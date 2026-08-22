@@ -5,28 +5,37 @@ This directory is the self-contained staging export for the future
 member and never links to or runs inside `factoryd`.
 
 The current code proves one inert authority boundary. It is deployable as a
-Rust Cloudflare Worker backed by SQLite Durable Objects, but this repository
-does not claim that a Worker, route, domain, or GitHub App is live.
+Rust Cloudflare Worker backed by SQLite Durable Objects. Deployment state is
+verified separately; source control is not evidence that a route or App
+configuration is live.
 
 ## Current surface
 
 - `GET /healthz` proves only that the Worker can answer.
-- `GET /readyz` returns 200 only when all three exact authority bindings are
+- `GET /readyz` returns 200 only when the three webhook authority bindings are
   valid and the Durable Object binding, SQLite schema, and migration marker
-  pass their audit.
+  pass their audit. When App authority is configured, readiness also imports
+  the private key, signs an App JWT, and verifies the exact live installation.
+  A partial or syntactically invalid App-authority group makes the whole Worker
+  inactive.
 - `POST /v1/github/maintainer/webhook` accepts only a bounded GitHub webhook.
   It verifies `X-Hub-Signature-256` over the exact body with HMAC-SHA-256,
   limits the body to 64 KiB, requires one value for every security header,
   requires an `integration` target, and binds the configured App ID.
-- A valid `ping` is the only acknowledged event. Every other authenticated
-  event is journalled as `policy_rejected` and returns 422. No payload can
-  create a task, message, prompt, provider run, or GitHub mutation.
+- A valid `ping` is the only acknowledged event. When the four App-authority
+  bindings are present, acknowledgement also requires an RS256 App JWT, one
+  exact metadata-read-only selected-repository installation for the configured
+  `owner/repository` and numeric owner. This proof creates no installation
+  token. Every other authenticated event is journalled as `policy_rejected`
+  and returns 422. No payload can create a task, message, prompt, provider run,
+  or GitHub mutation.
 - The product webhook and operator/PWA namespaces have no routes.
 
-Missing, empty, partial, or malformed authority produces the fixed inactive
-router: liveness remains 200, readiness is 503, and the webhook route is not
-installed. Storage failure returns 503 without acknowledging a delivery.
-Responses never contain configuration or storage errors.
+Missing, empty, partial, or syntactically invalid authority produces the fixed
+inactive router: liveness remains 200, readiness is 503, and the webhook route
+is not installed. An unusable key, live GitHub drift, or storage failure keeps
+the configured route fail-closed and returns 503 without acknowledging a
+delivery. Responses never contain configuration, GitHub, or storage errors.
 
 ## Durable replay model
 
@@ -69,7 +78,7 @@ runtime database role, Vercel adapter, or provider management API.
 - `preview_urls = false`;
 - no route or custom domain;
 - one capability-style Durable Object binding; and
-- three required secret bindings.
+- seven required production secret bindings.
 
 The exact required bindings are:
 
@@ -78,12 +87,21 @@ The exact required bindings are:
 - `DARK_FACTORY_MAINTAINER_WEBHOOK_SECRET_REVISION`: a bounded lowercase
   revision such as `maintainer-v1`; and
 - `DARK_FACTORY_MAINTAINER_APP_ID`: the positive numeric App ID expected in
-  `X-GitHub-Hook-Installation-Target-ID`.
+  `X-GitHub-Hook-Installation-Target-ID`;
+- `DARK_FACTORY_MAINTAINER_PRIVATE_KEY_PKCS8`: standard-base64 encoding of the
+  App's unencrypted PKCS#8 DER private key;
+- `DARK_FACTORY_MAINTAINER_PERMISSION_REVISION`: exactly
+  `maintainer-metadata-v1` for this authority revision;
+- `DARK_FACTORY_MAINTAINER_REPOSITORY`: the exact safe `owner/repository`
+  name; and
+- `DARK_FACTORY_MAINTAINER_REPOSITORY_OWNER_ID`: the exact positive numeric
+  owner ID.
 
-The revision and App ID are stored as secrets too. They are not confidential,
-but treating all authority settings identically avoids a dashboard/source
-split and makes a missing value block upload or deployment through Wrangler's
-required-secret validation. There are no aliases or ambient fallbacks.
+The revisions and numeric IDs are stored as secrets too. They are not
+confidential, but treating all authority settings identically avoids a
+dashboard/source split and makes a missing value block upload or deployment
+through Wrangler's required-secret validation. The App-authority group is
+all-or-nothing at runtime. There are no aliases or ambient fallbacks.
 
 Never put values in a checked-in file, `.env*`, `.dev.vars*`, a provider
 process, Dark Factory state, shell history, or the macOS Keychain. Cloudflare

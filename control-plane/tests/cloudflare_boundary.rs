@@ -48,6 +48,10 @@ fn wrangler_keeps_the_unconfigured_worker_private_and_inert() {
         "DARK_FACTORY_MAINTAINER_WEBHOOK_SECRET",
         "DARK_FACTORY_MAINTAINER_WEBHOOK_SECRET_REVISION",
         "DARK_FACTORY_MAINTAINER_APP_ID",
+        "DARK_FACTORY_MAINTAINER_PRIVATE_KEY_PKCS8",
+        "DARK_FACTORY_MAINTAINER_PERMISSION_REVISION",
+        "DARK_FACTORY_MAINTAINER_REPOSITORY",
+        "DARK_FACTORY_MAINTAINER_REPOSITORY_OWNER_ID",
     ] {
         assert!(
             wrangler.contains(required_secret),

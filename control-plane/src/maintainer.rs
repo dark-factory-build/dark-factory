@@ -10,6 +10,8 @@ use hmac::{Hmac, Mac as _};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
+#[cfg(target_arch = "wasm32")]
+use crate::github_app;
 use crate::{BrokerState, journal};
 
 pub const WEBHOOK_PATH: &str = "/v1/github/maintainer/webhook";
@@ -61,6 +63,8 @@ pub(crate) struct MaintainerState {
     secret_revision: SecretRevision,
     expected_target_id: i64,
     journal: journal::DeliveryJournal,
+    #[cfg(target_arch = "wasm32")]
+    app_authority: Option<github_app::AppAuthority>,
 }
 
 impl MaintainerState {
@@ -70,18 +74,30 @@ impl MaintainerState {
         secret_revision: SecretRevision,
         expected_target_id: i64,
         journal: journal::DeliveryJournal,
+        #[cfg(target_arch = "wasm32")] app_authority: Option<github_app::AppAuthority>,
     ) -> Self {
         Self {
             secret,
             secret_revision,
             expected_target_id,
             journal,
+            #[cfg(target_arch = "wasm32")]
+            app_authority,
         }
     }
 
     #[cfg(target_arch = "wasm32")]
-    pub(crate) async fn ready(&self) -> Result<(), journal::Error> {
-        self.journal.ready().await
+    pub(crate) async fn ready(&self) -> Result<(), ()> {
+        self.journal.ready().await.map_err(|_| ())?;
+        if let Some(authority) = self.app_authority.as_ref() {
+            authority.verify().await.map_err(|_| ())?;
+        }
+        Ok(())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) const fn has_app_authority(&self) -> bool {
+        self.app_authority.is_some()
     }
 }
 
@@ -188,6 +204,16 @@ pub(crate) async fn receive(
     }
 
     let (action, disposition) = disposition(event, &body);
+    #[cfg(target_arch = "wasm32")]
+    if matches!(disposition, Disposition::Ping)
+        && let Some(authority) = maintainer.app_authority.as_ref()
+        && authority.verify().await.is_err()
+    {
+        return response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "github_authority_unavailable",
+        );
+    }
     let delivery = Delivery {
         delivery_id: delivery_id.to_owned(),
         hook_id,
