@@ -124,6 +124,8 @@ fn mcp_surface_is_repository_bound_and_typed() {
         "create_pull_request",
         "submit_pull_request_review",
         "observe_pull_request_checks",
+        "publish_commit",
+        "merge_pull_request_at_head",
     ] {
         assert!(mcp.contains(tool), "missing typed MCP tool: {tool}");
     }

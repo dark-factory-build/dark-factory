@@ -20,6 +20,11 @@ pub(crate) const REPOSITORY_ID_BINDING: &str = "DARK_FACTORY_MAINTAINER_REPOSITO
 pub(crate) const PERMISSION_REVISION: &str = "maintainer-operations-v1";
 const GITHUB_API_VERSION: &str = "2026-03-10";
 const MAX_GITHUB_RESPONSE_BYTES: usize = 64 * 1024;
+/// Publication bounds. A commit is a bounded, reviewable unit of work, not a
+/// bulk upload channel, and the Worker must hold every blob in memory.
+const MAX_COMMIT_FILES: usize = 50;
+const MAX_COMMIT_FILE_BYTES: usize = 1_000_000;
+const MAX_COMMIT_TOTAL_BYTES: usize = 4_000_000;
 
 #[derive(Clone)]
 pub(crate) struct AppAuthority(Arc<Authority>);
@@ -109,6 +114,72 @@ impl ReviewEvent {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ObservePullRequestChecks {
     pub(crate) pull_number: i64,
+    pub(crate) head_sha: String,
+}
+
+/// One file's content at a path, or its removal when `content_base64` is absent.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FileChange {
+    pub(crate) path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) content_base64: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PublishCommit {
+    pub(crate) operation_id: String,
+    pub(crate) branch: String,
+    /// The commit the branch must currently point at. Two agents racing the
+    /// same branch means the second one's expectation no longer holds and it
+    /// fails closed instead of clobbering the first.
+    pub(crate) expected_head_sha: String,
+    pub(crate) message: String,
+    pub(crate) changes: Vec<FileChange>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MergeMethod {
+    Merge,
+    Squash,
+    Rebase,
+}
+
+impl MergeMethod {
+    const fn github_method(self) -> &'static str {
+        match self {
+            Self::Merge => "merge",
+            Self::Squash => "squash",
+            Self::Rebase => "rebase",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MergePullRequest {
+    pub(crate) operation_id: String,
+    pub(crate) pull_number: i64,
+    /// GitHub refuses the merge with 409 if the head has moved, so exact-head
+    /// merging is enforced by the platform rather than reimplemented here.
+    pub(crate) head_sha: String,
+    pub(crate) merge_method: MergeMethod,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct CommitResult {
+    pub(crate) branch: String,
+    pub(crate) commit_sha: String,
+    pub(crate) parent_sha: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct MergeResult {
+    pub(crate) pull_number: i64,
+    pub(crate) merged: bool,
+    pub(crate) merge_commit_sha: String,
     pub(crate) head_sha: String,
 }
 
@@ -341,6 +412,149 @@ impl AppAuthority {
     }
 
     #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn publish_commit(
+        &self,
+        journal: &DeliveryJournal,
+        request: PublishCommit,
+    ) -> Result<CommitResult, OperationError> {
+        request.validate()?;
+        let operation = request.operation("publish_commit")?;
+        let state = journal
+            .begin_operation(&operation)
+            .await
+            .map_err(|_| OperationError::Unavailable)?;
+        if let Some(result) = completed_or_conflict::<CommitResult>(&state)? {
+            return Ok(result);
+        }
+        let token = self
+            .0
+            .installation_token(BTreeMap::from([
+                ("contents", "write"),
+                ("metadata", "read"),
+            ]))
+            .await?;
+        if let Some(result) = self.0.reconcile_commit(&token, &request).await? {
+            return complete(journal, &operation, result).await;
+        }
+        if matches!(
+            state,
+            OperationRecord::Executing | OperationRecord::Indeterminate
+        ) {
+            journal
+                .mark_operation(&operation, OperationTransition::Indeterminate)
+                .await
+                .map_err(|_| OperationError::Unavailable)?;
+            return Err(OperationError::Indeterminate);
+        }
+        let branch_exists = self.0.verify_publish_precondition(&token, &request).await?;
+        match journal
+            .mark_operation(&operation, OperationTransition::Executing)
+            .await
+            .map_err(|_| OperationError::Unavailable)?
+        {
+            OperationRecord::Claimed => {}
+            OperationRecord::Completed(result) => {
+                return serde_json::from_str(&result).map_err(|_| OperationError::Unavailable);
+            }
+            OperationRecord::Conflict => return Err(OperationError::Conflict),
+            OperationRecord::Executing | OperationRecord::Indeterminate => {
+                if let Some(result) = self.0.reconcile_commit(&token, &request).await? {
+                    return complete(journal, &operation, result).await;
+                }
+                return Err(OperationError::Indeterminate);
+            }
+            OperationRecord::New | OperationRecord::Planned => {
+                return Err(OperationError::Unavailable);
+            }
+        }
+        match self.0.push_commit(&token, &request, branch_exists).await {
+            Ok(result) => complete(journal, &operation, result).await,
+            Err(_) => {
+                if let Some(result) = self.0.reconcile_commit(&token, &request).await? {
+                    return complete(journal, &operation, result).await;
+                }
+                let _ = journal
+                    .mark_operation(&operation, OperationTransition::Indeterminate)
+                    .await;
+                Err(OperationError::Indeterminate)
+            }
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn merge_pull_request_at_head(
+        &self,
+        journal: &DeliveryJournal,
+        request: MergePullRequest,
+    ) -> Result<MergeResult, OperationError> {
+        request.validate()?;
+        let operation = request.operation("merge_pull_request_at_head")?;
+        let state = journal
+            .begin_operation(&operation)
+            .await
+            .map_err(|_| OperationError::Unavailable)?;
+        if let Some(result) = completed_or_conflict::<MergeResult>(&state)? {
+            return Ok(result);
+        }
+        let token = self
+            .0
+            .installation_token(BTreeMap::from([
+                ("contents", "write"),
+                ("metadata", "read"),
+                ("pull_requests", "write"),
+            ]))
+            .await?;
+        if let Some(result) = self.0.reconcile_merge(&token, &request).await? {
+            return complete(journal, &operation, result).await;
+        }
+        if matches!(
+            state,
+            OperationRecord::Executing | OperationRecord::Indeterminate
+        ) {
+            journal
+                .mark_operation(&operation, OperationTransition::Indeterminate)
+                .await
+                .map_err(|_| OperationError::Unavailable)?;
+            return Err(OperationError::Indeterminate);
+        }
+        self.0
+            .verify_pull_request_head(&token, request.pull_number, &request.head_sha)
+            .await?;
+        match journal
+            .mark_operation(&operation, OperationTransition::Executing)
+            .await
+            .map_err(|_| OperationError::Unavailable)?
+        {
+            OperationRecord::Claimed => {}
+            OperationRecord::Completed(result) => {
+                return serde_json::from_str(&result).map_err(|_| OperationError::Unavailable);
+            }
+            OperationRecord::Conflict => return Err(OperationError::Conflict),
+            OperationRecord::Executing | OperationRecord::Indeterminate => {
+                if let Some(result) = self.0.reconcile_merge(&token, &request).await? {
+                    return complete(journal, &operation, result).await;
+                }
+                return Err(OperationError::Indeterminate);
+            }
+            OperationRecord::New | OperationRecord::Planned => {
+                return Err(OperationError::Unavailable);
+            }
+        }
+        match self.0.merge_pull_request(&token, &request).await {
+            Ok(result) => complete(journal, &operation, result).await,
+            Err(_) => {
+                if let Some(result) = self.0.reconcile_merge(&token, &request).await? {
+                    return complete(journal, &operation, result).await;
+                }
+                let _ = journal
+                    .mark_operation(&operation, OperationTransition::Indeterminate)
+                    .await;
+                Err(OperationError::Indeterminate)
+            }
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
     pub(crate) async fn observe_pull_request_checks(
         &self,
         request: ObservePullRequestChecks,
@@ -417,6 +631,73 @@ impl SubmitPullRequestReview {
     }
 }
 
+impl PublishCommit {
+    fn validate(&self) -> Result<(), OperationError> {
+        valid_operation_id(&self.operation_id)?;
+        valid_ref(&self.branch)?;
+        valid_sha(&self.expected_head_sha)?;
+        valid_text(&self.message, 1, 4_096, true)?;
+        if !(1..=MAX_COMMIT_FILES).contains(&self.changes.len()) {
+            return Err(OperationError::InvalidInput);
+        }
+        let mut total = 0_usize;
+        for (index, change) in self.changes.iter().enumerate() {
+            valid_repository_path(&change.path)?;
+            // A commit that touched the same path twice would leave which write
+            // wins up to GitHub's tree ordering.
+            if self.changes[..index]
+                .iter()
+                .any(|earlier| earlier.path == change.path)
+            {
+                return Err(OperationError::InvalidInput);
+            }
+            if let Some(content) = change.content_base64.as_deref() {
+                if content.len() > MAX_COMMIT_FILE_BYTES {
+                    return Err(OperationError::InvalidInput);
+                }
+                general_purpose::STANDARD
+                    .decode(content)
+                    .map_err(|_| OperationError::InvalidInput)?;
+                total = total
+                    .checked_add(content.len())
+                    .ok_or(OperationError::InvalidInput)?;
+            }
+        }
+        (total <= MAX_COMMIT_TOTAL_BYTES)
+            .then_some(())
+            .ok_or(OperationError::InvalidInput)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn operation(&self, kind: &str) -> Result<Operation, OperationError> {
+        operation(kind, &self.operation_id, self)
+    }
+
+    fn trailer(&self) -> String {
+        format!("Dark-Factory-Operation: {}", self.operation_id)
+    }
+
+    /// The trailer makes a landed commit self-identifying, so a retry after an
+    /// indeterminate failure can tell "already published" from "not published"
+    /// by reading the branch rather than guessing.
+    fn marked_message(&self) -> String {
+        format!("{}\n\n{}", self.message, self.trailer())
+    }
+}
+
+impl MergePullRequest {
+    fn validate(&self) -> Result<(), OperationError> {
+        valid_operation_id(&self.operation_id)?;
+        valid_exact_integer(self.pull_number)?;
+        valid_sha(&self.head_sha)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn operation(&self, kind: &str) -> Result<Operation, OperationError> {
+        operation(kind, &self.operation_id, self)
+    }
+}
+
 impl ObservePullRequestChecks {
     fn validate(&self) -> Result<(), OperationError> {
         valid_exact_integer(self.pull_number)?;
@@ -434,6 +715,29 @@ fn valid_operation_id(value: &str) -> Result<(), OperationError> {
             .enumerate()
             .all(|(index, byte)| [8, 13, 18, 23].contains(&index) || byte.is_ascii_hexdigit())
         && value == value.to_ascii_lowercase();
+    valid.then_some(()).ok_or(OperationError::InvalidInput)
+}
+
+/// A path inside the repository, as a commit may address it.
+///
+/// `.github/workflows/` is refused explicitly. GitHub already blocks it without
+/// the `workflows` permission, which this App deliberately does not hold, but a
+/// policy-checked surface should state the boundary rather than depend on a
+/// permission staying un-granted: an agent that could rewrite the CI gating its
+/// own work would be escalating its authority.
+fn valid_repository_path(value: &str) -> Result<(), OperationError> {
+    let valid = !value.is_empty()
+        && value.len() <= 240
+        && !value.starts_with('/')
+        && !value.ends_with('/')
+        && !value.contains("//")
+        && !value.split('/').any(|segment| {
+            segment.is_empty() || segment == "." || segment == ".." || segment == ".git"
+        })
+        && value
+            .chars()
+            .all(|character| !character.is_control() && character != '\\')
+        && !value.starts_with(".github/workflows/");
     valid.then_some(()).ok_or(OperationError::InvalidInput)
 }
 
@@ -678,6 +982,251 @@ impl Authority {
             return Err(OperationError::Unavailable);
         }
         Credential::new(response.token).map_err(Into::into)
+    }
+
+    /// Blobs, then a tree over the base commit's tree, then a commit, then a
+    /// non-forced ref update. The ref update is the only mutation that matters:
+    /// GitHub rejects it if the branch moved since `expected_head_sha`, so a
+    /// racing agent loses rather than overwrites.
+    /// Either the branch is at exactly `expected_head_sha`, or it does not exist
+    /// yet and `expected_head_sha` is the commit it will start from. Returns
+    /// whether the branch already exists.
+    async fn verify_publish_precondition(
+        &self,
+        token: &Credential,
+        request: &PublishCommit,
+    ) -> Result<bool, OperationError> {
+        match self
+            .verify_ref(token, &request.branch, &request.expected_head_sha)
+            .await
+        {
+            Ok(()) => Ok(true),
+            Err(_) => {
+                // The parent must still be a real commit, so a typo cannot
+                // create a branch from nothing.
+                let _: GitCommit = github_json(
+                    &format!(
+                        "https://api.github.com/repos/{}/{}/git/commits/{}",
+                        self.repository.owner, self.repository.name, request.expected_head_sha
+                    ),
+                    token.as_str(),
+                )
+                .await?;
+                Ok(false)
+            }
+        }
+    }
+
+    async fn push_commit(
+        &self,
+        token: &Credential,
+        request: &PublishCommit,
+        branch_exists: bool,
+    ) -> Result<CommitResult, OperationError> {
+        let base: GitCommit = github_json(
+            &format!(
+                "https://api.github.com/repos/{}/{}/git/commits/{}",
+                self.repository.owner, self.repository.name, request.expected_head_sha
+            ),
+            token.as_str(),
+        )
+        .await?;
+        let mut entries = Vec::with_capacity(request.changes.len());
+        for change in &request.changes {
+            let sha = match change.content_base64.as_deref() {
+                Some(content) => {
+                    let blob: GitObjectId = github_json_request(
+                        worker::Method::Post,
+                        &format!(
+                            "https://api.github.com/repos/{}/{}/git/blobs",
+                            self.repository.owner, self.repository.name
+                        ),
+                        token.as_str(),
+                        Some(&BlobRequest {
+                            content,
+                            encoding: "base64",
+                        }),
+                    )
+                    .await?;
+                    Some(blob.sha)
+                }
+                // A null sha in a tree entry deletes the path.
+                None => None,
+            };
+            entries.push(TreeEntry {
+                path: change.path.clone(),
+                mode: "100644",
+                kind: "blob",
+                sha,
+            });
+        }
+        let tree: GitObjectId = github_json_request(
+            worker::Method::Post,
+            &format!(
+                "https://api.github.com/repos/{}/{}/git/trees",
+                self.repository.owner, self.repository.name
+            ),
+            token.as_str(),
+            Some(&TreeRequest {
+                base_tree: &base.tree.sha,
+                tree: &entries,
+            }),
+        )
+        .await?;
+        let commit: GitObjectId = github_json_request(
+            worker::Method::Post,
+            &format!(
+                "https://api.github.com/repos/{}/{}/git/commits",
+                self.repository.owner, self.repository.name
+            ),
+            token.as_str(),
+            Some(&CommitRequest {
+                message: request.marked_message(),
+                tree: &tree.sha,
+                parents: [&request.expected_head_sha],
+            }),
+        )
+        .await?;
+        // Creating a ref fails if it already exists and a non-forced update
+        // fails if the branch moved, so neither path can clobber another agent.
+        let updated: GitReference = if branch_exists {
+            github_json_request(
+                worker::Method::Patch,
+                &format!(
+                    "https://api.github.com/repos/{}/{}/git/refs/heads/{}",
+                    self.repository.owner,
+                    self.repository.name,
+                    percent_encode(&request.branch)
+                ),
+                token.as_str(),
+                Some(&RefUpdate {
+                    sha: &commit.sha,
+                    force: false,
+                }),
+            )
+            .await?
+        } else {
+            github_json_request(
+                worker::Method::Post,
+                &format!(
+                    "https://api.github.com/repos/{}/{}/git/refs",
+                    self.repository.owner, self.repository.name
+                ),
+                token.as_str(),
+                Some(&RefCreate {
+                    reference: &format!("refs/heads/{}", request.branch),
+                    sha: &commit.sha,
+                }),
+            )
+            .await?
+        };
+        (updated.object.sha == commit.sha)
+            .then_some(CommitResult {
+                branch: request.branch.clone(),
+                commit_sha: commit.sha,
+                parent_sha: request.expected_head_sha.clone(),
+            })
+            .ok_or(OperationError::Indeterminate)
+    }
+
+    /// Did this exact operation already land? The trailer makes the commit
+    /// self-identifying, so a retry after an indeterminate failure reads the
+    /// branch instead of guessing.
+    async fn reconcile_commit(
+        &self,
+        token: &Credential,
+        request: &PublishCommit,
+    ) -> Result<Option<CommitResult>, OperationError> {
+        let reference: GitReference = match github_json(
+            &format!(
+                "https://api.github.com/repos/{}/{}/git/ref/heads/{}",
+                self.repository.owner,
+                self.repository.name,
+                percent_encode(&request.branch)
+            ),
+            token.as_str(),
+        )
+        .await
+        {
+            Ok(reference) => reference,
+            Err(_) => return Ok(None),
+        };
+        if reference.object.sha == request.expected_head_sha {
+            return Ok(None);
+        }
+        let head: GitCommit = github_json(
+            &format!(
+                "https://api.github.com/repos/{}/{}/git/commits/{}",
+                self.repository.owner, self.repository.name, reference.object.sha
+            ),
+            token.as_str(),
+        )
+        .await?;
+        if !head.message.contains(&request.trailer()) {
+            // The branch moved for some other reason; this operation did not
+            // land and must not claim it did.
+            return Ok(None);
+        }
+        Ok(Some(CommitResult {
+            branch: request.branch.clone(),
+            commit_sha: reference.object.sha,
+            parent_sha: request.expected_head_sha.clone(),
+        }))
+    }
+
+    async fn merge_pull_request(
+        &self,
+        token: &Credential,
+        request: &MergePullRequest,
+    ) -> Result<MergeResult, OperationError> {
+        let merged: MergeResponse = github_json_request(
+            worker::Method::Put,
+            &format!(
+                "https://api.github.com/repos/{}/{}/pulls/{}/merge",
+                self.repository.owner, self.repository.name, request.pull_number
+            ),
+            token.as_str(),
+            Some(&MergeRequest {
+                sha: &request.head_sha,
+                merge_method: request.merge_method.github_method(),
+            }),
+        )
+        .await?;
+        merged
+            .merged
+            .then_some(MergeResult {
+                pull_number: request.pull_number,
+                merged: true,
+                merge_commit_sha: merged.sha,
+                head_sha: request.head_sha.clone(),
+            })
+            .ok_or(OperationError::Indeterminate)
+    }
+
+    async fn reconcile_merge(
+        &self,
+        token: &Credential,
+        request: &MergePullRequest,
+    ) -> Result<Option<MergeResult>, OperationError> {
+        let pull: PullRequestState = github_json(
+            &format!(
+                "https://api.github.com/repos/{}/{}/pulls/{}",
+                self.repository.owner, self.repository.name, request.pull_number
+            ),
+            token.as_str(),
+        )
+        .await?;
+        // Only this exact head counts as this operation having landed.
+        if !pull.merged || pull.head.sha != request.head_sha {
+            return Ok(None);
+        }
+        let merge_commit_sha = pull.merge_commit_sha.ok_or(OperationError::Indeterminate)?;
+        Ok(Some(MergeResult {
+            pull_number: request.pull_number,
+            merged: true,
+            merge_commit_sha,
+            head_sha: request.head_sha.clone(),
+        }))
     }
 
     async fn verify_ref(
@@ -945,6 +1494,89 @@ struct InstallationToken {
     token: String,
     permissions: BTreeMap<String, String>,
     repositories: Vec<RepositoryIdentity>,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Serialize)]
+struct BlobRequest<'a> {
+    content: &'a str,
+    encoding: &'static str,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Serialize)]
+struct TreeEntry {
+    path: String,
+    mode: &'static str,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    // Serialised as null when absent, which is how a tree entry deletes a path.
+    sha: Option<String>,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Serialize)]
+struct TreeRequest<'a> {
+    base_tree: &'a str,
+    tree: &'a [TreeEntry],
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Serialize)]
+struct CommitRequest<'a> {
+    message: String,
+    tree: &'a str,
+    parents: [&'a str; 1],
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Serialize)]
+struct RefUpdate<'a> {
+    sha: &'a str,
+    force: bool,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Serialize)]
+struct RefCreate<'a> {
+    #[serde(rename = "ref")]
+    reference: &'a str,
+    sha: &'a str,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Serialize)]
+struct MergeRequest<'a> {
+    sha: &'a str,
+    merge_method: &'static str,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Deserialize)]
+struct GitObjectId {
+    sha: String,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Deserialize)]
+struct GitCommit {
+    message: String,
+    tree: GitObjectId,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Deserialize)]
+struct MergeResponse {
+    sha: String,
+    merged: bool,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Deserialize)]
+struct PullRequestState {
+    merged: bool,
+    merge_commit_sha: Option<String>,
+    head: GitObjectId,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1379,6 +2011,96 @@ mod tests {
             validate_installation(&insufficient, 4_673_420, 109_233_175).err(),
             Some(Error::Unavailable)
         );
+    }
+
+    #[test]
+    fn publication_paths_are_policy_checked() {
+        for allowed in [
+            "README.md",
+            "src/lib.rs",
+            "docs/development/WORKFLOW.md",
+            "a.b_c-d/e.rs",
+        ] {
+            assert!(
+                valid_repository_path(allowed).is_ok(),
+                "rejected: {allowed}"
+            );
+        }
+        // Workflow files are refused explicitly. GitHub also blocks them without
+        // the `workflows` permission this App does not hold, but an agent able
+        // to rewrite the CI gating its own work would be escalating authority,
+        // so the surface states the boundary rather than inheriting it.
+        for refused in [
+            ".github/workflows/ci.yml",
+            "",
+            "/etc/passwd",
+            "src/",
+            "src//lib.rs",
+            "../secrets",
+            "src/../../etc/passwd",
+            ".git/config",
+            "src/a\\b.rs",
+        ] {
+            assert!(
+                valid_repository_path(refused).is_err(),
+                "accepted: {refused}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_published_commit_is_bounded_and_unambiguous() {
+        let base = |changes: Vec<FileChange>| PublishCommit {
+            operation_id: "11111111-2222-3333-4444-555555555555".into(),
+            branch: "agent/work".into(),
+            expected_head_sha: "a".repeat(40),
+            message: "Do the thing".into(),
+            changes,
+        };
+        let file = |path: &str| FileChange {
+            path: path.into(),
+            content_base64: Some(general_purpose::STANDARD.encode(b"hello")),
+        };
+        assert!(base(vec![file("README.md")]).validate().is_ok());
+        // A deletion carries no content.
+        assert!(
+            base(vec![FileChange {
+                path: "gone.txt".into(),
+                content_base64: None
+            }])
+            .validate()
+            .is_ok()
+        );
+        // Empty, oversized, and duplicated change sets are all refused: the same
+        // path twice would leave which write wins up to tree ordering.
+        assert!(base(vec![]).validate().is_err());
+        assert!(
+            base(
+                (0..=MAX_COMMIT_FILES)
+                    .map(|i| file(&format!("f{i}.txt")))
+                    .collect()
+            )
+            .validate()
+            .is_err()
+        );
+        assert!(
+            base(vec![file("same.txt"), file("same.txt")])
+                .validate()
+                .is_err()
+        );
+        // Content must be real base64, and the trailer makes a landed commit
+        // self-identifying for reconciliation.
+        assert!(
+            base(vec![FileChange {
+                path: "bad.txt".into(),
+                content_base64: Some("not base64!!".into())
+            }])
+            .validate()
+            .is_err()
+        );
+        let request = base(vec![file("README.md")]);
+        assert!(request.marked_message().contains(&request.trailer()));
+        assert!(request.marked_message().starts_with("Do the thing"));
     }
 
     #[test]

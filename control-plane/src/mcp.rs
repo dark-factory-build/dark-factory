@@ -10,8 +10,8 @@ use crate::{
     BrokerState,
     access::AccessAuthority,
     github_app::{
-        AppAuthority, CreatePullRequest, ObservePullRequestChecks, OperationError,
-        SubmitPullRequestReview,
+        AppAuthority, CreatePullRequest, MergePullRequest, ObservePullRequestChecks,
+        OperationError, PublishCommit, SubmitPullRequestReview,
     },
     journal::DeliveryJournal,
 };
@@ -213,6 +213,73 @@ fn tools() -> Value {
             "additionalProperties": false
         },
         "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
+    }, {
+        "name": "publish_commit",
+        "title": "Publish an exact-head commit",
+        "description": "Publish one commit to a repository branch, but only while that branch still points at the stated commit. A file with no content is deleted. Workflow files cannot be written. Replays require the same operation UUID and request.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "operation_id": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
+                "branch": {"type": "string", "minLength": 1, "maxLength": 240},
+                "expected_head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+                "message": {"type": "string", "minLength": 1, "maxLength": 4096},
+                "changes": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 50,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "minLength": 1, "maxLength": 240},
+                            "content_base64": {"type": "string", "maxLength": 1000000}
+                        },
+                        "required": ["path"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["operation_id", "branch", "expected_head_sha", "message", "changes"],
+            "additionalProperties": false
+        },
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "branch": {"type": "string"},
+                "commit_sha": {"type": "string"},
+                "parent_sha": {"type": "string"}
+            },
+            "required": ["branch", "commit_sha", "parent_sha"],
+            "additionalProperties": false
+        },
+        "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true}
+    }, {
+        "name": "merge_pull_request_at_head",
+        "title": "Merge a pull request at an exact head",
+        "description": "Merge one pull request only while its head is still the stated commit. GitHub refuses the merge if the head moved or a required check has not passed. Replays require the same operation UUID and request.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "operation_id": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
+                "pull_number": {"type": "integer", "minimum": 1},
+                "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+                "merge_method": {"type": "string", "enum": ["merge", "squash", "rebase"]}
+            },
+            "required": ["operation_id", "pull_number", "head_sha", "merge_method"],
+            "additionalProperties": false
+        },
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "pull_number": {"type": "integer"},
+                "merged": {"type": "boolean"},
+                "merge_commit_sha": {"type": "string"},
+                "head_sha": {"type": "string"}
+            },
+            "required": ["pull_number", "merged", "merge_commit_sha", "head_sha"],
+            "additionalProperties": false
+        },
+        "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true}
     }]})
 }
 
@@ -264,6 +331,30 @@ async fn call_tool(id: Value, request: &Map<String, Value>, mcp: &McpState) -> R
             {
                 Ok(result) => {
                     serialized_tool_result(id, &result, "Pull request review is durably recorded.")
+                }
+                Err(error) => operation_error(id, error),
+            }
+        }
+        Some("publish_commit") => {
+            let Ok(arguments) = serde_json::from_value::<PublishCommit>(arguments) else {
+                return json_rpc_error(id, -32602, "Invalid params");
+            };
+            match mcp.app.publish_commit(&mcp.journal, arguments).await {
+                Ok(result) => serialized_tool_result(id, &result, "Commit is durably published."),
+                Err(error) => operation_error(id, error),
+            }
+        }
+        Some("merge_pull_request_at_head") => {
+            let Ok(arguments) = serde_json::from_value::<MergePullRequest>(arguments) else {
+                return json_rpc_error(id, -32602, "Invalid params");
+            };
+            match mcp
+                .app
+                .merge_pull_request_at_head(&mcp.journal, arguments)
+                .await
+            {
+                Ok(result) => {
+                    serialized_tool_result(id, &result, "Pull request is durably merged.")
                 }
                 Err(error) => operation_error(id, error),
             }
