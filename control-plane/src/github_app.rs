@@ -599,16 +599,16 @@ fn jwt_unsigned(app_id: i64, now: i64) -> String {
 #[cfg(target_arch = "wasm32")]
 impl Authority {
     async fn verify(&self) -> Result<(), Error> {
-        let jwt = self.jwt().await?;
-        let installation: Installation =
-            github_json(&self.repository.installation_url(), jwt.as_str()).await?;
-        validate_installation(&installation, self.app_id, self.repository_owner_id)?;
-        let repository: RepositoryIdentity = github_json(
-            &format!("https://api.github.com/repositories/{}", self.repository_id),
-            jwt.as_str(),
-        )
-        .await?;
-        self.validate_repository(&repository)
+        // An App JWT authenticates only App-level endpoints; every other REST
+        // resource needs an installation token. Minting a least-privilege token
+        // proves the key, the App, the installation, and the exact repository
+        // binding in one authenticated response, because `installation_token`
+        // already requires the granted repositories to be exactly this
+        // repository's id, full name, and owner id.
+        self.installation_token(BTreeMap::from([("metadata", "read")]))
+            .await
+            .map(|_| ())
+            .map_err(|_| Error::Unavailable)
     }
 
     async fn jwt(&self) -> Result<Credential, Error> {
@@ -621,21 +621,13 @@ impl Authority {
         ))
     }
 
-    fn validate_repository(&self, repository: &RepositoryIdentity) -> Result<(), Error> {
-        (repository.id == self.repository_id
-            && repository.full_name == self.repository.full_name
-            && repository.owner.id == self.repository_owner_id)
-            .then_some(())
-            .ok_or(Error::Unavailable)
-    }
-
     async fn installation_token(
         &self,
         permissions: BTreeMap<&'static str, &'static str>,
     ) -> Result<Credential, OperationError> {
         let jwt = self.jwt().await?;
         let installation: Installation =
-            github_json(&self.repository.installation_url(), jwt.as_str()).await?;
+            github_json_as_app(&self.repository.installation_url(), jwt.as_str()).await?;
         validate_installation(&installation, self.app_id, self.repository_owner_id)?;
         #[derive(Serialize)]
         struct TokenRequest {
@@ -1141,6 +1133,27 @@ fn permission_at_least(permissions: &BTreeMap<String, String>, name: &str, requi
     )
 }
 
+/// A GitHub App JWT authenticates only App-level endpoints. Every other REST
+/// resource requires an installation token, and GitHub answers `Bad
+/// credentials` when a JWT is presented to one.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn app_jwt_endpoint(url: &str) -> bool {
+    url == "https://api.github.com/app"
+        || url.starts_with("https://api.github.com/app/installations/")
+        || (url.starts_with("https://api.github.com/repos/") && url.ends_with("/installation"))
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn github_json_as_app<T: serde::de::DeserializeOwned>(
+    url: &str,
+    jwt: &str,
+) -> Result<T, Error> {
+    app_jwt_endpoint(url)
+        .then_some(())
+        .ok_or(Error::Unavailable)?;
+    github_json(url, jwt).await
+}
+
 #[cfg(target_arch = "wasm32")]
 async fn github_json<T: serde::de::DeserializeOwned>(
     url: &str,
@@ -1311,6 +1324,29 @@ mod tests {
             validate_installation(&insufficient, 4_673_420, 109_233_175).err(),
             Some(Error::Unavailable)
         );
+    }
+
+    #[test]
+    fn only_app_level_endpoints_accept_an_app_jwt() {
+        assert!(app_jwt_endpoint("https://api.github.com/app"));
+        assert!(app_jwt_endpoint(
+            "https://api.github.com/repos/baziyer/dark-factory/installation"
+        ));
+        assert!(app_jwt_endpoint(
+            "https://api.github.com/app/installations/155853844/access_tokens"
+        ));
+        // Readiness once proved repository identity by fetching this URL with
+        // the App JWT. GitHub answers `Bad credentials`, so `verify` always
+        // failed and `/readyz` could never report ready in production.
+        assert!(!app_jwt_endpoint(
+            "https://api.github.com/repositories/1335380107"
+        ));
+        assert!(!app_jwt_endpoint(
+            "https://api.github.com/repos/baziyer/dark-factory"
+        ));
+        assert!(!app_jwt_endpoint(
+            "https://api.github.com/repos/baziyer/dark-factory/pulls"
+        ));
     }
 
     #[test]
