@@ -74,10 +74,41 @@ impl AccessAuthority {
         // Choosing the principal by header presence keeps each path exact:
         // neither can satisfy the other's identity check.
         let email_header = optional_single_header(headers, "cf-access-authenticated-user-email")?;
-        let parsed = ParsedJwt::parse(assertion)?;
-        let jwk = self.signing_key(&parsed.header.kid).await?;
-        verify_rs256(jwk, parsed.unsigned.as_bytes(), &parsed.signature).await?;
-        self.validate_envelope(&parsed.claims, now())?;
+        let parsed = ParsedJwt::parse(assertion).inspect_err(|_| {
+            // Surface serde's own reason. It names the missing or mistyped
+            // claim, which a bare "did not parse" does not, and Cloudflare's
+            // claim set differs per principal.
+            let reason = assertion
+                .split('.')
+                .nth(1)
+                .and_then(|payload| general_purpose::URL_SAFE_NO_PAD.decode(payload).ok())
+                .map(|bytes| match serde_json::from_slice::<Claims>(&bytes) {
+                    Ok(_) => "claims parse succeeded on retry".to_owned(),
+                    Err(error) => error.to_string(),
+                })
+                .unwrap_or_else(|| "payload was not decodable base64url".to_owned());
+            worker::console_error!("access assertion rejected: {reason}");
+        })?;
+        let jwk = self
+            .signing_key(&parsed.header.kid)
+            .await
+            .inspect_err(|_| {
+                worker::console_error!("access signing key unavailable for kid");
+            })?;
+        verify_rs256(jwk, parsed.unsigned.as_bytes(), &parsed.signature)
+            .await
+            .inspect_err(|_| {
+                worker::console_error!("access assertion signature did not verify");
+            })?;
+        self.validate_envelope(&parsed.claims, now())
+            .inspect_err(|_| {
+                worker::console_error!(
+                    "access envelope rejected: kind={} issuer_match={} aud_match={}",
+                    parsed.claims.kind,
+                    parsed.claims.issuer == self.team_domain,
+                    parsed.claims.audience.is_exactly(&self.audience)
+                );
+            })?;
         match email_header {
             Some(email_header) => self.validate_operator(&parsed.claims, email_header),
             None => self.validate_service_token(&parsed.claims),
@@ -89,9 +120,11 @@ impl AccessAuthority {
     fn validate_envelope(&self, claims: &Claims, now: i64) -> Result<(), Error> {
         if claims.kind != "app"
             || claims.issuer != self.team_domain
-            || claims.audience.as_slice() != [self.audience.as_str()]
+            || !claims.audience.is_exactly(&self.audience)
             || claims.issued_at > now + 60
-            || claims.not_before > now + 60
+            || claims
+                .not_before
+                .is_some_and(|not_before| not_before > now + 60)
             || claims.expires_at < now - 60
             || claims.expires_at <= claims.issued_at
         {
@@ -281,10 +314,29 @@ struct JwtHeader {
     kind: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum Audience {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl Audience {
+    /// Exactly this audience and no other, whichever shape it arrived in.
+    fn is_exactly(&self, expected: &str) -> bool {
+        match self {
+            Self::One(value) => value == expected,
+            Self::Many(values) => values.as_slice() == [expected],
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct Claims {
+    // Cloudflare sends `aud` as an array for a human assertion and, for some
+    // principals, as a bare string. Accept both and require exactly one value.
     #[serde(rename = "aud")]
-    audience: Vec<String>,
+    audience: Audience,
     // Absent on a service-token assertion, which has no human identity.
     #[serde(default)]
     email: String,
@@ -295,8 +347,11 @@ struct Claims {
     expires_at: i64,
     #[serde(rename = "iat")]
     issued_at: i64,
-    #[serde(rename = "nbf")]
-    not_before: i64,
+    // Cloudflare omits `nbf` from service-token assertions. Enforce it when it
+    // is present rather than defaulting it, so a human assertion that carries
+    // one is still bound by it.
+    #[serde(rename = "nbf", default)]
+    not_before: Option<i64>,
     #[serde(rename = "iss")]
     issuer: String,
     #[serde(rename = "type")]
@@ -498,12 +553,12 @@ mod tests {
 
     fn claims() -> Claims {
         Claims {
-            audience: vec!["a".repeat(64)],
+            audience: Audience::Many(vec!["a".repeat(64)]),
             email: "Operator@Example.com".into(),
             common_name: String::new(),
             expires_at: 1_800_000_600,
             issued_at: 1_800_000_000,
-            not_before: 1_800_000_000,
+            not_before: Some(1_800_000_000),
             issuer: "https://dark-factory.cloudflareaccess.com".into(),
             kind: "app".into(),
         }
@@ -521,7 +576,7 @@ mod tests {
             .is_ok()
         );
         let mut wrong = claims();
-        wrong.audience = vec!["b".repeat(64)];
+        wrong.audience = Audience::Many(vec!["b".repeat(64)]);
         assert_eq!(
             validate_claims(&authority(), &wrong, "operator@example.com", 1_800_000_100),
             Err(Error::Unauthorized)
@@ -613,9 +668,75 @@ mod tests {
 
         // The envelope still binds this application and a live token.
         let mut wrong_audience = service_claims();
-        wrong_audience.audience = vec!["b".repeat(64)];
+        wrong_audience.audience = Audience::Many(vec!["b".repeat(64)]);
         assert_eq!(
             service_authority().validate_envelope(&wrong_audience, 1_800_000_100),
+            Err(Error::Unauthorized)
+        );
+    }
+
+    /// The exact claim names Cloudflare sends for a service-token assertion,
+    /// captured from a live request: no `nbf` and no `email`. Requiring `nbf`
+    /// made deserialisation fail before any identity check ran, so every
+    /// headless call was rejected with no indication why.
+    #[test]
+    fn a_service_token_assertion_deserialises_without_nbf_or_email() {
+        let payload = serde_json::json!({
+            "aud": ["a".repeat(64)],
+            "common_name": SERVICE_TOKEN_ID,
+            "exp": 1_800_000_600_i64,
+            "h_INTERNAL_DO_NOT_USE": "ignored",
+            "iat": 1_799_999_940_i64,
+            "iss": "https://dark-factory.cloudflareaccess.com",
+            "sub": "",
+            "type": "app"
+        });
+        let claims: Claims =
+            serde_json::from_value(payload).expect("service-token claim set must deserialise");
+        assert!(claims.not_before.is_none());
+        assert!(claims.email.is_empty());
+        assert!(
+            service_authority()
+                .validate_envelope(&claims, 1_800_000_100)
+                .is_ok()
+        );
+        assert!(service_authority().validate_service_token(&claims).is_ok());
+        // Cloudflare sends `aud` as a bare string for this principal; requiring
+        // an array failed deserialisation exactly as a missing `nbf` did.
+        let bare: Claims = serde_json::from_value(serde_json::json!({
+            "aud": "a".repeat(64),
+            "common_name": SERVICE_TOKEN_ID,
+            "exp": 1_800_000_600_i64,
+            "iat": 1_799_999_940_i64,
+            "iss": "https://dark-factory.cloudflareaccess.com",
+            "sub": "",
+            "type": "app"
+        }))
+        .expect("a bare-string audience must deserialise");
+        assert!(
+            service_authority()
+                .validate_envelope(&bare, 1_800_000_100)
+                .is_ok()
+        );
+        let wrong: Claims = serde_json::from_value(serde_json::json!({
+            "aud": "b".repeat(64),
+            "common_name": SERVICE_TOKEN_ID,
+            "exp": 1_800_000_600_i64,
+            "iat": 1_799_999_940_i64,
+            "iss": "https://dark-factory.cloudflareaccess.com",
+            "type": "app"
+        }))
+        .expect("deserialises");
+        assert_eq!(
+            service_authority().validate_envelope(&wrong, 1_800_000_100),
+            Err(Error::Unauthorized)
+        );
+
+        // A present `nbf` is still enforced.
+        let mut future = claims;
+        future.not_before = Some(1_800_000_600);
+        assert_eq!(
+            service_authority().validate_envelope(&future, 1_800_000_100),
             Err(Error::Unauthorized)
         );
     }
