@@ -164,6 +164,22 @@ explicit backup and rollback decision. Migration never implies boot approval.
 
 The pull-request workflow runs the shared source gate on hosted macOS and the
 Linux source-only lane. The aggregate `required` context is the merge gate.
+
+Merges go through a **merge queue**, not straight to `main`. An approved,
+green pull request is enqueued; GitHub then builds `main` + every entry ahead
+of it + this one on a temporary `gh-readonly-queue/**` ref, runs the same
+`required` gate against that exact combination via a `merge_group` event, and
+merges only if it passes — ejecting the entry if it does not. Entries build
+speculatively in parallel, so a queue of branches costs roughly one CI run,
+not one per branch.
+
+This replaces "require branches to be up to date before merging", which is now
+off. That setting guaranteed the same property by forcing every open branch to
+be rebased and fully re-tested after each merge, which serialises a queue of
+`n` branches into `n` CI runs and dismisses each approval on the way. The queue
+establishes the same thing once. Nothing else is relaxed: `required` still
+gates, history is still linear, force-push and deletion are still refused, and
+CODEOWNERS approval is still required.
 Review the exact `.github/workflows/` diff before approving an external run: a
 PR evaluates its own workflow and can change `runs-on`. A green workflow never
 replaces CODEOWNERS approval and resolved review threads.
