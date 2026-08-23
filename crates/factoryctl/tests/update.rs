@@ -27,6 +27,9 @@ const BINARIES: [&str; 4] = ["factoryd", "factory-runner", "factoryctl", "factor
 // process-level suite, so a bound that merely fits an idle machine turns
 // contention into a mystery failure. Matches the `FIXTURE_TIMEOUT` bound
 // used by the shared process-fixture helpers elsewhere in this repository.
+// Its only consumer is macOS-gated, so the constant must be too: an
+// unconditional definition is dead code on Linux and fails `-D warnings`.
+#[cfg(target_os = "macos")]
 const HEALTH_SERVER_TIMEOUT: Duration = Duration::from_secs(30);
 
 struct Fixture {
