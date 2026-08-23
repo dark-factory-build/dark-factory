@@ -123,6 +123,35 @@ Read-only context unless a task explicitly asks you to edit them:
    contributor-agent boundary is not a future Dark Factory product GitHub
    integration and does not change a human operator's normal workflow.
 
+   Three narrow carve-outs, each chosen because the credential cannot be
+   steered somewhere that matters:
+
+   **Backlog.** `gh issue create`, `comment`, `close`, `reopen`, `list`, and
+   `view`, against the repository the task works in, so rule 9's
+   close-at-source requirement is executable rather than aspirational. Check
+   for an existing item before opening one. `gh issue edit` is excluded:
+   #126, #153, #188 and #198 each declare their body an immutable source
+   revision whose edit creates a new quarantined revision, so body-write
+   authority would let an agent mutate the exact artifact that boundary
+   protects. On any issue carrying that contract a comment must also not
+   carry scope, decisions, evidence, status, or acceptance criteria.
+
+   **Reads.** Authenticated read-only `gh`: `gh pr view`/`checks`/`diff`,
+   `gh run view`/`list`, and `gh api` GET. A read cannot be steered into a
+   write, and the anonymous path is not a substitute -- it caps at 60
+   requests an hour and returns 403 on Actions logs, so an agent that cannot
+   read its own CI failure has to interrupt the operator to be told what it
+   already had authority to see.
+
+   **Topic-branch push.** `git push` to any ref except the default branch,
+   and `--force-with-lease` only, never a bare `--force`, never a ref the
+   agent did not create. Pushing `main` stays closed. This is safe for a
+   reason worth stating: the default branch is protected by its ruleset, so
+   a pushed branch cannot reach it without review and passing checks, and an
+   agent that can push is already executing on the machine -- a branch push
+   grants it nothing it could not do locally. Opening or merging a pull
+   request is not covered and stays with the App or the operator.
+
 ## Adding to the system
 
 - New provider, integration, or theme: see [CONTRIBUTING.md](CONTRIBUTING.md)
