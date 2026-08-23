@@ -11,10 +11,19 @@ Codex nor Claude owns its credentials or its durable journal.
    pull request and require an adversarial review by someone other than the
    author before merge.
 2. Keep runtime credentials outside agent processes and Dark Factory state.
-   Store them only in the deployment platform's secret manager; never put a
-   GitHub App private key, installation token, webhook secret, or database URL
-   in a prompt, a checked-in file, an ambient `gh` session, or the macOS
-   Keychain.
+   Store them only in the deployment platform's secret manager — Cloudflare
+   Worker secrets for the running service, and a GitHub Actions environment
+   secret for the credential that deploys it; never put a GitHub App private
+   key, installation token, webhook secret, or database URL in a prompt, a
+   checked-in file, an ambient `gh` session, or the macOS Keychain. Worker
+   secrets persist across versions, so a routine deployment promotes a new
+   version with only the Cloudflare API token and never handles the App private
+   key or the webhook secret; those are needed for first activation and
+   rotation alone.
+   Diagnosing the running service does not justify holding any of them: run the
+   Worker locally with `wrangler dev --env-file` and a throwaway key, outside
+   this tree, and read the console directly. A production deployment cycle is
+   never the right debugging loop.
 3. Expose typed, policy-checked operations only. Do not add a generic GitHub
    REST or GraphQL proxy, a shell-command surface, or a fallback to personal
    GitHub credentials.
@@ -41,5 +50,10 @@ Codex nor Claude owns its credentials or its durable journal.
 10. Deployments and credential changes require an explicit task. Never send a
     provider prompt, mutate the Dark Factory live install, use ambient
     Keychain authentication, or deploy as a side effect of tests or review.
+    Deploy through the dispatched `Deploy control-plane` workflow, which binds
+    the run to a stated reviewed tree, proves secret inheritance before traffic
+    moves, and rolls back a failed live check. Routes are a non-versioned
+    setting, so promoting a version never detaches the production hostname:
+    taking the route down to ship a code change is a mistake, not a procedure.
 11. Report exactly which checks, deployments, migrations, and live probes did
     or did not run. Local proof is not hosted CI or production proof.
