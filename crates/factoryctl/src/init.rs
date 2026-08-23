@@ -77,8 +77,8 @@ pub fn run(options: &Options, socket: &Path) -> Result<i32, String> {
     // Which Codex account agents will use.
     let plist = launchd::plist_path(&user_home);
     let existing = launchd::read_existing(&plist)?;
-    // The same precedence launchd::apply uses: this shell's CODEX_HOME wins,
-    // else the job's, else ~/.codex.
+    // The same precedence launchd::apply_with_rollback uses: this shell's
+    // CODEX_HOME wins, else the job's, else ~/.codex.
     let carried = launchd::carried_environment();
     let seed_home = carried
         .get("CODEX_HOME")

@@ -74,7 +74,7 @@ fn render_floors(frame: &mut Frame, area: Rect, board: &Board, hits: &mut HitMap
             let Some(agent) = board.agents.get(&agent_id) else {
                 continue;
             };
-            let state = board.agent_state(agent).value;
+            let state = board.agent_state(agent);
             let selected = if board.selected_agent.as_ref() == Some(&agent_id) {
                 ">"
             } else {

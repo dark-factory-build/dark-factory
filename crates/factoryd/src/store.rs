@@ -708,12 +708,6 @@ impl Store {
         self.set_agent_paused(project_id, agent_id, false, now_ms)
     }
 
-    /// Effective durable hold, composing the ordinary agent hold with the
-    /// independent budget circuit breaker.
-    pub fn agent_is_held(&self, project_id: &ProjectId, agent_id: &AgentId) -> Result<bool> {
-        Ok(!agent_pause_reasons(&self.connection, project_id, agent_id)?.is_empty())
-    }
-
     fn set_agent_paused(
         &mut self,
         project_id: &ProjectId,
@@ -788,27 +782,6 @@ impl Store {
                 after_id.map(MessageId::as_str),
                 limit as i64,
             ],
-            agent_message_from_row,
-        )?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(StoreError::from)
-    }
-
-    /// Every undelivered inbox message for an agent, oldest first.
-    pub fn undelivered_messages_for_agent(
-        &self,
-        project_id: &ProjectId,
-        agent_id: &AgentId,
-    ) -> Result<Vec<AgentMessage>> {
-        let mut statement = self.connection.prepare(
-            "SELECT id, project_id, sender_agent_id, recipient_agent_id,
-                    body, created_at_ms, delivered_at_ms, delivered_run_id
-             FROM agent_messages
-             WHERE project_id = ?1 AND recipient_agent_id = ?2 AND delivered_at_ms IS NULL
-             ORDER BY created_at_ms, id",
-        )?;
-        let rows = statement.query_map(
-            params![project_id.as_str(), agent_id.as_str()],
             agent_message_from_row,
         )?;
         rows.collect::<std::result::Result<Vec<_>, _>>()

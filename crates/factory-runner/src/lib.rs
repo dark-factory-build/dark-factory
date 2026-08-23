@@ -327,11 +327,6 @@ async fn append_encoded(
     Ok(event)
 }
 
-pub async fn run(config: Config) -> Result<(), Error> {
-    let (_runner_signal_tx, runner_signal_rx) = watch::channel(false);
-    run_with_shutdown(config, runner_signal_rx).await
-}
-
 pub async fn run_with_shutdown(
     config: Config,
     mut runner_signal_rx: watch::Receiver<bool>,

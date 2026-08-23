@@ -293,22 +293,6 @@ fn is_display_control(character: char) -> bool {
         )
 }
 
-/// Keep legacy persisted values from emitting terminal formatting controls.
-/// New values are rejected by [`normalize_profile`]; this is only a safe
-/// rendering boundary for old state.
-pub fn sanitize_for_display(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| {
-            if is_display_control(character) {
-                '\u{fffd}'
-            } else {
-                character
-            }
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

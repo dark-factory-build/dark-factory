@@ -38,7 +38,7 @@ pub use keymap::{
     Intent, Mode, PendingAction, PickerKind, PickerState, PromptKind, PromptState, TaskMenuState,
     View,
 };
-pub use state::{AgentState, Rated};
+pub use state::AgentState;
 
 use crate::theme::Theme;
 
@@ -382,8 +382,8 @@ impl Board {
 
     /// The single mapping point from durable attempt state to the board's five-way state.
     #[must_use]
-    pub fn agent_state(&self, agent: &AgentSnapshot) -> Rated<AgentState> {
-        Rated::observed(state::agent_state_from_run(self.latest_run_for(&agent.id)))
+    pub fn agent_state(&self, agent: &AgentSnapshot) -> AgentState {
+        state::agent_state_from_run(self.latest_run_for(&agent.id))
     }
 
     pub(crate) fn allocate_operation_id(&mut self) -> u64 {

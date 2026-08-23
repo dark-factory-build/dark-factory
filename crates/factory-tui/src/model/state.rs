@@ -22,24 +22,6 @@ pub enum AgentState {
     Failed,
 }
 
-/// Whether a presentation value came directly from durable state or is an
-/// intentionally inferred fallback.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Rated<T> {
-    pub value: T,
-    pub inferred: bool,
-}
-
-impl<T> Rated<T> {
-    #[must_use]
-    pub const fn observed(value: T) -> Self {
-        Self {
-            value,
-            inferred: false,
-        }
-    }
-}
-
 impl AgentState {
     #[must_use]
     pub const fn label(self) -> &'static str {

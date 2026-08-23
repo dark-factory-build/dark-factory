@@ -126,16 +126,6 @@ impl Client {
         self.request_with_timeout(request, REQUEST_TIMEOUT)
     }
 
-    /// Sends one request with an opaque bearer. The caller chooses only the
-    /// credential value; factoryd resolves its principal and owned attempt.
-    pub fn request_authenticated(
-        &self,
-        request: LocalRequest,
-        credential: RequestCredential,
-    ) -> Result<ServerFrame, ClientError> {
-        self.request_with_timeout_authenticated(request, credential, REQUEST_TIMEOUT)
-    }
-
     /// Like [`Self::request`] but with an explicit read/write timeout
     /// instead of the default 15 seconds — e.g. `factoryctl hook`'s 5-second
     /// fail-open budget, so a slow or wedged daemon never blocks a live
