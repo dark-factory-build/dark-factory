@@ -1,0 +1,208 @@
+name: Deploy control-plane
+
+# Deployment is an explicit operator action (control-plane/AGENTS.md rule 10),
+# so this never runs on push or merge. `workflow_dispatch` is restricted to
+# accounts with write access, and the `production` environment below adds a
+# second gate.
+#
+# This job handles the ordinary case: promote a new version behind the
+# already-attached custom domain. Routes are a non-versioned setting, so
+# `wrangler versions deploy` swaps code atomically without touching the
+# hostname and without an outage. Worker secrets persist across versions, so a
+# routine deployment needs only CLOUDFLARE_API_TOKEN — no GitHub App private
+# key and no webhook secret. First activation and credential rotation are a
+# separate, rarer procedure and deliberately do not live here.
+on:
+  workflow_dispatch:
+    inputs:
+      expected_tree:
+        description: Reviewed tree SHA-1 that the checked-out source must match
+        required: true
+        type: string
+      promote:
+        description: Promote the uploaded version to 100% traffic
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+# Never cancel a deployment in flight, and never run two at once.
+concurrency:
+  group: deploy-control-plane
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # `environment` is the security boundary that makes a self-hosted runner
+    # acceptable here: environment secrets are unavailable to any job that does
+    # not name the environment, so a pull-request workflow cannot read the
+    # deployment credential even on the same repository. Add required reviewers
+    # to the `production` environment for an approval gate. See #54 for the
+    # persistent runner's remaining isolation work.
+    environment: production
+    runs-on: dark-factory-mac
+    timeout-minutes: 45
+    env:
+      ACCOUNT_ID: 008dfc7e9e8ab2c6028b3aee30ee3f49
+      WORKER_NAME: dark-factory-control-plane
+      PRODUCTION_HOSTNAME: maintainer.darkfactory.build
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV: "false"
+    steps:
+      # Same checkout idiom as ci.yml: no actions/checkout, because
+      # codeload.github.com can 429 for long stretches on this runner, and the
+      # workspace persists between jobs so prior state must be thrown away
+      # rather than repaired.
+      - name: Check out $GITHUB_SHA
+        run: |
+          set -euxo pipefail
+          rm -rf .git
+          git init
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --depth=1 origin "$GITHUB_SHA"
+          git checkout --force --detach FETCH_HEAD
+          git clean -ffdx
+
+      # The operator states which tree was reviewed; the runner proves the
+      # source it is about to ship is that exact tree. This replaces hand-edited
+      # constants in the old deployment scripts.
+      - name: Bind the deployment to the reviewed tree
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse 'HEAD^{tree}')"
+          echo "expected tree: ${EXPECTED_TREE}"
+          echo "actual tree:   ${actual}"
+          if [ "${actual}" != "${EXPECTED_TREE}" ]; then
+            echo "source tree is not the reviewed tree; refusing to deploy" >&2
+            exit 1
+          fi
+          echo "SOURCE_TREE=${actual}" >> "$GITHUB_ENV"
+        env:
+          EXPECTED_TREE: ${{ inputs.expected_tree }}
+
+      - name: Install the pinned toolchain
+        run: rustup toolchain install 1.88.0 --profile minimal --component clippy,rustfmt --no-self-update
+
+      - name: Verify the supported Node runtime
+        run: node -e "if (Number(process.versions.node.split('.')[0]) < 22) process.exit(1)"
+
+      # Deploy only what the authoritative gate accepts. This also produces the
+      # wasm the upload step ships.
+      - name: Run the control-plane authoritative gate
+        run: ./control-plane/scripts/local-ci.sh
+
+      - name: Record the currently deployed version for rollback
+        run: |
+          set -euo pipefail
+          current="$(curl -sS --fail-with-body --max-time 30 \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            "https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/workers/scripts/${WORKER_NAME}/deployments" \
+            | jq -r '.result.deployments[0].versions[0].version_id // empty')"
+          if [ -z "${current}" ]; then
+            echo "could not determine the currently deployed version; refusing to deploy" >&2
+            exit 1
+          fi
+          echo "rollback target: ${current}"
+          echo "ROLLBACK_VERSION_ID=${current}" >> "$GITHUB_ENV"
+
+      - name: Upload the reviewed version
+        working-directory: control-plane
+        run: |
+          set -euo pipefail
+          tag="maintainer-${SOURCE_TREE:0:8}-${GITHUB_RUN_ID}"
+          npx wrangler versions upload \
+            --name "${WORKER_NAME}" \
+            --tag "${tag}" \
+            --message "Reviewed tree ${SOURCE_TREE}; commit ${GITHUB_SHA}" \
+            --strict | tee /tmp/df-upload.txt
+          version="$(sed -n 's/^Worker Version ID: *//p' /tmp/df-upload.txt | tail -1)"
+          case "${version}" in
+            [0-9a-f]*-[0-9a-f]*-[0-9a-f]*-[0-9a-f]*-[0-9a-f]*) ;;
+            *) echo "could not read the uploaded version id" >&2; exit 1 ;;
+          esac
+          echo "VERSION_ID=${version}" >> "$GITHUB_ENV"
+
+      # Secrets are inherited from the previous deployment rather than uploaded
+      # here. Prove that inheritance actually happened before sending traffic,
+      # instead of discovering an unconfigured Worker after cutover.
+      - name: Prove the version carries every required secret
+        working-directory: control-plane
+        run: |
+          set -euo pipefail
+          npx wrangler versions view "${VERSION_ID}" --name "${WORKER_NAME}" > /tmp/df-version.txt
+          missing=0
+          while IFS= read -r name; do
+            [ -z "${name}" ] && continue
+            if ! grep -Fq "Secret Name:  ${name}" /tmp/df-version.txt; then
+              echo "missing secret on the uploaded version: ${name}" >&2
+              missing=1
+            fi
+          done <<'SECRETS'
+          DARK_FACTORY_MAINTAINER_WEBHOOK_SECRET
+          DARK_FACTORY_MAINTAINER_WEBHOOK_SECRET_REVISION
+          DARK_FACTORY_MAINTAINER_APP_ID
+          DARK_FACTORY_MAINTAINER_PRIVATE_KEY_PKCS8
+          DARK_FACTORY_MAINTAINER_PERMISSION_REVISION
+          DARK_FACTORY_MAINTAINER_REPOSITORY
+          DARK_FACTORY_MAINTAINER_REPOSITORY_OWNER_ID
+          DARK_FACTORY_MAINTAINER_REPOSITORY_ID
+          DARK_FACTORY_MAINTAINER_OPERATOR_EMAIL_SHA256
+          DARK_FACTORY_CLOUDFLARE_ACCESS_TEAM_DOMAIN
+          DARK_FACTORY_CLOUDFLARE_ACCESS_AUD
+          SECRETS
+          [ "${missing}" -eq 0 ] || exit 1
+          echo "all eleven authority secrets are present on ${VERSION_ID}"
+
+      - name: Promote the version to production traffic
+        if: ${{ inputs.promote }}
+        working-directory: control-plane
+        run: |
+          set -euo pipefail
+          npx wrangler versions deploy \
+            --name "${WORKER_NAME}" \
+            --version-id "${VERSION_ID}" \
+            --message "Reviewed tree ${SOURCE_TREE}; commit ${GITHUB_SHA}" \
+            --yes
+
+      # The route is never touched, so a failure here is a bad build rather than
+      # a lost hostname. Roll the previous version back rather than leaving a
+      # broken one serving.
+      - name: Verify the live deployment
+        if: ${{ inputs.promote }}
+        run: |
+          set -euo pipefail
+          ready=0
+          for _ in $(seq 1 12); do
+            health="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 \
+              "https://${PRODUCTION_HOSTNAME}/healthz" || true)"
+            body="$(curl -sS --max-time 30 "https://${PRODUCTION_HOSTNAME}/readyz" || true)"
+            mcp="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 -X POST \
+              -H 'Content-Type: application/json' \
+              --data-binary '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+              "https://${PRODUCTION_HOSTNAME}/mcp" || true)"
+            echo "healthz=${health} mcp=${mcp} readyz=${body}"
+            if [ "${health}" = "200" ] && [ "${mcp}" = "401" ] \
+              && printf '%s' "${body}" | grep -Fq '"status":"ready"'; then
+              ready=1
+              break
+            fi
+            sleep 10
+          done
+          [ "${ready}" -eq 1 ] || { echo "live verification failed" >&2; exit 1; }
+          echo "live: https://${PRODUCTION_HOSTNAME}"
+
+      - name: Roll back to the previously deployed version
+        if: ${{ failure() && inputs.promote && env.VERSION_ID != '' }}
+        working-directory: control-plane
+        run: |
+          set -euo pipefail
+          echo "rolling back to ${ROLLBACK_VERSION_ID}"
+          npx wrangler versions deploy \
+            --name "${WORKER_NAME}" \
+            --version-id "${ROLLBACK_VERSION_ID}" \
+            --message "Roll back failed deployment of ${VERSION_ID}" \
+            --yes
+          curl -sS -o /dev/null -w 'post-rollback healthz: %{http_code}\n' --max-time 20 \
+            "https://${PRODUCTION_HOSTNAME}/healthz"
