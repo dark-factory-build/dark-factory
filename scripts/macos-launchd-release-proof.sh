@@ -1,19 +1,23 @@
 #!/bin/sh
+# Opt-in proof that a release replacement and rollback work against a real,
+# randomized, disposable launchd job.
+#
+# Containment is NOT owned by this script. The job and its private root are
+# declared in a durable receipt before anything is bootstrapped, so a kill of
+# the target, the fixture, or this coordinator leaves a resumable record. This
+# script only resumes that ledger before and after the fixture; a run killed
+# between the two is contained by the next invocation, not by a trap or a
+# background verifier that would die with its parent.
+#
+# The installed com.dark-factory.factoryd job and ~/.dark-factory are always
+# out of scope and are independently observed before and after.
 set -eu
 
 launchctl_bin=${DARK_FACTORY_LAUNCHD_LAUNCHCTL:-/bin/launchctl}
-pid_probe_bin=${DARK_FACTORY_LAUNCHD_PID_PROBE:-}
-probe_attempts=${DARK_FACTORY_LAUNCHD_PROBE_ATTEMPTS:-200}
 command_timeout=${DARK_FACTORY_LAUNCHD_COMMAND_TIMEOUT:-3}
 case "$launchctl_bin" in /*) ;; *) echo 'launchctl path must be absolute' >&2; exit 2 ;; esac
 test -x "$launchctl_bin" || { echo "launchctl is not executable: $launchctl_bin" >&2; exit 2; }
-case "$probe_attempts:$command_timeout" in
-    *[!0-9:]* | 0:* | *:0) echo 'probe limits must be positive integers' >&2; exit 2 ;;
-esac
-if test -n "$pid_probe_bin"; then
-    case "$pid_probe_bin" in /*) ;; *) echo 'PID probe path must be absolute' >&2; exit 2 ;; esac
-    test -x "$pid_probe_bin" || { echo "PID probe is not executable: $pid_probe_bin" >&2; exit 2; }
-fi
+case "$command_timeout" in *[!0-9]* | 0) echo 'command timeout must be positive' >&2; exit 2 ;; esac
 
 # Retain and reap the exact direct command child. Status 124 is an internal
 # timeout, never a launchctl absence classification.
@@ -75,67 +79,9 @@ launchctl_print_state() {
     return 4
 }
 
-# Signal zero is observation-only. The helper preserves errno so only ESRCH is
-# absence; EPERM is present and every other result is an operational failure.
-pid_probe_state() {
-    if test -n "$pid_probe_bin"; then
-        "$pid_probe_bin" "$1"
-        return
-    fi
-    /usr/bin/perl -MErrno=ESRCH,EPERM -e '
-        my $pid = shift;
-        exit 0 if kill 0, $pid;
-        exit 0 if $! == EPERM;
-        exit 3 if $! == ESRCH;
-        warn "PID observation failed for $pid: $!\n";
-        exit 4;
-    ' "$1"
-}
-
-wait_pid_absent() {
-    checked_pid=$1
-    attempt=0
-    pid_deadline=${cleanup_deadline_epoch:-$(($(date +%s) + 10))}
-    while :; do
-        pid_status=0
-        pid_probe_state "$checked_pid" || pid_status=$?
-        case "$pid_status" in
-            0) ;;
-            3) return 0 ;;
-            *) return 1 ;;
-        esac
-        attempt=$((attempt + 1))
-        test "$attempt" -lt "$probe_attempts" || return 1
-        test "$(date +%s)" -lt "$pid_deadline" || return 1
-        sleep 0.05
-    done
-}
-
-wait_service_absent() {
-    absent_service=$1
-    absent_output=$2
-    attempt=0
-    service_deadline=${cleanup_deadline_epoch:-$(($(date +%s) + 10))}
-    while :; do
-        service_status=0
-        launchctl_print_state "$absent_service" "$absent_output" || service_status=$?
-        case "$service_status" in
-            0) ;;
-            3) return 0 ;;
-            *) return 1 ;;
-        esac
-        attempt=$((attempt + 1))
-        test "$attempt" -lt "$probe_attempts" || return 1
-        test "$(date +%s)" -lt "$service_deadline" || return 1
-        sleep 0.05
-    done
-}
-
 if test "${DARK_FACTORY_LAUNCHD_PROBE_META_TEST:-0}" = 1; then
     case "${1:-}" in
         --print-state) launchctl_print_state "$2" "$3"; exit $? ;;
-        --wait-service-absent) wait_service_absent "$2" "$3"; exit $? ;;
-        --wait-pid-absent) wait_pid_absent "$2"; exit $? ;;
         *) echo 'unknown launchd probe meta-test' >&2; exit 2 ;;
     esac
 fi
@@ -180,17 +126,28 @@ for provider in claude codex; do
     fi
 done
 
-root=$(mktemp -d /tmp/df-launchd-release.XXXXXX)
-chmod 700 "$root"
-mkdir "$root/user-home" "$root/factory-home"
-chmod 700 "$root/user-home" "$root/factory-home"
-suffix=$(basename "$root" | tr -cd '[:alnum:]')
+# The ledger deliberately outlives one run: it is how a later coordinator
+# finds and finalizes a job whose creator was killed.
+ledger=${DARK_FACTORY_LAUNCHD_GATE_LEDGER:-"${TMPDIR:-/tmp}/dark-factory-launchd-gate"}
+mkdir -p "$ledger"
+chmod 700 "$ledger"
+
 uid=$(/usr/bin/id -u)
 domain="gui/$uid"
-label="com.dark-factory.fixture.$suffix"
-service="$domain/$label"
 live_service="$domain/com.dark-factory.factoryd"
 live_plist="$operator_home/Library/LaunchAgents/com.dark-factory.factoryd.plist"
+
+# The gate owns this entire root, including the fixture's evidence. Nothing
+# here is removed by this script, so a kill cannot strand a half-cleaned tree.
+root=$(mktemp -d /tmp/df-launchd-release.XXXXXX)
+chmod 700 "$root"
+mkdir "$root/user-home" "$root/factory-home" "$root/tmp" "$root/evidence"
+chmod 700 "$root/user-home" "$root/factory-home" "$root/tmp" "$root/evidence"
+suffix=$(basename "$root" | tr -cd '[:alnum:]')
+label="com.dark-factory.fixture.$suffix"
+# Snapshots must outlive the root the gate deletes.
+observations=$(mktemp -d /tmp/df-launchd-observed.XXXXXX)
+chmod 700 "$observations"
 
 snapshot_live_install() {
     destination=$1
@@ -221,111 +178,80 @@ snapshot_live_install() {
     rm -f "$destination.launchctl"
 }
 
-snapshot_live_install "$root/live-before" || {
-    echo "preserving unresolved launchd fixture root: $root" >&2
+fixture_cargo() {
+    /usr/bin/env \
+        HOME="$root/user-home" \
+        DARK_FACTORY_HOME="$root/factory-home" \
+        DARK_FACTORY_LAUNCHD_RELEASE_PROOF=1 \
+        DARK_FACTORY_LAUNCHD_FIXTURE_ROOT="$root" \
+        DARK_FACTORY_LAUNCHD_EVIDENCE="$root/evidence" \
+        DARK_FACTORY_LAUNCHD_GATE_LEDGER="$ledger" \
+        DARK_FACTORY_LAUNCHD_LAUNCHCTL="$launchctl_bin" \
+        DARK_FACTORY_LAUNCHD_LABEL="$label" \
+        DARK_FACTORY_LAUNCHD_SOURCE_DIR="$source_dir" \
+        DARK_FACTORY_LAUNCHD_SAFE_PATH="$safe_path" \
+        DARK_FACTORY_LAUNCHD_FAIL_AFTER_SECOND="$fail_after_second" \
+        CARGO_HOME="$host_cargo_home" \
+        RUSTUP_HOME="$host_rustup_home" \
+        PATH="$safe_path" \
+        "$cargo" +1.88.0 test --locked -p factoryctl --test launchd_release \
+            "$1" -- --ignored --exact --test-threads=1
+}
+
+snapshot_live_install "$observations/live-before" || {
+    echo "could not observe the installed launchd job" >&2
     exit 1
 }
-collision_status=0
-launchctl_print_state "$service" "$root/collision.launchctl" || collision_status=$?
-case "$collision_status" in
-    0)
-        echo "randomized launchd label unexpectedly already exists: $label" >&2
-        rm -rf -- "$root"
-        exit 1
-        ;;
-    3) ;;
-    *) echo "preserving unresolved launchd fixture root: $root" >&2; exit 1 ;;
-esac
 
-# shellcheck disable=SC2329 # invoked by the external verifier
-verify_cleanup() {
-    cleanup_status=0
-    cleanup_deadline_epoch=$(($(date +%s) + 30))
-    service_status=0
-    launchctl_print_state "$service" "$root/cleanup-before.launchctl" \
-        || service_status=$?
-    case "$service_status" in
-        0) run_bounded "$launchctl_bin" bootout "$service" \
-            >"$root/bootout.out" 2>"$root/bootout.error" || cleanup_status=1 ;;
-        3) ;;
-        *) cleanup_status=1 ;;
-    esac
-    wait_service_absent "$service" "$root/cleanup-residue.launchctl" \
-        || cleanup_status=1
-    if test -f "$root/observed-pids"; then
-        while IFS= read -r pid; do
-            case "$pid" in
-                '' | *[!0-9]* | 0 | 1) cleanup_status=1 ;;
-                *) wait_pid_absent "$pid" || cleanup_status=1 ;;
-            esac
-        done <"$root/observed-pids"
-    fi
-    snapshot_live_install "$root/live-after" || cleanup_status=1
-    cmp -s "$root/live-before.job" "$root/live-after.job" || cleanup_status=1
-    cmp -s "$root/live-before.plist" "$root/live-after.plist" || cleanup_status=1
-    if test "$cleanup_status" -eq 0; then
-        rm -rf -- "$root"
-        test ! -e "$root" || cleanup_status=1
-    else
-        echo "preserving unresolved launchd fixture root: $root" >&2
-    fi
-    test "$cleanup_status" -eq 0
+# Contain anything an earlier killed coordinator left behind before adding to
+# the ledger. A failure here is visible and stops the run.
+fixture_cargo disposable_launchd_jobs_are_resumed || {
+    echo 'could not finalize launchd jobs left by an earlier run' >&2
+    exit 1
 }
-
-mkfifo "$root/verifier.fifo"
-(
-    trap '' HUP INT TERM
-    while IFS= read -r _; do :; done <"$root/verifier.fifo"
-    verify_cleanup
-) &
-verifier_pid=$!
-exec 9>"$root/verifier.fifo"
-
-# shellcheck disable=SC2329 # invoked by trap
-finish() {
-    status=$?
-    trap - EXIT HUP INT TERM
-    exec 9>&-
-    verifier_status=0
-    wait "$verifier_pid" || verifier_status=$?
-    if test "$verifier_status" -eq 0; then
-        if test "$status" -eq 0; then
-            echo 'disposable launchd release proof passed with exact external teardown'
-        else
-            echo "external launchd teardown passed after fixture status $status" >&2
-        fi
-    fi
-    test "$verifier_status" -eq 0 || exit 1
-    exit "$status"
-}
-trap finish EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
 
 test_status=0
-/usr/bin/env \
-    HOME="$root/user-home" \
-    DARK_FACTORY_HOME="$root/factory-home" \
-    DARK_FACTORY_LAUNCHD_RELEASE_PROOF=1 \
-    DARK_FACTORY_LAUNCHD_FIXTURE_ROOT="$root" \
-    DARK_FACTORY_LAUNCHD_LABEL="$label" \
-    DARK_FACTORY_LAUNCHD_SOURCE_DIR="$source_dir" \
-    DARK_FACTORY_LAUNCHD_SAFE_PATH="$safe_path" \
-    DARK_FACTORY_LAUNCHD_FAIL_AFTER_SECOND="$fail_after_second" \
-    CARGO_HOME="$host_cargo_home" \
-    RUSTUP_HOME="$host_rustup_home" \
-    PATH="$safe_path" \
-    "$cargo" +1.88.0 test --locked -p factoryctl --test launchd_release \
-        disposable_launchd_release_replacement -- \
-        --ignored --exact --test-threads=1 9>&- || test_status=$?
+fixture_cargo disposable_launchd_release_replacement || test_status=$?
 
+# Read the evidence while the root still exists. `cargo test` exits 0 when a
+# filter matches nothing, so these markers are what prove the phases ran.
 if test "$test_status" -eq 0; then
     for marker in first-live second-live crash-observed rollback-live; do
-        test -f "$root/$marker" || {
+        test -f "$root/evidence/$marker" || {
             echo "launchd proof omitted $marker" >&2
             test_status=1
         }
     done
+fi
+# Keep the daemon logs of a failed run; the root itself is not ours to spare.
+if test "$test_status" -ne 0 && test -d "$root/factory-home/logs"; then
+    cp -R "$root/factory-home/logs" "$observations/factory-logs" 2>/dev/null || true
+    echo "preserved failed-run logs: $observations/factory-logs" >&2
+fi
+
+# The one finalization authority. Success and hard death converge here.
+resume_status=0
+fixture_cargo disposable_launchd_jobs_are_resumed || resume_status=$?
+test ! -e "$root" || {
+    echo "launchd gate did not remove its private root: $root" >&2
+    resume_status=1
+}
+
+snapshot_live_install "$observations/live-after" || resume_status=1
+cmp -s "$observations/live-before.job" "$observations/live-after.job" || {
+    echo 'the installed launchd job changed during the fixture' >&2
+    resume_status=1
+}
+cmp -s "$observations/live-before.plist" "$observations/live-after.plist" || {
+    echo 'the installed launchd plist changed during the fixture' >&2
+    resume_status=1
+}
+
+if test "$resume_status" -ne 0; then
+    echo "preserving launchd observations: $observations" >&2
+    test "$test_status" -ne 0 || test_status=1
+elif test "$test_status" -eq 0; then
+    rm -rf -- "$observations"
+    echo 'disposable launchd release proof passed with exact external teardown'
 fi
 exit "$test_status"

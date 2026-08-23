@@ -1,10 +1,18 @@
 #!/bin/sh
+# Static and meta tests for the disposable launchd proof coordinator.
+#
+# Containment itself is proved by `cargo test -p factoryctl --test launchd_gate`
+# against a fake launchctl on every platform. What is checked here is the part
+# that cannot be: that this coordinator keeps the installed service out of
+# scope, resumes the durable ledger around the fixture, and never becomes a
+# second teardown authority of its own.
 # shellcheck disable=SC2016 # grep patterns intentionally contain shell syntax
 set -eu
 
 repository_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 runner="$repository_root/scripts/macos-launchd-release-proof.sh"
 test_source="$repository_root/crates/factoryctl/tests/launchd_release.rs"
+gate_source="$repository_root/crates/factoryctl/tests/launchd_gate.rs"
 workflow="$repository_root/.github/workflows/ci.yml"
 gate="$repository_root/scripts/local-ci.sh"
 
@@ -23,38 +31,49 @@ printf '%s\n' \
     '  error) printf "%s\n" "${FAKE_ERROR_TEXT:-113: Could not find specified service}" ;;' \
     '  *) exit 64 ;;' \
     'esac' >"$fake_launchctl"
-fake_pid_probe="$meta_root/pid-probe"
-printf '%s\n' '#!/bin/sh' 'exit "${FAKE_PID_STATUS:-0}"' >"$fake_pid_probe"
-chmod 700 "$fake_launchctl" "$fake_pid_probe"
+chmod 700 "$fake_launchctl"
 
 sh -n "$runner"
+
+# The installed service stays observable but untouchable.
 grep -Fq "test \"\$classification\" = '113: Could not find specified service'" "$runner" \
     || fail 'launchctl absence is not tied to the documented classification'
-grep -Fq 'exit 0 if $! == EPERM;' "$runner" \
-    || fail 'EPERM is no longer classified as present'
-grep -Fq 'exit 3 if $! == ESRCH;' "$runner" \
-    || fail 'ESRCH is no longer the only PID absence result'
-if grep -Fq 'kill -0' "$runner"; then
-    fail 'shell kill -0 collapsed PID observation errors'
-fi
 grep -Fq 'label="com.dark-factory.fixture.$suffix"' "$runner" \
     || fail 'runner lost its randomized disposable label'
 grep -Fq 'live_service="$domain/com.dark-factory.factoryd"' "$runner" \
-    || fail 'external verifier no longer observes the installed label'
-grep -Fq 'run_bounded "$launchctl_bin" bootout "$service"' "$runner" \
-    || fail 'external verifier no longer boots out only its selected service'
-grep -Fq 'cmp -s "$root/live-before.job" "$root/live-after.job"' "$runner" \
-    || fail 'installed job identity is not preserved'
-grep -Fq 'cmp -s "$root/live-before.plist" "$root/live-after.plist"' "$runner" \
-    || fail 'installed plist identity is not preserved'
-grep -Fq 'mkfifo "$root/verifier.fifo"' "$runner" \
-    || fail 'verifier is not independently retained across parent exit'
-grep -Fq 'wait "$verifier_pid"' "$runner" \
-    || fail 'parent does not consume the exact verifier result'
-grep -Fq -- '--exact --test-threads=1 9>&-' "$runner" \
-    || fail 'Cargo descendants retain the verifier FIFO writer'
+    || fail 'coordinator no longer observes the installed label'
+grep -Fq 'cmp -s "$observations/live-before.job" "$observations/live-after.job"' "$runner" \
+    || fail 'installed job identity is not compared'
+grep -Fq 'cmp -s "$observations/live-before.plist" "$observations/live-after.plist"' "$runner" \
+    || fail 'installed plist identity is not compared'
 grep -Fq 'DARK_FACTORY_LAUNCHD_SAFE_PATH' "$runner" \
     || fail 'provider-absent PATH is not explicit'
+
+# Teardown authority belongs to the durable gate, not to this script. Only
+# executable lines matter; the header comment necessarily names these verbs.
+runner_code=$(grep -v '^[[:space:]]*#' "$runner")
+if printf '%s\n' "$runner_code" | grep -Eq 'bootout|kickstart|bootstrap'; then
+    fail 'the coordinator must never be a second launchd teardown authority'
+fi
+if printf '%s\n' "$runner_code" | grep -Fq 'mkfifo'; then
+    fail 'containment regressed to a background verifier that dies with its parent'
+fi
+if printf '%s\n' "$runner_code" | grep -Eq 'trap .*(EXIT|TERM|HUP|INT)'; then
+    fail 'containment regressed to a trap owned by the killed process'
+fi
+test "$(grep -c 'fixture_cargo disposable_launchd_jobs_are_resumed' "$runner")" -ge 2 \
+    || fail 'the ledger is not resumed both before and after the fixture'
+grep -Fq 'ledger=${DARK_FACTORY_LAUNCHD_GATE_LEDGER:-' "$runner" \
+    || fail 'the ledger does not outlive one run'
+
+# The script must never delete the gate-owned root itself.
+if printf '%s\n' "$runner_code" | grep -Eq 'rm -rf.*\$root|rm -rf -- "\$root"'; then
+    fail 'the coordinator deletes the gate-owned root instead of resuming it'
+fi
+grep -Fq 'test ! -e "$root" ||' "$runner" \
+    || fail 'the coordinator does not verify the gate removed its root'
+grep -Fq 'DARK_FACTORY_LAUNCHD_EVIDENCE' "$test_source" \
+    || fail 'the fixture no longer records phase evidence'
 
 meta_status=0
 env DARK_FACTORY_LAUNCHD_PROBE_META_TEST=1 \
@@ -72,39 +91,36 @@ test "$meta_status" -eq 4 || fail 'status 113 without exact classification becam
 meta_status=0
 env DARK_FACTORY_LAUNCHD_PROBE_META_TEST=1 \
     DARK_FACTORY_LAUNCHD_LAUNCHCTL="$fake_launchctl" \
-    DARK_FACTORY_LAUNCHD_PROBE_ATTEMPTS=2 \
     FAKE_PRINT_STATUS=77 FAKE_ERROR_TEXT='77: Operation not permitted' \
-    "$runner" --wait-service-absent gui/0/denied "$meta_root/denied" \
-    || meta_status=$?
-test "$meta_status" -eq 1 || fail 'operational post-bootout query became absence'
+    "$runner" --print-state gui/0/denied "$meta_root/denied" || meta_status=$?
+test "$meta_status" -eq 4 || fail 'an operational launchctl failure became absence'
 test -f "$meta_root/denied.error" \
     || fail 'operational launchctl diagnostics were discarded'
 
-meta_status=0
-env DARK_FACTORY_LAUNCHD_PROBE_META_TEST=1 \
-    DARK_FACTORY_LAUNCHD_PID_PROBE="$fake_pid_probe" \
-    DARK_FACTORY_LAUNCHD_PROBE_ATTEMPTS=2 FAKE_PID_STATUS=0 \
-    "$runner" --wait-pid-absent 42 || meta_status=$?
-test "$meta_status" -eq 1 || fail 'EPERM-equivalent presence became PID absence'
-
-env DARK_FACTORY_LAUNCHD_PROBE_META_TEST=1 \
-    DARK_FACTORY_LAUNCHD_PID_PROBE="$fake_pid_probe" \
-    DARK_FACTORY_LAUNCHD_PROBE_ATTEMPTS=2 FAKE_PID_STATUS=3 \
-    "$runner" --wait-pid-absent 42 \
-    || fail 'ESRCH-equivalent observation was not PID absence'
-
-meta_status=0
-env DARK_FACTORY_LAUNCHD_PROBE_META_TEST=1 \
-    DARK_FACTORY_LAUNCHD_PID_PROBE="$fake_pid_probe" FAKE_PID_STATUS=4 \
-    "$runner" --wait-pid-absent 42 || meta_status=$?
-test "$meta_status" -eq 1 || fail 'unknown PID observation became absence'
-
+# The real fixture stays opt-in and declares its job before it is loaded.
 grep -Fq '#[ignore = "opt-in: loads a randomized disposable launchd job"]' "$test_source" \
     || fail 'real launchd test is not opt-in'
 grep -Fq 'LaunchdTarget::new(' "$test_source" \
     || fail 'test no longer injects an explicit launchd identity'
 grep -Fq 'rollback_after_health_failure_for(' "$test_source" \
     || fail 'test no longer exercises the targeted rollback seam'
+grep -Fq 'LaunchdGateInvocation::open(' "$test_source" \
+    || fail 'the disposable job is not declared in the durable ledger'
+if grep -Fq 'invocation.finalize()' "$test_source"; then
+    fail 'the fixture added a second teardown path that only success exercises'
+fi
+
+# The portable containment proofs must keep covering the dangerous cases.
+for proof in \
+    a_declared_job_is_resumable_before_it_is_ever_bootstrapped \
+    a_resumed_receipt_boots_out_exactly_its_own_label \
+    a_lost_bootout_response_does_not_send_a_second_teardown \
+    a_sigkilled_coordinator_leaves_exactly_one_resumable_invocation \
+    a_receipt_cannot_aim_cleanup_at_a_directory_the_gate_never_claimed \
+    the_installed_label_is_refused_at_declaration_and_at_finalization
+do
+    grep -Fq "fn $proof(" "$gate_source" || fail "containment proof $proof was removed"
+done
 
 grep -Fq './scripts/test-macos-launchd-release-proof.sh' "$gate" \
     || fail 'local source gate lost the launchd safety checks'
