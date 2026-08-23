@@ -26,6 +26,8 @@ use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::runner_process::git_discovery_ceiling;
+
 const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
 const PRIVATE_FILE_MODE: u32 = 0o600;
 const MAX_PATH_BYTES: usize = 4096;
@@ -864,12 +866,27 @@ fn run_materializer_wrapper(
     )?;
     verify_for_provider_exec(&selected, &published)?;
 
-    let error = Command::new(provider_program)
-        .args(invocation.provider_arguments)
-        .current_dir(&published.path)
-        .env("GIT_CEILING_DIRECTORIES", &published.path)
-        .exec();
+    let error = provider_command(
+        &provider_program,
+        &invocation.provider_arguments,
+        &published.path,
+    )
+    .exec();
     Err(Error::ProviderExec(error))
+}
+
+/// The exact provider command this wrapper `exec`s in place: the published
+/// `.git`-free Change as the working directory, and the Git discovery ceiling
+/// that actually stops the upward walk at that root. The ceiling is restated
+/// here rather than trusted from the inherited runner environment because this
+/// is the last gate before the provider replaces the process.
+fn provider_command(program: &Path, arguments: &[String], published: &Path) -> Command {
+    let mut command = Command::new(program);
+    command
+        .args(arguments)
+        .current_dir(published)
+        .env("GIT_CEILING_DIRECTORIES", git_discovery_ceiling(published));
+    command
 }
 
 /// Writes one exact-idempotent, owner-only, bounded JSON ready record and fsyncs
@@ -2270,6 +2287,109 @@ mod tests {
         let record = selected.selection_record(&staged);
         materialize_blobs_command(&selected.blob_command().unwrap(), &staged, &manifest).unwrap();
         (root, staged, record)
+    }
+
+    /// The same "Source boundary" containment on the wrapper's own `exec`
+    /// path: the command this process replaces itself with must not be able
+    /// to discover an ancestor repository from the published Change.
+    #[test]
+    fn published_change_exec_refuses_git_discovery_past_its_root() {
+        let (root, staged, _selection) = materialized_source();
+        let published = staged.publish().unwrap();
+        let nested = published.path.join("nested");
+        assert!(nested.is_dir());
+        let git = find_git();
+        // Make an ancestor of `changes/<uuid>` a repository with a commit.
+        let init = Command::new(&git)
+            .args(["init", "--quiet", "--initial-branch=main"])
+            .arg(root.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .status()
+            .unwrap();
+        assert!(init.success());
+        let commit = Command::new(&git)
+            .current_dir(root.path())
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "base",
+            ])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .status()
+            .unwrap();
+        assert!(commit.success());
+
+        // Anti-vacuity: without a ceiling that ancestor really is reachable.
+        let reachable = Command::new(&git)
+            .args(["rev-parse", "--show-toplevel"])
+            .current_dir(&nested)
+            .env_remove("GIT_CEILING_DIRECTORIES")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap();
+        assert!(
+            reachable.status.success(),
+            "fixture has no discoverable ancestor repository: {}",
+            String::from_utf8_lossy(&reachable.stderr)
+        );
+
+        // The wrapper starts the provider in the published Change itself.
+        assert_eq!(
+            provider_command(&git, &[], &published.path)
+                .get_current_dir()
+                .map(Path::to_path_buf),
+            Some(published.path.clone())
+        );
+
+        for (index, cwd) in [&published.path, &nested].into_iter().enumerate() {
+            let worktree = root.path().join(format!("linked-worktree-{index}"));
+            let attempts: [Vec<String>; 3] = [
+                vec!["rev-parse".to_owned(), "--show-toplevel".to_owned()],
+                vec!["status".to_owned(), "--porcelain".to_owned()],
+                vec![
+                    "worktree".to_owned(),
+                    "add".to_owned(),
+                    "--detach".to_owned(),
+                    worktree.to_str().unwrap().to_owned(),
+                ],
+            ];
+            for arguments in attempts {
+                let mut command = provider_command(&git, &arguments, &published.path);
+                // A provider may `chdir` anywhere inside its own Change.
+                command
+                    .current_dir(cwd)
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+                let output = command.output().unwrap();
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert!(
+                    !output.status.success(),
+                    "git {arguments:?} succeeded in {cwd:?}: {stdout}{stderr}"
+                );
+                assert!(
+                    stderr.contains("not a git repository"),
+                    "git {arguments:?} in {cwd:?} failed for the wrong reason: {stderr}"
+                );
+            }
+            assert!(
+                !worktree.exists(),
+                "a linked worktree was created at {worktree:?}"
+            );
+        }
     }
 
     #[test]
