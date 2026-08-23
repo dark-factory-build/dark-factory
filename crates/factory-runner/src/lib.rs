@@ -1490,6 +1490,18 @@ mod tests {
     use super::*;
     use std::fs::OpenOptions;
 
+    /// Deliberately generous, matching the bound
+    /// `crates/factory-runner/tests/support/kernel_process.rs` and
+    /// `crates/factoryd/src/test_support.rs` use for the equivalent
+    /// integration and inline-unit fixtures elsewhere in this repository:
+    /// these tests run alongside the rest of the suite, so a bound that
+    /// merely fits an idle machine turns contention into a mystery failure.
+    /// This crate's own unit tests cannot reach either of those modules --
+    /// one lives under `tests/`, compiled only into separate integration
+    /// binaries, and the other is private to `factoryd` -- so this is a
+    /// third, file-local copy of the same constant, not a shared one.
+    const FIXTURE_TIMEOUT: Duration = Duration::from_secs(30);
+
     struct PreparedSupervision {
         _directory: tempfile::TempDir,
         descendant: Pid,
@@ -1577,7 +1589,7 @@ mod tests {
     }
 
     async fn wait_for_process_absence(pid: Pid) {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + FIXTURE_TIMEOUT;
         loop {
             match rustix::process::test_kill_process(pid) {
                 Err(rustix::io::Errno::SRCH) => return,
@@ -1586,7 +1598,7 @@ mod tests {
             }
             assert!(
                 Instant::now() < deadline,
-                "owned process-group descendant survived cleanup"
+                "owned process-group descendant {pid:?} survived cleanup (waited {FIXTURE_TIMEOUT:?})"
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -1649,7 +1661,7 @@ mod tests {
     }
 
     async fn wait_for_pid_marker(path: &Path) -> Pid {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + FIXTURE_TIMEOUT;
         loop {
             if let Ok(raw) = std::fs::read_to_string(path)
                 .unwrap_or_default()
@@ -1658,18 +1670,25 @@ mod tests {
             {
                 return Pid::from_raw(raw).unwrap();
             }
-            assert!(Instant::now() < deadline, "descendant was not started");
+            assert!(
+                Instant::now() < deadline,
+                "descendant PID was never published to {} (waited {FIXTURE_TIMEOUT:?})",
+                path.display()
+            );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 
     async fn wait_for_started(log: &EventLog) {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + FIXTURE_TIMEOUT;
         loop {
             if log.snapshot().await.head >= 1 {
                 return;
             }
-            assert!(Instant::now() < deadline, "Started event was not durable");
+            assert!(
+                Instant::now() < deadline,
+                "Started event was not durable (waited {FIXTURE_TIMEOUT:?})"
+            );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }

@@ -12,6 +12,8 @@ pub mod runner_client;
 pub mod runner_process;
 mod rust_verify;
 pub mod store;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 /// Internal entrypoint used only when the daemon binary has been launched as
 /// the registered source-materializer wrapper.

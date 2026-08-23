@@ -24,8 +24,9 @@ use factoryd::{
 mod support;
 
 use support::{
-    OwnedRunner, birth_fingerprint, private_directory, process_absent, process_birth,
-    runner_locator, runner_setup_locator, runtime_birth, runtime_locator,
+    FIXTURE_TIMEOUT, OwnedRunner, birth_fingerprint, bounded_shell_wait, private_directory,
+    process_absent, process_birth, runner_locator, runner_setup_locator, runtime_birth,
+    runtime_locator, wait_for_condition,
 };
 
 const RUN_ID: &str = "11111111-1111-4111-8111-111111111111";
@@ -130,7 +131,24 @@ impl Fixture {
         let provider = root.path().join("provider.sh");
         fs::write(
             &provider,
-            "#!/bin/sh\nset -eu\n(while [ ! -e \"$3\" ]; do /bin/sleep 0.01; done) &\nprintf %s \"$!\" > \"$4\"\nprintf x >> \"$1\"\nwhile [ ! -e \"$2\" ]; do /bin/sleep 0.01; done\nexit 17\n",
+            // Both waits are bounded by a hard iteration cap and by the
+            // fixture root disappearing, not only by the release marker each
+            // waits for. A `ReleaseOnDrop` guard writes that marker even when
+            // this test panics, but a guard only runs at all when the test
+            // unwinds normally, and can race the very `TempDir` deletion that
+            // would otherwise make the marker disappear along with
+            // everything else. Without these bounds a panic here orphans the
+            // backgrounded descendant to launchd forever, not just for the
+            // rest of this test run.
+            format!(
+                "#!/bin/sh\nset -eu\n({wait_descendant_release}) &\n\
+                 printf %s \"$!\" > \"$4\"\n\
+                 printf x >> \"$1\"\n\
+                 {wait_provider_release}\n\
+                 exit 17\n",
+                wait_descendant_release = bounded_shell_wait("\"$3\"", root.path()),
+                wait_provider_release = bounded_shell_wait("\"$2\"", root.path()),
+            ),
         )
         .unwrap();
         fs::set_permissions(&provider, fs::Permissions::from_mode(0o700)).unwrap();
@@ -417,7 +435,7 @@ async fn manually_seed_running_observer_fixture(
 }
 
 async fn prepare_with_grace(client: &RunnerClient) -> PreparedRunner {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + FIXTURE_TIMEOUT;
     loop {
         match client.prepare().await {
             Ok(prepared) => return prepared,
@@ -425,7 +443,9 @@ async fn prepare_with_grace(client: &RunnerClient) -> PreparedRunner {
                 let _ = error;
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            Err(error) => panic!("runner did not prepare provider: {error}"),
+            Err(error) => {
+                panic!("runner did not prepare provider within {FIXTURE_TIMEOUT:?}: {error}")
+            }
         }
     }
 }
@@ -447,59 +467,50 @@ fn run(store: &Store, run_id: &RunId) -> factory_core::RunSnapshot {
 }
 
 async fn wait_for_observer_cut(state: &DaemonState, run_id: &RunId) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let (run, resources) = state
-            .with_store({
-                let run_id = run_id.clone();
-                move |store| {
-                    Ok((
-                        store.kernel_run(&run_id)?.unwrap(),
-                        store.kernel_resources(&run_id)?,
-                    ))
-                }
-            })
-            .await
-            .unwrap();
-        let released = |kind| {
-            resources.iter().any(|resource| {
-                resource.kind == kind && resource.state == KernelResourceState::Released
-            })
-        };
-        let group_pending = resources.iter().any(|resource| {
-            resource.kind == KernelResourceKind::ProcessGroup
-                && resource.state == KernelResourceState::Releasing
-        });
-        if run.phase == RunPhase::Finalizing
-            && run.exit_code == Some(17)
-            && released(KernelResourceKind::RunnerProcess)
-            && released(KernelResourceKind::ProviderProcess)
-            && group_pending
-        {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "production observer did not reach the acknowledged external-resource cut"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    wait_for_condition(
+        "production observer did not reach the acknowledged external-resource cut",
+        || async {
+            let (run, resources) = state
+                .with_store({
+                    let run_id = run_id.clone();
+                    move |store| {
+                        Ok((
+                            store.kernel_run(&run_id)?.unwrap(),
+                            store.kernel_resources(&run_id)?,
+                        ))
+                    }
+                })
+                .await
+                .unwrap();
+            let released = |kind| {
+                resources.iter().any(|resource| {
+                    resource.kind == kind && resource.state == KernelResourceState::Released
+                })
+            };
+            let group_pending = resources.iter().any(|resource| {
+                resource.kind == KernelResourceKind::ProcessGroup
+                    && resource.state == KernelResourceState::Releasing
+            });
+            run.phase == RunPhase::Finalizing
+                && run.exit_code == Some(17)
+                && released(KernelResourceKind::RunnerProcess)
+                && released(KernelResourceKind::ProviderProcess)
+                && group_pending
+        },
+    )
+    .await;
 }
 
 async fn wait_for_terminal(state: &DaemonState, run_id: &RunId) {
-    let deadline = Instant::now() + Duration::from_secs(8);
-    loop {
-        let phase = state
+    wait_for_condition("run did not terminalize", || async {
+        state
             .with_store({
                 let run_id = run_id.clone();
                 move |store| Ok(store.kernel_run(&run_id)?.unwrap().phase)
             })
             .await
-            .unwrap();
-        if phase == RunPhase::Terminal {
-            return;
-        }
-        assert!(Instant::now() < deadline, "run did not terminalize");
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+            .unwrap()
+            == RunPhase::Terminal
+    })
+    .await;
 }

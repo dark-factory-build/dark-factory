@@ -16,6 +16,11 @@ use factoryd::lifecycle::DaemonInstance;
 // Optional reviewed-provider metadata is validated before factoryd binds its
 // socket, so startup readiness includes that bounded preflight.
 const STARTUP_READINESS_TIMEOUT: Duration = Duration::from_secs(10);
+// Deliberately generous: this fixture runs alongside the rest of the
+// process-level suite, so a bound that merely fits an idle machine turns
+// contention into a mystery failure. Matches the `FIXTURE_TIMEOUT` bound
+// used by the shared process-fixture helpers elsewhere in this repository.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn private_directory(path: &Path) {
     fs::create_dir_all(path).unwrap();
@@ -271,7 +276,7 @@ fn wait_until_ready(child: &mut Child, socket: &Path) {
 }
 
 fn wait_for_exit(child: &mut Child) -> std::process::ExitStatus {
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
     while Instant::now() < deadline {
         if let Some(status) = child.try_wait().unwrap() {
             return status;
@@ -279,5 +284,5 @@ fn wait_for_exit(child: &mut Child) -> std::process::ExitStatus {
         thread::sleep(Duration::from_millis(20));
     }
     let _ = child.kill();
-    panic!("factoryd did not stop after SIGTERM");
+    panic!("factoryd did not stop after SIGTERM within {SHUTDOWN_TIMEOUT:?}");
 }

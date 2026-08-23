@@ -2,8 +2,10 @@ use std::{
     fs,
     os::unix::fs::OpenOptionsExt as _,
     process::{Command, Stdio},
-    time::{Duration, Instant},
 };
+
+#[path = "support/kernel_process.rs"]
+mod support;
 
 fn runner() -> &'static str {
     env!("CARGO_BIN_EXE_factory-runner")
@@ -32,15 +34,16 @@ fn expected_parent_mismatch_exits_without_activation_or_exec() {
         .spawn()
         .unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        assert!(Instant::now() < deadline, "mismatched gate did not exit");
-        std::thread::sleep(Duration::from_millis(5));
-    };
-    assert!(status.success());
+    let mut status = None;
+    support::wait_for("mismatched gate did not exit", || {
+        status = child.try_wait().unwrap();
+        status.is_some()
+    });
+    assert!(
+        status
+            .expect("wait_for only returns once the condition is true")
+            .success()
+    );
     assert!(!marker.exists());
 }
 
@@ -80,11 +83,10 @@ printf '%s' "$!" > "$CHILD_PID_FILE""#,
         .unwrap();
     activation_file.sync_all().unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while rustix::process::test_kill_process(child_pid).is_ok() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    assert!(rustix::process::test_kill_process(child_pid).is_err());
+    support::wait_for(
+        &format!("gate process {child_pid:?} was not reaped after parent exit"),
+        || rustix::process::test_kill_process(child_pid).is_err(),
+    );
     assert!(!marker.exists());
 }
 

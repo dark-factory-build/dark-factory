@@ -1513,10 +1513,11 @@ printf '%s\n' "$@" > "$TMPDIR/provider-argv"
         let child_pid = prepared.child_pid();
         let pid = Pid::from_raw(i32::try_from(child_pid).unwrap()).unwrap();
         let marker = directory.path().join("outer-gate-pid");
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !marker.exists() && Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+        crate::test_support::wait_for_async(
+            &format!("outer gate never published its PID to {}", marker.display()),
+            || marker.exists(),
+        )
+        .await;
         assert_eq!(
             fs::read_to_string(marker)
                 .unwrap()
@@ -1527,11 +1528,11 @@ printf '%s\n' "$@" > "$TMPDIR/provider-argv"
         );
 
         drop(prepared);
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while test_kill_process(pid).is_ok() && Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        assert!(test_kill_process(pid).is_err());
+        crate::test_support::wait_for_async(
+            &format!("prepared runner {pid:?} was not reaped after being dropped"),
+            || test_kill_process(pid).is_err(),
+        )
+        .await;
         assert!(!directory.path().join("runner-argv").exists());
         assert!(!directory.path().join("provider-stdin").exists());
     }
@@ -1635,24 +1636,31 @@ printf '%s\n' "$@" > "$TMPDIR/provider-argv"
             .unwrap();
 
         let ready = directory.path().join("ready");
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + crate::test_support::FIXTURE_TIMEOUT;
         while !ready.exists() && Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         if !ready.exists() {
             let _ = child.kill().await;
             let _ = child.wait().await;
-            panic!("provider did not reach the pre-drop barrier");
+            panic!(
+                "provider did not reach the pre-drop barrier within {:?}",
+                crate::test_support::FIXTURE_TIMEOUT
+            );
         }
         drop(child);
         tokio::time::sleep(Duration::from_millis(100)).await;
         fs::write(directory.path().join("release"), b"").unwrap();
 
         let marker = directory.path().join("survived");
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !marker.exists() && Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        crate::test_support::wait_for_async(
+            &format!(
+                "the process survived by dropping its Child handle never wrote {}",
+                marker.display()
+            ),
+            || marker.exists(),
+        )
+        .await;
         assert_eq!(fs::read_to_string(marker).unwrap(), "survived");
     }
 }
