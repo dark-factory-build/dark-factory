@@ -581,13 +581,16 @@ impl Store {
             &identity.process_group_birth_fingerprint,
             now_ms,
         )?;
-        transaction.execute(
+        let changed = transaction.execute(
             "UPDATE runs
              SET phase = 'running', running_at_ms = ?1, phase_since_ms = ?1,
                  updated_at_ms = ?1
              WHERE id = ?2 AND phase = 'admitted'",
             params![now_ms, run_id.as_str()],
         )?;
+        if changed != 1 {
+            return Err(StoreError::InvalidRunState);
+        }
         let run = load_kernel_run(&transaction, run_id)?.ok_or(StoreError::RunNotFound)?;
         let event = FactoryEvent::RunChanged {
             run: Box::new(run.clone()),
@@ -1000,15 +1003,18 @@ impl Store {
             RunPhase::Admitted => return Err(StoreError::InvalidRunState),
         }
         let (kind, detail) = outcome_parts(outcome);
-        transaction.execute(
+        let changed = transaction.execute(
             "UPDATE runs
              SET phase = 'finalizing', outcome = ?1,
                  outcome_detail = ?2, outcome_result = ?3,
                  stop_requested_at_ms = ?4,
                  finalizing_at_ms = ?4, phase_since_ms = ?4, updated_at_ms = ?4
-             WHERE id = ?5",
+             WHERE id = ?5 AND phase = 'running'",
             params![kind, detail, result, now_ms, run_id.as_str()],
         )?;
+        if changed != 1 {
+            return Err(StoreError::InvalidRunState);
+        }
         insert_completion_check_if_required(&transaction, &run, outcome, now_ms)?;
         transaction.execute(
             "UPDATE resources SET state = 'releasing', updated_at_ms = ?1
@@ -1079,7 +1085,7 @@ impl Store {
             RunPhase::Running => "running",
             RunPhase::Finalizing | RunPhase::Terminal => return Err(StoreError::InvalidRunState),
         };
-        transaction.execute(
+        let changed = transaction.execute(
             "UPDATE runs
              SET phase = 'finalizing', outcome = 'failed',
                  outcome_detail = ?1,
@@ -1088,6 +1094,9 @@ impl Store {
              WHERE id = ?3 AND phase = ?4",
             params![detail, now_ms, run_id.as_str(), expected_phase],
         )?;
+        if changed != 1 {
+            return Err(StoreError::InvalidRunState);
+        }
         transaction.execute(
             "UPDATE resources SET state = 'releasing', updated_at_ms = ?1
              WHERE run_id = ?2 AND state IN ('declared', 'active')",
@@ -1130,7 +1139,7 @@ impl Store {
                 Err(StoreError::InvalidRunState)
             };
         }
-        transaction.execute(
+        let changed = transaction.execute(
             "UPDATE runs
              SET phase = 'finalizing', outcome = 'cancelled',
                  outcome_detail = ?1,
@@ -1139,6 +1148,9 @@ impl Store {
              WHERE id = ?3 AND phase IN ('admitted', 'running')",
             params![reason, now_ms, run_id.as_str()],
         )?;
+        if changed != 1 {
+            return Err(StoreError::InvalidRunState);
+        }
         transaction.execute(
             "UPDATE resources SET state = 'releasing', updated_at_ms = ?1
              WHERE run_id = ?2 AND state IN ('declared', 'active')",
@@ -1181,7 +1193,7 @@ impl Store {
             let (_, failure_detail) = outcome_parts(&RunOutcome::Failed {
                 reason: failure_reason.unwrap_or(RunFailureReason::Process),
             });
-            transaction.execute(
+            let changed = transaction.execute(
                 "UPDATE runs
                  SET phase = 'finalizing', outcome = 'failed',
                      outcome_detail = ?1,
@@ -1191,8 +1203,11 @@ impl Store {
                  WHERE id = ?3 AND phase = 'running'",
                 params![failure_detail, now_ms, run_id.as_str()],
             )?;
+            if changed != 1 {
+                return Err(StoreError::InvalidRunState);
+            }
         } else if run.phase == RunPhase::Admitted {
-            transaction.execute(
+            let changed = transaction.execute(
                 "UPDATE runs
                  SET phase = 'finalizing', outcome = 'failed',
                      outcome_detail = 'spawn',
@@ -1202,6 +1217,9 @@ impl Store {
                  WHERE id = ?2 AND phase = 'admitted'",
                 params![now_ms, run_id.as_str()],
             )?;
+            if changed != 1 {
+                return Err(StoreError::InvalidRunState);
+            }
         }
         transaction.execute(
             "UPDATE resources SET state = 'releasing', updated_at_ms = ?1
@@ -1515,7 +1533,7 @@ impl Store {
             return Err(StoreError::InvalidRunState);
         }
         let (outcome_kind, outcome_detail) = outcome_parts(&outcome);
-        transaction.execute(
+        let terminalized = transaction.execute(
             "UPDATE runs
              SET phase = 'terminal', outcome = ?1, outcome_detail = ?2,
                  outcome_result = ?3, phase_since_ms = ?4, updated_at_ms = ?4,
@@ -1529,6 +1547,9 @@ impl Store {
                 run_id.as_str()
             ],
         )?;
+        if terminalized != 1 {
+            return Err(StoreError::InvalidRunState);
+        }
         let change_event = transaction
             .query_row(
                 "SELECT change_id FROM runs WHERE id = ?1",
@@ -4378,6 +4399,156 @@ mod tests {
         assert_eq!(
             store.kernel_run(&run_id).unwrap().unwrap().phase,
             RunPhase::Finalizing
+        );
+    }
+
+    /// Makes the next `runs.phase` write to `phase` match zero rows while
+    /// leaving the row itself untouched. Every phase transition restates in
+    /// SQL the phase the freshly loaded row already proved, so that zero-row
+    /// state is unreachable through the store's own API today; this stages it
+    /// directly so each transition's row check has something to refuse.
+    fn suppress_phase_write(store: &Store, phase: &str) {
+        store
+            .connection
+            .execute_batch(&format!(
+                "CREATE TEMP TRIGGER suppress_phase_write
+                 BEFORE UPDATE OF phase ON runs
+                 WHEN new.phase = '{phase}'
+                 BEGIN SELECT RAISE(IGNORE); END;"
+            ))
+            .unwrap();
+    }
+
+    #[test]
+    fn activation_refuses_a_phase_transition_that_matched_no_row() {
+        let mut store = Store::open_in_memory().unwrap();
+        let run_id = admit_worker(&mut store);
+        suppress_phase_write(&store, "running");
+
+        assert!(matches!(
+            store.activate_prepared_run(&run_id, prepared_identity(), 6),
+            Err(StoreError::InvalidRunState)
+        ));
+        assert!(
+            store
+                .kernel_resources(&run_id)
+                .unwrap()
+                .iter()
+                .all(|resource| resource.state != KernelResourceState::Active),
+            "a refused activation never leaves a process identity active"
+        );
+    }
+
+    /// Runs one running-to-finalizing transition against a suppressed phase
+    /// write and proves the refusal skipped the release that transition would
+    /// otherwise have published. An attempt whose resources are already
+    /// releasing reads as finished to every later observer, whatever its phase
+    /// column still says, which is the failure the row check exists to stop.
+    fn refused_finalizing_transition_holds_the_resources(
+        transition: impl FnOnce(&mut Store, &RunId) -> Result<(RunSnapshot, Vec<EventEnvelope>)>,
+    ) {
+        let mut store = Store::open_in_memory().unwrap();
+        let run_id = admit_worker(&mut store);
+        store
+            .activate_prepared_run(&run_id, prepared_identity(), 6)
+            .unwrap();
+        suppress_phase_write(&store, "finalizing");
+
+        assert!(matches!(
+            transition(&mut store, &run_id),
+            Err(StoreError::InvalidRunState)
+        ));
+        assert!(
+            store
+                .kernel_resources(&run_id)
+                .unwrap()
+                .iter()
+                .all(|resource| resource.state != KernelResourceState::Releasing),
+            "a refused transition never releases the attempt's resources"
+        );
+    }
+
+    #[test]
+    fn attempt_outcome_refuses_a_phase_transition_that_matched_no_row() {
+        refused_finalizing_transition_holds_the_resources(|store, run_id| {
+            store.request_attempt_outcome(run_id, &RunOutcome::Succeeded, Some("done"), 7)
+        });
+    }
+
+    #[test]
+    fn open_failure_refuses_a_phase_transition_that_matched_no_row() {
+        refused_finalizing_transition_holds_the_resources(|store, run_id| {
+            store.fail_running_run(run_id, RunFailureReason::Process, 7)
+        });
+    }
+
+    #[test]
+    fn cancellation_refuses_a_phase_transition_that_matched_no_row() {
+        refused_finalizing_transition_holds_the_resources(|store, run_id| {
+            store.cancel_admitted_or_running_run(run_id, "operator".into(), 7)
+        });
+    }
+
+    #[test]
+    fn running_exit_refuses_a_phase_transition_that_matched_no_row() {
+        let mut store = Store::open_in_memory().unwrap();
+        let run_id = admit_worker(&mut store);
+        store
+            .activate_prepared_run(&run_id, prepared_identity(), 6)
+            .unwrap();
+        suppress_phase_write(&store, "finalizing");
+
+        assert!(matches!(
+            store.observe_attempt_exit(&run_id, 1, Some(3), None, None, 7),
+            Err(StoreError::InvalidRunState)
+        ));
+        assert_eq!(
+            store.kernel_run(&run_id).unwrap().unwrap().exit_code,
+            None,
+            "a refused exit never records the runner's exit status"
+        );
+    }
+
+    #[test]
+    fn spawn_failure_exit_refuses_a_phase_transition_that_matched_no_row() {
+        let mut store = Store::open_in_memory().unwrap();
+        let run_id = admit_worker(&mut store);
+        suppress_phase_write(&store, "finalizing");
+
+        assert!(matches!(
+            store.observe_attempt_exit(&run_id, 1, Some(3), None, Some(RunFailureReason::Spawn), 7),
+            Err(StoreError::InvalidRunState)
+        ));
+        assert_eq!(
+            store.kernel_run(&run_id).unwrap().unwrap().exit_code,
+            None,
+            "a refused spawn failure never records the runner's exit status"
+        );
+    }
+
+    #[test]
+    fn terminalization_refuses_a_phase_transition_that_matched_no_row() {
+        let mut store = Store::open_in_memory().unwrap();
+        let run_id = admit_worker(&mut store);
+        store
+            .fail_admitted_run(&run_id, RunFailureReason::Spawn, 6)
+            .unwrap();
+        release_all(&mut store, &run_id, 7);
+        suppress_phase_write(&store, "terminal");
+
+        assert!(matches!(
+            store.finalize_run(&run_id, 8),
+            Err(StoreError::InvalidRunState)
+        ));
+        let run = store.kernel_run(&run_id).unwrap().unwrap();
+        assert_eq!(
+            store
+                .get_task(&run.project_id, &run.task_id)
+                .unwrap()
+                .snapshot
+                .status,
+            TaskStatus::Running,
+            "a refused terminalization never projects the task's final status"
         );
     }
 
