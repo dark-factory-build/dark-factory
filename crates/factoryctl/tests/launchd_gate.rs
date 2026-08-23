@@ -652,6 +652,51 @@ fn relative_paths_are_refused_rather_than_silently_resolved() {
     }
 }
 
+/// A ledger inside the root it records would be destroyed by finalizing that
+/// root, taking every other receipt in it with it.
+#[test]
+fn a_ledger_inside_the_root_it_records_is_refused() {
+    let world = World::new("nestedledger");
+    let launchctl = world.launchctl();
+    let nested = world.root.join("ledger");
+    fs::create_dir(&nested).unwrap();
+    fs::set_permissions(&nested, fs::Permissions::from_mode(0o700)).unwrap();
+    let (plist, staged) = world.request();
+    let error = LaunchdGateInvocation::open(
+        &nested,
+        &launchctl,
+        GateRequest {
+            domain: "gui/501",
+            label: &world.label,
+            plist: &plist,
+            runtime_root: &world.root,
+            staged_executable: &staged,
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(error, GateError::Refused(_)), "{error}");
+    assert!(!world.root.join(".dark-factory-launchd-gate").exists());
+}
+
+/// A process we may not signal still exists. Reading `EPERM` as absence would
+/// let finalization delete a root while the daemon it recorded is alive.
+#[test]
+fn a_process_we_may_not_signal_counts_as_present() {
+    // PID 1 is launchd itself: always running, never ours to signal.
+    assert!(
+        launchd_gate::process_present(1).unwrap(),
+        "a live root-owned process was not seen as present"
+    );
+    // A process we started and reaped is absent.
+    let mut gone = Command::new("/bin/sh")
+        .args(["-c", "exit 0"])
+        .spawn()
+        .unwrap();
+    let pid = gone.id();
+    gone.wait().unwrap();
+    assert!(!launchd_gate::process_present(pid).unwrap());
+}
+
 /// launchd domains name a domain, never a service. A receipt that could carry
 /// a service component could aim a teardown at something else entirely.
 #[test]

@@ -234,11 +234,13 @@ fi
 # The one finalization authority. Success and hard death converge here.
 resume_status=0
 fixture_cargo disposable_launchd_jobs_are_resumed || resume_status=$?
-# A root the gate claimed carries its marker. One without a marker was never
-# declared — the fixture died before that point — so it is ours to remove and
-# is not evidence of a containment failure.
+# A root is only ours to remove when it was never declared, and that needs two
+# independent facts: no claim marker, and no receipt naming this run's label.
+# The marker alone is not enough — removing a root is not atomic, so a
+# finalization that unlinked the marker and then failed leaves a root the gate
+# deliberately retained looking exactly like one that was never declared.
 if test -e "$root"; then
-    if test -e "$root/.dark-factory-launchd-gate"; then
+    if test -e "$root/.dark-factory-launchd-gate" || test -e "$ledger/$label.json"; then
         echo "launchd gate did not remove the private root it claimed: $root" >&2
         resume_status=1
     else
