@@ -11,6 +11,9 @@ pub(crate) const OPERATOR_EMAIL_DIGEST_BINDING: &str =
     "DARK_FACTORY_MAINTAINER_OPERATOR_EMAIL_SHA256";
 pub(crate) const TEAM_DOMAIN_BINDING: &str = "DARK_FACTORY_CLOUDFLARE_ACCESS_TEAM_DOMAIN";
 pub(crate) const AUDIENCE_BINDING: &str = "DARK_FACTORY_CLOUDFLARE_ACCESS_AUD";
+/// Optional. Absent means no service token may act, which is the correct state
+/// for a deployment that has not deliberately enabled headless access.
+pub(crate) const SERVICE_TOKEN_BINDING: &str = "DARK_FACTORY_CLOUDFLARE_ACCESS_SERVICE_TOKEN_ID";
 const MAX_CERTS_BYTES: usize = 64 * 1024;
 
 #[derive(Clone)]
@@ -18,6 +21,10 @@ pub(crate) struct AccessAuthority {
     expected_email_digest: [u8; 32],
     team_domain: String,
     audience: String,
+    /// Exact Cloudflare Access service-token client ID permitted to act without
+    /// a human identity. `None` rejects every service token, which is the state
+    /// a deployment that has not configured one must stay in.
+    service_token_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -33,6 +40,7 @@ impl AccessAuthority {
         expected_email_digest: String,
         team_domain: String,
         audience: String,
+        service_token_id: Option<String>,
     ) -> Result<Self, Error> {
         let mut digest = [0_u8; 32];
         if !lower_hex(&expected_email_digest, 64)
@@ -42,30 +50,44 @@ impl AccessAuthority {
         {
             return Err(Error::Configuration);
         }
+        // A configured but malformed service-token id is a configuration error,
+        // not a silently ignored one: it would otherwise leave the deployment
+        // believing headless access is enabled while every call fails closed.
+        if let Some(id) = service_token_id.as_deref()
+            && !valid_service_token_id(id)
+        {
+            return Err(Error::Configuration);
+        }
         Ok(Self {
             expected_email_digest: digest,
             team_domain,
             audience,
+            service_token_id,
         })
     }
 
     #[cfg(target_arch = "wasm32")]
     pub(crate) async fn authorize(&self, headers: &HeaderMap) -> Result<(), Error> {
         let assertion = single_header(headers, "cf-access-jwt-assertion")?;
-        let email_header = single_header(headers, "cf-access-authenticated-user-email")?;
+        // A human identity carries an authenticated email header; a service
+        // token carries none and identifies itself by `common_name` instead.
+        // Choosing the principal by header presence keeps each path exact:
+        // neither can satisfy the other's identity check.
+        let email_header = optional_single_header(headers, "cf-access-authenticated-user-email")?;
         let parsed = ParsedJwt::parse(assertion)?;
         let jwk = self.signing_key(&parsed.header.kid).await?;
         verify_rs256(jwk, parsed.unsigned.as_bytes(), &parsed.signature).await?;
-        self.validate_claims(&parsed.claims, email_header, now())
+        self.validate_envelope(&parsed.claims, now())?;
+        match email_header {
+            Some(email_header) => self.validate_operator(&parsed.claims, email_header),
+            None => self.validate_service_token(&parsed.claims),
+        }
     }
 
-    fn validate_claims(&self, claims: &Claims, email_header: &str, now: i64) -> Result<(), Error> {
-        let email = valid_email(email_header)?;
-        let claim_email = valid_email(&claims.email)?;
-        let supplied: [u8; 32] = Sha256::digest(email.as_bytes()).into();
-        if email != claim_email
-            || supplied != self.expected_email_digest
-            || claims.kind != "app"
+    /// Everything both principals must satisfy: this application, this
+    /// organization, and a live token.
+    fn validate_envelope(&self, claims: &Claims, now: i64) -> Result<(), Error> {
+        if claims.kind != "app"
             || claims.issuer != self.team_domain
             || claims.audience.as_slice() != [self.audience.as_str()]
             || claims.issued_at > now + 60
@@ -73,6 +95,35 @@ impl AccessAuthority {
             || claims.expires_at < now - 60
             || claims.expires_at <= claims.issued_at
         {
+            return Err(Error::Unauthorized);
+        }
+        Ok(())
+    }
+
+    fn validate_operator(&self, claims: &Claims, email_header: &str) -> Result<(), Error> {
+        let email = valid_email(email_header)?;
+        let claim_email = valid_email(&claims.email)?;
+        let supplied: [u8; 32] = Sha256::digest(email.as_bytes()).into();
+        // A service token must never satisfy the operator path, even if Access
+        // were ever to attach an email header to one.
+        if email != claim_email
+            || supplied != self.expected_email_digest
+            || !claims.common_name.is_empty()
+        {
+            return Err(Error::Unauthorized);
+        }
+        Ok(())
+    }
+
+    fn validate_service_token(&self, claims: &Claims) -> Result<(), Error> {
+        let expected = self
+            .service_token_id
+            .as_deref()
+            .ok_or(Error::Unauthorized)?;
+        // The identity is the client id alone; a service-token assertion that
+        // also carried an email would be an unexpected shape, so reject it
+        // rather than guess which principal it is.
+        if claims.common_name != expected || !claims.email.is_empty() {
             return Err(Error::Unauthorized);
         }
         Ok(())
@@ -234,7 +285,12 @@ struct JwtHeader {
 struct Claims {
     #[serde(rename = "aud")]
     audience: Vec<String>,
+    // Absent on a service-token assertion, which has no human identity.
+    #[serde(default)]
     email: String,
+    // Cloudflare sets this to the service token's client id; empty for a human.
+    #[serde(default)]
+    common_name: String,
     #[serde(rename = "exp")]
     expires_at: i64,
     #[serde(rename = "iat")]
@@ -302,6 +358,28 @@ fn valid_email(value: &str) -> Result<String, Error> {
         return Err(Error::Unauthorized);
     }
     Ok(value.to_ascii_lowercase())
+}
+
+/// A Cloudflare Access service-token client id: 32 lowercase hex characters
+/// followed by `.access`.
+fn valid_service_token_id(value: &str) -> bool {
+    value
+        .strip_suffix(".access")
+        .is_some_and(|prefix| lower_hex(prefix, 32))
+}
+
+/// Absent is a valid answer; present-but-ambiguous is not. A duplicated or
+/// unparsable header still fails closed rather than being treated as missing,
+/// which would silently downgrade an operator request to the service path.
+#[cfg(target_arch = "wasm32")]
+fn optional_single_header<'a>(
+    headers: &'a HeaderMap,
+    name: &str,
+) -> Result<Option<&'a str>, Error> {
+    if headers.get(name).is_none() {
+        return Ok(None);
+    }
+    single_header(headers, name).map(Some)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -402,14 +480,27 @@ mod tests {
             hex::encode(Sha256::digest(b"operator@example.com")),
             "https://dark-factory.cloudflareaccess.com".into(),
             "a".repeat(64),
+            None,
         )
         .unwrap()
+    }
+
+    /// The operator path as `authorize` composes it: envelope, then identity.
+    fn validate_claims(
+        authority: &AccessAuthority,
+        claims: &Claims,
+        email: &str,
+        now: i64,
+    ) -> Result<(), Error> {
+        authority.validate_envelope(claims, now)?;
+        authority.validate_operator(claims, email)
     }
 
     fn claims() -> Claims {
         Claims {
             audience: vec!["a".repeat(64)],
             email: "Operator@Example.com".into(),
+            common_name: String::new(),
             expires_at: 1_800_000_600,
             issued_at: 1_800_000_000,
             not_before: 1_800_000_000,
@@ -421,25 +512,139 @@ mod tests {
     #[test]
     fn access_claims_bind_issuer_audience_time_and_identity() {
         assert!(
-            authority()
-                .validate_claims(&claims(), "operator@example.com", 1_800_000_100)
-                .is_ok()
+            validate_claims(
+                &authority(),
+                &claims(),
+                "operator@example.com",
+                1_800_000_100
+            )
+            .is_ok()
         );
         let mut wrong = claims();
         wrong.audience = vec!["b".repeat(64)];
         assert_eq!(
-            authority().validate_claims(&wrong, "operator@example.com", 1_800_000_100),
+            validate_claims(&authority(), &wrong, "operator@example.com", 1_800_000_100),
             Err(Error::Unauthorized)
         );
         let mut expired = claims();
         expired.expires_at = 1_799_999_000;
         assert_eq!(
-            authority().validate_claims(&expired, "operator@example.com", 1_800_000_100),
+            validate_claims(
+                &authority(),
+                &expired,
+                "operator@example.com",
+                1_800_000_100
+            ),
             Err(Error::Unauthorized)
         );
         assert_eq!(
-            authority().validate_claims(&claims(), "attacker@example.com", 1_800_000_100),
+            validate_claims(
+                &authority(),
+                &claims(),
+                "attacker@example.com",
+                1_800_000_100
+            ),
             Err(Error::Unauthorized)
+        );
+    }
+
+    const SERVICE_TOKEN_ID: &str = "0123456789abcdef0123456789abcdef.access";
+
+    fn service_authority() -> AccessAuthority {
+        AccessAuthority::new(
+            hex::encode(Sha256::digest(b"operator@example.com")),
+            "https://dark-factory.cloudflareaccess.com".into(),
+            "a".repeat(64),
+            Some(SERVICE_TOKEN_ID.into()),
+        )
+        .unwrap()
+    }
+
+    fn service_claims() -> Claims {
+        Claims {
+            email: String::new(),
+            common_name: SERVICE_TOKEN_ID.into(),
+            ..claims()
+        }
+    }
+
+    #[test]
+    fn service_tokens_act_only_when_configured_and_exact() {
+        // A headless agent cannot complete Managed OAuth, so it presents a
+        // service token: no email header, identity in `common_name`.
+        assert!(
+            service_authority()
+                .validate_envelope(&service_claims(), 1_800_000_100)
+                .is_ok()
+        );
+        assert!(
+            service_authority()
+                .validate_service_token(&service_claims())
+                .is_ok()
+        );
+
+        // Absent configuration must reject every service token rather than
+        // treat "no expected id" as "any id".
+        assert_eq!(
+            authority().validate_service_token(&service_claims()),
+            Err(Error::Unauthorized)
+        );
+
+        let mut other = service_claims();
+        other.common_name = "ffffffffffffffffffffffffffffffff.access".into();
+        assert_eq!(
+            service_authority().validate_service_token(&other),
+            Err(Error::Unauthorized)
+        );
+
+        // Neither principal may satisfy the other's identity check.
+        let mut impersonating = claims();
+        impersonating.common_name = SERVICE_TOKEN_ID.into();
+        assert_eq!(
+            service_authority().validate_operator(&impersonating, "operator@example.com"),
+            Err(Error::Unauthorized)
+        );
+        let mut with_email = service_claims();
+        with_email.email = "operator@example.com".into();
+        assert_eq!(
+            service_authority().validate_service_token(&with_email),
+            Err(Error::Unauthorized)
+        );
+
+        // The envelope still binds this application and a live token.
+        let mut wrong_audience = service_claims();
+        wrong_audience.audience = vec!["b".repeat(64)];
+        assert_eq!(
+            service_authority().validate_envelope(&wrong_audience, 1_800_000_100),
+            Err(Error::Unauthorized)
+        );
+    }
+
+    #[test]
+    fn service_token_identity_is_exact_or_a_configuration_error() {
+        assert!(valid_service_token_id(SERVICE_TOKEN_ID));
+        for invalid in [
+            "",
+            ".access",
+            "0123456789abcdef0123456789abcdef",
+            "0123456789ABCDEF0123456789abcdef.access",
+            "0123456789abcdef0123456789abcde.access",
+            "0123456789abcdef0123456789abcdeff.access",
+            "0123456789abcdef0123456789abcdef.access.access",
+        ] {
+            assert!(!valid_service_token_id(invalid), "accepted: {invalid}");
+        }
+        // Misconfiguration must fail loudly at construction, not silently
+        // disable headless access at request time.
+        assert_eq!(
+            AccessAuthority::new(
+                hex::encode(Sha256::digest(b"operator@example.com")),
+                "https://dark-factory.cloudflareaccess.com".into(),
+                "a".repeat(64),
+                Some("not-a-service-token".into()),
+            )
+            .err(),
+            Some(Error::Configuration)
         );
     }
 
@@ -461,6 +666,7 @@ mod tests {
                 "a".repeat(64),
                 "https://dark-factory.cloudflareaccess.com".into(),
                 "b".repeat(64),
+                None,
             )
             .is_ok()
         );
@@ -469,6 +675,7 @@ mod tests {
                 "a".repeat(64),
                 "https://dark-factory.cloudflareaccess.com".into(),
                 "B".repeat(64),
+                None,
             )
             .is_err()
         );

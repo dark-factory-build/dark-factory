@@ -124,6 +124,7 @@ fn optional_operation_authority(
             optional_secret(env, access::TEAM_DOMAIN_BINDING),
             optional_secret(env, access::AUDIENCE_BINDING),
         ],
+        optional_secret(env, access::SERVICE_TOKEN_BINDING),
     )
 }
 
@@ -131,6 +132,10 @@ fn optional_operation_authority(
 fn operation_authority_from_values(
     app_id: i64,
     values: [Option<String>; 8],
+    // Separate from the all-or-nothing group above: headless access is opt-in,
+    // so its absence must leave the rest of the authority group configured
+    // rather than tipping the whole surface inactive.
+    service_token_id: Option<String>,
 ) -> Result<Option<(access::AccessAuthority, github_app::AppAuthority)>, AuthorityError> {
     if values.iter().all(Option::is_none) {
         return Ok(None);
@@ -157,8 +162,13 @@ fn operation_authority_from_values(
         repository_id,
     )
     .map_err(|_| AuthorityError::AppAuthority)?;
-    let access = access::AccessAuthority::new(operator_email_digest, team_domain, audience)
-        .map_err(|_| AuthorityError::AppAuthority)?;
+    let access = access::AccessAuthority::new(
+        operator_email_digest,
+        team_domain,
+        audience,
+        service_token_id,
+    )
+    .map_err(|_| AuthorityError::AppAuthority)?;
     Ok(Some((access, app)))
 }
 
@@ -372,6 +382,7 @@ mod tests {
             operation_authority_from_values(
                 4_673_420,
                 [None, None, None, None, None, None, None, None],
+                None,
             )
             .is_ok_and(|value| value.is_none())
         );
@@ -388,6 +399,7 @@ mod tests {
                     None,
                     None,
                 ],
+                None,
             )
             .err(),
             Some(AuthorityError::AppAuthority)
@@ -409,6 +421,7 @@ mod tests {
                     Some("https://dark-factory.cloudflareaccess.com".into()),
                     Some("a".repeat(64)),
                 ],
+                None,
             )
             .is_ok_and(|value| value.is_some())
         );
