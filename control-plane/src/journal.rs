@@ -459,6 +459,21 @@ impl DurableObject for MaintainerDeliveryJournal {
 /// rows copied, and the old one dropped. A shard already on `0003`, or one that
 /// has no operations table yet, is left alone.
 #[cfg(target_arch = "wasm32")]
+fn table_exists(sql: &SqlStorage, name: &str) -> Result<bool, Error> {
+    #[derive(Deserialize)]
+    struct Present {
+        present: i64,
+    }
+    let rows = sql
+        .exec(
+            "SELECT count(*) AS present FROM sqlite_schema WHERE type = 'table' AND name = ?",
+            vec![name.into()],
+        )?
+        .to_array::<Present>()?;
+    Ok(matches!(rows.as_slice(), [row] if row.present > 0))
+}
+
+#[cfg(target_arch = "wasm32")]
 fn migrate_operations_to_0003(sql: &SqlStorage) -> Result<(), Error> {
     let stored = sql
         .exec(
@@ -473,19 +488,33 @@ fn migrate_operations_to_0003(sql: &SqlStorage) -> Result<(), Error> {
         return Ok(());
     }
     worker::console_log!("journal: rebuilding maintainer_operations for revision 0003");
-    sql.exec(
-        "ALTER TABLE maintainer_operations RENAME TO maintainer_operations_0002",
-        None,
-    )?;
+    // Each step is driven off what the schema actually holds, because the
+    // rebuild is not atomic: a failure part-way through returns a 503 and
+    // leaves the completed steps in place, and the revision row still says
+    // 0002, so the next request runs this again. Resuming must not re-rename a
+    // table that is already renamed, and must never drop the legacy table
+    // before its rows have been copied — at the point the rename has happened
+    // it holds the only copy of the journal.
+    if table_exists(sql, "maintainer_operations")?
+        && !table_exists(sql, "maintainer_operations_0002")?
+    {
+        sql.exec(
+            "ALTER TABLE maintainer_operations RENAME TO maintainer_operations_0002",
+            None,
+        )?;
+    }
     sql.exec(OPERATION_MIGRATION_SQL, None)?;
-    sql.exec(
-        "INSERT INTO maintainer_operations
-             (operation_id, kind, request_digest, state, result_json, created_at, updated_at)
-         SELECT operation_id, kind, request_digest, state, result_json, created_at, updated_at
-         FROM maintainer_operations_0002",
-        None,
-    )?;
-    sql.exec("DROP TABLE maintainer_operations_0002", None)?;
+    if table_exists(sql, "maintainer_operations_0002")? {
+        sql.exec(
+            "INSERT INTO maintainer_operations
+                 (operation_id, kind, request_digest, state, result_json, created_at, updated_at)
+             SELECT operation_id, kind, request_digest, state, result_json, created_at, updated_at
+             FROM maintainer_operations_0002
+             ON CONFLICT(operation_id) DO NOTHING",
+            None,
+        )?;
+        sql.exec("DROP TABLE maintainer_operations_0002", None)?;
+    }
     sql.exec(
         "UPDATE control_plane_migrations SET revision = ?, digest = ? WHERE component = ?",
         vec![
