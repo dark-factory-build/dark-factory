@@ -111,6 +111,7 @@ impl PreparedRustWorkspaceTest {
 }
 
 /// Bounded result from executing every test artifact serially.
+#[derive(Debug)]
 struct RustWorkspaceTestResult {
     success: bool,
     diagnostic: String,
@@ -1956,6 +1957,110 @@ mod tests {
         format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
     }
 
+    /// Republishes an internally self-consistent manifest over the staged one
+    /// and returns its recomputed bundle digest, so a test can pin exactly one
+    /// binding clause instead of tripping the manifest-digest clause first.
+    fn republish_manifest(root: &Path, manifest: &BundleManifest) -> String {
+        let path = root.join("manifest.json");
+        fs::remove_file(&path).unwrap();
+        write_create_only_json(&path, manifest, MAX_BUNDLE_MANIFEST_BYTES).unwrap();
+        bundle_digest(manifest).unwrap()
+    }
+
+    fn rebound(
+        prepared: &PreparedRustWorkspaceTest,
+        bundle_digest: String,
+    ) -> PreparedRustWorkspaceTest {
+        PreparedRustWorkspaceTest {
+            bundle_digest,
+            ..prepared.clone()
+        }
+    }
+
+    fn bundle_executable(prepared: &PreparedRustWorkspaceTest) -> PathBuf {
+        prepared.bundle_root().join("bin/test-0000")
+    }
+
+    /// Asserts the per-executable guard refuses this exact staged file with
+    /// the specific tamper error, and that the fixed launch path then refuses
+    /// the whole bundle without executing anything.
+    fn assert_refused_before_launch(
+        operation: &RustWorkspaceTest,
+        prepared: &PreparedRustWorkspaceTest,
+        run_marker: &Path,
+    ) {
+        let executable = bundle_executable(prepared);
+        let manifest = read_bundle_manifest(prepared.bundle_root()).unwrap();
+        let mut file = open_regular_nofollow(&executable).unwrap();
+        let refusal = verify_opened_executable(&executable, &mut file, &manifest.executables[0]);
+        drop(file);
+        assert!(
+            matches!(&refusal, Err(RustVerifyError::ExecutableTampered(path)) if *path == executable),
+            "expected an exact ExecutableTampered refusal, got {refusal:?}"
+        );
+        let launch = operation.execute(prepared);
+        assert!(
+            matches!(launch, Err(RustVerifyError::InvalidBundle)),
+            "expected an exact InvalidBundle refusal, got {launch:?}"
+        );
+        assert!(!run_marker.exists());
+    }
+
+    #[test]
+    fn a_bundle_bound_to_a_different_source_snapshot_is_refused_before_launch() {
+        let fixture = Fixture::new(false, false);
+        let operation = fixture.operation();
+        let prepared = operation.prepare().unwrap();
+        let mut manifest = read_bundle_manifest(prepared.bundle_root()).unwrap();
+        manifest.snapshot_digest = "0".repeat(64);
+        let digest = republish_manifest(prepared.bundle_root(), &manifest);
+        let prepared = rebound(&prepared, digest);
+
+        let launch = operation.execute(&prepared);
+        assert!(
+            matches!(launch, Err(RustVerifyError::InvalidBundle)),
+            "expected an exact InvalidBundle refusal, got {launch:?}"
+        );
+        assert!(!fixture.run_marker.exists());
+    }
+
+    #[test]
+    fn a_bundle_bound_to_a_different_toolchain_cache_is_refused_before_launch() {
+        let fixture = Fixture::new(false, false);
+        let operation = fixture.operation();
+        let prepared = operation.prepare().unwrap();
+        let mut manifest = read_bundle_manifest(prepared.bundle_root()).unwrap();
+        manifest.cache_key = "1".repeat(64);
+        assert_ne!(manifest.cache_key, operation.cache_key);
+        let digest = republish_manifest(prepared.bundle_root(), &manifest);
+        let prepared = rebound(&prepared, digest);
+
+        let launch = operation.execute(&prepared);
+        assert!(
+            matches!(launch, Err(RustVerifyError::InvalidBundle)),
+            "expected an exact InvalidBundle refusal, got {launch:?}"
+        );
+        assert!(!fixture.run_marker.exists());
+    }
+
+    #[test]
+    fn a_bundle_that_does_not_match_its_recorded_digest_is_refused_before_launch() {
+        let fixture = Fixture::new(false, false);
+        let operation = fixture.operation();
+        let prepared = operation.prepare().unwrap();
+        let manifest = read_bundle_manifest(prepared.bundle_root()).unwrap();
+        assert_eq!(manifest.snapshot_digest, prepared.snapshot_digest);
+        assert_eq!(manifest.cache_key, operation.cache_key);
+        let prepared = rebound(&prepared, "2".repeat(64));
+
+        let launch = operation.execute(&prepared);
+        assert!(
+            matches!(launch, Err(RustVerifyError::InvalidBundle)),
+            "expected an exact InvalidBundle refusal, got {launch:?}"
+        );
+        assert!(!fixture.run_marker.exists());
+    }
+
     #[test]
     fn live_source_mutation_during_build_cannot_change_selected_snapshot() {
         let fixture = Fixture::new(true, false);
@@ -2027,18 +2132,82 @@ mod tests {
     }
 
     #[test]
-    fn tampered_bundle_fails_before_launch() {
+    fn substituted_bundle_content_at_identical_size_and_mode_fails_before_launch() {
         let fixture = Fixture::new(false, false);
         let operation = fixture.operation();
         let prepared = operation.prepare().unwrap();
-        let executable = prepared.bundle_root().join("bin/test-0000");
+        let executable = bundle_executable(&prepared);
+        let before = fs::symlink_metadata(&executable).unwrap();
+        let original = fs::read(&executable).unwrap();
+        let needle = b"printf A > ";
+        let offset = original
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .unwrap();
+        let mut replacement = original.clone();
+        replacement[offset + 7] = b'B';
+        assert_ne!(replacement, original);
+
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
-        fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
-        assert!(matches!(
-            operation.execute(&prepared),
-            Err(RustVerifyError::InvalidBundle | RustVerifyError::ExecutableTampered(_))
-        ));
-        assert!(!fixture.run_marker.exists());
+        let mut file = OpenOptions::new().write(true).open(&executable).unwrap();
+        file.write_all(&replacement).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        fs::set_permissions(
+            &executable,
+            fs::Permissions::from_mode(BUNDLE_EXECUTABLE_MODE),
+        )
+        .unwrap();
+        let after = fs::symlink_metadata(&executable).unwrap();
+        assert_eq!(
+            (
+                after.len(),
+                after.permissions().mode() & 0o7777,
+                after.dev(),
+                after.ino()
+            ),
+            (
+                before.len(),
+                before.permissions().mode() & 0o7777,
+                before.dev(),
+                before.ino()
+            ),
+            "the substitution must differ only in content"
+        );
+
+        assert_refused_before_launch(&operation, &prepared, &fixture.run_marker);
+    }
+
+    #[test]
+    fn a_bundle_executable_whose_mode_changed_fails_before_launch() {
+        let fixture = Fixture::new(false, false);
+        let operation = fixture.operation();
+        let prepared = operation.prepare().unwrap();
+        let executable = bundle_executable(&prepared);
+        let before = fs::symlink_metadata(&executable).unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let after = fs::symlink_metadata(&executable).unwrap();
+        assert_eq!(
+            (after.len(), after.dev(), after.ino()),
+            (before.len(), before.dev(), before.ino()),
+            "the tamper must differ only in mode"
+        );
+        assert_ne!(after.permissions().mode() & 0o7777, BUNDLE_EXECUTABLE_MODE);
+
+        assert_refused_before_launch(&operation, &prepared, &fixture.run_marker);
+    }
+
+    #[test]
+    fn a_bundle_manifest_that_relabels_its_executable_size_fails_before_launch() {
+        let fixture = Fixture::new(false, false);
+        let operation = fixture.operation();
+        let prepared = operation.prepare().unwrap();
+        let mut manifest = read_bundle_manifest(prepared.bundle_root()).unwrap();
+        manifest.executables[0].size += 1;
+        let digest = republish_manifest(prepared.bundle_root(), &manifest);
+        let prepared = rebound(&prepared, digest);
+
+        assert_refused_before_launch(&operation, &prepared, &fixture.run_marker);
     }
 
     #[test]
