@@ -16,7 +16,7 @@ use std::{
 
 use factory_core::{
     AgentId, AgentRole, ChangeId, ProjectId, Provider, RunId, RunOutcome, RunPhase,
-    RunnerInstanceId, TaskId, paths,
+    RunnerInstanceId, TaskId, paths, runner::exec_gate_file_name,
 };
 use factoryd::{
     daemon_state::DaemonState,
@@ -229,10 +229,10 @@ struct ExecWitness {
 }
 
 impl ExecWitness {
-    fn new(marker: &Path, runtime: &Path, runner_instance_id: &str) -> Self {
+    fn new(marker: &Path, runtime: &Path, runner_instance_id: &RunnerInstanceId) -> Self {
         Self {
             marker: marker.to_path_buf(),
-            gate: runtime.join(format!("exec-gate-{runner_instance_id}.activate")),
+            gate: runtime.join(exec_gate_file_name(runner_instance_id)),
             spool: runtime.join(RUNNER_EVENT_SPOOL),
         }
     }
@@ -589,7 +589,7 @@ async fn crashed_launch_with(fixture: &Fixture, identity: RuntimeIdentity) -> Cr
     let runner = OwnedRunner::new(prepared_runner.activate().await.unwrap());
 
     CrashedLaunch {
-        witness: ExecWitness::new(&fixture.marker, &runtime, runner_instance_id.as_str()),
+        witness: ExecWitness::new(&fixture.marker, &runtime, &runner_instance_id),
         run_id,
         runner,
         runner_pid,
@@ -683,7 +683,7 @@ async fn revoke_when_runner_is_registered(state: &DaemonState, fixture: &Fixture
                 let witness = ExecWitness::new(
                     &marker,
                     Path::new(&run.runner_runtime),
-                    run.runner_instance_id.as_str(),
+                    &run.runner_instance_id,
                 );
                 let exec_released =
                     runner_listening && wait_for(EXEC_RELEASE_LIMIT, || witness.released());

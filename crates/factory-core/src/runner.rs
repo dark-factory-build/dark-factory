@@ -1,5 +1,7 @@
 //! Stable, provider-blind control and event wire for one runner process.
 
+use std::{ffi::OsString, path::Path};
+
 use serde::{Deserialize, Serialize};
 
 use crate::{RunId, RunnerInstanceId};
@@ -15,6 +17,39 @@ pub const MAX_STARTUP_STDIN_BYTES: usize = 1024 * 1024;
 /// Private startup-input file whose advisory lock proves whether an outer
 /// runner gate created before durable PID registration can still exist.
 pub const RUNNER_STARTUP_LEASE_FILE: &str = "runner-startup.lease";
+/// The gate's mode selector. Only the gate's own parser and the fixtures that
+/// stand in for it spell this; construction goes through [`exec_gate_argv`].
+pub const EXEC_GATE_FLAG: &str = "--exec-gate";
+/// The spawning parent's PID, taken before the spawn so the gate can refuse to
+/// exec for anything but the parent that prepared it.
+pub const EXEC_GATE_EXPECTED_PARENT_PID_FLAG: &str = "--expected-parent-pid";
+/// The complete exec-gate prefix, in the one order the gate accepts.
+///
+/// `exec_gate` in `factory-runner` reads these positionally, so the order is
+/// as much of the contract as the spellings are. Building the whole prefix
+/// here keeps the daemon, the runner's nested provider gate, and the gate's
+/// own parser from drifting apart in either respect. The trailing `--` ends
+/// the gate's own options; the caller appends the program and its arguments.
+/// `expected_parent` is the caller's own `getpid`, which is always positive.
+#[must_use]
+pub fn exec_gate_argv(activation: &Path, expected_parent: u32) -> [OsString; 5] {
+    [
+        OsString::from(EXEC_GATE_FLAG),
+        activation.as_os_str().to_owned(),
+        OsString::from(EXEC_GATE_EXPECTED_PARENT_PID_FLAG),
+        OsString::from(expected_parent.to_string()),
+        OsString::from("--"),
+    ]
+}
+
+/// Private per-runner activation file inside the run's runtime directory.
+/// Creating it releases the provider exec gate that runner prepared, so the
+/// runner and anything observing the launch must derive the same name.
+#[must_use]
+pub fn exec_gate_file_name(runner_instance_id: &RunnerInstanceId) -> String {
+    format!("exec-gate-{}.activate", runner_instance_id.as_str())
+}
+
 /// One authenticated, newline-delimited request sent to a runner.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RequestEnvelope {

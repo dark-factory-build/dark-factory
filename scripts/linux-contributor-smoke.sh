@@ -328,6 +328,10 @@ snapshot_runner_processes() {
     done >"$process_file"
 }
 
+# Identify the runner by the argv the daemon gave it. This flag is
+# `factory_core::runner::RUNNER_RUN_ID_FLAG`; a shell script cannot import the
+# constant, so renaming it there must be mirrored here or this smoke stops
+# finding any runner at all.
 runner_record() {
     checked_run_id=$1
     snapshot_runner_processes

@@ -4,6 +4,8 @@ use std::{
     process::{Command, Stdio},
 };
 
+use factory_core::runner::{EXEC_GATE_EXPECTED_PARENT_PID_FLAG, EXEC_GATE_FLAG};
+
 #[path = "support/kernel_process.rs"]
 mod support;
 
@@ -20,9 +22,9 @@ fn expected_parent_mismatch_exits_without_activation_or_exec() {
     let wrong_parent = actual_parent.checked_add(1).unwrap();
 
     let mut child = Command::new(runner())
-        .arg("--exec-gate")
+        .arg(EXEC_GATE_FLAG)
         .arg(&activation)
-        .arg("--expected-parent-pid")
+        .arg(EXEC_GATE_EXPECTED_PARENT_PID_FLAG)
         .arg(wrong_parent.to_string())
         .arg("--")
         .arg("/bin/sh")
@@ -55,10 +57,12 @@ fn parent_exit_before_activation_cannot_leave_an_executable_orphan() {
     let child_pid_file = directory.path().join("gate-pid");
     let parent = Command::new("/bin/sh")
         .arg("-c")
-        .arg(
-            r#""$RUNNER" --exec-gate "$ACTIVATION" --expected-parent-pid "$$" -- /usr/bin/touch "$MARKER" &
-printf '%s' "$!" > "$CHILD_PID_FILE""#,
-        )
+        // Interpolated, not literal: a renamed flag must break this shell
+        // invocation rather than leave it matching an old spelling.
+        .arg(format!(
+            r#""$RUNNER" {EXEC_GATE_FLAG} "$ACTIVATION" {EXEC_GATE_EXPECTED_PARENT_PID_FLAG} "$$" -- /usr/bin/touch "$MARKER" &
+printf '%s' "$!" > "$CHILD_PID_FILE""#
+        ))
         .env("RUNNER", runner())
         .env("ACTIVATION", &activation)
         .env("MARKER", &marker)
@@ -97,9 +101,9 @@ fn activation_execs_target_with_the_gate_pid() {
     let marker = directory.path().join("executed-pid");
     let expected_parent = rustix::process::getpid().as_raw_nonzero().get();
     let mut child = Command::new(runner())
-        .arg("--exec-gate")
+        .arg(EXEC_GATE_FLAG)
         .arg(&activation)
-        .arg("--expected-parent-pid")
+        .arg(EXEC_GATE_EXPECTED_PARENT_PID_FLAG)
         .arg(expected_parent.to_string())
         .arg("--")
         .arg("/bin/sh")

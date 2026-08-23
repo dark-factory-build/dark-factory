@@ -20,7 +20,7 @@ use factory_core::{
     runner::{
         MAX_RUNNER_ERROR_BYTES, MAX_RUNNER_FRAME_BYTES, MAX_STARTUP_STDIN_BYTES,
         RUNNER_PROTOCOL_VERSION, RequestEnvelope, RunnerErrorCode, RunnerEvent,
-        RunnerEventEnvelope, RunnerFrame, RunnerRequest,
+        RunnerEventEnvelope, RunnerFrame, RunnerRequest, exec_gate_argv, exec_gate_file_name,
     },
 };
 use rustix::process::{Pid, Signal, getpgid, kill_process_group};
@@ -1133,12 +1133,9 @@ async fn supervise_piped(
         }
     };
     let mut command = Command::new(&config.exec_gate_program);
+    let expected_parent = rustix::process::getpid().as_raw_nonzero().get();
     command
-        .arg("--exec-gate")
-        .arg(&gate_path)
-        .arg("--expected-parent-pid")
-        .arg(rustix::process::getpid().as_raw_nonzero().get().to_string())
-        .arg("--")
+        .args(exec_gate_argv(&gate_path, expected_parent.unsigned_abs()))
         .arg(&config.program)
         .args(&config.arguments)
         .current_dir(&config.cwd)
@@ -1333,10 +1330,9 @@ fn process_identity(child_pid: u32, pid: Pid) -> Result<ProcessIdentity, Error> 
 }
 
 fn exec_gate_path(config: &Config) -> PathBuf {
-    config.runtime_dir.join(format!(
-        "exec-gate-{}.activate",
-        config.runner_instance_id.as_str()
-    ))
+    config
+        .runtime_dir
+        .join(exec_gate_file_name(&config.runner_instance_id))
 }
 
 fn ensure_exec_gate_absent(path: &Path) -> Result<(), Error> {

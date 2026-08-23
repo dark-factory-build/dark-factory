@@ -4076,6 +4076,7 @@ impl<Id: Eq + std::hash::Hash + Clone> DeleteGate<Id> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use factory_core::runner::{EXEC_GATE_EXPECTED_PARENT_PID_FLAG, EXEC_GATE_FLAG};
     use rustix::process::test_kill_process;
     use std::{
         os::unix::{
@@ -4148,24 +4149,28 @@ mod tests {
 
     fn outer_gate_probe(root: &Path) -> PathBuf {
         let runner = root.join("runner-probe");
+        // Interpolated, not literal: a renamed flag must break this probe
+        // rather than leave it matching a spelling the gate no longer sends.
         executable(
             &runner,
-            r#"#!/bin/sh
+            &format!(
+                r#"#!/bin/sh
 set -eu
-[ "${1:-}" = "--exec-gate" ] || exit 64
+[ "${{1:-}}" = "{EXEC_GATE_FLAG}" ] || exit 64
 gate_path=$2
 shift 2
-[ "${1:-}" = "--expected-parent-pid" ] || exit 64
+[ "${{1:-}}" = "{EXEC_GATE_EXPECTED_PARENT_PID_FLAG}" ] || exit 64
 expected_parent=$2
 shift 2
-[ "${1:-}" = "--" ] || exit 64
+[ "${{1:-}}" = "--" ] || exit 64
 [ "$PPID" = "$expected_parent" ] || exit 0
 # Keep the probe single-process: a polling child would inherit the lease.
 while [ ! -e "$gate_path" ]; do
     [ "$PPID" = "$expected_parent" ] || exit 0
 done
 exit 125
-"#,
+"#
+            ),
         );
         runner
     }

@@ -3,7 +3,10 @@ use std::{
     time::Duration,
 };
 
-use factory_core::{RunId, RunnerInstanceId, runner::MAX_STARTUP_STDIN_BYTES};
+use factory_core::{
+    RunId, RunnerInstanceId,
+    runner::{EXEC_GATE_EXPECTED_PARENT_PID_FLAG, EXEC_GATE_FLAG, MAX_STARTUP_STDIN_BYTES},
+};
 use factory_runner::{Config, Error};
 
 #[tokio::main(flavor = "current_thread")]
@@ -26,7 +29,7 @@ async fn main() {
 }
 
 fn exec_gate_requested(mut arguments: impl Iterator<Item = String>) -> bool {
-    matches!(arguments.next().as_deref(), Some("--exec-gate"))
+    arguments.next().as_deref() == Some(EXEC_GATE_FLAG)
 }
 
 fn exec_gate(mut arguments: impl Iterator<Item = String>) -> ! {
@@ -34,7 +37,7 @@ fn exec_gate(mut arguments: impl Iterator<Item = String>) -> ! {
         eprintln!("factory-runner exec gate: missing activation path");
         process::exit(125);
     };
-    if arguments.next().as_deref() != Some("--expected-parent-pid") {
+    if arguments.next().as_deref() != Some(EXEC_GATE_EXPECTED_PARENT_PID_FLAG) {
         eprintln!("factory-runner exec gate: missing expected parent PID");
         process::exit(125);
     }
@@ -202,7 +205,7 @@ fn required_value<T>(value: Option<T>, name: &str) -> Result<T, Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{exec_gate_requested, version_requested};
+    use super::{EXEC_GATE_FLAG, exec_gate_requested, version_requested};
 
     #[test]
     fn version_is_a_standalone_read_only_command() {
@@ -216,7 +219,7 @@ mod tests {
 
     #[test]
     fn exec_gate_is_a_distinct_internal_mode() {
-        assert!(exec_gate_requested(["--exec-gate".to_owned()].into_iter()));
+        assert!(exec_gate_requested([EXEC_GATE_FLAG.to_owned()].into_iter()));
         assert!(!exec_gate_requested(["--version".to_owned()].into_iter()));
     }
 }

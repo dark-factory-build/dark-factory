@@ -12,7 +12,7 @@ use std::{
 
 use factory_core::{
     RunId, RunnerInstanceId,
-    runner::{MAX_STARTUP_STDIN_BYTES, RUNNER_STARTUP_LEASE_FILE},
+    runner::{MAX_STARTUP_STDIN_BYTES, RUNNER_STARTUP_LEASE_FILE, exec_gate_argv},
 };
 use rustix::fs::FlockOperation;
 use tokio::process::{Child, Command};
@@ -357,7 +357,7 @@ async fn prepare_runner_with_environment(
     let setup_metadata = startup_input.metadata().map_err(Error::StartupInput)?;
     let cwd = spec.cwd;
     let source_root = spec.source_root;
-    let expected_parent = rustix::process::getpid();
+    let expected_parent = rustix::process::getpid().as_raw_nonzero().get();
     let mut command = Command::new(&runner);
     // The runner is its own process-group leader: an attempt must outlive
     // whatever started the daemon. Without this, launchd's default
@@ -369,11 +369,10 @@ async fn prepare_runner_with_environment(
     // update" process fixture).
     command.process_group(0);
     command
-        .arg("--exec-gate")
-        .arg(&activation_path)
-        .arg("--expected-parent-pid")
-        .arg(expected_parent.as_raw_nonzero().get().to_string())
-        .arg("--")
+        .args(exec_gate_argv(
+            &activation_path,
+            expected_parent.unsigned_abs(),
+        ))
         .arg(&runner)
         .arg("--run-id")
         .arg(spec.run_id.as_str())
@@ -426,15 +425,14 @@ pub async fn prepare_effect(spec: EffectLaunchSpec) -> Result<PreparedEffectProc
     let gate = checked_executable(&spec.gate_program, "effect gate")?;
     let program = checked_executable(&spec.program, "effect")?;
     ensure_exec_gate_absent(&spec.activation_path)?;
-    let expected_parent = rustix::process::getpid();
+    let expected_parent = rustix::process::getpid().as_raw_nonzero().get();
     let mut command = Command::new(&gate);
     command.process_group(0);
     command
-        .arg("--exec-gate")
-        .arg(&spec.activation_path)
-        .arg("--expected-parent-pid")
-        .arg(expected_parent.as_raw_nonzero().get().to_string())
-        .arg("--")
+        .args(exec_gate_argv(
+            &spec.activation_path,
+            expected_parent.unsigned_abs(),
+        ))
         .arg(program)
         .args(spec.arguments)
         .current_dir(spec.cwd)
@@ -726,7 +724,10 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use factory_core::{RunId, RunnerInstanceId, runner::MAX_STARTUP_STDIN_BYTES};
+    use factory_core::{
+        RunId, RunnerInstanceId,
+        runner::{EXEC_GATE_EXPECTED_PARENT_PID_FLAG, EXEC_GATE_FLAG, MAX_STARTUP_STDIN_BYTES},
+    };
     use rustix::fs::FlockOperation;
     use rustix::process::{Pid, test_kill_process};
     use tokio::process::Command;
@@ -783,17 +784,20 @@ mod tests {
     }
 
     fn scripts(directory: &Path) {
+        // Interpolated, not literal: a renamed flag must break this probe
+        // rather than leave it matching a spelling the gate no longer sends.
         executable(
             &directory.join("runner-probe"),
-            r#"#!/bin/sh
+            &format!(
+                r#"#!/bin/sh
 set -eu
-if [ "${1:-}" = "--exec-gate" ]; then
+if [ "${{1:-}}" = "{EXEC_GATE_FLAG}" ]; then
     gate_path=$2
     shift 2
-    [ "${1:-}" = "--expected-parent-pid" ] || exit 125
+    [ "${{1:-}}" = "{EXEC_GATE_EXPECTED_PARENT_PID_FLAG}" ] || exit 125
     expected_parent=$2
     shift 2
-    [ "${1:-}" = "--" ] || exit 125
+    [ "${{1:-}}" = "--" ] || exit 125
     shift
     [ "$PPID" = "$expected_parent" ] || exit 0
     printf '%s\n' "$$" > "$TMPDIR/outer-gate-pid"
@@ -816,7 +820,8 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 exec "$@"
-"#,
+"#
+            ),
         );
         executable(
             &directory.join("provider-probe"),
