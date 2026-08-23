@@ -594,6 +594,7 @@ impl CreatePullRequest {
         valid_sha(&self.base_sha)?;
         valid_text(&self.title, 1, 256, false)?;
         valid_text(&self.body, 0, 30_000, true)?;
+        free_of_operation_marker(&self.body)?;
         if self.head == self.base || self.head_sha == self.base_sha {
             return Err(OperationError::InvalidInput);
         }
@@ -606,7 +607,7 @@ impl CreatePullRequest {
     }
 
     fn marker(&self) -> String {
-        format!("<!-- dark-factory-operation:{} -->", self.operation_id)
+        format!("{OPERATION_MARKER_PREFIX}{} -->", self.operation_id)
     }
 
     fn marked_body(&self) -> String {
@@ -623,7 +624,8 @@ impl SubmitPullRequestReview {
         valid_operation_id(&self.operation_id)?;
         valid_exact_integer(self.pull_number)?;
         valid_sha(&self.head_sha)?;
-        valid_text(&self.body, 1, 16_000, true)
+        valid_text(&self.body, 1, 16_000, true)?;
+        free_of_operation_marker(&self.body)
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -632,7 +634,7 @@ impl SubmitPullRequestReview {
     }
 
     fn marker(&self) -> String {
-        format!("<!-- dark-factory-operation:{} -->", self.operation_id)
+        format!("{OPERATION_MARKER_PREFIX}{} -->", self.operation_id)
     }
 
     fn marked_body(&self) -> String {
@@ -646,6 +648,7 @@ impl PublishCommit {
         valid_ref(&self.branch)?;
         valid_sha(&self.expected_head_sha)?;
         valid_text(&self.message, 1, 4_096, true)?;
+        free_of_operation_marker(&self.message)?;
         if !(1..=MAX_COMMIT_FILES).contains(&self.changes.len()) {
             return Err(OperationError::InvalidInput);
         }
@@ -683,7 +686,7 @@ impl PublishCommit {
     }
 
     fn trailer(&self) -> String {
-        format!("Dark-Factory-Operation: {}", self.operation_id)
+        format!("{OPERATION_TRAILER_PREFIX} {}", self.operation_id)
     }
 
     /// The trailer makes a landed commit self-identifying, so a retry after an
@@ -725,6 +728,22 @@ fn valid_operation_id(value: &str) -> Result<(), OperationError> {
             .all(|(index, byte)| [8, 13, 18, 23].contains(&index) || byte.is_ascii_hexdigit())
         && value == value.to_ascii_lowercase();
     valid.then_some(()).ok_or(OperationError::InvalidInput)
+}
+
+/// A reconciler identifies its own work by a marker the caller does not get to
+/// write: `publish_commit` puts `Dark-Factory-Operation: <id>` in the commit
+/// message, and the pull-request operations put an HTML comment in the body.
+/// Both are matched with `contains`, so caller text carrying either prefix
+/// could name a *different* operation's id and make that operation's
+/// reconciliation adopt work it never did. Refuse the prefix at the door
+/// rather than trying to out-parse it afterwards.
+const OPERATION_TRAILER_PREFIX: &str = "Dark-Factory-Operation:";
+const OPERATION_MARKER_PREFIX: &str = "<!-- dark-factory-operation:";
+
+fn free_of_operation_marker(value: &str) -> Result<(), OperationError> {
+    let forged =
+        value.contains(OPERATION_TRAILER_PREFIX) || value.contains(OPERATION_MARKER_PREFIX);
+    (!forged).then_some(()).ok_or(OperationError::InvalidInput)
 }
 
 /// A path inside the repository, as a commit may address it.
@@ -1200,7 +1219,14 @@ impl Authority {
             token.as_str(),
         )
         .await?;
-        if !head.message.contains(&request.trailer()) {
+        // The trailer alone is not proof. It travels with the message through a
+        // rebase or a cherry-pick, and `validate` is the only thing stopping a
+        // caller writing another operation's trailer into its own commit, so
+        // the tip must also still be a direct child of the stated head. That is
+        // what makes the reported `parent_sha` true rather than assumed.
+        if !head.message.contains(&request.trailer())
+            || !matches!(head.parents.as_slice(), [parent] if parent.sha == request.expected_head_sha)
+        {
             // The branch moved for some other reason; this operation did not
             // land and must not claim it did.
             return Ok(None);
@@ -1600,6 +1626,14 @@ struct GitObjectId {
 struct GitCommit {
     message: String,
     tree: GitObjectId,
+    parents: Vec<GitParent>,
+}
+
+/// A parent entry carries no `type`, so it cannot reuse `GitObject`.
+#[cfg(target_arch = "wasm32")]
+#[derive(Deserialize)]
+struct GitParent {
+    sha: String,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -2113,6 +2147,30 @@ mod tests {
             content_base64: Some(general_purpose::STANDARD.encode(b"hello")),
         };
         assert!(base(vec![file("README.md")]).validate().is_ok());
+        // A caller must not be able to write the reconciler's own vocabulary.
+        // `reconcile_commit` matches the trailer with `contains`, so a message
+        // carrying a *different* operation's trailer would make that operation
+        // reconcile onto this commit and report a publication it never made.
+        let forged = |message: &str| PublishCommit {
+            message: message.into(),
+            ..base(vec![file("README.md")])
+        };
+        assert!(
+            forged("Add notes\n\nDark-Factory-Operation: 22222222-3333-4444-5555-666666666666")
+                .validate()
+                .is_err()
+        );
+        assert!(
+            forged("Add notes\n\n<!-- dark-factory-operation:22222222 -->")
+                .validate()
+                .is_err()
+        );
+        // The words themselves are fine; only the marker prefixes are not.
+        assert!(
+            forged("Describe the dark factory operation")
+                .validate()
+                .is_ok()
+        );
         // A deletion carries no content.
         assert!(
             base(vec![FileChange {
