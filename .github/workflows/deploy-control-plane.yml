@@ -206,6 +206,13 @@ jobs:
       # returns 401 on the missing header before any network call — so it is
       # only a smoke check here. Proving authenticated MCP end to end needs an
       # Access service token; see the deployment notes.
+      #
+      # Readiness must report `..._operator_and_headless`. The service-token
+      # binding is optional at runtime and inherited across versions, so a
+      # rotation that drops it promotes cleanly, passes the secret-inheritance
+      # proof above — which cannot enumerate an optional binding — and lands a
+      # version where every headless call 401s. Asserting the headless variant
+      # here is what makes that failure roll back instead of ship.
       - name: Verify the live deployment
         if: ${{ inputs.promote }}
         run: |
@@ -218,7 +225,7 @@ jobs:
             echo "healthz=${health} readyz=${body}"
             if [ "${health}" = "200" ] \
               && printf '%s' "${body}" | grep -Fq '"status":"ready"' \
-              && printf '%s' "${body}" | grep -Fq '"maintainer_operations":"mcp_pr_create_review_checks"'; then
+              && printf '%s' "${body}" | grep -Fq '"maintainer_operations":"mcp_six_tools_operator_and_headless"'; then
               ready=1
               break
             fi

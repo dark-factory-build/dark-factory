@@ -144,6 +144,27 @@ fn mcp_surface_is_repository_bound_and_typed() {
     assert!(access.contains("claims.issuer"));
 }
 
+/// The deployment gate rolls back unless the live `/readyz` body carries the
+/// exact label the Worker emits. They live in two files, so a rename that
+/// touches only one strands production on a rollback loop — or, worse, passes
+/// against a label that no longer means what the gate thinks it does.
+#[test]
+fn the_deployment_gate_asserts_the_readiness_label_the_worker_emits() {
+    let lib = project_file("src/lib.rs");
+    let workflow =
+        std::fs::read_to_string("../.github/workflows/deploy-control-plane.yml").unwrap();
+
+    let headless = r#""maintainer_operations":"mcp_six_tools_operator_and_headless""#;
+    assert!(lib.contains(headless));
+    assert!(lib.contains(r#""maintainer_operations":"mcp_six_tools_operator_only""#));
+    // The gate must require the headless variant specifically: the binding
+    // behind it is optional and inherited across versions, so this is the only
+    // check that catches a deployment which silently lost it.
+    assert!(workflow.contains(headless));
+    assert!(!workflow.contains("mcp_six_tools_operator_only"));
+    assert!(!workflow.contains("mcp_pr_create_review_checks"));
+}
+
 /// The merge and publish paths are `wasm32`-only, so a host test cannot drive
 /// them. What it can do is hold the contract they were got wrong on: GitHub's
 /// refusal statuses must reach a determinate answer rather than being folded

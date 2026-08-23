@@ -271,8 +271,8 @@ async fn ready(State(state): State<BrokerState>) -> Response {
         (Deployment::Cloudflare, Some(maintainer)) if maintainer.ready().await.is_ok() => {
             // Report the operations surface ready only when its own live
             // dependency answers. Gating on configuration alone let a Worker
-            // that could not reach Cloudflare Access at all still advertise
-            // `mcp_pr_create_review_checks` while every call returned 401.
+            // that could not reach Cloudflare Access at all still advertise a
+            // working surface while every call returned 401.
             if let Some(mcp) = state.mcp.as_ref() {
                 if mcp.ready().await.is_err() {
                     return json_response(
@@ -280,9 +280,17 @@ async fn ready(State(state): State<BrokerState>) -> Response {
                         r#"{"status":"unavailable","maintainer_webhook":"inactive","maintainer_operations":"inactive","product_webhook":"inactive","operator_api":"inactive"}"#,
                     );
                 }
+                // Name which principals can actually reach the surface. The
+                // headless binding is optional and inherited across versions,
+                // so a deployment that drops it must be visible here rather
+                // than only in the 401 every service-token call then gets.
                 json_response(
                     StatusCode::OK,
-                    r#"{"status":"ready","maintainer_webhook":"signed_ping_with_app_verification","maintainer_operations":"mcp_pr_create_review_checks","product_webhook":"inactive","operator_api":"inactive"}"#,
+                    if mcp.headless() {
+                        r#"{"status":"ready","maintainer_webhook":"signed_ping_with_app_verification","maintainer_operations":"mcp_six_tools_operator_and_headless","product_webhook":"inactive","operator_api":"inactive"}"#
+                    } else {
+                        r#"{"status":"ready","maintainer_webhook":"signed_ping_with_app_verification","maintainer_operations":"mcp_six_tools_operator_only","product_webhook":"inactive","operator_api":"inactive"}"#
+                    },
                 )
             } else {
                 json_response(

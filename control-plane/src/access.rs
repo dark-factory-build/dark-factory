@@ -148,6 +148,14 @@ impl AccessAuthority {
         Ok(())
     }
 
+    /// Whether a headless principal is configured at all. Readiness reports it
+    /// because the binding is optional and inherited across versions: a
+    /// deployment that silently loses it still answers `/readyz`, and every
+    /// service-token call then 401s with nothing to point at.
+    pub(crate) const fn headless(&self) -> bool {
+        self.service_token_id.is_some()
+    }
+
     fn validate_service_token(&self, claims: &Claims) -> Result<(), Error> {
         let expected = self
             .service_token_id
@@ -166,7 +174,7 @@ impl AccessAuthority {
     ///
     /// Readiness previously reported the operations surface ready whenever it
     /// was merely configured, so a Worker that could not reach Cloudflare
-    /// Access at all still advertised `mcp_pr_create_review_checks` while every
+    /// Access at all still advertised a working operations surface while every
     /// authenticated call returned 401. Fetch the signing keys and require one
     /// usable RS256 key, which is the same document `authorize` depends on.
     #[cfg(target_arch = "wasm32")]

@@ -46,6 +46,10 @@ impl McpState {
     pub(crate) async fn ready(&self) -> Result<(), ()> {
         self.access.ready().await.map_err(|_| ())
     }
+
+    pub(crate) const fn headless(&self) -> bool {
+        self.access.headless()
+    }
 }
 
 #[worker::send]
