@@ -614,7 +614,9 @@ impl Authority {
     async fn jwt(&self) -> Result<Credential, Error> {
         let now = (js_sys::Date::now() / 1_000.0).floor() as i64;
         let unsigned = jwt_unsigned(self.app_id, now);
-        let signature = sign_rs256(&self.private_key.0, unsigned.as_bytes()).await?;
+        let signature = sign_rs256(&self.private_key.0, unsigned.as_bytes())
+            .await
+            .inspect_err(|_| worker::console_error!("app jwt signing failed"))?;
         Credential::new(format!(
             "{unsigned}.{}",
             general_purpose::URL_SAFE_NO_PAD.encode(signature)
@@ -661,6 +663,11 @@ impl Authority {
                     },
                 }]
         {
+            worker::console_error!(
+                "installation token contract mismatch: {} permission(s), {} repository(ies)",
+                response.permissions.len(),
+                response.repositories.len()
+            );
             return Err(OperationError::Unavailable);
         }
         Credential::new(response.token).map_err(Into::into)
@@ -1201,11 +1208,19 @@ async fn github_json_request<T: serde::de::DeserializeOwned, B: Serialize>(
         .with_headers(headers)
         .with_body(body.map(Into::into));
     let request = Request::new_with_init(url, &init).map_err(|_| Error::Unavailable)?;
-    let mut response = Fetch::Request(request)
-        .send()
-        .await
-        .map_err(|_| Error::Unavailable)?;
+    // Diagnosis only: never log credentials, headers, or bodies.
+    let mut response = match Fetch::Request(request).send().await {
+        Ok(response) => response,
+        Err(error) => {
+            worker::console_error!("github request failed: {url}: {error:?}");
+            return Err(Error::Unavailable);
+        }
+    };
     if !(200..300).contains(&response.status_code()) {
+        worker::console_error!(
+            "github rejected {url} with status {}",
+            response.status_code()
+        );
         return Err(Error::Unavailable);
     }
     let mut stream = response.stream().map_err(|_| Error::Unavailable)?;
