@@ -13,6 +13,7 @@ repository_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 runner="$repository_root/scripts/macos-launchd-release-proof.sh"
 test_source="$repository_root/crates/factoryctl/tests/launchd_release.rs"
 gate_source="$repository_root/crates/factoryctl/tests/launchd_gate.rs"
+gate_support="$repository_root/crates/factoryctl/tests/support/launchd_gate.rs"
 workflow="$repository_root/.github/workflows/ci.yml"
 gate="$repository_root/scripts/local-ci.sh"
 
@@ -66,12 +67,12 @@ test "$(grep -c 'fixture_cargo disposable_launchd_jobs_are_resumed' "$runner")" 
 grep -Fq 'ledger=${DARK_FACTORY_LAUNCHD_GATE_LEDGER:-' "$runner" \
     || fail 'the ledger does not outlive one run'
 
-# The script must never delete the gate-owned root itself.
-if printf '%s\n' "$runner_code" | grep -Eq 'rm -rf.*\$root|rm -rf -- "\$root"'; then
-    fail 'the coordinator deletes the gate-owned root instead of resuming it'
-fi
-grep -Fq 'test ! -e "$root" ||' "$runner" \
-    || fail 'the coordinator does not verify the gate removed its root'
+# The coordinator may only remove a root the gate never claimed. A claimed
+# root that survives is a containment failure and must be reported, not tidied.
+grep -Fq 'test -e "$root/.dark-factory-launchd-gate"' "$runner" \
+    || fail 'the coordinator does not distinguish a claimed root from an undeclared one'
+grep -Fq 'launchd gate did not remove the private root it claimed' "$runner" \
+    || fail 'a surviving claimed root is not reported as a containment failure'
 grep -Fq 'DARK_FACTORY_LAUNCHD_EVIDENCE' "$test_source" \
     || fail 'the fixture no longer records phase evidence'
 
@@ -110,6 +111,11 @@ if grep -Fq 'invocation.finalize()' "$test_source"; then
     fail 'the fixture added a second teardown path that only success exercises'
 fi
 
+# Containment machinery must not ship in the operator CLI.
+grep -Fq 'launchd_gate' "$repository_root/crates/factoryctl/src/lib.rs" \
+    && fail 'test-only launchd containment is exported from the factoryctl library'
+test -f "$gate_support" || fail 'the shared containment support module is missing'
+
 # The portable containment proofs must keep covering the dangerous cases.
 for proof in \
     a_declared_job_is_resumable_before_it_is_ever_bootstrapped \
@@ -117,6 +123,14 @@ for proof in \
     a_lost_bootout_response_does_not_send_a_second_teardown \
     a_sigkilled_coordinator_leaves_exactly_one_resumable_invocation \
     a_receipt_cannot_aim_cleanup_at_a_directory_the_gate_never_claimed \
+    a_live_owner_is_never_finalized_by_another_coordinator \
+    a_second_declaration_cannot_overwrite_an_existing_receipt \
+    a_root_already_claimed_cannot_be_claimed_again \
+    a_replaced_private_root_is_never_deleted \
+    a_receipt_renamed_away_from_its_label_is_not_finalized \
+    a_still_running_recorded_process_retains_the_root \
+    a_wedged_launchctl_times_out_instead_of_hanging \
+    relative_paths_are_refused_rather_than_silently_resolved \
     the_installed_label_is_refused_at_declaration_and_at_finalization
 do
     grep -Fq "fn $proof(" "$gate_source" || fail "containment proof $proof was removed"

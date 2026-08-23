@@ -8,20 +8,32 @@
 //! finishes the same operation, so response loss cannot create a second
 //! bootstrap or a second cleanup authority.
 //!
-//! This is a release and managed-service fixture. It is deliberately not an
-//! attempt `KernelResource`: no Dark Factory attempt creates a launchd job,
-//! and ordinary run terminalization never waits for one.
+//! Liveness is an advisory lock held open by the owning process. The kernel
+//! releases it on death — including `SIGKILL` — so a resuming coordinator can
+//! distinguish "the owner died holding this" from "another coordinator is
+//! using this right now" without consulting a PID that may have been recycled.
+//!
+//! This is a release and managed-service fixture, not production code: it
+//! lives in test support so nothing ships it in the operator CLI. It is
+//! deliberately not an attempt `KernelResource` either — no Dark Factory
+//! attempt creates a launchd job, and run terminalization never waits on one.
 //!
 //! Every proof here is exact. Absence is only launchctl's documented
 //! not-found classification for one selected service; nothing scans global
 //! processes, guesses success from an operational failure, or touches a label
 //! this invocation did not create.
 
+// Two test targets share this module and each uses a subset of it.
+#![allow(dead_code)]
+
 use std::{
     ffi::OsStr,
-    fs::{self, File},
+    fs::{self, File, OpenOptions},
     io::{self, Write},
-    os::unix::fs::{MetadataExt, PermissionsExt},
+    os::unix::{
+        fs::{MetadataExt, PermissionsExt},
+        process::CommandExt,
+    },
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     sync::{
@@ -32,6 +44,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+use rustix::{
+    fs::{FlockOperation, flock},
+    io::Errno,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -43,9 +59,31 @@ pub const FIXTURE_LABEL_PREFIX: &str = "com.dark-factory.fixture.";
 /// and never removed.
 pub const INSTALLED_LABEL: &str = "com.dark-factory.factoryd";
 
-const COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
-const ABSENCE_TIMEOUT: Duration = Duration::from_secs(30);
 const ABSENCE_POLL: Duration = Duration::from_millis(50);
+/// Polling launchctl costs two process spawns per attempt, so the interval
+/// grows towards this ceiling instead of hammering a service that is taking
+/// its time to unload.
+const ABSENCE_POLL_MAX: Duration = Duration::from_millis(500);
+
+/// How long each stage may take before it is a visible failure. Tests that
+/// deliberately exercise a stuck service shorten these so they do not spend
+/// the real budget waiting.
+#[derive(Clone, Copy, Debug)]
+pub struct Deadlines {
+    pub command: Duration,
+    pub absence: Duration,
+    pub process: Duration,
+}
+
+impl Default for Deadlines {
+    fn default() -> Self {
+        Self {
+            command: Duration::from_secs(15),
+            absence: Duration::from_secs(30),
+            process: Duration::from_secs(10),
+        }
+    }
+}
 
 /// launchctl's documented status and text for a service that is not loaded.
 /// Status alone is not absence: a future launchctl could reuse the number, so
@@ -53,11 +91,12 @@ const ABSENCE_POLL: Duration = Duration::from_millis(50);
 const NOT_FOUND_STATUS: i32 = 113;
 const NOT_FOUND_TEXT: &str = "113: Could not find specified service";
 
-/// Written inside a private root when it is declared, and required before that
+/// Written inside a private root when it is claimed, and required before that
 /// root is ever deleted. The receipt's device and inode alone are not enough:
 /// a corrupt or hand-written receipt could name any directory and carry that
-/// directory's real identity. Only a root this gate actually created holds a
-/// marker naming the same label, so nothing else can be removed.
+/// directory's real identity. Only a root this gate created holds a marker
+/// naming the same label, so nothing else can be removed. It is created
+/// exclusively, so a second invocation cannot claim a root already in use.
 const ROOT_MARKER: &str = ".dark-factory-launchd-gate";
 
 #[derive(Debug, thiserror::Error)]
@@ -94,6 +133,7 @@ pub enum ServiceState {
 #[derive(Clone, Debug)]
 pub struct Launchctl {
     binary: PathBuf,
+    deadlines: Deadlines,
 }
 
 impl Launchctl {
@@ -101,12 +141,7 @@ impl Launchctl {
     /// executable, so a fixture cannot inherit one from `PATH`.
     pub fn new(binary: impl Into<PathBuf>) -> GateResult<Self> {
         let binary = binary.into();
-        if !binary.is_absolute() {
-            return Err(GateError::refused(format!(
-                "launchctl path must be absolute: {}",
-                binary.display()
-            )));
-        }
+        absolute(&binary, "launchctl")?;
         let metadata = fs::metadata(&binary).map_err(|error| {
             GateError::refused(format!("launchctl {}: {error}", binary.display()))
         })?;
@@ -116,7 +151,18 @@ impl Launchctl {
                 binary.display()
             )));
         }
-        Ok(Self { binary })
+        Ok(Self {
+            binary,
+            deadlines: Deadlines::default(),
+        })
+    }
+
+    /// Shortens this launchctl's deadlines. Only fixtures that deliberately
+    /// wait on a stuck service need it.
+    #[must_use]
+    pub fn with_deadlines(mut self, deadlines: Deadlines) -> Self {
+        self.deadlines = deadlines;
+        self
     }
 
     /// Classifies one exact service. `Absent` requires both the documented
@@ -148,13 +194,15 @@ impl Launchctl {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
     }
 
+    /// Requests teardown of one exact service. The returned error is advisory:
+    /// launchd reports routine teardown races (`3: No such process`,
+    /// `36: Operation now in progress`) as failures even though the job is on
+    /// its way out. Only the absence proof that follows decides.
     fn bootout(&self, service: &str) -> Result<(), String> {
         let output = self.run(&["bootout".as_ref(), service.as_ref()])?;
         if output.status.success() {
             return Ok(());
         }
-        // A concurrent teardown may have removed the job first. That is not a
-        // failure by itself; the absence proof that follows decides.
         Err(format!(
             "launchctl bootout {service} failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
@@ -166,42 +214,54 @@ impl Launchctl {
     fn run(&self, args: &[&OsStr]) -> Result<Output, String> {
         let child = Command::new(&self.binary)
             .args(args)
+            // Its own process group, so the watchdog can reach any child it
+            // spawned. Killing only the direct child would leave a grandchild
+            // holding the pipes open and `wait_with_output` blocked well past
+            // the deadline the watchdog exists to enforce.
+            .process_group(0)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| format!("could not run {}: {error}", self.binary.display()))?;
-        // The watchdog only fires while this thread is still inside
-        // `wait_with_output`, so the child is unreaped and its PID cannot yet
-        // have been recycled onto an unrelated process.
         let pid = child.id();
-        let finished = Arc::new(AtomicBool::new(false));
+        let command_timeout = self.deadlines.command;
+        // `reaped` is set only after `wait_with_output` returns, so the
+        // watchdog can never signal a PID this process has already reaped and
+        // which the kernel could therefore have handed to someone else.
+        let reaped = Arc::new(AtomicBool::new(false));
         let watchdog = {
-            let finished = Arc::clone(&finished);
+            let reaped = Arc::clone(&reaped);
             thread::spawn(move || {
-                let deadline = Instant::now() + COMMAND_TIMEOUT;
+                let deadline = Instant::now() + command_timeout;
                 while Instant::now() < deadline {
-                    if finished.load(Ordering::Relaxed) {
+                    if reaped.load(Ordering::SeqCst) {
                         return false;
                     }
                     thread::sleep(Duration::from_millis(20));
                 }
-                if finished.load(Ordering::Relaxed) {
+                // Re-check under the same ordering immediately before
+                // signalling; a reap that beats this load leaves the child
+                // unsignalled and the command simply succeeds.
+                if reaped.load(Ordering::SeqCst) {
                     return false;
                 }
-                kill(pid);
+                kill_group(pid);
                 true
             })
         };
         let output = child
             .wait_with_output()
             .map_err(|error| format!("could not wait for launchctl: {error}"));
-        finished.store(true, Ordering::Relaxed);
-        let timed_out = watchdog.join().unwrap_or(false);
+        reaped.store(true, Ordering::SeqCst);
+        let timed_out = watchdog.join().unwrap_or(true);
         let output = output?;
-        if timed_out {
+        // A process that exited on its own produced a real answer, however
+        // long the machine took to schedule it. Only one this watchdog
+        // actually killed — and so left signalled — is a timeout.
+        if timed_out && output.status.code().is_none() {
             return Err(format!(
-                "{} {} exceeded {COMMAND_TIMEOUT:?}",
+                "{} {} exceeded {command_timeout:?}",
                 self.binary.display(),
                 args.join(OsStr::new(" ")).to_string_lossy()
             ));
@@ -210,11 +270,30 @@ impl Launchctl {
     }
 }
 
-fn kill(pid: u32) {
+/// Kills the command's whole process group. The child is spawned as its own
+/// group leader, so this can never reach this process or its siblings.
+fn kill_group(pid: u32) {
     if let Ok(pid) = i32::try_from(pid)
         && let Some(pid) = rustix::process::Pid::from_raw(pid)
     {
-        let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+    }
+}
+
+/// Observation of one exact PID. Absence is only `ESRCH`; a permission error
+/// means the process exists, and anything else is an operational failure.
+fn process_present(pid: u32) -> Result<bool, String> {
+    let Ok(raw) = i32::try_from(pid) else {
+        return Err(format!("implausible pid {pid}"));
+    };
+    let Some(handle) = rustix::process::Pid::from_raw(raw) else {
+        return Err(format!("implausible pid {pid}"));
+    };
+    match rustix::process::test_kill_process(handle) {
+        Ok(()) => Ok(true),
+        Err(Errno::PERM) => Ok(true),
+        Err(Errno::SRCH) => Ok(false),
+        Err(error) => Err(format!("could not observe pid {pid}: {error}")),
     }
 }
 
@@ -232,20 +311,24 @@ pub struct GateReceipt {
     /// replaced root rather than deleting whatever now occupies the path.
     pub root_device: u64,
     pub root_inode: u64,
-    /// The executable the job was first staged to run. Recorded for
-    /// diagnosis; the fixture legitimately activates other versions later, so
-    /// it is not a cleanup precondition.
+    /// The executable the job was first staged to run. Recorded so a retained
+    /// root can be traced back to what it was running.
     pub staged_digest: String,
-    /// The first PID launchd reported, when it reported one. Diagnostic only:
-    /// a PID observed minutes earlier can be recycled, so the authoritative
-    /// proof is the launchctl absence of the exact label.
-    pub first_pid: Option<u32>,
+    /// Every PID launchd reported for this job, in order. Finalization waits
+    /// for each to be gone after proving the service absent, so a passing run
+    /// leaves no test-owned daemon behind.
+    pub observed_pids: Vec<u32>,
 }
 
 impl GateReceipt {
     #[must_use]
     pub fn service(&self) -> String {
         format!("{}/{}", self.domain, self.label)
+    }
+
+    #[must_use]
+    pub fn first_pid(&self) -> Option<u32> {
+        self.observed_pids.first().copied()
     }
 }
 
@@ -260,32 +343,28 @@ pub struct GateRequest<'a> {
 }
 
 /// One declared disposable launchd job, owned by the coordinator that holds
-/// it. Dropping this value deliberately does nothing: the receipt on disk is
-/// the authority, and only [`Self::finalize`] or [`resume`] may remove it.
+/// it. Dropping this value deliberately performs no teardown: the receipt on
+/// disk is the authority and [`resume`] is the only finalizer. Dropping does
+/// release the ownership lock, which is what lets the next coordinator tell
+/// this invocation is no longer live.
 #[derive(Debug)]
 pub struct LaunchdGateInvocation {
     receipt: GateReceipt,
     receipt_path: PathBuf,
-    launchctl: Launchctl,
+    lock: File,
 }
 
 impl LaunchdGateInvocation {
     /// Declares one disposable job and persists its receipt. Returns only
     /// after the receipt is durable, so the caller may bootstrap next and a
     /// crash between the two leaves a resumable record rather than an orphan.
-    pub fn open(ledger: &Path, launchctl: Launchctl, request: GateRequest<'_>) -> GateResult<Self> {
+    pub fn open(
+        ledger: &Path,
+        launchctl: &Launchctl,
+        request: GateRequest<'_>,
+    ) -> GateResult<Self> {
         let label = request.label;
-        if label == INSTALLED_LABEL || !label.starts_with(FIXTURE_LABEL_PREFIX) {
-            return Err(GateError::refused(format!(
-                "launchd gate label must start with {FIXTURE_LABEL_PREFIX}: {label}"
-            )));
-        }
-        let suffix = &label[FIXTURE_LABEL_PREFIX.len()..];
-        if suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_alphanumeric()) {
-            return Err(GateError::refused(format!(
-                "launchd gate label suffix must be a non-empty alphanumeric token: {label}"
-            )));
-        }
+        validate_label(label)?;
         if !is_domain_target(request.domain) {
             return Err(GateError::refused(format!(
                 "launchd gate domain must be a domain target such as gui/501: {}",
@@ -293,8 +372,19 @@ impl LaunchdGateInvocation {
             )));
         }
 
-        let owner_uid = rustix::process::getuid().as_raw();
-        let root = private_directory(request.runtime_root, owner_uid)?;
+        // Every path is absolute. A relative root would resolve against
+        // whichever directory a later coordinator happened to run from, and
+        // its absence there would look like an already-clean root.
+        absolute(ledger, "launchd gate ledger")?;
+        absolute(request.runtime_root, "launchd gate private root")?;
+        absolute(request.plist, "launchd gate plist")?;
+        absolute(request.staged_executable, "launchd gate staged executable")?;
+        if ledger.starts_with(request.runtime_root) {
+            return Err(GateError::refused(format!(
+                "launchd gate ledger {} must not live inside the root it records",
+                ledger.display()
+            )));
+        }
         if !request.plist.starts_with(request.runtime_root) {
             return Err(GateError::refused(format!(
                 "launchd gate plist {} must live inside {}",
@@ -302,6 +392,9 @@ impl LaunchdGateInvocation {
                 request.runtime_root.display()
             )));
         }
+
+        let owner_uid = rustix::process::getuid().as_raw();
+        let (root_device, root_inode) = private_directory(request.runtime_root, owner_uid)?;
         let staged_digest = digest(request.staged_executable)?;
 
         let receipt = GateReceipt {
@@ -310,11 +403,22 @@ impl LaunchdGateInvocation {
             plist: request.plist.to_owned(),
             runtime_root: request.runtime_root.to_owned(),
             owner_uid,
-            root_device: root.0,
-            root_inode: root.1,
+            root_device,
+            root_inode,
             staged_digest,
-            first_pid: None,
+            observed_pids: Vec::new(),
         };
+
+        create_private_dir(ledger)?;
+        let receipt_path = receipt_path(ledger, label);
+        // Take ownership before looking at the world, so two coordinators
+        // racing on one label cannot both proceed.
+        let lock = claim_lock(&lock_path(ledger, label))?;
+        if receipt_path.exists() {
+            return Err(GateError::refused(format!(
+                "launchd gate ledger already records {label}; finalize it before reusing the label"
+            )));
+        }
 
         // Refuse a label that is somehow already loaded rather than adopting
         // and later booting out a job this invocation did not create.
@@ -329,21 +433,24 @@ impl LaunchdGateInvocation {
             Err(reason) => return Err(GateError::refused(reason)),
         }
 
-        let receipt_path = receipt_path(ledger, label);
-        create_private_dir(ledger)?;
-        // The marker precedes the receipt: a receipt is only ever published
-        // for a root this gate has already claimed.
-        fs::write(request.runtime_root.join(ROOT_MARKER), label.as_bytes()).map_err(|error| {
-            GateError::refused(format!(
-                "could not claim launchd gate private root {}: {error}",
-                request.runtime_root.display()
-            ))
-        })?;
+        // The marker is exclusive and precedes the receipt: a receipt is only
+        // ever published for a root this invocation alone has claimed.
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(request.runtime_root.join(ROOT_MARKER))
+            .and_then(|mut file| file.write_all(label.as_bytes()))
+            .map_err(|error| {
+                GateError::refused(format!(
+                    "could not claim launchd gate private root {}: {error}",
+                    request.runtime_root.display()
+                ))
+            })?;
         write_receipt(&receipt_path, &receipt)?;
         Ok(Self {
             receipt,
             receipt_path,
-            launchctl,
+            lock,
         })
     }
 
@@ -357,27 +464,37 @@ impl LaunchdGateInvocation {
         self.receipt.service()
     }
 
-    /// Records the first PID launchd reported. Later reports are ignored so
-    /// the receipt keeps describing one invocation.
-    pub fn record_first_pid(&mut self, pid: u32) -> GateResult<()> {
-        if self.receipt.first_pid.is_some() {
+    /// Records a PID launchd reported for this job. Repeats are ignored so the
+    /// receipt stays a set of distinct observations.
+    pub fn record_pid(&mut self, pid: u32) -> GateResult<()> {
+        if self.receipt.observed_pids.contains(&pid) {
             return Ok(());
         }
-        self.receipt.first_pid = Some(pid);
+        self.receipt.observed_pids.push(pid);
         write_receipt(&self.receipt_path, &self.receipt)
     }
 
-    /// Boots out exactly this label, proves it absent, revalidates the private
-    /// root, removes it, and only then drops the receipt.
-    pub fn finalize(self) -> GateResult<()> {
-        finalize_receipt(&self.launchctl, &self.receipt, &self.receipt_path)
+    /// Releases ownership without finalizing, exactly as a killed coordinator
+    /// would. The receipt stays for [`resume`].
+    pub fn release(self) {
+        drop(self.lock);
     }
 }
 
-/// Finalizes every receipt left in `ledger` by an earlier coordinator. It is
-/// idempotent: a receipt whose job is already absent and whose root is already
-/// gone is simply retired.
-pub fn resume(ledger: &Path, launchctl: &Launchctl) -> GateResult<usize> {
+/// What one resume pass did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ResumeReport {
+    /// Receipts whose job is proven absent and whose root is gone.
+    pub finalized: usize,
+    /// Receipts skipped because a live coordinator still owns them.
+    pub live: usize,
+}
+
+/// Finalizes every receipt in `ledger` whose owner is gone. A receipt still
+/// held by a live coordinator is left alone, so concurrent runs cannot tear
+/// down each other's jobs. It is idempotent: a receipt whose job is already
+/// absent and whose root is already gone is simply retired.
+pub fn resume(ledger: &Path, launchctl: &Launchctl) -> GateResult<ResumeReport> {
     let mut paths = match fs::read_dir(ledger) {
         Ok(entries) => entries
             .filter_map(|entry| {
@@ -385,7 +502,9 @@ pub fn resume(ledger: &Path, launchctl: &Launchctl) -> GateResult<usize> {
                 (path.extension() == Some(OsStr::new("json"))).then_some(path)
             })
             .collect::<Vec<_>>(),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(ResumeReport::default());
+        }
         Err(error) => {
             return Err(GateError::refused(format!(
                 "could not read launchd gate ledger {}: {error}",
@@ -395,23 +514,58 @@ pub fn resume(ledger: &Path, launchctl: &Launchctl) -> GateResult<usize> {
     };
     paths.sort();
 
-    let mut finalized = 0;
+    let mut report = ResumeReport::default();
     let mut retained = Vec::new();
     for path in paths {
-        match read_receipt(&path) {
-            Ok(receipt) => match finalize_receipt(launchctl, &receipt, &path) {
-                Ok(()) => finalized += 1,
-                Err(error) => retained.push(error.to_string()),
-            },
+        let receipt = match read_receipt(&path) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                retained.push(error.to_string());
+                continue;
+            }
+        };
+        // The filename is part of the identity: a receipt moved or renamed no
+        // longer describes the label whose lock and marker guard it.
+        if path.file_stem() != Some(OsStr::new(receipt.label.as_str())) {
+            retained.push(format!(
+                "{} does not match the label it records ({})",
+                path.display(),
+                receipt.label
+            ));
+            continue;
+        }
+        let lock = match try_claim_lock(&lock_path(ledger, &receipt.label)) {
+            Ok(Some(lock)) => lock,
+            Ok(None) => {
+                report.live += 1;
+                continue;
+            }
+            Err(error) => {
+                retained.push(error.to_string());
+                continue;
+            }
+        };
+        match finalize_receipt(launchctl, &receipt, &path) {
+            Ok(()) => {
+                report.finalized += 1;
+                drop(lock);
+                let _ = fs::remove_file(lock_path(ledger, &receipt.label));
+            }
             Err(error) => retained.push(error.to_string()),
         }
     }
     if retained.is_empty() {
-        return Ok(finalized);
+        return Ok(report);
     }
+    // The aggregate names the ledger; each retained root appears in its own
+    // rendered reason.
     Err(GateError::Retained {
         root: ledger.to_owned(),
-        reason: retained.join("; "),
+        reason: format!(
+            "{} receipt(s) not finalized: {}",
+            retained.len(),
+            retained.join("; ")
+        ),
     })
 }
 
@@ -420,7 +574,7 @@ fn finalize_receipt(
     receipt: &GateReceipt,
     receipt_path: &Path,
 ) -> GateResult<()> {
-    if receipt.label == INSTALLED_LABEL || !receipt.label.starts_with(FIXTURE_LABEL_PREFIX) {
+    if validate_label(&receipt.label).is_err() {
         return Err(GateError::Retained {
             root: receipt.runtime_root.clone(),
             reason: format!("refusing to finalize foreign label {}", receipt.label),
@@ -432,13 +586,23 @@ fn finalize_receipt(
         reason,
     };
 
-    // Boot out only when the job is actually loaded, so a resumed receipt
-    // does not send a second teardown for an operation already completed.
-    match launchctl.state(&service).map_err(retain)? {
-        ServiceState::Present => launchctl.bootout(&service).map_err(retain)?,
-        ServiceState::Absent => {}
-    }
-    wait_absent(launchctl, &service).map_err(retain)?;
+    // Boot out only when the job is loaded, so a resumed receipt does not send
+    // a second teardown for an operation already completed. A bootout error is
+    // advisory: the absence proof decides, and only if that also fails does the
+    // bootout diagnosis reach the operator.
+    let bootout_error = match launchctl.state(&service).map_err(retain)? {
+        ServiceState::Present => launchctl.bootout(&service).err(),
+        ServiceState::Absent => None,
+    };
+    wait_absent(launchctl, &service).map_err(|reason| {
+        retain(match bootout_error {
+            Some(bootout) => format!("{reason} ({bootout})"),
+            None => reason,
+        })
+    })?;
+    // launchd reaps a service's process before reporting it absent, so this
+    // should already hold; it is what proves no test-owned daemon survives.
+    wait_processes_absent(&receipt.observed_pids, launchctl.deadlines.process).map_err(retain)?;
 
     match fs::symlink_metadata(&receipt.runtime_root) {
         Ok(metadata) => {
@@ -472,19 +636,91 @@ fn finalize_receipt(
 }
 
 fn wait_absent(launchctl: &Launchctl, service: &str) -> Result<(), String> {
-    let deadline = Instant::now() + ABSENCE_TIMEOUT;
+    let timeout = launchctl.deadlines.absence;
+    let deadline = Instant::now() + timeout;
+    let mut poll = ABSENCE_POLL;
     loop {
         match launchctl.state(service)? {
             ServiceState::Absent => return Ok(()),
             ServiceState::Present => {}
         }
         if Instant::now() >= deadline {
-            return Err(format!(
-                "{service} was still loaded after {ABSENCE_TIMEOUT:?}"
-            ));
+            return Err(format!("{service} was still loaded after {timeout:?}"));
         }
-        thread::sleep(ABSENCE_POLL);
+        thread::sleep(poll);
+        poll = (poll * 2).min(ABSENCE_POLL_MAX);
     }
+}
+
+/// Waits for every recorded PID to be gone. A PID recorded before a crash can
+/// in principle be recycled onto an unrelated process by the time a later
+/// coordinator resumes; that can only hold the root back with a visible
+/// failure, never turn a live job into a false success.
+fn wait_processes_absent(pids: &[u32], timeout: Duration) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    for pid in pids {
+        loop {
+            if !process_present(*pid)? {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err(format!("pid {pid} was still running after {timeout:?}"));
+            }
+            thread::sleep(ABSENCE_POLL);
+        }
+    }
+    Ok(())
+}
+
+/// Takes the advisory ownership lock for one label, refusing if a live
+/// coordinator already holds it.
+fn claim_lock(path: &Path) -> GateResult<File> {
+    match try_claim_lock(path) {
+        Ok(Some(lock)) => Ok(lock),
+        Ok(None) => Err(GateError::refused(format!(
+            "another live coordinator owns {}",
+            path.display()
+        ))),
+        Err(error) => Err(error),
+    }
+}
+
+fn try_claim_lock(path: &Path) -> GateResult<Option<File>> {
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|error| {
+            GateError::refused(format!(
+                "could not open launchd gate lock {}: {error}",
+                path.display()
+            ))
+        })?;
+    match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => Ok(Some(file)),
+        Err(Errno::WOULDBLOCK) => Ok(None),
+        Err(error) => Err(GateError::refused(format!(
+            "could not lock {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+fn validate_label(label: &str) -> GateResult<()> {
+    if label == INSTALLED_LABEL || !label.starts_with(FIXTURE_LABEL_PREFIX) {
+        return Err(GateError::refused(format!(
+            "launchd gate label must start with {FIXTURE_LABEL_PREFIX}: {label}"
+        )));
+    }
+    let suffix = &label[FIXTURE_LABEL_PREFIX.len()..];
+    if suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(GateError::refused(format!(
+            "launchd gate label suffix must be a non-empty alphanumeric token: {label}"
+        )));
+    }
+    Ok(())
 }
 
 /// Accepts only the launchd domain targets a per-user fixture can own:
@@ -503,8 +739,22 @@ fn is_domain_target(domain: &str) -> bool {
     }
 }
 
+fn absolute(path: &Path, what: &str) -> GateResult<()> {
+    if path.is_absolute() {
+        return Ok(());
+    }
+    Err(GateError::refused(format!(
+        "{what} must be an absolute path: {}",
+        path.display()
+    )))
+}
+
 fn receipt_path(ledger: &Path, label: &str) -> PathBuf {
     ledger.join(format!("{label}.json"))
+}
+
+fn lock_path(ledger: &Path, label: &str) -> PathBuf {
+    ledger.join(format!("{label}.lock"))
 }
 
 fn private_directory(path: &Path, owner_uid: u32) -> GateResult<(u64, u64)> {

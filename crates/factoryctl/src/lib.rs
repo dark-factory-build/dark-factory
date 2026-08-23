@@ -17,7 +17,6 @@ use factory_core::{
 pub mod capacity;
 pub mod install;
 pub mod launchd;
-pub mod launchd_gate;
 pub mod managed_update;
 pub mod probes;
 pub mod runtime;

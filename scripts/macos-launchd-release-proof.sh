@@ -155,11 +155,13 @@ snapshot_live_install() {
     launchctl_print_state "$live_service" "$destination.launchctl" || live_status=$?
     case "$live_status" in
         0)
+            # The pid is deliberately excluded: the operator's own daemon may
+            # legitimately restart mid-fixture. Remaining loaded from the same
+            # plist and program is what proves this fixture never touched it.
             {
                 echo loaded
                 sed -n -e '/^[[:space:]]*path = /p' \
-                    -e '/^[[:space:]]*program = /p' \
-                    -e '/^[[:space:]]*pid = /p' "$destination.launchctl"
+                    -e '/^[[:space:]]*program = /p' "$destination.launchctl"
             } >"$destination.job"
             ;;
         3) echo absent >"$destination.job" ;;
@@ -223,7 +225,7 @@ if test "$test_status" -eq 0; then
         }
     done
 fi
-# Keep the daemon logs of a failed run; the root itself is not ours to spare.
+# Keep the daemon logs of a failed run; the root itself is the gate's to remove.
 if test "$test_status" -ne 0 && test -d "$root/factory-home/logs"; then
     cp -R "$root/factory-home/logs" "$observations/factory-logs" 2>/dev/null || true
     echo "preserved failed-run logs: $observations/factory-logs" >&2
@@ -232,10 +234,18 @@ fi
 # The one finalization authority. Success and hard death converge here.
 resume_status=0
 fixture_cargo disposable_launchd_jobs_are_resumed || resume_status=$?
-test ! -e "$root" || {
-    echo "launchd gate did not remove its private root: $root" >&2
-    resume_status=1
-}
+# A root the gate claimed carries its marker. One without a marker was never
+# declared — the fixture died before that point — so it is ours to remove and
+# is not evidence of a containment failure.
+if test -e "$root"; then
+    if test -e "$root/.dark-factory-launchd-gate"; then
+        echo "launchd gate did not remove the private root it claimed: $root" >&2
+        resume_status=1
+    else
+        rm -rf -- "$root"
+        echo 'the fixture failed before declaring its job; no launchd job was loaded' >&2
+    fi
+fi
 
 snapshot_live_install "$observations/live-after" || resume_status=1
 cmp -s "$observations/live-before.job" "$observations/live-after.job" || {

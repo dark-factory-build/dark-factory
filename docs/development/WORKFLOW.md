@@ -88,9 +88,34 @@ The scratch-only macOS smoke covers these cuts through external causal proofs;
 it makes no claim about launchd or the operator's installed job.
 
 The separate opt-in `./scripts/macos-launchd-release-proof.sh` uses a randomized
-scratch-only launchd label to prove release replacement and rollback. Its
-external verifier removes that job and refuses success if the installed label
-or plist changed. The fixture job is not an attempt `KernelResource`.
+scratch-only launchd label to prove release replacement and rollback. The
+fixture job is not an attempt `KernelResource`; the installed
+`com.dark-factory.factoryd` label and plist are observed before and after and
+must be unchanged.
+
+That job is contained by a durable receipt, not by the script. Before
+`launchctl bootstrap`, the fixture records the domain, label, private root
+identity, and staged digest under a ledger that outlives one run
+(`DARK_FACTORY_LAUNCHD_GATE_LEDGER`, `$TMPDIR/dark-factory-launchd-gate` by
+default). The coordinator resumes that ledger before and after the fixture, so
+a run killed at any point — target, fixture, or coordinator — is finalized by
+the next one rather than by a trap or a background verifier that dies with its
+parent. Ownership is an advisory lock the kernel releases on death, so a
+resume never tears down a job another live coordinator is using.
+
+Finalization boots out the exact label, proves absence only from launchctl's
+documented not-found classification, waits for every recorded PID, revalidates
+the root's device, inode, owner, and claim marker, and only then removes it.
+Anything unproven keeps the root and fails visibly; recover by fixing the
+cause and re-running, which resumes the same receipt. A retained receipt makes
+the next run fail at startup on purpose: it means a real launchd job is still
+loaded.
+
+Containment itself is proved on every platform, including Linux, by
+`cargo test -p factoryctl --test launchd_gate` against a fake `launchctl` —
+including a coordinator that is `SIGKILL`ed after bootstrapping. Hosted macOS
+runners get a fresh `TMPDIR` per job, so cross-run resume is exercised by those
+tests and by local dogfooding rather than by CI.
 
 ## Review discipline
 
