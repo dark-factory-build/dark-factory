@@ -30,19 +30,36 @@ concurrency:
 jobs:
   deploy:
     # `environment` scopes the credential to jobs that name it, so an ordinary
-    # pull-request job cannot read it. That is necessary and NOT sufficient:
+    # pull-request job cannot read it. That is necessary and NOT sufficient: a
+    # dispatch runs the workflow file from the SELECTED REF, so anyone who can
+    # push a branch and dispatch it controls this file.
     #
-    #   * a dispatch runs the workflow file from the SELECTED REF, so anyone who
-    #     can push a branch and dispatch it controls this file;
-    #   * `dark-factory-mac` is persistent and shared with CI, so a job that
-    #     ran earlier can leave state behind (#54).
-    #
-    # Both are closed by configuration this file cannot assert: on the
+    # That is closed by configuration this file cannot assert: on the
     # `production` environment set REQUIRED REVIEWERS and restrict DEPLOYMENT
-    # BRANCHES to `main`. Without those two settings the credential is only as
-    # protected as write access to the repository.
+    # BRANCHES to `main`. Both are in place. Without them the credential is
+    # only as protected as write access to the repository.
+    #
+    # The second hazard this comment used to name — `dark-factory-mac` being
+    # persistent and shared with CI (#54) — no longer applies to this job,
+    # because it no longer runs there. See below.
     environment: production
-    runs-on: dark-factory-mac
+    # Hosted and ephemeral, not `dark-factory-mac`. Two reasons, and the
+    # security one is the important half.
+    #
+    #   * The step below requires Node 22. `dark-factory-mac` resolves `node`
+    #     to Homebrew's v20, so this job could never reach the upload step —
+    #     the first dispatch of this workflow failed there. The
+    #     `control-plane` CI job has always run the very same assertion and
+    #     the very same `local-ci.sh` on `ubuntu-24.04`, where Node 22 is
+    #     preinstalled, so this is the proven environment for this gate.
+    #   * `dark-factory-mac` is persistent and shared with CI (#54), which the
+    #     comment below names as a hazard this file cannot close. Running the
+    #     one job that handles the deployment credential on an ephemeral
+    #     hosted runner removes that exposure rather than mitigating it.
+    #
+    # Nothing in this job is macOS-specific: it is rustup, worker-build, npm,
+    # and wrangler.
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
       # Wrangler reads CLOUDFLARE_ACCOUNT_ID; ACCOUNT_ID alone would leave it
