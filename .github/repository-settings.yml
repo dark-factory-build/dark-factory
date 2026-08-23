@@ -5,7 +5,7 @@
 # `required` context is the CI workflow's aggregate job: it is green only
 # when `checks` (hosted macOS), `linux` (hosted Ubuntu), and the separately
 # deployed `control-plane` gate are green.
-repository: baziyer/dark-factory
+repository: dark-factory-build/dark-factory
 default_branch: main
 rulesets:
   - name: main-protect

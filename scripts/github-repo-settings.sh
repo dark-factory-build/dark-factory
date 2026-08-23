@@ -62,6 +62,18 @@ apply_ruleset() {
     fi
 }
 
+# The condition names `refs/heads/main` rather than `~DEFAULT_BRANCH`, and that
+# is load-bearing: GitHub refuses a merge queue rule whose ref condition is not
+# an exact name ("Wildcard ref names are not supported when merge queue is
+# enabled"), and it counts `~DEFAULT_BRANCH` as non-exact. On the real ruleset
+# that refusal arrives as `Invalid rule 'merge_queue': ` with an empty reason,
+# so the cause is only visible if you happen to try a wildcard and read the
+# better error. Renaming the default branch now needs this line changed too.
+#
+# A merge queue also requires an ORGANIZATION-owned repository. The same rule
+# with the same parameters is rejected on a user-owned repository, again with
+# an empty reason. That is why this repository moved to `dark-factory-build`.
+#
 # `strict_required_status_checks_policy` is deliberately FALSE, and the merge
 # queue is why. Strict demands every open pull request be rebased onto main and
 # fully re-tested after any merge, so with more than one branch in flight each
@@ -76,7 +88,7 @@ apply_ruleset main-protect '{
   "target": "branch",
   "enforcement": "active",
   "bypass_actors": [],
-  "conditions": { "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] } },
+  "conditions": { "ref_name": { "include": ["refs/heads/main"], "exclude": [] } },
   "rules": [
     { "type": "deletion" },
     { "type": "non_fast_forward" },

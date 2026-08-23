@@ -7,7 +7,7 @@ manifest="$repository_root/.github/repository-settings.yml"
 workflow="$repository_root/.github/workflows/ci.yml"
 publisher="$repository_root/scripts/github-repo-settings.sh"
 
-grep -Fq 'repository: baziyer/dark-factory' "$manifest"
+grep -Fq 'repository: dark-factory-build/dark-factory' "$manifest"
 grep -Fq 'context: required' "$manifest"
 grep -Fq 'integration_id: 15368' "$manifest"
 grep -Fq '  required:' "$workflow"

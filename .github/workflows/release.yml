@@ -6,7 +6,7 @@ name: Release
 # default-branch dispatch safely resumes an existing immutable tag after a
 # workflow defect is fixed.
 # `factoryctl update` reads that manifest at
-# https://github.com/baziyer/dark-factory/releases/latest/download/latest.json;
+# https://github.com/dark-factory-build/dark-factory/releases/latest/download/latest.json;
 # see docs/development/WORKFLOW.md, "Release and update".
 on:
   push:

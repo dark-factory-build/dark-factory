@@ -422,7 +422,7 @@ mod tests {
                 [
                     Some(private_key),
                     Some("maintainer-operations-v1".into()),
-                    Some("baziyer/dark-factory".into()),
+                    Some("dark-factory-build/dark-factory".into()),
                     Some("109233175".into()),
                     Some("1335380107".into()),
                     Some(hex::encode(sha2::Sha256::digest(b"operator@example.com"))),

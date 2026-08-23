@@ -2122,10 +2122,10 @@ mod tests {
 
     #[test]
     fn exact_repository_path_and_operation_installation_are_required() {
-        let repository = RepositoryName::new("baziyer/dark-factory".into()).unwrap();
+        let repository = RepositoryName::new("dark-factory-build/dark-factory".into()).unwrap();
         assert_eq!(
             repository.installation_url(),
-            "https://api.github.com/repos/baziyer/dark-factory/installation"
+            "https://api.github.com/repos/dark-factory-build/dark-factory/installation"
         );
         assert!(RepositoryName::new("baziyer/../dark-factory".into()).is_err());
         assert!(RepositoryName::new("baziyer/dark factory".into()).is_err());
@@ -2303,7 +2303,7 @@ mod tests {
     fn only_app_level_endpoints_accept_an_app_jwt() {
         assert!(app_jwt_endpoint("https://api.github.com/app"));
         assert!(app_jwt_endpoint(
-            "https://api.github.com/repos/baziyer/dark-factory/installation"
+            "https://api.github.com/repos/dark-factory-build/dark-factory/installation"
         ));
         assert!(app_jwt_endpoint(
             "https://api.github.com/app/installations/155853844/access_tokens"
@@ -2315,21 +2315,21 @@ mod tests {
             "https://api.github.com/repositories/1335380107"
         ));
         assert!(!app_jwt_endpoint(
-            "https://api.github.com/repos/baziyer/dark-factory"
+            "https://api.github.com/repos/dark-factory-build/dark-factory"
         ));
         assert!(!app_jwt_endpoint(
-            "https://api.github.com/repos/baziyer/dark-factory/pulls"
+            "https://api.github.com/repos/dark-factory-build/dark-factory/pulls"
         ));
         // A query or fragment must not be able to supply the suffix.
         assert!(!app_jwt_endpoint(
-            "https://api.github.com/repos/baziyer/dark-factory/pulls?x=/installation"
+            "https://api.github.com/repos/dark-factory-build/dark-factory/pulls?x=/installation"
         ));
         assert!(!app_jwt_endpoint(
-            "https://api.github.com/repos/baziyer/dark-factory/pulls#/installation"
+            "https://api.github.com/repos/dark-factory-build/dark-factory/pulls#/installation"
         ));
         // Dot segments are collapsed by the URL parser after this check runs.
         assert!(!app_jwt_endpoint(
-            "https://api.github.com/app/installations/../../repos/baziyer/dark-factory/pulls"
+            "https://api.github.com/app/installations/../../repos/dark-factory-build/dark-factory/pulls"
         ));
         // Userinfo must not be mistaken for the host.
         assert!(!app_jwt_endpoint("https://api.github.com@evil.example/app"));
@@ -2343,7 +2343,7 @@ mod tests {
                 4_673_420,
                 key.clone(),
                 PERMISSION_REVISION.into(),
-                "baziyer/dark-factory".into(),
+                "dark-factory-build/dark-factory".into(),
                 "109233175".into(),
                 "1335380107".into(),
             )
@@ -2354,7 +2354,7 @@ mod tests {
                 4_673_420,
                 key,
                 "broader-v2".into(),
-                "baziyer/dark-factory/extra".into(),
+                "dark-factory-build/dark-factory/extra".into(),
                 "109233175".into(),
                 "1335380107".into(),
             )
@@ -2428,7 +2428,9 @@ mod tests {
 
         let recovered = PullRequestReview {
             id: 1,
-            html_url: "https://github.com/baziyer/dark-factory/pull/297#pullrequestreview-1".into(),
+            html_url:
+                "https://github.com/dark-factory-build/dark-factory/pull/297#pullrequestreview-1"
+                    .into(),
             body: Some(review.marked_body()),
             commit_id: review.head_sha.clone(),
             state: "CHANGES_REQUESTED".into(),

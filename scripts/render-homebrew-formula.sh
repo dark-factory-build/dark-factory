@@ -5,7 +5,7 @@ set -eu
 
 tag="${1:-}"
 checksums="${2:-}"
-repository="${3:-baziyer/dark-factory}"
+repository="${3:-dark-factory-build/dark-factory}"
 if [ -z "$tag" ] || [ -z "$checksums" ] || [ "$#" -gt 3 ]; then
     echo "usage: scripts/render-homebrew-formula.sh <tag> <SHA256SUMS> [<owner/repo>]" >&2
     exit 1

@@ -158,6 +158,6 @@ Read-only context unless a task explicitly asks you to edit them:
   for the shortest path and [docs/providers.md](docs/providers.md) for the
   provider contract.
 - Known problems and their smallest fix: [GitHub issues labelled
-  `known-issue`](https://github.com/baziyer/dark-factory/issues?q=is%3Aissue+is%3Aopen+label%3Aknown-issue).
+  `known-issue`](https://github.com/dark-factory-build/dark-factory/issues?q=is%3Aissue+is%3Aopen+label%3Aknown-issue).
 - Day-to-day workflow and the implemented release/update process:
   [docs/development/WORKFLOW.md](docs/development/WORKFLOW.md).

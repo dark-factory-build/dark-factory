@@ -29,14 +29,14 @@ DF_SUMMARY_REF=refs/pull/208/merge \
 DF_SUMMARY_SHA=0123456789abcdef0123456789abcdef01234567 \
 DF_SUMMARY_RESULT=success \
 DF_SUMMARY_TARGET='v0.4.0 — GitHub-connected factory' \
-DF_SUMMARY_RUN_URL=https://github.com/baziyer/dark-factory/actions/runs/123 \
-DF_SUMMARY_TARGET_URL=https://github.com/baziyer/dark-factory/milestone/2 \
+DF_SUMMARY_RUN_URL=https://github.com/dark-factory-build/dark-factory/actions/runs/123 \
+DF_SUMMARY_TARGET_URL=https://github.com/dark-factory-build/dark-factory/milestone/2 \
     "$summary_script"
 assert_contains '<code>CI</code>' "$summary"
 assert_contains '<code>refs/pull/208/merge</code>' "$summary"
 assert_contains '<code>0123456789abcdef0123456789abcdef01234567</code>' "$summary"
-assert_contains 'href="https://github.com/baziyer/dark-factory/actions/runs/123"' "$summary"
-assert_contains 'href="https://github.com/baziyer/dark-factory/milestone/2"' "$summary"
+assert_contains 'href="https://github.com/dark-factory-build/dark-factory/actions/runs/123"' "$summary"
+assert_contains 'href="https://github.com/dark-factory-build/dark-factory/milestone/2"' "$summary"
 
 : >"$summary"
 GITHUB_STEP_SUMMARY=$summary \
@@ -67,8 +67,8 @@ DF_SUMMARY_REF="$long_value" \
 DF_SUMMARY_SHA=0123456789abcdef0123456789abcdef01234567 \
 DF_SUMMARY_RESULT=success \
 DF_SUMMARY_TARGET="$long_value" \
-DF_SUMMARY_RUN_URL=https://github.com/baziyer/dark-factory/actions/runs/123 \
-DF_SUMMARY_TARGET_URL=https://github.com/baziyer/dark-factory/milestone/2 \
+DF_SUMMARY_RUN_URL=https://github.com/dark-factory-build/dark-factory/actions/runs/123 \
+DF_SUMMARY_TARGET_URL=https://github.com/dark-factory-build/dark-factory/milestone/2 \
     "$summary_script"
 bytes=$(wc -c <"$summary" | tr -d ' ')
 [ "$bytes" -le 4096 ] || {
