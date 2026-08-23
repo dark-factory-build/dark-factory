@@ -92,11 +92,13 @@ const NOT_FOUND_STATUS: i32 = 113;
 const NOT_FOUND_TEXT: &str = "113: Could not find specified service";
 
 /// Written inside a private root when it is claimed, and required before that
-/// root is ever deleted. The receipt's device and inode alone are not enough:
-/// a corrupt or hand-written receipt could name any directory and carry that
-/// directory's real identity. Only a root this gate created holds a marker
-/// naming the same label, so nothing else can be removed. It is created
-/// exclusively, so a second invocation cannot claim a root already in use.
+/// root is ever deleted. It holds a random claim token, not the label: a
+/// corrupt or hand-written receipt could name any directory and carry that
+/// directory's real device and inode, and those are not even distinguishing
+/// on a filesystem that recycles an inode straight back after a delete. Only
+/// a root this exact invocation created holds its unguessable token, so
+/// nothing else can be removed. It is created exclusively, so a second
+/// invocation cannot claim a root already in use.
 const ROOT_MARKER: &str = ".dark-factory-launchd-gate";
 
 #[derive(Debug, thiserror::Error)]
@@ -311,6 +313,9 @@ pub struct GateReceipt {
     /// replaced root rather than deleting whatever now occupies the path.
     pub root_device: u64,
     pub root_inode: u64,
+    /// Random per-invocation claim. The private root is deleted only if its
+    /// marker still holds this exact value.
+    pub claim_token: String,
     /// The executable the job was first staged to run. Recorded so a retained
     /// root can be traced back to what it was running.
     pub staged_digest: String,
@@ -406,6 +411,7 @@ impl LaunchdGateInvocation {
             root_device,
             root_inode,
             staged_digest,
+            claim_token: uuid::Uuid::new_v4().to_string(),
             observed_pids: Vec::new(),
         };
 
@@ -439,7 +445,7 @@ impl LaunchdGateInvocation {
             .write(true)
             .create_new(true)
             .open(request.runtime_root.join(ROOT_MARKER))
-            .and_then(|mut file| file.write_all(label.as_bytes()))
+            .and_then(|mut file| file.write_all(receipt.claim_token.as_bytes()))
             .map_err(|error| {
                 GateError::refused(format!(
                     "could not claim launchd gate private root {}: {error}",
@@ -616,7 +622,7 @@ fn finalize_receipt(
                 )));
             }
             let marker = receipt.runtime_root.join(ROOT_MARKER);
-            if fs::read(&marker).ok().as_deref() != Some(receipt.label.as_bytes()) {
+            if fs::read(&marker).ok().as_deref() != Some(receipt.claim_token.as_bytes()) {
                 return Err(retain(format!(
                     "{} does not claim {service}; refusing to delete it",
                     marker.display()

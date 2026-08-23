@@ -298,9 +298,11 @@ fn an_operational_launchctl_failure_retains_the_root() {
     assert!(world.receipt_path().exists());
 }
 
-/// A replaced root must be refused on device/inode identity alone. The
-/// replacement deliberately carries a *valid* marker, so passing this test
-/// requires the identity revalidation and not just the marker check.
+/// A root swapped for a different directory at the same path must never be
+/// deleted. The replacement carries a plausible marker, and on a filesystem
+/// that recycles an inode straight back after a delete it also carries the
+/// recorded device and inode — so only the unguessable claim token
+/// distinguishes it.
 #[test]
 fn a_replaced_private_root_is_never_deleted() {
     let world = World::new("replaced");
@@ -313,18 +315,31 @@ fn a_replaced_private_root_is_never_deleted() {
     fs::set_permissions(&world.root, fs::Permissions::from_mode(0o700)).unwrap();
     fs::write(world.root.join(".dark-factory-launchd-gate"), &world.label).unwrap();
     fs::write(world.root.join("someone-elses-work"), b"keep me").unwrap();
-    assert_ne!(
-        fs::symlink_metadata(&world.root).unwrap().ino(),
-        serde_json::from_slice::<serde_json::Value>(&fs::read(world.receipt_path()).unwrap())
-            .unwrap()["root_inode"]
-            .as_u64()
-            .unwrap(),
-        "the replacement must really be a different directory"
-    );
 
     let error = resume(&world.ledger, &launchctl).unwrap_err();
     assert!(matches!(error, GateError::Retained { .. }), "{error}");
     assert!(world.root.join("someone-elses-work").exists());
+}
+
+/// The recorded device and inode must still be revalidated in their own
+/// right: a receipt describing a different directory than the one now at the
+/// path is not a receipt this cleanup may act on.
+#[test]
+fn a_receipt_whose_recorded_identity_no_longer_matches_is_refused() {
+    let world = World::new("identity");
+    let launchctl = world.launchctl();
+    let invocation = world.open(&launchctl);
+    invocation.release();
+    fs::write(world.root.join("still-in-use"), b"keep me").unwrap();
+
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(world.receipt_path()).unwrap()).unwrap();
+    receipt["root_inode"] = serde_json::json!(receipt["root_inode"].as_u64().unwrap() + 1);
+    fs::write(world.receipt_path(), serde_json::to_vec(&receipt).unwrap()).unwrap();
+
+    let error = resume(&world.ledger, &launchctl).unwrap_err();
+    assert!(matches!(error, GateError::Retained { .. }), "{error}");
+    assert!(world.root.join("still-in-use").exists());
 }
 
 /// Two coordinators share one ledger. The one that does not own a receipt
