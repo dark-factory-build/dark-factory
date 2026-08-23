@@ -178,6 +178,14 @@ ambient `git fetch`, `git pull`, `git clone`, `git push`, `gh`, `gh auth`, or
 SSH-based access: those paths can consult the operator's credential helper,
 login keychain, SSH agent, or other user credential state.
 
+Three narrow carve-outs exist: `gh issue` (create, comment, close, reopen,
+list, view -- not `edit`, because a canonical issue body is an immutable
+source revision); authenticated read-only `gh` (`pr view`/`checks`/`diff`,
+`run view`/`list`, `api` GET); and `git push` to any ref except the default
+branch, `--force-with-lease` only. Pushing the default branch, and opening or
+merging a pull request, are not covered. See rule 14 in
+[AGENTS.md](../../AGENTS.md) for the reasoning behind each.
+
 Anonymous HTTPS reads of public repositories are allowed when credential
 lookup and interactive prompting are disabled. A host may instead inject a
 short-lived, repository-scoped read credential for checkout without exposing
