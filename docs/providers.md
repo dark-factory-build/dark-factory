@@ -204,11 +204,13 @@ argument, or add another credential route.
 
 ## Testing
 
-Use `ShellProvider` for end-to-end daemon tests and `fake-agent` for lower-level
-process behavior. All fixtures use a temporary `DARK_FACTORY_HOME`, explicit
-socket, disposable paths, and an independent post-test verifier. A crash test
-must prove the resource ledger/finalizer converges after restart; a passing
-destructor is not evidence.
+`ShellProvider` is the deterministic provider for driving a real daemon end to
+end without a subscription; `scripts/macos-contributor-smoke.sh` is its
+consumer, and no Rust test launches it. Rust tests cover lower-level process
+behavior with `fake-agent`. All fixtures use a temporary `DARK_FACTORY_HOME`,
+explicit socket, disposable paths, and an independent post-test verifier. A
+crash test must prove the resource ledger/finalizer converges after restart; a
+passing destructor is not evidence.
 
 Run focused tests through the repository CI lease, then `./scripts/local-ci.sh`.
 Real Claude and Codex runs are reserved for an explicit provider-validation

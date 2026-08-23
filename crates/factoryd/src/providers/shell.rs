@@ -1,4 +1,8 @@
-//! Deterministic non-interactive provider used by lifecycle tests.
+//! Deterministic non-interactive provider that costs no subscription.
+//!
+//! `scripts/macos-contributor-smoke.sh` is its end-to-end consumer: it creates
+//! `--provider shell` agents and drives a real daemon through them. No Rust
+//! test launches it; the tests below cover only its spawn specification.
 //!
 //! A configured command receives the run's startup input on stdin. With no
 //! configured command, `sh -s` treats that input as the one shell program to
