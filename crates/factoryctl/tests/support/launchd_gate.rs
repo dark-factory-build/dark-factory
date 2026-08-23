@@ -228,9 +228,13 @@ impl Launchctl {
             .map_err(|error| format!("could not run {}: {error}", self.binary.display()))?;
         let pid = child.id();
         let command_timeout = self.deadlines.command;
-        // `reaped` is set only after `wait_with_output` returns, so the
-        // watchdog can never signal a PID this process has already reaped and
-        // which the kernel could therefore have handed to someone else.
+        // The watchdog stands down as soon as this flag is set, which happens
+        // the moment the child is reaped. That is an ordering, not mutual
+        // exclusion: a watchdog descheduled between its last check and its
+        // signal could in principle reach a PID the kernel had already handed
+        // out again. Closing that needs a non-reaping wait, which is not worth
+        // it here -- it takes a microsecond coincidence at the deadline *and*
+        // the PID reissued as a process-group leader, in a test fixture.
         let reaped = Arc::new(AtomicBool::new(false));
         let watchdog = {
             let reaped = Arc::clone(&reaped);
@@ -284,7 +288,7 @@ fn kill_group(pid: u32) {
 
 /// Observation of one exact PID. Absence is only `ESRCH`; a permission error
 /// means the process exists, and anything else is an operational failure.
-fn process_present(pid: u32) -> Result<bool, String> {
+pub fn process_present(pid: u32) -> Result<bool, String> {
     let Ok(raw) = i32::try_from(pid) else {
         return Err(format!("implausible pid {pid}"));
     };
@@ -534,6 +538,8 @@ pub fn resume(ledger: &Path, launchctl: &Launchctl) -> GateResult<ResumeReport> 
                 continue;
             }
         };
+        // This copy only names the label, so the lock below can be addressed.
+        // The authoritative read happens after the lock is held.
         // The filename is part of the identity: a receipt moved or renamed no
         // longer describes the label whose lock and marker guard it.
         if path.file_stem() != Some(OsStr::new(receipt.label.as_str())) {
@@ -555,11 +561,24 @@ pub fn resume(ledger: &Path, launchctl: &Launchctl) -> GateResult<ResumeReport> 
                 continue;
             }
         };
+        // Re-read under the lock. The owner may have recorded another PID
+        // between the read above and the moment its death released the lock,
+        // and a PID this pass never sees is a PID it never waits for.
+        let receipt = match read_receipt(&path) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                retained.push(error.to_string());
+                continue;
+            }
+        };
         match finalize_receipt(launchctl, &receipt, &path) {
             Ok(()) => {
                 report.finalized += 1;
+                // The lock file is deliberately left behind. Unlinking a file
+                // whose lock others may be about to take is the classic way to
+                // end up with two owners of one path; an empty lock file costs
+                // nothing, and labels are never reused.
                 drop(lock);
-                let _ = fs::remove_file(lock_path(ledger, &receipt.label));
             }
             Err(error) => retained.push(error.to_string()),
         }
@@ -591,9 +610,10 @@ fn finalize_receipt(
         });
     }
     let service = receipt.service();
+    // A retained root is inspected by a human, so say what it was running.
     let retain = |reason: String| GateError::Retained {
         root: receipt.runtime_root.clone(),
-        reason,
+        reason: format!("{reason} [staged {}]", receipt.staged_digest),
     };
 
     // Boot out only when the job is loaded, so a resumed receipt does not send
