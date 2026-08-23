@@ -1,3 +1,29 @@
-# Every path needs a review from the repository owner before it merges to
-# main (enforced by the main branch ruleset, see scripts/github-repo-settings.sh).
-* @baziyer
+# Which paths need the repository owner's approval before merging to main.
+#
+# This is deliberately NOT `*`. `main-review` sets
+# `required_approving_review_count: 0`, so a pull request touching only paths
+# absent from this file merges on its checks alone, and one touching any path
+# listed here still needs an owner approval. The point is to spend the
+# owner's attention on changes that can break the product or widen authority,
+# not on documentation.
+#
+# Anything executable, anything that gates or deploys, and anything that
+# defines authority is listed. If you are unsure whether a path belongs here,
+# it does.
+
+# The product itself.
+/crates/                @baziyer
+
+# The authority boundary for the GitHub Apps.
+/control-plane/         @baziyer
+
+# CI, deployment, repository settings, and this file. A change here can
+# rewrite the gate that reviews it.
+/.github/               @baziyer
+/scripts/               @baziyer
+
+# The rules agents operate under.
+/AGENTS.md              @baziyer
+/CLAUDE.md              @baziyer
+/SECURITY.md            @baziyer
+/ARCHITECTURE.md        @baziyer
