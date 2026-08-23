@@ -525,12 +525,15 @@ fn apply_runner_environment(
     }
     command.env("NO_COLOR", "1").env("TERM", "dumb");
     // Attempts may inspect and edit only their daemon-owned source. Stop
-    // ordinary repository discovery at that exact `.git`-free root, reset
-    // credential helpers, disable SSH, hide gh configuration, and forbid
-    // prompts. Ambient Git locator variables are already removed by
-    // `env_clear` above.
+    // ordinary repository discovery at that exact `.git`-free root (see
+    // `git_discovery_ceiling`), reset credential helpers, disable SSH, hide gh
+    // configuration, and forbid prompts. Ambient Git locator variables are
+    // already removed by `env_clear` above.
     command
-        .env("GIT_CEILING_DIRECTORIES", source_root)
+        .env(
+            "GIT_CEILING_DIRECTORIES",
+            git_discovery_ceiling(source_root),
+        )
         .env("GIT_DISCOVERY_ACROSS_FILESYSTEM", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_ASKPASS", "/usr/bin/false")
@@ -541,6 +544,29 @@ fn apply_runner_environment(
         .env("GIT_CONFIG_KEY_1", "core.sshCommand")
         .env("GIT_CONFIG_VALUE_1", "/usr/bin/false")
         .env("GH_CONFIG_DIR", "/dev/null");
+}
+
+/// The directory to name in `GIT_CEILING_DIRECTORIES` so that ordinary Git
+/// repository discovery stops at `source_root`.
+///
+/// Git's ceiling stops the upward walk only once discovery would move *up
+/// into* a listed directory, so naming `source_root` itself contains nothing:
+/// Git still inspects the Change root and then climbs straight past it into an
+/// ancestor repository. Naming the parent is what makes the `.git`-free Change
+/// root the last directory Git may look at. Measured with Git 2.50 against a
+/// Change nested inside a repository: with the ceiling set to the Change root,
+/// `git rev-parse --show-toplevel` resolves the ancestor and `git worktree
+/// add` succeeds; with the ceiling set to its parent, both fail.
+///
+/// Git ignores relative ceiling entries and resolves symlinks in the ones it
+/// keeps, comparing them against the physical working directory, so the entry
+/// must be absolute but need not be pre-canonicalized. `source_root` is a
+/// daemon-built absolute path -- `changes_root/<uuid>` for a worker, the run's
+/// `policy` directory for an orchestrator -- whose final component is never
+/// `.` or `..`, so its parent is absolute and names the real ancestor. A
+/// `source_root` of `/` has no parent and nothing above it to reach.
+pub(crate) fn git_discovery_ceiling(source_root: &Path) -> &Path {
+    source_root.parent().unwrap_or(source_root)
 }
 
 /// Prepends `directory` to a `PATH` value, keeping any existing entries
@@ -861,10 +887,13 @@ printf '%s\n' "$@" > "$TMPDIR/provider-argv"
         assert!(output.lines().any(|line| line == "HOME=/safe/home"));
         assert!(output.lines().any(|line| line == "USER=safe-user"));
         assert!(output.lines().any(|line| line == "SHELL=/bin/sh"));
+        // The ceiling names the Change root's parent: see
+        // `git_discovery_ceiling`, and `git_discovery_stops_at_the_change_root`
+        // for the effect this value has to produce.
         assert!(
             output
                 .lines()
-                .any(|line| line == "GIT_CEILING_DIRECTORIES=/opt/dark-factory/changes/change-1")
+                .any(|line| line == "GIT_CEILING_DIRECTORIES=/opt/dark-factory/changes")
         );
         assert!(
             output
@@ -1106,6 +1135,122 @@ printf '%s\n' "$@" > "$TMPDIR/provider-argv"
             "{output}"
         );
         assert!(output.lines().any(|line| line == "TERM=dumb"));
+    }
+
+    /// The matrix "Source boundary" row: in the provider view, ordinary
+    /// repository discovery and worktree creation must fail even when the
+    /// Change sits inside somebody else's repository. Asserts the external
+    /// effect of the runner environment, not the value of any variable.
+    #[tokio::test]
+    async fn git_discovery_stops_at_the_change_root() {
+        let directory = tempfile::tempdir().unwrap();
+        let outer = directory.path();
+        let change = outer.join("changes").join("change-1");
+        let nested = change.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        let path = env::join_paths([
+            Path::new("/usr/bin"),
+            Path::new("/bin"),
+            Path::new("/opt/homebrew/bin"),
+        ])
+        .unwrap();
+        let captured = environment(path, directory.path());
+        let git = resolve_executable(Path::new("git"), &captured, "test").expect("git executable");
+        // An ancestor repository with a commit, so `git worktree add` has a
+        // HEAD to check out if containment fails.
+        let init = Command::new(&git)
+            .args(["init", "--quiet", "--initial-branch=main"])
+            .arg(outer)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .status()
+            .await
+            .unwrap();
+        assert!(init.success());
+        let commit = Command::new(&git)
+            .current_dir(outer)
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "base",
+            ])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .status()
+            .await
+            .unwrap();
+        assert!(commit.success());
+
+        // Anti-vacuity: with no ceiling at all the ancestor repository really
+        // is reachable from inside the Change, so every refusal below is
+        // containment rather than a fixture that never had a repository.
+        let reachable = Command::new(&git)
+            .args(["rev-parse", "--show-toplevel"])
+            .current_dir(&nested)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env_remove("GIT_CEILING_DIRECTORIES")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            reachable.status.success(),
+            "fixture has no discoverable ancestor repository: {}",
+            String::from_utf8_lossy(&reachable.stderr)
+        );
+
+        for (index, cwd) in [&change, &nested].into_iter().enumerate() {
+            let worktree = outer.join(format!("linked-worktree-{index}"));
+            let worktree_argument = worktree.to_str().unwrap().to_owned();
+            let attempts: [Vec<&str>; 3] = [
+                vec!["rev-parse", "--show-toplevel"],
+                vec!["status", "--porcelain"],
+                vec!["worktree", "add", "--detach", &worktree_argument],
+            ];
+            for arguments in attempts {
+                let mut command = Command::new(&git);
+                command
+                    .args(&arguments)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+                apply_runner_environment(
+                    &mut command,
+                    &captured,
+                    Path::new("/opt/dark-factory/bin/factoryctl"),
+                    &change,
+                );
+                // A provider inherits this environment and may `chdir`
+                // anywhere inside its own Change.
+                command.current_dir(cwd);
+                let output = command.output().await.unwrap();
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert!(
+                    !output.status.success(),
+                    "git {arguments:?} succeeded in {cwd:?}: {stdout}{stderr}"
+                );
+                assert!(
+                    stderr.contains("not a git repository"),
+                    "git {arguments:?} in {cwd:?} failed for the wrong reason: {stderr}"
+                );
+                assert!(
+                    !stdout.contains(outer.to_str().unwrap()),
+                    "git {arguments:?} in {cwd:?} disclosed the ancestor repository: {stdout}"
+                );
+            }
+            assert!(
+                !worktree.exists(),
+                "a linked worktree was created at {worktree:?}"
+            );
+        }
     }
 
     #[test]
@@ -1368,10 +1513,11 @@ printf '%s\n' "$@" > "$TMPDIR/provider-argv"
         let child_pid = prepared.child_pid();
         let pid = Pid::from_raw(i32::try_from(child_pid).unwrap()).unwrap();
         let marker = directory.path().join("outer-gate-pid");
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !marker.exists() && Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+        crate::test_support::wait_for_async(
+            &format!("outer gate never published its PID to {}", marker.display()),
+            || marker.exists(),
+        )
+        .await;
         assert_eq!(
             fs::read_to_string(marker)
                 .unwrap()
@@ -1382,11 +1528,11 @@ printf '%s\n' "$@" > "$TMPDIR/provider-argv"
         );
 
         drop(prepared);
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while test_kill_process(pid).is_ok() && Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        assert!(test_kill_process(pid).is_err());
+        crate::test_support::wait_for_async(
+            &format!("prepared runner {pid:?} was not reaped after being dropped"),
+            || test_kill_process(pid).is_err(),
+        )
+        .await;
         assert!(!directory.path().join("runner-argv").exists());
         assert!(!directory.path().join("provider-stdin").exists());
     }
@@ -1490,24 +1636,31 @@ printf '%s\n' "$@" > "$TMPDIR/provider-argv"
             .unwrap();
 
         let ready = directory.path().join("ready");
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + crate::test_support::FIXTURE_TIMEOUT;
         while !ready.exists() && Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         if !ready.exists() {
             let _ = child.kill().await;
             let _ = child.wait().await;
-            panic!("provider did not reach the pre-drop barrier");
+            panic!(
+                "provider did not reach the pre-drop barrier within {:?}",
+                crate::test_support::FIXTURE_TIMEOUT
+            );
         }
         drop(child);
         tokio::time::sleep(Duration::from_millis(100)).await;
         fs::write(directory.path().join("release"), b"").unwrap();
 
         let marker = directory.path().join("survived");
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !marker.exists() && Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        crate::test_support::wait_for_async(
+            &format!(
+                "the process survived by dropping its Child handle never wrote {}",
+                marker.display()
+            ),
+            || marker.exists(),
+        )
+        .await;
         assert_eq!(fs::read_to_string(marker).unwrap(), "survived");
     }
 }

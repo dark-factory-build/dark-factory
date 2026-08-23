@@ -221,9 +221,13 @@ callback or row:
 | Dispatch and execution mode | Disabled dispatch admits nothing. An admitted run retains its frozen typed mode across profile and dispatch changes, and every provider maps each supported mode to exact non-interactive native flags. |
 
 Process tests use a temporary `DARK_FACTORY_HOME`, explicit private socket,
-unique disposable paths and labels, deterministic providers, and an
-independent post-test reaper. They never address the operator home, socket,
-job, credentials, or paid provider subscription.
+unique disposable paths and labels, deterministic providers, and two
+unconditional reaping mechanisms for any descendant a fixture deliberately
+leaves alive past its leader: a `Drop` guard that fires on the pass, fail, or
+panic path, and a hard iteration cap on any backgrounded shell wait that
+reclaims the descendant on its own even if the test process is killed
+outright. They never address the operator home, socket, job, credentials, or
+paid provider subscription.
 
 ## Exact-main boot gate
 

@@ -17,6 +17,11 @@ use factory_core::{
 };
 use rustix::process::{Pid, Signal, kill_process, kill_process_group};
 
+#[path = "support/kernel_process.rs"]
+mod support;
+
+use support::FIXTURE_TIMEOUT;
+
 const RUN_ID: &str = "run-1";
 const INSTANCE_ID: &str = "instance-1";
 // Repeated cargo-test runs under host contention measured the 1 MiB pipe
@@ -122,7 +127,7 @@ impl RunningRunner {
     }
 
     fn wait_until_ready(&mut self) {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + FIXTURE_TIMEOUT;
         while Instant::now() < deadline {
             if UnixStream::connect(self.socket()).is_ok() {
                 return;
@@ -136,7 +141,7 @@ impl RunningRunner {
             }
             thread::sleep(Duration::from_millis(10));
         }
-        panic!("runner did not create its control socket");
+        panic!("runner did not create its control socket within {FIXTURE_TIMEOUT:?}");
     }
 
     fn prepare(&self) -> (UnixStream, u32, u32) {
@@ -186,22 +191,17 @@ impl RunningRunner {
     }
 
     fn wait_for_terminal_spool(&self) {
-        let deadline = Instant::now() + Duration::from_secs(8);
-        while Instant::now() < deadline {
+        support::wait_for("runner did not persist a terminal event", || {
             let spool = fs::read_to_string(self.spool()).unwrap_or_default();
-            if spool.lines().any(|line| {
+            spool.lines().any(|line| {
                 serde_json::from_str::<RunnerEventEnvelope>(line).is_ok_and(|event| {
                     matches!(
                         event.event,
                         RunnerEvent::SpawnFailed { .. } | RunnerEvent::Exited { .. }
                     )
                 })
-            }) {
-                return;
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-        panic!("runner did not persist a terminal event");
+            })
+        });
     }
 
     fn assert_still_running(&mut self) {
@@ -217,16 +217,14 @@ impl RunningRunner {
     }
 
     fn wait_for_successful_exit(&mut self) {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline {
-            if let Some(status) = self.child.as_mut().unwrap().try_wait().unwrap() {
-                assert!(status.success(), "runner exit was {status}");
-                self.child.take();
-                return;
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-        panic!("runner did not exit after terminal acknowledgement");
+        let mut status = None;
+        support::wait_for("runner did not exit after terminal acknowledgement", || {
+            status = self.child.as_mut().unwrap().try_wait().unwrap();
+            status.is_some()
+        });
+        let status = status.expect("wait_for only returns once the condition is true");
+        assert!(status.success(), "runner exit was {status}");
+        self.child.take();
     }
 }
 
@@ -434,7 +432,7 @@ fn assert_startup_input_rejected(declared_bytes: usize, input: &[u8]) {
     .unwrap();
     let _ = child.stdin.take().unwrap().write_all(input);
 
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + FIXTURE_TIMEOUT;
     while Instant::now() < deadline {
         if marker.exists() || runtime.exists() {
             let _ = child.kill();
@@ -451,7 +449,7 @@ fn assert_startup_input_rejected(declared_bytes: usize, input: &[u8]) {
     }
     let _ = child.kill();
     let _ = child.wait();
-    panic!("runner did not reject invalid startup input");
+    panic!("runner did not reject invalid startup input within {FIXTURE_TIMEOUT:?}");
 }
 
 #[test]
@@ -650,7 +648,7 @@ fn invalid_cli_is_rejected_before_reading_declared_stdin() {
         .unwrap();
     let _open_stdin = child.stdin.take().unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + FIXTURE_TIMEOUT;
     while Instant::now() < deadline {
         if let Some(status) = child.try_wait().unwrap() {
             assert!(!status.success());
@@ -661,7 +659,9 @@ fn invalid_cli_is_rejected_before_reading_declared_stdin() {
     }
     let _ = child.kill();
     let _ = child.wait();
-    panic!("runner read framed stdin before rejecting its missing program");
+    panic!(
+        "runner read framed stdin before rejecting its missing program within {FIXTURE_TIMEOUT:?}"
+    );
 }
 
 #[test]
@@ -1035,8 +1035,13 @@ fn leader_exit_records_terminal_without_signalling_a_descendant() {
         ],
     );
     let descendant_pid = wait_for_pid_file(&marker);
-    runner.wait_for_terminal_spool();
     let descendant = Pid::from_raw(descendant_pid).unwrap();
+    // Production deliberately never signals this descendant once its leader
+    // has exited (that is exactly what this test proves), so nothing else in
+    // the daemon will reap it either. Arm the unconditional reaper before any
+    // assertion below can panic and orphan it to launchd.
+    let _reap_descendant = support::KillOnDrop(descendant);
+    runner.wait_for_terminal_spool();
     assert!(
         rustix::process::test_kill_process(descendant).is_ok(),
         "runner signalled a descendant after reaping its group leader"
@@ -1246,49 +1251,36 @@ fn insecure_or_symlinked_runtime_paths_are_rejected_without_spawning() {
 }
 
 fn wait_for_spool_text(spool: &Path, needle: &str) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        if fs::read_to_string(spool)
+    support::wait_for(&format!("spool never contained {needle:?}"), || {
+        fs::read_to_string(spool)
             .unwrap_or_default()
             .contains(needle)
-        {
-            return;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    panic!("spool never contained {needle:?}");
+    });
 }
 
 fn wait_for_path(path: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        if path.exists() {
-            return;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    panic!("path did not appear: {}", path.display());
+    support::wait_for(&format!("path did not appear: {}", path.display()), || {
+        path.exists()
+    });
 }
 
 fn wait_for_pid_file(path: &Path) -> i32 {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        if let Ok(pid) = fs::read_to_string(path).unwrap_or_default().trim().parse() {
-            return pid;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    panic!("PID did not appear in {}", path.display());
+    let mut parsed = None;
+    support::wait_for(&format!("PID did not appear in {}", path.display()), || {
+        parsed = fs::read_to_string(path)
+            .unwrap_or_default()
+            .trim()
+            .parse()
+            .ok();
+        parsed.is_some()
+    });
+    parsed.expect("wait_for only returns once the condition is true")
 }
 
 fn wait_for_process_exit(raw_pid: i32) {
     let pid = rustix::process::Pid::from_raw(raw_pid).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        if rustix::process::test_kill_process(pid).is_err() {
-            return;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    panic!("descendant process {raw_pid} survived group stop");
+    support::wait_for(
+        &format!("descendant process {raw_pid} survived group stop"),
+        || rustix::process::test_kill_process(pid).is_err(),
+    );
 }

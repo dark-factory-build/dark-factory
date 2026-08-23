@@ -23,6 +23,14 @@ use factory_core::{
 use serde_json::Value;
 
 const BINARIES: [&str; 4] = ["factoryd", "factory-runner", "factoryctl", "factory-tui"];
+// Deliberately generous: this fixture runs alongside the rest of the
+// process-level suite, so a bound that merely fits an idle machine turns
+// contention into a mystery failure. Matches the `FIXTURE_TIMEOUT` bound
+// used by the shared process-fixture helpers elsewhere in this repository.
+// Its only consumer is macOS-gated, so the constant must be too: an
+// unconditional definition is dead code on Linux and fails `-D warnings`.
+#[cfg(target_os = "macos")]
+const HEALTH_SERVER_TIMEOUT: Duration = Duration::from_secs(30);
 
 struct Fixture {
     root: tempfile::TempDir,
@@ -302,9 +310,14 @@ fn serve_unrelated_then_managed_health(
     let runner = home.join("bin/current/factory-runner");
     let factoryctl = home.join("bin/current/factoryctl");
     thread::spawn(move || {
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + HEALTH_SERVER_TIMEOUT;
         let mut served = 0;
-        while served < 2 && std::time::Instant::now() < deadline {
+        while served < 2 {
+            if std::time::Instant::now() >= deadline {
+                panic!(
+                    "health server served only {served}/2 requests within {HEALTH_SERVER_TIMEOUT:?}"
+                );
+            }
             let (mut stream, _) = match listener.accept() {
                 Ok(connection) => connection,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {

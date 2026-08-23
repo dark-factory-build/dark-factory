@@ -1,8 +1,7 @@
 use std::{
-    fs, io,
-    os::unix::fs::{MetadataExt, PermissionsExt},
-    path::{Path, PathBuf},
-    thread,
+    fs,
+    os::unix::fs::PermissionsExt,
+    path::PathBuf,
     time::{Duration, Instant},
 };
 
@@ -20,16 +19,19 @@ use factoryd::{
         NewProject, NewRunAdmission, NewTask, PreparedProcessIdentity, Store,
     },
 };
-use rustix::{
-    io::Errno,
-    process::{Pid, test_kill_process},
+
+#[path = "support/kernel_process.rs"]
+mod support;
+
+use support::{
+    FIXTURE_TIMEOUT, OwnedRunner, birth_fingerprint, bounded_shell_wait, private_directory,
+    process_absent, process_birth, runner_locator, runner_setup_locator, runtime_birth,
+    runtime_locator, wait_for_condition,
 };
-use tokio::process::Child;
 
 const RUN_ID: &str = "11111111-1111-4111-8111-111111111111";
 const RUNNER_INSTANCE_ID: &str = "22222222-2222-4222-8222-222222222222";
 const RUNTIME_NONCE: &str = "33333333333343338333333333333333";
-const CHILD_REAP_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct Fixture {
     _root: tempfile::TempDir,
@@ -129,7 +131,24 @@ impl Fixture {
         let provider = root.path().join("provider.sh");
         fs::write(
             &provider,
-            "#!/bin/sh\nset -eu\n(while [ ! -e \"$3\" ]; do /bin/sleep 0.01; done) &\nprintf %s \"$!\" > \"$4\"\nprintf x >> \"$1\"\nwhile [ ! -e \"$2\" ]; do /bin/sleep 0.01; done\nexit 17\n",
+            // Both waits are bounded by a hard iteration cap and by the
+            // fixture root disappearing, not only by the release marker each
+            // waits for. A `ReleaseOnDrop` guard writes that marker even when
+            // this test panics, but a guard only runs at all when the test
+            // unwinds normally, and can race the very `TempDir` deletion that
+            // would otherwise make the marker disappear along with
+            // everything else. Without these bounds a panic here orphans the
+            // backgrounded descendant to launchd forever, not just for the
+            // rest of this test run.
+            format!(
+                "#!/bin/sh\nset -eu\n({wait_descendant_release}) &\n\
+                 printf %s \"$!\" > \"$4\"\n\
+                 printf x >> \"$1\"\n\
+                 {wait_provider_release}\n\
+                 exit 17\n",
+                wait_descendant_release = bounded_shell_wait("\"$3\"", root.path()),
+                wait_provider_release = bounded_shell_wait("\"$2\"", root.path()),
+            ),
         )
         .unwrap();
         fs::set_permissions(&provider, fs::Permissions::from_mode(0o700)).unwrap();
@@ -202,50 +221,6 @@ impl Drop for ReleaseOnDrop {
     }
 }
 
-struct OwnedRunner(Option<Child>);
-
-impl OwnedRunner {
-    fn new(child: Child) -> Self {
-        Self(Some(child))
-    }
-
-    async fn wait(&mut self) -> std::process::ExitStatus {
-        let status = self.0.as_mut().unwrap().wait().await.unwrap();
-        self.0.take();
-        status
-    }
-
-    fn kill_and_reap(&mut self) -> io::Result<std::process::ExitStatus> {
-        let child = self.0.as_mut().expect("owned runner is already reaped");
-        child.start_kill()?;
-        let deadline = Instant::now() + CHILD_REAP_TIMEOUT;
-        loop {
-            if let Some(status) = child.try_wait()? {
-                self.0.take();
-                return Ok(status);
-            }
-            if Instant::now() >= deadline {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "owned runner did not reap after exact-child kill",
-                ));
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-    }
-}
-
-impl Drop for OwnedRunner {
-    fn drop(&mut self) {
-        if self.0.is_some()
-            && let Err(error) = self.kill_and_reap()
-            && !thread::panicking()
-        {
-            panic!("failed to reap owned runner during cleanup: {error}");
-        }
-    }
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn production_observer_defers_terminal_until_external_group_absence_across_restart() {
     let (fixture, mut store, admitted) = Fixture::new();
@@ -256,8 +231,8 @@ async fn production_observer_defers_terminal_until_external_group_absence_across
     drop(store);
 
     prepared_provider.activate().await.unwrap();
-    wait_for_path(&fixture.marker).await;
-    wait_for_path(&fixture.descendant_pid).await;
+    support::await_path(&fixture.marker).await;
+    support::await_path(&fixture.descendant_pid).await;
     let descendant_pid = fs::read_to_string(&fixture.descendant_pid)
         .unwrap()
         .parse::<u32>()
@@ -316,7 +291,7 @@ async fn production_observer_defers_terminal_until_external_group_absence_across
     // Cut: the acknowledged runner and provider are gone, but the surviving
     // external group keeps finalization durable across manager shutdown.
     fs::write(&fixture.descendant_release, b"release").unwrap();
-    wait_for_process_absence(descendant_pid).await;
+    support::await_process_absence(descendant_pid).await;
     let store = fixture.reopen();
     assert_eq!(run(&store, &fixture.run_id).phase, RunPhase::Finalizing);
     assert!(
@@ -384,7 +359,7 @@ async fn cancelled_wait_is_followed_by_exact_child_kill_and_reap() {
         "the live child exited before wait cancellation"
     );
     assert!(
-        runner.0.is_some(),
+        runner.is_live(),
         "cancelling wait disarmed exact Child cleanup authority"
     );
     drop(runner);
@@ -409,7 +384,7 @@ async fn manually_seed_running_observer_fixture(
         .unwrap();
     let setup_locator =
         runner_setup_locator(setup.setup_path(), &admitted.target.runner_instance_id);
-    let setup_birth = runner_setup_birth(setup.setup_device(), setup.setup_inode());
+    let setup_birth = birth_fingerprint(setup.setup_device(), setup.setup_inode());
     store
         .register_admitted_runner_setup(&fixture.run_id, &setup_locator, &setup_birth, 6)
         .unwrap();
@@ -460,7 +435,7 @@ async fn manually_seed_running_observer_fixture(
 }
 
 async fn prepare_with_grace(client: &RunnerClient) -> PreparedRunner {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + FIXTURE_TIMEOUT;
     loop {
         match client.prepare().await {
             Ok(prepared) => return prepared,
@@ -468,7 +443,9 @@ async fn prepare_with_grace(client: &RunnerClient) -> PreparedRunner {
                 let _ = error;
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            Err(error) => panic!("runner did not prepare provider: {error}"),
+            Err(error) => {
+                panic!("runner did not prepare provider within {FIXTURE_TIMEOUT:?}: {error}")
+            }
         }
     }
 }
@@ -489,139 +466,51 @@ fn run(store: &Store, run_id: &RunId) -> factory_core::RunSnapshot {
     store.kernel_run(run_id).unwrap().unwrap()
 }
 
-fn private_directory(path: &Path) {
-    fs::create_dir(path).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
-}
-
-fn runtime_locator(path: &Path) -> String {
-    serde_json::json!({ "path": path }).to_string()
-}
-
-fn runtime_birth(path: &Path) -> String {
-    let metadata = fs::symlink_metadata(path).unwrap();
-    format!("unix-device:{}:inode:{}", metadata.dev(), metadata.ino())
-}
-
-fn runner_setup_locator(path: &Path, runner_instance_id: &RunnerInstanceId) -> String {
-    serde_json::json!({
-        "runner_instance_id": runner_instance_id.as_str(),
-        "setup_path": path,
-    })
-    .to_string()
-}
-
-fn runner_locator(pid: u32, runner_instance_id: &RunnerInstanceId) -> String {
-    serde_json::json!({
-        "pid": pid,
-        "runner_instance_id": runner_instance_id.as_str(),
-    })
-    .to_string()
-}
-
-fn runner_setup_birth(device: u64, inode: u64) -> String {
-    format!("unix-device:{device}:inode:{inode}")
-}
-
-#[cfg(target_os = "linux")]
-fn process_birth(pid: u32) -> Option<String> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let fields = stat.rsplit_once(") ")?.1;
-    let ticks = fields.split_whitespace().nth(19)?;
-    Some(format!("linux-start-ticks:{ticks}"))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn process_birth(pid: u32) -> Option<String> {
-    test_kill_process(self::pid(pid)?).ok()?;
-    Some("weak-presence-only".into())
-}
-
-fn pid(value: u32) -> Option<Pid> {
-    i32::try_from(value).ok().and_then(Pid::from_raw)
-}
-
-fn process_absent(raw_pid: u32) -> bool {
-    match test_kill_process(pid(raw_pid).unwrap()) {
-        Err(Errno::SRCH) => true,
-        Ok(()) => false,
-        Err(error) => panic!("process {raw_pid} presence probe failed: {error}"),
-    }
-}
-
-async fn wait_for_path(path: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !path.exists() && Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    assert!(path.exists(), "{} was not created", path.display());
-}
-
-async fn wait_for_process_absence(raw_pid: u32) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !process_absent(raw_pid) && Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    assert!(
-        process_absent(raw_pid),
-        "process {raw_pid} survived its release gate"
-    );
-}
-
 async fn wait_for_observer_cut(state: &DaemonState, run_id: &RunId) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let (run, resources) = state
-            .with_store({
-                let run_id = run_id.clone();
-                move |store| {
-                    Ok((
-                        store.kernel_run(&run_id)?.unwrap(),
-                        store.kernel_resources(&run_id)?,
-                    ))
-                }
-            })
-            .await
-            .unwrap();
-        let released = |kind| {
-            resources.iter().any(|resource| {
-                resource.kind == kind && resource.state == KernelResourceState::Released
-            })
-        };
-        let group_pending = resources.iter().any(|resource| {
-            resource.kind == KernelResourceKind::ProcessGroup
-                && resource.state == KernelResourceState::Releasing
-        });
-        if run.phase == RunPhase::Finalizing
-            && run.exit_code == Some(17)
-            && released(KernelResourceKind::RunnerProcess)
-            && released(KernelResourceKind::ProviderProcess)
-            && group_pending
-        {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "production observer did not reach the acknowledged external-resource cut"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    wait_for_condition(
+        "production observer did not reach the acknowledged external-resource cut",
+        || async {
+            let (run, resources) = state
+                .with_store({
+                    let run_id = run_id.clone();
+                    move |store| {
+                        Ok((
+                            store.kernel_run(&run_id)?.unwrap(),
+                            store.kernel_resources(&run_id)?,
+                        ))
+                    }
+                })
+                .await
+                .unwrap();
+            let released = |kind| {
+                resources.iter().any(|resource| {
+                    resource.kind == kind && resource.state == KernelResourceState::Released
+                })
+            };
+            let group_pending = resources.iter().any(|resource| {
+                resource.kind == KernelResourceKind::ProcessGroup
+                    && resource.state == KernelResourceState::Releasing
+            });
+            run.phase == RunPhase::Finalizing
+                && run.exit_code == Some(17)
+                && released(KernelResourceKind::RunnerProcess)
+                && released(KernelResourceKind::ProviderProcess)
+                && group_pending
+        },
+    )
+    .await;
 }
 
 async fn wait_for_terminal(state: &DaemonState, run_id: &RunId) {
-    let deadline = Instant::now() + Duration::from_secs(8);
-    loop {
-        let phase = state
+    wait_for_condition("run did not terminalize", || async {
+        state
             .with_store({
                 let run_id = run_id.clone();
                 move |store| Ok(store.kernel_run(&run_id)?.unwrap().phase)
             })
             .await
-            .unwrap();
-        if phase == RunPhase::Terminal {
-            return;
-        }
-        assert!(Instant::now() < deadline, "run did not terminalize");
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+            .unwrap()
+            == RunPhase::Terminal
+    })
+    .await;
 }

@@ -1006,7 +1006,7 @@ impl Store {
                  outcome_detail = ?2, outcome_result = ?3,
                  stop_requested_at_ms = ?4,
                  finalizing_at_ms = ?4, phase_since_ms = ?4, updated_at_ms = ?4
-             WHERE id = ?5 AND phase = 'running'",
+             WHERE id = ?5",
             params![kind, detail, result, now_ms, run_id.as_str()],
         )?;
         insert_completion_check_if_required(&transaction, &run, outcome, now_ms)?;

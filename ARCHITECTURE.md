@@ -184,7 +184,10 @@ replaces that same registered process only after SQLite records the Change as
 
 The provider sees a plain writable source tree with no `.git` locator. Git
 repository discovery and linked-worktree creation are refused by construction
-and by the sanitized environment. Retries reuse the same retained Change;
+and by the sanitized environment: the discovery ceiling names the Change root's
+*parent*, because Git stops the upward walk only when it would climb into a
+listed directory, so naming the Change root itself would still let an ancestor
+repository be found from that root. Retries reuse the same retained Change;
 deletion is an explicit identity- and revision-checked transition that is
 refused while an attempt leases it. Factoryd supplies no status, commit, push,
 pull-request, or publication operation.

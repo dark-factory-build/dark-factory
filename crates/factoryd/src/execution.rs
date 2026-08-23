@@ -4083,7 +4083,6 @@ mod tests {
             process::CommandExt as _,
         },
         process::Stdio,
-        thread,
     };
 
     use crate::store::{NewAgent, NewProject, NewTask, Store};
@@ -4833,10 +4832,24 @@ exit 125
         let marker = directory.path().join("descendant.pid");
         let release = directory.path().join("release-descendant");
         let release_on_drop = ReleaseOnDrop(release.clone());
+        // The descendant's own wait is bounded by a hard iteration cap and by
+        // `directory` disappearing, not only by `release`. `release_on_drop`
+        // writes that marker even when this test panics before reaching the
+        // cooperative release below, but a write the very next statement
+        // before `directory`'s `TempDir::drop` deletes the whole tree races
+        // that deletion far more often than it wins it: the descendant polls
+        // every 20ms, so it almost never observes the marker in the
+        // microsecond window between the write and the unlink. Without an
+        // independent bound tied to the directory itself, a panicking test
+        // here orphans the descendant to launchd, not just for the rest of
+        // this test run -- exactly what this suite's own boot review found.
+        let wait_for_release = crate::test_support::bounded_shell_wait("\"$2\"", directory.path());
         let mut command = std::process::Command::new("/bin/sh");
         command
             .arg("-c")
-            .arg("(while [ ! -e \"$2\" ]; do sleep 0.02; done) & echo $! > \"$1\"; sleep 0.2")
+            .arg(format!(
+                "({wait_for_release}) & echo $! > \"$1\"; sleep 0.2"
+            ))
             .arg("sh")
             .arg(&marker)
             .arg(&release)
@@ -4847,21 +4860,20 @@ exit 125
         let mut leader = command.spawn().unwrap();
         let pgid = leader.id();
         let birth = process_birth_fingerprint(pgid).unwrap().unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        let descendant = loop {
-            if let Ok(pid) = fs::read_to_string(&marker)
-                .unwrap_or_default()
-                .trim()
-                .parse::<i32>()
-            {
-                break Pid::from_raw(pid).unwrap();
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "descendant PID was not published"
-            );
-            thread::sleep(Duration::from_millis(10));
-        };
+        let mut descendant = None;
+        crate::test_support::wait_for(
+            &format!("descendant PID was never published to {}", marker.display()),
+            || {
+                descendant = fs::read_to_string(&marker)
+                    .unwrap_or_default()
+                    .trim()
+                    .parse::<i32>()
+                    .ok()
+                    .and_then(Pid::from_raw);
+                descendant.is_some()
+            },
+        );
+        let descendant = descendant.expect("wait_for only returns once the condition is true");
         assert!(leader.wait().unwrap().success());
         assert!(test_kill_process(descendant).is_ok());
 
@@ -4885,14 +4897,10 @@ exit 125
 
         fs::write(&release, b"release").unwrap();
         drop(release_on_drop);
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while test_kill_process(descendant) != Err(rustix::io::Errno::SRCH) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "descendant did not exit cooperatively"
-            );
-            thread::sleep(Duration::from_millis(10));
-        }
+        crate::test_support::wait_for(
+            &format!("descendant {descendant:?} did not exit cooperatively"),
+            || test_kill_process(descendant) == Err(rustix::io::Errno::SRCH),
+        );
     }
 
     #[test]
@@ -4900,10 +4908,16 @@ exit 125
         let directory = private_tempdir();
         let release = directory.path().join("release-leader");
         let release_on_drop = ReleaseOnDrop(release.clone());
+        // Bounded the same way as the descendant wait in
+        // `leader_exit_with_live_descendant_keeps_group_resource_nonterminal`
+        // above: `release_on_drop` races `directory`'s own `TempDir::drop`
+        // far more often than it wins, so the loop also needs its own
+        // independent bound tied to `directory` disappearing.
+        let wait_for_release = crate::test_support::bounded_shell_wait("\"$1\"", directory.path());
         let mut command = std::process::Command::new("/bin/sh");
         command
             .arg("-c")
-            .arg("while [ ! -e \"$1\" ]; do sleep 0.02; done")
+            .arg(wait_for_release)
             .arg("sh")
             .arg(&release)
             .stdin(Stdio::null())
@@ -4939,10 +4953,15 @@ exit 125
     fn healthy_verifier_finish_marker_triggers_cooperative_group_exit() {
         let directory = private_tempdir();
         let finish = directory.path().join("finish");
+        // Bounded the same way as the leader/descendant waits above: this
+        // process has no `ReleaseOnDrop` at all (the marker is written
+        // unconditionally immediately below), but the independent cap still
+        // guards against a panic landing between `spawn` and that write.
+        let wait_for_finish = crate::test_support::bounded_shell_wait("\"$1\"", directory.path());
         let mut command = std::process::Command::new("/bin/sh");
         command
             .arg("-c")
-            .arg("while [ ! -e \"$1\" ]; do sleep 0.05; done; kill -KILL 0")
+            .arg(format!("{wait_for_finish}; kill -KILL 0"))
             .arg("sh")
             .arg(&finish)
             .stdin(Stdio::null())
@@ -4952,18 +4971,19 @@ exit 125
         let mut worker = command.spawn().unwrap();
 
         write_finish_signal(&finish).unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            if let Some(status) = worker.try_wait().unwrap() {
-                assert!(!status.success());
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "healthy verifier ignored its cooperative finish marker"
-            );
-            thread::sleep(Duration::from_millis(10));
-        }
+        let mut status = None;
+        crate::test_support::wait_for(
+            "healthy verifier ignored its cooperative finish marker",
+            || {
+                status = worker.try_wait().unwrap();
+                status.is_some()
+            },
+        );
+        assert!(
+            !status
+                .expect("wait_for only returns once the condition is true")
+                .success()
+        );
 
         write_finish_signal(&finish).unwrap();
     }

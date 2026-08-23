@@ -135,11 +135,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     process::exit(exit_code);
 }
 
+// Deliberately generous: this fixture process runs alongside the rest of the
+// process-level suite, so a bound that merely fits an idle machine turns
+// contention into a mystery failure. Matches the `FIXTURE_TIMEOUT` bound the
+// tests that drive this binary use for their own waits.
+const FIXTURE_TIMEOUT: Duration = Duration::from_secs(30);
+
 fn wait_for_path(path: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + FIXTURE_TIMEOUT;
     while !std::path::Path::new(path).exists() {
         if Instant::now() >= deadline {
-            return Err(format!("timed out waiting for {path}").into());
+            return Err(format!("timed out waiting for {path} within {FIXTURE_TIMEOUT:?}").into());
         }
         thread::sleep(Duration::from_millis(5));
     }
