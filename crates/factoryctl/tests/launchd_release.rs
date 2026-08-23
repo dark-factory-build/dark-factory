@@ -2,9 +2,7 @@
 
 use std::{
     collections::BTreeMap,
-    env,
-    fs::{self, OpenOptions},
-    io::Write,
+    env, fs,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     time::Duration,
@@ -16,6 +14,11 @@ use factoryctl::{
     probes, runtime,
 };
 
+#[path = "support/launchd_gate.rs"]
+mod launchd_gate;
+
+use launchd_gate::{GateRequest, Launchctl, LaunchdGateInvocation, resume};
+
 const FIRST: &str = "0.0.1";
 const SECOND: &str = "0.0.2";
 const CRASHING: &str = "0.0.3";
@@ -24,20 +27,35 @@ fn required_path(name: &str) -> PathBuf {
     PathBuf::from(env::var_os(name).unwrap_or_else(|| panic!("{name} is required")))
 }
 
-fn mark(root: &Path, name: &str) {
-    fs::write(root.join(name), b"\n").unwrap();
+fn launchctl() -> Launchctl {
+    Launchctl::new(
+        env::var_os("DARK_FACTORY_LAUNCHD_LAUNCHCTL")
+            .map_or_else(|| PathBuf::from("/bin/launchctl"), PathBuf::from),
+    )
+    .unwrap()
 }
 
-fn record_pid(root: &Path, pid: u32) {
-    writeln!(
-        OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(root.join("observed-pids"))
-            .unwrap(),
-        "{pid}"
-    )
-    .unwrap();
+/// Finalizes every disposable job an earlier coordinator left behind. The
+/// proof script runs this before and after the real fixture, so a killed run
+/// is contained by the next one rather than by a guard inside the dead
+/// process.
+#[test]
+#[ignore = "opt-in: finalizes disposable launchd jobs left by an earlier run"]
+fn disposable_launchd_jobs_are_resumed() {
+    let ledger = required_path("DARK_FACTORY_LAUNCHD_GATE_LEDGER");
+    let report = resume(&ledger, &launchctl()).unwrap();
+    println!(
+        "launchd gate finalized {} invocation(s); {} still owned by a live coordinator",
+        report.finalized, report.live
+    );
+}
+
+/// Evidence that a phase really ran. `cargo test` exits 0 when a filter
+/// matches nothing, so the coordinator reads these markers — while the root
+/// still exists — to prove the fixture actually executed.
+fn mark(name: &str) {
+    let evidence = required_path("DARK_FACTORY_LAUNCHD_EVIDENCE");
+    fs::write(evidence.join(name), b"\n").unwrap();
 }
 
 fn managed_pid(target: &LaunchdTarget, socket: &Path, home: &Path) -> u32 {
@@ -102,6 +120,22 @@ fn disposable_launchd_release_replacement() {
     install::create_private_dir(&home).unwrap();
     install::create_private_dir(&root.join("tmp")).unwrap();
 
+    // Declared first. A root that exists without a receipt is a root no
+    // coordinator can finalize, so nothing that can fail comes before this.
+    let ledger = required_path("DARK_FACTORY_LAUNCHD_GATE_LEDGER");
+    let mut invocation = LaunchdGateInvocation::open(
+        &ledger,
+        &launchctl(),
+        GateRequest {
+            domain: target.domain(),
+            label: target.label(),
+            plist: &plist,
+            runtime_root: &root,
+            staged_executable: &source.join("factoryd"),
+        },
+    )
+    .unwrap();
+
     install::install_from_dir(&home, &source, FIRST).unwrap();
     install::install_from_dir(&home, &source, SECOND).unwrap();
     install::activate(&home, FIRST).unwrap();
@@ -130,8 +164,8 @@ fn disposable_launchd_release_replacement() {
 
     apply(&target, &home, &plist, None, &environment, || Ok(()));
     let first_pid = managed_pid(&target, &socket, &home);
-    record_pid(&root, first_pid);
-    mark(&root, "first-live");
+    invocation.record_pid(first_pid).unwrap();
+    mark("first-live");
 
     let (replacement_lock, replacement_snapshot) =
         runtime::MutationLock::begin(&home, &plist).unwrap();
@@ -152,8 +186,7 @@ fn disposable_launchd_release_replacement() {
     );
     let second_pid = managed_pid(&target, &socket, &home);
     assert_ne!(second_pid, first_pid);
-    record_pid(&root, second_pid);
-    mark(&root, "second-live");
+    mark("second-live");
     if env::var("DARK_FACTORY_LAUNCHD_FAIL_AFTER_SECOND").as_deref() == Ok("1") {
         panic!("intentional failure after the replacement job became live");
     }
@@ -190,7 +223,7 @@ fn disposable_launchd_release_replacement() {
         &home,
     )
     .expect_err("the deliberately crashing runtime must not become healthy");
-    mark(&root, "crash-observed");
+    mark("crash-observed");
 
     runtime::rollback_after_health_failure_for(
         &target,
@@ -219,6 +252,10 @@ fn disposable_launchd_release_replacement() {
     );
     let restored_pid = managed_pid(&target, &socket, &home);
     assert_ne!(restored_pid, second_pid);
-    record_pid(&root, restored_pid);
-    mark(&root, "rollback-live");
+    mark("rollback-live");
+
+    // Deliberately no finalization here. Success and hard death converge
+    // through the one resume authority, so there is never a second teardown
+    // path that only the happy case exercises.
+    invocation.release();
 }
