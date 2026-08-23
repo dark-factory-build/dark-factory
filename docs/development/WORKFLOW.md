@@ -62,6 +62,16 @@ inactive regenerable Cargo targets manually. Product Rust verification uses
 its own bounded daemon cache. It does not replace this daemon-independent
 development lease.
 
+`crates/factoryd/tests/rust_completion.rs` drives the product's Rust
+completion lane through the production manager, so the gate compiles a
+generated one-crate workspace with the exact toolchain running the suite. It
+needs `CARGO` to name a real toolchain directory holding both `cargo` and
+`rustc` — `cargo +<version> test` provides that — and it needs the workspace
+binaries, so run it as part of the whole-workspace gate rather than with
+`-p factoryd` alone. Everything it compiles lives under its own temporary
+root. It costs roughly forty seconds, most of it waiting on the daemon's own
+reconcile interval rather than on Cargo.
+
 ## Isolated daemon checks
 
 Use a second, throwaway home and explicit socket. Never rely on the default:

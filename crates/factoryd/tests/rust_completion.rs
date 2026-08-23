@@ -166,7 +166,17 @@ impl Fixture {
         fixture.write_workspace(kind);
         fs::write(
             &fixture.provider,
-            "#!/bin/sh\nset -eu\n             (trap '' TERM; while [ ! -e \"$3\" ]; do /bin/sleep 0.05; done) &\n             printf x >> \"$1\"\n             while [ ! -e \"$2\" ]; do /bin/sleep 0.01; done\nexit 0\n",
+            // The backgrounded descendant ignores SIGTERM so this attempt's
+            // process group provably outlives its leader. Both waits are
+            // bounded so a panicking test can never leak a process.
+            format!(
+                "#!/bin/sh\nset -eu\n\
+                 (trap '' TERM; {group}) &\n\
+                 printf x >> \"$1\"\n\
+                 {exit}\nexit 0\n",
+                group = bounded_shell_wait("\"$3\"", &base),
+                exit = bounded_shell_wait("\"$2\"", &base),
+            ),
         )
         .unwrap();
         fs::set_permissions(&fixture.provider, fs::Permissions::from_mode(0o700)).unwrap();
@@ -201,19 +211,22 @@ impl Fixture {
             FixtureTest::HoldsGroupOpen => format!(
                 "    std::process::Command::new(\"/bin/sh\")\n\
                  \x20       .arg(\"-c\")\n\
-                 \x20       .arg(\"while [ ! -e '{descendant}' ]; do /bin/sleep 0.05; done\")\n\
+                 \x20       .arg({descendant:?})\n\
                  \x20       .stdin(std::process::Stdio::null())\n\
                  \x20       .stdout(std::process::Stdio::null())\n\
                  \x20       .stderr(std::process::Stdio::null())\n\
                  \x20       .spawn()\n\
                  \x20       .unwrap();\n\
-                 \x20   std::fs::write(\"{started}\", b\"started\").unwrap();\n\
-                 \x20   while !std::path::Path::new(\"{release}\").exists() {{\n\
+                 \x20   std::fs::write({started:?}, b\"started\").unwrap();\n\
+                 \x20   while !std::path::Path::new({release:?}).exists() {{\n\
                  \x20       std::thread::sleep(std::time::Duration::from_millis(20));\n\
                  \x20   }}\n",
-                descendant = self.descendant_release.display(),
-                started = self.test_started.display(),
-                release = self.test_release.display(),
+                descendant = bounded_shell_wait(
+                    &format!("'{}'", self.descendant_release.display()),
+                    self.descendant_release.parent().unwrap(),
+                ),
+                started = self.test_started.to_string_lossy(),
+                release = self.test_release.to_string_lossy(),
             ),
         };
         fs::write(
@@ -225,12 +238,12 @@ impl Fixture {
                  \x20   let mut log = std::fs::OpenOptions::new()\n\
                  \x20       .create(true)\n\
                  \x20       .append(true)\n\
-                 \x20       .open(\"{log}\")\n\
+                 \x20       .open({log:?})\n\
                  \x20       .unwrap();\n\
                  \x20   writeln!(log, \"ran\").unwrap();\n\
                  \x20   log.sync_all().unwrap();\n\
                  {body}}}\n",
-                log = self.ran_log.display(),
+                log = self.ran_log.to_string_lossy(),
             ),
         )
         .unwrap();
@@ -1089,6 +1102,18 @@ fn is_digest(value: &str) -> bool {
 
 fn run_nonce() -> String {
     uuid::Uuid::parse_str(RUN_ID).unwrap().simple().to_string()
+}
+
+/// A `sh` wait for one path that also ends as soon as the fixture root is
+/// gone, and in any case within five minutes. Both bounds exist purely so a
+/// panicking test can never leak a fixture process; no assertion depends on
+/// either.
+fn bounded_shell_wait(target: &str, root: &Path) -> String {
+    format!(
+        "i=0; while [ ! -e {target} ] && [ -d '{root}' ] && [ \"$i\" -lt 6000 ]; \
+         do i=$((i + 1)); /bin/sleep 0.05; done",
+        root = root.display()
+    )
 }
 
 fn private_directory(path: &Path) {
