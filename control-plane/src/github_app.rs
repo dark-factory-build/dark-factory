@@ -1115,17 +1115,25 @@ fn validate_installation(
     app_id: i64,
     owner_id: i64,
 ) -> Result<(), Error> {
-    if installation.id <= 0
-        || installation.app_id != app_id
-        || installation.account.id != owner_id
-        || installation.repository_selection != "selected"
-        || !permission_at_least(&installation.permissions, "checks", "read")
-        || !permission_at_least(&installation.permissions, "contents", "read")
-        || !permission_at_least(&installation.permissions, "metadata", "read")
-        || !permission_at_least(&installation.permissions, "pull_requests", "write")
-        || !installation.events.is_empty()
-        || installation.suspended_at.is_some()
-    {
+    let rejected: Vec<&str> = [
+        (installation.id <= 0).then_some("id"),
+        (installation.app_id != app_id).then_some("app_id"),
+        (installation.account.id != owner_id).then_some("account_id"),
+        (installation.repository_selection != "selected").then_some("repository_selection"),
+        (!permission_at_least(&installation.permissions, "checks", "read")).then_some("checks"),
+        (!permission_at_least(&installation.permissions, "contents", "read")).then_some("contents"),
+        (!permission_at_least(&installation.permissions, "metadata", "read")).then_some("metadata"),
+        (!permission_at_least(&installation.permissions, "pull_requests", "write"))
+            .then_some("pull_requests"),
+        (!installation.events.is_empty()).then_some("events"),
+        (installation.suspended_at.is_some()).then_some("suspended_at"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if !rejected.is_empty() {
+        #[cfg(target_arch = "wasm32")]
+        worker::console_error!("installation rejected on: {}", rejected.join(","));
         return Err(Error::Unavailable);
     }
     Ok(())
@@ -1155,9 +1163,10 @@ async fn github_json_as_app<T: serde::de::DeserializeOwned>(
     url: &str,
     jwt: &str,
 ) -> Result<T, Error> {
-    app_jwt_endpoint(url)
-        .then_some(())
-        .ok_or(Error::Unavailable)?;
+    if !app_jwt_endpoint(url) {
+        worker::console_error!("refusing to present an app jwt to {url}");
+        return Err(Error::Unavailable);
+    }
     github_json(url, jwt).await
 }
 
@@ -1235,7 +1244,13 @@ async fn github_json_request<T: serde::de::DeserializeOwned, B: Serialize>(
         }
         bytes.append(&mut chunk);
     }
-    serde_json::from_slice(&bytes).map_err(|_| Error::Unavailable)
+    serde_json::from_slice(&bytes).map_err(|error| {
+        worker::console_error!(
+            "github response from {url} did not match the expected shape ({} bytes): {error}",
+            bytes.len()
+        );
+        Error::Unavailable
+    })
 }
 
 #[cfg(target_arch = "wasm32")]
