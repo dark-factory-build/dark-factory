@@ -433,7 +433,12 @@ impl AppAuthority {
                 ("metadata", "read"),
             ]))
             .await?;
-        if let Some(result) = self.0.reconcile_commit(&token, &request).await? {
+        if let Some(result) = self
+            .0
+            .reconcile_commit(&token, &request)
+            .await
+            .map_err(|_| OperationError::Indeterminate)?
+        {
             return complete(journal, &operation, result).await;
         }
         if matches!(
@@ -446,7 +451,11 @@ impl AppAuthority {
                 .map_err(|_| OperationError::Unavailable)?;
             return Err(OperationError::Indeterminate);
         }
-        let branch_exists = self.0.verify_publish_precondition(&token, &request).await?;
+        let branch_exists = self
+            .0
+            .verify_publish_precondition(&token, &request)
+            .await
+            .map_err(|_| OperationError::Conflict)?;
         match journal
             .mark_operation(&operation, OperationTransition::Executing)
             .await
@@ -996,11 +1005,25 @@ impl Authority {
         token: &Credential,
         request: &PublishCommit,
     ) -> Result<bool, OperationError> {
-        match self
-            .verify_ref(token, &request.branch, &request.expected_head_sha)
-            .await
+        // Read the ref directly rather than reusing `verify_ref`, which cannot
+        // distinguish "branch is somewhere else" from "branch does not exist".
+        // Conflating them turned a stale head into an attempted branch create,
+        // which failed late and reported indeterminate instead of conflict.
+        match github_json::<GitReference>(
+            &format!(
+                "https://api.github.com/repos/{}/{}/git/ref/heads/{}",
+                self.repository.owner,
+                self.repository.name,
+                percent_encode(&request.branch)
+            ),
+            token.as_str(),
+        )
+        .await
         {
-            Ok(()) => Ok(true),
+            Ok(reference) => (reference.object.kind == "commit"
+                && reference.object.sha == request.expected_head_sha)
+                .then_some(true)
+                .ok_or(OperationError::Conflict),
             Err(_) => {
                 // The parent must still be a real commit, so a typo cannot
                 // create a branch from nothing.

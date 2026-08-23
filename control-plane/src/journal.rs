@@ -28,9 +28,15 @@ const DELIVERY_MIGRATION_SQL: &str = include_str!("../migrations/0001_maintainer
 #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
 const OPERATION_MIGRATION_COMPONENT: &str = "maintainer_operations";
 #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
-const OPERATION_MIGRATION_REVISION: &str = "0002";
+const OPERATION_MIGRATION_REVISION: &str = "0003";
+/// The revision that predates publication kinds. A Durable Object created
+/// before this change still carries it, and SQLite cannot alter a CHECK
+/// constraint, so that table is rebuilt rather than left to reject every
+/// publish or merge.
 #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
-const OPERATION_MIGRATION_SQL: &str = include_str!("../migrations/0002_maintainer_operations.sql");
+const LEGACY_OPERATION_MIGRATION_REVISION: &str = "0002";
+#[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+const OPERATION_MIGRATION_SQL: &str = include_str!("../migrations/0003_maintainer_operations.sql");
 #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
 const MIGRATION_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS control_plane_migrations (
     component TEXT PRIMARY KEY,
@@ -440,10 +446,57 @@ impl DurableObject for MaintainerDeliveryJournal {
     }
 }
 
+/// Rebuild a `0002` operations table in place, preserving its rows.
+///
+/// The `kind` CHECK predates commit publication and exact-head merge, so every
+/// such operation fails its INSERT on an older shard. SQLite cannot alter a
+/// CHECK, so the table is renamed, recreated from the current migration, its
+/// rows copied, and the old one dropped. A shard already on `0003`, or one that
+/// has no operations table yet, is left alone.
+#[cfg(target_arch = "wasm32")]
+fn migrate_operations_to_0003(sql: &SqlStorage) -> Result<(), Error> {
+    let stored = sql
+        .exec(
+            "SELECT revision, digest FROM control_plane_migrations WHERE component = ?",
+            vec![OPERATION_MIGRATION_COMPONENT.into()],
+        )?
+        .to_array::<MigrationRow>()?;
+    let [row] = stored.as_slice() else {
+        return Ok(());
+    };
+    if row.revision != LEGACY_OPERATION_MIGRATION_REVISION {
+        return Ok(());
+    }
+    worker::console_log!("journal: rebuilding maintainer_operations for revision 0003");
+    sql.exec(
+        "ALTER TABLE maintainer_operations RENAME TO maintainer_operations_0002",
+        None,
+    )?;
+    sql.exec(OPERATION_MIGRATION_SQL, None)?;
+    sql.exec(
+        "INSERT INTO maintainer_operations
+             (operation_id, kind, request_digest, state, result_json, created_at, updated_at)
+         SELECT operation_id, kind, request_digest, state, result_json, created_at, updated_at
+         FROM maintainer_operations_0002",
+        None,
+    )?;
+    sql.exec("DROP TABLE maintainer_operations_0002", None)?;
+    sql.exec(
+        "UPDATE control_plane_migrations SET revision = ?, digest = ? WHERE component = ?",
+        vec![
+            OPERATION_MIGRATION_REVISION.into(),
+            migration_digest(OPERATION_MIGRATION_SQL).into(),
+            OPERATION_MIGRATION_COMPONENT.into(),
+        ],
+    )?;
+    Ok(())
+}
+
 #[cfg(target_arch = "wasm32")]
 fn initialize_cloudflare_schema(sql: &SqlStorage) -> Result<(), Error> {
     sql.exec(MIGRATION_TABLE_SQL, None)?;
     sql.exec(DELIVERY_MIGRATION_SQL, None)?;
+    migrate_operations_to_0003(sql)?;
     sql.exec(OPERATION_MIGRATION_SQL, None)?;
     sql.exec(
         "INSERT INTO control_plane_migrations (component, revision, digest)

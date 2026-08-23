@@ -108,7 +108,7 @@ fn durable_object_is_sharded_by_app_and_exact_replay_identity() {
     assert!(journal.contains("app_id"));
     assert!(journal.contains("delivery_id"));
     assert!(journal.contains("operation_id"));
-    assert!(journal.contains("0002_maintainer_operations.sql"));
+    assert!(journal.contains("0003_maintainer_operations.sql"));
     assert!(journal.contains("sha256"));
     assert!(!journal.contains("DATABASE_URL"));
     assert!(!journal.contains("neon_superuser"));
