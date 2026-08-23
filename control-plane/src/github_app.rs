@@ -608,7 +608,10 @@ impl Authority {
         self.installation_token(BTreeMap::from([("metadata", "read")]))
             .await
             .map(|_| ())
-            .map_err(|_| Error::Unavailable)
+            .map_err(|error| {
+                worker::console_error!("verify: installation token unavailable: {error:?}");
+                Error::Unavailable
+            })
     }
 
     async fn jwt(&self) -> Result<Credential, Error> {
@@ -1190,18 +1193,17 @@ async fn github_json_request<T: serde::de::DeserializeOwned, B: Serialize>(
 
     let headers = Headers::new();
     let authorization = Zeroizing::new(format!("Bearer {credential}"));
-    headers
-        .set("accept", "application/vnd.github+json")
-        .map_err(|_| Error::Unavailable)?;
-    headers
-        .set("authorization", authorization.as_str())
-        .map_err(|_| Error::Unavailable)?;
-    headers
-        .set("user-agent", "dark-factory-control-plane/0.1")
-        .map_err(|_| Error::Unavailable)?;
-    headers
-        .set("x-github-api-version", GITHUB_API_VERSION)
-        .map_err(|_| Error::Unavailable)?;
+    for (name, value) in [
+        ("accept", "application/vnd.github+json"),
+        ("authorization", authorization.as_str()),
+        ("user-agent", "dark-factory-control-plane/0.1"),
+        ("x-github-api-version", GITHUB_API_VERSION),
+    ] {
+        headers.set(name, value).map_err(|error| {
+            worker::console_error!("github header {name} rejected: {error}");
+            Error::Unavailable
+        })?;
+    }
     let body = body
         .map(serde_json::to_string)
         .transpose()
@@ -1213,10 +1215,17 @@ async fn github_json_request<T: serde::de::DeserializeOwned, B: Serialize>(
     }
     let mut init = RequestInit::new();
     init.with_method(method)
-        .with_redirect(RequestRedirect::Error)
+        // Workers' Request supports only `follow` and `manual`; `error` makes the
+        // constructor throw, so no request ever leaves the edge. `manual` returns
+        // the redirect itself, which the status check below rejects as non-2xx —
+        // a redirect is still never followed.
+        .with_redirect(RequestRedirect::Manual)
         .with_headers(headers)
         .with_body(body.map(Into::into));
-    let request = Request::new_with_init(url, &init).map_err(|_| Error::Unavailable)?;
+    let request = Request::new_with_init(url, &init).map_err(|error| {
+        worker::console_error!("github request could not be built for {url}: {error}");
+        Error::Unavailable
+    })?;
     // Diagnosis only: never log credentials, headers, or bodies.
     let mut response = match Fetch::Request(request).send().await {
         Ok(response) => response,

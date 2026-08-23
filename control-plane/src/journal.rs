@@ -283,13 +283,19 @@ pub(crate) struct CloudflareJournal {
 impl CloudflareJournal {
     async fn ready(&self) -> Result<(), Error> {
         let name = format!("maintainer:{}:ready", self.app_id);
-        let stub = self.namespace.get_by_name(&name)?;
+        let stub = self.namespace.get_by_name(&name).inspect_err(|error| {
+            worker::console_error!("journal: stub unavailable: {error}");
+        })?;
         let response = stub
             .fetch_with_str("https://journal.internal/ready")
-            .await?;
+            .await
+            .inspect_err(|error| {
+                worker::console_error!("journal: ready fetch failed: {error}");
+            })?;
         if response.status_code() == 200 {
             Ok(())
         } else {
+            worker::console_error!("journal: ready returned {}", response.status_code());
             Err(Error::InvalidSchema)
         }
     }
