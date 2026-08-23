@@ -28,9 +28,15 @@ const DELIVERY_MIGRATION_SQL: &str = include_str!("../migrations/0001_maintainer
 #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
 const OPERATION_MIGRATION_COMPONENT: &str = "maintainer_operations";
 #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
-const OPERATION_MIGRATION_REVISION: &str = "0002";
+const OPERATION_MIGRATION_REVISION: &str = "0003";
+/// The revision that predates publication kinds. A Durable Object created
+/// before this change still carries it, and SQLite cannot alter a CHECK
+/// constraint, so that table is rebuilt rather than left to reject every
+/// publish or merge.
 #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
-const OPERATION_MIGRATION_SQL: &str = include_str!("../migrations/0002_maintainer_operations.sql");
+const LEGACY_OPERATION_MIGRATION_REVISION: &str = "0002";
+#[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+const OPERATION_MIGRATION_SQL: &str = include_str!("../migrations/0003_maintainer_operations.sql");
 #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
 const MIGRATION_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS control_plane_migrations (
     component TEXT PRIMARY KEY,
@@ -249,6 +255,11 @@ impl DeliveryJournal {
 pub(crate) enum OperationTransition {
     Executing,
     Completed(String),
+    /// GitHub refused determinately and nothing happened, so the claim is
+    /// released rather than buried: the same operation ID and request may be
+    /// retried once the refused precondition holds. `planned` is the state
+    /// `begin_operation` inserts, so this needs no new schema.
+    Refused,
     Indeterminate,
 }
 
@@ -283,13 +294,19 @@ pub(crate) struct CloudflareJournal {
 impl CloudflareJournal {
     async fn ready(&self) -> Result<(), Error> {
         let name = format!("maintainer:{}:ready", self.app_id);
-        let stub = self.namespace.get_by_name(&name)?;
+        let stub = self.namespace.get_by_name(&name).inspect_err(|error| {
+            worker::console_error!("journal: stub unavailable: {error}");
+        })?;
         let response = stub
             .fetch_with_str("https://journal.internal/ready")
-            .await?;
+            .await
+            .inspect_err(|error| {
+                worker::console_error!("journal: ready fetch failed: {error}");
+            })?;
         if response.status_code() == 200 {
             Ok(())
         } else {
+            worker::console_error!("journal: ready returned {}", response.status_code());
             Err(Error::InvalidSchema)
         }
     }
@@ -434,10 +451,86 @@ impl DurableObject for MaintainerDeliveryJournal {
     }
 }
 
+/// Rebuild a `0002` operations table in place, preserving its rows.
+///
+/// The `kind` CHECK predates commit publication and exact-head merge, so every
+/// such operation fails its INSERT on an older shard. SQLite cannot alter a
+/// CHECK, so the table is renamed, recreated from the current migration, its
+/// rows copied, and the old one dropped. A shard already on `0003`, or one that
+/// has no operations table yet, is left alone.
+#[cfg(target_arch = "wasm32")]
+fn table_exists(sql: &SqlStorage, name: &str) -> Result<bool, Error> {
+    #[derive(Deserialize)]
+    struct Present {
+        present: i64,
+    }
+    let rows = sql
+        .exec(
+            "SELECT count(*) AS present FROM sqlite_schema WHERE type = 'table' AND name = ?",
+            vec![name.into()],
+        )?
+        .to_array::<Present>()?;
+    Ok(matches!(rows.as_slice(), [row] if row.present > 0))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn migrate_operations_to_0003(sql: &SqlStorage) -> Result<(), Error> {
+    let stored = sql
+        .exec(
+            "SELECT revision, digest FROM control_plane_migrations WHERE component = ?",
+            vec![OPERATION_MIGRATION_COMPONENT.into()],
+        )?
+        .to_array::<MigrationRow>()?;
+    let [row] = stored.as_slice() else {
+        return Ok(());
+    };
+    if row.revision != LEGACY_OPERATION_MIGRATION_REVISION {
+        return Ok(());
+    }
+    worker::console_log!("journal: rebuilding maintainer_operations for revision 0003");
+    // Each step is driven off what the schema actually holds, because the
+    // rebuild is not atomic: a failure part-way through returns a 503 and
+    // leaves the completed steps in place, and the revision row still says
+    // 0002, so the next request runs this again. Resuming must not re-rename a
+    // table that is already renamed, and must never drop the legacy table
+    // before its rows have been copied — at the point the rename has happened
+    // it holds the only copy of the journal.
+    if table_exists(sql, "maintainer_operations")?
+        && !table_exists(sql, "maintainer_operations_0002")?
+    {
+        sql.exec(
+            "ALTER TABLE maintainer_operations RENAME TO maintainer_operations_0002",
+            None,
+        )?;
+    }
+    sql.exec(OPERATION_MIGRATION_SQL, None)?;
+    if table_exists(sql, "maintainer_operations_0002")? {
+        sql.exec(
+            "INSERT INTO maintainer_operations
+                 (operation_id, kind, request_digest, state, result_json, created_at, updated_at)
+             SELECT operation_id, kind, request_digest, state, result_json, created_at, updated_at
+             FROM maintainer_operations_0002
+             ON CONFLICT(operation_id) DO NOTHING",
+            None,
+        )?;
+        sql.exec("DROP TABLE maintainer_operations_0002", None)?;
+    }
+    sql.exec(
+        "UPDATE control_plane_migrations SET revision = ?, digest = ? WHERE component = ?",
+        vec![
+            OPERATION_MIGRATION_REVISION.into(),
+            migration_digest(OPERATION_MIGRATION_SQL).into(),
+            OPERATION_MIGRATION_COMPONENT.into(),
+        ],
+    )?;
+    Ok(())
+}
+
 #[cfg(target_arch = "wasm32")]
 fn initialize_cloudflare_schema(sql: &SqlStorage) -> Result<(), Error> {
     sql.exec(MIGRATION_TABLE_SQL, None)?;
     sql.exec(DELIVERY_MIGRATION_SQL, None)?;
+    migrate_operations_to_0003(sql)?;
     sql.exec(OPERATION_MIGRATION_SQL, None)?;
     sql.exec(
         "INSERT INTO control_plane_migrations (component, revision, digest)
@@ -643,6 +736,13 @@ fn transition_parts(
                 "'planned','executing','indeterminate'",
             ))
         }
+        // Also from `indeterminate`: a concurrent retry inside the merge
+        // round-trip marks the row indeterminate while the original call is
+        // still in flight, and that call's refusal would then fail to release
+        // the claim — re-wedging the exact operation ID this transition exists
+        // to keep retryable. Safe, because the arm issuing this transition is
+        // reached only after GitHub answered determinately.
+        OperationTransition::Refused => Ok(("planned", None, "'executing','indeterminate'")),
         OperationTransition::Indeterminate => {
             Ok(("indeterminate", None, "'executing','indeterminate'"))
         }
@@ -866,6 +966,84 @@ fn stored_operation_sqlite(
 #[cfg(all(test, feature = "development-sqlite"))]
 mod operation_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_refused_operation_releases_its_claim_for_the_same_request() {
+        let directory = tempfile::tempdir().unwrap();
+        let journal =
+            DeliveryJournal::open_development(&directory.path().join("journal.db")).unwrap();
+        let operation = Operation {
+            operation_id: "6d1f0f8e-7f1f-11f0-952e-acde48001122".into(),
+            kind: "merge_pull_request_at_head".into(),
+            request_digest: "b".repeat(64),
+        };
+        assert!(matches!(
+            journal.begin_operation(&operation).await.unwrap(),
+            OperationRecord::New
+        ));
+        assert!(matches!(
+            journal
+                .mark_operation(&operation, OperationTransition::Executing)
+                .await
+                .unwrap(),
+            OperationRecord::Claimed
+        ));
+        // GitHub refused determinately, so the claim goes back rather than
+        // being buried: a merge refused because CI was still running must be
+        // retryable under the same operation ID once CI is green.
+        assert!(matches!(
+            journal
+                .mark_operation(&operation, OperationTransition::Refused)
+                .await
+                .unwrap(),
+            OperationRecord::Planned
+        ));
+        assert!(matches!(
+            journal.begin_operation(&operation).await.unwrap(),
+            OperationRecord::Planned
+        ));
+        assert!(matches!(
+            journal
+                .mark_operation(&operation, OperationTransition::Executing)
+                .await
+                .unwrap(),
+            OperationRecord::Claimed
+        ));
+        let result = r#"{"pull_number":1,"merged":true}"#.to_owned();
+        assert!(
+            matches!(journal.mark_operation(&operation, OperationTransition::Completed(result.clone())).await.unwrap(), OperationRecord::Completed(stored) if stored == result)
+        );
+        // A concurrent retry can mark the row indeterminate while the original
+        // call is still waiting on GitHub. That call's refusal must still
+        // release the claim, or the operation ID is wedged by exactly the race
+        // this transition exists to survive.
+        let racing = Operation {
+            operation_id: "7e2a1c60-7f1f-11f0-952e-acde48001122".into(),
+            kind: "merge_pull_request_at_head".into(),
+            request_digest: "c".repeat(64),
+        };
+        journal.begin_operation(&racing).await.unwrap();
+        journal
+            .mark_operation(&racing, OperationTransition::Executing)
+            .await
+            .unwrap();
+        journal
+            .mark_operation(&racing, OperationTransition::Indeterminate)
+            .await
+            .unwrap();
+        assert!(matches!(
+            journal
+                .mark_operation(&racing, OperationTransition::Refused)
+                .await
+                .unwrap(),
+            OperationRecord::Planned
+        ));
+
+        // A completed operation is terminal: a late refusal cannot reopen it.
+        assert!(
+            matches!(journal.mark_operation(&operation, OperationTransition::Refused).await.unwrap(), OperationRecord::Completed(stored) if stored == result)
+        );
+    }
 
     #[tokio::test]
     async fn operation_state_is_idempotent_and_conflicts_fail_closed() {

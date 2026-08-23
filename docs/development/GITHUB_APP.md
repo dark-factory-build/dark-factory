@@ -89,7 +89,7 @@ exact replay and conflict behavior across concurrency, eviction, and Worker
 restart.
 
 The intended stable route is
-`https://broker.darkfactory.build/v1/github/maintainer/webhook`, but committing
+`https://maintainer.darkfactory.build/v1/github/maintainer/webhook`, but committing
 the adapter does not register that domain, deploy the service, configure an
 App, or activate a webhook. Production credentials are never shared with
 preview or disposable deployments; those use a distinct App, secret, Durable

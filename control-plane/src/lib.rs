@@ -124,6 +124,7 @@ fn optional_operation_authority(
             optional_secret(env, access::TEAM_DOMAIN_BINDING),
             optional_secret(env, access::AUDIENCE_BINDING),
         ],
+        optional_secret(env, access::SERVICE_TOKEN_BINDING),
     )
 }
 
@@ -131,6 +132,10 @@ fn optional_operation_authority(
 fn operation_authority_from_values(
     app_id: i64,
     values: [Option<String>; 8],
+    // Separate from the all-or-nothing group above: headless access is opt-in,
+    // so its absence must leave the rest of the authority group configured
+    // rather than tipping the whole surface inactive.
+    service_token_id: Option<String>,
 ) -> Result<Option<(access::AccessAuthority, github_app::AppAuthority)>, AuthorityError> {
     if values.iter().all(Option::is_none) {
         return Ok(None);
@@ -157,8 +162,13 @@ fn operation_authority_from_values(
         repository_id,
     )
     .map_err(|_| AuthorityError::AppAuthority)?;
-    let access = access::AccessAuthority::new(operator_email_digest, team_domain, audience)
-        .map_err(|_| AuthorityError::AppAuthority)?;
+    let access = access::AccessAuthority::new(
+        operator_email_digest,
+        team_domain,
+        audience,
+        service_token_id,
+    )
+    .map_err(|_| AuthorityError::AppAuthority)?;
     Ok(Some((access, app)))
 }
 
@@ -259,6 +269,10 @@ async fn ready(State(state): State<BrokerState>) -> Response {
     match (state.deployment, state.maintainer.as_ref()) {
         #[cfg(target_arch = "wasm32")]
         (Deployment::Cloudflare, Some(maintainer)) if maintainer.ready().await.is_ok() => {
+            // Report the operations surface ready only when its own live
+            // dependency answers. Gating on configuration alone let a Worker
+            // that could not reach Cloudflare Access at all still advertise a
+            // working surface while every call returned 401.
             if let Some(mcp) = state.mcp.as_ref() {
                 if mcp.ready().await.is_err() {
                     return json_response(
@@ -266,9 +280,17 @@ async fn ready(State(state): State<BrokerState>) -> Response {
                         r#"{"status":"unavailable","maintainer_webhook":"inactive","maintainer_operations":"inactive","product_webhook":"inactive","operator_api":"inactive"}"#,
                     );
                 }
+                // Name which principals can actually reach the surface. The
+                // headless binding is optional and inherited across versions,
+                // so a deployment that drops it must be visible here rather
+                // than only in the 401 every service-token call then gets.
                 json_response(
                     StatusCode::OK,
-                    r#"{"status":"ready","maintainer_webhook":"signed_ping_with_app_verification","maintainer_operations":"mcp_pr_create_review_checks","product_webhook":"inactive","operator_api":"inactive"}"#,
+                    if mcp.headless() {
+                        r#"{"status":"ready","maintainer_webhook":"signed_ping_with_app_verification","maintainer_operations":"mcp_six_tools_operator_and_headless","product_webhook":"inactive","operator_api":"inactive"}"#
+                    } else {
+                        r#"{"status":"ready","maintainer_webhook":"signed_ping_with_app_verification","maintainer_operations":"mcp_six_tools_operator_only","product_webhook":"inactive","operator_api":"inactive"}"#
+                    },
                 )
             } else {
                 json_response(
@@ -368,6 +390,7 @@ mod tests {
             operation_authority_from_values(
                 4_673_420,
                 [None, None, None, None, None, None, None, None],
+                None,
             )
             .is_ok_and(|value| value.is_none())
         );
@@ -384,6 +407,7 @@ mod tests {
                     None,
                     None,
                 ],
+                None,
             )
             .err(),
             Some(AuthorityError::AppAuthority)
@@ -405,6 +429,7 @@ mod tests {
                     Some("https://dark-factory.cloudflareaccess.com".into()),
                     Some("a".repeat(64)),
                 ],
+                None,
             )
             .is_ok_and(|value| value.is_some())
         );

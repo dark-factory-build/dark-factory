@@ -88,9 +88,13 @@ impl MaintainerState {
 
     #[cfg(target_arch = "wasm32")]
     pub(crate) async fn ready(&self) -> Result<(), ()> {
-        self.journal.ready().await.map_err(|_| ())?;
+        self.journal.ready().await.map_err(|_| {
+            worker::console_error!("readiness: journal unavailable");
+        })?;
         if let Some(authority) = self.app_authority.as_ref() {
-            authority.verify().await.map_err(|_| ())?;
+            authority.verify().await.map_err(|_| {
+                worker::console_error!("readiness: app authority unverified");
+            })?;
         }
         Ok(())
     }

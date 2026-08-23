@@ -1,0 +1,255 @@
+name: Deploy control-plane
+
+# Deployment is an explicit operator action (control-plane/AGENTS.md rule 10),
+# so this never runs on push or merge. Routes are a non-versioned setting and
+# Worker secrets persist across versions, so promoting a version swaps code
+# atomically behind the attached custom domain: no hostname change, no outage,
+# and no GitHub App private key or webhook secret. Only CLOUDFLARE_API_TOKEN is
+# needed. First activation and credential rotation are a separate, rarer
+# procedure and deliberately do not live here.
+on:
+  workflow_dispatch:
+    inputs:
+      expected_tree:
+        description: Reviewed tree SHA-1 that the checked-out source must match
+        required: true
+        type: string
+      promote:
+        description: Promote the uploaded version to 100% traffic
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-control-plane
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # `environment` scopes the credential to jobs that name it, so an ordinary
+    # pull-request job cannot read it. That is necessary and NOT sufficient:
+    #
+    #   * a dispatch runs the workflow file from the SELECTED REF, so anyone who
+    #     can push a branch and dispatch it controls this file;
+    #   * `dark-factory-mac` is persistent and shared with CI, so a job that
+    #     ran earlier can leave state behind (#54).
+    #
+    # Both are closed by configuration this file cannot assert: on the
+    # `production` environment set REQUIRED REVIEWERS and restrict DEPLOYMENT
+    # BRANCHES to `main`. Without those two settings the credential is only as
+    # protected as write access to the repository.
+    environment: production
+    runs-on: dark-factory-mac
+    timeout-minutes: 45
+    env:
+      # Wrangler reads CLOUDFLARE_ACCOUNT_ID; ACCOUNT_ID alone would leave it
+      # guessing when the token can see more than one account.
+      CLOUDFLARE_ACCOUNT_ID: 008dfc7e9e8ab2c6028b3aee30ee3f49
+      WORKER_NAME: dark-factory-control-plane
+      PRODUCTION_HOSTNAME: maintainer.darkfactory.build
+      CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV: "false"
+    steps:
+      # Same checkout idiom as ci.yml: no actions/checkout, because
+      # codeload.github.com can 429 for long stretches on this runner, and the
+      # workspace persists between jobs so prior state must be thrown away
+      # rather than repaired.
+      - name: Check out $GITHUB_SHA
+        run: |
+          set -euxo pipefail
+          rm -rf .git
+          git init
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --depth=1 origin "$GITHUB_SHA"
+          git checkout --force --detach FETCH_HEAD
+          git clean -ffdx
+
+      # The operator states which tree was reviewed; the runner proves the
+      # source it is about to ship is that exact tree.
+      - name: Bind the deployment to the reviewed tree
+        env:
+          EXPECTED_TREE: ${{ inputs.expected_tree }}
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse 'HEAD^{tree}')"
+          if [ "${actual}" != "${EXPECTED_TREE}" ]; then
+            echo "source tree ${actual} is not the reviewed tree; refusing to deploy" >&2
+            exit 1
+          fi
+          echo "SOURCE_TREE=${actual}" >> "$GITHUB_ENV"
+
+      - name: Install the pinned toolchain
+        run: rustup toolchain install 1.88.0 --profile minimal --component clippy,rustfmt --no-self-update
+
+      - name: Verify the supported Node runtime
+        run: node -e "if (Number(process.versions.node.split('.')[0]) < 22) process.exit(1)"
+
+      # Deploy only what the authoritative gate accepts. This also installs
+      # worker-build into control-plane/.tools and produces the wasm the upload
+      # step ships. The credential is deliberately NOT in scope here: this step
+      # runs every build script, unit test, and `npm ci` in the dependency
+      # graph.
+      - name: Run the control-plane authoritative gate
+        run: ./control-plane/scripts/local-ci.sh
+
+      # local-ci.sh puts .tools/bin on PATH only inside its own process, and
+      # wrangler.toml's `[build] command = worker-build --release` runs in this
+      # one. Without this the upload dies with `worker-build: command not
+      # found`.
+      - name: Put the pinned wasm toolchain on PATH
+        run: |
+          set -euo pipefail
+          tools="${GITHUB_WORKSPACE}/control-plane/.tools/bin"
+          test -x "${tools}/worker-build" || { echo "worker-build was not installed by the gate" >&2; exit 1; }
+          "${tools}/worker-build" --version
+          echo "${tools}" >> "$GITHUB_PATH"
+          echo "RUSTUP_TOOLCHAIN=1.88.0" >> "$GITHUB_ENV"
+
+      - name: Record the currently deployed version for rollback
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          deployments="$(curl -sS --fail-with-body --max-time 30 \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${WORKER_NAME}/deployments")"
+          # Assert the shape rather than trusting ordering: exactly one version
+          # at 100%, which is what "roll back to what was live" requires.
+          current="$(printf '%s' "${deployments}" \
+            | jq -er '[.result.deployments[] | select(.strategy == "percentage")][0]
+                      | select((.versions | length) == 1) | .versions[0].version_id')"
+          case "${current}" in
+            [0-9a-f]*-*-*-*-*) ;;
+            *) echo "could not identify a single live version to roll back to" >&2; exit 1 ;;
+          esac
+          echo "rollback target: ${current}"
+          echo "ROLLBACK_VERSION_ID=${current}" >> "$GITHUB_ENV"
+
+      - name: Upload the reviewed version
+        working-directory: control-plane
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          npx wrangler versions upload \
+            --name "${WORKER_NAME}" \
+            --tag "maintainer-${SOURCE_TREE:0:8}-${GITHUB_RUN_ID}" \
+            --message "Reviewed tree ${SOURCE_TREE}; commit ${GITHUB_SHA}" \
+            | tee /tmp/df-upload.txt
+          version="$(sed -e 's/\x1b\[[0-9;]*m//g' /tmp/df-upload.txt \
+            | sed -n 's/^Worker Version ID: *//p' | tail -1)"
+          case "${version}" in
+            [0-9a-f]*-*-*-*-*) ;;
+            *) echo "could not read the uploaded version id" >&2; exit 1 ;;
+          esac
+          echo "VERSION_ID=${version}" >> "$GITHUB_ENV"
+
+      # Secrets are inherited from the previous deployment rather than uploaded
+      # here, so prove the inheritance happened before sending traffic. The
+      # match is anchored: three of these names are prefixes of others
+      # (..._WEBHOOK_SECRET of ..._WEBHOOK_SECRET_REVISION, ..._REPOSITORY of
+      # ..._REPOSITORY_ID and ..._REPOSITORY_OWNER_ID), so a substring test
+      # would report a missing secret as present.
+      - name: Prove the version carries every required secret
+        working-directory: control-plane
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          npx wrangler versions view "${VERSION_ID}" --name "${WORKER_NAME}" \
+            | sed -e 's/\x1b\[[0-9;]*m//g' > /tmp/df-version.txt
+          missing=0
+          for name in \
+            DARK_FACTORY_MAINTAINER_WEBHOOK_SECRET \
+            DARK_FACTORY_MAINTAINER_WEBHOOK_SECRET_REVISION \
+            DARK_FACTORY_MAINTAINER_APP_ID \
+            DARK_FACTORY_MAINTAINER_PRIVATE_KEY_PKCS8 \
+            DARK_FACTORY_MAINTAINER_PERMISSION_REVISION \
+            DARK_FACTORY_MAINTAINER_REPOSITORY \
+            DARK_FACTORY_MAINTAINER_REPOSITORY_OWNER_ID \
+            DARK_FACTORY_MAINTAINER_REPOSITORY_ID \
+            DARK_FACTORY_MAINTAINER_OPERATOR_EMAIL_SHA256 \
+            DARK_FACTORY_CLOUDFLARE_ACCESS_TEAM_DOMAIN \
+            DARK_FACTORY_CLOUDFLARE_ACCESS_AUD
+          do
+            if ! grep -Eq "^Secret Name: +${name}\$" /tmp/df-version.txt; then
+              echo "missing secret on the uploaded version: ${name}" >&2
+              missing=1
+            fi
+          done
+          [ "${missing}" -eq 0 ] || exit 1
+          echo "all eleven authority secrets are present on ${VERSION_ID}"
+
+      - name: Promote the version to production traffic
+        if: ${{ inputs.promote }}
+        working-directory: control-plane
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          npx wrangler versions deploy \
+            --name "${WORKER_NAME}" \
+            --version-id "${VERSION_ID}" \
+            --message "Reviewed tree ${SOURCE_TREE}; commit ${GITHUB_SHA}" \
+            --yes
+          # Only a failure after this point should roll back. Earlier failures
+          # never moved traffic, so re-deploying the live version would be a
+          # pointless production mutation.
+          echo "PROMOTED=1" >> "$GITHUB_ENV"
+
+      # `/readyz` is the real proof: it now returns ready only when the
+      # Durable Object answers, the GitHub App authority verifies, AND
+      # Cloudflare Access serves a usable signing key. An unauthenticated
+      # `/mcp` 401 is NOT evidence of a healthy Access path — mcp::receive
+      # returns 401 on the missing header before any network call — so it is
+      # only a smoke check here. Proving authenticated MCP end to end needs an
+      # Access service token; see the deployment notes.
+      #
+      # Readiness must report `..._operator_and_headless`. The service-token
+      # binding is optional at runtime and inherited across versions, so a
+      # rotation that drops it promotes cleanly, passes the secret-inheritance
+      # proof above — which cannot enumerate an optional binding — and lands a
+      # version where every headless call 401s. Asserting the headless variant
+      # here is what makes that failure roll back instead of ship.
+      - name: Verify the live deployment
+        if: ${{ inputs.promote }}
+        run: |
+          set -euo pipefail
+          ready=0
+          for _ in $(seq 1 12); do
+            health="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 \
+              "https://${PRODUCTION_HOSTNAME}/healthz" || true)"
+            body="$(curl -sS --max-time 30 "https://${PRODUCTION_HOSTNAME}/readyz" || true)"
+            echo "healthz=${health} readyz=${body}"
+            if [ "${health}" = "200" ] \
+              && printf '%s' "${body}" | grep -Fq '"status":"ready"' \
+              && printf '%s' "${body}" | grep -Fq '"maintainer_operations":"mcp_six_tools_operator_and_headless"'; then
+              ready=1
+              break
+            fi
+            sleep 10
+          done
+          [ "${ready}" -eq 1 ] || { echo "live verification failed" >&2; exit 1; }
+          echo "live: https://${PRODUCTION_HOSTNAME}"
+
+      # `failure()` alone would miss a cancellation, which can strand a broken
+      # version at 100% traffic during the readiness wait.
+      - name: Roll back to the previously deployed version
+        if: ${{ always() && !success() && env.PROMOTED == '1' }}
+        working-directory: control-plane
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "rolling back to ${ROLLBACK_VERSION_ID}"
+          npx wrangler versions deploy \
+            --name "${WORKER_NAME}" \
+            --version-id "${ROLLBACK_VERSION_ID}" \
+            --message "Roll back failed deployment of ${VERSION_ID}" \
+            --yes
+          status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
+            "https://${PRODUCTION_HOSTNAME}/healthz" || true)"
+          echo "post-rollback healthz: ${status}"
+          [ "${status}" = "200" ] || { echo "rollback did not restore a healthy Worker" >&2; exit 1; }
