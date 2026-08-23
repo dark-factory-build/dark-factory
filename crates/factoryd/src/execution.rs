@@ -16,7 +16,7 @@ use std::{
 
 use factory_core::{
     AgentId, AgentRole, ChangeId, ChangePhase, ChangeSnapshot, ProjectId, Provider,
-    RunFailureReason, RunId, RunPhase, RunnerInstanceId,
+    RunFailureReason, RunId, RunPhase, RunSnapshot, RunnerInstanceId,
     runner::{RUNNER_STARTUP_LEASE_FILE, RunnerEvent},
 };
 #[cfg(not(target_os = "linux"))]
@@ -698,10 +698,11 @@ async fn start_run(
         return Ok(None);
     };
 
+    let admitted_run_id = admitted.run.id.clone();
     match launch_admitted(config, state, admitted, bearer).await {
         Ok(started) => Ok(Some(started)),
-        Err((error, child, run)) => {
-            cleanup_unactivated(state, &run, child).await;
+        Err(error) => {
+            cleanup_unactivated(state, &admitted_run_id, None).await;
             Err(error)
         }
     }
@@ -712,33 +713,21 @@ async fn launch_admitted(
     state: &DaemonState,
     admitted: AdmittedRun,
     bearer: String,
-) -> Result<StartedProcess, (Error, Option<Child>, RecoverableKernelRun)> {
-    let recovery = recovery_from_admission(&admitted);
-    let provider = match select_provider(
+) -> Result<StartedProcess, Error> {
+    let provider = select_provider(
         admitted.target.provider,
         config.claude_installation.as_ref(),
         &config.codex_provider,
-    ) {
-        Ok(provider) => provider,
-        Err(error) => return Err((error.into(), None, recovery)),
-    };
+    )?;
     let runtime_dir = PathBuf::from(&admitted.target.runner_runtime);
-    if let Err(error) = ensure_private_directory(&runtime_dir) {
-        return Err((error, None, recovery));
-    }
+    ensure_private_directory(&runtime_dir)?;
     let runtime_locator = runtime_locator(&runtime_dir);
-    let runtime_birth = match runtime_birth_fingerprint(&runtime_dir) {
-        Ok(Some(fingerprint)) => fingerprint,
-        Ok(None) => return Err((Error::InvalidRuntimeRoot, None, recovery)),
-        Err(error) => return Err((error, None, recovery)),
-    };
+    let runtime_birth =
+        runtime_birth_fingerprint(&runtime_dir)?.ok_or(Error::InvalidRuntimeRoot)?;
     let register_runtime_run_id = admitted.run.id.clone();
     let registered_runtime_claim = admitted.target.runtime_claim.clone();
-    let runtime_registered_at_ms = match now_ms() {
-        Ok(value) => value,
-        Err(error) => return Err((error, None, recovery)),
-    };
-    if let Err(error) = state
+    let runtime_registered_at_ms = now_ms()?;
+    state
         .commit_and_publish(move |store| {
             store.register_admitted_runtime(
                 &register_runtime_run_id,
@@ -749,23 +738,14 @@ async fn launch_admitted(
             )?;
             Ok(((), Vec::new()))
         })
-        .await
-    {
-        return Err((error.into(), None, recovery));
-    }
+        .await?;
     let provisioning = admitted.target.change_phase == Some(ChangePhase::Provisioning);
     let policy_dir = runtime_dir.join("policy");
     if admitted.target.role == AgentRole::Orchestrator || provisioning {
-        match ensure_private_directory(&policy_dir) {
-            Ok(()) => {}
-            Err(error) => return Err((error, None, recovery)),
-        }
+        ensure_private_directory(&policy_dir)?;
     }
     let hook_token_path = runtime_dir.join("attempt.token");
-    let startup_input = match compose_startup(config, &admitted) {
-        Ok(input) => input,
-        Err(error) => return Err((error, None, recovery)),
-    };
+    let startup_input = compose_startup(config, &admitted)?;
     let context = SpawnContext {
         run_id: admitted.run.id.clone(),
         source_root: PathBuf::from(&admitted.target.source_root),
@@ -778,46 +758,25 @@ async fn launch_admitted(
         socket_path: config.socket_path.clone(),
         agent_dir: runtime_dir.join("provider"),
     };
-    let mut launch = match provider.spawn_spec(&context) {
-        Ok(launch) => launch,
-        Err(error) => return Err((error.into(), None, recovery)),
-    };
+    let mut launch = provider.spawn_spec(&context)?;
     if let Err(source) = hooks::write_private_file(&hook_token_path, bearer.as_bytes()) {
-        return Err((
-            Error::Runtime {
-                path: hook_token_path,
-                source,
-            },
-            None,
-            recovery,
-        ));
+        return Err(Error::Runtime {
+            path: hook_token_path,
+            source,
+        });
     }
     if provisioning {
-        let change_id = match admitted.target.change_id.as_ref() {
-            Some(change_id) => change_id,
-            None => return Err((Error::InvalidId, None, recovery)),
-        };
-        let change_uuid = match parse_change_uuid(change_id) {
-            Ok(value) => value,
-            Err(error) => return Err((error, None, recovery)),
-        };
+        let change_id = admitted.target.change_id.as_ref().ok_or(Error::InvalidId)?;
+        let change_uuid = parse_change_uuid(change_id)?;
         let lookup_project = admitted.target.project_id.clone();
-        let repository_root = match state
-            .with_store(move |store| Ok(store.get_project(&lookup_project)?.root))
-            .await
-        {
-            Ok(root) => PathBuf::from(root),
-            Err(error) => return Err((error.into(), None, recovery)),
-        };
-        let provider_program = match runner_process::resolve_provider_executable(&launch.program) {
-            Ok(program) => program,
-            Err(error) => return Err((error.into(), None, recovery)),
-        };
+        let repository_root = PathBuf::from(
+            state
+                .with_store(move |store| Ok(store.get_project(&lookup_project)?.root))
+                .await?,
+        );
+        let provider_program = runner_process::resolve_provider_executable(&launch.program)?;
         let invocation_path = runtime_dir.join("materializer.json");
-        let limits = match SourceLimits::new(CHANGE_SCAN_MAX_ENTRIES, CHANGE_SCAN_MAX_BYTES) {
-            Ok(limits) => limits,
-            Err(error) => return Err((error.into(), None, recovery)),
-        };
+        let limits = SourceLimits::new(CHANGE_SCAN_MAX_ENTRIES, CHANGE_SCAN_MAX_BYTES)?;
         let invocation = MaterializerInvocation {
             git_program: config.git_program.clone(),
             repository_root,
@@ -832,11 +791,7 @@ async fn launch_admitted(
             provider_program,
             provider_arguments: launch.args,
         };
-        if let Err(error) =
-            change_source::write_materializer_invocation(&invocation_path, &invocation)
-        {
-            return Err((error.into(), None, recovery));
-        }
+        change_source::write_materializer_invocation(&invocation_path, &invocation)?;
         launch.program = config.factoryd_program.clone();
         launch.args = vec![
             "--materialize-change".into(),
@@ -862,10 +817,7 @@ async fn launch_admitted(
         source_root: PathBuf::from(&admitted.target.source_root),
         startup_input: launch.startup_input,
     };
-    let prepared_setup = match runner_process::prepare_runner(spec).await {
-        Ok(prepared) => prepared,
-        Err(error) => return Err((error.into(), None, recovery)),
-    };
+    let prepared_setup = runner_process::prepare_runner(spec).await?;
     let setup_locator = runner_setup_locator(
         prepared_setup.setup_path(),
         &admitted.target.runner_instance_id,
@@ -875,11 +827,8 @@ async fn launch_admitted(
     let setup_run_id = admitted.run.id.clone();
     let registered_setup_locator = setup_locator.clone();
     let registered_setup_birth = setup_birth.clone();
-    let setup_registered_at_ms = match now_ms() {
-        Ok(value) => value,
-        Err(error) => return Err((error, None, recovery)),
-    };
-    if let Err(error) = state
+    let setup_registered_at_ms = now_ms()?;
+    state
         .commit_and_publish(move |store| {
             store.register_admitted_runner_setup(
                 &setup_run_id,
@@ -889,29 +838,19 @@ async fn launch_admitted(
             )?;
             Ok(((), Vec::new()))
         })
-        .await
-    {
-        return Err((error.into(), None, recovery));
-    }
-    let prepared_runner = match prepared_setup.spawn() {
-        Ok(prepared) => prepared,
-        Err(error) => return Err((error.into(), None, recovery)),
-    };
+        .await?;
+    let prepared_runner = prepared_setup.spawn()?;
     let runner_pid = prepared_runner.child_pid();
     let runner_locator = runner_locator(runner_pid, &admitted.target.runner_instance_id);
     let runner_birth = match process_birth_fingerprint(runner_pid) {
         Ok(Some(fingerprint)) => fingerprint,
         Ok(None) => {
             prepared_runner.terminate().await;
-            return Err((
-                Error::ProcessIdentityUnavailable(runner_pid),
-                None,
-                recovery,
-            ));
+            return Err(Error::ProcessIdentityUnavailable(runner_pid));
         }
         Err(error) => {
             prepared_runner.terminate().await;
-            return Err((error, None, recovery));
+            return Err(error);
         }
     };
     let register_run_id = admitted.run.id.clone();
@@ -919,7 +858,7 @@ async fn launch_admitted(
         Ok(value) => value,
         Err(error) => {
             prepared_runner.terminate().await;
-            return Err((error, None, recovery));
+            return Err(error);
         }
     };
     let register_setup_locator = setup_locator.clone();
@@ -941,79 +880,68 @@ async fn launch_admitted(
         Ok(phase) => phase,
         Err(error) => {
             prepared_runner.terminate().await;
-            return Err((error.into(), None, recovery));
+            return Err(error.into());
         }
     };
     if registered_phase == RunPhase::Finalizing {
         prepared_runner.terminate().await;
-        return Err((
-            Error::State(DaemonStateError::Store(StoreError::InvalidRunState)),
-            None,
-            recovery,
-        ));
+        return Err(Error::State(DaemonStateError::Store(
+            StoreError::InvalidRunState,
+        )));
     }
-    let child = match prepared_runner.activate().await {
-        Ok(child) => child,
-        Err(error) => return Err((error.into(), None, recovery)),
-    };
+    // The provider is running from here on, so `?` must not reach past this
+    // binding: an early return that dropped the child would orphan it.
+    let mut child = prepared_runner.activate().await?;
+    let activated = activate_launched_run(state, &admitted, &runtime_dir).await;
+    match activated {
+        Ok((activated_run, resources)) => Ok(StartedProcess {
+            run: RecoverableKernelRun {
+                run: activated_run,
+                change_id: admitted.target.change_id,
+                source_root: admitted.target.source_root,
+                runner_instance_id: admitted.target.runner_instance_id,
+                runner_runtime: admitted.target.runner_runtime,
+                resources,
+            },
+            child,
+        }),
+        Err(error) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            Err(error)
+        }
+    }
+}
+
+async fn activate_launched_run(
+    state: &DaemonState,
+    admitted: &AdmittedRun,
+    runtime_dir: &Path,
+) -> Result<(RunSnapshot, Vec<KernelResource>), Error> {
     let client = RunnerClient::new(
-        &runtime_dir,
+        runtime_dir,
         admitted.run.id.clone(),
         admitted.target.runner_instance_id.clone(),
     );
-    let prepared = match prepare_with_grace(&client).await {
-        Ok(prepared) => prepared,
-        Err(error) => return Err((error.into(), Some(child), recovery)),
-    };
-    let identity = match prepared_identity(&admitted, &prepared) {
-        Ok(identity) => identity,
-        Err(error) => return Err((error, Some(child), recovery)),
-    };
+    let prepared = prepare_with_grace(&client).await?;
+    let identity = prepared_identity(admitted, &prepared)?;
     let activate_run_id = admitted.run.id.clone();
-    let activated_at_ms = match now_ms() {
-        Ok(value) => value,
-        Err(error) => return Err((error, Some(child), recovery)),
-    };
-    let (activated_run, resources) = match state
+    let activated_at_ms = now_ms()?;
+    let (activated_run, resources) = state
         .commit_and_publish(move |store| {
             let (run, events) =
                 store.activate_prepared_run(&activate_run_id, identity, activated_at_ms)?;
             let resources = store.kernel_resources(&activate_run_id)?;
             Ok(((run, resources), events))
         })
-        .await
-    {
-        Ok(run) => run,
-        Err(error) => return Err((error.into(), Some(child), recovery)),
-    };
+        .await?;
     if let Err(error) = prepared.activate().await {
         // Running is already durable. The observer resolves whether the gate
         // accepted activation; returning the admitted run is safer than
         // manufacturing a second attempt after an ambiguous acknowledgement.
         tracing::warn!(run_id = %admitted.run.id, %error, "runner activation acknowledgement was lost");
     }
-    Ok(StartedProcess {
-        run: RecoverableKernelRun {
-            run: activated_run,
-            change_id: admitted.target.change_id,
-            source_root: admitted.target.source_root,
-            runner_instance_id: admitted.target.runner_instance_id,
-            runner_runtime: admitted.target.runner_runtime,
-            resources,
-        },
-        child,
-    })
-}
-
-fn recovery_from_admission(admitted: &AdmittedRun) -> RecoverableKernelRun {
-    RecoverableKernelRun {
-        run: admitted.run.clone(),
-        change_id: admitted.target.change_id.clone(),
-        source_root: admitted.target.source_root.clone(),
-        runner_instance_id: admitted.target.runner_instance_id.clone(),
-        runner_runtime: admitted.target.runner_runtime.clone(),
-        resources: Vec::new(),
-    }
+    Ok((activated_run, resources))
 }
 
 async fn prepare_with_grace(client: &RunnerClient) -> Result<PreparedRunner, RunnerClientError> {
@@ -2859,7 +2787,7 @@ async fn observe_run(
     let mut subscription = match subscribe_with_grace(&client).await {
         Ok(subscription) => subscription,
         Err(error) if run.run.phase == RunPhase::Admitted => {
-            cleanup_unactivated(state, run, child).await;
+            cleanup_unactivated(state, &run.run.id, child).await;
             return Err(error.into());
         }
         Err(error) => {
@@ -2927,7 +2855,7 @@ async fn observe_run(
     } else {
         wait_for_registered_runner_exit(run).await?;
     }
-    release_completed_resources(state, run).await
+    release_completed_resources(state, &run.run.id).await
 }
 
 async fn subscribe_with_grace(
@@ -3216,35 +3144,28 @@ struct ObservedExit {
     failure_reason: Option<RunFailureReason>,
 }
 
-async fn cleanup_unactivated(
-    state: &DaemonState,
-    run: &RecoverableKernelRun,
-    mut child: Option<Child>,
-) {
+async fn cleanup_unactivated(state: &DaemonState, run_id: &RunId, mut child: Option<Child>) {
     if let Some(child) = child.as_mut() {
         let _ = child.kill().await;
         let _ = child.wait().await;
     }
-    let run_id = run.run.id.clone();
+    let failed_run_id = run_id.clone();
     if let Ok(at_ms) = now_ms() {
         let _ = state
             .commit_and_publish(move |store| {
                 let (_, events) =
-                    store.fail_admitted_run(&run_id, RunFailureReason::Spawn, at_ms)?;
+                    store.fail_admitted_run(&failed_run_id, RunFailureReason::Spawn, at_ms)?;
                 Ok(((), events))
             })
             .await;
     }
-    let _ = release_completed_resources(state, run).await;
+    let _ = release_completed_resources(state, run_id).await;
 }
 
-async fn release_completed_resources(
-    state: &DaemonState,
-    run: &RecoverableKernelRun,
-) -> Result<(), Error> {
+async fn release_completed_resources(state: &DaemonState, run_id: &RunId) -> Result<(), Error> {
     let refreshed = state
         .with_store({
-            let run_id = run.run.id.clone();
+            let run_id = run_id.clone();
             move |store| {
                 let recovered = store
                     .recoverable_kernel_runs()?
