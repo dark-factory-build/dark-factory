@@ -151,8 +151,11 @@ fn mcp_surface_is_repository_bound_and_typed() {
 #[test]
 fn the_deployment_gate_asserts_the_readiness_label_the_worker_emits() {
     let lib = project_file("src/lib.rs");
-    let workflow =
-        std::fs::read_to_string("../.github/workflows/deploy-control-plane.yml").unwrap();
+    let workflow = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../.github/workflows/deploy-control-plane.yml"),
+    )
+    .unwrap();
 
     let headless = r#""maintainer_operations":"mcp_six_tools_operator_and_headless""#;
     assert!(lib.contains(headless));

@@ -35,6 +35,15 @@ pub(crate) enum Error {
     Unauthorized,
 }
 
+/// Bound a diagnostic string on a character boundary. Byte slicing would
+/// panic mid-codepoint on the multi-byte input this exists to bound.
+fn truncated(value: &str, limit: usize) -> String {
+    match value.char_indices().nth(limit) {
+        Some((end, _)) => format!("{}…", &value[..end]),
+        None => value.to_owned(),
+    }
+}
+
 impl AccessAuthority {
     pub(crate) fn new(
         expected_email_digest: String,
@@ -430,15 +439,6 @@ fn valid_email(value: &str) -> Result<String, Error> {
 
 /// A Cloudflare Access service-token client id: 32 lowercase hex characters
 /// followed by `.access`.
-/// Bound a diagnostic string on a character boundary. Byte slicing would
-/// panic mid-codepoint on the multi-byte input this exists to bound.
-fn truncated(value: &str, limit: usize) -> String {
-    match value.char_indices().nth(limit) {
-        Some((end, _)) => format!("{}…", &value[..end]),
-        None => value.to_owned(),
-    }
-}
-
 fn valid_service_token_id(value: &str) -> bool {
     value
         .strip_suffix(".access")
