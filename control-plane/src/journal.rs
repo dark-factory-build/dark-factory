@@ -736,7 +736,13 @@ fn transition_parts(
                 "'planned','executing','indeterminate'",
             ))
         }
-        OperationTransition::Refused => Ok(("planned", None, "'executing'")),
+        // Also from `indeterminate`: a concurrent retry inside the merge
+        // round-trip marks the row indeterminate while the original call is
+        // still in flight, and that call's refusal would then fail to release
+        // the claim — re-wedging the exact operation ID this transition exists
+        // to keep retryable. Safe, because the arm issuing this transition is
+        // reached only after GitHub answered determinately.
+        OperationTransition::Refused => Ok(("planned", None, "'executing','indeterminate'")),
         OperationTransition::Indeterminate => {
             Ok(("indeterminate", None, "'executing','indeterminate'"))
         }
@@ -1007,6 +1013,32 @@ mod operation_tests {
         assert!(
             matches!(journal.mark_operation(&operation, OperationTransition::Completed(result.clone())).await.unwrap(), OperationRecord::Completed(stored) if stored == result)
         );
+        // A concurrent retry can mark the row indeterminate while the original
+        // call is still waiting on GitHub. That call's refusal must still
+        // release the claim, or the operation ID is wedged by exactly the race
+        // this transition exists to survive.
+        let racing = Operation {
+            operation_id: "7e2a1c60-7f1f-11f0-952e-acde48001122".into(),
+            kind: "merge_pull_request_at_head".into(),
+            request_digest: "c".repeat(64),
+        };
+        journal.begin_operation(&racing).await.unwrap();
+        journal
+            .mark_operation(&racing, OperationTransition::Executing)
+            .await
+            .unwrap();
+        journal
+            .mark_operation(&racing, OperationTransition::Indeterminate)
+            .await
+            .unwrap();
+        assert!(matches!(
+            journal
+                .mark_operation(&racing, OperationTransition::Refused)
+                .await
+                .unwrap(),
+            OperationRecord::Planned
+        ));
+
         // A completed operation is terminal: a late refusal cannot reopen it.
         assert!(
             matches!(journal.mark_operation(&operation, OperationTransition::Refused).await.unwrap(), OperationRecord::Completed(stored) if stored == result)

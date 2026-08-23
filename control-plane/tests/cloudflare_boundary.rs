@@ -183,9 +183,7 @@ fn github_refusals_stay_determinate() {
     assert!(github_app.contains("Err(Error::Rejected(404))"));
     // A refusal releases the claim so the same operation ID stays retryable.
     assert!(github_app.contains("OperationTransition::Refused"));
-    assert!(
-        journal.contains(r#"OperationTransition::Refused => Ok(("planned", None, "'executing'"))"#)
-    );
+    assert!(journal.contains(r#"Ok(("planned", None, "'executing','indeterminate'"))"#));
     // And the caller is told which of the two it got.
     assert!(mcp.contains(r#""refused""#));
     assert!(mcp.contains(r#""indeterminate""#));
