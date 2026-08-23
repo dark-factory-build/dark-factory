@@ -371,6 +371,7 @@ case "$launch" in
     3) echo retry-mutation >>README.md; "$DARK_FACTORY_FACTORYCTL" task done --result retry-ok; exit 43 ;;
     4) reap_or_wait "$HOME/runner-exit"; : >"$HOME/runner-fault-sent"; kill -TERM "$PPID"; while :; do sleep 1; done ;;
     5) reap_or_wait "$HOME/never" ;;
+    6) reap_or_wait "$HOME/outage-exit"; exit 53 ;;
     *) exit 99 ;;
 esac
 EOF
@@ -488,7 +489,28 @@ wait_for_file "$HOME/worker-5.ready" 'cancellation target'
     --run "$cancel_run" --grace-ms 1000 >/dev/null
 wait_for_run_terminal "$cancel_run" cancelled
 finish_worker_verifier
-test "$(wc -l <"$HOME/worker-launches" | tr -d '[:space:]')" = 5 || exit 1
+
+# Second crash cut, on the other side of the provider's life: the daemon is
+# absent when the provider exits, so the exit exists only in the runner's
+# durable log until a restarted daemon observes and acknowledges it. Recovery
+# must adopt that one exit exactly, without relaunching or replaying anything.
+start_worker_verifier 6
+add_worker_task macos-smoke-outage-exit
+outage_run=$(wait_for_task_run macos-smoke-outage-exit)
+wait_for_file "$HOME/worker-6.ready" 'outage-exit target'
+crash_daemon
+: >"$HOME/outage-exit"
+wait_for_file "$HOME/worker-6.closed" 'provider exit during the outage'
+start_daemon
+wait_for_run_terminal "$outage_run" failed
+run_has "$outage_run" '"reason":"process"' || exit 1
+run_has "$outage_run" '"exit_code":53' || exit 1
+finish_worker_verifier
+finish_owner "$old_owner_pid" "$old_owner_state" reap reaped
+old_owner_pid=
+old_owner_state=
+
+test "$(wc -l <"$HOME/worker-launches" | tr -d '[:space:]')" = 6 || exit 1
 test "$(wc -l <"$HOME/god-launches" | tr -d '[:space:]')" = 1 || exit 1
 
 test ! -d "$home/runs" \
@@ -498,4 +520,4 @@ owner_pid=
 owner_state=
 test ! -e "$socket" || exit 1
 
-echo 'macOS source smoke passed: owned daemon crash, surviving worker/God without replay, self-exit provider/runner faults, retained-Change retry, cancellation, and exact teardown'
+echo 'macOS source smoke passed: owned daemon crash with surviving worker/God, a second crash spanning the provider exit, both without replay, self-exit provider/runner faults, retained-Change retry, cancellation, and exact teardown'
