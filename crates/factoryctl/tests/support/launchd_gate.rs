@@ -625,7 +625,16 @@ fn finalize_receipt(
                     "private root identity changed since {service} was declared"
                 )));
             }
+            // An absent claim is never a match. The field is defaulted so an
+            // older receipt still decodes, and without this an empty marker
+            // file would satisfy an empty token and authorise the deletion.
             let marker = receipt.runtime_root.join(ROOT_MARKER);
+            if receipt.claim_token.is_empty() {
+                return Err(retain(format!(
+                    "the receipt for {service} carries no claim; refusing to delete {}",
+                    receipt.runtime_root.display()
+                )));
+            }
             if fs::read(&marker).ok().as_deref() != Some(receipt.claim_token.as_bytes()) {
                 return Err(retain(format!(
                     "{} does not claim {service}; refusing to delete it",

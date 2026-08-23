@@ -408,6 +408,66 @@ fn each_invocation_gets_its_own_unguessable_claim() {
     );
 }
 
+/// An absent claim must never match. `claim_token` is defaulted so older
+/// receipts still decode, which makes the empty string a value the marker
+/// could hold -- and an empty marker file would then authorise deletion
+/// without anyone knowing a token.
+#[test]
+fn an_empty_claim_never_authorises_a_deletion() {
+    let world = World::new("emptyclaim");
+    let launchctl = world.launchctl();
+    let victim = world.directory.path().join("victim");
+    fs::create_dir(&victim).unwrap();
+    fs::set_permissions(&victim, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(victim.join("precious"), b"keep me").unwrap();
+    fs::write(victim.join(".dark-factory-launchd-gate"), b"").unwrap();
+
+    plant(&world.ledger, &world.label, &victim, "");
+
+    let error = resume(&world.ledger, &launchctl).unwrap_err();
+    assert!(matches!(error, GateError::Retained { .. }), "{error}");
+    assert!(
+        victim.join("precious").exists(),
+        "an empty marker satisfied an empty claim"
+    );
+}
+
+/// A receipt written before `claim_token` and `observed_pids` existed must
+/// still decode and be acted on. If it stopped decoding, every later run
+/// would fail on a receipt nobody could even identify.
+#[test]
+fn a_receipt_from_an_earlier_build_still_decodes_and_is_acted_on() {
+    let world = World::new("oldschema");
+    let launchctl = world.launchctl();
+    let identity = fs::symlink_metadata(&world.root).unwrap();
+    fs::write(
+        world.ledger.join(format!("{}.json", world.label)),
+        serde_json::to_vec(&serde_json::json!({
+            "domain": "gui/501",
+            "label": world.label,
+            "plist": world.root.join("x.plist"),
+            "runtime_root": world.root,
+            "owner_uid": rustix::process::getuid().as_raw(),
+            "root_device": identity.dev(),
+            "root_inode": identity.ino(),
+            "staged_digest": "",
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let error = resume(&world.ledger, &launchctl).unwrap_err();
+    let message = error.to_string();
+    assert!(
+        !message.contains("unreadable"),
+        "an earlier-build receipt stopped decoding: {message}"
+    );
+    assert!(
+        message.contains("carries no claim"),
+        "expected the claim guard to refuse it, got: {message}"
+    );
+}
+
 /// The recorded device and inode must still be revalidated in their own
 /// right: a receipt describing a different directory than the one now at the
 /// path is not a receipt this cleanup may act on.
