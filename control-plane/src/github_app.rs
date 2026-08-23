@@ -784,9 +784,14 @@ fn free_of_operation_marker(value: &str) -> Result<(), OperationError> {
 /// The refusal is by path segment, not by prefix. A tree entry may name a
 /// directory as a blob, which replaces the whole subtree, so `.github` and
 /// `.github/workflows` must be refused as paths in their own right and not
-/// only as prefixes of a file inside them. `.github` itself is refused
-/// because nothing under the `workflows` permission protects CODEOWNERS,
-/// `dependabot.yml`, or the issue templates that share that directory.
+/// only as prefixes of a file inside them.
+///
+/// The review and dependency policy files are refused by name for the same
+/// reason. Refusing the `.github` tree stops an agent destroying them
+/// wholesale but not rewriting one of them in place, and an agent that can
+/// edit CODEOWNERS can remove itself from required review — the same
+/// escalation, reached one file at a time. GitHub reads CODEOWNERS from the
+/// repository root, `.github/`, and `docs/`, so all three are named.
 fn valid_repository_path(value: &str) -> Result<(), OperationError> {
     let mut segments = value.split('/');
     let github_authority = segments
@@ -795,6 +800,14 @@ fn valid_repository_path(value: &str) -> Result<(), OperationError> {
         && segments
             .next()
             .is_none_or(|segment| segment.eq_ignore_ascii_case("workflows"));
+    let review_authority = matches!(
+        value,
+        "CODEOWNERS"
+            | ".github/CODEOWNERS"
+            | "docs/CODEOWNERS"
+            | ".github/dependabot.yml"
+            | ".github/dependabot.yaml"
+    );
     let valid = !value.is_empty()
         && value.len() <= 240
         && !value.starts_with('/')
@@ -806,7 +819,8 @@ fn valid_repository_path(value: &str) -> Result<(), OperationError> {
         && value
             .chars()
             .all(|character| !character.is_control() && character != '\\')
-        && !github_authority;
+        && !github_authority
+        && !review_authority;
     valid.then_some(()).ok_or(OperationError::InvalidInput)
 }
 
@@ -2157,10 +2171,11 @@ mod tests {
             "src/lib.rs",
             "docs/development/WORKFLOW.md",
             "a.b_c-d/e.rs",
-            // Only the `workflows` subtree is off limits inside `.github`;
-            // an ordinary file beside it stays publishable.
-            ".github/CODEOWNERS",
+            // An ordinary file beside the refused ones stays publishable.
+            ".github/ISSUE_TEMPLATE/bug.yml",
+            ".github/PULL_REQUEST_TEMPLATE.md",
             ".githubbed/notes.md",
+            "docs/codeowners-guidance.md",
         ] {
             assert!(
                 valid_repository_path(allowed).is_ok(),
@@ -2180,6 +2195,13 @@ mod tests {
             // installation protects.
             ".github/workflows",
             ".github",
+            // An agent that can rewrite CODEOWNERS can remove itself from
+            // required review. Refusing only the tree left that reachable one
+            // file at a time.
+            "CODEOWNERS",
+            ".github/CODEOWNERS",
+            "docs/CODEOWNERS",
+            ".github/dependabot.yml",
             ".GitHub/Workflows/ci.yml",
             ".github/workflows/nested/deep.yml",
             "",
