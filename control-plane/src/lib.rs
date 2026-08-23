@@ -259,10 +259,17 @@ async fn ready(State(state): State<BrokerState>) -> Response {
     match (state.deployment, state.maintainer.as_ref()) {
         #[cfg(target_arch = "wasm32")]
         (Deployment::Cloudflare, Some(maintainer)) if maintainer.ready().await.is_ok() => {
-            // `maintainer.ready()` has already proved the one live dependency the MCP
-            // surface shares. Re-verifying here doubled every readiness probe's
-            // outbound GitHub work for no additional proof.
-            if state.mcp.is_some() {
+            // Report the operations surface ready only when its own live
+            // dependency answers. Gating on configuration alone let a Worker
+            // that could not reach Cloudflare Access at all still advertise
+            // `mcp_pr_create_review_checks` while every call returned 401.
+            if let Some(mcp) = state.mcp.as_ref() {
+                if mcp.ready().await.is_err() {
+                    return json_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        r#"{"status":"unavailable","maintainer_webhook":"inactive","maintainer_operations":"inactive","product_webhook":"inactive","operator_api":"inactive"}"#,
+                    );
+                }
                 json_response(
                     StatusCode::OK,
                     r#"{"status":"ready","maintainer_webhook":"signed_ping_with_app_verification","maintainer_operations":"mcp_pr_create_review_checks","product_webhook":"inactive","operator_api":"inactive"}"#,

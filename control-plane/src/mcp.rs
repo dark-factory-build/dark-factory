@@ -38,6 +38,14 @@ impl McpState {
             journal,
         }
     }
+
+    /// Cloudflare Access is this surface's own live dependency, and the App
+    /// authority has already been proved by the maintainer readiness path, so
+    /// this adds a signal instead of repeating one.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn ready(&self) -> Result<(), ()> {
+        self.access.ready().await.map_err(|_| ())
+    }
 }
 
 #[worker::send]

@@ -78,8 +78,49 @@ impl AccessAuthority {
         Ok(())
     }
 
+    /// Prove the live dependency the MCP surface actually has.
+    ///
+    /// Readiness previously reported the operations surface ready whenever it
+    /// was merely configured, so a Worker that could not reach Cloudflare
+    /// Access at all still advertised `mcp_pr_create_review_checks` while every
+    /// authenticated call returned 401. Fetch the signing keys and require one
+    /// usable RS256 key, which is the same document `authorize` depends on.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn ready(&self) -> Result<(), Error> {
+        let keys = self.certs().await.inspect_err(|_| {
+            worker::console_error!("readiness: cloudflare access signing keys unavailable");
+        })?;
+        keys.keys
+            .iter()
+            .any(|key| {
+                key.kind == "RSA"
+                    && key.algorithm == "RS256"
+                    && key.usage == "sig"
+                    && usable_modulus(&key.modulus)
+                    && key.exponent == "AQAB"
+            })
+            .then_some(())
+            .ok_or(Error::Unauthorized)
+            .inspect_err(|_| {
+                worker::console_error!("readiness: no usable cloudflare access signing key");
+            })
+    }
+
     #[cfg(target_arch = "wasm32")]
     async fn signing_key(&self, kid: &str) -> Result<JsonWebKey, Error> {
+        let keys = self.certs().await?;
+        let mut matches = keys.keys.into_iter().filter(|key| {
+            key.kid == kid && key.kind == "RSA" && key.algorithm == "RS256" && key.usage == "sig"
+        });
+        let key = matches.next().ok_or(Error::Unauthorized)?;
+        if matches.next().is_some() || !usable_modulus(&key.modulus) || key.exponent != "AQAB" {
+            return Err(Error::Unauthorized);
+        }
+        Ok(key)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    async fn certs(&self) -> Result<JsonWebKeySet, Error> {
         use futures_util::TryStreamExt as _;
         use worker::{Fetch, Headers, Method, Request, RequestInit, RequestRedirect};
 
@@ -118,24 +159,16 @@ impl AccessAuthority {
             }
             bytes.append(&mut chunk);
         }
-        let keys: JsonWebKeySet =
-            serde_json::from_slice(&bytes).map_err(|_| Error::Unauthorized)?;
-        let mut matches = keys.keys.into_iter().filter(|key| {
-            key.kid == kid && key.kind == "RSA" && key.algorithm == "RS256" && key.usage == "sig"
-        });
-        let key = matches.next().ok_or(Error::Unauthorized)?;
-        if matches.next().is_some()
-            || key.modulus.len() < 342
-            || key.modulus.len() > 1_024
-            || key.exponent != "AQAB"
-            || general_purpose::URL_SAFE_NO_PAD
-                .decode(&key.modulus)
-                .is_err()
-        {
-            return Err(Error::Unauthorized);
-        }
-        Ok(key)
+        serde_json::from_slice(&bytes).map_err(|_| Error::Unauthorized)
     }
+}
+
+/// The bounds `signing_key` has always enforced, shared so readiness proves the
+/// same key shape it will later verify against rather than a weaker one.
+#[cfg(target_arch = "wasm32")]
+fn usable_modulus(modulus: &str) -> bool {
+    (342..=1_024).contains(&modulus.len())
+        && general_purpose::URL_SAFE_NO_PAD.decode(modulus).is_ok()
 }
 
 #[cfg(target_arch = "wasm32")]

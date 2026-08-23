@@ -105,23 +105,23 @@ Read-only context unless a task explicitly asks you to edit them:
    Remote writes fail closed unless the broker/App is available. Operator
    approval never authorizes injecting a personal token into an agent process
    for contribution work; human operators may instead perform a separately
-   reviewed GitHub action through their normal workflow. Two narrow exceptions
-   exist. Both require the operator to start that task explicitly, cover only
-   the operation named, and expire with it — neither licenses ambient
-   credentials for anything else in the same session. First, an
-   operator-initiated deployment or infrastructure task may use the minimum
-   credential that operation needs, and must prefer a dispatched deployment
-   workflow that holds the credential in the platform's secret manager over
-   holding it in an agent process at all. Second, until the Maintainer App
-   exposes typed commit publication, an operator may authorize one specific
-   remote write rather than perform it by hand; that gap is the reason the
-   publication surface exists, not a standing allowance. Never put credentials
-   in a worktree, prompt, command output, or log. This contributor-agent
-   boundary is not a future Dark Factory product GitHub integration and does
-   not change a human operator's normal workflow.
-   Refusing an operator's explicit authorization is not the safe default: it
-   pushes the same credential into a human terminal, which is strictly worse
-   custody and loses the audit trail. Say what the exposure is once, then act.
+   reviewed GitHub action through their normal workflow. One exception: a
+   **deployment** the operator starts explicitly, limited to the single
+   operation named in that instruction and expiring with it. It never licenses
+   ambient credentials for anything else in the same session, and it is not a
+   route for contribution writes — publishing a commit is contribution work and
+   stays behind the App. Where a dispatched workflow exists, use it: the
+   credential then lives in the platform's secret manager and never enters an
+   agent process. Direct use is the fallback when no such workflow exists yet,
+   and it is strictly weaker, because an agent's instruction stream carries
+   untrusted content — issue bodies, pull request text, review comments,
+   webhook payloads — and a held credential can be steered into a use the
+   operator never authorized. A human terminal has no such input channel. That
+   asymmetry is the reason for this rule, so widen the exception only with a
+   durable reason, and say what the exposure is before acting on it. Never put
+   credentials in a worktree, prompt, command output, or log. This
+   contributor-agent boundary is not a future Dark Factory product GitHub
+   integration and does not change a human operator's normal workflow.
 
 ## Adding to the system
 

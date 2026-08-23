@@ -173,13 +173,51 @@ lookup and interactive prompting are disabled. A host may instead inject a
 short-lived, repository-scoped read credential for checkout without exposing
 it to the agent. If no authorized surface is available, authenticated access
 stops without contacting the remote. There is no token fallback for agent
-writes: operator approval does not authorize injecting `GH_TOKEN`,
-`GITHUB_TOKEN`, a personal access token, or another write credential into an
-agent process. Never use interactive authentication, write a credential into a
-worktree or repository, or expose it through a prompt, command output, or log.
+*contribution* writes: operator approval does not authorize injecting
+`GH_TOKEN`, `GITHUB_TOKEN`, a personal access token, or another write
+credential into an agent process to push branches, publish commits, or open
+pull requests. Those go through the App surface, or a human performs them.
+Deployment is the one exception, and it is narrow: see `AGENTS.md` rule 14 and
+"Deploying the control-plane" below. Never use interactive authentication,
+write a credential into a worktree or repository, or expose it through a
+prompt, command output, or log.
 This is a contributor-agent workflow boundary, not the future Dark Factory
 product GitHub integration. Human operators may continue to use their normal
 Git and GitHub CLI configuration for separately reviewed human actions.
+
+## Deploying the control-plane
+
+`maintainer.darkfactory.build` runs the `dark-factory-control-plane` Worker.
+Deploy it by dispatching the **Deploy control-plane** workflow with the reviewed
+tree SHA-1; the run proves the checkout matches that tree, runs
+`control-plane/scripts/local-ci.sh`, uploads a version, proves every authority
+secret was inherited, promotes it, verifies `/healthz` and `/readyz`, and rolls
+the previous version back if the live check fails.
+
+Routes are a non-versioned Cloudflare setting, so promoting a version swaps code
+atomically behind the attached hostname. Detaching the production hostname to
+ship a code change is a mistake, not a procedure — it was briefly documented as
+one, and it causes an outage for no benefit.
+
+Worker secrets persist across versions, so a routine deployment needs only
+`CLOUDFLARE_API_TOKEN`. The GitHub App private key and the webhook secret are
+needed for first activation and rotation alone, and never for shipping code.
+
+The credential lives as an environment secret on the `production` GitHub
+environment. That scopes it to jobs naming the environment, which is necessary
+and not sufficient: a dispatch runs the workflow file from the ref it is
+dispatched against, and `dark-factory-mac` is a persistent runner shared with
+CI (#54). Both gaps are closed by settings on that environment — **required
+reviewers** and **deployment branches restricted to `main`** — which the
+workflow file cannot assert for itself. Without them the credential is only as
+protected as write access to the repository.
+
+`/readyz` is the deployment's real proof: it returns ready only when the Durable
+Object answers, the GitHub App authority verifies, and Cloudflare Access serves
+a usable signing key. An unauthenticated `/mcp` 401 proves nothing about Access,
+because the handler rejects a missing header before making any network call.
+Proving authenticated MCP end to end needs an Access service token and a policy
+that includes it; until then that leg is verified by hand.
 
 Public state may include a milestone, exact ref/SHA, checks, links, and next
 operator action. Attempt identities, prompts, guidance, raw provider output,

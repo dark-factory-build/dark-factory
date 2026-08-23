@@ -42,19 +42,28 @@ fn production_runtime_is_cloudflare_only() {
 /// integration test could reach the affected paths. Assert it over the source instead.
 #[test]
 fn no_outbound_request_uses_a_redirect_mode_workers_rejects() {
-    for source in [
-        "src/access.rs",
-        "src/github_app.rs",
-        "src/journal.rs",
-        "src/lib.rs",
-        "src/maintainer.rs",
-        "src/mcp.rs",
-    ] {
+    // Walk the directory rather than list files: an enumerated allowlist would
+    // silently stop covering the next module added, and the next module added
+    // on this branch is the one that publishes commits.
+    let source_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut checked = 0_usize;
+    for entry in fs::read_dir(&source_dir).expect("src/ is readable") {
+        let path = entry.expect("readable directory entry").path();
+        if path.extension().is_none_or(|extension| extension != "rs") {
+            continue;
+        }
+        let source = fs::read_to_string(&path).expect("readable source file");
         assert!(
-            !project_file(source).contains("RequestRedirect::Error"),
-            "{source} builds an outbound request Workers will refuse to construct"
+            !source.contains("RequestRedirect::Error"),
+            "{} builds an outbound request Workers will refuse to construct",
+            path.display()
         );
+        checked += 1;
     }
+    assert!(
+        checked >= 6,
+        "expected to scan every module, scanned {checked}"
+    );
 }
 
 #[test]
