@@ -1879,7 +1879,12 @@ fn validate_installation(
         (installation.account.id != owner_id).then_some("account_id"),
         (installation.repository_selection != "selected").then_some("repository_selection"),
         (!permission_at_least(&installation.permissions, "checks", "read")).then_some("checks"),
-        (!permission_at_least(&installation.permissions, "contents", "read")).then_some("contents"),
+        // `publish_commit` and `merge_pull_request_at_head` both mint
+        // `contents: write`. Accepting a read-only installation let readiness
+        // pass and then failed at token mint, where GitHub's 422 reaches the
+        // caller as an opaque "authority is unavailable".
+        (!permission_at_least(&installation.permissions, "contents", "write"))
+            .then_some("contents"),
         (!permission_at_least(&installation.permissions, "metadata", "read")).then_some("metadata"),
         (!permission_at_least(&installation.permissions, "pull_requests", "write"))
             .then_some("pull_requests"),
@@ -2128,6 +2133,19 @@ mod tests {
         .unwrap();
         assert_eq!(
             validate_installation(&insufficient, 4_673_420, 109_233_175).err(),
+            Some(Error::Unavailable)
+        );
+
+        // `publish_commit` and `merge_pull_request_at_head` mint `contents:
+        // write`. A read-only installation used to pass here and pass
+        // readiness, then fail at token mint where GitHub's refusal reaches
+        // the caller as an opaque "authority is unavailable".
+        let read_only: Installation = serde_json::from_str(
+            r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"checks":"read","contents":"read","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            validate_installation(&read_only, 4_673_420, 109_233_175).err(),
             Some(Error::Unavailable)
         );
     }

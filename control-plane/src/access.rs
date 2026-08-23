@@ -84,7 +84,12 @@ impl AccessAuthority {
                 .and_then(|payload| general_purpose::URL_SAFE_NO_PAD.decode(payload).ok())
                 .map(|bytes| match serde_json::from_slice::<Claims>(&bytes) {
                     Ok(_) => "claims parse succeeded on retry".to_owned(),
-                    Err(error) => error.to_string(),
+                    // serde names the offending claim first and the offending
+                    // value second, so a prefix keeps the diagnosis and drops
+                    // the payload. Nothing here is authenticated yet: without
+                    // the bound, an unauthenticated request could write its own
+                    // multi-kilobyte string into the log on demand.
+                    Err(error) => truncated(&error.to_string(), 160),
                 })
                 .unwrap_or_else(|| "payload was not decodable base64url".to_owned());
             worker::console_error!("access assertion rejected: {reason}");
@@ -425,6 +430,15 @@ fn valid_email(value: &str) -> Result<String, Error> {
 
 /// A Cloudflare Access service-token client id: 32 lowercase hex characters
 /// followed by `.access`.
+/// Bound a diagnostic string on a character boundary. Byte slicing would
+/// panic mid-codepoint on the multi-byte input this exists to bound.
+fn truncated(value: &str, limit: usize) -> String {
+    match value.char_indices().nth(limit) {
+        Some((end, _)) => format!("{}…", &value[..end]),
+        None => value.to_owned(),
+    }
+}
+
 fn valid_service_token_id(value: &str) -> bool {
     value
         .strip_suffix(".access")
