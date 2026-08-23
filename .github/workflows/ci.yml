@@ -2,6 +2,11 @@ name: CI
 
 on:
   pull_request:
+  # A merge queue tests `main` + every entry ahead in the queue + this one,
+  # on a temporary `gh-readonly-queue/**` ref, and merges only if that exact
+  # combination is green. Without this trigger the queue would wait forever
+  # for a `required` context that never reports.
+  merge_group:
   push:
     branches: [main]
   workflow_dispatch:
@@ -11,7 +16,9 @@ permissions:
 
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.sha }}
-  cancel-in-progress: true
+  # Never cancel a queue run: the merge it gates would be left waiting on a
+  # context that will never report, stalling every entry behind it.
+  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 
 jobs:
   # The macOS job is the release-compatible source gate. Linux uses the same
@@ -26,7 +33,11 @@ jobs:
   # tracked follow-up). Not duplicated here on purpose, so there's one
   # place to keep accurate instead of two.
   checks:
-    runs-on: ${{ github.event_name == 'pull_request' && 'macos-latest' || 'dark-factory-mac' }}
+    # `merge_group` is grouped with `pull_request`, not left to the fallback.
+    # A queue run gates a merge exactly as a pull request does, so it belongs
+    # on the ephemeral hosted runner; letting it fall through would quietly
+    # route every gating run onto the persistent shared runner (#54).
+    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'macos-latest' || 'dark-factory-mac' }}
     timeout-minutes: 45
     steps:
       # No actions/checkout: codeload.github.com (which serves an action's

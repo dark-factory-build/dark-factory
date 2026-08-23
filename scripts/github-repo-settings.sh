@@ -62,7 +62,15 @@ apply_ruleset() {
     fi
 }
 
-step "ruleset: main-protect (required aggregate + linear history + no force-push/delete; no bypass)"
+# `strict_required_status_checks_policy` is deliberately FALSE, and the merge
+# queue is why. Strict demands every open pull request be rebased onto main and
+# fully re-tested after any merge, so with more than one branch in flight each
+# merge invalidates the next: update-branch, wait a full CI run, merge, repeat.
+# The queue gives the same guarantee without the serialisation — it tests
+# main + everything ahead in the queue + this entry, and merges only that exact
+# combination — so strict would add a per-merge re-run for a property the queue
+# already establishes. GitHub also expects strict off when a queue is enabled.
+step "ruleset: main-protect (required aggregate + linear history + merge queue + no force-push/delete; no bypass)"
 apply_ruleset main-protect '{
   "name": "main-protect",
   "target": "branch",
@@ -73,8 +81,16 @@ apply_ruleset main-protect '{
     { "type": "deletion" },
     { "type": "non_fast_forward" },
     { "type": "required_linear_history" },
+    { "type": "merge_queue", "parameters": {
+        "merge_method": "SQUASH",
+        "grouping_strategy": "ALLGREEN",
+        "max_entries_to_build": 5,
+        "max_entries_to_merge": 5,
+        "min_entries_to_merge": 1,
+        "min_entries_to_merge_wait_minutes": 5,
+        "check_response_timeout_minutes": 60 } },
     { "type": "required_status_checks", "parameters": {
-        "strict_required_status_checks_policy": true,
+        "strict_required_status_checks_policy": false,
         "required_status_checks": [ { "context": "required", "integration_id": 15368 } ] } }
   ]
 }'
