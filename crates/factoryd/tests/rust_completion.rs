@@ -715,8 +715,7 @@ async fn an_externally_killed_verifier_converges_on_its_published_result_after_g
         "the verifier never reached the staged test binary",
     )
     .await;
-    let effect = effect_resources(&state, &fixture.run_id).await;
-    let leader = locator_pid(&effect.0.locator);
+    let leader = registered_verifier_leader(&state, &fixture.run_id).await;
     let temporary = fixture.artifacts_root.join("tmp").join(run_nonce());
     let result_path = temporary.join("result.json");
     assert!(!result_path.exists());
@@ -1029,19 +1028,25 @@ async fn snapshot(
     (run, check)
 }
 
-async fn effect_resources(state: &DaemonState, run_id: &RunId) -> (KernelResource, KernelResource) {
+/// The exact PID the daemon registered as both the verifier effect process and
+/// its process-group leader.
+async fn registered_verifier_leader(state: &DaemonState, run_id: &RunId) -> u32 {
     let (_, resources, _) = kernel(state, run_id).await;
-    let find = |kind| {
+    let locator = |kind| {
         resources
             .iter()
             .find(|resource| resource.kind == kind)
             .unwrap_or_else(|| panic!("the verifier registered no {kind:?} resource"))
+            .locator
             .clone()
     };
-    (
-        find(KernelResourceKind::EffectProcess),
-        find(KernelResourceKind::EffectGroup),
-    )
+    let leader = locator_number(&locator(KernelResourceKind::EffectProcess), "pid");
+    assert_eq!(
+        leader,
+        locator_number(&locator(KernelResourceKind::EffectGroup), "pgid"),
+        "the verifier effect must lead its own process group"
+    );
+    leader
 }
 
 async fn task_status(state: &DaemonState, fixture: &Fixture) -> TaskStatus {
@@ -1146,8 +1151,8 @@ fn runner_locator(pid: u32, runner_instance_id: &RunnerInstanceId) -> String {
     .to_string()
 }
 
-fn locator_pid(locator: &str) -> u32 {
-    serde_json::from_str::<serde_json::Value>(locator).unwrap()["pid"]
+fn locator_number(locator: &str, key: &str) -> u32 {
+    serde_json::from_str::<serde_json::Value>(locator).unwrap()[key]
         .as_u64()
         .unwrap()
         .try_into()
@@ -1195,10 +1200,8 @@ fn kill_and_reap(pid: u32) {
     let _ = rustix::process::kill_process(target, rustix::process::Signal::KILL);
     let deadline = Instant::now() + PROCESS_BUDGET;
     loop {
-        match waitpid(Some(target), WaitOptions::NOHANG) {
-            Ok(Some(_)) | Err(Errno::CHILD) => {}
-            Ok(None) | Err(_) => {}
-        }
+        // The verifier is this process's own child, so nothing else reaps it.
+        let _ = waitpid(Some(target), WaitOptions::NOHANG);
         if process_absent(pid) {
             return;
         }
