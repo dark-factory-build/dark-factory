@@ -52,6 +52,10 @@ fn wrangler_keeps_the_unconfigured_worker_private_and_inert() {
         "DARK_FACTORY_MAINTAINER_PERMISSION_REVISION",
         "DARK_FACTORY_MAINTAINER_REPOSITORY",
         "DARK_FACTORY_MAINTAINER_REPOSITORY_OWNER_ID",
+        "DARK_FACTORY_MAINTAINER_REPOSITORY_ID",
+        "DARK_FACTORY_MAINTAINER_OPERATOR_EMAIL_SHA256",
+        "DARK_FACTORY_CLOUDFLARE_ACCESS_TEAM_DOMAIN",
+        "DARK_FACTORY_CLOUDFLARE_ACCESS_AUD",
     ] {
         assert!(
             wrangler.contains(required_secret),
@@ -63,15 +67,46 @@ fn wrangler_keeps_the_unconfigured_worker_private_and_inert() {
 }
 
 #[test]
-fn durable_object_is_sharded_by_app_and_delivery_identity() {
+fn durable_object_is_sharded_by_app_and_exact_replay_identity() {
     let journal = project_file("src/journal.rs");
 
     assert!(journal.contains("pub struct MaintainerDeliveryJournal"));
     assert!(journal.contains("DARK_FACTORY_MAINTAINER_DELIVERIES"));
     assert!(journal.contains("delivery_shard_name"));
+    assert!(journal.contains("operation_shard_name"));
     assert!(journal.contains("app_id"));
     assert!(journal.contains("delivery_id"));
+    assert!(journal.contains("operation_id"));
+    assert!(journal.contains("0002_maintainer_operations.sql"));
     assert!(journal.contains("sha256"));
     assert!(!journal.contains("DATABASE_URL"));
     assert!(!journal.contains("neon_superuser"));
+}
+
+#[test]
+fn mcp_surface_is_repository_bound_and_typed() {
+    let mcp = project_file("src/mcp.rs");
+    let access = project_file("src/access.rs");
+
+    for tool in [
+        "maintainer_status",
+        "create_pull_request",
+        "submit_pull_request_review",
+        "observe_pull_request_checks",
+    ] {
+        assert!(mcp.contains(tool), "missing typed MCP tool: {tool}");
+    }
+    for forbidden in ["generic_request", "graphql", "shell", "access_token"] {
+        assert!(
+            !mcp.contains(forbidden),
+            "generic authority leaked: {forbidden}"
+        );
+    }
+    assert!(access.contains("cf-access-jwt-assertion"));
+    assert!(access.contains("cf-access-authenticated-user-email"));
+    assert!(access.contains("expected_email_digest"));
+    assert!(access.contains("cdn-cgi/access/certs"));
+    assert!(access.contains("verify_rs256"));
+    assert!(access.contains("claims.audience"));
+    assert!(access.contains("claims.issuer"));
 }

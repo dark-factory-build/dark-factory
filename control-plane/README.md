@@ -1,12 +1,13 @@
-# Dark Factory control plane (staging export)
+# Dark Factory control plane
 
 This directory is the self-contained staging export for the future
 `dark-factory-control-plane` service. It is not a `dark-factory` workspace
 member and never links to or runs inside `factoryd`.
 
-The current code proves one inert authority boundary. It is deployable as a
-Rust Cloudflare Worker backed by SQLite Durable Objects. Deployment state is
-verified separately; source control is not evidence that a route or App
+The service is a Rust Cloudflare Worker backed by SQLite Durable Objects. It
+keeps GitHub App credentials outside agent processes and exposes only reviewed,
+repository-bound operations over MCP. Deployment state is verified separately;
+source control is not evidence that a route, Access policy, or App
 configuration is live.
 
 ## Current surface
@@ -22,13 +23,21 @@ configuration is live.
   It verifies `X-Hub-Signature-256` over the exact body with HMAC-SHA-256,
   limits the body to 64 KiB, requires one value for every security header,
   requires an `integration` target, and binds the configured App ID.
-- A valid `ping` is the only acknowledged event. When the four App-authority
+- A valid `ping` is the only acknowledged event. When the six operation-authority
   bindings are present, acknowledgement also requires an RS256 App JWT, one
-  exact metadata-read-only selected-repository installation for the configured
-  `owner/repository` and numeric owner. This proof creates no installation
-  token. Every other authenticated event is journalled as `policy_rejected`
+  exact selected-repository installation for the configured repository name,
+  numeric repository ID, and numeric owner. Every other authenticated event is
+  journalled as `policy_rejected`
   and returns 422. No payload can create a task, message, prompt, provider run,
   or GitHub mutation.
+- `POST /mcp` is a stateless Streamable HTTP MCP JSON-RPC endpoint. It is
+  installed only with the complete operation authority and accepts requests
+  only after Cloudflare Access has supplied one authenticated JWT assertion and
+  the exact configured operator identity. It exposes four typed tools:
+  `maintainer_status`, exact-head pull-request creation, exact-head `COMMENT` or
+  `REQUEST_CHANGES` review submission, and exact-head check-run observation.
+  There is no generic GitHub proxy, arbitrary URL, repository selector, merge,
+  push, issue, shell, or credential-returning tool.
 - The product webhook and operator/PWA namespaces have no routes.
 
 Missing, empty, partial, or syntactically invalid authority produces the fixed
@@ -37,7 +46,7 @@ is not installed. An unusable key, live GitHub drift, or storage failure keeps
 the configured route fail-closed and returns 503 without acknowledging a
 delivery. Responses never contain configuration, GitHub, or storage errors.
 
-## Durable replay model
+## Durable replay and operation model
 
 The Worker binds one `MaintainerDeliveryJournal` SQLite Durable Object
 namespace. Object names include the configured App ID and one byte of the
@@ -61,6 +70,23 @@ consistent and transactionally isolated, with encrypted storage and point-in-
 time recovery. See the official [SQLite storage API], [Durable Object rules],
 and [data security] documentation.
 
+Maintainer writes use a separate reviewed table in the same Durable Object
+namespace. The UUID operation ID is bound to the SHA-256 digest of the complete
+typed request and one fixed operation kind. Its state machine is
+`planned -> executing -> completed`; `indeterminate` records an ambiguous
+external outcome. An atomic transition gives exactly one caller permission to
+invoke GitHub. A retry with the same ID and request replays the completed result
+or reconciles against the operation marker and exact commit IDs. A different
+request under the same ID conflicts. If an executing or indeterminate operation
+cannot be reconciled, it is never blindly submitted again.
+
+GitHub App installation tokens are minted only inside the Worker, scoped to the
+configured numeric repository, and downscoped per operation. They are held in
+zeroizing memory and are never returned or journalled. The permanent App may
+have additional installed capabilities, but readiness requires the minimum
+checks-read, contents-read, metadata-read, and pull-requests-write set; unused
+App-level authority is never copied into an operation token.
+
 [SQLite storage API]: https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/
 [Durable Object rules]: https://developers.cloudflare.com/durable-objects/best-practices/rules-of-durable-objects/
 [data security]: https://developers.cloudflare.com/durable-objects/reference/data-security/
@@ -78,7 +104,7 @@ runtime database role, Vercel adapter, or provider management API.
 - `preview_urls = false`;
 - no route or custom domain;
 - one capability-style Durable Object binding; and
-- seven required production secret bindings.
+- eleven required production secret bindings.
 
 The exact required bindings are:
 
@@ -91,17 +117,33 @@ The exact required bindings are:
 - `DARK_FACTORY_MAINTAINER_PRIVATE_KEY_PKCS8`: standard-base64 encoding of the
   App's unencrypted PKCS#8 DER private key;
 - `DARK_FACTORY_MAINTAINER_PERMISSION_REVISION`: exactly
-  `maintainer-metadata-v1` for this authority revision;
+  `maintainer-operations-v1` for this authority revision;
 - `DARK_FACTORY_MAINTAINER_REPOSITORY`: the exact safe `owner/repository`
-  name; and
+  name;
 - `DARK_FACTORY_MAINTAINER_REPOSITORY_OWNER_ID`: the exact positive numeric
-  owner ID.
+  owner ID;
+- `DARK_FACTORY_MAINTAINER_REPOSITORY_ID`: the exact positive numeric repository
+  ID; and
+- `DARK_FACTORY_MAINTAINER_OPERATOR_EMAIL_SHA256`: lowercase SHA-256 of the one
+  Cloudflare Access operator email after ASCII lowercasing;
+- `DARK_FACTORY_CLOUDFLARE_ACCESS_TEAM_DOMAIN`: the exact lowercase
+  `https://<team>.cloudflareaccess.com` issuer and key origin; and
+- `DARK_FACTORY_CLOUDFLARE_ACCESS_AUD`: the exact lowercase 64-hex application
+  audience tag.
 
 The revisions and numeric IDs are stored as secrets too. They are not
 confidential, but treating all authority settings identically avoids a
 dashboard/source split and makes a missing value block upload or deployment
 through Wrangler's required-secret validation. The App-authority group is
 all-or-nothing at runtime. There are no aliases or ambient fallbacks.
+
+Cloudflare Access Managed OAuth must protect the exact `/mcp` application path
+before the route receives traffic. The Worker also validates the injected JWT
+independently: it fetches the bounded key set from the configured team domain,
+matches one RS256 signing key by `kid`, verifies the signature with WebCrypto,
+and binds issuer, single audience, token type, time window, JWT email, injected
+email header, and configured email digest. An unprotected route still cannot
+forge those claims.
 
 Never put values in a checked-in file, `.env*`, `.dev.vars*`, a provider
 process, Dark Factory state, shell history, or the macOS Keychain. Cloudflare
@@ -140,7 +182,9 @@ The authoritative gate performs:
 7. a local `workerd` integration proof, including readiness, signed ping,
    exact concurrent replay, concurrent conflict, policy rejection, duplicate
    headers, the 64 KiB limit, persistence across runtime restart, absent future
-   routes, and invalid-config inactivity.
+   routes, and invalid-config inactivity. The native SQLite lane separately
+   proves operation replay, conflict, state transitions, and exactly one
+   concurrent effect claim. Live GitHub and Access calls are not made by CI.
 
 The gate installs `worker-build` 0.8.5 under ignored `.tools/` and uses the
 project-local locked Wrangler. It creates no `.env` file, calls no live API,
@@ -156,15 +200,19 @@ operator-authorized run in this order:
 2. a disposable Cloudflare account or isolated Worker proof using distinct
    test bindings and no production GitHub App;
 3. review of the exact no-traffic secret-staging and route/domain commands;
-4. creation of the permanent `Dark Factory Maintainer` GitHub App and its
+4. verification of the permanent `Dark Factory Maintainer` GitHub App and its
    exact webhook secret;
 5. upload of one exact Worker version with required secrets while it has no
    public route;
-6. verification of the version, Durable Object binding, and deployment
-   configuration without reading secret values;
-7. an explicit deployment/route decision, followed by `/healthz`, `/readyz`,
-   signed ping, replay, conflict, and failure probes; and
-8. only then, activation of the GitHub webhook.
+6. configuration of a Cloudflare Access self-hosted application for the exact
+   `/mcp` path, with Managed OAuth and only the configured operator identity;
+7. verification of the version, Durable Object binding, Access application,
+   and deployment configuration without reading secret values;
+8. a route activation followed by `/healthz`, `/readyz`, signed ping, replay,
+   conflict, unauthenticated MCP rejection, authenticated MCP initialization,
+   and `maintainer_status`; and
+9. connection of the remote MCP server to Codex/ChatGPT, followed by use of its
+   typed tools for the next PR under the normal independent-review rule.
 
 Cloudflare account credentials, GitHub App credentials, route changes, and
 deployments remain operator authority. Tests and review never exercise them.
@@ -182,4 +230,5 @@ the Durable Object commit. Queues are at-least-once, so the Durable Object
 identity remains the deduplication authority. Long-running typed effects may
 later use Workflows, but every external GitHub mutation still needs a durable
 operation key and reconciliation state for ambiguous outcomes. Those are
-separate reviewed increments, not abstractions added to this ping bootstrap.
+implemented for the first pull-request operations; each future mutation still
+requires its own reviewed schema, policy, reconciliation query, and tests.
