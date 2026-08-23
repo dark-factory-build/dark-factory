@@ -729,12 +729,27 @@ fn valid_operation_id(value: &str) -> Result<(), OperationError> {
 
 /// A path inside the repository, as a commit may address it.
 ///
-/// `.github/workflows/` is refused explicitly. GitHub already blocks it without
-/// the `workflows` permission, which this App deliberately does not hold, but a
-/// policy-checked surface should state the boundary rather than depend on a
-/// permission staying un-granted: an agent that could rewrite the CI gating its
-/// own work would be escalating its authority.
+/// The `.github` authority tree is refused explicitly. GitHub already blocks
+/// `.github/workflows/` without the `workflows` permission, which this App
+/// deliberately does not hold, but a policy-checked surface should state the
+/// boundary rather than depend on a permission staying un-granted: an agent
+/// that could rewrite the CI gating its own work would be escalating its
+/// authority.
+///
+/// The refusal is by path segment, not by prefix. A tree entry may name a
+/// directory as a blob, which replaces the whole subtree, so `.github` and
+/// `.github/workflows` must be refused as paths in their own right and not
+/// only as prefixes of a file inside them. `.github` itself is refused
+/// because nothing under the `workflows` permission protects CODEOWNERS,
+/// `dependabot.yml`, or the issue templates that share that directory.
 fn valid_repository_path(value: &str) -> Result<(), OperationError> {
+    let mut segments = value.split('/');
+    let github_authority = segments
+        .next()
+        .is_some_and(|segment| segment.eq_ignore_ascii_case(".github"))
+        && segments
+            .next()
+            .is_none_or(|segment| segment.eq_ignore_ascii_case("workflows"));
     let valid = !value.is_empty()
         && value.len() <= 240
         && !value.starts_with('/')
@@ -746,7 +761,7 @@ fn valid_repository_path(value: &str) -> Result<(), OperationError> {
         && value
             .chars()
             .all(|character| !character.is_control() && character != '\\')
-        && !value.starts_with(".github/workflows/");
+        && !github_authority;
     valid.then_some(()).ok_or(OperationError::InvalidInput)
 }
 
@@ -2043,6 +2058,10 @@ mod tests {
             "src/lib.rs",
             "docs/development/WORKFLOW.md",
             "a.b_c-d/e.rs",
+            // Only the `workflows` subtree is off limits inside `.github`;
+            // an ordinary file beside it stays publishable.
+            ".github/CODEOWNERS",
+            ".githubbed/notes.md",
         ] {
             assert!(
                 valid_repository_path(allowed).is_ok(),
@@ -2055,6 +2074,15 @@ mod tests {
         // so the surface states the boundary rather than inheriting it.
         for refused in [
             ".github/workflows/ci.yml",
+            // A tree entry may name a directory as a blob, which replaces the
+            // whole subtree. A prefix test needing the trailing slash let
+            // `.github/workflows` delete every workflow, and `.github` delete
+            // CODEOWNERS and the issue templates, which no permission on this
+            // installation protects.
+            ".github/workflows",
+            ".github",
+            ".GitHub/Workflows/ci.yml",
+            ".github/workflows/nested/deep.yml",
             "",
             "/etc/passwd",
             "src/",
