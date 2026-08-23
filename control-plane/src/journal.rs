@@ -1,10 +1,12 @@
+#![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+
 #[cfg(feature = "development-sqlite")]
 use std::{path::Path, sync::Arc, time::Duration};
 
 #[cfg(feature = "development-sqlite")]
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
 use sha2::{Digest as _, Sha256};
 #[cfg(target_arch = "wasm32")]
@@ -18,11 +20,17 @@ use crate::maintainer::{Delivery, Disposition};
 #[cfg(target_arch = "wasm32")]
 pub(crate) const NAMESPACE_BINDING: &str = "DARK_FACTORY_MAINTAINER_DELIVERIES";
 #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
-const MIGRATION_COMPONENT: &str = "maintainer_webhook";
+const DELIVERY_MIGRATION_COMPONENT: &str = "maintainer_webhook";
 #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
-const MIGRATION_REVISION: &str = "0001";
+const DELIVERY_MIGRATION_REVISION: &str = "0001";
 #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
-const MIGRATION_SQL: &str = include_str!("../migrations/0001_maintainer_deliveries.sql");
+const DELIVERY_MIGRATION_SQL: &str = include_str!("../migrations/0001_maintainer_deliveries.sql");
+#[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+const OPERATION_MIGRATION_COMPONENT: &str = "maintainer_operations";
+#[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+const OPERATION_MIGRATION_REVISION: &str = "0002";
+#[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+const OPERATION_MIGRATION_SQL: &str = include_str!("../migrations/0002_maintainer_operations.sql");
 #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
 const MIGRATION_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS control_plane_migrations (
     component TEXT PRIMARY KEY,
@@ -52,6 +60,9 @@ pub(crate) enum Error {
     #[cfg(target_arch = "wasm32")]
     #[error("delivery journal lost a conflicting row")]
     MissingConflict,
+    #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+    #[error("operation journal transition is invalid")]
+    InvalidTransition,
     #[error("delivery journal schema differs from the reviewed migration")]
     InvalidSchema,
 }
@@ -73,6 +84,52 @@ pub(crate) enum Record {
     New,
     Replay(Disposition),
     Conflict,
+}
+
+#[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct Operation {
+    pub(crate) operation_id: String,
+    pub(crate) kind: String,
+    pub(crate) request_digest: String,
+}
+
+#[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum OperationRecord {
+    New,
+    Planned,
+    Claimed,
+    Executing,
+    Completed(String),
+    Indeterminate,
+    Conflict,
+}
+
+#[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+#[derive(Debug, Deserialize)]
+struct StoredOperation {
+    kind: String,
+    request_digest: String,
+    state: String,
+    result_json: Option<String>,
+}
+
+#[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+impl StoredOperation {
+    fn record(&self, operation: &Operation) -> Result<OperationRecord, Error> {
+        if self.kind != operation.kind || self.request_digest != operation.request_digest {
+            return Ok(OperationRecord::Conflict);
+        }
+        match (self.state.as_str(), self.result_json.as_ref()) {
+            ("planned", None) => Ok(OperationRecord::Planned),
+            ("executing", None) => Ok(OperationRecord::Executing),
+            ("completed", Some(result)) => Ok(OperationRecord::Completed(result.clone())),
+            ("indeterminate", None) => Ok(OperationRecord::Indeterminate),
+            _ => Err(Error::InvalidTransition),
+        }
+    }
 }
 
 #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
@@ -144,11 +201,60 @@ impl DeliveryJournal {
             Self::Unavailable => Err(Error::InvalidSchema),
         }
     }
+
+    #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+    pub(crate) async fn begin_operation(
+        &self,
+        operation: &Operation,
+    ) -> Result<OperationRecord, Error> {
+        match self {
+            #[cfg(target_arch = "wasm32")]
+            Self::Cloudflare(journal) => journal.begin_operation(operation).await,
+            #[cfg(feature = "development-sqlite")]
+            Self::Sqlite(journal) => {
+                let journal = journal.clone();
+                let operation = operation.clone();
+                tokio::task::spawn_blocking(move || journal.begin_operation(&operation)).await?
+            }
+            #[cfg(all(not(target_arch = "wasm32"), not(feature = "development-sqlite")))]
+            Self::Unavailable => Err(Error::InvalidSchema),
+        }
+    }
+
+    #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+    pub(crate) async fn mark_operation(
+        &self,
+        operation: &Operation,
+        transition: OperationTransition,
+    ) -> Result<OperationRecord, Error> {
+        match self {
+            #[cfg(target_arch = "wasm32")]
+            Self::Cloudflare(journal) => journal.mark_operation(operation, transition).await,
+            #[cfg(feature = "development-sqlite")]
+            Self::Sqlite(journal) => {
+                let journal = journal.clone();
+                let operation = operation.clone();
+                tokio::task::spawn_blocking(move || journal.mark_operation(&operation, transition))
+                    .await?
+            }
+            #[cfg(all(not(target_arch = "wasm32"), not(feature = "development-sqlite")))]
+            Self::Unavailable => Err(Error::InvalidSchema),
+        }
+    }
 }
 
 #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
-fn migration_digest() -> String {
-    hex::encode(Sha256::digest(MIGRATION_SQL.as_bytes()))
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum OperationTransition {
+    Executing,
+    Completed(String),
+    Indeterminate,
+}
+
+#[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+fn migration_digest(sql: &str) -> String {
+    hex::encode(Sha256::digest(sql.as_bytes()))
 }
 
 #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
@@ -202,6 +308,50 @@ impl CloudflareJournal {
         }
         Ok(response.json().await?)
     }
+
+    async fn begin_operation(&self, operation: &Operation) -> Result<OperationRecord, Error> {
+        self.operation_request("/operation/begin", operation, None)
+            .await
+    }
+
+    async fn mark_operation(
+        &self,
+        operation: &Operation,
+        transition: OperationTransition,
+    ) -> Result<OperationRecord, Error> {
+        self.operation_request("/operation/mark", operation, Some(transition))
+            .await
+    }
+
+    async fn operation_request(
+        &self,
+        path: &str,
+        operation: &Operation,
+        transition: Option<OperationTransition>,
+    ) -> Result<OperationRecord, Error> {
+        #[derive(Serialize)]
+        struct Message<'a> {
+            operation: &'a Operation,
+            transition: Option<OperationTransition>,
+        }
+        let stub = self
+            .namespace
+            .get_by_name(&operation_shard_name(self.app_id, &operation.operation_id))?;
+        let mut init = RequestInit::new();
+        init.with_method(Method::Post).with_body(Some(
+            serde_json::to_string(&Message {
+                operation,
+                transition,
+            })?
+            .into(),
+        ));
+        let request = Request::new_with_init(&format!("https://journal.internal{path}"), &init)?;
+        let mut response = stub.fetch_with_request(request).await?;
+        if response.status_code() != 200 {
+            return Err(Error::InvalidSchema);
+        }
+        Ok(response.json().await?)
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -210,6 +360,12 @@ fn delivery_shard_name(app_id: i64, delivery_id: &str) -> String {
     // every replay identity for one App on the same Durable Object.
     let sha256 = Sha256::digest(delivery_id.as_bytes());
     format!("maintainer:{app_id}:{:02x}", sha256[0])
+}
+
+#[cfg(target_arch = "wasm32")]
+fn operation_shard_name(app_id: i64, operation_id: &str) -> String {
+    let sha256 = Sha256::digest(operation_id.as_bytes());
+    format!("maintainer:{app_id}:operation:{:02x}", sha256[0])
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -242,6 +398,37 @@ impl DurableObject for MaintainerDeliveryJournal {
                     Err(_) => Response::error("journal unavailable", 503),
                 }
             }
+            (Method::Post, "/operation/begin") => {
+                #[derive(Deserialize)]
+                struct Message {
+                    operation: Operation,
+                }
+                let result = async {
+                    let message: Message = request.json().await?;
+                    begin_operation_cloudflare(&self.sql, &message.operation)
+                }
+                .await;
+                match result {
+                    Ok(record) => Response::from_json(&record),
+                    Err(_) => Response::error("journal unavailable", 503),
+                }
+            }
+            (Method::Post, "/operation/mark") => {
+                #[derive(Deserialize)]
+                struct Message {
+                    operation: Operation,
+                    transition: OperationTransition,
+                }
+                let result = async {
+                    let message: Message = request.json().await?;
+                    mark_operation_cloudflare(&self.sql, &message.operation, message.transition)
+                }
+                .await;
+                match result {
+                    Ok(record) => Response::from_json(&record),
+                    Err(_) => Response::error("journal unavailable", 503),
+                }
+            }
             _ => Response::error("not found", 404),
         }
     }
@@ -250,14 +437,24 @@ impl DurableObject for MaintainerDeliveryJournal {
 #[cfg(target_arch = "wasm32")]
 fn initialize_cloudflare_schema(sql: &SqlStorage) -> Result<(), Error> {
     sql.exec(MIGRATION_TABLE_SQL, None)?;
-    sql.exec(MIGRATION_SQL, None)?;
+    sql.exec(DELIVERY_MIGRATION_SQL, None)?;
+    sql.exec(OPERATION_MIGRATION_SQL, None)?;
     sql.exec(
         "INSERT INTO control_plane_migrations (component, revision, digest)
          VALUES (?, ?, ?) ON CONFLICT(component) DO NOTHING",
         vec![
-            MIGRATION_COMPONENT.into(),
-            MIGRATION_REVISION.into(),
-            migration_digest().into(),
+            DELIVERY_MIGRATION_COMPONENT.into(),
+            DELIVERY_MIGRATION_REVISION.into(),
+            migration_digest(DELIVERY_MIGRATION_SQL).into(),
+        ],
+    )?;
+    sql.exec(
+        "INSERT INTO control_plane_migrations (component, revision, digest)
+         VALUES (?, ?, ?) ON CONFLICT(component) DO NOTHING",
+        vec![
+            OPERATION_MIGRATION_COMPONENT.into(),
+            OPERATION_MIGRATION_REVISION.into(),
+            migration_digest(OPERATION_MIGRATION_SQL).into(),
         ],
     )?;
     audit_cloudflare_schema(sql)
@@ -285,6 +482,13 @@ fn audit_cloudflare_schema(sql: &SqlStorage) -> Result<(), Error> {
             None,
         )?
         .to_array::<SchemaRow>()?;
+    let operation_schema = sql
+        .exec(
+            "SELECT sql FROM sqlite_schema
+             WHERE type = 'table' AND name = 'maintainer_operations'",
+            None,
+        )?
+        .to_array::<SchemaRow>()?;
     let migration_schema = sql
         .exec(
             "SELECT sql FROM sqlite_schema
@@ -292,19 +496,30 @@ fn audit_cloudflare_schema(sql: &SqlStorage) -> Result<(), Error> {
             None,
         )?
         .to_array::<SchemaRow>()?;
-    let migration = sql
+    let delivery_migration = sql
         .exec(
             "SELECT revision, digest FROM control_plane_migrations WHERE component = ?",
-            vec![MIGRATION_COMPONENT.into()],
+            vec![DELIVERY_MIGRATION_COMPONENT.into()],
+        )?
+        .to_array::<MigrationRow>()?;
+    let operation_migration = sql
+        .exec(
+            "SELECT revision, digest FROM control_plane_migrations WHERE component = ?",
+            vec![OPERATION_MIGRATION_COMPONENT.into()],
         )?
         .to_array::<MigrationRow>()?;
     let exact = delivery_schema.len() == 1
-        && normalized_sql(&delivery_schema[0].sql) == expected_stored_sql(MIGRATION_SQL)
+        && normalized_sql(&delivery_schema[0].sql) == expected_stored_sql(DELIVERY_MIGRATION_SQL)
+        && operation_schema.len() == 1
+        && normalized_sql(&operation_schema[0].sql) == expected_stored_sql(OPERATION_MIGRATION_SQL)
         && migration_schema.len() == 1
         && normalized_sql(&migration_schema[0].sql) == expected_stored_sql(MIGRATION_TABLE_SQL)
-        && migration.len() == 1
-        && migration[0].revision == MIGRATION_REVISION
-        && migration[0].digest == migration_digest();
+        && delivery_migration.len() == 1
+        && delivery_migration[0].revision == DELIVERY_MIGRATION_REVISION
+        && delivery_migration[0].digest == migration_digest(DELIVERY_MIGRATION_SQL)
+        && operation_migration.len() == 1
+        && operation_migration[0].revision == OPERATION_MIGRATION_REVISION
+        && operation_migration[0].digest == migration_digest(OPERATION_MIGRATION_SQL);
     exact.then_some(()).ok_or(Error::InvalidSchema)
 }
 
@@ -345,6 +560,96 @@ fn record_cloudflare(sql: &SqlStorage, delivery: &Delivery) -> Result<Record, Er
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+fn begin_operation_cloudflare(
+    sql: &SqlStorage,
+    operation: &Operation,
+) -> Result<OperationRecord, Error> {
+    let insert = sql.exec(
+        "INSERT INTO maintainer_operations (operation_id, kind, request_digest, state)
+         VALUES (?, ?, ?, 'planned') ON CONFLICT(operation_id) DO NOTHING",
+        vec![
+            operation.operation_id.as_str().into(),
+            operation.kind.as_str().into(),
+            operation.request_digest.as_str().into(),
+        ],
+    )?;
+    if insert.rows_written() == 1 {
+        return Ok(OperationRecord::New);
+    }
+    stored_operation_cloudflare(sql, operation)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn stored_operation_cloudflare(
+    sql: &SqlStorage,
+    operation: &Operation,
+) -> Result<OperationRecord, Error> {
+    let stored = sql
+        .exec(
+            "SELECT kind, request_digest, state, result_json
+             FROM maintainer_operations WHERE operation_id = ?",
+            vec![operation.operation_id.as_str().into()],
+        )?
+        .to_array::<StoredOperation>()?;
+    match stored.as_slice() {
+        [stored] => stored.record(operation),
+        _ => Err(Error::MissingConflict),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn mark_operation_cloudflare(
+    sql: &SqlStorage,
+    operation: &Operation,
+    transition: OperationTransition,
+) -> Result<OperationRecord, Error> {
+    let (state, result, allowed) = transition_parts(&transition)?;
+    let update = sql.exec(
+        &format!(
+            "UPDATE maintainer_operations SET state = ?, result_json = ?, updated_at = unixepoch()
+             WHERE operation_id = ? AND kind = ? AND request_digest = ? AND state IN ({allowed})"
+        ),
+        vec![
+            state.into(),
+            SqlStorageValue::from(result),
+            operation.operation_id.as_str().into(),
+            operation.kind.as_str().into(),
+            operation.request_digest.as_str().into(),
+        ],
+    )?;
+    if update.rows_written() != 1 {
+        return stored_operation_cloudflare(sql, operation);
+    }
+    if matches!(transition, OperationTransition::Executing) {
+        return Ok(OperationRecord::Claimed);
+    }
+    stored_operation_cloudflare(sql, operation)
+}
+
+#[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+fn transition_parts(
+    transition: &OperationTransition,
+) -> Result<(&'static str, Option<String>, &'static str), Error> {
+    match transition {
+        OperationTransition::Executing => Ok(("executing", None, "'planned'")),
+        OperationTransition::Completed(result)
+            if (2..=16_384).contains(&result.len())
+                && serde_json::from_str::<serde_json::Value>(result).is_ok() =>
+        {
+            Ok((
+                "completed",
+                Some(result.clone()),
+                "'planned','executing','indeterminate'",
+            ))
+        }
+        OperationTransition::Indeterminate => {
+            Ok(("indeterminate", None, "'executing','indeterminate'"))
+        }
+        OperationTransition::Completed(_) => Err(Error::InvalidTransition),
+    }
+}
+
 #[cfg(feature = "development-sqlite")]
 #[derive(Clone)]
 pub(crate) struct SqliteJournal {
@@ -359,11 +664,25 @@ impl SqliteJournal {
         };
         let connection = journal.connection()?;
         connection.execute_batch(MIGRATION_TABLE_SQL)?;
-        connection.execute_batch(MIGRATION_SQL)?;
+        connection.execute_batch(DELIVERY_MIGRATION_SQL)?;
+        connection.execute_batch(OPERATION_MIGRATION_SQL)?;
         connection.execute(
             "INSERT INTO control_plane_migrations (component, revision, digest)
              VALUES (?1, ?2, ?3) ON CONFLICT(component) DO NOTHING",
-            params![MIGRATION_COMPONENT, MIGRATION_REVISION, migration_digest()],
+            params![
+                DELIVERY_MIGRATION_COMPONENT,
+                DELIVERY_MIGRATION_REVISION,
+                migration_digest(DELIVERY_MIGRATION_SQL)
+            ],
+        )?;
+        connection.execute(
+            "INSERT INTO control_plane_migrations (component, revision, digest)
+             VALUES (?1, ?2, ?3) ON CONFLICT(component) DO NOTHING",
+            params![
+                OPERATION_MIGRATION_COMPONENT,
+                OPERATION_MIGRATION_REVISION,
+                migration_digest(OPERATION_MIGRATION_SQL)
+            ],
         )?;
         audit_sqlite_schema(&connection)?;
         Ok(journal)
@@ -419,6 +738,60 @@ impl SqliteJournal {
         Ok(Record::New)
     }
 
+    fn begin_operation(&self, operation: &Operation) -> Result<OperationRecord, Error> {
+        let mut connection = self.connection()?;
+        audit_sqlite_schema(&connection)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = transaction.execute(
+            "INSERT INTO maintainer_operations (operation_id, kind, request_digest, state)
+             VALUES (?1, ?2, ?3, 'planned') ON CONFLICT(operation_id) DO NOTHING",
+            params![
+                operation.operation_id,
+                operation.kind,
+                operation.request_digest
+            ],
+        )?;
+        let record = if changed == 1 {
+            OperationRecord::New
+        } else {
+            stored_operation_sqlite(&transaction, operation)?
+        };
+        transaction.commit()?;
+        Ok(record)
+    }
+
+    fn mark_operation(
+        &self,
+        operation: &Operation,
+        transition: OperationTransition,
+    ) -> Result<OperationRecord, Error> {
+        let mut connection = self.connection()?;
+        audit_sqlite_schema(&connection)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (state, result, allowed) = transition_parts(&transition)?;
+        let sql = format!(
+            "UPDATE maintainer_operations SET state = ?1, result_json = ?2, updated_at = unixepoch()
+             WHERE operation_id = ?3 AND kind = ?4 AND request_digest = ?5 AND state IN ({allowed})"
+        );
+        let changed = transaction.execute(
+            &sql,
+            params![
+                state,
+                result,
+                operation.operation_id,
+                operation.kind,
+                operation.request_digest
+            ],
+        )?;
+        let record = if changed == 1 && matches!(transition, OperationTransition::Executing) {
+            OperationRecord::Claimed
+        } else {
+            stored_operation_sqlite(&transaction, operation)?
+        };
+        transaction.commit()?;
+        Ok(record)
+    }
+
     fn connection(&self) -> Result<Connection, rusqlite::Error> {
         let connection = Connection::open(self.database.as_ref())?;
         connection.busy_timeout(Duration::from_secs(5))?;
@@ -437,19 +810,177 @@ fn audit_sqlite_schema(connection: &Connection) -> Result<(), Error> {
             )
             .optional()
     };
-    let migration: Option<(String, String)> = connection
+    let delivery_migration: Option<(String, String)> = connection
         .query_row(
             "SELECT revision, digest FROM control_plane_migrations WHERE component = ?1",
-            [MIGRATION_COMPONENT],
+            [DELIVERY_MIGRATION_COMPONENT],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let operation_migration: Option<(String, String)> = connection
+        .query_row(
+            "SELECT revision, digest FROM control_plane_migrations WHERE component = ?1",
+            [OPERATION_MIGRATION_COMPONENT],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
     let exact = schema("maintainer_deliveries")?
-        .is_some_and(|sql| normalized_sql(&sql) == expected_stored_sql(MIGRATION_SQL))
+        .is_some_and(|sql| normalized_sql(&sql) == expected_stored_sql(DELIVERY_MIGRATION_SQL))
+        && schema("maintainer_operations")?.is_some_and(|sql| {
+            normalized_sql(&sql) == expected_stored_sql(OPERATION_MIGRATION_SQL)
+        })
         && schema("control_plane_migrations")?
             .is_some_and(|sql| normalized_sql(&sql) == expected_stored_sql(MIGRATION_TABLE_SQL))
-        && migration.is_some_and(|(revision, digest)| {
-            revision == MIGRATION_REVISION && digest == migration_digest()
+        && delivery_migration.is_some_and(|(revision, digest)| {
+            revision == DELIVERY_MIGRATION_REVISION
+                && digest == migration_digest(DELIVERY_MIGRATION_SQL)
+        })
+        && operation_migration.is_some_and(|(revision, digest)| {
+            revision == OPERATION_MIGRATION_REVISION
+                && digest == migration_digest(OPERATION_MIGRATION_SQL)
         });
     exact.then_some(()).ok_or(Error::InvalidSchema)
+}
+
+#[cfg(feature = "development-sqlite")]
+fn stored_operation_sqlite(
+    connection: &rusqlite::Connection,
+    operation: &Operation,
+) -> Result<OperationRecord, Error> {
+    let stored: StoredOperation = connection.query_row(
+        "SELECT kind, request_digest, state, result_json
+         FROM maintainer_operations WHERE operation_id = ?1",
+        [operation.operation_id.as_str()],
+        |row| {
+            Ok(StoredOperation {
+                kind: row.get(0)?,
+                request_digest: row.get(1)?,
+                state: row.get(2)?,
+                result_json: row.get(3)?,
+            })
+        },
+    )?;
+    stored.record(operation)
+}
+
+#[cfg(all(test, feature = "development-sqlite"))]
+mod operation_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn operation_state_is_idempotent_and_conflicts_fail_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let journal =
+            DeliveryJournal::open_development(&directory.path().join("journal.db")).unwrap();
+        let operation = Operation {
+            operation_id: "1c8a5c44-7f1f-11f0-952e-acde48001122".into(),
+            kind: "create_pull_request".into(),
+            request_digest: "a".repeat(64),
+        };
+        assert!(matches!(
+            journal.begin_operation(&operation).await.unwrap(),
+            OperationRecord::New
+        ));
+        assert!(matches!(
+            journal.begin_operation(&operation).await.unwrap(),
+            OperationRecord::Planned
+        ));
+        assert!(matches!(
+            journal
+                .mark_operation(&operation, OperationTransition::Executing)
+                .await
+                .unwrap(),
+            OperationRecord::Claimed
+        ));
+        assert!(matches!(
+            journal.begin_operation(&operation).await.unwrap(),
+            OperationRecord::Executing
+        ));
+        assert!(matches!(
+            journal
+                .mark_operation(&operation, OperationTransition::Indeterminate)
+                .await
+                .unwrap(),
+            OperationRecord::Indeterminate
+        ));
+        let result =
+            r#"{"number":297,"head_sha":"0123456789012345678901234567890123456789"}"#.to_owned();
+        assert!(
+            matches!(journal.mark_operation(&operation, OperationTransition::Completed(result.clone())).await.unwrap(), OperationRecord::Completed(stored) if stored == result)
+        );
+        assert!(
+            matches!(journal.begin_operation(&operation).await.unwrap(), OperationRecord::Completed(stored) if stored == result)
+        );
+
+        let conflict = Operation {
+            kind: "submit_pull_request_review".into(),
+            ..operation
+        };
+        assert!(matches!(
+            journal.begin_operation(&conflict).await.unwrap(),
+            OperationRecord::Conflict
+        ));
+    }
+
+    #[tokio::test]
+    async fn concurrent_effect_claim_has_exactly_one_winner() {
+        let directory = tempfile::tempdir().unwrap();
+        let journal =
+            DeliveryJournal::open_development(&directory.path().join("journal.db")).unwrap();
+        let operation = Operation {
+            operation_id: "2c8a5c44-7f1f-11f0-952e-acde48001122".into(),
+            kind: "submit_pull_request_review".into(),
+            request_digest: "b".repeat(64),
+        };
+        assert!(matches!(
+            journal.begin_operation(&operation).await.unwrap(),
+            OperationRecord::New
+        ));
+        let attempts = (0..8)
+            .map(|_| {
+                let journal = journal.clone();
+                let operation = operation.clone();
+                tokio::spawn(async move {
+                    journal
+                        .mark_operation(&operation, OperationTransition::Executing)
+                        .await
+                        .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut claimed = 0;
+        for attempt in attempts {
+            if matches!(attempt.await.unwrap(), OperationRecord::Claimed) {
+                claimed += 1;
+            }
+        }
+        assert_eq!(claimed, 1);
+        assert!(matches!(
+            journal.begin_operation(&operation).await.unwrap(),
+            OperationRecord::Executing
+        ));
+    }
+
+    #[tokio::test]
+    async fn operation_schema_drift_fails_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("journal.db");
+        let journal = DeliveryJournal::open_development(&database).unwrap();
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "DROP TABLE maintainer_operations;
+                 CREATE TABLE maintainer_operations (operation_id TEXT PRIMARY KEY);",
+            )
+            .unwrap();
+        let operation = Operation {
+            operation_id: "3c8a5c44-7f1f-11f0-952e-acde48001122".into(),
+            kind: "create_pull_request".into(),
+            request_digest: "c".repeat(64),
+        };
+        assert!(matches!(
+            journal.begin_operation(&operation).await,
+            Err(Error::InvalidSchema)
+        ));
+    }
 }

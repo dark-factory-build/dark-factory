@@ -94,11 +94,6 @@ impl MaintainerState {
         }
         Ok(())
     }
-
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) const fn has_app_authority(&self) -> bool {
-        self.app_authority.is_some()
-    }
 }
 
 #[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize)]
