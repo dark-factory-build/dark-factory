@@ -32,12 +32,20 @@ configuration is live.
   or GitHub mutation.
 - `POST /mcp` is a stateless Streamable HTTP MCP JSON-RPC endpoint. It is
   installed only with the complete operation authority and accepts requests
-  only after Cloudflare Access has supplied one authenticated JWT assertion and
-  the exact configured operator identity. It exposes four typed tools:
-  `maintainer_status`, exact-head pull-request creation, exact-head `COMMENT` or
-  `REQUEST_CHANGES` review submission, and exact-head check-run observation.
-  There is no generic GitHub proxy, arbitrary URL, repository selector, merge,
-  push, issue, shell, or credential-returning tool.
+  only after Cloudflare Access has supplied one authenticated JWT assertion
+  identifying exactly one of two configured principals: the operator's email
+  identity, or — when `DARK_FACTORY_CLOUDFLARE_ACCESS_SERVICE_TOKEN_ID` is
+  bound — one exact Access **service token**, which is how the surface is
+  reached headlessly with no human present. Each principal's claim set rejects
+  the other's shape, so neither can take the other's path. It exposes six
+  typed tools: `maintainer_status`, exact-head pull-request creation,
+  exact-head `COMMENT` or `REQUEST_CHANGES` review submission, exact-head
+  check-run observation, exact-head commit publication, and exact-head pull
+  request merge. Publication refuses the `.github` authority tree, and both
+  writes are bound to a stated head commit and to a durable operation ID.
+  There is no generic GitHub proxy, arbitrary URL, repository selector, issue,
+  shell, or credential-returning tool, and no way to move a ref other than
+  forward from the head the caller stated.
 - The product webhook and operator/PWA namespaces have no routes.
 
 Missing, empty, partial, or syntactically invalid authority produces the fixed
@@ -131,19 +139,39 @@ The exact required bindings are:
 - `DARK_FACTORY_CLOUDFLARE_ACCESS_AUD`: the exact lowercase 64-hex application
   audience tag.
 
+One further binding is deliberately outside the all-or-nothing group:
+
+- `DARK_FACTORY_CLOUDFLARE_ACCESS_SERVICE_TOKEN_ID`: the exact
+  `<32-hex>.access` client ID of the one Access service token allowed to act
+  headlessly. Absent, every service-token assertion is rejected and only the
+  operator identity can reach `/mcp`; it never means "any service token".
+  Because it is optional and inherited across versions, `/readyz` names which
+  principals are live — `mcp_six_tools_operator_and_headless` or
+  `mcp_six_tools_operator_only` — and the deployment gate requires the former.
+
 The revisions and numeric IDs are stored as secrets too. They are not
 confidential, but treating all authority settings identically avoids a
 dashboard/source split and makes a missing value block upload or deployment
 through Wrangler's required-secret validation. The App-authority group is
 all-or-nothing at runtime. There are no aliases or ambient fallbacks.
 
-Cloudflare Access Managed OAuth must protect the exact `/mcp` application path
-before the route receives traffic. The Worker also validates the injected JWT
-independently: it fetches the bounded key set from the configured team domain,
-matches one RS256 signing key by `kid`, verifies the signature with WebCrypto,
-and binds issuer, single audience, token type, time window, JWT email, injected
-email header, and configured email digest. An unprotected route still cannot
-forge those claims.
+A Cloudflare Access application must protect the exact `/mcp` application path
+before the route receives traffic. A service token needs a `non_identity`
+("Service Auth") policy on that application: an ordinary `allow` policy does
+not match a service token and silently falls through to interactive IdP login,
+which a headless caller cannot complete.
+
+The Worker also validates the injected JWT independently: it fetches the
+bounded key set from the configured team domain, matches one RS256 signing key
+by `kid`, verifies the signature with WebCrypto, and binds issuer, single
+audience, token type, and time window. It then binds the identity to exactly
+one principal — for the operator, the JWT email, the injected email header, and
+the configured digest; for a service token, `common_name` against the
+configured client ID, requiring the email claim to be absent. A service-token
+assertion omits `nbf` and `email` and carries `aud` as a bare string rather
+than an array; all three are accepted shapes, and `aud` is still compared for
+exact equality, never containment. An unprotected route still cannot forge any
+of those claims.
 
 Never put values in a checked-in file, `.env*`, `.dev.vars*`, a provider
 process, Dark Factory state, shell history, or the macOS Keychain. Cloudflare

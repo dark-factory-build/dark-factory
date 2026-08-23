@@ -20,6 +20,11 @@ pub(crate) const REPOSITORY_ID_BINDING: &str = "DARK_FACTORY_MAINTAINER_REPOSITO
 pub(crate) const PERMISSION_REVISION: &str = "maintainer-operations-v1";
 const GITHUB_API_VERSION: &str = "2026-03-10";
 const MAX_GITHUB_RESPONSE_BYTES: usize = 64 * 1024;
+/// Publication bounds. A commit is a bounded, reviewable unit of work, not a
+/// bulk upload channel, and the Worker must hold every blob in memory.
+const MAX_COMMIT_FILES: usize = 50;
+const MAX_COMMIT_FILE_BYTES: usize = 1_000_000;
+const MAX_COMMIT_TOTAL_BYTES: usize = 4_000_000;
 
 #[derive(Clone)]
 pub(crate) struct AppAuthority(Arc<Authority>);
@@ -46,6 +51,12 @@ pub(crate) enum Error {
     Configuration,
     #[error("maintainer App authority is unavailable")]
     Unavailable,
+    /// GitHub answered, and its status is the answer. The merge endpoint in
+    /// particular reports *why* it refused, and collapsing that into
+    /// "unavailable" turns a determinate refusal into a reconciliation the
+    /// caller cannot resolve.
+    #[error("github rejected the request with status {0}")]
+    Rejected(u16),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -54,6 +65,12 @@ pub(crate) enum OperationError {
     InvalidInput,
     #[error("operation ID is already bound to a different request")]
     Conflict,
+    /// GitHub refused, determinately, and nothing changed. Distinct from
+    /// `Indeterminate`, which means the outcome is genuinely unknown: a
+    /// refusal leaves the operation ID retryable once the precondition the
+    /// refusal names actually holds.
+    #[error("github refused the operation and nothing changed")]
+    Refused,
     #[error("operation outcome requires reconciliation")]
     Indeterminate,
     #[error("maintainer operation authority is unavailable")]
@@ -61,6 +78,9 @@ pub(crate) enum OperationError {
 }
 
 impl From<Error> for OperationError {
+    /// A bare status carries no determinate meaning at most call sites — only
+    /// the operations that know which statuses their endpoint uses to refuse
+    /// may read one, and they match on `Error::Rejected` before reaching here.
     fn from(_: Error) -> Self {
         Self::Unavailable
     }
@@ -109,6 +129,72 @@ impl ReviewEvent {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ObservePullRequestChecks {
     pub(crate) pull_number: i64,
+    pub(crate) head_sha: String,
+}
+
+/// One file's content at a path, or its removal when `content_base64` is absent.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FileChange {
+    pub(crate) path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) content_base64: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PublishCommit {
+    pub(crate) operation_id: String,
+    pub(crate) branch: String,
+    /// The commit the branch must currently point at. Two agents racing the
+    /// same branch means the second one's expectation no longer holds and it
+    /// fails closed instead of clobbering the first.
+    pub(crate) expected_head_sha: String,
+    pub(crate) message: String,
+    pub(crate) changes: Vec<FileChange>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MergeMethod {
+    Merge,
+    Squash,
+    Rebase,
+}
+
+impl MergeMethod {
+    const fn github_method(self) -> &'static str {
+        match self {
+            Self::Merge => "merge",
+            Self::Squash => "squash",
+            Self::Rebase => "rebase",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MergePullRequest {
+    pub(crate) operation_id: String,
+    pub(crate) pull_number: i64,
+    /// GitHub refuses the merge with 409 if the head has moved, so exact-head
+    /// merging is enforced by the platform rather than reimplemented here.
+    pub(crate) head_sha: String,
+    pub(crate) merge_method: MergeMethod,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct CommitResult {
+    pub(crate) branch: String,
+    pub(crate) commit_sha: String,
+    pub(crate) parent_sha: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct MergeResult {
+    pub(crate) pull_number: i64,
+    pub(crate) merged: bool,
+    pub(crate) merge_commit_sha: String,
     pub(crate) head_sha: String,
 }
 
@@ -341,6 +427,169 @@ impl AppAuthority {
     }
 
     #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn publish_commit(
+        &self,
+        journal: &DeliveryJournal,
+        request: PublishCommit,
+    ) -> Result<CommitResult, OperationError> {
+        request.validate()?;
+        let operation = request.operation("publish_commit")?;
+        let state = journal
+            .begin_operation(&operation)
+            .await
+            .map_err(|_| OperationError::Unavailable)?;
+        if let Some(result) = completed_or_conflict::<CommitResult>(&state)? {
+            return Ok(result);
+        }
+        let token = self
+            .0
+            .installation_token(BTreeMap::from([
+                ("contents", "write"),
+                ("metadata", "read"),
+            ]))
+            .await?;
+        if let Some(result) = self
+            .0
+            .reconcile_commit(&token, &request)
+            .await
+            .map_err(|_| OperationError::Indeterminate)?
+        {
+            return complete(journal, &operation, result).await;
+        }
+        if matches!(
+            state,
+            OperationRecord::Executing | OperationRecord::Indeterminate
+        ) {
+            journal
+                .mark_operation(&operation, OperationTransition::Indeterminate)
+                .await
+                .map_err(|_| OperationError::Unavailable)?;
+            return Err(OperationError::Indeterminate);
+        }
+        // `verify_publish_precondition` already reports a moved head as a
+        // conflict. Rewriting every other failure into one too told the caller
+        // to refetch a head that had not moved.
+        let branch_exists = self.0.verify_publish_precondition(&token, &request).await?;
+        match journal
+            .mark_operation(&operation, OperationTransition::Executing)
+            .await
+            .map_err(|_| OperationError::Unavailable)?
+        {
+            OperationRecord::Claimed => {}
+            OperationRecord::Completed(result) => {
+                return serde_json::from_str(&result).map_err(|_| OperationError::Unavailable);
+            }
+            OperationRecord::Conflict => return Err(OperationError::Conflict),
+            OperationRecord::Executing | OperationRecord::Indeterminate => {
+                if let Some(result) = self.0.reconcile_commit(&token, &request).await? {
+                    return complete(journal, &operation, result).await;
+                }
+                return Err(OperationError::Indeterminate);
+            }
+            OperationRecord::New | OperationRecord::Planned => {
+                return Err(OperationError::Unavailable);
+            }
+        }
+        match self.0.push_commit(&token, &request, branch_exists).await {
+            Ok(result) => complete(journal, &operation, result).await,
+            Err(_) => {
+                if let Some(result) = self.0.reconcile_commit(&token, &request).await? {
+                    return complete(journal, &operation, result).await;
+                }
+                let _ = journal
+                    .mark_operation(&operation, OperationTransition::Indeterminate)
+                    .await;
+                Err(OperationError::Indeterminate)
+            }
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn merge_pull_request_at_head(
+        &self,
+        journal: &DeliveryJournal,
+        request: MergePullRequest,
+    ) -> Result<MergeResult, OperationError> {
+        request.validate()?;
+        let operation = request.operation("merge_pull_request_at_head")?;
+        let state = journal
+            .begin_operation(&operation)
+            .await
+            .map_err(|_| OperationError::Unavailable)?;
+        if let Some(result) = completed_or_conflict::<MergeResult>(&state)? {
+            return Ok(result);
+        }
+        let token = self
+            .0
+            .installation_token(BTreeMap::from([
+                ("contents", "write"),
+                ("metadata", "read"),
+                ("pull_requests", "write"),
+            ]))
+            .await?;
+        if let Some(result) = self.0.reconcile_merge(&token, &request).await? {
+            return complete(journal, &operation, result).await;
+        }
+        if matches!(
+            state,
+            OperationRecord::Executing | OperationRecord::Indeterminate
+        ) {
+            journal
+                .mark_operation(&operation, OperationTransition::Indeterminate)
+                .await
+                .map_err(|_| OperationError::Unavailable)?;
+            return Err(OperationError::Indeterminate);
+        }
+        self.0
+            .verify_pull_request_head(&token, request.pull_number, &request.head_sha)
+            .await?;
+        match journal
+            .mark_operation(&operation, OperationTransition::Executing)
+            .await
+            .map_err(|_| OperationError::Unavailable)?
+        {
+            OperationRecord::Claimed => {}
+            OperationRecord::Completed(result) => {
+                return serde_json::from_str(&result).map_err(|_| OperationError::Unavailable);
+            }
+            OperationRecord::Conflict => return Err(OperationError::Conflict),
+            OperationRecord::Executing | OperationRecord::Indeterminate => {
+                if let Some(result) = self.0.reconcile_merge(&token, &request).await? {
+                    return complete(journal, &operation, result).await;
+                }
+                return Err(OperationError::Indeterminate);
+            }
+            OperationRecord::New | OperationRecord::Planned => {
+                return Err(OperationError::Unavailable);
+            }
+        }
+        match self.0.merge_pull_request(&token, &request).await {
+            Ok(result) => complete(journal, &operation, result).await,
+            Err(OperationError::Refused) => {
+                // Nothing merged, and we know it. Release the claim so this
+                // same operation ID and request can be retried once the pull
+                // request is actually mergeable; burying it at `indeterminate`
+                // would force a fresh UUID for every retry and would report an
+                // unknown outcome for a fully known one.
+                journal
+                    .mark_operation(&operation, OperationTransition::Refused)
+                    .await
+                    .map_err(|_| OperationError::Unavailable)?;
+                Err(OperationError::Refused)
+            }
+            Err(_) => {
+                if let Some(result) = self.0.reconcile_merge(&token, &request).await? {
+                    return complete(journal, &operation, result).await;
+                }
+                let _ = journal
+                    .mark_operation(&operation, OperationTransition::Indeterminate)
+                    .await;
+                Err(OperationError::Indeterminate)
+            }
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
     pub(crate) async fn observe_pull_request_checks(
         &self,
         request: ObservePullRequestChecks,
@@ -371,6 +620,7 @@ impl CreatePullRequest {
         valid_sha(&self.base_sha)?;
         valid_text(&self.title, 1, 256, false)?;
         valid_text(&self.body, 0, 30_000, true)?;
+        free_of_operation_marker(&self.body)?;
         if self.head == self.base || self.head_sha == self.base_sha {
             return Err(OperationError::InvalidInput);
         }
@@ -383,7 +633,7 @@ impl CreatePullRequest {
     }
 
     fn marker(&self) -> String {
-        format!("<!-- dark-factory-operation:{} -->", self.operation_id)
+        format!("{OPERATION_MARKER_PREFIX}{} -->", self.operation_id)
     }
 
     fn marked_body(&self) -> String {
@@ -400,7 +650,8 @@ impl SubmitPullRequestReview {
         valid_operation_id(&self.operation_id)?;
         valid_exact_integer(self.pull_number)?;
         valid_sha(&self.head_sha)?;
-        valid_text(&self.body, 1, 16_000, true)
+        valid_text(&self.body, 1, 16_000, true)?;
+        free_of_operation_marker(&self.body)
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -409,11 +660,79 @@ impl SubmitPullRequestReview {
     }
 
     fn marker(&self) -> String {
-        format!("<!-- dark-factory-operation:{} -->", self.operation_id)
+        format!("{OPERATION_MARKER_PREFIX}{} -->", self.operation_id)
     }
 
     fn marked_body(&self) -> String {
         format!("{}\n\n{}", self.body, self.marker())
+    }
+}
+
+impl PublishCommit {
+    fn validate(&self) -> Result<(), OperationError> {
+        valid_operation_id(&self.operation_id)?;
+        valid_ref(&self.branch)?;
+        valid_sha(&self.expected_head_sha)?;
+        valid_text(&self.message, 1, 4_096, true)?;
+        free_of_operation_marker(&self.message)?;
+        if !(1..=MAX_COMMIT_FILES).contains(&self.changes.len()) {
+            return Err(OperationError::InvalidInput);
+        }
+        let mut total = 0_usize;
+        for (index, change) in self.changes.iter().enumerate() {
+            valid_repository_path(&change.path)?;
+            // A commit that touched the same path twice would leave which write
+            // wins up to GitHub's tree ordering.
+            if self.changes[..index]
+                .iter()
+                .any(|earlier| earlier.path == change.path)
+            {
+                return Err(OperationError::InvalidInput);
+            }
+            if let Some(content) = change.content_base64.as_deref() {
+                if content.len() > MAX_COMMIT_FILE_BYTES {
+                    return Err(OperationError::InvalidInput);
+                }
+                general_purpose::STANDARD
+                    .decode(content)
+                    .map_err(|_| OperationError::InvalidInput)?;
+                total = total
+                    .checked_add(content.len())
+                    .ok_or(OperationError::InvalidInput)?;
+            }
+        }
+        (total <= MAX_COMMIT_TOTAL_BYTES)
+            .then_some(())
+            .ok_or(OperationError::InvalidInput)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn operation(&self, kind: &str) -> Result<Operation, OperationError> {
+        operation(kind, &self.operation_id, self)
+    }
+
+    fn trailer(&self) -> String {
+        format!("{OPERATION_TRAILER_PREFIX} {}", self.operation_id)
+    }
+
+    /// The trailer makes a landed commit self-identifying, so a retry after an
+    /// indeterminate failure can tell "already published" from "not published"
+    /// by reading the branch rather than guessing.
+    fn marked_message(&self) -> String {
+        format!("{}\n\n{}", self.message, self.trailer())
+    }
+}
+
+impl MergePullRequest {
+    fn validate(&self) -> Result<(), OperationError> {
+        valid_operation_id(&self.operation_id)?;
+        valid_exact_integer(self.pull_number)?;
+        valid_sha(&self.head_sha)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn operation(&self, kind: &str) -> Result<Operation, OperationError> {
+        operation(kind, &self.operation_id, self)
     }
 }
 
@@ -434,6 +753,74 @@ fn valid_operation_id(value: &str) -> Result<(), OperationError> {
             .enumerate()
             .all(|(index, byte)| [8, 13, 18, 23].contains(&index) || byte.is_ascii_hexdigit())
         && value == value.to_ascii_lowercase();
+    valid.then_some(()).ok_or(OperationError::InvalidInput)
+}
+
+/// A reconciler identifies its own work by a marker the caller does not get to
+/// write: `publish_commit` puts `Dark-Factory-Operation: <id>` in the commit
+/// message, and the pull-request operations put an HTML comment in the body.
+/// Both are matched with `contains`, so caller text carrying either prefix
+/// could name a *different* operation's id and make that operation's
+/// reconciliation adopt work it never did. Refuse the prefix at the door
+/// rather than trying to out-parse it afterwards.
+const OPERATION_TRAILER_PREFIX: &str = "Dark-Factory-Operation:";
+const OPERATION_MARKER_PREFIX: &str = "<!-- dark-factory-operation:";
+
+fn free_of_operation_marker(value: &str) -> Result<(), OperationError> {
+    let forged =
+        value.contains(OPERATION_TRAILER_PREFIX) || value.contains(OPERATION_MARKER_PREFIX);
+    (!forged).then_some(()).ok_or(OperationError::InvalidInput)
+}
+
+/// A path inside the repository, as a commit may address it.
+///
+/// The `.github` authority tree is refused explicitly. GitHub already blocks
+/// `.github/workflows/` without the `workflows` permission, which this App
+/// deliberately does not hold, but a policy-checked surface should state the
+/// boundary rather than depend on a permission staying un-granted: an agent
+/// that could rewrite the CI gating its own work would be escalating its
+/// authority.
+///
+/// The refusal is by path segment, not by prefix. A tree entry may name a
+/// directory as a blob, which replaces the whole subtree, so `.github` and
+/// `.github/workflows` must be refused as paths in their own right and not
+/// only as prefixes of a file inside them.
+///
+/// The review and dependency policy files are refused by name for the same
+/// reason. Refusing the `.github` tree stops an agent destroying them
+/// wholesale but not rewriting one of them in place, and an agent that can
+/// edit CODEOWNERS can remove itself from required review — the same
+/// escalation, reached one file at a time. GitHub reads CODEOWNERS from the
+/// repository root, `.github/`, and `docs/`, so all three are named.
+fn valid_repository_path(value: &str) -> Result<(), OperationError> {
+    let mut segments = value.split('/');
+    let github_authority = segments
+        .next()
+        .is_some_and(|segment| segment.eq_ignore_ascii_case(".github"))
+        && segments
+            .next()
+            .is_none_or(|segment| segment.eq_ignore_ascii_case("workflows"));
+    let review_authority = matches!(
+        value,
+        "CODEOWNERS"
+            | ".github/CODEOWNERS"
+            | "docs/CODEOWNERS"
+            | ".github/dependabot.yml"
+            | ".github/dependabot.yaml"
+    );
+    let valid = !value.is_empty()
+        && value.len() <= 240
+        && !value.starts_with('/')
+        && !value.ends_with('/')
+        && !value.contains("//")
+        && !value.split('/').any(|segment| {
+            segment.is_empty() || segment == "." || segment == ".." || segment == ".git"
+        })
+        && value
+            .chars()
+            .all(|character| !character.is_control() && character != '\\')
+        && !github_authority
+        && !review_authority;
     valid.then_some(()).ok_or(OperationError::InvalidInput)
 }
 
@@ -599,34 +986,30 @@ fn jwt_unsigned(app_id: i64, now: i64) -> String {
 #[cfg(target_arch = "wasm32")]
 impl Authority {
     async fn verify(&self) -> Result<(), Error> {
+        // An App JWT authenticates only App-level endpoints, so repository identity
+        // cannot be read here. Prove the key signs, the App and owner match, and the
+        // installation is the exact selected-repository one — and mint nothing. This
+        // endpoint is reachable unauthenticated through /readyz, so issuing a
+        // credential here would let a stranger exhaust the App's rate limit and
+        // disable every real operation. The repository_id <-> full_name <-> owner_id
+        // binding is enforced by `installation_token` on each actual operation, which
+        // is the correct enforcement point.
         let jwt = self.jwt().await?;
         let installation: Installation =
-            github_json(&self.repository.installation_url(), jwt.as_str()).await?;
-        validate_installation(&installation, self.app_id, self.repository_owner_id)?;
-        let repository: RepositoryIdentity = github_json(
-            &format!("https://api.github.com/repositories/{}", self.repository_id),
-            jwt.as_str(),
-        )
-        .await?;
-        self.validate_repository(&repository)
+            github_json_as_app(&self.repository.installation_url(), jwt.as_str()).await?;
+        validate_installation(&installation, self.app_id, self.repository_owner_id)
     }
 
     async fn jwt(&self) -> Result<Credential, Error> {
         let now = (js_sys::Date::now() / 1_000.0).floor() as i64;
         let unsigned = jwt_unsigned(self.app_id, now);
-        let signature = sign_rs256(&self.private_key.0, unsigned.as_bytes()).await?;
+        let signature = sign_rs256(&self.private_key.0, unsigned.as_bytes())
+            .await
+            .inspect_err(|_| worker::console_error!("app jwt signing failed"))?;
         Credential::new(format!(
             "{unsigned}.{}",
             general_purpose::URL_SAFE_NO_PAD.encode(signature)
         ))
-    }
-
-    fn validate_repository(&self, repository: &RepositoryIdentity) -> Result<(), Error> {
-        (repository.id == self.repository_id
-            && repository.full_name == self.repository.full_name
-            && repository.owner.id == self.repository_owner_id)
-            .then_some(())
-            .ok_or(Error::Unavailable)
     }
 
     async fn installation_token(
@@ -635,7 +1018,7 @@ impl Authority {
     ) -> Result<Credential, OperationError> {
         let jwt = self.jwt().await?;
         let installation: Installation =
-            github_json(&self.repository.installation_url(), jwt.as_str()).await?;
+            github_json_as_app(&self.repository.installation_url(), jwt.as_str()).await?;
         validate_installation(&installation, self.app_id, self.repository_owner_id)?;
         #[derive(Serialize)]
         struct TokenRequest {
@@ -646,12 +1029,17 @@ impl Authority {
             .iter()
             .map(|(name, level)| ((*name).to_owned(), (*level).to_owned()))
             .collect::<BTreeMap<_, _>>();
+        let token_url = format!(
+            "https://api.github.com/app/installations/{}/access_tokens",
+            installation.id
+        );
+        if !app_jwt_endpoint(&token_url) {
+            worker::console_error!("refusing to present an app jwt to {token_url}");
+            return Err(OperationError::Unavailable);
+        }
         let response: InstallationToken = github_json_request(
             worker::Method::Post,
-            &format!(
-                "https://api.github.com/app/installations/{}/access_tokens",
-                installation.id
-            ),
+            &token_url,
             jwt.as_str(),
             Some(&TokenRequest {
                 repository_ids: [self.repository_id],
@@ -669,9 +1057,301 @@ impl Authority {
                     },
                 }]
         {
+            worker::console_error!(
+                "installation token contract mismatch: {} permission(s), {} repository(ies)",
+                response.permissions.len(),
+                response.repositories.len()
+            );
             return Err(OperationError::Unavailable);
         }
         Credential::new(response.token).map_err(Into::into)
+    }
+
+    /// Blobs, then a tree over the base commit's tree, then a commit, then a
+    /// non-forced ref update. The ref update is the only mutation that matters:
+    /// GitHub rejects it if the branch moved since `expected_head_sha`, so a
+    /// racing agent loses rather than overwrites.
+    /// Either the branch is at exactly `expected_head_sha`, or it does not exist
+    /// yet and `expected_head_sha` is the commit it will start from. Returns
+    /// whether the branch already exists.
+    async fn verify_publish_precondition(
+        &self,
+        token: &Credential,
+        request: &PublishCommit,
+    ) -> Result<bool, OperationError> {
+        // Read the ref directly rather than reusing `verify_ref`, which cannot
+        // distinguish "branch is somewhere else" from "branch does not exist".
+        // Conflating them turned a stale head into an attempted branch create,
+        // which failed late and reported indeterminate instead of conflict.
+        match github_json::<GitReference>(
+            &format!(
+                "https://api.github.com/repos/{}/{}/git/ref/heads/{}",
+                self.repository.owner,
+                self.repository.name,
+                percent_encode(&request.branch)
+            ),
+            token.as_str(),
+        )
+        .await
+        {
+            Ok(reference) => (reference.object.kind == "commit"
+                && reference.object.sha == request.expected_head_sha)
+                .then_some(true)
+                .ok_or(OperationError::Conflict),
+            // Only a 404 means the branch is absent. Reading any other failure
+            // as absence sent a publish onto a branch sitting exactly at
+            // `expected_head_sha` down the create path, where `POST /git/refs`
+            // answers "Reference already exists" and wedges the operation at
+            // indeterminate for a branch that never moved.
+            Err(Error::Rejected(404)) => {
+                // The parent must still be a real commit, so a typo cannot
+                // create a branch from nothing.
+                let _: GitCommit = github_json(
+                    &format!(
+                        "https://api.github.com/repos/{}/{}/git/commits/{}",
+                        self.repository.owner, self.repository.name, request.expected_head_sha
+                    ),
+                    token.as_str(),
+                )
+                .await?;
+                Ok(false)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    async fn push_commit(
+        &self,
+        token: &Credential,
+        request: &PublishCommit,
+        branch_exists: bool,
+    ) -> Result<CommitResult, OperationError> {
+        let base: GitCommit = github_json(
+            &format!(
+                "https://api.github.com/repos/{}/{}/git/commits/{}",
+                self.repository.owner, self.repository.name, request.expected_head_sha
+            ),
+            token.as_str(),
+        )
+        .await?;
+        let mut entries = Vec::with_capacity(request.changes.len());
+        for change in &request.changes {
+            let sha = match change.content_base64.as_deref() {
+                Some(content) => {
+                    let blob: GitObjectId = github_json_request(
+                        worker::Method::Post,
+                        &format!(
+                            "https://api.github.com/repos/{}/{}/git/blobs",
+                            self.repository.owner, self.repository.name
+                        ),
+                        token.as_str(),
+                        Some(&BlobRequest {
+                            content,
+                            encoding: "base64",
+                        }),
+                    )
+                    .await?;
+                    Some(blob.sha)
+                }
+                // A null sha in a tree entry deletes the path.
+                None => None,
+            };
+            entries.push(TreeEntry {
+                path: change.path.clone(),
+                mode: "100644",
+                kind: "blob",
+                sha,
+            });
+        }
+        let tree: GitObjectId = github_json_request(
+            worker::Method::Post,
+            &format!(
+                "https://api.github.com/repos/{}/{}/git/trees",
+                self.repository.owner, self.repository.name
+            ),
+            token.as_str(),
+            Some(&TreeRequest {
+                base_tree: &base.tree.sha,
+                tree: &entries,
+            }),
+        )
+        .await?;
+        let commit: GitObjectId = github_json_request(
+            worker::Method::Post,
+            &format!(
+                "https://api.github.com/repos/{}/{}/git/commits",
+                self.repository.owner, self.repository.name
+            ),
+            token.as_str(),
+            Some(&CommitRequest {
+                message: request.marked_message(),
+                tree: &tree.sha,
+                parents: [&request.expected_head_sha],
+            }),
+        )
+        .await?;
+        // Creating a ref fails if it already exists and a non-forced update
+        // fails if the branch moved, so neither path can clobber another agent.
+        let updated: GitReference = if branch_exists {
+            github_json_request(
+                worker::Method::Patch,
+                &format!(
+                    "https://api.github.com/repos/{}/{}/git/refs/heads/{}",
+                    self.repository.owner,
+                    self.repository.name,
+                    percent_encode(&request.branch)
+                ),
+                token.as_str(),
+                Some(&RefUpdate {
+                    sha: &commit.sha,
+                    force: false,
+                }),
+            )
+            .await?
+        } else {
+            github_json_request(
+                worker::Method::Post,
+                &format!(
+                    "https://api.github.com/repos/{}/{}/git/refs",
+                    self.repository.owner, self.repository.name
+                ),
+                token.as_str(),
+                Some(&RefCreate {
+                    reference: &format!("refs/heads/{}", request.branch),
+                    sha: &commit.sha,
+                }),
+            )
+            .await?
+        };
+        (updated.object.sha == commit.sha)
+            .then_some(CommitResult {
+                branch: request.branch.clone(),
+                commit_sha: commit.sha,
+                parent_sha: request.expected_head_sha.clone(),
+            })
+            .ok_or(OperationError::Indeterminate)
+    }
+
+    /// Did this exact operation already land? The trailer makes the commit
+    /// self-identifying, so a retry after an indeterminate failure reads the
+    /// branch instead of guessing.
+    async fn reconcile_commit(
+        &self,
+        token: &Credential,
+        request: &PublishCommit,
+    ) -> Result<Option<CommitResult>, OperationError> {
+        let reference: GitReference = match github_json(
+            &format!(
+                "https://api.github.com/repos/{}/{}/git/ref/heads/{}",
+                self.repository.owner,
+                self.repository.name,
+                percent_encode(&request.branch)
+            ),
+            token.as_str(),
+        )
+        .await
+        {
+            Ok(reference) => reference,
+            Err(_) => return Ok(None),
+        };
+        if reference.object.sha == request.expected_head_sha {
+            return Ok(None);
+        }
+        let head: GitCommit = github_json(
+            &format!(
+                "https://api.github.com/repos/{}/{}/git/commits/{}",
+                self.repository.owner, self.repository.name, reference.object.sha
+            ),
+            token.as_str(),
+        )
+        .await?;
+        // The trailer alone is not proof. It travels with the message through a
+        // rebase or a cherry-pick, and `validate` is the only thing stopping a
+        // caller writing another operation's trailer into its own commit, so
+        // the tip must also still be a direct child of the stated head. That is
+        // what makes the reported `parent_sha` true rather than assumed.
+        if !head.message.contains(&request.trailer())
+            || !matches!(head.parents.as_slice(), [parent] if parent.sha == request.expected_head_sha)
+        {
+            // The branch moved for some other reason; this operation did not
+            // land and must not claim it did.
+            return Ok(None);
+        }
+        Ok(Some(CommitResult {
+            branch: request.branch.clone(),
+            commit_sha: reference.object.sha,
+            parent_sha: request.expected_head_sha.clone(),
+        }))
+    }
+
+    async fn merge_pull_request(
+        &self,
+        token: &Credential,
+        request: &MergePullRequest,
+    ) -> Result<MergeResult, OperationError> {
+        let merged: MergeResponse = match github_json_request(
+            worker::Method::Put,
+            &format!(
+                "https://api.github.com/repos/{}/{}/pulls/{}/merge",
+                self.repository.owner, self.repository.name, request.pull_number
+            ),
+            token.as_str(),
+            Some(&MergeRequest {
+                sha: &request.head_sha,
+                merge_method: request.merge_method.github_method(),
+            }),
+        )
+        .await
+        {
+            Ok(merged) => merged,
+            // This endpoint answers with the reason it refused. 405 is "not
+            // mergeable" — a required check red or still running, a draft, or
+            // a conflicting base — and is the ordinary first answer for a pull
+            // request whose CI has not finished. 409 is "the head moved", and
+            // 403/422 are a refused permission and a rejected body. All four
+            // mean the merge did not happen, so the caller has something to
+            // act on rather than an outcome it must reconcile by hand.
+            Err(Error::Rejected(403 | 405 | 409 | 422)) => {
+                return Err(OperationError::Refused);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        merged
+            .merged
+            .then_some(MergeResult {
+                pull_number: request.pull_number,
+                merged: true,
+                merge_commit_sha: merged.sha,
+                head_sha: request.head_sha.clone(),
+            })
+            // A 2xx that did not merge is still a determinate "did not merge".
+            .ok_or(OperationError::Refused)
+    }
+
+    async fn reconcile_merge(
+        &self,
+        token: &Credential,
+        request: &MergePullRequest,
+    ) -> Result<Option<MergeResult>, OperationError> {
+        let pull: PullRequestState = github_json(
+            &format!(
+                "https://api.github.com/repos/{}/{}/pulls/{}",
+                self.repository.owner, self.repository.name, request.pull_number
+            ),
+            token.as_str(),
+        )
+        .await?;
+        // Only this exact head counts as this operation having landed.
+        if !pull.merged || pull.head.sha != request.head_sha {
+            return Ok(None);
+        }
+        let merge_commit_sha = pull.merge_commit_sha.ok_or(OperationError::Indeterminate)?;
+        Ok(Some(MergeResult {
+            pull_number: request.pull_number,
+            merged: true,
+            merge_commit_sha,
+            head_sha: request.head_sha.clone(),
+        }))
     }
 
     async fn verify_ref(
@@ -942,6 +1622,97 @@ struct InstallationToken {
 }
 
 #[cfg(target_arch = "wasm32")]
+#[derive(Serialize)]
+struct BlobRequest<'a> {
+    content: &'a str,
+    encoding: &'static str,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Serialize)]
+struct TreeEntry {
+    path: String,
+    mode: &'static str,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    // Serialised as null when absent, which is how a tree entry deletes a path.
+    sha: Option<String>,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Serialize)]
+struct TreeRequest<'a> {
+    base_tree: &'a str,
+    tree: &'a [TreeEntry],
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Serialize)]
+struct CommitRequest<'a> {
+    message: String,
+    tree: &'a str,
+    parents: [&'a str; 1],
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Serialize)]
+struct RefUpdate<'a> {
+    sha: &'a str,
+    force: bool,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Serialize)]
+struct RefCreate<'a> {
+    #[serde(rename = "ref")]
+    reference: &'a str,
+    sha: &'a str,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Serialize)]
+struct MergeRequest<'a> {
+    sha: &'a str,
+    merge_method: &'static str,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Deserialize)]
+struct GitObjectId {
+    sha: String,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Deserialize)]
+struct GitCommit {
+    message: String,
+    tree: GitObjectId,
+    parents: Vec<GitParent>,
+}
+
+/// A parent entry carries no `type`, so it cannot reuse `GitObject`.
+#[cfg(target_arch = "wasm32")]
+#[derive(Deserialize)]
+struct GitParent {
+    sha: String,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Deserialize)]
+struct MergeResponse {
+    sha: String,
+    merged: bool,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Deserialize)]
+struct PullRequestState {
+    merged: bool,
+    merge_commit_sha: Option<String>,
+    head: GitObjectId,
+}
+
+#[cfg(target_arch = "wasm32")]
 #[derive(Deserialize)]
 struct GitReference {
     #[serde(rename = "ref")]
@@ -1116,17 +1887,30 @@ fn validate_installation(
     app_id: i64,
     owner_id: i64,
 ) -> Result<(), Error> {
-    if installation.id <= 0
-        || installation.app_id != app_id
-        || installation.account.id != owner_id
-        || installation.repository_selection != "selected"
-        || !permission_at_least(&installation.permissions, "checks", "read")
-        || !permission_at_least(&installation.permissions, "contents", "read")
-        || !permission_at_least(&installation.permissions, "metadata", "read")
-        || !permission_at_least(&installation.permissions, "pull_requests", "write")
-        || !installation.events.is_empty()
-        || installation.suspended_at.is_some()
-    {
+    let rejected: Vec<&str> = [
+        (installation.id <= 0).then_some("id"),
+        (installation.app_id != app_id).then_some("app_id"),
+        (installation.account.id != owner_id).then_some("account_id"),
+        (installation.repository_selection != "selected").then_some("repository_selection"),
+        (!permission_at_least(&installation.permissions, "checks", "read")).then_some("checks"),
+        // `publish_commit` and `merge_pull_request_at_head` both mint
+        // `contents: write`. Accepting a read-only installation let readiness
+        // pass and then failed at token mint, where GitHub's 422 reaches the
+        // caller as an opaque "authority is unavailable".
+        (!permission_at_least(&installation.permissions, "contents", "write"))
+            .then_some("contents"),
+        (!permission_at_least(&installation.permissions, "metadata", "read")).then_some("metadata"),
+        (!permission_at_least(&installation.permissions, "pull_requests", "write"))
+            .then_some("pull_requests"),
+        (!installation.events.is_empty()).then_some("events"),
+        (installation.suspended_at.is_some()).then_some("suspended_at"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if !rejected.is_empty() {
+        #[cfg(target_arch = "wasm32")]
+        worker::console_error!("installation rejected on: {}", rejected.join(","));
         return Err(Error::Unavailable);
     }
     Ok(())
@@ -1139,6 +1923,35 @@ fn permission_at_least(permissions: &BTreeMap<String, String>, name: &str, requi
             | (Some("write" | "admin"), "write")
             | (Some("admin"), "admin")
     )
+}
+
+/// A GitHub App JWT authenticates only App-level endpoints. Every other REST
+/// resource requires an installation token, and GitHub answers `Bad
+/// credentials` when a JWT is presented to one.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn app_jwt_endpoint(url: &str) -> bool {
+    // Match the path only. A query or fragment can otherwise supply the suffix
+    // (`.../pulls?x=/installation`), and dot segments are collapsed by the URL
+    // parser after this check runs.
+    let path = &url[..url.find(['?', '#']).unwrap_or(url.len())];
+    if path.contains("..") {
+        return false;
+    }
+    path == "https://api.github.com/app"
+        || path.starts_with("https://api.github.com/app/installations/")
+        || (path.starts_with("https://api.github.com/repos/") && path.ends_with("/installation"))
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn github_json_as_app<T: serde::de::DeserializeOwned>(
+    url: &str,
+    jwt: &str,
+) -> Result<T, Error> {
+    if !app_jwt_endpoint(url) {
+        worker::console_error!("refusing to present an app jwt to {url}");
+        return Err(Error::Unavailable);
+    }
+    github_json(url, jwt).await
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1161,18 +1974,22 @@ async fn github_json_request<T: serde::de::DeserializeOwned, B: Serialize>(
 
     let headers = Headers::new();
     let authorization = Zeroizing::new(format!("Bearer {credential}"));
-    headers
-        .set("accept", "application/vnd.github+json")
-        .map_err(|_| Error::Unavailable)?;
+    // Set the credential outside the logged loop. Nothing below formats a header
+    // value, and keeping the credential out of that iteration means a later edit to
+    // the log line cannot put a live token into Cloudflare logs.
     headers
         .set("authorization", authorization.as_str())
         .map_err(|_| Error::Unavailable)?;
-    headers
-        .set("user-agent", "dark-factory-control-plane/0.1")
-        .map_err(|_| Error::Unavailable)?;
-    headers
-        .set("x-github-api-version", GITHUB_API_VERSION)
-        .map_err(|_| Error::Unavailable)?;
+    for (name, value) in [
+        ("accept", "application/vnd.github+json"),
+        ("user-agent", "dark-factory-control-plane/0.1"),
+        ("x-github-api-version", GITHUB_API_VERSION),
+    ] {
+        headers.set(name, value).map_err(|error| {
+            worker::console_error!("github header {name} rejected: {error}");
+            Error::Unavailable
+        })?;
+    }
     let body = body
         .map(serde_json::to_string)
         .transpose()
@@ -1184,16 +2001,31 @@ async fn github_json_request<T: serde::de::DeserializeOwned, B: Serialize>(
     }
     let mut init = RequestInit::new();
     init.with_method(method)
-        .with_redirect(RequestRedirect::Error)
+        // Workers' Request supports only `follow` and `manual`; `error` makes the
+        // constructor throw, so no request ever leaves the edge. `manual` returns
+        // the redirect itself, which the status check below rejects as non-2xx —
+        // a redirect is still never followed.
+        .with_redirect(RequestRedirect::Manual)
         .with_headers(headers)
         .with_body(body.map(Into::into));
-    let request = Request::new_with_init(url, &init).map_err(|_| Error::Unavailable)?;
-    let mut response = Fetch::Request(request)
-        .send()
-        .await
-        .map_err(|_| Error::Unavailable)?;
+    let request = Request::new_with_init(url, &init).map_err(|error| {
+        worker::console_error!("github request could not be built for {url}: {error}");
+        Error::Unavailable
+    })?;
+    // Diagnosis only: never log credentials, headers, or bodies.
+    let mut response = match Fetch::Request(request).send().await {
+        Ok(response) => response,
+        Err(error) => {
+            worker::console_error!("github request failed: {url}: {error:?}");
+            return Err(Error::Unavailable);
+        }
+    };
     if !(200..300).contains(&response.status_code()) {
-        return Err(Error::Unavailable);
+        worker::console_error!(
+            "github rejected {url} with status {}",
+            response.status_code()
+        );
+        return Err(Error::Rejected(response.status_code()));
     }
     let mut stream = response.stream().map_err(|_| Error::Unavailable)?;
     let mut bytes = Vec::new();
@@ -1207,7 +2039,13 @@ async fn github_json_request<T: serde::de::DeserializeOwned, B: Serialize>(
         }
         bytes.append(&mut chunk);
     }
-    serde_json::from_slice(&bytes).map_err(|_| Error::Unavailable)
+    serde_json::from_slice(&bytes).map_err(|error| {
+        worker::console_error!(
+            "github response from {url} did not match the expected shape ({} bytes): {error}",
+            bytes.len()
+        );
+        Error::Unavailable
+    })
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1311,6 +2149,190 @@ mod tests {
             validate_installation(&insufficient, 4_673_420, 109_233_175).err(),
             Some(Error::Unavailable)
         );
+
+        // `publish_commit` and `merge_pull_request_at_head` mint `contents:
+        // write`. A read-only installation used to pass here and pass
+        // readiness, then fail at token mint where GitHub's refusal reaches
+        // the caller as an opaque "authority is unavailable".
+        let read_only: Installation = serde_json::from_str(
+            r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"checks":"read","contents":"read","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            validate_installation(&read_only, 4_673_420, 109_233_175).err(),
+            Some(Error::Unavailable)
+        );
+    }
+
+    #[test]
+    fn publication_paths_are_policy_checked() {
+        for allowed in [
+            "README.md",
+            "src/lib.rs",
+            "docs/development/WORKFLOW.md",
+            "a.b_c-d/e.rs",
+            // An ordinary file beside the refused ones stays publishable.
+            ".github/ISSUE_TEMPLATE/bug.yml",
+            ".github/PULL_REQUEST_TEMPLATE.md",
+            ".githubbed/notes.md",
+            "docs/codeowners-guidance.md",
+        ] {
+            assert!(
+                valid_repository_path(allowed).is_ok(),
+                "rejected: {allowed}"
+            );
+        }
+        // Workflow files are refused explicitly. GitHub also blocks them without
+        // the `workflows` permission this App does not hold, but an agent able
+        // to rewrite the CI gating its own work would be escalating authority,
+        // so the surface states the boundary rather than inheriting it.
+        for refused in [
+            ".github/workflows/ci.yml",
+            // A tree entry may name a directory as a blob, which replaces the
+            // whole subtree. A prefix test needing the trailing slash let
+            // `.github/workflows` delete every workflow, and `.github` delete
+            // CODEOWNERS and the issue templates, which no permission on this
+            // installation protects.
+            ".github/workflows",
+            ".github",
+            // An agent that can rewrite CODEOWNERS can remove itself from
+            // required review. Refusing only the tree left that reachable one
+            // file at a time.
+            "CODEOWNERS",
+            ".github/CODEOWNERS",
+            "docs/CODEOWNERS",
+            ".github/dependabot.yml",
+            ".GitHub/Workflows/ci.yml",
+            ".github/workflows/nested/deep.yml",
+            "",
+            "/etc/passwd",
+            "src/",
+            "src//lib.rs",
+            "../secrets",
+            "src/../../etc/passwd",
+            ".git/config",
+            "src/a\\b.rs",
+        ] {
+            assert!(
+                valid_repository_path(refused).is_err(),
+                "accepted: {refused}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_published_commit_is_bounded_and_unambiguous() {
+        let base = |changes: Vec<FileChange>| PublishCommit {
+            operation_id: "11111111-2222-3333-4444-555555555555".into(),
+            branch: "agent/work".into(),
+            expected_head_sha: "a".repeat(40),
+            message: "Do the thing".into(),
+            changes,
+        };
+        let file = |path: &str| FileChange {
+            path: path.into(),
+            content_base64: Some(general_purpose::STANDARD.encode(b"hello")),
+        };
+        assert!(base(vec![file("README.md")]).validate().is_ok());
+        // A caller must not be able to write the reconciler's own vocabulary.
+        // `reconcile_commit` matches the trailer with `contains`, so a message
+        // carrying a *different* operation's trailer would make that operation
+        // reconcile onto this commit and report a publication it never made.
+        let forged = |message: &str| PublishCommit {
+            message: message.into(),
+            ..base(vec![file("README.md")])
+        };
+        assert!(
+            forged("Add notes\n\nDark-Factory-Operation: 22222222-3333-4444-5555-666666666666")
+                .validate()
+                .is_err()
+        );
+        assert!(
+            forged("Add notes\n\n<!-- dark-factory-operation:22222222 -->")
+                .validate()
+                .is_err()
+        );
+        // The words themselves are fine; only the marker prefixes are not.
+        assert!(
+            forged("Describe the dark factory operation")
+                .validate()
+                .is_ok()
+        );
+        // A deletion carries no content.
+        assert!(
+            base(vec![FileChange {
+                path: "gone.txt".into(),
+                content_base64: None
+            }])
+            .validate()
+            .is_ok()
+        );
+        // Empty, oversized, and duplicated change sets are all refused: the same
+        // path twice would leave which write wins up to tree ordering.
+        assert!(base(vec![]).validate().is_err());
+        assert!(
+            base(
+                (0..=MAX_COMMIT_FILES)
+                    .map(|i| file(&format!("f{i}.txt")))
+                    .collect()
+            )
+            .validate()
+            .is_err()
+        );
+        assert!(
+            base(vec![file("same.txt"), file("same.txt")])
+                .validate()
+                .is_err()
+        );
+        // Content must be real base64, and the trailer makes a landed commit
+        // self-identifying for reconciliation.
+        assert!(
+            base(vec![FileChange {
+                path: "bad.txt".into(),
+                content_base64: Some("not base64!!".into())
+            }])
+            .validate()
+            .is_err()
+        );
+        let request = base(vec![file("README.md")]);
+        assert!(request.marked_message().contains(&request.trailer()));
+        assert!(request.marked_message().starts_with("Do the thing"));
+    }
+
+    #[test]
+    fn only_app_level_endpoints_accept_an_app_jwt() {
+        assert!(app_jwt_endpoint("https://api.github.com/app"));
+        assert!(app_jwt_endpoint(
+            "https://api.github.com/repos/baziyer/dark-factory/installation"
+        ));
+        assert!(app_jwt_endpoint(
+            "https://api.github.com/app/installations/155853844/access_tokens"
+        ));
+        // Readiness once proved repository identity by fetching this URL with
+        // the App JWT. GitHub answers `Bad credentials`, so `verify` always
+        // failed and `/readyz` could never report ready in production.
+        assert!(!app_jwt_endpoint(
+            "https://api.github.com/repositories/1335380107"
+        ));
+        assert!(!app_jwt_endpoint(
+            "https://api.github.com/repos/baziyer/dark-factory"
+        ));
+        assert!(!app_jwt_endpoint(
+            "https://api.github.com/repos/baziyer/dark-factory/pulls"
+        ));
+        // A query or fragment must not be able to supply the suffix.
+        assert!(!app_jwt_endpoint(
+            "https://api.github.com/repos/baziyer/dark-factory/pulls?x=/installation"
+        ));
+        assert!(!app_jwt_endpoint(
+            "https://api.github.com/repos/baziyer/dark-factory/pulls#/installation"
+        ));
+        // Dot segments are collapsed by the URL parser after this check runs.
+        assert!(!app_jwt_endpoint(
+            "https://api.github.com/app/installations/../../repos/baziyer/dark-factory/pulls"
+        ));
+        // Userinfo must not be mistaken for the host.
+        assert!(!app_jwt_endpoint("https://api.github.com@evil.example/app"));
     }
 
     #[test]

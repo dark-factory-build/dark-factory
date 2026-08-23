@@ -35,6 +35,37 @@ fn production_runtime_is_cloudflare_only() {
     }
 }
 
+/// Workers' `Request` constructor accepts only `follow` and `manual` and throws on
+/// `error`, so `RequestRedirect::Error` means the request is never built and the call
+/// fails closed with no diagnosis. Shipping it once left `/readyz` permanently 503 and
+/// every authenticated MCP call 401, and neither the unit tests nor the `workerd`
+/// integration test could reach the affected paths. Assert it over the source instead.
+#[test]
+fn no_outbound_request_uses_a_redirect_mode_workers_rejects() {
+    // Walk the directory rather than list files: an enumerated allowlist would
+    // silently stop covering the next module added, and the next module added
+    // on this branch is the one that publishes commits.
+    let source_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut checked = 0_usize;
+    for entry in fs::read_dir(&source_dir).expect("src/ is readable") {
+        let path = entry.expect("readable directory entry").path();
+        if path.extension().is_none_or(|extension| extension != "rs") {
+            continue;
+        }
+        let source = fs::read_to_string(&path).expect("readable source file");
+        assert!(
+            !source.contains("RequestRedirect::Error"),
+            "{} builds an outbound request Workers will refuse to construct",
+            path.display()
+        );
+        checked += 1;
+    }
+    assert!(
+        checked >= 6,
+        "expected to scan every module, scanned {checked}"
+    );
+}
+
 #[test]
 fn wrangler_keeps_the_unconfigured_worker_private_and_inert() {
     let wrangler = project_file("wrangler.toml");
@@ -77,7 +108,7 @@ fn durable_object_is_sharded_by_app_and_exact_replay_identity() {
     assert!(journal.contains("app_id"));
     assert!(journal.contains("delivery_id"));
     assert!(journal.contains("operation_id"));
-    assert!(journal.contains("0002_maintainer_operations.sql"));
+    assert!(journal.contains("0003_maintainer_operations.sql"));
     assert!(journal.contains("sha256"));
     assert!(!journal.contains("DATABASE_URL"));
     assert!(!journal.contains("neon_superuser"));
@@ -93,6 +124,8 @@ fn mcp_surface_is_repository_bound_and_typed() {
         "create_pull_request",
         "submit_pull_request_review",
         "observe_pull_request_checks",
+        "publish_commit",
+        "merge_pull_request_at_head",
     ] {
         assert!(mcp.contains(tool), "missing typed MCP tool: {tool}");
     }
@@ -109,4 +142,52 @@ fn mcp_surface_is_repository_bound_and_typed() {
     assert!(access.contains("verify_rs256"));
     assert!(access.contains("claims.audience"));
     assert!(access.contains("claims.issuer"));
+}
+
+/// The deployment gate rolls back unless the live `/readyz` body carries the
+/// exact label the Worker emits. They live in two files, so a rename that
+/// touches only one strands production on a rollback loop — or, worse, passes
+/// against a label that no longer means what the gate thinks it does.
+#[test]
+fn the_deployment_gate_asserts_the_readiness_label_the_worker_emits() {
+    let lib = project_file("src/lib.rs");
+    let workflow = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../.github/workflows/deploy-control-plane.yml"),
+    )
+    .unwrap();
+
+    let headless = r#""maintainer_operations":"mcp_six_tools_operator_and_headless""#;
+    assert!(lib.contains(headless));
+    assert!(lib.contains(r#""maintainer_operations":"mcp_six_tools_operator_only""#));
+    // The gate must require the headless variant specifically: the binding
+    // behind it is optional and inherited across versions, so this is the only
+    // check that catches a deployment which silently lost it.
+    assert!(workflow.contains(headless));
+    assert!(!workflow.contains("mcp_six_tools_operator_only"));
+    assert!(!workflow.contains("mcp_pr_create_review_checks"));
+}
+
+/// The merge and publish paths are `wasm32`-only, so a host test cannot drive
+/// them. What it can do is hold the contract they were got wrong on: GitHub's
+/// refusal statuses must reach a determinate answer rather than being folded
+/// into "unavailable" and reported as an outcome nobody knows.
+#[test]
+fn github_refusals_stay_determinate() {
+    let github_app = project_file("src/github_app.rs");
+    let mcp = project_file("src/mcp.rs");
+    let journal = project_file("src/journal.rs");
+
+    // The transport reports the status; it is the only place that sees one.
+    assert!(github_app.contains("Err(Error::Rejected(response.status_code()))"));
+    // The merge endpoint's four refusal statuses are read, not collapsed.
+    assert!(github_app.contains("Err(Error::Rejected(403 | 405 | 409 | 422))"));
+    // A missing branch is a 404 and nothing else.
+    assert!(github_app.contains("Err(Error::Rejected(404))"));
+    // A refusal releases the claim so the same operation ID stays retryable.
+    assert!(github_app.contains("OperationTransition::Refused"));
+    assert!(journal.contains(r#"Ok(("planned", None, "'executing','indeterminate'"))"#));
+    // And the caller is told which of the two it got.
+    assert!(mcp.contains(r#""refused""#));
+    assert!(mcp.contains(r#""indeterminate""#));
 }

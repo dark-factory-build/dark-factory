@@ -103,12 +103,25 @@ Read-only context unless a task explicitly asks you to edit them:
    credential lookup and interactive prompts disabled; a host may instead
    supply a short-lived, repository-scoped read credential for checkout.
    Remote writes fail closed unless the broker/App is available. Operator
-   approval never authorizes injecting a personal token into an agent process;
-   human operators may instead perform a separately reviewed GitHub action
-   through their normal workflow. Never put credentials in a worktree, prompt,
-   command output, or log. This contributor-agent boundary is not a future Dark
-   Factory product GitHub integration and does not change a human operator's
-   normal workflow.
+   approval never authorizes injecting a personal token into an agent process
+   for contribution work; human operators may instead perform a separately
+   reviewed GitHub action through their normal workflow. One exception: a
+   **deployment** the operator starts explicitly, limited to the single
+   operation named in that instruction and expiring with it. It never licenses
+   ambient credentials for anything else in the same session, and it is not a
+   route for contribution writes — publishing a commit is contribution work and
+   stays behind the App. Where a dispatched workflow exists, use it: the
+   credential then lives in the platform's secret manager and never enters an
+   agent process. Direct use is the fallback when no such workflow exists yet,
+   and it is strictly weaker, because an agent's instruction stream carries
+   untrusted content — issue bodies, pull request text, review comments,
+   webhook payloads — and a held credential can be steered into a use the
+   operator never authorized. A human terminal has no such input channel. That
+   asymmetry is the reason for this rule, so widen the exception only with a
+   durable reason, and say what the exposure is before acting on it. Never put
+   credentials in a worktree, prompt, command output, or log. This
+   contributor-agent boundary is not a future Dark Factory product GitHub
+   integration and does not change a human operator's normal workflow.
 
 ## Adding to the system
 
