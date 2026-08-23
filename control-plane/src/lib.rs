@@ -15,6 +15,8 @@ use axum::{
 #[cfg(target_arch = "wasm32")]
 use tower::ServiceExt as _;
 
+#[cfg(any(target_arch = "wasm32", test))]
+mod github_app;
 mod journal;
 pub mod maintainer;
 
@@ -54,6 +56,7 @@ impl BrokerState {
         let revision = required_secret(env, SECRET_REVISION_BINDING)?;
         let app_id = required_secret(env, APP_ID_BINDING)?;
         let (secret, revision, app_id) = validate_authority(secret, revision, app_id)?;
+        let app_authority = optional_app_authority(env, app_id)?;
         let namespace = env
             .durable_object(journal::NAMESPACE_BINDING)
             .map_err(|_| AuthorityError::BindingMissing(journal::NAMESPACE_BINDING))?;
@@ -63,6 +66,7 @@ impl BrokerState {
                 revision,
                 app_id,
                 journal::DeliveryJournal::cloudflare(namespace, app_id),
+                app_authority,
             )),
             deployment: Deployment::Cloudflare,
         })
@@ -89,6 +93,58 @@ impl BrokerState {
             deployment: Deployment::Development,
         })
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn optional_app_authority(
+    env: &worker::Env,
+    app_id: i64,
+) -> Result<Option<github_app::AppAuthority>, AuthorityError> {
+    app_authority_from_values(
+        app_id,
+        [
+            optional_secret(env, github_app::PRIVATE_KEY_BINDING),
+            optional_secret(env, github_app::PERMISSION_REVISION_BINDING),
+            optional_secret(env, github_app::REPOSITORY_BINDING),
+            optional_secret(env, github_app::REPOSITORY_OWNER_ID_BINDING),
+        ],
+    )
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn app_authority_from_values(
+    app_id: i64,
+    values: [Option<String>; 4],
+) -> Result<Option<github_app::AppAuthority>, AuthorityError> {
+    if values.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+    let [
+        Some(private_key),
+        Some(permission_revision),
+        Some(repository),
+        Some(owner_id),
+    ] = values
+    else {
+        return Err(AuthorityError::AppAuthority);
+    };
+    github_app::AppAuthority::new(
+        app_id,
+        private_key,
+        permission_revision,
+        repository,
+        owner_id,
+    )
+    .map(Some)
+    .map_err(|_| AuthorityError::AppAuthority)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn optional_secret(env: &worker::Env, name: &'static str) -> Option<String> {
+    env.secret(name)
+        .ok()
+        .map(|value| value.to_string())
+        .filter(|value| !value.is_empty())
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -134,6 +190,9 @@ enum AuthorityError {
     SecretRevision,
     #[error("maintainer App ID must be a positive integer")]
     AppId,
+    #[cfg(any(target_arch = "wasm32", test))]
+    #[error("maintainer App operation authority is invalid")]
+    AppAuthority,
 }
 
 #[cfg(feature = "development-sqlite")]
@@ -171,10 +230,17 @@ async fn ready(State(state): State<BrokerState>) -> Response {
     match (state.deployment, state.maintainer.as_ref()) {
         #[cfg(target_arch = "wasm32")]
         (Deployment::Cloudflare, Some(maintainer)) if maintainer.ready().await.is_ok() => {
-            json_response(
-                StatusCode::OK,
-                r#"{"status":"ready","maintainer_webhook":"bootstrap_ping_only","product_webhook":"inactive","operator_api":"inactive"}"#,
-            )
+            if maintainer.has_app_authority() {
+                json_response(
+                    StatusCode::OK,
+                    r#"{"status":"ready","maintainer_webhook":"signed_ping_with_app_verification","maintainer_operations":"inactive","product_webhook":"inactive","operator_api":"inactive"}"#,
+                )
+            } else {
+                json_response(
+                    StatusCode::OK,
+                    r#"{"status":"ready","maintainer_webhook":"bootstrap_ping_only","product_webhook":"inactive","operator_api":"inactive"}"#,
+                )
+            }
         }
         #[cfg(target_arch = "wasm32")]
         (Deployment::Cloudflare, Some(_)) => json_response(
@@ -257,6 +323,34 @@ mod tests {
             )
             .err(),
             Some(AuthorityError::AppId)
+        );
+    }
+
+    #[test]
+    fn app_authority_group_is_absent_complete_or_inactive() {
+        assert!(
+            app_authority_from_values(4_673_420, [None, None, None, None])
+                .is_ok_and(|value| value.is_none())
+        );
+        assert_eq!(
+            app_authority_from_values(4_673_420, [Some("partial".into()), None, None, None],).err(),
+            Some(AuthorityError::AppAuthority)
+        );
+        let private_key = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            vec![7_u8; 1_200],
+        );
+        assert!(
+            app_authority_from_values(
+                4_673_420,
+                [
+                    Some(private_key),
+                    Some("maintainer-metadata-v1".into()),
+                    Some("baziyer/dark-factory".into()),
+                    Some("109233175".into()),
+                ],
+            )
+            .is_ok_and(|value| value.is_some())
         );
     }
 }

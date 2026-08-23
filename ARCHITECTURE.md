@@ -271,9 +271,11 @@ The official control-plane adapter is a Rust Cloudflare Worker with sharded
 SQLite Durable Objects. That is a hosted deployment choice, not part of the
 daemon protocol: self-hosted brokers preserve the same typed contract without
 loading credentials into `factoryd`. The current bootstrap acknowledges only
-an exact signed maintainer-App `ping`; every other authenticated event is
-durably policy-rejected. Product intake and the operator/PWA API remain
-separate inactive planes.
+an exact signed maintainer-App `ping`. When configured with App authority, it
+also proves one exact metadata-only repository installation with an App JWT;
+it creates no installation token and exposes no GitHub mutation.
+Every other authenticated event is durably policy-rejected. Product intake and
+the operator/PWA API remain separate inactive planes.
 
 ## State outside SQLite
 

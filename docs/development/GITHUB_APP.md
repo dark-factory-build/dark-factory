@@ -1,8 +1,8 @@
 # GitHub App authority decision
 
-Status: proposed and inactive. This document does not authorize App
-registration, installation, token minting, delivery intake, repository
-publication, merge, release, or live-factory changes.
+Status: Phase 0 read-only authority proof implemented; mutation operations
+inactive. This document does not itself authorize App registration,
+installation, repository publication, merge, release, or live-factory changes.
 
 ## Decision
 
@@ -54,17 +54,30 @@ namespaces, or audit identities.
 The broker implementation belongs in the sibling
 `dark-factory-control-plane` service, not in the pure-Rust local-runtime
 workspace or `factoryd`. The temporary `control-plane/` staging export proves
-only a versioned, signed, inert maintainer `ping` boundary. Every non-ping event
-is policy-rejected. The official hosted adapter is a Rust Cloudflare Worker.
+a versioned, signed, inert maintainer `ping` boundary. With the App-authority
+group configured, readiness and every ping also prove that the broker can sign
+an App JWT and find the exact metadata-read-only selected-repository
+installation for the bound `owner/repository` and numeric owner. This proof
+creates no installation token and exposes no repository operation. Every
+non-ping event is policy-rejected. The official hosted adapter is a Rust
+Cloudflare Worker.
 Its production journal uses strongly consistent SQLite Durable Objects;
 native SQLite exists only behind the non-default `development-sqlite` feature
 and can never satisfy readiness. The production adapter accepts exactly
 `DARK_FACTORY_MAINTAINER_WEBHOOK_SECRET`,
 `DARK_FACTORY_MAINTAINER_WEBHOOK_SECRET_REVISION`, and
-`DARK_FACTORY_MAINTAINER_APP_ID`. Missing or partial configuration leaves the
-fixed inactive router with no webhook route. A configured but unavailable or
-drifted Durable Object journal makes readiness and delivery acknowledgement
-fail closed.
+`DARK_FACTORY_MAINTAINER_APP_ID`, plus the all-or-nothing App-authority group
+`DARK_FACTORY_MAINTAINER_PRIVATE_KEY_PKCS8`,
+`DARK_FACTORY_MAINTAINER_PERMISSION_REVISION`,
+`DARK_FACTORY_MAINTAINER_REPOSITORY`, and
+`DARK_FACTORY_MAINTAINER_REPOSITORY_OWNER_ID`. The private key is standard
+base64 of unencrypted PKCS#8 DER, the repository is an exact safe
+`owner/repository` name, and the implemented permission revision is exactly
+`maintainer-metadata-v1`. Missing webhook authority or a partial or
+syntactically invalid App-authority group leaves the fixed inactive router with
+no webhook route. An unusable key or configured but unavailable or drifted
+Durable Object journal or GitHub authority makes readiness and ping
+acknowledgement fail closed.
 
 The namespace is sharded deterministically by App ID and the first byte of the
 SHA-256 delivery-ID digest. This keeps every replay identity on one serialized
@@ -82,9 +95,9 @@ App, or activate a webhook. Production credentials are never shared with
 preview or disposable deployments; those use a distinct App, secret, Durable
 Object namespace, and activation contract. `workers.dev` and preview URLs are
 disabled and the checked-in configuration has no route, so an upload cannot
-silently claim a public ingress. All three authority settings are required
-Cloudflare secrets. There is no database URL, owner integration, runtime role,
-provider API key, or ambient authentication fallback.
+silently claim a public ingress. All seven production authority settings are
+required Cloudflare secrets. There is no database URL, owner integration,
+runtime role, provider API key, or ambient authentication fallback.
 
 `wrangler secret put` deploys immediately and is not an acceptable staging
 step. The separate live runbook must stage an exact version and its secrets

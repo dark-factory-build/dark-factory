@@ -63,6 +63,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "base64"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
 name = "bitflags"
 version = "2.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -140,8 +146,11 @@ name = "dark-factory-control-plane"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64",
+ "futures-util",
  "hex",
  "hmac",
+ "js-sys",
  "rusqlite",
  "serde",
  "serde_json",
@@ -151,7 +160,9 @@ dependencies = [
  "tokio",
  "tower",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "worker",
+ "zeroize",
 ]
 
 [[package]]
@@ -1153,6 +1164,12 @@ dependencies = [
  "syn 2.0.119",
  "synstructure",
 ]
+
+[[package]]
+name = "zeroize"
+version = "1.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
 
 [[package]]
 name = "zerotrie"
