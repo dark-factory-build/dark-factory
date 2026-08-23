@@ -38,10 +38,6 @@ impl McpState {
             journal,
         }
     }
-
-    pub(crate) async fn ready(&self) -> Result<(), ()> {
-        self.app.verify().await.map_err(|_| ())
-    }
 }
 
 #[worker::send]

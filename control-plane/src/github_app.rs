@@ -599,19 +599,18 @@ fn jwt_unsigned(app_id: i64, now: i64) -> String {
 #[cfg(target_arch = "wasm32")]
 impl Authority {
     async fn verify(&self) -> Result<(), Error> {
-        // An App JWT authenticates only App-level endpoints; every other REST
-        // resource needs an installation token. Minting a least-privilege token
-        // proves the key, the App, the installation, and the exact repository
-        // binding in one authenticated response, because `installation_token`
-        // already requires the granted repositories to be exactly this
-        // repository's id, full name, and owner id.
-        self.installation_token(BTreeMap::from([("metadata", "read")]))
-            .await
-            .map(|_| ())
-            .map_err(|error| {
-                worker::console_error!("verify: installation token unavailable: {error:?}");
-                Error::Unavailable
-            })
+        // An App JWT authenticates only App-level endpoints, so repository identity
+        // cannot be read here. Prove the key signs, the App and owner match, and the
+        // installation is the exact selected-repository one — and mint nothing. This
+        // endpoint is reachable unauthenticated through /readyz, so issuing a
+        // credential here would let a stranger exhaust the App's rate limit and
+        // disable every real operation. The repository_id <-> full_name <-> owner_id
+        // binding is enforced by `installation_token` on each actual operation, which
+        // is the correct enforcement point.
+        let jwt = self.jwt().await?;
+        let installation: Installation =
+            github_json_as_app(&self.repository.installation_url(), jwt.as_str()).await?;
+        validate_installation(&installation, self.app_id, self.repository_owner_id)
     }
 
     async fn jwt(&self) -> Result<Credential, Error> {
@@ -643,12 +642,17 @@ impl Authority {
             .iter()
             .map(|(name, level)| ((*name).to_owned(), (*level).to_owned()))
             .collect::<BTreeMap<_, _>>();
+        let token_url = format!(
+            "https://api.github.com/app/installations/{}/access_tokens",
+            installation.id
+        );
+        if !app_jwt_endpoint(&token_url) {
+            worker::console_error!("refusing to present an app jwt to {token_url}");
+            return Err(OperationError::Unavailable);
+        }
         let response: InstallationToken = github_json_request(
             worker::Method::Post,
-            &format!(
-                "https://api.github.com/app/installations/{}/access_tokens",
-                installation.id
-            ),
+            &token_url,
             jwt.as_str(),
             Some(&TokenRequest {
                 repository_ids: [self.repository_id],
@@ -1156,9 +1160,16 @@ fn permission_at_least(permissions: &BTreeMap<String, String>, name: &str, requi
 /// credentials` when a JWT is presented to one.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 fn app_jwt_endpoint(url: &str) -> bool {
-    url == "https://api.github.com/app"
-        || url.starts_with("https://api.github.com/app/installations/")
-        || (url.starts_with("https://api.github.com/repos/") && url.ends_with("/installation"))
+    // Match the path only. A query or fragment can otherwise supply the suffix
+    // (`.../pulls?x=/installation`), and dot segments are collapsed by the URL
+    // parser after this check runs.
+    let path = &url[..url.find(['?', '#']).unwrap_or(url.len())];
+    if path.contains("..") {
+        return false;
+    }
+    path == "https://api.github.com/app"
+        || path.starts_with("https://api.github.com/app/installations/")
+        || (path.starts_with("https://api.github.com/repos/") && path.ends_with("/installation"))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1193,9 +1204,14 @@ async fn github_json_request<T: serde::de::DeserializeOwned, B: Serialize>(
 
     let headers = Headers::new();
     let authorization = Zeroizing::new(format!("Bearer {credential}"));
+    // Set the credential outside the logged loop. Nothing below formats a header
+    // value, and keeping the credential out of that iteration means a later edit to
+    // the log line cannot put a live token into Cloudflare logs.
+    headers
+        .set("authorization", authorization.as_str())
+        .map_err(|_| Error::Unavailable)?;
     for (name, value) in [
         ("accept", "application/vnd.github+json"),
-        ("authorization", authorization.as_str()),
         ("user-agent", "dark-factory-control-plane/0.1"),
         ("x-github-api-version", GITHUB_API_VERSION),
     ] {
@@ -1386,6 +1402,19 @@ mod tests {
         assert!(!app_jwt_endpoint(
             "https://api.github.com/repos/baziyer/dark-factory/pulls"
         ));
+        // A query or fragment must not be able to supply the suffix.
+        assert!(!app_jwt_endpoint(
+            "https://api.github.com/repos/baziyer/dark-factory/pulls?x=/installation"
+        ));
+        assert!(!app_jwt_endpoint(
+            "https://api.github.com/repos/baziyer/dark-factory/pulls#/installation"
+        ));
+        // Dot segments are collapsed by the URL parser after this check runs.
+        assert!(!app_jwt_endpoint(
+            "https://api.github.com/app/installations/../../repos/baziyer/dark-factory/pulls"
+        ));
+        // Userinfo must not be mistaken for the host.
+        assert!(!app_jwt_endpoint("https://api.github.com@evil.example/app"));
     }
 
     #[test]

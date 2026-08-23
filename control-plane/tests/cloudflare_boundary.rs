@@ -35,6 +35,28 @@ fn production_runtime_is_cloudflare_only() {
     }
 }
 
+/// Workers' `Request` constructor accepts only `follow` and `manual` and throws on
+/// `error`, so `RequestRedirect::Error` means the request is never built and the call
+/// fails closed with no diagnosis. Shipping it once left `/readyz` permanently 503 and
+/// every authenticated MCP call 401, and neither the unit tests nor the `workerd`
+/// integration test could reach the affected paths. Assert it over the source instead.
+#[test]
+fn no_outbound_request_uses_a_redirect_mode_workers_rejects() {
+    for source in [
+        "src/access.rs",
+        "src/github_app.rs",
+        "src/journal.rs",
+        "src/lib.rs",
+        "src/maintainer.rs",
+        "src/mcp.rs",
+    ] {
+        assert!(
+            !project_file(source).contains("RequestRedirect::Error"),
+            "{source} builds an outbound request Workers will refuse to construct"
+        );
+    }
+}
+
 #[test]
 fn wrangler_keeps_the_unconfigured_worker_private_and_inert() {
     let wrangler = project_file("wrangler.toml");

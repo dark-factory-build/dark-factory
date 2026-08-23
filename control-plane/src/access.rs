@@ -89,7 +89,11 @@ impl AccessAuthority {
             .map_err(|_| Error::Unauthorized)?;
         let mut init = RequestInit::new();
         init.with_method(Method::Get)
-            .with_redirect(RequestRedirect::Error)
+            // Workers' Request accepts only `follow` and `manual`; `error` makes the
+            // constructor throw, so the signing key could never be fetched and every
+            // authenticated MCP call failed closed. The 200-only check below still
+            // rejects a redirect rather than following it.
+            .with_redirect(RequestRedirect::Manual)
             .with_headers(headers)
             .with_body(None);
         let request =
