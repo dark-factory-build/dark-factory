@@ -51,6 +51,12 @@ pub(crate) enum Error {
     Configuration,
     #[error("maintainer App authority is unavailable")]
     Unavailable,
+    /// GitHub answered, and its status is the answer. The merge endpoint in
+    /// particular reports *why* it refused, and collapsing that into
+    /// "unavailable" turns a determinate refusal into a reconciliation the
+    /// caller cannot resolve.
+    #[error("github rejected the request with status {0}")]
+    Rejected(u16),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -59,6 +65,12 @@ pub(crate) enum OperationError {
     InvalidInput,
     #[error("operation ID is already bound to a different request")]
     Conflict,
+    /// GitHub refused, determinately, and nothing changed. Distinct from
+    /// `Indeterminate`, which means the outcome is genuinely unknown: a
+    /// refusal leaves the operation ID retryable once the precondition the
+    /// refusal names actually holds.
+    #[error("github refused the operation and nothing changed")]
+    Refused,
     #[error("operation outcome requires reconciliation")]
     Indeterminate,
     #[error("maintainer operation authority is unavailable")]
@@ -66,6 +78,9 @@ pub(crate) enum OperationError {
 }
 
 impl From<Error> for OperationError {
+    /// A bare status carries no determinate meaning at most call sites — only
+    /// the operations that know which statuses their endpoint uses to refuse
+    /// may read one, and they match on `Error::Rejected` before reaching here.
     fn from(_: Error) -> Self {
         Self::Unavailable
     }
@@ -451,11 +466,10 @@ impl AppAuthority {
                 .map_err(|_| OperationError::Unavailable)?;
             return Err(OperationError::Indeterminate);
         }
-        let branch_exists = self
-            .0
-            .verify_publish_precondition(&token, &request)
-            .await
-            .map_err(|_| OperationError::Conflict)?;
+        // `verify_publish_precondition` already reports a moved head as a
+        // conflict. Rewriting every other failure into one too told the caller
+        // to refetch a head that had not moved.
+        let branch_exists = self.0.verify_publish_precondition(&token, &request).await?;
         match journal
             .mark_operation(&operation, OperationTransition::Executing)
             .await
@@ -551,6 +565,18 @@ impl AppAuthority {
         }
         match self.0.merge_pull_request(&token, &request).await {
             Ok(result) => complete(journal, &operation, result).await,
+            Err(OperationError::Refused) => {
+                // Nothing merged, and we know it. Release the claim so this
+                // same operation ID and request can be retried once the pull
+                // request is actually mergeable; burying it at `indeterminate`
+                // would force a fresh UUID for every retry and would report an
+                // unknown outcome for a fully known one.
+                journal
+                    .mark_operation(&operation, OperationTransition::Refused)
+                    .await
+                    .map_err(|_| OperationError::Unavailable)?;
+                Err(OperationError::Refused)
+            }
             Err(_) => {
                 if let Some(result) = self.0.reconcile_merge(&token, &request).await? {
                     return complete(journal, &operation, result).await;
@@ -1058,7 +1084,12 @@ impl Authority {
                 && reference.object.sha == request.expected_head_sha)
                 .then_some(true)
                 .ok_or(OperationError::Conflict),
-            Err(_) => {
+            // Only a 404 means the branch is absent. Reading any other failure
+            // as absence sent a publish onto a branch sitting exactly at
+            // `expected_head_sha` down the create path, where `POST /git/refs`
+            // answers "Reference already exists" and wedges the operation at
+            // indeterminate for a branch that never moved.
+            Err(Error::Rejected(404)) => {
                 // The parent must still be a real commit, so a typo cannot
                 // create a branch from nothing.
                 let _: GitCommit = github_json(
@@ -1071,6 +1102,7 @@ impl Authority {
                 .await?;
                 Ok(false)
             }
+            Err(error) => Err(error.into()),
         }
     }
 
@@ -1243,7 +1275,7 @@ impl Authority {
         token: &Credential,
         request: &MergePullRequest,
     ) -> Result<MergeResult, OperationError> {
-        let merged: MergeResponse = github_json_request(
+        let merged: MergeResponse = match github_json_request(
             worker::Method::Put,
             &format!(
                 "https://api.github.com/repos/{}/{}/pulls/{}/merge",
@@ -1255,7 +1287,21 @@ impl Authority {
                 merge_method: request.merge_method.github_method(),
             }),
         )
-        .await?;
+        .await
+        {
+            Ok(merged) => merged,
+            // This endpoint answers with the reason it refused. 405 is "not
+            // mergeable" — a required check red or still running, a draft, or
+            // a conflicting base — and is the ordinary first answer for a pull
+            // request whose CI has not finished. 409 is "the head moved", and
+            // 403/422 are a refused permission and a rejected body. All four
+            // mean the merge did not happen, so the caller has something to
+            // act on rather than an outcome it must reconcile by hand.
+            Err(Error::Rejected(403 | 405 | 409 | 422)) => {
+                return Err(OperationError::Refused);
+            }
+            Err(error) => return Err(error.into()),
+        };
         merged
             .merged
             .then_some(MergeResult {
@@ -1264,7 +1310,8 @@ impl Authority {
                 merge_commit_sha: merged.sha,
                 head_sha: request.head_sha.clone(),
             })
-            .ok_or(OperationError::Indeterminate)
+            // A 2xx that did not merge is still a determinate "did not merge".
+            .ok_or(OperationError::Refused)
     }
 
     async fn reconcile_merge(
@@ -1959,7 +2006,7 @@ async fn github_json_request<T: serde::de::DeserializeOwned, B: Serialize>(
             "github rejected {url} with status {}",
             response.status_code()
         );
-        return Err(Error::Unavailable);
+        return Err(Error::Rejected(response.status_code()));
     }
     let mut stream = response.stream().map_err(|_| Error::Unavailable)?;
     let mut bytes = Vec::new();

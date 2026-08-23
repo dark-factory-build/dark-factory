@@ -407,6 +407,11 @@ fn operation_error(id: Value, error: OperationError) -> Response {
             "conflict",
             "The exact-head or operation binding changed.",
         ),
+        OperationError::Refused => tool_error(
+            id,
+            "refused",
+            "GitHub refused the operation and nothing changed; retry when its precondition holds.",
+        ),
         OperationError::Indeterminate => tool_error(
             id,
             "indeterminate",

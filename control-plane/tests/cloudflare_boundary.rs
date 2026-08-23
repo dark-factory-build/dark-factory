@@ -143,3 +143,29 @@ fn mcp_surface_is_repository_bound_and_typed() {
     assert!(access.contains("claims.audience"));
     assert!(access.contains("claims.issuer"));
 }
+
+/// The merge and publish paths are `wasm32`-only, so a host test cannot drive
+/// them. What it can do is hold the contract they were got wrong on: GitHub's
+/// refusal statuses must reach a determinate answer rather than being folded
+/// into "unavailable" and reported as an outcome nobody knows.
+#[test]
+fn github_refusals_stay_determinate() {
+    let github_app = project_file("src/github_app.rs");
+    let mcp = project_file("src/mcp.rs");
+    let journal = project_file("src/journal.rs");
+
+    // The transport reports the status; it is the only place that sees one.
+    assert!(github_app.contains("Err(Error::Rejected(response.status_code()))"));
+    // The merge endpoint's four refusal statuses are read, not collapsed.
+    assert!(github_app.contains("Err(Error::Rejected(403 | 405 | 409 | 422))"));
+    // A missing branch is a 404 and nothing else.
+    assert!(github_app.contains("Err(Error::Rejected(404))"));
+    // A refusal releases the claim so the same operation ID stays retryable.
+    assert!(github_app.contains("OperationTransition::Refused"));
+    assert!(
+        journal.contains(r#"OperationTransition::Refused => Ok(("planned", None, "'executing'"))"#)
+    );
+    // And the caller is told which of the two it got.
+    assert!(mcp.contains(r#""refused""#));
+    assert!(mcp.contains(r#""indeterminate""#));
+}

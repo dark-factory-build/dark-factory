@@ -255,6 +255,11 @@ impl DeliveryJournal {
 pub(crate) enum OperationTransition {
     Executing,
     Completed(String),
+    /// GitHub refused determinately and nothing happened, so the claim is
+    /// released rather than buried: the same operation ID and request may be
+    /// retried once the refused precondition holds. `planned` is the state
+    /// `begin_operation` inserts, so this needs no new schema.
+    Refused,
     Indeterminate,
 }
 
@@ -702,6 +707,7 @@ fn transition_parts(
                 "'planned','executing','indeterminate'",
             ))
         }
+        OperationTransition::Refused => Ok(("planned", None, "'executing'")),
         OperationTransition::Indeterminate => {
             Ok(("indeterminate", None, "'executing','indeterminate'"))
         }
@@ -925,6 +931,58 @@ fn stored_operation_sqlite(
 #[cfg(all(test, feature = "development-sqlite"))]
 mod operation_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_refused_operation_releases_its_claim_for_the_same_request() {
+        let directory = tempfile::tempdir().unwrap();
+        let journal =
+            DeliveryJournal::open_development(&directory.path().join("journal.db")).unwrap();
+        let operation = Operation {
+            operation_id: "6d1f0f8e-7f1f-11f0-952e-acde48001122".into(),
+            kind: "merge_pull_request_at_head".into(),
+            request_digest: "b".repeat(64),
+        };
+        assert!(matches!(
+            journal.begin_operation(&operation).await.unwrap(),
+            OperationRecord::New
+        ));
+        assert!(matches!(
+            journal
+                .mark_operation(&operation, OperationTransition::Executing)
+                .await
+                .unwrap(),
+            OperationRecord::Claimed
+        ));
+        // GitHub refused determinately, so the claim goes back rather than
+        // being buried: a merge refused because CI was still running must be
+        // retryable under the same operation ID once CI is green.
+        assert!(matches!(
+            journal
+                .mark_operation(&operation, OperationTransition::Refused)
+                .await
+                .unwrap(),
+            OperationRecord::Planned
+        ));
+        assert!(matches!(
+            journal.begin_operation(&operation).await.unwrap(),
+            OperationRecord::Planned
+        ));
+        assert!(matches!(
+            journal
+                .mark_operation(&operation, OperationTransition::Executing)
+                .await
+                .unwrap(),
+            OperationRecord::Claimed
+        ));
+        let result = r#"{"pull_number":1,"merged":true}"#.to_owned();
+        assert!(
+            matches!(journal.mark_operation(&operation, OperationTransition::Completed(result.clone())).await.unwrap(), OperationRecord::Completed(stored) if stored == result)
+        );
+        // A completed operation is terminal: a late refusal cannot reopen it.
+        assert!(
+            matches!(journal.mark_operation(&operation, OperationTransition::Refused).await.unwrap(), OperationRecord::Completed(stored) if stored == result)
+        );
+    }
 
     #[tokio::test]
     async fn operation_state_is_idempotent_and_conflicts_fail_closed() {
