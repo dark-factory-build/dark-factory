@@ -107,9 +107,12 @@ Finalization boots out the exact label, proves absence only from launchctl's
 documented not-found classification, waits for every recorded PID, revalidates
 the root's device, inode, owner, and claim marker, and only then removes it.
 Anything unproven keeps the root and fails visibly; recover by fixing the
-cause and re-running, which resumes the same receipt. A retained receipt makes
-the next run fail at startup on purpose: it means a real launchd job is still
-loaded.
+cause and re-running, which resumes the same receipt. A receipt that cannot be
+finalized makes every later run fail at startup on purpose, since it may
+describe a job that is still loaded. That is deliberately conservative: it also
+fires when the receipt merely cannot be acted on, such as an unreadable file or
+a recorded PID whose number has been reused. If the service the receipt names
+is provably absent, remove that file from the ledger to unblock later runs.
 
 Containment itself is proved on every platform, including Linux, by
 `cargo test -p factoryctl --test launchd_gate` against a fake `launchctl` —

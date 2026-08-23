@@ -11,9 +11,7 @@
 //! is durable across process boundaries and not merely across a scope.
 
 use std::{
-    env,
-    fs::{self, File},
-    io::Write,
+    env, fs,
     os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     process::Command,
@@ -23,9 +21,37 @@ use std::{
 mod launchd_gate;
 
 use launchd_gate::{
-    Deadlines, FIXTURE_LABEL_PREFIX, GateError, GateRequest, INSTALLED_LABEL, Launchctl,
-    LaunchdGateInvocation, ServiceState, resume,
+    Deadlines, FIXTURE_LABEL_PREFIX, GateError, GateReceipt, GateRequest, INSTALLED_LABEL,
+    Launchctl, LaunchdGateInvocation, ServiceState, resume,
 };
+
+/// Builds a planted receipt from the real type. A hand-written JSON literal
+/// silently stops decoding the moment a field is added, which turns every
+/// assertion after it into a check that the parser rejected the file -- not
+/// that the guard under test refused it.
+fn plant(ledger: &Path, label: &str, root: &Path, claim_token: &str) -> GateReceipt {
+    let identity = fs::symlink_metadata(root).unwrap();
+    let receipt = GateReceipt {
+        domain: "gui/501".to_owned(),
+        label: label.to_owned(),
+        plist: root.join(format!("{label}.plist")),
+        runtime_root: root.to_owned(),
+        owner_uid: rustix::process::getuid().as_raw(),
+        root_device: identity.dev(),
+        root_inode: identity.ino(),
+        staged_digest: String::new(),
+        claim_token: claim_token.to_owned(),
+        observed_pids: Vec::new(),
+    };
+    // Named for the label it records, so the filename check cannot be what
+    // refuses it.
+    fs::write(
+        ledger.join(format!("{label}.json")),
+        serde_json::to_vec(&receipt).unwrap(),
+    )
+    .unwrap();
+    receipt
+}
 
 const CHILD_MODE: &str = "DARK_FACTORY_GATE_CHILD";
 
@@ -319,6 +345,67 @@ fn a_replaced_private_root_is_never_deleted() {
     let error = resume(&world.ledger, &launchctl).unwrap_err();
     assert!(matches!(error, GateError::Retained { .. }), "{error}");
     assert!(world.root.join("someone-elses-work").exists());
+}
+
+/// The claim token must do work on its own, independently of the recorded
+/// device and inode. The directory is left exactly as it was — same inode,
+/// same owner — and only the marker's contents change, so nothing but the
+/// token can refuse this. Recreating the directory instead would let the
+/// inode check refuse it on a filesystem that does not recycle inodes, and
+/// the test would then prove nothing on that platform.
+#[test]
+fn a_root_whose_claim_no_longer_matches_is_never_deleted() {
+    let world = World::new("forgedclaim");
+    let launchctl = world.launchctl();
+    let invocation = world.open(&launchctl);
+    let before = fs::symlink_metadata(&world.root).unwrap();
+    invocation.release();
+
+    fs::write(world.root.join("still-in-use"), b"keep me").unwrap();
+    // A plausible guess at the claim: the label, which is exactly what the
+    // marker held before the token existed.
+    fs::write(world.root.join(".dark-factory-launchd-gate"), &world.label).unwrap();
+    let after = fs::symlink_metadata(&world.root).unwrap();
+    assert_eq!(
+        (before.dev(), before.ino()),
+        (after.dev(), after.ino()),
+        "the recorded identity must be untouched so only the claim can refuse"
+    );
+
+    let error = resume(&world.ledger, &launchctl).unwrap_err();
+    assert!(matches!(error, GateError::Retained { .. }), "{error}");
+    assert!(world.root.join("still-in-use").exists());
+}
+
+/// The claim is only worth anything if it cannot be predicted. A fixed token
+/// would satisfy every other test here while letting anyone who has read the
+/// source write a marker that authorises deletion.
+#[test]
+fn each_invocation_gets_its_own_unguessable_claim() {
+    let first = World::new("claimone");
+    let second = World::new("claimtwo");
+    let first_open = first.open(&first.launchctl());
+    let second_open = second.open(&second.launchctl());
+
+    let first_token = first_open.receipt().claim_token.clone();
+    let second_token = second_open.receipt().claim_token.clone();
+    assert_ne!(
+        first_token, second_token,
+        "two invocations share a claim, so it is guessable from any one root"
+    );
+    assert!(
+        !first_token.is_empty() && !first_token.contains(&first.label),
+        "the claim must not be derived from the label: {first_token}"
+    );
+    // Each root carries its own claim and no other.
+    assert_eq!(
+        fs::read_to_string(first.root.join(".dark-factory-launchd-gate")).unwrap(),
+        first_token
+    );
+    assert_eq!(
+        fs::read_to_string(second.root.join(".dark-factory-launchd-gate")).unwrap(),
+        second_token
+    );
 }
 
 /// The recorded device and inode must still be revalidated in their own
@@ -659,23 +746,10 @@ fn the_installed_label_is_refused_at_declaration_and_at_finalization() {
     .unwrap_err();
     assert!(matches!(refusal, GateError::Refused(_)), "{refusal}");
 
-    // A hand-written or corrupted receipt must not turn resume into a
-    // teardown of the operator's real service.
-    let planted = world.ledger.join("planted.json");
-    let mut file = File::create(&planted).unwrap();
-    file.write_all(
-        format!(
-            r#"{{"domain":"gui/501","label":"{INSTALLED_LABEL}","plist":"{plist}",
-                 "runtime_root":"{root}","owner_uid":{uid},"root_device":1,"root_inode":1,
-                 "staged_digest":"","first_pid":null}}"#,
-            plist = plist.display(),
-            root = world.root.display(),
-            uid = rustix::process::getuid().as_raw(),
-        )
-        .as_bytes(),
-    )
-    .unwrap();
-    drop(file);
+    // A corrupted receipt must not turn resume into a teardown of the
+    // operator's real service. Everything else about it is valid, so the
+    // label refusal inside finalization is the only thing that can refuse it.
+    plant(&world.ledger, INSTALLED_LABEL, &world.root, "irrelevant");
 
     let error = resume(&world.ledger, &launchctl).unwrap_err();
     assert!(matches!(error, GateError::Retained { .. }), "{error}");
@@ -699,25 +773,15 @@ fn a_receipt_cannot_aim_cleanup_at_a_directory_the_gate_never_claimed() {
     fs::create_dir(&victim).unwrap();
     fs::set_permissions(&victim, fs::Permissions::from_mode(0o700)).unwrap();
     fs::write(victim.join("precious"), b"keep me").unwrap();
-    let identity = fs::symlink_metadata(&victim).unwrap();
 
-    let planted = world.ledger.join("planted.json");
-    fs::write(
-        &planted,
-        serde_json::to_vec(&serde_json::json!({
-            "domain": "gui/501",
-            "label": world.label,
-            "plist": victim.join("x.plist"),
-            "runtime_root": victim,
-            "owner_uid": rustix::process::getuid().as_raw(),
-            "root_device": identity.dev(),
-            "root_inode": identity.ino(),
-            "staged_digest": "",
-            "first_pid": serde_json::Value::Null,
-        }))
-        .unwrap(),
-    )
-    .unwrap();
+    // The receipt carries the victim's real device, inode and owner, so the
+    // identity revalidation passes and only the missing claim can refuse it.
+    plant(
+        &world.ledger,
+        &world.label,
+        &victim,
+        "a-token-no-marker-holds",
+    );
 
     let error = resume(&world.ledger, &launchctl).unwrap_err();
     assert!(matches!(error, GateError::Retained { .. }), "{error}");

@@ -314,7 +314,10 @@ pub struct GateReceipt {
     pub root_device: u64,
     pub root_inode: u64,
     /// Random per-invocation claim. The private root is deleted only if its
-    /// marker still holds this exact value.
+    /// marker still holds this exact value. Defaulted so a receipt written by
+    /// an earlier build still decodes: an undecodable receipt fails every
+    /// later run, and cannot be told apart from one describing a live job.
+    #[serde(default)]
     pub claim_token: String,
     /// The executable the job was first staged to run. Recorded so a retained
     /// root can be traced back to what it was running.
@@ -322,6 +325,7 @@ pub struct GateReceipt {
     /// Every PID launchd reported for this job, in order. Finalization waits
     /// for each to be gone after proving the service absent, so a passing run
     /// leaves no test-owned daemon behind.
+    #[serde(default)]
     pub observed_pids: Vec<u32>,
 }
 
@@ -853,7 +857,8 @@ fn read_receipt(path: &Path) -> GateResult<GateReceipt> {
     })?;
     serde_json::from_slice(&content).map_err(|error| {
         GateError::refused(format!(
-            "unreadable launchd gate receipt {}: {error}",
+            "unreadable launchd gate receipt {}: {error}. Confirm the service \
+             it names is not loaded, then remove the file to unblock later runs",
             path.display()
         ))
     })
