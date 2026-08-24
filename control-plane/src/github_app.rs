@@ -69,13 +69,78 @@ pub(crate) enum OperationError {
     /// GitHub refused, determinately, and nothing changed. Distinct from
     /// `Indeterminate`, which means the outcome is genuinely unknown: a
     /// refusal leaves the operation ID retryable once the precondition the
-    /// refusal names actually holds.
-    #[error("github refused the operation and nothing changed")]
-    Refused,
+    /// refusal names actually holds. The reason rides along because an
+    /// untyped outcome has now cost two diagnosis cycles (#371): "the token
+    /// lacks a permission", "the queue rejected the entry", and "there is
+    /// no queue" are three different retries, and without the reason the
+    /// only way to tell them apart is reading this crate's source.
+    #[error("github refused the operation and nothing changed: {0}")]
+    Refused(RefusalReason),
     #[error("operation outcome requires reconciliation")]
     Indeterminate,
     #[error("maintainer operation authority is unavailable")]
     Unavailable,
+}
+
+/// Why GitHub refused, said with typed classifications only. GitHub's
+/// error text can quote caller input, so the text never rides along -- the
+/// same discipline `github_graphql` applies to its logging.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub(crate) enum RefusalReason {
+    /// The mutation was rejected before execution, and these are the typed
+    /// error classes GitHub returned at the mutation root.
+    #[error("rejected before execution as {0}")]
+    Rejected(RejectionKinds),
+    /// The mutation answered with neither an effect nor an error.
+    #[error("answered with neither an effect nor an error")]
+    NoEffect,
+    /// The queue read answered, and its answer carried no merge queue for
+    /// the base branch -- stated as the observation, because `entries:
+    /// None` is also the shape of a null repository. The decision doc
+    /// calls a queueless branch unsupported and fails closed rather than
+    /// falling back to a merge.
+    #[error("the queue read found no merge queue on the base branch")]
+    NoMergeQueue,
+}
+
+/// Which pre-execution rejection classes appeared. More than one can:
+/// GitHub reports one error per problem, so the set is carried whole
+/// rather than collapsed to whichever arrived first.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct RejectionKinds {
+    not_found: bool,
+    forbidden: bool,
+    unprocessable: bool,
+    rate_limited: bool,
+}
+
+impl std::fmt::Display for RejectionKinds {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut separate = false;
+        for (present, name) in [
+            (self.not_found, "NOT_FOUND"),
+            (self.forbidden, "FORBIDDEN"),
+            (self.unprocessable, "UNPROCESSABLE"),
+            (self.rate_limited, "RATE_LIMITED"),
+        ] {
+            if present {
+                if separate {
+                    formatter.write_str("+")?;
+                }
+                formatter.write_str(name)?;
+                separate = true;
+            }
+        }
+        if !separate {
+            // No real path constructs the empty set: `classify_graphql_errors`
+            // records a class for every error it accepts and refuses an empty
+            // error array earlier. But the derived `Default` is
+            // crate-visible, so the impossible value must at least read as
+            // what it is rather than trailing off mid-sentence.
+            formatter.write_str("no recorded class")?;
+        }
+        Ok(())
+    }
 }
 
 impl From<Error> for OperationError {
@@ -582,7 +647,12 @@ impl AppAuthority {
             .installation_token(BTreeMap::from([
                 ("merge_queues", "write"),
                 ("metadata", "read"),
-                ("pull_requests", "read"),
+                // Enqueueing mutates the pull request's queue state. This
+                // minted `read` once, and the first live enqueue was refused
+                // wholesale (#371); every sibling operation that mutates a
+                // pull request mints `write`, and the reviewed permission
+                // revision already grants it.
+                ("pull_requests", "write"),
             ]))
             .await?;
         if let Some(result) = self.0.reconcile_enqueue(&token, &request).await? {
@@ -629,7 +699,7 @@ impl AppAuthority {
         }
         match self.0.enqueue_entry(&token, &pull.node_id, &request).await {
             Ok(result) => complete(journal, &operation, result).await,
-            Err(OperationError::Refused) => {
+            Err(OperationError::Refused(reason)) => {
                 // Nothing was enqueued, and we know it. Release the claim so
                 // this same operation ID and request can be retried once the
                 // pull request is actually queueable; burying it at
@@ -639,7 +709,7 @@ impl AppAuthority {
                     .mark_operation(&operation, OperationTransition::Refused)
                     .await
                     .map_err(|_| OperationError::Unavailable)?;
-                Err(OperationError::Refused)
+                Err(OperationError::Refused(reason))
             }
             Err(_) => {
                 if let Some(result) = self.0.reconcile_enqueue(&token, &request).await? {
@@ -1499,9 +1569,10 @@ impl Authority {
             .and_then(|repository| repository.queue)
             .and_then(|queue| queue.entries)
         else {
-            // No queue on this branch. The decision doc calls that
-            // unsupported and fails closed rather than falling back.
-            return Err(OperationError::Refused);
+            // The read answered, and its answer carried no queue for this
+            // branch. The decision doc calls that unsupported and fails
+            // closed rather than falling back.
+            return Err(OperationError::Refused(RefusalReason::NoMergeQueue));
         };
         // One unread page could hide this operation's entry and make a
         // reconciliation answer "not queued" for something that is. Refuse to
@@ -2197,7 +2268,8 @@ fn classify_graphql_errors(errors: &[GraphQlError]) -> Option<GraphQlFailure> {
     if errors.is_empty() {
         return None;
     }
-    let rejected = errors.iter().all(|error| {
+    let mut kinds = RejectionKinds::default();
+    for error in errors {
         // A type alone is not enough. GitHub raises typed errors -- including
         // `FORBIDDEN`, for permission scoping on an installation token -- while
         // *resolving* deep fields, and an error at a path below the mutation
@@ -2210,17 +2282,18 @@ fn classify_graphql_errors(errors: &[GraphQlError]) -> Option<GraphQlFailure> {
         // A root-level error keeps its type: the SAML `FORBIDDEN` GitHub
         // documents arrives at `path: ["<mutationField>"]`, length one, and is
         // a genuine pre-execution rejection.
-        error.path.len() <= 1
-            && matches!(
-                error.kind.as_deref(),
-                Some("NOT_FOUND" | "FORBIDDEN" | "UNPROCESSABLE" | "RATE_LIMITED")
-            )
-    });
-    Some(if rejected {
-        GraphQlFailure::Rejected
-    } else {
-        GraphQlFailure::Unknown
-    })
+        if error.path.len() > 1 {
+            return Some(GraphQlFailure::Unknown);
+        }
+        match error.kind.as_deref() {
+            Some("NOT_FOUND") => kinds.not_found = true,
+            Some("FORBIDDEN") => kinds.forbidden = true,
+            Some("UNPROCESSABLE") => kinds.unprocessable = true,
+            Some("RATE_LIMITED") => kinds.rate_limited = true,
+            _ => return Some(GraphQlFailure::Unknown),
+        }
+    }
+    Some(GraphQlFailure::Rejected(kinds))
 }
 
 /// What an enqueue mutation established, decided from the **payload** rather
@@ -2245,13 +2318,15 @@ fn enqueue_outcome(
         (Some(entry), _) => Ok(entry),
         // Rejected before execution: nothing was queued, and the same
         // operation ID stays retryable once the precondition holds.
-        (None, Some(GraphQlFailure::Rejected)) => Err(OperationError::Refused),
+        (None, Some(GraphQlFailure::Rejected(kinds))) => {
+            Err(OperationError::Refused(RefusalReason::Rejected(kinds)))
+        }
         // An untyped error may follow a server-side timeout on work already
         // under way. The caller reconciles against the queue rather than
         // asserting nothing happened.
         (None, Some(GraphQlFailure::Unknown)) => Err(OperationError::Indeterminate),
         // No entry and no error is a determinate "did not enqueue".
-        (None, None) => Err(OperationError::Refused),
+        (None, None) => Err(OperationError::Refused(RefusalReason::NoEffect)),
     }
 }
 
@@ -2267,8 +2342,9 @@ fn enqueue_outcome(
 #[derive(Clone, Copy, Debug)]
 enum GraphQlFailure {
     /// Every error names a class GitHub rejects *before* running the
-    /// operation, so no effect was produced.
-    Rejected,
+    /// operation, so no effect was produced. Which classes appeared rides
+    /// along, because the reason ends at the MCP boundary (#371).
+    Rejected(RejectionKinds),
     /// At least one error carries no type, or one GitHub can return after it
     /// began executing. Whether the effect landed is not knowable from this.
     Unknown,
@@ -2644,13 +2720,15 @@ mod tests {
         assert!(classify_graphql_errors(&[]).is_none());
 
         for kind in ["NOT_FOUND", "FORBIDDEN", "UNPROCESSABLE", "RATE_LIMITED"] {
-            assert!(
-                matches!(
-                    classify_graphql_errors(&errors(&[Some(kind)])),
-                    Some(GraphQlFailure::Rejected)
-                ),
-                "{kind} is rejected before execution"
-            );
+            match classify_graphql_errors(&errors(&[Some(kind)])) {
+                Some(GraphQlFailure::Rejected(kinds)) => {
+                    // The class is recorded, not merely accepted: a refusal
+                    // that cannot say which class it was is the untyped
+                    // refusal this table exists to prevent (#371).
+                    assert_eq!(kinds.to_string(), kind);
+                }
+                other => panic!("{kind} is rejected before execution, got {other:?}"),
+            }
         }
 
         // An untyped error is GitHub's shape for `Something went wrong while
@@ -2696,12 +2774,12 @@ mod tests {
         // pre-execution rejection.
         assert!(matches!(
             classify_graphql_errors(&at_path("FORBIDDEN", &["enqueuePullRequest"])),
-            Some(GraphQlFailure::Rejected)
+            Some(GraphQlFailure::Rejected(_))
         ));
         // An error with no path at all is request-level.
         assert!(matches!(
             classify_graphql_errors(&at_path("RATE_LIMITED", &[])),
-            Some(GraphQlFailure::Rejected)
+            Some(GraphQlFailure::Rejected(_))
         ));
     }
 
@@ -2721,16 +2799,22 @@ mod tests {
             }),
         };
 
+        let forbidden = RejectionKinds {
+            forbidden: true,
+            ..RejectionKinds::default()
+        };
+
         // An entry came back. That is the effect, whatever rode alongside it.
         assert!(enqueue_outcome(Some(entry()), None).is_ok());
-        assert!(enqueue_outcome(Some(entry()), Some(GraphQlFailure::Rejected)).is_ok());
+        assert!(enqueue_outcome(Some(entry()), Some(GraphQlFailure::Rejected(forbidden))).is_ok());
         assert!(enqueue_outcome(Some(entry()), Some(GraphQlFailure::Unknown)).is_ok());
 
-        // No entry, rejected before execution: determinate, and the same
-        // operation ID stays retryable.
+        // No entry, rejected before execution: determinate, the same
+        // operation ID stays retryable, and the refusal carries the classes
+        // the classification recorded rather than a fresh guess.
         assert!(matches!(
-            enqueue_outcome(None, Some(GraphQlFailure::Rejected)),
-            Err(OperationError::Refused)
+            enqueue_outcome(None, Some(GraphQlFailure::Rejected(forbidden))),
+            Err(OperationError::Refused(RefusalReason::Rejected(kinds))) if kinds == forbidden
         ));
         // No entry, and an error class that may follow a server-side timeout
         // on work already under way. Reporting "nothing changed" here is the
@@ -2739,11 +2823,58 @@ mod tests {
             enqueue_outcome(None, Some(GraphQlFailure::Unknown)),
             Err(OperationError::Indeterminate)
         ));
-        // No entry and no error at all.
+        // No entry and no error at all is its own reason: nothing was
+        // rejected, GitHub simply answered with no effect.
         assert!(matches!(
             enqueue_outcome(None, None),
-            Err(OperationError::Refused)
+            Err(OperationError::Refused(RefusalReason::NoEffect))
         ));
+    }
+
+    /// The reason must survive to the caller-visible rendering: each refusal
+    /// names itself distinctly, and a multi-class rejection carries every
+    /// class rather than whichever arrived first (#371).
+    #[test]
+    fn a_refusal_renders_its_reason() {
+        let mixed = vec![
+            GraphQlError {
+                kind: Some("NOT_FOUND".into()),
+                path: vec!["enqueuePullRequest".into()],
+            },
+            GraphQlError {
+                kind: Some("RATE_LIMITED".into()),
+                path: vec![],
+            },
+        ];
+        match classify_graphql_errors(&mixed) {
+            Some(GraphQlFailure::Rejected(kinds)) => {
+                assert_eq!(kinds.to_string(), "NOT_FOUND+RATE_LIMITED");
+            }
+            other => panic!("a mixed typed rejection stays rejected, got {other:?}"),
+        }
+
+        let rejected = enqueue_outcome(None, classify_graphql_errors(&mixed))
+            .err()
+            .unwrap();
+        assert_eq!(
+            rejected.to_string(),
+            "github refused the operation and nothing changed: \
+             rejected before execution as NOT_FOUND+RATE_LIMITED"
+        );
+        assert_eq!(
+            enqueue_outcome(None, None).err().unwrap().to_string(),
+            "github refused the operation and nothing changed: \
+             answered with neither an effect nor an error"
+        );
+        assert_eq!(
+            OperationError::Refused(RefusalReason::NoMergeQueue).to_string(),
+            "github refused the operation and nothing changed: \
+             the queue read found no merge queue on the base branch"
+        );
+        // The empty set is unreachable from classification but constructible
+        // through the derived `Default`; its rendering must say so instead
+        // of ending the sentence with nothing.
+        assert_eq!(RejectionKinds::default().to_string(), "no recorded class");
     }
 
     /// The queue entry's own `headCommit` is the queue's synthetic merge
