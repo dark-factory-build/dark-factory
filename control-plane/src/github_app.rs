@@ -2088,6 +2088,11 @@ async fn github_json_as_app<T: serde::de::DeserializeOwned>(
 struct GraphQlError {
     #[serde(rename = "type")]
     kind: Option<String>,
+    /// The response path the error was raised at. A path deeper than the
+    /// mutation root means a resolver had to run to produce an object to
+    /// select into, so the effect may already exist -- whatever the type says.
+    #[serde(default)]
+    path: Vec<serde_json::Value>,
 }
 
 /// Classify a GraphQL `errors` array into what it establishes about the
@@ -2110,10 +2115,23 @@ fn classify_graphql_errors(errors: &[GraphQlError]) -> Option<GraphQlFailure> {
         return None;
     }
     let rejected = errors.iter().all(|error| {
-        matches!(
-            error.kind.as_deref(),
-            Some("NOT_FOUND" | "FORBIDDEN" | "UNPROCESSABLE" | "RATE_LIMITED")
-        )
+        // A type alone is not enough. GitHub raises typed errors -- including
+        // `FORBIDDEN`, for permission scoping on an installation token -- while
+        // *resolving* deep fields, and an error at a path below the mutation
+        // root is post-execution by construction: the resolver had to run to
+        // produce something to select into. On this mutation that matters,
+        // because `mergeQueueEntry.id` and `.state` are non-null, so an error
+        // on either nulls `mergeQueueEntry` itself and the entry looks absent
+        // for an enqueue that already happened.
+        //
+        // A root-level error keeps its type: the SAML `FORBIDDEN` GitHub
+        // documents arrives at `path: ["<mutationField>"]`, length one, and is
+        // a genuine pre-execution rejection.
+        error.path.len() <= 1
+            && matches!(
+                error.kind.as_deref(),
+                Some("NOT_FOUND" | "FORBIDDEN" | "UNPROCESSABLE" | "RATE_LIMITED")
+            )
     });
     Some(if rejected {
         GraphQlFailure::Rejected
@@ -2529,8 +2547,15 @@ mod tests {
                 .iter()
                 .map(|kind| GraphQlError {
                     kind: kind.map(Into::into),
+                    path: vec!["enqueuePullRequest".into()],
                 })
                 .collect::<Vec<_>>()
+        };
+        let at_path = |kind: &str, path: &[&str]| {
+            vec![GraphQlError {
+                kind: Some(kind.into()),
+                path: path.iter().map(|part| (*part).into()).collect(),
+            }]
         };
 
         assert!(classify_graphql_errors(&[]).is_none());
@@ -2561,6 +2586,39 @@ mod tests {
         assert!(matches!(
             classify_graphql_errors(&errors(&[Some("FORBIDDEN"), None])),
             Some(GraphQlFailure::Unknown)
+        ));
+
+        // A typed error raised while RESOLVING a field is post-execution by
+        // construction, whatever its type says. GitHub raises `FORBIDDEN` this
+        // way for permission scoping on installation tokens, and because
+        // `mergeQueueEntry.id` and `.state` are non-null it would null the
+        // entry -- making a landed enqueue look absent and be reported as
+        // "nothing changed".
+        assert!(matches!(
+            classify_graphql_errors(&at_path(
+                "FORBIDDEN",
+                &["enqueuePullRequest", "mergeQueueEntry", "id"]
+            )),
+            Some(GraphQlFailure::Unknown)
+        ));
+        assert!(matches!(
+            classify_graphql_errors(&at_path(
+                "NOT_FOUND",
+                &["enqueuePullRequest", "mergeQueueEntry", "state"]
+            )),
+            Some(GraphQlFailure::Unknown)
+        ));
+        // A root-level error keeps its type: this is the shape GitHub
+        // documents for a SAML-protected resource, and it is a genuine
+        // pre-execution rejection.
+        assert!(matches!(
+            classify_graphql_errors(&at_path("FORBIDDEN", &["enqueuePullRequest"])),
+            Some(GraphQlFailure::Rejected)
+        ));
+        // An error with no path at all is request-level.
+        assert!(matches!(
+            classify_graphql_errors(&at_path("RATE_LIMITED", &[])),
+            Some(GraphQlFailure::Rejected)
         ));
     }
 
