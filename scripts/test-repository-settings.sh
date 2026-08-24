@@ -3,7 +3,10 @@
 # adversarial-review gate. Nothing here mutates anything live: the publisher
 # records what an operator intends to apply, the live rules are the only
 # record of what is applied, and the workflow's inline chokepoint asserts
-# the live rules on every run.
+# four live facts on every run -- the merge_queue rule, ALLGREEN grouping,
+# the required_status_checks rule, and the required context. It does not
+# observe the context's integration binding; the publisher pin below is that
+# fact's only record (#375).
 set -eu
 
 repository_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
