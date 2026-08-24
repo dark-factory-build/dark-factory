@@ -15,12 +15,12 @@ use super::changes::{
 };
 use super::rust_builds::insert_completion_check_if_required;
 use super::{
-    AgentMessage, ChangeReservation, MAX_BLOCKED_REASON_BYTES, MAX_PATH_BYTES,
+    AGENT_BUDGET_SELECT, AgentMessage, ChangeReservation, MAX_BLOCKED_REASON_BYTES, MAX_PATH_BYTES,
     MAX_TASK_RESULT_BYTES, MAX_WAIT_REASON_BYTES, NewAgentMessage, NewTask, Result, Store,
-    StoreError, TaskDetail, agent_pause_reasons, append_agent_changed_event, append_event,
-    assign_task_in_transaction, budget_from_row, insert_agent_message, insert_task, load_agent,
-    load_agent_profile, load_task, parse_agent_role, parse_execution_mode, parse_id,
-    parse_observer_health, parse_provider,
+    StoreError, TaskDetail, agent_message_from_row, agent_pause_reasons,
+    append_agent_changed_event, append_event, assign_task_in_transaction, budget_from_row,
+    insert_agent_message, insert_task, load_agent, load_agent_profile, load_task, parse_agent_role,
+    parse_execution_mode, parse_id, parse_observer_health, parse_provider, provider_value,
 };
 
 const CAPABILITY_HEX_LEN: usize = 64;
@@ -418,7 +418,7 @@ impl Store {
                 change_id.as_ref().map(ChangeId::as_str),
                 source_root,
                 input.capability_digest,
-                provider_str(agent.snapshot.provider),
+                provider_value(agent.snapshot.provider),
                 profile.model,
                 profile.reasoning_effort,
                 profile.execution_mode.as_str(),
@@ -746,8 +746,7 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let authority = load_running_attempt_authority(&transaction, run_id)?;
         let before = transaction.query_row(
-            "SELECT max_tool_calls, tool_calls, exhausted, reset_at_ms, updated_at_ms
-             FROM agent_budgets WHERE agent_id = ?1",
+            AGENT_BUDGET_SELECT,
             [authority.agent_id.as_str()],
             budget_from_row,
         )?;
@@ -770,8 +769,7 @@ impl Store {
             )?;
         }
         let budget = transaction.query_row(
-            "SELECT max_tool_calls, tool_calls, exhausted, reset_at_ms, updated_at_ms
-             FROM agent_budgets WHERE agent_id = ?1",
+            AGENT_BUDGET_SELECT,
             [authority.agent_id.as_str()],
             budget_from_row,
         )?;
@@ -1851,14 +1849,6 @@ fn task_projection<'a>(
     }
 }
 
-fn provider_str(provider: Provider) -> &'static str {
-    match provider {
-        Provider::ClaudeCode => "claude_code",
-        Provider::Codex => "codex",
-        Provider::Shell => "shell",
-    }
-}
-
 fn insert_resource(
     transaction: &Transaction<'_>,
     id: &str,
@@ -2314,20 +2304,10 @@ fn undelivered_messages(
          ORDER BY created_at_ms, id",
     )?;
     statement
-        .query_map(params![project_id.as_str(), agent_id.as_str()], |row| {
-            let sender: Option<String> = row.get(2)?;
-            let delivered_run: Option<String> = row.get(7)?;
-            Ok(AgentMessage {
-                id: parse_id::<MessageId>(row.get(0)?, 0)?,
-                project_id: parse_id(row.get(1)?, 1)?,
-                sender_agent_id: sender.map(|value| parse_id(value, 2)).transpose()?,
-                recipient_agent_id: parse_id(row.get(3)?, 3)?,
-                body: row.get(4)?,
-                created_at_ms: row.get(5)?,
-                delivered_at_ms: row.get(6)?,
-                delivered_run_id: delivered_run.map(|value| parse_id(value, 7)).transpose()?,
-            })
-        })?
+        .query_map(
+            params![project_id.as_str(), agent_id.as_str()],
+            agent_message_from_row,
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(StoreError::from)
 }

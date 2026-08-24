@@ -622,7 +622,8 @@ impl Store {
         if changed == 0 {
             return Err(StoreError::AgentNotFound);
         }
-        let budget = transaction.query_row("SELECT max_tool_calls, tool_calls, exhausted, reset_at_ms, updated_at_ms FROM agent_budgets WHERE agent_id = ?1", [agent_id.as_str()], budget_from_row)?;
+        let budget =
+            transaction.query_row(AGENT_BUDGET_SELECT, [agent_id.as_str()], budget_from_row)?;
         let pause_reasons = agent_pause_reasons(&transaction, project_id, agent_id)?;
         let event = FactoryEvent::AgentBudgetChanged {
             project_id: project_id.clone(),
@@ -662,7 +663,8 @@ impl Store {
         if changed == 0 {
             return Err(StoreError::AgentNotFound);
         }
-        let budget = transaction.query_row("SELECT max_tool_calls, tool_calls, exhausted, reset_at_ms, updated_at_ms FROM agent_budgets WHERE agent_id = ?1", [agent_id.as_str()], budget_from_row)?;
+        let budget =
+            transaction.query_row(AGENT_BUDGET_SELECT, [agent_id.as_str()], budget_from_row)?;
         let pause_reasons = agent_pause_reasons(&transaction, project_id, agent_id)?;
         let event = FactoryEvent::AgentBudgetChanged {
             project_id: project_id.clone(),
@@ -794,16 +796,7 @@ impl Store {
                 "SELECT id, name, root, completion_verification, created_at_ms, updated_at_ms
                  FROM projects WHERE id = ?1",
                 params![project_id.as_str()],
-                |row| {
-                    Ok(ProjectSnapshot {
-                        id: parse_id(row.get(0)?, 0)?,
-                        name: row.get(1)?,
-                        root: row.get(2)?,
-                        completion_verification: parse_completion_verification(row.get(3)?, 3)?,
-                        created_at_ms: row.get(4)?,
-                        updated_at_ms: row.get(5)?,
-                    })
-                },
+                project_snapshot_from_row,
             )
             .optional()
             .map_err(StoreError::from)?
@@ -827,16 +820,7 @@ impl Store {
         )?;
         let rows = statement.query_map(
             params![after_id.map(ProjectId::as_str), limit as i64],
-            |row| {
-                Ok(ProjectSnapshot {
-                    id: parse_id(row.get(0)?, 0)?,
-                    name: row.get(1)?,
-                    root: row.get(2)?,
-                    completion_verification: parse_completion_verification(row.get(3)?, 3)?,
-                    created_at_ms: row.get(4)?,
-                    updated_at_ms: row.get(5)?,
-                })
-            },
+            project_snapshot_from_row,
         )?;
 
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -954,27 +938,7 @@ impl Store {
                 after_id.map(TaskId::as_str),
                 limit as i64,
             ],
-            |row| {
-                let parent_id: Option<String> = row.get(2)?;
-                let assigned_id: Option<String> = row.get(3)?;
-                let status: String = row.get(7)?;
-                Ok(TaskDetail {
-                    snapshot: TaskSnapshot {
-                        id: parse_id(row.get(0)?, 0)?,
-                        project_id: parse_id(row.get(1)?, 1)?,
-                        parent_task_id: parse_optional_id(parent_id, 2)?,
-                        assigned_agent_id: parse_optional_id(assigned_id, 3)?,
-                        title: row.get(4)?,
-                        status: parse_task_status(&status, 7)?,
-                        priority: row.get(8)?,
-                        created_at_ms: row.get(9)?,
-                        updated_at_ms: row.get(10)?,
-                    },
-                    body: row.get(5)?,
-                    result: row.get(6)?,
-                    blocked_reason: row.get(11)?,
-                })
-            },
+            task_detail_from_row,
         )?;
 
         Ok((rows.collect::<std::result::Result<Vec<_>, _>>()?, revision))
@@ -1555,16 +1519,7 @@ impl Store {
              FROM projects ORDER BY created_at_ms, id",
         )?;
         let projects = projects
-            .query_map([], |row| {
-                Ok(ProjectSnapshot {
-                    id: parse_id(row.get(0)?, 0)?,
-                    name: row.get(1)?,
-                    root: row.get(2)?,
-                    completion_verification: parse_completion_verification(row.get(3)?, 3)?,
-                    created_at_ms: row.get(4)?,
-                    updated_at_ms: row.get(5)?,
-                })
-            })?
+            .query_map([], project_snapshot_from_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let mut out = Vec::with_capacity(projects.len());
         for project in projects {
@@ -2099,9 +2054,15 @@ fn check_agent_deletable(
     Ok(())
 }
 
-/// See [`check_agent_deletable`]: same reasoning, one level up, factored
-/// out of `delete_project`.
-fn check_project_deletable(connection: &Connection, project_id: &ProjectId) -> Result<()> {
+/// The gates every project-wide teardown shares: the project exists, no run
+/// is still live, and no Change or legacy source still names it. Gate order
+/// is observable -- the first one that fails is the error the caller sees --
+/// so callers run this before any gate of their own.
+///
+/// Takes a `&Connection` so a caller already inside a write transaction can
+/// pass `&transaction` (`Transaction` derefs to `Connection`); this reads
+/// only, and never commits or opens a transaction of its own.
+fn check_project_quiescent(connection: &Connection, project_id: &ProjectId) -> Result<()> {
     let exists: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)",
         params![project_id.as_str()],
@@ -2133,6 +2094,18 @@ fn check_project_deletable(connection: &Connection, project_id: &ProjectId) -> R
     if has_change_metadata {
         return Err(StoreError::ProjectHasChanges);
     }
+    Ok(())
+}
+
+/// See [`check_agent_deletable`]: same reasoning, one level up, factored
+/// out of `delete_project`.
+///
+/// Deletion's own final gate is stricter than
+/// `begin_project_rust_cache_reclamation`'s: *any* surviving Rust build cache
+/// row blocks it, because deleting the project would orphan the bytes on
+/// disk. Reclamation only blocks on rows it cannot yet classify.
+fn check_project_deletable(connection: &Connection, project_id: &ProjectId) -> Result<()> {
+    check_project_quiescent(connection, project_id)?;
     let has_rust_artifacts: bool = connection.query_row(
         "SELECT EXISTS(
              SELECT 1 FROM rust_build_caches
@@ -2278,27 +2251,7 @@ fn load_task(connection: &Connection, task_id: &TaskId) -> Result<Option<TaskDet
                     status, priority, created_at_ms, updated_at_ms, blocked_reason
              FROM tasks WHERE id = ?1",
             params![task_id.as_str()],
-            |row| {
-                let parent_id: Option<String> = row.get(2)?;
-                let assigned_id: Option<String> = row.get(3)?;
-                let status: String = row.get(7)?;
-                Ok(TaskDetail {
-                    snapshot: TaskSnapshot {
-                        id: parse_id(row.get(0)?, 0)?,
-                        project_id: parse_id(row.get(1)?, 1)?,
-                        parent_task_id: parse_optional_id(parent_id, 2)?,
-                        assigned_agent_id: parse_optional_id(assigned_id, 3)?,
-                        title: row.get(4)?,
-                        status: parse_task_status(&status, 7)?,
-                        priority: row.get(8)?,
-                        created_at_ms: row.get(9)?,
-                        updated_at_ms: row.get(10)?,
-                    },
-                    body: row.get(5)?,
-                    result: row.get(6)?,
-                    blocked_reason: row.get(11)?,
-                })
-            },
+            task_detail_from_row,
         )
         .optional()
         .map_err(StoreError::from)
@@ -2308,20 +2261,19 @@ fn load_run(connection: &Connection, run_id: &RunId) -> Result<Option<RunSnapsho
     kernel::load_kernel_run(connection, run_id)
 }
 
+/// The one budget row, keyed by agent alone. `Store::agent_budget` asks a
+/// different question and keeps its own JOIN: it scopes the agent to a
+/// project and reports a cross-project id as `AgentNotFound`.
+const AGENT_BUDGET_SELECT: &str =
+    "SELECT max_tool_calls, tool_calls, exhausted, reset_at_ms, updated_at_ms
+     FROM agent_budgets WHERE agent_id = ?1";
+
 fn budget_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentBudget> {
     let max_tool_calls: Option<i64> = row.get(0)?;
     let tool_calls: i64 = row.get(1)?;
     Ok(AgentBudget {
-        max_tool_calls: max_tool_calls
-            .map(|value| {
-                u64::try_from(value).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(0, Type::Integer, Box::new(error))
-                })
-            })
-            .transpose()?,
-        tool_calls: u64::try_from(tool_calls).map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(1, Type::Integer, Box::new(error))
-        })?,
+        max_tool_calls: parse_optional_u64(max_tool_calls, 0)?,
+        tool_calls: parse_u64(tool_calls, 1)?,
         exhausted: row.get(2)?,
         reset_at_ms: row.get(3)?,
         updated_at_ms: row.get(4)?,
@@ -3079,6 +3031,34 @@ where
     value.map(|value| parse_id(value, column)).transpose()
 }
 
+/// SQLite has no unsigned integer type, so every `u64` column comes back as
+/// `i64` and has to be narrowed on read. Sibling of `parse_id` in shape and in
+/// purpose. Not to be confused with `changes::sqlite_u64` and
+/// `rust_builds::to_i64`, which go the other way on write and deliberately
+/// report different `StoreError` variants.
+fn parse_u64(value: i64, column: usize) -> rusqlite::Result<u64> {
+    u64::try_from(value).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(column, Type::Integer, Box::new(error))
+    })
+}
+
+fn parse_optional_u64(value: Option<i64>, column: usize) -> rusqlite::Result<Option<u64>> {
+    value.map(|value| parse_u64(value, column)).transpose()
+}
+
+/// Maps `SELECT id, name, root, completion_verification, created_at_ms,
+/// updated_at_ms FROM projects` onto a [`ProjectSnapshot`].
+fn project_snapshot_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectSnapshot> {
+    Ok(ProjectSnapshot {
+        id: parse_id(row.get(0)?, 0)?,
+        name: row.get(1)?,
+        root: row.get(2)?,
+        completion_verification: parse_completion_verification(row.get(3)?, 3)?,
+        created_at_ms: row.get(4)?,
+        updated_at_ms: row.get(5)?,
+    })
+}
+
 /// Maps `SELECT id, project_id, parent_task_id, assigned_agent_id, title,
 /// status, priority, created_at_ms, updated_at_ms FROM tasks` onto a
 /// [`TaskSnapshot`].
@@ -3096,6 +3076,36 @@ fn task_snapshot_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskSnaps
         priority: row.get(6)?,
         created_at_ms: row.get(7)?,
         updated_at_ms: row.get(8)?,
+    })
+}
+
+/// Maps `SELECT id, project_id, parent_task_id, assigned_agent_id, title,
+/// body, result, status, priority, created_at_ms, updated_at_ms,
+/// blocked_reason FROM tasks` onto a [`TaskDetail`]. It cannot reuse
+/// [`task_snapshot_from_row`] as the two stand: this SELECT interleaves body
+/// and result before `status`, so `status` onwards sit two columns later.
+/// Reordering both `TaskDetail` projections to put the snapshot columns first
+/// would let it delegate, the way `blocked_tasks` already does -- worth doing,
+/// but it moves columns, so not in a behaviour-free pass.
+fn task_detail_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskDetail> {
+    let parent_id: Option<String> = row.get(2)?;
+    let assigned_id: Option<String> = row.get(3)?;
+    let status: String = row.get(7)?;
+    Ok(TaskDetail {
+        snapshot: TaskSnapshot {
+            id: parse_id(row.get(0)?, 0)?,
+            project_id: parse_id(row.get(1)?, 1)?,
+            parent_task_id: parse_optional_id(parent_id, 2)?,
+            assigned_agent_id: parse_optional_id(assigned_id, 3)?,
+            title: row.get(4)?,
+            status: parse_task_status(&status, 7)?,
+            priority: row.get(8)?,
+            created_at_ms: row.get(9)?,
+            updated_at_ms: row.get(10)?,
+        },
+        body: row.get(5)?,
+        result: row.get(6)?,
+        blocked_reason: row.get(11)?,
     })
 }
 

@@ -4,7 +4,7 @@ use factory_core::{
 };
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
-use super::{MAX_PATH_BYTES, Result, Store, StoreError};
+use super::{MAX_PATH_BYTES, Result, Store, StoreError, parse_optional_u64, parse_u64};
 
 const DIGEST_HEX_LEN: usize = 64;
 const MAX_FAILURE_BYTES: usize = 4096;
@@ -123,7 +123,7 @@ impl Store {
             )
             .optional()?
             .ok_or(StoreError::ProjectNotFound)?;
-        if parse_verification(&current, 0)? != verification {
+        if super::parse_completion_verification(current, 0)? != verification {
             let has_nonterminal_run: bool = transaction.query_row(
                 "SELECT EXISTS(
                     SELECT 1 FROM runs WHERE project_id = ?1 AND phase <> 'terminal'
@@ -148,17 +148,7 @@ impl Store {
             "SELECT id, name, root, completion_verification, created_at_ms, updated_at_ms
              FROM projects WHERE id = ?1",
             [project_id.as_str()],
-            |row| {
-                let verification: String = row.get(3)?;
-                Ok(ProjectSnapshot {
-                    id: super::parse_id(row.get(0)?, 0)?,
-                    name: row.get(1)?,
-                    root: row.get(2)?,
-                    completion_verification: parse_verification(&verification, 3)?,
-                    created_at_ms: row.get(4)?,
-                    updated_at_ms: row.get(5)?,
-                })
-            },
+            super::project_snapshot_from_row,
         )?;
         let event = FactoryEvent::ProjectChanged {
             project: project.clone(),
@@ -535,13 +525,13 @@ impl Store {
             |row| row.get(0),
         )?;
         Ok(RustStorageSummary {
-            cache_count: from_i64(cache_count, 0)?,
+            cache_count: parse_u64(cache_count, 0)?,
             cache_bytes: (cache_count == cache_measured)
-                .then(|| from_i64(cache_bytes, 2))
+                .then(|| parse_u64(cache_bytes, 2))
                 .transpose()?,
-            protected_count: from_i64(protected_count, 0)?,
-            reclaimable_count: from_i64(reclaimable_count, 0)?,
-            failed_count: from_i64(failed_count, 0)?,
+            protected_count: parse_u64(protected_count, 0)?,
+            reclaimable_count: parse_u64(reclaimable_count, 0)?,
+            failed_count: parse_u64(failed_count, 0)?,
         })
     }
 
@@ -779,36 +769,10 @@ impl Store {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let exists: bool = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)",
-            [project_id.as_str()],
-            |row| row.get(0),
-        )?;
-        if !exists {
-            return Err(StoreError::ProjectNotFound);
-        }
-        let has_nonterminal_run: bool = transaction.query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM runs WHERE project_id = ?1 AND phase <> 'terminal'
-             )",
-            [project_id.as_str()],
-            |row| row.get(0),
-        )?;
-        if has_nonterminal_run {
-            return Err(StoreError::ProjectHasActiveRun);
-        }
-        let has_change_metadata: bool = transaction.query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM changes WHERE project_id = ?1 AND phase <> 'removed'
-                UNION ALL
-                SELECT 1 FROM legacy_sources WHERE project_id = ?1
-             )",
-            [project_id.as_str()],
-            |row| row.get(0),
-        )?;
-        if has_change_metadata {
-            return Err(StoreError::ProjectHasChanges);
-        }
+        super::check_project_quiescent(&transaction, project_id)?;
+        // Deliberately narrower than `check_project_deletable`'s cache gate:
+        // reclamation is what retires the `available` rows, so only the rows
+        // it cannot classify -- the `declared` ones -- block it.
         let has_ambiguous_cache: bool = transaction.query_row(
             "SELECT EXISTS(
                 SELECT 1 FROM rust_build_caches
@@ -879,7 +843,7 @@ fn ensure_artifact_capacity(transaction: &Transaction<'_>) -> Result<()> {
         transaction.query_row("SELECT COUNT(*) FROM rust_build_caches", [], |row| {
             row.get(0)
         })?;
-    if from_i64(count, 0)? >= MAX_RUST_CACHE_COUNT {
+    if parse_u64(count, 0)? >= MAX_RUST_CACHE_COUNT {
         return Err(StoreError::RustStorageCapacityReached {
             kind: "cache",
             limit: MAX_RUST_CACHE_COUNT,
@@ -901,7 +865,7 @@ fn ensure_cache_claim_capacity(transaction: &Transaction<'_>) -> Result<()> {
         [],
         |row| row.get(0),
     )?;
-    if from_i64(claimed, 0)? >= MAX_RUST_CACHE_COUNT {
+    if parse_u64(claimed, 0)? >= MAX_RUST_CACHE_COUNT {
         return Err(StoreError::RustStorageCapacityReached {
             kind: "cache",
             limit: MAX_RUST_CACHE_COUNT,
@@ -929,7 +893,9 @@ pub(super) fn insert_completion_check_if_required(
             [run.id.as_str()],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )?;
-    if role != "worker" || parse_verification(&verification, 1)? == CompletionVerification::None {
+    if role != "worker"
+        || super::parse_completion_verification(verification, 1)? == CompletionVerification::None
+    {
         return Ok(());
     }
     let change_id = change_id.ok_or(StoreError::InvalidRunState)?;
@@ -1006,9 +972,9 @@ fn load_cache(
                     project_incarnation_id: row.get(1)?,
                     cache_key: row.get(2)?,
                     path: row.get(3)?,
-                    dev: optional_u64(row.get(4)?, 4)?,
-                    inode: optional_u64(row.get(5)?, 5)?,
-                    bytes: optional_u64(row.get(6)?, 6)?,
+                    dev: parse_optional_u64(row.get(4)?, 4)?,
+                    inode: parse_optional_u64(row.get(5)?, 5)?,
+                    bytes: parse_optional_u64(row.get(6)?, 6)?,
                     lifecycle: parse_lifecycle(&lifecycle, 7)?,
                     failure: row.get(8)?,
                     created_at_ms: row.get(9)?,
@@ -1091,18 +1057,9 @@ fn fail_reclaim(
     }
 }
 
-fn parse_verification(value: &str, column: usize) -> rusqlite::Result<CompletionVerification> {
-    match value {
-        "none" => Ok(CompletionVerification::None),
-        "rust_workspace_test" => Ok(CompletionVerification::RustWorkspaceTest),
-        _ => Err(rusqlite::Error::InvalidColumnType(
-            column,
-            value.to_owned(),
-            rusqlite::types::Type::Text,
-        )),
-    }
-}
-
+/// The write side of `super::parse_completion_verification`, which has no
+/// serde counterpart: `Serialize` would hand back an owned `String` where the
+/// SQL parameter wants a `&'static str`.
 const fn verification_str(value: CompletionVerification) -> &'static str {
     match value {
         CompletionVerification::None => "none",
@@ -1158,20 +1115,6 @@ fn validate_bound_identity(path: &str, inode: u64) -> Result<()> {
 
 fn to_i64(value: u64) -> Result<i64> {
     i64::try_from(value).map_err(|_| StoreError::InvalidRustBuildMetadata)
-}
-
-fn from_i64(value: i64, column: usize) -> rusqlite::Result<u64> {
-    u64::try_from(value).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(
-            column,
-            rusqlite::types::Type::Integer,
-            Box::new(error),
-        )
-    })
-}
-
-fn optional_u64(value: Option<i64>, column: usize) -> rusqlite::Result<Option<u64>> {
-    value.map(|value| from_i64(value, column)).transpose()
 }
 
 #[cfg(test)]

@@ -6,7 +6,10 @@ use factory_core::{
 };
 use rusqlite::{OptionalExtension, TransactionBehavior, params, types::Type};
 
-use super::{MAX_PATH_BYTES, Result, Store, StoreError, append_event, truncate_utf8};
+use super::{
+    MAX_PATH_BYTES, Result, Store, StoreError, append_event, parse_id, parse_optional_u64,
+    truncate_utf8,
+};
 
 const MAX_TASK_INCARNATION_BYTES: usize = 255;
 const MAX_CHANGE_FAILURE_BYTES: usize = 4096;
@@ -955,26 +958,6 @@ fn sqlite_positive_u64(value: u64) -> Result<i64> {
         return Err(StoreError::InvalidChangeMetadata);
     }
     sqlite_u64(value)
-}
-
-fn parse_id<T>(value: String, column: usize) -> rusqlite::Result<T>
-where
-    T: TryFrom<String>,
-    T::Error: std::error::Error + Send + Sync + 'static,
-{
-    T::try_from(value).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(column, Type::Text, Box::new(error))
-    })
-}
-
-fn parse_u64(value: i64, column: usize) -> rusqlite::Result<u64> {
-    u64::try_from(value).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(column, Type::Integer, Box::new(error))
-    })
-}
-
-fn parse_optional_u64(value: Option<i64>, column: usize) -> rusqlite::Result<Option<u64>> {
-    value.map(|value| parse_u64(value, column)).transpose()
 }
 
 fn invalid_value(column: usize, value: String) -> rusqlite::Error {
