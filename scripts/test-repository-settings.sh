@@ -25,6 +25,11 @@ grep -Fq "if: needs.review.result != 'success' && (github.event_name == 'merge_g
 # step body is extracted and checked for the exit that makes it a gate.
 verdict_step=$(awk '
     /^      - name: Require a recorded adversarial review verdict$/ { step = 1; next }
+    # Bounded to this step. Without this, a step whose `run:` is not a block
+    # scalar leaves the scan running until the NEXT step`s `run: |` and
+    # asserts against that body instead -- which passes, because the step
+    # beside it also ends in `exit 1`. Found by mutating this file.
+    step && !body && /^      - name: / { exit }
     step && /^        run: \|$/ { body = 1; next }
     body && /^          / { sub(/^          /, ""); print; next }
     body && /^ *$/ { print ""; next }
