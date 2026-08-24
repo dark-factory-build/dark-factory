@@ -1,28 +1,46 @@
 # Which paths need the repository owner's approval before merging to main.
 #
-# This is deliberately NOT `*`. `main-review` sets
-# `required_approving_review_count: 0`, so a pull request touching only paths
-# absent from this file merges on its checks alone, and one touching any path
-# listed here still needs an owner approval. The point is to spend the
-# owner's attention on changes that can break the product or widen authority,
-# not on documentation.
+# This is deliberately NOT `*`, and deliberately narrower than "anything
+# executable". `main-review` sets `required_approving_review_count: 0`, so a
+# pull request touching only paths absent from this file merges on its checks
+# alone; one touching any path here still stops for the owner.
 #
-# Anything executable, anything that gates or deploys, and anything that
-# defines authority is listed. If you are unsure whether a path belongs here,
-# it does.
+# The line drawn is **authority, not risk**. Product and control-plane code is
+# risky, but it is gated by things that scale: the hosted source gates, and
+# AGENTS.md rule 2's adversarial review, which is now a required status check
+# reading an exact-head verdict recorded through the maintainer App. Owner
+# attention does not scale, so it is spent on the changes those gates cannot
+# judge -- the ones that change what agents are *allowed* to do, including the
+# gates themselves.
+#
+# Measured before this change: six of six pull requests in one day touched an
+# owned path, so every one stopped for the owner. Under this file, one of those
+# six would.
+#
+# Two properties make this safe, and both must hold. If either stops being
+# true, widen this file again:
+#
+#  1. `review` is in the `required` aggregate, so no change reaches `main`
+#     without a verdict bound to its exact head. Until that is so, a narrow
+#     CODEOWNERS leaves nothing standing where review should stand.
+#  2. The maintainer App cannot publish under `.github/workflows/`, so an
+#     agent-authored change cannot rewrite the gate that judges it. Note the
+#     App's refusal is by named path -- `.github/actions/**` IS publishable --
+#     which is why the whole `.github` tree is owned here rather than just
+#     `workflows/`.
+#
+# What this accepts, stated plainly: the reviewing and authoring agents reach
+# the App through one credential, so a recorded verdict is evidence that a
+# review happened, not proof that it was earned. Independence is a property of
+# the factory running a fresh agent that did not write the change.
 
-# The product itself.
-/crates/                @baziyer
-
-# The authority boundary for the GitHub Apps.
-/control-plane/         @baziyer
-
-# CI, deployment, repository settings, and this file. A change here can
-# rewrite the gate that reviews it.
+# CI, deployment, repository settings, and this file. A change here can rewrite
+# the gate that reviews it, so it is the one path where owner approval is not
+# an opinion about quality but a control on authority.
 /.github/               @baziyer
-/scripts/               @baziyer
 
-# The rules agents operate under.
+# The rules agents operate under, and the boundary they are held to. An agent
+# that could amend these could amend its own limits.
 /AGENTS.md              @baziyer
 /CLAUDE.md              @baziyer
 /SECURITY.md            @baziyer
