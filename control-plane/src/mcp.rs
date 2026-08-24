@@ -174,9 +174,10 @@ fn tools() -> Value {
                 "review_id": {"type": "integer"},
                 "url": {"type": "string"},
                 "head_sha": {"type": "string"},
-                "state": {"type": "string"}
+                "state": {"type": "string"},
+                "verdict": {"type": "string", "enum": ["allow", "note", "block"]}
             },
-            "required": ["review_id", "url", "head_sha", "state"],
+            "required": ["review_id", "url", "head_sha", "state", "verdict"],
             "additionalProperties": false
         },
         "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true}

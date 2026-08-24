@@ -52,6 +52,11 @@ Read-only context unless a task explicitly asks you to edit them:
                                head_sha: <the exact commit reviewed>
    ```
 
+   The check runs in the merge queue, not on the pull request: recording a
+   verdict fires no workflow event, so a pull-request-time check could never
+   turn green after the reviewer acted. A change with no verdict enqueues and
+   is ejected.
+
    `ALLOW` means the reviewer is satisfied and is the only verdict that
    clears the check. `REQUEST_CHANGES` blocks it. `COMMENT` decides nothing
    and is for findings mid-review. The verdict binds to `head_sha`: pushing

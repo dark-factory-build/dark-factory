@@ -212,7 +212,13 @@ only that something was.
 `review` joins the `required` aggregate in a follow-up change, once the gate is
 on the default branch. A single pull request adding both would deadlock: the
 job runs the default branch's copy of a script that does not exist there yet,
-so its own `required` could never go green.
+so its own queue run could never go green.
+
+What the check does **not** do is judge the review. A reviewer that records an
+`ALLOW` without reading anything produces a green check, and the reviewing and
+authoring agents reach the App through the same credential — so this is
+evidence that a review was recorded, not proof one was earned. It closes the
+gap where a real review happened and GitHub could not see it.
 
 Three properties are worth stating precisely, because each replaces something
 an approval used to do:
@@ -223,22 +229,33 @@ an approval used to do:
   caller cannot state a verdict it did not ask for. Both must name the head
   under test. Pushing a fix orphans every prior verdict, which is what
   `dismiss_stale_reviews_on_push` did for human approvals.
-- **The gate is not part of the change it gates.** The `review` job runs the
-  copy of `verify-adversarial-review.sh` on the default branch, never the one
-  in the pull request. `scripts/` is a path the maintainer App *can* publish
-  to, unlike `.github/`, so without this an agent-authored pull request could
-  weaken the reviewer that was about to judge it.
-- **It runs in the merge queue too.** Each queue entry gets its own
-  `merge_group` run whose ref names exactly one pull request
-  (`gh-readonly-queue/<base>/pr-<n>-<base sha>`), so every entry is verified
-  against its own head rather than the group's synthetic head commit.
+- **The decision is not part of the change it gates.** The `review` job runs
+  the copy of `verify-adversarial-review.sh` on the default branch, never the
+  one in the pull request. `scripts/` is a path the maintainer App *can*
+  publish to, so without this an agent-authored pull request could weaken the
+  reviewer about to judge it. The *plumbing* is not hoisted: the projection,
+  the head lookup, and whether the job runs at all still come from the pull
+  request's own `ci.yml`, bounded by CODEOWNERS on `.github/` and by the App's
+  refusal to publish under `.github/workflows/`. That refusal is by named
+  path — `.github/actions/**` is publishable — so a composite action extracted
+  from this job would leave the gate's plumbing inside App reach.
+- **It runs only in the merge queue.** Recording a verdict fires no workflow
+  event, so a pull-request-time run would evaluate before the reviewer acted,
+  fail, and have no way back to green: re-triggering means pushing, which moves
+  the head and orphans the verdict. Requiring it there would make every pull
+  request permanently unmergeable and the release valve would be an admin
+  bypass. The queue runs after the verdict exists, against the head being
+  merged. A pull request with no verdict enqueues and is ejected.
+- **Every entry is checked, and that depends on a ruleset setting.** Each queue
+  entry gets its own `merge_group` run whose ref names exactly one pull request
+  (`gh-readonly-queue/<base>/pr-<n>-<base sha>`), so entries are verified
+  against their own heads rather than the group's synthetic head commit. This
+  holds because `main-protect` sets `grouping_strategy: ALLGREEN`, where every
+  entry's own group must pass. Under `HEADGREEN` only the last entry's group
+  must, and unreviewed entries ahead of it would merge unchecked — so that
+  setting in `scripts/github-repo-settings.sh` is load-bearing for this gate,
+  not just for CI cost.
 
-What the check does not do is judge the review. A reviewer that records an
-`ALLOW` without reading anything produces a green check, and the reviewing and
-authoring agents reach the App through the same credential, so this is evidence
-that a review was recorded — not proof that one was earned. It closes the gap
-where a real review happened and GitHub could not see it, which was costing an
-owner approval on every pull request forever.
 Review the exact `.github/workflows/` diff before approving an external run: a
 PR evaluates its own workflow and can change `runs-on`. `.github/` is an owned
 path in CODEOWNERS for exactly this reason, and the maintainer App refuses to

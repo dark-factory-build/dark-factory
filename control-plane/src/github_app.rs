@@ -258,6 +258,10 @@ pub(crate) struct ReviewResult {
     pub(crate) url: String,
     pub(crate) head_sha: String,
     pub(crate) state: String,
+    /// `ALLOW` and `COMMENT` are both `COMMENTED` on the wire, so `state`
+    /// cannot tell a reviewer which verdict it just recorded -- on the one
+    /// field that now gates merges. This echoes it back.
+    pub(crate) verdict: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1642,19 +1646,16 @@ impl Authority {
             token.as_str(),
         )
         .await?;
-        let matches = reviews
+        let mut matches = reviews
             .into_iter()
             .filter(|review| review.matches(request))
-            .map(ReviewResult::try_from)
+            .map(|review| review.into_result(request))
             .collect::<Result<Vec<_>, _>>()?;
-        match matches.as_slice() {
-            [] => Ok(None),
-            [result] => Ok(Some(ReviewResult {
-                review_id: result.review_id,
-                url: result.url.clone(),
-                head_sha: result.head_sha.clone(),
-                state: result.state.clone(),
-            })),
+        match matches.len() {
+            0 => Ok(None),
+            1 => Ok(matches.pop()),
+            // Two reviews carrying one operation's marker at one head is not
+            // something to pick a winner from.
             _ => Err(OperationError::Indeterminate),
         }
     }
@@ -1684,7 +1685,7 @@ impl Authority {
             }),
         )
         .await?;
-        let result = ReviewResult::try_from(review)?;
+        let result = review.into_result(request)?;
         if result.head_sha != request.head_sha || result.state != request.event.github_state() {
             return Err(OperationError::Indeterminate);
         }
@@ -1974,22 +1975,27 @@ impl PullRequestReview {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
-impl TryFrom<PullRequestReview> for ReviewResult {
-    type Error = OperationError;
-
-    fn try_from(review: PullRequestReview) -> Result<Self, Self::Error> {
-        valid_exact_integer(review.id)?;
-        valid_github_url(&review.html_url)?;
-        valid_sha(&review.commit_id)?;
-        if !matches!(review.state.as_str(), "COMMENTED" | "CHANGES_REQUESTED") {
+#[cfg(any(target_arch = "wasm32", test))]
+impl PullRequestReview {
+    /// The verdict comes from the request, not from GitHub: `ALLOW` and
+    /// `COMMENT` are indistinguishable in the review's `state`, and the App is
+    /// the only thing that knows which one it rendered.
+    fn into_result(
+        self,
+        request: &SubmitPullRequestReview,
+    ) -> Result<ReviewResult, OperationError> {
+        valid_exact_integer(self.id)?;
+        valid_github_url(&self.html_url)?;
+        valid_sha(&self.commit_id)?;
+        if !matches!(self.state.as_str(), "COMMENTED" | "CHANGES_REQUESTED") {
             return Err(OperationError::Unavailable);
         }
-        Ok(Self {
-            review_id: review.id,
-            url: review.html_url,
-            head_sha: review.commit_id,
-            state: review.state,
+        Ok(ReviewResult {
+            review_id: self.id,
+            url: self.html_url,
+            head_sha: self.commit_id,
+            state: self.state,
+            verdict: request.event.verdict().into(),
         })
     }
 }
@@ -2045,7 +2051,7 @@ impl TryFrom<CheckRun> for CheckResult {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 fn valid_github_url(value: &str) -> Result<(), OperationError> {
     (value.starts_with("https://github.com/")
         && value.len() <= 2_048
@@ -3138,6 +3144,32 @@ mod tests {
             state: "COMMENTED".into(),
         };
         assert!(recovered.matches(&allow));
+
+        // `state` is `COMMENTED` for both ALLOW and COMMENT, so the caller
+        // cannot tell from it which verdict was recorded -- on the field that
+        // now gates merges. The result echoes it.
+        let echoed = PullRequestReview {
+            id: 2,
+            html_url: recovered.html_url.clone(),
+            body: recovered.body.clone(),
+            commit_id: recovered.commit_id.clone(),
+            state: "COMMENTED".into(),
+        }
+        .into_result(&allow)
+        .unwrap();
+        assert_eq!(echoed.state, "COMMENTED");
+        assert_eq!(echoed.verdict, "allow");
+        let noted = PullRequestReview {
+            id: 3,
+            html_url: recovered.html_url.clone(),
+            body: recovered.body.clone(),
+            commit_id: recovered.commit_id.clone(),
+            state: "COMMENTED".into(),
+        }
+        .into_result(&note)
+        .unwrap();
+        assert_eq!(noted.state, echoed.state);
+        assert_ne!(noted.verdict, echoed.verdict);
         // A verdict is bound to one head. The same review against any other
         // commit is not this operation's result.
         assert!(

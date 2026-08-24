@@ -11,7 +11,9 @@ trap 'rm -rf "$temporary"' EXIT HUP INT TERM
 
 head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 other=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-app='dark-factory-maintainer[bot]'
+# The App's numeric bot user id, which is what the projection emits and the
+# gate binds to. A login can be renamed; this cannot.
+app=319516570
 tab=$(printf '\t')
 
 # commit_id, state, author, flattened body -- exactly what the workflow's
@@ -114,12 +116,45 @@ assert_summary '**BLOCKED**'
 expect_fail 'CHANGES_REQUESTED outranks an allow'
 assert_summary '**BLOCKED**'
 
+# A review with no body at all is a real shape: GitHub returns `body: null`
+# and the projection emits a trailing tab, so the record has an empty fourth
+# field. It must neither crash the loop nor mask a valid verdict beside it.
+{
+    record "$head" COMMENTED "$app" ""
+    record "$head" COMMENTED "$app" "Dark-Factory-Review: allow $head"
+} >"$reviews"
+expect_pass 'an empty-bodied review does not mask a valid verdict'
+record "$head" COMMENTED "$app" "" >"$reviews"
+expect_fail 'an empty-bodied review is not itself a verdict'
+
 # Only the App's verdict counts. Anyone can type the line into a review by
 # hand; the author check is what stops that being a merge gate bypass.
-record "$head" COMMENTED baziyer "Dark-Factory-Review: allow $head" >"$reviews"
+record "$head" COMMENTED 109233175 "Dark-Factory-Review: allow $head" >"$reviews"
 expect_fail 'a human cannot hand-write a verdict'
-record "$head" COMMENTED 'dark-factory-maintainer' "Dark-Factory-Review: allow $head" >"$reviews"
-expect_fail 'a near-miss author login does not count'
+record "$head" COMMENTED 3195165 "Dark-Factory-Review: allow $head" >"$reviews"
+expect_fail 'a truncated author id does not count'
+record "$head" COMMENTED 'dark-factory-maintainer[bot]' "Dark-Factory-Review: allow $head" >"$reviews"
+expect_fail 'the login is not the identity the gate binds to'
+
+# A final record with no trailing newline must still be read. `while read`
+# returns non-zero on an unterminated last line, so without the `|| [ -n ... ]`
+# guard the loop body never runs for it -- silently dropping a blocking
+# verdict, the one direction this gate must never fail in.
+{
+    printf '%s\t%s\t%s\t%s\n' "$head" COMMENTED "$app" "Dark-Factory-Review: allow $head"
+    printf '%s\t%s\t%s\t%s' "$head" COMMENTED "$app" "Dark-Factory-Review: block $head"
+} >"$reviews"
+expect_fail 'an unterminated final record is still read'
+assert_summary '**BLOCKED**'
+
+# A record with too FEW fields is as malformed as one with too many, and the
+# shortfall shifts the body into a field the gate does not read.
+printf '%s\t%s\t%s\n' "$head" COMMENTED "$app" >"$reviews"
+expect_fail 'a three-field record'
+assert_stderr 'malformed review record'
+printf '%s\t%s\n' "$head" COMMENTED >"$reviews"
+expect_fail 'a two-field record'
+assert_stderr 'malformed review record'
 
 # A malformed projection must fail closed rather than be read as a verdict.
 # An embedded tab means the body was not flattened, so the fields after it are
@@ -190,12 +225,15 @@ assert_pull_number() {
         exit 1
     }
 }
-assert_pull_number refs/pull/330/merge 330
 assert_pull_number "refs/heads/gh-readonly-queue/main/pr-325-f64d7d6457938b771ac55390d010d185dbddef1f" 325
 assert_pull_number "refs/heads/gh-readonly-queue/release/v1/pr-7-$head" 7
 
-for bad in refs/heads/main '' refs/pull//merge refs/pull/abc/merge \
-    refs/heads/gh-readonly-queue/main/pr--abc refs/pull/0/merge; do
+# A pull-request ref must NOT resolve: this gate runs only on `merge_group`,
+# so seeing one would mean the trigger was widened without the enforcement
+# being rethought.
+for bad in refs/heads/main '' refs/pull/330/merge refs/pull/abc/merge \
+    refs/heads/gh-readonly-queue/main/pr--abc \
+    refs/heads/gh-readonly-queue/main/pr-0-abc; do
     if GITHUB_REF=$bad "$verify" --pull-number >/dev/null 2>&1; then
         echo "FAIL: ref must not resolve: $bad" >&2
         exit 1
@@ -224,5 +262,11 @@ done
 workflow=$repository_root/.github/workflows/ci.yml
 grep -Fq 'scripts/verify-adversarial-review.sh' "$workflow"
 grep -Fq 'refs/heads/${DEFAULT_BRANCH}' "$workflow"
-grep -Fq "if: github.event_name == 'pull_request' || github.event_name == 'merge_group'" "$workflow"
+# Enforcement lives in the merge queue. On a pull request a verdict recorded
+# after the run cannot re-trigger it, so a gate there could never go green.
+grep -Fq "if: github.event_name == 'merge_group'" "$workflow"
+# The projection must emit the App's numeric id, which is what this gate binds
+# to. Emitting the login instead would make every verdict invisible at once.
+grep -Fq '(.user.id | tostring)' "$workflow"
+grep -Fq "APP_USER_ID=319516570" "$verify"
 echo "adversarial review gate passed its failure modes"

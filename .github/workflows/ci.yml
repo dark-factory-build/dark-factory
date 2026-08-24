@@ -142,11 +142,20 @@ jobs:
   # commit -- not whether the review was any good; see AGENTS.md rule 2 for
   # what that does and does not establish.
   review:
-    # Only the two gating events name a pull request. On a push to `main` or a
-    # manual dispatch there is no verdict to read, and the gate must not
-    # pretend to have checked one: it fails closed on any ref it cannot
-    # resolve, so it is not run rather than made lenient.
-    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    # The merge queue, and nowhere else.
+    #
+    # Recording a verdict fires no workflow event. A pull-request-time run
+    # would therefore evaluate before the reviewer had acted, fail, and have
+    # no way back to green: the only way to re-trigger it is to push, which
+    # moves the head and orphans the verdict it was waiting for. There is no
+    # ordering that ends green, so requiring it there would make every pull
+    # request permanently unmergeable, and the release valve would be an admin
+    # bypass -- the gate satisfied by circumventing it.
+    #
+    # The queue runs after the verdict exists, against the head being merged,
+    # which is the one moment it has to be true. A pull request with no verdict
+    # enqueues and is ejected when this fails.
+    if: github.event_name == 'merge_group'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -154,12 +163,19 @@ jobs:
       pull-requests: read
     steps:
       # Deliberately NOT $GITHUB_SHA. This runs the gate as it exists on the
-      # default branch, never the copy carried by the pull request under
-      # review. The maintainer App refuses to publish under `.github/` but may
-      # publish under `scripts/`, so a pull request running its own copy could
-      # weaken the reviewer that was about to judge it. A change to the gate is
-      # still tested by `checks` and `linux`, which do run the pull request's
-      # copy against scripts/test-verify-adversarial-review.sh.
+      # default branch, never the copy carried by the change under review: the
+      # maintainer App may publish under `scripts/`, so a pull request running
+      # its own copy could weaken the reviewer about to judge it. A change to
+      # the gate is still tested by `checks` and `linux`, which do run the
+      # pull request's copy against test-verify-adversarial-review.sh.
+      #
+      # This hoists the decision, not the plumbing. Everything else on this
+      # path -- the projection below, the head lookup, this job's existence --
+      # still comes from the pull request's own `ci.yml`, exactly as the
+      # comment on `checks` says. What bounds that is CODEOWNERS on `.github/`
+      # plus the App's refusal to publish under `.github/workflows/`; note the
+      # App's refusal is by named path, so `.github/actions/**` IS publishable
+      # and a composite action extracted from this job would not be covered.
       - name: Check out the gate from the default branch
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
@@ -184,7 +200,7 @@ jobs:
           # Projection only: four fields per review and no decision, so the
           # logic that gates every merge stays somewhere a test can drive it.
           gh api "repos/${GITHUB_REPOSITORY}/pulls/${number}/reviews" --paginate \
-            --jq '.[] | [.commit_id, .state, .user.login, ((.body // "") | gsub("[\n\r\t]"; " "))] | @tsv' \
+            --jq '.[] | [.commit_id, .state, (.user.id | tostring), ((.body // "") | gsub("[\n\r\t]"; " "))] | @tsv' \
             >"${RUNNER_TEMP}/reviews.tsv"
           DF_REVIEW_HEAD_SHA="${head}" DF_REVIEW_REVIEWS="${RUNNER_TEMP}/reviews.tsv" \
             ./scripts/verify-adversarial-review.sh
