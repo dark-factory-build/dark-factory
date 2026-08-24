@@ -69,8 +69,12 @@ Read-only context unless a task explicitly asks you to edit them:
    authors the pull requests it reviews and GitHub refuses a self-review
    that takes a side — `APPROVE` and `REQUEST_CHANGES` alike — so every
    verdict is submitted as a GitHub `COMMENT` and the verdict itself rides
-   in a line the App writes and refuses in caller text. The check reads
-   that line; it never reads the GitHub review state.
+   in a line the App writes and refuses in caller text. That line is what
+   the check reads to tell one verdict from another. It is not all it
+   reads: an App review at this head whose GitHub state is
+   `CHANGES_REQUESTED` blocks on that state alone, ahead of whatever the
+   line says — a fail-closed backstop no verdict this App submits can now
+   reach, kept so the gate does not depend on that staying true.
 
    **What this checks and what it does not.** It checks that a verdict
    exists, came from the App, and names this exact commit. It does not judge

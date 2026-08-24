@@ -220,7 +220,11 @@ A blocking verdict is recorded the same way, with `event: REQUEST_CHANGES`.
 All three verdicts reach GitHub as a `COMMENT` review — the App authors the
 pull requests it reviews, and GitHub refuses a self-review that takes a side,
 `APPROVE` and `REQUEST_CHANGES` alike — so what distinguishes them is the line
-the App writes, which is the only thing the check reads.
+the App writes, and that line is what the check reads to tell them apart. It is
+not the only thing the check reads: a review it considers that carries GitHub's
+own `CHANGES_REQUESTED` state blocks on the state alone, ahead of any line. No
+verdict this App submits can produce that state any more, and the branch is
+kept anyway — a backstop the merge gate should not have to assume away.
 
 `review` is part of the `required` aggregate, which is what makes rule 2 a
 merge condition rather than a convention:
