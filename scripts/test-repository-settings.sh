@@ -1,15 +1,15 @@
 #!/bin/sh
-# Static regression for the no-live-mutation repository-settings proposal.
+# Static regression for the repository-settings publisher and the workflow's
+# adversarial-review gate. Nothing here mutates anything live: the publisher
+# records what an operator intends to apply, the live rules are the only
+# record of what is applied, and the workflow's inline chokepoint asserts
+# the live rules on every run.
 set -eu
 
 repository_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-manifest="$repository_root/.github/repository-settings.yml"
 workflow="$repository_root/.github/workflows/ci.yml"
 publisher="$repository_root/scripts/github-repo-settings.sh"
 
-grep -Fq 'repository: dark-factory-build/dark-factory' "$manifest"
-grep -Fq 'context: required' "$manifest"
-grep -Fq 'integration_id: 15368' "$manifest"
 grep -Fq '  required:' "$workflow"
 grep -Fq '    if: always()' "$workflow"
 grep -Fq '    needs: [checks, linux, control-plane, review]' "$workflow"
@@ -68,6 +68,10 @@ printf '%s\n' "$verdict_step" | grep -qx 'exit 1' || {
 }
 grep -Fq "if: needs.checks.result != 'success' || needs.linux.result != 'success' || needs.control-plane.result != 'success'" "$workflow"
 grep -Fq '"context": "required"' "$publisher"
+# Bound to GitHub Actions (integration 15368): without the binding, any
+# installed integration could post a green `required` status and satisfy the
+# ruleset.
+grep -Fq '"integration_id": 15368' "$publisher"
 # The review gate runs only on `merge_group`, so these two are load-bearing for
 # rule 2's enforcement and not merely for CI cost: without the queue the gate
 # never runs, and under `HEADGREEN` only the last entry of a group is required,
@@ -89,4 +93,4 @@ if grep -Fq '"context": "checks"' "$publisher"; then
     exit 1
 fi
 
-echo "repository settings proposal passed static checks"
+echo "repository settings publisher and gate passed static checks"
