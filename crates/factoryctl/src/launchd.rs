@@ -3,9 +3,9 @@
 //! binary-only install never needs the repository).
 //!
 //! `factoryctl init` and `factoryctl update --install` own this file
-//! through [`apply`]: read whatever job is there, keep its
-//! extra daemon arguments and environment, make sure its `PATH` can find
-//! the provider CLIs, point it at `bin/current/factoryd`, write it at
+//! through [`apply_with_rollback_for`]: read whatever job is there, keep
+//! its extra daemon arguments and environment, make sure its `PATH` can
+//! find the provider CLIs, point it at `bin/current/factoryd`, write it at
 //! `0600`, and reload it. A reload restarts only the daemon — every
 //! session's runner is a detached process tree the new daemon reconnects
 //! to (`ARCHITECTURE.md`, invariant 4; the template's `AbandonProcessGroup`
@@ -305,27 +305,10 @@ pub fn merged_path(existing: Option<&str>, required: &[(&str, PathBuf)]) -> Stri
         .unwrap_or_else(|_| BASE_PATH.to_owned())
 }
 
-/// Renders the job: `factoryd` (an absolute path, normally
-/// `<home>/bin/current/factoryd`) plus `extra_arguments`, with
-/// `environment` — every entry, plus `DARK_FACTORY_HOME` set to `home` —
-/// and logs under `<home>/logs`.
-#[must_use]
-pub fn render(
-    home: &Path,
-    factoryd: &Path,
-    extra_arguments: &[String],
-    environment: &BTreeMap<String, String>,
-) -> String {
-    render_for(
-        &LaunchdTarget::for_user(rustix::process::getuid().as_raw()),
-        home,
-        factoryd,
-        extra_arguments,
-        environment,
-    )
-}
-
-/// Renders a job for an explicitly selected managed launchd identity.
+/// Renders the job for an explicitly selected managed launchd identity:
+/// `factoryd` (an absolute path, normally `<home>/bin/current/factoryd`)
+/// plus `extra_arguments`, with `environment` — every entry, plus
+/// `DARK_FACTORY_HOME` set to `home` — and logs under `<home>/logs`.
 #[must_use]
 pub fn render_for(
     target: &LaunchdTarget,
@@ -454,32 +437,6 @@ fn same_path(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Renders the job for `home` (keeping an existing job's extra arguments
-/// and environment; `PATH` merged with `provider_directories`), writes it
-/// at `plist`, and reloads it. The caller has already read and checked
-/// the existing job with [`read_existing`]/[`check_home`] — this is the
-/// mutating half. A failed reload restores the prior runtime and plist before
-/// returning; `rollback_runtime` runs before the old plist is reloaded so the
-/// two always describe the same installed binaries.
-pub fn apply(
-    home: &Path,
-    plist: &Path,
-    existing: Option<&ExistingJob>,
-    provider_directories: &[(&str, PathBuf)],
-    extra_environment: &BTreeMap<String, String>,
-    capacity: Option<usize>,
-) -> Result<(), MutationError> {
-    apply_with_rollback(
-        home,
-        plist,
-        existing,
-        provider_directories,
-        extra_environment,
-        capacity,
-        || Ok(()),
-    )
-}
-
 /// Applies a managed launchd mutation with a caller-owned runtime rollback.
 /// Init and update use this to repoint `bin/current` before the old plist is
 /// restored when bootstrap fails.
@@ -566,32 +523,10 @@ pub fn apply_with_rollback_for(
     })
 }
 
-/// Restores a previously saved plist and reloads that exact managed job. This
-/// is used after a post-reload health failure, where merely repointing
-/// `bin/current` would leave launchd running the changed job state.
-pub fn restore(plist: &Path, home: &Path, content: &str) -> Result<(), MutationError> {
-    restore_with_rollback(plist, home, content, || Ok(()))
-}
-
-/// Restores a saved plist. If that reload fails, `rollback_runtime` restores
-/// the runtime that belongs to the currently installed plist before that
-/// plist is reloaded as the recovery attempt.
-pub fn restore_with_rollback(
-    plist: &Path,
-    home: &Path,
-    content: &str,
-    rollback_runtime: impl FnMut() -> Result<(), String>,
-) -> Result<(), MutationError> {
-    restore_with_rollback_for(
-        &LaunchdTarget::for_user(rustix::process::getuid().as_raw()),
-        plist,
-        home,
-        content,
-        rollback_runtime,
-    )
-}
-
-/// Restores a saved plist for an explicitly selected managed service.
+/// Restores a saved plist for an explicitly selected managed service. If
+/// that reload fails, `rollback_runtime` restores the runtime that belongs
+/// to the currently installed plist before that plist is reloaded as the
+/// recovery attempt.
 pub fn restore_with_rollback_for(
     target: &LaunchdTarget,
     plist: &Path,
@@ -709,17 +644,12 @@ pub fn install(plist: &Path, content: &str, home: &Path) -> Result<(), String> {
         .map_err(|error| format!("could not install {}: {error}", plist.display()))
 }
 
-/// (Re)loads the job from `plist`: `bootout` (ignored if it wasn't loaded)
-/// then `bootstrap`, retried briefly because launchd can still be tearing
-/// the old instance down when the first `bootstrap` arrives. launchd
-/// caches a job's `ProgramArguments`, so a plain `kickstart -k` would keep
-/// running the *old* binary after a rewrite — this is the only sequence
-/// that picks up a changed plist.
-pub fn reload(uid: u32, plist: &Path) -> Result<(), String> {
-    reload_for(&LaunchdTarget::for_user(uid), plist)
-}
-
-/// Reloads a selected launchd service from `plist`.
+/// (Re)loads a selected launchd service from `plist`: `bootout` (ignored if
+/// it wasn't loaded) then `bootstrap`, retried briefly because launchd can
+/// still be tearing the old instance down when the first `bootstrap`
+/// arrives. launchd caches a job's `ProgramArguments`, so a plain
+/// `kickstart -k` would keep running the *old* binary after a rewrite —
+/// this is the only sequence that picks up a changed plist.
 pub fn reload_for(target: &LaunchdTarget, plist: &Path) -> Result<(), String> {
     let domain = target.domain();
     let service = format!("{domain}/{}", target.label());
@@ -752,11 +682,6 @@ pub fn reload_for(target: &LaunchdTarget, plist: &Path) -> Result<(), String> {
         plist.display(),
         plist.display()
     ))
-}
-
-/// Returns the PID launchd currently associates with its managed job.
-pub fn job_pid(uid: u32) -> Result<Option<u32>, String> {
-    job_pid_for(&LaunchdTarget::for_user(uid))
 }
 
 /// Returns the PID launchd associates with a selected managed service.
@@ -799,7 +724,8 @@ mod tests {
 
     #[test]
     fn render_fills_every_placeholder_carries_the_environment_and_escapes() {
-        let rendered = render(
+        let rendered = render_for(
+            &LaunchdTarget::for_user(0),
             Path::new("/Users/me/.dark-factory"),
             Path::new("/Users/me/.dark-factory/bin/current/factoryd"),
             &["--max-active-runs".to_owned(), "6".to_owned()],
@@ -1088,7 +1014,8 @@ mod tests {
     fn read_existing_round_trips_through_plutil() {
         let root = tempfile::tempdir().unwrap();
         let plist = root.path().join("job.plist");
-        let rendered = render(
+        let rendered = render_for(
+            &LaunchdTarget::for_user(0),
             Path::new("/h"),
             Path::new("/h/bin/current/factoryd"),
             &["--max-active-runs".to_owned(), "2".to_owned()],
