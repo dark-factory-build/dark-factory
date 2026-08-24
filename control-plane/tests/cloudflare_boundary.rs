@@ -108,7 +108,7 @@ fn durable_object_is_sharded_by_app_and_exact_replay_identity() {
     assert!(journal.contains("app_id"));
     assert!(journal.contains("delivery_id"));
     assert!(journal.contains("operation_id"));
-    assert!(journal.contains("0003_maintainer_operations.sql"));
+    assert!(journal.contains("0004_maintainer_operations.sql"));
     assert!(journal.contains("sha256"));
     assert!(!journal.contains("DATABASE_URL"));
     assert!(!journal.contains("neon_superuser"));
@@ -125,7 +125,7 @@ fn mcp_surface_is_repository_bound_and_typed() {
         "submit_pull_request_review",
         "observe_pull_request_checks",
         "publish_commit",
-        "merge_pull_request_at_head",
+        "enqueue_pull_request",
     ] {
         assert!(mcp.contains(tool), "missing typed MCP tool: {tool}");
     }
@@ -168,9 +168,9 @@ fn the_deployment_gate_asserts_the_readiness_label_the_worker_emits() {
     assert!(!workflow.contains("mcp_pr_create_review_checks"));
 }
 
-/// The merge and publish paths are `wasm32`-only, so a host test cannot drive
-/// them. What it can do is hold the contract they were got wrong on: GitHub's
-/// refusal statuses must reach a determinate answer rather than being folded
+/// The enqueue and publish paths are `wasm32`-only, so a host test cannot
+/// drive them. What it can do is hold the contract they were got wrong on:
+/// GitHub's refusals must reach a determinate answer rather than being folded
 /// into "unavailable" and reported as an outcome nobody knows.
 #[test]
 fn github_refusals_stay_determinate() {
@@ -180,10 +180,16 @@ fn github_refusals_stay_determinate() {
 
     // The transport reports the status; it is the only place that sees one.
     assert!(github_app.contains("Err(Error::Rejected(response.status_code()))"));
-    // The merge endpoint's four refusal statuses are read, not collapsed.
-    assert!(github_app.contains("Err(Error::Rejected(403 | 405 | 409 | 422))"));
     // A missing branch is a 404 and nothing else.
     assert!(github_app.contains("Err(Error::Rejected(404))"));
+    // GraphQL answers 200 with an `errors` array, so a status check alone
+    // reads a refused mutation as a success. The envelope is inspected, and a
+    // rejected enqueue is determinate rather than indeterminate.
+    assert!(github_app.contains("if !envelope.errors.is_empty()"));
+    assert!(github_app.contains("envelope.data.ok_or(OperationError::Indeterminate)"));
+    // A branch with no queue fails closed instead of falling back to a merge.
+    assert!(!github_app.contains("/merge\""));
+    assert!(!mcp.contains("merge_pull_request_at_head"));
     // A refusal releases the claim so the same operation ID stays retryable.
     assert!(github_app.contains("OperationTransition::Refused"));
     assert!(journal.contains(r#"Ok(("planned", None, "'executing','indeterminate'"))"#));

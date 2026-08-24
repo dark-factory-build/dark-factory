@@ -28,15 +28,9 @@ const DELIVERY_MIGRATION_SQL: &str = include_str!("../migrations/0001_maintainer
 #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
 const OPERATION_MIGRATION_COMPONENT: &str = "maintainer_operations";
 #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
-const OPERATION_MIGRATION_REVISION: &str = "0003";
-/// The revision that predates publication kinds. A Durable Object created
-/// before this change still carries it, and SQLite cannot alter a CHECK
-/// constraint, so that table is rebuilt rather than left to reject every
-/// publish or merge.
+const OPERATION_MIGRATION_REVISION: &str = "0004";
 #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
-const LEGACY_OPERATION_MIGRATION_REVISION: &str = "0002";
-#[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
-const OPERATION_MIGRATION_SQL: &str = include_str!("../migrations/0003_maintainer_operations.sql");
+const OPERATION_MIGRATION_SQL: &str = include_str!("../migrations/0004_maintainer_operations.sql");
 #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
 const MIGRATION_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS control_plane_migrations (
     component TEXT PRIMARY KEY,
@@ -451,13 +445,16 @@ impl DurableObject for MaintainerDeliveryJournal {
     }
 }
 
-/// Rebuild a `0002` operations table in place, preserving its rows.
+/// Rebuild an older operations table in place, preserving its rows.
 ///
-/// The `kind` CHECK predates commit publication and exact-head merge, so every
-/// such operation fails its INSERT on an older shard. SQLite cannot alter a
-/// CHECK, so the table is renamed, recreated from the current migration, its
-/// rows copied, and the old one dropped. A shard already on `0003`, or one that
-/// has no operations table yet, is left alone.
+/// SQLite cannot alter a CHECK, so the table is renamed, recreated from the
+/// current migration, its rows copied, and the old one dropped. A shard
+/// already on the current revision, or one with no operations table yet, is
+/// left alone.
+///
+/// This ran once for `0002 -> 0003` to widen an enumerated `kind`, and runs
+/// again for `-> 0004`, which replaces that enumeration with a shape check so
+/// there is no third time.
 #[cfg(target_arch = "wasm32")]
 fn table_exists(sql: &SqlStorage, name: &str) -> Result<bool, Error> {
     #[derive(Deserialize)]
@@ -474,7 +471,7 @@ fn table_exists(sql: &SqlStorage, name: &str) -> Result<bool, Error> {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn migrate_operations_to_0003(sql: &SqlStorage) -> Result<(), Error> {
+fn migrate_operations(sql: &SqlStorage) -> Result<(), Error> {
     let stored = sql
         .exec(
             "SELECT revision, digest FROM control_plane_migrations WHERE component = ?",
@@ -484,10 +481,16 @@ fn migrate_operations_to_0003(sql: &SqlStorage) -> Result<(), Error> {
     let [row] = stored.as_slice() else {
         return Ok(());
     };
-    if row.revision != LEGACY_OPERATION_MIGRATION_REVISION {
+    // Any revision that is not the current one is legacy. Naming the single
+    // predecessor instead would silently skip the rebuild on a shard two
+    // revisions behind, leaving it to fail every INSERT against a CHECK it
+    // cannot satisfy.
+    if row.revision == OPERATION_MIGRATION_REVISION {
         return Ok(());
     }
-    worker::console_log!("journal: rebuilding maintainer_operations for revision 0003");
+    worker::console_log!(
+        "journal: rebuilding maintainer_operations for revision {OPERATION_MIGRATION_REVISION}"
+    );
     // Each step is driven off what the schema actually holds, because the
     // rebuild is not atomic: a failure part-way through returns a 503 and
     // leaves the completed steps in place, and the revision row still says
@@ -495,25 +498,36 @@ fn migrate_operations_to_0003(sql: &SqlStorage) -> Result<(), Error> {
     // table that is already renamed, and must never drop the legacy table
     // before its rows have been copied — at the point the rename has happened
     // it holds the only copy of the journal.
+    // `maintainer_operations_0002` is the rename this function used before it
+    // was generalised. A shard interrupted part-way through that rebuild holds
+    // the only copy of its journal under that name, so it is still drained
+    // here rather than assuming every shard finished.
+    let legacy = ["maintainer_operations_legacy", "maintainer_operations_0002"];
     if table_exists(sql, "maintainer_operations")?
-        && !table_exists(sql, "maintainer_operations_0002")?
+        && !legacy.iter().try_fold(false, |found, name| {
+            Ok::<_, Error>(found || table_exists(sql, name)?)
+        })?
     {
         sql.exec(
-            "ALTER TABLE maintainer_operations RENAME TO maintainer_operations_0002",
+            "ALTER TABLE maintainer_operations RENAME TO maintainer_operations_legacy",
             None,
         )?;
     }
     sql.exec(OPERATION_MIGRATION_SQL, None)?;
-    if table_exists(sql, "maintainer_operations_0002")? {
-        sql.exec(
-            "INSERT INTO maintainer_operations
-                 (operation_id, kind, request_digest, state, result_json, created_at, updated_at)
-             SELECT operation_id, kind, request_digest, state, result_json, created_at, updated_at
-             FROM maintainer_operations_0002
-             ON CONFLICT(operation_id) DO NOTHING",
-            None,
-        )?;
-        sql.exec("DROP TABLE maintainer_operations_0002", None)?;
+    for name in legacy {
+        if table_exists(sql, name)? {
+            sql.exec(
+                &format!(
+                    "INSERT INTO maintainer_operations
+                         (operation_id, kind, request_digest, state, result_json, created_at, updated_at)
+                     SELECT operation_id, kind, request_digest, state, result_json, created_at, updated_at
+                     FROM {name}
+                     ON CONFLICT(operation_id) DO NOTHING"
+                ),
+                None,
+            )?;
+            sql.exec(&format!("DROP TABLE {name}"), None)?;
+        }
     }
     sql.exec(
         "UPDATE control_plane_migrations SET revision = ?, digest = ? WHERE component = ?",
@@ -530,7 +544,7 @@ fn migrate_operations_to_0003(sql: &SqlStorage) -> Result<(), Error> {
 fn initialize_cloudflare_schema(sql: &SqlStorage) -> Result<(), Error> {
     sql.exec(MIGRATION_TABLE_SQL, None)?;
     sql.exec(DELIVERY_MIGRATION_SQL, None)?;
-    migrate_operations_to_0003(sql)?;
+    migrate_operations(sql)?;
     sql.exec(OPERATION_MIGRATION_SQL, None)?;
     sql.exec(
         "INSERT INTO control_plane_migrations (component, revision, digest)
@@ -974,7 +988,7 @@ mod operation_tests {
             DeliveryJournal::open_development(&directory.path().join("journal.db")).unwrap();
         let operation = Operation {
             operation_id: "6d1f0f8e-7f1f-11f0-952e-acde48001122".into(),
-            kind: "merge_pull_request_at_head".into(),
+            kind: "enqueue_pull_request".into(),
             request_digest: "b".repeat(64),
         };
         assert!(matches!(
@@ -1019,7 +1033,7 @@ mod operation_tests {
         // this transition exists to survive.
         let racing = Operation {
             operation_id: "7e2a1c60-7f1f-11f0-952e-acde48001122".into(),
-            kind: "merge_pull_request_at_head".into(),
+            kind: "enqueue_pull_request".into(),
             request_digest: "c".repeat(64),
         };
         journal.begin_operation(&racing).await.unwrap();

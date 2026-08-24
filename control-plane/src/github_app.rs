@@ -154,33 +154,31 @@ pub(crate) struct PublishCommit {
     pub(crate) changes: Vec<FileChange>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum MergeMethod {
-    Merge,
-    Squash,
-    Rebase,
-}
-
-impl MergeMethod {
-    const fn github_method(self) -> &'static str {
-        match self {
-            Self::Merge => "merge",
-            Self::Squash => "squash",
-            Self::Rebase => "rebase",
-        }
-    }
-}
-
+/// Add one pull request to the merge queue for its base branch.
+///
+/// This replaced a direct `PUT /pulls/{n}/merge` operation, which
+/// `docs/development/GITHUB_APP.md` had already ruled out: "The typed merge
+/// operation uses a GitHub-enforced merge queue as its sole automated path
+/// ... The broker does not request Administration permission or expose direct
+/// merge as a fallback." A required queue also makes GitHub refuse that
+/// endpoint outright, so the operation was both non-compliant and dead.
+///
+/// There is no merge method here. The queue's ruleset decides it, and a
+/// caller-supplied method would either be ignored or contradict the ruleset.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct MergePullRequest {
+pub(crate) struct EnqueuePullRequest {
     pub(crate) operation_id: String,
     pub(crate) pull_number: i64,
-    /// GitHub refuses the merge with 409 if the head has moved, so exact-head
-    /// merging is enforced by the platform rather than reimplemented here.
+    /// `enqueuePullRequest` takes `expectedHeadOid`, so exact-head binding is
+    /// enforced by the platform on the write itself rather than only by the
+    /// re-read below.
     pub(crate) head_sha: String,
-    pub(crate) merge_method: MergeMethod,
+    /// The branch whose queue this is. The decision doc requires the bound
+    /// base as well as the head: without it, a pull request that targets a
+    /// different branch than the caller believes would be enqueued onto that
+    /// branch's queue instead.
+    pub(crate) base: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -190,12 +188,15 @@ pub(crate) struct CommitResult {
     pub(crate) parent_sha: String,
 }
 
+/// Deliberately carries neither `position` nor `state`: both change while the
+/// entry waits, and this is a durable result an idempotent replay returns
+/// verbatim. A stored "position 3" would be a lie the moment anything ahead
+/// merges. The entry id and the head it was queued at do not change.
 #[derive(Debug, Deserialize, Serialize)]
-pub(crate) struct MergeResult {
+pub(crate) struct EnqueueResult {
     pub(crate) pull_number: i64,
-    pub(crate) merged: bool,
-    pub(crate) merge_commit_sha: String,
     pub(crate) head_sha: String,
+    pub(crate) entry_id: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -505,29 +506,29 @@ impl AppAuthority {
     }
 
     #[cfg(target_arch = "wasm32")]
-    pub(crate) async fn merge_pull_request_at_head(
+    pub(crate) async fn enqueue_pull_request(
         &self,
         journal: &DeliveryJournal,
-        request: MergePullRequest,
-    ) -> Result<MergeResult, OperationError> {
+        request: EnqueuePullRequest,
+    ) -> Result<EnqueueResult, OperationError> {
         request.validate()?;
-        let operation = request.operation("merge_pull_request_at_head")?;
+        let operation = request.operation("enqueue_pull_request")?;
         let state = journal
             .begin_operation(&operation)
             .await
             .map_err(|_| OperationError::Unavailable)?;
-        if let Some(result) = completed_or_conflict::<MergeResult>(&state)? {
+        if let Some(result) = completed_or_conflict::<EnqueueResult>(&state)? {
             return Ok(result);
         }
         let token = self
             .0
             .installation_token(BTreeMap::from([
-                ("contents", "write"),
+                ("merge_queues", "write"),
                 ("metadata", "read"),
-                ("pull_requests", "write"),
+                ("pull_requests", "read"),
             ]))
             .await?;
-        if let Some(result) = self.0.reconcile_merge(&token, &request).await? {
+        if let Some(result) = self.0.reconcile_enqueue(&token, &request).await? {
             return complete(journal, &operation, result).await;
         }
         if matches!(
@@ -540,9 +541,15 @@ impl AppAuthority {
                 .map_err(|_| OperationError::Unavailable)?;
             return Err(OperationError::Indeterminate);
         }
-        self.0
+        // The decision doc requires the bound base and head re-read before
+        // enqueueing, not only bound on the write.
+        let pull = self
+            .0
             .verify_pull_request_head(&token, request.pull_number, &request.head_sha)
             .await?;
+        if pull.base.name != request.base {
+            return Err(OperationError::Conflict);
+        }
         match journal
             .mark_operation(&operation, OperationTransition::Executing)
             .await
@@ -554,7 +561,7 @@ impl AppAuthority {
             }
             OperationRecord::Conflict => return Err(OperationError::Conflict),
             OperationRecord::Executing | OperationRecord::Indeterminate => {
-                if let Some(result) = self.0.reconcile_merge(&token, &request).await? {
+                if let Some(result) = self.0.reconcile_enqueue(&token, &request).await? {
                     return complete(journal, &operation, result).await;
                 }
                 return Err(OperationError::Indeterminate);
@@ -563,14 +570,14 @@ impl AppAuthority {
                 return Err(OperationError::Unavailable);
             }
         }
-        match self.0.merge_pull_request(&token, &request).await {
+        match self.0.enqueue_entry(&token, &pull.node_id, &request).await {
             Ok(result) => complete(journal, &operation, result).await,
             Err(OperationError::Refused) => {
-                // Nothing merged, and we know it. Release the claim so this
-                // same operation ID and request can be retried once the pull
-                // request is actually mergeable; burying it at `indeterminate`
-                // would force a fresh UUID for every retry and would report an
-                // unknown outcome for a fully known one.
+                // Nothing was enqueued, and we know it. Release the claim so
+                // this same operation ID and request can be retried once the
+                // pull request is actually queueable; burying it at
+                // `indeterminate` would force a fresh UUID for every retry and
+                // would report an unknown outcome for a fully known one.
                 journal
                     .mark_operation(&operation, OperationTransition::Refused)
                     .await
@@ -578,7 +585,7 @@ impl AppAuthority {
                 Err(OperationError::Refused)
             }
             Err(_) => {
-                if let Some(result) = self.0.reconcile_merge(&token, &request).await? {
+                if let Some(result) = self.0.reconcile_enqueue(&token, &request).await? {
                     return complete(journal, &operation, result).await;
                 }
                 let _ = journal
@@ -723,11 +730,12 @@ impl PublishCommit {
     }
 }
 
-impl MergePullRequest {
+impl EnqueuePullRequest {
     fn validate(&self) -> Result<(), OperationError> {
         valid_operation_id(&self.operation_id)?;
         valid_exact_integer(self.pull_number)?;
-        valid_sha(&self.head_sha)
+        valid_sha(&self.head_sha)?;
+        valid_ref(&self.base)
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -1284,74 +1292,122 @@ impl Authority {
         }))
     }
 
-    async fn merge_pull_request(
+    /// Enqueue via GraphQL, which is the only API GitHub offers for this.
+    ///
+    /// `expectedHeadOid` is a first-class input, so the head binding is
+    /// enforced by the write itself. `jump` is never sent: the decision doc
+    /// forbids queue-jump authority, and omitting the field is a stronger
+    /// guarantee than sending `false`.
+    async fn enqueue_entry(
         &self,
         token: &Credential,
-        request: &MergePullRequest,
-    ) -> Result<MergeResult, OperationError> {
-        let merged: MergeResponse = match github_json_request(
-            worker::Method::Put,
-            &format!(
-                "https://api.github.com/repos/{}/{}/pulls/{}/merge",
-                self.repository.owner, self.repository.name, request.pull_number
-            ),
-            token.as_str(),
-            Some(&MergeRequest {
-                sha: &request.head_sha,
-                merge_method: request.merge_method.github_method(),
-            }),
-        )
-        .await
-        {
-            Ok(merged) => merged,
-            // This endpoint answers with the reason it refused. 405 is "not
-            // mergeable" — a required check red or still running, a draft, or
-            // a conflicting base — and is the ordinary first answer for a pull
-            // request whose CI has not finished. 409 is "the head moved", and
-            // 403/422 are a refused permission and a rejected body. All four
-            // mean the merge did not happen, so the caller has something to
-            // act on rather than an outcome it must reconcile by hand.
-            Err(Error::Rejected(403 | 405 | 409 | 422)) => {
-                return Err(OperationError::Refused);
-            }
-            Err(error) => return Err(error.into()),
-        };
-        merged
-            .merged
-            .then_some(MergeResult {
-                pull_number: request.pull_number,
-                merged: true,
-                merge_commit_sha: merged.sha,
-                head_sha: request.head_sha.clone(),
-            })
-            // A 2xx that did not merge is still a determinate "did not merge".
-            .ok_or(OperationError::Refused)
-    }
+        pull_node_id: &str,
+        request: &EnqueuePullRequest,
+    ) -> Result<EnqueueResult, OperationError> {
+        #[derive(Serialize)]
+        struct Variables<'a> {
+            pull: &'a str,
+            head: &'a str,
+        }
+        #[derive(Deserialize)]
+        struct Data {
+            #[serde(rename = "enqueuePullRequest")]
+            enqueue: Option<Payload>,
+        }
+        #[derive(Deserialize)]
+        struct Payload {
+            #[serde(rename = "mergeQueueEntry")]
+            entry: Option<QueueEntry>,
+        }
 
-    async fn reconcile_merge(
-        &self,
-        token: &Credential,
-        request: &MergePullRequest,
-    ) -> Result<Option<MergeResult>, OperationError> {
-        let pull: PullRequestState = github_json(
-            &format!(
-                "https://api.github.com/repos/{}/{}/pulls/{}",
-                self.repository.owner, self.repository.name, request.pull_number
-            ),
-            token.as_str(),
+        let data: Data = github_graphql(
+            token,
+            "mutation($pull:ID!,$head:GitObjectID!){\
+             enqueuePullRequest(input:{pullRequestId:$pull,expectedHeadOid:$head}){\
+             mergeQueueEntry{id pullRequest{number headRefOid}}}}",
+            &Variables {
+                pull: pull_node_id,
+                head: &request.head_sha,
+            },
         )
         .await?;
-        // Only this exact head counts as this operation having landed.
-        if !pull.merged || pull.head.sha != request.head_sha {
-            return Ok(None);
+        let entry = data
+            .enqueue
+            .and_then(|payload| payload.entry)
+            // A mutation that returns no entry did not enqueue anything. That
+            // is determinate, not ambiguous.
+            .ok_or(OperationError::Refused)?;
+        entry.into_result(request)
+    }
+
+    /// Answer "is this pull request queued at the head I stated?" by reading
+    /// GitHub, never a local record.
+    async fn reconcile_enqueue(
+        &self,
+        token: &Credential,
+        request: &EnqueuePullRequest,
+    ) -> Result<Option<EnqueueResult>, OperationError> {
+        #[derive(Serialize)]
+        struct Variables<'a> {
+            owner: &'a str,
+            name: &'a str,
+            base: &'a str,
         }
-        let merge_commit_sha = pull.merge_commit_sha.ok_or(OperationError::Indeterminate)?;
-        Ok(Some(MergeResult {
-            pull_number: request.pull_number,
-            merged: true,
-            merge_commit_sha,
-            head_sha: request.head_sha.clone(),
-        }))
+        #[derive(Deserialize)]
+        struct Data {
+            repository: Option<Repository>,
+        }
+        #[derive(Deserialize)]
+        struct Repository {
+            #[serde(rename = "mergeQueue")]
+            queue: Option<Queue>,
+        }
+        #[derive(Deserialize)]
+        struct Queue {
+            entries: Option<Entries>,
+        }
+        #[derive(Deserialize)]
+        struct Entries {
+            #[serde(rename = "totalCount")]
+            total_count: i64,
+            nodes: Vec<QueueEntry>,
+        }
+
+        const PAGE: i64 = 100;
+        let data: Data = github_graphql(
+            token,
+            "query($owner:String!,$name:String!,$base:String!){\
+             repository(owner:$owner,name:$name){\
+             mergeQueue(branch:$base){entries(first:100){totalCount \
+             nodes{id pullRequest{number headRefOid}}}}}}",
+            &Variables {
+                owner: &self.repository.owner,
+                name: &self.repository.name,
+                base: &request.base,
+            },
+        )
+        .await?;
+        let Some(entries) = data
+            .repository
+            .and_then(|repository| repository.queue)
+            .and_then(|queue| queue.entries)
+        else {
+            // No queue on this branch. The decision doc calls that
+            // unsupported and fails closed rather than falling back.
+            return Err(OperationError::Refused);
+        };
+        // One unread page could hide this operation's entry and make a
+        // reconciliation answer "not queued" for something that is. Refuse to
+        // guess instead.
+        if entries.total_count > PAGE || entries.nodes.len() as i64 != entries.total_count {
+            return Err(OperationError::Indeterminate);
+        }
+        entries
+            .nodes
+            .into_iter()
+            .find(|entry| entry.matches(request))
+            .map(|entry| entry.into_result(request))
+            .transpose()
     }
 
     async fn verify_ref(
@@ -1670,13 +1726,6 @@ struct RefCreate<'a> {
 }
 
 #[cfg(target_arch = "wasm32")]
-#[derive(Serialize)]
-struct MergeRequest<'a> {
-    sha: &'a str,
-    merge_method: &'static str,
-}
-
-#[cfg(target_arch = "wasm32")]
 #[derive(Deserialize)]
 struct GitObjectId {
     sha: String,
@@ -1697,19 +1746,49 @@ struct GitParent {
     sha: String,
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 #[derive(Deserialize)]
-struct MergeResponse {
-    sha: String,
-    merged: bool,
+struct QueueEntry {
+    id: String,
+    #[serde(rename = "pullRequest")]
+    pull_request: Option<QueueEntryPullRequest>,
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 #[derive(Deserialize)]
-struct PullRequestState {
-    merged: bool,
-    merge_commit_sha: Option<String>,
-    head: GitObjectId,
+struct QueueEntryPullRequest {
+    number: i64,
+    #[serde(rename = "headRefOid")]
+    head_ref_oid: String,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+impl QueueEntry {
+    /// The entry's own `headCommit` is the queue's *synthetic* merge commit,
+    /// not the pull request head -- verified live against a real queue entry,
+    /// where they differed. Matching on it would never find the head the
+    /// caller stated. `pullRequest.headRefOid` is the live head, and GitHub
+    /// ejects an entry when the head moves, so a surviving entry names the
+    /// head it was queued at.
+    fn matches(&self, request: &EnqueuePullRequest) -> bool {
+        self.pull_request.as_ref().is_some_and(|pull| {
+            pull.number == request.pull_number && pull.head_ref_oid == request.head_sha
+        })
+    }
+
+    fn into_result(self, request: &EnqueuePullRequest) -> Result<EnqueueResult, OperationError> {
+        if !self.matches(request) {
+            // GitHub answered about a different pull request or head than the
+            // one asked about. Nothing safe can be concluded from that.
+            return Err(OperationError::Indeterminate);
+        }
+        valid_text(&self.id, 1, 256, true)?;
+        Ok(EnqueueResult {
+            pull_number: request.pull_number,
+            head_sha: request.head_sha.clone(),
+            entry_id: self.id,
+        })
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1732,6 +1811,7 @@ struct GitObject {
 #[derive(Deserialize)]
 struct PullRequest {
     number: i64,
+    node_id: String,
     html_url: String,
     body: Option<String>,
     head: PullReference,
@@ -1952,6 +2032,62 @@ async fn github_json_as_app<T: serde::de::DeserializeOwned>(
         return Err(Error::Unavailable);
     }
     github_json(url, jwt).await
+}
+
+/// One typed GraphQL operation, not a proxy: the query text is a compile-time
+/// constant here and the caller supplies only typed variables. There is no
+/// path by which an agent's input becomes GraphQL.
+///
+/// GraphQL answers **200 with an `errors` array** for a rejected operation, so
+/// a status check alone reports success for a failure. `data` absent or null
+/// with errors present is the refusal signal, and it must be read explicitly.
+#[cfg(target_arch = "wasm32")]
+async fn github_graphql<T: serde::de::DeserializeOwned, V: Serialize>(
+    token: &Credential,
+    query: &str,
+    variables: &V,
+) -> Result<T, OperationError> {
+    #[derive(Serialize)]
+    struct Body<'a, V> {
+        query: &'a str,
+        variables: &'a V,
+    }
+    #[derive(Deserialize)]
+    struct Envelope<T> {
+        data: Option<T>,
+        #[serde(default)]
+        errors: Vec<GraphQlError>,
+    }
+    #[derive(Deserialize)]
+    struct GraphQlError {
+        #[serde(rename = "type")]
+        kind: Option<String>,
+    }
+
+    let envelope: Envelope<T> = github_json_request(
+        worker::Method::Post,
+        "https://api.github.com/graphql",
+        token.as_str(),
+        Some(&Body { query, variables }),
+    )
+    .await?;
+    if !envelope.errors.is_empty() {
+        // Diagnosis only. Messages can quote caller input, so only the typed
+        // classification is logged, never the text.
+        for error in &envelope.errors {
+            worker::console_error!(
+                "github graphql error: {}",
+                error.kind.as_deref().unwrap_or("untyped")
+            );
+        }
+        // Every error type GitHub documents here means the operation did not
+        // happen: the request was refused, not lost. Treating it as
+        // indeterminate would wedge the operation ID for a fully known
+        // outcome -- the exact defect that made every merge retry need a
+        // fresh UUID before this.
+        return Err(OperationError::Refused);
+    }
+    envelope.data.ok_or(OperationError::Indeterminate)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -2218,6 +2354,84 @@ mod tests {
                 "accepted: {refused}"
             );
         }
+    }
+
+    /// The queue entry's own `headCommit` is the queue's synthetic merge
+    /// commit, not the pull request head. Binding to the wrong one would make
+    /// every reconciliation answer "not queued" for something that is, and the
+    /// operation would enqueue a second time.
+    #[test]
+    fn a_queue_entry_is_bound_to_the_pull_request_head_not_the_queue_commit() {
+        let head = "d".repeat(40);
+        let request = EnqueuePullRequest {
+            operation_id: "4c8a5c44-7f1f-11f0-952e-acde48001122".into(),
+            pull_number: 329,
+            head_sha: head.clone(),
+            base: "main".into(),
+        };
+        assert!(request.validate().is_ok());
+
+        let entry = |number: i64, oid: &str| QueueEntry {
+            id: "MQE_kwDOabc".into(),
+            pull_request: Some(QueueEntryPullRequest {
+                number,
+                head_ref_oid: oid.into(),
+            }),
+        };
+
+        assert!(entry(329, &head).matches(&request));
+        // A different pull request's entry is not this operation's effect.
+        assert!(!entry(330, &head).matches(&request));
+        // Nor is this pull request queued at a head the caller did not state:
+        // GitHub ejects an entry when the head moves, so a surviving entry
+        // naming another head means the queue holds something else.
+        assert!(!entry(329, &"e".repeat(40)).matches(&request));
+        // An entry GitHub returned without a pull request tells us nothing.
+        assert!(
+            !QueueEntry {
+                id: "MQE_kwDOabc".into(),
+                pull_request: None,
+            }
+            .matches(&request)
+        );
+
+        let result = entry(329, &head).into_result(&request).unwrap();
+        assert_eq!(result.pull_number, 329);
+        assert_eq!(result.head_sha, head);
+        assert_eq!(result.entry_id, "MQE_kwDOabc");
+
+        // Converting a non-matching entry must never manufacture a result.
+        assert!(matches!(
+            entry(330, &head).into_result(&request),
+            Err(OperationError::Indeterminate)
+        ));
+
+        // The base is bound too: a pull request that targets another branch
+        // would otherwise be enqueued onto that branch's queue.
+        assert!(
+            EnqueuePullRequest {
+                base: "../etc".into(),
+                ..request.clone()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            EnqueuePullRequest {
+                head_sha: "D".repeat(40),
+                ..request.clone()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            EnqueuePullRequest {
+                pull_number: 0,
+                ..request
+            }
+            .validate()
+            .is_err()
+        );
     }
 
     #[test]

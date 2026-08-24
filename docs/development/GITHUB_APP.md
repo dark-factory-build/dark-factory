@@ -1,7 +1,8 @@
 # GitHub App authority decision
 
-Status: Phase 0 read-only authority proof implemented; mutation operations
-inactive. This document does not itself authorize App registration,
+Status: the maintainer broker is live with six typed operations. The typed
+merge operation is the merge-queue enqueue this document requires; the
+direct-merge operation that briefly stood in for it has been removed. This document does not itself authorize App registration,
 installation, repository publication, merge, release, or live-factory changes.
 
 ## Decision
