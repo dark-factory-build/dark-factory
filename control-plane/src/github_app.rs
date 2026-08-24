@@ -967,8 +967,17 @@ fn free_of_review_verdict(value: &str) -> Result<(), OperationError> {
 /// exists to prevent, reached by making the name a directory instead. The
 /// collision is with the *leading* segments only, so a path that merely
 /// contains a protected name -- `CODEOWNERS.md`, `docs/notes-on-CODEOWNERS.md`
-/// -- stays publishable. The `.github` tree needs no such rule: its refusal
-/// already covers everything beneath it.
+/// -- stays publishable, and so does one that carries it as a whole segment
+/// somewhere GitHub reads no authority from, such as `src/CODEOWNERS`.
+///
+/// The `.github` tree needs no such rule. It is already refused as a path in
+/// its own right, so no blob can replace it, and `.github/workflows` is
+/// refused at any depth by the segment test, which is that directory's
+/// prefix rule. The rest of `.github` is a tree this surface deliberately
+/// publishes into -- `.github/ISSUE_TEMPLATE/**` and
+/// `.github/PULL_REQUEST_TEMPLATE.md` stay allowed -- which is why the three
+/// `.github/*` entries above are refused by name one at a time. A blanket
+/// prefix rule there would refuse intended writes rather than close a hole.
 fn valid_repository_path(value: &str) -> Result<(), OperationError> {
     const REVIEW_AUTHORITY_PATHS: &[&str] = &[
         "CODEOWNERS",
@@ -2673,6 +2682,14 @@ mod tests {
             "docs/notes-on-CODEOWNERS.md",
             "src/codeowners_test.rs",
             ".github/dependabot.yml.example",
+            // The collision is with the leading segments only. GitHub reads
+            // CODEOWNERS from the root, `.github/`, and `docs/` and nowhere
+            // else, so the name as a whole segment elsewhere carries no
+            // authority and stays publishable. A refactor to "any segment
+            // equals a protected name" would over-refuse these.
+            "src/CODEOWNERS",
+            "a/CODEOWNERS/b",
+            ".github/sub/dependabot.yml",
         ] {
             assert!(
                 valid_repository_path(allowed).is_ok(),
