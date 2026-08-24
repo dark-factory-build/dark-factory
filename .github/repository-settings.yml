@@ -3,8 +3,19 @@
 # This file is intentionally not an API mutator. An authorized maintainer may
 # reconcile it with GitHub after reviewing the exact prepared commit. The
 # `required` context is the CI workflow's aggregate job: it is green only
-# when `checks` (hosted macOS), `linux` (hosted Ubuntu), and the separately
-# deployed `control-plane` gate are green.
+# when `checks` (hosted macOS), `linux` (hosted Ubuntu), the separately
+# deployed `control-plane` gate, and -- inside the merge queue -- `review`
+# are green. `review` enforces AGENTS.md rule 2 by requiring an exact-head
+# adversarial-review verdict.
+#
+# This file is a PROPOSAL and is not, and has never been, a record of what is
+# live. It omits rules the live `main-protect` ruleset carries -- including
+# `merge_queue`, without which `review` never runs at all -- and its
+# `strict_required_status_checks_policy` disagrees with production, which
+# `docs/development/WORKFLOW.md` explains must stay false while a queue is in
+# use. Reconciling this file as written would delete the merge queue and stop
+# the review gate firing. Treat `scripts/github-repo-settings.sh` as the
+# publisher and the live rules as the truth; see #368.
 repository: dark-factory-build/dark-factory
 default_branch: main
 rulesets:

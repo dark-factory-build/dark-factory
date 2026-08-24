@@ -209,27 +209,33 @@ merged, with no blocking verdict at that head. The reviewer's findings are
 written to the run summary, so a red check says what was wrong rather than
 only that something was.
 
-`review` joins the `required` aggregate in a follow-up change, once the gate is
-on the default branch. A single pull request adding both would deadlock: the
-job runs the default branch's copy of a script that does not exist there yet,
-so its own queue run could never go green.
-
-That follow-up is **not** a one-line `needs:` edit, and getting it wrong
-recreates the deadlock in a new costume. Because `review` runs only on
-`merge_group`, it is `skipped` on every `pull_request` and `push` run, so the
-naive condition fails `required` on every pull request. It must read:
+`review` is part of the `required` aggregate, which is what makes rule 2 a
+merge condition rather than a convention:
 
 ```yaml
 needs: [checks, linux, control-plane, review]
-# `skipped` is the correct answer outside the queue, where there is no verdict
-# to read. Treating it as a failure blocks every pull request.
-if: needs.review.result != 'success' && needs.review.result != 'skipped'
+# In the queue only `success` passes. Elsewhere `skipped` passes too, since
+# `review` runs on merge_group alone and there is no verdict to read. Treating
+# that as a failure would block every pull request.
+if: needs.review.result != 'success' && (github.event_name == 'merge_group' || needs.review.result != 'skipped')
 ```
 
-Until that lands the gate is **decorative and invisible**: it produces no check
-on the pull request at all, so nothing reports that rule 2 is unenforced. What
-keeps the window closed meanwhile is that `main-protect` still requires the
-queue, and `required` in the queue still runs everything else.
+Keyed on the event as well as the result on purpose. Keying on the result alone
+is sound only while `review` has no `needs:` and so cannot be
+dependency-skipped inside the queue — a property of a different job that a
+reader would have to go and check. This form states the policy directly.
+
+It arrived in two changes rather than one, because a single pull request adding
+the gate and requiring it would have deadlocked: the job runs the default
+branch's copy of a script that would not have existed there yet. The same
+ordering applied to the control plane — until `ALLOW` was deployed, requiring a
+verdict would have demanded something nothing could produce.
+
+`scripts/test-repository-settings.sh` pins both arms of the condition **and**
+extracts the step body to confirm it still fails the job. Pinning the strings
+alone is not enough: the condition can be present and correct while the step it
+guards has been changed to `exit 0`, or deleted with the `if:` left behind in a
+comment — either leaving a gate that runs, prints its diagnostic, and passes.
 
 The `merge_queue` rule is therefore a single chokepoint, and the `required` job
 asserts it on every run against the **live** rules — not against

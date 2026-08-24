@@ -137,18 +137,23 @@ jobs:
 
       # AGENTS.md rule 2, made a merge condition rather than a convention.
       #
-      # `skipped` is the correct answer outside the merge queue, and treating
-      # it as a failure would fail every pull request: `review` runs only on
-      # `merge_group`, because recording a verdict fires no workflow event and
-      # a pull-request-time run could never turn green after the reviewer
-      # acted. The naive `!= 'success'` recreates that deadlock in a new
-      # costume.
+      # In the queue only `success` passes. Everywhere else `skipped` passes
+      # too, because `review` runs only on `merge_group`: recording a verdict
+      # fires no workflow event, so a pull-request-time run could never turn
+      # green after the reviewer acted, and treating its `skipped` as a failure
+      # would fail every pull request -- the same deadlock in a new costume.
+      #
+      # Keyed on the EVENT as well as the result, deliberately. Keying on the
+      # result alone is safe only while `review` has no `needs:` and cannot be
+      # dependency-skipped inside the queue -- a property of a different job
+      # that a reader has to go and verify. This form says the policy outright
+      # and cannot be undermined by a later edit to that job.
       #
       # So a pull request enqueues without a verdict and is ejected here, at
       # the one moment the verdict has to be true: against the head being
       # merged.
       - name: Require a recorded adversarial review verdict
-        if: needs.review.result != 'success' && needs.review.result != 'skipped'
+        if: needs.review.result != 'success' && (github.event_name == 'merge_group' || needs.review.result != 'skipped')
         run: |
           echo "no adversarial review verdict at the head being merged (review=${{ needs.review.result }})" >&2
           echo "  A reviewer that did not write the change records:" >&2

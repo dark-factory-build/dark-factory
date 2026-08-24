@@ -13,9 +13,36 @@ grep -Fq 'integration_id: 15368' "$manifest"
 grep -Fq '  required:' "$workflow"
 grep -Fq '    if: always()' "$workflow"
 grep -Fq '    needs: [checks, linux, control-plane, review]' "$workflow"
-# `skipped` is the correct answer outside the merge queue. Without this arm the
-# aggregate fails every pull request, since `review` runs only on merge_group.
-grep -Fq "if: needs.review.result != 'success' && needs.review.result != 'skipped'" "$workflow"
+# In the queue only `success` passes; elsewhere `skipped` passes too, because
+# `review` runs on merge_group alone. Without the second arm the aggregate
+# fails every pull request.
+grep -Fq "if: needs.review.result != 'success' && (github.event_name == 'merge_group' || needs.review.result != 'skipped')" "$workflow"
+
+# Pinning the strings is not enough, and claiming otherwise was wrong: the
+# condition can be present and correct while the step it guards has been
+# changed to `exit 0`, or deleted with the `if:` left behind in a comment.
+# Either leaves a gate that runs, prints its diagnostic, and passes. So the
+# step body is extracted and checked for the exit that makes it a gate.
+verdict_step=$(awk '
+    /^      - name: Require a recorded adversarial review verdict$/ { step = 1; next }
+    step && /^        run: \|$/ { body = 1; next }
+    body && /^          / { sub(/^          /, ""); print; next }
+    body && /^ *$/ { print ""; next }
+    body { exit }
+' "$workflow")
+case $verdict_step in
+    *"exit 1"*) ;;
+    *)
+        echo "the adversarial-review step does not fail the job" >&2
+        exit 1
+        ;;
+esac
+case $verdict_step in
+    *"exit 0"*)
+        echo "the adversarial-review step exits successfully" >&2
+        exit 1
+        ;;
+esac
 grep -Fq "if: needs.checks.result != 'success' || needs.linux.result != 'success' || needs.control-plane.result != 'success'" "$workflow"
 grep -Fq '"context": "required"' "$publisher"
 # The review gate runs only on `merge_group`, so these two are load-bearing for
