@@ -14,7 +14,25 @@ workflow="$repository_root/.github/workflows/ci.yml"
 publisher="$repository_root/scripts/github-repo-settings.sh"
 
 grep -Fq '  required:' "$workflow"
-grep -Fq '    if: always()' "$workflow"
+# Extracted, not grepped. The free-floating `grep -Fq '    if: always()'` this
+# replaces was satisfied by a DIFFERENT `if: always()` -- the one on the
+# `checks` job's summary step, at a deeper indent -- so the aggregate's own
+# `if:` could be `false`, the gate never running on any event, with this test
+# still green (#376). Same arming and job bound as the step extractions below.
+# Every match in the window is printed rather than the first, so a second
+# `if:` appended after the real one cannot hide behind it.
+job_if=$(awk '
+    /^  required:$/ { job = 1; next }
+    # The same job-key bound explained on the extraction below.
+    job && /^  [^ #]/ { exit }
+    # Job keys are four-space indented and every step key is deeper, so this
+    # cannot match inside `steps:` however the steps are laid out.
+    job && /^    if: / { sub(/^    if: /, ""); print }
+' "$workflow")
+if [ "$job_if" != "always()" ]; then
+    echo "the required job does not run on every event" >&2
+    exit 1
+fi
 grep -Fq '    needs: [checks, linux, control-plane, review]' "$workflow"
 # The condition is extracted from the step, not grepped from the file. A
 # free-floating `grep` is satisfied by the string appearing in a comment, so it
@@ -80,6 +98,32 @@ printf '%s\n' "$verdict_step" | grep -qx 'exit 1' || {
     echo "the adversarial-review step does not fail the job" >&2
     exit 1
 }
+
+# Both extractions above read the step's `if:` and `run:`, and a key BESIDE
+# them neuters the body without changing a byte of either: `shell: cat {0}`
+# prints the gate instead of running it, so the `exit 1` is never executed,
+# and `continue-on-error: true` lets the step fail red while the job stays
+# green (#376). Asserting the whole key set rather than naming those two says
+# the rule they are members of -- a key the assertions do not read is
+# unchecked by definition -- and does not have to be extended the next time
+# Actions grows another step attribute. Sorted, so writing the two keys in
+# either order passes, while a second copy of either -- YAML takes the last --
+# still fails.
+verdict_step_keys=$(awk '
+    /^  required:$/ { job = 1; next }
+    # Same job-key bound as the extractions above.
+    job && /^  [^ #]/ { exit }
+    job && /^      - name: Require a recorded adversarial review verdict$/ { step = 1; next }
+    # The step ends at the next six-space-indented line, whether that is the
+    # following `- name:` or a comment block between steps. A block scalar
+    # body is indented past its own key, so it is never read as one.
+    step && /^      [^ ]/ { exit }
+    step && /^        [^ #]/ { sub(/:.*/, ""); sub(/^ */, ""); print }
+' "$workflow" | sort)
+if [ "$verdict_step_keys" != "$(printf '%s\n' if run)" ]; then
+    echo "the adversarial-review step's keys are not exactly 'if' and 'run'" >&2
+    exit 1
+fi
 grep -Fq "if: needs.checks.result != 'success' || needs.linux.result != 'success' || needs.control-plane.result != 'success'" "$workflow"
 grep -Fq '"context": "required"' "$publisher"
 # Bound to GitHub Actions (integration 15368): without the binding, any
