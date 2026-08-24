@@ -490,6 +490,18 @@ fn operations_copy_sql(source: &str) -> String {
     )
 }
 
+/// Whether the stored `CREATE TABLE` text is the current migration's.
+///
+/// Split out from the storage read so it is host-testable: this predicate
+/// decides whether the rebuild runs at all, and getting it wrong in either
+/// direction is severe -- a false positive skips a needed rebuild and records
+/// the new revision against an old table, which the schema audit then rejects
+/// forever.
+#[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+fn operations_schema_is_current(stored: &str) -> bool {
+    normalized_sql(stored) == expected_stored_sql(OPERATION_MIGRATION_SQL)
+}
+
 #[cfg(target_arch = "wasm32")]
 fn operations_table_is_current(sql: &SqlStorage) -> Result<bool, Error> {
     let rows = sql
@@ -499,10 +511,7 @@ fn operations_table_is_current(sql: &SqlStorage) -> Result<bool, Error> {
             None,
         )?
         .to_array::<SchemaRow>()?;
-    Ok(matches!(
-        rows.as_slice(),
-        [row] if normalized_sql(&row.sql) == expected_stored_sql(OPERATION_MIGRATION_SQL)
-    ))
+    Ok(matches!(rows.as_slice(), [row] if operations_schema_is_current(&row.sql)))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -545,10 +554,16 @@ fn migrate_operations(sql: &SqlStorage) -> Result<(), Error> {
     // `IF NOT EXISTS` create, and record the new revision against a table that
     // never changed -- which the schema audit then rejects forever.
     if !operations_table_is_current(sql)? && table_exists(sql, "maintainer_operations")? {
-        let Some(slot) = legacy
-            .iter()
-            .find(|name| !matches!(table_exists(sql, name), Ok(true)))
-        else {
+        let mut free = None;
+        for name in legacy {
+            // `?`, not a `matches!` that folds an error into "occupied": a
+            // storage failure here is not evidence that a slot is taken.
+            if !table_exists(sql, name)? {
+                free = Some(name);
+                break;
+            }
+        }
+        let Some(slot) = free else {
             // Both names are taken and the live table is still wrong. Renaming
             // over either one would destroy the only copy of those rows.
             worker::console_error!("journal: no free legacy slot for the operations rebuild");
@@ -1298,6 +1313,42 @@ mod migration_tests {
             })
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    /// The predicate that decides whether the rebuild runs at all. A false
+    /// positive skips a needed rebuild and stamps the new revision onto an old
+    /// table, which the schema audit then rejects on every request forever.
+    #[test]
+    fn the_current_schema_predicate_recognises_only_the_current_table() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(OPERATION_MIGRATION_SQL).unwrap();
+        let stored: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_schema
+                 WHERE type = 'table' AND name = 'maintainer_operations'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            operations_schema_is_current(&stored),
+            "a table created from the current migration must be recognised"
+        );
+
+        // An older shape -- the enumerated `kind` CHECK 0004 replaced -- must
+        // not be, or the shard that most needs the rebuild never gets it.
+        assert!(!operations_schema_is_current(
+            "CREATE TABLE maintainer_operations (
+                 operation_id TEXT PRIMARY KEY,
+                 kind TEXT NOT NULL CHECK (kind IN ('create_pull_request')),
+                 request_digest TEXT NOT NULL,
+                 state TEXT NOT NULL,
+                 result_json TEXT,
+                 created_at INTEGER NOT NULL,
+                 updated_at INTEGER NOT NULL
+             ) STRICT"
+        ));
+        assert!(!operations_schema_is_current(""));
     }
 
     /// Every `kind` the code writes must satisfy the shape CHECK that replaced

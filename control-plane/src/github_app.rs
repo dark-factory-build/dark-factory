@@ -193,18 +193,19 @@ pub(crate) struct CommitResult {
 /// this is a durable result an idempotent replay returns verbatim, so a stored
 /// "position 3" is a lie the moment anything ahead merges.
 ///
-/// `state_at_enqueue` is named for what it is. An entry can be `UNMERGEABLE`
-/// the moment it is created -- a moved base, a conflict -- and a caller told
-/// only "queued" would wait for a merge that is never coming. The value does
-/// not change retroactively, so replaying it is honest; it is not a live
-/// status, and there is no operation yet that reports the eventual merge
-/// outcome.
+/// `state_when_recorded` is named for exactly what it is, and deliberately not
+/// "at enqueue": reconciliation builds this result too, and it observes an
+/// entry that may have moved `QUEUED -> AWAITING_CHECKS -> UNMERGEABLE` since.
+/// It is worth carrying because an entry can be `UNMERGEABLE` the moment it is
+/// created -- a moved base, a conflict -- and a caller told only "queued"
+/// waits for a merge that is never coming. It is a durable observation, not a
+/// live status, and no operation yet reports the eventual merge outcome.
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct EnqueueResult {
     pub(crate) pull_number: i64,
     pub(crate) head_sha: String,
     pub(crate) entry_id: String,
-    pub(crate) state_at_enqueue: String,
+    pub(crate) state_when_recorded: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1328,7 +1329,7 @@ impl Authority {
             entry: Option<QueueEntry>,
         }
 
-        let answer: Result<Data, GraphQlFailure> = github_graphql(
+        let (data, failure): (Option<Data>, Option<GraphQlFailure>) = github_graphql(
             token,
             "mutation($pull:ID!,$head:GitObjectID!){\
              enqueuePullRequest(input:{pullRequestId:$pull,expectedHeadOid:$head}){\
@@ -1339,26 +1340,24 @@ impl Authority {
             },
         )
         .await?;
-        let data = match answer {
-            Ok(data) => data,
-            // Rejected before execution: nothing was queued and the caller can
-            // retry this same operation ID once the precondition holds.
-            Err(GraphQlFailure::Rejected) => return Err(OperationError::Refused),
-            // Not knowable. The ladder above reconciles against the queue and
-            // only reports indeterminate if that cannot answer either.
-            Err(GraphQlFailure::Unknown) => return Err(OperationError::Indeterminate),
-        };
-        let entry = data
-            .enqueue
-            .and_then(|payload| payload.entry)
-            // A mutation that returns no entry did not enqueue anything. That
-            // is determinate, not ambiguous.
-            .ok_or(OperationError::Refused)?;
+        let entry = enqueue_outcome(
+            data.and_then(|data| data.enqueue)
+                .and_then(|payload| payload.entry),
+            failure,
+        )?;
         entry.into_result(request)
     }
 
     /// Answer "is this pull request queued at the head I stated?" by reading
     /// GitHub, never a local record.
+    ///
+    /// Unlike every other reconciler here, this one has no operation marker to
+    /// match on: a queue entry carries no field the App can write. So it can
+    /// adopt an entry some *other* actor created -- a second operation, or an
+    /// operator who enqueued by hand. That is accepted rather than solved,
+    /// because the effect is idempotent by construction: "pull request N is
+    /// queued at head H" is the whole of what this operation produces, and it
+    /// is equally true whoever brought it about.
     async fn reconcile_enqueue(
         &self,
         token: &Credential,
@@ -1390,7 +1389,7 @@ impl Authority {
             nodes: Vec<QueueEntry>,
         }
 
-        let answer: Result<Data, GraphQlFailure> = github_graphql(
+        let (data, failure): (Option<Data>, Option<GraphQlFailure>) = github_graphql(
             token,
             "query($owner:String!,$name:String!,$base:String!){\
              repository(owner:$owner,name:$name){\
@@ -1403,10 +1402,17 @@ impl Authority {
             },
         )
         .await?;
-        // A read that failed did not refuse anything -- it failed to find out.
-        // Reporting `Refused` here would tell the caller "nothing changed"
-        // about an enqueue whose outcome is exactly what could not be read.
-        let data = answer.map_err(|_| OperationError::Indeterminate)?;
+        // A read that carried ANY error did not answer, whether or not `data`
+        // came back partially populated. Reporting a refusal here would tell
+        // the caller "nothing changed" about an enqueue whose outcome is
+        // exactly what could not be read -- and this runs on the path where
+        // the mutation's outcome is already unknown.
+        if failure.is_some() {
+            return Err(OperationError::Indeterminate);
+        }
+        let Some(data) = data else {
+            return Err(OperationError::Indeterminate);
+        };
         let Some(entries) = data
             .repository
             .and_then(|repository| repository.queue)
@@ -1820,7 +1826,7 @@ impl QueueEntry {
             pull_number: request.pull_number,
             head_sha: request.head_sha.clone(),
             entry_id: self.id,
-            state_at_enqueue: self.state,
+            state_when_recorded: self.state,
         })
     }
 }
@@ -2077,6 +2083,77 @@ async fn github_json_as_app<T: serde::de::DeserializeOwned>(
     github_json(url, jwt).await
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Deserialize)]
+struct GraphQlError {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+}
+
+/// Classify a GraphQL `errors` array into what it establishes about the
+/// operation, or `None` when there were no errors.
+///
+/// Pure, so it is host-testable: the transport around it is `wasm32`-only, and
+/// this table is where "the operation did not run" is asserted. Getting a
+/// class wrong in the permissive direction reports "nothing changed" for
+/// something that may have changed.
+///
+/// `RATE_LIMITED` is rejected-before-execution because GitHub refuses the
+/// request rather than half-running it. `SERVICE_UNAVAILABLE` and every
+/// untyped error are not: GitHub returns an untyped `Something went wrong
+/// while executing your query` for what its own documentation says "may be the
+/// result of a timeout", and a request that timed out server-side may have
+/// executed.
+#[cfg(any(target_arch = "wasm32", test))]
+fn classify_graphql_errors(errors: &[GraphQlError]) -> Option<GraphQlFailure> {
+    if errors.is_empty() {
+        return None;
+    }
+    let rejected = errors.iter().all(|error| {
+        matches!(
+            error.kind.as_deref(),
+            Some("NOT_FOUND" | "FORBIDDEN" | "UNPROCESSABLE" | "RATE_LIMITED")
+        )
+    });
+    Some(if rejected {
+        GraphQlFailure::Rejected
+    } else {
+        GraphQlFailure::Unknown
+    })
+}
+
+/// What an enqueue mutation established, decided from the **payload** rather
+/// than the envelope.
+///
+/// This is the distinction the first version got wrong. A GraphQL field error
+/// nulls the field it names and leaves `data` an object, so GitHub's ordinary
+/// refusal shape is a populated `data` carrying `enqueuePullRequest: null`
+/// *beside* an errors array. Asking "did the envelope have data?" routes every
+/// real refusal past the classification and answers `Refused` for outcomes
+/// nobody knows.
+///
+/// Split out so it is host-testable: the transport is `wasm32`-only, and a
+/// grep-style assertion on the source cannot catch a rewrite of this decision.
+#[cfg(any(target_arch = "wasm32", test))]
+fn enqueue_outcome(
+    entry: Option<QueueEntry>,
+    failure: Option<GraphQlFailure>,
+) -> Result<QueueEntry, OperationError> {
+    match (entry, failure) {
+        // An entry came back. That is the effect, errors alongside it or not.
+        (Some(entry), _) => Ok(entry),
+        // Rejected before execution: nothing was queued, and the same
+        // operation ID stays retryable once the precondition holds.
+        (None, Some(GraphQlFailure::Rejected)) => Err(OperationError::Refused),
+        // An untyped error may follow a server-side timeout on work already
+        // under way. The caller reconciles against the queue rather than
+        // asserting nothing happened.
+        (None, Some(GraphQlFailure::Unknown)) => Err(OperationError::Indeterminate),
+        // No entry and no error is a determinate "did not enqueue".
+        (None, None) => Err(OperationError::Refused),
+    }
+}
+
 /// What a GraphQL response establishes, handed back to the caller rather than
 /// decided here.
 ///
@@ -2085,7 +2162,8 @@ async fn github_json_as_app<T: serde::de::DeserializeOwned>(
 /// means "nothing happened, retry this operation ID"; for `reconcile_enqueue`
 /// the identical response means "I could not find out", which is never a
 /// refusal of the operation being reconciled.
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Clone, Copy, Debug)]
 enum GraphQlFailure {
     /// Every error names a class GitHub rejects *before* running the
     /// operation, so no effect was produced.
@@ -2118,7 +2196,7 @@ async fn github_graphql<T: serde::de::DeserializeOwned, V: Serialize>(
     token: &Credential,
     query: &str,
     variables: &V,
-) -> Result<Result<T, GraphQlFailure>, Error> {
+) -> Result<(Option<T>, Option<GraphQlFailure>), Error> {
     #[derive(Serialize)]
     struct Body<'a, V> {
         query: &'a str,
@@ -2130,12 +2208,6 @@ async fn github_graphql<T: serde::de::DeserializeOwned, V: Serialize>(
         #[serde(default)]
         errors: Vec<GraphQlError>,
     }
-    #[derive(Deserialize)]
-    struct GraphQlError {
-        #[serde(rename = "type")]
-        kind: Option<String>,
-    }
-
     let envelope: Envelope<T> = github_json_request(
         worker::Method::Post,
         "https://api.github.com/graphql",
@@ -2143,34 +2215,17 @@ async fn github_graphql<T: serde::de::DeserializeOwned, V: Serialize>(
         Some(&Body { query, variables }),
     )
     .await?;
-    // A populated `data` is what GitHub did, errors alongside it or not.
-    if let Some(data) = envelope.data {
-        return Ok(Ok(data));
-    }
-    // Diagnosis only. Messages can quote caller input, so only the typed
-    // classification is logged, never the text.
+    // Diagnosis only, and unconditional: a field error nulls its field and
+    // leaves `data` an object, so returning early on a populated `data` would
+    // mean the most common refusal logged nothing at all. Messages can quote
+    // caller input, so only the typed classification is logged, never the text.
     for error in &envelope.errors {
         worker::console_error!(
             "github graphql error: {}",
             error.kind.as_deref().unwrap_or("untyped")
         );
     }
-    // Rejected before execution. `RATE_LIMITED` belongs here because GitHub
-    // refuses the request rather than half-running it; `SERVICE_UNAVAILABLE`
-    // and every untyped error do not, because either may follow a server-side
-    // timeout on work that was already under way.
-    let rejected = !envelope.errors.is_empty()
-        && envelope.errors.iter().all(|error| {
-            matches!(
-                error.kind.as_deref(),
-                Some("NOT_FOUND" | "FORBIDDEN" | "UNPROCESSABLE" | "RATE_LIMITED")
-            )
-        });
-    Ok(Err(if rejected {
-        GraphQlFailure::Rejected
-    } else {
-        GraphQlFailure::Unknown
-    }))
+    Ok((envelope.data, classify_graphql_errors(&envelope.errors)))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -2464,6 +2519,92 @@ mod tests {
         }
     }
 
+    /// The table that decides whether "the operation did not run" may be
+    /// asserted. A class wrongly listed as rejected-before-execution reports
+    /// "nothing changed" for something that may have changed.
+    #[test]
+    fn only_pre_execution_error_classes_are_rejections() {
+        let errors = |kinds: &[Option<&str>]| {
+            kinds
+                .iter()
+                .map(|kind| GraphQlError {
+                    kind: kind.map(Into::into),
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert!(classify_graphql_errors(&[]).is_none());
+
+        for kind in ["NOT_FOUND", "FORBIDDEN", "UNPROCESSABLE", "RATE_LIMITED"] {
+            assert!(
+                matches!(
+                    classify_graphql_errors(&errors(&[Some(kind)])),
+                    Some(GraphQlFailure::Rejected)
+                ),
+                "{kind} is rejected before execution"
+            );
+        }
+
+        // An untyped error is GitHub's shape for `Something went wrong while
+        // executing your query`, which its docs say may be a timeout -- and a
+        // request that timed out server-side may have executed.
+        assert!(matches!(
+            classify_graphql_errors(&errors(&[None])),
+            Some(GraphQlFailure::Unknown)
+        ));
+        assert!(matches!(
+            classify_graphql_errors(&errors(&[Some("SERVICE_UNAVAILABLE")])),
+            Some(GraphQlFailure::Unknown)
+        ));
+        // One unknown class among rejections makes the whole answer unknown:
+        // the array describes one response, and any part of it may have run.
+        assert!(matches!(
+            classify_graphql_errors(&errors(&[Some("FORBIDDEN"), None])),
+            Some(GraphQlFailure::Unknown)
+        ));
+    }
+
+    /// GitHub's ordinary refusal shape for a mutation is a populated `data`
+    /// whose mutation field is null, *beside* an errors array. Deciding from
+    /// the envelope rather than the payload answers "nothing changed" for an
+    /// enqueue that may have landed -- the defect this function exists to make
+    /// impossible to reintroduce silently.
+    #[test]
+    fn an_enqueue_outcome_is_decided_from_the_payload_not_the_envelope() {
+        let entry = || QueueEntry {
+            id: "MQE_kwDOabc".into(),
+            state: "QUEUED".into(),
+            pull_request: Some(QueueEntryPullRequest {
+                number: 329,
+                head_ref_oid: "d".repeat(40),
+            }),
+        };
+
+        // An entry came back. That is the effect, whatever rode alongside it.
+        assert!(enqueue_outcome(Some(entry()), None).is_ok());
+        assert!(enqueue_outcome(Some(entry()), Some(GraphQlFailure::Rejected)).is_ok());
+        assert!(enqueue_outcome(Some(entry()), Some(GraphQlFailure::Unknown)).is_ok());
+
+        // No entry, rejected before execution: determinate, and the same
+        // operation ID stays retryable.
+        assert!(matches!(
+            enqueue_outcome(None, Some(GraphQlFailure::Rejected)),
+            Err(OperationError::Refused)
+        ));
+        // No entry, and an error class that may follow a server-side timeout
+        // on work already under way. Reporting "nothing changed" here is the
+        // one answer that can be actively false.
+        assert!(matches!(
+            enqueue_outcome(None, Some(GraphQlFailure::Unknown)),
+            Err(OperationError::Indeterminate)
+        ));
+        // No entry and no error at all.
+        assert!(matches!(
+            enqueue_outcome(None, None),
+            Err(OperationError::Refused)
+        ));
+    }
+
     /// The queue entry's own `headCommit` is the queue's synthetic merge
     /// commit, not the pull request head. Binding to the wrong one would make
     /// every reconciliation answer "not queued" for something that is, and the
@@ -2509,7 +2650,7 @@ mod tests {
         assert_eq!(result.pull_number, 329);
         assert_eq!(result.head_sha, head);
         assert_eq!(result.entry_id, "MQE_kwDOabc");
-        assert_eq!(result.state_at_enqueue, "QUEUED");
+        assert_eq!(result.state_when_recorded, "QUEUED");
 
         // An entry already unmergeable is reported as such rather than as a
         // plain "queued": the caller would otherwise wait for a merge that is
@@ -2519,7 +2660,10 @@ mod tests {
             ..entry(329, &head)
         };
         assert_eq!(
-            unmergeable.into_result(&request).unwrap().state_at_enqueue,
+            unmergeable
+                .into_result(&request)
+                .unwrap()
+                .state_when_recorded,
             "UNMERGEABLE"
         );
 
