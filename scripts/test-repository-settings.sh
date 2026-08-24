@@ -21,7 +21,16 @@ grep -Fq '"context": "required"' "$publisher"
 # so unreviewed entries ahead of it would merge unchecked.
 grep -Fq '"type": "merge_queue"' "$publisher"
 grep -Fq '"grouping_strategy": "ALLGREEN"' "$publisher"
-grep -Fq 'scripts/verify-merge-queue-chokepoint.sh' "$workflow"
+# The chokepoint assertion lives inline in the workflow on purpose: a helper
+# under scripts/ is App-publishable, so it would be the weaker-protected file
+# guarding the stronger-protected one. Assert all four facts are required.
+for fact in rule:merge_queue grouping:ALLGREEN rule:required_status_checks context:required; do
+    grep -Fq "require $fact" "$workflow" || {
+        echo "the workflow does not require '$fact' to be live" >&2
+        exit 1
+    }
+done
+grep -Fq 'rules/branches/${BASE_BRANCH}' "$workflow"
 if grep -Fq '"context": "checks"' "$publisher"; then
     echo "repository settings still require the macOS-only checks context" >&2
     exit 1

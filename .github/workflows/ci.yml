@@ -137,41 +137,59 @@ jobs:
 
       # The adversarial-review gate runs on `merge_group` and nowhere else, so
       # the `merge_queue` rule is the single chokepoint keeping unreviewed work
-      # out of the default branch. If it lapses, `merge_group` stops firing,
-      # the gate never runs on any event, and this aggregate stays green --
-      # rule 2 silently stops being enforced with no red check anywhere.
+      # out of this branch. If it lapses, `merge_group` stops firing, the gate
+      # never runs on any event, and this aggregate stays green -- rule 2
+      # silently stops being enforced with no red check anywhere.
       #
-      # Checked against the LIVE rules rather than the proposal in
-      # scripts/github-repo-settings.sh: that file records what an operator
-      # intended to apply, which is not evidence that it is applied. The two
-      # have already drifted once.
-      - name: Check out $GITHUB_SHA
-        run: |
-          set -euxo pipefail
-          rm -rf .git
-          git init
-          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
-          git fetch --depth=1 origin "$GITHUB_SHA"
-          git checkout --force --detach FETCH_HEAD
-          git clean -ffdx
-
-      - name: Require the merge queue to still be the only path to the branch
+      # Asserted INLINE, deliberately, and this is the one place in the repo
+      # where that is the safer arrangement. A pull request runs the workflow
+      # file it carries, but the maintainer App is refused
+      # `.github/workflows/` and `.github/` is owned in CODEOWNERS, so an
+      # agent-authored change cannot weaken this without a human push and an
+      # owner approval. A helper under `scripts/` would be App-publishable --
+      # the weaker-protected file guarding the stronger-protected one, which is
+      # exactly why `verify-adversarial-review.sh` is hoisted to the default
+      # branch. Hoisting is not available here: it cannot work until the code
+      # is already on the default branch, and this must hold from the first
+      # run. So the assertion is kept small enough to review by eye instead.
+      #
+      # Read from the LIVE rules, not from `scripts/github-repo-settings.sh`:
+      # that file records what an operator intended to apply, which is not
+      # evidence that it is applied, and the two have already drifted once.
+      # Rules in `evaluate` or `disabled` rulesets are not returned by this
+      # endpoint, so a ruleset downgraded out of enforcement reads as absent.
+      - name: Require the merge queue to still be the only path to this branch
         env:
           GH_TOKEN: ${{ github.token }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          BASE_BRANCH: ${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}
         run: |
           set -euo pipefail
-          gh api "repos/${GITHUB_REPOSITORY}/rules/branches/${DEFAULT_BRANCH}" \
-            --jq '.[].type' >"${RUNNER_TEMP}/rules.txt"
-          DF_CHOKEPOINT_RULES="${RUNNER_TEMP}/rules.txt" \
-            ./scripts/verify-merge-queue-chokepoint.sh
+          rules="$(gh api "repos/${GITHUB_REPOSITORY}/rules/branches/${BASE_BRANCH}" --jq '
+            .[] | (("rule:" + .type),
+                   (if .type=="merge_queue"
+                    then "grouping:" + (.parameters.grouping_strategy // "none") else empty end),
+                   (if .type=="required_status_checks"
+                    then (.parameters.required_status_checks[]? | "context:" + .context) else empty end))')"
+          require() {
+            printf '%s\n' "$rules" | grep -qx "$1" || {
+              echo "chokepoint: '$1' is not active on ${BASE_BRANCH}" >&2
+              echo "  $2" >&2
+              echo "  Re-apply scripts/github-repo-settings.sh." >&2
+              exit 1
+            }
+          }
+          require rule:merge_queue \
+            'The review gate runs only on merge_group; without the queue it never runs.'
+          # ALLGREEN makes every entry's own group required. Under HEADGREEN the
+          # per-entry groups are still built but stop being required, so
+          # unreviewed entries ahead of the last would merge unchecked.
+          require grouping:ALLGREEN \
+            'Only the last entry of a group would be gated.'
+          require rule:required_status_checks \
+            'Nothing would require any check at all.'
+          require context:required \
+            'Nothing would require the aggregate the review gate reports through.'
 
-  # AGENTS.md rule 2 requires an adversarial review by an agent that did not
-  # write the change. GitHub cannot observe that, so the reviewer records its
-  # verdict through the maintainer App against the exact head it read, and this
-  # job reads it back. It judges whether a verdict exists and binds to this
-  # commit -- not whether the review was any good; see AGENTS.md rule 2 for
-  # what that does and does not establish.
   review:
     # The merge queue, and nowhere else.
     #
