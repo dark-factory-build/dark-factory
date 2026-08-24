@@ -227,11 +227,16 @@ resource labels, and independent cleanup verification. They never inspect or
 mutate the installed job or operator home and never send paid provider prompts
 unless the task explicitly requires live validation.
 
-A pull request can modify its own workflow, including `runs-on`. Maintainers
-must inspect `.github/workflows/` before approving external CI. A green check
-alone never authorizes merge: protected `main` also requires independent
-CODEOWNERS review and resolved threads. Persistent CI runner isolation remains
-a separate hardening concern.
+A pull request can modify its own workflow, including `runs-on`, and
+`.github/` is CODEOWNERS-owned, so that change stops for the owner, who must
+inspect it before approving. A green check alone never authorizes merge to
+protected `main`: every change needs the `required` aggregate in the merge
+queue -- which includes an adversarial-review verdict recorded at the exact
+head -- plus resolved threads, and a change touching the authority surface
+(`.github/`, the agent rule and boundary documents, the ruleset and
+review-gate scripts) additionally requires the owner's approval, re-earned
+after every push because stale reviews are dismissed. Persistent CI runner
+isolation remains a separate hardening concern.
 
 Every security-sensitive PR receives an adversarial review that explicitly
 tries stale credentials, cross-attempt identity, crash boundaries, resource
