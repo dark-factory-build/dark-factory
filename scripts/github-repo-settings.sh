@@ -112,10 +112,11 @@ apply_ruleset main-protect '{
 # true, which is not "no review". It moves the requirement from "every pull
 # request needs an approval" to "every pull request touching an owned path
 # needs the owner's approval", and `.github/CODEOWNERS` decides which paths
-# those are: everything executable, everything that gates or deploys, and
-# everything that defines authority. A documentation-only change merges on its
-# checks; a change under `crates/`, `control-plane/`, `.github/`, `scripts/`,
-# or to the agent rules still stops for a human.
+# those are: the authority surface only -- `.github/`, the agent rule and
+# boundary documents, and the four named scripts (this one among them) that
+# publish the ruleset, verify the review verdict, or causally test those two.
+# Everything else, executable or not, merges on the `required` aggregate,
+# whose `review` check demands an exact-head adversarial-review verdict.
 #
 # The reason to spend the count this way is that the owner is also the author
 # of most pull requests here, and GitHub never lets an author approve their

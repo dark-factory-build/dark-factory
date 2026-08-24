@@ -13,9 +13,11 @@
 # judge -- the ones that change what agents are *allowed* to do, including the
 # gates themselves.
 #
-# Measured before this change: six of six pull requests in one day touched an
-# owned path, so every one stopped for the owner. Under this file, one of those
-# six would.
+# Measured across the eleven pull requests merged on 2026-08-24 (UTC): under
+# the blanket approval count of 1 then in force, all eleven waited on the
+# owner. Under this file, four of the eleven would -- #321, #323, #345, #367 --
+# and each of those four changed CI, the agent rules, or an authority script
+# named below.
 #
 # Two properties make this safe, and both must hold. If either stops being
 # true, widen this file again:
@@ -45,3 +47,17 @@
 /CLAUDE.md              @baziyer
 /SECURITY.md            @baziyer
 /ARCHITECTURE.md        @baziyer
+
+# The authority boundary in executable form, owned by name. `scripts/` at
+# large is deliberately unowned -- it merges on the review verdict like the
+# rest of the tree -- but these four publish the ruleset, verify the recorded
+# verdict, or causally test those two, so a change to them changes what the
+# gate IS. ci.yml already names the hazard a weakening here would realize:
+# rule 2 silently unenforced with no red check anywhere. The publisher applies
+# itself the next time the operator runs it, and the queue runs the default
+# branch's copy of the verifier -- hoisting decides which copy runs, not who
+# may change it.
+/scripts/github-repo-settings.sh           @baziyer
+/scripts/test-repository-settings.sh       @baziyer
+/scripts/verify-adversarial-review.sh      @baziyer
+/scripts/test-verify-adversarial-review.sh @baziyer

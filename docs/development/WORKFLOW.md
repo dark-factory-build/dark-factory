@@ -184,9 +184,16 @@ linear, and force-push and deletion are still refused.
 
 Owner approval is scoped by path rather than demanded of every pull request.
 `main-review` sets `required_approving_review_count` to 0 and keeps
-`require_code_owner_review`, so `.github/CODEOWNERS` decides: a change under
-`crates/`, `control-plane/`, `.github/`, `scripts/`, or to the agent rules
-stops for the owner, and a documentation-only change merges on its checks.
+`require_code_owner_review`, so `.github/CODEOWNERS` decides. Owned paths are
+the authority surface: `.github/`, the agent rule and boundary documents
+(`AGENTS.md`, `CLAUDE.md`, `SECURITY.md`, `ARCHITECTURE.md`), and the four
+named scripts that publish the ruleset, verify the recorded review verdict,
+or causally test those two. A change touching any of them stops for one owner
+approval, re-earned after every push because stale reviews are dismissed.
+Everything else -- `crates/`, `control-plane/`, the rest of `scripts/`, and
+docs -- merges on the `required` aggregate in the queue, whose `review` check
+demands an adversarial-review verdict at the exact head, with no human
+approval at any point.
 
 That is not a relaxation of review so much as a repair of it. The owner
 authors most pull requests here and GitHub never lets an author approve their
