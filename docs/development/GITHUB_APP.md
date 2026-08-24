@@ -143,7 +143,8 @@ This maintainer revision may use Metadata read, Issues read/write, Contents
 read/write, Pull requests read/write, Checks read, and Merge queues write.
 Issues write exists only for the typed issue-creation operation: the surface
 exposes no issue-comment, issue-update, or issue-close operation. Pull requests
-write authorizes PR creation, update, and formal review; a PR review is not an
+write authorizes PR creation, update, formal review, and the exact-head
+enqueue, which mutates the pull request's queue state; a PR review is not an
 Issues API comment. Merge queues write authorizes only the typed exact-head
 enqueue and reconciliation operation. No Actions, Workflow, Release,
 Administration, Secrets, arbitrary status, direct-merge, dequeue, queue-jump,

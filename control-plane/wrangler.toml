@@ -7,6 +7,12 @@ preview_urls = false
 [build]
 command = "worker-build --release"
 
+# Workers Logs. Without this the console_error diagnostics the Worker already
+# emits -- the GraphQL error classes among them -- are discarded, so a typed
+# failure GitHub named was unreadable exactly when it was needed (#371).
+[observability]
+enabled = true
+
 [[durable_objects.bindings]]
 name = "DARK_FACTORY_MAINTAINER_DELIVERIES"
 class_name = "MaintainerDeliveryJournal"

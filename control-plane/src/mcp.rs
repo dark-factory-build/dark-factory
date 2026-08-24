@@ -261,7 +261,7 @@ fn tools() -> Value {
     }, {
         "name": "enqueue_pull_request",
         "title": "Add a pull request to its base branch's merge queue at an exact head",
-        "description": "Enqueue one pull request only while its head is still the stated commit and its base is still the stated branch. GitHub tests the entry against the queue's latest base and merges it; there is no direct-merge path. Refused when the branch has no merge queue or the queue rejects the entry, and the same operation UUID stays retryable. Replays require the same operation UUID and request.",
+        "description": "Enqueue one pull request only while its head is still the stated commit and its base is still the stated branch. GitHub tests the entry against the queue's latest base and merges it; there is no direct-merge path. A refusal names its typed reason -- the pre-execution rejection classes, a base branch with no merge queue, or an answer with no effect -- and the same operation UUID stays retryable. Replays require the same operation UUID and request.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -408,10 +408,13 @@ fn operation_error(id: Value, error: OperationError) -> Response {
             "conflict",
             "The exact-head or operation binding changed.",
         ),
-        OperationError::Refused => tool_error(
+        OperationError::Refused(reason) => tool_error(
             id,
             "refused",
-            "GitHub refused the operation and nothing changed; retry when its precondition holds.",
+            &format!(
+                "GitHub refused the operation and nothing changed ({reason}); \
+                 retry when its precondition holds."
+            ),
         ),
         OperationError::Indeterminate => tool_error(
             id,
@@ -424,7 +427,7 @@ fn operation_error(id: Value, error: OperationError) -> Response {
     }
 }
 
-fn tool_error(id: Value, code: &'static str, message: &'static str) -> Response {
+fn tool_error(id: Value, code: &'static str, message: &str) -> Response {
     json_rpc_result(
         id,
         json!({
