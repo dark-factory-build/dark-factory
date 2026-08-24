@@ -17,8 +17,15 @@ grep -Fq '    needs: [checks, linux, control-plane, review]' "$workflow"
 # free-floating `grep` is satisfied by the string appearing in a comment, so it
 # passes while the step's real `if:` has been changed to `false` -- a gate that
 # is present, correctly named, body intact, and never fires.
+# Bounded to the `required` job, not just to the step name. Unbounded, a decoy
+# step carrying this exact name in a job that never runs satisfies both
+# extractions while the real gate is neutered -- or deleted outright, which a
+# uniqueness check would not catch either, since then the decoy is the only
+# match.
 verdict_if=$(awk '
-    /^      - name: Require a recorded adversarial review verdict$/ { step = 1; next }
+    /^  required:$/ { job = 1; next }
+    job && /^  [a-z]/ { exit }
+    job && /^      - name: Require a recorded adversarial review verdict$/ { step = 1; next }
     step && /^      - name: / { exit }
     step && /^        if: / { sub(/^        if: /, ""); print; exit }
 ' "$workflow")
@@ -37,7 +44,9 @@ fi
 # Either leaves a gate that runs, prints its diagnostic, and passes. So the
 # step body is extracted and checked for the exit that makes it a gate.
 verdict_step=$(awk '
-    /^      - name: Require a recorded adversarial review verdict$/ { step = 1; next }
+    /^  required:$/ { job = 1; next }
+    job && /^  [a-z]/ { exit }
+    job && /^      - name: Require a recorded adversarial review verdict$/ { step = 1; next }
     # Bounded to this step. Without this, a step whose `run:` is not a block
     # scalar leaves the scan running until the NEXT step`s `run: |` and
     # asserts against that body instead -- which passes, because the step

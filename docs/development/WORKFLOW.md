@@ -231,11 +231,14 @@ branch's copy of a script that would not have existed there yet. The same
 ordering applied to the control plane — until `ALLOW` was deployed, requiring a
 verdict would have demanded something nothing could produce.
 
-`scripts/test-repository-settings.sh` pins both arms of the condition **and**
-extracts the step body to confirm it still fails the job. Pinning the strings
-alone is not enough: the condition can be present and correct while the step it
-guards has been changed to `exit 0`, or deleted with the `if:` left behind in a
-comment — either leaving a gate that runs, prints its diagnostic, and passes.
+`scripts/test-repository-settings.sh` extracts both the step's condition and
+its body from the `required` job and checks them, rather than grepping the file
+for the strings. Grepping is not enough, and each weaker form was defeated by a
+mutation rather than by argument: a pinned string is satisfied by a comment
+above a step whose real `if:` is `false`; a substring test for `exit 1` is
+satisfied by `# exit 1`; an extraction bounded only by the step name reads a
+decoy step of the same name in a job that never runs. Every one leaves a gate
+that runs, prints its diagnostic, and passes.
 
 The `merge_queue` rule is therefore a single chokepoint, and the `required` job
 asserts it on every run against the **live** rules — not against
