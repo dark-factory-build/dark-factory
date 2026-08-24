@@ -48,9 +48,10 @@ try gh repo edit "$repository" --enable-squash-merge --enable-rebase-merge \
 # unconditional; "main-review" carries the pull-request rule with a
 # Repository-admin (id 5) bypass in pull-request mode, since GitHub never
 # lets an author approve their own PR and this repository has one
-# maintainer. Everyone else needs the PR, the CODEOWNERS approval, resolved
-# threads, and a green `required` aggregate from GitHub Actions (integration 15368)
-# against a head that is up to date with main. Nobody pushes to main.
+# maintainer. Everyone else needs the PR, an owner approval on any owned path,
+# resolved threads, and a green `required` aggregate from GitHub Actions
+# (integration 15368). Currency is the merge queue's job, not a strict
+# up-to-date check. Nobody pushes to main.
 apply_ruleset() {
     printf '%s' "$2" > "$tmp"
     existing=$(gh api "repos/$repository/rulesets" --jq ".[] | select(.name==\"$1\") | .id" 2>/dev/null | head -1)
@@ -107,7 +108,21 @@ apply_ruleset main-protect '{
   ]
 }'
 
-step "ruleset: main-review (pull request + CODEOWNERS approval; admin may bypass via a PR)"
+# `required_approving_review_count` is 0 and `require_code_owner_review` is
+# true, which is not "no review". It moves the requirement from "every pull
+# request needs an approval" to "every pull request touching an owned path
+# needs the owner's approval", and `.github/CODEOWNERS` decides which paths
+# those are: everything executable, everything that gates or deploys, and
+# everything that defines authority. A documentation-only change merges on its
+# checks; a change under `crates/`, `control-plane/`, `.github/`, `scripts/`,
+# or to the agent rules still stops for a human.
+#
+# The reason to spend the count this way is that the owner is also the author
+# of most pull requests here, and GitHub never lets an author approve their
+# own. A blanket count of 1 therefore made every owner-authored change merge
+# by admin bypass — a gate satisfied by circumventing it rather than by
+# meeting it. Scoping by path means the approvals that do happen are real.
+step "ruleset: main-review (owner approval on owned paths; admin may bypass via a PR)"
 apply_ruleset main-review '{
   "name": "main-review",
   "target": "branch",
@@ -118,7 +133,7 @@ apply_ruleset main-review '{
   "conditions": { "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] } },
   "rules": [
     { "type": "pull_request", "parameters": {
-        "required_approving_review_count": 1,
+        "required_approving_review_count": 0,
         "dismiss_stale_reviews_on_push": true,
         "require_code_owner_review": true,
         "require_last_push_approval": false,

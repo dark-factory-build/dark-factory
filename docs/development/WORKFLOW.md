@@ -177,12 +177,27 @@ This replaces "require branches to be up to date before merging", which is now
 off. That setting guaranteed the same property by forcing every open branch to
 be rebased and fully re-tested after each merge, which serialises a queue of
 `n` branches into `n` CI runs and dismisses each approval on the way. The queue
-establishes the same thing once. Nothing else is relaxed: `required` still
-gates, history is still linear, force-push and deletion are still refused, and
-CODEOWNERS approval is still required.
+establishes the same thing once. `required` still gates, history is still
+linear, and force-push and deletion are still refused.
+
+Owner approval is scoped by path rather than demanded of every pull request.
+`main-review` sets `required_approving_review_count` to 0 and keeps
+`require_code_owner_review`, so `.github/CODEOWNERS` decides: a change under
+`crates/`, `control-plane/`, `.github/`, `scripts/`, or to the agent rules
+stops for the owner, and a documentation-only change merges on its checks.
+
+That is not a relaxation of review so much as a repair of it. The owner
+authors most pull requests here and GitHub never lets an author approve their
+own, so a blanket count of 1 meant every owner-authored change merged by admin
+bypass — the gate satisfied by circumventing it rather than by meeting it.
+Scoping by path means the approvals that do happen are real ones. It does not
+replace rule 2's adversarial review, which is a process requirement GitHub
+cannot observe.
 Review the exact `.github/workflows/` diff before approving an external run: a
-PR evaluates its own workflow and can change `runs-on`. A green workflow never
-replaces CODEOWNERS approval and resolved review threads.
+PR evaluates its own workflow and can change `runs-on`. `.github/` is an owned
+path in CODEOWNERS for exactly this reason, and the maintainer App refuses to
+publish under `.github/workflows/` at all. A green workflow never replaces
+review and resolved review threads.
 
 Agent automation must use an explicitly authorized credential broker or
 App-backed tool surface supplied by its host for every authenticated remote
