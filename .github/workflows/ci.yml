@@ -164,14 +164,21 @@ jobs:
           BASE_BRANCH: ${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}
         run: |
           set -euo pipefail
-          rules="$(gh api "repos/${GITHUB_REPOSITORY}/rules/branches/${BASE_BRANCH}" --jq '
+          # Written to a file, not piped. `grep -q` exits on its first match
+          # and closes the pipe; with `pipefail` a still-writing `printf` then
+          # makes the pipeline 141 (SIGPIPE), and a rule that IS active reads
+          # as absent. Latent here -- the projection is ~163 bytes against a
+          # 64KB pipe buffer -- but it grows with required contexts and the
+          # failure is silent and confusing when it arrives.
+          gh api "repos/${GITHUB_REPOSITORY}/rules/branches/${BASE_BRANCH}" --jq '
             .[] | (("rule:" + .type),
                    (if .type=="merge_queue"
                     then "grouping:" + (.parameters.grouping_strategy // "none") else empty end),
                    (if .type=="required_status_checks"
-                    then (.parameters.required_status_checks[]? | "context:" + .context) else empty end))')"
+                    then (.parameters.required_status_checks[]? | "context:" + .context) else empty end))' \
+            >"${RUNNER_TEMP}/ruleset-facts.txt"
           require() {
-            printf '%s\n' "$rules" | grep -qx "$1" || {
+            grep -qx "$1" "${RUNNER_TEMP}/ruleset-facts.txt" || {
               echo "chokepoint: '$1' is not active on ${BASE_BRANCH}" >&2
               echo "  $2" >&2
               echo "  Re-apply scripts/github-repo-settings.sh." >&2

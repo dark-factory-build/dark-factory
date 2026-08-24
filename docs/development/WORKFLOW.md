@@ -231,13 +231,37 @@ on the pull request at all, so nothing reports that rule 2 is unenforced. What
 keeps the window closed meanwhile is that `main-protect` still requires the
 queue, and `required` in the queue still runs everything else.
 
-The `merge_queue` rule is therefore a single chokepoint, and
-`scripts/verify-merge-queue-chokepoint.sh` asserts it on every run against the
-**live** rules — not against `scripts/github-repo-settings.sh`, which records
-what an operator intended to apply rather than what is applied. If the rule
-lapses, `merge_group` stops firing, the review gate never runs on any event,
+The `merge_queue` rule is therefore a single chokepoint, and the `required` job
+asserts it on every run against the **live** rules — not against
+`scripts/github-repo-settings.sh`, which records what an operator intended to
+apply rather than what is applied, and has already drifted from it once. Four
+facts are required: the `merge_queue` rule, its `ALLGREEN` grouping, the
+`required_status_checks` rule, and the `required` context within it. If any
+lapses, `merge_group` stops firing or stops gating, the review gate never runs,
 and `required` would otherwise stay green while rule 2 quietly stopped being
-enforced.
+enforced. Rulesets in `evaluate` or `disabled` enforcement are not returned by
+that endpoint, so a ruleset downgraded out of enforcement reads as absent —
+which is the answer we want.
+
+That assertion is written **inline** in `.github/workflows/ci.yml` rather than
+in a script under `scripts/`, and it is the one place in this repository where
+inline is the safer arrangement. A helper under `scripts/` is publishable by
+the maintainer App, so it would be the weaker-protected file guarding the
+stronger-protected one — the exact reason `verify-adversarial-review.sh` is
+hoisted to the default branch instead. Hoisting cannot work here: a
+default-branch copy does not exist until the change has already merged, and
+this assertion has to hold from its first run.
+
+`scripts/test-inline-chokepoint.sh` extracts that step's script from `ci.yml`
+verbatim and runs it against fixtures with a stubbed `gh`, so the shipped
+assertion is exercised byte-for-byte rather than a copy that could diverge from
+it. The test itself is App-publishable and that is fine: neutering it weakens
+only the test, never the assertion, which sits where the App cannot write.
+
+One cost is worth naming. `required` — the single required context — now
+depends on a live GitHub API call on every event, so a rules-API outage turns
+every merge red. That is the correct direction to fail, but it is new
+availability coupling on the one context the ruleset requires.
 
 What the check does **not** do is judge the review. A reviewer that records an
 `ALLOW` without reading anything produces a green check, and the reviewing and
