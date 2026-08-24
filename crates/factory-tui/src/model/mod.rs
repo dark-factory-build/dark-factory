@@ -669,7 +669,6 @@ impl Board {
             FactoryEvent::RunChanged { run } => {
                 self.invalidate_attention(|item| item.run_id.as_ref() == Some(&run.id));
             }
-            FactoryEvent::LegacyRunChanged { .. } | FactoryEvent::LegacySessionChanged { .. } => {}
             FactoryEvent::TaskDeleted { task_id, .. } => {
                 self.invalidate_attention(|item| item.task_id.as_ref() == Some(task_id));
             }
@@ -680,21 +679,17 @@ impl Board {
                 self.invalidate_attention(|item| &item.project_id == project_id);
             }
             FactoryEvent::DispatchPolicyChanged { .. }
-            | FactoryEvent::LegacyAutoModeChanged { .. }
             | FactoryEvent::PolicyDecision { .. }
-            | FactoryEvent::LegacyRepositoryOperation { .. }
-            | FactoryEvent::LegacyRepositoryAuthorityChanged { .. }
             | FactoryEvent::ChangeChanged { .. }
             | FactoryEvent::InputReceived { .. }
             | FactoryEvent::WorkCandidateStatusChanged { .. }
             | FactoryEvent::LegacySourceForgotten { .. }
+            | FactoryEvent::HistoricalEvent
             | FactoryEvent::ProjectChanged { .. } => {}
         }
 
         match event.event {
-            FactoryEvent::DispatchPolicyChanged { .. }
-            | FactoryEvent::LegacyAutoModeChanged { .. }
-            | FactoryEvent::PolicyDecision { .. } => {}
+            FactoryEvent::DispatchPolicyChanged { .. } | FactoryEvent::PolicyDecision { .. } => {}
             FactoryEvent::AgentBudgetChanged {
                 agent_id, paused, ..
             } => {
@@ -702,14 +697,11 @@ impl Board {
                     agent.paused = paused;
                 }
             }
-            FactoryEvent::LegacyRepositoryOperation { .. }
-            | FactoryEvent::LegacyRepositoryAuthorityChanged { .. }
-            | FactoryEvent::ChangeChanged { .. }
+            FactoryEvent::ChangeChanged { .. }
             | FactoryEvent::InputReceived { .. }
             | FactoryEvent::WorkCandidateStatusChanged { .. }
             | FactoryEvent::LegacySourceForgotten { .. }
-            | FactoryEvent::LegacyRunChanged { .. }
-            | FactoryEvent::LegacySessionChanged { .. } => {}
+            | FactoryEvent::HistoricalEvent => {}
             FactoryEvent::ProjectChanged { project } => {
                 if let Some(existing) = self.projects.iter_mut().find(|p| p.id == project.id) {
                     *existing = project;
@@ -997,9 +989,6 @@ impl Board {
                     created_at_ms: Some(agent.created_at_ms),
                 },
             )),
-            FactoryEvent::LegacySessionChanged { .. } | FactoryEvent::LegacyRunChanged { .. } => {
-                None
-            }
             FactoryEvent::PolicyDecision {
                 project_id,
                 agent_id,
@@ -1014,14 +1003,12 @@ impl Board {
                 self.activity_identity(agent_id, project_id),
             )),
             FactoryEvent::AgentDeleted { .. }
-            | FactoryEvent::LegacyRepositoryOperation { .. }
-            | FactoryEvent::LegacyRepositoryAuthorityChanged { .. }
             | FactoryEvent::ChangeChanged { .. }
             | FactoryEvent::InputReceived { .. }
             | FactoryEvent::WorkCandidateStatusChanged { .. }
             | FactoryEvent::LegacySourceForgotten { .. }
             | FactoryEvent::DispatchPolicyChanged { .. }
-            | FactoryEvent::LegacyAutoModeChanged { .. }
+            | FactoryEvent::HistoricalEvent
             | FactoryEvent::TaskDeleted { .. }
             | FactoryEvent::ProjectChanged { .. }
             | FactoryEvent::ProjectDeleted { .. } => None,

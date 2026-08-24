@@ -87,9 +87,6 @@ pub fn format_event(event: &EventEnvelope) -> Option<Announcement> {
             );
             (text, run_attention(run))
         }
-        FactoryEvent::LegacySessionChanged { .. } | FactoryEvent::LegacyRunChanged { .. } => {
-            return None;
-        }
         FactoryEvent::AgentChanged { agent } => {
             let text = format!(
                 "{time} {:<10} agent updated",
@@ -135,11 +132,9 @@ pub fn format_event(event: &EventEnvelope) -> Option<Announcement> {
             Attention::NeedsInput,
         ),
         FactoryEvent::DispatchPolicyChanged { .. }
-        | FactoryEvent::LegacyAutoModeChanged { .. }
         | FactoryEvent::PolicyDecision { .. }
         | FactoryEvent::AgentBudgetChanged { .. }
-        | FactoryEvent::LegacyRepositoryOperation { .. }
-        | FactoryEvent::LegacyRepositoryAuthorityChanged { .. }
+        | FactoryEvent::HistoricalEvent
         | FactoryEvent::ChangeChanged { .. }
         | FactoryEvent::InputReceived { .. }
         | FactoryEvent::WorkCandidateStatusChanged { .. }

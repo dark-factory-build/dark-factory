@@ -1,9 +1,9 @@
 use std::path::Path;
 
 use factory_core::{
-    AgentId, AgentRole, ChangeId, ChangePhase, EventEnvelope, ExecutionMode, FactoryEvent,
-    MessageId, PROTOCOL_VERSION, ProjectId, Provider, RunFailureReason, RunId, RunOutcome,
-    RunPhase, RunSnapshot, RunnerInstanceId, TaskId, local::MAX_PROVIDER_TOOL_NAME_BYTES,
+    AgentId, AgentRole, ChangeId, ChangePhase, DURABLE_EVENT_VERSION, EventEnvelope, ExecutionMode,
+    FactoryEvent, MessageId, ProjectId, Provider, RunFailureReason, RunId, RunOutcome, RunPhase,
+    RunSnapshot, RunnerInstanceId, TaskId, local::MAX_PROVIDER_TOOL_NAME_BYTES,
     runner::RUNNER_STARTUP_LEASE_FILE,
 };
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
@@ -481,14 +481,14 @@ impl Store {
         let mut events = Vec::with_capacity(4);
         events.extend(change_event);
         events.push(EventEnvelope {
-            protocol_version: factory_core::PROTOCOL_VERSION,
+            protocol_version: factory_core::DURABLE_EVENT_VERSION,
             sequence: task_sequence,
             occurred_at_ms: now_ms,
             event: task_event,
         });
         events.push(agent_event);
         events.push(EventEnvelope {
-            protocol_version: factory_core::PROTOCOL_VERSION,
+            protocol_version: factory_core::DURABLE_EVENT_VERSION,
             sequence: run_sequence,
             occurred_at_ms: now_ms,
             event: run_event_value,
@@ -600,7 +600,7 @@ impl Store {
         Ok((
             run,
             vec![EventEnvelope {
-                protocol_version: factory_core::PROTOCOL_VERSION,
+                protocol_version: factory_core::DURABLE_EVENT_VERSION,
                 sequence,
                 occurred_at_ms: now_ms,
                 event,
@@ -814,13 +814,13 @@ impl Store {
             verdict,
             events: vec![
                 EventEnvelope {
-                    protocol_version: PROTOCOL_VERSION,
+                    protocol_version: DURABLE_EVENT_VERSION,
                     sequence: budget_sequence,
                     occurred_at_ms: now_ms,
                     event: budget_event,
                 },
                 EventEnvelope {
-                    protocol_version: PROTOCOL_VERSION,
+                    protocol_version: DURABLE_EVENT_VERSION,
                     sequence: policy_sequence,
                     occurred_at_ms: now_ms,
                     event: policy_event,
@@ -915,7 +915,7 @@ impl Store {
         Ok((
             task,
             EventEnvelope {
-                protocol_version: factory_core::PROTOCOL_VERSION,
+                protocol_version: factory_core::DURABLE_EVENT_VERSION,
                 sequence,
                 occurred_at_ms: now_ms,
                 event,
@@ -959,7 +959,7 @@ impl Store {
         Ok((
             task,
             EventEnvelope {
-                protocol_version: factory_core::PROTOCOL_VERSION,
+                protocol_version: factory_core::DURABLE_EVENT_VERSION,
                 sequence,
                 occurred_at_ms: now_ms,
                 event,
@@ -1028,7 +1028,7 @@ impl Store {
         Ok((
             run,
             vec![EventEnvelope {
-                protocol_version: factory_core::PROTOCOL_VERSION,
+                protocol_version: factory_core::DURABLE_EVENT_VERSION,
                 sequence,
                 occurred_at_ms: now_ms,
                 event,
@@ -1109,7 +1109,7 @@ impl Store {
         Ok((
             run,
             vec![EventEnvelope {
-                protocol_version: factory_core::PROTOCOL_VERSION,
+                protocol_version: factory_core::DURABLE_EVENT_VERSION,
                 sequence,
                 occurred_at_ms: now_ms,
                 event,
@@ -1163,7 +1163,7 @@ impl Store {
         Ok((
             run,
             vec![EventEnvelope {
-                protocol_version: factory_core::PROTOCOL_VERSION,
+                protocol_version: factory_core::DURABLE_EVENT_VERSION,
                 sequence,
                 occurred_at_ms: now_ms,
                 event,
@@ -1252,7 +1252,7 @@ impl Store {
         Ok((
             run,
             vec![EventEnvelope {
-                protocol_version: factory_core::PROTOCOL_VERSION,
+                protocol_version: factory_core::DURABLE_EVENT_VERSION,
                 sequence,
                 occurred_at_ms: now_ms,
                 event,
@@ -1579,14 +1579,14 @@ impl Store {
         }
         events.extend([
             EventEnvelope {
-                protocol_version: factory_core::PROTOCOL_VERSION,
+                protocol_version: factory_core::DURABLE_EVENT_VERSION,
                 sequence: task_sequence,
                 occurred_at_ms: now_ms,
                 event: task_event,
             },
             agent_event,
             EventEnvelope {
-                protocol_version: factory_core::PROTOCOL_VERSION,
+                protocol_version: factory_core::DURABLE_EVENT_VERSION,
                 sequence: run_sequence,
                 occurred_at_ms: now_ms,
                 event: run_event,

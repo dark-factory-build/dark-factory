@@ -31,7 +31,7 @@ fn run_id(value: &str) -> RunId {
 
 #[test]
 fn request_envelope_has_a_stable_tagged_shape() {
-    assert_eq!(PROTOCOL_VERSION, 7);
+    assert_eq!(PROTOCOL_VERSION, 8);
     let request = RequestEnvelope {
         protocol_version: PROTOCOL_VERSION,
         credential: None,
@@ -310,7 +310,7 @@ fn unknown_execution_modes_fail_closed_on_the_wire() {
 
 #[test]
 fn server_frames_version_responses_and_events_at_the_outer_boundary() {
-    assert_eq!(PROTOCOL_VERSION, 7);
+    assert_eq!(PROTOCOL_VERSION, 8);
     let frame = ServerFrame::Response {
         protocol_version: PROTOCOL_VERSION,
         response: LocalResponse::Projects {

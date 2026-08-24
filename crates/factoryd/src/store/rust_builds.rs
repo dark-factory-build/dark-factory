@@ -1,5 +1,5 @@
 use factory_core::{
-    CompletionVerification, EventEnvelope, FactoryEvent, PROTOCOL_VERSION, ProjectId,
+    CompletionVerification, DURABLE_EVENT_VERSION, EventEnvelope, FactoryEvent, ProjectId,
     ProjectSnapshot, RunId, RunOutcome,
 };
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
@@ -158,7 +158,7 @@ impl Store {
         Ok((
             project,
             EventEnvelope {
-                protocol_version: PROTOCOL_VERSION,
+                protocol_version: DURABLE_EVENT_VERSION,
                 sequence,
                 occurred_at_ms: now_ms,
                 event,

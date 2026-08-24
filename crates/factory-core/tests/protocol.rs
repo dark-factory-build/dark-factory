@@ -1,6 +1,7 @@
 use factory_core::{
-    AgentId, EventEnvelope, FactoryEvent, ObserverHealth, PROTOCOL_VERSION, ProjectId, Provider,
-    RunFailureReason, RunId, RunOutcome, RunPhase, RunSnapshot, TaskId, TaskStatus,
+    AgentId, DURABLE_EVENT_VERSION, EventEnvelope, FactoryEvent, ObserverHealth, PROTOCOL_VERSION,
+    ProjectId, Provider, RunFailureReason, RunId, RunOutcome, RunPhase, RunSnapshot, TaskId,
+    TaskStatus,
 };
 
 fn id<T>(value: &str) -> T
@@ -13,7 +14,7 @@ where
 
 #[test]
 fn run_phases_have_stable_wire_names_and_only_running_grants_authority() {
-    assert_eq!(PROTOCOL_VERSION, 7);
+    assert_eq!(PROTOCOL_VERSION, 8);
     let cases = [
         (RunPhase::Admitted, "admitted"),
         (RunPhase::Running, "running"),
@@ -27,23 +28,12 @@ fn run_phases_have_stable_wire_names_and_only_running_grants_authority() {
 }
 
 #[test]
-fn legacy_repository_audit_events_remain_decodable() {
-    let value = serde_json::json!({
-        "type": "repository_operation",
-        "data": {
-            "project_id": "project-1",
-            "agent_id": "worker-1",
-            "run_id": "run-1",
-            "operation": "git_push",
-            "phase": "finished",
-            "success": true,
-            "reference": "deadbeef"
-        }
-    });
-    assert!(matches!(
-        serde_json::from_value::<FactoryEvent>(value).unwrap(),
-        FactoryEvent::LegacyRepositoryOperation { .. }
-    ));
+fn the_durable_event_version_moves_independently_of_the_local_protocol() {
+    // Event rows are never rewritten, so the version they carry may only
+    // advance when a stored payload's shape changes. A local API bump - like
+    // the one that carried this very test - must leave it where it is.
+    assert_eq!(DURABLE_EVENT_VERSION, 7);
+    assert_ne!(DURABLE_EVENT_VERSION, PROTOCOL_VERSION);
 }
 
 #[test]
