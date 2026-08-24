@@ -69,8 +69,10 @@ needs `CARGO` to name a real toolchain directory holding both `cargo` and
 `rustc` — `cargo +<version> test` provides that — and it needs the workspace
 binaries, so run it as part of the whole-workspace gate rather than with
 `-p factoryd` alone. Everything it compiles lives under its own temporary
-root. It costs roughly forty seconds, most of it waiting on the daemon's own
-reconcile interval rather than on Cargo.
+root. It costs roughly twenty seconds: the daemon wakes its Rust maintenance
+queue at the transitions it observes rather than only on the reconcile tick,
+so what is left is Cargo plus that interval's bounded polling for exact
+process absence.
 
 ## Isolated daemon checks
 

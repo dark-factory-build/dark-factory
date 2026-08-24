@@ -379,9 +379,8 @@ async fn run_manager(
     reconcile_runs(&state, &commands, &mut observed).await?;
     schedule_recoverable_changes(&state, &mut change_finalizer).await;
     change_finalizer.start_next(Arc::clone(&config), state.clone());
-    schedule_recoverable_rust_checks(&state, &mut rust_maintenance).await;
     rust_maintenance.schedule_storage();
-    rust_maintenance.start_next(Arc::clone(&config), state.clone());
+    wake_rust_maintenance(&config, &state, &commands, &mut rust_maintenance).await;
     let mut tick = tokio::time::interval(RECONCILE_INTERVAL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -408,6 +407,7 @@ async fn run_manager(
                         ).await {
                             tracing::warn!(%error, "attempt reconciliation paused");
                         }
+                        wake_rust_maintenance(&config, &state, &commands, &mut rust_maintenance).await;
                     }
                     Command::ReconcileChange { project_id, change_id } => {
                         change_finalizer.schedule(project_id, change_id);
@@ -415,6 +415,7 @@ async fn run_manager(
                     }
                     Command::ObserverFinished(run_id) => {
                         observed.remove(&run_id);
+                        wake_rust_maintenance(&config, &state, &commands, &mut rust_maintenance).await;
                     }
                 }
             }
@@ -424,15 +425,16 @@ async fn run_manager(
             }
             completed = rust_maintenance.join_next(), if rust_maintenance.is_active() => {
                 rust_maintenance.finish(completed);
-                rust_maintenance.start_next(Arc::clone(&config), state.clone());
+                rust_maintenance.start_next(
+                    Arc::clone(&config), state.clone(), commands.clone(),
+                );
             }
             _ = tick.tick() => {
                 reconcile_runs(&state, &commands, &mut observed).await?;
                 schedule_recoverable_changes(&state, &mut change_finalizer).await;
                 change_finalizer.start_next(Arc::clone(&config), state.clone());
-                schedule_recoverable_rust_checks(&state, &mut rust_maintenance).await;
                 rust_maintenance.schedule_storage();
-                rust_maintenance.start_next(Arc::clone(&config), state.clone());
+                wake_rust_maintenance(&config, &state, &commands, &mut rust_maintenance).await;
                 if let Err(error) = reconcile_agents(
                     Arc::clone(&config), state.clone(), commands.clone(),
                     &mut observed, Arc::clone(&agent_gate),
@@ -442,6 +444,24 @@ async fn run_manager(
             }
         }
     }
+}
+
+/// Rescans the durable check queue and starts whatever is now runnable.
+///
+/// Called at the transitions this manager observes, so a completion does not
+/// sleep on the reconcile interval. Nothing is signalled and nothing can be
+/// lost: SQLite is the queue, this rescan reads it from the one task that owns
+/// [`RustMaintenance`], and a rescan that lands before the transition it was
+/// meant to see is simply repeated by the tick, which remains the backstop for
+/// every transition no wake site covers.
+async fn wake_rust_maintenance(
+    config: &Arc<Config>,
+    state: &DaemonState,
+    commands: &mpsc::Sender<Command>,
+    maintenance: &mut RustMaintenance,
+) {
+    schedule_recoverable_rust_checks(state, maintenance).await;
+    maintenance.start_next(Arc::clone(config), state.clone(), commands.clone());
 }
 
 /// Runs one verifier or cache-maintenance step at a time without blocking
@@ -480,7 +500,12 @@ impl RustMaintenance {
         self.storage_pending = true;
     }
 
-    fn start_next(&mut self, config: Arc<Config>, state: DaemonState) {
+    fn start_next(
+        &mut self,
+        config: Arc<Config>,
+        state: DaemonState,
+        commands: mpsc::Sender<Command>,
+    ) {
         if self.active.is_some() {
             return;
         }
@@ -490,8 +515,9 @@ impl RustMaintenance {
         match &work {
             RustMaintenanceWork::Completion(run_id) => {
                 let run_id = run_id.clone();
-                self.tasks
-                    .spawn(async move { reconcile_rust_completion(&config, &state, run_id).await });
+                self.tasks.spawn(async move {
+                    reconcile_rust_completion(&config, &state, &commands, run_id).await
+                });
             }
             RustMaintenanceWork::Storage => {
                 self.tasks
@@ -1340,6 +1366,7 @@ async fn schedule_recoverable_rust_checks(state: &DaemonState, finalizer: &mut R
 async fn reconcile_rust_completion(
     config: &Config,
     state: &DaemonState,
+    commands: &mpsc::Sender<Command>,
     run_id: RunId,
 ) -> Result<(), Error> {
     let lookup_run = run_id.clone();
@@ -1365,11 +1392,21 @@ async fn reconcile_rust_completion(
     match check.phase {
         RustCompletionPhase::Pending => {
             let change = load_available_completion_change(state, &check).await?;
-            start_rust_completion(config, state, check, change).await
+            start_rust_completion(config, state, check, change).await?;
         }
-        RustCompletionPhase::Running => recover_rust_completion(config, state, check).await,
-        RustCompletionPhase::Passed | RustCompletionPhase::Failed => Ok(()),
+        RustCompletionPhase::Running => recover_rust_completion(config, state, check).await?,
+        RustCompletionPhase::Passed | RustCompletionPhase::Failed => return Ok(()),
     }
+    // This step is what terminalization was waiting on, so hand the run back to
+    // the manager the way an observer does rather than leaving it to the tick.
+    // A step that found nothing to do has already returned above.
+    let _ = commands
+        .send(Command::ReconcileRun {
+            run_id,
+            grace_ms: DEFAULT_FINALIZE_GRACE_MS,
+        })
+        .await;
+    Ok(())
 }
 
 async fn load_available_completion_change(
