@@ -24,13 +24,16 @@ grep -Fq '    needs: [checks, linux, control-plane, review]' "$workflow"
 # match.
 verdict_if=$(awk '
     /^  required:$/ { job = 1; next }
-    # The scan ends at the next job key. A job id may start with a letter of
-    # either case or `_`, so the bound is "any two-space-indented line that is
-    # not a comment": `[a-z]` let a `_shim` or `Zshim` decoy job sit past the
-    # bound. `#` is excluded because a two-space comment line -- a style this
-    # file already uses above `jobs:` -- is not a key, and a bound stopping on
-    # one would fail this test the day a comment lands between the job key and
-    # the step it scans for.
+    # The scan ends at the next two-space-indented line that is not a
+    # comment. Every job key is such a line -- a job id may start with a
+    # letter of either case or `_`, so the old `[a-z]` bound let a `_shim`
+    # or `Zshim` decoy job sit past it -- and so, in principle, are exotic
+    # legal continuations, which would stop the scan early: a spurious red,
+    # never a silent pass. `#` is excluded because a comment line is never a
+    # job key, and this file writes two-space comment blocks directly above
+    # job keys (one sits right above `required:` itself), so one drifting
+    # into the scanned window would otherwise red this test for no reason.
+    # None is inside the window at this commit.
     job && /^  [^ #]/ { exit }
     job && /^      - name: Require a recorded adversarial review verdict$/ { step = 1; next }
     step && /^      - name: / { exit }
@@ -52,13 +55,7 @@ fi
 # step body is extracted and checked for the exit that makes it a gate.
 verdict_step=$(awk '
     /^  required:$/ { job = 1; next }
-    # The scan ends at the next job key. A job id may start with a letter of
-    # either case or `_`, so the bound is "any two-space-indented line that is
-    # not a comment": `[a-z]` let a `_shim` or `Zshim` decoy job sit past the
-    # bound. `#` is excluded because a two-space comment line -- a style this
-    # file already uses above `jobs:` -- is not a key, and a bound stopping on
-    # one would fail this test the day a comment lands between the job key and
-    # the step it scans for.
+    # Same job-key bound as the first extraction above.
     job && /^  [^ #]/ { exit }
     job && /^      - name: Require a recorded adversarial review verdict$/ { step = 1; next }
     # Bounded to this step. Without this, a step whose `run:` is not a block
