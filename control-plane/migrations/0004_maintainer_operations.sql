@@ -8,8 +8,15 @@ CREATE TABLE IF NOT EXISTS maintainer_operations (
         AND length(replace(operation_id, '-', '')) = 32
         AND replace(operation_id, '-', '') NOT GLOB '*[^0-9a-f]*'
     ),
+    -- Constrained by shape, not by enumeration. An enumerated `kind` made
+    -- every new typed operation need its own migration -- 0003 existed only
+    -- to widen this list, and 0004 only to widen it again -- while providing
+    -- no safety: `kind` is a compile-time constant at each call site and is
+    -- never caller-supplied. What is worth enforcing is that it stays a short
+    -- identifier, so a malformed one cannot be written.
     kind TEXT NOT NULL CHECK (
-        kind IN ('create_pull_request', 'submit_pull_request_review')
+        length(kind) BETWEEN 1 AND 64
+        AND kind NOT GLOB '*[^a-z_]*'
     ),
     request_digest TEXT NOT NULL CHECK (
         length(request_digest) = 64

@@ -10,7 +10,7 @@ use crate::{
     BrokerState,
     access::AccessAuthority,
     github_app::{
-        AppAuthority, CreatePullRequest, MergePullRequest, ObservePullRequestChecks,
+        AppAuthority, CreatePullRequest, EnqueuePullRequest, ObservePullRequestChecks,
         OperationError, PublishCommit, SubmitPullRequestReview,
     },
     journal::DeliveryJournal,
@@ -258,29 +258,29 @@ fn tools() -> Value {
         },
         "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true}
     }, {
-        "name": "merge_pull_request_at_head",
-        "title": "Merge a pull request at an exact head",
-        "description": "Merge one pull request only while its head is still the stated commit. GitHub refuses the merge if the head moved or a required check has not passed. Replays require the same operation UUID and request.",
+        "name": "enqueue_pull_request",
+        "title": "Add a pull request to its base branch's merge queue at an exact head",
+        "description": "Enqueue one pull request only while its head is still the stated commit and its base is still the stated branch. GitHub tests the entry against the queue's latest base and merges it; there is no direct-merge path. Refused when the branch has no merge queue or the queue rejects the entry, and the same operation UUID stays retryable. Replays require the same operation UUID and request.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "operation_id": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
                 "pull_number": {"type": "integer", "minimum": 1},
                 "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-                "merge_method": {"type": "string", "enum": ["merge", "squash", "rebase"]}
+                "base": {"type": "string", "minLength": 1, "maxLength": 255}
             },
-            "required": ["operation_id", "pull_number", "head_sha", "merge_method"],
+            "required": ["operation_id", "pull_number", "head_sha", "base"],
             "additionalProperties": false
         },
         "outputSchema": {
             "type": "object",
             "properties": {
                 "pull_number": {"type": "integer"},
-                "merged": {"type": "boolean"},
-                "merge_commit_sha": {"type": "string"},
-                "head_sha": {"type": "string"}
+                "head_sha": {"type": "string"},
+                "entry_id": {"type": "string"},
+                "state_when_recorded": {"type": "string", "enum": ["QUEUED", "AWAITING_CHECKS", "MERGEABLE", "UNMERGEABLE", "LOCKED"]}
             },
-            "required": ["pull_number", "merged", "merge_commit_sha", "head_sha"],
+            "required": ["pull_number", "head_sha", "entry_id", "state_when_recorded"],
             "additionalProperties": false
         },
         "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true}
@@ -348,17 +348,13 @@ async fn call_tool(id: Value, request: &Map<String, Value>, mcp: &McpState) -> R
                 Err(error) => operation_error(id, error),
             }
         }
-        Some("merge_pull_request_at_head") => {
-            let Ok(arguments) = serde_json::from_value::<MergePullRequest>(arguments) else {
+        Some("enqueue_pull_request") => {
+            let Ok(arguments) = serde_json::from_value::<EnqueuePullRequest>(arguments) else {
                 return json_rpc_error(id, -32602, "Invalid params");
             };
-            match mcp
-                .app
-                .merge_pull_request_at_head(&mcp.journal, arguments)
-                .await
-            {
+            match mcp.app.enqueue_pull_request(&mcp.journal, arguments).await {
                 Ok(result) => {
-                    serialized_tool_result(id, &result, "Pull request is durably merged.")
+                    serialized_tool_result(id, &result, "Pull request is durably queued.")
                 }
                 Err(error) => operation_error(id, error),
             }

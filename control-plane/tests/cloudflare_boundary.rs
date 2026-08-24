@@ -108,10 +108,48 @@ fn durable_object_is_sharded_by_app_and_exact_replay_identity() {
     assert!(journal.contains("app_id"));
     assert!(journal.contains("delivery_id"));
     assert!(journal.contains("operation_id"));
-    assert!(journal.contains("0003_maintainer_operations.sql"));
+    assert!(journal.contains("0004_maintainer_operations.sql"));
     assert!(journal.contains("sha256"));
     assert!(!journal.contains("DATABASE_URL"));
     assert!(!journal.contains("neon_superuser"));
+}
+
+/// A tool's declared `outputSchema` and the Rust struct it serializes live in
+/// two files with nothing tying them together. A rename in one alone produces
+/// a surface that advertises a field it never sends -- which compiles, passes
+/// every test, and is only visible to a caller validating the response. That
+/// happened during this change and nothing caught it.
+#[test]
+fn declared_output_schemas_name_the_fields_the_results_carry() {
+    let mcp = project_file("src/mcp.rs");
+    let github_app = project_file("src/github_app.rs");
+
+    for (struct_name, fields) in [
+        (
+            "EnqueueResult",
+            &["pull_number", "head_sha", "entry_id", "state_when_recorded"][..],
+        ),
+        (
+            "ReviewResult",
+            &["review_id", "url", "head_sha", "state"][..],
+        ),
+        ("CommitResult", &["branch", "commit_sha", "parent_sha"][..]),
+    ] {
+        let start = github_app
+            .find(&format!("struct {struct_name} {{"))
+            .unwrap_or_else(|| panic!("missing struct: {struct_name}"));
+        let body = &github_app[start..start + github_app[start..].find('}').unwrap()];
+        for field in fields {
+            assert!(
+                body.contains(&format!("{field}: ")),
+                "{struct_name} does not carry {field}"
+            );
+            assert!(
+                mcp.contains(&format!(r#""{field}""#)),
+                "the MCP surface never names {field}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -125,7 +163,7 @@ fn mcp_surface_is_repository_bound_and_typed() {
         "submit_pull_request_review",
         "observe_pull_request_checks",
         "publish_commit",
-        "merge_pull_request_at_head",
+        "enqueue_pull_request",
     ] {
         assert!(mcp.contains(tool), "missing typed MCP tool: {tool}");
     }
@@ -168,9 +206,9 @@ fn the_deployment_gate_asserts_the_readiness_label_the_worker_emits() {
     assert!(!workflow.contains("mcp_pr_create_review_checks"));
 }
 
-/// The merge and publish paths are `wasm32`-only, so a host test cannot drive
-/// them. What it can do is hold the contract they were got wrong on: GitHub's
-/// refusal statuses must reach a determinate answer rather than being folded
+/// The enqueue and publish paths are `wasm32`-only, so a host test cannot
+/// drive them. What it can do is hold the contract they were got wrong on:
+/// GitHub's refusals must reach a determinate answer rather than being folded
 /// into "unavailable" and reported as an outcome nobody knows.
 #[test]
 fn github_refusals_stay_determinate() {
@@ -180,10 +218,46 @@ fn github_refusals_stay_determinate() {
 
     // The transport reports the status; it is the only place that sees one.
     assert!(github_app.contains("Err(Error::Rejected(response.status_code()))"));
-    // The merge endpoint's four refusal statuses are read, not collapsed.
-    assert!(github_app.contains("Err(Error::Rejected(403 | 405 | 409 | 422))"));
     // A missing branch is a 404 and nothing else.
     assert!(github_app.contains("Err(Error::Rejected(404))"));
+    // GraphQL answers 200 with an `errors` array, so a status check alone
+    // reads a refused mutation as a success.
+    //
+    // The transport hands the classification back rather than deciding: a
+    // mutation and a read need opposite answers to the same response. Only
+    // error classes GitHub rejects before execution are `Rejected`; an untyped
+    // error may follow a server-side timeout on work already under way, so it
+    // is `Unknown` and fails safe.
+    assert!(github_app.contains("enum GraphQlFailure"));
+    // The table itself is exercised by
+    // `github_app::tests::only_pre_execution_error_classes_are_rejections`.
+    assert!(github_app.contains("fn classify_graphql_errors("));
+    // The classification is asked at the PAYLOAD, not the envelope. A field
+    // error nulls its field and leaves `data` an object, so GitHub's ordinary
+    // refusal shape is a populated `data` with a null mutation field beside an
+    // errors array -- an envelope-level early return routes every real refusal
+    // past the classification.
+    assert!(github_app.contains("Ok((envelope.data, classify_graphql_errors(&envelope.errors)))"));
+    // The decision itself is exercised by
+    // `github_app::tests::an_enqueue_outcome_is_decided_from_the_payload_not_the_envelope`,
+    // which is a real test rather than a grep. What is asserted here is only
+    // that the transport still hands both halves back, so that decision keeps
+    // getting the inputs it needs.
+    assert!(github_app.contains("fn enqueue_outcome("));
+    // Errors are logged whatever `data` carried.
+    assert!(github_app.contains("for error in &envelope.errors {"));
+    // A failed read is never reported as a refusal of the operation it was
+    // reconciling.
+    assert!(github_app.contains("if failure.is_some() {"));
+    // The boundary requires every permission the operations mint, so a missing
+    // grant fails at `/readyz` rather than at token mint.
+    assert!(
+        github_app
+            .contains(r#"permission_at_least(&installation.permissions, "merge_queues", "write")"#)
+    );
+    // A branch with no queue fails closed instead of falling back to a merge.
+    assert!(!github_app.contains("/merge\""));
+    assert!(!mcp.contains("merge_pull_request_at_head"));
     // A refusal releases the claim so the same operation ID stays retryable.
     assert!(github_app.contains("OperationTransition::Refused"));
     assert!(journal.contains(r#"Ok(("planned", None, "'executing','indeterminate'"))"#));

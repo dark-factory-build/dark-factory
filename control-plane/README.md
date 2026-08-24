@@ -40,8 +40,12 @@ configuration is live.
   the other's shape, so neither can take the other's path. It exposes six
   typed tools: `maintainer_status`, exact-head pull-request creation,
   exact-head `COMMENT` or `REQUEST_CHANGES` review submission, exact-head
-  check-run observation, exact-head commit publication, and exact-head pull
-  request merge. Publication refuses the `.github` authority tree, and both
+  check-run observation, exact-head commit publication, and exact-head merge
+  queue enqueue. There is no direct-merge tool: a required merge queue makes
+  GitHub refuse `PUT /pulls/{n}/merge` outright, and
+  `docs/development/GITHUB_APP.md` had already ruled it out ("the broker does
+  not ... expose direct merge as a fallback"). Enqueue is the only automated
+  path to `main`. Publication refuses the `.github` authority tree, and both
   writes are bound to a stated head commit and to a durable operation ID.
   There is no generic GitHub proxy, arbitrary URL, repository selector, issue,
   shell, or credential-returning tool, and no way to move a ref other than
