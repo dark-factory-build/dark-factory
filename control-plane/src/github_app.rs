@@ -960,7 +960,24 @@ fn free_of_review_verdict(value: &str) -> Result<(), OperationError> {
 /// edit CODEOWNERS can remove itself from required review — the same
 /// escalation, reached one file at a time. GitHub reads CODEOWNERS from the
 /// repository root, `.github/`, and `docs/`, so all three are named.
+///
+/// Each of those names is also refused as a leading directory. A tree entry
+/// at `.github/CODEOWNERS/x` turns the CODEOWNERS blob into a tree, deleting
+/// its content as a side effect: exactly the write the by-name refusal
+/// exists to prevent, reached by making the name a directory instead. The
+/// collision is with the *leading* segments only, so a path that merely
+/// contains a protected name -- `CODEOWNERS.md`, `docs/notes-on-CODEOWNERS.md`
+/// -- stays publishable. The `.github` tree needs no such rule: its refusal
+/// already covers everything beneath it.
 fn valid_repository_path(value: &str) -> Result<(), OperationError> {
+    const REVIEW_AUTHORITY_PATHS: &[&str] = &[
+        "CODEOWNERS",
+        ".github/CODEOWNERS",
+        "docs/CODEOWNERS",
+        ".github/dependabot.yml",
+        ".github/dependabot.yaml",
+    ];
+
     let mut segments = value.split('/');
     let github_authority = segments
         .next()
@@ -968,14 +985,11 @@ fn valid_repository_path(value: &str) -> Result<(), OperationError> {
         && segments
             .next()
             .is_none_or(|segment| segment.eq_ignore_ascii_case("workflows"));
-    let review_authority = matches!(
-        value,
-        "CODEOWNERS"
-            | ".github/CODEOWNERS"
-            | "docs/CODEOWNERS"
-            | ".github/dependabot.yml"
-            | ".github/dependabot.yaml"
-    );
+    let review_authority = REVIEW_AUTHORITY_PATHS.iter().any(|&protected| {
+        value
+            .strip_prefix(protected)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    });
     let valid = !value.is_empty()
         && value.len() <= 240
         && !value.starts_with('/')
@@ -2652,6 +2666,13 @@ mod tests {
             ".github/PULL_REQUEST_TEMPLATE.md",
             ".githubbed/notes.md",
             "docs/codeowners-guidance.md",
+            // The protected names are refused segment-exactly, not as
+            // substrings: a path that merely carries one stays publishable,
+            // including one where the name is a prefix of a longer segment.
+            "CODEOWNERS.md",
+            "docs/notes-on-CODEOWNERS.md",
+            "src/codeowners_test.rs",
+            ".github/dependabot.yml.example",
         ] {
             assert!(
                 valid_repository_path(allowed).is_ok(),
@@ -2678,6 +2699,17 @@ mod tests {
             ".github/CODEOWNERS",
             "docs/CODEOWNERS",
             ".github/dependabot.yml",
+            ".github/dependabot.yaml",
+            // Publishing under a protected name turns its blob into a tree,
+            // which deletes the file's content -- the same write, reached by
+            // making the name a directory. Every by-name refusal is refused
+            // as a leading directory too.
+            "CODEOWNERS/x",
+            ".github/CODEOWNERS/x",
+            "docs/CODEOWNERS/x",
+            "CODEOWNERS/nested/deep.md",
+            ".github/dependabot.yml/x",
+            ".github/dependabot.yaml/x",
             ".GitHub/Workflows/ci.yml",
             ".github/workflows/nested/deep.yml",
             "",
