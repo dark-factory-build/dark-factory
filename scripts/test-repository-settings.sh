@@ -24,7 +24,14 @@ grep -Fq '    needs: [checks, linux, control-plane, review]' "$workflow"
 # match.
 verdict_if=$(awk '
     /^  required:$/ { job = 1; next }
-    job && /^  [a-z]/ { exit }
+    # The scan ends at the next job key. A job id may start with a letter of
+    # either case or `_`, so the bound is "any two-space-indented line that is
+    # not a comment": `[a-z]` let a `_shim` or `Zshim` decoy job sit past the
+    # bound. `#` is excluded because a two-space comment line -- a style this
+    # file already uses above `jobs:` -- is not a key, and a bound stopping on
+    # one would fail this test the day a comment lands between the job key and
+    # the step it scans for.
+    job && /^  [^ #]/ { exit }
     job && /^      - name: Require a recorded adversarial review verdict$/ { step = 1; next }
     step && /^      - name: / { exit }
     step && /^        if: / { sub(/^        if: /, ""); print; exit }
@@ -45,7 +52,14 @@ fi
 # step body is extracted and checked for the exit that makes it a gate.
 verdict_step=$(awk '
     /^  required:$/ { job = 1; next }
-    job && /^  [a-z]/ { exit }
+    # The scan ends at the next job key. A job id may start with a letter of
+    # either case or `_`, so the bound is "any two-space-indented line that is
+    # not a comment": `[a-z]` let a `_shim` or `Zshim` decoy job sit past the
+    # bound. `#` is excluded because a two-space comment line -- a style this
+    # file already uses above `jobs:` -- is not a key, and a bound stopping on
+    # one would fail this test the day a comment lands between the job key and
+    # the step it scans for.
+    job && /^  [^ #]/ { exit }
     job && /^      - name: Require a recorded adversarial review verdict$/ { step = 1; next }
     # Bounded to this step. Without this, a step whose `run:` is not a block
     # scalar leaves the scan running until the NEXT step`s `run: |` and
