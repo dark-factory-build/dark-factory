@@ -123,7 +123,7 @@ jobs:
   # selected when the ruleset was first configured.
   required:
     if: always()
-    needs: [checks, linux, control-plane]
+    needs: [checks, linux, control-plane, review]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -134,6 +134,26 @@ jobs:
           exit 1
       - name: Confirm all hosted source gates passed
         run: echo "macOS, Linux, and control-plane source gates passed"
+
+      # AGENTS.md rule 2, made a merge condition rather than a convention.
+      #
+      # `skipped` is the correct answer outside the merge queue, and treating
+      # it as a failure would fail every pull request: `review` runs only on
+      # `merge_group`, because recording a verdict fires no workflow event and
+      # a pull-request-time run could never turn green after the reviewer
+      # acted. The naive `!= 'success'` recreates that deadlock in a new
+      # costume.
+      #
+      # So a pull request enqueues without a verdict and is ejected here, at
+      # the one moment the verdict has to be true: against the head being
+      # merged.
+      - name: Require a recorded adversarial review verdict
+        if: needs.review.result != 'success' && needs.review.result != 'skipped'
+        run: |
+          echo "no adversarial review verdict at the head being merged (review=${{ needs.review.result }})" >&2
+          echo "  A reviewer that did not write the change records:" >&2
+          echo "  submit_pull_request_review, event: ALLOW, head_sha: <this exact head>" >&2
+          exit 1
 
       # The adversarial-review gate runs on `merge_group` and nowhere else, so
       # the `merge_queue` rule is the single chokepoint keeping unreviewed work

@@ -12,7 +12,10 @@ grep -Fq 'context: required' "$manifest"
 grep -Fq 'integration_id: 15368' "$manifest"
 grep -Fq '  required:' "$workflow"
 grep -Fq '    if: always()' "$workflow"
-grep -Fq '    needs: [checks, linux, control-plane]' "$workflow"
+grep -Fq '    needs: [checks, linux, control-plane, review]' "$workflow"
+# `skipped` is the correct answer outside the merge queue. Without this arm the
+# aggregate fails every pull request, since `review` runs only on merge_group.
+grep -Fq "if: needs.review.result != 'success' && needs.review.result != 'skipped'" "$workflow"
 grep -Fq "if: needs.checks.result != 'success' || needs.linux.result != 'success' || needs.control-plane.result != 'success'" "$workflow"
 grep -Fq '"context": "required"' "$publisher"
 # The review gate runs only on `merge_group`, so these two are load-bearing for
