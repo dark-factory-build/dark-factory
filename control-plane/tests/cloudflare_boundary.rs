@@ -124,29 +124,68 @@ fn declared_output_schemas_name_the_fields_the_results_carry() {
     let mcp = project_file("src/mcp.rs");
     let github_app = project_file("src/github_app.rs");
 
-    for (struct_name, fields) in [
+    // Scoped to each tool's OWN block, not to `mcp.rs` as a whole. A whole-file
+    // `contains` is satisfied by the field's own `required` array, or by a
+    // different tool's schema, so it passes while the property it is meant to
+    // pin has been renamed away -- verified by mutation: renaming the
+    // `verdict` property survived a whole-file check.
+    let tool_block = |name: &str| -> String {
+        let start = mcp
+            .find(&format!(r#""name": "{name}""#))
+            .unwrap_or_else(|| panic!("missing tool: {name}"));
+        let rest = &mcp[start..];
+        let end = rest[1..]
+            .find(r#""name": ""#)
+            .map_or(rest.len(), |offset| offset + 1);
+        // The tool's OUTPUT schema only. Its `inputSchema` names some of the
+        // same fields -- `head_sha` in particular -- so a whole-tool slice
+        // passes while the output declaration has lost the field, which is
+        // the drift this test exists to catch.
+        let block = &rest[..end];
+        let output = block
+            .find(r#""outputSchema""#)
+            .unwrap_or_else(|| panic!("{name} declares no outputSchema"));
+        block[output..].to_string()
+    };
+
+    for (tool, struct_name, fields) in [
         (
+            "enqueue_pull_request",
             "EnqueueResult",
             &["pull_number", "head_sha", "entry_id", "state_when_recorded"][..],
         ),
         (
+            "submit_pull_request_review",
             "ReviewResult",
-            &["review_id", "url", "head_sha", "state"][..],
+            // `verdict` especially: it is the field the required `review`
+            // check reads, so a rename that missed the MCP schema would make
+            // every recorded verdict invisible while every test stayed green.
+            &["review_id", "url", "head_sha", "state", "verdict"][..],
         ),
-        ("CommitResult", &["branch", "commit_sha", "parent_sha"][..]),
+        (
+            "publish_commit",
+            "CommitResult",
+            &["branch", "commit_sha", "parent_sha"][..],
+        ),
+        (
+            "create_pull_request",
+            "PullRequestResult",
+            &["number", "url", "head_sha"][..],
+        ),
     ] {
         let start = github_app
             .find(&format!("struct {struct_name} {{"))
             .unwrap_or_else(|| panic!("missing struct: {struct_name}"));
         let body = &github_app[start..start + github_app[start..].find('}').unwrap()];
+        let block = tool_block(tool);
         for field in fields {
             assert!(
                 body.contains(&format!("{field}: ")),
                 "{struct_name} does not carry {field}"
             );
             assert!(
-                mcp.contains(&format!(r#""{field}""#)),
-                "the MCP surface never names {field}"
+                block.contains(&format!(r#""{field}": {{"#)),
+                "{tool}'s outputSchema does not declare {field}"
             );
         }
     }

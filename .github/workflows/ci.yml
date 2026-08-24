@@ -135,6 +135,132 @@ jobs:
       - name: Confirm all hosted source gates passed
         run: echo "macOS, Linux, and control-plane source gates passed"
 
+      # The adversarial-review gate runs on `merge_group` and nowhere else, so
+      # the `merge_queue` rule is the single chokepoint keeping unreviewed work
+      # out of this branch. If it lapses, `merge_group` stops firing, the gate
+      # never runs on any event, and this aggregate stays green -- rule 2
+      # silently stops being enforced with no red check anywhere.
+      #
+      # Asserted INLINE, deliberately, and this is the one place in the repo
+      # where that is the safer arrangement. A pull request runs the workflow
+      # file it carries, but the maintainer App is refused
+      # `.github/workflows/` and `.github/` is owned in CODEOWNERS, so an
+      # agent-authored change cannot weaken this without a human push and an
+      # owner approval. A helper under `scripts/` would be App-publishable --
+      # the weaker-protected file guarding the stronger-protected one, which is
+      # exactly why `verify-adversarial-review.sh` is hoisted to the default
+      # branch. Hoisting is not available here: it cannot work until the code
+      # is already on the default branch, and this must hold from the first
+      # run. So the assertion is kept small enough to review by eye instead.
+      #
+      # Read from the LIVE rules, not from `scripts/github-repo-settings.sh`:
+      # that file records what an operator intended to apply, which is not
+      # evidence that it is applied, and the two have already drifted once.
+      # Rules in `evaluate` or `disabled` rulesets are not returned by this
+      # endpoint, so a ruleset downgraded out of enforcement reads as absent.
+      - name: Require the merge queue to still be the only path to this branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_BRANCH: ${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          # Written to a file, not piped. `grep -q` exits on its first match
+          # and closes the pipe; with `pipefail` a still-writing `printf` then
+          # makes the pipeline 141 (SIGPIPE), and a rule that IS active reads
+          # as absent. Latent here -- the projection is ~163 bytes against a
+          # 64KB pipe buffer -- but it grows with required contexts and the
+          # failure is silent and confusing when it arrives.
+          gh api "repos/${GITHUB_REPOSITORY}/rules/branches/${BASE_BRANCH}" --jq '
+            .[] | (("rule:" + .type),
+                   (if .type=="merge_queue"
+                    then "grouping:" + (.parameters.grouping_strategy // "none") else empty end),
+                   (if .type=="required_status_checks"
+                    then (.parameters.required_status_checks[]? | "context:" + .context) else empty end))' \
+            >"${RUNNER_TEMP}/ruleset-facts.txt"
+          require() {
+            grep -qx "$1" "${RUNNER_TEMP}/ruleset-facts.txt" || {
+              echo "chokepoint: '$1' is not active on ${BASE_BRANCH}" >&2
+              echo "  $2" >&2
+              echo "  Re-apply scripts/github-repo-settings.sh." >&2
+              exit 1
+            }
+          }
+          require rule:merge_queue \
+            'The review gate runs only on merge_group; without the queue it never runs.'
+          # ALLGREEN makes every entry's own group required. Under HEADGREEN the
+          # per-entry groups are still built but stop being required, so
+          # unreviewed entries ahead of the last would merge unchecked.
+          require grouping:ALLGREEN \
+            'Only the last entry of a group would be gated.'
+          require rule:required_status_checks \
+            'Nothing would require any check at all.'
+          require context:required \
+            'Nothing would require the aggregate the review gate reports through.'
+
+  review:
+    # The merge queue, and nowhere else.
+    #
+    # Recording a verdict fires no workflow event. A pull-request-time run
+    # would therefore evaluate before the reviewer had acted, fail, and have
+    # no way back to green: the only way to re-trigger it is to push, which
+    # moves the head and orphans the verdict it was waiting for. There is no
+    # ordering that ends green, so requiring it there would make every pull
+    # request permanently unmergeable, and the release valve would be an admin
+    # bypass -- the gate satisfied by circumventing it.
+    #
+    # The queue runs after the verdict exists, against the head being merged,
+    # which is the one moment it has to be true. A pull request with no verdict
+    # enqueues and is ejected when this fails.
+    if: github.event_name == 'merge_group'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      # Deliberately NOT $GITHUB_SHA. This runs the gate as it exists on the
+      # default branch, never the copy carried by the change under review: the
+      # maintainer App may publish under `scripts/`, so a pull request running
+      # its own copy could weaken the reviewer about to judge it. A change to
+      # the gate is still tested by `checks` and `linux`, which do run the
+      # pull request's copy against test-verify-adversarial-review.sh.
+      #
+      # This hoists the decision, not the plumbing. Everything else on this
+      # path -- the projection below, the head lookup, this job's existence --
+      # still comes from the pull request's own `ci.yml`, exactly as the
+      # comment on `checks` says. What bounds that is CODEOWNERS on `.github/`
+      # plus the App's refusal to publish under `.github/workflows/`; note the
+      # App's refusal is by named path, so `.github/actions/**` IS publishable
+      # and a composite action extracted from this job would not be covered.
+      - name: Check out the gate from the default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euxo pipefail
+          rm -rf .git
+          git init
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --depth=1 origin "refs/heads/${DEFAULT_BRANCH}"
+          git checkout --force --detach FETCH_HEAD
+          git clean -ffdx
+
+      - name: Verify the adversarial review verdict
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Both gating events name the pull request in GITHUB_REF, so this
+          # job does not branch on the event.
+          number="$(./scripts/verify-adversarial-review.sh --pull-number)"
+          head="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${number}" --jq '.head.sha')"
+          # Projection only: four fields per review and no decision, so the
+          # logic that gates every merge stays somewhere a test can drive it.
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${number}/reviews" --paginate \
+            --jq '.[] | [.commit_id, .state, (.user.id | tostring), ((.body // "") | gsub("[\n\r\t]"; " "))] | @tsv' \
+            >"${RUNNER_TEMP}/reviews.tsv"
+          DF_REVIEW_HEAD_SHA="${head}" DF_REVIEW_REVIEWS="${RUNNER_TEMP}/reviews.tsv" \
+            ./scripts/verify-adversarial-review.sh
+
   control-plane:
     runs-on: ubuntu-24.04
     timeout-minutes: 20

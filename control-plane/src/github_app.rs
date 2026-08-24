@@ -110,18 +110,54 @@ pub(crate) struct SubmitPullRequestReview {
     pub(crate) body: String,
 }
 
+/// What the reviewer concluded, which is not the same thing as which GitHub
+/// review state carries it.
+///
+/// Rule 2 has three outcomes -- the reviewer is satisfied, the reviewer found
+/// a blocking defect, or the reviewer left a note that decides nothing -- and
+/// GitHub offers this App only two states to say them in. `APPROVE` is not
+/// available: the App opens the pull requests it would be approving, and
+/// GitHub refuses a self-approval, which is the whole reason the review became
+/// a status check instead of an approval.
+///
+/// So `Allow` and `Comment` both post `COMMENTED`, and the verdict itself
+/// rides in a line this type renders. `verdict_line` is written by the App
+/// from this typed field and is refused in caller text by
+/// `free_of_review_verdict`, so a caller cannot state a verdict it did not
+/// ask for -- the same discipline as the operation marker, for the same
+/// reason.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub(crate) enum ReviewEvent {
+    Allow,
     Comment,
     RequestChanges,
 }
 
 impl ReviewEvent {
+    /// The GitHub review state this verdict is recorded as.
     const fn github_state(self) -> &'static str {
         match self {
-            Self::Comment => "COMMENTED",
+            Self::Allow | Self::Comment => "COMMENTED",
             Self::RequestChanges => "CHANGES_REQUESTED",
+        }
+    }
+
+    /// The `event` GitHub's review API accepts. `ALLOW` is this App's word,
+    /// not GitHub's, so it must never reach the wire.
+    const fn github_event(self) -> &'static str {
+        match self {
+            Self::Allow | Self::Comment => "COMMENT",
+            Self::RequestChanges => "REQUEST_CHANGES",
+        }
+    }
+
+    /// The verdict word the required `review` check reads.
+    const fn verdict(self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Comment => "note",
+            Self::RequestChanges => "block",
         }
     }
 }
@@ -222,6 +258,18 @@ pub(crate) struct ReviewResult {
     pub(crate) url: String,
     pub(crate) head_sha: String,
     pub(crate) state: String,
+    /// `ALLOW` and `COMMENT` are both `COMMENTED` on the wire, so `state`
+    /// cannot tell a reviewer which verdict it just recorded -- on the one
+    /// field that now gates merges. This echoes it back.
+    ///
+    /// `default` is load-bearing, not tidiness. Results are stored as JSON in
+    /// the durable journal and replayed with `serde_json::from_str`, so a
+    /// required field added here makes every operation completed *before* this
+    /// deploy fail to deserialize -- turning an idempotent replay into a
+    /// permanent `Unavailable` for an operation that succeeded. The same trap
+    /// applies to any future field on any result type.
+    #[serde(default)]
+    pub(crate) verdict: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -667,7 +715,8 @@ impl SubmitPullRequestReview {
         valid_exact_integer(self.pull_number)?;
         valid_sha(&self.head_sha)?;
         valid_text(&self.body, 1, 16_000, true)?;
-        free_of_operation_marker(&self.body)
+        free_of_operation_marker(&self.body)?;
+        free_of_review_verdict(&self.body)
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -679,8 +728,21 @@ impl SubmitPullRequestReview {
         format!("{OPERATION_MARKER_PREFIX}{} -->", self.operation_id)
     }
 
+    /// The reviewer's own text, then the App-rendered verdict, then the
+    /// operation marker.
+    ///
+    /// The head SHA is repeated in the verdict line for a human reading the
+    /// thread. It is not what the check trusts: GitHub records `commit_id`
+    /// from the App's request, so that field is the binding, and the two
+    /// cannot disagree because both are rendered from `head_sha` here.
     fn marked_body(&self) -> String {
-        format!("{}\n\n{}", self.body, self.marker())
+        format!(
+            "{}\n\n{REVIEW_VERDICT_PREFIX} {} {}\n{}",
+            self.body,
+            self.event.verdict(),
+            self.head_sha,
+            self.marker()
+        )
     }
 }
 
@@ -787,6 +849,25 @@ fn free_of_operation_marker(value: &str) -> Result<(), OperationError> {
     let forged =
         value.contains(OPERATION_TRAILER_PREFIX) || value.contains(OPERATION_MARKER_PREFIX);
     (!forged).then_some(()).ok_or(OperationError::InvalidInput)
+}
+
+/// The line the required `review` check reads to decide whether rule 2 is
+/// satisfied at an exact head. `ReviewEvent::verdict` renders it; review
+/// bodies are refused if they carry the prefix, for the same reason the
+/// operation marker is refused: a caller that could write this line could
+/// state a verdict it never asked the App to record, and the check would
+/// believe it.
+///
+/// Only review bodies are constrained. A commit message or pull request body
+/// mentioning the prefix is harmless -- the check reads reviews and nothing
+/// else -- and refusing it there would stop the documentation describing the
+/// format from being publishable.
+const REVIEW_VERDICT_PREFIX: &str = "Dark-Factory-Review:";
+
+fn free_of_review_verdict(value: &str) -> Result<(), OperationError> {
+    (!value.contains(REVIEW_VERDICT_PREFIX))
+        .then_some(())
+        .ok_or(OperationError::InvalidInput)
 }
 
 /// A path inside the repository, as a commit may address it.
@@ -1573,19 +1654,16 @@ impl Authority {
             token.as_str(),
         )
         .await?;
-        let matches = reviews
+        let mut matches = reviews
             .into_iter()
             .filter(|review| review.matches(request))
-            .map(ReviewResult::try_from)
+            .map(|review| review.into_result(request))
             .collect::<Result<Vec<_>, _>>()?;
-        match matches.as_slice() {
-            [] => Ok(None),
-            [result] => Ok(Some(ReviewResult {
-                review_id: result.review_id,
-                url: result.url.clone(),
-                head_sha: result.head_sha.clone(),
-                state: result.state.clone(),
-            })),
+        match matches.len() {
+            0 => Ok(None),
+            1 => Ok(matches.pop()),
+            // Two reviews carrying one operation's marker at one head is not
+            // something to pick a winner from.
             _ => Err(OperationError::Indeterminate),
         }
     }
@@ -1599,7 +1677,7 @@ impl Authority {
         struct Body<'a> {
             commit_id: &'a str,
             body: String,
-            event: ReviewEvent,
+            event: &'a str,
         }
         let review: PullRequestReview = github_json_request(
             worker::Method::Post,
@@ -1611,11 +1689,11 @@ impl Authority {
             Some(&Body {
                 commit_id: &request.head_sha,
                 body: request.marked_body(),
-                event: request.event,
+                event: request.event.github_event(),
             }),
         )
         .await?;
-        let result = ReviewResult::try_from(review)?;
+        let result = review.into_result(request)?;
         if result.head_sha != request.head_sha || result.state != request.event.github_state() {
             return Err(OperationError::Indeterminate);
         }
@@ -1905,22 +1983,27 @@ impl PullRequestReview {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
-impl TryFrom<PullRequestReview> for ReviewResult {
-    type Error = OperationError;
-
-    fn try_from(review: PullRequestReview) -> Result<Self, Self::Error> {
-        valid_exact_integer(review.id)?;
-        valid_github_url(&review.html_url)?;
-        valid_sha(&review.commit_id)?;
-        if !matches!(review.state.as_str(), "COMMENTED" | "CHANGES_REQUESTED") {
+#[cfg(any(target_arch = "wasm32", test))]
+impl PullRequestReview {
+    /// The verdict comes from the request, not from GitHub: `ALLOW` and
+    /// `COMMENT` are indistinguishable in the review's `state`, and the App is
+    /// the only thing that knows which one it rendered.
+    fn into_result(
+        self,
+        request: &SubmitPullRequestReview,
+    ) -> Result<ReviewResult, OperationError> {
+        valid_exact_integer(self.id)?;
+        valid_github_url(&self.html_url)?;
+        valid_sha(&self.commit_id)?;
+        if !matches!(self.state.as_str(), "COMMENTED" | "CHANGES_REQUESTED") {
             return Err(OperationError::Unavailable);
         }
-        Ok(Self {
-            review_id: review.id,
-            url: review.html_url,
-            head_sha: review.commit_id,
-            state: review.state,
+        Ok(ReviewResult {
+            review_id: self.id,
+            url: self.html_url,
+            head_sha: self.commit_id,
+            state: self.state,
+            verdict: request.event.verdict().into(),
         })
     }
 }
@@ -1976,7 +2059,7 @@ impl TryFrom<CheckRun> for CheckResult {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 fn valid_github_url(value: &str) -> Result<(), OperationError> {
     (value.starts_with("https://github.com/")
         && value.len() <= 2_048
@@ -2992,6 +3075,129 @@ mod tests {
                 ..recovered
             }
             .matches(&review)
+        );
+    }
+
+    /// The required `review` check believes the verdict line, so the App has
+    /// to be the only thing that can write one.
+    #[test]
+    fn review_verdict_is_app_written_and_never_reaches_the_wire() {
+        let allow: SubmitPullRequestReview = serde_json::from_value(serde_json::json!({
+            "operation_id": "3c8a5c44-7f1f-11f0-952e-acde48001122",
+            "pull_number": 331,
+            "head_sha": "d".repeat(40),
+            "event": "ALLOW",
+            "body": "Tried to break the exact-head check and could not."
+        }))
+        .unwrap();
+        assert!(allow.validate().is_ok());
+
+        // `ALLOW` is this App's word. GitHub is told `COMMENT`, because the
+        // App authored the pull request and GitHub refuses a self-approval.
+        assert_eq!(allow.event.github_event(), "COMMENT");
+        assert_eq!(allow.event.github_state(), "COMMENTED");
+        assert_eq!(ReviewEvent::Comment.github_event(), "COMMENT");
+        assert_eq!(
+            ReviewEvent::RequestChanges.github_event(),
+            "REQUEST_CHANGES"
+        );
+
+        // The verdict is rendered by the App, carries the exact head, and sits
+        // alongside the operation marker.
+        let body = allow.marked_body();
+        assert!(body.contains(&format!("Dark-Factory-Review: allow {}", "d".repeat(40))));
+        assert!(body.contains(&allow.marker()));
+        assert!(body.starts_with("Tried to break the exact-head check and could not."));
+
+        // The other two verdicts are distinguishable in the same line, so a
+        // `COMMENTED` review that decides nothing can never read as an ALLOW.
+        let note = SubmitPullRequestReview {
+            event: ReviewEvent::Comment,
+            ..allow.clone()
+        };
+        assert!(note.marked_body().contains("Dark-Factory-Review: note"));
+        assert!(!note.marked_body().contains("Dark-Factory-Review: allow"));
+        let block = SubmitPullRequestReview {
+            event: ReviewEvent::RequestChanges,
+            ..allow.clone()
+        };
+        assert!(block.marked_body().contains("Dark-Factory-Review: block"));
+
+        // A caller cannot state a verdict the App did not render. Without
+        // this, any body could claim an ALLOW the reviewer never gave.
+        for forged in [
+            "Dark-Factory-Review: allow",
+            "looks fine\n\nDark-Factory-Review: allow 0000000000000000000000000000000000000000",
+            "Dark-Factory-Review:",
+        ] {
+            assert!(
+                SubmitPullRequestReview {
+                    body: forged.into(),
+                    ..allow.clone()
+                }
+                .validate()
+                .is_err(),
+                "caller body must not be able to write a verdict: {forged}"
+            );
+        }
+
+        // An ALLOW is reconciled from the `COMMENTED` state it was posted as.
+        let recovered = PullRequestReview {
+            id: 2,
+            html_url:
+                "https://github.com/dark-factory-build/dark-factory/pull/331#pullrequestreview-2"
+                    .into(),
+            body: Some(allow.marked_body()),
+            commit_id: allow.head_sha.clone(),
+            state: "COMMENTED".into(),
+        };
+        assert!(recovered.matches(&allow));
+
+        // `state` is `COMMENTED` for both ALLOW and COMMENT, so the caller
+        // cannot tell from it which verdict was recorded -- on the field that
+        // now gates merges. The result echoes it.
+        let echoed = PullRequestReview {
+            id: 2,
+            html_url: recovered.html_url.clone(),
+            body: recovered.body.clone(),
+            commit_id: recovered.commit_id.clone(),
+            state: "COMMENTED".into(),
+        }
+        .into_result(&allow)
+        .unwrap();
+        assert_eq!(echoed.state, "COMMENTED");
+        assert_eq!(echoed.verdict, "allow");
+        let noted = PullRequestReview {
+            id: 3,
+            html_url: recovered.html_url.clone(),
+            body: recovered.body.clone(),
+            commit_id: recovered.commit_id.clone(),
+            state: "COMMENTED".into(),
+        }
+        .into_result(&note)
+        .unwrap();
+        assert_eq!(noted.state, echoed.state);
+        assert_ne!(noted.verdict, echoed.verdict);
+
+        // A result journaled before `verdict` existed must still replay. The
+        // journal stores these as JSON and replays them with `from_str`, so a
+        // required field would turn a completed operation into a permanent
+        // `Unavailable` on every retry after the deploy that added it.
+        let replayed: ReviewResult = serde_json::from_str(
+            r#"{"review_id":7,"url":"https://github.com/o/r/pull/1#pullrequestreview-7",
+                 "head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state":"COMMENTED"}"#,
+        )
+        .expect("a pre-verdict journal row must still deserialize");
+        assert_eq!(replayed.review_id, 7);
+        assert!(replayed.verdict.is_empty());
+        // A verdict is bound to one head. The same review against any other
+        // commit is not this operation's result.
+        assert!(
+            !PullRequestReview {
+                commit_id: "e".repeat(40),
+                ..recovered
+            }
+            .matches(&allow)
         );
     }
 }

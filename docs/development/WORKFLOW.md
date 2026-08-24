@@ -192,9 +192,119 @@ That is not a relaxation of review so much as a repair of it. The owner
 authors most pull requests here and GitHub never lets an author approve their
 own, so a blanket count of 1 meant every owner-authored change merged by admin
 bypass — the gate satisfied by circumventing it rather than by meeting it.
-Scoping by path means the approvals that do happen are real ones. It does not
-replace rule 2's adversarial review, which is a process requirement GitHub
-cannot observe.
+Scoping by path means the approvals that do happen are real ones.
+
+Rule 2's adversarial review is enforced separately, by the `review` check. The
+review itself happens in the factory, where an
+agent that did not write the change reads the diff; what GitHub sees is the
+verdict the reviewer records through the maintainer App:
+
+```sh
+submit_pull_request_review  event: ALLOW  head_sha: <the exact commit reviewed>
+```
+
+`scripts/verify-adversarial-review.sh` reads the pull request's reviews and
+passes only when the App recorded an `ALLOW` against exactly the head being
+merged, with no blocking verdict at that head. The reviewer's findings are
+written to the run summary, so a red check says what was wrong rather than
+only that something was.
+
+`review` joins the `required` aggregate in a follow-up change, once the gate is
+on the default branch. A single pull request adding both would deadlock: the
+job runs the default branch's copy of a script that does not exist there yet,
+so its own queue run could never go green.
+
+That follow-up is **not** a one-line `needs:` edit, and getting it wrong
+recreates the deadlock in a new costume. Because `review` runs only on
+`merge_group`, it is `skipped` on every `pull_request` and `push` run, so the
+naive condition fails `required` on every pull request. It must read:
+
+```yaml
+needs: [checks, linux, control-plane, review]
+# `skipped` is the correct answer outside the queue, where there is no verdict
+# to read. Treating it as a failure blocks every pull request.
+if: needs.review.result != 'success' && needs.review.result != 'skipped'
+```
+
+Until that lands the gate is **decorative and invisible**: it produces no check
+on the pull request at all, so nothing reports that rule 2 is unenforced. What
+keeps the window closed meanwhile is that `main-protect` still requires the
+queue, and `required` in the queue still runs everything else.
+
+The `merge_queue` rule is therefore a single chokepoint, and the `required` job
+asserts it on every run against the **live** rules — not against
+`scripts/github-repo-settings.sh`, which records what an operator intended to
+apply rather than what is applied, and has already drifted from it once. Four
+facts are required: the `merge_queue` rule, its `ALLGREEN` grouping, the
+`required_status_checks` rule, and the `required` context within it. If any
+lapses, `merge_group` stops firing or stops gating, the review gate never runs,
+and `required` would otherwise stay green while rule 2 quietly stopped being
+enforced. Rulesets in `evaluate` or `disabled` enforcement are not returned by
+that endpoint, so a ruleset downgraded out of enforcement reads as absent —
+which is the answer we want.
+
+That assertion is written **inline** in `.github/workflows/ci.yml` rather than
+in a script under `scripts/`, and it is the one place in this repository where
+inline is the safer arrangement. A helper under `scripts/` is publishable by
+the maintainer App, so it would be the weaker-protected file guarding the
+stronger-protected one — the exact reason `verify-adversarial-review.sh` is
+hoisted to the default branch instead. Hoisting cannot work here: a
+default-branch copy does not exist until the change has already merged, and
+this assertion has to hold from its first run.
+
+`scripts/test-inline-chokepoint.sh` extracts that step's script from `ci.yml`
+verbatim and runs it against fixtures with a stubbed `gh`, so the shipped
+assertion is exercised byte-for-byte rather than a copy that could diverge from
+it. The test itself is App-publishable and that is fine: neutering it weakens
+only the test, never the assertion, which sits where the App cannot write.
+
+One cost is worth naming. `required` — the single required context — now
+depends on a live GitHub API call on every event, so a rules-API outage turns
+every merge red. That is the correct direction to fail, but it is new
+availability coupling on the one context the ruleset requires.
+
+What the check does **not** do is judge the review. A reviewer that records an
+`ALLOW` without reading anything produces a green check, and the reviewing and
+authoring agents reach the App through the same credential — so this is
+evidence that a review was recorded, not proof one was earned. It closes the
+gap where a real review happened and GitHub could not see it.
+
+Three properties are worth stating precisely, because each replaces something
+an approval used to do:
+
+- **Exact-head binding.** GitHub records `commit_id` on the review from the
+  App's request, and the App also renders the head into a `Dark-Factory-Review:`
+  line it writes itself — a review body carrying that prefix is refused, so a
+  caller cannot state a verdict it did not ask for. Both must name the head
+  under test. Pushing a fix orphans every prior verdict, which is what
+  `dismiss_stale_reviews_on_push` did for human approvals.
+- **The decision is not part of the change it gates.** The `review` job runs
+  the copy of `verify-adversarial-review.sh` on the default branch, never the
+  one in the pull request. `scripts/` is a path the maintainer App *can*
+  publish to, so without this an agent-authored pull request could weaken the
+  reviewer about to judge it. The *plumbing* is not hoisted: the projection,
+  the head lookup, and whether the job runs at all still come from the pull
+  request's own `ci.yml`, bounded by CODEOWNERS on `.github/` and by the App's
+  refusal to publish under `.github/workflows/`. That refusal is by named
+  path — `.github/actions/**` is publishable — so a composite action extracted
+  from this job would leave the gate's plumbing inside App reach.
+- **It runs only in the merge queue.** Recording a verdict fires no workflow
+  event, so a pull-request-time run would evaluate before the reviewer acted,
+  fail, and have no way back to green: re-triggering means pushing, which moves
+  the head and orphans the verdict. Requiring it there would make every pull
+  request permanently unmergeable and the release valve would be an admin
+  bypass. The queue runs after the verdict exists, against the head being
+  merged. A pull request with no verdict enqueues and is ejected.
+- **Every entry is checked, and that depends on a ruleset setting.** Each queue
+  entry gets its own `merge_group` run whose ref names exactly one pull request
+  (`gh-readonly-queue/<base>/pr-<n>-<base sha>`), so entries are verified
+  against their own heads rather than the group's synthetic head commit. This
+  holds because `main-protect` sets `grouping_strategy: ALLGREEN`, where every
+  entry's own group must pass. Under `HEADGREEN` only the last entry's group
+  must, and unreviewed entries ahead of it would merge unchecked — so that
+  setting in `scripts/github-repo-settings.sh` is load-bearing for this gate,
+  not just for CI cost.
+
 Review the exact `.github/workflows/` diff before approving an external run: a
 PR evaluates its own workflow and can change `runs-on`. `.github/` is an owned
 path in CODEOWNERS for exactly this reason, and the maintainer App refuses to

@@ -43,6 +43,36 @@ Read-only context unless a task explicitly asks you to edit them:
    tried to break and couldn't; (c) author addresses each finding or
    explains why not; (d) reviewer re-checks; (e) merge only once the
    reviewer is satisfied. The author never merges their own unreviewed PR.
+
+   The reviewer records the outcome through the maintainer App, so the
+   `review` status check can see it:
+
+   ```
+   submit_pull_request_review  event: ALLOW | REQUEST_CHANGES | COMMENT
+                               head_sha: <the exact commit reviewed>
+   ```
+
+   The check runs in the merge queue, not on the pull request: recording a
+   verdict fires no workflow event, so a pull-request-time check could never
+   turn green after the reviewer acted. A change with no verdict enqueues and
+   is ejected.
+
+   `ALLOW` means the reviewer is satisfied and is the only verdict that
+   clears the check. `REQUEST_CHANGES` blocks it. `COMMENT` decides nothing
+   and is for findings mid-review. The verdict binds to `head_sha`: pushing
+   a fix moves the head and needs a fresh verdict, which is the point — a
+   verdict can never cover code the reviewer did not read. A blocking
+   verdict at a head cannot be cleared by a second ALLOW at that same head;
+   it is cleared by pushing the fix.
+
+   **What this checks and what it does not.** It checks that a verdict
+   exists, came from the App, and names this exact commit. It does not judge
+   the review: an agent that records `ALLOW` without reading anything
+   produces a green check. Nor is it forge-proof against the factory itself
+   — the reviewing and authoring agents reach the App through the same
+   credential, so this is evidence, not attestation. What it removes is the
+   failure where a real review happened and nothing recorded it. Independence
+   remains a property of running a fresh agent that did not write the code.
 3. **Remove or refactor over patch.** Every change should leave the
    codebase smaller or simpler than it found it, not just working. Delete
    dead code paths instead of leaving them unreachable; collapse
