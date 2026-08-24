@@ -647,6 +647,19 @@ impl AppAuthority {
         let token = self
             .0
             .installation_token(BTreeMap::from([
+                // A queued entry ends with GitHub pushing the squash commit
+                // to the default branch, and push capability for an
+                // installation token derives from `contents: write` -- the
+                // scope `publish_commit` already mints and the reviewed
+                // revision already grants. Whether it is what the live
+                // enqueue is missing is the hypothesis under test (#371):
+                // the first live enqueue was refused wholesale with
+                // `pull_requests: read` minted, and the retry after #373 was
+                // refused `rejected before execution as FORBIDDEN` with
+                // `pull_requests: write` minted, so this is the next
+                // narrowest scope consistent with what enqueueing causes.
+                // The proof either way is a live enqueue after deploy.
+                ("contents", "write"),
                 ("merge_queues", "write"),
                 ("metadata", "read"),
                 // Enqueueing mutates the pull request's queue state. This

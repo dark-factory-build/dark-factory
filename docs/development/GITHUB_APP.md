@@ -146,7 +146,9 @@ exposes no issue-comment, issue-update, or issue-close operation. Pull requests
 write authorizes PR creation, update, formal review, and the exact-head
 enqueue, which mutates the pull request's queue state; a PR review is not an
 Issues API comment. Merge queues write authorizes only the typed exact-head
-enqueue and reconciliation operation. No Actions, Workflow, Release,
+enqueue and reconciliation operation; the enqueue token also mints Contents
+write, because a queued entry ends with GitHub pushing the squash commit to
+the default branch (#371 tracks the live proof of the scope set). No Actions, Workflow, Release,
 Administration, Secrets, arbitrary status, direct-merge, dequeue, queue-jump,
 or generic API authority is exposed. Because the maintainer revision has no
 Workflows permission, exact-tree publication rejects any tree that changes
