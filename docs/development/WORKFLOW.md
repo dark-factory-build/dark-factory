@@ -250,14 +250,18 @@ that runs, prints its diagnostic, and passes.
 The `merge_queue` rule is therefore a single chokepoint, and the `required` job
 asserts it on every run against the **live** rules — not against
 `scripts/github-repo-settings.sh`, which records what an operator intended to
-apply rather than what is applied, and has already drifted from it once. Four
+apply rather than what is applied, and has already drifted from it once. Five
 facts are required: the `merge_queue` rule, its `ALLGREEN` grouping, the
-`required_status_checks` rule, and the `required` context within it. If any
-lapses, `merge_group` stops firing or stops gating, the review gate never runs,
-and `required` would otherwise stay green while rule 2 quietly stopped being
-enforced. Rulesets in `evaluate` or `disabled` enforcement are not returned by
-that endpoint, so a ruleset downgraded out of enforcement reads as absent —
-which is the answer we want.
+`required_status_checks` rule, the `required` context within it, and that
+context's binding to GitHub Actions (integration `15368`). If any lapses,
+`merge_group` stops firing or stops gating, the review gate never runs or
+becomes reportable by an integration that never ran it, and `required` would
+otherwise stay green while rule 2 quietly stopped being enforced. The binding
+fact names its context — `integration:15368:required`, not a bare
+`integration:15368` — so a second required context carrying the binding cannot
+stand in for `required` losing it. Rulesets in `evaluate` or `disabled`
+enforcement are not returned by that endpoint, so a ruleset downgraded out of
+enforcement reads as absent — which is the answer we want.
 
 That assertion is written **inline** in `.github/workflows/ci.yml` rather than
 in a script under `scripts/`, and it is the one place in this repository where

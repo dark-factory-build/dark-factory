@@ -192,15 +192,22 @@ jobs:
           # Written to a file, not piped. `grep -q` exits on its first match
           # and closes the pipe; with `pipefail` a still-writing `printf` then
           # makes the pipeline 141 (SIGPIPE), and a rule that IS active reads
-          # as absent. Latent here -- the projection is ~163 bytes against a
+          # as absent. Latent here -- the projection is ~190 bytes against a
           # 64KB pipe buffer -- but it grows with required contexts and the
           # failure is silent and confusing when it arrives.
+          #
+          # Each required context yields two facts, and the second names the
+          # context it belongs to on purpose. A bare `integration:15368` would
+          # be satisfied by ANY bound entry, so a second required context
+          # carrying the binding would stand in for `required` losing it.
           gh api "repos/${GITHUB_REPOSITORY}/rules/branches/${BASE_BRANCH}" --jq '
             .[] | (("rule:" + .type),
                    (if .type=="merge_queue"
                     then "grouping:" + (.parameters.grouping_strategy // "none") else empty end),
                    (if .type=="required_status_checks"
-                    then (.parameters.required_status_checks[]? | "context:" + .context) else empty end))' \
+                    then (.parameters.required_status_checks[]?
+                          | ("context:" + .context),
+                            ("integration:" + (.integration_id|tostring) + ":" + .context)) else empty end))' \
             >"${RUNNER_TEMP}/ruleset-facts.txt"
           require() {
             grep -qx "$1" "${RUNNER_TEMP}/ruleset-facts.txt" || {
@@ -221,6 +228,13 @@ jobs:
             'Nothing would require any check at all.'
           require context:required \
             'Nothing would require the aggregate the review gate reports through.'
+          # The context is required; this is who may report it green. Without
+          # the binding the ruleset accepts a `required` status from any
+          # integration installed on this repository, so the aggregate the
+          # review gate reports through could be satisfied by something that
+          # never ran it.
+          require integration:15368:required \
+            'Any installed integration could report it green, not only GitHub Actions.'
 
   review:
     # The merge queue, and nowhere else.

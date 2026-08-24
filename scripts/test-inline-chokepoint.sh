@@ -56,18 +56,22 @@ run_case() {
         bash "$temporary/assertion.sh" >"$temporary/out" 2>&1
 }
 
+# The projection the step runs, as it reads against this repository's live
+# `main` rules today. `integration:15368:required` is the binding fact: the
+# required context is reportable only by GitHub Actions (integration 15368).
 live_facts() {
     printf '%s\n' rule:deletion rule:non_fast_forward rule:required_linear_history \
-        rule:required_status_checks context:required rule:merge_queue \
-        grouping:ALLGREEN rule:pull_request >"$temporary/facts"
+        rule:required_status_checks context:required integration:15368:required \
+        rule:merge_queue grouping:ALLGREEN rule:pull_request >"$temporary/facts"
 }
 
 # The live ruleset, as observed on this repository, must pass.
 live_facts
 run_case || { echo 'FAIL: the live ruleset must pass' >&2; cat "$temporary/out" >&2; exit 1; }
 
-# Each of the four required facts must fail closed on its own.
-for missing in rule:merge_queue grouping:ALLGREEN rule:required_status_checks context:required; do
+# Each of the five required facts must fail closed on its own.
+for missing in rule:merge_queue grouping:ALLGREEN rule:required_status_checks \
+    context:required integration:15368:required; do
     live_facts
     grep -vx "$missing" "$temporary/facts" >"$temporary/facts.tmp"
     mv "$temporary/facts.tmp" "$temporary/facts"
@@ -101,6 +105,29 @@ sed 's/^context:required$/context:not-required-really/' "$temporary/facts" >"$te
 mv "$temporary/facts.tmp" "$temporary/facts"
 if run_case; then echo 'FAIL: a superstring context must not satisfy the check' >&2; exit 1; fi
 
+# The required context present but unbound: `required_status_checks` entries
+# carry no `integration_id`, so `tostring` projects `null` and any installed
+# integration could report the aggregate green. This is the ruleset the other
+# four facts all pass through unchanged (#375).
+live_facts
+sed 's/^integration:15368:required$/integration:null:required/' "$temporary/facts" >"$temporary/facts.tmp"
+mv "$temporary/facts.tmp" "$temporary/facts"
+if run_case; then echo 'FAIL: an unbound required context must fail the step' >&2; exit 1; fi
+
+# Bound, but to some other integration.
+live_facts
+sed 's/^integration:15368:required$/integration:99999:required/' "$temporary/facts" >"$temporary/facts.tmp"
+mv "$temporary/facts.tmp" "$temporary/facts"
+if run_case; then echo 'FAIL: a foreign integration binding must fail the step' >&2; exit 1; fi
+
+# The binding on a DIFFERENT required context must not stand in for it. This
+# is why the fact names the context: against a bare `integration:15368` this
+# ruleset -- `required` unbound, some other context bound -- reads as green.
+live_facts
+sed 's/^integration:15368:required$/integration:15368:control-plane/' "$temporary/facts" >"$temporary/facts.tmp"
+mv "$temporary/facts.tmp" "$temporary/facts"
+if run_case; then echo "FAIL: another context's binding must not satisfy the check" >&2; exit 1; fi
+
 # No rules at all is the most severe form, not a pass.
 : >"$temporary/facts"
 if run_case; then echo 'FAIL: an empty ruleset must fail' >&2; exit 1; fi
@@ -118,7 +145,7 @@ fi
 
 # `grep -q` closes the pipe on its first match, so a piped projection under
 # `pipefail` returns 141 once the data exceeds the 64KB pipe buffer -- reporting
-# an ACTIVE rule as absent. Latent at today's ~163 bytes, so this is the only
+# an ACTIVE rule as absent. Latent at today's ~190 bytes, so this is the only
 # thing standing between the assertion and a silent regression to it.
 live_facts
 awk 'BEGIN { for (i = 0; i < 6000; i++) print "context:filler" i }' >>"$temporary/facts"
