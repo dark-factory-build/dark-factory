@@ -155,14 +155,14 @@ fn tools() -> Value {
     }, {
         "name": "submit_pull_request_review",
         "title": "Submit an exact-head pull request review",
-        "description": "Submit a COMMENT or REQUEST_CHANGES review bound to one pull request head commit. Replays require the same operation UUID and request.",
+        "description": "Record an adversarial-review verdict against one pull request head commit. ALLOW satisfies the required `review` check; REQUEST_CHANGES blocks it; COMMENT decides nothing. The verdict line is written by the App, so `body` carries the reviewer's findings and must not contain one. Replays require the same operation UUID and request.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "operation_id": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
                 "pull_number": {"type": "integer", "minimum": 1},
                 "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-                "event": {"type": "string", "enum": ["COMMENT", "REQUEST_CHANGES"]},
+                "event": {"type": "string", "enum": ["ALLOW", "COMMENT", "REQUEST_CHANGES"]},
                 "body": {"type": "string", "minLength": 1, "maxLength": 16000}
             },
             "required": ["operation_id", "pull_number", "head_sha", "event", "body"],

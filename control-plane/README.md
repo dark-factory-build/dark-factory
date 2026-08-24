@@ -39,10 +39,15 @@ configuration is live.
   reached headlessly with no human present. Each principal's claim set rejects
   the other's shape, so neither can take the other's path. It exposes six
   typed tools: `maintainer_status`, exact-head pull-request creation,
-  exact-head `COMMENT` or `REQUEST_CHANGES` review submission, exact-head
-  check-run observation, exact-head commit publication, and exact-head merge
-  queue enqueue. There is no direct-merge tool: a required merge queue makes
-  GitHub refuse `PUT /pulls/{n}/merge` outright, and
+  exact-head `ALLOW`, `COMMENT`, or `REQUEST_CHANGES` review submission,
+  exact-head check-run observation, exact-head commit publication, and
+  exact-head merge queue enqueue. `ALLOW` is the repository's own verdict, not
+  a GitHub review state -- the App opens the pull requests it would otherwise
+  approve and GitHub refuses a self-approval -- so it is posted as `COMMENT`
+  carrying a `Dark-Factory-Review:` line the App renders and refuses in caller
+  text. The `review` status check reads that line to enforce AGENTS.md rule 2;
+  see `docs/development/WORKFLOW.md`. There is no direct-merge tool: a required
+  merge queue makes GitHub refuse `PUT /pulls/{n}/merge` outright, and
   `docs/development/GITHUB_APP.md` had already ruled it out ("the broker does
   not ... expose direct merge as a fallback"). Enqueue is the only automated
   path to `main`. Publication refuses the `.github` authority tree, and both
