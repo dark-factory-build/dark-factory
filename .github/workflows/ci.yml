@@ -135,6 +135,60 @@ jobs:
       - name: Confirm all hosted source gates passed
         run: echo "macOS, Linux, and control-plane source gates passed"
 
+  # AGENTS.md rule 2 requires an adversarial review by an agent that did not
+  # write the change. GitHub cannot observe that, so the reviewer records its
+  # verdict through the maintainer App against the exact head it read, and this
+  # job reads it back. It judges whether a verdict exists and binds to this
+  # commit -- not whether the review was any good; see AGENTS.md rule 2 for
+  # what that does and does not establish.
+  review:
+    # Only the two gating events name a pull request. On a push to `main` or a
+    # manual dispatch there is no verdict to read, and the gate must not
+    # pretend to have checked one: it fails closed on any ref it cannot
+    # resolve, so it is not run rather than made lenient.
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      # Deliberately NOT $GITHUB_SHA. This runs the gate as it exists on the
+      # default branch, never the copy carried by the pull request under
+      # review. The maintainer App refuses to publish under `.github/` but may
+      # publish under `scripts/`, so a pull request running its own copy could
+      # weaken the reviewer that was about to judge it. A change to the gate is
+      # still tested by `checks` and `linux`, which do run the pull request's
+      # copy against scripts/test-verify-adversarial-review.sh.
+      - name: Check out the gate from the default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euxo pipefail
+          rm -rf .git
+          git init
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --depth=1 origin "refs/heads/${DEFAULT_BRANCH}"
+          git checkout --force --detach FETCH_HEAD
+          git clean -ffdx
+
+      - name: Verify the adversarial review verdict
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Both gating events name the pull request in GITHUB_REF, so this
+          # job does not branch on the event.
+          number="$(./scripts/verify-adversarial-review.sh --pull-number)"
+          head="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${number}" --jq '.head.sha')"
+          # Projection only: four fields per review and no decision, so the
+          # logic that gates every merge stays somewhere a test can drive it.
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${number}/reviews" --paginate \
+            --jq '.[] | [.commit_id, .state, .user.login, ((.body // "") | gsub("[\n\r\t]"; " "))] | @tsv' \
+            >"${RUNNER_TEMP}/reviews.tsv"
+          DF_REVIEW_HEAD_SHA="${head}" DF_REVIEW_REVIEWS="${RUNNER_TEMP}/reviews.tsv" \
+            ./scripts/verify-adversarial-review.sh
+
   control-plane:
     runs-on: ubuntu-24.04
     timeout-minutes: 20

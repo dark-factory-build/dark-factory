@@ -192,9 +192,53 @@ That is not a relaxation of review so much as a repair of it. The owner
 authors most pull requests here and GitHub never lets an author approve their
 own, so a blanket count of 1 meant every owner-authored change merged by admin
 bypass — the gate satisfied by circumventing it rather than by meeting it.
-Scoping by path means the approvals that do happen are real ones. It does not
-replace rule 2's adversarial review, which is a process requirement GitHub
-cannot observe.
+Scoping by path means the approvals that do happen are real ones.
+
+Rule 2's adversarial review is enforced separately, by the `review` check. The
+review itself happens in the factory, where an
+agent that did not write the change reads the diff; what GitHub sees is the
+verdict the reviewer records through the maintainer App:
+
+```sh
+submit_pull_request_review  event: ALLOW  head_sha: <the exact commit reviewed>
+```
+
+`scripts/verify-adversarial-review.sh` reads the pull request's reviews and
+passes only when the App recorded an `ALLOW` against exactly the head being
+merged, with no blocking verdict at that head. The reviewer's findings are
+written to the run summary, so a red check says what was wrong rather than
+only that something was.
+
+`review` joins the `required` aggregate in a follow-up change, once the gate is
+on the default branch. A single pull request adding both would deadlock: the
+job runs the default branch's copy of a script that does not exist there yet,
+so its own `required` could never go green.
+
+Three properties are worth stating precisely, because each replaces something
+an approval used to do:
+
+- **Exact-head binding.** GitHub records `commit_id` on the review from the
+  App's request, and the App also renders the head into a `Dark-Factory-Review:`
+  line it writes itself — a review body carrying that prefix is refused, so a
+  caller cannot state a verdict it did not ask for. Both must name the head
+  under test. Pushing a fix orphans every prior verdict, which is what
+  `dismiss_stale_reviews_on_push` did for human approvals.
+- **The gate is not part of the change it gates.** The `review` job runs the
+  copy of `verify-adversarial-review.sh` on the default branch, never the one
+  in the pull request. `scripts/` is a path the maintainer App *can* publish
+  to, unlike `.github/`, so without this an agent-authored pull request could
+  weaken the reviewer that was about to judge it.
+- **It runs in the merge queue too.** Each queue entry gets its own
+  `merge_group` run whose ref names exactly one pull request
+  (`gh-readonly-queue/<base>/pr-<n>-<base sha>`), so every entry is verified
+  against its own head rather than the group's synthetic head commit.
+
+What the check does not do is judge the review. A reviewer that records an
+`ALLOW` without reading anything produces a green check, and the reviewing and
+authoring agents reach the App through the same credential, so this is evidence
+that a review was recorded — not proof that one was earned. It closes the gap
+where a real review happened and GitHub could not see it, which was costing an
+owner approval on every pull request forever.
 Review the exact `.github/workflows/` diff before approving an external run: a
 PR evaluates its own workflow and can change `runs-on`. `.github/` is an owned
 path in CODEOWNERS for exactly this reason, and the maintainer App refuses to
