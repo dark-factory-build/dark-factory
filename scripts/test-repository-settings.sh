@@ -114,14 +114,23 @@ verdict_step_keys=$(awk '
     # Same job-key bound as the extractions above.
     job && /^  [^ #]/ { exit }
     job && /^      - name: Require a recorded adversarial review verdict$/ { step = 1; next }
-    # The step ends at the next six-space-indented line, whether that is the
-    # following `- name:` or a comment block between steps. A block scalar
-    # body is indented past its own key, so it is never read as one.
-    step && /^      [^ ]/ { exit }
+    # The step ends at the next six-space line that is NOT a comment: the
+    # following `- name:`. The same rule as the job bounds, for the same
+    # reason -- a comment is never a key -- and load-bearing here. Stopping
+    # on a comment hides every key written after one, and YAML comment
+    # indentation is structurally irrelevant, so `# regrouping the step` on
+    # its own line above `shell: cat {0}` still leaves the key on THIS step:
+    # bypasses 2 and 3 straight back. Found by review of this change.
+    # A block scalar body is indented past its own key, so it is never read
+    # as one.
+    step && /^      [^ #]/ { exit }
     step && /^        [^ #]/ { sub(/:.*/, ""); sub(/^ */, ""); print }
 ' "$workflow" | sort)
 if [ "$verdict_step_keys" != "$(printf '%s\n' if run)" ]; then
     echo "the adversarial-review step's keys are not exactly 'if' and 'run'" >&2
+    # The set, not just the rule: this assertion fires on a benign addition by
+    # design, and the collected keys say at a glance which case it is.
+    echo "  found: $(printf '%s' "${verdict_step_keys:-(none)}" | tr '\n' ' ')" >&2
     exit 1
 fi
 grep -Fq "if: needs.checks.result != 'success' || needs.linux.result != 'success' || needs.control-plane.result != 'success'" "$workflow"
