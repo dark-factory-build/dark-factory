@@ -348,7 +348,7 @@ jobs:
       - name: Verify source-gate mode boundary
         run: ./scripts/test-local-ci-mode.sh
 
-      - name: Verify repository settings proposal
+      - name: Verify repository settings publisher and gate
         run: ./scripts/test-repository-settings.sh
 
       - name: Run the source contributor smoke
