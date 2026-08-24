@@ -13,10 +13,23 @@ grep -Fq 'integration_id: 15368' "$manifest"
 grep -Fq '  required:' "$workflow"
 grep -Fq '    if: always()' "$workflow"
 grep -Fq '    needs: [checks, linux, control-plane, review]' "$workflow"
+# The condition is extracted from the step, not grepped from the file. A
+# free-floating `grep` is satisfied by the string appearing in a comment, so it
+# passes while the step's real `if:` has been changed to `false` -- a gate that
+# is present, correctly named, body intact, and never fires.
+verdict_if=$(awk '
+    /^      - name: Require a recorded adversarial review verdict$/ { step = 1; next }
+    step && /^      - name: / { exit }
+    step && /^        if: / { sub(/^        if: /, ""); print; exit }
+' "$workflow")
 # In the queue only `success` passes; elsewhere `skipped` passes too, because
 # `review` runs on merge_group alone. Without the second arm the aggregate
 # fails every pull request.
-grep -Fq "if: needs.review.result != 'success' && (github.event_name == 'merge_group' || needs.review.result != 'skipped')" "$workflow"
+expected_if="needs.review.result != 'success' && (github.event_name == 'merge_group' || needs.review.result != 'skipped')"
+if [ "$verdict_if" != "$expected_if" ]; then
+    echo "the adversarial-review step does not carry the reviewed condition" >&2
+    exit 1
+fi
 
 # Pinning the strings is not enough, and claiming otherwise was wrong: the
 # condition can be present and correct while the step it guards has been
@@ -35,19 +48,15 @@ verdict_step=$(awk '
     body && /^ *$/ { print ""; next }
     body { exit }
 ' "$workflow")
-case $verdict_step in
-    *"exit 1"*) ;;
-    *)
-        echo "the adversarial-review step does not fail the job" >&2
-        exit 1
-        ;;
-esac
-case $verdict_step in
-    *"exit 0"*)
-        echo "the adversarial-review step exits successfully" >&2
-        exit 1
-        ;;
-esac
+# `grep -qx`, not a substring test. A substring is satisfied by `# exit 1`, by
+# an `exit 1` nested under `if false; then`, and by `echo "exit 1"` -- each a
+# step that runs, prints its diagnostic, and passes. Since awk has already
+# stripped the body indent, requiring a whole line equal to `exit 1` also
+# forces it to be unconditional at the top level.
+printf '%s\n' "$verdict_step" | grep -qx 'exit 1' || {
+    echo "the adversarial-review step does not fail the job" >&2
+    exit 1
+}
 grep -Fq "if: needs.checks.result != 'success' || needs.linux.result != 'success' || needs.control-plane.result != 'success'" "$workflow"
 grep -Fq '"context": "required"' "$publisher"
 # The review gate runs only on `merge_group`, so these two are load-bearing for
