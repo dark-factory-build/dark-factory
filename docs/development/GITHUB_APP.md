@@ -1,8 +1,10 @@
 # GitHub App authority decision
 
-Status: Phase 0 read-only authority proof implemented; mutation operations
-inactive. This document does not itself authorize App registration,
-installation, repository publication, merge, release, or live-factory changes.
+Status: the maintainer broker is live at `https://maintainer.darkfactory.build`
+with six typed operations, exercised in production. The product App's runtime
+integration remains inactive behind the activation gates below. This document
+does not itself authorize App registration, installation, repository
+publication, merge, release, or live-factory changes.
 
 ## Decision
 
@@ -61,7 +63,9 @@ installation for the bound `owner/repository` and numeric owner. This proof
 creates no installation token and exposes no repository operation. Every
 non-ping event is policy-rejected. The official hosted adapter is a Rust
 Cloudflare Worker.
-Its production journal uses strongly consistent SQLite Durable Objects;
+Its production webhook **delivery** journal -- distinct from the operation
+audit described under "Authority boundary", and unaffected by it -- uses
+strongly consistent SQLite Durable Objects;
 native SQLite exists only behind the non-default `development-sqlite` feature
 and can never satisfy readiness. The production adapter accepts exactly
 `DARK_FACTORY_MAINTAINER_WEBHOOK_SECRET`,
@@ -73,7 +77,7 @@ and can never satisfy readiness. The production adapter accepts exactly
 `DARK_FACTORY_MAINTAINER_REPOSITORY_OWNER_ID`. The private key is standard
 base64 of unencrypted PKCS#8 DER, the repository is an exact safe
 `owner/repository` name, and the implemented permission revision is exactly
-`maintainer-metadata-v1`. Missing webhook authority or a partial or
+`maintainer-operations-v1`. Missing webhook authority or a partial or
 syntactically invalid App-authority group leaves the fixed inactive router with
 no webhook route. An unusable key or configured but unavailable or drifted
 Durable Object journal or GitHub authority makes readiness and ping
@@ -206,23 +210,67 @@ GitHub client itself. Broker absence, denial, or an indeterminate result is a
 visible operation failure, never authority to use an operator's personal
 credentials.
 
-Each durable operation binds:
+Each operation binds:
 
 - project and repository numeric identity;
 - App installation and explicit permission revision;
 - exact attempt, Run, Change, and immutable source digest where applicable;
 - exact source/base commit;
-- a canonical request digest and idempotency key; and
-- one durable result, including the resulting Git object or PR identity.
+- a canonical request digest; and
+- one result, including the resulting Git object or PR identity.
 
 The broker revalidates installation, selected-repository scope, permission
 subset, expiry, and request binding before the effect. Cross-project,
 cross-repository, cross-installation, stale-base, ambiguous, revoked, or
-permission-expanded requests fail closed. Retry returns the exact prior result
-or an idempotency conflict. A mutation submitted to GitHub without a durable
-acknowledgement becomes visibly indeterminate and is not submitted again until
-operation-specific reconciliation proves the result; the system never guesses
-whether a second mutation is safe.
+permission-expanded requests fail closed.
+
+**Where at-most-once comes from.** It is a property of the write itself, not
+of a local ledger. Every mutation this broker performs is a compare-and-swap
+against GitHub state that the caller stated in advance:
+
+- `publish_commit` updates the ref with `force: false` from a stated sole
+  parent, so once the first attempt has landed a second cannot fast-forward;
+- `merge_pull_request_at_head` passes `sha`, which GitHub enforces as a
+  required head match and answers `409` when it no longer holds;
+- `create_pull_request` is refused by GitHub for a duplicate head/base pair.
+
+A retry therefore cannot produce a second effect. It either finds the head
+where it was stated and performs the one write, or finds it moved and fails
+closed. Recovery from an unacknowledged submission is a **stateless read of
+GitHub** -- read the branch, the pull request, or the review list and ask
+whether this operation's effect is present -- never a read of a local record
+of what we intended. GitHub is what knows; a journal only records that we did
+not.
+
+**Reusing an operation ID with a different request.** This is the one property
+a local ledger genuinely provided, and it is kept by moving the idempotency
+key into the artifact rather than into a ledger beside it. The marker an
+operation writes carries the request digest alongside the operation ID:
+
+```
+Dark-Factory-Operation: <operation_id>/<request_digest>
+```
+
+Reconciliation matches the exact pair. A reused ID carrying a different body
+finds no match, proceeds, and fails closed on the compare-and-swap -- because
+the head moved when the first effect landed. The key is self-describing and
+lives with the thing it identifies, so it cannot drift out of agreement with
+it.
+
+**The audit is a record, not a control.** One append-only row per operation
+records App installation, repository, permission revision, operation kind,
+request digest, result, and outcome. It is written after the effect and is
+never consulted to decide whether an effect may proceed. It carries no `CHECK`
+constraint on the operation kind: constraining the kind means a schema
+migration for every new typed operation, which is a tax on exactly the
+behaviour this document wants to be cheap.
+
+**The limit of this design, stated so it is decided rather than discovered.**
+It holds only for operations whose effect is observable in GitHub state. All
+six current operations are. An operation with an external side effect that
+cannot be read back -- a notification, a payment, anything write-only -- has no
+stateless reconciliation available and needs durable local state of its own.
+That is a decision to take before adding such an operation, not after.
 
 The future runtime operation set is deliberately finite: read an exact
 revision, publish one exact immutable Change tree to a generated branch,
@@ -313,11 +361,29 @@ must not be reintroduced. No DCO `Signed-off-by` trailer is added
 automatically: legal signoff is a separate explicit product-policy decision,
 not cryptographic commit verification.
 
-GitHub documents no general idempotency key for Git commit creation. The REST
-Git Database sequence therefore remains blocked until the broker can prove
-at-most-once submission and honest indeterminate recovery, or an atomic API is
-shown to preserve every Change byte and Git mode. No implementation may claim
-exactly-once commit publication from blind REST retry.
+GitHub documents no general idempotency key for Git commit creation, and an
+earlier revision of this document therefore blocked the REST Git Database
+sequence "until the broker can prove at-most-once submission and honest
+indeterminate recovery". That condition is met, but not in the way that
+sentence anticipated, so it is worth saying exactly where its premise was
+wrong.
+
+The premise was that blob, tree, and commit creation are unguarded mutations.
+They are not mutations in any observable sense. **An unreferenced Git object
+has no effect.** Creating the same tree twice yields the same SHA; creating a
+commit twice yields two objects that nothing points at and that GitHub will
+garbage-collect. Nothing is visible, to a reader or to a later operation,
+until the ref update -- and that update is a single atomic compare-and-swap
+against a stated parent. At-most-once is a property of the ref update, which
+means it was always available, and the missing piece was never an idempotency
+key for object creation.
+
+What remains true, and is why this paragraph is not simply deleted: no
+implementation may claim exactly-once publication from *blind* REST retry. A
+retry is safe only because it re-states the same expected head and is refused
+when that head has moved. A retry that dropped the expected head, or passed
+`force: true`, would reintroduce precisely the hazard this paragraph was
+written to prevent.
 
 Runtime ref creation never uses force or replacement. A pre-existing generated
 ref is success only when it already names the exact verified commit. Runtime
