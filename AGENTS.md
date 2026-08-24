@@ -65,6 +65,13 @@ Read-only context unless a task explicitly asks you to edit them:
    verdict at a head cannot be cleared by a second ALLOW at that same head;
    it is cleared by pushing the fix.
 
+   All three are the App's own words, not GitHub review states. The App
+   authors the pull requests it reviews and GitHub refuses a self-review
+   that takes a side — `APPROVE` and `REQUEST_CHANGES` alike — so every
+   verdict is submitted as a GitHub `COMMENT` and the verdict itself rides
+   in a line the App writes and refuses in caller text. The check reads
+   that line; it never reads the GitHub review state.
+
    **What this checks and what it does not.** It checks that a verdict
    exists, came from the App, and names this exact commit. It does not judge
    the review: an agent that records `ALLOW` without reading anything

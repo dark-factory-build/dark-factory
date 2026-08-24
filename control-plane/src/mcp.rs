@@ -128,7 +128,7 @@ fn tools() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "operation_id": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
+                "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
                 "head": {"type": "string", "minLength": 1, "maxLength": 240},
                 "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
                 "base": {"type": "string", "minLength": 1, "maxLength": 240},
@@ -155,11 +155,11 @@ fn tools() -> Value {
     }, {
         "name": "submit_pull_request_review",
         "title": "Submit an exact-head pull request review",
-        "description": "Record an adversarial-review verdict against one pull request head commit. ALLOW satisfies the required `review` check; REQUEST_CHANGES blocks it; COMMENT decides nothing. The verdict line is written by the App, so `body` carries the reviewer's findings and must not contain one. Replays require the same operation UUID and request.",
+        "description": "Record an adversarial-review verdict against one pull request head commit. ALLOW satisfies the required `review` check; REQUEST_CHANGES blocks it, and a block at a head is cleared only by pushing a fix, never by a second ALLOW at that same head; COMMENT decides nothing. All three are this App's own words and none is a GitHub review state: the App authors the pull requests it reviews and GitHub refuses a self-review either way, so every verdict is submitted as a GitHub COMMENT and the verdict itself rides in a line the App writes. That is the line the `review` check reads, which is why `body` carries the reviewer's findings and must not contain one. Replays require the same operation UUID and request.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "operation_id": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
+                "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
                 "pull_number": {"type": "integer", "minimum": 1},
                 "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
                 "event": {"type": "string", "enum": ["ALLOW", "COMMENT", "REQUEST_CHANGES"]},
@@ -225,7 +225,7 @@ fn tools() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "operation_id": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
+                "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
                 "branch": {"type": "string", "minLength": 1, "maxLength": 240},
                 "expected_head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
                 "message": {"type": "string", "minLength": 1, "maxLength": 4096},
@@ -265,7 +265,7 @@ fn tools() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "operation_id": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
+                "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
                 "pull_number": {"type": "integer", "minimum": 1},
                 "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
                 "base": {"type": "string", "minLength": 1, "maxLength": 255}

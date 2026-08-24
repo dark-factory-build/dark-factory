@@ -216,6 +216,12 @@ merged, with no blocking verdict at that head. The reviewer's findings are
 written to the run summary, so a red check says what was wrong rather than
 only that something was.
 
+A blocking verdict is recorded the same way, with `event: REQUEST_CHANGES`.
+All three verdicts reach GitHub as a `COMMENT` review — the App authors the
+pull requests it reviews, and GitHub refuses a self-review that takes a side,
+`APPROVE` and `REQUEST_CHANGES` alike — so what distinguishes them is the line
+the App writes, which is the only thing the check reads.
+
 `review` is part of the `required` aggregate, which is what makes rule 2 a
 merge condition rather than a convention:
 

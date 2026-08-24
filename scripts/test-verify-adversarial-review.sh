@@ -101,6 +101,18 @@ expect_fail 'note is not an allow'
 expect_fail 'block outranks a co-existing allow'
 assert_summary '**BLOCKED**'
 
+# ...and clears only by pushing. A block belongs to the head it was recorded
+# against, so the fix that moves the head orphans it exactly as it orphans an
+# ALLOW. Without this, "cleared by pushing the fix" is a claim rather than a
+# tested property -- and the failure it would hide is the worse direction of
+# the two: a pull request no push could ever make mergeable again.
+{
+    record "$other" COMMENTED "$app" "Reaps nothing on failure. Dark-Factory-Review: block $other"
+    record "$head" COMMENTED "$app" "Reap fixed and re-read. Dark-Factory-Review: allow $head"
+} >"$reviews"
+expect_pass 'a block at the previous head does not block the new one'
+assert_summary '**ALLOWED**'
+
 # GitHub's own blocking state blocks even with no verdict line.
 record "$head" CHANGES_REQUESTED "$app" "no verdict line here" >"$reviews"
 expect_fail 'CHANGES_REQUESTED blocks without a line'
@@ -277,6 +289,15 @@ for verdict in allow note block; do
         exit 1
     }
 done
+# And it must be able to record all three. Every verdict is submitted as one
+# GitHub review event, because the App authors the pull requests it reviews and
+# GitHub refuses a self-review that takes a side. Mapping any verdict onto a
+# GitHub review state instead makes it unpostable on every reviewable pull
+# request -- which is how block precedence above came to guard an empty set.
+grep -Fq 'const REVIEW_EVENT: &str = "COMMENT";' "$app" || {
+    echo 'FAIL: the App does not record every verdict as a COMMENT review' >&2
+    exit 1
+}
 
 # The workflow has to run this gate, and run the default branch's copy of it.
 # Running the pull request's own copy would let a change weaken the reviewer
