@@ -3,10 +3,10 @@
 # adversarial-review gate. Nothing here mutates anything live: the publisher
 # records what an operator intends to apply, the live rules are the only
 # record of what is applied, and the workflow's inline chokepoint asserts
-# four live facts on every run -- the merge_queue rule, ALLGREEN grouping,
-# the required_status_checks rule, and the required context. It does not
-# observe the context's integration binding; the publisher pin below is that
-# fact's only record (#375).
+# five live facts on every run -- the merge_queue rule, ALLGREEN grouping,
+# the required_status_checks rule, the required context, and that context's
+# binding to GitHub Actions (#375). The publisher pin below records the
+# intent; the chokepoint is what observes it.
 set -eu
 
 repository_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -94,13 +94,27 @@ grep -Fq '"type": "merge_queue"' "$publisher"
 grep -Fq '"grouping_strategy": "ALLGREEN"' "$publisher"
 # The chokepoint assertion lives inline in the workflow on purpose: a helper
 # under scripts/ is App-publishable, so it would be the weaker-protected file
-# guarding the stronger-protected one. Assert all four facts are required.
-for fact in rule:merge_queue grouping:ALLGREEN rule:required_status_checks context:required; do
+# guarding the stronger-protected one. Assert all five facts are required.
+# The binding fact names its context: a bare `integration:15368` would be
+# satisfied by any bound entry, including one that is not `required`.
+for fact in rule:merge_queue grouping:ALLGREEN rule:required_status_checks \
+    context:required integration:15368:required; do
     grep -Fq "require $fact" "$workflow" || {
         echo "the workflow does not require '$fact' to be live" >&2
         exit 1
     }
 done
+# The binding fact has to be READ from the rule, not written into the string.
+# The fixtures in test-inline-chokepoint.sh are projection output -- the stubbed
+# `gh` never runs the `--jq` program -- so a projection that emits
+# `("integration:15368:" + .context)` fabricates the fact for every entry,
+# satisfies `require integration:15368:required` unconditionally, and leaves
+# both test scripts green. The live run does not catch it either: a fabricated
+# fact agrees with the require line everywhere, so it fails OPEN rather than
+# closed. Pinning the token that does the reading is what separates the shipped
+# projection from that mutant. The general gap -- the stub not honouring
+# `--jq`, which would make the projection executable by a test -- is #383.
+grep -Fq '(.integration_id|tostring)' "$workflow"
 grep -Fq 'rules/branches/${BASE_BRANCH}' "$workflow"
 if grep -Fq '"context": "checks"' "$publisher"; then
     echo "repository settings still require the macOS-only checks context" >&2
