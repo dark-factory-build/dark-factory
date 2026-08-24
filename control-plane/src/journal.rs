@@ -470,6 +470,41 @@ fn table_exists(sql: &SqlStorage, name: &str) -> Result<bool, Error> {
     Ok(matches!(rows.as_slice(), [row] if row.present > 0))
 }
 
+/// The statement the rebuild uses to drain one legacy table into the current
+/// one. Shared with the test lane, because the rebuild itself is `wasm32`-only
+/// and this statement shipped unparseable once already.
+///
+/// `WHERE true` is required, not stylistic. SQLite cannot parse an UPSERT
+/// attached to an `INSERT .. SELECT` without one: the parser cannot tell
+/// whether `ON` begins a join constraint or the conflict clause, and answers
+/// `near "DO": syntax error`.
+#[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+fn operations_copy_sql(source: &str) -> String {
+    format!(
+        "INSERT INTO maintainer_operations
+             (operation_id, kind, request_digest, state, result_json, created_at, updated_at)
+         SELECT operation_id, kind, request_digest, state, result_json, created_at, updated_at
+         FROM {source}
+         WHERE true
+         ON CONFLICT(operation_id) DO NOTHING"
+    )
+}
+
+#[cfg(target_arch = "wasm32")]
+fn operations_table_is_current(sql: &SqlStorage) -> Result<bool, Error> {
+    let rows = sql
+        .exec(
+            "SELECT sql FROM sqlite_schema
+             WHERE type = 'table' AND name = 'maintainer_operations'",
+            None,
+        )?
+        .to_array::<SchemaRow>()?;
+    Ok(matches!(
+        rows.as_slice(),
+        [row] if normalized_sql(&row.sql) == expected_stored_sql(OPERATION_MIGRATION_SQL)
+    ))
+}
+
 #[cfg(target_arch = "wasm32")]
 fn migrate_operations(sql: &SqlStorage) -> Result<(), Error> {
     let stored = sql
@@ -491,41 +526,43 @@ fn migrate_operations(sql: &SqlStorage) -> Result<(), Error> {
     worker::console_log!(
         "journal: rebuilding maintainer_operations for revision {OPERATION_MIGRATION_REVISION}"
     );
-    // Each step is driven off what the schema actually holds, because the
-    // rebuild is not atomic: a failure part-way through returns a 503 and
-    // leaves the completed steps in place, and the revision row still says
-    // 0002, so the next request runs this again. Resuming must not re-rename a
-    // table that is already renamed, and must never drop the legacy table
-    // before its rows have been copied — at the point the rename has happened
-    // it holds the only copy of the journal.
-    // `maintainer_operations_0002` is the rename this function used before it
-    // was generalised. A shard interrupted part-way through that rebuild holds
-    // the only copy of its journal under that name, so it is still drained
+
+    // `maintainer_operations_0002` is the name an earlier form of this
+    // function renamed to. A shard interrupted part-way through that rebuild
+    // holds the only copy of its journal under it, so it is still drained
     // here rather than assuming every shard finished.
     let legacy = ["maintainer_operations_legacy", "maintainer_operations_0002"];
-    if table_exists(sql, "maintainer_operations")?
-        && !legacy.iter().try_fold(false, |found, name| {
-            Ok::<_, Error>(found || table_exists(sql, name)?)
-        })?
-    {
+
+    // Each step is driven off what the schema actually holds, because the
+    // rebuild is not atomic: a failure part-way through returns a 503 and
+    // leaves the completed steps in place, and the revision row still names
+    // the old revision, so the next request runs this again.
+    //
+    // The rename is guarded on the live table being the WRONG SHAPE, not on a
+    // legacy table being absent. Those are different questions once more than
+    // one legacy name is possible: a shard left holding both a current-shape
+    // table and an older legacy one would otherwise skip the rename, no-op the
+    // `IF NOT EXISTS` create, and record the new revision against a table that
+    // never changed -- which the schema audit then rejects forever.
+    if !operations_table_is_current(sql)? && table_exists(sql, "maintainer_operations")? {
+        let Some(slot) = legacy
+            .iter()
+            .find(|name| !matches!(table_exists(sql, name), Ok(true)))
+        else {
+            // Both names are taken and the live table is still wrong. Renaming
+            // over either one would destroy the only copy of those rows.
+            worker::console_error!("journal: no free legacy slot for the operations rebuild");
+            return Err(Error::InvalidSchema);
+        };
         sql.exec(
-            "ALTER TABLE maintainer_operations RENAME TO maintainer_operations_legacy",
+            &format!("ALTER TABLE maintainer_operations RENAME TO {slot}"),
             None,
         )?;
     }
     sql.exec(OPERATION_MIGRATION_SQL, None)?;
     for name in legacy {
         if table_exists(sql, name)? {
-            sql.exec(
-                &format!(
-                    "INSERT INTO maintainer_operations
-                         (operation_id, kind, request_digest, state, result_json, created_at, updated_at)
-                     SELECT operation_id, kind, request_digest, state, result_json, created_at, updated_at
-                     FROM {name}
-                     ON CONFLICT(operation_id) DO NOTHING"
-                ),
-                None,
-            )?;
+            sql.exec(&operations_copy_sql(name), None)?;
             sql.exec(&format!("DROP TABLE {name}"), None)?;
         }
     }
@@ -1174,5 +1211,122 @@ mod operation_tests {
             journal.begin_operation(&operation).await,
             Err(Error::InvalidSchema)
         ));
+    }
+}
+
+/// The operations rebuild is `wasm32`-only, so no host test reaches it and
+/// `clippy --target wasm32` type-checks its SQL strings without ever parsing
+/// them as SQL. The workerd integration test does not reach it either: it
+/// builds a fresh persistence directory each run, so the shard it exercises
+/// has no migration row and the rebuild early-returns.
+///
+/// That left the highest-blast-radius code in the component with no coverage
+/// in any environment, and it shipped a statement SQLite cannot parse. These
+/// tests drive the real statements against real SQLite.
+#[cfg(all(test, feature = "development-sqlite"))]
+mod migration_tests {
+    use super::*;
+
+    fn legacy_0003_table(connection: &Connection, name: &str) {
+        connection
+            .execute_batch(&format!(
+                "CREATE TABLE {name} (
+                     operation_id TEXT PRIMARY KEY,
+                     kind TEXT NOT NULL,
+                     request_digest TEXT NOT NULL,
+                     state TEXT NOT NULL,
+                     result_json TEXT,
+                     created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                     updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+                 ) STRICT;
+                 INSERT INTO {name}
+                     (operation_id, kind, request_digest, state, result_json,
+                      created_at, updated_at)
+                 VALUES
+                     ('2c8a5c44-7f1f-11f0-952e-acde48001122',
+                      'merge_pull_request_at_head',
+                      '{digest}', 'completed', '{{\"merged\":true}}', 1, 1);",
+                name = name,
+                digest = "a".repeat(64)
+            ))
+            .unwrap();
+    }
+
+    /// The copy statement must parse. It did not: an UPSERT attached to an
+    /// `INSERT .. SELECT` needs a `WHERE` clause, and without one SQLite
+    /// answers `near "DO": syntax error`. Every already-used shard would have
+    /// renamed its table, failed here, and returned 503 for every route
+    /// forever with its journal stranded under the renamed table.
+    #[test]
+    fn the_rebuild_copy_statement_parses_and_preserves_rows() {
+        let connection = Connection::open_in_memory().unwrap();
+        legacy_0003_table(&connection, "maintainer_operations_legacy");
+        connection.execute_batch(OPERATION_MIGRATION_SQL).unwrap();
+
+        connection
+            .execute_batch(&operations_copy_sql("maintainer_operations_legacy"))
+            .expect("the rebuild copy statement must be valid SQLite");
+
+        let (count, kind): (i64, String) = connection
+            .query_row(
+                "SELECT count(*), max(kind) FROM maintainer_operations",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "the legacy row must survive the rebuild");
+        // A kind the current build no longer writes still has to round-trip:
+        // the new CHECK constrains shape, not membership, so history is kept.
+        assert_eq!(kind, "merge_pull_request_at_head");
+    }
+
+    /// Re-running the copy after a partial rebuild must not fail or duplicate.
+    #[test]
+    fn the_rebuild_copy_is_idempotent() {
+        let connection = Connection::open_in_memory().unwrap();
+        legacy_0003_table(&connection, "maintainer_operations_legacy");
+        connection.execute_batch(OPERATION_MIGRATION_SQL).unwrap();
+
+        for _ in 0..3 {
+            connection
+                .execute_batch(&operations_copy_sql("maintainer_operations_legacy"))
+                .unwrap();
+        }
+        let count: i64 = connection
+            .query_row("SELECT count(*) FROM maintainer_operations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    /// Every `kind` the code writes must satisfy the shape CHECK that replaced
+    /// the enumeration, and a malformed one must still be refused.
+    #[test]
+    fn the_kind_shape_check_accepts_every_kind_the_code_writes() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(OPERATION_MIGRATION_SQL).unwrap();
+        let insert = |id: &str, kind: &str| {
+            connection.execute(
+                "INSERT INTO maintainer_operations
+                     (operation_id, kind, request_digest, state)
+                 VALUES (?, ?, ?, 'planned')",
+                rusqlite::params![id, kind, "b".repeat(64)],
+            )
+        };
+        for (index, kind) in [
+            "create_pull_request",
+            "submit_pull_request_review",
+            "publish_commit",
+            "enqueue_pull_request",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = format!("2c8a5c44-7f1f-11f0-952e-acde4800112{index}");
+            insert(&id, kind).unwrap_or_else(|error| panic!("{kind} rejected: {error}"));
+        }
+        assert!(insert("3c8a5c44-7f1f-11f0-952e-acde48001122", "Publish Commit").is_err());
+        assert!(insert("4c8a5c44-7f1f-11f0-952e-acde48001122", "").is_err());
     }
 }

@@ -51,10 +51,11 @@ pub(crate) enum Error {
     Configuration,
     #[error("maintainer App authority is unavailable")]
     Unavailable,
-    /// GitHub answered, and its status is the answer. The merge endpoint in
-    /// particular reports *why* it refused, and collapsing that into
-    /// "unavailable" turns a determinate refusal into a reconciliation the
-    /// caller cannot resolve.
+    /// GitHub answered, and its status is the answer. Endpoints report *why*
+    /// they refused, and collapsing that into "unavailable" turns a
+    /// determinate refusal into a reconciliation the caller cannot resolve.
+    /// Which statuses a given endpoint uses to refuse is the caller's to
+    /// classify, not this type's.
     #[error("github rejected the request with status {0}")]
     Rejected(u16),
 }
@@ -188,15 +189,22 @@ pub(crate) struct CommitResult {
     pub(crate) parent_sha: String,
 }
 
-/// Deliberately carries neither `position` nor `state`: both change while the
-/// entry waits, and this is a durable result an idempotent replay returns
-/// verbatim. A stored "position 3" would be a lie the moment anything ahead
-/// merges. The entry id and the head it was queued at do not change.
+/// Deliberately carries no `position`: it changes while the entry waits, and
+/// this is a durable result an idempotent replay returns verbatim, so a stored
+/// "position 3" is a lie the moment anything ahead merges.
+///
+/// `state_at_enqueue` is named for what it is. An entry can be `UNMERGEABLE`
+/// the moment it is created -- a moved base, a conflict -- and a caller told
+/// only "queued" would wait for a merge that is never coming. The value does
+/// not change retroactively, so replaying it is honest; it is not a live
+/// status, and there is no operation yet that reports the eventual merge
+/// outcome.
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct EnqueueResult {
     pub(crate) pull_number: i64,
     pub(crate) head_sha: String,
     pub(crate) entry_id: String,
+    pub(crate) state_at_enqueue: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1320,17 +1328,26 @@ impl Authority {
             entry: Option<QueueEntry>,
         }
 
-        let data: Data = github_graphql(
+        let answer: Result<Data, GraphQlFailure> = github_graphql(
             token,
             "mutation($pull:ID!,$head:GitObjectID!){\
              enqueuePullRequest(input:{pullRequestId:$pull,expectedHeadOid:$head}){\
-             mergeQueueEntry{id pullRequest{number headRefOid}}}}",
+             mergeQueueEntry{id state pullRequest{number headRefOid}}}}",
             &Variables {
                 pull: pull_node_id,
                 head: &request.head_sha,
             },
         )
         .await?;
+        let data = match answer {
+            Ok(data) => data,
+            // Rejected before execution: nothing was queued and the caller can
+            // retry this same operation ID once the precondition holds.
+            Err(GraphQlFailure::Rejected) => return Err(OperationError::Refused),
+            // Not knowable. The ladder above reconciles against the queue and
+            // only reports indeterminate if that cannot answer either.
+            Err(GraphQlFailure::Unknown) => return Err(OperationError::Indeterminate),
+        };
         let entry = data
             .enqueue
             .and_then(|payload| payload.entry)
@@ -1373,13 +1390,12 @@ impl Authority {
             nodes: Vec<QueueEntry>,
         }
 
-        const PAGE: i64 = 100;
-        let data: Data = github_graphql(
+        let answer: Result<Data, GraphQlFailure> = github_graphql(
             token,
             "query($owner:String!,$name:String!,$base:String!){\
              repository(owner:$owner,name:$name){\
              mergeQueue(branch:$base){entries(first:100){totalCount \
-             nodes{id pullRequest{number headRefOid}}}}}}",
+             nodes{id state pullRequest{number headRefOid}}}}}}",
             &Variables {
                 owner: &self.repository.owner,
                 name: &self.repository.name,
@@ -1387,6 +1403,10 @@ impl Authority {
             },
         )
         .await?;
+        // A read that failed did not refuse anything -- it failed to find out.
+        // Reporting `Refused` here would tell the caller "nothing changed"
+        // about an enqueue whose outcome is exactly what could not be read.
+        let data = answer.map_err(|_| OperationError::Indeterminate)?;
         let Some(entries) = data
             .repository
             .and_then(|repository| repository.queue)
@@ -1399,7 +1419,10 @@ impl Authority {
         // One unread page could hide this operation's entry and make a
         // reconciliation answer "not queued" for something that is. Refuse to
         // guess instead.
-        if entries.total_count > PAGE || entries.nodes.len() as i64 != entries.total_count {
+        // `nodes.len() == totalCount` is the proof that the whole queue was
+        // read, so the page size does not need naming twice: a short page
+        // fails this comparison exactly as an over-long queue would.
+        if entries.nodes.len() as i64 != entries.total_count {
             return Err(OperationError::Indeterminate);
         }
         entries
@@ -1750,6 +1773,7 @@ struct GitParent {
 #[derive(Deserialize)]
 struct QueueEntry {
     id: String,
+    state: String,
     #[serde(rename = "pullRequest")]
     pull_request: Option<QueueEntryPullRequest>,
 }
@@ -1783,10 +1807,20 @@ impl QueueEntry {
             return Err(OperationError::Indeterminate);
         }
         valid_text(&self.id, 1, 256, true)?;
+        // GitHub's documented `MergeQueueEntryState`. An unknown value means
+        // the schema moved under us, and guessing would report a merge state
+        // this build does not understand.
+        if !matches!(
+            self.state.as_str(),
+            "QUEUED" | "AWAITING_CHECKS" | "MERGEABLE" | "UNMERGEABLE" | "LOCKED"
+        ) {
+            return Err(OperationError::Indeterminate);
+        }
         Ok(EnqueueResult {
             pull_number: request.pull_number,
             head_sha: request.head_sha.clone(),
             entry_id: self.id,
+            state_at_enqueue: self.state,
         })
     }
 }
@@ -1973,15 +2007,24 @@ fn validate_installation(
         (installation.account.id != owner_id).then_some("account_id"),
         (installation.repository_selection != "selected").then_some("repository_selection"),
         (!permission_at_least(&installation.permissions, "checks", "read")).then_some("checks"),
-        // `publish_commit` and `merge_pull_request_at_head` both mint
-        // `contents: write`. Accepting a read-only installation let readiness
-        // pass and then failed at token mint, where GitHub's 422 reaches the
-        // caller as an opaque "authority is unavailable".
+        // `publish_commit` mints `contents: write`. Accepting a read-only
+        // installation let readiness pass and then failed at token mint, where
+        // GitHub's 422 reaches the caller as an opaque "authority is
+        // unavailable".
         (!permission_at_least(&installation.permissions, "contents", "write"))
             .then_some("contents"),
         (!permission_at_least(&installation.permissions, "metadata", "read")).then_some("metadata"),
         (!permission_at_least(&installation.permissions, "pull_requests", "write"))
             .then_some("pull_requests"),
+        // `enqueue_pull_request` mints `merge_queues: write`, and it is the
+        // only automated path to the default branch. Omitting it here is the
+        // same fail-open the `contents` line above exists to prevent: an
+        // installation without Merge queues would pass `/readyz`, report
+        // authority ready, and then fail every enqueue at token mint. This
+        // check is also what makes readiness the answer to "was the permission
+        // actually granted?" rather than something nothing records.
+        (!permission_at_least(&installation.permissions, "merge_queues", "write"))
+            .then_some("merge_queues"),
         (!installation.events.is_empty()).then_some("events"),
         (installation.suspended_at.is_some()).then_some("suspended_at"),
     ]
@@ -2034,19 +2077,48 @@ async fn github_json_as_app<T: serde::de::DeserializeOwned>(
     github_json(url, jwt).await
 }
 
-/// One typed GraphQL operation, not a proxy: the query text is a compile-time
-/// constant here and the caller supplies only typed variables. There is no
+/// What a GraphQL response establishes, handed back to the caller rather than
+/// decided here.
+///
+/// A mutation and a read need opposite answers to the same response, so the
+/// transport must not collapse them: for `enqueue_entry` a rejected request
+/// means "nothing happened, retry this operation ID"; for `reconcile_enqueue`
+/// the identical response means "I could not find out", which is never a
+/// refusal of the operation being reconciled.
+#[cfg(target_arch = "wasm32")]
+enum GraphQlFailure {
+    /// Every error names a class GitHub rejects *before* running the
+    /// operation, so no effect was produced.
+    Rejected,
+    /// At least one error carries no type, or one GitHub can return after it
+    /// began executing. Whether the effect landed is not knowable from this.
+    Unknown,
+}
+
+/// One typed GraphQL operation, not a proxy: each query text is a
+/// compile-time constant and callers supply only typed variables. There is no
 /// path by which an agent's input becomes GraphQL.
 ///
 /// GraphQL answers **200 with an `errors` array** for a rejected operation, so
-/// a status check alone reports success for a failure. `data` absent or null
-/// with errors present is the refusal signal, and it must be read explicitly.
+/// a status check alone reports success for a failure. Two consequences are
+/// handled here rather than assumed away:
+///
+/// - `data` and `errors` can both be populated. That partial result is what
+///   GitHub actually did, so it is returned rather than discarded -- a
+///   field-level error under the selection would otherwise be reported as
+///   "nothing changed" for an operation that landed.
+/// - Not every error means the operation did not run. GitHub returns 200 with
+///   an untyped `Something went wrong while executing your query` for what its
+///   own documentation says "may be the result of a timeout", and a request
+///   that timed out server-side may have executed. Only error classes that are
+///   rejected before execution are reported as such; anything else is unknown,
+///   which fails safe.
 #[cfg(target_arch = "wasm32")]
 async fn github_graphql<T: serde::de::DeserializeOwned, V: Serialize>(
     token: &Credential,
     query: &str,
     variables: &V,
-) -> Result<T, OperationError> {
+) -> Result<Result<T, GraphQlFailure>, Error> {
     #[derive(Serialize)]
     struct Body<'a, V> {
         query: &'a str,
@@ -2071,23 +2143,34 @@ async fn github_graphql<T: serde::de::DeserializeOwned, V: Serialize>(
         Some(&Body { query, variables }),
     )
     .await?;
-    if !envelope.errors.is_empty() {
-        // Diagnosis only. Messages can quote caller input, so only the typed
-        // classification is logged, never the text.
-        for error in &envelope.errors {
-            worker::console_error!(
-                "github graphql error: {}",
-                error.kind.as_deref().unwrap_or("untyped")
-            );
-        }
-        // Every error type GitHub documents here means the operation did not
-        // happen: the request was refused, not lost. Treating it as
-        // indeterminate would wedge the operation ID for a fully known
-        // outcome -- the exact defect that made every merge retry need a
-        // fresh UUID before this.
-        return Err(OperationError::Refused);
+    // A populated `data` is what GitHub did, errors alongside it or not.
+    if let Some(data) = envelope.data {
+        return Ok(Ok(data));
     }
-    envelope.data.ok_or(OperationError::Indeterminate)
+    // Diagnosis only. Messages can quote caller input, so only the typed
+    // classification is logged, never the text.
+    for error in &envelope.errors {
+        worker::console_error!(
+            "github graphql error: {}",
+            error.kind.as_deref().unwrap_or("untyped")
+        );
+    }
+    // Rejected before execution. `RATE_LIMITED` belongs here because GitHub
+    // refuses the request rather than half-running it; `SERVICE_UNAVAILABLE`
+    // and every untyped error do not, because either may follow a server-side
+    // timeout on work that was already under way.
+    let rejected = !envelope.errors.is_empty()
+        && envelope.errors.iter().all(|error| {
+            matches!(
+                error.kind.as_deref(),
+                Some("NOT_FOUND" | "FORBIDDEN" | "UNPROCESSABLE" | "RATE_LIMITED")
+            )
+        });
+    Ok(Err(if rejected {
+        GraphQlFailure::Rejected
+    } else {
+        GraphQlFailure::Unknown
+    }))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -2286,7 +2369,7 @@ mod tests {
             Some(Error::Unavailable)
         );
 
-        // `publish_commit` and `merge_pull_request_at_head` mint `contents:
+        // `publish_commit` mints `contents:
         // write`. A read-only installation used to pass here and pass
         // readiness, then fail at token mint where GitHub's refusal reaches
         // the caller as an opaque "authority is unavailable".
@@ -2296,6 +2379,31 @@ mod tests {
         .unwrap();
         assert_eq!(
             validate_installation(&read_only, 4_673_420, 109_233_175).err(),
+            Some(Error::Unavailable)
+        );
+
+        // The "ok" fixtures above already listed `merge_queues`, so they would
+        // pass whether or not the boundary required it -- they read as
+        // coverage while asserting nothing. This is the case that proves it:
+        // everything else granted, Merge queues absent. Without it an
+        // installation that cannot enqueue passes `/readyz`, reports authority
+        // ready, and fails every `enqueue_pull_request` at token mint.
+        let no_queue: Installation = serde_json::from_str(
+            r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"checks":"read","contents":"write","issues":"write","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            validate_installation(&no_queue, 4_673_420, 109_233_175).err(),
+            Some(Error::Unavailable)
+        );
+
+        // Read is not enough: enqueueing writes to the queue.
+        let queue_read_only: Installation = serde_json::from_str(
+            r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"checks":"read","contents":"write","issues":"write","merge_queues":"read","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            validate_installation(&queue_read_only, 4_673_420, 109_233_175).err(),
             Some(Error::Unavailable)
         );
     }
@@ -2373,6 +2481,7 @@ mod tests {
 
         let entry = |number: i64, oid: &str| QueueEntry {
             id: "MQE_kwDOabc".into(),
+            state: "QUEUED".into(),
             pull_request: Some(QueueEntryPullRequest {
                 number,
                 head_ref_oid: oid.into(),
@@ -2390,6 +2499,7 @@ mod tests {
         assert!(
             !QueueEntry {
                 id: "MQE_kwDOabc".into(),
+                state: "QUEUED".into(),
                 pull_request: None,
             }
             .matches(&request)
@@ -2399,6 +2509,30 @@ mod tests {
         assert_eq!(result.pull_number, 329);
         assert_eq!(result.head_sha, head);
         assert_eq!(result.entry_id, "MQE_kwDOabc");
+        assert_eq!(result.state_at_enqueue, "QUEUED");
+
+        // An entry already unmergeable is reported as such rather than as a
+        // plain "queued": the caller would otherwise wait for a merge that is
+        // never coming.
+        let unmergeable = QueueEntry {
+            state: "UNMERGEABLE".into(),
+            ..entry(329, &head)
+        };
+        assert_eq!(
+            unmergeable.into_result(&request).unwrap().state_at_enqueue,
+            "UNMERGEABLE"
+        );
+
+        // A state this build does not know means the schema moved under us;
+        // guessing would report a merge state it does not understand.
+        assert!(matches!(
+            QueueEntry {
+                state: "TELEPORTED".into(),
+                ..entry(329, &head)
+            }
+            .into_result(&request),
+            Err(OperationError::Indeterminate)
+        ));
 
         // Converting a non-matching entry must never manufacture a result.
         assert!(matches!(

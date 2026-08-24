@@ -74,7 +74,7 @@ and can never satisfy readiness. The production adapter accepts exactly
 `DARK_FACTORY_MAINTAINER_REPOSITORY_OWNER_ID`. The private key is standard
 base64 of unencrypted PKCS#8 DER, the repository is an exact safe
 `owner/repository` name, and the implemented permission revision is exactly
-`maintainer-metadata-v1`. Missing webhook authority or a partial or
+`maintainer-operations-v1`. Missing webhook authority or a partial or
 syntactically invalid App-authority group leaves the fixed inactive router with
 no webhook route. An unusable key or configured but unavailable or drifted
 Durable Object journal or GitHub authority makes readiness and ping
@@ -168,7 +168,10 @@ policy may require a separate GitHub actor to approve before the typed merge.
 The typed merge operation uses a GitHub-enforced merge queue as its sole
 automated path. Before enqueueing it re-reads the PR and requires the bound base
 and head; the GraphQL mutation supplies `expectedHeadOid`, never `jump`, and the
-broker reconciles the exact queue entry and eventual merge result. GitHub then
+broker reconciles the exact queue entry. The enqueue result reports the state
+the entry was created in, which is what makes an immediately `UNMERGEABLE`
+entry visible; **no operation yet reports the eventual merge outcome**, so a
+caller cannot learn from this surface whether its entry merged or was ejected. GitHub then
 tests the exact PR head against the queue's latest base before merging. A base
 or head mismatch observed before enqueue invalidates the operation; an
 ambiguous enqueue is reconciled and never blindly repeated. A repository with

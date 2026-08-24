@@ -183,10 +183,29 @@ fn github_refusals_stay_determinate() {
     // A missing branch is a 404 and nothing else.
     assert!(github_app.contains("Err(Error::Rejected(404))"));
     // GraphQL answers 200 with an `errors` array, so a status check alone
-    // reads a refused mutation as a success. The envelope is inspected, and a
-    // rejected enqueue is determinate rather than indeterminate.
-    assert!(github_app.contains("if !envelope.errors.is_empty()"));
-    assert!(github_app.contains("envelope.data.ok_or(OperationError::Indeterminate)"));
+    // reads a refused mutation as a success.
+    //
+    // The transport hands the classification back rather than deciding: a
+    // mutation and a read need opposite answers to the same response. Only
+    // error classes GitHub rejects before execution are `Rejected`; an untyped
+    // error may follow a server-side timeout on work already under way, so it
+    // is `Unknown` and fails safe.
+    assert!(github_app.contains("enum GraphQlFailure"));
+    assert!(
+        github_app
+            .contains(r#"Some("NOT_FOUND" | "FORBIDDEN" | "UNPROCESSABLE" | "RATE_LIMITED")"#)
+    );
+    // A populated `data` is what GitHub did, errors alongside it or not.
+    assert!(github_app.contains("if let Some(data) = envelope.data {"));
+    // A failed read is never reported as a refusal of the operation it was
+    // reconciling.
+    assert!(github_app.contains("answer.map_err(|_| OperationError::Indeterminate)?"));
+    // The boundary requires every permission the operations mint, so a missing
+    // grant fails at `/readyz` rather than at token mint.
+    assert!(
+        github_app
+            .contains(r#"permission_at_least(&installation.permissions, "merge_queues", "write")"#)
+    );
     // A branch with no queue fails closed instead of falling back to a merge.
     assert!(!github_app.contains("/merge\""));
     assert!(!mcp.contains("merge_pull_request_at_head"));

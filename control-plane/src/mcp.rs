@@ -277,9 +277,10 @@ fn tools() -> Value {
             "properties": {
                 "pull_number": {"type": "integer"},
                 "head_sha": {"type": "string"},
-                "entry_id": {"type": "string"}
+                "entry_id": {"type": "string"},
+                "state_at_enqueue": {"type": "string", "enum": ["QUEUED", "AWAITING_CHECKS", "MERGEABLE", "UNMERGEABLE", "LOCKED"]}
             },
-            "required": ["pull_number", "head_sha", "entry_id"],
+            "required": ["pull_number", "head_sha", "entry_id", "state_at_enqueue"],
             "additionalProperties": false
         },
         "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true}
