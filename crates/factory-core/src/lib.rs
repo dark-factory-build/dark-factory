@@ -17,9 +17,18 @@ pub mod status;
 
 /// Local API wire version. Bump for new request/response variants so an older
 /// daemon rejects a newer client explicitly instead of misreading its JSON.
-/// Durable event envelopes retain their own stored schema version and may be
-/// older than this outer frame version during an upgrade.
-pub const PROTOCOL_VERSION: u16 = 7;
+/// Durable event envelopes retain their own stored [`DURABLE_EVENT_VERSION`]
+/// and may be older than this outer frame version during an upgrade.
+pub const PROTOCOL_VERSION: u16 = 8;
+
+/// Durable event payload version stamped on every appended event row. Rows are
+/// never rewritten, so only a change to a stored payload's shape may bump this,
+/// deliberately not a change to [`PROTOCOL_VERSION`], which moves for local API
+/// reasons a stored row knows nothing about. It continues the numbering
+/// existing rows already carry: each was stamped with the protocol version
+/// current when it was written, and 7 is the generation today's payload shapes
+/// belong to.
+pub const DURABLE_EVENT_VERSION: u16 = 7;
 const MAX_ID_LEN: usize = 128;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -617,13 +626,6 @@ pub enum FactoryEvent {
     DispatchPolicyChanged {
         enabled: bool,
     },
-    /// Decode-only compatibility for the pre-split setting, which controlled
-    /// both admission and provider bypass. Its meaning cannot be represented
-    /// honestly as a current dispatch-policy event.
-    #[serde(rename = "auto_mode_changed")]
-    LegacyAutoModeChanged {
-        enabled: bool,
-    },
     /// The daemon's answer to one provider `PreToolUse` hook.
     PolicyDecision {
         project_id: ProjectId,
@@ -644,26 +646,6 @@ pub enum FactoryEvent {
         paused: bool,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pause_reasons: Vec<crate::status::AgentPauseReason>,
-    },
-    /// Decode-only compatibility for repository audit events written before
-    /// the Stage 1 repository execution surface was removed.
-    #[serde(rename = "repository_operation")]
-    LegacyRepositoryOperation {
-        project_id: ProjectId,
-        agent_id: AgentId,
-        run_id: RunId,
-        operation: String,
-        phase: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        success: Option<bool>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        reference: Option<String>,
-    },
-    /// Decode-only compatibility for the deleted project repository-authority
-    /// setting. Stage 2 has no constructor for this historical event.
-    #[serde(rename = "repository_authority_changed")]
-    LegacyRepositoryAuthorityChanged {
-        project_id: ProjectId,
     },
     ProjectChanged {
         project: ProjectSnapshot,
@@ -700,26 +682,6 @@ pub enum FactoryEvent {
         project_id: ProjectId,
         legacy_source_id: LegacySourceId,
     },
-    /// Decode-only projection for `run_changed` events written before the
-    /// attempt-kernel wire change. The store derives these identities from
-    /// the event index rather than reviving the old resident-session run
-    /// model or exposing its worktree and process metadata.
-    LegacyRunChanged {
-        project_id: ProjectId,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        task_id: Option<TaskId>,
-        agent_id: AgentId,
-        run_id: RunId,
-    },
-    /// Decode-only projection for historical resident-session events. The
-    /// store derives these identities from the event index and never parses
-    /// the obsolete session/process snapshot.
-    LegacySessionChanged {
-        project_id: ProjectId,
-        agent_id: AgentId,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        run_id: Option<RunId>,
-    },
     /// A task was permanently removed. Unlike `TaskChanged`, there is no
     /// surviving snapshot to publish.
     TaskDeleted {
@@ -735,10 +697,17 @@ pub enum FactoryEvent {
     ProjectDeleted {
         project_id: ProjectId,
     },
+    /// A historical event, written before a durable format change, occupied
+    /// this sequence. Its payload has no honest representation in the current
+    /// model; the marker keeps cursor-based replay contiguous instead. The
+    /// store decodes these; nothing appends one.
+    HistoricalEvent,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct EventEnvelope {
+    /// The [`DURABLE_EVENT_VERSION`] this event was stored with, which may be
+    /// older than the [`PROTOCOL_VERSION`] of the frame carrying it.
     pub protocol_version: u16,
     pub sequence: i64,
     pub occurred_at_ms: i64,

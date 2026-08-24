@@ -1,6 +1,6 @@
 use factory_core::{
-    EventEnvelope, FactoryEvent, InputEnvelopeId, InputEnvelopeSnapshot, InputReceipt,
-    PROTOCOL_VERSION, ProjectId, WorkCandidateId, WorkCandidateSnapshot, WorkCandidateStatus,
+    DURABLE_EVENT_VERSION, EventEnvelope, FactoryEvent, InputEnvelopeId, InputEnvelopeSnapshot,
+    InputReceipt, ProjectId, WorkCandidateId, WorkCandidateSnapshot, WorkCandidateStatus,
     local::MAX_INPUT_CONTENT_BYTES,
 };
 use rusqlite::{
@@ -523,7 +523,7 @@ fn input_received_event(
     };
     let sequence = append_event(connection, now_ms, &event)?;
     Ok(EventEnvelope {
-        protocol_version: PROTOCOL_VERSION,
+        protocol_version: DURABLE_EVENT_VERSION,
         sequence,
         occurred_at_ms: now_ms,
         event,
@@ -544,7 +544,7 @@ fn candidate_status_event(
     };
     let sequence = append_event(connection, now_ms, &event)?;
     Ok(EventEnvelope {
-        protocol_version: PROTOCOL_VERSION,
+        protocol_version: DURABLE_EVENT_VERSION,
         sequence,
         occurred_at_ms: now_ms,
         event,

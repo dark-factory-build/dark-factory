@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use factory_core::{
-    AgentId, ChangeId, ChangePhase, ChangeSnapshot, EventEnvelope, FactoryEvent, LegacySourceId,
-    LegacySourceSnapshot, PROTOCOL_VERSION, ProjectId, TaskId,
+    AgentId, ChangeId, ChangePhase, ChangeSnapshot, DURABLE_EVENT_VERSION, EventEnvelope,
+    FactoryEvent, LegacySourceId, LegacySourceSnapshot, ProjectId, TaskId,
 };
 use rusqlite::{OptionalExtension, TransactionBehavior, params, types::Type};
 
@@ -298,7 +298,7 @@ impl Store {
         let sequence = append_event(&transaction, now_ms, &event)?;
         transaction.commit()?;
         Ok(EventEnvelope {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: DURABLE_EVENT_VERSION,
             sequence,
             occurred_at_ms: now_ms,
             event,
@@ -880,7 +880,7 @@ pub(super) fn change_mutation(
     Ok(ChangeMutation {
         change,
         event: Some(EventEnvelope {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: DURABLE_EVENT_VERSION,
             sequence,
             occurred_at_ms: now_ms,
             event,

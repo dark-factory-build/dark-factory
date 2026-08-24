@@ -1,9 +1,9 @@
 use std::path::Path;
 
 use factory_core::{
-    AgentBudget, AgentId, AgentRole, AgentSnapshot, EventEnvelope, ExecutionMode, FactoryEvent,
-    MessageId, ObserverHealth, PROTOCOL_VERSION, ProjectId, ProjectSnapshot, Provider, RunId,
-    RunSnapshot, TaskDetail, TaskId, TaskSnapshot, TaskStatus,
+    AgentBudget, AgentId, AgentRole, AgentSnapshot, DURABLE_EVENT_VERSION, EventEnvelope,
+    ExecutionMode, FactoryEvent, MessageId, ObserverHealth, ProjectId, ProjectSnapshot, Provider,
+    RunId, RunSnapshot, TaskDetail, TaskId, TaskSnapshot, TaskStatus,
     attention::{Attention, run_attention},
     local::{MAX_TASK_BODY_BYTES, normalize_task_title},
     model_policy,
@@ -176,8 +176,6 @@ pub enum StoreError {
     InvalidStateLimit,
     #[error("corrupt event protocol version {0}")]
     CorruptProtocolVersion(i64),
-    #[error("legacy event is missing a valid indexed identity")]
-    CorruptLegacyEvent,
     #[error("serialized factory event has no string type tag")]
     MissingEventKind,
     #[error("event cursor must not be negative")]
@@ -373,7 +371,7 @@ impl Store {
         let sequence = append_event(&transaction, now_ms, &event)?;
         transaction.commit()?;
         Ok(EventEnvelope {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: DURABLE_EVENT_VERSION,
             sequence,
             occurred_at_ms: now_ms,
             event,
@@ -422,7 +420,7 @@ impl Store {
         Ok((
             project,
             EventEnvelope {
-                protocol_version: PROTOCOL_VERSION,
+                protocol_version: DURABLE_EVENT_VERSION,
                 sequence,
                 occurred_at_ms: now_ms,
                 event,
@@ -463,7 +461,7 @@ impl Store {
         Ok((
             record,
             EventEnvelope {
-                protocol_version: PROTOCOL_VERSION,
+                protocol_version: DURABLE_EVENT_VERSION,
                 sequence,
                 occurred_at_ms: now_ms,
                 event,
@@ -579,7 +577,7 @@ impl Store {
         Ok((
             agent,
             EventEnvelope {
-                protocol_version: PROTOCOL_VERSION,
+                protocol_version: DURABLE_EVENT_VERSION,
                 sequence,
                 occurred_at_ms: now_ms,
                 event,
@@ -637,7 +635,7 @@ impl Store {
         Ok((
             budget,
             EventEnvelope {
-                protocol_version: PROTOCOL_VERSION,
+                protocol_version: DURABLE_EVENT_VERSION,
                 sequence,
                 occurred_at_ms: now_ms,
                 event,
@@ -677,7 +675,7 @@ impl Store {
         Ok((
             budget,
             EventEnvelope {
-                protocol_version: PROTOCOL_VERSION,
+                protocol_version: DURABLE_EVENT_VERSION,
                 sequence,
                 occurred_at_ms: now_ms,
                 event,
@@ -736,7 +734,7 @@ impl Store {
         Ok((
             agent,
             EventEnvelope {
-                protocol_version: PROTOCOL_VERSION,
+                protocol_version: DURABLE_EVENT_VERSION,
                 sequence,
                 occurred_at_ms: now_ms,
                 event,
@@ -1041,7 +1039,7 @@ impl Store {
         Ok((
             task,
             EventEnvelope {
-                protocol_version: PROTOCOL_VERSION,
+                protocol_version: DURABLE_EVENT_VERSION,
                 sequence,
                 occurred_at_ms: now_ms,
                 event,
@@ -1066,7 +1064,7 @@ impl Store {
         Ok((
             task,
             EventEnvelope {
-                protocol_version: PROTOCOL_VERSION,
+                protocol_version: DURABLE_EVENT_VERSION,
                 sequence,
                 occurred_at_ms: now_ms,
                 event,
@@ -1108,7 +1106,7 @@ impl Store {
         Ok((
             task,
             EventEnvelope {
-                protocol_version: PROTOCOL_VERSION,
+                protocol_version: DURABLE_EVENT_VERSION,
                 sequence,
                 occurred_at_ms: now_ms,
                 event,
@@ -1163,7 +1161,7 @@ impl Store {
         Ok((
             task,
             EventEnvelope {
-                protocol_version: PROTOCOL_VERSION,
+                protocol_version: DURABLE_EVENT_VERSION,
                 sequence,
                 occurred_at_ms: now_ms,
                 event,
@@ -1287,7 +1285,7 @@ impl Store {
         let sequence = append_event(&transaction, now_ms, &event)?;
         transaction.commit()?;
         Ok(EventEnvelope {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: DURABLE_EVENT_VERSION,
             sequence,
             occurred_at_ms: now_ms,
             event,
@@ -1352,7 +1350,7 @@ impl Store {
                 };
                 let sequence = append_event(&transaction, now_ms, &event)?;
                 events.push(EventEnvelope {
-                    protocol_version: PROTOCOL_VERSION,
+                    protocol_version: DURABLE_EVENT_VERSION,
                     sequence,
                     occurred_at_ms: now_ms,
                     event,
@@ -1400,7 +1398,7 @@ impl Store {
         };
         let sequence = append_event(&transaction, now_ms, &event)?;
         events.push(EventEnvelope {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: DURABLE_EVENT_VERSION,
             sequence,
             occurred_at_ms: now_ms,
             event,
@@ -1501,7 +1499,7 @@ impl Store {
         let sequence = append_event(&transaction, now_ms, &event)?;
         transaction.commit()?;
         Ok(EventEnvelope {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: DURABLE_EVENT_VERSION,
             sequence,
             occurred_at_ms: now_ms,
             event,
@@ -1785,7 +1783,7 @@ impl Store {
         Ok((
             AgentDetail { snapshot, profile },
             EventEnvelope {
-                protocol_version: PROTOCOL_VERSION,
+                protocol_version: DURABLE_EVENT_VERSION,
                 sequence,
                 occurred_at_ms: now_ms,
                 event,
@@ -1834,8 +1832,7 @@ impl Store {
         }
 
         let mut statement = self.connection.prepare(
-            "SELECT id, occurred_at_ms, schema_version, kind, payload_json,
-                    project_id, task_id, agent_id, run_id
+            "SELECT id, occurred_at_ms, schema_version, payload_json
              FROM events
              WHERE id > ?1
              ORDER BY id
@@ -1847,11 +1844,6 @@ impl Store {
                 row.get::<_, i64>(1)?,
                 row.get::<_, i64>(2)?,
                 row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, Option<String>>(6)?,
-                row.get::<_, Option<String>>(7)?,
-                row.get::<_, Option<String>>(8)?,
             ))
         })?;
         let stored = rows.collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1871,36 +1863,21 @@ impl Store {
 
         stored
             .into_iter()
-            .map(
-                |(
+            .map(|(sequence, occurred_at_ms, version, payload)| {
+                // Every row this daemon has written carries the durable version
+                // current at its append, so 0 is corruption exactly like a
+                // negative or out-of-range value, not an unusually old row.
+                let event_version = u16::try_from(version)
+                    .ok()
+                    .filter(|event_version| *event_version > 0)
+                    .ok_or(StoreError::CorruptProtocolVersion(version))?;
+                Ok(EventEnvelope {
+                    protocol_version: event_version,
                     sequence,
                     occurred_at_ms,
-                    version,
-                    kind,
-                    payload,
-                    project_id,
-                    task_id,
-                    agent_id,
-                    run_id,
-                )| {
-                    let protocol_version = u16::try_from(version)
-                        .map_err(|_| StoreError::CorruptProtocolVersion(version))?;
-                    Ok(EventEnvelope {
-                        protocol_version,
-                        sequence,
-                        occurred_at_ms,
-                        event: decode_stored_event(
-                            protocol_version,
-                            &kind,
-                            &payload,
-                            project_id,
-                            task_id,
-                            agent_id,
-                            run_id,
-                        )?,
-                    })
-                },
-            )
+                    event: decode_stored_event(event_version, &payload)?,
+                })
+            })
             .collect()
     }
 
@@ -1913,64 +1890,20 @@ impl Store {
     }
 }
 
-fn decode_stored_event(
-    protocol_version: u16,
-    kind: &str,
-    payload: &str,
-    project_id: Option<String>,
-    task_id: Option<String>,
-    agent_id: Option<String>,
-    run_id: Option<String>,
-) -> Result<FactoryEvent> {
-    if protocol_version >= PROTOCOL_VERSION {
-        return serde_json::from_str(payload).map_err(StoreError::from);
+/// Decodes one stored event payload. The payload itself decides: a row that
+/// still deserializes into the current [`FactoryEvent`] is that event, whatever
+/// version stamped it, and a row that no longer does is a historical shape this
+/// model can no longer state. The version is consulted only to draw the line
+/// between history and corruption.
+fn decode_stored_event(event_version: u16, payload: &str) -> Result<FactoryEvent> {
+    match serde_json::from_str(payload) {
+        Ok(event) => Ok(event),
+        // A row written by the current generation must parse. Older rows
+        // predate shapes this model has since replaced, so they degrade to a
+        // marker that keeps the sequence contiguous for cursor-based replay.
+        Err(error) if event_version >= DURABLE_EVENT_VERSION => Err(error.into()),
+        Err(_) => Ok(FactoryEvent::HistoricalEvent),
     }
-    if kind == "run_changed" {
-        let project_id = project_id
-            .as_deref()
-            .and_then(|value| ProjectId::try_from(value).ok())
-            .ok_or(StoreError::CorruptLegacyEvent)?;
-        let task_id = task_id
-            .as_deref()
-            .map(TaskId::try_from)
-            .transpose()
-            .map_err(|_| StoreError::CorruptLegacyEvent)?;
-        let agent_id = agent_id
-            .as_deref()
-            .and_then(|value| AgentId::try_from(value).ok())
-            .ok_or(StoreError::CorruptLegacyEvent)?;
-        let run_id = run_id
-            .as_deref()
-            .and_then(|value| RunId::try_from(value).ok())
-            .ok_or(StoreError::CorruptLegacyEvent)?;
-        return Ok(FactoryEvent::LegacyRunChanged {
-            project_id,
-            task_id,
-            agent_id,
-            run_id,
-        });
-    }
-    if kind == "session_changed" {
-        let project_id = project_id
-            .as_deref()
-            .and_then(|value| ProjectId::try_from(value).ok())
-            .ok_or(StoreError::CorruptLegacyEvent)?;
-        let agent_id = agent_id
-            .as_deref()
-            .and_then(|value| AgentId::try_from(value).ok())
-            .ok_or(StoreError::CorruptLegacyEvent)?;
-        let run_id = run_id
-            .as_deref()
-            .map(RunId::try_from)
-            .transpose()
-            .map_err(|_| StoreError::CorruptLegacyEvent)?;
-        return Ok(FactoryEvent::LegacySessionChanged {
-            project_id,
-            agent_id,
-            run_id,
-        });
-    }
-    serde_json::from_str(payload).map_err(StoreError::from)
 }
 
 fn truncate_utf8(value: &str, max_bytes: usize) -> String {
@@ -2890,7 +2823,7 @@ fn append_event(
             metadata.agent_id.map(AgentId::as_str),
             metadata.run_id.map(RunId::as_str),
             kind,
-            i64::from(PROTOCOL_VERSION),
+            i64::from(DURABLE_EVENT_VERSION),
             payload
         ],
     )?;
@@ -2908,7 +2841,7 @@ fn append_agent_changed_event(
     let event = FactoryEvent::AgentChanged { agent };
     let sequence = append_event(transaction, occurred_at_ms, &event)?;
     Ok(EventEnvelope {
-        protocol_version: PROTOCOL_VERSION,
+        protocol_version: DURABLE_EVENT_VERSION,
         sequence,
         occurred_at_ms,
         event,
@@ -2924,14 +2857,20 @@ struct EventMetadata<'a> {
 
 fn event_metadata(event: &FactoryEvent) -> EventMetadata<'_> {
     match event {
-        FactoryEvent::DispatchPolicyChanged { .. } | FactoryEvent::LegacyAutoModeChanged { .. } => {
-            EventMetadata {
-                project_id: None,
-                task_id: None,
-                agent_id: None,
-                run_id: None,
-            }
-        }
+        FactoryEvent::DispatchPolicyChanged { .. } => EventMetadata {
+            project_id: None,
+            task_id: None,
+            agent_id: None,
+            run_id: None,
+        },
+        // Decode-only: the store never appends a historical marker, so there
+        // is no index identity to record for one.
+        FactoryEvent::HistoricalEvent => EventMetadata {
+            project_id: None,
+            task_id: None,
+            agent_id: None,
+            run_id: None,
+        },
         FactoryEvent::PolicyDecision {
             project_id,
             agent_id,
@@ -2951,23 +2890,6 @@ fn event_metadata(event: &FactoryEvent) -> EventMetadata<'_> {
             project_id: Some(project_id),
             task_id: None,
             agent_id: Some(agent_id),
-            run_id: None,
-        },
-        FactoryEvent::LegacyRepositoryOperation {
-            project_id,
-            agent_id,
-            run_id,
-            ..
-        } => EventMetadata {
-            project_id: Some(project_id),
-            task_id: None,
-            agent_id: Some(agent_id),
-            run_id: Some(run_id),
-        },
-        FactoryEvent::LegacyRepositoryAuthorityChanged { project_id } => EventMetadata {
-            project_id: Some(project_id),
-            task_id: None,
-            agent_id: None,
             run_id: None,
         },
         FactoryEvent::ProjectChanged { project } => EventMetadata {
@@ -3012,27 +2934,6 @@ fn event_metadata(event: &FactoryEvent) -> EventMetadata<'_> {
             task_id: None,
             agent_id: None,
             run_id: None,
-        },
-        FactoryEvent::LegacyRunChanged {
-            project_id,
-            task_id,
-            agent_id,
-            run_id,
-        } => EventMetadata {
-            project_id: Some(project_id),
-            task_id: task_id.as_ref(),
-            agent_id: Some(agent_id),
-            run_id: Some(run_id),
-        },
-        FactoryEvent::LegacySessionChanged {
-            project_id,
-            agent_id,
-            run_id,
-        } => EventMetadata {
-            project_id: Some(project_id),
-            task_id: None,
-            agent_id: Some(agent_id),
-            run_id: run_id.as_ref(),
         },
         FactoryEvent::TaskDeleted {
             project_id,
@@ -3155,6 +3056,8 @@ const fn provider_value(value: Provider) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use factory_core::{RunOutcome, RunPhase};
+
     use super::*;
 
     #[test]
@@ -3977,45 +3880,298 @@ mod tests {
     }
 
     #[test]
-    fn kernel_migration_replays_schema_2_run_events_as_minimal_legacy_events() {
+    fn kernel_migration_replays_schema_2_run_events_as_historical_markers() {
         let mut store = schema_29_with_two_terminal_runs_and_legacy_event();
         migrate(&mut store.connection).unwrap();
 
         let events = store.events_after(0, 10).unwrap();
         assert_eq!(events.len(), 2);
+        assert_eq!(events[0].sequence, 1);
         assert_eq!(events[0].protocol_version, 2);
-        assert!(matches!(
-            &events[0].event,
-            FactoryEvent::LegacyRunChanged {
-                project_id,
-                task_id: Some(task_id),
-                agent_id,
-                run_id,
-            } if project_id.as_str() == "project-1"
-                && task_id.as_str() == "task-1"
-                && agent_id.as_str() == "worker-1"
-                && run_id.as_str() == "run-1"
-        ));
+        // A schema-2 run payload predates the attempt kernel: it has no
+        // project, provider, phase, or admission time to decode.
+        assert_eq!(events[0].event, FactoryEvent::HistoricalEvent);
     }
 
     #[test]
-    fn kernel_migration_replays_schema_2_session_events_as_minimal_legacy_events() {
+    fn kernel_migration_replays_schema_2_session_events_as_historical_markers() {
         let mut store = schema_29_with_two_terminal_runs_and_legacy_event();
         migrate(&mut store.connection).unwrap();
 
         let events = store.events_after(0, 10).unwrap();
         assert_eq!(events.len(), 2);
+        assert_eq!(events[1].sequence, 2);
         assert_eq!(events[1].protocol_version, 2);
-        assert!(matches!(
-            &events[1].event,
-            FactoryEvent::LegacySessionChanged {
-                project_id,
-                agent_id,
-                run_id: Some(run_id),
-            } if project_id.as_str() == "project-1"
-                && agent_id.as_str() == "worker-1"
-                && run_id.as_str() == "run-1"
-        ));
+        assert_eq!(events[1].event, FactoryEvent::HistoricalEvent);
+    }
+
+    fn insert_stored_event(store: &Store, kind: &str, version: i64, payload: &serde_json::Value) {
+        store
+            .connection
+            .execute(
+                "INSERT INTO events (
+                    occurred_at_ms, project_id, task_id, agent_id, run_id,
+                    kind, schema_version, payload_json
+                 ) VALUES (7, 'project-1', 'task-1', 'worker-1', 'run-1', ?1, ?2, ?3)",
+                params![kind, version, payload.to_string()],
+            )
+            .unwrap();
+    }
+
+    /// One `run_changed` payload in the shape the attempt kernel has written
+    /// since v3. Only the runtime authority field was ever respelled, at v6.
+    fn attempt_kernel_run_changed(runtime_field: &str, runtime_value: &str) -> serde_json::Value {
+        let mut payload = serde_json::json!({
+            "type": "run_changed",
+            "data": {
+                "run": {
+                    "id": "run-1",
+                    "project_id": "project-1",
+                    "agent_id": "worker-1",
+                    "task_id": "task-1",
+                    "provider": "claude_code",
+                    "phase": "terminal",
+                    "outcome": {"type": "succeeded"},
+                    "runtime_model": "opus-4",
+                    "runtime_reasoning_effort": "medium",
+                    "observer_health": "healthy",
+                    "admitted_at_ms": 5,
+                    "started_at_ms": 6,
+                    "phase_since_ms": 7,
+                    "updated_at_ms": 7,
+                    "ended_at_ms": 7,
+                    "exit_code": 0
+                }
+            }
+        });
+        payload["data"]["run"][runtime_field] = serde_json::json!(runtime_value);
+        payload
+    }
+
+    #[test]
+    fn a_run_event_keeps_its_snapshot_at_every_version_since_the_attempt_kernel() {
+        let store = Store::open_in_memory().unwrap();
+        let payload = attempt_kernel_run_changed("runtime_execution_mode", "workspace_write");
+        for version in 3..=i64::from(DURABLE_EVENT_VERSION) {
+            insert_stored_event(&store, "run_changed", version, &payload);
+        }
+
+        let events = store.events_after(0, 10).unwrap();
+        assert_eq!(events.len(), 5);
+        for event in events {
+            let stored = event.protocol_version;
+            let FactoryEvent::RunChanged { run } = event.event else {
+                panic!("v{stored} run_changed decoded without its snapshot");
+            };
+            assert_eq!(run.id.as_str(), "run-1");
+            assert_eq!(run.task_id.as_str(), "task-1");
+            assert_eq!(run.provider, Provider::ClaudeCode);
+            assert_eq!(run.phase, RunPhase::Terminal);
+            assert_eq!(run.outcome, Some(RunOutcome::Succeeded));
+            assert_eq!(run.runtime_model.as_deref(), Some("opus-4"));
+            assert_eq!(
+                run.runtime_execution_mode,
+                Some(ExecutionMode::WorkspaceWrite)
+            );
+            assert_eq!(run.ended_at_ms, Some(7));
+            assert_eq!(run.exit_code, Some(0));
+        }
+    }
+
+    #[test]
+    fn a_pre_v6_run_event_keeps_everything_but_its_respelled_runtime_authority() {
+        let store = Store::open_in_memory().unwrap();
+        let payload = attempt_kernel_run_changed("runtime_permission_mode", "acceptEdits");
+        insert_stored_event(&store, "run_changed", 5, &payload);
+
+        let events = store.events_after(0, 10).unwrap();
+        let FactoryEvent::RunChanged { run } = &events[0].event else {
+            panic!("v5 run_changed decoded without its snapshot");
+        };
+        assert_eq!(run.phase, RunPhase::Terminal);
+        assert_eq!(run.outcome, Some(RunOutcome::Succeeded));
+        // Schema 34 respelled the provider permission string as a typed
+        // execution mode and rewrote `runs`, but never the event rows. The old
+        // spelling maps only through the run's provider and the then-current
+        // global bypass, which the payload cannot report, so this stays the
+        // same honest legacy-unknown the migration recorded.
+        assert_eq!(run.runtime_execution_mode, None);
+    }
+
+    #[test]
+    fn kinds_the_current_model_cannot_state_decode_as_historical_markers() {
+        let store = Store::open_in_memory().unwrap();
+        let historical = [
+            ("auto_mode_changed", 5, serde_json::json!({"enabled": true})),
+            (
+                "repository_operation",
+                5,
+                serde_json::json!({
+                    "project_id": "project-1",
+                    "agent_id": "worker-1",
+                    "run_id": "run-1",
+                    "operation": "git_push",
+                    "phase": "finished",
+                    "success": true,
+                    "reference": "deadbeef"
+                }),
+            ),
+            (
+                "repository_authority_changed",
+                3,
+                serde_json::json!({"project_id": "project-1"}),
+            ),
+            (
+                "session_changed",
+                2,
+                serde_json::json!({"session": {"id": "session-1"}}),
+            ),
+        ];
+        for (kind, version, data) in &historical {
+            let payload = serde_json::json!({"type": kind, "data": data});
+            insert_stored_event(&store, kind, *version, &payload);
+        }
+
+        let events = store.events_after(0, 10).unwrap();
+        assert_eq!(events.len(), historical.len());
+        for (event, (_, version, _)) in events.iter().zip(&historical) {
+            assert_eq!(i64::from(event.protocol_version), *version);
+            assert_eq!(event.event, FactoryEvent::HistoricalEvent);
+        }
+    }
+
+    /// The deletion and budget events landed while `PROTOCOL_VERSION` still
+    /// read 1 - `dd54234` and `f21b70c`, two days before `7b17b30` bumped it
+    /// to 2 - and their payloads have not changed since. The UI applies these
+    /// to *remove* state, so a v1 row degrading to a marker would resurrect
+    /// deleted projects, agents, and tasks on a replay from zero.
+    #[test]
+    fn v1_deletion_and_budget_rows_decode_as_the_events_they_are() {
+        let store = Store::open_in_memory().unwrap();
+        let rows = [
+            (
+                "task_deleted",
+                serde_json::json!({
+                    "type": "task_deleted",
+                    "data": {"project_id": "project-1", "task_id": "task-1"}
+                }),
+                FactoryEvent::TaskDeleted {
+                    project_id: ProjectId::try_from("project-1").unwrap(),
+                    task_id: TaskId::try_from("task-1").unwrap(),
+                },
+            ),
+            (
+                "agent_deleted",
+                serde_json::json!({
+                    "type": "agent_deleted",
+                    "data": {"project_id": "project-1", "agent_id": "worker-1"}
+                }),
+                FactoryEvent::AgentDeleted {
+                    project_id: ProjectId::try_from("project-1").unwrap(),
+                    agent_id: AgentId::try_from("worker-1").unwrap(),
+                },
+            ),
+            (
+                "project_deleted",
+                serde_json::json!({
+                    "type": "project_deleted",
+                    "data": {"project_id": "project-1"}
+                }),
+                FactoryEvent::ProjectDeleted {
+                    project_id: ProjectId::try_from("project-1").unwrap(),
+                },
+            ),
+            (
+                "agent_budget_changed",
+                serde_json::json!({
+                    "type": "agent_budget_changed",
+                    "data": {
+                        "project_id": "project-1",
+                        "agent_id": "worker-1",
+                        "budget": {
+                            "max_tool_calls": 1000,
+                            "tool_calls": 7,
+                            "exhausted": false,
+                            "reset_at_ms": 0,
+                            "updated_at_ms": 9,
+                            "monetary_spend": null
+                        },
+                        "action": "observed",
+                        "paused": false
+                    }
+                }),
+                FactoryEvent::AgentBudgetChanged {
+                    project_id: ProjectId::try_from("project-1").unwrap(),
+                    agent_id: AgentId::try_from("worker-1").unwrap(),
+                    budget: AgentBudget {
+                        max_tool_calls: Some(1000),
+                        tool_calls: 7,
+                        exhausted: false,
+                        reset_at_ms: 0,
+                        updated_at_ms: 9,
+                        monetary_spend: None,
+                    },
+                    action: "observed".into(),
+                    paused: false,
+                    // Absent from the v1 payload and defaulted here, which is
+                    // the same answer the row deserves.
+                    pause_reasons: Vec::new(),
+                },
+            ),
+        ];
+        for (kind, payload, _) in &rows {
+            insert_stored_event(&store, kind, 1, payload);
+        }
+
+        let events = store.events_after(0, 10).unwrap();
+        assert_eq!(events.len(), rows.len());
+        for (event, (kind, _, expected)) in events.iter().zip(&rows) {
+            assert_eq!(event.protocol_version, 1, "{kind}");
+            assert_eq!(event.event, *expected, "{kind}");
+        }
+    }
+
+    /// No released daemon has ever stamped a row below 1, so a version the
+    /// write path cannot produce is corruption rather than an unusually old
+    /// row - even when its payload happens to parse.
+    #[test]
+    fn a_stored_version_below_one_is_corruption_not_history() {
+        for version in [0, -1] {
+            let store = Store::open_in_memory().unwrap();
+            insert_stored_event(
+                &store,
+                "project_deleted",
+                version,
+                &serde_json::json!({
+                    "type": "project_deleted",
+                    "data": {"project_id": "project-1"}
+                }),
+            );
+
+            assert!(matches!(
+                store.events_after(0, 10),
+                Err(StoreError::CorruptProtocolVersion(stored)) if stored == version
+            ));
+        }
+    }
+
+    /// The forward gate for the durable log: an event appended today is
+    /// stamped with the durable version, not the local protocol version, and
+    /// reads back as itself wherever [`factory_core::PROTOCOL_VERSION`] moves
+    /// next. Rows written now must parse, so this is what keeps the decoder's
+    /// current-generation branch honest.
+    #[test]
+    fn an_appended_event_is_stamped_durable_and_reads_back_as_itself() {
+        let mut store = Store::open_in_memory().unwrap();
+        let appended = store.set_dispatch_enabled(false, 42).unwrap();
+
+        let stored: i64 = store
+            .connection
+            .query_row("SELECT schema_version FROM events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(stored, i64::from(DURABLE_EVENT_VERSION));
+        assert_ne!(stored, i64::from(factory_core::PROTOCOL_VERSION));
+        assert_eq!(store.events_after(0, 10).unwrap(), vec![appended]);
     }
 
     fn legacy_preflight_connection() -> Connection {

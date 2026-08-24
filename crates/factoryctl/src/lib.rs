@@ -451,7 +451,7 @@ mod tests {
                         protocol_version: 1,
                         sequence: 1,
                         occurred_at_ms: 10,
-                        event: FactoryEvent::LegacyAutoModeChanged { enabled: true },
+                        event: FactoryEvent::HistoricalEvent,
                     },
                 },
                 ServerFrame::Response {
