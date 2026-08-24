@@ -56,9 +56,11 @@ run_case() {
         bash "$temporary/assertion.sh" >"$temporary/out" 2>&1
 }
 
-# The projection the step runs, as it reads against this repository's live
-# `main` rules today. `integration:15368:required` is the binding fact: the
-# required context is reportable only by GitHub Actions (integration 15368).
+# A hand-maintained copy of what the projection emitted against the live `main`
+# rules when it was last compared by hand -- a declaration, not an observation:
+# nothing here reads live state, so drift is possible and would be silent.
+# `integration:15368:required` is the binding fact: the required context is
+# reportable only by GitHub Actions (integration 15368).
 live_facts() {
     printf '%s\n' rule:deletion rule:non_fast_forward rule:required_linear_history \
         rule:required_status_checks context:required integration:15368:required \
@@ -105,24 +107,11 @@ sed 's/^context:required$/context:not-required-really/' "$temporary/facts" >"$te
 mv "$temporary/facts.tmp" "$temporary/facts"
 if run_case; then echo 'FAIL: a superstring context must not satisfy the check' >&2; exit 1; fi
 
-# The required context present but unbound: `required_status_checks` entries
-# carry no `integration_id`, so `tostring` projects `null` and any installed
-# integration could report the aggregate green. This is the ruleset the other
-# four facts all pass through unchanged (#375).
-live_facts
-sed 's/^integration:15368:required$/integration:null:required/' "$temporary/facts" >"$temporary/facts.tmp"
-mv "$temporary/facts.tmp" "$temporary/facts"
-if run_case; then echo 'FAIL: an unbound required context must fail the step' >&2; exit 1; fi
-
-# Bound, but to some other integration.
-live_facts
-sed 's/^integration:15368:required$/integration:99999:required/' "$temporary/facts" >"$temporary/facts.tmp"
-mv "$temporary/facts.tmp" "$temporary/facts"
-if run_case; then echo 'FAIL: a foreign integration binding must fail the step' >&2; exit 1; fi
-
-# The binding on a DIFFERENT required context must not stand in for it. This
-# is why the fact names the context: against a bare `integration:15368` this
-# ruleset -- `required` unbound, some other context bound -- reads as green.
+# `required` unbound while some OTHER required context carries the binding.
+# The one new failure mode `grep -qx` does not already cover: every fact the
+# other four `require` lines look for is still present and correct, so this
+# ruleset is green under a bare `integration:15368` and red only because the
+# fact names the context it belongs to (#375).
 live_facts
 sed 's/^integration:15368:required$/integration:15368:control-plane/' "$temporary/facts" >"$temporary/facts.tmp"
 mv "$temporary/facts.tmp" "$temporary/facts"

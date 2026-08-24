@@ -104,6 +104,17 @@ for fact in rule:merge_queue grouping:ALLGREEN rule:required_status_checks \
         exit 1
     }
 done
+# The binding fact has to be READ from the rule, not written into the string.
+# The fixtures in test-inline-chokepoint.sh are projection output -- the stubbed
+# `gh` never runs the `--jq` program -- so a projection that emits
+# `("integration:15368:" + .context)` fabricates the fact for every entry,
+# satisfies `require integration:15368:required` unconditionally, and leaves
+# both test scripts green. The live run does not catch it either: a fabricated
+# fact agrees with the require line everywhere, so it fails OPEN rather than
+# closed. Pinning the token that does the reading is what separates the shipped
+# projection from that mutant. The general gap -- the stub not honouring
+# `--jq`, which would make the projection executable by a test -- is #383.
+grep -Fq '(.integration_id|tostring)' "$workflow"
 grep -Fq 'rules/branches/${BASE_BRANCH}' "$workflow"
 if grep -Fq '"context": "checks"' "$publisher"; then
     echo "repository settings still require the macOS-only checks context" >&2
