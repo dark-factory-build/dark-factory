@@ -160,11 +160,15 @@ token or credential helper. The ordinary non-workflow stack may resume through
 the broker only after that workflow pull request has passed its own review and
 merged.
 
-When the maintainer App also authored the PR, its formal review may record
-bounded findings, `COMMENT`, or `REQUEST_CHANGES`; it is not an independent
-GitHub approval and cannot satisfy a distinct-reviewer requirement. The cold
-review must still be performed by a separate agent or person, and repository
-policy may require a separate GitHub actor to approve before the typed merge.
+When the maintainer App also authored the PR — which is every PR it reviews —
+GitHub refuses a self-review that takes a side, `APPROVE` and `REQUEST_CHANGES`
+alike. So the formal review is always submitted as a `COMMENT` and carries its
+bounded findings plus one App-written verdict line, which is what the required
+`review` check reads; the GitHub review state never carries the verdict. The
+review is not an independent GitHub approval and cannot satisfy a
+distinct-reviewer requirement. The cold review must still be performed by a
+separate agent or person, and repository policy may require a separate GitHub
+actor to approve before the typed merge.
 
 The typed merge operation uses a GitHub-enforced merge queue as its sole
 automated path. Before enqueueing it re-reads the PR and requires the bound base

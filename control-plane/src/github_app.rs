@@ -180,17 +180,29 @@ pub(crate) struct SubmitPullRequestReview {
 ///
 /// Rule 2 has three outcomes -- the reviewer is satisfied, the reviewer found
 /// a blocking defect, or the reviewer left a note that decides nothing -- and
-/// GitHub offers this App only two states to say them in. `APPROVE` is not
-/// available: the App opens the pull requests it would be approving, and
-/// GitHub refuses a self-approval, which is the whole reason the review became
-/// a status check instead of an approval.
+/// GitHub offers this App exactly one state to say all three in.
 ///
-/// So `Allow` and `Comment` both post `COMMENTED`, and the verdict itself
-/// rides in a line this type renders. `verdict_line` is written by the App
-/// from this typed field and is refused in caller text by
-/// `free_of_review_verdict`, so a caller cannot state a verdict it did not
-/// ask for -- the same discipline as the operation marker, for the same
-/// reason.
+/// The constraint is one constraint, and it applies to both ends. This App
+/// opens the pull requests it reviews, and GitHub refuses a self-review that
+/// takes a side: not `APPROVE`, and equally not `REQUEST_CHANGES`. The
+/// approval half was already understood -- it is the whole reason the review
+/// became a status check instead of an approval -- but the blocking half was
+/// not, and `RequestChanges` was mapped onto GitHub's real `REQUEST_CHANGES`
+/// event anyway. GitHub refused every such post, reconciliation found no
+/// review to adopt, and the operation journalled indeterminate, so a blocking
+/// verdict was unrecordable on precisely the pull requests the gate exists to
+/// gate (#377).
+///
+/// So all three verdicts post `COMMENT` and are recorded `COMMENTED`, and the
+/// verdict itself rides in a line the App renders: `verdict` supplies the
+/// word and `SubmitPullRequestReview::marked_body` writes the line. Caller
+/// text carrying that prefix is refused by `free_of_review_verdict`, so a
+/// caller cannot state a verdict it did not ask for -- the same discipline as
+/// the operation marker, for the same reason.
+///
+/// `ALLOW`, `COMMENT`, and `REQUEST_CHANGES` are therefore all this App's own
+/// words for its own outcomes. None of them is a GitHub review event any
+/// more, and none of them reaches the wire.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub(crate) enum ReviewEvent {
@@ -199,24 +211,14 @@ pub(crate) enum ReviewEvent {
     RequestChanges,
 }
 
+/// The `event` every verdict is submitted as, and the state GitHub records it
+/// in. Constants and not a function of the verdict: which outcome a review
+/// carries is readable only from the line the App writes, never from the
+/// GitHub state, which is why the required `review` check reads that line.
+const REVIEW_EVENT: &str = "COMMENT";
+const REVIEW_STATE: &str = "COMMENTED";
+
 impl ReviewEvent {
-    /// The GitHub review state this verdict is recorded as.
-    const fn github_state(self) -> &'static str {
-        match self {
-            Self::Allow | Self::Comment => "COMMENTED",
-            Self::RequestChanges => "CHANGES_REQUESTED",
-        }
-    }
-
-    /// The `event` GitHub's review API accepts. `ALLOW` is this App's word,
-    /// not GitHub's, so it must never reach the wire.
-    const fn github_event(self) -> &'static str {
-        match self {
-            Self::Allow | Self::Comment => "COMMENT",
-            Self::RequestChanges => "REQUEST_CHANGES",
-        }
-    }
-
     /// The verdict word the required `review` check reads.
     const fn verdict(self) -> &'static str {
         match self {
@@ -323,9 +325,9 @@ pub(crate) struct ReviewResult {
     pub(crate) url: String,
     pub(crate) head_sha: String,
     pub(crate) state: String,
-    /// `ALLOW` and `COMMENT` are both `COMMENTED` on the wire, so `state`
-    /// cannot tell a reviewer which verdict it just recorded -- on the one
-    /// field that now gates merges. This echoes it back.
+    /// All three verdicts are `COMMENTED` on the wire, so `state` cannot tell
+    /// a reviewer which verdict it just recorded -- on the one field that now
+    /// gates merges. This echoes it back.
     ///
     /// `default` is load-bearing, not tidiness. Results are stored as JSON in
     /// the durable journal and replayed with `serde_json::from_str`, so a
@@ -404,7 +406,7 @@ impl AppAuthority {
     pub(crate) async fn create_pull_request(
         &self,
         journal: &DeliveryJournal,
-        request: CreatePullRequest,
+        mut request: CreatePullRequest,
     ) -> Result<PullRequestResult, OperationError> {
         request.validate()?;
         let operation = request.operation("create_pull_request")?;
@@ -480,7 +482,7 @@ impl AppAuthority {
     pub(crate) async fn submit_pull_request_review(
         &self,
         journal: &DeliveryJournal,
-        request: SubmitPullRequestReview,
+        mut request: SubmitPullRequestReview,
     ) -> Result<ReviewResult, OperationError> {
         request.validate()?;
         let operation = request.operation("submit_pull_request_review")?;
@@ -553,7 +555,7 @@ impl AppAuthority {
     pub(crate) async fn publish_commit(
         &self,
         journal: &DeliveryJournal,
-        request: PublishCommit,
+        mut request: PublishCommit,
     ) -> Result<CommitResult, OperationError> {
         request.validate()?;
         let operation = request.operation("publish_commit")?;
@@ -631,7 +633,7 @@ impl AppAuthority {
     pub(crate) async fn enqueue_pull_request(
         &self,
         journal: &DeliveryJournal,
-        request: EnqueuePullRequest,
+        mut request: EnqueuePullRequest,
     ) -> Result<EnqueueResult, OperationError> {
         request.validate()?;
         let operation = request.operation("enqueue_pull_request")?;
@@ -746,8 +748,8 @@ impl AppAuthority {
 }
 
 impl CreatePullRequest {
-    fn validate(&self) -> Result<(), OperationError> {
-        valid_operation_id(&self.operation_id)?;
+    fn validate(&mut self) -> Result<(), OperationError> {
+        canonical_operation_id(&mut self.operation_id)?;
         valid_ref(&self.head)?;
         valid_ref(&self.base)?;
         valid_sha(&self.head_sha)?;
@@ -780,8 +782,8 @@ impl CreatePullRequest {
 }
 
 impl SubmitPullRequestReview {
-    fn validate(&self) -> Result<(), OperationError> {
-        valid_operation_id(&self.operation_id)?;
+    fn validate(&mut self) -> Result<(), OperationError> {
+        canonical_operation_id(&mut self.operation_id)?;
         valid_exact_integer(self.pull_number)?;
         valid_sha(&self.head_sha)?;
         valid_text(&self.body, 1, 16_000, true)?;
@@ -817,8 +819,8 @@ impl SubmitPullRequestReview {
 }
 
 impl PublishCommit {
-    fn validate(&self) -> Result<(), OperationError> {
-        valid_operation_id(&self.operation_id)?;
+    fn validate(&mut self) -> Result<(), OperationError> {
+        canonical_operation_id(&mut self.operation_id)?;
         valid_ref(&self.branch)?;
         valid_sha(&self.expected_head_sha)?;
         valid_text(&self.message, 1, 4_096, true)?;
@@ -872,8 +874,8 @@ impl PublishCommit {
 }
 
 impl EnqueuePullRequest {
-    fn validate(&self) -> Result<(), OperationError> {
-        valid_operation_id(&self.operation_id)?;
+    fn validate(&mut self) -> Result<(), OperationError> {
+        canonical_operation_id(&mut self.operation_id)?;
         valid_exact_integer(self.pull_number)?;
         valid_sha(&self.head_sha)?;
         valid_ref(&self.base)
@@ -892,17 +894,38 @@ impl ObservePullRequestChecks {
     }
 }
 
-fn valid_operation_id(value: &str) -> Result<(), OperationError> {
+/// Check one operation ID's shape and settle its case in place.
+///
+/// A UUID reads case-insensitively but does not compare that way, and
+/// everything downstream compares this one byte for byte: it is the journal's
+/// primary key, it is hashed into the request digest alongside the rest of the
+/// request, and it is rendered into the marker `reconcile_*` finds its own
+/// work by with `contains`. Two casings of one UUID would therefore be two
+/// operations sharing no replay identity, which is why a single canonical case
+/// has to exist.
+///
+/// Refusing the other case was the previous way of getting one, and it was the
+/// wrong way: macOS `uuidgen` emits uppercase, so every stock-Mac caller spent
+/// a blind `invalid_input` on its first write and learned nothing from it,
+/// twice in two days (#377). Lowering it here instead is settled before the ID
+/// is digested, journalled, or rendered, so the same UUID in either case is
+/// the same operation everywhere. Nothing already durable can collide with a
+/// newly lowered ID, because lowercase is the only case the journal was ever
+/// able to store.
+fn canonical_operation_id(value: &mut str) -> Result<(), OperationError> {
     let valid = value.len() == 36
-        && [8, 13, 18, 23]
-            .into_iter()
-            .all(|index| value.as_bytes().get(index) == Some(&b'-'))
-        && value
-            .bytes()
-            .enumerate()
-            .all(|(index, byte)| [8, 13, 18, 23].contains(&index) || byte.is_ascii_hexdigit())
-        && value == value.to_ascii_lowercase();
-    valid.then_some(()).ok_or(OperationError::InvalidInput)
+        && value.bytes().enumerate().all(|(index, byte)| {
+            if [8, 13, 18, 23].contains(&index) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        });
+    if !valid {
+        return Err(OperationError::InvalidInput);
+    }
+    value.make_ascii_lowercase();
+    Ok(())
 }
 
 /// A reconciler identifies its own work by a marker the caller does not get to
@@ -1760,12 +1783,12 @@ impl Authority {
             Some(&Body {
                 commit_id: &request.head_sha,
                 body: request.marked_body(),
-                event: request.event.github_event(),
+                event: REVIEW_EVENT,
             }),
         )
         .await?;
         let result = review.into_result(request)?;
-        if result.head_sha != request.head_sha || result.state != request.event.github_state() {
+        if result.head_sha != request.head_sha {
             return Err(OperationError::Indeterminate);
         }
         Ok(result)
@@ -2050,15 +2073,15 @@ impl PullRequestReview {
             .as_deref()
             .is_some_and(|body| body.contains(&request.marker()))
             && self.commit_id == request.head_sha
-            && self.state == request.event.github_state()
+            && self.state == REVIEW_STATE
     }
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
 impl PullRequestReview {
-    /// The verdict comes from the request, not from GitHub: `ALLOW` and
-    /// `COMMENT` are indistinguishable in the review's `state`, and the App is
-    /// the only thing that knows which one it rendered.
+    /// The verdict comes from the request, not from GitHub: all three verdicts
+    /// are indistinguishable in the review's `state`, and the App is the only
+    /// thing that knows which one it rendered.
     fn into_result(
         self,
         request: &SubmitPullRequestReview,
@@ -2066,7 +2089,10 @@ impl PullRequestReview {
         valid_exact_integer(self.id)?;
         valid_github_url(&self.html_url)?;
         valid_sha(&self.commit_id)?;
-        if !matches!(self.state.as_str(), "COMMENTED" | "CHANGES_REQUESTED") {
+        // Every review this App can record is posted as `REVIEW_EVENT`, so
+        // any other state means this is not one of its reviews. Refusing here
+        // is what lets `post_review` trust the state it echoes back.
+        if self.state != REVIEW_STATE {
             return Err(OperationError::Unavailable);
         }
         Ok(ReviewResult {
@@ -2884,7 +2910,7 @@ mod tests {
     #[test]
     fn a_queue_entry_is_bound_to_the_pull_request_head_not_the_queue_commit() {
         let head = "d".repeat(40);
-        let request = EnqueuePullRequest {
+        let mut request = EnqueuePullRequest {
             operation_id: "4c8a5c44-7f1f-11f0-952e-acde48001122".into(),
             pull_number: 329,
             head_sha: head.clone(),
@@ -3129,7 +3155,7 @@ mod tests {
 
     #[test]
     fn typed_operation_inputs_are_exact_head_bound_and_bounded() {
-        let create = CreatePullRequest {
+        let mut create = CreatePullRequest {
             operation_id: "1c8a5c44-7f1f-11f0-952e-acde48001122".into(),
             head: "feature/maintainer".into(),
             head_sha: "a".repeat(40),
@@ -3170,7 +3196,7 @@ mod tests {
             .is_err()
         );
 
-        let review: SubmitPullRequestReview = serde_json::from_value(serde_json::json!({
+        let mut review: SubmitPullRequestReview = serde_json::from_value(serde_json::json!({
             "operation_id": "2c8a5c44-7f1f-11f0-952e-acde48001122",
             "pull_number": 297,
             "head_sha": "c".repeat(40),
@@ -3190,6 +3216,11 @@ mod tests {
             .is_err()
         );
 
+        // A blocking verdict is reconciled from the `COMMENTED` state it was
+        // posted as, like every other verdict. GitHub's own
+        // `CHANGES_REQUESTED` is not a state this App can reach -- it refuses
+        // a changes-requested self-review exactly as it refuses a
+        // self-approval -- so a review carrying it is not this operation's.
         let recovered = PullRequestReview {
             id: 1,
             html_url:
@@ -3197,23 +3228,74 @@ mod tests {
                     .into(),
             body: Some(review.marked_body()),
             commit_id: review.head_sha.clone(),
-            state: "CHANGES_REQUESTED".into(),
+            state: "COMMENTED".into(),
         };
         assert!(recovered.matches(&review));
         assert!(
             !PullRequestReview {
-                state: "COMMENTED".into(),
+                state: "CHANGES_REQUESTED".into(),
                 ..recovered
             }
             .matches(&review)
         );
     }
 
+    /// An operation ID is a durable identity, not a spelling. The same UUID in
+    /// either case has to be the same operation, or a replay would fork.
+    #[test]
+    fn an_operation_id_is_case_settled_rather_than_case_refused() {
+        let lower = SubmitPullRequestReview {
+            operation_id: "5c8a5c44-7f1f-11f0-952e-acde48001122".into(),
+            pull_number: 377,
+            head_sha: "a".repeat(40),
+            event: ReviewEvent::RequestChanges,
+            body: "Exact finding.".into(),
+        };
+        // `uuidgen` on macOS emits this, and refusing it cost two callers a
+        // blind retry before it was canonicalized instead.
+        let mut upper = SubmitPullRequestReview {
+            operation_id: "5C8A5C44-7F1F-11F0-952E-ACDE48001122".into(),
+            ..lower.clone()
+        };
+        assert!(upper.validate().is_ok());
+        assert_eq!(upper.operation_id, lower.operation_id);
+        // Replay identity is all three of these: the journal key, the digested
+        // request, and the marker reconciliation matches with `contains`. If
+        // the case were settled anywhere later than this, one of them would
+        // still carry the caller's spelling and the replay would fork.
+        assert_eq!(upper.marker(), lower.marker());
+        assert_eq!(
+            serde_json::to_string(&upper).unwrap(),
+            serde_json::to_string(&lower).unwrap()
+        );
+
+        // Case is the only thing relaxed. Everything that is not a UUID is
+        // still refused, and the refusal is still the first thing `validate`
+        // reaches.
+        for malformed in [
+            "5c8a5c44-7f1f-11f0-952e-acde4800112",
+            "5c8a5c44-7f1f-11f0-952e-acde480011222",
+            "5c8a5c44-7f1f-11f0-952e-acde480011g2",
+            "5c8a5c447f1f-11f0-952e--acde48001122",
+            "5c8a5c44_7f1f_11f0_952e_acde48001122",
+            "",
+        ] {
+            let mut request = SubmitPullRequestReview {
+                operation_id: malformed.into(),
+                ..lower.clone()
+            };
+            assert!(
+                request.validate().is_err(),
+                "a malformed operation ID must be refused: {malformed}"
+            );
+        }
+    }
+
     /// The required `review` check believes the verdict line, so the App has
     /// to be the only thing that can write one.
     #[test]
     fn review_verdict_is_app_written_and_never_reaches_the_wire() {
-        let allow: SubmitPullRequestReview = serde_json::from_value(serde_json::json!({
+        let mut allow: SubmitPullRequestReview = serde_json::from_value(serde_json::json!({
             "operation_id": "3c8a5c44-7f1f-11f0-952e-acde48001122",
             "pull_number": 331,
             "head_sha": "d".repeat(40),
@@ -3223,15 +3305,14 @@ mod tests {
         .unwrap();
         assert!(allow.validate().is_ok());
 
-        // `ALLOW` is this App's word. GitHub is told `COMMENT`, because the
-        // App authored the pull request and GitHub refuses a self-approval.
-        assert_eq!(allow.event.github_event(), "COMMENT");
-        assert_eq!(allow.event.github_state(), "COMMENTED");
-        assert_eq!(ReviewEvent::Comment.github_event(), "COMMENT");
-        assert_eq!(
-            ReviewEvent::RequestChanges.github_event(),
-            "REQUEST_CHANGES"
-        );
+        // `ALLOW`, `COMMENT`, and `REQUEST_CHANGES` are all this App's words.
+        // GitHub is told `COMMENT` for every one of them, because the App
+        // authored the pull request it is reviewing and GitHub refuses a
+        // self-review that takes a side -- `APPROVE` and `REQUEST_CHANGES`
+        // alike. Neither reaches the wire, and there is no per-verdict
+        // mapping left that could send one.
+        assert_eq!(REVIEW_EVENT, "COMMENT");
+        assert_eq!(REVIEW_STATE, "COMMENTED");
 
         // The verdict is rendered by the App, carries the exact head, and sits
         // alongside the operation marker.
@@ -3253,6 +3334,37 @@ mod tests {
             ..allow.clone()
         };
         assert!(block.marked_body().contains("Dark-Factory-Review: block"));
+
+        // The blocking verdict is the one the gate exists for, so its whole
+        // round trip is pinned: rendered into the line, posted as a
+        // `COMMENTED` review, recognised there by reconciliation, and echoed
+        // back as `block`. Mapping it to GitHub's `CHANGES_REQUESTED` instead
+        // made it unpostable on every App-authored pull request and therefore
+        // unreconcilable too, which is the defect this replaces (#377).
+        let posted_block = PullRequestReview {
+            id: 4,
+            html_url:
+                "https://github.com/dark-factory-build/dark-factory/pull/331#pullrequestreview-4"
+                    .into(),
+            body: Some(block.marked_body()),
+            commit_id: block.head_sha.clone(),
+            state: REVIEW_STATE.into(),
+        };
+        assert!(posted_block.matches(&block));
+        let blocked = posted_block.into_result(&block).unwrap();
+        assert_eq!(blocked.state, "COMMENTED");
+        assert_eq!(blocked.verdict, "block");
+        assert!(
+            PullRequestReview {
+                id: 5,
+                html_url: blocked.url.clone(),
+                body: Some(block.marked_body()),
+                commit_id: block.head_sha.clone(),
+                state: "CHANGES_REQUESTED".into(),
+            }
+            .into_result(&block)
+            .is_err()
+        );
 
         // A caller cannot state a verdict the App did not render. Without
         // this, any body could claim an ALLOW the reviewer never gave.
@@ -3284,9 +3396,9 @@ mod tests {
         };
         assert!(recovered.matches(&allow));
 
-        // `state` is `COMMENTED` for both ALLOW and COMMENT, so the caller
-        // cannot tell from it which verdict was recorded -- on the field that
-        // now gates merges. The result echoes it.
+        // `state` is `COMMENTED` for all three verdicts, so the caller cannot
+        // tell from it which verdict was recorded -- on the field that now
+        // gates merges. The result echoes it.
         let echoed = PullRequestReview {
             id: 2,
             html_url: recovered.html_url.clone(),
