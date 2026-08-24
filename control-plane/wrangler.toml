@@ -8,8 +8,8 @@ preview_urls = false
 command = "worker-build --release"
 
 # Workers Logs. Without this the console_error diagnostics the Worker already
-# emits -- the GraphQL error classes among them -- are discarded, so a typed
-# failure GitHub named was unreadable exactly when it was needed (#371).
+# emits -- the GraphQL error classes among them -- are discarded, so whatever
+# GitHub said about the refusal in #371 was unreadable when it was needed.
 [observability]
 enabled = true
 

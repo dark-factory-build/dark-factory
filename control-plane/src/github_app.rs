@@ -69,11 +69,11 @@ pub(crate) enum OperationError {
     /// GitHub refused, determinately, and nothing changed. Distinct from
     /// `Indeterminate`, which means the outcome is genuinely unknown: a
     /// refusal leaves the operation ID retryable once the precondition the
-    /// refusal names actually holds. The reason rides along because a bare
-    /// `refused` has now cost two diagnosis cycles (#371): "the token lacks
-    /// a permission", "the queue rejected the entry", and "there is no
-    /// queue" are three different retries, and without the reason the only
-    /// way to tell them apart is reading this crate's source.
+    /// refusal names actually holds. The reason rides along because an
+    /// untyped outcome has now cost two diagnosis cycles (#371): "the token
+    /// lacks a permission", "the queue rejected the entry", and "there is
+    /// no queue" are three different retries, and without the reason the
+    /// only way to tell them apart is reading this crate's source.
     #[error("github refused the operation and nothing changed: {0}")]
     Refused(RefusalReason),
     #[error("operation outcome requires reconciliation")]
@@ -94,9 +94,12 @@ pub(crate) enum RefusalReason {
     /// The mutation answered with neither an effect nor an error.
     #[error("answered with neither an effect nor an error")]
     NoEffect,
-    /// The base branch has no merge queue. The decision doc calls that
-    /// unsupported and fails closed rather than falling back to a merge.
-    #[error("the base branch has no merge queue")]
+    /// The queue read answered, and its answer carried no merge queue for
+    /// the base branch -- stated as the observation, because `entries:
+    /// None` is also the shape of a null repository. The decision doc
+    /// calls a queueless branch unsupported and fails closed rather than
+    /// falling back to a merge.
+    #[error("the queue read found no merge queue on the base branch")]
     NoMergeQueue,
 }
 
@@ -127,6 +130,14 @@ impl std::fmt::Display for RejectionKinds {
                 formatter.write_str(name)?;
                 separate = true;
             }
+        }
+        if !separate {
+            // No real path constructs the empty set: `classify_graphql_errors`
+            // records a class for every error it accepts and refuses an empty
+            // error array earlier. But the derived `Default` is
+            // crate-visible, so the impossible value must at least read as
+            // what it is rather than trailing off mid-sentence.
+            formatter.write_str("no recorded class")?;
         }
         Ok(())
     }
@@ -1558,8 +1569,9 @@ impl Authority {
             .and_then(|repository| repository.queue)
             .and_then(|queue| queue.entries)
         else {
-            // No queue on this branch. The decision doc calls that
-            // unsupported and fails closed rather than falling back.
+            // The read answered, and its answer carried no queue for this
+            // branch. The decision doc calls that unsupported and fails
+            // closed rather than falling back.
             return Err(OperationError::Refused(RefusalReason::NoMergeQueue));
         };
         // One unread page could hide this operation's entry and make a
@@ -2857,8 +2869,12 @@ mod tests {
         assert_eq!(
             OperationError::Refused(RefusalReason::NoMergeQueue).to_string(),
             "github refused the operation and nothing changed: \
-             the base branch has no merge queue"
+             the queue read found no merge queue on the base branch"
         );
+        // The empty set is unreachable from classification but constructible
+        // through the derived `Default`; its rendering must say so instead
+        // of ending the sentence with nothing.
+        assert_eq!(RejectionKinds::default().to_string(), "no recorded class");
     }
 
     /// The queue entry's own `headCommit` is the queue's synthetic merge
