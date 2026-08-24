@@ -9,7 +9,7 @@ use rusqlite::{
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use super::{MAX_STATE_PAGE, Result, Store, StoreError, append_event};
+use super::{MAX_STATE_PAGE, Result, Store, StoreError, append_event, parse_id};
 
 const MAX_SOURCE_KIND_BYTES: usize = 64;
 const MAX_SOURCE_ID_BYTES: usize = 512;
@@ -647,16 +647,6 @@ fn parse_status(value: &str, column: usize) -> rusqlite::Result<WorkCandidateSta
         }
     };
     Ok(status)
-}
-
-fn parse_id<T>(value: String, column: usize) -> rusqlite::Result<T>
-where
-    T: TryFrom<String>,
-    T::Error: std::error::Error + Send + Sync + 'static,
-{
-    T::try_from(value).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(column, Type::Text, Box::new(error))
-    })
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
