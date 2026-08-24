@@ -214,6 +214,31 @@ on the default branch. A single pull request adding both would deadlock: the
 job runs the default branch's copy of a script that does not exist there yet,
 so its own queue run could never go green.
 
+That follow-up is **not** a one-line `needs:` edit, and getting it wrong
+recreates the deadlock in a new costume. Because `review` runs only on
+`merge_group`, it is `skipped` on every `pull_request` and `push` run, so the
+naive condition fails `required` on every pull request. It must read:
+
+```yaml
+needs: [checks, linux, control-plane, review]
+# `skipped` is the correct answer outside the queue, where there is no verdict
+# to read. Treating it as a failure blocks every pull request.
+if: needs.review.result != 'success' && needs.review.result != 'skipped'
+```
+
+Until that lands the gate is **decorative and invisible**: it produces no check
+on the pull request at all, so nothing reports that rule 2 is unenforced. What
+keeps the window closed meanwhile is that `main-protect` still requires the
+queue, and `required` in the queue still runs everything else.
+
+The `merge_queue` rule is therefore a single chokepoint, and
+`scripts/verify-merge-queue-chokepoint.sh` asserts it on every run against the
+**live** rules — not against `scripts/github-repo-settings.sh`, which records
+what an operator intended to apply rather than what is applied. If the rule
+lapses, `merge_group` stops firing, the review gate never runs on any event,
+and `required` would otherwise stay green while rule 2 quietly stopped being
+enforced.
+
 What the check does **not** do is judge the review. A reviewer that records an
 `ALLOW` without reading anything produces a green check, and the reviewing and
 authoring agents reach the App through the same credential — so this is

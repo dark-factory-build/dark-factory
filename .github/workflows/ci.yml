@@ -135,6 +135,37 @@ jobs:
       - name: Confirm all hosted source gates passed
         run: echo "macOS, Linux, and control-plane source gates passed"
 
+      # The adversarial-review gate runs on `merge_group` and nowhere else, so
+      # the `merge_queue` rule is the single chokepoint keeping unreviewed work
+      # out of the default branch. If it lapses, `merge_group` stops firing,
+      # the gate never runs on any event, and this aggregate stays green --
+      # rule 2 silently stops being enforced with no red check anywhere.
+      #
+      # Checked against the LIVE rules rather than the proposal in
+      # scripts/github-repo-settings.sh: that file records what an operator
+      # intended to apply, which is not evidence that it is applied. The two
+      # have already drifted once.
+      - name: Check out $GITHUB_SHA
+        run: |
+          set -euxo pipefail
+          rm -rf .git
+          git init
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --depth=1 origin "$GITHUB_SHA"
+          git checkout --force --detach FETCH_HEAD
+          git clean -ffdx
+
+      - name: Require the merge queue to still be the only path to the branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}/rules/branches/${DEFAULT_BRANCH}" \
+            --jq '.[].type' >"${RUNNER_TEMP}/rules.txt"
+          DF_CHOKEPOINT_RULES="${RUNNER_TEMP}/rules.txt" \
+            ./scripts/verify-merge-queue-chokepoint.sh
+
   # AGENTS.md rule 2 requires an adversarial review by an agent that did not
   # write the change. GitHub cannot observe that, so the reviewer records its
   # verdict through the maintainer App against the exact head it read, and this

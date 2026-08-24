@@ -130,9 +130,13 @@ expect_fail 'an empty-bodied review is not itself a verdict'
 # Only the App's verdict counts. Anyone can type the line into a review by
 # hand; the author check is what stops that being a merge gate bypass.
 record "$head" COMMENTED 109233175 "Dark-Factory-Review: allow $head" >"$reviews"
-expect_fail 'a human cannot hand-write a verdict'
+expect_fail 'a real human account id does not count'
 record "$head" COMMENTED 3195165 "Dark-Factory-Review: allow $head" >"$reviews"
 expect_fail 'a truncated author id does not count'
+record "$head" COMMENTED 3195165700 "Dark-Factory-Review: allow $head" >"$reviews"
+expect_fail 'a lengthened author id does not count'
+record "$head" COMMENTED " $app" "Dark-Factory-Review: allow $head" >"$reviews"
+expect_fail 'a padded author id does not count'
 record "$head" COMMENTED 'dark-factory-maintainer[bot]' "Dark-Factory-Review: allow $head" >"$reviews"
 expect_fail 'the login is not the identity the gate binds to'
 
@@ -155,6 +159,16 @@ assert_stderr 'malformed review record'
 printf '%s\t%s\n' "$head" COMMENTED >"$reviews"
 expect_fail 'a two-field record'
 assert_stderr 'malformed review record'
+
+# A blank line is skipped, not read as a malformed record. Unreachable through
+# `@tsv`, but the promise is "anything else in the file is a projection bug",
+# and until this fixture existed the behaviour was unpinned in both directions.
+{
+    printf '\n'
+    record "$head" COMMENTED "$app" "Dark-Factory-Review: allow $head"
+    printf '\n'
+} >"$reviews"
+expect_pass 'blank lines are skipped'
 
 # A malformed projection must fail closed rather than be read as a verdict.
 # An embedded tab means the body was not flattened, so the fields after it are
@@ -212,6 +226,9 @@ record "$head" COMMENTED "$app" \
 expect_fail 'findings are rendered'
 assert_summary 'the launch path'
 assert_summary '&lt;script&gt;'
+# `&` must be escaped first, or `&lt;` would itself be re-escaped wrongly and a
+# literal `&` in a finding could open an entity in the rendered summary.
+assert_summary '&amp; the launch path'
 if grep -F '<script>alert' "$summary" >/dev/null; then
     echo 'FAIL: review body reached the summary unescaped' >&2
     exit 1
@@ -227,6 +244,11 @@ assert_pull_number() {
 }
 assert_pull_number "refs/heads/gh-readonly-queue/main/pr-325-f64d7d6457938b771ac55390d010d185dbddef1f" 325
 assert_pull_number "refs/heads/gh-readonly-queue/release/v1/pr-7-$head" 7
+# A base branch whose own name contains `/pr-`. This is the only fixture that
+# distinguishes rightmost (`##`) from leftmost (`#`) stripping, and getting it
+# wrong reads a DIFFERENT pull request's verdict while merging this one -- at
+# the sole enforcement point.
+assert_pull_number "refs/heads/gh-readonly-queue/release/pr-2-hotfix/pr-341-$head" 341
 
 # A pull-request ref must NOT resolve: this gate runs only on `merge_group`,
 # so seeing one would mean the trigger was widened without the enforcement

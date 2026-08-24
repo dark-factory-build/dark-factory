@@ -261,6 +261,14 @@ pub(crate) struct ReviewResult {
     /// `ALLOW` and `COMMENT` are both `COMMENTED` on the wire, so `state`
     /// cannot tell a reviewer which verdict it just recorded -- on the one
     /// field that now gates merges. This echoes it back.
+    ///
+    /// `default` is load-bearing, not tidiness. Results are stored as JSON in
+    /// the durable journal and replayed with `serde_json::from_str`, so a
+    /// required field added here makes every operation completed *before* this
+    /// deploy fail to deserialize -- turning an idempotent replay into a
+    /// permanent `Unavailable` for an operation that succeeded. The same trap
+    /// applies to any future field on any result type.
+    #[serde(default)]
     pub(crate) verdict: String,
 }
 
@@ -3170,6 +3178,18 @@ mod tests {
         .unwrap();
         assert_eq!(noted.state, echoed.state);
         assert_ne!(noted.verdict, echoed.verdict);
+
+        // A result journaled before `verdict` existed must still replay. The
+        // journal stores these as JSON and replays them with `from_str`, so a
+        // required field would turn a completed operation into a permanent
+        // `Unavailable` on every retry after the deploy that added it.
+        let replayed: ReviewResult = serde_json::from_str(
+            r#"{"review_id":7,"url":"https://github.com/o/r/pull/1#pullrequestreview-7",
+                 "head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state":"COMMENTED"}"#,
+        )
+        .expect("a pre-verdict journal row must still deserialize");
+        assert_eq!(replayed.review_id, 7);
+        assert!(replayed.verdict.is_empty());
         // A verdict is bound to one head. The same review against any other
         // commit is not this operation's result.
         assert!(
