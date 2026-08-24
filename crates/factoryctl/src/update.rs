@@ -30,7 +30,7 @@ pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Where the newest release's manifest lives; overridable for tests and
 /// mirrors through `DARK_FACTORY_UPDATE_URL`.
 pub const MANIFEST_URL: &str =
-    "https://github.com/baziyer/dark-factory/releases/latest/download/latest.json";
+    "https://github.com/dark-factory-build/dark-factory/releases/latest/download/latest.json";
 pub const MANIFEST_URL_ENV: &str = "DARK_FACTORY_UPDATE_URL";
 /// How long a cached check stays fresh.
 pub const CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);

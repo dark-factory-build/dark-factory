@@ -3,7 +3,7 @@
 ## Reporting a vulnerability
 
 Use [GitHub private vulnerability
-reporting](https://github.com/baziyer/dark-factory/security/advisories/new).
+reporting](https://github.com/dark-factory-build/dark-factory/security/advisories/new).
 Do not open a public issue for a capability, credential, process-ownership, or
 network-boundary failure.
 

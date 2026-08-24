@@ -55,7 +55,7 @@ A few workspace-wide rules the gate enforces, worth knowing up front:
 ## Where to start
 
 - **A bug or a small gap**: [GitHub issues labelled
-  `known-issue`](https://github.com/baziyer/dark-factory/issues?q=is%3Aissue+is%3Aopen+label%3Aknown-issue)
+  `known-issue`](https://github.com/dark-factory-build/dark-factory/issues?q=is%3Aissue+is%3Aopen+label%3Aknown-issue)
   each have a symptom, evidence (`file:line` or how it was observed), a
   suggested smallest fix, and a `size:S|M|L` label (`decision` when the
   maintainer has to choose, not code) — anything `size:S` is a reasonable
