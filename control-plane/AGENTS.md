@@ -32,14 +32,18 @@ Codex nor Claude owns its credentials or its durable journal.
    model-provider GitHub connector is an equivalent authority path. Their
    first remote call must be `maintainer_status`, and they must fail closed
    unless it binds `dark-factory-build/dark-factory` with numeric repository
-   ID `1335380107` and permission revision `maintainer-operations-v1`. A
+   ID `1335380107` and permission revision `maintainer-operations-v2`. A
    credential-isolating host transport authenticates the connection; provider,
    tool, and shell processes never inherit the Access pair, and agents never
    read or source `.env.txt` or handle either value.
-   The deployed surface currently has six operations: status, exact commit
-   publication, pull-request creation, exact-head review submission, check
-   observation, and merge-queue enqueue. Missing issue, release, workflow, or
-   merge-result operations are human handoffs, never credential fallbacks.
+   The deployed surface is finite: authority and default-head observation,
+   durable operation observation, bounded issue lifecycle, exact commit and
+   pull-request publication, exact-head review and CI diagnosis/recovery,
+   merge-queue enqueue and eventual-result observation, immutable release
+   publication/observation/recovery, and one exact control-plane deployment
+   dispatch. GitHub's delete-on-merge setting owns source-branch cleanup.
+   Direct merge and generic issue, ref, release, Actions, or API operations are
+   absent, never credential fallbacks.
 4. Treat webhook authentication and replay handling as load-bearing. Verify
    the signature over the exact bounded request body, require exactly one of
    every security header, bind the configured App ID, and journal the full

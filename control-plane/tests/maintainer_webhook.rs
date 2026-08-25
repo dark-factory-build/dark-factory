@@ -258,7 +258,7 @@ async fn unknown_events_and_lifecycle_actions_fail_closed() {
 }
 
 #[tokio::test]
-async fn malformed_or_oversized_requests_are_rejected_before_journaling() {
+async fn malformed_requests_and_oversized_webhooks_are_rejected_before_journaling() {
     let (router, _temporary, database) = test_router();
     let malformed_delivery = Request::post("/v1/github/maintainer/webhook")
         .header("content-type", "application/json")

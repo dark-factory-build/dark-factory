@@ -1,7 +1,8 @@
 name: Deploy control-plane
+run-name: Deploy control-plane ${{ inputs.operation_id }} ${{ inputs.request_digest }}
 
-# Deployment is an explicit operator action (control-plane/AGENTS.md rule 10),
-# so this never runs on push or merge. Routes are a non-versioned setting and
+# Deployment is an explicit, exact Maintainer operation rather than a side
+# effect of push or merge. Routes are a non-versioned setting and
 # Worker secrets persist across versions, so promoting a version swaps code
 # atomically behind the attached custom domain: no hostname change, no outage,
 # and no GitHub App private key or webhook secret. Only CLOUDFLARE_API_TOKEN is
@@ -10,6 +11,18 @@ name: Deploy control-plane
 on:
   workflow_dispatch:
     inputs:
+      operation_id:
+        description: Durable Maintainer operation UUID
+        required: true
+        type: string
+      request_digest:
+        description: SHA-256 of the complete durable Maintainer request
+        required: true
+        type: string
+      expected_commit:
+        description: Exact default-branch commit authorized for deployment
+        required: true
+        type: string
       expected_tree:
         description: Reviewed tree SHA-1 that the checked-out source must match
         required: true
@@ -29,15 +42,21 @@ concurrency:
 
 jobs:
   deploy:
+    # GitHub's event context, unlike workflow inputs, identifies who
+    # authenticated the dispatch. Only the Maintainer App may reach the job
+    # that names the credential-bearing environment. Require both actors so a
+    # human cannot rerun an App-created run and inherit its authority.
+    if: ${{ github.actor == 'dark-factory-maintainer[bot]' && github.triggering_actor == 'dark-factory-maintainer[bot]' && github.ref == 'refs/heads/main' }}
     # `environment` scopes the credential to jobs that name it, so an ordinary
-    # pull-request job cannot read it. That is necessary and NOT sufficient: a
-    # dispatch runs the workflow file from the SELECTED REF, so anyone who can
-    # push a branch and dispatch it controls this file.
-    #
-    # That is closed by configuration this file cannot assert: on the
-    # `production` environment set REQUIRED REVIEWERS and restrict DEPLOYMENT
-    # BRANCHES to `main`. Both are in place. Without them the credential is
-    # only as protected as write access to the repository.
+    # pull-request job cannot read it. That is necessary and NOT sufficient:
+    # a dispatch runs the workflow file from the SELECTED REF. The production
+    # environment's DEPLOYMENT BRANCHES must therefore remain restricted to
+    # `main`; a modified branch copy cannot reach this credential even if it
+    # removes this guard. The v2 headless path intentionally has no required
+    # reviewer: the trusted App actor gate, main-only environment rule, the
+    # App's live-default binding, and the exact tree assertion below are the
+    # durable authorization. A per-run reviewer would restore an operator
+    # click to every autonomous deployment.
     #
     # The second hazard this comment used to name — `dark-factory-mac` being
     # persistent and shared with CI (#54) — no longer applies to this job,
@@ -82,6 +101,16 @@ jobs:
           git fetch --depth=1 origin "$GITHUB_SHA"
           git checkout --force --detach FETCH_HEAD
           git clean -ffdx
+
+      - name: Bind the dispatch to the reviewed commit
+        env:
+          EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_SHA}" != "${EXPECTED_COMMIT}" ]; then
+            echo "dispatch commit ${GITHUB_SHA} is not the reviewed commit ${EXPECTED_COMMIT}; refusing to deploy" >&2
+            exit 1
+          fi
 
       # The operator states which tree was reviewed; the runner proves the
       # source it is about to ship is that exact tree.
@@ -242,7 +271,7 @@ jobs:
             echo "healthz=${health} readyz=${body}"
             if [ "${health}" = "200" ] \
               && printf '%s' "${body}" | grep -Fq '"status":"ready"' \
-              && printf '%s' "${body}" | grep -Fq '"maintainer_operations":"mcp_six_tools_operator_and_headless"'; then
+              && printf '%s' "${body}" | grep -Fq '"maintainer_operations":"mcp_repository_bound_operator_and_headless"'; then
               ready=1
               break
             fi

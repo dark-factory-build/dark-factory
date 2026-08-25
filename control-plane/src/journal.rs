@@ -96,6 +96,15 @@ pub(crate) struct Operation {
 
 #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
 #[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct OperationObservation {
+    pub(crate) kind: String,
+    pub(crate) request_digest: String,
+    pub(crate) state: String,
+    pub(crate) result_json: Option<String>,
+}
+
+#[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum OperationRecord {
     New,
@@ -241,6 +250,26 @@ impl DeliveryJournal {
             Self::Unavailable => Err(Error::InvalidSchema),
         }
     }
+
+    #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+    pub(crate) async fn observe_operation(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<OperationObservation>, Error> {
+        match self {
+            #[cfg(target_arch = "wasm32")]
+            Self::Cloudflare(journal) => journal.observe_operation(operation_id).await,
+            #[cfg(feature = "development-sqlite")]
+            Self::Sqlite(journal) => {
+                let journal = journal.clone();
+                let operation_id = operation_id.to_owned();
+                tokio::task::spawn_blocking(move || journal.observe_operation(&operation_id))
+                    .await?
+            }
+            #[cfg(all(not(target_arch = "wasm32"), not(feature = "development-sqlite")))]
+            Self::Unavailable => Err(Error::InvalidSchema),
+        }
+    }
 }
 
 #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
@@ -332,6 +361,29 @@ impl CloudflareJournal {
     ) -> Result<OperationRecord, Error> {
         self.operation_request("/operation/mark", operation, Some(transition))
             .await
+    }
+
+    async fn observe_operation(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<OperationObservation>, Error> {
+        #[derive(Serialize)]
+        struct Message<'a> {
+            operation_id: &'a str,
+        }
+        let stub = self
+            .namespace
+            .get_by_name(&operation_shard_name(self.app_id, operation_id))?;
+        let mut init = RequestInit::new();
+        init.with_method(Method::Post).with_body(Some(
+            serde_json::to_string(&Message { operation_id })?.into(),
+        ));
+        let request = Request::new_with_init("https://journal.internal/operation/observe", &init)?;
+        let mut response = stub.fetch_with_request(request).await?;
+        if response.status_code() != 200 {
+            return Err(Error::InvalidSchema);
+        }
+        Ok(response.json().await?)
     }
 
     async fn operation_request(
@@ -437,6 +489,21 @@ impl DurableObject for MaintainerDeliveryJournal {
                 .await;
                 match result {
                     Ok(record) => Response::from_json(&record),
+                    Err(_) => Response::error("journal unavailable", 503),
+                }
+            }
+            (Method::Post, "/operation/observe") => {
+                #[derive(Deserialize)]
+                struct Message {
+                    operation_id: String,
+                }
+                let result = async {
+                    let message: Message = request.json().await?;
+                    observe_operation_cloudflare(&self.sql, &message.operation_id)
+                }
+                .await;
+                match result {
+                    Ok(observation) => Response::from_json(&observation),
                     Err(_) => Response::error("journal unavailable", 503),
                 }
             }
@@ -758,6 +825,23 @@ fn stored_operation_cloudflare(
 }
 
 #[cfg(target_arch = "wasm32")]
+fn observe_operation_cloudflare(
+    sql: &SqlStorage,
+    operation_id: &str,
+) -> Result<Option<OperationObservation>, Error> {
+    let stored = sql
+        .exec(
+            "SELECT kind, request_digest, state, result_json
+             FROM maintainer_operations WHERE operation_id = ?",
+            vec![operation_id.into()],
+        )?
+        .to_array::<OperationObservation>()?;
+    (stored.len() <= 1)
+        .then(|| stored.into_iter().next())
+        .ok_or(Error::MissingConflict)
+}
+
+#[cfg(target_arch = "wasm32")]
 fn mark_operation_cloudflare(
     sql: &SqlStorage,
     operation: &Operation,
@@ -958,6 +1042,12 @@ impl SqliteJournal {
         Ok(record)
     }
 
+    fn observe_operation(&self, operation_id: &str) -> Result<Option<OperationObservation>, Error> {
+        let connection = self.connection()?;
+        audit_sqlite_schema(&connection)?;
+        observe_operation_sqlite(&connection, operation_id)
+    }
+
     fn connection(&self) -> Result<Connection, rusqlite::Error> {
         let connection = Connection::open(self.database.as_ref())?;
         connection.busy_timeout(Duration::from_secs(5))?;
@@ -1027,6 +1117,29 @@ fn stored_operation_sqlite(
         },
     )?;
     stored.record(operation)
+}
+
+#[cfg(feature = "development-sqlite")]
+fn observe_operation_sqlite(
+    connection: &rusqlite::Connection,
+    operation_id: &str,
+) -> Result<Option<OperationObservation>, Error> {
+    connection
+        .query_row(
+            "SELECT kind, request_digest, state, result_json
+             FROM maintainer_operations WHERE operation_id = ?1",
+            [operation_id],
+            |row| {
+                Ok(OperationObservation {
+                    kind: row.get(0)?,
+                    request_digest: row.get(1)?,
+                    state: row.get(2)?,
+                    result_json: row.get(3)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Error::from)
 }
 
 #[cfg(all(test, feature = "development-sqlite"))]
@@ -1163,6 +1276,73 @@ mod operation_tests {
         assert!(matches!(
             journal.begin_operation(&conflict).await.unwrap(),
             OperationRecord::Conflict
+        ));
+    }
+
+    #[tokio::test]
+    async fn operation_observation_is_read_only_and_returns_the_stored_result() {
+        let directory = tempfile::tempdir().unwrap();
+        let journal =
+            DeliveryJournal::open_development(&directory.path().join("journal.db")).unwrap();
+        let operation = Operation {
+            operation_id: "4c8a5c44-7f1f-11f0-952e-acde48001122".into(),
+            kind: "publish_commit".into(),
+            request_digest: "d".repeat(64),
+        };
+
+        assert!(
+            journal
+                .observe_operation(&operation.operation_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            journal.begin_operation(&operation).await.unwrap(),
+            OperationRecord::New
+        ));
+        let planned = journal
+            .observe_operation(&operation.operation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(planned.kind, operation.kind);
+        assert_eq!(planned.request_digest, operation.request_digest);
+        assert_eq!(planned.state, "planned");
+        assert_eq!(planned.result_json, None);
+
+        assert!(matches!(
+            journal
+                .mark_operation(&operation, OperationTransition::Executing)
+                .await
+                .unwrap(),
+            OperationRecord::Claimed
+        ));
+        let result = r#"{"branch":"topic","commit_sha":"0123456789012345678901234567890123456789","parent_sha":"abcdefabcdefabcdefabcdefabcdefabcdefabcd"}"#;
+        assert!(matches!(
+            journal
+                .mark_operation(
+                    &operation,
+                    OperationTransition::Completed(result.to_owned())
+                )
+                .await
+                .unwrap(),
+            OperationRecord::Completed(stored) if stored == result
+        ));
+        let completed = journal
+            .observe_operation(&operation.operation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed.kind, operation.kind);
+        assert_eq!(completed.request_digest, operation.request_digest);
+        assert_eq!(completed.state, "completed");
+        assert_eq!(completed.result_json.as_deref(), Some(result));
+
+        // Observation never claims, releases, or changes a completed row.
+        assert!(matches!(
+            journal.begin_operation(&operation).await.unwrap(),
+            OperationRecord::Completed(stored) if stored == result
         ));
     }
 

@@ -347,7 +347,7 @@ operation. The host or coordinator supplies its transport authentication; it
 is not a Codex, Claude, or other model-provider connector. Before any remote
 operation, call `maintainer_status` and require the exact repository
 `dark-factory-build/dark-factory`, numeric repository ID `1335380107`, and
-permission revision `maintainer-operations-v1`.
+permission revision `maintainer-operations-v2`.
 
 Host registration must isolate the Cloudflare Access pair inside the MCP
 transport process. Do not export either value into a coordinator-wide,
@@ -355,31 +355,52 @@ provider, tool, or shell environment. An MCP-compatible client may use a local
 stdio-to-HTTPS transport for that isolation; this is a generic MCP boundary,
 not authority granted by a particular model provider or client configuration.
 
-The deployed surface currently supports status, exact commit publication,
-pull-request creation, exact-head review submission, exact-head check
-observation, and merge-queue enqueue. It does not expose generic remote reads,
-issues, releases, workflow dispatch, direct merge, branch deletion, or the
-eventual result of an enqueue. An operation outside that set is an explicit
-human handoff until a separately reviewed typed operation exists; it is not a
-reason to borrow operator credentials.
+The deployed surface supports authority, default-head, and durable-operation
+observation; bounded issue lifecycle; exact commit and pull-request publication;
+exact-head review, workflow diagnosis/recovery, and eventual-merge observation;
+merge-queue enqueue; immutable release publication/observation/recovery; and an
+exact dispatch of the reviewed control-plane deployment workflow. GitHub's
+required `delete_branch_on_merge` repository setting owns source-branch cleanup
+atomically. It does not expose generic remote reads, direct merge, arbitrary ref
+mutation, arbitrary issue mutation, or a generic Actions/API proxy. An operation
+outside that set is an explicit human handoff; it is not a reason to borrow
+operator credentials.
+
+Retain the canonical request for every write until it completes. If the MCP
+transport closes without a result, call `observe_operation` with the same UUID.
+A completed record returns the typed result; a missing record proves the
+request never reached the journal; planned, executing, and indeterminate states
+remain bound to that request. Retry only the byte-identical request under the
+same UUID. If local assembly was truncated or otherwise wrong, do not reuse its
+UUID for corrected bytes.
 
 Agents must not use ambient `git fetch`, `git pull`, `git clone`, `git push`,
 `gh`, `gh auth`, or SSH-based access: those paths can consult the operator's
 credential helper, login keychain, SSH agent, or other user credential state.
 
-Anonymous HTTPS reads of public repositories are allowed when credential
-lookup and interactive prompting are disabled. If no authorized surface is
-available, authenticated access stops without contacting the remote. There is
-no token fallback for agent operations: operator approval does not authorize
-injecting `GH_TOKEN`,
-`GITHUB_TOKEN`, a personal access token, or another credential into an agent
-process. Supported operations go through the Maintainer MCP; unsupported
-operations require a separately reviewed human action.
+If no authorized surface is available, remote access stops without contacting
+GitHub. There is no token fallback for agent operations: operator approval does
+not authorize injecting `GH_TOKEN`, `GITHUB_TOKEN`, a personal access token,
+or another credential into an agent process. Supported operations go through
+the Maintainer MCP; unsupported operations require a separately reviewed human
+action.
 
-Deployment is the one exception, and it is narrow: see `AGENTS.md` rule 14 and
-"Deploying the control-plane" below. Never use interactive authentication,
-write a credential into a worktree or repository, or expose it through a
-prompt, command output, or log.
+Deployment remains narrow: the Maintainer MCP can dispatch only the fixed
+default-branch workflow at an exact commit and reviewed tree. For headless
+steady-state operation, the protected `production` environment keeps its
+main-only deployment-branch rule and secret but has no required reviewers.
+The deploy job itself admits only a `workflow_dispatch` whose event-context
+`github.actor` and `github.triggering_actor` are both the exact
+`dark-factory-maintainer[bot]` identity and whose ref is `main`; these are
+GitHub-authenticated facts, not caller-supplied inputs. Requiring the triggering
+actor as well prevents a human rerun from inheriting an App-created run's
+authority. A workflow copied to another branch cannot reach the environment
+secret because of its main-only rule, while the protected default-branch copy
+cannot be changed by an ordinary repository actor. Removing the existing
+reviewer is a one-time v2 bootstrap setting change, not an Administration API
+granted to agents. Never use interactive authentication, write a credential
+into a worktree or repository, or expose it through a prompt, command output,
+or log.
 This is a contributor-agent workflow boundary, not the future Dark Factory
 product GitHub integration. Human operators may continue to use their normal
 Git and GitHub CLI configuration for separately reviewed human actions.
@@ -387,8 +408,12 @@ Git and GitHub CLI configuration for separately reviewed human actions.
 ## Deploying the control-plane
 
 `maintainer.darkfactory.build` runs the `dark-factory-control-plane` Worker.
-Deploy it by dispatching the **Deploy control-plane** workflow with the reviewed
-tree SHA-1; the run proves the checkout matches that tree, runs
+Deploy it through the typed Maintainer operation, which dispatches the **Deploy
+control-plane** workflow from the live default branch with its exact commit,
+reviewed tree SHA-1, and complete durable-request digest. GitHub's returned run
+ID is re-read before the operation completes and must name that exact workflow,
+commit, and digest. The run refuses a raced default-branch commit before
+deployment and proves the checkout matches the reviewed tree, then runs
 `control-plane/scripts/local-ci.sh`, uploads a version, proves every authority
 secret was inherited, promotes it, verifies `/healthz` and `/readyz`, and rolls
 the previous version back if the live check fails.
@@ -403,20 +428,21 @@ Worker secrets persist across versions, so a routine deployment needs only
 needed for first activation and rotation alone, and never for shipping code.
 
 The credential lives as an environment secret on the `production` GitHub
-environment. That scopes it to jobs naming the environment, which is necessary
-and not sufficient: a dispatch runs the workflow file from the ref it is
-dispatched against, and `dark-factory-mac` is a persistent runner shared with
-CI (#54). Both gaps are closed by settings on that environment — **required
-reviewers** and **deployment branches restricted to `main`** — which the
-workflow file cannot assert for itself. Without them the credential is only as
-protected as write access to the repository.
+environment. That scopes it to jobs naming the environment, while deployment
+branches restricted to `main` prevent a dispatch from selecting an unreviewed
+workflow ref. The job's exact Maintainer App actor check also prevents an
+ordinary repository actor from consuming the secret through a manual dispatch
+or rerun. The job uses an ephemeral hosted runner. Protected-main review,
+the exact-tree workflow assertion, and the Maintainer operation's live-default
+binding replace the old per-deployment reviewer pause; retaining that pause
+would make every otherwise autonomous deployment require an operator click.
 
 `/readyz` is the deployment's real proof: it returns ready only when the Durable
 Object answers, the GitHub App authority verifies, and Cloudflare Access serves
 a usable signing key. An unauthenticated `/mcp` 401 proves nothing about Access,
 because the handler rejects a missing header before making any network call.
-Proving authenticated MCP end to end needs an Access service token and a policy
-that includes it; until then that leg is verified by hand.
+The deployment gate requires the headless readiness label, so a promoted build
+must also retain the exact Access service-token binding used by the coordinator.
 
 Public state may include a milestone, exact ref/SHA, checks, links, and next
 operator action. Attempt identities, prompts, guidance, raw provider output,
@@ -432,7 +458,16 @@ job.
 After boot approval and a separate release decision, the release transaction
 retains this shape:
 
-- a semver tag matching the workspace version builds the supported archives;
+- the typed Maintainer operation publishes an immutable semver tag only at the
+  live default head; the tag-triggered workflow builds the supported archives;
+- initial observation binds the tag and source SHA to exactly one tag-push run
+  of the fixed workflow and requires the release, when present, to contain only
+  the five uploaded assets with GitHub-reported SHA-256 digests;
+- a failed exact tag can be recovered only through the fixed release workflow;
+  the request binds the exact default-branch workflow commit, the workflow
+  refuses a raced dispatch head, and the returned run ID is read before durable
+  completion; recovery observation reads that same run while re-proving its
+  full-request digest, workflow commit, and immutable tag;
 - published manifests and archives carry exact SHA-256 identities;
 - install stages a complete version directory, verifies every binary, then
   atomically repoints `bin/current`;

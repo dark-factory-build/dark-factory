@@ -10,14 +10,28 @@ use crate::{
     BrokerState,
     access::AccessAuthority,
     github_app::{
-        AppAuthority, CreatePullRequest, EnqueuePullRequest, ObservePullRequestChecks,
-        OperationError, PublishCommit, SubmitPullRequestReview,
+        AppAuthority, CreateIssue, CreatePullRequest, DispatchControlPlaneDeploy,
+        EnqueuePullRequest, ObserveControlPlaneDeploy, ObserveIssue, ObservePullRequestChecks,
+        ObservePullRequestMerge, ObservePullRequestWorkflows, ObserveRelease,
+        ObserveReleaseWorkflow, OperationError, PublishCommit, PublishReleaseTag,
+        ReadPullRequestJobLog, RecoverRelease, RerunFailedPullRequestJobs, ResolveIssue,
+        SubmitPullRequestReview, canonical_operation_id,
     },
     journal::DeliveryJournal,
 };
 
 pub(crate) const PATH: &str = "/mcp";
+// `publish_commit` permits 50 files with one million encoded characters each.
+// Leave room for their paths and the JSON-RPC envelope without accepting an
+// unbounded allocation before typed validation.
+pub(crate) const MAX_BODY_BYTES: usize = 52 * 1024 * 1024;
 const PROTOCOL_VERSION: &str = "2025-06-18";
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ObserveOperation {
+    operation_id: String,
+}
 
 #[derive(Clone)]
 pub(crate) struct McpState {
@@ -104,22 +118,261 @@ async fn dispatch(request: Value, mcp: &McpState) -> Response {
     }
 }
 
+fn workflow_run_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "run_id": {"type": "integer"},
+            "run_attempt": {"type": "integer"},
+            "name": {"type": "string"},
+            "path": {"type": "string"},
+            "event": {"type": "string"},
+            "status": {"type": "string"},
+            "conclusion": {"type": ["string", "null"]},
+            "url": {"type": "string"},
+            "jobs": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "job_id": {"type": "integer"},
+                        "name": {"type": "string"},
+                        "status": {"type": "string"},
+                        "conclusion": {"type": ["string", "null"]},
+                        "url": {"type": "string"},
+                        "steps": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "status": {"type": "string"},
+                                    "conclusion": {"type": ["string", "null"]}
+                                },
+                                "required": ["name", "status", "conclusion"],
+                                "additionalProperties": false
+                            }
+                        }
+                    },
+                    "required": ["job_id", "name", "status", "conclusion", "url", "steps"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["run_id", "run_attempt", "name", "path", "event", "status", "conclusion", "url", "jobs"],
+        "additionalProperties": false
+    })
+}
+
+fn release_schema() -> Value {
+    json!({
+        "type": ["object", "null"],
+        "properties": {
+            "tag": {"type": "string"},
+            "url": {"type": "string"},
+            "draft": {"type": "boolean", "const": false},
+            "prerelease": {"type": "boolean"},
+            "assets": {
+                "type": "array",
+                "minItems": 5,
+                "maxItems": 5,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "size": {"type": "integer", "minimum": 1},
+                        "digest": {"type": "string", "pattern": "^sha256:[0-9a-fA-F]{64}$"},
+                        "url": {"type": "string"}
+                    },
+                    "required": ["name", "size", "digest", "url"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["tag", "url", "draft", "prerelease", "assets"],
+        "additionalProperties": false
+    })
+}
+
 fn tools() -> Value {
     json!({"tools": [{
         "name": "maintainer_status",
-        "title": "Verify maintainer authority",
-        "description": "Verify the exact Dark Factory Maintainer GitHub App installation and permission revision before repository operations.",
+        "title": "Verify authority and default head",
+        "description": "Verify the exact Dark Factory Maintainer GitHub App installation and permission revision, and return the live default branch head before repository operations.",
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
         "outputSchema": {
             "type": "object",
             "properties": {
                 "repository": {"type": "string"},
                 "repository_id": {"type": "integer"},
-                "permission_revision": {"type": "string"}
+                "permission_revision": {"type": "string"},
+                "default_branch": {"type": "string"},
+                "default_sha": {"type": "string"},
+                "delete_branch_on_merge": {"type": "boolean", "const": true}
             },
-            "required": ["repository", "repository_id", "permission_revision"],
+            "required": ["repository", "repository_id", "permission_revision", "default_branch", "default_sha", "delete_branch_on_merge"],
             "additionalProperties": false
         },
+        "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
+    }, {
+        "name": "observe_operation",
+        "title": "Observe a durable write operation",
+        "description": "Report whether one operation UUID reached the durable journal and return its request digest, state, and completed typed result. This never begins or retries the operation.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"}
+            },
+            "required": ["operation_id"],
+            "additionalProperties": false
+        },
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "operation_id": {"type": "string"},
+                "state": {"type": "string", "enum": ["missing", "planned", "executing", "completed", "indeterminate"]},
+                "kind": {"type": ["string", "null"]},
+                "request_digest": {"type": ["string", "null"]},
+                "result": {"type": ["object", "null"]}
+            },
+            "required": ["operation_id", "state", "kind", "request_digest", "result"],
+            "additionalProperties": false
+        },
+        "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false}
+    }, {
+        "name": "create_issue",
+        "title": "Create a bounded issue",
+        "description": "Create one repository-bound issue with a marker containing the durable operation UUID and complete request digest. Replays require the same UUID and request.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
+                "title": {"type": "string", "minLength": 1, "maxLength": 256},
+                "body": {"type": "string", "maxLength": 30000}
+            },
+            "required": ["operation_id", "title", "body"],
+            "additionalProperties": false
+        },
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "number": {"type": "integer"},
+                "url": {"type": "string"}
+            },
+            "required": ["number", "url"],
+            "additionalProperties": false
+        },
+        "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true}
+    }, {
+        "name": "observe_issue",
+        "title": "Observe one issue",
+        "description": "Return the live state of one repository issue. Pull requests are refused.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"issue_number": {"type": "integer", "minimum": 1}},
+            "required": ["issue_number"],
+            "additionalProperties": false
+        },
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "number": {"type": "integer"},
+                "url": {"type": "string"},
+                "state": {"type": "string", "enum": ["open", "closed"]},
+                "state_reason": {"type": ["string", "null"]}
+            },
+            "required": ["number", "url", "state", "state_reason"],
+            "additionalProperties": false
+        },
+        "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
+    }, {
+        "name": "resolve_issue",
+        "title": "Resolve an issue with evidence",
+        "description": "Post one bounded evidence comment and close the same real issue as completed or not planned. A durable marker reconciles partial completion without duplicate comments.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
+                "issue_number": {"type": "integer", "minimum": 1},
+                "body": {"type": "string", "minLength": 1, "maxLength": 16000},
+                "state_reason": {"type": "string", "enum": ["completed", "not_planned"]}
+            },
+            "required": ["operation_id", "issue_number", "body", "state_reason"],
+            "additionalProperties": false
+        },
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "number": {"type": "integer"},
+                "url": {"type": "string"},
+                "comment_url": {"type": "string"},
+                "state": {"type": "string", "const": "closed"},
+                "state_reason": {"type": "string", "enum": ["completed", "not_planned"]}
+            },
+            "required": ["number", "url", "comment_url", "state", "state_reason"],
+            "additionalProperties": false
+        },
+        "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": true}
+    }, {
+        "name": "publish_release_tag",
+        "title": "Publish an immutable release tag",
+        "description": "Create one semver release tag only at the live default-branch commit. Existing exact tags reconcile; moved tags conflict.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
+                "tag": {"type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+(?:-[A-Za-z0-9.-]+)?$"},
+                "commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+            },
+            "required": ["operation_id", "tag", "commit_sha"],
+            "additionalProperties": false
+        },
+        "outputSchema": {"type": "object", "properties": {"tag": {"type": "string"}, "commit_sha": {"type": "string"}}, "required": ["tag", "commit_sha"], "additionalProperties": false},
+        "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true}
+    }, {
+        "name": "recover_release",
+        "title": "Recover an exact release workflow",
+        "description": "Dispatch only the fixed release.yml recovery workflow from the exact live default-branch commit for an existing exact tag, then verify GitHub's returned run ID before completion.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
+                "tag": {"type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+(?:-[A-Za-z0-9.-]+)?$"},
+                "commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+                "workflow_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+            },
+            "required": ["operation_id", "tag", "commit_sha", "workflow_sha"],
+            "additionalProperties": false
+        },
+        "outputSchema": {"type": "object", "properties": {"operation_id": {"type": "string"}, "workflow": {"type": "string"}, "commit_sha": {"type": "string"}, "run_id": {"type": "integer"}, "run_attempt": {"type": "integer"}}, "required": ["operation_id", "workflow", "commit_sha", "run_id", "run_attempt"], "additionalProperties": false},
+        "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true}
+    }, {
+        "name": "observe_release",
+        "title": "Observe an exact release",
+        "description": "Verify an immutable tag and return its release assets plus the one fixed tag-push release workflow run for that exact commit.",
+        "inputSchema": {"type": "object", "properties": {"tag": {"type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+(?:-[A-Za-z0-9.-]+)?$"}, "commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}}, "required": ["tag", "commit_sha"], "additionalProperties": false},
+        "outputSchema": {"type": "object", "properties": {"tag": {"type": "string"}, "commit_sha": {"type": "string"}, "release": release_schema(), "workflow_run": workflow_run_schema()}, "required": ["tag", "commit_sha", "release", "workflow_run"], "additionalProperties": false},
+        "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
+    }, {
+        "name": "observe_release_workflow",
+        "title": "Observe an exact release recovery workflow",
+        "description": "Read the one workflow run returned by recover_release and re-prove its fixed workflow, complete request digest, immutable tag, and dispatch commit.",
+        "inputSchema": {"type": "object", "properties": {"operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"}, "tag": {"type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+(?:-[A-Za-z0-9.-]+)?$"}, "tag_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "workflow_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "run_id": {"type": "integer", "minimum": 1}}, "required": ["operation_id", "tag", "tag_sha", "workflow_sha", "run_id"], "additionalProperties": false},
+        "outputSchema": {"type": "object", "properties": {"operation_id": {"type": "string"}, "tag": {"type": "string"}, "tag_sha": {"type": "string"}, "workflow_sha": {"type": "string"}, "workflow_run": workflow_run_schema()}, "required": ["operation_id", "tag", "tag_sha", "workflow_sha", "workflow_run"], "additionalProperties": false},
+        "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
+    }, {
+        "name": "dispatch_control_plane_deploy",
+        "title": "Dispatch the fixed control-plane deployment",
+        "description": "Dispatch only deploy-control-plane.yml from the live default branch, bound to the exact commit and reviewed source tree.",
+        "inputSchema": {"type": "object", "properties": {"operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"}, "commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "reviewed_tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "promote": {"type": "boolean"}}, "required": ["operation_id", "commit_sha", "reviewed_tree", "promote"], "additionalProperties": false},
+        "outputSchema": {"type": "object", "properties": {"operation_id": {"type": "string"}, "workflow": {"type": "string"}, "commit_sha": {"type": "string"}, "run_id": {"type": "integer"}, "run_attempt": {"type": "integer"}}, "required": ["operation_id", "workflow", "commit_sha", "run_id", "run_attempt"], "additionalProperties": false},
+        "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true}
+    }, {
+        "name": "observe_control_plane_deploy",
+        "title": "Observe an exact control-plane deployment",
+        "description": "Read the one workflow run returned by dispatch_control_plane_deploy and re-prove its fixed workflow, complete request digest, exact commit, reviewed tree, and promotion mode.",
+        "inputSchema": {"type": "object", "properties": {"operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"}, "commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "reviewed_tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "promote": {"type": "boolean"}, "run_id": {"type": "integer", "minimum": 1}}, "required": ["operation_id", "commit_sha", "reviewed_tree", "promote", "run_id"], "additionalProperties": false},
+        "outputSchema": {"type": "object", "properties": {"operation_id": {"type": "string"}, "commit_sha": {"type": "string"}, "reviewed_tree": {"type": "string"}, "promote": {"type": "boolean"}, "workflow_run": workflow_run_schema()}, "required": ["operation_id", "commit_sha", "reviewed_tree", "promote", "workflow_run"], "additionalProperties": false},
         "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
     }, {
         "name": "create_pull_request",
@@ -129,6 +382,7 @@ fn tools() -> Value {
             "type": "object",
             "properties": {
                 "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
+                "issue_number": {"type": "integer", "minimum": 1},
                 "head": {"type": "string", "minLength": 1, "maxLength": 240},
                 "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
                 "base": {"type": "string", "minLength": 1, "maxLength": 240},
@@ -137,7 +391,7 @@ fn tools() -> Value {
                 "body": {"type": "string", "maxLength": 30000},
                 "draft": {"type": "boolean"}
             },
-            "required": ["operation_id", "head", "head_sha", "base", "base_sha", "title", "body", "draft"],
+            "required": ["operation_id", "issue_number", "head", "head_sha", "base", "base_sha", "title", "body", "draft"],
             "additionalProperties": false
         },
         "outputSchema": {
@@ -215,6 +469,128 @@ fn tools() -> Value {
                 }
             },
             "required": ["pull_number", "head_sha", "checks"],
+            "additionalProperties": false
+        },
+        "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
+    }, {
+        "name": "observe_pull_request_workflows",
+        "title": "Observe exact-head pull request workflows",
+        "description": "Return the bounded CI workflow runs, jobs, and steps for one exact pull request head and live default base.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "pull_number": {"type": "integer", "minimum": 1},
+                "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+                "base": {"type": "string", "minLength": 1, "maxLength": 240}
+            },
+            "required": ["pull_number", "head_sha", "base"],
+            "additionalProperties": false
+        },
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "pull_number": {"type": "integer"},
+                "head_sha": {"type": "string"},
+                "base": {"type": "string"},
+                "runs": {
+                    "type": "array",
+                    "items": workflow_run_schema()
+                }
+            },
+            "required": ["pull_number", "head_sha", "base", "runs"],
+            "additionalProperties": false
+        },
+        "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
+    }, {
+        "name": "read_pull_request_job_log",
+        "title": "Read one failed pull request job log",
+        "description": "Return at most the last 64 KiB of one completed failed job log after re-proving its exact pull request head, base, run, and attempt.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "pull_number": {"type": "integer", "minimum": 1},
+                "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+                "base": {"type": "string", "minLength": 1, "maxLength": 240},
+                "run_id": {"type": "integer", "minimum": 1},
+                "run_attempt": {"type": "integer", "minimum": 1},
+                "job_id": {"type": "integer", "minimum": 1}
+            },
+            "required": ["pull_number", "head_sha", "base", "run_id", "run_attempt", "job_id"],
+            "additionalProperties": false
+        },
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "pull_number": {"type": "integer"},
+                "head_sha": {"type": "string"},
+                "base": {"type": "string"},
+                "run_id": {"type": "integer"},
+                "run_attempt": {"type": "integer"},
+                "job_id": {"type": "integer"},
+                "text": {"type": "string"}
+            },
+            "required": ["pull_number", "head_sha", "base", "run_id", "run_attempt", "job_id", "text"],
+            "additionalProperties": false
+        },
+        "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
+    }, {
+        "name": "rerun_failed_pull_request_jobs",
+        "title": "Rerun failed jobs for an exact pull request workflow",
+        "description": "Rerun only failed jobs from one completed failed CI run after re-proving its exact pull request head, base, run, and attempt. Replays require the same operation UUID and request.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
+                "pull_number": {"type": "integer", "minimum": 1},
+                "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+                "base": {"type": "string", "minLength": 1, "maxLength": 240},
+                "run_id": {"type": "integer", "minimum": 1},
+                "run_attempt": {"type": "integer", "minimum": 1}
+            },
+            "required": ["operation_id", "pull_number", "head_sha", "base", "run_id", "run_attempt"],
+            "additionalProperties": false
+        },
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "pull_number": {"type": "integer"},
+                "head_sha": {"type": "string"},
+                "base": {"type": "string"},
+                "run_id": {"type": "integer"},
+                "run_attempt": {"type": "integer"}
+            },
+            "required": ["pull_number", "head_sha", "base", "run_id", "run_attempt"],
+            "additionalProperties": false
+        },
+        "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true}
+    }, {
+        "name": "observe_pull_request_merge",
+        "title": "Observe an exact-head merge outcome",
+        "description": "Bind to the completed App enqueue attempt and return whether that exact pull request head is still in its default-branch merge queue, merged after the attempt, or no longer queued. NOT_QUEUED does not guess why the entry disappeared.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "enqueue_operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
+                "pull_number": {"type": "integer", "minimum": 1},
+                "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+                "base": {"type": "string", "minLength": 1, "maxLength": 240}
+            },
+            "required": ["enqueue_operation_id", "pull_number", "head_sha", "base"],
+            "additionalProperties": false
+        },
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "pull_number": {"type": "integer"},
+                "head_sha": {"type": "string"},
+                "base": {"type": "string"},
+                "pull_state": {"type": "string", "enum": ["open", "closed"]},
+                "state": {"type": "string", "enum": ["ACTIVE_QUEUE", "MERGED_AFTER_ENQUEUE_ATTEMPT", "NOT_QUEUED"]},
+                "entry_id": {"type": "string"},
+                "queue_state": {"type": ["string", "null"]},
+                "merge_commit_sha": {"type": ["string", "null"]}
+            },
+            "required": ["pull_number", "head_sha", "base", "pull_state", "state", "entry_id", "queue_state", "merge_commit_sha"],
             "additionalProperties": false
         },
         "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
@@ -301,18 +677,178 @@ async fn call_tool(id: Value, request: &Map<String, Value>, mcp: &McpState) -> R
         Some("maintainer_status")
             if arguments.as_object().is_some_and(serde_json::Map::is_empty) =>
         {
-            if mcp.app.verify().await.is_err() {
-                return tool_error(id, "unavailable", "Maintainer authority is unavailable.");
+            match mcp.app.observe_repository().await {
+                Ok(result) => tool_result(
+                    id,
+                    json!({
+                        "repository": result.repository,
+                        "repository_id": result.repository_id,
+                        "permission_revision": mcp.app.permission_revision(),
+                        "default_branch": result.default_branch,
+                        "default_sha": result.default_sha,
+                        "delete_branch_on_merge": result.delete_branch_on_merge
+                    }),
+                    "Dark Factory Maintainer authority and default head are ready.",
+                ),
+                Err(error) => operation_error(id, error),
             }
-            tool_result(
-                id,
-                json!({
-                    "repository": mcp.app.repository(),
-                    "repository_id": mcp.app.repository_id(),
-                    "permission_revision": mcp.app.permission_revision()
-                }),
-                "Dark Factory Maintainer authority is ready.",
-            )
+        }
+        Some("observe_operation") => {
+            let Ok(mut arguments) = serde_json::from_value::<ObserveOperation>(arguments) else {
+                return json_rpc_error(id, -32602, "Invalid params");
+            };
+            if canonical_operation_id(&mut arguments.operation_id).is_err() {
+                return json_rpc_error(id, -32602, "Invalid params");
+            }
+            match mcp.journal.observe_operation(&arguments.operation_id).await {
+                Ok(None) => tool_result(
+                    id,
+                    json!({
+                        "operation_id": arguments.operation_id,
+                        "state": "missing",
+                        "kind": null,
+                        "request_digest": null,
+                        "result": null
+                    }),
+                    "Operation UUID has not reached the durable journal.",
+                ),
+                Ok(Some(observation)) => {
+                    let result = match observation.result_json {
+                        Some(result) => match serde_json::from_str::<Value>(&result) {
+                            Ok(result) if result.is_object() => result,
+                            _ => {
+                                return tool_error(
+                                    id,
+                                    "unavailable",
+                                    "The durable operation record is invalid.",
+                                );
+                            }
+                        },
+                        None => Value::Null,
+                    };
+                    tool_result(
+                        id,
+                        json!({
+                            "operation_id": arguments.operation_id,
+                            "state": observation.state,
+                            "kind": observation.kind,
+                            "request_digest": observation.request_digest,
+                            "result": result
+                        }),
+                        "Durable operation state was observed.",
+                    )
+                }
+                Err(_) => tool_error(
+                    id,
+                    "unavailable",
+                    "The durable operation journal is unavailable.",
+                ),
+            }
+        }
+        Some("create_issue") => {
+            let Ok(arguments) = serde_json::from_value::<CreateIssue>(arguments) else {
+                return json_rpc_error(id, -32602, "Invalid params");
+            };
+            match mcp.app.create_issue(&mcp.journal, arguments).await {
+                Ok(result) => serialized_tool_result(id, &result, "Issue is durably recorded."),
+                Err(error) => operation_error(id, error),
+            }
+        }
+        Some("observe_issue") => {
+            let Ok(arguments) = serde_json::from_value::<ObserveIssue>(arguments) else {
+                return json_rpc_error(id, -32602, "Invalid params");
+            };
+            match mcp.app.observe_issue(arguments).await {
+                Ok(result) => serialized_tool_result(id, &result, "Issue state was observed."),
+                Err(error) => operation_error(id, error),
+            }
+        }
+        Some("resolve_issue") => {
+            let Ok(arguments) = serde_json::from_value::<ResolveIssue>(arguments) else {
+                return json_rpc_error(id, -32602, "Invalid params");
+            };
+            match mcp.app.resolve_issue(&mcp.journal, arguments).await {
+                Ok(result) => serialized_tool_result(id, &result, "Issue is durably resolved."),
+                Err(error) => operation_error(id, error),
+            }
+        }
+        Some("publish_release_tag") => {
+            let Ok(arguments) = serde_json::from_value::<PublishReleaseTag>(arguments) else {
+                return json_rpc_error(id, -32602, "Invalid params");
+            };
+            match mcp.app.publish_release_tag(&mcp.journal, arguments).await {
+                Ok(result) => {
+                    serialized_tool_result(id, &result, "Release tag is durably published.")
+                }
+                Err(error) => operation_error(id, error),
+            }
+        }
+        Some("recover_release") => {
+            let Ok(arguments) = serde_json::from_value::<RecoverRelease>(arguments) else {
+                return json_rpc_error(id, -32602, "Invalid params");
+            };
+            match mcp.app.recover_release(&mcp.journal, arguments).await {
+                Ok(result) => {
+                    serialized_tool_result(id, &result, "Release recovery is durably dispatched.")
+                }
+                Err(error) => operation_error(id, error),
+            }
+        }
+        Some("observe_release") => {
+            let Ok(arguments) = serde_json::from_value::<ObserveRelease>(arguments) else {
+                return json_rpc_error(id, -32602, "Invalid params");
+            };
+            match mcp.app.observe_release(arguments).await {
+                Ok(result) => {
+                    serialized_tool_result(id, &result, "Exact release state was observed.")
+                }
+                Err(error) => operation_error(id, error),
+            }
+        }
+        Some("observe_release_workflow") => {
+            let Ok(arguments) = serde_json::from_value::<ObserveReleaseWorkflow>(arguments) else {
+                return json_rpc_error(id, -32602, "Invalid params");
+            };
+            match mcp.app.observe_release_workflow(arguments).await {
+                Ok(result) => serialized_tool_result(
+                    id,
+                    &result,
+                    "Exact release recovery workflow state was observed.",
+                ),
+                Err(error) => operation_error(id, error),
+            }
+        }
+        Some("dispatch_control_plane_deploy") => {
+            let Ok(arguments) = serde_json::from_value::<DispatchControlPlaneDeploy>(arguments)
+            else {
+                return json_rpc_error(id, -32602, "Invalid params");
+            };
+            match mcp
+                .app
+                .dispatch_control_plane_deploy(&mcp.journal, arguments)
+                .await
+            {
+                Ok(result) => serialized_tool_result(
+                    id,
+                    &result,
+                    "Control-plane deployment is durably dispatched.",
+                ),
+                Err(error) => operation_error(id, error),
+            }
+        }
+        Some("observe_control_plane_deploy") => {
+            let Ok(arguments) = serde_json::from_value::<ObserveControlPlaneDeploy>(arguments)
+            else {
+                return json_rpc_error(id, -32602, "Invalid params");
+            };
+            match mcp.app.observe_control_plane_deploy(arguments).await {
+                Ok(result) => serialized_tool_result(
+                    id,
+                    &result,
+                    "Exact control-plane deployment state was observed.",
+                ),
+                Err(error) => operation_error(id, error),
+            }
         }
         Some("create_pull_request") => {
             let Ok(arguments) = serde_json::from_value::<CreatePullRequest>(arguments) else {
@@ -372,6 +908,58 @@ async fn call_tool(id: Value, request: &Map<String, Value>, mcp: &McpState) -> R
                 Err(error) => operation_error(id, error),
             }
         }
+        Some("observe_pull_request_workflows") => {
+            let Ok(arguments) = serde_json::from_value::<ObservePullRequestWorkflows>(arguments)
+            else {
+                return json_rpc_error(id, -32602, "Invalid params");
+            };
+            match mcp.app.observe_pull_request_workflows(arguments).await {
+                Ok(result) => {
+                    serialized_tool_result(id, &result, "Exact-head workflow runs were observed.")
+                }
+                Err(error) => operation_error(id, error),
+            }
+        }
+        Some("read_pull_request_job_log") => {
+            let Ok(arguments) = serde_json::from_value::<ReadPullRequestJobLog>(arguments) else {
+                return json_rpc_error(id, -32602, "Invalid params");
+            };
+            match mcp.app.read_pull_request_job_log(arguments).await {
+                Ok(result) => serialized_tool_result(id, &result, "Failed job log tail was read."),
+                Err(error) => operation_error(id, error),
+            }
+        }
+        Some("rerun_failed_pull_request_jobs") => {
+            let Ok(arguments) = serde_json::from_value::<RerunFailedPullRequestJobs>(arguments)
+            else {
+                return json_rpc_error(id, -32602, "Invalid params");
+            };
+            match mcp
+                .app
+                .rerun_failed_pull_request_jobs(&mcp.journal, arguments)
+                .await
+            {
+                Ok(result) => {
+                    serialized_tool_result(id, &result, "Failed jobs were durably rerun.")
+                }
+                Err(error) => operation_error(id, error),
+            }
+        }
+        Some("observe_pull_request_merge") => {
+            let Ok(arguments) = serde_json::from_value::<ObservePullRequestMerge>(arguments) else {
+                return json_rpc_error(id, -32602, "Invalid params");
+            };
+            match mcp
+                .app
+                .observe_pull_request_merge(&mcp.journal, arguments)
+                .await
+            {
+                Ok(result) => {
+                    serialized_tool_result(id, &result, "Exact-head merge state was observed.")
+                }
+                Err(error) => operation_error(id, error),
+            }
+        }
         _ => json_rpc_error(id, -32602, "Invalid params"),
     }
 }
@@ -412,7 +1000,7 @@ fn operation_error(id: Value, error: OperationError) -> Response {
             id,
             "refused",
             &format!(
-                "GitHub refused the operation and nothing changed ({reason}); \
+                "GitHub refused the requested mutation ({reason}); \
                  retry when its precondition holds."
             ),
         ),
