@@ -1293,3 +1293,53 @@ Store foundation on integrated head `6272a8d`:
   deleted until its injected begin/commit/rollback ambiguity, crash/reopen and
   exact busy proofs exercise concrete domain methods and natural reconciliation
   without replay.
+
+Change commitment/materialization proof on integrated head `42056bd`:
+
+- Added one immutable base-bound `ManifestCommitmentV1`: domain prefix/version,
+  closed SHA-1/SHA-256 format tag, raw selected base OID, total entry/blob-byte
+  counts, and raw-byte-sorted path/mode/size/blob-OID entries, hashed with
+  SHA-256. Materialization rehashes exact bytes using Git's blob encoding and
+  reconstructs the same commitment without Git metadata.
+- Admission bounds are 10,000 total files plus implied directories, depth 64,
+  1,023-byte relative paths on Darwin, 255-byte components, 256 MiB per blob
+  and 1 GiB total blobs. Invalid UTF-8 is refused before effect because native
+  Darwin filesystem calls reject it; valid composed/decomposed UTF-8 remains
+  byte-distinct.
+- The concrete Darwin lifecycle is caller-declared `Prepare`, durable identity
+  bind, explicit single-use `PopulateAndPublish`, then no-replace
+  `RenameatxNp`. It uses dirfd-relative no-follow operations, exact owner/mode/
+  special-bit/device/inode/link checks, file and bottom-up directory fsync, two
+  complete scans, and final cancellation/root checks immediately before
+  publication. Existing targets are never removed or replaced.
+- `ParseCommitment`, signed-SQLite-compatible `NewStageIdentity`,
+  `InspectPublished` and identity-guarded `RemoveRecordedTree` let recovery
+  reconstruct authority rather than duplicate the scanner. Inspection stops at
+  the first over-limit observation; removal deliberately ignores admission
+  bounds so a provider-expanded retained tree can converge with constant
+  memory/descriptor ownership. Tests remove 10,017 siblings and depth 96; the
+  traversal uses at most three transient descriptors in addition to its stable
+  parent/root descriptors.
+- Independent review required three BLOCK/fix cycles: unregistered random
+  staging/unbounded depth/missing inspection, then nonconstructible persisted
+  identity/unbounded directory reads/misplaced rename proof, then exact bounded
+  recovery verification. Final exact-head review returned ALLOW and judged the
+  added recovery/lifecycle code proportional; no VFS, walker framework, Git
+  library, archive/worktree or portability abstraction was introduced.
+- Mutations killed include omitting base/format, display-order sorting, unsafe
+  modes, trusting blob OIDs, replacing rename, following intermediate symlinks,
+  deleting on uncertainty, hidden/random staging, losing a post-mkdir locator,
+  directory-excluding counts, missing depth/root/context checks, trusting
+  inspection facts, invalid recovered identity, draining an oversized
+  directory, depth-held FDs, admission-capped cleanup and an early rename hook.
+  All mutation code was removed.
+- Author/reviewer focused, full, race, vet/module/format/diff, cross-build and
+  resource gates passed. After unchanged integration the orchestrator ran
+  Change count-three (`2.916s`), Change race (`2.267s`), and the full CGO-free
+  suite (`Change 1.084s`, kernel `4.089s`, process proof `0.752s`, SQLite proof
+  `10.693s`) successfully.
+- This package proves structural two-phase ordering, not the durable Store
+  commits around it. The Store/change-worker E2E must still prove locator
+  commit, Prepare, identity-bind commit, population/publish and
+  available-before-provider-exec. Cooperative same-UID mutation, power loss,
+  Git selection and stable verification remain separate explicit proofs.
