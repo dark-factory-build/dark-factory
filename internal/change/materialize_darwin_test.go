@@ -48,14 +48,8 @@ func TestPrepareRetainsDeclaredEmptyStageBeforeExplicitPopulate(t *testing.T) {
 		t.Fatal("Prepare read a blob")
 	}
 
-	// This assignment represents the caller's durable identity bind. The blob
-	// witness proves no population crossed it.
-	durablyBound := true
 	published, err := prepared.PopulateAndPublish(context.Background(), fixture.manifest, func(ctx context.Context, oid ObjectID) ([]byte, error) {
 		sourceCalled = true
-		if !durablyBound {
-			t.Fatal("blob read preceded durable bind")
-		}
 		return fixture.source(ctx, oid)
 	})
 	if err != nil {
@@ -190,6 +184,157 @@ func TestPopulateAndInspectExactSHA1AndSHA256(t *testing.T) {
 	}
 }
 
+func TestWideInspectionRefusesAtGlobalBudgetAndRemovalStaysBounded(t *testing.T) {
+	if testing.Short() {
+		t.Skip("creates a real over-limit recovery tree")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	parent := secureTempDir(t)
+	prepared := mustPrepare(t, parent, "target", "wide-recorded")
+	identity := prepared.Identity()
+	root := filepath.Join(parent, "wide-recorded")
+	const extra = 17
+	for i := 0; i < int(MaxEntryCount)+extra; i++ {
+		path := filepath.Join(root, fmt.Sprintf("entry-%05d", i))
+		if err := os.WriteFile(path, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := prepared.Close(); err != nil {
+		t.Fatal(err)
+	}
+	beforeFDs := descriptorCount(t)
+	format := mustFormat(t, "sha1")
+	base := mustID(t, format, bytes.Repeat([]byte{7}, format.OIDLength()))
+	observed := 0
+	_, err := inspectPublished(ctx, parent, "wide-recorded", identity, format, base, func(point materializePoint) error {
+		if point.step == stepDuringDirectoryRead {
+			observed++
+		}
+		return nil
+	})
+	var limit *LimitError
+	if !errors.As(err, &limit) || observed != int(MaxEntryCount)+1 {
+		t.Fatalf("wide inspection = %T %v observed=%d, want LimitError at %d", err, err, observed, MaxEntryCount+1)
+	}
+	if _, err := os.Stat(filepath.Join(root, fmt.Sprintf("entry-%05d", int(MaxEntryCount)+extra-1))); err != nil {
+		t.Fatalf("bounded inspection mutated an unread suffix: %v", err)
+	}
+
+	census := &removalCensus{}
+	if err := removeRecordedTreeWithCensus(ctx, parent, "wide-recorded", identity, nil, census); err != nil {
+		t.Fatal(err)
+	}
+	if census.open != 0 || census.maximum > 3 {
+		t.Fatalf("wide removal descriptor census open=%d maximum=%d, want 0 and <=3", census.open, census.maximum)
+	}
+	if afterFDs := descriptorCount(t); afterFDs != beforeFDs {
+		t.Fatalf("oversized recovery leaked descriptors: before=%d after=%d", beforeFDs, afterFDs)
+	}
+	if _, err := os.Lstat(root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("wide recorded tree survived removal: %v", err)
+	}
+}
+
+func TestDeepRecoveryRemovalDoesNotRetainOneFDPerLevel(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	parent := secureTempDir(t)
+	prepared := mustPrepare(t, parent, "target", "deep-recorded")
+	identity := prepared.Identity()
+	root := filepath.Join(parent, "deep-recorded")
+	directory := root
+	for depth := 0; depth < MaxDepth+32; depth++ {
+		directory = filepath.Join(directory, "d")
+		if err := os.Mkdir(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(directory, "leaf"), []byte("provider-expanded"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepared.Close(); err != nil {
+		t.Fatal(err)
+	}
+	census := &removalCensus{}
+	if err := removeRecordedTreeWithCensus(ctx, parent, "deep-recorded", identity, nil, census); err != nil {
+		t.Fatal(err)
+	}
+	if census.open != 0 || census.maximum != 3 {
+		t.Fatalf("deep removal descriptor census open=%d maximum=%d, want 0 and 3", census.open, census.maximum)
+	}
+	if _, err := os.Lstat(root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("deep recorded tree survived removal: %v", err)
+	}
+}
+
+func TestBeforeRenameCheckpointFollowsFsyncAndFinalRootVerification(t *testing.T) {
+	t.Run("cancellation is the final pre-publication edge", func(t *testing.T) {
+		parent := secureTempDir(t)
+		fixture := newFixture(t, "sha1", []fixtureFile{{[]byte("nested/a"), "100644", []byte("a")}})
+		prepared := mustPrepare(t, parent, "change", "stage")
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		sawScan := false
+		sawFsync := false
+		renameChecks := 0
+		hook := func(point materializePoint) error {
+			switch point.step {
+			case stepDuringTreeScan:
+				sawScan = true
+			case stepDuringTreeFsync:
+				sawFsync = true
+			case stepBeforeRename:
+				renameChecks++
+				if !sawScan || !sawFsync {
+					t.Fatalf("rename edge preceded scan/fsync: scan=%v fsync=%v", sawScan, sawFsync)
+				}
+				cancel()
+			}
+			return nil
+		}
+		_, err := prepared.populateAndPublish(ctx, fixture.manifest, fixture.source, hook)
+		var unknown *OutcomeUnknownError
+		if !errors.Is(err, context.Canceled) || errors.As(err, &unknown) || renameChecks != 1 {
+			t.Fatalf("rename-edge cancellation = %T %v checks=%d", err, err, renameChecks)
+		}
+		if _, err := os.Lstat(filepath.Join(parent, "change")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("rename-edge cancellation published target: %v", err)
+		}
+		assertEmptyOrPopulatedDirectory(t, filepath.Join(parent, "stage"), prepared.Identity())
+		removeRecorded(t, parent, "stage", prepared.Identity())
+		_ = prepared.Close()
+	})
+
+	t.Run("root recheck separates fsync from rename edge", func(t *testing.T) {
+		parent := secureTempDir(t)
+		fixture := newFixture(t, "sha1", []fixtureFile{{[]byte("nested/a"), "100644", []byte("a")}})
+		prepared := mustPrepare(t, parent, "change", "stage")
+		renameReached := false
+		mutated := false
+		hook := func(point materializePoint) error {
+			if point.step == stepDuringTreeFsync && len(point.entryPath) == 0 && !mutated {
+				mutated = true
+				return unix.Chmod(filepath.Join(parent, "stage"), 0o777)
+			}
+			if point.step == stepBeforeRename {
+				renameReached = true
+			}
+			return nil
+		}
+		if _, err := prepared.populateAndPublish(context.Background(), fixture.manifest, fixture.source, hook); err == nil || !mutated || renameReached {
+			t.Fatalf("final root recheck missing: err=%v mutated=%v renameReached=%v", err, mutated, renameReached)
+		}
+		if _, err := os.Lstat(filepath.Join(parent, "change")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("invalid root was published: %v", err)
+		}
+		_ = unix.Chmod(filepath.Join(parent, "stage"), 0o700)
+		removeRecorded(t, parent, "stage", prepared.Identity())
+		_ = prepared.Close()
+	})
+}
+
 func TestInspectPublishedDetectsIdentityBaseBytesModesAndRootAuthority(t *testing.T) {
 	parent := secureTempDir(t)
 	fixture := newFixture(t, "sha1", []fixtureFile{{[]byte("nested/a"), "100644", []byte("right")}})
@@ -294,7 +439,7 @@ func TestPopulateRechecksRootAndNestedMetadataBeforeAndAfterRename(t *testing.T)
 			fixture := newFixture(t, "sha1", []fixtureFile{{[]byte("nested/a"), "100644", []byte("a")}})
 			prepared := mustPrepare(t, parent, "change", "stage")
 			hook := func(point materializePoint) error {
-				if point.step == stepBeforeRename {
+				if point.step == stepBeforeTreeFsync {
 					return unix.Chmod(filepath.Join(point.parent, point.stagingName, mutation.path), mutation.mode)
 				}
 				return nil
@@ -829,16 +974,26 @@ func isLifecycle(err error) bool { var lifecycle *LifecycleError; return errors.
 
 func assertEmptyExactDirectory(t testing.TB, path string, identity StageIdentity) {
 	t.Helper()
+	assertExactDirectoryIdentity(t, path, identity)
+	entries, err := os.ReadDir(path)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("prepared stage not empty: %v %v", entries, err)
+	}
+}
+
+func assertEmptyOrPopulatedDirectory(t testing.TB, path string, identity StageIdentity) {
+	t.Helper()
+	assertExactDirectoryIdentity(t, path, identity)
+}
+
+func assertExactDirectoryIdentity(t testing.TB, path string, identity StageIdentity) {
+	t.Helper()
 	info, err := os.Lstat(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !info.IsDir() || info.Mode().Perm() != 0o700 {
 		t.Fatalf("prepared stage mode=%v", info.Mode())
-	}
-	entries, err := os.ReadDir(path)
-	if err != nil || len(entries) != 0 {
-		t.Fatalf("prepared stage not empty: %v %v", entries, err)
 	}
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
 	if err != nil {

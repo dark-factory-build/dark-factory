@@ -15,6 +15,16 @@ type StageIdentity struct {
 	inode  uint64
 }
 
+const maxStoreInteger = uint64(1<<63 - 1)
+
+// NewStageIdentity reconstructs one exact identity from SQLite INTEGER values.
+func NewStageIdentity(device, inode uint64) (StageIdentity, error) {
+	if device > maxStoreInteger || inode == 0 || inode > maxStoreInteger {
+		return StageIdentity{}, &ValidationError{Reason: "stage identity is not representable in Store"}
+	}
+	return StageIdentity{device: device, inode: inode}, nil
+}
+
 // Device returns the filesystem device number.
 func (i StageIdentity) Device() uint64 { return i.device }
 
@@ -23,6 +33,10 @@ func (i StageIdentity) Inode() uint64 { return i.inode }
 
 // Equal reports exact device/inode equality.
 func (i StageIdentity) Equal(other StageIdentity) bool { return i == other }
+
+func (i StageIdentity) valid() bool {
+	return i.device <= maxStoreInteger && i.inode > 0 && i.inode <= maxStoreInteger
+}
 
 // TreeFacts are immutable facts reconstructed from one exact plain tree.
 type TreeFacts struct {
@@ -68,6 +82,7 @@ const (
 	stepBeforeFileFsync       materializeStep = "before file fsync"
 	stepBeforeTreeVerify      materializeStep = "before tree verify"
 	stepDuringTreeScan        materializeStep = "during tree scan"
+	stepDuringDirectoryRead   materializeStep = "during directory read"
 	stepBeforeTreeFsync       materializeStep = "before tree fsync"
 	stepDuringTreeFsync       materializeStep = "during tree fsync"
 	stepBeforeRename          materializeStep = "before no-replace rename"

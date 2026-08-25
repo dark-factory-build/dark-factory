@@ -25,7 +25,7 @@ const (
 	MaxTotalBlobBytes    uint64 = 1 << 30
 )
 
-var commitmentPrefix = []byte("dark-factory/change-manifest\x00\x01")
+const commitmentPrefix = "dark-factory/change-manifest\x00\x01"
 
 // ObjectFormat is one closed Git object-format value.
 type ObjectFormat byte

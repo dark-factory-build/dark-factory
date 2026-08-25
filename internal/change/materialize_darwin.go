@@ -21,7 +21,7 @@ import (
 const directoryMode = 0o700
 
 // Prepared is one create-only declared staging directory whose exact identity
-// remains open across the caller's durable-bind checkpoint. It is single-use.
+// remains open while the caller records it. It is single-use.
 type Prepared struct {
 	mu sync.Mutex
 
@@ -37,8 +37,8 @@ type Prepared struct {
 }
 
 // Prepare creates exactly staging below parent and retains verified parent and
-// staging descriptors. The caller must durably bind Identity before invoking
-// PopulateAndPublish.
+// staging descriptors. The caller records Identity before invoking
+// PopulateAndPublish; Store tests own proof that this record is durable.
 func Prepare(ctx context.Context, parent, target, staging string) (*Prepared, error) {
 	return prepare(ctx, parent, target, staging, nil)
 }
@@ -80,15 +80,19 @@ func prepare(ctx context.Context, parent, target, staging string, hook materiali
 		return nil, fmt.Errorf("create declared Change staging directory: %w", err)
 	}
 
-	identity, identityKnown, identityErr := namedIdentity(parentFD, staging)
+	identity, identityErr := namedIdentity(parentFD, staging)
 	if identityErr != nil {
 		unix.Close(parentFD)
 		return nil, unresolved("identify declared staging after mkdir", parent, staging, StageIdentity{}, false, identityErr)
 	}
+	if !identity.valid() {
+		unix.Close(parentFD)
+		return nil, unresolved("represent declared staging identity", parent, staging, identity, true, &ValidationError{Reason: "stage identity is not representable in Store"})
+	}
 	point := materializePoint{step: stepAfterPrepareMkdir, parent: parent, stagingName: staging, targetName: target}
 	if err := checkpoint(ctx, hook, point); err != nil {
 		unix.Close(parentFD)
-		return nil, unresolved("validate declared staging after mkdir", parent, staging, identity, identityKnown, err)
+		return nil, unresolved("validate declared staging after mkdir", parent, staging, identity, true, err)
 	}
 	stageFD, err := unix.Openat(parentFD, staging, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
 	if err != nil {
@@ -169,11 +173,11 @@ func (p *Prepared) populateAndPublish(ctx context.Context, manifest Manifest, so
 	if err := p.verifyPreparedRoot(); err != nil {
 		return Published{}, err
 	}
-	names, err := directoryNames(ctx, p.stageFD)
+	hasEntry, err := directoryHasEntry(ctx, p.stageFD)
 	if err != nil {
 		return Published{}, err
 	}
-	if len(names) != 0 {
+	if hasEntry {
 		return Published{}, &ValidationError{Reason: "prepared staging directory is not empty"}
 	}
 
@@ -183,10 +187,6 @@ func (p *Prepared) populateAndPublish(ctx context.Context, manifest Manifest, so
 		}
 	}
 	point := p.point(stepBeforeTreeVerify, nil)
-	if err := checkpoint(ctx, hook, point); err != nil {
-		return Published{}, err
-	}
-	point.step = stepBeforeRename
 	if err := checkpoint(ctx, hook, point); err != nil {
 		return Published{}, err
 	}
@@ -202,6 +202,10 @@ func (p *Prepared) populateAndPublish(ctx context.Context, manifest Manifest, so
 		return Published{}, &ValidationError{Reason: "prepared tree differs from selected manifest"}
 	}
 	if err := p.verifyPreparedRoot(); err != nil {
+		return Published{}, err
+	}
+	point.step = stepBeforeRename
+	if err := checkpoint(ctx, hook, point); err != nil {
 		return Published{}, err
 	}
 	if err := unix.RenameatxNp(p.parentFD, p.staging, p.parentFD, p.target, unix.RENAME_EXCL); err != nil {
@@ -374,7 +378,7 @@ func inspectPublished(ctx context.Context, parent, target string, expected Stage
 	if err := validateParentAndName(parent, target); err != nil {
 		return TreeFacts{}, err
 	}
-	if expected == (StageIdentity{}) || !format.valid() || !base.format.valid() || base.format != format {
+	if !expected.valid() || !format.valid() || !base.format.valid() || base.format != format {
 		return TreeFacts{}, &ValidationError{Reason: "valid expected identity, format and base are required"}
 	}
 	if err := checkpoint(ctx, hook, materializePoint{}); err != nil {
@@ -427,10 +431,14 @@ func RemoveRecordedTree(ctx context.Context, parent, name string, expected Stage
 }
 
 func removeRecordedTree(ctx context.Context, parent, name string, expected StageIdentity, hook materializeHook) error {
+	return removeRecordedTreeWithCensus(ctx, parent, name, expected, hook, nil)
+}
+
+func removeRecordedTreeWithCensus(ctx context.Context, parent, name string, expected StageIdentity, hook materializeHook, census *removalCensus) error {
 	if err := validateParentAndName(parent, name); err != nil {
 		return err
 	}
-	if expected == (StageIdentity{}) {
+	if !expected.valid() {
 		return &ValidationError{Reason: "recorded tree identity is required"}
 	}
 	parentFD, err := openVerifiedParent(parent)
@@ -467,7 +475,7 @@ func removeRecordedTree(ctx context.Context, parent, name string, expected Stage
 	if err := verifyNamedRoot(parentFD, name, expected); err != nil {
 		return unresolved("recorded tree identity before removal", parent, name, expected, true, err)
 	}
-	if err := removeDirectoryContents(ctx, rootFD, expected.device); err != nil {
+	if err := removeDirectoryContents(ctx, parentFD, name, rootFD, expected, census); err != nil {
 		return unresolved("recorded tree contents removal", parent, name, expected, true, err)
 	}
 	if err := verifyNamedRoot(parentFD, name, expected); err != nil {
@@ -574,16 +582,16 @@ func identityOf(stat unix.Stat_t) StageIdentity {
 	return StageIdentity{device: uint64(stat.Dev), inode: stat.Ino}
 }
 
-func namedIdentity(parentFD int, name string) (StageIdentity, bool, error) {
+func namedIdentity(parentFD int, name string) (StageIdentity, error) {
 	var stat unix.Stat_t
 	if err := unix.Fstatat(parentFD, name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-		return StageIdentity{}, false, err
+		return StageIdentity{}, err
 	}
-	return identityOf(stat), true, nil
+	return identityOf(stat), nil
 }
 
 func namedEntryExists(parentFD int, name string) (bool, error) {
-	_, _, err := namedIdentity(parentFD, name)
+	_, err := namedIdentity(parentFD, name)
 	if err == nil {
 		return true, nil
 	}
@@ -684,7 +692,8 @@ func scanTree(ctx context.Context, rootFD int, rootDevice uint64, format ObjectF
 	entries := make([]Entry, 0)
 	directories := make([]string, 0)
 	var total uint64
-	if err := scanDirectory(ctx, rootFD, rootDevice, format, "", &entries, &directories, &total, syncDirectories, hook, point); err != nil {
+	budget := entryBudget{limit: MaxEntryCount}
+	if err := scanDirectory(ctx, rootFD, rootDevice, format, "", &entries, &directories, &total, &budget, syncDirectories, hook, point); err != nil {
 		return Manifest{}, err
 	}
 	manifest, err := NewManifest(format, base, entries)
@@ -698,11 +707,11 @@ func scanTree(ctx context.Context, rootFD int, rootDevice uint64, format ObjectF
 	return manifest, nil
 }
 
-func scanDirectory(ctx context.Context, dirFD int, rootDevice uint64, format ObjectFormat, prefix string, entries *[]Entry, directories *[]string, total *uint64, syncDirectories bool, hook materializeHook, point materializePoint) error {
+func scanDirectory(ctx context.Context, dirFD int, rootDevice uint64, format ObjectFormat, prefix string, entries *[]Entry, directories *[]string, total *uint64, budget *entryBudget, syncDirectories bool, hook materializeHook, point materializePoint) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	names, err := directoryNames(ctx, dirFD)
+	names, err := directoryNames(ctx, dirFD, budget, hook, point)
 	if err != nil {
 		return err
 	}
@@ -742,11 +751,7 @@ func scanDirectory(ctx context.Context, dirFD int, rootDevice uint64, format Obj
 			}
 			if err == nil {
 				*directories = append(*directories, path)
-				if uint64(len(*entries)+len(*directories)) > MaxEntryCount {
-					err = &LimitError{Reason: "reconstructed total entry count exceeded"}
-				} else {
-					err = scanDirectory(ctx, childFD, rootDevice, format, path, entries, directories, total, syncDirectories, hook, point)
-				}
+				err = scanDirectory(ctx, childFD, rootDevice, format, path, entries, directories, total, budget, syncDirectories, hook, point)
 			}
 			unix.Close(childFD)
 			if err != nil {
@@ -787,9 +792,6 @@ func scanDirectory(ctx context.Context, dirFD int, rootDevice uint64, format Obj
 			}
 			*entries = append(*entries, entry)
 			*total += uint64(opened.Size)
-			if uint64(len(*entries)+len(*directories)) > MaxEntryCount {
-				return &LimitError{Reason: "reconstructed total entry count exceeded"}
-			}
 		default:
 			return &ValidationError{Reason: "non-regular prepared entry forbidden"}
 		}
@@ -838,7 +840,12 @@ func hashOpenBlob(ctx context.Context, format ObjectFormat, fd int, size uint64,
 	return NewObjectID(format, hasher.Sum(nil))
 }
 
-func directoryNames(ctx context.Context, dirFD int) ([]string, error) {
+type entryBudget struct {
+	observed uint64
+	limit    uint64
+}
+
+func directoryNames(ctx context.Context, dirFD int, budget *entryBudget, hook materializeHook, point materializePoint) ([]string, error) {
 	fd, err := unix.Openat(dirFD, ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
 	if err != nil {
 		return nil, err
@@ -854,8 +861,21 @@ func directoryNames(ctx context.Context, dirFD int) ([]string, error) {
 			file.Close()
 			return nil, err
 		}
-		entries, readErr := file.ReadDir(128)
+		remainingThroughRefusal := budget.limit + 1 - budget.observed
+		batch := min(uint64(128), remainingThroughRefusal)
+		entries, readErr := file.ReadDir(int(batch))
 		for _, entry := range entries {
+			point.step = stepDuringDirectoryRead
+			point.entryPath = []byte(entry.Name())
+			if err := checkpoint(ctx, hook, point); err != nil {
+				file.Close()
+				return nil, err
+			}
+			budget.observed++
+			if budget.observed > budget.limit {
+				file.Close()
+				return nil, &LimitError{Reason: "reconstructed total entry count exceeded"}
+			}
 			names = append(names, entry.Name())
 		}
 		if errors.Is(readErr, io.EOF) {
@@ -871,6 +891,46 @@ func directoryNames(ctx context.Context, dirFD int) ([]string, error) {
 	}
 	slices.Sort(names)
 	return names, nil
+}
+
+func directoryHasEntry(ctx context.Context, dirFD int) (bool, error) {
+	_, found, err := firstDirectoryName(ctx, dirFD, nil)
+	return found, err
+}
+
+func firstDirectoryName(ctx context.Context, dirFD int, census *removalCensus) (string, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return "", false, err
+	}
+	fd, err := unix.Openat(dirFD, ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
+	if err != nil {
+		return "", false, err
+	}
+	census.opened()
+	file := os.NewFile(uintptr(fd), "Change directory first entry")
+	if file == nil {
+		closeRemovalFD(fd, census)
+		return "", false, errors.New("wrap Change directory descriptor")
+	}
+	entries, readErr := file.ReadDir(1)
+	closeErr := file.Close()
+	census.closed()
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		return "", false, readErr
+	}
+	if closeErr != nil {
+		return "", false, closeErr
+	}
+	if len(entries) == 0 {
+		return "", false, nil
+	}
+	return entries[0].Name(), true, nil
+}
+
+func closeRemovalFD(fd int, census *removalCensus) error {
+	err := unix.Close(fd)
+	census.closed()
+	return err
 }
 
 func manifestsEqual(left, right Manifest) bool {
@@ -893,64 +953,134 @@ func factsFromManifest(identity StageIdentity, manifest Manifest) TreeFacts {
 	}
 }
 
-func removeDirectoryContents(ctx context.Context, dirFD int, rootDevice uint64) error {
-	if err := ctx.Err(); err != nil {
-		return err
+type removalCensus struct {
+	open    int
+	maximum int
+}
+
+func (c *removalCensus) opened() {
+	if c == nil {
+		return
 	}
-	names, err := directoryNames(ctx, dirFD)
-	if err != nil {
-		return err
+	c.open++
+	c.maximum = max(c.maximum, c.open)
+}
+
+func (c *removalCensus) closed() {
+	if c != nil {
+		c.open--
 	}
-	for _, name := range names {
+}
+
+// removeDirectoryContents deliberately restarts from the retained root after
+// each unlink. This trades cleanup speed for constant directory-name memory
+// and at most three recovery-traversal descriptors, regardless of width/depth.
+func removeDirectoryContents(ctx context.Context, parentFD int, rootName string, rootFD int, expected StageIdentity, census *removalCensus) error {
+	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		var before unix.Stat_t
-		if err := unix.Fstatat(dirFD, name, &before, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		if err := verifyOpenRoot(rootFD, expected); err != nil {
 			return err
+		}
+		if err := verifyNamedRoot(parentFD, rootName, expected); err != nil {
+			return err
+		}
+		empty, err := removeOneRecordedEntry(ctx, rootFD, expected.device, census)
+		if err != nil {
+			return err
+		}
+		if empty {
+			return nil
+		}
+	}
+}
+
+func removeOneRecordedEntry(ctx context.Context, rootFD int, rootDevice uint64, census *removalCensus) (bool, error) {
+	currentFD := rootFD
+	currentOwned := false
+	defer func() {
+		if currentOwned {
+			closeRemovalFD(currentFD, census)
+		}
+	}()
+
+	name, found, err := firstDirectoryName(ctx, currentFD, census)
+	if err != nil || !found {
+		return !found, err
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		var before unix.Stat_t
+		if err := unix.Fstatat(currentFD, name, &before, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			return false, err
 		}
 		if uint64(before.Dev) != rootDevice {
-			return errors.New("refuse removal across filesystem device")
+			return false, errors.New("refuse removal across filesystem device")
 		}
-		if before.Mode&unix.S_IFMT == unix.S_IFDIR {
-			childFD, err := unix.Openat(dirFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
-			if err != nil {
-				return err
+		if before.Mode&unix.S_IFMT != unix.S_IFDIR {
+			if err := verifyNamedEntry(currentFD, name, before); err != nil {
+				return false, err
 			}
-			var opened unix.Stat_t
-			err = unix.Fstat(childFD, &opened)
-			if err == nil && identityOf(opened) != identityOf(before) {
-				err = errors.New("directory changed during recorded removal")
+			if err := unix.Unlinkat(currentFD, name, 0); err != nil {
+				return false, err
 			}
-			if err == nil {
-				err = removeDirectoryContents(ctx, childFD, rootDevice)
-			}
-			unix.Close(childFD)
-			if err != nil {
-				return err
-			}
-			var after unix.Stat_t
-			if err := unix.Fstatat(dirFD, name, &after, unix.AT_SYMLINK_NOFOLLOW); err != nil || identityOf(after) != identityOf(before) {
-				if err == nil {
-					err = errors.New("directory changed before recorded removal")
-				}
-				return err
-			}
-			if err := unix.Unlinkat(dirFD, name, unix.AT_REMOVEDIR); err != nil {
-				return err
-			}
-			continue
+			return false, nil
 		}
-		var after unix.Stat_t
-		if err := unix.Fstatat(dirFD, name, &after, unix.AT_SYMLINK_NOFOLLOW); err != nil || identityOf(after) != identityOf(before) || after.Mode&unix.S_IFMT != before.Mode&unix.S_IFMT {
-			if err == nil {
-				err = errors.New("entry changed before recorded removal")
+
+		childFD, err := openRemovalDirectory(currentFD, name, before, rootDevice, census)
+		if err != nil {
+			return false, err
+		}
+		childName, childFound, err := firstDirectoryName(ctx, childFD, census)
+		if err != nil {
+			closeRemovalFD(childFD, census)
+			return false, err
+		}
+		if !childFound {
+			closeRemovalFD(childFD, census)
+			if err := verifyNamedEntry(currentFD, name, before); err != nil {
+				return false, err
 			}
-			return err
+			if err := unix.Unlinkat(currentFD, name, unix.AT_REMOVEDIR); err != nil {
+				return false, err
+			}
+			return false, nil
 		}
-		if err := unix.Unlinkat(dirFD, name, 0); err != nil {
-			return err
+		if currentOwned {
+			closeRemovalFD(currentFD, census)
 		}
+		currentFD, currentOwned = childFD, true
+		name = childName
+	}
+}
+
+func openRemovalDirectory(parentFD int, name string, expected unix.Stat_t, rootDevice uint64, census *removalCensus) (int, error) {
+	fd, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
+	if err != nil {
+		return -1, err
+	}
+	census.opened()
+	var opened unix.Stat_t
+	if err := unix.Fstat(fd, &opened); err != nil || identityOf(opened) != identityOf(expected) || uint64(opened.Dev) != rootDevice {
+		closeRemovalFD(fd, census)
+		if err != nil {
+			return -1, err
+		}
+		return -1, errors.New("directory changed during recorded removal")
+	}
+	return fd, nil
+}
+
+func verifyNamedEntry(parentFD int, name string, expected unix.Stat_t) error {
+	var actual unix.Stat_t
+	if err := unix.Fstatat(parentFD, name, &actual, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return err
+	}
+	if identityOf(actual) != identityOf(expected) || actual.Mode&unix.S_IFMT != expected.Mode&unix.S_IFMT {
+		return errors.New("entry changed before recorded removal")
 	}
 	return nil
 }
