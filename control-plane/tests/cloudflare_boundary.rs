@@ -318,6 +318,25 @@ fn the_deployment_gate_asserts_the_readiness_label_the_worker_emits() {
     assert!(!workflow.contains("mcp_six_tools"));
 }
 
+/// The production environment has no per-run reviewer so the Maintainer App
+/// can deploy unattended. The workflow must therefore authenticate the event
+/// origin from GitHub's event context before the job names that environment;
+/// caller-supplied dispatch inputs are not authority.
+#[test]
+fn deployment_workflow_accepts_only_the_maintainer_app_dispatch() {
+    let workflow = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../.github/workflows/deploy-control-plane.yml"),
+    )
+    .unwrap();
+
+    let guard = "    if: ${{ github.actor == 'dark-factory-maintainer[bot]' && github.triggering_actor == 'dark-factory-maintainer[bot]' && github.ref == 'refs/heads/main' }}";
+    assert_eq!(workflow.lines().filter(|line| *line == guard).count(), 1);
+    assert!(workflow.contains("    environment: production"));
+    assert!(!workflow.contains("inputs.actor"));
+    assert!(!workflow.contains("inputs.triggering_actor"));
+}
+
 /// The enqueue and publish paths are `wasm32`-only, so a host test cannot
 /// drive them. What it can do is hold the contract they were got wrong on:
 /// GitHub's refusals must reach a determinate answer rather than being folded

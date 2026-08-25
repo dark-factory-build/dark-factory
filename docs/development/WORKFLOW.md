@@ -389,10 +389,18 @@ Deployment remains narrow: the Maintainer MCP can dispatch only the fixed
 default-branch workflow at an exact commit and reviewed tree. For headless
 steady-state operation, the protected `production` environment keeps its
 main-only deployment-branch rule and secret but has no required reviewers.
-Removing the existing reviewer is a one-time v2 bootstrap setting change, not
-an Administration API granted to agents. Never use interactive authentication,
-write a credential into a worktree or repository, or expose it through a
-prompt, command output, or log.
+The deploy job itself admits only a `workflow_dispatch` whose event-context
+`github.actor` and `github.triggering_actor` are both the exact
+`dark-factory-maintainer[bot]` identity and whose ref is `main`; these are
+GitHub-authenticated facts, not caller-supplied inputs. Requiring the triggering
+actor as well prevents a human rerun from inheriting an App-created run's
+authority. A workflow copied to another branch cannot reach the environment
+secret because of its main-only rule, while the protected default-branch copy
+cannot be changed by an ordinary repository actor. Removing the existing
+reviewer is a one-time v2 bootstrap setting change, not an Administration API
+granted to agents. Never use interactive authentication, write a credential
+into a worktree or repository, or expose it through a prompt, command output,
+or log.
 This is a contributor-agent workflow boundary, not the future Dark Factory
 product GitHub integration. Human operators may continue to use their normal
 Git and GitHub CLI configuration for separately reviewed human actions.
@@ -422,7 +430,9 @@ needed for first activation and rotation alone, and never for shipping code.
 The credential lives as an environment secret on the `production` GitHub
 environment. That scopes it to jobs naming the environment, while deployment
 branches restricted to `main` prevent a dispatch from selecting an unreviewed
-workflow ref. The job uses an ephemeral hosted runner. Protected-main review,
+workflow ref. The job's exact Maintainer App actor check also prevents an
+ordinary repository actor from consuming the secret through a manual dispatch
+or rerun. The job uses an ephemeral hosted runner. Protected-main review,
 the exact-tree workflow assertion, and the Maintainer operation's live-default
 binding replace the old per-deployment reviewer pause; retaining that pause
 would make every otherwise autonomous deployment require an operator click.

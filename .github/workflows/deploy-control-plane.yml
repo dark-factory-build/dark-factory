@@ -42,17 +42,21 @@ concurrency:
 
 jobs:
   deploy:
+    # GitHub's event context, unlike workflow inputs, identifies who
+    # authenticated the dispatch. Only the Maintainer App may reach the job
+    # that names the credential-bearing environment. Require both actors so a
+    # human cannot rerun an App-created run and inherit its authority.
+    if: ${{ github.actor == 'dark-factory-maintainer[bot]' && github.triggering_actor == 'dark-factory-maintainer[bot]' && github.ref == 'refs/heads/main' }}
     # `environment` scopes the credential to jobs that name it, so an ordinary
-    # pull-request job cannot read it. That is necessary and NOT sufficient: a
-    # dispatch runs the workflow file from the SELECTED REF, so anyone who can
-    # push a branch and dispatch it controls this file.
-    #
-    # That is closed by configuration this file cannot assert: restrict the
-    # `production` environment's DEPLOYMENT BRANCHES to `main`. The v2
-    # headless path intentionally has no required reviewer: protected-main
-    # review, the App's live-default binding, and the exact tree assertion
-    # below are the durable authorization. A per-run reviewer would restore an
-    # operator click to every autonomous deployment.
+    # pull-request job cannot read it. That is necessary and NOT sufficient:
+    # a dispatch runs the workflow file from the SELECTED REF. The production
+    # environment's DEPLOYMENT BRANCHES must therefore remain restricted to
+    # `main`; a modified branch copy cannot reach this credential even if it
+    # removes this guard. The v2 headless path intentionally has no required
+    # reviewer: the trusted App actor gate, main-only environment rule, the
+    # App's live-default binding, and the exact tree assertion below are the
+    # durable authorization. A per-run reviewer would restore an operator
+    # click to every autonomous deployment.
     #
     # The second hazard this comment used to name — `dark-factory-mac` being
     # persistent and shared with CI (#54) — no longer applies to this job,
