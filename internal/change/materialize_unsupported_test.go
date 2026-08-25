@@ -11,21 +11,30 @@ import (
 	"testing"
 )
 
-func TestUnsupportedMaterializeFailsBeforeFilesystemOrBlobEffect(t *testing.T) {
+func TestUnsupportedChangeAPIsFailBeforeFilesystemOrBlobEffect(t *testing.T) {
 	parent := t.TempDir()
-	sourceCalled := false
-	_, err := Materialize(context.Background(), parent, "must-not-exist", Manifest{}, func(context.Context, ObjectID) ([]byte, error) {
-		sourceCalled = true
-		return nil, nil
-	})
+	prepared, err := Prepare(context.Background(), parent, "target", "stage")
+	assertUnsupported(t, err)
+	if prepared != nil {
+		t.Fatal("unsupported Prepare returned a handle")
+	}
+	if _, err := InspectPublished(context.Background(), parent, "target", StageIdentity{}, ObjectFormat(1), ObjectID{}); err == nil {
+		t.Fatal("unsupported InspectPublished succeeded")
+	}
+	if err := RemoveRecordedTree(context.Background(), parent, "target", StageIdentity{}); err == nil {
+		t.Fatal("unsupported RemoveRecordedTree succeeded")
+	}
+	for _, name := range []string{"target", "stage"} {
+		if _, err := os.Lstat(filepath.Join(parent, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("unsupported API caused filesystem effect at %s: %v", name, err)
+		}
+	}
+}
+
+func assertUnsupported(t testing.TB, err error) {
+	t.Helper()
 	var unsupported *UnsupportedError
 	if !errors.As(err, &unsupported) || unsupported.Platform != runtime.GOOS {
 		t.Fatalf("got %T %v, want UnsupportedError for %s", err, err, runtime.GOOS)
-	}
-	if sourceCalled {
-		t.Fatal("unsupported platform called blob source")
-	}
-	if _, err := os.Lstat(filepath.Join(parent, "must-not-exist")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("unsupported platform caused filesystem effect: %v", err)
 	}
 }

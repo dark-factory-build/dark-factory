@@ -21,14 +21,141 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-var injectedFailure = errors.New("injected materialization failure")
+var injectedFailure = errors.New("injected Change failure")
 
 type changeFixture struct {
 	manifest Manifest
 	blobs    map[string][]byte
 }
 
-func TestMaterializeReconstructsExactPlainTreeSHA1AndSHA256(t *testing.T) {
+func TestPrepareRetainsDeclaredEmptyStageBeforeExplicitPopulate(t *testing.T) {
+	parent := secureTempDir(t)
+	fixture := newFixture(t, "sha1", []fixtureFile{{[]byte("nested/a"), "100644", []byte("a")}})
+	sourceCalled := false
+	prepared, err := Prepare(context.Background(), parent, "target", "declared-stage")
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := prepared.Identity()
+	if identity == (StageIdentity{}) {
+		t.Fatal("Prepare returned an empty identity")
+	}
+	assertEmptyExactDirectory(t, filepath.Join(parent, "declared-stage"), identity)
+	if _, err := os.Lstat(filepath.Join(parent, "target")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Prepare published target: %v", err)
+	}
+	if sourceCalled {
+		t.Fatal("Prepare read a blob")
+	}
+
+	// This assignment represents the caller's durable identity bind. The blob
+	// witness proves no population crossed it.
+	durablyBound := true
+	published, err := prepared.PopulateAndPublish(context.Background(), fixture.manifest, func(ctx context.Context, oid ObjectID) ([]byte, error) {
+		sourceCalled = true
+		if !durablyBound {
+			t.Fatal("blob read preceded durable bind")
+		}
+		return fixture.source(ctx, oid)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sourceCalled || !published.Facts().Identity().Equal(identity) || published.Path() != filepath.Join(parent, "target") {
+		t.Fatalf("unexpected publication: source=%v path=%q facts=%+v", sourceCalled, published.Path(), published.Facts())
+	}
+	if _, err := prepared.PopulateAndPublish(context.Background(), fixture.manifest, fixture.source); !isLifecycle(err) {
+		t.Fatalf("repeat Populate = %T %v, want LifecycleError", err, err)
+	}
+	if err := prepared.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepared.Close(); !isLifecycle(err) {
+		t.Fatalf("repeat Close = %T %v, want LifecycleError", err, err)
+	}
+	assertExactTree(t, published.Path(), fixture)
+
+	closed, err := Prepare(context.Background(), parent, "never-target", "closed-stage")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closedID := closed.Identity()
+	if err := closed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := closed.PopulateAndPublish(context.Background(), fixture.manifest, fixture.source); !isLifecycle(err) {
+		t.Fatalf("Populate after Close = %T %v, want LifecycleError", err, err)
+	}
+	removeRecorded(t, parent, "closed-stage", closedID)
+}
+
+func TestPrepareCrashReopenAndPostMkdirFailureRemainLocatable(t *testing.T) {
+	parent := secureTempDir(t)
+	format := mustFormat(t, "sha1")
+	base := mustID(t, format, bytes.Repeat([]byte{3}, format.OIDLength()))
+	empty := mustManifest(t, format, base, nil)
+
+	prepared, err := Prepare(context.Background(), parent, "target", "crash-stage")
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := prepared.Identity()
+	if err := prepared.Close(); err != nil {
+		t.Fatal(err)
+	}
+	facts, err := InspectPublished(context.Background(), parent, "crash-stage", identity, format, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !facts.Identity().Equal(identity) || facts.EntryCount() != 0 || facts.BlobBytes() != 0 || !facts.Commitment().Equal(empty.Commitment()) {
+		t.Fatalf("reopened prepared facts differ: %+v", facts)
+	}
+	removeRecorded(t, parent, "crash-stage", identity)
+
+	for i, step := range []materializeStep{stepAfterPrepareMkdir, stepBeforePrepareFsync} {
+		name := fmt.Sprintf("failed-stage-%d", i)
+		_, err = prepare(context.Background(), parent, "target", name, failAt(step))
+		var unresolved *UnresolvedError
+		if !errors.As(err, &unresolved) || !errors.Is(err, injectedFailure) {
+			t.Fatalf("%s failure = %T %v, want retained UnresolvedError", step, err, err)
+		}
+		if unresolved.Parent != parent || unresolved.Name != name || !unresolved.HasIdentity || unresolved.Identity == (StageIdentity{}) {
+			t.Fatalf("failure lost declared locator/identity: %+v", unresolved)
+		}
+		assertEmptyExactDirectory(t, filepath.Join(parent, name), unresolved.Identity)
+		entries, readErr := os.ReadDir(parent)
+		if readErr != nil || len(entries) != 1 || entries[0].Name() != name {
+			t.Fatalf("Prepare created an undeclared/random artifact: %v %v", entries, readErr)
+		}
+		removeRecorded(t, parent, name, unresolved.Identity)
+	}
+}
+
+func TestPrepareRejectsNonCanonicalLocatorsBeforeEffect(t *testing.T) {
+	parent := secureTempDir(t)
+	parents := []string{"relative", parent + "/", parent + "/child/..", parent + "//"}
+	for _, candidate := range parents {
+		t.Run(fmt.Sprintf("parent-%x", candidate), func(t *testing.T) {
+			if _, err := Prepare(context.Background(), candidate, "target", "stage"); err == nil {
+				t.Fatal("noncanonical parent accepted")
+			}
+			assertDirectoryEmpty(t, parent)
+		})
+	}
+	for _, names := range [][2]string{
+		{"", "stage"}, {".", "stage"}, {"..", "stage"}, {"a/b", "stage"}, {"a\\b", "stage"},
+		{".GIT", "stage"}, {string([]byte{'b', 'a', 'd', 0xfe}), "stage"}, {"same", "same"}, {"target", "a/b"},
+	} {
+		t.Run(fmt.Sprintf("names-%x-%x", names[0], names[1]), func(t *testing.T) {
+			if _, err := Prepare(context.Background(), parent, names[0], names[1]); err == nil {
+				t.Fatal("unsafe target/stage accepted")
+			}
+			assertDirectoryEmpty(t, parent)
+		})
+	}
+}
+
+func TestPopulateAndInspectExactSHA1AndSHA256(t *testing.T) {
 	for _, formatName := range []string{"sha1", "sha256"} {
 		t.Run(formatName, func(t *testing.T) {
 			parent := secureTempDir(t)
@@ -38,90 +165,277 @@ func TestMaterializeReconstructsExactPlainTreeSHA1AndSHA256(t *testing.T) {
 				{[]byte("empty"), "100644", nil},
 				{[]byte("raw/e\u0301"), "100644", []byte("raw-name")},
 			})
-			preselected := fixture.manifest.Commitment()
-			result, err := Materialize(context.Background(), parent, "change", fixture.manifest, fixture.source)
+			prepared := mustPrepare(t, parent, "change", "stage")
+			identity := prepared.Identity()
+			published, err := prepared.PopulateAndPublish(context.Background(), fixture.manifest, fixture.source)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !result.Commitment().Equal(preselected) || result.Path() != filepath.Join(parent, "change") || result.FileCount() != 4 || result.BlobBytes() != fixture.manifest.BlobBytes() || result.Device() == 0 || result.Inode() == 0 {
-				t.Fatalf("unexpected result: %+v", result)
+			if err := prepared.Close(); err != nil {
+				t.Fatal(err)
 			}
-			assertExactTree(t, result.Path(), fixture)
+			facts := published.Facts()
+			if !facts.Identity().Equal(identity) || !facts.Commitment().Equal(fixture.manifest.Commitment()) || facts.EntryCount() != fixture.manifest.EntryCount() || facts.BlobBytes() != fixture.manifest.BlobBytes() {
+				t.Fatalf("publication facts differ: %+v", facts)
+			}
+			inspected, err := InspectPublished(context.Background(), parent, "change", identity, fixture.manifest.format, fixture.manifest.base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !inspected.Commitment().Equal(facts.Commitment()) || inspected.EntryCount() != facts.EntryCount() || inspected.BlobBytes() != facts.BlobBytes() {
+				t.Fatalf("inspection facts differ: %+v vs %+v", inspected, facts)
+			}
+			assertExactTree(t, published.Path(), fixture)
+		})
+	}
+}
 
-			rootFD, rootID := openTestTree(t, result.Path())
-			actual, directories, err := scanTree(rootFD, rootID.device, fixture.manifest.format, fixture.manifest.base)
-			_ = unix.Close(rootFD)
-			if err != nil {
-				t.Fatal(err)
+func TestInspectPublishedDetectsIdentityBaseBytesModesAndRootAuthority(t *testing.T) {
+	parent := secureTempDir(t)
+	fixture := newFixture(t, "sha1", []fixtureFile{{[]byte("nested/a"), "100644", []byte("right")}})
+	prepared := mustPrepare(t, parent, "change", "stage")
+	identity := prepared.Identity()
+	if _, err := prepared.PopulateAndPublish(context.Background(), fixture.manifest, fixture.source); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepared.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	wrongIdentity := StageIdentity{device: identity.device, inode: identity.inode + 1}
+	if _, err := InspectPublished(context.Background(), parent, "change", wrongIdentity, fixture.manifest.format, fixture.manifest.base); err == nil {
+		t.Fatal("wrong recorded identity accepted")
+	}
+	wrongBase := mustID(t, fixture.manifest.format, bytes.Repeat([]byte{8}, fixture.manifest.format.OIDLength()))
+	wrongBaseFacts, err := InspectPublished(context.Background(), parent, "change", identity, fixture.manifest.format, wrongBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wrongBaseFacts.Commitment().Equal(fixture.manifest.Commitment()) {
+		t.Fatal("wrong base did not change reconstructed commitment")
+	}
+
+	file := filepath.Join(parent, "change", "nested", "a")
+	if err := os.WriteFile(file, []byte("wrong"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tampered, err := InspectPublished(context.Background(), parent, "change", identity, fixture.manifest.format, fixture.manifest.base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tampered.Commitment().Equal(fixture.manifest.Commitment()) {
+		t.Fatal("same-size byte tamper trusted stored commitment")
+	}
+	if err := unix.Chmod(file, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectPublished(context.Background(), parent, "change", identity, fixture.manifest.format, fixture.manifest.base); err == nil {
+		t.Fatal("file mode tamper accepted")
+	}
+	if err := unix.Chmod(file, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Chmod(filepath.Join(parent, "change"), 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectPublished(context.Background(), parent, "change", identity, fixture.manifest.format, fixture.manifest.base); err == nil {
+		t.Fatal("root authority tamper accepted")
+	}
+}
+
+func TestPopulateRechecksRootAndNestedMetadataBeforeAndAfterRename(t *testing.T) {
+	t.Run("root before blob", func(t *testing.T) {
+		parent := secureTempDir(t)
+		fixture := newFixture(t, "sha1", []fixtureFile{{[]byte("a"), "100644", []byte("a")}})
+		prepared := mustPrepare(t, parent, "change", "stage")
+		if err := unix.Chmod(filepath.Join(parent, "stage"), 0o777); err != nil {
+			t.Fatal(err)
+		}
+		called := false
+		_, err := prepared.PopulateAndPublish(context.Background(), fixture.manifest, func(context.Context, ObjectID) ([]byte, error) {
+			called = true
+			return nil, nil
+		})
+		if err == nil || called {
+			t.Fatalf("root mode was not rejected before blob read: err=%v called=%v", err, called)
+		}
+		_ = unix.Chmod(filepath.Join(parent, "stage"), 0o700)
+		removeRecorded(t, parent, "stage", prepared.Identity())
+		_ = prepared.Close()
+	})
+
+	t.Run("root special bits before blob", func(t *testing.T) {
+		parent := secureTempDir(t)
+		fixture := newFixture(t, "sha1", []fixtureFile{{[]byte("a"), "100644", []byte("a")}})
+		prepared := mustPrepare(t, parent, "change", "stage")
+		if err := unix.Chmod(filepath.Join(parent, "stage"), 0o1700); err != nil {
+			t.Fatal(err)
+		}
+		called := false
+		_, err := prepared.PopulateAndPublish(context.Background(), fixture.manifest, func(context.Context, ObjectID) ([]byte, error) {
+			called = true
+			return nil, nil
+		})
+		if err == nil || called {
+			t.Fatalf("root special bits were not rejected before blob read: err=%v called=%v", err, called)
+		}
+		_ = unix.Chmod(filepath.Join(parent, "stage"), 0o700)
+		removeRecorded(t, parent, "stage", prepared.Identity())
+		_ = prepared.Close()
+	})
+
+	for _, mutation := range []struct {
+		name string
+		path string
+		mode uint32
+	}{{"nested sticky", "nested", 0o1700}} {
+		t.Run(mutation.name, func(t *testing.T) {
+			parent := secureTempDir(t)
+			fixture := newFixture(t, "sha1", []fixtureFile{{[]byte("nested/a"), "100644", []byte("a")}})
+			prepared := mustPrepare(t, parent, "change", "stage")
+			hook := func(point materializePoint) error {
+				if point.step == stepBeforeRename {
+					return unix.Chmod(filepath.Join(point.parent, point.stagingName, mutation.path), mutation.mode)
+				}
+				return nil
 			}
-			if !manifestsEqual(fixture.manifest, actual) || !preselected.Equal(actual.Commitment()) || !slices.Equal(directories, expectedDirectories(fixture.manifest)) {
-				t.Fatal("post-materialization reconstruction did not equal preselection")
+			if _, err := prepared.populateAndPublish(context.Background(), fixture.manifest, fixture.source, hook); err == nil {
+				t.Fatal("special-bit mutation was published")
+			}
+			_ = unix.Chmod(filepath.Join(parent, "stage", mutation.path), mutation.mode&0o777)
+			removeRecorded(t, parent, "stage", prepared.Identity())
+			_ = prepared.Close()
+		})
+	}
+
+	t.Run("root after rename", func(t *testing.T) {
+		parent := secureTempDir(t)
+		fixture := newFixture(t, "sha1", []fixtureFile{{[]byte("a"), "100644", []byte("a")}})
+		prepared := mustPrepare(t, parent, "change", "stage")
+		hook := func(point materializePoint) error {
+			if point.step == stepAfterRename {
+				return unix.Chmod(filepath.Join(point.parent, point.targetName), 0o777)
+			}
+			return nil
+		}
+		_, err := prepared.populateAndPublish(context.Background(), fixture.manifest, fixture.source, hook)
+		var unknown *OutcomeUnknownError
+		if !errors.As(err, &unknown) {
+			t.Fatalf("post-rename root mutation = %T %v, want OutcomeUnknownError", err, err)
+		}
+		_ = prepared.Close()
+		if _, statErr := os.Stat(filepath.Join(parent, "change")); statErr != nil {
+			t.Fatalf("ambiguous published target was deleted: %v", statErr)
+		}
+	})
+
+	t.Run("nested special bits after rename", func(t *testing.T) {
+		parent := secureTempDir(t)
+		fixture := newFixture(t, "sha1", []fixtureFile{{[]byte("nested/a"), "100644", []byte("a")}})
+		prepared := mustPrepare(t, parent, "change", "stage")
+		hook := func(point materializePoint) error {
+			if point.step == stepAfterRename {
+				return unix.Chmod(filepath.Join(point.parent, point.targetName, "nested"), 0o1700)
+			}
+			return nil
+		}
+		_, err := prepared.populateAndPublish(context.Background(), fixture.manifest, fixture.source, hook)
+		var unknown *OutcomeUnknownError
+		if !errors.As(err, &unknown) {
+			t.Fatalf("post-rename nested mutation = %T %v, want OutcomeUnknownError", err, err)
+		}
+		_ = prepared.Close()
+	})
+}
+
+func TestRootAuthorityPredicateRejectsOwnerModeSpecialBitsTypeAndIdentity(t *testing.T) {
+	uid := uint32(os.Geteuid())
+	identity := StageIdentity{device: 11, inode: 22}
+	valid := unix.Stat_t{Dev: int32(identity.device), Ino: identity.inode, Uid: uid, Mode: unix.S_IFDIR | 0o700}
+	if !rootAuthority(valid, identity, uid) {
+		t.Fatal("valid root authority rejected")
+	}
+	mutations := map[string]func(*unix.Stat_t){
+		"owner":        func(stat *unix.Stat_t) { stat.Uid++ },
+		"mode":         func(stat *unix.Stat_t) { stat.Mode = unix.S_IFDIR | 0o777 },
+		"special bits": func(stat *unix.Stat_t) { stat.Mode = unix.S_IFDIR | 0o1700 },
+		"type":         func(stat *unix.Stat_t) { stat.Mode = unix.S_IFREG | 0o700 },
+		"identity":     func(stat *unix.Stat_t) { stat.Ino++ },
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			candidate := valid
+			mutate(&candidate)
+			if rootAuthority(candidate, identity, uid) {
+				t.Fatalf("%s mutation accepted", name)
 			}
 		})
 	}
 }
 
-func TestMaterializeRejectsWrongBlobBeforePublication(t *testing.T) {
+func TestCancellationInsideHashScanAndFsyncIsBounded(t *testing.T) {
+	tests := []struct {
+		name string
+		step materializeStep
+		data []byte
+	}{{"blob hash", stepDuringBlobHash, bytes.Repeat([]byte("h"), 4<<20)}, {"tree scan", stepDuringTreeScan, bytes.Repeat([]byte("s"), 1<<20)}, {"directory fsync", stepDuringTreeFsync, []byte("f")}}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			parent := secureTempDir(t)
+			fixture := newFixture(t, "sha1", []fixtureFile{{[]byte("nested/a"), "100644", test.data}})
+			prepared := mustPrepare(t, parent, "change", "stage")
+			ctx, cancel := context.WithCancel(context.Background())
+			entered := 0
+			hook := func(point materializePoint) error {
+				if point.step == test.step {
+					entered++
+					if entered == 1 {
+						cancel()
+					}
+				}
+				return nil
+			}
+			started := time.Now()
+			_, err := prepared.populateAndPublish(ctx, fixture.manifest, fixture.source, hook)
+			if !errors.Is(err, context.Canceled) || entered != 1 || time.Since(started) > 2*time.Second {
+				t.Fatalf("loop cancellation failed: err=%v entered=%d duration=%s", err, entered, time.Since(started))
+			}
+			if _, statErr := os.Lstat(filepath.Join(parent, "change")); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("canceled population published: %v", statErr)
+			}
+			removeRecorded(t, parent, "stage", prepared.Identity())
+			_ = prepared.Close()
+		})
+	}
+}
+
+func TestPopulateRejectsWrongBlobBeforeFilesystemCreation(t *testing.T) {
 	parent := secureTempDir(t)
 	fixture := newFixture(t, "sha1", []fixtureFile{{[]byte("a"), "100644", []byte("right")}})
-	fileCreateReached := false
-	_, err := materialize(context.Background(), parent, "change", fixture.manifest, func(context.Context, ObjectID) ([]byte, error) {
+	prepared := mustPrepare(t, parent, "change", "stage")
+	createReached := false
+	_, err := prepared.populateAndPublish(context.Background(), fixture.manifest, func(context.Context, ObjectID) ([]byte, error) {
 		return []byte("wrong"), nil
 	}, func(point materializePoint) error {
 		if point.step == stepBeforeEntryParentOpen || point.step == stepBeforeFileCreate {
-			fileCreateReached = true
+			createReached = true
 		}
 		return nil
 	})
-	if err == nil {
-		t.Fatal("wrong blob bytes were trusted")
+	if err == nil || createReached {
+		t.Fatalf("wrong blob reached filesystem creation: err=%v reached=%v", err, createReached)
 	}
-	if fileCreateReached {
-		t.Fatal("wrong blob bytes reached filesystem creation")
-	}
-	assertNoTargetOrStaging(t, parent, "change")
+	assertEmptyExactDirectory(t, filepath.Join(parent, "stage"), prepared.Identity())
+	removeRecorded(t, parent, "stage", prepared.Identity())
+	_ = prepared.Close()
 }
 
-func TestMaterializeRejectsUnsafeBoundaryBeforeBlobOrTargetEffect(t *testing.T) {
-	fixture := newFixture(t, "sha1", []fixtureFile{{[]byte("a"), "100644", []byte("a")}})
-	for _, target := range []string{"", ".", "..", "a/b", ".GIT", string([]byte{'b', 'a', 'd', 0xfe})} {
-		t.Run(fmt.Sprintf("target-%x", target), func(t *testing.T) {
-			parent := secureTempDir(t)
-			called := false
-			_, err := Materialize(context.Background(), parent, target, fixture.manifest, func(context.Context, ObjectID) ([]byte, error) {
-				called = true
-				return nil, nil
-			})
-			if err == nil || called {
-				t.Fatalf("unsafe target was not rejected before blob effect: err=%v called=%v", err, called)
-			}
-			assertNoStaging(t, parent)
-		})
-	}
-
-	realParent := secureTempDir(t)
-	linkedParent := filepath.Join(secureTempDir(t), "linked")
-	if err := os.Symlink(realParent, linkedParent); err != nil {
-		t.Fatal(err)
-	}
-	called := false
-	_, err := Materialize(context.Background(), linkedParent, "change", fixture.manifest, func(context.Context, ObjectID) ([]byte, error) {
-		called = true
-		return nil, nil
-	})
-	if err == nil || called {
-		t.Fatalf("symlinked parent was not rejected before blob effect: err=%v called=%v", err, called)
-	}
-	assertNoTargetOrStaging(t, realParent, "change")
-}
-
-func TestMaterializeRejectsInjectedNonPlainEntries(t *testing.T) {
+func TestPopulateRejectsNonPlainEntriesAndSymlinkEscape(t *testing.T) {
 	injections := map[string]func(string) error{
-		"symlink": func(stage string) error { return os.Symlink("/private/tmp", filepath.Join(stage, "extra")) },
-		"hardlink": func(stage string) error {
-			return os.Link(filepath.Join(stage, "a"), filepath.Join(stage, "extra"))
-		},
-		"fifo": func(stage string) error { return unix.Mkfifo(filepath.Join(stage, "extra"), 0o600) },
+		"symlink":         func(stage string) error { return os.Symlink("/private/tmp", filepath.Join(stage, "extra")) },
+		"hardlink":        func(stage string) error { return os.Link(filepath.Join(stage, "a"), filepath.Join(stage, "extra")) },
+		"fifo":            func(stage string) error { return unix.Mkfifo(filepath.Join(stage, "extra"), 0o600) },
+		"empty directory": func(stage string) error { return os.Mkdir(filepath.Join(stage, "extra"), 0o700) },
 		"socket": func(stage string) error {
 			listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(stage, "extra"), Net: "unix"})
 			if err != nil {
@@ -130,35 +444,31 @@ func TestMaterializeRejectsInjectedNonPlainEntries(t *testing.T) {
 			listener.SetUnlinkOnClose(false)
 			return listener.Close()
 		},
-		"extra directory": func(stage string) error { return os.Mkdir(filepath.Join(stage, "extra"), 0o700) },
 	}
 	for name, inject := range injections {
 		t.Run(name, func(t *testing.T) {
 			parent := secureTempDir(t)
 			fixture := newFixture(t, "sha1", []fixtureFile{{[]byte("a"), "100644", []byte("a")}})
+			prepared := mustPrepare(t, parent, "change", "stage")
 			hook := func(point materializePoint) error {
 				if point.step == stepBeforeTreeVerify {
 					return inject(filepath.Join(point.parent, point.stagingName))
 				}
 				return nil
 			}
-			if _, err := materialize(context.Background(), parent, "change", fixture.manifest, fixture.source, hook); err == nil {
+			if _, err := prepared.populateAndPublish(context.Background(), fixture.manifest, fixture.source, hook); err == nil {
 				t.Fatalf("injected %s was accepted", name)
 			}
-			assertNoTargetOrStaging(t, parent, "change")
+			removeRecorded(t, parent, "stage", prepared.Identity())
+			_ = prepared.Close()
 		})
 	}
-}
 
-func TestMaterializeDirFDResistsIntermediateSymlinkSwap(t *testing.T) {
 	parent := secureTempDir(t)
 	outside := secureTempDir(t)
-	sentinel := filepath.Join(outside, "z-payload")
-	fixture := newFixture(t, "sha1", []fixtureFile{
-		{[]byte("nested/a-seed"), "100644", []byte("seed")},
-		{[]byte("nested/z-payload"), "100644", []byte("secret")},
-	})
-	var swapped bool
+	fixture := newFixture(t, "sha1", []fixtureFile{{[]byte("nested/a-seed"), "100644", []byte("seed")}, {[]byte("nested/z-payload"), "100644", []byte("secret")}})
+	prepared := mustPrepare(t, parent, "change", "stage")
+	swapped := false
 	hook := func(point materializePoint) error {
 		if point.step != stepBeforeEntryParentOpen || string(point.entryPath) != "nested/z-payload" || swapped {
 			return nil
@@ -170,85 +480,64 @@ func TestMaterializeDirFDResistsIntermediateSymlinkSwap(t *testing.T) {
 		}
 		return os.Symlink(outside, filepath.Join(stage, "nested"))
 	}
-	if _, err := materialize(context.Background(), parent, "change", fixture.manifest, fixture.source, hook); err == nil {
+	if _, err := prepared.populateAndPublish(context.Background(), fixture.manifest, fixture.source, hook); err == nil {
 		t.Fatal("intermediate symlink swap was accepted")
 	}
-	if _, err := os.Lstat(sentinel); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Lstat(filepath.Join(outside, "z-payload")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("write escaped staging root: %v", err)
 	}
-	assertNoTargetOrStaging(t, parent, "change")
+	removeRecorded(t, parent, "stage", prepared.Identity())
+	_ = prepared.Close()
 }
 
-func TestMaterializeNeverReplacesExistingTarget(t *testing.T) {
-	tests := map[string]func(*testing.T, string) func(*testing.T, string){
-		"file": func(t *testing.T, path string) func(*testing.T, string) {
-			if err := os.WriteFile(path, []byte("sentinel"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			return func(t *testing.T, path string) {
-				data, err := os.ReadFile(path)
-				if err != nil || string(data) != "sentinel" {
-					t.Fatalf("file target changed: %q %v", data, err)
-				}
-			}
-		},
-		"directory": func(t *testing.T, path string) func(*testing.T, string) {
-			if err := os.Mkdir(path, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(path, "sentinel"), []byte("keep"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			return func(t *testing.T, path string) {
-				data, err := os.ReadFile(filepath.Join(path, "sentinel"))
-				if err != nil || string(data) != "keep" {
-					t.Fatalf("directory target changed: %q %v", data, err)
-				}
-			}
-		},
-		"symlink": func(t *testing.T, path string) func(*testing.T, string) {
-			if err := os.Symlink("sentinel-destination", path); err != nil {
-				t.Fatal(err)
-			}
-			return func(t *testing.T, path string) {
-				destination, err := os.Readlink(path)
-				if err != nil || destination != "sentinel-destination" {
-					t.Fatalf("symlink target changed: %q %v", destination, err)
-				}
-			}
-		},
-	}
-	for name, create := range tests {
-		t.Run(name, func(t *testing.T) {
+func TestCreateOnlyTargetsAndConcurrentPublish(t *testing.T) {
+	for _, kind := range []string{"file", "directory", "symlink"} {
+		t.Run(kind, func(t *testing.T) {
 			parent := secureTempDir(t)
 			target := filepath.Join(parent, "change")
-			check := create(t, target)
-			fixture := newFixture(t, "sha1", []fixtureFile{{[]byte("a"), "100644", []byte("a")}})
-			_, err := Materialize(context.Background(), parent, "change", fixture.manifest, fixture.source)
-			var conflict *ConflictError
-			if !errors.As(err, &conflict) {
-				t.Fatalf("got %T %v, want ConflictError", err, err)
+			switch kind {
+			case "file":
+				if err := os.WriteFile(target, []byte("sentinel"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "directory":
+				if err := os.Mkdir(target, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			case "symlink":
+				if err := os.Symlink("sentinel", target); err != nil {
+					t.Fatal(err)
+				}
 			}
-			check(t, target)
-			assertNoStaging(t, parent)
+			before, _ := os.Lstat(target)
+			if _, err := Prepare(context.Background(), parent, "change", "stage"); err == nil {
+				t.Fatal("existing target accepted")
+			}
+			after, err := os.Lstat(target)
+			if err != nil || !os.SameFile(before, after) {
+				t.Fatalf("existing target changed: %v", err)
+			}
+			if _, err := os.Lstat(filepath.Join(parent, "stage")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("conflict created staging: %v", err)
+			}
 		})
 	}
-}
 
-func TestConcurrentMaterializersPublishOneExactWinner(t *testing.T) {
 	parent := secureTempDir(t)
 	fixture := newFixture(t, "sha1", []fixtureFile{{[]byte("winner"), "100644", []byte("exact")}})
+	first := mustPrepare(t, parent, "change", "stage-one")
+	second := mustPrepare(t, parent, "change", "stage-two")
 	start := make(chan struct{})
 	results := make(chan error, 2)
 	var wait sync.WaitGroup
-	for range 2 {
+	for _, prepared := range []*Prepared{first, second} {
 		wait.Add(1)
-		go func() {
+		go func(prepared *Prepared) {
 			defer wait.Done()
 			<-start
-			_, err := Materialize(context.Background(), parent, "change", fixture.manifest, fixture.source)
+			_, err := prepared.PopulateAndPublish(context.Background(), fixture.manifest, fixture.source)
 			results <- err
-		}()
+		}(prepared)
 	}
 	close(start)
 	wait.Wait()
@@ -264,16 +553,55 @@ func TestConcurrentMaterializersPublishOneExactWinner(t *testing.T) {
 			conflict++
 			continue
 		}
-		t.Fatalf("unexpected loser error: %T %v", err, err)
+		t.Fatalf("unexpected concurrent error: %T %v", err, err)
 	}
 	if success != 1 || conflict != 1 {
 		t.Fatalf("success=%d conflict=%d, want one each", success, conflict)
 	}
 	assertExactTree(t, filepath.Join(parent, "change"), fixture)
-	assertNoStaging(t, parent)
+	removeRecorded(t, parent, "stage-one", first.Identity())
+	removeRecorded(t, parent, "stage-two", second.Identity())
+	_ = first.Close()
+	_ = second.Close()
 }
 
-func TestMaterializeFailureCutsCleanupOrRetainPublishedTarget(t *testing.T) {
+func TestPostPublicationFailureIsInspectedNeverDeleted(t *testing.T) {
+	parent := secureTempDir(t)
+	fixture := newFixture(t, "sha1", []fixtureFile{{[]byte("a"), "100644", []byte("right")}})
+	prepared := mustPrepare(t, parent, "change", "stage")
+	identity := prepared.Identity()
+	_, err := prepared.populateAndPublish(context.Background(), fixture.manifest, fixture.source, failAt(stepAfterRename))
+	var unknown *OutcomeUnknownError
+	if !errors.As(err, &unknown) || !errors.Is(err, injectedFailure) || !unknown.Identity.Equal(identity) || !unknown.Commitment.Equal(fixture.manifest.Commitment()) {
+		t.Fatalf("post-publication cut = %T %v, want exact OutcomeUnknownError", err, err)
+	}
+	facts, inspectErr := InspectPublished(context.Background(), parent, "change", identity, fixture.manifest.format, fixture.manifest.base)
+	if inspectErr != nil || !facts.Commitment().Equal(fixture.manifest.Commitment()) {
+		t.Fatalf("reconciliation failed: facts=%+v err=%v", facts, inspectErr)
+	}
+	_ = prepared.Close()
+
+	parent = secureTempDir(t)
+	prepared = mustPrepare(t, parent, "change", "stage")
+	identity = prepared.Identity()
+	hook := func(point materializePoint) error {
+		if point.step == stepAfterRename {
+			return os.WriteFile(filepath.Join(point.parent, point.targetName, "a"), []byte("wrong"), 0o644)
+		}
+		return nil
+	}
+	_, err = prepared.populateAndPublish(context.Background(), fixture.manifest, fixture.source, hook)
+	if !errors.As(err, &unknown) {
+		t.Fatalf("post-publication tamper = %T %v, want OutcomeUnknownError", err, err)
+	}
+	tampered, inspectErr := InspectPublished(context.Background(), parent, "change", identity, fixture.manifest.format, fixture.manifest.base)
+	if inspectErr != nil || tampered.Commitment().Equal(fixture.manifest.Commitment()) {
+		t.Fatalf("inspection trusted expected digest: facts=%+v err=%v", tampered, inspectErr)
+	}
+	_ = prepared.Close()
+}
+
+func TestPopulateFailureCutsLeaveOnlyTheDeclaredRecordedStage(t *testing.T) {
 	prePublication := []materializeStep{
 		stepBeforeFileCreate, stepBeforeFileWrite, stepBeforeFileFsync,
 		stepBeforeTreeVerify, stepBeforeTreeFsync, stepBeforeRename,
@@ -282,121 +610,88 @@ func TestMaterializeFailureCutsCleanupOrRetainPublishedTarget(t *testing.T) {
 		t.Run(string(step), func(t *testing.T) {
 			parent := secureTempDir(t)
 			fixture := newFixture(t, "sha1", []fixtureFile{{[]byte("a"), "100644", []byte("a")}})
-			hook := failAt(step)
-			_, err := materialize(context.Background(), parent, "change", fixture.manifest, fixture.source, hook)
+			prepared := mustPrepare(t, parent, "change", "declared-stage")
+			_, err := prepared.populateAndPublish(context.Background(), fixture.manifest, fixture.source, failAt(step))
 			if !errors.Is(err, injectedFailure) {
-				t.Fatalf("got %T %v, want injected failure", err, err)
+				t.Fatalf("cut = %T %v, want injected failure", err, err)
 			}
-			assertNoTargetOrStaging(t, parent, "change")
+			if _, err := os.Lstat(filepath.Join(parent, "change")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("pre-publication cut created target: %v", err)
+			}
+			entries, readErr := os.ReadDir(parent)
+			if readErr != nil || len(entries) != 1 || entries[0].Name() != "declared-stage" {
+				t.Fatalf("cut path census=%v err=%v", entries, readErr)
+			}
+			removeRecorded(t, parent, "declared-stage", prepared.Identity())
+			_ = prepared.Close()
 		})
 	}
 	for _, step := range []materializeStep{stepAfterRename, stepBeforeParentFsync} {
 		t.Run(string(step), func(t *testing.T) {
 			parent := secureTempDir(t)
 			fixture := newFixture(t, "sha1", []fixtureFile{{[]byte("a"), "100644", []byte("a")}})
-			_, err := materialize(context.Background(), parent, "change", fixture.manifest, fixture.source, failAt(step))
+			prepared := mustPrepare(t, parent, "change", "declared-stage")
+			identity := prepared.Identity()
+			_, err := prepared.populateAndPublish(context.Background(), fixture.manifest, fixture.source, failAt(step))
 			var unknown *OutcomeUnknownError
-			if !errors.As(err, &unknown) || !errors.Is(err, injectedFailure) || !unknown.Commitment.Equal(fixture.manifest.Commitment()) || unknown.Device == 0 || unknown.Inode == 0 {
-				t.Fatalf("got %T %v, want exact outcome-unknown", err, err)
+			if !errors.As(err, &unknown) || !errors.Is(err, injectedFailure) || !unknown.Identity.Equal(identity) {
+				t.Fatalf("post-publication cut = %T %v, want OutcomeUnknownError", err, err)
 			}
-			assertExactTree(t, filepath.Join(parent, "change"), fixture)
-			assertNoStaging(t, parent)
+			facts, inspectErr := InspectPublished(context.Background(), parent, "change", identity, fixture.manifest.format, fixture.manifest.base)
+			if inspectErr != nil || !facts.Commitment().Equal(fixture.manifest.Commitment()) {
+				t.Fatalf("post-cut reconciliation facts=%+v err=%v", facts, inspectErr)
+			}
+			_ = prepared.Close()
 		})
 	}
 }
 
-func TestMaterializePostPublicationReconstructionDetectsTamper(t *testing.T) {
+func TestRemoveRecordedTreeExactMismatchAndSwap(t *testing.T) {
 	parent := secureTempDir(t)
-	fixture := newFixture(t, "sha1", []fixtureFile{{[]byte("a"), "100644", []byte("right")}})
+	prepared := mustPrepare(t, parent, "target", "stage")
+	identity := prepared.Identity()
+	if err := os.WriteFile(filepath.Join(parent, "stage", "sentinel"), []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wrong := StageIdentity{device: identity.device, inode: identity.inode + 1}
+	if err := RemoveRecordedTree(context.Background(), parent, "stage", wrong); err == nil {
+		t.Fatal("identity mismatch authorized removal")
+	}
+	if _, err := os.Stat(filepath.Join(parent, "stage", "sentinel")); err != nil {
+		t.Fatalf("mismatch changed artifact: %v", err)
+	}
+	if err := RemoveRecordedTree(context.Background(), parent, "stage", identity); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveRecordedTree(context.Background(), parent, "stage", identity); err != nil {
+		t.Fatalf("positive absence was not idempotent: %v", err)
+	}
+	_ = prepared.Close()
+
+	prepared = mustPrepare(t, parent, "target", "swap-stage")
+	identity = prepared.Identity()
+	preserved := filepath.Join(parent, "preserved")
 	hook := func(point materializePoint) error {
-		if point.step == stepAfterRename {
-			return os.WriteFile(filepath.Join(point.parent, point.targetName, "a"), []byte("wrong"), 0o644)
+		if point.step == stepBeforeRecordedRemoval {
+			if err := os.Rename(filepath.Join(parent, "swap-stage"), preserved); err != nil {
+				return err
+			}
+			return os.Mkdir(filepath.Join(parent, "swap-stage"), 0o700)
 		}
 		return nil
 	}
-	_, err := materialize(context.Background(), parent, "change", fixture.manifest, fixture.source, hook)
-	var unknown *OutcomeUnknownError
-	if !errors.As(err, &unknown) || !unknown.Commitment.Equal(fixture.manifest.Commitment()) {
-		t.Fatalf("post-publication mismatch was not outcome-unknown: %T %v", err, err)
-	}
-	data, readErr := os.ReadFile(filepath.Join(parent, "change", "a"))
-	if readErr != nil || string(data) != "wrong" {
-		t.Fatalf("ambiguous target was deleted or changed again: %q %v", data, readErr)
-	}
-	assertNoStaging(t, parent)
-}
-
-func TestMaterializeCancellationIsBoundedAndDoesNotPublishEarly(t *testing.T) {
-	steps := []materializeStep{
-		stepBeforeFileCreate, stepBeforeFileWrite, stepBeforeFileFsync,
-		stepBeforeTreeVerify, stepBeforeTreeFsync, stepBeforeRename,
-	}
-	for _, step := range steps {
-		t.Run(string(step), func(t *testing.T) {
-			parent := secureTempDir(t)
-			fixture := newFixture(t, "sha1", []fixtureFile{{[]byte("a"), "100644", bytes.Repeat([]byte("a"), 1024)}})
-			ctx, cancel := context.WithCancel(context.Background())
-			hook := func(point materializePoint) error {
-				if point.step == step {
-					cancel()
-				}
-				return nil
-			}
-			started := time.Now()
-			_, err := materialize(ctx, parent, "change", fixture.manifest, fixture.source, hook)
-			if !errors.Is(err, context.Canceled) || time.Since(started) > 2*time.Second {
-				t.Fatalf("cancellation was not prompt: %T %v after %s", err, err, time.Since(started))
-			}
-			assertNoTargetOrStaging(t, parent, "change")
-		})
-	}
-
-	parent := secureTempDir(t)
-	fixture := newFixture(t, "sha1", []fixtureFile{{[]byte("a"), "100644", []byte("a")}})
-	ctx, cancel := context.WithCancel(context.Background())
-	hook := func(point materializePoint) error {
-		if point.step == stepAfterRename {
-			cancel()
-		}
-		return nil
-	}
-	_, err := materialize(ctx, parent, "change", fixture.manifest, fixture.source, hook)
-	var unknown *OutcomeUnknownError
-	if !errors.As(err, &unknown) || !errors.Is(err, context.Canceled) {
-		t.Fatalf("post-publish cancellation was not outcome-unknown: %T %v", err, err)
-	}
-	assertExactTree(t, filepath.Join(parent, "change"), fixture)
-}
-
-func TestMaterializeIdentityMismatchRefusesCleanup(t *testing.T) {
-	parent := secureTempDir(t)
-	fixture := newFixture(t, "sha1", []fixtureFile{{[]byte("a"), "100644", []byte("right")}})
-	var preserved string
-	hook := func(point materializePoint) error {
-		if point.step != stepBeforeOwnedStageCleanup {
-			return nil
-		}
-		original := filepath.Join(point.parent, point.stagingName)
-		preserved = original + "-preserved"
-		if err := os.Rename(original, preserved); err != nil {
-			return err
-		}
-		return os.Mkdir(original, 0o700)
-	}
-	_, err := materialize(context.Background(), parent, "change", fixture.manifest, func(context.Context, ObjectID) ([]byte, error) {
-		return []byte("wrong"), nil
-	}, hook)
+	err := removeRecordedTree(context.Background(), parent, "swap-stage", identity, hook)
 	var unresolved *UnresolvedError
 	if !errors.As(err, &unresolved) {
-		t.Fatalf("got %T %v, want UnresolvedError", err, err)
+		t.Fatalf("identity swap = %T %v, want UnresolvedError", err, err)
 	}
 	if _, err := os.Stat(preserved); err != nil {
-		t.Fatalf("owned artifact was not left visible: %v", err)
+		t.Fatalf("original artifact removed after swap: %v", err)
 	}
-	entries, err := os.ReadDir(parent)
-	if err != nil || len(entries) != 2 {
-		t.Fatalf("identity mismatch artifacts = %v, err=%v", entries, err)
+	if _, err := os.Stat(filepath.Join(parent, "swap-stage")); err != nil {
+		t.Fatalf("replacement artifact removed after swap: %v", err)
 	}
+	_ = prepared.Close()
 }
 
 func TestPublishedChangeCarriesNoRepositoryAuthority(t *testing.T) {
@@ -407,21 +702,25 @@ func TestPublishedChangeCarriesNoRepositoryAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	fixture := newFixture(t, "sha1", []fixtureFile{{[]byte("a"), "100644", []byte("a")}})
-	result, err := Materialize(context.Background(), changes, "change", fixture.manifest, fixture.source)
+	prepared := mustPrepare(t, changes, "change", "stage")
+	published, err := prepared.PopulateAndPublish(context.Background(), fixture.manifest, fixture.source)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Lstat(filepath.Join(result.Path(), ".git")); !errors.Is(err, os.ErrNotExist) {
+	if err := prepared.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(published.Path(), ".git")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("published Change has Git metadata: %v", err)
 	}
 	command := exec.Command("git", "rev-parse", "--is-inside-work-tree")
-	command.Dir = result.Path()
+	command.Dir = published.Path()
 	command.Env = append(safeGitEnv(), "GIT_CEILING_DIRECTORIES="+changes)
 	if output, err := command.CombinedOutput(); err == nil {
 		t.Fatalf("controlled ceiling discovered ancestor repository: %q", output)
 	}
 	command = exec.Command("git", "rev-parse", "--is-inside-work-tree")
-	command.Dir = result.Path()
+	command.Dir = published.Path()
 	command.Env = safeGitEnv()
 	output, err := command.Output()
 	if err != nil || strings.TrimSpace(string(output)) != "true" {
@@ -429,14 +728,17 @@ func TestPublishedChangeCarriesNoRepositoryAuthority(t *testing.T) {
 	}
 }
 
-func TestMaterializeDoesNotLeakDescriptorsGoroutinesOrStaging(t *testing.T) {
+func TestPreparedLifecycleDoesNotLeakResources(t *testing.T) {
 	parent := secureTempDir(t)
-	fixture := newFixture(t, "sha1", []fixtureFile{{[]byte("a"), "100644", []byte("right")}})
+	fixture := newFixture(t, "sha1", []fixtureFile{{[]byte("a"), "100644", []byte("a")}})
 	beforeFDs := descriptorCount(t)
 	beforeGoroutines := runtime.NumGoroutine()
 	for i := range 20 {
-		target := fmt.Sprintf("change-%d", i)
-		if _, err := Materialize(context.Background(), parent, target, fixture.manifest, fixture.source); err != nil {
+		prepared := mustPrepare(t, parent, fmt.Sprintf("change-%d", i), fmt.Sprintf("stage-%d", i))
+		if _, err := prepared.PopulateAndPublish(context.Background(), fixture.manifest, fixture.source); err != nil {
+			t.Fatal(err)
+		}
+		if err := prepared.Close(); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -447,7 +749,15 @@ func TestMaterializeDoesNotLeakDescriptorsGoroutinesOrStaging(t *testing.T) {
 	if after := runtime.NumGoroutine(); after > beforeGoroutines+1 {
 		t.Fatalf("goroutine count changed: before=%d after=%d", beforeGoroutines, after)
 	}
-	assertNoStaging(t, parent)
+	entries, err := os.ReadDir(parent)
+	if err != nil || len(entries) != 20 {
+		t.Fatalf("unexpected path census: count=%d err=%v", len(entries), err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "stage-") {
+			t.Fatalf("staging locator survived publication: %q", entry.Name())
+		}
+	}
 }
 
 type fixtureFile struct {
@@ -477,6 +787,22 @@ func (f changeFixture) source(_ context.Context, oid ObjectID) ([]byte, error) {
 	return bytes.Clone(data), nil
 }
 
+func mustPrepare(t testing.TB, parent, target, staging string) *Prepared {
+	t.Helper()
+	prepared, err := Prepare(context.Background(), parent, target, staging)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return prepared
+}
+
+func removeRecorded(t testing.TB, parent, name string, identity StageIdentity) {
+	t.Helper()
+	if err := RemoveRecordedTree(context.Background(), parent, name, identity); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func secureTempDir(t testing.TB) string {
 	t.Helper()
 	path, err := os.MkdirTemp(os.Getenv("TMPDIR"), "dark-factory-change-")
@@ -499,9 +825,45 @@ func failAt(step materializeStep) materializeHook {
 	}
 }
 
+func isLifecycle(err error) bool { var lifecycle *LifecycleError; return errors.As(err, &lifecycle) }
+
+func assertEmptyExactDirectory(t testing.TB, path string, identity StageIdentity) {
+	t.Helper()
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.IsDir() || info.Mode().Perm() != 0o700 {
+		t.Fatalf("prepared stage mode=%v", info.Mode())
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("prepared stage not empty: %v %v", entries, err)
+	}
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(fd)
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		t.Fatal(err)
+	}
+	if !identityOf(stat).Equal(identity) {
+		t.Fatalf("stage identity differs: %+v", identityOf(stat))
+	}
+}
+
+func assertDirectoryEmpty(t testing.TB, path string) {
+	t.Helper()
+	entries, err := os.ReadDir(path)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("directory has effects: %v %v", entries, err)
+	}
+}
+
 func assertExactTree(t testing.TB, root string, fixture changeFixture) {
 	t.Helper()
-	expectedDirs := expectedDirectories(fixture.manifest)
 	actualDirs := make([]string, 0)
 	actualFiles := make(map[string]struct{})
 	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
@@ -520,11 +882,11 @@ func assertExactTree(t testing.TB, root string, fixture changeFixture) {
 			return err
 		}
 		if info.Mode()&os.ModeSymlink != 0 || info.Mode()&(os.ModeDevice|os.ModeNamedPipe|os.ModeSocket) != 0 {
-			return fmt.Errorf("non-plain entry %q: %v", relative, info.Mode())
+			return fmt.Errorf("non-plain entry %q", relative)
 		}
 		if entry.IsDir() {
 			if info.Mode().Perm() != 0o700 {
-				return fmt.Errorf("directory mode %q = %o", relative, info.Mode().Perm())
+				return fmt.Errorf("directory mode %q=%o", relative, info.Mode().Perm())
 			}
 			actualDirs = append(actualDirs, relative)
 			return nil
@@ -539,11 +901,11 @@ func assertExactTree(t testing.TB, root string, fixture changeFixture) {
 		t.Fatal(err)
 	}
 	slices.Sort(actualDirs)
-	if !slices.Equal(actualDirs, expectedDirs) {
-		t.Fatalf("directories = %q, want %q", actualDirs, expectedDirs)
+	if !slices.Equal(actualDirs, fixture.manifest.directories) {
+		t.Fatalf("directories=%q want=%q", actualDirs, fixture.manifest.directories)
 	}
 	if len(actualFiles) != len(fixture.manifest.entries) {
-		t.Fatalf("file count = %d, want %d", len(actualFiles), len(fixture.manifest.entries))
+		t.Fatalf("file count=%d", len(actualFiles))
 	}
 	for _, entry := range fixture.manifest.entries {
 		path := filepath.Join(root, string(entry.path))
@@ -558,52 +920,14 @@ func assertExactTree(t testing.TB, root string, fixture changeFixture) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		wantMode := os.FileMode(0o644)
+		want := os.FileMode(0o644)
 		if entry.mode == "100755" {
-			wantMode = 0o755
+			want = 0o755
 		}
-		if info.Mode().Perm() != wantMode {
-			t.Fatalf("mode for %x = %o, want %o", entry.path, info.Mode().Perm(), wantMode)
-		}
-		if _, ok := actualFiles[string(entry.path)]; !ok {
-			t.Fatalf("missing walked file %x", entry.path)
+		if info.Mode().Perm() != want {
+			t.Fatalf("mode for %x=%o want=%o", entry.path, info.Mode().Perm(), want)
 		}
 	}
-}
-
-func assertNoTargetOrStaging(t testing.TB, parent, target string) {
-	t.Helper()
-	if _, err := os.Lstat(filepath.Join(parent, target)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("target exists after pre-publication failure: %v", err)
-	}
-	assertNoStaging(t, parent)
-}
-
-func assertNoStaging(t testing.TB, parent string) {
-	t.Helper()
-	entries, err := os.ReadDir(parent)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), ".dark-factory-change-") {
-			t.Fatalf("staging artifact leaked: %q", entry.Name())
-		}
-	}
-}
-
-func openTestTree(t testing.TB, path string) (int, fileIdentity) {
-	t.Helper()
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var stat unix.Stat_t
-	if err := unix.Fstat(fd, &stat); err != nil {
-		_ = unix.Close(fd)
-		t.Fatal(err)
-	}
-	return fd, identityOf(stat)
 }
 
 func git(t testing.TB, directory string, args ...string) {
@@ -617,13 +941,7 @@ func git(t testing.TB, directory string, args ...string) {
 }
 
 func safeGitEnv() []string {
-	return []string{
-		"PATH=/usr/bin:/bin",
-		"HOME=/nonexistent",
-		"GIT_CONFIG_NOSYSTEM=1",
-		"GIT_CONFIG_GLOBAL=/dev/null",
-		"GIT_TERMINAL_PROMPT=0",
-	}
+	return []string{"PATH=/usr/bin:/bin", "HOME=/nonexistent", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0"}
 }
 
 func descriptorCount(t testing.TB) int {

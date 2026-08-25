@@ -5,8 +5,6 @@ package change
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -14,282 +12,278 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
 )
 
-const (
-	directoryMode = 0o700
-)
+const directoryMode = 0o700
 
-type fileIdentity struct {
-	device uint64
-	inode  uint64
+// Prepared is one create-only declared staging directory whose exact identity
+// remains open across the caller's durable-bind checkpoint. It is single-use.
+type Prepared struct {
+	mu sync.Mutex
+
+	parent   string
+	target   string
+	staging  string
+	parentFD int
+	stageFD  int
+	parentID StageIdentity
+	identity StageIdentity
+	consumed bool
+	closed   bool
 }
 
-func materialize(ctx context.Context, parent, target string, manifest Manifest, source BlobSource, hook materializeHook) (result MaterializeResult, returnErr error) {
-	if err := validateMaterializeInput(parent, target, manifest, source); err != nil {
-		return MaterializeResult{}, err
+// Prepare creates exactly staging below parent and retains verified parent and
+// staging descriptors. The caller must durably bind Identity before invoking
+// PopulateAndPublish.
+func Prepare(ctx context.Context, parent, target, staging string) (*Prepared, error) {
+	return prepare(ctx, parent, target, staging, nil)
+}
+
+func prepare(ctx context.Context, parent, target, staging string, hook materializeHook) (*Prepared, error) {
+	if err := validatePrepareLocator(parent, target, staging); err != nil {
+		return nil, err
 	}
 	if err := checkpoint(ctx, hook, materializePoint{}); err != nil {
-		return MaterializeResult{}, err
+		return nil, err
 	}
-
-	parentFD, err := unix.Open(parent, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
+	parentFD, err := openVerifiedParent(parent)
 	if err != nil {
-		return MaterializeResult{}, fmt.Errorf("open verified Change parent: %w", err)
+		return nil, err
 	}
-	defer unix.Close(parentFD)
 	parentID, err := verifySecureParent(parentFD)
 	if err != nil {
-		return MaterializeResult{}, err
+		unix.Close(parentFD)
+		return nil, err
 	}
 	if err := verifyParentPath(parent, parentID); err != nil {
-		return MaterializeResult{}, err
+		unix.Close(parentFD)
+		return nil, err
 	}
-	if exists, err := namedEntryExists(parentFD, target); err != nil {
-		return MaterializeResult{}, err
-	} else if exists {
-		return MaterializeResult{}, &ConflictError{Target: changePath(parent, target)}
+	for _, name := range []string{target, staging} {
+		if exists, err := namedEntryExists(parentFD, name); err != nil {
+			unix.Close(parentFD)
+			return nil, err
+		} else if exists {
+			unix.Close(parentFD)
+			return nil, &ConflictError{Target: changePath(parent, name)}
+		}
+	}
+	if err := unix.Mkdirat(parentFD, staging, directoryMode); err != nil {
+		unix.Close(parentFD)
+		if errors.Is(err, unix.EEXIST) {
+			return nil, &ConflictError{Target: changePath(parent, staging)}
+		}
+		return nil, fmt.Errorf("create declared Change staging directory: %w", err)
 	}
 
-	stagingName, stageFD, stageID, err := createStaging(parentFD)
-	if err != nil {
-		return MaterializeResult{}, err
+	identity, identityKnown, identityErr := namedIdentity(parentFD, staging)
+	if identityErr != nil {
+		unix.Close(parentFD)
+		return nil, unresolved("identify declared staging after mkdir", parent, staging, StageIdentity{}, false, identityErr)
 	}
-	defer unix.Close(stageFD)
-	published := false
-	defer func() {
-		if returnErr == nil || published {
-			return
-		}
-		point := materializePoint{step: stepBeforeOwnedStageCleanup, parent: parent, stagingName: stagingName, targetName: target}
-		cleanupErr := checkpoint(context.Background(), hook, point)
-		if cleanupErr == nil {
-			cleanupErr = cleanupOwnedStage(parentFD, stagingName, stageFD, stageID)
-		}
-		returnErr = joinFailure(returnErr, cleanupErr)
-	}()
+	point := materializePoint{step: stepAfterPrepareMkdir, parent: parent, stagingName: staging, targetName: target}
+	if err := checkpoint(ctx, hook, point); err != nil {
+		unix.Close(parentFD)
+		return nil, unresolved("validate declared staging after mkdir", parent, staging, identity, identityKnown, err)
+	}
+	stageFD, err := unix.Openat(parentFD, staging, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
+	if err != nil {
+		unix.Close(parentFD)
+		return nil, unresolved("open declared staging", parent, staging, identity, true, err)
+	}
+	if err := verifyOpenIdentity(stageFD, identity); err != nil {
+		unix.Close(stageFD)
+		unix.Close(parentFD)
+		return nil, unresolved("bind opened declared staging", parent, staging, identity, true, err)
+	}
+	if err := unix.Fchmod(stageFD, directoryMode); err != nil {
+		unix.Close(stageFD)
+		unix.Close(parentFD)
+		return nil, unresolved("secure declared staging", parent, staging, identity, true, err)
+	}
+	if err := verifyOpenRoot(stageFD, identity); err != nil {
+		unix.Close(stageFD)
+		unix.Close(parentFD)
+		return nil, unresolved("verify declared staging", parent, staging, identity, true, err)
+	}
+	if err := verifyNamedRoot(parentFD, staging, identity); err != nil {
+		unix.Close(stageFD)
+		unix.Close(parentFD)
+		return nil, unresolved("bind declared staging name", parent, staging, identity, true, err)
+	}
+	point.step = stepBeforePrepareFsync
+	if err := checkpoint(ctx, hook, point); err != nil {
+		unix.Close(stageFD)
+		unix.Close(parentFD)
+		return nil, unresolved("sync declared staging", parent, staging, identity, true, err)
+	}
+	if err := unix.Fsync(stageFD); err != nil {
+		unix.Close(stageFD)
+		unix.Close(parentFD)
+		return nil, unresolved("fsync declared staging", parent, staging, identity, true, err)
+	}
+	if err := unix.Fsync(parentFD); err != nil {
+		unix.Close(stageFD)
+		unix.Close(parentFD)
+		return nil, unresolved("fsync declared staging parent", parent, staging, identity, true, err)
+	}
+	return &Prepared{
+		parent: parent, target: target, staging: staging,
+		parentFD: parentFD, stageFD: stageFD, parentID: parentID, identity: identity,
+	}, nil
+}
+
+// Identity returns the exact retained staging root identity.
+func (p *Prepared) Identity() StageIdentity {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.identity
+}
+
+// PopulateAndPublish consumes this handle exactly once, reconstructs and syncs
+// the complete tree, then publishes with Darwin atomic no-replace rename.
+func (p *Prepared) PopulateAndPublish(ctx context.Context, manifest Manifest, source BlobSource) (Published, error) {
+	return p.populateAndPublish(ctx, manifest, source, nil)
+}
+
+func (p *Prepared) populateAndPublish(ctx context.Context, manifest Manifest, source BlobSource, hook materializeHook) (Published, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return Published{}, &LifecycleError{Reason: "populate after close"}
+	}
+	if p.consumed {
+		return Published{}, &LifecycleError{Reason: "populate more than once"}
+	}
+	p.consumed = true
+	if source == nil || !manifest.format.valid() || !manifest.base.format.valid() || manifest.base.format != manifest.format {
+		return Published{}, &ValidationError{Reason: "valid manifest and blob source are required"}
+	}
+	if err := checkpoint(ctx, hook, materializePoint{}); err != nil {
+		return Published{}, err
+	}
+	if err := p.verifyPreparedRoot(); err != nil {
+		return Published{}, err
+	}
+	names, err := directoryNames(ctx, p.stageFD)
+	if err != nil {
+		return Published{}, err
+	}
+	if len(names) != 0 {
+		return Published{}, &ValidationError{Reason: "prepared staging directory is not empty"}
+	}
 
 	for _, entry := range manifest.entries {
-		if err := materializeEntry(ctx, stageFD, stageID.device, entry, source, hook, parent, stagingName, target); err != nil {
-			return MaterializeResult{}, err
+		if err := p.materializeEntry(ctx, entry, source, hook); err != nil {
+			return Published{}, err
 		}
 	}
-	point := materializePoint{step: stepBeforeTreeVerify, parent: parent, stagingName: stagingName, targetName: target}
+	point := p.point(stepBeforeTreeVerify, nil)
 	if err := checkpoint(ctx, hook, point); err != nil {
-		return MaterializeResult{}, err
-	}
-	actual, directories, err := scanTree(stageFD, stageID.device, manifest.format, manifest.base)
-	if err != nil {
-		return MaterializeResult{}, fmt.Errorf("verify staged Change: %w", err)
-	}
-	if !manifestsEqual(manifest, actual) || !slices.Equal(expectedDirectories(manifest), directories) {
-		return MaterializeResult{}, &ValidationError{Reason: "staged tree differs from selected manifest"}
-	}
-	commitment := manifest.Commitment()
-	if !commitment.Equal(actual.Commitment()) {
-		return MaterializeResult{}, &ValidationError{Reason: "reconstructed tree commitment differs from selection"}
-	}
-	point.step = stepBeforeTreeFsync
-	if err := checkpoint(ctx, hook, point); err != nil {
-		return MaterializeResult{}, err
-	}
-	if err := fsyncTree(stageFD, stageID.device); err != nil {
-		return MaterializeResult{}, fmt.Errorf("fsync staged Change: %w", err)
-	}
-	if err := verifyNamedIdentity(parentFD, stagingName, stageID); err != nil {
-		return MaterializeResult{}, err
-	}
-	if err := verifyParentPath(parent, parentID); err != nil {
-		return MaterializeResult{}, err
+		return Published{}, err
 	}
 	point.step = stepBeforeRename
 	if err := checkpoint(ctx, hook, point); err != nil {
-		return MaterializeResult{}, err
+		return Published{}, err
 	}
-	if err := unix.RenameatxNp(parentFD, stagingName, parentFD, target, unix.RENAME_EXCL); err != nil {
+	point.step = stepBeforeTreeFsync
+	if err := checkpoint(ctx, hook, point); err != nil {
+		return Published{}, err
+	}
+	actual, err := scanTree(ctx, p.stageFD, p.identity.device, manifest.format, manifest.base, true, hook, point)
+	if err != nil {
+		return Published{}, fmt.Errorf("verify and sync prepared Change: %w", err)
+	}
+	if !manifestsEqual(manifest, actual) {
+		return Published{}, &ValidationError{Reason: "prepared tree differs from selected manifest"}
+	}
+	if err := p.verifyPreparedRoot(); err != nil {
+		return Published{}, err
+	}
+	if err := unix.RenameatxNp(p.parentFD, p.staging, p.parentFD, p.target, unix.RENAME_EXCL); err != nil {
 		if errors.Is(err, unix.EEXIST) {
-			return MaterializeResult{}, &ConflictError{Target: changePath(parent, target)}
+			return Published{}, &ConflictError{Target: changePath(p.parent, p.target)}
 		}
-		return MaterializeResult{}, fmt.Errorf("publish Change without replacement: %w", err)
+		// Darwin documents renameatx_np errors as pre-publication failures.
+		return Published{}, fmt.Errorf("publish Change without replacement: %w", err)
 	}
-	published = true
 
-	unknown := func(cause error) (MaterializeResult, error) {
-		return MaterializeResult{}, &OutcomeUnknownError{
-			Target:     changePath(parent, target),
-			Commitment: commitment,
-			Device:     stageID.device,
-			Inode:      stageID.inode,
-			Cause:      cause,
+	unknown := func(cause error) (Published, error) {
+		return Published{}, &OutcomeUnknownError{
+			Target: changePath(p.parent, p.target), Identity: p.identity,
+			Commitment: manifest.Commitment(), Cause: cause,
 		}
 	}
 	point.step = stepAfterRename
 	if err := checkpoint(ctx, hook, point); err != nil {
 		return unknown(err)
 	}
-	if err := verifyNamedIdentity(parentFD, target, stageID); err != nil {
+	if err := verifyNamedRoot(p.parentFD, p.target, p.identity); err != nil {
 		return unknown(err)
 	}
-	if err := verifyParentPath(parent, parentID); err != nil {
+	if err := verifyOpenRoot(p.stageFD, p.identity); err != nil {
 		return unknown(err)
 	}
-	postPublication, postDirectories, err := scanTree(stageFD, stageID.device, manifest.format, manifest.base)
+	if err := verifyParentPath(p.parent, p.parentID); err != nil {
+		return unknown(err)
+	}
+	post, err := scanTree(ctx, p.stageFD, p.identity.device, manifest.format, manifest.base, false, hook, point)
 	if err != nil {
 		return unknown(fmt.Errorf("reconstruct published Change: %w", err))
 	}
-	if !manifestsEqual(manifest, postPublication) || !slices.Equal(expectedDirectories(manifest), postDirectories) || !commitment.Equal(postPublication.Commitment()) {
+	if !manifestsEqual(manifest, post) {
 		return unknown(&ValidationError{Reason: "published tree differs from selected manifest"})
 	}
 	point.step = stepBeforeParentFsync
 	if err := checkpoint(ctx, hook, point); err != nil {
 		return unknown(err)
 	}
-	if err := unix.Fsync(parentFD); err != nil {
+	if err := unix.Fsync(p.parentFD); err != nil {
 		return unknown(fmt.Errorf("fsync Change parent after publication: %w", err))
 	}
-	return MaterializeResult{
-		path:       changePath(parent, target),
-		commitment: commitment,
-		device:     stageID.device,
-		inode:      stageID.inode,
-		fileCount:  manifest.FileCount(),
-		blobBytes:  manifest.BlobBytes(),
-	}, nil
+	facts := factsFromManifest(p.identity, post)
+	return Published{path: changePath(p.parent, p.target), facts: facts}, nil
 }
 
-func validateMaterializeInput(parent, target string, manifest Manifest, source BlobSource) error {
-	if !filepath.IsAbs(parent) {
-		return &ValidationError{Reason: "Change parent must be absolute"}
+// Close closes retained descriptors only. It never removes staging or target.
+func (p *Prepared) Close() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return &LifecycleError{Reason: "close more than once"}
 	}
-	if source == nil {
-		return &ValidationError{Reason: "blob source is required"}
-	}
-	if !manifest.format.valid() || !manifest.base.format.valid() || manifest.base.format != manifest.format {
-		return &ValidationError{Reason: "invalid manifest"}
-	}
-	if target == "" || target == "." || target == ".." || len(target) > maxNameBytes || !utf8.ValidString(target) || strings.ContainsAny(target, "/\x00") {
-		return &ValidationError{Reason: "target must be one safe name"}
-	}
-	if strings.EqualFold(target, ".git") {
-		return &ValidationError{Reason: ".git target is forbidden"}
-	}
-	return nil
+	p.closed = true
+	return errors.Join(unix.Close(p.stageFD), unix.Close(p.parentFD))
 }
 
-func checkpoint(ctx context.Context, hook materializeHook, point materializePoint) error {
-	if err := ctx.Err(); err != nil {
+func (p *Prepared) verifyPreparedRoot() error {
+	if err := verifyParentFD(p.parentFD, p.parentID); err != nil {
 		return err
 	}
-	if hook != nil {
-		if err := hook(point); err != nil {
-			return err
-		}
-	}
-	return ctx.Err()
-}
-
-func verifySecureParent(fd int) (fileIdentity, error) {
-	var stat unix.Stat_t
-	if err := unix.Fstat(fd, &stat); err != nil {
-		return fileIdentity{}, fmt.Errorf("stat Change parent: %w", err)
-	}
-	if stat.Mode&unix.S_IFMT != unix.S_IFDIR || stat.Mode&0o777 != directoryMode || stat.Uid != uint32(os.Geteuid()) {
-		return fileIdentity{}, &ValidationError{Reason: "Change parent must be an owned mode-0700 directory"}
-	}
-	return identityOf(stat), nil
-}
-
-func verifyParentPath(path string, expected fileIdentity) error {
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
-	if err != nil {
-		return fmt.Errorf("reopen Change parent without symlinks: %w", err)
-	}
-	defer unix.Close(fd)
-	actual, err := verifySecureParent(fd)
-	if err != nil {
+	if err := verifyParentPath(p.parent, p.parentID); err != nil {
 		return err
 	}
-	if actual != expected {
-		return &UnresolvedError{Stage: "verified parent identity", Cause: errors.New("Change parent identity changed")}
+	if err := verifyOpenRoot(p.stageFD, p.identity); err != nil {
+		return unresolved("retained staging root", p.parent, p.staging, p.identity, true, err)
+	}
+	if err := verifyNamedRoot(p.parentFD, p.staging, p.identity); err != nil {
+		return unresolved("declared staging identity", p.parent, p.staging, p.identity, true, err)
 	}
 	return nil
 }
 
-func identityOf(stat unix.Stat_t) fileIdentity {
-	return fileIdentity{device: uint64(stat.Dev), inode: stat.Ino}
+func (p *Prepared) point(step materializeStep, entryPath []byte) materializePoint {
+	return materializePoint{
+		step: step, parent: p.parent, stagingName: p.staging, targetName: p.target,
+		entryPath: bytes.Clone(entryPath),
+	}
 }
 
-func namedEntryExists(parentFD int, name string) (bool, error) {
-	var stat unix.Stat_t
-	err := unix.Fstatat(parentFD, name, &stat, unix.AT_SYMLINK_NOFOLLOW)
-	if err == nil {
-		return true, nil
-	}
-	if errors.Is(err, unix.ENOENT) {
-		return false, nil
-	}
-	return false, fmt.Errorf("inspect Change target: %w", err)
-}
-
-func createStaging(parentFD int) (string, int, fileIdentity, error) {
-	for attempt := 0; attempt < 32; attempt++ {
-		var random [16]byte
-		if _, err := rand.Read(random[:]); err != nil {
-			return "", -1, fileIdentity{}, fmt.Errorf("generate staging identity: %w", err)
-		}
-		name := ".dark-factory-change-" + hex.EncodeToString(random[:])
-		if err := unix.Mkdirat(parentFD, name, directoryMode); err != nil {
-			if errors.Is(err, unix.EEXIST) {
-				continue
-			}
-			return "", -1, fileIdentity{}, fmt.Errorf("create Change staging directory: %w", err)
-		}
-		fd, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
-		if err != nil {
-			return "", -1, fileIdentity{}, &UnresolvedError{Stage: "open new staging directory", Cause: err}
-		}
-		var stat unix.Stat_t
-		if err := unix.Fstat(fd, &stat); err != nil {
-			unix.Close(fd)
-			return "", -1, fileIdentity{}, &UnresolvedError{Stage: "stat new staging directory", Cause: err}
-		}
-		if err := unix.Fchmod(fd, directoryMode); err != nil {
-			unix.Close(fd)
-			return "", -1, fileIdentity{}, &UnresolvedError{Stage: "secure new staging directory", Cause: err}
-		}
-		if err := unix.Fstat(fd, &stat); err != nil {
-			unix.Close(fd)
-			return "", -1, fileIdentity{}, &UnresolvedError{Stage: "restat new staging directory", Cause: err}
-		}
-		id := identityOf(stat)
-		if stat.Mode&unix.S_IFMT != unix.S_IFDIR || stat.Mode&0o777 != directoryMode {
-			unix.Close(fd)
-			return "", -1, fileIdentity{}, &UnresolvedError{Stage: "new staging directory mode", Cause: errors.New("unexpected staging directory")}
-		}
-		if err := verifyNamedIdentity(parentFD, name, id); err != nil {
-			unix.Close(fd)
-			return "", -1, fileIdentity{}, err
-		}
-		return name, fd, id, nil
-	}
-	return "", -1, fileIdentity{}, errors.New("could not allocate unique Change staging directory")
-}
-
-func verifyNamedIdentity(parentFD int, name string, expected fileIdentity) error {
-	var stat unix.Stat_t
-	if err := unix.Fstatat(parentFD, name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-		return &UnresolvedError{Stage: "named filesystem identity", Cause: err}
-	}
-	if stat.Mode&unix.S_IFMT != unix.S_IFDIR || identityOf(stat) != expected {
-		return &UnresolvedError{Stage: "named filesystem identity", Cause: errors.New("directory identity changed")}
-	}
-	return nil
-}
-
-func materializeEntry(ctx context.Context, rootFD int, rootDevice uint64, entry Entry, source BlobSource, hook materializeHook, parent, staging, target string) error {
+func (p *Prepared) materializeEntry(ctx context.Context, entry Entry, source BlobSource, hook materializeHook) error {
 	data, err := source(ctx, entry.oid)
 	if err != nil {
 		return fmt.Errorf("read selected blob %s: %w", entry.oid.Hex(), err)
@@ -297,15 +291,22 @@ func materializeEntry(ctx context.Context, rootFD int, rootDevice uint64, entry 
 	if uint64(len(data)) != entry.size {
 		return &ValidationError{Reason: fmt.Sprintf("blob size differs for %q", entry.path)}
 	}
-	if !hashBlob(entry.oid.format, data).equal(entry.oid) {
+	hashPoint := p.point(stepDuringBlobHash, entry.path)
+	actualOID, err := hashBlobContext(ctx, entry.oid.format, data, func() error {
+		return checkpoint(ctx, hook, hashPoint)
+	})
+	if err != nil {
+		return err
+	}
+	if !actualOID.equal(entry.oid) {
 		return &ValidationError{Reason: fmt.Sprintf("blob object ID differs for %q", entry.path)}
 	}
 	components := strings.Split(string(entry.path), "/")
-	point := materializePoint{step: stepBeforeEntryParentOpen, parent: parent, stagingName: staging, targetName: target, entryPath: bytes.Clone(entry.path)}
+	point := p.point(stepBeforeEntryParentOpen, entry.path)
 	if err := checkpoint(ctx, hook, point); err != nil {
 		return err
 	}
-	parentFD, closeParent, err := openEntryParent(rootFD, rootDevice, components[:len(components)-1])
+	parentFD, closeParent, err := openEntryParent(p.stageFD, p.identity.device, components[:len(components)-1])
 	if err != nil {
 		return err
 	}
@@ -322,11 +323,11 @@ func materializeEntry(ctx context.Context, rootFD int, rootDevice uint64, entry 
 	}
 	fd, err := unix.Openat(parentFD, components[len(components)-1], unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, permissions)
 	if err != nil {
-		return fmt.Errorf("create staged file %q: %w", entry.path, err)
+		return fmt.Errorf("create prepared file %q: %w", entry.path, err)
 	}
 	defer unix.Close(fd)
 	if err := unix.Fchmod(fd, permissions); err != nil {
-		return fmt.Errorf("set staged file mode %q: %w", entry.path, err)
+		return fmt.Errorf("set prepared file mode %q: %w", entry.path, err)
 	}
 	point.step = stepBeforeFileWrite
 	if err := checkpoint(ctx, hook, point); err != nil {
@@ -339,58 +340,339 @@ func materializeEntry(ctx context.Context, rootFD int, rootDevice uint64, entry 
 		end := min(written+(1<<20), len(data))
 		n, err := unix.Write(fd, data[written:end])
 		if err != nil {
-			return fmt.Errorf("write staged file %q: %w", entry.path, err)
+			return fmt.Errorf("write prepared file %q: %w", entry.path, err)
 		}
 		if n == 0 {
-			return fmt.Errorf("write staged file %q: %w", entry.path, io.ErrShortWrite)
+			return fmt.Errorf("write prepared file %q: %w", entry.path, io.ErrShortWrite)
 		}
 		written += n
 	}
 	var stat unix.Stat_t
 	if err := unix.Fstat(fd, &stat); err != nil {
-		return fmt.Errorf("stat staged file %q: %w", entry.path, err)
+		return fmt.Errorf("stat prepared file %q: %w", entry.path, err)
 	}
-	if stat.Mode&unix.S_IFMT != unix.S_IFREG || uint32(stat.Mode&0o777) != permissions || stat.Nlink != 1 || stat.Size != int64(entry.size) || uint64(stat.Dev) != rootDevice {
-		return &ValidationError{Reason: fmt.Sprintf("staged file identity differs for %q", entry.path)}
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG || uint32(stat.Mode&0o7777) != permissions || stat.Uid != uint32(os.Geteuid()) || stat.Nlink != 1 || stat.Size != int64(entry.size) || uint64(stat.Dev) != p.identity.device {
+		return &ValidationError{Reason: fmt.Sprintf("prepared file authority differs for %q", entry.path)}
 	}
 	point.step = stepBeforeFileFsync
 	if err := checkpoint(ctx, hook, point); err != nil {
 		return err
 	}
 	if err := unix.Fsync(fd); err != nil {
-		return fmt.Errorf("fsync staged file %q: %w", entry.path, err)
+		return fmt.Errorf("fsync prepared file %q: %w", entry.path, err)
 	}
 	return nil
+}
+
+// InspectPublished reconstructs one exact recorded target without trusting a
+// stored digest. format and base are the durable selected source facts.
+func InspectPublished(ctx context.Context, parent, target string, expected StageIdentity, format ObjectFormat, base ObjectID) (TreeFacts, error) {
+	return inspectPublished(ctx, parent, target, expected, format, base, nil)
+}
+
+func inspectPublished(ctx context.Context, parent, target string, expected StageIdentity, format ObjectFormat, base ObjectID, hook materializeHook) (TreeFacts, error) {
+	if err := validateParentAndName(parent, target); err != nil {
+		return TreeFacts{}, err
+	}
+	if expected == (StageIdentity{}) || !format.valid() || !base.format.valid() || base.format != format {
+		return TreeFacts{}, &ValidationError{Reason: "valid expected identity, format and base are required"}
+	}
+	if err := checkpoint(ctx, hook, materializePoint{}); err != nil {
+		return TreeFacts{}, err
+	}
+	parentFD, err := openVerifiedParent(parent)
+	if err != nil {
+		return TreeFacts{}, err
+	}
+	defer unix.Close(parentFD)
+	parentID, err := verifySecureParent(parentFD)
+	if err != nil {
+		return TreeFacts{}, err
+	}
+	if err := verifyParentPath(parent, parentID); err != nil {
+		return TreeFacts{}, err
+	}
+	rootFD, err := unix.Openat(parentFD, target, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
+	if err != nil {
+		return TreeFacts{}, unresolved("open recorded tree", parent, target, expected, true, err)
+	}
+	defer unix.Close(rootFD)
+	if err := verifyOpenRoot(rootFD, expected); err != nil {
+		return TreeFacts{}, unresolved("inspect recorded tree root", parent, target, expected, true, err)
+	}
+	if err := verifyNamedRoot(parentFD, target, expected); err != nil {
+		return TreeFacts{}, unresolved("inspect recorded tree name", parent, target, expected, true, err)
+	}
+	manifest, err := scanTree(ctx, rootFD, expected.device, format, base, false, hook, materializePoint{parent: parent, targetName: target})
+	if err != nil {
+		return TreeFacts{}, err
+	}
+	if err := verifyOpenRoot(rootFD, expected); err != nil {
+		return TreeFacts{}, unresolved("recheck recorded tree root", parent, target, expected, true, err)
+	}
+	if err := verifyNamedRoot(parentFD, target, expected); err != nil {
+		return TreeFacts{}, unresolved("recheck recorded tree name", parent, target, expected, true, err)
+	}
+	if err := verifyParentPath(parent, parentID); err != nil {
+		return TreeFacts{}, err
+	}
+	return factsFromManifest(expected, manifest), nil
+}
+
+// RemoveRecordedTree removes only an absent or exact identity-matched recorded
+// tree. Under the documented cooperative same-UID boundary, identity is checked
+// before traversal and again immediately before root unlink.
+func RemoveRecordedTree(ctx context.Context, parent, name string, expected StageIdentity) error {
+	return removeRecordedTree(ctx, parent, name, expected, nil)
+}
+
+func removeRecordedTree(ctx context.Context, parent, name string, expected StageIdentity, hook materializeHook) error {
+	if err := validateParentAndName(parent, name); err != nil {
+		return err
+	}
+	if expected == (StageIdentity{}) {
+		return &ValidationError{Reason: "recorded tree identity is required"}
+	}
+	parentFD, err := openVerifiedParent(parent)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(parentFD)
+	parentID, err := verifySecureParent(parentFD)
+	if err != nil {
+		return err
+	}
+	if err := verifyParentPath(parent, parentID); err != nil {
+		return err
+	}
+	exists, err := namedEntryExists(parentFD, name)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	rootFD, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
+	if err != nil {
+		return unresolved("open recorded tree for removal", parent, name, expected, true, err)
+	}
+	defer unix.Close(rootFD)
+	if err := verifyOpenRoot(rootFD, expected); err != nil {
+		return unresolved("verify recorded tree for removal", parent, name, expected, true, err)
+	}
+	point := materializePoint{step: stepBeforeRecordedRemoval, parent: parent, stagingName: name, targetName: name}
+	if err := checkpoint(ctx, hook, point); err != nil {
+		return unresolved("recorded tree removal checkpoint", parent, name, expected, true, err)
+	}
+	if err := verifyNamedRoot(parentFD, name, expected); err != nil {
+		return unresolved("recorded tree identity before removal", parent, name, expected, true, err)
+	}
+	if err := removeDirectoryContents(ctx, rootFD, expected.device); err != nil {
+		return unresolved("recorded tree contents removal", parent, name, expected, true, err)
+	}
+	if err := verifyNamedRoot(parentFD, name, expected); err != nil {
+		return unresolved("recorded tree identity before root removal", parent, name, expected, true, err)
+	}
+	if err := unix.Unlinkat(parentFD, name, unix.AT_REMOVEDIR); err != nil {
+		return unresolved("recorded tree root removal", parent, name, expected, true, err)
+	}
+	if err := unix.Fsync(parentFD); err != nil {
+		return unresolved("recorded tree parent fsync", parent, name, expected, true, err)
+	}
+	return nil
+}
+
+func validatePrepareLocator(parent, target, staging string) error {
+	if err := validateParentAndName(parent, target); err != nil {
+		return err
+	}
+	if err := validateName(staging); err != nil {
+		return err
+	}
+	if target == staging {
+		return &ValidationError{Reason: "target and staging names must differ"}
+	}
+	return nil
+}
+
+func validateParentAndName(parent, name string) error {
+	if !filepath.IsAbs(parent) || filepath.Clean(parent) != parent {
+		return &ValidationError{Reason: "Change parent must be one clean absolute path"}
+	}
+	return validateName(name)
+}
+
+func validateName(name string) error {
+	if name == "" || name == "." || name == ".." || len(name) > MaxComponentBytes || !utf8.ValidString(name) || strings.ContainsAny(name, "/\\\x00") {
+		return &ValidationError{Reason: "Change locator must be one safe name"}
+	}
+	if strings.EqualFold(name, ".git") {
+		return &ValidationError{Reason: ".git locator is forbidden"}
+	}
+	return nil
+}
+
+func checkpoint(ctx context.Context, hook materializeHook, point materializePoint) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if hook != nil {
+		if err := hook(point); err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
+}
+
+func openVerifiedParent(parent string) (int, error) {
+	fd, err := unix.Open(parent, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
+	if err != nil {
+		return -1, fmt.Errorf("open verified Change parent: %w", err)
+	}
+	return fd, nil
+}
+
+func verifySecureParent(fd int) (StageIdentity, error) {
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return StageIdentity{}, fmt.Errorf("stat Change parent: %w", err)
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFDIR || stat.Mode&0o7777 != directoryMode || stat.Uid != uint32(os.Geteuid()) {
+		return StageIdentity{}, &ValidationError{Reason: "Change parent must be an owned exact mode-0700 directory"}
+	}
+	return identityOf(stat), nil
+}
+
+func verifyParentFD(fd int, expected StageIdentity) error {
+	actual, err := verifySecureParent(fd)
+	if err != nil {
+		return err
+	}
+	if actual != expected {
+		return errors.New("Change parent descriptor identity changed")
+	}
+	return nil
+}
+
+func verifyParentPath(path string, expected StageIdentity) error {
+	fd, err := openVerifiedParent(path)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(fd)
+	actual, err := verifySecureParent(fd)
+	if err != nil {
+		return err
+	}
+	if actual != expected {
+		return unresolved("verified parent identity", filepath.Dir(path), filepath.Base(path), expected, true, errors.New("Change parent identity changed"))
+	}
+	return nil
+}
+
+func identityOf(stat unix.Stat_t) StageIdentity {
+	return StageIdentity{device: uint64(stat.Dev), inode: stat.Ino}
+}
+
+func namedIdentity(parentFD int, name string) (StageIdentity, bool, error) {
+	var stat unix.Stat_t
+	if err := unix.Fstatat(parentFD, name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return StageIdentity{}, false, err
+	}
+	return identityOf(stat), true, nil
+}
+
+func namedEntryExists(parentFD int, name string) (bool, error) {
+	_, _, err := namedIdentity(parentFD, name)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, unix.ENOENT) {
+		return false, nil
+	}
+	return false, fmt.Errorf("inspect declared Change path: %w", err)
+}
+
+func verifyOpenRoot(fd int, expected StageIdentity) error {
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return err
+	}
+	if !rootAuthority(stat, expected, uint32(os.Geteuid())) {
+		return errors.New("tree root authority or identity changed")
+	}
+	return nil
+}
+
+func verifyOpenIdentity(fd int, expected StageIdentity) error {
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return err
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFDIR || stat.Uid != uint32(os.Geteuid()) || identityOf(stat) != expected {
+		return errors.New("opened tree root authority or identity changed")
+	}
+	return nil
+}
+
+func verifyNamedRoot(parentFD int, name string, expected StageIdentity) error {
+	var stat unix.Stat_t
+	if err := unix.Fstatat(parentFD, name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return err
+	}
+	if !rootAuthority(stat, expected, uint32(os.Geteuid())) {
+		return errors.New("named tree root authority or identity changed")
+	}
+	return nil
+}
+
+func rootAuthority(stat unix.Stat_t, expected StageIdentity, effectiveUID uint32) bool {
+	return stat.Mode&unix.S_IFMT == unix.S_IFDIR && stat.Mode&0o7777 == directoryMode &&
+		stat.Uid == effectiveUID && identityOf(stat) == expected
+}
+
+func unresolved(stage, parent, name string, identity StageIdentity, known bool, cause error) error {
+	return &UnresolvedError{Stage: stage, Parent: parent, Name: name, Identity: identity, HasIdentity: known, Cause: cause}
 }
 
 func openEntryParent(rootFD int, rootDevice uint64, components []string) (int, bool, error) {
 	current := rootFD
 	owned := false
 	for _, component := range components {
-		if err := unix.Mkdirat(current, component, directoryMode); err != nil && !errors.Is(err, unix.EEXIST) {
-			if owned {
-				unix.Close(current)
+		created := false
+		if err := unix.Mkdirat(current, component, directoryMode); err != nil {
+			if !errors.Is(err, unix.EEXIST) {
+				if owned {
+					unix.Close(current)
+				}
+				return -1, false, fmt.Errorf("create prepared directory %q: %w", component, err)
 			}
-			return -1, false, fmt.Errorf("create staged directory %q: %w", component, err)
+		} else {
+			created = true
 		}
 		next, err := unix.Openat(current, component, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
 		if err != nil {
 			if owned {
 				unix.Close(current)
 			}
-			return -1, false, fmt.Errorf("open staged directory %q without following: %w", component, err)
+			return -1, false, fmt.Errorf("open prepared directory %q without following: %w", component, err)
+		}
+		if created {
+			err = unix.Fchmod(next, directoryMode)
 		}
 		var stat unix.Stat_t
-		err = unix.Fstat(next, &stat)
-		if err == nil && (stat.Mode&unix.S_IFMT != unix.S_IFDIR || stat.Mode&0o777 != directoryMode || uint64(stat.Dev) != rootDevice) {
-			err = errors.New("staged directory identity or mode differs")
+		if err == nil {
+			err = unix.Fstat(next, &stat)
+		}
+		if err == nil && (stat.Mode&unix.S_IFMT != unix.S_IFDIR || stat.Mode&0o7777 != directoryMode || stat.Uid != uint32(os.Geteuid()) || uint64(stat.Dev) != rootDevice) {
+			err = errors.New("prepared directory authority differs")
 		}
 		if owned {
 			unix.Close(current)
 		}
 		if err != nil {
 			unix.Close(next)
-			return -1, false, fmt.Errorf("verify staged directory %q: %w", component, err)
+			return -1, false, fmt.Errorf("verify prepared directory %q: %w", component, err)
 		}
 		current = next
 		owned = true
@@ -398,45 +680,56 @@ func openEntryParent(rootFD int, rootDevice uint64, components []string) (int, b
 	return current, owned, nil
 }
 
-func scanTree(rootFD int, rootDevice uint64, format ObjectFormat, base ObjectID) (Manifest, []string, error) {
+func scanTree(ctx context.Context, rootFD int, rootDevice uint64, format ObjectFormat, base ObjectID, syncDirectories bool, hook materializeHook, point materializePoint) (Manifest, error) {
 	entries := make([]Entry, 0)
 	directories := make([]string, 0)
 	var total uint64
-	if err := scanDirectory(rootFD, rootDevice, format, "", &entries, &directories, &total); err != nil {
-		return Manifest{}, nil, err
+	if err := scanDirectory(ctx, rootFD, rootDevice, format, "", &entries, &directories, &total, syncDirectories, hook, point); err != nil {
+		return Manifest{}, err
 	}
 	manifest, err := NewManifest(format, base, entries)
 	if err != nil {
-		return Manifest{}, nil, err
+		return Manifest{}, err
 	}
 	slices.Sort(directories)
-	return manifest, directories, nil
+	if !slices.Equal(manifest.directories, directories) {
+		return Manifest{}, &ValidationError{Reason: "empty or unselected prepared directory exists"}
+	}
+	return manifest, nil
 }
 
-func scanDirectory(dirFD int, rootDevice uint64, format ObjectFormat, prefix string, entries *[]Entry, directories *[]string, total *uint64) error {
-	names, err := directoryNames(dirFD)
+func scanDirectory(ctx context.Context, dirFD int, rootDevice uint64, format ObjectFormat, prefix string, entries *[]Entry, directories *[]string, total *uint64, syncDirectories bool, hook materializeHook, point materializePoint) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	names, err := directoryNames(ctx, dirFD)
 	if err != nil {
 		return err
 	}
 	for _, name := range names {
+		point.step = stepDuringTreeScan
+		point.entryPath = []byte(name)
+		if err := checkpoint(ctx, hook, point); err != nil {
+			return err
+		}
 		path := name
 		if prefix != "" {
 			path = prefix + "/" + name
 		}
-		if err := validatePath([]byte(path)); err != nil {
+		if _, err := validatePath([]byte(path)); err != nil {
 			return err
 		}
 		var before unix.Stat_t
 		if err := unix.Fstatat(dirFD, name, &before, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 			return err
 		}
-		if uint64(before.Dev) != rootDevice {
-			return &ValidationError{Reason: "staged entry crosses filesystem device"}
+		if uint64(before.Dev) != rootDevice || before.Uid != uint32(os.Geteuid()) {
+			return &ValidationError{Reason: "prepared entry ownership or device differs"}
 		}
 		switch before.Mode & unix.S_IFMT {
 		case unix.S_IFDIR:
-			if before.Mode&0o777 != directoryMode {
-				return &ValidationError{Reason: "staged directory mode differs"}
+			if before.Mode&0o7777 != directoryMode {
+				return &ValidationError{Reason: "prepared directory mode or special bits differ"}
 			}
 			childFD, err := unix.Openat(dirFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
 			if err != nil {
@@ -445,29 +738,27 @@ func scanDirectory(dirFD int, rootDevice uint64, format ObjectFormat, prefix str
 			var opened unix.Stat_t
 			err = unix.Fstat(childFD, &opened)
 			if err == nil && identityOf(opened) != identityOf(before) {
-				err = errors.New("staged directory changed while opening")
+				err = errors.New("prepared directory changed while opening")
 			}
 			if err == nil {
 				*directories = append(*directories, path)
-				err = scanDirectory(childFD, rootDevice, format, path, entries, directories, total)
+				if uint64(len(*entries)+len(*directories)) > MaxEntryCount {
+					err = &LimitError{Reason: "reconstructed total entry count exceeded"}
+				} else {
+					err = scanDirectory(ctx, childFD, rootDevice, format, path, entries, directories, total, syncDirectories, hook, point)
+				}
 			}
 			unix.Close(childFD)
 			if err != nil {
 				return err
 			}
 		case unix.S_IFREG:
-			if before.Nlink != 1 {
-				return &ValidationError{Reason: "hard-linked staged file forbidden"}
+			permissions := before.Mode & 0o7777
+			if before.Nlink != 1 || (permissions != 0o644 && permissions != 0o755) {
+				return &ValidationError{Reason: "prepared file link, mode or special bits differ"}
 			}
-			if before.Size < 0 || uint64(before.Size) > maxBlobBytes || *total > maxTotalBytes-uint64(before.Size) {
+			if before.Size < 0 || uint64(before.Size) > MaxBlobBytes || *total > MaxTotalBlobBytes-uint64(before.Size) {
 				return &LimitError{Reason: "reconstructed byte limit exceeded"}
-			}
-			permissions := before.Mode & 0o777
-			mode := "100644"
-			if permissions == 0o755 {
-				mode = "100755"
-			} else if permissions != 0o644 {
-				return &ValidationError{Reason: "staged file mode differs"}
 			}
 			fd, err := unix.Openat(dirFD, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
 			if err != nil {
@@ -476,15 +767,19 @@ func scanDirectory(dirFD int, rootDevice uint64, format ObjectFormat, prefix str
 			var opened unix.Stat_t
 			err = unix.Fstat(fd, &opened)
 			if err == nil && (identityOf(opened) != identityOf(before) || opened.Mode&unix.S_IFMT != unix.S_IFREG || opened.Nlink != 1) {
-				err = errors.New("staged file changed while opening")
+				err = errors.New("prepared file changed while opening")
 			}
 			var oid ObjectID
 			if err == nil {
-				oid, err = hashOpenBlob(format, fd, uint64(opened.Size))
+				oid, err = hashOpenBlob(ctx, format, fd, uint64(opened.Size), hook, point)
 			}
 			unix.Close(fd)
 			if err != nil {
 				return err
+			}
+			mode := "100644"
+			if permissions == 0o755 {
+				mode = "100755"
 			}
 			entry, err := NewEntry([]byte(path), mode, uint64(opened.Size), oid)
 			if err != nil {
@@ -492,39 +787,58 @@ func scanDirectory(dirFD int, rootDevice uint64, format ObjectFormat, prefix str
 			}
 			*entries = append(*entries, entry)
 			*total += uint64(opened.Size)
-			if len(*entries) > maxFileCount {
-				return &LimitError{Reason: "reconstructed file count exceeded"}
+			if uint64(len(*entries)+len(*directories)) > MaxEntryCount {
+				return &LimitError{Reason: "reconstructed total entry count exceeded"}
 			}
 		default:
-			return &ValidationError{Reason: "non-regular staged entry forbidden"}
+			return &ValidationError{Reason: "non-regular prepared entry forbidden"}
+		}
+	}
+	if syncDirectories {
+		point.step = stepDuringTreeFsync
+		point.entryPath = []byte(prefix)
+		if err := checkpoint(ctx, hook, point); err != nil {
+			return err
+		}
+		if err := unix.Fsync(dirFD); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-func hashOpenBlob(format ObjectFormat, fd int, size uint64) (ObjectID, error) {
+func hashOpenBlob(ctx context.Context, format ObjectFormat, fd int, size uint64, hook materializeHook, point materializePoint) (ObjectID, error) {
 	hasher := format.newHash()
 	_, _ = fmt.Fprintf(hasher, "blob %d\x00", size)
-	readFD, err := unix.Dup(fd)
-	if err != nil {
-		return ObjectID{}, err
+	buffer := make([]byte, 64<<10)
+	var read uint64
+	for {
+		point.step = stepDuringTreeScan
+		if err := checkpoint(ctx, hook, point); err != nil {
+			return ObjectID{}, err
+		}
+		n, err := unix.Read(fd, buffer)
+		if n > 0 {
+			_, _ = hasher.Write(buffer[:n])
+			read += uint64(n)
+		}
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if err != nil {
+			return ObjectID{}, err
+		}
+		if n == 0 {
+			break
+		}
 	}
-	file := os.NewFile(uintptr(readFD), "staged blob")
-	if file == nil {
-		unix.Close(readFD)
-		return ObjectID{}, errors.New("wrap staged blob descriptor")
-	}
-	if _, err := io.Copy(hasher, file); err != nil {
-		file.Close()
-		return ObjectID{}, err
-	}
-	if err := file.Close(); err != nil {
-		return ObjectID{}, err
+	if read != size {
+		return ObjectID{}, &ValidationError{Reason: "file size changed while hashing"}
 	}
 	return NewObjectID(format, hasher.Sum(nil))
 }
 
-func directoryNames(dirFD int) ([]string, error) {
+func directoryNames(ctx context.Context, dirFD int) ([]string, error) {
 	fd, err := unix.Openat(dirFD, ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
 	if err != nil {
 		return nil, err
@@ -534,73 +848,33 @@ func directoryNames(dirFD int) ([]string, error) {
 		unix.Close(fd)
 		return nil, errors.New("wrap Change directory descriptor")
 	}
-	entries, err := file.ReadDir(-1)
-	closeErr := file.Close()
-	if err != nil {
+	names := make([]string, 0)
+	for {
+		if err := ctx.Err(); err != nil {
+			file.Close()
+			return nil, err
+		}
+		entries, readErr := file.ReadDir(128)
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			file.Close()
+			return nil, readErr
+		}
+	}
+	if err := file.Close(); err != nil {
 		return nil, err
-	}
-	if closeErr != nil {
-		return nil, closeErr
-	}
-	names := make([]string, len(entries))
-	for i, entry := range entries {
-		names[i] = entry.Name()
 	}
 	slices.Sort(names)
 	return names, nil
 }
 
-func fsyncTree(dirFD int, rootDevice uint64) error {
-	names, err := directoryNames(dirFD)
-	if err != nil {
-		return err
-	}
-	for _, name := range names {
-		var stat unix.Stat_t
-		if err := unix.Fstatat(dirFD, name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-			return err
-		}
-		if stat.Mode&unix.S_IFMT != unix.S_IFDIR {
-			continue
-		}
-		childFD, err := unix.Openat(dirFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
-		if err != nil {
-			return err
-		}
-		var opened unix.Stat_t
-		err = unix.Fstat(childFD, &opened)
-		if err == nil && (identityOf(opened) != identityOf(stat) || uint64(opened.Dev) != rootDevice) {
-			err = errors.New("staged directory changed while syncing")
-		}
-		if err == nil {
-			err = fsyncTree(childFD, rootDevice)
-		}
-		unix.Close(childFD)
-		if err != nil {
-			return err
-		}
-	}
-	return unix.Fsync(dirFD)
-}
-
-func expectedDirectories(manifest Manifest) []string {
-	seen := make(map[string]struct{})
-	for _, entry := range manifest.entries {
-		components := strings.Split(string(entry.path), "/")
-		for i := 1; i < len(components); i++ {
-			seen[strings.Join(components[:i], "/")] = struct{}{}
-		}
-	}
-	directories := make([]string, 0, len(seen))
-	for directory := range seen {
-		directories = append(directories, directory)
-	}
-	slices.Sort(directories)
-	return directories
-}
-
 func manifestsEqual(left, right Manifest) bool {
-	if left.format != right.format || !left.base.equal(right.base) || left.blobBytes != right.blobBytes || len(left.entries) != len(right.entries) {
+	if left.format != right.format || !left.base.equal(right.base) || left.entryCount != right.entryCount || left.blobBytes != right.blobBytes || len(left.entries) != len(right.entries) {
 		return false
 	}
 	for i := range left.entries {
@@ -612,37 +886,31 @@ func manifestsEqual(left, right Manifest) bool {
 	return true
 }
 
-func cleanupOwnedStage(parentFD int, stagingName string, stageFD int, expected fileIdentity) error {
-	if err := verifyNamedIdentity(parentFD, stagingName, expected); err != nil {
-		return err
+func factsFromManifest(identity StageIdentity, manifest Manifest) TreeFacts {
+	return TreeFacts{
+		identity: identity, commitment: manifest.Commitment(),
+		entryCount: manifest.EntryCount(), blobBytes: manifest.BlobBytes(),
 	}
-	if err := removeDirectoryContents(stageFD, expected.device); err != nil {
-		return err
-	}
-	if err := verifyNamedIdentity(parentFD, stagingName, expected); err != nil {
-		return err
-	}
-	if err := unix.Unlinkat(parentFD, stagingName, unix.AT_REMOVEDIR); err != nil {
-		return fmt.Errorf("remove owned staging directory: %w", err)
-	}
-	if err := unix.Fsync(parentFD); err != nil {
-		return fmt.Errorf("fsync parent after staging cleanup: %w", err)
-	}
-	return nil
 }
 
-func removeDirectoryContents(dirFD int, rootDevice uint64) error {
-	names, err := directoryNames(dirFD)
+func removeDirectoryContents(ctx context.Context, dirFD int, rootDevice uint64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	names, err := directoryNames(ctx, dirFD)
 	if err != nil {
 		return err
 	}
 	for _, name := range names {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		var before unix.Stat_t
 		if err := unix.Fstatat(dirFD, name, &before, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 			return err
 		}
 		if uint64(before.Dev) != rootDevice {
-			return errors.New("refuse cleanup across filesystem device")
+			return errors.New("refuse removal across filesystem device")
 		}
 		if before.Mode&unix.S_IFMT == unix.S_IFDIR {
 			childFD, err := unix.Openat(dirFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
@@ -652,10 +920,10 @@ func removeDirectoryContents(dirFD int, rootDevice uint64) error {
 			var opened unix.Stat_t
 			err = unix.Fstat(childFD, &opened)
 			if err == nil && identityOf(opened) != identityOf(before) {
-				err = errors.New("directory changed during owned cleanup")
+				err = errors.New("directory changed during recorded removal")
 			}
 			if err == nil {
-				err = removeDirectoryContents(childFD, rootDevice)
+				err = removeDirectoryContents(ctx, childFD, rootDevice)
 			}
 			unix.Close(childFD)
 			if err != nil {
@@ -664,7 +932,7 @@ func removeDirectoryContents(dirFD int, rootDevice uint64) error {
 			var after unix.Stat_t
 			if err := unix.Fstatat(dirFD, name, &after, unix.AT_SYMLINK_NOFOLLOW); err != nil || identityOf(after) != identityOf(before) {
 				if err == nil {
-					err = errors.New("directory changed before owned removal")
+					err = errors.New("directory changed before recorded removal")
 				}
 				return err
 			}
@@ -676,7 +944,7 @@ func removeDirectoryContents(dirFD int, rootDevice uint64) error {
 		var after unix.Stat_t
 		if err := unix.Fstatat(dirFD, name, &after, unix.AT_SYMLINK_NOFOLLOW); err != nil || identityOf(after) != identityOf(before) || after.Mode&unix.S_IFMT != before.Mode&unix.S_IFMT {
 			if err == nil {
-				err = errors.New("entry changed before owned removal")
+				err = errors.New("entry changed before recorded removal")
 			}
 			return err
 		}

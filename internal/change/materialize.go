@@ -5,57 +5,75 @@ import (
 	"path/filepath"
 )
 
-// BlobSource returns the exact bytes for one selected Git blob. The caller
-// retains ownership of the returned slice; Materialize never exposes it.
+// BlobSource returns the exact bytes for one selected Git blob. It must not
+// mutate the returned slice while PopulateAndPublish is using it.
 type BlobSource func(context.Context, ObjectID) ([]byte, error)
 
-// MaterializeResult is the immutable identity of one published plain tree.
-type MaterializeResult struct {
-	path       string
+// StageIdentity is one immutable filesystem device/inode identity.
+type StageIdentity struct {
+	device uint64
+	inode  uint64
+}
+
+// Device returns the filesystem device number.
+func (i StageIdentity) Device() uint64 { return i.device }
+
+// Inode returns the filesystem inode number.
+func (i StageIdentity) Inode() uint64 { return i.inode }
+
+// Equal reports exact device/inode equality.
+func (i StageIdentity) Equal(other StageIdentity) bool { return i == other }
+
+// TreeFacts are immutable facts reconstructed from one exact plain tree.
+type TreeFacts struct {
+	identity   StageIdentity
 	commitment Commitment
-	device     uint64
-	inode      uint64
-	fileCount  uint64
+	entryCount uint64
 	blobBytes  uint64
 }
 
-// Path returns the absolute path of the published Change.
-func (r MaterializeResult) Path() string { return r.path }
+// Identity returns the exact tree-root identity.
+func (f TreeFacts) Identity() StageIdentity { return f.identity }
 
-// Commitment returns the canonical selected and reconstructed tree commitment.
-func (r MaterializeResult) Commitment() Commitment { return r.commitment }
+// Commitment returns the reconstructed manifest commitment.
+func (f TreeFacts) Commitment() Commitment { return f.commitment }
 
-// Device returns the published root directory's device identity.
-func (r MaterializeResult) Device() uint64 { return r.device }
-
-// Inode returns the published root directory's inode identity.
-func (r MaterializeResult) Inode() uint64 { return r.inode }
-
-// FileCount returns the exact number of regular files.
-func (r MaterializeResult) FileCount() uint64 { return r.fileCount }
+// EntryCount returns regular files plus directories, excluding the root.
+func (f TreeFacts) EntryCount() uint64 { return f.entryCount }
 
 // BlobBytes returns the exact total regular-file bytes.
-func (r MaterializeResult) BlobBytes() uint64 { return r.blobBytes }
+func (f TreeFacts) BlobBytes() uint64 { return f.blobBytes }
 
-// Materialize creates and atomically publishes an exact repository-free Change
-// below parent. target must be one name, never a path.
-func Materialize(ctx context.Context, parent, target string, manifest Manifest, source BlobSource) (MaterializeResult, error) {
-	return materialize(ctx, parent, target, manifest, source, nil)
+// Published identifies one successfully published Change.
+type Published struct {
+	path  string
+	facts TreeFacts
 }
+
+// Path returns the clean absolute published path.
+func (p Published) Path() string { return p.path }
+
+// Facts returns reconstructed publication facts.
+func (p Published) Facts() TreeFacts { return p.facts }
 
 type materializeStep string
 
 const (
-	stepBeforeEntryParentOpen   materializeStep = "before entry parent open"
-	stepBeforeFileCreate        materializeStep = "before file create"
-	stepBeforeFileWrite         materializeStep = "before file write"
-	stepBeforeFileFsync         materializeStep = "before file fsync"
-	stepBeforeTreeVerify        materializeStep = "before tree verify"
-	stepBeforeTreeFsync         materializeStep = "before tree fsync"
-	stepBeforeRename            materializeStep = "before no-replace rename"
-	stepAfterRename             materializeStep = "after no-replace rename"
-	stepBeforeParentFsync       materializeStep = "before parent fsync"
-	stepBeforeOwnedStageCleanup materializeStep = "before owned staging cleanup"
+	stepAfterPrepareMkdir     materializeStep = "after prepare mkdir"
+	stepBeforePrepareFsync    materializeStep = "before prepare fsync"
+	stepDuringBlobHash        materializeStep = "during blob hash"
+	stepBeforeEntryParentOpen materializeStep = "before entry parent open"
+	stepBeforeFileCreate      materializeStep = "before file create"
+	stepBeforeFileWrite       materializeStep = "before file write"
+	stepBeforeFileFsync       materializeStep = "before file fsync"
+	stepBeforeTreeVerify      materializeStep = "before tree verify"
+	stepDuringTreeScan        materializeStep = "during tree scan"
+	stepBeforeTreeFsync       materializeStep = "before tree fsync"
+	stepDuringTreeFsync       materializeStep = "during tree fsync"
+	stepBeforeRename          materializeStep = "before no-replace rename"
+	stepAfterRename           materializeStep = "after no-replace rename"
+	stepBeforeParentFsync     materializeStep = "before parent fsync"
+	stepBeforeRecordedRemoval materializeStep = "before recorded removal"
 )
 
 type materializePoint struct {
@@ -68,4 +86,4 @@ type materializePoint struct {
 
 type materializeHook func(materializePoint) error
 
-func changePath(parent, target string) string { return filepath.Join(parent, target) }
+func changePath(parent, name string) string { return filepath.Join(parent, name) }

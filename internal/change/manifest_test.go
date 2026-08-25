@@ -2,12 +2,29 @@ package change
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
 )
+
+func TestHashBlobContextStopsAtCancellationCheckpoint(t *testing.T) {
+	format := mustFormat(t, "sha1")
+	ctx, cancel := context.WithCancel(context.Background())
+	checkpoints := 0
+	_, err := hashBlobContext(ctx, format, bytes.Repeat([]byte("x"), 4<<20), func() error {
+		checkpoints++
+		cancel()
+		return ctx.Err()
+	})
+	if !errors.Is(err, context.Canceled) || checkpoints != 1 {
+		t.Fatalf("hash did not stop at cancellation: err=%v checkpoints=%d", err, checkpoints)
+	}
+}
 
 func TestManifestCommitmentV1GoldenAndImmutable(t *testing.T) {
 	format := mustFormat(t, "sha1")
@@ -20,7 +37,7 @@ func TestManifestCommitmentV1GoldenAndImmutable(t *testing.T) {
 	independent = append(independent, []byte("dark-factory/change-manifest")...)
 	independent = append(independent, 0, 1, 1)
 	independent = append(independent, bytes.Repeat([]byte{0x42}, 20)...)
-	independent = binary.BigEndian.AppendUint64(independent, 2)
+	independent = binary.BigEndian.AppendUint64(independent, 3)
 	independent = binary.BigEndian.AppendUint64(independent, uint64(len("alpha")+len("#!/bin/sh\n")))
 	for _, entry := range []struct {
 		path []byte
@@ -36,7 +53,7 @@ func TestManifestCommitmentV1GoldenAndImmutable(t *testing.T) {
 	if !bytes.Equal(manifest.canonicalBytes(), independent) {
 		t.Fatalf("canonical bytes differ\n got: %x\nwant: %x", manifest.canonicalBytes(), independent)
 	}
-	wantDigest := "1295413e1a6f90ddaf6802b923bc175cd67865f103604488adbc7fd78e62942d"
+	wantDigest := "8f66a699c4dd5c28b86b1c084c4d908710604047ec1a08c364f7647fdaf566c7"
 	if got := manifest.Commitment().Hex(); got != wantDigest {
 		t.Fatalf("golden commitment changed: got %s want %s", got, wantDigest)
 	}
@@ -64,7 +81,7 @@ func TestManifestCommitmentBindsEveryAuthorityField(t *testing.T) {
 		"path":         mustManifest(t, sha1Format, base, []Entry{mustEntry(t, sha1Format, []byte("raw/other"), "100644", []byte("payload"))}),
 		"mode":         mustManifest(t, sha1Format, base, []Entry{mustEntry(t, sha1Format, []byte("raw/name"), "100755", []byte("payload"))}),
 		"size and oid": mustManifest(t, sha1Format, base, []Entry{mustEntry(t, sha1Format, []byte("raw/name"), "100644", []byte("payload!"))}),
-		"file count":   mustManifest(t, sha1Format, base, nil),
+		"entry count":  mustManifest(t, sha1Format, base, nil),
 	}
 	sha256Format := mustFormat(t, "sha256")
 	mutations["object format"] = mustManifest(t, sha256Format, mustID(t, sha256Format, bytes.Repeat([]byte{1}, 32)), []Entry{
@@ -98,7 +115,7 @@ func TestManifestRejectsUnsafeOrUnboundedInput(t *testing.T) {
 		nil, {}, []byte("/absolute"), []byte("."), []byte(".."), []byte("a/./b"), []byte("a/../b"),
 		[]byte("a//b"), []byte("a/"), []byte("a\x00b"), []byte(".git/config"), []byte("A/.GiT/config"),
 		[]byte{'r', 'a', 'w', '/', 0xfe},
-		bytes.Repeat([]byte{'p'}, maxNameBytes+1), bytes.Repeat([]byte{'p'}, maxPathBytes+1),
+		bytes.Repeat([]byte{'p'}, MaxComponentBytes+1), bytes.Repeat([]byte{'p'}, MaxRelativePathBytes+1),
 	}
 	for _, path := range unsafePaths {
 		if _, err := NewEntry(path, "100644", 0, oid); err == nil {
@@ -110,7 +127,7 @@ func TestManifestRejectsUnsafeOrUnboundedInput(t *testing.T) {
 			t.Fatalf("unsafe mode accepted: %q", mode)
 		}
 	}
-	if _, err := NewEntry([]byte("safe"), "100644", maxBlobBytes+1, oid); err == nil {
+	if _, err := NewEntry([]byte("safe"), "100644", MaxBlobBytes+1, oid); err == nil {
 		t.Fatal("oversized blob accepted")
 	}
 	if _, err := NewObjectID(format, make([]byte, 19)); err == nil {
@@ -129,12 +146,12 @@ func TestManifestRejectsUnsafeOrUnboundedInput(t *testing.T) {
 	if _, err := NewManifest(format, base, []Entry{entry, child}); err == nil {
 		t.Fatal("file/directory prefix collision accepted")
 	}
-	if _, err := NewManifest(format, base, make([]Entry, maxFileCount+1)); err == nil {
+	if _, err := NewManifest(format, base, make([]Entry, MaxEntryCount+1)); err == nil {
 		t.Fatal("file-count overflow accepted")
 	}
 	large := make([]Entry, 5)
 	for i := range large {
-		large[i], _ = NewEntry([]byte(fmt.Sprintf("large-%d", i)), "100644", maxBlobBytes, oid)
+		large[i], _ = NewEntry([]byte(fmt.Sprintf("large-%d", i)), "100644", MaxBlobBytes, oid)
 	}
 	if _, err := NewManifest(format, base, large); err == nil {
 		t.Fatal("total-byte overflow accepted")
@@ -153,6 +170,99 @@ func TestManifestRejectsUnsafeOrUnboundedInput(t *testing.T) {
 	if _, err := NewEntry(decomposed, "100644", 0, oid); err != nil {
 		t.Fatalf("valid decomposed UTF-8 rejected: %v", err)
 	}
+}
+
+func TestManifestFrozenBoundsAndTotalEntryAccounting(t *testing.T) {
+	format := mustFormat(t, "sha1")
+	base := mustID(t, format, bytes.Repeat([]byte{9}, format.OIDLength()))
+	oid := mustID(t, format, make([]byte, format.OIDLength()))
+
+	depth64 := strings.Repeat("d/", MaxDepth-1) + "f"
+	entry64 := mustEntryWithID(t, []byte(depth64), "100644", 0, oid)
+	if _, err := NewEntry([]byte(strings.Repeat("d/", MaxDepth)+"f"), "100644", 0, oid); err == nil {
+		t.Fatal("depth MaxDepth+1 accepted")
+	}
+	component255 := bytes.Repeat([]byte{'c'}, MaxComponentBytes)
+	if _, err := NewEntry(component255, "100644", 0, oid); err != nil {
+		t.Fatalf("exact component bound rejected: %v", err)
+	}
+	path1023 := bytes.Join([][]byte{component255, component255, component255, component255}, []byte{'/'})
+	if len(path1023) != MaxRelativePathBytes {
+		t.Fatalf("path fixture length=%d", len(path1023))
+	}
+	if _, err := NewEntry(path1023, "100644", 0, oid); err != nil {
+		t.Fatalf("exact path bound rejected: %v", err)
+	}
+	if _, err := NewEntry(append(bytes.Clone(path1023), 'x'), "100644", 0, oid); err == nil {
+		t.Fatal("path bound +1 accepted")
+	}
+	if _, err := NewEntry(bytes.Repeat([]byte{'c'}, MaxComponentBytes+1), "100644", 0, oid); err == nil {
+		t.Fatal("component bound +1 accepted")
+	}
+
+	entries := make([]Entry, 0, MaxEntryCount-63)
+	entries = append(entries, entry64) // one file plus 63 implied directories
+	for i := 0; i < int(MaxEntryCount)-64; i++ {
+		entries = append(entries, mustEntryWithID(t, []byte(fmt.Sprintf("root-%04d", i)), "100644", 0, oid))
+	}
+	atLimit := mustManifest(t, format, base, entries)
+	if atLimit.EntryCount() != MaxEntryCount || len(atLimit.directories) != 63 {
+		t.Fatalf("entry accounting=%d dirs=%d, want %d and 63", atLimit.EntryCount(), len(atLimit.directories), MaxEntryCount)
+	}
+	entries = append(entries, mustEntryWithID(t, []byte("overflow"), "100644", 0, oid))
+	if _, err := NewManifest(format, base, entries); err == nil {
+		t.Fatal("total entry bound +1 accepted")
+	}
+
+	sharedDirs := mustManifest(t, format, base, []Entry{
+		mustEntryWithID(t, []byte("a/b/c"), "100644", 0, oid),
+		mustEntryWithID(t, []byte("a/b/d"), "100644", 0, oid),
+	})
+	if sharedDirs.EntryCount() != 4 || len(sharedDirs.directories) != 2 {
+		t.Fatalf("shared implied directories counted incorrectly: entries=%d dirs=%d", sharedDirs.EntryCount(), len(sharedDirs.directories))
+	}
+
+	large := make([]Entry, 4)
+	for i := range large {
+		large[i] = mustEntryWithID(t, []byte(fmt.Sprintf("large-%d", i)), "100644", MaxBlobBytes, oid)
+	}
+	if got := mustManifest(t, format, base, large).BlobBytes(); got != MaxTotalBlobBytes {
+		t.Fatalf("exact total blob bound=%d", got)
+	}
+	large = append(large, mustEntryWithID(t, []byte("one-more"), "100644", 1, oid))
+	if _, err := NewManifest(format, base, large); err == nil {
+		t.Fatal("total blob bound +1 accepted")
+	}
+}
+
+func TestParseCommitmentIsExactAndImmutable(t *testing.T) {
+	raw := bytes.Repeat([]byte{0xa5}, sha256.Size)
+	commitment, err := ParseCommitment(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw[0] = 0
+	copyOut := commitment.Bytes()
+	copyOut[1] = 0
+	if commitment.Bytes()[0] != 0xa5 || commitment.Bytes()[1] != 0xa5 {
+		t.Fatal("commitment aliases caller or accessor storage")
+	}
+	for _, length := range []int{0, sha256.Size - 1, sha256.Size + 1} {
+		if _, err := ParseCommitment(make([]byte, length)); err == nil {
+			t.Fatalf("commitment length %d accepted", length)
+		}
+	}
+}
+
+func TestPathWith2047ComponentsFailsBeforeAnyFilesystemOrBlobBoundary(t *testing.T) {
+	format := mustFormat(t, "sha1")
+	oid := mustID(t, format, make([]byte, format.OIDLength()))
+	path := []byte(strings.Repeat("d/", 2_046) + "f")
+	if _, err := NewEntry(path, "100644", 0, oid); err == nil {
+		t.Fatal("2,047-component path accepted")
+	}
+	// NewEntry is the only route into an immutable Manifest, so rejection here
+	// precedes Prepare mkdir and BlobSource by construction.
 }
 
 func mustFormat(t testing.TB, name string) ObjectFormat {
