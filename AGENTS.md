@@ -116,7 +116,9 @@ Read-only context unless a task explicitly asks you to edit them:
    external tracker or backlog, update its item to the equivalent
    resolved/closed state and link the change. The source of the issue does not
    matter: after the change lands, verify every tracked item is actually closed
-   at its source. A doc or issue describing work that no longer exists is worse
+   at its source. If the authorized broker does not expose the required issue
+   operation, record the exact human handoff instead of using operator
+   credentials. A doc or issue describing work that no longer exists is worse
    than no record at all.
 10. **Never touch the operator's live install from a task.** `~/.dark-factory`,
     the installed `launchd` job, and the running daemon behind them are the
@@ -134,64 +136,38 @@ Read-only context unless a task explicitly asks you to edit them:
    high-risk escalation with a durable reason. God remains Sol/xhigh. See
    the project guidance for the one operator-facing policy and CLI examples;
    existing profiles are not silently rewritten.
-14. **Keep agent automation out of operator credentials.** Agents never use
-   ambient `git fetch`, `git pull`, `git clone`, or `git push`; `gh` or
-   `gh auth`; SSH-agent state; credential helpers; or the user's keychain for
-   authenticated remote reads or writes. Use an explicitly authorized
-   credential broker or App-backed tool surface supplied by the host (the
-   current coordinator's connected GitHub App is one example; another harness
-   may provide an equivalent). Anonymous public reads are allowed only with
-   credential lookup and interactive prompts disabled; a host may instead
-   supply a short-lived, repository-scoped read credential for checkout.
-   Remote writes fail closed unless the broker/App is available. Operator
-   approval never authorizes injecting a personal token into an agent process
-   for contribution work; human operators may instead perform a separately
-   reviewed GitHub action through their normal workflow. One exception: a
-   **deployment** the operator starts explicitly, limited to the single
-   operation named in that instruction and expiring with it. It never licenses
-   ambient credentials for anything else in the same session, and it is not a
-   route for contribution writes — publishing a commit is contribution work and
-   stays behind the App. Where a dispatched workflow exists, use it: the
-   credential then lives in the platform's secret manager and never enters an
-   agent process. Direct use is the fallback when no such workflow exists yet,
-   and it is strictly weaker, because an agent's instruction stream carries
-   untrusted content — issue bodies, pull request text, review comments,
-   webhook payloads — and a held credential can be steered into a use the
-   operator never authorized. A human terminal has no such input channel. That
-   asymmetry is the reason for this rule, so widen the exception only with a
-   durable reason, and say what the exposure is before acting on it. Never put
-   credentials in a worktree, prompt, command output, or log. This
-   contributor-agent boundary is not a future Dark Factory product GitHub
-   integration and does not change a human operator's normal workflow.
+14. **Use only the provider-neutral Maintainer App for GitHub authority.** The
+   sole remote path for contributor agents is the Dark Factory Maintainer MCP
+   at `https://maintainer.darkfactory.build/mcp`, exposed as authenticated App
+   tools by the host or coordinator. It is not the curated OpenAI/Codex GitHub
+   plugin, a provider login, or a future Dark Factory product integration.
+   Before the first remote operation in every session, call
+   `maintainer_status` and continue only when it binds
+   `dark-factory-build/dark-factory` with numeric repository ID `1335380107`
+   and permission revision `maintainer-operations-v1`.
+   The current surface exposes only status, exact commit publication, pull
+   request creation, review verdict submission, check observation, and merge
+   queue enqueue. Use those typed tools only. Issue creation, issue comments
+   or state changes, releases, workflow dispatch, and eventual merge-result
+   observation are not currently exposed; they require a separately reviewed
+   human action until a typed operation is implemented. If the MCP or the
+   needed typed tool is absent, denied, unavailable, or indeterminate, fail
+   closed and report the exact missing authority path; continue with
+   local-only work where useful.
 
-   Three narrow carve-outs, each chosen because the credential cannot be
-   steered somewhere that matters:
-
-   **Backlog.** `gh issue create`, `comment`, `close`, `reopen`, `list`, and
-   `view`, against the repository the task works in, so rule 9's
-   close-at-source requirement is executable rather than aspirational. Check
-   for an existing item before opening one. `gh issue edit` is excluded:
-   #126, #153, #188 and #198 each declare their body an immutable source
-   revision whose edit creates a new quarantined revision, so body-write
-   authority would let an agent mutate the exact artifact that boundary
-   protects. On any issue carrying that contract a comment must also not
-   carry scope, decisions, evidence, status, or acceptance criteria.
-
-   **Reads.** Authenticated read-only `gh`: `gh pr view`/`checks`/`diff`,
-   `gh run view`/`list`, and `gh api` GET. A read cannot be steered into a
-   write, and the anonymous path is not a substitute -- it caps at 60
-   requests an hour and returns 403 on Actions logs, so an agent that cannot
-   read its own CI failure has to interrupt the operator to be told what it
-   already had authority to see.
-
-   **Topic-branch push.** `git push` to any ref except the default branch,
-   and `--force-with-lease` only, never a bare `--force`, never a ref the
-   agent did not create. Pushing `main` stays closed. This is safe for a
-   reason worth stating: the default branch is protected by its ruleset, so
-   a pushed branch cannot reach it without review and passing checks, and an
-   agent that can push is already executing on the machine -- a branch push
-   grants it nothing it could not do locally. Opening or merging a pull
-   request is not covered and stays with the App or the operator.
+   Never substitute `gh`, `gh auth`, authenticated `git fetch`/`pull`/`clone`/
+   `push`, a PAT, `GH_TOKEN`/`GITHUB_TOKEN`, SSH-agent state or keys, credential
+   helpers, browser sessions, the user's keychain, or any model-provider GitHub
+   connector. Do not read or source `.env.txt` or another secret-bearing file,
+   inspect or expose the Cloudflare Access service-token values, or put any
+   credential in a worktree, prompt, command output, or log. Host registration
+   must isolate transport credentials from provider, tool, and shell process
+   environments; never export the Access pair into an agent-wide environment.
+   Human operators may perform a separately reviewed GitHub action through
+   their normal workflow. A deployment the operator explicitly requests
+   remains limited to that named operation and should use the repository's
+   dispatched workflow; it never authorizes contribution writes outside the
+   Maintainer App.
 
 ## Adding to the system
 
