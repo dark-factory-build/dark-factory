@@ -111,9 +111,8 @@ type markerIdentity struct {
 }
 
 type helperFrame struct {
-	Kind     string          `json:"kind"`
-	Identity identity        `json:"identity"`
-	Marker   *markerIdentity `json:"marker,omitempty"`
+	Kind     string   `json:"kind"`
+	Identity identity `json:"identity"`
 }
 
 func TestProcessContractHelper(t *testing.T) {
@@ -126,8 +125,6 @@ func TestProcessContractHelper(t *testing.T) {
 		helperReadyThenBlock(3, 4, 0)
 	case "exit-23":
 		helperReadyThenBlock(3, 4, 23)
-	case "immediate":
-		os.Exit(29)
 	case "exec-gate":
 		helperExecGate()
 	case "exec-target":
@@ -188,7 +185,7 @@ func helperTermIgnore() {
 		os.Exit(98)
 	}
 	ch := make(chan os.Signal, 1)
-	signalNotify(ch, syscall.SIGTERM)
+	signal.Notify(ch, syscall.SIGTERM)
 	if _, err := ready.Write([]byte{'R'}); err != nil {
 		os.Exit(98)
 	}
@@ -200,9 +197,6 @@ func helperTermIgnore() {
 	_ = ack.Close()
 	select {}
 }
-
-// Kept behind a variable so the helper remains small and signal setup stays auditable.
-var signalNotify = signal.Notify
 
 func helperLeashGate() {
 	leash := os.NewFile(3, "leash")
@@ -586,58 +580,55 @@ func TestUnreapedIdentityAndTimeout(t *testing.T) {
 	}
 }
 
-func TestKqueueReceiptBeforeExitAndExitRace(t *testing.T) {
-	t.Run("registered-before-exit", func(t *testing.T) {
-		readyR, readyW := pipe(t)
-		releaseR, releaseW := pipe(t)
-		c := startHelper(t, "blocked", 0, []*os.File{readyW, releaseR})
-		_ = readyW.Close()
-		_ = releaseR.Close()
-		readByte(t, readyR, 'R')
-		_, _ = releaseW.Write([]byte{'X'})
-		_ = releaseW.Close()
-		if _, err := waitExit(c.kq, c.pid, exitTimeout); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := readIdentity(c.pid); err != nil {
-			t.Fatalf("NOTE_EXIT reaped child: %v", err)
-		}
-		if err := c.wait(); err != nil {
-			t.Fatal(err)
-		}
-	})
-	t.Run("exit-before-registration-is-rejected", func(t *testing.T) {
-		for range 8 {
-			c := startHelper(t, "immediate", 0, nil)
-			if _, err := waitExit(c.kq, c.pid, exitTimeout); err != nil {
-				t.Fatal(err)
-			}
-			// The first kqueue is the readiness witness that the child is already
-			// exited and unreaped. Registration on a fresh kqueue is therefore a
-			// deterministic post-exit instance of the registration race.
-			lateKQ, err := unix.Kqueue()
-			if err != nil {
-				t.Fatal(err)
-			}
-			err = registerExit(lateKQ, c.pid)
-			var receiptErr receiptError
-			if !errors.As(err, &receiptErr) || receiptErr.Errno != unix.ESRCH {
-				_ = unix.Close(lateKQ)
-				t.Fatalf("post-exit registration unexpectedly succeeded or changed error: %v", err)
-			}
-			if err := unix.Close(lateKQ); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := readIdentity(c.pid); err != nil {
-				t.Fatalf("raced zombie not identifiable: %v", err)
-			}
-			err = c.wait()
-			var exitErr *exec.ExitError
-			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 29 {
-				t.Fatalf("want 29: %v", err)
-			}
-		}
-	})
+func TestKqueueLateRegistrationOnKnownZombie(t *testing.T) {
+	readyR, readyW := pipe(t)
+	releaseR, releaseW := pipe(t)
+	// startHelper does not return until EV_RECEIPT has acknowledged the first
+	// NOTE_EXIT registration. The blocked child cannot exit before release.
+	c := startHelper(t, "blocked", 0, []*os.File{readyW, releaseR})
+	_ = readyW.Close()
+	_ = releaseR.Close()
+	readByte(t, readyR, 'R')
+	want, err := readIdentity(c.pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := releaseW.Write([]byte{'X'}); err != nil {
+		t.Fatal(err)
+	}
+	_ = releaseW.Close()
+	if _, err := waitExit(c.kq, c.pid, exitTimeout); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := readIdentity(c.pid); err != nil || got != want {
+		t.Fatalf("first NOTE_EXIT did not leave exact zombie: got=%+v err=%v", got, err)
+	}
+
+	lateKQ, err := unix.Kqueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = registerExit(lateKQ, c.pid)
+	var receiptErr receiptError
+	if !errors.As(err, &receiptErr) || receiptErr.Errno != unix.ESRCH {
+		_ = unix.Close(lateKQ)
+		t.Fatalf("known-zombie registration unexpectedly succeeded or changed error: %v", err)
+	}
+	if err := unix.Close(lateKQ); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.wait(); err != nil {
+		t.Fatal(err)
+	}
+	_, infoErr := readIdentity(c.pid)
+	pzero := unix.Kill(c.pid, 0)
+	gzero := unix.Kill(-c.pgid, 0)
+	if !errors.Is(pzero, unix.ESRCH) || !errors.Is(gzero, unix.ESRCH) {
+		t.Fatalf("reaped child was not absent: info=%v pid0=%v group0=%v", infoErr, pzero, gzero)
+	}
+	if got := classify(observations{Stored: want, ProcessInfoError: infoErr, ProcessZeroError: pzero, GroupZeroError: gzero}); got != absent {
+		t.Fatalf("post-Wait classification=%s info=%v pid0=%v group0=%v", got, infoErr, pzero, gzero)
+	}
 }
 
 func TestLeaderExitBeforeDescendantAndGroupKill(t *testing.T) {
