@@ -97,21 +97,42 @@ func (d *database) verifyInitialConnections() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Duration(busyMilliseconds)*time.Millisecond)
 	defer cancel()
 
-	for name, pool := range map[string]*sql.DB{"writer": d.writer, "reader": d.readers} {
-		connection, err := pool.Conn(ctx)
-		if err != nil {
-			return fmt.Errorf("checkout %s connection: %w", name, err)
-		}
-		err = verifyConnection(ctx, connection)
-		closeErr := connection.Close()
-		if err != nil {
-			return fmt.Errorf("verify %s connection: %w", name, err)
-		}
-		if closeErr != nil {
-			return fmt.Errorf("return %s connection: %w", name, closeErr)
-		}
+	writer, err := d.writerConnection(ctx)
+	if err != nil {
+		return err
+	}
+	if err := writer.Close(); err != nil {
+		return fmt.Errorf("return writer connection: %w", err)
+	}
+
+	reader, err := d.readerConnection(ctx)
+	if err != nil {
+		return err
+	}
+	if err := reader.Close(); err != nil {
+		return fmt.Errorf("return reader connection: %w", err)
 	}
 	return nil
+}
+
+func (d *database) writerConnection(ctx context.Context) (*sql.Conn, error) {
+	return verifiedConnection(ctx, d.writer, "writer")
+}
+
+func (d *database) readerConnection(ctx context.Context) (*sql.Conn, error) {
+	return verifiedConnection(ctx, d.readers, "reader")
+}
+
+func verifiedConnection(ctx context.Context, pool *sql.DB, kind string) (*sql.Conn, error) {
+	connection, err := pool.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("checkout %s connection: %w", kind, err)
+	}
+	if err := verifyConnection(ctx, connection); err != nil {
+		discardConnection(connection)
+		return nil, fmt.Errorf("verify %s connection: %w", kind, err)
+	}
+	return connection, nil
 }
 
 func verifyConnection(ctx context.Context, connection *sql.Conn) error {
@@ -148,9 +169,9 @@ func (d *database) close() error {
 // immediate is deliberately unexported. Domain methods must own this pattern;
 // callers never receive a generic transaction object or callback API.
 func (d *database) immediate(ctx context.Context, body func(*sql.Conn) error) (err error) {
-	connection, err := d.writer.Conn(ctx)
+	connection, err := d.writerConnection(ctx)
 	if err != nil {
-		return fmt.Errorf("checkout writer connection: %w", err)
+		return err
 	}
 	closed := false
 	closeConnection := func() {
@@ -162,6 +183,11 @@ func (d *database) immediate(ctx context.Context, body func(*sql.Conn) error) (e
 	defer closeConnection()
 
 	if _, err := connection.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		if cancellation := ctx.Err(); cancellation != nil {
+			discardConnection(connection)
+			closed = true
+			return &outcomeUnknownError{cause: errors.Join(cancellation, fmt.Errorf("begin immediate: %w", err))}
+		}
 		if errors.Is(err, sqlite3.BUSY) || errors.Is(err, sqlite3.LOCKED) {
 			return fmt.Errorf("%w: %v", errBusy, err)
 		}

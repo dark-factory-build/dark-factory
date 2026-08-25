@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"io"
@@ -13,18 +14,28 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
+
+	sqliteDriver "github.com/ncruces/go-sqlite3/driver"
 )
 
 const (
-	applicationID = 0x4446474f
-	userVersion   = 1
-	helperEnv     = "DARK_FACTORY_SQLITE_CONTRACT_HELPER"
+	applicationID       = 0x4446474f
+	userVersion         = 1
+	expectedBusyTimeout = 5000
+	helperEnv           = "DARK_FACTORY_SQLITE_CONTRACT_HELPER"
+	helperWaitTimeout   = 12 * time.Second
 )
 
-var errGuardedWrite = errors.New("guarded write changed an unexpected row count")
+var (
+	errFaultResponse = errors.New("injected sqlite response failure")
+	errGuardedWrite  = errors.New("guarded write changed an unexpected row count")
+)
 
 func TestSQLiteContract(t *testing.T) {
 	t.Helper()
@@ -33,11 +44,15 @@ func TestSQLiteContract(t *testing.T) {
 		run  func(*testing.T)
 	}{
 		{name: "every physical connection", run: testEveryPhysicalConnection},
+		{name: "unsafe pooled connection rejected", run: testUnsafePooledConnectionRejected},
 		{name: "WAL reopen and pinned reader", run: testWALReopenAndPinnedReader},
 		{name: "immediate writer busy bound", run: testImmediateWriterBusyBound},
+		{name: "busy cancellation", run: testBusyCancellation},
 		{name: "guarded rows and atomic footprint", run: testGuardedRowsAndAtomicFootprint},
 		{name: "rollback and discard", run: testRollbackAndDiscard},
+		{name: "ambiguous begin and commit responses", run: testAmbiguousResponses},
 		{name: "cancellation cleanup", run: testCancellationCleanup},
+		{name: "helper start failure cleanup", run: testHelperStartFailureCleanup},
 		{name: "independent process immediate exclusion", run: testIndependentProcessImmediateExclusion},
 		{name: "independent process admission", run: testIndependentProcessAdmission},
 		{name: "SIGKILL before commit", run: testSIGKILLBeforeCommit},
@@ -78,6 +93,7 @@ func testEveryPhysicalConnection(t *testing.T) {
 		if err := verifyConnection(ctx, connection); err != nil {
 			t.Fatalf("physical connection %d: %v", index, err)
 		}
+		assertExactConnectionPolicy(t, connection)
 		if _, err := connection.ExecContext(ctx, "INSERT INTO fixture_child(id, parent_id) VALUES(?, 999)", index+1); err == nil {
 			t.Fatalf("physical connection %d did not enforce its foreign key", index)
 		}
@@ -95,6 +111,7 @@ func testEveryPhysicalConnection(t *testing.T) {
 	if err := verifyConnection(ctx, replacement); err != nil {
 		t.Fatalf("replacement connection: %v", err)
 	}
+	assertExactConnectionPolicy(t, replacement)
 	if _, err := replacement.ExecContext(ctx, "INSERT INTO fixture_child(id, parent_id) VALUES(99, 999)"); err == nil {
 		t.Fatal("replacement connection did not enforce its foreign key")
 	}
@@ -118,8 +135,89 @@ func testEveryPhysicalConnection(t *testing.T) {
 	if err := verifyConnection(ctx, writerReplacement); err != nil {
 		t.Fatalf("replacement writer connection: %v", err)
 	}
+	assertExactConnectionPolicy(t, writerReplacement)
 	if _, err := writerReplacement.ExecContext(ctx, "INSERT INTO fixture_child(id, parent_id) VALUES(100, 999)"); err == nil {
 		t.Fatal("replacement writer connection did not enforce its foreign key")
+	}
+}
+
+func assertExactConnectionPolicy(t *testing.T, connection *sql.Conn) {
+	t.Helper()
+	var busy int
+	if err := connection.QueryRowContext(context.Background(), "PRAGMA busy_timeout").Scan(&busy); err != nil {
+		t.Fatal(err)
+	}
+	if busy != expectedBusyTimeout {
+		t.Fatalf("busy_timeout = %d, want literal 5000", busy)
+	}
+}
+
+func testUnsafePooledConnectionRejected(t *testing.T) {
+	database, _ := newFixture(t)
+	ctx := context.Background()
+
+	poisonedWriter, err := database.writer.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := poisonedWriter.ExecContext(ctx, "PRAGMA foreign_keys=OFF"); err != nil {
+		t.Fatal(err)
+	}
+	if err := poisonedWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	bodyEntered := false
+	err = database.immediate(ctx, func(*sql.Conn) error {
+		bodyEntered = true
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "unsafe sqlite connection configuration") {
+		t.Fatalf("poisoned writer error = %v, want fail-closed verification", err)
+	}
+	if bodyEntered {
+		t.Fatal("writer body ran before poisoned connection was rejected")
+	}
+	if got := database.writer.Stats().OpenConnections; got != 0 {
+		t.Fatalf("poisoned writer remained pooled: %d connections", got)
+	}
+	if err := database.immediate(ctx, func(*sql.Conn) error { return nil }); err != nil {
+		t.Fatalf("verified replacement writer failed: %v", err)
+	}
+
+	poisonedReader, err := database.readers.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := poisonedReader.ExecContext(ctx, "PRAGMA foreign_keys=OFF"); err != nil {
+		t.Fatal(err)
+	}
+	if err := poisonedReader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	queryEntered := false
+	reader, err := database.readerConnection(ctx)
+	if err == nil {
+		queryEntered = true
+		_ = reader.QueryRowContext(ctx, "SELECT 1").Scan(new(int))
+		_ = reader.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "unsafe sqlite connection configuration") {
+		t.Fatalf("poisoned reader error = %v, want fail-closed verification", err)
+	}
+	if queryEntered {
+		t.Fatal("reader query ran before poisoned connection was rejected")
+	}
+	if got := database.readers.Stats().OpenConnections; got != 0 {
+		t.Fatalf("poisoned reader remained pooled: %d connections", got)
+	}
+	replacement, err := database.readerConnection(ctx)
+	if err != nil {
+		t.Fatalf("verified replacement reader failed: %v", err)
+	}
+	defer replacement.Close()
+	var one int
+	if err := replacement.QueryRowContext(ctx, "SELECT 1").Scan(&one); err != nil || one != 1 {
+		t.Fatalf("replacement reader query = (%d, %v), want (1, nil)", one, err)
 	}
 }
 
@@ -127,7 +225,7 @@ func testWALReopenAndPinnedReader(t *testing.T) {
 	database, path := newFixture(t)
 	ctx := context.Background()
 
-	reader, err := database.readers.Conn(ctx)
+	reader, err := database.readerConnection(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +243,7 @@ func testWALReopenAndPinnedReader(t *testing.T) {
 		if _, err := writer.ExecContext(ctx, "INSERT INTO fixture_events(entity_id) VALUES('run-wal')"); err != nil {
 			return err
 		}
-		freshReader, err := database.readers.Conn(ctx)
+		freshReader, err := database.readerConnection(ctx)
 		if err != nil {
 			return err
 		}
@@ -159,7 +257,7 @@ func testWALReopenAndPinnedReader(t *testing.T) {
 	if _, err := reader.ExecContext(ctx, "ROLLBACK"); err != nil {
 		t.Fatal(err)
 	}
-	assertSnapshot(t, database.readers, "running", 1)
+	assertDatabaseSnapshot(t, database, "running", 1)
 
 	if err := database.close(); err != nil {
 		t.Fatal(err)
@@ -184,7 +282,7 @@ func testWALReopenAndPinnedReader(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reopened.close()
-	assertSnapshot(t, reopened.readers, "running", 1)
+	assertDatabaseSnapshot(t, reopened, "running", 1)
 	if err := quickCheck(reopened); err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +297,7 @@ func testImmediateWriterBusyBound(t *testing.T) {
 	defer second.close()
 
 	ctx := context.Background()
-	owner, err := first.writer.Conn(ctx)
+	owner, err := first.writerConnection(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +313,7 @@ func testImmediateWriterBusyBound(t *testing.T) {
 	if !errors.Is(err, errBusy) {
 		t.Fatalf("second immediate writer error = %v, want typed busy", err)
 	}
-	if elapsed < 4*time.Second || elapsed > 8*time.Second {
+	if elapsed < 4500*time.Millisecond || elapsed > 5750*time.Millisecond {
 		t.Fatalf("busy wait = %s, want explicit bounded wait around 5s", elapsed)
 	}
 
@@ -225,6 +323,71 @@ func testImmediateWriterBusyBound(t *testing.T) {
 	if err := second.immediate(ctx, func(*sql.Conn) error { return nil }); err != nil {
 		t.Fatalf("second writer did not succeed after release: %v", err)
 	}
+}
+
+func testBusyCancellation(t *testing.T) {
+	ownerDatabase, path := newFixture(t)
+	owner, err := ownerDatabase.writerConnection(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+	if _, err := owner.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	defer owner.ExecContext(context.Background(), "ROLLBACK")
+
+	plan := &faultPlan{beginEntered: make(chan struct{})}
+	contender := openFaultDatabase(t, path, plan)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	bodyEntered := false
+	done := make(chan error, 1)
+	started := time.Now()
+	go func() {
+		done <- contender.immediate(ctx, func(connection *sql.Conn) error {
+			bodyEntered = true
+			return insertFootprint(ctx, connection, "busy-cancel")
+		})
+	}()
+
+	select {
+	case <-plan.beginEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("contender never reached BEGIN IMMEDIATE")
+	}
+	select {
+	case contenderErr := <-done:
+		t.Fatalf("contender returned before cancellation instead of blocking: %v", contenderErr)
+	case <-time.After(50 * time.Millisecond):
+	}
+	cancel()
+	var contenderErr error
+	select {
+	case contenderErr = <-done:
+	case <-time.After(time.Second):
+		t.Fatal("busy BEGIN IMMEDIATE ignored cancellation")
+	}
+	if !errors.Is(contenderErr, context.Canceled) {
+		t.Fatalf("busy cancellation error = %v, want context.Canceled", contenderErr)
+	}
+	if bodyEntered {
+		t.Fatal("contending body ran while another immediate writer held the lock")
+	}
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		t.Fatalf("busy cancellation took %s, want under 1s", elapsed)
+	}
+	assertFootprint(t, ownerDatabase, "busy-cancel", 0, 0)
+
+	if _, err := owner.ExecContext(context.Background(), "ROLLBACK"); err != nil {
+		t.Fatal(err)
+	}
+	if err := contender.immediate(context.Background(), func(connection *sql.Conn) error {
+		return insertFootprint(context.Background(), connection, "busy-cancel-reuse")
+	}); err != nil {
+		t.Fatalf("writer replacement after busy cancellation failed: %v", err)
+	}
+	assertFootprint(t, contender, "busy-cancel-reuse", 1, 1)
 }
 
 func testGuardedRowsAndAtomicFootprint(t *testing.T) {
@@ -364,7 +527,92 @@ func testRollbackAndDiscard(t *testing.T) {
 	assertFootprint(t, database, "replacement", 1, 1)
 }
 
+func testAmbiguousResponses(t *testing.T) {
+	t.Run("commit forwarded before response failure", func(t *testing.T) {
+		testAmbiguousCommit(t, faultCommitAfterApply, "commit-after", 1)
+	})
+	t.Run("commit rejected before apply", func(t *testing.T) {
+		testAmbiguousCommit(t, faultCommitBeforeApply, "commit-before", 0)
+	})
+	t.Run("begin forwarded before response failure", func(t *testing.T) {
+		path := initializedFixturePath(t)
+		plan := &faultPlan{}
+		database := openFaultDatabase(t, path, plan)
+		plan.arm(faultBeginAfterApply)
+		bodyInvocations := 0
+		err := database.immediate(context.Background(), func(connection *sql.Conn) error {
+			bodyInvocations++
+			return insertFootprint(context.Background(), connection, "begin-after")
+		})
+		requireOutcomeUnknown(t, err)
+		if bodyInvocations != 0 {
+			t.Fatalf("body invocations after ambiguous begin = %d, want 0", bodyInvocations)
+		}
+		assertFaultedConnectionEvicted(t, database, plan)
+		if err := database.close(); err != nil {
+			t.Fatal(err)
+		}
+		reopened := reopenFixture(t, path)
+		defer reopened.close()
+		assertFootprint(t, reopened, "begin-after", 0, 0)
+	})
+}
+
+func testAmbiguousCommit(t *testing.T, fault faultKind, id string, wantFootprint int) {
+	t.Helper()
+	path := initializedFixturePath(t)
+	plan := &faultPlan{}
+	database := openFaultDatabase(t, path, plan)
+	plan.arm(fault)
+	bodyInvocations := 0
+	err := database.immediate(context.Background(), func(connection *sql.Conn) error {
+		bodyInvocations++
+		return insertFootprint(context.Background(), connection, id)
+	})
+	requireOutcomeUnknown(t, err)
+	if bodyInvocations != 1 {
+		t.Fatalf("body invocations after ambiguous commit = %d, want exactly 1", bodyInvocations)
+	}
+	assertFaultedConnectionEvicted(t, database, plan)
+	if err := database.close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened := reopenFixture(t, path)
+	defer reopened.close()
+	assertFootprint(t, reopened, id, wantFootprint, wantFootprint)
+	if got := footprintCount(t, reopened, id); got != wantFootprint {
+		t.Fatalf("domain reconciliation for %q = %d, want %d without replay", id, got, wantFootprint)
+	}
+}
+
+func requireOutcomeUnknown(t *testing.T, err error) {
+	t.Helper()
+	var unknown *outcomeUnknownError
+	if !errors.As(err, &unknown) || !errors.Is(err, errFaultResponse) {
+		t.Fatalf("ambiguous response error = %v, want outcomeUnknownError preserving injected failure", err)
+	}
+}
+
+func assertFaultedConnectionEvicted(t *testing.T, database *database, plan *faultPlan) {
+	t.Helper()
+	faultedID, closed := plan.faultedAndClosed()
+	if faultedID == 0 || !closed {
+		t.Fatalf("faulted connection = %d, closed = %v; want discarded physical connection", faultedID, closed)
+	}
+	replacement, err := database.writerConnection(context.Background())
+	if err != nil {
+		t.Fatalf("verified writer replacement: %v", err)
+	}
+	defer replacement.Close()
+	replacementID := faultConnectionID(t, replacement)
+	if replacementID == faultedID {
+		t.Fatalf("ambiguous connection %d was reused", faultedID)
+	}
+}
+
 func testCancellationCleanup(t *testing.T) {
+	baseline := runtime.NumGoroutine()
 	path := filepath.Join(t.TempDir(), "cancel.sqlite3")
 	database, err := openDatabase(path)
 	if err != nil {
@@ -373,7 +621,13 @@ func testCancellationCleanup(t *testing.T) {
 	if err := initializeFixture(database); err != nil {
 		t.Fatal(err)
 	}
-	baseline := runtime.NumGoroutine()
+	openDescriptors, err := fileDescriptorsFor(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(openDescriptors) == 0 {
+		t.Fatal("file-identity descriptor census did not detect the known-open database")
+	}
 
 	for index := range 32 {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -394,7 +648,11 @@ func testCancellationCleanup(t *testing.T) {
 	if err := database.close(); err != nil {
 		t.Fatal(err)
 	}
-	if targets := fileDescriptorsFor(path); len(targets) != 0 {
+	targets, err := fileDescriptorsFor(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 0 {
 		t.Fatalf("database descriptors survived close: %v", targets)
 	}
 	deadline := time.Now().Add(2 * time.Second)
@@ -403,6 +661,21 @@ func testCancellationCleanup(t *testing.T) {
 	}
 	if got := runtime.NumGoroutine(); got > baseline {
 		t.Fatalf("goroutines after scoped cancellations = %d, baseline %d", got, baseline)
+	}
+}
+
+func testHelperStartFailureCleanup(t *testing.T) {
+	_, files, err := launchGatedHelper(t, filepath.Join(t.TempDir(), "missing-helper"), "admit", "unused", "unused")
+	if err == nil {
+		t.Fatal("missing helper executable unexpectedly started")
+	}
+	if len(files) != 6 {
+		t.Fatalf("helper pipe ends = %d, want 6", len(files))
+	}
+	for index, file := range files {
+		if _, statErr := file.Stat(); statErr == nil {
+			t.Fatalf("helper pipe end %d remained open after Start failure", index)
+		}
 	}
 }
 
@@ -420,7 +693,7 @@ func testIndependentProcessAdmission(t *testing.T) {
 	if err := second.wait(t); err != nil {
 		t.Fatalf("second helper: %v\n%s", err, second.stderr.String())
 	}
-	results := []string{first.outputWord(t), second.outputWord(t)}
+	results := []string{first.result(t), second.result(t)}
 	sort.Strings(results)
 	if strings.Join(results, ",") != "lost,won" {
 		t.Fatalf("independent helper results = %v, want one loss and one win", results)
@@ -442,8 +715,10 @@ func testIndependentProcessImmediateExclusion(t *testing.T) {
 	owner.ready(t)
 	contender.send(t, false)
 	contender.expectExitWithoutReady(t)
-	if err := contender.wait(t); err == nil || !strings.Contains(contender.stderr.String(), errBusy.Error()) {
-		t.Fatalf("contender = %v, stderr %q; want typed busy before body", err, contender.stderr.String())
+	contenderErr := contender.wait(t)
+	requireExitCode(t, contenderErr, 75)
+	if !strings.Contains(contender.stderr.String(), errBusy.Error()) {
+		t.Fatalf("contender = %v, stderr %q; want typed busy before body", contenderErr, contender.stderr.String())
 	}
 
 	owner.send(t, true)
@@ -459,9 +734,7 @@ func testSIGKILLBeforeCommit(t *testing.T) {
 	if err := helper.command.Process.Kill(); err != nil {
 		t.Fatal(err)
 	}
-	if err := helper.wait(t); err == nil {
-		t.Fatal("SIGKILLed helper unexpectedly succeeded")
-	}
+	requireSIGKILL(t, helper.wait(t))
 
 	database := reopenFixture(t, path)
 	defer database.close()
@@ -478,9 +751,7 @@ func testPostCommitAcknowledgement(t *testing.T) {
 	if err := helper.command.Process.Kill(); err != nil {
 		t.Fatal(err)
 	}
-	if err := helper.wait(t); err == nil {
-		t.Fatal("SIGKILLed helper unexpectedly succeeded")
-	}
+	requireSIGKILL(t, helper.wait(t))
 
 	database := reopenFixture(t, path)
 	defer database.close()
@@ -494,9 +765,7 @@ func testPostCommitAcknowledgement(t *testing.T) {
 func testLostReplyReconciliation(t *testing.T) {
 	path := initializedFixturePath(t)
 	helper := startHelper(t, "lost-reply", path, "run-lost", nil)
-	if err := helper.wait(t); err == nil {
-		t.Fatal("lost-reply helper unexpectedly returned success")
-	}
+	requireExitCode(t, helper.wait(t), 86)
 	if helper.stdout.Len() != 0 {
 		t.Fatalf("lost-reply helper emitted a reply: %q", helper.stdout.String())
 	}
@@ -509,6 +778,40 @@ func testLostReplyReconciliation(t *testing.T) {
 		t.Fatalf("reconciled replay = (%v, %v), want no second transition", won, err)
 	}
 	assertQueueAndTotalFootprint(t, database, "running", 1, 1)
+}
+
+func requireSIGKILL(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("SIGKILLed helper unexpectedly succeeded")
+	}
+	var timeout *helperTimeoutError
+	if errors.As(err, &timeout) {
+		t.Fatalf("expected explicit SIGKILL, got helper timeout: %v", err)
+	}
+	var exitError *exec.ExitError
+	if !errors.As(err, &exitError) {
+		t.Fatalf("helper termination error = %T %v, want *exec.ExitError", err, err)
+	}
+	status, ok := exitError.Sys().(syscall.WaitStatus)
+	if !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
+		t.Fatalf("helper wait status = %#v, want signaled by SIGKILL", exitError.Sys())
+	}
+}
+
+func requireExitCode(t *testing.T, err error, want int) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("helper unexpectedly succeeded, want exit %d", want)
+	}
+	var timeout *helperTimeoutError
+	if errors.As(err, &timeout) {
+		t.Fatalf("expected helper exit %d, got timeout: %v", want, err)
+	}
+	var exitError *exec.ExitError
+	if !errors.As(err, &exitError) || exitError.ExitCode() != want {
+		t.Fatalf("helper exit = %v, want code %d", err, want)
+	}
 }
 
 func newFixture(t *testing.T) (*database, string) {
@@ -633,14 +936,23 @@ func assertSnapshot(t *testing.T, query snapshotQuerier, wantStatus string, want
 	}
 }
 
+func assertDatabaseSnapshot(t *testing.T, database *database, wantStatus string, wantEvents int) {
+	t.Helper()
+	connection := mustReaderConnection(t, database)
+	defer connection.Close()
+	assertSnapshot(t, connection, wantStatus, wantEvents)
+}
+
 func assertFootprint(t *testing.T, database *database, id string, wantState, wantEvents int) {
 	t.Helper()
 	ctx := context.Background()
+	connection := mustReaderConnection(t, database)
+	defer connection.Close()
 	var state, events int
-	if err := database.readers.QueryRowContext(ctx, "SELECT COUNT(*) FROM fixture_transitions WHERE id = ?", id).Scan(&state); err != nil {
+	if err := connection.QueryRowContext(ctx, "SELECT COUNT(*) FROM fixture_transitions WHERE id = ?", id).Scan(&state); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.readers.QueryRowContext(ctx, "SELECT COUNT(*) FROM fixture_events WHERE entity_id = ?", id).Scan(&events); err != nil {
+	if err := connection.QueryRowContext(ctx, "SELECT COUNT(*) FROM fixture_events WHERE entity_id = ?", id).Scan(&events); err != nil {
 		t.Fatal(err)
 	}
 	if state != wantState || events != wantEvents {
@@ -651,15 +963,17 @@ func assertFootprint(t *testing.T, database *database, id string, wantState, wan
 func assertQueueAndTotalFootprint(t *testing.T, database *database, wantStatus string, wantState, wantEvents int) {
 	t.Helper()
 	ctx := context.Background()
+	connection := mustReaderConnection(t, database)
+	defer connection.Close()
 	var status string
 	var state, events int
-	if err := database.readers.QueryRowContext(ctx, "SELECT status FROM fixture_queue WHERE id = 'task-1'").Scan(&status); err != nil {
+	if err := connection.QueryRowContext(ctx, "SELECT status FROM fixture_queue WHERE id = 'task-1'").Scan(&status); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.readers.QueryRowContext(ctx, "SELECT COUNT(*) FROM fixture_transitions").Scan(&state); err != nil {
+	if err := connection.QueryRowContext(ctx, "SELECT COUNT(*) FROM fixture_transitions").Scan(&state); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.readers.QueryRowContext(ctx, "SELECT COUNT(*) FROM fixture_events").Scan(&events); err != nil {
+	if err := connection.QueryRowContext(ctx, "SELECT COUNT(*) FROM fixture_events").Scan(&events); err != nil {
 		t.Fatal(err)
 	}
 	if status != wantStatus || state != wantState || events != wantEvents {
@@ -667,9 +981,34 @@ func assertQueueAndTotalFootprint(t *testing.T, database *database, wantStatus s
 	}
 }
 
+func footprintCount(t *testing.T, database *database, id string) int {
+	t.Helper()
+	connection := mustReaderConnection(t, database)
+	defer connection.Close()
+	var count int
+	if err := connection.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM fixture_transitions WHERE id = ?", id).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count
+}
+
+func mustReaderConnection(t *testing.T, database *database) *sql.Conn {
+	t.Helper()
+	connection, err := database.readerConnection(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return connection
+}
+
 func quickCheck(database *database) error {
+	connection, err := database.readerConnection(context.Background())
+	if err != nil {
+		return err
+	}
+	defer connection.Close()
 	var result string
-	if err := database.readers.QueryRowContext(context.Background(), "PRAGMA quick_check").Scan(&result); err != nil {
+	if err := connection.QueryRowContext(context.Background(), "PRAGMA quick_check").Scan(&result); err != nil {
 		return err
 	}
 	if result != "ok" {
@@ -678,23 +1017,186 @@ func quickCheck(database *database) error {
 	return nil
 }
 
-func fileDescriptorsFor(path string) []string {
+func fileDescriptorsFor(path string) ([]string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("stat database for descriptor census: %w", err)
+	}
+	want, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return nil, errors.New("database stat has no syscall identity")
+	}
 	fdRoot := "/dev/fd"
 	if runtime.GOOS == "linux" {
 		fdRoot = "/proc/self/fd"
 	}
 	entries, err := os.ReadDir(fdRoot)
 	if err != nil {
-		return []string{"cannot inspect " + fdRoot + ": " + err.Error()}
+		return nil, fmt.Errorf("inspect %s: %w", fdRoot, err)
 	}
 	var matches []string
 	for _, entry := range entries {
-		target, err := os.Readlink(filepath.Join(fdRoot, entry.Name()))
-		if err == nil && strings.Contains(target, path) {
-			matches = append(matches, entry.Name()+"="+target)
+		fd, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		var got syscall.Stat_t
+		if err := syscall.Fstat(fd, &got); err == nil && got.Dev == want.Dev && got.Ino == want.Ino {
+			matches = append(matches, entry.Name())
 		}
 	}
-	return matches
+	sort.Strings(matches)
+	return matches, nil
+}
+
+type faultKind int
+
+const (
+	faultNone faultKind = iota
+	faultBeginAfterApply
+	faultCommitBeforeApply
+	faultCommitAfterApply
+)
+
+type faultPlan struct {
+	mu           sync.Mutex
+	fault        faultKind
+	nextID       int
+	faultedID    int
+	closed       map[int]bool
+	beginEntered chan struct{}
+	beginOnce    sync.Once
+}
+
+func (p *faultPlan) arm(fault faultKind) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.fault = fault
+}
+
+func (p *faultPlan) opened() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.nextID++
+	if p.closed == nil {
+		p.closed = make(map[int]bool)
+	}
+	return p.nextID
+}
+
+func (p *faultPlan) closedConnection(id int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.closed[id] = true
+}
+
+func (p *faultPlan) intercept(id int, query string) faultKind {
+	if query == "BEGIN IMMEDIATE" && p.beginEntered != nil {
+		p.beginOnce.Do(func() { close(p.beginEntered) })
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	match := (query == "BEGIN IMMEDIATE" && p.fault == faultBeginAfterApply) ||
+		(query == "COMMIT" && (p.fault == faultCommitBeforeApply || p.fault == faultCommitAfterApply))
+	if !match {
+		return faultNone
+	}
+	fault := p.fault
+	p.fault = faultNone
+	p.faultedID = id
+	return fault
+}
+
+func (p *faultPlan) faultedAndClosed() (int, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.faultedID, p.closed[p.faultedID]
+}
+
+type faultConnector struct {
+	driver.Connector
+	plan *faultPlan
+}
+
+func (c *faultConnector) Connect(ctx context.Context) (driver.Conn, error) {
+	connection, err := c.Connector.Connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &faultConnection{Conn: connection, id: c.plan.opened(), plan: c.plan}, nil
+}
+
+type faultConnection struct {
+	driver.Conn
+	id   int
+	plan *faultPlan
+}
+
+func (c *faultConnection) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	execer, ok := c.Conn.(driver.ExecerContext)
+	if !ok {
+		return nil, driver.ErrSkip
+	}
+	fault := c.plan.intercept(c.id, query)
+	if fault == faultCommitBeforeApply {
+		return nil, errFaultResponse
+	}
+	result, err := execer.ExecContext(ctx, query, args)
+	if err != nil {
+		return result, err
+	}
+	if fault == faultBeginAfterApply || fault == faultCommitAfterApply {
+		return result, errFaultResponse
+	}
+	return result, nil
+}
+
+func (c *faultConnection) Close() error {
+	c.plan.closedConnection(c.id)
+	return c.Conn.Close()
+}
+
+func openFaultDatabase(t *testing.T, path string, plan *faultPlan) *database {
+	t.Helper()
+	openPool := func(limit int) *sql.DB {
+		base, err := (&sqliteDriver.SQLite{}).OpenConnector(dataSource(path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		pool := sql.OpenDB(&faultConnector{Connector: base, plan: plan})
+		pool.SetMaxOpenConns(limit)
+		pool.SetMaxIdleConns(limit)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Duration(expectedBusyTimeout)*time.Millisecond)
+		defer cancel()
+		if err := pool.PingContext(ctx); err != nil {
+			_ = pool.Close()
+			t.Fatal(err)
+		}
+		return pool
+	}
+	database := &database{writer: openPool(1), readers: openPool(maxReaders)}
+	if err := database.verifyInitialConnections(); err != nil {
+		_ = database.close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.close() })
+	return database
+}
+
+func faultConnectionID(t *testing.T, connection *sql.Conn) int {
+	t.Helper()
+	var id int
+	if err := connection.Raw(func(raw any) error {
+		faulted, ok := raw.(*faultConnection)
+		if !ok {
+			return fmt.Errorf("driver connection type = %T, want *faultConnection", raw)
+		}
+		id = faulted.id
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return id
 }
 
 type ownedHelper struct {
@@ -703,33 +1205,68 @@ type ownedHelper struct {
 	stderr  bytes.Buffer
 	readyR  *os.File
 	startW  *os.File
+	resultR *os.File
 	waited  bool
 }
 
 func startGatedHelper(t *testing.T, mode, path, runID string) *ownedHelper {
 	t.Helper()
-	readyR, readyW, err := os.Pipe()
+	helper, _, err := launchGatedHelper(t, os.Args[0], mode, path, runID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	return helper
+}
+
+func launchGatedHelper(t *testing.T, executable, mode, path, runID string) (*ownedHelper, []*os.File, error) {
+	t.Helper()
+	readyR, readyW, err := os.Pipe()
+	if err != nil {
+		return nil, nil, err
 	}
 	startR, startW, err := os.Pipe()
 	if err != nil {
 		_ = readyR.Close()
 		_ = readyW.Close()
-		t.Fatal(err)
+		return nil, []*os.File{readyR, readyW}, err
 	}
-	helper := startHelper(t, mode, path, runID, []*os.File{readyW, startR})
+	resultR, resultW, err := os.Pipe()
+	if err != nil {
+		for _, file := range []*os.File{readyR, readyW, startR, startW} {
+			_ = file.Close()
+		}
+		return nil, []*os.File{readyR, readyW, startR, startW}, err
+	}
+	files := []*os.File{readyR, readyW, startR, startW, resultR, resultW}
+	helper, err := launchHelper(t, executable, mode, path, runID, []*os.File{readyW, startR, resultW})
+	for _, childFile := range []*os.File{readyW, startR, resultW} {
+		_ = childFile.Close()
+	}
+	if err != nil {
+		for _, parentFile := range []*os.File{readyR, startW, resultR} {
+			_ = parentFile.Close()
+		}
+		return helper, files, err
+	}
 	helper.readyR = readyR
 	helper.startW = startW
-	_ = readyW.Close()
-	_ = startR.Close()
-	return helper
+	helper.resultR = resultR
+	return helper, files, nil
 }
 
 func startHelper(t *testing.T, mode, path, runID string, extraFiles []*os.File) *ownedHelper {
 	t.Helper()
+	helper, err := launchHelper(t, os.Args[0], mode, path, runID, extraFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return helper
+}
+
+func launchHelper(t *testing.T, executable, mode, path, runID string, extraFiles []*os.File) (*ownedHelper, error) {
+	t.Helper()
 	helper := &ownedHelper{}
-	helper.command = exec.Command(os.Args[0], "-test.run=^TestSQLiteContractHelper$")
+	helper.command = exec.Command(executable, "-test.run=^TestSQLiteContractHelper$")
 	helper.command.Env = []string{
 		helperEnv + "=1",
 		"SQLITE_CONTRACT_MODE=" + mode,
@@ -743,7 +1280,10 @@ func startHelper(t *testing.T, mode, path, runID string, extraFiles []*os.File) 
 	helper.command.Stdout = &helper.stdout
 	helper.command.Stderr = &helper.stderr
 	if err := helper.command.Start(); err != nil {
-		t.Fatal(err)
+		for _, file := range extraFiles {
+			_ = file.Close()
+		}
+		return helper, err
 	}
 	t.Cleanup(func() {
 		if !helper.waited {
@@ -756,8 +1296,11 @@ func startHelper(t *testing.T, mode, path, runID string, extraFiles []*os.File) 
 		if helper.startW != nil {
 			_ = helper.startW.Close()
 		}
+		if helper.resultR != nil {
+			_ = helper.resultR.Close()
+		}
 	})
-	return helper
+	return helper, nil
 }
 
 func (h *ownedHelper) ready(t *testing.T) {
@@ -810,21 +1353,51 @@ func (h *ownedHelper) wait(t *testing.T) error {
 	case err := <-done:
 		h.waited = true
 		return err
-	case <-time.After(20 * time.Second):
+	case <-time.After(helperWaitTimeout):
 		_ = h.command.Process.Kill()
 		err := <-done
 		h.waited = true
-		return fmt.Errorf("helper timed out: %w", err)
+		return &helperTimeoutError{cause: err}
 	}
 }
 
-func (h *ownedHelper) outputWord(t *testing.T) string {
+type helperTimeoutError struct {
+	cause error
+}
+
+func (e *helperTimeoutError) Error() string {
+	return fmt.Sprintf("helper timed out after %s: %v", helperWaitTimeout, e.cause)
+}
+
+func (e *helperTimeoutError) Unwrap() error {
+	return e.cause
+}
+
+func (h *ownedHelper) result(t *testing.T) string {
 	t.Helper()
-	fields := strings.Fields(h.stdout.String())
-	if len(fields) == 0 {
-		t.Fatalf("helper emitted no result\n%s", h.stderr.String())
+	if h.resultR == nil {
+		t.Fatal("helper has no result pipe")
 	}
-	return fields[0]
+	if err := h.resultR.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	frame, err := io.ReadAll(h.resultR)
+	if err != nil {
+		t.Fatalf("read helper result: %v", err)
+	}
+	if err := h.resultR.Close(); err != nil {
+		t.Fatal(err)
+	}
+	h.resultR = nil
+	switch string(frame) {
+	case "result=won\n":
+		return "won"
+	case "result=lost\n":
+		return "lost"
+	default:
+		t.Fatalf("invalid helper result frame %q", frame)
+		return ""
+	}
 }
 
 func TestSQLiteContractHelper(t *testing.T) {
@@ -842,7 +1415,15 @@ func TestSQLiteContractHelper(t *testing.T) {
 
 	switch mode {
 	case "admit":
-		if err := helperSignalAndWait(); err != nil {
+		ready, start, result, err := inheritedHelperPipes()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		defer ready.Close()
+		defer start.Close()
+		defer result.Close()
+		if err := signalAndWait(ready, start); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(2)
 		}
@@ -852,22 +1433,27 @@ func TestSQLiteContractHelper(t *testing.T) {
 			os.Exit(2)
 		}
 		if won {
-			fmt.Println("won")
+			_, err = io.WriteString(result, "result=won\n")
 		} else {
-			fmt.Println("lost")
+			_, err = io.WriteString(result, "result=lost\n")
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
 		}
 		if err := database.close(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(2)
 		}
 	case "hold-immediate":
-		ready, start, err := inheritedHelperPipes()
+		ready, start, result, err := inheritedHelperPipes()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(2)
 		}
 		defer ready.Close()
 		defer start.Close()
+		defer result.Close()
 		if err := signalAndWait(ready, start); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(2)
@@ -884,7 +1470,7 @@ func TestSQLiteContractHelper(t *testing.T) {
 			os.Exit(2)
 		}
 	case "crash-before-commit":
-		connection, err := database.writer.Conn(context.Background())
+		connection, err := database.writerConnection(context.Background())
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(2)
@@ -929,22 +1515,24 @@ func TestSQLiteContractHelper(t *testing.T) {
 }
 
 func helperSignalAndWait() error {
-	ready, start, err := inheritedHelperPipes()
+	ready, start, result, err := inheritedHelperPipes()
 	if err != nil {
 		return err
 	}
 	defer ready.Close()
 	defer start.Close()
+	defer result.Close()
 	return signalAndWait(ready, start)
 }
 
-func inheritedHelperPipes() (*os.File, *os.File, error) {
+func inheritedHelperPipes() (*os.File, *os.File, *os.File, error) {
 	ready := os.NewFile(3, "ready")
 	start := os.NewFile(4, "start")
-	if ready == nil || start == nil {
-		return nil, nil, errors.New("missing inherited helper pipes")
+	result := os.NewFile(5, "result")
+	if ready == nil || start == nil || result == nil {
+		return nil, nil, nil, errors.New("missing inherited helper pipes")
 	}
-	return ready, start, nil
+	return ready, start, result, nil
 }
 
 func signalAndWait(ready, start *os.File) error {
