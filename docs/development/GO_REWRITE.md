@@ -528,8 +528,10 @@ The source wrapper has two internal releases in addition to the outer runner
 activation; these preserve evidence that the selected commit preceded blob
 reads and that the complete Change preceded provider execution:
 
-1. `AdmitNext` commits run, credential, Change lease, runtime claim, initial
-   resource declarations, and invalidations.
+1. `AdmitNext` commits run, credential, Change lease with exact final and
+   staging locators, runtime claim, initial resource declarations, and
+   invalidations. The staging name is caller-generated and durable before any
+   directory exists; the materializer never invents a hidden random locator.
 2. Daemon creates the exact private runtime root and binds its inode.
 3. Daemon creates/binds a private startup lease before outer runner spawn.
 4. Daemon starts an inert parent-bound runner gate and records exact runner
@@ -541,14 +543,18 @@ reads and that the complete Change preceded provider execution:
 6. Daemon binds those identities and releases only source selection. The
    wrapper selects an exact local commit without lazy fetch, computes a
    canonical Git-tree commitment, reports OID/digest/count/bytes, and blocks
-   before reading materialized blobs. Daemon records the bounded selection,
-   then releases materialization. The already registered wrapper process group
-   covers its Git descendants; the wrapper synchronously owns, bounds, and
-   kill-and-waits every direct Git child, and provider exec cannot overlap any
-   of them. No per-command durable resource/gate state is added.
-7. The wrapper builds a bounded `.git`-free staging tree, publishes it without
-   replacement, reports the commitment and exact published path identity, and
-   blocks before provider `exec`. Daemon scans/hashes the plain published tree
+   before reading materialized blobs. Daemon records the bounded selection.
+   The wrapper create-only prepares the already-declared empty staging
+   directory and reports its exact identity; daemon persists that prepared
+   checkpoint before releasing population. The already registered wrapper
+   process group covers its Git descendants; the wrapper synchronously owns,
+   bounds, and kill-and-waits every direct Git child, and provider exec cannot
+   overlap any of them. No per-command durable resource/gate state is added.
+7. The wrapper populates that prepared directory with at most 10,000 total
+   entries, depth 64, 1,023-byte relative paths, 255-byte components, 256 MiB
+   per blob and 1 GiB total blobs. It publishes without replacement, reports
+   the commitment and exact published path identity, and blocks before
+   provider `exec`. Daemon scans/hashes the plain published tree
    without Git and compares digest/count/bytes to the selected commitment,
    records the Change available, atomically moves admitted to running, and only
    then releases provider execution. After a publish-before-ready crash, a
@@ -1246,3 +1252,44 @@ Darwin process-semantics proof on integrated head `47e50e7`:
   or actual runner-parent-death descriptor hygiene. The production runner's
   real process/crash suite must prove both with group-wide independent safety
   cleanup before the kernel go/no-go gate.
+
+Store foundation on integrated head `6272a8d`:
+
+- Added one concrete `internal/kernel` package with immutable typed IDs,
+  digests, revisions, times and closed domain values; exact DFGO application ID
+  and schema fingerprint; eight `STRICT` tables; one verified writer and four
+  verified readers; literal `BEGIN IMMEDIATE`; bounded invalidations; and
+  concrete project/agent/task/factory/snapshot/watch methods. No migration,
+  ORM, repository, operation ledger, event snapshot or public transaction
+  callback exists.
+- `Create` requires an absent absolute 0600 file. `Open` first validates the
+  exact schema, complete durable controls, integrity, foreign keys and
+  invalidation continuity inside one unconfigured pinned read-only snapshot;
+  only a valid database may open configured RW/WAL pools. Empty, partial,
+  foreign, Rust and exact-schema-but-corrupt fixtures are refused without
+  changing file hash/inode/size/mode/mtime or directory entries. Configured
+  validation is independently pinned.
+- Creation replay uses caller-generated identity and immutable intent, not a
+  later daemon timestamp. Snapshot and Watch validate private control fields in
+  the same SQLite snapshot as their bounded safe projection, without exposing
+  roots, bodies, results, model/guidance, credentials, Change paths or process
+  identities. Retention is exactly 4,096 and watch batches are at most 256.
+- The fresh Change row keeps selected commit identity separate from its
+  base-bound commitment, stores `entry_count` (not file count) bounded to
+  10,000 and total blob bytes bounded to 1 GiB. Additional depth/path/component
+  and per-blob bounds belong to the concrete Change validator rather than
+  duplicated schema columns.
+- The first independent review reproduced four blockers outside the package:
+  later-clock replay conflict, WAL mutation before corrupt-home refusal,
+  Snapshot accepting hidden corruption, and mixed-snapshot false corruption
+  during concurrent Open. The repaired exact head passed a 300-open/2,000-write
+  stress three times and under race; the reviewer returned ALLOW.
+- Author and reviewer full/race/vet/module/format/cross-build gates passed. On
+  the unchanged integrated head the orchestrator ran the full CGO-free suite
+  (`kernel 4.293s`, process proof `0.323s`, SQLite proof `10.958s`) and full
+  race suite (`kernel 97.283s`, process proof `6.890s`, SQLite proof `13.773s`),
+  plus vet/module/format/diff and clean process/temp censuses.
+- `internal/sqlitecontract` remains deliberately temporary. It cannot be
+  deleted until its injected begin/commit/rollback ambiguity, crash/reopen and
+  exact busy proofs exercise concrete domain methods and natural reconciliation
+  without replay.
