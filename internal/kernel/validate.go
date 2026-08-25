@@ -99,128 +99,28 @@ func validateChanges(ctx context.Context, connection *sql.Conn) error {
 }
 
 func validateRuns(ctx context.Context, connection *sql.Conn) error {
-	rows, err := connection.QueryContext(ctx, `SELECT id, project_id, agent_id, task_id, task_incarnation_id,
-        admitted_task_work_revision, change_id, role, provider, execution_mode, model, reasoning_effort, phase,
-        proposal_kind, proposal_code, proposal_detail, proposal_result,
-        terminal_kind, terminal_code, terminal_detail, terminal_result,
-        credential_digest, credential_revoked_at_ms,
-        runner_exit_sequence, runner_exit_code, runner_exit_signal, runner_exit_at_ms,
-        revision, admitted_at_ms, running_at_ms, finalizing_at_ms, terminal_at_ms, updated_at_ms
-        FROM runs`)
+	rows, err := connection.QueryContext(ctx, `SELECT `+runColumns+` FROM runs`)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var id, projectID, agentID, taskID, incarnationID, changeID, credentialDigest []byte
-		var role, provider, mode, phase string
-		var model, effort sql.NullString
-		var proposalKind, proposalCode, proposalDetail, proposalResult sql.NullString
-		var terminalKind, terminalCode, terminalDetail, terminalResult sql.NullString
-		var admittedWorkRevision, revision, admittedAt, updatedAt int64
-		var runningAt, finalizingAt, terminalAt, revokedAt sql.NullInt64
-		var exitSequence, exitCode, exitSignal, exitAt sql.NullInt64
-		if err := rows.Scan(
-			&id, &projectID, &agentID, &taskID, &incarnationID, &admittedWorkRevision, &changeID,
-			&role, &provider, &mode, &model, &effort, &phase,
-			&proposalKind, &proposalCode, &proposalDetail, &proposalResult,
-			&terminalKind, &terminalCode, &terminalDetail, &terminalResult,
-			&credentialDigest, &revokedAt, &exitSequence, &exitCode, &exitSignal, &exitAt,
-			&revision, &admittedAt, &runningAt, &finalizingAt, &terminalAt, &updatedAt,
-		); err != nil {
-			return fmt.Errorf("scan run controls: %w", err)
-		}
-		_, roleErr := parseAgentRole(role)
-		_, providerErr := parseProvider(provider)
-		executionMode, modeErr := parseExecutionMode(mode)
-		if !validNonzeroID(id) || !validNonzeroID(projectID) || !validNonzeroID(agentID) || !validNonzeroID(taskID) || !validNonzeroID(incarnationID) || admittedWorkRevision < 1 || roleErr != nil || providerErr != nil || modeErr != nil || model.Valid && (byteLen(model.String) < 1 || byteLen(model.String) > 128) || effort.Valid && (effort.String == "" || !validReasoningEffort(effort.String)) || len(credentialDigest) != DigestBytes || revision < 1 || admittedAt < 0 || updatedAt < admittedAt || provider == ProviderShell.String() && executionMode != ExecutionUnrestricted {
-			return fmt.Errorf("%w: invalid run controls", ErrCorruptState)
-		}
-		if role == RoleWorker.String() && !validNonzeroID(changeID) || role == RoleOrchestrator.String() && changeID != nil {
-			return fmt.Errorf("%w: invalid run change binding", ErrCorruptState)
-		}
-		if runningAt.Valid && runningAt.Int64 < admittedAt || finalizingAt.Valid && finalizingAt.Int64 < admittedAt || terminalAt.Valid && terminalAt.Int64 < admittedAt || revokedAt.Valid && revokedAt.Int64 < 0 {
-			return fmt.Errorf("%w: invalid run transition time", ErrCorruptState)
-		}
-		if !validOutcome(proposalKind, proposalCode, proposalDetail, proposalResult) || !validOutcome(terminalKind, terminalCode, terminalDetail, terminalResult) || !validRunnerExit(exitSequence, exitCode, exitSignal, exitAt) {
-			return fmt.Errorf("%w: invalid run outcome controls", ErrCorruptState)
-		}
-		switch phase {
-		case "admitted":
-			if anyNullIntValid(runningAt, finalizingAt, terminalAt, revokedAt) || proposalKind.Valid || terminalKind.Valid {
-				return fmt.Errorf("%w: inconsistent admitted run", ErrCorruptState)
-			}
-		case "running":
-			if !runningAt.Valid || runningAt.Int64 < admittedAt || anyNullIntValid(finalizingAt, terminalAt, revokedAt) || proposalKind.Valid || terminalKind.Valid {
-				return fmt.Errorf("%w: inconsistent running run", ErrCorruptState)
-			}
-		case "finalizing":
-			if !finalizingAt.Valid || finalizingAt.Int64 < admittedAt || terminalAt.Valid || !revokedAt.Valid || revokedAt.Int64 < 0 || !proposalKind.Valid || terminalKind.Valid {
-				return fmt.Errorf("%w: inconsistent finalizing run", ErrCorruptState)
-			}
-		case "terminal":
-			if !finalizingAt.Valid || finalizingAt.Int64 < admittedAt || !terminalAt.Valid || terminalAt.Int64 < admittedAt || !revokedAt.Valid || revokedAt.Int64 < 0 || !proposalKind.Valid || !terminalKind.Valid || !sameNullable(proposalKind, terminalKind) || !sameNullable(proposalCode, terminalCode) || !sameNullable(proposalDetail, terminalDetail) || !sameNullable(proposalResult, terminalResult) {
-				return fmt.Errorf("%w: inconsistent terminal run", ErrCorruptState)
-			}
-		default:
-			return corruptControl("run phase", phase)
+		if _, _, err := scanRun(rows); err != nil {
+			return err
 		}
 	}
 	return rows.Err()
 }
 
 func validateResources(ctx context.Context, connection *sql.Conn) error {
-	rows, err := connection.QueryContext(ctx, `SELECT id, run_id, kind, state, path, path_dev, path_inode, pid, pgid, birth_digest, unresolved_reason, revision, declared_at_ms, updated_at_ms, released_at_ms FROM resources`)
+	rows, err := connection.QueryContext(ctx, `SELECT `+resourceColumns+` FROM resources`)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var id, runID, birthDigest []byte
-		var kind, state string
-		var path, reason sql.NullString
-		var pathDev, pathInode, pid, pgid, releasedAt sql.NullInt64
-		var revision, declaredAt, updatedAt int64
-		if err := rows.Scan(&id, &runID, &kind, &state, &path, &pathDev, &pathInode, &pid, &pgid, &birthDigest, &reason, &revision, &declaredAt, &updatedAt, &releasedAt); err != nil {
-			return fmt.Errorf("scan resource: %w", err)
-		}
-		if !validNonzeroID(id) || !validNonzeroID(runID) || revision < 1 || declaredAt < 0 || updatedAt < declaredAt || reason.Valid && (byteLen(reason.String) < 1 || byteLen(reason.String) > 4096) {
-			return fmt.Errorf("%w: invalid resource row", ErrCorruptState)
-		}
-		switch kind {
-		case "runtime_root":
-			if !path.Valid || byteLen(path.String) < 1 || byteLen(path.String) > 4096 || path.String[0] != '/' || pid.Valid || pgid.Valid || birthDigest != nil {
-				return fmt.Errorf("%w: invalid runtime root", ErrCorruptState)
-			}
-		case "runner_process", "provider_process", "provider_group":
-			if path.Valid || pathDev.Valid || pathInode.Valid {
-				return fmt.Errorf("%w: invalid process resource", ErrCorruptState)
-			}
-		default:
-			return corruptControl("resource kind", kind)
-		}
-		if pathDev.Valid != pathInode.Valid || pathDev.Valid && (pathDev.Int64 < 0 || pathInode.Int64 < 1) || pid.Valid != pgid.Valid || pid.Valid != (birthDigest != nil) || pid.Valid && (pid.Int64 <= 1 || pgid.Int64 <= 1 || len(birthDigest) != DigestBytes) {
-			return fmt.Errorf("%w: inconsistent resource identity", ErrCorruptState)
-		}
-		switch state {
-		case "declared", "releasing":
-			if releasedAt.Valid {
-				return fmt.Errorf("%w: released time on live resource", ErrCorruptState)
-			}
-		case "active":
-			if releasedAt.Valid || kind == "runtime_root" && !pathDev.Valid || kind != "runtime_root" && !pid.Valid {
-				return fmt.Errorf("%w: invalid active resource", ErrCorruptState)
-			}
-		case "unresolved":
-			if releasedAt.Valid || !reason.Valid || byteLen(reason.String) < 1 || byteLen(reason.String) > 4096 {
-				return fmt.Errorf("%w: invalid unresolved resource", ErrCorruptState)
-			}
-		case "released":
-			if !releasedAt.Valid || releasedAt.Int64 < declaredAt {
-				return fmt.Errorf("%w: invalid released resource", ErrCorruptState)
-			}
-		default:
-			return corruptControl("resource state", state)
+		if _, _, err := scanResource(rows); err != nil {
+			return err
 		}
 	}
 	return rows.Err()
@@ -281,35 +181,6 @@ func validateInvalidationBounds(ctx context.Context, connection *sql.Conn, facto
 	return nil
 }
 
-func validOutcome(kind, code, detail, result sql.NullString) bool {
-	if !kind.Valid {
-		return !code.Valid && !detail.Valid && !result.Valid
-	}
-	switch kind.String {
-	case "succeeded":
-		return !code.Valid && !detail.Valid && result.Valid && byteLen(result.String) <= 131072
-	case "blocked", "cancelled":
-		return !code.Valid && detail.Valid && byteLen(detail.String) >= 1 && byteLen(detail.String) <= 4096 && !result.Valid
-	case "failed":
-		if !code.Valid || result.Valid || detail.Valid && (byteLen(detail.String) < 1 || byteLen(detail.String) > 4096) {
-			return false
-		}
-		switch code.String {
-		case "spawn", "activation", "source", "runner_exit", "protocol", "internal":
-			return true
-		}
-	}
-	return false
-}
-
-func validRunnerExit(sequence, code, signal, at sql.NullInt64) bool {
-	if !sequence.Valid && !code.Valid && !signal.Valid && !at.Valid {
-		return true
-	}
-	return sequence.Valid && sequence.Int64 >= 1 && at.Valid && at.Int64 >= 0 &&
-		(code.Valid && code.Int64 >= 0 && !signal.Valid || !code.Valid && signal.Valid && signal.Int64 > 0)
-}
-
 func validNonzeroID(value []byte) bool {
 	_, err := identifierFromBytes(value)
 	return err == nil
@@ -322,8 +193,4 @@ func anyNullIntValid(values ...sql.NullInt64) bool {
 		}
 	}
 	return false
-}
-
-func sameNullable(left, right sql.NullString) bool {
-	return left.Valid == right.Valid && (!left.Valid || left.String == right.String)
 }
