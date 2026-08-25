@@ -116,17 +116,17 @@ fn storage_completion_requires_zero_live_leases() {
     let leased = store.change_storage_summary(Some(&project_id)).unwrap();
     assert_eq!(leased.retained_count, 1);
     assert_eq!(leased.measured_bytes, 5);
-    assert_eq!(leased.mactive_leases, 1);
+    assert_eq!(leased.active_leases, 1);
     assert!(!leased.complete);
 
     drop(store);
-    rusqlite::Connection::nopen(&database)
+    rusqlite::Connection::open(&database)
         .unwrap()
         .execute(
             "UPDATE runs
              SET phase = 'terminal', outcome = 'failed', outcome_detail = 'spawn',
-                finalizing_at_ms = 6, phase_since_ms = 6,
-                updated_at_ms = 6, ended_at_ms = 6
+                 finalizing_at_ms = 6, phase_since_ms = 6,
+                 updated_at_ms = 6, ended_at_ms = 6
              WHERE id = ?1",
             [run_id.as_str()],
         )
