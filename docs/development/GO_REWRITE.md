@@ -1210,3 +1210,39 @@ SQLite/driver proof on integrated head `fc533eb`:
   home.
 - Darwin ARM64 executed natively. Darwin AMD64 and Linux AMD64 CGO-free test
   binaries cross-built successfully; Linux runtime behavior remains deferred.
+
+Darwin process-semantics proof on integrated head `47e50e7`:
+
+- Proved the exact `kern.proc.pid` start-time/PGID identity remains stable
+  across `syscall.Exec`, remains observable for an exited unreaped direct
+  child, and disappears after the sole `Wait`. On this Darwin version the
+  post-Wait sysctl result is `EIO`, so absence requires both exact PID and
+  negative-PGID probes to return `ESRCH`; `EIO` alone is never absence.
+- Proved an acknowledged pre-exit `EVFILT_PROC/NOTE_EXIT` registration reports
+  exit without reaping. A fresh registration on a known unreaped zombie returns
+  an `EV_RECEIPT` `ESRCH`; therefore production must register while the child
+  is still inert. A raced registration is launch failure followed by the live
+  owner's synchronous sole `Wait`, never a recovered/missed watcher.
+- Proved leader exit does not imply group absence, group KILL reaches a
+  remaining exact member while the leader stays unreaped, TERM-ignore requires
+  bounded KILL escalation, create-only/no-follow markers do not replace, leash
+  EOF prevents pre-marker effect, marker creation linearizes a single possible
+  effect, and an explicit kqueue wake permits bounded watcher join.
+- Mutations killed include ignoring birth time, a watcher calling `Wait`,
+  waiting the leader before group cleanup, dropping `O_EXCL`, inheriting an
+  extra leash writer, mapping `EPERM` to absent, releasing before the first
+  kqueue receipt, and accepting a zero-timeout observation. Mutation code was
+  removed.
+- The first independent review BLOCKED an uncontrolled immediate-child
+  registration race. The repaired test constructs a blocked child, registers,
+  releases, observes NOTE_EXIT, verifies exact unreaped identity, then performs
+  the late-registration negative. The reviewer stress-ran it 100 times and
+  returned ALLOW on exact proof head `033d86fc`.
+- The author ran the focused package three times (`0.277s`), its race test
+  (`6.352s`), the full Go suite (`10.648s`), vet/module/format/diff checks and
+  clean resource censuses. After unchanged cherry-pick, the orchestrator ran
+  focused count-three (`0.415s`) and race (`6.349s`) successfully.
+- This narrow OS proof deliberately does not claim a provider-forked descendant
+  or actual runner-parent-death descriptor hygiene. The production runner's
+  real process/crash suite must prove both with group-wide independent safety
+  cleanup before the kernel go/no-go gate.
