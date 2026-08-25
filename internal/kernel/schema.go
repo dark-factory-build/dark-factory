@@ -222,24 +222,19 @@ func expectedSchema() map[string]schemaObject {
 	return result
 }
 
-func inspectIdentity(ctx context.Context, queryer interface {
-	QueryRowContext(context.Context, string, ...any) *sql.Row
-}) (int, int, error) {
+func inspectIdentity(ctx context.Context, connection *sql.Conn) (int, int, error) {
 	var appID, version int
-	if err := queryer.QueryRowContext(ctx, "PRAGMA application_id").Scan(&appID); err != nil {
+	if err := connection.QueryRowContext(ctx, "PRAGMA application_id").Scan(&appID); err != nil {
 		return 0, 0, fmt.Errorf("read sqlite application id: %w", err)
 	}
-	if err := queryer.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+	if err := connection.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return 0, 0, fmt.Errorf("read sqlite user version: %w", err)
 	}
 	return appID, version, nil
 }
 
-func validateExactSchema(ctx context.Context, queryer interface {
-	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
-	QueryRowContext(context.Context, string, ...any) *sql.Row
-}) error {
-	appID, version, err := inspectIdentity(ctx, queryer)
+func validateExactSchema(ctx context.Context, connection *sql.Conn) error {
+	appID, version, err := inspectIdentity(ctx, connection)
 	if err != nil {
 		return err
 	}
@@ -248,7 +243,7 @@ func validateExactSchema(ctx context.Context, queryer interface {
 	}
 
 	expected := expectedSchema()
-	rows, err := queryer.QueryContext(ctx, `SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name`)
+	rows, err := connection.QueryContext(ctx, `SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name`)
 	if err != nil {
 		return fmt.Errorf("read sqlite schema: %w", err)
 	}
@@ -273,7 +268,7 @@ func validateExactSchema(ctx context.Context, queryer interface {
 	}
 
 	var violations int
-	foreignKeys, err := queryer.QueryContext(ctx, "PRAGMA foreign_key_check")
+	foreignKeys, err := connection.QueryContext(ctx, "PRAGMA foreign_key_check")
 	if err != nil {
 		return fmt.Errorf("check foreign keys: %w", err)
 	}
@@ -289,16 +284,40 @@ func validateExactSchema(ctx context.Context, queryer interface {
 	return nil
 }
 
-func schemaIsEmpty(ctx context.Context, queryer interface {
-	QueryRowContext(context.Context, string, ...any) *sql.Row
-}) (bool, error) {
-	appID, version, err := inspectIdentity(ctx, queryer)
+func schemaIsEmpty(ctx context.Context, connection *sql.Conn) (bool, error) {
+	appID, version, err := inspectIdentity(ctx, connection)
 	if err != nil {
 		return false, err
 	}
 	var objects int
-	if err := queryer.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'`).Scan(&objects); err != nil {
+	if err := connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'`).Scan(&objects); err != nil {
 		return false, fmt.Errorf("count sqlite schema objects: %w", err)
 	}
 	return appID == 0 && version == 0 && objects == 0, nil
+}
+
+func validateIntegrity(ctx context.Context, connection *sql.Conn) error {
+	rows, err := connection.QueryContext(ctx, "PRAGMA integrity_check")
+	if err != nil {
+		return fmt.Errorf("check sqlite integrity: %w", err)
+	}
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		var result string
+		if err := rows.Scan(&result); err != nil {
+			return fmt.Errorf("scan sqlite integrity result: %w", err)
+		}
+		count++
+		if result != "ok" {
+			return fmt.Errorf("%w: sqlite integrity check: %s", ErrCorruptState, result)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate sqlite integrity results: %w", err)
+	}
+	if count != 1 {
+		return fmt.Errorf("%w: sqlite integrity check returned %d results", ErrCorruptState, count)
+	}
+	return nil
 }

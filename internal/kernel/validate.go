@@ -282,11 +282,9 @@ func validateInvalidations(ctx context.Context, connection *sql.Conn, factory Fa
 	return rows.Err()
 }
 
-func validateInvalidationBounds(ctx context.Context, queryer interface {
-	QueryRowContext(context.Context, string, ...any) *sql.Row
-}, factory FactoryState) error {
+func validateInvalidationBounds(ctx context.Context, connection *sql.Conn, factory FactoryState) error {
 	var count, minimum, maximum int64
-	if err := queryer.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(MIN(sequence), 0), COALESCE(MAX(sequence), 0) FROM invalidations`).Scan(&count, &minimum, &maximum); err != nil {
+	if err := connection.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(MIN(sequence), 0), COALESCE(MAX(sequence), 0) FROM invalidations`).Scan(&count, &minimum, &maximum); err != nil {
 		return err
 	}
 	if count < 0 || count > EventRetentionLimit {

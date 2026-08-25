@@ -3,6 +3,7 @@ package kernel
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"os"
@@ -90,14 +91,11 @@ func TestCreateAndOpenRejectForeignPathsWithoutModification(t *testing.T) {
 		if err := os.WriteFile(path, nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		before, _ := os.ReadFile(path)
+		before := captureDatabaseEvidence(t, path)
 		if _, err := Open(ctx, path); !errors.Is(err, ErrForeignDatabase) {
 			t.Fatalf("Open error = %v", err)
 		}
-		after, _ := os.ReadFile(path)
-		if !bytes.Equal(before, after) {
-			t.Fatal("Open modified empty foreign file")
-		}
+		assertDatabaseEvidenceUnchanged(t, path, before)
 	})
 
 	t.Run("foreign application", func(t *testing.T) {
@@ -116,14 +114,11 @@ func TestCreateAndOpenRejectForeignPathsWithoutModification(t *testing.T) {
 		if err := os.Chmod(path, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		before, _ := os.ReadFile(path)
+		before := captureDatabaseEvidence(t, path)
 		if _, err := Open(ctx, path); !errors.Is(err, ErrForeignDatabase) {
 			t.Fatalf("Open error = %v", err)
 		}
-		after, _ := os.ReadFile(path)
-		if !bytes.Equal(before, after) {
-			t.Fatal("Open modified foreign database")
-		}
+		assertDatabaseEvidenceUnchanged(t, path, before)
 		if _, err := os.Stat(path + "-wal"); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("foreign Open created WAL: %v", err)
 		}
@@ -139,9 +134,11 @@ func TestCreateAndOpenRejectForeignPathsWithoutModification(t *testing.T) {
 		if err := os.Chmod(path, 0o644); err != nil {
 			t.Fatal(err)
 		}
+		before := captureDatabaseEvidence(t, path)
 		if _, err := Open(ctx, path); !errors.Is(err, ErrForeignDatabase) {
 			t.Fatalf("Open error = %v", err)
 		}
+		assertDatabaseEvidenceUnchanged(t, path, before)
 	})
 
 	t.Run("symlink", func(t *testing.T) {
@@ -185,9 +182,11 @@ func TestOpenRejectsUnknownVersionAndPartialIdentity(t *testing.T) {
 			raw := openRaw(t, path)
 			mutate(t, raw)
 			raw.Close()
+			before := captureDatabaseEvidence(t, path)
 			if _, err := Open(context.Background(), path); !errors.Is(err, ErrForeignDatabase) {
 				t.Fatalf("Open error = %v", err)
 			}
+			assertDatabaseEvidenceUnchanged(t, path, before)
 		})
 	}
 }
@@ -211,9 +210,11 @@ func TestOpenRejectsEverySchemaDrift(t *testing.T) {
 				t.Fatal(err)
 			}
 			raw.Close()
+			before := captureDatabaseEvidence(t, path)
 			if _, err := Open(context.Background(), path); !errors.Is(err, ErrForeignDatabase) {
 				t.Fatalf("Open error = %v", err)
 			}
+			assertDatabaseEvidenceUnchanged(t, path, before)
 		})
 	}
 }
@@ -383,6 +384,15 @@ func changeID(t *testing.T, seed byte) ChangeID {
 	return result
 }
 
+func resourceID(t *testing.T, seed byte) ResourceID {
+	t.Helper()
+	result, err := ResourceIDFromBytes(bytes.Repeat([]byte{seed}, IDBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
 func openRaw(t *testing.T, path string) *sql.DB {
 	t.Helper()
 	pool, err := sql.Open(driverName, "file:"+path)
@@ -421,4 +431,53 @@ func TestCloseDoesNotRetainKernelGoroutines(t *testing.T) {
 	if delta := runtime.NumGoroutine() - baseline; delta > 2 {
 		t.Fatalf("kernel stores retained %d goroutines", delta)
 	}
+}
+
+type databaseEvidence struct {
+	hash       [sha256.Size]byte
+	info       os.FileInfo
+	dirEntries []string
+}
+
+func captureDatabaseEvidence(t *testing.T, path string) databaseEvidence {
+	t.Helper()
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name()+":"+entry.Type().String())
+	}
+	return databaseEvidence{hash: sha256.Sum256(contents), info: info, dirEntries: names}
+}
+
+func assertDatabaseEvidenceUnchanged(t *testing.T, path string, before databaseEvidence) {
+	t.Helper()
+	after := captureDatabaseEvidence(t, path)
+	if after.hash != before.hash || !os.SameFile(before.info, after.info) || after.info.Size() != before.info.Size() || after.info.Mode() != before.info.Mode() || !after.info.ModTime().Equal(before.info.ModTime()) || !equalStrings(after.dirEntries, before.dirEntries) {
+		t.Fatalf("database refusal changed filesystem evidence:\nbefore hash=%x size=%d mode=%v mtime=%v entries=%v\nafter  hash=%x size=%d mode=%v mtime=%v entries=%v",
+			before.hash, before.info.Size(), before.info.Mode(), before.info.ModTime(), before.dirEntries,
+			after.hash, after.info.Size(), after.info.Mode(), after.info.ModTime(), after.dirEntries)
+	}
+}
+
+func equalStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }

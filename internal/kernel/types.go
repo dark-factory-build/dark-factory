@@ -12,13 +12,10 @@ const (
 	EventRetentionLimit    = 4096
 	WatchBatchLimit        = 256
 	SnapshotEntityLimit    = 4096
-	RecentTerminalRunLimit = 256
 	MaxFactoryCapacity     = 1024
 	MaxChangeTreeEntries   = 10_000
 	MaxChangeTreeBlobBytes = 1 << 30
 )
-
-var errInvalidValue = ErrInvalidValue
 
 type identifier struct {
 	b [IDBytes]byte
@@ -26,12 +23,12 @@ type identifier struct {
 
 func identifierFromBytes(value []byte) (identifier, error) {
 	if len(value) != IDBytes {
-		return identifier{}, fmt.Errorf("%w: identifier is %d bytes, want %d", errInvalidValue, len(value), IDBytes)
+		return identifier{}, fmt.Errorf("%w: identifier is %d bytes, want %d", ErrInvalidValue, len(value), IDBytes)
 	}
 	var id identifier
 	copy(id.b[:], value)
 	if id.zero() {
-		return identifier{}, fmt.Errorf("%w: identifier is all zero", errInvalidValue)
+		return identifier{}, fmt.Errorf("%w: identifier is all zero", ErrInvalidValue)
 	}
 	return id, nil
 }
@@ -113,7 +110,7 @@ type digest struct {
 
 func digestFromBytes(value []byte) (digest, error) {
 	if len(value) != DigestBytes {
-		return digest{}, fmt.Errorf("%w: digest is %d bytes, want %d", errInvalidValue, len(value), DigestBytes)
+		return digest{}, fmt.Errorf("%w: digest is %d bytes, want %d", ErrInvalidValue, len(value), DigestBytes)
 	}
 	var result digest
 	copy(result.b[:], value)
@@ -153,7 +150,7 @@ type UnixMillis struct{ value int64 }
 
 func NewUnixMillis(value int64) (UnixMillis, error) {
 	if value < 0 {
-		return UnixMillis{}, fmt.Errorf("%w: negative timestamp", errInvalidValue)
+		return UnixMillis{}, fmt.Errorf("%w: negative timestamp", ErrInvalidValue)
 	}
 	return UnixMillis{value: value}, nil
 }
@@ -167,7 +164,7 @@ type Revision struct{ value int64 }
 
 func NewRevision(value int64) (Revision, error) {
 	if value < 1 {
-		return Revision{}, fmt.Errorf("%w: revision must be positive", errInvalidValue)
+		return Revision{}, fmt.Errorf("%w: revision must be positive", ErrInvalidValue)
 	}
 	return Revision{value: value}, nil
 }
@@ -181,7 +178,7 @@ type EventSequence struct{ value int64 }
 
 func NewEventSequence(value int64) (EventSequence, error) {
 	if value < 0 {
-		return EventSequence{}, fmt.Errorf("%w: event sequence must not be negative", errInvalidValue)
+		return EventSequence{}, fmt.Errorf("%w: event sequence must not be negative", ErrInvalidValue)
 	}
 	return EventSequence{value: value}, nil
 }
@@ -402,7 +399,7 @@ type FactoryConfig struct {
 
 func (config FactoryConfig) validate() error {
 	if config.Capacity < 1 || config.Capacity > MaxFactoryCapacity {
-		return fmt.Errorf("%w: capacity %d outside 1..%d", errInvalidValue, config.Capacity, MaxFactoryCapacity)
+		return fmt.Errorf("%w: capacity %d outside 1..%d", ErrInvalidValue, config.Capacity, MaxFactoryCapacity)
 	}
 	return nil
 }

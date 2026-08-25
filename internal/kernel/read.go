@@ -13,15 +13,11 @@ type rowScanner interface {
 	Scan(...any) error
 }
 
-type rowQueryer interface {
-	QueryRowContext(context.Context, string, ...any) *sql.Row
-}
-
-func projectByID(ctx context.Context, queryer rowQueryer, id ProjectID) (Project, bool, error) {
+func projectByID(ctx context.Context, connection *sql.Conn, id ProjectID) (Project, bool, error) {
 	if id.zero() {
-		return Project{}, false, fmt.Errorf("%w: zero project identifier", errInvalidValue)
+		return Project{}, false, fmt.Errorf("%w: zero project identifier", ErrInvalidValue)
 	}
-	return scanProject(queryer.QueryRowContext(ctx, `SELECT id, name, root, revision, created_at_ms, updated_at_ms FROM projects WHERE id = ?`, id.Bytes()))
+	return scanProject(connection.QueryRowContext(ctx, `SELECT id, name, root, revision, created_at_ms, updated_at_ms FROM projects WHERE id = ?`, id.Bytes()))
 }
 
 func scanProject(scanner rowScanner) (Project, bool, error) {
@@ -53,11 +49,11 @@ func scanProject(scanner rowScanner) (Project, bool, error) {
 	return Project{ID: id, Name: name, Root: root, Revision: rev, CreatedAt: created, UpdatedAt: updated}, true, nil
 }
 
-func agentByID(ctx context.Context, queryer rowQueryer, id AgentID) (Agent, bool, error) {
+func agentByID(ctx context.Context, connection *sql.Conn, id AgentID) (Agent, bool, error) {
 	if id.zero() {
-		return Agent{}, false, fmt.Errorf("%w: zero agent identifier", errInvalidValue)
+		return Agent{}, false, fmt.Errorf("%w: zero agent identifier", ErrInvalidValue)
 	}
-	return scanAgent(queryer.QueryRowContext(ctx, `SELECT id, project_id, name, role, provider, execution_mode, model, reasoning_effort, paused, tool_budget_limit, tool_calls_used, revision, created_at_ms, updated_at_ms FROM agents WHERE id = ?`, id.Bytes()))
+	return scanAgent(connection.QueryRowContext(ctx, `SELECT id, project_id, name, role, provider, execution_mode, model, reasoning_effort, paused, tool_budget_limit, tool_calls_used, revision, created_at_ms, updated_at_ms FROM agents WHERE id = ?`, id.Bytes()))
 }
 
 func scanAgent(scanner rowScanner) (Agent, bool, error) {
@@ -96,11 +92,11 @@ func scanAgent(scanner rowScanner) (Agent, bool, error) {
 	}, true, nil
 }
 
-func taskByID(ctx context.Context, queryer rowQueryer, id TaskID) (Task, bool, error) {
+func taskByID(ctx context.Context, connection *sql.Conn, id TaskID) (Task, bool, error) {
 	if id.zero() {
-		return Task{}, false, fmt.Errorf("%w: zero task identifier", errInvalidValue)
+		return Task{}, false, fmt.Errorf("%w: zero task identifier", ErrInvalidValue)
 	}
-	return scanTask(queryer.QueryRowContext(ctx, `SELECT id, project_id, assigned_agent_id, incarnation_id, work_revision, title, body, status, priority, blocked_reason, result, completed_at_ms, revision, created_at_ms, updated_at_ms FROM tasks WHERE id = ?`, id.Bytes()))
+	return scanTask(connection.QueryRowContext(ctx, `SELECT id, project_id, assigned_agent_id, incarnation_id, work_revision, title, body, status, priority, blocked_reason, result, completed_at_ms, revision, created_at_ms, updated_at_ms FROM tasks WHERE id = ?`, id.Bytes()))
 }
 
 func scanTask(scanner rowScanner) (Task, bool, error) {
@@ -160,9 +156,9 @@ func scanTask(scanner rowScanner) (Task, bool, error) {
 	}, true, nil
 }
 
-func factoryState(ctx context.Context, queryer rowQueryer) (FactoryState, error) {
+func factoryState(ctx context.Context, connection *sql.Conn) (FactoryState, error) {
 	var dispatch, capacity, revision, next, floor, updatedAt int64
-	if err := queryer.QueryRowContext(ctx, `SELECT dispatch_enabled, capacity, revision, next_invalidation_sequence, invalidation_floor, updated_at_ms FROM factory WHERE singleton = 1`).Scan(&dispatch, &capacity, &revision, &next, &floor, &updatedAt); err != nil {
+	if err := connection.QueryRowContext(ctx, `SELECT dispatch_enabled, capacity, revision, next_invalidation_sequence, invalidation_floor, updated_at_ms FROM factory WHERE singleton = 1`).Scan(&dispatch, &capacity, &revision, &next, &floor, &updatedAt); err != nil {
 		return FactoryState{}, fmt.Errorf("read factory: %w", err)
 	}
 	if dispatch != 0 && dispatch != 1 || capacity < 1 || capacity > MaxFactoryCapacity || next < 1 || floor < 1 || floor > next || updatedAt < 0 {
@@ -223,6 +219,10 @@ func (store *Store) beginRead(ctx context.Context) (*readTx, error) {
 	if err != nil {
 		return nil, err
 	}
+	return beginPinnedRead(ctx, connection)
+}
+
+func beginPinnedRead(ctx context.Context, connection *sql.Conn) (*readTx, error) {
 	if _, err := connection.ExecContext(ctx, "BEGIN"); err != nil {
 		discardConnection(connection)
 		return nil, fmt.Errorf("begin sqlite read: %w", err)
@@ -252,6 +252,9 @@ func (store *Store) Snapshot(ctx context.Context) (DashboardSnapshot, error) {
 		return DashboardSnapshot{}, err
 	}
 	defer tx.Close()
+	if err := validateDurableControls(ctx, tx.connection); err != nil {
+		return DashboardSnapshot{}, err
+	}
 	state, err := factoryState(ctx, tx.connection)
 	if err != nil {
 		return DashboardSnapshot{}, err
@@ -366,6 +369,9 @@ func (store *Store) WatchAfter(ctx context.Context, after EventSequence) (WatchB
 		return WatchBatch{}, err
 	}
 	defer tx.Close()
+	if err := validateDurableControls(ctx, tx.connection); err != nil {
+		return WatchBatch{}, err
+	}
 	state, err := factoryState(ctx, tx.connection)
 	if err != nil {
 		return WatchBatch{}, err
@@ -375,9 +381,6 @@ func (store *Store) WatchAfter(ctx context.Context, after EventSequence) (WatchB
 	}
 	if after.Int64() < state.Floor.Int64()-1 {
 		return WatchBatch{}, &ResyncRequiredError{Head: state.Head, Floor: state.Floor}
-	}
-	if err := validateInvalidationBounds(ctx, tx.connection, state); err != nil {
-		return WatchBatch{}, err
 	}
 	rows, err := tx.connection.QueryContext(ctx, `SELECT sequence, occurred_at_ms, entity_kind, entity_id, revision, deleted FROM invalidations WHERE sequence > ? ORDER BY sequence ASC LIMIT ?`, after.Int64(), WatchBatchLimit+1)
 	if err != nil {

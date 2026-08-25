@@ -32,7 +32,7 @@ func (store *Store) CreateProject(ctx context.Context, spec NewProject, at UnixM
 		return Project{}, tx.Rollback(err)
 	}
 	if found {
-		if existing.Name == spec.Name && existing.Root == spec.Root && existing.CreatedAt == at {
+		if projectMatchesCreation(existing, spec) {
 			if err := tx.Rollback(nil); err != nil {
 				return Project{}, err
 			}
@@ -80,7 +80,7 @@ func (store *Store) CreateAgent(ctx context.Context, spec NewAgent, at UnixMilli
 		return Agent{}, tx.Rollback(err)
 	}
 	if found {
-		if agentMatchesCreation(existing, spec, at) {
+		if agentMatchesCreation(existing, spec) {
 			if err := tx.Rollback(nil); err != nil {
 				return Agent{}, err
 			}
@@ -125,7 +125,7 @@ func (store *Store) EnqueueTask(ctx context.Context, spec NewTask, at UnixMillis
 		return Task{}, tx.Rollback(err)
 	}
 	if found {
-		if taskMatchesCreation(existing, spec, at) {
+		if taskMatchesCreation(existing, spec) {
 			if err := tx.Rollback(nil); err != nil {
 				return Task{}, err
 			}
@@ -159,7 +159,7 @@ func (store *Store) EnqueueTask(ctx context.Context, spec NewTask, at UnixMillis
 
 func (store *Store) SetDispatch(ctx context.Context, expected Revision, enabled bool, at UnixMillis) (FactoryState, error) {
 	if expected.Int64() < 1 {
-		return FactoryState{}, fmt.Errorf("%w: invalid expected factory revision", errInvalidValue)
+		return FactoryState{}, fmt.Errorf("%w: invalid expected factory revision", ErrInvalidValue)
 	}
 	return store.setFactory(ctx, expected, at, func(state FactoryState) (bool, int64, int64) {
 		return state.DispatchEnabled != enabled, int64(boolInt(enabled)), int64(state.Capacity)
@@ -168,7 +168,7 @@ func (store *Store) SetDispatch(ctx context.Context, expected Revision, enabled 
 
 func (store *Store) SetCapacity(ctx context.Context, expected Revision, capacity uint16, at UnixMillis) (FactoryState, error) {
 	if expected.Int64() < 1 || capacity < 1 || capacity > MaxFactoryCapacity {
-		return FactoryState{}, fmt.Errorf("%w: capacity %d outside 1..%d", errInvalidValue, capacity, MaxFactoryCapacity)
+		return FactoryState{}, fmt.Errorf("%w: capacity %d outside 1..%d", ErrInvalidValue, capacity, MaxFactoryCapacity)
 	}
 	return store.setFactory(ctx, expected, at, func(state FactoryState) (bool, int64, int64) {
 		return state.Capacity != capacity, int64(boolInt(state.DispatchEnabled)), int64(capacity)
@@ -252,7 +252,7 @@ func appendInvalidations(ctx context.Context, connection *sql.Conn, at UnixMilli
 		kind := item.kind.String()
 		validID := len(item.id) == IDBytes && (item.kind == EntityFactory && string(item.id) == string(factoryEntityID[:]) || item.kind != EntityFactory && validNonzeroID(item.id))
 		if kind == "" || !validID || item.revision < 1 {
-			return fmt.Errorf("%w: invalid invalidation identity", errInvalidValue)
+			return fmt.Errorf("%w: invalid invalidation identity", ErrInvalidValue)
 		}
 		if _, err := connection.ExecContext(ctx, `INSERT INTO invalidations(sequence, occurred_at_ms, entity_kind, entity_id, revision, deleted) VALUES(?, ?, ?, ?, ?, ?)`, next+int64(index), at.Int64(), kind, item.id, item.revision, boolInt(item.deleted)); err != nil {
 			return fmt.Errorf("insert invalidation: %w", err)
@@ -275,33 +275,33 @@ func appendInvalidations(ctx context.Context, connection *sql.Conn, at UnixMilli
 
 func validateNewProject(spec NewProject) error {
 	if spec.ID.zero() || byteLen(spec.Name) < 1 || byteLen(spec.Name) > 128 || byteLen(spec.Root) < 1 || byteLen(spec.Root) > 4096 || !filepath.IsAbs(spec.Root) {
-		return fmt.Errorf("%w: invalid project", errInvalidValue)
+		return fmt.Errorf("%w: invalid project", ErrInvalidValue)
 	}
 	return nil
 }
 
 func validateNewAgent(spec NewAgent) error {
 	if spec.ID.zero() || spec.ProjectID.zero() || byteLen(spec.Name) < 1 || byteLen(spec.Name) > 128 || !spec.Role.valid() || !spec.Provider.valid() || !spec.ExecutionMode.valid() {
-		return fmt.Errorf("%w: invalid agent", errInvalidValue)
+		return fmt.Errorf("%w: invalid agent", ErrInvalidValue)
 	}
 	if spec.Provider == ProviderShell && spec.ExecutionMode != ExecutionUnrestricted {
-		return fmt.Errorf("%w: shell requires unrestricted execution", errInvalidValue)
+		return fmt.Errorf("%w: shell requires unrestricted execution", ErrInvalidValue)
 	}
 	if byteLen(spec.Model) > 128 || (spec.Model != "" && byteLen(spec.Model) < 1) {
-		return fmt.Errorf("%w: invalid model", errInvalidValue)
+		return fmt.Errorf("%w: invalid model", ErrInvalidValue)
 	}
 	if !validReasoningEffort(spec.ReasoningEffort) {
-		return fmt.Errorf("%w: invalid reasoning effort", errInvalidValue)
+		return fmt.Errorf("%w: invalid reasoning effort", ErrInvalidValue)
 	}
 	if spec.ToolBudgetLimit < 1 || spec.ToolBudgetLimit > 1_000_000_000 {
-		return fmt.Errorf("%w: invalid tool budget", errInvalidValue)
+		return fmt.Errorf("%w: invalid tool budget", ErrInvalidValue)
 	}
 	return nil
 }
 
 func validateNewTask(spec NewTask) error {
 	if spec.ID.zero() || spec.ProjectID.zero() || spec.AssignedAgentID.zero() || spec.IncarnationID.zero() || byteLen(spec.Title) < 1 || byteLen(spec.Title) > 1024 || byteLen(spec.Body) > 131072 || spec.Priority < -1_000_000 || spec.Priority > 1_000_000 {
-		return fmt.Errorf("%w: invalid task", errInvalidValue)
+		return fmt.Errorf("%w: invalid task", ErrInvalidValue)
 	}
 	return nil
 }
@@ -322,10 +322,14 @@ func nullableString(value string) any {
 	return value
 }
 
-func agentMatchesCreation(existing Agent, spec NewAgent, at UnixMillis) bool {
-	return existing.ProjectID == spec.ProjectID && existing.Name == spec.Name && existing.Role == spec.Role && existing.Provider == spec.Provider && existing.ExecutionMode == spec.ExecutionMode && existing.Model == spec.Model && existing.ReasoningEffort == spec.ReasoningEffort && existing.ToolBudgetLimit == spec.ToolBudgetLimit && existing.ToolCallsUsed == 0 && !existing.Paused && existing.CreatedAt == at
+func projectMatchesCreation(existing Project, spec NewProject) bool {
+	return existing.Name == spec.Name && existing.Root == spec.Root && existing.Revision.Int64() == 1 && existing.UpdatedAt == existing.CreatedAt
 }
 
-func taskMatchesCreation(existing Task, spec NewTask, at UnixMillis) bool {
-	return existing.ProjectID == spec.ProjectID && existing.AssignedAgentID == spec.AssignedAgentID && existing.IncarnationID == spec.IncarnationID && existing.Title == spec.Title && existing.Body == spec.Body && existing.Status == TaskQueued && existing.Priority == spec.Priority && existing.CreatedAt == at
+func agentMatchesCreation(existing Agent, spec NewAgent) bool {
+	return existing.ProjectID == spec.ProjectID && existing.Name == spec.Name && existing.Role == spec.Role && existing.Provider == spec.Provider && existing.ExecutionMode == spec.ExecutionMode && existing.Model == spec.Model && existing.ReasoningEffort == spec.ReasoningEffort && existing.ToolBudgetLimit == spec.ToolBudgetLimit && existing.ToolCallsUsed == 0 && !existing.Paused && existing.Revision.Int64() == 1 && existing.UpdatedAt == existing.CreatedAt
+}
+
+func taskMatchesCreation(existing Task, spec NewTask) bool {
+	return existing.ProjectID == spec.ProjectID && existing.AssignedAgentID == spec.AssignedAgentID && existing.IncarnationID == spec.IncarnationID && existing.Title == spec.Title && existing.Body == spec.Body && existing.Status == TaskQueued && existing.Priority == spec.Priority && existing.WorkRevision.Int64() == 1 && existing.BlockedReason == "" && existing.Result == "" && existing.CompletedAt == nil && existing.Revision.Int64() == 1 && existing.UpdatedAt == existing.CreatedAt
 }

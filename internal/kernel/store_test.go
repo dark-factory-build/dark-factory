@@ -45,14 +45,26 @@ func TestEntityCreationReconciliationAndRelationships(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.CreateProject(ctx, projectSpec, mustTime(t, 10)); err != nil {
+	projectReplay, err := store.CreateProject(ctx, projectSpec, mustTime(t, 110))
+	if err != nil {
 		t.Fatalf("exact project replay: %v", err)
 	}
-	if _, err := store.CreateAgent(ctx, agentSpec, mustTime(t, 11)); err != nil {
+	if projectReplay.CreatedAt != project.CreatedAt || projectReplay.UpdatedAt != project.UpdatedAt {
+		t.Fatalf("project replay replaced durable times: original=%+v replay=%+v", project, projectReplay)
+	}
+	agentReplay, err := store.CreateAgent(ctx, agentSpec, mustTime(t, 111))
+	if err != nil {
 		t.Fatalf("exact agent replay: %v", err)
 	}
-	if _, err := store.EnqueueTask(ctx, taskSpec, mustTime(t, 12)); err != nil {
+	if agentReplay.CreatedAt != agent.CreatedAt || agentReplay.UpdatedAt != agent.UpdatedAt {
+		t.Fatalf("agent replay replaced durable times: original=%+v replay=%+v", agent, agentReplay)
+	}
+	taskReplay, err := store.EnqueueTask(ctx, taskSpec, mustTime(t, 112))
+	if err != nil {
 		t.Fatalf("exact task replay: %v", err)
+	}
+	if taskReplay.CreatedAt != task.CreatedAt || taskReplay.UpdatedAt != task.UpdatedAt {
+		t.Fatalf("task replay replaced durable times: original=%+v replay=%+v", task, taskReplay)
 	}
 	after, err := store.Factory(ctx)
 	if err != nil {
@@ -61,10 +73,29 @@ func TestEntityCreationReconciliationAndRelationships(t *testing.T) {
 	if before.Head != after.Head || after.Head.Int64() != 3 {
 		t.Fatalf("replay emitted invalidations: before=%+v after=%+v", before, after)
 	}
+	for table, want := range map[string]int{"projects": 1, "agents": 1, "tasks": 1, "invalidations": 3} {
+		var count int
+		if err := store.readers.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != want {
+			t.Fatalf("%s row count after replay = %d, want %d", table, count, want)
+		}
+	}
 	conflict := projectSpec
 	conflict.Name = "different"
 	if _, err := store.CreateProject(ctx, conflict, mustTime(t, 10)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("conflicting project replay error = %v", err)
+	}
+	agentConflict := agentSpec
+	agentConflict.Model = "changed-model"
+	if _, err := store.CreateAgent(ctx, agentConflict, mustTime(t, 111)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("conflicting agent replay error = %v", err)
+	}
+	taskConflict := taskSpec
+	taskConflict.Body = "changed body"
+	if _, err := store.EnqueueTask(ctx, taskConflict, mustTime(t, 112)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("conflicting task replay error = %v", err)
 	}
 	if _, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 5), Name: "other", Root: projectSpec.Root}, mustTime(t, 10)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("duplicate root error = %v", err)
@@ -406,32 +437,7 @@ func TestCorruptControlsFailClosedOnReadAndReopen(t *testing.T) {
 			}
 		},
 		"run outcome detail": func(t *testing.T, store *Store) {
-			ctx := context.Background()
-			project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 1), Name: "p", Root: "/p"}, mustTime(t, 2))
-			if err != nil {
-				t.Fatal(err)
-			}
-			agent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 2), ProjectID: project.ID, Name: "a", Role: RoleOrchestrator, Provider: ProviderCodex, ExecutionMode: ExecutionWorkspaceWrite, ToolBudgetLimit: 1}, mustTime(t, 3))
-			if err != nil {
-				t.Fatal(err)
-			}
-			task, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 3), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 4), Title: "t"}, mustTime(t, 4))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := store.writer.Exec(`INSERT INTO runs(
-                    id, project_id, agent_id, task_id, task_incarnation_id, admitted_task_work_revision,
-                    change_id, role, provider, execution_mode, model, reasoning_effort, phase,
-                    proposal_kind, proposal_code, proposal_detail, proposal_result,
-                    terminal_kind, terminal_code, terminal_detail, terminal_result,
-                    credential_digest, credential_revoked_at_ms,
-                    runner_exit_sequence, runner_exit_code, runner_exit_signal, runner_exit_at_ms,
-                    revision, admitted_at_ms, running_at_ms, finalizing_at_ms, terminal_at_ms, updated_at_ms
-                ) VALUES(?, ?, ?, ?, ?, 1, NULL, 'orchestrator', 'codex', 'workspace_write', NULL, NULL, 'admitted',
-                    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, NULL, NULL, NULL, NULL, NULL, 1, 5, NULL, NULL, NULL, 5)`,
-				runID(t, 5).Bytes(), project.ID.Bytes(), agent.ID.Bytes(), task.ID.Bytes(), task.IncarnationID.Bytes(), bytes.Repeat([]byte{0x5a}, DigestBytes)); err != nil {
-				t.Fatal(err)
-			}
+			seedDurableAuthority(t, store)
 			corruptSQL(t, store, `UPDATE runs SET proposal_detail = ''`)
 		},
 	}
@@ -444,6 +450,154 @@ func TestCorruptControlsFailClosedOnReadAndReopen(t *testing.T) {
 				t.Fatalf("Open error = %v", err)
 			}
 		})
+	}
+}
+
+func TestOpenRefusesHiddenCorruptionWithoutFilesystemMutation(t *testing.T) {
+	tests := map[string]string{
+		"agent provider":     `UPDATE agents SET provider = 'unknown'`,
+		"agent mode":         `UPDATE agents SET execution_mode = 'unknown'`,
+		"task incarnation":   `UPDATE tasks SET incarnation_id = zeroblob(15)`,
+		"task status":        `UPDATE tasks SET status = 'unknown'`,
+		"task private state": `UPDATE tasks SET blocked_reason = 'hidden'`,
+		"run phase":          `UPDATE runs SET phase = 'terminal'`,
+		"run outcome":        `UPDATE runs SET proposal_detail = 'hidden'`,
+		"resource identity":  `UPDATE resources SET state = 'active'`,
+		"invalidation":       `UPDATE invalidations SET deleted = 2 WHERE sequence = 1`,
+	}
+	for name, statement := range tests {
+		t.Run(name, func(t *testing.T) {
+			store, path := newTestStore(t)
+			seedDurableAuthority(t, store)
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			corruptDatabaseFile(t, path, statement)
+			before := captureDatabaseEvidence(t, path)
+			if _, err := Open(context.Background(), path); !errors.Is(err, ErrCorruptState) {
+				t.Fatalf("Open error = %v", err)
+			}
+			assertDatabaseEvidenceUnchanged(t, path, before)
+		})
+	}
+
+	t.Run("non-WAL journal", func(t *testing.T) {
+		store, path := newTestStore(t)
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+		raw := openRaw(t, path)
+		var mode string
+		if err := raw.QueryRow(`PRAGMA journal_mode = DELETE`).Scan(&mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := raw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if mode != "delete" {
+			t.Fatalf("journal mode = %q", mode)
+		}
+		before := captureDatabaseEvidence(t, path)
+		if _, err := Open(context.Background(), path); !errors.Is(err, ErrCorruptState) {
+			t.Fatalf("Open error = %v", err)
+		}
+		assertDatabaseEvidenceUnchanged(t, path, before)
+	})
+}
+
+func TestSnapshotAndWatchRejectHiddenControlsInPinnedSnapshot(t *testing.T) {
+	tests := map[string]struct {
+		corrupt string
+		repair  string
+		args    func(*testing.T) []any
+		secret  string
+	}{
+		"provider": {corrupt: `UPDATE agents SET provider = 'PROVIDER_SECRET_78c2'`, repair: `UPDATE agents SET provider = 'codex'`, secret: "PROVIDER_SECRET_78c2"},
+		"mode":     {corrupt: `UPDATE agents SET execution_mode = 'MODE_SECRET_91f4'`, repair: `UPDATE agents SET execution_mode = 'workspace_write'`, secret: "MODE_SECRET_91f4"},
+		"task incarnation": {
+			corrupt: `UPDATE tasks SET incarnation_id = zeroblob(15)`,
+			repair:  `UPDATE tasks SET incarnation_id = ?`,
+			args: func(t *testing.T) []any {
+				return []any{incarnationID(t, 4).Bytes()}
+			},
+		},
+		"task private": {corrupt: `UPDATE tasks SET blocked_reason = 'TASK_SECRET_6a31'`, repair: `UPDATE tasks SET blocked_reason = NULL`, secret: "TASK_SECRET_6a31"},
+		"run phase":    {corrupt: `UPDATE runs SET phase = 'RUN_SECRET_a229'`, repair: `UPDATE runs SET phase = 'admitted'`, secret: "RUN_SECRET_a229"},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			store, _ := newTestStore(t)
+			defer store.Close()
+			seedDurableAuthority(t, store)
+			state, err := store.Factory(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			corruptSQL(t, store, test.corrupt)
+			if _, err := store.Snapshot(context.Background()); !errors.Is(err, ErrCorruptState) {
+				t.Fatalf("Snapshot error = %v", err)
+			} else if test.secret != "" && strings.Contains(err.Error(), test.secret) {
+				t.Fatalf("Snapshot exposed hidden control: %v", err)
+			}
+			if _, err := store.WatchAfter(context.Background(), state.Head); !errors.Is(err, ErrCorruptState) {
+				t.Fatalf("WatchAfter error = %v", err)
+			} else if test.secret != "" && strings.Contains(err.Error(), test.secret) {
+				t.Fatalf("WatchAfter exposed hidden control: %v", err)
+			}
+			var args []any
+			if test.args != nil {
+				args = test.args(t)
+			}
+			corruptSQL(t, store, test.repair, args...)
+			if _, err := store.Snapshot(context.Background()); err != nil {
+				t.Fatalf("Snapshot after repair: %v", err)
+			}
+			if batch, err := store.WatchAfter(context.Background(), state.Head); err != nil || len(batch.Invalidations) != 0 {
+				t.Fatalf("WatchAfter after repair = %+v, %v", batch, err)
+			}
+		})
+	}
+}
+
+func TestConcurrentOpenAndValidWriterNeverMixSnapshots(t *testing.T) {
+	writer, path := newTestStore(t)
+	defer writer.Close()
+	ctx := context.Background()
+	start := make(chan struct{})
+	writerResult := make(chan error, 1)
+	go func() {
+		<-start
+		state, err := writer.Factory(ctx)
+		for index := 0; err == nil && index < 2000; index++ {
+			state, err = writer.SetDispatch(ctx, state.Revision, !state.DispatchEnabled, UnixMillis{value: int64(index + 2)})
+		}
+		writerResult <- err
+	}()
+	close(start)
+	for index := 0; index < 300; index++ {
+		opened, err := Open(ctx, path)
+		if err != nil {
+			t.Fatalf("Open %d returned a false failure: %v", index, err)
+		}
+		if err := opened.Close(); err != nil {
+			t.Fatalf("Close %d: %v", index, err)
+		}
+	}
+	if err := <-writerResult; err != nil {
+		t.Fatalf("writer: %v", err)
+	}
+	state, err := writer.Factory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Revision.Int64() != 2001 || state.Head.Int64() != 2000 || state.Floor.Int64() != 1 {
+		t.Fatalf("final factory state = %+v", state)
+	}
+	if _, err := writer.Snapshot(ctx); err != nil {
+		t.Fatalf("final Snapshot: %v", err)
+	}
+	if _, err := writer.WatchAfter(ctx, mustSequence(t, 0)); err != nil {
+		t.Fatalf("final WatchAfter: %v", err)
 	}
 }
 
@@ -498,17 +652,89 @@ func TestChangeCommitmentSchemaUsesFrozenBounds(t *testing.T) {
 	}
 }
 
-func corruptSQL(t *testing.T, store *Store, statement string) {
+func seedDurableAuthority(t *testing.T, store *Store) {
+	t.Helper()
+	ctx := context.Background()
+	project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 1), Name: "p", Root: "/p"}, mustTime(t, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 2), ProjectID: project.ID, Name: "a", Role: RoleOrchestrator, Provider: ProviderCodex, ExecutionMode: ExecutionWorkspaceWrite, ToolBudgetLimit: 1}, mustTime(t, 3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 3), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 4), Title: "t", Body: "private body"}, mustTime(t, 4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.Exec(`INSERT INTO runs(
+            id, project_id, agent_id, task_id, task_incarnation_id, admitted_task_work_revision,
+            change_id, role, provider, execution_mode, model, reasoning_effort, phase,
+            proposal_kind, proposal_code, proposal_detail, proposal_result,
+            terminal_kind, terminal_code, terminal_detail, terminal_result,
+            credential_digest, credential_revoked_at_ms,
+            runner_exit_sequence, runner_exit_code, runner_exit_signal, runner_exit_at_ms,
+            revision, admitted_at_ms, running_at_ms, finalizing_at_ms, terminal_at_ms, updated_at_ms
+        ) VALUES(?, ?, ?, ?, ?, 1, NULL, 'orchestrator', 'codex', 'workspace_write', NULL, NULL, 'admitted',
+            NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, NULL, NULL, NULL, NULL, NULL, 1, 5, NULL, NULL, NULL, 5)`,
+		runID(t, 5).Bytes(), project.ID.Bytes(), agent.ID.Bytes(), task.ID.Bytes(), task.IncarnationID.Bytes(), bytes.Repeat([]byte{0x5a}, DigestBytes)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.Exec(`INSERT INTO resources(
+            id, run_id, kind, state, path, path_dev, path_inode, pid, pgid, birth_digest,
+            unresolved_reason, revision, declared_at_ms, updated_at_ms, released_at_ms
+        ) VALUES(?, ?, 'runtime_root', 'declared', '/runtime', NULL, NULL, NULL, NULL, NULL, NULL, 1, 5, 5, NULL)`,
+		resourceID(t, 6).Bytes(), runID(t, 5).Bytes()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func corruptSQL(t *testing.T, store *Store, statement string, args ...any) {
 	t.Helper()
 	connection, err := store.writer.Conn(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer discardConnection(connection)
+	if _, err := connection.ExecContext(context.Background(), `PRAGMA foreign_keys = OFF`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := connection.ExecContext(context.Background(), `PRAGMA ignore_check_constraints = ON`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := connection.ExecContext(context.Background(), statement); err != nil {
+	if _, err := connection.ExecContext(context.Background(), statement, args...); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func corruptDatabaseFile(t *testing.T, path, statement string, args ...any) {
+	t.Helper()
+	raw := openRaw(t, path)
+	connection, err := raw.Conn(context.Background())
+	if err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if _, err := connection.ExecContext(context.Background(), `PRAGMA foreign_keys = OFF`); err != nil {
+		connection.Close()
+		raw.Close()
+		t.Fatal(err)
+	}
+	if _, err := connection.ExecContext(context.Background(), `PRAGMA ignore_check_constraints = ON`); err != nil {
+		connection.Close()
+		raw.Close()
+		t.Fatal(err)
+	}
+	if _, err := connection.ExecContext(context.Background(), statement, args...); err != nil {
+		connection.Close()
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := connection.Close(); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
 		t.Fatal(err)
 	}
 }

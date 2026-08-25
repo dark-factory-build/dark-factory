@@ -87,7 +87,7 @@ func Open(ctx context.Context, absolutePath string) (*Store, error) {
 
 func validateDatabasePath(path string) error {
 	if !filepath.IsAbs(path) {
-		return fmt.Errorf("%w: sqlite path must be absolute: %q", errInvalidValue, path)
+		return fmt.Errorf("%w: sqlite path must be absolute: %q", ErrInvalidValue, path)
 	}
 	return nil
 }
@@ -109,6 +109,20 @@ func validateExistingFile(path string) error {
 func preflightExisting(ctx context.Context, path string) error {
 	query := url.Values{}
 	query.Set("mode", "ro")
+	walPresent, err := pathExists(path + "-wal")
+	if err != nil {
+		return err
+	}
+	shmPresent, err := pathExists(path + "-shm")
+	if err != nil {
+		return err
+	}
+	if walPresent != shmPresent {
+		return fmt.Errorf("%w: incomplete WAL sidecar pair", ErrCorruptState)
+	}
+	if !walPresent {
+		query.Set("immutable", "1")
+	}
 	dsn := (&url.URL{Scheme: "file", Path: path, RawQuery: query.Encode()}).String()
 	pool, err := sql.Open(driverName, dsn)
 	if err != nil {
@@ -121,9 +135,49 @@ func preflightExisting(ctx context.Context, path string) error {
 	if err != nil {
 		return fmt.Errorf("checkout sqlite preflight: %w", err)
 	}
-	defer connection.Close()
-	if err := validateExactSchema(ctx, connection); err != nil {
-		return err
+	tx, err := beginPinnedRead(ctx, connection)
+	if err != nil {
+		return fmt.Errorf("begin sqlite preflight: %w", err)
+	}
+	err = validateExactSchema(ctx, tx.connection)
+	if err == nil {
+		err = validateWALHeader(path)
+	}
+	if err == nil {
+		err = validateDurableControls(ctx, tx.connection)
+	}
+	if err == nil {
+		err = validateIntegrity(ctx, tx.connection)
+	}
+	return errors.Join(err, tx.Close())
+}
+
+func pathExists(path string) (bool, error) {
+	_, err := os.Lstat(path)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return false, fmt.Errorf("inspect sqlite sidecar: %w", err)
+}
+
+func validateWALHeader(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open sqlite header: %w", err)
+	}
+	defer file.Close()
+	header := make([]byte, 20)
+	if _, err := file.ReadAt(header, 0); err != nil {
+		return fmt.Errorf("%w: read sqlite header: %v", ErrForeignDatabase, err)
+	}
+	if string(header[:16]) != "SQLite format 3\x00" {
+		return fmt.Errorf("%w: invalid sqlite header", ErrForeignDatabase)
+	}
+	if header[18] != 2 || header[19] != 2 {
+		return fmt.Errorf("%w: database header is not WAL mode", ErrCorruptState)
 	}
 	return nil
 }
@@ -303,18 +357,22 @@ func (store *Store) initialize(ctx context.Context, config FactoryConfig, at Uni
 }
 
 func (store *Store) validateOpen(ctx context.Context) error {
-	connection, err := store.readerConnection(ctx)
+	tx, err := store.beginRead(ctx)
 	if err != nil {
 		return err
 	}
-	defer connection.Close()
+	err = validateDatabaseSnapshot(ctx, tx.connection)
+	return errors.Join(err, tx.Close())
+}
+
+func validateDatabaseSnapshot(ctx context.Context, connection *sql.Conn) error {
 	if err := validateExactSchema(ctx, connection); err != nil {
 		return err
 	}
 	if err := validateDurableControls(ctx, connection); err != nil {
 		return err
 	}
-	return nil
+	return validateIntegrity(ctx, connection)
 }
 
 func (store *Store) Close() error {
