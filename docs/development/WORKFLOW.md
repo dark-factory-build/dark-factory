@@ -341,33 +341,41 @@ path in CODEOWNERS for exactly this reason, and the maintainer App refuses to
 publish under `.github/workflows/` at all. A green workflow never replaces
 review and resolved review threads.
 
-Agent automation must use an explicitly authorized credential broker or
-App-backed tool surface supplied by its host for every authenticated remote
-read or write. This includes private checkout and fetch as well as publishing
-refs, opening or updating pull requests, reviewing, merging, and deleting
-refs. The current coordinator's connected GitHub App is one such surface;
-Claude or another harness may provide an equivalent. Agents must not use
-ambient `git fetch`, `git pull`, `git clone`, `git push`, `gh`, `gh auth`, or
-SSH-based access: those paths can consult the operator's credential helper,
-login keychain, SSH agent, or other user credential state.
+Agent automation must use the provider-neutral Dark Factory Maintainer MCP at
+`https://maintainer.darkfactory.build/mcp` for every authenticated remote
+operation. The host or coordinator supplies its transport authentication; it
+is not a Codex, Claude, or other model-provider connector. Before any remote
+operation, call `maintainer_status` and require the exact repository
+`dark-factory-build/dark-factory`, numeric repository ID `1335380107`, and
+permission revision `maintainer-operations-v1`.
 
-Three narrow carve-outs exist: `gh issue` (create, comment, close, reopen,
-list, view -- not `edit`, because a canonical issue body is an immutable
-source revision); authenticated read-only `gh` (`pr view`/`checks`/`diff`,
-`run view`/`list`, `api` GET); and `git push` to any ref except the default
-branch, `--force-with-lease` only. Pushing the default branch, and opening or
-merging a pull request, are not covered. See rule 14 in
-[AGENTS.md](../../AGENTS.md) for the reasoning behind each.
+Host registration must isolate the Cloudflare Access pair inside the MCP
+transport process. Do not export either value into a coordinator-wide,
+provider, tool, or shell environment. An MCP-compatible client may use a local
+stdio-to-HTTPS transport for that isolation; this is a generic MCP boundary,
+not authority granted by a particular model provider or client configuration.
+
+The deployed surface currently supports status, exact commit publication,
+pull-request creation, exact-head review submission, exact-head check
+observation, and merge-queue enqueue. It does not expose generic remote reads,
+issues, releases, workflow dispatch, direct merge, branch deletion, or the
+eventual result of an enqueue. An operation outside that set is an explicit
+human handoff until a separately reviewed typed operation exists; it is not a
+reason to borrow operator credentials.
+
+Agents must not use ambient `git fetch`, `git pull`, `git clone`, `git push`,
+`gh`, `gh auth`, or SSH-based access: those paths can consult the operator's
+credential helper, login keychain, SSH agent, or other user credential state.
 
 Anonymous HTTPS reads of public repositories are allowed when credential
-lookup and interactive prompting are disabled. A host may instead inject a
-short-lived, repository-scoped read credential for checkout without exposing
-it to the agent. If no authorized surface is available, authenticated access
-stops without contacting the remote. There is no token fallback for agent
-*contribution* writes: operator approval does not authorize injecting
-`GH_TOKEN`, `GITHUB_TOKEN`, a personal access token, or another write
-credential into an agent process to push branches, publish commits, or open
-pull requests. Those go through the App surface, or a human performs them.
+lookup and interactive prompting are disabled. If no authorized surface is
+available, authenticated access stops without contacting the remote. There is
+no token fallback for agent operations: operator approval does not authorize
+injecting `GH_TOKEN`,
+`GITHUB_TOKEN`, a personal access token, or another credential into an agent
+process. Supported operations go through the Maintainer MCP; unsupported
+operations require a separately reviewed human action.
+
 Deployment is the one exception, and it is narrow: see `AGENTS.md` rule 14 and
 "Deploying the control-plane" below. Never use interactive authentication,
 write a credential into a worktree or repository, or expose it through a
