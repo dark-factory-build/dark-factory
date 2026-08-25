@@ -10,7 +10,10 @@ temporary=$(mktemp -d "${TMPDIR:-/tmp}/dark-factory-local-ci-lease-test.XXXXXX")
 first="$temporary/first"
 second="$temporary/second"
 background_pids=
-wait_timeout_seconds=5
+# Lease acquisition retries once per second. The old five-second total allowed
+# only about four retries on a busy hosted runner; give hosted runners fifteen.
+# Tests of the timeout path pass their own one-second bound below.
+wait_timeout_seconds=15
 
 process_parent() {
     ps -p "$1" -o ppid= 2>/dev/null | tr -d ' '
