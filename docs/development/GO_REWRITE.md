@@ -490,18 +490,17 @@ control values make open, read, authentication, and mutation fail closed.
   SQLite conflict behavior.
 - Bounded readers use separately initialized WAL connections and explicit
   read transactions for multi-query snapshots.
-- Driver choice is not final until a focused proof demonstrates foreign keys,
-  WAL, busy behavior, immediate writer exclusion, guarded row counts,
-  crash/reopen, concurrent readers, and connection-local initialization. Pure
-  Go is preferred only if it passes that contract without hiding semantics.
-  The candidate-neutral spike tries `github.com/ncruces/go-sqlite3/driver`
-  v0.35.3 first, then `modernc.org/sqlite` v1.57.0 as comparator/fallback.
-  Preliminary isolated CGO-free build/open probes passed for both on Darwin
-  ARM64 and cross-built AMD64, but no contention/crash/durability claim passed.
-  `ncruces` must fail fast on its newer Go VFS's independent-process locking,
-  shared-memory WAL, and crash semantics; `modernc` must fail fast on exact
-  `libc` pin reproducibility and cancellation-goroutine cleanup. The same tests
-  decide; documentation, default retries/timeouts, and cross-build alone do not.
+- The focused candidate-neutral proof selected
+  `github.com/ncruces/go-sqlite3/driver` v0.35.3. Both it and
+  `modernc.org/sqlite` v1.57.0 passed initial CGO-free build/open probes, but
+  `ncruces` also passed the causal contract for foreign keys, WAL, exact busy
+  policy, immediate writer exclusion, guarded row counts, crash/reopen,
+  concurrent readers, cancellation, connection replacement and ambiguous
+  begin/commit/rollback responses with the smaller linked dependency graph.
+  `modernc` was therefore removed rather than retained as a fallback. The proof
+  lives temporarily in `internal/sqlitecontract` and is deleted once those
+  semantics and causal tests move into concrete Store methods; its generic
+  callback is not a production Store API.
 
 ### Goroutine ownership
 
@@ -1129,3 +1128,44 @@ must contain:
 If Go is larger, this record must explain which retained safety proof or
 operator behavior accounts for it. LOC is evidence about comprehensibility,
 not a target.
+
+### Landed kernel evidence
+
+SQLite/driver proof on integrated head `fc533eb`:
+
+- Selected the CGO-free `github.com/ncruces/go-sqlite3` v0.35.3 driver after
+  running the same initial build/open comparison against `modernc.org/sqlite`
+  v1.57.0; no comparator or fallback dependency remains.
+- Proved exact per-checkout `foreign_keys=ON`, `journal_mode=WAL`,
+  `synchronous=FULL` and `busy_timeout=5000`, including poisoned pooled
+  connections and verified replacements.
+- Proved literal `BEGIN IMMEDIATE`, same-process and independent-process writer
+  exclusion, concurrent WAL readers, cancellation of a blocked writer,
+  guarded state/event atomicity, SIGKILL before/after commit, reopen, and
+  bounded connection/goroutine/file-descriptor ownership.
+- Test-only driver faults distinguish begin, commit and rollback response
+  ambiguity before and after the underlying call. Each returns typed
+  outcome-unknown, preserves its cause, discards the exact physical
+  connection, never replays the callback, and exposes zero or one durable
+  footprint as appropriate. Rollback pre/post forwarding has an independent
+  call-order witness because its durable footprint is intentionally identical.
+- Mutations killed include changed busy policy, skipped replacement
+  verification, timeout mistaken for crash, swallowed commit response error,
+  retained ambiguous connection, leaked cancellation goroutine, plain
+  cancellation without outcome-unknown, retained rollback-ambiguous
+  connection, and collapsed rollback pre/post cuts. Mutation code was removed.
+- The original author ran `go test ./... -count=3` in `30.731s`,
+  `go test -race ./... -count=1` in `13.798s`, `go vet ./...`,
+  `go mod verify`, formatting/diff checks and a clean process/temp census on
+  exact proof head `7e808236`. A fresh independent reviewer returned ALLOW on
+  that exact head after three earlier BLOCK/fix cycles.
+- After unchanged cherry-pick, the orchestrator ran CGO-free
+  `go test ./... -count=1 -timeout=120s` in package time `10.521s`,
+  `go test -race ./... -count=1 -timeout=150s` in package time `13.876s`,
+  `go vet ./...`, `go mod verify`, `gofmt -d`, `git diff --check`, and clean
+  test-temp/process censuses. The first orchestrator attempt did not compile:
+  the read-only owner module-cache parent could not be created; rerunning from
+  a task-owned `/private/tmp` cache passed and did not touch a Dark Factory
+  home.
+- Darwin ARM64 executed natively. Darwin AMD64 and Linux AMD64 CGO-free test
+  binaries cross-built successfully; Linux runtime behavior remains deferred.
