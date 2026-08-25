@@ -1,0 +1,304 @@
+package kernel
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"strings"
+)
+
+const (
+	applicationID = 0x4446474f
+	userVersion   = 1
+)
+
+var schemaStatements = []string{
+	// This slice deliberately creates only the eight kernel authority tables.
+	// Final-v1 agent-message, verification, removal, and checkpoint state is
+	// absent until its owning slice can add it before the incompatible v1 ships.
+	`CREATE TABLE factory (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    dispatch_enabled INTEGER NOT NULL CHECK (dispatch_enabled IN (0, 1)),
+    capacity INTEGER NOT NULL CHECK (capacity BETWEEN 1 AND 1024),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    next_invalidation_sequence INTEGER NOT NULL CHECK (next_invalidation_sequence >= 1),
+    invalidation_floor INTEGER NOT NULL CHECK (invalidation_floor >= 1 AND invalidation_floor <= next_invalidation_sequence),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0)
+) STRICT, WITHOUT ROWID`,
+	`CREATE TABLE projects (
+    id BLOB PRIMARY KEY CHECK (length(id) = 16),
+    name TEXT NOT NULL CHECK (length(CAST(name AS BLOB)) BETWEEN 1 AND 128),
+    root TEXT NOT NULL CHECK (length(CAST(root AS BLOB)) BETWEEN 1 AND 4096 AND substr(root, 1, 1) = '/'),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms)
+) STRICT, WITHOUT ROWID`,
+	`CREATE UNIQUE INDEX projects_root_unique ON projects(root)`,
+	`CREATE TABLE agents (
+    id BLOB PRIMARY KEY CHECK (length(id) = 16),
+    project_id BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id),
+    name TEXT NOT NULL CHECK (length(CAST(name AS BLOB)) BETWEEN 1 AND 128),
+    role TEXT NOT NULL CHECK (role IN ('orchestrator', 'worker')),
+    provider TEXT NOT NULL CHECK (provider IN ('claude_code', 'codex', 'shell')),
+    execution_mode TEXT NOT NULL CHECK (execution_mode IN ('plan_only', 'workspace_write', 'unrestricted')),
+    model TEXT CHECK (model IS NULL OR length(CAST(model AS BLOB)) BETWEEN 1 AND 128),
+    reasoning_effort TEXT CHECK (reasoning_effort IS NULL OR reasoning_effort IN ('low', 'medium', 'high', 'xhigh', 'max', 'ultra')),
+    paused INTEGER NOT NULL CHECK (paused IN (0, 1)),
+    tool_budget_limit INTEGER NOT NULL CHECK (tool_budget_limit BETWEEN 1 AND 1000000000),
+    tool_calls_used INTEGER NOT NULL CHECK (tool_calls_used >= 0 AND tool_calls_used <= tool_budget_limit),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
+    CHECK (provider <> 'shell' OR execution_mode = 'unrestricted')
+) STRICT, WITHOUT ROWID`,
+	`CREATE UNIQUE INDEX agents_id_project_unique ON agents(id, project_id)`,
+	`CREATE TABLE tasks (
+    id BLOB PRIMARY KEY CHECK (length(id) = 16),
+    project_id BLOB NOT NULL CHECK (length(project_id) = 16),
+    assigned_agent_id BLOB NOT NULL CHECK (length(assigned_agent_id) = 16),
+    incarnation_id BLOB NOT NULL CHECK (length(incarnation_id) = 16),
+    work_revision INTEGER NOT NULL CHECK (work_revision >= 1),
+    title TEXT NOT NULL CHECK (length(CAST(title AS BLOB)) BETWEEN 1 AND 1024),
+    body TEXT NOT NULL CHECK (length(CAST(body AS BLOB)) <= 131072),
+    status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'blocked', 'succeeded', 'failed', 'cancelled')),
+    priority INTEGER NOT NULL CHECK (priority BETWEEN -1000000 AND 1000000),
+    blocked_reason TEXT CHECK (blocked_reason IS NULL OR length(CAST(blocked_reason AS BLOB)) BETWEEN 1 AND 4096),
+    result TEXT CHECK (result IS NULL OR length(CAST(result AS BLOB)) <= 131072),
+    completed_at_ms INTEGER CHECK (completed_at_ms IS NULL OR completed_at_ms >= 0),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
+    FOREIGN KEY (assigned_agent_id, project_id) REFERENCES agents(id, project_id),
+    CHECK (
+        (status IN ('queued', 'running') AND blocked_reason IS NULL AND result IS NULL AND completed_at_ms IS NULL) OR
+        (status = 'blocked' AND blocked_reason IS NOT NULL AND result IS NULL AND completed_at_ms IS NULL) OR
+        (status = 'succeeded' AND blocked_reason IS NULL AND completed_at_ms IS NOT NULL) OR
+        (status IN ('failed', 'cancelled') AND blocked_reason IS NULL AND result IS NULL AND completed_at_ms IS NOT NULL)
+    )
+) STRICT, WITHOUT ROWID`,
+	`CREATE UNIQUE INDEX tasks_id_project_incarnation_unique ON tasks(id, project_id, incarnation_id)`,
+	`CREATE UNIQUE INDEX tasks_incarnation_unique ON tasks(incarnation_id)`,
+	`CREATE INDEX tasks_canonical_queue ON tasks(assigned_agent_id, status, priority DESC, created_at_ms ASC, id ASC)`,
+	`CREATE TABLE changes (
+    id BLOB PRIMARY KEY CHECK (length(id) = 16),
+    project_id BLOB NOT NULL CHECK (length(project_id) = 16),
+    task_id BLOB NOT NULL CHECK (length(task_id) = 16),
+    task_incarnation_id BLOB NOT NULL CHECK (length(task_incarnation_id) = 16),
+    phase TEXT NOT NULL CHECK (phase IN ('reserved', 'selected', 'available')),
+    source_root TEXT NOT NULL CHECK (length(CAST(source_root AS BLOB)) BETWEEN 1 AND 4096 AND substr(source_root, 1, 1) = '/'),
+    object_format TEXT CHECK (object_format IS NULL OR object_format IN ('sha1', 'sha256')),
+    selected_commit BLOB,
+    repository_root TEXT CHECK (repository_root IS NULL OR (length(CAST(repository_root AS BLOB)) BETWEEN 1 AND 4096 AND substr(repository_root, 1, 1) = '/')),
+    repository_dev INTEGER CHECK (repository_dev IS NULL OR repository_dev >= 0),
+    repository_inode INTEGER CHECK (repository_inode IS NULL OR repository_inode > 0),
+    selected_at_ms INTEGER CHECK (selected_at_ms IS NULL OR selected_at_ms >= 0),
+    tree_digest BLOB CHECK (tree_digest IS NULL OR length(tree_digest) = 32),
+    file_count INTEGER CHECK (file_count IS NULL OR file_count BETWEEN 0 AND 100000),
+    total_bytes INTEGER CHECK (total_bytes IS NULL OR total_bytes BETWEEN 0 AND 1073741824),
+    source_dev INTEGER CHECK (source_dev IS NULL OR source_dev >= 0),
+    source_inode INTEGER CHECK (source_inode IS NULL OR source_inode > 0),
+    available_at_ms INTEGER CHECK (available_at_ms IS NULL OR available_at_ms >= 0),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
+    FOREIGN KEY (task_id, project_id, task_incarnation_id) REFERENCES tasks(id, project_id, incarnation_id),
+    CHECK ((object_format IS NULL AND selected_commit IS NULL) OR (object_format = 'sha1' AND length(selected_commit) = 20) OR (object_format = 'sha256' AND length(selected_commit) = 32)),
+    CHECK (
+        (phase = 'reserved' AND object_format IS NULL AND selected_commit IS NULL AND repository_root IS NULL AND repository_dev IS NULL AND repository_inode IS NULL AND selected_at_ms IS NULL AND tree_digest IS NULL AND file_count IS NULL AND total_bytes IS NULL AND source_dev IS NULL AND source_inode IS NULL AND available_at_ms IS NULL) OR
+        (phase = 'selected' AND object_format IS NOT NULL AND selected_commit IS NOT NULL AND repository_root IS NOT NULL AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL AND selected_at_ms IS NOT NULL AND tree_digest IS NULL AND file_count IS NULL AND total_bytes IS NULL AND source_dev IS NULL AND source_inode IS NULL AND available_at_ms IS NULL) OR
+        (phase = 'available' AND object_format IS NOT NULL AND selected_commit IS NOT NULL AND repository_root IS NOT NULL AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL AND selected_at_ms IS NOT NULL AND tree_digest IS NOT NULL AND file_count IS NOT NULL AND total_bytes IS NOT NULL AND source_dev IS NOT NULL AND source_inode IS NOT NULL AND available_at_ms IS NOT NULL)
+    )
+) STRICT, WITHOUT ROWID`,
+	`CREATE UNIQUE INDEX changes_id_project_task_incarnation_unique ON changes(id, project_id, task_id, task_incarnation_id)`,
+	`CREATE UNIQUE INDEX changes_task_incarnation_unique ON changes(project_id, task_id, task_incarnation_id)`,
+	`CREATE UNIQUE INDEX changes_source_root_unique ON changes(source_root)`,
+	`CREATE TABLE runs (
+    id BLOB PRIMARY KEY CHECK (length(id) = 16),
+    project_id BLOB NOT NULL CHECK (length(project_id) = 16),
+    agent_id BLOB NOT NULL CHECK (length(agent_id) = 16),
+    task_id BLOB NOT NULL CHECK (length(task_id) = 16),
+    task_incarnation_id BLOB NOT NULL CHECK (length(task_incarnation_id) = 16),
+    admitted_task_work_revision INTEGER NOT NULL CHECK (admitted_task_work_revision >= 1),
+    change_id BLOB CHECK (change_id IS NULL OR length(change_id) = 16),
+    role TEXT NOT NULL CHECK (role IN ('orchestrator', 'worker')),
+    provider TEXT NOT NULL CHECK (provider IN ('claude_code', 'codex', 'shell')),
+    execution_mode TEXT NOT NULL CHECK (execution_mode IN ('plan_only', 'workspace_write', 'unrestricted')),
+    model TEXT CHECK (model IS NULL OR length(CAST(model AS BLOB)) BETWEEN 1 AND 128),
+    reasoning_effort TEXT CHECK (reasoning_effort IS NULL OR reasoning_effort IN ('low', 'medium', 'high', 'xhigh', 'max', 'ultra')),
+    phase TEXT NOT NULL CHECK (phase IN ('admitted', 'running', 'finalizing', 'terminal')),
+    proposal_kind TEXT CHECK (proposal_kind IS NULL OR proposal_kind IN ('succeeded', 'blocked', 'failed', 'cancelled')),
+    proposal_code TEXT CHECK (proposal_code IS NULL OR proposal_code IN ('spawn', 'activation', 'source', 'runner_exit', 'protocol', 'internal')),
+    proposal_detail TEXT CHECK (proposal_detail IS NULL OR length(CAST(proposal_detail AS BLOB)) BETWEEN 1 AND 4096),
+    proposal_result TEXT CHECK (proposal_result IS NULL OR length(CAST(proposal_result AS BLOB)) <= 131072),
+    terminal_kind TEXT CHECK (terminal_kind IS NULL OR terminal_kind IN ('succeeded', 'blocked', 'failed', 'cancelled')),
+    terminal_code TEXT CHECK (terminal_code IS NULL OR terminal_code IN ('spawn', 'activation', 'source', 'runner_exit', 'protocol', 'internal')),
+    terminal_detail TEXT CHECK (terminal_detail IS NULL OR length(CAST(terminal_detail AS BLOB)) BETWEEN 1 AND 4096),
+    terminal_result TEXT CHECK (terminal_result IS NULL OR length(CAST(terminal_result AS BLOB)) <= 131072),
+    credential_digest BLOB NOT NULL CHECK (length(credential_digest) = 32),
+    credential_revoked_at_ms INTEGER CHECK (credential_revoked_at_ms IS NULL OR credential_revoked_at_ms >= 0),
+    runner_exit_sequence INTEGER CHECK (runner_exit_sequence IS NULL OR runner_exit_sequence >= 1),
+    runner_exit_code INTEGER CHECK (runner_exit_code IS NULL OR runner_exit_code >= 0),
+    runner_exit_signal INTEGER CHECK (runner_exit_signal IS NULL OR runner_exit_signal > 0),
+    runner_exit_at_ms INTEGER CHECK (runner_exit_at_ms IS NULL OR runner_exit_at_ms >= 0),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    admitted_at_ms INTEGER NOT NULL CHECK (admitted_at_ms >= 0),
+    running_at_ms INTEGER CHECK (running_at_ms IS NULL OR running_at_ms >= admitted_at_ms),
+    finalizing_at_ms INTEGER CHECK (finalizing_at_ms IS NULL OR finalizing_at_ms >= admitted_at_ms),
+    terminal_at_ms INTEGER CHECK (terminal_at_ms IS NULL OR terminal_at_ms >= admitted_at_ms),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= admitted_at_ms),
+    FOREIGN KEY (agent_id, project_id) REFERENCES agents(id, project_id),
+    FOREIGN KEY (task_id, project_id, task_incarnation_id) REFERENCES tasks(id, project_id, incarnation_id),
+    FOREIGN KEY (change_id, project_id, task_id, task_incarnation_id) REFERENCES changes(id, project_id, task_id, task_incarnation_id),
+    CHECK ((role = 'worker' AND change_id IS NOT NULL) OR (role = 'orchestrator' AND change_id IS NULL)),
+    CHECK (provider <> 'shell' OR execution_mode = 'unrestricted'),
+    CHECK ((proposal_kind IS NULL AND proposal_code IS NULL AND proposal_detail IS NULL AND proposal_result IS NULL) OR (proposal_kind = 'succeeded' AND proposal_code IS NULL AND proposal_detail IS NULL AND proposal_result IS NOT NULL) OR (proposal_kind = 'blocked' AND proposal_code IS NULL AND proposal_detail IS NOT NULL AND proposal_result IS NULL) OR (proposal_kind = 'failed' AND proposal_code IS NOT NULL AND proposal_result IS NULL) OR (proposal_kind = 'cancelled' AND proposal_code IS NULL AND proposal_detail IS NOT NULL AND proposal_result IS NULL)),
+    CHECK ((terminal_kind IS NULL AND terminal_code IS NULL AND terminal_detail IS NULL AND terminal_result IS NULL) OR (terminal_kind = 'succeeded' AND terminal_code IS NULL AND terminal_detail IS NULL AND terminal_result IS NOT NULL) OR (terminal_kind = 'blocked' AND terminal_code IS NULL AND terminal_detail IS NOT NULL AND terminal_result IS NULL) OR (terminal_kind = 'failed' AND terminal_code IS NOT NULL AND terminal_result IS NULL) OR (terminal_kind = 'cancelled' AND terminal_code IS NULL AND terminal_detail IS NOT NULL AND terminal_result IS NULL)),
+    CHECK ((phase = 'admitted' AND running_at_ms IS NULL AND finalizing_at_ms IS NULL AND terminal_at_ms IS NULL AND proposal_kind IS NULL AND terminal_kind IS NULL AND credential_revoked_at_ms IS NULL) OR (phase = 'running' AND running_at_ms IS NOT NULL AND finalizing_at_ms IS NULL AND terminal_at_ms IS NULL AND proposal_kind IS NULL AND terminal_kind IS NULL AND credential_revoked_at_ms IS NULL) OR (phase = 'finalizing' AND finalizing_at_ms IS NOT NULL AND terminal_at_ms IS NULL AND proposal_kind IS NOT NULL AND terminal_kind IS NULL AND credential_revoked_at_ms IS NOT NULL) OR (phase = 'terminal' AND finalizing_at_ms IS NOT NULL AND terminal_at_ms IS NOT NULL AND proposal_kind IS NOT NULL AND terminal_kind IS NOT NULL AND credential_revoked_at_ms IS NOT NULL)),
+    CHECK (phase <> 'terminal' OR (terminal_kind = proposal_kind AND terminal_code IS proposal_code AND terminal_detail IS proposal_detail AND terminal_result IS proposal_result)),
+    CHECK ((runner_exit_sequence IS NULL AND runner_exit_code IS NULL AND runner_exit_signal IS NULL AND runner_exit_at_ms IS NULL) OR (runner_exit_sequence IS NOT NULL AND runner_exit_at_ms IS NOT NULL AND ((runner_exit_code IS NOT NULL AND runner_exit_signal IS NULL) OR (runner_exit_code IS NULL AND runner_exit_signal IS NOT NULL))))
+) STRICT, WITHOUT ROWID`,
+	`CREATE UNIQUE INDEX runs_credential_digest_unique ON runs(credential_digest)`,
+	`CREATE UNIQUE INDEX runs_one_open_per_agent ON runs(agent_id) WHERE phase <> 'terminal'`,
+	`CREATE UNIQUE INDEX runs_one_open_per_task_incarnation ON runs(task_id, task_incarnation_id) WHERE phase <> 'terminal'`,
+	`CREATE UNIQUE INDEX runs_one_open_per_change ON runs(change_id) WHERE change_id IS NOT NULL AND phase <> 'terminal'`,
+	`CREATE INDEX runs_recoverable ON runs(phase, admitted_at_ms, id) WHERE phase <> 'terminal'`,
+	`CREATE TABLE resources (
+    id BLOB PRIMARY KEY CHECK (length(id) = 16),
+    run_id BLOB NOT NULL CHECK (length(run_id) = 16) REFERENCES runs(id),
+    kind TEXT NOT NULL CHECK (kind IN ('runtime_root', 'runner_process', 'provider_process', 'provider_group')),
+    state TEXT NOT NULL CHECK (state IN ('declared', 'active', 'releasing', 'unresolved', 'released')),
+    path TEXT CHECK (path IS NULL OR (length(CAST(path AS BLOB)) BETWEEN 1 AND 4096 AND substr(path, 1, 1) = '/')),
+    path_dev INTEGER CHECK (path_dev IS NULL OR path_dev >= 0),
+    path_inode INTEGER CHECK (path_inode IS NULL OR path_inode > 0),
+    pid INTEGER CHECK (pid IS NULL OR pid > 1),
+    pgid INTEGER CHECK (pgid IS NULL OR pgid > 1),
+    birth_digest BLOB CHECK (birth_digest IS NULL OR length(birth_digest) = 32),
+    unresolved_reason TEXT CHECK (unresolved_reason IS NULL OR length(CAST(unresolved_reason AS BLOB)) BETWEEN 1 AND 4096),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    declared_at_ms INTEGER NOT NULL CHECK (declared_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= declared_at_ms),
+    released_at_ms INTEGER CHECK (released_at_ms IS NULL OR released_at_ms >= declared_at_ms),
+    CHECK ((kind = 'runtime_root' AND path IS NOT NULL AND pid IS NULL AND pgid IS NULL AND birth_digest IS NULL) OR (kind IN ('runner_process', 'provider_process', 'provider_group') AND path IS NULL AND path_dev IS NULL AND path_inode IS NULL)),
+    CHECK ((path_dev IS NULL AND path_inode IS NULL) OR (path_dev IS NOT NULL AND path_inode IS NOT NULL)),
+    CHECK ((pid IS NULL AND pgid IS NULL AND birth_digest IS NULL) OR (pid IS NOT NULL AND pgid IS NOT NULL AND birth_digest IS NOT NULL)),
+    CHECK (state <> 'active' OR (kind = 'runtime_root' AND path_dev IS NOT NULL) OR (kind IN ('runner_process', 'provider_process', 'provider_group') AND pid IS NOT NULL)),
+    CHECK ((state = 'released') = (released_at_ms IS NOT NULL)),
+    CHECK (state <> 'unresolved' OR unresolved_reason IS NOT NULL)
+) STRICT, WITHOUT ROWID`,
+	`CREATE UNIQUE INDEX resources_run_kind_unique ON resources(run_id, kind)`,
+	`CREATE INDEX resources_recoverable ON resources(state, updated_at_ms, id) WHERE state <> 'released'`,
+	`CREATE TABLE invalidations (
+    sequence INTEGER PRIMARY KEY CHECK (sequence >= 1),
+    occurred_at_ms INTEGER NOT NULL CHECK (occurred_at_ms >= 0),
+    entity_kind TEXT NOT NULL CHECK (entity_kind IN ('factory', 'project', 'agent', 'task', 'change', 'run')),
+    entity_id BLOB NOT NULL CHECK (length(entity_id) = 16),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    deleted INTEGER NOT NULL CHECK (deleted IN (0, 1))
+) STRICT`,
+	`CREATE UNIQUE INDEX invalidations_entity_revision_unique ON invalidations(entity_kind, entity_id, revision)`,
+}
+
+type schemaObject struct {
+	kind string
+	name string
+	sql  string
+}
+
+func expectedSchema() map[string]schemaObject {
+	result := make(map[string]schemaObject, len(schemaStatements))
+	for _, statement := range schemaStatements {
+		fields := strings.Fields(statement)
+		kind := "table"
+		nameAt := 2
+		if fields[1] == "UNIQUE" {
+			kind = "index"
+			nameAt = 3
+		} else if fields[1] == "INDEX" {
+			kind = "index"
+		}
+		name := fields[nameAt]
+		result[name] = schemaObject{kind: kind, name: name, sql: strings.TrimSpace(statement)}
+	}
+	return result
+}
+
+func inspectIdentity(ctx context.Context, queryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}) (int, int, error) {
+	var appID, version int
+	if err := queryer.QueryRowContext(ctx, "PRAGMA application_id").Scan(&appID); err != nil {
+		return 0, 0, fmt.Errorf("read sqlite application id: %w", err)
+	}
+	if err := queryer.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		return 0, 0, fmt.Errorf("read sqlite user version: %w", err)
+	}
+	return appID, version, nil
+}
+
+func validateExactSchema(ctx context.Context, queryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}) error {
+	appID, version, err := inspectIdentity(ctx, queryer)
+	if err != nil {
+		return err
+	}
+	if appID != applicationID || version != userVersion {
+		return fmt.Errorf("%w: application_id=%#x user_version=%d", ErrForeignDatabase, appID, version)
+	}
+
+	expected := expectedSchema()
+	rows, err := queryer.QueryContext(ctx, `SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name`)
+	if err != nil {
+		return fmt.Errorf("read sqlite schema: %w", err)
+	}
+	defer rows.Close()
+	seen := make(map[string]bool, len(expected))
+	for rows.Next() {
+		var kind, name, definition string
+		if err := rows.Scan(&kind, &name, &definition); err != nil {
+			return fmt.Errorf("scan sqlite schema: %w", err)
+		}
+		want, ok := expected[name]
+		if !ok || want.kind != kind || want.sql != definition {
+			return fmt.Errorf("%w: unexpected or changed schema object %s %s", ErrForeignDatabase, kind, name)
+		}
+		seen[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate sqlite schema: %w", err)
+	}
+	if len(seen) != len(expected) {
+		return fmt.Errorf("%w: schema has %d of %d required objects", ErrForeignDatabase, len(seen), len(expected))
+	}
+
+	var violations int
+	foreignKeys, err := queryer.QueryContext(ctx, "PRAGMA foreign_key_check")
+	if err != nil {
+		return fmt.Errorf("check foreign keys: %w", err)
+	}
+	for foreignKeys.Next() {
+		violations++
+	}
+	if err := foreignKeys.Close(); err != nil {
+		return fmt.Errorf("close foreign key check: %w", err)
+	}
+	if violations != 0 {
+		return fmt.Errorf("%w: %d foreign key violations", ErrCorruptState, violations)
+	}
+	return nil
+}
+
+func schemaIsEmpty(ctx context.Context, queryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}) (bool, error) {
+	appID, version, err := inspectIdentity(ctx, queryer)
+	if err != nil {
+		return false, err
+	}
+	var objects int
+	if err := queryer.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'`).Scan(&objects); err != nil {
+		return false, fmt.Errorf("count sqlite schema objects: %w", err)
+	}
+	return appID == 0 && version == 0 && objects == 0, nil
+}

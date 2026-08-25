@@ -1,0 +1,426 @@
+package kernel
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"math"
+	"time"
+)
+
+type rowScanner interface {
+	Scan(...any) error
+}
+
+type rowQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func projectByID(ctx context.Context, queryer rowQueryer, id ProjectID) (Project, bool, error) {
+	if id.zero() {
+		return Project{}, false, fmt.Errorf("%w: zero project identifier", errInvalidValue)
+	}
+	return scanProject(queryer.QueryRowContext(ctx, `SELECT id, name, root, revision, created_at_ms, updated_at_ms FROM projects WHERE id = ?`, id.Bytes()))
+}
+
+func scanProject(scanner rowScanner) (Project, bool, error) {
+	var rawID []byte
+	var name, root string
+	var revision, createdAt, updatedAt int64
+	if err := scanner.Scan(&rawID, &name, &root, &revision, &createdAt, &updatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Project{}, false, nil
+		}
+		return Project{}, false, fmt.Errorf("scan project: %w", err)
+	}
+	id, err := ProjectIDFromBytes(rawID)
+	if err != nil || byteLen(name) < 1 || byteLen(name) > 128 || byteLen(root) < 1 || byteLen(root) > 4096 || root[0] != '/' || updatedAt < createdAt {
+		return Project{}, false, fmt.Errorf("%w: invalid project row", ErrCorruptState)
+	}
+	rev, err := NewRevision(revision)
+	if err != nil {
+		return Project{}, false, fmt.Errorf("%w: invalid project revision", ErrCorruptState)
+	}
+	created, err := NewUnixMillis(createdAt)
+	if err != nil {
+		return Project{}, false, fmt.Errorf("%w: invalid project creation time", ErrCorruptState)
+	}
+	updated, err := NewUnixMillis(updatedAt)
+	if err != nil {
+		return Project{}, false, fmt.Errorf("%w: invalid project update time", ErrCorruptState)
+	}
+	return Project{ID: id, Name: name, Root: root, Revision: rev, CreatedAt: created, UpdatedAt: updated}, true, nil
+}
+
+func agentByID(ctx context.Context, queryer rowQueryer, id AgentID) (Agent, bool, error) {
+	if id.zero() {
+		return Agent{}, false, fmt.Errorf("%w: zero agent identifier", errInvalidValue)
+	}
+	return scanAgent(queryer.QueryRowContext(ctx, `SELECT id, project_id, name, role, provider, execution_mode, model, reasoning_effort, paused, tool_budget_limit, tool_calls_used, revision, created_at_ms, updated_at_ms FROM agents WHERE id = ?`, id.Bytes()))
+}
+
+func scanAgent(scanner rowScanner) (Agent, bool, error) {
+	var rawID, rawProjectID []byte
+	var name, rawRole, rawProvider, rawMode string
+	var model, effort sql.NullString
+	var paused, budget, used, revision, createdAt, updatedAt int64
+	if err := scanner.Scan(&rawID, &rawProjectID, &name, &rawRole, &rawProvider, &rawMode, &model, &effort, &paused, &budget, &used, &revision, &createdAt, &updatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Agent{}, false, nil
+		}
+		return Agent{}, false, fmt.Errorf("scan agent: %w", err)
+	}
+	id, idErr := AgentIDFromBytes(rawID)
+	projectID, projectErr := ProjectIDFromBytes(rawProjectID)
+	role, roleErr := parseAgentRole(rawRole)
+	provider, providerErr := parseProvider(rawProvider)
+	mode, modeErr := parseExecutionMode(rawMode)
+	if idErr != nil || projectErr != nil || roleErr != nil || providerErr != nil || modeErr != nil || byteLen(name) < 1 || byteLen(name) > 128 || (paused != 0 && paused != 1) || budget < 1 || budget > 1_000_000_000 || used < 0 || used > budget || updatedAt < createdAt {
+		return Agent{}, false, fmt.Errorf("%w: invalid agent row", ErrCorruptState)
+	}
+	if model.Valid && (byteLen(model.String) < 1 || byteLen(model.String) > 128) || effort.Valid && !validReasoningEffort(effort.String) || provider == ProviderShell && mode != ExecutionUnrestricted {
+		return Agent{}, false, fmt.Errorf("%w: invalid agent controls", ErrCorruptState)
+	}
+	rev, revisionErr := NewRevision(revision)
+	created, createdErr := NewUnixMillis(createdAt)
+	updated, updatedErr := NewUnixMillis(updatedAt)
+	if revisionErr != nil || createdErr != nil || updatedErr != nil {
+		return Agent{}, false, fmt.Errorf("%w: invalid agent revision or time", ErrCorruptState)
+	}
+	return Agent{
+		ID: id, ProjectID: projectID, Name: name, Role: role, Provider: provider,
+		ExecutionMode: mode, Model: nullStringValue(model), ReasoningEffort: nullStringValue(effort),
+		Paused: paused == 1, ToolBudgetLimit: uint64(budget), ToolCallsUsed: uint64(used),
+		Revision: rev, CreatedAt: created, UpdatedAt: updated,
+	}, true, nil
+}
+
+func taskByID(ctx context.Context, queryer rowQueryer, id TaskID) (Task, bool, error) {
+	if id.zero() {
+		return Task{}, false, fmt.Errorf("%w: zero task identifier", errInvalidValue)
+	}
+	return scanTask(queryer.QueryRowContext(ctx, `SELECT id, project_id, assigned_agent_id, incarnation_id, work_revision, title, body, status, priority, blocked_reason, result, completed_at_ms, revision, created_at_ms, updated_at_ms FROM tasks WHERE id = ?`, id.Bytes()))
+}
+
+func scanTask(scanner rowScanner) (Task, bool, error) {
+	var rawID, rawProjectID, rawAgentID, rawIncarnationID []byte
+	var workRevision, priority, revision, createdAt, updatedAt int64
+	var title, body, rawStatus string
+	var blockedReason, result sql.NullString
+	var completedAt sql.NullInt64
+	if err := scanner.Scan(&rawID, &rawProjectID, &rawAgentID, &rawIncarnationID, &workRevision, &title, &body, &rawStatus, &priority, &blockedReason, &result, &completedAt, &revision, &createdAt, &updatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Task{}, false, nil
+		}
+		return Task{}, false, fmt.Errorf("scan task: %w", err)
+	}
+	id, idErr := TaskIDFromBytes(rawID)
+	projectID, projectErr := ProjectIDFromBytes(rawProjectID)
+	agentID, agentErr := AgentIDFromBytes(rawAgentID)
+	incarnationID, incarnationErr := IncarnationIDFromBytes(rawIncarnationID)
+	workRev, workRevisionErr := NewRevision(workRevision)
+	status, statusErr := parseTaskStatus(rawStatus)
+	rev, revisionErr := NewRevision(revision)
+	created, createdErr := NewUnixMillis(createdAt)
+	updated, updatedErr := NewUnixMillis(updatedAt)
+	if idErr != nil || projectErr != nil || agentErr != nil || incarnationErr != nil || workRevisionErr != nil || statusErr != nil || revisionErr != nil || createdErr != nil || updatedErr != nil || byteLen(title) < 1 || byteLen(title) > 1024 || byteLen(body) > 131072 || priority < -1_000_000 || priority > 1_000_000 || updatedAt < createdAt {
+		return Task{}, false, fmt.Errorf("%w: invalid task row", ErrCorruptState)
+	}
+	if blockedReason.Valid && (byteLen(blockedReason.String) < 1 || byteLen(blockedReason.String) > 4096) || result.Valid && byteLen(result.String) > 131072 {
+		return Task{}, false, fmt.Errorf("%w: invalid task result fields", ErrCorruptState)
+	}
+	validState := false
+	switch status {
+	case TaskQueued, TaskRunning:
+		validState = !blockedReason.Valid && !result.Valid && !completedAt.Valid
+	case TaskBlocked:
+		validState = blockedReason.Valid && !result.Valid && !completedAt.Valid
+	case TaskSucceeded:
+		validState = !blockedReason.Valid && completedAt.Valid
+	case TaskFailed, TaskCancelled:
+		validState = !blockedReason.Valid && !result.Valid && completedAt.Valid
+	}
+	if !validState || completedAt.Valid && completedAt.Int64 < 0 {
+		return Task{}, false, fmt.Errorf("%w: inconsistent task state", ErrCorruptState)
+	}
+	var completed *UnixMillis
+	if completedAt.Valid {
+		value, err := NewUnixMillis(completedAt.Int64)
+		if err != nil {
+			return Task{}, false, fmt.Errorf("%w: invalid task completion time", ErrCorruptState)
+		}
+		completed = &value
+	}
+	return Task{
+		ID: id, ProjectID: projectID, AssignedAgentID: agentID, IncarnationID: incarnationID,
+		WorkRevision: workRev, Title: title, Body: body, Status: status, Priority: priority,
+		BlockedReason: nullStringValue(blockedReason), Result: nullStringValue(result), CompletedAt: completed,
+		Revision: rev, CreatedAt: created, UpdatedAt: updated,
+	}, true, nil
+}
+
+func factoryState(ctx context.Context, queryer rowQueryer) (FactoryState, error) {
+	var dispatch, capacity, revision, next, floor int64
+	if err := queryer.QueryRowContext(ctx, `SELECT dispatch_enabled, capacity, revision, next_invalidation_sequence, invalidation_floor FROM factory WHERE singleton = 1`).Scan(&dispatch, &capacity, &revision, &next, &floor); err != nil {
+		return FactoryState{}, fmt.Errorf("read factory: %w", err)
+	}
+	if dispatch != 0 && dispatch != 1 || capacity < 1 || capacity > MaxFactoryCapacity || next < 1 || floor < 1 || floor > next {
+		return FactoryState{}, fmt.Errorf("%w: invalid factory controls", ErrCorruptState)
+	}
+	rev, revErr := NewRevision(revision)
+	head, headErr := NewEventSequence(next - 1)
+	floorSequence, floorErr := NewEventSequence(floor)
+	if revErr != nil || headErr != nil || floorErr != nil {
+		return FactoryState{}, fmt.Errorf("%w: invalid factory revision or invalidation metadata", ErrCorruptState)
+	}
+	return FactoryState{DispatchEnabled: dispatch == 1, Capacity: uint16(capacity), Revision: rev, Head: head, Floor: floorSequence}, nil
+}
+
+func (store *Store) Factory(ctx context.Context) (FactoryState, error) {
+	connection, err := store.readerConnection(ctx)
+	if err != nil {
+		return FactoryState{}, err
+	}
+	defer connection.Close()
+	return factoryState(ctx, connection)
+}
+
+func (store *Store) Project(ctx context.Context, id ProjectID) (Project, bool, error) {
+	connection, err := store.readerConnection(ctx)
+	if err != nil {
+		return Project{}, false, err
+	}
+	defer connection.Close()
+	return projectByID(ctx, connection, id)
+}
+
+func (store *Store) Agent(ctx context.Context, id AgentID) (Agent, bool, error) {
+	connection, err := store.readerConnection(ctx)
+	if err != nil {
+		return Agent{}, false, err
+	}
+	defer connection.Close()
+	return agentByID(ctx, connection, id)
+}
+
+func (store *Store) Task(ctx context.Context, id TaskID) (Task, bool, error) {
+	connection, err := store.readerConnection(ctx)
+	if err != nil {
+		return Task{}, false, err
+	}
+	defer connection.Close()
+	return taskByID(ctx, connection, id)
+}
+
+type readTx struct {
+	connection *sql.Conn
+	active     bool
+}
+
+func (store *Store) beginRead(ctx context.Context) (*readTx, error) {
+	connection, err := store.readerConnection(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := connection.ExecContext(ctx, "BEGIN"); err != nil {
+		discardConnection(connection)
+		return nil, fmt.Errorf("begin sqlite read: %w", err)
+	}
+	return &readTx{connection: connection, active: true}, nil
+}
+
+func (tx *readTx) Close() error {
+	if !tx.active {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Duration(busyMilliseconds)*time.Millisecond)
+	defer cancel()
+	_, rollbackErr := tx.connection.ExecContext(ctx, "ROLLBACK")
+	if rollbackErr != nil {
+		discardConnection(tx.connection)
+	} else {
+		rollbackErr = tx.connection.Close()
+	}
+	tx.active = false
+	return rollbackErr
+}
+
+func (store *Store) Snapshot(ctx context.Context) (DashboardSnapshot, error) {
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return DashboardSnapshot{}, err
+	}
+	defer tx.Close()
+	state, err := factoryState(ctx, tx.connection)
+	if err != nil {
+		return DashboardSnapshot{}, err
+	}
+	var activeRuns int64
+	if err := tx.connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs WHERE phase <> 'terminal'`).Scan(&activeRuns); err != nil {
+		return DashboardSnapshot{}, fmt.Errorf("count active runs: %w", err)
+	}
+	if activeRuns < 0 || activeRuns > math.MaxUint16 {
+		return DashboardSnapshot{}, fmt.Errorf("%w: invalid active run count", ErrCorruptState)
+	}
+	snapshot := DashboardSnapshot{
+		Head:    state.Head,
+		Factory: FactorySummary{DispatchEnabled: state.DispatchEnabled, Capacity: state.Capacity, ActiveRuns: uint16(activeRuns), Revision: state.Revision},
+	}
+	count := 0
+	projectRows, err := tx.connection.QueryContext(ctx, `SELECT id, name, revision FROM projects ORDER BY id LIMIT ?`, SnapshotEntityLimit+1)
+	if err != nil {
+		return DashboardSnapshot{}, fmt.Errorf("read project summaries: %w", err)
+	}
+	for projectRows.Next() {
+		var rawID []byte
+		var name string
+		var rawRevision int64
+		if err := projectRows.Scan(&rawID, &name, &rawRevision); err != nil {
+			projectRows.Close()
+			return DashboardSnapshot{}, fmt.Errorf("scan project summary: %w", err)
+		}
+		id, idErr := ProjectIDFromBytes(rawID)
+		revision, revisionErr := NewRevision(rawRevision)
+		if idErr != nil || revisionErr != nil || byteLen(name) < 1 || byteLen(name) > 128 {
+			projectRows.Close()
+			return DashboardSnapshot{}, fmt.Errorf("%w: invalid project summary", ErrCorruptState)
+		}
+		count++
+		if count > SnapshotEntityLimit {
+			projectRows.Close()
+			return DashboardSnapshot{}, ErrSnapshotTooLarge
+		}
+		snapshot.Projects = append(snapshot.Projects, ProjectSummary{ID: id, Name: name, Revision: revision})
+	}
+	if err := projectRows.Close(); err != nil {
+		return DashboardSnapshot{}, err
+	}
+	agentRows, err := tx.connection.QueryContext(ctx, `SELECT id, project_id, name, role, paused, revision FROM agents ORDER BY id LIMIT ?`, SnapshotEntityLimit+1)
+	if err != nil {
+		return DashboardSnapshot{}, fmt.Errorf("read agent summaries: %w", err)
+	}
+	for agentRows.Next() {
+		var rawID, rawProjectID []byte
+		var name, rawRole string
+		var paused, rawRevision int64
+		if err := agentRows.Scan(&rawID, &rawProjectID, &name, &rawRole, &paused, &rawRevision); err != nil {
+			agentRows.Close()
+			return DashboardSnapshot{}, fmt.Errorf("scan agent summary: %w", err)
+		}
+		id, idErr := AgentIDFromBytes(rawID)
+		projectID, projectErr := ProjectIDFromBytes(rawProjectID)
+		role, roleErr := parseAgentRole(rawRole)
+		revision, revisionErr := NewRevision(rawRevision)
+		if idErr != nil || projectErr != nil || roleErr != nil || revisionErr != nil || byteLen(name) < 1 || byteLen(name) > 128 || paused != 0 && paused != 1 {
+			agentRows.Close()
+			return DashboardSnapshot{}, fmt.Errorf("%w: invalid agent summary", ErrCorruptState)
+		}
+		count++
+		if count > SnapshotEntityLimit {
+			agentRows.Close()
+			return DashboardSnapshot{}, ErrSnapshotTooLarge
+		}
+		snapshot.Agents = append(snapshot.Agents, AgentSummary{ID: id, ProjectID: projectID, Name: name, Role: role.String(), Paused: paused == 1, Revision: revision})
+	}
+	if err := agentRows.Close(); err != nil {
+		return DashboardSnapshot{}, err
+	}
+	taskRows, err := tx.connection.QueryContext(ctx, `SELECT id, project_id, assigned_agent_id, title, status, priority, revision FROM tasks ORDER BY priority DESC, created_at_ms ASC, id ASC LIMIT ?`, SnapshotEntityLimit+1)
+	if err != nil {
+		return DashboardSnapshot{}, fmt.Errorf("read task summaries: %w", err)
+	}
+	for taskRows.Next() {
+		var rawID, rawProjectID, rawAgentID []byte
+		var title, rawStatus string
+		var priority, rawRevision int64
+		if err := taskRows.Scan(&rawID, &rawProjectID, &rawAgentID, &title, &rawStatus, &priority, &rawRevision); err != nil {
+			taskRows.Close()
+			return DashboardSnapshot{}, fmt.Errorf("scan task summary: %w", err)
+		}
+		id, idErr := TaskIDFromBytes(rawID)
+		projectID, projectErr := ProjectIDFromBytes(rawProjectID)
+		agentID, agentErr := AgentIDFromBytes(rawAgentID)
+		status, statusErr := parseTaskStatus(rawStatus)
+		revision, revisionErr := NewRevision(rawRevision)
+		if idErr != nil || projectErr != nil || agentErr != nil || statusErr != nil || revisionErr != nil || byteLen(title) < 1 || byteLen(title) > 1024 || priority < -1_000_000 || priority > 1_000_000 {
+			taskRows.Close()
+			return DashboardSnapshot{}, fmt.Errorf("%w: invalid task summary", ErrCorruptState)
+		}
+		count++
+		if count > SnapshotEntityLimit {
+			taskRows.Close()
+			return DashboardSnapshot{}, ErrSnapshotTooLarge
+		}
+		snapshot.Tasks = append(snapshot.Tasks, TaskSummary{ID: id, ProjectID: projectID, AssignedAgentID: agentID, Title: title, Status: status.String(), Priority: priority, Revision: revision})
+	}
+	if err := taskRows.Close(); err != nil {
+		return DashboardSnapshot{}, err
+	}
+	return snapshot, nil
+}
+
+func (store *Store) WatchAfter(ctx context.Context, after EventSequence) (WatchBatch, error) {
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return WatchBatch{}, err
+	}
+	defer tx.Close()
+	state, err := factoryState(ctx, tx.connection)
+	if err != nil {
+		return WatchBatch{}, err
+	}
+	if after.Int64() > state.Head.Int64() {
+		return WatchBatch{}, ErrFutureCursor
+	}
+	if after.Int64() < state.Floor.Int64()-1 {
+		return WatchBatch{}, &ResyncRequiredError{Head: state.Head, Floor: state.Floor}
+	}
+	rows, err := tx.connection.QueryContext(ctx, `SELECT sequence, occurred_at_ms, entity_kind, entity_id, revision, deleted FROM invalidations WHERE sequence > ? ORDER BY sequence ASC LIMIT ?`, after.Int64(), WatchBatchLimit+1)
+	if err != nil {
+		return WatchBatch{}, fmt.Errorf("read invalidations: %w", err)
+	}
+	defer rows.Close()
+	batch := WatchBatch{Head: state.Head, Floor: state.Floor}
+	expected := after.Int64() + 1
+	for rows.Next() {
+		var sequence, occurredAt, revision, deleted int64
+		var rawKind string
+		var rawID []byte
+		if err := rows.Scan(&sequence, &occurredAt, &rawKind, &rawID, &revision, &deleted); err != nil {
+			return WatchBatch{}, fmt.Errorf("scan invalidation: %w", err)
+		}
+		kind, kindErr := parseEntityKind(rawKind)
+		seq, sequenceErr := NewEventSequence(sequence)
+		at, atErr := NewUnixMillis(occurredAt)
+		rev, revisionErr := NewRevision(revision)
+		validID := len(rawID) == IDBytes
+		if validID && kind == EntityFactory {
+			validID = string(rawID) == string(factoryEntityID[:])
+		} else if validID {
+			_, idErr := identifierFromBytes(rawID)
+			validID = idErr == nil
+		}
+		if kindErr != nil || sequenceErr != nil || atErr != nil || revisionErr != nil || !validID || deleted != 0 && deleted != 1 || sequence != expected {
+			return WatchBatch{}, fmt.Errorf("%w: invalid or discontinuous invalidation at sequence %d", ErrCorruptState, sequence)
+		}
+		expected++
+		if len(batch.Invalidations) < WatchBatchLimit {
+			batch.Invalidations = append(batch.Invalidations, Invalidation{Sequence: seq, OccurredAt: at, EntityKind: kind.String(), EntityID: fmt.Sprintf("%x", rawID), Revision: rev, Deleted: deleted == 1})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return WatchBatch{}, fmt.Errorf("iterate invalidations: %w", err)
+	}
+	if expected <= state.Head.Int64() && len(batch.Invalidations) < WatchBatchLimit {
+		return WatchBatch{}, fmt.Errorf("%w: invalidation log ends before durable head", ErrCorruptState)
+	}
+	return batch, nil
+}
+
+func nullStringValue(value sql.NullString) string {
+	if value.Valid {
+		return value.String
+	}
+	return ""
+}
