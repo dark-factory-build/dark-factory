@@ -766,16 +766,52 @@ milestones so process/Cargo/Go gates do not conflict on the machine.
 ### Wave 3: hard cutover
 
 1. Freeze Go contracts and pass full Go gates/reviews.
-2. Make Go binaries the only local runtime and Go gates the local-runtime CI.
-3. Update architecture, security, workflow, provider, install, and release
+2. Run a dedicated code-elegance audit on the complete Go local runtime, make
+   the accepted DRY/YAGNI refactors, and obtain a fresh ALLOW on the resulting
+   exact head. This audit is separate from correctness and deletion reviews.
+3. Make Go binaries the only local runtime and Go gates the local-runtime CI.
+4. Update architecture, security, workflow, provider, install, and release
    documentation in the same change.
-4. Delete the five Rust local-runtime crates and root Rust workspace artifacts;
+5. Delete the five Rust local-runtime crates and root Rust workspace artifacts;
    retain `control-plane/` as its standalone Rust workspace and gate.
-5. Delete transitional scaffolding/compatibility and repeat clean-checkout
+6. Delete transitional scaffolding/compatibility and repeat clean-checkout
    build, dependency/package review, isolated install E2E, and process census.
-6. Obtain final independent architecture, security, process, Store/concurrency,
+7. Obtain final independent architecture, security, process, Store/concurrency,
    and simplification reviews on the exact head, fix every finding, and repeat
    the affected gates.
+
+### Code-elegance audit
+
+After the complete Go runtime works and before Rust deletion, a reviewer who
+did not author the majority of the implementation performs a cold structural
+audit. It is explicitly not a request for code golf or premature abstraction.
+The reviewer must trace the production package graph and representative
+project/task/run lifecycles, then look for:
+
+- policy, transition, validation, serialization, cleanup or error mapping that
+  has more than one owner;
+- repeated code that can become one direct concrete function without merging
+  distinct authority checks or creating a framework;
+- interfaces with one production implementation, forwarding wrappers,
+  pass-through layers, generic callback machinery, speculative extension
+  points, unused exports and packages with no independent reason to change;
+- persisted fields or states that are derivable bookkeeping rather than real
+  external conditions;
+- control flow, goroutine/channel use, error types, naming and file/package
+  boundaries that make ownership harder to follow than a direct call would;
+- test helpers that prove their own callbacks instead of real state, process or
+  filesystem effects, and fixtures whose abstraction hides causal order;
+- dependencies whose retained value is smaller than the code/attack surface
+  they introduce.
+
+The audit returns an inventory of duplication and unnecessary machinery,
+specific deletions/collapses, cases where apparent duplication must remain
+because the authority or failure semantics differ, and ALLOW/BLOCK. Accepted
+changes are implemented as small commits, the affected causal/race/process
+gates are rerun, and a fresh reviewer re-checks the exact refactored head. No
+refactor may collapse `running -> finalizing -> terminal`, widen credentials,
+replace durable Store guards with memory, weaken exact resource identity, or
+trade fail-closed uncertainty for a common helper.
 
 ## 6. Test contract
 
@@ -1096,6 +1132,9 @@ following evidence:
   absent;
 - dependency tree/package graph inspected with no accidental framework or
   transitional dual-runtime dependency;
+- dedicated code-elegance/DRY/YAGNI audit completed, accepted refactors landed,
+  affected causal gates rerun, and a fresh reviewer returns ALLOW on the exact
+  refactored head;
 - independent architecture, security/authority, process lifecycle,
   Store/concurrency, and simplification reviewers return ALLOW on the exact
   head after all findings are resolved;
@@ -1120,6 +1159,8 @@ must contain:
 - exact commands/results for focused, full, race, crash, mutation, privacy,
   process-cleanup, install and clean-checkout evidence;
 - causal kernel proof and independent review verdicts;
+- code-elegance audit findings, accepted/rejected DRY/YAGNI changes, resulting
+  package/dependency reductions, rerun gates and exact-head ALLOW;
 - remaining risks and deliberately deferred work;
 - before/after production LOC, test LOC, local-runtime package/crate count,
   direct dependencies, clean build time, focused/full gate time, binary sizes,
