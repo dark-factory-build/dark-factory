@@ -344,6 +344,144 @@ async fn production_observer_defers_terminal_until_external_group_absence_across
     manager.await.unwrap().unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovery_converges_after_runner_crash_while_provider_is_blocked() {
+    let (fixture, mut store, admitted) = Fixture::new();
+    let _provider_release = ReleaseOnDrop(fixture.provider_release.clone());
+    let _descendant_release = ReleaseOnDrop(fixture.descendant_release.clone());
+    let (mut runner, prepared_provider, runner_pid, provider_pid) =
+        manually_seed_running_observer_fixture(&fixture, &mut store, &admitted).await;
+    drop(store);
+
+    prepared_provider.activate().await.unwrap();
+    support::await_path(&fixture.marker).await;
+    support::await_path(&fixture.descendant_pid).await;
+    let descendant_pid = fs::read_to_string(&fixture.descendant_pid)
+        .unwrap()
+        .parse::<u32>()
+        .unwrap();
+    assert_eq!(fs::read_to_string(&fixture.marker).unwrap(), "x");
+
+    // The real process-lifecycle cut: the runner disappears after the run is
+    // running, while the provider is still blocked and its descendant still
+    // owns the exact process group. The provider must remain live for the
+    // restarted manager to observe, not be invented or rerun.
+    runner.kill_and_reap().unwrap();
+    assert!(process_absent(runner_pid));
+    assert!(!process_absent(provider_pid));
+    assert!(!process_absent(descendant_pid));
+
+    let state = DaemonState::new(fixture.reopen());
+    let (handle, manager) = execution::spawn(fixture.execution_config(), state.clone()).unwrap();
+    support::wait_for_condition(
+        "recovery did not persist finalizing while the blocked provider remained live",
+        || async {
+            let (run, resources) = state
+                .with_store({
+                    let run_id = fixture.run_id.clone();
+                    move |store| {
+                        Ok((
+                            store.kernel_run(&run_id)?.unwrap(),
+                            store.kernel_resources(&run_id)?,
+                        ))
+                    }
+                })
+                .await
+                .unwrap();
+            let pending = |kind| {
+                resources.iter().any(|resource| {
+                    resource.kind == kind && resource.state != KernelResourceState::Released
+                })
+            };
+            let runner_released = resources.iter().any(|resource| {
+                resource.kind == KernelResourceKind::RunnerProcess
+                    && resource.state == KernelResourceState::Released
+            });
+            run.phase == RunPhase::Finalizing
+                && run.outcome
+                    == Some(RunOutcome::Failed {
+                        reason: RunFailureReason::Process,
+                    })
+                && runner_released
+                && pending(KernelResourceKind::ProviderProcess)
+                && pending(KernelResourceKind::ProcessGroup)
+        },
+    )
+    .await;
+    let finalizing = run(&fixture.reopen(), &fixture.run_id);
+    assert_eq!(finalizing.phase, RunPhase::Finalizing);
+    assert_eq!(
+        finalizing.outcome,
+        Some(RunOutcome::Failed {
+            reason: RunFailureReason::Process,
+        })
+    );
+    assert!(!process_absent(provider_pid));
+    assert!(!process_absent(descendant_pid));
+
+    // Recovery must wait for the exact blocked process group to disappear;
+    // releasing only the provider leader is not enough.
+    fs::write(&fixture.provider_release, b"release").unwrap();
+    support::await_process_absence(provider_pid).await;
+    assert!(!process_absent(descendant_pid));
+    support::wait_for_condition(
+        "recovery released the process group before its descendant exited",
+        || async {
+            let (phase, resources) = state
+                .with_store({
+                    let run_id = fixture.run_id.clone();
+                    move |store| {
+                        Ok((
+                            store.kernel_run(&run_id)?.unwrap().phase,
+                            store.kernel_resources(&run_id)?,
+                        ))
+                    }
+                })
+                .await
+                .unwrap();
+            let released = |kind| {
+                resources.iter().any(|resource| {
+                    resource.kind == kind && resource.state == KernelResourceState::Released
+                })
+            };
+            phase == RunPhase::Finalizing
+                && released(KernelResourceKind::ProviderProcess)
+                && !released(KernelResourceKind::ProcessGroup)
+        },
+    )
+    .await;
+    assert!(fixture.runtime.exists());
+    fs::write(&fixture.descendant_release, b"release").unwrap();
+    support::await_process_absence(descendant_pid).await;
+    wait_for_terminal(&state, &fixture.run_id).await;
+
+    let terminal = run(&fixture.reopen(), &fixture.run_id);
+    assert_eq!(terminal.phase, RunPhase::Terminal);
+    assert_eq!(
+        terminal.outcome,
+        Some(RunOutcome::Failed {
+            reason: RunFailureReason::Process,
+        })
+    );
+    let resources = state
+        .with_store({
+            let run_id = fixture.run_id.clone();
+            move |store| store.kernel_resources(&run_id)
+        })
+        .await
+        .unwrap();
+    assert!(
+        resources
+            .iter()
+            .all(|resource| resource.state == KernelResourceState::Released)
+    );
+    assert!(!fixture.runtime.exists());
+    assert_eq!(fs::read_to_string(&fixture.marker).unwrap(), "x");
+
+    handle.shutdown().await.unwrap();
+    manager.await.unwrap().unwrap();
+}
+
 #[tokio::test]
 async fn cancelled_wait_is_followed_by_exact_child_kill_and_reap() {
     let child = tokio::process::Command::new("/bin/sleep")
