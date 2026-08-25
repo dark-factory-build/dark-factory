@@ -371,6 +371,10 @@ func testBusyCancellation(t *testing.T) {
 	if !errors.Is(contenderErr, context.Canceled) {
 		t.Fatalf("busy cancellation error = %v, want context.Canceled", contenderErr)
 	}
+	var unknown *outcomeUnknownError
+	if !errors.As(contenderErr, &unknown) {
+		t.Fatalf("busy cancellation error = %T %v, want outcomeUnknownError", contenderErr, contenderErr)
+	}
 	if bodyEntered {
 		t.Fatal("contending body ran while another immediate writer held the lock")
 	}
@@ -378,14 +382,21 @@ func testBusyCancellation(t *testing.T) {
 		t.Fatalf("busy cancellation took %s, want under 1s", elapsed)
 	}
 	assertFootprint(t, ownerDatabase, "busy-cancel", 0, 0)
+	contenderID, closed := plan.beginConnectionAndClosed()
+	replacementID := assertConnectionEvicted(t, contender, contenderID, closed)
 
 	if _, err := owner.ExecContext(context.Background(), "ROLLBACK"); err != nil {
 		t.Fatal(err)
 	}
+	usedID := 0
 	if err := contender.immediate(context.Background(), func(connection *sql.Conn) error {
+		usedID = faultConnectionID(t, connection)
 		return insertFootprint(context.Background(), connection, "busy-cancel-reuse")
 	}); err != nil {
 		t.Fatalf("writer replacement after busy cancellation failed: %v", err)
+	}
+	if usedID != replacementID {
+		t.Fatalf("later write used connection %d, want verified replacement %d", usedID, replacementID)
 	}
 	assertFootprint(t, contender, "busy-cancel-reuse", 1, 1)
 }
@@ -534,6 +545,12 @@ func testAmbiguousResponses(t *testing.T) {
 	t.Run("commit rejected before apply", func(t *testing.T) {
 		testAmbiguousCommit(t, faultCommitBeforeApply, "commit-before", 0)
 	})
+	t.Run("rollback rejected before apply", func(t *testing.T) {
+		testAmbiguousRollback(t, faultRollbackBeforeApply, "rollback-before")
+	})
+	t.Run("rollback forwarded before response failure", func(t *testing.T) {
+		testAmbiguousRollback(t, faultRollbackAfterApply, "rollback-after")
+	})
 	t.Run("begin forwarded before response failure", func(t *testing.T) {
 		path := initializedFixturePath(t)
 		plan := &faultPlan{}
@@ -556,6 +573,45 @@ func testAmbiguousResponses(t *testing.T) {
 		defer reopened.close()
 		assertFootprint(t, reopened, "begin-after", 0, 0)
 	})
+}
+
+func testAmbiguousRollback(t *testing.T, fault faultKind, id string) {
+	t.Helper()
+	path := initializedFixturePath(t)
+	plan := &faultPlan{}
+	database := openFaultDatabase(t, path, plan)
+	plan.arm(fault)
+	bodyError := errors.New("rollback body failed")
+	bodyInvocations := 0
+	err := database.immediate(context.Background(), func(connection *sql.Conn) error {
+		bodyInvocations++
+		if err := insertFootprint(context.Background(), connection, id); err != nil {
+			return err
+		}
+		return bodyError
+	})
+	var unknown *outcomeUnknownError
+	if !errors.As(err, &unknown) || !errors.Is(err, bodyError) || !errors.Is(err, errFaultResponse) {
+		t.Fatalf("ambiguous rollback error = %v, want outcomeUnknownError preserving body and response failures", err)
+	}
+	if bodyInvocations != 1 {
+		t.Fatalf("body invocations after ambiguous rollback = %d, want exactly 1", bodyInvocations)
+	}
+	assertFaultedConnectionEvicted(t, database, plan)
+	if err := database.close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened := reopenFixture(t, path)
+	defer reopened.close()
+	assertFootprint(t, reopened, id, 0, 0)
+	reopenID := id + "-reopen"
+	if err := reopened.immediate(context.Background(), func(connection *sql.Conn) error {
+		return insertFootprint(context.Background(), connection, reopenID)
+	}); err != nil {
+		t.Fatalf("write after ambiguous rollback reopen: %v", err)
+	}
+	assertFootprint(t, reopened, reopenID, 1, 1)
 }
 
 func testAmbiguousCommit(t *testing.T, fault faultKind, id string, wantFootprint int) {
@@ -597,6 +653,11 @@ func requireOutcomeUnknown(t *testing.T, err error) {
 func assertFaultedConnectionEvicted(t *testing.T, database *database, plan *faultPlan) {
 	t.Helper()
 	faultedID, closed := plan.faultedAndClosed()
+	assertConnectionEvicted(t, database, faultedID, closed)
+}
+
+func assertConnectionEvicted(t *testing.T, database *database, faultedID int, closed bool) int {
+	t.Helper()
 	if faultedID == 0 || !closed {
 		t.Fatalf("faulted connection = %d, closed = %v; want discarded physical connection", faultedID, closed)
 	}
@@ -609,6 +670,7 @@ func assertFaultedConnectionEvicted(t *testing.T, database *database, plan *faul
 	if replacementID == faultedID {
 		t.Fatalf("ambiguous connection %d was reused", faultedID)
 	}
+	return replacementID
 }
 
 func testCancellationCleanup(t *testing.T) {
@@ -1056,6 +1118,8 @@ const (
 	faultBeginAfterApply
 	faultCommitBeforeApply
 	faultCommitAfterApply
+	faultRollbackBeforeApply
+	faultRollbackAfterApply
 )
 
 type faultPlan struct {
@@ -1063,6 +1127,7 @@ type faultPlan struct {
 	fault        faultKind
 	nextID       int
 	faultedID    int
+	beginID      int
 	closed       map[int]bool
 	beginEntered chan struct{}
 	beginOnce    sync.Once
@@ -1092,12 +1157,16 @@ func (p *faultPlan) closedConnection(id int) {
 
 func (p *faultPlan) intercept(id int, query string) faultKind {
 	if query == "BEGIN IMMEDIATE" && p.beginEntered != nil {
+		p.mu.Lock()
+		p.beginID = id
+		p.mu.Unlock()
 		p.beginOnce.Do(func() { close(p.beginEntered) })
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	match := (query == "BEGIN IMMEDIATE" && p.fault == faultBeginAfterApply) ||
-		(query == "COMMIT" && (p.fault == faultCommitBeforeApply || p.fault == faultCommitAfterApply))
+		(query == "COMMIT" && (p.fault == faultCommitBeforeApply || p.fault == faultCommitAfterApply)) ||
+		(query == "ROLLBACK" && (p.fault == faultRollbackBeforeApply || p.fault == faultRollbackAfterApply))
 	if !match {
 		return faultNone
 	}
@@ -1105,6 +1174,12 @@ func (p *faultPlan) intercept(id int, query string) faultKind {
 	p.fault = faultNone
 	p.faultedID = id
 	return fault
+}
+
+func (p *faultPlan) beginConnectionAndClosed() (int, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.beginID, p.closed[p.beginID]
 }
 
 func (p *faultPlan) faultedAndClosed() (int, bool) {
@@ -1138,14 +1213,14 @@ func (c *faultConnection) ExecContext(ctx context.Context, query string, args []
 		return nil, driver.ErrSkip
 	}
 	fault := c.plan.intercept(c.id, query)
-	if fault == faultCommitBeforeApply {
+	if fault == faultCommitBeforeApply || fault == faultRollbackBeforeApply {
 		return nil, errFaultResponse
 	}
 	result, err := execer.ExecContext(ctx, query, args)
 	if err != nil {
 		return result, err
 	}
-	if fault == faultBeginAfterApply || fault == faultCommitAfterApply {
+	if fault == faultBeginAfterApply || fault == faultCommitAfterApply || fault == faultRollbackAfterApply {
 		return result, errFaultResponse
 	}
 	return result, nil
