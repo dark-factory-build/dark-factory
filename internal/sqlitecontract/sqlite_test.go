@@ -597,6 +597,20 @@ func testAmbiguousRollback(t *testing.T, fault faultKind, id string) {
 	if bodyInvocations != 1 {
 		t.Fatalf("body invocations after ambiguous rollback = %d, want exactly 1", bodyInvocations)
 	}
+	wantForwards := 0
+	if fault == faultRollbackAfterApply {
+		wantForwards = 1
+	}
+	forwards, forwardsAtFault := plan.rollbackWitness()
+	if forwards != wantForwards || forwardsAtFault != wantForwards {
+		t.Fatalf(
+			"rollback witness = (forwards=%d, forwards_at_response_fault=%d), want (%d, %d)",
+			forwards,
+			forwardsAtFault,
+			wantForwards,
+			wantForwards,
+		)
+	}
 	assertFaultedConnectionEvicted(t, database, plan)
 	if err := database.close(); err != nil {
 		t.Fatal(err)
@@ -1123,14 +1137,16 @@ const (
 )
 
 type faultPlan struct {
-	mu           sync.Mutex
-	fault        faultKind
-	nextID       int
-	faultedID    int
-	beginID      int
-	closed       map[int]bool
-	beginEntered chan struct{}
-	beginOnce    sync.Once
+	mu                      sync.Mutex
+	fault                   faultKind
+	nextID                  int
+	faultedID               int
+	beginID                 int
+	rollbackForwards        int
+	rollbackForwardsAtFault int
+	closed                  map[int]bool
+	beginEntered            chan struct{}
+	beginOnce               sync.Once
 }
 
 func (p *faultPlan) arm(fault faultKind) {
@@ -1188,6 +1204,24 @@ func (p *faultPlan) faultedAndClosed() (int, bool) {
 	return p.faultedID, p.closed[p.faultedID]
 }
 
+func (p *faultPlan) recordRollbackForward() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.rollbackForwards++
+}
+
+func (p *faultPlan) recordRollbackFault() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.rollbackForwardsAtFault = p.rollbackForwards
+}
+
+func (p *faultPlan) rollbackWitness() (forwards, forwardsAtFault int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.rollbackForwards, p.rollbackForwardsAtFault
+}
+
 type faultConnector struct {
 	driver.Connector
 	plan *faultPlan
@@ -1213,14 +1247,25 @@ func (c *faultConnection) ExecContext(ctx context.Context, query string, args []
 		return nil, driver.ErrSkip
 	}
 	fault := c.plan.intercept(c.id, query)
-	if fault == faultCommitBeforeApply || fault == faultRollbackBeforeApply {
+	if fault == faultRollbackBeforeApply {
+		c.plan.recordRollbackFault()
 		return nil, errFaultResponse
+	}
+	if fault == faultCommitBeforeApply {
+		return nil, errFaultResponse
+	}
+	if query == "ROLLBACK" {
+		c.plan.recordRollbackForward()
 	}
 	result, err := execer.ExecContext(ctx, query, args)
 	if err != nil {
 		return result, err
 	}
-	if fault == faultBeginAfterApply || fault == faultCommitAfterApply || fault == faultRollbackAfterApply {
+	if fault == faultRollbackAfterApply {
+		c.plan.recordRollbackFault()
+		return result, errFaultResponse
+	}
+	if fault == faultBeginAfterApply || fault == faultCommitAfterApply {
 		return result, errFaultResponse
 	}
 	return result, nil
