@@ -1,6 +1,6 @@
 # Dark Factory control plane
 
-This directory is the self-contained staging export for the future
+This directory is the self-contained implementation of the deployed
 `dark-factory-control-plane` service. It is not a `dark-factory` workspace
 member and never links to or runs inside `factoryd`.
 
@@ -23,7 +23,7 @@ configuration is live.
   It verifies `X-Hub-Signature-256` over the exact body with HMAC-SHA-256,
   limits the body to 64 KiB, requires one value for every security header,
   requires an `integration` target, and binds the configured App ID.
-- A valid `ping` is the only acknowledged event. When the six operation-authority
+- A valid `ping` is the only acknowledged event. When all operation-authority
   bindings are present, acknowledgement also requires an RS256 App JWT, one
   exact selected-repository installation for the configured repository name,
   numeric repository ID, and numeric owner. Every other authenticated event is
@@ -31,18 +31,25 @@ configuration is live.
   and returns 422. No payload can create a task, message, prompt, provider run,
   or GitHub mutation.
 - `POST /mcp` is a stateless Streamable HTTP MCP JSON-RPC endpoint. It is
-  installed only with the complete operation authority and accepts requests
-  only after Cloudflare Access has supplied one authenticated JWT assertion
+  installed only with the complete operation authority. Its 52 MiB envelope
+  ceiling is derived above the largest request the typed publication schema
+  permits (50 files with 1,000,000 encoded characters each), rather than
+  reusing the webhook's unrelated 64 KiB limit or adding a lower aggregate
+  limit. The endpoint is reached only after Cloudflare Access has supplied
+  one authenticated JWT assertion
   identifying exactly one of two configured principals: the operator's email
   identity, or — when `DARK_FACTORY_CLOUDFLARE_ACCESS_SERVICE_TOKEN_ID` is
   bound — one exact Access **service token**, which is how the surface is
   reached headlessly with no human present. Each principal's claim set rejects
-  the other's shape, so neither can take the other's path. It exposes six
-  typed tools: `maintainer_status`, exact-head pull-request creation,
-  exact-head `ALLOW`, `COMMENT`, or `REQUEST_CHANGES` review submission,
-  exact-head check-run observation, exact-head commit publication, and
-  exact-head merge queue enqueue. All three verdicts are the repository's own
-  words, not GitHub review states -- the App opens the pull requests it
+  the other's shape, so neither can take the other's path. Its finite typed
+  tools observe the default head and durable operation state, manage a bounded
+  issue lifecycle, publish an exact commit and pull request, submit an exact-head
+  `ALLOW`, `COMMENT`, or `REQUEST_CHANGES` verdict, diagnose and rerun exact CI,
+  observe eventual merge state, enqueue through the merge queue, publish and
+  observe immutable releases, and dispatch only the two fixed reviewed recovery
+  and deployment workflows. GitHub's required `delete_branch_on_merge` setting
+  performs atomic source-branch cleanup. All three verdicts are the repository's own words,
+  not GitHub review states -- the App opens the pull requests it
   reviews, and GitHub refuses a self-review that takes a side, `APPROVE` and
   `REQUEST_CHANGES` alike -- so every one of them is posted as `COMMENT`
   carrying a `Dark-Factory-Review:` line the App renders and refuses in caller
@@ -56,9 +63,11 @@ configuration is live.
   not ... expose direct merge as a fallback"). Enqueue is the only automated
   path to `main`. Publication refuses the `.github` authority tree, and every
   write is bound to a stated head commit and to a durable operation ID.
-  There is no generic GitHub proxy, arbitrary URL, repository selector, issue,
-  shell, or credential-returning tool, and no way to move a ref other than
-  forward from the head the caller stated.
+  There is no generic GitHub proxy, arbitrary URL, repository selector, shell,
+  direct merge, arbitrary ref/workflow mutation, or credential-returning tool.
+  A publication cannot target the
+  live default branch: generated refs move only forward from a stated head or
+  disappear after their exact pull request is proven merged.
 - The product webhook and operator/PWA namespaces have no routes.
 
 Missing, empty, partial, or syntactically invalid authority produces the fixed
@@ -98,15 +107,19 @@ typed request and one fixed operation kind. Its state machine is
 external outcome. An atomic transition gives exactly one caller permission to
 invoke GitHub. A retry with the same ID and request replays the completed result
 or reconciles against the operation marker and exact commit IDs. A different
-request under the same ID conflicts. If an executing or indeterminate operation
-cannot be reconciled, it is never blindly submitted again.
+request under the same ID conflicts. Read-only operation observation reports
+whether a UUID was never received, is in flight, became indeterminate, or
+completed, including the stored request digest and typed result. If an
+executing or indeterminate operation cannot be reconciled, it is never blindly
+submitted again.
 
 GitHub App installation tokens are minted only inside the Worker, scoped to the
 configured numeric repository, and downscoped per operation. They are held in
 zeroizing memory and are never returned or journalled. The permanent App may
 have additional installed capabilities, but readiness requires the minimum
-checks-read, contents-read, metadata-read, and pull-requests-write set; unused
-App-level authority is never copied into an operation token.
+  Actions-write, checks-read, contents-write, issues-write, merge-queues-write,
+  metadata-read, and pull-requests-write set; unused App-level authority is
+  never copied into an operation token.
 
 [SQLite storage API]: https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/
 [Durable Object rules]: https://developers.cloudflare.com/durable-objects/best-practices/rules-of-durable-objects/
@@ -138,7 +151,7 @@ The exact required bindings are:
 - `DARK_FACTORY_MAINTAINER_PRIVATE_KEY_PKCS8`: standard-base64 encoding of the
   App's unencrypted PKCS#8 DER private key;
 - `DARK_FACTORY_MAINTAINER_PERMISSION_REVISION`: exactly
-  `maintainer-operations-v1` for this authority revision;
+  `maintainer-operations-v2` for this authority revision;
 - `DARK_FACTORY_MAINTAINER_REPOSITORY`: the exact safe `owner/repository`
   name;
 - `DARK_FACTORY_MAINTAINER_REPOSITORY_OWNER_ID`: the exact positive numeric
@@ -159,8 +172,9 @@ One further binding is deliberately outside the all-or-nothing group:
   headlessly. Absent, every service-token assertion is rejected and only the
   operator identity can reach `/mcp`; it never means "any service token".
   Because it is optional and inherited across versions, `/readyz` names which
-  principals are live — `mcp_six_tools_operator_and_headless` or
-  `mcp_six_tools_operator_only` — and the deployment gate requires the former.
+  principals are live — `mcp_repository_bound_operator_and_headless` or
+  `mcp_repository_bound_operator_only` — and the deployment gate requires the
+  former.
 
 The revisions and numeric IDs are stored as secrets too. They are not
 confidential, but treating all authority settings identically avoids a
@@ -222,8 +236,8 @@ The authoritative gate performs:
 6. a non-uploading `wrangler deploy --dry-run`; and
 7. a local `workerd` integration proof, including readiness, signed ping,
    exact concurrent replay, concurrent conflict, policy rejection, duplicate
-   headers, the 64 KiB limit, persistence across runtime restart, absent future
-   routes, and invalid-config inactivity. The native SQLite lane separately
+   headers, the signed webhook's 64 KiB limit, persistence across runtime
+   restart, absent future routes, and invalid-config inactivity. The native SQLite lane separately
    proves operation replay, conflict, state transitions, and exactly one
    concurrent effect claim. Live GitHub and Access calls are not made by CI.
 

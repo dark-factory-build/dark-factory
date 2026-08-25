@@ -1,9 +1,10 @@
 # GitHub App authority decision
 
-Status: the maintainer broker is live with six typed operations. The typed
-merge operation is the merge-queue enqueue this document requires; the
-direct-merge operation that briefly stood in for it has been removed. This document does not itself authorize App registration,
-installation, repository publication, merge, release, or live-factory changes.
+Status: the maintainer broker has one finite repository-bound MCP surface. Its
+only merge mutation is merge-queue enqueue; the direct-merge operation that
+briefly stood in for it has been removed. This document does not itself
+authorize App registration, installation, repository publication, merge,
+release, or live-factory changes.
 
 ## Decision
 
@@ -52,16 +53,16 @@ The product and maintainer registrations may share control-plane implementation
 but never keys, installation mappings, permission revisions, operation journal
 namespaces, or audit identities.
 
-The broker implementation belongs in the sibling
-`dark-factory-control-plane` service, not in the pure-Rust local-runtime
-workspace or `factoryd`. The temporary `control-plane/` staging export proves
-a versioned, signed, inert maintainer `ping` boundary. With the App-authority
+The broker implementation lives in the standalone `control-plane/` crate, not
+in the pure-Rust local-runtime workspace or `factoryd`. Its webhook remains a
+versioned, signed, inert maintainer `ping` boundary. With the App-authority
 group configured, readiness and every ping also prove that the broker can sign
-an App JWT and find the exact metadata-read-only selected-repository
-installation for the bound `owner/repository` and numeric owner. This proof
-creates no installation token and exposes no repository operation. Every
-non-ping event is policy-rejected. The official hosted adapter is a Rust
-Cloudflare Worker.
+an App JWT and find the exact selected-repository installation with the
+revision's bounded permissions for the bound `owner/repository` and numeric
+owner. This proof creates no installation token and exposes no repository
+operation through webhook intake. Every non-ping event is policy-rejected.
+The hosted adapter is a Rust Cloudflare Worker; repository operations are
+available only through the separately authenticated finite MCP surface.
 Its production journal uses strongly consistent SQLite Durable Objects;
 native SQLite exists only behind the non-default `development-sqlite` feature
 and can never satisfy readiness. The production adapter accepts exactly
@@ -71,10 +72,14 @@ and can never satisfy readiness. The production adapter accepts exactly
 `DARK_FACTORY_MAINTAINER_PRIVATE_KEY_PKCS8`,
 `DARK_FACTORY_MAINTAINER_PERMISSION_REVISION`,
 `DARK_FACTORY_MAINTAINER_REPOSITORY`, and
-`DARK_FACTORY_MAINTAINER_REPOSITORY_OWNER_ID`. The private key is standard
+`DARK_FACTORY_MAINTAINER_REPOSITORY_OWNER_ID`,
+`DARK_FACTORY_MAINTAINER_REPOSITORY_ID`,
+`DARK_FACTORY_MAINTAINER_OPERATOR_EMAIL_SHA256`,
+`DARK_FACTORY_CLOUDFLARE_ACCESS_TEAM_DOMAIN`, and
+`DARK_FACTORY_CLOUDFLARE_ACCESS_AUD`. The private key is standard
 base64 of unencrypted PKCS#8 DER, the repository is an exact safe
 `owner/repository` name, and the implemented permission revision is exactly
-`maintainer-operations-v1`. Missing webhook authority or a partial or
+`maintainer-operations-v2`. Missing webhook authority or a partial or
 syntactically invalid App-authority group leaves the fixed inactive router with
 no webhook route. An unusable key or configured but unavailable or drifted
 Durable Object journal or GitHub authority makes readiness and ping
@@ -96,7 +101,7 @@ App, or activate a webhook. Production credentials are never shared with
 preview or disposable deployments; those use a distinct App, secret, Durable
 Object namespace, and activation contract. `workers.dev` and preview URLs are
 disabled and the checked-in configuration has no route, so an upload cannot
-silently claim a public ingress. All seven production authority settings are
+silently claim a public ingress. All eleven production authority settings are
 required Cloudflare secrets. There is no database URL, owner integration,
 runtime role, provider API key, or ambient authentication fallback.
 
@@ -120,15 +125,24 @@ is never retried through personal authority.
 
 The live maintainer broker exposes only these repository-scoped operations:
 
-- verify the exact repository, numeric repository ID, and permission revision;
-- publish one exact independently reviewed tree and App-verified commit to a
+- verify the exact repository, numeric repository ID, permission revision, and
+  live default branch head;
+- observe one durable operation UUID without mutating it;
+- create, observe, and resolve one bounded issue with an evidence comment;
+- publish one exact independently reviewed tree as an App-authored commit to a
   generated branch;
 - create one PR for that exact branch and base;
 - submit one bounded exact-head review verdict through the Pull Request Review
   API;
-- observe Check Runs for one exact PR head; and
+- observe Check Runs, bounded workflow/job/step state, a bounded failed-job log
+  tail, and eventual merge state for one exact PR head;
+- rerun failed jobs from one exact completed failed workflow attempt;
 - enqueue one exact reviewed head for merge after its bound checks and
-  approvals.
+  approvals;
+- publish and observe one immutable semver release tag, and recover only that
+  exact tag through the fixed release workflow; and
+- dispatch and observe the fixed control-plane deployment workflow at one exact
+  default-branch commit and reviewed tree.
 
 Replacing the already-open canonical bodies for #126, #153, and #188 is a
 one-time Phase 0 bootstrap action, not a maintainer-broker operation. It must
@@ -138,20 +152,19 @@ replacement digest, and exact reviewed body, and exposes no comment, label,
 state, or close authority. Until that bootstrap authority exists, the reviewed
 replacement bodies remain local and Phase 0 is incomplete.
 
-The live tools mint only their operation-specific subsets of Metadata read,
-Contents write, Pull requests write, Checks read, and Merge queues write. The
-permanent App registration may retain Issues write for a future bounded issue
-operation, but this revision neither requires nor mints it and exposes no
-issue-create, issue-comment, issue-update, or issue-close tool. Pull requests
+The live tools mint only their operation-specific subsets of Actions write,
+Metadata read, Contents write, Issues write, Pull requests write, Checks read,
+and Merge queues write. Issues write exists only for bounded issue creation and
+evidence-backed terminal state. Pull requests
 write authorizes PR creation, formal review, and the exact-head enqueue, which
 mutates the pull request's queue state; a PR review is not an Issues API
 comment. Merge queues write authorizes only the typed exact-head enqueue and
 reconciliation operation; the enqueue token also mints Contents write, because
 a queued entry ends with GitHub pushing the squash commit to the default branch
-(#371 tracks the live proof of the scope set). No Actions, Workflow, Release,
-Administration, Secrets, arbitrary status, direct-merge, dequeue, queue-jump,
-or generic API authority is exposed. Because the maintainer revision has no
-Workflows permission, exact-tree publication rejects any tree that changes
+(#371 tracks the live proof of the scope set). Actions write is narrowed by code
+to exact workflow/run identities; no generic workflow, Administration, Secrets,
+arbitrary status, direct-merge, dequeue, queue-jump, or generic API authority is
+exposed. Exact-tree publication still rejects any tree that changes
 `.github/workflows/**` rather than silently publishing an incomplete or
 unauthorized workflow update.
 
@@ -177,14 +190,21 @@ automated path. Before enqueueing it re-reads the PR and requires the bound base
 and head; the GraphQL mutation supplies `expectedHeadOid`, never `jump`, and the
 broker reconciles the exact queue entry. The enqueue result reports the state
 the entry was created in, which is what makes an immediately `UNMERGEABLE`
-entry visible; **no operation yet reports the eventual merge outcome**, so a
-caller cannot learn from this surface whether its entry merged or was ejected. GitHub then
-tests the exact PR head against the queue's latest base before merging. A base
-or head mismatch observed before enqueue invalidates the operation; an
-ambiguous enqueue is reconciled and never blindly repeated. A repository with
-no merge queue, or only ruleset/classic branch protection the broker cannot
-prove applies without bypass, is unsupported and fails closed. The broker does
-not request Administration permission or expose direct merge as a fallback.
+entry visible. An entry already present before the durable claim is refused as
+external; it is never adopted as an App enqueue. The read-only merge observer
+first binds to the completed
+durable App enqueue attempt, then distinguishes its active exact entry, a
+merged PR after that attempt with its merge commit, and an exact PR whose
+recorded entry is no longer in the queue. The last state deliberately does not
+guess whether the entry was ejected or manually removed. The durable entry ID
+is returned in every state; a generic `merged: true` response alone is not
+reported as queue lineage. GitHub tests the exact PR head
+against the queue's latest base before merging. A base or head mismatch
+observed before enqueue invalidates the operation; an ambiguous enqueue is
+reconciled and never blindly repeated. A repository with no merge queue, or
+only ruleset/classic branch protection the broker cannot prove applies without
+bypass, is unsupported and fails closed. The broker does not request
+Administration permission or expose direct merge as a fallback.
 
 Every request binds the App installation, repository numeric ID, permission
 revision, operation kind, exact expected base and head where applicable,
@@ -195,12 +215,14 @@ and credential-bearing URLs remain in broker memory and never enter the agent,
 repository, prompt, worktree, log, or SQLite state.
 
 Existing refs are never force-updated or replaced. Publication may adopt only
-the exact expected generated ref/commit; any different target is a conflict.
-The live surface has no branch-deletion operation, so cleanup is an explicit
-human handoff until one is implemented. A moved, reused, or ambiguous ref
-becomes a reconciled success or a visible indeterminate/conflict, never a blind
-retry. This maintainer surface is permanent official coordinator
-infrastructure, not executable intake and not the future runtime broker.
+the exact expected generated ref/commit and refuses the live default branch;
+any different target is a conflict.
+GitHub's required `delete_branch_on_merge` setting removes the source ref as
+part of merge processing. Publication, PR creation, enqueue, and merge
+observation each re-read that setting before acting. The broker exposes no
+read-then-delete ref mutation.
+This maintainer surface is permanent official coordinator infrastructure, not
+executable intake and not the future runtime broker.
 
 ## Authority boundary
 
@@ -234,15 +256,24 @@ acknowledgement becomes visibly indeterminate and is not submitted again until
 operation-specific reconciliation proves the result; the system never guesses
 whether a second mutation is safe.
 
-The future runtime operation set is deliberately finite: read an exact
-revision, publish one exact immutable Change tree to a generated branch,
-create or update one PR, observe Check Runs for its exact head, and post one
-bounded formal PR review.
-A later Issues-write revision may add source-issue closure after an exact
-approved terminal workflow. Creating Check Runs, writing legacy commit
-statuses, issue comments, and issue closure are unavailable in the publication
-revision. There is no arbitrary REST, GraphQL, Git, shell, merge, ref update,
-release, or administration escape hatch.
+The coordinator retains the exact canonical request until completion. After a
+closed transport, `observe_operation` says whether the UUID never reached the
+journal, is still planned or executing, is indeterminate, or completed; a
+completed record includes its typed result. This observation does not retry a
+write. Only the byte-identical request may be replayed under that UUID. If the
+caller discovers that its local request was truncated or assembled from the
+wrong bytes, it uses a fresh UUID for the corrected request rather than
+turning an idempotency conflict into a guess.
+
+The runtime operation set is deliberately finite: read the exact default
+revision, create, observe, and resolve one bounded issue with an evidence
+comment, publish one exact immutable Change tree to a generated branch, create
+one PR, observe checks and merge state for its exact head, post one bounded
+formal PR review, enqueue it, publish and observe one immutable release, and
+dispatch one fixed control-plane deployment. GitHub owns merged source-branch
+cleanup through delete-on-merge. There is no generic issue-comment or closure
+authority and no arbitrary REST, GraphQL, Git, shell, merge, ref update, or
+administration escape hatch.
 
 ## Input quarantine
 
@@ -285,31 +316,30 @@ lifecycle action fails closed. The revision requests no Contents, Pull
 requests, Checks, Actions, Workflows, Releases, Administration, or Secrets
 authority.
 
-A separately approved publication revision may add only Contents read/write,
-Pull requests read/write, and Checks read. It does not inherit broader
-permissions speculatively. Closing a plain source issue or posting an issue
-comment remains unavailable: either operation would require a later,
-separately approved Issues-write revision and its own causal tests.
-Pull requests write covers the formal Pull Request Review API; Contents write
-covers exact generated-ref creation. Neither permission creates a generic
-mutation surface. Runtime merge and branch deletion are not added by this
-foundation; those operations above belong only to the separate maintainer
-broker.
+The separately approved `maintainer-operations-v2` revision adds only Actions
+read/write, Contents read/write, Issues read/write, Pull requests read/write,
+Checks read, Merge queues read/write, and Metadata read. Each credential minted
+from it is downscoped again to one typed operation. Pull requests write covers
+PR creation and the formal review API; Contents write covers exact generated-ref
+and immutable tag creation; Actions write covers exact failed-run recovery and
+the two fixed workflow dispatches. None creates a generic mutation surface.
+Runtime direct merge is absent. GitHub's required delete-on-merge repository
+setting performs source-branch cleanup atomically instead of a broker
+read-then-delete race.
 
-## Verified App identity
+## Bound App publication
 
 For a Dark Factory-authored publication, the broker authenticates as the exact
-installation and creates the Git tree and commit from the daemon's immutable
-post-attempt publication snapshot through an API that has been causally proven
-to sign as that App. Omitting a signature from the REST Git commit API does not
-satisfy this contract. Before branch or PR publication is reported successful,
-Dark Factory requires the selected API to return both
-`verification.verified == true` and `verification.reason == "valid"`.
-
-The same read must match the expected repository, App bot numeric identity,
-tree SHA, sole parent/base SHA, and byte-exact bounded message and trailers.
-No branch ref is created or advanced and no PR is opened or updated until every
-check succeeds.
+installation and builds immutable blobs, one tree, and one commit through the
+Git Database API. Those objects do not publish a branch. The only persistent
+publication is the final ref write: it creates an absent topic ref directly at
+the commit or advances an existing exact-parent ref without force. A moved ref
+therefore fails instead of being overwritten, and a failed first publication
+cannot strand an empty branch at the parent. Before reporting success the
+broker requires the returned ref and commit to agree; a lost response is
+reconciled only from a branch tip with the byte-exact operation message, the
+complete request digest in its trailer, the exact materialized request tree,
+and the stated sole parent.
 
 The durable audit records Run, Change, exact source digest, base commit,
 resulting commit, installation, permission revision, request digest, and
@@ -323,18 +353,18 @@ must not be reintroduced. No DCO `Signed-off-by` trailer is added
 automatically: legal signoff is a separate explicit product-policy decision,
 not cryptographic commit verification.
 
-GitHub documents no general idempotency key for Git commit creation. The REST
-Git Database sequence therefore remains blocked until the broker can prove
-at-most-once submission and honest indeterminate recovery, or an atomic API is
-shown to preserve every Change byte and Git mode. No implementation may claim
-exactly-once commit publication from blind REST retry.
+GitHub documents no general idempotency key for Git commit creation. Publication
+therefore uses a durable at-most-once claim, an exact-parent non-forced ref
+write, and branch-tip reconciliation; it never blindly resubmits an ambiguous
+publication.
 
 Runtime ref creation never uses force or replacement. A pre-existing generated
 ref is success only when it already names the exact verified commit. Runtime
 crash tests cover request-before-effect, effect-before-acknowledgement, and
 acknowledgement-after-effect for publication and formal review; ambiguity stops
 instead of turning SDK retry defaults into a second mutation. The maintainer
-broker has separate equivalent tests for its exact merge and branch deletion.
+broker has separate equivalent tests for its exact merge observation and
+GitHub-owned delete-on-merge precondition.
 
 ## Activation gates
 

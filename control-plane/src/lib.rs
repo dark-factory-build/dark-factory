@@ -2,6 +2,8 @@
 //! `factoryd`; its bootstrap surface only authenticates and journals ping
 //! deliveries.
 
+#![recursion_limit = "256"]
+
 #[cfg(feature = "development-sqlite")]
 use std::path::Path;
 
@@ -24,7 +26,7 @@ pub mod maintainer;
 #[cfg(target_arch = "wasm32")]
 mod mcp;
 
-use maintainer::{MAX_BODY_BYTES, MaintainerState};
+use maintainer::MaintainerState;
 
 pub const WEBHOOK_SECRET_BINDING: &str = "DARK_FACTORY_MAINTAINER_WEBHOOK_SECRET";
 pub const SECRET_REVISION_BINDING: &str = "DARK_FACTORY_MAINTAINER_WEBHOOK_SECRET_REVISION";
@@ -244,20 +246,24 @@ pub fn app(state: BrokerState) -> Router {
     let router = if state.maintainer.is_some() {
         router.route(
             maintainer::WEBHOOK_PATH,
-            axum::routing::post(maintainer::receive),
+            axum::routing::post(maintainer::receive)
+                .layer(DefaultBodyLimit::max(maintainer::MAX_BODY_BYTES)),
         )
     } else {
         router
     };
     #[cfg(target_arch = "wasm32")]
     let router = if state.mcp.is_some() {
-        router.route(mcp::PATH, axum::routing::post(mcp::receive))
+        router.route(
+            mcp::PATH,
+            // This ceiling is derived above every typed publication allowed by
+            // MCP. The old global webhook cap drifted below that contract.
+            axum::routing::post(mcp::receive).layer(DefaultBodyLimit::max(mcp::MAX_BODY_BYTES)),
+        )
     } else {
         router
     };
-    router
-        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
-        .with_state(state)
+    router.with_state(state)
 }
 
 async fn health() -> Response {
@@ -287,9 +293,9 @@ async fn ready(State(state): State<BrokerState>) -> Response {
                 json_response(
                     StatusCode::OK,
                     if mcp.headless() {
-                        r#"{"status":"ready","maintainer_webhook":"signed_ping_with_app_verification","maintainer_operations":"mcp_six_tools_operator_and_headless","product_webhook":"inactive","operator_api":"inactive"}"#
+                        r#"{"status":"ready","maintainer_webhook":"signed_ping_with_app_verification","maintainer_operations":"mcp_repository_bound_operator_and_headless","product_webhook":"inactive","operator_api":"inactive"}"#
                     } else {
-                        r#"{"status":"ready","maintainer_webhook":"signed_ping_with_app_verification","maintainer_operations":"mcp_six_tools_operator_only","product_webhook":"inactive","operator_api":"inactive"}"#
+                        r#"{"status":"ready","maintainer_webhook":"signed_ping_with_app_verification","maintainer_operations":"mcp_repository_bound_operator_only","product_webhook":"inactive","operator_api":"inactive"}"#
                     },
                 )
             } else {
@@ -421,7 +427,7 @@ mod tests {
                 4_673_420,
                 [
                     Some(private_key),
-                    Some("maintainer-operations-v1".into()),
+                    Some("maintainer-operations-v2".into()),
                     Some("dark-factory-build/dark-factory".into()),
                     Some("109233175".into()),
                     Some("1335380107".into()),

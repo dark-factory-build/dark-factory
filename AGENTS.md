@@ -144,16 +144,18 @@ Read-only context unless a task explicitly asks you to edit them:
    Before the first remote operation in every session, call
    `maintainer_status` and continue only when it binds
    `dark-factory-build/dark-factory` with numeric repository ID `1335380107`
-   and permission revision `maintainer-operations-v1`.
-   The current surface exposes only status, exact commit publication, pull
-   request creation, review verdict submission, check observation, and merge
-   queue enqueue. Use those typed tools only. Issue creation, issue comments
-   or state changes, releases, workflow dispatch, and eventual merge-result
-   observation are not currently exposed; they require a separately reviewed
-   human action until a typed operation is implemented. If the MCP or the
-   needed typed tool is absent, denied, unavailable, or indeterminate, fail
-   closed and report the exact missing authority path; continue with
-   local-only work where useful.
+   and permission revision `maintainer-operations-v2`.
+   The typed surface verifies authority, observes the exact default head and
+   durable operation outcomes, manages bounded issues, publishes exact
+   commits and pull requests, records exact-head review verdicts, diagnoses
+   and reruns exact-head CI, observes merge results, enqueues through the merge
+   queue, publishes and observes immutable releases, and dispatches only the
+   fixed reviewed release-recovery and control-plane deployment workflows.
+   Use those typed tools only. Direct merge and arbitrary GitHub or workflow
+   operations are not exposed. If the MCP or the needed
+   typed tool is absent, denied, unavailable, or indeterminate, fail closed
+   and report the exact missing authority path; continue with local-only work
+   where useful.
 
    Never substitute `gh`, `gh auth`, authenticated `git fetch`/`pull`/`clone`/
    `push`, a PAT, `GH_TOKEN`/`GITHUB_TOKEN`, SSH-agent state or keys, credential

@@ -35,6 +35,24 @@ fn production_runtime_is_cloudflare_only() {
     }
 }
 
+/// A global body limit silently rejected valid publication envelopes before
+/// `publish_commit` could apply its typed file-count and per-file bounds. Keep
+/// the signed webhook limit separate and derive the MCP ceiling above every
+/// request its schema permits, so neither path is unbounded or contradictory.
+#[test]
+fn body_limits_are_scoped_to_their_routes() {
+    let lib = project_file("src/lib.rs");
+    let mcp = project_file("src/mcp.rs");
+    assert!(lib.contains(
+        "axum::routing::post(maintainer::receive)\n                .layer(DefaultBodyLimit::max(maintainer::MAX_BODY_BYTES))"
+    ));
+    assert!(lib.contains(
+        "axum::routing::post(mcp::receive).layer(DefaultBodyLimit::max(mcp::MAX_BODY_BYTES))"
+    ));
+    assert!(!lib.contains(".layer(DefaultBodyLimit::max(MAX_BODY_BYTES))"));
+    assert!(mcp.contains("pub(crate) const MAX_BODY_BYTES: usize = 52 * 1024 * 1024;"));
+}
+
 /// Workers' `Request` constructor accepts only `follow` and `manual` and throws on
 /// `error`, so `RequestRedirect::Error` means the request is never built and the call
 /// fails closed with no diagnosis. Shipping it once left `/readyz` permanently 503 and
@@ -172,6 +190,31 @@ fn declared_output_schemas_name_the_fields_the_results_carry() {
             "PullRequestResult",
             &["number", "url", "head_sha"][..],
         ),
+        (
+            "maintainer_status",
+            "RepositoryResult",
+            &[
+                "repository",
+                "repository_id",
+                "default_branch",
+                "default_sha",
+            ][..],
+        ),
+        ("create_issue", "IssueResult", &["number", "url"][..]),
+        (
+            "observe_pull_request_merge",
+            "PullRequestMergeResult",
+            &[
+                "pull_number",
+                "head_sha",
+                "base",
+                "pull_state",
+                "state",
+                "entry_id",
+                "queue_state",
+                "merge_commit_sha",
+            ][..],
+        ),
     ] {
         let start = github_app
             .find(&format!("struct {struct_name} {{"))
@@ -189,6 +232,21 @@ fn declared_output_schemas_name_the_fields_the_results_carry() {
             );
         }
     }
+
+    let operation = tool_block("observe_operation");
+    let journal = project_file("src/journal.rs");
+    for field in ["kind", "request_digest", "state", "result_json"] {
+        assert!(
+            journal.contains(&format!("pub(crate) {field}: ")),
+            "OperationObservation does not carry {field}"
+        );
+    }
+    for field in ["operation_id", "kind", "request_digest", "state", "result"] {
+        assert!(
+            operation.contains(&format!(r#""{field}": {{"#)),
+            "observe_operation's outputSchema does not declare {field}"
+        );
+    }
 }
 
 #[test]
@@ -198,9 +256,23 @@ fn mcp_surface_is_repository_bound_and_typed() {
 
     for tool in [
         "maintainer_status",
+        "observe_operation",
+        "create_issue",
+        "observe_issue",
+        "resolve_issue",
+        "publish_release_tag",
+        "recover_release",
+        "observe_release",
+        "observe_release_workflow",
+        "dispatch_control_plane_deploy",
+        "observe_control_plane_deploy",
         "create_pull_request",
         "submit_pull_request_review",
         "observe_pull_request_checks",
+        "observe_pull_request_workflows",
+        "read_pull_request_job_log",
+        "rerun_failed_pull_request_jobs",
+        "observe_pull_request_merge",
         "publish_commit",
         "enqueue_pull_request",
     ] {
@@ -234,15 +306,16 @@ fn the_deployment_gate_asserts_the_readiness_label_the_worker_emits() {
     )
     .unwrap();
 
-    let headless = r#""maintainer_operations":"mcp_six_tools_operator_and_headless""#;
+    let headless = r#""maintainer_operations":"mcp_repository_bound_operator_and_headless""#;
     assert!(lib.contains(headless));
-    assert!(lib.contains(r#""maintainer_operations":"mcp_six_tools_operator_only""#));
+    assert!(lib.contains(r#""maintainer_operations":"mcp_repository_bound_operator_only""#));
     // The gate must require the headless variant specifically: the binding
     // behind it is optional and inherited across versions, so this is the only
     // check that catches a deployment which silently lost it.
     assert!(workflow.contains(headless));
-    assert!(!workflow.contains("mcp_six_tools_operator_only"));
-    assert!(!workflow.contains("mcp_pr_create_review_checks"));
+    assert!(!workflow.contains("mcp_repository_bound_operator_only"));
+    assert!(!lib.contains("mcp_six_tools"));
+    assert!(!workflow.contains("mcp_six_tools"));
 }
 
 /// The enqueue and publish paths are `wasm32`-only, so a host test cannot
@@ -294,11 +367,34 @@ fn github_refusals_stay_determinate() {
         github_app
             .contains(r#"permission_at_least(&installation.permissions, "merge_queues", "write")"#)
     );
+    assert!(
+        github_app.contains(r#"permission_at_least(&installation.permissions, "issues", "write")"#)
+    );
+    assert!(
+        github_app
+            .contains(r#"permission_at_least(&installation.permissions, "actions", "write")"#)
+    );
     // A branch with no queue fails closed instead of falling back to a merge.
     assert!(!github_app.contains("/merge\""));
     assert!(!mcp.contains("merge_pull_request_at_head"));
+    // GitHub owns atomic post-merge cleanup. There is no unsafe read-then-delete
+    // ref mutation in this surface.
+    assert!(github_app.contains("delete_branch_on_merge"));
+    assert!(github_app.contains("require_branch_cleanup(&repository)?;"));
+    assert!(!github_app.contains("delete_generated_branch"));
+    // Publication, PR creation, and enqueue derive the default branch from
+    // GitHub rather than trusting a caller-supplied branch name.
+    assert!(github_app.contains("request.base != repository.default_branch"));
+    assert!(github_app.contains("request.branch == repository.default_branch"));
     // A refusal releases the claim so the same operation ID stays retryable.
     assert!(github_app.contains("OperationTransition::Refused"));
+    assert!(github_app.contains("RefusalReason::AlreadyQueued"));
+    // Reconciliation rematerializes the content-addressed request tree; a
+    // copied marker and parent cannot cause a different tree to be adopted.
+    assert!(github_app.contains("head.tree.sha != self.materialize_tree(token, request).await?"));
+    // These fixed REST contracts are exact rather than generic 2xx guesses.
+    assert!(github_app.contains("request.promote.to_string()"));
+    assert!(github_app.contains("token.as_str(),\n            201,"));
     assert!(journal.contains(r#"Ok(("planned", None, "'executing','indeterminate'"))"#));
     // And the caller is told which of the two it got.
     assert!(mcp.contains(r#""refused""#));

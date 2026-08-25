@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use base64::{Engine as _, engine::general_purpose};
 use serde::{Deserialize, Serialize};
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 use sha2::{Digest as _, Sha256};
 use zeroize::{Zeroize as _, Zeroizing};
 
@@ -17,14 +17,25 @@ pub(crate) const PERMISSION_REVISION_BINDING: &str = "DARK_FACTORY_MAINTAINER_PE
 pub(crate) const REPOSITORY_BINDING: &str = "DARK_FACTORY_MAINTAINER_REPOSITORY";
 pub(crate) const REPOSITORY_OWNER_ID_BINDING: &str = "DARK_FACTORY_MAINTAINER_REPOSITORY_OWNER_ID";
 pub(crate) const REPOSITORY_ID_BINDING: &str = "DARK_FACTORY_MAINTAINER_REPOSITORY_ID";
-pub(crate) const PERMISSION_REVISION: &str = "maintainer-operations-v1";
+pub(crate) const PERMISSION_REVISION: &str = "maintainer-operations-v2";
 const GITHUB_API_VERSION: &str = "2026-03-10";
-const MAX_GITHUB_RESPONSE_BYTES: usize = 64 * 1024;
+// GitHub list endpoints below request at most 100 records. Issue comments and
+// review bodies can each be 65,536 characters, so a webhook-sized 64 KiB cap
+// rejected valid bounded pages before their typed count checks could run.
+const MAX_GITHUB_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 /// Publication bounds. A commit is a bounded, reviewable unit of work, not a
 /// bulk upload channel, and the Worker must hold every blob in memory.
 const MAX_COMMIT_FILES: usize = 50;
 const MAX_COMMIT_FILE_BYTES: usize = 1_000_000;
-const MAX_COMMIT_TOTAL_BYTES: usize = 4_000_000;
+const MAX_ISSUE_COMMENT_PAGES: usize = 10;
+const MAX_ISSUE_COMMENTS_PER_PAGE: usize = 100;
+const MAX_WORKFLOW_RUNS: usize = 20;
+const MAX_WORKFLOW_JOBS: usize = 100;
+const MAX_WORKFLOW_STEPS: usize = 100;
+const MAX_JOB_LOG_BYTES: usize = 64 * 1024;
+const MAX_LOG_REDIRECT_BYTES: usize = 4_096;
+const RELEASE_WORKFLOW_PATH: &str = ".github/workflows/release.yml";
+const DEPLOY_WORKFLOW_PATH: &str = ".github/workflows/deploy-control-plane.yml";
 
 #[derive(Clone)]
 pub(crate) struct AppAuthority(Arc<Authority>);
@@ -66,7 +77,7 @@ pub(crate) enum OperationError {
     InvalidInput,
     #[error("operation ID is already bound to a different request")]
     Conflict,
-    /// GitHub refused, determinately, and nothing changed. Distinct from
+    /// GitHub refused the requested mutation determinately. Distinct from
     /// `Indeterminate`, which means the outcome is genuinely unknown: a
     /// refusal leaves the operation ID retryable once the precondition the
     /// refusal names actually holds. The reason rides along because an
@@ -74,7 +85,7 @@ pub(crate) enum OperationError {
     /// lacks a permission", "the queue rejected the entry", and "there is
     /// no queue" are three different retries, and without the reason the
     /// only way to tell them apart is reading this crate's source.
-    #[error("github refused the operation and nothing changed: {0}")]
+    #[error("github refused the requested mutation: {0}")]
     Refused(RefusalReason),
     #[error("operation outcome requires reconciliation")]
     Indeterminate,
@@ -101,6 +112,14 @@ pub(crate) enum RefusalReason {
     /// falling back to a merge.
     #[error("the queue read found no merge queue on the base branch")]
     NoMergeQueue,
+    #[error("the workflow run is not a completed failure")]
+    RunNotFailed,
+    #[error("the workflow job is not a completed failure")]
+    JobNotFailed,
+    #[error("repository delete-on-merge is disabled")]
+    BranchCleanupDisabled,
+    #[error("the pull request was already queued before this operation claimed it")]
+    AlreadyQueued,
 }
 
 /// Which pre-execution rejection classes appeared. More than one can:
@@ -144,18 +163,34 @@ impl std::fmt::Display for RejectionKinds {
 }
 
 impl From<Error> for OperationError {
-    /// A bare status carries no determinate meaning at most call sites — only
-    /// the operations that know which statuses their endpoint uses to refuse
-    /// may read one, and they match on `Error::Rejected` before reaching here.
-    fn from(_: Error) -> Self {
-        Self::Unavailable
+    fn from(error: Error) -> Self {
+        match error {
+            Error::Rejected(status) => rejection_for_status(status)
+                .map(RefusalReason::Rejected)
+                .map(Self::Refused)
+                .unwrap_or(Self::Unavailable),
+            Error::Configuration | Error::Unavailable => Self::Unavailable,
+        }
     }
+}
+
+fn rejection_for_status(status: u16) -> Option<RejectionKinds> {
+    let mut kinds = RejectionKinds::default();
+    match status {
+        404 => kinds.not_found = true,
+        401 | 403 => kinds.forbidden = true,
+        409 | 422 => kinds.unprocessable = true,
+        429 => kinds.rate_limited = true,
+        _ => return None,
+    }
+    Some(kinds)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CreatePullRequest {
     pub(crate) operation_id: String,
+    pub(crate) issue_number: i64,
     pub(crate) head: String,
     pub(crate) head_sha: String,
     pub(crate) base: String,
@@ -236,6 +271,106 @@ pub(crate) struct ObservePullRequestChecks {
     pub(crate) head_sha: String,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct RepositoryResult {
+    pub(crate) repository: String,
+    pub(crate) repository_id: i64,
+    pub(crate) default_branch: String,
+    pub(crate) default_sha: String,
+    pub(crate) delete_branch_on_merge: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CreateIssue {
+    pub(crate) operation_id: String,
+    pub(crate) title: String,
+    pub(crate) body: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct IssueResult {
+    pub(crate) number: i64,
+    pub(crate) url: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ObserveIssue {
+    pub(crate) issue_number: i64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct IssueObservationResult {
+    pub(crate) number: i64,
+    pub(crate) url: String,
+    pub(crate) state: String,
+    pub(crate) state_reason: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum IssueResolutionReason {
+    Completed,
+    NotPlanned,
+}
+
+impl IssueResolutionReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::NotPlanned => "not_planned",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ResolveIssue {
+    pub(crate) operation_id: String,
+    pub(crate) issue_number: i64,
+    pub(crate) body: String,
+    pub(crate) state_reason: IssueResolutionReason,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct ResolveIssueResult {
+    pub(crate) number: i64,
+    pub(crate) url: String,
+    pub(crate) comment_url: String,
+    pub(crate) state: String,
+    pub(crate) state_reason: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ObservePullRequestMerge {
+    pub(crate) enqueue_operation_id: String,
+    pub(crate) pull_number: i64,
+    pub(crate) head_sha: String,
+    pub(crate) base: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct PullRequestMergeResult {
+    pub(crate) pull_number: i64,
+    pub(crate) head_sha: String,
+    pub(crate) base: String,
+    pub(crate) pull_state: String,
+    pub(crate) state: MergeObservationState,
+    pub(crate) entry_id: String,
+    pub(crate) queue_state: Option<String>,
+    pub(crate) merge_commit_sha: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub(crate) enum MergeObservationState {
+    ActiveQueue,
+    MergedAfterEnqueueAttempt,
+    NotQueued,
+}
+
 /// One file's content at a path, or its removal when `content_base64` is absent.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -302,7 +437,7 @@ pub(crate) struct CommitResult {
 /// It is worth carrying because an entry can be `UNMERGEABLE` the moment it is
 /// created -- a moved base, a conflict -- and a caller told only "queued"
 /// waits for a merge that is never coming. It is a durable observation, not a
-/// live status, and no operation yet reports the eventual merge outcome.
+/// live status; `observe_pull_request_merge` performs the later live read.
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct EnqueueResult {
     pub(crate) pull_number: i64,
@@ -328,14 +463,6 @@ pub(crate) struct ReviewResult {
     /// All three verdicts are `COMMENTED` on the wire, so `state` cannot tell
     /// a reviewer which verdict it just recorded -- on the one field that now
     /// gates merges. This echoes it back.
-    ///
-    /// `default` is load-bearing, not tidiness. Results are stored as JSON in
-    /// the durable journal and replayed with `serde_json::from_str`, so a
-    /// required field added here makes every operation completed *before* this
-    /// deploy fail to deserialize -- turning an idempotent replay into a
-    /// permanent `Unavailable` for an operation that succeeded. The same trap
-    /// applies to any future field on any result type.
-    #[serde(default)]
     pub(crate) verdict: String,
 }
 
@@ -352,6 +479,205 @@ pub(crate) struct CheckResult {
     pub(crate) status: String,
     pub(crate) conclusion: Option<String>,
     pub(crate) url: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ObservePullRequestWorkflows {
+    pub(crate) pull_number: i64,
+    pub(crate) head_sha: String,
+    pub(crate) base: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct PullRequestWorkflowsResult {
+    pub(crate) pull_number: i64,
+    pub(crate) head_sha: String,
+    pub(crate) base: String,
+    pub(crate) runs: Vec<WorkflowRunResult>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct WorkflowRunResult {
+    pub(crate) run_id: i64,
+    pub(crate) run_attempt: i64,
+    pub(crate) name: String,
+    pub(crate) path: String,
+    pub(crate) event: String,
+    pub(crate) status: String,
+    pub(crate) conclusion: Option<String>,
+    pub(crate) url: String,
+    pub(crate) jobs: Vec<WorkflowJobResult>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct WorkflowJobResult {
+    pub(crate) job_id: i64,
+    pub(crate) name: String,
+    pub(crate) status: String,
+    pub(crate) conclusion: Option<String>,
+    pub(crate) url: String,
+    pub(crate) steps: Vec<WorkflowStepResult>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct WorkflowStepResult {
+    pub(crate) name: String,
+    pub(crate) status: String,
+    pub(crate) conclusion: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReadPullRequestJobLog {
+    pub(crate) pull_number: i64,
+    pub(crate) head_sha: String,
+    pub(crate) base: String,
+    pub(crate) run_id: i64,
+    pub(crate) run_attempt: i64,
+    pub(crate) job_id: i64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct JobLogResult {
+    pub(crate) pull_number: i64,
+    pub(crate) head_sha: String,
+    pub(crate) base: String,
+    pub(crate) run_id: i64,
+    pub(crate) run_attempt: i64,
+    pub(crate) job_id: i64,
+    pub(crate) text: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RerunFailedPullRequestJobs {
+    pub(crate) operation_id: String,
+    pub(crate) pull_number: i64,
+    pub(crate) head_sha: String,
+    pub(crate) base: String,
+    pub(crate) run_id: i64,
+    pub(crate) run_attempt: i64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct RerunFailedPullRequestJobsResult {
+    pub(crate) pull_number: i64,
+    pub(crate) head_sha: String,
+    pub(crate) base: String,
+    pub(crate) run_id: i64,
+    pub(crate) run_attempt: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PublishReleaseTag {
+    pub(crate) operation_id: String,
+    pub(crate) tag: String,
+    pub(crate) commit_sha: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct ReleaseTagResult {
+    pub(crate) tag: String,
+    pub(crate) commit_sha: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RecoverRelease {
+    pub(crate) operation_id: String,
+    pub(crate) tag: String,
+    pub(crate) commit_sha: String,
+    pub(crate) workflow_sha: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DispatchControlPlaneDeploy {
+    pub(crate) operation_id: String,
+    pub(crate) commit_sha: String,
+    pub(crate) reviewed_tree: String,
+    pub(crate) promote: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct WorkflowDispatchResult {
+    pub(crate) operation_id: String,
+    pub(crate) workflow: String,
+    pub(crate) commit_sha: String,
+    pub(crate) run_id: i64,
+    pub(crate) run_attempt: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ObserveRelease {
+    pub(crate) tag: String,
+    pub(crate) commit_sha: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ObserveReleaseWorkflow {
+    pub(crate) operation_id: String,
+    pub(crate) tag: String,
+    pub(crate) tag_sha: String,
+    pub(crate) workflow_sha: String,
+    pub(crate) run_id: i64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct ReleaseWorkflowObservationResult {
+    pub(crate) operation_id: String,
+    pub(crate) tag: String,
+    pub(crate) tag_sha: String,
+    pub(crate) workflow_sha: String,
+    pub(crate) workflow_run: WorkflowRunResult,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct ReleaseObservationResult {
+    pub(crate) tag: String,
+    pub(crate) commit_sha: String,
+    pub(crate) release: Option<ReleaseResult>,
+    pub(crate) workflow_run: WorkflowRunResult,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct ReleaseResult {
+    pub(crate) tag: String,
+    pub(crate) url: String,
+    pub(crate) draft: bool,
+    pub(crate) prerelease: bool,
+    pub(crate) assets: Vec<ReleaseAssetResult>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct ReleaseAssetResult {
+    pub(crate) name: String,
+    pub(crate) size: i64,
+    pub(crate) digest: String,
+    pub(crate) url: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ObserveControlPlaneDeploy {
+    pub(crate) operation_id: String,
+    pub(crate) commit_sha: String,
+    pub(crate) reviewed_tree: String,
+    pub(crate) promote: bool,
+    pub(crate) run_id: i64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct ControlPlaneDeployObservationResult {
+    pub(crate) operation_id: String,
+    pub(crate) commit_sha: String,
+    pub(crate) reviewed_tree: String,
+    pub(crate) promote: bool,
+    pub(crate) workflow_run: WorkflowRunResult,
 }
 
 impl AppAuthority {
@@ -390,16 +716,224 @@ impl AppAuthority {
         self.0.verify().await
     }
 
-    pub(crate) fn repository(&self) -> &str {
-        &self.0.repository.full_name
-    }
-
-    pub(crate) fn repository_id(&self) -> i64 {
-        self.0.repository_id
-    }
-
     pub(crate) const fn permission_revision(&self) -> &'static str {
         PERMISSION_REVISION
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn observe_repository(&self) -> Result<RepositoryResult, OperationError> {
+        let token = self
+            .0
+            .installation_token(BTreeMap::from([("contents", "read"), ("metadata", "read")]))
+            .await?;
+        self.0.repository_snapshot(&token).await
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn create_issue(
+        &self,
+        journal: &DeliveryJournal,
+        mut request: CreateIssue,
+    ) -> Result<IssueResult, OperationError> {
+        request.validate()?;
+        let operation = request.operation("create_issue")?;
+        let state = journal
+            .begin_operation(&operation)
+            .await
+            .map_err(|_| OperationError::Unavailable)?;
+        if let Some(result) = completed_or_conflict::<IssueResult>(&state)? {
+            return Ok(result);
+        }
+        let token = self
+            .0
+            .installation_token(BTreeMap::from([("issues", "write"), ("metadata", "read")]))
+            .await?;
+        if let Some(result) = self.0.reconcile_issue(&token, &request).await? {
+            return complete(journal, &operation, result).await;
+        }
+        if matches!(
+            state,
+            OperationRecord::Executing | OperationRecord::Indeterminate
+        ) {
+            journal
+                .mark_operation(&operation, OperationTransition::Indeterminate)
+                .await
+                .map_err(|_| OperationError::Unavailable)?;
+            return Err(OperationError::Indeterminate);
+        }
+        match journal
+            .mark_operation(&operation, OperationTransition::Executing)
+            .await
+            .map_err(|_| OperationError::Unavailable)?
+        {
+            OperationRecord::Claimed => {}
+            OperationRecord::Completed(result) => {
+                return serde_json::from_str(&result).map_err(|_| OperationError::Unavailable);
+            }
+            OperationRecord::Conflict => return Err(OperationError::Conflict),
+            OperationRecord::Executing | OperationRecord::Indeterminate => {
+                if let Some(result) = self.0.reconcile_issue(&token, &request).await? {
+                    return complete(journal, &operation, result).await;
+                }
+                return Err(OperationError::Indeterminate);
+            }
+            OperationRecord::New | OperationRecord::Planned => {
+                return Err(OperationError::Unavailable);
+            }
+        }
+        match self.0.post_issue(&token, &request).await {
+            Ok(result) => complete(journal, &operation, result).await,
+            Err(OperationError::Refused(reason)) => refuse(journal, &operation, reason).await,
+            Err(_) => {
+                if let Some(result) = self.0.reconcile_issue(&token, &request).await? {
+                    return complete(journal, &operation, result).await;
+                }
+                let _ = journal
+                    .mark_operation(&operation, OperationTransition::Indeterminate)
+                    .await;
+                Err(OperationError::Indeterminate)
+            }
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn observe_issue(
+        &self,
+        request: ObserveIssue,
+    ) -> Result<IssueObservationResult, OperationError> {
+        request.validate()?;
+        let token = self
+            .0
+            .installation_token(BTreeMap::from([("issues", "read"), ("metadata", "read")]))
+            .await?;
+        self.0
+            .read_issue(&token, request.issue_number)
+            .await?
+            .into_observation()
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn resolve_issue(
+        &self,
+        journal: &DeliveryJournal,
+        mut request: ResolveIssue,
+    ) -> Result<ResolveIssueResult, OperationError> {
+        request.validate()?;
+        let operation = request.operation("resolve_issue")?;
+        let state = journal
+            .begin_operation(&operation)
+            .await
+            .map_err(|_| OperationError::Unavailable)?;
+        if let Some(result) = completed_or_conflict::<ResolveIssueResult>(&state)? {
+            return Ok(result);
+        }
+        let token = self
+            .0
+            .installation_token(BTreeMap::from([("issues", "write"), ("metadata", "read")]))
+            .await?;
+        let progress = self.0.reconcile_issue_resolution(&token, &request).await?;
+        if let Some(result) = progress.completed(&request) {
+            return complete(journal, &operation, result).await;
+        }
+        if matches!(state, OperationRecord::Executing) {
+            journal
+                .mark_operation(&operation, OperationTransition::Indeterminate)
+                .await
+                .map_err(|_| OperationError::Unavailable)?;
+            return Err(OperationError::Indeterminate);
+        }
+        // A prior attempt may have posted the comment and lost the response.
+        // It is safe to retry only the close, never the comment, when the
+        // marker is already present.
+        if matches!(state, OperationRecord::Indeterminate) && progress.comment.is_none() {
+            return Err(OperationError::Indeterminate);
+        }
+        if matches!(state, OperationRecord::New | OperationRecord::Planned) {
+            match journal
+                .mark_operation(&operation, OperationTransition::Executing)
+                .await
+                .map_err(|_| OperationError::Unavailable)?
+            {
+                OperationRecord::Claimed => {}
+                OperationRecord::Completed(result) => {
+                    return serde_json::from_str(&result).map_err(|_| OperationError::Unavailable);
+                }
+                OperationRecord::Conflict => return Err(OperationError::Conflict),
+                OperationRecord::Executing | OperationRecord::Indeterminate => {
+                    return Err(OperationError::Indeterminate);
+                }
+                OperationRecord::New | OperationRecord::Planned => {
+                    return Err(OperationError::Unavailable);
+                }
+            }
+        }
+
+        let comment = match progress.comment {
+            Some(comment) => comment,
+            None => match self.0.post_issue_comment(&token, &request).await {
+                Ok(comment) => comment,
+                Err(OperationError::Refused(reason)) => {
+                    return refuse(journal, &operation, reason).await;
+                }
+                Err(_) => {
+                    if let Some(result) = self
+                        .0
+                        .reconcile_issue_resolution(&token, &request)
+                        .await?
+                        .completed(&request)
+                    {
+                        return complete(journal, &operation, result).await;
+                    }
+                    let _ = journal
+                        .mark_operation(&operation, OperationTransition::Indeterminate)
+                        .await;
+                    return Err(OperationError::Indeterminate);
+                }
+            },
+        };
+        match self.0.close_issue(&token, &request).await {
+            Ok(issue) => {
+                let result = ResolveIssueResult {
+                    number: issue.number,
+                    url: issue.html_url,
+                    comment_url: comment.html_url,
+                    state: issue.state,
+                    state_reason: issue.state_reason.unwrap_or_default(),
+                };
+                if result.state != "closed" || result.state_reason != request.state_reason.as_str()
+                {
+                    let _ = journal
+                        .mark_operation(&operation, OperationTransition::Indeterminate)
+                        .await;
+                    return Err(OperationError::Indeterminate);
+                }
+                complete(journal, &operation, result).await
+            }
+            Err(OperationError::Refused(reason)) => {
+                // The evidence comment is already durable, so the whole
+                // operation is partially applied even though GitHub proved
+                // the close itself did not run. Keep the journal
+                // reconcilable, but preserve the typed reason for this call.
+                let _ = journal
+                    .mark_operation(&operation, OperationTransition::Indeterminate)
+                    .await;
+                Err(OperationError::Refused(reason))
+            }
+            Err(_) => {
+                if let Some(result) = self
+                    .0
+                    .reconcile_issue_resolution(&token, &request)
+                    .await?
+                    .completed(&request)
+                {
+                    return complete(journal, &operation, result).await;
+                }
+                let _ = journal
+                    .mark_operation(&operation, OperationTransition::Indeterminate)
+                    .await;
+                Err(OperationError::Indeterminate)
+            }
+        }
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -421,10 +955,16 @@ impl AppAuthority {
             .0
             .installation_token(BTreeMap::from([
                 ("contents", "read"),
+                ("issues", "read"),
                 ("metadata", "read"),
                 ("pull_requests", "write"),
             ]))
             .await?;
+        let repository = self.0.repository_metadata(&token).await?;
+        if request.base != repository.default_branch {
+            return Err(OperationError::InvalidInput);
+        }
+        require_branch_cleanup(&repository)?;
         if let Some(result) = self.0.reconcile_pull_request(&token, &request).await? {
             return complete(journal, &operation, result).await;
         }
@@ -437,6 +977,10 @@ impl AppAuthority {
                 .await
                 .map_err(|_| OperationError::Unavailable)?;
             return Err(OperationError::Indeterminate);
+        }
+        let issue = self.0.read_issue(&token, request.issue_number).await?;
+        if !issue.is_real_open_issue() {
+            return Err(OperationError::Conflict);
         }
         self.0
             .verify_ref(&token, &request.head, &request.head_sha)
@@ -466,6 +1010,7 @@ impl AppAuthority {
         }
         match self.0.post_pull_request(&token, &request).await {
             Ok(result) => complete(journal, &operation, result).await,
+            Err(OperationError::Refused(reason)) => refuse(journal, &operation, reason).await,
             Err(_) => {
                 if let Some(result) = self.0.reconcile_pull_request(&token, &request).await? {
                     return complete(journal, &operation, result).await;
@@ -539,6 +1084,7 @@ impl AppAuthority {
         }
         match self.0.post_review(&token, &request).await {
             Ok(result) => complete(journal, &operation, result).await,
+            Err(OperationError::Refused(reason)) => refuse(journal, &operation, reason).await,
             Err(_) => {
                 if let Some(result) = self.0.reconcile_review(&token, &request).await? {
                     return complete(journal, &operation, result).await;
@@ -573,6 +1119,11 @@ impl AppAuthority {
                 ("metadata", "read"),
             ]))
             .await?;
+        let repository = self.0.repository_metadata(&token).await?;
+        if request.branch == repository.default_branch {
+            return Err(OperationError::InvalidInput);
+        }
+        require_branch_cleanup(&repository)?;
         if let Some(result) = self
             .0
             .reconcile_commit(&token, &request)
@@ -617,6 +1168,7 @@ impl AppAuthority {
         }
         match self.0.push_commit(&token, &request, branch_exists).await {
             Ok(result) => complete(journal, &operation, result).await,
+            Err(OperationError::Refused(reason)) => refuse(journal, &operation, reason).await,
             Err(_) => {
                 if let Some(result) = self.0.reconcile_commit(&token, &request).await? {
                     return complete(journal, &operation, result).await;
@@ -627,6 +1179,584 @@ impl AppAuthority {
                 Err(OperationError::Indeterminate)
             }
         }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn publish_release_tag(
+        &self,
+        journal: &DeliveryJournal,
+        mut request: PublishReleaseTag,
+    ) -> Result<ReleaseTagResult, OperationError> {
+        request.validate()?;
+        let operation = request.operation("publish_release_tag")?;
+        let state = journal
+            .begin_operation(&operation)
+            .await
+            .map_err(|_| OperationError::Unavailable)?;
+        if let Some(result) = completed_or_conflict::<ReleaseTagResult>(&state)? {
+            return Ok(result);
+        }
+        let token = self
+            .0
+            .installation_token(BTreeMap::from([
+                ("contents", "write"),
+                ("metadata", "read"),
+            ]))
+            .await?;
+        let repository = self.0.repository_metadata(&token).await?;
+        let default = self.0.read_ref(&token, &repository.default_branch).await?;
+        if default.object.sha != request.commit_sha {
+            return Err(OperationError::Conflict);
+        }
+        if let Some(existing) = self
+            .0
+            .read_tag_commit_optional(&token, &request.tag)
+            .await?
+        {
+            if existing == request.commit_sha {
+                return complete(
+                    journal,
+                    &operation,
+                    ReleaseTagResult {
+                        tag: request.tag,
+                        commit_sha: existing,
+                    },
+                )
+                .await;
+            }
+            return Err(OperationError::Conflict);
+        }
+        if matches!(
+            state,
+            OperationRecord::Executing | OperationRecord::Indeterminate
+        ) {
+            journal
+                .mark_operation(&operation, OperationTransition::Indeterminate)
+                .await
+                .map_err(|_| OperationError::Unavailable)?;
+            return Err(OperationError::Indeterminate);
+        }
+        match journal
+            .mark_operation(&operation, OperationTransition::Executing)
+            .await
+            .map_err(|_| OperationError::Unavailable)?
+        {
+            OperationRecord::Claimed => {}
+            OperationRecord::Completed(result) => {
+                return serde_json::from_str(&result).map_err(|_| OperationError::Unavailable);
+            }
+            OperationRecord::Conflict => return Err(OperationError::Conflict),
+            OperationRecord::Executing | OperationRecord::Indeterminate => {
+                if let Some(existing) = self
+                    .0
+                    .read_tag_commit_optional(&token, &request.tag)
+                    .await?
+                {
+                    if existing == request.commit_sha {
+                        return complete(
+                            journal,
+                            &operation,
+                            ReleaseTagResult {
+                                tag: request.tag,
+                                commit_sha: existing,
+                            },
+                        )
+                        .await;
+                    }
+                }
+                return Err(OperationError::Indeterminate);
+            }
+            OperationRecord::New | OperationRecord::Planned => {
+                return Err(OperationError::Unavailable);
+            }
+        }
+        let result = ReleaseTagResult {
+            tag: request.tag.clone(),
+            commit_sha: request.commit_sha.clone(),
+        };
+        match self.0.create_release_tag(&token, &request).await {
+            Ok(()) => complete(journal, &operation, result).await,
+            Err(error) => {
+                match self
+                    .0
+                    .read_tag_commit_optional(&token, &request.tag)
+                    .await?
+                {
+                    Some(commit_sha) if commit_sha == request.commit_sha => {
+                        complete(journal, &operation, result).await
+                    }
+                    Some(_) => Err(OperationError::Conflict),
+                    None => {
+                        if let OperationError::Refused(reason) = error {
+                            return refuse(journal, &operation, reason).await;
+                        }
+                        let _ = journal
+                            .mark_operation(&operation, OperationTransition::Indeterminate)
+                            .await;
+                        Err(OperationError::Indeterminate)
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn recover_release(
+        &self,
+        journal: &DeliveryJournal,
+        mut request: RecoverRelease,
+    ) -> Result<WorkflowDispatchResult, OperationError> {
+        request.validate()?;
+        let operation = request.operation("recover_release")?;
+        let state = journal
+            .begin_operation(&operation)
+            .await
+            .map_err(|_| OperationError::Unavailable)?;
+        if let Some(result) = completed_or_conflict::<WorkflowDispatchResult>(&state)? {
+            return Ok(result);
+        }
+        let token = self
+            .0
+            .installation_token(BTreeMap::from([
+                ("actions", "write"),
+                ("contents", "read"),
+                ("metadata", "read"),
+            ]))
+            .await?;
+        let repository = self.0.repository_metadata(&token).await?;
+        let default = self.0.read_ref(&token, &repository.default_branch).await?;
+        if default.object.sha != request.workflow_sha {
+            return Err(OperationError::Conflict);
+        }
+        let tag_sha = self
+            .0
+            .read_tag_commit_optional(&token, &request.tag)
+            .await?
+            .ok_or(OperationError::Conflict)?;
+        if tag_sha != request.commit_sha {
+            return Err(OperationError::Conflict);
+        }
+        let marker = format!(
+            "Release recovery {} {}",
+            operation.operation_id, operation.request_digest
+        );
+        if let Some(run) = self
+            .0
+            .workflow_run_by_title(
+                &token,
+                RELEASE_WORKFLOW_PATH,
+                &marker,
+                &request.workflow_sha,
+            )
+            .await?
+        {
+            return complete(
+                journal,
+                &operation,
+                WorkflowDispatchResult {
+                    operation_id: request.operation_id,
+                    workflow: RELEASE_WORKFLOW_PATH.into(),
+                    commit_sha: request.workflow_sha,
+                    run_id: run.id,
+                    run_attempt: run.run_attempt,
+                },
+            )
+            .await;
+        }
+        if matches!(
+            state,
+            OperationRecord::Executing | OperationRecord::Indeterminate
+        ) {
+            journal
+                .mark_operation(&operation, OperationTransition::Indeterminate)
+                .await
+                .map_err(|_| OperationError::Unavailable)?;
+            return Err(OperationError::Indeterminate);
+        }
+        match journal
+            .mark_operation(&operation, OperationTransition::Executing)
+            .await
+            .map_err(|_| OperationError::Unavailable)?
+        {
+            OperationRecord::Claimed => {}
+            OperationRecord::Completed(result) => {
+                return serde_json::from_str(&result).map_err(|_| OperationError::Unavailable);
+            }
+            OperationRecord::Conflict => return Err(OperationError::Conflict),
+            OperationRecord::Executing | OperationRecord::Indeterminate => {
+                return Err(OperationError::Indeterminate);
+            }
+            OperationRecord::New | OperationRecord::Planned => {
+                return Err(OperationError::Unavailable);
+            }
+        }
+        match self
+            .0
+            .dispatch_workflow(
+                &token,
+                RELEASE_WORKFLOW_PATH,
+                &repository.default_branch,
+                serde_json::json!({
+                    "operation_id": request.operation_id,
+                    "request_digest": operation.request_digest,
+                    "tag": request.tag,
+                    "expected_workflow_sha": request.workflow_sha,
+                }),
+            )
+            .await
+        {
+            Ok(dispatch) => match self
+                .0
+                .read_dispatched_workflow(
+                    &token,
+                    dispatch.workflow_run_id,
+                    RELEASE_WORKFLOW_PATH,
+                    &request.workflow_sha,
+                    &marker,
+                )
+                .await
+            {
+                Ok(run) => {
+                    complete(
+                        journal,
+                        &operation,
+                        WorkflowDispatchResult {
+                            operation_id: operation.operation_id.clone(),
+                            workflow: RELEASE_WORKFLOW_PATH.into(),
+                            commit_sha: request.workflow_sha.clone(),
+                            run_id: run.id,
+                            run_attempt: run.run_attempt,
+                        },
+                    )
+                    .await
+                }
+                Err(_) => {
+                    let _ = journal
+                        .mark_operation(&operation, OperationTransition::Indeterminate)
+                        .await;
+                    Err(OperationError::Indeterminate)
+                }
+            },
+            Err(OperationError::Refused(reason)) => refuse(journal, &operation, reason).await,
+            Err(_) => {
+                if let Some(run) = self
+                    .0
+                    .workflow_run_by_title(
+                        &token,
+                        RELEASE_WORKFLOW_PATH,
+                        &marker,
+                        &request.workflow_sha,
+                    )
+                    .await?
+                {
+                    return complete(
+                        journal,
+                        &operation,
+                        WorkflowDispatchResult {
+                            operation_id: operation.operation_id.clone(),
+                            workflow: RELEASE_WORKFLOW_PATH.into(),
+                            commit_sha: request.workflow_sha.clone(),
+                            run_id: run.id,
+                            run_attempt: run.run_attempt,
+                        },
+                    )
+                    .await;
+                }
+                let _ = journal
+                    .mark_operation(&operation, OperationTransition::Indeterminate)
+                    .await;
+                Err(OperationError::Indeterminate)
+            }
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn dispatch_control_plane_deploy(
+        &self,
+        journal: &DeliveryJournal,
+        mut request: DispatchControlPlaneDeploy,
+    ) -> Result<WorkflowDispatchResult, OperationError> {
+        request.validate()?;
+        let operation = request.operation("dispatch_control_plane_deploy")?;
+        let state = journal
+            .begin_operation(&operation)
+            .await
+            .map_err(|_| OperationError::Unavailable)?;
+        if let Some(result) = completed_or_conflict::<WorkflowDispatchResult>(&state)? {
+            return Ok(result);
+        }
+        let token = self
+            .0
+            .installation_token(BTreeMap::from([
+                ("actions", "write"),
+                ("contents", "read"),
+                ("metadata", "read"),
+            ]))
+            .await?;
+        let repository = self.0.repository_metadata(&token).await?;
+        let default = self.0.read_ref(&token, &repository.default_branch).await?;
+        if default.object.sha != request.commit_sha {
+            return Err(OperationError::Conflict);
+        }
+        let default_commit: GitCommit = github_json(
+            &format!(
+                "https://api.github.com/repos/{}/{}/git/commits/{}",
+                self.0.repository.owner, self.0.repository.name, request.commit_sha
+            ),
+            token.as_str(),
+        )
+        .await?;
+        if default_commit.tree.sha != request.reviewed_tree {
+            return Err(OperationError::Conflict);
+        }
+        let marker = format!(
+            "Deploy control-plane {} {}",
+            operation.operation_id, operation.request_digest
+        );
+        if let Some(run) = self
+            .0
+            .workflow_run_by_title(&token, DEPLOY_WORKFLOW_PATH, &marker, &request.commit_sha)
+            .await?
+        {
+            return complete(
+                journal,
+                &operation,
+                WorkflowDispatchResult {
+                    operation_id: request.operation_id,
+                    workflow: DEPLOY_WORKFLOW_PATH.into(),
+                    commit_sha: request.commit_sha,
+                    run_id: run.id,
+                    run_attempt: run.run_attempt,
+                },
+            )
+            .await;
+        }
+        if matches!(
+            state,
+            OperationRecord::Executing | OperationRecord::Indeterminate
+        ) {
+            journal
+                .mark_operation(&operation, OperationTransition::Indeterminate)
+                .await
+                .map_err(|_| OperationError::Unavailable)?;
+            return Err(OperationError::Indeterminate);
+        }
+        match journal
+            .mark_operation(&operation, OperationTransition::Executing)
+            .await
+            .map_err(|_| OperationError::Unavailable)?
+        {
+            OperationRecord::Claimed => {}
+            OperationRecord::Completed(result) => {
+                return serde_json::from_str(&result).map_err(|_| OperationError::Unavailable);
+            }
+            OperationRecord::Conflict => return Err(OperationError::Conflict),
+            OperationRecord::Executing | OperationRecord::Indeterminate => {
+                return Err(OperationError::Indeterminate);
+            }
+            OperationRecord::New | OperationRecord::Planned => {
+                return Err(OperationError::Unavailable);
+            }
+        }
+        match self
+            .0
+            .dispatch_workflow(
+                &token,
+                DEPLOY_WORKFLOW_PATH,
+                &repository.default_branch,
+                serde_json::json!({
+                    "operation_id": request.operation_id,
+                    "request_digest": operation.request_digest,
+                    "expected_commit": request.commit_sha,
+                    "expected_tree": request.reviewed_tree,
+                    "promote": request.promote.to_string(),
+                }),
+            )
+            .await
+        {
+            Ok(dispatch) => match self
+                .0
+                .read_dispatched_workflow(
+                    &token,
+                    dispatch.workflow_run_id,
+                    DEPLOY_WORKFLOW_PATH,
+                    &request.commit_sha,
+                    &marker,
+                )
+                .await
+            {
+                Ok(run) => {
+                    complete(
+                        journal,
+                        &operation,
+                        WorkflowDispatchResult {
+                            operation_id: operation.operation_id.clone(),
+                            workflow: DEPLOY_WORKFLOW_PATH.into(),
+                            commit_sha: request.commit_sha.clone(),
+                            run_id: run.id,
+                            run_attempt: run.run_attempt,
+                        },
+                    )
+                    .await
+                }
+                Err(_) => {
+                    let _ = journal
+                        .mark_operation(&operation, OperationTransition::Indeterminate)
+                        .await;
+                    Err(OperationError::Indeterminate)
+                }
+            },
+            Err(OperationError::Refused(reason)) => refuse(journal, &operation, reason).await,
+            Err(_) => {
+                if let Some(run) = self
+                    .0
+                    .workflow_run_by_title(
+                        &token,
+                        DEPLOY_WORKFLOW_PATH,
+                        &marker,
+                        &request.commit_sha,
+                    )
+                    .await?
+                {
+                    return complete(
+                        journal,
+                        &operation,
+                        WorkflowDispatchResult {
+                            operation_id: operation.operation_id.clone(),
+                            workflow: DEPLOY_WORKFLOW_PATH.into(),
+                            commit_sha: request.commit_sha.clone(),
+                            run_id: run.id,
+                            run_attempt: run.run_attempt,
+                        },
+                    )
+                    .await;
+                }
+                let _ = journal
+                    .mark_operation(&operation, OperationTransition::Indeterminate)
+                    .await;
+                Err(OperationError::Indeterminate)
+            }
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn observe_release(
+        &self,
+        request: ObserveRelease,
+    ) -> Result<ReleaseObservationResult, OperationError> {
+        request.validate()?;
+        let token = self
+            .0
+            .installation_token(BTreeMap::from([
+                ("actions", "read"),
+                ("contents", "read"),
+                ("metadata", "read"),
+            ]))
+            .await?;
+        let actual = self
+            .0
+            .read_tag_commit_optional(&token, &request.tag)
+            .await?
+            .ok_or(OperationError::Conflict)?;
+        if actual != request.commit_sha {
+            return Err(OperationError::Conflict);
+        }
+        let release = self.0.release(&token, &request.tag).await?;
+        let workflow_run = self
+            .0
+            .release_workflow_run(&token, &request.tag, &request.commit_sha)
+            .await?;
+        Ok(ReleaseObservationResult {
+            tag: request.tag,
+            commit_sha: request.commit_sha,
+            release,
+            workflow_run,
+        })
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn observe_release_workflow(
+        &self,
+        mut request: ObserveReleaseWorkflow,
+    ) -> Result<ReleaseWorkflowObservationResult, OperationError> {
+        request.validate()?;
+        let token = self
+            .0
+            .installation_token(BTreeMap::from([
+                ("actions", "read"),
+                ("contents", "read"),
+                ("metadata", "read"),
+            ]))
+            .await?;
+        let tag_sha = self
+            .0
+            .read_tag_commit_optional(&token, &request.tag)
+            .await?
+            .ok_or(OperationError::Conflict)?;
+        if tag_sha != request.tag_sha {
+            return Err(OperationError::Conflict);
+        }
+        let mut recovery = RecoverRelease {
+            operation_id: request.operation_id.clone(),
+            tag: request.tag.clone(),
+            commit_sha: request.tag_sha.clone(),
+            workflow_sha: request.workflow_sha.clone(),
+        };
+        recovery.validate()?;
+        let operation = recovery.operation("recover_release")?;
+        let title = format!(
+            "Release recovery {} {}",
+            operation.operation_id, operation.request_digest
+        );
+        let workflow_run = self.0.workflow_run(&token, request.run_id).await?;
+        workflow_run.verify_dispatch(RELEASE_WORKFLOW_PATH, &request.workflow_sha, &title)?;
+        Ok(ReleaseWorkflowObservationResult {
+            operation_id: request.operation_id,
+            tag: request.tag,
+            tag_sha: request.tag_sha,
+            workflow_sha: request.workflow_sha,
+            workflow_run: workflow_run.into_result(Vec::new())?,
+        })
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn observe_control_plane_deploy(
+        &self,
+        mut request: ObserveControlPlaneDeploy,
+    ) -> Result<ControlPlaneDeployObservationResult, OperationError> {
+        request.validate()?;
+        let token = self
+            .0
+            .installation_token(BTreeMap::from([
+                ("actions", "read"),
+                ("contents", "read"),
+                ("metadata", "read"),
+            ]))
+            .await?;
+        let mut dispatch = DispatchControlPlaneDeploy {
+            operation_id: request.operation_id.clone(),
+            commit_sha: request.commit_sha.clone(),
+            reviewed_tree: request.reviewed_tree.clone(),
+            promote: request.promote,
+        };
+        dispatch.validate()?;
+        let operation = dispatch.operation("dispatch_control_plane_deploy")?;
+        let workflow_run = self.0.workflow_run(&token, request.run_id).await?;
+        workflow_run.verify_dispatch(
+            DEPLOY_WORKFLOW_PATH,
+            &request.commit_sha,
+            &format!(
+                "Deploy control-plane {} {}",
+                operation.operation_id, operation.request_digest
+            ),
+        )?;
+        Ok(ControlPlaneDeployObservationResult {
+            operation_id: request.operation_id,
+            commit_sha: request.commit_sha,
+            reviewed_tree: request.reviewed_tree,
+            promote: request.promote,
+            workflow_run: workflow_run.into_result(Vec::new())?,
+        })
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -670,18 +1800,27 @@ impl AppAuthority {
                 ("pull_requests", "write"),
             ]))
             .await?;
-        if let Some(result) = self.0.reconcile_enqueue(&token, &request).await? {
-            return complete(journal, &operation, result).await;
+        let repository = self.0.repository_metadata(&token).await?;
+        if request.base != repository.default_branch {
+            return Err(OperationError::Conflict);
         }
+        require_branch_cleanup(&repository)?;
+        let existing = self.0.reconcile_enqueue(&token, &request).await?;
         if matches!(
             state,
             OperationRecord::Executing | OperationRecord::Indeterminate
         ) {
+            if let Some(result) = existing {
+                return complete(journal, &operation, result).await;
+            }
             journal
                 .mark_operation(&operation, OperationTransition::Indeterminate)
                 .await
                 .map_err(|_| OperationError::Unavailable)?;
             return Err(OperationError::Indeterminate);
+        }
+        if existing.is_some() {
+            return Err(OperationError::Refused(RefusalReason::AlreadyQueued));
         }
         // The decision doc requires the bound base and head re-read before
         // enqueueing, not only bound on the write.
@@ -758,11 +1897,329 @@ impl AppAuthority {
             .await?;
         self.0.checks(&token, request).await
     }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn observe_pull_request_workflows(
+        &self,
+        request: ObservePullRequestWorkflows,
+    ) -> Result<PullRequestWorkflowsResult, OperationError> {
+        request.validate()?;
+        let token = self
+            .0
+            .installation_token(BTreeMap::from([
+                ("actions", "read"),
+                ("metadata", "read"),
+                ("pull_requests", "read"),
+            ]))
+            .await?;
+        self.0
+            .verify_workflow_pr(
+                &token,
+                request.pull_number,
+                &request.head_sha,
+                &request.base,
+            )
+            .await?;
+        self.0.workflow_runs(&token, &request).await
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn read_pull_request_job_log(
+        &self,
+        request: ReadPullRequestJobLog,
+    ) -> Result<JobLogResult, OperationError> {
+        request.validate()?;
+        let token = self
+            .0
+            .installation_token(BTreeMap::from([
+                ("actions", "read"),
+                ("metadata", "read"),
+                ("pull_requests", "read"),
+            ]))
+            .await?;
+        self.0
+            .verify_workflow_pr(
+                &token,
+                request.pull_number,
+                &request.head_sha,
+                &request.base,
+            )
+            .await?;
+        let run = self.0.read_workflow_run(&token, request.run_id).await?;
+        run.verify(request.pull_number, &request.head_sha)?;
+        if run.run_attempt != request.run_attempt
+            || run.status != "completed"
+            || !run.conclusion.as_deref().is_some_and(failed_conclusion)
+        {
+            return Err(OperationError::Conflict);
+        }
+        let jobs = self.0.workflow_jobs(&token, request.run_id).await?;
+        let job = jobs
+            .into_iter()
+            .find(|job| job.id == request.job_id)
+            .ok_or(OperationError::Conflict)?;
+        if job.status != "completed" || !job.conclusion.as_deref().is_some_and(failed_conclusion) {
+            return Err(OperationError::Refused(RefusalReason::JobNotFailed));
+        }
+        let location = self.0.job_log_redirect(&token, request.job_id).await?;
+        let text = github_public_log(&location).await?;
+        Ok(JobLogResult {
+            pull_number: request.pull_number,
+            head_sha: request.head_sha,
+            base: request.base,
+            run_id: request.run_id,
+            run_attempt: request.run_attempt,
+            job_id: request.job_id,
+            text,
+        })
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn rerun_failed_pull_request_jobs(
+        &self,
+        journal: &DeliveryJournal,
+        mut request: RerunFailedPullRequestJobs,
+    ) -> Result<RerunFailedPullRequestJobsResult, OperationError> {
+        request.validate()?;
+        let operation = request.operation("rerun_failed_pull_request_jobs")?;
+        let state = journal
+            .begin_operation(&operation)
+            .await
+            .map_err(|_| OperationError::Unavailable)?;
+        if let Some(result) = completed_or_conflict::<RerunFailedPullRequestJobsResult>(&state)? {
+            return Ok(result);
+        }
+        let token = self
+            .0
+            .installation_token(BTreeMap::from([
+                ("actions", "write"),
+                ("metadata", "read"),
+                ("pull_requests", "read"),
+            ]))
+            .await?;
+        self.0
+            .verify_workflow_pr(
+                &token,
+                request.pull_number,
+                &request.head_sha,
+                &request.base,
+            )
+            .await?;
+        let run = self.0.read_workflow_run(&token, request.run_id).await?;
+        run.verify(request.pull_number, &request.head_sha)?;
+        if run.run_attempt < request.run_attempt {
+            return Err(OperationError::Conflict);
+        }
+        if run.run_attempt > request.run_attempt {
+            if matches!(
+                state,
+                OperationRecord::Executing | OperationRecord::Indeterminate
+            ) {
+                return complete(
+                    journal,
+                    &operation,
+                    RerunFailedPullRequestJobsResult {
+                        pull_number: request.pull_number,
+                        head_sha: request.head_sha,
+                        base: request.base,
+                        run_id: request.run_id,
+                        run_attempt: run.run_attempt,
+                    },
+                )
+                .await;
+            }
+            return Err(OperationError::Conflict);
+        }
+        if run.status != "completed" || !run.conclusion.as_deref().is_some_and(failed_conclusion) {
+            return Err(OperationError::Refused(RefusalReason::RunNotFailed));
+        }
+        if matches!(
+            state,
+            OperationRecord::Executing | OperationRecord::Indeterminate
+        ) {
+            journal
+                .mark_operation(&operation, OperationTransition::Indeterminate)
+                .await
+                .map_err(|_| OperationError::Unavailable)?;
+            return Err(OperationError::Indeterminate);
+        }
+        match journal
+            .mark_operation(&operation, OperationTransition::Executing)
+            .await
+            .map_err(|_| OperationError::Unavailable)?
+        {
+            OperationRecord::Claimed => {}
+            OperationRecord::Completed(result) => {
+                return serde_json::from_str(&result).map_err(|_| OperationError::Unavailable);
+            }
+            OperationRecord::Conflict => return Err(OperationError::Conflict),
+            OperationRecord::Executing | OperationRecord::Indeterminate => {
+                return Err(OperationError::Indeterminate);
+            }
+            OperationRecord::New | OperationRecord::Planned => {
+                return Err(OperationError::Unavailable);
+            }
+        }
+        if let Err(OperationError::Refused(reason)) =
+            self.0.rerun_failed_jobs(&token, request.run_id).await
+        {
+            return refuse(journal, &operation, reason).await;
+        }
+        for attempt in 0..4 {
+            if let Ok(after) = self.0.read_workflow_run(&token, request.run_id).await
+                && after.verify(request.pull_number, &request.head_sha).is_ok()
+                && after.run_attempt > request.run_attempt
+            {
+                return complete(
+                    journal,
+                    &operation,
+                    RerunFailedPullRequestJobsResult {
+                        pull_number: request.pull_number,
+                        head_sha: request.head_sha,
+                        base: request.base,
+                        run_id: request.run_id,
+                        run_attempt: after.run_attempt,
+                    },
+                )
+                .await;
+            }
+            if attempt < 3 {
+                worker::Delay::from(std::time::Duration::from_millis(250)).await;
+            }
+        }
+        // A 201 means GitHub accepted the rerun request, not that the run
+        // already exposes its new attempt. A lost response is equally
+        // ambiguous. Keep the UUID reconcilable until the exact run advances.
+        let _ = journal
+            .mark_operation(&operation, OperationTransition::Indeterminate)
+            .await;
+        Err(OperationError::Indeterminate)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn observe_pull_request_merge(
+        &self,
+        journal: &DeliveryJournal,
+        mut request: ObservePullRequestMerge,
+    ) -> Result<PullRequestMergeResult, OperationError> {
+        request.validate()?;
+        let mut enqueue_request = EnqueuePullRequest {
+            operation_id: request.enqueue_operation_id.clone(),
+            pull_number: request.pull_number,
+            head_sha: request.head_sha.clone(),
+            base: request.base.clone(),
+        };
+        enqueue_request.validate()?;
+        let enqueue_operation = enqueue_request.operation("enqueue_pull_request")?;
+        let enqueue_observation = journal
+            .observe_operation(&request.enqueue_operation_id)
+            .await
+            .map_err(|_| OperationError::Unavailable)?
+            .ok_or(OperationError::Conflict)?;
+        if enqueue_observation.kind != enqueue_operation.kind
+            || enqueue_observation.request_digest != enqueue_operation.request_digest
+            || enqueue_observation.state != "completed"
+        {
+            return Err(OperationError::Conflict);
+        }
+        let enqueue: EnqueueResult = serde_json::from_str(
+            enqueue_observation
+                .result_json
+                .as_deref()
+                .ok_or(OperationError::Unavailable)?,
+        )
+        .map_err(|_| OperationError::Unavailable)?;
+        if enqueue.pull_number != request.pull_number
+            || enqueue.head_sha != request.head_sha
+            || !valid_queue_state(&enqueue.state_when_recorded)
+            || valid_text(&enqueue.entry_id, 1, 256, true).is_err()
+        {
+            return Err(OperationError::Unavailable);
+        }
+        let token = self
+            .0
+            .installation_token(BTreeMap::from([
+                ("contents", "read"),
+                ("merge_queues", "read"),
+                ("metadata", "read"),
+                ("pull_requests", "read"),
+            ]))
+            .await?;
+        let repository = self.0.repository_metadata(&token).await?;
+        if request.base != repository.default_branch {
+            return Err(OperationError::Conflict);
+        }
+        require_branch_cleanup(&repository)?;
+        let pull = self
+            .0
+            .verify_pull_request_head(&token, request.pull_number, &request.head_sha)
+            .await?;
+        if pull.base.name != request.base {
+            return Err(OperationError::Conflict);
+        }
+        if !matches!(pull.state.as_str(), "open" | "closed") {
+            return Err(OperationError::Unavailable);
+        }
+        if pull.merged {
+            let merge_commit_sha = pull
+                .merge_commit_sha
+                .filter(|sha| valid_sha(sha).is_ok())
+                .ok_or(OperationError::Indeterminate)?;
+            return Ok(PullRequestMergeResult {
+                pull_number: request.pull_number,
+                head_sha: request.head_sha,
+                base: request.base,
+                pull_state: pull.state,
+                state: MergeObservationState::MergedAfterEnqueueAttempt,
+                entry_id: enqueue.entry_id,
+                queue_state: None,
+                merge_commit_sha: Some(merge_commit_sha),
+            });
+        }
+        let queue = self
+            .0
+            .read_queue_entry(
+                &token,
+                &request.base,
+                request.pull_number,
+                &request.head_sha,
+            )
+            .await?;
+        match queue {
+            Some(entry) => {
+                valid_text(&entry.id, 1, 256, true)?;
+                if entry.id != enqueue.entry_id || !valid_queue_state(&entry.state) {
+                    return Err(OperationError::Indeterminate);
+                }
+                Ok(PullRequestMergeResult {
+                    pull_number: request.pull_number,
+                    head_sha: request.head_sha,
+                    base: request.base,
+                    pull_state: pull.state,
+                    state: MergeObservationState::ActiveQueue,
+                    entry_id: entry.id,
+                    queue_state: Some(entry.state),
+                    merge_commit_sha: None,
+                })
+            }
+            None => Ok(PullRequestMergeResult {
+                pull_number: request.pull_number,
+                head_sha: request.head_sha,
+                base: request.base,
+                pull_state: pull.state,
+                state: MergeObservationState::NotQueued,
+                entry_id: enqueue.entry_id,
+                queue_state: None,
+                merge_commit_sha: None,
+            }),
+        }
+    }
 }
 
 impl CreatePullRequest {
     fn validate(&mut self) -> Result<(), OperationError> {
         canonical_operation_id(&mut self.operation_id)?;
+        valid_exact_integer(self.issue_number)?;
         valid_ref(&self.head)?;
         valid_ref(&self.base)?;
         valid_sha(&self.head_sha)?;
@@ -781,15 +2238,20 @@ impl CreatePullRequest {
         operation(kind, &self.operation_id, self)
     }
 
-    fn marker(&self) -> String {
-        format!("{OPERATION_MARKER_PREFIX}{} -->", self.operation_id)
+    fn marker(&self) -> Result<String, OperationError> {
+        Ok(format!(
+            "{OPERATION_MARKER_PREFIX}{}:{} -->",
+            self.operation_id,
+            request_digest(self)?
+        ))
     }
 
-    fn marked_body(&self) -> String {
+    fn marked_body(&self) -> Result<String, OperationError> {
+        let closes = format!("Closes #{}", self.issue_number);
         if self.body.is_empty() {
-            self.marker()
+            Ok(format!("{}\n\n{}", closes, self.marker()?))
         } else {
-            format!("{}\n\n{}", self.body, self.marker())
+            Ok(format!("{}\n\n{}\n\n{}", self.body, closes, self.marker()?))
         }
     }
 }
@@ -809,8 +2271,12 @@ impl SubmitPullRequestReview {
         operation(kind, &self.operation_id, self)
     }
 
-    fn marker(&self) -> String {
-        format!("{OPERATION_MARKER_PREFIX}{} -->", self.operation_id)
+    fn marker(&self) -> Result<String, OperationError> {
+        Ok(format!(
+            "{OPERATION_MARKER_PREFIX}{}:{} -->",
+            self.operation_id,
+            request_digest(self)?
+        ))
     }
 
     /// The reviewer's own text, then the App-rendered verdict, then the
@@ -820,14 +2286,14 @@ impl SubmitPullRequestReview {
     /// thread. It is not what the check trusts: GitHub records `commit_id`
     /// from the App's request, so that field is the binding, and the two
     /// cannot disagree because both are rendered from `head_sha` here.
-    fn marked_body(&self) -> String {
-        format!(
+    fn marked_body(&self) -> Result<String, OperationError> {
+        Ok(format!(
             "{}\n\n{REVIEW_VERDICT_PREFIX} {} {}\n{}",
             self.body,
             self.event.verdict(),
             self.head_sha,
-            self.marker()
-        )
+            self.marker()?
+        ))
     }
 }
 
@@ -836,12 +2302,14 @@ impl PublishCommit {
         canonical_operation_id(&mut self.operation_id)?;
         valid_ref(&self.branch)?;
         valid_sha(&self.expected_head_sha)?;
-        valid_text(&self.message, 1, 4_096, true)?;
+        // Keep caller text to one headline and reserve the body for the
+        // operation trailer so the full message is byte-exact and trivial to
+        // reconcile.
+        valid_text(&self.message, 1, 4_096, false)?;
         free_of_operation_marker(&self.message)?;
         if !(1..=MAX_COMMIT_FILES).contains(&self.changes.len()) {
             return Err(OperationError::InvalidInput);
         }
-        let mut total = 0_usize;
         for (index, change) in self.changes.iter().enumerate() {
             valid_repository_path(&change.path)?;
             // A commit that touched the same path twice would leave which write
@@ -859,14 +2327,9 @@ impl PublishCommit {
                 general_purpose::STANDARD
                     .decode(content)
                     .map_err(|_| OperationError::InvalidInput)?;
-                total = total
-                    .checked_add(content.len())
-                    .ok_or(OperationError::InvalidInput)?;
             }
         }
-        (total <= MAX_COMMIT_TOTAL_BYTES)
-            .then_some(())
-            .ok_or(OperationError::InvalidInput)
+        Ok(())
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -874,15 +2337,19 @@ impl PublishCommit {
         operation(kind, &self.operation_id, self)
     }
 
-    fn trailer(&self) -> String {
-        format!("{OPERATION_TRAILER_PREFIX} {}", self.operation_id)
+    fn trailer(&self) -> Result<String, OperationError> {
+        Ok(format!(
+            "{OPERATION_TRAILER_PREFIX} {} {}",
+            self.operation_id,
+            request_digest(self)?
+        ))
     }
 
     /// The trailer makes a landed commit self-identifying, so a retry after an
     /// indeterminate failure can tell "already published" from "not published"
     /// by reading the branch rather than guessing.
-    fn marked_message(&self) -> String {
-        format!("{}\n\n{}", self.message, self.trailer())
+    fn marked_message(&self) -> Result<String, OperationError> {
+        Ok(format!("{}\n\n{}", self.message, self.trailer()?))
     }
 }
 
@@ -907,6 +2374,182 @@ impl ObservePullRequestChecks {
     }
 }
 
+fn validate_pull_workflow(
+    pull_number: i64,
+    head_sha: &str,
+    base: &str,
+) -> Result<(), OperationError> {
+    valid_exact_integer(pull_number)?;
+    valid_sha(head_sha)?;
+    valid_ref(base)
+}
+
+impl ObservePullRequestWorkflows {
+    fn validate(&self) -> Result<(), OperationError> {
+        validate_pull_workflow(self.pull_number, &self.head_sha, &self.base)
+    }
+}
+
+impl ReadPullRequestJobLog {
+    fn validate(&self) -> Result<(), OperationError> {
+        validate_pull_workflow(self.pull_number, &self.head_sha, &self.base)?;
+        valid_exact_integer(self.run_id)?;
+        valid_exact_integer(self.run_attempt)?;
+        valid_exact_integer(self.job_id)
+    }
+}
+
+impl RerunFailedPullRequestJobs {
+    fn validate(&mut self) -> Result<(), OperationError> {
+        canonical_operation_id(&mut self.operation_id)?;
+        validate_pull_workflow(self.pull_number, &self.head_sha, &self.base)?;
+        valid_exact_integer(self.run_id)?;
+        valid_exact_integer(self.run_attempt)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn operation(&self, kind: &str) -> Result<Operation, OperationError> {
+        operation(kind, &self.operation_id, self)
+    }
+}
+
+impl PublishReleaseTag {
+    fn validate(&mut self) -> Result<(), OperationError> {
+        canonical_operation_id(&mut self.operation_id)?;
+        valid_release_tag(&self.tag)?;
+        valid_sha(&self.commit_sha)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn operation(&self, kind: &str) -> Result<Operation, OperationError> {
+        operation(kind, &self.operation_id, self)
+    }
+}
+
+impl RecoverRelease {
+    fn validate(&mut self) -> Result<(), OperationError> {
+        canonical_operation_id(&mut self.operation_id)?;
+        valid_release_tag(&self.tag)?;
+        valid_sha(&self.commit_sha)?;
+        valid_sha(&self.workflow_sha)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn operation(&self, kind: &str) -> Result<Operation, OperationError> {
+        operation(kind, &self.operation_id, self)
+    }
+}
+
+impl DispatchControlPlaneDeploy {
+    fn validate(&mut self) -> Result<(), OperationError> {
+        canonical_operation_id(&mut self.operation_id)?;
+        valid_sha(&self.commit_sha)?;
+        valid_sha(&self.reviewed_tree)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn operation(&self, kind: &str) -> Result<Operation, OperationError> {
+        operation(kind, &self.operation_id, self)
+    }
+}
+
+impl ObserveRelease {
+    fn validate(&self) -> Result<(), OperationError> {
+        valid_release_tag(&self.tag)?;
+        valid_sha(&self.commit_sha)
+    }
+}
+
+impl ObserveReleaseWorkflow {
+    fn validate(&mut self) -> Result<(), OperationError> {
+        canonical_operation_id(&mut self.operation_id)?;
+        valid_release_tag(&self.tag)?;
+        valid_sha(&self.tag_sha)?;
+        valid_sha(&self.workflow_sha)?;
+        valid_exact_integer(self.run_id)
+    }
+}
+
+impl ObserveControlPlaneDeploy {
+    fn validate(&mut self) -> Result<(), OperationError> {
+        canonical_operation_id(&mut self.operation_id)?;
+        valid_sha(&self.commit_sha)?;
+        valid_sha(&self.reviewed_tree)?;
+        valid_exact_integer(self.run_id)
+    }
+}
+
+impl CreateIssue {
+    fn validate(&mut self) -> Result<(), OperationError> {
+        canonical_operation_id(&mut self.operation_id)?;
+        valid_text(&self.title, 1, 256, false)?;
+        valid_text(&self.body, 0, 30_000, true)?;
+        free_of_operation_marker(&self.body)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn operation(&self, kind: &str) -> Result<Operation, OperationError> {
+        operation(kind, &self.operation_id, self)
+    }
+
+    fn marker(&self) -> Result<String, OperationError> {
+        Ok(format!(
+            "{OPERATION_MARKER_PREFIX}{}:{} -->",
+            self.operation_id,
+            request_digest(self)?
+        ))
+    }
+
+    fn marked_body(&self) -> Result<String, OperationError> {
+        if self.body.is_empty() {
+            self.marker()
+        } else {
+            Ok(format!("{}\n\n{}", self.body, self.marker()?))
+        }
+    }
+}
+
+impl ObserveIssue {
+    fn validate(&self) -> Result<(), OperationError> {
+        valid_exact_integer(self.issue_number)
+    }
+}
+
+impl ResolveIssue {
+    fn validate(&mut self) -> Result<(), OperationError> {
+        canonical_operation_id(&mut self.operation_id)?;
+        valid_exact_integer(self.issue_number)?;
+        valid_text(&self.body, 1, 16_000, true)?;
+        free_of_operation_marker(&self.body)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn operation(&self, kind: &str) -> Result<Operation, OperationError> {
+        operation(kind, &self.operation_id, self)
+    }
+
+    fn marker(&self) -> Result<String, OperationError> {
+        Ok(format!(
+            "{OPERATION_MARKER_PREFIX}{}:{} -->",
+            self.operation_id,
+            request_digest(self)?
+        ))
+    }
+
+    fn marked_body(&self) -> Result<String, OperationError> {
+        Ok(format!("{}\n\n{}", self.body, self.marker()?))
+    }
+}
+
+impl ObservePullRequestMerge {
+    fn validate(&mut self) -> Result<(), OperationError> {
+        canonical_operation_id(&mut self.enqueue_operation_id)?;
+        valid_exact_integer(self.pull_number)?;
+        valid_sha(&self.head_sha)?;
+        valid_ref(&self.base)
+    }
+}
+
 /// Check one operation ID's shape and settle its case in place.
 ///
 /// A UUID reads case-insensitively but does not compare that way, and
@@ -925,7 +2568,7 @@ impl ObservePullRequestChecks {
 /// the same operation everywhere. Nothing already durable can collide with a
 /// newly lowered ID, because lowercase is the only case the journal was ever
 /// able to store.
-fn canonical_operation_id(value: &mut str) -> Result<(), OperationError> {
+pub(crate) fn canonical_operation_id(value: &mut str) -> Result<(), OperationError> {
     let valid = value.len() == 36
         && value.bytes().enumerate().all(|(index, byte)| {
             if [8, 13, 18, 23].contains(&index) {
@@ -1066,6 +2709,28 @@ fn valid_ref(value: &str) -> Result<(), OperationError> {
     valid.then_some(()).ok_or(OperationError::InvalidInput)
 }
 
+fn valid_release_tag(value: &str) -> Result<(), OperationError> {
+    let valid_characters = value.strip_prefix('v').is_some_and(|rest| {
+        !rest.is_empty()
+            && rest
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    });
+    let version = value.strip_prefix('v').unwrap_or_default();
+    let (core, suffix_valid) = match version.split_once('-') {
+        Some((core, suffix)) => (core, !suffix.is_empty()),
+        None => (version, true),
+    };
+    let numeric = core.split('.').collect::<Vec<_>>();
+    let valid_core = numeric.len() == 3
+        && numeric
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()));
+    (valid_characters && suffix_valid && valid_core)
+        .then_some(())
+        .ok_or(OperationError::InvalidInput)
+}
+
 fn valid_sha(value: &str) -> Result<(), OperationError> {
     (value.len() == 40
         && value.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -1101,12 +2766,17 @@ fn operation<T: Serialize>(
     operation_id: &str,
     request: &T,
 ) -> Result<Operation, OperationError> {
-    let canonical = serde_json::to_vec(request).map_err(|_| OperationError::InvalidInput)?;
     Ok(Operation {
         operation_id: operation_id.to_owned(),
         kind: kind.to_owned(),
-        request_digest: hex::encode(Sha256::digest(canonical)),
+        request_digest: request_digest(request)?,
     })
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn request_digest<T: Serialize>(request: &T) -> Result<String, OperationError> {
+    let canonical = serde_json::to_vec(request).map_err(|_| OperationError::InvalidInput)?;
+    Ok(hex::encode(Sha256::digest(canonical)))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1140,6 +2810,19 @@ async fn complete<T: Serialize + serde::de::DeserializeOwned>(
         OperationRecord::Conflict => Err(OperationError::Conflict),
         _ => Err(OperationError::Unavailable),
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn refuse<T>(
+    journal: &DeliveryJournal,
+    operation: &Operation,
+    reason: RefusalReason,
+) -> Result<T, OperationError> {
+    journal
+        .mark_operation(operation, OperationTransition::Refused)
+        .await
+        .map_err(|_| OperationError::Unavailable)?;
+    Err(OperationError::Refused(reason))
 }
 
 fn exact_integer(value: &str) -> Result<i64, Error> {
@@ -1294,35 +2977,297 @@ impl Authority {
         Credential::new(response.token).map_err(Into::into)
     }
 
-    /// Blobs, then a tree over the base commit's tree, then a commit, then a
-    /// non-forced ref update. The ref update is the only mutation that matters:
-    /// GitHub rejects it if the branch moved since `expected_head_sha`, so a
-    /// racing agent loses rather than overwrites.
-    /// Either the branch is at exactly `expected_head_sha`, or it does not exist
-    /// yet and `expected_head_sha` is the commit it will start from. Returns
-    /// whether the branch already exists.
-    async fn verify_publish_precondition(
+    async fn repository_metadata(
         &self,
         token: &Credential,
-        request: &PublishCommit,
-    ) -> Result<bool, OperationError> {
-        // Read the ref directly rather than reusing `verify_ref`, which cannot
-        // distinguish "branch is somewhere else" from "branch does not exist".
-        // Conflating them turned a stale head into an attempted branch create,
-        // which failed late and reported indeterminate instead of conflict.
-        match github_json::<GitReference>(
+    ) -> Result<RepositoryMetadata, OperationError> {
+        let metadata: RepositoryMetadata = github_json(
+            &format!(
+                "https://api.github.com/repos/{}/{}",
+                self.repository.owner, self.repository.name
+            ),
+            token.as_str(),
+        )
+        .await?;
+        metadata.validate(self)
+    }
+
+    async fn repository_snapshot(
+        &self,
+        token: &Credential,
+    ) -> Result<RepositoryResult, OperationError> {
+        let metadata = self.repository_metadata(token).await?;
+        if !metadata.delete_branch_on_merge {
+            return Err(OperationError::Unavailable);
+        }
+        let reference = self.read_ref(token, &metadata.default_branch).await?;
+        if reference.object.kind != "commit" {
+            return Err(OperationError::Unavailable);
+        }
+        valid_sha(&reference.object.sha)?;
+        Ok(RepositoryResult {
+            repository: self.repository.full_name.clone(),
+            repository_id: self.repository_id,
+            default_branch: metadata.default_branch,
+            default_sha: reference.object.sha,
+            delete_branch_on_merge: metadata.delete_branch_on_merge,
+        })
+    }
+
+    async fn read_ref(
+        &self,
+        token: &Credential,
+        branch: &str,
+    ) -> Result<GitReference, OperationError> {
+        self.read_ref_optional(token, branch)
+            .await?
+            .ok_or(OperationError::Unavailable)
+    }
+
+    async fn read_ref_optional(
+        &self,
+        token: &Credential,
+        branch: &str,
+    ) -> Result<Option<GitReference>, OperationError> {
+        let reference: GitReference = match github_json(
             &format!(
                 "https://api.github.com/repos/{}/{}/git/ref/heads/{}",
                 self.repository.owner,
                 self.repository.name,
-                percent_encode(&request.branch)
+                percent_encode(branch)
             ),
             token.as_str(),
         )
         .await
         {
-            Ok(reference) => (reference.object.kind == "commit"
-                && reference.object.sha == request.expected_head_sha)
+            Ok(reference) => reference,
+            Err(Error::Rejected(404)) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        if reference.name != format!("refs/heads/{branch}")
+            || reference.object.kind != "commit"
+            || valid_sha(&reference.object.sha).is_err()
+        {
+            return Err(OperationError::Unavailable);
+        }
+        Ok(Some(reference))
+    }
+
+    async fn post_issue(
+        &self,
+        token: &Credential,
+        request: &CreateIssue,
+    ) -> Result<IssueResult, OperationError> {
+        #[derive(Serialize)]
+        struct Body {
+            title: String,
+            body: String,
+        }
+        let issue: Issue = github_json_request(
+            worker::Method::Post,
+            &format!(
+                "https://api.github.com/repos/{}/{}/issues",
+                self.repository.owner, self.repository.name
+            ),
+            token.as_str(),
+            Some(&Body {
+                title: request.title.clone(),
+                body: request.marked_body()?,
+            }),
+        )
+        .await?;
+        if !issue.matches_create(request) {
+            return Err(OperationError::Indeterminate);
+        }
+        issue.into_result()
+    }
+
+    async fn reconcile_issue(
+        &self,
+        token: &Credential,
+        request: &CreateIssue,
+    ) -> Result<Option<IssueResult>, OperationError> {
+        #[derive(Deserialize)]
+        struct SearchResult {
+            total_count: i64,
+            items: Vec<Issue>,
+        }
+        let query = format!(
+            "repo:{} \"{}\"",
+            self.repository.full_name,
+            request.marker()?
+        );
+        let response: SearchResult = github_json(
+            &format!(
+                "https://api.github.com/search/issues?q={}&per_page=100",
+                percent_encode(&query)
+            ),
+            token.as_str(),
+        )
+        .await?;
+        if !(0..=100).contains(&response.total_count)
+            || response.total_count as usize != response.items.len()
+        {
+            return Err(OperationError::Indeterminate);
+        }
+        let matches = response
+            .items
+            .into_iter()
+            .filter(|issue| issue.matches_create(request))
+            .map(Issue::into_result)
+            .collect::<Result<Vec<_>, _>>()?;
+        match matches.as_slice() {
+            [] => Ok(None),
+            [result] => Ok(Some(IssueResult {
+                number: result.number,
+                url: result.url.clone(),
+            })),
+            _ => Err(OperationError::Indeterminate),
+        }
+    }
+
+    async fn read_issue(
+        &self,
+        token: &Credential,
+        issue_number: i64,
+    ) -> Result<Issue, OperationError> {
+        let issue: Issue = github_json(
+            &format!(
+                "https://api.github.com/repos/{}/{}/issues/{issue_number}",
+                self.repository.owner, self.repository.name
+            ),
+            token.as_str(),
+        )
+        .await?;
+        if issue.number != issue_number {
+            return Err(OperationError::Conflict);
+        }
+        valid_github_url(&issue.html_url)?;
+        if !matches!(issue.state.as_str(), "open" | "closed") {
+            return Err(OperationError::Indeterminate);
+        }
+        Ok(issue)
+    }
+
+    async fn read_issue_resolution_comment(
+        &self,
+        token: &Credential,
+        request: &ResolveIssue,
+    ) -> Result<Option<IssueComment>, OperationError> {
+        let mut found = None;
+        for page in 1..=MAX_ISSUE_COMMENT_PAGES {
+            let comments: Vec<IssueComment> = github_json(
+                &format!(
+                    "https://api.github.com/repos/{}/{}/issues/{}/comments?per_page={MAX_ISSUE_COMMENTS_PER_PAGE}&page={page}",
+                    self.repository.owner, self.repository.name, request.issue_number
+                ),
+                token.as_str(),
+            )
+            .await?;
+            if comments.len() > MAX_ISSUE_COMMENTS_PER_PAGE {
+                return Err(OperationError::Indeterminate);
+            }
+            let page_is_full = comments.len() == MAX_ISSUE_COMMENTS_PER_PAGE;
+            for comment in comments {
+                let comment = comment.validate()?;
+                if comment.matches(request) {
+                    if found.is_some() {
+                        return Err(OperationError::Indeterminate);
+                    }
+                    found = Some(comment);
+                }
+            }
+            if !page_is_full {
+                return Ok(found);
+            }
+        }
+        // A full final page may hide another matching marker. Do not post a
+        // second comment when the bounded search cannot prove absence.
+        Err(OperationError::Indeterminate)
+    }
+
+    async fn reconcile_issue_resolution(
+        &self,
+        token: &Credential,
+        request: &ResolveIssue,
+    ) -> Result<IssueResolutionProgress, OperationError> {
+        let issue = self.read_issue(token, request.issue_number).await?;
+        if !issue.is_real_issue() {
+            return Err(OperationError::Conflict);
+        }
+        let comment = self.read_issue_resolution_comment(token, request).await?;
+        Ok(IssueResolutionProgress { issue, comment })
+    }
+
+    async fn post_issue_comment(
+        &self,
+        token: &Credential,
+        request: &ResolveIssue,
+    ) -> Result<IssueComment, OperationError> {
+        #[derive(Serialize)]
+        struct Body {
+            body: String,
+        }
+        let comment: IssueComment = github_json_request(
+            worker::Method::Post,
+            &format!(
+                "https://api.github.com/repos/{}/{}/issues/{}/comments",
+                self.repository.owner, self.repository.name, request.issue_number
+            ),
+            token.as_str(),
+            Some(&Body {
+                body: request.marked_body()?,
+            }),
+        )
+        .await?;
+        let comment = comment.validate()?;
+        comment
+            .matches(request)
+            .then_some(comment)
+            .ok_or(OperationError::Indeterminate)
+    }
+
+    async fn close_issue(
+        &self,
+        token: &Credential,
+        request: &ResolveIssue,
+    ) -> Result<Issue, OperationError> {
+        #[derive(Serialize)]
+        struct Body {
+            state: &'static str,
+            state_reason: &'static str,
+        }
+        let issue: Issue = github_json_request(
+            worker::Method::Patch,
+            &format!(
+                "https://api.github.com/repos/{}/{}/issues/{}",
+                self.repository.owner, self.repository.name, request.issue_number
+            ),
+            token.as_str(),
+            Some(&Body {
+                state: "closed",
+                state_reason: request.state_reason.as_str(),
+            }),
+        )
+        .await?;
+        if issue.number != request.issue_number || !issue.is_real_issue() {
+            return Err(OperationError::Conflict);
+        }
+        valid_github_url(&issue.html_url)?;
+        Ok(issue)
+    }
+
+    /// Either the branch is at exactly `expected_head_sha`, or it does not exist
+    /// yet and `expected_head_sha` is the commit it will start from. A missing
+    /// branch is created only after the operation is claimed, so a lost create
+    /// response can be reconciled without guessing.
+    async fn verify_publish_precondition(
+        &self,
+        token: &Credential,
+        request: &PublishCommit,
+    ) -> Result<bool, OperationError> {
+        match self.read_ref_optional(token, &request.branch).await? {
+            Some(reference) => (reference.object.sha == request.expected_head_sha)
                 .then_some(true)
                 .ok_or(OperationError::Conflict),
             // Only a 404 means the branch is absent. Reading any other failure
@@ -1330,7 +3275,7 @@ impl Authority {
             // `expected_head_sha` down the create path, where `POST /git/refs`
             // answers "Reference already exists" and wedges the operation at
             // indeterminate for a branch that never moved.
-            Err(Error::Rejected(404)) => {
+            None => {
                 // The parent must still be a real commit, so a typo cannot
                 // create a branch from nothing.
                 let _: GitCommit = github_json(
@@ -1343,7 +3288,6 @@ impl Authority {
                 .await?;
                 Ok(false)
             }
-            Err(error) => Err(error.into()),
         }
     }
 
@@ -1353,56 +3297,7 @@ impl Authority {
         request: &PublishCommit,
         branch_exists: bool,
     ) -> Result<CommitResult, OperationError> {
-        let base: GitCommit = github_json(
-            &format!(
-                "https://api.github.com/repos/{}/{}/git/commits/{}",
-                self.repository.owner, self.repository.name, request.expected_head_sha
-            ),
-            token.as_str(),
-        )
-        .await?;
-        let mut entries = Vec::with_capacity(request.changes.len());
-        for change in &request.changes {
-            let sha = match change.content_base64.as_deref() {
-                Some(content) => {
-                    let blob: GitObjectId = github_json_request(
-                        worker::Method::Post,
-                        &format!(
-                            "https://api.github.com/repos/{}/{}/git/blobs",
-                            self.repository.owner, self.repository.name
-                        ),
-                        token.as_str(),
-                        Some(&BlobRequest {
-                            content,
-                            encoding: "base64",
-                        }),
-                    )
-                    .await?;
-                    Some(blob.sha)
-                }
-                // A null sha in a tree entry deletes the path.
-                None => None,
-            };
-            entries.push(TreeEntry {
-                path: change.path.clone(),
-                mode: "100644",
-                kind: "blob",
-                sha,
-            });
-        }
-        let tree: GitObjectId = github_json_request(
-            worker::Method::Post,
-            &format!(
-                "https://api.github.com/repos/{}/{}/git/trees",
-                self.repository.owner, self.repository.name
-            ),
-            token.as_str(),
-            Some(&TreeRequest {
-                base_tree: &base.tree.sha,
-                tree: &entries,
-            }),
-        )
-        .await?;
+        let tree = self.materialize_tree(token, request).await?;
         let commit: GitObjectId = github_json_request(
             worker::Method::Post,
             &format!(
@@ -1411,14 +3306,16 @@ impl Authority {
             ),
             token.as_str(),
             Some(&CommitRequest {
-                message: request.marked_message(),
-                tree: &tree.sha,
+                message: request.marked_message()?,
+                tree: &tree,
                 parents: [&request.expected_head_sha],
             }),
         )
         .await?;
-        // Creating a ref fails if it already exists and a non-forced update
-        // fails if the branch moved, so neither path can clobber another agent.
+        valid_sha(&commit.sha)?;
+        // Git objects are immutable. The only persistent publication is this
+        // final non-forced ref write, so a failure cannot strand an empty
+        // branch and a moved branch cannot be overwritten.
         let updated: GitReference = if branch_exists {
             github_json_request(
                 worker::Method::Patch,
@@ -1450,13 +3347,77 @@ impl Authority {
             )
             .await?
         };
-        (updated.object.sha == commit.sha)
+        (updated.object.kind == "commit" && updated.object.sha == commit.sha)
             .then_some(CommitResult {
                 branch: request.branch.clone(),
                 commit_sha: commit.sha,
                 parent_sha: request.expected_head_sha.clone(),
             })
             .ok_or(OperationError::Indeterminate)
+    }
+
+    /// Create the content-addressed tree for one request. Repeating these blob
+    /// and tree writes is safe: Git object IDs are hashes of their content and
+    /// no ref is published here. Reconciliation uses the same function so a
+    /// matching message and parent cannot smuggle different file contents.
+    async fn materialize_tree(
+        &self,
+        token: &Credential,
+        request: &PublishCommit,
+    ) -> Result<String, OperationError> {
+        let base: GitCommit = github_json(
+            &format!(
+                "https://api.github.com/repos/{}/{}/git/commits/{}",
+                self.repository.owner, self.repository.name, request.expected_head_sha
+            ),
+            token.as_str(),
+        )
+        .await?;
+        valid_sha(&base.tree.sha)?;
+        let mut entries = Vec::with_capacity(request.changes.len());
+        for change in &request.changes {
+            let sha = match change.content_base64.as_deref() {
+                Some(content) => {
+                    let blob: GitObjectId = github_json_request(
+                        worker::Method::Post,
+                        &format!(
+                            "https://api.github.com/repos/{}/{}/git/blobs",
+                            self.repository.owner, self.repository.name
+                        ),
+                        token.as_str(),
+                        Some(&BlobRequest {
+                            content,
+                            encoding: "base64",
+                        }),
+                    )
+                    .await?;
+                    valid_sha(&blob.sha)?;
+                    Some(blob.sha)
+                }
+                None => None,
+            };
+            entries.push(TreeEntry {
+                path: change.path.clone(),
+                mode: "100644",
+                kind: "blob",
+                sha,
+            });
+        }
+        let tree: GitObjectId = github_json_request(
+            worker::Method::Post,
+            &format!(
+                "https://api.github.com/repos/{}/{}/git/trees",
+                self.repository.owner, self.repository.name
+            ),
+            token.as_str(),
+            Some(&TreeRequest {
+                base_tree: &base.tree.sha,
+                tree: &entries,
+            }),
+        )
+        .await?;
+        valid_sha(&tree.sha)?;
+        Ok(tree.sha)
     }
 
     /// Did this exact operation already land? The trailer makes the commit
@@ -1467,19 +3428,8 @@ impl Authority {
         token: &Credential,
         request: &PublishCommit,
     ) -> Result<Option<CommitResult>, OperationError> {
-        let reference: GitReference = match github_json(
-            &format!(
-                "https://api.github.com/repos/{}/{}/git/ref/heads/{}",
-                self.repository.owner,
-                self.repository.name,
-                percent_encode(&request.branch)
-            ),
-            token.as_str(),
-        )
-        .await
-        {
-            Ok(reference) => reference,
-            Err(_) => return Ok(None),
+        let Some(reference) = self.read_ref_optional(token, &request.branch).await? else {
+            return Ok(None);
         };
         if reference.object.sha == request.expected_head_sha {
             return Ok(None);
@@ -1497,11 +3447,15 @@ impl Authority {
         // caller writing another operation's trailer into its own commit, so
         // the tip must also still be a direct child of the stated head. That is
         // what makes the reported `parent_sha` true rather than assumed.
-        if !head.message.contains(&request.trailer())
+        if head.message != request.marked_message()?
             || !matches!(head.parents.as_slice(), [parent] if parent.sha == request.expected_head_sha)
+            || valid_sha(&head.tree.sha).is_err()
         {
             // The branch moved for some other reason; this operation did not
             // land and must not claim it did.
+            return Ok(None);
+        }
+        if head.tree.sha != self.materialize_tree(token, request).await? {
             return Ok(None);
         }
         Ok(Some(CommitResult {
@@ -1561,18 +3515,31 @@ impl Authority {
     /// Answer "is this pull request queued at the head I stated?" by reading
     /// GitHub, never a local record.
     ///
-    /// Unlike every other reconciler here, this one has no operation marker to
-    /// match on: a queue entry carries no field the App can write. So it can
-    /// adopt an entry some *other* actor created -- a second operation, or an
-    /// operator who enqueued by hand. That is accepted rather than solved,
-    /// because the effect is idempotent by construction: "pull request N is
-    /// queued at head H" is the whole of what this operation produces, and it
-    /// is equally true whoever brought it about.
+    /// A queue entry carries no operation marker. The caller therefore uses
+    /// this only after the durable claim entered `executing` or
+    /// `indeterminate`; an entry already present before the claim is refused
+    /// as external rather than misreported as App-created. A lost response can
+    /// prove only that the matching entry exists after the attempt, so later
+    /// observation says `MERGED_AFTER_ENQUEUE_ATTEMPT`, not that this mutation
+    /// was necessarily the proximate cause.
     async fn reconcile_enqueue(
         &self,
         token: &Credential,
         request: &EnqueuePullRequest,
     ) -> Result<Option<EnqueueResult>, OperationError> {
+        self.read_queue_entry(token, &request.base, request.pull_number, &request.head_sha)
+            .await?
+            .map(|entry| entry.into_result(request))
+            .transpose()
+    }
+
+    async fn read_queue_entry(
+        &self,
+        token: &Credential,
+        base: &str,
+        pull_number: i64,
+        head_sha: &str,
+    ) -> Result<Option<QueueEntry>, OperationError> {
         #[derive(Serialize)]
         struct Variables<'a> {
             owner: &'a str,
@@ -1608,7 +3575,7 @@ impl Authority {
             &Variables {
                 owner: &self.repository.owner,
                 name: &self.repository.name,
-                base: &request.base,
+                base,
             },
         )
         .await?;
@@ -1629,25 +3596,24 @@ impl Authority {
             .and_then(|queue| queue.entries)
         else {
             // The read answered, and its answer carried no queue for this
-            // branch. The decision doc calls that unsupported and fails
-            // closed rather than falling back.
+            // branch. Enqueue treats that as unsupported; observation maps it
+            // to NOT_QUEUED because no entry is present.
             return Err(OperationError::Refused(RefusalReason::NoMergeQueue));
         };
         // One unread page could hide this operation's entry and make a
         // reconciliation answer "not queued" for something that is. Refuse to
         // guess instead.
-        // `nodes.len() == totalCount` is the proof that the whole queue was
-        // read, so the page size does not need naming twice: a short page
-        // fails this comparison exactly as an over-long queue would.
-        if entries.nodes.len() as i64 != entries.total_count {
+        if !(0..=100).contains(&entries.total_count)
+            || entries.nodes.len() as i64 != entries.total_count
+        {
             return Err(OperationError::Indeterminate);
         }
-        entries
-            .nodes
-            .into_iter()
-            .find(|entry| entry.matches(request))
-            .map(|entry| entry.into_result(request))
-            .transpose()
+        Ok(entries.nodes.into_iter().find(|entry| {
+            entry
+                .pull_request
+                .as_ref()
+                .is_some_and(|pull| pull.number == pull_number && pull.head_ref_oid == head_sha)
+        }))
     }
 
     async fn verify_ref(
@@ -1656,19 +3622,8 @@ impl Authority {
         name: &str,
         expected_sha: &str,
     ) -> Result<(), OperationError> {
-        let reference: GitReference = github_json(
-            &format!(
-                "https://api.github.com/repos/{}/{}/git/ref/heads/{}",
-                self.repository.owner,
-                self.repository.name,
-                percent_encode(name)
-            ),
-            token.as_str(),
-        )
-        .await?;
-        (reference.name == format!("refs/heads/{name}")
-            && reference.object.kind == "commit"
-            && reference.object.sha == expected_sha)
+        let reference = self.read_ref(token, name).await?;
+        (reference.object.sha == expected_sha)
             .then_some(())
             .ok_or(OperationError::Conflict)
     }
@@ -1712,15 +3667,7 @@ impl Authority {
         .await?;
         let matches = pulls
             .into_iter()
-            .filter(|pull| {
-                pull.body
-                    .as_deref()
-                    .is_some_and(|body| body.contains(&request.marker()))
-                    && pull.head.name == request.head
-                    && pull.head.sha == request.head_sha
-                    && pull.base.name == request.base
-                    && pull.base.sha == request.base_sha
-            })
+            .filter(|pull| pull.matches_create(request))
             .map(PullRequestResult::try_from)
             .collect::<Result<Vec<_>, _>>()?;
         match matches.as_slice() {
@@ -1759,11 +3706,14 @@ impl Authority {
                 title: &request.title,
                 head: &request.head,
                 base: &request.base,
-                body: request.marked_body(),
+                body: request.marked_body()?,
                 draft: request.draft,
             }),
         )
         .await?;
+        if !pull.matches_create(request) {
+            return Err(OperationError::Indeterminate);
+        }
         let result = PullRequestResult::try_from(pull)?;
         if result.head_sha != request.head_sha || result.base_sha != request.base_sha {
             return Err(OperationError::Indeterminate);
@@ -1818,7 +3768,7 @@ impl Authority {
             token.as_str(),
             Some(&Body {
                 commit_id: &request.head_sha,
-                body: request.marked_body(),
+                body: request.marked_body()?,
                 event: REVIEW_EVENT,
             }),
         )
@@ -1859,6 +3809,362 @@ impl Authority {
             head_sha: request.head_sha,
             checks,
         })
+    }
+
+    async fn verify_workflow_pr(
+        &self,
+        token: &Credential,
+        pull_number: i64,
+        head_sha: &str,
+        base: &str,
+    ) -> Result<(), OperationError> {
+        let repository = self.repository_metadata(token).await?;
+        if base != repository.default_branch {
+            return Err(OperationError::Conflict);
+        }
+        let pull = self
+            .verify_pull_request_head(token, pull_number, head_sha)
+            .await?;
+        (pull.base.name == base)
+            .then_some(())
+            .ok_or(OperationError::Conflict)
+    }
+
+    async fn workflow_runs(
+        &self,
+        token: &Credential,
+        request: &ObservePullRequestWorkflows,
+    ) -> Result<PullRequestWorkflowsResult, OperationError> {
+        let response: WorkflowRuns = github_json(
+            &format!(
+                "https://api.github.com/repos/{}/{}/actions/runs?event=pull_request&head_sha={}&per_page={MAX_WORKFLOW_RUNS}",
+                self.repository.owner, self.repository.name, request.head_sha
+            ),
+            token.as_str(),
+        )
+        .await?;
+        if !(0..=MAX_WORKFLOW_RUNS as i64).contains(&response.total_count)
+            || response.total_count as usize != response.workflow_runs.len()
+        {
+            return Err(OperationError::Indeterminate);
+        }
+        let mut runs = Vec::with_capacity(response.workflow_runs.len());
+        for run in response.workflow_runs {
+            run.verify(request.pull_number, &request.head_sha)?;
+            let jobs = self.workflow_jobs(token, run.id).await?;
+            runs.push(run.into_result(jobs)?);
+        }
+        runs.sort_by_key(|run| run.run_id);
+        Ok(PullRequestWorkflowsResult {
+            pull_number: request.pull_number,
+            head_sha: request.head_sha.clone(),
+            base: request.base.clone(),
+            runs,
+        })
+    }
+
+    async fn read_workflow_run(
+        &self,
+        token: &Credential,
+        run_id: i64,
+    ) -> Result<WorkflowRun, OperationError> {
+        let run: WorkflowRun = github_json(
+            &format!(
+                "https://api.github.com/repos/{}/{}/actions/runs/{run_id}",
+                self.repository.owner, self.repository.name
+            ),
+            token.as_str(),
+        )
+        .await?;
+        (run.id == run_id)
+            .then_some(run)
+            .ok_or(OperationError::Conflict)
+    }
+
+    async fn workflow_jobs(
+        &self,
+        token: &Credential,
+        run_id: i64,
+    ) -> Result<Vec<WorkflowJob>, OperationError> {
+        let response: WorkflowJobs = github_json(
+            &format!(
+                "https://api.github.com/repos/{}/{}/actions/runs/{run_id}/jobs?filter=latest&per_page={MAX_WORKFLOW_JOBS}",
+                self.repository.owner, self.repository.name
+            ),
+            token.as_str(),
+        )
+        .await?;
+        if !(0..=MAX_WORKFLOW_JOBS as i64).contains(&response.total_count)
+            || response.total_count as usize != response.jobs.len()
+            || response.jobs.iter().any(|job| job.run_id != run_id)
+        {
+            return Err(OperationError::Indeterminate);
+        }
+        Ok(response.jobs)
+    }
+
+    async fn job_log_redirect(
+        &self,
+        token: &Credential,
+        job_id: i64,
+    ) -> Result<String, OperationError> {
+        github_redirect_location(
+            &format!(
+                "https://api.github.com/repos/{}/{}/actions/jobs/{job_id}/logs",
+                self.repository.owner, self.repository.name
+            ),
+            token.as_str(),
+        )
+        .await
+    }
+
+    async fn rerun_failed_jobs(
+        &self,
+        token: &Credential,
+        run_id: i64,
+    ) -> Result<(), OperationError> {
+        github_empty_request(
+            worker::Method::Post,
+            &format!(
+                "https://api.github.com/repos/{}/{}/actions/runs/{run_id}/rerun-failed-jobs",
+                self.repository.owner, self.repository.name
+            ),
+            token.as_str(),
+            201,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn read_tag_commit_optional(
+        &self,
+        token: &Credential,
+        tag: &str,
+    ) -> Result<Option<String>, OperationError> {
+        let url = format!(
+            "https://api.github.com/repos/{}/{}/git/ref/tags/{}",
+            self.repository.owner,
+            self.repository.name,
+            percent_encode(tag)
+        );
+        let reference: GitReference = match github_json(&url, token.as_str()).await {
+            Ok(reference) => reference,
+            Err(Error::Rejected(404)) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        if reference.name != format!("refs/tags/{tag}") || valid_sha(&reference.object.sha).is_err()
+        {
+            return Err(OperationError::Unavailable);
+        }
+        let mut kind = reference.object.kind;
+        let mut sha = reference.object.sha;
+        for _ in 0..4 {
+            match kind.as_str() {
+                "commit" => {
+                    valid_sha(&sha)?;
+                    return Ok(Some(sha));
+                }
+                "tag" => {
+                    let tagged: TagObject = github_json(
+                        &format!(
+                            "https://api.github.com/repos/{}/{}/git/tags/{sha}",
+                            self.repository.owner, self.repository.name
+                        ),
+                        token.as_str(),
+                    )
+                    .await?;
+                    kind = tagged.object.kind;
+                    sha = tagged.object.sha;
+                    valid_sha(&sha)?;
+                }
+                _ => return Err(OperationError::Unavailable),
+            }
+        }
+        Err(OperationError::Unavailable)
+    }
+
+    async fn create_release_tag(
+        &self,
+        token: &Credential,
+        request: &PublishReleaseTag,
+    ) -> Result<(), OperationError> {
+        let reference: GitReference = github_json_request(
+            worker::Method::Post,
+            &format!(
+                "https://api.github.com/repos/{}/{}/git/refs",
+                self.repository.owner, self.repository.name
+            ),
+            token.as_str(),
+            Some(&RefCreate {
+                reference: &format!("refs/tags/{}", request.tag),
+                sha: &request.commit_sha,
+            }),
+        )
+        .await?;
+        if reference.name != format!("refs/tags/{}", request.tag)
+            || reference.object.kind != "commit"
+            || reference.object.sha != request.commit_sha
+        {
+            return Err(OperationError::Indeterminate);
+        }
+        Ok(())
+    }
+
+    async fn dispatch_workflow(
+        &self,
+        token: &Credential,
+        workflow: &str,
+        branch: &str,
+        inputs: serde_json::Value,
+    ) -> Result<WorkflowDispatchResponse, OperationError> {
+        #[derive(Serialize)]
+        struct Body {
+            r#ref: String,
+            inputs: serde_json::Value,
+        }
+        let response: WorkflowDispatchResponse = github_json_request(
+            worker::Method::Post,
+            &format!(
+                "https://api.github.com/repos/{}/{}/actions/workflows/{workflow}/dispatches",
+                self.repository.owner, self.repository.name
+            ),
+            token.as_str(),
+            Some(&Body {
+                r#ref: branch.to_owned(),
+                inputs,
+            }),
+        )
+        .await
+        .map_err(OperationError::from)?;
+        response.validate()
+    }
+
+    async fn workflow_run_by_title(
+        &self,
+        token: &Credential,
+        workflow: &str,
+        title: &str,
+        head_sha: &str,
+    ) -> Result<Option<WorkflowRun>, OperationError> {
+        let mut runs = self
+            .read_workflow_runs(token, workflow, head_sha)
+            .await?
+            .into_iter()
+            .filter(|run| run.display_title.as_deref() == Some(title))
+            .collect::<Vec<_>>();
+        match runs.len() {
+            0 => Ok(None),
+            1 => {
+                let run = runs.pop().ok_or(OperationError::Indeterminate)?;
+                run.verify_dispatch(workflow, head_sha, title)?;
+                Ok(Some(run))
+            }
+            _ => Err(OperationError::Indeterminate),
+        }
+    }
+
+    async fn read_dispatched_workflow(
+        &self,
+        token: &Credential,
+        run_id: i64,
+        workflow: &str,
+        head_sha: &str,
+        title: &str,
+    ) -> Result<WorkflowRun, OperationError> {
+        for attempt in 0..4 {
+            if let Ok(run) = self.workflow_run(token, run_id).await {
+                return run
+                    .verify_dispatch(workflow, head_sha, title)
+                    .map(|()| run)
+                    // The dispatch happened, but not at the reviewed commit.
+                    // It is an external effect and can never be called a
+                    // request conflict or a no-effect refusal.
+                    .map_err(|_| OperationError::Indeterminate);
+            }
+            if attempt < 3 {
+                worker::Delay::from(std::time::Duration::from_millis(250)).await;
+            }
+        }
+        Err(OperationError::Indeterminate)
+    }
+
+    async fn workflow_run(
+        &self,
+        token: &Credential,
+        run_id: i64,
+    ) -> Result<WorkflowRun, OperationError> {
+        let run: WorkflowRun = github_json(
+            &format!(
+                "https://api.github.com/repos/{}/{}/actions/runs/{run_id}",
+                self.repository.owner, self.repository.name,
+            ),
+            token.as_str(),
+        )
+        .await
+        .map_err(OperationError::from)?;
+        (run.id == run_id)
+            .then_some(run)
+            .ok_or(OperationError::Conflict)
+    }
+
+    async fn release_workflow_run(
+        &self,
+        token: &Credential,
+        tag: &str,
+        commit_sha: &str,
+    ) -> Result<WorkflowRunResult, OperationError> {
+        let runs = self
+            .read_workflow_runs(token, RELEASE_WORKFLOW_PATH, commit_sha)
+            .await?;
+        select_release_workflow_run(runs, tag, commit_sha)?.into_result(Vec::new())
+    }
+
+    async fn read_workflow_runs(
+        &self,
+        token: &Credential,
+        workflow: &str,
+        head_sha: &str,
+    ) -> Result<Vec<WorkflowRun>, OperationError> {
+        let response: WorkflowRuns = github_json(
+            &format!(
+                "https://api.github.com/repos/{}/{}/actions/workflows/{workflow}/runs?head_sha={head_sha}&per_page={MAX_WORKFLOW_RUNS}",
+                self.repository.owner, self.repository.name
+            ),
+            token.as_str(),
+        )
+        .await?;
+        if !(0..=MAX_WORKFLOW_RUNS as i64).contains(&response.total_count)
+            || response.workflow_runs.len() as i64 != response.total_count
+        {
+            return Err(OperationError::Indeterminate);
+        }
+        let mut runs = Vec::new();
+        for run in response.workflow_runs {
+            run.verify_identity(workflow, head_sha)?;
+            runs.push(run);
+        }
+        Ok(runs)
+    }
+
+    async fn release(
+        &self,
+        token: &Credential,
+        tag: &str,
+    ) -> Result<Option<ReleaseResult>, OperationError> {
+        let release: Release = match github_json(
+            &format!(
+                "https://api.github.com/repos/{}/{}/releases/tags/{tag}",
+                self.repository.owner, self.repository.name
+            ),
+            token.as_str(),
+        )
+        .await
+        {
+            Ok(release) => release,
+            Err(Error::Rejected(404)) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        release.into_result(tag)
     }
 }
 
@@ -1915,6 +4221,141 @@ struct InstallationToken {
 }
 
 #[cfg(target_arch = "wasm32")]
+#[derive(Deserialize)]
+struct RepositoryMetadata {
+    id: i64,
+    full_name: String,
+    default_branch: String,
+    delete_branch_on_merge: bool,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl RepositoryMetadata {
+    fn validate(self, authority: &Authority) -> Result<Self, OperationError> {
+        valid_exact_integer(self.id)?;
+        if self.id != authority.repository_id || self.full_name != authority.repository.full_name {
+            return Err(OperationError::Conflict);
+        }
+        valid_ref(&self.default_branch)?;
+        Ok(self)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn require_branch_cleanup(metadata: &RepositoryMetadata) -> Result<(), OperationError> {
+    metadata
+        .delete_branch_on_merge
+        .then_some(())
+        .ok_or(OperationError::Refused(
+            RefusalReason::BranchCleanupDisabled,
+        ))
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Deserialize)]
+struct Issue {
+    number: i64,
+    html_url: String,
+    title: String,
+    body: Option<String>,
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    state_reason: Option<String>,
+    #[serde(default)]
+    pull_request: Option<serde_json::Value>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Issue {
+    fn matches_create(&self, request: &CreateIssue) -> bool {
+        self.is_real_issue()
+            && self.title == request.title
+            && request
+                .marked_body()
+                .is_ok_and(|body| self.body.as_deref() == Some(body.as_str()))
+    }
+
+    fn is_real_issue(&self) -> bool {
+        self.pull_request.is_none()
+    }
+
+    fn is_real_open_issue(&self) -> bool {
+        self.is_real_issue() && self.state == "open"
+    }
+
+    fn into_result(self) -> Result<IssueResult, OperationError> {
+        valid_exact_integer(self.number)?;
+        valid_github_url(&self.html_url)?;
+        Ok(IssueResult {
+            number: self.number,
+            url: self.html_url,
+        })
+    }
+
+    fn into_observation(self) -> Result<IssueObservationResult, OperationError> {
+        valid_exact_integer(self.number)?;
+        valid_github_url(&self.html_url)?;
+        if !self.is_real_issue() || !matches!(self.state.as_str(), "open" | "closed") {
+            return Err(OperationError::Conflict);
+        }
+        Ok(IssueObservationResult {
+            number: self.number,
+            url: self.html_url,
+            state: self.state,
+            state_reason: self.state_reason,
+        })
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Deserialize)]
+struct IssueComment {
+    id: i64,
+    html_url: String,
+    body: Option<String>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl IssueComment {
+    fn validate(self) -> Result<Self, OperationError> {
+        valid_exact_integer(self.id)?;
+        valid_github_url(&self.html_url)?;
+        Ok(self)
+    }
+
+    fn matches(&self, request: &ResolveIssue) -> bool {
+        request
+            .marked_body()
+            .is_ok_and(|body| self.body.as_deref() == Some(body.as_str()))
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+struct IssueResolutionProgress {
+    issue: Issue,
+    comment: Option<IssueComment>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl IssueResolutionProgress {
+    fn completed(&self, request: &ResolveIssue) -> Option<ResolveIssueResult> {
+        let comment = self.comment.as_ref()?;
+        let state_reason = self.issue.state_reason.as_deref()?;
+        if self.issue.state != "closed" || state_reason != request.state_reason.as_str() {
+            return None;
+        }
+        Some(ResolveIssueResult {
+            number: self.issue.number,
+            url: self.issue.html_url.clone(),
+            comment_url: comment.html_url.clone(),
+            state: self.issue.state.clone(),
+            state_reason: state_reason.to_owned(),
+        })
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
 #[derive(Serialize)]
 struct BlobRequest<'a> {
     content: &'a str,
@@ -1928,7 +4369,6 @@ struct TreeEntry {
     mode: &'static str,
     #[serde(rename = "type")]
     kind: &'static str,
-    // Serialised as null when absent, which is how a tree entry deletes a path.
     sha: Option<String>,
 }
 
@@ -1974,6 +4414,12 @@ struct GitCommit {
     message: String,
     tree: GitObjectId,
     parents: Vec<GitParent>,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Deserialize)]
+struct TagObject {
+    object: GitObject,
 }
 
 /// A parent entry carries no `type`, so it cannot reuse `GitObject`.
@@ -2024,10 +4470,7 @@ impl QueueEntry {
         // GitHub's documented `MergeQueueEntryState`. An unknown value means
         // the schema moved under us, and guessing would report a merge state
         // this build does not understand.
-        if !matches!(
-            self.state.as_str(),
-            "QUEUED" | "AWAITING_CHECKS" | "MERGEABLE" | "UNMERGEABLE" | "LOCKED"
-        ) {
+        if !valid_queue_state(&self.state) {
             return Err(OperationError::Indeterminate);
         }
         Ok(EnqueueResult {
@@ -2037,6 +4480,14 @@ impl QueueEntry {
             state_when_recorded: self.state,
         })
     }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn valid_queue_state(state: &str) -> bool {
+    matches!(
+        state,
+        "QUEUED" | "AWAITING_CHECKS" | "MERGEABLE" | "UNMERGEABLE" | "LOCKED"
+    )
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -2061,9 +4512,16 @@ struct PullRequest {
     number: i64,
     node_id: String,
     html_url: String,
+    title: String,
     body: Option<String>,
+    draft: bool,
     head: PullReference,
     base: PullReference,
+    state: String,
+    #[serde(default)]
+    merged: bool,
+    #[serde(default)]
+    merge_commit_sha: Option<String>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -2072,6 +4530,24 @@ struct PullReference {
     #[serde(rename = "ref")]
     name: String,
     sha: String,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl PullRequest {
+    fn matches_create(&self, request: &CreatePullRequest) -> bool {
+        // `base.sha` follows the branch after PR creation. The immutable
+        // requested base SHA is inside the body marker's request digest;
+        // requiring the live field here would make a lost-response retry
+        // unreconcilable as soon as protected main advanced.
+        self.title == request.title
+            && request
+                .marked_body()
+                .is_ok_and(|body| self.body.as_deref() == Some(body.as_str()))
+            && self.draft == request.draft
+            && self.head.name == request.head
+            && self.head.sha == request.head_sha
+            && self.base.name == request.base
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -2105,9 +4581,9 @@ struct PullRequestReview {
 #[cfg(any(target_arch = "wasm32", test))]
 impl PullRequestReview {
     fn matches(&self, request: &SubmitPullRequestReview) -> bool {
-        self.body
-            .as_deref()
-            .is_some_and(|body| body.contains(&request.marker()))
+        request
+            .marked_body()
+            .is_ok_and(|body| self.body.as_deref() == Some(body.as_str()))
             && self.commit_id == request.head_sha
             && self.state == REVIEW_STATE
     }
@@ -2130,6 +4606,9 @@ impl PullRequestReview {
         // is what lets `post_review` trust the state it echoes back.
         if self.state != REVIEW_STATE {
             return Err(OperationError::Unavailable);
+        }
+        if !self.matches(request) {
+            return Err(OperationError::Indeterminate);
         }
         Ok(ReviewResult {
             review_id: self.id,
@@ -2192,6 +4671,351 @@ impl TryFrom<CheckRun> for CheckResult {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+#[derive(Deserialize)]
+struct WorkflowRuns {
+    total_count: i64,
+    workflow_runs: Vec<WorkflowRun>,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Deserialize)]
+struct WorkflowDispatchResponse {
+    workflow_run_id: i64,
+    run_url: String,
+    html_url: String,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl WorkflowDispatchResponse {
+    fn validate(self) -> Result<Self, OperationError> {
+        valid_exact_integer(self.workflow_run_id)?;
+        valid_github_api_url(&self.run_url)?;
+        valid_github_url(&self.html_url)?;
+        let suffix = format!("/actions/runs/{}", self.workflow_run_id);
+        if !self.run_url.ends_with(&suffix) || !self.html_url.ends_with(&suffix) {
+            return Err(OperationError::Indeterminate);
+        }
+        Ok(self)
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Deserialize)]
+struct Release {
+    tag_name: String,
+    html_url: String,
+    draft: bool,
+    prerelease: bool,
+    assets: Vec<ReleaseAsset>,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Deserialize)]
+struct ReleaseAsset {
+    name: String,
+    size: i64,
+    digest: Option<String>,
+    state: String,
+    browser_download_url: String,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+impl Release {
+    fn into_result(self, tag: &str) -> Result<Option<ReleaseResult>, OperationError> {
+        let expected_names = [
+            format!("dark-factory-{tag}-aarch64-apple-darwin.tar.gz"),
+            format!("dark-factory-{tag}-x86_64-apple-darwin.tar.gz"),
+            "SHA256SUMS".into(),
+            "latest.json".into(),
+            "dark-factory.rb".into(),
+        ];
+        if self.tag_name != tag
+            || self.draft
+            || self.prerelease != tag.contains('-')
+            || self.assets.len() != expected_names.len()
+        {
+            return Err(OperationError::Indeterminate);
+        }
+        let release_suffix = format!("/releases/tag/{tag}");
+        valid_github_url(&self.html_url)?;
+        if !self.html_url.ends_with(&release_suffix) {
+            return Err(OperationError::Indeterminate);
+        }
+        let mut assets_by_name = BTreeMap::new();
+        for asset in self.assets {
+            if assets_by_name.insert(asset.name.clone(), asset).is_some() {
+                return Err(OperationError::Indeterminate);
+            }
+        }
+        let mut assets = Vec::with_capacity(expected_names.len());
+        for name in expected_names {
+            let asset = assets_by_name
+                .remove(&name)
+                .ok_or(OperationError::Indeterminate)?;
+            (1..=i64::MAX)
+                .contains(&asset.size)
+                .then_some(())
+                .ok_or(OperationError::Indeterminate)?;
+            if asset.state != "uploaded" {
+                return Err(OperationError::Indeterminate);
+            }
+            valid_github_url(&asset.browser_download_url)?;
+            let asset_suffix = format!("/releases/download/{tag}/{}", asset.name);
+            if !asset.browser_download_url.ends_with(&asset_suffix) {
+                return Err(OperationError::Indeterminate);
+            }
+            let digest = asset.digest.ok_or(OperationError::Indeterminate)?;
+            valid_digest(&digest)?;
+            assets.push(ReleaseAssetResult {
+                name: asset.name,
+                size: asset.size,
+                digest,
+                url: asset.browser_download_url,
+            });
+        }
+        if !assets_by_name.is_empty() {
+            return Err(OperationError::Indeterminate);
+        }
+        Ok(Some(ReleaseResult {
+            tag: tag.to_owned(),
+            url: self.html_url,
+            draft: self.draft,
+            prerelease: self.prerelease,
+            assets,
+        }))
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Deserialize)]
+struct WorkflowRun {
+    id: i64,
+    run_attempt: i64,
+    name: String,
+    path: String,
+    event: String,
+    status: String,
+    conclusion: Option<String>,
+    head_sha: String,
+    #[serde(default)]
+    head_branch: String,
+    #[serde(default)]
+    display_title: Option<String>,
+    html_url: String,
+    #[serde(default)]
+    pull_requests: Vec<WorkflowPullRequest>,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Deserialize)]
+struct WorkflowPullRequest {
+    number: i64,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn select_release_workflow_run(
+    runs: Vec<WorkflowRun>,
+    tag: &str,
+    commit_sha: &str,
+) -> Result<WorkflowRun, OperationError> {
+    let title = format!("Release {tag}");
+    let mut matches = runs
+        .into_iter()
+        .filter(|run| {
+            run.path == RELEASE_WORKFLOW_PATH
+                && run.head_sha == commit_sha
+                && run.head_branch == tag
+                && run.event == "push"
+                && run.display_title.as_deref() == Some(&title)
+        })
+        .collect::<Vec<_>>();
+    if matches.len() != 1 {
+        return Err(OperationError::Indeterminate);
+    }
+    matches.pop().ok_or(OperationError::Indeterminate)
+}
+
+#[cfg(target_arch = "wasm32")]
+impl WorkflowRun {
+    fn verify(&self, pull_number: i64, head_sha: &str) -> Result<(), OperationError> {
+        valid_exact_integer(self.id)?;
+        valid_exact_integer(self.run_attempt)?;
+        valid_text(&self.name, 1, 256, false)?;
+        self.verify_identity(".github/workflows/ci.yml", head_sha)?;
+        if self.event != "pull_request"
+            || self.pull_requests.len() != 1
+            || self.pull_requests[0].number != pull_number
+        {
+            return Err(OperationError::Conflict);
+        }
+        Ok(())
+    }
+
+    fn verify_identity(&self, path: &str, head_sha: &str) -> Result<(), OperationError> {
+        valid_exact_integer(self.id)?;
+        valid_exact_integer(self.run_attempt)?;
+        valid_text(&self.name, 1, 256, false)?;
+        if self.path != path
+            || self.head_sha != head_sha
+            || !valid_workflow_status(&self.status)
+            || !self
+                .conclusion
+                .as_deref()
+                .is_none_or(valid_workflow_conclusion)
+        {
+            return Err(OperationError::Conflict);
+        }
+        valid_github_url(&self.html_url)
+    }
+
+    fn verify_dispatch(
+        &self,
+        path: &str,
+        head_sha: &str,
+        title: &str,
+    ) -> Result<(), OperationError> {
+        self.verify_identity(path, head_sha)?;
+        if self.event != "workflow_dispatch" || self.display_title.as_deref() != Some(title) {
+            return Err(OperationError::Conflict);
+        }
+        Ok(())
+    }
+
+    fn into_result(self, jobs: Vec<WorkflowJob>) -> Result<WorkflowRunResult, OperationError> {
+        let mut jobs = jobs
+            .into_iter()
+            .map(|job| job.into_result(&self.head_sha))
+            .collect::<Result<Vec<_>, _>>()?;
+        jobs.sort_by_key(|job| job.job_id);
+        Ok(WorkflowRunResult {
+            run_id: self.id,
+            run_attempt: self.run_attempt,
+            name: self.name,
+            path: self.path,
+            event: self.event,
+            status: self.status,
+            conclusion: self.conclusion,
+            url: self.html_url,
+            jobs,
+        })
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Deserialize)]
+struct WorkflowJobs {
+    total_count: i64,
+    jobs: Vec<WorkflowJob>,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Deserialize)]
+struct WorkflowJob {
+    id: i64,
+    run_id: i64,
+    name: String,
+    head_sha: String,
+    status: String,
+    conclusion: Option<String>,
+    html_url: String,
+    #[serde(default)]
+    steps: Vec<WorkflowStep>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl WorkflowJob {
+    fn into_result(self, head_sha: &str) -> Result<WorkflowJobResult, OperationError> {
+        valid_exact_integer(self.id)?;
+        valid_exact_integer(self.run_id)?;
+        valid_text(&self.name, 1, 256, false)?;
+        if self.head_sha != head_sha
+            || !valid_workflow_status(&self.status)
+            || !self
+                .conclusion
+                .as_deref()
+                .is_none_or(valid_workflow_conclusion)
+            || self.steps.len() > MAX_WORKFLOW_STEPS
+        {
+            return Err(OperationError::Indeterminate);
+        }
+        valid_github_url(&self.html_url)?;
+        let steps = self
+            .steps
+            .into_iter()
+            .map(WorkflowStep::into_result)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(WorkflowJobResult {
+            job_id: self.id,
+            name: self.name,
+            status: self.status,
+            conclusion: self.conclusion,
+            url: self.html_url,
+            steps,
+        })
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Deserialize)]
+struct WorkflowStep {
+    name: String,
+    status: String,
+    conclusion: Option<String>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl WorkflowStep {
+    fn into_result(self) -> Result<WorkflowStepResult, OperationError> {
+        valid_text(&self.name, 1, 256, false)?;
+        if !valid_workflow_status(&self.status)
+            || !self
+                .conclusion
+                .as_deref()
+                .is_none_or(valid_workflow_conclusion)
+        {
+            return Err(OperationError::Indeterminate);
+        }
+        Ok(WorkflowStepResult {
+            name: self.name,
+            status: self.status,
+            conclusion: self.conclusion,
+        })
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn valid_workflow_status(value: &str) -> bool {
+    matches!(
+        value,
+        "queued" | "in_progress" | "completed" | "pending" | "waiting" | "requested"
+    )
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn valid_workflow_conclusion(value: &str) -> bool {
+    matches!(
+        value,
+        "action_required"
+            | "cancelled"
+            | "failure"
+            | "neutral"
+            | "skipped"
+            | "stale"
+            | "startup_failure"
+            | "success"
+            | "timed_out"
+    )
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn failed_conclusion(value: &str) -> bool {
+    matches!(
+        value,
+        "action_required" | "cancelled" | "failure" | "startup_failure" | "timed_out"
+    )
+}
+
 #[cfg(any(target_arch = "wasm32", test))]
 fn valid_github_url(value: &str) -> Result<(), OperationError> {
     (value.starts_with("https://github.com/")
@@ -2200,6 +5024,26 @@ fn valid_github_url(value: &str) -> Result<(), OperationError> {
         && !value.contains(['\r', '\n']))
     .then_some(())
     .ok_or(OperationError::Unavailable)
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn valid_github_api_url(value: &str) -> Result<(), OperationError> {
+    (value.starts_with("https://api.github.com/")
+        && value.len() <= 2_048
+        && value.is_ascii()
+        && !value.contains(['\r', '\n']))
+    .then_some(())
+    .ok_or(OperationError::Unavailable)
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn valid_digest(value: &str) -> Result<(), OperationError> {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return Err(OperationError::Indeterminate);
+    };
+    (hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then_some(())
+        .ok_or(OperationError::Indeterminate)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -2228,6 +5072,7 @@ fn validate_installation(
         (installation.app_id != app_id).then_some("app_id"),
         (installation.account.id != owner_id).then_some("account_id"),
         (installation.repository_selection != "selected").then_some("repository_selection"),
+        (!permission_at_least(&installation.permissions, "actions", "write")).then_some("actions"),
         (!permission_at_least(&installation.permissions, "checks", "read")).then_some("checks"),
         // `publish_commit` mints `contents: write`. Accepting a read-only
         // installation let readiness pass and then failed at token mint, where
@@ -2235,6 +5080,7 @@ fn validate_installation(
         // unavailable".
         (!permission_at_least(&installation.permissions, "contents", "write"))
             .then_some("contents"),
+        (!permission_at_least(&installation.permissions, "issues", "write")).then_some("issues"),
         (!permission_at_least(&installation.permissions, "metadata", "read")).then_some("metadata"),
         (!permission_at_least(&installation.permissions, "pull_requests", "write"))
             .then_some("pull_requests"),
@@ -2482,7 +5328,58 @@ async fn github_json_request<T: serde::de::DeserializeOwned, B: Serialize>(
     credential: &str,
     body: Option<&B>,
 ) -> Result<T, Error> {
-    use futures_util::TryStreamExt as _;
+    let body = body
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|_| Error::Unavailable)?;
+    let bytes = github_response(method, url, credential, body).await?;
+    serde_json::from_slice(&bytes).map_err(|error| {
+        worker::console_error!(
+            "github response from {url} did not match the expected shape ({} bytes): {error}",
+            bytes.len()
+        );
+        Error::Unavailable
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn github_empty_request(
+    method: worker::Method,
+    url: &str,
+    credential: &str,
+    expected_status: u16,
+) -> Result<(), Error> {
+    let response = github_request(method, url, credential, None).await?;
+    if response.status_code() != expected_status {
+        worker::console_error!(
+            "github answered {url} with status {}, expected {expected_status}",
+            response.status_code()
+        );
+        return Err(Error::Rejected(response.status_code()));
+    }
+    read_github_response(response, url, MAX_GITHUB_RESPONSE_BYTES)
+        .await
+        .map(|_| ())
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn github_response(
+    method: worker::Method,
+    url: &str,
+    credential: &str,
+    body: Option<String>,
+) -> Result<Vec<u8>, Error> {
+    let response = github_request(method, url, credential, body).await?;
+    read_github_response(response, url, MAX_GITHUB_RESPONSE_BYTES).await
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn github_request(
+    method: worker::Method,
+    url: &str,
+    credential: &str,
+    body: Option<String>,
+) -> Result<worker::Response, Error> {
     use worker::{Fetch, Headers, Request, RequestInit, RequestRedirect};
 
     let headers = Headers::new();
@@ -2503,10 +5400,6 @@ async fn github_json_request<T: serde::de::DeserializeOwned, B: Serialize>(
             Error::Unavailable
         })?;
     }
-    let body = body
-        .map(serde_json::to_string)
-        .transpose()
-        .map_err(|_| Error::Unavailable)?;
     if body.is_some() {
         headers
             .set("content-type", "application/json")
@@ -2526,13 +5419,24 @@ async fn github_json_request<T: serde::de::DeserializeOwned, B: Serialize>(
         Error::Unavailable
     })?;
     // Diagnosis only: never log credentials, headers, or bodies.
-    let mut response = match Fetch::Request(request).send().await {
+    let response = match Fetch::Request(request).send().await {
         Ok(response) => response,
         Err(error) => {
             worker::console_error!("github request failed: {url}: {error:?}");
             return Err(Error::Unavailable);
         }
     };
+    Ok(response)
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn read_github_response(
+    mut response: worker::Response,
+    url: &str,
+    limit: usize,
+) -> Result<Vec<u8>, Error> {
+    use futures_util::TryStreamExt as _;
+
     if !(200..300).contains(&response.status_code()) {
         worker::console_error!(
             "github rejected {url} with status {}",
@@ -2547,18 +5451,132 @@ async fn github_json_request<T: serde::de::DeserializeOwned, B: Serialize>(
             .len()
             .checked_add(chunk.len())
             .ok_or(Error::Unavailable)?;
-        if next_len > MAX_GITHUB_RESPONSE_BYTES {
+        if next_len > limit {
             return Err(Error::Unavailable);
         }
         bytes.append(&mut chunk);
     }
-    serde_json::from_slice(&bytes).map_err(|error| {
-        worker::console_error!(
-            "github response from {url} did not match the expected shape ({} bytes): {error}",
-            bytes.len()
-        );
-        Error::Unavailable
-    })
+    Ok(bytes)
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn github_redirect_location(url: &str, credential: &str) -> Result<String, OperationError> {
+    let response = github_request(worker::Method::Get, url, credential, None).await?;
+    if response.status_code() != 302 {
+        return Err(Error::Rejected(response.status_code()).into());
+    }
+    let location = response
+        .headers()
+        .get("location")
+        .map_err(|_| OperationError::Unavailable)?
+        .ok_or(OperationError::Unavailable)?;
+    valid_log_redirect(&location)?;
+    Ok(location)
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn github_public_log(location: &str) -> Result<String, OperationError> {
+    use worker::{Fetch, Headers, Request, RequestInit, RequestRedirect};
+
+    valid_log_redirect(location)?;
+    let headers = Headers::new();
+    for (name, value) in [
+        ("accept", "text/plain"),
+        ("range", "bytes=-65536"),
+        ("user-agent", "dark-factory-control-plane/0.1"),
+    ] {
+        headers
+            .set(name, value)
+            .map_err(|_| OperationError::Unavailable)?;
+    }
+    let mut init = RequestInit::new();
+    init.with_method(worker::Method::Get)
+        .with_redirect(RequestRedirect::Manual)
+        .with_headers(headers);
+    let request =
+        Request::new_with_init(location, &init).map_err(|_| OperationError::Unavailable)?;
+    // This request is deliberately credentialless. The short-lived signed URL
+    // is the complete authorization and is never logged or returned.
+    let mut response = Fetch::Request(request)
+        .send()
+        .await
+        .map_err(|_| OperationError::Unavailable)?;
+    if !matches!(response.status_code(), 200 | 206) {
+        return Err(OperationError::Unavailable);
+    }
+    let bytes = read_response_tail(&mut response, MAX_JOB_LOG_BYTES).await?;
+    Ok(String::from_utf8_lossy(&bytes)
+        .chars()
+        .map(|character| {
+            if character == '\n' || character == '\t' || !character.is_control() {
+                character
+            } else {
+                '\u{fffd}'
+            }
+        })
+        .collect())
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn read_response_tail(
+    response: &mut worker::Response,
+    limit: usize,
+) -> Result<Vec<u8>, OperationError> {
+    use futures_util::TryStreamExt as _;
+
+    let mut stream = response.stream().map_err(|_| OperationError::Unavailable)?;
+    let mut bytes = Vec::new();
+    while let Some(mut chunk) = stream
+        .try_next()
+        .await
+        .map_err(|_| OperationError::Unavailable)?
+    {
+        retain_tail(&mut bytes, &mut chunk, limit);
+    }
+    Ok(bytes)
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn retain_tail(bytes: &mut Vec<u8>, chunk: &mut Vec<u8>, limit: usize) {
+    if chunk.len() >= limit {
+        bytes.clear();
+        bytes.extend_from_slice(&chunk[chunk.len() - limit..]);
+        return;
+    }
+    let overflow = bytes
+        .len()
+        .saturating_add(chunk.len())
+        .saturating_sub(limit);
+    if overflow > 0 {
+        bytes.drain(..overflow);
+    }
+    bytes.append(chunk);
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn valid_log_redirect(location: &str) -> Result<(), OperationError> {
+    if location.len() > MAX_LOG_REDIRECT_BYTES
+        || !location.is_ascii()
+        || location.bytes().any(|byte| byte.is_ascii_control())
+        || location.contains('#')
+    {
+        return Err(OperationError::Unavailable);
+    }
+    let rest = location
+        .strip_prefix("https://")
+        .ok_or(OperationError::Unavailable)?;
+    let authority_end = rest.find(['/', '?']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    if authority.is_empty() || authority.contains(['@', ':']) {
+        return Err(OperationError::Unavailable);
+    }
+    let host = authority.to_ascii_lowercase();
+    if !(host.ends_with(".actions.githubusercontent.com")
+        || host.ends_with(".blob.core.windows.net"))
+    {
+        return Err(OperationError::Unavailable);
+    }
+    Ok(())
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -2643,13 +5661,13 @@ mod tests {
         assert!(RepositoryName::new("baziyer/../dark-factory".into()).is_err());
         assert!(RepositoryName::new("baziyer/dark factory".into()).is_err());
         let installation: Installation = serde_json::from_str(
-            r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"checks":"read","contents":"write","issues":"write","merge_queues":"write","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
+            r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"actions":"write","checks":"read","contents":"write","issues":"write","merge_queues":"write","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
         )
         .unwrap();
         assert!(validate_installation(&installation, 4_673_420, 109_233_175).is_ok());
 
         let broader: Installation = serde_json::from_str(
-            r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"administration":"write","checks":"read","contents":"write","issues":"write","merge_queues":"write","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
+            r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"actions":"write","administration":"write","checks":"read","contents":"write","issues":"write","merge_queues":"write","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
         )
         .unwrap();
         assert!(validate_installation(&broader, 4_673_420, 109_233_175).is_ok());
@@ -2668,7 +5686,7 @@ mod tests {
         // readiness, then fail at token mint where GitHub's refusal reaches
         // the caller as an opaque "authority is unavailable".
         let read_only: Installation = serde_json::from_str(
-            r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"checks":"read","contents":"read","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
+            r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"actions":"write","checks":"read","contents":"read","issues":"write","merge_queues":"write","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
         )
         .unwrap();
         assert_eq!(
@@ -2683,7 +5701,7 @@ mod tests {
         // installation that cannot enqueue passes `/readyz`, reports authority
         // ready, and fails every `enqueue_pull_request` at token mint.
         let no_queue: Installation = serde_json::from_str(
-            r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"checks":"read","contents":"write","issues":"write","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
+            r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"actions":"write","checks":"read","contents":"write","issues":"write","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
         )
         .unwrap();
         assert_eq!(
@@ -2693,11 +5711,29 @@ mod tests {
 
         // Read is not enough: enqueueing writes to the queue.
         let queue_read_only: Installation = serde_json::from_str(
-            r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"checks":"read","contents":"write","issues":"write","merge_queues":"read","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
+            r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"actions":"write","checks":"read","contents":"write","issues":"write","merge_queues":"read","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
         )
         .unwrap();
         assert_eq!(
             validate_installation(&queue_read_only, 4_673_420, 109_233_175).err(),
+            Some(Error::Unavailable)
+        );
+
+        let no_issues: Installation = serde_json::from_str(
+            r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"actions":"write","checks":"read","contents":"write","merge_queues":"write","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            validate_installation(&no_issues, 4_673_420, 109_233_175).err(),
+            Some(Error::Unavailable)
+        );
+
+        let no_actions: Installation = serde_json::from_str(
+            r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"checks":"read","contents":"write","issues":"write","merge_queues":"write","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            validate_installation(&no_actions, 4_673_420, 109_233_175).err(),
             Some(Error::Unavailable)
         );
     }
@@ -2946,17 +5982,17 @@ mod tests {
             .unwrap();
         assert_eq!(
             rejected.to_string(),
-            "github refused the operation and nothing changed: \
+            "github refused the requested mutation: \
              rejected before execution as NOT_FOUND+RATE_LIMITED"
         );
         assert_eq!(
             enqueue_outcome(None, None).err().unwrap().to_string(),
-            "github refused the operation and nothing changed: \
+            "github refused the requested mutation: \
              answered with neither an effect nor an error"
         );
         assert_eq!(
             OperationError::Refused(RefusalReason::NoMergeQueue).to_string(),
-            "github refused the operation and nothing changed: \
+            "github refused the requested mutation: \
              the queue read found no merge queue on the base branch"
         );
         // The empty set is unreachable from classification but constructible
@@ -3087,9 +6123,7 @@ mod tests {
         };
         assert!(base(vec![file("README.md")]).validate().is_ok());
         // A caller must not be able to write the reconciler's own vocabulary.
-        // `reconcile_commit` matches the trailer with `contains`, so a message
-        // carrying a *different* operation's trailer would make that operation
-        // reconcile onto this commit and report a publication it never made.
+        // A caller cannot smuggle any operation marker into the headline.
         let forged = |message: &str| PublishCommit {
             message: message.into(),
             ..base(vec![file("README.md")])
@@ -3147,8 +6181,171 @@ mod tests {
             .is_err()
         );
         let request = base(vec![file("README.md")]);
-        assert!(request.marked_message().contains(&request.trailer()));
-        assert!(request.marked_message().starts_with("Do the thing"));
+        let trailer = request.trailer().unwrap();
+        let marked = request.marked_message().unwrap();
+        assert!(marked.contains(&trailer));
+        assert!(marked.starts_with("Do the thing"));
+        let mut different_tree = request.clone();
+        different_tree.changes[0].content_base64 = Some("ZGlmZmVyZW50".into());
+        assert_ne!(trailer, different_tree.trailer().unwrap());
+        assert!(forged("Two\nlines").validate().is_err());
+    }
+
+    #[test]
+    fn rest_refusals_and_streaming_log_tails_are_bounded() {
+        assert_eq!(
+            rejection_for_status(403),
+            Some(RejectionKinds {
+                forbidden: true,
+                ..RejectionKinds::default()
+            })
+        );
+        assert_eq!(
+            rejection_for_status(422),
+            Some(RejectionKinds {
+                unprocessable: true,
+                ..RejectionKinds::default()
+            })
+        );
+        assert_eq!(rejection_for_status(500), None);
+
+        let mut tail = b"first".to_vec();
+        let mut middle = b"-middle".to_vec();
+        retain_tail(&mut tail, &mut middle, 8);
+        assert_eq!(tail, b"t-middle");
+        let mut oversized = b"0123456789".to_vec();
+        retain_tail(&mut tail, &mut oversized, 8);
+        assert_eq!(tail, b"23456789");
+    }
+
+    fn complete_release(tag: &str) -> Release {
+        let names = [
+            format!("dark-factory-{tag}-aarch64-apple-darwin.tar.gz"),
+            format!("dark-factory-{tag}-x86_64-apple-darwin.tar.gz"),
+            "SHA256SUMS".into(),
+            "latest.json".into(),
+            "dark-factory.rb".into(),
+        ];
+        Release {
+            tag_name: tag.into(),
+            html_url: format!(
+                "https://github.com/dark-factory-build/dark-factory/releases/tag/{tag}"
+            ),
+            draft: false,
+            prerelease: tag.contains('-'),
+            assets: names
+                .into_iter()
+                .map(|name| ReleaseAsset {
+                    browser_download_url: format!(
+                        "https://github.com/dark-factory-build/dark-factory/releases/download/{tag}/{name}"
+                    ),
+                    name,
+                    size: 1,
+                    digest: Some(format!("sha256:{}", "a".repeat(64))),
+                    state: "uploaded".into(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_release_is_complete_exact_and_digest_bound() {
+        let result = complete_release("v1.2.3")
+            .into_result("v1.2.3")
+            .unwrap()
+            .unwrap();
+        assert!(!result.draft);
+        assert!(!result.prerelease);
+        assert_eq!(result.assets.len(), 5);
+        assert!(result.assets.iter().all(|asset| asset.digest.len() == 71));
+
+        let mut missing_digest = complete_release("v1.2.3");
+        missing_digest.assets[0].digest = None;
+        assert!(matches!(
+            missing_digest.into_result("v1.2.3"),
+            Err(OperationError::Indeterminate)
+        ));
+        let mut partial = complete_release("v1.2.3");
+        partial.assets.pop();
+        assert!(matches!(
+            partial.into_result("v1.2.3"),
+            Err(OperationError::Indeterminate)
+        ));
+        let mut unexpected = complete_release("v1.2.3");
+        unexpected.assets[0].name = "surprise.tar.gz".into();
+        assert!(matches!(
+            unexpected.into_result("v1.2.3"),
+            Err(OperationError::Indeterminate)
+        ));
+        let mut uploading = complete_release("v1.2.3");
+        uploading.assets[0].state = "new".into();
+        assert!(matches!(
+            uploading.into_result("v1.2.3"),
+            Err(OperationError::Indeterminate)
+        ));
+        let mut draft = complete_release("v1.2.3");
+        draft.draft = true;
+        assert!(matches!(
+            draft.into_result("v1.2.3"),
+            Err(OperationError::Indeterminate)
+        ));
+    }
+
+    fn release_run(id: i64, event: &str, head_sha: &str, tag: &str) -> WorkflowRun {
+        WorkflowRun {
+            id,
+            run_attempt: 1,
+            name: "Release".into(),
+            path: RELEASE_WORKFLOW_PATH.into(),
+            event: event.into(),
+            status: "completed".into(),
+            conclusion: Some("success".into()),
+            head_sha: head_sha.into(),
+            head_branch: tag.into(),
+            display_title: Some(format!("Release {tag}")),
+            html_url: format!(
+                "https://github.com/dark-factory-build/dark-factory/actions/runs/{id}"
+            ),
+            pull_requests: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn an_initial_release_has_one_exact_tag_push_run() {
+        let sha = "a".repeat(40);
+        let selected = select_release_workflow_run(
+            vec![
+                release_run(1, "workflow_dispatch", &sha, "v1.2.3"),
+                release_run(2, "push", &sha, "v1.2.3"),
+            ],
+            "v1.2.3",
+            &sha,
+        )
+        .unwrap();
+        assert_eq!(selected.id, 2);
+        assert!(matches!(
+            select_release_workflow_run(Vec::new(), "v1.2.3", &sha),
+            Err(OperationError::Indeterminate)
+        ));
+        assert!(matches!(
+            select_release_workflow_run(
+                vec![
+                    release_run(2, "push", &sha, "v1.2.3"),
+                    release_run(3, "push", &sha, "v1.2.3"),
+                ],
+                "v1.2.3",
+                &sha,
+            ),
+            Err(OperationError::Indeterminate)
+        ));
+        assert!(matches!(
+            select_release_workflow_run(
+                vec![release_run(2, "push", &"b".repeat(40), "v1.2.3")],
+                "v1.2.3",
+                &sha,
+            ),
+            Err(OperationError::Indeterminate)
+        ));
     }
 
     #[test]
@@ -3217,8 +6414,74 @@ mod tests {
 
     #[test]
     fn typed_operation_inputs_are_exact_head_bound_and_bounded() {
+        let mut issue = CreateIssue {
+            operation_id: "0c8a5c44-7f1f-11f0-952e-acde48001122".into(),
+            title: "Bounded issue".into(),
+            body: "Acceptance criteria.".into(),
+        };
+        assert!(issue.validate().is_ok());
+        assert!(
+            issue
+                .marked_body()
+                .unwrap()
+                .ends_with(&issue.marker().unwrap())
+        );
+        assert!(
+            CreateIssue {
+                body: "<!-- dark-factory-operation:forged -->".into(),
+                ..issue
+            }
+            .validate()
+            .is_err()
+        );
+
+        let observe_issue = ObserveIssue { issue_number: 349 };
+        assert!(observe_issue.validate().is_ok());
+        assert!(ObserveIssue { issue_number: 0 }.validate().is_err());
+        let mut resolve_issue = ResolveIssue {
+            operation_id: "3c8a5c44-7f1f-11f0-952e-acde48001122".into(),
+            issue_number: 349,
+            body: "The exact storage proof is now merged.".into(),
+            state_reason: IssueResolutionReason::Completed,
+        };
+        assert!(resolve_issue.validate().is_ok());
+        assert!(
+            resolve_issue
+                .marked_body()
+                .unwrap()
+                .contains(&resolve_issue.marker().unwrap())
+        );
+        assert_eq!(IssueResolutionReason::NotPlanned.as_str(), "not_planned");
+        assert!(
+            ResolveIssue {
+                body: "<!-- dark-factory-operation:forged -->".into(),
+                ..resolve_issue.clone()
+            }
+            .validate()
+            .is_err()
+        );
+        resolve_issue.issue_number = 0;
+        assert!(resolve_issue.validate().is_err());
+
+        let mut merge = ObservePullRequestMerge {
+            enqueue_operation_id: "4c8a5c44-7f1f-11f0-952e-acde48001122".into(),
+            pull_number: 390,
+            head_sha: "d".repeat(40),
+            base: "main".into(),
+        };
+        assert!(merge.validate().is_ok());
+        assert!(
+            ObservePullRequestMerge {
+                base: "../main".into(),
+                ..merge
+            }
+            .validate()
+            .is_err()
+        );
+
         let mut create = CreatePullRequest {
             operation_id: "1c8a5c44-7f1f-11f0-952e-acde48001122".into(),
+            issue_number: 390,
             head: "feature/maintainer".into(),
             head_sha: "a".repeat(40),
             base: "main".into(),
@@ -3228,10 +6491,20 @@ mod tests {
             draft: false,
         };
         assert!(create.validate().is_ok());
+        assert!(create.marked_body().unwrap().contains("Closes #390"));
         assert!(
             create
                 .marked_body()
-                .ends_with("<!-- dark-factory-operation:1c8a5c44-7f1f-11f0-952e-acde48001122 -->")
+                .unwrap()
+                .ends_with(&create.marker().unwrap())
+        );
+        assert!(
+            CreatePullRequest {
+                issue_number: 0,
+                ..create.clone()
+            }
+            .validate()
+            .is_err()
         );
         assert!(
             CreatePullRequest {
@@ -3288,7 +6561,7 @@ mod tests {
             html_url:
                 "https://github.com/dark-factory-build/dark-factory/pull/297#pullrequestreview-1"
                     .into(),
-            body: Some(review.marked_body()),
+            body: Some(review.marked_body().unwrap()),
             commit_id: review.head_sha.clone(),
             state: "COMMENTED".into(),
         };
@@ -3378,9 +6651,9 @@ mod tests {
 
         // The verdict is rendered by the App, carries the exact head, and sits
         // alongside the operation marker.
-        let body = allow.marked_body();
+        let body = allow.marked_body().unwrap();
         assert!(body.contains(&format!("Dark-Factory-Review: allow {}", "d".repeat(40))));
-        assert!(body.contains(&allow.marker()));
+        assert!(body.contains(&allow.marker().unwrap()));
         assert!(body.starts_with("Tried to break the exact-head check and could not."));
 
         // The other two verdicts are distinguishable in the same line, so a
@@ -3389,13 +6662,27 @@ mod tests {
             event: ReviewEvent::Comment,
             ..allow.clone()
         };
-        assert!(note.marked_body().contains("Dark-Factory-Review: note"));
-        assert!(!note.marked_body().contains("Dark-Factory-Review: allow"));
+        assert!(
+            note.marked_body()
+                .unwrap()
+                .contains("Dark-Factory-Review: note")
+        );
+        assert!(
+            !note
+                .marked_body()
+                .unwrap()
+                .contains("Dark-Factory-Review: allow")
+        );
         let block = SubmitPullRequestReview {
             event: ReviewEvent::RequestChanges,
             ..allow.clone()
         };
-        assert!(block.marked_body().contains("Dark-Factory-Review: block"));
+        assert!(
+            block
+                .marked_body()
+                .unwrap()
+                .contains("Dark-Factory-Review: block")
+        );
 
         // The blocking verdict is the one the gate exists for, so its whole
         // round trip is pinned: rendered into the line, posted as a
@@ -3408,7 +6695,7 @@ mod tests {
             html_url:
                 "https://github.com/dark-factory-build/dark-factory/pull/331#pullrequestreview-4"
                     .into(),
-            body: Some(block.marked_body()),
+            body: Some(block.marked_body().unwrap()),
             commit_id: block.head_sha.clone(),
             state: REVIEW_STATE.into(),
         };
@@ -3420,7 +6707,7 @@ mod tests {
             PullRequestReview {
                 id: 5,
                 html_url: blocked.url.clone(),
-                body: Some(block.marked_body()),
+                body: Some(block.marked_body().unwrap()),
                 commit_id: block.head_sha.clone(),
                 state: "CHANGES_REQUESTED".into(),
             }
@@ -3452,15 +6739,15 @@ mod tests {
             html_url:
                 "https://github.com/dark-factory-build/dark-factory/pull/331#pullrequestreview-2"
                     .into(),
-            body: Some(allow.marked_body()),
+            body: Some(allow.marked_body().unwrap()),
             commit_id: allow.head_sha.clone(),
             state: "COMMENTED".into(),
         };
         assert!(recovered.matches(&allow));
 
-        // `state` is `COMMENTED` for all three verdicts, so the caller cannot
-        // tell from it which verdict was recorded -- on the field that now
-        // gates merges. The result echoes it.
+        // `state` is `COMMENTED` for all three verdicts, so reconciliation
+        // must match the complete App-authored body before reconstructing the
+        // verdict from the request.
         let echoed = PullRequestReview {
             id: 2,
             html_url: recovered.html_url.clone(),
@@ -3472,11 +6759,22 @@ mod tests {
         .unwrap();
         assert_eq!(echoed.state, "COMMENTED");
         assert_eq!(echoed.verdict, "allow");
+        assert!(
+            PullRequestReview {
+                id: 3,
+                html_url: recovered.html_url.clone(),
+                body: recovered.body.clone(),
+                commit_id: recovered.commit_id.clone(),
+                state: "COMMENTED".into(),
+            }
+            .into_result(&note)
+            .is_err()
+        );
         let noted = PullRequestReview {
             id: 3,
             html_url: recovered.html_url.clone(),
-            body: recovered.body.clone(),
-            commit_id: recovered.commit_id.clone(),
+            body: Some(note.marked_body().unwrap()),
+            commit_id: note.head_sha.clone(),
             state: "COMMENTED".into(),
         }
         .into_result(&note)
@@ -3484,17 +6782,6 @@ mod tests {
         assert_eq!(noted.state, echoed.state);
         assert_ne!(noted.verdict, echoed.verdict);
 
-        // A result journaled before `verdict` existed must still replay. The
-        // journal stores these as JSON and replays them with `from_str`, so a
-        // required field would turn a completed operation into a permanent
-        // `Unavailable` on every retry after the deploy that added it.
-        let replayed: ReviewResult = serde_json::from_str(
-            r#"{"review_id":7,"url":"https://github.com/o/r/pull/1#pullrequestreview-7",
-                 "head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state":"COMMENTED"}"#,
-        )
-        .expect("a pre-verdict journal row must still deserialize");
-        assert_eq!(replayed.review_id, 7);
-        assert!(replayed.verdict.is_empty());
         // A verdict is bound to one head. The same review against any other
         // commit is not this operation's result.
         assert!(

@@ -1,4 +1,5 @@
 name: Release
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('Release recovery {0} {1}', inputs.operation_id, inputs.request_digest) || format('Release {0}', github.ref_name) }}
 
 # A semver tag (`v0.2.6`) pushed by a maintainer builds the macOS arm64
 # and Intel binaries serially and publishes them, a SHA256SUMS file, a tap
@@ -13,6 +14,18 @@ on:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
+      operation_id:
+        description: Durable Maintainer operation UUID
+        required: true
+        type: string
+      request_digest:
+        description: SHA-256 of the complete durable Maintainer request
+        required: true
+        type: string
+      expected_workflow_sha:
+        description: Exact default-branch commit authorized to run recovery
+        required: true
+        type: string
       tag:
         description: Existing release tag to recover
         required: true
@@ -24,7 +37,7 @@ permissions:
 jobs:
   release:
     name: release
-    if: github.event_name == 'push' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    if: github.event_name == 'push' || (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && github.sha == inputs.expected_workflow_sha)
     # Only maintainers can push tags, so this is a trusted ref (same boundary
     # as CI's `push` to `main`, the only other trigger that reaches the
     # persistent Mac — every pull request, same-repository or a fork, runs
