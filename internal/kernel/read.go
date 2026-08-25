@@ -376,6 +376,9 @@ func (store *Store) WatchAfter(ctx context.Context, after EventSequence) (WatchB
 	if after.Int64() < state.Floor.Int64()-1 {
 		return WatchBatch{}, &ResyncRequiredError{Head: state.Head, Floor: state.Floor}
 	}
+	if err := validateInvalidationBounds(ctx, tx.connection, state); err != nil {
+		return WatchBatch{}, err
+	}
 	rows, err := tx.connection.QueryContext(ctx, `SELECT sequence, occurred_at_ms, entity_kind, entity_id, revision, deleted FROM invalidations WHERE sequence > ? ORDER BY sequence ASC LIMIT ?`, after.Int64(), WatchBatchLimit+1)
 	if err != nil {
 		return WatchBatch{}, fmt.Errorf("read invalidations: %w", err)

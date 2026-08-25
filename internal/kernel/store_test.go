@@ -184,6 +184,9 @@ func TestDispatchCapacityRevisionGuards(t *testing.T) {
 	if _, err := store.SetCapacity(ctx, state.Revision, MaxFactoryCapacity+1, mustTime(t, 4)); !errors.Is(err, ErrInvalidValue) {
 		t.Fatalf("oversized capacity error = %v", err)
 	}
+	if _, err := store.SetDispatch(ctx, Revision{}, false, mustTime(t, 4)); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("zero revision error = %v", err)
+	}
 	batch, err := store.WatchAfter(ctx, mustSequence(t, 0))
 	if err != nil || len(batch.Invalidations) != 2 || batch.Invalidations[0].Revision.Int64() != 2 || batch.Invalidations[1].Revision.Int64() != 3 {
 		t.Fatalf("factory invalidations = %+v, %v", batch, err)
@@ -232,6 +235,53 @@ func TestInvalidationRetentionBatchAndGapSemantics(t *testing.T) {
 	}
 	if _, err := store.WatchAfter(ctx, mustSequence(t, 98)); !errors.Is(err, ErrCorruptState) {
 		t.Fatalf("gap error = %v", err)
+	}
+	if _, err := store.WatchAfter(ctx, state.Head); !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("gap behind cursor error = %v", err)
+	}
+}
+
+func TestFactoryMutationRequiresExactlyOneRow(t *testing.T) {
+	store, _ := newTestStore(t)
+	defer store.Close()
+	if _, err := store.writer.Exec(`CREATE TRIGGER suppress_factory_update BEFORE UPDATE OF dispatch_enabled ON factory BEGIN SELECT RAISE(IGNORE); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetDispatch(context.Background(), mustRevision(t, 1), true, mustTime(t, 2)); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("suppressed update error = %v", err)
+	}
+	state, err := store.Factory(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.DispatchEnabled || state.Revision.Int64() != 1 || state.Head.Int64() != 0 {
+		t.Fatalf("suppressed update left footprint: %+v", state)
+	}
+}
+
+func TestReadTransactionPinsSnapshotBeforeConcurrentWrite(t *testing.T) {
+	store, _ := newTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Close()
+	state, err := factoryState(ctx, tx.connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := NewProject{ID: projectID(t, 11), Name: "concurrent", Root: filepath.Join(t.TempDir(), "concurrent")}
+	if _, err := store.CreateProject(ctx, spec, mustTime(t, 2)); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := projectByID(ctx, tx.connection, spec.ID); err != nil || found {
+		t.Fatalf("pinned read observed concurrent write found=%v err=%v", found, err)
+	}
+	batch, err := store.WatchAfter(ctx, state.Head)
+	if err != nil || len(batch.Invalidations) != 1 {
+		t.Fatalf("watch after pinned head = %+v, %v", batch, err)
 	}
 }
 

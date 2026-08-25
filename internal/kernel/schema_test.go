@@ -268,12 +268,16 @@ func TestLiteralImmediateExclusionAndCancelledWait(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer tx.Close()
 	other := openConfiguredRaw(t, path)
 	defer other.Close()
 	if _, err := other.Exec(`PRAGMA busy_timeout = 0`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := other.Exec(`BEGIN IMMEDIATE`); !errors.Is(err, sqlite3.BUSY) && !errors.Is(err, sqlite3.LOCKED) {
+	if _, err := other.Exec(`BEGIN IMMEDIATE`); err == nil {
+		_, _ = other.Exec(`ROLLBACK`)
+		t.Fatal("second immediate writer acquired the write reservation")
+	} else if !errors.Is(err, sqlite3.BUSY) && !errors.Is(err, sqlite3.LOCKED) {
 		t.Fatalf("second immediate writer error = %v", err)
 	}
 	if err := tx.Rollback(nil); err != nil {

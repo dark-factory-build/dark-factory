@@ -249,10 +249,12 @@ func appendInvalidations(ctx context.Context, connection *sql.Conn, at UnixMilli
 		return fmt.Errorf("%w: invalidation head changed inside writer transaction", ErrCorruptState)
 	}
 	for index, item := range pending {
-		if len(item.id) != IDBytes || item.revision < 1 {
+		kind := item.kind.String()
+		validID := len(item.id) == IDBytes && (item.kind == EntityFactory && string(item.id) == string(factoryEntityID[:]) || item.kind != EntityFactory && validNonzeroID(item.id))
+		if kind == "" || !validID || item.revision < 1 {
 			return fmt.Errorf("%w: invalid invalidation identity", errInvalidValue)
 		}
-		if _, err := connection.ExecContext(ctx, `INSERT INTO invalidations(sequence, occurred_at_ms, entity_kind, entity_id, revision, deleted) VALUES(?, ?, ?, ?, ?, ?)`, next+int64(index), at.Int64(), item.kind.String(), item.id, item.revision, boolInt(item.deleted)); err != nil {
+		if _, err := connection.ExecContext(ctx, `INSERT INTO invalidations(sequence, occurred_at_ms, entity_kind, entity_id, revision, deleted) VALUES(?, ?, ?, ?, ?, ?)`, next+int64(index), at.Int64(), kind, item.id, item.revision, boolInt(item.deleted)); err != nil {
 			return fmt.Errorf("insert invalidation: %w", err)
 		}
 	}

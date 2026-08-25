@@ -228,28 +228,18 @@ func validateResources(ctx context.Context, connection *sql.Conn) error {
 }
 
 func validateInvalidations(ctx context.Context, connection *sql.Conn, factory FactoryState) error {
-	var count, minimum, maximum int64
-	if err := connection.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(MIN(sequence), 0), COALESCE(MAX(sequence), 0) FROM invalidations`).Scan(&count, &minimum, &maximum); err != nil {
+	if err := validateInvalidationBounds(ctx, connection, factory); err != nil {
 		return err
 	}
-	if count < 0 || count > EventRetentionLimit {
-		return fmt.Errorf("%w: invalid invalidation count", ErrCorruptState)
-	}
-	if count == 0 {
-		if factory.Head.Int64() != 0 || factory.Floor.Int64() != 1 {
-			return fmt.Errorf("%w: empty invalidation log has advanced metadata", ErrCorruptState)
-		}
+	if factory.Head.Int64() == 0 {
 		return nil
-	}
-	if minimum != factory.Floor.Int64() || maximum != factory.Head.Int64() || maximum-minimum+1 != count {
-		return fmt.Errorf("%w: invalidation metadata or gap", ErrCorruptState)
 	}
 	rows, err := connection.QueryContext(ctx, `SELECT sequence, occurred_at_ms, entity_kind, entity_id, revision, deleted FROM invalidations ORDER BY sequence`)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
-	expected := minimum
+	expected := factory.Floor.Int64()
 	for rows.Next() {
 		var sequence, at, revision, deleted int64
 		var kind string
@@ -270,6 +260,28 @@ func validateInvalidations(ctx context.Context, connection *sql.Conn, factory Fa
 		expected++
 	}
 	return rows.Err()
+}
+
+func validateInvalidationBounds(ctx context.Context, queryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, factory FactoryState) error {
+	var count, minimum, maximum int64
+	if err := queryer.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(MIN(sequence), 0), COALESCE(MAX(sequence), 0) FROM invalidations`).Scan(&count, &minimum, &maximum); err != nil {
+		return err
+	}
+	if count < 0 || count > EventRetentionLimit {
+		return fmt.Errorf("%w: invalid invalidation count", ErrCorruptState)
+	}
+	if count == 0 {
+		if factory.Head.Int64() != 0 || factory.Floor.Int64() != 1 {
+			return fmt.Errorf("%w: empty invalidation log has advanced metadata", ErrCorruptState)
+		}
+		return nil
+	}
+	if minimum != factory.Floor.Int64() || maximum != factory.Head.Int64() || maximum-minimum+1 != count {
+		return fmt.Errorf("%w: invalidation metadata or gap", ErrCorruptState)
+	}
+	return nil
 }
 
 func validOutcomePair(kind, code sql.NullString) bool {
