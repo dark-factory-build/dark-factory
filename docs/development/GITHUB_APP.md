@@ -118,18 +118,17 @@ broker, including a `403`, fails closed. An effect with an uncertain result is
 indeterminate until the typed reconciliation operation proves its outcome; it
 is never retried through personal authority.
 
-The maintainer broker exposes only these repository-scoped operations:
+The live maintainer broker exposes only these repository-scoped operations:
 
-- create one bounded issue;
+- verify the exact repository, numeric repository ID, and permission revision;
 - publish one exact independently reviewed tree and App-verified commit to a
   generated branch;
-- create or update one PR for that exact branch and base;
-- submit one bounded formal Pull Request Review through the Pull Request Review
+- create one PR for that exact branch and base;
+- submit one bounded exact-head review verdict through the Pull Request Review
   API;
-- observe Check Runs for one exact PR head;
+- observe Check Runs for one exact PR head; and
 - enqueue one exact reviewed head for merge after its bound checks and
-  approvals; and
-- delete the exact generated branch after the bound merge result.
+  approvals.
 
 Replacing the already-open canonical bodies for #126, #153, and #188 is a
 one-time Phase 0 bootstrap action, not a maintainer-broker operation. It must
@@ -139,16 +138,17 @@ replacement digest, and exact reviewed body, and exposes no comment, label,
 state, or close authority. Until that bootstrap authority exists, the reviewed
 replacement bodies remain local and Phase 0 is incomplete.
 
-This maintainer revision may use Metadata read, Issues read/write, Contents
-read/write, Pull requests read/write, Checks read, and Merge queues write.
-Issues write exists only for the typed issue-creation operation: the surface
-exposes no issue-comment, issue-update, or issue-close operation. Pull requests
-write authorizes PR creation, update, formal review, and the exact-head
-enqueue, which mutates the pull request's queue state; a PR review is not an
-Issues API comment. Merge queues write authorizes only the typed exact-head
-enqueue and reconciliation operation; the enqueue token also mints Contents
-write, because a queued entry ends with GitHub pushing the squash commit to
-the default branch (#371 tracks the live proof of the scope set). No Actions, Workflow, Release,
+The live tools mint only their operation-specific subsets of Metadata read,
+Contents write, Pull requests write, Checks read, and Merge queues write. The
+permanent App registration may retain Issues write for a future bounded issue
+operation, but this revision neither requires nor mints it and exposes no
+issue-create, issue-comment, issue-update, or issue-close tool. Pull requests
+write authorizes PR creation, formal review, and the exact-head enqueue, which
+mutates the pull request's queue state; a PR review is not an Issues API
+comment. Merge queues write authorizes only the typed exact-head enqueue and
+reconciliation operation; the enqueue token also mints Contents write, because
+a queued entry ends with GitHub pushing the squash commit to the default branch
+(#371 tracks the live proof of the scope set). No Actions, Workflow, Release,
 Administration, Secrets, arbitrary status, direct-merge, dequeue, queue-jump,
 or generic API authority is exposed. Because the maintainer revision has no
 Workflows permission, exact-tree publication rejects any tree that changes
@@ -196,12 +196,11 @@ repository, prompt, worktree, log, or SQLite state.
 
 Existing refs are never force-updated or replaced. Publication may adopt only
 the exact expected generated ref/commit; any different target is a conflict.
-Branch deletion re-reads the ref, requires the exact merged head, and deletes
-only the generated ref. A moved, reused, missing-before-acknowledgement, or
-ambiguous ref becomes a reconciled success or a visible indeterminate/conflict,
-never a blind delete or retry. This maintainer surface is permanent official
-coordinator infrastructure, not executable intake and not the future runtime
-broker.
+The live surface has no branch-deletion operation, so cleanup is an explicit
+human handoff until one is implemented. A moved, reused, or ambiguous ref
+becomes a reconciled success or a visible indeterminate/conflict, never a blind
+retry. This maintainer surface is permanent official coordinator
+infrastructure, not executable intake and not the future runtime broker.
 
 ## Authority boundary
 
