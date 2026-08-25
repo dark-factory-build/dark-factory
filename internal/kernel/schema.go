@@ -93,7 +93,7 @@ var schemaStatements = []string{
     repository_inode INTEGER CHECK (repository_inode IS NULL OR repository_inode > 0),
     selected_at_ms INTEGER CHECK (selected_at_ms IS NULL OR selected_at_ms >= 0),
     tree_digest BLOB CHECK (tree_digest IS NULL OR length(tree_digest) = 32),
-    file_count INTEGER CHECK (file_count IS NULL OR file_count BETWEEN 0 AND 100000),
+    entry_count INTEGER CHECK (entry_count IS NULL OR entry_count BETWEEN 0 AND 10000),
     total_bytes INTEGER CHECK (total_bytes IS NULL OR total_bytes BETWEEN 0 AND 1073741824),
     source_dev INTEGER CHECK (source_dev IS NULL OR source_dev >= 0),
     source_inode INTEGER CHECK (source_inode IS NULL OR source_inode > 0),
@@ -104,9 +104,9 @@ var schemaStatements = []string{
     FOREIGN KEY (task_id, project_id, task_incarnation_id) REFERENCES tasks(id, project_id, incarnation_id),
     CHECK ((object_format IS NULL AND selected_commit IS NULL) OR (object_format = 'sha1' AND length(selected_commit) = 20) OR (object_format = 'sha256' AND length(selected_commit) = 32)),
     CHECK (
-        (phase = 'reserved' AND object_format IS NULL AND selected_commit IS NULL AND repository_root IS NULL AND repository_dev IS NULL AND repository_inode IS NULL AND selected_at_ms IS NULL AND tree_digest IS NULL AND file_count IS NULL AND total_bytes IS NULL AND source_dev IS NULL AND source_inode IS NULL AND available_at_ms IS NULL) OR
-        (phase = 'selected' AND object_format IS NOT NULL AND selected_commit IS NOT NULL AND repository_root IS NOT NULL AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL AND selected_at_ms IS NOT NULL AND tree_digest IS NULL AND file_count IS NULL AND total_bytes IS NULL AND source_dev IS NULL AND source_inode IS NULL AND available_at_ms IS NULL) OR
-        (phase = 'available' AND object_format IS NOT NULL AND selected_commit IS NOT NULL AND repository_root IS NOT NULL AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL AND selected_at_ms IS NOT NULL AND tree_digest IS NOT NULL AND file_count IS NOT NULL AND total_bytes IS NOT NULL AND source_dev IS NOT NULL AND source_inode IS NOT NULL AND available_at_ms IS NOT NULL)
+        (phase = 'reserved' AND object_format IS NULL AND selected_commit IS NULL AND repository_root IS NULL AND repository_dev IS NULL AND repository_inode IS NULL AND selected_at_ms IS NULL AND tree_digest IS NULL AND entry_count IS NULL AND total_bytes IS NULL AND source_dev IS NULL AND source_inode IS NULL AND available_at_ms IS NULL) OR
+        (phase = 'selected' AND object_format IS NOT NULL AND selected_commit IS NOT NULL AND repository_root IS NOT NULL AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL AND selected_at_ms IS NOT NULL AND tree_digest IS NULL AND entry_count IS NULL AND total_bytes IS NULL AND source_dev IS NULL AND source_inode IS NULL AND available_at_ms IS NULL) OR
+        (phase = 'available' AND object_format IS NOT NULL AND selected_commit IS NOT NULL AND repository_root IS NOT NULL AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL AND selected_at_ms IS NOT NULL AND tree_digest IS NOT NULL AND entry_count IS NOT NULL AND total_bytes IS NOT NULL AND source_dev IS NOT NULL AND source_inode IS NOT NULL AND available_at_ms IS NOT NULL)
     )
 ) STRICT, WITHOUT ROWID`,
 	`CREATE UNIQUE INDEX changes_id_project_task_incarnation_unique ON changes(id, project_id, task_id, task_incarnation_id)`,

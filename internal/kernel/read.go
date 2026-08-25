@@ -79,7 +79,7 @@ func scanAgent(scanner rowScanner) (Agent, bool, error) {
 	if idErr != nil || projectErr != nil || roleErr != nil || providerErr != nil || modeErr != nil || byteLen(name) < 1 || byteLen(name) > 128 || (paused != 0 && paused != 1) || budget < 1 || budget > 1_000_000_000 || used < 0 || used > budget || updatedAt < createdAt {
 		return Agent{}, false, fmt.Errorf("%w: invalid agent row", ErrCorruptState)
 	}
-	if model.Valid && (byteLen(model.String) < 1 || byteLen(model.String) > 128) || effort.Valid && !validReasoningEffort(effort.String) || provider == ProviderShell && mode != ExecutionUnrestricted {
+	if model.Valid && (byteLen(model.String) < 1 || byteLen(model.String) > 128) || effort.Valid && (effort.String == "" || !validReasoningEffort(effort.String)) || provider == ProviderShell && mode != ExecutionUnrestricted {
 		return Agent{}, false, fmt.Errorf("%w: invalid agent controls", ErrCorruptState)
 	}
 	rev, revisionErr := NewRevision(revision)
@@ -161,11 +161,11 @@ func scanTask(scanner rowScanner) (Task, bool, error) {
 }
 
 func factoryState(ctx context.Context, queryer rowQueryer) (FactoryState, error) {
-	var dispatch, capacity, revision, next, floor int64
-	if err := queryer.QueryRowContext(ctx, `SELECT dispatch_enabled, capacity, revision, next_invalidation_sequence, invalidation_floor FROM factory WHERE singleton = 1`).Scan(&dispatch, &capacity, &revision, &next, &floor); err != nil {
+	var dispatch, capacity, revision, next, floor, updatedAt int64
+	if err := queryer.QueryRowContext(ctx, `SELECT dispatch_enabled, capacity, revision, next_invalidation_sequence, invalidation_floor, updated_at_ms FROM factory WHERE singleton = 1`).Scan(&dispatch, &capacity, &revision, &next, &floor, &updatedAt); err != nil {
 		return FactoryState{}, fmt.Errorf("read factory: %w", err)
 	}
-	if dispatch != 0 && dispatch != 1 || capacity < 1 || capacity > MaxFactoryCapacity || next < 1 || floor < 1 || floor > next {
+	if dispatch != 0 && dispatch != 1 || capacity < 1 || capacity > MaxFactoryCapacity || next < 1 || floor < 1 || floor > next || updatedAt < 0 {
 		return FactoryState{}, fmt.Errorf("%w: invalid factory controls", ErrCorruptState)
 	}
 	rev, revErr := NewRevision(revision)

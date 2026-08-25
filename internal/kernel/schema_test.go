@@ -365,6 +365,24 @@ func incarnationID(t *testing.T, seed byte) IncarnationID {
 	return result
 }
 
+func runID(t *testing.T, seed byte) RunID {
+	t.Helper()
+	result, err := RunIDFromBytes(bytes.Repeat([]byte{seed}, IDBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func changeID(t *testing.T, seed byte) ChangeID {
+	t.Helper()
+	result, err := ChangeIDFromBytes(bytes.Repeat([]byte{seed}, IDBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
 func openRaw(t *testing.T, path string) *sql.DB {
 	t.Helper()
 	pool, err := sql.Open(driverName, "file:"+path)

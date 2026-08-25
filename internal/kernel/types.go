@@ -14,6 +14,8 @@ const (
 	SnapshotEntityLimit    = 4096
 	RecentTerminalRunLimit = 256
 	MaxFactoryCapacity     = 1024
+	MaxChangeTreeEntries   = 10_000
+	MaxChangeTreeBlobBytes = 1 << 30
 )
 
 var errInvalidValue = ErrInvalidValue

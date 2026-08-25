@@ -1,6 +1,7 @@
 package kernel
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -404,6 +405,35 @@ func TestCorruptControlsFailClosedOnReadAndReopen(t *testing.T) {
 				t.Fatalf("old Project lookup should be an unremarkable miss: %v", err)
 			}
 		},
+		"run outcome detail": func(t *testing.T, store *Store) {
+			ctx := context.Background()
+			project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 1), Name: "p", Root: "/p"}, mustTime(t, 2))
+			if err != nil {
+				t.Fatal(err)
+			}
+			agent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 2), ProjectID: project.ID, Name: "a", Role: RoleOrchestrator, Provider: ProviderCodex, ExecutionMode: ExecutionWorkspaceWrite, ToolBudgetLimit: 1}, mustTime(t, 3))
+			if err != nil {
+				t.Fatal(err)
+			}
+			task, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 3), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 4), Title: "t"}, mustTime(t, 4))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.writer.Exec(`INSERT INTO runs(
+                    id, project_id, agent_id, task_id, task_incarnation_id, admitted_task_work_revision,
+                    change_id, role, provider, execution_mode, model, reasoning_effort, phase,
+                    proposal_kind, proposal_code, proposal_detail, proposal_result,
+                    terminal_kind, terminal_code, terminal_detail, terminal_result,
+                    credential_digest, credential_revoked_at_ms,
+                    runner_exit_sequence, runner_exit_code, runner_exit_signal, runner_exit_at_ms,
+                    revision, admitted_at_ms, running_at_ms, finalizing_at_ms, terminal_at_ms, updated_at_ms
+                ) VALUES(?, ?, ?, ?, ?, 1, NULL, 'orchestrator', 'codex', 'workspace_write', NULL, NULL, 'admitted',
+                    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, NULL, NULL, NULL, NULL, NULL, 1, 5, NULL, NULL, NULL, 5)`,
+				runID(t, 5).Bytes(), project.ID.Bytes(), agent.ID.Bytes(), task.ID.Bytes(), task.IncarnationID.Bytes(), bytes.Repeat([]byte{0x5a}, DigestBytes)); err != nil {
+				t.Fatal(err)
+			}
+			corruptSQL(t, store, `UPDATE runs SET proposal_detail = ''`)
+		},
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -417,13 +447,64 @@ func TestCorruptControlsFailClosedOnReadAndReopen(t *testing.T) {
 	}
 }
 
+func TestChangeCommitmentSchemaUsesFrozenBounds(t *testing.T) {
+	store, _ := newTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 1), Name: "p", Root: "/p"}, mustTime(t, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 2), ProjectID: project.ID, Name: "a", Role: RoleWorker, Provider: ProviderCodex, ExecutionMode: ExecutionWorkspaceWrite, ToolBudgetLimit: 1}, mustTime(t, 3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 3), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 4), Title: "t"}, mustTime(t, 4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var entryColumns, legacyColumns int
+	if err := store.readers.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('changes') WHERE name = 'entry_count'`).Scan(&entryColumns); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.readers.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('changes') WHERE name = 'file_count'`).Scan(&legacyColumns); err != nil {
+		t.Fatal(err)
+	}
+	if entryColumns != 1 || legacyColumns != 0 {
+		t.Fatalf("change count columns entry=%d legacy=%d", entryColumns, legacyColumns)
+	}
+	change := changeID(t, 5)
+	if _, err := store.writer.Exec(`INSERT INTO changes(
+            id, project_id, task_id, task_incarnation_id, phase, source_root,
+            object_format, selected_commit, repository_root, repository_dev, repository_inode, selected_at_ms,
+            tree_digest, entry_count, total_bytes, source_dev, source_inode, available_at_ms,
+            revision, created_at_ms, updated_at_ms
+        ) VALUES(?, ?, ?, ?, 'available', '/source', 'sha1', ?, '/repository', 0, 1, 5, ?, ?, ?, 0, 2, 6, 1, 4, 6)`,
+		change.Bytes(), project.ID.Bytes(), task.ID.Bytes(), task.IncarnationID.Bytes(), bytes.Repeat([]byte{0x11}, 20), bytes.Repeat([]byte{0x22}, DigestBytes), MaxChangeTreeEntries, MaxChangeTreeBlobBytes); err != nil {
+		t.Fatalf("insert exact cap: %v", err)
+	}
+	if _, err := store.writer.Exec(`UPDATE changes SET entry_count = ? WHERE id = ?`, MaxChangeTreeEntries+1, change.Bytes()); err == nil {
+		t.Fatal("entry cap plus one succeeded")
+	}
+	if _, err := store.writer.Exec(`UPDATE changes SET total_bytes = ? WHERE id = ?`, MaxChangeTreeBlobBytes+1, change.Bytes()); err == nil {
+		t.Fatal("aggregate byte cap plus one succeeded")
+	}
+	var entries, totalBytes int64
+	if err := store.readers.QueryRow(`SELECT entry_count, total_bytes FROM changes WHERE id = ?`, change.Bytes()).Scan(&entries, &totalBytes); err != nil {
+		t.Fatal(err)
+	}
+	if entries != MaxChangeTreeEntries || totalBytes != MaxChangeTreeBlobBytes {
+		t.Fatalf("failed cap mutations changed commitment: entries=%d bytes=%d", entries, totalBytes)
+	}
+}
+
 func corruptSQL(t *testing.T, store *Store, statement string) {
 	t.Helper()
 	connection, err := store.writer.Conn(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer connection.Close()
+	defer discardConnection(connection)
 	if _, err := connection.ExecContext(context.Background(), `PRAGMA ignore_check_constraints = ON`); err != nil {
 		t.Fatal(err)
 	}
