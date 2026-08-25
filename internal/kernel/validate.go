@@ -75,48 +75,27 @@ func validateTasks(ctx context.Context, connection *sql.Conn) error {
 }
 
 func validateChanges(ctx context.Context, connection *sql.Conn) error {
-	rows, err := connection.QueryContext(ctx, `SELECT id, project_id, task_id, task_incarnation_id, phase, source_root, object_format, selected_commit, repository_root, repository_dev, repository_inode, selected_at_ms, tree_digest, entry_count, total_bytes, source_dev, source_inode, available_at_ms, revision, created_at_ms, updated_at_ms FROM changes`)
+	rows, err := connection.QueryContext(ctx, `SELECT `+changeColumns+` FROM changes`)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 	for rows.Next() {
-		var id, projectID, taskID, incarnationID []byte
-		var phase, sourceRoot string
-		var objectFormat, repositoryRoot sql.NullString
-		var selectedCommit, treeDigest []byte
-		var repositoryDev, repositoryInode, selectedAt, entryCount, totalBytes, sourceDev, sourceInode, availableAt sql.NullInt64
-		var revision, createdAt, updatedAt int64
-		if err := rows.Scan(&id, &projectID, &taskID, &incarnationID, &phase, &sourceRoot, &objectFormat, &selectedCommit, &repositoryRoot, &repositoryDev, &repositoryInode, &selectedAt, &treeDigest, &entryCount, &totalBytes, &sourceDev, &sourceInode, &availableAt, &revision, &createdAt, &updatedAt); err != nil {
-			return fmt.Errorf("scan change: %w", err)
-		}
-		if !validNonzeroID(id) || !validNonzeroID(projectID) || !validNonzeroID(taskID) || !validNonzeroID(incarnationID) || byteLen(sourceRoot) < 1 || byteLen(sourceRoot) > 4096 || sourceRoot[0] != '/' || revision < 1 || createdAt < 0 || updatedAt < createdAt {
-			return fmt.Errorf("%w: invalid change row", ErrCorruptState)
-		}
-		switch phase {
-		case "reserved":
-			if objectFormat.Valid || selectedCommit != nil || repositoryRoot.Valid || anyNullIntValid(repositoryDev, repositoryInode, selectedAt, entryCount, totalBytes, sourceDev, sourceInode, availableAt) || treeDigest != nil {
-				return fmt.Errorf("%w: inconsistent reserved change", ErrCorruptState)
-			}
-		case "selected", "available":
-			commitLength := 0
-			if objectFormat.Valid && objectFormat.String == "sha1" {
-				commitLength = 20
-			} else if objectFormat.Valid && objectFormat.String == "sha256" {
-				commitLength = 32
-			}
-			if commitLength == 0 || len(selectedCommit) != commitLength || !repositoryRoot.Valid || byteLen(repositoryRoot.String) < 1 || byteLen(repositoryRoot.String) > 4096 || repositoryRoot.String[0] != '/' || !repositoryDev.Valid || repositoryDev.Int64 < 0 || !repositoryInode.Valid || repositoryInode.Int64 < 1 || !selectedAt.Valid || selectedAt.Int64 < 0 {
-				return fmt.Errorf("%w: invalid selected change", ErrCorruptState)
-			}
-			availableFields := len(treeDigest) == DigestBytes && entryCount.Valid && entryCount.Int64 >= 0 && entryCount.Int64 <= MaxChangeTreeEntries && totalBytes.Valid && totalBytes.Int64 >= 0 && totalBytes.Int64 <= MaxChangeTreeBlobBytes && sourceDev.Valid && sourceDev.Int64 >= 0 && sourceInode.Valid && sourceInode.Int64 > 0 && availableAt.Valid && availableAt.Int64 >= 0
-			if phase == "selected" && (treeDigest != nil || anyNullIntValid(entryCount, totalBytes, sourceDev, sourceInode, availableAt)) || phase == "available" && !availableFields {
-				return fmt.Errorf("%w: inconsistent change materialization", ErrCorruptState)
-			}
-		default:
-			return corruptControl("change phase", phase)
+		if _, _, err := scanChange(rows); err != nil {
+			rows.Close()
+			return err
 		}
 	}
-	return rows.Err()
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	var collisions int
+	if err := connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM changes AS left_change JOIN changes AS right_change ON left_change.source_root = right_change.staging_root`).Scan(&collisions); err != nil {
+		return err
+	}
+	if collisions != 0 {
+		return fmt.Errorf("%w: Change locators collide across source and staging authority", ErrCorruptState)
+	}
+	return nil
 }
 
 func validateRuns(ctx context.Context, connection *sql.Conn) error {

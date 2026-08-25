@@ -629,11 +629,12 @@ func TestChangeCommitmentSchemaUsesFrozenBounds(t *testing.T) {
 	}
 	change := changeID(t, 5)
 	if _, err := store.writer.Exec(`INSERT INTO changes(
-            id, project_id, task_id, task_incarnation_id, phase, source_root,
-            object_format, selected_commit, repository_root, repository_dev, repository_inode, selected_at_ms,
-            tree_digest, entry_count, total_bytes, source_dev, source_inode, available_at_ms,
-            revision, created_at_ms, updated_at_ms
-        ) VALUES(?, ?, ?, ?, 'available', '/source', 'sha1', ?, '/repository', 0, 1, 5, ?, ?, ?, 0, 2, 6, 1, 4, 6)`,
+	            id, project_id, task_id, task_incarnation_id, phase, source_root, staging_root,
+	            object_format, selected_commit, repository_root, repository_dev, repository_inode, selected_at_ms,
+	            stage_dev, stage_inode, prepared_at_ms,
+	            tree_digest, entry_count, total_bytes, source_dev, source_inode, available_at_ms,
+	            revision, created_at_ms, updated_at_ms
+	        ) VALUES(?, ?, ?, ?, 'available', '/source', '/staging', 'sha1', ?, '/repository', 0, 1, 5, 0, 2, 6, ?, ?, ?, 0, 2, 7, 4, 4, 7)`,
 		change.Bytes(), project.ID.Bytes(), task.ID.Bytes(), task.IncarnationID.Bytes(), bytes.Repeat([]byte{0x11}, 20), bytes.Repeat([]byte{0x22}, DigestBytes), MaxChangeTreeEntries, MaxChangeTreeBlobBytes); err != nil {
 		t.Fatalf("insert exact cap: %v", err)
 	}

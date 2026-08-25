@@ -12,6 +12,8 @@ var (
 	ErrForeignDatabase  = errors.New("foreign or incompatible database")
 	ErrRevisionConflict = errors.New("revision conflict")
 	ErrConflict         = errors.New("kernel entity conflicts with durable state")
+	ErrNotFound         = errors.New("kernel entity not found")
+	ErrUnauthorized     = errors.New("attempt credential is not authorized")
 	ErrFutureCursor     = errors.New("watch cursor is ahead of durable head")
 	ErrSnapshotTooLarge = errors.New("dashboard snapshot exceeds the entity bound")
 	ErrStoreClosed      = errors.New("kernel store is closed")
