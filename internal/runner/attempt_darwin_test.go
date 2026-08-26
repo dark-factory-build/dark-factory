@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -93,6 +94,29 @@ func runAttemptWorkerHelper(args []string) error {
 		return err
 	}
 	return control.ExecProvider(prepared)
+}
+
+func runRetirementProviderHelper(args []string) error {
+	if len(args) != 3 {
+		return errors.New("retirement provider: missing witnesses or delay")
+	}
+	delayMillis, err := strconv.Atoi(args[2])
+	if err != nil || delayMillis < 1 || delayMillis > 5000 {
+		return errors.New("retirement provider: invalid delay")
+	}
+	signal.Ignore(unix.SIGTERM)
+	write := func(path string) error {
+		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			return err
+		}
+		return file.Close()
+	}
+	if err := write(args[0]); err != nil {
+		return err
+	}
+	time.Sleep(time.Duration(delayMillis) * time.Millisecond)
+	return write(args[1])
 }
 
 type attemptFixture struct {
@@ -439,7 +463,7 @@ func TestAttemptCleanupReapsObservedInertExit(t *testing.T) {
 			t.Fatal(finishErr)
 		}
 	case <-time.After(2 * time.Second):
-		_ = reads.processOnly()
+		reads.processOnly()
 		_, _ = child.finishInertAfterExit()
 		select {
 		case <-done:
@@ -513,7 +537,7 @@ func TestAttemptCleanupRetiresProtocolReadinessBeforeProcessWait(t *testing.T) {
 			case <-time.After(2 * time.Second):
 				// Independent safety transition keeps a deliberately broken
 				// mutation from leaking the real fixture after this failure.
-				_ = reads.processOnly()
+				reads.processOnly()
 				_, _ = child.finishInertAfterExit()
 				select {
 				case <-done:
@@ -562,16 +586,17 @@ func TestAttemptReadSetRemovalIsRetryableAndIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	reads.kq = -1
-	if err := reads.processOnly(); err == nil || !reads.daemonRegistered || !reads.workerRegistered {
-		t.Fatalf("failed removal lost registration authority: err=%v reads=%+v", err, reads)
+	daemonErr := reads.removeDaemon()
+	workerErr := reads.removeWorker()
+	if daemonErr == nil || workerErr == nil || !reads.daemonRegistered || !reads.workerRegistered {
+		t.Fatalf("failed removal lost registration authority: daemon=%v worker=%v reads=%+v", daemonErr, workerErr, reads)
 	}
 	reads.kq = kq
-	if err := reads.processOnly(); err != nil || reads.daemonRegistered || reads.workerRegistered {
-		t.Fatalf("retried removal=%v reads=%+v", err, reads)
+	reads.processOnly()
+	if reads.daemonRegistered || reads.workerRegistered {
+		t.Fatalf("retried removal reads=%+v", reads)
 	}
-	if err := reads.processOnly(); err != nil {
-		t.Fatalf("duplicate removal=%v", err)
-	}
+	reads.processOnly()
 	if _, err := daemonPeer.Write([]byte("still-open")); err != nil {
 		t.Fatal(err)
 	}
@@ -583,6 +608,195 @@ func TestAttemptReadSetRemovalIsRetryableAndIdempotent(t *testing.T) {
 	if n, err := unix.Kevent(kq, nil, events, &timeout); err != nil || n != 0 {
 		t.Fatalf("removed read filter remained ready: n=%d events=%+v err=%v", n, events, err)
 	}
+}
+
+type releasedRetirementFixture struct {
+	fixture            *fixture
+	child              *OwnedChild
+	daemon, daemonPeer *os.File
+	worker, workerPeer *os.File
+	reads              *attemptReadSet
+	completed          string
+}
+
+func newReleasedRetirementFixture(t *testing.T, delay time.Duration) *releasedRetirementFixture {
+	t.Helper()
+	f := newFixture(t)
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := filepath.Join(f.root, "provider-started")
+	completed := filepath.Join(f.root, "provider-completed")
+	child := f.start(executable, []string{"--attempt-retirement-provider", started, completed, strconv.Itoa(int(delay / time.Millisecond))}, nil, nil)
+	daemon, daemonPeer, err := newControlPair("test-daemon", "test-daemon-peer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, workerPeer, err := newControlPair("test-worker", "test-worker-peer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range []*os.File{daemon, daemonPeer, worker, workerPeer} {
+		file := file
+		t.Cleanup(func() { _ = file.Close() })
+	}
+	reads := &attemptReadSet{kq: child.kq, daemonFD: int(daemon.Fd()), workerFD: int(worker.Fd())}
+	if err := reads.registerDaemon(); err != nil {
+		t.Fatal(err)
+	}
+	if err := reads.registerWorker(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := child.Activate(); err != nil {
+		t.Fatal(err)
+	}
+	waitFile(t, started)
+	return &releasedRetirementFixture{fixture: f, child: child, daemon: daemon, daemonPeer: daemonPeer, worker: worker, workerPeer: workerPeer, reads: reads, completed: completed}
+}
+
+func (f *releasedRetirementFixture) closePeer(t *testing.T, source attemptSource) int {
+	t.Helper()
+	switch source {
+	case sourceDaemon:
+		if err := f.daemonPeer.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return int(f.daemon.Fd())
+	case sourceWorker:
+		if err := f.workerPeer.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return int(f.worker.Fd())
+	default:
+		t.Fatal("invalid retirement source")
+		return -1
+	}
+}
+
+func (f *releasedRetirementFixture) finish(t *testing.T, cfg attemptConfig) <-chan error {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() {
+		daemonOpen, cause := finishReleasedProvider(f.child, f.daemon, f.worker, f.reads)
+		done <- finishAttemptWithExit(f.child, f.fixture.dir, cfg, f.reads, nil, daemonOpen, cause)
+	}()
+	return done
+}
+
+func TestReleasedProviderRetriesReadableFilterRetirement(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		source attemptSource
+	}{
+		{name: "daemon-eof", source: sourceDaemon},
+		{name: "worker-eof", source: sourceWorker},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newReleasedRetirementFixture(t, 1200*time.Millisecond)
+			targetFD := f.closePeer(t, test.source)
+			var calls atomic.Int32
+			f.reads.testUnregister = func(fd int) error {
+				if fd == targetFD && calls.Add(1) <= 2 {
+					return fmt.Errorf("%w: injected readable-filter retirement", ErrUnresolved)
+				}
+				return nil
+			}
+			cfg := attemptConfig{AttemptID: "attempt-" + test.name, TerminalName: "terminal.json"}
+			done := f.finish(t, cfg)
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(4 * time.Second):
+				t.Fatal("released provider did not finish after transient filter retirement uncertainty")
+			}
+			if got := calls.Load(); got != 3 {
+				t.Fatalf("retirement calls=%d want=3", got)
+			}
+			if _, err := os.Stat(f.completed); err != nil {
+				t.Fatalf("authorized provider did not complete naturally: %v", err)
+			}
+			record, err := LoadTerminal(f.fixture.dir, cfg.TerminalName)
+			if err != nil || record.Terminal.Process != f.child.Identity() || record.Terminal.Exit.Code != 0 || record.Terminal.Exit.Signal != 0 {
+				t.Fatalf("natural terminal=%+v err=%v", record, err)
+			}
+			waitExactAbsence(t, f.child.Identity())
+		})
+	}
+}
+
+func TestReleasedProviderPermanentFilterUncertaintyPreservesExecution(t *testing.T) {
+	f := newReleasedRetirementFixture(t, 100*time.Millisecond)
+	targetFD := f.closePeer(t, sourceDaemon)
+	entered := make(chan struct{}, 16)
+	var restored atomic.Bool
+	f.reads.testUnregister = func(fd int) error {
+		if fd != targetFD {
+			return nil
+		}
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		if !restored.Load() {
+			return fmt.Errorf("%w: permanent readable-filter retirement", ErrUnresolved)
+		}
+		return nil
+	}
+	cfg := attemptConfig{AttemptID: "attempt-permanent-retirement", TerminalName: "terminal.json"}
+	done := f.finish(t, cfg)
+	finished := false
+	t.Cleanup(func() {
+		if finished {
+			return
+		}
+		restored.Store(true)
+		select {
+		case <-done:
+		case <-time.After(4 * time.Second):
+			t.Error("retirement owner did not join after restoration")
+		}
+	})
+	for range 3 {
+		select {
+		case <-entered:
+		case err := <-done:
+			finished = true
+			t.Fatalf("retirement uncertainty escaped to cleanup: %v", err)
+		case <-time.After(4 * time.Second):
+			t.Fatal("retirement owner stopped retrying")
+		}
+	}
+	waitFile(t, f.completed)
+	if _, err := os.Stat(filepath.Join(f.fixture.root, cfg.TerminalName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("permanent filter uncertainty published terminal: %v", err)
+	}
+	if got := ObserveProcess(f.child.Identity()); got.Presence != Present {
+		t.Fatalf("retirement uncertainty lost exact unreaped provider: %+v", got)
+	}
+	select {
+	case err := <-done:
+		finished = true
+		t.Fatalf("permanent retirement uncertainty returned: %v", err)
+	default:
+	}
+	restored.Store(true)
+	select {
+	case err := <-done:
+		finished = true
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("retirement did not converge after restoration")
+	}
+	record, err := LoadTerminal(f.fixture.dir, cfg.TerminalName)
+	if err != nil || record.Terminal.Process != f.child.Identity() || record.Terminal.Exit.Code != 0 || record.Terminal.Exit.Signal != 0 {
+		t.Fatalf("restored natural terminal=%+v err=%v", record, err)
+	}
+	waitExactAbsence(t, f.child.Identity())
 }
 
 func TestAttemptRunnerTerminatesOwnedProviderGroup(t *testing.T) {

@@ -58,6 +58,13 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
+	if len(os.Args) == 5 && os.Args[1] == "--attempt-retirement-provider" {
+		if err := runRetirementProviderHelper(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(96)
+		}
+		os.Exit(0)
+	}
 	beforeFD := fdCensus()
 	beforeG := runtime.NumGoroutine()
 	code := m.Run()

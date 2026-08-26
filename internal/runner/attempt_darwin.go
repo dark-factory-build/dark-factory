@@ -616,6 +616,7 @@ type attemptReadSet struct {
 	workerFD         int
 	daemonRegistered bool
 	workerRegistered bool
+	testUnregister   func(int) error // package-test-only; production is nil
 }
 
 func (reads *attemptReadSet) registerDaemon() error {
@@ -644,7 +645,7 @@ func (reads *attemptReadSet) removeDaemon() error {
 	if reads == nil || !reads.daemonRegistered {
 		return nil
 	}
-	if err := unregisterRead(reads.kq, reads.daemonFD); err != nil {
+	if err := reads.unregister(reads.daemonFD); err != nil {
 		return err
 	}
 	reads.daemonRegistered = false
@@ -655,18 +656,37 @@ func (reads *attemptReadSet) removeWorker() error {
 	if reads == nil || !reads.workerRegistered {
 		return nil
 	}
-	if err := unregisterRead(reads.kq, reads.workerFD); err != nil {
+	if err := reads.unregister(reads.workerFD); err != nil {
 		return err
 	}
 	reads.workerRegistered = false
 	return nil
 }
 
-func (reads *attemptReadSet) processOnly() error {
-	if reads == nil {
-		return nil
+func (reads *attemptReadSet) unregister(fd int) error {
+	if reads.testUnregister != nil {
+		if err := reads.testUnregister(fd); err != nil {
+			return err
+		}
 	}
-	return errors.Join(reads.removeDaemon(), reads.removeWorker())
+	return unregisterRead(reads.kq, fd)
+}
+
+func retireReadableFilter(remove func() error) {
+	for {
+		if err := remove(); err == nil {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func (reads *attemptReadSet) processOnly() {
+	if reads == nil {
+		return
+	}
+	retireReadableFilter(reads.removeDaemon)
+	retireReadableFilter(reads.removeWorker)
 }
 
 func nextAttemptFrame(child *OwnedChild, daemon, worker *os.File, daemonOpen, workerOpen bool, timeout time.Duration) (attemptFrame, attemptSource, error) {
@@ -746,9 +766,7 @@ func finishReleasedProvider(child *OwnedChild, daemon, worker *os.File, reads *a
 		}
 		if source == sourceDaemon {
 			if errors.Is(err, io.EOF) {
-				if removeErr := reads.removeDaemon(); removeErr != nil {
-					return daemonOpen, removeErr
-				}
+				retireReadableFilter(reads.removeDaemon)
 				daemonOpen = false
 				continue
 			}
@@ -762,9 +780,7 @@ func finishReleasedProvider(child *OwnedChild, daemon, worker *os.File, reads *a
 		}
 		if source == sourceWorker {
 			if errors.Is(err, io.EOF) {
-				if removeErr := reads.removeWorker(); removeErr != nil {
-					return daemonOpen, removeErr
-				}
+				retireReadableFilter(reads.removeWorker)
 				workerOpen = false
 				continue
 			}
@@ -791,10 +807,8 @@ func finishReleasedProvider(child *OwnedChild, daemon, worker *os.File, reads *a
 }
 
 func finishAttemptWithExit(child *OwnedChild, dir *os.File, cfg attemptConfig, reads *attemptReadSet, daemon *os.File, daemonOpen bool, cause error) error {
-	for reads != nil && (reads.daemonRegistered || reads.workerRegistered) {
-		if err := reads.processOnly(); err != nil {
-			time.Sleep(25 * time.Millisecond)
-		}
+	if reads != nil {
+		reads.processOnly()
 	}
 	exit, cleanupErr := waitForAttemptChild(child)
 	if cleanupErr != nil {
