@@ -12,7 +12,8 @@ const runColumns = `id, project_id, agent_id, task_id, task_incarnation_id,
 	    admitted_task_work_revision, change_id, role, provider, execution_mode, model, reasoning_effort, verification_policy, phase,
     proposal_kind, proposal_code, proposal_detail, proposal_result,
     terminal_kind, terminal_code, terminal_detail, terminal_result,
-    credential_digest, credential_revoked_at_ms,
+	credential_digest, credential_revoked_at_ms,
+	    provider_exit_kind, provider_exit_sequence, provider_exit_code, provider_exit_signal, provider_exit_at_ms,
 	    runner_exit_kind, runner_exit_sequence, runner_exit_code, runner_exit_signal, runner_exit_at_ms,
     revision, admitted_at_ms, running_at_ms, finalizing_at_ms, terminal_at_ms, updated_at_ms`
 
@@ -37,8 +38,10 @@ func scanRun(scanner rowScanner) (Run, bool, error) {
 	var model, effort sql.NullString
 	var proposalKind, proposalCode, proposalDetail, proposalResult sql.NullString
 	var terminalKind, terminalCode, terminalDetail, terminalResult sql.NullString
-	var revokedAt, exitSequence, exitCode, exitSignal, exitAt sql.NullInt64
-	var exitKind sql.NullString
+	var revokedAt sql.NullInt64
+	var providerExitSequence, providerExitCode, providerExitSignal, providerExitAt sql.NullInt64
+	var runnerExitSequence, runnerExitCode, runnerExitSignal, runnerExitAt sql.NullInt64
+	var providerExitKind, runnerExitKind sql.NullString
 	var admittedWorkRevision, revision, admittedAt, updatedAt int64
 	var runningAt, finalizingAt, terminalAt sql.NullInt64
 	if err := scanner.Scan(
@@ -46,7 +49,9 @@ func scanRun(scanner rowScanner) (Run, bool, error) {
 		&roleValue, &providerValue, &modeValue, &model, &effort, &verificationValue, &phaseValue,
 		&proposalKind, &proposalCode, &proposalDetail, &proposalResult,
 		&terminalKind, &terminalCode, &terminalDetail, &terminalResult,
-		&rawDigest, &revokedAt, &exitKind, &exitSequence, &exitCode, &exitSignal, &exitAt,
+		&rawDigest, &revokedAt,
+		&providerExitKind, &providerExitSequence, &providerExitCode, &providerExitSignal, &providerExitAt,
+		&runnerExitKind, &runnerExitSequence, &runnerExitCode, &runnerExitSignal, &runnerExitAt,
 		&revision, &admittedAt, &runningAt, &finalizingAt, &terminalAt, &updatedAt,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -127,23 +132,30 @@ func scanRun(scanner rowScanner) (Run, bool, error) {
 		}
 		result.TerminalAt = &value
 	}
-	exit, exitPresent, exitErr := decodeRunnerExit(exitKind, exitSequence, exitCode, exitSignal, exitAt)
-	if exitErr != nil {
-		return Run{}, false, fmt.Errorf("%w: invalid runner exit", ErrCorruptState)
+	providerExit, providerExitPresent, providerExitErr := decodeProcessExit(providerExitKind, providerExitSequence, providerExitCode, providerExitSignal, providerExitAt)
+	runnerExit, runnerExitPresent, runnerExitErr := decodeProcessExit(runnerExitKind, runnerExitSequence, runnerExitCode, runnerExitSignal, runnerExitAt)
+	if providerExitErr != nil || runnerExitErr != nil {
+		return Run{}, false, fmt.Errorf("%w: invalid process exit", ErrCorruptState)
 	}
-	if exitPresent {
-		result.RunnerExit = &exit
+	if providerExitPresent {
+		result.ProviderExit = &providerExit
+	}
+	if runnerExitPresent {
+		result.RunnerExit = &runnerExit
+	}
+	if result.ProviderExit != nil && (result.ProviderExit.At().Int64() < admittedAt || result.ProviderExit.At().Int64() > updatedAt) || result.RunnerExit != nil && (result.RunnerExit.At().Int64() < admittedAt || result.RunnerExit.At().Int64() > updatedAt) {
+		return Run{}, false, fmt.Errorf("%w: invalid process exit time", ErrCorruptState)
 	}
 	if result.RunningAt != nil && result.RunningAt.Int64() < admittedAt || result.FinalizingAt != nil && result.FinalizingAt.Int64() < admittedAt || result.TerminalAt != nil && result.TerminalAt.Int64() < admittedAt || result.CredentialRevokedAt != nil && result.CredentialRevokedAt.Int64() < admittedAt {
 		return Run{}, false, fmt.Errorf("%w: invalid run transition time", ErrCorruptState)
 	}
 	switch phase {
 	case RunAdmitted:
-		if result.RunningAt != nil || result.FinalizingAt != nil || result.TerminalAt != nil || result.CredentialRevokedAt != nil || result.Proposal != nil || result.Terminal != nil || result.RunnerExit != nil {
+		if result.RunningAt != nil || result.FinalizingAt != nil || result.TerminalAt != nil || result.CredentialRevokedAt != nil || result.Proposal != nil || result.Terminal != nil || result.ProviderExit != nil || result.RunnerExit != nil {
 			return Run{}, false, fmt.Errorf("%w: inconsistent admitted run", ErrCorruptState)
 		}
 	case RunRunning:
-		if result.RunningAt == nil || result.FinalizingAt != nil || result.TerminalAt != nil || result.CredentialRevokedAt != nil || result.Proposal != nil || result.Terminal != nil || result.RunnerExit != nil {
+		if result.RunningAt == nil || result.FinalizingAt != nil || result.TerminalAt != nil || result.CredentialRevokedAt != nil || result.Proposal != nil || result.Terminal != nil || result.ProviderExit != nil || result.RunnerExit != nil {
 			return Run{}, false, fmt.Errorf("%w: inconsistent running run", ErrCorruptState)
 		}
 	case RunFinalizing:
@@ -183,42 +195,42 @@ func decodeProposal(kind, code, detail, result sql.NullString) (Proposal, bool, 
 	return proposal, true, nil
 }
 
-func decodeRunnerExit(kind sql.NullString, sequence, code, signal, at sql.NullInt64) (RunnerExit, bool, error) {
+func decodeProcessExit(kind sql.NullString, sequence, code, signal, at sql.NullInt64) (ProcessExit, bool, error) {
 	if !kind.Valid && !sequence.Valid && !code.Valid && !signal.Valid && !at.Valid {
-		return RunnerExit{}, false, nil
+		return ProcessExit{}, false, nil
 	}
 	if !kind.Valid || !sequence.Valid || !at.Valid {
-		return RunnerExit{}, false, ErrCorruptState
+		return ProcessExit{}, false, ErrCorruptState
 	}
-	parsedKind, err := parseRunnerExitKind(kind.String)
+	parsedKind, err := parseProcessExitKind(kind.String)
 	if err != nil {
-		return RunnerExit{}, false, err
+		return ProcessExit{}, false, err
 	}
 	timeValue, err := NewUnixMillis(at.Int64)
 	if err != nil {
-		return RunnerExit{}, false, err
+		return ProcessExit{}, false, err
 	}
 	switch parsedKind {
-	case runnerExitCode:
+	case processExitCode:
 		if !code.Valid || signal.Valid {
-			return RunnerExit{}, false, ErrCorruptState
+			return ProcessExit{}, false, ErrCorruptState
 		}
-		exit, err := NewRunnerExitCode(uint64(sequence.Int64), code.Int64, timeValue)
+		exit, err := NewProcessExitCode(uint64(sequence.Int64), code.Int64, timeValue)
 		return exit, err == nil, err
-	case runnerExitSignal:
+	case processExitSignal:
 		if code.Valid || !signal.Valid {
-			return RunnerExit{}, false, ErrCorruptState
+			return ProcessExit{}, false, ErrCorruptState
 		}
-		exit, err := NewRunnerExitSignal(uint64(sequence.Int64), signal.Int64, timeValue)
+		exit, err := NewProcessExitSignal(uint64(sequence.Int64), signal.Int64, timeValue)
 		return exit, err == nil, err
-	case runnerExitRecoveredAbsence:
+	case processExitRecoveredAbsence:
 		if code.Valid || signal.Valid {
-			return RunnerExit{}, false, ErrCorruptState
+			return ProcessExit{}, false, ErrCorruptState
 		}
-		exit, err := NewRunnerExitRecoveredAbsence(uint64(sequence.Int64), timeValue)
+		exit, err := NewProcessExitRecoveredAbsence(uint64(sequence.Int64), timeValue)
 		return exit, err == nil, err
 	default:
-		return RunnerExit{}, false, ErrCorruptState
+		return ProcessExit{}, false, ErrCorruptState
 	}
 }
 

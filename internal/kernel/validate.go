@@ -141,6 +141,21 @@ func loadRunRelationships(ctx context.Context, connection *sql.Conn, run Run) (r
 	if !resourcesMatchRunPhase(run.Phase, resources) {
 		return runRelationships{}, fmt.Errorf("%w: resources do not match run phase", ErrCorruptState)
 	}
+	for _, resource := range resources {
+		if resource.State != ResourceReleased || resource.Identity.Empty() {
+			continue
+		}
+		switch resource.Kind {
+		case ResourceProviderProcess, ResourceProviderGroup:
+			if run.ProviderExit == nil {
+				return runRelationships{}, fmt.Errorf("%w: released provider resource lacks exit evidence", ErrCorruptState)
+			}
+		case ResourceRunnerProcess:
+			if run.RunnerExit == nil {
+				return runRelationships{}, fmt.Errorf("%w: released runner resource lacks exit evidence", ErrCorruptState)
+			}
+		}
+	}
 	return runRelationships{task: task, change: change, resources: resources}, nil
 }
 

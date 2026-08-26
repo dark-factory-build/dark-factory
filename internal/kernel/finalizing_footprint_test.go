@@ -26,8 +26,13 @@ func TestFinalizingRequiresExactResourceFootprint(t *testing.T) {
 			return err
 		}},
 		{name: "runner exit", invoke: func(store *Store, run Run, _ AdmissionKeys) error {
-			exit, _ := NewRunnerExitCode(1, 0, mustTime(t, 39))
-			_, err := store.ObserveRunnerExit(context.Background(), run.ID, run.Revision, exit, mustTime(t, 40))
+			exit, _ := NewProcessExitCode(1, 0, mustTime(t, 39))
+			_, err := store.ObserveRunnerExit(context.Background(), run.ID, run.Revision, registeredProcessIdentity(t, store, run.ID, ResourceRunnerProcess), exit, mustTime(t, 40))
+			return err
+		}},
+		{name: "provider exit", invoke: func(store *Store, run Run, _ AdmissionKeys) error {
+			exit, _ := NewProcessExitCode(1, 0, mustTime(t, 39))
+			_, err := store.ObserveProviderExit(context.Background(), run.ID, run.Revision, registeredProcessIdentity(t, store, run.ID, ResourceProviderProcess), exit, mustTime(t, 40))
 			return err
 		}},
 	}
@@ -42,7 +47,7 @@ func TestFinalizingRequiresExactResourceFootprint(t *testing.T) {
 				t.Fatalf("split finalizing write = %v", err)
 			}
 			fresh, found, err := store.Run(context.Background(), run.ID)
-			if err != nil || !found || fresh.Phase != RunRunning || fresh.Revision != run.Revision || fresh.Proposal != nil || fresh.RunnerExit != nil || fresh.CredentialRevokedAt != nil {
+			if err != nil || !found || fresh.Phase != RunRunning || fresh.Revision != run.Revision || fresh.Proposal != nil || fresh.ProviderExit != nil || fresh.RunnerExit != nil || fresh.CredentialRevokedAt != nil {
 				t.Fatalf("run changed despite resource rollback = %+v found=%v err=%v", fresh, found, err)
 			}
 			for _, resource := range resourcesForRunTest(t, store, run.ID) {
@@ -58,7 +63,7 @@ func TestFinalizingRequiresExactResourceFootprint(t *testing.T) {
 }
 
 func TestFailRunAcceptsOnlyInfrastructureFailureCodes(t *testing.T) {
-	for _, code := range []FailureCode{FailureAttempt, FailureRunnerExit} {
+	for _, code := range []FailureCode{FailureAttempt, FailureProviderExit, FailureRunnerExit} {
 		t.Run(code.String(), func(t *testing.T) {
 			store, run, keys := runningOrchestratorRun(t)
 			defer store.Close()

@@ -19,7 +19,11 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
-const supervisorPollInterval = 100 * time.Millisecond
+const (
+	supervisorPollInterval       = 100 * time.Millisecond
+	supervisorReconcileAttempts  = 3
+	supervisorStoreAttemptWindow = 250 * time.Millisecond
+)
 
 type supervisorKeys struct {
 	run       kernel.RunID
@@ -150,10 +154,13 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		if spec.reconcileAdmission != nil {
 			reconcileAdmission = spec.reconcileAdmission
 		}
-		for {
-			reconciled, reconcileErr := reconcileAdmission(context.Background(), admissionKeys)
+		var reconcileErr error
+		for attempt := 0; attempt < supervisorReconcileAttempts; attempt++ {
+			reconcileCtx, cancel := context.WithTimeout(context.Background(), supervisorStoreAttemptWindow)
+			reconciled, readErr := reconcileAdmission(reconcileCtx, admissionKeys)
+			cancel()
+			reconcileErr = readErr
 			if reconcileErr != nil {
-				time.Sleep(25 * time.Millisecond)
 				continue
 			}
 			if reconciled.Admitted() {
@@ -162,8 +169,9 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 			if reconciled.Reason == kernel.NoAdmissionNotReconciled {
 				return kernel.Run{}, err
 			}
-			time.Sleep(25 * time.Millisecond)
+			reconcileErr = kernel.ErrCorruptState
 		}
+		return kernel.Run{}, kernel.NewOutcomeUnknownError(errors.Join(err, reconcileErr))
 	}
 	if !admission.Admitted() {
 		return kernel.Run{}, fmt.Errorf("%w: no admission (%s)", kernel.ErrConflict, admission.Reason.String())
@@ -426,14 +434,6 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	if terminalEvent.Kind != runner.AttemptTerminal || terminalEvent.Terminal == nil {
 		return daemon.failRun(run, kernel.FailureProtocol, waitErr)
 	}
-	exitAt, err := daemon.timestamp()
-	if err != nil {
-		return daemon.failRun(run, kernel.FailureInternal, err)
-	}
-	exit, err := kernelRunnerExit(terminalEvent.Terminal.Terminal.Exit, exitAt)
-	if err != nil {
-		return daemon.failRun(run, kernel.FailureProtocol, err)
-	}
 	current, found, err := daemon.store.Run(context.Background(), run.ID)
 	if err != nil || !found {
 		if err == nil {
@@ -441,9 +441,25 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		}
 		return daemon.failRun(run, kernel.FailureInternal, err)
 	}
-	run, err = daemon.store.ObserveRunnerExit(context.Background(), run.ID, current.Revision, exit, exitAt)
+	run = current
+	providerExitAt, err := daemon.timestamp()
 	if err != nil {
-		return daemon.failRun(current, kernel.FailureInternal, err)
+		return daemon.failRun(run, kernel.FailureInternal, err)
+	}
+	providerExit, err := kernelProcessExit(terminalEvent.Terminal.Terminal.Exit, providerExitAt)
+	if err != nil {
+		return daemon.failRun(run, kernel.FailureProtocol, err)
+	}
+	terminalIdentity, err := processResourceIdentity(terminalEvent.Terminal.Terminal.Process)
+	if err != nil || terminalIdentity != providerIdentity {
+		return daemon.failRun(run, kernel.FailureProtocol, errors.Join(err, errInvalidContract))
+	}
+	// The terminal spool is exact inner/provider wait evidence. Commit it
+	// before acknowledging and deleting the spool, then release only the
+	// provider resources that this live owner has positively reaped.
+	run, err = daemon.observeProviderExit(run.ID, providerIdentity, providerExit, providerExitAt)
+	if err != nil {
+		return kernel.Run{}, errors.Join(waitErr, err)
 	}
 	if err := daemon.releaseResources(context.Background(), run.ID, kernel.ResourceProviderProcess, kernel.ResourceProviderGroup); err != nil {
 		return run, err
@@ -451,10 +467,23 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	if err := controller.AcknowledgeTerminal(terminalEvent.Terminal, true); err != nil {
 		return run, err
 	}
-	if _, err := child.FinishAfterExit(8 * time.Second); err != nil {
+	outerExit, err := child.FinishAfterExit(8 * time.Second)
+	if err != nil {
 		return run, err
 	}
 	owner.reaped = true
+	exitAt, err := daemon.timestamp()
+	if err != nil {
+		return daemon.failRun(run, kernel.FailureInternal, err)
+	}
+	exit, err := kernelProcessExit(outerExit, exitAt)
+	if err != nil {
+		return daemon.failRun(run, kernel.FailureProtocol, err)
+	}
+	run, err = daemon.observeRunnerExit(run.ID, runnerResourceIdentity, exit, exitAt)
+	if err != nil {
+		return kernel.Run{}, errors.Join(waitErr, err)
+	}
 	if err := daemon.releaseResources(context.Background(), run.ID, kernel.ResourceRunnerProcess); err != nil {
 		return run, err
 	}
@@ -650,6 +679,7 @@ func (daemon *Daemon) releaseResources(ctx context.Context, runID kernel.RunID, 
 func (daemon *Daemon) awaitTerminal(ctx context.Context, runID kernel.RunID, wake <-chan struct{}, controller *runner.AttemptController) (runner.AttemptEvent, error) {
 	terminated := false
 	cancelled := false
+	finalizingObserved := false
 	for {
 		select {
 		case <-wake:
@@ -664,11 +694,17 @@ func (daemon *Daemon) awaitTerminal(ctx context.Context, runID kernel.RunID, wak
 		if !found {
 			return runner.AttemptEvent{}, kernel.ErrCorruptState
 		}
-		if (current.Phase == kernel.RunFinalizing || cancelled) && !terminated {
+		if (cancelled || current.Phase == kernel.RunFinalizing && finalizingObserved) && !terminated {
 			if err := controller.Terminate(); err != nil {
 				return runner.AttemptEvent{}, err
 			}
 			terminated = true
+		}
+		if current.Phase == kernel.RunFinalizing {
+			// Give an attempt that just committed its outcome one bounded readiness
+			// interval to exit naturally. The next Store reread terminates it if it
+			// remains live; cancellation never receives this grace interval.
+			finalizingObserved = true
 		}
 		ready, err := controller.NextReady(supervisorPollInterval)
 		if err != nil {
@@ -688,14 +724,14 @@ func (daemon *Daemon) awaitTerminal(ctx context.Context, runID kernel.RunID, wak
 	}
 }
 
-func kernelRunnerExit(exit runner.Exit, at kernel.UnixMillis) (kernel.RunnerExit, error) {
+func kernelProcessExit(exit runner.Exit, at kernel.UnixMillis) (kernel.ProcessExit, error) {
 	if exit.Signal > 0 {
-		return kernel.NewRunnerExitSignal(1, int64(exit.Signal), at)
+		return kernel.NewProcessExitSignal(1, int64(exit.Signal), at)
 	}
 	if exit.Code < 0 {
-		return kernel.RunnerExit{}, errInvalidContract
+		return kernel.ProcessExit{}, errInvalidContract
 	}
-	return kernel.NewRunnerExitCode(1, int64(exit.Code), at)
+	return kernel.NewProcessExitCode(1, int64(exit.Code), at)
 }
 
 func (daemon *Daemon) failRun(run kernel.Run, code kernel.FailureCode, cause error) (kernel.Run, error) {
@@ -703,31 +739,76 @@ func (daemon *Daemon) failRun(run kernel.Run, code kernel.FailureCode, cause err
 	if err != nil {
 		return run, errors.Join(cause, err)
 	}
-	for {
-		current, found, readErr := daemon.store.Run(context.Background(), run.ID)
+	var lastErr error
+	for attempt := 0; attempt < supervisorReconcileAttempts; attempt++ {
+		storeCtx, cancel := context.WithTimeout(context.Background(), supervisorStoreAttemptWindow)
+		current, found, readErr := daemon.store.Run(storeCtx, run.ID)
 		if readErr != nil || !found {
-			// Returning could expose a still-valid attempt credential. Retain the
-			// supervisor and retry durable revocation instead.
-			time.Sleep(25 * time.Millisecond)
+			cancel()
+			lastErr = readErr
+			if lastErr == nil {
+				lastErr = kernel.ErrCorruptState
+			}
 			continue
 		}
 		if current.Phase != kernel.RunAdmitted && current.Phase != kernel.RunRunning {
+			cancel()
 			return current, cause
 		}
 		at, clockErr := daemon.timestamp()
 		if clockErr != nil {
-			time.Sleep(25 * time.Millisecond)
+			cancel()
+			lastErr = clockErr
 			continue
 		}
-		failed, failErr := daemon.store.FailRun(context.Background(), current.ID, current.Revision, failure, at)
+		failed, failErr := daemon.store.FailRun(storeCtx, current.ID, current.Revision, failure, at)
+		cancel()
 		if failErr == nil {
 			return failed, cause
 		}
-		// Commit errors can be ambiguous, and any other Store error still leaves
-		// the last read potentially authorized. Reread/reconcile until the phase
-		// proves revocation instead of returning that stale running row.
-		time.Sleep(25 * time.Millisecond)
+		lastErr = failErr
 	}
+	// Live ownership is synchronously converged by the caller's deferred owner.
+	// Returning no Run avoids presenting the last admitted/running observation
+	// as revoked; durable recovery must reconcile it later.
+	return kernel.Run{}, kernel.NewOutcomeUnknownError(errors.Join(cause, lastErr))
+}
+
+func (daemon *Daemon) observeProviderExit(runID kernel.RunID, identity kernel.ResourceIdentity, exit kernel.ProcessExit, at kernel.UnixMillis) (kernel.Run, error) {
+	return daemon.observeProcessExit(runID, identity, exit, at, true)
+}
+
+func (daemon *Daemon) observeRunnerExit(runID kernel.RunID, identity kernel.ResourceIdentity, exit kernel.ProcessExit, at kernel.UnixMillis) (kernel.Run, error) {
+	return daemon.observeProcessExit(runID, identity, exit, at, false)
+}
+
+func (daemon *Daemon) observeProcessExit(runID kernel.RunID, identity kernel.ResourceIdentity, exit kernel.ProcessExit, at kernel.UnixMillis, provider bool) (kernel.Run, error) {
+	var lastErr error
+	for attempt := 0; attempt < supervisorReconcileAttempts; attempt++ {
+		storeCtx, cancel := context.WithTimeout(context.Background(), supervisorStoreAttemptWindow)
+		current, found, readErr := daemon.store.Run(storeCtx, runID)
+		if readErr != nil || !found {
+			cancel()
+			lastErr = readErr
+			if lastErr == nil {
+				lastErr = kernel.ErrCorruptState
+			}
+			continue
+		}
+		var observed kernel.Run
+		var observeErr error
+		if provider {
+			observed, observeErr = daemon.store.ObserveProviderExit(storeCtx, runID, current.Revision, identity, exit, at)
+		} else {
+			observed, observeErr = daemon.store.ObserveRunnerExit(storeCtx, runID, current.Revision, identity, exit, at)
+		}
+		cancel()
+		if observeErr == nil {
+			return observed, nil
+		}
+		lastErr = observeErr
+	}
+	return kernel.Run{}, kernel.NewOutcomeUnknownError(lastErr)
 }
 
 func (daemon *Daemon) unresolvedRuntime(run kernel.Run, resourceID kernel.ResourceID, cause error) (kernel.Run, error) {

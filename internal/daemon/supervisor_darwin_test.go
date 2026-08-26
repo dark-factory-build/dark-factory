@@ -90,8 +90,8 @@ func TestSupervisorCompletionBeforeProviderExitKeepsFirstOutcome(t *testing.T) {
 		t.Fatalf("RunNext: %v", err)
 	}
 	fixture.assertTerminal(t, run, kernel.OutcomeSucceeded)
-	if run.RunnerExit == nil {
-		t.Fatal("provider exit evidence missing")
+	if run.ProviderExit == nil || run.RunnerExit == nil {
+		t.Fatalf("process exit evidence missing: provider=%+v runner=%+v", run.ProviderExit, run.RunnerExit)
 	}
 	fixture.assertOneWitness(t)
 }
@@ -103,12 +103,30 @@ func TestSupervisorProviderExitWithoutTypedOutcomeFails(t *testing.T) {
 		t.Fatalf("RunNext: %v", err)
 	}
 	fixture.assertTerminal(t, run, kernel.OutcomeFailed)
-	if run.Proposal == nil || run.Proposal.Code() != kernel.FailureRunnerExit {
+	if run.Proposal == nil || run.Proposal.Code() != kernel.FailureProviderExit {
 		t.Fatalf("zero exit became lifecycle authority: %+v", run.Proposal)
 	}
 	late, _ := kernel.NewSuccessProposal("too late")
 	if _, err := fixture.store.ProposeAttemptOutcome(context.Background(), run.CredentialDigest, late, supervisorTime()); !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Fatalf("completion after provider exit = %v", err)
+	}
+	fixture.assertOneWitness(t)
+}
+
+func TestSupervisorPersistsOuterRunnerExitNotProviderExit(t *testing.T) {
+	fixture := newSupervisorFixture(t, providerExitAfterSuccessProgram(t, 7))
+	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, run, kernel.OutcomeSucceeded)
+	if run.ProviderExit == nil || run.RunnerExit == nil {
+		t.Fatalf("process exit evidence missing: provider=%+v runner=%+v", run.ProviderExit, run.RunnerExit)
+	}
+	providerCode, providerCodeOK := run.ProviderExit.Code()
+	runnerCode, runnerCodeOK := run.RunnerExit.Code()
+	if !providerCodeOK || providerCode != 7 || !runnerCodeOK || runnerCode != 0 {
+		t.Fatalf("durable exits provider=%+v runner=%+v, want provider 7 and outer factory-runner 0", run.ProviderExit, run.RunnerExit)
 	}
 	fixture.assertOneWitness(t)
 }
@@ -431,6 +449,94 @@ func TestSupervisorRetriesTransientAdmissionReconciliation(t *testing.T) {
 	}
 }
 
+func TestSupervisorBoundsUnavailableAdmissionReconciliation(t *testing.T) {
+	fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
+	commitErr := errors.New("injected lost admission commit acknowledgement")
+	fixture.spec.afterAdmission = func() error {
+		return errors.Join(commitErr, fixture.store.Close())
+	}
+	started := time.Now()
+	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	elapsed := time.Since(started)
+	var unknown *kernel.OutcomeUnknownError
+	if !errors.As(err, &unknown) || !errors.Is(err, commitErr) {
+		t.Fatalf("permanent admission reconciliation = %v", err)
+	}
+	if run.Phase.String() != "" || run.Revision.Int64() != 0 {
+		t.Fatalf("unknown admission returned a claimed durable run = %+v", run)
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("permanent admission reconciliation took %s", elapsed)
+	}
+	fixture.reopenStore(t)
+	recoverable, err := fixture.store.RecoverableRuns(context.Background())
+	if err != nil || len(recoverable) != 1 || recoverable[0].Run.Phase != kernel.RunAdmitted {
+		t.Fatalf("admission recovery handoff = %+v, %v", recoverable, err)
+	}
+	for _, resource := range recoverable[0].Resources {
+		if resource.State != kernel.ResourceDeclared || !resource.Identity.Empty() {
+			t.Fatalf("unknown admission resource = %+v", resource)
+		}
+	}
+	if _, err := os.Stat(fixture.witness); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unknown admission executed provider: %v", err)
+	}
+}
+
+func TestSupervisorBoundsUnavailableFailureHandoffAndJoinsOwner(t *testing.T) {
+	fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
+	ctx, cancel := context.WithCancel(context.Background())
+	var closeErr error
+	fixture.spec.beforeProviderRelease = func() {
+		closeErr = fixture.store.Close()
+		cancel()
+	}
+	started := time.Now()
+	run, err := fixture.daemon.RunNext(ctx, fixture.spec)
+	elapsed := time.Since(started)
+	if closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	var unknown *kernel.OutcomeUnknownError
+	if !errors.As(err, &unknown) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("permanent failure reconciliation = %v", err)
+	}
+	if run.Phase.String() != "" || run.Revision.Int64() != 0 {
+		t.Fatalf("unknown revocation returned stale run = %+v", run)
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("permanent failure reconciliation took %s", elapsed)
+	}
+	if _, err := os.Stat(fixture.witness); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("provider crossed unknown pre-release handoff: %v", err)
+	}
+	fixture.reopenStore(t)
+	recoverable, err := fixture.store.RecoverableRuns(context.Background())
+	if err != nil || len(recoverable) != 1 || recoverable[0].Run.Phase != kernel.RunRunning {
+		t.Fatalf("failure recovery handoff = %+v, %v", recoverable, err)
+	}
+	for _, resource := range recoverable[0].Resources {
+		if resource.Kind == kernel.ResourceRuntimeRoot {
+			continue
+		}
+		identity, identityErr := runnerIdentity(resource.Identity)
+		if identityErr != nil {
+			t.Fatal(identityErr)
+		}
+		if observation := runner.ObserveProcess(identity); observation.Presence != runner.Absent {
+			t.Fatalf("unknown failure left %s alive: %+v", resource.Kind.String(), observation)
+		}
+	}
+	failure, _ := kernel.NewFailureProposal(kernel.FailureInternal, "recovery handoff")
+	failed, err := fixture.store.FailRun(context.Background(), recoverable[0].Run.ID, recoverable[0].Run.Revision, failure, supervisorTime())
+	if err != nil || failed.Phase != kernel.RunFinalizing || failed.CredentialRevokedAt == nil {
+		t.Fatalf("recovery convergence = %+v, %v", failed, err)
+	}
+	if _, err := fixture.store.AuthenticateAttempt(context.Background(), failed.CredentialDigest); !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Fatalf("recovery did not revoke credential: %v", err)
+	}
+}
+
 func TestSupervisorReapsProviderDescendant(t *testing.T) {
 	fixture := newSupervisorFixture(t, descendantProgram(t))
 	ctx, cancel := context.WithCancel(context.Background())
@@ -493,6 +599,7 @@ func TestReleaseResourceRejectsForeignRunEvenWhenAlreadyReleased(t *testing.T) {
 type supervisorFixture struct {
 	root, witness, childReceipt, continueReceipt string
 	base, changeParent, runtimeParentPath        string
+	storePath                                    string
 	daemon                                       *Daemon
 	store                                        *kernel.Store
 	runtimeParent                                *RuntimeParent
@@ -566,11 +673,13 @@ func newSupervisorFixture(t *testing.T, program string) *supervisorFixture {
 	}
 	fixture.runtimeParent, fixture.runtimeParentPath, fixture.changeParent = runtimeParent, runtimeParentPath, changeParent
 
-	store, err := kernel.Create(context.Background(), filepath.Join(root, "factory.sqlite3"), kernel.FactoryConfig{Capacity: 1}, supervisorTime())
+	storePath := filepath.Join(root, "factory.sqlite3")
+	store, err := kernel.Create(context.Background(), storePath, kernel.FactoryConfig{Capacity: 1}, supervisorTime())
 	if err != nil {
 		t.Fatal(err)
 	}
 	fixture.store = store
+	fixture.storePath = storePath
 	projectID := supervisorProjectID(t, 1)
 	agentID := supervisorAgentID(t, 2)
 	taskID := supervisorTaskID(t, 3)
@@ -828,6 +937,16 @@ func (fixture *supervisorFixture) trackRun(runID kernel.RunID) {
 	fixture.runMu.Unlock()
 }
 
+func (fixture *supervisorFixture) reopenStore(t *testing.T) {
+	t.Helper()
+	store, err := kernel.Open(context.Background(), fixture.storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.store = store
+	fixture.daemon.store = store
+}
+
 func (fixture *supervisorFixture) changeName(t *testing.T, run kernel.Run) string {
 	t.Helper()
 	if run.ChangeID == nil {
@@ -851,6 +970,15 @@ func supervisorProgram(t *testing.T, waitAfterRequest, noRequest bool) string {
 		wait = "sleep 30\n"
 	}
 	return "set -eu\nprintf x >> __WITNESS__\n" + request + wait
+}
+
+func providerExitAfterSuccessProgram(t *testing.T, code int) string {
+	t.Helper()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fmt.Sprintf("set -eu\ntrap '' TERM\nprintf x >> __WITNESS__\nGORACE=atexit_sleep_ms=0 %s --supervisor-attempt-succeed typed-success\nexit %d\n", quoteShell(executable), code)
 }
 
 func descendantProgram(t *testing.T) string {

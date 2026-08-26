@@ -296,11 +296,7 @@ func TestConcreteStoreCrashBeforeAndAfterFinalizationCommit(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			exit, _ := NewRunnerExitCode(1, 0, mustTime(t, 41))
-			finalizing, err = store.ObserveRunnerExit(context.Background(), run.ID, finalizing.Revision, exit, mustTime(t, 42))
-			if err != nil {
-				t.Fatal(err)
-			}
+			finalizing = observeMissingProcessExits(t, store, run.ID, 41)
 			for index, resource := range resourcesForRunTest(t, store, run.ID) {
 				if _, err := store.ReleaseResource(context.Background(), run.ID, resource.ID, resource.Revision, resource.Identity, mustTime(t, 50+int64(index))); err != nil {
 					t.Fatal(err)

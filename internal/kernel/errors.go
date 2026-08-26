@@ -29,6 +29,16 @@ func (err *OutcomeUnknownError) Error() string {
 
 func (err *OutcomeUnknownError) Unwrap() error { return err.cause }
 
+// NewOutcomeUnknownError marks an operation whose durable result cannot be
+// distinguished after bounded domain reconciliation. Callers must hand the
+// entity to recovery rather than reporting success or replaying the write.
+func NewOutcomeUnknownError(cause error) error {
+	if cause == nil {
+		return fmt.Errorf("%w: missing outcome-unknown cause", ErrInvalidValue)
+	}
+	return &OutcomeUnknownError{cause: cause}
+}
+
 type ResyncRequiredError struct {
 	Head  EventSequence
 	Floor EventSequence

@@ -60,25 +60,27 @@ func TestCompletionExitOrderPreservesFirstOutcomeAndExactExit(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		exit, _ := NewRunnerExitCode(1, 0, mustTime(t, 41))
-		observed, err := store.ObserveRunnerExit(context.Background(), run.ID, finalizing.Revision, exit, mustTime(t, 42))
+		exit, _ := NewProcessExitCode(1, 0, mustTime(t, 41))
+		runnerIdentity := registeredProcessIdentity(t, store, run.ID, ResourceRunnerProcess)
+		observed, err := store.ObserveRunnerExit(context.Background(), run.ID, finalizing.Revision, runnerIdentity, exit, mustTime(t, 42))
 		if err != nil || observed.Proposal == nil || !observed.Proposal.equal(proposal) || observed.RunnerExit == nil || !observed.RunnerExit.equal(exit) {
 			t.Fatalf("observed = %+v, %v", observed, err)
 		}
-		replay, err := store.ObserveRunnerExit(context.Background(), run.ID, finalizing.Revision, exit, mustTime(t, 99))
+		replay, err := store.ObserveRunnerExit(context.Background(), run.ID, finalizing.Revision, runnerIdentity, exit, mustTime(t, 99))
 		if err != nil || replay.Revision != observed.Revision {
 			t.Fatalf("exit replay = %+v, %v", replay, err)
 		}
-		conflictExit, _ := NewRunnerExitCode(2, 1, mustTime(t, 41))
-		if _, err := store.ObserveRunnerExit(context.Background(), run.ID, observed.Revision, conflictExit, mustTime(t, 43)); !errors.Is(err, ErrConflict) {
+		conflictExit, _ := NewProcessExitCode(2, 1, mustTime(t, 41))
+		if _, err := store.ObserveRunnerExit(context.Background(), run.ID, observed.Revision, runnerIdentity, conflictExit, mustTime(t, 43)); !errors.Is(err, ErrConflict) {
 			t.Fatalf("conflicting exit = %v", err)
 		}
 	})
 	t.Run("exit then completion", func(t *testing.T) {
 		store, run, keys := runningOrchestratorRun(t)
 		defer store.Close()
-		exit, _ := NewRunnerExitSignal(1, 9, mustTime(t, 40))
-		observed, err := store.ObserveRunnerExit(context.Background(), run.ID, run.Revision, exit, mustTime(t, 41))
+		exit, _ := NewProcessExitSignal(1, 9, mustTime(t, 40))
+		runnerIdentity := registeredProcessIdentity(t, store, run.ID, ResourceRunnerProcess)
+		observed, err := store.ObserveRunnerExit(context.Background(), run.ID, run.Revision, runnerIdentity, exit, mustTime(t, 41))
 		if err != nil || observed.Proposal == nil || observed.Proposal.kind != OutcomeFailed || observed.Proposal.code != FailureRunnerExit {
 			t.Fatalf("exit-first = %+v, %v", observed, err)
 		}
@@ -162,11 +164,7 @@ func TestFinalizerRequiresEveryReleasedResourceAndExactTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	exit, _ := NewRunnerExitCode(1, 0, mustTime(t, 41))
-	finalizing, err = store.ObserveRunnerExit(context.Background(), admitted.ID, finalizing.Revision, exit, mustTime(t, 42))
-	if err != nil {
-		t.Fatal(err)
-	}
+	finalizing = observeMissingProcessExits(t, store, admitted.ID, 41)
 	resources := resourcesForRunTest(t, store, admitted.ID)
 	for index, resource := range resources {
 		if index == len(resources)-1 {
@@ -276,14 +274,7 @@ func TestAttemptRequestedFailureHasOneTypedDurableCode(t *testing.T) {
 	if err != nil || !found || read.Proposal == nil || read.Proposal.Code() != FailureAttempt || read.Proposal.Code().String() != "attempt" {
 		t.Fatalf("read attempt failure = %+v, found=%v err=%v", read, found, err)
 	}
-	exit, err := NewRunnerExitCode(1, 0, mustTime(t, 41))
-	if err != nil {
-		t.Fatal(err)
-	}
-	finalizing, err = store.ObserveRunnerExit(context.Background(), running.ID, finalizing.Revision, exit, mustTime(t, 42))
-	if err != nil {
-		t.Fatal(err)
-	}
+	finalizing = observeMissingProcessExits(t, store, running.ID, 41)
 	for index, resource := range resourcesForRunTest(t, store, running.ID) {
 		if _, err := store.ReleaseResource(context.Background(), running.ID, resource.ID, resource.Revision, resource.Identity, mustTime(t, int64(50+index))); err != nil {
 			t.Fatal(err)
@@ -640,8 +631,7 @@ func TestTaskGuardAndPermanentDigestUniquenessRollbackTerminalOrAdmission(t *tes
 		defer store.Close()
 		proposal, _ := NewSuccessProposal("done")
 		finalizing, _ := store.ProposeAttemptOutcome(context.Background(), keys.AttemptDigest, proposal, mustTime(t, 40))
-		exit, _ := NewRunnerExitCode(1, 0, mustTime(t, 41))
-		finalizing, _ = store.ObserveRunnerExit(context.Background(), run.ID, finalizing.Revision, exit, mustTime(t, 42))
+		finalizing = observeMissingProcessExits(t, store, run.ID, 41)
 		for _, resource := range resourcesForRunTest(t, store, run.ID) {
 			_, _ = store.ReleaseResource(context.Background(), run.ID, resource.ID, resource.Revision, resource.Identity, mustTime(t, 50))
 		}
@@ -707,7 +697,7 @@ func TestConcurrentCompletionAndExitHaveOneImmutableWinner(t *testing.T) {
 	defer store.Close()
 	defer second.Close()
 	proposal, _ := NewSuccessProposal("winner")
-	exit, _ := NewRunnerExitCode(1, 7, mustTime(t, 40))
+	exit, _ := NewProcessExitCode(1, 7, mustTime(t, 40))
 	start := make(chan struct{})
 	errs := make(chan error, 2)
 	go func() {
@@ -717,7 +707,7 @@ func TestConcurrentCompletionAndExitHaveOneImmutableWinner(t *testing.T) {
 	}()
 	go func() {
 		<-start
-		_, err := second.ObserveRunnerExit(context.Background(), run.ID, run.Revision, exit, mustTime(t, 41))
+		_, err := second.ObserveRunnerExit(context.Background(), run.ID, run.Revision, registeredProcessIdentity(t, store, run.ID, ResourceRunnerProcess), exit, mustTime(t, 41))
 		errs <- err
 	}()
 	close(start)
@@ -899,12 +889,7 @@ func finalizingReleasedRun(t *testing.T, role AgentRole, policy VerificationPoli
 		store.Close()
 		t.Fatal(err)
 	}
-	exit, _ := NewRunnerExitCode(1, 0, mustTime(t, 41))
-	finalizing, err = store.ObserveRunnerExit(context.Background(), running.ID, finalizing.Revision, exit, mustTime(t, 42))
-	if err != nil {
-		store.Close()
-		t.Fatal(err)
-	}
+	finalizing = observeMissingProcessExits(t, store, running.ID, 41)
 	for index, resource := range resourcesForRunTest(t, store, running.ID) {
 		if _, err := store.ReleaseResource(context.Background(), running.ID, resource.ID, resource.Revision, resource.Identity, mustTime(t, int64(50+index))); err != nil {
 			store.Close()
@@ -918,11 +903,14 @@ func finalizingReleasedRun(t *testing.T, role AgentRole, policy VerificationPoli
 func activateAllResources(t *testing.T, store *Store, run Run, keys AdmissionKeys, at int64) map[ResourceKind]Resource {
 	t.Helper()
 	result := map[ResourceKind]Resource{}
+	providerIdentity := processIdentity(t, 250)
 	for index, resource := range resourcesForRunTest(t, store, run.ID) {
 		var identity ResourceIdentity
 		var err error
 		if resource.Kind == ResourceRuntimeRoot {
 			identity, err = NewPathResourceIdentity(10, 100+int64(index))
+		} else if resource.Kind == ResourceProviderProcess || resource.Kind == ResourceProviderGroup {
+			identity = providerIdentity
 		} else {
 			identity = processIdentity(t, 200+int64(index))
 		}
@@ -949,6 +937,40 @@ func processIdentity(t *testing.T, seed int64) ResourceIdentity {
 		t.Fatal(err)
 	}
 	return identity
+}
+
+func registeredProcessIdentity(t testing.TB, store *Store, runID RunID, kind ResourceKind) ResourceIdentity {
+	t.Helper()
+	resource := resourceOfKindTB(t, resourcesForRunTB(t, store, runID), kind)
+	if resource.Identity.Empty() {
+		t.Fatalf("%s identity is empty", kind.String())
+	}
+	return resource.Identity
+}
+
+func resourcesForRunTB(t testing.TB, store *Store, runID RunID) []Resource {
+	t.Helper()
+	connection, err := store.readerConnection(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	resources, err := resourcesForRun(context.Background(), connection, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resources
+}
+
+func resourceOfKindTB(t testing.TB, resources []Resource, kind ResourceKind) Resource {
+	t.Helper()
+	for _, resource := range resources {
+		if resource.Kind == kind {
+			return resource
+		}
+	}
+	t.Fatalf("resource %s not found", kind.String())
+	return Resource{}
 }
 
 func resourceOfKind(t *testing.T, resources []Resource, kind ResourceKind) Resource {

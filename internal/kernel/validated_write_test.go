@@ -117,9 +117,10 @@ func TestEveryPublicMutationValidatesDurableGraphBeforeDecision(t *testing.T) {
 	digest, _ := TreeDigestFromBytes(bytes.Repeat([]byte{0x81}, DigestBytes))
 	availability, _ := NewChangeAvailability(digest, 1, 1, stage)
 	pathIdentity, _ := NewPathResourceIdentity(90, 100)
+	processIdentity := processIdentity(t, 101)
 	failure, _ := NewFailureProposal(FailureInternal, "failure")
 	proposal, _ := NewSuccessProposal("result")
-	exit, _ := NewRunnerExitCode(1, 0, mustTime(t, 90))
+	exit, _ := NewProcessExitCode(1, 0, mustTime(t, 90))
 	at := mustTime(t, 100)
 
 	tests := []struct {
@@ -196,7 +197,7 @@ func TestEveryPublicMutationValidatesDurableGraphBeforeDecision(t *testing.T) {
 			return err
 		}},
 		{name: "ObserveRunnerExit", invoke: func(store *Store) error {
-			_, err := store.ObserveRunnerExit(context.Background(), runID(t, 5), mustRevision(t, 1), exit, at)
+			_, err := store.ObserveRunnerExit(context.Background(), runID(t, 5), mustRevision(t, 1), processIdentity, exit, at)
 			return err
 		}},
 		{name: "FinalizeRun", invoke: func(store *Store) error {

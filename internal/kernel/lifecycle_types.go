@@ -296,6 +296,7 @@ const (
 	FailureSpawn FailureCode = iota + 1
 	FailureActivation
 	FailureSource
+	FailureProviderExit
 	FailureRunnerExit
 	FailureProtocol
 	FailureInternal
@@ -310,6 +311,8 @@ func parseFailureCode(value string) (FailureCode, error) {
 		return FailureActivation, nil
 	case "source":
 		return FailureSource, nil
+	case "provider_exit":
+		return FailureProviderExit, nil
 	case "runner_exit":
 		return FailureRunnerExit, nil
 	case "protocol":
@@ -331,6 +334,8 @@ func (value FailureCode) String() string {
 		return "activation"
 	case FailureSource:
 		return "source"
+	case FailureProviderExit:
+		return "provider_exit"
 	case FailureRunnerExit:
 		return "runner_exit"
 	case FailureProtocol:
@@ -431,103 +436,103 @@ func (policy VerificationPolicy) String() string {
 	}
 }
 
-type runnerExitKind uint8
+type processExitKind uint8
 
 const (
-	runnerExitCode runnerExitKind = iota + 1
-	runnerExitSignal
-	runnerExitRecoveredAbsence
+	processExitCode processExitKind = iota + 1
+	processExitSignal
+	processExitRecoveredAbsence
 )
 
-func parseRunnerExitKind(value string) (runnerExitKind, error) {
+func parseProcessExitKind(value string) (processExitKind, error) {
 	switch value {
 	case "code":
-		return runnerExitCode, nil
+		return processExitCode, nil
 	case "signal":
-		return runnerExitSignal, nil
+		return processExitSignal, nil
 	case "recovered_absence":
-		return runnerExitRecoveredAbsence, nil
+		return processExitRecoveredAbsence, nil
 	default:
-		return 0, corruptControl("runner exit kind", value)
+		return 0, corruptControl("process exit kind", value)
 	}
 }
 
-func (kind runnerExitKind) String() string {
+func (kind processExitKind) String() string {
 	switch kind {
-	case runnerExitCode:
+	case processExitCode:
 		return "code"
-	case runnerExitSignal:
+	case processExitSignal:
 		return "signal"
-	case runnerExitRecoveredAbsence:
+	case processExitRecoveredAbsence:
 		return "recovered_absence"
 	default:
 		return ""
 	}
 }
 
-type RunnerExit struct {
-	kind     runnerExitKind
+type ProcessExit struct {
+	kind     processExitKind
 	sequence int64
 	code     *int64
 	signal   *int64
 	at       UnixMillis
 }
 
-func NewRunnerExitCode(sequence uint64, code int64, at UnixMillis) (RunnerExit, error) {
+func NewProcessExitCode(sequence uint64, code int64, at UnixMillis) (ProcessExit, error) {
 	if sequence < 1 || sequence > math.MaxInt64 || code < 0 {
-		return RunnerExit{}, fmt.Errorf("%w: invalid runner exit code", ErrInvalidValue)
+		return ProcessExit{}, fmt.Errorf("%w: invalid process exit code", ErrInvalidValue)
 	}
-	return RunnerExit{kind: runnerExitCode, sequence: int64(sequence), code: &code, at: at}, nil
+	return ProcessExit{kind: processExitCode, sequence: int64(sequence), code: &code, at: at}, nil
 }
 
-func NewRunnerExitSignal(sequence uint64, signal int64, at UnixMillis) (RunnerExit, error) {
+func NewProcessExitSignal(sequence uint64, signal int64, at UnixMillis) (ProcessExit, error) {
 	if sequence < 1 || sequence > math.MaxInt64 || signal < 1 {
-		return RunnerExit{}, fmt.Errorf("%w: invalid runner exit signal", ErrInvalidValue)
+		return ProcessExit{}, fmt.Errorf("%w: invalid process exit signal", ErrInvalidValue)
 	}
-	return RunnerExit{kind: runnerExitSignal, sequence: int64(sequence), signal: &signal, at: at}, nil
+	return ProcessExit{kind: processExitSignal, sequence: int64(sequence), signal: &signal, at: at}, nil
 }
 
-// NewRunnerExitRecoveredAbsence records that recovery, without live-child or
-// Wait ownership, positively proved the exact registered runner disappeared.
+// NewProcessExitRecoveredAbsence records that recovery, without live-child or
+// Wait ownership, positively proved the exact registered process disappeared.
 // It does not represent an uncertain, malformed, or permission-denied probe.
-func NewRunnerExitRecoveredAbsence(sequence uint64, at UnixMillis) (RunnerExit, error) {
+func NewProcessExitRecoveredAbsence(sequence uint64, at UnixMillis) (ProcessExit, error) {
 	if sequence < 1 || sequence > math.MaxInt64 {
-		return RunnerExit{}, fmt.Errorf("%w: invalid recovered runner absence", ErrInvalidValue)
+		return ProcessExit{}, fmt.Errorf("%w: invalid recovered process absence", ErrInvalidValue)
 	}
-	return RunnerExit{kind: runnerExitRecoveredAbsence, sequence: int64(sequence), at: at}, nil
+	return ProcessExit{kind: processExitRecoveredAbsence, sequence: int64(sequence), at: at}, nil
 }
 
-func (exit RunnerExit) Sequence() uint64 { return uint64(exit.sequence) }
-func (exit RunnerExit) Code() (int64, bool) {
+func (exit ProcessExit) Sequence() uint64 { return uint64(exit.sequence) }
+func (exit ProcessExit) Code() (int64, bool) {
 	if exit.code == nil {
 		return 0, false
 	}
 	return *exit.code, true
 }
-func (exit RunnerExit) Signal() (int64, bool) {
+func (exit ProcessExit) Signal() (int64, bool) {
 	if exit.signal == nil {
 		return 0, false
 	}
 	return *exit.signal, true
 }
-func (exit RunnerExit) RecoveredAbsence() bool { return exit.kind == runnerExitRecoveredAbsence }
-func (exit RunnerExit) At() UnixMillis         { return exit.at }
-func (exit RunnerExit) valid() bool {
+func (exit ProcessExit) RecoveredAbsence() bool { return exit.kind == processExitRecoveredAbsence }
+func (exit ProcessExit) At() UnixMillis         { return exit.at }
+func (exit ProcessExit) valid() bool {
 	if exit.sequence < 1 {
 		return false
 	}
 	switch exit.kind {
-	case runnerExitCode:
+	case processExitCode:
 		return exit.code != nil && *exit.code >= 0 && exit.signal == nil
-	case runnerExitSignal:
+	case processExitSignal:
 		return exit.code == nil && exit.signal != nil && *exit.signal > 0
-	case runnerExitRecoveredAbsence:
+	case processExitRecoveredAbsence:
 		return exit.code == nil && exit.signal == nil
 	default:
 		return false
 	}
 }
-func (exit RunnerExit) equal(other RunnerExit) bool {
+func (exit ProcessExit) equal(other ProcessExit) bool {
 	if exit.kind != other.kind || exit.sequence != other.sequence || exit.at != other.at {
 		return false
 	}
@@ -681,7 +686,8 @@ type Run struct {
 	Terminal                 *Proposal
 	CredentialDigest         AttemptDigest
 	CredentialRevokedAt      *UnixMillis
-	RunnerExit               *RunnerExit
+	ProviderExit             *ProcessExit
+	RunnerExit               *ProcessExit
 	Revision                 Revision
 	AdmittedAt               UnixMillis
 	RunningAt                *UnixMillis

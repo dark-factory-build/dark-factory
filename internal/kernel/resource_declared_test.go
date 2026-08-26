@@ -39,8 +39,8 @@ func TestDeclaredResourcesRejectHiddenIdentityAndRecoveredAbsenceAuthority(t *te
 				t.Fatalf("run with corrupt declared resource = %v", err)
 			}
 			before := captureWriteFootprint(t, store)
-			exit, _ := NewRunnerExitRecoveredAbsence(1, mustTime(t, 20))
-			if _, err := store.ObserveRunnerExit(context.Background(), run.ID, run.Revision, exit, mustTime(t, 21)); !errors.Is(err, ErrCorruptState) {
+			exit, _ := NewProcessExitRecoveredAbsence(1, mustTime(t, 20))
+			if _, err := store.ObserveRunnerExit(context.Background(), run.ID, run.Revision, processIdentity(t, 91), exit, mustTime(t, 21)); !errors.Is(err, ErrCorruptState) {
 				store.Close()
 				t.Fatalf("recovered absence over corrupt declared resource = %v", err)
 			}
