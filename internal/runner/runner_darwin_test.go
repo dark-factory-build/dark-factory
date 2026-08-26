@@ -703,6 +703,44 @@ func TestLeaderExitWithDescendantRequiresOwnedCleanup(t *testing.T) {
 	}
 }
 
+func TestFinishAfterNaturalLeaderExitCleansOwnedGroupBeforeWait(t *testing.T) {
+	f := newFixture(t)
+	descendantPath := filepath.Join(f.root, "descendant")
+	out := outputFile(t, filepath.Join(f.root, "out"))
+	child := f.start("/bin/sh", []string{"-c", "sleep 30 & echo $! > " + descendantPath + "; exit 23"}, nil, out)
+	if _, err := child.Activate(); err != nil {
+		t.Fatal(err)
+	}
+	waitFile(t, descendantPath)
+	body, err := os.ReadFile(descendantPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	descendant, err := readIdentity(pid)
+	if err != nil || descendant.PGID != child.Identity().PGID {
+		t.Fatalf("descendant identity=%+v err=%v", descendant, err)
+	}
+	defer func() {
+		if current, err := readIdentity(descendant.PID); err == nil && current == descendant {
+			_ = unix.Kill(descendant.PID, unix.SIGKILL)
+		}
+	}()
+	exit, err := child.FinishAfterExit(4 * time.Second)
+	if err != nil || exit.Code != 23 || exit.Signal != 0 {
+		t.Fatalf("natural exit=%+v err=%v", exit, err)
+	}
+	if observation := ObserveProcess(descendant); observation.Presence != Absent {
+		t.Fatalf("FinishAfterExit left descendant: %+v", observation)
+	}
+	if err := unix.Kill(-child.Identity().PGID, 0); !errors.Is(err, unix.ESRCH) {
+		t.Fatalf("FinishAfterExit left process group: %v", err)
+	}
+}
+
 func TestTerminateGroupSignalCatchesDescendantForkedDuringTERMGrace(t *testing.T) {
 	f := newFixture(t)
 	readyPath := filepath.Join(f.root, "ready")
@@ -847,6 +885,65 @@ func TestProcessCleanupHasNoPerMemberSignalPath(t *testing.T) {
 	})
 	if signals != 1 {
 		t.Fatalf("nonzero unix.Kill call count=%d want=1", signals)
+	}
+}
+
+func TestActivatedWaitPathsConvergeGroupBeforeSoleWait(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("locate test source")
+	}
+	fset := token.NewFileSet()
+	parsed, err := parser.ParseFile(fset, filepath.Join(filepath.Dir(thisFile), "process_darwin.go"), nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activatedCallers := map[string]bool{"FinishAfterExit": false, "Terminate": false}
+	for _, declaration := range parsed.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok || function.Body == nil {
+			continue
+		}
+		var convergencePosition, waitPosition token.Pos
+		ast.Inspect(function.Body, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			var called string
+			switch target := call.Fun.(type) {
+			case *ast.SelectorExpr:
+				called = target.Sel.Name
+			case *ast.Ident:
+				called = target.Name
+			}
+			switch called {
+			case "waitActivatedOnce":
+				if _, tracked := activatedCallers[function.Name.Name]; tracked {
+					activatedCallers[function.Name.Name] = true
+				}
+			case "killRemainingGroup":
+				if function.Name.Name == "waitActivatedOnce" {
+					convergencePosition = call.Pos()
+				}
+			case "waitOnce":
+				if function.Name.Name != "waitActivatedOnce" && function.Name.Name != "waitInertOnce" {
+					t.Errorf("%s calls sole Wait without an ownership-specific guard at %s", function.Name.Name, fset.Position(call.Pos()))
+				}
+				if function.Name.Name == "waitActivatedOnce" {
+					waitPosition = call.Pos()
+				}
+			}
+			return true
+		})
+		if function.Name.Name == "waitActivatedOnce" && (convergencePosition == token.NoPos || waitPosition == token.NoPos || convergencePosition >= waitPosition) {
+			t.Fatal("activated Wait is not structurally preceded by group convergence")
+		}
+	}
+	for caller, found := range activatedCallers {
+		if !found {
+			t.Errorf("%s does not use the activated convergence-and-Wait path", caller)
+		}
 	}
 }
 

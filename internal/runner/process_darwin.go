@@ -86,6 +86,7 @@ type OwnedChild struct {
 	status         *os.File
 	lease          *GateLease
 	state          state
+	activated      bool
 	exitObserved   bool
 	exitRegistered bool
 	keepLease      bool
@@ -281,6 +282,10 @@ func (c *OwnedChild) Activate() (FileIdentity, error) {
 		return FileIdentity{}, err
 	}
 	c.lease.marker = &id
+	// The durable marker is the activation linearization point. From here on,
+	// a lost leash acknowledgement is still an activated child, never inert.
+	c.activated = true
+	c.state = stateActivated
 	if err := writeFrame(c.activation, gateFrame{Kind: "activate", Marker: &id}, maxFrameBytes); err != nil {
 		return id, err
 	}
@@ -288,7 +293,6 @@ func (c *OwnedChild) Activate() (FileIdentity, error) {
 		return id, err
 	}
 	c.activation = nil
-	c.state = stateActivated
 	return id, nil
 }
 
@@ -301,7 +305,7 @@ func (c *OwnedChild) Abort() error {
 	if _, werr := c.waitForExit(4 * time.Second); werr != nil {
 		return werr
 	}
-	if waitErr := c.waitOnce(); waitErr != nil {
+	if waitErr := c.waitInertOnce(); waitErr != nil {
 		return waitErr
 	}
 	return err
@@ -337,7 +341,7 @@ func (c *OwnedChild) waitForExit(timeout time.Duration) (unix.Kevent_t, error) {
 }
 
 func (c *OwnedChild) FinishAfterExit(timeout time.Duration) (Exit, error) {
-	if c == nil || c.state == stateWaited {
+	if c == nil || !c.activated || c.state == stateWaited {
 		return Exit{}, ErrState
 	}
 	if !c.exitObserved {
@@ -345,8 +349,11 @@ func (c *OwnedChild) FinishAfterExit(timeout time.Duration) (Exit, error) {
 			return Exit{}, err
 		}
 	}
-	err := c.waitOnce()
-	exit := exitFromWait(c.cmd.ProcessState, err)
+	waitErr := c.waitActivatedOnce()
+	if c.state != stateWaited {
+		return Exit{}, waitErr
+	}
+	exit := exitFromWait(c.cmd.ProcessState, waitErr)
 	_ = c.status.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 	var frame gateFrame
 	if ferr := readFrame(c.status, &frame, maxFrameBytes); ferr == nil && frame.Kind == "launch-error" {
@@ -384,8 +391,25 @@ func (c *OwnedChild) waitOnce() error {
 	return err
 }
 
+func (c *OwnedChild) waitInertOnce() error {
+	if c.activated {
+		return ErrState
+	}
+	return c.waitOnce()
+}
+
+func (c *OwnedChild) waitActivatedOnce() error {
+	if !c.activated || !c.exitObserved {
+		return ErrState
+	}
+	if err := killRemainingGroup(c.identity); err != nil {
+		return err
+	}
+	return c.waitOnce()
+}
+
 func (c *OwnedChild) Terminate(timeout time.Duration) (Exit, error) {
-	if c == nil || c.state == stateWaited || !c.identity.Valid() {
+	if c == nil || !c.activated || c.state == stateWaited || !c.identity.Valid() {
 		return Exit{}, ErrState
 	}
 	if timeout <= 0 {
@@ -422,11 +446,11 @@ func (c *OwnedChild) Terminate(timeout time.Duration) (Exit, error) {
 			}
 		}
 	}
-	if err := killRemainingGroup(c.identity); err != nil {
-		return Exit{}, err
+	waitErr := c.waitActivatedOnce()
+	if c.state != stateWaited {
+		return Exit{}, waitErr
 	}
-	err := c.waitOnce()
-	return exitFromWait(c.cmd.ProcessState, err), nil
+	return exitFromWait(c.cmd.ProcessState, waitErr), nil
 }
 
 func waitForOwnedGroupQuiescence(leader Identity, timeout time.Duration) error {
@@ -545,9 +569,20 @@ func (c *OwnedChild) Close() error {
 		return nil
 	}
 	if c.state != stateWaited {
-		_, err := c.Terminate(defaultStopTimeout)
-		if err != nil {
-			return err
+		if c.activated {
+			if _, err := c.Terminate(defaultStopTimeout); err != nil {
+				return err
+			}
+		} else if c.state == stateBlocked {
+			if err := c.Abort(); err != nil {
+				return err
+			}
+		} else if c.state == stateExited {
+			if err := c.waitInertOnce(); err != nil {
+				return err
+			}
+		} else {
+			return ErrState
 		}
 	}
 	if c.activation != nil {
@@ -576,7 +611,9 @@ func (c *OwnedChild) hardCleanup() error {
 		}
 	}
 	if c.state != stateWaited {
-		_ = c.waitOnce()
+		if err := c.waitInertOnce(); err != nil && c.state != stateWaited {
+			cleanupErr = errors.Join(cleanupErr, err)
+		}
 	}
 	if c.activation != nil {
 		_ = c.activation.Close()
