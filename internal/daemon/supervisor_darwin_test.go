@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -268,6 +269,62 @@ func TestSupervisorPartialProviderReleaseRevokesAuthority(t *testing.T) {
 	}
 }
 
+func TestSupervisorCancellationBeforeProviderReleaseKeepsProviderInert(t *testing.T) {
+	fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
+	ctx, cancel := context.WithCancel(context.Background())
+	reached := make(chan struct{})
+	proceed := make(chan struct{}, 1)
+	fixture.spec.beforeProviderRelease = func() {
+		close(reached)
+		<-proceed
+	}
+	result := make(chan struct {
+		run kernel.Run
+		err error
+	}, 1)
+	go func() {
+		run, err := fixture.daemon.RunNext(ctx, fixture.spec)
+		result <- struct {
+			run kernel.Run
+			err error
+		}{run: run, err: err}
+	}()
+	select {
+	case <-reached:
+	case <-time.After(12 * time.Second):
+		cancel()
+		proceed <- struct{}{}
+		select {
+		case <-result:
+		case <-time.After(12 * time.Second):
+		}
+		t.Fatal("supervisor did not reach provider release barrier")
+	}
+	cancel()
+	proceed <- struct{}{}
+	var got struct {
+		run kernel.Run
+		err error
+	}
+	select {
+	case got = <-result:
+	case <-time.After(12 * time.Second):
+		t.Fatal("cancelled supervisor did not join")
+	}
+	if !errors.Is(got.err, context.Canceled) {
+		t.Fatalf("pre-release cancellation = %v", got.err)
+	}
+	if got.run.Phase != kernel.RunFinalizing || got.run.CredentialRevokedAt == nil || got.run.Terminal != nil {
+		t.Fatalf("pre-release cancellation run = %+v", got.run)
+	}
+	if _, err := fixture.store.AuthenticateAttempt(context.Background(), got.run.CredentialDigest); !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Fatalf("pre-release cancellation credential = %v", err)
+	}
+	if _, err := os.Stat(fixture.witness); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("provider crossed cancellation/release boundary: %v", err)
+	}
+}
+
 func TestSupervisorActivationErrorAfterDurableMarkerJoinsInnerOwner(t *testing.T) {
 	fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
 	activationErr := errors.New("injected activation acknowledgement loss")
@@ -278,6 +335,9 @@ func TestSupervisorActivationErrorAfterDurableMarkerJoinsInnerOwner(t *testing.T
 			return marker, err
 		}
 		observedInner = supervisorWaitForDirectChild(t, child.Identity())
+		// The exact inner receipt proves activation occurred. On the injected
+		// acknowledgement loss, controller EOF makes the outer converge that
+		// distinct group before FinishAfterExit returns; killing outer first is unsafe.
 		return marker, activationErr
 	}
 	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
@@ -346,18 +406,105 @@ func TestSupervisorReconcilesAmbiguousAdmissionAndRevokesBearer(t *testing.T) {
 	}
 }
 
+func TestSupervisorRetriesTransientAdmissionReconciliation(t *testing.T) {
+	fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
+	commitErr := errors.New("injected lost admission commit acknowledgement")
+	transientErr := errors.New("injected transient reconciliation read")
+	fixture.spec.afterAdmission = func() error { return commitErr }
+	attempts := 0
+	fixture.spec.reconcileAdmission = func(ctx context.Context, keys kernel.AdmissionKeys) (kernel.AdmissionResult, error) {
+		attempts++
+		if attempts < 3 {
+			return kernel.AdmissionResult{}, transientErr
+		}
+		return fixture.store.ReconcileAdmission(ctx, keys)
+	}
+	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if !errors.Is(err, commitErr) || attempts != 3 {
+		t.Fatalf("RunNext reconciliation = attempts %d, err %v", attempts, err)
+	}
+	if run.Phase != kernel.RunFinalizing || run.CredentialRevokedAt == nil {
+		t.Fatalf("transient reconciliation run = %+v", run)
+	}
+	if _, err := fixture.store.AuthenticateAttempt(context.Background(), run.CredentialDigest); !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Fatalf("transient reconciliation bearer = %v", err)
+	}
+}
+
+func TestSupervisorReapsProviderDescendant(t *testing.T) {
+	fixture := newSupervisorFixture(t, descendantProgram(t))
+	ctx, cancel := context.WithCancel(context.Background())
+	type runResult struct {
+		run kernel.Run
+		err error
+	}
+	done := make(chan runResult, 1)
+	joined := make(chan struct{})
+	go func() {
+		defer close(joined)
+		run, err := fixture.daemon.RunNext(ctx, fixture.spec)
+		done <- runResult{run: run, err: err}
+	}()
+	t.Cleanup(func() {
+		cancel()
+		_ = os.WriteFile(fixture.continueReceipt, []byte("cleanup"), 0o600)
+		select {
+		case <-joined:
+		case <-time.After(12 * time.Second):
+			t.Error("descendant supervisor owner did not join during safety cleanup")
+		}
+	})
+	childPID := supervisorWaitForPIDReceipt(t, fixture.childReceipt)
+	child := supervisorIdentityForPID(t, childPID)
+	if err := os.WriteFile(fixture.continueReceipt, []byte("continue"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var result runResult
+	select {
+	case result = <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("descendant supervisor did not join")
+	}
+	if result.err != nil {
+		t.Fatalf("descendant RunNext: %v", result.err)
+	}
+	fixture.assertTerminal(t, result.run, kernel.OutcomeSucceeded)
+	if observation := runner.ObserveProcess(child); observation.Presence != runner.Absent {
+		t.Fatalf("provider descendant remains: %+v", observation)
+	}
+}
+
+func TestReleaseResourceRejectsForeignRunEvenWhenAlreadyReleased(t *testing.T) {
+	fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
+	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resource := fixture.resources(t, run.ID)[0]
+	foreign, err := kernel.RunIDFromBytes(supervisorIDBytes(99))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.daemon.releaseResource(context.Background(), foreign, resource.ID); !errors.Is(err, kernel.ErrConflict) {
+		t.Fatalf("foreign released-resource ownership = %v", err)
+	}
+}
+
 type supervisorFixture struct {
-	root, witness, base, changeParent, runtimeParentPath string
-	daemon                                               *Daemon
-	store                                                *kernel.Store
-	runtimeParent                                        *RuntimeParent
-	spec                                                 SupervisorSpec
-	listener                                             *api.Listener
-	serverDone                                           chan error
-	serverOnce                                           sync.Once
-	t                                                    *testing.T
-	baselineFDs                                          int
-	baselineGoroutines                                   int
+	root, witness, childReceipt, continueReceipt string
+	base, changeParent, runtimeParentPath        string
+	daemon                                       *Daemon
+	store                                        *kernel.Store
+	runtimeParent                                *RuntimeParent
+	spec                                         SupervisorSpec
+	listener                                     *api.Listener
+	serverDone                                   chan error
+	serverOnce                                   sync.Once
+	runMu                                        sync.Mutex
+	runIDs                                       map[kernel.RunID]struct{}
+	t                                            *testing.T
+	baselineFDs                                  int
+	baselineGoroutines                           int
 }
 
 func newSupervisorFixture(t *testing.T, program string) *supervisorFixture {
@@ -372,10 +519,14 @@ func newSupervisorFixture(t *testing.T, program string) *supervisorFixture {
 		t.Fatal(err)
 	}
 	fixture := &supervisorFixture{
-		root: root, witness: filepath.Join(root, "provider.witness"), t: t,
+		root: root, witness: filepath.Join(root, "provider.witness"),
+		childReceipt: filepath.Join(root, "provider-child.pid"), continueReceipt: filepath.Join(root, "provider.continue"), t: t,
 		baselineFDs: baselineFDs, baselineGoroutines: baselineGoroutines,
+		runIDs: make(map[kernel.RunID]struct{}),
 	}
 	program = strings.ReplaceAll(program, "__WITNESS__", quoteShell(fixture.witness))
+	program = strings.ReplaceAll(program, "__CHILD_RECEIPT__", quoteShell(fixture.childReceipt))
+	program = strings.ReplaceAll(program, "__CONTINUE_RECEIPT__", quoteShell(fixture.continueReceipt))
 	t.Cleanup(func() {
 		fixture.close()
 		_ = os.RemoveAll(root)
@@ -457,6 +608,14 @@ func newSupervisorFixture(t *testing.T, program string) *supervisorFixture {
 		t.Fatal(err)
 	}
 	socket := filepath.Join(root, "api.sock")
+	parentInfo, err := os.Stat(filepath.Dir(socket))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parentInfo.Mode().Perm() != 0o700 || filepath.Dir(socket) != root {
+		t.Fatalf("attempt API parent is not exact private fixture root: path=%q mode=%v", filepath.Dir(socket), parentInfo.Mode().Perm())
+	}
+	t.Logf("attempt API fixture parent is exact mode %04o", parentInfo.Mode().Perm())
 	listener, err := api.Listen(socket, operatorToken)
 	if err != nil {
 		t.Fatal(err)
@@ -525,17 +684,25 @@ func (fixture *supervisorFixture) hardSafetyCleanup() {
 		return
 	}
 	identities := make(map[runner.Identity]struct{})
+	fixture.runMu.Lock()
+	runIDs := make([]kernel.RunID, 0, len(fixture.runIDs))
+	for runID := range fixture.runIDs {
+		runIDs = append(runIDs, runID)
+	}
+	fixture.runMu.Unlock()
+	for _, runID := range runIDs {
+		resources, resourceErr := fixture.store.Resources(context.Background(), runID)
+		if resourceErr != nil {
+			fixture.t.Errorf("hard safety resource read: %v", resourceErr)
+			continue
+		}
+		for _, resource := range resources {
+			fixture.addSafetyIdentity(identities, resource)
+		}
+	}
 	for _, recovered := range runs {
 		for _, resource := range recovered.Resources {
-			if resource.Kind == kernel.ResourceRuntimeRoot || resource.Identity.Empty() {
-				continue
-			}
-			identity, identityErr := runnerIdentity(resource.Identity)
-			if identityErr != nil {
-				fixture.t.Errorf("hard safety identity: %v", identityErr)
-				continue
-			}
-			identities[identity] = struct{}{}
+			fixture.addSafetyIdentity(identities, resource)
 		}
 	}
 	for identity := range identities {
@@ -567,6 +734,18 @@ func (fixture *supervisorFixture) hardSafetyCleanup() {
 	}
 }
 
+func (fixture *supervisorFixture) addSafetyIdentity(identities map[runner.Identity]struct{}, resource kernel.Resource) {
+	if resource.Kind == kernel.ResourceRuntimeRoot || resource.Identity.Empty() {
+		return
+	}
+	identity, err := runnerIdentity(resource.Identity)
+	if err != nil {
+		fixture.t.Errorf("hard safety identity: %v", err)
+		return
+	}
+	identities[identity] = struct{}{}
+}
+
 func (fixture *supervisorFixture) assertResourceCensus() {
 	deadline := time.Now().Add(4 * time.Second)
 	for {
@@ -587,6 +766,7 @@ func (fixture *supervisorFixture) assertResourceCensus() {
 
 func (fixture *supervisorFixture) assertTerminal(t *testing.T, run kernel.Run, kind kernel.OutcomeKind) {
 	t.Helper()
+	fixture.trackRun(run.ID)
 	if run.Phase != kernel.RunTerminal || run.Proposal == nil || run.Terminal == nil || run.Proposal.Kind() != kind || run.Terminal.Kind() != kind {
 		t.Fatalf("terminal run = %+v", run)
 	}
@@ -605,9 +785,8 @@ func (fixture *supervisorFixture) assertTerminal(t *testing.T, run kernel.Run, k
 
 func (fixture *supervisorFixture) assertOneWitness(t *testing.T) {
 	t.Helper()
-	body, err := os.ReadFile(fixture.witness)
-	if err != nil || string(body) != "x" {
-		t.Fatalf("provider execution witness = %q, %v", body, err)
+	if err := exactOneWitness(fixture.witness); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -635,11 +814,18 @@ func (fixture *supervisorFixture) assertReleased(t *testing.T, run kernel.Run) {
 
 func (fixture *supervisorFixture) resources(t *testing.T, runID kernel.RunID) []kernel.Resource {
 	t.Helper()
+	fixture.trackRun(runID)
 	resources, err := fixture.store.Resources(context.Background(), runID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return resources
+}
+
+func (fixture *supervisorFixture) trackRun(runID kernel.RunID) {
+	fixture.runMu.Lock()
+	fixture.runIDs[runID] = struct{}{}
+	fixture.runMu.Unlock()
 }
 
 func (fixture *supervisorFixture) changeName(t *testing.T, run kernel.Run) string {
@@ -664,7 +850,38 @@ func supervisorProgram(t *testing.T, waitAfterRequest, noRequest bool) string {
 	if waitAfterRequest {
 		wait = "sleep 30\n"
 	}
-	return "set -eu\nprintf x > __WITNESS__\n" + request + wait
+	return "set -eu\nprintf x >> __WITNESS__\n" + request + wait
+}
+
+func descendantProgram(t *testing.T) string {
+	t.Helper()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return "set -eu\nprintf x >> __WITNESS__\nsleep 30 &\nprintf '%s' \"$!\" > __CHILD_RECEIPT__\nwhile [ ! -f __CONTINUE_RECEIPT__ ]; do sleep 0.01; done\n" +
+		quoteShell(executable) + " --supervisor-attempt-succeed typed-success\nsleep 30\n"
+}
+
+func exactOneWitness(path string) error {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("provider execution witness read: %w", err)
+	}
+	if string(body) != "x" {
+		return fmt.Errorf("provider execution witness = %q, want exactly one append", body)
+	}
+	return nil
+}
+
+func TestExactOneWitnessRejectsDuplicateAppend(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "witness")
+	if err := os.WriteFile(path, []byte("xx"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := exactOneWitness(path); err == nil {
+		t.Fatal("duplicate execution append passed one-execution assertion")
+	}
 }
 
 func cleanupFailureProgram(t *testing.T) string {
@@ -772,6 +989,51 @@ func supervisorWaitForDirectChild(t testing.TB, outer runner.Identity) runner.Id
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+}
+
+func supervisorWaitForPIDReceipt(t testing.TB, path string) int {
+	t.Helper()
+	deadline := time.Now().Add(8 * time.Second)
+	for {
+		body, err := os.ReadFile(path)
+		if err == nil {
+			pid, parseErr := strconv.Atoi(strings.TrimSpace(string(body)))
+			if parseErr != nil || pid < 1 {
+				t.Fatalf("invalid child PID receipt %q: %v", body, parseErr)
+			}
+			return pid
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("provider child PID receipt timeout")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func supervisorIdentityForPID(t testing.TB, pid int) runner.Identity {
+	t.Helper()
+	processes, err := unix.SysctlKinfoProcSlice("kern.proc.all", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, process := range processes {
+		if int(process.Proc.P_pid) != pid || process.Proc.P_stat == 5 {
+			continue
+		}
+		identity := runner.Identity{
+			PID: pid, PGID: int(process.Eproc.Pgid),
+			Birth: runner.Birth{Seconds: process.Proc.P_starttime.Sec, Microseconds: process.Proc.P_starttime.Usec},
+		}
+		if !identity.Valid() {
+			t.Fatalf("invalid child identity %+v", identity)
+		}
+		return identity
+	}
+	t.Fatalf("child PID %d disappeared before exact identity capture", pid)
+	return runner.Identity{}
 }
 
 func supervisorFDCount(t testing.TB) int {

@@ -142,7 +142,8 @@ func (store *Store) AdmitNext(ctx context.Context, agentID AgentID, keys Admissi
 		{keys.Resources.ProviderGroup, ResourceProviderGroup, nil},
 	}
 	for _, resource := range resources {
-		if _, err := tx.connection.ExecContext(ctx, `INSERT INTO resources(id, run_id, kind, state, path, revision, declared_at_ms, updated_at_ms) VALUES(?, ?, ?, 'declared', ?, 1, ?, ?)`, resource.id.Bytes(), keys.RunID.Bytes(), resource.kind.String(), resource.path, at.Int64(), at.Int64()); err != nil {
+		inserted, err := tx.connection.ExecContext(ctx, `INSERT INTO resources(id, run_id, kind, state, path, revision, declared_at_ms, updated_at_ms) VALUES(?, ?, ?, 'declared', ?, 1, ?, ?)`, resource.id.Bytes(), keys.RunID.Bytes(), resource.kind.String(), resource.path, at.Int64(), at.Int64())
+		if err := requireOneRow(inserted, err); err != nil {
 			return AdmissionResult{}, tx.Rollback(classifyAdmissionConflict(ctx, tx.connection, keys, err))
 		}
 	}

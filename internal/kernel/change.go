@@ -254,14 +254,21 @@ func changeAvailabilityEqual(left, right ChangeAvailability) bool {
 }
 
 func requireOneRow(result sql.Result, err error) error {
+	return requireRows(result, err, 1)
+}
+
+func requireRows(result sql.Result, err error, want int64) error {
 	if err != nil {
 		return err
+	}
+	if result == nil || want < 1 {
+		return ErrRevisionConflict
 	}
 	rows, err := result.RowsAffected()
 	if err != nil {
 		return err
 	}
-	if rows != 1 {
+	if rows != want {
 		return ErrRevisionConflict
 	}
 	return nil

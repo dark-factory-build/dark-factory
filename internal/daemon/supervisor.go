@@ -20,11 +20,13 @@ type SupervisorSpec struct {
 	AttemptSocket    string
 	RunnerExecutable string
 
-	// releaseProvider is a package-test-only seam for the irreversible control
-	// write. Production callers outside daemon cannot set it.
-	releaseProvider func(*runner.AttemptController) error
-	activateOuter   func(*runner.OwnedChild) (runner.FileIdentity, error)
-	afterAdmission  func() error
+	// These unexported hooks are package-test-only ambiguity seams. Production
+	// callers outside daemon cannot set them.
+	releaseProvider       func(*runner.AttemptController) error
+	activateOuter         func(*runner.OwnedChild) (runner.FileIdentity, error)
+	afterAdmission        func() error
+	reconcileAdmission    func(context.Context, kernel.AdmissionKeys) (kernel.AdmissionResult, error)
+	beforeProviderRelease func()
 }
 
 // RunNext admits and synchronously owns one complete shell-worker attempt.

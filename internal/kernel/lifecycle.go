@@ -249,6 +249,11 @@ func (store *Store) FailRun(ctx context.Context, runID RunID, expected Revision,
 	if runID.zero() || !failure.valid() || failure.kind != OutcomeFailed {
 		return Run{}, fmt.Errorf("%w: invalid run failure", ErrInvalidValue)
 	}
+	switch failure.code {
+	case FailureSpawn, FailureActivation, FailureSource, FailureProtocol, FailureInternal:
+	default:
+		return Run{}, fmt.Errorf("%w: failure code is not daemon infrastructure authority", ErrInvalidValue)
+	}
 	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return Run{}, err
@@ -312,7 +317,8 @@ func (store *Store) enterFinalizing(ctx context.Context, tx *writeTx, run Run, e
 	if err := requireOneRow(updated, err); err != nil {
 		return Run{}, tx.Rollback(err)
 	}
-	if _, err := tx.connection.ExecContext(ctx, `UPDATE resources SET state = 'releasing', revision = revision + 1, updated_at_ms = ? WHERE run_id = ? AND state IN ('declared', 'active')`, at.Int64(), run.ID.Bytes()); err != nil {
+	releasing, err := tx.connection.ExecContext(ctx, `UPDATE resources SET state = 'releasing', revision = revision + 1, updated_at_ms = ? WHERE run_id = ? AND state IN ('declared', 'active')`, at.Int64(), run.ID.Bytes())
+	if err := requireRows(releasing, err, 4); err != nil {
 		return Run{}, tx.Rollback(err)
 	}
 	if err := appendInvalidations(ctx, tx.connection, at, []pendingInvalidation{{kind: EntityRun, id: run.ID.Bytes(), revision: expected.Int64() + 1}}); err != nil {
@@ -385,7 +391,8 @@ func (store *Store) ObserveRunnerExit(ctx context.Context, runID RunID, expected
 		if err := requireOneRow(updated, err); err != nil {
 			return Run{}, tx.Rollback(err)
 		}
-		if _, err := tx.connection.ExecContext(ctx, `UPDATE resources SET state = 'releasing', revision = revision + 1, updated_at_ms = ? WHERE run_id = ? AND state IN ('declared', 'active')`, at.Int64(), run.ID.Bytes()); err != nil {
+		releasing, err := tx.connection.ExecContext(ctx, `UPDATE resources SET state = 'releasing', revision = revision + 1, updated_at_ms = ? WHERE run_id = ? AND state IN ('declared', 'active')`, at.Int64(), run.ID.Bytes())
+		if err := requireRows(releasing, err, 4); err != nil {
 			return Run{}, tx.Rollback(err)
 		}
 	} else if run.Phase == RunFinalizing {

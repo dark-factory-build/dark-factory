@@ -143,14 +143,27 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		err = spec.afterAdmission()
 	}
 	if err != nil {
-		reconciled, reconcileErr := daemon.store.ReconcileAdmission(context.Background(), admissionKeys)
-		if reconcileErr != nil {
-			return kernel.Run{}, errors.Join(err, reconcileErr)
+		// Admission commit acknowledgement is ambiguous. Retain the freshly
+		// generated bearer and exact keys until SQLite proves either that no
+		// admission committed or that its authority has been revoked.
+		reconcileAdmission := daemon.store.ReconcileAdmission
+		if spec.reconcileAdmission != nil {
+			reconcileAdmission = spec.reconcileAdmission
 		}
-		if reconciled.Admitted() {
-			return daemon.failRun(*reconciled.Run, kernel.FailureInternal, err)
+		for {
+			reconciled, reconcileErr := reconcileAdmission(context.Background(), admissionKeys)
+			if reconcileErr != nil {
+				time.Sleep(25 * time.Millisecond)
+				continue
+			}
+			if reconciled.Admitted() {
+				return daemon.failRun(*reconciled.Run, kernel.FailureInternal, err)
+			}
+			if reconciled.Reason == kernel.NoAdmissionNotReconciled {
+				return kernel.Run{}, err
+			}
+			time.Sleep(25 * time.Millisecond)
 		}
-		return kernel.Run{}, err
 	}
 	if !admission.Admitted() {
 		return kernel.Run{}, fmt.Errorf("%w: no admission (%s)", kernel.ErrConflict, admission.Reason.String())
@@ -396,6 +409,15 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	if spec.releaseProvider != nil {
 		releaseProvider = spec.releaseProvider
 	}
+	if spec.beforeProviderRelease != nil {
+		spec.beforeProviderRelease()
+	}
+	// This check is the cancellation/release linearization point. Cancellation
+	// already visible here leaves the provider inert; cancellation racing after
+	// it is handled as a released attempt and converges through terminal evidence.
+	if err := ctx.Err(); err != nil {
+		return daemon.failRun(run, kernel.FailureInternal, err)
+	}
 	if err := releaseProvider(controller); err != nil {
 		return daemon.failRun(run, kernel.FailureProtocol, err)
 	}
@@ -589,6 +611,9 @@ func (daemon *Daemon) releaseResource(ctx context.Context, runID kernel.RunID, r
 			err = kernel.ErrCorruptState
 		}
 		return err
+	}
+	if resource.RunID != runID {
+		return kernel.ErrConflict
 	}
 	if resource.State == kernel.ResourceReleased {
 		return nil

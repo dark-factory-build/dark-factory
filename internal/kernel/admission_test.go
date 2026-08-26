@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -242,6 +243,39 @@ func TestAdmissionTaskGuardFailureRollsBackEntireFootprint(t *testing.T) {
 	fresh, found, err := store.Task(context.Background(), task.ID)
 	if err != nil || !found || fresh.Status != TaskQueued {
 		t.Fatalf("task after guarded rollback = %+v found=%v err=%v", fresh, found, err)
+	}
+}
+
+func TestAdmissionRequiresEveryDeclaredResourceInsert(t *testing.T) {
+	for _, kind := range []ResourceKind{ResourceRuntimeRoot, ResourceRunnerProcess, ResourceProviderProcess, ResourceProviderGroup} {
+		t.Run(kind.String(), func(t *testing.T) {
+			store, _, project, agent := newAdmissionStore(t, RoleWorker, 2)
+			defer store.Close()
+			task, err := store.EnqueueTask(context.Background(), NewTask{
+				ID: taskID(t, 109), ProjectID: project.ID, AssignedAgentID: agent.ID,
+				IncarnationID: incarnationID(t, 110), Title: "resource insert guard",
+			}, mustTime(t, 5))
+			if err != nil {
+				t.Fatal(err)
+			}
+			trigger := fmt.Sprintf(`CREATE TRIGGER suppress_resource_insert BEFORE INSERT ON resources WHEN NEW.kind = '%s' BEGIN SELECT RAISE(IGNORE); END`, kind.String())
+			if _, err := store.writer.Exec(trigger); err != nil {
+				t.Fatal(err)
+			}
+			before := admissionFootprint(t, store)
+			reservation := &ChangeReservation{ID: changeID(t, 111), SourceRoot: "/changes/resource-guard", StagingRoot: "/changes/resource-guard-stage"}
+			result, err := store.AdmitNext(context.Background(), agent.ID, admissionKeys(t, 112, reservation), mustTime(t, 10))
+			if !errors.Is(err, ErrRevisionConflict) || result.Admitted() {
+				t.Fatalf("suppressed %s admission = %+v, %v", kind.String(), result, err)
+			}
+			if after := admissionFootprint(t, store); after != before {
+				t.Fatalf("suppressed %s left footprint: before=%+v after=%+v", kind.String(), before, after)
+			}
+			fresh, found, err := store.Task(context.Background(), task.ID)
+			if err != nil || !found || fresh.Status != TaskQueued {
+				t.Fatalf("suppressed %s task = %+v found=%v err=%v", kind.String(), fresh, found, err)
+			}
+		})
 	}
 }
 
