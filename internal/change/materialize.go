@@ -75,6 +75,8 @@ type materializeStep string
 const (
 	stepAfterPrepareMkdir     materializeStep = "after prepare mkdir"
 	stepBeforePrepareFsync    materializeStep = "before prepare fsync"
+	stepBeforeAdoptOpen       materializeStep = "before adopt open"
+	stepAfterAdoptOpen        materializeStep = "after adopt open"
 	stepDuringBlobHash        materializeStep = "during blob hash"
 	stepBeforeEntryParentOpen materializeStep = "before entry parent open"
 	stepBeforeFileCreate      materializeStep = "before file create"

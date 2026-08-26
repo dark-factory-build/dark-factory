@@ -43,6 +43,105 @@ func Prepare(ctx context.Context, parent, target, staging string) (*Prepared, er
 	return prepare(ctx, parent, target, staging, nil)
 }
 
+// AdoptPrepared opens one caller-declared staging directory retained after a
+// crash before its identity was recorded. It accepts only the exact empty,
+// private stage and never mutates or removes either declared path.
+func AdoptPrepared(ctx context.Context, parent, target, staging string) (*Prepared, error) {
+	return adoptPrepared(ctx, parent, target, staging, nil)
+}
+
+func adoptPrepared(ctx context.Context, parent, target, staging string, hook materializeHook) (*Prepared, error) {
+	if err := validatePrepareLocator(parent, target, staging); err != nil {
+		return nil, err
+	}
+	if err := checkpoint(ctx, hook, materializePoint{}); err != nil {
+		return nil, err
+	}
+	parentFD, err := openVerifiedParent(parent)
+	if err != nil {
+		return nil, err
+	}
+	closeParent := true
+	defer func() {
+		if closeParent {
+			_ = unix.Close(parentFD)
+		}
+	}()
+	parentID, err := verifySecureParent(parentFD)
+	if err != nil {
+		return nil, err
+	}
+	if err := verifyParentPath(parent, parentID); err != nil {
+		return nil, err
+	}
+	if err := requireNamedAbsent(parentFD, parent, target); err != nil {
+		return nil, err
+	}
+
+	identity, err := namedIdentity(parentFD, staging)
+	if errors.Is(err, unix.ENOENT) {
+		return nil, &ValidationError{Reason: "declared staging directory does not exist"}
+	}
+	if err != nil {
+		return nil, unresolved("identify retained staging", parent, staging, StageIdentity{}, false, err)
+	}
+	if !identity.valid() {
+		return nil, unresolved("represent retained staging identity", parent, staging, identity, true, &ValidationError{Reason: "stage identity is not representable in Store"})
+	}
+	point := materializePoint{step: stepBeforeAdoptOpen, parent: parent, stagingName: staging, targetName: target}
+	if err := checkpoint(ctx, hook, point); err != nil {
+		return nil, unresolved("open retained staging", parent, staging, identity, true, err)
+	}
+	stageFD, err := unix.Openat(parentFD, staging, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
+	if err != nil {
+		return nil, unresolved("open retained staging", parent, staging, identity, true, err)
+	}
+	closeStage := true
+	defer func() {
+		if closeStage {
+			_ = unix.Close(stageFD)
+		}
+	}()
+	point.step = stepAfterAdoptOpen
+	if err := checkpoint(ctx, hook, point); err != nil {
+		return nil, unresolved("validate opened retained staging", parent, staging, identity, true, err)
+	}
+	if err := verifyAdoptableStage(stageFD, identity); err != nil {
+		return nil, unresolved("verify opened retained staging", parent, staging, identity, true, err)
+	}
+	if err := verifyNamedAdoptableStage(parentFD, staging, identity); err != nil {
+		return nil, unresolved("bind retained staging name", parent, staging, identity, true, err)
+	}
+	if err := verifyParentFD(parentFD, parentID); err != nil {
+		return nil, unresolved("verify retained staging parent", parent, staging, identity, true, err)
+	}
+	if err := verifyParentPath(parent, parentID); err != nil {
+		return nil, unresolved("bind retained staging parent", parent, staging, identity, true, err)
+	}
+	hasEntry, err := directoryHasEntry(ctx, stageFD)
+	if err != nil {
+		return nil, unresolved("inspect retained staging contents", parent, staging, identity, true, err)
+	}
+	if hasEntry {
+		return nil, unresolved("inspect retained staging contents", parent, staging, identity, true, &ValidationError{Reason: "retained staging directory is not empty"})
+	}
+	if err := verifyAdoptableStage(stageFD, identity); err != nil {
+		return nil, unresolved("reverify opened retained staging", parent, staging, identity, true, err)
+	}
+	if err := verifyNamedAdoptableStage(parentFD, staging, identity); err != nil {
+		return nil, unresolved("rebind retained staging name", parent, staging, identity, true, err)
+	}
+	if err := verifyParentPath(parent, parentID); err != nil {
+		return nil, unresolved("rebind retained staging parent", parent, staging, identity, true, err)
+	}
+	if err := requireNamedAbsent(parentFD, parent, target); err != nil {
+		return nil, unresolved("recheck absent Change target", parent, staging, identity, true, err)
+	}
+	closeParent = false
+	closeStage = false
+	return newPrepared(parent, target, staging, parentFD, stageFD, parentID, identity), nil
+}
+
 func prepare(ctx context.Context, parent, target, staging string, hook materializeHook) (*Prepared, error) {
 	if err := validatePrepareLocator(parent, target, staging); err != nil {
 		return nil, err
@@ -135,10 +234,14 @@ func prepare(ctx context.Context, parent, target, staging string, hook materiali
 		unix.Close(parentFD)
 		return nil, unresolved("fsync declared staging parent", parent, staging, identity, true, err)
 	}
+	return newPrepared(parent, target, staging, parentFD, stageFD, parentID, identity), nil
+}
+
+func newPrepared(parent, target, staging string, parentFD, stageFD int, parentID, identity StageIdentity) *Prepared {
 	return &Prepared{
 		parent: parent, target: target, staging: staging,
 		parentFD: parentFD, stageFD: stageFD, parentID: parentID, identity: identity,
-	}, nil
+	}
 }
 
 // Identity returns the exact retained staging root identity.
@@ -599,6 +702,45 @@ func namedEntryExists(parentFD int, name string) (bool, error) {
 		return false, nil
 	}
 	return false, fmt.Errorf("inspect declared Change path: %w", err)
+}
+
+func requireNamedAbsent(parentFD int, parent, name string) error {
+	exists, err := namedEntryExists(parentFD, name)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return &ConflictError{Target: changePath(parent, name)}
+	}
+	return nil
+}
+
+func verifyAdoptableStage(fd int, expected StageIdentity) error {
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return err
+	}
+	if !adoptableStageAuthority(stat, expected, uint32(os.Geteuid())) {
+		return errors.New("retained staging authority or identity changed")
+	}
+	return nil
+}
+
+func verifyNamedAdoptableStage(parentFD int, name string, expected StageIdentity) error {
+	var stat unix.Stat_t
+	if err := unix.Fstatat(parentFD, name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return err
+	}
+	if !adoptableStageAuthority(stat, expected, uint32(os.Geteuid())) {
+		return errors.New("named retained staging authority or identity changed")
+	}
+	return nil
+}
+
+func adoptableStageAuthority(stat unix.Stat_t, expected StageIdentity, effectiveUID uint32) bool {
+	// An empty Darwin directory has exactly its name and dot link. More links
+	// imply a child directory or authority the adopter did not create.
+	return rootAuthority(stat, expected, effectiveUID) && stat.Nlink == 2
 }
 
 func verifyOpenRoot(fd int, expected StageIdentity) error {

@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
@@ -81,6 +82,352 @@ func TestPrepareRetainsDeclaredEmptyStageBeforeExplicitPopulate(t *testing.T) {
 		t.Fatalf("Populate after Close = %T %v, want LifecycleError", err, err)
 	}
 	removeRecorded(t, parent, "closed-stage", closedID)
+}
+
+func TestAdoptPreparedRetainsExactIdentityAndUsesExistingLifecycle(t *testing.T) {
+	parent := secureTempDir(t)
+	defer os.RemoveAll(parent)
+	fixture := newFixture(t, "sha1", []fixtureFile{{[]byte("nested/a"), "100644", []byte("a")}})
+	original := mustPrepare(t, parent, "change", "crash-stage")
+	wantIdentity := original.Identity()
+	if err := original.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	adopted, err := AdoptPrepared(context.Background(), parent, "change", "crash-stage")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !adopted.Identity().Equal(wantIdentity) {
+		t.Fatalf("adopted identity=%+v want=%+v", adopted.Identity(), wantIdentity)
+	}
+	published, err := adopted.PopulateAndPublish(context.Background(), fixture.manifest, fixture.source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := adopted.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !published.Facts().Identity().Equal(wantIdentity) {
+		t.Fatalf("published identity=%+v want=%+v", published.Facts().Identity(), wantIdentity)
+	}
+	assertExactTree(t, published.Path(), fixture)
+}
+
+func TestAdoptPreparedRequiresAbsentTargetAndEmptyPrivateStageWithoutMutation(t *testing.T) {
+	t.Run("missing stage", func(t *testing.T) {
+		parent := secureTempDir(t)
+		defer os.RemoveAll(parent)
+		if _, err := AdoptPrepared(context.Background(), parent, "target", "stage"); err == nil {
+			t.Fatal("missing stage adopted")
+		}
+		assertDirectoryEmpty(t, parent)
+	})
+
+	t.Run("existing target", func(t *testing.T) {
+		parent := secureTempDir(t)
+		defer os.RemoveAll(parent)
+		prepared := mustPrepare(t, parent, "target", "stage")
+		identity := prepared.Identity()
+		if err := prepared.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(parent, "target"), []byte("foreign"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := AdoptPrepared(context.Background(), parent, "target", "stage"); err == nil {
+			t.Fatal("stage adopted despite existing target")
+		}
+		assertEmptyExactDirectory(t, filepath.Join(parent, "stage"), identity)
+		if data, err := os.ReadFile(filepath.Join(parent, "target")); err != nil || string(data) != "foreign" {
+			t.Fatalf("target changed: %q %v", data, err)
+		}
+	})
+
+	t.Run("target appears after stage open", func(t *testing.T) {
+		parent := secureTempDir(t)
+		defer os.RemoveAll(parent)
+		prepared := mustPrepare(t, parent, "target", "stage")
+		identity := prepared.Identity()
+		if err := prepared.Close(); err != nil {
+			t.Fatal(err)
+		}
+		hook := func(point materializePoint) error {
+			if point.step == stepAfterAdoptOpen {
+				return os.WriteFile(filepath.Join(parent, "target"), []byte("foreign"), 0o600)
+			}
+			return nil
+		}
+		if adopted, err := adoptPrepared(context.Background(), parent, "target", "stage", hook); err == nil {
+			_ = adopted.Close()
+			t.Fatal("stage adopted after target appeared")
+		}
+		assertEmptyExactDirectory(t, filepath.Join(parent, "stage"), identity)
+		if data, err := os.ReadFile(filepath.Join(parent, "target")); err != nil || string(data) != "foreign" {
+			t.Fatalf("target changed: %q %v", data, err)
+		}
+	})
+
+	mutations := []struct {
+		name   string
+		create func(testing.TB, string)
+		check  func(testing.TB, string)
+	}{
+		{
+			name: "wrong mode",
+			create: func(t testing.TB, path string) {
+				t.Helper()
+				if err := os.Mkdir(path, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+			check: func(t testing.TB, path string) {
+				t.Helper()
+				if info, err := os.Lstat(path); err != nil || !info.IsDir() || info.Mode().Perm() != 0o755 {
+					t.Fatalf("wrong-mode stage changed: %v %v", info, err)
+				}
+			},
+		},
+		{
+			name: "regular file",
+			create: func(t testing.TB, path string) {
+				t.Helper()
+				if err := os.WriteFile(path, []byte("retained"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			check: func(t testing.TB, path string) {
+				t.Helper()
+				if data, err := os.ReadFile(path); err != nil || string(data) != "retained" {
+					t.Fatalf("regular stage changed: %q %v", data, err)
+				}
+			},
+		},
+		{
+			name: "symlink",
+			create: func(t testing.TB, path string) {
+				t.Helper()
+				if err := os.Symlink("elsewhere", path); err != nil {
+					t.Fatal(err)
+				}
+			},
+			check: func(t testing.TB, path string) {
+				t.Helper()
+				if target, err := os.Readlink(path); err != nil || target != "elsewhere" {
+					t.Fatalf("symlink stage changed: %q %v", target, err)
+				}
+			},
+		},
+		{
+			name: "fifo",
+			create: func(t testing.TB, path string) {
+				t.Helper()
+				if err := unix.Mkfifo(path, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			check: func(t testing.TB, path string) {
+				t.Helper()
+				if info, err := os.Lstat(path); err != nil || info.Mode()&os.ModeNamedPipe == 0 {
+					t.Fatalf("fifo stage changed: %v %v", info, err)
+				}
+			},
+		},
+	}
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			parent := secureTempDir(t)
+			defer os.RemoveAll(parent)
+			stage := filepath.Join(parent, "stage")
+			mutation.create(t, stage)
+			if _, err := AdoptPrepared(context.Background(), parent, "target", "stage"); err == nil {
+				t.Fatal("unsafe stage adopted")
+			}
+			mutation.check(t, stage)
+		})
+	}
+
+	contents := []struct {
+		name string
+		add  func(testing.TB, string)
+	}{
+		{"file", func(t testing.TB, stage string) {
+			if err := os.WriteFile(filepath.Join(stage, "partial"), []byte("retained"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"hidden partial", func(t testing.TB, stage string) {
+			if err := os.WriteFile(filepath.Join(stage, ".partial"), []byte("retained"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"directory", func(t testing.TB, stage string) {
+			if err := os.Mkdir(filepath.Join(stage, "nested"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"symlink entry", func(t testing.TB, stage string) {
+			if err := os.Symlink("outside", filepath.Join(stage, "partial")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"deep", func(t testing.TB, stage string) {
+			path := stage
+			for i := 0; i < 20; i++ {
+				path = filepath.Join(path, fmt.Sprintf("d-%d", i))
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}},
+		{"wide", func(t testing.TB, stage string) {
+			for i := 0; i < 100; i++ {
+				if err := os.WriteFile(filepath.Join(stage, fmt.Sprintf("f-%d", i)), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}},
+	}
+	for _, content := range contents {
+		t.Run("nonempty "+content.name, func(t *testing.T) {
+			parent := secureTempDir(t)
+			defer os.RemoveAll(parent)
+			prepared := mustPrepare(t, parent, "target", "stage")
+			if err := prepared.Close(); err != nil {
+				t.Fatal(err)
+			}
+			stage := filepath.Join(parent, "stage")
+			content.add(t, stage)
+			if _, err := AdoptPrepared(context.Background(), parent, "target", "stage"); err == nil {
+				t.Fatal("nonempty stage adopted")
+			}
+			entries, err := os.ReadDir(stage)
+			if err != nil || len(entries) == 0 {
+				t.Fatalf("refusal removed stage contents: %v %v", entries, err)
+			}
+		})
+	}
+}
+
+func TestAdoptPreparedRejectsStageAndParentSwapsAtOpenBoundaries(t *testing.T) {
+	for _, step := range []materializeStep{stepBeforeAdoptOpen, stepAfterAdoptOpen} {
+		t.Run("stage "+string(step), func(t *testing.T) {
+			parent := secureTempDir(t)
+			defer os.RemoveAll(parent)
+			prepared := mustPrepare(t, parent, "target", "stage")
+			identity := prepared.Identity()
+			if err := prepared.Close(); err != nil {
+				t.Fatal(err)
+			}
+			hook := func(point materializePoint) error {
+				if point.step != step {
+					return nil
+				}
+				if err := os.Rename(filepath.Join(parent, "stage"), filepath.Join(parent, "held-stage")); err != nil {
+					return err
+				}
+				return os.Mkdir(filepath.Join(parent, "stage"), 0o700)
+			}
+			if adopted, err := adoptPrepared(context.Background(), parent, "target", "stage", hook); err == nil {
+				_ = adopted.Close()
+				t.Fatal("stage swap adopted")
+			}
+			assertEmptyExactDirectory(t, filepath.Join(parent, "held-stage"), identity)
+			if info, err := os.Lstat(filepath.Join(parent, "stage")); err != nil || !info.IsDir() {
+				t.Fatalf("replacement stage not retained: %v %v", info, err)
+			}
+		})
+
+		t.Run("parent "+string(step), func(t *testing.T) {
+			root := secureTempDir(t)
+			defer os.RemoveAll(root)
+			parent := filepath.Join(root, "parent")
+			if err := os.Mkdir(parent, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			prepared := mustPrepare(t, parent, "target", "stage")
+			identity := prepared.Identity()
+			if err := prepared.Close(); err != nil {
+				t.Fatal(err)
+			}
+			hook := func(point materializePoint) error {
+				if point.step != step {
+					return nil
+				}
+				if err := os.Rename(parent, filepath.Join(root, "held-parent")); err != nil {
+					return err
+				}
+				return os.Mkdir(parent, 0o700)
+			}
+			if adopted, err := adoptPrepared(context.Background(), parent, "target", "stage", hook); err == nil {
+				_ = adopted.Close()
+				t.Fatal("parent swap adopted")
+			}
+			assertEmptyExactDirectory(t, filepath.Join(root, "held-parent", "stage"), identity)
+			assertDirectoryEmpty(t, parent)
+		})
+	}
+}
+
+func TestAdoptPreparedCancellationRepeatedOpenAndDescriptorOwnership(t *testing.T) {
+	previousGC := debug.SetGCPercent(-1)
+	defer debug.SetGCPercent(previousGC)
+	parent := secureTempDir(t)
+	defer os.RemoveAll(parent)
+	prepared := mustPrepare(t, parent, "target", "stage")
+	identity := prepared.Identity()
+	if err := prepared.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := AdoptPrepared(cancelled, parent, "target", "stage"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled adoption = %T %v", err, err)
+	}
+	assertEmptyExactDirectory(t, filepath.Join(parent, "stage"), identity)
+
+	duringOpen, cancelDuringOpen := context.WithCancel(context.Background())
+	hook := func(point materializePoint) error {
+		if point.step == stepAfterAdoptOpen {
+			cancelDuringOpen()
+		}
+		return nil
+	}
+	if _, err := adoptPrepared(duringOpen, parent, "target", "stage", hook); !errors.Is(err, context.Canceled) {
+		t.Fatalf("adoption cancelled after open = %T %v", err, err)
+	}
+	assertEmptyExactDirectory(t, filepath.Join(parent, "stage"), identity)
+
+	before := descriptorCount(t)
+	for i := 0; i < 40; i++ {
+		first, err := AdoptPrepared(context.Background(), parent, "target", "stage")
+		if err != nil {
+			t.Fatal(err)
+		}
+		second, err := AdoptPrepared(context.Background(), parent, "target", "stage")
+		if err != nil {
+			_ = first.Close()
+			t.Fatal(err)
+		}
+		if !first.Identity().Equal(identity) || !second.Identity().Equal(identity) {
+			t.Fatal("repeated adoption changed identity")
+		}
+		if err := first.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := second.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if after := descriptorCount(t); after != before {
+		t.Fatalf("descriptor count before=%d after=%d", before, after)
+	}
+	if created, err := Prepare(context.Background(), parent, "target", "stage"); err == nil {
+		_ = created.Close()
+		t.Fatal("create-only Prepare accepted retained stage")
+	}
+	assertEmptyExactDirectory(t, filepath.Join(parent, "stage"), identity)
 }
 
 func TestPrepareCrashReopenAndPostMkdirFailureRemainLocatable(t *testing.T) {
@@ -512,6 +859,30 @@ func TestRootAuthorityPredicateRejectsOwnerModeSpecialBitsTypeAndIdentity(t *tes
 			candidate := valid
 			mutate(&candidate)
 			if rootAuthority(candidate, identity, uid) {
+				t.Fatalf("%s mutation accepted", name)
+			}
+		})
+	}
+}
+
+func TestAdoptableStageAuthorityRequiresExactEmptyDirectoryLinkCount(t *testing.T) {
+	uid := uint32(os.Geteuid())
+	identity := StageIdentity{device: 11, inode: 22}
+	valid := unix.Stat_t{Dev: int32(identity.device), Ino: identity.inode, Uid: uid, Mode: unix.S_IFDIR | 0o700, Nlink: 2}
+	if !adoptableStageAuthority(valid, identity, uid) {
+		t.Fatal("valid adoptable stage rejected")
+	}
+	for name, mutate := range map[string]func(*unix.Stat_t){
+		"owner":      func(stat *unix.Stat_t) { stat.Uid++ },
+		"mode":       func(stat *unix.Stat_t) { stat.Mode = unix.S_IFDIR | 0o755 },
+		"type":       func(stat *unix.Stat_t) { stat.Mode = unix.S_IFREG | 0o700 },
+		"identity":   func(stat *unix.Stat_t) { stat.Ino++ },
+		"link count": func(stat *unix.Stat_t) { stat.Nlink++ },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := valid
+			mutate(&candidate)
+			if adoptableStageAuthority(candidate, identity, uid) {
 				t.Fatalf("%s mutation accepted", name)
 			}
 		})

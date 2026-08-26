@@ -18,6 +18,11 @@ func TestUnsupportedChangeAPIsFailBeforeFilesystemOrBlobEffect(t *testing.T) {
 	if prepared != nil {
 		t.Fatal("unsupported Prepare returned a handle")
 	}
+	adopted, err := AdoptPrepared(context.Background(), parent, "target", "stage")
+	assertUnsupported(t, err)
+	if adopted != nil {
+		t.Fatal("unsupported AdoptPrepared returned a handle")
+	}
 	if _, err := InspectPublished(context.Background(), parent, "target", StageIdentity{}, ObjectFormat(1), ObjectID{}); err == nil {
 		t.Fatal("unsupported InspectPublished succeeded")
 	}

@@ -15,6 +15,10 @@ func Prepare(context.Context, string, string, string) (*Prepared, error) {
 	return nil, &UnsupportedError{Platform: runtime.GOOS}
 }
 
+func AdoptPrepared(context.Context, string, string, string) (*Prepared, error) {
+	return nil, &UnsupportedError{Platform: runtime.GOOS}
+}
+
 func (p *Prepared) Identity() StageIdentity { return StageIdentity{} }
 
 func (p *Prepared) PopulateAndPublish(context.Context, Manifest, BlobSource) (Published, error) {
