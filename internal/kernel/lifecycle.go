@@ -351,7 +351,7 @@ func (store *Store) ObserveRunnerExit(ctx context.Context, runID RunID, expected
 		}
 		registered := false
 		for _, resource := range resources {
-			if resource.Kind == ResourceRunnerProcess && !resource.Identity.Empty() {
+			if resource.Kind == ResourceRunnerProcess && resource.State != ResourceDeclared && !resource.Identity.Empty() {
 				registered = true
 				break
 			}

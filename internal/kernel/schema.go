@@ -189,9 +189,10 @@ var schemaStatements = []string{
     updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= declared_at_ms),
     released_at_ms INTEGER CHECK (released_at_ms IS NULL OR released_at_ms >= declared_at_ms),
     CHECK ((kind = 'runtime_root' AND path IS NOT NULL AND pid IS NULL AND pgid IS NULL AND birth_digest IS NULL) OR (kind IN ('runner_process', 'provider_process', 'provider_group') AND path IS NULL AND path_dev IS NULL AND path_inode IS NULL)),
-    CHECK ((path_dev IS NULL AND path_inode IS NULL) OR (path_dev IS NOT NULL AND path_inode IS NOT NULL)),
-    CHECK ((pid IS NULL AND pgid IS NULL AND birth_digest IS NULL) OR (pid IS NOT NULL AND pgid IS NOT NULL AND birth_digest IS NOT NULL)),
-    CHECK (state <> 'active' OR (kind = 'runtime_root' AND path_dev IS NOT NULL) OR (kind IN ('runner_process', 'provider_process', 'provider_group') AND pid IS NOT NULL)),
+	    CHECK ((path_dev IS NULL AND path_inode IS NULL) OR (path_dev IS NOT NULL AND path_inode IS NOT NULL)),
+	    CHECK ((pid IS NULL AND pgid IS NULL AND birth_digest IS NULL) OR (pid IS NOT NULL AND pgid IS NOT NULL AND birth_digest IS NOT NULL)),
+	    CHECK (state <> 'declared' OR (path_dev IS NULL AND path_inode IS NULL AND pid IS NULL AND pgid IS NULL AND birth_digest IS NULL)),
+	    CHECK (state <> 'active' OR (kind = 'runtime_root' AND path_dev IS NOT NULL) OR (kind IN ('runner_process', 'provider_process', 'provider_group') AND pid IS NOT NULL)),
     CHECK ((state = 'released') = (released_at_ms IS NOT NULL)),
     CHECK (state <> 'unresolved' OR unresolved_reason IS NOT NULL)
 ) STRICT, WITHOUT ROWID`,

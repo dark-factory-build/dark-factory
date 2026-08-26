@@ -294,7 +294,11 @@ func scanResource(scanner rowScanner) (Resource, bool, error) {
 		}
 	}
 	switch state {
-	case ResourceDeclared, ResourceReleasing:
+	case ResourceDeclared:
+		if resource.ReleasedAt != nil || reason.Valid || !resource.Identity.Empty() {
+			return Resource{}, false, fmt.Errorf("%w: inconsistent declared resource", ErrCorruptState)
+		}
+	case ResourceReleasing:
 		if resource.ReleasedAt != nil || reason.Valid {
 			return Resource{}, false, fmt.Errorf("%w: inconsistent live resource", ErrCorruptState)
 		}
