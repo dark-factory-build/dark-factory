@@ -137,6 +137,34 @@ func TestAdmissionCreatesExactWorkerFootprintAndReconciles(t *testing.T) {
 	}
 }
 
+func TestAdmissionRejectsNonCanonicalOwnershipLocators(t *testing.T) {
+	store, _, project, agent := newAdmissionStore(t, RoleWorker, 2)
+	defer store.Close()
+	_, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 75), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 76), Title: "locator"}, mustTime(t, 5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(*AdmissionKeys){
+		"aliased Change roots": func(keys *AdmissionKeys) {
+			keys.Change = &ChangeReservation{ID: changeID(t, 77), SourceRoot: "/changes/same", StagingRoot: "/changes/same/."}
+		},
+		"unclean runtime": func(keys *AdmissionKeys) { keys.RuntimeRoot = "/runtime/run/." },
+		"root runtime":    func(keys *AdmissionKeys) { keys.RuntimeRoot = "/" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			keys := admissionKeys(t, 78, &ChangeReservation{ID: changeID(t, 79), SourceRoot: "/changes/source", StagingRoot: "/changes/stage"})
+			mutate(&keys)
+			before := admissionFootprint(t, store)
+			if _, err := store.AdmitNext(context.Background(), agent.ID, keys, mustTime(t, 10)); !errors.Is(err, ErrInvalidValue) {
+				t.Fatalf("admission error = %v", err)
+			}
+			if after := admissionFootprint(t, store); after != before {
+				t.Fatalf("invalid locator footprint before=%+v after=%+v", before, after)
+			}
+		})
+	}
+}
+
 func TestIndependentStoresCannotAdmitSameAgentOrTask(t *testing.T) {
 	store, path, project, agent := newAdmissionStore(t, RoleOrchestrator, 4)
 	task, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 80), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 81), Title: "race"}, mustTime(t, 5))

@@ -14,8 +14,8 @@ const (
 
 var schemaStatements = []string{
 	// This slice deliberately creates only the eight kernel authority tables.
-	// Final-v1 agent-message, verification, removal, and checkpoint state is
-	// absent until its owning slice can add it before the incompatible v1 ships.
+	// Final-v1 agent-message, verification-effect, removal, and checkpoint state
+	// is absent until its owning slice can add it before the incompatible v1 ships.
 	`CREATE TABLE factory (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     dispatch_enabled INTEGER NOT NULL CHECK (dispatch_enabled IN (0, 1)),
@@ -27,8 +27,9 @@ var schemaStatements = []string{
 ) STRICT, WITHOUT ROWID`,
 	`CREATE TABLE projects (
     id BLOB PRIMARY KEY CHECK (length(id) = 16),
-    name TEXT NOT NULL CHECK (length(CAST(name AS BLOB)) BETWEEN 1 AND 128),
-    root TEXT NOT NULL CHECK (length(CAST(root AS BLOB)) BETWEEN 1 AND 4096 AND substr(root, 1, 1) = '/'),
+	    name TEXT NOT NULL CHECK (length(CAST(name AS BLOB)) BETWEEN 1 AND 128),
+	    root TEXT NOT NULL CHECK (length(CAST(root AS BLOB)) BETWEEN 1 AND 4096 AND substr(root, 1, 1) = '/'),
+	    verification_policy TEXT NOT NULL CHECK (verification_policy IN ('none', 'rust_workspace_test', 'go_workspace_test')),
     revision INTEGER NOT NULL CHECK (revision >= 1),
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
     updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms)
@@ -130,14 +131,15 @@ var schemaStatements = []string{
     provider TEXT NOT NULL CHECK (provider IN ('claude_code', 'codex', 'shell')),
     execution_mode TEXT NOT NULL CHECK (execution_mode IN ('plan_only', 'workspace_write', 'unrestricted')),
     model TEXT CHECK (model IS NULL OR length(CAST(model AS BLOB)) BETWEEN 1 AND 128),
-    reasoning_effort TEXT CHECK (reasoning_effort IS NULL OR reasoning_effort IN ('low', 'medium', 'high', 'xhigh', 'max', 'ultra')),
-    phase TEXT NOT NULL CHECK (phase IN ('admitted', 'running', 'finalizing', 'terminal')),
+	    reasoning_effort TEXT CHECK (reasoning_effort IS NULL OR reasoning_effort IN ('low', 'medium', 'high', 'xhigh', 'max', 'ultra')),
+	    verification_policy TEXT NOT NULL CHECK (verification_policy IN ('none', 'rust_workspace_test', 'go_workspace_test')),
+	    phase TEXT NOT NULL CHECK (phase IN ('admitted', 'running', 'finalizing', 'terminal')),
     proposal_kind TEXT CHECK (proposal_kind IS NULL OR proposal_kind IN ('succeeded', 'blocked', 'failed', 'cancelled')),
     proposal_code TEXT CHECK (proposal_code IS NULL OR proposal_code IN ('spawn', 'activation', 'source', 'runner_exit', 'protocol', 'internal')),
     proposal_detail TEXT CHECK (proposal_detail IS NULL OR length(CAST(proposal_detail AS BLOB)) BETWEEN 1 AND 4096),
     proposal_result TEXT CHECK (proposal_result IS NULL OR length(CAST(proposal_result AS BLOB)) <= 131072),
     terminal_kind TEXT CHECK (terminal_kind IS NULL OR terminal_kind IN ('succeeded', 'blocked', 'failed', 'cancelled')),
-    terminal_code TEXT CHECK (terminal_code IS NULL OR terminal_code IN ('spawn', 'activation', 'source', 'runner_exit', 'protocol', 'internal')),
+	    terminal_code TEXT CHECK (terminal_code IS NULL OR terminal_code IN ('spawn', 'activation', 'source', 'runner_exit', 'protocol', 'internal', 'unverifiable')),
     terminal_detail TEXT CHECK (terminal_detail IS NULL OR length(CAST(terminal_detail AS BLOB)) BETWEEN 1 AND 4096),
     terminal_result TEXT CHECK (terminal_result IS NULL OR length(CAST(terminal_result AS BLOB)) <= 131072),
     credential_digest BLOB NOT NULL CHECK (length(credential_digest) = 32),
@@ -160,7 +162,7 @@ var schemaStatements = []string{
     CHECK ((proposal_kind IS NULL AND proposal_code IS NULL AND proposal_detail IS NULL AND proposal_result IS NULL) OR (proposal_kind = 'succeeded' AND proposal_code IS NULL AND proposal_detail IS NULL AND proposal_result IS NOT NULL) OR (proposal_kind = 'blocked' AND proposal_code IS NULL AND proposal_detail IS NOT NULL AND proposal_result IS NULL) OR (proposal_kind = 'failed' AND proposal_code IS NOT NULL AND proposal_result IS NULL) OR (proposal_kind = 'cancelled' AND proposal_code IS NULL AND proposal_detail IS NOT NULL AND proposal_result IS NULL)),
     CHECK ((terminal_kind IS NULL AND terminal_code IS NULL AND terminal_detail IS NULL AND terminal_result IS NULL) OR (terminal_kind = 'succeeded' AND terminal_code IS NULL AND terminal_detail IS NULL AND terminal_result IS NOT NULL) OR (terminal_kind = 'blocked' AND terminal_code IS NULL AND terminal_detail IS NOT NULL AND terminal_result IS NULL) OR (terminal_kind = 'failed' AND terminal_code IS NOT NULL AND terminal_result IS NULL) OR (terminal_kind = 'cancelled' AND terminal_code IS NULL AND terminal_detail IS NOT NULL AND terminal_result IS NULL)),
     CHECK ((phase = 'admitted' AND running_at_ms IS NULL AND finalizing_at_ms IS NULL AND terminal_at_ms IS NULL AND proposal_kind IS NULL AND terminal_kind IS NULL AND credential_revoked_at_ms IS NULL) OR (phase = 'running' AND running_at_ms IS NOT NULL AND finalizing_at_ms IS NULL AND terminal_at_ms IS NULL AND proposal_kind IS NULL AND terminal_kind IS NULL AND credential_revoked_at_ms IS NULL) OR (phase = 'finalizing' AND finalizing_at_ms IS NOT NULL AND terminal_at_ms IS NULL AND proposal_kind IS NOT NULL AND terminal_kind IS NULL AND credential_revoked_at_ms IS NOT NULL) OR (phase = 'terminal' AND finalizing_at_ms IS NOT NULL AND terminal_at_ms IS NOT NULL AND proposal_kind IS NOT NULL AND terminal_kind IS NOT NULL AND credential_revoked_at_ms IS NOT NULL)),
-    CHECK (phase <> 'terminal' OR (terminal_kind = proposal_kind AND terminal_code IS proposal_code AND terminal_detail IS proposal_detail AND terminal_result IS proposal_result)),
+	    CHECK (phase <> 'terminal' OR (terminal_kind = proposal_kind AND terminal_code IS proposal_code AND terminal_detail IS proposal_detail AND terminal_result IS proposal_result) OR (role = 'worker' AND verification_policy <> 'none' AND proposal_kind = 'succeeded' AND terminal_kind = 'failed' AND terminal_code = 'unverifiable' AND terminal_detail IS NOT NULL AND terminal_result IS NULL)),
     CHECK ((runner_exit_sequence IS NULL AND runner_exit_code IS NULL AND runner_exit_signal IS NULL AND runner_exit_at_ms IS NULL) OR (runner_exit_sequence IS NOT NULL AND runner_exit_at_ms IS NOT NULL AND ((runner_exit_code IS NOT NULL AND runner_exit_signal IS NULL) OR (runner_exit_code IS NULL AND runner_exit_signal IS NOT NULL))))
 ) STRICT, WITHOUT ROWID`,
 	`CREATE UNIQUE INDEX runs_credential_digest_unique ON runs(credential_digest)`,

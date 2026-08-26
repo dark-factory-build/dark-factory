@@ -29,11 +29,107 @@ func validateDurableControls(ctx context.Context, connection *sql.Conn) error {
 	if err := validateResources(ctx, connection); err != nil {
 		return err
 	}
+	if err := validateRunResourceCoupling(ctx, connection); err != nil {
+		return err
+	}
+	if err := validateResourceIdentityCollisions(ctx, connection); err != nil {
+		return err
+	}
 	return validateInvalidations(ctx, connection, state)
 }
 
+func validateResourceIdentityCollisions(ctx context.Context, connection *sql.Conn) error {
+	rows, err := connection.QueryContext(ctx, `SELECT left_resource.run_id, left_resource.kind, right_resource.run_id, right_resource.kind
+		FROM resources AS left_resource
+		JOIN resources AS right_resource ON left_resource.id < right_resource.id AND (
+			(left_resource.path_dev IS NOT NULL AND left_resource.path_dev = right_resource.path_dev AND left_resource.path_inode = right_resource.path_inode) OR
+			(left_resource.pid IS NOT NULL AND left_resource.pid = right_resource.pid AND left_resource.pgid = right_resource.pgid AND left_resource.birth_digest = right_resource.birth_digest)
+		)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var leftRunRaw, rightRunRaw []byte
+		var leftKindRaw, rightKindRaw string
+		if err := rows.Scan(&leftRunRaw, &leftKindRaw, &rightRunRaw, &rightKindRaw); err != nil {
+			return err
+		}
+		leftRun, leftRunErr := RunIDFromBytes(leftRunRaw)
+		rightRun, rightRunErr := RunIDFromBytes(rightRunRaw)
+		leftKind, leftKindErr := parseResourceKind(leftKindRaw)
+		rightKind, rightKindErr := parseResourceKind(rightKindRaw)
+		providerPair := leftRun == rightRun && (leftKind == ResourceProviderProcess && rightKind == ResourceProviderGroup || leftKind == ResourceProviderGroup && rightKind == ResourceProviderProcess)
+		if leftRunErr != nil || rightRunErr != nil || leftKindErr != nil || rightKindErr != nil || !providerPair {
+			return fmt.Errorf("%w: resource identities collide", ErrCorruptState)
+		}
+	}
+	return rows.Err()
+}
+
+func validateRunResourceCoupling(ctx context.Context, connection *sql.Conn) error {
+	rows, err := connection.QueryContext(ctx, `SELECT `+runColumns+` FROM runs`)
+	if err != nil {
+		return err
+	}
+	var runs []Run
+	for rows.Next() {
+		run, found, err := scanRun(rows)
+		if err != nil || !found {
+			rows.Close()
+			if err == nil {
+				err = ErrCorruptState
+			}
+			return err
+		}
+		runs = append(runs, run)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, run := range runs {
+		resources, err := resourcesForRun(ctx, connection, run.ID)
+		if err != nil || !resourcesMatchRunPhase(run.Phase, resources) {
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("%w: resources do not match run phase", ErrCorruptState)
+		}
+	}
+	return nil
+}
+
+func resourcesMatchRunPhase(phase RunPhase, resources []Resource) bool {
+	if !exactResourceSet(resources, false) {
+		return false
+	}
+	for _, resource := range resources {
+		switch phase {
+		case RunAdmitted:
+			if resource.State != ResourceDeclared && resource.State != ResourceActive {
+				return false
+			}
+		case RunRunning:
+			if resource.State != ResourceActive {
+				return false
+			}
+		case RunFinalizing:
+			if resource.State != ResourceReleasing && resource.State != ResourceUnresolved && resource.State != ResourceReleased {
+				return false
+			}
+		case RunTerminal:
+			if resource.State != ResourceReleased {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func validateProjects(ctx context.Context, connection *sql.Conn) error {
-	rows, err := connection.QueryContext(ctx, `SELECT id, name, root, revision, created_at_ms, updated_at_ms FROM projects`)
+	rows, err := connection.QueryContext(ctx, `SELECT id, name, root, verification_policy, revision, created_at_ms, updated_at_ms FROM projects`)
 	if err != nil {
 		return err
 	}

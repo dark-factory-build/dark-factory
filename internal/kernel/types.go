@@ -412,9 +412,10 @@ func (config FactoryConfig) normalized() (FactoryConfig, error) {
 }
 
 type NewProject struct {
-	ID   ProjectID
-	Name string
-	Root string
+	ID                 ProjectID
+	Name               string
+	Root               string
+	VerificationPolicy VerificationPolicy
 }
 
 type NewAgent struct {
@@ -448,12 +449,13 @@ type FactoryState struct {
 }
 
 type Project struct {
-	ID        ProjectID
-	Name      string
-	Root      string
-	Revision  Revision
-	CreatedAt UnixMillis
-	UpdatedAt UnixMillis
+	ID                 ProjectID
+	Name               string
+	Root               string
+	VerificationPolicy VerificationPolicy
+	Revision           Revision
+	CreatedAt          UnixMillis
+	UpdatedAt          UnixMillis
 }
 
 type Agent struct {

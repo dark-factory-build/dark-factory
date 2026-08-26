@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"testing"
 )
 
@@ -104,37 +105,49 @@ func TestResourceGraphAndFinalizerAreOneWay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	replayedRuntime, err := store.ActivateResource(ctx, run.ID, runtime.ID, runtime.Revision, pathIdentity, mustTime(t, 21))
+	if err != nil || replayedRuntime.Revision != activeRuntime.Revision {
+		t.Fatalf("activation replay = %+v, %v", replayedRuntime, err)
+	}
 	if _, err := store.ReleaseResource(ctx, run.ID, runtime.ID, activeRuntime.Revision, wrongPath, mustTime(t, 21)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("wrong release identity = %v", err)
 	}
-	releasing, err := store.BeginResourceRelease(ctx, run.ID, runtime.ID, activeRuntime.Revision, pathIdentity, mustTime(t, 22))
+	if _, err := store.BeginResourceRelease(ctx, run.ID, runtime.ID, activeRuntime.Revision, pathIdentity, mustTime(t, 22)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("cleanup while admitted = %v", err)
+	}
+	if _, err := store.MarkResourceUnresolved(ctx, run.ID, runtime.ID, activeRuntime.Revision, pathIdentity, "too early", mustTime(t, 22)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("unresolved while admitted = %v", err)
+	}
+	failure, _ := NewFailureProposal(FailureActivation, "pre-exec cleanup")
+	if _, err := store.FailAdmitted(ctx, run.ID, run.Revision, failure, mustTime(t, 23)); err != nil {
+		t.Fatal(err)
+	}
+	releasing, _, _ := store.Resource(ctx, runtime.ID)
+	unresolved, err := store.MarkResourceUnresolved(ctx, run.ID, runtime.ID, releasing.Revision, pathIdentity, "identity uncertain", mustTime(t, 24))
 	if err != nil {
 		t.Fatal(err)
 	}
-	unresolved, err := store.MarkResourceUnresolved(ctx, run.ID, runtime.ID, releasing.Revision, pathIdentity, "identity uncertain", mustTime(t, 23))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.ActivateResource(ctx, run.ID, runtime.ID, unresolved.Revision, pathIdentity, mustTime(t, 24)); !errors.Is(err, ErrConflict) {
+	if _, err := store.ActivateResource(ctx, run.ID, runtime.ID, unresolved.Revision, pathIdentity, mustTime(t, 25)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("unresolved resurrection = %v", err)
 	}
-	released, err := store.ReleaseResource(ctx, run.ID, runtime.ID, unresolved.Revision, pathIdentity, mustTime(t, 25))
+	released, err := store.ReleaseResource(ctx, run.ID, runtime.ID, unresolved.Revision, pathIdentity, mustTime(t, 26))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.ActivateResource(ctx, run.ID, runtime.ID, released.Revision, pathIdentity, mustTime(t, 26)); !errors.Is(err, ErrConflict) {
+	if _, err := store.ActivateResource(ctx, run.ID, runtime.ID, released.Revision, pathIdentity, mustTime(t, 27)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("released resurrection = %v", err)
 	}
-	if _, err := store.MarkResourceUnresolved(ctx, run.ID, runtime.ID, released.Revision, pathIdentity, "late", mustTime(t, 27)); !errors.Is(err, ErrConflict) {
+	if _, err := store.MarkResourceUnresolved(ctx, run.ID, runtime.ID, released.Revision, pathIdentity, "late", mustTime(t, 28)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("released unresolved = %v", err)
 	}
 
 	runner := resourceOfKind(t, resources, ResourceRunnerProcess)
 	processIdentity := processIdentity(t, 101)
-	if _, err := store.ReleaseResource(ctx, run.ID, runner.ID, runner.Revision, processIdentity, mustTime(t, 28)); !errors.Is(err, ErrConflict) {
+	runner, _, _ = store.Resource(ctx, runner.ID)
+	if _, err := store.ReleaseResource(ctx, run.ID, runner.ID, runner.Revision, processIdentity, mustTime(t, 29)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("declared release without empty proof = %v", err)
 	}
-	declaredReleased, err := store.ReleaseResource(ctx, run.ID, runner.ID, runner.Revision, EmptyResourceIdentity(), mustTime(t, 29))
+	declaredReleased, err := store.ReleaseResource(ctx, run.ID, runner.ID, runner.Revision, EmptyResourceIdentity(), mustTime(t, 30))
 	if err != nil || declaredReleased.State != ResourceReleased || !declaredReleased.Identity.Empty() {
 		t.Fatalf("declared no-effect release = %+v, %v", declaredReleased, err)
 	}
@@ -198,6 +211,198 @@ func TestFinalizerRequiresEveryReleasedResourceAndExactTask(t *testing.T) {
 	if afterReplay.Head != after.Head {
 		t.Fatalf("duplicate terminal invalidation: before=%+v after=%+v", after, afterReplay)
 	}
+}
+
+func TestWorkerVerificationFailureIsTheOnlyTerminalRefinement(t *testing.T) {
+	proposal, _ := NewSuccessProposal("proposed result")
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationRustWorkspaceTest, proposal)
+	path := storePath(t, store)
+	second, err := Open(context.Background(), path)
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	defer store.Close()
+	defer second.Close()
+	failure, _ := NewVerificationFailure("verification failed")
+	before, _ := store.Factory(context.Background())
+	start := make(chan struct{})
+	errorsSeen := make(chan error, 2)
+	for _, candidate := range []*Store{store, second} {
+		go func(candidate *Store) {
+			<-start
+			_, err := candidate.FinalizeRunAfterVerification(context.Background(), finalizing.ID, finalizing.Revision, failure, mustTime(t, 80))
+			errorsSeen <- err
+		}(candidate)
+	}
+	close(start)
+	for range 2 {
+		if err := <-errorsSeen; err != nil {
+			t.Fatalf("concurrent exact refinement: %v", err)
+		}
+	}
+	terminal, found, err := store.Run(context.Background(), finalizing.ID)
+	if err != nil || !found || terminal.Phase != RunTerminal || terminal.Proposal == nil || !terminal.Proposal.equal(proposal) || terminal.Terminal == nil || terminal.Terminal.kind != OutcomeFailed || terminal.Terminal.code != FailureUnverifiable || terminal.Terminal.detail != failure.detail || terminal.CredentialRevokedAt == nil || finalizing.CredentialRevokedAt == nil || *terminal.CredentialRevokedAt != *finalizing.CredentialRevokedAt {
+		t.Fatalf("refined terminal = %+v found=%v err=%v", terminal, found, err)
+	}
+	task, _, _ := store.Task(context.Background(), finalizing.TaskID)
+	if task.Status != TaskFailed || task.Result != "" {
+		t.Fatalf("refined task = %+v", task)
+	}
+	after, _ := store.Factory(context.Background())
+	if after.Head.Int64() != before.Head.Int64()+3 {
+		t.Fatalf("terminal invalidations before=%+v after=%+v", before, after)
+	}
+	different, _ := NewVerificationFailure("different")
+	if _, err := store.FinalizeRunAfterVerification(context.Background(), terminal.ID, finalizing.Revision, different, mustTime(t, 90)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("different refinement replay = %v", err)
+	}
+	if _, err := store.FinalizeRun(context.Background(), terminal.ID, finalizing.Revision, mustTime(t, 91)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("plain finalizer rewrote refined terminal = %v", err)
+	}
+	finalHead, _ := store.Factory(context.Background())
+	if finalHead.Head != after.Head {
+		t.Fatalf("conflicting replay appended invalidation: before=%+v after=%+v", after, finalHead)
+	}
+}
+
+func TestConcurrentPlainAndRefinedFinalizersChooseOneTerminal(t *testing.T) {
+	proposal, _ := NewSuccessProposal("proposed result")
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationGoWorkspaceTest, proposal)
+	path := storePath(t, store)
+	second, err := Open(context.Background(), path)
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	defer store.Close()
+	defer second.Close()
+	failure, _ := NewVerificationFailure("verification failed")
+	before, _ := store.Factory(context.Background())
+	start := make(chan struct{})
+	errorsSeen := make(chan error, 2)
+	go func() {
+		<-start
+		_, err := store.FinalizeRun(context.Background(), finalizing.ID, finalizing.Revision, mustTime(t, 80))
+		errorsSeen <- err
+	}()
+	go func() {
+		<-start
+		_, err := second.FinalizeRunAfterVerification(context.Background(), finalizing.ID, finalizing.Revision, failure, mustTime(t, 80))
+		errorsSeen <- err
+	}()
+	close(start)
+	accepted, conflicts := 0, 0
+	for range 2 {
+		err := <-errorsSeen
+		if err == nil {
+			accepted++
+		} else if errors.Is(err, ErrConflict) {
+			conflicts++
+		} else {
+			t.Fatalf("concurrent finalizer = %v", err)
+		}
+	}
+	if accepted != 1 || conflicts != 1 {
+		t.Fatalf("accepted=%d conflicts=%d", accepted, conflicts)
+	}
+	terminal, _, err := store.Run(context.Background(), finalizing.ID)
+	if err != nil || terminal.Terminal == nil || terminal.Proposal == nil || terminal.Phase != RunTerminal {
+		t.Fatalf("terminal = %+v, %v", terminal, err)
+	}
+	if !terminal.Terminal.equal(*terminal.Proposal) && terminal.Terminal.code != FailureUnverifiable {
+		t.Fatalf("terminal escaped narrow outcomes: %+v", terminal)
+	}
+	after, _ := store.Factory(context.Background())
+	if after.Head.Int64() != before.Head.Int64()+3 {
+		t.Fatalf("concurrent finalizer invalidations before=%+v after=%+v", before, after)
+	}
+}
+
+func TestVerificationRefinementRejectsInapplicableRuns(t *testing.T) {
+	if _, err := NewFailureProposal(FailureUnverifiable, "cannot be proposed"); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("unverifiable proposal = %v", err)
+	}
+	success, _ := NewSuccessProposal("done")
+	blocked, _ := NewBlockedProposal("blocked")
+	failed, _ := NewFailureProposal(FailureInternal, "failed")
+	cancelled, _ := NewCancelledProposal("cancelled")
+	runnerExit, _ := NewFailureProposal(FailureRunnerExit, "provider exited")
+	tests := []struct {
+		name     string
+		role     AgentRole
+		policy   VerificationPolicy
+		proposal Proposal
+	}{
+		{name: "orchestrator", role: RoleOrchestrator, policy: VerificationGoWorkspaceTest, proposal: success},
+		{name: "none policy", role: RoleWorker, policy: VerificationNone, proposal: success},
+		{name: "blocked", role: RoleWorker, policy: VerificationGoWorkspaceTest, proposal: blocked},
+		{name: "failed", role: RoleWorker, policy: VerificationGoWorkspaceTest, proposal: failed},
+		{name: "cancelled", role: RoleWorker, policy: VerificationGoWorkspaceTest, proposal: cancelled},
+		{name: "provider exit", role: RoleWorker, policy: VerificationGoWorkspaceTest, proposal: runnerExit},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store, finalizing := finalizingReleasedRun(t, test.role, test.policy, test.proposal)
+			defer store.Close()
+			failure, _ := NewVerificationFailure("not applicable")
+			before, _ := store.Factory(context.Background())
+			if _, err := store.FinalizeRunAfterVerification(context.Background(), finalizing.ID, finalizing.Revision, failure, mustTime(t, 80)); !errors.Is(err, ErrConflict) {
+				t.Fatalf("refinement = %v", err)
+			}
+			fresh, _, _ := store.Run(context.Background(), finalizing.ID)
+			after, _ := store.Factory(context.Background())
+			if fresh.Phase != RunFinalizing || after.Head != before.Head {
+				t.Fatalf("rejected refinement footprint run=%+v before=%+v after=%+v", fresh, before, after)
+			}
+			if _, err := store.FinalizeRun(context.Background(), finalizing.ID, finalizing.Revision, mustTime(t, 81)); err != nil {
+				t.Fatalf("ordinary finalization after rejection: %v", err)
+			}
+		})
+	}
+}
+
+func TestVerificationAndTerminalCorruptionFailClosed(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate string
+	}{
+		{name: "unknown run policy", mutate: `UPDATE runs SET verification_policy = 'mystery'`},
+		{name: "unknown failure", mutate: `UPDATE runs SET terminal_code = 'mystery'`},
+		{name: "arbitrary mismatch", mutate: `UPDATE runs SET terminal_kind = 'blocked', terminal_code = NULL, terminal_detail = 'arbitrary', terminal_result = NULL`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			proposal, _ := NewSuccessProposal("done")
+			store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationGoWorkspaceTest, proposal)
+			path := storePath(t, store)
+			failure, _ := NewVerificationFailure("verification failed")
+			if _, err := store.FinalizeRunAfterVerification(context.Background(), finalizing.ID, finalizing.Revision, failure, mustTime(t, 80)); err != nil {
+				t.Fatal(err)
+			}
+			corruptSQL(t, store, test.mutate)
+			if _, _, err := store.Run(context.Background(), finalizing.ID); !errors.Is(err, ErrCorruptState) {
+				t.Fatalf("corrupt Run = %v", err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			before := captureDatabaseEvidence(t, path)
+			if _, err := Open(context.Background(), path); !errors.Is(err, ErrCorruptState) {
+				t.Fatalf("corrupt Open = %v", err)
+			}
+			assertDatabaseEvidenceUnchanged(t, path, before)
+		})
+	}
+
+	t.Run("unknown project policy", func(t *testing.T) {
+		store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
+		defer store.Close()
+		corruptSQL(t, store, `UPDATE projects SET verification_policy = 'mystery' WHERE id = ?`, project.ID.Bytes())
+		if _, _, err := store.Project(context.Background(), project.ID); !errors.Is(err, ErrCorruptState) {
+			t.Fatalf("corrupt Project = %v", err)
+		}
+	})
 }
 
 func TestFinalizingConsumesFactoryCapacity(t *testing.T) {
@@ -279,6 +484,96 @@ func TestResourceIdentityCannotBeReusedAcrossRuns(t *testing.T) {
 	if _, err := store.ActivateResource(context.Background(), second.Run.ID, secondRuntime.ID, secondRuntime.Revision, sharedPath, mustTime(t, 23)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("path identity reuse = %v", err)
 	}
+}
+
+func TestProviderIdentityPairIsTheOnlySameRunProcessAlias(t *testing.T) {
+	store, run, _ := admittedOrchestratorRun(t)
+	path := storePath(t, store)
+	resources := resourcesForRunTest(t, store, run.ID)
+	sharedProvider := processIdentity(t, 930)
+	provider := resourceOfKind(t, resources, ResourceProviderProcess)
+	group := resourceOfKind(t, resources, ResourceProviderGroup)
+	runner := resourceOfKind(t, resources, ResourceRunnerProcess)
+	if _, err := store.ActivateResource(context.Background(), run.ID, provider.ID, provider.Revision, sharedProvider, mustTime(t, 20)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ActivateResource(context.Background(), run.ID, group.ID, group.Revision, sharedProvider, mustTime(t, 21)); err != nil {
+		t.Fatalf("provider process/group pair rejected: %v", err)
+	}
+	if _, err := store.ActivateResource(context.Background(), run.ID, runner.ID, runner.Revision, sharedProvider, mustTime(t, 22)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("runner aliased provider identity: %v", err)
+	}
+	if _, err := store.ActivateResource(context.Background(), run.ID, runner.ID, runner.Revision, processIdentity(t, 931), mustTime(t, 23)); err != nil {
+		t.Fatal(err)
+	}
+	pid, pgid, birth, _ := sharedProvider.Process()
+	corruptSQL(t, store, `UPDATE resources SET pid = ?, pgid = ?, birth_digest = ? WHERE id = ?`, pid, pgid, birth.Bytes(), runner.ID.Bytes())
+	if _, err := store.Snapshot(context.Background()); !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("same-run runner/provider durable alias = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before := captureDatabaseEvidence(t, path)
+	if _, err := Open(context.Background(), path); !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("Open aliased process identity = %v", err)
+	}
+	assertDatabaseEvidenceUnchanged(t, path, before)
+}
+
+func TestResourceTransitionsAreCoupledToRunPhaseAndCredential(t *testing.T) {
+	store, run, keys := runningOrchestratorRun(t)
+	defer store.Close()
+	resource := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
+	before, _ := store.Factory(context.Background())
+	if _, err := store.ReleaseResource(context.Background(), run.ID, resource.ID, resource.Revision, resource.Identity, mustTime(t, 35)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("running release = %v", err)
+	}
+	if _, err := store.BeginResourceRelease(context.Background(), run.ID, resource.ID, resource.Revision, resource.Identity, mustTime(t, 36)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("running begin release = %v", err)
+	}
+	if _, err := store.MarkResourceUnresolved(context.Background(), run.ID, resource.ID, resource.Revision, resource.Identity, "too early", mustTime(t, 37)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("running unresolved = %v", err)
+	}
+	fresh, _, _ := store.Resource(context.Background(), resource.ID)
+	after, _ := store.Factory(context.Background())
+	if fresh.State != ResourceActive || fresh.Revision != resource.Revision || after.Head != before.Head {
+		t.Fatalf("wrong-phase release footprint resource=%+v before=%+v after=%+v", fresh, before, after)
+	}
+	if _, err := store.AuthenticateAttempt(context.Background(), keys.AttemptDigest); err != nil {
+		t.Fatalf("credential lost after rejected cleanup: %v", err)
+	}
+	proposal, _ := NewSuccessProposal("done")
+	if _, err := store.ProposeAttemptOutcome(context.Background(), keys.AttemptDigest, proposal, mustTime(t, 40)); err != nil {
+		t.Fatal(err)
+	}
+	releasing, _, _ := store.Resource(context.Background(), resource.ID)
+	released, err := store.ReleaseResource(context.Background(), run.ID, resource.ID, releasing.Revision, releasing.Identity, mustTime(t, 41))
+	if err != nil {
+		t.Fatalf("finalizing release: %v", err)
+	}
+	replay, err := store.ReleaseResource(context.Background(), run.ID, resource.ID, releasing.Revision, releasing.Identity, mustTime(t, 99))
+	if err != nil || replay.Revision != released.Revision {
+		t.Fatalf("release replay = %+v, %v", replay, err)
+	}
+}
+
+func TestImpossibleRunningResourceLedgerFailsAuthenticationAndOpen(t *testing.T) {
+	store, run, keys := runningOrchestratorRun(t)
+	path := storePath(t, store)
+	resource := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
+	corruptSQL(t, store, `UPDATE resources SET state = 'released', released_at_ms = updated_at_ms WHERE id = ?`, resource.ID.Bytes())
+	if _, err := store.AuthenticateAttempt(context.Background(), keys.AttemptDigest); !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("credential on impossible ledger = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before := captureDatabaseEvidence(t, path)
+	if _, err := Open(context.Background(), path); !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("Open impossible ledger = %v", err)
+	}
+	assertDatabaseEvidenceUnchanged(t, path, before)
 }
 
 func TestWorkerRunCannotActivateBeforeExactChangeIsAvailable(t *testing.T) {
@@ -477,6 +772,88 @@ func runningOrchestratorRun(t *testing.T) (*Store, Run, AdmissionKeys) {
 		t.Fatal(err)
 	}
 	return store, running, keys
+}
+
+func finalizingReleasedRun(t *testing.T, role AgentRole, policy VerificationPolicy, proposal Proposal) (*Store, Run) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "kernel.db")
+	store, err := Create(context.Background(), path, FactoryConfig{DispatchEnabled: true, Capacity: 2}, mustTime(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := store.CreateProject(context.Background(), NewProject{ID: projectID(t, 240), Name: "verified", Root: "/verified", VerificationPolicy: policy}, mustTime(t, 2))
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	agent, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 241), ProjectID: project.ID, Name: "agent", Role: role, Provider: ProviderCodex, ExecutionMode: ExecutionWorkspaceWrite, ToolBudgetLimit: 2}, mustTime(t, 3))
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	task, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 242), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 243), Title: "verify"}, mustTime(t, 4))
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	var reservation *ChangeReservation
+	if role == RoleWorker {
+		reservation = &ChangeReservation{ID: changeID(t, 244), SourceRoot: "/verified/change", StagingRoot: "/verified/stage"}
+	}
+	keys := admissionKeys(t, 245, reservation)
+	admission, err := store.AdmitNext(context.Background(), agent.ID, keys, mustTime(t, 10))
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	if reservation != nil {
+		format, _ := NewObjectFormat("sha1")
+		commit, _ := NewCommitID(format, bytes.Repeat([]byte{1}, 20))
+		repository, _ := NewFileIdentity(1, 2)
+		selection, _ := NewChangeSelection(format, commit, "/verified/repository", repository)
+		selected, err := store.RecordChangeSelection(context.Background(), reservation.ID, mustRevision(t, 1), selection, mustTime(t, 11))
+		if err != nil {
+			store.Close()
+			t.Fatal(err)
+		}
+		stage, _ := NewFileIdentity(3, 4)
+		prepared, err := store.RecordChangePrepared(context.Background(), reservation.ID, selected.Revision, stage, mustTime(t, 12))
+		if err != nil {
+			store.Close()
+			t.Fatal(err)
+		}
+		digest, _ := TreeDigestFromBytes(bytes.Repeat([]byte{2}, DigestBytes))
+		availability, _ := NewChangeAvailability(digest, 1, 1, stage)
+		if _, err := store.MarkChangeAvailable(context.Background(), reservation.ID, prepared.Revision, availability, mustTime(t, 13)); err != nil {
+			store.Close()
+			t.Fatal(err)
+		}
+	}
+	activateAllResources(t, store, *admission.Run, keys, 20)
+	running, err := store.ActivateRun(context.Background(), admission.Run.ID, admission.Run.Revision, mustTime(t, 30))
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	finalizing, err := store.ProposeAttemptOutcome(context.Background(), keys.AttemptDigest, proposal, mustTime(t, 40))
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	exit, _ := NewRunnerExitCode(1, 0, mustTime(t, 41))
+	finalizing, err = store.ObserveRunnerExit(context.Background(), running.ID, finalizing.Revision, exit, mustTime(t, 42))
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	for index, resource := range resourcesForRunTest(t, store, running.ID) {
+		if _, err := store.ReleaseResource(context.Background(), running.ID, resource.ID, resource.Revision, resource.Identity, mustTime(t, int64(50+index))); err != nil {
+			store.Close()
+			t.Fatal(err)
+		}
+	}
+	_ = task
+	return store, finalizing
 }
 
 func activateAllResources(t *testing.T, store *Store, run Run, keys AdmissionKeys, at int64) map[ResourceKind]Resource {

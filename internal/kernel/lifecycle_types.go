@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"path/filepath"
+	"strings"
 )
 
 type ObjectFormat uint8
@@ -139,7 +140,7 @@ type ChangeSelection struct {
 }
 
 func NewChangeSelection(format ObjectFormat, commit CommitID, repositoryRoot string, repository FileIdentity) (ChangeSelection, error) {
-	if format.oidLength() == 0 || commit.format != format || !repository.valid() || !validAbsolutePath(repositoryRoot) {
+	if format.oidLength() == 0 || commit.format != format || !repository.valid() || !validOwnedLocator(repositoryRoot) {
 		return ChangeSelection{}, fmt.Errorf("%w: invalid Change selection", ErrInvalidValue)
 	}
 	return ChangeSelection{format: format, commit: commit, repositoryRoot: repositoryRoot, repository: repository}, nil
@@ -150,7 +151,7 @@ func (selection ChangeSelection) Commit() CommitID                 { return sele
 func (selection ChangeSelection) RepositoryRoot() string           { return selection.repositoryRoot }
 func (selection ChangeSelection) RepositoryIdentity() FileIdentity { return selection.repository }
 func (selection ChangeSelection) valid() bool {
-	return selection.format.oidLength() != 0 && selection.commit.format == selection.format && len(selection.commit.Bytes()) == selection.format.oidLength() && selection.repository.valid() && validAbsolutePath(selection.repositoryRoot)
+	return selection.format.oidLength() != 0 && selection.commit.format == selection.format && len(selection.commit.Bytes()) == selection.format.oidLength() && selection.repository.valid() && validOwnedLocator(selection.repositoryRoot)
 }
 
 type ChangeAvailability struct {
@@ -199,7 +200,7 @@ type ChangeReservation struct {
 }
 
 func (reservation ChangeReservation) valid() bool {
-	return !reservation.ID.zero() && validAbsolutePath(reservation.SourceRoot) && validAbsolutePath(reservation.StagingRoot) && reservation.SourceRoot != reservation.StagingRoot && (reservation.ExpectedReuseRevision == nil || reservation.ExpectedReuseRevision.Int64() >= 1)
+	return !reservation.ID.zero() && validOwnedLocator(reservation.SourceRoot) && validOwnedLocator(reservation.StagingRoot) && reservation.SourceRoot != reservation.StagingRoot && (reservation.ExpectedReuseRevision == nil || reservation.ExpectedReuseRevision.Int64() >= 1)
 }
 
 type RunPhase uint8
@@ -289,6 +290,7 @@ const (
 	FailureRunnerExit
 	FailureProtocol
 	FailureInternal
+	FailureUnverifiable
 )
 
 func parseFailureCode(value string) (FailureCode, error) {
@@ -305,6 +307,8 @@ func parseFailureCode(value string) (FailureCode, error) {
 		return FailureProtocol, nil
 	case "internal":
 		return FailureInternal, nil
+	case "unverifiable":
+		return FailureUnverifiable, nil
 	default:
 		return 0, corruptControl("failure code", value)
 	}
@@ -324,6 +328,8 @@ func (value FailureCode) String() string {
 		return "protocol"
 	case FailureInternal:
 		return "internal"
+	case FailureUnverifiable:
+		return "unverifiable"
 	default:
 		return ""
 	}
@@ -351,7 +357,7 @@ func NewBlockedProposal(detail string) (Proposal, error) {
 }
 
 func NewFailureProposal(code FailureCode, detail string) (Proposal, error) {
-	if code.String() == "" || byteLen(detail) > 4096 {
+	if code.String() == "" || code == FailureUnverifiable || byteLen(detail) > 4096 {
 		return Proposal{}, fmt.Errorf("%w: invalid failure proposal", ErrInvalidValue)
 	}
 	return Proposal{kind: OutcomeFailed, code: code, detail: detail}, nil
@@ -381,6 +387,60 @@ func (proposal Proposal) valid() bool {
 	}
 }
 func (proposal Proposal) equal(other Proposal) bool { return proposal == other }
+
+type VerificationPolicy uint8
+
+const (
+	VerificationNone VerificationPolicy = iota + 1
+	VerificationRustWorkspaceTest
+	VerificationGoWorkspaceTest
+)
+
+func parseVerificationPolicy(value string) (VerificationPolicy, error) {
+	switch value {
+	case "none":
+		return VerificationNone, nil
+	case "rust_workspace_test":
+		return VerificationRustWorkspaceTest, nil
+	case "go_workspace_test":
+		return VerificationGoWorkspaceTest, nil
+	default:
+		return 0, corruptControl("verification policy", value)
+	}
+}
+
+func (policy VerificationPolicy) String() string {
+	switch policy {
+	case VerificationNone:
+		return "none"
+	case VerificationRustWorkspaceTest:
+		return "rust_workspace_test"
+	case VerificationGoWorkspaceTest:
+		return "go_workspace_test"
+	default:
+		return ""
+	}
+}
+
+type VerificationFailure struct {
+	detail string
+}
+
+func NewVerificationFailure(detail string) (VerificationFailure, error) {
+	if byteLen(detail) < 1 || byteLen(detail) > 4096 {
+		return VerificationFailure{}, fmt.Errorf("%w: invalid verification failure", ErrInvalidValue)
+	}
+	return VerificationFailure{detail: detail}, nil
+}
+
+func (failure VerificationFailure) Detail() string { return failure.detail }
+func (failure VerificationFailure) valid() bool {
+	return byteLen(failure.detail) >= 1 && byteLen(failure.detail) <= 4096
+}
+
+func (failure VerificationFailure) terminal() Proposal {
+	return Proposal{kind: OutcomeFailed, code: FailureUnverifiable, detail: failure.detail}
+}
 
 type RunnerExit struct {
 	sequence int64
@@ -568,6 +628,7 @@ type Run struct {
 	ExecutionMode            ExecutionMode
 	Model                    string
 	ReasoningEffort          string
+	VerificationPolicy       VerificationPolicy
 	Phase                    RunPhase
 	Proposal                 *Proposal
 	Terminal                 *Proposal
@@ -580,6 +641,18 @@ type Run struct {
 	FinalizingAt             *UnixMillis
 	TerminalAt               *UnixMillis
 	UpdatedAt                UnixMillis
+}
+
+func validTerminalRefinement(run Run) bool {
+	if run.Proposal == nil || run.Terminal == nil {
+		return false
+	}
+	if run.Proposal.equal(*run.Terminal) {
+		return true
+	}
+	return run.Role == RoleWorker && run.VerificationPolicy != VerificationNone &&
+		run.Proposal.kind == OutcomeSucceeded && run.Terminal.kind == OutcomeFailed &&
+		run.Terminal.code == FailureUnverifiable && byteLen(run.Terminal.detail) >= 1
 }
 
 type Resource struct {
@@ -624,7 +697,7 @@ type AdmissionKeys struct {
 }
 
 func (keys AdmissionKeys) valid() bool {
-	return !keys.RunID.zero() && keys.Resources.valid() && validAbsolutePath(keys.RuntimeRoot) && (keys.Change == nil || keys.Change.valid())
+	return !keys.RunID.zero() && keys.Resources.valid() && validOwnedLocator(keys.RuntimeRoot) && (keys.Change == nil || keys.Change.valid())
 }
 
 type NoAdmissionReason uint8
@@ -686,5 +759,9 @@ type RecoverableRun struct {
 }
 
 func validAbsolutePath(value string) bool {
-	return byteLen(value) >= 1 && byteLen(value) <= 4096 && filepath.IsAbs(value)
+	return byteLen(value) >= 1 && byteLen(value) <= 4096 && !strings.ContainsRune(value, 0) && filepath.IsAbs(value) && filepath.Clean(value) == value
+}
+
+func validOwnedLocator(value string) bool {
+	return validAbsolutePath(value) && value != string(filepath.Separator)
 }

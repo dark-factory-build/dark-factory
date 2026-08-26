@@ -110,6 +110,40 @@ func TestChangeCheckpointBoundsAndOrderingFailBeforeMutation(t *testing.T) {
 	}
 }
 
+func TestChangeLocatorsAreCanonicalAtConstructionAndRead(t *testing.T) {
+	format, _ := NewObjectFormat("sha1")
+	commit, _ := NewCommitID(format, bytes.Repeat([]byte{1}, 20))
+	repository, _ := NewFileIdentity(1, 2)
+	for _, locator := range []string{"/repository/.", "/"} {
+		if _, err := NewChangeSelection(format, commit, locator, repository); !errors.Is(err, ErrInvalidValue) {
+			t.Fatalf("selection locator %q = %v", locator, err)
+		}
+	}
+
+	store, _, project, agent := newAdmissionStore(t, RoleWorker, 2)
+	path := storePath(t, store)
+	_, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 201), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 202), Title: "canonical"}, mustTime(t, 5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reservation := &ChangeReservation{ID: changeID(t, 203), SourceRoot: "/change/source", StagingRoot: "/change/stage"}
+	if _, err := store.AdmitNext(context.Background(), agent.ID, admissionKeys(t, 204, reservation), mustTime(t, 10)); err != nil {
+		t.Fatal(err)
+	}
+	corruptSQL(t, store, `UPDATE changes SET staging_root = '/change/stage/.' WHERE id = ?`, reservation.ID.Bytes())
+	if _, _, err := store.Change(context.Background(), reservation.ID); !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("unclean durable Change read = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before := captureDatabaseEvidence(t, path)
+	if _, err := Open(context.Background(), path); !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("Open unclean Change = %v", err)
+	}
+	assertDatabaseEvidenceUnchanged(t, path, before)
+}
+
 func seedReservedChange(t *testing.T, store *Store) Change {
 	t.Helper()
 	ctx := context.Background()

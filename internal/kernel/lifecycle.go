@@ -53,6 +53,16 @@ func (store *Store) transitionResource(ctx context.Context, runID RunID, resourc
 	if resource.Revision != expected || at.Int64() < resource.UpdatedAt.Int64() {
 		return Resource{}, tx.Rollback(ErrRevisionConflict)
 	}
+	run, found, err := runByID(ctx, tx.connection, runID)
+	if err != nil || !found {
+		if err == nil {
+			err = ErrCorruptState
+		}
+		return Resource{}, tx.Rollback(err)
+	}
+	if target == ResourceActive && run.Phase != RunAdmitted || target != ResourceActive && run.Phase != RunFinalizing {
+		return Resource{}, tx.Rollback(ErrConflict)
+	}
 	if err := validateResourceEdge(resource, target, identity, reason); err != nil {
 		return Resource{}, tx.Rollback(err)
 	}
@@ -124,22 +134,37 @@ func validateResourceEdge(resource Resource, target ResourceState, identity Reso
 func resourceIdentityEqual(left, right ResourceIdentity) bool { return left == right }
 
 func ensureResourceIdentityUnused(ctx context.Context, connection *sql.Conn, resource Resource, identity ResourceIdentity) error {
-	var collisions int
 	if resource.Kind == ResourceRuntimeRoot {
+		var collisions int
 		pathIdentity, _ := identity.Path()
 		if err := connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM resources WHERE id <> ? AND path_dev = ? AND path_inode = ?`, resource.ID.Bytes(), pathIdentity.device, pathIdentity.inode).Scan(&collisions); err != nil {
 			return err
 		}
-	} else {
-		pid, pgid, birth, _ := identity.Process()
-		if err := connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM resources WHERE run_id <> ? AND pid = ? AND pgid = ? AND birth_digest = ?`, resource.RunID.Bytes(), pid, pgid, birth.Bytes()).Scan(&collisions); err != nil {
+		if collisions != 0 {
+			return ErrConflict
+		}
+		return nil
+	}
+	pid, pgid, birth, _ := identity.Process()
+	rows, err := connection.QueryContext(ctx, `SELECT run_id, kind FROM resources WHERE id <> ? AND pid = ? AND pgid = ? AND birth_digest = ?`, resource.ID.Bytes(), pid, pgid, birth.Bytes())
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var rawRunID []byte
+		var rawKind string
+		if err := rows.Scan(&rawRunID, &rawKind); err != nil {
 			return err
 		}
+		runID, runErr := RunIDFromBytes(rawRunID)
+		kind, kindErr := parseResourceKind(rawKind)
+		providerPair := resource.RunID == runID && (resource.Kind == ResourceProviderProcess && kind == ResourceProviderGroup || resource.Kind == ResourceProviderGroup && kind == ResourceProviderProcess)
+		if runErr != nil || kindErr != nil || !providerPair {
+			return ErrConflict
+		}
 	}
-	if collisions != 0 {
-		return ErrConflict
-	}
-	return nil
+	return rows.Err()
 }
 
 func (store *Store) ActivateRun(ctx context.Context, runID RunID, expected Revision, at UnixMillis) (Run, error) {
@@ -390,6 +415,17 @@ func (store *Store) ObserveRunnerExit(ctx context.Context, runID RunID, expected
 }
 
 func (store *Store) FinalizeRun(ctx context.Context, runID RunID, expected Revision, at UnixMillis) (Run, error) {
+	return store.finalizeRun(ctx, runID, expected, nil, at)
+}
+
+func (store *Store) FinalizeRunAfterVerification(ctx context.Context, runID RunID, expected Revision, failure VerificationFailure, at UnixMillis) (Run, error) {
+	if !failure.valid() {
+		return Run{}, fmt.Errorf("%w: invalid verification refinement", ErrInvalidValue)
+	}
+	return store.finalizeRun(ctx, runID, expected, &failure, at)
+}
+
+func (store *Store) finalizeRun(ctx context.Context, runID RunID, expected Revision, verification *VerificationFailure, at UnixMillis) (Run, error) {
 	if runID.zero() {
 		return Run{}, fmt.Errorf("%w: zero run identifier", ErrInvalidValue)
 	}
@@ -406,6 +442,13 @@ func (store *Store) FinalizeRun(ctx context.Context, runID RunID, expected Revis
 		return Run{}, tx.Rollback(ErrNotFound)
 	}
 	if run.Phase == RunTerminal && run.Revision.Int64() > expected.Int64() {
+		terminal, err := terminalOutcome(run, verification)
+		if err != nil || run.Terminal == nil || !run.Terminal.equal(terminal) {
+			if err == nil {
+				err = ErrConflict
+			}
+			return Run{}, tx.Rollback(err)
+		}
 		if err := tx.Rollback(nil); err != nil {
 			return Run{}, err
 		}
@@ -413,6 +456,10 @@ func (store *Store) FinalizeRun(ctx context.Context, runID RunID, expected Revis
 	}
 	if run.Phase != RunFinalizing || run.Proposal == nil || run.CredentialRevokedAt == nil || run.Revision != expected || at.Int64() < run.UpdatedAt.Int64() {
 		return Run{}, tx.Rollback(ErrRevisionConflict)
+	}
+	terminal, err := terminalOutcome(run, verification)
+	if err != nil {
+		return Run{}, tx.Rollback(err)
 	}
 	resources, err := resourcesForRun(ctx, tx.connection, run.ID)
 	if err != nil {
@@ -446,11 +493,11 @@ func (store *Store) FinalizeRun(ctx context.Context, runID RunID, expected Revis
 	taskRevision := task.Revision.Int64() + 1
 	var taskStatus string
 	var blocked, result, completed any
-	switch run.Proposal.kind {
+	switch terminal.kind {
 	case OutcomeSucceeded:
-		taskStatus, result, completed = TaskSucceeded.String(), run.Proposal.result, at.Int64()
+		taskStatus, result, completed = TaskSucceeded.String(), terminal.result, at.Int64()
 	case OutcomeBlocked:
-		taskStatus, blocked = TaskBlocked.String(), run.Proposal.detail
+		taskStatus, blocked = TaskBlocked.String(), terminal.detail
 	case OutcomeFailed:
 		taskStatus, completed = TaskFailed.String(), at.Int64()
 	case OutcomeCancelled:
@@ -463,7 +510,8 @@ func (store *Store) FinalizeRun(ctx context.Context, runID RunID, expected Revis
 	if err := requireOneRow(updated, err); err != nil {
 		return Run{}, tx.Rollback(err)
 	}
-	updated, err = tx.connection.ExecContext(ctx, `UPDATE runs SET phase = 'terminal', terminal_kind = proposal_kind, terminal_code = proposal_code, terminal_detail = proposal_detail, terminal_result = proposal_result, terminal_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase = 'finalizing' AND proposal_kind IS NOT NULL AND credential_revoked_at_ms IS NOT NULL AND revision = ?`, at.Int64(), at.Int64(), run.ID.Bytes(), expected.Int64())
+	terminalKind, terminalCode, terminalDetail, terminalResult := proposalSQL(terminal)
+	updated, err = tx.connection.ExecContext(ctx, `UPDATE runs SET phase = 'terminal', terminal_kind = ?, terminal_code = ?, terminal_detail = ?, terminal_result = ?, terminal_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase = 'finalizing' AND proposal_kind IS NOT NULL AND credential_revoked_at_ms IS NOT NULL AND revision = ?`, terminalKind, terminalCode, terminalDetail, terminalResult, at.Int64(), at.Int64(), run.ID.Bytes(), expected.Int64())
 	if err := requireOneRow(updated, err); err != nil {
 		return Run{}, tx.Rollback(err)
 	}
@@ -494,6 +542,22 @@ func (store *Store) FinalizeRun(ctx context.Context, runID RunID, expected Revis
 		return Run{}, err
 	}
 	return run, nil
+}
+
+func terminalOutcome(run Run, verification *VerificationFailure) (Proposal, error) {
+	if run.Proposal == nil {
+		return Proposal{}, ErrCorruptState
+	}
+	if verification == nil {
+		return *run.Proposal, nil
+	}
+	if !verification.valid() {
+		return Proposal{}, ErrInvalidValue
+	}
+	if run.Role != RoleWorker || run.VerificationPolicy == VerificationNone || run.Proposal.kind != OutcomeSucceeded {
+		return Proposal{}, ErrConflict
+	}
+	return verification.terminal(), nil
 }
 
 func exactResourceSet(resources []Resource, requireActive bool) bool {

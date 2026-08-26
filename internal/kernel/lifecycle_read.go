@@ -9,7 +9,7 @@ import (
 )
 
 const runColumns = `id, project_id, agent_id, task_id, task_incarnation_id,
-    admitted_task_work_revision, change_id, role, provider, execution_mode, model, reasoning_effort, phase,
+	    admitted_task_work_revision, change_id, role, provider, execution_mode, model, reasoning_effort, verification_policy, phase,
     proposal_kind, proposal_code, proposal_detail, proposal_result,
     terminal_kind, terminal_code, terminal_detail, terminal_result,
     credential_digest, credential_revoked_at_ms,
@@ -32,7 +32,7 @@ func runByDigest(ctx context.Context, connection *sql.Conn, digest AttemptDigest
 
 func scanRun(scanner rowScanner) (Run, bool, error) {
 	var rawID, rawProjectID, rawAgentID, rawTaskID, rawIncarnationID, rawChangeID, rawDigest []byte
-	var roleValue, providerValue, modeValue, phaseValue string
+	var roleValue, providerValue, modeValue, verificationValue, phaseValue string
 	var model, effort sql.NullString
 	var proposalKind, proposalCode, proposalDetail, proposalResult sql.NullString
 	var terminalKind, terminalCode, terminalDetail, terminalResult sql.NullString
@@ -41,7 +41,7 @@ func scanRun(scanner rowScanner) (Run, bool, error) {
 	var runningAt, finalizingAt, terminalAt sql.NullInt64
 	if err := scanner.Scan(
 		&rawID, &rawProjectID, &rawAgentID, &rawTaskID, &rawIncarnationID, &admittedWorkRevision, &rawChangeID,
-		&roleValue, &providerValue, &modeValue, &model, &effort, &phaseValue,
+		&roleValue, &providerValue, &modeValue, &model, &effort, &verificationValue, &phaseValue,
 		&proposalKind, &proposalCode, &proposalDetail, &proposalResult,
 		&terminalKind, &terminalCode, &terminalDetail, &terminalResult,
 		&rawDigest, &revokedAt, &exitSequence, &exitCode, &exitSignal, &exitAt,
@@ -61,18 +61,19 @@ func scanRun(scanner rowScanner) (Run, bool, error) {
 	role, roleErr := parseAgentRole(roleValue)
 	provider, providerErr := parseProvider(providerValue)
 	mode, modeErr := parseExecutionMode(modeValue)
+	verification, verificationErr := parseVerificationPolicy(verificationValue)
 	phase, phaseErr := parseRunPhase(phaseValue)
 	digest, digestErr := AttemptDigestFromBytes(rawDigest)
 	rev, revisionErr := NewRevision(revision)
 	admittedTime, admittedErr := NewUnixMillis(admittedAt)
 	updatedTime, updatedErr := NewUnixMillis(updatedAt)
-	if idErr != nil || projectErr != nil || agentErr != nil || taskErr != nil || incarnationErr != nil || workErr != nil || roleErr != nil || providerErr != nil || modeErr != nil || phaseErr != nil || digestErr != nil || revisionErr != nil || admittedErr != nil || updatedErr != nil || updatedAt < admittedAt || model.Valid && (byteLen(model.String) < 1 || byteLen(model.String) > 128) || effort.Valid && (effort.String == "" || !validReasoningEffort(effort.String)) || provider == ProviderShell && mode != ExecutionUnrestricted {
+	if idErr != nil || projectErr != nil || agentErr != nil || taskErr != nil || incarnationErr != nil || workErr != nil || roleErr != nil || providerErr != nil || modeErr != nil || verificationErr != nil || phaseErr != nil || digestErr != nil || revisionErr != nil || admittedErr != nil || updatedErr != nil || updatedAt < admittedAt || model.Valid && (byteLen(model.String) < 1 || byteLen(model.String) > 128) || effort.Valid && (effort.String == "" || !validReasoningEffort(effort.String)) || provider == ProviderShell && mode != ExecutionUnrestricted {
 		return Run{}, false, fmt.Errorf("%w: invalid run controls", ErrCorruptState)
 	}
 	result := Run{
 		ID: id, ProjectID: projectID, AgentID: agentID, TaskID: taskID, TaskIncarnationID: incarnationID,
 		AdmittedTaskWorkRevision: workRevision, Role: role, Provider: provider, ExecutionMode: mode,
-		Model: nullStringValue(model), ReasoningEffort: nullStringValue(effort), Phase: phase,
+		Model: nullStringValue(model), ReasoningEffort: nullStringValue(effort), VerificationPolicy: verification, Phase: phase,
 		CredentialDigest: digest, Revision: rev, AdmittedAt: admittedTime, UpdatedAt: updatedTime,
 	}
 	if rawChangeID != nil {
@@ -91,6 +92,9 @@ func scanRun(scanner rowScanner) (Run, bool, error) {
 		return Run{}, false, fmt.Errorf("%w: invalid run outcome", ErrCorruptState)
 	}
 	if proposalPresent {
+		if proposal.code == FailureUnverifiable {
+			return Run{}, false, fmt.Errorf("%w: invalid proposed verification outcome", ErrCorruptState)
+		}
 		result.Proposal = &proposal
 	}
 	if terminalPresent {
@@ -148,7 +152,7 @@ func scanRun(scanner rowScanner) (Run, bool, error) {
 			return Run{}, false, fmt.Errorf("%w: inconsistent finalizing run", ErrCorruptState)
 		}
 	case RunTerminal:
-		if result.FinalizingAt == nil || result.TerminalAt == nil || result.CredentialRevokedAt == nil || result.Proposal == nil || result.Terminal == nil || !result.Proposal.equal(*result.Terminal) {
+		if result.FinalizingAt == nil || result.TerminalAt == nil || result.CredentialRevokedAt == nil || result.Proposal == nil || result.Terminal == nil || !validTerminalRefinement(result) {
 			return Run{}, false, fmt.Errorf("%w: inconsistent terminal run", ErrCorruptState)
 		}
 	}
@@ -240,7 +244,7 @@ func scanResource(scanner rowScanner) (Resource, bool, error) {
 		resource.ReleasedAt = &value
 	}
 	if kind == ResourceRuntimeRoot {
-		if !path.Valid || !validAbsolutePath(path.String) || pid.Valid || pgid.Valid || birth != nil {
+		if !path.Valid || !validOwnedLocator(path.String) || pid.Valid || pgid.Valid || birth != nil {
 			return Resource{}, false, fmt.Errorf("%w: invalid runtime-root resource", ErrCorruptState)
 		}
 		if pathDev.Valid || pathInode.Valid {
@@ -294,21 +298,50 @@ func scanResource(scanner rowScanner) (Resource, bool, error) {
 }
 
 func (store *Store) Run(ctx context.Context, id RunID) (Run, bool, error) {
-	connection, err := store.readerConnection(ctx)
+	tx, err := store.beginRead(ctx)
 	if err != nil {
 		return Run{}, false, err
 	}
-	defer connection.Close()
-	return runByID(ctx, connection, id)
+	defer tx.Close()
+	run, found, err := runByID(ctx, tx.connection, id)
+	if err != nil || !found {
+		return run, found, err
+	}
+	resources, err := resourcesForRun(ctx, tx.connection, run.ID)
+	if err != nil || !resourcesMatchRunPhase(run.Phase, resources) {
+		if err == nil {
+			err = ErrCorruptState
+		}
+		return Run{}, false, err
+	}
+	return run, true, nil
 }
 
 func (store *Store) Resource(ctx context.Context, id ResourceID) (Resource, bool, error) {
-	connection, err := store.readerConnection(ctx)
+	tx, err := store.beginRead(ctx)
 	if err != nil {
 		return Resource{}, false, err
 	}
-	defer connection.Close()
-	return resourceByID(ctx, connection, id)
+	defer tx.Close()
+	resource, found, err := resourceByID(ctx, tx.connection, id)
+	if err != nil || !found {
+		return resource, found, err
+	}
+	run, runFound, err := runByID(ctx, tx.connection, resource.RunID)
+	if err != nil || !runFound {
+		if err == nil {
+			err = ErrCorruptState
+		}
+		return Resource{}, false, err
+	}
+	resources, err := resourcesForRun(ctx, tx.connection, run.ID)
+	if err != nil || !resourcesMatchRunPhase(run.Phase, resources) {
+		if err == nil {
+			err = ErrCorruptState
+		}
+		return Resource{}, false, err
+	}
+	return resource, true, nil
 }
 
 func resourcesForRun(ctx context.Context, connection *sql.Conn, runID RunID) ([]Resource, error) {
@@ -395,6 +428,13 @@ func (store *Store) AuthenticateAttempt(ctx context.Context, digest AttemptDiges
 	}
 	if !found || run.Phase != RunRunning || run.CredentialRevokedAt != nil || !bytes.Equal(run.CredentialDigest.Bytes(), digest.Bytes()) {
 		return AttemptAuthority{}, ErrUnauthorized
+	}
+	resources, err := resourcesForRun(ctx, tx.connection, run.ID)
+	if err != nil {
+		return AttemptAuthority{}, err
+	}
+	if !resourcesMatchRunPhase(run.Phase, resources) {
+		return AttemptAuthority{}, ErrCorruptState
 	}
 	return AttemptAuthority{RunID: run.ID, ProjectID: run.ProjectID, AgentID: run.AgentID, TaskID: run.TaskID, TaskIncarnation: run.TaskIncarnationID, Role: run.Role, Provider: run.Provider, ExecutionMode: run.ExecutionMode, ChangeID: run.ChangeID}, nil
 }

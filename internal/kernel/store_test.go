@@ -386,7 +386,7 @@ func TestSnapshotRejectsCapPlusOne(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	statement, err := tx.Prepare(`INSERT INTO projects(id, name, root, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, 1, 1, 1)`)
+	statement, err := tx.Prepare(`INSERT INTO projects(id, name, root, verification_policy, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, 'none', 1, 1, 1)`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -670,13 +670,13 @@ func seedDurableAuthority(t *testing.T, store *Store) {
 	}
 	if _, err := store.writer.Exec(`INSERT INTO runs(
             id, project_id, agent_id, task_id, task_incarnation_id, admitted_task_work_revision,
-            change_id, role, provider, execution_mode, model, reasoning_effort, phase,
+	            change_id, role, provider, execution_mode, model, reasoning_effort, verification_policy, phase,
             proposal_kind, proposal_code, proposal_detail, proposal_result,
             terminal_kind, terminal_code, terminal_detail, terminal_result,
             credential_digest, credential_revoked_at_ms,
             runner_exit_sequence, runner_exit_code, runner_exit_signal, runner_exit_at_ms,
             revision, admitted_at_ms, running_at_ms, finalizing_at_ms, terminal_at_ms, updated_at_ms
-        ) VALUES(?, ?, ?, ?, ?, 1, NULL, 'orchestrator', 'codex', 'workspace_write', NULL, NULL, 'admitted',
+	        ) VALUES(?, ?, ?, ?, ?, 1, NULL, 'orchestrator', 'codex', 'workspace_write', NULL, NULL, 'none', 'admitted',
             NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, NULL, NULL, NULL, NULL, NULL, 1, 5, NULL, NULL, NULL, 5)`,
 		runID(t, 5).Bytes(), project.ID.Bytes(), agent.ID.Bytes(), task.ID.Bytes(), task.IncarnationID.Bytes(), bytes.Repeat([]byte{0x5a}, DigestBytes)); err != nil {
 		t.Fatal(err)
@@ -687,6 +687,15 @@ func seedDurableAuthority(t *testing.T, store *Store) {
         ) VALUES(?, ?, 'runtime_root', 'declared', '/runtime', NULL, NULL, NULL, NULL, NULL, NULL, 1, 5, 5, NULL)`,
 		resourceID(t, 6).Bytes(), runID(t, 5).Bytes()); err != nil {
 		t.Fatal(err)
+	}
+	for index, kind := range []string{"runner_process", "provider_process", "provider_group"} {
+		if _, err := store.writer.Exec(`INSERT INTO resources(
+			id, run_id, kind, state, path, path_dev, path_inode, pid, pgid, birth_digest,
+			unresolved_reason, revision, declared_at_ms, updated_at_ms, released_at_ms
+		) VALUES(?, ?, ?, 'declared', NULL, NULL, NULL, NULL, NULL, NULL, NULL, 1, 5, 5, NULL)`,
+			resourceID(t, byte(7+index)).Bytes(), runID(t, 5).Bytes(), kind); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
