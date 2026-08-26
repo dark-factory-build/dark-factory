@@ -1880,3 +1880,52 @@ Runtime-ownership re-review at unintegrated head `b640b78`:
   terminal preflight, bounded cleanup and scratch tests remain required, and
   the stack remains unintegrated until the same reviewer returns exact-head
   ALLOW.
+
+Runtime ownership and cleanup proof on integrated head `a35a435`:
+
+- One pre-created EUID-owned `0600` regular `.runtime.lock` serializes every
+  cooperating product create/adopt/observe/remove through fresh independent
+  opens and exact metadata/identity rechecks. It closes Darwin's mkdir-to-first-
+  identity gap within the documented cooperative same-EUID boundary; a mutex
+  remains serialization only. Failure cleanup never removes a replacement.
+- One validating `RuntimeBinding` is the source of runtime root, fixed HOME/TMP,
+  attempt-token and worker-config locators. The daemon-global API socket remains
+  separate authority. A dedicated fixed empty read-only lifetime inode—not the
+  runtime-directory descriptor—is duplicated across outer gate, registered
+  worker and final provider as FD 10. FD 3/control and FD 9/runtime authority
+  close before provider exec; the provider cannot use FD 10 for `openat`,
+  `fchdir`, write or truncate.
+- A real causal test SIGKILLs the outer runner while the same provider PID/PGID/
+  birth remains alive. Independent recovery still observes the lifetime flock
+  held and sees it available only after provider exit. Missing, malformed,
+  replaced, linked, mode- or size-mutated lifetime authority fails closed.
+- Runtime cleanup uses a fixed top-level grammar and runner-owned names. An
+  unacknowledged terminal spool blocks every effect. HOME/TMP traversal accepts
+  only bounded same-device/EUID regular single-link content; symlinks, FIFOs,
+  sockets, hardlinks, unexpected entries, depth/effect exhaustion, cancellation
+  and identity uncertainty never become release. Directory/root/parent fsync
+  and a final absence recheck make successful retry durable.
+- Three independent BLOCK/repair cycles found and closed the missing cooperative
+  mutation lock, dropped final-provider lease, invalid terminal-scratch cleanup,
+  adoption effects before lifetime acquisition, and failed-create deletion of
+  a replacement lifetime. Adoption now acquires/rechecks an existing lifetime
+  before any repair, and only the exact pre-provider pre-lifetime crash grammar
+  may create one under the parent lock. Exact created lifetime identity is
+  threaded through bounded cleanup; replacements remain visible.
+- Mutations removing parent/lifetime flocks, lock metadata checks, terminal
+  preflight, hardlink/symlink refusal, final absence recheck, provider FD 10,
+  scratch exact cleanup, adoption-before-lock ordering and created-identity
+  comparison were killed and removed. Exact repaired review head `e5785eb`
+  received independent **ALLOW** with no findings.
+- Author full, focused, race, CGO-free, vet, cross-build, mutation and clean-
+  census gates passed. After unchanged integration the orchestrator passed
+  daemon/runner/command focused tests, the full nine-package Go suite, targeted
+  race (`daemon 2.367s`, `runner 32.128s`, command 1.677s), vet, format/diff,
+  an empty task temporary root and an exact process census with no runner,
+  attempt-worker or lifetime-provider residue.
+- The remaining boundary is deliberate: a provider can voluntarily close its
+  inherited read-only lease after simultaneous outer loss, and hostile same-
+  EUID processes can ignore advisory locks. The documented product/cooperative
+  threat model does not claim OS isolation. Final Change tree/CWD reinspection
+  remains assigned to the registered Change worker and is not implied by this
+  proof.
