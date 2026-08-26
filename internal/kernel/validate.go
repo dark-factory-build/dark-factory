@@ -40,10 +40,53 @@ func validateDurableControls(ctx context.Context, connection *sql.Conn) error {
 	if err := validateBrowserAuthority(ctx, connection); err != nil {
 		return err
 	}
+	if err := validateHumanRequests(ctx, connection); err != nil {
+		return err
+	}
 	if err := validateResourceIdentityCollisions(ctx, connection); err != nil {
 		return err
 	}
 	return validateInvalidations(ctx, connection, state)
+}
+
+func validateHumanRequests(ctx context.Context, connection *sql.Conn) error {
+	var unresolved int64
+	if err := connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM human_requests WHERE status IN ('open', 'delivering', 'delivery_unknown')`).Scan(&unresolved); err != nil {
+		return err
+	}
+	if unresolved < 0 || unresolved > MaxOpenHumanRequests {
+		return fmt.Errorf("%w: human request bound exceeded", ErrCorruptState)
+	}
+	rows, err := connection.QueryContext(ctx, `SELECT `+humanRequestColumns+` FROM human_requests ORDER BY id`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		request, found, scanErr := scanHumanRequest(rows)
+		if scanErr != nil || !found {
+			if scanErr == nil {
+				scanErr = ErrCorruptState
+			}
+			return scanErr
+		}
+		var phase string
+		if err := connection.QueryRowContext(ctx, `SELECT phase FROM runs WHERE id = ?`, request.RunID.Bytes()).Scan(&phase); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("%w: human request run is missing", ErrCorruptState)
+			}
+			return err
+		}
+		if request.Status == HumanRequestOpen || request.Status == HumanRequestDelivering {
+			if phase != RunRunning.String() {
+				return fmt.Errorf("%w: active human request has non-running origin", ErrCorruptState)
+			}
+		}
+		if request.Status == HumanRequestStale && phase == RunRunning.String() {
+			return fmt.Errorf("%w: stale human request has running origin", ErrCorruptState)
+		}
+	}
+	return rows.Err()
 }
 
 // validateBrowserAuthority is intentionally a concrete integrity pass. Browser

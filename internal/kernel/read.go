@@ -394,6 +394,11 @@ func (store *Store) Snapshot(ctx context.Context) (DashboardSnapshot, error) {
 	if err := taskRows.Close(); err != nil {
 		return DashboardSnapshot{}, err
 	}
+	humanRequests, err := humanRequestProjections(ctx, tx.connection, SnapshotEntityLimit-count)
+	if err != nil {
+		return DashboardSnapshot{}, fmt.Errorf("read human request projections: %w", err)
+	}
+	snapshot.HumanRequests = humanRequests
 	return snapshot, nil
 }
 

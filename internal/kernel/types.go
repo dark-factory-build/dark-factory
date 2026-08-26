@@ -56,6 +56,8 @@ type TerminalSessionID struct{ identifier }
 type DaemonID struct{ identifier }
 type BootID struct{ identifier }
 type BrowserClientID struct{ identifier }
+type HumanRequestID struct{ identifier }
+type HumanRequestDeliveryID struct{ identifier }
 
 func ProjectIDFromBytes(value []byte) (ProjectID, error) {
 	id, err := identifierFromBytes(value)
@@ -107,30 +109,42 @@ func BrowserClientIDFromBytes(value []byte) (BrowserClientID, error) {
 	id, err := identifierFromBytes(value)
 	return BrowserClientID{id}, err
 }
+func HumanRequestIDFromBytes(value []byte) (HumanRequestID, error) {
+	id, err := identifierFromBytes(value)
+	return HumanRequestID{id}, err
+}
+func HumanRequestDeliveryIDFromBytes(value []byte) (HumanRequestDeliveryID, error) {
+	id, err := identifierFromBytes(value)
+	return HumanRequestDeliveryID{id}, err
+}
 
-func (id ProjectID) Bytes() []byte         { return id.bytes() }
-func (id AgentID) Bytes() []byte           { return id.bytes() }
-func (id TaskID) Bytes() []byte            { return id.bytes() }
-func (id IncarnationID) Bytes() []byte     { return id.bytes() }
-func (id ChangeID) Bytes() []byte          { return id.bytes() }
-func (id RunID) Bytes() []byte             { return id.bytes() }
-func (id ResourceID) Bytes() []byte        { return id.bytes() }
-func (id TerminalSessionID) Bytes() []byte { return id.bytes() }
-func (id DaemonID) Bytes() []byte          { return id.bytes() }
-func (id BootID) Bytes() []byte            { return id.bytes() }
-func (id BrowserClientID) Bytes() []byte   { return id.bytes() }
+func (id ProjectID) Bytes() []byte              { return id.bytes() }
+func (id AgentID) Bytes() []byte                { return id.bytes() }
+func (id TaskID) Bytes() []byte                 { return id.bytes() }
+func (id IncarnationID) Bytes() []byte          { return id.bytes() }
+func (id ChangeID) Bytes() []byte               { return id.bytes() }
+func (id RunID) Bytes() []byte                  { return id.bytes() }
+func (id ResourceID) Bytes() []byte             { return id.bytes() }
+func (id TerminalSessionID) Bytes() []byte      { return id.bytes() }
+func (id DaemonID) Bytes() []byte               { return id.bytes() }
+func (id BootID) Bytes() []byte                 { return id.bytes() }
+func (id BrowserClientID) Bytes() []byte        { return id.bytes() }
+func (id HumanRequestID) Bytes() []byte         { return id.bytes() }
+func (id HumanRequestDeliveryID) Bytes() []byte { return id.bytes() }
 
-func (id ProjectID) MarshalText() ([]byte, error)         { return []byte(id.String()), nil }
-func (id AgentID) MarshalText() ([]byte, error)           { return []byte(id.String()), nil }
-func (id TaskID) MarshalText() ([]byte, error)            { return []byte(id.String()), nil }
-func (id IncarnationID) MarshalText() ([]byte, error)     { return []byte(id.String()), nil }
-func (id ChangeID) MarshalText() ([]byte, error)          { return []byte(id.String()), nil }
-func (id RunID) MarshalText() ([]byte, error)             { return []byte(id.String()), nil }
-func (id ResourceID) MarshalText() ([]byte, error)        { return []byte(id.String()), nil }
-func (id TerminalSessionID) MarshalText() ([]byte, error) { return []byte(id.String()), nil }
-func (id DaemonID) MarshalText() ([]byte, error)          { return []byte(id.String()), nil }
-func (id BootID) MarshalText() ([]byte, error)            { return []byte(id.String()), nil }
-func (id BrowserClientID) MarshalText() ([]byte, error)   { return []byte(id.String()), nil }
+func (id ProjectID) MarshalText() ([]byte, error)              { return []byte(id.String()), nil }
+func (id AgentID) MarshalText() ([]byte, error)                { return []byte(id.String()), nil }
+func (id TaskID) MarshalText() ([]byte, error)                 { return []byte(id.String()), nil }
+func (id IncarnationID) MarshalText() ([]byte, error)          { return []byte(id.String()), nil }
+func (id ChangeID) MarshalText() ([]byte, error)               { return []byte(id.String()), nil }
+func (id RunID) MarshalText() ([]byte, error)                  { return []byte(id.String()), nil }
+func (id ResourceID) MarshalText() ([]byte, error)             { return []byte(id.String()), nil }
+func (id TerminalSessionID) MarshalText() ([]byte, error)      { return []byte(id.String()), nil }
+func (id DaemonID) MarshalText() ([]byte, error)               { return []byte(id.String()), nil }
+func (id BootID) MarshalText() ([]byte, error)                 { return []byte(id.String()), nil }
+func (id BrowserClientID) MarshalText() ([]byte, error)        { return []byte(id.String()), nil }
+func (id HumanRequestID) MarshalText() ([]byte, error)         { return []byte(id.String()), nil }
+func (id HumanRequestDeliveryID) MarshalText() ([]byte, error) { return []byte(id.String()), nil }
 
 type digest struct {
 	b [DigestBytes]byte
@@ -388,6 +402,7 @@ const (
 	EntityTask
 	EntityChange
 	EntityRun
+	EntityHumanRequest
 )
 
 func parseEntityKind(value string) (EntityKind, error) {
@@ -404,6 +419,8 @@ func parseEntityKind(value string) (EntityKind, error) {
 		return EntityChange, nil
 	case "run":
 		return EntityRun, nil
+	case "human_request":
+		return EntityHumanRequest, nil
 	default:
 		return 0, corruptControl("entity kind", value)
 	}
@@ -423,6 +440,8 @@ func (value EntityKind) String() string {
 		return "change"
 	case EntityRun:
 		return "run"
+	case EntityHumanRequest:
+		return "human_request"
 	default:
 		return ""
 	}
@@ -564,11 +583,12 @@ type FactorySummary struct {
 }
 
 type DashboardSnapshot struct {
-	Head     EventSequence
-	Factory  FactorySummary
-	Projects []ProjectSummary
-	Agents   []AgentSummary
-	Tasks    []TaskSummary
+	Head          EventSequence
+	Factory       FactorySummary
+	Projects      []ProjectSummary
+	Agents        []AgentSummary
+	Tasks         []TaskSummary
+	HumanRequests []HumanRequestProjection
 }
 
 type Invalidation struct {

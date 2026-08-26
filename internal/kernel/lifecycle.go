@@ -683,7 +683,13 @@ func (store *Store) enterFinalizing(ctx context.Context, tx *writeTx, run Run, e
 			return Run{}, tx.Rollback(err)
 		}
 	}
-	if err := appendInvalidations(ctx, tx.connection, at, []pendingInvalidation{{kind: EntityRun, id: run.ID.Bytes(), revision: expected.Int64() + 1}}); err != nil {
+	pending := []pendingInvalidation{{kind: EntityRun, id: run.ID.Bytes(), revision: expected.Int64() + 1}}
+	requestInvalidations, err := transitionHumanRequestsForRun(ctx, tx.connection, run.ID, at, false)
+	if err != nil {
+		return Run{}, tx.Rollback(err)
+	}
+	pending = append(pending, requestInvalidations...)
+	if err := appendInvalidations(ctx, tx.connection, at, pending); err != nil {
 		return Run{}, tx.Rollback(err)
 	}
 	run, found, err := runByID(ctx, tx.connection, run.ID)
@@ -964,11 +970,17 @@ func (store *Store) FinalizeRun(ctx context.Context, runID RunID, expected Revis
 	if err := requireOneRow(updated, err); err != nil {
 		return Run{}, tx.Rollback(err)
 	}
-	if err := appendInvalidations(ctx, tx.connection, at, []pendingInvalidation{
+	requestInvalidations, err := transitionHumanRequestsForRun(ctx, tx.connection, run.ID, at, true)
+	if err != nil {
+		return Run{}, tx.Rollback(err)
+	}
+	pending := []pendingInvalidation{
 		{kind: EntityFactory, id: factoryEntityID[:], revision: factoryRevision},
 		{kind: EntityTask, id: task.ID.Bytes(), revision: taskRevision},
 		{kind: EntityRun, id: run.ID.Bytes(), revision: expected.Int64() + 1},
-	}); err != nil {
+	}
+	pending = append(pending, requestInvalidations...)
+	if err := appendInvalidations(ctx, tx.connection, at, pending); err != nil {
 		return Run{}, tx.Rollback(err)
 	}
 	run, found, err = runByID(ctx, tx.connection, run.ID)
