@@ -47,7 +47,8 @@ branch/worktree and obeys that repository's `AGENTS.md`.
 | Reusable with adaptation | `internal/runner` live-child/process-group ownership; daemon supervisor choreography; bounded API framing/auth separation; dashboard projection/client reducer direction; rebased recovery branch `go-recovery-reserved-fix` at `185cd5f`; fail-closed runtime/spool/Change close branches at `f239815`, `347c977`, and `4183205` |
 | In progress but held | Recovery is rebased onto the approved Store chronology but remains unintegrated until PTY/session semantics replace non-interactive assumptions and the close patches are replayed/re-reviewed |
 | Obsolete | Startup-input-only/closed-stdin provider contract; separate stdin/stdout/stderr provider pipes as the product transport; TUI/Bubble Tea packages, lanes and parity tests; generic attention projection; message-on-next-run as the live-question answer |
-| Blocked until proved | Hosted-origin loopback connectivity; PTY allocation/session/input/replay; durable `HumanRequest`; browser pairing/security; browser protocol v1; TypeScript client; public web UI; private host integration; revised crash-cut vertical slice |
+| Proved for revised architecture | Current Chrome on macOS can connect from the protected hosted HTTPS preview to exact `ws://127.0.0.1:43123` with the dedicated loopback permission; strict Origin/Host checks, binary traffic, reconnect, denial, no-daemon, port-collision and cross-site refusal are causal |
+| Blocked until proved | PTY allocation/session/input/replay; durable `HumanRequest`; browser pairing/security; browser protocol v1; TypeScript client; public web UI; complete private host integration; revised crash-cut vertical slice |
 
 Read-only redirection audits were assigned without overlapping writes:
 
@@ -514,8 +515,76 @@ If direct ws fails, choose in order: a local bootstrap HTTPS origin that hands
 control back to the hosted app; a locally trusted HTTPS endpoint if its install
 and renewal UX is acceptable; then a custom `darkfactory://` bootstrap only if
 required. Do not add a relay, extension, service worker, LAN listener or remote
-mobile path. The supported transport is not frozen until the real Chrome matrix
-is recorded here.
+mobile path.
+
+#### Spike result: direct loopback WebSocket selected for Chrome
+
+The direct candidate is **GREEN** on installed Google Chrome
+`151.0.7922.174` on macOS for this exact first support contract:
+
+```text
+hosted HTTPS page
+  → ws://127.0.0.1:43123/browser/v1
+  → exact Host 127.0.0.1:43123
+  → exact hosted Origin
+  → dedicated Chrome loopback-network permission
+```
+
+This does not claim `localhost`, IPv6, Safari, another Chrome version or a
+random port. It does not require local TLS, a local bootstrap origin, a custom
+URL scheme, an extension or a relay. Chrome 147 expanded Local Network Access
+to WebSockets, and current Chromium splits the old compatibility permission
+into `local-network` and `loopback-network`; the actual `127.0.0.1` grant is
+`loopback-network`, not the legacy `local-network-access` alias. See the
+[Chrome 147 release notes](https://developer.chrome.com/release-notes/147) and
+[Chromium compatibility context](https://chromium.googlesource.com/chromium/src/%2B/f7eb223f51392d3eeb51a7d4b32db0762bf70d02/components/permissions/contexts/local_network_access_compat_permission_context.h).
+
+Evidence used the reviewed public harness at canonical public head
+`160fca4804225348356c5e9e05fdd4c6c22f3e4e`, the independently reviewed thin
+private host at `7cdbee3f9c03c185295a1a5755a02c5c070d31cb`, and Vercel preview deployment
+`dpl_8MqaCyGAnQ1rTfVZ7whFbQY93uyt`. The hosted artifact was byte-identical to
+the public 4,513-byte fixture with SHA-512
+`0efad89d96c62e937c5e21c62d52a115cba7110a97ea8e07642c89ddbcdf36879f21970a83fcc4f751b19ec07ff0e7fc236c4adcc595e2d2630e0ef3195ea0d8`.
+Canonical, query and Vercel-normalized encoded aliases could never serve the
+artifact without its hash-only CSP, `no-referrer`, `nosniff` and `no-store`;
+other aliases returned a different error body. The preview remained behind
+Vercel authentication. A test-only automation bypass was carried only in an
+owner-readable cookie, never a URL, and was revoked after the matrix; the
+project reported zero remaining automation-bypass credentials.
+
+Causal Chrome results:
+
+- Three independent fresh profiles granted `loopback-network`. Each opened the
+  exact socket, exchanged a 20-byte binary frame, closed, explicitly
+  reconnected, and exchanged a second 20-byte binary frame. The harness
+  recorded exact Host/Origin, two `101` upgrades and two bounded binary echoes
+  per profile. There was no mixed-content error.
+- Granting the legacy `local-network-access` alias was deliberately tried and
+  killed as a false positive: its permission query reported `granted` while
+  the connection failed with `ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS` and
+  never reached the server.
+- A fresh profile with `loopback-network` denied failed with that same Chrome
+  error and produced no harness event. A headless `prompt` profile remained
+  prompt and failed closed; headless reset resolved denied and also failed
+  closed. The actual headed first-run prompt wording/acceptance UX remains a
+  platform cutover test, not an architecture uncertainty.
+- A fresh granted profile loaded from `https://example.com` reached the
+  harness with that exact wrong Origin and received `403`; it never opened.
+- With no listener, a granted profile failed visibly with
+  `ERR_CONNECTION_REFUSED`. Restarting the harness restored both binary echoes
+  and reconnect in a new fresh profile without changing the hosted page.
+- A second server on the fixed port failed synchronously with
+  `bind: address already in use`. Exact wrong/missing Origin, wrong Host,
+  malformed/oversized frames, connection capacity and partial reads also pass
+  the raw-socket causal harness suite.
+
+All harnesses, Chrome processes, sockets and temporary profiles were censused
+and removed. An early disposable runner did leak two Chrome trees; the census
+caught them, exact isolated PIDs were terminated, and eleven task-specific
+profile directories from the exploratory runners were deleted. The replacement
+runner used unconditional close/removal, and all later per-scenario censuses
+were empty. The public spike's five-second idle
+timeout is intentionally test-only and is not the production heartbeat policy.
 
 ### Updated vertical slice
 
