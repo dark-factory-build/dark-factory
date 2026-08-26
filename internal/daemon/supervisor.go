@@ -21,10 +21,12 @@ type SupervisorSpec struct {
 	RunnerExecutable string
 
 	// These unexported hooks are package-test-only ambiguity seams. Production
-	// callers outside daemon cannot set them.
-	releaseProvider       func(*runner.AttemptController) error
+	// callers outside daemon cannot set them. afterProviderRelease runs only
+	// after the real provider release frame has been written; it can report a
+	// lost acknowledgement without replacing that irreversible write.
 	activateOuter         func(*runner.OwnedChild) (runner.FileIdentity, error)
 	afterAdmission        func() error
+	afterProviderRelease  func() error
 	reconcileAdmission    func(context.Context, kernel.AdmissionKeys) (kernel.AdmissionResult, error)
 	beforeProviderRelease func()
 }

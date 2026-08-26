@@ -408,23 +408,27 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	if err != nil {
 		return daemon.failRun(run, kernel.FailureActivation, err)
 	}
-	releaseProvider := func(controller *runner.AttemptController) error {
-		return controller.Release(runner.StageProvider)
-	}
-	if spec.releaseProvider != nil {
-		releaseProvider = spec.releaseProvider
-	}
 	if spec.beforeProviderRelease != nil {
 		spec.beforeProviderRelease()
 	}
 	// This check is the cancellation/release linearization point. Cancellation
-	// already visible here leaves the provider inert; cancellation racing after
-	// it is handled as a released attempt and converges through terminal evidence.
+	// already visible here leaves the provider inert. Once it returns nil, the
+	// release wins; cancellation becoming visible afterward may race the socket
+	// write but cannot revoke that release, and the owner converges through
+	// terminal evidence.
 	if err := ctx.Err(); err != nil {
 		return daemon.failRun(run, kernel.FailureInternal, err)
 	}
-	if err := releaseProvider(controller); err != nil {
+	// The controller write is the irreversible effect immediately following the
+	// cancellation decision. Test-only acknowledgement loss is injected only
+	// after this write, so a hook cannot stand in for or delay provider release.
+	if err := controller.Release(runner.StageProvider); err != nil {
 		return daemon.failRun(run, kernel.FailureProtocol, err)
+	}
+	if spec.afterProviderRelease != nil {
+		if err := spec.afterProviderRelease(); err != nil {
+			return daemon.failRun(run, kernel.FailureProtocol, err)
+		}
 	}
 
 	terminalEvent, waitErr := daemon.awaitTerminal(ctx, run.ID, wake, controller)

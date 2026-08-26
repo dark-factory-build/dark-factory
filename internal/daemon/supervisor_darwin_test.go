@@ -218,6 +218,7 @@ func TestSupervisorCancellationStillJoinsAndCleansOwnedProcesses(t *testing.T) {
 		t.Fatalf("RunNext cancellation = %v", err)
 	}
 	fixture.assertTerminal(t, run, kernel.OutcomeFailed)
+	fixture.assertOneWitness(t)
 	fixture.assertReleased(t, run)
 }
 
@@ -254,12 +255,7 @@ func TestSupervisorSourceFailureCannotReleaseProvider(t *testing.T) {
 func TestSupervisorPartialProviderReleaseRevokesAuthority(t *testing.T) {
 	fixture := newSupervisorFixture(t, supervisorProgram(t, true, true))
 	releaseErr := errors.New("injected ambiguous provider release")
-	fixture.spec.releaseProvider = func(controller *runner.AttemptController) error {
-		if err := controller.Release(runner.StageProvider); err != nil {
-			return err
-		}
-		return releaseErr
-	}
+	fixture.spec.afterProviderRelease = func() error { return releaseErr }
 	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
 	if !errors.Is(err, releaseErr) {
 		t.Fatalf("RunNext partial release = %v", err)
@@ -270,6 +266,7 @@ func TestSupervisorPartialProviderReleaseRevokesAuthority(t *testing.T) {
 	if _, err := fixture.store.AuthenticateAttempt(context.Background(), run.CredentialDigest); !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Fatalf("partial release credential = %v", err)
 	}
+	fixture.assertOneWitness(t)
 	for _, resource := range fixture.resources(t, run.ID) {
 		if resource.State != kernel.ResourceReleasing {
 			t.Fatalf("partial release %s state = %s", resource.Kind.String(), resource.State.String())
@@ -285,6 +282,66 @@ func TestSupervisorPartialProviderReleaseRevokesAuthority(t *testing.T) {
 			t.Fatalf("partial release left %s alive: %+v", resource.Kind.String(), observation)
 		}
 	}
+}
+
+func TestSupervisorCancellationAfterProviderReleaseStillJoins(t *testing.T) {
+	fixture := newSupervisorFixture(t, supervisorProgram(t, true, false))
+	ctx, cancel := context.WithCancel(context.Background())
+	reached := make(chan struct{})
+	fixture.spec.afterProviderRelease = func() error {
+		close(reached)
+		deadline := time.Now().Add(12 * time.Second)
+		for {
+			recoverable, err := fixture.store.RecoverableRuns(context.Background())
+			if err != nil {
+				return err
+			}
+			if len(recoverable) == 1 && recoverable[0].Run.Proposal != nil {
+				// The typed success is durable after the provider release write;
+				// cancellation must not replace that first outcome.
+				cancel()
+				return nil
+			}
+			if time.Now().After(deadline) {
+				return errors.New("provider outcome timeout after release")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	result := make(chan struct {
+		run kernel.Run
+		err error
+	}, 1)
+	go func() {
+		run, err := fixture.daemon.RunNext(ctx, fixture.spec)
+		result <- struct {
+			run kernel.Run
+			err error
+		}{run: run, err: err}
+	}()
+	select {
+	case <-reached:
+	case <-time.After(12 * time.Second):
+		cancel()
+		t.Fatal("supervisor did not reach post-release barrier")
+	}
+	var got struct {
+		run kernel.Run
+		err error
+	}
+	select {
+	case got = <-result:
+	case <-time.After(12 * time.Second):
+		t.Fatal("post-release cancellation did not join")
+	}
+	if !errors.Is(got.err, context.Canceled) {
+		t.Fatalf("post-release cancellation = %v", got.err)
+	}
+	if got.run.Phase != kernel.RunTerminal || got.run.Proposal == nil || got.run.Proposal.Kind() != kernel.OutcomeSucceeded || got.run.Proposal.Result() != "typed-success" {
+		t.Fatalf("post-release cancellation run = %+v", got.run)
+	}
+	fixture.assertOneWitness(t)
+	fixture.assertReleased(t, got.run)
 }
 
 func TestSupervisorCancellationBeforeProviderReleaseKeepsProviderInert(t *testing.T) {
