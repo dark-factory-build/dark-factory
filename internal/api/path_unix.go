@@ -215,13 +215,13 @@ func openPrivateParentAt(path string, beforeOpen, afterOpen func(string)) (*priv
 	info, statErr := opened.Stat()
 	closeErr := opened.Close()
 	rootIdentity, ok := identityOf(info)
-	if statErr != nil || closeErr != nil || !ok || !rootIdentity.same(identity) {
+	if statErr != nil || closeErr != nil || !ok || !rootIdentity.sameDirectory(identity) {
 		root.Close()
 		directory.Close()
 		return nil, fileIdentity{}, ErrInvalidClient
 	}
 	check, checkedIdentity, err := openParentChain(parentPath, nil, nil)
-	if err != nil || check.Close() != nil || !checkedIdentity.same(identity) {
+	if err != nil || check.Close() != nil || !checkedIdentity.sameDirectory(identity) {
 		root.Close()
 		directory.Close()
 		return nil, fileIdentity{}, ErrInvalidClient
@@ -263,8 +263,8 @@ func openParentChain(parentPath string, beforeOpen, afterOpen func(string)) (*os
 		openedIdentity, openedOK := identityOf(openedInfo)
 		afterInfo, afterErr := os.Lstat(currentPath)
 		afterIdentity, afterOK := identityOf(afterInfo)
-		if openedErr != nil || !openedOK || !openedIdentity.same(before) || afterErr != nil || !afterOK ||
-			!validDirectoryComponent(afterInfo) || !afterIdentity.same(before) {
+		if openedErr != nil || !openedOK || !openedIdentity.sameDirectory(before) || afterErr != nil || !afterOK ||
+			!validDirectoryComponent(afterInfo) || !afterIdentity.sameDirectory(before) {
 			next.Close()
 			directory.Close()
 			return nil, fileIdentity{}, ErrInvalidClient
@@ -289,7 +289,7 @@ func sameParent(path string, expected fileIdentity) bool {
 	if err != nil {
 		return false
 	}
-	return root.Close() == nil && actual.same(expected)
+	return root.Close() == nil && actual.sameDirectory(expected)
 }
 
 func validDirectoryComponent(info os.FileInfo) bool {

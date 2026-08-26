@@ -168,6 +168,53 @@ func TestPrivateParentComponentSwapAtOpenIsRejected(t *testing.T) {
 	}
 }
 
+func TestPrivateParentAllowsUnrelatedChildCreation(t *testing.T) {
+	base := privateTestDirectory(t)
+	outer := filepath.Join(base, "outer")
+	inner := filepath.Join(outer, "inner")
+	if err := os.Mkdir(outer, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(inner, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	beforeInfo, err := os.Lstat(outer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, ok := identityOf(beforeInfo)
+	if !ok {
+		t.Fatal("outer directory has no filesystem identity")
+	}
+	called := false
+	root, _, err := openPrivateParentAt(filepath.Join(inner, "token"), nil, func(component string) {
+		if component != outer {
+			return
+		}
+		called = true
+		if mkdirErr := os.Mkdir(filepath.Join(outer, "unrelated"), 0o700); mkdirErr != nil {
+			t.Fatal(mkdirErr)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := root.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("unrelated child was not created during the directory check")
+	}
+	afterInfo, err := os.Lstat(outer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, ok := identityOf(afterInfo)
+	if !ok || before.same(after) || !before.sameDirectory(after) {
+		t.Fatalf("outer identities before=%+v after=%+v", before, after)
+	}
+}
+
 func TestPrivateParentOpenDoesNotFollowTransientComponent(t *testing.T) {
 	base := privateTestDirectory(t)
 	outer := filepath.Join(base, "outer")
