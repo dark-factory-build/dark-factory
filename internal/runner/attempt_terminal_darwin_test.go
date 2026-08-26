@@ -5,6 +5,7 @@ package runner
 import (
 	"errors"
 	"os"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
@@ -137,9 +138,58 @@ func TestAttemptControllerTerminalEventsInterleaveWithoutLifecycleMutation(t *te
 	}
 }
 
+func TestAttemptControllerAcceptsAttachResultsWithoutLifecycleMutation(t *testing.T) {
+	controller, peer, err := NewAttemptController()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controller.Close()
+	defer peer.Close()
+	controller.state = controllerProviderReleased
+
+	frames := []TerminalFrame{
+		{Kind: TerminalAttached, Correlation: 1, Sequence: 8, Floor: 2, Head: 8, Status: TerminalResultOK},
+		{Kind: TerminalAttached, Correlation: 2, Sequence: 9, Floor: 2, Head: 8, Status: TerminalResultRejected},
+	}
+	for _, want := range frames {
+		if err := writeControlFrame(peer, terminalEventFrame(want), maxFrameBytes); err != nil {
+			t.Fatal(err)
+		}
+		got, err := controller.Next(time.Second)
+		if err != nil || got.Kind != AttemptTerminalFrame || got.Frame == nil || !reflect.DeepEqual(*got.Frame, want) {
+			t.Fatalf("attach event = %+v, err=%v, want %+v", got, err, want)
+		}
+		if controller.state != controllerProviderReleased {
+			t.Fatalf("attach result changed lifecycle state to %d", controller.state)
+		}
+	}
+}
+
+func TestEveryDeclaredTerminalEventKindIsHandled(t *testing.T) {
+	// Keep this table beside the closed union. Adding a TerminalEventKind
+	// requires adding its constructor here and its case to isTerminalEventKind;
+	// otherwise the controller can silently reject a valid event.
+	declared := []TerminalEventKind{
+		TerminalGenerationResult,
+		TerminalInputResult,
+		TerminalResizeResult,
+		TerminalAttached,
+		TerminalOutput,
+		TerminalReset,
+		TerminalPTYEOF,
+	}
+	for _, kind := range declared {
+		if !isTerminalEventKind(string(kind)) {
+			t.Fatalf("declared terminal event kind %q is not accepted by controller", kind)
+		}
+	}
+}
+
 func TestAttemptControllerRejectsMalformedTerminalEvents(t *testing.T) {
 	bad := []attemptFrame{
 		{Version: 1, Kind: string(TerminalOutput), Start: 0, End: 2, Payload: []byte("x")},
+		{Version: 1, Kind: string(TerminalAttached), Correlation: 1, Sequence: 9, Floor: 2, Head: 8, Status: "ok"},
+		{Version: 1, Kind: string(TerminalAttached), Correlation: 1, Sequence: 8, Floor: 2, Head: 8, Status: "partial"},
 		{Version: 1, Kind: string(TerminalReset), Correlation: 1, Generation: 1, Floor: 3, Head: 2},
 		{Version: 1, Kind: string(TerminalPTYEOF), Payload: []byte("bytes")},
 	}
