@@ -1,0 +1,664 @@
+//go:build darwin
+
+package runner
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"syscall"
+	"time"
+	"unsafe"
+
+	"golang.org/x/sys/unix"
+)
+
+type GateLease struct {
+	dir         *os.File
+	dirIdentity fileCommitment
+	basename    string
+	marker      *FileIdentity
+	closed      bool
+}
+
+func CreateGateLease(dir *os.File, basename string) (*GateLease, FileIdentity, error) {
+	if dir == nil || basename == "" || filepath.Base(basename) != basename || basename == "." || basename == ".." {
+		return nil, FileIdentity{}, fmt.Errorf("runner: invalid marker name")
+	}
+	dup, err := unix.FcntlInt(dir.Fd(), unix.F_DUPFD_CLOEXEC, 0)
+	if err != nil {
+		return nil, FileIdentity{}, err
+	}
+	f := os.NewFile(uintptr(dup), "gate-lease-dir")
+	path, err := fdPath(f)
+	if err != nil {
+		f.Close()
+		return nil, FileIdentity{}, err
+	}
+	c, err := commitOpen(f, path, false)
+	if err != nil {
+		f.Close()
+		return nil, FileIdentity{}, err
+	}
+	if c.UID != uint32(os.Getuid()) || c.Mode&0o777 != 0o700 {
+		f.Close()
+		return nil, FileIdentity{}, fmt.Errorf("runner: lease directory must be owner-only")
+	}
+	var s unix.Stat_t
+	err = unix.Fstatat(int(f.Fd()), basename, &s, unix.AT_SYMLINK_NOFOLLOW)
+	if err == nil {
+		f.Close()
+		return nil, FileIdentity{}, os.ErrExist
+	}
+	if !errors.Is(err, unix.ENOENT) {
+		f.Close()
+		return nil, FileIdentity{}, err
+	}
+	return &GateLease{dir: f, dirIdentity: c, basename: basename}, c.FileIdentity, nil
+}
+
+func fdPath(f *os.File) (string, error) {
+	b := make([]byte, 1024)
+	_, _, errno := syscall.Syscall(syscall.SYS_FCNTL, f.Fd(), unix.F_GETPATH, uintptr(unsafePointer(&b[0])))
+	if errno != 0 {
+		return "", errno
+	}
+	n := 0
+	for n < len(b) && b[n] != 0 {
+		n++
+	}
+	if n == 0 {
+		return "", ErrIdentity
+	}
+	return string(b[:n]), nil
+}
+
+// Kept in the Darwin file: F_GETPATH has no typed Go wrapper.
+func unsafePointer(p *byte) uintptr { return uintptr(unsafe.Pointer(p)) }
+
+func (l *GateLease) Close() error {
+	if l == nil || l.closed {
+		return nil
+	}
+	l.closed = true
+	return l.dir.Close()
+}
+
+type OwnedChild struct {
+	cmd          *exec.Cmd
+	identity     Identity
+	kq           int
+	activation   *os.File
+	status       *os.File
+	lease        *GateLease
+	state        state
+	exitObserved bool
+	keepLease    bool
+}
+
+func (c *OwnedChild) Identity() Identity {
+	if c == nil {
+		return Identity{}
+	}
+	return c.identity
+}
+
+func StartBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, keepLeaseAcrossExec bool) (child *OwnedChild, err error) {
+	if lease == nil || lease.closed || lease.marker != nil || spec == nil {
+		return nil, ErrState
+	}
+	gate, err := canonical(gateExecutable)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := commitExecutable(gate); err != nil {
+		return nil, fmt.Errorf("runner: gate executable: %w", err)
+	}
+	config, err := anonymousFile(lease.dir, "config", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer config.Close()
+	if err := writeFrame(config, gateConfig{Version: 1, Target: spec.commit, LeaseDirectory: lease.dirIdentity, MarkerName: lease.basename, KeepLease: keepLeaseAcrossExec}, maxConfigBytes); err != nil {
+		return nil, err
+	}
+	if _, err := config.Seek(0, 0); err != nil {
+		return nil, err
+	}
+	stdin, err := anonymousFile(lease.dir, "stdin", spec.stdin)
+	if err != nil {
+		return nil, err
+	}
+	defer stdin.Close()
+	leashR, leashW, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+	defer leashR.Close()
+	statusR, statusW, err := os.Pipe()
+	if err != nil {
+		leashW.Close()
+		return nil, err
+	}
+	defer statusW.Close()
+	stdout := spec.stdout
+	stderr := spec.stderr
+	var closeOut, closeErr *os.File
+	if stdout == nil {
+		closeOut, err = os.OpenFile("/dev/null", os.O_WRONLY, 0)
+		if err != nil {
+			return nil, err
+		}
+		stdout = closeOut
+		defer closeOut.Close()
+	}
+	if stderr == nil {
+		closeErr, err = os.OpenFile("/dev/null", os.O_WRONLY, 0)
+		if err != nil {
+			return nil, err
+		}
+		stderr = closeErr
+		defer closeErr.Close()
+	}
+	leaseDup, err := unix.FcntlInt(lease.dir.Fd(), unix.F_DUPFD_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	leaseFile := os.NewFile(uintptr(leaseDup), "lease-dir")
+	defer leaseFile.Close()
+	kq, err := unix.Kqueue()
+	if err != nil {
+		return nil, err
+	}
+	unix.CloseOnExec(kq)
+	cmd := exec.Command(gate, "--exec-gate")
+	cmd.Env = []string{}
+	cmd.Stderr = stderr
+	cmd.ExtraFiles = []*os.File{config, leashR, statusW, stdin, stdout, stderr, leaseFile}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		unix.Close(kq)
+		leashW.Close()
+		statusR.Close()
+		return nil, err
+	}
+	c := &OwnedChild{cmd: cmd, identity: Identity{PID: cmd.Process.Pid, PGID: cmd.Process.Pid}, kq: kq, activation: leashW, status: statusR, lease: lease, state: stateBlocked, keepLease: keepLeaseAcrossExec}
+	defer func() {
+		if err != nil {
+			_ = c.hardCleanup()
+		}
+	}()
+	_ = leashR.Close()
+	_ = statusW.Close()
+	first, e := readIdentity(c.identity.PID)
+	if e != nil {
+		err = e
+		return nil, err
+	}
+	if e = registerExit(kq, c.identity.PID); e != nil {
+		err = e
+		return nil, err
+	}
+	if e = statusR.SetReadDeadline(time.Now().Add(4 * time.Second)); e != nil {
+		err = e
+		return nil, err
+	}
+	var ready gateFrame
+	if e = readFrame(statusR, &ready, maxFrameBytes); e != nil {
+		err = e
+		return nil, err
+	}
+	second, e := readIdentity(c.identity.PID)
+	if e != nil {
+		err = e
+		return nil, err
+	}
+	if ready.Kind != "ready" || !ready.Identity.Valid() || ready.Identity != first || second != first || first.PGID != first.PID {
+		err = ErrIdentity
+		return nil, err
+	}
+	c.identity = first
+	return c, nil
+}
+
+func anonymousFile(dir *os.File, prefix string, body []byte) (*os.File, error) {
+	path, err := fdPath(dir)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.CreateTemp(path, "."+prefix+"-")
+	if err != nil {
+		return nil, err
+	}
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
+		return nil, err
+	}
+	if err := os.Remove(f.Name()); err != nil {
+		f.Close()
+		return nil, err
+	}
+	if len(body) > 0 {
+		if _, err := f.Write(body); err != nil {
+			f.Close()
+			return nil, err
+		}
+	}
+	if _, err := f.Seek(0, 0); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+func (c *OwnedChild) Activate() (FileIdentity, error) {
+	if c == nil || c.state != stateBlocked || c.lease.closed {
+		return FileIdentity{}, ErrState
+	}
+	fd, err := unix.Openat(int(c.lease.dir.Fd()), c.lease.basename, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+	if err != nil {
+		return FileIdentity{}, err
+	}
+	f := os.NewFile(uintptr(fd), "activation-marker")
+	id, err := statIdentity(f)
+	if err == nil {
+		err = unix.Fsync(fd)
+	}
+	if err == nil {
+		err = unix.Fsync(int(c.lease.dir.Fd()))
+	}
+	closeErr := f.Close()
+	if err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return FileIdentity{}, err
+	}
+	c.lease.marker = &id
+	if err := writeFrame(c.activation, gateFrame{Kind: "activate", Marker: &id}, maxFrameBytes); err != nil {
+		return id, err
+	}
+	if err := c.activation.Close(); err != nil {
+		return id, err
+	}
+	c.activation = nil
+	c.state = stateActivated
+	return id, nil
+}
+
+func (c *OwnedChild) Abort() error {
+	if c == nil || c.state != stateBlocked {
+		return ErrState
+	}
+	err := c.activation.Close()
+	c.activation = nil
+	if _, werr := c.waitForExit(4 * time.Second); werr != nil {
+		return werr
+	}
+	if waitErr := c.waitOnce(); waitErr != nil {
+		return waitErr
+	}
+	return err
+}
+
+func (c *OwnedChild) waitForExit(timeout time.Duration) (unix.Kevent_t, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return unix.Kevent_t{}, os.ErrDeadlineExceeded
+		}
+		events := make([]unix.Kevent_t, 1)
+		ts := unix.NsecToTimespec(remaining.Nanoseconds())
+		n, err := unix.Kevent(c.kq, nil, events, &ts)
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if err != nil {
+			return unix.Kevent_t{}, err
+		}
+		if n == 0 {
+			return unix.Kevent_t{}, os.ErrDeadlineExceeded
+		}
+		ev := events[0]
+		if ev.Ident != uint64(c.identity.PID) || ev.Filter != unix.EVFILT_PROC || ev.Fflags&unix.NOTE_EXIT == 0 {
+			return unix.Kevent_t{}, ErrIdentity
+		}
+		c.exitObserved = true
+		c.state = stateExited
+		return ev, nil
+	}
+}
+
+func (c *OwnedChild) FinishAfterExit(timeout time.Duration) (Exit, error) {
+	if c == nil || c.state == stateWaited {
+		return Exit{}, ErrState
+	}
+	if !c.exitObserved {
+		if _, err := c.waitForExit(timeout); err != nil {
+			return Exit{}, err
+		}
+	}
+	err := c.waitOnce()
+	exit := exitFromWait(c.cmd.ProcessState, err)
+	_ = c.status.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	var frame gateFrame
+	if ferr := readFrame(c.status, &frame, maxFrameBytes); ferr == nil && frame.Kind == "launch-error" {
+		exit.LaunchErr = frame.Error
+	}
+	return exit, nil
+}
+
+func exitFromWait(ps *os.ProcessState, err error) Exit {
+	e := Exit{Code: -1}
+	if ps == nil {
+		e.LaunchErr = fmt.Sprint(err)
+		return e
+	}
+	ws, ok := ps.Sys().(syscall.WaitStatus)
+	if !ok {
+		e.LaunchErr = "unknown wait status"
+		return e
+	}
+	if ws.Exited() {
+		e.Code = ws.ExitStatus()
+	}
+	if ws.Signaled() {
+		e.Signal = int(ws.Signal())
+	}
+	return e
+}
+
+func (c *OwnedChild) waitOnce() error {
+	if c.state == stateWaited {
+		return ErrState
+	}
+	err := c.cmd.Wait()
+	c.state = stateWaited
+	return err
+}
+
+func (c *OwnedChild) Terminate(timeout time.Duration) (Exit, error) {
+	if c == nil || c.state == stateWaited || !c.identity.Valid() {
+		return Exit{}, ErrState
+	}
+	if timeout <= 0 {
+		timeout = defaultStopTimeout
+	}
+	if err := unix.Kill(-c.identity.PGID, unix.SIGTERM); err != nil && !errors.Is(err, unix.ESRCH) {
+		return Exit{}, fmt.Errorf("%w: TERM: %v", ErrUnresolved, err)
+	}
+	if !c.exitObserved {
+		_, err := c.waitForExit(timeout)
+		if err != nil {
+			if !errors.Is(err, os.ErrDeadlineExceeded) {
+				return Exit{}, err
+			}
+			if err := unix.Kill(-c.identity.PGID, unix.SIGKILL); err != nil && !errors.Is(err, unix.ESRCH) {
+				return Exit{}, fmt.Errorf("%w: KILL: %v", ErrUnresolved, err)
+			}
+			if _, err := c.waitForExit(4 * time.Second); err != nil {
+				return Exit{}, err
+			}
+		}
+	}
+	if err := killRemainingGroup(c.identity); err != nil {
+		return Exit{}, err
+	}
+	err := c.waitOnce()
+	return exitFromWait(c.cmd.ProcessState, err), nil
+}
+
+func killRemainingGroup(leader Identity) error {
+	members, err := unix.SysctlKinfoProcSlice("kern.proc.pgrp", leader.PGID)
+	if err != nil && !errors.Is(err, unix.ESRCH) && !errors.Is(err, unix.EIO) {
+		return fmt.Errorf("%w: enumerate: %v", ErrUnresolved, err)
+	}
+	for _, p := range members {
+		pid := int(p.Proc.P_pid)
+		if pid == leader.PID {
+			continue
+		}
+		if err := unix.Kill(pid, unix.SIGKILL); err != nil && !errors.Is(err, unix.ESRCH) {
+			return fmt.Errorf("%w: descendant %d: %v", ErrUnresolved, pid, err)
+		}
+	}
+	deadline := time.Now().Add(4 * time.Second)
+	for {
+		members, err = unix.SysctlKinfoProcSlice("kern.proc.pgrp", leader.PGID)
+		if err != nil && !(errors.Is(err, unix.ESRCH) || errors.Is(err, unix.EIO)) {
+			return fmt.Errorf("%w: census: %v", ErrUnresolved, err)
+		}
+		onlyLeader := true
+		for _, p := range members {
+			if int(p.Proc.P_pid) != leader.PID {
+				onlyLeader = false
+			}
+		}
+		if onlyLeader {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return ErrUnresolved
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func (c *OwnedChild) Close() error {
+	if c == nil {
+		return nil
+	}
+	if c.state != stateWaited {
+		_, err := c.Terminate(defaultStopTimeout)
+		if err != nil {
+			return err
+		}
+	}
+	if c.activation != nil {
+		_ = c.activation.Close()
+	}
+	if c.status != nil {
+		_ = c.status.Close()
+	}
+	if c.kq >= 0 {
+		_ = unix.Close(c.kq)
+		c.kq = -1
+	}
+	return nil
+}
+func (c *OwnedChild) hardCleanup() error {
+	if c == nil || c.cmd == nil {
+		return nil
+	}
+	_ = unix.Kill(-c.identity.PGID, unix.SIGKILL)
+	if c.kq >= 0 {
+		_, _ = c.waitForExit(4 * time.Second)
+	}
+	if c.state != stateWaited {
+		_ = c.waitOnce()
+	}
+	if c.activation != nil {
+		_ = c.activation.Close()
+	}
+	if c.status != nil {
+		_ = c.status.Close()
+	}
+	if c.kq >= 0 {
+		_ = unix.Close(c.kq)
+		c.kq = -1
+	}
+	return nil
+}
+
+func registerExit(kq, pid int) error {
+	change := unix.Kevent_t{Ident: uint64(pid), Filter: unix.EVFILT_PROC, Flags: unix.EV_ADD | unix.EV_ENABLE | unix.EV_ONESHOT | unix.EV_RECEIPT, Fflags: unix.NOTE_EXIT}
+	events := make([]unix.Kevent_t, 1)
+	n, err := unix.Kevent(kq, []unix.Kevent_t{change}, events, nil)
+	if err != nil {
+		return err
+	}
+	if n != 1 || events[0].Flags&unix.EV_ERROR == 0 {
+		return ErrIdentity
+	}
+	if events[0].Data != 0 {
+		return unix.Errno(events[0].Data)
+	}
+	return nil
+}
+
+func readIdentity(pid int) (Identity, error) {
+	if pid <= 1 {
+		return Identity{}, ErrIdentity
+	}
+	p, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
+	if err != nil {
+		return Identity{}, err
+	}
+	id := Identity{PID: pid, PGID: int(p.Eproc.Pgid), Birth: Birth{Seconds: p.Proc.P_starttime.Sec, Microseconds: p.Proc.P_starttime.Usec}}
+	if !id.Valid() || int(p.Proc.P_pid) != pid {
+		return Identity{}, ErrIdentity
+	}
+	return id, nil
+}
+
+func ObserveProcess(want Identity) Observation {
+	if !want.Valid() {
+		return Observation{Presence: Unknown, Err: ErrIdentity}
+	}
+	got, err := readIdentity(want.PID)
+	if err == nil {
+		if got == want {
+			return Observation{Presence: Present}
+		}
+		return Observation{Presence: Reused}
+	}
+	pzero := unix.Kill(want.PID, 0)
+	gzero := unix.Kill(-want.PGID, 0)
+	if (errors.Is(err, unix.EIO) || errors.Is(err, unix.ESRCH) || errors.Is(err, unix.ENOENT)) && errors.Is(pzero, unix.ESRCH) && errors.Is(gzero, unix.ESRCH) {
+		return Observation{Presence: Absent}
+	}
+	return Observation{Presence: Unknown, Err: fmt.Errorf("%w: info=%v pid=%v group=%v", ErrUnresolved, err, pzero, gzero)}
+}
+
+func ObserveProcessGroup(want Identity) Observation {
+	base := ObserveProcess(want)
+	if base.Presence != Present {
+		return base
+	}
+	procs, err := unix.SysctlKinfoProcSlice("kern.proc.pgrp", want.PGID)
+	if err != nil {
+		return Observation{Presence: Unknown, Err: err}
+	}
+	members := make([]Identity, 0, len(procs))
+	for _, p := range procs {
+		id := Identity{PID: int(p.Proc.P_pid), PGID: int(p.Eproc.Pgid), Birth: Birth{Seconds: p.Proc.P_starttime.Sec, Microseconds: p.Proc.P_starttime.Usec}}
+		if !id.Valid() {
+			return Observation{Presence: Unknown, Err: ErrIdentity}
+		}
+		members = append(members, id)
+	}
+	return Observation{Presence: Present, Members: members}
+}
+
+func RunExecGate() error {
+	config := os.NewFile(3, "gate-config")
+	leash := os.NewFile(4, "gate-leash")
+	status := os.NewFile(5, "gate-status")
+	stdin := os.NewFile(6, "target-stdin")
+	stdout := os.NewFile(7, "target-stdout")
+	stderr := os.NewFile(8, "target-stderr")
+	leaseDir := os.NewFile(9, "lease-dir")
+	for _, f := range []*os.File{config, leash, status, stdin, stdout, stderr, leaseDir} {
+		if f == nil {
+			return fmt.Errorf("runner: missing inherited capability")
+		}
+	}
+	var cfg gateConfig
+	if err := readFrame(io.LimitReader(config, maxConfigBytes+4), &cfg, maxConfigBytes); err != nil {
+		return err
+	}
+	_ = config.Close()
+	if cfg.Version != 1 || cfg.MarkerName == "" || filepath.Base(cfg.MarkerName) != cfg.MarkerName {
+		return fmt.Errorf("runner: invalid gate config")
+	}
+	if got, err := commitOpen(leaseDir, cfg.LeaseDirectory.Path, false); err != nil || got.FileIdentity != cfg.LeaseDirectory.FileIdentity || got.UID != cfg.LeaseDirectory.UID || got.GID != cfg.LeaseDirectory.GID || got.Mode != cfg.LeaseDirectory.Mode {
+		return ErrIdentity
+	}
+	target, err := verifyCommit(cfg.Target.Executable, true)
+	if err != nil {
+		return err
+	}
+	_ = target.Close()
+	cwd, err := verifyCommit(cfg.Target.Cwd, false)
+	if err != nil {
+		return err
+	}
+	defer cwd.Close()
+	id, err := readIdentity(os.Getpid())
+	if err != nil {
+		return err
+	}
+	if err := writeFrame(status, gateFrame{Kind: "ready", Identity: id}, maxFrameBytes); err != nil {
+		return err
+	}
+	var activation gateFrame
+	if err := readFrame(leash, &activation, maxFrameBytes); err != nil {
+		if errors.Is(err, io.EOF) {
+			_ = writeFrame(status, gateFrame{Kind: "aborted"}, maxFrameBytes)
+			return nil
+		}
+		return err
+	}
+	_ = leash.Close()
+	if activation.Kind != "activate" || activation.Marker == nil {
+		return fmt.Errorf("runner: invalid activation")
+	}
+	var marker unix.Stat_t
+	if err := unix.Fstatat(int(leaseDir.Fd()), cfg.MarkerName, &marker, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return err
+	}
+	if marker.Mode&unix.S_IFMT != unix.S_IFREG || marker.Mode&0o777 != 0o600 || uint64(marker.Dev) != activation.Marker.Device || marker.Ino != activation.Marker.Inode {
+		return ErrIdentity
+	}
+	target, err = verifyCommit(cfg.Target.Executable, true)
+	if err != nil {
+		_ = writeFrame(status, gateFrame{Kind: "launch-error", Error: err.Error()}, maxFrameBytes)
+		return err
+	}
+	if err := sameNamedIdentity(cfg.Target.Executable.Path, cfg.Target.Executable.FileIdentity); err != nil {
+		target.Close()
+		_ = writeFrame(status, gateFrame{Kind: "launch-error", Error: err.Error()}, maxFrameBytes)
+		return err
+	}
+	_ = target.Close()
+	if err := unix.Fchdir(int(cwd.Fd())); err != nil {
+		return err
+	}
+	_ = cwd.Close()
+	_ = leaseDir.Close()
+	if err := unix.Dup2(int(stdin.Fd()), 0); err != nil {
+		return err
+	}
+	if err := unix.Dup2(int(stdout.Fd()), 1); err != nil {
+		return err
+	}
+	if err := unix.Dup2(int(stderr.Fd()), 2); err != nil {
+		return err
+	}
+	for _, fd := range []int{3, 4, 6, 7, 8} {
+		_ = unix.Close(fd)
+	}
+	unix.CloseOnExec(5)
+	if !cfg.KeepLease {
+		_ = unix.Close(9)
+	}
+	if err := unix.Exec(cfg.Target.Executable.Path, cfg.Target.Argv, cfg.Target.Env); err != nil {
+		_ = writeFrame(status, gateFrame{Kind: "launch-error", Error: err.Error()}, maxFrameBytes)
+		return err
+	}
+	return nil
+}
