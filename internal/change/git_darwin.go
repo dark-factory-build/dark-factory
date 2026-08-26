@@ -61,10 +61,16 @@ type gitStreamResult struct {
 // SelectGit resolves revision once, validates the complete recursive tree
 // metadata, and returns without reading any blob contents.
 func SelectGit(ctx context.Context, gitExecutable, repositoryRoot, revision string, expected RepositoryIdentity) (Selection, error) {
-	return selectGit(ctx, gitExecutable, repositoryRoot, revision, expected, nil)
+	return selectGitWithTrust(ctx, gitExecutable, repositoryRoot, revision, expected, nil, true)
 }
 
+// selectGit is the package-private native-process fixture seam. Public callers
+// can enter only through SelectGit's root-owned Developer-toolchain check.
 func selectGit(ctx context.Context, gitExecutable, repositoryRoot, revision string, expected RepositoryIdentity, hook gitProcessHook) (Selection, error) {
+	return selectGitWithTrust(ctx, gitExecutable, repositoryRoot, revision, expected, hook, false)
+}
+
+func selectGitWithTrust(ctx context.Context, gitExecutable, repositoryRoot, revision string, expected RepositoryIdentity, hook gitProcessHook, trusted bool) (Selection, error) {
 	if err := validateRevision(revision); err != nil {
 		return Selection{}, err
 	}
@@ -72,7 +78,7 @@ func selectGit(ctx context.Context, gitExecutable, repositoryRoot, revision stri
 	if err != nil {
 		return Selection{}, err
 	}
-	gitIdentity, err := checkpointGitExecutable(gitExecutable)
+	gitIdentity, err := checkpointExpectedGitExecutable(gitExecutable, trusted)
 	if err != nil {
 		return Selection{}, err
 	}
@@ -234,7 +240,7 @@ func checkpointRepository(path string, expected RepositoryIdentity) (repositoryC
 	}
 	defer unix.Close(rootFD)
 	rootStat, err := fstatGit(rootFD)
-	if err != nil || rootStat.Mode&unix.S_IFMT != unix.S_IFDIR {
+	if err != nil || !safeGitMode(rootStat.Mode, gitModeDirectory) {
 		return repositoryCheckpoint{}, &ValidationError{Reason: "repository root is not an exact directory"}
 	}
 	root, err := NewRepositoryIdentity(uint64(rootStat.Dev), rootStat.Ino)
@@ -299,7 +305,7 @@ func openGitAdminDirectory(parentFD int, name string) (int, gitAdminIdentity, er
 		return -1, gitAdminIdentity{}, err
 	}
 	stat, err := fstatGit(fd)
-	if err != nil || stat.Mode&unix.S_IFMT != unix.S_IFDIR || stat.Ino == 0 {
+	if err != nil || !safeGitMode(stat.Mode, gitModeDirectory) || stat.Ino == 0 {
 		unix.Close(fd)
 		return -1, gitAdminIdentity{}, errors.New("invalid Git admin directory")
 	}
@@ -314,8 +320,8 @@ func readGitAdminFile(parentFD int, name string, maximum int64) (gitAdminIdentit
 	file := os.NewFile(uintptr(fd), "")
 	defer file.Close()
 	before, err := fstatGit(fd)
-	if err != nil || before.Mode&unix.S_IFMT != unix.S_IFREG || before.Size < 0 || before.Size > maximum || before.Ino == 0 ||
-		before.Nlink != 1 || before.Mode&(unix.S_ISUID|unix.S_ISGID|unix.S_ISVTX) != 0 {
+	if err != nil || !safeGitMode(before.Mode, gitModeFile) || before.Size < 0 || before.Size > maximum || before.Ino == 0 ||
+		before.Nlink != 1 {
 		return gitAdminIdentity{}, nil, errors.New("invalid Git admin file")
 	}
 	data, err := io.ReadAll(io.LimitReader(file, maximum+1))
@@ -369,7 +375,7 @@ type gitObjectScan struct {
 
 func checkpointGitObjectStore(objectsFD, maximum int) (gitObjectStoreIdentity, error) {
 	root, err := fstatGit(objectsFD)
-	if err != nil || root.Mode&unix.S_IFMT != unix.S_IFDIR || root.Ino == 0 || maximum < 0 {
+	if err != nil || !safeGitMode(root.Mode, gitModeDirectory) || root.Ino == 0 || maximum < 0 {
 		return gitObjectStoreIdentity{}, &ValidationError{Reason: "Git object store root is invalid"}
 	}
 	scan := gitObjectScan{
@@ -493,13 +499,39 @@ func (scan *gitObjectScan) readNames(directoryFD int) ([]string, error) {
 }
 
 func (scan *gitObjectScan) validDirectory(stat unix.Stat_t) bool {
-	return stat.Mode&unix.S_IFMT == unix.S_IFDIR && uint64(stat.Dev) == scan.rootDevice && stat.Uid == scan.rootUID &&
-		stat.Ino != 0 && stat.Mode&(unix.S_ISUID|unix.S_ISGID|unix.S_ISVTX) == 0
+	return safeGitMode(stat.Mode, gitModeDirectory) && uint64(stat.Dev) == scan.rootDevice && stat.Uid == scan.rootUID &&
+		stat.Ino != 0
 }
 
 func (scan *gitObjectScan) validFile(stat unix.Stat_t) bool {
-	return stat.Mode&unix.S_IFMT == unix.S_IFREG && uint64(stat.Dev) == scan.rootDevice && stat.Uid == scan.rootUID &&
-		stat.Ino != 0 && stat.Nlink == 1 && stat.Size >= 0 && stat.Mode&(unix.S_ISUID|unix.S_ISGID|unix.S_ISVTX) == 0
+	return safeGitMode(stat.Mode, gitModeFile) && uint64(stat.Dev) == scan.rootDevice && stat.Uid == scan.rootUID &&
+		stat.Ino != 0 && stat.Nlink == 1 && stat.Size >= 0
+}
+
+type gitModeKind byte
+
+const (
+	gitModeDirectory gitModeKind = iota + 1
+	gitModeFile
+	gitModeExecutable
+)
+
+// safeGitMode is the single mode authority for repository inputs. Nothing Git
+// may consume can be group/world writable or carry special permission bits.
+func safeGitMode(mode uint16, kind gitModeKind) bool {
+	if mode&0o022 != 0 || mode&(unix.S_ISUID|unix.S_ISGID|unix.S_ISVTX) != 0 {
+		return false
+	}
+	switch kind {
+	case gitModeDirectory:
+		return mode&unix.S_IFMT == unix.S_IFDIR
+	case gitModeFile:
+		return mode&unix.S_IFMT == unix.S_IFREG
+	case gitModeExecutable:
+		return mode&unix.S_IFMT == unix.S_IFREG && mode&0o111 != 0
+	default:
+		return false
+	}
 }
 
 func validGitObjectPath(parent, name string) (bool, bool) {
@@ -603,7 +635,7 @@ func gitAdminFromStat(stat unix.Stat_t, digest [32]byte) gitAdminIdentity {
 
 func sameGitStat(left, right unix.Stat_t) bool {
 	return left.Dev == right.Dev && left.Ino == right.Ino && left.Uid == right.Uid && left.Mode == right.Mode &&
-		left.Size == right.Size && left.Mtim == right.Mtim && left.Ctim == right.Ctim
+		left.Nlink == right.Nlink && left.Size == right.Size && left.Mtim == right.Mtim && left.Ctim == right.Ctim
 }
 
 func repositoryIdentityOf(info os.FileInfo) (RepositoryIdentity, error) {
@@ -628,10 +660,63 @@ func checkpointGitExecutable(path string) (gitFileIdentity, error) {
 	}
 	file := os.NewFile(uintptr(fd), "")
 	defer file.Close()
+	return inspectGitExecutable(file, false)
+}
+
+func checkpointTrustedGitExecutable(path string) (gitFileIdentity, error) {
+	if !validDeveloperGitPath(path) {
+		return gitFileIdentity{}, &ValidationError{Reason: "Git executable is outside the trusted Developer toolchain"}
+	}
+	components := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	directoryFD, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return gitFileIdentity{}, newGitError(gitFailurePrivateIO)
+	}
+	defer func() { _ = unix.Close(directoryFD) }()
+	root, err := fstatGit(directoryFD)
+	if err != nil || root.Uid != 0 || !safeGitMode(root.Mode, gitModeDirectory) {
+		return gitFileIdentity{}, &ValidationError{Reason: "Git Developer toolchain authority is unsafe"}
+	}
+	for _, component := range components[:len(components)-1] {
+		nextFD, openErr := unix.Openat(directoryFD, component, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if openErr != nil {
+			return gitFileIdentity{}, &ValidationError{Reason: "Git Developer toolchain path is not exact"}
+		}
+		stat, statErr := fstatGit(nextFD)
+		if statErr != nil || stat.Uid != 0 || stat.Ino == 0 || !safeGitMode(stat.Mode, gitModeDirectory) {
+			_ = unix.Close(nextFD)
+			return gitFileIdentity{}, &ValidationError{Reason: "Git Developer toolchain authority is unsafe"}
+		}
+		_ = unix.Close(directoryFD)
+		directoryFD = nextFD
+	}
+	fd, err := unix.Openat(directoryFD, components[len(components)-1], unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return gitFileIdentity{}, &ValidationError{Reason: "Git executable is not exact"}
+	}
+	file := os.NewFile(uintptr(fd), "")
+	defer file.Close()
+	return inspectGitExecutable(file, true)
+}
+
+func validDeveloperGitPath(path string) bool {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path || filepath.Base(path) != "git" {
+		return false
+	}
+	components := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	if len(components) == 6 && components[0] == "Library" && components[1] == "Developer" && components[2] == "CommandLineTools" &&
+		components[3] == "usr" && components[4] == "bin" && components[5] == "git" {
+		return true
+	}
+	return len(components) == 7 && components[0] == "Applications" && strings.HasSuffix(components[1], ".app") &&
+		components[2] == "Contents" && components[3] == "Developer" && components[4] == "usr" && components[5] == "bin" && components[6] == "git"
+}
+
+func inspectGitExecutable(file *os.File, trusted bool) (gitFileIdentity, error) {
+	fd := int(file.Fd())
 	before, err := fstatGit(fd)
-	if err != nil || before.Mode&unix.S_IFMT != unix.S_IFREG || before.Mode&0o111 == 0 ||
-		before.Mode&(unix.S_ISUID|unix.S_ISGID) != 0 || before.Mode&0o022 != 0 ||
-		(before.Uid != 0 && before.Uid != uint32(unix.Geteuid())) ||
+	if err != nil || !safeGitMode(before.Mode, gitModeExecutable) ||
+		(trusted && before.Uid != 0) || (!trusted && before.Uid != 0 && before.Uid != uint32(unix.Geteuid())) ||
 		before.Size <= 0 || before.Size > maxGitExecutableBytes || before.Ino == 0 || before.Nlink != 1 {
 		return gitFileIdentity{}, &ValidationError{Reason: "Git executable metadata is unsafe"}
 	}
@@ -647,10 +732,18 @@ func checkpointGitExecutable(path string) (gitFileIdentity, error) {
 	var digest [32]byte
 	copy(digest[:], hasher.Sum(nil))
 	return gitFileIdentity{
-		device: uint64(before.Dev), inode: before.Ino, uid: before.Uid, mode: uint32(before.Mode), size: before.Size,
+		trusted: trusted,
+		device:  uint64(before.Dev), inode: before.Ino, uid: before.Uid, mode: uint32(before.Mode), size: before.Size,
 		modifiedNS: before.Mtim.Sec*1e9 + before.Mtim.Nsec,
 		changedNS:  before.Ctim.Sec*1e9 + before.Ctim.Nsec, digest: digest,
 	}, nil
+}
+
+func checkpointExpectedGitExecutable(path string, trusted bool) (gitFileIdentity, error) {
+	if trusted {
+		return checkpointTrustedGitExecutable(path)
+	}
+	return checkpointGitExecutable(path)
 }
 
 func isNativeGitMachO(file *os.File) bool {
@@ -680,7 +773,7 @@ func verifyGitAuthority(repository string, expected repositoryCheckpoint, execut
 	if err := verifyRepository(repository, expected); err != nil {
 		return err
 	}
-	actual, err := checkpointGitExecutable(executable)
+	actual, err := checkpointExpectedGitExecutable(executable, executableIdentity.trusted)
 	if err != nil {
 		return err
 	}
@@ -1080,6 +1173,9 @@ type GitBlobs struct {
 // OpenGitBlobs starts one bounded exact-object reader after rechecking the
 // repository and executable identities captured by SelectGit.
 func OpenGitBlobs(ctx context.Context, gitExecutable, repositoryRoot string, selection Selection) (*GitBlobs, error) {
+	if !selection.gitIdentity.trusted {
+		return nil, &ValidationError{Reason: "blob reader selection lacks trusted Git authority"}
+	}
 	return openGitBlobs(ctx, gitExecutable, repositoryRoot, selection, nil)
 }
 

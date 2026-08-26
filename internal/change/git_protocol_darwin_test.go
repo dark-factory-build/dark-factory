@@ -56,7 +56,7 @@ case "$*" in
 esac
 `, logPath, environmentPath, repository, base.Hex(), blob.oid.Hex(), blobWitness)
 	git := writeFakeGit(t, script)
-	selected, err := SelectGit(context.Background(), git, repository, "refs/heads/main", mustRepositoryIdentity(t, repository))
+	selected, err := selectGit(context.Background(), git, repository, "refs/heads/main", mustRepositoryIdentity(t, repository), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +105,7 @@ func TestGitBlobsValidatesExactOrderAndFramingWithoutLeakingOutput(t *testing.T)
 			git := writeFakeGit(t, script)
 			selection.gitExecutable = git
 			selection.gitIdentity = mustGitFileIdentity(t, git)
-			blobs, err := OpenGitBlobs(context.Background(), git, repository, selection)
+			blobs, err := openGitBlobs(context.Background(), git, repository, selection, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -141,7 +141,7 @@ done
 `, logPath, first.oid.Hex(), second.oid.Hex())
 	git := writeFakeGit(t, script)
 	selection.gitExecutable, selection.gitIdentity = git, mustGitFileIdentity(t, git)
-	blobs, err := OpenGitBlobs(context.Background(), git, repository, selection)
+	blobs, err := openGitBlobs(context.Background(), git, repository, selection, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +163,7 @@ while IFS= read -r ignored; do :; done
 `
 	git := writeFakeGit(t, script)
 	selection.gitExecutable, selection.gitIdentity = git, mustGitFileIdentity(t, git)
-	blobs, err := OpenGitBlobs(context.Background(), git, repository, selection)
+	blobs, err := openGitBlobs(context.Background(), git, repository, selection, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +204,7 @@ func TestGitBlobsBoundsAndRedactsStderrAndRejectsIncompleteClose(t *testing.T) {
 	selection, _ = fakeSelection(t, repository, "", []byte("secret"))
 	git = writeFakeGit(t, "#!/bin/sh\nwhile IFS= read -r request; do exit 4; done\n")
 	selection.gitExecutable, selection.gitIdentity = git, mustGitFileIdentity(t, git)
-	blobs, err = OpenGitBlobs(context.Background(), git, repository, selection)
+	blobs, err = openGitBlobs(context.Background(), git, repository, selection, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

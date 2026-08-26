@@ -208,7 +208,7 @@ func TestSelectGitRejectsLocalIncludesBeforeExecutingGit(t *testing.T) {
 			}
 			started := filepath.Join(filepath.Dir(repository), "ordinary-git-started")
 			git := writeFakeGit(t, fmt.Sprintf("#!/bin/sh\n: > %q\nexit 99\n", started))
-			_, err := SelectGit(context.Background(), git, repository, "HEAD", mustRepositoryIdentity(t, repository))
+			_, err := selectGit(context.Background(), git, repository, "HEAD", mustRepositoryIdentity(t, repository), nil)
 			if err == nil {
 				t.Fatal("local config include was accepted")
 			}
@@ -234,7 +234,7 @@ func TestGitAdminFilesAndObjectStoreAreExactAndRechecked(t *testing.T) {
 			t.Fatal(err)
 		}
 		git := writeFakeGit(t, "#!/bin/sh\nexit 99\n")
-		if _, err := SelectGit(context.Background(), git, repository, "HEAD", mustRepositoryIdentity(t, repository)); err == nil {
+		if _, err := selectGit(context.Background(), git, repository, "HEAD", mustRepositoryIdentity(t, repository), nil); err == nil {
 			t.Fatal("symlink Git config accepted")
 		}
 	})
@@ -252,7 +252,7 @@ func TestGitAdminFilesAndObjectStoreAreExactAndRechecked(t *testing.T) {
 			t.Fatal(err)
 		}
 		git := writeFakeGit(t, "#!/bin/sh\nexit 99\n")
-		if _, err := SelectGit(context.Background(), git, repository, "HEAD", mustRepositoryIdentity(t, repository)); err == nil {
+		if _, err := selectGit(context.Background(), git, repository, "HEAD", mustRepositoryIdentity(t, repository), nil); err == nil {
 			t.Fatal("external symlink object store accepted")
 		}
 	})
@@ -286,6 +286,71 @@ func TestGitAdminFilesAndObjectStoreAreExactAndRechecked(t *testing.T) {
 			if lines := bytes.Count(mustReadFile(t, logPath), []byte{'\n'}); lines != 1 {
 				t.Fatalf("replacement Git phase ran after admin swap: command lines=%d", lines)
 			}
+		})
+	}
+}
+
+func TestGitRepositoryRejectsWritableAuthorityBeforeGit(t *testing.T) {
+	type attack struct {
+		name     string
+		relative string
+		mode     os.FileMode
+		prepare  func(testing.TB, string)
+	}
+	attacks := []attack{
+		{name: "group-writable root", mode: 0o720},
+		{name: "world-writable root", mode: 0o702},
+		{name: "group-writable Git directory", relative: ".git", mode: 0o720},
+		{name: "world-writable Git directory", relative: ".git", mode: 0o702},
+		{name: "group-writable config", relative: ".git/config", mode: 0o620},
+		{name: "world-writable config", relative: ".git/config", mode: 0o602},
+		{name: "group-writable objects", relative: ".git/objects", mode: 0o720},
+		{name: "world-writable objects", relative: ".git/objects", mode: 0o702},
+		{
+			name: "group-writable nested object directory", relative: ".git/objects/aa", mode: 0o720,
+			prepare: func(t testing.TB, path string) {
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "world-writable nested object file", relative: ".git/objects/aa/" + strings.Repeat("0", 38), mode: 0o602,
+			prepare: func(t testing.TB, path string) {
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("object"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "group-writable object admin file", relative: ".git/objects/info/packs", mode: 0o620,
+			prepare: func(t testing.TB, path string) {
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, attack := range attacks {
+		t.Run(attack.name, func(t *testing.T) {
+			repository := fakeRepository(t)
+			path := repository
+			if attack.relative != "" {
+				path = filepath.Join(repository, attack.relative)
+			}
+			if attack.prepare != nil {
+				attack.prepare(t, path)
+			}
+			if err := os.Chmod(path, attack.mode); err != nil {
+				t.Fatal(err)
+			}
+			assertObjectStoreRejectedBeforeGit(t, repository, mustRepositoryIdentity(t, repository))
 		})
 	}
 }
@@ -504,7 +569,7 @@ func assertObjectStoreRejectedBeforeGit(t testing.TB, repository string, identit
 	t.Helper()
 	witness := filepath.Join(filepath.Dir(repository), "git-started")
 	git := writeFakeGit(t, fmt.Sprintf("#!/bin/sh\n: > %q\nexit 99\n", witness))
-	if _, err := SelectGit(context.Background(), git, repository, "HEAD", identity); err == nil {
+	if _, err := selectGit(context.Background(), git, repository, "HEAD", identity, nil); err == nil {
 		t.Fatal("unsafe Git object store was accepted")
 	}
 	if _, err := os.Lstat(witness); !errors.Is(err, os.ErrNotExist) {
@@ -651,10 +716,10 @@ func TestGitExecutableIsContentFrozenAcrossEveryPhase(t *testing.T) {
 
 func TestGitExecutableMustBeActualNativeGitForHost(t *testing.T) {
 	actual := fixtureGitExecutable(t)
-	if _, err := checkpointGitExecutable(actual); err != nil {
+	if _, err := checkpointTrustedGitExecutable(actual); err != nil {
 		t.Fatalf("xcrun-resolved native Git rejected: %v", err)
 	}
-	if _, err := checkpointGitExecutable("/usr/bin/git"); err == nil {
+	if _, err := checkpointTrustedGitExecutable("/usr/bin/git"); err == nil {
 		t.Fatal("Apple xcode-select Git shim accepted as the committed executable")
 	}
 	shebang := filepath.Join(secureTempDir(t), "git")
@@ -672,6 +737,15 @@ func TestGitExecutableMustBeActualNativeGitForHost(t *testing.T) {
 	nativeFake := writeFakeGit(t, "#!/bin/sh\nexit 1\n")
 	if _, err := checkpointGitExecutable(nativeFake); err != nil {
 		t.Fatalf("native test Git fake rejected: %v", err)
+	}
+	witness := filepath.Join(secureTempDir(t), "renamed-native-ran")
+	nonGitRenamed := writeFakeGit(t, fmt.Sprintf("#!/bin/sh\n: > %q\nexit 99\n", witness))
+	repository := fakeRepository(t)
+	if _, err := SelectGit(context.Background(), nonGitRenamed, repository, "HEAD", mustRepositoryIdentity(t, repository)); err == nil {
+		t.Fatal("renamed native non-Git binary passed Developer-toolchain authority")
+	}
+	if _, err := os.Lstat(witness); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("renamed native non-Git binary executed: %v", err)
 	}
 
 	wrongArchitecture := filepath.Join(secureTempDir(t), "git")
@@ -741,15 +815,15 @@ func TestGitPublicFailuresNeverExposePrivateBoundaryData(t *testing.T) {
 	assertPrivate(t, err)
 
 	stderrGit := writeFakeGit(t, "#!/bin/sh\nprintf '"+sentinel+"\\n' >&2\nexit 91\n")
-	_, err = SelectGit(context.Background(), stderrGit, repository, "HEAD", mustRepositoryIdentity(t, repository))
+	_, err = selectGit(context.Background(), stderrGit, repository, "HEAD", mustRepositoryIdentity(t, repository), nil)
 	assertPrivate(t, err)
 	protocolGit := writeFakeGit(t, "#!/bin/sh\ncase \"$*\" in *\" config \"*) exit 1;; *) printf '"+sentinel+"\\n';; esac\n")
-	_, err = SelectGit(context.Background(), protocolGit, repository, "HEAD", mustRepositoryIdentity(t, repository))
+	_, err = selectGit(context.Background(), protocolGit, repository, "HEAD", mustRepositoryIdentity(t, repository), nil)
 	assertPrivate(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err = SelectGit(ctx, git, repository, "HEAD", mustRepositoryIdentity(t, repository))
+	_, err = selectGit(ctx, git, repository, "HEAD", mustRepositoryIdentity(t, repository), nil)
 	assertPrivate(t, err)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("sanitized cancellation lost errors.Is: %v", err)
@@ -962,7 +1036,7 @@ func TestGitBoundaryResourceCensus(t *testing.T) {
 	malformedGit := writeFakeGit(t, "#!/bin/sh\nIFS= read -r request || exit 2\nprintf '%s blob 6\\nwrong!\\n' \"$request\"\n")
 	malformedSelection.gitExecutable, malformedSelection.gitIdentity = malformedGit, mustGitFileIdentity(t, malformedGit)
 	for range 10 {
-		blobs, err := OpenGitBlobs(context.Background(), malformedGit, malformedRepository, malformedSelection)
+		blobs, err := openGitBlobs(context.Background(), malformedGit, malformedRepository, malformedSelection, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -975,7 +1049,7 @@ func TestGitBoundaryResourceCensus(t *testing.T) {
 	blockedGit := writeFakeGit(t, "#!/bin/sh\nIFS= read -r request || exit 2\nexec /usr/bin/perl -e '$SIG{TERM}=sub{exit 0}; while(1){select(undef,undef,undef,1)}'\n")
 	blockedSelection.gitExecutable, blockedSelection.gitIdentity = blockedGit, mustGitFileIdentity(t, blockedGit)
 	for range 5 {
-		blobs, err := OpenGitBlobs(context.Background(), blockedGit, blockedRepository, blockedSelection)
+		blobs, err := openGitBlobs(context.Background(), blockedGit, blockedRepository, blockedSelection, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

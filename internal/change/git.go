@@ -33,6 +33,7 @@ func (i RepositoryIdentity) valid() bool {
 }
 
 type gitFileIdentity struct {
+	trusted    bool
 	device     uint64
 	inode      uint64
 	uid        uint32
