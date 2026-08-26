@@ -208,6 +208,28 @@ func TestLeashEOFAbortsWithoutProviderEffect(t *testing.T) {
 	}
 }
 
+func TestActivationRefusesMarkerCreatedAfterReadiness(t *testing.T) {
+	f := newFixture(t)
+	effect := filepath.Join(f.root, "effect")
+	out := outputFile(t, filepath.Join(f.root, "out"))
+	child := f.start("/bin/sh", []string{"-c", "echo bad > " + effect}, nil, out)
+	if err := os.WriteFile(filepath.Join(f.root, "activate"), []byte("foreign"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := child.Activate(); !errors.Is(err, unix.EEXIST) {
+		t.Fatalf("activation replaced marker: %v", err)
+	}
+	if err := child.Abort(); err != nil {
+		t.Fatal(err)
+	}
+	if body, err := os.ReadFile(filepath.Join(f.root, "activate")); err != nil || string(body) != "foreign" {
+		t.Fatalf("marker changed body=%q err=%v", body, err)
+	}
+	if _, err := os.Stat(effect); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("provider ran after marker conflict")
+	}
+}
+
 func TestFrozenExecutableRejectsReplacementAndMutation(t *testing.T) {
 	for _, mutation := range []string{"replace", "bytes", "mode", "remove"} {
 		t.Run(mutation, func(t *testing.T) {
