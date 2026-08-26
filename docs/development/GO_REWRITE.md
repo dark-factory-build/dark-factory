@@ -1751,3 +1751,41 @@ Closed runner environment proof on integrated head `c7d74cc`:
   question for provider integration and the final elegance audit. They must be
   removed if no shipped provider needs them; this proof freezes validation and
   ordering, not speculative visibility.
+
+Interim code-elegance inventory on integrated head `6460de9`:
+
+- A read-only reviewer who had not authored the integrated foundation traced
+  the complete current Go package graph and returned **ALLOW continued kernel
+  implementation, BLOCK final simplicity sign-off**. No ORM, DI container,
+  router framework, workflow framework, generic repository, or production
+  interface hierarchy exists. The current graph is still intentionally
+  disconnected until the daemon becomes its concrete composition root.
+- `internal/sqlitecontract` and `internal/processcontract` remain explicit
+  deletion candidates, not permanent architecture. After the integrated
+  kernel duplicates their unique busy/crash/transaction and Darwin process
+  causal coverage through concrete Store/runner effects, those proof-only
+  packages and any redundant tests must be removed rather than retained as a
+  second abstraction layer.
+- `AuthenticateAttempt`/`AttemptAuthority`, unused typed JSON/text marshal
+  methods, and provisional exports must be rechecked after the API dispatcher
+  and supervisor establish the only real consumers. Any still-unused surface
+  is deleted. Attempt outcome handlers must continue to call the atomic Store
+  proposal method directly; an operator cannot manufacture attempt authority.
+- Production-compiled filesystem, Git, API and process fault hooks are retained
+  only while the crash/mutation matrix needs them. The final elegance audit
+  must either move or delete seams that no longer add causal proof. This may
+  not remove the before/after observations at distinct trust boundaries, the
+  runner's sole-Wait ownership, or the Store's pinned durable validation merely
+  because those checks look repetitive.
+- The final audit must also correct dependency metadata, decide the narrow
+  unsupported-platform build shape, measure the complete Store-validation
+  cost, and inspect the real post-daemon export/package graph. In-memory cached
+  validation, generic scanners, and a generic transaction context are not
+  accepted simplifications unless an independent proof shows SQLite remains
+  the sole current authority.
+- The static audit measured approximately 13,000 production Go lines at this
+  intermediate head (`kernel` 5,063, `change` 3,405, `runner` 2,648, `api`
+  1,770, command entry points 186). These are an interim trend point, not a
+  success metric or final before/after claim. The reviewer ran only static
+  source/package/export inspection, as required, so process, goroutine and
+  crash safety remain kernel-gate questions rather than inferred green results.
