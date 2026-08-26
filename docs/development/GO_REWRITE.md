@@ -1998,6 +1998,17 @@ Bounded API dispatcher proof on integrated head `157af0c`:
   cancellation, wake-race and empty-array attacks held over a real isolated
   Unix listener. Exact head `cbb6f6b` received independent **ALLOW** with no
   findings; focused/race/CGO-free/vet/cross-build gates passed.
+- A later package-parallel gate exposed a production path-walk bug rather than
+  a reason to serialize clients: directory observations compared mutable child-
+  churn metadata (link count, size and mtime) while other fixtures legitimately
+  created entries under `/private/tmp`. Exactly five directory-object checks now
+  reuse `sameDirectory` (device, inode, EUID and full mode); strict full identity
+  remains on token and socket objects. The causal test changes an unrelated
+  sibling between observations and fails under the old comparison. Exact repair
+  `aad8058` received independent **ALLOW** with no findings, including causal
+  mutation replay, race and replacement/symlink/owner/mode attacks. After
+  integration at `3f36fe2`, API and daemon passed 20 concurrent-package
+  iterations (`api 27.001s`, `daemon 4.195s`).
 
 Registered Change-worker proof on integrated head `43a94ee`:
 
