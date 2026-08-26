@@ -220,14 +220,17 @@ does not add a fifth terminal event/entity kind.
 Lease acquisition is one guarded row update that requires `active` plus the
 durable run phase `running`, a client with the finite `terminal_input`
 capability, and no current unexpired holder. It advances the generation and
-resets the input sequence. Release and expiry require the exact holder and
-generation and advance the generation again, so stale holders cannot affect a
-new lease. Reserving an input sequence is a guarded Store update before the
+resets the input sequence. Explicit release requires the exact holder and
+generation. Replacement acquisition treats an expired lease as revoked in the
+same transaction; neither clock expiry nor replacement pretends an actor
+released it. Every release/replacement advances the generation, so stale
+holders cannot affect a new lease. Reserving an input sequence is a guarded Store update before the
 bounded runner write. A reserved operation that lacks a complete ACK is
 reported as delivery-uncertain and is never retried automatically. A known
-partial write consumes the sequence and reports the exact byte count; no suffix
-is queued or retried, and a later explicit input may proceed only after the
-operator sees that result. Unknown PTY delivery, ACK loss, or an uncertain
+partial write consumes the sequence, revokes the lease and reports the exact
+byte count; no suffix is queued or retried. A later deliberate correction
+requires a fresh lease generation, which is the protocol barrier proving the
+partial result was observed rather than silently pipelined. Unknown PTY delivery, ACK loss, or an uncertain
 reservation transaction immediately freezes input, revokes the lease and
 fails the run into finalizing when Store authority is available. If Store
 authority itself is unavailable, the daemon shuts down the bound runner
@@ -573,9 +576,8 @@ every challenge row. The challenge's current `boot_id` binds it to this daemon
 start; copying the database necessarily copies its singleton identity too.
 
 After exact HTTP path/Host/Origin validation, the daemon sends a bounded v1
-`HELLO` containing `daemon_id`, `boot_id`, the challenge's daemon-minted
-capability mask when pairing, and a fresh 32-byte connection nonce. There are
-exactly two signed transcripts:
+`HELLO` containing only protocol version, `daemon_id`, `boot_id` and a fresh
+32-byte connection nonce. There are exactly two signed transcripts:
 
 ```text
 PAIR domain bytes:  "dark-factory/browser/v1/pair\x00"
@@ -592,7 +594,6 @@ PAIR fields, in order:
   connection_nonce[32]
   raw_challenge[32]
   public_key_sec1[65]
-  capability_mask_u32be[4]                        # value loaded by daemon
   exact_validated_host_utf8
   exact_validated_origin_utf8
 
@@ -606,7 +607,7 @@ AUTH fields, in order:
 ```
 
 The domain bytes are not length-prefixed; every following field is. All
-integers and lengths are unsigned big-endian. IDs/nonces/challenge/key/mask are
+integers and lengths are unsigned big-endian. IDs/nonces/challenge/key are
 their raw fixed-length bytes, never textual encodings inside the transcript.
 Host and Origin bytes come only from the already-validated HTTP request, not a
 frame field. Empty, oversized, invalid-UTF-8 or length-mismatched fields fail
@@ -630,12 +631,16 @@ PAIR transcript from stored/current facts and verifies the proof, then uses one
 immediate transaction to guard `redeemed_at_ms IS NULL`, current `boot_id`,
 exact intended Origin and unexpired time, insert the client, record the
 security event and mark the challenge redeemed. Exactly one affected row wins
-concurrent redemption. A valid proof whose key fingerprint already exists
-consumes the challenge, records a bounded conflict event and returns a generic
-conflict; the browser must create a new key and `factoryctl web open` must mint
-a new challenge. Other transaction failures roll back without claiming
-redemption. A lost success response also consumes the challenge and is never
-replayed.
+concurrent redemption. Capabilities come only from that challenge row and are
+returned after commit in `PAIR_RESULT`; the browser neither signs nor submits
+them. Inside the immediate transaction the daemon first guards and marks the
+challenge consumed, then explicitly checks the fingerprint. An existing
+fingerprint records a bounded conflict event, commits consumption and returns a
+generic conflict. Otherwise it inserts the client with the challenge's exact
+mask, records the pairing event and commits. The browser must create a new key
+and `factoryctl web open` must mint a new challenge after conflict. Other
+transaction failures roll back without claiming redemption. A lost success
+response also consumes the challenge and is never replayed.
 
 Existing-client `AUTH_PROVE` names only the client ID. The daemon loads the
 stored public key and reconstructs AUTH; ordinary authentication never accepts
@@ -671,7 +676,7 @@ Revocation, key mismatch, duplicate identity, old connection nonce, profile
 reset, capability escalation and daemon restart are explicit tests.
 
 `factoryctl web open` asks the owner-only Unix API to create one short-lived,
-single-use challenge bound to the daemon instance and intended Origin, then
+single-use challenge bound to the current boot ID and intended Origin, then
 opens the hosted app with that challenge only in the URL fragment. A challenge
 is forbidden in the path or query. The host sends `Referrer-Policy: no-referrer`
 and loads no analytics or third-party resource. Its first synchronous
