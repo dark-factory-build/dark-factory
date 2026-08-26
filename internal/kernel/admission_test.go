@@ -191,6 +191,32 @@ func TestIndependentStoresCannotAdmitSameAgentOrTask(t *testing.T) {
 	}
 }
 
+func TestAdmissionTaskGuardFailureRollsBackEntireFootprint(t *testing.T) {
+	store, _, project, agent := newAdmissionStore(t, RoleWorker, 2)
+	defer store.Close()
+	task, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 105), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 106), Title: "guarded"}, mustTime(t, 5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.Exec(`CREATE TRIGGER suppress_admission_task_update BEFORE UPDATE ON tasks WHEN OLD.id = X'69696969696969696969696969696969' BEGIN SELECT RAISE(IGNORE); END`); err != nil {
+		t.Fatal(err)
+	}
+	before := admissionFootprint(t, store)
+	reservation := &ChangeReservation{ID: changeID(t, 107), SourceRoot: "/changes/guarded-published", StagingRoot: "/changes/guarded-staged"}
+	result, err := store.AdmitNext(context.Background(), agent.ID, admissionKeys(t, 108, reservation), mustTime(t, 10))
+	if !errors.Is(err, ErrRevisionConflict) || result.Admitted() {
+		t.Fatalf("guarded admission = %+v, %v", result, err)
+	}
+	after := admissionFootprint(t, store)
+	if before != after {
+		t.Fatalf("guard failure footprint before=%+v after=%+v", before, after)
+	}
+	fresh, found, err := store.Task(context.Background(), task.ID)
+	if err != nil || !found || fresh.Status != TaskQueued {
+		t.Fatalf("task after guarded rollback = %+v found=%v err=%v", fresh, found, err)
+	}
+}
+
 type admissionCounts struct{ runs, resources, changes, invalidations int }
 
 func admissionFootprint(t *testing.T, store *Store) admissionCounts {
