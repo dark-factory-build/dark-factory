@@ -391,6 +391,66 @@ The following current details are deleted during PTY implementation:
 - use of the final JSON terminal spool as a live output transport. The spool
   remains only for bounded final exit/recovery evidence.
 
+#### Private runner protocol freeze
+
+The existing process tree is retained deliberately:
+
+```text
+factoryd
+└── outer attempt-runner child (ordinary blocked process; no PTY)
+    └── inner change-worker child (blocked PTY child)
+        └── same PID/PGID after exec: shell, Claude or Codex provider
+```
+
+The outer attempt runner, not `factoryd`, calls `StartBlockedPTY` for the inner
+change worker. It owns the PTY master, exact inner child and process group. The
+inner worker performs source selection/preparation/population, then preserves
+only its PTY slave on descriptors 0/1/2 while closing private preparation
+authority and execing the provider in place. The daemon continues to own only
+the outer runner child and its exact `AttemptController`; allocating a PTY in
+the daemon would target the wrong process boundary.
+
+One existing full-duplex private Unix control socket carries the finite runner
+protocol. A second data socket would duplicate registration, EOF and recovery
+semantics. Each endpoint has exactly one frame reader and one serialized frame
+writer. In the daemon the per-run supervisor event loop owns both controller
+read and write; browser handlers submit bounded commands through the per-run
+gate and never call `AttemptController.Next` or write the socket. In the outer
+runner one synchronous Darwin kqueue loop owns daemon frames, worker/provider
+exit, PTY reads, the output ring and every response. No runner goroutine is
+introduced.
+
+Before terminal frames are added, private framing must perform complete bounded
+writes: header and body partial writes, `EAGAIN`, timeout and peer closure are
+explicit outcomes. A successful method never means that only a prefix was
+written. Lifecycle and terminal frames remain a small closed union; terminal
+frames do not advance the attempt checkpoint state machine.
+
+Runner output sequences count bytes as half-open ranges `[start,end)`. The
+runner ring is the only scrollback copy. The daemon owns bounded per-connection
+queues, not a second replay ring. `terminal-attach` names a cursor;
+`terminal-credit` bounds runner-to-daemon output; insufficient retention returns
+`terminal-reset`. PTY EOF is never child-exit evidence, and child exit does not
+discard a buffered PTY tail. Exact child wait and owned-group convergence remain
+the terminal authority before spool publication.
+
+Durable lease acquisition commits first, then the daemon tells the runner the
+exact new generation. Setting the same generation is idempotent only to recover
+a lost control acknowledgement and never writes PTY bytes. A failed generation
+install revokes that lease before another input is accepted. Each terminal
+input command contains the Store-reserved exact generation and next sequence;
+the runner accepts it once, performs one bounded PTY write and reports complete,
+known-partial or failure without retrying a suffix. Revocation advances the
+generation in Store before the runner is told to freeze the old one. Resize is
+an idempotent exact-size command but still requires the current live lease at
+the daemon gate.
+
+Daemon/control EOF after provider release is an ownership event, not permission
+to keep working: the outer runner freezes input, terminates and waits its exact
+owned group, drains/closes the PTY as far as positively known, publishes final
+spool evidence and exits. This intentionally deletes the old behavior that
+allowed a provider to continue indefinitely after daemon EOF.
+
 ### Terminal ownership, replay and backpressure
 
 The runner owns one bounded in-memory scrollback ring, monotonically increasing
