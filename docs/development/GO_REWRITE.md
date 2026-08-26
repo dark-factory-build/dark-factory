@@ -1692,3 +1692,32 @@ Private local-API server proof on integrated head `1ca7a31`:
   bind and fails closed, but can leave an inert socket artifact in the replaced
   parent. The integrated creation-race and cleanup census must keep that
   residual visible; it is not authority to unlink an unrecorded path.
+
+Minimal typed attempt CLI proof on integrated head `f812ae6`:
+
+- The initial Go `factoryctl` has only three commands: `attempt succeed`,
+  `attempt block` and `attempt fail`. A direct fixed-arity parser rejects
+  positional aliases, equals syntax, mixed/duplicate/unknown flags, entity IDs,
+  failure codes, socket/token selectors, result files and extra arguments
+  before it reads environment state or constructs a client. No CLI framework,
+  command interface, retry or goroutine was added.
+- The command reads only a nonempty `DARK_FACTORY_SOCKET`; the reviewed
+  `AttemptClient` alone discovers the attempt token file. A missing/invalid
+  attempt token cannot fall back to operator authority, including when an
+  operator token is present. Empty success/failure text remains valid and an
+  empty Block remains invalid.
+- One five-second-bounded typed API call returns a fixed redacted acceptance
+  line with canonical head and revision. It says only that the outcome request
+  was accepted and never claims the task or run is terminal/successful. Result,
+  detail, token, bearer, socket/path and wrapped-error sentinels never appear in
+  stdout or stderr.
+- Mutating the success line to claim terminal success was killed and reverted.
+  Author gates passed count-three (`0.560s`), race (`1.385s`), CGO-free
+  (`0.342s`), vet/format/diff/cross-build and exact FD/goroutine/socket/process/
+  temp censuses. Independent exact-head review returned ALLOW; the unchanged
+  integrated command suite passed in `0.370s`.
+- The accepted result/detail necessarily appears in the provider's command
+  argv when a human invokes it directly. The bearer does not. Broken output
+  pipes currently do not change the already-completed API result; output-error
+  policy and any later non-attempt commands remain explicit subjects for the
+  CLI portion of the final elegance audit.
