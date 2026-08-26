@@ -346,6 +346,36 @@ func TestResponseFramingIsExactBoundedAndStrict(t *testing.T) {
 		{name: "duplicate envelope error", write: func(connection net.Conn) error {
 			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"ok":false,"error":"forbidden","error":"unauthorized"}`)
 		}, want: ErrProtocol},
+		{name: "lowercase then uppercase ok alias", write: func(connection net.Conn) error {
+			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"ok":false,"OK":true,"data":{"ready":true}}`)
+		}, want: ErrProtocol},
+		{name: "uppercase then lowercase ok alias", write: func(connection net.Conn) error {
+			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"OK":false,"ok":true,"data":{"ready":true}}`)
+		}, want: ErrProtocol},
+		{name: "nested uppercase ready alias", write: func(connection net.Conn) error {
+			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"ok":true,"data":{"ready":false,"READY":true}}`)
+		}, want: ErrProtocol},
+		{name: "unicode fold ok alias", write: func(connection net.Conn) error {
+			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"o\u212a":true,"data":{"ready":true}}`)
+		}, want: ErrProtocol},
+		{name: "escaped uppercase ok alias", write: func(connection net.Conn) error {
+			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"\u004fK":true,"data":{"ready":true}}`)
+		}, want: ErrProtocol},
+		{name: "standalone noncanonical ok", write: func(connection net.Conn) error {
+			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"Ok":true,"data":{"ready":true}}`)
+		}, want: ErrProtocol},
+		{name: "punctuated member name", write: func(connection net.Conn) error {
+			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"ok":true,"data":{"ready":true},"bad-key":1}`)
+		}, want: ErrProtocol},
+		{name: "whitespace member name", write: func(connection net.Conn) error {
+			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"ok":true,"data":{"ready":true},"bad key":1}`)
+		}, want: ErrProtocol},
+		{name: "control member name", write: func(connection net.Conn) error {
+			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"ok":true,"data":{"ready":true},"\u0001":1}`)
+		}, want: ErrProtocol},
+		{name: "escaped canonical lowercase names", write: func(connection net.Conn) error {
+			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"\u006f\u006b":true,"data":{"\u0072eady":true}}`)
+		}},
 		{name: "invalid UTF-8 error", write: func(connection net.Conn) error {
 			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, "{\"ok\":false,\"error\":\"\xff\"}")
 		}, want: ErrProtocol},
@@ -400,6 +430,19 @@ func TestResponseFramingIsExactBoundedAndStrict(t *testing.T) {
 	}
 }
 
+func TestCanonicalJSONNameGrammar(t *testing.T) {
+	for _, name := range []string{"ok", "active_runs", "x1", "a_b_2"} {
+		if !canonicalJSONName(name) {
+			t.Errorf("canonical name %q rejected", name)
+		}
+	}
+	for _, name := range []string{"", "OK", "Ok", "oK", "_ok", "1ok", "bad-key", "bad key", "bad.name", "bad\x01name"} {
+		if canonicalJSONName(name) {
+			t.Errorf("noncanonical name %q accepted", name)
+		}
+	}
+}
+
 func TestSnapshotJSONRejectsDuplicateNestedNamesAndInvalidUTF8(t *testing.T) {
 	bearer := testCredential('J')
 	prefix := `{"head":1,"factory":{"dispatch_enabled":true,"capacity":1,"active_runs":0,"revision":1},"projects":[{"id":"` + id('1') + `",`
@@ -409,7 +452,9 @@ func TestSnapshotJSONRejectsDuplicateNestedNamesAndInvalidUTF8(t *testing.T) {
 		body string
 	}{
 		{name: "duplicate entity name", body: prefix + `"name":"first","name":"second"` + suffix},
+		{name: "entity case alias", body: prefix + `"name":"first","Name":"second"` + suffix},
 		{name: "duplicate nested snapshot field", body: `{"head":1,"factory":{"dispatch_enabled":true,"capacity":1,"capacity":2,"active_runs":0,"revision":1},"projects":[],"agents":[],"tasks":[]}`},
+		{name: "nested snapshot case alias", body: `{"head":1,"factory":{"dispatch_enabled":true,"capacity":1,"Capacity":2,"active_runs":0,"revision":1},"projects":[],"agents":[],"tasks":[]}`},
 		{name: "invalid UTF-8 entity name", body: prefix + "\"name\":\"\xff\"" + suffix},
 	}
 	for _, test := range tests {

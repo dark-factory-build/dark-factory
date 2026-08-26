@@ -377,7 +377,7 @@ func validateJSONValue(decoder *json.Decoder, depth int) error {
 				return err
 			}
 			name, ok := nameToken.(string)
-			if !ok {
+			if !ok || !canonicalJSONName(name) {
 				return ErrProtocol
 			}
 			if _, duplicate := names[name]; duplicate {
@@ -406,6 +406,20 @@ func validateJSONValue(decoder *json.Decoder, depth int) error {
 		return ErrProtocol
 	}
 	return nil
+}
+
+func canonicalJSONName(name string) bool {
+	if len(name) == 0 || name[0] < 'a' || name[0] > 'z' {
+		return false
+	}
+	for index := 1; index < len(name); index++ {
+		character := name[index]
+		if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func validRemoteCode(code RemoteErrorCode) bool {
