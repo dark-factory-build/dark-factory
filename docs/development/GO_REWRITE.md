@@ -75,6 +75,7 @@ dark-factory
 ├── internal/daemon
 ├── internal/runner
 ├── internal/browser
+├── internal/browserprotocol
 ├── internal/api
 ├── protocol/browser/v1
 └── web
@@ -115,6 +116,11 @@ CI imports the installed provenance, compares every field and digest, runs the
 browser-v1 capability/fixture contract, and causally fails on a mismatched
 package, source commit, protocol version or integrity. No floating range or
 unreviewed local package is accepted for the cutover proof.
+
+`pnpm-lock.yaml` remains the sole dependency-resolution authority.
+`dark-factory-ui.lock.json` is an independent human-reviewed provenance
+assertion used by the integration gate; it must agree with the resolved
+packages but does not select or override them.
 
 No React, CSS, xterm or visual code enters Store, scheduler, process-kernel or
 daemon packages. No private host credential or deployment behavior enters the
@@ -164,7 +170,7 @@ admit run
 The live PTY is one concrete runner-owned `TerminalSession`, not a generic
 actor or plugin. A small durable `terminal_sessions` row records only its random
 session ID, exact run and runner-resource owner, one of `declared`, `active`,
-`closed`, or `unresolved`, revision/timestamps and bounded output head/floor.
+`closed`, or `unresolved`, revision and timestamps.
 It never persists an FD or PTY number and never grants signal/input authority
 by itself.
 Admission declares it before allocation; activation binds the already-active
@@ -221,19 +227,27 @@ The following current details are deleted during PTY implementation:
 
 ### Terminal ownership, replay and backpressure
 
-The runner owns one bounded in-memory scrollback ring and monotonically
-increasing output sequence per run. V1 deliberately has no durable live-output
-journal: browser reconnect can replay retained output only while the same
-daemon and runner session remain live. Daemon/runner loss produces an explicit
-terminal reset and canonical lifecycle state; only final exit/cleanup evidence
-uses the durable terminal spool. This is at-most-once observation, not a claim
-that every terminal byte survives a crash.
+The runner owns one bounded in-memory scrollback ring, monotonically increasing
+output sequence and ephemeral retained floor/head per live session. No output
+cursor is written to SQLite or used as recovery authority. V1 deliberately has
+no durable live-output journal: browser reconnect can replay retained output
+only while the same daemon and runner session remain live. Daemon/runner loss
+produces an explicit terminal reset and canonical lifecycle state; only final
+exit/cleanup evidence uses the durable terminal spool. This is at-most-once
+observation, not a claim that every terminal byte survives a crash.
 
 Output frames are binary. The daemon/browser adapter owns subscriber queues and
-drops/resets a slow client instead of blocking the PTY reader or provider.
-Bounds are frozen by tests before release and apply to individual frames,
-per-client queued bytes and in-memory scrollback. No disk scrollback is added
-until measurement proves it necessary and its crash semantics are designed.
+drops/resets a slow client instead of blocking the PTY reader or provider. The
+runner-to-daemon link is also an explicit bounded credit channel: the runner
+never waits indefinitely for a live-but-stalled daemon consumer. When credit
+is exhausted it keeps draining the PTY into the fixed ring, advances the
+retained floor, and emits one coalesced reset/head notification when credit
+returns; it does not enqueue unbounded frames or block provider output. The
+daemon can then resume from the retained floor or reset every affected browser
+observer. Bounds are frozen by tests before release and apply to individual
+frames, runner-to-daemon credit, per-client queued bytes and in-memory
+scrollback. No disk scrollback is added until measurement proves it necessary
+and its crash semantics are designed.
 
 Attach names an exact run and last acknowledged output sequence. If retained
 data covers the cursor, the runner returns ordered scrollback followed by live
@@ -329,13 +343,17 @@ Inline PTY delivery is an external effect and therefore explicit:
 ```text
 open
 → delivering(delivery_id, bounded reply)
-→ runner persists receipt-before-write intent
+→ daemon commits the delivery receipt before issuing the runner command
 → exact live runner writes once and acknowledges delivery_id
 → resolved(reply)
 ```
 
-The runner suppresses duplicate delivery IDs in the live session. If recovery
-proves no receipt exists, delivery may be attempted once; a prepared receipt
+The daemon owns the Store transaction and durable delivery state; the runner is
+Store-blind. The daemon first commits `delivering(delivery_id, bounded reply)`,
+then sends that exact command to the live runner. The runner suppresses
+duplicate delivery IDs in the live session, performs the PTY write and returns
+an ACK; only the daemon may commit `resolved(reply)`. If recovery proves no
+delivery receipt exists, delivery may be attempted once. A committed receipt
 without positive write acknowledgement is `delivery unknown`, never replayed.
 The request remains visible and non-resolved for operator recovery. This
 fail-closed edge is preferable to injecting a duplicate answer. Purely internal
@@ -430,6 +448,16 @@ The hosted app must use first-party bundled scripts, strict CSP, controlled
 dependencies, no third-party analytics in the terminal context, and safe
 rendering of hostile terminal bytes. These are cross-repository requirements;
 the local daemon cannot enforce a remote page's CSP.
+
+A compromised hosted origin or same-origin dependency can ask a paired,
+non-exportable key to sign and can exercise that client's granted authority;
+proof-of-possession prevents key export and cloning, not same-origin script
+abuse. This is an explicit residual trust boundary. Mitigations are least
+capabilities, exact public-artifact provenance, strict CSP, no third-party
+terminal-context code, bounded daemon operations, and immediate `factoryctl`
+client revocation. `SECURITY.md` documents the incident response, and a test
+proves revocation terminates existing connections and refuses every later
+proof/action from that client.
 
 ### Hosted-origin connectivity spike
 
@@ -560,7 +588,10 @@ matrix, the following must exist and kill the named guard mutations:
 - Detach leaves provider live; reconnect from retained sequence yields exact
   scrollback/live order; removing the retention-floor reset is killed.
 - Slow clients cannot grow memory/disk or block PTY/provider; removing the
-  queue/credit bound is killed by measured limits.
+  runner-to-daemon or daemon-to-browser queue/credit bound is killed by
+  measured limits. One fixture stalls a still-live daemon consumer while the
+  provider writes continuously and proves bounded memory, advancing retained
+  floor, explicit reset and continued provider progress.
 - Runner/daemon death at every PTY/gate/write/ack cut causes no provider or
   terminal-input replay, no unsafe signal and no false release.
 - Daemon death proves its live runner freezes input and kill-and-waits its owned
@@ -576,6 +607,10 @@ matrix, the following must exist and kill the named guard mutations:
 - HumanRequest creation is idempotent; viewing does not clear; restart
   preserves; stale run/revision refuses; duplicate/uncertain delivery never
   injects twice; routine failure never creates one.
+- HumanRequest delivery cuts after the daemon receipt commit, before the runner
+  command, after the PTY write and before the ACK prove that the Store-blind
+  runner never owns durable state and every uncertain delivery remains visible
+  without replay.
 - Attempts can supply only private bounded question text. Mutations that copy it
   into safe metadata/watch/log/error frames are killed by per-field secret
   exfiltration tests; clients without `human_request_detail` cannot fetch it.
