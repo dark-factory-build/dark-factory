@@ -229,8 +229,12 @@ bounded runner write. A reserved operation that lacks a complete ACK is
 reported as delivery-uncertain and is never retried automatically. A known
 partial write consumes the sequence, revokes the lease and reports the exact
 byte count; no suffix is queued or retried. A later deliberate correction
-requires a fresh lease generation, which is the protocol barrier proving the
-partial result was observed rather than silently pipelined. Unknown PTY delivery, ACK loss, or an uncertain
+requires an explicit fresh lease generation, which is the protocol barrier
+preventing silent pipelining. If persisting the known-partial revocation fails
+or its commit result is uncertain, the daemon accepts no more input, closes the
+bound runner channel to invoke the existing owner-death convergence path, and
+never retries the suffix. Recovery must observe the lease invalidated or fail
+the run into finalizing; it never continues under the old generation. Unknown PTY delivery, ACK loss, or an uncertain
 reservation transaction immediately freezes input, revokes the lease and
 fails the run into finalizing when Store authority is available. If Store
 authority itself is unavailable, the daemon shuts down the bound runner
