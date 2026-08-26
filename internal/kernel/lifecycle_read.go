@@ -274,7 +274,7 @@ func scanResource(scanner rowScanner) (Resource, bool, error) {
 	}
 	if releasedAt.Valid {
 		value, err := NewUnixMillis(releasedAt.Int64)
-		if err != nil || releasedAt.Int64 < declaredAt || resource.ActivatedAt != nil && releasedAt.Int64 < resource.ActivatedAt.Int64() {
+		if err != nil || releasedAt.Int64 < declaredAt || releasedAt.Int64 != updatedAt || resource.ActivatedAt != nil && releasedAt.Int64 < resource.ActivatedAt.Int64() {
 			return Resource{}, false, fmt.Errorf("%w: invalid resource release time", ErrCorruptState)
 		}
 		resource.ReleasedAt = &value

@@ -124,6 +124,82 @@ func TestProcessExitAtResourceActivationIsAccepted(t *testing.T) {
 	}
 }
 
+func TestPersistedProcessExitBeforeResourceActivationFailsEveryBoundary(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		column  string
+		kind    ResourceKind
+		observe func(*Store, Run, ResourceIdentity, ProcessExit) (Run, error)
+	}{
+		{name: "provider", column: "provider_exit_at_ms", kind: ResourceProviderProcess, observe: func(store *Store, run Run, identity ResourceIdentity, exit ProcessExit) (Run, error) {
+			return store.ObserveProviderExit(context.Background(), run.ID, run.Revision, identity, exit, mustTime(t, 40))
+		}},
+		{name: "runner", column: "runner_exit_at_ms", kind: ResourceRunnerProcess, observe: func(store *Store, run Run, identity ResourceIdentity, exit ProcessExit) (Run, error) {
+			return store.ObserveRunnerExit(context.Background(), run.ID, run.Revision, identity, exit, mustTime(t, 40))
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Run("Run", func(t *testing.T) {
+				store, run := corruptPersistedExitBeforeActivation(t, test.column, test.kind, test.observe)
+				defer store.Close()
+				if _, _, err := store.Run(context.Background(), run.ID); !errors.Is(err, ErrCorruptState) {
+					t.Fatalf("corrupt persisted %s exit read = %v", test.name, err)
+				}
+			})
+			t.Run("RecoverableRuns", func(t *testing.T) {
+				store, _ := corruptPersistedExitBeforeActivation(t, test.column, test.kind, test.observe)
+				defer store.Close()
+				if _, err := store.RecoverableRuns(context.Background()); !errors.Is(err, ErrCorruptState) {
+					t.Fatalf("corrupt persisted %s exit recovery = %v", test.name, err)
+				}
+			})
+			t.Run("Open", func(t *testing.T) {
+				store, run := corruptPersistedExitBeforeActivation(t, test.column, test.kind, test.observe)
+				path := storePath(t, store)
+				if err := store.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if reopened, err := Open(context.Background(), path); !errors.Is(err, ErrCorruptState) {
+					if reopened != nil {
+						reopened.Close()
+					}
+					t.Fatalf("corrupt persisted %s exit open = %v", test.name, err)
+				}
+				_ = run
+			})
+			t.Run("FinalizeRun", func(t *testing.T) {
+				store, run := corruptPersistedExitBeforeActivation(t, test.column, test.kind, test.observe)
+				defer store.Close()
+				before := captureWriteFootprint(t, store)
+				if _, err := store.FinalizeRun(context.Background(), run.ID, run.Revision, mustTime(t, 60)); !errors.Is(err, ErrCorruptState) {
+					t.Fatalf("corrupt persisted %s exit finalization = %v", test.name, err)
+				}
+				if after := captureWriteFootprint(t, store); after != before {
+					t.Fatalf("corrupt persisted %s exit finalization footprint before=%+v after=%+v", test.name, before, after)
+				}
+			})
+		})
+	}
+}
+
+func corruptPersistedExitBeforeActivation(t *testing.T, column string, kind ResourceKind, observe func(*Store, Run, ResourceIdentity, ProcessExit) (Run, error)) (*Store, Run) {
+	t.Helper()
+	store, run, _ := runningOrchestratorRun(t)
+	resource := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), kind)
+	exit, err := NewProcessExitCode(1, 0, mustTime(t, 40))
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	observed, err := observe(store, run, resource.Identity, exit)
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	corruptSQL(t, store, `UPDATE runs SET `+column+` = ? WHERE id = ?`, resource.ActivatedAt.Int64()-1, run.ID.Bytes())
+	return store, observed
+}
+
 func TestDirectReleaseRetainsNilActivationTime(t *testing.T) {
 	store, run, _ := admittedOrchestratorRun(t)
 	defer store.Close()
@@ -164,6 +240,18 @@ func TestResourceActivationTimeScannerRejectsImpossibleRows(t *testing.T) {
 		{name: "release before activation", mutate: func(t *testing.T, store *Store, run Run) {
 			resource := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
 			corruptSQL(t, store, `UPDATE resources SET state = 'released', released_at_ms = activated_at_ms - 1, updated_at_ms = activated_at_ms WHERE id = ?`, resource.ID.Bytes())
+		}},
+		{name: "release before update", mutate: func(t *testing.T, store *Store, run Run) {
+			failure, _ := NewFailureProposal(FailureActivation, "pre-exec cleanup")
+			if _, err := store.FailRun(context.Background(), run.ID, run.Revision, failure, mustTime(t, 40)); err != nil {
+				t.Fatal(err)
+			}
+			resource := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
+			statement := `UPDATE resources SET state = 'released', released_at_ms = updated_at_ms, updated_at_ms = updated_at_ms + 1 WHERE id = ?`
+			if _, err := store.writer.Exec(statement, resource.ID.Bytes()); err == nil {
+				t.Fatal("schema accepted released timestamp before updated timestamp")
+			}
+			corruptSQL(t, store, statement, resource.ID.Bytes())
 		}},
 		{name: "provider activation times differ", mutate: func(t *testing.T, store *Store, run Run) {
 			corruptSQL(t, store, `UPDATE resources SET activated_at_ms = activated_at_ms + 1 WHERE run_id = ? AND kind = 'provider_group'`, run.ID.Bytes())

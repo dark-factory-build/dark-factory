@@ -180,7 +180,38 @@ func loadRunRelationships(ctx context.Context, connection *sql.Conn, run Run) (r
 			}
 		}
 	}
+	if err := validatePersistedProcessExits(run, resources); err != nil {
+		return runRelationships{}, err
+	}
 	return runRelationships{task: task, change: change, resources: resources}, nil
+}
+
+func validatePersistedProcessExits(run Run, resources []Resource) error {
+	// Exit rows carry no identity of their own. Their authority is the exact
+	// activated resource (or provider process/group pair) still recorded here.
+	var providerProcess, providerGroup, runnerProcess *Resource
+	for index := range resources {
+		resource := &resources[index]
+		switch resource.Kind {
+		case ResourceProviderProcess:
+			providerProcess = resource
+		case ResourceProviderGroup:
+			providerGroup = resource
+		case ResourceRunnerProcess:
+			runnerProcess = resource
+		}
+	}
+	if run.ProviderExit != nil {
+		if providerProcess == nil || providerGroup == nil || providerProcess.ActivatedAt == nil || providerGroup.ActivatedAt == nil || providerProcess.Identity.Empty() || !resourceIdentityEqual(providerProcess.Identity, providerGroup.Identity) || *providerProcess.ActivatedAt != *providerGroup.ActivatedAt || run.ProviderExit.At().Int64() < providerProcess.ActivatedAt.Int64() {
+			return fmt.Errorf("%w: provider exit does not match activated provider resources", ErrCorruptState)
+		}
+	}
+	if run.RunnerExit != nil {
+		if runnerProcess == nil || runnerProcess.ActivatedAt == nil || runnerProcess.Identity.Empty() || run.RunnerExit.At().Int64() < runnerProcess.ActivatedAt.Int64() {
+			return fmt.Errorf("%w: runner exit does not match activated runner resource", ErrCorruptState)
+		}
+	}
+	return nil
 }
 
 func taskMatchesRun(task Task, run Run) bool {
