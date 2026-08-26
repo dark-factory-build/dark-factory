@@ -321,6 +321,16 @@ func validateTaskRunTopology(ctx context.Context, connection *sql.Conn, task Tas
 			}
 			break
 		}
+		if found {
+			if !retryableTerminal(latest) {
+				invalid = fmt.Errorf("%w: run history predecessor is not retryable", ErrCorruptState)
+				break
+			}
+			if run.AdmittedAt.Int64() < latest.UpdatedAt.Int64() {
+				invalid = fmt.Errorf("%w: run history admission predates predecessor terminal run", ErrCorruptState)
+				break
+			}
+		}
 		latest = run
 		found = true
 		expectedRevision++
@@ -349,9 +359,7 @@ func validateTaskRunTopology(ctx context.Context, connection *sql.Conn, task Tas
 		if latest.Phase != RunTerminal || task.Status != TaskQueued {
 			return fmt.Errorf("%w: queued task is not the next run revision", ErrCorruptState)
 		}
-		switch latest.Terminal.kind {
-		case OutcomeBlocked, OutcomeFailed, OutcomeCancelled:
-		default:
+		if !retryableTerminal(latest) {
 			return fmt.Errorf("%w: successful task cannot be retried", ErrCorruptState)
 		}
 		if task.UpdatedAt.Int64() < latest.UpdatedAt.Int64() {
@@ -361,6 +369,18 @@ func validateTaskRunTopology(ctx context.Context, connection *sql.Conn, task Tas
 		return fmt.Errorf("%w: task/run revisions are not contiguous", ErrCorruptState)
 	}
 	return nil
+}
+
+func retryableTerminal(run Run) bool {
+	if run.Phase != RunTerminal || run.Terminal == nil {
+		return false
+	}
+	switch run.Terminal.kind {
+	case OutcomeBlocked, OutcomeFailed, OutcomeCancelled:
+		return true
+	default:
+		return false
+	}
 }
 
 type ownershipLocator struct {

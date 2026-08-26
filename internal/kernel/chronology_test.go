@@ -396,6 +396,85 @@ func TestQueuedRetryMustFollowPredecessorTerminal(t *testing.T) {
 	})
 }
 
+func TestHistoricalRetryMustFollowEveryPredecessor(t *testing.T) {
+	store, predecessor, successor := retryAdmittedWorker(t, 33, 33)
+	path := storePath(t, store)
+	corruptSQL(t, store, `UPDATE runs SET terminal_at_ms = 100, updated_at_ms = 100 WHERE id = ?`, predecessor.ID.Bytes())
+	assertCorruptTaskHistory(t, store, path, predecessor.ID, successor.ID)
+}
+
+func TestEarlierSuccessfulRunForbidsLaterHistory(t *testing.T) {
+	store, predecessor, successor := retryAdmittedWorker(t, 33, 33)
+	path := storePath(t, store)
+	corruptSQL(t, store, `UPDATE runs SET proposal_kind = 'succeeded', proposal_code = NULL, proposal_detail = NULL, proposal_result = 'hidden success', terminal_kind = 'succeeded', terminal_code = NULL, terminal_detail = NULL, terminal_result = 'hidden success' WHERE id = ?`, predecessor.ID.Bytes())
+	assertCorruptTaskHistory(t, store, path, predecessor.ID, successor.ID)
+}
+
+func TestRetryHistoryAllowsMultipleNonSuccessRuns(t *testing.T) {
+	store, predecessor, agentID, keys := retryQueuedWorker(t, 33)
+	defer store.Close()
+	second, err := store.AdmitNext(context.Background(), agentID, keys, mustTime(t, 33))
+	if err != nil || !second.Admitted() {
+		t.Fatalf("first retry admission = %+v, %v", second, err)
+	}
+	finalizing, err := store.CancelRun(context.Background(), second.Run.ID, second.Run.Revision, "retry again", mustTime(t, 40))
+	if err != nil {
+		t.Fatal(err)
+	}
+	releaseAllRunResources(t, store, second.Run.ID, 41)
+	secondTerminal, err := store.FinalizeRun(context.Background(), second.Run.ID, finalizing.Revision, mustTime(t, 45))
+	if err != nil {
+		t.Fatal(err)
+	}
+	thirdAgent, thirdKeys := queueRetryForTerminalSeed(t, store, secondTerminal, 45, 230)
+	third, err := store.AdmitNext(context.Background(), thirdAgent, thirdKeys, mustTime(t, 45))
+	if err != nil || !third.Admitted() {
+		t.Fatalf("second retry admission = %+v, %v", third, err)
+	}
+	for _, id := range []RunID{predecessor.ID, second.Run.ID, third.Run.ID} {
+		if _, _, err := store.Run(context.Background(), id); err != nil {
+			t.Fatalf("non-success retry history Run(%s) = %v", id, err)
+		}
+	}
+}
+
+func assertCorruptTaskHistory(t *testing.T, store *Store, path string, runIDs ...RunID) {
+	t.Helper()
+	before := captureWriteFootprint(t, store)
+	for _, id := range runIDs {
+		if _, _, err := store.Run(context.Background(), id); !errors.Is(err, ErrCorruptState) {
+			t.Fatalf("corrupt task history Run(%s) = %v", id, err)
+		}
+		if _, found, err := store.RecoverableRun(context.Background(), id); !errors.Is(err, ErrCorruptState) || found {
+			t.Fatalf("corrupt task history RecoverableRun(%s) = found=%v, err=%v", id, found, err)
+		}
+	}
+	if _, err := store.Snapshot(context.Background()); !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("corrupt task history Snapshot = %v", err)
+	}
+	if _, err := store.RecoverableRuns(context.Background()); !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("corrupt task history RecoverableRuns = %v", err)
+	}
+	factory, err := store.Factory(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetDispatch(context.Background(), factory.Revision, !factory.DispatchEnabled, mustTime(t, 100)); !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("corrupt task history mutation = %v", err)
+	}
+	if after := captureWriteFootprint(t, store); after != before {
+		t.Fatalf("corrupt task history footprint before=%+v after=%+v", before, after)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	beforeDatabase := captureDatabaseEvidence(t, path)
+	if _, err := Open(context.Background(), path); !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("corrupt task history Open = %v", err)
+	}
+	assertDatabaseEvidenceUnchanged(t, path, beforeDatabase)
+}
+
 func TestFinalizingResourceActivationMustNotFollowFinalizing(t *testing.T) {
 	t.Run("after finalizing", func(t *testing.T) {
 		store, run, _ := admittedOrchestratorRun(t)
@@ -591,6 +670,10 @@ func retryQueuedWorker(t *testing.T, taskUpdatedAt int64) (*Store, Run, AgentID,
 }
 
 func queueRetryForTerminal(t *testing.T, store *Store, terminal Run, taskUpdatedAt int64) (AgentID, AdmissionKeys) {
+	return queueRetryForTerminalSeed(t, store, terminal, taskUpdatedAt, 220)
+}
+
+func queueRetryForTerminalSeed(t *testing.T, store *Store, terminal Run, taskUpdatedAt int64, seed byte) (AgentID, AdmissionKeys) {
 	t.Helper()
 	project, found, err := store.Project(context.Background(), terminal.ProjectID)
 	if err != nil || !found {
@@ -610,8 +693,7 @@ func queueRetryForTerminal(t *testing.T, store *Store, terminal Run, taskUpdated
 	}
 	reuseRevision := change.Revision
 	reservation := &ChangeReservation{ID: *terminal.ChangeID, SourceRoot: change.SourceRoot, StagingRoot: change.StagingRoot, ExpectedReuseRevision: &reuseRevision}
-	keys := admissionKeys(t, 220, reservation)
-	keys.RuntimeRoot = "/retry/runtime"
+	keys := admissionKeys(t, seed, reservation)
 	return secondAgent.ID, keys
 }
 
