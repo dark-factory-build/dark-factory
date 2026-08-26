@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -17,7 +18,7 @@ import (
 func TestPublicSelectGitFortyCallsHaveExactZeroFDDeltaWithoutGC(t *testing.T) {
 	root := t.TempDir()
 	repository := filepath.Join(root, "repository")
-	git := "/usr/bin/git"
+	git := externalGitExecutable(t)
 	runExternalGit(t, root, git, root, "init", repository)
 	runExternalGit(t, root, git, repository, "config", "user.name", "Dark Factory Test")
 	runExternalGit(t, root, git, repository, "config", "user.email", "test@invalid")
@@ -49,6 +50,21 @@ func TestPublicSelectGitFortyCallsHaveExactZeroFDDeltaWithoutGC(t *testing.T) {
 	if after := externalFDCount(t); after != before {
 		t.Fatalf("public SelectGit leaked descriptors without finalizers: before=%d after=%d", before, after)
 	}
+}
+
+func externalGitExecutable(t testing.TB) string {
+	t.Helper()
+	command := exec.Command("/usr/bin/xcrun", "--find", "git")
+	command.Env = []string{"HOME=/dev/null", "TMPDIR=" + os.Getenv("TMPDIR"), "LC_ALL=C", "LANG=C"}
+	output, err := command.Output()
+	if err != nil {
+		t.Fatalf("resolve native Git fixture: %v", err)
+	}
+	git := strings.TrimSpace(string(output))
+	if !filepath.IsAbs(git) || filepath.Clean(git) != git || filepath.Base(git) != "git" {
+		t.Fatal("xcrun returned invalid Git fixture path")
+	}
+	return git
 }
 
 func runExternalGit(t testing.TB, home, git, directory string, arguments ...string) {

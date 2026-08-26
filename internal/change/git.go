@@ -54,28 +54,33 @@ type gitAdminIdentity struct {
 	digest     [32]byte
 }
 
+type gitObjectStoreIdentity struct {
+	entryCount uint32
+	digest     [32]byte
+}
+
 type repositoryCheckpoint struct {
-	root    RepositoryIdentity
-	git     gitAdminIdentity
-	config  gitAdminIdentity
-	objects gitAdminIdentity
+	root        RepositoryIdentity
+	git         gitAdminIdentity
+	config      gitAdminIdentity
+	objects     gitAdminIdentity
+	objectStore gitObjectStoreIdentity
 }
 
 // Selection is one immutable exact commit and its complete regular-file tree.
 // Repository paths and Git process configuration remain private.
 type Selection struct {
-	repositoryRoot     string
-	repositoryIdentity RepositoryIdentity
-	repository         repositoryCheckpoint
-	gitExecutable      string
-	gitIdentity        gitFileIdentity
-	format             ObjectFormat
-	base               ObjectID
-	manifest           Manifest
+	repositoryRoot string
+	repository     repositoryCheckpoint
+	gitExecutable  string
+	gitIdentity    gitFileIdentity
+	format         ObjectFormat
+	base           ObjectID
+	manifest       Manifest
 }
 
 // RepositoryIdentity returns the exact selected repository-root identity.
-func (s Selection) RepositoryIdentity() RepositoryIdentity { return s.repositoryIdentity }
+func (s Selection) RepositoryIdentity() RepositoryIdentity { return s.repository.root }
 
 // ObjectFormat returns the selected repository object format.
 func (s Selection) ObjectFormat() ObjectFormat { return s.format }
@@ -101,8 +106,8 @@ func (s Selection) String() string   { return "selected Git Change" }
 func (s Selection) GoString() string { return "change.Selection{private}" }
 
 func (s Selection) valid() bool {
-	return s.repositoryRoot != "" && s.repositoryIdentity.valid() && s.gitExecutable != "" &&
-		s.gitIdentity.inode != 0 && s.repository.root == s.repositoryIdentity &&
+	return s.repositoryRoot != "" && s.repository.root.valid() && s.gitExecutable != "" &&
+		s.gitIdentity.inode != 0 &&
 		s.format.valid() && s.base.format == s.format &&
 		s.manifest.format == s.format && s.manifest.base.equal(s.base)
 }

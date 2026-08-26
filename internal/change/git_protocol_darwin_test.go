@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -560,18 +561,14 @@ func TestSelectedLooseObjectRemovalFailsWithoutFallback(t *testing.T) {
 	if err := os.Rename(objectPath, quarantine); err != nil {
 		t.Fatalf("quarantine selected loose object: %v", err)
 	}
-	blobs, err := OpenGitBlobs(context.Background(), fixture.git, fixture.repository, selected)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := blobs.Read(context.Background(), first.oid); err == nil {
-		t.Fatal("missing selected object received fallback content")
+	if _, err := OpenGitBlobs(context.Background(), fixture.git, fixture.repository, selected); err == nil {
+		t.Fatal("missing selected object crossed the exact object-store checkpoint")
 	}
 }
 
 func TestGitStartFailureLeavesNoOwnedProcessDescriptorOrHome(t *testing.T) {
 	repository := fakeRepository(t)
-	git := filepath.Join(secureTempDir(t), "invalid-git")
+	git := filepath.Join(secureTempDir(t), "git")
 	if err := os.WriteFile(git, []byte("not an executable image"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -585,9 +582,9 @@ func TestGitStartFailureLeavesNoOwnedProcessDescriptorOrHome(t *testing.T) {
 	if err == nil {
 		t.Fatal("invalid executable image started")
 	}
-	var process *GitError
-	if !errors.As(err, &process) {
-		t.Fatalf("error=%T %v, want GitError", err, err)
+	var invalid *ValidationError
+	if !errors.As(err, &invalid) {
+		t.Fatalf("error=%T %v, want ValidationError", err, err)
 	}
 	recorder.require(t, 0, 0, 0, 0)
 	if after := descriptorCount(t); after != beforeFDs {
@@ -669,7 +666,7 @@ func fakeSelection(t testing.TB, repository, path string, data []byte) (Selectio
 		t.Fatal(err)
 	}
 	return Selection{
-		repositoryRoot: repository, repositoryIdentity: repositoryIdentity, repository: repositoryCheckpoint,
+		repositoryRoot: repository, repository: repositoryCheckpoint,
 		format: format, base: base, manifest: mustManifest(t, format, base, []Entry{entry}),
 	}, entry
 }
@@ -677,10 +674,29 @@ func fakeSelection(t testing.TB, repository, path string, data []byte) (Selectio
 func writeFakeGit(t testing.TB, contents string) string {
 	t.Helper()
 	path := filepath.Join(secureTempDir(t), "git")
-	if err := os.WriteFile(path, []byte(contents), 0o700); err != nil {
+	executable, err := os.Executable()
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(path, 0o700); err != nil {
+	source, err := os.Open(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	target, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o700)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(target, source); err != nil {
+		t.Fatal(err)
+	}
+	if err := target.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := target.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+".plan", []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return path
@@ -688,7 +704,7 @@ func writeFakeGit(t testing.TB, contents string) string {
 
 func mustGitFileIdentity(t testing.TB, path string) gitFileIdentity {
 	t.Helper()
-	identity, err := validateGitExecutable(path)
+	identity, err := checkpointGitExecutable(path)
 	if err != nil {
 		t.Fatal(err)
 	}
