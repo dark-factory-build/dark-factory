@@ -255,7 +255,15 @@ func TestSupervisorSourceFailureCannotReleaseProvider(t *testing.T) {
 func TestSupervisorPartialProviderReleaseRevokesAuthority(t *testing.T) {
 	fixture := newSupervisorFixture(t, supervisorProgram(t, true, true))
 	releaseErr := errors.New("injected ambiguous provider release")
-	fixture.spec.afterProviderRelease = func() error { return releaseErr }
+	fixture.spec.afterProviderRelease = func() error {
+		// The release frame is consumed only when the real provider creates this
+		// witness. Return the injected acknowledgement loss after that external
+		// effect, rather than relying on scheduling around the supervisor return.
+		if err := waitForWitness(fixture.witness, 8*time.Second); err != nil {
+			return err
+		}
+		return releaseErr
+	}
 	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
 	if !errors.Is(err, releaseErr) {
 		t.Fatalf("RunNext partial release = %v", err)
@@ -1057,6 +1065,21 @@ func exactOneWitness(path string) error {
 		return fmt.Errorf("provider execution witness = %q, want exactly one append", body)
 	}
 	return nil
+}
+
+func waitForWitness(path string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("provider execution witness stat: %w", err)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("provider execution witness timeout after %s", timeout)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 func TestExactOneWitnessRejectsDuplicateAppend(t *testing.T) {
