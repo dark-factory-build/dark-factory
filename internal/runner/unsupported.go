@@ -42,6 +42,7 @@ func (c *AttemptController) Configure(AttemptSpec) error { return ErrUnsupported
 func (c *AttemptController) Next(time.Duration) (AttemptEvent, error) {
 	return AttemptEvent{}, ErrUnsupported
 }
+func (c *AttemptController) NextReady(time.Duration) (bool, error)           { return false, ErrUnsupported }
 func (c *AttemptController) Release(AttemptStage) error                      { return ErrUnsupported }
 func (c *AttemptController) Terminate() error                                { return ErrUnsupported }
 func (c *AttemptController) AcknowledgeTerminal(*TerminalRecord, bool) error { return ErrUnsupported }

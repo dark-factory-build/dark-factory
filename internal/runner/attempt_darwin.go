@@ -147,6 +147,40 @@ func (c *AttemptController) Next(timeout time.Duration) (AttemptEvent, error) {
 	}
 }
 
+// NextReady waits for the exact control socket to become readable or close
+// without consuming any frame bytes. A timeout is an ordinary false result;
+// callers invoke Next once with its full frame timeout only after readiness.
+func (c *AttemptController) NextReady(timeout time.Duration) (bool, error) {
+	if c == nil || c.file == nil || timeout < 0 {
+		return false, ErrState
+	}
+	milliseconds := int(timeout / time.Millisecond)
+	if timeout > 0 && milliseconds == 0 {
+		milliseconds = 1
+	}
+	fds := []unix.PollFd{{Fd: int32(c.file.Fd()), Events: unix.POLLIN}}
+	for {
+		count, err := unix.Poll(fds, milliseconds)
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		if count == 0 {
+			return false, nil
+		}
+		revents := fds[0].Revents
+		if revents&unix.POLLNVAL != 0 || revents&^(unix.POLLIN|unix.POLLHUP|unix.POLLERR) != 0 {
+			return false, ErrIdentity
+		}
+		if revents&(unix.POLLIN|unix.POLLHUP|unix.POLLERR) != 0 {
+			return true, nil
+		}
+		return false, ErrIdentity
+	}
+}
+
 func (c *AttemptController) acceptCheckpoint(frame attemptFrame, stage AttemptStage, next attemptControllerState) (AttemptEvent, error) {
 	if frame.Kind != "checkpoint" || frame.Stage != stage || frame.Identity != (Identity{}) || len(frame.Payload) > maxAttemptReportBytes || frame.Terminal != nil || frame.FileIdentity != nil || frame.Digest != "" || frame.StoreCommitted {
 		return AttemptEvent{}, ErrState
