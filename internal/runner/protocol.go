@@ -214,27 +214,7 @@ func readFrame(r io.Reader, dst any, limit int) error {
 	if _, err := io.ReadFull(r, body); err != nil {
 		return err
 	}
-	dec := json.NewDecoder(newBytesReader(body))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(dst); err != nil {
-		return err
-	}
-	var trailing json.RawMessage
-	if err := dec.Decode(&trailing); err != io.EOF {
-		return errorsNewTrailing(err)
-	}
-	return nil
+	return decodeFrameBody(body, dst)
 }
 
-type byteReader struct{ b []byte }
-
-func newBytesReader(b []byte) *byteReader { return &byteReader{b: b} }
-func (r *byteReader) Read(p []byte) (int, error) {
-	if len(r.b) == 0 {
-		return 0, io.EOF
-	}
-	n := copy(p, r.b)
-	r.b = r.b[n:]
-	return n, nil
-}
 func errorsNewTrailing(err error) error { return fmt.Errorf("runner: trailing frame data: %v", err) }
