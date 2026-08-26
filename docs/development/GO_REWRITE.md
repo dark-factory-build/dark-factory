@@ -184,13 +184,28 @@ unresolved_reason      bounded text only in unresolved
 lease_client_id        nullable exact browser client
 lease_generation       nonnegative and advanced on acquire/revoke/release
 lease_expires_at_ms    nullable, present only with a lease holder
-last_input_sequence    nonnegative, reset on each new lease generation
+last_input_sequence    nonnegative, zero without a holder
 revision               positive
 declared_at_ms
 activated_at_ms        nullable, present after activation
 closed_at_ms           nullable, present only in closed
 updated_at_ms
 ```
+
+SQLite checks exact 16-byte IDs and the closed state enum. Holder and expiry
+are either both present or both absent; a holder is an exact 16-byte client ID,
+is a foreign key to `browser_clients`, and a lease may exist only while the
+session is active. `unresolved_reason` is
+present only in `unresolved` and is 1–4096 bytes. `activated_at_ms` is absent
+in declared, required in active, optional in closed/unresolved only because a
+pre-exec session can close or become unresolved, and never precedes declaration.
+`closed_at_ms` is present only in closed and never precedes declaration or
+activation. Every timestamp is nonnegative and no later timestamp precedes an
+earlier present one. Generation and input sequence are nonnegative SQLite
+integers; an increment at the signed 64-bit limit fails closed instead of
+wrapping. No holder also requires input sequence zero. Store validation derives
+and checks the same run's unique `runner_process` resource on every lifecycle
+read/write; the schema continues to forbid duplicate `(run_id, kind)` resources.
 
 The legal lifecycle is `declared → active → closed`, `declared → closed`, or
 `declared/active → unresolved → closed`; `closed` is absorbing and
@@ -209,13 +224,46 @@ resets the input sequence. Release and expiry require the exact holder and
 generation and advance the generation again, so stale holders cannot affect a
 new lease. Reserving an input sequence is a guarded Store update before the
 bounded runner write. A reserved operation that lacks a complete ACK is
-reported as delivery-uncertain and is never retried automatically. The
-running-to-finalizing transaction clears the holder, advances the generation
+reported as delivery-uncertain and is never retried automatically. A known
+partial write consumes the sequence and reports the exact byte count; no suffix
+is queued or retried, and a later explicit input may proceed only after the
+operator sees that result. Unknown PTY delivery, ACK loss, or an uncertain
+reservation transaction immediately freezes input, revokes the lease and
+fails the run into finalizing when Store authority is available. If Store
+authority itself is unavailable, the daemon shuts down the bound runner
+channel so its existing death path freezes input and converges the owned
+provider; restart recovery never restores that lease. No subsequent input is
+accepted on the affected run. This is one failure path, not a durable delivery
+framework.
+
+The running-to-finalizing transaction clears the holder, advances the generation
 and revokes the attempt credential together. Close requires positive typed
 evidence from the live owner; recovery may close only after exact runner and
 provider-group absence. Otherwise it marks unresolved and terminalization
 remains blocked. None of these mutexes or rows creates process/signal
 authority by itself.
+
+Session `revision` changes on lifecycle transitions only. Lease generation and
+input sequence are the private concurrency guards for lease/input mutations;
+they emit no public invalidation and do not change the lifecycle revision.
+`updated_at_ms` therefore tracks the lifecycle revision rather than lease
+traffic. Every lifecycle change also advances the run aggregate revision and
+emits its single bounded run invalidation. On daemon start, one immediate
+`ResetTerminalLeases` transaction clears every holder/expiry, zeros its input
+sequence and advances every affected generation before browser service starts.
+Old connections are independently invalid because `boot_id` changed.
+
+Terminal closure has three concrete, non-browser entry points. Live-owner
+closure requires the daemon's exact bound runner control, an active session on
+a finalizing run, frozen input, recorded provider exit and positive owned-group
+absence; one Store transaction releases the provider process/group resources
+and closes the session. Recovered closure requires already-recorded exact
+runner and provider-group absence plus corresponding recovered resource/exit
+evidence. Pre-exec closure requires the exact registered outer owner to have
+synchronously aborted the inert child while provider identity was never
+activated; one transaction releases the still-declared provider resources and
+closes the declared session. Arbitrary booleans, browser calls and recovered
+numeric PID/PGID are not closure evidence.
 
 Admission declares it before allocation; activation binds the already-active
 exact runner identity. A live runner may close it after it has stopped writes,
@@ -426,8 +474,7 @@ Structured control uses bounded versioned JSON. Terminal bytes use binary
 WebSocket frames and are never base64 JSON. V1 explicitly covers:
 
 ```text
-HELLO / HELLO_ACK / CAPABILITIES
-PAIR_BEGIN / PAIR_PROVE / PAIR_RESULT
+HELLO / PAIR_PROVE / PAIR_RESULT / AUTH_PROVE / AUTH_RESULT
 STATE_GET / STATE_SNAPSHOT / STATE_SUBSCRIBE / STATE_EVENT
 HUMAN_REQUEST_REPLY / HUMAN_REQUEST_ACTION
 TERMINAL_ATTACH / TERMINAL_ATTACHED / TERMINAL_ACK
@@ -485,7 +532,6 @@ Two small authority tables and one bounded audit table are sufficient:
 ```text
 browser_pairing_challenges
   secret_digest          32-byte SHA-256 primary key; raw challenge never stored
-  daemon_id              exact persistent daemon
   boot_id                exact boot that minted it
   intended_origin        exact allowlisted origin
   capability_mask        only daemon-minted known bits
@@ -522,27 +568,78 @@ the same profile key but have distinct connections and terminal leases. If
 durable non-exportable key storage is unavailable, the browser must pair again
 rather than weakening the credential.
 
-After exact HTTP path/Host/Origin validation, the daemon sends a bounded v1
-`HELLO` containing `daemon_id`, `boot_id` and a fresh 32-byte connection nonce.
-New-client proof binds a 32-byte one-time challenge, its public key and the
-actual validated HTTP Origin/Host to that HELLO. The daemon hashes the raw
-challenge for lookup, verifies the proof, then uses one immediate transaction
-to guard `redeemed_at_ms IS NULL`, current `boot_id`, exact intended Origin and
-unexpired time, insert the client, record the security event and mark the
-challenge redeemed. Exactly one affected row wins concurrent redemption. A
-lost success response consumes the challenge; `factoryctl web open` mints a
-new one rather than replaying it.
+The persistent daemon ID is read from the singleton rather than copied into
+every challenge row. The challenge's current `boot_id` binds it to this daemon
+start; copying the database necessarily copies its singleton identity too.
 
-Existing-client `AUTH_PROVE` names only the client ID and signs a canonical
-length-prefixed binary transcript containing a domain separator, protocol
-version, `daemon_id`, current `boot_id`, fresh connection nonce, client ID and
-the actual validated Host and Origin. Ordinary authentication never accepts a
-replacement public key. The only signature format is WebCrypto ECDSA P-256
-with SHA-256 encoded as exactly 64-byte IEEE-P1363 `r || s`; Go verifies it
-with `crypto/ecdsa`, `crypto/elliptic` and `crypto/sha256`. ASN.1 signatures and
-JSON canonicalization are rejected. A checked Go/browser golden fixture fixes
-the byte transcript and encoding before the transport ships. The connection
-nonce is single-use and authentication has a short fixed deadline.
+After exact HTTP path/Host/Origin validation, the daemon sends a bounded v1
+`HELLO` containing `daemon_id`, `boot_id`, the challenge's daemon-minted
+capability mask when pairing, and a fresh 32-byte connection nonce. There are
+exactly two signed transcripts:
+
+```text
+PAIR domain bytes:  "dark-factory/browser/v1/pair\x00"
+AUTH domain bytes:  "dark-factory/browser/v1/auth\x00"
+
+transcript =
+  domain bytes
+  || u16be(1)                                      # protocol version
+  || repeated(u32be(byte_length) || raw field bytes)
+
+PAIR fields, in order:
+  daemon_id[16]
+  boot_id[16]
+  connection_nonce[32]
+  raw_challenge[32]
+  public_key_sec1[65]
+  capability_mask_u32be[4]                        # value loaded by daemon
+  exact_validated_host_utf8
+  exact_validated_origin_utf8
+
+AUTH fields, in order:
+  daemon_id[16]
+  boot_id[16]
+  connection_nonce[32]
+  client_id[16]
+  exact_validated_host_utf8
+  exact_validated_origin_utf8
+```
+
+The domain bytes are not length-prefixed; every following field is. All
+integers and lengths are unsigned big-endian. IDs/nonces/challenge/key/mask are
+their raw fixed-length bytes, never textual encodings inside the transcript.
+Host and Origin bytes come only from the already-validated HTTP request, not a
+frame field. Empty, oversized, invalid-UTF-8 or length-mismatched fields fail
+before signature verification.
+
+The browser invokes
+`crypto.subtle.sign({name: "ECDSA", hash: "SHA-256"}, key, transcript)` and
+must produce exactly 64-byte IEEE-P1363 `r || s`. Go hashes the complete
+transcript exactly once with SHA-256, rejects any signature not exactly 64
+bytes, splits two unsigned 32-byte integers, requires both in the P-256 scalar
+range, parses only a 65-byte uncompressed SEC1 point beginning with `0x04`,
+requires the point on P-256, and calls `ecdsa.Verify`. ASN.1, compressed points,
+JSON canonicalization and alternate encodings are rejected. One checked
+cross-language golden fixture is required by the first implementation commit
+and fixes all transcript bytes, signature bytes and malformed-length cases.
+The connection nonce is single-use and authentication has a short fixed
+deadline.
+
+For pairing, the daemon hashes the raw challenge for lookup, reconstructs the
+PAIR transcript from stored/current facts and verifies the proof, then uses one
+immediate transaction to guard `redeemed_at_ms IS NULL`, current `boot_id`,
+exact intended Origin and unexpired time, insert the client, record the
+security event and mark the challenge redeemed. Exactly one affected row wins
+concurrent redemption. A valid proof whose key fingerprint already exists
+consumes the challenge, records a bounded conflict event and returns a generic
+conflict; the browser must create a new key and `factoryctl web open` must mint
+a new challenge. Other transaction failures roll back without claiming
+redemption. A lost success response also consumes the challenge and is never
+replayed.
+
+Existing-client `AUTH_PROVE` names only the client ID. The daemon loads the
+stored public key and reconstructs AUTH; ordinary authentication never accepts
+a replacement public key.
 
 Authentication yields only a client-ID principal. Every operation reloads the
 client row, rejects revocation, checks the exact finite capability, validates
@@ -551,16 +648,24 @@ browser never supplies a trusted project, task, agent, run, request or terminal
 authority identity. No per-operation signature is needed inside the
 authenticated WebSocket.
 
-A small per-client daemon operation gate orders browser operations with Unix-
-API revocation. An operation already inside that gate may finish before the
-revocation transaction; revocation then marks the client revoked, advances its
-revision, records the event and closes all of its connections before another
-operation can enter. Thus no external effect begins after durable revocation.
-Terminal input additionally takes the existing per-run operation gate in the
-fixed client-then-run order and revalidates session, holder, lease generation,
-input sequence and durable running phase immediately before the bounded PTY
-write. These gates serialize effects but never replace Store authorization.
-Finalizing revokes terminal input independently of browser-client revocation.
+A small per-client daemon operation gate orders every browser effect with the
+owner-only Unix revocation path. Terminal input, HumanRequest reply/action,
+lease acquire/release, mutation and subscription setup all acquire that exact
+client gate, reload active client/capabilities, perform their bounded external
+effect or durable transaction, then release it. Terminal/run operations also
+take their per-run gate in the fixed client-then-run order and revalidate
+session, holder, lease generation, input sequence and durable running phase
+immediately before a bounded PTY write.
+
+`factoryctl web revoke` acquires the same client gate, then one immediate
+transaction marks the client revoked, advances its revision, records the event
+and clears every terminal lease held by that client while advancing each lease
+generation and zeroing its input sequence. It then closes all active client
+connections before releasing the gate. An operation already inside the gate
+may finish before revocation commits; no later browser effect begins after the
+durable revocation. These gates serialize effects but never replace Store
+authorization. Finalizing revokes terminal input independently of browser-
+client revocation.
 
 Revocation, key mismatch, duplicate identity, old connection nonce, profile
 reset, capability escalation and daemon restart are explicit tests.
