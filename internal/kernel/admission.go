@@ -30,6 +30,9 @@ func (store *Store) AdmitNext(ctx context.Context, agentID AgentID, keys Admissi
 		}
 		return result, nil
 	}
+	if at.Int64() < factory.updatedAt.Int64() {
+		return AdmissionResult{}, tx.Rollback(ErrRevisionConflict)
+	}
 	if !factory.DispatchEnabled {
 		return rollbackNoAdmission(tx, NoAdmissionDispatchDisabled)
 	}

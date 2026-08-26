@@ -133,7 +133,7 @@ func TestRecoverableRunExactLookupRejectsUnrelatedIdentityCollision(t *testing.T
 	}
 }
 
-func TestRecoverableRunExactLookupValidatesTerminalGraphBeforeNotFound(t *testing.T) {
+func TestRecoverableRunExactLookupAllowsHistoricalTerminalTaskState(t *testing.T) {
 	failure, _ := NewFailureProposal(FailureInternal, "terminal")
 	store, finalizing := finalizingReleasedRun(t, RoleOrchestrator, VerificationNone, failure)
 	defer store.Close()
@@ -141,9 +141,23 @@ func TestRecoverableRunExactLookupValidatesTerminalGraphBeforeNotFound(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	corruptSQL(t, store, `UPDATE tasks SET status = 'running', result = NULL, completed_at_ms = NULL WHERE id = ?`, terminal.TaskID.Bytes())
+	corruptSQL(t, store, `UPDATE tasks SET assigned_agent_id = X'91919191919191919191919191919191', work_revision = work_revision + 1, status = 'queued', result = NULL, completed_at_ms = NULL WHERE id = ?`, terminal.TaskID.Bytes())
+	if _, found, err := store.RecoverableRun(context.Background(), terminal.ID); err != nil || found {
+		t.Fatalf("historical terminal graph = found=%v, err=%v", found, err)
+	}
+}
+
+func TestTerminalRunRejectsUnownedLaterRunningTaskState(t *testing.T) {
+	failure, _ := NewFailureProposal(FailureInternal, "terminal")
+	store, finalizing := finalizingReleasedRun(t, RoleOrchestrator, VerificationNone, failure)
+	defer store.Close()
+	terminal, err := store.FinalizeRun(context.Background(), finalizing.ID, finalizing.Revision, mustTime(t, 70))
+	if err != nil {
+		t.Fatal(err)
+	}
+	corruptSQL(t, store, `UPDATE tasks SET work_revision = work_revision + 1, status = 'running', result = NULL, completed_at_ms = NULL WHERE id = ?`, terminal.TaskID.Bytes())
 	if _, found, err := store.RecoverableRun(context.Background(), terminal.ID); !errors.Is(err, ErrCorruptState) || found {
-		t.Fatalf("corrupt terminal graph = found=%v, err=%v", found, err)
+		t.Fatalf("unowned later running task = found=%v, err=%v", found, err)
 	}
 }
 

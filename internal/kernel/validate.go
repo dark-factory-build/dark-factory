@@ -113,7 +113,17 @@ func loadRunRelationships(ctx context.Context, connection *sql.Conn, run Run) (r
 		}
 		return runRelationships{}, err
 	}
-	if task.ProjectID != run.ProjectID || task.AssignedAgentID != run.AgentID || task.IncarnationID != run.TaskIncarnationID || task.WorkRevision != run.AdmittedTaskWorkRevision || !taskMatchesRun(task, run) {
+	if task.ProjectID != run.ProjectID || task.IncarnationID != run.TaskIncarnationID {
+		return runRelationships{}, fmt.Errorf("%w: task does not match run", ErrCorruptState)
+	}
+	if err := validateTaskRunTopology(ctx, connection, task); err != nil {
+		return runRelationships{}, err
+	}
+	if run.Phase != RunTerminal {
+		if task.AssignedAgentID != run.AgentID || task.WorkRevision != run.AdmittedTaskWorkRevision || !taskMatchesRun(task, run) {
+			return runRelationships{}, fmt.Errorf("%w: task does not match run", ErrCorruptState)
+		}
+	} else if task.WorkRevision.Int64() < run.AdmittedTaskWorkRevision.Int64() || task.WorkRevision == run.AdmittedTaskWorkRevision && !taskMatchesRun(task, run) {
 		return runRelationships{}, fmt.Errorf("%w: task does not match run", ErrCorruptState)
 	}
 
@@ -126,8 +136,11 @@ func loadRunRelationships(ctx context.Context, connection *sql.Conn, run Run) (r
 			}
 			return runRelationships{}, err
 		}
-		if run.Role != RoleWorker || value.ProjectID != run.ProjectID || value.TaskID != run.TaskID || value.TaskIncarnationID != run.TaskIncarnationID || run.RunningAt != nil && value.Phase != ChangeAvailable {
+		if run.Role != RoleWorker || value.ProjectID != run.ProjectID || value.TaskID != run.TaskID || value.TaskIncarnationID != run.TaskIncarnationID || run.RunningAt != nil && (value.Phase != ChangeAvailable || value.AvailableAt == nil || value.AvailableAt.Int64() > run.RunningAt.Int64()) {
 			return runRelationships{}, fmt.Errorf("%w: Change does not match run", ErrCorruptState)
+		}
+		if run.Phase == RunTerminal && task.WorkRevision == run.AdmittedTaskWorkRevision && run.TerminalAt != nil && value.UpdatedAt.Int64() > run.TerminalAt.Int64() {
+			return runRelationships{}, fmt.Errorf("%w: terminal run predates Change checkpoint", ErrCorruptState)
 		}
 		change = &value
 	} else if run.Role != RoleOrchestrator {
@@ -217,9 +230,6 @@ func validateRunResourceChronology(run Run, change *Change, resources []Resource
 			return fmt.Errorf("%w: cleanup phase lacks finalizing time", ErrCorruptState)
 		}
 		finalizingAt := run.FinalizingAt.Int64()
-		if run.Phase == RunTerminal && change != nil && (run.TerminalAt == nil || change.UpdatedAt.Int64() > run.TerminalAt.Int64()) {
-			return fmt.Errorf("%w: terminal run predates Change checkpoint", ErrCorruptState)
-		}
 		for _, resource := range resources {
 			if resource.UpdatedAt.Int64() < finalizingAt {
 				return fmt.Errorf("%w: resource update predates finalizing", ErrCorruptState)
@@ -270,27 +280,76 @@ func validatePersistedProcessExits(run Run, resources []Resource) error {
 
 func taskMatchesRun(task Task, run Run) bool {
 	if run.Phase != RunTerminal {
-		return task.Status == TaskRunning
+		return task.AssignedAgentID == run.AgentID && task.WorkRevision == run.AdmittedTaskWorkRevision && task.Status == TaskRunning
 	}
-	if run.Terminal == nil || run.TerminalAt == nil || task.UpdatedAt != *run.TerminalAt {
+	if task.AssignedAgentID != run.AgentID || task.WorkRevision != run.AdmittedTaskWorkRevision || run.Terminal == nil || run.TerminalAt == nil || task.UpdatedAt != *run.TerminalAt {
 		return false
 	}
 	switch run.Terminal.kind {
 	case OutcomeSucceeded:
-		return task.Status == TaskSucceeded && task.Result == run.Terminal.result && terminalCompletionMatches(task, run)
+		return task.Status == TaskSucceeded && task.Result == run.Terminal.result && task.CompletedAt != nil && *task.CompletedAt == *run.TerminalAt
 	case OutcomeBlocked:
 		return task.Status == TaskBlocked && task.BlockedReason == run.Terminal.detail && task.CompletedAt == nil
 	case OutcomeFailed:
-		return task.Status == TaskFailed && terminalCompletionMatches(task, run)
+		return task.Status == TaskFailed && task.CompletedAt != nil && *task.CompletedAt == *run.TerminalAt
 	case OutcomeCancelled:
-		return task.Status == TaskCancelled && terminalCompletionMatches(task, run)
+		return task.Status == TaskCancelled && task.CompletedAt != nil && *task.CompletedAt == *run.TerminalAt
 	default:
 		return false
 	}
 }
 
-func terminalCompletionMatches(task Task, run Run) bool {
-	return task.CompletedAt != nil && run.TerminalAt != nil && *task.CompletedAt == *run.TerminalAt
+func validateTaskRunTopology(ctx context.Context, connection *sql.Conn, task Task) error {
+	rows, err := connection.QueryContext(ctx, `SELECT `+runColumns+` FROM runs WHERE task_id = ? AND task_incarnation_id = ? ORDER BY admitted_task_work_revision`, task.ID.Bytes(), task.IncarnationID.Bytes())
+	if err != nil {
+		return err
+	}
+	expectedRevision := int64(1)
+	var latest Run
+	found := false
+	var invalid error
+	for rows.Next() {
+		run, present, err := scanRun(rows)
+		if err != nil || !present || run.ProjectID != task.ProjectID || run.TaskID != task.ID || run.TaskIncarnationID != task.IncarnationID || run.AdmittedTaskWorkRevision.Int64() != expectedRevision {
+			if err != nil {
+				invalid = err
+			} else {
+				invalid = fmt.Errorf("%w: invalid task/run revision topology", ErrCorruptState)
+			}
+			break
+		}
+		latest = run
+		found = true
+		expectedRevision++
+	}
+	rowsErr := rows.Err()
+	closeErr := rows.Close()
+	if rowsErr != nil {
+		return rowsErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if invalid != nil {
+		return invalid
+	}
+	if !found {
+		return fmt.Errorf("%w: task has no run history", ErrCorruptState)
+	}
+	delta := task.WorkRevision.Int64() - latest.AdmittedTaskWorkRevision.Int64()
+	switch delta {
+	case 0:
+		if task.Status == TaskQueued || !taskMatchesRun(task, latest) {
+			return fmt.Errorf("%w: current task does not match latest run", ErrCorruptState)
+		}
+	case 1:
+		if latest.Phase != RunTerminal || task.Status != TaskQueued {
+			return fmt.Errorf("%w: queued task is not the next run revision", ErrCorruptState)
+		}
+	default:
+		return fmt.Errorf("%w: task/run revisions are not contiguous", ErrCorruptState)
+	}
+	return nil
 }
 
 type ownershipLocator struct {

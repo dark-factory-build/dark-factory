@@ -191,10 +191,11 @@ func factoryState(ctx context.Context, connection *sql.Conn) (FactoryState, erro
 	rev, revErr := NewRevision(revision)
 	head, headErr := NewEventSequence(next - 1)
 	floorSequence, floorErr := NewEventSequence(floor)
-	if revErr != nil || headErr != nil || floorErr != nil {
+	updated, updatedErr := NewUnixMillis(updatedAt)
+	if revErr != nil || headErr != nil || floorErr != nil || updatedErr != nil {
 		return FactoryState{}, fmt.Errorf("%w: invalid factory revision or invalidation metadata", ErrCorruptState)
 	}
-	return FactoryState{DispatchEnabled: dispatch == 1, Capacity: uint16(capacity), Revision: rev, Head: head, Floor: floorSequence}, nil
+	return FactoryState{DispatchEnabled: dispatch == 1, Capacity: uint16(capacity), Revision: rev, Head: head, Floor: floorSequence, updatedAt: updated}, nil
 }
 
 func (store *Store) Factory(ctx context.Context) (FactoryState, error) {

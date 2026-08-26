@@ -203,6 +203,9 @@ func (store *Store) setFactory(ctx context.Context, expected Revision, at UnixMi
 	if state.Revision != expected {
 		return FactoryState{}, tx.Rollback(ErrRevisionConflict)
 	}
+	if at.Int64() < state.updatedAt.Int64() {
+		return FactoryState{}, tx.Rollback(ErrRevisionConflict)
+	}
 	result, err := tx.connection.ExecContext(ctx, `UPDATE factory SET dispatch_enabled = ?, capacity = ?, revision = revision + 1, updated_at_ms = ? WHERE singleton = 1 AND revision = ?`, dispatch, capacity, at.Int64(), expected.Int64())
 	if err != nil {
 		return FactoryState{}, tx.Rollback(err)

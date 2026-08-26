@@ -644,6 +644,13 @@ func (store *Store) FinalizeRun(ctx context.Context, runID RunID, expected Revis
 	if relationships.change != nil && relationships.change.UpdatedAt.Int64() > at.Int64() {
 		return Run{}, tx.Rollback(ErrRevisionConflict)
 	}
+	factory, err := factoryState(ctx, tx.connection)
+	if err != nil {
+		return Run{}, tx.Rollback(err)
+	}
+	if at.Int64() < factory.updatedAt.Int64() {
+		return Run{}, tx.Rollback(ErrRevisionConflict)
+	}
 	if run.Role == RoleWorker && run.VerificationPolicy != VerificationNone && run.Proposal.kind == OutcomeSucceeded {
 		return Run{}, tx.Rollback(ErrConflict)
 	}
@@ -694,10 +701,6 @@ func (store *Store) FinalizeRun(ctx context.Context, runID RunID, expected Revis
 	terminalKind, terminalCode, terminalDetail, terminalResult := proposalSQL(terminal)
 	updated, err = tx.connection.ExecContext(ctx, `UPDATE runs SET phase = 'terminal', terminal_kind = ?, terminal_code = ?, terminal_detail = ?, terminal_result = ?, terminal_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase = 'finalizing' AND proposal_kind IS NOT NULL AND credential_revoked_at_ms IS NOT NULL AND revision = ?`, terminalKind, terminalCode, terminalDetail, terminalResult, at.Int64(), at.Int64(), run.ID.Bytes(), expected.Int64())
 	if err := requireOneRow(updated, err); err != nil {
-		return Run{}, tx.Rollback(err)
-	}
-	factory, err := factoryState(ctx, tx.connection)
-	if err != nil {
 		return Run{}, tx.Rollback(err)
 	}
 	factoryRevision := factory.Revision.Int64() + 1

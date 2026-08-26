@@ -446,6 +446,7 @@ type FactoryState struct {
 	Revision        Revision
 	Head            EventSequence
 	Floor           EventSequence
+	updatedAt       UnixMillis
 }
 
 type Project struct {

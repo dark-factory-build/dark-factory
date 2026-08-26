@@ -52,7 +52,7 @@ func TestRecoveredRunnerAbsenceFromAdmittedRunConvergesExactly(t *testing.T) {
 		t.Fatalf("runner release transition = %+v", currentRunner)
 	}
 	beforeReplay, _ := store.Factory(context.Background())
-	replay, err := store.ObserveRunnerExit(context.Background(), run.ID, run.Revision, registered.Identity, exit, mustTime(t, 99))
+	replay, err := store.ObserveRunnerExit(context.Background(), run.ID, run.Revision, registered.Identity, exit, mustTime(t, 21))
 	afterReplay, _ := store.Factory(context.Background())
 	if err != nil || replay.Revision != observed.Revision || afterReplay.Head != beforeReplay.Head {
 		t.Fatalf("replay = %+v, %v; heads %v -> %v", replay, err, beforeReplay.Head, afterReplay.Head)

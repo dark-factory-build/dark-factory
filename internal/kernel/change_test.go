@@ -8,9 +8,12 @@ import (
 )
 
 func TestChangeCheckpointsAreGuardedOneWayAndReplayable(t *testing.T) {
-	store, _ := newTestStore(t)
+	store, change := ownedReservedChange(t)
 	defer store.Close()
-	change := seedReservedChange(t, store)
+	baseline, err := store.Factory(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
 	format, err := NewObjectFormat("sha1")
 	if err != nil {
 		t.Fatal(err)
@@ -90,14 +93,14 @@ func TestChangeCheckpointsAreGuardedOneWayAndReplayable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.Head.Int64() != 6 { // project, agent, task, and three Change transitions.
-		t.Fatalf("invalidation head = %d, want 6", state.Head.Int64())
+	if state.Head.Int64() != baseline.Head.Int64()+3 {
+		t.Fatalf("invalidation head = %d, want %d", state.Head.Int64(), baseline.Head.Int64()+3)
 	}
 }
 
 func TestSelectedManifestSurvivesRestartAndGuardsRecoveryAvailability(t *testing.T) {
-	store, path := newTestStore(t)
-	change := seedReservedChange(t, store)
+	store, change := ownedReservedChange(t)
+	path := storePath(t, store)
 	format, _ := NewObjectFormat("sha1")
 	commit, _ := NewCommitID(format, bytes.Repeat([]byte{0x31}, format.oidLength()))
 	repository, _ := NewFileIdentity(41, 42)
@@ -181,8 +184,8 @@ func TestPartialOrCorruptSelectedManifestFailsReadMutationAndOpen(t *testing.T) 
 	}
 	for name, mutation := range mutations {
 		t.Run(name, func(t *testing.T) {
-			store, path := newTestStore(t)
-			change := seedReservedChange(t, store)
+			store, change := ownedReservedChange(t)
+			path := storePath(t, store)
 			selection := testChangeSelection(t)
 			if _, err := store.RecordChangeSelection(context.Background(), change.ID, change.Revision, selection, mustTime(t, 10)); err != nil {
 				t.Fatal(err)
@@ -267,9 +270,8 @@ func TestAvailablePhaseRequiresCompleteSourceIdentityInSchema(t *testing.T) {
 		"missing source inode":  {device: int64(9), inode: nil},
 	} {
 		t.Run(name, func(t *testing.T) {
-			store, _ := newTestStore(t)
+			store, change := ownedReservedChange(t)
 			defer store.Close()
-			change := seedReservedChange(t, store)
 			selected, err := store.RecordChangeSelection(context.Background(), change.ID, change.Revision, testChangeSelection(t), mustTime(t, 10))
 			if err != nil {
 				t.Fatal(err)
@@ -376,6 +378,17 @@ func seedReservedChange(t *testing.T, store *Store) Change {
 		t.Fatalf("read reserved Change = %+v, %v", change, err)
 	}
 	return change
+}
+
+func ownedReservedChange(t *testing.T) (*Store, Change) {
+	t.Helper()
+	store, run, _ := admittedWorkerRun(t)
+	change, found, err := store.Change(context.Background(), *run.ChangeID)
+	if err != nil || !found {
+		store.Close()
+		t.Fatalf("read admitted Change = %+v, %v", change, err)
+	}
+	return store, change
 }
 
 func assertChangeCheckpoint(t *testing.T, change Change, phase ChangePhase, revision int64) {

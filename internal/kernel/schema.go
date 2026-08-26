@@ -185,6 +185,7 @@ var schemaStatements = []string{
 	`CREATE UNIQUE INDEX runs_one_open_per_agent ON runs(agent_id) WHERE phase <> 'terminal'`,
 	`CREATE UNIQUE INDEX runs_one_open_per_task_incarnation ON runs(task_id, task_incarnation_id) WHERE phase <> 'terminal'`,
 	`CREATE UNIQUE INDEX runs_one_open_per_change ON runs(change_id) WHERE change_id IS NOT NULL AND phase <> 'terminal'`,
+	`CREATE UNIQUE INDEX runs_one_per_task_work_revision ON runs(task_id, task_incarnation_id, admitted_task_work_revision)`,
 	`CREATE INDEX runs_recoverable ON runs(phase, admitted_at_ms, id) WHERE phase <> 'terminal'`,
 	`CREATE TABLE resources (
     id BLOB PRIMARY KEY CHECK (length(id) = 16),

@@ -201,7 +201,7 @@ func TestFinalizerRequiresEveryReleasedResourceAndExactTask(t *testing.T) {
 	if after.Head.Int64() != before.Head.Int64()+3 {
 		t.Fatalf("terminal invalidations before=%+v after=%+v", before, after)
 	}
-	replay, err := store.FinalizeRun(context.Background(), admitted.ID, finalizing.Revision, mustTime(t, 99))
+	replay, err := store.FinalizeRun(context.Background(), admitted.ID, finalizing.Revision, mustTime(t, 0))
 	if err != nil || replay.Revision != terminal.Revision {
 		t.Fatalf("finalizer replay = %+v, %v", replay, err)
 	}
@@ -739,11 +739,11 @@ func TestRecoverableRunsAreCanonicalOrderedAndPrivateStateStaysOutOfPublicProjec
 	secondAgent, _ := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 141), ProjectID: project.ID, Name: "second", Role: RoleOrchestrator, Provider: ProviderCodex, ExecutionMode: ExecutionWorkspaceWrite, Model: "MODEL_SENTINEL", ToolBudgetLimit: 2}, mustTime(t, 4))
 	_, _ = store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 142), ProjectID: project.ID, AssignedAgentID: secondAgent.ID, IncarnationID: incarnationID(t, 143), Title: "second", Body: "BODY_SENTINEL"}, mustTime(t, 5))
 	_, _ = store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 144), ProjectID: project.ID, AssignedAgentID: firstAgent.ID, IncarnationID: incarnationID(t, 145), Title: "first"}, mustTime(t, 5))
-	second, err := store.AdmitNext(context.Background(), secondAgent.ID, admissionKeys(t, 160, nil), mustTime(t, 20))
+	first, err := store.AdmitNext(context.Background(), firstAgent.ID, admissionKeys(t, 170, nil), mustTime(t, 10))
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := store.AdmitNext(context.Background(), firstAgent.ID, admissionKeys(t, 170, nil), mustTime(t, 10))
+	second, err := store.AdmitNext(context.Background(), secondAgent.ID, admissionKeys(t, 160, nil), mustTime(t, 20))
 	if err != nil {
 		t.Fatal(err)
 	}
