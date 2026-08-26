@@ -116,6 +116,93 @@ func TestPTYReadDeadlineDoesNotAffectOwnedProvider(t *testing.T) {
 	}
 }
 
+func TestPTYResizeUsesOnlyLiveOwnedMasterAndExactBounds(t *testing.T) {
+	f := newFixture(t)
+	gate, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := PrepareExecSpec(ExecSpec{Target: "/bin/sh", Args: []string{"-c", "sleep 2"}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C", "TERM=xterm"}, Cwd: f.cwd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := StartBlockedPTY(f.lease, gate, spec, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.child = child
+	for _, invalid := range [][2]int{{0, 24}, {-1, 24}, {80, 0}, {80, -1}, {maxPTYDimension + 1, 24}, {80, maxPTYDimension + 1}, {1 << 20, 24}, {80, 1 << 20}, {int(^uint(0) >> 1), 24}} {
+		if err := child.ResizePTY(invalid[0], invalid[1]); !errors.Is(err, ErrState) {
+			t.Fatalf("ResizePTY(%d,%d) error=%v, want ErrState", invalid[0], invalid[1], err)
+		}
+	}
+	if err := child.ResizePTY(80, 24); !errors.Is(err, ErrState) {
+		t.Fatalf("pre-activation resize error=%v, want ErrState", err)
+	}
+	if _, err := child.Activate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, size := range [][2]int{{80, 24}, {132, 43}, {132, 43}} {
+		if err := child.ResizePTY(size[0], size[1]); err != nil {
+			t.Fatalf("ResizePTY(%d,%d): %v", size[0], size[1], err)
+		}
+		got, err := unix.IoctlGetWinsize(int(child.ptyMaster.Fd()), unix.TIOCGWINSZ)
+		if err != nil {
+			t.Fatalf("read PTY size after ResizePTY(%d,%d): %v", size[0], size[1], err)
+		}
+		if got.Col != uint16(size[0]) || got.Row != uint16(size[1]) {
+			t.Fatalf("PTY size=%dx%d, want %dx%d", got.Col, got.Row, size[0], size[1])
+		}
+	}
+	if _, err := child.Terminate(2 * time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := child.ResizePTY(80, 24); !errors.Is(err, ErrState) {
+		t.Fatalf("post-reap resize error=%v, want ErrState", err)
+	}
+}
+
+func TestPTYResizeRejectsNonPTYAndClosedMaster(t *testing.T) {
+	f := newFixture(t)
+	child := f.start("/bin/sh", []string{"-c", "sleep 2"}, nil, nil)
+	if _, err := child.Activate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := child.ResizePTY(80, 24); !errors.Is(err, ErrState) {
+		t.Fatalf("non-PTY resize error=%v, want ErrState", err)
+	}
+	if _, err := child.Terminate(2 * time.Second); err != nil {
+		t.Fatal(err)
+	}
+
+	ptyFixture := newFixture(t)
+	gate, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := PrepareExecSpec(ExecSpec{Target: "/bin/sh", Args: []string{"-c", "sleep 2"}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C", "TERM=xterm"}, Cwd: ptyFixture.cwd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ptyChild, err := StartBlockedPTY(ptyFixture.lease, gate, spec, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ptyFixture.child = ptyChild
+	if _, err := ptyChild.Activate(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ptyChild.Terminate(2 * time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := ptyChild.closePTY(); err != nil {
+		t.Fatal(err)
+	}
+	if err := ptyChild.ResizePTY(80, 24); !errors.Is(err, ErrState) {
+		t.Fatalf("closed-master resize error=%v, want ErrState", err)
+	}
+}
+
 func TestPTYAttemptsHaveDistinctOwnedMasterAndProcess(t *testing.T) {
 	one, two := newFixture(t), newFixture(t)
 	gate, err := os.Executable()

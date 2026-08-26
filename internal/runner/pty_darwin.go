@@ -12,6 +12,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+const maxPTYDimension = 4096
+
 // openPTY deliberately uses the Darwin kernel's /dev/ptmx interface instead
 // of adding a PTY library. Both descriptors are CLOEXEC; os/exec makes the
 // slave its 0/1/2 descriptors for the blocked gate, while the parent retains
@@ -60,6 +62,27 @@ func ptyIoctl(fd int, request uintptr, arg unsafe.Pointer) error {
 		return errno
 	}
 	return nil
+}
+
+// ResizePTY changes the window size of this live owner's PTY. The PTY master
+// is an authority-bearing capability: recovered process identities and
+// callers holding only a numeric descriptor cannot reach this operation.
+// Callers serialize it with other terminal operations at the daemon boundary.
+func (c *OwnedChild) ResizePTY(columns, rows int) error {
+	if c == nil || c.ptyMaster == nil || c.state != stateActivated || c.exitObserved {
+		return ErrState
+	}
+	if columns < 1 || columns > maxPTYDimension || rows < 1 || rows > maxPTYDimension {
+		return ErrState
+	}
+	if err := c.refreshExit(); err != nil {
+		return err
+	}
+	if c.exitObserved {
+		return ErrState
+	}
+	winsize := unix.Winsize{Col: uint16(columns), Row: uint16(rows)}
+	return unix.IoctlSetWinsize(int(c.ptyMaster.Fd()), unix.TIOCSWINSZ, &winsize)
 }
 
 func validatePTYDescriptors() error {
