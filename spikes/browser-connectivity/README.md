@@ -53,14 +53,14 @@ exact SHA-256 sources for the current inline blocks (recompute them whenever
 `probe.html` changes):
 
 ```text
-style-src 'sha256-3rtSo/hQJP43H+EO0MQc2/uro7JeO8IGTep9xCv7NJs='
-script-src 'sha256-11tVZzignmE9YOrYM2VqfDs6EnZO84Q7VF5uPQQj/SY='
+style-src 'sha256-ypigXjDe8/ECxByNK83EA1cZdqnQLMyHXtgcMDD/AVI='
+script-src 'sha256-lI9bOSCmtgF4hMbVtD48yKSCiq+mznor1Z2gFVS8zVI='
 ```
 
 A complete fixed-port route example is:
 
 ```text
-Content-Security-Policy: default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; style-src 'sha256-3rtSo/hQJP43H+EO0MQc2/uro7JeO8IGTep9xCv7NJs='; script-src 'sha256-11tVZzignmE9YOrYM2VqfDs6EnZO84Q7VF5uPQQj/SY='; connect-src ws://127.0.0.1:43123
+Content-Security-Policy: default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; style-src 'sha256-ypigXjDe8/ECxByNK83EA1cZdqnQLMyHXtgcMDD/AVI='; script-src 'sha256-lI9bOSCmtgF4hMbVtD48yKSCiq+mznor1Z2gFVS8zVI='; connect-src ws://127.0.0.1:43123
 ```
 
 Use the exact port in `connect-src` when changing the fixture URL. Do not

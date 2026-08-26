@@ -435,17 +435,33 @@ func TestProbePageIsSelfContainedAndCredentialFree(t *testing.T) {
 	if strings.Count(page, "thisGeneration !== generation") < 3 || !strings.Contains(page, "thisGeneration === generation") {
 		t.Error("stale WebSocket callbacks are not guarded by the active generation")
 	}
-	styleHash := blockHash(page, "  <style>", "  </style>")
-	scriptHash := blockHash(page, "  <script>", "  </script>")
-	if styleHash != "3rtSo/hQJP43H+EO0MQc2/uro7JeO8IGTep9xCv7NJs=" || scriptHash != "11tVZzignmE9YOrYM2VqfDs6EnZO84Q7VF5uPQQj/SY=" {
+	styleText := blockText(page, "  <style>", "</style>")
+	scriptText := blockText(page, "  <script>", "</script>")
+	if !strings.HasPrefix(styleText, "\n") || !strings.HasSuffix(styleText, "\n  ") || !strings.HasPrefix(scriptText, "\n") || !strings.HasSuffix(scriptText, "\n  ") {
+		t.Fatal("CSP block hashing must include boundary newlines")
+	}
+	styleHash := blockHash(styleText)
+	scriptHash := blockHash(scriptText)
+	if styleHash != "ypigXjDe8/ECxByNK83EA1cZdqnQLMyHXtgcMDD/AVI=" || scriptHash != "lI9bOSCmtgF4hMbVtD48yKSCiq+mznor1Z2gFVS8zVI=" {
 		t.Fatalf("CSP hashes changed: style=%s script=%s", styleHash, scriptHash)
 	}
 }
 
-func blockHash(page, open, close string) string {
-	start := strings.Index(page, open) + len(open)
-	end := strings.Index(page[start:], close) + start
-	hash := sha256.Sum256([]byte(page[start:end]))
+func blockText(page, open, close string) string {
+	start := strings.Index(page, open)
+	if start < 0 {
+		return ""
+	}
+	start += len(open)
+	end := strings.Index(page[start:], close)
+	if end < 0 {
+		return ""
+	}
+	return page[start : start+end]
+}
+
+func blockHash(text string) string {
+	hash := sha256.Sum256([]byte(text))
 	return base64.StdEncoding.EncodeToString(hash[:])
 }
 
