@@ -1126,6 +1126,15 @@ func TestCurrentExecRejectsInvalidTransferredCwd(t *testing.T) {
 			if _, err := os.Lstat(filepath.Join(f.root, "provider.effect")); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("invalid cwd provider effect: %v", err)
 			}
+			if mode == "cwd-reused" {
+				output := f.output()
+				if !strings.Contains(output, "runner: current cwd: runner: identity mismatch") {
+					t.Fatalf("reused cwd error lost identity cause: %q", output)
+				}
+				if strings.Contains(output, "file already closed") || strings.Contains(output, os.ErrInvalid.Error()) {
+					t.Fatalf("reused cwd gained spurious close error: %q", output)
+				}
+			}
 		})
 	}
 }

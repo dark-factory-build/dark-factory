@@ -425,10 +425,11 @@ func execPreparedCurrent(spec *LaunchSpec, cwd *os.File, worker *WorkerControl) 
 	if err := unix.Fchdir(int(cwd.Fd())); err != nil {
 		return err
 	}
-	if err := cwd.Close(); err != nil {
+	closing := cwd
+	cwd = nil
+	if err := closing.Close(); err != nil {
 		return err
 	}
-	cwd = nil
 	if err := unix.Dup2(int(stdin.Fd()), 0); err != nil {
 		return err
 	}
