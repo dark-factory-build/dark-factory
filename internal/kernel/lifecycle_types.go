@@ -135,23 +135,29 @@ func (value ChangePhase) String() string {
 type ChangeSelection struct {
 	format         ObjectFormat
 	commit         CommitID
+	commitment     TreeDigest
+	entries        uint32
+	bytes          uint64
 	repositoryRoot string
 	repository     FileIdentity
 }
 
-func NewChangeSelection(format ObjectFormat, commit CommitID, repositoryRoot string, repository FileIdentity) (ChangeSelection, error) {
-	if format.oidLength() == 0 || commit.format != format || !repository.valid() || !validOwnedLocator(repositoryRoot) {
+func NewChangeSelection(format ObjectFormat, commit CommitID, commitment TreeDigest, entries uint32, totalBytes uint64, repositoryRoot string, repository FileIdentity) (ChangeSelection, error) {
+	if format.oidLength() == 0 || commit.format != format || entries > MaxChangeTreeEntries || totalBytes > MaxChangeTreeBlobBytes || !repository.valid() || !validOwnedLocator(repositoryRoot) {
 		return ChangeSelection{}, fmt.Errorf("%w: invalid Change selection", ErrInvalidValue)
 	}
-	return ChangeSelection{format: format, commit: commit, repositoryRoot: repositoryRoot, repository: repository}, nil
+	return ChangeSelection{format: format, commit: commit, commitment: commitment, entries: entries, bytes: totalBytes, repositoryRoot: repositoryRoot, repository: repository}, nil
 }
 
 func (selection ChangeSelection) ObjectFormat() ObjectFormat       { return selection.format }
 func (selection ChangeSelection) Commit() CommitID                 { return selection.commit }
+func (selection ChangeSelection) Commitment() TreeDigest           { return selection.commitment }
+func (selection ChangeSelection) EntryCount() uint32               { return selection.entries }
+func (selection ChangeSelection) TotalBytes() uint64               { return selection.bytes }
 func (selection ChangeSelection) RepositoryRoot() string           { return selection.repositoryRoot }
 func (selection ChangeSelection) RepositoryIdentity() FileIdentity { return selection.repository }
 func (selection ChangeSelection) valid() bool {
-	return selection.format.oidLength() != 0 && selection.commit.format == selection.format && len(selection.commit.Bytes()) == selection.format.oidLength() && selection.repository.valid() && validOwnedLocator(selection.repositoryRoot)
+	return selection.format.oidLength() != 0 && selection.commit.format == selection.format && len(selection.commit.Bytes()) == selection.format.oidLength() && selection.entries <= MaxChangeTreeEntries && selection.bytes <= MaxChangeTreeBlobBytes && selection.repository.valid() && validOwnedLocator(selection.repositoryRoot)
 }
 
 type ChangeAvailability struct {
@@ -172,6 +178,9 @@ func (value ChangeAvailability) Commitment() TreeDigest       { return value.com
 func (value ChangeAvailability) EntryCount() uint32           { return value.entries }
 func (value ChangeAvailability) TotalBytes() uint64           { return value.bytes }
 func (value ChangeAvailability) SourceIdentity() FileIdentity { return value.source }
+func (value ChangeAvailability) valid() bool {
+	return value.entries <= MaxChangeTreeEntries && value.bytes <= MaxChangeTreeBlobBytes && value.source.valid()
+}
 
 type Change struct {
 	ID                ChangeID

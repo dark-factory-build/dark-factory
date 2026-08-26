@@ -23,7 +23,8 @@ func TestChangeCheckpointsAreGuardedOneWayAndReplayable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	selection, err := NewChangeSelection(format, commit, "/repository", repository)
+	digest := changeTreeDigest(t, 0x22)
+	selection, err := NewChangeSelection(format, commit, digest, MaxChangeTreeEntries, MaxChangeTreeBlobBytes, "/repository", repository)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,9 +39,18 @@ func TestChangeCheckpointsAreGuardedOneWayAndReplayable(t *testing.T) {
 		t.Fatalf("selection replay = %+v, %v", replayed, err)
 	}
 	wrongCommit, _ := NewCommitID(format, bytes.Repeat([]byte{0x12}, 20))
-	wrongSelection, _ := NewChangeSelection(format, wrongCommit, "/repository", repository)
+	wrongSelection, _ := NewChangeSelection(format, wrongCommit, digest, MaxChangeTreeEntries, MaxChangeTreeBlobBytes, "/repository", repository)
 	if _, err := store.RecordChangeSelection(context.Background(), change.ID, change.Revision, wrongSelection, mustTime(t, 11)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("conflicting selection = %v", err)
+	}
+	for name, conflicting := range map[string]ChangeSelection{
+		"commitment":  mustChangeSelection(t, format, commit, changeTreeDigest(t, 0x23), MaxChangeTreeEntries, MaxChangeTreeBlobBytes, repository),
+		"entry count": mustChangeSelection(t, format, commit, digest, MaxChangeTreeEntries-1, MaxChangeTreeBlobBytes, repository),
+		"total bytes": mustChangeSelection(t, format, commit, digest, MaxChangeTreeEntries, MaxChangeTreeBlobBytes-1, repository),
+	} {
+		if _, err := store.RecordChangeSelection(context.Background(), change.ID, change.Revision, conflicting, mustTime(t, 11)); !errors.Is(err, ErrConflict) {
+			t.Fatalf("conflicting selection %s = %v", name, err)
+		}
 	}
 
 	stage, _ := NewFileIdentity(9, 10)
@@ -54,7 +64,6 @@ func TestChangeCheckpointsAreGuardedOneWayAndReplayable(t *testing.T) {
 		t.Fatalf("prepared replay = %+v, %v", preparedReplay, err)
 	}
 
-	digest, _ := TreeDigestFromBytes(bytes.Repeat([]byte{0x22}, DigestBytes))
 	availableFacts, err := NewChangeAvailability(digest, MaxChangeTreeEntries, MaxChangeTreeBlobBytes, stage)
 	if err != nil {
 		t.Fatal(err)
@@ -86,6 +95,122 @@ func TestChangeCheckpointsAreGuardedOneWayAndReplayable(t *testing.T) {
 	}
 }
 
+func TestSelectedManifestSurvivesRestartAndGuardsRecoveryAvailability(t *testing.T) {
+	store, path := newTestStore(t)
+	change := seedReservedChange(t, store)
+	format, _ := NewObjectFormat("sha1")
+	commit, _ := NewCommitID(format, bytes.Repeat([]byte{0x31}, format.oidLength()))
+	repository, _ := NewFileIdentity(41, 42)
+	digest := changeTreeDigest(t, 0x32)
+	selection := mustChangeSelection(t, format, commit, digest, 7, 19, repository)
+	selected, err := store.RecordChangeSelection(context.Background(), change.ID, change.Revision, selection, mustTime(t, 10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected.Selection == nil || !changeSelectionEqual(*selected.Selection, selection) {
+		t.Fatalf("selected facts = %+v", selected.Selection)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened, found, err := store.Change(context.Background(), change.ID)
+	if err != nil || !found || reopened.Selection == nil || !changeSelectionEqual(*reopened.Selection, selection) {
+		t.Fatalf("reopened selection = %+v found=%v err=%v", reopened, found, err)
+	}
+	replay, err := store.RecordChangeSelection(context.Background(), change.ID, change.Revision, selection, mustTime(t, 99))
+	if err != nil || replay.Revision != selected.Revision || replay.UpdatedAt != selected.UpdatedAt {
+		t.Fatalf("reopened selection replay = %+v, %v", replay, err)
+	}
+	stage, _ := NewFileIdentity(43, 44)
+	prepared, err := store.RecordChangePrepared(context.Background(), change.ID, reopened.Revision, stage, mustTime(t, 11))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	for name, observation := range map[string]ChangeAvailability{
+		"commitment":  mustChangeAvailability(t, changeTreeDigest(t, 0x33), 7, 19, stage),
+		"entry count": mustChangeAvailability(t, digest, 8, 19, stage),
+		"total bytes": mustChangeAvailability(t, digest, 7, 20, stage),
+	} {
+		before := captureWriteFootprint(t, store)
+		if _, err := store.MarkChangeAvailable(context.Background(), change.ID, prepared.Revision, observation, mustTime(t, 12)); !errors.Is(err, ErrConflict) {
+			t.Fatalf("mismatched %s = %v", name, err)
+		}
+		if after := captureWriteFootprint(t, store); after != before {
+			t.Fatalf("mismatched %s mutated authority: before=%+v after=%+v", name, before, after)
+		}
+	}
+	observed := mustChangeAvailability(t, digest, 7, 19, stage)
+	available, err := store.MarkChangeAvailable(context.Background(), change.ID, prepared.Revision, observed, mustTime(t, 12))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if available.Availability == nil || !changeAvailabilityEqual(*available.Availability, observed) || available.Selection == nil || !changeSelectionEqual(*available.Selection, selection) {
+		t.Fatalf("available Change lost selected facts: %+v", available)
+	}
+	var storedDigest []byte
+	var storedEntries, storedBytes int64
+	if err := store.readers.QueryRow(`SELECT tree_digest, entry_count, total_bytes FROM changes WHERE id = ?`, change.ID.Bytes()).Scan(&storedDigest, &storedEntries, &storedBytes); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(storedDigest, digest.Bytes()) || storedEntries != 7 || storedBytes != 19 {
+		t.Fatalf("availability changed selected facts: digest=%x entries=%d bytes=%d", storedDigest, storedEntries, storedBytes)
+	}
+}
+
+func TestPartialOrCorruptSelectedManifestFailsReadMutationAndOpen(t *testing.T) {
+	mutations := map[string]string{
+		"missing digest":    `UPDATE changes SET tree_digest = NULL WHERE id = ?`,
+		"short digest":      `UPDATE changes SET tree_digest = zeroblob(31) WHERE id = ?`,
+		"missing entries":   `UPDATE changes SET entry_count = NULL WHERE id = ?`,
+		"negative entries":  `UPDATE changes SET entry_count = -1 WHERE id = ?`,
+		"missing bytes":     `UPDATE changes SET total_bytes = NULL WHERE id = ?`,
+		"overflowing bytes": `UPDATE changes SET total_bytes = 1073741825 WHERE id = ?`,
+	}
+	for name, mutation := range mutations {
+		t.Run(name, func(t *testing.T) {
+			store, path := newTestStore(t)
+			change := seedReservedChange(t, store)
+			selection := testChangeSelection(t)
+			if _, err := store.RecordChangeSelection(context.Background(), change.ID, change.Revision, selection, mustTime(t, 10)); err != nil {
+				t.Fatal(err)
+			}
+			corruptSQL(t, store, mutation, change.ID.Bytes())
+			if _, _, err := store.Change(context.Background(), change.ID); !errors.Is(err, ErrCorruptState) {
+				t.Fatalf("corrupt selected manifest read = %v", err)
+			}
+			beforeWrite := captureWriteFootprint(t, store)
+			stage, _ := NewFileIdentity(50, 51)
+			if _, err := store.RecordChangePrepared(context.Background(), change.ID, mustRevision(t, 2), stage, mustTime(t, 11)); !errors.Is(err, ErrCorruptState) {
+				t.Fatalf("corrupt selected manifest mutation = %v", err)
+			}
+			if afterWrite := captureWriteFootprint(t, store); afterWrite != beforeWrite {
+				t.Fatalf("corrupt selected manifest changed authority: before=%+v after=%+v", beforeWrite, afterWrite)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			beforeOpen := captureDatabaseEvidence(t, path)
+			if _, err := Open(context.Background(), path); !errors.Is(err, ErrCorruptState) {
+				t.Fatalf("Open corrupt selected manifest = %v", err)
+			}
+			assertDatabaseEvidenceUnchanged(t, path, beforeOpen)
+		})
+	}
+}
+
 func TestChangeCheckpointBoundsAndOrderingFailBeforeMutation(t *testing.T) {
 	store, _ := newTestStore(t)
 	defer store.Close()
@@ -94,7 +219,16 @@ func TestChangeCheckpointBoundsAndOrderingFailBeforeMutation(t *testing.T) {
 	if _, err := store.RecordChangePrepared(context.Background(), change.ID, change.Revision, stage, mustTime(t, 5)); !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("prepared before selection = %v", err)
 	}
-	digest, _ := TreeDigestFromBytes(bytes.Repeat([]byte{1}, DigestBytes))
+	digest := changeTreeDigest(t, 1)
+	format, _ := NewObjectFormat("sha1")
+	commit, _ := NewCommitID(format, bytes.Repeat([]byte{1}, format.oidLength()))
+	repository, _ := NewFileIdentity(3, 4)
+	if _, err := NewChangeSelection(format, commit, digest, MaxChangeTreeEntries+1, 0, "/repository", repository); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("selected entry bound = %v", err)
+	}
+	if _, err := NewChangeSelection(format, commit, digest, 0, MaxChangeTreeBlobBytes+1, "/repository", repository); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("selected byte bound = %v", err)
+	}
 	if _, err := NewChangeAvailability(digest, MaxChangeTreeEntries+1, 0, stage); !errors.Is(err, ErrInvalidValue) {
 		t.Fatalf("entry bound = %v", err)
 	}
@@ -110,12 +244,27 @@ func TestChangeCheckpointBoundsAndOrderingFailBeforeMutation(t *testing.T) {
 	}
 }
 
+func TestSelectedPhaseRequiresManifestFactsInSchema(t *testing.T) {
+	store, _ := newTestStore(t)
+	defer store.Close()
+	change := seedReservedChange(t, store)
+	_, err := store.writer.Exec(`UPDATE changes SET phase = 'selected', object_format = 'sha1', selected_commit = ?, repository_root = '/repository', repository_dev = 1, repository_inode = 2, selected_at_ms = 10, revision = 2, updated_at_ms = 10 WHERE id = ?`, bytes.Repeat([]byte{1}, 20), change.ID.Bytes())
+	if err == nil {
+		t.Fatal("selected phase accepted missing manifest facts")
+	}
+	fresh, found, readErr := store.Change(context.Background(), change.ID)
+	if readErr != nil || !found || fresh.Phase != ChangeReserved || fresh.Revision != change.Revision {
+		t.Fatalf("failed selected schema mutation changed Change: %+v found=%v err=%v", fresh, found, readErr)
+	}
+}
+
 func TestChangeLocatorsAreCanonicalAtConstructionAndRead(t *testing.T) {
 	format, _ := NewObjectFormat("sha1")
 	commit, _ := NewCommitID(format, bytes.Repeat([]byte{1}, 20))
 	repository, _ := NewFileIdentity(1, 2)
+	digest := changeTreeDigest(t, 1)
 	for _, locator := range []string{"/repository/.", "/"} {
-		if _, err := NewChangeSelection(format, commit, locator, repository); !errors.Is(err, ErrInvalidValue) {
+		if _, err := NewChangeSelection(format, commit, digest, 1, 1, locator, repository); !errors.Is(err, ErrInvalidValue) {
 			t.Fatalf("selection locator %q = %v", locator, err)
 		}
 	}
@@ -142,6 +291,33 @@ func TestChangeLocatorsAreCanonicalAtConstructionAndRead(t *testing.T) {
 		t.Fatalf("Open unclean Change = %v", err)
 	}
 	assertDatabaseEvidenceUnchanged(t, path, before)
+}
+
+func changeTreeDigest(t testing.TB, seed byte) TreeDigest {
+	t.Helper()
+	digest, err := TreeDigestFromBytes(bytes.Repeat([]byte{seed}, DigestBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return digest
+}
+
+func mustChangeSelection(t testing.TB, format ObjectFormat, commit CommitID, digest TreeDigest, entries uint32, totalBytes uint64, repository FileIdentity) ChangeSelection {
+	t.Helper()
+	selection, err := NewChangeSelection(format, commit, digest, entries, totalBytes, "/repository", repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return selection
+}
+
+func mustChangeAvailability(t testing.TB, digest TreeDigest, entries uint32, totalBytes uint64, source FileIdentity) ChangeAvailability {
+	t.Helper()
+	availability, err := NewChangeAvailability(digest, entries, totalBytes, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return availability
 }
 
 func seedReservedChange(t *testing.T, store *Store) Change {

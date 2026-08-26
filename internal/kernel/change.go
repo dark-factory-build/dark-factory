@@ -1,7 +1,6 @@
 package kernel
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -56,9 +55,9 @@ func scanChange(scanner rowScanner) (Change, bool, error) {
 		Phase: parsedPhase, SourceRoot: sourceRoot, StagingRoot: stagingRoot,
 		Revision: rev, CreatedAt: created, UpdatedAt: updated,
 	}
-	selectionFields := objectFormat.Valid || selectedCommit != nil || repositoryRoot.Valid || repositoryDev.Valid || repositoryInode.Valid || selectedAt.Valid
+	selectionFields := objectFormat.Valid || selectedCommit != nil || repositoryRoot.Valid || repositoryDev.Valid || repositoryInode.Valid || selectedAt.Valid || treeDigest != nil || entryCount.Valid || totalBytes.Valid
 	if selectionFields {
-		if !objectFormat.Valid || !repositoryRoot.Valid || !repositoryDev.Valid || !repositoryInode.Valid || !selectedAt.Valid {
+		if !objectFormat.Valid || !repositoryRoot.Valid || !repositoryDev.Valid || !repositoryInode.Valid || !selectedAt.Valid || len(treeDigest) != DigestBytes || !entryCount.Valid || !totalBytes.Valid || entryCount.Int64 < 0 || entryCount.Int64 > MaxChangeTreeEntries || totalBytes.Int64 < 0 || totalBytes.Int64 > MaxChangeTreeBlobBytes {
 			return Change{}, false, fmt.Errorf("%w: partial Change selection", ErrCorruptState)
 		}
 		format, err := parseObjectFormat(objectFormat.String)
@@ -66,10 +65,11 @@ func scanChange(scanner rowScanner) (Change, bool, error) {
 			return Change{}, false, err
 		}
 		commit, commitErr := NewCommitID(format, selectedCommit)
+		commitment, commitmentErr := TreeDigestFromBytes(treeDigest)
 		repository, repositoryErr := NewFileIdentity(repositoryDev.Int64, repositoryInode.Int64)
-		selection, selectionErr := NewChangeSelection(format, commit, repositoryRoot.String, repository)
+		selection, selectionErr := NewChangeSelection(format, commit, commitment, uint32(entryCount.Int64), uint64(totalBytes.Int64), repositoryRoot.String, repository)
 		selectedTime, selectedTimeErr := NewUnixMillis(selectedAt.Int64)
-		if commitErr != nil || repositoryErr != nil || selectionErr != nil || selectedTimeErr != nil || selectedAt.Int64 < createdAt {
+		if commitErr != nil || commitmentErr != nil || repositoryErr != nil || selectionErr != nil || selectedTimeErr != nil || selectedAt.Int64 < createdAt {
 			return Change{}, false, fmt.Errorf("%w: invalid Change selection", ErrCorruptState)
 		}
 		result.Selection = &selection
@@ -88,16 +88,15 @@ func scanChange(scanner rowScanner) (Change, bool, error) {
 		result.StageIdentity = &identity
 		result.PreparedAt = &preparedTime
 	}
-	availableFields := treeDigest != nil || entryCount.Valid || totalBytes.Valid || sourceDev.Valid || sourceInode.Valid || availableAt.Valid
+	availableFields := sourceDev.Valid || sourceInode.Valid || availableAt.Valid
 	if availableFields {
-		if len(treeDigest) != DigestBytes || !entryCount.Valid || !totalBytes.Valid || !sourceDev.Valid || !sourceInode.Valid || !availableAt.Valid || entryCount.Int64 < 0 || entryCount.Int64 > MaxChangeTreeEntries || totalBytes.Int64 < 0 || totalBytes.Int64 > MaxChangeTreeBlobBytes {
+		if !sourceDev.Valid || !sourceInode.Valid || !availableAt.Valid || result.Selection == nil {
 			return Change{}, false, fmt.Errorf("%w: partial available Change", ErrCorruptState)
 		}
-		digest, digestErr := TreeDigestFromBytes(treeDigest)
 		source, sourceErr := NewFileIdentity(sourceDev.Int64, sourceInode.Int64)
-		availability, availabilityErr := NewChangeAvailability(digest, uint32(entryCount.Int64), uint64(totalBytes.Int64), source)
+		availability, availabilityErr := NewChangeAvailability(result.Selection.commitment, result.Selection.entries, result.Selection.bytes, source)
 		availableTime, timeErr := NewUnixMillis(availableAt.Int64)
-		if digestErr != nil || sourceErr != nil || availabilityErr != nil || timeErr != nil || result.StageIdentity == nil || source != *result.StageIdentity || availableAt.Int64 < preparedAt.Int64 {
+		if sourceErr != nil || availabilityErr != nil || timeErr != nil || result.StageIdentity == nil || source != *result.StageIdentity || availableAt.Int64 < preparedAt.Int64 {
 			return Change{}, false, fmt.Errorf("%w: invalid available Change", ErrCorruptState)
 		}
 		result.Availability = &availability
@@ -150,8 +149,8 @@ func (store *Store) RecordChangeSelection(ctx context.Context, id ChangeID, expe
 		if change.Phase != ChangeReserved || change.Revision != expected || at.Int64() < change.CreatedAt.Int64() {
 			return false, ErrRevisionConflict
 		}
-		result, err := connection.ExecContext(ctx, `UPDATE changes SET phase = 'selected', object_format = ?, selected_commit = ?, repository_root = ?, repository_dev = ?, repository_inode = ?, selected_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase = 'reserved' AND revision = ?`,
-			selection.format.String(), selection.commit.Bytes(), selection.repositoryRoot, selection.repository.device, selection.repository.inode, at.Int64(), at.Int64(), id.Bytes(), expected.Int64())
+		result, err := connection.ExecContext(ctx, `UPDATE changes SET phase = 'selected', object_format = ?, selected_commit = ?, tree_digest = ?, entry_count = ?, total_bytes = ?, repository_root = ?, repository_dev = ?, repository_inode = ?, selected_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase = 'reserved' AND revision = ?`,
+			selection.format.String(), selection.commit.Bytes(), selection.commitment.Bytes(), int64(selection.entries), int64(selection.bytes), selection.repositoryRoot, selection.repository.device, selection.repository.inode, at.Int64(), at.Int64(), id.Bytes(), expected.Int64())
 		return false, requireOneRow(result, err)
 	})
 }
@@ -177,7 +176,7 @@ func (store *Store) RecordChangePrepared(ctx context.Context, id ChangeID, expec
 }
 
 func (store *Store) MarkChangeAvailable(ctx context.Context, id ChangeID, expected Revision, available ChangeAvailability, at UnixMillis) (Change, error) {
-	if id.zero() || available.entries > MaxChangeTreeEntries || available.bytes > MaxChangeTreeBlobBytes || !available.source.valid() {
+	if id.zero() || !available.valid() {
 		return Change{}, fmt.Errorf("%w: invalid available Change request", ErrInvalidValue)
 	}
 	return store.advanceChange(ctx, id, expected, at, func(change Change, connection *sql.Conn) (bool, error) {
@@ -190,8 +189,11 @@ func (store *Store) MarkChangeAvailable(ctx context.Context, id ChangeID, expect
 		if change.Phase != ChangePrepared || change.Revision != expected || change.StageIdentity == nil || *change.StageIdentity != available.source || at.Int64() < change.UpdatedAt.Int64() {
 			return false, ErrRevisionConflict
 		}
-		result, err := connection.ExecContext(ctx, `UPDATE changes SET phase = 'available', tree_digest = ?, entry_count = ?, total_bytes = ?, source_dev = ?, source_inode = ?, available_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase = 'prepared' AND revision = ? AND stage_dev = ? AND stage_inode = ?`,
-			available.commitment.Bytes(), int64(available.entries), int64(available.bytes), available.source.device, available.source.inode, at.Int64(), at.Int64(), id.Bytes(), expected.Int64(), available.source.device, available.source.inode)
+		if change.Selection == nil || !changeSelectionMatchesAvailability(*change.Selection, available) {
+			return false, ErrConflict
+		}
+		result, err := connection.ExecContext(ctx, `UPDATE changes SET phase = 'available', source_dev = ?, source_inode = ?, available_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase = 'prepared' AND revision = ? AND stage_dev = ? AND stage_inode = ?`,
+			available.source.device, available.source.inode, at.Int64(), at.Int64(), id.Bytes(), expected.Int64(), available.source.device, available.source.inode)
 		return false, requireOneRow(result, err)
 	})
 }
@@ -240,11 +242,15 @@ func (store *Store) advanceChange(ctx context.Context, id ChangeID, expected Rev
 }
 
 func changeSelectionEqual(left, right ChangeSelection) bool {
-	return left.format == right.format && left.commit.equal(right.commit) && left.repositoryRoot == right.repositoryRoot && left.repository == right.repository
+	return left.format == right.format && left.commit.equal(right.commit) && left.commitment == right.commitment && left.entries == right.entries && left.bytes == right.bytes && left.repositoryRoot == right.repositoryRoot && left.repository == right.repository
+}
+
+func changeSelectionMatchesAvailability(selection ChangeSelection, available ChangeAvailability) bool {
+	return selection.commitment == available.commitment && selection.entries == available.entries && selection.bytes == available.bytes
 }
 
 func changeAvailabilityEqual(left, right ChangeAvailability) bool {
-	return bytes.Equal(left.commitment.Bytes(), right.commitment.Bytes()) && left.entries == right.entries && left.bytes == right.bytes && left.source == right.source
+	return left.commitment == right.commitment && left.entries == right.entries && left.bytes == right.bytes && left.source == right.source
 }
 
 func requireOneRow(result sql.Result, err error) error {

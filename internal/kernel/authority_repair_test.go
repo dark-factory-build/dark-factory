@@ -242,7 +242,8 @@ func runningWorkerRun(t *testing.T) (*Store, Run, AdmissionKeys) {
 	format, _ := NewObjectFormat("sha1")
 	commit, _ := NewCommitID(format, bytes.Repeat([]byte{1}, format.oidLength()))
 	repository, _ := NewFileIdentity(50, 60)
-	selection, _ := NewChangeSelection(format, commit, "/repository", repository)
+	digest := changeTreeDigest(t, 2)
+	selection, _ := NewChangeSelection(format, commit, digest, 1, 1, "/repository", repository)
 	selected, err := store.RecordChangeSelection(context.Background(), reservation.ID, mustRevision(t, 1), selection, mustTime(t, 11))
 	if err != nil {
 		store.Close()
@@ -254,7 +255,6 @@ func runningWorkerRun(t *testing.T) (*Store, Run, AdmissionKeys) {
 		store.Close()
 		t.Fatal(err)
 	}
-	digest, _ := TreeDigestFromBytes(bytes.Repeat([]byte{2}, DigestBytes))
 	availability, _ := NewChangeAvailability(digest, 1, 1, stage)
 	if _, err := store.MarkChangeAvailable(context.Background(), reservation.ID, prepared.Revision, availability, mustTime(t, 13)); err != nil {
 		store.Close()
