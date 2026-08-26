@@ -706,6 +706,100 @@ func TestTaskRunTopologyRejectsRevisionSkip(t *testing.T) {
 	}
 }
 
+func TestOrphanTaskRevisionRejectedEveryBoundary(t *testing.T) {
+	store, path, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
+	task, err := store.EnqueueTask(context.Background(), NewTask{
+		ID: taskID(t, 240), ProjectID: project.ID, AssignedAgentID: agent.ID,
+		IncarnationID: incarnationID(t, 241), Title: "orphan",
+	}, mustTime(t, 5))
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	corruptSQL(t, store, `UPDATE tasks SET work_revision = 2 WHERE id = ?`, task.ID.Bytes())
+	before := captureWriteFootprint(t, store)
+	if _, found, err := store.Task(context.Background(), task.ID); !errors.Is(err, ErrCorruptState) || found {
+		t.Fatalf("orphan Task = found=%v, err=%v", found, err)
+	}
+	if _, err := store.Snapshot(context.Background()); !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("orphan Snapshot = %v", err)
+	}
+	if _, err := store.RecoverableRuns(context.Background()); !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("orphan RecoverableRuns = %v", err)
+	}
+	if result, err := store.AdmitNext(context.Background(), agent.ID, admissionKeys(t, 242, nil), mustTime(t, 10)); !errors.Is(err, ErrCorruptState) || result.Admitted() {
+		t.Fatalf("orphan admission = %+v, %v", result, err)
+	}
+	if after := captureWriteFootprint(t, store); after != before {
+		t.Fatalf("orphan rejection footprint before=%+v after=%+v", before, after)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	beforeDatabase := captureDatabaseEvidence(t, path)
+	if _, err := Open(context.Background(), path); !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("orphan Open = %v", err)
+	}
+	assertDatabaseEvidenceUnchanged(t, path, beforeDatabase)
+}
+
+func TestFreshQueuedTaskWithoutRunRemainsValidAndAdmissible(t *testing.T) {
+	store, path, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
+	task, err := store.EnqueueTask(context.Background(), NewTask{
+		ID: taskID(t, 243), ProjectID: project.ID, AssignedAgentID: agent.ID,
+		IncarnationID: incarnationID(t, 244), Title: "fresh",
+	}, mustTime(t, 5))
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	if _, err := store.Snapshot(context.Background()); err != nil {
+		t.Fatalf("fresh Snapshot = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	opened, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("fresh Open = %v", err)
+	}
+	defer opened.Close()
+	if fresh, found, err := opened.Task(context.Background(), task.ID); err != nil || !found || fresh.WorkRevision.Int64() != 1 || fresh.Status != TaskQueued {
+		t.Fatalf("fresh Task = %+v, found=%v, err=%v", fresh, found, err)
+	}
+	result, err := opened.AdmitNext(context.Background(), agent.ID, admissionKeys(t, 245, nil), mustTime(t, 10))
+	if err != nil || !result.Admitted() || result.Run.AdmittedTaskWorkRevision.Int64() != 1 {
+		t.Fatalf("fresh admission = %+v, %v", result, err)
+	}
+}
+
+func TestNoRunNonQueuedTaskRejected(t *testing.T) {
+	store, path, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
+	task, err := store.EnqueueTask(context.Background(), NewTask{
+		ID: taskID(t, 246), ProjectID: project.ID, AssignedAgentID: agent.ID,
+		IncarnationID: incarnationID(t, 247), Title: "nonfresh",
+	}, mustTime(t, 5))
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	corruptSQL(t, store, `UPDATE tasks SET status = 'running' WHERE id = ?`, task.ID.Bytes())
+	if _, found, err := store.Task(context.Background(), task.ID); !errors.Is(err, ErrCorruptState) || found {
+		t.Fatalf("nonfresh Task = found=%v, err=%v", found, err)
+	}
+	if _, err := store.Snapshot(context.Background()); !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("nonfresh Snapshot = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	beforeDatabase := captureDatabaseEvidence(t, path)
+	if _, err := Open(context.Background(), path); !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("nonfresh Open = %v", err)
+	}
+	assertDatabaseEvidenceUnchanged(t, path, beforeDatabase)
+}
+
 func TestRunsRejectDuplicateAdmittedTaskWorkRevision(t *testing.T) {
 	store, terminal, _ := terminalPreRunningWorker(t)
 	defer store.Close()

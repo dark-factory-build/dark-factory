@@ -226,12 +226,19 @@ func (store *Store) Agent(ctx context.Context, id AgentID) (Agent, bool, error) 
 }
 
 func (store *Store) Task(ctx context.Context, id TaskID) (Task, bool, error) {
-	connection, err := store.readerConnection(ctx)
+	tx, err := store.beginRead(ctx)
 	if err != nil {
 		return Task{}, false, err
 	}
-	defer connection.Close()
-	return taskByID(ctx, connection, id)
+	defer tx.Close()
+	task, found, err := taskByID(ctx, tx.connection, id)
+	if err != nil || !found {
+		return task, found, err
+	}
+	if err := validateTaskRunTopology(ctx, tx.connection, task); err != nil {
+		return Task{}, false, err
+	}
+	return task, true, nil
 }
 
 type readTx struct {

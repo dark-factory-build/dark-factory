@@ -347,6 +347,9 @@ func validateTaskRunTopology(ctx context.Context, connection *sql.Conn, task Tas
 		return invalid
 	}
 	if !found {
+		if task.Status == TaskQueued && task.WorkRevision.Int64() == 1 {
+			return nil
+		}
 		return fmt.Errorf("%w: task has no run history", ErrCorruptState)
 	}
 	delta := task.WorkRevision.Int64() - latest.AdmittedTaskWorkRevision.Int64()
@@ -551,13 +554,36 @@ func validateTasks(ctx context.Context, connection *sql.Conn) error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	var tasks []Task
+	var invalid error
 	for rows.Next() {
-		if _, _, err := scanTask(rows); err != nil {
+		task, found, err := scanTask(rows)
+		if err != nil || !found {
+			if err == nil {
+				err = ErrCorruptState
+			}
+			invalid = err
+			break
+		}
+		tasks = append(tasks, task)
+	}
+	rowsErr := rows.Err()
+	closeErr := rows.Close()
+	if rowsErr != nil {
+		return rowsErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if invalid != nil {
+		return invalid
+	}
+	for _, task := range tasks {
+		if err := validateTaskRunTopology(ctx, connection, task); err != nil {
 			return err
 		}
 	}
-	return rows.Err()
+	return nil
 }
 
 func validateChanges(ctx context.Context, connection *sql.Conn) error {
