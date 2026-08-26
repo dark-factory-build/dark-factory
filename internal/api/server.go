@@ -310,7 +310,7 @@ const (
 )
 
 // Connection owns one accepted socket and permits exactly one Receive and one
-// Respond. It creates no goroutine.
+// Respond. Receive owns and joins its cancellation watcher before returning.
 type Connection struct {
 	connection        *net.UnixConn
 	operatorTokenPath string
@@ -334,6 +334,8 @@ func (connection *Connection) Receive(ctx context.Context) (Call, error) {
 	if err := connection.setDeadline(ctx); err != nil {
 		return Call{}, err
 	}
+	stopCancellation := watchCancellation(ctx, connection.connection)
+	defer stopCancellation()
 	payload, err := readFrame(connection.connection)
 	if err != nil {
 		return Call{}, classifyFrameError(ctx, err)
@@ -352,6 +354,9 @@ func (connection *Connection) Receive(ctx context.Context) (Call, error) {
 		}
 		return Call{}, classifyFrameError(ctx, err)
 	}
+	if err := ctx.Err(); err != nil {
+		return Call{}, err
+	}
 	if domain != operatorDomain && domain != attemptDomain {
 		return Call{}, ErrProtocol
 	}
@@ -368,6 +373,9 @@ func (connection *Connection) Receive(ctx context.Context) (Call, error) {
 		}
 	}
 	call, code := decodeCall(domain, bearer, payload[requestPrelude:])
+	if err := ctx.Err(); err != nil {
+		return Call{}, err
+	}
 	if code != "" {
 		return Call{}, connection.reject(code)
 	}

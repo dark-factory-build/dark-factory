@@ -502,6 +502,97 @@ func TestServerFramingDeadlinePeerAndResponseBounds(t *testing.T) {
 	})
 }
 
+func TestServerReceiveCancellationCutsJoinWatcher(t *testing.T) {
+	bearer := testCredential('K')
+	var partialPayloadHeader [4]byte
+	binary.BigEndian.PutUint32(partialPayloadHeader[:], 128)
+	cuts := []struct {
+		name  string
+		write []byte
+	}{
+		{name: "partial header", write: []byte{0, 0}},
+		{name: "partial payload", write: append(partialPayloadHeader[:], 1, operatorDomain, 'x')},
+		{name: "missing request EOF", write: rawRequest(1, operatorDomain, bearer, []byte(`{"method":"health","params":{}}`))},
+	}
+	for _, cut := range cuts {
+		t.Run(cut.name, func(t *testing.T) {
+			baselineGoroutines := runtime.NumGoroutine()
+			baselineFDs := countTestFDs(t)
+			for range 20 {
+				listener, socketPath := newAPITestListener(t, bearer)
+				ctx, cancel := context.WithCancel(context.Background())
+				accepted := make(chan struct{})
+				done := make(chan serverReceiveResult, 1)
+				go func() {
+					connection, err := listener.Accept()
+					if err != nil {
+						done <- serverReceiveResult{err: err}
+						return
+					}
+					close(accepted)
+					call, receiveErr := connection.Receive(ctx)
+					firstClose := connection.Close()
+					secondClose := connection.Close()
+					if firstClose != nil {
+						receiveErr = firstClose
+					}
+					if secondClose != nil {
+						receiveErr = secondClose
+					}
+					done <- serverReceiveResult{call: call, err: receiveErr}
+				}()
+				client, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: socketPath, Net: "unix"})
+				if err != nil {
+					cancel()
+					t.Fatal(err)
+				}
+				<-accepted
+				if _, err := client.Write(cut.write); err != nil {
+					cancel()
+					client.Close()
+					t.Fatal(err)
+				}
+				time.Sleep(5 * time.Millisecond)
+				started := time.Now()
+				cancel()
+				select {
+				case result := <-done:
+					if !errors.Is(result.err, context.Canceled) || result.call.Kind() != 0 {
+						t.Fatalf("cancelled receive dispatched: %+v, %v", result.call, result.err)
+					}
+				case <-time.After(500 * time.Millisecond):
+					t.Fatal("cancelled receive retained its connection")
+				}
+				if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+					t.Fatalf("cancelled receive took %v", elapsed)
+				}
+				if err := client.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+					t.Fatal(err)
+				}
+				if count, err := client.Read(make([]byte, 1)); count != 0 || err == nil {
+					t.Fatalf("server connection remained open: count=%d error=%v", count, err)
+				}
+				if err := client.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if err := listener.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			deadline := time.Now().Add(500 * time.Millisecond)
+			for runtime.NumGoroutine() != baselineGoroutines && time.Now().Before(deadline) {
+				time.Sleep(5 * time.Millisecond)
+			}
+			if after := runtime.NumGoroutine(); after != baselineGoroutines {
+				t.Fatalf("cancelled receives changed goroutine census: before=%d after=%d", baselineGoroutines, after)
+			}
+			if after := countTestFDs(t); after != baselineFDs {
+				t.Fatalf("cancelled receives changed FD census: before=%d after=%d", baselineFDs, after)
+			}
+		})
+	}
+}
+
 func TestServerRechecksOperatorTokenAndKeepsPublicValuesPrivate(t *testing.T) {
 	bearer := testCredential('S')
 	listener, socketPath := newAPITestListener(t, bearer)
