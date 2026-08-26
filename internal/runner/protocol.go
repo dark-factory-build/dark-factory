@@ -46,9 +46,75 @@ type attemptFrame struct {
 	FileIdentity   *FileIdentity `json:"file_identity,omitempty"`
 	Digest         string        `json:"digest,omitempty"`
 	StoreCommitted bool          `json:"store_committed,omitempty"`
+	Correlation    uint64        `json:"correlation,omitempty"`
+	Generation     uint64        `json:"generation,omitempty"`
+	Sequence       uint64        `json:"sequence,omitempty"`
+	Start          uint64        `json:"start,omitempty"`
+	End            uint64        `json:"end,omitempty"`
+	Floor          uint64        `json:"floor,omitempty"`
+	Head           uint64        `json:"head,omitempty"`
+	Count          uint32        `json:"count,omitempty"`
+	Rows           uint16        `json:"rows,omitempty"`
+	Cols           uint16        `json:"cols,omitempty"`
+	Credit         uint32        `json:"credit,omitempty"`
+	Status         string        `json:"status,omitempty"`
+}
+
+func terminalCommandFrame(command TerminalCommand) attemptFrame {
+	return attemptFrame{
+		Version: commandVersion, Kind: string(command.Kind), Correlation: command.Correlation,
+		Generation: command.Generation, Sequence: command.Sequence, Credit: command.Credit,
+		Rows: command.Rows, Cols: command.Cols, Payload: append([]byte(nil), command.Payload...),
+	}
+}
+
+func terminalCommandFromFrame(frame attemptFrame) (TerminalCommand, error) {
+	command := TerminalCommand{
+		Kind: TerminalCommandKind(frame.Kind), Correlation: frame.Correlation,
+		Generation: frame.Generation, Sequence: frame.Sequence, Credit: frame.Credit,
+		Rows: frame.Rows, Cols: frame.Cols, Payload: append([]byte(nil), frame.Payload...),
+	}
+	if err := command.validate(); err != nil {
+		return TerminalCommand{}, err
+	}
+	return command, nil
+}
+
+func terminalEventFromFrame(frame attemptFrame) (TerminalFrame, error) {
+	event := TerminalFrame{
+		Kind: TerminalEventKind(frame.Kind), Correlation: frame.Correlation,
+		Generation: frame.Generation, Sequence: frame.Sequence,
+		Start: frame.Start, End: frame.End, Floor: frame.Floor, Head: frame.Head,
+		Count: frame.Count, Rows: frame.Rows, Cols: frame.Cols,
+		Status: TerminalResultStatus(frame.Status), Payload: append([]byte(nil), frame.Payload...),
+	}
+	if err := event.validate(); err != nil {
+		return TerminalFrame{}, err
+	}
+	return event, nil
+}
+
+func terminalEventFrame(event TerminalFrame) attemptFrame {
+	return attemptFrame{
+		Version: commandVersion, Kind: string(event.Kind), Correlation: event.Correlation,
+		Generation: event.Generation, Sequence: event.Sequence, Start: event.Start,
+		End: event.End, Floor: event.Floor, Head: event.Head, Count: event.Count,
+		Rows: event.Rows, Cols: event.Cols, Status: string(event.Status),
+		Payload: append([]byte(nil), event.Payload...),
+	}
+}
+
+func noTerminalFields(frame attemptFrame) bool {
+	return frame.Correlation == 0 && frame.Generation == 0 && frame.Sequence == 0 &&
+		frame.Start == 0 && frame.End == 0 && frame.Floor == 0 && frame.Head == 0 &&
+		frame.Count == 0 && frame.Rows == 0 && frame.Cols == 0 && frame.Credit == 0 &&
+		frame.Status == ""
 }
 
 func writeFrame(w io.Writer, value any, limit int) error {
+	if w == nil {
+		return ErrIdentity
+	}
 	body, err := json.Marshal(value)
 	if err != nil {
 		return err
@@ -58,11 +124,38 @@ func writeFrame(w io.Writer, value any, limit int) error {
 	}
 	var header [4]byte
 	binary.BigEndian.PutUint32(header[:], uint32(len(body)))
-	if _, err := w.Write(header[:]); err != nil {
-		return err
+	if err := writeFully(w, header[:]); err != nil {
+		return fmt.Errorf("runner: frame header: %w", err)
 	}
-	_, err = w.Write(body)
-	return err
+	if err := writeFully(w, body); err != nil {
+		return fmt.Errorf("runner: frame body: %w", err)
+	}
+	return nil
+}
+
+// writeFully is deliberately small and synchronous. Framing a message is an
+// all-or-nothing operation from the caller's point of view: returning after a
+// short write would leave the peer with a valid-looking prefix and make the
+// next lifecycle transition ambiguous. A writer that makes no progress is
+// treated as failed rather than spun on forever; socket callers install their
+// own write deadline before entering this helper.
+func writeFully(w io.Writer, p []byte) error {
+	for len(p) != 0 {
+		n, err := w.Write(p)
+		if n < 0 || n > len(p) {
+			return fmt.Errorf("runner: invalid write count %d", n)
+		}
+		if n != 0 {
+			p = p[n:]
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrNoProgress
+		}
+	}
+	return nil
 }
 
 func readFrame(r io.Reader, dst any, limit int) error {

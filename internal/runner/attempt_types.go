@@ -1,6 +1,9 @@
 package runner
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // AttemptStage is the closed sequence of daemon-authorized releases. Selection
 // is the inner gate activation; every later release crosses the already-running
@@ -27,10 +30,163 @@ type AttemptSpec struct {
 type AttemptEventKind string
 
 const (
-	AttemptInnerReady AttemptEventKind = "inner-ready"
-	AttemptCheckpoint AttemptEventKind = "checkpoint"
-	AttemptTerminal   AttemptEventKind = "terminal"
+	AttemptInnerReady    AttemptEventKind = "inner-ready"
+	AttemptCheckpoint    AttemptEventKind = "checkpoint"
+	AttemptTerminal      AttemptEventKind = "terminal"
+	AttemptTerminalFrame AttemptEventKind = "terminal-frame"
 )
+
+// TerminalCommandKind and TerminalEventKind are intentionally closed unions.
+// The private runner socket is a capability, not a general-purpose RPC bus;
+// adding a wire operation requires adding its validation here first.
+type TerminalCommandKind string
+
+const (
+	TerminalGenerationInstall TerminalCommandKind = "terminal-generation-install"
+	TerminalGenerationRevoke  TerminalCommandKind = "terminal-generation-revoke"
+	TerminalAttach            TerminalCommandKind = "terminal-attach"
+	TerminalCredit            TerminalCommandKind = "terminal-credit"
+	TerminalInput             TerminalCommandKind = "terminal-input"
+	TerminalResize            TerminalCommandKind = "terminal-resize"
+)
+
+type TerminalEventKind string
+
+const (
+	TerminalGenerationResult TerminalEventKind = "terminal-generation-result"
+	TerminalInputResult      TerminalEventKind = "terminal-input-result"
+	TerminalResizeResult     TerminalEventKind = "terminal-resize-result"
+	TerminalOutput           TerminalEventKind = "terminal-output"
+	TerminalReset            TerminalEventKind = "terminal-reset"
+	TerminalPTYEOF           TerminalEventKind = "terminal-pty-eof"
+)
+
+type TerminalResultStatus string
+
+const (
+	TerminalResultOK        TerminalResultStatus = "ok"
+	TerminalResultRejected  TerminalResultStatus = "rejected"
+	TerminalResultPartial   TerminalResultStatus = "partial"
+	TerminalResultUncertain TerminalResultStatus = "uncertain"
+)
+
+const (
+	// Terminal frames are JSON control messages on the private socket. Payload
+	// bytes are base64 encoded by encoding/json, so keep the decoded byte bound
+	// below the framing bound as well.
+	// maxFrameBytes is 16 KiB and JSON base64 expands payloads; 8 KiB keeps a
+	// valid terminal frame below that existing private framing limit.
+	maxTerminalFramePayload = 8 << 10
+	maxTerminalCredit       = 1 << 20
+	maxTerminalRows         = 1000
+	maxTerminalCols         = 1000
+	maxTerminalCorrelation  = ^uint64(0) >> 1
+)
+
+// TerminalCommand is the only supported daemon-to-runner terminal command.
+// Zero values are invalid; SendTerminalCommand performs the closed-union
+// validation before writing anything to the capability socket.
+type TerminalCommand struct {
+	Kind        TerminalCommandKind
+	Correlation uint64
+	Generation  uint64
+	Sequence    uint64
+	Credit      uint32
+	Rows        uint16
+	Cols        uint16
+	Payload     []byte
+}
+
+// TerminalFrame is a runner-to-daemon terminal event returned by AttemptEvent.
+// The same bounded fields are used for every event kind, with strict
+// per-kind validation preventing accidental cross-operation interpretation.
+type TerminalFrame struct {
+	Kind        TerminalEventKind
+	Correlation uint64
+	Generation  uint64
+	Sequence    uint64
+	Start       uint64
+	End         uint64
+	Floor       uint64
+	Head        uint64
+	Count       uint32
+	Rows        uint16
+	Cols        uint16
+	Status      TerminalResultStatus
+	Payload     []byte
+}
+
+func (c TerminalCommand) validate() error {
+	if c.Correlation == 0 || c.Correlation > maxTerminalCorrelation {
+		return fmt.Errorf("runner: terminal command correlation is zero")
+	}
+	switch c.Kind {
+	case TerminalGenerationInstall, TerminalGenerationRevoke:
+		if c.Generation == 0 || c.Sequence != 0 || c.Credit != 0 || c.Rows != 0 || c.Cols != 0 || len(c.Payload) != 0 {
+			return ErrState
+		}
+	case TerminalAttach:
+		if c.Generation != 0 || c.Sequence == ^uint64(0) || c.Credit != 0 || c.Rows != 0 || c.Cols != 0 || len(c.Payload) != 0 {
+			return ErrState
+		}
+	case TerminalCredit:
+		if c.Generation != 0 || c.Sequence != 0 || c.Credit == 0 || c.Credit > maxTerminalCredit || c.Rows != 0 || c.Cols != 0 || len(c.Payload) != 0 {
+			return ErrState
+		}
+	case TerminalInput:
+		if c.Generation == 0 || c.Sequence == 0 || len(c.Payload) == 0 || len(c.Payload) > maxTerminalFramePayload || c.Credit != 0 || c.Rows != 0 || c.Cols != 0 {
+			return ErrState
+		}
+	case TerminalResize:
+		if c.Generation == 0 || c.Rows == 0 || c.Rows > maxTerminalRows || c.Cols == 0 || c.Cols > maxTerminalCols || c.Sequence != 0 || c.Credit != 0 || len(c.Payload) != 0 {
+			return ErrState
+		}
+	default:
+		return ErrState
+	}
+	return nil
+}
+
+func (f TerminalFrame) validate() error {
+	switch f.Kind {
+	case TerminalGenerationResult:
+		if f.Correlation == 0 || f.Correlation > maxTerminalCorrelation || f.Generation == 0 || !validTerminalResult(f.Status) || f.Sequence != 0 || f.Start != 0 || f.End != 0 || f.Floor != 0 || f.Head != 0 || f.Count != 0 || f.Rows != 0 || f.Cols != 0 || len(f.Payload) != 0 {
+			return ErrState
+		}
+	case TerminalInputResult:
+		if f.Correlation == 0 || f.Correlation > maxTerminalCorrelation || f.Generation == 0 || f.Sequence == 0 || !validTerminalResult(f.Status) || f.Start != 0 || f.End != 0 || f.Floor != 0 || f.Head != 0 || f.Rows != 0 || f.Cols != 0 || f.Count > maxTerminalFramePayload || len(f.Payload) != 0 {
+			return ErrState
+		}
+	case TerminalResizeResult:
+		if f.Correlation == 0 || f.Correlation > maxTerminalCorrelation || f.Generation == 0 || !validTerminalResult(f.Status) || f.Sequence != 0 || f.Start != 0 || f.End != 0 || f.Floor != 0 || f.Head != 0 || f.Count != 0 || f.Rows == 0 || f.Rows > maxTerminalRows || f.Cols == 0 || f.Cols > maxTerminalCols || len(f.Payload) != 0 {
+			return ErrState
+		}
+	case TerminalOutput:
+		if f.Correlation != 0 || f.Generation == 0 || f.Start >= f.End || f.End-f.Start != uint64(len(f.Payload)) || len(f.Payload) == 0 || len(f.Payload) > maxTerminalFramePayload || f.Sequence != 0 || f.Floor != 0 || f.Head != 0 || f.Count != 0 || f.Rows != 0 || f.Cols != 0 || f.Status != "" {
+			return ErrState
+		}
+	case TerminalReset:
+		if f.Correlation == 0 || f.Correlation > maxTerminalCorrelation || f.Generation == 0 || f.Floor > f.Head || f.Start != 0 || f.End != 0 || f.Sequence != 0 || f.Count != 0 || f.Rows != 0 || f.Cols != 0 || f.Status != "" || len(f.Payload) != 0 {
+			return ErrState
+		}
+	case TerminalPTYEOF:
+		if f.Correlation != 0 || f.Generation == 0 || f.Sequence != 0 || f.Start != 0 || f.End != 0 || f.Floor != 0 || f.Head != 0 || f.Count != 0 || f.Rows != 0 || f.Cols != 0 || f.Status != "" || len(f.Payload) != 0 {
+			return ErrState
+		}
+	default:
+		return ErrState
+	}
+	return nil
+}
+
+func validTerminalResult(value TerminalResultStatus) bool {
+	switch value {
+	case TerminalResultOK, TerminalResultRejected, TerminalResultPartial, TerminalResultUncertain:
+		return true
+	default:
+		return false
+	}
+}
 
 type AttemptEvent struct {
 	Kind     AttemptEventKind
@@ -38,6 +194,9 @@ type AttemptEvent struct {
 	Identity Identity
 	Payload  []byte
 	Terminal *TerminalRecord
+	Frame    *TerminalFrame
 }
 
 const attemptControlTimeout = 4 * time.Second
+
+const commandVersion = 1

@@ -116,7 +116,7 @@ func (c *AttemptController) Next(timeout time.Duration) (AttemptEvent, error) {
 	}
 	switch c.state {
 	case controllerConfigured:
-		if frame.Kind != "inner-ready" || !frame.Identity.Valid() || frame.Identity.PID != frame.Identity.PGID || frame.Stage != "" || len(frame.Payload) != 0 || frame.Terminal != nil || frame.FileIdentity != nil || frame.Digest != "" || frame.StoreCommitted {
+		if frame.Kind != "inner-ready" || !frame.Identity.Valid() || frame.Identity.PID != frame.Identity.PGID || frame.Stage != "" || len(frame.Payload) != 0 || frame.Terminal != nil || frame.FileIdentity != nil || frame.Digest != "" || frame.StoreCommitted || !noTerminalFields(frame) {
 			return AttemptEvent{}, ErrState
 		}
 		c.state = controllerInnerReady
@@ -129,10 +129,20 @@ func (c *AttemptController) Next(timeout time.Duration) (AttemptEvent, error) {
 	case controllerPopulationReleased:
 		return c.acceptCheckpoint(frame, StagePopulation, controllerPopulationReported)
 	case controllerProviderReleased:
-		if frame.Kind == "current-exec-check" {
+		if isTerminalEventKind(frame.Kind) {
+			if frame.Version != commandVersion || frame.Stage != "" || frame.Identity != (Identity{}) || frame.Terminal != nil || frame.FileIdentity != nil || frame.Digest != "" || frame.StoreCommitted {
+				return AttemptEvent{}, ErrState
+			}
+			event, err := terminalEventFromFrame(frame)
+			if err != nil {
+				return AttemptEvent{}, err
+			}
+			return AttemptEvent{Kind: AttemptTerminalFrame, Frame: &event}, nil
+		}
+		if frame.Kind == "current-exec-check" && noTerminalFields(frame) && frame.Stage == "" && frame.Identity == (Identity{}) && len(frame.Payload) == 0 && frame.Terminal == nil && frame.FileIdentity == nil && frame.Digest == "" && !frame.StoreCommitted {
 			return AttemptEvent{Kind: AttemptCheckpoint, Stage: StageProvider}, nil
 		}
-		if frame.Kind != "terminal" || frame.Stage != "" || frame.Identity != (Identity{}) || len(frame.Payload) != 0 || frame.Terminal == nil || frame.FileIdentity == nil || len(frame.Digest) != 64 || frame.StoreCommitted {
+		if frame.Kind != "terminal" || frame.Stage != "" || frame.Identity != (Identity{}) || len(frame.Payload) != 0 || frame.Terminal == nil || frame.FileIdentity == nil || len(frame.Digest) != 64 || frame.StoreCommitted || !noTerminalFields(frame) {
 			return AttemptEvent{}, ErrState
 		}
 		record := &TerminalRecord{Terminal: *frame.Terminal, Identity: *frame.FileIdentity, Digest: frame.Digest}
@@ -144,6 +154,15 @@ func (c *AttemptController) Next(timeout time.Duration) (AttemptEvent, error) {
 		return AttemptEvent{Kind: AttemptTerminal, Terminal: record, Identity: record.Terminal.Process}, nil
 	default:
 		return AttemptEvent{}, ErrState
+	}
+}
+
+func isTerminalEventKind(kind string) bool {
+	switch TerminalEventKind(kind) {
+	case TerminalGenerationResult, TerminalInputResult, TerminalResizeResult, TerminalOutput, TerminalReset, TerminalPTYEOF:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -182,7 +201,7 @@ func (c *AttemptController) NextReady(timeout time.Duration) (bool, error) {
 }
 
 func (c *AttemptController) acceptCheckpoint(frame attemptFrame, stage AttemptStage, next attemptControllerState) (AttemptEvent, error) {
-	if frame.Kind != "checkpoint" || frame.Stage != stage || frame.Identity != (Identity{}) || len(frame.Payload) > maxAttemptReportBytes || frame.Terminal != nil || frame.FileIdentity != nil || frame.Digest != "" || frame.StoreCommitted {
+	if frame.Kind != "checkpoint" || frame.Stage != stage || frame.Identity != (Identity{}) || len(frame.Payload) > maxAttemptReportBytes || frame.Terminal != nil || frame.FileIdentity != nil || frame.Digest != "" || frame.StoreCommitted || !noTerminalFields(frame) {
 		return AttemptEvent{}, ErrState
 	}
 	c.state = next
@@ -215,6 +234,20 @@ func (c *AttemptController) Release(stage AttemptStage) error {
 	}
 	c.state = next
 	return nil
+}
+
+// SendTerminalCommand validates and writes one complete terminal command to
+// the already-running outer runner. The daemon supervisor owns the controller
+// call and serializes it with its other lifecycle operations; this method does
+// not add a concurrent RPC abstraction or a background writer.
+func (c *AttemptController) SendTerminalCommand(command TerminalCommand) error {
+	if c == nil || c.file == nil || c.state != controllerProviderReleased {
+		return ErrState
+	}
+	if err := command.validate(); err != nil {
+		return err
+	}
+	return writeControlFrame(c.file, terminalCommandFrame(command), maxFrameBytes)
 }
 
 func (c *AttemptController) Terminate() error {
@@ -430,7 +463,7 @@ func (w *WorkerControl) await(stage AttemptStage, before, after workerState) err
 	if err := readFrame(w.file, &frame, maxFrameBytes); err != nil {
 		return err
 	}
-	if frame.Version != 1 || frame.Kind != "release" || frame.Stage != stage || frame.Identity != (Identity{}) || len(frame.Payload) != 0 || frame.Terminal != nil || frame.FileIdentity != nil || frame.Digest != "" || frame.StoreCommitted {
+	if frame.Version != 1 || frame.Kind != "release" || frame.Stage != stage || frame.Identity != (Identity{}) || len(frame.Payload) != 0 || frame.Terminal != nil || frame.FileIdentity != nil || frame.Digest != "" || frame.StoreCommitted || !noTerminalFields(frame) {
 		return ErrState
 	}
 	w.state = after
@@ -904,11 +937,11 @@ func protocolError(want string, got attemptSource, err error) error {
 }
 
 func validReleaseFrame(frame attemptFrame, stage AttemptStage) bool {
-	return frame.Version == 1 && frame.Kind == "release" && frame.Stage == stage && frame.Identity == (Identity{}) && len(frame.Payload) == 0 && frame.Terminal == nil && frame.FileIdentity == nil && frame.Digest == "" && !frame.StoreCommitted
+	return frame.Version == 1 && frame.Kind == "release" && frame.Stage == stage && frame.Identity == (Identity{}) && len(frame.Payload) == 0 && frame.Terminal == nil && frame.FileIdentity == nil && frame.Digest == "" && !frame.StoreCommitted && noTerminalFields(frame)
 }
 
 func validCheckpointFrame(frame attemptFrame, stage AttemptStage) bool {
-	return frame.Version == 1 && frame.Kind == "checkpoint" && frame.Stage == stage && frame.Identity == (Identity{}) && len(frame.Payload) <= maxAttemptReportBytes && frame.Terminal == nil && frame.FileIdentity == nil && frame.Digest == "" && !frame.StoreCommitted
+	return frame.Version == 1 && frame.Kind == "checkpoint" && frame.Stage == stage && frame.Identity == (Identity{}) && len(frame.Payload) <= maxAttemptReportBytes && frame.Terminal == nil && frame.FileIdentity == nil && frame.Digest == "" && !frame.StoreCommitted && noTerminalFields(frame)
 }
 
 func finishAttemptFailure(child *OwnedChild, dir *os.File, cfg attemptConfig, reads *attemptReadSet, cause error) error {
@@ -932,7 +965,7 @@ func finishReleasedProvider(child *OwnedChild, daemon, worker *os.File, reads *a
 			if err != nil {
 				return daemonOpen, err
 			}
-			if frame.Version != 1 || frame.Kind != "terminate" {
+			if frame.Version != 1 || frame.Kind != "terminate" || frame.Stage != "" || frame.Identity != (Identity{}) || len(frame.Payload) != 0 || frame.Terminal != nil || frame.FileIdentity != nil || frame.Digest != "" || frame.StoreCommitted || !noTerminalFields(frame) {
 				return daemonOpen, ErrState
 			}
 			return daemonOpen, nil
@@ -946,14 +979,14 @@ func finishReleasedProvider(child *OwnedChild, daemon, worker *os.File, reads *a
 			if err != nil {
 				return daemonOpen, err
 			}
-			if frame.Version != 1 || frame.Kind != "current-exec-check" || !daemonOpen {
+			if frame.Version != 1 || frame.Kind != "current-exec-check" || !noTerminalFields(frame) || frame.Stage != "" || frame.Identity != (Identity{}) || len(frame.Payload) != 0 || frame.Terminal != nil || frame.FileIdentity != nil || frame.Digest != "" || frame.StoreCommitted || !daemonOpen {
 				return daemonOpen, ErrState
 			}
 			if err := writeControlFrame(daemon, frame, maxFrameBytes); err != nil {
 				return false, err
 			}
 			ack, ackSource, err := nextAttemptFrame(child, daemon, worker, true, true, 0)
-			if err != nil || ackSource != sourceDaemon || ack.Version != 1 || ack.Kind != "current-exec-check-ack" {
+			if err != nil || ackSource != sourceDaemon || ack.Version != 1 || ack.Kind != "current-exec-check-ack" || ack.Stage != "" || ack.Identity != (Identity{}) || len(ack.Payload) != 0 || ack.Terminal != nil || ack.FileIdentity != nil || ack.Digest != "" || ack.StoreCommitted || !noTerminalFields(ack) {
 				return false, protocolError("current exec check ack", ackSource, err)
 			}
 			if err := writeControlFrame(worker, ack, maxFrameBytes); err != nil {
