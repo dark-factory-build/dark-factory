@@ -1415,3 +1415,84 @@ Change commitment/materialization proof on integrated head `42056bd`:
   commit, Prepare, identity-bind commit, population/publish and
   available-before-provider-exec. Cooperative same-UID mutation, power loss,
   Git selection and stable verification remain separate explicit proofs.
+
+Sealed Git selection/blob proof on integrated head `dcceb83`:
+
+- Added one concrete Darwin Git boundary. `SelectGit` resolves one exact commit,
+  freezes the repository and trusted Git executable identities, computes the
+  complete bounded manifest without reading materialized blob bodies, and
+  returns immutable selection authority. `OpenGitBlobs` later reads only the
+  selected OIDs in order and verifies type, declared size, Git blob hash,
+  delimiter, exact EOF and child exit. No Git library, repository abstraction,
+  lazy fetch, worktree/archive path or provider-visible `.git` authority was
+  added.
+- Public execution accepts only a root-owned, mode-safe, native Git below the
+  fixed Command Line Tools or Xcode Developer path grammar. Every path
+  component is opened no-follow; the executable metadata, architecture and
+  SHA-256 are rechecked around each phase. `/usr/bin/git`, PATH/xcrun lookup at
+  execution, scripts, symlinks, renamed user-owned Mach-O files and forged
+  selections fail before effect.
+- The repository root, `.git`, config and complete supported object-store
+  grammar are owner/device/mode/link/type checked and structurally committed.
+  The bounded no-follow scanner covers loose objects, packs, indexes, MIDX,
+  bitmaps and commit graphs, rejects alternates/promisor/unknown/deep/special
+  layouts, and rechecks between every metadata phase and blob read. Git child
+  pipes and the exact process group remain synchronously owned through one
+  Wait; cancellation and leader-first descendants are cleaned before return.
+- The hard-cutover config contract deliberately supports one bounded ASCII
+  `.git/config` only. BOM, C0/DEL/non-ASCII controls, includes/includeIf,
+  `extensions.worktreeConfig`, and any `config.worktree` file, directory,
+  symlink or FIFO are rejected before a Git child starts. This deletes the
+  need to emulate Git's expanding config scopes and their duplicated authority.
+- Independent attack review repeatedly BLOCKED apparently green heads and
+  demonstrated eight initial process/config/blob/identity gaps, nested object
+  indirection and Apple shim acceptance, writable repository authority and a
+  renamed native witness, `config.worktree`/BOM external includes, and finally
+  the omitted DEL byte. Each was repaired with causal public effects or
+  zero-start witnesses. The reviewer returned ALLOW on exact author head
+  `c3f7118`; the unchanged stack integrated through `dcceb83`.
+- Author exact-head gates included Change count-three (`39.310s`), race
+  (`28.076s`), CGO-free (`13.094s`), full Go, vet/module/format/diff,
+  cross-build and clean process/temp evidence across the substantive repairs.
+  The final one-byte DEL repair reran its focused matrix count-three
+  (`0.550s`). The orchestrator's first integrated Change run failed because
+  the default macOS `/var` temporary locator resolves through `/private/var`
+  and the canonical-path fixtures correctly refused that alias. The explicit
+  canonical isolated `TMPDIR=/private/tmp/df-root-change-tmp` rerun passed
+  `internal/change` in `13.221s`.
+- Remaining explicit costs/boundaries are complete object-store rechecks before
+  each blob, deliberate refusal of unknown future Git layouts, root trust for
+  Developer tools, and the documented cooperative same-UID mutation seam.
+  Realistic large-repository cost must be measured during the scheduled
+  elegance/performance audit without deleting the causal checkpoints.
+
+Selected-manifest Store/recovery proof on integrated head `dd72fbb`:
+
+- `RecordChangeSelection` now commits the exact base-bound manifest digest,
+  entry count and total blob bytes with commit/repository authority before any
+  materialized blob read. Prepared and available phases require those facts.
+  `MarkChangeAvailable` compares all three independently observed plain-tree
+  facts plus exact prepared source identity, but persists only source identity
+  and time; reads derive availability facts from the one selected copy. No
+  duplicate durable digest/count/bytes or compatibility columns remain.
+- Crash/reopen and replay tests prove selected facts survive, exact replay is
+  revision/invalidation stable, and every digest/count/bytes mismatch has zero
+  durable footprint. The fresh schema explicitly requires both available
+  source identity components rather than relying on a SQLite `CHECK` whose
+  NULL result would otherwise pass.
+- Independent review BLOCKED the first repair after proving that ncruces scans
+  a present `zeroblob(0)` into a nil byte slice. An already-open Store therefore
+  mistook a corrupt selected digest for SQL NULL and allowed a later validated
+  factory write. One concrete `nullableBlob` scanner now preserves NULL versus
+  present zero-length values and rejects wrong driver types for every nullable
+  durable BLOB: Change selected commit/digest, run Change ID and resource birth
+  digest. Direct reads, reopen and the complete validated-write entry all fail
+  closed without an invalidation or state footprint. The exact repaired head
+  `c75f56e` received independent ALLOW.
+- Mutations restoring nil-slice presence logic were killed by all four field
+  attacks; removing selected/available equality or source non-NULL guards was
+  killed by the intended restart/schema tests. Author gates passed kernel
+  count-three (`26.114s`), race (`238.065s`), CGO-free (`8.983s`), vet/module/
+  format/diff and Darwin/Linux AMD64 cross-builds. The unchanged integrated
+  root passed `internal/kernel` in `8.964s` with the pinned Go toolchain and
+  canonical isolated temporary root.
