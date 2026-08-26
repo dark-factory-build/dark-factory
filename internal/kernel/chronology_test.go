@@ -197,7 +197,20 @@ func TestFinalizeRunRejectsBeforeLateWorkerChangeCheckpoint(t *testing.T) {
 	failure, _ := NewFailureProposal(FailureInternal, "cleanup")
 	store, run, _ := admittedWorkerRun(t)
 	defer store.Close()
+	runner := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
+	runner, err := store.ActivateResource(context.Background(), run.ID, runner.ID, runner.Revision, processIdentity(t, 303), mustTime(t, 19))
+	if err != nil {
+		t.Fatal(err)
+	}
 	finalizing, err := store.FailRun(context.Background(), run.ID, run.Revision, failure, mustTime(t, 20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runnerExit, err := NewProcessExitCode(1, 0, mustTime(t, 21))
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalizing, err = store.ObserveRunnerExit(context.Background(), run.ID, finalizing.Revision, runner.Identity, runnerExit, mustTime(t, 21))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,6 +244,7 @@ func TestFinalizeRunRejectsBeforeLateWorkerChangeCheckpoint(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	finalizing = closeTerminalSessionAtCurrent(t, store, run.ID, 32)
 	if _, err := store.FinalizeRun(context.Background(), run.ID, finalizing.Revision, mustTime(t, 33)); err != nil {
 		t.Fatalf("late Change boundary finalization = %v", err)
 	}
@@ -418,11 +432,25 @@ func TestRetryHistoryAllowsMultipleNonSuccessRuns(t *testing.T) {
 	if err != nil || !second.Admitted() {
 		t.Fatalf("first retry admission = %+v, %v", second, err)
 	}
+	runner := resourceOfKind(t, resourcesForRunTest(t, store, second.Run.ID), ResourceRunnerProcess)
+	runner, err = store.ActivateResource(context.Background(), second.Run.ID, runner.ID, runner.Revision, processIdentity(t, 302), mustTime(t, 39))
+	if err != nil {
+		t.Fatal(err)
+	}
 	finalizing, err := store.CancelRun(context.Background(), second.Run.ID, second.Run.Revision, "retry again", mustTime(t, 40))
 	if err != nil {
 		t.Fatal(err)
 	}
-	releaseAllRunResources(t, store, second.Run.ID, 41)
+	runnerExit, err := NewProcessExitCode(1, 0, mustTime(t, 41))
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalizing, err = store.ObserveRunnerExit(context.Background(), second.Run.ID, finalizing.Revision, runner.Identity, runnerExit, mustTime(t, 41))
+	if err != nil {
+		t.Fatal(err)
+	}
+	releaseAllRunResources(t, store, second.Run.ID, 42)
+	finalizing = closeTerminalSessionAtCurrent(t, store, second.Run.ID, 45)
 	secondTerminal, err := store.FinalizeRun(context.Background(), second.Run.ID, finalizing.Revision, mustTime(t, 45))
 	if err != nil {
 		t.Fatal(err)
@@ -604,7 +632,20 @@ func TestTerminalChangeReplayRemainsIdempotentWithoutOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	failure, _ := NewFailureProposal(FailureInternal, "cleanup")
+	runner := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
+	runner, err = store.ActivateResource(context.Background(), run.ID, runner.ID, runner.Revision, processIdentity(t, 304), mustTime(t, 19))
+	if err != nil {
+		t.Fatal(err)
+	}
 	finalizing, err := store.FailRun(context.Background(), run.ID, run.Revision, failure, mustTime(t, 20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runnerExit, err := NewProcessExitCode(1, 0, mustTime(t, 21))
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalizing, err = store.ObserveRunnerExit(context.Background(), run.ID, finalizing.Revision, runner.Identity, runnerExit, mustTime(t, 21))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -613,6 +654,7 @@ func TestTerminalChangeReplayRemainsIdempotentWithoutOwner(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	finalizing = closeTerminalSessionAtCurrent(t, store, run.ID, 33)
 	if _, err := store.FinalizeRun(context.Background(), run.ID, finalizing.Revision, mustTime(t, 33)); err != nil {
 		t.Fatal(err)
 	}
@@ -839,6 +881,12 @@ func TestTerminalRunRejectsSameRevisionLateChangeCheckpoint(t *testing.T) {
 func terminalPreRunningAvailableWorker(t *testing.T) (*Store, Run) {
 	t.Helper()
 	store, run, _ := admittedWorkerRun(t)
+	runner := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
+	runner, err := store.ActivateResource(context.Background(), run.ID, runner.ID, runner.Revision, processIdentity(t, 305), mustTime(t, 10))
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
 	selection := testChangeSelection(t)
 	selected, err := store.RecordChangeSelection(context.Background(), *run.ChangeID, mustRevision(t, 1), selection, mustTime(t, 11))
 	if err != nil {
@@ -862,12 +910,23 @@ func terminalPreRunningAvailableWorker(t *testing.T) (*Store, Run) {
 		store.Close()
 		t.Fatal(err)
 	}
+	runnerExit, err := NewProcessExitCode(1, 0, mustTime(t, 21))
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	finalizing, err = store.ObserveRunnerExit(context.Background(), run.ID, finalizing.Revision, runner.Identity, runnerExit, mustTime(t, 21))
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
 	for index, resource := range resourcesForRunTest(t, store, run.ID) {
 		if _, err := store.ReleaseResource(context.Background(), run.ID, resource.ID, resource.Revision, resource.Identity, mustTime(t, int64(30+index))); err != nil {
 			store.Close()
 			t.Fatal(err)
 		}
 	}
+	finalizing = closeTerminalSessionAtCurrent(t, store, run.ID, 33)
 	terminal, err := store.FinalizeRun(context.Background(), run.ID, finalizing.Revision, mustTime(t, 33))
 	if err != nil {
 		store.Close()
@@ -880,7 +939,24 @@ func terminalPreRunningWorker(t *testing.T) (*Store, Run, AdmissionKeys) {
 	t.Helper()
 	failure, _ := NewFailureProposal(FailureInternal, "cleanup")
 	store, run, keys := admittedWorkerRun(t)
+	runner := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
+	var err error
+	runner, err = store.ActivateResource(context.Background(), run.ID, runner.ID, runner.Revision, processIdentity(t, 301), mustTime(t, 19))
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
 	finalizing, err := store.FailRun(context.Background(), run.ID, run.Revision, failure, mustTime(t, 20))
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	runnerExit, err := NewProcessExitCode(1, 0, mustTime(t, 21))
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	finalizing, err = store.ObserveRunnerExit(context.Background(), run.ID, finalizing.Revision, runner.Identity, runnerExit, mustTime(t, 21))
 	if err != nil {
 		store.Close()
 		t.Fatal(err)
@@ -891,6 +967,7 @@ func terminalPreRunningWorker(t *testing.T) (*Store, Run, AdmissionKeys) {
 			t.Fatal(err)
 		}
 	}
+	finalizing = closeTerminalSessionAtCurrent(t, store, run.ID, 33)
 	terminal, err := store.FinalizeRun(context.Background(), run.ID, finalizing.Revision, mustTime(t, 33))
 	if err != nil {
 		store.Close()

@@ -127,7 +127,20 @@ func TestAdmissionRejectsOverlapWithDurableRuntimeAndRetainedChange(t *testing.T
 		t.Fatalf("first admission = %+v, %v", first, err)
 	}
 	failure, _ := NewFailureProposal(FailureSpawn, "startup failed")
+	runner := resourceOfKind(t, resourcesForRunTest(t, store, first.Run.ID), ResourceRunnerProcess)
+	runner, err = store.ActivateResource(context.Background(), first.Run.ID, runner.ID, runner.Revision, processIdentity(t, 302), mustTime(t, 10))
+	if err != nil {
+		t.Fatal(err)
+	}
 	finalizing, err := store.FailRun(context.Background(), first.Run.ID, first.Run.Revision, failure, mustTime(t, 11))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runnerExit, err := NewProcessExitCode(1, 0, mustTime(t, 12))
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalizing, err = store.ObserveRunnerExit(context.Background(), first.Run.ID, finalizing.Revision, runner.Identity, runnerExit, mustTime(t, 12))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,6 +149,7 @@ func TestAdmissionRejectsOverlapWithDurableRuntimeAndRetainedChange(t *testing.T
 			t.Fatal(err)
 		}
 	}
+	finalizing = closeTerminalSessionAtCurrent(t, store, first.Run.ID, 13)
 	if _, err := store.FinalizeRun(context.Background(), first.Run.ID, finalizing.Revision, mustTime(t, 13)); err != nil {
 		t.Fatal(err)
 	}

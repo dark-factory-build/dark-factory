@@ -302,6 +302,7 @@ func TestConcreteStoreCrashBeforeAndAfterFinalizationCommit(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			finalizing = closeTerminalSessionAtCurrent(t, store, run.ID, 54)
 			if err := store.Close(); err != nil {
 				t.Fatal(err)
 			}

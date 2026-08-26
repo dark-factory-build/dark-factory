@@ -189,6 +189,7 @@ func TestFinalizerRequiresEveryReleasedResourceAndExactTask(t *testing.T) {
 	if _, err := store.ReleaseResource(context.Background(), admitted.ID, last.ID, unresolved.Revision, unresolved.Identity, mustTime(t, 63)); err != nil {
 		t.Fatal(err)
 	}
+	finalizing = closeTerminalSessionAtCurrent(t, store, admitted.ID, 64)
 	before, _ := store.Factory(context.Background())
 	terminal, err := store.FinalizeRun(context.Background(), admitted.ID, finalizing.Revision, mustTime(t, 64))
 	if err != nil || terminal.Phase != RunTerminal || terminal.Terminal == nil || !terminal.Terminal.equal(proposal) {
@@ -281,6 +282,7 @@ func TestAttemptRequestedFailureHasOneTypedDurableCode(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	finalizing = closeTerminalSessionAtCurrent(t, store, running.ID, 60)
 	terminal, err := store.FinalizeRun(context.Background(), running.ID, finalizing.Revision, mustTime(t, 60))
 	if err != nil || terminal.Phase != RunTerminal || terminal.Terminal == nil || terminal.Terminal.Code() != FailureAttempt || terminal.Terminal.Detail() != "" {
 		t.Fatalf("terminal attempt failure = %+v, %v", terminal, err)
@@ -656,14 +658,28 @@ func TestTaskGuardAndPermanentDigestUniquenessRollbackTerminalOrAdmission(t *tes
 	t.Run("digest never reused", func(t *testing.T) {
 		store, run, keys := admittedOrchestratorRun(t)
 		defer store.Close()
+		runner := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
+		runner, err := store.ActivateResource(context.Background(), run.ID, runner.ID, runner.Revision, processIdentity(t, 180), mustTime(t, 19))
+		if err != nil {
+			t.Fatal(err)
+		}
 		failure, _ := NewFailureProposal(FailureSpawn, "no process")
 		finalizing, err := store.FailRun(context.Background(), run.ID, run.Revision, failure, mustTime(t, 20))
+		if err != nil {
+			t.Fatal(err)
+		}
+		runnerExit, err := NewProcessExitCode(1, 0, mustTime(t, 21))
+		if err != nil {
+			t.Fatal(err)
+		}
+		finalizing, err = store.ObserveRunnerExit(context.Background(), run.ID, finalizing.Revision, runner.Identity, runnerExit, mustTime(t, 21))
 		if err != nil {
 			t.Fatal(err)
 		}
 		for _, resource := range resourcesForRunTest(t, store, run.ID) {
 			_, _ = store.ReleaseResource(context.Background(), run.ID, resource.ID, resource.Revision, resource.Identity, mustTime(t, 30))
 		}
+		finalizing = closeTerminalSessionAtCurrent(t, store, run.ID, 35)
 		if _, err := store.FinalizeRun(context.Background(), run.ID, finalizing.Revision, mustTime(t, 40)); err != nil {
 			t.Fatal(err)
 		}
@@ -896,6 +912,21 @@ func finalizingReleasedRun(t *testing.T, role AgentRole, policy VerificationPoli
 			store.Close()
 			t.Fatal(err)
 		}
+	}
+	current, found, err := store.Run(context.Background(), running.ID)
+	if err != nil || !found {
+		store.Close()
+		t.Fatalf("read finalizing run: %+v, found=%v, err=%v", current, found, err)
+	}
+	session = terminalSessionForRunTest(t, store, running.ID)
+	if _, err := store.CloseActiveTerminalSession(context.Background(), running.ID, session.ID, current.Revision, session.Revision, mustTime(t, 53)); err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	finalizing, found, err = store.Run(context.Background(), running.ID)
+	if err != nil || !found {
+		store.Close()
+		t.Fatalf("read closed-session run: %+v, found=%v, err=%v", finalizing, found, err)
 	}
 	_ = task
 	return store, finalizing

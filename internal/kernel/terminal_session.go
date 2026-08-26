@@ -106,16 +106,16 @@ func (store *Store) TerminalSessionForRun(ctx context.Context, runID RunID) (Ter
 		return TerminalSession{}, false, err
 	}
 	defer tx.Close()
-	session, found, err := terminalSessionByRunID(ctx, tx.connection, runID)
-	if err != nil || !found {
-		return session, found, err
-	}
 	run, runFound, err := runByID(ctx, tx.connection, runID)
 	if err != nil || !runFound {
-		if err == nil {
-			err = ErrCorruptState
-		}
+		return TerminalSession{}, runFound, err
+	}
+	session, found, err := terminalSessionByRunID(ctx, tx.connection, runID)
+	if err != nil {
 		return TerminalSession{}, false, err
+	}
+	if !found {
+		return TerminalSession{}, false, ErrCorruptState
 	}
 	if _, err := loadRunRelationships(ctx, tx.connection, run); err != nil {
 		return TerminalSession{}, false, err

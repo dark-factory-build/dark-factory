@@ -181,8 +181,14 @@ func TestEveryPublicMutationValidatesDurableGraphBeforeDecision(t *testing.T) {
 		}},
 		{name: "ActivateRun", invoke: func(store *Store) error {
 			runIDValue := runID(t, 5)
-			session := terminalSessionForRunTest(t, store, runIDValue)
-			_, err := store.ActivateRun(context.Background(), runIDValue, session.ID, mustRevision(t, 1), session.Revision, at)
+			session, found, err := store.TerminalSession(context.Background(), terminalSessionID(t, 15))
+			if err != nil {
+				return err
+			}
+			if !found {
+				return ErrCorruptState
+			}
+			_, err = store.ActivateRun(context.Background(), runIDValue, session.ID, mustRevision(t, 1), session.Revision, at)
 			return err
 		}},
 		{name: "ProposeAttemptOutcome", invoke: func(store *Store) error {

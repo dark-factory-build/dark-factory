@@ -684,6 +684,12 @@ func seedDurableAuthority(t *testing.T, store *Store) {
 		runID(t, 5).Bytes(), project.ID.Bytes(), agent.ID.Bytes(), task.ID.Bytes(), task.IncarnationID.Bytes(), bytes.Repeat([]byte{0x5a}, DigestBytes)); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.writer.Exec(`INSERT INTO terminal_sessions(
+			id, run_id, state, unresolved_reason, revision, declared_at_ms,
+			activated_at_ms, closed_at_ms, updated_at_ms
+		) VALUES(?, ?, 'declared', NULL, 1, 5, NULL, NULL, 5)`, terminalSessionID(t, 15).Bytes(), runID(t, 5).Bytes()); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := store.writer.Exec(`INSERT INTO resources(
             id, run_id, kind, state, path, path_dev, path_inode, pid, pgid, birth_digest,
             unresolved_reason, revision, declared_at_ms, updated_at_ms, released_at_ms

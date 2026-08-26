@@ -300,12 +300,36 @@ func TestAdmissionRequiresEveryDeclaredResourceInsert(t *testing.T) {
 	}
 }
 
-type admissionCounts struct{ runs, resources, changes, invalidations int }
+func TestAdmissionRequiresTerminalSessionInsert(t *testing.T) {
+	store, _, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
+	defer store.Close()
+	task, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 119), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 120), Title: "terminal insert guard"}, mustTime(t, 5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.Exec(`CREATE TRIGGER suppress_terminal_session_insert BEFORE INSERT ON terminal_sessions BEGIN SELECT RAISE(IGNORE); END`); err != nil {
+		t.Fatal(err)
+	}
+	before := admissionFootprint(t, store)
+	result, err := store.AdmitNext(context.Background(), agent.ID, admissionKeys(t, 121, nil), mustTime(t, 10))
+	if !errors.Is(err, ErrRevisionConflict) || result.Admitted() {
+		t.Fatalf("suppressed terminal session admission = %+v, %v", result, err)
+	}
+	if after := admissionFootprint(t, store); after != before {
+		t.Fatalf("suppressed terminal session left footprint: before=%+v after=%+v", before, after)
+	}
+	fresh, found, err := store.Task(context.Background(), task.ID)
+	if err != nil || !found || fresh.Status != TaskQueued {
+		t.Fatalf("suppressed terminal session task = %+v found=%v err=%v", fresh, found, err)
+	}
+}
+
+type admissionCounts struct{ runs, resources, changes, sessions, invalidations int }
 
 func admissionFootprint(t *testing.T, store *Store) admissionCounts {
 	t.Helper()
 	var result admissionCounts
-	for table, target := range map[string]*int{"runs": &result.runs, "resources": &result.resources, "changes": &result.changes, "invalidations": &result.invalidations} {
+	for table, target := range map[string]*int{"runs": &result.runs, "resources": &result.resources, "changes": &result.changes, "terminal_sessions": &result.sessions, "invalidations": &result.invalidations} {
 		if err := store.readers.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(target); err != nil {
 			t.Fatal(err)
 		}

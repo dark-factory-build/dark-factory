@@ -204,6 +204,19 @@ func loadRunRelationships(ctx context.Context, connection *sql.Conn, run Run) (r
 	if !found {
 		return runRelationships{}, fmt.Errorf("%w: run has no terminal session", ErrCorruptState)
 	}
+	if session.DeclaredAt != run.AdmittedAt || session.UpdatedAt.Int64() > run.UpdatedAt.Int64() {
+		return runRelationships{}, fmt.Errorf("%w: terminal session chronology does not match run", ErrCorruptState)
+	}
+	if session.ActivatedAt == nil {
+		if run.RunningAt != nil {
+			return runRelationships{}, fmt.Errorf("%w: running run lacks terminal activation", ErrCorruptState)
+		}
+	} else if run.RunningAt == nil || *session.ActivatedAt != *run.RunningAt {
+		return runRelationships{}, fmt.Errorf("%w: terminal activation does not match run", ErrCorruptState)
+	}
+	if session.ClosedAt != nil && run.TerminalAt != nil && session.ClosedAt.Int64() > run.TerminalAt.Int64() {
+		return runRelationships{}, fmt.Errorf("%w: terminal session closes after run", ErrCorruptState)
+	}
 	switch run.Phase {
 	case RunAdmitted:
 		if session.State != TerminalSessionDeclared {

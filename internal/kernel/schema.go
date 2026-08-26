@@ -13,7 +13,7 @@ const (
 )
 
 var schemaStatements = []string{
-	// This slice deliberately creates only the eight kernel authority tables.
+	// This slice deliberately creates only the kernel authority tables.
 	// Final-v1 agent-message, verification-effect, removal, and checkpoint state
 	// is absent until its owning slice can add it before the incompatible v1 ships.
 	`CREATE TABLE factory (

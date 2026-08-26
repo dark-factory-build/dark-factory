@@ -425,11 +425,17 @@ func (store *Store) closeTerminalSessionWithTarget(ctx context.Context, runID Ru
 		if session.State != source {
 			return TerminalSession{}, tx.Rollback(ErrConflict)
 		}
-		if err := terminalSessionCloseEvidence(run, relationships.resources, session.State); err != nil {
+		if err := terminalSessionCloseEvidence(run, relationships.resources, session); err != nil {
 			return TerminalSession{}, tx.Rollback(err)
 		}
 	}
-	if result, err := tx.connection.ExecContext(ctx, `UPDATE terminal_sessions SET state = CASE WHEN ? = 'unresolved' THEN 'unresolved' ELSE 'closed' END, unresolved_reason = CASE WHEN ? = 'unresolved' THEN ? ELSE NULL END, closed_at_ms = CASE WHEN ? = 'unresolved' THEN NULL ELSE ? END, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND run_id = ? AND revision = ?`, target.String(), target.String(), reason, target.String(), at.Int64(), at.Int64(), session.ID.Bytes(), run.ID.Bytes(), expectedSession.Int64()); err != nil {
+	var result sql.Result
+	if target == TerminalSessionUnresolved {
+		result, err = tx.connection.ExecContext(ctx, `UPDATE terminal_sessions SET state = 'unresolved', unresolved_reason = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND run_id = ? AND state IN ('declared', 'active') AND revision = ?`, reason, at.Int64(), session.ID.Bytes(), run.ID.Bytes(), expectedSession.Int64())
+	} else {
+		result, err = tx.connection.ExecContext(ctx, `UPDATE terminal_sessions SET state = 'closed', unresolved_reason = NULL, closed_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND run_id = ? AND state = ? AND revision = ?`, at.Int64(), at.Int64(), session.ID.Bytes(), run.ID.Bytes(), source.String(), expectedSession.Int64())
+	}
+	if err != nil {
 		return TerminalSession{}, tx.Rollback(err)
 	} else if err := requireOneRow(result, nil); err != nil {
 		return TerminalSession{}, tx.Rollback(err)
@@ -455,7 +461,7 @@ func (store *Store) closeTerminalSessionWithTarget(ctx context.Context, runID Ru
 	return session, nil
 }
 
-func terminalSessionCloseEvidence(run Run, resources []Resource, state TerminalSessionState) error {
+func terminalSessionCloseEvidence(run Run, resources []Resource, session TerminalSession) error {
 	var providerProcess, providerGroup, runner *Resource
 	for index := range resources {
 		switch resources[index].Kind {
@@ -467,22 +473,33 @@ func terminalSessionCloseEvidence(run Run, resources []Resource, state TerminalS
 			runner = &resources[index]
 		}
 	}
-	if providerProcess == nil || providerGroup == nil || providerProcess.State != ResourceReleased || providerGroup.State != ResourceReleased {
+	if providerProcess == nil || providerGroup == nil || runner == nil || providerProcess.State != ResourceReleased || providerGroup.State != ResourceReleased || runner.State != ResourceReleased {
 		return ErrConflict
 	}
-	if state == TerminalSessionDeclared {
-		if !providerProcess.Identity.Empty() || !providerGroup.Identity.Empty() || run.ProviderExit != nil {
+	if session.State == TerminalSessionDeclared {
+		if !providerProcess.Identity.Empty() || !providerGroup.Identity.Empty() || run.ProviderExit != nil || run.RunnerExit == nil {
 			return ErrConflict
 		}
 		return nil
 	}
+	if session.State == TerminalSessionUnresolved {
+		if run.RunnerExit == nil || !run.RunnerExit.RecoveredAbsence() {
+			return ErrConflict
+		}
+		if session.ActivatedAt == nil {
+			if !providerProcess.Identity.Empty() || !providerGroup.Identity.Empty() || run.ProviderExit != nil {
+				return ErrConflict
+			}
+			return nil
+		}
+		if run.ProviderExit == nil || !run.ProviderExit.RecoveredAbsence() || !resourceIdentityEqual(providerProcess.Identity, providerGroup.Identity) {
+			return ErrConflict
+		}
+	}
+	if session.State == TerminalSessionActive && (run.ProviderExit != nil && run.ProviderExit.RecoveredAbsence() || run.RunnerExit != nil && run.RunnerExit.RecoveredAbsence()) {
+		return ErrConflict
+	}
 	if run.ProviderExit == nil || !resourceIdentityEqual(providerProcess.Identity, providerGroup.Identity) {
-		return ErrConflict
-	}
-	if state == TerminalSessionUnresolved && !run.ProviderExit.RecoveredAbsence() {
-		return ErrConflict
-	}
-	if state == TerminalSessionUnresolved && (runner == nil || runner.State != ResourceReleased || run.RunnerExit == nil || !run.RunnerExit.RecoveredAbsence()) {
 		return ErrConflict
 	}
 	return nil
