@@ -71,17 +71,19 @@
         setButtons();
       };
       connection.onmessage = (event) => {
+        if (thisGeneration !== generation) return;
         const bytes = event.data instanceof ArrayBuffer ? new Uint8Array(event.data) : null;
         report(bytes ? "binary echo" : "error", bytes ? `${bytes.byteLength} bytes` : "non-binary frame");
       };
-      connection.onerror = () => report("error", "WebSocket connection failed");
+      connection.onerror = () => {
+        if (thisGeneration === generation) report("error", "WebSocket connection failed");
+      };
       connection.onclose = (event) => {
+        if (thisGeneration !== generation) return;
         report("closed", `code ${event.code}`);
-        if (thisGeneration === generation) {
-          opened = false;
-          socket = undefined;
-          setButtons();
-        }
+        opened = false;
+        socket = undefined;
+        setButtons();
       };
       setButtons();
     }

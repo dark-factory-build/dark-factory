@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -370,6 +371,12 @@ func TestDuplicateHeadersHTTPVersionForceQueryAndCapacityRefuse(t *testing.T) {
 		conn.Close()
 	}
 	waitForConnections(t, server, 0)
+	conn, response, _, err = openWebSocket(server)
+	if err != nil || response.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("slot was not released after close: response=%v error=%v", response, err)
+	}
+	conn.Close()
+	waitForConnections(t, server, 0)
 }
 
 func TestPartialFrameReadDeadline(t *testing.T) {
@@ -425,6 +432,21 @@ func TestProbePageIsSelfContainedAndCredentialFree(t *testing.T) {
 			t.Errorf("probe page lacks failure-safe behavior %q", required)
 		}
 	}
+	if strings.Count(page, "thisGeneration !== generation") < 3 || !strings.Contains(page, "thisGeneration === generation") {
+		t.Error("stale WebSocket callbacks are not guarded by the active generation")
+	}
+	styleHash := blockHash(page, "  <style>", "  </style>")
+	scriptHash := blockHash(page, "  <script>", "  </script>")
+	if styleHash != "3rtSo/hQJP43H+EO0MQc2/uro7JeO8IGTep9xCv7NJs=" || scriptHash != "11tVZzignmE9YOrYM2VqfDs6EnZO84Q7VF5uPQQj/SY=" {
+		t.Fatalf("CSP hashes changed: style=%s script=%s", styleHash, scriptHash)
+	}
+}
+
+func blockHash(page, open, close string) string {
+	start := strings.Index(page, open) + len(open)
+	end := strings.Index(page[start:], close) + start
+	hash := sha256.Sum256([]byte(page[start:end]))
+	return base64.StdEncoding.EncodeToString(hash[:])
 }
 
 func TestReadinessAndEventsShareOneOrderedWriter(t *testing.T) {

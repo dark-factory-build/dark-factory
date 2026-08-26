@@ -242,9 +242,9 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		s.rejectUpgrade(w, r, http.StatusServiceUnavailable, "capacity", "connection capacity reached")
 		return
 	}
+	defer func() { <-s.slots }()
 	conn, rw, err := hijacker.Hijack()
 	if err != nil {
-		<-s.slots
 		return
 	}
 	acceptHash := sha1.Sum([]byte(key + webSocketGUID))
@@ -258,7 +258,6 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	connectionID, registered := s.addConnection(conn)
 	if !registered {
-		<-s.slots
 		_ = conn.Close()
 		return
 	}
@@ -267,7 +266,6 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		s.emit(ProbeEvent{Event: "connection", Phase: "closed", ConnectionIndex: connectionID})
 		s.removeConnection(conn)
-		<-s.slots
 		_ = conn.Close()
 	}()
 	s.serveWebSocket(conn, rw, connectionID)

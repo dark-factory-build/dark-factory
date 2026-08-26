@@ -30,8 +30,9 @@ and readiness is emitted before the listener accepts requests.
 Serve or preview `probe.html` from that HTTPS origin. If using another port,
 replace only `LOOPBACK_WS_URL` in the fixture with the readiness `url`; never
 put a token, challenge, or credential in the URL. Press **connect**, **send
-binary echo**, **close**, and **reconnect**. Record the page's state log and the
-server readiness line as evidence.
+binary echo**, **close**, and **reconnect**. Capture the complete server
+stdout JSONL stream (readiness plus every later event) and the page state log;
+the readiness line alone is not evidence.
 
 ## Evidence matrix
 
@@ -47,10 +48,24 @@ The harness intentionally does not use a browser automation dependency. Keep
 the server process, port, and any preview state temporary; do not point it at
 the Dark Factory live home, daemon, socket, provider, or credentials.
 
-If a thin HTTPS host applies a strict Content Security Policy, permit this
-fixture's inline script with its exact SHA-256 CSP hash (recompute it whenever
-`probe.html` changes); do not weaken the policy with `unsafe-inline` or add a
-frontend framework. The fixture loads no third-party resource.
+If a thin HTTPS host applies a strict Content Security Policy, these are the
+exact SHA-256 sources for the current inline blocks (recompute them whenever
+`probe.html` changes):
+
+```text
+style-src 'sha256-3rtSo/hQJP43H+EO0MQc2/uro7JeO8IGTep9xCv7NJs='
+script-src 'sha256-11tVZzignmE9YOrYM2VqfDs6EnZO84Q7VF5uPQQj/SY='
+```
+
+A complete fixed-port route example is:
+
+```text
+Content-Security-Policy: default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; style-src 'sha256-3rtSo/hQJP43H+EO0MQc2/uro7JeO8IGTep9xCv7NJs='; script-src 'sha256-11tVZzignmE9YOrYM2VqfDs6EnZO84Q7VF5uPQQj/SY='; connect-src ws://127.0.0.1:43123
+```
+
+Use the exact port in `connect-src` when changing the fixture URL. Do not
+weaken the policy with `unsafe-inline` or add a frontend framework. The
+fixture loads no third-party resource.
 
 ## Focused checks
 
