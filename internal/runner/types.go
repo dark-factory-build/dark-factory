@@ -24,6 +24,7 @@ const (
 	GateStdinScratchName      = ".runner-gate.stdin"
 	ProviderStdinScratchName  = ".runner-provider.stdin"
 	TerminalScratchName       = ".runner-terminal.tmp"
+	RuntimeLifetimeLeaseName  = ".runner-runtime.lifetime"
 )
 
 var (

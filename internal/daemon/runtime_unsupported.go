@@ -44,7 +44,9 @@ func (*RuntimeBinding) ProviderHome() (string, error)     { return "", errUnsupp
 func (*RuntimeBinding) ProviderTemp() (string, error)     { return "", errUnsupported }
 func (*RuntimeBinding) AttemptTokenPath() (string, error) { return "", errUnsupported }
 func (*RuntimeBinding) WorkerConfigPath() (string, error) { return "", errUnsupported }
-func (*Runtime) DuplicateDirectory() (*os.File, error)    { return nil, errUnsupported }
+func (*Runtime) DuplicateRunnerFiles() (*os.File, *os.File, error) {
+	return nil, nil, errUnsupported
+}
 func ObserveRuntimeLifetime(*RuntimeParent, string, runner.FileIdentity) (RuntimeLeasePresence, error) {
 	return 0, errUnsupported
 }

@@ -58,6 +58,13 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
+	if len(os.Args) == 3 && os.Args[1] == "--lifetime-provider" {
+		if err := runLifetimeProviderHelper(os.Args[2]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(95)
+		}
+		os.Exit(0)
+	}
 	if len(os.Args) == 5 && os.Args[1] == "--attempt-retirement-provider" {
 		if err := runRetirementProviderHelper(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -79,6 +86,44 @@ func TestMain(m *testing.M) {
 		code = 1
 	}
 	os.Exit(code)
+}
+
+func runLifetimeProviderHelper(root string) error {
+	var lifetime unix.Stat_t
+	if err := unix.Fstat(10, &lifetime); err != nil || lifetime.Mode&unix.S_IFMT != unix.S_IFREG || lifetime.Mode&0o7777 != 0o600 || lifetime.Size != 0 || lifetime.Nlink != 1 {
+		return fmt.Errorf("provider lifetime descriptor: %v", err)
+	}
+	for _, fd := range []int{3, 4, 5, 6, 7, 8, 9, 11, 12} {
+		var stat unix.Stat_t
+		if err := unix.Fstat(fd, &stat); !errors.Is(err, unix.EBADF) {
+			return fmt.Errorf("provider inherited fd %d: %v", fd, err)
+		}
+	}
+	if err := unix.Fchdir(10); !errors.Is(err, unix.ENOTDIR) && !errors.Is(err, unix.EBADF) {
+		return fmt.Errorf("provider lifetime allowed fchdir: %v", err)
+	}
+	if fd, err := unix.Openat(10, "change-worker.config", unix.O_RDONLY|unix.O_CLOEXEC, 0); !errors.Is(err, unix.ENOTDIR) && !errors.Is(err, unix.EBADF) {
+		if err == nil {
+			unix.Close(fd)
+		}
+		return fmt.Errorf("provider lifetime allowed openat: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "provider.pid"), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(root, "provider.ready"), nil, 0o600); err != nil {
+		return err
+	}
+	deadline := time.Now().Add(8 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(root, "continue")); err == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return os.ErrDeadlineExceeded
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 func fdCensus() map[int]FileIdentity {
@@ -109,12 +154,13 @@ func sameCensus(a, b map[int]FileIdentity) bool {
 }
 
 type fixture struct {
-	t     *testing.T
-	root  string
-	cwd   string
-	dir   *os.File
-	lease *GateLease
-	child *OwnedChild
+	t        *testing.T
+	root     string
+	cwd      string
+	dir      *os.File
+	lifetime *os.File
+	lease    *GateLease
+	child    *OwnedChild
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -131,19 +177,35 @@ func newFixture(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lease, _, err := CreateGateLease(dir, OuterActivationMarkerName)
+	lifetime := createTestRuntimeLifetime(t, dir)
+	lease, _, err := CreateGateLease(dir, lifetime, OuterActivationMarkerName)
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &fixture{t: t, root: root, cwd: cwd, dir: dir, lease: lease}
+	f := &fixture{t: t, root: root, cwd: cwd, dir: dir, lifetime: lifetime, lease: lease}
 	t.Cleanup(func() {
 		if f.child != nil {
 			_ = f.child.Close()
 		}
 		_ = lease.Close()
+		_ = lifetime.Close()
 		_ = dir.Close()
 	})
 	return f
+}
+
+func createTestRuntimeLifetime(t testing.TB, dir *os.File) *os.File {
+	t.Helper()
+	fd, err := unix.Openat(int(dir.Fd()), RuntimeLifetimeLeaseName, unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := os.NewFile(uintptr(fd), "test-runtime-lifetime")
+	if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	return file
 }
 func (f *fixture) start(target string, args []string, input []byte, stdout *os.File) *OwnedChild {
 	f.t.Helper()
@@ -215,7 +277,12 @@ func runParentDeathOwner() error {
 		return err
 	}
 	defer dir.Close()
-	lease, _, err := CreateGateLease(dir, OuterActivationMarkerName)
+	lifetime := createTestRuntimeLifetimeTest(dir)
+	if lifetime == nil {
+		return errors.New("runner test owner: lifetime lease")
+	}
+	defer lifetime.Close()
+	lease, _, err := CreateGateLease(dir, lifetime, OuterActivationMarkerName)
 	if err != nil {
 		return err
 	}
@@ -380,7 +447,7 @@ func TestBlockedActivateExecutesOnceWithExactIdentityAndInput(t *testing.T) {
 	effect := filepath.Join(f.root, "effect")
 	stdinCopy := filepath.Join(f.root, "stdin")
 	out := outputFile(t, filepath.Join(f.root, "output"))
-	child := f.start("/bin/sh", []string{"-c", fmt.Sprintf("test -z \"${HOME+x}\" || exit 90; for n in 3 4 5 6 7 8 9 10; do test ! -e /dev/fd/$n || exit 91; done; printf x >> %q; cat > %q; printf '%%s' $$", effect, stdinCopy)}, []byte("one-input"), out)
+	child := f.start("/bin/sh", []string{"-c", fmt.Sprintf("test -z \"${HOME+x}\" || exit 90; for n in 3 4 5 6 7 8 9 11; do test ! -e /dev/fd/$n || exit 91; done; test -f /dev/fd/10 || exit 92; test ! -s /dev/fd/10 || exit 93; printf x >> %q; cat > %q; printf '%%s' $$", effect, stdinCopy)}, []byte("one-input"), out)
 	id := child.Identity()
 	if !id.Valid() || id.PID != id.PGID {
 		t.Fatalf("bad ready identity %+v", id)
@@ -419,13 +486,13 @@ func TestBlockedActivateExecutesOnceWithExactIdentityAndInput(t *testing.T) {
 	}
 }
 
-func TestKeepLeaseAcrossExecIsExplicit(t *testing.T) {
+func TestPrivateDirectoryAndLifetimeInheritanceAreExplicit(t *testing.T) {
 	f := newFixture(t)
 	effect := filepath.Join(f.root, "effect")
 	out := outputFile(t, filepath.Join(f.root, "out"))
 	spec, err := PrepareExecSpec(ExecSpec{
 		Target: "/bin/sh",
-		Args:   []string{"-c", fmt.Sprintf("test -d /dev/fd/9 || exit 92; test ! -e /dev/fd/10 || exit 93; printf kept > %q", effect)},
+		Args:   []string{"-c", fmt.Sprintf("test -d /dev/fd/9 || exit 92; test -f /dev/fd/10 || exit 93; test ! -s /dev/fd/10 || exit 94; printf kept > %q", effect)},
 		Env:    []string{"PATH=/usr/bin:/bin", "LANG=C"},
 		Cwd:    f.cwd,
 		Stdout: out,
@@ -447,11 +514,8 @@ func TestKeepLeaseAcrossExecIsExplicit(t *testing.T) {
 	}
 }
 
-func TestInheritedRuntimeFlockSurvivesGateExecUntilTargetExit(t *testing.T) {
+func TestInheritedRuntimeLifetimeSurvivesGateExecUntilTargetExit(t *testing.T) {
 	f := newFixture(t)
-	if err := unix.Flock(int(f.dir.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		t.Fatal(err)
-	}
 	continuePath := filepath.Join(f.root, "continue")
 	out := outputFile(t, filepath.Join(f.root, "out"))
 	spec, err := PrepareExecSpec(ExecSpec{
@@ -475,7 +539,10 @@ func TestInheritedRuntimeFlockSurvivesGateExecUntilTargetExit(t *testing.T) {
 	if err := f.dir.Close(); err != nil {
 		t.Fatal(err)
 	}
-	probe, err := unix.Open(f.root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
+	if err := f.lifetime.Close(); err != nil {
+		t.Fatal(err)
+	}
+	probe, err := unix.Open(filepath.Join(f.root, RuntimeLifetimeLeaseName), unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1107,9 +1174,66 @@ func TestPrepareRejectsScriptAndPreexistingMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer dir.Close()
-	if _, _, err := CreateGateLease(dir, OuterActivationMarkerName); !errors.Is(err, os.ErrExist) {
+	lifetime := createTestRuntimeLifetime(t, dir)
+	defer lifetime.Close()
+	if _, _, err := CreateGateLease(dir, lifetime, OuterActivationMarkerName); !errors.Is(err, os.ErrExist) {
 		t.Fatalf("preexisting marker=%v", err)
 	}
+}
+
+func TestGateLeaseRejectsMissingMalformedAndReplacedLifetime(t *testing.T) {
+	for _, mutation := range []string{"missing", "mode", "replacement"} {
+		t.Run(mutation, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.Chmod(root, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			dir, err := os.Open(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer dir.Close()
+			if mutation == "missing" {
+				if lease, _, err := CreateGateLease(dir, nil, OuterActivationMarkerName); err == nil || lease != nil {
+					t.Fatalf("missing lifetime accepted: %v %v", lease, err)
+				}
+				return
+			}
+			lifetime := createTestRuntimeLifetime(t, dir)
+			defer lifetime.Close()
+			path := filepath.Join(root, RuntimeLifetimeLeaseName)
+			if mutation == "mode" {
+				if err := os.Chmod(path, 0o640); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := os.Rename(path, path+".old"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if lease, _, err := CreateGateLease(dir, lifetime, OuterActivationMarkerName); err == nil || lease != nil {
+				t.Fatalf("%s lifetime accepted: %v %v", mutation, lease, err)
+			}
+			if _, err := os.Stat(filepath.Join(root, OuterActivationMarkerName)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("%s lifetime created activation effect: %v", mutation, err)
+			}
+		})
+	}
+}
+
+func createTestRuntimeLifetimeTest(dir *os.File) *os.File {
+	fd, err := unix.Openat(int(dir.Fd()), RuntimeLifetimeLeaseName, unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil
+	}
+	if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		unix.Close(fd)
+		return nil
+	}
+	return os.NewFile(uintptr(fd), "test-runtime-lifetime")
 }
 
 func copyNative(t *testing.T, from, to string) {

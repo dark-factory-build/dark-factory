@@ -13,8 +13,9 @@ type gateConfig struct {
 	Version        int                   `json:"version"`
 	Target         launchCommitment      `json:"target"`
 	LeaseDirectory fileCommitment        `json:"lease_directory"`
+	Lifetime       descriptorCommitment  `json:"lifetime"`
 	MarkerName     string                `json:"marker_name"`
-	KeepLease      bool                  `json:"keep_lease"`
+	KeepDirectory  bool                  `json:"keep_directory"`
 	Control        *descriptorCommitment `json:"control,omitempty"`
 	TestFinalCheck bool                  `json:"test_final_check,omitempty"`
 }

@@ -239,33 +239,53 @@ const (
 // exposes the fixed checkpoint sequence and the sole same-process provider
 // exec; it does not expose arbitrary frames or descriptors.
 type WorkerControl struct {
-	file     *os.File
-	dir      *os.File
-	identity Identity
-	state    workerState
+	file       *os.File
+	dir        *os.File
+	lifetime   *os.File
+	lifetimeID descriptorCommitment
+	identity   Identity
+	state      workerState
 }
 
 func OpenWorkerControl() (*WorkerControl, error) {
 	control := os.NewFile(3, "attempt-worker-control")
 	dir := os.NewFile(9, "attempt-private-dir")
-	if control == nil || dir == nil {
+	lifetime := os.NewFile(10, "runtime-lifetime")
+	if control == nil || dir == nil || lifetime == nil {
 		return nil, ErrIdentity
 	}
+	keep := false
+	defer func() {
+		if !keep {
+			control.Close()
+			dir.Close()
+			lifetime.Close()
+		}
+	}()
 	if _, err := commitControl(control); err != nil {
 		return nil, fmt.Errorf("runner: worker control: %w", err)
 	}
 	if _, err := validatePrivateDirectory(dir); err != nil {
 		return nil, fmt.Errorf("runner: worker private directory: %w", err)
 	}
+	lifetimeID, err := commitRuntimeLifetime(dir, lifetime)
+	if err != nil {
+		return nil, fmt.Errorf("runner: worker runtime lifetime: %w", err)
+	}
 	// These capabilities belong only to the wrapper. Its bounded Git children
-	// and eventual provider must never gain accidental duplicate ownership.
+	// and eventual provider must never gain accidental directory authority.
+	// Only the empty regular lifetime file is deliberately retained for exec.
 	unix.CloseOnExec(3)
 	unix.CloseOnExec(9)
+	if _, err := unix.FcntlInt(lifetime.Fd(), unix.F_SETFD, 0); err != nil {
+		return nil, err
+	}
 	id, err := readIdentity(os.Getpid())
 	if err != nil || id.PID != id.PGID {
 		return nil, ErrIdentity
 	}
-	return &WorkerControl{file: control, dir: dir, identity: id, state: workerSelection}, nil
+	keep = true
+	return &WorkerControl{file: control, dir: dir, lifetime: lifetime, lifetimeID: lifetimeID, identity: id, state: workerSelection}, nil
 }
 
 func (w *WorkerControl) Identity() Identity {
@@ -330,7 +350,7 @@ func (w *WorkerControl) await(stage AttemptStage, before, after workerState) err
 }
 
 func (w *WorkerControl) ExecProvider(spec *LaunchSpec) error {
-	if w == nil || w.file == nil || w.dir == nil || w.state != workerProvider || spec == nil || spec.control != nil || spec.controlID != nil || spec.stdout != nil || spec.stderr != nil {
+	if w == nil || w.file == nil || w.dir == nil || w.lifetime == nil || w.state != workerProvider || spec == nil || spec.control != nil || spec.controlID != nil || spec.stdout != nil || spec.stderr != nil {
 		return ErrState
 	}
 	w.state = workerExec
@@ -349,6 +369,10 @@ func (w *WorkerControl) Close() error {
 	if w.dir != nil {
 		err = errors.Join(err, w.dir.Close())
 		w.dir = nil
+	}
+	if w.lifetime != nil {
+		err = errors.Join(err, w.lifetime.Close())
+		w.lifetime = nil
 	}
 	return err
 }
@@ -387,6 +411,9 @@ func execPreparedCurrent(spec *LaunchSpec, worker *WorkerControl) error {
 	if err := unix.Dup2(int(stdin.Fd()), 0); err != nil {
 		return err
 	}
+	if got, err := commitRuntimeLifetime(worker.dir, worker.lifetime); err != nil || got != worker.lifetimeID {
+		return fmt.Errorf("runner: current runtime lifetime: %w", errors.Join(ErrIdentity, err))
+	}
 	if err := worker.file.Close(); err != nil {
 		return err
 	}
@@ -397,6 +424,9 @@ func execPreparedCurrent(spec *LaunchSpec, worker *WorkerControl) error {
 	worker.dir = nil
 	_ = unix.Close(3)
 	_ = unix.Close(9)
+	if _, err := unix.FcntlInt(worker.lifetime.Fd(), unix.F_SETFD, 0); err != nil {
+		return fmt.Errorf("runner: retain current runtime lifetime: %w", err)
+	}
 	if err := unix.Exec(spec.commit.Executable.Path, spec.commit.Argv, spec.commit.Env); err != nil {
 		return fmt.Errorf("runner: current exec: %w", err)
 	}
@@ -406,22 +436,30 @@ func execPreparedCurrent(spec *LaunchSpec, worker *WorkerControl) error {
 func RunAttemptRunner() error {
 	control := os.NewFile(3, "attempt-daemon-control")
 	dir := os.NewFile(9, "attempt-private-dir")
-	if control == nil || dir == nil {
+	lifetime := os.NewFile(10, "runtime-lifetime")
+	if control == nil || dir == nil || lifetime == nil {
 		return fmt.Errorf("runner: missing attempt capability")
 	}
 	defer control.Close()
 	defer dir.Close()
+	defer lifetime.Close()
 	if _, err := commitControl(control); err != nil {
 		return fmt.Errorf("runner: daemon control: %w", err)
 	}
 	if _, err := validatePrivateDirectory(dir); err != nil {
 		return fmt.Errorf("runner: private directory: %w", err)
 	}
+	if _, err := commitRuntimeLifetime(dir, lifetime); err != nil {
+		return fmt.Errorf("runner: runtime lifetime: %w", err)
+	}
 	// The attempt runner passes only deliberate duplicates through StartBlocked;
 	// neither daemon control nor its retained directory may leak into the inner
 	// gate through ordinary fork/exec inheritance.
 	unix.CloseOnExec(3)
 	unix.CloseOnExec(9)
+	if _, err := unix.FcntlInt(lifetime.Fd(), unix.F_SETFD, 0); err != nil {
+		return err
+	}
 	if err := control.SetReadDeadline(time.Now().Add(attemptControlTimeout)); err != nil {
 		return err
 	}
@@ -433,7 +471,7 @@ func RunAttemptRunner() error {
 	if err := validateAttemptConfig(cfg); err != nil {
 		return err
 	}
-	return runAttempt(control, dir, cfg)
+	return runAttempt(control, dir, lifetime, cfg)
 }
 
 func validateAttemptConfig(cfg attemptConfig) error {
@@ -471,8 +509,8 @@ func validateBasename(value string) error {
 	return nil
 }
 
-func runAttempt(daemon, dir *os.File, cfg attemptConfig) (result error) {
-	lease, _, err := CreateGateLease(dir, cfg.MarkerName)
+func runAttempt(daemon, dir, lifetime *os.File, cfg attemptConfig) (result error) {
+	lease, _, err := CreateGateLease(dir, lifetime, cfg.MarkerName)
 	if err != nil {
 		return err
 	}

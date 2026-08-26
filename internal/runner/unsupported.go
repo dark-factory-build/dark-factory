@@ -11,7 +11,7 @@ type GateLease struct{}
 type OwnedChild struct{}
 
 func PrepareExecSpec(ExecSpec) (*LaunchSpec, error) { return nil, ErrUnsupported }
-func CreateGateLease(*os.File, string) (*GateLease, FileIdentity, error) {
+func CreateGateLease(*os.File, *os.File, string) (*GateLease, FileIdentity, error) {
 	return nil, FileIdentity{}, ErrUnsupported
 }
 func StartBlocked(*GateLease, string, *LaunchSpec, bool) (*OwnedChild, error) {

@@ -64,7 +64,7 @@ func runAttemptWorkerHelper(args []string) error {
 	var provider ExecSpec
 	switch mode {
 	case "shell", "term", "leader":
-		script := fmt.Sprintf("test -z \"${HOME+x}\" || exit 90; test -z \"${DARK_FACTORY_ATTEMPT_TOKEN+x}\" || exit 91; for n in 3 4 5 6 7 8 9 10 11; do test ! -e /dev/fd/$n || exit 92; done; printf '%%s' $$ > %q; while test ! -f %q; do sleep 0.01; done; printf x >> %q; cat > %q", filepath.Join(root, "provider.pid"), filepath.Join(root, "continue"), filepath.Join(root, "provider.effect"), filepath.Join(root, "provider.stdin"))
+		script := fmt.Sprintf("test -z \"${HOME+x}\" || exit 90; test -z \"${DARK_FACTORY_ATTEMPT_TOKEN+x}\" || exit 91; for n in 3 4 5 6 7 8 9 11; do test ! -e /dev/fd/$n || exit 92; done; test -f /dev/fd/10 || exit 93; test ! -s /dev/fd/10 || exit 94; cat /dev/fd/10/change-worker.config >/dev/null 2>&1 && exit 95; cd /dev/fd/10 >/dev/null 2>&1 && exit 96; printf '%%s' $$ > %q; while test ! -f %q; do sleep 0.01; done; printf x >> %q; cat > %q", filepath.Join(root, "provider.pid"), filepath.Join(root, "continue"), filepath.Join(root, "provider.effect"), filepath.Join(root, "provider.stdin"))
 		if mode == "term" {
 			script = fmt.Sprintf("trap '' TERM; sleep 30 & printf '%%s' $! > %q; printf '%%s' $$ > %q; while :; do sleep 1; done", filepath.Join(root, "descendant.pid"), filepath.Join(root, "provider.pid"))
 		}
@@ -72,11 +72,15 @@ func runAttemptWorkerHelper(args []string) error {
 			script = fmt.Sprintf("sleep 30 & printf '%%s' $! > %q; printf '%%s' $$ > %q; exit 0", filepath.Join(root, "descendant.pid"), filepath.Join(root, "provider.pid"))
 		}
 		provider = ExecSpec{Target: "/bin/sh", Args: []string{"-c", script}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: filepath.Join(root, "work"), Stdin: []byte("one-startup")}
-	case "binary", "seam":
+	case "binary", "seam", "lifetime", "lease-seam":
 		if len(args) != 3 {
 			return errors.New("attempt worker: missing binary target")
 		}
-		provider = ExecSpec{Target: args[2], Args: []string{"--attempt-provider", filepath.Join(root, "provider.effect")}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: filepath.Join(root, "work")}
+		providerArgs := []string{"--attempt-provider", filepath.Join(root, "provider.effect")}
+		if mode == "lifetime" {
+			providerArgs = []string{"--lifetime-provider", root}
+		}
+		provider = ExecSpec{Target: args[2], Args: providerArgs, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: filepath.Join(root, "work")}
 	default:
 		return fmt.Errorf("attempt worker: invalid mode %q", mode)
 	}
@@ -84,7 +88,7 @@ func runAttemptWorkerHelper(args []string) error {
 	if err != nil {
 		return err
 	}
-	if mode == "seam" {
+	if mode == "seam" || mode == "lease-seam" {
 		prepared.testCurrentFinal = true
 	}
 	if err := control.ReportPopulation([]byte("populated")); err != nil {
@@ -123,6 +127,7 @@ type attemptFixture struct {
 	t          *testing.T
 	root       string
 	dir        *os.File
+	lifetime   *os.File
 	lease      *GateLease
 	controller *AttemptController
 	spec       AttemptSpec
@@ -145,7 +150,8 @@ func newAttemptFixture(t *testing.T, mode string, target string) *attemptFixture
 	if err != nil {
 		t.Fatal(err)
 	}
-	lease, _, err := CreateGateLease(dir, OuterActivationMarkerName)
+	lifetime := createTestRuntimeLifetime(t, dir)
+	lease, _, err := CreateGateLease(dir, lifetime, OuterActivationMarkerName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +182,7 @@ func newAttemptFixture(t *testing.T, mode string, target string) *attemptFixture
 		t.Fatalf("outer StartBlocked: %v", err)
 	}
 	_ = childCap.Close()
-	f := &attemptFixture{t: t, root: root, dir: dir, lease: lease, controller: controller, spec: attemptSpec, outer: outer, diagnostic: diagnostic}
+	f := &attemptFixture{t: t, root: root, dir: dir, lifetime: lifetime, lease: lease, controller: controller, spec: attemptSpec, outer: outer, diagnostic: diagnostic}
 	t.Cleanup(func() {
 		_ = controller.Close()
 		if f.inner.Valid() {
@@ -186,6 +192,7 @@ func newAttemptFixture(t *testing.T, mode string, target string) *attemptFixture
 		}
 		_ = outer.Close()
 		_ = lease.Close()
+		_ = lifetime.Close()
 		_ = dir.Close()
 	})
 	return f
@@ -326,11 +333,8 @@ func TestAttemptRunnerOrdersOuterWrapperAndShellProvider(t *testing.T) {
 	}
 }
 
-func TestRuntimeFlockRemainsHeldAcrossOuterAndInnerOwnership(t *testing.T) {
+func TestRuntimeLifetimeRemainsHeldAcrossOuterAndInnerOwnership(t *testing.T) {
 	f := newAttemptFixture(t, "shell", "")
-	if err := unix.Flock(int(f.dir.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		t.Fatal(err)
-	}
 	f.activateOuter()
 	f.advanceToProvider()
 	if err := f.controller.Release(StageProvider); err != nil {
@@ -343,7 +347,10 @@ func TestRuntimeFlockRemainsHeldAcrossOuterAndInnerOwnership(t *testing.T) {
 	if err := f.dir.Close(); err != nil {
 		t.Fatal(err)
 	}
-	probe, err := unix.Open(f.root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
+	if err := f.lifetime.Close(); err != nil {
+		t.Fatal(err)
+	}
+	probe, err := unix.Open(filepath.Join(f.root, RuntimeLifetimeLeaseName), unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -370,6 +377,70 @@ func TestRuntimeFlockRemainsHeldAcrossOuterAndInnerOwnership(t *testing.T) {
 	if err := unix.Flock(probe, unix.LOCK_UN); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestProviderRetainsLeastPrivilegeLifetimeAfterOuterSIGKILL(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newAttemptFixture(t, "lifetime", executable)
+	inner := f.activateOuter()
+	f.advanceToProvider()
+	if err := f.controller.Release(StageProvider); err != nil {
+		t.Fatal(err)
+	}
+	waitFile(t, filepath.Join(f.root, "provider.ready"))
+	if got, err := readIdentity(inner.PID); err != nil || got != inner {
+		t.Fatalf("provider identity=%+v err=%v want=%+v", got, err, inner)
+	}
+	if err := f.lease.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.dir.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.lifetime.Close(); err != nil {
+		t.Fatal(err)
+	}
+	probe, err := unix.Open(filepath.Join(f.root, RuntimeLifetimeLeaseName), unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(probe)
+	if err := unix.Flock(probe, unix.LOCK_EX|unix.LOCK_NB); !errors.Is(err, unix.EWOULDBLOCK) {
+		t.Fatalf("provider did not hold lifetime before outer death: %v", err)
+	}
+	if err := f.outer.cmd.Process.Signal(unix.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	if exit, err := f.outer.FinishAfterExit(6 * time.Second); err != nil || exit.Signal != int(unix.SIGKILL) {
+		t.Fatalf("outer SIGKILL exit=%+v err=%v", exit, err)
+	}
+	if got, err := readIdentity(inner.PID); err != nil || got != inner {
+		t.Fatalf("provider did not survive outer death: got=%+v err=%v", got, err)
+	}
+	if err := unix.Flock(probe, unix.LOCK_EX|unix.LOCK_NB); !errors.Is(err, unix.EWOULDBLOCK) {
+		t.Fatalf("recovery observed available while provider lived: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(f.root, "continue"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(6 * time.Second)
+	for {
+		err := unix.Flock(probe, unix.LOCK_EX|unix.LOCK_NB)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, unix.EWOULDBLOCK) || time.Now().After(deadline) {
+			t.Fatalf("lifetime did not become available after provider exit: %v", err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := unix.Flock(probe, unix.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+	waitExactAbsence(t, inner)
 }
 
 func TestAttemptRunnerDaemonEOFCuts(t *testing.T) {
@@ -963,6 +1034,40 @@ func TestCurrentExecDocumentsCooperativeSameUIDRace(t *testing.T) {
 	}
 	if body, err := os.ReadFile(filepath.Join(f.root, "provider.effect")); err != nil || string(body) != "provider" {
 		t.Fatalf("replacement witness=%q err=%v", body, err)
+	}
+}
+
+func TestCurrentExecRejectsReplacedRuntimeLifetime(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newAttemptFixture(t, "lease-seam", executable)
+	f.activateOuter()
+	f.advanceToProvider()
+	if err := f.controller.Release(StageProvider); err != nil {
+		t.Fatal(err)
+	}
+	event, err := f.controller.Next(4 * time.Second)
+	if err != nil || event.Kind != AttemptCheckpoint || event.Stage != StageProvider {
+		t.Fatalf("final-check event=%+v err=%v", event, err)
+	}
+	lifetimePath := filepath.Join(f.root, RuntimeLifetimeLeaseName)
+	if err := os.Rename(lifetimePath, lifetimePath+".old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lifetimePath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.controller.acknowledgeCurrentExecCheck(); err != nil {
+		t.Fatal(err)
+	}
+	record := f.finishAndAck()
+	if record.Terminal.Exit.Code == 0 {
+		t.Fatalf("replaced lifetime reported success: %+v", record.Terminal)
+	}
+	if _, err := os.Stat(filepath.Join(f.root, "provider.effect")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("provider ran with replaced lifetime: %v", err)
 	}
 }
 

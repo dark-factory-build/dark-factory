@@ -19,13 +19,15 @@ import (
 type GateLease struct {
 	dir         *os.File
 	dirIdentity fileCommitment
+	lifetime    *os.File
+	lifetimeID  descriptorCommitment
 	basename    string
 	marker      *FileIdentity
 	closed      bool
 }
 
-func CreateGateLease(dir *os.File, basename string) (*GateLease, FileIdentity, error) {
-	if dir == nil || basename != OuterActivationMarkerName && basename != InnerActivationMarkerName {
+func CreateGateLease(dir, lifetime *os.File, basename string) (*GateLease, FileIdentity, error) {
+	if dir == nil || lifetime == nil || basename != OuterActivationMarkerName && basename != InnerActivationMarkerName {
 		return nil, FileIdentity{}, fmt.Errorf("runner: invalid marker name")
 	}
 	dup, err := unix.FcntlInt(dir.Fd(), unix.F_DUPFD_CLOEXEC, 0)
@@ -38,17 +40,58 @@ func CreateGateLease(dir *os.File, basename string) (*GateLease, FileIdentity, e
 		f.Close()
 		return nil, FileIdentity{}, err
 	}
+	lifetimeDup, err := unix.FcntlInt(lifetime.Fd(), unix.F_DUPFD_CLOEXEC, 0)
+	if err != nil {
+		f.Close()
+		return nil, FileIdentity{}, err
+	}
+	lifetimeFile := os.NewFile(uintptr(lifetimeDup), "runtime-lifetime")
+	lifetimeID, err := commitRuntimeLifetime(f, lifetimeFile)
+	if err != nil {
+		f.Close()
+		lifetimeFile.Close()
+		return nil, FileIdentity{}, err
+	}
 	var s unix.Stat_t
 	err = unix.Fstatat(int(f.Fd()), basename, &s, unix.AT_SYMLINK_NOFOLLOW)
 	if err == nil {
 		f.Close()
+		lifetimeFile.Close()
 		return nil, FileIdentity{}, os.ErrExist
 	}
 	if !errors.Is(err, unix.ENOENT) {
 		f.Close()
+		lifetimeFile.Close()
 		return nil, FileIdentity{}, err
 	}
-	return &GateLease{dir: f, dirIdentity: c, basename: basename}, c.FileIdentity, nil
+	return &GateLease{dir: f, dirIdentity: c, lifetime: lifetimeFile, lifetimeID: lifetimeID, basename: basename}, c.FileIdentity, nil
+}
+
+func commitRuntimeLifetime(dir, lifetime *os.File) (descriptorCommitment, error) {
+	if dir == nil || lifetime == nil {
+		return descriptorCommitment{}, ErrIdentity
+	}
+	var opened, named unix.Stat_t
+	if err := unix.Fstat(int(lifetime.Fd()), &opened); err != nil {
+		return descriptorCommitment{}, err
+	}
+	if err := unix.Fstatat(int(dir.Fd()), RuntimeLifetimeLeaseName, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return descriptorCommitment{}, err
+	}
+	valid := func(stat unix.Stat_t) bool {
+		return stat.Mode&unix.S_IFMT == unix.S_IFREG && stat.Mode&0o7777 == 0o600 && stat.Uid == uint32(os.Geteuid()) && stat.Nlink == 1 && stat.Size == 0 && stat.Dev != 0 && stat.Ino != 0
+	}
+	if !valid(opened) || !valid(named) || opened.Dev != named.Dev || opened.Ino != named.Ino {
+		return descriptorCommitment{}, ErrIdentity
+	}
+	if err := unix.Flock(int(lifetime.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		return descriptorCommitment{}, err
+	}
+	var recheck, namedRecheck unix.Stat_t
+	if err := unix.Fstat(int(lifetime.Fd()), &recheck); err != nil || unix.Fstatat(int(dir.Fd()), RuntimeLifetimeLeaseName, &namedRecheck, unix.AT_SYMLINK_NOFOLLOW) != nil || !valid(recheck) || !valid(namedRecheck) || recheck.Dev != opened.Dev || recheck.Ino != opened.Ino || namedRecheck.Dev != opened.Dev || namedRecheck.Ino != opened.Ino {
+		return descriptorCommitment{}, errors.Join(ErrIdentity, err)
+	}
+	return descriptorCommitment{FileIdentity: FileIdentity{Device: uint64(opened.Dev), Inode: opened.Ino}, UID: opened.Uid, GID: opened.Gid, Mode: uint32(opened.Mode)}, nil
 }
 
 func fdPath(f *os.File) (string, error) {
@@ -75,7 +118,7 @@ func (l *GateLease) Close() error {
 		return nil
 	}
 	l.closed = true
-	return l.dir.Close()
+	return errors.Join(l.dir.Close(), l.lifetime.Close())
 }
 
 type OwnedChild struct {
@@ -90,7 +133,7 @@ type OwnedChild struct {
 	activated      bool
 	exitObserved   bool
 	exitRegistered bool
-	keepLease      bool
+	keepDirectory  bool
 	// testConvergence injects a package-test-only failure immediately before
 	// activated group convergence. Production children always leave it nil.
 	testConvergence func() error
@@ -103,8 +146,8 @@ func (c *OwnedChild) Identity() Identity {
 	return c.identity
 }
 
-func StartBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, keepLeaseAcrossExec bool) (child *OwnedChild, err error) {
-	if lease == nil || lease.closed || lease.marker != nil || spec == nil {
+func StartBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, keepDirectoryAcrossExec bool) (child *OwnedChild, err error) {
+	if lease == nil || lease.closed || lease.marker != nil || lease.lifetime == nil || spec == nil {
 		return nil, ErrState
 	}
 	gate, err := canonical(gateExecutable)
@@ -119,7 +162,7 @@ func StartBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, kee
 		return nil, err
 	}
 	defer config.Close()
-	if err := writeFrame(config, gateConfig{Version: 1, Target: spec.commit, LeaseDirectory: lease.dirIdentity, MarkerName: lease.basename, KeepLease: keepLeaseAcrossExec, Control: spec.controlID, TestFinalCheck: spec.testFinal != nil}, maxConfigBytes); err != nil {
+	if err := writeFrame(config, gateConfig{Version: 1, Target: spec.commit, LeaseDirectory: lease.dirIdentity, Lifetime: lease.lifetimeID, MarkerName: lease.basename, KeepDirectory: keepDirectoryAcrossExec, Control: spec.controlID, TestFinalCheck: spec.testFinal != nil}, maxConfigBytes); err != nil {
 		return nil, err
 	}
 	if _, err := config.Seek(0, 0); err != nil {
@@ -166,6 +209,12 @@ func StartBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, kee
 	}
 	leaseFile := os.NewFile(uintptr(leaseDup), "lease-dir")
 	defer leaseFile.Close()
+	lifetimeDup, err := unix.FcntlInt(lease.lifetime.Fd(), unix.F_DUPFD_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	lifetimeFile := os.NewFile(uintptr(lifetimeDup), "runtime-lifetime")
+	defer lifetimeFile.Close()
 	kq, err := unix.Kqueue()
 	if err != nil {
 		return nil, err
@@ -174,7 +223,7 @@ func StartBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, kee
 	cmd := exec.Command(gate, "--exec-gate")
 	cmd.Env = []string{}
 	cmd.Stderr = stderr
-	cmd.ExtraFiles = []*os.File{config, leashR, statusW, stdin, stdout, stderr, leaseFile}
+	cmd.ExtraFiles = []*os.File{config, leashR, statusW, stdin, stdout, stderr, leaseFile, lifetimeFile}
 	if spec.controlID != nil {
 		cmd.ExtraFiles = append(cmd.ExtraFiles, spec.control)
 	}
@@ -188,7 +237,7 @@ func StartBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, kee
 		statusR.Close()
 		return nil, err
 	}
-	c := &OwnedChild{cmd: cmd, identity: Identity{PID: cmd.Process.Pid, PGID: cmd.Process.Pid}, kq: kq, activation: leashW, status: statusR, lease: lease, state: stateBlocked, keepLease: keepLeaseAcrossExec}
+	c := &OwnedChild{cmd: cmd, identity: Identity{PID: cmd.Process.Pid, PGID: cmd.Process.Pid}, kq: kq, activation: leashW, status: statusR, lease: lease, state: stateBlocked, keepDirectory: keepDirectoryAcrossExec}
 	defer func() {
 		if err != nil {
 			if cleanupErr := c.hardCleanup(); cleanupErr != nil {
@@ -767,7 +816,8 @@ func RunExecGate() error {
 	stdout := os.NewFile(7, "target-stdout")
 	stderr := os.NewFile(8, "target-stderr")
 	leaseDir := os.NewFile(9, "lease-dir")
-	for _, f := range []*os.File{config, leash, status, stdin, stdout, stderr, leaseDir} {
+	lifetime := os.NewFile(10, "runtime-lifetime")
+	for _, f := range []*os.File{config, leash, status, stdin, stdout, stderr, leaseDir, lifetime} {
 		if f == nil {
 			return fmt.Errorf("runner: missing inherited capability")
 		}
@@ -783,9 +833,12 @@ func RunExecGate() error {
 	if got, err := commitOpen(leaseDir, cfg.LeaseDirectory.Path, false); err != nil || got.FileIdentity != cfg.LeaseDirectory.FileIdentity || got.UID != cfg.LeaseDirectory.UID || got.GID != cfg.LeaseDirectory.GID || got.Mode != cfg.LeaseDirectory.Mode {
 		return fmt.Errorf("runner: lease directory: %w", ErrIdentity)
 	}
+	if got, err := commitRuntimeLifetime(leaseDir, lifetime); err != nil || got != cfg.Lifetime {
+		return fmt.Errorf("runner: runtime lifetime: %w", errors.Join(ErrIdentity, err))
+	}
 	var control *os.File
 	if cfg.Control != nil {
-		control = os.NewFile(10, "target-control")
+		control = os.NewFile(11, "target-control")
 		if control == nil || verifyControl(control, *cfg.Control) != nil {
 			return fmt.Errorf("runner: control capability: %w", ErrIdentity)
 		}
@@ -839,9 +892,9 @@ func RunExecGate() error {
 	if cfg.TestFinalCheck {
 		// This package-test-only barrier makes the documented cooperative
 		// same-UID pathname race measurable; it is not a production defense.
-		seamFD := uintptr(10)
+		seamFD := uintptr(11)
 		if control != nil {
-			seamFD = 11
+			seamFD = 12
 		}
 		seam := os.NewFile(seamFD, "test-final-check")
 		if seam == nil {
@@ -861,7 +914,7 @@ func RunExecGate() error {
 		return err
 	}
 	_ = cwd.Close()
-	if !cfg.KeepLease {
+	if !cfg.KeepDirectory {
 		_ = leaseDir.Close()
 	}
 	if err := unix.Dup2(int(stdin.Fd()), 0); err != nil {
@@ -878,15 +931,18 @@ func RunExecGate() error {
 			return err
 		}
 	}
-	for _, fd := range []int{4, 6, 7, 8, 10, 11} {
+	for _, fd := range []int{4, 6, 7, 8, 11, 12} {
 		_ = unix.Close(fd)
 	}
 	if control == nil {
 		_ = unix.Close(3)
 	}
 	unix.CloseOnExec(5)
-	if !cfg.KeepLease {
+	if !cfg.KeepDirectory {
 		_ = unix.Close(9)
+	}
+	if _, err := unix.FcntlInt(lifetime.Fd(), unix.F_SETFD, 0); err != nil {
+		return fmt.Errorf("runner: retain runtime lifetime: %w", err)
 	}
 	if err := unix.Exec(cfg.Target.Executable.Path, cfg.Target.Argv, cfg.Target.Env); err != nil {
 		_ = writeFrame(status, gateFrame{Kind: "launch-error", Error: err.Error()}, maxFrameBytes)

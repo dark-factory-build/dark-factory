@@ -37,15 +37,25 @@ func TestRuntimeCreatePublishClosePreservesExactPrivateEffects(t *testing.T) {
 	assertDirectory(t, runtimePath, identity.Device, identity.Inode, 0o700)
 	assertDirectory(t, filepath.Join(runtimePath, runtimeHomeName), 0, 0, 0o700)
 	assertDirectory(t, filepath.Join(runtimePath, runtimeTempName), 0, 0, 0o700)
+	leaseInfo, err := os.Lstat(filepath.Join(runtimePath, runner.RuntimeLifetimeLeaseName))
+	if err != nil || !leaseInfo.Mode().IsRegular() || leaseInfo.Mode().Perm() != 0o600 || leaseInfo.Size() != 0 {
+		t.Fatalf("runtime lifetime = %v, %v", leaseInfo, err)
+	}
 
-	duplicate, err := runtime.DuplicateDirectory()
+	duplicate, lifetime, err := runtime.DuplicateRunnerFiles()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if duplicate.Fd() == runtime.dir.Fd() {
 		t.Fatal("directory descriptor was not duplicated")
 	}
+	if err := unix.Fchdir(int(lifetime.Fd())); !errors.Is(err, unix.ENOTDIR) && !errors.Is(err, unix.EBADF) {
+		t.Fatalf("lifetime duplicate grants directory authority: %v", err)
+	}
 	if err := duplicate.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := lifetime.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -359,7 +369,7 @@ func TestRuntimeLifetimeLeaseRequiresLastDuplicateClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	identity := mustRuntimeIdentity(t, runtime)
-	duplicate, err := runtime.DuplicateDirectory()
+	directory, duplicate, err := runtime.DuplicateRunnerFiles()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -367,6 +377,9 @@ func TestRuntimeLifetimeLeaseRequiresLastDuplicateClose(t *testing.T) {
 		t.Fatalf("live runtime observation = %v, %v", got, err)
 	}
 	if err := runtime.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := directory.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := ObserveRuntimeLifetime(parent, "run", identity); err != nil || got != RuntimeLeaseHeld {
@@ -485,8 +498,8 @@ func TestRuntimeBindingAndDuplicationRejectChangedParentLockMetadata(t *testing.
 			if _, _, err := binding.Values(); !errors.Is(err, errInvalidContract) {
 				t.Fatalf("cached Binding after %s = %v", mutation, err)
 			}
-			if duplicate, err := runtime.DuplicateDirectory(); !errors.Is(err, errInvalidContract) || duplicate != nil {
-				t.Fatalf("DuplicateDirectory after %s = %v, %v", mutation, duplicate, err)
+			if directory, lifetime, err := runtime.DuplicateRunnerFiles(); !errors.Is(err, errInvalidContract) || directory != nil || lifetime != nil {
+				t.Fatalf("DuplicateRunnerFiles after %s = %v, %v, %v", mutation, directory, lifetime, err)
 			}
 		})
 	}
@@ -523,6 +536,44 @@ func TestRuntimeBindingRejectsFixedChildReplacement(t *testing.T) {
 			}
 			if _, err := binding.WorkerConfigPath(); !errors.Is(err, errInvalidContract) {
 				t.Fatalf("config locator accepted replaced %s: %v", name, err)
+			}
+		})
+	}
+}
+
+func TestRuntimeBindingRejectsLifetimeMutation(t *testing.T) {
+	for _, mutation := range []string{"mode", "hardlink", "replacement"} {
+		t.Run(mutation, func(t *testing.T) {
+			runtime := newTestRuntime(t)
+			defer runtime.Close()
+			binding, err := runtime.Binding()
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := mustRuntimePath(t, runtime)
+			lease := filepath.Join(path, runner.RuntimeLifetimeLeaseName)
+			switch mutation {
+			case "mode":
+				if err := os.Chmod(lease, 0o640); err != nil {
+					t.Fatal(err)
+				}
+			case "hardlink":
+				if err := os.Link(lease, lease+".link"); err != nil {
+					t.Fatal(err)
+				}
+			case "replacement":
+				if err := os.Rename(lease, lease+".old"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(lease, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, _, err := binding.Values(); !errors.Is(err, errInvalidContract) {
+				t.Fatalf("Binding after lifetime %s = %v", mutation, err)
+			}
+			if directory, lifetime, err := runtime.DuplicateRunnerFiles(); !errors.Is(err, errInvalidContract) || directory != nil || lifetime != nil {
+				t.Fatalf("DuplicateRunnerFiles after lifetime %s = %v, %v, %v", mutation, directory, lifetime, err)
 			}
 		})
 	}
@@ -596,8 +647,8 @@ func TestRuntimeAuthorityRejectsPathReplacementAtEveryAccessor(t *testing.T) {
 		if _, err := runtime.Binding(); !errors.Is(err, errInvalidContract) {
 			t.Fatalf("Binding after replacement = %v", err)
 		}
-		if duplicate, err := runtime.DuplicateDirectory(); !errors.Is(err, errInvalidContract) || duplicate != nil {
-			t.Fatalf("DuplicateDirectory after replacement = %v, %v", duplicate, err)
+		if directory, lifetime, err := runtime.DuplicateRunnerFiles(); !errors.Is(err, errInvalidContract) || directory != nil || lifetime != nil {
+			t.Fatalf("DuplicateRunnerFiles after replacement = %v, %v, %v", directory, lifetime, err)
 		}
 		if _, err := runtime.PublishAttemptToken(context.Background(), [32]byte{1}); !errors.Is(err, errInvalidContract) {
 			t.Fatalf("token after replacement = %v", err)

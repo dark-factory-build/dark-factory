@@ -15,7 +15,7 @@ import (
 
 const runtimeRemovalEffectLimit = 256
 const runtimeRemovalDepthLimit = 32
-const runtimeTopEntryLimit = 11 // home, tmp, terminal, and eight removable fixed files.
+const runtimeTopEntryLimit = 12 // home, tmp, terminal, lifetime, and eight removable fixed files.
 
 // RemoveRecordedRuntime removes only a positively identified, inactive
 // runtime using the fixed V1 grammar. false,nil is bounded progress or lock
@@ -72,16 +72,35 @@ func removeRecordedRuntimeWithHook(ctx context.Context, parent *RuntimeParent, b
 	if err != nil || verifyNamedChild(parentFD, basename, rootIdentity) != nil {
 		return false, invalidContract(err)
 	}
-	if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		if errors.Is(err, unix.EWOULDBLOCK) {
-			return false, nil
-		}
-		return false, invalidContract(err)
-	}
-	defer unix.Flock(fd, unix.LOCK_UN)
 	if err := verifyNamedChild(parentFD, basename, rootIdentity); err != nil {
 		return false, invalidContract(err)
 	}
+	lifetime, lifetimeIdentity, err := openRuntimeLifetime(fd, rootIdentity.device, nil)
+	if errors.Is(err, errRuntimeBusy) {
+		return false, nil
+	}
+	if err != nil {
+		// A prior cleanup may have durably removed the lifetime immediately
+		// before a failed root removal. Only an otherwise empty exact root is a
+		// safe continuation of that crash cut.
+		if !errors.Is(err, errInvalidContract) || !runtimeRootEmpty(fd) {
+			return false, err
+		}
+		if err := syncDirectory(fd); err != nil {
+			return false, invalidContract(err)
+		}
+		if err := unix.Unlinkat(parentFD, basename, unix.AT_REMOVEDIR); err != nil {
+			return false, invalidContract(err)
+		}
+		if err := syncDirectory(parentFD); err != nil {
+			return false, invalidContract(err)
+		}
+		if err := unix.Fstatat(parentFD, basename, &named, unix.AT_SYMLINK_NOFOLLOW); !errors.Is(err, unix.ENOENT) {
+			return false, invalidContract(err)
+		}
+		return true, nil
+	}
+	defer lifetime.Close()
 	entries, more, err := readRuntimeEntries(fd, runtimeTopEntryLimit)
 	if err != nil || more {
 		return false, invalidContract(err)
@@ -107,7 +126,7 @@ func removeRecordedRuntimeWithHook(ctx context.Context, parent *RuntimeParent, b
 		}
 	}
 	for _, name := range entries {
-		if name == runtimeHomeName || name == runtimeTempName {
+		if name == runtimeHomeName || name == runtimeTempName || name == runner.RuntimeLifetimeLeaseName {
 			continue
 		}
 		if err := ctx.Err(); err != nil {
@@ -134,6 +153,16 @@ func removeRecordedRuntimeWithHook(ctx context.Context, parent *RuntimeParent, b
 		return false, invalidContract(err)
 	}
 	if err := verifyNamedChild(parentFD, basename, rootIdentity); err != nil {
+		return false, invalidContract(err)
+	}
+	var namedLifetime unix.Stat_t
+	if err := unix.Fstatat(fd, runner.RuntimeLifetimeLeaseName, &namedLifetime, unix.AT_SYMLINK_NOFOLLOW); err != nil || !validRuntimeLifetime(namedLifetime, rootIdentity.device) || (runner.FileIdentity{Device: uint64(namedLifetime.Dev), Inode: namedLifetime.Ino}) != lifetimeIdentity {
+		return false, invalidContract(err)
+	}
+	if err := unix.Unlinkat(fd, runner.RuntimeLifetimeLeaseName, 0); err != nil {
+		return false, invalidContract(err)
+	}
+	if err := syncDirectory(fd); err != nil {
 		return false, invalidContract(err)
 	}
 	remaining, more, err := readRuntimeEntries(fd, runtimeTopEntryLimit)
@@ -163,11 +192,17 @@ func isRemovableRuntimeFile(name string) bool {
 	case attemptTokenName, workerConfigName,
 		runner.OuterActivationMarkerName, runner.InnerActivationMarkerName,
 		runner.GateConfigScratchName, runner.GateStdinScratchName,
-		runner.ProviderStdinScratchName, runner.TerminalScratchName:
+		runner.ProviderStdinScratchName, runner.TerminalScratchName,
+		runner.RuntimeLifetimeLeaseName:
 		return true
 	default:
 		return false
 	}
+}
+
+func runtimeRootEmpty(fd int) bool {
+	entries, more, err := readRuntimeEntries(fd, 1)
+	return err == nil && !more && len(entries) == 0
 }
 
 func removeRuntimeTree(ctx context.Context, parentFD int, name string, device uint64, budget *int, syncDirectory func(int) error, exactLayout bool, depth int) (bool, error) {
