@@ -1852,3 +1852,31 @@ Runtime-ownership candidate review at unintegrated head `ca222fd`:
   depth/descriptors and already-absent fsync/recheck. This candidate remains
   unintegrated until both new findings receive causal tests and exact-head
   independent ALLOW.
+
+Runtime-ownership re-review at unintegrated head `b640b78`:
+
+- The repaired candidate replaced the runtime-directory lease with a fixed
+  empty read-only regular lifetime inode. A real provider retained only FD 10
+  across final exec; FD 3/control and FD 9/runtime closed. The reviewer killed
+  the outer runner and proved the same live provider kept recovery's fresh
+  flock blocked, then released it on provider exit. The provider could not use
+  FD 10 for `openat`, `fchdir`, write or truncate. The exact terminal-scratch
+  residue repair also held. These close the previous two findings.
+- Exact-head re-review still returned **BLOCK** after proving that
+  `AdoptRuntime` created missing fixed children before it acquired an already-
+  existing lifetime flock. A held/live runtime with a partial layout was
+  therefore mutated before recovery returned busy. Existing lifetime authority
+  must be acquired and rechecked before the first adoption effect; only a
+  recognized pre-lifetime crash layout may create the lifetime under the
+  cooperative parent lock.
+- The reviewer also replaced the newly created lifetime inode during an
+  injected creation failure. The inner exact cleanup retained/removed the
+  original safely, but outer layout cleanup then unlinked the valid replacement
+  by name. Failed-create cleanup must carry the exact lifetime identity created
+  by that operation and may never unlink a replacement merely because its
+  metadata looks valid.
+- The next repair is deliberately limited to effect ordering and exact identity
+  threading. All prior provider-lease, parent-lock, Binding, fixed-grammar,
+  terminal preflight, bounded cleanup and scratch tests remain required, and
+  the stack remains unintegrated until the same reviewer returns exact-head
+  ALLOW.
