@@ -19,10 +19,10 @@ const (
 )
 
 var (
-	ErrTerminalReplayReset  = errors.New("runner: terminal replay cursor is below the retained floor")
-	ErrTerminalReplayFuture = errors.New("runner: terminal replay cursor is beyond the head")
-	ErrTerminalReplaySize   = errors.New("runner: terminal replay head would overflow")
-	ErrFrameDecoderPoisoned = errors.New("runner: frame decoder is poisoned")
+	errTerminalReplayReset  = errors.New("runner: terminal replay cursor is below the retained floor")
+	errTerminalReplayFuture = errors.New("runner: terminal replay cursor is beyond the head")
+	errTerminalReplaySize   = errors.New("runner: terminal replay head would overflow")
+	errFrameDecoderPoisoned = errors.New("runner: frame decoder is poisoned")
 )
 
 // attemptFrameDecoder incrementally consumes the private length-prefixed JSON
@@ -93,18 +93,8 @@ func (d *attemptFrameDecoder) Feed(p []byte) ([]attemptFrame, error) {
 }
 
 func (d *attemptFrameDecoder) fail(err error) error {
-	d.poisoned = errors.Join(ErrFrameDecoderPoisoned, err)
+	d.poisoned = errors.Join(errFrameDecoderPoisoned, err)
 	return d.poisoned
-}
-
-// Reset is intentionally rejected. A malformed private frame leaves the
-// stream's framing boundary untrusted; only closing and recreating the
-// capability can recover it.
-func (d *attemptFrameDecoder) Reset() error {
-	if d == nil {
-		return ErrIdentity
-	}
-	return ErrFrameDecoderPoisoned
 }
 
 // terminalByteRing is the sole live scrollback copy. Sequence numbers are
@@ -120,7 +110,7 @@ func (r *terminalByteRing) Append(p []byte) error {
 		return ErrIdentity
 	}
 	if uint64(len(p)) > math.MaxUint64-r.head {
-		return ErrTerminalReplaySize
+		return errTerminalReplaySize
 	}
 	newHead := r.head + uint64(len(p))
 	newFloor := uint64(0)
@@ -136,7 +126,7 @@ func (r *terminalByteRing) Append(p []byte) error {
 		p = p[len(p)-terminalReplayCapacity:]
 	}
 	start := newHead - uint64(len(p))
-	copy(r.bytes[start%terminalReplayCapacity:], p[:minInt(len(p), terminalReplayCapacity-int(start%terminalReplayCapacity))])
+	copy(r.bytes[start%terminalReplayCapacity:], p[:min(len(p), terminalReplayCapacity-int(start%terminalReplayCapacity))])
 	if len(p) > terminalReplayCapacity-int(start%terminalReplayCapacity) {
 		copy(r.bytes[:], p[terminalReplayCapacity-int(start%terminalReplayCapacity):])
 	}
@@ -152,10 +142,10 @@ func (r *terminalByteRing) Read(cursor uint64) ([]byte, uint64, error) {
 		return nil, 0, ErrIdentity
 	}
 	if cursor < r.floor {
-		return nil, r.head, ErrTerminalReplayReset
+		return nil, r.head, errTerminalReplayReset
 	}
 	if cursor > r.head {
-		return nil, r.head, ErrTerminalReplayFuture
+		return nil, r.head, errTerminalReplayFuture
 	}
 	if cursor == r.head {
 		return nil, cursor, nil
@@ -166,7 +156,7 @@ func (r *terminalByteRing) Read(cursor uint64) ([]byte, uint64, error) {
 	}
 	chunk := make([]byte, int(n))
 	offset := int(cursor % terminalReplayCapacity)
-	first := minInt(len(chunk), terminalReplayCapacity-offset)
+	first := min(len(chunk), terminalReplayCapacity-offset)
 	copy(chunk, r.bytes[offset:offset+first])
 	if first != len(chunk) {
 		copy(chunk[first:], r.bytes[:len(chunk)-first])
@@ -175,24 +165,11 @@ func (r *terminalByteRing) Read(cursor uint64) ([]byte, uint64, error) {
 }
 
 func (r *terminalByteRing) Floor() uint64 {
-	if r == nil {
-		return 0
-	}
 	return r.floor
 }
 
 func (r *terminalByteRing) Head() uint64 {
-	if r == nil {
-		return 0
-	}
 	return r.head
-}
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 // decodeFrameBody is shared by blocking lifecycle reads and the incremental
