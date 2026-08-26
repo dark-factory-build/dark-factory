@@ -181,7 +181,7 @@ func openRuntimeAuthority(ctx context.Context, runtimeDir *os.File) (*runtimeAut
 	if err != nil {
 		return nil, Config{}, err
 	}
-	config, configID, configSize, encoded, err := openPrivateFile(int(runtimeDir.Fd()), ConfigName, ConfigLimit)
+	config, configID, configSize, encoded, err := openPrivateFile(int(runtimeDir.Fd()), ConfigName, ConfigLimit, rootID.Device)
 	if err != nil {
 		return nil, Config{}, err
 	}
@@ -205,20 +205,20 @@ func openRuntimeAuthority(ctx context.Context, runtimeDir *os.File) (*runtimeAut
 		_ = config.Close()
 		return nil, Config{}, ErrWorker
 	}
-	home, err := openPrivateDirectoryAt(int(runtimeDir.Fd()), HomeName)
+	home, homeID, err := openPrivateDirectoryAt(int(runtimeDir.Fd()), HomeName, rootID.Device)
 	if err != nil {
 		_ = namedRoot.Close()
 		_ = config.Close()
 		return nil, Config{}, err
 	}
-	temp, err := openPrivateDirectoryAt(int(runtimeDir.Fd()), TempName)
+	temp, tempID, err := openPrivateDirectoryAt(int(runtimeDir.Fd()), TempName, rootID.Device)
 	if err != nil {
 		_ = home.Close()
 		_ = namedRoot.Close()
 		_ = config.Close()
 		return nil, Config{}, err
 	}
-	token, _, _, body, err := openPrivateFile(int(runtimeDir.Fd()), AttemptTokenName, 32)
+	token, tokenID, _, body, err := openPrivateFile(int(runtimeDir.Fd()), AttemptTokenName, 32, rootID.Device)
 	if err != nil || len(body) != 32 {
 		if token != nil {
 			_ = token.Close()
@@ -229,9 +229,6 @@ func openRuntimeAuthority(ctx context.Context, runtimeDir *os.File) (*runtimeAut
 		_ = config.Close()
 		return nil, Config{}, ErrWorker
 	}
-	homeID, _ := privateDirectory(home)
-	tempID, _ := privateDirectory(temp)
-	tokenID, _ := openFileIdentity(token)
 	return &runtimeAuthority{runtimePath: decoded.RuntimePath, namedRoot: namedRoot, config: config, home: home, temp: temp, token: token, rootID: rootID, configID: configID, homeID: homeID, tempID: tempID, tokenID: tokenID, configSize: configSize, configDigest: sha256.Sum256(encoded)}, decoded, nil
 }
 
@@ -264,18 +261,18 @@ func (a *runtimeAuthority) verify(ctx context.Context) error {
 		id   runner.FileIdentity
 	}{{a.home, a.homeID}, {a.temp, a.tempID}} {
 		got, err := privateDirectory(item.file)
-		if err != nil || got != item.id {
+		if err != nil || got != item.id || runtimeDevice(got, a.rootID.Device) != nil {
 			return ErrWorker
 		}
 	}
-	if err := verifyOpenPrivateFile(a.config, a.configID, a.configSize); err != nil {
+	if err := verifyOpenPrivateFile(a.config, a.configID, a.configSize); err != nil || runtimeDevice(a.configID, a.rootID.Device) != nil {
 		return ErrWorker
 	}
 	var token unix.Stat_t
 	if err := unix.Fstat(int(a.token.Fd()), &token); err != nil || token.Mode&unix.S_IFMT != unix.S_IFREG || token.Uid != uint32(os.Geteuid()) || token.Mode&0o7777 != 0o600 || token.Nlink != 1 || token.Size != 32 {
 		return ErrWorker
 	}
-	if (runner.FileIdentity{Device: uint64(token.Dev), Inode: token.Ino}) != a.tokenID {
+	if (runner.FileIdentity{Device: uint64(token.Dev), Inode: token.Ino}) != a.tokenID || runtimeDevice(a.tokenID, a.rootID.Device) != nil {
 		return ErrWorker
 	}
 	if _, err := a.config.Seek(0, io.SeekStart); err != nil {
@@ -295,14 +292,6 @@ func (a *runtimeAuthority) verify(ctx context.Context) error {
 		}
 	}
 	return ctx.Err()
-}
-
-func openFileIdentity(file *os.File) (runner.FileIdentity, error) {
-	var stat unix.Stat_t
-	if file == nil || unix.Fstat(int(file.Fd()), &stat) != nil {
-		return runner.FileIdentity{}, ErrWorker
-	}
-	return runner.FileIdentity{Device: uint64(stat.Dev), Inode: stat.Ino}, nil
 }
 
 func (a *runtimeAuthority) close() error {
@@ -330,20 +319,21 @@ func privateDirectory(file *os.File) (runner.FileIdentity, error) {
 	return runner.FileIdentity{Device: uint64(stat.Dev), Inode: stat.Ino}, nil
 }
 
-func openPrivateDirectoryAt(parent int, name string) (*os.File, error) {
+func openPrivateDirectoryAt(parent int, name string, rootDevice uint64) (*os.File, runner.FileIdentity, error) {
 	fd, err := unix.Openat(parent, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
 	if err != nil {
-		return nil, ErrWorker
+		return nil, runner.FileIdentity{}, ErrWorker
 	}
 	file := os.NewFile(uintptr(fd), "private-runtime-directory")
-	if _, err := privateDirectory(file); err != nil {
+	identity, err := privateDirectory(file)
+	if err != nil || runtimeDevice(identity, rootDevice) != nil {
 		_ = file.Close()
-		return nil, err
+		return nil, runner.FileIdentity{}, ErrWorker
 	}
-	return file, nil
+	return file, identity, nil
 }
 
-func openPrivateFile(parent int, name string, maximum int) (*os.File, runner.FileIdentity, int64, []byte, error) {
+func openPrivateFile(parent int, name string, maximum int, rootDevice uint64) (*os.File, runner.FileIdentity, int64, []byte, error) {
 	fd, err := unix.Openat(parent, name, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
 	if err != nil {
 		return nil, runner.FileIdentity{}, 0, nil, ErrWorker
@@ -360,11 +350,18 @@ func openPrivateFile(parent int, name string, maximum int) (*os.File, runner.Fil
 		return nil, runner.FileIdentity{}, 0, nil, ErrWorker
 	}
 	id := runner.FileIdentity{Device: uint64(stat.Dev), Inode: stat.Ino}
-	if err := verifyOpenPrivateFile(file, id, stat.Size); err != nil {
+	if err := verifyOpenPrivateFile(file, id, stat.Size); err != nil || runtimeDevice(id, rootDevice) != nil {
 		_ = file.Close()
-		return nil, runner.FileIdentity{}, 0, nil, err
+		return nil, runner.FileIdentity{}, 0, nil, ErrWorker
 	}
 	return file, id, stat.Size, body, nil
+}
+
+func runtimeDevice(identity runner.FileIdentity, rootDevice uint64) error {
+	if rootDevice == 0 || identity.Device != rootDevice {
+		return ErrWorker
+	}
+	return nil
 }
 
 func verifyOpenPrivateFile(file *os.File, id runner.FileIdentity, size int64) error {

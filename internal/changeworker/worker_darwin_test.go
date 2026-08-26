@@ -152,6 +152,56 @@ func TestCompleteWorkerLeavesExactFDAndGoroutineCensus(t *testing.T) {
 	}
 }
 
+func TestInitialRuntimeChildValidationPrecedesSelectionEffects(t *testing.T) {
+	for _, name := range []string{"config", "home", "tmp", "token"} {
+		t.Run(name, func(t *testing.T) {
+			before := fdCensus(t)
+			fixture := newWorkerFixture(t)
+			fixture.start(t)
+			binding, err := fixture.runtime.Binding()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var path string
+			switch name {
+			case "config":
+				path, err = binding.WorkerConfigPath()
+			case "home":
+				path, err = binding.ProviderHome()
+			case "tmp":
+				path, err = binding.ProviderTemp()
+			case "token":
+				path, err = binding.AttemptTokenPath()
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(path, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := fixture.controller.Release(runner.StageSelection); err != nil {
+				t.Fatal(err)
+			}
+			event, err := fixture.controller.Next(8 * time.Second)
+			if !errors.Is(err, io.EOF) || event.Kind != "" || event.Stage != "" || event.Identity.Valid() || len(event.Payload) != 0 || event.Terminal != nil {
+				t.Fatalf("event=%+v err=%v diag=%q", event, err, fixture.output())
+			}
+			if exit, err := fixture.child.FinishAfterExit(8 * time.Second); err != nil || exit.Code == 0 && exit.Signal == 0 {
+				t.Fatalf("outer=%+v err=%v", exit, err)
+			}
+			for _, effect := range []string{filepath.Join(fixture.changeParent, fixture.finalName), filepath.Join(fixture.changeParent, ".stage"), fixture.witness} {
+				if _, err := os.Lstat(effect); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("pre-validation effect %q: %v", effect, err)
+				}
+			}
+			fixture.close()
+			if after := fdCensus(t); !reflect.DeepEqual(after, before) {
+				t.Fatalf("%s FD census changed: before=%v after=%v", name, before, after)
+			}
+		})
+	}
+}
+
 func TestFinalReinspectionRejectsLateGitMetadata(t *testing.T) {
 	fixture := newWorkerFixture(t)
 	fixture.start(t)

@@ -381,20 +381,19 @@ func decodeFormat(value byte) (change.ObjectFormat, error) {
 	switch value {
 	case 1:
 		format, err := change.NewObjectFormat("sha1")
-		return format, invalidChangeError(err)
+		if err != nil {
+			return 0, invalidContract(err)
+		}
+		return format, nil
 	case 2:
 		format, err := change.NewObjectFormat("sha256")
-		return format, invalidChangeError(err)
+		if err != nil {
+			return 0, invalidContract(err)
+		}
+		return format, nil
 	default:
 		return 0, invalidContract(nil)
 	}
-}
-
-func invalidChangeError(err error) error {
-	if err == nil {
-		return nil
-	}
-	return invalidContract(err)
 }
 
 func validText(value string, maximum int) bool {
