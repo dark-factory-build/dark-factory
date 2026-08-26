@@ -195,25 +195,25 @@ func StartBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, kee
 	_ = statusW.Close()
 	first, e := readIdentity(c.identity.PID)
 	if e != nil {
-		err = e
+		err = fmt.Errorf("runner: first identity: %w", e)
 		return nil, err
 	}
 	if e = registerExit(kq, c.identity.PID); e != nil {
-		err = e
+		err = fmt.Errorf("runner: register exit: %w", e)
 		return nil, err
 	}
 	if e = statusR.SetReadDeadline(time.Now().Add(4 * time.Second)); e != nil {
-		err = e
+		err = fmt.Errorf("runner: ready deadline: %w", e)
 		return nil, err
 	}
 	var ready gateFrame
 	if e = readFrame(statusR, &ready, maxFrameBytes); e != nil {
-		err = e
+		err = fmt.Errorf("runner: ready frame: %w", e)
 		return nil, err
 	}
 	second, e := readIdentity(c.identity.PID)
 	if e != nil {
-		err = e
+		err = fmt.Errorf("runner: second identity: %w", e)
 		return nil, err
 	}
 	if ready.Kind != "ready" || !ready.Identity.Valid() || ready.Identity != first || second != first || first.PGID != first.PID {
@@ -586,16 +586,16 @@ func RunExecGate() error {
 		return fmt.Errorf("runner: invalid gate config")
 	}
 	if got, err := commitOpen(leaseDir, cfg.LeaseDirectory.Path, false); err != nil || got.FileIdentity != cfg.LeaseDirectory.FileIdentity || got.UID != cfg.LeaseDirectory.UID || got.GID != cfg.LeaseDirectory.GID || got.Mode != cfg.LeaseDirectory.Mode {
-		return ErrIdentity
+		return fmt.Errorf("runner: lease directory: %w", ErrIdentity)
 	}
 	target, err := verifyCommit(cfg.Target.Executable, true)
 	if err != nil {
-		return err
+		return fmt.Errorf("runner: prepared executable: %w", err)
 	}
 	_ = target.Close()
 	cwd, err := verifyCommit(cfg.Target.Cwd, false)
 	if err != nil {
-		return err
+		return fmt.Errorf("runner: prepared cwd: %w", err)
 	}
 	defer cwd.Close()
 	id, err := readIdentity(os.Getpid())

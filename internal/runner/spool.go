@@ -89,7 +89,8 @@ func LoadTerminal(dir *os.File, basename string) (*TerminalRecord, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer unix.Close(fd)
+	f := os.NewFile(uintptr(fd), "terminal")
+	defer f.Close()
 	var a, b unix.Stat_t
 	if err := unix.Fstat(fd, &a); err != nil {
 		return nil, err
@@ -97,7 +98,6 @@ func LoadTerminal(dir *os.File, basename string) (*TerminalRecord, error) {
 	if a.Mode&unix.S_IFMT != unix.S_IFREG || a.Mode&0o777 != 0o600 || a.Nlink != 1 || a.Size <= 0 || a.Size > maxTerminalBytes {
 		return nil, ErrIdentity
 	}
-	f := os.NewFile(uintptr(fd), "terminal")
 	body, err := io.ReadAll(io.LimitReader(f, maxTerminalBytes+1))
 	if err != nil {
 		return nil, err

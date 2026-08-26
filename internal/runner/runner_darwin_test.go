@@ -156,7 +156,7 @@ func TestBlockedActivateExecutesOnceWithExactIdentityAndInput(t *testing.T) {
 	effect := filepath.Join(f.root, "effect")
 	stdinCopy := filepath.Join(f.root, "stdin")
 	out := outputFile(t, filepath.Join(f.root, "output"))
-	child := f.start("/bin/sh", []string{"-c", fmt.Sprintf("printf x >> %q; cat > %q; printf '%%s' $$", effect, stdinCopy)}, []byte("one-input"), out)
+	child := f.start("/bin/sh", []string{"-c", fmt.Sprintf("test -z \"${HOME+x}\" || exit 90; for n in 3 4 5 6 7 8 9; do test ! -e /dev/fd/$n || exit 91; done; printf x >> %q; cat > %q; printf '%%s' $$", effect, stdinCopy)}, []byte("one-input"), out)
 	id := child.Identity()
 	if !id.Valid() || id.PID != id.PGID {
 		t.Fatalf("bad ready identity %+v", id)
@@ -345,6 +345,31 @@ func TestObservationFailsClosed(t *testing.T) {
 	reused.Birth.Microseconds++
 	if got := ObserveProcess(reused); got.Presence != Reused {
 		t.Fatalf("reuse=%+v", got)
+	}
+}
+
+func TestPrepareRejectsScriptAndPreexistingMarker(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(root, "provider")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PrepareExecSpec(ExecSpec{Target: script, Cwd: root}); err == nil {
+		t.Fatal("shebang script accepted")
+	}
+	if err := os.WriteFile(filepath.Join(root, "activate"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dir.Close()
+	if _, _, err := CreateGateLease(dir, "activate"); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("preexisting marker=%v", err)
 	}
 }
 
