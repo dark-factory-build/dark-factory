@@ -26,6 +26,19 @@ func TestUnsupportedChangeAPIsFailBeforeFilesystemOrBlobEffect(t *testing.T) {
 	if _, err := InspectPublished(context.Background(), parent, "target", StageIdentity{}, ObjectFormat(1), ObjectID{}); err == nil {
 		t.Fatal("unsupported InspectPublished succeeded")
 	}
+	if verified, err := (Published{}).Reinspect(context.Background()); err == nil || verified != nil {
+		t.Fatalf("unsupported Reinspect = %+v, %v", verified, err)
+	}
+	verified := &VerifiedPublished{}
+	if _, err := verified.Facts(); err == nil {
+		t.Fatal("unsupported verified Facts succeeded")
+	}
+	if duplicate, err := verified.DuplicateDirectory(context.Background()); err == nil || duplicate != nil {
+		t.Fatalf("unsupported verified duplicate = %+v, %v", duplicate, err)
+	}
+	if err := verified.Close(); err == nil {
+		t.Fatal("unsupported verified Close succeeded")
+	}
 	if err := RemoveRecordedTree(context.Background(), parent, "target", StageIdentity{}); err == nil {
 		t.Fatal("unsupported RemoveRecordedTree succeeded")
 	}

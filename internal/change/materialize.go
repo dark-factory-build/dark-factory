@@ -2,7 +2,9 @@ package change
 
 import (
 	"context"
+	"os"
 	"path/filepath"
+	"sync"
 )
 
 // BlobSource returns the exact bytes for one selected Git blob. It must not
@@ -60,8 +62,12 @@ func (f TreeFacts) BlobBytes() uint64 { return f.blobBytes }
 
 // Published identifies one successfully published Change.
 type Published struct {
-	path  string
-	facts TreeFacts
+	path   string
+	parent string
+	target string
+	facts  TreeFacts
+	format ObjectFormat
+	base   ObjectID
 }
 
 // Path returns the clean absolute published path.
@@ -69,6 +75,26 @@ func (p Published) Path() string { return p.path }
 
 // Facts returns reconstructed publication facts.
 func (p Published) Facts() TreeFacts { return p.facts }
+
+func (Published) String() string   { return "Published(<redacted>)" }
+func (Published) GoString() string { return "Published(<redacted>)" }
+
+// VerifiedPublished retains the exact directory descriptor scanned by
+// Published.Reinspect. Copies share one close state and descriptor ownership.
+// Callers can only obtain a usable value from Reinspect.
+type VerifiedPublished struct {
+	state *verifiedPublishedState
+}
+
+type verifiedPublishedState struct {
+	mu        sync.Mutex
+	directory *os.File
+	facts     TreeFacts
+	closed    bool
+}
+
+func (VerifiedPublished) String() string   { return "VerifiedPublished(<redacted>)" }
+func (VerifiedPublished) GoString() string { return "VerifiedPublished(<redacted>)" }
 
 type materializeStep string
 

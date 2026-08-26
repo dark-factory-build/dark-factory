@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/dark-factory-build/dark-factory/internal/change"
+	"golang.org/x/sys/unix"
 )
 
 func TestStageIdentityReconstructsRecoveryAuthorityAcrossClose(t *testing.T) {
@@ -61,12 +62,35 @@ func TestStageIdentityReconstructsRecoveryAuthorityAcrossClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	identity := prepared.Identity()
-	if _, err := prepared.PopulateAndPublish(ctx, manifest, func(context.Context, change.ObjectID) ([]byte, error) {
+	published, err := prepared.PopulateAndPublish(ctx, manifest, func(context.Context, change.ObjectID) ([]byte, error) {
 		return bytes.Clone(blob), nil
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 	if err := prepared.Close(); err != nil {
+		t.Fatal(err)
+	}
+	verified, err := published.Reinspect(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifiedFacts, err := verified.Facts()
+	if err != nil || !verifiedFacts.Identity().Equal(identity) || !verifiedFacts.Commitment().Equal(manifest.Commitment()) {
+		t.Fatalf("external verified facts differ: %+v, %v", verifiedFacts, err)
+	}
+	directory, err := verified.DuplicateDirectory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verified.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var retained unix.Stat_t
+	if err := unix.Fstat(int(directory.Fd()), &retained); err != nil || uint64(retained.Dev) != identity.Device() || retained.Ino != identity.Inode() {
+		t.Fatalf("external duplicate lost exact identity: %+v, %v", retained, err)
+	}
+	if err := directory.Close(); err != nil {
 		t.Fatal(err)
 	}
 

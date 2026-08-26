@@ -4,6 +4,7 @@ package change
 
 import (
 	"context"
+	"os"
 	"runtime"
 )
 
@@ -26,6 +27,20 @@ func (p *Prepared) PopulateAndPublish(context.Context, Manifest, BlobSource) (Pu
 }
 
 func (p *Prepared) Close() error { return &UnsupportedError{Platform: runtime.GOOS} }
+
+func (Published) Reinspect(context.Context) (*VerifiedPublished, error) {
+	return nil, &UnsupportedError{Platform: runtime.GOOS}
+}
+
+func (*VerifiedPublished) Facts() (TreeFacts, error) {
+	return TreeFacts{}, &UnsupportedError{Platform: runtime.GOOS}
+}
+
+func (*VerifiedPublished) DuplicateDirectory(context.Context) (*os.File, error) {
+	return nil, &UnsupportedError{Platform: runtime.GOOS}
+}
+
+func (*VerifiedPublished) Close() error { return &UnsupportedError{Platform: runtime.GOOS} }
 
 func InspectPublished(context.Context, string, string, StageIdentity, ObjectFormat, ObjectID) (TreeFacts, error) {
 	return TreeFacts{}, &UnsupportedError{Platform: runtime.GOOS}

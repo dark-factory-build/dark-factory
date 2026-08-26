@@ -353,7 +353,10 @@ func (p *Prepared) populateAndPublish(ctx context.Context, manifest Manifest, so
 		return unknown(fmt.Errorf("fsync Change parent after publication: %w", err))
 	}
 	facts := factsFromManifest(p.identity, post)
-	return Published{path: changePath(p.parent, p.target), facts: facts}, nil
+	return Published{
+		path: changePath(p.parent, p.target), parent: p.parent, target: p.target,
+		facts: facts, format: manifest.format, base: manifest.base,
+	}, nil
 }
 
 // Close closes retained descriptors only. It never removes staging or target.
@@ -478,52 +481,162 @@ func InspectPublished(ctx context.Context, parent, target string, expected Stage
 }
 
 func inspectPublished(ctx context.Context, parent, target string, expected StageIdentity, format ObjectFormat, base ObjectID, hook materializeHook) (TreeFacts, error) {
+	facts, directory, err := inspectPublishedDirectory(ctx, parent, target, expected, format, base, hook)
+	if directory != nil {
+		_ = directory.Close()
+	}
+	return facts, err
+}
+
+func inspectPublishedDirectory(ctx context.Context, parent, target string, expected StageIdentity, format ObjectFormat, base ObjectID, hook materializeHook) (_ TreeFacts, directory *os.File, _ error) {
 	if err := validateParentAndName(parent, target); err != nil {
-		return TreeFacts{}, err
+		return TreeFacts{}, nil, err
 	}
 	if !expected.valid() || !format.valid() || !base.format.valid() || base.format != format {
-		return TreeFacts{}, &ValidationError{Reason: "valid expected identity, format and base are required"}
+		return TreeFacts{}, nil, &ValidationError{Reason: "valid expected identity, format and base are required"}
 	}
 	if err := checkpoint(ctx, hook, materializePoint{}); err != nil {
-		return TreeFacts{}, err
+		return TreeFacts{}, nil, err
 	}
 	parentFD, err := openVerifiedParent(parent)
 	if err != nil {
-		return TreeFacts{}, err
+		return TreeFacts{}, nil, err
 	}
 	defer unix.Close(parentFD)
 	parentID, err := verifySecureParent(parentFD)
 	if err != nil {
-		return TreeFacts{}, err
+		return TreeFacts{}, nil, err
 	}
 	if err := verifyParentPath(parent, parentID); err != nil {
-		return TreeFacts{}, err
+		return TreeFacts{}, nil, err
 	}
 	rootFD, err := unix.Openat(parentFD, target, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
 	if err != nil {
-		return TreeFacts{}, unresolved("open recorded tree", parent, target, expected, true, err)
+		return TreeFacts{}, nil, unresolved("open recorded tree", parent, target, expected, true, err)
 	}
-	defer unix.Close(rootFD)
+	defer func() {
+		if directory == nil {
+			_ = unix.Close(rootFD)
+		}
+	}()
 	if err := verifyOpenRoot(rootFD, expected); err != nil {
-		return TreeFacts{}, unresolved("inspect recorded tree root", parent, target, expected, true, err)
+		return TreeFacts{}, nil, unresolved("inspect recorded tree root", parent, target, expected, true, err)
 	}
 	if err := verifyNamedRoot(parentFD, target, expected); err != nil {
-		return TreeFacts{}, unresolved("inspect recorded tree name", parent, target, expected, true, err)
+		return TreeFacts{}, nil, unresolved("inspect recorded tree name", parent, target, expected, true, err)
 	}
 	manifest, err := scanTree(ctx, rootFD, expected.device, format, base, false, hook, materializePoint{parent: parent, targetName: target})
 	if err != nil {
-		return TreeFacts{}, err
+		return TreeFacts{}, nil, err
 	}
 	if err := verifyOpenRoot(rootFD, expected); err != nil {
-		return TreeFacts{}, unresolved("recheck recorded tree root", parent, target, expected, true, err)
+		return TreeFacts{}, nil, unresolved("recheck recorded tree root", parent, target, expected, true, err)
 	}
 	if err := verifyNamedRoot(parentFD, target, expected); err != nil {
-		return TreeFacts{}, unresolved("recheck recorded tree name", parent, target, expected, true, err)
+		return TreeFacts{}, nil, unresolved("recheck recorded tree name", parent, target, expected, true, err)
 	}
 	if err := verifyParentPath(parent, parentID); err != nil {
-		return TreeFacts{}, err
+		return TreeFacts{}, nil, err
 	}
-	return factsFromManifest(expected, manifest), nil
+	directory = os.NewFile(uintptr(rootFD), "verified-published-change")
+	if directory == nil {
+		return TreeFacts{}, nil, &ValidationError{Reason: "retain verified published Change descriptor"}
+	}
+	return factsFromManifest(expected, manifest), directory, nil
+}
+
+// Reinspect reconstructs this exact published tree through the central scanner
+// and retains the same verified directory descriptor for immediate execution.
+func (p Published) Reinspect(ctx context.Context) (*VerifiedPublished, error) {
+	if ctx == nil || p.path == "" || p.parent == "" || p.target == "" ||
+		changePath(p.parent, p.target) != p.path || !p.facts.identity.valid() ||
+		!p.format.valid() || !p.base.format.valid() || p.base.format != p.format {
+		return nil, &ValidationError{Reason: "published Change capability is invalid"}
+	}
+	facts, directory, err := inspectPublishedDirectory(ctx, p.parent, p.target, p.facts.identity, p.format, p.base, nil)
+	if err != nil {
+		return nil, err
+	}
+	if facts != p.facts {
+		_ = directory.Close()
+		return nil, &ValidationError{Reason: "published Change facts changed"}
+	}
+	return &VerifiedPublished{state: &verifiedPublishedState{directory: directory, facts: facts}}, nil
+}
+
+// Facts returns the immutable facts reconstructed from the retained directory
+// only while that exact descriptor still has valid root authority.
+func (verified *VerifiedPublished) Facts() (TreeFacts, error) {
+	if verified == nil || verified.state == nil {
+		return TreeFacts{}, &LifecycleError{Reason: "use invalid verified publication"}
+	}
+	verified.state.mu.Lock()
+	defer verified.state.mu.Unlock()
+	if verified.state.closed || verified.state.directory == nil {
+		return TreeFacts{}, &LifecycleError{Reason: "use closed verified publication"}
+	}
+	if err := verifyOpenRoot(int(verified.state.directory.Fd()), verified.state.facts.identity); err != nil {
+		return TreeFacts{}, &ValidationError{Reason: "verified published Change descriptor changed"}
+	}
+	return verified.state.facts, nil
+}
+
+// DuplicateDirectory returns one independently owned descriptor for the exact
+// retained root. It never resolves or reopens the published pathname.
+func (verified *VerifiedPublished) DuplicateDirectory(ctx context.Context) (*os.File, error) {
+	if verified == nil || verified.state == nil || ctx == nil {
+		return nil, &LifecycleError{Reason: "use invalid verified publication"}
+	}
+	verified.state.mu.Lock()
+	defer verified.state.mu.Unlock()
+	if verified.state.closed || verified.state.directory == nil {
+		return nil, &LifecycleError{Reason: "use closed verified publication"}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	identity := verified.state.facts.identity
+	if err := verifyOpenRoot(int(verified.state.directory.Fd()), identity); err != nil {
+		return nil, &ValidationError{Reason: "verified published Change descriptor changed"}
+	}
+	fd, err := unix.FcntlInt(verified.state.directory.Fd(), unix.F_DUPFD_CLOEXEC, 0)
+	if err != nil {
+		return nil, &ValidationError{Reason: "duplicate verified published Change descriptor"}
+	}
+	duplicate := os.NewFile(uintptr(fd), "verified-published-change-duplicate")
+	if duplicate == nil {
+		_ = unix.Close(fd)
+		return nil, &ValidationError{Reason: "duplicate verified published Change descriptor"}
+	}
+	if err := ctx.Err(); err != nil {
+		_ = duplicate.Close()
+		return nil, err
+	}
+	if err := verifyOpenRoot(int(duplicate.Fd()), identity); err != nil {
+		_ = duplicate.Close()
+		return nil, &ValidationError{Reason: "duplicated published Change descriptor changed"}
+	}
+	if err := verifyOpenRoot(int(verified.state.directory.Fd()), identity); err != nil {
+		_ = duplicate.Close()
+		return nil, &ValidationError{Reason: "verified published Change descriptor changed"}
+	}
+	return duplicate, nil
+}
+
+// Close releases the retained directory descriptor. It never mutates a path.
+func (verified *VerifiedPublished) Close() error {
+	if verified == nil || verified.state == nil {
+		return &LifecycleError{Reason: "close invalid verified publication"}
+	}
+	verified.state.mu.Lock()
+	defer verified.state.mu.Unlock()
+	if verified.state.closed || verified.state.directory == nil {
+		return &LifecycleError{Reason: "close verified publication more than once"}
+	}
+	verified.state.closed = true
+	err := verified.state.directory.Close()
+	verified.state.directory = nil
+	return err
 }
 
 // RemoveRecordedTree removes only an absent or exact identity-matched recorded

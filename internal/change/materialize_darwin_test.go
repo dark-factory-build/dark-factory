@@ -1244,6 +1244,281 @@ func TestPublishedChangeCarriesNoRepositoryAuthority(t *testing.T) {
 	}
 }
 
+func TestPublishedReinspectRetainsExactDirectoryOwnership(t *testing.T) {
+	parent := secureTempDir(t)
+	fixture := newFixture(t, "sha1", []fixtureFile{{[]byte("nested/a"), "100644", []byte("right")}})
+	prepared := mustPrepare(t, parent, "change", "stage")
+	published, err := prepared.PopulateAndPublish(context.Background(), fixture.manifest, fixture.source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := prepared.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	baseline := descriptorCount(t)
+	verified, err := published.Reinspect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if formatted := fmt.Sprintf("%v %+v %#v %v %+v %#v", published, published, published, verified, verified, verified); formatted != "Published(<redacted>) Published(<redacted>) Published(<redacted>) VerifiedPublished(<redacted>) VerifiedPublished(<redacted>) VerifiedPublished(<redacted>)" {
+		t.Fatalf("capability formatting exposed authority: %q", formatted)
+	}
+	facts, err := verified.Facts()
+	if err != nil || facts != published.Facts() {
+		t.Fatalf("verified facts = %+v, %v; want %+v", facts, err, published.Facts())
+	}
+
+	first, err := verified.DuplicateDirectory(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var firstStat unix.Stat_t
+	if err := unix.Fstat(int(first.Fd()), &firstStat); err != nil || identityOf(firstStat) != published.Facts().Identity() {
+		t.Fatalf("first duplicate identity = %+v, %v", identityOf(firstStat), err)
+	}
+
+	moved := filepath.Join(parent, "retained-original")
+	if err := os.Rename(published.Path(), moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(published.Path(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	second, err := verified.DuplicateDirectory(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var secondStat, replacementStat unix.Stat_t
+	if err := unix.Fstat(int(second.Fd()), &secondStat); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Lstat(published.Path(), &replacementStat); err != nil {
+		t.Fatal(err)
+	}
+	if identityOf(secondStat) != published.Facts().Identity() || identityOf(secondStat) == identityOf(replacementStat) {
+		t.Fatalf("duplicate retargeted: duplicate=%+v original=%+v replacement=%+v", identityOf(secondStat), published.Facts().Identity(), identityOf(replacementStat))
+	}
+
+	copyOfCapability := *verified
+	if err := verified.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := copyOfCapability.Facts(); !isLifecycle(err) {
+		t.Fatalf("copied capability survived shared close: %T %v", err, err)
+	}
+	if _, err := copyOfCapability.DuplicateDirectory(context.Background()); !isLifecycle(err) {
+		t.Fatalf("duplicate after close = %T %v, want LifecycleError", err, err)
+	}
+	if err := copyOfCapability.Close(); !isLifecycle(err) {
+		t.Fatalf("second close = %T %v, want LifecycleError", err, err)
+	}
+	for _, directory := range []*os.File{first, second} {
+		var stat unix.Stat_t
+		if err := unix.Fstat(int(directory.Fd()), &stat); err != nil || identityOf(stat) != published.Facts().Identity() {
+			t.Fatalf("owned duplicate did not survive capability close: %+v %v", identityOf(stat), err)
+		}
+		if err := directory.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if after := descriptorCount(t); after != baseline {
+		t.Fatalf("verified ownership leaked descriptors: before=%d after=%d", baseline, after)
+	}
+}
+
+func TestPublishedReinspectRejectsLateTreeMutation(t *testing.T) {
+	t.Run("same-size content", func(t *testing.T) {
+		parent := secureTempDir(t)
+		fixture := newFixture(t, "sha1", []fixtureFile{{[]byte("nested/a"), "100644", []byte("right")}})
+		prepared := mustPrepare(t, parent, "change", "stage")
+		published, err := prepared.PopulateAndPublish(context.Background(), fixture.manifest, fixture.source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := prepared.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(published.Path(), "nested", "a"), []byte("wrong"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if verified, err := published.Reinspect(context.Background()); err == nil || verified != nil {
+			t.Fatalf("same-size mutation retained authority: %+v, %v", verified, err)
+		}
+	})
+
+	for _, name := range []string{".git", ".GiT"} {
+		t.Run(fmt.Sprintf("forbidden-%x", name), func(t *testing.T) {
+			parent := secureTempDir(t)
+			fixture := newFixture(t, "sha1", []fixtureFile{{[]byte("a"), "100644", []byte("a")}})
+			prepared := mustPrepare(t, parent, "change", "stage")
+			published, err := prepared.PopulateAndPublish(context.Background(), fixture.manifest, fixture.source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := prepared.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(filepath.Join(published.Path(), "nested"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(filepath.Join(published.Path(), "nested", name), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if verified, err := published.Reinspect(context.Background()); err == nil || verified != nil {
+				t.Fatalf("late %q retained authority: %+v, %v", name, verified, err)
+			}
+		})
+	}
+}
+
+func TestPublishedReinspectRejectsCorruptCapabilityFactsAndDescriptor(t *testing.T) {
+	parent := secureTempDir(t)
+	fixture := newFixture(t, "sha1", []fixtureFile{{[]byte("a"), "100644", []byte("a")}})
+	prepared := mustPrepare(t, parent, "change", "stage")
+	published, err := prepared.PopulateAndPublish(context.Background(), fixture.manifest, fixture.source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := prepared.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	mutations := map[string]func(*Published){
+		"entry count": func(value *Published) { value.facts.entryCount++ },
+		"blob bytes":  func(value *Published) { value.facts.blobBytes++ },
+		"commitment":  func(value *Published) { value.facts.commitment = Commitment{} },
+		"identity":    func(value *Published) { value.facts.identity.inode++ },
+		"base": func(value *Published) {
+			value.base = mustID(t, value.format, bytes.Repeat([]byte{0x77}, value.format.OIDLength()))
+		},
+		"format": func(value *Published) { value.format = ObjectFormat(0) },
+		"path":   func(value *Published) { value.path = filepath.Join(parent, "alias") },
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			corrupt := published
+			mutate(&corrupt)
+			if verified, err := corrupt.Reinspect(context.Background()); err == nil || verified != nil {
+				t.Fatalf("corrupt capability retained authority: %+v, %v", verified, err)
+			}
+		})
+	}
+	if verified, err := (Published{}).Reinspect(context.Background()); err == nil || verified != nil {
+		t.Fatalf("zero Published retained authority: %+v, %v", verified, err)
+	}
+	zero := &VerifiedPublished{}
+	if _, err := zero.Facts(); !isLifecycle(err) {
+		t.Fatalf("zero verified facts = %T %v", err, err)
+	}
+	if _, err := zero.DuplicateDirectory(context.Background()); !isLifecycle(err) {
+		t.Fatalf("zero verified duplicate = %T %v", err, err)
+	}
+	if err := zero.Close(); !isLifecycle(err) {
+		t.Fatalf("zero verified close = %T %v", err, err)
+	}
+
+	verified, err := published.Reinspect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Chmod(published.Path(), 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if facts, err := verified.Facts(); err == nil || facts != (TreeFacts{}) {
+		t.Fatalf("invalid root metadata returned facts: %+v, %v", facts, err)
+	}
+	if duplicate, err := verified.DuplicateDirectory(context.Background()); err == nil || duplicate != nil {
+		t.Fatalf("invalid root metadata authorized duplicate: %+v, %v", duplicate, err)
+	}
+	if err := unix.Chmod(published.Path(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := verified.state.directory.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if duplicate, err := verified.DuplicateDirectory(context.Background()); err == nil || duplicate != nil || strings.Contains(fmt.Sprint(err), parent) {
+		t.Fatalf("closed retained descriptor authorized duplicate or leaked path: %+v, %v", duplicate, err)
+	}
+	_ = verified.Close()
+}
+
+func TestPublishedInspectionReplacementAndCancellationCloseDescriptors(t *testing.T) {
+	parent := secureTempDir(t)
+	fixture := newFixture(t, "sha1", []fixtureFile{{[]byte("a"), "100644", []byte("a")}})
+	prepared := mustPrepare(t, parent, "change", "stage")
+	published, err := prepared.PopulateAndPublish(context.Background(), fixture.manifest, fixture.source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := prepared.Close(); err != nil {
+		t.Fatal(err)
+	}
+	baseline := descriptorCount(t)
+	baselineGoroutines := runtime.NumGoroutine()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	visited := false
+	facts := published.Facts()
+	_, directory, err := inspectPublishedDirectory(ctx, published.parent, published.target, facts.identity, published.format, published.base, func(point materializePoint) error {
+		if point.step == stepDuringTreeScan {
+			visited = true
+			cancel()
+		}
+		return nil
+	})
+	if !visited || !errors.Is(err, context.Canceled) || directory != nil {
+		t.Fatalf("scan cancellation = visited=%v directory=%+v err=%v", visited, directory, err)
+	}
+	if after := descriptorCount(t); after != baseline {
+		t.Fatalf("canceled scan leaked descriptors: before=%d after=%d", baseline, after)
+	}
+
+	moved := filepath.Join(parent, "moved-during-scan")
+	replaced := false
+	_, directory, err = inspectPublishedDirectory(context.Background(), published.parent, published.target, facts.identity, published.format, published.base, func(point materializePoint) error {
+		if point.step == stepDuringTreeScan && !replaced {
+			replaced = true
+			if err := os.Rename(published.Path(), moved); err != nil {
+				return err
+			}
+			return os.Mkdir(published.Path(), 0o700)
+		}
+		return nil
+	})
+	if !replaced || err == nil || directory != nil {
+		t.Fatalf("replacement during scan retained authority: replaced=%v directory=%+v err=%v", replaced, directory, err)
+	}
+	if after := descriptorCount(t); after != baseline {
+		t.Fatalf("replacement scan leaked descriptors: before=%d after=%d", baseline, after)
+	}
+
+	if err := os.RemoveAll(published.Path()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(moved, published.Path()); err != nil {
+		t.Fatal(err)
+	}
+	verified, err := published.Reinspect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	canceled, stop := context.WithCancel(context.Background())
+	stop()
+	if duplicate, err := verified.DuplicateDirectory(canceled); !errors.Is(err, context.Canceled) || duplicate != nil {
+		t.Fatalf("canceled duplicate = %+v, %v", duplicate, err)
+	}
+	if err := verified.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if after := descriptorCount(t); after != baseline {
+		t.Fatalf("verified cancellation leaked descriptors: before=%d after=%d", baseline, after)
+	}
+	if after := runtime.NumGoroutine(); after > baselineGoroutines {
+		t.Fatalf("verified lifecycle leaked goroutines: before=%d after=%d", baselineGoroutines, after)
+	}
+}
+
 func TestPreparedLifecycleDoesNotLeakResources(t *testing.T) {
 	parent := secureTempDir(t)
 	fixture := newFixture(t, "sha1", []fixtureFile{{[]byte("a"), "100644", []byte("a")}})
