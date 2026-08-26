@@ -349,12 +349,19 @@ func (w *WorkerControl) await(stage AttemptStage, before, after workerState) err
 	return nil
 }
 
-func (w *WorkerControl) ExecProvider(spec *LaunchSpec) error {
-	if w == nil || w.file == nil || w.dir == nil || w.lifetime == nil || w.state != workerProvider || spec == nil || spec.control != nil || spec.controlID != nil || spec.stdout != nil || spec.stderr != nil {
+// ExecProvider takes ownership of cwd on every call. The registered worker
+// supplies this exact descriptor only after its final source scan; runner does
+// not reopen or interpret the Change pathname. On failure the descriptor is
+// closed before return, and on success it is closed before the provider exec.
+func (w *WorkerControl) ExecProvider(spec *LaunchSpec, cwd *os.File) error {
+	if w == nil || w.file == nil || w.dir == nil || w.lifetime == nil || w.state != workerProvider || spec == nil || cwd == nil || spec.control != nil || spec.controlID != nil || spec.stdout != nil || spec.stderr != nil {
+		if cwd != nil {
+			return errors.Join(ErrState, cwd.Close())
+		}
 		return ErrState
 	}
 	w.state = workerExec
-	return execPreparedCurrent(spec, w)
+	return execPreparedCurrent(spec, cwd, w)
 }
 
 func (w *WorkerControl) Close() error {
@@ -377,17 +384,21 @@ func (w *WorkerControl) Close() error {
 	return err
 }
 
-func execPreparedCurrent(spec *LaunchSpec, worker *WorkerControl) error {
+func execPreparedCurrent(spec *LaunchSpec, cwd *os.File, worker *WorkerControl) (resultErr error) {
+	defer func() {
+		if cwd != nil {
+			resultErr = errors.Join(resultErr, cwd.Close())
+		}
+	}()
+	unix.CloseOnExec(int(cwd.Fd()))
+	if err := verifyCurrentDirectory(cwd, spec.commit.Cwd); err != nil {
+		return fmt.Errorf("runner: current cwd: %w", err)
+	}
 	target, err := verifyCommit(spec.commit.Executable, true)
 	if err != nil {
 		return fmt.Errorf("runner: current executable: %w", err)
 	}
 	defer target.Close()
-	cwd, err := verifyCommit(spec.commit.Cwd, false)
-	if err != nil {
-		return fmt.Errorf("runner: current cwd: %w", err)
-	}
-	defer cwd.Close()
 	if err := sameNamedIdentity(spec.commit.Executable.Path, spec.commit.Executable.FileIdentity); err != nil {
 		return err
 	}
@@ -405,14 +416,21 @@ func execPreparedCurrent(spec *LaunchSpec, worker *WorkerControl) error {
 		return err
 	}
 	defer stdin.Close()
+	if got, err := commitRuntimeLifetime(worker.dir, worker.lifetime); err != nil || got != worker.lifetimeID {
+		return fmt.Errorf("runner: current runtime lifetime: %w", errors.Join(ErrIdentity, err))
+	}
+	if err := verifyCurrentDirectory(cwd, spec.commit.Cwd); err != nil {
+		return fmt.Errorf("runner: final current cwd: %w", err)
+	}
 	if err := unix.Fchdir(int(cwd.Fd())); err != nil {
 		return err
 	}
-	if err := unix.Dup2(int(stdin.Fd()), 0); err != nil {
+	if err := cwd.Close(); err != nil {
 		return err
 	}
-	if got, err := commitRuntimeLifetime(worker.dir, worker.lifetime); err != nil || got != worker.lifetimeID {
-		return fmt.Errorf("runner: current runtime lifetime: %w", errors.Join(ErrIdentity, err))
+	cwd = nil
+	if err := unix.Dup2(int(stdin.Fd()), 0); err != nil {
+		return err
 	}
 	if err := worker.file.Close(); err != nil {
 		return err
@@ -429,6 +447,26 @@ func execPreparedCurrent(spec *LaunchSpec, worker *WorkerControl) error {
 	}
 	if err := unix.Exec(spec.commit.Executable.Path, spec.commit.Argv, spec.commit.Env); err != nil {
 		return fmt.Errorf("runner: current exec: %w", err)
+	}
+	return nil
+}
+
+func verifyCurrentDirectory(cwd *os.File, want fileCommitment) error {
+	if cwd == nil {
+		return ErrIdentity
+	}
+	// commitOpen uses want.Path only as the immutable commitment label. Every
+	// authority fact comes from cwd; this does not open or stat the pathname.
+	got, err := commitOpen(cwd, want.Path, false)
+	if err != nil {
+		return err
+	}
+	if got.UID != uint32(os.Geteuid()) || got.Mode&uint32(unix.S_IFMT) != uint32(unix.S_IFDIR) ||
+		got.Mode&uint32(unix.S_IWGRP|unix.S_IWOTH|unix.S_ISUID|unix.S_ISGID) != 0 {
+		return ErrIdentity
+	}
+	if got != want {
+		return ErrIdentity
 	}
 	return nil
 }

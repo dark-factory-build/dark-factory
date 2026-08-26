@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -61,6 +62,7 @@ func runAttemptWorkerHelper(args []string) error {
 	if err := write("population", "populated"); err != nil {
 		return err
 	}
+	providerCwd := filepath.Join(root, "work")
 	var provider ExecSpec
 	switch mode {
 	case "shell", "term", "leader":
@@ -71,8 +73,8 @@ func runAttemptWorkerHelper(args []string) error {
 		if mode == "leader" {
 			script = fmt.Sprintf("sleep 30 & printf '%%s' $! > %q; printf '%%s' $$ > %q; exit 0", filepath.Join(root, "descendant.pid"), filepath.Join(root, "provider.pid"))
 		}
-		provider = ExecSpec{Target: "/bin/sh", Args: []string{"-c", script}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: filepath.Join(root, "work"), Stdin: []byte("one-startup")}
-	case "binary", "seam", "lifetime", "lease-seam":
+		provider = ExecSpec{Target: "/bin/sh", Args: []string{"-c", script}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: providerCwd, Stdin: []byte("one-startup")}
+	case "binary", "seam", "lifetime", "lease-seam", "cwd", "cwd-seam", "cwd-unrelated", "cwd-file", "cwd-closed", "cwd-reused", "cwd-mode":
 		if len(args) != 3 {
 			return errors.New("attempt worker: missing binary target")
 		}
@@ -80,7 +82,13 @@ func runAttemptWorkerHelper(args []string) error {
 		if mode == "lifetime" {
 			providerArgs = []string{"--lifetime-provider", root}
 		}
-		provider = ExecSpec{Target: args[2], Args: providerArgs, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: filepath.Join(root, "work")}
+		if strings.HasPrefix(mode, "cwd") {
+			providerCwd = filepath.Join(root, "change", "work")
+		}
+		if mode == "cwd" || mode == "cwd-seam" {
+			providerArgs = []string{"--cwd-provider", root}
+		}
+		provider = ExecSpec{Target: args[2], Args: providerArgs, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: providerCwd}
 	default:
 		return fmt.Errorf("attempt worker: invalid mode %q", mode)
 	}
@@ -88,16 +96,59 @@ func runAttemptWorkerHelper(args []string) error {
 	if err != nil {
 		return err
 	}
-	if mode == "seam" || mode == "lease-seam" {
+	if mode == "seam" || mode == "lease-seam" || mode == "cwd-seam" {
 		prepared.testCurrentFinal = true
 	}
+	cwdPath := providerCwd
+	if mode == "cwd-unrelated" {
+		cwdPath = filepath.Join(root, "unrelated")
+	}
+	if mode == "cwd-file" {
+		cwdPath = filepath.Join(root, "cwd-file")
+	}
+	cwd, err := os.Open(cwdPath)
+	if err != nil {
+		return err
+	}
+	if mode == "cwd-closed" {
+		if err := cwd.Close(); err != nil {
+			return err
+		}
+	}
+	if mode == "cwd-reused" {
+		raw := int(cwd.Fd())
+		if err := unix.Close(raw); err != nil {
+			return err
+		}
+		replacement, err := unix.Open(filepath.Join(root, "unrelated"), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
+		if err != nil {
+			return err
+		}
+		if replacement != raw {
+			if err := unix.Dup2(replacement, raw); err != nil {
+				unix.Close(replacement)
+				return err
+			}
+			if err := unix.Close(replacement); err != nil {
+				return err
+			}
+		}
+	}
+	if mode == "cwd-mode" {
+		if err := os.Chmod(providerCwd, 0o755); err != nil {
+			cwd.Close()
+			return err
+		}
+	}
 	if err := control.ReportPopulation([]byte("populated")); err != nil {
+		cwd.Close()
 		return err
 	}
 	if err := control.AwaitProvider(); err != nil {
+		cwd.Close()
 		return err
 	}
-	return control.ExecProvider(prepared)
+	return control.ExecProvider(prepared, cwd)
 }
 
 func runRetirementProviderHelper(args []string) error {
@@ -144,6 +195,15 @@ func newAttemptFixture(t *testing.T, mode string, target string) *attemptFixture
 		t.Fatal(err)
 	}
 	if err := os.Mkdir(filepath.Join(root, "work"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "change", "work"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "unrelated"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "cwd-file"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	dir, err := os.Open(root)
@@ -999,6 +1059,120 @@ func TestCurrentExecRejectsCommittedTargetChanges(t *testing.T) {
 				t.Fatalf("mutated provider effect exists: %v", err)
 			}
 		})
+	}
+}
+
+func TestCurrentExecUsesTransferredCwdAfterParentPathReplacement(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newAttemptFixture(t, "cwd", executable)
+	inner := f.activateOuter()
+	f.advanceToProvider()
+	originalPath := filepath.Join(f.root, "change", "work")
+	originalInfo, err := os.Lstat(originalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := originalInfo.Sys().(*syscall.Stat_t)
+	if err := os.Rename(filepath.Join(f.root, "change"), filepath.Join(f.root, "change.old")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(originalPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	replacementInfo, err := os.Lstat(originalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := replacementInfo.Sys().(*syscall.Stat_t)
+	if original.Dev == replacement.Dev && original.Ino == replacement.Ino {
+		t.Fatal("replacement reused original cwd identity")
+	}
+	if err := f.controller.Release(StageProvider); err != nil {
+		t.Fatal(err)
+	}
+	record := f.finishAndAck()
+	if record.Terminal.Exit.Code != 0 || record.Terminal.Process != inner {
+		t.Fatalf("descriptor cwd terminal=%+v", record.Terminal)
+	}
+	want := fmt.Sprintf("%d:%d", original.Dev, original.Ino)
+	if got, err := os.ReadFile(filepath.Join(f.root, "cwd.identity")); err != nil || string(got) != want {
+		t.Fatalf("provider cwd identity=%q err=%v want=%q", got, err, want)
+	}
+	if got, err := os.ReadFile(filepath.Join(f.root, "provider.effect")); err != nil || string(got) != "provider" {
+		t.Fatalf("provider witness=%q err=%v", got, err)
+	}
+}
+
+func TestCurrentExecRejectsInvalidTransferredCwd(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []string{"cwd-unrelated", "cwd-file", "cwd-closed", "cwd-reused", "cwd-mode"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newAttemptFixture(t, mode, executable)
+			f.activateOuter()
+			f.advanceToProvider()
+			if err := f.controller.Release(StageProvider); err != nil {
+				t.Fatal(err)
+			}
+			record := f.finishAndAck()
+			if record.Terminal.Exit.Code == 0 {
+				t.Fatalf("invalid cwd reported success: %+v", record.Terminal)
+			}
+			if _, err := os.Lstat(filepath.Join(f.root, "provider.effect")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("invalid cwd provider effect: %v", err)
+			}
+		})
+	}
+}
+
+func TestCurrentExecRechecksTransferredCwdAtFinalSeam(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newAttemptFixture(t, "cwd-seam", executable)
+	f.activateOuter()
+	f.advanceToProvider()
+	if err := f.controller.Release(StageProvider); err != nil {
+		t.Fatal(err)
+	}
+	event, err := f.controller.Next(4 * time.Second)
+	if err != nil || event.Kind != AttemptCheckpoint || event.Stage != StageProvider {
+		t.Fatalf("final-check event=%+v err=%v", event, err)
+	}
+	if err := os.Chmod(filepath.Join(f.root, "change", "work"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.controller.acknowledgeCurrentExecCheck(); err != nil {
+		t.Fatal(err)
+	}
+	record := f.finishAndAck()
+	if record.Terminal.Exit.Code == 0 {
+		t.Fatalf("mutated cwd reported success: %+v", record.Terminal)
+	}
+	if _, err := os.Lstat(filepath.Join(f.root, "provider.effect")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("mutated cwd provider effect: %v", err)
+	}
+}
+
+func TestExecProviderTakesCwdOwnershipOnRejectedCall(t *testing.T) {
+	cwd, err := os.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fd := int(cwd.Fd())
+	var worker *WorkerControl
+	if err := worker.ExecProvider(nil, cwd); !errors.Is(err, ErrState) {
+		t.Fatalf("rejected transfer=%v", err)
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); !errors.Is(err, unix.EBADF) {
+		t.Fatalf("rejected cwd remained open: %v", err)
 	}
 }
 

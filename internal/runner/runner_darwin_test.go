@@ -65,6 +65,13 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
+	if len(os.Args) == 3 && os.Args[1] == "--cwd-provider" {
+		if err := runCwdProviderHelper(os.Args[2]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(94)
+		}
+		os.Exit(0)
+	}
 	if len(os.Args) == 5 && os.Args[1] == "--attempt-retirement-provider" {
 		if err := runRetirementProviderHelper(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -86,6 +93,42 @@ func TestMain(m *testing.M) {
 		code = 1
 	}
 	os.Exit(code)
+}
+
+func runCwdProviderHelper(root string) error {
+	info, err := os.Stat(".")
+	if err != nil {
+		return err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return ErrIdentity
+	}
+	entries, err := os.ReadDir("/dev/fd")
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		fd, err := strconv.Atoi(entry.Name())
+		if err != nil || fd <= 2 || fd == 10 {
+			continue
+		}
+		var inherited unix.Stat_t
+		if err := unix.Fstat(fd, &inherited); errors.Is(err, unix.EBADF) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		return fmt.Errorf("cwd provider inherited fd %d", fd)
+	}
+	var lifetime unix.Stat_t
+	if err := unix.Fstat(10, &lifetime); err != nil || lifetime.Mode&unix.S_IFMT != unix.S_IFREG || lifetime.Size != 0 {
+		return fmt.Errorf("cwd provider lifetime: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "cwd.identity"), []byte(fmt.Sprintf("%d:%d", stat.Dev, stat.Ino)), 0o600); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(root, "provider.effect"), []byte("provider"), 0o600)
 }
 
 func runLifetimeProviderHelper(root string) error {
