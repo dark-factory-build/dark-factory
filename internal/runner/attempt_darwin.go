@@ -545,11 +545,8 @@ func runAttempt(daemon, dir *os.File, cfg attemptConfig) (result error) {
 			return finishAttemptFailure(child, dir, cfg, err)
 		}
 	}
-	exit, daemonOpen, err := finishReleasedProvider(child, daemon, workerParent)
-	if err != nil {
-		return finishAttemptWithExit(dir, cfg, child.Identity(), exit, daemon, daemonOpen, err)
-	}
-	return finishAttemptWithExit(dir, cfg, child.Identity(), exit, daemon, daemonOpen, nil)
+	daemonOpen, err := finishReleasedProvider(child, daemon, workerParent)
+	return finishAttemptWithExit(child, dir, cfg, daemon, daemonOpen, err)
 }
 
 func newControlPair(parentName, childName string) (*os.File, *os.File, error) {
@@ -665,26 +662,16 @@ func validCheckpointFrame(frame attemptFrame, stage AttemptStage) bool {
 }
 
 func finishAttemptFailure(child *OwnedChild, dir *os.File, cfg attemptConfig, cause error) error {
-	var exit Exit
-	var cleanupErr error
-	if child.state == stateBlocked && !child.activated {
-		cleanupErr = child.Abort()
-		exit = exitFromWait(child.cmd.ProcessState, cleanupErr)
-		exit.Aborted = true
-	} else if child.state != stateWaited {
-		exit, cleanupErr = child.Terminate(defaultStopTimeout)
-	}
-	return errors.Join(cause, cleanupErr, publishAttemptTerminal(dir, cfg, child.Identity(), exit, nil, false, cause))
+	return finishAttemptWithExit(child, dir, cfg, nil, false, cause)
 }
 
-func finishReleasedProvider(child *OwnedChild, daemon, worker *os.File) (Exit, bool, error) {
+func finishReleasedProvider(child *OwnedChild, daemon, worker *os.File) (bool, error) {
 	daemonOpen := true
 	workerOpen := true
 	for {
 		frame, source, err := nextAttemptFrame(child, daemon, worker, daemonOpen, workerOpen, 0)
 		if source == sourceChild && err == nil {
-			exit, finishErr := child.FinishAfterExit(attemptControlTimeout)
-			return exit, daemonOpen, finishErr
+			return daemonOpen, nil
 		}
 		if source == sourceDaemon {
 			if errors.Is(err, io.EOF) {
@@ -693,13 +680,12 @@ func finishReleasedProvider(child *OwnedChild, daemon, worker *os.File) (Exit, b
 				continue
 			}
 			if err != nil {
-				return terminateAfterProtocolError(child, daemonOpen, err)
+				return daemonOpen, err
 			}
 			if frame.Version != 1 || frame.Kind != "terminate" {
-				return terminateAfterProtocolError(child, daemonOpen, ErrState)
+				return daemonOpen, ErrState
 			}
-			exit, terminateErr := child.Terminate(defaultStopTimeout)
-			return exit, daemonOpen, terminateErr
+			return daemonOpen, nil
 		}
 		if source == sourceWorker {
 			if errors.Is(err, io.EOF) {
@@ -708,37 +694,67 @@ func finishReleasedProvider(child *OwnedChild, daemon, worker *os.File) (Exit, b
 				continue
 			}
 			if err != nil {
-				return terminateAfterProtocolError(child, daemonOpen, err)
+				return daemonOpen, err
 			}
 			if frame.Version != 1 || frame.Kind != "current-exec-check" || !daemonOpen {
-				return terminateAfterProtocolError(child, daemonOpen, ErrState)
+				return daemonOpen, ErrState
 			}
 			if err := writeControlFrame(daemon, frame, maxFrameBytes); err != nil {
-				return terminateAfterProtocolError(child, false, err)
+				return false, err
 			}
 			ack, ackSource, err := nextAttemptFrame(child, daemon, worker, true, true, 0)
 			if err != nil || ackSource != sourceDaemon || ack.Version != 1 || ack.Kind != "current-exec-check-ack" {
-				return terminateAfterProtocolError(child, false, protocolError("current exec check ack", ackSource, err))
+				return false, protocolError("current exec check ack", ackSource, err)
 			}
 			if err := writeControlFrame(worker, ack, maxFrameBytes); err != nil {
-				return terminateAfterProtocolError(child, daemonOpen, err)
+				return daemonOpen, err
 			}
 			continue
 		}
-		return terminateAfterProtocolError(child, daemonOpen, err)
+		return daemonOpen, err
 	}
 }
 
-func terminateAfterProtocolError(child *OwnedChild, daemonOpen bool, cause error) (Exit, bool, error) {
-	exit, err := child.Terminate(defaultStopTimeout)
-	return exit, daemonOpen, errors.Join(cause, err)
+func finishAttemptWithExit(child *OwnedChild, dir *os.File, cfg attemptConfig, daemon *os.File, daemonOpen bool, cause error) error {
+	exit, cleanupErr := waitForAttemptChild(child)
+	if cleanupErr != nil {
+		return errors.Join(cause, cleanupErr)
+	}
+	return errors.Join(cause, publishAttemptTerminal(child, dir, cfg, exit, daemon, daemonOpen, cause))
 }
 
-func finishAttemptWithExit(dir *os.File, cfg attemptConfig, identity Identity, exit Exit, daemon *os.File, daemonOpen bool, cause error) error {
-	return errors.Join(cause, publishAttemptTerminal(dir, cfg, identity, exit, daemon, daemonOpen, cause))
+// waitForAttemptChild is intentionally synchronous and has no terminal error
+// path after a child exists. Cleanup uncertainty retains the sole live owner and
+// retries with a bounded delay until exact group convergence and the sole Wait
+// succeed. It may therefore remain here indefinitely rather than orphaning the
+// child or publishing a false terminal observation.
+func waitForAttemptChild(child *OwnedChild) (Exit, error) {
+	if child == nil {
+		return Exit{}, ErrState
+	}
+	for {
+		if exit, err := child.waitedExit(); err == nil {
+			return exit, nil
+		}
+		switch {
+		case !child.activated && child.state == stateBlocked:
+			_ = child.Abort()
+		case child.activated && child.exitObserved:
+			_, _ = child.FinishAfterExit(attemptControlTimeout)
+		case child.activated:
+			_, _ = child.Terminate(defaultStopTimeout)
+		}
+		if exit, err := child.waitedExit(); err == nil {
+			return exit, nil
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
 }
 
-func publishAttemptTerminal(dir *os.File, cfg attemptConfig, identity Identity, exit Exit, daemon *os.File, daemonOpen bool, cause error) error {
+func publishAttemptTerminal(child *OwnedChild, dir *os.File, cfg attemptConfig, exit Exit, daemon *os.File, daemonOpen bool, cause error) error {
+	if _, err := child.waitedExit(); err != nil {
+		return err
+	}
 	message := ""
 	if cause != nil {
 		message = cause.Error()
@@ -746,7 +762,7 @@ func publishAttemptTerminal(dir *os.File, cfg attemptConfig, identity Identity, 
 			message = message[:8192]
 		}
 	}
-	record, err := PublishTerminal(dir, cfg.TerminalName, Terminal{AttemptID: cfg.AttemptID, Process: identity, Exit: exit, Message: message})
+	record, err := PublishTerminal(dir, cfg.TerminalName, Terminal{AttemptID: cfg.AttemptID, Process: child.Identity(), Exit: exit, Message: message})
 	if err != nil {
 		return err
 	}

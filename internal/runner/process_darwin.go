@@ -81,6 +81,7 @@ func (l *GateLease) Close() error {
 type OwnedChild struct {
 	cmd            *exec.Cmd
 	identity       Identity
+	exit           Exit
 	kq             int
 	activation     *os.File
 	status         *os.File
@@ -90,6 +91,9 @@ type OwnedChild struct {
 	exitObserved   bool
 	exitRegistered bool
 	keepLease      bool
+	// testConvergence injects a package-test-only failure immediately before
+	// activated group convergence. Production children always leave it nil.
+	testConvergence func() error
 }
 
 func (c *OwnedChild) Identity() Identity {
@@ -303,15 +307,21 @@ func (c *OwnedChild) Abort() error {
 	if c == nil || c.state != stateBlocked {
 		return ErrState
 	}
-	err := c.activation.Close()
-	c.activation = nil
-	if _, werr := c.waitForExit(4 * time.Second); werr != nil {
-		return werr
+	var err error
+	if c.activation != nil {
+		err = c.activation.Close()
+		c.activation = nil
 	}
-	if waitErr := c.waitInertOnce(); waitErr != nil {
-		return waitErr
+	if !c.exitObserved {
+		if _, werr := c.waitForExit(4 * time.Second); werr != nil {
+			return werr
+		}
 	}
-	return err
+	waitErr := c.waitInertOnce()
+	if c.state == stateWaited {
+		c.exit.Aborted = true
+	}
+	return errors.Join(err, waitErr)
 }
 
 func (c *OwnedChild) waitForExit(timeout time.Duration) (unix.Kevent_t, error) {
@@ -356,13 +366,12 @@ func (c *OwnedChild) FinishAfterExit(timeout time.Duration) (Exit, error) {
 	if c.state != stateWaited {
 		return Exit{}, waitErr
 	}
-	exit := exitFromWait(c.cmd.ProcessState, waitErr)
 	_ = c.status.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 	var frame gateFrame
 	if ferr := readFrame(c.status, &frame, maxFrameBytes); ferr == nil && frame.Kind == "launch-error" {
-		exit.LaunchErr = frame.Error
+		c.exit.LaunchErr = frame.Error
 	}
-	return exit, nil
+	return c.exit, nil
 }
 
 func exitFromWait(ps *os.ProcessState, err error) Exit {
@@ -391,6 +400,7 @@ func (c *OwnedChild) waitOnce() error {
 	}
 	err := c.cmd.Wait()
 	c.state = stateWaited
+	c.exit = exitFromWait(c.cmd.ProcessState, err)
 	return err
 }
 
@@ -404,6 +414,11 @@ func (c *OwnedChild) waitInertOnce() error {
 func (c *OwnedChild) waitActivatedOnce() error {
 	if !c.activated || !c.exitObserved {
 		return ErrState
+	}
+	if c.testConvergence != nil {
+		if err := c.testConvergence(); err != nil {
+			return err
+		}
 	}
 	if err := killRemainingGroup(c.identity); err != nil {
 		return err
@@ -453,7 +468,14 @@ func (c *OwnedChild) Terminate(timeout time.Duration) (Exit, error) {
 	if c.state != stateWaited {
 		return Exit{}, waitErr
 	}
-	return exitFromWait(c.cmd.ProcessState, waitErr), nil
+	return c.exit, nil
+}
+
+func (c *OwnedChild) waitedExit() (Exit, error) {
+	if c == nil || c.state != stateWaited {
+		return Exit{}, ErrState
+	}
+	return c.exit, nil
 }
 
 func waitForOwnedGroupQuiescence(leader Identity, timeout time.Duration) error {

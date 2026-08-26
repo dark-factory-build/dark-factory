@@ -139,7 +139,7 @@ func AcknowledgeTerminal(dir *os.File, basename string, want *TerminalRecord, st
 	if err != nil {
 		return err
 	}
-	if got.Digest != want.Digest || got.Identity != want.Identity || got.Terminal.AttemptID != want.Terminal.AttemptID {
+	if got.Digest != want.Digest || got.Identity != want.Identity || got.Terminal != want.Terminal {
 		return ErrIdentity
 	}
 	if err := validateTerminalName(dir, basename); err != nil {

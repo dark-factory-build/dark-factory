@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -524,6 +525,12 @@ func TestAttemptProtocolSurfaceIsClosed(t *testing.T) {
 			t.Fatalf("attempt runner bypasses OwnedChild with %q", forbidden)
 		}
 	}
+	if got := strings.Count(string(attemptSource), "publishAttemptTerminal("); got != 2 {
+		t.Fatalf("terminal publication must have one guarded call site, got %d occurrences", got)
+	}
+	if !strings.Contains(string(attemptSource), "if _, err := child.waitedExit(); err != nil") {
+		t.Fatal("terminal publication lost waited-child proof")
+	}
 	typesSource, err := os.ReadFile("types.go")
 	if err != nil {
 		t.Fatal(err)
@@ -531,6 +538,169 @@ func TestAttemptProtocolSurfaceIsClosed(t *testing.T) {
 	if strings.Contains(string(typesSource), "ExtraFiles ") {
 		t.Fatal("generic arbitrary inherited-FD surface introduced")
 	}
+}
+
+func TestPublishAttemptTerminalRequiresWaitedChild(t *testing.T) {
+	f := newFixture(t)
+	child := f.start("/bin/sh", []string{"-c", "exit 0"}, nil, nil)
+	cfg := attemptConfig{AttemptID: "attempt-guard", TerminalName: "terminal.json"}
+	if err := publishAttemptTerminal(child, f.dir, cfg, Exit{Code: 0}, nil, false, nil); !errors.Is(err, ErrState) {
+		t.Fatalf("unwaited terminal publication=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(f.root, cfg.TerminalName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unwaited terminal left an effect: %v", err)
+	}
+	if err := child.Abort(); err != nil && child.state != stateWaited {
+		t.Fatalf("abort guarded child: %v", err)
+	}
+}
+
+func TestAttemptCleanupUncertaintyRetainsOwnerBeforeTerminal(t *testing.T) {
+	f := newFixture(t)
+	child := f.start("/bin/sh", []string{"-c", "exit 0"}, nil, nil)
+	if _, err := child.Activate(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := attemptConfig{AttemptID: "attempt-retry", TerminalName: "terminal.json"}
+	identity := child.Identity()
+	entered := make(chan int, 4)
+	release := make(chan struct{})
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			close(release)
+		}
+	})
+	var calls atomic.Int32
+	child.testConvergence = func() error {
+		call := int(calls.Add(1))
+		entered <- call
+		if call <= 2 {
+			<-release
+			return fmt.Errorf("%w: injected convergence uncertainty", ErrUnresolved)
+		}
+		return nil
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- finishAttemptWithExit(child, f.dir, cfg, nil, false, nil)
+	}()
+	select {
+	case call := <-entered:
+		if call != 1 {
+			t.Fatalf("first convergence call=%d", call)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("cleanup did not reach injected uncertainty")
+	}
+	if _, err := os.Stat(filepath.Join(f.root, cfg.TerminalName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("uncertain cleanup published terminal: %v", err)
+	}
+	if got := ObserveProcess(identity); got.Presence != Present {
+		t.Fatalf("uncertain cleanup lost exact unreaped owner: %+v", got)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("uncertain cleanup returned early: %v", err)
+	default:
+	}
+	close(release)
+	released = true
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("cleanup did not converge after uncertainty cleared")
+	}
+	if got := calls.Load(); got != 3 {
+		t.Fatalf("convergence calls=%d want=3", got)
+	}
+	if child.state != stateWaited {
+		t.Fatalf("terminal returned without sole Wait: state=%d", child.state)
+	}
+	record, err := LoadTerminal(f.dir, cfg.TerminalName)
+	if err != nil || record.Terminal.Process != identity {
+		t.Fatalf("terminal after convergence=%+v err=%v", record, err)
+	}
+	waitExactAbsence(t, identity)
+	if err := unix.Kill(-identity.PGID, 0); !errors.Is(err, unix.ESRCH) {
+		t.Fatalf("owned group remains after terminal: %v", err)
+	}
+}
+
+func TestAttemptPermanentCleanupUncertaintyPublishesNothing(t *testing.T) {
+	f := newFixture(t)
+	child := f.start("/bin/sh", []string{"-c", "exit 0"}, nil, nil)
+	if _, err := child.Activate(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := attemptConfig{AttemptID: "attempt-unresolved", TerminalName: "terminal.json"}
+	identity := child.Identity()
+	entered := make(chan struct{}, 16)
+	var restored atomic.Bool
+	child.testConvergence = func() error {
+		entered <- struct{}{}
+		if !restored.Load() {
+			return fmt.Errorf("%w: permanent injected convergence uncertainty", ErrUnresolved)
+		}
+		return nil
+	}
+	done := make(chan error, 1)
+	finished := false
+	t.Cleanup(func() {
+		if finished {
+			return
+		}
+		restored.Store(true)
+		select {
+		case <-done:
+		case <-time.After(4 * time.Second):
+			t.Error("cleanup owner did not join after safety restoration")
+		}
+	})
+	go func() {
+		done <- finishAttemptWithExit(child, f.dir, cfg, nil, false, nil)
+	}()
+	for range 3 {
+		select {
+		case <-entered:
+		case err := <-done:
+			finished = true
+			t.Fatalf("cleanup owner abandoned permanent uncertainty: %v", err)
+		case <-time.After(4 * time.Second):
+			t.Fatal("cleanup stopped retrying permanent uncertainty")
+		}
+	}
+	if _, err := os.Stat(filepath.Join(f.root, cfg.TerminalName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("permanent uncertainty published terminal: %v", err)
+	}
+	if got := ObserveProcess(identity); got.Presence != Present {
+		t.Fatalf("permanent uncertainty lost exact unreaped owner: %+v", got)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("permanent uncertainty returned early: %v", err)
+	default:
+	}
+	restored.Store(true)
+	select {
+	case err := <-done:
+		finished = true
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("cleanup did not converge after safety restoration")
+	}
+	if child.state != stateWaited {
+		t.Fatalf("restored cleanup returned before Wait: state=%d", child.state)
+	}
+	if _, err := LoadTerminal(f.dir, cfg.TerminalName); err != nil {
+		t.Fatalf("restored cleanup did not publish terminal: %v", err)
+	}
+	waitExactAbsence(t, identity)
 }
 
 func TestAttemptControllerRejectsForeignTerminalAuthority(t *testing.T) {

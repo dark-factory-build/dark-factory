@@ -75,6 +75,44 @@ func TestTerminalSpoolStoreBeforeExactAck(t *testing.T) {
 	}
 }
 
+func TestTerminalSpoolExactAckBindsCompleteTerminal(t *testing.T) {
+	root, dir := openTestSpool(t)
+	record, err := PublishTerminal(dir, "terminal.json", testTerminal("attempt-exact", "authentic"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutations := map[string]func(*Terminal){
+		"process": func(terminal *Terminal) {
+			terminal.Process = Identity{PID: 23, PGID: 23, Birth: Birth{Seconds: 3, Microseconds: 4}}
+		},
+		"exit": func(terminal *Terminal) {
+			terminal.Exit = Exit{Code: -1, Signal: int(unix.SIGKILL)}
+		},
+		"message": func(terminal *Terminal) {
+			terminal.Message = "forged"
+		},
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			forged := *record
+			mutate(&forged.Terminal)
+			if err := AcknowledgeTerminal(dir, "terminal.json", &forged, true); !errors.Is(err, ErrIdentity) {
+				t.Fatalf("forged terminal ack=%v", err)
+			}
+			retained, err := LoadTerminal(dir, "terminal.json")
+			if err != nil || retained.Digest != record.Digest || retained.Identity != record.Identity || retained.Terminal != record.Terminal {
+				t.Fatalf("forged ack mutated spool: retained=%+v err=%v", retained, err)
+			}
+		})
+	}
+	if err := AcknowledgeTerminal(dir, "terminal.json", record, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "terminal.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("exact committed ack retained spool: %v", err)
+	}
+}
+
 func TestTerminalSpoolRequiresPrivateDirectoryForEveryOperation(t *testing.T) {
 	for _, mode := range []os.FileMode{0o755, 0o770} {
 		t.Run(mode.String(), func(t *testing.T) {
