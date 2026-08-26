@@ -60,11 +60,10 @@ func TestRecoveredProviderAbsenceRequiresExactRegisteredPair(t *testing.T) {
 	defer store.Close()
 	resources := resourcesForRunTest(t, store, run.ID)
 	identity := processIdentity(t, 91)
-	for _, kind := range []ResourceKind{ResourceProviderProcess, ResourceProviderGroup} {
-		resource := resourceOfKind(t, resources, kind)
-		if _, err := store.ActivateResource(context.Background(), run.ID, resource.ID, resource.Revision, identity, mustTime(t, 20)); err != nil {
-			t.Fatal(err)
-		}
+	provider := resourceOfKind(t, resources, ResourceProviderProcess)
+	group := resourceOfKind(t, resources, ResourceProviderGroup)
+	if _, _, err := store.ActivateProviderResources(context.Background(), run.ID, provider.ID, provider.Revision, group.ID, group.Revision, identity, mustTime(t, 20)); err != nil {
+		t.Fatal(err)
 	}
 	exit, _ := NewProcessExitRecoveredAbsence(1, mustTime(t, 21))
 	if _, err := store.ObserveProviderExit(context.Background(), run.ID, run.Revision, processIdentity(t, 92), exit, mustTime(t, 22)); !errors.Is(err, ErrConflict) {

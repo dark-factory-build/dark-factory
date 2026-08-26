@@ -141,6 +141,18 @@ func loadRunRelationships(ctx context.Context, connection *sql.Conn, run Run) (r
 	if !resourcesMatchRunPhase(run.Phase, resources) {
 		return runRelationships{}, fmt.Errorf("%w: resources do not match run phase", ErrCorruptState)
 	}
+	var providerProcessIdentity, providerGroupIdentity ResourceIdentity
+	for _, resource := range resources {
+		switch resource.Kind {
+		case ResourceProviderProcess:
+			providerProcessIdentity = resource.Identity
+		case ResourceProviderGroup:
+			providerGroupIdentity = resource.Identity
+		}
+	}
+	if !resourceIdentityEqual(providerProcessIdentity, providerGroupIdentity) {
+		return runRelationships{}, fmt.Errorf("%w: provider process/group identity is not atomic", ErrCorruptState)
+	}
 	for _, resource := range resources {
 		if resource.State != ResourceReleased || resource.Identity.Empty() {
 			continue

@@ -300,8 +300,17 @@ func prepareActiveAttempt(t *testing.T, fixture *dispatchFixture, seed byte) act
 	processTwo, _ := kernel.NewProcessResourceIdentity(int64(seed)+12, int64(seed)+13, birthTwo)
 	activate(keys.Resources.RuntimeRoot, pathIdentity)
 	activate(keys.Resources.RunnerProcess, processOne)
-	activate(keys.Resources.ProviderProcess, processTwo)
-	activate(keys.Resources.ProviderGroup, processTwo)
+	providerProcess, found, err := fixture.store.Resource(ctx, keys.Resources.ProviderProcess)
+	if err != nil || !found {
+		t.Fatalf("provider process = %+v, found=%v, err=%v", providerProcess, found, err)
+	}
+	providerGroup, found, err := fixture.store.Resource(ctx, keys.Resources.ProviderGroup)
+	if err != nil || !found {
+		t.Fatalf("provider group = %+v, found=%v, err=%v", providerGroup, found, err)
+	}
+	if _, _, err := fixture.store.ActivateProviderResources(ctx, run.ID, providerProcess.ID, providerProcess.Revision, providerGroup.ID, providerGroup.Revision, processTwo, at); err != nil {
+		t.Fatal(err)
+	}
 	active, err := fixture.store.ActivateRun(ctx, run.ID, run.Revision, at)
 	if err != nil {
 		t.Fatal(err)

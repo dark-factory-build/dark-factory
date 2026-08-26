@@ -10,6 +10,76 @@ func (store *Store) ActivateResource(ctx context.Context, runID RunID, resourceI
 	return store.transitionResource(ctx, runID, resourceID, expected, identity, "", ResourceActive, at)
 }
 
+// ActivateProviderResources binds the one provider process/group authority in
+// one transaction. Neither resource may acquire an identity independently.
+func (store *Store) ActivateProviderResources(ctx context.Context, runID RunID, processID ResourceID, processExpected Revision, groupID ResourceID, groupExpected Revision, identity ResourceIdentity, at UnixMillis) (Resource, Resource, error) {
+	if runID.zero() || processID.zero() || groupID.zero() || processID == groupID || !identity.validFor(ResourceProviderProcess) {
+		return Resource{}, Resource{}, fmt.Errorf("%w: invalid provider resource activation", ErrInvalidValue)
+	}
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return Resource{}, Resource{}, err
+	}
+	defer tx.Close()
+	run, found, err := runByID(ctx, tx.connection, runID)
+	if err != nil || !found {
+		if err == nil {
+			err = ErrNotFound
+		}
+		return Resource{}, Resource{}, tx.Rollback(err)
+	}
+	process, processFound, err := resourceByID(ctx, tx.connection, processID)
+	if err != nil {
+		return Resource{}, Resource{}, tx.Rollback(err)
+	}
+	group, groupFound, err := resourceByID(ctx, tx.connection, groupID)
+	if err != nil {
+		return Resource{}, Resource{}, tx.Rollback(err)
+	}
+	if !processFound || !groupFound {
+		return Resource{}, Resource{}, tx.Rollback(ErrNotFound)
+	}
+	if process.RunID != runID || process.Kind != ResourceProviderProcess || group.RunID != runID || group.Kind != ResourceProviderGroup {
+		return Resource{}, Resource{}, tx.Rollback(ErrConflict)
+	}
+	if process.State == ResourceActive && group.State == ResourceActive && resourceIdentityEqual(process.Identity, identity) && resourceIdentityEqual(group.Identity, identity) && process.Revision.Int64() == processExpected.Int64()+1 && group.Revision.Int64() == groupExpected.Int64()+1 {
+		if err := tx.Rollback(nil); err != nil {
+			return Resource{}, Resource{}, err
+		}
+		return process, group, nil
+	}
+	if run.Phase != RunAdmitted || process.State != ResourceDeclared || group.State != ResourceDeclared || process.Revision != processExpected || group.Revision != groupExpected || at.Int64() < process.UpdatedAt.Int64() || at.Int64() < group.UpdatedAt.Int64() {
+		return Resource{}, Resource{}, tx.Rollback(ErrRevisionConflict)
+	}
+	if err := ensureResourceIdentityUnused(ctx, tx.connection, process, identity); err != nil {
+		return Resource{}, Resource{}, tx.Rollback(err)
+	}
+	pid, pgid, birth, _ := identity.Process()
+	updated, err := tx.connection.ExecContext(ctx, `UPDATE resources SET state = 'active', pid = ?, pgid = ?, birth_digest = ?, revision = revision + 1, updated_at_ms = ? WHERE run_id = ? AND state = 'declared' AND pid IS NULL AND pgid IS NULL AND birth_digest IS NULL AND ((id = ? AND kind = 'provider_process' AND revision = ?) OR (id = ? AND kind = 'provider_group' AND revision = ?))`,
+		pid, pgid, birth.Bytes(), at.Int64(), runID.Bytes(), processID.Bytes(), processExpected.Int64(), groupID.Bytes(), groupExpected.Int64())
+	if err := requireRows(updated, err, 2); err != nil {
+		return Resource{}, Resource{}, tx.Rollback(err)
+	}
+	process, processFound, err = resourceByID(ctx, tx.connection, processID)
+	if err != nil || !processFound {
+		if err == nil {
+			err = ErrCorruptState
+		}
+		return Resource{}, Resource{}, tx.Rollback(err)
+	}
+	group, groupFound, err = resourceByID(ctx, tx.connection, groupID)
+	if err != nil || !groupFound {
+		if err == nil {
+			err = ErrCorruptState
+		}
+		return Resource{}, Resource{}, tx.Rollback(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Resource{}, Resource{}, err
+	}
+	return process, group, nil
+}
+
 func (store *Store) BeginResourceRelease(ctx context.Context, runID RunID, resourceID ResourceID, expected Revision, identity ResourceIdentity, at UnixMillis) (Resource, error) {
 	return store.transitionResource(ctx, runID, resourceID, expected, identity, "", ResourceReleasing, at)
 }
@@ -42,6 +112,9 @@ func (store *Store) transitionResource(ctx context.Context, runID RunID, resourc
 		return Resource{}, tx.Rollback(ErrNotFound)
 	}
 	if resource.RunID != runID {
+		return Resource{}, tx.Rollback(ErrConflict)
+	}
+	if target == ResourceActive && (resource.Kind == ResourceProviderProcess || resource.Kind == ResourceProviderGroup) {
 		return Resource{}, tx.Rollback(ErrConflict)
 	}
 	run, found, err := runByID(ctx, tx.connection, runID)

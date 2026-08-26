@@ -506,10 +506,7 @@ func TestProviderIdentityPairIsTheOnlySameRunProcessAlias(t *testing.T) {
 	provider := resourceOfKind(t, resources, ResourceProviderProcess)
 	group := resourceOfKind(t, resources, ResourceProviderGroup)
 	runner := resourceOfKind(t, resources, ResourceRunnerProcess)
-	if _, err := store.ActivateResource(context.Background(), run.ID, provider.ID, provider.Revision, sharedProvider, mustTime(t, 20)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.ActivateResource(context.Background(), run.ID, group.ID, group.Revision, sharedProvider, mustTime(t, 21)); err != nil {
+	if _, _, err := store.ActivateProviderResources(context.Background(), run.ID, provider.ID, provider.Revision, group.ID, group.Revision, sharedProvider, mustTime(t, 20)); err != nil {
 		t.Fatalf("provider process/group pair rejected: %v", err)
 	}
 	if _, err := store.ActivateResource(context.Background(), run.ID, runner.ID, runner.Revision, sharedProvider, mustTime(t, 22)); !errors.Is(err, ErrConflict) {
@@ -903,21 +900,30 @@ func finalizingReleasedRun(t *testing.T, role AgentRole, policy VerificationPoli
 func activateAllResources(t *testing.T, store *Store, run Run, keys AdmissionKeys, at int64) map[ResourceKind]Resource {
 	t.Helper()
 	result := map[ResourceKind]Resource{}
-	providerIdentity := processIdentity(t, 250)
-	for index, resource := range resourcesForRunTest(t, store, run.ID) {
+	resources := resourcesForRunTest(t, store, run.ID)
+	provider := resourceOfKind(t, resources, ResourceProviderProcess)
+	group := resourceOfKind(t, resources, ResourceProviderGroup)
+	activeProvider, activeGroup, err := store.ActivateProviderResources(context.Background(), run.ID, provider.ID, provider.Revision, group.ID, group.Revision, processIdentity(t, 250), mustTime(t, at))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result[ResourceProviderProcess] = activeProvider
+	result[ResourceProviderGroup] = activeGroup
+	for index, resource := range resources {
+		if resource.Kind == ResourceProviderProcess || resource.Kind == ResourceProviderGroup {
+			continue
+		}
 		var identity ResourceIdentity
-		var err error
+		var identityErr error
 		if resource.Kind == ResourceRuntimeRoot {
-			identity, err = NewPathResourceIdentity(10, 100+int64(index))
-		} else if resource.Kind == ResourceProviderProcess || resource.Kind == ResourceProviderGroup {
-			identity = providerIdentity
+			identity, identityErr = NewPathResourceIdentity(10, 100+int64(index))
 		} else {
 			identity = processIdentity(t, 200+int64(index))
 		}
-		if err != nil {
-			t.Fatal(err)
+		if identityErr != nil {
+			t.Fatal(identityErr)
 		}
-		active, err := store.ActivateResource(context.Background(), run.ID, resource.ID, resource.Revision, identity, mustTime(t, at+int64(index)))
+		active, err := store.ActivateResource(context.Background(), run.ID, resource.ID, resource.Revision, identity, mustTime(t, at+1+int64(index)))
 		if err != nil {
 			t.Fatal(err)
 		}

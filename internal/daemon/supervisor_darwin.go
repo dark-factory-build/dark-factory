@@ -318,10 +318,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	if err != nil {
 		return daemon.failRun(run, kernel.FailureProtocol, err)
 	}
-	if _, err := daemon.activateResource(ctx, run.ID, keys.resources.ProviderProcess, providerIdentity); err != nil {
-		return daemon.failRun(run, kernel.FailureInternal, err)
-	}
-	if _, err := daemon.activateResource(ctx, run.ID, keys.resources.ProviderGroup, providerIdentity); err != nil {
+	if err := daemon.activateProviderResources(ctx, run.ID, keys.resources.ProviderProcess, keys.resources.ProviderGroup, providerIdentity); err != nil {
 		return daemon.failRun(run, kernel.FailureInternal, err)
 	}
 
@@ -631,6 +628,31 @@ func (daemon *Daemon) activateResource(ctx context.Context, runID kernel.RunID, 
 		return kernel.Resource{}, err
 	}
 	return daemon.store.ActivateResource(ctx, runID, resourceID, resource.Revision, identity, at)
+}
+
+func (daemon *Daemon) activateProviderResources(ctx context.Context, runID kernel.RunID, processID, groupID kernel.ResourceID, identity kernel.ResourceIdentity) error {
+	resources, err := daemon.store.Resources(ctx, runID)
+	if err != nil {
+		return err
+	}
+	var process, group kernel.Resource
+	for _, resource := range resources {
+		switch resource.ID {
+		case processID:
+			process = resource
+		case groupID:
+			group = resource
+		}
+	}
+	if process.ID != processID || process.Kind != kernel.ResourceProviderProcess || group.ID != groupID || group.Kind != kernel.ResourceProviderGroup {
+		return kernel.ErrCorruptState
+	}
+	at, err := daemon.timestamp()
+	if err != nil {
+		return err
+	}
+	_, _, err = daemon.store.ActivateProviderResources(ctx, runID, process.ID, process.Revision, group.ID, group.Revision, identity, at)
+	return err
 }
 
 func (daemon *Daemon) releaseResource(ctx context.Context, runID kernel.RunID, resourceID kernel.ResourceID) error {
