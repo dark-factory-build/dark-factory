@@ -84,7 +84,7 @@ dark-factory
 
 dark-factory-site (private)
 └── thin production Next.js host
-    ├── domain/deployment/authentication shell
+    ├── domain/deployment/site-access shell
     ├── private branding/marketing/ledger
     └── exact pinned public UI artifact
 ```
@@ -97,12 +97,24 @@ React 19; the transport client remains framework-neutral. The dev host may use
 the smallest Vite/Playwright setup that exercises the same packages without
 copying product state.
 
-The private site stays a thin host. It imports an exact version/digest of the
-public UI and client, supplies production origin/auth/deployment configuration,
-and retains its existing marketing and ledger pages. It must not copy protocol
-definitions, reducers, xterm integration, scheduling policy, action
-authorization, or daemon state. Its CI must reject a host whose pinned public
-artifact does not pass the browser-v1 capability/fixture contract.
+The private site stays a thin host. It imports exact public npm versions of
+`@dark-factory/client` and `@dark-factory/ui`, supplies only production hosting,
+origin, site-access, deployment and branding configuration, and retains its
+existing marketing and ledger pages. Runtime pairing, client credentials,
+authorization and state remain exclusively daemon-owned; site login/access is
+not runtime authority. The host must not copy protocol definitions, reducers,
+xterm integration, scheduling policy, action authorization, or daemon state.
+
+Each public package contains a generated build provenance record with exact
+source commit, protocol version, package version and build-tool versions.
+Public CI tests the packed tarballs, publishes immutable exact versions with
+registry provenance, and records their SHA-512 integrity. The private host uses
+exact versions with the `pnpm-lock.yaml` integrity plus a small committed
+`dark-factory-ui.lock.json` naming source commit/protocol/package versions. Its
+CI imports the installed provenance, compares every field and digest, runs the
+browser-v1 capability/fixture contract, and causally fails on a mismatched
+package, source commit, protocol version or integrity. No floating range or
+unreviewed local package is accepted for the cutover proof.
 
 No React, CSS, xterm or visual code enters Store, scheduler, process-kernel or
 daemon packages. No private host credential or deployment behavior enters the
@@ -135,8 +147,8 @@ Replace the provider pipe contract with this visible order:
 admit run
 → declare runtime, runner, provider/group and terminal-session resources
 → create blocked outer runner and persist its exact identity
-→ runner allocates PTY master/slave and prepares an inert inner child
-→ bind the slave as the child's controlling terminal/session
+→ runner allocates PTY master/slave with close-on-exec and prepares an inert child
+→ child creates a fresh session and binds the slave as controlling terminal
 → report exact provider identity and terminal-session identity
 → persist every identity and activation checkpoint
 → finish Change preparation/materialization
@@ -149,19 +161,54 @@ admit run
 → verify, release resources and terminalize
 ```
 
-The PTY is one concrete in-memory `TerminalSession`, not a generic actor or
-plugin. Durable state declares the terminal session before allocation and binds
-it to the exact runner/run when activated; it never persists an FD or treats a
-PTY number as authority. Exact runner absence proves its master FD is gone.
-Provider leader and group remain separate durable facts because leader reap is
-not group absence.
+The live PTY is one concrete runner-owned `TerminalSession`, not a generic
+actor or plugin. A small durable `terminal_sessions` row records only its random
+session ID, exact run and runner-resource owner, one of `declared`, `active`,
+`closed`, or `unresolved`, revision/timestamps and bounded output head/floor.
+It never persists an FD or PTY number and never grants signal/input authority
+by itself.
+Admission declares it before allocation; activation binds the already-active
+exact runner identity. A live runner may close it after it has stopped writes,
+closed the master and proved provider-group absence. Recovery may close it only
+after exact runner and provider-group absence; every weaker case becomes
+`unresolved`. Provider leader and group remain separate durable facts because
+leader reap is not group absence.
 
-V1 does not invent interactive authority after daemon/runner loss. If the live
-runner channel is lost, browser input is revoked. Recovery may read validated
-bounded terminal evidence and converge the run, but it must not reopen a PTY,
-reattach by PID, signal from a numeric identity, or replay input. Transparent
-reattachment to an orphaned PTY is deferred unless a later capability-bound
-runner channel is independently proved.
+The Darwin preparation sequence is explicit and gets its own syscall spike.
+The attempt runner calls `openpty` with close-on-exec, retains the master, and
+passes only the slave as child descriptors 0/1/2. A trusted inert provider
+wrapper becomes a fresh session leader, makes the slave its controlling
+terminal (`setsid`, then `TIOCSCTTY`/the proved Go `SysProcAttr` equivalent),
+reports PID/PGID/birth/session identity, and blocks before provider exec. The
+runner closes its slave copy immediately after the child is established. The
+provider exec inherits only 0/1/2 and its deliberately documented private
+descriptor set; it never inherits the master, control/gate descriptors or
+other runtime FDs. Every descriptor is enumerated, close-on-exec tested and
+censused. If `os/exec` cannot prove that exact Darwin order, use one small
+Darwin helper rather than a portability or process framework.
+
+V1 does not invent interactive authority after daemon/runner loss. A runner
+owns an exact daemon-lifetime channel. Daemon death closes it; the still-live
+runner synchronously freezes input, kill-and-waits its owned provider group,
+closes the PTY master, publishes final exit/cleanup evidence and exits. The
+restarted daemon never reattaches to that terminal and returns an explicit
+terminal reset plus canonical run state.
+
+Darwin has no assumed parent-death signal or signal-capability FD. If the
+runner itself is killed while its provider/group may remain, recovered numeric
+identity cannot authorize a kill. The run and terminal session remain visibly
+`unresolved` until later exact natural absence is proved; there is no false
+terminal or automatic signal. Real crash tests use an independent fixture
+safety owner, established before release, solely to clean test processes after
+asserting the product's unresolved result. A clean test census must not be
+misreported as product recovery. This honest fail-closed limitation is accepted
+for V1 unless the Darwin spike proves a smaller OS-enforced death leash; do not
+add a resident watchdog or per-run launchd abstraction merely to hide it.
+
+Transparent reattachment to an orphaned PTY, automatic convergence after lost
+runner signal authority, and durable live-session survival across daemon death
+are deferred. Browser refresh/reconnect while the same daemon and runner remain
+live is fully supported.
 
 The following current details are deleted during PTY implementation:
 
@@ -174,12 +221,19 @@ The following current details are deleted during PTY implementation:
 
 ### Terminal ownership, replay and backpressure
 
-The runner owns one bounded scrollback ring and monotonically increasing output
-sequence per run. Output frames are binary. The daemon/browser adapter owns
-subscriber queues and drops/resets a slow client instead of blocking the PTY
-reader or provider. Bounds are frozen by tests before release and apply to
-individual frames, per-client queued bytes, in-memory scrollback and any
-runner-owned disk evidence.
+The runner owns one bounded in-memory scrollback ring and monotonically
+increasing output sequence per run. V1 deliberately has no durable live-output
+journal: browser reconnect can replay retained output only while the same
+daemon and runner session remain live. Daemon/runner loss produces an explicit
+terminal reset and canonical lifecycle state; only final exit/cleanup evidence
+uses the durable terminal spool. This is at-most-once observation, not a claim
+that every terminal byte survives a crash.
+
+Output frames are binary. The daemon/browser adapter owns subscriber queues and
+drops/resets a slow client instead of blocking the PTY reader or provider.
+Bounds are frozen by tests before release and apply to individual frames,
+per-client queued bytes and in-memory scrollback. No disk scrollback is added
+until measurement proves it necessary and its crash semantics are designed.
 
 Attach names an exact run and last acknowledged output sequence. If retained
 data covers the cursor, the runner returns ordered scrollback followed by live
@@ -191,10 +245,23 @@ substitute for exact child/group exit evidence.
 Input frames carry an exact client, terminal session, lease generation and
 monotonic client input sequence. The daemon grants at most one lease per run;
 read-only clients cannot acquire it. Disconnect, expiry, operator revocation,
-run transition from running, or daemon restart revokes the lease. The runner
-serializes terminal input, HumanRequest delivery and resize operations. It ACKs
-input only after the live PTY write; a client never automatically retransmits
-an unacknowledged frame after reconnect because delivery is uncertain.
+run transition from running, or daemon restart revokes the lease.
+
+One per-run daemon operation gate serializes ordinary terminal input,
+HumanRequest delivery and the first outcome/finalizing transition. An input
+operation revalidates durable running state and the current lease while holding
+that gate, then waits for the runner write/ACK before releasing it. Finalizing
+takes the same gate, waits for any prior write, closes the browser input gate,
+commits the durable finalizing/credential-revocation transaction, advances the
+runner input generation synchronously, and never reopens it. A queued stale
+call can run only afterward, reloads finalizing and fails. The runner also
+checks accepting state and lease generation immediately before each PTY write;
+no buffered write may cross its revocation barrier. The mutex orders effects
+but never authorizes them; SQLite phase and exact credentials remain authority.
+
+The runner ACKs input only after the live PTY write. A client never
+automatically retransmits an unacknowledged frame after reconnect because
+delivery is uncertain.
 
 Multiple readers are ordinary observers. Collaborative/multi-writer terminal
 editing, durable lease survival, LAN listeners, and PTY recovery by numeric
@@ -210,20 +277,32 @@ routine automation can resolve stay in task/run/system status.
 The fresh schema uses one concrete request table plus a finite action table or
 equivalent normalized rows. It records exact 16-byte identifiers for project,
 agent, task, task incarnation and (for an agent question) run; positive
-revision and timestamps; bounded `kind`, `title`, `summary`,
+revision and timestamps; bounded daemon-derived `kind`, `title`, `summary`,
 `why_human_is_needed`, typed context items, status, idempotency identity,
 resolution and delivery identity. The initial closed kinds are `question`,
 `action`, and `combined`; statuses are `open`, `delivering`, `resolved`,
 `stale`, and policy-gated `dismissed`.
 
-The bounded public projection contains:
+The bounded watch/dashboard projection contains only daemon-derived safe
+metadata:
 
 ```text
 id, project, agent, task, run,
 created_at, updated_at, revision,
 kind, title, summary, why_human_is_needed,
-typed context items, available interactions, status
+safe typed context items, available interactions, status
 ```
+
+An attempt may supply exactly one bounded private `question_text` field and an
+idempotency identity. It may not supply title, summary, why text, context,
+interaction labels, action choices, destinations or public fields. The daemon
+derives the public card from canonical agent/task/run facts and a closed reason
+code. Arbitrary agent question text is stored as private request detail, never
+embedded in invalidations, snapshots, logs, metrics or errors. It is fetched
+only by a paired client with an explicit `human_request_detail` capability,
+escaped/rendered as hostile text, and capped independently. Observation-only
+clients without that capability see only safe metadata. This is an intentional
+private operator channel, not a public projection or sanitization claim.
 
 Interactions are one explicit union:
 
@@ -234,9 +313,10 @@ Interactions are one explicit union:
 
 The initial typed action set is finite: approve, reject, retry, cancel, resume,
 publish and narrowly defined permission grants. An agent may create only a
-bounded question through an authenticated `request_human` operation. It cannot
-mint a button, label, action kind, arguments or authority. The daemon derives
-all identity from the exact attempt credential and decides which actions exist.
+bounded private question through an authenticated `request_human` operation.
+It cannot mint public card text, a button, label, action kind, arguments or
+authority. The daemon derives all identity from the exact attempt credential
+and decides which actions exist.
 
 Creation is unique for one exact `(run, request idempotency identity)`. Viewing,
 subscribing or opening the terminal never resolves it. Reply/action requires
@@ -263,7 +343,6 @@ typed actions commit their state effect, request resolution and invalidations
 in one immediate SQLite transaction.
 
 ### Browser protocol v1
-
 `factoryd` initially hosts the loopback WebSocket adapter in
 `internal/browser`. That package owns HTTP/WebSocket upgrade parsing, Host and
 Origin policy, pairing/client authentication, multiplexing, bounds and browser
@@ -293,13 +372,16 @@ values fail closed.
 The source of truth stays deliberately small:
 
 - `protocol/browser/v1/manifest.json` owns protocol version, capabilities,
-  control names, terminal opcodes and wire bounds;
-- typed Go and TypeScript unions remain explicit and readable;
+  control names, terminal opcodes and wire bounds, not payload schemas;
+- explicit Go wire definitions in `internal/browserprotocol` own control and
+  binary payload shapes; the TypeScript union is a readable client mirror,
+  never a second semantic authority;
 - the Go implementation produces a golden valid/error fixture for every
   manifest entry;
 - TypeScript tests consume every fixture and exercise the real Go server;
 - a gate regenerates fixtures to a temporary directory, compares the checked-in
-  set, checks registry exhaustiveness, and rejects drift.
+  set, proves every manifest entry maps to exactly one Go decoder/encoder and
+  TypeScript handler, rejects extra registry entries, and rejects drift.
 
 This avoids a general schema/code-generation framework while satisfying the
 rule that a Go protocol change cannot pass with a silently incompatible
@@ -314,20 +396,35 @@ The browser transport carries operator authority and terminal input. V1 must:
 - expose no permissive CORS or missing-Origin fallback;
 - reject malformed, oversized and rate-exceeding control/binary frames;
 - separate paired observation from terminal-input authority;
-- issue one revocable client identity per browser profile;
+- issue one revocable proof-of-possession client identity per browser profile;
 - persist pairing/client/revocation facts and security invalidations;
 - never send the Unix operator token, attempt credential, provider credential,
   private source, raw debug data or permanent secret to browser JavaScript;
 - revoke input on finalizing even if the browser/daemon has stale state.
 
+Each browser profile creates a non-exportable WebCrypto P-256 signing key and
+stores the `CryptoKey` in IndexedDB; there is no long-lived bearer/localStorage
+fallback. Pairing persists only the client ID, public key fingerprint/key,
+granted capabilities, revision and revocation state in SQLite. Each WebSocket
+connection performs a fresh daemon-nonce proof over protocol version, exact
+Origin/Host, daemon instance and client ID before receiving state. Tabs may use
+the same profile key but have distinct connections and terminal leases.
+Revocation, key mismatch, duplicate identity, profile reset and daemon restart
+are explicit tests. If durable non-exportable key storage is unavailable, the
+browser must pair again rather than weakening the credential.
+
 `factoryctl web open` asks the owner-only Unix API to create one short-lived,
-single-use challenge, then opens the hosted app with only that one-time
-bootstrap material. The app removes bootstrap material from browser history
-before establishing durable state, creates its own client identity, proves the
-challenge, and receives only client-scoped revocable authority. Reuse, expiry,
-wrong daemon/client and revocation fail closed. `web status`, `pair/open`,
-`list-clients`, and `revoke` are the initial CLI recovery surfaces; exact names
-may collapse if one command suffices.
+single-use challenge bound to the daemon instance and intended Origin, then
+opens the hosted app with that challenge only in the URL fragment. A challenge
+is forbidden in the path or query. The host sends `Referrer-Policy: no-referrer`
+and loads no analytics or third-party resource. Its first synchronous
+first-party bootstrap reads and clears the fragment with `history.replaceState`
+before starting any application network request, then registers the browser
+public key with the loopback daemon. HTTP access logs, requests, referrers,
+telemetry, errors and copied post-bootstrap URLs must never contain the
+challenge. Reuse, expiry, wrong daemon/origin/key/client and revocation fail
+closed. `web status`, `pair/open`, `list-clients`, and `revoke` are the initial
+CLI recovery surfaces; exact names may collapse if one command suffices.
 
 The hosted app must use first-party bundled scripts, strict CSP, controlled
 dependencies, no third-party analytics in the terminal context, and safe
@@ -350,9 +447,12 @@ https://app.darkfactory.build
 ```
 
 Only `127.0.0.1` is in the first support claim; `localhost`, IPv6, random-port
-discovery and Safari support require their own evidence. A stable port avoids
-port scanning and secrets in discovery URLs; collision must fail visibly and
-be diagnosed by `factoryctl web status`.
+discovery and Safari support require their own evidence. A stable port removes
+random-port discovery/coordination; it is not a secret and provides no security.
+Collision must fail visibly and be diagnosed by `factoryctl web status`.
+Security comes only from loopback binding, canonical exact Host+port, exact
+Origin, proof-of-possession pairing and per-operation authority. Forwarded Host
+or proxy headers are never trusted.
 
 The spike uses a real hosted/preview HTTPS origin and a disposable local server
 outside the live home. It records WebSocket upgrade, mixed-content/LNA prompt,
@@ -391,13 +491,15 @@ fresh SQLite database
 → acquire one input lease, send input and observe exact provider response
 → provider explicitly creates one bounded HumanRequest
 → browser renders it without transcript/private fields
-→ inline reply is delivered once to that exact run
+→ inline reply is acknowledged at most once by that exact run, or becomes
+  visibly delivery-unknown without replay
 → one daemon-minted typed action is revalidated and committed
 → completion request enters finalizing and revokes all input
 → provider, descendants and PTY are reaped/closed
 → stable verification and resource cleanup
 → terminal state
-→ browser refresh and daemon restart converge without input/process replay
+→ browser refresh replays live retained scrollback; daemon restart returns an
+  explicit terminal reset and converges without input/process replay
 ```
 
 Use only deterministic shell fixtures. A browser or daemon disconnect does not
@@ -449,6 +551,9 @@ matrix, the following must exist and kill the named guard mutations:
 
 - PTY cannot exist before admission/resource declaration; release-before-
   identity-commit mutation is killed by an external execution witness.
+- Darwin cuts after `openpty`, fork, `setsid`, controlling-terminal bind, slave
+  handoff, identity persistence and every parent/child descriptor close prove
+  the provider never executes early and inherits no master/control descriptor.
 - Input before running, without the current lease, from a stale lease/client,
   or after finalizing is refused; removing the phase or lease-generation check
   is killed by an exact fixture input count.
@@ -458,19 +563,38 @@ matrix, the following must exist and kill the named guard mutations:
   queue/credit bound is killed by measured limits.
 - Runner/daemon death at every PTY/gate/write/ack cut causes no provider or
   terminal-input replay, no unsafe signal and no false release.
+- Daemon death proves its live runner freezes input and kill-and-waits its owned
+  group. Runner `SIGKILL` with a live/descendant-held PTY proves the product
+  records unresolved and does not signal; the independent test safety owner
+  then removes the fixture and the report distinguishes those two effects.
+- Browser refresh on a live runner replays the retained range; daemon or runner
+  loss yields `TERMINAL_RESET` and canonical state, never a fabricated durable
+  output replay.
 - Provider descendants, PTY descriptors, control sockets and every owner
   goroutine are absent after normal/error/cancel/crash tests, with independent
   safety cleanup.
 - HumanRequest creation is idempotent; viewing does not clear; restart
   preserves; stale run/revision refuses; duplicate/uncertain delivery never
   injects twice; routine failure never creates one.
+- Attempts can supply only private bounded question text. Mutations that copy it
+  into safe metadata/watch/log/error frames are killed by per-field secret
+  exfiltration tests; clients without `human_request_detail` cannot fetch it.
 - An attempt cannot mint a typed action. Removing daemon action allowlisting or
   current-state precondition checks is killed by authority tests.
 - Every public/browser frame is scanned against private sentinels from task
   bodies, prompts, output, credentials, source and result detail.
+- Terminal/UI tests treat all bytes as hostile, disable or explicitly mediate
+  OSC 52 clipboard, OSC 8 links, title changes and device/control queries, and
+  bound escape sequences and binary frames without interpreting them as HTML.
 - Non-loopback bind, wrong/missing Origin, wrong Host, wildcard origin,
   unpaired/expired/replayed/revoked/wrong-client credentials, read-only input,
   malformed/oversized/rate-exceeding frames are rejected causally.
+- Pairing tests prove fragment-only bootstrap, no-referrer, clearing before app
+  requests, and absence from HTTP logs/history/referrers/telemetry. Client tests
+  cover non-exportable key persistence, fresh nonce proof, copied/mismatched
+  keys, profile reset, tab sharing and revocation across daemon restart.
+- A cut between input enqueue, runner generation check, PTY write, ACK and
+  finalizing barrier proves no byte is written after durable finalizing.
 - Every manifest message/opcode has Go and TypeScript fixtures; changing a
   message, version, capability or binary envelope without updating the client
   fails the gate.
@@ -511,6 +635,7 @@ verification and process proofs plus:
 
 ```text
 PTY/process lifecycle and leak matrix GREEN
+runner-loss unresolved/no-signal proof and independent fixture cleanup GREEN
 Go race detector GREEN
 hosted-origin browser connectivity contract recorded and GREEN on supported Chrome
 loopback Host/Origin/pairing/revocation/security matrix GREEN
@@ -669,8 +794,9 @@ not a compatibility target.
 - A stored PID or PGID is observation evidence, never signal authority.
   `EPERM`, malformed identity, reuse, missing birth proof, or any inconclusive
   liveness result is present/`unresolved`, never absent/released.
-- Runner terminal observation remains durable and replayable across daemon
-  loss. Store commit precedes runner acknowledgement. Output remains opaque.
+- Runner final exit/cleanup observation remains durable and replayable across
+  daemon loss. Store commit precedes runner acknowledgement. Live PTY output is
+  bounded and opaque but intentionally not crash-durable in V1.
 - Provider launch uses `env_clear` plus a closed allowlist of ordinary identity,
   locale, shell, path, and temporary-directory values and explicit validated
   provider-home configuration. It disables Git discovery above the Change,
@@ -1124,7 +1250,8 @@ the already registered gate. Each concrete adapter resolves the
 operator-facing executable to one canonical native Mach-O target and freezes
 its absolute path, device/inode, owner, complete mode, bounded size, nanosecond
 timestamps, SHA-256, running-architecture support, argv, environment, working
-directory identity, and stdin setup before readiness. After create-only
+directory identity, and exact PTY/control descriptor setup before readiness.
+After create-only
 activation, that same PID reopens and verifies the frozen path, hashes its
 bytes, compares a second `fstat` plus named-path identity, closes the verifier
 descriptor, and immediately calls `execve` on the committed path. Mismatch,
@@ -1189,8 +1316,9 @@ They write/sync private staging and receipt, atomically publish one immutable
 version directory without replacement, durably record old/new activation and
 plist/service phases before effects, swap the relative `bin/current`, render
 and reload one allowlisted plist with `AbandonProcessGroup=true`, and prove
-launchd PID, actual daemon executable/build identity, and all four receipt-bound
-siblings. Exact new health commits/removes pending state. Every known pre-health
+launchd PID, actual daemon executable/build identity, and all three
+receipt-bound siblings. Exact new health commits/removes pending state. Every
+known pre-health
 crash rolls back link then plist/service; unknown ownership/control state fails
 closed and preserves evidence.
 
@@ -1228,9 +1356,12 @@ silently retaining the current persistent-runner credential exposure (#54).
 
 ## 4. Kernel proof
 
-The first implementation is a vertical, integrated go/no-go spike. It includes
-only the Store/domain, the two-gate runner, shell provider, minimal exact
-Change, finalizer/recovery, the private API, and enough CLI to drive it.
+The Store/two-gate/Change/API/CLI implementation through `7eb4176` is retained
+foundation, not the redirected go/no-go proof by itself. The first web-first
+integrated proof includes that foundation plus the PTY session, HumanRequest,
+loopback browser adapter, browser-v1 TypeScript client and minimal public dev UI
+needed to exercise the authoritative updated vertical slice above. Private-site
+integration remains a later cutover gate after the public packages stabilize.
 
 The deterministic witness is:
 
@@ -1241,18 +1372,21 @@ fresh Go-marked home and SQLite schema
   -> create assigned task
   -> atomic canonical admission inside BEGIN IMMEDIATE
   -> reserve daemon-owned Change and exact source/base authority
-  -> mint one attempt credential and declare runtime/runner/provider resources
-  -> prepare outer runner and registered source/provider wrapper before exec
+  -> mint one attempt credential and declare runtime/runner/provider/terminal session
+  -> prepare outer runner, PTY and registered source/provider wrapper before exec
   -> persist exact identities; release exact commit selection before blob read
   -> materialize/publish and revalidate the complete exact Change manifest
   -> persist Change available and transition admitted -> running
   -> release the exact shell provider once
+  -> pair browser; attach, observe output, acquire lease, input and resize
+  -> create exact HumanRequest; fetch private detail with explicit capability
+  -> deliver reply at most once or surface delivery-unknown; commit one typed action
   -> provider makes a typed authenticated completion request
-  -> transition to finalizing and revoke credential
+  -> serialize finalizing barrier; revoke credential and all input
   -> stop/reap provider; for configured worker success only, take a stable
      snapshot and run the once-only registered verifier effect
-  -> release resources, remove runtime last, finalizer writes terminal
-  -> client snapshot/watch agrees with SQLite
+  -> close terminal, release resources, remove runtime last, finalizer writes terminal
+  -> browser refresh/reconnect/reset and client state agree with SQLite
 ```
 
 The shell provider writes an external witness only after activation. Tests
@@ -1663,8 +1797,8 @@ untouched. `control-plane/` must keep its independent Rust gate after root
 Cargo removal.
 
 The platform transaction must distinguish launchd “not found” from permission,
-spawn, parse, and service errors; bind the actual daemon executable plus all
-four sibling binaries to one receipt/build identity; reject symlinked path
+spawn, parse, and service errors; bind all three Go binaries to one
+receipt/build identity; reject symlinked path
 components and foreign plists; and recover every activation/reload cut. An
 incompatible Go home is never activated over a Rust database, so pointer
 rollback cannot masquerade as database rollback.
@@ -1672,8 +1806,8 @@ rollback cannot masquerade as database rollback.
 ### Scope pressure
 
 The issue backlog contains useful future product work that is not required for
-the rewrite. Kernel correctness, basic useful work, client parity, and local
-macOS replacement define cutover. Intake, auto-update, Linux release, new
+the rewrite. Kernel correctness, basic useful web operation, and local macOS
+replacement define cutover. Intake, auto-update, Linux release, new
 workflows/personas/review features, and storage product expansion remain
 deferred even if adjacent code is being replaced.
 
@@ -1718,7 +1852,8 @@ following evidence:
 - independent architecture, security/authority, process lifecycle,
   Store/concurrency, and simplification reviewers return ALLOW on the exact
   head after all findings are resolved;
-- a clean checkout builds all four Go binaries, runs the authoritative gates,
+- a clean checkout builds all three Go binaries and the public web packages,
+  runs the authoritative gates,
   and ends with a clean process/path/resource census.
 
 Only then may the cutover commit make Go the sole local runtime, delete the
