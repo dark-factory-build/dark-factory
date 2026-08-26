@@ -14,4 +14,10 @@ func TestUnsupportedFailsBeforeEffect(t *testing.T) {
 	if err := RunExecGate(); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("gate=%v", err)
 	}
+	if err := RunAttemptRunner(); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("attempt=%v", err)
+	}
+	if _, _, err := NewAttemptController(); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("controller=%v", err)
+	}
 }

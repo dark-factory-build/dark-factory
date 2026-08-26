@@ -37,6 +37,27 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
+	if len(os.Args) == 2 && os.Args[1] == "--attempt-runner" {
+		if err := RunAttemptRunner(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(70)
+		}
+		os.Exit(0)
+	}
+	if len(os.Args) >= 2 && os.Args[1] == "--attempt-worker" {
+		if err := runAttemptWorkerHelper(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(98)
+		}
+		os.Exit(0)
+	}
+	if len(os.Args) == 3 && os.Args[1] == "--attempt-provider" {
+		if err := os.WriteFile(os.Args[2], []byte("provider"), 0o600); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(97)
+		}
+		os.Exit(0)
+	}
 	beforeFD := fdCensus()
 	beforeG := runtime.NumGoroutine()
 	code := m.Run()

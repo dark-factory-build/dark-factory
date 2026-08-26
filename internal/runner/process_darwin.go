@@ -115,7 +115,7 @@ func StartBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, kee
 		return nil, err
 	}
 	defer config.Close()
-	if err := writeFrame(config, gateConfig{Version: 1, Target: spec.commit, LeaseDirectory: lease.dirIdentity, MarkerName: lease.basename, KeepLease: keepLeaseAcrossExec, TestFinalCheck: spec.testFinal != nil}, maxConfigBytes); err != nil {
+	if err := writeFrame(config, gateConfig{Version: 1, Target: spec.commit, LeaseDirectory: lease.dirIdentity, MarkerName: lease.basename, KeepLease: keepLeaseAcrossExec, Control: spec.controlID, TestFinalCheck: spec.testFinal != nil}, maxConfigBytes); err != nil {
 		return nil, err
 	}
 	if _, err := config.Seek(0, 0); err != nil {
@@ -171,6 +171,9 @@ func StartBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, kee
 	cmd.Env = []string{}
 	cmd.Stderr = stderr
 	cmd.ExtraFiles = []*os.File{config, leashR, statusW, stdin, stdout, stderr, leaseFile}
+	if spec.controlID != nil {
+		cmd.ExtraFiles = append(cmd.ExtraFiles, spec.control)
+	}
 	if spec.testFinal != nil {
 		cmd.ExtraFiles = append(cmd.ExtraFiles, spec.testFinal)
 	}
@@ -726,6 +729,13 @@ func RunExecGate() error {
 	if got, err := commitOpen(leaseDir, cfg.LeaseDirectory.Path, false); err != nil || got.FileIdentity != cfg.LeaseDirectory.FileIdentity || got.UID != cfg.LeaseDirectory.UID || got.GID != cfg.LeaseDirectory.GID || got.Mode != cfg.LeaseDirectory.Mode {
 		return fmt.Errorf("runner: lease directory: %w", ErrIdentity)
 	}
+	var control *os.File
+	if cfg.Control != nil {
+		control = os.NewFile(10, "target-control")
+		if control == nil || verifyControl(control, *cfg.Control) != nil {
+			return fmt.Errorf("runner: control capability: %w", ErrIdentity)
+		}
+	}
 	target, err := verifyCommit(cfg.Target.Executable, true)
 	if err != nil {
 		return fmt.Errorf("runner: prepared executable: %w", err)
@@ -775,7 +785,11 @@ func RunExecGate() error {
 	if cfg.TestFinalCheck {
 		// This package-test-only barrier makes the documented cooperative
 		// same-UID pathname race measurable; it is not a production defense.
-		seam := os.NewFile(10, "test-final-check")
+		seamFD := uintptr(10)
+		if control != nil {
+			seamFD = 11
+		}
+		seam := os.NewFile(seamFD, "test-final-check")
 		if seam == nil {
 			return ErrIdentity
 		}
@@ -805,8 +819,16 @@ func RunExecGate() error {
 	if err := unix.Dup2(int(stderr.Fd()), 2); err != nil {
 		return err
 	}
-	for _, fd := range []int{3, 4, 6, 7, 8} {
+	if control != nil {
+		if err := unix.Dup2(int(control.Fd()), 3); err != nil {
+			return err
+		}
+	}
+	for _, fd := range []int{4, 6, 7, 8, 10, 11} {
 		_ = unix.Close(fd)
+	}
+	if control == nil {
+		_ = unix.Close(3)
 	}
 	unix.CloseOnExec(5)
 	if !cfg.KeepLease {

@@ -78,14 +78,28 @@ type ExecSpec struct {
 	Stdin  []byte
 	Stdout *os.File
 	Stderr *os.File
+	// Control is the one fixed private duplex capability inherited by a
+	// runner-owned target as descriptor 3. It is not a general ExtraFiles
+	// surface and is closed before provider exec.
+	Control *os.File
 }
 
 type LaunchSpec struct {
-	commit    launchCommitment
-	stdin     []byte
-	stdout    *os.File
-	stderr    *os.File
-	testFinal *os.File // package-test-only barrier after the final pathname check
+	commit           launchCommitment
+	stdin            []byte
+	stdout           *os.File
+	stderr           *os.File
+	control          *os.File
+	controlID        *descriptorCommitment
+	testFinal        *os.File // package-test-only barrier after the final pathname check
+	testCurrentFinal bool     // package-test-only barrier for same-process exec
+}
+
+type descriptorCommitment struct {
+	FileIdentity
+	UID  uint32 `json:"uid"`
+	GID  uint32 `json:"gid"`
+	Mode uint32 `json:"mode"`
 }
 
 type fileCommitment struct {

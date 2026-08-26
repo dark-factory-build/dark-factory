@@ -42,8 +42,53 @@ func PrepareExecSpec(spec ExecSpec) (*LaunchSpec, error) {
 	if err != nil {
 		return nil, err
 	}
+	var controlID *descriptorCommitment
+	if spec.Control != nil {
+		committed, err := commitControl(spec.Control)
+		if err != nil {
+			return nil, fmt.Errorf("runner: control capability: %w", err)
+		}
+		controlID = &committed
+	}
 	argv := append([]string{target.Path}, spec.Args...)
-	return &LaunchSpec{commit: launchCommitment{Executable: target, Cwd: cwd, Argv: argv, Env: append([]string{}, spec.Env...)}, stdin: append([]byte{}, spec.Stdin...), stdout: spec.Stdout, stderr: spec.Stderr}, nil
+	return &LaunchSpec{commit: launchCommitment{Executable: target, Cwd: cwd, Argv: argv, Env: append([]string{}, spec.Env...)}, stdin: append([]byte{}, spec.Stdin...), stdout: spec.Stdout, stderr: spec.Stderr, control: spec.Control, controlID: controlID}, nil
+}
+
+func commitControl(f *os.File) (descriptorCommitment, error) {
+	if f == nil {
+		return descriptorCommitment{}, ErrIdentity
+	}
+	var a, b unix.Stat_t
+	if err := unix.Fstat(int(f.Fd()), &a); err != nil {
+		return descriptorCommitment{}, err
+	}
+	if a.Mode&unix.S_IFMT != unix.S_IFSOCK || a.Uid != uint32(os.Geteuid()) || a.Dev == 0 || a.Ino == 0 {
+		return descriptorCommitment{}, ErrIdentity
+	}
+	if kind, err := unix.GetsockoptInt(int(f.Fd()), unix.SOL_SOCKET, unix.SO_TYPE); err != nil || kind != unix.SOCK_STREAM {
+		return descriptorCommitment{}, ErrIdentity
+	}
+	if _, err := unix.Getpeername(int(f.Fd())); err != nil {
+		return descriptorCommitment{}, ErrIdentity
+	}
+	if err := unix.Fstat(int(f.Fd()), &b); err != nil {
+		return descriptorCommitment{}, err
+	}
+	if statKey(a) != statKey(b) {
+		return descriptorCommitment{}, ErrIdentity
+	}
+	return descriptorCommitment{FileIdentity: FileIdentity{Device: uint64(a.Dev), Inode: a.Ino}, UID: a.Uid, GID: a.Gid, Mode: uint32(a.Mode)}, nil
+}
+
+func verifyControl(f *os.File, want descriptorCommitment) error {
+	got, err := commitControl(f)
+	if err != nil {
+		return err
+	}
+	if got != want {
+		return ErrIdentity
+	}
+	return nil
 }
 
 func allowedEnv(k string) bool {

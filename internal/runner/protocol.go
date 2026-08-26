@@ -7,13 +7,16 @@ import (
 	"io"
 )
 
+const maxAttemptReportBytes = 32 << 10
+
 type gateConfig struct {
-	Version        int              `json:"version"`
-	Target         launchCommitment `json:"target"`
-	LeaseDirectory fileCommitment   `json:"lease_directory"`
-	MarkerName     string           `json:"marker_name"`
-	KeepLease      bool             `json:"keep_lease"`
-	TestFinalCheck bool             `json:"test_final_check,omitempty"`
+	Version        int                   `json:"version"`
+	Target         launchCommitment      `json:"target"`
+	LeaseDirectory fileCommitment        `json:"lease_directory"`
+	MarkerName     string                `json:"marker_name"`
+	KeepLease      bool                  `json:"keep_lease"`
+	Control        *descriptorCommitment `json:"control,omitempty"`
+	TestFinalCheck bool                  `json:"test_final_check,omitempty"`
 }
 
 type gateFrame struct {
@@ -21,6 +24,26 @@ type gateFrame struct {
 	Identity Identity      `json:"identity,omitempty"`
 	Marker   *FileIdentity `json:"marker,omitempty"`
 	Error    string        `json:"error,omitempty"`
+}
+
+type attemptConfig struct {
+	Version      int              `json:"version"`
+	AttemptID    string           `json:"attempt_id"`
+	Wrapper      launchCommitment `json:"wrapper"`
+	MarkerName   string           `json:"marker_name"`
+	TerminalName string           `json:"terminal_name"`
+}
+
+type attemptFrame struct {
+	Version        int           `json:"version"`
+	Kind           string        `json:"kind"`
+	Stage          AttemptStage  `json:"stage,omitempty"`
+	Identity       Identity      `json:"identity,omitempty"`
+	Payload        []byte        `json:"payload,omitempty"`
+	Terminal       *Terminal     `json:"terminal,omitempty"`
+	FileIdentity   *FileIdentity `json:"file_identity,omitempty"`
+	Digest         string        `json:"digest,omitempty"`
+	StoreCommitted bool          `json:"store_committed,omitempty"`
 }
 
 func writeFrame(w io.Writer, value any, limit int) error {
