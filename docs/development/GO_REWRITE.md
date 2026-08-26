@@ -285,6 +285,31 @@ provider; restart recovery never restores that lease. No subsequent input is
 accepted on the affected run. This is one failure path, not a durable delivery
 framework.
 
+The durable lease TTL is exactly 30 seconds. Acquisition calculates the expiry
+from the daemon-supplied transaction timestamp; the browser never supplies an
+expiry. Expiry means `now >= lease_expires_at_ms`. The exact live connection
+that acquired the lease renews it before expiry with its client ID and current
+generation; renewal changes only the expiry and is rejected if the timestamp
+would move the expiry backwards. It never advances generation or resets input
+sequence. A backward wall-clock jump may conservatively keep an old holder
+longer, but can never grant a second writer; daemon restart clears every lease.
+The control protocol therefore has explicit acquire, renew and release
+operations. A per-session live owner also binds the durable client/generation
+to one exact WebSocket connection, so two tabs sharing one browser-profile key
+cannot both write. Disconnect best-effort releases the durable lease; expiry
+and generation remain the independent safety mechanism.
+
+`last_input_sequence` is the server-reserved sequence within one lease
+generation. Each terminal input frame names the exact generation and exact
+next positive sequence; the Store accepts only `last_input_sequence + 1` and
+commits that reservation before the daemon attempts the bounded PTY write.
+Duplicate, skipped and stale sequences fail without a write. A known partial
+write whose revocation commits leaves the run running but requires an explicit
+fresh lease before any deliberate correction; unknown delivery or inability
+to commit revocation takes the existing fail-closed owner-death/finalizing
+path. Sequence or generation increment at SQLite's signed-integer maximum
+fails without state change.
+
 The running-to-finalizing transaction clears the holder, advances the generation
 and revokes the attempt credential together. Close requires positive typed
 evidence from the live owner; recovery may close only after exact runner and
@@ -527,6 +552,7 @@ HELLO / PAIR_PROVE / PAIR_RESULT / AUTH_PROVE / AUTH_RESULT
 STATE_GET / STATE_SNAPSHOT / STATE_SUBSCRIBE / STATE_EVENT
 HUMAN_REQUEST_REPLY / HUMAN_REQUEST_ACTION
 TERMINAL_ATTACH / TERMINAL_ATTACHED / TERMINAL_ACK
+TERMINAL_LEASE_ACQUIRE / TERMINAL_LEASE_RENEW / TERMINAL_LEASE_RELEASE
 TERMINAL_RESIZE / TERMINAL_DETACH / TERMINAL_EXIT / TERMINAL_RESET
 ERROR
 ```
@@ -536,6 +562,24 @@ session identifier, sequence/generation metadata and bounded payload. Exact
 encoding and maximums freeze only after Go/TypeScript fixture and malformed
 frame tests. Unknown versions, capabilities, messages, opcodes or control
 values fail closed.
+
+`internal/browser` owns one small consumer-side backend interface implemented
+directly by `internal/daemon`. It contains only pairing/authentication,
+canonical state/watch, HumanRequest reply/action, and terminal attach/lease/
+input/resize operations. The only streaming member is one terminal attachment
+whose owner synchronously closes and joins it. Principals contain only the
+browser client ID; every effect reloads durable capability and target state.
+The adapter never imports `internal/kernel` or `internal/runner`, and no service
+or repository wrapper sits between daemon and Store.
+
+Transport implementation remains blocked until the daemon owns a registered
+live-attempt object outside `RunNext`: exact runner/PTY owner, one PTY reader,
+bounded scrollback and subscribers, resize, and fixed per-client-then-per-run
+operation gates. Existing supervisor wake hints are not a browser event bus.
+The live-attempt surface exposes no PID, PGID, descriptor, signal or child
+authority. Revocation commits before a non-reentrant callback closes that
+client's connections; shutdown cancels and joins every listener, connection,
+attachment, reader and subscription owner.
 
 The source of truth stays deliberately small:
 
@@ -599,15 +643,30 @@ browser_clients
   revoked_at_ms          nullable
 
 browser_security_events
-  bounded pairing/revocation/security kind, client reference and timestamp;
+  monotonic sequence primary key, bounded pairing/revocation/security kind,
+  client reference and timestamp;
   never a challenge, signature, terminal byte, provider output or private text
 ```
 
 The initial capability bits are exactly `observe`,
 `private_human_request_detail`, `human_actions`, and `terminal_input`. Unknown
-bits fail closed. Capabilities are selected by the daemon when it mints the
-challenge; the browser never proposes or widens them. This is one concrete
-bitmask, not a generic permission framework.
+bits fail closed and `observe` is mandatory; the other three bits are
+independent and imply no hidden authority. The owner-authenticated mint request
+may select a subset of those fixed optional bits, subject to daemon policy.
+The browser never submits, proposes or widens capabilities. This is one
+concrete bitmask, not a generic permission framework.
+
+Security-event kinds are exactly `challenge_minted`, `client_paired`,
+`duplicate_fingerprint`, and `client_revoked` in v1. Challenge consumption is
+already represented by its row and does not receive a duplicate event.
+Unauthenticated refusal traffic is bounded in memory rather than becoming a
+SQLite write-amplification path. After appending an event, the same transaction
+deletes every event older than the newest 4,096 by monotonic sequence; it never
+rejects an authorized mutation merely because the audit is full. The event
+contains no free-form detail. Challenge minting in the same transaction removes
+redeemed, expired and old-boot rows, permits at most 32 current unredeemed
+challenges, and otherwise fails closed. Thus neither table grows without a
+fixed bound during normal operation.
 
 Each browser profile creates a non-exportable WebCrypto P-256 signing key and
 stores the `CryptoKey` in IndexedDB; there is no long-lived bearer/localStorage
@@ -688,6 +747,16 @@ and `factoryctl web open` must mint a new challenge after conflict. Other
 transaction failures roll back without claiming redemption. A lost success
 response also consumes the challenge and is never replayed.
 
+Unexpired means strictly `now < expires_at_ms`; the exact boundary is expired.
+Wrong boot, Origin, proof or expiry refuses without consuming the challenge.
+The Store derives the fingerprint itself as SHA-256 of the exact validated
+65-byte uncompressed on-curve P-256 point and never accepts a caller-provided
+fingerprint. A duplicate fingerprint conflicts even when its existing client
+is revoked; pairing never revives or replaces an identity. The loopback server
+accepts one configured exact Host including its port. Host is therefore bound
+by upgrade policy and the signed transcript rather than copied into every
+challenge row; a challenge cannot move to a second accepted Host.
+
 Existing-client `AUTH_PROVE` names only the client ID. The daemon loads the
 stored public key and reconstructs AUTH; ordinary authentication never accepts
 a replacement public key.
@@ -716,7 +785,24 @@ connections before releasing the gate. An operation already inside the gate
 may finish before revocation commits; no later browser effect begins after the
 durable revocation. These gates serialize effects but never replace Store
 authorization. Finalizing revokes terminal input independently of browser-
-client revocation.
+client revocation. Revocation requires the exact expected client revision. The
+first successful revoke advances it once; a call using the current revision on
+an already revoked client is an idempotent no-op with no duplicate event or
+lease change, while a stale revision conflicts. Client revisions do not change
+on daemon restart.
+
+Lease state is not a public event entity and never exposes another client ID.
+Attach/acquire/renew/release responses project only whether input is available,
+whether this authenticated connection owns it, its own generation and expiry.
+The live terminal hub sends bounded ownership-control updates to attached
+connections; reconnect/attach reloads canonical durable state. A lost lease
+hint can make controls look stale briefly but cannot authorize input because
+every operation revalidates Store state. Run finalization still advances the
+run revision/invalidation and sends a terminal reset/exit control after commit.
+
+Each WebSocket connection accepts exactly one successful PAIR or AUTH proof
+against its single-use nonce and short deadline. Any failed proof closes that
+connection. These are in-memory transport invariants, not durable session rows.
 
 Revocation, key mismatch, duplicate identity, old connection nonce, profile
 reset, capability escalation and daemon restart are explicit tests.
