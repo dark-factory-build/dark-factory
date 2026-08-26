@@ -43,12 +43,12 @@ branch/worktree and obeys that repository's `AGENTS.md`.
 
 | State | Exact work retained or stopped |
 |---|---|
-| Complete and retained | Fresh SQLite contract; typed kernel; atomic admission; exact attempt credentials; run/finalizing/resource state; bounded invalidations; Change ownership/materialization groundwork; owner-only Unix control API; typed `factoryctl` client; Darwin process identity; two blocked-exec gates; terminal-exit spool; gated Darwin PTY primitive; durable terminal-session admission, activation, recovery uncertainty and finalization guards through `9c91731` |
+| Complete and retained | Fresh SQLite contract; typed kernel; atomic admission; exact attempt credentials; run/finalizing/resource state; bounded invalidations; Change ownership/materialization groundwork; owner-only Unix control API; typed `factoryctl` client; Darwin process identity; two blocked-exec gates; terminal-exit spool; gated Darwin PTY primitive; durable terminal-session admission, activation, recovery uncertainty and finalization guards; durable browser clients/challenges/revocation/input leases; exact PAIR/AUTH transcripts; strict browser-v1 handshake/binary codecs; strict runner terminal union, complete-write poisoning, incremental frame decoder and one fixed replay ring through `f1f72aa` |
 | Reusable with adaptation | `internal/runner` live-child/process-group ownership; daemon supervisor choreography; bounded API framing/auth separation; dashboard projection/client reducer direction; rebased recovery branch `go-recovery-reserved-fix` at `185cd5f`; fail-closed runtime/spool/Change close branches at `f239815`, `347c977`, and `4183205` |
-| In progress but held | Recovery is rebased onto the approved Store chronology but remains unintegrated until the live PTY owner, bounded output and input-lease semantics replace the remaining non-interactive runner assumptions and the close patches are replayed/re-reviewed |
+| In progress but held | The live PTY-owner loop is isolated on `go-runner-terminal-loop`; the framework-neutral TypeScript contract has code review ALLOW and awaits its generated lockfile/package exact-head review. Recovery remains unintegrated until PTY tail, daemon-loss and input-generation semantics replace the remaining non-interactive runner assumptions and the close patches are replayed/re-reviewed. |
 | Obsolete | Startup-input-only/closed-stdin provider contract; separate stdin/stdout/stderr provider pipes as the product transport; TUI/Bubble Tea packages, lanes and parity tests; generic attention projection; message-on-next-run as the live-question answer |
 | Proved for revised architecture | Current Chrome on macOS can connect from the protected hosted HTTPS preview to exact `ws://127.0.0.1:43123` with the dedicated loopback permission; strict Origin/Host checks, binary traffic, reconnect, denial, no-daemon, port-collision and cross-site refusal are causal. A fresh Darwin PTY child remains inert until release, owns a controlling terminal/process group and is reaped without orphaning. SQLite now owns exactly one terminal session per admitted run and refuses terminalization until its exact close is proved. |
-| Blocked until proved | Live runner ownership of PTY attach/input/resize/output replay; browser-client pairing/security; durable terminal leases; durable `HumanRequest`; browser protocol v1; TypeScript client; public web UI; complete private host integration; revised crash-cut vertical slice |
+| Blocked until proved | Live runner execution of PTY attach/input/resize/output replay and daemon-loss cleanup; loopback transport authentication/Host/Origin security over the durable browser authority; durable `HumanRequest`; complete browser protocol operations beyond the reviewed handshake/binary core; TypeScript connection/reconnect client; public web UI; complete private host integration; revised crash-cut vertical slice |
 
 Read-only redirection audits were assigned without overlapping writes:
 
@@ -390,6 +390,20 @@ The following current details are deleted during PTY implementation:
   wrappers that the PTY aggregate replaces;
 - use of the final JSON terminal spool as a live output transport. The spool
   remains only for bounded final exit/recovery evidence.
+
+Deleting provider `stdin` does not delete the autonomous run's initial task
+input. It changes its ownership and delivery semantics. After the provider
+release, the inner change worker sends one bounded `initial_terminal_input` to
+the already-registered outer runner and waits for an exact registration ACK
+before it can exec. The outer runner retains that input only in bounded memory,
+then writes it once through the PTY after the worker-control handoff. Browser
+input remains disabled until this first write completes. A partial, timed-out
+or uncertain write terminates the attempt and is never retried; runner or
+daemon loss never reconstructs or replays it. The shell adapter supplies one
+line terminator when needed rather than depending on closed-stdin EOF. No task
+input is placed in argv, environment, output events, the final terminal spool
+or an anonymous provider-stdin file. This is one concrete launch step, not a
+second terminal-input authority or compatibility path.
 
 #### Private runner protocol freeze
 
