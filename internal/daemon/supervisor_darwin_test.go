@@ -295,27 +295,31 @@ func TestSupervisorPartialProviderReleaseRevokesAuthority(t *testing.T) {
 func TestSupervisorCancellationAfterProviderReleaseStillJoins(t *testing.T) {
 	fixture := newSupervisorFixture(t, supervisorProgram(t, true, false))
 	ctx, cancel := context.WithCancel(context.Background())
-	reached := make(chan struct{})
-	fixture.spec.afterProviderRelease = func() error {
-		close(reached)
+	proposalObserved := make(chan error, 1)
+	go func() {
 		deadline := time.Now().Add(12 * time.Second)
 		for {
 			recoverable, err := fixture.store.RecoverableRuns(context.Background())
 			if err != nil {
-				return err
+				cancel()
+				proposalObserved <- err
+				return
 			}
 			if len(recoverable) == 1 && recoverable[0].Run.Proposal != nil {
-				// The typed success is durable after the provider release write;
-				// cancellation must not replace that first outcome.
+				// A durable typed success proves the provider consumed the real
+				// release. Cancellation must not replace that first outcome.
 				cancel()
-				return nil
+				proposalObserved <- nil
+				return
 			}
 			if time.Now().After(deadline) {
-				return errors.New("provider outcome timeout after release")
+				cancel()
+				proposalObserved <- errors.New("provider outcome timeout after release")
+				return
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
-	}
+	}()
 	result := make(chan struct {
 		run kernel.Run
 		err error
@@ -327,12 +331,6 @@ func TestSupervisorCancellationAfterProviderReleaseStillJoins(t *testing.T) {
 			err error
 		}{run: run, err: err}
 	}()
-	select {
-	case <-reached:
-	case <-time.After(12 * time.Second):
-		cancel()
-		t.Fatal("supervisor did not reach post-release barrier")
-	}
 	var got struct {
 		run kernel.Run
 		err error
@@ -341,6 +339,9 @@ func TestSupervisorCancellationAfterProviderReleaseStillJoins(t *testing.T) {
 	case got = <-result:
 	case <-time.After(12 * time.Second):
 		t.Fatal("post-release cancellation did not join")
+	}
+	if waitErr := <-proposalObserved; waitErr != nil {
+		t.Fatal(waitErr)
 	}
 	if !errors.Is(got.err, context.Canceled) {
 		t.Fatalf("post-release cancellation = %v", got.err)
