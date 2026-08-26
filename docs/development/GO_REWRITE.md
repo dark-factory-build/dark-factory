@@ -1789,3 +1789,33 @@ Interim code-elegance inventory on integrated head `6460de9`:
   success metric or final before/after claim. The reviewer ran only static
   source/package/export inspection, as required, so process, goroutine and
   crash safety remain kernel-gate questions rather than inferred green results.
+
+Shell-provider candidate review at unintegrated head `d0ce0d9`:
+
+- Independent exact-head re-review returned **BLOCK**. The repair successfully
+  replaced a caller-selected Change pathname with an unforgeable `Published`
+  value, reused the central Change scanner, rejected `.git` and upward Git
+  discovery for an unchanged tree, and rechecked committed HOME/TMP identities
+  at both runner activation boundaries. Focused, race, CGO-free, vet and
+  cross-compile gates passed, but those green tests did not prove the final
+  authority boundary.
+- The reviewer changed an already-published ordinary file in place, preserving
+  its size and root-directory identity, after `PrepareShell`. The registered
+  process then executed and read the changed bytes because the runner's final
+  gate retained only the working-directory identity, not the `Published` tree
+  facts. The same gap could admit a nested `.git` inserted after the earlier
+  scan. The final central `Reinspect` therefore belongs inside the registered
+  Change worker after the provider release and immediately before its pathname-
+  free provider exec; adding a runner tree walker is forbidden duplication.
+- The reviewer also proved that caller-selected owner-only HOME/TMP directories
+  outside any admitted runtime were accepted. Private HOME/TMP/socket/token/
+  config locators must instead be derived from one unforgeable runtime binding
+  and reopened descriptor-relatively. Lexical prefix checks are not authority.
+  Canonical-then-path-open intermediate-component replacement remains part of
+  that coordinated runtime/worker repair.
+- This candidate is not integrated and is not counted as kernel progress. The
+  repair is sequenced behind the independently reviewed runtime-parent/lifetime-
+  lease contract so only one writer changes shared runner files. Required
+  regression attacks are same-size content mutation, late `.git`, unrelated
+  private directories, intermediate replacement, binding forgery and the
+  unchanged successful shell path.
