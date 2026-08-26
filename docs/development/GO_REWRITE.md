@@ -1721,3 +1721,33 @@ Minimal typed attempt CLI proof on integrated head `f812ae6`:
   pipes currently do not change the already-completed API result; output-error
   policy and any later non-attempt commands remain explicit subjects for the
   CLI portion of the final elegance audit.
+
+Closed runner environment proof on integrated head `c7d74cc`:
+
+- `internal/runner` accepts one exact, ordered environment grammar shared by
+  new launch specifications and recovered attempt configuration. It rejects
+  empty or malformed names, NULs, invalid UTF-8, exact duplicate names,
+  forbidden proxy/provider/API/Git/GitHub/SSH/loader authority, entity
+  metadata, ambient home variables and arbitrary additions before executable,
+  working-directory or activation commitment.
+- The grammar contains only the daemon-decided private socket and token-file
+  locators plus the provider home/temp, deterministic executable/search and
+  locale controls, noninteractive Git/GitHub controls and terminal/color
+  controls. The runner does not inherit `os.Environ`, widen the list, normalize
+  names or interpret provider-specific values; concrete providers must supply
+  and test those exact values.
+- Independent review BLOCKED the first head after demonstrating that invalid
+  UTF-8 environment bytes survived runner validation but were silently changed
+  by the JSON handoff. One `utf8.ValidString` guard now closes both fresh and
+  recovered paths. Causal tests reject invalid bytes in names and values and
+  prove valid multibyte bytes reach a real child unchanged. No second parser or
+  wire compatibility path was added.
+- Final author gates passed focused count-three (`0.326s`), full runner
+  count-three (`16.199s`), selected race (`1.366s`), CGO-free (`5.555s`), vet,
+  format and diff checks with a stable descriptor and process census. Exact-head
+  review returned ALLOW; the unchanged integrated environment/config tests
+  passed in `0.288s`.
+- The retained `SHELL`, `USER`, `LOGNAME` and `LC_CTYPE` names remain a concrete
+  question for provider integration and the final elegance audit. They must be
+  removed if no shipped provider needs them; this proof freezes validation and
+  ordering, not speculative visibility.
