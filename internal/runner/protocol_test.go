@@ -167,3 +167,120 @@ func TestTerminalResizeUsesPTYOwnerBounds(t *testing.T) {
 		}
 	}
 }
+
+func TestTerminalConversionsRejectLifecycleAndCrossUnionFields(t *testing.T) {
+	commandBase := terminalCommandFrame(TerminalCommand{Kind: TerminalCredit, Correlation: 1, Credit: 1})
+	commandContaminations := []struct {
+		name   string
+		mutate func(*attemptFrame)
+	}{
+		{"stage", func(f *attemptFrame) { f.Stage = StageProvider }},
+		{"identity", func(f *attemptFrame) { f.Identity = Identity{PID: 2, PGID: 2, Birth: Birth{Seconds: 1}} }},
+		{"terminal", func(f *attemptFrame) { f.Terminal = &Terminal{} }},
+		{"file_identity", func(f *attemptFrame) { f.FileIdentity = &FileIdentity{Device: 1, Inode: 1} }},
+		{"digest", func(f *attemptFrame) { f.Digest = "digest" }},
+		{"store_committed", func(f *attemptFrame) { f.StoreCommitted = true }},
+		{"generation", func(f *attemptFrame) { f.Generation = 1 }},
+		{"sequence", func(f *attemptFrame) { f.Sequence = 1 }},
+		{"start", func(f *attemptFrame) { f.Start = 1 }},
+		{"end", func(f *attemptFrame) { f.End = 1 }},
+		{"floor", func(f *attemptFrame) { f.Floor = 1 }},
+		{"head", func(f *attemptFrame) { f.Head = 1 }},
+		{"count", func(f *attemptFrame) { f.Count = 1 }},
+		{"rows", func(f *attemptFrame) { f.Rows = 1 }},
+		{"cols", func(f *attemptFrame) { f.Cols = 1 }},
+		{"status", func(f *attemptFrame) { f.Status = "ok" }},
+		{"payload", func(f *attemptFrame) { f.Payload = []byte("unexpected") }},
+	}
+	for _, test := range commandContaminations {
+		t.Run("command/"+test.name, func(t *testing.T) {
+			frame := commandBase
+			test.mutate(&frame)
+			if _, err := terminalCommandFromFrame(frame); err == nil {
+				t.Fatalf("accepted contaminated command frame %+v", frame)
+			}
+		})
+	}
+
+	eventBase := terminalEventFrame(TerminalFrame{Kind: TerminalPTYEOF, Generation: 1})
+	eventContaminations := []struct {
+		name   string
+		mutate func(*attemptFrame)
+	}{
+		{"stage", func(f *attemptFrame) { f.Stage = StageProvider }},
+		{"identity", func(f *attemptFrame) { f.Identity = Identity{PID: 2, PGID: 2, Birth: Birth{Seconds: 1}} }},
+		{"terminal", func(f *attemptFrame) { f.Terminal = &Terminal{} }},
+		{"file_identity", func(f *attemptFrame) { f.FileIdentity = &FileIdentity{Device: 1, Inode: 1} }},
+		{"digest", func(f *attemptFrame) { f.Digest = "digest" }},
+		{"store_committed", func(f *attemptFrame) { f.StoreCommitted = true }},
+		{"correlation", func(f *attemptFrame) { f.Correlation = 1 }},
+		{"sequence", func(f *attemptFrame) { f.Sequence = 1 }},
+		{"start", func(f *attemptFrame) { f.Start = 1 }},
+		{"end", func(f *attemptFrame) { f.End = 1 }},
+		{"floor", func(f *attemptFrame) { f.Floor = 1 }},
+		{"head", func(f *attemptFrame) { f.Head = 1 }},
+		{"count", func(f *attemptFrame) { f.Count = 1 }},
+		{"rows", func(f *attemptFrame) { f.Rows = 1 }},
+		{"cols", func(f *attemptFrame) { f.Cols = 1 }},
+		{"credit", func(f *attemptFrame) { f.Credit = 1 }},
+		{"status", func(f *attemptFrame) { f.Status = "ok" }},
+		{"payload", func(f *attemptFrame) { f.Payload = []byte("unexpected") }},
+	}
+	for _, test := range eventContaminations {
+		t.Run("event/"+test.name, func(t *testing.T) {
+			frame := eventBase
+			test.mutate(&frame)
+			if _, err := terminalEventFromFrame(frame); err == nil {
+				t.Fatalf("accepted contaminated event frame %+v", frame)
+			}
+		})
+	}
+}
+
+func TestTerminalAcknowledgementsRejectEveryTerminalField(t *testing.T) {
+	record := &TerminalRecord{Terminal: Terminal{AttemptID: "attempt", Process: Identity{PID: 2, PGID: 2, Birth: Birth{Seconds: 1}}}, Identity: FileIdentity{Device: 1, Inode: 2}, Digest: "digest"}
+	current := attemptFrame{Version: commandVersion, Kind: "current-exec-check-ack"}
+	terminal := attemptFrame{Version: commandVersion, Kind: "terminal-ack", Terminal: &record.Terminal, FileIdentity: &record.Identity, Digest: record.Digest, StoreCommitted: true}
+	mutations := []struct {
+		name   string
+		mutate func(*attemptFrame)
+	}{
+		{"stage", func(f *attemptFrame) { f.Stage = StageProvider }},
+		{"identity", func(f *attemptFrame) { f.Identity = Identity{PID: 2, PGID: 2, Birth: Birth{Seconds: 1}} }},
+		{"terminal", func(f *attemptFrame) { f.Terminal = &Terminal{} }},
+		{"file_identity", func(f *attemptFrame) { f.FileIdentity = &FileIdentity{Device: 1, Inode: 1} }},
+		{"digest", func(f *attemptFrame) { f.Digest = "other" }},
+		{"store_committed", func(f *attemptFrame) { f.StoreCommitted = !f.StoreCommitted }},
+		{"correlation", func(f *attemptFrame) { f.Correlation = 1 }},
+		{"generation", func(f *attemptFrame) { f.Generation = 1 }},
+		{"sequence", func(f *attemptFrame) { f.Sequence = 1 }},
+		{"start", func(f *attemptFrame) { f.Start = 1 }},
+		{"end", func(f *attemptFrame) { f.End = 1 }},
+		{"floor", func(f *attemptFrame) { f.Floor = 1 }},
+		{"head", func(f *attemptFrame) { f.Head = 1 }},
+		{"count", func(f *attemptFrame) { f.Count = 1 }},
+		{"rows", func(f *attemptFrame) { f.Rows = 1 }},
+		{"cols", func(f *attemptFrame) { f.Cols = 1 }},
+		{"credit", func(f *attemptFrame) { f.Credit = 1 }},
+		{"status", func(f *attemptFrame) { f.Status = "ok" }},
+	}
+	for _, test := range mutations {
+		t.Run("current/"+test.name, func(t *testing.T) {
+			frame := current
+			test.mutate(&frame)
+			if validCurrentExecCheckAck(frame) {
+				t.Fatalf("accepted contaminated current-exec ACK %+v", frame)
+			}
+		})
+		t.Run("terminal/"+test.name, func(t *testing.T) {
+			frame := terminal
+			test.mutate(&frame)
+			if validTerminalAck(frame, record) {
+				t.Fatalf("accepted contaminated terminal ACK %+v", frame)
+			}
+		})
+	}
+	if !validCurrentExecCheckAck(current) || !validTerminalAck(terminal, record) {
+		t.Fatal("valid ACK baseline rejected")
+	}
+}

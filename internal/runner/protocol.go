@@ -72,6 +72,9 @@ func terminalCommandFromFrame(frame attemptFrame) (TerminalCommand, error) {
 	if frame.Version != commandVersion {
 		return TerminalCommand{}, ErrIdentity
 	}
+	if !validTerminalEnvelope(frame, true) {
+		return TerminalCommand{}, ErrState
+	}
 	command := TerminalCommand{
 		Kind: TerminalCommandKind(frame.Kind), Correlation: frame.Correlation,
 		Generation: frame.Generation, Sequence: frame.Sequence, Credit: frame.Credit,
@@ -86,6 +89,9 @@ func terminalCommandFromFrame(frame attemptFrame) (TerminalCommand, error) {
 func terminalEventFromFrame(frame attemptFrame) (TerminalFrame, error) {
 	if frame.Version != commandVersion {
 		return TerminalFrame{}, ErrIdentity
+	}
+	if !validTerminalEnvelope(frame, false) {
+		return TerminalFrame{}, ErrState
 	}
 	event := TerminalFrame{
 		Kind: TerminalEventKind(frame.Kind), Correlation: frame.Correlation,
@@ -115,6 +121,37 @@ func noTerminalFields(frame attemptFrame) bool {
 		frame.Start == 0 && frame.End == 0 && frame.Floor == 0 && frame.Head == 0 &&
 		frame.Count == 0 && frame.Rows == 0 && frame.Cols == 0 && frame.Credit == 0 &&
 		frame.Status == ""
+}
+
+func noLegacyFields(frame attemptFrame) bool {
+	return frame.Stage == "" && frame.Identity == (Identity{}) && frame.Terminal == nil &&
+		frame.FileIdentity == nil && frame.Digest == "" && !frame.StoreCommitted
+}
+
+// validTerminalEnvelope is the single shared boundary between the legacy
+// attempt union and the terminal union. Per-kind validation below still owns
+// operation-specific fields; this predicate rejects fields that belong only
+// to the other direction or to lifecycle messages.
+func validTerminalEnvelope(frame attemptFrame, command bool) bool {
+	if !noLegacyFields(frame) {
+		return false
+	}
+	if command {
+		return frame.Start == 0 && frame.End == 0 && frame.Floor == 0 && frame.Head == 0 && frame.Count == 0 && frame.Status == ""
+	}
+	return frame.Credit == 0
+}
+
+func validCurrentExecCheckAck(frame attemptFrame) bool {
+	return frame.Version == commandVersion && frame.Kind == "current-exec-check-ack" &&
+		noLegacyFields(frame) && noTerminalFields(frame) && len(frame.Payload) == 0
+}
+
+func validTerminalAck(frame attemptFrame, record *TerminalRecord) bool {
+	return record != nil && frame.Version == commandVersion && frame.Kind == "terminal-ack" &&
+		frame.Stage == "" && frame.Identity == (Identity{}) && noTerminalFields(frame) && len(frame.Payload) == 0 && frame.StoreCommitted &&
+		frame.Terminal != nil && frame.FileIdentity != nil && frame.Digest == record.Digest &&
+		*frame.FileIdentity == record.Identity && *frame.Terminal == record.Terminal
 }
 
 func writeFrame(w io.Writer, value any, limit int) error {

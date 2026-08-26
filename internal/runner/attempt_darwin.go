@@ -148,7 +148,7 @@ func (c *AttemptController) Next(timeout time.Duration) (AttemptEvent, error) {
 		return c.acceptCheckpoint(frame, StagePopulation, controllerPopulationReported)
 	case controllerProviderReleased:
 		if isTerminalEventKind(frame.Kind) {
-			if frame.Version != commandVersion || frame.Stage != "" || frame.Identity != (Identity{}) || frame.Terminal != nil || frame.FileIdentity != nil || frame.Digest != "" || frame.StoreCommitted {
+			if frame.Version != commandVersion || !validTerminalEnvelope(frame, false) {
 				return AttemptEvent{}, ErrState
 			}
 			event, err := terminalEventFromFrame(frame)
@@ -157,7 +157,7 @@ func (c *AttemptController) Next(timeout time.Duration) (AttemptEvent, error) {
 			}
 			return AttemptEvent{Kind: AttemptTerminalFrame, Frame: &event}, nil
 		}
-		if frame.Kind == "current-exec-check" && noTerminalFields(frame) && frame.Stage == "" && frame.Identity == (Identity{}) && len(frame.Payload) == 0 && frame.Terminal == nil && frame.FileIdentity == nil && frame.Digest == "" && !frame.StoreCommitted {
+		if frame.Kind == "current-exec-check" && noLegacyFields(frame) && noTerminalFields(frame) && len(frame.Payload) == 0 {
 			return AttemptEvent{Kind: AttemptCheckpoint, Stage: StageProvider}, nil
 		}
 		if frame.Kind != "terminal" || frame.Stage != "" || frame.Identity != (Identity{}) || len(frame.Payload) != 0 || frame.Terminal == nil || frame.FileIdentity == nil || len(frame.Digest) != 64 || frame.StoreCommitted || !noTerminalFields(frame) {
@@ -546,7 +546,7 @@ func execPreparedCurrent(spec *LaunchSpec, cwd *os.File, worker *WorkerControl) 
 			return err
 		}
 		var ack attemptFrame
-		if err := readFrame(worker.file, &ack, maxFrameBytes); err != nil || ack.Version != 1 || ack.Kind != "current-exec-check-ack" {
+		if err := readFrame(worker.file, &ack, maxFrameBytes); err != nil || !validCurrentExecCheckAck(ack) {
 			return fmt.Errorf("runner: current exec test seam: %w", errors.Join(err, ErrState))
 		}
 	}
@@ -1094,7 +1094,7 @@ func publishAttemptTerminal(child *OwnedChild, dir *os.File, cfg attemptConfig, 
 		}
 		return err
 	}
-	if ack.Version != 1 || ack.Kind != "terminal-ack" || ack.Stage != "" || ack.Identity != (Identity{}) || len(ack.Payload) != 0 || !ack.StoreCommitted || ack.Terminal == nil || ack.FileIdentity == nil || ack.Digest != record.Digest || *ack.FileIdentity != record.Identity || *ack.Terminal != record.Terminal {
+	if !validTerminalAck(ack, record) {
 		return ErrIdentity
 	}
 	return AcknowledgeTerminal(dir, cfg.TerminalName, record, true)
