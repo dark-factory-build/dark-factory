@@ -217,6 +217,23 @@ var schemaStatements = []string{
 ) STRICT, WITHOUT ROWID`,
 	`CREATE UNIQUE INDEX resources_run_kind_unique ON resources(run_id, kind)`,
 	`CREATE INDEX resources_recoverable ON resources(state, updated_at_ms, id) WHERE state <> 'released'`,
+	`CREATE TABLE terminal_sessions (
+    id BLOB PRIMARY KEY CHECK (length(id) = 16),
+    run_id BLOB NOT NULL CHECK (length(run_id) = 16) REFERENCES runs(id),
+    state TEXT NOT NULL CHECK (state IN ('declared', 'active', 'closed', 'unresolved')),
+    unresolved_reason TEXT CHECK (unresolved_reason IS NULL OR length(CAST(unresolved_reason AS BLOB)) BETWEEN 1 AND 4096),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    declared_at_ms INTEGER NOT NULL CHECK (declared_at_ms >= 0),
+    activated_at_ms INTEGER CHECK (activated_at_ms IS NULL OR (activated_at_ms >= declared_at_ms AND activated_at_ms >= 0)),
+    closed_at_ms INTEGER CHECK (closed_at_ms IS NULL OR (closed_at_ms >= declared_at_ms AND (activated_at_ms IS NULL OR closed_at_ms >= activated_at_ms) AND closed_at_ms = updated_at_ms)),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= declared_at_ms AND (activated_at_ms IS NULL OR updated_at_ms >= activated_at_ms)),
+    CHECK ((state = 'unresolved') = (unresolved_reason IS NOT NULL)),
+    CHECK (state <> 'declared' OR (activated_at_ms IS NULL AND closed_at_ms IS NULL AND updated_at_ms = declared_at_ms)),
+    CHECK (state <> 'active' OR (activated_at_ms IS NOT NULL AND closed_at_ms IS NULL AND unresolved_reason IS NULL)),
+    CHECK (state <> 'unresolved' OR closed_at_ms IS NULL),
+    CHECK (state <> 'closed' OR (closed_at_ms IS NOT NULL AND unresolved_reason IS NULL))
+) STRICT, WITHOUT ROWID`,
+	`CREATE UNIQUE INDEX terminal_sessions_run_unique ON terminal_sessions(run_id)`,
 	`CREATE TABLE invalidations (
     sequence INTEGER PRIMARY KEY CHECK (sequence >= 1),
     occurred_at_ms INTEGER NOT NULL CHECK (occurred_at_ms >= 0),

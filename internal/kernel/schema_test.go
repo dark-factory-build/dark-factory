@@ -393,6 +393,15 @@ func resourceID(t *testing.T, seed byte) ResourceID {
 	return result
 }
 
+func terminalSessionID(t *testing.T, seed byte) TerminalSessionID {
+	t.Helper()
+	value, err := TerminalSessionIDFromBytes(bytes.Repeat([]byte{seed}, IDBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return value
+}
+
 func openRaw(t *testing.T, path string) *sql.DB {
 	t.Helper()
 	pool, err := sql.Open(driverName, "file:"+path)

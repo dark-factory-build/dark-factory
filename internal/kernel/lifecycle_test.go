@@ -17,7 +17,8 @@ func TestCredentialAuthorityExistsOnlyWhileExactRunIsRunning(t *testing.T) {
 		t.Fatalf("admitted credential = %v", err)
 	}
 	active := activateAllResources(t, store, run, keys, 20)
-	running, err := store.ActivateRun(ctx, run.ID, run.Revision, mustTime(t, 30))
+	session := terminalSessionForRunTest(t, store, run.ID)
+	running, err := store.ActivateRun(ctx, run.ID, session.ID, run.Revision, session.Revision, mustTime(t, 30))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -596,7 +597,8 @@ func TestWorkerRunCannotActivateBeforeExactChangeIsAvailable(t *testing.T) {
 		t.Fatal(err)
 	}
 	activateAllResources(t, store, *admission.Run, keys, 20)
-	if _, err := store.ActivateRun(context.Background(), admission.Run.ID, admission.Run.Revision, mustTime(t, 30)); !errors.Is(err, ErrConflict) {
+	session := terminalSessionForRunTest(t, store, admission.Run.ID)
+	if _, err := store.ActivateRun(context.Background(), admission.Run.ID, session.ID, admission.Run.Revision, session.Revision, mustTime(t, 30)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("activation before available = %v", err)
 	}
 	format, _ := NewObjectFormat("sha1")
@@ -617,7 +619,7 @@ func TestWorkerRunCannotActivateBeforeExactChangeIsAvailable(t *testing.T) {
 	if _, err := store.MarkChangeAvailable(context.Background(), reservation.ID, prepared.Revision, availability, mustTime(t, 33)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.ActivateRun(context.Background(), admission.Run.ID, admission.Run.Revision, mustTime(t, 34)); err != nil {
+	if _, err := store.ActivateRun(context.Background(), admission.Run.ID, session.ID, admission.Run.Revision, session.Revision, mustTime(t, 34)); err != nil {
 		t.Fatalf("activation after available: %v", err)
 	}
 }
@@ -812,7 +814,8 @@ func runningOrchestratorRun(t *testing.T) (*Store, Run, AdmissionKeys) {
 	t.Helper()
 	store, run, keys := admittedOrchestratorRun(t)
 	activateAllResources(t, store, run, keys, 20)
-	running, err := store.ActivateRun(context.Background(), run.ID, run.Revision, mustTime(t, 30))
+	session := terminalSessionForRunTest(t, store, run.ID)
+	running, err := store.ActivateRun(context.Background(), run.ID, session.ID, run.Revision, session.Revision, mustTime(t, 30))
 	if err != nil {
 		store.Close()
 		t.Fatal(err)
@@ -876,7 +879,8 @@ func finalizingReleasedRun(t *testing.T, role AgentRole, policy VerificationPoli
 		}
 	}
 	activateAllResources(t, store, *admission.Run, keys, 20)
-	running, err := store.ActivateRun(context.Background(), admission.Run.ID, admission.Run.Revision, mustTime(t, 30))
+	session := terminalSessionForRunTest(t, store, admission.Run.ID)
+	running, err := store.ActivateRun(context.Background(), admission.Run.ID, session.ID, admission.Run.Revision, session.Revision, mustTime(t, 30))
 	if err != nil {
 		store.Close()
 		t.Fatal(err)

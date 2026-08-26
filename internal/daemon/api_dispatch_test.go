@@ -268,7 +268,7 @@ func prepareActiveAttempt(t *testing.T, fixture *dispatchFixture, seed byte) act
 		t.Fatal(err)
 	}
 	keys := kernel.AdmissionKeys{
-		RunID: mustRunID(t, testID(seed+4)), AttemptDigest: digest,
+		RunID: mustRunID(t, testID(seed+4)), TerminalSessionID: mustTerminalSessionID(t, testID(seed+14)), AttemptDigest: digest,
 		RuntimeRoot: filepath.Join(filepath.Dir(fixture.socket), "runtime"),
 		Resources: kernel.AdmissionResourceIDs{
 			RuntimeRoot: mustResourceID(t, testID(seed+5)), RunnerProcess: mustResourceID(t, testID(seed+6)),
@@ -311,7 +311,11 @@ func prepareActiveAttempt(t *testing.T, fixture *dispatchFixture, seed byte) act
 	if _, _, err := fixture.store.ActivateProviderResources(ctx, run.ID, providerProcess.ID, providerProcess.Revision, providerGroup.ID, providerGroup.Revision, processTwo, at); err != nil {
 		t.Fatal(err)
 	}
-	active, err := fixture.store.ActivateRun(ctx, run.ID, run.Revision, at)
+	session, found, err := fixture.store.TerminalSessionForRun(ctx, run.ID)
+	if err != nil || !found {
+		t.Fatalf("terminal session = %+v, found=%v, err=%v", session, found, err)
+	}
+	active, err := fixture.store.ActivateRun(ctx, run.ID, session.ID, run.Revision, session.Revision, at)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -586,6 +590,15 @@ func mustRunID(t *testing.T, value string) kernel.RunID {
 func mustResourceID(t *testing.T, value string) kernel.ResourceID {
 	t.Helper()
 	id, err := kernel.ResourceIDFromBytes(mustIDBytes(t, value))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func mustTerminalSessionID(t *testing.T, value string) kernel.TerminalSessionID {
+	t.Helper()
+	id, err := kernel.TerminalSessionIDFromBytes(mustIDBytes(t, value))
 	if err != nil {
 		t.Fatal(err)
 	}

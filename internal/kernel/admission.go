@@ -138,6 +138,10 @@ func (store *Store) AdmitNext(ctx context.Context, agentID AgentID, keys Admissi
 	if err != nil {
 		return AdmissionResult{}, tx.Rollback(classifyAdmissionConflict(ctx, tx.connection, keys, err))
 	}
+	inserted, err := tx.connection.ExecContext(ctx, `INSERT INTO terminal_sessions(id, run_id, state, unresolved_reason, revision, declared_at_ms, activated_at_ms, closed_at_ms, updated_at_ms) VALUES(?, ?, 'declared', NULL, 1, ?, NULL, NULL, ?)`, keys.TerminalSessionID.Bytes(), keys.RunID.Bytes(), at.Int64(), at.Int64())
+	if err := requireOneRow(inserted, err); err != nil {
+		return AdmissionResult{}, tx.Rollback(classifyAdmissionConflict(ctx, tx.connection, keys, err))
+	}
 	resources := []struct {
 		id   ResourceID
 		kind ResourceKind
@@ -293,6 +297,13 @@ func reconcileAdmissionOnConnection(ctx context.Context, connection *sql.Conn, k
 		if !ok || resource.ID != id || resource.RunID != run.ID || resource.Kind == ResourceRuntimeRoot && resource.Path != keys.RuntimeRoot {
 			return AdmissionResult{}, true, ErrConflict
 		}
+	}
+	session, sessionFound, err := terminalSessionByRunID(ctx, connection, run.ID)
+	if err != nil {
+		return AdmissionResult{}, true, err
+	}
+	if !sessionFound || session.ID != keys.TerminalSessionID || session.RunID != run.ID || session.State != TerminalSessionDeclared || session.Revision.Int64() != 1 || session.DeclaredAt.Int64() != run.AdmittedAt.Int64() {
+		return AdmissionResult{}, true, ErrConflict
 	}
 	return AdmissionResult{Run: &run}, true, nil
 }

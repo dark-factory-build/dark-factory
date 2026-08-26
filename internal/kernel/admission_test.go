@@ -37,6 +37,27 @@ func TestAdmitNextSelectsCanonicalCurrentQueueInsideTransaction(t *testing.T) {
 	})
 }
 
+func TestAdmissionCreatesExactDeclaredTerminalSession(t *testing.T) {
+	store, _, _, agent := newAdmissionStore(t, RoleOrchestrator, 4)
+	defer store.Close()
+	if _, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 221), ProjectID: agent.ProjectID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 222), Title: "session"}, mustTime(t, 5)); err != nil {
+		t.Fatal(err)
+	}
+	keys := admissionKeys(t, 220, nil)
+	result, err := store.AdmitNext(context.Background(), agent.ID, keys, mustTime(t, 10))
+	if err != nil || !result.Admitted() {
+		t.Fatalf("admission = %+v, %v", result, err)
+	}
+	session, found, err := store.TerminalSession(context.Background(), keys.TerminalSessionID)
+	if err != nil || !found || session.RunID != result.Run.ID || session.State != TerminalSessionDeclared || session.Revision.Int64() != 1 {
+		t.Fatalf("terminal session = %+v, found=%v, err=%v", session, found, err)
+	}
+	var count int
+	if err := store.writer.QueryRow(`SELECT COUNT(*) FROM terminal_sessions WHERE run_id = ?`, result.Run.ID.Bytes()).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("terminal session count = %d, err=%v", count, err)
+	}
+}
+
 func TestAdmissionGatesHaveZeroFootprint(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -317,7 +338,7 @@ func admissionKeys(t *testing.T, seed byte, change *ChangeReservation) Admission
 		t.Fatal(err)
 	}
 	return AdmissionKeys{
-		RunID: runID(t, seed), AttemptDigest: digest, Change: change, RuntimeRoot: "/runtime/" + string([]byte{'a' + seed%20}),
+		RunID: runID(t, seed), TerminalSessionID: terminalSessionID(t, seed+20), AttemptDigest: digest, Change: change, RuntimeRoot: "/runtime/" + string([]byte{'a' + seed%20}),
 		Resources: AdmissionResourceIDs{RuntimeRoot: resourceID(t, seed+1), RunnerProcess: resourceID(t, seed+2), ProviderProcess: resourceID(t, seed+3), ProviderGroup: resourceID(t, seed+4)},
 	}
 }
@@ -334,4 +355,13 @@ func resourcesForRunTest(t *testing.T, store *Store, runID RunID) []Resource {
 		t.Fatal(err)
 	}
 	return resources
+}
+
+func terminalSessionForRunTest(t testing.TB, store *Store, runID RunID) TerminalSession {
+	t.Helper()
+	session, found, err := store.TerminalSessionForRun(context.Background(), runID)
+	if err != nil || !found {
+		t.Fatalf("terminal session = %+v, found=%v, err=%v", session, found, err)
+	}
+	return session
 }

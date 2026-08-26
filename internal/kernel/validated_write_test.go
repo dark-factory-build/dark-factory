@@ -180,7 +180,9 @@ func TestEveryPublicMutationValidatesDurableGraphBeforeDecision(t *testing.T) {
 			return err
 		}},
 		{name: "ActivateRun", invoke: func(store *Store) error {
-			_, err := store.ActivateRun(context.Background(), runID(t, 5), mustRevision(t, 1), at)
+			runIDValue := runID(t, 5)
+			session := terminalSessionForRunTest(t, store, runIDValue)
+			_, err := store.ActivateRun(context.Background(), runIDValue, session.ID, mustRevision(t, 1), session.Revision, at)
 			return err
 		}},
 		{name: "ProposeAttemptOutcome", invoke: func(store *Store) error {
@@ -404,7 +406,7 @@ func benchmarkValidationStore(b *testing.B) *Store {
 	}
 	attempt, _ := AttemptDigestFromBytes(bytes.Repeat([]byte{7}, DigestBytes))
 	keys := AdmissionKeys{
-		RunID: runID, AttemptDigest: attempt,
+		RunID: runID, TerminalSessionID: func() TerminalSessionID { value, _ := TerminalSessionIDFromBytes(id(12)); return value }(), AttemptDigest: attempt,
 		Change:      &ChangeReservation{ID: changeID, SourceRoot: "/change/source", StagingRoot: "/change/staging"},
 		RuntimeRoot: "/runtime/run",
 		Resources: AdmissionResourceIDs{

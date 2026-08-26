@@ -11,13 +11,14 @@ func TestActivateRunRejectsCausallyEarlyResources(t *testing.T) {
 	defer store.Close()
 	activateResourcesAt(t, store, run, 20)
 	before := captureWriteFootprint(t, store)
-	if _, err := store.ActivateRun(context.Background(), run.ID, run.Revision, mustTime(t, 11)); !errors.Is(err, ErrRevisionConflict) {
+	session := terminalSessionForRunTest(t, store, run.ID)
+	if _, err := store.ActivateRun(context.Background(), run.ID, session.ID, run.Revision, session.Revision, mustTime(t, 11)); !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("early activation = %v", err)
 	}
 	if after := captureWriteFootprint(t, store); after != before {
 		t.Fatalf("early activation footprint before=%+v after=%+v", before, after)
 	}
-	if _, err := store.ActivateRun(context.Background(), run.ID, run.Revision, mustTime(t, 20)); err != nil {
+	if _, err := store.ActivateRun(context.Background(), run.ID, session.ID, run.Revision, session.Revision, mustTime(t, 20)); err != nil {
 		t.Fatalf("activation boundary = %v", err)
 	}
 }

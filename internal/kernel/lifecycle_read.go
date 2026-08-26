@@ -541,7 +541,7 @@ func recoverableRunFrom(ctx context.Context, connection *sql.Conn, run Run) (Rec
 	if err != nil {
 		return RecoverableRun{}, err
 	}
-	return RecoverableRun{Run: run, Change: relationships.change, Resources: relationships.resources}, nil
+	return RecoverableRun{Run: run, Change: relationships.change, Resources: relationships.resources, TerminalSession: relationships.session}, nil
 }
 
 func (store *Store) AuthenticateAttempt(ctx context.Context, digest AttemptDigest) (AttemptAuthority, error) {

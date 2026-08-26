@@ -251,6 +251,57 @@ func (value RunPhase) String() string {
 	}
 }
 
+type TerminalSessionState uint8
+
+const (
+	TerminalSessionDeclared TerminalSessionState = iota + 1
+	TerminalSessionActive
+	TerminalSessionClosed
+	TerminalSessionUnresolved
+)
+
+func parseTerminalSessionState(value string) (TerminalSessionState, error) {
+	switch value {
+	case "declared":
+		return TerminalSessionDeclared, nil
+	case "active":
+		return TerminalSessionActive, nil
+	case "closed":
+		return TerminalSessionClosed, nil
+	case "unresolved":
+		return TerminalSessionUnresolved, nil
+	default:
+		return 0, corruptControl("terminal session state", value)
+	}
+}
+
+func (value TerminalSessionState) String() string {
+	switch value {
+	case TerminalSessionDeclared:
+		return "declared"
+	case TerminalSessionActive:
+		return "active"
+	case TerminalSessionClosed:
+		return "closed"
+	case TerminalSessionUnresolved:
+		return "unresolved"
+	default:
+		return ""
+	}
+}
+
+type TerminalSession struct {
+	ID               TerminalSessionID
+	RunID            RunID
+	State            TerminalSessionState
+	UnresolvedReason string
+	Revision         Revision
+	DeclaredAt       UnixMillis
+	ActivatedAt      *UnixMillis
+	ClosedAt         *UnixMillis
+	UpdatedAt        UnixMillis
+}
+
 type OutcomeKind uint8
 
 const (
@@ -731,15 +782,16 @@ func (ids AdmissionResourceIDs) valid() bool {
 }
 
 type AdmissionKeys struct {
-	RunID         RunID
-	AttemptDigest AttemptDigest
-	Change        *ChangeReservation
-	Resources     AdmissionResourceIDs
-	RuntimeRoot   string
+	RunID             RunID
+	TerminalSessionID TerminalSessionID
+	AttemptDigest     AttemptDigest
+	Change            *ChangeReservation
+	Resources         AdmissionResourceIDs
+	RuntimeRoot       string
 }
 
 func (keys AdmissionKeys) valid() bool {
-	if keys.RunID.zero() || !keys.Resources.valid() || !validOwnedLocator(keys.RuntimeRoot) || keys.Change != nil && !keys.Change.valid() {
+	if keys.RunID.zero() || keys.TerminalSessionID.zero() || !keys.Resources.valid() || !validOwnedLocator(keys.RuntimeRoot) || keys.Change != nil && !keys.Change.valid() {
 		return false
 	}
 	return keys.Change == nil || !pathsOverlap(keys.RuntimeRoot, keys.Change.SourceRoot) && !pathsOverlap(keys.RuntimeRoot, keys.Change.StagingRoot)
@@ -798,9 +850,10 @@ type AttemptAuthority struct {
 }
 
 type RecoverableRun struct {
-	Run       Run
-	Change    *Change
-	Resources []Resource
+	Run             Run
+	Change          *Change
+	Resources       []Resource
+	TerminalSession TerminalSession
 }
 
 func validAbsolutePath(value string) bool {

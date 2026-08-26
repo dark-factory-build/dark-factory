@@ -103,6 +103,7 @@ type runRelationships struct {
 	task      Task
 	change    *Change
 	resources []Resource
+	session   TerminalSession
 }
 
 func loadRunRelationships(ctx context.Context, connection *sql.Conn, run Run) (runRelationships, error) {
@@ -196,10 +197,31 @@ func loadRunRelationships(ctx context.Context, connection *sql.Conn, run Run) (r
 	if err := validatePersistedProcessExits(run, resources); err != nil {
 		return runRelationships{}, err
 	}
+	session, found, err := terminalSessionByRunID(ctx, connection, run.ID)
+	if err != nil {
+		return runRelationships{}, err
+	}
+	if !found {
+		return runRelationships{}, fmt.Errorf("%w: run has no terminal session", ErrCorruptState)
+	}
+	switch run.Phase {
+	case RunAdmitted:
+		if session.State != TerminalSessionDeclared {
+			return runRelationships{}, fmt.Errorf("%w: admitted run terminal session is not declared", ErrCorruptState)
+		}
+	case RunRunning:
+		if session.State != TerminalSessionActive {
+			return runRelationships{}, fmt.Errorf("%w: running run terminal session is not active", ErrCorruptState)
+		}
+	case RunTerminal:
+		if session.State != TerminalSessionClosed {
+			return runRelationships{}, fmt.Errorf("%w: terminal run terminal session is not closed", ErrCorruptState)
+		}
+	}
 	if err := validateRunResourceChronology(run, change, resources); err != nil {
 		return runRelationships{}, err
 	}
-	return runRelationships{task: task, change: change, resources: resources}, nil
+	return runRelationships{task: task, change: change, resources: resources, session: session}, nil
 }
 
 func validateRunResourceChronology(run Run, change *Change, resources []Resource) error {

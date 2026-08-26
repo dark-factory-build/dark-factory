@@ -27,6 +27,7 @@ const (
 
 type supervisorKeys struct {
 	run       kernel.RunID
+	session   kernel.TerminalSessionID
 	change    kernel.ChangeID
 	resources kernel.AdmissionResourceIDs
 	token     [32]byte
@@ -139,7 +140,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		return kernel.Run{}, err
 	}
 	admissionKeys := kernel.AdmissionKeys{
-		RunID: keys.run, AttemptDigest: digest, Change: &changeReservation,
+		RunID: keys.run, TerminalSessionID: keys.session, AttemptDigest: digest, Change: &changeReservation,
 		Resources: keys.resources, RuntimeRoot: runtimeRoot,
 	}
 	admission, err := daemon.store.AdmitNext(ctx, spec.AgentID, admissionKeys, at)
@@ -404,7 +405,14 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	if err != nil {
 		return daemon.failRun(run, kernel.FailureInternal, err)
 	}
-	run, err = daemon.store.ActivateRun(ctx, run.ID, run.Revision, at)
+	session, found, err := daemon.store.TerminalSessionForRun(ctx, run.ID)
+	if err != nil || !found {
+		if err == nil {
+			err = kernel.ErrCorruptState
+		}
+		return daemon.failRun(run, kernel.FailureInternal, err)
+	}
+	run, err = daemon.store.ActivateRun(ctx, run.ID, session.ID, run.Revision, session.Revision, at)
 	if err != nil {
 		return daemon.failRun(run, kernel.FailureActivation, err)
 	}
@@ -526,6 +534,27 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	if err := daemon.releaseResources(context.Background(), run.ID, kernel.ResourceRuntimeRoot); err != nil {
 		return run, err
 	}
+	at, err = daemon.timestamp()
+	if err != nil {
+		return run, errors.Join(waitErr, err)
+	}
+	session, found, err = daemon.store.TerminalSessionForRun(context.Background(), run.ID)
+	if err != nil || !found {
+		if err == nil {
+			err = kernel.ErrCorruptState
+		}
+		return run, err
+	}
+	current, found, err = daemon.store.Run(context.Background(), run.ID)
+	if err != nil || !found {
+		if err == nil {
+			err = kernel.ErrCorruptState
+		}
+		return run, err
+	}
+	if _, err := daemon.store.CloseActiveTerminalSession(context.Background(), run.ID, session.ID, current.Revision, session.Revision, at); err != nil {
+		return run, err
+	}
 	current, found, err = daemon.store.Run(context.Background(), run.ID)
 	if err != nil || !found {
 		if err == nil {
@@ -555,6 +584,11 @@ func newSupervisorKeys(reader io.Reader) (supervisorKeys, error) {
 	if raw, readErr := readID(); readErr != nil {
 		return keys, readErr
 	} else if keys.run, err = kernel.RunIDFromBytes(raw); err != nil {
+		return keys, err
+	}
+	if raw, readErr := readID(); readErr != nil {
+		return keys, readErr
+	} else if keys.session, err = kernel.TerminalSessionIDFromBytes(raw); err != nil {
 		return keys, err
 	}
 	if raw, readErr := readID(); readErr != nil {

@@ -52,6 +52,7 @@ type IncarnationID struct{ identifier }
 type ChangeID struct{ identifier }
 type RunID struct{ identifier }
 type ResourceID struct{ identifier }
+type TerminalSessionID struct{ identifier }
 
 func ProjectIDFromBytes(value []byte) (ProjectID, error) {
 	id, err := identifierFromBytes(value)
@@ -87,22 +88,28 @@ func ResourceIDFromBytes(value []byte) (ResourceID, error) {
 	id, err := identifierFromBytes(value)
 	return ResourceID{id}, err
 }
+func TerminalSessionIDFromBytes(value []byte) (TerminalSessionID, error) {
+	id, err := identifierFromBytes(value)
+	return TerminalSessionID{id}, err
+}
 
-func (id ProjectID) Bytes() []byte     { return id.bytes() }
-func (id AgentID) Bytes() []byte       { return id.bytes() }
-func (id TaskID) Bytes() []byte        { return id.bytes() }
-func (id IncarnationID) Bytes() []byte { return id.bytes() }
-func (id ChangeID) Bytes() []byte      { return id.bytes() }
-func (id RunID) Bytes() []byte         { return id.bytes() }
-func (id ResourceID) Bytes() []byte    { return id.bytes() }
+func (id ProjectID) Bytes() []byte         { return id.bytes() }
+func (id AgentID) Bytes() []byte           { return id.bytes() }
+func (id TaskID) Bytes() []byte            { return id.bytes() }
+func (id IncarnationID) Bytes() []byte     { return id.bytes() }
+func (id ChangeID) Bytes() []byte          { return id.bytes() }
+func (id RunID) Bytes() []byte             { return id.bytes() }
+func (id ResourceID) Bytes() []byte        { return id.bytes() }
+func (id TerminalSessionID) Bytes() []byte { return id.bytes() }
 
-func (id ProjectID) MarshalText() ([]byte, error)     { return []byte(id.String()), nil }
-func (id AgentID) MarshalText() ([]byte, error)       { return []byte(id.String()), nil }
-func (id TaskID) MarshalText() ([]byte, error)        { return []byte(id.String()), nil }
-func (id IncarnationID) MarshalText() ([]byte, error) { return []byte(id.String()), nil }
-func (id ChangeID) MarshalText() ([]byte, error)      { return []byte(id.String()), nil }
-func (id RunID) MarshalText() ([]byte, error)         { return []byte(id.String()), nil }
-func (id ResourceID) MarshalText() ([]byte, error)    { return []byte(id.String()), nil }
+func (id ProjectID) MarshalText() ([]byte, error)         { return []byte(id.String()), nil }
+func (id AgentID) MarshalText() ([]byte, error)           { return []byte(id.String()), nil }
+func (id TaskID) MarshalText() ([]byte, error)            { return []byte(id.String()), nil }
+func (id IncarnationID) MarshalText() ([]byte, error)     { return []byte(id.String()), nil }
+func (id ChangeID) MarshalText() ([]byte, error)          { return []byte(id.String()), nil }
+func (id RunID) MarshalText() ([]byte, error)             { return []byte(id.String()), nil }
+func (id ResourceID) MarshalText() ([]byte, error)        { return []byte(id.String()), nil }
+func (id TerminalSessionID) MarshalText() ([]byte, error) { return []byte(id.String()), nil }
 
 type digest struct {
 	b [DigestBytes]byte
