@@ -276,6 +276,27 @@ func TestAttemptRequestedFailureHasOneTypedDurableCode(t *testing.T) {
 	if err != nil || !found || read.Proposal == nil || read.Proposal.Code() != FailureAttempt || read.Proposal.Code().String() != "attempt" {
 		t.Fatalf("read attempt failure = %+v, found=%v err=%v", read, found, err)
 	}
+	exit, err := NewRunnerExitCode(1, 0, mustTime(t, 41))
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalizing, err = store.ObserveRunnerExit(context.Background(), running.ID, finalizing.Revision, exit, mustTime(t, 42))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, resource := range resourcesForRunTest(t, store, running.ID) {
+		if _, err := store.ReleaseResource(context.Background(), running.ID, resource.ID, resource.Revision, resource.Identity, mustTime(t, int64(50+index))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	terminal, err := store.FinalizeRun(context.Background(), running.ID, finalizing.Revision, mustTime(t, 60))
+	if err != nil || terminal.Phase != RunTerminal || terminal.Terminal == nil || terminal.Terminal.Code() != FailureAttempt || terminal.Terminal.Detail() != "" {
+		t.Fatalf("terminal attempt failure = %+v, %v", terminal, err)
+	}
+	read, found, err = store.Run(context.Background(), running.ID)
+	if err != nil || !found || read.Terminal == nil || read.Terminal.Code() != FailureAttempt || read.Terminal.Code().String() != "attempt" || read.Terminal.Detail() != "" {
+		t.Fatalf("read terminal attempt failure = %+v, found=%v err=%v", read, found, err)
+	}
 }
 
 func TestVerificationAndTerminalCorruptionFailClosed(t *testing.T) {
