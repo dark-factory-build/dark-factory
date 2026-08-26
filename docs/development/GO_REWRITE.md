@@ -1598,3 +1598,97 @@ Bounded local-API client proof on integrated head `3ca153f`:
   than authentication, compare only the credential for the declared domain,
   call the atomic attempt outcome mutator directly, bound every handler and
   connection lifetime, and return only fixed sanitized errors.
+
+Prepared-Change crash adoption proof on integrated head `ebb88b8`:
+
+- `AdoptPrepared` closes the crash cut after the caller-declared staging
+  directory is created but before its exact identity reaches SQLite. It adopts
+  only an existing empty EUID-owned, mode-0700, single-link ordinary directory
+  beneath the exact no-follow parent while the final target remains absent,
+  then returns the normal `Prepared` lifecycle. It does not delete, repair,
+  rename, populate or publish during adoption; ordinary `Prepare` remains
+  create-only.
+- The parent, stage pathname and open descriptor identities are checked around
+  open, emptiness and target-absence observations. Parent/stage swaps,
+  nonempty/deep/wide/special content, wrong metadata, target appearance and
+  cancellation all retain the existing object and fail visibly. The later
+  populate path rechecks stage emptiness and identity before its first effect,
+  covering a cooperative same-UID insertion after adoption returns.
+- A mutation deleting the final target-absence recheck was killed by the
+  target-appearance test. Author gates passed focused count-three, full Change
+  (`13.835s`), race (`28.179s`), CGO-free (`13.158s`), vet/cross-build/format/
+  diff and descriptor/process/temp censuses. Independent exact-head review
+  returned ALLOW; the integrated focused adoption/unsupported run passed in
+  `0.314s`.
+- Concurrent adopters can retain handles to the same verified stage, but gain
+  no mutation authority and create-only publication remains the arbiter. The
+  daemon is the sole coordinator; a true concurrent-adoption stress case is
+  retained for the integrated crash matrix rather than adding a lock or second
+  durable owner to this package.
+
+Recovered-runner-absence Store proof on integrated head `d2b3e97`:
+
+- Runner exit evidence now has one explicit closed discriminant: `code`,
+  `signal` or `recovered_absence`. The last variant carries the exact per-run
+  observation sequence and time but no invented wait status. It means only
+  that the live owner was lost and a recovery caller separately proved the
+  exact registered runner identity disappeared; uncertainty, malformed facts
+  and permission failures cannot construct that proof accidentally.
+- The fresh schema, scanner and Go value exhaustively bind kind/status NULL
+  shape. Admitted/running rows cannot already carry exit evidence. Exact replay
+  is idempotent, conflicting later evidence is rejected, the first outcome
+  still wins, attempt authority is revoked on finalizing, and terminalization
+  still requires every resource released.
+- Independent review BLOCKED the first head after demonstrating that a
+  constraint-bypassed `declared` runner row could smuggle PID/PGID/birth and
+  become recovered-exit authority. The schema and scanner now require every
+  declared resource to have no bound identity, and the recovered-exit mutator
+  independently requires a non-declared runner identity. The attack is causal
+  across schema, reopen, direct reads, every validated write and recovered
+  observation, including provider process/group and runtime-path variants.
+- Mutations accepting an unknown exit kind and omitting the scanner's declared
+  identity rejection were killed and removed. Author gates passed focused
+  count-three, full kernel (`9.310s` after the repair), race, CGO-free, vet,
+  cross-build/format/diff and clean censuses. Exact-head re-review returned
+  ALLOW; the unchanged integrated focused run passed in `0.337s`.
+- The Store validates evidence shape and prior durable registration, not OS
+  liveness. The later daemon recovery test must prove that only exact
+  `Absent`/`Reused` observation reaches this constructor and that `Unknown`,
+  `EPERM` or weak identity remains unresolved.
+
+Private local-API server proof on integrated head `1ca7a31`:
+
+- `internal/api` now owns one concrete synchronous `Listener` and opaque
+  one-shot `Connection`, but no Store import, handler interface, router,
+  callback framework or goroutine accept loop. The daemon owns accept-handler
+  registration and joins; each `Receive` owns only the short-lived cancellation
+  watcher required to unblock socket I/O and joins it before returning.
+- Listener creation requires the exact private parent/token predicates, records
+  the mode-0600 Unix socket identity, verifies peer EUID on accept and removes
+  only that recorded socket identity on close. Operator authentication and
+  token identity rechecks remain inside transport. An attempt raw bearer is
+  erased after conversion to one redacted SHA-256 digest; no raw bearer is
+  representable in the decoded call.
+- A closed nine-call union and four reply constructors preserve the exact
+  domain/method matrix and bounded public DTOs. Request EOF is required before
+  dispatch. Mutation replies deliberately carry the canonical observed `head`
+  (zero is valid) plus positive entity revision rather than falsely claiming
+  one exact invalidation identity.
+- Independent review BLOCKED the first server head three times: empty
+  `fail.detail` contradicted the fixed kernel attempt-failure contract; context
+  cancellation could retain a partial header/payload/missing-EOF connection
+  until the five-second deadline; and Go's JSON decoder silently replaced lone
+  UTF-16 surrogate escapes with U+FFFD. Separate repairs permit empty failure
+  only (Block stays nonempty), join cancellation at all three cuts with zero
+  dispatch, and lexically reject lone/reversed/mismatched surrogate escapes on
+  both request and response while preserving valid pairs and literal U+FFFD.
+- Domain-guard, surrogate and cancellation mutations were killed and removed.
+  Final author gates passed API count-three (`4.322s`), race (`2.872s`),
+  CGO-free (`1.650s`), vet/format/diff, cross-builds and exact FD/goroutine/
+  socket/process/temp censuses. Exact-head re-review returned ALLOW; the
+  unchanged integrated API suite passed in `1.675s`.
+- Linux remains compile-only. Unix pathname bind has no descriptor-relative
+  primitive: a cooperative same-EUID parent replacement is detected after
+  bind and fails closed, but can leave an inert socket artifact in the replaced
+  parent. The integrated creation-race and cleanup census must keep that
+  residual visible; it is not authority to unlink an unrecorded path.
