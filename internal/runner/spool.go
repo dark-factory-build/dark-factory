@@ -201,7 +201,7 @@ func unlinkExactScratch(dir *os.File, name string, opened unix.Stat_t) error {
 	} else if err != nil && !errors.Is(err, unix.ENOENT) {
 		return err
 	}
-	fd, err := unix.Openat(int(dir.Fd()), ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
+	fd, err := unix.Openat(int(dir.Fd()), ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return err
 	}
