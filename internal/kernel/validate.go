@@ -231,6 +231,9 @@ func validateRunResourceChronology(run Run, change *Change, resources []Resource
 		}
 		finalizingAt := run.FinalizingAt.Int64()
 		for _, resource := range resources {
+			if resource.ActivatedAt != nil && resource.ActivatedAt.Int64() > finalizingAt {
+				return fmt.Errorf("%w: resource activation follows finalizing", ErrCorruptState)
+			}
 			if resource.UpdatedAt.Int64() < finalizingAt {
 				return fmt.Errorf("%w: resource update predates finalizing", ErrCorruptState)
 			}
@@ -345,6 +348,14 @@ func validateTaskRunTopology(ctx context.Context, connection *sql.Conn, task Tas
 	case 1:
 		if latest.Phase != RunTerminal || task.Status != TaskQueued {
 			return fmt.Errorf("%w: queued task is not the next run revision", ErrCorruptState)
+		}
+		switch latest.Terminal.kind {
+		case OutcomeBlocked, OutcomeFailed, OutcomeCancelled:
+		default:
+			return fmt.Errorf("%w: successful task cannot be retried", ErrCorruptState)
+		}
+		if task.UpdatedAt.Int64() < latest.UpdatedAt.Int64() {
+			return fmt.Errorf("%w: queued retry predates predecessor terminal run", ErrCorruptState)
 		}
 	default:
 		return fmt.Errorf("%w: task/run revisions are not contiguous", ErrCorruptState)
