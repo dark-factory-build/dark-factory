@@ -144,6 +144,20 @@ type OwnedChild struct {
 	testConvergence func() error
 }
 
+// These seams exist only for package tests to force post-spawn cleanup paths;
+// production leaves both nil and always closes the real slave synchronously.
+var (
+	testPTYAfterStart func(*OwnedChild)
+	testPTYSlaveClose func(*os.File) error
+)
+
+func closePTYSlave(slave *os.File) error {
+	if testPTYSlaveClose != nil {
+		return testPTYSlaveClose(slave)
+	}
+	return slave.Close()
+}
+
 func (c *OwnedChild) Identity() Identity {
 	if c == nil {
 		return Identity{}
@@ -244,6 +258,12 @@ func (c *OwnedChild) ReadPTY(output []byte) (int, error) {
 		n, err := unix.Read(int(c.ptyMaster.Fd()), output)
 		if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
 			continue
+		}
+		if errors.Is(err, unix.EIO) {
+			return n, io.EOF
+		}
+		if n == 0 && err == nil && fds[0].Revents&(unix.POLLHUP|unix.POLLERR) != 0 {
+			return 0, io.EOF
 		}
 		return n, err
 	}
@@ -407,12 +427,6 @@ func startBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, kee
 		statusR.Close()
 		return nil, err
 	}
-	if ptySlave != nil {
-		if closeErr := ptySlave.Close(); closeErr != nil {
-			return nil, closeErr
-		}
-		ptySlave = nil
-	}
 	c := &OwnedChild{cmd: cmd, identity: Identity{PID: cmd.Process.Pid, PGID: cmd.Process.Pid}, kq: kq, activation: leashW, status: statusR, lease: lease, state: stateBlocked, keepDirectory: keepDirectoryAcrossExec, ptyMaster: ptyMaster}
 	ptyMaster = nil
 	defer func() {
@@ -422,6 +436,9 @@ func startBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, kee
 			}
 		}
 	}()
+	if testPTYAfterStart != nil && usePTY {
+		testPTYAfterStart(c)
+	}
 	_ = leashR.Close()
 	_ = statusW.Close()
 	first, e := readIdentity(c.identity.PID)
@@ -439,6 +456,12 @@ func startBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, kee
 		return nil, err
 	}
 	c.exitRegistered = true
+	if ptySlave != nil {
+		if closeErr := closePTYSlave(ptySlave); closeErr != nil {
+			return nil, closeErr
+		}
+		ptySlave = nil
+	}
 	if e = statusR.SetReadDeadline(time.Now().Add(4 * time.Second)); e != nil {
 		err = fmt.Errorf("runner: ready deadline: %w", e)
 		return nil, err

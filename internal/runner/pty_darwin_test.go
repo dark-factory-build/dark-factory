@@ -4,6 +4,7 @@ package runner
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -78,7 +79,7 @@ func TestBlockedPTYIsInertUntilActivationAndProviderGetsExactTTY(t *testing.T) {
 	if _, err := child.FinishAfterExit(4 * time.Second); err != nil {
 		t.Fatalf("finish provider: %v", err)
 	}
-	if n, err := child.ReadPTY(make([]byte, 16)); errors.Is(err, os.ErrDeadlineExceeded) || n != 0 {
+	if n, err := child.ReadPTY(make([]byte, 16)); !errors.Is(err, io.EOF) || n != 0 {
 		t.Fatalf("post-exit PTY did not reach EOF: n=%d err=%v", n, err)
 	}
 	if _, err := child.WritePTY([]byte("after\n")); !errors.Is(err, ErrState) {
@@ -188,5 +189,43 @@ func TestBlockedPTYAbortClosesMasterWithoutProviderEffect(t *testing.T) {
 	var stat unix.Stat_t
 	if err := unix.Fstat(masterFD, &stat); !errors.Is(err, unix.EBADF) {
 		t.Fatalf("aborted PTY master fd %d remains open: %v", masterFD, err)
+	}
+}
+
+func TestPTYSlaveCloseFailureCleansExactStartedChild(t *testing.T) {
+	f := newFixture(t)
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := PrepareExecSpec(ExecSpec{Target: executable, Args: []string{"--pty-provider", f.root}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C", "TERM=xterm"}, Cwd: f.cwd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var started *OwnedChild
+	oldAfterStart, oldSlaveClose := testPTYAfterStart, testPTYSlaveClose
+	t.Cleanup(func() {
+		testPTYAfterStart = oldAfterStart
+		testPTYSlaveClose = oldSlaveClose
+	})
+	testPTYAfterStart = func(child *OwnedChild) { started = child }
+	testPTYSlaveClose = func(*os.File) error { return errors.New("injected slave close failure") }
+	child, err := StartBlockedPTY(f.lease, gate, spec, false)
+	if child != nil || err == nil {
+		t.Fatalf("slave-close failure returned child=%v err=%v", child, err)
+	}
+	if started == nil {
+		t.Fatal("post-start owner hook was not reached")
+	}
+	waitExactAbsence(t, started.Identity())
+	if started.state != stateWaited {
+		t.Fatalf("started child was not reaped: state=%v", started.state)
+	}
+	if started.ptyMaster != nil {
+		t.Fatal("started child retained PTY master after failed slave close")
 	}
 }
