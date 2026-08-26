@@ -431,6 +431,33 @@ func resourcesForRun(ctx context.Context, connection *sql.Conn, runID RunID) ([]
 	return resources, rows.Err()
 }
 
+// RecoverableRun reloads one exact nonterminal run and its durable recovery relationships.
+func (store *Store) RecoverableRun(ctx context.Context, id RunID) (RecoverableRun, bool, error) {
+	if id.zero() {
+		return RecoverableRun{}, false, fmt.Errorf("%w: zero run identifier", ErrInvalidValue)
+	}
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return RecoverableRun{}, false, err
+	}
+	defer tx.Close()
+	run, found, err := runByID(ctx, tx.connection, id)
+	if err != nil || !found {
+		return RecoverableRun{}, false, err
+	}
+	if err := validateOwnershipLocators(ctx, tx.connection); err != nil {
+		return RecoverableRun{}, false, err
+	}
+	if run.Phase == RunTerminal {
+		return RecoverableRun{}, false, nil
+	}
+	recovered, err := recoverableRunFrom(ctx, tx.connection, run)
+	if err != nil {
+		return RecoverableRun{}, false, err
+	}
+	return recovered, true, nil
+}
+
 func (store *Store) RecoverableRuns(ctx context.Context) ([]RecoverableRun, error) {
 	tx, err := store.beginRead(ctx)
 	if err != nil {
@@ -462,14 +489,21 @@ func (store *Store) RecoverableRuns(ctx context.Context) ([]RecoverableRun, erro
 	}
 	result := make([]RecoverableRun, 0, len(runs))
 	for _, run := range runs {
-		relationships, err := loadRunRelationships(ctx, tx.connection, run)
+		recovered, err := recoverableRunFrom(ctx, tx.connection, run)
 		if err != nil {
 			return nil, err
 		}
-		recovered := RecoverableRun{Run: run, Change: relationships.change, Resources: relationships.resources}
 		result = append(result, recovered)
 	}
 	return result, nil
+}
+
+func recoverableRunFrom(ctx context.Context, connection *sql.Conn, run Run) (RecoverableRun, error) {
+	relationships, err := loadRunRelationships(ctx, connection, run)
+	if err != nil {
+		return RecoverableRun{}, err
+	}
+	return RecoverableRun{Run: run, Change: relationships.change, Resources: relationships.resources}, nil
 }
 
 func (store *Store) AuthenticateAttempt(ctx context.Context, digest AttemptDigest) (AttemptAuthority, error) {
