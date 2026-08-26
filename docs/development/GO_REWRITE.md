@@ -1999,16 +1999,52 @@ Bounded API dispatcher proof on integrated head `157af0c`:
   Unix listener. Exact head `cbb6f6b` received independent **ALLOW** with no
   findings; focused/race/CGO-free/vet/cross-build gates passed.
 
-Registered Change-worker candidate review at unintegrated head `4d00168`:
+Registered Change-worker proof on integrated head `43a94ee`:
 
-- The codec was moved from daemon into one concrete `internal/changeworker` and
-  the real four-release Git/materialization/final-scan/shell sequence passed.
-  Git descendants correctly block population, late `.git`/same-size content
-  and HOME replacement block provider exec, and same-PID/process/FD/privacy
-  tests held. Independent review nevertheless returned **BLOCK**.
-- Initial HOME/TMP/token identity-capture errors were discarded, permitting Git
-  selection before the first complete authority verification. Fixed child and
-  config validation also omitted exact device equality with the fd9 runtime
-  root. Every capture error must close before any effect, and initial/final
-  checks must bind every fixed child to the root device. The candidate remains
-  unintegrated pending causal repair and exact-head re-review.
+- The private checkpoint codec moved, rather than copied, from daemon into one
+  concrete `internal/changeworker`. `factory-runner --change-worker-shell`
+  performs one serial four-release sequence: select and report the exact Git
+  base; prepare and report the Change staging identity; populate, publish and
+  report; then re-inspect the stable published tree and pass its retained exact
+  directory descriptor to the already prepared shell provider. No provider
+  effect is possible before all four daemon releases.
+- The worker derives HOME, TMP and token locations from the retained runtime
+  descriptor. It validates config and every fixed child before the first Git
+  effect and again immediately before provider exec, including exact root-
+  device equality. Every capture failure closes the newly opened descriptor
+  and all earlier authority descriptors before selection, staging, checkpoint
+  or provider effects. It exposes no raw bearer, HOME, TMP or token location in
+  worker configuration.
+- The initial independent review at `4d00168` returned **BLOCK** after finding
+  discarded HOME/TMP/token capture errors and missing root-device equality.
+  Repair `3063fda` centralized checked child capture, added initial/final
+  device binding and removed a redundant error wrapper. Mutations restoring a
+  swallowed capture error or deleting directory-device equality were killed
+  by the new causal tests and removed. Exact-head re-review returned **ALLOW**
+  with no new finding.
+- Real Git and shell tests prove the four releases, same PID/PGID/birth through
+  final exec, Git descendant reaping, exact blob ordering, fixed HOME, final
+  `.git` rejection, same-size tree mutation rejection, retained cwd authority,
+  provider descriptor grammar, private-value filtering, and exact FD/goroutine
+  census. Wrong-device, closed-parent and malformed config/HOME/TMP/token cases
+  produce no selection, staging, provider or descriptor effect.
+- After unchanged integration the orchestrator passed the full serial Go suite
+  and the serial race gate across API, daemon, kernel, Change, Change worker,
+  runner and `factory-runner` (`api 2.868s`, `daemon 3.513s`, `kernel
+  248.826s`, `change 28.311s`, `changeworker 8.776s`, `runner 40.559s`,
+  command 2.271s). Vet, format and diff checks passed; the isolated task root
+  was empty and the exact process census found no runner, Change worker, Git
+  batch or shell-provider residue.
+- One initial package-parallel combined invocation failed the daemon dispatcher
+  fixture at its fourth client call with fixed `ErrInvalidClient`; all kernel,
+  Change, worker, runner and command packages in that invocation passed. The
+  exact daemon test then passed 20/20 alone, the seven-package gate passed
+  three times with package serialization, and the full serial and race gates
+  passed. This failed invocation is not counted as green evidence; process-
+  sensitive integration gates remain serial while the fast-gate concurrency
+  policy is finalized.
+- The remaining go/no-go work is composition, not another wrapper abstraction:
+  a concrete daemon supervisor must bind these checkpoints to Store commits,
+  release the provider once, observe its terminal spool, clean exact resources,
+  and prove crash/restart convergence. The cooperative same-EUID boundary and
+  scan-to-exec assumption remain explicit residual limits.
