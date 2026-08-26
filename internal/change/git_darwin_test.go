@@ -196,6 +196,8 @@ func TestSelectGitRejectsLocalIncludesBeforeExecutingGit(t *testing.T) {
 		"direct include":      "[include]\n\tpath = ../outside-config\n",
 		"conditional include": "[includeIf \"gitdir:**/repository/**\"]\n\tpath = ../outside-config\n",
 		"case folded include": "[InClUdEiF \"onbranch:main\"]\n\tpath = ../outside-config\n",
+		"include key":         "[core]\n\tinclude.path = ../outside-config\n",
+		"worktree config":     "[extensions]\n\tworktreeConfig = true\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			repository := fakeRepository(t)
@@ -219,7 +221,110 @@ func TestSelectGitRejectsLocalIncludesBeforeExecutingGit(t *testing.T) {
 	}
 }
 
+func TestLocalGitConfigValidatorIsMinimalAndFailClosed(t *testing.T) {
+	valid := []byte("[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n[remote \"origin\"]\n\tpromisor = false\n")
+	if !validLocalGitConfig(valid) {
+		t.Fatal("ordinary local Git config rejected")
+	}
+	for name, config := range map[string][]byte{
+		"BOM":                  append([]byte{0xef, 0xbb, 0xbf}, []byte("[core]\n\tbare = false\n")...),
+		"non-ASCII":            []byte("[user]\n\tname = Jos\xc3\xa9\n"),
+		"control":              []byte("[core]\n\tbare = \x01false\n"),
+		"UTF-16":               []byte{'[', 0, 'c', 0, 'o', 0, 'r', 0, 'e', 0, ']', 0},
+		"bare carriage return": []byte("[core]\rbare = false\n"),
+		"include section":      []byte("[include]\n\tpath = ../outside\n"),
+		"includeIf section":    []byte("[includeIf \"onbranch:main\"]\n\tpath = ../outside\n"),
+		"include key":          []byte("[core]\n\tinclude.path = ../outside\n"),
+		"worktree config":      []byte("[extensions]\n\tworktreeConfig = true\n"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if validLocalGitConfig(config) {
+				t.Fatal("unsupported local Git config accepted")
+			}
+		})
+	}
+}
+
+func TestSelectGitRejectsBOMIncludeAndWorktreeConfigBeforeTrustedGit(t *testing.T) {
+	t.Run("BOM include FIFO", func(t *testing.T) {
+		fixture := newLocalGitFixture(t, "sha1")
+		fifo := filepath.Join(filepath.Dir(fixture.repository), "external-config.fifo")
+		if err := unix.Mkfifo(fifo, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		config := append([]byte{0xef, 0xbb, 0xbf}, []byte("[include]\n\tpath = "+fifo+"\n")...)
+		if err := os.WriteFile(filepath.Join(fixture.repository, ".git", "config"), config, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		assertTrustedConfigRejectedWithoutFIFOBlock(t, fixture, 750*time.Millisecond)
+	})
+	t.Run("worktree config include FIFO", func(t *testing.T) {
+		fixture := newLocalGitFixture(t, "sha1")
+		runFixtureGit(t, fixture.git, fixture.repository, "config", "core.repositoryformatversion", "1")
+		runFixtureGit(t, fixture.git, fixture.repository, "config", "extensions.worktreeConfig", "true")
+		fifo := filepath.Join(filepath.Dir(fixture.repository), "external-worktree-config.fifo")
+		if err := unix.Mkfifo(fifo, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(fixture.repository, ".git", "config.worktree"), []byte("[include]\n\tpath = "+fifo+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		assertTrustedConfigRejectedWithoutFIFOBlock(t, fixture, 750*time.Millisecond)
+	})
+}
+
+func assertTrustedConfigRejectedWithoutFIFOBlock(t testing.TB, fixture localGitFixture, timeout time.Duration) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	_, err := SelectGit(ctx, fixture.git, fixture.repository, "HEAD", fixture.identity)
+	if err == nil {
+		t.Fatal("unsafe Git config was accepted")
+	}
+	var validation *ValidationError
+	if !errors.As(err, &validation) {
+		t.Fatalf("unsafe Git config crossed into the Git child: %v", err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal("unsafe Git config blocked on its external FIFO")
+	}
+}
+
 func TestGitAdminFilesAndObjectStoreAreExactAndRechecked(t *testing.T) {
+	t.Run("config.worktree presence", func(t *testing.T) {
+		for _, kind := range []string{"file", "directory", "symlink", "fifo"} {
+			t.Run(kind, func(t *testing.T) {
+				repository := fakeRepository(t)
+				path := filepath.Join(repository, ".git", "config.worktree")
+				switch kind {
+				case "file":
+					if err := os.WriteFile(path, []byte("[core]\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				case "directory":
+					if err := os.Mkdir(path, 0o700); err != nil {
+						t.Fatal(err)
+					}
+				case "symlink":
+					if err := os.Symlink(filepath.Join(filepath.Dir(repository), "outside"), path); err != nil {
+						t.Fatal(err)
+					}
+				case "fifo":
+					if err := unix.Mkfifo(path, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				started := filepath.Join(filepath.Dir(repository), "git-started")
+				git := writeFakeGit(t, fmt.Sprintf("#!/bin/sh\n: > %q\nexit 99\n", started))
+				if _, err := selectGit(context.Background(), git, repository, "HEAD", mustRepositoryIdentity(t, repository), nil); err == nil {
+					t.Fatal("config.worktree entry was accepted")
+				}
+				if _, err := os.Lstat(started); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("Git ran before config.worktree refusal: %v", err)
+				}
+			})
+		}
+	})
 	t.Run("config symlink", func(t *testing.T) {
 		repository := fakeRepository(t)
 		config := filepath.Join(repository, ".git", "config")

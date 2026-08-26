@@ -255,6 +255,9 @@ func checkpointRepository(path string, expected RepositoryIdentity) (repositoryC
 	if gitIdentity.device != uint64(rootStat.Dev) || gitIdentity.uid != rootStat.Uid {
 		return repositoryCheckpoint{}, &ValidationError{Reason: "Git administration must remain on the repository filesystem"}
 	}
+	if err := rejectDirectGitAdminEntry(gitFD, "config.worktree"); err != nil {
+		return repositoryCheckpoint{}, err
+	}
 	configIdentity, config, err := readGitAdminFile(gitFD, "config", maxGitConfigBytes)
 	if err != nil {
 		return repositoryCheckpoint{}, &ValidationError{Reason: "Git config must be one bounded regular file"}
@@ -262,8 +265,8 @@ func checkpointRepository(path string, expected RepositoryIdentity) (repositoryC
 	if configIdentity.device != uint64(rootStat.Dev) || configIdentity.uid != rootStat.Uid {
 		return repositoryCheckpoint{}, &ValidationError{Reason: "Git config authority differs from the repository"}
 	}
-	if configHasInclude(config) {
-		return repositoryCheckpoint{}, &ValidationError{Reason: "Git config includes are forbidden"}
+	if !validLocalGitConfig(config) {
+		return repositoryCheckpoint{}, &ValidationError{Reason: "Git config syntax or authority is unsupported"}
 	}
 	objectsFD, objectsIdentity, err := openGitAdminDirectory(gitFD, "objects")
 	if err != nil {
@@ -598,25 +601,51 @@ func validPackName(name string) bool {
 	}
 }
 
-func configHasInclude(config []byte) bool {
-	if bytes.IndexByte(config, 0) >= 0 {
-		return true
-	}
-	for _, line := range bytes.Split(config, []byte{'\n'}) {
-		line = bytes.TrimSpace(line)
-		if len(line) < 3 || line[0] == '#' || line[0] == ';' || line[0] != '[' {
-			continue
+func validLocalGitConfig(config []byte) bool {
+	for index, character := range config {
+		if character >= utf8.RuneSelf || character == 0 || character < 0x20 && character != '\t' && character != '\n' && character != '\r' {
+			return false
 		}
-		end := bytes.IndexByte(line, ']')
-		if end < 0 {
-			continue
-		}
-		header := strings.ToLower(strings.TrimSpace(string(line[1:end])))
-		if header == "include" || strings.HasPrefix(header, "includeif ") || strings.HasPrefix(header, "includeif\t") {
-			return true
+		if character == '\r' && (index+1 == len(config) || config[index+1] != '\n') {
+			return false
 		}
 	}
-	return false
+	section := ""
+	for _, rawLine := range bytes.Split(config, []byte{'\n'}) {
+		rawLine = bytes.TrimSuffix(rawLine, []byte{'\r'})
+		line := strings.TrimSpace(string(rawLine))
+		if line == "" || line[0] == '#' || line[0] == ';' {
+			continue
+		}
+		if line[0] == '[' {
+			if len(line) < 3 || line[len(line)-1] != ']' {
+				return false
+			}
+			fields := strings.Fields(strings.TrimSpace(line[1 : len(line)-1]))
+			if len(fields) == 0 {
+				return false
+			}
+			section = strings.ToLower(fields[0])
+			if section == "include" || strings.HasPrefix(section, "include.") || section == "includeif" || strings.HasPrefix(section, "includeif.") {
+				return false
+			}
+			continue
+		}
+		if section == "" {
+			return false
+		}
+		key, _, _ := strings.Cut(line, "=")
+		key = strings.ToLower(strings.TrimSpace(key))
+		if key == "" || key == "include" || strings.HasPrefix(key, "include.") || key == "includeif" || strings.HasPrefix(key, "includeif.") || section == "extensions" && key == "worktreeconfig" {
+			return false
+		}
+		for _, character := range key {
+			if !(character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '-') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func fstatGit(fd int) (unix.Stat_t, error) {
