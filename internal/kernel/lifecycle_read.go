@@ -143,11 +143,8 @@ func scanRun(scanner rowScanner) (Run, bool, error) {
 	if runnerExitPresent {
 		result.RunnerExit = &runnerExit
 	}
-	if result.ProviderExit != nil && (result.ProviderExit.At().Int64() < admittedAt || result.ProviderExit.At().Int64() > updatedAt) || result.RunnerExit != nil && (result.RunnerExit.At().Int64() < admittedAt || result.RunnerExit.At().Int64() > updatedAt) {
-		return Run{}, false, fmt.Errorf("%w: invalid process exit time", ErrCorruptState)
-	}
-	if result.RunningAt != nil && result.RunningAt.Int64() < admittedAt || result.FinalizingAt != nil && result.FinalizingAt.Int64() < admittedAt || result.TerminalAt != nil && result.TerminalAt.Int64() < admittedAt || result.CredentialRevokedAt != nil && result.CredentialRevokedAt.Int64() < admittedAt {
-		return Run{}, false, fmt.Errorf("%w: invalid run transition time", ErrCorruptState)
+	if err := validateRunChronology(result); err != nil {
+		return Run{}, false, err
 	}
 	switch phase {
 	case RunAdmitted:
@@ -168,6 +165,44 @@ func scanRun(scanner rowScanner) (Run, bool, error) {
 		}
 	}
 	return result, true, nil
+}
+
+func validateRunChronology(run Run) error {
+	admitted := run.AdmittedAt.Int64()
+	updated := run.UpdatedAt.Int64()
+	if run.Phase == RunAdmitted && updated != admitted {
+		return fmt.Errorf("%w: admitted run update time changed", ErrCorruptState)
+	}
+	if run.RunningAt != nil && (run.RunningAt.Int64() < admitted || run.RunningAt.Int64() > updated) {
+		return fmt.Errorf("%w: invalid running time", ErrCorruptState)
+	}
+	if run.FinalizingAt != nil && (run.FinalizingAt.Int64() < admitted || run.FinalizingAt.Int64() > updated) {
+		return fmt.Errorf("%w: invalid finalizing time", ErrCorruptState)
+	}
+	if run.TerminalAt != nil && (run.TerminalAt.Int64() < admitted || run.TerminalAt.Int64() > updated) {
+		return fmt.Errorf("%w: invalid terminal time", ErrCorruptState)
+	}
+	if run.CredentialRevokedAt != nil && (run.CredentialRevokedAt.Int64() < admitted || run.CredentialRevokedAt.Int64() > updated) {
+		return fmt.Errorf("%w: invalid credential revocation time", ErrCorruptState)
+	}
+	if run.RunningAt != nil && run.FinalizingAt != nil && run.RunningAt.Int64() > run.FinalizingAt.Int64() || run.FinalizingAt != nil && run.TerminalAt != nil && run.FinalizingAt.Int64() > run.TerminalAt.Int64() {
+		return fmt.Errorf("%w: invalid run transition order", ErrCorruptState)
+	}
+	if run.Phase == RunRunning && run.RunningAt == nil || run.Phase == RunTerminal && run.TerminalAt == nil {
+		return fmt.Errorf("%w: missing run phase checkpoint", ErrCorruptState)
+	}
+	if run.Phase == RunRunning && run.RunningAt.Int64() != updated || run.Phase == RunTerminal && run.TerminalAt.Int64() != updated {
+		return fmt.Errorf("%w: run phase checkpoint does not equal update time", ErrCorruptState)
+	}
+	if run.Phase == RunFinalizing || run.Phase == RunTerminal {
+		if run.FinalizingAt == nil || run.CredentialRevokedAt == nil || run.CredentialRevokedAt.Int64() != run.FinalizingAt.Int64() {
+			return fmt.Errorf("%w: invalid finalizing checkpoint", ErrCorruptState)
+		}
+	}
+	if run.ProviderExit != nil && (run.ProviderExit.At().Int64() < admitted || run.ProviderExit.At().Int64() > updated) || run.RunnerExit != nil && (run.RunnerExit.At().Int64() < admitted || run.RunnerExit.At().Int64() > updated) {
+		return fmt.Errorf("%w: invalid process exit time", ErrCorruptState)
+	}
+	return nil
 }
 
 func decodeProposal(kind, code, detail, result sql.NullString) (Proposal, bool, error) {
@@ -314,7 +349,7 @@ func scanResource(scanner rowScanner) (Resource, bool, error) {
 	}
 	switch state {
 	case ResourceDeclared:
-		if resource.ReleasedAt != nil || resource.ActivatedAt != nil || reason.Valid || !resource.Identity.Empty() {
+		if resource.UpdatedAt.Int64() != resource.DeclaredAt.Int64() || resource.ReleasedAt != nil || resource.ActivatedAt != nil || reason.Valid || !resource.Identity.Empty() {
 			return Resource{}, false, fmt.Errorf("%w: inconsistent declared resource", ErrCorruptState)
 		}
 	case ResourceReleasing:
@@ -322,7 +357,7 @@ func scanResource(scanner rowScanner) (Resource, bool, error) {
 			return Resource{}, false, fmt.Errorf("%w: inconsistent live resource", ErrCorruptState)
 		}
 	case ResourceActive:
-		if resource.ReleasedAt != nil || resource.ActivatedAt == nil || reason.Valid || !resource.Identity.validFor(kind) {
+		if resource.ReleasedAt != nil || resource.ActivatedAt == nil || resource.ActivatedAt.Int64() != resource.UpdatedAt.Int64() || reason.Valid || !resource.Identity.validFor(kind) {
 			return Resource{}, false, fmt.Errorf("%w: inconsistent active resource", ErrCorruptState)
 		}
 	case ResourceUnresolved:

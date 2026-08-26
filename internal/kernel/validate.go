@@ -183,7 +183,53 @@ func loadRunRelationships(ctx context.Context, connection *sql.Conn, run Run) (r
 	if err := validatePersistedProcessExits(run, resources); err != nil {
 		return runRelationships{}, err
 	}
+	if err := validateRunResourceChronology(run, change, resources); err != nil {
+		return runRelationships{}, err
+	}
 	return runRelationships{task: task, change: change, resources: resources}, nil
+}
+
+func validateRunResourceChronology(run Run, change *Change, resources []Resource) error {
+	if run.Phase == RunRunning {
+		if run.RunningAt == nil {
+			return fmt.Errorf("%w: running run lacks running time", ErrCorruptState)
+		}
+		runningAt := run.RunningAt.Int64()
+		if change != nil && (change.Phase != ChangeAvailable || change.AvailableAt == nil || change.AvailableAt.Int64() > runningAt || change.UpdatedAt.Int64() > runningAt) {
+			return fmt.Errorf("%w: Change became available after run activation", ErrCorruptState)
+		}
+		for _, resource := range resources {
+			if resource.State == ResourceActive && (resource.ActivatedAt == nil || resource.ActivatedAt.Int64() > runningAt || resource.UpdatedAt.Int64() > runningAt) {
+				return fmt.Errorf("%w: active resource became current after run activation", ErrCorruptState)
+			}
+		}
+	}
+	if run.RunningAt != nil {
+		runningAt := run.RunningAt.Int64()
+		for _, resource := range resources {
+			if resource.ActivatedAt != nil && resource.ActivatedAt.Int64() > runningAt {
+				return fmt.Errorf("%w: resource activation follows run activation", ErrCorruptState)
+			}
+		}
+	}
+	if run.Phase == RunFinalizing || run.Phase == RunTerminal {
+		if run.FinalizingAt == nil {
+			return fmt.Errorf("%w: cleanup phase lacks finalizing time", ErrCorruptState)
+		}
+		finalizingAt := run.FinalizingAt.Int64()
+		if run.Phase == RunTerminal && change != nil && (run.TerminalAt == nil || change.UpdatedAt.Int64() > run.TerminalAt.Int64()) {
+			return fmt.Errorf("%w: terminal run predates Change checkpoint", ErrCorruptState)
+		}
+		for _, resource := range resources {
+			if resource.UpdatedAt.Int64() < finalizingAt {
+				return fmt.Errorf("%w: resource update predates finalizing", ErrCorruptState)
+			}
+			if run.Phase == RunTerminal && resource.State == ResourceReleased && (resource.ReleasedAt == nil || resource.ReleasedAt.Int64() > run.TerminalAt.Int64()) {
+				return fmt.Errorf("%w: resource release follows terminal run", ErrCorruptState)
+			}
+		}
+	}
+	return nil
 }
 
 func validatePersistedProcessExits(run Run, resources []Resource) error {
@@ -205,10 +251,18 @@ func validatePersistedProcessExits(run Run, resources []Resource) error {
 		if providerProcess == nil || providerGroup == nil || providerProcess.ActivatedAt == nil || providerGroup.ActivatedAt == nil || providerProcess.Identity.Empty() || !resourceIdentityEqual(providerProcess.Identity, providerGroup.Identity) || *providerProcess.ActivatedAt != *providerGroup.ActivatedAt || run.ProviderExit.At().Int64() < providerProcess.ActivatedAt.Int64() {
 			return fmt.Errorf("%w: provider exit does not match activated provider resources", ErrCorruptState)
 		}
+		for _, resource := range []*Resource{providerProcess, providerGroup} {
+			if resource.ReleasedAt != nil && resource.ReleasedAt.Int64() < run.ProviderExit.At().Int64() {
+				return fmt.Errorf("%w: provider resource released before provider exit", ErrCorruptState)
+			}
+		}
 	}
 	if run.RunnerExit != nil {
 		if runnerProcess == nil || runnerProcess.ActivatedAt == nil || runnerProcess.Identity.Empty() || run.RunnerExit.At().Int64() < runnerProcess.ActivatedAt.Int64() {
 			return fmt.Errorf("%w: runner exit does not match activated runner resource", ErrCorruptState)
+		}
+		if runnerProcess.ReleasedAt != nil && runnerProcess.ReleasedAt.Int64() < run.RunnerExit.At().Int64() {
+			return fmt.Errorf("%w: runner resource released before runner exit", ErrCorruptState)
 		}
 	}
 	return nil
@@ -218,7 +272,7 @@ func taskMatchesRun(task Task, run Run) bool {
 	if run.Phase != RunTerminal {
 		return task.Status == TaskRunning
 	}
-	if run.Terminal == nil {
+	if run.Terminal == nil || run.TerminalAt == nil || task.UpdatedAt != *run.TerminalAt {
 		return false
 	}
 	switch run.Terminal.kind {

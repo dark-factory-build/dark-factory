@@ -161,7 +161,7 @@ func scanTask(scanner rowScanner) (Task, bool, error) {
 	case TaskFailed, TaskCancelled:
 		validState = !blockedReason.Valid && !result.Valid && completedAt.Valid
 	}
-	if !validState || completedAt.Valid && completedAt.Int64 < 0 {
+	if !validState || completedAt.Valid && (completedAt.Int64 < 0 || completedAt.Int64 != updatedAt) {
 		return Task{}, false, fmt.Errorf("%w: inconsistent task state", ErrCorruptState)
 	}
 	var completed *UnixMillis

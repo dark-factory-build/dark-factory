@@ -120,6 +120,12 @@ func scanChange(scanner rowScanner) (Change, bool, error) {
 			return Change{}, false, fmt.Errorf("%w: inconsistent available Change", ErrCorruptState)
 		}
 	}
+	if parsedPhase == ChangeReserved && createdAt != updatedAt {
+		return Change{}, false, fmt.Errorf("%w: reserved Change update time changed", ErrCorruptState)
+	}
+	if parsedPhase == ChangeSelected && result.SelectedAt.Int64() != updatedAt || parsedPhase == ChangePrepared && result.PreparedAt.Int64() != updatedAt || parsedPhase == ChangeAvailable && result.AvailableAt.Int64() != updatedAt {
+		return Change{}, false, fmt.Errorf("%w: current Change checkpoint does not equal update time", ErrCorruptState)
+	}
 	return result, true, nil
 }
 

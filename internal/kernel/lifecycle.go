@@ -145,6 +145,18 @@ func (store *Store) transitionResource(ctx context.Context, runID RunID, resourc
 		}
 		return resource, nil
 	}
+	if target == ResourceReleased && !resource.Identity.Empty() {
+		switch resource.Kind {
+		case ResourceProviderProcess, ResourceProviderGroup:
+			if at.Int64() < run.ProviderExit.At().Int64() {
+				return Resource{}, tx.Rollback(ErrRevisionConflict)
+			}
+		case ResourceRunnerProcess:
+			if at.Int64() < run.RunnerExit.At().Int64() {
+				return Resource{}, tx.Rollback(ErrRevisionConflict)
+			}
+		}
+	}
 	if resource.Revision != expected || at.Int64() < resource.UpdatedAt.Int64() {
 		return Resource{}, tx.Rollback(ErrRevisionConflict)
 	}
@@ -291,6 +303,12 @@ func (store *Store) ActivateRun(ctx context.Context, runID RunID, expected Revis
 	if !exactResourceSet(resources, true) {
 		return Run{}, tx.Rollback(ErrConflict)
 	}
+	if err := requireResourceTime(resources, at); err != nil {
+		return Run{}, tx.Rollback(err)
+	}
+	if run.Role == RoleWorker && (relationships.change.AvailableAt == nil || relationships.change.AvailableAt.Int64() > at.Int64() || relationships.change.UpdatedAt.Int64() > at.Int64()) {
+		return Run{}, tx.Rollback(ErrRevisionConflict)
+	}
 	result, err := tx.connection.ExecContext(ctx, `UPDATE runs SET phase = 'running', running_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase = 'admitted' AND revision = ?`, at.Int64(), at.Int64(), run.ID.Bytes(), expected.Int64())
 	if err := requireOneRow(result, err); err != nil {
 		return Run{}, tx.Rollback(err)
@@ -399,6 +417,9 @@ func (store *Store) enterFinalizing(ctx context.Context, tx *writeTx, run Run, e
 	if run.Revision != expected || at.Int64() < run.UpdatedAt.Int64() {
 		return Run{}, tx.Rollback(ErrRevisionConflict)
 	}
+	if err := requireFinalizingTime(ctx, tx.connection, run, at); err != nil {
+		return Run{}, tx.Rollback(err)
+	}
 	kind, code, detail, result := proposalSQL(proposal)
 	updated, err := tx.connection.ExecContext(ctx, `UPDATE runs SET phase = 'finalizing', proposal_kind = ?, proposal_code = ?, proposal_detail = ?, proposal_result = ?, credential_revoked_at_ms = ?, finalizing_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase IN ('admitted', 'running') AND proposal_kind IS NULL AND credential_revoked_at_ms IS NULL AND revision = ?`,
 		kind, code, detail, result, at.Int64(), at.Int64(), at.Int64(), run.ID.Bytes(), expected.Int64())
@@ -493,6 +514,9 @@ func (store *Store) observeProcessExit(ctx context.Context, runID RunID, expecte
 	exitKind, code, signal := exitSQL(exit)
 	newRevision := expected.Int64() + 1
 	if run.Phase == RunAdmitted || run.Phase == RunRunning {
+		if err := requireFinalizingTime(ctx, tx.connection, run, at); err != nil {
+			return Run{}, tx.Rollback(err)
+		}
 		failureCode, detail := FailureRunnerExit, "runner exited before an attempt outcome"
 		if owner == providerExitOwner {
 			failureCode, detail = FailureProviderExit, "provider exited before an attempt outcome"
@@ -611,6 +635,15 @@ func (store *Store) FinalizeRun(ctx context.Context, runID RunID, expected Revis
 	if run.Phase != RunFinalizing || run.Proposal == nil || run.CredentialRevokedAt == nil || run.Revision != expected || at.Int64() < run.UpdatedAt.Int64() {
 		return Run{}, tx.Rollback(ErrRevisionConflict)
 	}
+	if err := requireResourceTime(relationships.resources, at); err != nil {
+		return Run{}, tx.Rollback(err)
+	}
+	if relationships.task.UpdatedAt.Int64() > at.Int64() {
+		return Run{}, tx.Rollback(ErrRevisionConflict)
+	}
+	if relationships.change != nil && relationships.change.UpdatedAt.Int64() > at.Int64() {
+		return Run{}, tx.Rollback(ErrRevisionConflict)
+	}
 	if run.Role == RoleWorker && run.VerificationPolicy != VerificationNone && run.Proposal.kind == OutcomeSucceeded {
 		return Run{}, tx.Rollback(ErrConflict)
 	}
@@ -704,6 +737,40 @@ func exactResourceSet(resources []Resource, requireActive bool) bool {
 		seen[resource.Kind] = true
 	}
 	return seen[ResourceRuntimeRoot] && seen[ResourceRunnerProcess] && seen[ResourceProviderProcess] && seen[ResourceProviderGroup]
+}
+
+func requireResourceTime(resources []Resource, at UnixMillis) error {
+	for _, resource := range resources {
+		if resource.UpdatedAt.Int64() > at.Int64() {
+			return ErrRevisionConflict
+		}
+	}
+	return nil
+}
+
+func requireFinalizingTime(ctx context.Context, connection *sql.Conn, run Run, at UnixMillis) error {
+	resources, err := resourcesForRun(ctx, connection, run.ID)
+	if err != nil {
+		return err
+	}
+	var change *Change
+	if run.ChangeID != nil {
+		value, found, err := changeByID(ctx, connection, *run.ChangeID)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return ErrCorruptState
+		}
+		change = &value
+	}
+	if err := requireResourceTime(resources, at); err != nil {
+		return err
+	}
+	if change != nil && change.UpdatedAt.Int64() > at.Int64() {
+		return ErrRevisionConflict
+	}
+	return nil
 }
 
 func proposalSQL(proposal Proposal) (kind string, code, detail, result any) {
