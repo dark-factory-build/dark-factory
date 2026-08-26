@@ -120,7 +120,7 @@ func loadRunRelationships(ctx context.Context, connection *sql.Conn, run Run) (r
 		return runRelationships{}, err
 	}
 	if run.Phase != RunTerminal {
-		if task.AssignedAgentID != run.AgentID || task.WorkRevision != run.AdmittedTaskWorkRevision || !taskMatchesRun(task, run) {
+		if !taskMatchesRun(task, run) {
 			return runRelationships{}, fmt.Errorf("%w: task does not match run", ErrCorruptState)
 		}
 	} else if task.WorkRevision.Int64() < run.AdmittedTaskWorkRevision.Int64() || task.WorkRevision == run.AdmittedTaskWorkRevision && !taskMatchesRun(task, run) {

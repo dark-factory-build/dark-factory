@@ -235,6 +235,59 @@ func TestFinalizeRunRejectsBeforeLateWorkerChangeCheckpoint(t *testing.T) {
 	}
 }
 
+func TestChangeCheckpointCannotPrecedeFinalizingOwner(t *testing.T) {
+	store, run, _ := admittedWorkerRun(t)
+	defer store.Close()
+	failure, _ := NewFailureProposal(FailureInternal, "cleanup")
+	finalizing, err := store.FailRun(context.Background(), run.ID, run.Revision, failure, mustTime(t, 20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := captureWriteFootprint(t, store)
+	if _, err := store.RecordChangeSelection(context.Background(), *run.ChangeID, mustRevision(t, 1), testChangeSelection(t), mustTime(t, 15)); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("Change before finalizing owner = %v", err)
+	}
+	if after := captureWriteFootprint(t, store); after != before {
+		t.Fatalf("Change before finalizing owner footprint before=%+v after=%+v", before, after)
+	}
+	if _, err := store.RecordChangeSelection(context.Background(), *run.ChangeID, mustRevision(t, 1), testChangeSelection(t), mustTime(t, 20)); err != nil {
+		t.Fatalf("Change at finalizing owner boundary = %v", err)
+	}
+	_ = finalizing
+}
+
+func TestChangeCheckpointCannotPrecedeRetryAdmission(t *testing.T) {
+	store, _, admission := retryAdmittedWorker(t, 50, 50)
+	defer store.Close()
+	selection := testChangeSelection(t)
+	before := captureWriteFootprint(t, store)
+	if _, err := store.RecordChangeSelection(context.Background(), *admission.ChangeID, mustRevision(t, 1), selection, mustTime(t, 49)); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("Change before retry admission = %v", err)
+	}
+	if after := captureWriteFootprint(t, store); after != before {
+		t.Fatalf("Change before retry admission footprint before=%+v after=%+v", before, after)
+	}
+	if _, err := store.RecordChangeSelection(context.Background(), *admission.ChangeID, mustRevision(t, 1), selection, mustTime(t, 50)); err != nil {
+		t.Fatalf("Change at retry admission boundary = %v", err)
+	}
+}
+
+func TestRetryAdmissionCannotPrecedeQueuedTaskUpdate(t *testing.T) {
+	store, terminal, agentID, keys := retryQueuedWorker(t, 50)
+	defer store.Close()
+	before := captureWriteFootprint(t, store)
+	if result, err := store.AdmitNext(context.Background(), agentID, keys, mustTime(t, 40)); !errors.Is(err, ErrRevisionConflict) || result.Admitted() {
+		t.Fatalf("admission before queued task update = %+v, %v", result, err)
+	}
+	if after := captureWriteFootprint(t, store); after != before {
+		t.Fatalf("admission before queued task update footprint before=%+v after=%+v", before, after)
+	}
+	if result, err := store.AdmitNext(context.Background(), agentID, keys, mustTime(t, 50)); err != nil || !result.Admitted() {
+		t.Fatalf("admission at queued task update = %+v, %v", result, err)
+	}
+	_ = terminal
+}
+
 func TestRunningWorkerChangeCausalitySurvivesLaterPhases(t *testing.T) {
 	t.Run("finalizing", func(t *testing.T) {
 		store, run, keys := runningWorkerRun(t)
@@ -317,25 +370,9 @@ func TestTerminalChangeReplayRemainsIdempotentWithoutOwner(t *testing.T) {
 }
 
 func TestHistoricalTerminalRunAllowsLaterRetainedChangeCheckpoint(t *testing.T) {
-	store, terminal, _ := terminalPreRunningWorker(t)
+	store, terminal, admission := retryAdmittedWorker(t, 34, 40)
 	defer store.Close()
-	project, found, err := store.Project(context.Background(), terminal.ProjectID)
-	if err != nil || !found {
-		t.Fatalf("project = %+v, %v", project, err)
-	}
-	secondAgent, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 214), ProjectID: project.ID, Name: "retry", Role: RoleWorker, Provider: ProviderCodex, ExecutionMode: ExecutionWorkspaceWrite, ToolBudgetLimit: 4}, mustTime(t, 34))
-	if err != nil {
-		t.Fatal(err)
-	}
-	corruptSQL(t, store, `UPDATE tasks SET assigned_agent_id = ?, work_revision = work_revision + 1, status = 'queued', result = NULL, completed_at_ms = NULL, revision = revision + 1, updated_at_ms = 34 WHERE id = ?`, secondAgent.ID.Bytes(), terminal.TaskID.Bytes())
 	reuseRevision := mustRevision(t, 1)
-	reservation := &ChangeReservation{ID: *terminal.ChangeID, SourceRoot: "/worker/source", StagingRoot: "/worker/staging", ExpectedReuseRevision: &reuseRevision}
-	keys := admissionKeys(t, 220, reservation)
-	keys.RuntimeRoot = "/retry/runtime"
-	admission, err := store.AdmitNext(context.Background(), secondAgent.ID, keys, mustTime(t, 40))
-	if err != nil || !admission.Admitted() {
-		t.Fatalf("retry admission = %+v, %v", admission, err)
-	}
 	selection := testChangeSelection(t)
 	selected, err := store.RecordChangeSelection(context.Background(), *terminal.ChangeID, reuseRevision, selection, mustTime(t, 41))
 	if err != nil {
@@ -353,9 +390,41 @@ func TestHistoricalTerminalRunAllowsLaterRetainedChangeCheckpoint(t *testing.T) 
 	if _, _, err := store.Run(context.Background(), terminal.ID); err != nil {
 		t.Fatalf("historical terminal Run rejected later Change checkpoint = %v", err)
 	}
-	if _, _, err := store.Run(context.Background(), admission.Run.ID); err != nil {
+	if _, _, err := store.Run(context.Background(), admission.ID); err != nil {
 		t.Fatalf("retry Run rejected retained Change checkpoint = %v", err)
 	}
+}
+
+func retryAdmittedWorker(t *testing.T, taskUpdatedAt, admissionAt int64) (*Store, Run, Run) {
+	t.Helper()
+	store, terminal, agentID, keys := retryQueuedWorker(t, taskUpdatedAt)
+	admission, err := store.AdmitNext(context.Background(), agentID, keys, mustTime(t, admissionAt))
+	if err != nil || !admission.Admitted() {
+		store.Close()
+		t.Fatalf("retry admission = %+v, %v", admission, err)
+	}
+	return store, terminal, *admission.Run
+}
+
+func retryQueuedWorker(t *testing.T, taskUpdatedAt int64) (*Store, Run, AgentID, AdmissionKeys) {
+	t.Helper()
+	store, terminal, _ := terminalPreRunningWorker(t)
+	project, found, err := store.Project(context.Background(), terminal.ProjectID)
+	if err != nil || !found {
+		store.Close()
+		t.Fatalf("project = %+v, %v", project, err)
+	}
+	secondAgent, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 214), ProjectID: project.ID, Name: "retry", Role: RoleWorker, Provider: ProviderCodex, ExecutionMode: ExecutionWorkspaceWrite, ToolBudgetLimit: 4}, mustTime(t, taskUpdatedAt))
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	corruptSQL(t, store, `UPDATE tasks SET assigned_agent_id = ?, work_revision = work_revision + 1, status = 'queued', result = NULL, completed_at_ms = NULL, revision = revision + 1, updated_at_ms = ? WHERE id = ?`, secondAgent.ID.Bytes(), taskUpdatedAt, terminal.TaskID.Bytes())
+	reuseRevision := mustRevision(t, 1)
+	reservation := &ChangeReservation{ID: *terminal.ChangeID, SourceRoot: "/worker/source", StagingRoot: "/worker/staging", ExpectedReuseRevision: &reuseRevision}
+	keys := admissionKeys(t, 220, reservation)
+	keys.RuntimeRoot = "/retry/runtime"
+	return store, terminal, secondAgent.ID, keys
 }
 
 func TestTaskRunTopologyRejectsRevisionSkip(t *testing.T) {

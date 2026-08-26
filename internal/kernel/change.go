@@ -155,7 +155,7 @@ func (store *Store) RecordChangeSelection(ctx context.Context, id ChangeID, expe
 		if change.Phase != ChangeReserved || change.Revision != expected || at.Int64() < change.CreatedAt.Int64() {
 			return false, ErrRevisionConflict
 		}
-		if err := requireChangeMutationOwner(ctx, connection, change.ID); err != nil {
+		if err := requireChangeMutationOwner(ctx, connection, change.ID, at); err != nil {
 			return false, err
 		}
 		result, err := connection.ExecContext(ctx, `UPDATE changes SET phase = 'selected', object_format = ?, selected_commit = ?, tree_digest = ?, entry_count = ?, total_bytes = ?, repository_root = ?, repository_dev = ?, repository_inode = ?, selected_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase = 'reserved' AND revision = ?`,
@@ -178,7 +178,7 @@ func (store *Store) RecordChangePrepared(ctx context.Context, id ChangeID, expec
 		if change.Phase != ChangeSelected || change.Revision != expected || at.Int64() < change.UpdatedAt.Int64() {
 			return false, ErrRevisionConflict
 		}
-		if err := requireChangeMutationOwner(ctx, connection, change.ID); err != nil {
+		if err := requireChangeMutationOwner(ctx, connection, change.ID, at); err != nil {
 			return false, err
 		}
 		result, err := connection.ExecContext(ctx, `UPDATE changes SET phase = 'prepared', stage_dev = ?, stage_inode = ?, prepared_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase = 'selected' AND revision = ?`,
@@ -201,7 +201,7 @@ func (store *Store) MarkChangeAvailable(ctx context.Context, id ChangeID, expect
 		if change.Phase != ChangePrepared || change.Revision != expected || change.StageIdentity == nil || *change.StageIdentity != available.source || at.Int64() < change.UpdatedAt.Int64() {
 			return false, ErrRevisionConflict
 		}
-		if err := requireChangeMutationOwner(ctx, connection, change.ID); err != nil {
+		if err := requireChangeMutationOwner(ctx, connection, change.ID, at); err != nil {
 			return false, err
 		}
 		if change.Selection == nil || !changeSelectionMatchesAvailability(*change.Selection, available) {
@@ -256,26 +256,41 @@ func (store *Store) advanceChange(ctx context.Context, id ChangeID, expected Rev
 	return change, nil
 }
 
-func requireChangeMutationOwner(ctx context.Context, connection *sql.Conn, changeID ChangeID) error {
-	rows, err := connection.QueryContext(ctx, `SELECT phase, running_at_ms FROM runs WHERE change_id = ? AND phase <> 'terminal'`, changeID.Bytes())
+func requireChangeMutationOwner(ctx context.Context, connection *sql.Conn, changeID ChangeID, at UnixMillis) error {
+	rows, err := connection.QueryContext(ctx, `SELECT phase, running_at_ms, updated_at_ms FROM runs WHERE change_id = ? AND phase <> 'terminal'`, changeID.Bytes())
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 	owners := 0
+	var ownerErr error
 	for rows.Next() {
 		var phase string
 		var runningAt sql.NullInt64
-		if err := rows.Scan(&phase, &runningAt); err != nil {
-			return err
+		var updatedAt int64
+		if err := rows.Scan(&phase, &runningAt, &updatedAt); err != nil {
+			ownerErr = err
+			break
 		}
 		owners++
 		if phase != RunAdmitted.String() && (phase != RunFinalizing.String() || runningAt.Valid) {
-			return ErrConflict
+			ownerErr = ErrConflict
+			break
+		}
+		if at.Int64() < updatedAt {
+			ownerErr = ErrRevisionConflict
+			break
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return err
+	rowsErr := rows.Err()
+	closeErr := rows.Close()
+	if rowsErr != nil {
+		return rowsErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if ownerErr != nil {
+		return ownerErr
 	}
 	if owners != 1 {
 		if owners > 1 {

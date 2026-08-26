@@ -75,8 +75,11 @@ func (store *Store) AdmitNext(ctx context.Context, agentID AgentID, keys Admissi
 	if !found {
 		return rollbackNoAdmission(tx, NoAdmissionQueueEmpty)
 	}
-	if task.ProjectID != agent.ProjectID || at.Int64() < task.CreatedAt.Int64() {
+	if task.ProjectID != agent.ProjectID {
 		return AdmissionResult{}, tx.Rollback(ErrCorruptState)
+	}
+	if at.Int64() < task.UpdatedAt.Int64() {
+		return AdmissionResult{}, tx.Rollback(ErrRevisionConflict)
 	}
 	project, found, err := projectByID(ctx, tx.connection, task.ProjectID)
 	if err != nil || !found {
