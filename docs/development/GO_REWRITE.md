@@ -610,8 +610,12 @@ not generic shebang scripts.
   `Watch(after)` streams monotonic `StateChanged(sequence, entity kind, entity
   ID, entity revision)` invalidations. Clients fetch bounded canonical
   summaries/details; a duplicate is idempotent and a gap forces resync.
-- Mutation replies include the committed sequence/revision. Replies and watch
-  invalidations use one reducer, so delayed replies cannot regress state.
+- Mutation replies include the canonical head observed after the operation and
+  the affected entity revision. They do not pretend the head identifies one
+  exact invalidation: an idempotent no-op has none, and a later concurrent
+  commit may already be visible. Clients fetch/fold canonical state through
+  one revision-aware reducer, so delayed replies cannot regress state or skip
+  unseen invalidations.
 - CLI and TUI share client methods. No TUI-only mutation or direct filesystem
   policy path exists.
 - Private detail reads are explicit and revisioned. Public/dashboard/watch
