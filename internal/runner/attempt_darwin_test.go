@@ -3,6 +3,7 @@
 package runner
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -30,6 +31,17 @@ func runAttemptWorkerHelper(args []string) error {
 		return err
 	}
 	defer control.Close()
+	runtimeDirectory, err := control.DuplicateRuntimeDirectory(context.Background())
+	if err != nil {
+		return err
+	}
+	var runtimeStat unix.Stat_t
+	flags, flagErr := unix.FcntlInt(runtimeDirectory.Fd(), unix.F_GETFD, 0)
+	statErr := unix.Fstat(int(runtimeDirectory.Fd()), &runtimeStat)
+	closeErr := runtimeDirectory.Close()
+	if flagErr != nil || statErr != nil || closeErr != nil || flags&unix.FD_CLOEXEC == 0 || runtimeStat.Mode&unix.S_IFMT != unix.S_IFDIR || runtimeStat.Uid != uint32(os.Geteuid()) || runtimeStat.Mode&0o7777 != 0o700 {
+		return fmt.Errorf("attempt worker: runtime duplicate: %w", errors.Join(flagErr, statErr, closeErr, ErrIdentity))
+	}
 	write := func(name, value string) error {
 		f, err := os.OpenFile(filepath.Join(root, name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err != nil {
@@ -1183,6 +1195,270 @@ func TestExecProviderTakesCwdOwnershipOnRejectedCall(t *testing.T) {
 	if err := unix.Fstat(fd, &stat); !errors.Is(err, unix.EBADF) {
 		t.Fatalf("rejected cwd remained open: %v", err)
 	}
+}
+
+func TestWorkerRuntimeDirectoryDuplicateOwnership(t *testing.T) {
+	t.Run("exact cloexec duplicate and independent close", func(t *testing.T) {
+		worker, _ := newWorkerDirectoryFixture(t)
+		before := fdCensus()
+		duplicate, err := worker.DuplicateRuntimeDirectory(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := validatePrivateDirectory(duplicate)
+		if err != nil || got != worker.dirID {
+			t.Fatalf("duplicate identity=%+v err=%v want=%+v", got, err, worker.dirID)
+		}
+		flags, err := unix.FcntlInt(duplicate.Fd(), unix.F_GETFD, 0)
+		if err != nil || flags&unix.FD_CLOEXEC == 0 {
+			t.Fatalf("duplicate flags=%#x err=%v", flags, err)
+		}
+		if err := duplicate.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := validatePrivateDirectory(worker.dir); err != nil || got != worker.dirID {
+			t.Fatalf("original after duplicate close=%+v err=%v", got, err)
+		}
+		if after := fdCensus(); !sameCensus(before, after) {
+			t.Fatalf("duplicate close census before=%v after=%v", before, after)
+		}
+	})
+
+	t.Run("duplicate survives original close", func(t *testing.T) {
+		worker, _ := newWorkerDirectoryFixture(t)
+		want := worker.dirID
+		duplicate, err := worker.DuplicateRuntimeDirectory(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := worker.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := validatePrivateDirectory(duplicate); err != nil || got != want {
+			t.Fatalf("duplicate after original close=%+v err=%v", got, err)
+		}
+		if err := duplicate.Close(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("one shot and initial state only", func(t *testing.T) {
+		worker, _ := newWorkerDirectoryFixture(t)
+		duplicate, err := worker.DuplicateRuntimeDirectory(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := duplicate.Close(); err != nil {
+			t.Fatal(err)
+		}
+		before := fdCensus()
+		if duplicate, err := worker.DuplicateRuntimeDirectory(context.Background()); !errors.Is(err, ErrState) || duplicate != nil {
+			t.Fatalf("second duplicate=%v err=%v", duplicate, err)
+		}
+		if after := fdCensus(); !sameCensus(before, after) {
+			t.Fatalf("second call leaked fd before=%v after=%v", before, after)
+		}
+
+		advanced, _ := newWorkerDirectoryFixture(t)
+		advanced.state = workerSelectionReported
+		closed, _ := newWorkerDirectoryFixture(t)
+		if err := closed.Close(); err != nil {
+			t.Fatal(err)
+		}
+		before = fdCensus()
+		if duplicate, err := advanced.DuplicateRuntimeDirectory(context.Background()); !errors.Is(err, ErrState) || duplicate != nil {
+			t.Fatalf("post-stage duplicate=%v err=%v", duplicate, err)
+		}
+		if duplicate, err := (*WorkerControl)(nil).DuplicateRuntimeDirectory(context.Background()); !errors.Is(err, ErrState) || duplicate != nil {
+			t.Fatalf("nil duplicate=%v err=%v", duplicate, err)
+		}
+		if duplicate, err := advanced.DuplicateRuntimeDirectory(nil); !errors.Is(err, ErrState) || duplicate != nil {
+			t.Fatalf("nil-context duplicate=%v err=%v", duplicate, err)
+		}
+		if duplicate, err := closed.DuplicateRuntimeDirectory(context.Background()); !errors.Is(err, ErrState) || duplicate != nil {
+			t.Fatalf("closed duplicate=%v err=%v", duplicate, err)
+		}
+		if after := fdCensus(); !sameCensus(before, after) {
+			t.Fatalf("rejected calls leaked fd before=%v after=%v", before, after)
+		}
+	})
+}
+
+func TestWorkerRuntimeDirectoryDuplicateFailsClosed(t *testing.T) {
+	t.Run("mode mutation", func(t *testing.T) {
+		worker, root := newWorkerDirectoryFixture(t)
+		if err := os.Chmod(root, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		before := fdCensus()
+		if duplicate, err := worker.DuplicateRuntimeDirectory(context.Background()); !errors.Is(err, ErrIdentity) || duplicate != nil {
+			t.Fatalf("mode-mutated duplicate=%v err=%v", duplicate, err)
+		}
+		if after := fdCensus(); !sameCensus(before, after) {
+			t.Fatalf("mode mutation leaked fd before=%v after=%v", before, after)
+		}
+	})
+
+	t.Run("pathname replacement", func(t *testing.T) {
+		worker, root := newWorkerDirectoryFixture(t)
+		moved := root + ".moved"
+		if err := os.Rename(root, moved); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if duplicate, err := worker.DuplicateRuntimeDirectory(context.Background()); !errors.Is(err, ErrIdentity) || duplicate != nil {
+			t.Fatalf("replaced-path duplicate=%v err=%v", duplicate, err)
+		}
+	})
+
+	t.Run("original replaced after duplicate", func(t *testing.T) {
+		worker, _ := newWorkerDirectoryFixture(t)
+		replacementPath := filepath.Join(t.TempDir(), "replacement")
+		if err := os.Mkdir(replacementPath, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		replacement, err := os.Open(replacementPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer replacement.Close()
+		ctx := &runtimeDirectoryTestContext{replaceAt: 3, worker: worker, replacement: replacement}
+		before := fdCensus()
+		if duplicate, err := worker.DuplicateRuntimeDirectory(ctx); !errors.Is(err, ErrIdentity) || duplicate != nil {
+			t.Fatalf("post-dup replacement=%v err=%v", duplicate, err)
+		}
+		if after := fdCensus(); !sameFDNumbers(before, after) {
+			t.Fatalf("post-dup replacement leaked fd before=%v after=%v", before, after)
+		}
+	})
+
+	t.Run("cancellation before and after duplicate", func(t *testing.T) {
+		beforeWorker, _ := newWorkerDirectoryFixture(t)
+		canceled, cancel := context.WithCancel(context.Background())
+		cancel()
+		before := fdCensus()
+		if duplicate, err := beforeWorker.DuplicateRuntimeDirectory(canceled); !errors.Is(err, context.Canceled) || duplicate != nil {
+			t.Fatalf("pre-canceled duplicate=%v err=%v", duplicate, err)
+		}
+		if after := fdCensus(); !sameCensus(before, after) {
+			t.Fatalf("pre-canceled call leaked fd before=%v after=%v", before, after)
+		}
+
+		betweenWorker, _ := newWorkerDirectoryFixture(t)
+		ctx := &runtimeDirectoryTestContext{cancelAt: 3}
+		before = fdCensus()
+		if duplicate, err := betweenWorker.DuplicateRuntimeDirectory(ctx); !errors.Is(err, context.Canceled) || duplicate != nil {
+			t.Fatalf("post-dup cancellation=%v err=%v", duplicate, err)
+		}
+		if after := fdCensus(); !sameCensus(before, after) {
+			t.Fatalf("post-dup cancellation leaked fd before=%v after=%v", before, after)
+		}
+	})
+}
+
+func TestWorkerRuntimeDirectoryDuplicateHasNoPathOpen(t *testing.T) {
+	source, err := os.ReadFile("attempt_darwin.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := strings.Index(string(source), "func (w *WorkerControl) DuplicateRuntimeDirectory")
+	if start < 0 {
+		t.Fatal("runtime directory method not found")
+	}
+	end := strings.Index(string(source[start:]), "\nfunc ")
+	if end < 0 {
+		t.Fatal("runtime directory method end not found")
+	}
+	method := string(source[start : start+end])
+	for _, forbidden := range []string{"unix.Open(", "unix.Openat(", "os.Open(", "os.OpenFile("} {
+		if strings.Contains(method, forbidden) {
+			t.Fatalf("runtime duplicate contains pathname open %q", forbidden)
+		}
+	}
+}
+
+func newWorkerDirectoryFixture(t *testing.T) (*WorkerControl, string) {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	directory, err := os.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directoryID, err := validatePrivateDirectory(directory)
+	if err != nil {
+		_ = directory.Close()
+		t.Fatal(err)
+	}
+	control, err := os.CreateTemp(t.TempDir(), "control")
+	if err != nil {
+		_ = directory.Close()
+		t.Fatal(err)
+	}
+	lifetime, err := os.CreateTemp(t.TempDir(), "lifetime")
+	if err != nil {
+		_ = control.Close()
+		_ = directory.Close()
+		t.Fatal(err)
+	}
+	worker := &WorkerControl{
+		file:     control,
+		dir:      directory,
+		dirID:    directoryID,
+		lifetime: lifetime,
+		state:    workerSelection,
+	}
+	t.Cleanup(func() {
+		if err := worker.Close(); err != nil {
+			t.Errorf("close worker directory fixture: %v", err)
+		}
+	})
+	return worker, root
+}
+
+// runtimeDirectoryTestContext injects a cancellation or swaps the original
+// descriptor at an exact validation boundary without adding a production seam.
+type runtimeDirectoryTestContext struct {
+	step        int
+	cancelAt    int
+	replaceAt   int
+	worker      *WorkerControl
+	replacement *os.File
+}
+
+func sameFDNumbers(left, right map[int]FileIdentity) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for fd := range left {
+		if _, ok := right[fd]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *runtimeDirectoryTestContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c *runtimeDirectoryTestContext) Done() <-chan struct{}       { return nil }
+func (c *runtimeDirectoryTestContext) Value(any) any               { return nil }
+func (c *runtimeDirectoryTestContext) Err() error {
+	c.step++
+	if c.step == c.replaceAt {
+		if c.worker == nil || c.worker.dir == nil || c.replacement == nil {
+			return ErrIdentity
+		}
+		if err := unix.Dup2(int(c.replacement.Fd()), int(c.worker.dir.Fd())); err != nil {
+			return err
+		}
+	}
+	if c.step == c.cancelAt {
+		return context.Canceled
+	}
+	return nil
 }
 
 func TestCurrentExecDocumentsCooperativeSameUIDRace(t *testing.T) {

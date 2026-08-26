@@ -3,6 +3,7 @@
 package runner
 
 import (
+	"context"
 	"errors"
 	"os"
 	"testing"
@@ -29,6 +30,9 @@ func TestUnsupportedFailsBeforeEffect(t *testing.T) {
 	}
 	fd := int(cwd.Fd())
 	var worker *WorkerControl
+	if duplicate, err := worker.DuplicateRuntimeDirectory(context.Background()); !errors.Is(err, ErrUnsupported) || duplicate != nil {
+		t.Fatalf("runtime duplicate=%v err=%v", duplicate, err)
+	}
 	if err := worker.ExecProvider(nil, cwd); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("provider=%v", err)
 	}

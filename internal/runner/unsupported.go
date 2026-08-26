@@ -3,6 +3,7 @@
 package runner
 
 import (
+	"context"
 	"errors"
 	"os"
 	"time"
@@ -47,12 +48,15 @@ func (c *AttemptController) AcknowledgeTerminal(*TerminalRecord, bool) error { r
 func (c *AttemptController) Close() error                                    { return nil }
 func OpenWorkerControl() (*WorkerControl, error)                             { return nil, ErrUnsupported }
 func (w *WorkerControl) Identity() Identity                                  { return Identity{} }
-func (w *WorkerControl) ReportSelection([]byte) error                        { return ErrUnsupported }
-func (w *WorkerControl) AwaitPreparation() error                             { return ErrUnsupported }
-func (w *WorkerControl) ReportPreparation([]byte) error                      { return ErrUnsupported }
-func (w *WorkerControl) AwaitPopulation() error                              { return ErrUnsupported }
-func (w *WorkerControl) ReportPopulation([]byte) error                       { return ErrUnsupported }
-func (w *WorkerControl) AwaitProvider() error                                { return ErrUnsupported }
+func (w *WorkerControl) DuplicateRuntimeDirectory(context.Context) (*os.File, error) {
+	return nil, ErrUnsupported
+}
+func (w *WorkerControl) ReportSelection([]byte) error   { return ErrUnsupported }
+func (w *WorkerControl) AwaitPreparation() error        { return ErrUnsupported }
+func (w *WorkerControl) ReportPreparation([]byte) error { return ErrUnsupported }
+func (w *WorkerControl) AwaitPopulation() error         { return ErrUnsupported }
+func (w *WorkerControl) ReportPopulation([]byte) error  { return ErrUnsupported }
+func (w *WorkerControl) AwaitProvider() error           { return ErrUnsupported }
 func (w *WorkerControl) ExecProvider(_ *LaunchSpec, cwd *os.File) error {
 	if cwd != nil {
 		return errors.Join(ErrUnsupported, cwd.Close())

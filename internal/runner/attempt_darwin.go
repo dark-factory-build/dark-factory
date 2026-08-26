@@ -3,6 +3,7 @@
 package runner
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -241,6 +242,8 @@ const (
 type WorkerControl struct {
 	file       *os.File
 	dir        *os.File
+	dirID      fileCommitment
+	dirIssued  bool
 	lifetime   *os.File
 	lifetimeID descriptorCommitment
 	identity   Identity
@@ -265,7 +268,8 @@ func OpenWorkerControl() (*WorkerControl, error) {
 	if _, err := commitControl(control); err != nil {
 		return nil, fmt.Errorf("runner: worker control: %w", err)
 	}
-	if _, err := validatePrivateDirectory(dir); err != nil {
+	dirID, err := validatePrivateDirectory(dir)
+	if err != nil {
 		return nil, fmt.Errorf("runner: worker private directory: %w", err)
 	}
 	lifetimeID, err := commitRuntimeLifetime(dir, lifetime)
@@ -285,7 +289,7 @@ func OpenWorkerControl() (*WorkerControl, error) {
 		return nil, ErrIdentity
 	}
 	keep = true
-	return &WorkerControl{file: control, dir: dir, lifetime: lifetime, lifetimeID: lifetimeID, identity: id, state: workerSelection}, nil
+	return &WorkerControl{file: control, dir: dir, dirID: dirID, lifetime: lifetime, lifetimeID: lifetimeID, identity: id, state: workerSelection}, nil
 }
 
 func (w *WorkerControl) Identity() Identity {
@@ -293,6 +297,56 @@ func (w *WorkerControl) Identity() Identity {
 		return Identity{}
 	}
 	return w.identity
+}
+
+// DuplicateRuntimeDirectory returns the worker's one caller-owned CLOEXEC
+// duplicate of its already-validated fd9 runtime directory. A successful or
+// effectful attempt is one-shot; the caller owns and must close the result.
+func (w *WorkerControl) DuplicateRuntimeDirectory(ctx context.Context) (_ *os.File, resultErr error) {
+	if ctx == nil || w == nil || w.file == nil || w.dir == nil || w.lifetime == nil || w.state != workerSelection || w.dirIssued {
+		return nil, ErrState
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	w.dirIssued = true
+	got, err := validatePrivateDirectory(w.dir)
+	if err != nil || got != w.dirID {
+		return nil, fmt.Errorf("runner: worker runtime directory: %w", errors.Join(ErrIdentity, err))
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	fd, err := unix.FcntlInt(w.dir.Fd(), unix.F_DUPFD_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	duplicate := os.NewFile(uintptr(fd), "worker-runtime-directory")
+	keep := false
+	defer func() {
+		if !keep {
+			resultErr = errors.Join(resultErr, duplicate.Close())
+		}
+	}()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	duplicateID, err := validatePrivateDirectory(duplicate)
+	if err != nil || duplicateID != w.dirID {
+		return nil, fmt.Errorf("runner: duplicate runtime directory: %w", errors.Join(ErrIdentity, err))
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	originalID, err := validatePrivateDirectory(w.dir)
+	if err != nil || originalID != w.dirID {
+		return nil, fmt.Errorf("runner: recheck runtime directory: %w", errors.Join(ErrIdentity, err))
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	keep = true
+	return duplicate, nil
 }
 
 func (w *WorkerControl) ReportSelection(payload []byte) error {
