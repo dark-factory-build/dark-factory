@@ -494,22 +494,25 @@ Only `127.0.0.1` is in the first support claim; `localhost`, IPv6, random-port
 discovery and Safari support require their own evidence. A stable port removes
 random-port discovery/coordination; it is not a secret and provides no security.
 Collision must fail visibly and be diagnosed by `factoryctl web status`.
-Security comes only from loopback binding, canonical exact Host+port, exact
-Origin, proof-of-possession pairing and per-operation authority. Forwarded Host
-or proxy headers are never trusted.
+Loopback binding, canonical exact Host+port, exact Origin and the browser's LNA
+permission are request filters and user mediation; none authenticates a Dark
+Factory client or grants product authority. Product authority comes only from
+proof-of-possession pairing plus daemon-side authorization of every operation.
+Forwarded Host or proxy headers are never trusted.
 
 The spike uses a real hosted/preview HTTPS origin and a disposable local server
-outside the live home. It records WebSocket upgrade, mixed-content/LNA prompt,
-Origin, Host, binary data, pairing, reconnect and denial behavior in headed
-current Chrome. Playwright supplies repeatability; manual Chrome records prompt
-UX and permission reset. Safari/WebKit is observed but not claimed without a
-pass.
+outside the live home. It records WebSocket upgrade, mixed-content/LNA
+permission behavior, Origin, Host, binary data, reconnect and denial in fresh
+automated Chrome profiles. It deliberately has no pairing or credential
+challenge. Headed first-run prompt UX and permission persistence are later
+platform tests. Safari/WebKit is not claimed without a pass.
 
-Required cases include `127.0.0.1` versus `localhost`, ws versus locally trusted
-wss, fixed versus occupied port, granted/denied/reset LNA, exact/wrong/missing
-Origin, exact/wrong Host, fresh/expired/replayed/revoked pairing, browser refresh,
-daemon restart, stale output cursor reset, cross-site WebSocket hijack, and no
-daemon/permission/TLS failure UX.
+Connectivity-spike cases include the exact `127.0.0.1` candidate, fixed versus
+occupied port, granted/denied/reset LNA, exact/wrong/missing Origin, exact/wrong
+Host, reconnect, cross-site WebSocket hijack and no-listener behavior. Because
+plain loopback `ws` passed, locally trusted `wss` is not built. The production
+browser lane later proves fresh/expired/replayed/revoked pairing, browser
+refresh, daemon restart, stale output cursor reset and bounded failure UX.
 
 If direct ws fails, choose in order: a local bootstrap HTTPS origin that hands
 control back to the hosted app; a locally trusted HTTPS endpoint if its install
