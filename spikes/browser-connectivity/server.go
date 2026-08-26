@@ -25,6 +25,7 @@ const (
 	maxFramePayload = 64 * 1024
 	maxHeaderBytes  = 16 * 1024
 	webSocketGUID   = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+	closeNormal     = 1000
 	closeProtocol   = 1002
 	closeTooBig     = 1009
 )
@@ -39,6 +40,7 @@ type Config struct {
 	ExpectedOrigin string
 	Path           string
 	MaxPayload     int
+	EventWriter    func(ProbeEvent)
 }
 
 func (c Config) validate() error {
@@ -55,7 +57,7 @@ func (c Config) validate() error {
 		return fmt.Errorf("max payload must be between 1 and %d", maxFramePayload)
 	}
 	u, err := url.Parse(c.ExpectedOrigin)
-	if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
 		return fmt.Errorf("expected origin must be an origin such as https://app.example")
 	}
 	return nil
@@ -71,6 +73,23 @@ type Ready struct {
 	MaxFrameBytes  int    `json:"max_frame_bytes"`
 }
 
+// ProbeEvent is the intentionally small JSONL evidence vocabulary. It records
+// policy inputs and lifecycle facts, never arbitrary HTTP headers or payloads.
+type ProbeEvent struct {
+	Event        string `json:"event"`
+	Result       string `json:"result,omitempty"`
+	Phase        string `json:"phase,omitempty"`
+	Host         string `json:"host"`
+	Origin       string `json:"origin"`
+	Path         string `json:"path"`
+	Status       int    `json:"status,omitempty"`
+	Direction    string `json:"direction,omitempty"`
+	Frame        string `json:"frame,omitempty"`
+	Bytes        int    `json:"bytes,omitempty"`
+	Code         int    `json:"code,omitempty"`
+	ConnectionID uint64 `json:"connection_id,omitempty"`
+}
+
 // Server owns only the probe listener and accepted WebSocket connections.
 type Server struct {
 	config Config
@@ -82,6 +101,7 @@ type Server struct {
 	mu     sync.Mutex
 	conns  map[net.Conn]struct{}
 	closed bool
+	nextID uint64
 	wg     sync.WaitGroup
 }
 
@@ -167,35 +187,35 @@ func (s *Server) ActiveConnections() int {
 
 func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet || r.URL.Path != s.config.Path || r.URL.RawQuery != "" {
-		rejectHTTP(w, http.StatusNotFound, "websocket endpoint only")
+		s.rejectUpgrade(w, r, http.StatusNotFound, "path", "websocket endpoint only")
 		return
 	}
 	if r.Host != s.ready.ExpectedHost {
-		rejectHTTP(w, http.StatusForbidden, "host refused")
+		s.rejectUpgrade(w, r, http.StatusForbidden, "host", "host refused")
 		return
 	}
 	origins := r.Header.Values("Origin")
 	if len(origins) != 1 || origins[0] != s.config.ExpectedOrigin {
-		rejectHTTP(w, http.StatusForbidden, "origin refused")
+		s.rejectUpgrade(w, r, http.StatusForbidden, "origin", "origin refused")
 		return
 	}
 	if !headerToken(r.Header.Get("Connection"), "upgrade") || !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
-		rejectHTTP(w, http.StatusBadRequest, "websocket upgrade required")
+		s.rejectUpgrade(w, r, http.StatusBadRequest, "handshake", "websocket upgrade required")
 		return
 	}
 	if r.Header.Get("Sec-WebSocket-Version") != "13" {
-		rejectHTTP(w, http.StatusBadRequest, "websocket version 13 required")
+		s.rejectUpgrade(w, r, http.StatusBadRequest, "handshake", "websocket version 13 required")
 		return
 	}
 	key := r.Header.Get("Sec-WebSocket-Key")
 	decoded, err := base64.StdEncoding.DecodeString(key)
 	if err != nil || len(decoded) != 16 || len(r.Header.Values("Sec-WebSocket-Key")) != 1 {
-		rejectHTTP(w, http.StatusBadRequest, "invalid websocket key")
+		s.rejectUpgrade(w, r, http.StatusBadRequest, "handshake", "invalid websocket key")
 		return
 	}
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
-		rejectHTTP(w, http.StatusInternalServerError, "hijacking unavailable")
+		s.rejectUpgrade(w, r, http.StatusInternalServerError, "handshake", "hijacking unavailable")
 		return
 	}
 	conn, rw, err := hijacker.Hijack()
@@ -211,26 +231,36 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = conn.Close()
 		return
 	}
-	if !s.addConnection(conn) {
+	connectionID, reconnect, registered := s.addConnection(conn)
+	if !registered {
 		_ = conn.Close()
 		return
 	}
+	s.emit(ProbeEvent{Event: "upgrade", Result: "accepted", Host: r.Host, Origin: origins[0], Path: r.URL.Path, Status: http.StatusSwitchingProtocols})
+	phase := "open"
+	if reconnect {
+		phase = "reconnect"
+	}
+	s.emit(ProbeEvent{Event: "connection", Phase: phase, ConnectionID: connectionID})
 	defer func() {
+		s.emit(ProbeEvent{Event: "connection", Phase: "closed", ConnectionID: connectionID})
 		s.removeConnection(conn)
 		_ = conn.Close()
 	}()
-	s.serveWebSocket(conn, rw)
+	s.serveWebSocket(conn, rw, connectionID)
 }
 
-func (s *Server) addConnection(conn net.Conn) bool {
+func (s *Server) addConnection(conn net.Conn) (uint64, bool, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return false
+		return 0, false, false
 	}
+	s.nextID++
+	reconnect := s.nextID > 1
 	s.conns[conn] = struct{}{}
 	s.wg.Add(1)
-	return true
+	return s.nextID, reconnect, true
 }
 
 func (s *Server) removeConnection(conn net.Conn) {
@@ -240,7 +270,7 @@ func (s *Server) removeConnection(conn net.Conn) {
 	s.wg.Done()
 }
 
-func (s *Server) serveWebSocket(conn net.Conn, rw *bufio.ReadWriter) {
+func (s *Server) serveWebSocket(conn net.Conn, rw *bufio.ReadWriter, connectionID uint64) {
 	for {
 		frame, err := readFrame(rw.Reader, s.config.MaxPayload)
 		if err != nil {
@@ -251,34 +281,58 @@ func (s *Server) serveWebSocket(conn net.Conn, rw *bufio.ReadWriter) {
 			if errors.Is(err, errFrameTooLarge) {
 				code = closeTooBig
 			}
+			s.emit(ProbeEvent{Event: "frame", Result: "rejected", Direction: "inbound", Frame: "invalid", ConnectionID: connectionID})
 			_ = writeClose(rw, code)
 			_ = rw.Flush()
+			s.emit(ProbeEvent{Event: "close", Result: "protocol_error", Code: code, ConnectionID: connectionID})
 			return
 		}
 		switch frame.opcode {
 		case 2: // binary
+			s.emit(ProbeEvent{Event: "frame", Result: "accepted", Direction: "inbound", Frame: "binary", Bytes: len(frame.payload), ConnectionID: connectionID})
 			if err := writeFrame(rw, 2, frame.payload); err != nil {
 				return
 			}
+			s.emit(ProbeEvent{Event: "frame", Result: "sent", Direction: "outbound", Frame: "binary", Bytes: len(frame.payload), ConnectionID: connectionID})
 		case 8: // close
 			_ = writeFrame(rw, 8, frame.payload)
 			_ = rw.Flush()
+			code := closeNormal
+			if len(frame.payload) >= 2 {
+				code = int(frame.payload[0])<<8 | int(frame.payload[1])
+			}
+			s.emit(ProbeEvent{Event: "close", Result: "graceful", Code: code, ConnectionID: connectionID})
 			return
 		case 9: // ping
+			s.emit(ProbeEvent{Event: "frame", Result: "accepted", Direction: "inbound", Frame: "ping", Bytes: len(frame.payload), ConnectionID: connectionID})
 			if err := writeFrame(rw, 10, frame.payload); err != nil {
 				return
 			}
+			s.emit(ProbeEvent{Event: "frame", Result: "sent", Direction: "outbound", Frame: "pong", Bytes: len(frame.payload), ConnectionID: connectionID})
 		case 10: // pong
 			// No application action is needed.
+			s.emit(ProbeEvent{Event: "frame", Result: "accepted", Direction: "inbound", Frame: "pong", Bytes: len(frame.payload), ConnectionID: connectionID})
 		default:
 			_ = writeClose(rw, closeProtocol)
 			_ = rw.Flush()
+			s.emit(ProbeEvent{Event: "close", Result: "protocol_error", Code: closeProtocol, ConnectionID: connectionID})
 			return
 		}
 		if err := rw.Flush(); err != nil {
 			return
 		}
 		_ = conn.SetReadDeadline(time.Time{})
+	}
+}
+
+func (s *Server) rejectUpgrade(w http.ResponseWriter, r *http.Request, status int, result, message string) {
+	s.emit(ProbeEvent{Event: "upgrade", Result: result, Host: r.Host, Origin: r.Header.Get("Origin"), Path: r.URL.Path, Status: status})
+	rejectHTTP(w, status, message)
+}
+
+func (s *Server) emit(event ProbeEvent) {
+	if s.config.EventWriter != nil {
+		s.config.EventWriter(event)
 	}
 }
 
@@ -404,5 +458,9 @@ func writeFrame(w io.Writer, opcode byte, payload []byte) error {
 }
 
 func writeClose(w io.Writer, code int) error {
-	return writeFrame(w, 8, []byte{byte(code >> 8), byte(code)})
+	return writeFrame(w, 8, closePayload(code))
+}
+
+func closePayload(code int) []byte {
+	return []byte{byte(code >> 8), byte(code)}
 }

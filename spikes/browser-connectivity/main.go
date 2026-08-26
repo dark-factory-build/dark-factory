@@ -7,8 +7,20 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 )
+
+type jsonEventWriter struct {
+	mu      sync.Mutex
+	encoder *json.Encoder
+}
+
+func (w *jsonEventWriter) Write(event ProbeEvent) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	_ = w.encoder.Encode(event)
+}
 
 func main() {
 	log.SetFlags(0)
@@ -23,6 +35,7 @@ func main() {
 		Port:           *port,
 		ExpectedOrigin: *origin,
 		Path:           *path,
+		EventWriter:    (&jsonEventWriter{encoder: json.NewEncoder(os.Stdout)}).Write,
 	})
 	if err != nil {
 		log.Fatal(err)

@@ -34,7 +34,6 @@
     const closeButton = document.getElementById("close");
     let socket;
     let opened = false;
-    let reconnectTimer;
 
     function report(next, detail) {
       state.textContent = next;
@@ -45,34 +44,26 @@
       closeButton.disabled = !socket || socket.readyState > WebSocket.OPEN;
     }
     function connectSocket(isReconnect) {
-      if (reconnectTimer) {
-        clearTimeout(reconnectTimer);
-        reconnectTimer = undefined;
-      }
       if (socket && socket.readyState < WebSocket.CLOSING) socket.close();
       report(isReconnect ? "reconnecting" : "connecting");
-      socket = new WebSocket(LOOPBACK_WS_URL);
-      socket.binaryType = "arraybuffer";
-      socket.onopen = () => {
+      const connection = new WebSocket(LOOPBACK_WS_URL);
+      socket = connection;
+      connection.binaryType = "arraybuffer";
+      connection.onopen = () => {
         opened = true;
         report(isReconnect ? "reconnected" : "open");
         setButtons();
       };
-      socket.onmessage = (event) => {
+      connection.onmessage = (event) => {
         const bytes = event.data instanceof ArrayBuffer ? new Uint8Array(event.data) : null;
         report(bytes ? "binary echo" : "error", bytes ? `${bytes.byteLength} bytes` : "non-binary frame");
       };
-      socket.onerror = () => report("error", "WebSocket connection failed");
-      socket.onclose = (event) => {
-        const wasOpen = opened;
-        opened = false;
+      connection.onerror = () => report("error", "WebSocket connection failed");
+      connection.onclose = (event) => {
         report("closed", `code ${event.code}`);
-        setButtons();
-        if (wasOpen && !reconnectTimer) {
-          reconnectTimer = setTimeout(() => {
-            reconnectTimer = undefined;
-            connectSocket(true);
-          }, 250);
+        if (socket === connection) {
+          opened = false;
+          setButtons();
         }
       };
       setButtons();

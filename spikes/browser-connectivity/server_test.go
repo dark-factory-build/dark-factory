@@ -12,11 +12,43 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
 const testOrigin = "https://preview.example.test"
+
+type eventCollector struct {
+	mu     sync.Mutex
+	events []ProbeEvent
+}
+
+func (c *eventCollector) add(event ProbeEvent) {
+	c.mu.Lock()
+	c.events = append(c.events, event)
+	c.mu.Unlock()
+}
+
+func (c *eventCollector) snapshot() []ProbeEvent {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]ProbeEvent(nil), c.events...)
+}
+
+func eventServer(t *testing.T) (*Server, *eventCollector) {
+	t.Helper()
+	collector := &eventCollector{}
+	server, err := NewServer(Config{BindHost: defaultHost, Port: 0, ExpectedOrigin: testOrigin, EventWriter: collector.add})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+	return server, collector
+}
 
 func testServer(t *testing.T) *Server {
 	t.Helper()
@@ -42,7 +74,7 @@ func TestConfigRequiresLoopbackAndExactOrigin(t *testing.T) {
 			t.Errorf("validate(%q) accepted a non-loopback bind", host)
 		}
 	}
-	for _, origin := range []string{"", "null", "https://", "https://example.test/path", "https://user@example.test", "https://example.test?x=1"} {
+	for _, origin := range []string{"", "null", "http://example.test", "https://", "https://example.test/path", "https://user@example.test", "https://example.test?x=1"} {
 		config := Config{BindHost: defaultHost, Port: 1, ExpectedOrigin: origin, Path: defaultPath, MaxPayload: maxFramePayload}
 		if err := config.validate(); err == nil {
 			t.Errorf("validate(%q) accepted an invalid origin", origin)
@@ -81,7 +113,7 @@ func TestFrameBoundsAndMalformedInput(t *testing.T) {
 		{"fragmented", []byte{0x02, 0x81, 1, 2, 3, 4, 'x'}, errInvalidFrame},
 		{"reserved-bit", []byte{0xc2, 0x81, 1, 2, 3, 4, 'x'}, errInvalidFrame},
 		{"text", maskedFrame(1, []byte("x"), [4]byte{1, 2, 3, 4}), errInvalidFrame},
-		{"oversized", []byte{0x82, 126, 1, 0}, errFrameTooLarge},
+		{"oversized", []byte{0x82, 0xff, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0}, errFrameTooLarge},
 		{"truncated-mask", []byte{0x82, 0x81, 1}, io.ErrUnexpectedEOF},
 	}
 	for _, tc := range cases {
@@ -109,7 +141,7 @@ func TestServerClosesOnOversizedFrame(t *testing.T) {
 	}
 	// The declared length is over the bound; no payload allocation or body is
 	// needed for the server to refuse it.
-	if _, err := conn.Write([]byte{0x82, 126, 0xff, 0xff}); err != nil {
+	if _, err := conn.Write([]byte{0x82, 0xff, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0}); err != nil {
 		t.Fatal(err)
 	}
 	conn.SetReadDeadline(time.Now().Add(time.Second))
@@ -117,7 +149,7 @@ func TestServerClosesOnOversizedFrame(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if closeFrame.opcode != 8 || !bytes.Equal(closeFrame.payload, []byte{byte(closeTooBig >> 8), byte(closeTooBig)}) {
+	if closeFrame.opcode != 8 || !bytes.Equal(closeFrame.payload, closePayload(closeTooBig)) {
 		t.Fatalf("oversized refusal = %#v", closeFrame)
 	}
 }
@@ -192,6 +224,70 @@ func TestReconnectAndGracefulClose(t *testing.T) {
 	}
 }
 
+func TestEvidenceEventsAreStructuredAndBounded(t *testing.T) {
+	server, collector := eventServer(t)
+	conn, response, _, err := handshake(server, server.Ready().ExpectedHost, stringPtr("https://wrong.example.test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("wrong origin status = %d", response.StatusCode)
+	}
+	conn, response, reader, err := openWebSocket(server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("valid upgrade status = %d", response.StatusCode)
+	}
+	if err := writeClientFrame(conn, 2, []byte("evidence")); err != nil {
+		t.Fatal(err)
+	}
+	conn.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := readFrameWithMask(reader, maxFramePayload, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeClientFrame(conn, 8, closePayload(1000)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readFrameWithMask(reader, maxFramePayload, false); err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	waitForConnections(t, server, 0)
+	conn, _, _, err = openWebSocket(server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	waitForConnections(t, server, 0)
+
+	events := collector.snapshot()
+	var rejected, accepted, inbound, outbound, graceful, reconnect bool
+	for _, event := range events {
+		switch event.Event {
+		case "upgrade":
+			if event.Result == "origin" {
+				rejected = event.Host == server.Ready().ExpectedHost && event.Origin == "https://wrong.example.test" && event.Path == defaultPath && event.Status == http.StatusForbidden
+			}
+			if event.Result == "accepted" {
+				accepted = event.Host == server.Ready().ExpectedHost && event.Origin == testOrigin && event.Path == defaultPath && event.Status == http.StatusSwitchingProtocols
+			}
+		case "frame":
+			inbound = inbound || event.Direction == "inbound" && event.Frame == "binary" && event.Bytes == len("evidence")
+			outbound = outbound || event.Direction == "outbound" && event.Frame == "binary" && event.Bytes == len("evidence")
+		case "close":
+			graceful = graceful || event.Result == "graceful" && event.Code == 1000
+		case "connection":
+			reconnect = reconnect || event.Phase == "reconnect"
+		}
+	}
+	if !rejected || !accepted || !inbound || !outbound || !graceful || !reconnect {
+		t.Fatalf("missing structured evidence: %#v", events)
+	}
+}
+
 func TestShutdownClosesConnectedSocket(t *testing.T) {
 	server := testServer(t)
 	conn, response, _, err := openWebSocket(server)
@@ -228,6 +324,9 @@ func TestProbePageIsSelfContainedAndCredentialFree(t *testing.T) {
 	}
 	if !strings.Contains(page, "ws://127.0.0.1:43123/browser/v1") {
 		t.Error("probe page does not contain the documented loopback URL")
+	}
+	if strings.Contains(page, "setTimeout") || !strings.Contains(page, "socket.close(1000") {
+		t.Error("explicit close must not schedule an automatic reconnect")
 	}
 }
 
