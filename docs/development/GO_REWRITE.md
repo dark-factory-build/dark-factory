@@ -1952,6 +1952,13 @@ Final Change-directory authority and runner cwd proof on integrated head
   `fchdir`, closes the descriptor plus FD 3/control and FD 9/runtime-directory,
   retains only the read-only FD 10 lifetime lease, and execs. It imports no
   Change policy and never reopens or stats the cwd pathname at final exec.
+- `WorkerControl.DuplicateRuntimeDirectory` supplies the private worker exactly
+  one caller-owned `F_DUPFD_CLOEXEC` duplicate of its already committed FD 9
+  during the initial selection state. It validates the original before and
+  after duplication and the duplicate itself; cancellation, repetition,
+  post-stage use, replacement and corruption close without an FD effect. This
+  eliminates raw-FD wrapper aliasing while retaining the runner's original.
+  Exact head `5c7ba60` received independent **ALLOW** with no findings.
 - Parent/name replacement after descriptor acquisition executes in the
   retained original inode. Unrelated directory, ordinary file, closed/reused
   descriptor, mode/final-seam mutation and error/unsupported ownership paths
@@ -1965,6 +1972,11 @@ Final Change-directory authority and runner cwd proof on integrated head
   orchestrator passed the combined Change/runner/command focused gate, full
   nine-package Go suite and combined race gate (`change 28.174s`, `runner`
   40.678s, command 1.706s).
+- Orchestrator tracing found and removed an accidental second deferred cwd
+  close on the error path. The direct ownership repair clears the deferred
+  owner before the one explicit close; reused-FD error chains and exact FD
+  censuses prove no spurious already-closed result. Exact repair head `39ebe6a`
+  received independent **ALLOW** before integration.
 - Composition still must call `Reinspect` only after the provider release is
   authorized and immediately pass its duplicate to `ExecProvider`. The
   capability proves scan-time content, not hostile same-EUID immutability; no
