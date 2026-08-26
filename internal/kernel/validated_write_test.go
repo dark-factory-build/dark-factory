@@ -217,6 +217,12 @@ func TestEveryPublicMutationValidatesDurableGraphBeforeDecision(t *testing.T) {
 		{name: "invalidation", mutate: func(store *Store) {
 			corruptSQL(t, store, `UPDATE invalidations SET sequence = 100 WHERE sequence = 1`)
 		}},
+		{name: "runner exit kind", mutate: func(store *Store) {
+			corruptSQL(t, store, `UPDATE runs SET runner_exit_kind = 'unknown', runner_exit_sequence = 1, runner_exit_at_ms = updated_at_ms WHERE id = ?`, runID(t, 5).Bytes())
+		}},
+		{name: "runner exit shape", mutate: func(store *Store) {
+			corruptSQL(t, store, `UPDATE runs SET runner_exit_kind = 'recovered_absence', runner_exit_sequence = 1, runner_exit_code = 0, runner_exit_at_ms = updated_at_ms WHERE id = ?`, runID(t, 5).Bytes())
+		}},
 	}
 
 	for _, test := range tests {

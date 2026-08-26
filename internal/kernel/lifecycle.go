@@ -344,6 +344,22 @@ func (store *Store) ObserveRunnerExit(ctx context.Context, runID RunID, expected
 	if !found {
 		return Run{}, tx.Rollback(ErrNotFound)
 	}
+	if exit.RecoveredAbsence() {
+		resources, err := resourcesForRun(ctx, tx.connection, runID)
+		if err != nil {
+			return Run{}, tx.Rollback(err)
+		}
+		registered := false
+		for _, resource := range resources {
+			if resource.Kind == ResourceRunnerProcess && !resource.Identity.Empty() {
+				registered = true
+				break
+			}
+		}
+		if !registered {
+			return Run{}, tx.Rollback(ErrConflict)
+		}
+	}
 	if run.RunnerExit != nil {
 		if !run.RunnerExit.equal(exit) {
 			return Run{}, tx.Rollback(ErrConflict)
@@ -356,13 +372,13 @@ func (store *Store) ObserveRunnerExit(ctx context.Context, runID RunID, expected
 	if run.Phase == RunTerminal || run.Revision != expected || at.Int64() < run.UpdatedAt.Int64() {
 		return Run{}, tx.Rollback(ErrRevisionConflict)
 	}
-	code, signal := exitSQL(exit)
+	exitKind, code, signal := exitSQL(exit)
 	newRevision := expected.Int64() + 1
 	if run.Phase == RunAdmitted || run.Phase == RunRunning {
 		proposal, _ := NewFailureProposal(FailureRunnerExit, "runner exited before an attempt outcome")
 		kind, failureCode, detail, result := proposalSQL(proposal)
-		updated, err := tx.connection.ExecContext(ctx, `UPDATE runs SET phase = 'finalizing', proposal_kind = ?, proposal_code = ?, proposal_detail = ?, proposal_result = ?, credential_revoked_at_ms = ?, finalizing_at_ms = ?, runner_exit_sequence = ?, runner_exit_code = ?, runner_exit_signal = ?, runner_exit_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase IN ('admitted', 'running') AND proposal_kind IS NULL AND runner_exit_sequence IS NULL AND revision = ?`,
-			kind, failureCode, detail, result, at.Int64(), at.Int64(), exit.sequence, code, signal, exit.at.Int64(), at.Int64(), run.ID.Bytes(), expected.Int64())
+		updated, err := tx.connection.ExecContext(ctx, `UPDATE runs SET phase = 'finalizing', proposal_kind = ?, proposal_code = ?, proposal_detail = ?, proposal_result = ?, credential_revoked_at_ms = ?, finalizing_at_ms = ?, runner_exit_kind = ?, runner_exit_sequence = ?, runner_exit_code = ?, runner_exit_signal = ?, runner_exit_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase IN ('admitted', 'running') AND proposal_kind IS NULL AND runner_exit_kind IS NULL AND revision = ?`,
+			kind, failureCode, detail, result, at.Int64(), at.Int64(), exitKind, exit.sequence, code, signal, exit.at.Int64(), at.Int64(), run.ID.Bytes(), expected.Int64())
 		if err := requireOneRow(updated, err); err != nil {
 			return Run{}, tx.Rollback(err)
 		}
@@ -370,7 +386,7 @@ func (store *Store) ObserveRunnerExit(ctx context.Context, runID RunID, expected
 			return Run{}, tx.Rollback(err)
 		}
 	} else if run.Phase == RunFinalizing {
-		updated, err := tx.connection.ExecContext(ctx, `UPDATE runs SET runner_exit_sequence = ?, runner_exit_code = ?, runner_exit_signal = ?, runner_exit_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase = 'finalizing' AND runner_exit_sequence IS NULL AND revision = ?`, exit.sequence, code, signal, exit.at.Int64(), at.Int64(), run.ID.Bytes(), expected.Int64())
+		updated, err := tx.connection.ExecContext(ctx, `UPDATE runs SET runner_exit_kind = ?, runner_exit_sequence = ?, runner_exit_code = ?, runner_exit_signal = ?, runner_exit_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase = 'finalizing' AND runner_exit_kind IS NULL AND revision = ?`, exitKind, exit.sequence, code, signal, exit.at.Int64(), at.Int64(), run.ID.Bytes(), expected.Int64())
 		if err := requireOneRow(updated, err); err != nil {
 			return Run{}, tx.Rollback(err)
 		}
@@ -528,7 +544,8 @@ func proposalSQL(proposal Proposal) (kind string, code, detail, result any) {
 	return
 }
 
-func exitSQL(exit RunnerExit) (code, signal any) {
+func exitSQL(exit RunnerExit) (kind string, code, signal any) {
+	kind = exit.kind.String()
 	if exit.code != nil {
 		code = *exit.code
 	}

@@ -13,7 +13,7 @@ const runColumns = `id, project_id, agent_id, task_id, task_incarnation_id,
     proposal_kind, proposal_code, proposal_detail, proposal_result,
     terminal_kind, terminal_code, terminal_detail, terminal_result,
     credential_digest, credential_revoked_at_ms,
-    runner_exit_sequence, runner_exit_code, runner_exit_signal, runner_exit_at_ms,
+	    runner_exit_kind, runner_exit_sequence, runner_exit_code, runner_exit_signal, runner_exit_at_ms,
     revision, admitted_at_ms, running_at_ms, finalizing_at_ms, terminal_at_ms, updated_at_ms`
 
 const resourceColumns = `id, run_id, kind, state, path, path_dev, path_inode, pid, pgid, birth_digest,
@@ -38,6 +38,7 @@ func scanRun(scanner rowScanner) (Run, bool, error) {
 	var proposalKind, proposalCode, proposalDetail, proposalResult sql.NullString
 	var terminalKind, terminalCode, terminalDetail, terminalResult sql.NullString
 	var revokedAt, exitSequence, exitCode, exitSignal, exitAt sql.NullInt64
+	var exitKind sql.NullString
 	var admittedWorkRevision, revision, admittedAt, updatedAt int64
 	var runningAt, finalizingAt, terminalAt sql.NullInt64
 	if err := scanner.Scan(
@@ -45,7 +46,7 @@ func scanRun(scanner rowScanner) (Run, bool, error) {
 		&roleValue, &providerValue, &modeValue, &model, &effort, &verificationValue, &phaseValue,
 		&proposalKind, &proposalCode, &proposalDetail, &proposalResult,
 		&terminalKind, &terminalCode, &terminalDetail, &terminalResult,
-		&rawDigest, &revokedAt, &exitSequence, &exitCode, &exitSignal, &exitAt,
+		&rawDigest, &revokedAt, &exitKind, &exitSequence, &exitCode, &exitSignal, &exitAt,
 		&revision, &admittedAt, &runningAt, &finalizingAt, &terminalAt, &updatedAt,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -126,7 +127,7 @@ func scanRun(scanner rowScanner) (Run, bool, error) {
 		}
 		result.TerminalAt = &value
 	}
-	exit, exitPresent, exitErr := decodeRunnerExit(exitSequence, exitCode, exitSignal, exitAt)
+	exit, exitPresent, exitErr := decodeRunnerExit(exitKind, exitSequence, exitCode, exitSignal, exitAt)
 	if exitErr != nil {
 		return Run{}, false, fmt.Errorf("%w: invalid runner exit", ErrCorruptState)
 	}
@@ -138,11 +139,11 @@ func scanRun(scanner rowScanner) (Run, bool, error) {
 	}
 	switch phase {
 	case RunAdmitted:
-		if result.RunningAt != nil || result.FinalizingAt != nil || result.TerminalAt != nil || result.CredentialRevokedAt != nil || result.Proposal != nil || result.Terminal != nil {
+		if result.RunningAt != nil || result.FinalizingAt != nil || result.TerminalAt != nil || result.CredentialRevokedAt != nil || result.Proposal != nil || result.Terminal != nil || result.RunnerExit != nil {
 			return Run{}, false, fmt.Errorf("%w: inconsistent admitted run", ErrCorruptState)
 		}
 	case RunRunning:
-		if result.RunningAt == nil || result.FinalizingAt != nil || result.TerminalAt != nil || result.CredentialRevokedAt != nil || result.Proposal != nil || result.Terminal != nil {
+		if result.RunningAt == nil || result.FinalizingAt != nil || result.TerminalAt != nil || result.CredentialRevokedAt != nil || result.Proposal != nil || result.Terminal != nil || result.RunnerExit != nil {
 			return Run{}, false, fmt.Errorf("%w: inconsistent running run", ErrCorruptState)
 		}
 	case RunFinalizing:
@@ -182,26 +183,43 @@ func decodeProposal(kind, code, detail, result sql.NullString) (Proposal, bool, 
 	return proposal, true, nil
 }
 
-func decodeRunnerExit(sequence, code, signal, at sql.NullInt64) (RunnerExit, bool, error) {
-	if !sequence.Valid && !code.Valid && !signal.Valid && !at.Valid {
+func decodeRunnerExit(kind sql.NullString, sequence, code, signal, at sql.NullInt64) (RunnerExit, bool, error) {
+	if !kind.Valid && !sequence.Valid && !code.Valid && !signal.Valid && !at.Valid {
 		return RunnerExit{}, false, nil
 	}
-	if !sequence.Valid || !at.Valid {
+	if !kind.Valid || !sequence.Valid || !at.Valid {
 		return RunnerExit{}, false, ErrCorruptState
+	}
+	parsedKind, err := parseRunnerExitKind(kind.String)
+	if err != nil {
+		return RunnerExit{}, false, err
 	}
 	timeValue, err := NewUnixMillis(at.Int64)
 	if err != nil {
 		return RunnerExit{}, false, err
 	}
-	if code.Valid && !signal.Valid {
+	switch parsedKind {
+	case runnerExitCode:
+		if !code.Valid || signal.Valid {
+			return RunnerExit{}, false, ErrCorruptState
+		}
 		exit, err := NewRunnerExitCode(uint64(sequence.Int64), code.Int64, timeValue)
 		return exit, err == nil, err
-	}
-	if signal.Valid && !code.Valid {
+	case runnerExitSignal:
+		if code.Valid || !signal.Valid {
+			return RunnerExit{}, false, ErrCorruptState
+		}
 		exit, err := NewRunnerExitSignal(uint64(sequence.Int64), signal.Int64, timeValue)
 		return exit, err == nil, err
+	case runnerExitRecoveredAbsence:
+		if code.Valid || signal.Valid {
+			return RunnerExit{}, false, ErrCorruptState
+		}
+		exit, err := NewRunnerExitRecoveredAbsence(uint64(sequence.Int64), timeValue)
+		return exit, err == nil, err
+	default:
+		return RunnerExit{}, false, ErrCorruptState
 	}
-	return RunnerExit{}, false, ErrCorruptState
 }
 
 func resourceByID(ctx context.Context, connection *sql.Conn, id ResourceID) (Resource, bool, error) {

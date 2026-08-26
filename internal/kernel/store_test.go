@@ -677,10 +677,10 @@ func seedDurableAuthority(t *testing.T, store *Store) {
             proposal_kind, proposal_code, proposal_detail, proposal_result,
             terminal_kind, terminal_code, terminal_detail, terminal_result,
             credential_digest, credential_revoked_at_ms,
-            runner_exit_sequence, runner_exit_code, runner_exit_signal, runner_exit_at_ms,
+	            runner_exit_kind, runner_exit_sequence, runner_exit_code, runner_exit_signal, runner_exit_at_ms,
             revision, admitted_at_ms, running_at_ms, finalizing_at_ms, terminal_at_ms, updated_at_ms
 	        ) VALUES(?, ?, ?, ?, ?, 1, NULL, 'orchestrator', 'codex', 'workspace_write', NULL, NULL, 'none', 'admitted',
-            NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, NULL, NULL, NULL, NULL, NULL, 1, 5, NULL, NULL, NULL, 5)`,
+	            NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, NULL, NULL, NULL, NULL, NULL, NULL, 1, 5, NULL, NULL, NULL, 5)`,
 		runID(t, 5).Bytes(), project.ID.Bytes(), agent.ID.Bytes(), task.ID.Bytes(), task.IncarnationID.Bytes(), bytes.Repeat([]byte{0x5a}, DigestBytes)); err != nil {
 		t.Fatal(err)
 	}

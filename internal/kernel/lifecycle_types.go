@@ -431,7 +431,42 @@ func (policy VerificationPolicy) String() string {
 	}
 }
 
+type runnerExitKind uint8
+
+const (
+	runnerExitCode runnerExitKind = iota + 1
+	runnerExitSignal
+	runnerExitRecoveredAbsence
+)
+
+func parseRunnerExitKind(value string) (runnerExitKind, error) {
+	switch value {
+	case "code":
+		return runnerExitCode, nil
+	case "signal":
+		return runnerExitSignal, nil
+	case "recovered_absence":
+		return runnerExitRecoveredAbsence, nil
+	default:
+		return 0, corruptControl("runner exit kind", value)
+	}
+}
+
+func (kind runnerExitKind) String() string {
+	switch kind {
+	case runnerExitCode:
+		return "code"
+	case runnerExitSignal:
+		return "signal"
+	case runnerExitRecoveredAbsence:
+		return "recovered_absence"
+	default:
+		return ""
+	}
+}
+
 type RunnerExit struct {
+	kind     runnerExitKind
 	sequence int64
 	code     *int64
 	signal   *int64
@@ -442,14 +477,24 @@ func NewRunnerExitCode(sequence uint64, code int64, at UnixMillis) (RunnerExit, 
 	if sequence < 1 || sequence > math.MaxInt64 || code < 0 {
 		return RunnerExit{}, fmt.Errorf("%w: invalid runner exit code", ErrInvalidValue)
 	}
-	return RunnerExit{sequence: int64(sequence), code: &code, at: at}, nil
+	return RunnerExit{kind: runnerExitCode, sequence: int64(sequence), code: &code, at: at}, nil
 }
 
 func NewRunnerExitSignal(sequence uint64, signal int64, at UnixMillis) (RunnerExit, error) {
 	if sequence < 1 || sequence > math.MaxInt64 || signal < 1 {
 		return RunnerExit{}, fmt.Errorf("%w: invalid runner exit signal", ErrInvalidValue)
 	}
-	return RunnerExit{sequence: int64(sequence), signal: &signal, at: at}, nil
+	return RunnerExit{kind: runnerExitSignal, sequence: int64(sequence), signal: &signal, at: at}, nil
+}
+
+// NewRunnerExitRecoveredAbsence records that recovery, without live-child or
+// Wait ownership, positively proved the exact registered runner disappeared.
+// It does not represent an uncertain, malformed, or permission-denied probe.
+func NewRunnerExitRecoveredAbsence(sequence uint64, at UnixMillis) (RunnerExit, error) {
+	if sequence < 1 || sequence > math.MaxInt64 {
+		return RunnerExit{}, fmt.Errorf("%w: invalid recovered runner absence", ErrInvalidValue)
+	}
+	return RunnerExit{kind: runnerExitRecoveredAbsence, sequence: int64(sequence), at: at}, nil
 }
 
 func (exit RunnerExit) Sequence() uint64 { return uint64(exit.sequence) }
@@ -465,12 +510,25 @@ func (exit RunnerExit) Signal() (int64, bool) {
 	}
 	return *exit.signal, true
 }
-func (exit RunnerExit) At() UnixMillis { return exit.at }
+func (exit RunnerExit) RecoveredAbsence() bool { return exit.kind == runnerExitRecoveredAbsence }
+func (exit RunnerExit) At() UnixMillis         { return exit.at }
 func (exit RunnerExit) valid() bool {
-	return exit.sequence >= 1 && ((exit.code != nil && *exit.code >= 0 && exit.signal == nil) || (exit.code == nil && exit.signal != nil && *exit.signal > 0))
+	if exit.sequence < 1 {
+		return false
+	}
+	switch exit.kind {
+	case runnerExitCode:
+		return exit.code != nil && *exit.code >= 0 && exit.signal == nil
+	case runnerExitSignal:
+		return exit.code == nil && exit.signal != nil && *exit.signal > 0
+	case runnerExitRecoveredAbsence:
+		return exit.code == nil && exit.signal == nil
+	default:
+		return false
+	}
 }
 func (exit RunnerExit) equal(other RunnerExit) bool {
-	if exit.sequence != other.sequence || exit.at != other.at {
+	if exit.kind != other.kind || exit.sequence != other.sequence || exit.at != other.at {
 		return false
 	}
 	leftCode, leftHasCode := exit.Code()
