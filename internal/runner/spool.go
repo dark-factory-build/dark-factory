@@ -1,7 +1,6 @@
 package runner
 
 import (
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -23,7 +22,7 @@ type TerminalRecord struct {
 	Digest   string
 }
 
-func PublishTerminal(dir *os.File, basename string, terminal Terminal) (*TerminalRecord, error) {
+func PublishTerminal(dir *os.File, basename string, terminal Terminal) (_ *TerminalRecord, resultErr error) {
 	if err := validateTerminalName(dir, basename); err != nil {
 		return nil, err
 	}
@@ -38,20 +37,25 @@ func PublishTerminal(dir *os.File, basename string, terminal Terminal) (*Termina
 		return nil, fmt.Errorf("runner: terminal too large")
 	}
 	body = append(body, '\n')
-	var nonce [12]byte
-	if _, err := rand.Read(nonce[:]); err != nil {
-		return nil, err
-	}
-	tmp := "." + basename + "." + hex.EncodeToString(nonce[:]) + ".tmp"
+	tmp := TerminalScratchName
 	fd, err := unix.Openat(int(dir.Fd()), tmp, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
 	if err != nil {
 		return nil, err
 	}
+	var created unix.Stat_t
+	if err := unix.Fstat(fd, &created); err != nil || !validTerminalFile(created, 0) || created.Size != 0 {
+		_ = unix.Close(fd)
+		return nil, errors.Join(ErrIdentity, err)
+	}
 	cleanup := true
 	defer func() {
-		_ = unix.Close(fd)
 		if cleanup {
-			_ = unix.Unlinkat(int(dir.Fd()), tmp, 0)
+			if cleanupErr := unlinkExactScratch(dir, tmp, created); cleanupErr != nil {
+				resultErr = errors.Join(resultErr, ErrUnresolved, cleanupErr)
+			}
+		}
+		if closeErr := unix.Close(fd); closeErr != nil {
+			resultErr = errors.Join(resultErr, closeErr)
 		}
 	}()
 	if err := writeAll(fd, body); err != nil {
@@ -66,6 +70,10 @@ func PublishTerminal(dir *os.File, basename string, terminal Terminal) (*Termina
 	}
 	if !validTerminalFile(st, int64(len(body))) {
 		return nil, ErrIdentity
+	}
+	var named unix.Stat_t
+	if err := unix.Fstatat(int(dir.Fd()), tmp, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil || named.Dev != st.Dev || named.Ino != st.Ino || !validTerminalFile(named, int64(len(body))) {
+		return nil, errors.Join(ErrIdentity, err)
 	}
 	if err := publishNoReplace(int(dir.Fd()), tmp, basename); err != nil {
 		if errors.Is(err, unix.EEXIST) {
@@ -152,7 +160,7 @@ func AcknowledgeTerminal(dir *os.File, basename string, want *TerminalRecord, st
 }
 
 func validateTerminalName(dir *os.File, name string) error {
-	if dir == nil || name == "" || filepath.Base(name) != name || name == "." || name == ".." {
+	if dir == nil || name != TerminalSpoolName || filepath.Base(name) != name {
 		return ErrIdentity
 	}
 	_, err := validatePrivateDirectory(dir)
@@ -172,6 +180,18 @@ func validTerminalFile(stat unix.Stat_t, exactSize int64) bool {
 	}
 	return exactSize == 0 || stat.Size == exactSize
 }
+
+func unlinkExactScratch(dir *os.File, name string, opened unix.Stat_t) error {
+	var named unix.Stat_t
+	if err := unix.Fstatat(int(dir.Fd()), name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return err
+	}
+	if named.Dev != opened.Dev || named.Ino != opened.Ino || named.Mode&unix.S_IFMT != unix.S_IFREG || named.Uid != uint32(os.Geteuid()) || named.Nlink != 1 {
+		return ErrIdentity
+	}
+	return unix.Unlinkat(int(dir.Fd()), name, 0)
+}
+
 func writeAll(fd int, p []byte) error {
 	for len(p) > 0 {
 		n, err := unix.Write(fd, p)

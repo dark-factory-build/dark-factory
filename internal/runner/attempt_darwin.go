@@ -80,10 +80,7 @@ func (c *AttemptController) Configure(spec AttemptSpec) error {
 	if err := validateAttemptName(spec.AttemptID, 256); err != nil {
 		return err
 	}
-	if err := validateBasename(spec.MarkerName); err != nil {
-		return err
-	}
-	if err := validateBasename(spec.TerminalName); err != nil || spec.MarkerName == spec.TerminalName {
+	if spec.MarkerName != InnerActivationMarkerName || spec.TerminalName != TerminalSpoolName {
 		return ErrIdentity
 	}
 	if spec.Wrapper.control != nil || spec.Wrapper.controlID != nil || len(spec.Wrapper.stdin) != 0 || spec.Wrapper.stdout != nil || spec.Wrapper.stderr != nil || spec.Wrapper.testFinal != nil || spec.Wrapper.testCurrentFinal {
@@ -440,7 +437,7 @@ func RunAttemptRunner() error {
 }
 
 func validateAttemptConfig(cfg attemptConfig) error {
-	if cfg.Version != 1 || validateAttemptName(cfg.AttemptID, 256) != nil || validateBasename(cfg.MarkerName) != nil || validateBasename(cfg.TerminalName) != nil || cfg.MarkerName == cfg.TerminalName {
+	if cfg.Version != 1 || validateAttemptName(cfg.AttemptID, 256) != nil || cfg.MarkerName != InnerActivationMarkerName || cfg.TerminalName != TerminalSpoolName {
 		return ErrIdentity
 	}
 	if cfg.Wrapper.Executable.Path == "" || cfg.Wrapper.Cwd.Path == "" || len(cfg.Wrapper.Argv) == 0 || cfg.Wrapper.Argv[0] != cfg.Wrapper.Executable.Path {

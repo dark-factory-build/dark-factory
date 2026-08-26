@@ -25,7 +25,7 @@ type GateLease struct {
 }
 
 func CreateGateLease(dir *os.File, basename string) (*GateLease, FileIdentity, error) {
-	if dir == nil || basename == "" || filepath.Base(basename) != basename || basename == "." || basename == ".." {
+	if dir == nil || basename != OuterActivationMarkerName && basename != InnerActivationMarkerName {
 		return nil, FileIdentity{}, fmt.Errorf("runner: invalid marker name")
 	}
 	dup, err := unix.FcntlInt(dir.Fd(), unix.F_DUPFD_CLOEXEC, 0)
@@ -236,19 +236,42 @@ func StartBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, kee
 }
 
 func anonymousFile(dir *os.File, prefix string, body []byte) (*os.File, error) {
-	path, err := fdPath(dir)
+	return anonymousFileWithHook(dir, prefix, body, nil)
+}
+
+func anonymousFileWithHook(dir *os.File, prefix string, body []byte, afterOpen func(string)) (*os.File, error) {
+	name := ""
+	switch prefix {
+	case "config":
+		name = GateConfigScratchName
+	case "stdin":
+		name = GateStdinScratchName
+	case "provider-stdin":
+		name = ProviderStdinScratchName
+	default:
+		return nil, ErrIdentity
+	}
+	fd, err := unix.Openat(int(dir.Fd()), name, unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.CreateTemp(path, "."+prefix+"-")
-	if err != nil {
-		return nil, err
+	f := os.NewFile(uintptr(fd), name)
+	if afterOpen != nil {
+		afterOpen(name)
 	}
-	if err := f.Chmod(0o600); err != nil {
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
 		f.Close()
 		return nil, err
 	}
-	if err := os.Remove(f.Name()); err != nil {
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Mode&0o7777 != 0o600 || stat.Uid != uint32(os.Geteuid()) || stat.Nlink != 1 {
+		_ = unlinkExactScratch(dir, name, stat)
+		f.Close()
+		return nil, ErrIdentity
+	}
+	// Fixed create-only names make a crash residue enumerable. The open inode
+	// is unlinked immediately; successful launches leave no named scratch.
+	if err := unix.Unlinkat(int(dir.Fd()), name, 0); err != nil {
 		f.Close()
 		return nil, err
 	}

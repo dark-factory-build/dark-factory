@@ -13,6 +13,19 @@ const (
 	maxFrameBytes  = 16 << 10
 )
 
+// These are the complete fixed top-level runtime names emitted by the runner.
+// The daemon cleanup contract consumes the same constants; no caller may
+// choose an alternate marker, spool, or scratch residue name.
+const (
+	OuterActivationMarkerName = "outer.activate"
+	InnerActivationMarkerName = "inner.activate"
+	TerminalSpoolName         = "terminal.json"
+	GateConfigScratchName     = ".runner-gate.config"
+	GateStdinScratchName      = ".runner-gate.stdin"
+	ProviderStdinScratchName  = ".runner-provider.stdin"
+	TerminalScratchName       = ".runner-terminal.tmp"
+)
+
 var (
 	ErrUnsupported = errors.New("runner: unsupported platform")
 	ErrState       = errors.New("runner: invalid lifecycle state")

@@ -145,7 +145,7 @@ func newAttemptFixture(t *testing.T, mode string, target string) *attemptFixture
 	if err != nil {
 		t.Fatal(err)
 	}
-	lease, _, err := CreateGateLease(dir, "outer.activate")
+	lease, _, err := CreateGateLease(dir, OuterActivationMarkerName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +165,7 @@ func newAttemptFixture(t *testing.T, mode string, target string) *attemptFixture
 	if err != nil {
 		t.Fatal(err)
 	}
-	attemptSpec := AttemptSpec{AttemptID: "attempt-1", Wrapper: wrapper, MarkerName: "inner.activate", TerminalName: "terminal.json"}
+	attemptSpec := AttemptSpec{AttemptID: "attempt-1", Wrapper: wrapper, MarkerName: InnerActivationMarkerName, TerminalName: TerminalSpoolName}
 	diagnostic := outputFile(t, filepath.Join(root, "runner.output"))
 	outerSpec, err := PrepareExecSpec(ExecSpec{Target: executable, Args: []string{"--attempt-runner"}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: filepath.Join(root, "work"), Stdout: diagnostic, Stderr: diagnostic, Control: childCap})
 	if err != nil {
@@ -323,6 +323,52 @@ func TestAttemptRunnerOrdersOuterWrapperAndShellProvider(t *testing.T) {
 	}
 	if body, err := os.ReadFile(filepath.Join(f.root, "provider.stdin")); err != nil || string(body) != "one-startup" {
 		t.Fatalf("stdin=%q err=%v", body, err)
+	}
+}
+
+func TestRuntimeFlockRemainsHeldAcrossOuterAndInnerOwnership(t *testing.T) {
+	f := newAttemptFixture(t, "shell", "")
+	if err := unix.Flock(int(f.dir.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	f.activateOuter()
+	f.advanceToProvider()
+	if err := f.controller.Release(StageProvider); err != nil {
+		t.Fatal(err)
+	}
+	waitFile(t, filepath.Join(f.root, "provider.pid"))
+	if err := f.lease.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.dir.Close(); err != nil {
+		t.Fatal(err)
+	}
+	probe, err := unix.Open(f.root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(probe)
+	if err := unix.Flock(probe, unix.LOCK_EX|unix.LOCK_NB); !errors.Is(err, unix.EWOULDBLOCK) {
+		t.Fatalf("attempt runner lost inherited lifetime lease: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(f.root, "continue"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	event, err := f.controller.Next(6 * time.Second)
+	if err != nil || event.Kind != AttemptTerminal || event.Terminal == nil {
+		t.Fatalf("terminal=%+v err=%v output=%q", event, err, f.output())
+	}
+	if err := f.controller.AcknowledgeTerminal(event.Terminal, true); err != nil {
+		t.Fatal(err)
+	}
+	if exit, err := f.outer.FinishAfterExit(6 * time.Second); err != nil || exit.Code != 0 {
+		t.Fatalf("outer exit=%+v err=%v", exit, err)
+	}
+	if err := unix.Flock(probe, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		t.Fatalf("attempt runner retained lease after exit: %v", err)
+	}
+	if err := unix.Flock(probe, unix.LOCK_UN); err != nil {
+		t.Fatal(err)
 	}
 }
 

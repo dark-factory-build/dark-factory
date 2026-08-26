@@ -131,7 +131,7 @@ func newFixture(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lease, _, err := CreateGateLease(dir, "activate")
+	lease, _, err := CreateGateLease(dir, OuterActivationMarkerName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +215,7 @@ func runParentDeathOwner() error {
 		return err
 	}
 	defer dir.Close()
-	lease, _, err := CreateGateLease(dir, "activate")
+	lease, _, err := CreateGateLease(dir, OuterActivationMarkerName)
 	if err != nil {
 		return err
 	}
@@ -447,6 +447,79 @@ func TestKeepLeaseAcrossExecIsExplicit(t *testing.T) {
 	}
 }
 
+func TestInheritedRuntimeFlockSurvivesGateExecUntilTargetExit(t *testing.T) {
+	f := newFixture(t)
+	if err := unix.Flock(int(f.dir.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	continuePath := filepath.Join(f.root, "continue")
+	out := outputFile(t, filepath.Join(f.root, "out"))
+	spec, err := PrepareExecSpec(ExecSpec{
+		Target: "/bin/sh",
+		Args:   []string{"-c", fmt.Sprintf("while test ! -e %q; do sleep 0.01; done", continuePath)},
+		Env:    []string{"PATH=/usr/bin:/bin", "LANG=C"},
+		Cwd:    f.cwd,
+		Stdout: out,
+		Stderr: out,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := f.startPrepared(spec, true)
+	if _, err := child.Activate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.lease.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.dir.Close(); err != nil {
+		t.Fatal(err)
+	}
+	probe, err := unix.Open(f.root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(probe)
+	if err := unix.Flock(probe, unix.LOCK_EX|unix.LOCK_NB); !errors.Is(err, unix.EWOULDBLOCK) {
+		t.Fatalf("inherited target lease was not held: %v", err)
+	}
+	if err := os.WriteFile(continuePath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if exit, err := child.FinishAfterExit(4 * time.Second); err != nil || exit.Code != 0 {
+		t.Fatalf("exit=%+v err=%v", exit, err)
+	}
+	if err := unix.Flock(probe, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		t.Fatalf("lifetime lease retained after target exit: %v", err)
+	}
+	if err := unix.Flock(probe, unix.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAnonymousScratchMetadataFailureIsErrorAndExactCleanup(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dir.Close()
+	file, err := anonymousFileWithHook(dir, "config", []byte("private"), func(name string) {
+		if err := os.Chmod(filepath.Join(root, name), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !errors.Is(err, ErrIdentity) || file != nil {
+		t.Fatalf("invalid scratch = %v, %v", file, err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, GateConfigScratchName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid scratch residue retained: %v", err)
+	}
+}
+
 func TestLeashEOFAbortsWithoutProviderEffect(t *testing.T) {
 	f := newFixture(t)
 	effect := filepath.Join(f.root, "effect")
@@ -465,7 +538,7 @@ func TestActivationRefusesMarkerCreatedAfterReadiness(t *testing.T) {
 	effect := filepath.Join(f.root, "effect")
 	out := outputFile(t, filepath.Join(f.root, "out"))
 	child := f.start("/bin/sh", []string{"-c", "echo bad > " + effect}, nil, out)
-	if err := os.WriteFile(filepath.Join(f.root, "activate"), []byte("foreign"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(f.root, OuterActivationMarkerName), []byte("foreign"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := child.Activate(); !errors.Is(err, unix.EEXIST) {
@@ -474,7 +547,7 @@ func TestActivationRefusesMarkerCreatedAfterReadiness(t *testing.T) {
 	if err := child.Abort(); err != nil {
 		t.Fatal(err)
 	}
-	if body, err := os.ReadFile(filepath.Join(f.root, "activate")); err != nil || string(body) != "foreign" {
+	if body, err := os.ReadFile(filepath.Join(f.root, OuterActivationMarkerName)); err != nil || string(body) != "foreign" {
 		t.Fatalf("marker changed body=%q err=%v", body, err)
 	}
 	if _, err := os.Stat(effect); !errors.Is(err, os.ErrNotExist) {
@@ -1026,7 +1099,7 @@ func TestPrepareRejectsScriptAndPreexistingMarker(t *testing.T) {
 	if _, err := PrepareExecSpec(ExecSpec{Target: script, Cwd: root}); err == nil {
 		t.Fatal("shebang script accepted")
 	}
-	if err := os.WriteFile(filepath.Join(root, "activate"), nil, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, OuterActivationMarkerName), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	dir, err := os.Open(root)
@@ -1034,7 +1107,7 @@ func TestPrepareRejectsScriptAndPreexistingMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer dir.Close()
-	if _, _, err := CreateGateLease(dir, "activate"); !errors.Is(err, os.ErrExist) {
+	if _, _, err := CreateGateLease(dir, OuterActivationMarkerName); !errors.Is(err, os.ErrExist) {
 		t.Fatalf("preexisting marker=%v", err)
 	}
 }
