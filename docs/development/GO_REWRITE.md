@@ -43,12 +43,12 @@ branch/worktree and obeys that repository's `AGENTS.md`.
 
 | State | Exact work retained or stopped |
 |---|---|
-| Complete and retained | Fresh SQLite contract; typed kernel; atomic admission; exact attempt credentials; run/finalizing/resource state; bounded invalidations; Change ownership/materialization groundwork; owner-only Unix control API; typed `factoryctl` client; Darwin process identity; two blocked-exec gates; terminal-exit spool; Store chronology through `7eb4176` |
+| Complete and retained | Fresh SQLite contract; typed kernel; atomic admission; exact attempt credentials; run/finalizing/resource state; bounded invalidations; Change ownership/materialization groundwork; owner-only Unix control API; typed `factoryctl` client; Darwin process identity; two blocked-exec gates; terminal-exit spool; gated Darwin PTY primitive; durable terminal-session admission, activation, recovery uncertainty and finalization guards through `9c91731` |
 | Reusable with adaptation | `internal/runner` live-child/process-group ownership; daemon supervisor choreography; bounded API framing/auth separation; dashboard projection/client reducer direction; rebased recovery branch `go-recovery-reserved-fix` at `185cd5f`; fail-closed runtime/spool/Change close branches at `f239815`, `347c977`, and `4183205` |
-| In progress but held | Recovery is rebased onto the approved Store chronology but remains unintegrated until PTY/session semantics replace non-interactive assumptions and the close patches are replayed/re-reviewed |
+| In progress but held | Recovery is rebased onto the approved Store chronology but remains unintegrated until the live PTY owner, bounded output and input-lease semantics replace the remaining non-interactive runner assumptions and the close patches are replayed/re-reviewed |
 | Obsolete | Startup-input-only/closed-stdin provider contract; separate stdin/stdout/stderr provider pipes as the product transport; TUI/Bubble Tea packages, lanes and parity tests; generic attention projection; message-on-next-run as the live-question answer |
-| Proved for revised architecture | Current Chrome on macOS can connect from the protected hosted HTTPS preview to exact `ws://127.0.0.1:43123` with the dedicated loopback permission; strict Origin/Host checks, binary traffic, reconnect, denial, no-daemon, port-collision and cross-site refusal are causal |
-| Blocked until proved | PTY allocation/session/input/replay; durable `HumanRequest`; browser pairing/security; browser protocol v1; TypeScript client; public web UI; complete private host integration; revised crash-cut vertical slice |
+| Proved for revised architecture | Current Chrome on macOS can connect from the protected hosted HTTPS preview to exact `ws://127.0.0.1:43123` with the dedicated loopback permission; strict Origin/Host checks, binary traffic, reconnect, denial, no-daemon, port-collision and cross-site refusal are causal. A fresh Darwin PTY child remains inert until release, owns a controlling terminal/process group and is reaped without orphaning. SQLite now owns exactly one terminal session per admitted run and refuses terminalization until its exact close is proved. |
+| Blocked until proved | Live runner ownership of PTY attach/input/resize/output replay; browser-client pairing/security; durable terminal leases; durable `HumanRequest`; browser protocol v1; TypeScript client; public web UI; complete private host integration; revised crash-cut vertical slice |
 
 Read-only redirection audits were assigned without overlapping writes:
 
@@ -61,6 +61,48 @@ Read-only redirection audits were assigned without overlapping writes:
 
 Their concrete conclusions are incorporated below. Broad production work does
 not resume until this revised plan is committed.
+
+### PTY and durable terminal-session checkpoint
+
+Canonical head `9c91731d5fbbb5589fbfbb06e1b29aa567ecf193` contains two
+independently reviewed foundations for the revised runtime:
+
+- `c4b83a2` and `69881e1` add the dependency-free Darwin PTY primitive. The
+  child receives a fresh session, controlling terminal and process group but
+  remains behind the existing register-before-exec gate. Ownership is installed
+  immediately after `Start` so a later slave-close failure still kills and
+  reaps the exact child. Darwin PTY hangup drains buffered output and becomes
+  EOF. The independent process reviewer returned **ALLOW** on the exact source
+  commit before integration.
+- `0a52298`, `ddfaef7` and `9c91731` add the strict `terminal_sessions` row and
+  its Store lifecycle. Admission creates one declared session in the same
+  transaction as the run and resources. Activation requires exact run/session
+  identities and revisions and changes both authorities in one transaction.
+  Declared no-start, live active and recovered unresolved closure remain
+  separate concrete operations; recovered numeric absence cannot pass a live
+  close. Missing rows, cross-table chronology disagreement and suppressed
+  invalidations fail closed. `FinalizeRun` requires the session closed as well
+  as every exact resource released.
+- The first Store candidate was blocked because normal fixtures did not yet
+  establish the new mandatory relationship. A provisional reviewer then found
+  recovered absence could pass the live-close path, and exact-head reviewers
+  later found a `Task` read bypass, no-start convergence gap, unchecked
+  invalidation insert and an overly generic close helper. All were repaired and
+  both Store/authority and slice-elegance reviewers returned **ALLOW** on exact
+  source head `916c1a7`, whose tree is integrated at `9c91731`.
+- Root verification on the reviewed tree: full kernel tests passed (`11.523s`),
+  the full kernel race suite passed before the final narrow repair (`293.016s`),
+  and the affected final-head terminal/admission/recovery/concurrency race
+  matrix passed (`4.971s`). The isolated daemon API/supervisor regression
+  matrix passed outside the socket sandbox (`4.078s`); vet and diff checks
+  passed. The broad daemon command still encounters the pre-existing ELOOP
+  runtime-fixture limitation in this harness, reproduced on base `69881e1`;
+  that failed invocation is not counted as green evidence.
+
+This checkpoint does not yet provide browser attachment or live terminal data.
+The next shared schema slice adds real browser clients, pairing credentials and
+terminal lease columns together so no fake foreign key or temporary identity
+model is introduced.
 
 ### Product and repository ownership
 
