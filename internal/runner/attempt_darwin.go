@@ -449,16 +449,13 @@ func validateAttemptConfig(cfg attemptConfig) error {
 	if len(cfg.Wrapper.Argv) > 129 || len(cfg.Wrapper.Env) > 128 {
 		return ErrIdentity
 	}
-	for _, value := range append(append([]string{}, cfg.Wrapper.Argv...), cfg.Wrapper.Env...) {
+	for _, value := range cfg.Wrapper.Argv {
 		if len(value) > 8192 || strings.IndexByte(value, 0) >= 0 {
 			return ErrIdentity
 		}
 	}
-	for _, value := range cfg.Wrapper.Env {
-		parts := strings.SplitN(value, "=", 2)
-		if len(parts) != 2 || !allowedEnv(parts[0]) {
-			return ErrIdentity
-		}
+	if err := validateEnvironment(cfg.Wrapper.Env); err != nil {
+		return ErrIdentity
 	}
 	return nil
 }

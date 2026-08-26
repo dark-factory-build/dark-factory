@@ -23,16 +23,13 @@ func PrepareExecSpec(spec ExecSpec) (*LaunchSpec, error) {
 	if len(spec.Args) > 128 || len(spec.Env) > 128 {
 		return nil, fmt.Errorf("runner: argv/env too large")
 	}
-	for _, s := range append(append([]string{}, spec.Args...), spec.Env...) {
+	for _, s := range spec.Args {
 		if len(s) > 8192 || strings.IndexByte(s, 0) >= 0 {
 			return nil, fmt.Errorf("runner: invalid argv/env")
 		}
 	}
-	for _, e := range spec.Env {
-		parts := strings.SplitN(e, "=", 2)
-		if len(parts) != 2 || !allowedEnv(parts[0]) {
-			return nil, fmt.Errorf("runner: environment key %q not allowed", parts[0])
-		}
+	if err := validateEnvironment(spec.Env); err != nil {
+		return nil, err
 	}
 	target, err := commitExecutable(spec.Target)
 	if err != nil {
@@ -93,10 +90,35 @@ func verifyControl(f *os.File, want descriptorCommitment) error {
 
 func allowedEnv(k string) bool {
 	switch k {
-	case "HOME", "PATH", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TERM", "SHELL", "USER", "LOGNAME", "DARK_FACTORY_ATTEMPT_TOKEN_FILE", "GIT_CEILING_DIRECTORIES", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT":
+	case "HOME", "PATH", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TERM", "SHELL", "USER", "LOGNAME",
+		"DARK_FACTORY_SOCKET", "DARK_FACTORY_ATTEMPT_TOKEN_FILE", "NO_COLOR",
+		"GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL",
+		"GIT_TERMINAL_PROMPT", "GIT_ASKPASS", "GIT_SSH_COMMAND", "GH_CONFIG_DIR":
 		return true
 	}
 	return false
+}
+
+func validateEnvironment(environment []string) error {
+	seen := make(map[string]struct{}, len(environment))
+	for _, entry := range environment {
+		if len(entry) > 8192 || strings.IndexByte(entry, 0) >= 0 {
+			return fmt.Errorf("runner: invalid environment")
+		}
+		parts := strings.SplitN(entry, "=", 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return fmt.Errorf("runner: invalid environment")
+		}
+		name := parts[0]
+		if !allowedEnv(name) {
+			return fmt.Errorf("runner: environment key %q not allowed", name)
+		}
+		if _, duplicate := seen[name]; duplicate {
+			return fmt.Errorf("runner: duplicate environment key %q", name)
+		}
+		seen[name] = struct{}{}
+	}
+	return nil
 }
 
 func canonical(path string) (string, error) {
