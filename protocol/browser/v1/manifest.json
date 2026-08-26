@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "capabilities": [
+    {"name": "observe", "bit": 0, "value": 1},
+    {"name": "private_human_request_detail", "bit": 1, "value": 2},
+    {"name": "human_actions", "bit": 2, "value": 4},
+    {"name": "terminal_input", "bit": 3, "value": 8}
+  ],
+  "control": [
+    {"type": "HELLO", "direction": "server", "id": "forbidden"},
+    {"type": "PAIR_PROVE", "direction": "client", "id": "required"},
+    {"type": "PAIR_RESULT", "direction": "server", "id": "required"},
+    {"type": "AUTH_PROVE", "direction": "client", "id": "required"},
+    {"type": "AUTH_RESULT", "direction": "server", "id": "required"},
+    {"type": "ERROR", "direction": "both", "id": "optional"}
+  ],
+  "terminal": {
+    "magic": "DF",
+    "version": 1,
+    "header_bytes": 40,
+    "max_payload_bytes": 65536,
+    "opcodes": [
+      {"name": "TERMINAL_INPUT", "value": 1, "direction": "client"},
+      {"name": "TERMINAL_OUTPUT", "value": 2, "direction": "server"}
+    ]
+  }
+}
