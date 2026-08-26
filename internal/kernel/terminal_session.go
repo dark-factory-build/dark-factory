@@ -31,7 +31,7 @@ func scanTerminalSession(scanner rowScanner) (TerminalSession, bool, error) {
 	rev, revisionErr := NewRevision(revision)
 	declared, declaredErr := NewUnixMillis(declaredAt)
 	updated, updatedErr := NewUnixMillis(updatedAt)
-	if idErr != nil || runErr != nil || stateErr != nil || revisionErr != nil || declaredErr != nil || updatedErr != nil || updatedAt < declaredAt || reason.Valid && (byteLen(reason.String) < 1 || byteLen(reason.String) > 4096) || leaseGeneration < 0 || lastInputSequence < 0 || rawLeaseClientID.valid && leaseGeneration < 1 || rawLeaseClientID.valid != leaseExpiresAt.Valid || !rawLeaseClientID.valid && lastInputSequence != 0 {
+	if idErr != nil || runErr != nil || stateErr != nil || revisionErr != nil || declaredErr != nil || updatedErr != nil || updatedAt < declaredAt || reason.Valid && (byteLen(reason.String) < 1 || byteLen(reason.String) > 4096) || leaseGeneration < 0 || lastInputSequence < 0 || rawLeaseClientID.valid && (state != TerminalSessionActive || leaseGeneration < 1) || rawLeaseClientID.valid != leaseExpiresAt.Valid || !rawLeaseClientID.valid && lastInputSequence != 0 {
 		return TerminalSession{}, false, fmt.Errorf("%w: invalid terminal session controls", ErrCorruptState)
 	}
 	result := TerminalSession{ID: id, RunID: runID, State: state, UnresolvedReason: nullStringValue(reason), Revision: rev, DeclaredAt: declared, UpdatedAt: updated, LeaseGeneration: uint64(leaseGeneration), LastInputSequence: uint64(lastInputSequence)}

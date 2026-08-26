@@ -678,11 +678,8 @@ func (store *Store) enterFinalizing(ctx context.Context, tx *writeTx, run Run, e
 		if overflowErr != nil {
 			return Run{}, tx.Rollback(overflowErr)
 		}
-		updatedSession, updateErr := tx.connection.ExecContext(ctx, `UPDATE terminal_sessions SET lease_client_id = NULL, lease_expires_at_ms = NULL, lease_generation = ?, last_input_sequence = 0, revision = revision + 1, updated_at_ms = ? WHERE run_id = ? AND lease_client_id IS NOT NULL AND lease_generation = ?`, next, at.Int64(), run.ID.Bytes(), generation)
-		if updateErr != nil {
-			return Run{}, tx.Rollback(updateErr)
-		}
-		if err := requireOneRow(updatedSession, nil); err != nil {
+		updatedSession, updateErr := tx.connection.ExecContext(ctx, `UPDATE terminal_sessions SET lease_client_id = NULL, lease_expires_at_ms = NULL, lease_generation = ?, last_input_sequence = 0 WHERE run_id = ? AND lease_client_id IS NOT NULL AND lease_generation = ?`, next, run.ID.Bytes(), generation)
+		if err := requireOneRow(updatedSession, updateErr); err != nil {
 			return Run{}, tx.Rollback(err)
 		}
 	}

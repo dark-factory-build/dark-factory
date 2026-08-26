@@ -238,6 +238,8 @@ var schemaStatements = []string{
     CHECK (state <> 'unresolved' OR closed_at_ms IS NULL),
     CHECK (state <> 'closed' OR (closed_at_ms IS NOT NULL AND unresolved_reason IS NULL))
     ,CHECK ((lease_client_id IS NULL) = (lease_expires_at_ms IS NULL))
+    ,CHECK (lease_client_id IS NULL OR state = 'active')
+    ,CHECK (lease_client_id IS NULL OR lease_generation >= 1)
     ,CHECK (lease_client_id IS NOT NULL OR last_input_sequence = 0)
 ) STRICT, WITHOUT ROWID`,
 	`CREATE UNIQUE INDEX terminal_sessions_run_unique ON terminal_sessions(run_id)`,
@@ -248,7 +250,7 @@ var schemaStatements = []string{
     capability_mask INTEGER NOT NULL CHECK (capability_mask BETWEEN 1 AND 15 AND (capability_mask & 1) = 1),
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
     expires_at_ms INTEGER NOT NULL CHECK (expires_at_ms > created_at_ms AND expires_at_ms <= created_at_ms + 300000),
-    redeemed_at_ms INTEGER CHECK (redeemed_at_ms IS NULL OR (redeemed_at_ms >= created_at_ms AND redeemed_at_ms >= 0))
+    redeemed_at_ms INTEGER CHECK (redeemed_at_ms IS NULL OR (redeemed_at_ms >= created_at_ms AND redeemed_at_ms <= expires_at_ms AND redeemed_at_ms >= 0))
 ) STRICT, WITHOUT ROWID`,
 	`CREATE TABLE browser_clients (
     id BLOB PRIMARY KEY CHECK (length(id) = 16 AND id <> zeroblob(16)),
@@ -258,13 +260,14 @@ var schemaStatements = []string{
     revision INTEGER NOT NULL CHECK (revision >= 1),
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
     updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
-    revoked_at_ms INTEGER CHECK (revoked_at_ms IS NULL OR (revoked_at_ms >= created_at_ms AND revoked_at_ms >= 0))
+    revoked_at_ms INTEGER CHECK (revoked_at_ms IS NULL OR (revoked_at_ms >= created_at_ms AND revoked_at_ms <= updated_at_ms AND revoked_at_ms >= 0))
 ) STRICT, WITHOUT ROWID`,
 	`CREATE TABLE browser_security_events (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT CHECK (sequence >= 1),
     kind TEXT NOT NULL CHECK (kind IN ('challenge_minted', 'client_paired', 'duplicate_fingerprint', 'client_revoked')),
     client_id BLOB CHECK (client_id IS NULL OR (length(client_id) = 16 AND client_id <> zeroblob(16))) REFERENCES browser_clients(id),
-    occurred_at_ms INTEGER NOT NULL CHECK (occurred_at_ms >= 0)
+    occurred_at_ms INTEGER NOT NULL CHECK (occurred_at_ms >= 0),
+    CHECK ((kind = 'challenge_minted' AND client_id IS NULL) OR (kind <> 'challenge_minted' AND client_id IS NOT NULL))
 ) STRICT`,
 	`CREATE INDEX browser_security_events_client ON browser_security_events(client_id, sequence)`,
 	`CREATE TABLE invalidations (

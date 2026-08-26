@@ -322,9 +322,10 @@ func (store *Store) initialize(ctx context.Context, config FactoryConfig, at Uni
 				err = fmt.Errorf("%w: generated zero daemon identifier", ErrCorruptState)
 			}
 			if err == nil {
-				_, err = tx.connection.ExecContext(ctx,
+				inserted, insertErr := tx.connection.ExecContext(ctx,
 					`INSERT INTO factory(singleton, daemon_id, dispatch_enabled, capacity, revision, next_invalidation_sequence, invalidation_floor, updated_at_ms) VALUES(1, ?, ?, ?, 1, 1, 1, ?)`,
 					rawDaemonID[:], boolInt(config.DispatchEnabled), int64(config.Capacity), at.Int64())
+				err = requireOneRow(inserted, insertErr)
 			}
 		}
 		if err != nil {

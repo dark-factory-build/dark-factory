@@ -3,6 +3,7 @@ package kernel
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
 )
@@ -71,7 +72,7 @@ func validateBrowserAuthority(ctx context.Context, connection *sql.Conn) error {
 			return err
 		}
 	}
-	if err := rows.Close(); err != nil {
+	if err := closeValidatedBrowserRows(rows); err != nil {
 		return err
 	}
 	rows, err = connection.QueryContext(ctx, `SELECT secret_digest FROM browser_pairing_challenges ORDER BY secret_digest`)
@@ -97,7 +98,7 @@ func validateBrowserAuthority(ctx context.Context, connection *sql.Conn) error {
 			return err
 		}
 	}
-	if err := rows.Close(); err != nil {
+	if err := closeValidatedBrowserRows(rows); err != nil {
 		return err
 	}
 	var count int64
@@ -120,7 +121,8 @@ func validateBrowserAuthority(ctx context.Context, connection *sql.Conn) error {
 			rows.Close()
 			return err
 		}
-		if sequence < 1 || sequence <= previous || !validBrowserSecurityKind(BrowserSecurityEventKind(kind)) || occurred < 0 {
+		parsedKind := BrowserSecurityEventKind(kind)
+		if sequence < 1 || sequence <= previous || !validBrowserSecurityKind(parsedKind) || (parsedKind == BrowserSecurityChallengeMinted) != !client.valid || occurred < 0 {
 			rows.Close()
 			return fmt.Errorf("%w: invalid browser security event", ErrCorruptState)
 		}
@@ -140,7 +142,7 @@ func validateBrowserAuthority(ctx context.Context, connection *sql.Conn) error {
 		}
 		previous = sequence
 	}
-	if err := rows.Close(); err != nil {
+	if err := closeValidatedBrowserRows(rows); err != nil {
 		return err
 	}
 	rows, err = connection.QueryContext(ctx, `SELECT id, run_id, state, lease_client_id, lease_generation, lease_expires_at_ms, last_input_sequence FROM terminal_sessions`)
@@ -189,7 +191,11 @@ func validateBrowserAuthority(ctx context.Context, connection *sql.Conn) error {
 			return fmt.Errorf("%w: invalid terminal session identity", ErrCorruptState)
 		}
 	}
-	return rows.Close()
+	return closeValidatedBrowserRows(rows)
+}
+
+func closeValidatedBrowserRows(rows *sql.Rows) error {
+	return errors.Join(rows.Err(), rows.Close())
 }
 
 func validateResourceIdentityCollisions(ctx context.Context, connection *sql.Conn) error {

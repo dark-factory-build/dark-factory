@@ -14,7 +14,6 @@ import (
 
 // BrowserCapabilityMask is the deliberately closed browser authority mask.
 type BrowserCapabilityMask uint8
-type BrowserCapabilities = BrowserCapabilityMask
 
 const (
 	BrowserCapabilityObserve BrowserCapabilityMask = 1 << iota
@@ -52,7 +51,14 @@ type BrowserClient struct {
 	RevokedAt      *UnixMillis
 }
 
-type BrowserClientPrincipal = BrowserClient
+// BrowserClientPrincipal is deliberately only a durable client identity. The
+// daemon reloads BrowserClient before every effect instead of caching authority
+// in a connection principal.
+type BrowserClientPrincipal struct {
+	id BrowserClientID
+}
+
+func (principal BrowserClientPrincipal) ClientID() BrowserClientID { return principal.id }
 
 type BrowserSecurityEventKind string
 
@@ -62,13 +68,6 @@ const (
 	BrowserSecurityDuplicateFingerprint BrowserSecurityEventKind = "duplicate_fingerprint"
 	BrowserSecurityClientRevoked        BrowserSecurityEventKind = "client_revoked"
 )
-
-type BrowserSecurityEvent struct {
-	Sequence   int64
-	Kind       BrowserSecurityEventKind
-	ClientID   *BrowserClientID
-	OccurredAt UnixMillis
-}
 
 func HashBrowserChallenge(raw []byte) BrowserChallengeDigest {
 	return BrowserChallengeDigestFromHash(sha256.Sum256(raw))
@@ -105,7 +104,7 @@ func validateBrowserID(id BrowserClientID) error {
 }
 
 func (store *Store) CreateBrowserPairingChallenge(ctx context.Context, digest BrowserChallengeDigest, bootID BootID, origin string, capabilities BrowserCapabilityMask, created, expires UnixMillis) (BrowserPairingChallenge, error) {
-	if err := validateOrigin(origin); err != nil || bootID.zero() || !capabilities.validPairing() || expires.Int64() <= created.Int64() || expires.Int64()-created.Int64() > 5*60*1000 {
+	if err := validateOrigin(origin); err != nil || bootID.zero() || created.Int64() < 0 || expires.Int64() < 0 || !capabilities.validPairing() || expires.Int64() <= created.Int64() || expires.Int64()-created.Int64() > 5*60*1000 {
 		if err != nil {
 			return BrowserPairingChallenge{}, err
 		}
@@ -290,10 +289,13 @@ func (store *Store) AuthenticateBrowserClient(ctx context.Context, id BrowserCli
 	if !found || client.RevokedAt != nil {
 		return BrowserClientPrincipal{}, ErrUnauthorized
 	}
-	return client, nil
+	return BrowserClientPrincipal{id: client.ID}, nil
 }
 
 func insertBrowserSecurityEvent(ctx context.Context, c *sql.Conn, kind BrowserSecurityEventKind, clientID *BrowserClientID, at UnixMillis) error {
+	if !validBrowserSecurityKind(kind) || (kind == BrowserSecurityChallengeMinted) != (clientID == nil) {
+		return fmt.Errorf("%w: invalid browser security event", ErrInvalidValue)
+	}
 	inserted, err := c.ExecContext(ctx, `INSERT INTO browser_security_events(kind, client_id, occurred_at_ms) VALUES(?, ?, ?)`, string(kind), nullableBrowserClient(clientID), at.Int64())
 	if err := requireOneRow(inserted, err); err != nil {
 		return err
@@ -316,43 +318,6 @@ func nullableBrowserClient(id *BrowserClientID) any {
 		return nil
 	}
 	return id.Bytes()
-}
-
-func (store *Store) BrowserSecurityEvents(ctx context.Context) ([]BrowserSecurityEvent, error) {
-	c, err := store.readerConnection(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer c.Close()
-	rows, err := c.QueryContext(ctx, `SELECT sequence, kind, client_id, occurred_at_ms FROM browser_security_events ORDER BY sequence`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var result []BrowserSecurityEvent
-	for rows.Next() {
-		var seq, at int64
-		var kind string
-		var raw nullableBlob
-		if err := rows.Scan(&seq, &kind, &raw, &at); err != nil {
-			return nil, err
-		}
-		parsedKind := BrowserSecurityEventKind(kind)
-		if !validBrowserSecurityKind(parsedKind) || seq < 1 || at < 0 {
-			return nil, ErrCorruptState
-		}
-		occurred, _ := NewUnixMillis(at)
-		event := BrowserSecurityEvent{Sequence: seq, Kind: parsedKind, OccurredAt: occurred}
-		if raw.valid {
-			id, err := BrowserClientIDFromBytes(raw.bytes)
-			if err != nil {
-				return nil, ErrCorruptState
-			}
-			event.ClientID = &id
-		}
-		result = append(result, event)
-	}
-	return result, rows.Err()
 }
 func validBrowserSecurityKind(kind BrowserSecurityEventKind) bool {
 	switch kind {
@@ -412,7 +377,7 @@ func (store *Store) AcquireTerminalLease(ctx context.Context, runID RunID, sessi
 	if err != nil {
 		return TerminalLease{}, tx.Rollback(err)
 	}
-	if run.Revision != expectedRun || session.Revision != expectedSession || at.Int64() < run.UpdatedAt.Int64() || at.Int64() < session.UpdatedAt.Int64() || expectedRun.Int64() >= math.MaxInt64 || expectedSession.Int64() >= math.MaxInt64 || run.Phase != RunRunning || session.State != TerminalSessionActive || client.RevokedAt != nil || !client.CapabilityMask.Has(BrowserCapabilityTerminalInput) {
+	if run.Revision != expectedRun || session.Revision != expectedSession || at.Int64() < run.UpdatedAt.Int64() || at.Int64() < session.UpdatedAt.Int64() || run.Phase != RunRunning || session.State != TerminalSessionActive || client.RevokedAt != nil || !client.CapabilityMask.Has(BrowserCapabilityTerminalInput) {
 		return TerminalLease{}, tx.Rollback(ErrUnauthorized)
 	}
 	if session.LeaseClientID != nil && session.LeaseExpiresAt != nil && session.LeaseExpiresAt.Int64() > at.Int64() {
@@ -429,7 +394,7 @@ func (store *Store) AcquireTerminalLease(ctx context.Context, runID RunID, sessi
 	if err := tx.Commit(ctx); err != nil {
 		return TerminalLease{}, err
 	}
-	return TerminalLease{RunID: run.ID, SessionID: session.ID, ClientID: clientID, Generation: uint64(next), ExpiresAt: UnixMillis{value: expiry}, RunRevision: expectedRun, SessionRevision: expectedSession}, nil
+	return TerminalLease{RunID: run.ID, SessionID: session.ID, ClientID: clientID, Generation: uint64(next), ExpiresAt: UnixMillis{value: expiry}, RunRevision: run.Revision, SessionRevision: session.Revision}, nil
 }
 
 // RenewTerminalLease changes only expiry. Generation, sequence and lifecycle
@@ -447,7 +412,7 @@ func (store *Store) RenewTerminalLease(ctx context.Context, runID RunID, session
 	if err != nil {
 		return TerminalLease{}, tx.Rollback(err)
 	}
-	if run.Revision != expectedRun || session.Revision != expectedSession || run.Phase != RunRunning || session.State != TerminalSessionActive || client.RevokedAt != nil || !client.CapabilityMask.Has(BrowserCapabilityTerminalInput) || session.LeaseClientID == nil || *session.LeaseClientID != clientID || session.LeaseGeneration != generation || session.LeaseExpiresAt == nil || at.Int64() >= session.LeaseExpiresAt.Int64() {
+	if run.Revision != expectedRun || session.Revision != expectedSession || at.Int64() < run.UpdatedAt.Int64() || at.Int64() < session.UpdatedAt.Int64() || run.Phase != RunRunning || session.State != TerminalSessionActive || client.RevokedAt != nil || !client.CapabilityMask.Has(BrowserCapabilityTerminalInput) || session.LeaseClientID == nil || *session.LeaseClientID != clientID || session.LeaseGeneration != generation || session.LeaseExpiresAt == nil || at.Int64() >= session.LeaseExpiresAt.Int64() {
 		return TerminalLease{}, tx.Rollback(ErrUnauthorized)
 	}
 	expires := at.Int64() + BrowserTerminalLeaseTTL
@@ -511,9 +476,9 @@ func (store *Store) ReleaseTerminalLease(ctx context.Context, runID RunID, sessi
 		return TerminalLease{}, tx.Rollback(err)
 	}
 	if run.Revision == expectedRun && session.Revision == expectedSession && session.LeaseClientID == nil && session.LeaseGeneration == generation {
-		return TerminalLease{RunID: run.ID, SessionID: session.ID, ClientID: clientID, Generation: session.LeaseGeneration, LastInputSequence: session.LastInputSequence, RunRevision: expectedRun, SessionRevision: expectedSession}, tx.Rollback(nil)
+		return TerminalLease{RunID: run.ID, SessionID: session.ID, ClientID: clientID, Generation: session.LeaseGeneration, LastInputSequence: session.LastInputSequence, RunRevision: run.Revision, SessionRevision: session.Revision}, tx.Rollback(nil)
 	}
-	if run.Revision != expectedRun || session.Revision != expectedSession || at.Int64() < run.UpdatedAt.Int64() || at.Int64() < session.UpdatedAt.Int64() || expectedRun.Int64() >= math.MaxInt64 || expectedSession.Int64() >= math.MaxInt64 || session.LeaseClientID == nil || *session.LeaseClientID != clientID || session.LeaseGeneration != generation {
+	if run.Revision != expectedRun || session.Revision != expectedSession || at.Int64() < run.UpdatedAt.Int64() || at.Int64() < session.UpdatedAt.Int64() || session.LeaseClientID == nil || *session.LeaseClientID != clientID || session.LeaseGeneration != generation {
 		return TerminalLease{}, tx.Rollback(ErrRevisionConflict)
 	}
 	next, err := leaseGenerationNext(int64(generation))
@@ -527,7 +492,7 @@ func (store *Store) ReleaseTerminalLease(ctx context.Context, runID RunID, sessi
 	if err := tx.Commit(ctx); err != nil {
 		return TerminalLease{}, err
 	}
-	return TerminalLease{RunID: run.ID, SessionID: session.ID, ClientID: clientID, Generation: uint64(next), RunRevision: expectedRun, SessionRevision: expectedSession}, nil
+	return TerminalLease{RunID: run.ID, SessionID: session.ID, ClientID: clientID, Generation: uint64(next), RunRevision: run.Revision, SessionRevision: session.Revision}, nil
 }
 
 func (store *Store) ReserveTerminalInputSequence(ctx context.Context, runID RunID, sessionID TerminalSessionID, clientID BrowserClientID, generation, sequence uint64, expectedRun, expectedSession Revision, at UnixMillis) (InputReservation, error) {
@@ -561,7 +526,7 @@ func (store *Store) reserveTerminalInputSequenceTx(ctx context.Context, tx *writ
 	if err := tx.Commit(ctx); err != nil {
 		return InputReservation{}, err
 	}
-	return InputReservation{RunID: run.ID, SessionID: session.ID, ClientID: client.ID, Generation: generation, Sequence: uint64(next), RunRevision: expectedRun, SessionRevision: expectedSession}, nil
+	return InputReservation{RunID: run.ID, SessionID: session.ID, ClientID: client.ID, Generation: generation, Sequence: uint64(next), RunRevision: run.Revision, SessionRevision: session.Revision}, nil
 }
 
 func (store *Store) RevokeTerminalInputAfterPartialWrite(ctx context.Context, runID RunID, sessionID TerminalSessionID, clientID BrowserClientID, generation uint64, sequence uint64, expectedRun, expectedSession Revision, at UnixMillis) error {
@@ -574,7 +539,7 @@ func (store *Store) RevokeTerminalInputAfterPartialWrite(ctx context.Context, ru
 	if err != nil {
 		return tx.Rollback(err)
 	}
-	if run.Revision != expectedRun || session.Revision != expectedSession || run.Phase != RunRunning || session.State != TerminalSessionActive || at.Int64() < run.UpdatedAt.Int64() || at.Int64() < session.UpdatedAt.Int64() || session.LeaseClientID == nil || *session.LeaseClientID != clientID || session.LeaseGeneration != generation || session.LastInputSequence != sequence {
+	if sequence == 0 || sequence > math.MaxInt64 || run.Revision != expectedRun || session.Revision != expectedSession || run.Phase != RunRunning || session.State != TerminalSessionActive || at.Int64() < run.UpdatedAt.Int64() || at.Int64() < session.UpdatedAt.Int64() || session.LeaseClientID == nil || *session.LeaseClientID != clientID || session.LeaseGeneration != generation || session.LastInputSequence != sequence {
 		return tx.Rollback(ErrRevisionConflict)
 	}
 	next, err := leaseGenerationNext(int64(generation))
@@ -626,12 +591,14 @@ func (store *Store) RevokeBrowserClient(ctx context.Context, id BrowserClientID,
 	for rows.Next() {
 		var h held
 		if err := rows.Scan(&h.sid, &h.generation); err != nil {
-			rows.Close()
+			_ = closeValidatedBrowserRows(rows)
 			return BrowserClient{}, tx.Rollback(err)
 		}
 		sessions = append(sessions, h)
 	}
-	rows.Close()
+	if err := closeValidatedBrowserRows(rows); err != nil {
+		return BrowserClient{}, tx.Rollback(err)
+	}
 	for _, h := range sessions {
 		_, err := leaseGenerationNext(h.generation)
 		if err != nil {
@@ -673,12 +640,14 @@ func (store *Store) ResetTerminalLeases(ctx context.Context, at UnixMillis) erro
 	for rows.Next() {
 		var h held
 		if err := rows.Scan(&h.sid, &h.gen); err != nil {
-			rows.Close()
+			_ = closeValidatedBrowserRows(rows)
 			return tx.Rollback(err)
 		}
 		sessions = append(sessions, h)
 	}
-	rows.Close()
+	if err := closeValidatedBrowserRows(rows); err != nil {
+		return tx.Rollback(err)
+	}
 	for _, h := range sessions {
 		if _, err := leaseGenerationNext(h.gen); err != nil {
 			return tx.Rollback(err)
