@@ -8,10 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -84,13 +86,14 @@ esac
 
 func TestGitBlobsValidatesExactOrderAndFramingWithoutLeakingOutput(t *testing.T) {
 	cases := map[string]func(string) string{
-		"wrong oid":  func(oid string) string { return strings.Repeat("0", len(oid)) + " blob 6\\nsecret\\n" },
-		"wrong type": func(oid string) string { return oid + " tree 6\\nsecret\\n" },
-		"wrong size": func(oid string) string { return oid + " blob 5\\nshort\\n" },
-		"oversize":   func(oid string) string { return fmt.Sprintf("%s blob %d\\n", oid, MaxBlobBytes+1) },
-		"truncated":  func(oid string) string { return oid + " blob 6\\nsec" },
-		"delimiter":  func(oid string) string { return oid + " blob 6\\nsecretX" },
-		"missing":    func(oid string) string { return oid + " missing\\n" },
+		"wrong oid":       func(oid string) string { return strings.Repeat("0", len(oid)) + " blob 6\\nsecret\\n" },
+		"wrong type":      func(oid string) string { return oid + " tree 6\\nsecret\\n" },
+		"wrong size":      func(oid string) string { return oid + " blob 5\\nshort\\n" },
+		"wrong blob hash": func(oid string) string { return oid + " blob 6\\nwrong!\\n" },
+		"oversize":        func(oid string) string { return fmt.Sprintf("%s blob %d\\n", oid, MaxBlobBytes+1) },
+		"truncated":       func(oid string) string { return oid + " blob 6\\nsec" },
+		"delimiter":       func(oid string) string { return oid + " blob 6\\nsecretX" },
+		"missing":         func(oid string) string { return oid + " missing\\n" },
 	}
 	for name, response := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -109,9 +112,9 @@ func TestGitBlobsValidatesExactOrderAndFramingWithoutLeakingOutput(t *testing.T)
 			if err == nil {
 				t.Fatal("malformed batch response accepted")
 			}
-			var protocol *GitProtocolError
+			var protocol *GitError
 			if !errors.As(err, &protocol) {
-				t.Fatalf("error=%T %v, want GitProtocolError", err, err)
+				t.Fatalf("error=%T %v, want GitError", err, err)
 			}
 			if strings.Contains(err.Error(), "secret") {
 				t.Fatalf("private output leaked: %v", err)
@@ -146,6 +149,30 @@ done
 	}
 	if got := mustReadFile(t, logPath); len(got) != 0 {
 		t.Fatalf("out-of-order request reached Git: %q", got)
+	}
+}
+
+func TestGitBlobsCloseRequiresExactProtocolEOF(t *testing.T) {
+	repository := fakeRepository(t)
+	selection, entry := fakeSelection(t, repository, "", []byte("secret"))
+	script := `#!/bin/sh
+IFS= read -r request || exit 2
+printf '%s blob 6\nsecret\nTRAILING-PRIVATE-BYTES' "$request"
+while IFS= read -r ignored; do :; done
+`
+	git := writeFakeGit(t, script)
+	selection.gitExecutable, selection.gitIdentity = git, mustGitFileIdentity(t, git)
+	blobs, err := OpenGitBlobs(context.Background(), git, repository, selection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := blobs.Read(context.Background(), entry.oid)
+	if err != nil || string(data) != "secret" {
+		t.Fatalf("read=%q err=%v", data, err)
+	}
+	err = blobs.Close()
+	if err == nil || strings.Contains(err.Error(), "TRAILING-PRIVATE-BYTES") {
+		t.Fatalf("trailing protocol output was accepted or leaked: %v", err)
 	}
 }
 
@@ -255,6 +282,7 @@ func TestGitChildCancellationKillsAndWaitsExactlyOnce(t *testing.T) {
 			t.Fatalf("error=%v", err)
 		}
 		recorder.require(t, 1, 1, 1, 1)
+		recorder.requireOrder(t, gitProcessStarted, gitProcessTermed, gitProcessKilled, gitProcessWaited)
 	})
 	t.Run("blob", func(t *testing.T) {
 		repository := fakeRepository(t)
@@ -281,6 +309,7 @@ func TestGitChildCancellationKillsAndWaitsExactlyOnce(t *testing.T) {
 			t.Fatalf("error=%v", err)
 		}
 		recorder.require(t, 1, 1, 1, 1)
+		recorder.requireOrder(t, gitProcessStarted, gitProcessTermed, gitProcessKilled, gitProcessWaited)
 	})
 	t.Run("before start", func(t *testing.T) {
 		repository := fakeRepository(t)
@@ -296,9 +325,216 @@ func TestGitChildCancellationKillsAndWaitsExactlyOnce(t *testing.T) {
 	})
 }
 
-func waitForFile(t testing.TB, path string) {
+func TestGitSignalsOnlyWhileExactLeaderIsUnreaped(t *testing.T) {
+	repository := fakeRepository(t)
+	ready := filepath.Join(filepath.Dir(repository), "unreaped-ready")
+	git := writeFakeGit(t, fmt.Sprintf("#!/bin/sh\nexec /usr/bin/perl -e '$SIG{TERM}=q(IGNORE); open(F,q(>%s)); print F q(x); close(F); while(1){}'\n", ready))
+	var child *gitChild
+	var signalChecks, waitedChecks int
+	hook := func(event gitProcessEvent) {
+		switch event {
+		case gitProcessTermed, gitProcessKilled:
+			signalChecks++
+			if child == nil {
+				t.Fatal("signal hook ran before child ownership was returned")
+			}
+			if _, err := unix.Getpgid(child.pid); err != nil {
+				t.Fatalf("signal %s targeted a reaped/reusable pid %d: %v", event, child.pid, err)
+			}
+		case gitProcessWaited:
+			waitedChecks++
+			if err := unix.Kill(child.pid, 0); !errors.Is(err, unix.ESRCH) {
+				t.Fatalf("Wait hook ran before exact pid %d disappeared: %v", child.pid, err)
+			}
+		}
+	}
+	var err error
+	child, err = startGitChild(gitCommandSpec{program: git, repository: repository, home: filepath.Dir(repository), hook: hook}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForFile(t, ready)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	reaped := child.reap(ctx, false)
+	_ = closeGitFiles(child.stdout, child.stderr)
+	if !errors.Is(reaped.contextError, context.Canceled) || !reaped.cleanup || signalChecks != 2 || waitedChecks != 1 {
+		t.Fatalf("reap=%+v signalChecks=%d waitedChecks=%d", reaped, signalChecks, waitedChecks)
+	}
+}
+
+func TestRegisteredWrapperGroupOwnsGitDescendantsUntilOuterCleanup(t *testing.T) {
+	if os.Getenv("DARK_FACTORY_GIT_WRAPPER_HELPER") == "1" {
+		repository := os.Getenv("DARK_FACTORY_GIT_WRAPPER_REPOSITORY")
+		git := os.Getenv("DARK_FACTORY_GIT_WRAPPER_EXECUTABLE")
+		resultPath := os.Getenv("DARK_FACTORY_GIT_WRAPPER_RESULT")
+		readyPath := os.Getenv("DARK_FACTORY_GIT_WRAPPER_READY")
+		home := os.Getenv("DARK_FACTORY_GIT_WRAPPER_HOME")
+		ctx, cancel := context.WithCancel(context.Background())
+		result := make(chan error, 1)
+		go func() {
+			_, err := runGitCapture(ctx, gitCommandSpec{program: git, repository: repository, home: home}, 1)
+			result <- err
+		}()
+		waitForFile(t, readyPath)
+		cancel()
+		err := <-result
+		var gitErr *GitError
+		if !errors.As(err, &gitErr) || !gitErr.RequiresGroupCleanup() || !errors.Is(err, context.Canceled) {
+			t.Fatalf("wrapper helper error=%T %v", err, err)
+		}
+		if err := os.WriteFile(resultPath, []byte("cleanup-required"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		select {}
+	}
+
+	root := secureTempDir(t)
+	repository := fakeRepository(t)
+	readyPath := filepath.Join(root, "ready")
+	leaderPath := filepath.Join(root, "leader")
+	descendantPath := filepath.Join(root, "descendant")
+	resultPath := filepath.Join(root, "result")
+	home := filepath.Join(root, "home")
+	if err := os.Mkdir(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	script := fmt.Sprintf(`#!/usr/bin/perl
+use POSIX ();
+$SIG{TERM} = 'IGNORE';
+my $child = fork();
+die "fork" unless defined $child;
+if ($child == 0) {
+  $SIG{TERM} = 'IGNORE';
+  open(my $d, '>', %q) or die "descendant";
+  print $d "$$ ", POSIX::getpgrp();
+  close($d);
+  while (1) { sleep 1; }
+}
+open(my $l, '>', %q) or die "leader";
+print $l "$$ ", POSIX::getpgrp();
+close($l);
+open(my $r, '>', %q) or die "ready";
+print $r "ready";
+close($r);
+while (1) { sleep 1; }
+`, descendantPath, leaderPath, readyPath)
+	git := writeFakeGit(t, script)
+	command := exec.Command(os.Args[0], "-test.run=^TestRegisteredWrapperGroupOwnsGitDescendantsUntilOuterCleanup$")
+	command.Env = append(os.Environ(),
+		"DARK_FACTORY_GIT_WRAPPER_HELPER=1",
+		"DARK_FACTORY_GIT_WRAPPER_REPOSITORY="+repository,
+		"DARK_FACTORY_GIT_WRAPPER_EXECUTABLE="+git,
+		"DARK_FACTORY_GIT_WRAPPER_RESULT="+resultPath,
+		"DARK_FACTORY_GIT_WRAPPER_READY="+readyPath,
+		"DARK_FACTORY_GIT_WRAPPER_HOME="+home,
+	)
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	wrapperPID := command.Process.Pid
+	wrapperCleaned := false
+	t.Cleanup(func() {
+		if !wrapperCleaned {
+			_ = unix.Kill(-wrapperPID, unix.SIGKILL)
+			_ = command.Wait()
+		}
+	})
+	waitForFileUntil(t, resultPath, 5*time.Second)
+	leaderPID, leaderPGID := readPIDAndPGID(t, leaderPath)
+	descendantPID, descendantPGID := readPIDAndPGID(t, descendantPath)
+	if leaderPGID != wrapperPID || descendantPGID != wrapperPID {
+		t.Fatalf("registered wrapper pgid=%d leader=(%d,%d) descendant=(%d,%d)", wrapperPID, leaderPID, leaderPGID, descendantPID, descendantPGID)
+	}
+	if err := unix.Kill(leaderPID, 0); !errors.Is(err, unix.ESRCH) {
+		t.Fatalf("direct Git leader was not synchronously reaped: %v", err)
+	}
+	if err := unix.Kill(descendantPID, 0); err != nil {
+		t.Fatalf("descendant escaped before registered wrapper cleanup: %v", err)
+	}
+	providerWitness := filepath.Join(root, "provider-started")
+	if _, err := os.Lstat(providerWitness); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("provider witness existed before registered group cleanup: %v", err)
+	}
+	if err := unix.Kill(-wrapperPID, unix.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Wait(); err == nil {
+		t.Fatal("wrapper did not die by registered group cleanup")
+	}
+	wrapperCleaned = true
+	waitForPIDGone(t, descendantPID)
+	if err := os.WriteFile(providerWitness, []byte("provider may start"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGitChildInheritsCurrentRegisteredWrapperGroup(t *testing.T) {
+	repository := fakeRepository(t)
+	git := writeFakeGit(t, "#!/usr/bin/perl\n$SIG{TERM}=sub{exit 0}; while(1){select(undef,undef,undef,1)}\n")
+	child, err := startGitChild(gitCommandSpec{program: git, repository: repository, home: filepath.Dir(repository)}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := mustProcessGroup(t, child.pid); got != unix.Getpgrp() {
+		t.Fatalf("Git child pgid=%d current registered wrapper pgid=%d", got, unix.Getpgrp())
+	}
+	reaped := child.reap(context.Background(), true)
+	_ = closeGitFiles(child.stdout, child.stderr)
+	if !reaped.cleanup || reaped.observerErr != nil {
+		t.Fatalf("reap=%+v", reaped)
+	}
+}
+
+func mustProcessGroup(t testing.TB, pid int) int {
+	t.Helper()
+	group, err := unix.Getpgid(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return group
+}
+
+func readPIDAndPGID(t testing.TB, path string) (int, int) {
+	t.Helper()
+	fields := strings.Fields(string(mustReadFile(t, path)))
+	if len(fields) != 2 {
+		t.Fatalf("invalid process witness %q", fields)
+	}
+	pid, err := strconv.Atoi(fields[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	pgid, err := strconv.Atoi(fields[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pid, pgid
+}
+
+func waitForPIDGone(t testing.TB, pid int) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if err := unix.Kill(pid, 0); errors.Is(err, unix.ESRCH) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("process %d remains after registered group cleanup", pid)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func waitForFile(t testing.TB, path string) {
+	t.Helper()
+	waitForFileUntil(t, path, 2*time.Second)
+}
+
+func waitForFileUntil(t testing.TB, path string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
 	for {
 		if _, err := os.Lstat(path); err == nil {
 			return
@@ -349,9 +585,9 @@ func TestGitStartFailureLeavesNoOwnedProcessDescriptorOrHome(t *testing.T) {
 	if err == nil {
 		t.Fatal("invalid executable image started")
 	}
-	var process *GitProcessError
+	var process *GitError
 	if !errors.As(err, &process) {
-		t.Fatalf("error=%T %v, want GitProcessError", err, err)
+		t.Fatalf("error=%T %v, want GitError", err, err)
 	}
 	recorder.require(t, 0, 0, 0, 0)
 	if after := descriptorCount(t); after != beforeFDs {
@@ -387,6 +623,20 @@ func (r *gitEventRecorder) require(t testing.TB, started, termed, killed, waited
 	}
 }
 
+func (r *gitEventRecorder) requireOrder(t testing.TB, want ...gitProcessEvent) {
+	t.Helper()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.events) != len(want) {
+		t.Fatalf("process events=%v want=%v", r.events, want)
+	}
+	for index := range want {
+		if r.events[index] != want[index] {
+			t.Fatalf("process events=%v want=%v", r.events, want)
+		}
+	}
+}
+
 func fakeRepository(t testing.TB) string {
 	t.Helper()
 	repository := filepath.Join(secureTempDir(t), "repository")
@@ -394,6 +644,12 @@ func fakeRepository(t testing.TB) string {
 		t.Fatal(err)
 	}
 	if err := os.Mkdir(filepath.Join(repository, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repository, ".git", "config"), []byte("[core]\n\trepositoryformatversion = 0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(repository, ".git", "objects"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	return repository
@@ -407,8 +663,13 @@ func fakeSelection(t testing.TB, repository, path string, data []byte) (Selectio
 		path = "file"
 	}
 	entry := mustEntry(t, format, []byte(path), "100644", data)
+	repositoryIdentity := mustRepositoryIdentity(t, repository)
+	repositoryCheckpoint, err := checkpointRepository(repository, repositoryIdentity)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return Selection{
-		repositoryRoot: repository, repositoryIdentity: mustRepositoryIdentity(t, repository),
+		repositoryRoot: repository, repositoryIdentity: repositoryIdentity, repository: repositoryCheckpoint,
 		format: format, base: base, manifest: mustManifest(t, format, base, []Entry{entry}),
 	}, entry
 }

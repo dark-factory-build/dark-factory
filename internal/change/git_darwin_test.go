@@ -5,14 +5,18 @@ package change
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"testing"
+	"time"
 )
 
 type localGitFixture struct {
@@ -152,6 +156,11 @@ func TestSelectGitRejectsPartialCloneAlternatesAndNonCommitRevision(t *testing.T
 		t.Fatal("partial clone accepted")
 	}
 	runFixtureGit(t, fixture.git, fixture.repository, "config", "--unset", "extensions.partialClone")
+	runFixtureGit(t, fixture.git, fixture.repository, "config", "remote.origin.promisor", "true")
+	if _, err := SelectGit(context.Background(), fixture.git, fixture.repository, "HEAD", fixture.identity); err == nil {
+		t.Fatal("direct promisor remote accepted")
+	}
+	runFixtureGit(t, fixture.git, fixture.repository, "config", "--unset", "remote.origin.promisor")
 	alternates := filepath.Join(fixture.repository, ".git", "objects", "info", "alternates")
 	if err := os.WriteFile(alternates, []byte("/private/tmp/objects\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -173,6 +182,105 @@ func TestSelectGitRejectsPartialCloneAlternatesAndNonCommitRevision(t *testing.T
 	}
 	if !tagged.Base().equal(fixture.base) {
 		t.Fatalf("tag selected %s, want commit %s", tagged.Base().Hex(), fixture.base.Hex())
+	}
+}
+
+func TestSelectGitRejectsLocalIncludesBeforeExecutingGit(t *testing.T) {
+	for name, section := range map[string]string{
+		"direct include":      "[include]\n\tpath = ../outside-config\n",
+		"conditional include": "[includeIf \"gitdir:**/repository/**\"]\n\tpath = ../outside-config\n",
+		"case folded include": "[InClUdEiF \"onbranch:main\"]\n\tpath = ../outside-config\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			repository := fakeRepository(t)
+			outside := filepath.Join(filepath.Dir(repository), "outside-config")
+			if err := os.WriteFile(outside, []byte("[remote \"origin\"]\n\tpromisor = true\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(repository, ".git", "config"), []byte("[core]\n\trepositoryformatversion = 0\n"+section), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			started := filepath.Join(filepath.Dir(repository), "ordinary-git-started")
+			git := writeFakeGit(t, fmt.Sprintf("#!/bin/sh\n: > %q\nexit 99\n", started))
+			_, err := SelectGit(context.Background(), git, repository, "HEAD", mustRepositoryIdentity(t, repository))
+			if err == nil {
+				t.Fatal("local config include was accepted")
+			}
+			if _, statErr := os.Lstat(started); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("ordinary Git ran before include refusal: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestGitAdminFilesAndObjectStoreAreExactAndRechecked(t *testing.T) {
+	t.Run("config symlink", func(t *testing.T) {
+		repository := fakeRepository(t)
+		config := filepath.Join(repository, ".git", "config")
+		outside := filepath.Join(filepath.Dir(repository), "private-config")
+		if err := os.WriteFile(outside, []byte("[core]\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(config); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, config); err != nil {
+			t.Fatal(err)
+		}
+		git := writeFakeGit(t, "#!/bin/sh\nexit 99\n")
+		if _, err := SelectGit(context.Background(), git, repository, "HEAD", mustRepositoryIdentity(t, repository)); err == nil {
+			t.Fatal("symlink Git config accepted")
+		}
+	})
+	t.Run("objects symlink", func(t *testing.T) {
+		repository := fakeRepository(t)
+		objects := filepath.Join(repository, ".git", "objects")
+		outside := filepath.Join(filepath.Dir(repository), "external-objects")
+		if err := os.Mkdir(outside, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(objects); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, objects); err != nil {
+			t.Fatal(err)
+		}
+		git := writeFakeGit(t, "#!/bin/sh\nexit 99\n")
+		if _, err := SelectGit(context.Background(), git, repository, "HEAD", mustRepositoryIdentity(t, repository)); err == nil {
+			t.Fatal("external symlink object store accepted")
+		}
+	})
+	for _, adminName := range []string{"config", "objects"} {
+		t.Run(adminName+" swapped between phases", func(t *testing.T) {
+			repository := fakeRepository(t)
+			logPath := filepath.Join(filepath.Dir(repository), "commands")
+			git := writeFakeGit(t, fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %q\nexit 1\n", logPath))
+			mutated := false
+			_, err := selectGit(context.Background(), git, repository, "HEAD", mustRepositoryIdentity(t, repository), func(event gitProcessEvent) {
+				if event != gitProcessWaited || mutated {
+					return
+				}
+				mutated = true
+				path := filepath.Join(repository, ".git", adminName)
+				old := path + "-old"
+				if renameErr := os.Rename(path, old); renameErr != nil {
+					panic(renameErr)
+				}
+				if adminName == "config" {
+					if writeErr := os.WriteFile(path, mustReadFile(t, old), 0o600); writeErr != nil {
+						panic(writeErr)
+					}
+				} else if mkdirErr := os.Mkdir(path, 0o700); mkdirErr != nil {
+					panic(mkdirErr)
+				}
+			})
+			if err == nil {
+				t.Fatal("Git administrative identity swap crossed phase boundary")
+			}
+			if lines := bytes.Count(mustReadFile(t, logPath), []byte{'\n'}); lines != 1 {
+				t.Fatalf("replacement Git phase ran after admin swap: command lines=%d", lines)
+			}
+		})
 	}
 }
 
@@ -228,6 +336,123 @@ esac
 	})
 	if err == nil {
 		t.Fatal("Git executable replacement after blob child start was accepted")
+	}
+}
+
+func TestGitExecutableIsContentFrozenAcrossEveryPhase(t *testing.T) {
+	for _, mutation := range []string{"same-size bytes", "changed-size", "mode", "timestamps"} {
+		t.Run(mutation, func(t *testing.T) {
+			repository := fakeRepository(t)
+			logPath := filepath.Join(filepath.Dir(repository), "commands")
+			startedAfterMutation := filepath.Join(filepath.Dir(repository), "replacement-ran")
+			original := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %q\nexit 1\n# %s\n", logPath, strings.Repeat("padding", 20))
+			git := writeFakeGit(t, original)
+			mutated := false
+			_, err := selectGit(context.Background(), git, repository, "HEAD", mustRepositoryIdentity(t, repository), func(event gitProcessEvent) {
+				if event != gitProcessWaited || mutated {
+					return
+				}
+				mutated = true
+				switch mutation {
+				case "same-size bytes":
+					replacement := fmt.Sprintf("#!/bin/sh\n: > %q\nexit 77\n", startedAfterMutation)
+					if len(replacement) > len(original) {
+						panic("test replacement exceeds original")
+					}
+					replacement += strings.Repeat("#", len(original)-len(replacement))
+					if writeErr := os.WriteFile(git, []byte(replacement), 0o700); writeErr != nil {
+						panic(writeErr)
+					}
+				case "changed-size":
+					if writeErr := os.WriteFile(git, []byte("#!/bin/sh\nexit 77\n"), 0o700); writeErr != nil {
+						panic(writeErr)
+					}
+				case "mode":
+					if chmodErr := os.Chmod(git, 0o500); chmodErr != nil {
+						panic(chmodErr)
+					}
+				case "timestamps":
+					when := time.Unix(1, 0)
+					if chtimeErr := os.Chtimes(git, when, when); chtimeErr != nil {
+						panic(chtimeErr)
+					}
+				}
+			})
+			if err == nil {
+				t.Fatal("in-place Git executable mutation was accepted")
+			}
+			if _, statErr := os.Lstat(startedAfterMutation); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("mutated executable ran another phase: %v", statErr)
+			}
+			if lines := bytes.Count(mustReadFile(t, logPath), []byte{'\n'}); lines != 1 {
+				t.Fatalf("unexpected phases executed after mutation: %d", lines)
+			}
+		})
+	}
+}
+
+func TestGitPublicFailuresNeverExposePrivateBoundaryData(t *testing.T) {
+	const sentinel = "DARK-FACTORY-PRIVATE-SENTINEL"
+	assertPrivate := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("private failure fixture unexpectedly succeeded")
+		}
+		encoded, jsonErr := json.Marshal(err)
+		if jsonErr != nil {
+			t.Fatal(jsonErr)
+		}
+		texts := []string{err.Error(), fmt.Sprintf("%v", err), fmt.Sprintf("%+v", err), fmt.Sprintf("%#v", err), string(encoded)}
+		for cause := errors.Unwrap(err); cause != nil; cause = errors.Unwrap(cause) {
+			texts = append(texts, cause.Error(), fmt.Sprintf("%#v", cause))
+		}
+		for _, text := range texts {
+			if strings.Contains(text, sentinel) {
+				t.Fatalf("public failure leaked private sentinel: %q", text)
+			}
+		}
+	}
+
+	repository := fakeRepository(t)
+	git := writeFakeGit(t, "#!/bin/sh\nexit 1\n")
+	_, err := SelectGit(context.Background(), git, filepath.Join(filepath.Dir(repository), sentinel), "HEAD", mustRepositoryIdentity(t, repository))
+	assertPrivate(t, err)
+	_, err = SelectGit(context.Background(), filepath.Join(filepath.Dir(repository), sentinel), repository, "HEAD", mustRepositoryIdentity(t, repository))
+	assertPrivate(t, err)
+
+	stderrGit := writeFakeGit(t, "#!/bin/sh\nprintf '"+sentinel+"\\n' >&2\nexit 91\n")
+	_, err = SelectGit(context.Background(), stderrGit, repository, "HEAD", mustRepositoryIdentity(t, repository))
+	assertPrivate(t, err)
+	protocolGit := writeFakeGit(t, "#!/bin/sh\ncase \"$*\" in *\" config \"*) exit 1;; *) printf '"+sentinel+"\\n';; esac\n")
+	_, err = SelectGit(context.Background(), protocolGit, repository, "HEAD", mustRepositoryIdentity(t, repository))
+	assertPrivate(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = SelectGit(ctx, git, repository, "HEAD", mustRepositoryIdentity(t, repository))
+	assertPrivate(t, err)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("sanitized cancellation lost errors.Is: %v", err)
+	}
+	gitErrorType := reflect.TypeOf(GitError{})
+	for index := 0; index < gitErrorType.NumField(); index++ {
+		if gitErrorType.Field(index).IsExported() {
+			t.Fatalf("GitError exports private field %s", gitErrorType.Field(index).Name)
+		}
+	}
+	privateRepository := filepath.Join(filepath.Dir(repository), sentinel+"-repository")
+	if err := os.Rename(repository, privateRepository); err != nil {
+		t.Fatal(err)
+	}
+	selection, _ := fakeSelection(t, privateRepository, "", []byte("secret"))
+	selection.gitExecutable = filepath.Join(filepath.Dir(privateRepository), sentinel+"-git")
+	selectionText := fmt.Sprintf("%v|%+v|%#v", selection, selection, selection)
+	selectionJSON, err := json.Marshal(selection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(selectionText, sentinel) || strings.Contains(string(selectionJSON), sentinel) {
+		t.Fatalf("public Selection formatting leaked private locators: %q %q", selectionText, selectionJSON)
 	}
 }
 
@@ -365,14 +590,22 @@ func fixtureGitEnvironment(home string) []string {
 
 func TestGitBoundaryResourceCensus(t *testing.T) {
 	fixture := newLocalGitFixture(t, "sha1")
-	runtime.GC()
+	previousGC := debug.SetGCPercent(-1)
+	t.Cleanup(func() { debug.SetGCPercent(previousGC) })
 	beforeFDs := descriptorCount(t)
 	beforeGoroutines := runtime.NumGoroutine()
-	for range 10 {
-		selected, err := SelectGit(context.Background(), fixture.git, fixture.repository, "HEAD", fixture.identity)
+	var selected Selection
+	for range 40 {
+		var err error
+		selected, err = SelectGit(context.Background(), fixture.git, fixture.repository, "HEAD", fixture.identity)
 		if err != nil {
 			t.Fatal(err)
 		}
+	}
+	if after := descriptorCount(t); after != beforeFDs {
+		t.Fatalf("40 public SelectGit calls leaked descriptors without GC: before=%d after=%d", beforeFDs, after)
+	}
+	for range 20 {
 		blobs, err := OpenGitBlobs(context.Background(), fixture.git, fixture.repository, selected)
 		if err != nil {
 			t.Fatal(err)
@@ -386,11 +619,39 @@ func TestGitBoundaryResourceCensus(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	runtime.GC()
-	if after := descriptorCount(t); after != beforeFDs {
-		t.Fatalf("Git boundary descriptor leak: before=%d after=%d", beforeFDs, after)
+	malformedRepository := fakeRepository(t)
+	malformedSelection, malformedEntry := fakeSelection(t, malformedRepository, "", []byte("secret"))
+	malformedGit := writeFakeGit(t, "#!/bin/sh\nIFS= read -r request || exit 2\nprintf '%s blob 6\\nwrong!\\n' \"$request\"\n")
+	malformedSelection.gitExecutable, malformedSelection.gitIdentity = malformedGit, mustGitFileIdentity(t, malformedGit)
+	for range 10 {
+		blobs, err := OpenGitBlobs(context.Background(), malformedGit, malformedRepository, malformedSelection)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := blobs.Read(context.Background(), malformedEntry.oid); err == nil {
+			t.Fatal("malformed resource-census blob was accepted")
+		}
 	}
-	if after := runtime.NumGoroutine(); after > beforeGoroutines+1 {
+	blockedRepository := fakeRepository(t)
+	blockedSelection, blockedEntry := fakeSelection(t, blockedRepository, "", []byte("secret"))
+	blockedGit := writeFakeGit(t, "#!/bin/sh\nIFS= read -r request || exit 2\nexec /usr/bin/perl -e '$SIG{TERM}=sub{exit 0}; while(1){select(undef,undef,undef,1)}'\n")
+	blockedSelection.gitExecutable, blockedSelection.gitIdentity = blockedGit, mustGitFileIdentity(t, blockedGit)
+	for range 5 {
+		blobs, err := OpenGitBlobs(context.Background(), blockedGit, blockedRepository, blockedSelection)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		_, err = blobs.Read(ctx, blockedEntry.oid)
+		cancel()
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("blocked resource-census read=%v", err)
+		}
+	}
+	if after := descriptorCount(t); after != beforeFDs {
+		t.Fatalf("Git blob success/error/cancel paths leaked descriptors without GC: before=%d after=%d", beforeFDs, after)
+	}
+	if after := runtime.NumGoroutine(); after > beforeGoroutines {
 		t.Fatalf("Git boundary goroutine leak: before=%d after=%d", beforeGoroutines, after)
 	}
 	homes, err := filepath.Glob(filepath.Join(os.Getenv("TMPDIR"), "dark-factory-git-home-*"))
