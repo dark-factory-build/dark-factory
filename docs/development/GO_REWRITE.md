@@ -264,18 +264,28 @@ run transition from running, or daemon restart revokes the lease.
 One per-run daemon operation gate serializes ordinary terminal input,
 HumanRequest delivery and the first outcome/finalizing transition. An input
 operation revalidates durable running state and the current lease while holding
-that gate, then waits for the runner write/ACK before releasing it. Finalizing
-takes the same gate, waits for any prior write, closes the browser input gate,
-commits the durable finalizing/credential-revocation transaction, advances the
-runner input generation synchronously, and never reopens it. A queued stale
-call can run only afterward, reloads finalizing and fails. The runner also
-checks accepting state and lease generation immediately before each PTY write;
-no buffered write may cross its revocation barrier. The mutex orders effects
-but never authorizes them; SQLite phase and exact credentials remain authority.
+that gate, then waits for one bounded runner write result before releasing it.
+The PTY master is nonblocking for input. The runner writes only the current
+bounded frame until complete, the fixed write deadline expires, or revocation/
+closure interrupts it; it never hides a partial write or puts the unwritten
+suffix into a background queue. The result contains the exact byte count when
+known and otherwise an explicit delivery-uncertain error. Neither result is
+automatically retried. This bound prevents a provider that stops reading from
+holding the daemon operation gate indefinitely.
 
-The runner ACKs input only after the live PTY write. A client never
-automatically retransmits an unacknowledged frame after reconnect because
-delivery is uncertain.
+Finalizing takes the same gate, waits only for that bounded prior result, closes
+the browser input gate, commits the durable finalizing/credential-revocation
+transaction, advances the runner input generation synchronously, and never
+reopens it. A queued stale call can run only afterward, reloads finalizing and
+fails. The runner also checks accepting state and lease generation immediately
+before each PTY write; no buffered write may cross its revocation barrier. The
+mutex orders effects but never authorizes them; SQLite phase and exact
+credentials remain authority.
+
+The runner ACKs input only after a complete live PTY write. Partial, timed-out
+or unknown results are surfaced with no retry. A client never automatically
+retransmits an unacknowledged frame after reconnect because delivery is
+uncertain.
 
 Multiple readers are ordinary observers. Collaborative/multi-writer terminal
 editing, durable lease survival, LAN listeners, and PTY recovery by numeric
@@ -455,9 +465,14 @@ proof-of-possession prevents key export and cloning, not same-origin script
 abuse. This is an explicit residual trust boundary. Mitigations are least
 capabilities, exact public-artifact provenance, strict CSP, no third-party
 terminal-context code, bounded daemon operations, and immediate `factoryctl`
-client revocation. `SECURITY.md` documents the incident response, and a test
-proves revocation terminates existing connections and refuses every later
-proof/action from that client.
+client revocation. Before the browser surface is enabled, `SECURITY.md` must
+document the incident response:
+revoke affected clients, terminate their existing connections, remediate and
+republish the hosted artifact, then re-pair. A compromised hosted artifact is
+a release incident. A causal recovery test starts with the hosted page absent
+or explicitly untrusted, uses only the owner-authenticated Unix
+`factoryctl web revoke` path, and proves revocation terminates existing
+connections and refuses every later proof/action from that client.
 
 ### Hosted-origin connectivity spike
 
@@ -585,6 +600,11 @@ matrix, the following must exist and kill the named guard mutations:
 - Input before running, without the current lease, from a stale lease/client,
   or after finalizing is refused; removing the phase or lease-generation check
   is killed by an exact fixture input count.
+- A provider that never reads PTY input cannot hold the operation gate:
+  nonblocking bounded writes return complete, exact partial or
+  delivery-uncertain within the fixed deadline; finalizing then advances and
+  no suffix/background write crosses revocation. Removing nonblocking mode,
+  the deadline or partial-result propagation is killed by this fixture.
 - Detach leaves provider live; reconnect from retained sequence yields exact
   scrollback/live order; removing the retention-floor reset is killed.
 - Slow clients cannot grow memory/disk or block PTY/provider; removing the
@@ -676,6 +696,7 @@ hosted-origin browser connectivity contract recorded and GREEN on supported Chro
 loopback Host/Origin/pairing/revocation/security matrix GREEN
 interactive terminal output/input/resize/reconnect/reset GREEN
 single-writer lease and finalization revocation GREEN
+stalled-provider input bound and no-post-revocation-write GREEN
 HumanRequest inline reply, typed action, stale/idempotent/restart/privacy GREEN
 browser protocol v1 Go/TypeScript fixture and real-server integration GREEN
 factoryctl web bootstrap/recovery GREEN
@@ -684,6 +705,7 @@ private site exact-artifact pair/state/terminal/request/action/refresh integrati
 fresh isolated install/service/restart/uninstall GREEN
 whole-runtime/web elegance audit complete
 independent exact-head architecture/security/process/Store/browser reviews ALLOW
+hosted-origin compromise/revocation runbook recorded in SECURITY.md
 ```
 
 If private-site integration cannot run, hard cutover stops and reports that
