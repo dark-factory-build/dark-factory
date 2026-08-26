@@ -338,20 +338,27 @@ func runGitCapture(ctx context.Context, spec gitCommandSpec, maximum int) (gitCa
 		return gitCapture{}, &GitProcessError{Operation: spec.operation, Cause: err}
 	}
 	command := spec.command()
-	stdout, err := command.StdoutPipe()
+	stdout, childStdout, err := os.Pipe()
 	if err != nil {
 		return gitCapture{}, &GitProcessError{Operation: spec.operation, Cause: err}
 	}
-	stderr, err := command.StderrPipe()
+	stderr, childStderr, err := os.Pipe()
 	if err != nil {
 		stdout.Close()
+		childStdout.Close()
 		return gitCapture{}, &GitProcessError{Operation: spec.operation, Cause: err}
 	}
+	command.Stdout = childStdout
+	command.Stderr = childStderr
 	if err := command.Start(); err != nil {
 		stdout.Close()
+		childStdout.Close()
 		stderr.Close()
+		childStderr.Close()
 		return gitCapture{}, &GitProcessError{Operation: spec.operation, Cause: err}
 	}
+	childStdout.Close()
+	childStderr.Close()
 	if spec.hook != nil {
 		spec.hook(gitProcessStarted)
 	}
@@ -510,31 +517,43 @@ func openGitBlobs(ctx context.Context, gitExecutable, repositoryRoot string, sel
 		arguments: []string{"-C", repositoryRoot, "cat-file", "--batch"}, operation: "blob reader", hook: hook,
 	}
 	command := spec.command()
-	stdin, err := command.StdinPipe()
+	childStdin, stdin, err := os.Pipe()
 	if err != nil {
 		_ = cleanupGitHome(home)
 		return nil, &GitProcessError{Operation: spec.operation, Cause: err}
 	}
-	stdout, err := command.StdoutPipe()
+	stdout, childStdout, err := os.Pipe()
 	if err != nil {
+		childStdin.Close()
 		stdin.Close()
 		_ = cleanupGitHome(home)
 		return nil, &GitProcessError{Operation: spec.operation, Cause: err}
 	}
-	stderr, err := command.StderrPipe()
+	stderr, childStderr, err := os.Pipe()
 	if err != nil {
+		childStdin.Close()
 		stdin.Close()
 		stdout.Close()
+		childStdout.Close()
 		_ = cleanupGitHome(home)
 		return nil, &GitProcessError{Operation: spec.operation, Cause: err}
 	}
+	command.Stdin = childStdin
+	command.Stdout = childStdout
+	command.Stderr = childStderr
 	if err := command.Start(); err != nil {
+		childStdin.Close()
 		stdin.Close()
 		stdout.Close()
+		childStdout.Close()
 		stderr.Close()
+		childStderr.Close()
 		_ = cleanupGitHome(home)
 		return nil, &GitProcessError{Operation: spec.operation, Cause: err}
 	}
+	childStdin.Close()
+	childStdout.Close()
+	childStderr.Close()
 	if hook != nil {
 		hook(gitProcessStarted)
 	}

@@ -365,6 +365,7 @@ func fixtureGitEnvironment(home string) []string {
 
 func TestGitBoundaryResourceCensus(t *testing.T) {
 	fixture := newLocalGitFixture(t, "sha1")
+	runtime.GC()
 	beforeFDs := descriptorCount(t)
 	beforeGoroutines := runtime.NumGoroutine()
 	for range 10 {
