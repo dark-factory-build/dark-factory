@@ -7,12 +7,12 @@
     {"name": "terminal_input", "bit": 3, "value": 8}
   ],
   "control": [
-    {"type": "HELLO", "direction": "server", "id": "forbidden"},
-    {"type": "PAIR_PROVE", "direction": "client", "id": "required"},
-    {"type": "PAIR_RESULT", "direction": "server", "id": "required"},
-    {"type": "AUTH_PROVE", "direction": "client", "id": "required"},
-    {"type": "AUTH_RESULT", "direction": "server", "id": "required"},
-    {"type": "ERROR", "direction": "both", "id": "optional"}
+    {"type": "HELLO", "direction": "server", "id": "forbidden", "fixture": "hello.json"},
+    {"type": "PAIR_PROVE", "direction": "client", "id": "required", "fixture": "pair_prove.json"},
+    {"type": "PAIR_RESULT", "direction": "server", "id": "required", "fixture": "pair_result.json"},
+    {"type": "AUTH_PROVE", "direction": "client", "id": "required", "fixture": "auth_prove.json"},
+    {"type": "AUTH_RESULT", "direction": "server", "id": "required", "fixture": "auth_result.json"},
+    {"type": "ERROR", "direction": "both", "id": "optional", "fixture": "error.json"}
   ],
   "terminal": {
     "magic": "DF",
@@ -20,8 +20,8 @@
     "header_bytes": 40,
     "max_payload_bytes": 65536,
     "opcodes": [
-      {"name": "TERMINAL_INPUT", "value": 1, "direction": "client"},
-      {"name": "TERMINAL_OUTPUT", "value": 2, "direction": "server"}
+      {"name": "TERMINAL_INPUT", "value": 1, "direction": "client", "fixture": "terminal_input.hex"},
+      {"name": "TERMINAL_OUTPUT", "value": 2, "direction": "server", "fixture": "terminal_output.hex"}
     ]
   }
 }

@@ -15,7 +15,7 @@ import (
 // The v1 control protocol intentionally contains only the handshake and
 // authentication messages needed before the rest of the browser API exists.
 // Adding a message is a contract change: add its manifest entry, fixture and
-// explicit case in DecodeControl together.
+// explicit case in the role-specific decoders together.
 const (
 	MaxControlBytes = 64 << 10
 	MaxJSONDepth    = 16
@@ -114,7 +114,7 @@ var (
 type controlEnvelope struct {
 	Version uint16          `json:"v"`
 	Type    MessageType     `json:"type"`
-	ID      string          `json:"id,omitempty"`
+	ID      json.RawMessage `json:"id,omitempty"`
 	Body    json.RawMessage `json:"body"`
 }
 
@@ -146,7 +146,14 @@ func encodeControl(kind MessageType, id string, body any) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: body: %v", ErrMalformed, err)
 	}
-	frame, err := json.Marshal(controlEnvelope{Version: 1, Type: kind, ID: id, Body: payload})
+	var wireID json.RawMessage
+	if id != "" {
+		wireID, err = json.Marshal(id)
+		if err != nil {
+			return nil, fmt.Errorf("%w: id: %v", ErrMalformed, err)
+		}
+	}
+	frame, err := json.Marshal(controlEnvelope{Version: 1, Type: kind, ID: wireID, Body: payload})
 	if err != nil {
 		return nil, fmt.Errorf("%w: envelope: %v", ErrMalformed, err)
 	}
@@ -156,7 +163,26 @@ func encodeControl(kind MessageType, id string, body any) ([]byte, error) {
 	return frame, nil
 }
 
-func DecodeControl(data []byte) (ControlFrame, error) {
+// DecodeClientControl accepts only frames a browser client may send. ERROR is
+// bidirectional; all other message directions are closed in the manifest.
+func DecodeClientControl(data []byte) (ControlFrame, error) {
+	return decodeControl(data, clientRole)
+}
+
+// DecodeServerControl accepts only frames factoryd may send. ERROR is
+// bidirectional; all other message directions are closed in the manifest.
+func DecodeServerControl(data []byte) (ControlFrame, error) {
+	return decodeControl(data, serverRole)
+}
+
+type senderRole byte
+
+const (
+	clientRole senderRole = 1
+	serverRole senderRole = 2
+)
+
+func decodeControl(data []byte, role senderRole) (ControlFrame, error) {
 	if len(data) > MaxControlBytes {
 		return ControlFrame{}, ErrOversized
 	}
@@ -164,20 +190,24 @@ func DecodeControl(data []byte) (ControlFrame, error) {
 		return ControlFrame{}, ErrMalformed
 	}
 	if err := validateJSON(data); err != nil {
-		return ControlFrame{}, err
+		return ControlFrame{}, ErrMalformed
 	}
 	var envelope controlEnvelope
 	if err := unmarshalObject(data, &envelope); err != nil {
-		return ControlFrame{}, err
+		return ControlFrame{}, ErrMalformed
 	}
 	if envelope.Version != 1 {
-		return ControlFrame{}, fmt.Errorf("%w: version %d", ErrMalformed, envelope.Version)
+		return ControlFrame{}, ErrMalformed
 	}
-	if err := validateID(envelope.ID, envelope.Type); err != nil {
-		return ControlFrame{}, err
+	id, idPresent, ok := decodeID(envelope.ID)
+	if !ok || !validIDPresence(id, idPresent, envelope.Type) {
+		return ControlFrame{}, ErrMalformed
 	}
 	if len(envelope.Body) == 0 || bytes.Equal(bytes.TrimSpace(envelope.Body), []byte("null")) {
-		return ControlFrame{}, fmt.Errorf("%w: missing body", ErrMalformed)
+		return ControlFrame{}, ErrMalformed
+	}
+	if !typeAllowed(role, envelope.Type) {
+		return ControlFrame{}, ErrMalformed
 	}
 	var body any
 	switch envelope.Type {
@@ -197,26 +227,61 @@ func DecodeControl(data []byte) (ControlFrame, error) {
 			Retryable *bool     `json:"retryable"`
 		}
 		if err := unmarshalObject(envelope.Body, &value); err != nil {
-			return ControlFrame{}, err
+			return ControlFrame{}, ErrMalformed
 		}
 		if value.Retryable == nil {
-			return ControlFrame{}, fmt.Errorf("%w: ERROR requires retryable", ErrMalformed)
+			return ControlFrame{}, ErrMalformed
 		}
 		body = Error{Code: value.Code, Retryable: *value.Retryable}
 		if err := validateBody(envelope.Type, body); err != nil {
-			return ControlFrame{}, err
+			return ControlFrame{}, ErrMalformed
 		}
-		return ControlFrame{Version: envelope.Version, Type: envelope.Type, ID: envelope.ID, Body: body}, nil
+		return ControlFrame{Version: envelope.Version, Type: envelope.Type, ID: id, Body: body}, nil
 	default:
-		return ControlFrame{}, fmt.Errorf("%w: unknown type %q", ErrMalformed, envelope.Type)
+		return ControlFrame{}, ErrMalformed
 	}
 	if err := unmarshalObject(envelope.Body, body); err != nil {
-		return ControlFrame{}, err
+		return ControlFrame{}, ErrMalformed
 	}
 	if err := validateBody(envelope.Type, body); err != nil {
-		return ControlFrame{}, err
+		return ControlFrame{}, ErrMalformed
 	}
-	return ControlFrame{Version: envelope.Version, Type: envelope.Type, ID: envelope.ID, Body: dereferenceBody(body)}, nil
+	return ControlFrame{Version: envelope.Version, Type: envelope.Type, ID: id, Body: dereferenceBody(body)}, nil
+}
+
+func decodeID(raw json.RawMessage) (string, bool, bool) {
+	if len(raw) == 0 {
+		return "", false, true
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return "", true, false
+	}
+	var value string
+	if json.Unmarshal(raw, &value) != nil {
+		return "", true, false
+	}
+	return value, true, true
+}
+
+func validIDPresence(id string, present bool, kind MessageType) bool {
+	required := kind == TypePairProve || kind == TypePairResult || kind == TypeAuthProve || kind == TypeAuthResult
+	if !present {
+		return !required && (kind == TypeHello || kind == TypeError)
+	}
+	if id == "" {
+		return false
+	}
+	return validateID(id, kind) == nil
+}
+
+func typeAllowed(role senderRole, kind MessageType) bool {
+	if kind == TypeError {
+		return true
+	}
+	if role == clientRole {
+		return kind == TypePairProve || kind == TypeAuthProve
+	}
+	return role == serverRole && (kind == TypeHello || kind == TypePairResult || kind == TypeAuthResult)
 }
 
 func dereferenceBody(body any) any {

@@ -40,28 +40,31 @@ func EncodeTerminalOutput(sessionID [16]byte, sequence uint64, payload []byte) (
 
 func DecodeTerminalFrame(data []byte) (TerminalFrame, error) {
 	if len(data) < TerminalHeaderSize || len(data) > TerminalHeaderSize+MaxTerminalPayload {
-		return TerminalFrame{}, fmt.Errorf("%w: invalid binary frame length", ErrMalformed)
+		return TerminalFrame{}, ErrMalformed
 	}
 	if data[0] != 'D' || data[1] != 'F' || data[2] != TerminalProtocolVersion {
-		return TerminalFrame{}, fmt.Errorf("%w: binary magic or version", ErrMalformed)
+		return TerminalFrame{}, ErrMalformed
 	}
 	opcode := data[3]
 	if TerminalOpcode(opcode) != TerminalInputOpcode && TerminalOpcode(opcode) != TerminalOutputOpcode {
-		return TerminalFrame{}, fmt.Errorf("%w: binary opcode", ErrMalformed)
+		return TerminalFrame{}, ErrMalformed
 	}
 	var sessionID [16]byte
 	copy(sessionID[:], data[4:20])
 	if zeroID(sessionID) {
-		return TerminalFrame{}, fmt.Errorf("%w: zero session id", ErrMalformed)
+		return TerminalFrame{}, ErrMalformed
 	}
 	sequence := binary.BigEndian.Uint64(data[20:28])
 	generation := binary.BigEndian.Uint64(data[28:36])
 	payloadLength := binary.BigEndian.Uint32(data[36:40])
 	if payloadLength > MaxTerminalPayload || uint64(TerminalHeaderSize)+uint64(payloadLength) != uint64(len(data)) {
-		return TerminalFrame{}, fmt.Errorf("%w: binary payload length", ErrMalformed)
+		return TerminalFrame{}, ErrMalformed
 	}
 	if payloadLength == 0 || (TerminalOpcode(opcode) == TerminalInputOpcode && (sequence == 0 || generation == 0)) || (TerminalOpcode(opcode) == TerminalOutputOpcode && generation != 0) {
-		return TerminalFrame{}, fmt.Errorf("%w: binary sequence, generation or payload", ErrMalformed)
+		return TerminalFrame{}, ErrMalformed
+	}
+	if TerminalOpcode(opcode) == TerminalOutputOpcode && sequence > ^uint64(0)-uint64(payloadLength) {
+		return TerminalFrame{}, ErrMalformed
 	}
 	payload := make([]byte, payloadLength)
 	copy(payload, data[TerminalHeaderSize:])
@@ -83,6 +86,9 @@ func encodeTerminalFrame(frame TerminalFrame) ([]byte, error) {
 	}
 	if frame.Opcode == TerminalOutputOpcode && frame.LeaseGeneration != 0 {
 		return nil, fmt.Errorf("%w: output generation must be zero", ErrMalformed)
+	}
+	if frame.Opcode == TerminalOutputOpcode && frame.Sequence > ^uint64(0)-uint64(len(frame.Payload)) {
+		return nil, ErrMalformed
 	}
 	result := make([]byte, TerminalHeaderSize+len(frame.Payload))
 	result[0], result[1], result[2], result[3] = 'D', 'F', TerminalProtocolVersion, byte(frame.Opcode)
