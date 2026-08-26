@@ -260,6 +260,24 @@ func TestOnlyConfiguredWorkerSuccessRequiresLaterVerifier(t *testing.T) {
 	}
 }
 
+func TestAttemptRequestedFailureHasOneTypedDurableCode(t *testing.T) {
+	store, running, keys := runningOrchestratorRun(t)
+	defer store.Close()
+
+	proposal, err := NewFailureProposal(FailureAttempt, "")
+	if err != nil || proposal.Code() != FailureAttempt || proposal.Code().String() != "attempt" {
+		t.Fatalf("attempt failure proposal = %+v, %v", proposal, err)
+	}
+	finalizing, err := store.ProposeAttemptOutcome(context.Background(), keys.AttemptDigest, proposal, mustTime(t, 40))
+	if err != nil || finalizing.Phase != RunFinalizing || finalizing.Proposal == nil || finalizing.Proposal.Code() != FailureAttempt || finalizing.Proposal.Detail() != "" {
+		t.Fatalf("durable attempt failure = %+v, %v", finalizing, err)
+	}
+	read, found, err := store.Run(context.Background(), running.ID)
+	if err != nil || !found || read.Proposal == nil || read.Proposal.Code() != FailureAttempt || read.Proposal.Code().String() != "attempt" {
+		t.Fatalf("read attempt failure = %+v, found=%v err=%v", read, found, err)
+	}
+}
+
 func TestVerificationAndTerminalCorruptionFailClosed(t *testing.T) {
 	tests := []struct {
 		name   string

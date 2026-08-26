@@ -299,6 +299,7 @@ const (
 	FailureRunnerExit
 	FailureProtocol
 	FailureInternal
+	FailureAttempt
 )
 
 func parseFailureCode(value string) (FailureCode, error) {
@@ -315,6 +316,8 @@ func parseFailureCode(value string) (FailureCode, error) {
 		return FailureProtocol, nil
 	case "internal":
 		return FailureInternal, nil
+	case "attempt":
+		return FailureAttempt, nil
 	default:
 		return 0, corruptControl("failure code", value)
 	}
@@ -334,6 +337,8 @@ func (value FailureCode) String() string {
 		return "protocol"
 	case FailureInternal:
 		return "internal"
+	case FailureAttempt:
+		return "attempt"
 	default:
 		return ""
 	}
