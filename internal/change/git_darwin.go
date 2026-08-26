@@ -603,7 +603,7 @@ func validPackName(name string) bool {
 
 func validLocalGitConfig(config []byte) bool {
 	for index, character := range config {
-		if character >= utf8.RuneSelf || character == 0 || character < 0x20 && character != '\t' && character != '\n' && character != '\r' {
+		if character >= utf8.RuneSelf || character == 0x7f || character == 0 || character < 0x20 && character != '\t' && character != '\n' && character != '\r' {
 			return false
 		}
 		if character == '\r' && (index+1 == len(config) || config[index+1] != '\n') {

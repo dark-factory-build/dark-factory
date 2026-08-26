@@ -230,6 +230,7 @@ func TestLocalGitConfigValidatorIsMinimalAndFailClosed(t *testing.T) {
 		"BOM":                  append([]byte{0xef, 0xbb, 0xbf}, []byte("[core]\n\tbare = false\n")...),
 		"non-ASCII":            []byte("[user]\n\tname = Jos\xc3\xa9\n"),
 		"control":              []byte("[core]\n\tbare = \x01false\n"),
+		"DEL control":          []byte("[core]\n\tbare = false\x7f\n"),
 		"UTF-16":               []byte{'[', 0, 'c', 0, 'o', 0, 'r', 0, 'e', 0, ']', 0},
 		"bare carriage return": []byte("[core]\rbare = false\n"),
 		"include section":      []byte("[include]\n\tpath = ../outside\n"),
@@ -246,6 +247,25 @@ func TestLocalGitConfigValidatorIsMinimalAndFailClosed(t *testing.T) {
 }
 
 func TestSelectGitRejectsBOMIncludeAndWorktreeConfigBeforeTrustedGit(t *testing.T) {
+	t.Run("DEL control", func(t *testing.T) {
+		fixture := newLocalGitFixture(t, "sha1")
+		if err := os.WriteFile(filepath.Join(fixture.repository, ".git", "config"), []byte("[core]\n\tbare = false\x7f\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		assertTrustedConfigRejectedWithoutFIFOBlock(t, fixture, 750*time.Millisecond)
+		started := 0
+		_, err := selectGit(context.Background(), fixture.git, fixture.repository, "HEAD", fixture.identity, func(event gitProcessEvent) {
+			if event == gitProcessStarted {
+				started++
+			}
+		})
+		if err == nil {
+			t.Fatal("DEL control was accepted")
+		}
+		if started != 0 {
+			t.Fatalf("Git started %d times before DEL control refusal", started)
+		}
+	})
 	t.Run("BOM include FIFO", func(t *testing.T) {
 		fixture := newLocalGitFixture(t, "sha1")
 		fifo := filepath.Join(filepath.Dir(fixture.repository), "external-config.fifo")
