@@ -119,7 +119,7 @@ func TestResourceGraphAndFinalizerAreOneWay(t *testing.T) {
 		t.Fatalf("unresolved while admitted = %v", err)
 	}
 	failure, _ := NewFailureProposal(FailureActivation, "pre-exec cleanup")
-	if _, err := store.FailAdmitted(ctx, run.ID, run.Revision, failure, mustTime(t, 23)); err != nil {
+	if _, err := store.FailRun(ctx, run.ID, run.Revision, failure, mustTime(t, 23)); err != nil {
 		t.Fatal(err)
 	}
 	releasing, _, _ := store.Resource(ctx, runtime.ID)
@@ -352,7 +352,7 @@ func TestFinalizingConsumesFactoryCapacity(t *testing.T) {
 		t.Fatal(err)
 	}
 	failure, _ := NewFailureProposal(FailureSpawn, "spawn failed")
-	if _, err := store.FailAdmitted(context.Background(), first.Run.ID, first.Run.Revision, failure, mustTime(t, 11)); err != nil {
+	if _, err := store.FailRun(context.Background(), first.Run.ID, first.Run.Revision, failure, mustTime(t, 11)); err != nil {
 		t.Fatal(err)
 	}
 	secondAgent, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 123), ProjectID: project.ID, Name: "second", Role: RoleOrchestrator, Provider: ProviderCodex, ExecutionMode: ExecutionWorkspaceWrite, ToolBudgetLimit: 2}, mustTime(t, 12))
@@ -382,6 +382,91 @@ func TestCancelRunIsFirstOutcomeAndRevokesAdmittedAuthority(t *testing.T) {
 	}
 	if _, err := store.AuthenticateAttempt(context.Background(), keys.AttemptDigest); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("cancelled digest = %v", err)
+	}
+}
+
+func TestFailRunRevokesRunningAuthorityAndPreservesFirstOutcome(t *testing.T) {
+	store, run, keys := runningOrchestratorRun(t)
+	defer store.Close()
+	failure, _ := NewFailureProposal(FailureProtocol, "daemon control failed")
+	failed, err := store.FailRun(context.Background(), run.ID, run.Revision, failure, mustTime(t, 40))
+	if err != nil || failed.Phase != RunFinalizing || failed.Proposal == nil || !failed.Proposal.equal(failure) || failed.CredentialRevokedAt == nil {
+		t.Fatalf("FailRun = %+v, %v", failed, err)
+	}
+	if _, err := store.AuthenticateAttempt(context.Background(), keys.AttemptDigest); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("old attempt credential = %v", err)
+	}
+	for _, resource := range resourcesForRunTest(t, store, run.ID) {
+		if resource.State != ResourceReleasing {
+			t.Fatalf("%s state = %s", resource.Kind.String(), resource.State.String())
+		}
+	}
+	replayed, err := store.FailRun(context.Background(), run.ID, run.Revision, failure, mustTime(t, 99))
+	if err != nil || replayed.Revision != failed.Revision {
+		t.Fatalf("exact replay = %+v, %v", replayed, err)
+	}
+	different, _ := NewFailureProposal(FailureInternal, "different")
+	if _, err := store.FailRun(context.Background(), run.ID, failed.Revision, different, mustTime(t, 41)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("overwrite first failure = %v", err)
+	}
+	success, _ := NewSuccessProposal("invalid daemon outcome")
+	if _, err := store.FailRun(context.Background(), run.ID, failed.Revision, success, mustTime(t, 41)); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("non-failure daemon outcome = %v", err)
+	}
+}
+
+func TestFailRunRacesAttemptSuccessAndCancellationWithoutOverwrite(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		race func(*Store, Run, AdmissionKeys) error
+	}{
+		{name: "attempt success", race: func(store *Store, run Run, keys AdmissionKeys) error {
+			proposal, _ := NewSuccessProposal("attempt won")
+			_, err := store.ProposeAttemptOutcome(context.Background(), keys.AttemptDigest, proposal, mustTime(t, 41))
+			return err
+		}},
+		{name: "operator cancellation", race: func(store *Store, run Run, _ AdmissionKeys) error {
+			_, err := store.CancelRun(context.Background(), run.ID, run.Revision, "operator won", mustTime(t, 41))
+			return err
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, run, keys := runningOrchestratorRun(t)
+			second, err := Open(context.Background(), storePath(t, store))
+			if err != nil {
+				store.Close()
+				t.Fatal(err)
+			}
+			defer store.Close()
+			defer second.Close()
+			failure, _ := NewFailureProposal(FailureProtocol, "daemon won")
+			start := make(chan struct{})
+			results := make(chan error, 2)
+			go func() {
+				<-start
+				_, raceErr := store.FailRun(context.Background(), run.ID, run.Revision, failure, mustTime(t, 40))
+				results <- raceErr
+			}()
+			go func() {
+				<-start
+				results <- test.race(second, run, keys)
+			}()
+			close(start)
+			firstErr, secondErr := <-results, <-results
+			if firstErr != nil && secondErr != nil {
+				t.Fatalf("both racers failed: %v; %v", firstErr, secondErr)
+			}
+			fresh, found, err := store.Run(context.Background(), run.ID)
+			if err != nil || !found || fresh.Phase != RunFinalizing || fresh.Proposal == nil || fresh.CredentialRevokedAt == nil {
+				t.Fatalf("race result = %+v, found=%v, err=%v", fresh, found, err)
+			}
+			if fresh.Proposal.Kind() != OutcomeFailed && fresh.Proposal.Kind() != OutcomeSucceeded && fresh.Proposal.Kind() != OutcomeCancelled {
+				t.Fatalf("invalid race winner = %+v", fresh.Proposal)
+			}
+			if _, err := store.AuthenticateAttempt(context.Background(), keys.AttemptDigest); !errors.Is(err, ErrUnauthorized) {
+				t.Fatalf("race credential = %v", err)
+			}
+		})
 	}
 }
 
@@ -583,7 +668,7 @@ func TestTaskGuardAndPermanentDigestUniquenessRollbackTerminalOrAdmission(t *tes
 		store, run, keys := admittedOrchestratorRun(t)
 		defer store.Close()
 		failure, _ := NewFailureProposal(FailureSpawn, "no process")
-		finalizing, err := store.FailAdmitted(context.Background(), run.ID, run.Revision, failure, mustTime(t, 20))
+		finalizing, err := store.FailRun(context.Background(), run.ID, run.Revision, failure, mustTime(t, 20))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -685,6 +770,38 @@ func TestRecoverableRunsAreCanonicalOrderedAndPrivateStateStaysOutOfPublicProjec
 		if bytes.Contains(encoded, []byte(sentinel)) {
 			t.Fatalf("public snapshot leaked %q: %s", sentinel, encoded)
 		}
+	}
+}
+
+func TestResourcesReturnsCanonicalSetAfterTerminalization(t *testing.T) {
+	proposal, err := NewFailureProposal(FailureInternal, "terminal resource read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, finalizing := finalizingReleasedRun(t, RoleOrchestrator, VerificationNone, proposal)
+	defer store.Close()
+	terminal, err := store.FinalizeRun(context.Background(), finalizing.ID, finalizing.Revision, mustTime(t, 70))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resources, err := store.Resources(context.Background(), terminal.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []ResourceKind{ResourceProviderGroup, ResourceProviderProcess, ResourceRunnerProcess, ResourceRuntimeRoot}
+	if len(resources) != len(want) {
+		t.Fatalf("resource count = %d", len(resources))
+	}
+	for index, resource := range resources {
+		if resource.Kind != want[index] || resource.State != ResourceReleased || resource.RunID != terminal.ID {
+			t.Fatalf("resource[%d] = %+v", index, resource)
+		}
+	}
+	if _, err := store.Resources(context.Background(), RunID{}); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("zero run resources = %v", err)
+	}
+	if _, err := store.Resources(context.Background(), runID(t, 99)); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing run resources = %v", err)
 	}
 }
 

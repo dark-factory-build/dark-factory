@@ -187,8 +187,8 @@ func TestEveryPublicMutationValidatesDurableGraphBeforeDecision(t *testing.T) {
 			_, err := store.ProposeAttemptOutcome(context.Background(), attempt, proposal, at)
 			return err
 		}},
-		{name: "FailAdmitted", invoke: func(store *Store) error {
-			_, err := store.FailAdmitted(context.Background(), runID(t, 5), mustRevision(t, 1), failure, at)
+		{name: "FailRun", invoke: func(store *Store) error {
+			_, err := store.FailRun(context.Background(), runID(t, 5), mustRevision(t, 1), failure, at)
 			return err
 		}},
 		{name: "CancelRun", invoke: func(store *Store) error {

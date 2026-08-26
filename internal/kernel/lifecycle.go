@@ -242,9 +242,12 @@ func (store *Store) ProposeAttemptOutcome(ctx context.Context, digest AttemptDig
 	return store.enterFinalizing(ctx, tx, run, run.Revision, proposal, at)
 }
 
-func (store *Store) FailAdmitted(ctx context.Context, runID RunID, expected Revision, failure Proposal, at UnixMillis) (Run, error) {
+// FailRun records a daemon-owned infrastructure failure before or during a
+// running attempt. It never acts as attempt authority and never overwrites an
+// outcome that reached finalizing first.
+func (store *Store) FailRun(ctx context.Context, runID RunID, expected Revision, failure Proposal, at UnixMillis) (Run, error) {
 	if runID.zero() || !failure.valid() || failure.kind != OutcomeFailed {
-		return Run{}, fmt.Errorf("%w: invalid admitted failure", ErrInvalidValue)
+		return Run{}, fmt.Errorf("%w: invalid run failure", ErrInvalidValue)
 	}
 	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
@@ -258,13 +261,13 @@ func (store *Store) FailAdmitted(ctx context.Context, runID RunID, expected Revi
 	if !found {
 		return Run{}, tx.Rollback(ErrNotFound)
 	}
-	if run.Phase == RunFinalizing && run.RunningAt == nil && run.Proposal != nil && run.Proposal.equal(failure) && run.Revision.Int64() == expected.Int64()+1 {
+	if run.Phase == RunFinalizing && run.Proposal != nil && run.Proposal.equal(failure) && run.Revision.Int64() == expected.Int64()+1 {
 		if err := tx.Rollback(nil); err != nil {
 			return Run{}, err
 		}
 		return run, nil
 	}
-	if run.Phase != RunAdmitted {
+	if run.Phase != RunAdmitted && run.Phase != RunRunning {
 		return Run{}, tx.Rollback(ErrConflict)
 	}
 	return store.enterFinalizing(ctx, tx, run, expected, failure, at)

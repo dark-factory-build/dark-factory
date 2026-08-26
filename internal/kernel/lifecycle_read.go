@@ -337,6 +337,35 @@ func (store *Store) Run(ctx context.Context, id RunID) (Run, bool, error) {
 	return run, true, nil
 }
 
+// Resources returns the canonical fixed resource set for one durable run.
+// It remains available after terminalization so cleanup and recovery never
+// need process-local admission identifiers as authority.
+func (store *Store) Resources(ctx context.Context, runID RunID) ([]Resource, error) {
+	if runID.zero() {
+		return nil, fmt.Errorf("%w: zero run identifier", ErrInvalidValue)
+	}
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Close()
+	run, found, err := runByID(ctx, tx.connection, runID)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, ErrNotFound
+	}
+	if err := validateOwnershipLocators(ctx, tx.connection); err != nil {
+		return nil, err
+	}
+	relationships, err := loadRunRelationships(ctx, tx.connection, run)
+	if err != nil {
+		return nil, err
+	}
+	return relationships.resources, nil
+}
+
 func (store *Store) Resource(ctx context.Context, id ResourceID) (Resource, bool, error) {
 	tx, err := store.beginRead(ctx)
 	if err != nil {

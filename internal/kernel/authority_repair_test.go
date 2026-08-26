@@ -127,7 +127,7 @@ func TestAdmissionRejectsOverlapWithDurableRuntimeAndRetainedChange(t *testing.T
 		t.Fatalf("first admission = %+v, %v", first, err)
 	}
 	failure, _ := NewFailureProposal(FailureSpawn, "startup failed")
-	finalizing, err := store.FailAdmitted(context.Background(), first.Run.ID, first.Run.Revision, failure, mustTime(t, 11))
+	finalizing, err := store.FailRun(context.Background(), first.Run.ID, first.Run.Revision, failure, mustTime(t, 11))
 	if err != nil {
 		t.Fatal(err)
 	}
