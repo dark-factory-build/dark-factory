@@ -6,7 +6,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
-    "test": "pnpm build && node --test packages/client/test/*.test.mjs"
+    "test": "tsc -p tsconfig.build.json && node --test packages/client/test/*.test.mjs"
   },
   "devDependencies": {
     "typescript": "5.8.3"
