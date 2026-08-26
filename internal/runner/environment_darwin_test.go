@@ -4,6 +4,7 @@ package runner
 
 import (
 	"io"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -75,6 +76,8 @@ func TestPrepareExecSpecRejectsDuplicateAndMalformedEnvironmentBeforePaths(t *te
 		{name: "empty value", env: []string{"PATH="}, want: "invalid environment"},
 		{name: "name NUL", env: []string{"PA\x00TH=value"}, want: "invalid environment"},
 		{name: "value NUL", env: []string{"PATH=va\x00lue"}, want: "invalid environment"},
+		{name: "invalid UTF-8 name", env: []string{"LA" + string([]byte{0xff}) + "G=value"}, want: "invalid environment"},
+		{name: "invalid UTF-8 value", env: []string{"LANG=" + string([]byte{0xff})}, want: "invalid environment"},
 		{name: "oversized value", env: []string{"PATH=" + strings.Repeat("x", 8193)}, want: "invalid environment"},
 	}
 	for _, test := range tests {
@@ -87,17 +90,42 @@ func TestPrepareExecSpecRejectsDuplicateAndMalformedEnvironmentBeforePaths(t *te
 	}
 }
 
-func TestAttemptConfigRejectsDuplicateEnvironment(t *testing.T) {
+func TestPrepareExecSpecRejectsInvalidUTF8BeforeControlCommitment(t *testing.T) {
+	control, err := os.Open("/dev/null")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = control.Close() })
+	_, err = PrepareExecSpec(ExecSpec{
+		Target: "/bin/sh", Cwd: t.TempDir(), Env: []string{"LANG=" + string([]byte{0xff})}, Control: control,
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid environment") {
+		t.Fatalf("invalid UTF-8 was not rejected before control commitment: %v", err)
+	}
+}
+
+func TestAttemptConfigRejectsInvalidEnvironment(t *testing.T) {
 	root := t.TempDir()
 	prepared, err := PrepareExecSpec(ExecSpec{Target: "/bin/sh", Cwd: root, Env: []string{"PATH=/usr/bin:/bin"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	commitment := prepared.commit
-	commitment.Env = []string{"PATH=/usr/bin", "PATH=/bin"}
-	cfg := attemptConfig{Version: 1, AttemptID: "attempt", MarkerName: "marker", TerminalName: "terminal", Wrapper: commitment}
-	if err := validateAttemptConfig(cfg); err != ErrIdentity {
-		t.Fatalf("duplicate recovered environment = %v, want ErrIdentity", err)
+	for _, test := range []struct {
+		name string
+		env  []string
+	}{
+		{name: "duplicate", env: []string{"PATH=/usr/bin", "PATH=/bin"}},
+		{name: "invalid UTF-8 name", env: []string{"LA" + string([]byte{0xff}) + "G=value"}},
+		{name: "invalid UTF-8 value", env: []string{"LANG=" + string([]byte{0xff})}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			commitment := prepared.commit
+			commitment.Env = test.env
+			cfg := attemptConfig{Version: 1, AttemptID: "attempt", MarkerName: "marker", TerminalName: "terminal", Wrapper: commitment}
+			if err := validateAttemptConfig(cfg); err != ErrIdentity {
+				t.Fatalf("invalid recovered environment = %v, want ErrIdentity", err)
+			}
+		})
 	}
 }
 
@@ -110,7 +138,7 @@ func TestPreparedEnvironmentOrderAndBytesReachRealChildExactly(t *testing.T) {
 		"HOME=/private/provider-home",
 		"TMPDIR=/private/provider-tmp",
 		"PATH=/usr/bin:/bin",
-		"LANG=C.UTF-8",
+		"LANG=工場.UTF-8",
 		"LC_ALL=C",
 		"TERM=dumb",
 		"NO_COLOR=1",

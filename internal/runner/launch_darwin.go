@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
 )
@@ -102,7 +103,7 @@ func allowedEnv(k string) bool {
 func validateEnvironment(environment []string) error {
 	seen := make(map[string]struct{}, len(environment))
 	for _, entry := range environment {
-		if len(entry) > 8192 || strings.IndexByte(entry, 0) >= 0 {
+		if len(entry) > 8192 || strings.IndexByte(entry, 0) >= 0 || !utf8.ValidString(entry) {
 			return fmt.Errorf("runner: invalid environment")
 		}
 		parts := strings.SplitN(entry, "=", 2)
