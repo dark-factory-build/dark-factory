@@ -706,6 +706,7 @@ type Resource struct {
 	UnresolvedReason string
 	Revision         Revision
 	DeclaredAt       UnixMillis
+	ActivatedAt      *UnixMillis
 	UpdatedAt        UnixMillis
 	ReleasedAt       *UnixMillis
 }

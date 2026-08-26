@@ -123,12 +123,14 @@ not a compatibility target.
   request wins; only the finalizer writes terminal; cleanup uncertainty stays
   visible and nonterminal.
 - Resources follow one monotonic graph. `declared` may become `active` when
-  exact external identity is bound. Declared or active resources enter
-  `releasing`; declared/active/releasing may become `unresolved` when absence
-  cannot be proved, or `released` on positive cleanup/absence proof.
-  `unresolved` may only become `released` after later positive proof, never
-  active/releasing or signal-authoritative. `released` and terminal are
-  absorbing. Any non-released resource forbids terminalization.
+  exact external identity is bound, recording one immutable activation time.
+  Declared or active resources enter `releasing`; declared/active/releasing may
+  become `unresolved` when absence cannot be proved, or `released` on positive
+  cleanup/absence proof. Exit evidence must match the exact activated
+  identity and cannot predate its activation time. `unresolved` may only
+  become `released` after later positive proof, never active/releasing or
+  signal-authoritative. `released` and terminal are absorbing. Any
+  non-released resource forbids terminalization.
 - One admitted run owns one fresh, non-interactive provider process and one
   startup input. There is no resident provider session, PTY attach, prompt
   replay, process resume, or stdout-derived lifecycle authority.

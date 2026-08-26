@@ -153,6 +153,18 @@ func loadRunRelationships(ctx context.Context, connection *sql.Conn, run Run) (r
 	if !resourceIdentityEqual(providerProcessIdentity, providerGroupIdentity) {
 		return runRelationships{}, fmt.Errorf("%w: provider process/group identity is not atomic", ErrCorruptState)
 	}
+	var providerProcessActivation, providerGroupActivation *UnixMillis
+	for _, resource := range resources {
+		switch resource.Kind {
+		case ResourceProviderProcess:
+			providerProcessActivation = resource.ActivatedAt
+		case ResourceProviderGroup:
+			providerGroupActivation = resource.ActivatedAt
+		}
+	}
+	if (providerProcessActivation == nil) != (providerGroupActivation == nil) || providerProcessActivation != nil && *providerProcessActivation != *providerGroupActivation {
+		return runRelationships{}, fmt.Errorf("%w: provider process/group activation is not atomic", ErrCorruptState)
+	}
 	for _, resource := range resources {
 		if resource.State != ResourceReleased || resource.Identity.Empty() {
 			continue

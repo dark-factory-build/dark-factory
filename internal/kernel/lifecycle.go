@@ -42,6 +42,9 @@ func (store *Store) ActivateProviderResources(ctx context.Context, runID RunID, 
 	if process.RunID != runID || process.Kind != ResourceProviderProcess || group.RunID != runID || group.Kind != ResourceProviderGroup {
 		return Resource{}, Resource{}, tx.Rollback(ErrConflict)
 	}
+	if (process.ActivatedAt == nil) != (group.ActivatedAt == nil) || process.ActivatedAt != nil && *process.ActivatedAt != *group.ActivatedAt {
+		return Resource{}, Resource{}, tx.Rollback(ErrCorruptState)
+	}
 	if process.State == ResourceActive && group.State == ResourceActive && resourceIdentityEqual(process.Identity, identity) && resourceIdentityEqual(group.Identity, identity) && process.Revision.Int64() == processExpected.Int64()+1 && group.Revision.Int64() == groupExpected.Int64()+1 {
 		if err := tx.Rollback(nil); err != nil {
 			return Resource{}, Resource{}, err
@@ -55,8 +58,8 @@ func (store *Store) ActivateProviderResources(ctx context.Context, runID RunID, 
 		return Resource{}, Resource{}, tx.Rollback(err)
 	}
 	pid, pgid, birth, _ := identity.Process()
-	updated, err := tx.connection.ExecContext(ctx, `UPDATE resources SET state = 'active', pid = ?, pgid = ?, birth_digest = ?, revision = revision + 1, updated_at_ms = ? WHERE run_id = ? AND state = 'declared' AND pid IS NULL AND pgid IS NULL AND birth_digest IS NULL AND ((id = ? AND kind = 'provider_process' AND revision = ?) OR (id = ? AND kind = 'provider_group' AND revision = ?))`,
-		pid, pgid, birth.Bytes(), at.Int64(), runID.Bytes(), processID.Bytes(), processExpected.Int64(), groupID.Bytes(), groupExpected.Int64())
+	updated, err := tx.connection.ExecContext(ctx, `UPDATE resources SET state = 'active', pid = ?, pgid = ?, birth_digest = ?, activated_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE run_id = ? AND state = 'declared' AND pid IS NULL AND pgid IS NULL AND birth_digest IS NULL AND activated_at_ms IS NULL AND ((id = ? AND kind = 'provider_process' AND revision = ?) OR (id = ? AND kind = 'provider_group' AND revision = ?))`,
+		pid, pgid, birth.Bytes(), at.Int64(), at.Int64(), runID.Bytes(), processID.Bytes(), processExpected.Int64(), groupID.Bytes(), groupExpected.Int64())
 	if err := requireRows(updated, err, 2); err != nil {
 		return Resource{}, Resource{}, tx.Rollback(err)
 	}
@@ -161,10 +164,10 @@ func (store *Store) transitionResource(ctx context.Context, runID RunID, resourc
 	case ResourceActive:
 		if resource.Kind == ResourceRuntimeRoot {
 			pathIdentity, _ := identity.Path()
-			result, err = tx.connection.ExecContext(ctx, `UPDATE resources SET state = 'active', path_dev = ?, path_inode = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND run_id = ? AND state = 'declared' AND revision = ? AND path_dev IS NULL AND path_inode IS NULL`, pathIdentity.device, pathIdentity.inode, at.Int64(), resourceID.Bytes(), runID.Bytes(), expected.Int64())
+			result, err = tx.connection.ExecContext(ctx, `UPDATE resources SET state = 'active', path_dev = ?, path_inode = ?, activated_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND run_id = ? AND state = 'declared' AND revision = ? AND path_dev IS NULL AND path_inode IS NULL AND activated_at_ms IS NULL`, pathIdentity.device, pathIdentity.inode, at.Int64(), at.Int64(), resourceID.Bytes(), runID.Bytes(), expected.Int64())
 		} else {
 			pid, pgid, birth, _ := identity.Process()
-			result, err = tx.connection.ExecContext(ctx, `UPDATE resources SET state = 'active', pid = ?, pgid = ?, birth_digest = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND run_id = ? AND state = 'declared' AND revision = ? AND pid IS NULL AND pgid IS NULL AND birth_digest IS NULL`, pid, pgid, birth.Bytes(), at.Int64(), resourceID.Bytes(), runID.Bytes(), expected.Int64())
+			result, err = tx.connection.ExecContext(ctx, `UPDATE resources SET state = 'active', pid = ?, pgid = ?, birth_digest = ?, activated_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND run_id = ? AND state = 'declared' AND revision = ? AND pid IS NULL AND pgid IS NULL AND birth_digest IS NULL AND activated_at_ms IS NULL`, pid, pgid, birth.Bytes(), at.Int64(), at.Int64(), resourceID.Bytes(), runID.Bytes(), expected.Int64())
 		}
 	case ResourceReleasing:
 		result, err = tx.connection.ExecContext(ctx, `UPDATE resources SET state = 'releasing', revision = revision + 1, updated_at_ms = ? WHERE id = ? AND run_id = ? AND state IN ('declared', 'active') AND revision = ?`, at.Int64(), resourceID.Bytes(), runID.Bytes(), expected.Int64())
@@ -464,7 +467,11 @@ func (store *Store) observeProcessExit(ctx context.Context, runID RunID, expecte
 	if err != nil {
 		return Run{}, tx.Rollback(err)
 	}
-	if !exitIdentityMatches(resources, owner, identity) {
+	activatedAt, matched := exitIdentityMatches(resources, owner, identity)
+	if !matched {
+		return Run{}, tx.Rollback(ErrConflict)
+	}
+	if exit.at.Int64() < activatedAt.Int64() {
 		return Run{}, tx.Rollback(ErrConflict)
 	}
 	existing := run.RunnerExit
@@ -536,27 +543,40 @@ func (store *Store) observeProcessExit(ctx context.Context, runID RunID, expecte
 	return run, nil
 }
 
-func exitIdentityMatches(resources []Resource, owner processExitOwner, identity ResourceIdentity) bool {
+func exitIdentityMatches(resources []Resource, owner processExitOwner, identity ResourceIdentity) (UnixMillis, bool) {
 	runnerMatched := false
 	providerProcessMatched := false
 	providerGroupMatched := false
+	var activatedAt UnixMillis
+	var activationFound bool
 	for _, resource := range resources {
 		if resource.State == ResourceDeclared || !resourceIdentityEqual(resource.Identity, identity) {
 			continue
 		}
+		matched := false
 		switch resource.Kind {
 		case ResourceRunnerProcess:
 			runnerMatched = true
+			matched = owner == runnerExitOwner
 		case ResourceProviderProcess:
 			providerProcessMatched = true
+			matched = owner == providerExitOwner
 		case ResourceProviderGroup:
 			providerGroupMatched = true
+			matched = owner == providerExitOwner
+		}
+		if matched {
+			if resource.ActivatedAt == nil || activationFound && *resource.ActivatedAt != activatedAt {
+				return UnixMillis{}, false
+			}
+			activatedAt = *resource.ActivatedAt
+			activationFound = true
 		}
 	}
 	if owner == providerExitOwner {
-		return providerProcessMatched && providerGroupMatched
+		return activatedAt, providerProcessMatched && providerGroupMatched && activationFound
 	}
-	return runnerMatched
+	return activatedAt, runnerMatched && activationFound
 }
 
 func (store *Store) FinalizeRun(ctx context.Context, runID RunID, expected Revision, at UnixMillis) (Run, error) {

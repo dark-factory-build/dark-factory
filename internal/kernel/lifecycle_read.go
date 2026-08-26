@@ -18,7 +18,7 @@ const runColumns = `id, project_id, agent_id, task_id, task_incarnation_id,
     revision, admitted_at_ms, running_at_ms, finalizing_at_ms, terminal_at_ms, updated_at_ms`
 
 const resourceColumns = `id, run_id, kind, state, path, path_dev, path_inode, pid, pgid, birth_digest,
-    unresolved_reason, revision, declared_at_ms, updated_at_ms, released_at_ms`
+    unresolved_reason, revision, declared_at_ms, activated_at_ms, updated_at_ms, released_at_ms`
 
 func runByID(ctx context.Context, connection *sql.Conn, id RunID) (Run, bool, error) {
 	if id.zero() {
@@ -246,9 +246,9 @@ func scanResource(scanner rowScanner) (Resource, bool, error) {
 	var birth nullableBlob
 	var kindValue, stateValue string
 	var path, reason sql.NullString
-	var pathDev, pathInode, pid, pgid, releasedAt sql.NullInt64
+	var pathDev, pathInode, activatedAt, pid, pgid, releasedAt sql.NullInt64
 	var revision, declaredAt, updatedAt int64
-	if err := scanner.Scan(&rawID, &rawRunID, &kindValue, &stateValue, &path, &pathDev, &pathInode, &pid, &pgid, &birth, &reason, &revision, &declaredAt, &updatedAt, &releasedAt); err != nil {
+	if err := scanner.Scan(&rawID, &rawRunID, &kindValue, &stateValue, &path, &pathDev, &pathInode, &pid, &pgid, &birth, &reason, &revision, &declaredAt, &activatedAt, &updatedAt, &releasedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Resource{}, false, nil
 		}
@@ -265,9 +265,16 @@ func scanResource(scanner rowScanner) (Resource, bool, error) {
 		return Resource{}, false, fmt.Errorf("%w: invalid resource row", ErrCorruptState)
 	}
 	resource := Resource{ID: id, RunID: runID, Kind: kind, State: state, Path: nullStringValue(path), Identity: EmptyResourceIdentity(), UnresolvedReason: nullStringValue(reason), Revision: rev, DeclaredAt: declared, UpdatedAt: updated}
+	if activatedAt.Valid {
+		value, err := NewUnixMillis(activatedAt.Int64)
+		if err != nil || activatedAt.Int64 < declaredAt || activatedAt.Int64 > updatedAt {
+			return Resource{}, false, fmt.Errorf("%w: invalid resource activation time", ErrCorruptState)
+		}
+		resource.ActivatedAt = &value
+	}
 	if releasedAt.Valid {
 		value, err := NewUnixMillis(releasedAt.Int64)
-		if err != nil || releasedAt.Int64 < declaredAt {
+		if err != nil || releasedAt.Int64 < declaredAt || resource.ActivatedAt != nil && releasedAt.Int64 < resource.ActivatedAt.Int64() {
 			return Resource{}, false, fmt.Errorf("%w: invalid resource release time", ErrCorruptState)
 		}
 		resource.ReleasedAt = &value
@@ -307,23 +314,23 @@ func scanResource(scanner rowScanner) (Resource, bool, error) {
 	}
 	switch state {
 	case ResourceDeclared:
-		if resource.ReleasedAt != nil || reason.Valid || !resource.Identity.Empty() {
+		if resource.ReleasedAt != nil || resource.ActivatedAt != nil || reason.Valid || !resource.Identity.Empty() {
 			return Resource{}, false, fmt.Errorf("%w: inconsistent declared resource", ErrCorruptState)
 		}
 	case ResourceReleasing:
-		if resource.ReleasedAt != nil || reason.Valid {
+		if resource.ReleasedAt != nil || reason.Valid || (resource.ActivatedAt == nil) != resource.Identity.Empty() {
 			return Resource{}, false, fmt.Errorf("%w: inconsistent live resource", ErrCorruptState)
 		}
 	case ResourceActive:
-		if resource.ReleasedAt != nil || reason.Valid || !resource.Identity.validFor(kind) {
+		if resource.ReleasedAt != nil || resource.ActivatedAt == nil || reason.Valid || !resource.Identity.validFor(kind) {
 			return Resource{}, false, fmt.Errorf("%w: inconsistent active resource", ErrCorruptState)
 		}
 	case ResourceUnresolved:
-		if resource.ReleasedAt != nil || !reason.Valid {
+		if resource.ReleasedAt != nil || !reason.Valid || (resource.ActivatedAt == nil) != resource.Identity.Empty() {
 			return Resource{}, false, fmt.Errorf("%w: inconsistent unresolved resource", ErrCorruptState)
 		}
 	case ResourceReleased:
-		if resource.ReleasedAt == nil || reason.Valid {
+		if resource.ReleasedAt == nil || reason.Valid || (resource.ActivatedAt == nil) != resource.Identity.Empty() {
 			return Resource{}, false, fmt.Errorf("%w: inconsistent released resource", ErrCorruptState)
 		}
 	}
