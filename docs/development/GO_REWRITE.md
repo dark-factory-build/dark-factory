@@ -1323,6 +1323,49 @@ Store foundation on integrated head `6272a8d`:
   exact busy proofs exercise concrete domain methods and natural reconciliation
   without replay.
 
+Admission, attempt authority and finalization Store proof on integrated head
+`3f2c255`:
+
+- Added canonical in-transaction admission, one attempt digest, the durable
+  Change checkpoints, exact four-resource ledger, explicit
+  admitted/running/finalizing/terminal phases, first proposal, exit
+  observation, recovery reads and finalizer-only terminalization without a new
+  table or compatibility state. Concrete lost-response and SIGKILL cuts cover
+  `AdmitNext` and `FinalizeRun`; `internal/sqlitecontract` remains because its
+  wider driver/process matrix is not yet fully duplicated by domain methods.
+- Four independent BLOCK/repair cycles found and closed real green-suite gaps:
+  broad same-run process identity aliasing, resource release with a live
+  credential, aliased Change locators, an incomplete verification-refinement
+  schema, corrupt run/task joins that still authenticated, overlapping runtime
+  and retained-Change cleanup authority, configured success bypassing
+  verification, and public mutations replaying/committing under pre-existing
+  durable-graph corruption.
+- Only same-run provider-process/provider-group records may share an exact
+  process identity. Resource activation is admitted-only; cleanup is
+  finalizing-only. Every run/task/Change/resource join and every canonical
+  runtime/source/staging locator is validated fail-closed, including lexical
+  ancestor/descendant overlap. Configured worker success remains finalizing;
+  the speculative verification-result API and `unverifiable` state were
+  deleted until a complete durable verifier-attempt/result lifecycle exists.
+- Every one of the 19 public mutators now enters one literal
+  `BEGIN IMMEDIATE`, validates the complete durable controls, relationships,
+  identity collisions, ownership locators and invalidation sequence on that
+  same pinned writer, then performs replay/decision/DML. The raw write entry is
+  initializer-only. A 57-case mutator-by-corruption matrix and exact resource/
+  Change replay attacks prove validation precedes every successful effect.
+- The author passed kernel count-three (`25.793s`), kernel race (`232.156s`),
+  CGO-free/full/vet/module/cross-build gates and clean censuses. The final
+  reviewer reran the focused 57-case matrix (`0.798s`) and returned ALLOW on
+  exact author head `41ea79a`; unchanged cherry-pick produced integrated head
+  `3f2c255`. The orchestrator's first two integration-test launches did not run
+  because sandboxed default Go cache/module parents were unwritable; the
+  approved cache-enabled rerun passed `internal/kernel` in `8.854s`.
+- Full-graph validation measured about 179 microseconds incremental on one
+  project/agent/task/Change/admitted-run/four-resource fixture (about 30.7x
+  transaction-entry cost, still sub-millisecond). This deliberate correctness
+  cost must be measured and simplified only through a separately reviewed
+  proof-preserving design during the scheduled elegance/performance audit.
+
 Change commitment/materialization proof on integrated head `42056bd`:
 
 - Added one immutable base-bound `ManifestCommitmentV1`: domain prefix/version,
