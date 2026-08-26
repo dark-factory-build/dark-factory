@@ -14,6 +14,7 @@ import (
 
 var (
 	errInvalidContract = errors.New("daemon: invalid private contract")
+	errRetainedRuntime = errors.New("daemon: private runtime effect retained")
 	errUnsupported     = errors.New("daemon: unsupported platform")
 )
 
@@ -261,4 +262,23 @@ func (e contractError) Unwrap() error { return e.cause }
 
 func (e contractError) Is(target error) bool {
 	return target == errInvalidContract || errors.Is(e.cause, target)
+}
+
+type retainedContractError struct{ cause error }
+
+func (retainedContractError) Error() string    { return "daemon: private runtime effect retained" }
+func (e retainedContractError) String() string { return e.Error() }
+func (e retainedContractError) GoString() string {
+	return e.Error()
+}
+func (e retainedContractError) Unwrap() error { return e.cause }
+func (e retainedContractError) Is(target error) bool {
+	return target == errRetainedRuntime || target == errInvalidContract || errors.Is(e.cause, target)
+}
+
+func retainedContract(cause error) error {
+	if cause == nil {
+		cause = errInvalidContract
+	}
+	return retainedContractError{cause: cause}
 }
