@@ -562,8 +562,9 @@ reads and that the complete Change preceded provider execution:
    a fresh bounded no-Git scan with the already durable selected commitment;
    this may retain the Change for a later retry but the current run finalizes
    and no replacement child may move it to running or execute its provider.
-8. The same registered child `exec`s the exact provider once; startup input is
-   sent once and stdin closes.
+8. The same registered child revalidates the frozen native provider commitment
+   after activation and pathname-`exec`s it once. Its PID, PGID, and birth
+   remain unchanged; startup input is sent once and stdin closes.
 9. Runner durably spools one terminal observation. Daemon commits it before
    exact acknowledgement.
 10. Completion/blocked/failure/exit requests first outcome, enters finalizing,
@@ -579,6 +580,26 @@ reads and that the complete Change preceded provider execution:
 
 No `exec.CommandContext` call, context cancellation, or goroutine completion
 is accepted as proof of process absence.
+
+On Darwin, provider activation uses identity-checked pathname `execve` from
+the already registered gate. Each concrete adapter resolves the
+operator-facing executable to one canonical native Mach-O target and freezes
+its absolute path, device/inode, owner, complete mode, bounded size, nanosecond
+timestamps, SHA-256, running-architecture support, argv, environment, working
+directory identity, and stdin setup before readiness. After create-only
+activation, that same PID reopens and verifies the frozen path, hashes its
+bytes, compares a second `fstat` plus named-path identity, closes the verifier
+descriptor, and immediately calls `execve` on the committed path. Mismatch,
+removal, or `execve` failure is a visible typed launch failure and never causes
+retargeting or replay.
+
+Darwin has no supported descriptor-exec primitive, and `/dev/fd` execution is
+not viable. The final pathname lookup is therefore not claimed inode-atomic or
+secure against a hostile same-UID race, consistent with the repository threat
+model. Version-selection symlinks are resolved before readiness; an admitted
+run keeps its frozen immutable version path, and old versions referenced by
+nonterminal runs are retained. V1 accepts native Mach-O provider executables,
+not generic shebang scripts.
 
 ### Client architecture
 
@@ -834,7 +855,7 @@ contracts.
 | Exact attempt authority | Exercise forged, old, admitted, wrong-run/project, operator, finalizing and terminal credentials against every attempt mutation | drop phase join; accept caller IDs; operator fallback; reuse credential on retry |
 | First outcome/finalizing | Run completion-before-exit and exit-before-completion; assert immutable proposal and revoked credential | overwrite first proposal; mutate during finalizing; direct running->terminal |
 | Finalizer only/one-way | With all resources released, repeated/concurrent finalizers create one terminal record/event; with any unresolved resource, they create none; later positive absence permits only unresolved->released->one terminal | terminalize unresolved; released->active/unresolved; duplicate terminal event |
-| Register-before-exec | External provider witness remains absent until run/resource identities are committed running | release either gate early; omit preparation leash; persist identity after exec |
+| Register-before-exec | External provider witness remains absent until run/resource identities are committed running; replacement before activation, version-symlink swap, target removal, byte/mode mutation, final-check failure, and lost activation acknowledgement preserve the frozen launch or fail without execution; a controlled post-check replacement records the explicitly out-of-scope same-UID pathname seam | release either gate early; omit preparation leash; persist identity after exec; re-resolve installation symlink; omit final metadata/digest comparison; retarget on mismatch; claim inode-atomic execution |
 | Owned process authority | Live runner stops exact direct-child group; recovered daemon with only PID/PGID never signals | daemon killpg fallback; retain signal authority after Wait; skip kill-and-wait |
 | Liveness fails closed | Real ESRCH, EPERM where feasible, malformed/overflow IDs, weak/mismatched/reused identity and leader-with-descendant | EPERM as absent; malformed as released; leader exit equals group absence |
 | Crash/restart at-most-once | SIGKILL daemon/runner at every launch, exit, cleanup and acknowledgement cut; count external witness/input; reopen same home | relaunch admitted run; ack before Store commit; remove runtime before absence |
@@ -1030,6 +1051,14 @@ Both gates and every durable checkpoint are load-bearing. Parent death before
 release must close/leash the inert child, and restart must prove it gone rather
 than infer absence. A smaller Go design may consolidate primitives, not the two
 ownership boundaries.
+
+The Darwin gate performs a final identity and SHA-256 comparison of its frozen
+native executable commitment and then immediately pathname-`exec`s it. This
+catches ordinary replacement, partial update, deletion, corruption, mode
+change, and version-symlink retargeting without inventing an unsupported
+descriptor-exec mechanism. A hostile same-UID replacement in the final
+check-to-`execve` interval remains outside the security boundary and is tested
+as a documented negative assurance, never described as a prevented race.
 
 ### Process-group identity
 
