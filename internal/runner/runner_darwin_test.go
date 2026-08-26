@@ -5,12 +5,16 @@ package runner
 import (
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -696,6 +700,153 @@ func TestLeaderExitWithDescendantRequiresOwnedCleanup(t *testing.T) {
 	}
 	if got := unix.Kill(-child.Identity().PGID, 0); !errors.Is(got, unix.ESRCH) {
 		t.Fatalf("group remains: %v", got)
+	}
+}
+
+func TestTerminateGroupSignalCatchesDescendantForkedDuringTERMGrace(t *testing.T) {
+	f := newFixture(t)
+	readyPath := filepath.Join(f.root, "ready")
+	termPath := filepath.Join(f.root, "term")
+	latePath := filepath.Join(f.root, "late")
+	out := outputFile(t, filepath.Join(f.root, "out"))
+	command := fmt.Sprintf("trap 'sleep 30 & echo $! > %q; printf term > %q' TERM; printf ready > %q; while :; do sleep 1; done", latePath, termPath, readyPath)
+	child := f.start("/bin/sh", []string{"-c", command}, nil, out)
+	if _, err := child.Activate(); err != nil {
+		t.Fatal(err)
+	}
+	waitFile(t, readyPath)
+	type terminationResult struct {
+		exit Exit
+		err  error
+	}
+	done := make(chan terminationResult, 1)
+	go func() {
+		exit, err := child.Terminate(500 * time.Millisecond)
+		done <- terminationResult{exit: exit, err: err}
+	}()
+	var late Identity
+	lateDeadline := time.Now().Add(400 * time.Millisecond)
+	for time.Now().Before(lateDeadline) {
+		body, err := os.ReadFile(latePath)
+		if err == nil {
+			pid, parseErr := strconv.Atoi(strings.TrimSpace(string(body)))
+			if parseErr == nil {
+				late, err = readIdentity(pid)
+				if err == nil && late.PGID == child.Identity().PGID {
+					break
+				}
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	defer func() {
+		if late.Valid() {
+			if current, err := readIdentity(late.PID); err == nil && current == late {
+				_ = unix.Kill(late.PID, unix.SIGKILL)
+			}
+		}
+	}()
+	var result terminationResult
+	select {
+	case result = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Terminate did not join after late descendant fork")
+	}
+	if !late.Valid() {
+		t.Fatal("TERM handler did not create an exact late descendant")
+	}
+	if result.err != nil || result.exit.Signal != int(unix.SIGKILL) {
+		t.Fatalf("termination=%+v err=%v", result.exit, result.err)
+	}
+	if body, err := os.ReadFile(termPath); err != nil || string(body) != "term" {
+		t.Fatalf("TERM grace witness=%q err=%v", body, err)
+	}
+	if observation := ObserveProcess(late); observation.Presence != Absent {
+		t.Fatalf("late descendant survived group cleanup: %+v", observation)
+	}
+	if err := unix.Kill(-child.Identity().PGID, 0); !errors.Is(err, unix.ESRCH) {
+		t.Fatalf("late-fork group remains: %v", err)
+	}
+}
+
+func TestGroupSignalRequiresExactUnreapedLeader(t *testing.T) {
+	f := newFixture(t)
+	out := outputFile(t, filepath.Join(f.root, "out"))
+	child := f.start("/bin/sh", []string{"-c", "exit 0"}, nil, out)
+	id := child.Identity()
+	changed := id
+	changed.Birth.Microseconds++
+	if err := signalOwnedGroup(changed, unix.SIGKILL); !errors.Is(err, ErrUnresolved) {
+		t.Fatalf("changed leader authorized group signal: %v", err)
+	}
+	if _, err := child.Activate(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := child.FinishAfterExit(4 * time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := signalOwnedGroup(id, unix.SIGKILL); !errors.Is(err, ErrUnresolved) {
+		t.Fatalf("reaped leader authorized group signal: %v", err)
+	}
+}
+
+func TestGroupSignalErrorClassificationFailsClosed(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		err    error
+		noLive bool
+		wantOK bool
+	}{
+		{name: "success", err: nil, wantOK: true},
+		{name: "corroborated ESRCH", err: unix.ESRCH, noLive: true, wantOK: true},
+		{name: "uncorroborated ESRCH", err: unix.ESRCH},
+		{name: "EPERM", err: unix.EPERM, noLive: true},
+		{name: "EIO", err: unix.EIO, noLive: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := classifyGroupSignal(test.err, test.noLive)
+			if (err == nil) != test.wantOK {
+				t.Fatalf("classification=%v wantOK=%v", err, test.wantOK)
+			}
+		})
+	}
+}
+
+func TestProcessCleanupHasNoPerMemberSignalPath(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("locate test source")
+	}
+	fset := token.NewFileSet()
+	parsed, err := parser.ParseFile(fset, filepath.Join(filepath.Dir(thisFile), "process_darwin.go"), nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signals := 0
+	ast.Inspect(parsed, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok || len(call.Args) != 2 {
+			return true
+		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		pkg, pkgOK := selector.X.(*ast.Ident)
+		if !pkgOK || pkg.Name != "unix" || selector.Sel.Name != "Kill" {
+			return true
+		}
+		if literal, ok := call.Args[1].(*ast.BasicLit); ok && literal.Kind == token.INT && literal.Value == "0" {
+			return true
+		}
+		signals++
+		if negative, ok := call.Args[0].(*ast.UnaryExpr); !ok || negative.Op != token.SUB {
+			t.Errorf("nonzero unix.Kill must target the owned negative PGID: %s", fset.Position(call.Pos()))
+		}
+		return true
+	})
+	if signals != 1 {
+		t.Fatalf("nonzero unix.Kill call count=%d want=1", signals)
 	}
 }
 

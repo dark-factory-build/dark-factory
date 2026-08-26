@@ -6,14 +6,12 @@ import (
 	"crypto/sha256"
 	"debug/macho"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
-	"syscall"
 
 	"golang.org/x/sys/unix"
 )
@@ -217,20 +215,3 @@ func sameNamedIdentity(path string, want FileIdentity) error {
 	}
 	return nil
 }
-
-func waitStatus(err error) Exit {
-	if err == nil {
-		return Exit{Code: 0}
-	}
-	var ee *os.PathError
-	if errors.As(err, &ee) {
-		return Exit{Code: -1, LaunchErr: err.Error()}
-	}
-	var ex *os.SyscallError
-	if errors.As(err, &ex) {
-		return Exit{Code: -1, LaunchErr: err.Error()}
-	}
-	return Exit{Code: -1, LaunchErr: err.Error()}
-}
-
-var _ = syscall.Signal(0)

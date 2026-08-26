@@ -33,19 +33,10 @@ func CreateGateLease(dir *os.File, basename string) (*GateLease, FileIdentity, e
 		return nil, FileIdentity{}, err
 	}
 	f := os.NewFile(uintptr(dup), "gate-lease-dir")
-	path, err := fdPath(f)
+	c, err := validatePrivateDirectory(f)
 	if err != nil {
 		f.Close()
 		return nil, FileIdentity{}, err
-	}
-	c, err := commitOpen(f, path, false)
-	if err != nil {
-		f.Close()
-		return nil, FileIdentity{}, err
-	}
-	if c.UID != uint32(os.Getuid()) || c.Mode&0o777 != 0o700 {
-		f.Close()
-		return nil, FileIdentity{}, fmt.Errorf("runner: lease directory must be owner-only")
 	}
 	var s unix.Stat_t
 	err = unix.Fstatat(int(f.Fd()), basename, &s, unix.AT_SYMLINK_NOFOLLOW)
@@ -88,15 +79,16 @@ func (l *GateLease) Close() error {
 }
 
 type OwnedChild struct {
-	cmd          *exec.Cmd
-	identity     Identity
-	kq           int
-	activation   *os.File
-	status       *os.File
-	lease        *GateLease
-	state        state
-	exitObserved bool
-	keepLease    bool
+	cmd            *exec.Cmd
+	identity       Identity
+	kq             int
+	activation     *os.File
+	status         *os.File
+	lease          *GateLease
+	state          state
+	exitObserved   bool
+	exitRegistered bool
+	keepLease      bool
 }
 
 func (c *OwnedChild) Identity() Identity {
@@ -191,7 +183,9 @@ func StartBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, kee
 	c := &OwnedChild{cmd: cmd, identity: Identity{PID: cmd.Process.Pid, PGID: cmd.Process.Pid}, kq: kq, activation: leashW, status: statusR, lease: lease, state: stateBlocked, keepLease: keepLeaseAcrossExec}
 	defer func() {
 		if err != nil {
-			_ = c.hardCleanup()
+			if cleanupErr := c.hardCleanup(); cleanupErr != nil {
+				err = errors.Join(err, fmt.Errorf("runner: failed launch cleanup: %w", cleanupErr))
+			}
 		}
 	}()
 	_ = leashR.Close()
@@ -201,10 +195,16 @@ func StartBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, kee
 		err = fmt.Errorf("runner: first identity: %w", e)
 		return nil, err
 	}
+	if first.PGID != first.PID {
+		err = ErrIdentity
+		return nil, err
+	}
+	c.identity = first
 	if e = registerExit(kq, c.identity.PID); e != nil {
 		err = fmt.Errorf("runner: register exit: %w", e)
 		return nil, err
 	}
+	c.exitRegistered = true
 	if e = statusR.SetReadDeadline(time.Now().Add(4 * time.Second)); e != nil {
 		err = fmt.Errorf("runner: ready deadline: %w", e)
 		return nil, err
@@ -219,7 +219,7 @@ func StartBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, kee
 		err = fmt.Errorf("runner: second identity: %w", e)
 		return nil, err
 	}
-	if ready.Kind != "ready" || !ready.Identity.Valid() || ready.Identity != first || second != first || first.PGID != first.PID {
+	if ready.Kind != "ready" || !ready.Identity.Valid() || ready.Identity != first || second != first {
 		err = ErrIdentity
 		return nil, err
 	}
@@ -391,18 +391,32 @@ func (c *OwnedChild) Terminate(timeout time.Duration) (Exit, error) {
 	if timeout <= 0 {
 		timeout = defaultStopTimeout
 	}
-	if err := unix.Kill(-c.identity.PGID, unix.SIGTERM); err != nil && !errors.Is(err, unix.ESRCH) {
+	if err := signalOwnedGroup(c.identity, unix.SIGTERM); err != nil {
 		return Exit{}, fmt.Errorf("%w: TERM: %v", ErrUnresolved, err)
 	}
+	escalate := false
 	if !c.exitObserved {
 		_, err := c.waitForExit(timeout)
 		if err != nil {
 			if !errors.Is(err, os.ErrDeadlineExceeded) {
 				return Exit{}, err
 			}
-			if err := unix.Kill(-c.identity.PGID, unix.SIGKILL); err != nil && !errors.Is(err, unix.ESRCH) {
-				return Exit{}, fmt.Errorf("%w: KILL: %v", ErrUnresolved, err)
+			escalate = true
+		}
+	}
+	if !escalate {
+		if err := waitForOwnedGroupQuiescence(c.identity, timeout); err != nil {
+			if !errors.Is(err, os.ErrDeadlineExceeded) {
+				return Exit{}, err
 			}
+			escalate = true
+		}
+	}
+	if escalate {
+		if err := signalOwnedGroup(c.identity, unix.SIGKILL); err != nil {
+			return Exit{}, fmt.Errorf("%w: KILL: %v", ErrUnresolved, err)
+		}
+		if !c.exitObserved {
 			if _, err := c.waitForExit(4 * time.Second); err != nil {
 				return Exit{}, err
 			}
@@ -415,44 +429,115 @@ func (c *OwnedChild) Terminate(timeout time.Duration) (Exit, error) {
 	return exitFromWait(c.cmd.ProcessState, err), nil
 }
 
+func waitForOwnedGroupQuiescence(leader Identity, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		census, err := censusOwnedGroup(leader)
+		if err != nil {
+			return err
+		}
+		if !census.hasLiveMember {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return os.ErrDeadlineExceeded
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func killRemainingGroup(leader Identity) error {
-	observed, err := readIdentity(leader.PID)
-	if err != nil || observed != leader {
-		return fmt.Errorf("%w: direct leader is no longer exact and unreaped", ErrUnresolved)
-	}
-	members, err := unix.SysctlKinfoProcSlice("kern.proc.pgrp", leader.PGID)
-	if err != nil && !errors.Is(err, unix.ESRCH) && !errors.Is(err, unix.EIO) {
-		return fmt.Errorf("%w: enumerate: %v", ErrUnresolved, err)
-	}
-	for _, p := range members {
-		pid := int(p.Proc.P_pid)
-		if pid == leader.PID {
-			continue
-		}
-		if err := unix.Kill(pid, unix.SIGKILL); err != nil && !errors.Is(err, unix.ESRCH) {
-			return fmt.Errorf("%w: descendant %d: %v", ErrUnresolved, pid, err)
-		}
-	}
 	deadline := time.Now().Add(4 * time.Second)
 	for {
-		members, err = unix.SysctlKinfoProcSlice("kern.proc.pgrp", leader.PGID)
-		if err != nil && !(errors.Is(err, unix.ESRCH) || errors.Is(err, unix.EIO)) {
-			return fmt.Errorf("%w: census: %v", ErrUnresolved, err)
+		census, err := censusOwnedGroup(leader)
+		if err != nil {
+			return err
 		}
-		onlyLeader := true
-		for _, p := range members {
-			if int(p.Proc.P_pid) != leader.PID {
-				onlyLeader = false
-			}
-		}
-		if onlyLeader {
+		if census.onlyLeader {
 			return nil
+		}
+		if census.hasLiveMember {
+			if err := signalOwnedGroup(leader, unix.SIGKILL); err != nil {
+				return err
+			}
 		}
 		if time.Now().After(deadline) {
 			return ErrUnresolved
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+}
+
+func signalOwnedGroup(leader Identity, signal unix.Signal) error {
+	census, err := censusOwnedGroup(leader)
+	if err != nil {
+		return err
+	}
+	if !census.hasLiveMember {
+		return nil
+	}
+	signalErr := unix.Kill(-leader.PGID, signal)
+	if signalErr == nil {
+		return nil
+	}
+	noLiveMembers := false
+	if errors.Is(signalErr, unix.ESRCH) {
+		census, err = censusOwnedGroup(leader)
+		if err != nil {
+			return err
+		}
+		noLiveMembers = !census.hasLiveMember
+	}
+	return classifyGroupSignal(signalErr, noLiveMembers)
+}
+
+func classifyGroupSignal(signalErr error, exactCensusHasNoLiveMembers bool) error {
+	if signalErr == nil || errors.Is(signalErr, unix.ESRCH) && exactCensusHasNoLiveMembers {
+		return nil
+	}
+	return fmt.Errorf("%w: group signal: %v", ErrUnresolved, signalErr)
+}
+
+type ownedGroupCensus struct {
+	onlyLeader    bool
+	hasLiveMember bool
+}
+
+const darwinZombieState = 5
+
+func censusOwnedGroup(leader Identity) (ownedGroupCensus, error) {
+	observed, err := readIdentity(leader.PID)
+	if err != nil || observed != leader {
+		return ownedGroupCensus{}, fmt.Errorf("%w: direct leader identity changed during group census", ErrUnresolved)
+	}
+	members, err := unix.SysctlKinfoProcSlice("kern.proc.pgrp", leader.PGID)
+	if err != nil {
+		return ownedGroupCensus{}, fmt.Errorf("%w: group census: %v", ErrUnresolved, err)
+	}
+	foundLeader := false
+	hasDescendant := false
+	hasLiveMember := false
+	for _, member := range members {
+		identity := Identity{PID: int(member.Proc.P_pid), PGID: int(member.Eproc.Pgid), Birth: Birth{Seconds: member.Proc.P_starttime.Sec, Microseconds: member.Proc.P_starttime.Usec}}
+		if identity.PID == leader.PID {
+			if identity != leader {
+				return ownedGroupCensus{}, fmt.Errorf("%w: leader changed during group census", ErrUnresolved)
+			}
+			foundLeader = true
+			if member.Proc.P_stat != darwinZombieState {
+				hasLiveMember = true
+			}
+			continue
+		}
+		hasDescendant = true
+		if member.Proc.P_stat != darwinZombieState {
+			hasLiveMember = true
+		}
+	}
+	if !foundLeader {
+		return ownedGroupCensus{}, fmt.Errorf("%w: exact leader missing from group census", ErrUnresolved)
+	}
+	return ownedGroupCensus{onlyLeader: !hasDescendant, hasLiveMember: hasLiveMember}, nil
 }
 
 func (c *OwnedChild) Close() error {
@@ -481,9 +566,14 @@ func (c *OwnedChild) hardCleanup() error {
 	if c == nil || c.cmd == nil {
 		return nil
 	}
-	_ = unix.Kill(-c.identity.PGID, unix.SIGKILL)
-	if c.kq >= 0 {
-		_, _ = c.waitForExit(4 * time.Second)
+	var cleanupErr error
+	if err := c.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		cleanupErr = errors.Join(cleanupErr, err)
+	}
+	if c.exitRegistered {
+		if _, err := c.waitForExit(4 * time.Second); err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
+		}
 	}
 	if c.state != stateWaited {
 		_ = c.waitOnce()
@@ -498,7 +588,7 @@ func (c *OwnedChild) hardCleanup() error {
 		_ = unix.Close(c.kq)
 		c.kq = -1
 	}
-	return nil
+	return cleanupErr
 }
 
 func registerExit(kq, pid int) error {

@@ -27,14 +27,14 @@ func PublishTerminal(dir *os.File, basename string, terminal Terminal) (*Termina
 	if err := validateTerminalName(dir, basename); err != nil {
 		return nil, err
 	}
-	if terminal.AttemptID == "" || len(terminal.AttemptID) > 256 || !terminal.Process.Valid() || len(terminal.Message) > 8192 {
+	if err := validateTerminal(terminal); err != nil {
 		return nil, fmt.Errorf("runner: invalid terminal")
 	}
 	body, err := json.Marshal(terminal)
 	if err != nil {
 		return nil, err
 	}
-	if len(body) > maxTerminalBytes {
+	if len(body)+1 > maxTerminalBytes {
 		return nil, fmt.Errorf("runner: terminal too large")
 	}
 	body = append(body, '\n')
@@ -64,7 +64,7 @@ func PublishTerminal(dir *os.File, basename string, terminal Terminal) (*Termina
 	if err := unix.Fstat(fd, &st); err != nil {
 		return nil, err
 	}
-	if st.Mode&unix.S_IFMT != unix.S_IFREG || st.Mode&0o777 != 0o600 || st.Nlink != 1 {
+	if !validTerminalFile(st, int64(len(body))) {
 		return nil, ErrIdentity
 	}
 	if err := publishNoReplace(int(dir.Fd()), tmp, basename); err != nil {
@@ -95,7 +95,7 @@ func LoadTerminal(dir *os.File, basename string) (*TerminalRecord, error) {
 	if err := unix.Fstat(fd, &a); err != nil {
 		return nil, err
 	}
-	if a.Mode&unix.S_IFMT != unix.S_IFREG || a.Mode&0o777 != 0o600 || a.Nlink != 1 || a.Size <= 0 || a.Size > maxTerminalBytes {
+	if !validTerminalFile(a, 0) || a.Size <= 0 || a.Size > maxTerminalBytes {
 		return nil, ErrIdentity
 	}
 	body, err := io.ReadAll(io.LimitReader(f, maxTerminalBytes+1))
@@ -121,8 +121,8 @@ func LoadTerminal(dir *os.File, basename string) (*TerminalRecord, error) {
 	if err := dec.Decode(&trailing); err != io.EOF {
 		return nil, fmt.Errorf("runner: trailing terminal")
 	}
-	if terminal.AttemptID == "" || !terminal.Process.Valid() {
-		return nil, ErrIdentity
+	if err := validateTerminal(terminal); err != nil {
+		return nil, err
 	}
 	digest := sha256.Sum256(body)
 	return &TerminalRecord{Terminal: terminal, Identity: FileIdentity{Device: uint64(a.Dev), Inode: a.Ino}, Digest: hex.EncodeToString(digest[:])}, nil
@@ -142,6 +142,9 @@ func AcknowledgeTerminal(dir *os.File, basename string, want *TerminalRecord, st
 	if got.Digest != want.Digest || got.Identity != want.Identity || got.Terminal.AttemptID != want.Terminal.AttemptID {
 		return ErrIdentity
 	}
+	if err := validateTerminalName(dir, basename); err != nil {
+		return err
+	}
 	if err := unix.Unlinkat(int(dir.Fd()), basename, 0); err != nil {
 		return err
 	}
@@ -152,14 +155,22 @@ func validateTerminalName(dir *os.File, name string) error {
 	if dir == nil || name == "" || filepath.Base(name) != name || name == "." || name == ".." {
 		return ErrIdentity
 	}
-	var st unix.Stat_t
-	if err := unix.Fstat(int(dir.Fd()), &st); err != nil {
-		return err
-	}
-	if st.Mode&unix.S_IFMT != unix.S_IFDIR {
+	_, err := validatePrivateDirectory(dir)
+	return err
+}
+
+func validateTerminal(terminal Terminal) error {
+	if terminal.AttemptID == "" || len(terminal.AttemptID) > 256 || !terminal.Process.Valid() || len(terminal.Message) > 8192 {
 		return ErrIdentity
 	}
 	return nil
+}
+
+func validTerminalFile(stat unix.Stat_t, exactSize int64) bool {
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Mode&0o7777 != 0o600 || stat.Uid != uint32(os.Geteuid()) || stat.Nlink != 1 || stat.Dev == 0 || stat.Ino == 0 {
+		return false
+	}
+	return exactSize == 0 || stat.Size == exactSize
 }
 func writeAll(fd int, p []byte) error {
 	for len(p) > 0 {
@@ -178,5 +189,5 @@ func writeAll(fd int, p []byte) error {
 	return nil
 }
 func statSpool(s unix.Stat_t) string {
-	return fmt.Sprintf("%d:%d:%d:%d:%d:%d:%d", s.Dev, s.Ino, s.Mode, s.Size, s.Mtim.Sec, s.Mtim.Nsec, s.Ctim.Nsec)
+	return fmt.Sprintf("%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d", s.Dev, s.Ino, s.Uid, s.Gid, s.Mode, s.Nlink, s.Size, s.Mtim.Sec, s.Mtim.Nsec, s.Ctim.Sec, s.Ctim.Nsec)
 }
