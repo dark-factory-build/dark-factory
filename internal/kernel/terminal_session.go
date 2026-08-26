@@ -115,6 +115,9 @@ func (store *Store) TerminalSession(ctx context.Context, id TerminalSessionID) (
 	if _, err := loadRunRelationships(ctx, tx.connection, run); err != nil {
 		return TerminalSession{}, false, err
 	}
+	if err := validateTerminalSessionLease(ctx, tx.connection, run, session); err != nil {
+		return TerminalSession{}, false, err
+	}
 	return session, true, nil
 }
 
@@ -138,5 +141,25 @@ func (store *Store) TerminalSessionForRun(ctx context.Context, runID RunID) (Ter
 	if _, err := loadRunRelationships(ctx, tx.connection, run); err != nil {
 		return TerminalSession{}, false, err
 	}
+	if err := validateTerminalSessionLease(ctx, tx.connection, run, session); err != nil {
+		return TerminalSession{}, false, err
+	}
 	return session, true, nil
+}
+
+func validateTerminalSessionLease(ctx context.Context, connection *sql.Conn, run Run, session TerminalSession) error {
+	if session.LeaseClientID == nil {
+		return nil
+	}
+	if run.Phase != RunRunning || session.State != TerminalSessionActive || session.LeaseExpiresAt == nil {
+		return fmt.Errorf("%w: invalid terminal lease relationship", ErrCorruptState)
+	}
+	client, found, err := browserClientByID(ctx, connection, *session.LeaseClientID)
+	if err != nil {
+		return err
+	}
+	if !found || client.RevokedAt != nil || !client.CapabilityMask.Has(BrowserCapabilityTerminalInput) {
+		return fmt.Errorf("%w: invalid terminal lease client relationship", ErrCorruptState)
+	}
+	return nil
 }

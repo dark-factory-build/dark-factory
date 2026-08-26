@@ -250,7 +250,7 @@ var schemaStatements = []string{
     capability_mask INTEGER NOT NULL CHECK (capability_mask BETWEEN 1 AND 15 AND (capability_mask & 1) = 1),
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
     expires_at_ms INTEGER NOT NULL CHECK (expires_at_ms > created_at_ms AND expires_at_ms <= created_at_ms + 300000),
-    redeemed_at_ms INTEGER CHECK (redeemed_at_ms IS NULL OR (redeemed_at_ms >= created_at_ms AND redeemed_at_ms <= expires_at_ms AND redeemed_at_ms >= 0))
+    redeemed_at_ms INTEGER CHECK (redeemed_at_ms IS NULL OR (redeemed_at_ms >= created_at_ms AND redeemed_at_ms < expires_at_ms AND redeemed_at_ms >= 0))
 ) STRICT, WITHOUT ROWID`,
 	`CREATE TABLE browser_clients (
     id BLOB PRIMARY KEY CHECK (length(id) = 16 AND id <> zeroblob(16)),

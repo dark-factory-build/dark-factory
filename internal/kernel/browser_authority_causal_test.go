@@ -61,6 +61,18 @@ func browserTableCount(t *testing.T, store *Store, table string) int64 {
 	return count
 }
 
+func TestBrowserCapabilityHasRequiresSingleKnownBit(t *testing.T) {
+	mask := BrowserCapabilityObserve | BrowserCapabilityTerminalInput
+	if !mask.Has(BrowserCapabilityObserve) || !mask.Has(BrowserCapabilityTerminalInput) {
+		t.Fatalf("known capability probe rejected: %v", mask)
+	}
+	for _, probe := range []BrowserCapabilityMask{0, BrowserCapabilityObserve | BrowserCapabilityTerminalInput, BrowserCapabilityMask(16)} {
+		if mask.Has(probe) {
+			t.Fatalf("invalid capability probe accepted: %v", probe)
+		}
+	}
+}
+
 func sameBrowserID(left, right *BrowserClientID) bool {
 	if left == nil || right == nil {
 		return left == nil && right == nil
@@ -277,8 +289,54 @@ func TestBrowserChallengeBoundsBootOriginExpiryAndPruning(t *testing.T) {
 	for index := 0; index < 32; index++ {
 		mintBrowserChallenge(t, store, byte(30+index), browserTestBoot(t, 5), int64(100+index), int64(200+index), BrowserCapabilityObserve)
 	}
+	if got := browserTableCount(t, store, "browser_pairing_challenges"); got != 32 {
+		t.Fatalf("active challenge count = %d, want 32", got)
+	}
 	if _, err := store.CreateBrowserPairingChallenge(ctx, HashBrowserChallenge([]byte("thirty-three")), browserTestBoot(t, 5), "https://app.example", BrowserCapabilityObserve, mustTime(t, 140), mustTime(t, 240)); !errors.Is(err, ErrBusy) {
 		t.Fatalf("active challenge bound error = %v", err)
+	}
+}
+
+func TestBrowserChallengeRetentionBoundFailsClosedOnOpen(t *testing.T) {
+	ctx := context.Background()
+	store, path := newBrowserStore(t)
+	boot := browserTestBoot(t, 6)
+	for index := 0; index < 33; index++ {
+		digest := HashBrowserChallenge([]byte(fmt.Sprintf("raw-retention-%d", index)))
+		corruptSQL(t, store, `INSERT INTO browser_pairing_challenges(secret_digest, boot_id, intended_origin, capability_mask, created_at_ms, expires_at_ms) VALUES(?, ?, ?, ?, ?, ?)`, digest.Bytes(), boot.Bytes(), "https://app.example", int64(BrowserCapabilityObserve), index+1, index+2)
+	}
+	if got := browserTableCount(t, store, "browser_pairing_challenges"); got != 33 {
+		t.Fatalf("raw challenge count = %d, want 33", got)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	opened, err := Open(ctx, path)
+	if opened != nil {
+		opened.Close()
+	}
+	if !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("33 challenges Open error = %v", err)
+	}
+}
+
+func TestBrowserChallengeInsertErrorsRemainSpecific(t *testing.T) {
+	ctx := context.Background()
+	store, _ := newBrowserStore(t)
+	defer store.Close()
+	boot := browserTestBoot(t, 7)
+	digest := mintBrowserChallenge(t, store, 7, boot, 10, 100, BrowserCapabilityObserve)
+	if _, err := store.CreateBrowserPairingChallenge(ctx, digest, boot, "https://app.example", BrowserCapabilityObserve, mustTime(t, 11), mustTime(t, 100)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("duplicate digest error = %v", err)
+	}
+	if _, err := store.writer.Exec(`CREATE TRIGGER reject_browser_challenge_insert BEFORE INSERT ON browser_pairing_challenges BEGIN SELECT RAISE(ABORT, 'unexpected challenge insert'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateBrowserPairingChallenge(ctx, HashBrowserChallenge([]byte("unexpected insert")), boot, "https://app.example", BrowserCapabilityObserve, mustTime(t, 12), mustTime(t, 100)); err == nil || errors.Is(err, ErrConflict) {
+		t.Fatalf("unexpected insert error collapsed: %v", err)
+	}
+	if got := browserTableCount(t, store, "browser_pairing_challenges"); got != 1 {
+		t.Fatalf("unexpected insert changed challenge count = %d", got)
 	}
 }
 
@@ -603,6 +661,14 @@ func TestBrowserAuthorityRawCorruptionFailsClosed(t *testing.T) {
 				corruptSQL(t, store, `UPDATE browser_pairing_challenges SET redeemed_at_ms = 101 WHERE secret_digest = ?`, digest.Bytes())
 			},
 		},
+		{
+			name: "redeemed at expiry",
+			mutate: func(t *testing.T, store *Store) {
+				boot := browserTestBoot(t, 104)
+				digest := mintBrowserChallenge(t, store, 104, boot, 10, 100, BrowserCapabilityObserve)
+				corruptSQL(t, store, `UPDATE browser_pairing_challenges SET redeemed_at_ms = 100 WHERE secret_digest = ?`, digest.Bytes())
+			},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -628,6 +694,57 @@ func TestBrowserAuthorityRawCorruptionFailsClosed(t *testing.T) {
 			}
 			if !errors.Is(err, ErrCorruptState) {
 				t.Fatalf("corrupt %s Open error = %v", test.name, err)
+			}
+		})
+	}
+}
+
+func TestTerminalSessionReadsValidateLeaseClientRelationship(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, *Store, BrowserClient)
+	}{
+		{
+			name: "missing client",
+			mutate: func(t *testing.T, store *Store, _ BrowserClient) {
+				corruptSQL(t, store, `UPDATE terminal_sessions SET lease_client_id = ?`, browserTestID(t, 250).Bytes())
+			},
+		},
+		{
+			name: "revoked client",
+			mutate: func(t *testing.T, store *Store, client BrowserClient) {
+				corruptSQL(t, store, `UPDATE browser_clients SET revoked_at_ms = updated_at_ms WHERE id = ?`, client.ID.Bytes())
+			},
+		},
+		{
+			name: "client without terminal capability",
+			mutate: func(t *testing.T, store *Store, client BrowserClient) {
+				corruptSQL(t, store, `UPDATE browser_clients SET capability_mask = ? WHERE id = ?`, int64(BrowserCapabilityObserve), client.ID.Bytes())
+			},
+		},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store, run, _ := runningOrchestratorRun(t)
+			defer store.Close()
+			session := terminalSessionForRunTest(t, store, run.ID)
+			boot := browserTestBoot(t, byte(220+index))
+			client := pairBrowserClient(t, store, mintBrowserChallenge(t, store, byte(220+index), boot, 30, 100, BrowserCapabilityObserve|BrowserCapabilityTerminalInput), boot, browserTestID(t, byte(220+index)), browserKey(t), 31)
+			if _, err := store.AcquireTerminalLease(context.Background(), run.ID, session.ID, client.ID, run.Revision, session.Revision, mustTime(t, 31)); err != nil {
+				t.Fatal(err)
+			}
+			if _, found, err := store.TerminalSession(context.Background(), session.ID); err != nil || !found {
+				t.Fatalf("normal TerminalSession read = found %v, err %v", found, err)
+			}
+			if _, found, err := store.TerminalSessionForRun(context.Background(), run.ID); err != nil || !found {
+				t.Fatalf("normal TerminalSessionForRun read = found %v, err %v", found, err)
+			}
+			test.mutate(t, store, client)
+			if _, found, err := store.TerminalSession(context.Background(), session.ID); !errors.Is(err, ErrCorruptState) || found {
+				t.Fatalf("corrupt TerminalSession read = found %v, err %v", found, err)
+			}
+			if _, found, err := store.TerminalSessionForRun(context.Background(), run.ID); !errors.Is(err, ErrCorruptState) || found {
+				t.Fatalf("corrupt TerminalSessionForRun read = found %v, err %v", found, err)
 			}
 		})
 	}
@@ -860,7 +977,7 @@ func TestTerminalLeaseSequenceReleasePartialResetAndFreshGeneration(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.ResetTerminalLeases(ctx, mustTime(t, 41)); err != nil {
+	if err := store.ResetTerminalLeases(ctx); err != nil {
 		t.Fatal(err)
 	}
 	afterReset := terminalSessionForRunTest(t, store, run.ID)

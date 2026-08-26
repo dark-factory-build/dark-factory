@@ -101,6 +101,13 @@ func validateBrowserAuthority(ctx context.Context, connection *sql.Conn) error {
 	if err := closeValidatedBrowserRows(rows); err != nil {
 		return err
 	}
+	var challengeCount int64
+	if err := connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM browser_pairing_challenges`).Scan(&challengeCount); err != nil {
+		return err
+	}
+	if challengeCount < 0 || challengeCount > 32 {
+		return fmt.Errorf("%w: browser pairing challenge retention exceeded", ErrCorruptState)
+	}
 	var count int64
 	if err := connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM browser_security_events`).Scan(&count); err != nil {
 		return err

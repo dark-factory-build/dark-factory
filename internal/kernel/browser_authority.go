@@ -28,7 +28,12 @@ const BrowserTerminalLeaseTTL int64 = 30 * 1000
 func (m BrowserCapabilityMask) validPairing() bool {
 	return m != 0 && m&^BrowserCapabilityKnownMask == 0 && m&BrowserCapabilityObserve != 0
 }
-func (m BrowserCapabilityMask) Has(bit BrowserCapabilityMask) bool { return m&bit != 0 }
+
+// Has reports whether one known capability bit is set. Composite, unknown and
+// zero probes are intentionally not accepted as capability names.
+func (m BrowserCapabilityMask) Has(bit BrowserCapabilityMask) bool {
+	return bit != 0 && bit&^BrowserCapabilityKnownMask == 0 && bit&(bit-1) == 0 && m&bit != 0
+}
 
 type BrowserPairingChallenge struct {
 	Digest         BrowserChallengeDigest
@@ -127,9 +132,17 @@ func (store *Store) CreateBrowserPairingChallenge(ctx context.Context, digest Br
 	if active >= 32 {
 		return BrowserPairingChallenge{}, tx.Rollback(ErrBusy)
 	}
+	var existing int
+	lookupErr := tx.connection.QueryRowContext(ctx, `SELECT 1 FROM browser_pairing_challenges WHERE secret_digest = ?`, digest.Bytes()).Scan(&existing)
+	if lookupErr == nil {
+		return BrowserPairingChallenge{}, tx.Rollback(ErrConflict)
+	}
+	if !errors.Is(lookupErr, sql.ErrNoRows) {
+		return BrowserPairingChallenge{}, tx.Rollback(lookupErr)
+	}
 	inserted, err := tx.connection.ExecContext(ctx, `INSERT INTO browser_pairing_challenges(secret_digest, boot_id, intended_origin, capability_mask, created_at_ms, expires_at_ms) VALUES(?, ?, ?, ?, ?, ?)`, digest.Bytes(), bootID.Bytes(), origin, int64(capabilities), created.Int64(), expires.Int64())
 	if err := requireOneRow(inserted, err); err != nil {
-		return BrowserPairingChallenge{}, tx.Rollback(ErrConflict)
+		return BrowserPairingChallenge{}, tx.Rollback(err)
 	}
 	if err := insertBrowserSecurityEvent(ctx, tx.connection, BrowserSecurityChallengeMinted, nil, created); err != nil {
 		return BrowserPairingChallenge{}, tx.Rollback(err)
@@ -229,7 +242,7 @@ func browserChallengeByDigest(ctx context.Context, c *sql.Conn, digest BrowserCh
 	b, berr := BootIDFromBytes(rawBoot)
 	ca, cerr := NewUnixMillis(created.Int64)
 	ea, eerr := NewUnixMillis(expires.Int64)
-	if derr != nil || berr != nil || !utf8.ValidString(origin) || byteLen(origin) < 1 || byteLen(origin) > 4096 || mask.Int64 < 1 || mask.Int64 > int64(BrowserCapabilityKnownMask) || mask.Int64&int64(BrowserCapabilityObserve) == 0 || cerr != nil || eerr != nil || expires.Int64 <= created.Int64 || expires.Int64-created.Int64 > 300000 || redeemed.Valid && (redeemed.Int64 < created.Int64 || redeemed.Int64 > expires.Int64 || redeemed.Int64 < 0) {
+	if derr != nil || berr != nil || !utf8.ValidString(origin) || byteLen(origin) < 1 || byteLen(origin) > 4096 || mask.Int64 < 1 || mask.Int64 > int64(BrowserCapabilityKnownMask) || mask.Int64&int64(BrowserCapabilityObserve) == 0 || cerr != nil || eerr != nil || expires.Int64 <= created.Int64 || expires.Int64-created.Int64 > 300000 || redeemed.Valid && (redeemed.Int64 < created.Int64 || redeemed.Int64 >= expires.Int64 || redeemed.Int64 < 0) {
 		return BrowserPairingChallenge{}, false, fmt.Errorf("%w: invalid browser challenge row", ErrCorruptState)
 	}
 	result := BrowserPairingChallenge{Digest: d, BootID: b, IntendedOrigin: origin, CapabilityMask: BrowserCapabilityMask(mask.Int64), CreatedAt: ca, ExpiresAt: ea}
@@ -388,7 +401,7 @@ func (store *Store) AcquireTerminalLease(ctx context.Context, runID RunID, sessi
 		return TerminalLease{}, tx.Rollback(err)
 	}
 	expiry := at.Int64() + BrowserTerminalLeaseTTL
-	if err := updateLease(ctx, tx.connection, session, clientID, next, expiry, 0, at); err != nil {
+	if err := updateLease(ctx, tx.connection, session, clientID, next, expiry, at); err != nil {
 		return TerminalLease{}, tx.Rollback(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -457,8 +470,8 @@ func leaseRows(ctx context.Context, c *sql.Conn, runID RunID, sessionID Terminal
 	return run, session, client, nil
 }
 
-func updateLease(ctx context.Context, c *sql.Conn, session TerminalSession, clientID BrowserClientID, generation int64, expiry, sequence int64, at UnixMillis) error {
-	result, err := c.ExecContext(ctx, `UPDATE terminal_sessions SET lease_client_id = ?, lease_generation = ?, lease_expires_at_ms = ?, last_input_sequence = ? WHERE id = ? AND (lease_client_id IS NULL OR lease_expires_at_ms <= ?)`, clientID.Bytes(), generation, expiry, sequence, session.ID.Bytes(), at.Int64())
+func updateLease(ctx context.Context, c *sql.Conn, session TerminalSession, clientID BrowserClientID, generation int64, expiry int64, at UnixMillis) error {
+	result, err := c.ExecContext(ctx, `UPDATE terminal_sessions SET lease_client_id = ?, lease_generation = ?, lease_expires_at_ms = ?, last_input_sequence = 0 WHERE id = ? AND (lease_client_id IS NULL OR lease_expires_at_ms <= ?)`, clientID.Bytes(), generation, expiry, session.ID.Bytes(), at.Int64())
 	if err := requireOneRow(result, err); err != nil {
 		return err
 	}
@@ -502,10 +515,10 @@ func (store *Store) ReserveTerminalInputSequence(ctx context.Context, runID RunI
 	if err != nil {
 		return InputReservation{}, tx.Rollback(err)
 	}
-	return store.reserveTerminalInputSequenceTx(ctx, tx, run, session, client, generation, sequence, expectedRun, expectedSession, at)
+	return reserveTerminalInputSequenceTx(ctx, tx, run, session, client, generation, sequence, expectedRun, expectedSession, at)
 }
 
-func (store *Store) reserveTerminalInputSequenceTx(ctx context.Context, tx *writeTx, run Run, session TerminalSession, client BrowserClient, generation, sequence uint64, expectedRun, expectedSession Revision, at UnixMillis) (InputReservation, error) {
+func reserveTerminalInputSequenceTx(ctx context.Context, tx *writeTx, run Run, session TerminalSession, client BrowserClient, generation, sequence uint64, expectedRun, expectedSession Revision, at UnixMillis) (InputReservation, error) {
 	if sequence == 0 || sequence > math.MaxInt64 || sequence != session.LastInputSequence+1 {
 		return InputReservation{}, tx.Rollback(ErrRevisionConflict)
 	}
@@ -619,7 +632,7 @@ func (store *Store) RevokeBrowserClient(ctx context.Context, id BrowserClientID,
 	return client, nil
 }
 
-func (store *Store) ResetTerminalLeases(ctx context.Context, at UnixMillis) error {
+func (store *Store) ResetTerminalLeases(ctx context.Context) error {
 	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return err
