@@ -9,6 +9,8 @@ import (
 	"strings"
 	"syscall"
 	"unicode/utf8"
+
+	"golang.org/x/sys/unix"
 )
 
 const maxSocketPathBytes = 103
@@ -39,6 +41,32 @@ type socketRecord struct {
 	socket fileIdentity
 }
 
+type privateRoot struct {
+	root      *os.Root
+	directory *os.File
+}
+
+func (root *privateRoot) Close() error {
+	rootErr := root.root.Close()
+	directoryErr := root.directory.Close()
+	if rootErr != nil {
+		return rootErr
+	}
+	return directoryErr
+}
+
+func (root *privateRoot) Lstat(name string) (os.FileInfo, error) {
+	return root.root.Lstat(name)
+}
+
+func (root *privateRoot) openToken(name string) (*os.File, error) {
+	fd, err := unix.Openat(int(root.directory.Fd()), name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), name), nil
+}
+
 func (left socketRecord) same(right socketRecord) bool {
 	return left.parent.same(right.parent) && left.socket.same(right.socket)
 }
@@ -48,6 +76,13 @@ func validCanonicalPath(path string, maximum int) bool {
 }
 
 func loadToken(path string) (tokenRecord, error) {
+	return loadTokenAtOpen(path, nil)
+}
+
+// loadTokenAtOpen keeps the only token-open race seam at the exact boundary
+// between the descriptor-relative metadata check and open. Production callers
+// pass nil; tests use it to prove replacement cannot block or change identity.
+func loadTokenAtOpen(path string, beforeOpen func()) (tokenRecord, error) {
 	if !validCanonicalPath(path, 4096) {
 		return tokenRecord{}, ErrInvalidClient
 	}
@@ -65,7 +100,10 @@ func loadToken(path string) (tokenRecord, error) {
 	if !ok {
 		return tokenRecord{}, ErrInvalidClient
 	}
-	file, err := root.Open(name)
+	if beforeOpen != nil {
+		beforeOpen()
+	}
+	file, err := root.openToken(name)
 	if err != nil {
 		return tokenRecord{}, ErrInvalidClient
 	}
@@ -139,61 +177,116 @@ func inspectSocket(path string) (socketRecord, error) {
 	return socketRecord{parent: parent, socket: identity}, nil
 }
 
-func openPrivateParent(path string) (*os.Root, fileIdentity, error) {
+func openPrivateParent(path string) (*privateRoot, fileIdentity, error) {
+	return openPrivateParentAt(path, nil, nil)
+}
+
+// openPrivateParentAt walks each canonical component from an open root. Each
+// directory is opened relative to its verified parent, and its identity and
+// non-symlink type must agree before, through, and after the open.
+func openPrivateParentAt(path string, beforeOpen, afterOpen func(string)) (*privateRoot, fileIdentity, error) {
 	parentPath := filepath.Dir(path)
-	if err := validateNoSymlinkComponents(parentPath); err != nil {
-		return nil, fileIdentity{}, err
-	}
-	beforeInfo, err := os.Lstat(parentPath)
-	if err != nil || !validPrivateParent(beforeInfo) {
+	if !validCanonicalPath(path, 4096) || parentPath == string(filepath.Separator) {
 		return nil, fileIdentity{}, ErrInvalidClient
 	}
-	before, ok := identityOf(beforeInfo)
-	if !ok {
+	directory, identity, err := openParentChain(parentPath, beforeOpen, afterOpen)
+	if err != nil {
 		return nil, fileIdentity{}, ErrInvalidClient
 	}
 	root, err := os.OpenRoot(parentPath)
 	if err != nil {
+		directory.Close()
 		return nil, fileIdentity{}, ErrInvalidClient
 	}
 	opened, err := root.Open(".")
 	if err != nil {
 		root.Close()
+		directory.Close()
 		return nil, fileIdentity{}, ErrInvalidClient
 	}
-	openedInfo, statErr := opened.Stat()
+	info, statErr := opened.Stat()
 	closeErr := opened.Close()
-	openedIdentity, ok := identityOf(openedInfo)
-	if statErr != nil || closeErr != nil || !ok || !openedIdentity.same(before) || !sameParent(path, before) {
+	rootIdentity, ok := identityOf(info)
+	if statErr != nil || closeErr != nil || !ok || !rootIdentity.same(identity) {
 		root.Close()
+		directory.Close()
 		return nil, fileIdentity{}, ErrInvalidClient
 	}
-	return root, before, nil
-}
-
-func sameParent(path string, expected fileIdentity) bool {
-	info, err := os.Lstat(filepath.Dir(path))
-	if err != nil || !validPrivateParent(info) {
-		return false
+	check, checkedIdentity, err := openParentChain(parentPath, nil, nil)
+	if err != nil || check.Close() != nil || !checkedIdentity.same(identity) {
+		root.Close()
+		directory.Close()
+		return nil, fileIdentity{}, ErrInvalidClient
 	}
-	identity, ok := identityOf(info)
-	return ok && identity.same(expected)
+	return &privateRoot{root: root, directory: directory}, identity, nil
 }
 
-func validateNoSymlinkComponents(path string) error {
-	current := string(filepath.Separator)
-	components := strings.Split(strings.TrimPrefix(path, string(filepath.Separator)), string(filepath.Separator))
+func openParentChain(parentPath string, beforeOpen, afterOpen func(string)) (*os.File, fileIdentity, error) {
+	directory, err := os.Open(string(filepath.Separator))
+	if err != nil {
+		return nil, fileIdentity{}, ErrInvalidClient
+	}
+	currentPath := string(filepath.Separator)
+	components := strings.Split(strings.TrimPrefix(parentPath, string(filepath.Separator)), string(filepath.Separator))
 	for _, component := range components {
 		if component == "" {
 			continue
 		}
-		current = filepath.Join(current, component)
-		info, err := os.Lstat(current)
-		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-			return ErrInvalidClient
+		currentPath = filepath.Join(currentPath, component)
+		beforeInfo, statErr := os.Lstat(currentPath)
+		before, ok := identityOf(beforeInfo)
+		if statErr != nil || !ok || !validDirectoryComponent(beforeInfo) {
+			directory.Close()
+			return nil, fileIdentity{}, ErrInvalidClient
 		}
+		if beforeOpen != nil {
+			beforeOpen(currentPath)
+		}
+		fd, openErr := unix.Openat(int(directory.Fd()), component, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+		if openErr != nil {
+			directory.Close()
+			return nil, fileIdentity{}, ErrInvalidClient
+		}
+		next := os.NewFile(uintptr(fd), currentPath)
+		if afterOpen != nil {
+			afterOpen(currentPath)
+		}
+		openedInfo, openedErr := next.Stat()
+		openedIdentity, openedOK := identityOf(openedInfo)
+		afterInfo, afterErr := os.Lstat(currentPath)
+		afterIdentity, afterOK := identityOf(afterInfo)
+		if openedErr != nil || !openedOK || !openedIdentity.same(before) || afterErr != nil || !afterOK ||
+			!validDirectoryComponent(afterInfo) || !afterIdentity.same(before) {
+			next.Close()
+			directory.Close()
+			return nil, fileIdentity{}, ErrInvalidClient
+		}
+		if err := directory.Close(); err != nil {
+			next.Close()
+			return nil, fileIdentity{}, ErrInvalidClient
+		}
+		directory = next
 	}
-	return nil
+	info, err := directory.Stat()
+	identity, ok := identityOf(info)
+	if err != nil || !ok || !validPrivateParent(info) {
+		directory.Close()
+		return nil, fileIdentity{}, ErrInvalidClient
+	}
+	return directory, identity, nil
+}
+
+func sameParent(path string, expected fileIdentity) bool {
+	root, actual, err := openPrivateParent(path)
+	if err != nil {
+		return false
+	}
+	return root.Close() == nil && actual.same(expected)
+}
+
+func validDirectoryComponent(info os.FileInfo) bool {
+	_, ok := identityOf(info)
+	return ok && info.IsDir() && info.Mode()&os.ModeSymlink == 0
 }
 
 func validPrivateParent(info os.FileInfo) bool {

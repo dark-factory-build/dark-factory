@@ -322,12 +322,87 @@ func decodeResponse(encoded []byte, output any) error {
 }
 
 func decodeExact(encoded []byte, output any) error {
+	if err := validateJSONNames(encoded); err != nil {
+		return err
+	}
 	decoder := json.NewDecoder(bytes.NewReader(encoded))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(output); err != nil {
 		return err
 	}
 	if decoder.Decode(&struct{}{}) != io.EOF {
+		return ErrProtocol
+	}
+	return nil
+}
+
+const maxJSONDepth = 64
+
+// validateJSONNames rejects byte sequences encoding/json intentionally accepts
+// but this exact local protocol does not: malformed UTF-8 and duplicate object
+// names. The frame bound caps total work and storage; maxJSONDepth caps stack.
+func validateJSONNames(encoded []byte) error {
+	if len(encoded) == 0 || len(encoded) > maxFrameBytes || !utf8.Valid(encoded) {
+		return ErrProtocol
+	}
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.UseNumber()
+	if err := validateJSONValue(decoder, 0); err != nil {
+		return ErrProtocol
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return ErrProtocol
+	}
+	return nil
+}
+
+func validateJSONValue(decoder *json.Decoder, depth int) error {
+	if depth > maxJSONDepth {
+		return ErrProtocol
+	}
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, compound := token.(json.Delim)
+	if !compound {
+		return nil
+	}
+	switch delimiter {
+	case '{':
+		names := make(map[string]struct{})
+		for decoder.More() {
+			nameToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			name, ok := nameToken.(string)
+			if !ok {
+				return ErrProtocol
+			}
+			if _, duplicate := names[name]; duplicate {
+				return ErrProtocol
+			}
+			names[name] = struct{}{}
+			if err := validateJSONValue(decoder, depth+1); err != nil {
+				return err
+			}
+		}
+		end, err := decoder.Token()
+		if err != nil || end != json.Delim('}') {
+			return ErrProtocol
+		}
+	case '[':
+		for decoder.More() {
+			if err := validateJSONValue(decoder, depth+1); err != nil {
+				return err
+			}
+		}
+		end, err := decoder.Token()
+		if err != nil || end != json.Delim(']') {
+			return ErrProtocol
+		}
+	default:
 		return ErrProtocol
 	}
 	return nil

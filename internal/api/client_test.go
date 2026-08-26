@@ -337,6 +337,18 @@ func TestResponseFramingIsExactBoundedAndStrict(t *testing.T) {
 		{name: "extra JSON", write: func(connection net.Conn) error {
 			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, valid+`{}`)
 		}, want: ErrProtocol},
+		{name: "duplicate envelope ok", write: func(connection net.Conn) error {
+			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"ok":false,"ok":true,"data":{"ready":true}}`)
+		}, want: ErrProtocol},
+		{name: "duplicate envelope data", write: func(connection net.Conn) error {
+			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"ok":true,"data":{"ready":false},"data":{"ready":true}}`)
+		}, want: ErrProtocol},
+		{name: "duplicate envelope error", write: func(connection net.Conn) error {
+			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"ok":false,"error":"forbidden","error":"unauthorized"}`)
+		}, want: ErrProtocol},
+		{name: "invalid UTF-8 error", write: func(connection net.Conn) error {
+			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, "{\"ok\":false,\"error\":\"\xff\"}")
+		}, want: ErrProtocol},
 		{name: "unknown envelope field", write: func(connection net.Conn) error {
 			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"ok":true,"data":{"ready":true},"private":"sentinel"}`)
 		}, want: ErrProtocol},
@@ -381,6 +393,36 @@ func TestResponseFramingIsExactBoundedAndStrict(t *testing.T) {
 				}
 			} else if err != nil {
 				t.Fatalf("client error = %v", err)
+			}
+			<-fixture.request
+			fixture.wait(t)
+		})
+	}
+}
+
+func TestSnapshotJSONRejectsDuplicateNestedNamesAndInvalidUTF8(t *testing.T) {
+	bearer := testCredential('J')
+	prefix := `{"head":1,"factory":{"dispatch_enabled":true,"capacity":1,"active_runs":0,"revision":1},"projects":[{"id":"` + id('1') + `",`
+	suffix := `,"revision":1}],"agents":[],"tasks":[]}`
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "duplicate entity name", body: prefix + `"name":"first","name":"second"` + suffix},
+		{name: "duplicate nested snapshot field", body: `{"head":1,"factory":{"dispatch_enabled":true,"capacity":1,"capacity":2,"active_runs":0,"revision":1},"projects":[],"agents":[],"tasks":[]}`},
+		{name: "invalid UTF-8 entity name", body: prefix + "\"name\":\"\xff\"" + suffix},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newWireFixture(t, bearer, func(connection net.Conn, _ []byte) error {
+				return writeTestResponse(connection, wireGeneration, wireOperatorDomain, successResponse(test.body))
+			})
+			client, err := NewOperatorClient(fixture.socket, fixture.token)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := client.Snapshot(context.Background()); !errors.Is(err, ErrProtocol) {
+				t.Fatalf("snapshot error = %v, want %v", err, ErrProtocol)
 			}
 			<-fixture.request
 			fixture.wait(t)
