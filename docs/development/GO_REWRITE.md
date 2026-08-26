@@ -6,10 +6,537 @@ authority and external effects, not around the existing Rust crates. Git
 history remains the archive; the Go runtime will not migrate a Rust home,
 schema, event log, protocol, or serialized state.
 
-The document starts as the pre-implementation contract. It must be updated as
-the kernel proof, broader implementation, mutation work, reviews, and final
-cutover produce evidence. Production Go implementation does not begin until
-this initial contract is committed.
+## Web-first redirection (authoritative from 2026-08-26)
+
+This section supersedes every later statement that requires a Go TUI, Bubble
+Tea, CLI/TUI parity, non-interactive provider stdin, or the Rust attention
+model. The later sections remain the chronological implementation record and
+evidence for already completed kernel work. They are not authority when they
+conflict with this redirection. The final elegance pass must remove the
+superseded prose after its replacement tests are green.
+
+The product is now a local Go daemon with durable authority and PTY-backed
+agents, controlled primarily by a hosted responsive web application. There is
+no Go `factory-tui`. `factoryctl` remains the bootstrap, service, recovery,
+diagnostic, automation, and browser-pairing client; it is not a second primary
+operator interface and does not owe visual feature parity.
+
+The hard-cutover decision is unchanged: fresh Go home, schema and protocols;
+no Rust migration, event upcasting, mixed runtime, or compatibility period.
+The existing Rust TUI and other replaced Rust local-runtime crates are deleted
+only after the revised web/PTY gate passes.
+
+### Redirection starting point and branch inventory
+
+The redirection began from clean canonical Go head
+`7eb417660fd189b8fa412e8e64215c7e6e7b3f90` in worktree
+`.worktrees/go-hard-cutover`. The only worktree modification while this section
+was written is this document. No branch was published or merged, no Go TUI
+implementation exists, and no live installation, daemon, socket, provider or
+credential was touched.
+
+The private sister repository `/Users/baziyer/dark-factory-site` exists at
+`cfef147717ed1c166944bc66a8780ac95a54f7d6`. Its current main worktree contains
+pre-existing uncommitted marketing/wordmark/test assets; they belong to the
+operator and must not be overwritten. Future site integration uses a separate
+branch/worktree and obeys that repository's `AGENTS.md`.
+
+| State | Exact work retained or stopped |
+|---|---|
+| Complete and retained | Fresh SQLite contract; typed kernel; atomic admission; exact attempt credentials; run/finalizing/resource state; bounded invalidations; Change ownership/materialization groundwork; owner-only Unix control API; typed `factoryctl` client; Darwin process identity; two blocked-exec gates; terminal-exit spool; Store chronology through `7eb4176` |
+| Reusable with adaptation | `internal/runner` live-child/process-group ownership; daemon supervisor choreography; bounded API framing/auth separation; dashboard projection/client reducer direction; rebased recovery branch `go-recovery-reserved-fix` at `185cd5f`; fail-closed runtime/spool/Change close branches at `f239815`, `347c977`, and `4183205` |
+| In progress but held | Recovery is rebased onto the approved Store chronology but remains unintegrated until PTY/session semantics replace non-interactive assumptions and the close patches are replayed/re-reviewed |
+| Obsolete | Startup-input-only/closed-stdin provider contract; separate stdin/stdout/stderr provider pipes as the product transport; TUI/Bubble Tea packages, lanes and parity tests; generic attention projection; message-on-next-run as the live-question answer |
+| Blocked until proved | Hosted-origin loopback connectivity; PTY allocation/session/input/replay; durable `HumanRequest`; browser pairing/security; browser protocol v1; TypeScript client; public web UI; private host integration; revised crash-cut vertical slice |
+
+Read-only redirection audits were assigned without overlapping writes:
+
+- `web_redirect_pty_audit`: current runner, supervisor and recovery reuse versus
+  obsolete pipe/session behavior;
+- `web_redirect_browser_audit`: current Chrome/Safari loopback rules, browser
+  security, and the public-UI/private-host repository split;
+- `web_redirect_human_protocol_audit`: durable `HumanRequest`, browser v1,
+  Go/TypeScript drift prevention and UI package boundaries.
+
+Their concrete conclusions are incorporated below. Broad production work does
+not resume until this revised plan is committed.
+
+### Product and repository ownership
+
+The runtime repository is MIT and intentionally owns the largest useful
+contribution surface:
+
+```text
+dark-factory
+├── cmd/factoryd
+├── cmd/factory-runner
+├── cmd/factoryctl
+├── internal/kernel
+├── internal/daemon
+├── internal/runner
+├── internal/browser
+├── internal/api
+├── protocol/browser/v1
+└── web
+    ├── packages/client     @dark-factory/client, framework-neutral
+    ├── packages/ui         React product UI and xterm adapter
+    └── apps/dev            runnable contributor/test host
+
+dark-factory-site (private)
+└── thin production Next.js host
+    ├── domain/deployment/authentication shell
+    ├── private branding/marketing/ledger
+    └── exact pinned public UI artifact
+```
+
+The public repository owns protocol semantics, pairing client behavior,
+browser/application state, terminal adapter, BUILDING, AGENT, NEEDS YOU,
+responsive and accessibility behavior, mocks, fixtures, and real-server tests.
+The public UI uses React because the existing production host is Next.js 15 and
+React 19; the transport client remains framework-neutral. The dev host may use
+the smallest Vite/Playwright setup that exercises the same packages without
+copying product state.
+
+The private site stays a thin host. It imports an exact version/digest of the
+public UI and client, supplies production origin/auth/deployment configuration,
+and retains its existing marketing and ledger pages. It must not copy protocol
+definitions, reducers, xterm integration, scheduling policy, action
+authorization, or daemon state. Its CI must reject a host whose pinned public
+artifact does not pass the browser-v1 capability/fixture contract.
+
+No React, CSS, xterm or visual code enters Store, scheduler, process-kernel or
+daemon packages. No private host credential or deployment behavior enters the
+MIT packages. Product UI work in `dark-factory-site` begins only after the
+public protocol/client/UI slice is stable, in a separate clean worktree that
+preserves the current dirty main worktree.
+
+### Revised process and PTY contract
+
+One admitted run owns one fresh PTY-backed provider process. The runner owns
+the PTY master, direct child, process group, live terminal session, output
+reader, input serialization, signal authority and reap. Many authenticated
+browser clients may observe; at most one holds a writable terminal-input lease.
+Closing every browser must not stop the provider.
+
+The existing process kernel is adapted, not restarted. Preserve:
+
+- atomic admission and durable resource declaration before external effects;
+- outer daemon-to-runner and inner runner-to-provider blocked-exec gates;
+- exact Darwin PID/PGID/birth identity and explicit process groups;
+- only the component holding the live child may signal or reap it;
+- recovered numeric process identity is observation, never signal authority;
+- exact absence before release, with uncertainty persisted as unresolved;
+- Store commit before terminal-spool acknowledgement/removal;
+- finalizing as a real nonterminal external-uncertainty phase.
+
+Replace the provider pipe contract with this visible order:
+
+```text
+admit run
+→ declare runtime, runner, provider/group and terminal-session resources
+→ create blocked outer runner and persist its exact identity
+→ runner allocates PTY master/slave and prepares an inert inner child
+→ bind the slave as the child's controlling terminal/session
+→ report exact provider identity and terminal-session identity
+→ persist every identity and activation checkpoint
+→ finish Change preparation/materialization
+→ mark the run running
+→ release provider exec
+→ read PTY output, assign sequences and fan out without blocking the provider
+→ accept leased input and bounded resize while that exact run remains running
+→ revoke input, terminate/reap, prove group absence and close the PTY
+→ publish exact exit evidence
+→ verify, release resources and terminalize
+```
+
+The PTY is one concrete in-memory `TerminalSession`, not a generic actor or
+plugin. Durable state declares the terminal session before allocation and binds
+it to the exact runner/run when activated; it never persists an FD or treats a
+PTY number as authority. Exact runner absence proves its master FD is gone.
+Provider leader and group remain separate durable facts because leader reap is
+not group absence.
+
+V1 does not invent interactive authority after daemon/runner loss. If the live
+runner channel is lost, browser input is revoked. Recovery may read validated
+bounded terminal evidence and converge the run, but it must not reopen a PTY,
+reattach by PID, signal from a numeric identity, or replay input. Transparent
+reattachment to an orphaned PTY is deferred unless a later capability-bound
+runner channel is independently proved.
+
+The following current details are deleted during PTY implementation:
+
+- `ExecSpec.Stdin`, provider-startup anonymous input files, closed-stdin/EOF
+  assertions, and startup-input replay semantics;
+- provider-facing separate stdin/stdout/stderr pipe descriptors and forwarding
+  wrappers that the PTY aggregate replaces;
+- use of the final JSON terminal spool as a live output transport. The spool
+  remains only for bounded final exit/recovery evidence.
+
+### Terminal ownership, replay and backpressure
+
+The runner owns one bounded scrollback ring and monotonically increasing output
+sequence per run. Output frames are binary. The daemon/browser adapter owns
+subscriber queues and drops/resets a slow client instead of blocking the PTY
+reader or provider. Bounds are frozen by tests before release and apply to
+individual frames, per-client queued bytes, in-memory scrollback and any
+runner-owned disk evidence.
+
+Attach names an exact run and last acknowledged output sequence. If retained
+data covers the cursor, the runner returns ordered scrollback followed by live
+output. Otherwise it returns an explicit reset containing the retained floor
+and current head; the client discards its terminal projection. Output ACKs or
+credits bound every observer. Terminal EOF is observation only and does not
+substitute for exact child/group exit evidence.
+
+Input frames carry an exact client, terminal session, lease generation and
+monotonic client input sequence. The daemon grants at most one lease per run;
+read-only clients cannot acquire it. Disconnect, expiry, operator revocation,
+run transition from running, or daemon restart revokes the lease. The runner
+serializes terminal input, HumanRequest delivery and resize operations. It ACKs
+input only after the live PTY write; a client never automatically retransmits
+an unacknowledged frame after reconnect because delivery is uncertain.
+
+Multiple readers are ordinary observers. Collaborative/multi-writer terminal
+editing, durable lease survival, LAN listeners, and PTY recovery by numeric
+identity are explicitly deferred.
+
+### Durable `HumanRequest` / NEEDS YOU
+
+`HumanRequest` is a first-class durable request for a specific human reply or
+daemon-authorized action. It is not a generic warning or attention score.
+Routine failure, delay, capacity wait, finalization stall and any condition
+routine automation can resolve stay in task/run/system status.
+
+The fresh schema uses one concrete request table plus a finite action table or
+equivalent normalized rows. It records exact 16-byte identifiers for project,
+agent, task, task incarnation and (for an agent question) run; positive
+revision and timestamps; bounded `kind`, `title`, `summary`,
+`why_human_is_needed`, typed context items, status, idempotency identity,
+resolution and delivery identity. The initial closed kinds are `question`,
+`action`, and `combined`; statuses are `open`, `delivering`, `resolved`,
+`stale`, and policy-gated `dismissed`.
+
+The bounded public projection contains:
+
+```text
+id, project, agent, task, run,
+created_at, updated_at, revision,
+kind, title, summary, why_human_is_needed,
+typed context items, available interactions, status
+```
+
+Interactions are one explicit union:
+
+- `InlineReply(max_bytes)`;
+- daemon-minted `TypedAction(id, label, kind)` with opaque server-owned
+  arguments and revalidated preconditions;
+- `OpenTerminal(run_id)`.
+
+The initial typed action set is finite: approve, reject, retry, cancel, resume,
+publish and narrowly defined permission grants. An agent may create only a
+bounded question through an authenticated `request_human` operation. It cannot
+mint a button, label, action kind, arguments or authority. The daemon derives
+all identity from the exact attempt credential and decides which actions exist.
+
+Creation is unique for one exact `(run, request idempotency identity)`. Viewing,
+subscribing or opening the terminal never resolves it. Reply/action requires
+expected request revision and revalidates the exact current run/state. A stale
+origin never routes to a later run. Underlying-state resolution, explicit
+staleness and permitted dismissal each commit once with one invalidation.
+
+Inline PTY delivery is an external effect and therefore explicit:
+
+```text
+open
+→ delivering(delivery_id, bounded reply)
+→ runner persists receipt-before-write intent
+→ exact live runner writes once and acknowledges delivery_id
+→ resolved(reply)
+```
+
+The runner suppresses duplicate delivery IDs in the live session. If recovery
+proves no receipt exists, delivery may be attempted once; a prepared receipt
+without positive write acknowledgement is `delivery unknown`, never replayed.
+The request remains visible and non-resolved for operator recovery. This
+fail-closed edge is preferable to injecting a duplicate answer. Purely internal
+typed actions commit their state effect, request resolution and invalidations
+in one immediate SQLite transaction.
+
+### Browser protocol v1
+
+`factoryd` initially hosts the loopback WebSocket adapter in
+`internal/browser`. That package owns HTTP/WebSocket upgrade parsing, Host and
+Origin policy, pairing/client authentication, multiplexing, bounds and browser
+DTOs. It depends on narrow daemon operations; Store, scheduler, runner and
+provider packages do not import it. This boundary permits a future separate
+adapter process without pre-building one now.
+
+Structured control uses bounded versioned JSON. Terminal bytes use binary
+WebSocket frames and are never base64 JSON. V1 explicitly covers:
+
+```text
+HELLO / HELLO_ACK / CAPABILITIES
+PAIR_BEGIN / PAIR_PROVE / PAIR_RESULT
+STATE_GET / STATE_SNAPSHOT / STATE_SUBSCRIBE / STATE_EVENT
+HUMAN_REQUEST_REPLY / HUMAN_REQUEST_ACTION
+TERMINAL_ATTACH / TERMINAL_ATTACHED / TERMINAL_ACK
+TERMINAL_RESIZE / TERMINAL_DETACH / TERMINAL_EXIT / TERMINAL_RESET
+ERROR
+```
+
+Binary terminal input/output frames include a fixed v1 opcode, exact run or
+session identifier, sequence/generation metadata and bounded payload. Exact
+encoding and maximums freeze only after Go/TypeScript fixture and malformed
+frame tests. Unknown versions, capabilities, messages, opcodes or control
+values fail closed.
+
+The source of truth stays deliberately small:
+
+- `protocol/browser/v1/manifest.json` owns protocol version, capabilities,
+  control names, terminal opcodes and wire bounds;
+- typed Go and TypeScript unions remain explicit and readable;
+- the Go implementation produces a golden valid/error fixture for every
+  manifest entry;
+- TypeScript tests consume every fixture and exercise the real Go server;
+- a gate regenerates fixtures to a temporary directory, compares the checked-in
+  set, checks registry exhaustiveness, and rejects drift.
+
+This avoids a general schema/code-generation framework while satisfying the
+rule that a Go protocol change cannot pass with a silently incompatible
+TypeScript client.
+
+### Browser security and pairing
+
+The browser transport carries operator authority and terminal input. V1 must:
+
+- bind only an explicit loopback address and refuse wildcard/LAN binds;
+- validate exact `Host` and exact production/development `Origin` at upgrade;
+- expose no permissive CORS or missing-Origin fallback;
+- reject malformed, oversized and rate-exceeding control/binary frames;
+- separate paired observation from terminal-input authority;
+- issue one revocable client identity per browser profile;
+- persist pairing/client/revocation facts and security invalidations;
+- never send the Unix operator token, attempt credential, provider credential,
+  private source, raw debug data or permanent secret to browser JavaScript;
+- revoke input on finalizing even if the browser/daemon has stale state.
+
+`factoryctl web open` asks the owner-only Unix API to create one short-lived,
+single-use challenge, then opens the hosted app with only that one-time
+bootstrap material. The app removes bootstrap material from browser history
+before establishing durable state, creates its own client identity, proves the
+challenge, and receives only client-scoped revocable authority. Reuse, expiry,
+wrong daemon/client and revocation fail closed. `web status`, `pair/open`,
+`list-clients`, and `revoke` are the initial CLI recovery surfaces; exact names
+may collapse if one command suffices.
+
+The hosted app must use first-party bundled scripts, strict CSP, controlled
+dependencies, no third-party analytics in the terminal context, and safe
+rendering of hostile terminal bytes. These are cross-repository requirements;
+the local daemon cannot enforce a remote page's CSP.
+
+### Hosted-origin connectivity spike
+
+Direct hosted HTTPS to loopback WebSocket remains a go/no-go transport spike,
+not an assumption. The installed environment currently has Chrome
+`151.0.7922.174` and Safari `26.5`. Current browser rules around mixed content
+and Local Network Access are version-sensitive, and WebSocket behavior cannot
+be inferred from ordinary Fetch.
+
+The first candidate is:
+
+```text
+https://app.darkfactory.build
+        → ws://127.0.0.1:<one configured stable port>/browser/v1
+```
+
+Only `127.0.0.1` is in the first support claim; `localhost`, IPv6, random-port
+discovery and Safari support require their own evidence. A stable port avoids
+port scanning and secrets in discovery URLs; collision must fail visibly and
+be diagnosed by `factoryctl web status`.
+
+The spike uses a real hosted/preview HTTPS origin and a disposable local server
+outside the live home. It records WebSocket upgrade, mixed-content/LNA prompt,
+Origin, Host, binary data, pairing, reconnect and denial behavior in headed
+current Chrome. Playwright supplies repeatability; manual Chrome records prompt
+UX and permission reset. Safari/WebKit is observed but not claimed without a
+pass.
+
+Required cases include `127.0.0.1` versus `localhost`, ws versus locally trusted
+wss, fixed versus occupied port, granted/denied/reset LNA, exact/wrong/missing
+Origin, exact/wrong Host, fresh/expired/replayed/revoked pairing, browser refresh,
+daemon restart, stale output cursor reset, cross-site WebSocket hijack, and no
+daemon/permission/TLS failure UX.
+
+If direct ws fails, choose in order: a local bootstrap HTTPS origin that hands
+control back to the hosted app; a locally trusted HTTPS endpoint if its install
+and renewal UX is acceptable; then a custom `darkfactory://` bootstrap only if
+required. Do not add a relay, extension, service worker, LAN listener or remote
+mobile path. The supported transport is not frozen until the real Chrome matrix
+is recorded here.
+
+### Updated vertical slice
+
+The revised kernel go/no-go proof is:
+
+```text
+fresh SQLite database
+→ create project, agent and task
+→ atomic admission and exact attempt credential
+→ declare/register runtime, runner, PTY session and provider resources
+→ prepare blocked PTY-backed provider and persist exact identities
+→ materialize the exact daemon-owned Change
+→ mark running, then release provider exec
+→ pair an authenticated browser client
+→ attach and receive sequenced binary terminal output
+→ acquire one input lease, send input and observe exact provider response
+→ provider explicitly creates one bounded HumanRequest
+→ browser renders it without transcript/private fields
+→ inline reply is delivered once to that exact run
+→ one daemon-minted typed action is revalidated and committed
+→ completion request enters finalizing and revokes all input
+→ provider, descendants and PTY are reaped/closed
+→ stable verification and resource cleanup
+→ terminal state
+→ browser refresh and daemon restart converge without input/process replay
+```
+
+Use only deterministic shell fixtures. A browser or daemon disconnect does not
+authorize replay. Real Claude/Codex sessions and credentials remain prohibited.
+
+### Revised work graph and integration order
+
+Shared contracts are orchestrator-owned. No two writing agents own schema,
+browser manifest, terminal messages or HumanRequest transitions concurrently.
+
+1. **Plan gate** — incorporate the three read-only redirect audits, commit this
+   document, then obtain a cold plan review.
+2. **Connectivity spike** — isolated loopback harness plus real hosted-origin
+   Chrome evidence. Freeze direct ws or the smallest fallback before production
+   browser transport.
+3. **Lane A: kernel** — complete current recovery/close integration, then own
+   HumanRequest schema, Store transitions, action authority and public
+   projection.
+4. **Lane B: PTY runtime** — adapt `internal/runner` and supervisor to PTY,
+   bounded scrollback, input sequencing/receipts, lease enforcement, shutdown
+   and process/FD/goroutine proof.
+5. **Lane C: browser transport** — own `internal/browser`, loopback listener,
+   WebSocket frames, Host/Origin, pairing, client credentials, multiplexing,
+   backpressure and reconnect. It consumes frozen A/B contracts.
+6. **Lane D: TypeScript client** — own `protocol/browser/v1`,
+   `web/packages/client`, fixtures and real-Go-server compatibility tests.
+7. **Lane E: public UI** — own `web/packages/ui` and `web/apps/dev`: BUILDING,
+   AGENT, xterm terminal, NEEDS YOU, responsive/accessibility and browser-state
+   tests. It depends only on the public client.
+8. **Lane F: platform/CLI** — init, service, doctor, recovery, web open/pair/list/
+   revoke, packaging and hard-cutover plumbing after C stabilizes.
+9. **Lane G: private host** — separate `dark-factory-site` worktree consuming
+   an exact public artifact after D/E stabilize; no daemon-contract edits.
+10. **Integration gate** — revised shell-provider vertical slice, crash cuts,
+    mutation matrix, authoritative race/process/browser tests and leak census.
+11. **Elegance/cutover** — dedicated whole-runtime and whole-web DRY/YAGNI
+    audit, independent architecture/security/process/Store/browser reviews,
+    delete Rust local runtime/TUI and transitional residue, clean-checkout gate.
+
+The old recovery branch is not discarded. After the plan and PTY contract
+freeze, rebase/adapt its synchronous recovery and apply the independently
+approved close patches; remove only assumptions specifically invalidated by
+the PTY design.
+
+### Revised causal and mutation contract
+
+In addition to the existing admission/credential/finalization/Change/process
+matrix, the following must exist and kill the named guard mutations:
+
+- PTY cannot exist before admission/resource declaration; release-before-
+  identity-commit mutation is killed by an external execution witness.
+- Input before running, without the current lease, from a stale lease/client,
+  or after finalizing is refused; removing the phase or lease-generation check
+  is killed by an exact fixture input count.
+- Detach leaves provider live; reconnect from retained sequence yields exact
+  scrollback/live order; removing the retention-floor reset is killed.
+- Slow clients cannot grow memory/disk or block PTY/provider; removing the
+  queue/credit bound is killed by measured limits.
+- Runner/daemon death at every PTY/gate/write/ack cut causes no provider or
+  terminal-input replay, no unsafe signal and no false release.
+- Provider descendants, PTY descriptors, control sockets and every owner
+  goroutine are absent after normal/error/cancel/crash tests, with independent
+  safety cleanup.
+- HumanRequest creation is idempotent; viewing does not clear; restart
+  preserves; stale run/revision refuses; duplicate/uncertain delivery never
+  injects twice; routine failure never creates one.
+- An attempt cannot mint a typed action. Removing daemon action allowlisting or
+  current-state precondition checks is killed by authority tests.
+- Every public/browser frame is scanned against private sentinels from task
+  bodies, prompts, output, credentials, source and result detail.
+- Non-loopback bind, wrong/missing Origin, wrong Host, wildcard origin,
+  unpaired/expired/replayed/revoked/wrong-client credentials, read-only input,
+  malformed/oversized/rate-exceeding frames are rejected causally.
+- Every manifest message/opcode has Go and TypeScript fixtures; changing a
+  message, version, capability or binary envelope without updating the client
+  fails the gate.
+- The TypeScript client is proved against a real Go server for pairing, state,
+  HumanRequest, typed action, attach, input, resize, binary output, reset,
+  reconnect and structured errors; TypeScript compilation alone is not proof.
+- Public UI tests prove revision/gap/stale-response behavior, terminal lease and
+  reconnect UX, HumanRequest card rendering without transcript reads,
+  accessibility and responsive layouts.
+- The private host proves it imports the exact public artifact and completes
+  the same pair/state/terminal/request/action/refresh slice without a protocol
+  or reducer copy.
+
+Required temporary mutations now also include PTY release ordering, terminal
+phase/lease guard, output retention floor, slow-client bound, HumanRequest
+idempotency and stale destination, delivery receipt-before-write, typed-action
+allowlist, Origin/Host checks, pairing replay/revocation, public privacy, and
+Go/TypeScript manifest drift. Mutation code is never retained.
+
+### Redirect simplification and explicit deletions
+
+Do not add `factory-tui`, Bubble Tea, Lip Gloss, keymaps, mouse support, TUI
+folding or browser/TUI parity. Delete those Rust surfaces only at final cutover.
+Delete generic attention and message-next-run behavior once HumanRequest proves
+their replacement. Do not retain both PTY and provider-pipe interaction paths.
+
+Do not add GraphQL, event sourcing, a generic action/workflow framework, a
+terminal actor system, multi-writer collaboration, cloud relay, Wails, native
+mobile, push notifications, public factory view, browser extension, speculative
+custom scheme, general protocol generator, large design system, or duplicated
+private-site client/reducer. The public UI is not embedded into `factoryd`; the
+private site is not a second implementation.
+
+### Revised hard-cutover gate
+
+Rust local-runtime deletion requires all original durable-authority, Change,
+verification and process proofs plus:
+
+```text
+PTY/process lifecycle and leak matrix GREEN
+Go race detector GREEN
+hosted-origin browser connectivity contract recorded and GREEN on supported Chrome
+loopback Host/Origin/pairing/revocation/security matrix GREEN
+interactive terminal output/input/resize/reconnect/reset GREEN
+single-writer lease and finalization revocation GREEN
+HumanRequest inline reply, typed action, stale/idempotent/restart/privacy GREEN
+browser protocol v1 Go/TypeScript fixture and real-server integration GREEN
+factoryctl web bootstrap/recovery GREEN
+public UI BUILDING/AGENT/NEEDS YOU/terminal/accessibility/responsive gate GREEN
+private site exact-artifact pair/state/terminal/request/action/refresh integration GREEN
+fresh isolated install/service/restart/uninstall GREEN
+whole-runtime/web elegance audit complete
+independent exact-head architecture/security/process/Store/browser reviews ALLOW
+```
+
+If private-site integration cannot run, hard cutover stops and reports that
+exact blocker; no full product frontend is substituted into daemon packages.
+When the gate passes, delete the Rust TUI and replaced local crates, remove all
+TUI and non-interactive-provider documentation/CI, retain `control-plane/`
+independently, and run final clean-checkout process/socket/PTY/goroutine/browser
+client census.
+
+The document began as the pre-implementation contract and is updated in place
+as proofs, redirections, mutations, reviews, and final cutover produce evidence.
+The original plan gate was committed before production Go work; the web-first
+redirection above is the next plan gate.
 
 ## 1. Exact starting point
 
@@ -131,9 +658,10 @@ not a compatibility target.
   become `released` after later positive proof, never active/releasing or
   signal-authoritative. `released` and terminal are absorbing. Any
   non-released resource forbids terminalization.
-- One admitted run owns one fresh, non-interactive provider process and one
-  startup input. There is no resident provider session, PTY attach, prompt
-  replay, process resume, or stdout-derived lifecycle authority.
+- One admitted run owns one fresh PTY-backed provider process and one exact live
+  terminal session. Attach/detach/input/resize are explicit authenticated
+  operations; terminal bytes and provider prose never become lifecycle
+  authority, and input is never replayed after uncertainty.
 - Register-before-exec remains a two-owner proof: an outer daemon-to-runner
   gate and an inner runner-to-provider gate. Exact runner/provider identities
   are durable before the corresponding activation. The runner alone may
@@ -150,7 +678,8 @@ not a compatibility target.
   injection, and ambient API/provider/proxy credentials. The attempt bearer is
   written only to an exact owner-only `0600` per-run file; the environment
   carries only that file's path. The bearer never appears in argv, environment,
-  startup input, request bodies, logs, errors, events, or debug output, and a
+  terminal input, browser frames, request bodies, logs, errors, events, or debug
+  output, and a
   provider-launched `factoryctl` never falls back to operator credentials.
 - Workers receive a daemon-owned, writable, retained, `.git`-free Change for
   one exact task incarnation and base commit. The daemon owns materialization,
@@ -184,15 +713,16 @@ not a compatibility target.
   never reruns verification against a current/later Change: exact absence plus
   no valid result is failed verification; uncertain absence or cleanup remains
   finalizing. Cache measurement/handoff occurs only after exact writer absence.
-- One private owner-only Unix-socket API serves both CLI and TUI. The CLI is
-  the canonical non-interactive recovery/automation surface. The daemon owns
-  all policy.
+- One private owner-only Unix control API serves CLI/bootstrap/attempt traffic,
+  while an isolated loopback WebSocket adapter serves paired browser clients.
+  Both invoke the same daemon-owned policy; neither transport owns Store or
+  lifecycle rules.
 - Public/watch state is bounded and excludes credentials, prompts, raw output,
   message bodies, task bodies/results, source content/paths, environment,
   private guidance, deliberation, and runner resource identities.
-- BUILDING and AGENT remain the TUI's useful core, including queue, current
-  work, bounded activity/status, a real NEEDS YOU decision inbox, and basic
-  project/agent/task actions.
+- BUILDING and AGENT remain the browser application's useful core, including
+  queue, current work, bounded activity/status, interactive terminals, a real
+  HumanRequest-backed NEEDS YOU inbox, and basic project/agent/task actions.
 - Independent adversarial review binds to the exact head and remains required
   before merge.
 
@@ -219,9 +749,10 @@ not a compatibility target.
 - Replace snapshot-heavy durable/public events with bounded invalidations or
   safe summary deltas. The current shape can expose `ProjectSnapshot.root` and
   couples event privacy to read DTO growth (#340/#344).
-- Replace the TUI's competing bootstrap, event, response, and independent
-  status projections with one revisioned snapshot/watch model. Gaps force
-  resync; delayed responses cannot regress newer state (#341/#342/#344).
+- Replace competing client bootstrap, event, response, and independent status
+  projections with one revisioned snapshot/watch model shared by the public
+  browser client. Gaps force resync; delayed responses cannot regress newer
+  state (#341/#342/#344).
 - Return task summaries from list/watch and fetch selected private detail by
   revision (#39). Add empty-state project and agent creation through the same
   API used by the CLI (#30).
@@ -278,16 +809,16 @@ not a compatibility target.
   gap triggers canonical resync; details remain explicit reads.
 - Feed mutation responses and watch invalidations through one revision-aware
   client reducer.
-- Keep one obvious CLI command per operation and a small, testable Bubble Tea
-  model. Use typed Open/Back/Next/Previous actions rather than navigation
-  synonyms.
+- Keep one obvious CLI command per bootstrap/recovery operation and one public,
+  testable React browser application consuming the framework-neutral client.
+  Browser navigation and visual state never select daemon policy.
 - Retain an internal project verification cache only if focused measurement
   shows enough value. If retained, use one lifecycle with active lease/known
   measurement rather than three states and do not expose read-only storage
   status without an operator action.
 - Restrict the initially supported local runtime to macOS/Darwin. Platform
   seams exist only where process/syscall/launchd behavior genuinely differs.
-- Keep install/update as one concrete transaction over exactly four binaries,
+- Keep install/update as one concrete transaction over exactly three binaries,
   one immutable version directory, one relative atomic `bin/current` link,
   one release receipt, and one exact owned launchd job. Parse archives in Go
   and reject traversal, links, duplicates, extras, mixed builds, wrong
@@ -356,12 +887,13 @@ factoryd        sole durable owner, scheduler, supervisor registry, finalizer,
                 Change owner, verifier owner, and local-API server
 factory-runner  provider-blind live-child owner and blocked-exec/replay host
 factoryctl      canonical typed CLI and daemon-absent lifecycle bootstrap
-factory-tui     disposable Bubble Tea client using the same API as factoryctl
+browser app     public React/xterm package hosted by a thin private site shell
 ```
 
-The first kernel slice builds only enough of `factoryd`, `factory-runner`, and
-`factoryctl` to drive the proof. TUI, installers, update logic, and broad
-provider integration remain blocked until the kernel go/no-go decision.
+The first redirected slice builds only enough of `factoryd`, `factory-runner`,
+`factoryctl`, browser v1 and the public web packages to drive the PTY/browser/
+HumanRequest proof. Installers, update logic, private hosting and broad provider
+integration remain blocked until that go/no-go decision.
 
 ### Packages and dependency direction
 
@@ -378,7 +910,8 @@ cmd/*
                       -> internal/api
 
 cmd/factoryctl -> internal/api
-cmd/factory-tui -> internal/tui -> internal/api
+internal/browser -> daemon operations + protocol/browser/v1
+web/packages/ui -> web/packages/client -> protocol/browser/v1 fixtures
 cmd/factory-runner -> internal/runner
 
 internal/install is added only after client/kernel cutover readiness.
@@ -409,9 +942,10 @@ internal/install is added only after client/kernel cutover readiness.
 - `internal/api`: bounded private protocol, framing, typed wire values, and the
   three narrow clients (`HealthClient`, `OperatorClient`, `AttemptClient`). It
   has no Store or lifecycle logic.
-- `internal/tui`: ordinary testable Bubble Tea update/view code and one shared
-  revision-aware client model.
-- `internal/install`: private home/bootstrap, safe four-member archive,
+- `internal/browser`: loopback-only WebSocket, Host/Origin checks, pairing,
+  client credentials, terminal multiplexing and bounded browser DTOs. Public
+  TypeScript client/UI code lives under `web/`, never in daemon packages.
+- `internal/install`: private home/bootstrap, safe three-member archive,
   receipt/version activation, and macOS launchd/install/update transaction,
   added late. It is concrete Darwin code, not a speculative service-manager
   interface, and is not part of kernel authority.
@@ -565,8 +1099,10 @@ reads and that the complete Change preceded provider execution:
    this may retain the Change for a later retry but the current run finalizes
    and no replacement child may move it to running or execute its provider.
 8. The same registered child revalidates the frozen native provider commitment
-   after activation and pathname-`exec`s it once. Its PID, PGID, and birth
-   remain unchanged; startup input is sent once and stdin closes.
+   after activation and pathname-`exec`s it once with the registered PTY slave
+   as its controlling terminal. Its PID, PGID, and birth remain unchanged;
+   input is accepted only through the exact live terminal session and current
+   lease while the run remains running.
 9. Runner durably spools one terminal observation. Daemon commits it before
    exact acknowledgement.
 10. Completion/blocked/failure/exit requests first outcome, enters finalizing,
@@ -618,8 +1154,9 @@ not generic shebang scripts.
   commit may already be visible. Clients fetch/fold canonical state through
   one revision-aware reducer, so delayed replies cannot regress state or skip
   unseen invalidations.
-- CLI and TUI share client methods. No TUI-only mutation or direct filesystem
-  policy path exists.
+- CLI and browser adapters invoke the same daemon operations where their scopes
+  overlap. Browser-only interaction remains typed daemon policy; no client has
+  a direct filesystem or lifecycle shortcut.
 - Private detail reads are explicit and revisioned. Public/dashboard/watch
   payload types cannot grow by adding a field to a private Store model.
 - One finite internal `EventRetentionLimit` is used; the spike starts at 4,096
@@ -646,7 +1183,7 @@ use one concrete install library and shared mutator prelude:
    launchd label/domain, and operation authority.
 
 Init/manual update then parse gzip/tar in-process and require exactly
-four root regular executable members with bounded individual/aggregate bytes,
+three root regular executable members with bounded individual/aggregate bytes,
 expected names/modes, Darwin architecture, version/build identity, and hashes.
 They write/sync private staging and receipt, atomically publish one immutable
 version directory without replacement, durably record old/new activation and
@@ -719,8 +1256,9 @@ fresh Go-marked home and SQLite schema
 ```
 
 The shell provider writes an external witness only after activation. Tests
-count that witness and startup-input digest, rather than trusting callbacks or
-stdout. The slice then repeats across real daemon/runner SIGKILL cuts after
+count that witness, exact terminal output sequences and exact fixture input
+receipts rather than trusting callbacks or stdout. The slice then repeats
+across real daemon/runner SIGKILL cuts after
 every durable/effect checkpoint and proves at most one provider execution, no
 input replay, no invented release, no unsafe signal, and eventual deterministic
 convergence where exact absence is provable.
@@ -730,7 +1268,8 @@ easier to trace than the corresponding Rust path while retaining the
 invariants and killing the required mutations. If the two-gate lifecycle,
 Store transaction semantics, or recovery requires more/larger abstraction, or
 if exact process ownership becomes weaker, stop and reassess the language
-decision. TUI/provider/update progress cannot compensate for a failed spike.
+decision. Browser/UI/provider/update progress cannot compensate for a failed
+PTY/process/authority spike.
 
 ## 5. Work graph
 
@@ -787,8 +1326,8 @@ contracts; a lane needing a change stops and coordinates before editing.
   hardening, and deterministic fake-executable tests.
 - Lane C, source: complete Change lifecycle, Rust/Go verification, retained
   cache only if measured.
-- Lane D, clients: full private API/client, concise CLI, revisioned model, and
-  Bubble Tea BUILDING/AGENT TUI.
+- Lane D, clients/browser: browser v1, pairing/WebSocket adapter,
+  framework-neutral TypeScript client, and public BUILDING/AGENT/NEEDS YOU UI.
 - Lane E, platform: Go bootstrap/install/launchd/packaging after A-D stabilize.
 
 Each writing assignment gets its own worktree, one owned file/package set, a
@@ -877,7 +1416,7 @@ contracts.
 | Bounded invalidation retention | Fill to `EventRetentionLimit+1`, prune between snapshot/watch, request before floor, delete entities, and restart; require `ResyncRequired` before later frames and exact tombstones/revisions | unbounded log; stream partial tail; omit deletion revision |
 | Public privacy/bounds | Seed unique sentinels in every private field, serialize every dashboard/event/status frame, and scan sizes/content | expose root/body/result/message/token/prompt/output; grow snapshot beyond cap |
 | Provider environment/token | Seed ambient API/provider/proxy/Git/GitHub/SSH/loader sentinels; inspect child argv/env, token mode/content, startup frames, logs/errors/events, and provider-launched CLI auth | inherit `os.Environ`; put bearer in env/argv; operator fallback |
-| TUI/CLI parity | Enumerate every TUI mutation and assert it invokes the same typed client method/daemon request as CLI | direct filesystem/policy mutation; display label selects behavior |
+| Browser authority boundary | Enumerate every browser mutation and assert it invokes one typed daemon operation with paired authority and revalidated state | direct filesystem/policy mutation; display label or agent prose selects behavior |
 | NEEDS YOU authority | Derive only the three actionable typed projections; resolve with exact operator/source revision and atomically commit state/intent/invalidation; test exact replay, stale/conflict/already-resolved/attempt denial and public-label privacy | duplicate policy table; inert choice; stale/attempt action |
 | Reducer deletion monotonicity | Delete an agent/task, then deliver a delayed mutation reply at an older/equal revision; entity remains absent and client equals fresh snapshot | resurrect deleted entity; ignore delete invalidation |
 | Operator reply loss | Drop a reply after durable operator mutation commit, reconnect/resync without payload replay, and prove one state effect/invalidation | automatically retry request ID; treat transport correlation as authority |
@@ -921,7 +1460,7 @@ exact process/path census.
   refused home receives no write;
 - archive traversal, absolute path, link/hardlink, duplicate, extra, mixed
   build, wrong architecture/mode, compression/aggregate bound, tampering, and
-  exact four-member success;
+  exact three-member success;
 - cuts after every staging file/receipt/directory sync, version publication,
   pending-record phase, current-link swap, plist write, bootout/bootstrap, and
   health proof, followed by exact commit/rollback/refusal;
@@ -1026,7 +1565,7 @@ and proof.
 | `legacy_sources` | Fresh Go schema can never create a row | old-home refusal; no Go producer/consumer |
 | Snapshot-heavy durable events | SQLite is authority; snapshots couple privacy/read fields to replay | invalidation sequence/resync/client agreement/privacy matrix |
 | Dead run/observer/control fields and failure variants | No authoritative producer/reachable state | constructor/writer search plus exhaustive typed Go transitions |
-| Announcements/theme/four-view TUI residue | Not rendered or useful to core BUILDING/AGENT workflows | TUI behavior/parity tests for retained views/actions |
+| Announcements/theme/four-view TUI residue | Superseded by the public BUILDING/AGENT/NEEDS YOU web application | browser behavior/authority tests for retained views/actions |
 | CLI aliases/usage/read-only storage status | Duplicate/no-action surface; no scheduling consumer | one-command-per-operation CLI tests and operator-action inventory |
 | Whole-profile update and display-string actions | Duplicate validation and lost-update/control risk | granular revision-conflict and typed-action tests |
 | Latest-sequence/bootstrap/status polling machinery | Compensates for non-atomic client projection | snapshot-at-N/watch-from-N gap/resync tests |
@@ -1148,7 +1687,7 @@ following evidence:
 - atomic admission, credential, outcome/finalization, resource, and event
   causal matrices green;
 - two-gate register-before-exec proof and every real crash cut green;
-- at-most-one provider witness, no startup-input replay, and exact terminal
+- at-most-one provider witness, no terminal-input replay, and exact terminal
   convergence across daemon/runner death;
 - `EPERM`/`ESRCH`/malformed/reuse/leader-loss behavior green with no unsafe
   signal or invented release;
@@ -1158,14 +1697,14 @@ following evidence:
   controlled-environment, and exact resource-cleanup proofs green;
 - public privacy/size matrix, invalidation sequence/gap/resync, and canonical
   client agreement green;
-- CLI/TUI operation parity and basic useful autonomous shell-provider flow
-  green;
+- browser typed-operation authority and basic useful interactive shell-provider
+  flow green;
 - deterministic fake Claude/Codex native launch/configuration tests green;
 - `scripts/go-check.sh`, `scripts/go-ci.sh`, full race suite, serialized process
   suite, deterministic shell E2E, and post-test resource census green;
-- fresh isolated macOS build/init/start/CLI/TUI/task/restart/stop/uninstall E2E
+- fresh isolated macOS build/init/start/CLI/browser/task/restart/stop/uninstall E2E
   green without observing or changing the live installation;
-- exact four-member, traversal/link/duplicate/extra-resistant archive tests;
+- exact three-member, traversal/link/duplicate/extra-resistant archive tests;
   deterministic Darwin ARM64/AMD64 artifacts; one receipt/build identity; and
   crash-safe activate/reload/rollback tests green;
 - packaging hashes/binary set and standalone `control-plane/` Rust gate green;
