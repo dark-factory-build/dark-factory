@@ -62,6 +62,26 @@ func TestTerminalSessionActivationAndLiveCloseAreDurableTransitions(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.writer.Exec(`CREATE TRIGGER suppress_terminal_invalidation_insert BEFORE INSERT ON invalidations BEGIN SELECT RAISE(IGNORE); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CloseActiveTerminalSession(context.Background(), fresh.ID, session.ID, fresh.Revision, session.Revision, mustTime(t, 58)); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("suppressed terminal invalidation = %v", err)
+	}
+	if _, err := store.writer.Exec(`DROP TRIGGER suppress_terminal_invalidation_insert`); err != nil {
+		t.Fatal(err)
+	}
+	unchanged, _, err := store.Run(context.Background(), fresh.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unchangedFactory, err := store.Factory(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.Revision != beforeRun.Revision || unchangedFactory.Head != beforeFactory.Head {
+		t.Fatalf("suppressed terminal invalidation changed authority: run %d -> %d, head %d -> %d", beforeRun.Revision.Int64(), unchanged.Revision.Int64(), beforeFactory.Head.Int64(), unchangedFactory.Head.Int64())
+	}
 	if _, err := store.writer.Exec(`CREATE TRIGGER suppress_terminal_session_update BEFORE UPDATE ON terminal_sessions BEGIN SELECT RAISE(IGNORE); END`); err != nil {
 		t.Fatal(err)
 	}
@@ -71,11 +91,11 @@ func TestTerminalSessionActivationAndLiveCloseAreDurableTransitions(t *testing.T
 	if _, err := store.writer.Exec(`DROP TRIGGER suppress_terminal_session_update`); err != nil {
 		t.Fatal(err)
 	}
-	unchanged, _, err := store.Run(context.Background(), fresh.ID)
+	unchanged, _, err = store.Run(context.Background(), fresh.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	unchangedFactory, err := store.Factory(context.Background())
+	unchangedFactory, err = store.Factory(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,6 +225,9 @@ func TestMissingTerminalSessionFailsValidatedReadsAndOpen(t *testing.T) {
 	store, run, _ := admittedOrchestratorRun(t)
 	path := storePath(t, store)
 	corruptSQL(t, store, `DELETE FROM terminal_sessions WHERE run_id = ?`, run.ID.Bytes())
+	if _, found, err := store.Task(context.Background(), run.TaskID); !errors.Is(err, ErrCorruptState) || found {
+		t.Fatalf("missing session task = found %v, err %v", found, err)
+	}
 	if _, found, err := store.Run(context.Background(), run.ID); !errors.Is(err, ErrCorruptState) || found {
 		t.Fatalf("missing session run = found %v, err %v", found, err)
 	}

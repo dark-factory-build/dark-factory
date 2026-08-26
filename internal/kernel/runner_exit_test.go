@@ -142,6 +142,67 @@ func TestRecoveredAbsenceCannotUseLiveTerminalClose(t *testing.T) {
 	}
 }
 
+func TestDeclaredNoStartCloseRequiresNoInventedExit(t *testing.T) {
+	store, run, _ := admittedOrchestratorRun(t)
+	defer store.Close()
+	failure, _ := NewFailureProposal(FailureSpawn, "did not start")
+	_, err := store.FailRun(context.Background(), run.ID, run.Revision, failure, mustTime(t, 20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	releaseAllRunResources(t, store, run.ID, 30)
+	fresh, found, err := store.Run(context.Background(), run.ID)
+	if err != nil || !found {
+		t.Fatal(err)
+	}
+	session := terminalSessionForRunTest(t, store, run.ID)
+	closed, err := store.CloseDeclaredTerminalSession(context.Background(), run.ID, session.ID, fresh.Revision, session.Revision, mustTime(t, 40))
+	if err != nil || closed.State != TerminalSessionClosed {
+		t.Fatalf("no-start declared close = %+v, err=%v", closed, err)
+	}
+	fresh, found, err = store.Run(context.Background(), run.ID)
+	if err != nil || !found {
+		t.Fatal(err)
+	}
+	if fresh.ProviderExit != nil || fresh.RunnerExit != nil {
+		t.Fatalf("no-start close invented exits: provider=%+v runner=%+v", fresh.ProviderExit, fresh.RunnerExit)
+	}
+	if _, err := store.FinalizeRun(context.Background(), run.ID, fresh.Revision, mustTime(t, 41)); err != nil {
+		t.Fatalf("no-start finalization = %v", err)
+	}
+}
+
+func TestRecoveredNoStartUnresolvedConvergesWithoutExitEvidence(t *testing.T) {
+	store, run, _ := admittedOrchestratorRun(t)
+	defer store.Close()
+	failure, _ := NewFailureProposal(FailureSpawn, "ambiguous before start")
+	finalizing, err := store.FailRun(context.Background(), run.ID, run.Revision, failure, mustTime(t, 20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := terminalSessionForRunTest(t, store, run.ID)
+	unresolved, err := store.MarkTerminalSessionUnresolved(context.Background(), run.ID, session.ID, finalizing.Revision, session.Revision, "recovered before start", mustTime(t, 21))
+	if err != nil || unresolved.State != TerminalSessionUnresolved {
+		t.Fatalf("no-start unresolved = %+v, err=%v", unresolved, err)
+	}
+	releaseAllRunResources(t, store, run.ID, 30)
+	fresh, found, err := store.Run(context.Background(), run.ID)
+	if err != nil || !found {
+		t.Fatal(err)
+	}
+	session = terminalSessionForRunTest(t, store, run.ID)
+	if _, err := store.CloseRecoveredTerminalSession(context.Background(), run.ID, session.ID, fresh.Revision, session.Revision, mustTime(t, 40)); err != nil {
+		t.Fatalf("no-start recovered close = %v", err)
+	}
+	fresh, found, err = store.Run(context.Background(), run.ID)
+	if err != nil || !found || fresh.ProviderExit != nil || fresh.RunnerExit != nil {
+		t.Fatalf("no-start recovered run = %+v, found=%v, err=%v", fresh, found, err)
+	}
+	if _, err := store.FinalizeRun(context.Background(), run.ID, fresh.Revision, mustTime(t, 41)); err != nil {
+		t.Fatalf("no-start recovered finalization = %v", err)
+	}
+}
+
 func TestRecoveredPreExecUnresolvedConvergesWithAbsenceEvidence(t *testing.T) {
 	store, run, _ := admittedOrchestratorRun(t)
 	defer store.Close()

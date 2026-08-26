@@ -259,7 +259,8 @@ func appendInvalidations(ctx context.Context, connection *sql.Conn, at UnixMilli
 		if kind == "" || !validID || item.revision < 1 {
 			return fmt.Errorf("%w: invalid invalidation identity", ErrInvalidValue)
 		}
-		if _, err := connection.ExecContext(ctx, `INSERT INTO invalidations(sequence, occurred_at_ms, entity_kind, entity_id, revision, deleted) VALUES(?, ?, ?, ?, ?, ?)`, next+int64(index), at.Int64(), kind, item.id, item.revision, boolInt(item.deleted)); err != nil {
+		inserted, err := connection.ExecContext(ctx, `INSERT INTO invalidations(sequence, occurred_at_ms, entity_kind, entity_id, revision, deleted) VALUES(?, ?, ?, ?, ?, ?)`, next+int64(index), at.Int64(), kind, item.id, item.revision, boolInt(item.deleted))
+		if err := requireOneRow(inserted, err); err != nil {
 			return fmt.Errorf("insert invalidation: %w", err)
 		}
 	}

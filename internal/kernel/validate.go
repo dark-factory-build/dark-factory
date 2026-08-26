@@ -197,44 +197,52 @@ func loadRunRelationships(ctx context.Context, connection *sql.Conn, run Run) (r
 	if err := validatePersistedProcessExits(run, resources); err != nil {
 		return runRelationships{}, err
 	}
-	session, found, err := terminalSessionByRunID(ctx, connection, run.ID)
+	session, err := validateRunTerminalSession(ctx, connection, run)
 	if err != nil {
 		return runRelationships{}, err
-	}
-	if !found {
-		return runRelationships{}, fmt.Errorf("%w: run has no terminal session", ErrCorruptState)
-	}
-	if session.DeclaredAt != run.AdmittedAt || session.UpdatedAt.Int64() > run.UpdatedAt.Int64() {
-		return runRelationships{}, fmt.Errorf("%w: terminal session chronology does not match run", ErrCorruptState)
-	}
-	if session.ActivatedAt == nil {
-		if run.RunningAt != nil {
-			return runRelationships{}, fmt.Errorf("%w: running run lacks terminal activation", ErrCorruptState)
-		}
-	} else if run.RunningAt == nil || *session.ActivatedAt != *run.RunningAt {
-		return runRelationships{}, fmt.Errorf("%w: terminal activation does not match run", ErrCorruptState)
-	}
-	if session.ClosedAt != nil && run.TerminalAt != nil && session.ClosedAt.Int64() > run.TerminalAt.Int64() {
-		return runRelationships{}, fmt.Errorf("%w: terminal session closes after run", ErrCorruptState)
-	}
-	switch run.Phase {
-	case RunAdmitted:
-		if session.State != TerminalSessionDeclared {
-			return runRelationships{}, fmt.Errorf("%w: admitted run terminal session is not declared", ErrCorruptState)
-		}
-	case RunRunning:
-		if session.State != TerminalSessionActive {
-			return runRelationships{}, fmt.Errorf("%w: running run terminal session is not active", ErrCorruptState)
-		}
-	case RunTerminal:
-		if session.State != TerminalSessionClosed {
-			return runRelationships{}, fmt.Errorf("%w: terminal run terminal session is not closed", ErrCorruptState)
-		}
 	}
 	if err := validateRunResourceChronology(run, change, resources); err != nil {
 		return runRelationships{}, err
 	}
 	return runRelationships{task: task, change: change, resources: resources, session: session}, nil
+}
+
+func validateRunTerminalSession(ctx context.Context, connection *sql.Conn, run Run) (TerminalSession, error) {
+	session, found, err := terminalSessionByRunID(ctx, connection, run.ID)
+	if err != nil {
+		return TerminalSession{}, err
+	}
+	if !found {
+		return TerminalSession{}, fmt.Errorf("%w: run has no terminal session", ErrCorruptState)
+	}
+	if session.DeclaredAt != run.AdmittedAt || session.UpdatedAt.Int64() > run.UpdatedAt.Int64() {
+		return TerminalSession{}, fmt.Errorf("%w: terminal session chronology does not match run", ErrCorruptState)
+	}
+	if session.ActivatedAt == nil {
+		if run.RunningAt != nil {
+			return TerminalSession{}, fmt.Errorf("%w: running run lacks terminal activation", ErrCorruptState)
+		}
+	} else if run.RunningAt == nil || *session.ActivatedAt != *run.RunningAt {
+		return TerminalSession{}, fmt.Errorf("%w: terminal activation does not match run", ErrCorruptState)
+	}
+	if session.ClosedAt != nil && run.TerminalAt != nil && session.ClosedAt.Int64() > run.TerminalAt.Int64() {
+		return TerminalSession{}, fmt.Errorf("%w: terminal session closes after run", ErrCorruptState)
+	}
+	switch run.Phase {
+	case RunAdmitted:
+		if session.State != TerminalSessionDeclared {
+			return TerminalSession{}, fmt.Errorf("%w: admitted run terminal session is not declared", ErrCorruptState)
+		}
+	case RunRunning:
+		if session.State != TerminalSessionActive {
+			return TerminalSession{}, fmt.Errorf("%w: running run terminal session is not active", ErrCorruptState)
+		}
+	case RunTerminal:
+		if session.State != TerminalSessionClosed {
+			return TerminalSession{}, fmt.Errorf("%w: terminal run terminal session is not closed", ErrCorruptState)
+		}
+	}
+	return session, nil
 }
 
 func validateRunResourceChronology(run Run, change *Change, resources []Resource) error {
@@ -354,6 +362,10 @@ func validateTaskRunTopology(ctx context.Context, connection *sql.Conn, task Tas
 			} else {
 				invalid = fmt.Errorf("%w: invalid task/run revision topology", ErrCorruptState)
 			}
+			break
+		}
+		if _, err := validateRunTerminalSession(ctx, connection, run); err != nil {
+			invalid = err
 			break
 		}
 		if found {
