@@ -9,10 +9,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestRepositoryIdentityUsesExactStoreIntegerBounds(t *testing.T) {
@@ -83,7 +86,7 @@ func TestGitBlobsValidatesExactOrderAndFramingWithoutLeakingOutput(t *testing.T)
 	cases := map[string]func(string) string{
 		"wrong oid":  func(oid string) string { return strings.Repeat("0", len(oid)) + " blob 6\\nsecret\\n" },
 		"wrong type": func(oid string) string { return oid + " tree 6\\nsecret\\n" },
-		"wrong size": func(oid string) string { return oid + " blob 5\\nsecret\\n" },
+		"wrong size": func(oid string) string { return oid + " blob 5\\nshort\\n" },
 		"oversize":   func(oid string) string { return fmt.Sprintf("%s blob %d\\n", oid, MaxBlobBytes+1) },
 		"truncated":  func(oid string) string { return oid + " blob 6\\nsec" },
 		"delimiter":  func(oid string) string { return oid + " blob 6\\nsecretX" },
@@ -188,7 +191,9 @@ func TestGitBlobsReadsOnlySelectedObjectsInOrderAndWaitsOnce(t *testing.T) {
 	second := mustEntry(t, selection.format, []byte("b"), "100644", []byte("second"))
 	selection.manifest = mustManifest(t, selection.format, selection.base, []Entry{first, second})
 	logPath := filepath.Join(filepath.Dir(repository), "requests")
+	pidPath := filepath.Join(filepath.Dir(repository), "pid")
 	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s' "$$" > %q
 while IFS= read -r request; do
   printf '%%s\n' "$request" >> %q
   case "$request" in
@@ -197,7 +202,7 @@ while IFS= read -r request; do
     *) exit 3 ;;
   esac
 done
-`, logPath, first.oid.Hex(), second.oid.Hex())
+`, pidPath, logPath, first.oid.Hex(), second.oid.Hex())
 	git := writeFakeGit(t, script)
 	selection.gitExecutable, selection.gitIdentity = git, mustGitFileIdentity(t, git)
 	recorder := &gitEventRecorder{}
@@ -221,6 +226,13 @@ done
 		t.Fatalf("requests=%q want=%q", got, want)
 	}
 	recorder.require(t, 1, 0, 0, 1)
+	pid, err := strconv.Atoi(string(mustReadFile(t, pidPath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Kill(pid, 0); !errors.Is(err, unix.ESRCH) {
+		t.Fatalf("exact Git child %d remains observable after Close: %v", pid, err)
+	}
 }
 
 func TestGitChildCancellationKillsAndWaitsExactlyOnce(t *testing.T) {
