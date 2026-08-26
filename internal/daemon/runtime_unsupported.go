@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 
+	"github.com/dark-factory-build/dark-factory/internal/changeworker"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
@@ -56,7 +57,7 @@ func RemoveRecordedRuntime(context.Context, *RuntimeParent, string, runner.FileI
 func (*Runtime) PublishAttemptToken(context.Context, [32]byte) (PrivateFile, error) {
 	return PrivateFile{}, errUnsupported
 }
-func (*Runtime) PublishWorkerConfig(context.Context, workerConfig) (PrivateFile, error) {
+func (*Runtime) PublishWorkerConfig(context.Context, changeworker.Config) (PrivateFile, error) {
 	return PrivateFile{}, errUnsupported
 }
 func (*Runtime) Close() error { return nil }

@@ -1,8 +1,9 @@
-package daemon
+package changeworker
 
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"io"
 	"math"
 	"path/filepath"
@@ -14,16 +15,20 @@ import (
 )
 
 const (
+	ConfigName           = "change-worker.config"
+	AttemptTokenName     = "attempt.token"
 	contractVersion      = 1
-	runtimeHomeName      = "home"
-	runtimeTempName      = "tmp"
-	checkpointLimit      = 32 << 10
-	workerConfigLimit    = 256 << 10
-	workerInputLimit     = 128 << 10
+	HomeName             = "home"
+	TempName             = "tmp"
+	CheckpointLimit      = 32 << 10
+	ConfigLimit          = 256 << 10
+	InputLimit           = 128 << 10
 	maximumLocatorBytes  = 4096
 	maximumRevisionBytes = 4096
 	maximumSocketBytes   = 103
 )
+
+var ErrInvalidContract = errors.New("Change worker: invalid private contract")
 
 var contractMagic = [4]byte{'D', 'F', 'D', 'C'}
 
@@ -36,7 +41,7 @@ const (
 	kindPopulation
 )
 
-type workerConfig struct {
+type Config struct {
 	RuntimePath        string
 	RuntimeIdentity    runner.FileIdentity
 	GitExecutable      string
@@ -46,17 +51,14 @@ type workerConfig struct {
 	ChangeParent       string
 	FinalName          string
 	StagingName        string
-	ProviderHome       string
-	ProviderTemp       string
 	AttemptSocket      string
-	AttemptTokenPath   string
 	StartupInput       []byte
 }
 
-func (workerConfig) String() string   { return "Change worker config (private)" }
-func (workerConfig) GoString() string { return "daemon.workerConfig{private}" }
+func (Config) String() string   { return "Change worker config (private)" }
+func (Config) GoString() string { return "changeworker.Config{private}" }
 
-type selectionCheckpoint struct {
+type SelectionReport struct {
 	Format     change.ObjectFormat
 	Base       change.ObjectID
 	Commitment change.Commitment
@@ -65,26 +67,26 @@ type selectionCheckpoint struct {
 	Repository change.RepositoryIdentity
 }
 
-func (selectionCheckpoint) String() string   { return "Change selection checkpoint (private)" }
-func (selectionCheckpoint) GoString() string { return "daemon.selectionCheckpoint{private}" }
+func (SelectionReport) String() string   { return "Change selection checkpoint (private)" }
+func (SelectionReport) GoString() string { return "changeworker.SelectionReport{private}" }
 
-type preparationCheckpoint struct{ Stage change.StageIdentity }
+type PreparationReport struct{ Stage change.StageIdentity }
 
-func (preparationCheckpoint) String() string   { return "Change preparation checkpoint (private)" }
-func (preparationCheckpoint) GoString() string { return "daemon.preparationCheckpoint{private}" }
+func (PreparationReport) String() string   { return "Change preparation checkpoint (private)" }
+func (PreparationReport) GoString() string { return "changeworker.PreparationReport{private}" }
 
-type populationCheckpoint struct {
+type PopulationReport struct {
 	Identity   change.StageIdentity
 	Commitment change.Commitment
 	EntryCount uint64
 	BlobBytes  uint64
 }
 
-func (populationCheckpoint) String() string   { return "Change population checkpoint (private)" }
-func (populationCheckpoint) GoString() string { return "daemon.populationCheckpoint{private}" }
+func (PopulationReport) String() string   { return "Change population checkpoint (private)" }
+func (PopulationReport) GoString() string { return "changeworker.PopulationReport{private}" }
 
-func encodeWorkerConfig(config workerConfig) ([]byte, error) {
-	if err := validateWorkerConfig(config); err != nil {
+func EncodeConfig(config Config) ([]byte, error) {
+	if err := validateConfig(config); err != nil {
 		return nil, err
 	}
 	encoded := appendHeader(nil, kindWorkerConfig)
@@ -94,70 +96,68 @@ func encodeWorkerConfig(config workerConfig) ([]byte, error) {
 	encoded = binary.BigEndian.AppendUint64(encoded, config.RepositoryIdentity.Inode())
 	for _, value := range []string{
 		config.RuntimePath, config.GitExecutable, config.RepositoryRoot, config.Revision,
-		config.ChangeParent, config.FinalName, config.StagingName,
-		config.ProviderHome, config.ProviderTemp, config.AttemptSocket, config.AttemptTokenPath,
+		config.ChangeParent, config.FinalName, config.StagingName, config.AttemptSocket,
 	} {
 		encoded = appendString(encoded, value)
 	}
 	encoded = binary.BigEndian.AppendUint32(encoded, uint32(len(config.StartupInput)))
 	encoded = append(encoded, config.StartupInput...)
-	if len(encoded) > workerConfigLimit {
+	if len(encoded) > ConfigLimit {
 		return nil, invalidContract(nil)
 	}
 	return encoded, nil
 }
 
-func decodeWorkerConfig(encoded []byte) (workerConfig, error) {
-	reader, err := newContractReader(encoded, kindWorkerConfig, workerConfigLimit)
+func DecodeConfig(encoded []byte) (Config, error) {
+	reader, err := newContractReader(encoded, kindWorkerConfig, ConfigLimit)
 	if err != nil {
-		return workerConfig{}, err
+		return Config{}, err
 	}
 	device, err := reader.uint64()
 	if err != nil {
-		return workerConfig{}, err
+		return Config{}, err
 	}
 	inode, err := reader.uint64()
 	if err != nil {
-		return workerConfig{}, err
+		return Config{}, err
 	}
 	repositoryDevice, err := reader.uint64()
 	if err != nil {
-		return workerConfig{}, err
+		return Config{}, err
 	}
 	repositoryInode, err := reader.uint64()
 	if err != nil {
-		return workerConfig{}, err
+		return Config{}, err
 	}
 	repositoryIdentity, err := change.NewRepositoryIdentity(repositoryDevice, repositoryInode)
 	if err != nil {
-		return workerConfig{}, invalidContract(err)
+		return Config{}, invalidContract(err)
 	}
-	values := make([]string, 11)
+	values := make([]string, 8)
 	for index := range values {
 		values[index], err = reader.string()
 		if err != nil {
-			return workerConfig{}, err
+			return Config{}, err
 		}
 	}
-	input, err := reader.bytes(workerInputLimit)
+	input, err := reader.bytes(InputLimit)
 	if err != nil || !reader.done() {
-		return workerConfig{}, invalidContract(err)
+		return Config{}, invalidContract(err)
 	}
-	config := workerConfig{
+	config := Config{
 		RuntimePath: values[0], RuntimeIdentity: runner.FileIdentity{Device: device, Inode: inode},
 		GitExecutable: values[1], RepositoryRoot: values[2], RepositoryIdentity: repositoryIdentity, Revision: values[3],
 		ChangeParent: values[4], FinalName: values[5], StagingName: values[6],
-		ProviderHome: values[7], ProviderTemp: values[8],
-		AttemptSocket: values[9], AttemptTokenPath: values[10], StartupInput: input,
+		AttemptSocket: values[7], StartupInput: input,
 	}
-	if err := validateWorkerConfig(config); err != nil {
-		return workerConfig{}, err
+	if err := validateConfig(config); err != nil {
+		return Config{}, err
 	}
 	return config, nil
 }
 
-func validateWorkerConfig(config workerConfig) error {
-	paths := []string{config.RuntimePath, config.GitExecutable, config.RepositoryRoot, config.ChangeParent, config.ProviderHome, config.ProviderTemp, config.AttemptSocket, config.AttemptTokenPath}
+func validateConfig(config Config) error {
+	paths := []string{config.RuntimePath, config.GitExecutable, config.RepositoryRoot, config.ChangeParent, config.AttemptSocket}
 	for _, path := range paths {
 		if !validAbsolute(path, maximumLocatorBytes) {
 			return invalidContract(nil)
@@ -165,22 +165,17 @@ func validateWorkerConfig(config workerConfig) error {
 	}
 	if len(config.AttemptSocket) > maximumSocketBytes || config.RuntimeIdentity.Device == 0 || config.RuntimeIdentity.Inode == 0 ||
 		!validText(config.Revision, maximumRevisionBytes) || !validChangeName(config.FinalName) || !validChangeName(config.StagingName) ||
-		config.FinalName == config.StagingName || len(config.StartupInput) > workerInputLimit {
+		config.FinalName == config.StagingName || len(config.StartupInput) > InputLimit || !utf8.Valid(config.StartupInput) || bytes.IndexByte(config.StartupInput, 0) >= 0 {
 		return invalidContract(nil)
 	}
 	if _, err := change.NewRepositoryIdentity(config.RepositoryIdentity.Device(), config.RepositoryIdentity.Inode()); err != nil {
 		return invalidContract(err)
 	}
-	if config.ProviderHome != filepath.Join(config.RuntimePath, runtimeHomeName) ||
-		config.ProviderTemp != filepath.Join(config.RuntimePath, runtimeTempName) ||
-		config.AttemptTokenPath != filepath.Join(config.RuntimePath, attemptTokenName) {
-		return invalidContract(nil)
-	}
 	return nil
 }
 
-func encodeSelectionCheckpoint(checkpoint selectionCheckpoint) ([]byte, error) {
-	if err := validateSelectionCheckpoint(checkpoint); err != nil {
+func EncodeSelectionReport(checkpoint SelectionReport) ([]byte, error) {
+	if err := ValidateSelectionReport(checkpoint); err != nil {
 		return nil, err
 	}
 	encoded := appendHeader(nil, kindSelection)
@@ -194,63 +189,63 @@ func encodeSelectionCheckpoint(checkpoint selectionCheckpoint) ([]byte, error) {
 	return boundedCheckpoint(encoded)
 }
 
-func decodeSelectionCheckpoint(encoded []byte) (selectionCheckpoint, error) {
-	reader, err := newContractReader(encoded, kindSelection, checkpointLimit)
+func DecodeSelectionReport(encoded []byte) (SelectionReport, error) {
+	reader, err := newContractReader(encoded, kindSelection, CheckpointLimit)
 	if err != nil {
-		return selectionCheckpoint{}, err
+		return SelectionReport{}, err
 	}
 	formatCode, err := reader.byte()
 	if err != nil {
-		return selectionCheckpoint{}, err
+		return SelectionReport{}, err
 	}
 	format, err := decodeFormat(formatCode)
 	if err != nil {
-		return selectionCheckpoint{}, err
+		return SelectionReport{}, err
 	}
 	baseBytes, err := reader.fixed(format.OIDLength())
 	if err != nil {
-		return selectionCheckpoint{}, err
+		return SelectionReport{}, err
 	}
 	base, err := change.NewObjectID(format, baseBytes)
 	if err != nil {
-		return selectionCheckpoint{}, invalidContract(err)
+		return SelectionReport{}, invalidContract(err)
 	}
 	commitmentBytes, err := reader.fixed(32)
 	if err != nil {
-		return selectionCheckpoint{}, err
+		return SelectionReport{}, err
 	}
 	commitment, err := change.ParseCommitment(commitmentBytes)
 	if err != nil {
-		return selectionCheckpoint{}, invalidContract(err)
+		return SelectionReport{}, invalidContract(err)
 	}
 	entries, err := reader.uint64()
 	if err != nil {
-		return selectionCheckpoint{}, err
+		return SelectionReport{}, err
 	}
 	blobs, err := reader.uint64()
 	if err != nil {
-		return selectionCheckpoint{}, err
+		return SelectionReport{}, err
 	}
 	device, err := reader.uint64()
 	if err != nil {
-		return selectionCheckpoint{}, err
+		return SelectionReport{}, err
 	}
 	inode, err := reader.uint64()
 	if err != nil || !reader.done() {
-		return selectionCheckpoint{}, invalidContract(err)
+		return SelectionReport{}, invalidContract(err)
 	}
 	repository, err := change.NewRepositoryIdentity(device, inode)
 	if err != nil {
-		return selectionCheckpoint{}, invalidContract(err)
+		return SelectionReport{}, invalidContract(err)
 	}
-	checkpoint := selectionCheckpoint{Format: format, Base: base, Commitment: commitment, EntryCount: entries, BlobBytes: blobs, Repository: repository}
-	if err := validateSelectionCheckpoint(checkpoint); err != nil {
-		return selectionCheckpoint{}, err
+	checkpoint := SelectionReport{Format: format, Base: base, Commitment: commitment, EntryCount: entries, BlobBytes: blobs, Repository: repository}
+	if err := ValidateSelectionReport(checkpoint); err != nil {
+		return SelectionReport{}, err
 	}
 	return checkpoint, nil
 }
 
-func validateSelectionCheckpoint(checkpoint selectionCheckpoint) error {
+func ValidateSelectionReport(checkpoint SelectionReport) error {
 	if checkpoint.Format.OIDLength() == 0 || checkpoint.Base.Format() != checkpoint.Format || len(checkpoint.Base.Bytes()) != checkpoint.Format.OIDLength() ||
 		len(checkpoint.Commitment.Bytes()) != 32 || checkpoint.EntryCount > change.MaxEntryCount || checkpoint.BlobBytes > change.MaxTotalBlobBytes {
 		return invalidContract(nil)
@@ -261,7 +256,7 @@ func validateSelectionCheckpoint(checkpoint selectionCheckpoint) error {
 	return nil
 }
 
-func encodePreparationCheckpoint(checkpoint preparationCheckpoint) ([]byte, error) {
+func EncodePreparationReport(checkpoint PreparationReport) ([]byte, error) {
 	if _, err := change.NewStageIdentity(checkpoint.Stage.Device(), checkpoint.Stage.Inode()); err != nil {
 		return nil, invalidContract(err)
 	}
@@ -271,28 +266,28 @@ func encodePreparationCheckpoint(checkpoint preparationCheckpoint) ([]byte, erro
 	return boundedCheckpoint(encoded)
 }
 
-func decodePreparationCheckpoint(encoded []byte) (preparationCheckpoint, error) {
-	reader, err := newContractReader(encoded, kindPreparation, checkpointLimit)
+func DecodePreparationReport(encoded []byte) (PreparationReport, error) {
+	reader, err := newContractReader(encoded, kindPreparation, CheckpointLimit)
 	if err != nil {
-		return preparationCheckpoint{}, err
+		return PreparationReport{}, err
 	}
 	device, err := reader.uint64()
 	if err != nil {
-		return preparationCheckpoint{}, err
+		return PreparationReport{}, err
 	}
 	inode, err := reader.uint64()
 	if err != nil || !reader.done() {
-		return preparationCheckpoint{}, invalidContract(err)
+		return PreparationReport{}, invalidContract(err)
 	}
 	stage, err := change.NewStageIdentity(device, inode)
 	if err != nil {
-		return preparationCheckpoint{}, invalidContract(err)
+		return PreparationReport{}, invalidContract(err)
 	}
-	return preparationCheckpoint{Stage: stage}, nil
+	return PreparationReport{Stage: stage}, nil
 }
 
-func encodePopulationCheckpoint(checkpoint populationCheckpoint) ([]byte, error) {
-	if err := validatePopulationCheckpoint(checkpoint); err != nil {
+func EncodePopulationReport(checkpoint PopulationReport) ([]byte, error) {
+	if err := ValidatePopulationReport(checkpoint); err != nil {
 		return nil, err
 	}
 	encoded := appendHeader(nil, kindPopulation)
@@ -304,47 +299,47 @@ func encodePopulationCheckpoint(checkpoint populationCheckpoint) ([]byte, error)
 	return boundedCheckpoint(encoded)
 }
 
-func decodePopulationCheckpoint(encoded []byte) (populationCheckpoint, error) {
-	reader, err := newContractReader(encoded, kindPopulation, checkpointLimit)
+func DecodePopulationReport(encoded []byte) (PopulationReport, error) {
+	reader, err := newContractReader(encoded, kindPopulation, CheckpointLimit)
 	if err != nil {
-		return populationCheckpoint{}, err
+		return PopulationReport{}, err
 	}
 	device, err := reader.uint64()
 	if err != nil {
-		return populationCheckpoint{}, err
+		return PopulationReport{}, err
 	}
 	inode, err := reader.uint64()
 	if err != nil {
-		return populationCheckpoint{}, err
+		return PopulationReport{}, err
 	}
 	stage, err := change.NewStageIdentity(device, inode)
 	if err != nil {
-		return populationCheckpoint{}, invalidContract(err)
+		return PopulationReport{}, invalidContract(err)
 	}
 	commitmentBytes, err := reader.fixed(32)
 	if err != nil {
-		return populationCheckpoint{}, err
+		return PopulationReport{}, err
 	}
 	commitment, err := change.ParseCommitment(commitmentBytes)
 	if err != nil {
-		return populationCheckpoint{}, invalidContract(err)
+		return PopulationReport{}, invalidContract(err)
 	}
 	entries, err := reader.uint64()
 	if err != nil {
-		return populationCheckpoint{}, err
+		return PopulationReport{}, err
 	}
 	blobs, err := reader.uint64()
 	if err != nil || !reader.done() {
-		return populationCheckpoint{}, invalidContract(err)
+		return PopulationReport{}, invalidContract(err)
 	}
-	checkpoint := populationCheckpoint{Identity: stage, Commitment: commitment, EntryCount: entries, BlobBytes: blobs}
-	if err := validatePopulationCheckpoint(checkpoint); err != nil {
-		return populationCheckpoint{}, err
+	checkpoint := PopulationReport{Identity: stage, Commitment: commitment, EntryCount: entries, BlobBytes: blobs}
+	if err := ValidatePopulationReport(checkpoint); err != nil {
+		return PopulationReport{}, err
 	}
 	return checkpoint, nil
 }
 
-func validatePopulationCheckpoint(checkpoint populationCheckpoint) error {
+func ValidatePopulationReport(checkpoint PopulationReport) error {
 	if _, err := change.NewStageIdentity(checkpoint.Identity.Device(), checkpoint.Identity.Inode()); err != nil {
 		return invalidContract(err)
 	}
@@ -355,7 +350,7 @@ func validatePopulationCheckpoint(checkpoint populationCheckpoint) error {
 }
 
 func boundedCheckpoint(encoded []byte) ([]byte, error) {
-	if len(encoded) > checkpointLimit {
+	if len(encoded) > CheckpointLimit {
 		return nil, invalidContract(nil)
 	}
 	return encoded, nil
@@ -477,3 +472,5 @@ func (reader *contractReader) bytes(maximum int) ([]byte, error) {
 }
 
 func (reader *contractReader) done() bool { return reader != nil && reader.offset == len(reader.value) }
+
+func invalidContract(error) error { return ErrInvalidContract }

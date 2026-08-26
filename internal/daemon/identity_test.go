@@ -1,12 +1,14 @@
 package daemon
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"math"
 	"testing"
 
 	"github.com/dark-factory-build/dark-factory/internal/change"
+	"github.com/dark-factory-build/dark-factory/internal/changeworker"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
@@ -92,7 +94,7 @@ func TestIdentityConversionsRejectOverflowsAndWrongKinds(t *testing.T) {
 }
 
 func TestCheckpointConversionsBindExactStoreFacts(t *testing.T) {
-	selection := selectionFixture(t)
+	selection := selectionReportFixture(t)
 	durable, err := kernelSelectionCheckpoint("/private/repository", selection)
 	if err != nil {
 		t.Fatal(err)
@@ -107,7 +109,7 @@ func TestCheckpointConversionsBindExactStoreFacts(t *testing.T) {
 		t.Fatalf("InspectPublished arguments = %s %s %+v, %v", format.Name(), base.Hex(), stage, err)
 	}
 
-	population := populationCheckpoint{Identity: mustStageIdentity(t, 21, 22), Commitment: selection.Commitment, EntryCount: 7, BlobBytes: 99}
+	population := changeworker.PopulationReport{Identity: mustStageIdentity(t, 21, 22), Commitment: selection.Commitment, EntryCount: 7, BlobBytes: 99}
 	available, err := kernelAvailabilityCheckpoint(population)
 	if err != nil {
 		t.Fatal(err)
@@ -115,6 +117,27 @@ func TestCheckpointConversionsBindExactStoreFacts(t *testing.T) {
 	if available.EntryCount() != 7 || available.TotalBytes() != 99 || string(available.Commitment().Bytes()) != string(selection.Commitment.Bytes()) || available.SourceIdentity().Device() != 21 || available.SourceIdentity().Inode() != 22 {
 		t.Fatalf("population facts were rebound: %+v", available)
 	}
+}
+
+func selectionReportFixture(t testing.TB) changeworker.SelectionReport {
+	t.Helper()
+	format, err := change.NewObjectFormat("sha1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := change.NewObjectID(format, bytes.Repeat([]byte{1}, format.OIDLength()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitment, err := change.ParseCommitment(bytes.Repeat([]byte{7}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := change.NewRepositoryIdentity(11, 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return changeworker.SelectionReport{Format: format, Base: base, Commitment: commitment, EntryCount: 7, BlobBytes: 99, Repository: repository}
 }
 
 func mustKernelFileIdentity(t testing.TB, device, inode int64) kernel.FileIdentity {

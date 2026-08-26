@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/dark-factory-build/dark-factory/internal/change"
+	"github.com/dark-factory-build/dark-factory/internal/changeworker"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 	"golang.org/x/sys/unix"
 )
@@ -69,7 +71,7 @@ func TestRuntimeCreatePublishClosePreservesExactPrivateEffects(t *testing.T) {
 	}
 	assertPrivateFile(t, tokenFile, token[:])
 	config := workerConfigForRuntime(t, runtime)
-	encodedConfig, err := encodeWorkerConfig(config)
+	encodedConfig, err := changeworker.EncodeConfig(config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1546,7 +1548,7 @@ func newTestRuntime(t testing.TB) *Runtime {
 	return runtime
 }
 
-func workerConfigForRuntime(t testing.TB, runtime *Runtime) workerConfig {
+func workerConfigForRuntime(t testing.TB, runtime *Runtime) changeworker.Config {
 	t.Helper()
 	binding, err := runtime.Binding()
 	if err != nil {
@@ -1556,25 +1558,16 @@ func workerConfigForRuntime(t testing.TB, runtime *Runtime) workerConfig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	home, err := binding.ProviderHome()
+	repository, err := change.NewRepositoryIdentity(11, 12)
 	if err != nil {
 		t.Fatal(err)
 	}
-	temp, err := binding.ProviderTemp()
-	if err != nil {
-		t.Fatal(err)
+	return changeworker.Config{
+		RuntimePath: path, RuntimeIdentity: identity, GitExecutable: "/usr/local/bin/git",
+		RepositoryRoot: "/private/repository", RepositoryIdentity: repository, Revision: "main",
+		ChangeParent: "/private/changes", FinalName: "change", StagingName: ".change.stage",
+		AttemptSocket: "/private/api.sock", StartupInput: []byte("echo exact"),
 	}
-	token, err := binding.AttemptTokenPath()
-	if err != nil {
-		t.Fatal(err)
-	}
-	config := workerConfigFixture()
-	config.RuntimePath = path
-	config.RuntimeIdentity = identity
-	config.ProviderHome = home
-	config.ProviderTemp = temp
-	config.AttemptTokenPath = token
-	return config
 }
 
 func openDirectory(t testing.TB, path string) *os.File {

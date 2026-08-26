@@ -12,13 +12,18 @@ import (
 	"syscall"
 	"unsafe"
 
+	"github.com/dark-factory-build/dark-factory/internal/changeworker"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 	"golang.org/x/sys/unix"
 )
 
 const (
-	workerConfigName   = "change-worker.config"
 	cleanupSearchLimit = 128
+	runtimeHomeName    = changeworker.HomeName
+	runtimeTempName    = changeworker.TempName
+	attemptTokenName   = changeworker.AttemptTokenName
+	workerConfigName   = changeworker.ConfigName
+	workerConfigLimit  = changeworker.ConfigLimit
 )
 
 type RuntimeLeasePresence uint8
@@ -278,19 +283,19 @@ func (binding *RuntimeBinding) Values() (string, runner.FileIdentity, error) {
 }
 
 func (binding *RuntimeBinding) ProviderHome() (string, error) {
-	return binding.fixedDirectory(runtimeHomeName)
+	return binding.fixedDirectory(changeworker.HomeName)
 }
 
 func (binding *RuntimeBinding) ProviderTemp() (string, error) {
-	return binding.fixedDirectory(runtimeTempName)
+	return binding.fixedDirectory(changeworker.TempName)
 }
 
 func (binding *RuntimeBinding) AttemptTokenPath() (string, error) {
-	return binding.fixedFile(attemptTokenName)
+	return binding.fixedFile(changeworker.AttemptTokenName)
 }
 
 func (binding *RuntimeBinding) WorkerConfigPath() (string, error) {
-	return binding.fixedFile(workerConfigName)
+	return binding.fixedFile(changeworker.ConfigName)
 }
 
 func (binding *RuntimeBinding) fixedDirectory(name string) (string, error) {
@@ -302,14 +307,14 @@ func (binding *RuntimeBinding) fixedDirectory(name string) (string, error) {
 	if err := binding.runtime.verifyAuthority(); err != nil {
 		return "", invalidContract(err)
 	}
-	if name != runtimeHomeName && name != runtimeTempName {
+	if name != changeworker.HomeName && name != changeworker.TempName {
 		return "", invalidContract(nil)
 	}
 	return filepath.Join(binding.runtime.path, name), nil
 }
 
 func (binding *RuntimeBinding) fixedFile(name string) (string, error) {
-	if binding == nil || binding.runtime == nil || name != attemptTokenName && name != workerConfigName {
+	if binding == nil || binding.runtime == nil || name != changeworker.AttemptTokenName && name != changeworker.ConfigName {
 		return "", invalidContract(nil)
 	}
 	binding.runtime.mu.Lock()
@@ -400,10 +405,10 @@ func ObserveRuntimeLifetime(parent *RuntimeParent, basename string, expected run
 }
 
 func (runtime *Runtime) PublishAttemptToken(ctx context.Context, token [32]byte) (PrivateFile, error) {
-	return runtime.publish(ctx, attemptTokenName, token[:], len(token), nil, nil)
+	return runtime.publish(ctx, changeworker.AttemptTokenName, token[:], len(token), nil, nil)
 }
 
-func (runtime *Runtime) PublishWorkerConfig(ctx context.Context, config workerConfig) (PrivateFile, error) {
+func (runtime *Runtime) PublishWorkerConfig(ctx context.Context, config changeworker.Config) (PrivateFile, error) {
 	if runtime == nil {
 		return PrivateFile{}, invalidContract(nil)
 	}
@@ -413,11 +418,11 @@ func (runtime *Runtime) PublishWorkerConfig(ctx context.Context, config workerCo
 	if !bound {
 		return PrivateFile{}, invalidContract(nil)
 	}
-	encoded, err := encodeWorkerConfig(config)
+	encoded, err := changeworker.EncodeConfig(config)
 	if err != nil {
 		return PrivateFile{}, invalidContract(nil)
 	}
-	return runtime.publish(ctx, workerConfigName, encoded, workerConfigLimit, nil, nil)
+	return runtime.publish(ctx, changeworker.ConfigName, encoded, changeworker.ConfigLimit, nil, nil)
 }
 
 func (runtime *Runtime) publish(ctx context.Context, name string, value []byte, limit int, write privateWrite, syncDirectory func(int) error) (_ PrivateFile, resultErr error) {

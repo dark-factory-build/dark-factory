@@ -8,6 +8,7 @@ import (
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/change"
+	"github.com/dark-factory-build/dark-factory/internal/changeworker"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
@@ -19,8 +20,6 @@ var (
 )
 
 var birthMagic = [8]byte{'D', 'F', 'B', 'I', 'R', 'T', 'H', 1}
-
-const attemptTokenName = "attempt.token"
 
 // encodeBirth preserves the Darwin kinfo birth tuple. It is an encoding, not
 // a hash: recovery must be able to reconstruct the exact runner observation.
@@ -147,15 +146,15 @@ func attemptDigest(value api.AttemptDigest) (kernel.AttemptDigest, error) {
 }
 
 func kernelSelection(repositoryRoot string, selection change.Selection) (kernel.ChangeSelection, error) {
-	checkpoint := selectionCheckpoint{
+	checkpoint := changeworker.SelectionReport{
 		Format: selection.ObjectFormat(), Base: selection.Base(), Commitment: selection.Commitment(),
 		EntryCount: selection.EntryCount(), BlobBytes: selection.BlobBytes(), Repository: selection.RepositoryIdentity(),
 	}
 	return kernelSelectionCheckpoint(repositoryRoot, checkpoint)
 }
 
-func kernelSelectionCheckpoint(repositoryRoot string, selection selectionCheckpoint) (kernel.ChangeSelection, error) {
-	if err := validateSelectionCheckpoint(selection); err != nil || selection.EntryCount > math.MaxUint32 {
+func kernelSelectionCheckpoint(repositoryRoot string, selection changeworker.SelectionReport) (kernel.ChangeSelection, error) {
+	if err := changeworker.ValidateSelectionReport(selection); err != nil || selection.EntryCount > math.MaxUint32 {
 		return kernel.ChangeSelection{}, errInvalidContract
 	}
 	format, err := kernel.NewObjectFormat(selection.Format.Name())
@@ -186,15 +185,15 @@ func kernelStageIdentity(identity change.StageIdentity) (kernel.FileIdentity, er
 }
 
 func kernelAvailability(facts change.TreeFacts) (kernel.ChangeAvailability, error) {
-	checkpoint := populationCheckpoint{
+	checkpoint := changeworker.PopulationReport{
 		Identity: facts.Identity(), Commitment: facts.Commitment(),
 		EntryCount: facts.EntryCount(), BlobBytes: facts.BlobBytes(),
 	}
 	return kernelAvailabilityCheckpoint(checkpoint)
 }
 
-func kernelAvailabilityCheckpoint(facts populationCheckpoint) (kernel.ChangeAvailability, error) {
-	if err := validatePopulationCheckpoint(facts); err != nil || facts.EntryCount > math.MaxUint32 {
+func kernelAvailabilityCheckpoint(facts changeworker.PopulationReport) (kernel.ChangeAvailability, error) {
+	if err := changeworker.ValidatePopulationReport(facts); err != nil || facts.EntryCount > math.MaxUint32 {
 		return kernel.ChangeAvailability{}, errInvalidContract
 	}
 	digest, err := kernel.TreeDigestFromBytes(facts.Commitment.Bytes())
