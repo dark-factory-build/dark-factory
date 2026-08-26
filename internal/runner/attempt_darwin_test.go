@@ -372,6 +372,219 @@ func TestAttemptRunnerDaemonEOFCuts(t *testing.T) {
 	})
 }
 
+func TestAttemptRunnerReapsInertInnerExitBeforeSelection(t *testing.T) {
+	f := newAttemptFixture(t, "shell", "")
+	inner := f.activateOuter()
+	if err := unix.Kill(-inner.PGID, unix.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	exit, err := f.outer.FinishAfterExit(4 * time.Second)
+	if err != nil || exit.Code == 0 {
+		t.Fatalf("outer exit=%+v err=%v output=%q", exit, err, f.output())
+	}
+	record, err := LoadTerminal(f.dir, "terminal.json")
+	if err != nil || record.Terminal.Process != inner || !record.Terminal.Exit.Aborted || record.Terminal.Exit.Signal != int(unix.SIGKILL) || record.Terminal.Message == "" {
+		t.Fatalf("inert-exit terminal=%+v err=%v", record, err)
+	}
+	for _, witness := range []string{"selection", "preparation", "population", "provider.effect"} {
+		if _, err := os.Stat(filepath.Join(f.root, witness)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("inert inner exit left %s witness: %v", witness, err)
+		}
+	}
+	waitExactAbsence(t, inner)
+	if err := unix.Kill(-inner.PGID, 0); !errors.Is(err, unix.ESRCH) {
+		t.Fatalf("inert inner group remains: %v", err)
+	}
+}
+
+func TestAttemptCleanupReapsObservedInertExit(t *testing.T) {
+	f := newFixture(t)
+	effect := filepath.Join(f.root, "effect")
+	child := f.start("/bin/sh", []string{"-c", "printf bad > " + effect}, nil, nil)
+	daemon, daemonPeer, err := newControlPair("test-daemon", "test-daemon-peer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, workerPeer, err := newControlPair("test-worker", "test-worker-peer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range []*os.File{daemon, daemonPeer, worker, workerPeer} {
+		file := file
+		t.Cleanup(func() { _ = file.Close() })
+	}
+	reads := &attemptReadSet{kq: child.kq, daemonFD: int(daemon.Fd()), workerFD: int(worker.Fd())}
+	if err := reads.registerDaemon(); err != nil {
+		t.Fatal(err)
+	}
+	if err := reads.registerWorker(); err != nil {
+		t.Fatal(err)
+	}
+	identity := child.Identity()
+	if err := unix.Kill(-identity.PGID, unix.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	_, source, err := nextAttemptFrame(child, daemon, worker, true, true, time.Second)
+	if err != nil || source != sourceChild || child.state != stateExited || !child.exitObserved {
+		t.Fatalf("observed inert exit source=%d err=%v state=%d observed=%t", source, err, child.state, child.exitObserved)
+	}
+	cfg := attemptConfig{AttemptID: "attempt-inert-exit", TerminalName: "terminal.json"}
+	done := make(chan error, 1)
+	go func() {
+		done <- finishAttemptWithExit(child, f.dir, cfg, reads, nil, false, nil)
+	}()
+	select {
+	case finishErr := <-done:
+		if finishErr != nil {
+			t.Fatal(finishErr)
+		}
+	case <-time.After(2 * time.Second):
+		_ = reads.processOnly()
+		_, _ = child.finishInertAfterExit()
+		select {
+		case <-done:
+		case <-time.After(4 * time.Second):
+		}
+		t.Fatal("observed inert exit was not reaped")
+	}
+	if child.state != stateWaited || reads.daemonRegistered || reads.workerRegistered {
+		t.Fatalf("inert exit did not converge: state=%d reads=%+v", child.state, reads)
+	}
+	record, err := LoadTerminal(f.dir, cfg.TerminalName)
+	if err != nil || record.Terminal.Process != identity || !record.Terminal.Exit.Aborted || record.Terminal.Exit.Signal != int(unix.SIGKILL) {
+		t.Fatalf("observed inert terminal=%+v err=%v", record, err)
+	}
+	if _, err := os.Stat(effect); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("observed inert exit executed target: %v", err)
+	}
+	waitExactAbsence(t, identity)
+}
+
+func TestAttemptCleanupRetiresProtocolReadinessBeforeProcessWait(t *testing.T) {
+	for _, mode := range []string{"eof", "malformed"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newFixture(t)
+			effect := filepath.Join(f.root, "effect")
+			child := f.start("/bin/sh", []string{"-c", "printf bad > " + effect}, nil, nil)
+			daemon, daemonPeer, err := newControlPair("test-daemon", "test-daemon-peer")
+			if err != nil {
+				t.Fatal(err)
+			}
+			worker, workerPeer, err := newControlPair("test-worker", "test-worker-peer")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, file := range []*os.File{daemon, daemonPeer, worker, workerPeer} {
+				file := file
+				t.Cleanup(func() { _ = file.Close() })
+			}
+			reads := &attemptReadSet{kq: child.kq, daemonFD: int(daemon.Fd()), workerFD: int(worker.Fd())}
+			if err := reads.registerDaemon(); err != nil {
+				t.Fatal(err)
+			}
+			if err := reads.registerWorker(); err != nil {
+				t.Fatal(err)
+			}
+			switch mode {
+			case "eof":
+				if err := daemonPeer.Close(); err != nil {
+					t.Fatal(err)
+				}
+			case "malformed":
+				if _, err := daemonPeer.Write(make([]byte, 64)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, source, cause := nextAttemptFrame(child, daemon, worker, true, true, time.Second)
+			if cause == nil || source != sourceDaemon || child.state != stateBlocked || child.exitObserved {
+				t.Fatalf("delayed process setup source=%d cause=%v state=%d observed=%t", source, cause, child.state, child.exitObserved)
+			}
+			cfg := attemptConfig{AttemptID: "attempt-" + mode, TerminalName: "terminal.json"}
+			done := make(chan error, 1)
+			started := time.Now()
+			go func() {
+				done <- finishAttemptWithExit(child, f.dir, cfg, reads, nil, false, cause)
+			}()
+			select {
+			case finishErr := <-done:
+				if finishErr == nil {
+					t.Fatal("protocol failure lost its cause")
+				}
+			case <-time.After(2 * time.Second):
+				// Independent safety transition keeps a deliberately broken
+				// mutation from leaking the real fixture after this failure.
+				_ = reads.processOnly()
+				_, _ = child.finishInertAfterExit()
+				select {
+				case <-done:
+				case <-time.After(4 * time.Second):
+				}
+				t.Fatal("protocol readiness starved the process exit")
+			}
+			if time.Since(started) >= 2*time.Second || reads.daemonRegistered || reads.workerRegistered || child.state != stateWaited {
+				t.Fatalf("process-only transition did not converge: elapsed=%v reads=%+v state=%d", time.Since(started), reads, child.state)
+			}
+			record, err := LoadTerminal(f.dir, cfg.TerminalName)
+			if err != nil || record.Terminal.Process != child.Identity() || !record.Terminal.Exit.Aborted {
+				t.Fatalf("protocol-failure terminal=%+v err=%v", record, err)
+			}
+			if _, err := os.Stat(effect); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("inert protocol failure executed target: %v", err)
+			}
+			waitExactAbsence(t, child.Identity())
+		})
+	}
+}
+
+func TestAttemptReadSetRemovalIsRetryableAndIdempotent(t *testing.T) {
+	kq, err := unix.Kqueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = unix.Close(kq) })
+	daemon, daemonPeer, err := newControlPair("test-daemon", "test-daemon-peer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, workerPeer, err := newControlPair("test-worker", "test-worker-peer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range []*os.File{daemon, daemonPeer, worker, workerPeer} {
+		file := file
+		t.Cleanup(func() { _ = file.Close() })
+	}
+	reads := &attemptReadSet{kq: kq, daemonFD: int(daemon.Fd()), workerFD: int(worker.Fd())}
+	if err := reads.registerDaemon(); err != nil {
+		t.Fatal(err)
+	}
+	if err := reads.registerWorker(); err != nil {
+		t.Fatal(err)
+	}
+	reads.kq = -1
+	if err := reads.processOnly(); err == nil || !reads.daemonRegistered || !reads.workerRegistered {
+		t.Fatalf("failed removal lost registration authority: err=%v reads=%+v", err, reads)
+	}
+	reads.kq = kq
+	if err := reads.processOnly(); err != nil || reads.daemonRegistered || reads.workerRegistered {
+		t.Fatalf("retried removal=%v reads=%+v", err, reads)
+	}
+	if err := reads.processOnly(); err != nil {
+		t.Fatalf("duplicate removal=%v", err)
+	}
+	if _, err := daemonPeer.Write([]byte("still-open")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workerPeer.Write([]byte("still-open")); err != nil {
+		t.Fatal(err)
+	}
+	events := make([]unix.Kevent_t, 1)
+	timeout := unix.NsecToTimespec((10 * time.Millisecond).Nanoseconds())
+	if n, err := unix.Kevent(kq, nil, events, &timeout); err != nil || n != 0 {
+		t.Fatalf("removed read filter remained ready: n=%d events=%+v err=%v", n, events, err)
+	}
+}
+
 func TestAttemptRunnerTerminatesOwnedProviderGroup(t *testing.T) {
 	for _, mode := range []string{"term", "leader"} {
 		t.Run(mode, func(t *testing.T) {
@@ -531,6 +744,21 @@ func TestAttemptProtocolSurfaceIsClosed(t *testing.T) {
 	if !strings.Contains(string(attemptSource), "if _, err := child.waitedExit(); err != nil") {
 		t.Fatal("terminal publication lost waited-child proof")
 	}
+	finishStart := strings.Index(string(attemptSource), "func finishAttemptWithExit(")
+	waitStart := strings.Index(string(attemptSource), "func waitForAttemptChild(")
+	if finishStart < 0 || waitStart <= finishStart {
+		t.Fatal("attempt cleanup functions missing")
+	}
+	finishBody := string(attemptSource)[finishStart:waitStart]
+	if strings.Index(finishBody, "reads.processOnly()") < 0 || strings.Index(finishBody, "reads.processOnly()") > strings.Index(finishBody, "waitForAttemptChild(child)") {
+		t.Fatal("process cleanup begins before protocol read filters are retired")
+	}
+	waitBody := string(attemptSource)[waitStart:]
+	for _, lifecycleCase := range []string{"case stateBlocked:", "case stateActivated:", "case stateExited:", "case stateWaited:"} {
+		if !strings.Contains(waitBody, lifecycleCase) {
+			t.Fatalf("attempt cleanup omits %s", lifecycleCase)
+		}
+	}
 	typesSource, err := os.ReadFile("types.go")
 	if err != nil {
 		t.Fatal(err)
@@ -583,7 +811,7 @@ func TestAttemptCleanupUncertaintyRetainsOwnerBeforeTerminal(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		done <- finishAttemptWithExit(child, f.dir, cfg, nil, false, nil)
+		done <- finishAttemptWithExit(child, f.dir, cfg, nil, nil, false, nil)
 	}()
 	select {
 	case call := <-entered:
@@ -661,7 +889,7 @@ func TestAttemptPermanentCleanupUncertaintyPublishesNothing(t *testing.T) {
 		}
 	})
 	go func() {
-		done <- finishAttemptWithExit(child, f.dir, cfg, nil, false, nil)
+		done <- finishAttemptWithExit(child, f.dir, cfg, nil, nil, false, nil)
 	}()
 	for range 3 {
 		select {

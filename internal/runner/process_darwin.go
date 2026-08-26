@@ -317,11 +317,8 @@ func (c *OwnedChild) Abort() error {
 			return werr
 		}
 	}
-	waitErr := c.waitInertOnce()
-	if c.state == stateWaited {
-		c.exit.Aborted = true
-	}
-	return errors.Join(err, waitErr)
+	_, finishErr := c.finishInertAfterExit()
+	return errors.Join(err, finishErr)
 }
 
 func (c *OwnedChild) waitForExit(timeout time.Duration) (unix.Kevent_t, error) {
@@ -409,6 +406,18 @@ func (c *OwnedChild) waitInertOnce() error {
 		return ErrState
 	}
 	return c.waitOnce()
+}
+
+func (c *OwnedChild) finishInertAfterExit() (Exit, error) {
+	if c == nil || c.activated || !c.exitObserved || c.state != stateExited {
+		return Exit{}, ErrState
+	}
+	waitErr := c.waitInertOnce()
+	if c.state != stateWaited {
+		return Exit{}, waitErr
+	}
+	c.exit.Aborted = true
+	return c.exit, nil
 }
 
 func (c *OwnedChild) waitActivatedOnce() error {

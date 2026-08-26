@@ -505,21 +505,22 @@ func runAttempt(daemon, dir *os.File, cfg attemptConfig) (result error) {
 	defer func() { result = errors.Join(result, child.Close()) }()
 	_ = workerChild.Close()
 	workerChild = nil
-	if err := registerRead(child.kq, int(daemon.Fd())); err != nil {
-		return finishAttemptFailure(child, dir, cfg, err)
+	reads := attemptReadSet{kq: child.kq, daemonFD: int(daemon.Fd()), workerFD: int(workerParent.Fd())}
+	if err := reads.registerDaemon(); err != nil {
+		return finishAttemptFailure(child, dir, cfg, &reads, err)
 	}
-	if err := registerRead(child.kq, int(workerParent.Fd())); err != nil {
-		return finishAttemptFailure(child, dir, cfg, err)
+	if err := reads.registerWorker(); err != nil {
+		return finishAttemptFailure(child, dir, cfg, &reads, err)
 	}
 	if err := writeControlFrame(daemon, attemptFrame{Version: 1, Kind: "inner-ready", Identity: child.Identity()}, maxFrameBytes); err != nil {
-		return finishAttemptFailure(child, dir, cfg, err)
+		return finishAttemptFailure(child, dir, cfg, &reads, err)
 	}
 	frame, source, err := nextAttemptFrame(child, daemon, workerParent, true, true, 0)
 	if err != nil || source != sourceDaemon || !validReleaseFrame(frame, StageSelection) {
-		return finishAttemptFailure(child, dir, cfg, protocolError("selection release", source, err))
+		return finishAttemptFailure(child, dir, cfg, &reads, protocolError("selection release", source, err))
 	}
 	if _, err := child.Activate(); err != nil {
-		return finishAttemptFailure(child, dir, cfg, err)
+		return finishAttemptFailure(child, dir, cfg, &reads, err)
 	}
 	sequence := []struct {
 		report  AttemptStage
@@ -532,21 +533,21 @@ func runAttempt(daemon, dir *os.File, cfg attemptConfig) (result error) {
 	for _, step := range sequence {
 		frame, source, err = nextAttemptFrame(child, daemon, workerParent, true, true, 0)
 		if err != nil || source != sourceWorker || !validCheckpointFrame(frame, step.report) {
-			return finishAttemptFailure(child, dir, cfg, protocolError(string(step.report)+" report", source, err))
+			return finishAttemptFailure(child, dir, cfg, &reads, protocolError(string(step.report)+" report", source, err))
 		}
 		if err := writeControlFrame(daemon, frame, maxConfigBytes); err != nil {
-			return finishAttemptFailure(child, dir, cfg, err)
+			return finishAttemptFailure(child, dir, cfg, &reads, err)
 		}
 		frame, source, err = nextAttemptFrame(child, daemon, workerParent, true, true, 0)
 		if err != nil || source != sourceDaemon || !validReleaseFrame(frame, step.release) {
-			return finishAttemptFailure(child, dir, cfg, protocolError(string(step.release)+" release", source, err))
+			return finishAttemptFailure(child, dir, cfg, &reads, protocolError(string(step.release)+" release", source, err))
 		}
 		if err := writeControlFrame(workerParent, frame, maxFrameBytes); err != nil {
-			return finishAttemptFailure(child, dir, cfg, err)
+			return finishAttemptFailure(child, dir, cfg, &reads, err)
 		}
 	}
-	daemonOpen, err := finishReleasedProvider(child, daemon, workerParent)
-	return finishAttemptWithExit(child, dir, cfg, daemon, daemonOpen, err)
+	daemonOpen, err := finishReleasedProvider(child, daemon, workerParent, &reads)
+	return finishAttemptWithExit(child, dir, cfg, &reads, daemon, daemonOpen, err)
 }
 
 func newControlPair(parentName, childName string) (*os.File, *os.File, error) {
@@ -593,9 +594,79 @@ func registerRead(kq, fd int) error {
 	return nil
 }
 
-func deleteRead(kq, fd int) {
-	change := unix.Kevent_t{Ident: uint64(fd), Filter: unix.EVFILT_READ, Flags: unix.EV_DELETE}
-	_, _ = unix.Kevent(kq, []unix.Kevent_t{change}, nil, nil)
+func unregisterRead(kq, fd int) error {
+	change := unix.Kevent_t{Ident: uint64(fd), Filter: unix.EVFILT_READ, Flags: unix.EV_DELETE | unix.EV_RECEIPT}
+	receipt := make([]unix.Kevent_t, 1)
+	n, err := unix.Kevent(kq, []unix.Kevent_t{change}, receipt, nil)
+	if err != nil {
+		return err
+	}
+	if n != 1 || receipt[0].Flags&unix.EV_ERROR == 0 || receipt[0].Data != 0 {
+		if n == 1 && receipt[0].Data != 0 {
+			return unix.Errno(receipt[0].Data)
+		}
+		return ErrIdentity
+	}
+	return nil
+}
+
+type attemptReadSet struct {
+	kq               int
+	daemonFD         int
+	workerFD         int
+	daemonRegistered bool
+	workerRegistered bool
+}
+
+func (reads *attemptReadSet) registerDaemon() error {
+	if reads == nil || reads.daemonRegistered {
+		return ErrState
+	}
+	if err := registerRead(reads.kq, reads.daemonFD); err != nil {
+		return err
+	}
+	reads.daemonRegistered = true
+	return nil
+}
+
+func (reads *attemptReadSet) registerWorker() error {
+	if reads == nil || reads.workerRegistered {
+		return ErrState
+	}
+	if err := registerRead(reads.kq, reads.workerFD); err != nil {
+		return err
+	}
+	reads.workerRegistered = true
+	return nil
+}
+
+func (reads *attemptReadSet) removeDaemon() error {
+	if reads == nil || !reads.daemonRegistered {
+		return nil
+	}
+	if err := unregisterRead(reads.kq, reads.daemonFD); err != nil {
+		return err
+	}
+	reads.daemonRegistered = false
+	return nil
+}
+
+func (reads *attemptReadSet) removeWorker() error {
+	if reads == nil || !reads.workerRegistered {
+		return nil
+	}
+	if err := unregisterRead(reads.kq, reads.workerFD); err != nil {
+		return err
+	}
+	reads.workerRegistered = false
+	return nil
+}
+
+func (reads *attemptReadSet) processOnly() error {
+	if reads == nil {
+		return nil
+	}
+	return errors.Join(reads.removeDaemon(), reads.removeWorker())
 }
 
 func nextAttemptFrame(child *OwnedChild, daemon, worker *os.File, daemonOpen, workerOpen bool, timeout time.Duration) (attemptFrame, attemptSource, error) {
@@ -661,11 +732,11 @@ func validCheckpointFrame(frame attemptFrame, stage AttemptStage) bool {
 	return frame.Version == 1 && frame.Kind == "checkpoint" && frame.Stage == stage && frame.Identity == (Identity{}) && len(frame.Payload) <= maxAttemptReportBytes && frame.Terminal == nil && frame.FileIdentity == nil && frame.Digest == "" && !frame.StoreCommitted
 }
 
-func finishAttemptFailure(child *OwnedChild, dir *os.File, cfg attemptConfig, cause error) error {
-	return finishAttemptWithExit(child, dir, cfg, nil, false, cause)
+func finishAttemptFailure(child *OwnedChild, dir *os.File, cfg attemptConfig, reads *attemptReadSet, cause error) error {
+	return finishAttemptWithExit(child, dir, cfg, reads, nil, false, cause)
 }
 
-func finishReleasedProvider(child *OwnedChild, daemon, worker *os.File) (bool, error) {
+func finishReleasedProvider(child *OwnedChild, daemon, worker *os.File, reads *attemptReadSet) (bool, error) {
 	daemonOpen := true
 	workerOpen := true
 	for {
@@ -675,7 +746,9 @@ func finishReleasedProvider(child *OwnedChild, daemon, worker *os.File) (bool, e
 		}
 		if source == sourceDaemon {
 			if errors.Is(err, io.EOF) {
-				deleteRead(child.kq, int(daemon.Fd()))
+				if removeErr := reads.removeDaemon(); removeErr != nil {
+					return daemonOpen, removeErr
+				}
 				daemonOpen = false
 				continue
 			}
@@ -689,7 +762,9 @@ func finishReleasedProvider(child *OwnedChild, daemon, worker *os.File) (bool, e
 		}
 		if source == sourceWorker {
 			if errors.Is(err, io.EOF) {
-				deleteRead(child.kq, int(worker.Fd()))
+				if removeErr := reads.removeWorker(); removeErr != nil {
+					return daemonOpen, removeErr
+				}
 				workerOpen = false
 				continue
 			}
@@ -715,7 +790,12 @@ func finishReleasedProvider(child *OwnedChild, daemon, worker *os.File) (bool, e
 	}
 }
 
-func finishAttemptWithExit(child *OwnedChild, dir *os.File, cfg attemptConfig, daemon *os.File, daemonOpen bool, cause error) error {
+func finishAttemptWithExit(child *OwnedChild, dir *os.File, cfg attemptConfig, reads *attemptReadSet, daemon *os.File, daemonOpen bool, cause error) error {
+	for reads != nil && (reads.daemonRegistered || reads.workerRegistered) {
+		if err := reads.processOnly(); err != nil {
+			time.Sleep(25 * time.Millisecond)
+		}
+	}
 	exit, cleanupErr := waitForAttemptChild(child)
 	if cleanupErr != nil {
 		return errors.Join(cause, cleanupErr)
@@ -736,13 +816,19 @@ func waitForAttemptChild(child *OwnedChild) (Exit, error) {
 		if exit, err := child.waitedExit(); err == nil {
 			return exit, nil
 		}
-		switch {
-		case !child.activated && child.state == stateBlocked:
+		switch child.state {
+		case stateBlocked:
 			_ = child.Abort()
-		case child.activated && child.exitObserved:
-			_, _ = child.FinishAfterExit(attemptControlTimeout)
-		case child.activated:
+		case stateActivated:
 			_, _ = child.Terminate(defaultStopTimeout)
+		case stateExited:
+			if child.activated {
+				_, _ = child.FinishAfterExit(attemptControlTimeout)
+			} else {
+				_, _ = child.finishInertAfterExit()
+			}
+		case stateWaited:
+			return child.waitedExit()
 		}
 		if exit, err := child.waitedExit(); err == nil {
 			return exit, nil
