@@ -1549,3 +1549,48 @@ Two-owner runner/process proof on integrated head `85d4841`:
   fail-closed ownership, not convergence. The later elegance audit must review
   production-compiled test seams and repeated frame validation, but may not
   collapse either ownership boundary or the explicit uncertainty behavior.
+
+Bounded local-API client proof on integrated head `3ca153f`:
+
+- `internal/api` exposes only six operator calls (`health`, `snapshot`,
+  `create_project`, `create_shell_agent`, `enqueue_task`, `set_dispatch`) and
+  three attempt outcome calls (`succeed`, `block`, `fail`). The attempt client
+  can discover only its one token-file environment variable; it cannot name or
+  fall back to operator authority. Attempt requests carry no run/task/entity ID
+  or caller-selected failure code.
+- The private wire is generation 1, one length-bounded request and response per
+  Unix connection, with explicit operator/attempt domains and raw 32-byte
+  bearers. Clients half-close after the request, require response EOF, and
+  recheck the exact socket and token identities around each call. Public DTOs
+  can represent only the bounded canonical dashboard projection; task bodies,
+  roots, credentials, provider input/output, source data and private result
+  detail have no public field.
+- Every path component is opened descriptor-relative from `/` without following
+  symlinks. Token opens are nonblocking and accept exactly one EUID-owned,
+  mode-0600, single-link, 32-byte regular file; socket inspection requires the
+  exact private owner/mode/type/link/identity chain and verifies the connected
+  peer UID. This closes FIFO blocking, leaf symlink, intermediate-component
+  replacement and post-dial socket swap attacks without a general filesystem
+  abstraction.
+- JSON decoding first validates UTF-8, depth, exact object-name uniqueness and
+  the canonical `[a-z][a-z0-9_]*` member grammar recursively, then uses
+  `DisallowUnknownFields` and exact EOF. This rejects the case-fold aliases
+  accepted by Go's ordinary struct decoder, including uppercase escapes and
+  Unicode Kelvin-sign folds, while retaining escaped canonical lowercase
+  names.
+- Independent review BLOCKED three successive heads for a regular-file-to-FIFO
+  token race, intermediate symlink replacement, duplicate/malformed JSON, and
+  finally case-folded field aliases. Each became a causal test; exact immutable
+  review head `033812e` received ALLOW. No router, middleware stack, generic
+  `Do`, retry loop, watch stream, request ID or compatibility generation was
+  introduced.
+- Final author gates passed API count-three (`2.154s`), race (`1.945s`),
+  CGO-free (`0.859s`), vet/format/diff, Darwin/Linux AMD64 cross-builds and
+  clean FD/goroutine/process/temp censuses. After unchanged integration the
+  orchestrator passed `internal/api` in `0.898s` using task-owned caches and a
+  canonical isolated temporary root.
+- The server half is intentionally not claimed by this proof. It must preserve
+  the same framing and path predicates, make peer UID a prerequisite rather
+  than authentication, compare only the credential for the declared domain,
+  call the atomic attempt outcome mutator directly, bound every handler and
+  connection lifetime, and return only fixed sanitized errors.
