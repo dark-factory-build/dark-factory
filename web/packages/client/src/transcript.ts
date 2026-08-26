@@ -1,4 +1,4 @@
-import { malformed } from "./errors.js";
+import { malformed, normalizeBoundary, ProtocolError } from "./errors.js";
 
 const PROTOCOL = new TextEncoder().encode("dark-factory/browser/v1/");
 const PAIR = new TextEncoder().encode("pair\0");
@@ -14,15 +14,17 @@ export type AuthTranscriptInput = {
 };
 
 export function hexBytes(value: string, bytes?: number): Uint8Array {
-  if (typeof value !== "string" || value.length % 2 !== 0 || value !== value.toLowerCase() || !/^[0-9a-f]*$/.test(value)) malformed();
-  if (bytes !== undefined && value.length !== bytes * 2) malformed();
-  const result = new Uint8Array(value.length / 2);
-  for (let i = 0; i < result.length; i++) result[i] = Number.parseInt(value.slice(i * 2, i * 2 + 2), 16);
-  return result;
+  return normalizeBoundary(() => {
+    if (typeof value !== "string" || (bytes !== undefined && (!Number.isSafeInteger(bytes) || bytes < 0)) || value.length % 2 !== 0 || value !== value.toLowerCase() || !/^[0-9a-f]*$/.test(value)) malformed();
+    if (bytes !== undefined && value.length !== bytes * 2) malformed();
+    const result = new Uint8Array(value.length / 2);
+    for (let i = 0; i < result.length; i++) result[i] = Number.parseInt(value.slice(i * 2, i * 2 + 2), 16);
+    return result;
+  });
 }
 function text(value: string): Uint8Array {
   for (const character of value) {
-    const code = character.charCodeAt(0);
+    const code = character.codePointAt(0) ?? 0;
     if (code >= 0xd800 && code <= 0xdfff) malformed();
   }
   const result = new TextEncoder().encode(value);
@@ -38,20 +40,27 @@ function transcript(domain: Uint8Array, fields: Array<{ value: Uint8Array; fixed
   const result = new Uint8Array(size); let offset = 0; for (const part of parts) { result.set(part, offset); offset += part.length; } return result;
 }
 export function buildPairTranscript(input: PairTranscriptInput): Uint8Array {
-  return transcript(PAIR, [
-    { value: fixed(input.daemon_id, 16), fixed: 16 }, { value: fixed(input.boot_id, 16), fixed: 16 }, { value: fixed(input.connection_nonce, 32), fixed: 32 },
-    { value: fixed(input.challenge, 32), fixed: 32 }, { value: publicKey(input.public_key_sec1), fixed: 65 }, { value: text(input.host) }, { value: text(input.origin) },
-  ]);
+  return normalizeBoundary(() => {
+    if (typeof input !== "object" || input === null) malformed();
+    return transcript(PAIR, [
+      { value: fixed(input.daemon_id, 16), fixed: 16 }, { value: fixed(input.boot_id, 16), fixed: 16 }, { value: fixed(input.connection_nonce, 32), fixed: 32 },
+      { value: fixed(input.challenge, 32), fixed: 32 }, { value: publicKey(input.public_key_sec1), fixed: 65 }, { value: text(input.host) }, { value: text(input.origin) },
+    ]);
+  });
 }
 export function buildAuthTranscript(input: AuthTranscriptInput): Uint8Array {
-  return transcript(AUTH, [
-    { value: fixed(input.daemon_id, 16), fixed: 16 }, { value: fixed(input.boot_id, 16), fixed: 16 }, { value: fixed(input.connection_nonce, 32), fixed: 32 },
-    { value: fixed(input.client_id, 16), fixed: 16 }, { value: text(input.host) }, { value: text(input.origin) },
-  ]);
+  return normalizeBoundary(() => {
+    if (typeof input !== "object" || input === null) malformed();
+    return transcript(AUTH, [
+      { value: fixed(input.daemon_id, 16), fixed: 16 }, { value: fixed(input.boot_id, 16), fixed: 16 }, { value: fixed(input.connection_nonce, 32), fixed: 32 },
+      { value: fixed(input.client_id, 16), fixed: 16 }, { value: text(input.host) }, { value: text(input.origin) },
+    ]);
+  });
 }
 
 /** Verify the raw IEEE-P1363 P-256 signature used by browser v1. */
 export async function verifyP256Signature(publicKeySEC1: Uint8Array, signature: Uint8Array, signed: Uint8Array): Promise<boolean> {
+  if (!(publicKeySEC1 instanceof Uint8Array) || !(signature instanceof Uint8Array) || !(signed instanceof Uint8Array)) throw new ProtocolError("malformed");
   if (publicKeySEC1.length !== 65 || publicKeySEC1[0] !== 4 || signature.length !== 64) return false;
   try {
     const key = await globalThis.crypto.subtle.importKey("raw", publicKeySEC1 as unknown as BufferSource, { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);

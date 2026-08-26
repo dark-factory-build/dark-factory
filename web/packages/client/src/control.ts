@@ -1,4 +1,4 @@
-import { malformed, ProtocolError } from "./errors.js";
+import { malformed, normalizeBoundary, ProtocolError } from "./errors.js";
 import {
   CAPABILITIES,
   CONTROL_TYPES,
@@ -50,8 +50,7 @@ const HEX_BYTES = {
 } as const;
 
 export function encodeClientControl(frame: ClientControlFrame): string {
-  validateControl(frame, "client");
-  return encode(frame);
+  return normalizeBoundary(() => { validateControl(frame, "client"); return encode(frame); });
 }
 
 export function encodePairProve(id: string, body: PairProveBody): string {
@@ -65,8 +64,7 @@ export function encodeClientError(body: ErrorBody, id?: string): string {
 }
 
 export function encodeServerControl(frame: ServerControlFrame): string {
-  validateControl(frame, "server");
-  return encode(frame);
+  return normalizeBoundary(() => { validateControl(frame, "server"); return encode(frame); });
 }
 
 export function encodeHello(body: HelloBody): string { return encodeServerControl({ v: 1, type: "HELLO", body }); }
@@ -77,11 +75,11 @@ export function encodeServerError(body: ErrorBody, id?: string): string {
 }
 
 export function decodeClientControl(data: string | Uint8Array): ClientControlFrame {
-  return decodeControl(data, "client") as ClientControlFrame;
+  return normalizeBoundary(() => decodeControl(data, "client") as ClientControlFrame);
 }
 
 export function decodeServerControl(data: string | Uint8Array): ServerControlFrame {
-  return decodeControl(data, "server") as ServerControlFrame;
+  return normalizeBoundary(() => decodeControl(data, "server") as ServerControlFrame);
 }
 
 function encode(frame: ClientControlFrame | ServerControlFrame): string {
@@ -141,6 +139,7 @@ function validateControl(frame: ClientControlFrame | ServerControlFrame, role: "
 }
 
 function validateBody(type: ControlType, body: Record<string, unknown>): HelloBody | PairProveBody | PairResultBody | AuthProveBody | AuthResultBody | ErrorBody {
+  if (!isObject(body)) malformed();
   if (type === "HELLO") {
     exactKeys(body, ["daemon_id", "boot_id", "connection_nonce"]);
     fixedHex(body.daemon_id, HEX_BYTES.daemon_id); fixedHex(body.boot_id, HEX_BYTES.boot_id); fixedHex(body.connection_nonce, HEX_BYTES.connection_nonce);
@@ -223,6 +222,14 @@ function rejectDuplicateKeys(text: string): void {
     if (text[index] === '"') { stringEnd(); return; }
     const start = index; while (index < text.length && !/[\s,\]}]/.test(text[index] ?? "")) index++;
     if (start === index) malformed();
+    const token = text.slice(start, index);
+    if (token[0] === "-" || (token[0] !== undefined && token[0] >= "0" && token[0] <= "9")) validateJSONNumber(token);
   };
   value(0); whitespace(); if (index !== text.length) malformed();
+}
+
+function validateJSONNumber(value: string): void {
+  if (value.includes(".") || value.includes("e") || value.includes("E") || !/^-?(0|[1-9][0-9]*)$/.test(value)) malformed();
+  const digits = value[0] === "-" ? value.slice(1) : value;
+  if (digits.length > 16 || (digits.length === 16 && digits > "9007199254740991")) malformed();
 }

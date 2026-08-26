@@ -1,4 +1,4 @@
-import { malformed } from "./errors.js";
+import { malformed, normalizeBoundary } from "./errors.js";
 import { MAX_TERMINAL_PAYLOAD, TERMINAL_HEADER_BYTES } from "./manifest.js";
 
 export type TerminalDirection = "input" | "output";
@@ -11,15 +11,16 @@ export type TerminalFrame = {
 };
 
 export function encodeTerminalInput(sessionId: Uint8Array, sequence: bigint, leaseGeneration: bigint, payload: Uint8Array): Uint8Array {
-  return encode({ direction: "input", sessionId, sequence, leaseGeneration, payload });
+  return normalizeBoundary(() => encode({ direction: "input", sessionId, sequence, leaseGeneration, payload }));
 }
 export function encodeTerminalOutput(sessionId: Uint8Array, sequence: bigint, payload: Uint8Array): Uint8Array {
-  return encode({ direction: "output", sessionId, sequence, leaseGeneration: 0n, payload });
+  return normalizeBoundary(() => encode({ direction: "output", sessionId, sequence, leaseGeneration: 0n, payload }));
 }
-export function decodeTerminalInput(data: Uint8Array): TerminalFrame { return decode(data, "input"); }
-export function decodeTerminalOutput(data: Uint8Array): TerminalFrame { return decode(data, "output"); }
+export function decodeTerminalInput(data: Uint8Array): TerminalFrame { return normalizeBoundary(() => decode(data, "input")); }
+export function decodeTerminalOutput(data: Uint8Array): TerminalFrame { return normalizeBoundary(() => decode(data, "output")); }
 
 function encode(frame: TerminalFrame): Uint8Array {
+  if (!(frame.sessionId instanceof Uint8Array) || !(frame.payload instanceof Uint8Array) || typeof frame.sequence !== "bigint" || typeof frame.leaseGeneration !== "bigint") malformed();
   if (frame.sessionId.length !== 16 || frame.sessionId.every((b) => b === 0) || frame.payload.length === 0 || frame.payload.length > MAX_TERMINAL_PAYLOAD) malformed();
   if (frame.sequence < 0n || frame.leaseGeneration < 0n || frame.sequence > 0xffff_ffff_ffff_ffffn || frame.leaseGeneration > 0xffff_ffff_ffff_ffffn) malformed();
   if (frame.direction === "input" && (frame.sequence === 0n || frame.leaseGeneration === 0n)) malformed();
@@ -29,6 +30,7 @@ function encode(frame: TerminalFrame): Uint8Array {
   view.setBigUint64(20, frame.sequence); view.setBigUint64(28, frame.leaseGeneration); view.setUint32(36, frame.payload.length); result.set(frame.payload, TERMINAL_HEADER_BYTES); return result;
 }
 function decode(data: Uint8Array, direction: TerminalDirection): TerminalFrame {
+  if (!(data instanceof Uint8Array)) malformed();
   if (data.length < TERMINAL_HEADER_BYTES || data.length > TERMINAL_HEADER_BYTES + MAX_TERMINAL_PAYLOAD) malformed();
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength); if (data[0] !== 0x44 || data[1] !== 0x46 || data[2] !== 1) malformed();
   const opcode = data[3]; if ((direction === "input" && opcode !== 1) || (direction === "output" && opcode !== 2)) malformed();

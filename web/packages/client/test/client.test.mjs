@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
   BROWSER_MANIFEST,
+  ProtocolError,
   buildAuthTranscript,
   buildPairTranscript,
   decodeClientControl,
@@ -23,7 +24,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "../../../..");
 const fixture = (name) => readFileSync(join(root, "protocol/browser/v1/fixtures", name), "utf8").trim();
 const json = (name) => JSON.parse(fixture(name));
 const bytes = (hex) => hexBytes(hex);
-const expectMalformed = (fn) => assert.throws(fn, (e) => ["malformed", "wrong_direction", "unsupported_version"].includes(e?.code));
+const expectMalformed = (fn) => assert.throws(fn, (e) => e instanceof ProtocolError && ["malformed", "wrong_direction", "unsupported_version"].includes(e.code));
 
 test("canonical control fixtures decode by sender role and re-encode exactly", () => {
   const client = ["pair_prove", "auth_prove"];
@@ -50,6 +51,10 @@ test("control role, envelope, field and capability validation is closed", () => 
   ]) expectMalformed(() => decodeServerControl(mutation(fixture("auth_result.json"))));
   expectMalformed(() => decodeClientControl('{"v":1,"type":"ERROR","body":{"code":"secret","retryable":false}}'));
   expectMalformed(() => decodeClientControl('{"v":1,"type":"ERROR","body":{"code":"internal","retryable":false,"message":"private"}}'));
+  for (const number of ["1.0", "1e0", "01", "+1", "9007199254740992", "-9007199254740992"]) {
+    expectMalformed(() => decodeServerControl(`{"v":1,"type":"AUTH_RESULT","id":"auth-1","body":{"client_id":"606162636465666768696a6b6c6d6e6f","capabilities":${number}}}`));
+  }
+  assert.equal(decodeServerControl('{"v":1,"type":"AUTH_RESULT","id":"auth-1","body":{"client_id":"606162636465666768696a6b6c6d6e6f","capabilities":1} }').body.capabilities, 1);
 });
 
 test("pair and auth transcripts are byte-exact and verify with WebCrypto P-1363", async () => {
@@ -75,6 +80,24 @@ test("transcript fixed fields and text are validated before signing", () => {
   expectMalformed(() => buildPairTranscript({ ...pair, host: "" }));
   expectMalformed(() => buildPairTranscript({ ...pair, origin: "https://x\u0000.example" }));
   expectMalformed(() => hexBytes("AA"));
+  expectMalformed(() => buildPairTranscript(null));
+  expectMalformed(() => buildPairTranscript({ ...pair, host: "https://bad\ud800" }));
+  expectMalformed(() => buildPairTranscript({ ...pair, origin: "https://bad\udfff" }));
+});
+
+test("transcript preserves astral Unicode as UTF-8 and rejects only lone surrogates", () => {
+  const pair = json("transcript_v1.json").pair;
+  const host = `${pair.host}🚀`;
+  const origin = `${pair.origin}🌟`;
+  const actual = buildPairTranscript({ ...pair, host, origin });
+  const expected = [];
+  const add = (value) => { const field = typeof value === "string" ? new TextEncoder().encode(value) : value; expected.push(new Uint8Array([field.length >>> 24, field.length >>> 16 & 255, field.length >>> 8 & 255, field.length & 255]), field); };
+  expected.push(new TextEncoder().encode("dark-factory/browser/v1/pair\0"), new Uint8Array([0, 1]));
+  for (const field of [pair.daemon_id, pair.boot_id, pair.connection_nonce, pair.challenge, pair.public_key_sec1]) add(bytes(field));
+  add(host); add(origin);
+  const joined = new Uint8Array(expected.reduce((n, field) => n + field.length, 0)); let offset = 0;
+  for (const field of expected) { joined.set(field, offset); offset += field.length; }
+  assert.deepEqual(actual, joined);
 });
 
 test("terminal fixtures round-trip and preserve 64-bit values as bigint", () => {
@@ -105,6 +128,17 @@ test("terminal framing rejects wrong direction, identity, bounds and overflow", 
   expectMalformed(() => encodeTerminalInput(session, 1n, 0n, new Uint8Array([1])));
   expectMalformed(() => encodeTerminalOutput(session, 0xffff_ffff_ffff_ffffn, new Uint8Array([1, 2])));
   expectMalformed(() => encodeTerminalOutput(session, 1n, new Uint8Array(65537)));
+  expectMalformed(() => decodeTerminalInput(null));
+  expectMalformed(() => encodeTerminalInput(null, 1n, 1n, new Uint8Array([1])));
+  expectMalformed(() => encodeTerminalInput(session, 1, 1n, new Uint8Array([1])));
+  expectMalformed(() => encodeTerminalInput(session, 1n, 1n, null));
+});
+
+test("all public malformed boundaries return the finite ProtocolError", async () => {
+  await assert.rejects(() => verifyP256Signature(null, new Uint8Array(64), new Uint8Array(1)), (error) => error instanceof ProtocolError && error.code === "malformed");
+  expectMalformed(() => decodeServerControl(Symbol("attacker")));
+  expectMalformed(() => decodeServerControl("{"));
+  expectMalformed(() => hexBytes({}));
 });
 
 test("manifest has exactly one public mapping for every v1 stable entry", () => {
