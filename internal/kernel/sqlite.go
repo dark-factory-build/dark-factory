@@ -295,7 +295,7 @@ func verifyConnection(ctx context.Context, connection *sql.Conn) error {
 
 func (store *Store) initialize(ctx context.Context, config FactoryConfig, at UnixMillis) error {
 	for attempt := 0; attempt < 2; attempt++ {
-		tx, err := store.beginWrite(ctx)
+		tx, err := store.beginUncheckedWrite(ctx)
 		if err != nil {
 			return err
 		}
@@ -393,7 +393,23 @@ type writeTx struct {
 	closed     bool
 }
 
-func (store *Store) beginWrite(ctx context.Context) (*writeTx, error) {
+func (store *Store) beginValidatedWrite(ctx context.Context) (*writeTx, error) {
+	tx, err := store.beginUncheckedWrite(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateDurableControls(ctx, tx.connection); err != nil {
+		err = tx.Rollback(err)
+		tx.Close()
+		return nil, err
+	}
+	return tx, nil
+}
+
+// beginUncheckedWrite exists only because a fresh database has no durable
+// graph to validate until initialize creates it. Public mutations must enter
+// through beginValidatedWrite.
+func (store *Store) beginUncheckedWrite(ctx context.Context) (*writeTx, error) {
 	store.writerMu.Lock()
 	if store.closed.Load() {
 		store.writerMu.Unlock()

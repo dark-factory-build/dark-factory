@@ -265,7 +265,7 @@ func TestLiteralImmediateExclusionAndCancelledWait(t *testing.T) {
 	store, path := newTestStore(t)
 	defer store.Close()
 	ctx := context.Background()
-	tx, err := store.beginWrite(ctx)
+	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}

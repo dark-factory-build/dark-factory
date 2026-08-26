@@ -29,7 +29,7 @@ func (store *Store) transitionResource(ctx context.Context, runID RunID, resourc
 	if runID.zero() || resourceID.zero() || target.String() == "" {
 		return Resource{}, fmt.Errorf("%w: invalid resource transition", ErrInvalidValue)
 	}
-	tx, err := store.beginWrite(ctx)
+	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return Resource{}, err
 	}
@@ -171,7 +171,7 @@ func (store *Store) ActivateRun(ctx context.Context, runID RunID, expected Revis
 	if runID.zero() {
 		return Run{}, fmt.Errorf("%w: zero run identifier", ErrInvalidValue)
 	}
-	tx, err := store.beginWrite(ctx)
+	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return Run{}, err
 	}
@@ -227,7 +227,7 @@ func (store *Store) ProposeAttemptOutcome(ctx context.Context, digest AttemptDig
 	if !proposal.valid() {
 		return Run{}, fmt.Errorf("%w: invalid attempt proposal", ErrInvalidValue)
 	}
-	tx, err := store.beginWrite(ctx)
+	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return Run{}, err
 	}
@@ -239,9 +239,6 @@ func (store *Store) ProposeAttemptOutcome(ctx context.Context, digest AttemptDig
 	if !found || run.Phase != RunRunning || run.CredentialRevokedAt != nil {
 		return Run{}, tx.Rollback(ErrUnauthorized)
 	}
-	if err := validateOwnershipLocators(ctx, tx.connection); err != nil {
-		return Run{}, tx.Rollback(err)
-	}
 	return store.enterFinalizing(ctx, tx, run, run.Revision, proposal, at)
 }
 
@@ -249,7 +246,7 @@ func (store *Store) FailAdmitted(ctx context.Context, runID RunID, expected Revi
 	if runID.zero() || !failure.valid() || failure.kind != OutcomeFailed {
 		return Run{}, fmt.Errorf("%w: invalid admitted failure", ErrInvalidValue)
 	}
-	tx, err := store.beginWrite(ctx)
+	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return Run{}, err
 	}
@@ -278,7 +275,7 @@ func (store *Store) CancelRun(ctx context.Context, runID RunID, expected Revisio
 	if err != nil {
 		return Run{}, err
 	}
-	tx, err := store.beginWrite(ctx)
+	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return Run{}, err
 	}
@@ -303,9 +300,6 @@ func (store *Store) CancelRun(ctx context.Context, runID RunID, expected Revisio
 }
 
 func (store *Store) enterFinalizing(ctx context.Context, tx *writeTx, run Run, expected Revision, proposal Proposal, at UnixMillis) (Run, error) {
-	if _, err := loadRunRelationships(ctx, tx.connection, run); err != nil {
-		return Run{}, tx.Rollback(err)
-	}
 	if run.Revision != expected || at.Int64() < run.UpdatedAt.Int64() {
 		return Run{}, tx.Rollback(ErrRevisionConflict)
 	}
@@ -338,7 +332,7 @@ func (store *Store) ObserveRunnerExit(ctx context.Context, runID RunID, expected
 	if runID.zero() || !exit.valid() || at.Int64() < exit.at.Int64() {
 		return Run{}, fmt.Errorf("%w: invalid runner exit observation", ErrInvalidValue)
 	}
-	tx, err := store.beginWrite(ctx)
+	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return Run{}, err
 	}
@@ -349,9 +343,6 @@ func (store *Store) ObserveRunnerExit(ctx context.Context, runID RunID, expected
 	}
 	if !found {
 		return Run{}, tx.Rollback(ErrNotFound)
-	}
-	if _, err := loadRunRelationships(ctx, tx.connection, run); err != nil {
-		return Run{}, tx.Rollback(err)
 	}
 	if run.RunnerExit != nil {
 		if !run.RunnerExit.equal(exit) {
@@ -406,7 +397,7 @@ func (store *Store) FinalizeRun(ctx context.Context, runID RunID, expected Revis
 	if runID.zero() {
 		return Run{}, fmt.Errorf("%w: zero run identifier", ErrInvalidValue)
 	}
-	tx, err := store.beginWrite(ctx)
+	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return Run{}, err
 	}

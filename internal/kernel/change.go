@@ -197,7 +197,7 @@ func (store *Store) MarkChangeAvailable(ctx context.Context, id ChangeID, expect
 }
 
 func (store *Store) advanceChange(ctx context.Context, id ChangeID, expected Revision, at UnixMillis, apply func(Change, *sql.Conn) (bool, error)) (Change, error) {
-	tx, err := store.beginWrite(ctx)
+	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return Change{}, err
 	}

@@ -12,7 +12,7 @@ func (store *Store) AdmitNext(ctx context.Context, agentID AgentID, keys Admissi
 	if agentID.zero() || !keys.valid() {
 		return AdmissionResult{}, fmt.Errorf("%w: invalid admission request", ErrInvalidValue)
 	}
-	tx, err := store.beginWrite(ctx)
+	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return AdmissionResult{}, err
 	}

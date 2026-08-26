@@ -1,0 +1,309 @@
+package kernel
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"path/filepath"
+	"testing"
+)
+
+func TestEveryPublicMutationValidatesDurableGraphBeforeDecision(t *testing.T) {
+	selection := testChangeSelection(t)
+	stage, _ := NewFileIdentity(70, 80)
+	digest, _ := TreeDigestFromBytes(bytes.Repeat([]byte{0x81}, DigestBytes))
+	availability, _ := NewChangeAvailability(digest, 1, 1, stage)
+	pathIdentity, _ := NewPathResourceIdentity(90, 100)
+	failure, _ := NewFailureProposal(FailureInternal, "failure")
+	proposal, _ := NewSuccessProposal("result")
+	exit, _ := NewRunnerExitCode(1, 0, mustTime(t, 90))
+	at := mustTime(t, 100)
+
+	tests := []struct {
+		name   string
+		invoke func(*Store) error
+	}{
+		{name: "CreateProject", invoke: func(store *Store) error {
+			_, err := store.CreateProject(context.Background(), NewProject{ID: projectID(t, 220), Name: "new", Root: "/new-project"}, at)
+			return err
+		}},
+		{name: "CreateAgent", invoke: func(store *Store) error {
+			_, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 221), ProjectID: projectID(t, 1), Name: "new", Role: RoleOrchestrator, Provider: ProviderCodex, ExecutionMode: ExecutionWorkspaceWrite, ToolBudgetLimit: 1}, at)
+			return err
+		}},
+		{name: "EnqueueTask", invoke: func(store *Store) error {
+			_, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 222), ProjectID: projectID(t, 1), AssignedAgentID: agentID(t, 2), IncarnationID: incarnationID(t, 223), Title: "new"}, at)
+			return err
+		}},
+		{name: "SetDispatch", invoke: func(store *Store) error {
+			_, err := store.SetDispatch(context.Background(), mustRevision(t, 1), true, at)
+			return err
+		}},
+		{name: "SetCapacity", invoke: func(store *Store) error {
+			_, err := store.SetCapacity(context.Background(), mustRevision(t, 1), 2, at)
+			return err
+		}},
+		{name: "AdmitNext", invoke: func(store *Store) error {
+			_, err := store.AdmitNext(context.Background(), agentID(t, 2), admissionKeys(t, 224, nil), at)
+			return err
+		}},
+		{name: "RecordChangeSelection", invoke: func(store *Store) error {
+			_, err := store.RecordChangeSelection(context.Background(), changeID(t, 225), mustRevision(t, 1), selection, at)
+			return err
+		}},
+		{name: "RecordChangePrepared", invoke: func(store *Store) error {
+			_, err := store.RecordChangePrepared(context.Background(), changeID(t, 225), mustRevision(t, 1), stage, at)
+			return err
+		}},
+		{name: "MarkChangeAvailable", invoke: func(store *Store) error {
+			_, err := store.MarkChangeAvailable(context.Background(), changeID(t, 225), mustRevision(t, 1), availability, at)
+			return err
+		}},
+		{name: "ActivateResource", invoke: func(store *Store) error {
+			_, err := store.ActivateResource(context.Background(), runID(t, 5), resourceID(t, 6), mustRevision(t, 1), pathIdentity, at)
+			return err
+		}},
+		{name: "BeginResourceRelease", invoke: func(store *Store) error {
+			_, err := store.BeginResourceRelease(context.Background(), runID(t, 5), resourceID(t, 6), mustRevision(t, 1), ResourceIdentity{}, at)
+			return err
+		}},
+		{name: "MarkResourceUnresolved", invoke: func(store *Store) error {
+			_, err := store.MarkResourceUnresolved(context.Background(), runID(t, 5), resourceID(t, 6), mustRevision(t, 1), ResourceIdentity{}, "reason", at)
+			return err
+		}},
+		{name: "ReleaseResource", invoke: func(store *Store) error {
+			_, err := store.ReleaseResource(context.Background(), runID(t, 5), resourceID(t, 6), mustRevision(t, 1), ResourceIdentity{}, at)
+			return err
+		}},
+		{name: "ActivateRun", invoke: func(store *Store) error {
+			_, err := store.ActivateRun(context.Background(), runID(t, 5), mustRevision(t, 1), at)
+			return err
+		}},
+		{name: "ProposeAttemptOutcome", invoke: func(store *Store) error {
+			attempt, _ := AttemptDigestFromBytes(bytes.Repeat([]byte{0x5a}, DigestBytes))
+			_, err := store.ProposeAttemptOutcome(context.Background(), attempt, proposal, at)
+			return err
+		}},
+		{name: "FailAdmitted", invoke: func(store *Store) error {
+			_, err := store.FailAdmitted(context.Background(), runID(t, 5), mustRevision(t, 1), failure, at)
+			return err
+		}},
+		{name: "CancelRun", invoke: func(store *Store) error {
+			_, err := store.CancelRun(context.Background(), runID(t, 5), mustRevision(t, 1), "cancel", at)
+			return err
+		}},
+		{name: "ObserveRunnerExit", invoke: func(store *Store) error {
+			_, err := store.ObserveRunnerExit(context.Background(), runID(t, 5), mustRevision(t, 1), exit, at)
+			return err
+		}},
+		{name: "FinalizeRun", invoke: func(store *Store) error {
+			_, err := store.FinalizeRun(context.Background(), runID(t, 5), mustRevision(t, 1), at)
+			return err
+		}},
+	}
+	corruptions := []struct {
+		name   string
+		mutate func(*Store)
+	}{
+		{name: "graph", mutate: func(store *Store) {
+			corruptSQL(t, store, `UPDATE tasks SET status = 'queued' WHERE id = ?`, taskID(t, 3).Bytes())
+		}},
+		{name: "control", mutate: func(store *Store) {
+			corruptSQL(t, store, `UPDATE agents SET provider = 'unknown' WHERE id = ?`, agentID(t, 2).Bytes())
+		}},
+		{name: "invalidation", mutate: func(store *Store) {
+			corruptSQL(t, store, `UPDATE invalidations SET sequence = 100 WHERE sequence = 1`)
+		}},
+	}
+
+	for _, test := range tests {
+		for _, corruption := range corruptions {
+			t.Run(test.name+"/"+corruption.name, func(t *testing.T) {
+				store, _ := newTestStore(t)
+				defer store.Close()
+				seedDurableAuthority(t, store)
+				corruption.mutate(store)
+				before := captureWriteFootprint(t, store)
+				if err := test.invoke(store); !errors.Is(err, ErrCorruptState) {
+					t.Fatalf("mutation under corrupt durable state = %v", err)
+				}
+				if after := captureWriteFootprint(t, store); after != before {
+					t.Fatalf("validation failure changed durable footprint: before=%+v after=%+v", before, after)
+				}
+			})
+		}
+	}
+}
+
+func TestResourceActivationAndReplayRefusePreexistingGraphCorruption(t *testing.T) {
+	for _, replay := range []bool{false, true} {
+		t.Run(map[bool]string{false: "first transition", true: "idempotent replay"}[replay], func(t *testing.T) {
+			store, _ := newTestStore(t)
+			defer store.Close()
+			seedDurableAuthority(t, store)
+			identity, _ := NewPathResourceIdentity(101, 102)
+			if replay {
+				if _, err := store.ActivateResource(context.Background(), runID(t, 5), resourceID(t, 6), mustRevision(t, 1), identity, mustTime(t, 10)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			corruptSQL(t, store, `UPDATE tasks SET status = 'queued' WHERE id = ?`, taskID(t, 3).Bytes())
+			before := captureWriteFootprint(t, store)
+			if _, err := store.ActivateResource(context.Background(), runID(t, 5), resourceID(t, 6), mustRevision(t, 1), identity, mustTime(t, 20)); !errors.Is(err, ErrCorruptState) {
+				t.Fatalf("ActivateResource = %v", err)
+			}
+			if after := captureWriteFootprint(t, store); after != before {
+				t.Fatalf("activation changed corrupt graph: before=%+v after=%+v", before, after)
+			}
+		})
+	}
+}
+
+func TestChangeSelectionAndReplayRefusePreexistingOwnershipCorruption(t *testing.T) {
+	for _, replay := range []bool{false, true} {
+		t.Run(map[bool]string{false: "first checkpoint", true: "idempotent replay"}[replay], func(t *testing.T) {
+			store, _, project, agent := newAdmissionStore(t, RoleWorker, 2)
+			defer store.Close()
+			_, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 230), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 231), Title: "worker"}, mustTime(t, 5))
+			if err != nil {
+				t.Fatal(err)
+			}
+			reservation := &ChangeReservation{ID: changeID(t, 232), SourceRoot: "/checkpoint/source", StagingRoot: "/checkpoint/staging"}
+			keys := admissionKeys(t, 233, reservation)
+			keys.RuntimeRoot = "/checkpoint/runtime"
+			if admission, err := store.AdmitNext(context.Background(), agent.ID, keys, mustTime(t, 10)); err != nil || !admission.Admitted() {
+				t.Fatalf("admission = %+v, %v", admission, err)
+			}
+			selection := testChangeSelection(t)
+			if replay {
+				if _, err := store.RecordChangeSelection(context.Background(), reservation.ID, mustRevision(t, 1), selection, mustTime(t, 11)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			corruptSQL(t, store, `UPDATE resources SET path = '/checkpoint/source/nested' WHERE kind = 'runtime_root'`)
+			before := captureWriteFootprint(t, store)
+			if _, err := store.RecordChangeSelection(context.Background(), reservation.ID, mustRevision(t, 1), selection, mustTime(t, 20)); !errors.Is(err, ErrCorruptState) {
+				t.Fatalf("RecordChangeSelection = %v", err)
+			}
+			if after := captureWriteFootprint(t, store); after != before {
+				t.Fatalf("checkpoint changed corrupt graph: before=%+v after=%+v", before, after)
+			}
+		})
+	}
+}
+
+type writeFootprint struct {
+	dispatch, capacity, factoryRevision, next, floor, factoryUpdated int64
+	projects, projectRevisions                                       int64
+	agents, agentRevisions                                           int64
+	tasks, taskRevisions                                             int64
+	changes, changeRevisions                                         int64
+	runs, runRevisions                                               int64
+	resources, resourceRevisions                                     int64
+	invalidations, invalidationSequences                             int64
+}
+
+func captureWriteFootprint(t *testing.T, store *Store) writeFootprint {
+	t.Helper()
+	var result writeFootprint
+	err := store.readers.QueryRow(`SELECT
+		dispatch_enabled, capacity, revision, next_invalidation_sequence, invalidation_floor, updated_at_ms,
+		(SELECT COUNT(*) FROM projects), (SELECT COALESCE(SUM(revision), 0) FROM projects),
+		(SELECT COUNT(*) FROM agents), (SELECT COALESCE(SUM(revision), 0) FROM agents),
+		(SELECT COUNT(*) FROM tasks), (SELECT COALESCE(SUM(revision), 0) FROM tasks),
+		(SELECT COUNT(*) FROM changes), (SELECT COALESCE(SUM(revision), 0) FROM changes),
+		(SELECT COUNT(*) FROM runs), (SELECT COALESCE(SUM(revision), 0) FROM runs),
+		(SELECT COUNT(*) FROM resources), (SELECT COALESCE(SUM(revision), 0) FROM resources),
+		(SELECT COUNT(*) FROM invalidations), (SELECT COALESCE(SUM(sequence), 0) FROM invalidations)
+		FROM factory WHERE singleton = 1`).Scan(
+		&result.dispatch, &result.capacity, &result.factoryRevision, &result.next, &result.floor, &result.factoryUpdated,
+		&result.projects, &result.projectRevisions, &result.agents, &result.agentRevisions,
+		&result.tasks, &result.taskRevisions, &result.changes, &result.changeRevisions,
+		&result.runs, &result.runRevisions, &result.resources, &result.resourceRevisions,
+		&result.invalidations, &result.invalidationSequences,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func testChangeSelection(t *testing.T) ChangeSelection {
+	t.Helper()
+	format, _ := NewObjectFormat("sha1")
+	commit, _ := NewCommitID(format, bytes.Repeat([]byte{0x71}, format.oidLength()))
+	repository, _ := NewFileIdentity(50, 60)
+	selection, err := NewChangeSelection(format, commit, "/repository", repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return selection
+}
+
+func BenchmarkWriteEntryValidation(b *testing.B) {
+	store := benchmarkValidationStore(b)
+	defer store.Close()
+	ctx := context.Background()
+	for name, begin := range map[string]func(context.Context) (*writeTx, error){
+		"unchecked": store.beginUncheckedWrite,
+		"validated": store.beginValidatedWrite,
+	} {
+		b.Run(name, func(b *testing.B) {
+			for range b.N {
+				tx, err := begin(ctx)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if err := tx.Rollback(nil); err != nil {
+					b.Fatal(err)
+				}
+				tx.Close()
+			}
+		})
+	}
+}
+
+func benchmarkValidationStore(b *testing.B) *Store {
+	b.Helper()
+	store, err := Create(context.Background(), filepath.Join(b.TempDir(), "kernel.db"), FactoryConfig{DispatchEnabled: true, Capacity: 2}, UnixMillis{})
+	if err != nil {
+		b.Fatal(err)
+	}
+	id := func(seed byte) []byte { return bytes.Repeat([]byte{seed}, IDBytes) }
+	projectID, _ := ProjectIDFromBytes(id(1))
+	agentID, _ := AgentIDFromBytes(id(2))
+	taskID, _ := TaskIDFromBytes(id(3))
+	incarnationID, _ := IncarnationIDFromBytes(id(4))
+	runID, _ := RunIDFromBytes(id(5))
+	changeID, _ := ChangeIDFromBytes(id(6))
+	resourceID := func(seed byte) ResourceID {
+		value, _ := ResourceIDFromBytes(id(seed))
+		return value
+	}
+	at, _ := NewUnixMillis(1)
+	project, err := store.CreateProject(context.Background(), NewProject{ID: projectID, Name: "p", Root: "/project"}, at)
+	if err != nil {
+		b.Fatal(err)
+	}
+	agent, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID, ProjectID: project.ID, Name: "a", Role: RoleWorker, Provider: ProviderCodex, ExecutionMode: ExecutionWorkspaceWrite, ToolBudgetLimit: 1}, at)
+	if err != nil {
+		b.Fatal(err)
+	}
+	if _, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID, ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID, Title: "t"}, at); err != nil {
+		b.Fatal(err)
+	}
+	attempt, _ := AttemptDigestFromBytes(bytes.Repeat([]byte{7}, DigestBytes))
+	keys := AdmissionKeys{
+		RunID: runID, AttemptDigest: attempt,
+		Change:      &ChangeReservation{ID: changeID, SourceRoot: "/change/source", StagingRoot: "/change/staging"},
+		RuntimeRoot: "/runtime/run",
+		Resources: AdmissionResourceIDs{
+			RuntimeRoot: resourceID(8), RunnerProcess: resourceID(9),
+			ProviderProcess: resourceID(10), ProviderGroup: resourceID(11),
+		},
+	}
+	if result, err := store.AdmitNext(context.Background(), agent.ID, keys, at); err != nil || !result.Admitted() {
+		b.Fatalf("admission = %+v, %v", result, err)
+	}
+	return store
+}

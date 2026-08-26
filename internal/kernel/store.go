@@ -23,7 +23,7 @@ func (store *Store) CreateProject(ctx context.Context, spec NewProject, at UnixM
 	if err := validateNewProject(spec); err != nil {
 		return Project{}, err
 	}
-	tx, err := store.beginWrite(ctx)
+	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return Project{}, err
 	}
@@ -72,7 +72,7 @@ func (store *Store) CreateAgent(ctx context.Context, spec NewAgent, at UnixMilli
 	if err := validateNewAgent(spec); err != nil {
 		return Agent{}, err
 	}
-	tx, err := store.beginWrite(ctx)
+	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return Agent{}, err
 	}
@@ -117,7 +117,7 @@ func (store *Store) EnqueueTask(ctx context.Context, spec NewTask, at UnixMillis
 	if err := validateNewTask(spec); err != nil {
 		return Task{}, err
 	}
-	tx, err := store.beginWrite(ctx)
+	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return Task{}, err
 	}
@@ -178,7 +178,7 @@ func (store *Store) SetCapacity(ctx context.Context, expected Revision, capacity
 }
 
 func (store *Store) setFactory(ctx context.Context, expected Revision, at UnixMillis, desired func(FactoryState) (bool, int64, int64)) (FactoryState, error) {
-	tx, err := store.beginWrite(ctx)
+	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return FactoryState{}, err
 	}
