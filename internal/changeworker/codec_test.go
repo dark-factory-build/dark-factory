@@ -31,7 +31,7 @@ func TestConfigRoundTripIsExactBoundedAndPrivate(t *testing.T) {
 	}
 	for _, value := range []any{want, SelectionReport{}, PreparationReport{}, PopulationReport{}} {
 		formatted := fmt.Sprintf("%v %+v %#v", value, value, value)
-		for _, sentinel := range []string{want.RuntimePath, want.RepositoryRoot, string(want.StartupInput)} {
+		for _, sentinel := range []string{want.RuntimePath, want.RepositoryRoot, string(want.InitialTerminalInput)} {
 			if strings.Contains(formatted, sentinel) {
 				t.Fatalf("private value leaked: %q", formatted)
 			}
@@ -83,13 +83,13 @@ func TestConfigRejectsRawAuthorityAndInputCorruption(t *testing.T) {
 		func(v *Config) { v.FinalName = ".GiT" },
 		func(v *Config) { v.StagingName = v.FinalName },
 		func(v *Config) { v.AttemptSocket = "/" + strings.Repeat("s", maximumSocketBytes) },
-		func(v *Config) { v.StartupInput = []byte{0xff} },
-		func(v *Config) { v.StartupInput = []byte{'x', 0} },
-		func(v *Config) { v.StartupInput = make([]byte, InputLimit+1) },
+		func(v *Config) { v.InitialTerminalInput = []byte{0xff} },
+		func(v *Config) { v.InitialTerminalInput = []byte{'x', 0} },
+		func(v *Config) { v.InitialTerminalInput = make([]byte, InputLimit+1) },
 	}
 	for i, mutate := range mutations {
 		bad := want
-		bad.StartupInput = bytes.Clone(want.StartupInput)
+		bad.InitialTerminalInput = bytes.Clone(want.InitialTerminalInput)
 		mutate(&bad)
 		if _, err := EncodeConfig(bad); !errors.Is(err, ErrInvalidContract) {
 			t.Fatalf("mutation %d accepted: %v", i, err)
@@ -111,7 +111,7 @@ func configFixture(t testing.TB) Config {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return Config{RuntimePath: "/private/runtime", RuntimeIdentity: runner.FileIdentity{Device: 1, Inode: 2}, GitExecutable: "/Library/Developer/CommandLineTools/usr/bin/git", RepositoryRoot: "/private/repository", RepositoryIdentity: repository, Revision: "main", ChangeParent: "/private/changes", FinalName: "change", StagingName: ".change.stage", AttemptSocket: "/private/api.sock", StartupInput: []byte("printf exact")}
+	return Config{RuntimePath: "/private/runtime", RuntimeIdentity: runner.FileIdentity{Device: 1, Inode: 2}, GitExecutable: "/Library/Developer/CommandLineTools/usr/bin/git", RepositoryRoot: "/private/repository", RepositoryIdentity: repository, Revision: "main", ChangeParent: "/private/changes", FinalName: "change", StagingName: ".change.stage", AttemptSocket: "/private/api.sock", InitialTerminalInput: []byte("printf exact")}
 }
 
 func selectionFixture(t testing.TB) SelectionReport {

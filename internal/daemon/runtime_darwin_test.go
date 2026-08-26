@@ -1185,7 +1185,7 @@ func TestRuntimeValuesAndErrorsRedactPrivateSentinels(t *testing.T) {
 	runtime := newTestRuntime(t)
 	defer runtime.Close()
 	config := workerConfigForRuntime(t, runtime)
-	config.StartupInput = []byte("PRIVATE-CONTENTS")
+	config.InitialTerminalInput = []byte("PRIVATE-CONTENTS")
 	file, err := runtime.PublishWorkerConfig(context.Background(), config)
 	if err != nil {
 		t.Fatal(err)
@@ -1195,7 +1195,7 @@ func TestRuntimeValuesAndErrorsRedactPrivateSentinels(t *testing.T) {
 			t.Fatalf("private file formatting leaked: %q", formatted)
 		}
 	}
-	config.StartupInput = []byte("SECOND-PRIVATE")
+	config.InitialTerminalInput = []byte("SECOND-PRIVATE")
 	_, err = runtime.PublishWorkerConfig(context.Background(), config)
 	if err == nil || stringsContainsAny(err.Error(), mustRuntimePath(t, runtime), "SECOND-PRIVATE") {
 		t.Fatalf("private error leaked: %v", err)
@@ -1566,7 +1566,7 @@ func workerConfigForRuntime(t testing.TB, runtime *Runtime) changeworker.Config 
 		RuntimePath: path, RuntimeIdentity: identity, GitExecutable: "/usr/local/bin/git",
 		RepositoryRoot: "/private/repository", RepositoryIdentity: repository, Revision: "main",
 		ChangeParent: "/private/changes", FinalName: "change", StagingName: ".change.stage",
-		AttemptSocket: "/private/api.sock", StartupInput: []byte("echo exact"),
+		AttemptSocket: "/private/api.sock", InitialTerminalInput: []byte("echo exact"),
 	}
 }
 

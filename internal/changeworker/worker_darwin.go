@@ -157,7 +157,11 @@ func runShell(ctx context.Context) (resultErr error) {
 		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0",
 		"GIT_ASKPASS=/usr/bin/false", "GIT_SSH_COMMAND=/usr/bin/false", "GH_CONFIG_DIR=/dev/null",
 	}
-	spec, err := runner.PrepareExecSpec(runner.ExecSpec{Target: shellPath, Args: []string{"-s"}, Env: environment, Cwd: published.Path(), Stdin: bytes.Clone(config.StartupInput)})
+	initialInput := bytes.Clone(config.InitialTerminalInput)
+	if len(initialInput) != 0 && initialInput[len(initialInput)-1] != '\n' {
+		initialInput = append(initialInput, '\n')
+	}
+	spec, err := runner.PrepareExecSpec(runner.ExecSpec{Target: shellPath, Args: []string{"-s"}, Env: environment, Cwd: published.Path()})
 	if err != nil {
 		_ = cwd.Close()
 		return err
@@ -167,6 +171,10 @@ func runShell(ctx context.Context) (resultErr error) {
 		return err
 	}
 	if err := authority.close(); err != nil {
+		_ = cwd.Close()
+		return err
+	}
+	if err := control.RegisterProviderInput(initialInput); err != nil {
 		_ = cwd.Close()
 		return err
 	}

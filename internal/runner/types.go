@@ -22,7 +22,6 @@ const (
 	TerminalSpoolName         = "terminal.json"
 	GateConfigScratchName     = ".runner-gate.config"
 	GateStdinScratchName      = ".runner-gate.stdin"
-	ProviderStdinScratchName  = ".runner-provider.stdin"
 	TerminalScratchName       = ".runner-terminal.tmp"
 	RuntimeLifetimeLeaseName  = ".runner-runtime.lifetime"
 )

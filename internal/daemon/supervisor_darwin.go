@@ -218,7 +218,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		RuntimePath: gotRuntimePath, RuntimeIdentity: runtimeFileIdentity,
 		GitExecutable: spec.GitExecutable, RepositoryRoot: project.Root, RepositoryIdentity: repositoryIdentity,
 		Revision: spec.BaseRevision, ChangeParent: spec.ChangeParent, FinalName: finalName, StagingName: stagingName,
-		AttemptSocket: spec.AttemptSocket, StartupInput: []byte(task.Body),
+		AttemptSocket: spec.AttemptSocket, InitialTerminalInput: []byte(task.Body),
 	}
 	if _, err := runtimeValue.PublishWorkerConfig(ctx, config); err != nil {
 		return daemon.failRun(run, kernel.FailureSource, err)

@@ -52,7 +52,10 @@ type Config struct {
 	FinalName          string
 	StagingName        string
 	AttemptSocket      string
-	StartupInput       []byte
+	// InitialTerminalInput is delivered once to the runner-owned PTY after the
+	// provider has crossed the release gate. It is not provider stdin: the PTY
+	// remains interactive for the lifetime of the run.
+	InitialTerminalInput []byte
 }
 
 func (Config) String() string   { return "Change worker config (private)" }
@@ -100,8 +103,8 @@ func EncodeConfig(config Config) ([]byte, error) {
 	} {
 		encoded = appendString(encoded, value)
 	}
-	encoded = binary.BigEndian.AppendUint32(encoded, uint32(len(config.StartupInput)))
-	encoded = append(encoded, config.StartupInput...)
+	encoded = binary.BigEndian.AppendUint32(encoded, uint32(len(config.InitialTerminalInput)))
+	encoded = append(encoded, config.InitialTerminalInput...)
 	if len(encoded) > ConfigLimit {
 		return nil, invalidContract(nil)
 	}
@@ -148,7 +151,7 @@ func DecodeConfig(encoded []byte) (Config, error) {
 		RuntimePath: values[0], RuntimeIdentity: runner.FileIdentity{Device: device, Inode: inode},
 		GitExecutable: values[1], RepositoryRoot: values[2], RepositoryIdentity: repositoryIdentity, Revision: values[3],
 		ChangeParent: values[4], FinalName: values[5], StagingName: values[6],
-		AttemptSocket: values[7], StartupInput: input,
+		AttemptSocket: values[7], InitialTerminalInput: input,
 	}
 	if err := validateConfig(config); err != nil {
 		return Config{}, err
@@ -165,7 +168,7 @@ func validateConfig(config Config) error {
 	}
 	if len(config.AttemptSocket) > maximumSocketBytes || config.RuntimeIdentity.Device == 0 || config.RuntimeIdentity.Inode == 0 ||
 		!validText(config.Revision, maximumRevisionBytes) || !validChangeName(config.FinalName) || !validChangeName(config.StagingName) ||
-		config.FinalName == config.StagingName || len(config.StartupInput) > InputLimit || !utf8.Valid(config.StartupInput) || bytes.IndexByte(config.StartupInput, 0) >= 0 {
+		config.FinalName == config.StagingName || len(config.InitialTerminalInput) > InputLimit || !utf8.Valid(config.InitialTerminalInput) || bytes.IndexByte(config.InitialTerminalInput, 0) >= 0 {
 		return invalidContract(nil)
 	}
 	if _, err := change.NewRepositoryIdentity(config.RepositoryIdentity.Device(), config.RepositoryIdentity.Inode()); err != nil {

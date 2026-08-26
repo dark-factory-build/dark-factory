@@ -181,6 +181,20 @@ func (c *OwnedChild) WritePTY(input []byte) (int, error) {
 	if c.exitObserved {
 		return 0, ErrState
 	}
+	return c.writePTYOwned(input)
+}
+
+// writePTYOwned is for the synchronous owner loop, which already consumes
+// the child's EVFILT_PROC event. Calling refreshExit from that loop could
+// consume a readiness event belonging to the loop and lose the only exit
+// notification.
+func (c *OwnedChild) writePTYOwned(input []byte) (int, error) {
+	if c == nil || c.ptyMaster == nil || c.state != stateActivated || c.exitObserved {
+		return 0, ErrState
+	}
+	if len(input) == 0 || len(input) > maxInputBytes {
+		return 0, ErrState
+	}
 	deadline := time.Now().Add(250 * time.Millisecond)
 	written := 0
 	for written < len(input) {
@@ -495,8 +509,6 @@ func anonymousFileWithHook(dir *os.File, prefix string, body []byte, afterOpen f
 		name = GateConfigScratchName
 	case "stdin":
 		name = GateStdinScratchName
-	case "provider-stdin":
-		name = ProviderStdinScratchName
 	default:
 		return nil, ErrIdentity
 	}

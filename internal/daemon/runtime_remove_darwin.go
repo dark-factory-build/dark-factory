@@ -192,7 +192,7 @@ func isRemovableRuntimeFile(name string) bool {
 	case attemptTokenName, workerConfigName,
 		runner.OuterActivationMarkerName, runner.InnerActivationMarkerName,
 		runner.GateConfigScratchName, runner.GateStdinScratchName,
-		runner.ProviderStdinScratchName, runner.TerminalScratchName,
+		runner.TerminalScratchName,
 		runner.RuntimeLifetimeLeaseName:
 		return true
 	default:

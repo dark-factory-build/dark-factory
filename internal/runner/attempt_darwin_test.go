@@ -76,16 +76,18 @@ func runAttemptWorkerHelper(args []string) error {
 	}
 	providerCwd := filepath.Join(root, "work")
 	var provider ExecSpec
+	var initialInput []byte
 	switch mode {
 	case "shell", "term", "leader":
-		script := fmt.Sprintf("test -z \"${HOME+x}\" || exit 90; test -z \"${DARK_FACTORY_ATTEMPT_TOKEN+x}\" || exit 91; for n in 3 4 5 6 7 8 9 11; do test ! -e /dev/fd/$n || exit 92; done; test -f /dev/fd/10 || exit 93; test ! -s /dev/fd/10 || exit 94; cat /dev/fd/10/change-worker.config >/dev/null 2>&1 && exit 95; cd /dev/fd/10 >/dev/null 2>&1 && exit 96; printf '%%s' $$ > %q; while test ! -f %q; do sleep 0.01; done; printf x >> %q; cat > %q", filepath.Join(root, "provider.pid"), filepath.Join(root, "continue"), filepath.Join(root, "provider.effect"), filepath.Join(root, "provider.stdin"))
+		script := fmt.Sprintf("test -z \"${HOME+x}\" || exit 90; test -z \"${DARK_FACTORY_ATTEMPT_TOKEN+x}\" || exit 91; for n in 3 4 5 6 7 8 9 11; do test ! -e /dev/fd/$n || exit 92; done; test -f /dev/fd/10 || exit 93; test ! -s /dev/fd/10 || exit 94; cat /dev/fd/10/change-worker.config >/dev/null 2>&1 && exit 95; cd /dev/fd/10 >/dev/null 2>&1 && exit 96; printf '%%s' $$ > %q; while test ! -f %q; do sleep 0.01; done; printf x >> %q; IFS= read -r line; printf '%%s' \"$line\" > %q", filepath.Join(root, "provider.pid"), filepath.Join(root, "continue"), filepath.Join(root, "provider.effect"), filepath.Join(root, "provider.stdin"))
 		if mode == "term" {
 			script = fmt.Sprintf("trap '' TERM; sleep 30 & printf '%%s' $! > %q; printf '%%s' $$ > %q; while :; do sleep 1; done", filepath.Join(root, "descendant.pid"), filepath.Join(root, "provider.pid"))
 		}
 		if mode == "leader" {
 			script = fmt.Sprintf("sleep 30 & printf '%%s' $! > %q; printf '%%s' $$ > %q; exit 0", filepath.Join(root, "descendant.pid"), filepath.Join(root, "provider.pid"))
 		}
-		provider = ExecSpec{Target: "/bin/sh", Args: []string{"-c", script}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: providerCwd, Stdin: []byte("one-startup")}
+		initialInput = []byte("one-startup\n")
+		provider = ExecSpec{Target: "/bin/sh", Args: []string{"-c", script}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: providerCwd}
 	case "binary", "seam", "lifetime", "lease-seam", "cwd", "cwd-seam", "cwd-unrelated", "cwd-file", "cwd-closed", "cwd-reused", "cwd-mode":
 		if len(args) != 3 {
 			return errors.New("attempt worker: missing binary target")
@@ -157,6 +159,10 @@ func runAttemptWorkerHelper(args []string) error {
 		return err
 	}
 	if err := control.AwaitProvider(); err != nil {
+		cwd.Close()
+		return err
+	}
+	if err := control.RegisterProviderInput(initialInput); err != nil {
 		cwd.Close()
 		return err
 	}
@@ -319,7 +325,14 @@ func (f *attemptFixture) advanceToProvider() {
 
 func (f *attemptFixture) finishAndAck() *TerminalRecord {
 	f.t.Helper()
-	event, err := f.controller.Next(6 * time.Second)
+	var event AttemptEvent
+	var err error
+	for {
+		event, err = f.controller.Next(6 * time.Second)
+		if err != nil || event.Kind != AttemptTerminalFrame {
+			break
+		}
+	}
 	if err != nil || event.Kind != AttemptTerminal || event.Terminal == nil {
 		f.t.Fatalf("terminal event=%+v err=%v output=%q", event, err, f.output())
 	}

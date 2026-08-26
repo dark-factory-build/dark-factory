@@ -325,14 +325,15 @@ const (
 // exposes the fixed checkpoint sequence and the sole same-process provider
 // exec; it does not expose arbitrary frames or descriptors.
 type WorkerControl struct {
-	file       *os.File
-	dir        *os.File
-	dirID      fileCommitment
-	dirIssued  bool
-	lifetime   *os.File
-	lifetimeID descriptorCommitment
-	identity   Identity
-	state      workerState
+	file                    *os.File
+	dir                     *os.File
+	dirID                   fileCommitment
+	dirIssued               bool
+	lifetime                *os.File
+	lifetimeID              descriptorCommitment
+	identity                Identity
+	state                   workerState
+	providerInputRegistered bool
 }
 
 func OpenWorkerControl() (*WorkerControl, error) {
@@ -458,6 +459,32 @@ func (w *WorkerControl) AwaitProvider() error {
 	return w.await(StageProvider, workerPopulationReported, workerProvider)
 }
 
+// RegisterProviderInput transfers the one-shot input selected during
+// admission to the live outer runner. The runner ACK is the durable handoff
+// point: the worker never falls back to anonymous stdin or retries this
+// transfer.
+func (w *WorkerControl) RegisterProviderInput(input []byte) error {
+	if w == nil || w.file == nil || w.state != workerProvider || w.providerInputRegistered || len(input) > maxInputBytes {
+		return ErrState
+	}
+	if err := writeControlFrame(w.file, attemptFrame{Version: 1, Kind: "provider-input", Payload: append([]byte(nil), input...)}, maxFrameBytes); err != nil {
+		return err
+	}
+	if err := w.file.SetReadDeadline(time.Now().Add(attemptControlTimeout)); err != nil {
+		return err
+	}
+	defer w.file.SetReadDeadline(time.Time{})
+	var ack attemptFrame
+	if err := readFrame(w.file, &ack, maxFrameBytes); err != nil {
+		return err
+	}
+	if ack.Version != 1 || ack.Kind != "provider-input-registered" || !noLegacyFields(ack) || !noTerminalFields(ack) || len(ack.Payload) != 0 {
+		return ErrState
+	}
+	w.providerInputRegistered = true
+	return nil
+}
+
 func (w *WorkerControl) report(stage AttemptStage, before, after workerState, payload []byte) error {
 	if w == nil || w.file == nil || w.state != before || len(payload) > maxAttemptReportBytes {
 		return ErrState
@@ -493,7 +520,7 @@ func (w *WorkerControl) await(stage AttemptStage, before, after workerState) err
 // not reopen or interpret the Change pathname. On failure the descriptor is
 // closed before return, and on success it is closed before the provider exec.
 func (w *WorkerControl) ExecProvider(spec *LaunchSpec, cwd *os.File) error {
-	if w == nil || w.file == nil || w.dir == nil || w.lifetime == nil || w.state != workerProvider || spec == nil || cwd == nil || spec.control != nil || spec.controlID != nil || spec.stdout != nil || spec.stderr != nil {
+	if w == nil || w.file == nil || w.dir == nil || w.lifetime == nil || w.state != workerProvider || !w.providerInputRegistered || spec == nil || cwd == nil || len(spec.stdin) != 0 || spec.control != nil || spec.controlID != nil || spec.stdout != nil || spec.stderr != nil {
 		if cwd != nil {
 			return errors.Join(ErrState, cwd.Close())
 		}
@@ -550,11 +577,6 @@ func execPreparedCurrent(spec *LaunchSpec, cwd *os.File, worker *WorkerControl) 
 			return fmt.Errorf("runner: current exec test seam: %w", errors.Join(err, ErrState))
 		}
 	}
-	stdin, err := anonymousFile(worker.dir, "provider-stdin", spec.stdin)
-	if err != nil {
-		return err
-	}
-	defer stdin.Close()
 	if got, err := commitRuntimeLifetime(worker.dir, worker.lifetime); err != nil || got != worker.lifetimeID {
 		return fmt.Errorf("runner: current runtime lifetime: %w", errors.Join(ErrIdentity, err))
 	}
@@ -567,9 +589,6 @@ func execPreparedCurrent(spec *LaunchSpec, cwd *os.File, worker *WorkerControl) 
 	closing := cwd
 	cwd = nil
 	if err := closing.Close(); err != nil {
-		return err
-	}
-	if err := unix.Dup2(int(stdin.Fd()), 0); err != nil {
 		return err
 	}
 	if err := worker.file.Close(); err != nil {
@@ -703,12 +722,14 @@ func runAttempt(daemon, dir, lifetime *os.File, cfg attemptConfig) (result error
 	if err != nil {
 		return err
 	}
-	wrapper := &LaunchSpec{commit: cfg.Wrapper, stdout: os.Stdout, stderr: os.Stderr, control: workerChild, controlID: &controlID}
+	// The inner worker and its eventual provider share the runner-owned PTY;
+	// no separate stdout/stderr capability is allowed in this topology.
+	wrapper := &LaunchSpec{commit: cfg.Wrapper, control: workerChild, controlID: &controlID}
 	gate, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	child, err := StartBlocked(lease, gate, wrapper, true)
+	child, err := StartBlockedPTY(lease, gate, wrapper, true)
 	if err != nil {
 		return err
 	}
@@ -756,7 +777,8 @@ func runAttempt(daemon, dir, lifetime *os.File, cfg attemptConfig) (result error
 			return finishAttemptFailure(child, dir, cfg, &reads, err)
 		}
 	}
-	daemonOpen, err := finishReleasedProvider(child, daemon, workerParent, &reads)
+	reads.ptyFD = int(child.ptyMaster.Fd())
+	daemonOpen, err := runReleasedProvider(child, daemon, workerParent, &reads)
 	return finishAttemptWithExit(child, dir, cfg, &reads, daemon, daemonOpen, err)
 }
 
@@ -824,8 +846,10 @@ type attemptReadSet struct {
 	kq               int
 	daemonFD         int
 	workerFD         int
+	ptyFD            int
 	daemonRegistered bool
 	workerRegistered bool
+	ptyRegistered    bool
 	testUnregister   func(int) error // package-test-only; production is nil
 }
 
@@ -851,6 +875,17 @@ func (reads *attemptReadSet) registerWorker() error {
 	return nil
 }
 
+func (reads *attemptReadSet) registerPTY() error {
+	if reads == nil || reads.ptyRegistered || reads.ptyFD <= 0 {
+		return ErrState
+	}
+	if err := registerRead(reads.kq, reads.ptyFD); err != nil {
+		return err
+	}
+	reads.ptyRegistered = true
+	return nil
+}
+
 func (reads *attemptReadSet) removeDaemon() error {
 	if reads == nil || !reads.daemonRegistered {
 		return nil
@@ -870,6 +905,17 @@ func (reads *attemptReadSet) removeWorker() error {
 		return err
 	}
 	reads.workerRegistered = false
+	return nil
+}
+
+func (reads *attemptReadSet) removePTY() error {
+	if reads == nil || !reads.ptyRegistered {
+		return nil
+	}
+	if err := reads.unregister(reads.ptyFD); err != nil {
+		return err
+	}
+	reads.ptyRegistered = false
 	return nil
 }
 
@@ -897,6 +943,7 @@ func (reads *attemptReadSet) processOnly() {
 	}
 	retireReadableFilter(reads.removeDaemon)
 	retireReadableFilter(reads.removeWorker)
+	retireReadableFilter(reads.removePTY)
 }
 
 func nextAttemptFrame(child *OwnedChild, daemon, worker *os.File, daemonOpen, workerOpen bool, timeout time.Duration) (attemptFrame, attemptSource, error) {
