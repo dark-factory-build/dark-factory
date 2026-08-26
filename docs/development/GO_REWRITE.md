@@ -170,10 +170,53 @@ admit run
 
 The live PTY is one concrete runner-owned `TerminalSession`, not a generic
 actor or plugin. A small durable `terminal_sessions` row records only its random
-session ID, exact run and runner-resource owner, one of `declared`, `active`,
-`closed`, or `unresolved`, revision and timestamps.
-It never persists an FD or PTY number and never grants signal/input authority
-by itself.
+session ID, exact run, lifecycle and current input-lease facts. The exact
+runner resource is derived from the run's unique `runner_process` resource; a
+second copied owner ID would add a cross-table consistency problem without
+adding authority. The table contains no FD, PTY number, PID, PGID, terminal
+bytes, output cursor or signal authority:
+
+```text
+id                     16-byte random primary key
+run_id                 16-byte unique foreign key
+state                  declared | active | closed | unresolved
+unresolved_reason      bounded text only in unresolved
+lease_client_id        nullable exact browser client
+lease_generation       nonnegative and advanced on acquire/revoke/release
+lease_expires_at_ms    nullable, present only with a lease holder
+last_input_sequence    nonnegative, reset on each new lease generation
+revision               positive
+declared_at_ms
+activated_at_ms        nullable, present after activation
+closed_at_ms           nullable, present only in closed
+updated_at_ms
+```
+
+The legal lifecycle is `declared → active → closed`, `declared → closed`, or
+`declared/active → unresolved → closed`; `closed` is absorbing and
+`unresolved` is never treated as closed. Admission inserts the declared row in
+the same immediate transaction as the run, Change reservation, four existing
+resources, task transition and invalidation. Activation requires the exact
+session/run revision and already-registered runner/provider identities, then
+changes the session to active and the run to running in one transaction.
+Session lifecycle uses the existing run aggregate and run invalidation; V1
+does not add a fifth terminal event/entity kind.
+
+Lease acquisition is one guarded row update that requires `active` plus the
+durable run phase `running`, a client with the finite `terminal_input`
+capability, and no current unexpired holder. It advances the generation and
+resets the input sequence. Release and expiry require the exact holder and
+generation and advance the generation again, so stale holders cannot affect a
+new lease. Reserving an input sequence is a guarded Store update before the
+bounded runner write. A reserved operation that lacks a complete ACK is
+reported as delivery-uncertain and is never retried automatically. The
+running-to-finalizing transaction clears the holder, advances the generation
+and revokes the attempt credential together. Close requires positive typed
+evidence from the live owner; recovery may close only after exact runner and
+provider-group absence. Otherwise it marks unresolved and terminalization
+remains blocked. None of these mutexes or rows creates process/signal
+authority by itself.
+
 Admission declares it before allocation; activation binds the already-active
 exact runner identity. A live runner may close it after it has stopped writes,
 closed the master and proved provider-group absence. Recovery may close it only
@@ -431,16 +474,96 @@ The browser transport carries operator authority and terminal input. V1 must:
   private source, raw debug data or permanent secret to browser JavaScript;
 - revoke input on finalizing even if the browser/daemon has stale state.
 
+Identity across restart is explicit. The fresh `factory` singleton owns one
+random persistent 16-byte `daemon_id`; every daemon start creates a fresh
+random 16-byte in-memory `boot_id`. Existing paired clients survive restart by
+proving their key against the new boot challenge. An unredeemed pairing
+challenge is bound to the boot that minted it and cannot survive restart.
+
+Two small authority tables and one bounded audit table are sufficient:
+
+```text
+browser_pairing_challenges
+  secret_digest          32-byte SHA-256 primary key; raw challenge never stored
+  daemon_id              exact persistent daemon
+  boot_id                exact boot that minted it
+  intended_origin        exact allowlisted origin
+  capability_mask        only daemon-minted known bits
+  created_at_ms
+  expires_at_ms          greater than created, fixed five-minute maximum
+  redeemed_at_ms         nullable
+
+browser_clients
+  id                     16-byte random primary key
+  public_key             exact 65-byte uncompressed SEC1 P-256 point
+  fingerprint            unique SHA-256 of public_key
+  capability_mask        only known bits
+  revision               positive
+  created_at_ms
+  updated_at_ms
+  revoked_at_ms          nullable
+
+browser_security_events
+  bounded pairing/revocation/security kind, client reference and timestamp;
+  never a challenge, signature, terminal byte, provider output or private text
+```
+
+The initial capability bits are exactly `observe`,
+`private_human_request_detail`, `human_actions`, and `terminal_input`. Unknown
+bits fail closed. Capabilities are selected by the daemon when it mints the
+challenge; the browser never proposes or widens them. This is one concrete
+bitmask, not a generic permission framework.
+
 Each browser profile creates a non-exportable WebCrypto P-256 signing key and
 stores the `CryptoKey` in IndexedDB; there is no long-lived bearer/localStorage
-fallback. Pairing persists only the client ID, public key fingerprint/key,
-granted capabilities, revision and revocation state in SQLite. Each WebSocket
-connection performs a fresh daemon-nonce proof over protocol version, exact
-Origin/Host, daemon instance and client ID before receiving state. Tabs may use
-the same profile key but have distinct connections and terminal leases.
-Revocation, key mismatch, duplicate identity, profile reset and daemon restart
-are explicit tests. If durable non-exportable key storage is unavailable, the
-browser must pair again rather than weakening the credential.
+fallback. Pairing persists only the client ID, exact public key/fingerprint,
+granted capabilities, revision and revocation state in SQLite. Tabs may use
+the same profile key but have distinct connections and terminal leases. If
+durable non-exportable key storage is unavailable, the browser must pair again
+rather than weakening the credential.
+
+After exact HTTP path/Host/Origin validation, the daemon sends a bounded v1
+`HELLO` containing `daemon_id`, `boot_id` and a fresh 32-byte connection nonce.
+New-client proof binds a 32-byte one-time challenge, its public key and the
+actual validated HTTP Origin/Host to that HELLO. The daemon hashes the raw
+challenge for lookup, verifies the proof, then uses one immediate transaction
+to guard `redeemed_at_ms IS NULL`, current `boot_id`, exact intended Origin and
+unexpired time, insert the client, record the security event and mark the
+challenge redeemed. Exactly one affected row wins concurrent redemption. A
+lost success response consumes the challenge; `factoryctl web open` mints a
+new one rather than replaying it.
+
+Existing-client `AUTH_PROVE` names only the client ID and signs a canonical
+length-prefixed binary transcript containing a domain separator, protocol
+version, `daemon_id`, current `boot_id`, fresh connection nonce, client ID and
+the actual validated Host and Origin. Ordinary authentication never accepts a
+replacement public key. The only signature format is WebCrypto ECDSA P-256
+with SHA-256 encoded as exactly 64-byte IEEE-P1363 `r || s`; Go verifies it
+with `crypto/ecdsa`, `crypto/elliptic` and `crypto/sha256`. ASN.1 signatures and
+JSON canonicalization are rejected. A checked Go/browser golden fixture fixes
+the byte transcript and encoding before the transport ships. The connection
+nonce is single-use and authentication has a short fixed deadline.
+
+Authentication yields only a client-ID principal. Every operation reloads the
+client row, rejects revocation, checks the exact finite capability, validates
+typed arguments/expected revisions and revalidates durable target state; the
+browser never supplies a trusted project, task, agent, run, request or terminal
+authority identity. No per-operation signature is needed inside the
+authenticated WebSocket.
+
+A small per-client daemon operation gate orders browser operations with Unix-
+API revocation. An operation already inside that gate may finish before the
+revocation transaction; revocation then marks the client revoked, advances its
+revision, records the event and closes all of its connections before another
+operation can enter. Thus no external effect begins after durable revocation.
+Terminal input additionally takes the existing per-run operation gate in the
+fixed client-then-run order and revalidates session, holder, lease generation,
+input sequence and durable running phase immediately before the bounded PTY
+write. These gates serialize effects but never replace Store authorization.
+Finalizing revokes terminal input independently of browser-client revocation.
+
+Revocation, key mismatch, duplicate identity, old connection nonce, profile
+reset, capability escalation and daemon restart are explicit tests.
 
 `factoryctl web open` asks the owner-only Unix API to create one short-lived,
 single-use challenge bound to the daemon instance and intended Origin, then
@@ -474,6 +597,12 @@ a release incident. A causal recovery test starts with the hosted page absent
 or explicitly untrusted, uses only the owner-authenticated Unix
 `factoryctl web revoke` path, and proves revocation terminates existing
 connections and refuses every later proof/action from that client.
+
+The production browser transport remains blocked until the schema and exact
+transcript above have causal Store and cross-language fixture tests. OAuth,
+JWT, certificates/PKI, browser bearer tokens, client-selected capabilities,
+signed JSON, per-operation signatures, local TLS and a cloud relay are not
+introduced.
 
 ### Hosted-origin connectivity spike
 
@@ -588,6 +717,16 @@ profile directories from the exploratory runners were deleted. The replacement
 runner used unconditional close/removal, and all later per-scenario censuses
 were empty. The public spike's five-second idle
 timeout is intentionally test-only and is not the production heartbeat policy.
+
+Two fresh read-only reviewers rechecked exact public documentation head
+`3194ab84206ad54d2f74ef057d5462889905c34e` and private host head
+`7cdbee3f9c03c185295a1a5755a02c5c070d31cb` and returned **ALLOW** for the
+narrow connectivity conclusion. They independently verified that the artifact
+hash and strict headers still match, both worktrees are clean, no test bypass
+remains, no task process/socket/profile remains, and the text no longer treats
+Origin, Host, loopback or LNA as product authority. Both explicitly keep
+pairing, revocation and per-operation authorization as blockers for the
+production browser transport.
 
 ### Updated vertical slice
 
