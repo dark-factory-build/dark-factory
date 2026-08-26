@@ -469,6 +469,30 @@ func TestCanonicalJSONNameGrammar(t *testing.T) {
 	}
 }
 
+func TestJSONSurrogateEscapesAreLexicallyExact(t *testing.T) {
+	for _, encoded := range []string{
+		`{"value":"\ud83d\ude00"}`,
+		`{"value":"�"}`,
+		`{"value":"\\ud800"}`,
+		`{"value":"\ufffd"}`,
+	} {
+		if err := validateJSONNames([]byte(encoded)); err != nil {
+			t.Errorf("valid JSON %s rejected: %v", encoded, err)
+		}
+	}
+	for _, encoded := range []string{
+		`{"value":"\ud800"}`,
+		`{"value":"\udc00"}`,
+		`{"value":"\udc00\ud800"}`,
+		`{"value":"\ud800\u0041"}`,
+		`{"value":"\ud800\ud801"}`,
+	} {
+		if err := validateJSONNames([]byte(encoded)); !errors.Is(err, ErrProtocol) {
+			t.Errorf("invalid surrogate JSON %s = %v", encoded, err)
+		}
+	}
+}
+
 func TestSnapshotJSONRejectsDuplicateNestedNamesAndInvalidUTF8(t *testing.T) {
 	bearer := testCredential('J')
 	prefix := `{"head":1,"factory":{"dispatch_enabled":true,"capacity":1,"active_runs":0,"revision":1},"projects":[{"id":"` + id('1') + `",`
@@ -482,6 +506,10 @@ func TestSnapshotJSONRejectsDuplicateNestedNamesAndInvalidUTF8(t *testing.T) {
 		{name: "duplicate nested snapshot field", body: `{"head":1,"factory":{"dispatch_enabled":true,"capacity":1,"capacity":2,"active_runs":0,"revision":1},"projects":[],"agents":[],"tasks":[]}`},
 		{name: "nested snapshot case alias", body: `{"head":1,"factory":{"dispatch_enabled":true,"capacity":1,"Capacity":2,"active_runs":0,"revision":1},"projects":[],"agents":[],"tasks":[]}`},
 		{name: "invalid UTF-8 entity name", body: prefix + "\"name\":\"\xff\"" + suffix},
+		{name: "lone high surrogate", body: prefix + `"name":"\ud800"` + suffix},
+		{name: "lone low surrogate", body: prefix + `"name":"\udc00"` + suffix},
+		{name: "reversed surrogate pair", body: prefix + `"name":"\udc00\ud800"` + suffix},
+		{name: "mismatched surrogate pair", body: prefix + `"name":"\ud800\u0041"` + suffix},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -494,6 +522,36 @@ func TestSnapshotJSONRejectsDuplicateNestedNamesAndInvalidUTF8(t *testing.T) {
 			}
 			if _, err := client.Snapshot(context.Background()); !errors.Is(err, ErrProtocol) {
 				t.Fatalf("snapshot error = %v, want %v", err, ErrProtocol)
+			}
+			<-fixture.request
+			fixture.wait(t)
+		})
+	}
+}
+
+func TestSnapshotJSONAcceptsPairedSurrogateAndLiteralReplacement(t *testing.T) {
+	bearer := testCredential('U')
+	tests := []struct {
+		name string
+		wire string
+		want string
+	}{
+		{name: "paired surrogate", wire: `\ud83d\ude00`, want: "😀"},
+		{name: "literal replacement", wire: "�", want: "�"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := `{"head":1,"factory":{"dispatch_enabled":true,"capacity":1,"active_runs":0,"revision":1},"projects":[{"id":"` + id('1') + `","name":"` + test.wire + `","revision":1}],"agents":[],"tasks":[]}`
+			fixture := newWireFixture(t, bearer, func(connection net.Conn, _ []byte) error {
+				return writeTestResponse(connection, wireGeneration, wireOperatorDomain, successResponse(body))
+			})
+			client, err := NewOperatorClient(fixture.socket, fixture.token)
+			if err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := client.Snapshot(context.Background())
+			if err != nil || len(snapshot.Projects) != 1 || snapshot.Projects[0].Name != test.want {
+				t.Fatalf("snapshot project = %+v, %v", snapshot.Projects, err)
 			}
 			<-fixture.request
 			fixture.wait(t)

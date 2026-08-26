@@ -199,6 +199,18 @@ func TestServerDecodesClosedNineMethodMatrix(t *testing.T) {
 				t.Fatalf("project input = %+v, %t", input, ok)
 			}
 		}},
+		{name: "create project paired surrogate", domain: operatorDomain, bearer: operatorBearer, body: `{"method":"create_project","params":{"id":"` + id('1') + `","name":"\ud83d\ude00","root":"/private/project"}}`, kind: CallCreateProject, check: func(t *testing.T, call Call) {
+			input, ok := call.CreateProjectInput()
+			if !ok || input.Name != "😀" {
+				t.Fatalf("paired project input = %+v, %t", input, ok)
+			}
+		}},
+		{name: "create project literal replacement", domain: operatorDomain, bearer: operatorBearer, body: `{"method":"create_project","params":{"id":"` + id('1') + `","name":"�","root":"/private/project"}}`, kind: CallCreateProject, check: func(t *testing.T, call Call) {
+			input, ok := call.CreateProjectInput()
+			if !ok || input.Name != "�" {
+				t.Fatalf("literal replacement project input = %+v, %t", input, ok)
+			}
+		}},
 		{name: "create shell agent", domain: operatorDomain, bearer: operatorBearer, body: `{"method":"create_shell_agent","params":{"id":"` + id('2') + `","project_id":"` + id('1') + `","name":"agent","role":"worker","tool_budget_limit":20}}`, kind: CallCreateShellAgent, check: func(t *testing.T, call Call) {
 			input, ok := call.CreateShellAgentInput()
 			if !ok || input.ToolBudgetLimit != 20 {
@@ -310,6 +322,10 @@ func TestServerRejectsDomainFallbackAndInvalidRequests(t *testing.T) {
 		{name: "empty block detail", generation: 1, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"block","params":{"detail":""}}`), code: RemoteInvalidRequest},
 		{name: "oversized failure detail", generation: 1, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"fail","params":{"detail":"` + strings.Repeat("x", 4097) + `"}}`), code: RemoteInvalidRequest},
 		{name: "invalid UTF-8", generation: 1, domain: operatorDomain, bearer: operatorBearer, body: []byte("{\"method\":\"health\",\"params\":{},\"x\":\"\xff\"}"), code: RemoteInvalidRequest},
+		{name: "lone high surrogate", generation: 1, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"create_project","params":{"id":"` + id('1') + `","name":"\ud800","root":"/private/project"}}`), code: RemoteInvalidRequest},
+		{name: "lone low surrogate", generation: 1, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"create_project","params":{"id":"` + id('1') + `","name":"\udc00","root":"/private/project"}}`), code: RemoteInvalidRequest},
+		{name: "reversed surrogate pair", generation: 1, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"create_project","params":{"id":"` + id('1') + `","name":"\udc00\ud800","root":"/private/project"}}`), code: RemoteInvalidRequest},
+		{name: "mismatched surrogate pair", generation: 1, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"create_project","params":{"id":"` + id('1') + `","name":"\ud800\u0041","root":"/private/project"}}`), code: RemoteInvalidRequest},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

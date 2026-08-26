@@ -342,10 +342,11 @@ func decodeExact(encoded []byte, output any) error {
 const maxJSONDepth = 64
 
 // validateJSONNames rejects byte sequences encoding/json intentionally accepts
-// but this exact local protocol does not: malformed UTF-8 and duplicate object
-// names. The frame bound caps total work and storage; maxJSONDepth caps stack.
+// but this exact local protocol does not: malformed UTF-8, unpaired UTF-16
+// escapes, and duplicate object names. The frame bound caps total work and
+// storage; maxJSONDepth caps stack.
 func validateJSONNames(encoded []byte) error {
-	if len(encoded) == 0 || len(encoded) > maxFrameBytes || !utf8.Valid(encoded) {
+	if len(encoded) == 0 || len(encoded) > maxFrameBytes || !utf8.Valid(encoded) || !validJSONUnicodeEscapes(encoded) {
 		return ErrProtocol
 	}
 	decoder := json.NewDecoder(bytes.NewReader(encoded))
@@ -357,6 +358,68 @@ func validateJSONNames(encoded []byte) error {
 		return ErrProtocol
 	}
 	return nil
+}
+
+// validJSONUnicodeEscapes scans only JSON string boundaries and escapes. It
+// prevents encoding/json from collapsing distinct lone surrogate escapes to
+// U+FFFD; the ordinary decoder remains authority for all other JSON grammar.
+func validJSONUnicodeEscapes(encoded []byte) bool {
+	inString := false
+	for index := 0; index < len(encoded); index++ {
+		switch encoded[index] {
+		case '"':
+			inString = !inString
+		case '\\':
+			if !inString || index+1 >= len(encoded) {
+				continue
+			}
+			if encoded[index+1] != 'u' {
+				index++
+				continue
+			}
+			unit, ok := jsonHexCodeUnit(encoded[index+2:])
+			if !ok {
+				return false
+			}
+			index += 5
+			switch {
+			case unit >= 0xdc00 && unit <= 0xdfff:
+				return false
+			case unit >= 0xd800 && unit <= 0xdbff:
+				next := index + 1
+				if next+6 > len(encoded) || encoded[next] != '\\' || encoded[next+1] != 'u' {
+					return false
+				}
+				low, ok := jsonHexCodeUnit(encoded[next+2:])
+				if !ok || low < 0xdc00 || low > 0xdfff {
+					return false
+				}
+				index += 6
+			}
+		}
+	}
+	return true
+}
+
+func jsonHexCodeUnit(encoded []byte) (uint16, bool) {
+	if len(encoded) < 4 {
+		return 0, false
+	}
+	var value uint16
+	for _, character := range encoded[:4] {
+		value <<= 4
+		switch {
+		case character >= '0' && character <= '9':
+			value |= uint16(character - '0')
+		case character >= 'a' && character <= 'f':
+			value |= uint16(character-'a') + 10
+		case character >= 'A' && character <= 'F':
+			value |= uint16(character-'A') + 10
+		default:
+			return 0, false
+		}
+	}
+	return value, true
 }
 
 func validateJSONValue(decoder *json.Decoder, depth int) error {
