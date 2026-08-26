@@ -1496,3 +1496,56 @@ Selected-manifest Store/recovery proof on integrated head `dd72fbb`:
   format/diff and Darwin/Linux AMD64 cross-builds. The unchanged integrated
   root passed `internal/kernel` in `8.964s` with the pinned Go toolchain and
   canonical isolated temporary root.
+
+Two-owner runner/process proof on integrated head `85d4841`:
+
+- `internal/runner` now contains one concrete outer attempt runner and one
+  inner registered wrapper/provider child. The daemon releases an inert outer
+  gate only after recording its exact identity; the outer runner records and
+  reports the inner identity before any wrapper effect. A fixed FD 3 control
+  capability and closed selection/preparation/population/provider releases
+  replace arbitrary inherited descriptors or a generic supervisor protocol.
+- The attempt runner is synchronous: one kqueue multiplexes controller,
+  wrapper and exact child-exit observations; no goroutine, channel, interface
+  or actor abstraction was added. The runner is provider-blind, owns the one
+  direct child and process group through the sole Wait, preserves the inner
+  PID/PGID/birth across the wrapper's final provider pathname exec, and closes
+  private control descriptors before provider code runs.
+- EOF before provider release aborts or converges the registered inner work;
+  EOF after provider release never cancels useful authorized work. A terminal
+  record is create-only and published only after exact group convergence and
+  the sole Wait. Recovery acknowledgement binds the full attempt/process/exit/
+  message value, digest and file identity and removes the spool only after the
+  caller asserts the exact Store commit. Numeric recovered identities remain
+  observation-only and gain no signal path.
+- Independent reviews repeatedly BLOCKED green heads after finding natural
+  leader exit before descendant cleanup, terminal publication on cleanup
+  uncertainty, inexact terminal acknowledgement, inert pre-release exit with
+  no Wait branch, protocol EOF events starving process convergence, and a
+  transient EOF-filter deletion failure terminating an already-released
+  provider. Repairs centralized waited-only publication, retained the live
+  owner during uncertainty, made the child-state switch exhaustive, retired
+  protocol filters before process-only convergence and kept post-release
+  retirement uncertainty inside the natural-completion loop. Exact immutable
+  review head `06d9f59` received ALLOW.
+- Causal real-process tests cover ordered zero-effect releases, parent/control
+  EOF at every stage, same-PID shell exec and input-once EOF, executable
+  replacement/mode/byte/symlink/removal, leader-first and TERM-ignoring
+  descendants, first-N and permanent process/filter uncertainty, inert exit,
+  repeated malformed/readable EOF, exact spool replay/forgery, and clean
+  process/FD/goroutine/temp censuses. Required mutations removed ordering,
+  waited publication, uncertainty retry, full-terminal equality, inert-exit
+  handling, process-only filter transition and post-release retirement
+  isolation; each was killed and reverted.
+- Final author gates passed runner/command count-three (`16.13s`), race
+  (`29.27s`), CGO-free (`5.99s`), full Go (`11.57s`), vet/module/format/diff
+  and Darwin/Linux AMD64 cross-builds. The orchestrator's first integrated run
+  reached two native-witness fixture build failures because their intentionally
+  cleared environment had no `GOCACHE` or `HOME`. The explicit task-owned
+  `GOCACHE`, `GOPATH`, `GOMODCACHE` and canonical TMPDIR rerun passed runner
+  (`5.556s`) and command (`0.460s`); no Dark Factory home or provider was used.
+- Permanent Darwin observation/filter uncertainty deliberately retains the
+  exact runner and unreaped child without terminal publication. This is
+  fail-closed ownership, not convergence. The later elegance audit must review
+  production-compiled test seams and repeated frame validation, but may not
+  collapse either ownership boundary or the explicit uncertainty behavior.
