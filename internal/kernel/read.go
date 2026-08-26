@@ -1,6 +1,7 @@
 package kernel
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -11,6 +12,28 @@ import (
 
 type rowScanner interface {
 	Scan(...any) error
+}
+
+// nullableBlob preserves SQL NULL separately from a present zero-length BLOB
+// and refuses every non-BLOB SQLite storage class.
+type nullableBlob struct {
+	bytes []byte
+	valid bool
+}
+
+func (value *nullableBlob) Scan(source any) error {
+	value.bytes = nil
+	value.valid = false
+	switch source := source.(type) {
+	case nil:
+		return nil
+	case []byte:
+		value.bytes = bytes.Clone(source)
+		value.valid = true
+		return nil
+	default:
+		return fmt.Errorf("%w: nullable BLOB has an invalid SQLite storage class", ErrCorruptState)
+	}
 }
 
 func projectByID(ctx context.Context, connection *sql.Conn, id ProjectID) (Project, bool, error) {

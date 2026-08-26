@@ -8,6 +8,109 @@ import (
 	"testing"
 )
 
+func TestNullableDurableBlobsPreservePresenceAndFailClosed(t *testing.T) {
+	tests := []struct {
+		name       string
+		corrupt    func(*testing.T, *Store)
+		directRead func(*testing.T, *Store) error
+	}{
+		{
+			name: "Change selected commit",
+			corrupt: func(t *testing.T, store *Store) {
+				change := seedReservedChange(t, store)
+				corruptSQL(t, store, `UPDATE changes SET selected_commit = zeroblob(0) WHERE id = ?`, change.ID.Bytes())
+			},
+			directRead: func(t *testing.T, store *Store) error {
+				_, _, err := store.Change(context.Background(), changeID(t, 35))
+				return err
+			},
+		},
+		{
+			name: "Change tree digest",
+			corrupt: func(t *testing.T, store *Store) {
+				change := seedReservedChange(t, store)
+				corruptSQL(t, store, `UPDATE changes SET tree_digest = zeroblob(0) WHERE id = ?`, change.ID.Bytes())
+			},
+			directRead: func(t *testing.T, store *Store) error {
+				_, _, err := store.Change(context.Background(), changeID(t, 35))
+				return err
+			},
+		},
+		{
+			name: "run Change ID",
+			corrupt: func(t *testing.T, store *Store) {
+				seedDurableAuthority(t, store)
+				corruptSQL(t, store, `UPDATE runs SET change_id = zeroblob(0) WHERE id = ?`, runID(t, 5).Bytes())
+			},
+			directRead: func(t *testing.T, store *Store) error {
+				_, _, err := store.Run(context.Background(), runID(t, 5))
+				return err
+			},
+		},
+		{
+			name: "resource birth digest",
+			corrupt: func(t *testing.T, store *Store) {
+				seedDurableAuthority(t, store)
+				corruptSQL(t, store, `UPDATE resources SET birth_digest = zeroblob(0) WHERE id = ?`, resourceID(t, 6).Bytes())
+			},
+			directRead: func(t *testing.T, store *Store) error {
+				_, _, err := store.Resource(context.Background(), resourceID(t, 6))
+				return err
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store, path := newTestStore(t)
+			test.corrupt(t, store)
+
+			if err := test.directRead(t, store); !errors.Is(err, ErrCorruptState) {
+				store.Close()
+				t.Fatalf("direct read of present zero-length BLOB = %v", err)
+			}
+			beforeWrite := captureWriteFootprint(t, store)
+			if _, err := store.SetDispatch(context.Background(), mustRevision(t, 1), true, mustTime(t, 100)); !errors.Is(err, ErrCorruptState) {
+				store.Close()
+				t.Fatalf("validated mutation over present zero-length BLOB = %v", err)
+			}
+			if afterWrite := captureWriteFootprint(t, store); afterWrite != beforeWrite {
+				store.Close()
+				t.Fatalf("validated refusal changed durable footprint: before=%+v after=%+v", beforeWrite, afterWrite)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			beforeOpen := captureDatabaseEvidence(t, path)
+			if reopened, err := Open(context.Background(), path); !errors.Is(err, ErrCorruptState) {
+				if reopened != nil {
+					reopened.Close()
+				}
+				t.Fatalf("Open with present zero-length BLOB = %v", err)
+			}
+			assertDatabaseEvidenceUnchanged(t, path, beforeOpen)
+		})
+	}
+}
+
+func TestNullableBlobRejectsWrongSQLiteStorageClass(t *testing.T) {
+	var value nullableBlob
+	if err := value.Scan(nil); err != nil || value.valid {
+		t.Fatalf("NULL scan = valid %v, error %v", value.valid, err)
+	}
+	if err := value.Scan([]byte{}); err != nil || !value.valid || len(value.bytes) != 0 {
+		t.Fatalf("zero-length BLOB scan = valid %v, bytes %x, error %v", value.valid, value.bytes, err)
+	}
+	for _, source := range []any{"", int64(0), float64(0)} {
+		if err := value.Scan(source); !errors.Is(err, ErrCorruptState) {
+			t.Fatalf("Scan(%T) = %v", source, err)
+		}
+		if value.valid {
+			t.Fatalf("Scan(%T) retained presence", source)
+		}
+	}
+}
+
 func TestEveryPublicMutationValidatesDurableGraphBeforeDecision(t *testing.T) {
 	selection := testChangeSelection(t)
 	stage, _ := NewFileIdentity(70, 80)

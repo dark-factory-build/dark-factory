@@ -31,7 +31,8 @@ func runByDigest(ctx context.Context, connection *sql.Conn, digest AttemptDigest
 }
 
 func scanRun(scanner rowScanner) (Run, bool, error) {
-	var rawID, rawProjectID, rawAgentID, rawTaskID, rawIncarnationID, rawChangeID, rawDigest []byte
+	var rawID, rawProjectID, rawAgentID, rawTaskID, rawIncarnationID, rawDigest []byte
+	var rawChangeID nullableBlob
 	var roleValue, providerValue, modeValue, verificationValue, phaseValue string
 	var model, effort sql.NullString
 	var proposalKind, proposalCode, proposalDetail, proposalResult sql.NullString
@@ -76,8 +77,8 @@ func scanRun(scanner rowScanner) (Run, bool, error) {
 		Model: nullStringValue(model), ReasoningEffort: nullStringValue(effort), VerificationPolicy: verification, Phase: phase,
 		CredentialDigest: digest, Revision: rev, AdmittedAt: admittedTime, UpdatedAt: updatedTime,
 	}
-	if rawChangeID != nil {
-		changeID, err := ChangeIDFromBytes(rawChangeID)
+	if rawChangeID.valid {
+		changeID, err := ChangeIDFromBytes(rawChangeID.bytes)
 		if err != nil {
 			return Run{}, false, fmt.Errorf("%w: invalid run Change binding", ErrCorruptState)
 		}
@@ -211,7 +212,8 @@ func resourceByID(ctx context.Context, connection *sql.Conn, id ResourceID) (Res
 }
 
 func scanResource(scanner rowScanner) (Resource, bool, error) {
-	var rawID, rawRunID, birth []byte
+	var rawID, rawRunID []byte
+	var birth nullableBlob
 	var kindValue, stateValue string
 	var path, reason sql.NullString
 	var pathDev, pathInode, pid, pgid, releasedAt sql.NullInt64
@@ -241,7 +243,7 @@ func scanResource(scanner rowScanner) (Resource, bool, error) {
 		resource.ReleasedAt = &value
 	}
 	if kind == ResourceRuntimeRoot {
-		if !path.Valid || !validOwnedLocator(path.String) || pid.Valid || pgid.Valid || birth != nil {
+		if !path.Valid || !validOwnedLocator(path.String) || pid.Valid || pgid.Valid || birth.valid {
 			return Resource{}, false, fmt.Errorf("%w: invalid runtime-root resource", ErrCorruptState)
 		}
 		if pathDev.Valid || pathInode.Valid {
@@ -258,11 +260,11 @@ func scanResource(scanner rowScanner) (Resource, bool, error) {
 		if path.Valid || pathDev.Valid || pathInode.Valid {
 			return Resource{}, false, fmt.Errorf("%w: path on process resource", ErrCorruptState)
 		}
-		if pid.Valid || pgid.Valid || birth != nil {
-			if !pid.Valid || !pgid.Valid || len(birth) != DigestBytes {
+		if pid.Valid || pgid.Valid || birth.valid {
+			if !pid.Valid || !pgid.Valid || !birth.valid || len(birth.bytes) != DigestBytes {
 				return Resource{}, false, fmt.Errorf("%w: partial process identity", ErrCorruptState)
 			}
-			birthDigest, err := BirthDigestFromBytes(birth)
+			birthDigest, err := BirthDigestFromBytes(birth.bytes)
 			if err != nil {
 				return Resource{}, false, fmt.Errorf("%w: invalid birth digest", ErrCorruptState)
 			}

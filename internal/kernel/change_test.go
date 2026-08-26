@@ -258,6 +258,38 @@ func TestSelectedPhaseRequiresManifestFactsInSchema(t *testing.T) {
 	}
 }
 
+func TestAvailablePhaseRequiresCompleteSourceIdentityInSchema(t *testing.T) {
+	for name, source := range map[string]struct {
+		device any
+		inode  any
+	}{
+		"missing source device": {device: nil, inode: int64(10)},
+		"missing source inode":  {device: int64(9), inode: nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store, _ := newTestStore(t)
+			defer store.Close()
+			change := seedReservedChange(t, store)
+			selected, err := store.RecordChangeSelection(context.Background(), change.ID, change.Revision, testChangeSelection(t), mustTime(t, 10))
+			if err != nil {
+				t.Fatal(err)
+			}
+			stage, _ := NewFileIdentity(9, 10)
+			prepared, err := store.RecordChangePrepared(context.Background(), change.ID, selected.Revision, stage, mustTime(t, 11))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.writer.Exec(`UPDATE changes SET phase = 'available', source_dev = ?, source_inode = ?, available_at_ms = 12, revision = revision + 1, updated_at_ms = 12 WHERE id = ?`, source.device, source.inode, change.ID.Bytes()); err == nil {
+				t.Fatal("available phase accepted incomplete source identity")
+			}
+			fresh, found, readErr := store.Change(context.Background(), change.ID)
+			if readErr != nil || !found || fresh.Phase != ChangePrepared || fresh.Revision != prepared.Revision {
+				t.Fatalf("failed available schema mutation changed Change: %+v found=%v err=%v", fresh, found, readErr)
+			}
+		})
+	}
+}
+
 func TestChangeLocatorsAreCanonicalAtConstructionAndRead(t *testing.T) {
 	format, _ := NewObjectFormat("sha1")
 	commit, _ := NewCommitID(format, bytes.Repeat([]byte{1}, 20))

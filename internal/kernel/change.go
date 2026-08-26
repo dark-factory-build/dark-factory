@@ -23,7 +23,7 @@ func scanChange(scanner rowScanner) (Change, bool, error) {
 	var rawID, rawProjectID, rawTaskID, rawIncarnationID []byte
 	var phase, sourceRoot, stagingRoot string
 	var objectFormat, repositoryRoot sql.NullString
-	var selectedCommit, treeDigest []byte
+	var selectedCommit, treeDigest nullableBlob
 	var repositoryDev, repositoryInode, selectedAt sql.NullInt64
 	var stageDev, stageInode, preparedAt sql.NullInt64
 	var entryCount, totalBytes, sourceDev, sourceInode, availableAt sql.NullInt64
@@ -55,17 +55,17 @@ func scanChange(scanner rowScanner) (Change, bool, error) {
 		Phase: parsedPhase, SourceRoot: sourceRoot, StagingRoot: stagingRoot,
 		Revision: rev, CreatedAt: created, UpdatedAt: updated,
 	}
-	selectionFields := objectFormat.Valid || selectedCommit != nil || repositoryRoot.Valid || repositoryDev.Valid || repositoryInode.Valid || selectedAt.Valid || treeDigest != nil || entryCount.Valid || totalBytes.Valid
+	selectionFields := objectFormat.Valid || selectedCommit.valid || repositoryRoot.Valid || repositoryDev.Valid || repositoryInode.Valid || selectedAt.Valid || treeDigest.valid || entryCount.Valid || totalBytes.Valid
 	if selectionFields {
-		if !objectFormat.Valid || !repositoryRoot.Valid || !repositoryDev.Valid || !repositoryInode.Valid || !selectedAt.Valid || len(treeDigest) != DigestBytes || !entryCount.Valid || !totalBytes.Valid || entryCount.Int64 < 0 || entryCount.Int64 > MaxChangeTreeEntries || totalBytes.Int64 < 0 || totalBytes.Int64 > MaxChangeTreeBlobBytes {
+		if !objectFormat.Valid || !selectedCommit.valid || !repositoryRoot.Valid || !repositoryDev.Valid || !repositoryInode.Valid || !selectedAt.Valid || !treeDigest.valid || len(treeDigest.bytes) != DigestBytes || !entryCount.Valid || !totalBytes.Valid || entryCount.Int64 < 0 || entryCount.Int64 > MaxChangeTreeEntries || totalBytes.Int64 < 0 || totalBytes.Int64 > MaxChangeTreeBlobBytes {
 			return Change{}, false, fmt.Errorf("%w: partial Change selection", ErrCorruptState)
 		}
 		format, err := parseObjectFormat(objectFormat.String)
 		if err != nil {
 			return Change{}, false, err
 		}
-		commit, commitErr := NewCommitID(format, selectedCommit)
-		commitment, commitmentErr := TreeDigestFromBytes(treeDigest)
+		commit, commitErr := NewCommitID(format, selectedCommit.bytes)
+		commitment, commitmentErr := TreeDigestFromBytes(treeDigest.bytes)
 		repository, repositoryErr := NewFileIdentity(repositoryDev.Int64, repositoryInode.Int64)
 		selection, selectionErr := NewChangeSelection(format, commit, commitment, uint32(entryCount.Int64), uint64(totalBytes.Int64), repositoryRoot.String, repository)
 		selectedTime, selectedTimeErr := NewUnixMillis(selectedAt.Int64)
