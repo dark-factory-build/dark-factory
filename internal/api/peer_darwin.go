@@ -11,6 +11,17 @@ import (
 )
 
 func verifySocketConnection(connection net.Conn, expected socketRecord) error {
+	if err := verifyPeerEUID(connection); err != nil {
+		return err
+	}
+	current, err := inspectSocket(connection.RemoteAddr().String())
+	if err != nil || !current.same(expected) {
+		return ErrInvalidClient
+	}
+	return nil
+}
+
+func verifyPeerEUID(connection net.Conn) error {
 	unix, ok := connection.(*net.UnixConn)
 	if !ok {
 		return ErrInvalidClient
@@ -29,10 +40,6 @@ func verifySocketConnection(connection net.Conn, expected socketRecord) error {
 		}
 		runtime.KeepAlive(&peer)
 	}); err != nil || socketErr != 0 || peer.version != 0 || peer.uid != uint32(os.Geteuid()) || peer.groupCount < 0 || int(peer.groupCount) > len(peer.groups) {
-		return ErrInvalidClient
-	}
-	current, err := inspectSocket(connection.RemoteAddr().String())
-	if err != nil || !current.same(expected) {
 		return ErrInvalidClient
 	}
 	return nil

@@ -166,7 +166,7 @@ func (client client) mutate(ctx context.Context, method string, params any) (Mut
 	if err := client.call(ctx, method, params, &result); err != nil {
 		return MutationResult{}, err
 	}
-	if result.Sequence == 0 || result.Revision == 0 {
+	if result.Revision == 0 {
 		return MutationResult{}, ErrProtocol
 	}
 	return result, nil

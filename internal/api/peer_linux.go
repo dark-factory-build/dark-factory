@@ -9,6 +9,17 @@ import (
 )
 
 func verifySocketConnection(connection net.Conn, expected socketRecord) error {
+	if err := verifyPeerEUID(connection); err != nil {
+		return err
+	}
+	current, err := inspectSocket(connection.RemoteAddr().String())
+	if err != nil || !current.same(expected) {
+		return ErrInvalidClient
+	}
+	return nil
+}
+
+func verifyPeerEUID(connection net.Conn) error {
 	unix, ok := connection.(*net.UnixConn)
 	if !ok {
 		return ErrInvalidClient
@@ -22,10 +33,6 @@ func verifySocketConnection(connection net.Conn, expected socketRecord) error {
 	if err := raw.Control(func(fd uintptr) {
 		credential, socketErr = syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
 	}); err != nil || socketErr != nil || credential == nil || credential.Uid != uint32(os.Geteuid()) {
-		return ErrInvalidClient
-	}
-	current, err := inspectSocket(connection.RemoteAddr().String())
-	if err != nil || !current.same(expected) {
 		return ErrInvalidClient
 	}
 	return nil

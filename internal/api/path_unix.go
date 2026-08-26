@@ -26,6 +26,14 @@ type fileIdentity struct {
 
 func (left fileIdentity) same(right fileIdentity) bool { return left == right }
 
+func (left fileIdentity) sameObject(right fileIdentity) bool {
+	return left.device == right.device && left.inode == right.inode && left.uid == right.uid && left.links == right.links && left.size == right.size
+}
+
+func (left fileIdentity) sameDirectory(right fileIdentity) bool {
+	return left.device == right.device && left.inode == right.inode && left.uid == right.uid && left.mode == right.mode
+}
+
 type tokenRecord struct {
 	bearer credential
 	parent fileIdentity
@@ -33,7 +41,7 @@ type tokenRecord struct {
 }
 
 func (left tokenRecord) same(right tokenRecord) bool {
-	return left.parent.same(right.parent) && left.file.same(right.file) && left.bearer.equal(right.bearer)
+	return left.parent.sameDirectory(right.parent) && left.file.same(right.file) && left.bearer.equal(right.bearer)
 }
 
 type socketRecord struct {
@@ -68,7 +76,7 @@ func (root *privateRoot) openToken(name string) (*os.File, error) {
 }
 
 func (left socketRecord) same(right socketRecord) bool {
-	return left.parent.same(right.parent) && left.socket.same(right.socket)
+	return left.parent.sameDirectory(right.parent) && left.socket.same(right.socket)
 }
 
 func validCanonicalPath(path string, maximum int) bool {

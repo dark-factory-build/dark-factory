@@ -167,7 +167,29 @@ func writeTestPayload(connection net.Conn, payload, trailing []byte) error {
 
 func successResponse(data string) string { return `{"ok":true,"data":` + data + `}` }
 
-func mutationResponse() string { return successResponse(`{"sequence":9,"revision":4}`) }
+func mutationResponse() string { return successResponse(`{"head":9,"revision":4}`) }
+
+func TestMutationResultUsesCanonicalHeadAndAllowsZero(t *testing.T) {
+	bearer := testCredential('H')
+	fixture := newWireFixture(t, bearer, func(connection net.Conn, _ []byte) error {
+		return writeTestResponse(connection, wireGeneration, wireOperatorDomain, successResponse(`{"head":0,"revision":1}`))
+	})
+	client, err := NewOperatorClient(fixture.socket, fixture.token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := client.CreateProject(context.Background(), CreateProjectInput{ID: id('1'), Name: "project", Root: "/private/project"})
+	if err != nil || result.Head != 0 || result.Revision != 1 {
+		t.Fatalf("zero-head mutation result = %+v, %v", result, err)
+	}
+	<-fixture.request
+	fixture.wait(t)
+
+	var oldShape MutationResult
+	if err := decodeResponse([]byte(successResponse(`{"sequence":1,"revision":1}`)), &oldShape); !errors.Is(err, ErrProtocol) {
+		t.Fatalf("obsolete sequence response = %v", err)
+	}
+}
 
 func requestJSON(t testing.TB, payload []byte, domain byte, bearer credential) string {
 	t.Helper()

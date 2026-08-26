@@ -9,10 +9,11 @@ const (
 )
 
 var (
-	ErrInvalidClient = errors.New("local API client configuration is invalid")
-	ErrInvalidInput  = errors.New("local API input is invalid")
-	ErrProtocol      = errors.New("local API protocol is invalid")
-	ErrTransport     = errors.New("local API transport failed")
+	ErrInvalidClient   = errors.New("local API client configuration is invalid")
+	ErrInvalidListener = errors.New("local API listener configuration is invalid")
+	ErrInvalidInput    = errors.New("local API input is invalid")
+	ErrProtocol        = errors.New("local API protocol is invalid")
+	ErrTransport       = errors.New("local API transport failed")
 )
 
 type RemoteErrorCode string
@@ -68,7 +69,7 @@ type HealthStatus struct {
 }
 
 type MutationResult struct {
-	Sequence uint64 `json:"sequence"`
+	Head     uint64 `json:"head"`
 	Revision uint64 `json:"revision"`
 }
 
