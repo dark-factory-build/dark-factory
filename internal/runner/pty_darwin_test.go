@@ -1,0 +1,192 @@
+//go:build darwin
+
+package runner
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"golang.org/x/sys/unix"
+)
+
+func TestBlockedPTYIsInertUntilActivationAndProviderGetsExactTTY(t *testing.T) {
+	f := newFixture(t)
+	effect := filepath.Join(f.root, "provider.effect")
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := PrepareExecSpec(ExecSpec{Target: executable, Args: []string{"--pty-provider", f.root}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C", "TERM=xterm"}, Cwd: f.cwd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := StartBlockedPTY(f.lease, gate, spec, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.child = child
+	if _, err := child.WritePTY([]byte("before\n")); !errors.Is(err, ErrState) {
+		t.Fatalf("pre-activation PTY write error=%v, want ErrState", err)
+	}
+	if _, err := os.Stat(effect); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("provider side effect before activation: %v", err)
+	}
+	want := child.Identity()
+	if !want.Valid() || want.PID != want.PGID {
+		t.Fatalf("invalid blocked PTY identity: %+v", want)
+	}
+	if _, err := child.Activate(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(4 * time.Second)
+	for {
+		if _, statErr := os.Stat(effect); statErr == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			got, finishErr := child.FinishAfterExit(time.Second)
+			t.Fatalf("provider side effect absent, finish=%+v err=%v", got, finishErr)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := child.Identity(); got != want {
+		t.Fatalf("identity changed across activation: before=%+v after=%+v", want, got)
+	}
+	if _, err := child.WritePTY([]byte("hello\n")); err != nil {
+		t.Fatalf("PTY input after activation: %v", err)
+	}
+	var output strings.Builder
+	buf := make([]byte, 128)
+	for !strings.Contains(output.String(), "RESPONSE:hello") {
+		n, err := child.ReadPTY(buf)
+		if err != nil {
+			t.Fatalf("PTY output: %v (partial=%q)", err, output.String())
+		}
+		output.Write(buf[:n])
+	}
+	if !strings.Contains(output.String(), "RESPONSE:hello") {
+		t.Fatalf("provider response missing: %q", output.String())
+	}
+	if _, err := child.FinishAfterExit(4 * time.Second); err != nil {
+		t.Fatalf("finish provider: %v", err)
+	}
+	if n, err := child.ReadPTY(make([]byte, 16)); errors.Is(err, os.ErrDeadlineExceeded) || n != 0 {
+		t.Fatalf("post-exit PTY did not reach EOF: n=%d err=%v", n, err)
+	}
+	if _, err := child.WritePTY([]byte("after\n")); !errors.Is(err, ErrState) {
+		t.Fatalf("post-exit PTY write error=%v, want ErrState", err)
+	}
+}
+
+func TestPTYReadDeadlineDoesNotAffectOwnedProvider(t *testing.T) {
+	f := newFixture(t)
+	spec, err := PrepareExecSpec(ExecSpec{Target: "/bin/sh", Args: []string{"-c", "sleep 2"}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C", "TERM=xterm"}, Cwd: f.cwd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := StartBlockedPTY(f.lease, gate, spec, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.child = child
+	if _, err := child.Activate(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := child.ReadPTY(make([]byte, 32)); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("quiet PTY read error=%v, want deadline", err)
+	}
+	if got := ObserveProcess(child.Identity()); got.Presence != Present {
+		t.Fatalf("observer read changed provider lifecycle: %+v", got)
+	}
+	if _, err := child.Terminate(2 * time.Second); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPTYAttemptsHaveDistinctOwnedMasterAndProcess(t *testing.T) {
+	one, two := newFixture(t), newFixture(t)
+	gate, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := func(f *fixture) *OwnedChild {
+		f.t.Helper()
+		spec, err := PrepareExecSpec(ExecSpec{Target: "/bin/sh", Args: []string{"-c", "sleep 2"}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C", "TERM=xterm"}, Cwd: f.cwd})
+		if err != nil {
+			f.t.Fatal(err)
+		}
+		child, err := StartBlockedPTY(f.lease, gate, spec, false)
+		if err != nil {
+			f.t.Fatal(err)
+		}
+		f.child = child
+		return child
+	}
+	a, b := start(one), start(two)
+	if a.Identity() == b.Identity() {
+		t.Fatalf("PTY attempts reused process identity: %+v", a.Identity())
+	}
+	if a.ptyMaster.Fd() == b.ptyMaster.Fd() {
+		t.Fatal("PTY attempts reused master descriptor")
+	}
+	if _, err := a.Activate(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Activate(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Terminate(2 * time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Terminate(2 * time.Second); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBlockedPTYAbortClosesMasterWithoutProviderEffect(t *testing.T) {
+	f := newFixture(t)
+	effect := filepath.Join(f.root, "provider.effect")
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := PrepareExecSpec(ExecSpec{Target: executable, Args: []string{"--pty-provider", f.root}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C", "TERM=xterm"}, Cwd: f.cwd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := StartBlockedPTY(f.lease, gate, spec, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.child = child
+	masterFD := int(child.ptyMaster.Fd())
+	if err := child.Abort(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(effect); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("aborted PTY provider executed: %v", err)
+	}
+	if err := child.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstat(masterFD, &stat); !errors.Is(err, unix.EBADF) {
+		t.Fatalf("aborted PTY master fd %d remains open: %v", masterFD, err)
+	}
+}

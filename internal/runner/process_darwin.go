@@ -138,6 +138,7 @@ type OwnedChild struct {
 	exitObserved   bool
 	exitRegistered bool
 	keepDirectory  bool
+	ptyMaster      *os.File
 	// testConvergence injects a package-test-only failure immediately before
 	// activated group convergence. Production children always leave it nil.
 	testConvergence func() error
@@ -150,7 +151,142 @@ func (c *OwnedChild) Identity() Identity {
 	return c.identity
 }
 
+// WritePTY writes terminal input only while this live owner has an activated
+// process. It is intentionally synchronous and bounded; the browser/runtime
+// transport is responsible for serialization and backpressure later.
+func (c *OwnedChild) WritePTY(input []byte) (int, error) {
+	if c == nil || c.ptyMaster == nil || c.state != stateActivated || c.exitObserved {
+		return 0, ErrState
+	}
+	if len(input) == 0 || len(input) > maxInputBytes {
+		return 0, ErrState
+	}
+	if err := c.refreshExit(); err != nil {
+		return 0, err
+	}
+	if c.exitObserved {
+		return 0, ErrState
+	}
+	deadline := time.Now().Add(250 * time.Millisecond)
+	written := 0
+	for written < len(input) {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return written, os.ErrDeadlineExceeded
+		}
+		milliseconds := int(remaining / time.Millisecond)
+		if milliseconds < 1 {
+			milliseconds = 1
+		}
+		fds := []unix.PollFd{{Fd: int32(c.ptyMaster.Fd()), Events: unix.POLLOUT}}
+		ready, err := unix.Poll(fds, milliseconds)
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if err != nil {
+			return written, err
+		}
+		if ready == 0 {
+			return written, os.ErrDeadlineExceeded
+		}
+		if fds[0].Revents&(unix.POLLERR|unix.POLLHUP|unix.POLLNVAL) != 0 {
+			return written, ErrState
+		}
+		n, err := unix.Write(int(c.ptyMaster.Fd()), input[written:])
+		if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
+			continue
+		}
+		if err != nil {
+			return written, err
+		}
+		if n == 0 {
+			return written, io.ErrNoProgress
+		}
+		written += n
+	}
+	return written, nil
+}
+
+// ReadPTY reads terminal output from the runner-owned master with a fixed
+// bounded wait. It never starts a goroutine and never changes process
+// lifecycle state.
+func (c *OwnedChild) ReadPTY(output []byte) (int, error) {
+	if c == nil || c.ptyMaster == nil || len(output) == 0 || len(output) > maxInputBytes {
+		return 0, ErrState
+	}
+	if c.state != stateActivated && c.state != stateExited && c.state != stateWaited {
+		return 0, ErrState
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return 0, os.ErrDeadlineExceeded
+		}
+		milliseconds := int(remaining / time.Millisecond)
+		if milliseconds < 1 {
+			milliseconds = 1
+		}
+		fds := []unix.PollFd{{Fd: int32(c.ptyMaster.Fd()), Events: unix.POLLIN}}
+		ready, err := unix.Poll(fds, milliseconds)
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if err != nil {
+			return 0, err
+		}
+		if ready == 0 {
+			return 0, os.ErrDeadlineExceeded
+		}
+		if fds[0].Revents&unix.POLLNVAL != 0 {
+			return 0, ErrState
+		}
+		n, err := unix.Read(int(c.ptyMaster.Fd()), output)
+		if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
+			continue
+		}
+		return n, err
+	}
+}
+
+func (c *OwnedChild) refreshExit() error {
+	if c == nil || c.kq < 0 || c.exitObserved {
+		return nil
+	}
+	events := make([]unix.Kevent_t, 1)
+	zero := unix.Timespec{}
+	n, err := unix.Kevent(c.kq, nil, events, &zero)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return nil
+	}
+	if events[0].Ident != uint64(c.identity.PID) || events[0].Filter != unix.EVFILT_PROC || events[0].Fflags&unix.NOTE_EXIT == 0 {
+		return ErrIdentity
+	}
+	c.exitObserved = true
+	c.state = stateExited
+	return nil
+}
+
 func StartBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, keepDirectoryAcrossExec bool) (child *OwnedChild, err error) {
+	return startBlocked(lease, gateExecutable, spec, keepDirectoryAcrossExec, false)
+}
+
+// StartBlockedPTY is the Darwin-only concrete PTY launch seam. It retains the
+// same activation gate and identity checks as StartBlocked, but gives the
+// gate, and ultimately the target, one controlling terminal on fd 0/1/2.
+// The returned child owns the master; callers must use the child methods for
+// synchronous I/O and must not close the master independently.
+func StartBlockedPTY(lease *GateLease, gateExecutable string, spec *LaunchSpec, keepDirectoryAcrossExec bool) (child *OwnedChild, err error) {
+	if spec == nil || len(spec.stdin) != 0 || spec.stdout != nil || spec.stderr != nil {
+		return nil, ErrState
+	}
+	return startBlocked(lease, gateExecutable, spec, keepDirectoryAcrossExec, true)
+}
+
+func startBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, keepDirectoryAcrossExec, usePTY bool) (child *OwnedChild, err error) {
 	if lease == nil || lease.closed || lease.marker != nil || lease.lifetime == nil || spec == nil {
 		return nil, ErrState
 	}
@@ -166,17 +302,58 @@ func StartBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, kee
 		return nil, err
 	}
 	defer config.Close()
-	if err := writeFrame(config, gateConfig{Version: 1, Target: spec.commit, LeaseDirectory: lease.dirIdentity, Lifetime: lease.lifetimeID, MarkerName: lease.basename, KeepDirectory: keepDirectoryAcrossExec, Control: spec.controlID, TestFinalCheck: spec.testFinal != nil}, maxConfigBytes); err != nil {
+	if err := writeFrame(config, gateConfig{Version: 1, Target: spec.commit, LeaseDirectory: lease.dirIdentity, Lifetime: lease.lifetimeID, MarkerName: lease.basename, KeepDirectory: keepDirectoryAcrossExec, Control: spec.controlID, TestFinalCheck: spec.testFinal != nil, PTY: usePTY}, maxConfigBytes); err != nil {
 		return nil, err
 	}
 	if _, err := config.Seek(0, 0); err != nil {
 		return nil, err
 	}
-	stdin, err := anonymousFile(lease.dir, "stdin", spec.stdin)
-	if err != nil {
-		return nil, err
+	var ptyMaster, ptySlave *os.File
+	if usePTY {
+		ptyMaster, ptySlave, err = openPTY()
+		if err != nil {
+			return nil, err
+		}
+		defer func() {
+			if ptySlave != nil {
+				_ = ptySlave.Close()
+			}
+			if err != nil && ptyMaster != nil {
+				_ = ptyMaster.Close()
+			}
+		}()
 	}
-	defer stdin.Close()
+	var stdin, stdout, stderr *os.File
+	if usePTY {
+		// The gate keeps the fixed 6/7/8 numbering, but these are harmless
+		// slave references rather than obsolete startup-input resources.
+		stdin, stdout, stderr = ptySlave, ptySlave, ptySlave
+	} else {
+		stdin, err = anonymousFile(lease.dir, "stdin", spec.stdin)
+		if err != nil {
+			return nil, err
+		}
+		defer stdin.Close()
+		stdout = spec.stdout
+		stderr = spec.stderr
+		var closeOut, closeErr *os.File
+		if stdout == nil {
+			closeOut, err = os.OpenFile("/dev/null", os.O_WRONLY, 0)
+			if err != nil {
+				return nil, err
+			}
+			stdout = closeOut
+			defer closeOut.Close()
+		}
+		if stderr == nil {
+			closeErr, err = os.OpenFile("/dev/null", os.O_WRONLY, 0)
+			if err != nil {
+				return nil, err
+			}
+			stderr = closeErr
+			defer closeErr.Close()
+		}
+	}
 	leashR, leashW, err := os.Pipe()
 	if err != nil {
 		return nil, err
@@ -188,25 +365,6 @@ func StartBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, kee
 		return nil, err
 	}
 	defer statusW.Close()
-	stdout := spec.stdout
-	stderr := spec.stderr
-	var closeOut, closeErr *os.File
-	if stdout == nil {
-		closeOut, err = os.OpenFile("/dev/null", os.O_WRONLY, 0)
-		if err != nil {
-			return nil, err
-		}
-		stdout = closeOut
-		defer closeOut.Close()
-	}
-	if stderr == nil {
-		closeErr, err = os.OpenFile("/dev/null", os.O_WRONLY, 0)
-		if err != nil {
-			return nil, err
-		}
-		stderr = closeErr
-		defer closeErr.Close()
-	}
 	leaseDup, err := unix.FcntlInt(lease.dir.Fd(), unix.F_DUPFD_CLOEXEC, 0)
 	if err != nil {
 		return nil, err
@@ -226,7 +384,11 @@ func StartBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, kee
 	unix.CloseOnExec(kq)
 	cmd := exec.Command(gate, "--exec-gate")
 	cmd.Env = []string{}
-	cmd.Stderr = stderr
+	if usePTY {
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = ptySlave, ptySlave, ptySlave
+	} else {
+		cmd.Stderr = stderr
+	}
 	cmd.ExtraFiles = []*os.File{config, leashR, statusW, stdin, stdout, stderr, leaseFile, lifetimeFile}
 	if spec.controlID != nil {
 		cmd.ExtraFiles = append(cmd.ExtraFiles, spec.control)
@@ -234,14 +396,25 @@ func StartBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, kee
 	if spec.testFinal != nil {
 		cmd.ExtraFiles = append(cmd.ExtraFiles, spec.testFinal)
 	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if usePTY {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0}
+	} else {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	}
 	if err := cmd.Start(); err != nil {
 		unix.Close(kq)
 		leashW.Close()
 		statusR.Close()
 		return nil, err
 	}
-	c := &OwnedChild{cmd: cmd, identity: Identity{PID: cmd.Process.Pid, PGID: cmd.Process.Pid}, kq: kq, activation: leashW, status: statusR, lease: lease, state: stateBlocked, keepDirectory: keepDirectoryAcrossExec}
+	if ptySlave != nil {
+		if closeErr := ptySlave.Close(); closeErr != nil {
+			return nil, closeErr
+		}
+		ptySlave = nil
+	}
+	c := &OwnedChild{cmd: cmd, identity: Identity{PID: cmd.Process.Pid, PGID: cmd.Process.Pid}, kq: kq, activation: leashW, status: statusR, lease: lease, state: stateBlocked, keepDirectory: keepDirectoryAcrossExec, ptyMaster: ptyMaster}
+	ptyMaster = nil
 	defer func() {
 		if err != nil {
 			if cleanupErr := c.hardCleanup(); cleanupErr != nil {
@@ -705,7 +878,7 @@ func (c *OwnedChild) Close() error {
 		_ = unix.Close(c.kq)
 		c.kq = -1
 	}
-	return nil
+	return c.closePTY()
 }
 func (c *OwnedChild) hardCleanup() error {
 	if c == nil || c.cmd == nil {
@@ -735,7 +908,17 @@ func (c *OwnedChild) hardCleanup() error {
 		_ = unix.Close(c.kq)
 		c.kq = -1
 	}
+	cleanupErr = errors.Join(cleanupErr, c.closePTY())
 	return cleanupErr
+}
+
+func (c *OwnedChild) closePTY() error {
+	if c == nil || c.ptyMaster == nil {
+		return nil
+	}
+	err := c.ptyMaster.Close()
+	c.ptyMaster = nil
+	return err
 }
 
 func registerExit(kq, pid int) error {
@@ -921,14 +1104,16 @@ func RunExecGate() error {
 	if !cfg.KeepDirectory {
 		_ = leaseDir.Close()
 	}
-	if err := unix.Dup2(int(stdin.Fd()), 0); err != nil {
-		return err
-	}
-	if err := unix.Dup2(int(stdout.Fd()), 1); err != nil {
-		return err
-	}
-	if err := unix.Dup2(int(stderr.Fd()), 2); err != nil {
-		return err
+	if !cfg.PTY {
+		if err := unix.Dup2(int(stdin.Fd()), 0); err != nil {
+			return err
+		}
+		if err := unix.Dup2(int(stdout.Fd()), 1); err != nil {
+			return err
+		}
+		if err := unix.Dup2(int(stderr.Fd()), 2); err != nil {
+			return err
+		}
 	}
 	if control != nil {
 		if err := unix.Dup2(int(control.Fd()), 3); err != nil {
@@ -947,6 +1132,11 @@ func RunExecGate() error {
 	}
 	if _, err := unix.FcntlInt(lifetime.Fd(), unix.F_SETFD, 0); err != nil {
 		return fmt.Errorf("runner: retain runtime lifetime: %w", err)
+	}
+	if cfg.PTY {
+		if err := validatePTYDescriptors(); err != nil {
+			return err
+		}
 	}
 	if err := unix.Exec(cfg.Target.Executable.Path, cfg.Target.Argv, cfg.Target.Env); err != nil {
 		_ = writeFrame(status, gateFrame{Kind: "launch-error", Error: err.Error()}, maxFrameBytes)

@@ -72,6 +72,13 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
+	if len(os.Args) == 3 && os.Args[1] == "--pty-provider" {
+		if err := runPTYProviderHelper(os.Args[2]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(93)
+		}
+		os.Exit(0)
+	}
 	if len(os.Args) == 5 && os.Args[1] == "--attempt-retirement-provider" {
 		if err := runRetirementProviderHelper(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -93,6 +100,39 @@ func TestMain(m *testing.M) {
 		code = 1
 	}
 	os.Exit(code)
+}
+
+func runPTYProviderHelper(root string) error {
+	for _, fd := range []int{0, 1, 2} {
+		if _, err := unix.IoctlGetWinsize(fd, unix.TIOCGWINSZ); err != nil {
+			return fmt.Errorf("provider fd %d is not a tty: %v", fd, err)
+		}
+	}
+	if sid, err := unix.Getsid(0); err != nil || sid != os.Getpid() {
+		return fmt.Errorf("provider session sid=%d err=%v", sid, err)
+	}
+	if pgid, err := unix.Getpgid(os.Getpid()); err != nil || pgid != os.Getpid() {
+		return fmt.Errorf("provider process group pgid=%d err=%v", pgid, err)
+	}
+	if pgrp, err := unix.IoctlGetInt(0, unix.TIOCGPGRP); err != nil || pgrp != os.Getpid() {
+		return fmt.Errorf("provider controlling tty pgrp=%d err=%v", pgrp, err)
+	}
+	for _, fd := range []int{3, 4, 5, 6, 7, 8, 9, 11, 12} {
+		var stat unix.Stat_t
+		if err := unix.Fstat(fd, &stat); !errors.Is(err, unix.EBADF) {
+			return fmt.Errorf("provider inherited fd %d: %v", fd, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "provider.effect"), []byte("provider-started"), 0o600); err != nil {
+		return err
+	}
+	line := make([]byte, 128)
+	n, err := os.Stdin.Read(line)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(os.Stdout, "RESPONSE:%s\n", strings.TrimSpace(string(line[:n])))
+	return err
 }
 
 func runCwdProviderHelper(root string) error {
