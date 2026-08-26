@@ -24,6 +24,16 @@ func TestUnsupportedChangeAPIsFailBeforeFilesystemOrBlobEffect(t *testing.T) {
 	if err := RemoveRecordedTree(context.Background(), parent, "target", StageIdentity{}); err == nil {
 		t.Fatal("unsupported RemoveRecordedTree succeeded")
 	}
+	repositoryIdentity, err := NewRepositoryIdentity(1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SelectGit(context.Background(), filepath.Join(parent, "git"), filepath.Join(parent, "repository"), "HEAD", repositoryIdentity); err == nil {
+		t.Fatal("unsupported SelectGit succeeded")
+	}
+	if _, err := OpenGitBlobs(context.Background(), filepath.Join(parent, "git"), filepath.Join(parent, "repository"), Selection{}); err == nil {
+		t.Fatal("unsupported OpenGitBlobs succeeded")
+	}
 	for _, name := range []string{"target", "stage"} {
 		if _, err := os.Lstat(filepath.Join(parent, name)); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("unsupported API caused filesystem effect at %s: %v", name, err)
