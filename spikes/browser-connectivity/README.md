@@ -21,6 +21,12 @@ The first line is readiness JSON, for example:
 {"url":"ws://127.0.0.1:43123/browser/v1","expected_host":"127.0.0.1:43123","expected_origin":"https://app.darkfactory.build","path":"/browser/v1","max_frame_bytes":65536}
 ```
 
+After readiness, each accepted or refused upgrade and each bounded frame or
+close produces one JSONL evidence event. Events contain only classification,
+Host/Origin/path/status, byte counts, close codes, and a neutral connection
+index; they never dump request headers or payloads. The writer is serialized
+and readiness is emitted before the listener accepts requests.
+
 Serve or preview `probe.html` from that HTTPS origin. If using another port,
 replace only `LOOPBACK_WS_URL` in the fixture with the readiness `url`; never
 put a token, challenge, or credential in the URL. Press **connect**, **send
@@ -40,6 +46,11 @@ separately and is not claimed by this fixture.
 The harness intentionally does not use a browser automation dependency. Keep
 the server process, port, and any preview state temporary; do not point it at
 the Dark Factory live home, daemon, socket, provider, or credentials.
+
+If a thin HTTPS host applies a strict Content Security Policy, permit this
+fixture's inline script with its exact SHA-256 CSP hash (recompute it whenever
+`probe.html` changes); do not weaken the policy with `unsafe-inline` or add a
+frontend framework. The fixture loads no third-party resource.
 
 ## Focused checks
 

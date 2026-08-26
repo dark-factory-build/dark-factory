@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"flag"
-	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -22,6 +21,12 @@ func (w *jsonEventWriter) Write(event ProbeEvent) {
 	_ = w.encoder.Encode(event)
 }
 
+func (w *jsonEventWriter) WriteReady(ready Ready) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	_ = w.encoder.Encode(ready)
+}
+
 func main() {
 	log.SetFlags(0)
 	host := flag.String("host", defaultHost, "listener address (must remain 127.0.0.1)")
@@ -30,28 +35,22 @@ func main() {
 	path := flag.String("path", defaultPath, "exact WebSocket request path")
 	flag.Parse()
 
+	output := &jsonEventWriter{encoder: json.NewEncoder(os.Stdout)}
 	server, err := NewServer(Config{
 		BindHost:       *host,
 		Port:           *port,
 		ExpectedOrigin: *origin,
 		Path:           *path,
-		EventWriter:    (&jsonEventWriter{encoder: json.NewEncoder(os.Stdout)}).Write,
+		EventWriter:    output.Write,
+		ReadyWriter:    output.WriteReady,
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
-	ready, err := server.Start()
+	_, err = server.Start()
 	if err != nil {
 		log.Fatal(err)
 	}
-	encoded, err := json.Marshal(ready)
-	if err != nil {
-		log.Fatal(err)
-	}
-	// This is the only readiness line. It is intentionally machine-readable so
-	// a preview script can capture the exact URL and policy it must exercise.
-	fmt.Println(string(encoded))
-
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop

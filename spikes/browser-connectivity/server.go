@@ -20,14 +20,16 @@ import (
 )
 
 const (
-	defaultHost     = "127.0.0.1"
-	defaultPath     = "/browser/v1"
-	maxFramePayload = 64 * 1024
-	maxHeaderBytes  = 16 * 1024
-	webSocketGUID   = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-	closeNormal     = 1000
-	closeProtocol   = 1002
-	closeTooBig     = 1009
+	defaultHost      = "127.0.0.1"
+	defaultPath      = "/browser/v1"
+	maxFramePayload  = 64 * 1024
+	maxHeaderBytes   = 16 * 1024
+	maxConnections   = 8
+	frameReadTimeout = 5 * time.Second
+	webSocketGUID    = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+	closeNormal      = 1000
+	closeProtocol    = 1002
+	closeTooBig      = 1009
 )
 
 var errInvalidFrame = errors.New("invalid websocket frame")
@@ -41,6 +43,8 @@ type Config struct {
 	Path           string
 	MaxPayload     int
 	EventWriter    func(ProbeEvent)
+	ReadyWriter    func(Ready)
+	ReadTimeout    time.Duration
 }
 
 func (c Config) validate() error {
@@ -55,6 +59,9 @@ func (c Config) validate() error {
 	}
 	if c.MaxPayload <= 0 || c.MaxPayload > maxFramePayload {
 		return fmt.Errorf("max payload must be between 1 and %d", maxFramePayload)
+	}
+	if c.ReadTimeout < 0 {
+		return fmt.Errorf("read timeout cannot be negative")
 	}
 	u, err := url.Parse(c.ExpectedOrigin)
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
@@ -76,18 +83,18 @@ type Ready struct {
 // ProbeEvent is the intentionally small JSONL evidence vocabulary. It records
 // policy inputs and lifecycle facts, never arbitrary HTTP headers or payloads.
 type ProbeEvent struct {
-	Event        string `json:"event"`
-	Result       string `json:"result,omitempty"`
-	Phase        string `json:"phase,omitempty"`
-	Host         string `json:"host"`
-	Origin       string `json:"origin"`
-	Path         string `json:"path"`
-	Status       int    `json:"status,omitempty"`
-	Direction    string `json:"direction,omitempty"`
-	Frame        string `json:"frame,omitempty"`
-	Bytes        int    `json:"bytes,omitempty"`
-	Code         int    `json:"code,omitempty"`
-	ConnectionID uint64 `json:"connection_id,omitempty"`
+	Event           string `json:"event"`
+	Result          string `json:"result,omitempty"`
+	Phase           string `json:"phase,omitempty"`
+	Host            string `json:"host"`
+	Origin          string `json:"origin"`
+	Path            string `json:"path"`
+	Status          int    `json:"status,omitempty"`
+	Direction       string `json:"direction,omitempty"`
+	Frame           string `json:"frame,omitempty"`
+	Bytes           int    `json:"bytes,omitempty"`
+	Code            int    `json:"code,omitempty"`
+	ConnectionIndex uint64 `json:"connection_index,omitempty"`
 }
 
 // Server owns only the probe listener and accepted WebSocket connections.
@@ -103,6 +110,7 @@ type Server struct {
 	closed bool
 	nextID uint64
 	wg     sync.WaitGroup
+	slots  chan struct{}
 }
 
 func NewServer(config Config) (*Server, error) {
@@ -115,10 +123,13 @@ func NewServer(config Config) (*Server, error) {
 	if config.MaxPayload == 0 {
 		config.MaxPayload = maxFramePayload
 	}
+	if config.ReadTimeout == 0 {
+		config.ReadTimeout = frameReadTimeout
+	}
 	if err := config.validate(); err != nil {
 		return nil, err
 	}
-	return &Server{config: config, conns: make(map[net.Conn]struct{})}, nil
+	return &Server{config: config, conns: make(map[net.Conn]struct{}), slots: make(chan struct{}, maxConnections)}, nil
 }
 
 // Start binds before returning, making readiness deterministic. Port zero is
@@ -144,6 +155,9 @@ func (s *Server) Start() (Ready, error) {
 		Handler:           http.HandlerFunc(s.handleHTTP),
 		ReadHeaderTimeout: 2 * time.Second,
 		MaxHeaderBytes:    maxHeaderBytes,
+	}
+	if s.config.ReadyWriter != nil {
+		s.config.ReadyWriter(s.ready)
 	}
 	go func() {
 		_ = s.http.Serve(listener)
@@ -186,7 +200,11 @@ func (s *Server) ActiveConnections() int {
 }
 
 func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet || r.URL.Path != s.config.Path || r.URL.RawQuery != "" {
+	if r.ProtoMajor != 1 || r.ProtoMinor != 1 {
+		s.rejectUpgrade(w, r, http.StatusHTTPVersionNotSupported, "http_version", "HTTP/1.1 required")
+		return
+	}
+	if r.Method != http.MethodGet || r.URL.Path != s.config.Path || r.URL.RawQuery != "" || r.URL.ForceQuery {
 		s.rejectUpgrade(w, r, http.StatusNotFound, "path", "websocket endpoint only")
 		return
 	}
@@ -199,7 +217,7 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		s.rejectUpgrade(w, r, http.StatusForbidden, "origin", "origin refused")
 		return
 	}
-	if !headerToken(r.Header.Get("Connection"), "upgrade") || !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+	if len(r.Header.Values("Connection")) != 1 || len(r.Header.Values("Upgrade")) != 1 || len(r.Header.Values("Sec-WebSocket-Version")) != 1 || !headerToken(r.Header.Get("Connection"), "upgrade") || !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 		s.rejectUpgrade(w, r, http.StatusBadRequest, "handshake", "websocket upgrade required")
 		return
 	}
@@ -218,8 +236,15 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		s.rejectUpgrade(w, r, http.StatusInternalServerError, "handshake", "hijacking unavailable")
 		return
 	}
+	select {
+	case s.slots <- struct{}{}:
+	default:
+		s.rejectUpgrade(w, r, http.StatusServiceUnavailable, "capacity", "connection capacity reached")
+		return
+	}
 	conn, rw, err := hijacker.Hijack()
 	if err != nil {
+		<-s.slots
 		return
 	}
 	acceptHash := sha1.Sum([]byte(key + webSocketGUID))
@@ -231,36 +256,33 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = conn.Close()
 		return
 	}
-	connectionID, reconnect, registered := s.addConnection(conn)
+	connectionID, registered := s.addConnection(conn)
 	if !registered {
+		<-s.slots
 		_ = conn.Close()
 		return
 	}
 	s.emit(ProbeEvent{Event: "upgrade", Result: "accepted", Host: r.Host, Origin: origins[0], Path: r.URL.Path, Status: http.StatusSwitchingProtocols})
-	phase := "open"
-	if reconnect {
-		phase = "reconnect"
-	}
-	s.emit(ProbeEvent{Event: "connection", Phase: phase, ConnectionID: connectionID})
+	s.emit(ProbeEvent{Event: "connection", Phase: "open", ConnectionIndex: connectionID})
 	defer func() {
-		s.emit(ProbeEvent{Event: "connection", Phase: "closed", ConnectionID: connectionID})
+		s.emit(ProbeEvent{Event: "connection", Phase: "closed", ConnectionIndex: connectionID})
 		s.removeConnection(conn)
+		<-s.slots
 		_ = conn.Close()
 	}()
 	s.serveWebSocket(conn, rw, connectionID)
 }
 
-func (s *Server) addConnection(conn net.Conn) (uint64, bool, bool) {
+func (s *Server) addConnection(conn net.Conn) (uint64, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return 0, false, false
+		return 0, false
 	}
 	s.nextID++
-	reconnect := s.nextID > 1
 	s.conns[conn] = struct{}{}
 	s.wg.Add(1)
-	return s.nextID, reconnect, true
+	return s.nextID, true
 }
 
 func (s *Server) removeConnection(conn net.Conn) {
@@ -272,6 +294,7 @@ func (s *Server) removeConnection(conn net.Conn) {
 
 func (s *Server) serveWebSocket(conn net.Conn, rw *bufio.ReadWriter, connectionID uint64) {
 	for {
+		_ = conn.SetReadDeadline(time.Now().Add(s.config.ReadTimeout))
 		frame, err := readFrame(rw.Reader, s.config.MaxPayload)
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
@@ -281,19 +304,19 @@ func (s *Server) serveWebSocket(conn net.Conn, rw *bufio.ReadWriter, connectionI
 			if errors.Is(err, errFrameTooLarge) {
 				code = closeTooBig
 			}
-			s.emit(ProbeEvent{Event: "frame", Result: "rejected", Direction: "inbound", Frame: "invalid", ConnectionID: connectionID})
+			s.emit(ProbeEvent{Event: "frame", Result: "rejected", Direction: "inbound", Frame: "invalid", ConnectionIndex: connectionID})
 			_ = writeClose(rw, code)
 			_ = rw.Flush()
-			s.emit(ProbeEvent{Event: "close", Result: "protocol_error", Code: code, ConnectionID: connectionID})
+			s.emit(ProbeEvent{Event: "close", Result: "protocol_error", Code: code, ConnectionIndex: connectionID})
 			return
 		}
 		switch frame.opcode {
 		case 2: // binary
-			s.emit(ProbeEvent{Event: "frame", Result: "accepted", Direction: "inbound", Frame: "binary", Bytes: len(frame.payload), ConnectionID: connectionID})
+			s.emit(ProbeEvent{Event: "frame", Result: "accepted", Direction: "inbound", Frame: "binary", Bytes: len(frame.payload), ConnectionIndex: connectionID})
 			if err := writeFrame(rw, 2, frame.payload); err != nil {
 				return
 			}
-			s.emit(ProbeEvent{Event: "frame", Result: "sent", Direction: "outbound", Frame: "binary", Bytes: len(frame.payload), ConnectionID: connectionID})
+			s.emit(ProbeEvent{Event: "frame", Result: "sent", Direction: "outbound", Frame: "binary", Bytes: len(frame.payload), ConnectionIndex: connectionID})
 		case 8: // close
 			_ = writeFrame(rw, 8, frame.payload)
 			_ = rw.Flush()
@@ -301,27 +324,26 @@ func (s *Server) serveWebSocket(conn net.Conn, rw *bufio.ReadWriter, connectionI
 			if len(frame.payload) >= 2 {
 				code = int(frame.payload[0])<<8 | int(frame.payload[1])
 			}
-			s.emit(ProbeEvent{Event: "close", Result: "graceful", Code: code, ConnectionID: connectionID})
+			s.emit(ProbeEvent{Event: "close", Result: "graceful", Code: code, ConnectionIndex: connectionID})
 			return
 		case 9: // ping
-			s.emit(ProbeEvent{Event: "frame", Result: "accepted", Direction: "inbound", Frame: "ping", Bytes: len(frame.payload), ConnectionID: connectionID})
+			s.emit(ProbeEvent{Event: "frame", Result: "accepted", Direction: "inbound", Frame: "ping", Bytes: len(frame.payload), ConnectionIndex: connectionID})
 			if err := writeFrame(rw, 10, frame.payload); err != nil {
 				return
 			}
-			s.emit(ProbeEvent{Event: "frame", Result: "sent", Direction: "outbound", Frame: "pong", Bytes: len(frame.payload), ConnectionID: connectionID})
+			s.emit(ProbeEvent{Event: "frame", Result: "sent", Direction: "outbound", Frame: "pong", Bytes: len(frame.payload), ConnectionIndex: connectionID})
 		case 10: // pong
 			// No application action is needed.
-			s.emit(ProbeEvent{Event: "frame", Result: "accepted", Direction: "inbound", Frame: "pong", Bytes: len(frame.payload), ConnectionID: connectionID})
+			s.emit(ProbeEvent{Event: "frame", Result: "accepted", Direction: "inbound", Frame: "pong", Bytes: len(frame.payload), ConnectionIndex: connectionID})
 		default:
 			_ = writeClose(rw, closeProtocol)
 			_ = rw.Flush()
-			s.emit(ProbeEvent{Event: "close", Result: "protocol_error", Code: closeProtocol, ConnectionID: connectionID})
+			s.emit(ProbeEvent{Event: "close", Result: "protocol_error", Code: closeProtocol, ConnectionIndex: connectionID})
 			return
 		}
 		if err := rw.Flush(); err != nil {
 			return
 		}
-		_ = conn.SetReadDeadline(time.Time{})
 	}
 }
 
@@ -384,6 +406,9 @@ func readFrameWithMask(r io.Reader, maxPayload int, requireMask bool) (frame, er
 			return frame{}, err
 		}
 		length = uint64(extended[0])<<8 | uint64(extended[1])
+		if length < 126 {
+			return frame{}, errInvalidFrame
+		}
 	} else if length == 127 {
 		var extended [8]byte
 		if _, err := io.ReadFull(r, extended[:]); err != nil {
@@ -394,6 +419,9 @@ func readFrameWithMask(r io.Reader, maxPayload int, requireMask bool) (frame, er
 		}
 		for _, b := range extended {
 			length = (length << 8) | uint64(b)
+		}
+		if length < 65536 {
+			return frame{}, errInvalidFrame
 		}
 	}
 	if length > uint64(maxPayload) || (opcode >= 8 && length > 125) {

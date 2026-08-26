@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"crypto/sha1"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -114,6 +115,8 @@ func TestFrameBoundsAndMalformedInput(t *testing.T) {
 		{"reserved-bit", []byte{0xc2, 0x81, 1, 2, 3, 4, 'x'}, errInvalidFrame},
 		{"text", maskedFrame(1, []byte("x"), [4]byte{1, 2, 3, 4}), errInvalidFrame},
 		{"oversized", []byte{0x82, 0xff, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0}, errFrameTooLarge},
+		{"noncanonical-126", []byte{0x82, 0xfe, 0, 125, 0, 0, 0, 0}, errInvalidFrame},
+		{"noncanonical-127", []byte{0x82, 0xff, 0, 0, 0, 0, 0, 0, 0, 125, 0, 0, 0, 0}, errInvalidFrame},
 		{"truncated-mask", []byte{0x82, 0x81, 1}, io.ErrUnexpectedEOF},
 	}
 	for _, tc := range cases {
@@ -264,7 +267,8 @@ func TestEvidenceEventsAreStructuredAndBounded(t *testing.T) {
 	waitForConnections(t, server, 0)
 
 	events := collector.snapshot()
-	var rejected, accepted, inbound, outbound, graceful, reconnect bool
+	var rejected, accepted, inbound, outbound, graceful bool
+	openCount := 0
 	for _, event := range events {
 		switch event.Event {
 		case "upgrade":
@@ -280,10 +284,12 @@ func TestEvidenceEventsAreStructuredAndBounded(t *testing.T) {
 		case "close":
 			graceful = graceful || event.Result == "graceful" && event.Code == 1000
 		case "connection":
-			reconnect = reconnect || event.Phase == "reconnect"
+			if event.Phase == "open" {
+				openCount++
+			}
 		}
 	}
-	if !rejected || !accepted || !inbound || !outbound || !graceful || !reconnect {
+	if !rejected || !accepted || !inbound || !outbound || !graceful || openCount != 2 {
 		t.Fatalf("missing structured evidence: %#v", events)
 	}
 }
@@ -311,6 +317,85 @@ func TestShutdownClosesConnectedSocket(t *testing.T) {
 	}
 }
 
+func TestDuplicateHeadersHTTPVersionForceQueryAndCapacityRefuse(t *testing.T) {
+	server := testServer(t)
+	for _, extra := range []string{
+		"Upgrade: websocket\r\n",
+		"Connection: Upgrade\r\n",
+		"Sec-WebSocket-Version: 13\r\n",
+	} {
+		conn, response, _, err := handshakeWith(server, server.Ready().ExpectedHost, stringPtr(testOrigin), "HTTP/1.1", server.Ready().Path, extra)
+		if err != nil {
+			t.Fatal(err)
+		}
+		conn.Close()
+		if response.StatusCode != http.StatusBadRequest {
+			t.Fatalf("duplicate header status = %d", response.StatusCode)
+		}
+	}
+	conn, response, _, err := handshakeWith(server, server.Ready().ExpectedHost, stringPtr(testOrigin), "HTTP/1.0", server.Ready().Path, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	if response.StatusCode != http.StatusHTTPVersionNotSupported {
+		t.Fatalf("HTTP/1.0 status = %d", response.StatusCode)
+	}
+	conn, response, _, err = handshakeWith(server, server.Ready().ExpectedHost, stringPtr(testOrigin), "HTTP/1.1", server.Ready().Path+"?", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("ForceQuery status = %d", response.StatusCode)
+	}
+
+	connections := make([]net.Conn, 0, maxConnections)
+	for i := 0; i < maxConnections; i++ {
+		conn, response, _, err := openWebSocket(server)
+		if err != nil || response.StatusCode != http.StatusSwitchingProtocols {
+			t.Fatalf("capacity connection %d: response=%v error=%v", i, response, err)
+		}
+		connections = append(connections, conn)
+	}
+	conn, response, _, err = openWebSocket(server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	if response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("over-capacity status = %d", response.StatusCode)
+	}
+	for _, conn := range connections {
+		conn.Close()
+	}
+	waitForConnections(t, server, 0)
+}
+
+func TestPartialFrameReadDeadline(t *testing.T) {
+	server, err := NewServer(Config{BindHost: defaultHost, Port: 0, ExpectedOrigin: testOrigin, ReadTimeout: 20 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	conn, response, reader, err := openWebSocket(server)
+	if err != nil || response.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("upgrade response=%v error=%v", response, err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte{0x82, 0x81, 1}); err != nil {
+		t.Fatal(err)
+	}
+	conn.SetReadDeadline(time.Now().Add(time.Second))
+	closeFrame, err := readFrameWithMask(reader, maxFramePayload, false)
+	if err != nil || closeFrame.opcode != 8 || !bytes.Equal(closeFrame.payload, closePayload(closeProtocol)) {
+		t.Fatalf("partial frame refusal=%#v error=%v", closeFrame, err)
+	}
+}
+
 func TestProbePageIsSelfContainedAndCredentialFree(t *testing.T) {
 	data, err := os.ReadFile("probe.html")
 	if err != nil {
@@ -328,6 +413,29 @@ func TestProbePageIsSelfContainedAndCredentialFree(t *testing.T) {
 	if strings.Contains(page, "setTimeout") || !strings.Contains(page, "socket.close(1000") {
 		t.Error("explicit close must not schedule an automatic reconnect")
 	}
+	for _, required := range []string{
+		"const thisGeneration = ++generation",
+		"try {\n        connection = new WebSocket",
+		"catch (error) {",
+		"successfulGeneration = true",
+		"binary send requested while closed",
+		"binary send failed",
+	} {
+		if !strings.Contains(page, required) {
+			t.Errorf("probe page lacks failure-safe behavior %q", required)
+		}
+	}
+}
+
+func TestReadinessAndEventsShareOneOrderedWriter(t *testing.T) {
+	var output bytes.Buffer
+	writer := &jsonEventWriter{encoder: json.NewEncoder(&output)}
+	writer.WriteReady(Ready{URL: "ws://127.0.0.1:1/browser/v1"})
+	writer.Write(ProbeEvent{Event: "upgrade", Result: "accepted", Status: http.StatusSwitchingProtocols})
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], `"url":"ws://127.0.0.1:1/browser/v1"`) || !strings.Contains(lines[1], `"event":"upgrade"`) {
+		t.Fatalf("readiness/events order = %q", output.String())
+	}
 }
 
 func stringPtr(value string) *string { return &value }
@@ -337,15 +445,20 @@ func openWebSocket(server *Server) (net.Conn, *http.Response, *bufio.Reader, err
 }
 
 func handshake(server *Server, host string, origin *string) (net.Conn, *http.Response, *bufio.Reader, error) {
+	return handshakeWith(server, host, origin, "HTTP/1.1", server.Ready().Path, "")
+}
+
+func handshakeWith(server *Server, host string, origin *string, protocol, path, extra string) (net.Conn, *http.Response, *bufio.Reader, error) {
 	conn, err := net.Dial("tcp", server.listener.Addr().String())
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 16))
-	request := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\n", server.Ready().Path, host, key)
+	request := fmt.Sprintf("GET %s %s\r\nHost: %s\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\n", path, protocol, host, key)
 	if origin != nil {
 		request += "Origin: " + *origin + "\r\n"
 	}
+	request += extra
 	request += "\r\n"
 	if _, err := io.WriteString(conn, request); err != nil {
 		conn.Close()

@@ -34,6 +34,8 @@
     const closeButton = document.getElementById("close");
     let socket;
     let opened = false;
+    let generation = 0;
+    let successfulGeneration = false;
 
     function report(next, detail) {
       state.textContent = next;
@@ -44,14 +46,28 @@
       closeButton.disabled = !socket || socket.readyState > WebSocket.OPEN;
     }
     function connectSocket(isReconnect) {
-      if (socket && socket.readyState < WebSocket.CLOSING) socket.close();
-      report(isReconnect ? "reconnecting" : "connecting");
-      const connection = new WebSocket(LOOPBACK_WS_URL);
+      const previous = socket;
+      const thisGeneration = ++generation;
+      const reconnecting = isReconnect && successfulGeneration;
+      socket = undefined;
+      opened = false;
+      setButtons();
+      if (previous && previous.readyState < WebSocket.CLOSING) previous.close();
+      report(reconnecting ? "reconnecting" : "connecting");
+      let connection;
+      try {
+        connection = new WebSocket(LOOPBACK_WS_URL);
+      } catch (error) {
+        if (thisGeneration === generation) report("error", "WebSocket constructor failed");
+        return;
+      }
       socket = connection;
       connection.binaryType = "arraybuffer";
       connection.onopen = () => {
+        if (thisGeneration !== generation) return;
         opened = true;
-        report(isReconnect ? "reconnected" : "open");
+        successfulGeneration = true;
+        report(reconnecting ? "reconnected" : "open");
         setButtons();
       };
       connection.onmessage = (event) => {
@@ -61,8 +77,9 @@
       connection.onerror = () => report("error", "WebSocket connection failed");
       connection.onclose = (event) => {
         report("closed", `code ${event.code}`);
-        if (socket === connection) {
+        if (thisGeneration === generation) {
           opened = false;
+          socket = undefined;
           setButtons();
         }
       };
@@ -70,8 +87,30 @@
     }
     connectButton.onclick = () => connectSocket(false);
     reconnectButton.onclick = () => connectSocket(true);
-    sendButton.onclick = () => socket.send(new TextEncoder().encode("browser-connectivity"));
-    closeButton.onclick = () => socket.close(1000, "probe complete");
+    sendButton.onclick = () => {
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        report("error", "binary send requested while closed");
+        setButtons();
+        return;
+      }
+      try {
+        socket.send(new TextEncoder().encode("browser-connectivity"));
+      } catch (error) {
+        report("error", "binary send failed");
+      }
+    };
+    closeButton.onclick = () => {
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        report("error", "close requested while closed");
+        setButtons();
+        return;
+      }
+      try {
+        socket.close(1000, "probe complete");
+      } catch (error) {
+        report("error", "close failed");
+      }
+    };
     report("ready", "press connect");
   </script>
 </body>
