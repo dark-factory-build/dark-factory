@@ -43,9 +43,9 @@ branch/worktree and obeys that repository's `AGENTS.md`.
 
 | State | Exact work retained or stopped |
 |---|---|
-| Complete and retained | Fresh SQLite contract; typed kernel; atomic admission; exact attempt credentials; run/finalizing/resource state; bounded invalidations; Change ownership/materialization groundwork; owner-only Unix control API; typed `factoryctl` client; Darwin process identity; two blocked-exec gates; terminal-exit spool; gated Darwin PTY primitive; durable terminal-session admission, activation, recovery uncertainty and finalization guards; durable browser clients/challenges/revocation/input leases; exact PAIR/AUTH transcripts; strict browser-v1 handshake/binary codecs; strict runner terminal union, complete-write poisoning, incremental frame decoder and one fixed replay ring through `f1f72aa` |
+| Complete and retained | Fresh SQLite contract; typed kernel; atomic admission; exact attempt credentials; run/finalizing/resource state; bounded invalidations; Change ownership/materialization groundwork; owner-only Unix control API; typed `factoryctl` client; Darwin process identity; two blocked-exec gates; terminal-exit spool; gated Darwin PTY primitive; durable terminal-session admission, activation, recovery uncertainty and finalization guards; durable browser clients/challenges/revocation/input leases; exact PAIR/AUTH transcripts; strict browser-v1 handshake/binary codecs; strict runner terminal union, complete-write poisoning, incremental frame decoder and one fixed replay ring through `f1f72aa`; reviewed framework-neutral `@dark-factory/client` handshake/transcript/binary core and exact package gate through `d03491f` |
 | Reusable with adaptation | `internal/runner` live-child/process-group ownership; daemon supervisor choreography; bounded API framing/auth separation; dashboard projection/client reducer direction; rebased recovery branch `go-recovery-reserved-fix` at `185cd5f`; fail-closed runtime/spool/Change close branches at `f239815`, `347c977`, and `4183205` |
-| In progress but held | The live PTY-owner loop is isolated on `go-runner-terminal-loop`; the framework-neutral TypeScript contract has code review ALLOW and awaits its generated lockfile/package exact-head review. Recovery remains unintegrated until PTY tail, daemon-loss and input-generation semantics replace the remaining non-interactive runner assumptions and the close patches are replayed/re-reviewed. |
+| In progress but held | The live PTY-owner loop is isolated on `go-runner-terminal-loop`. Recovery remains unintegrated until PTY tail, daemon-loss and input-generation semantics replace the remaining non-interactive runner assumptions and the close patches are replayed/re-reviewed. The newly frozen HumanRequest question foundation and daemon live-attempt mailbox remain unimplemented. |
 | Obsolete | Startup-input-only/closed-stdin provider contract; separate stdin/stdout/stderr provider pipes as the product transport; TUI/Bubble Tea packages, lanes and parity tests; generic attention projection; message-on-next-run as the live-question answer |
 | Proved for revised architecture | Current Chrome on macOS can connect from the protected hosted HTTPS preview to exact `ws://127.0.0.1:43123` with the dedicated loopback permission; strict Origin/Host checks, binary traffic, reconnect, denial, no-daemon, port-collision and cross-site refusal are causal. A fresh Darwin PTY child remains inert until release, owns a controlling terminal/process group and is reaped without orphaning. SQLite now owns exactly one terminal session per admitted run and refuses terminalization until its exact close is proved. |
 | Blocked until proved | Live runner execution of PTY attach/input/resize/output replay and daemon-loss cleanup; loopback transport authentication/Host/Origin security over the durable browser authority; durable `HumanRequest`; complete browser protocol operations beyond the reviewed handshake/binary core; TypeScript connection/reconnect client; public web UI; complete private host integration; revised crash-cut vertical slice |
@@ -61,6 +61,23 @@ Read-only redirection audits were assigned without overlapping writes:
 
 Their concrete conclusions are incorporated below. Broad production work does
 not resume until this revised plan is committed.
+
+Two further cold audits reviewed exact canonical head `d03491f` after the
+browser-authority, runner-protocol and TypeScript foundations landed:
+
+- `human_request_contract_audit_v2` blocked the ambiguous generic request/action
+  wording and allowed only the question-first, one-table contract recorded
+  below. It removed duplicate ownership identifiers, arbitrary public prose,
+  the action table, speculative action kinds and automatic uncertain replay.
+- `daemon_terminal_backend_audit` blocked WebSocket implementation until one
+  joined live-attempt owner, a bounded command mailbox, per-observer cursor
+  routing, lease-install failure revocation and non-abandoning shutdown are
+  explicit. It confirmed that the runner ring can remain the only replay copy
+  and that no generic pubsub/backend service layer is needed.
+
+Both audits were read-only and returned their causal/mutation matrices. They
+could not execute Go tests in their isolated shells because `go` was absent
+from those PATHs; their conclusions are design evidence, not test evidence.
 
 ### PTY and durable terminal-session checkpoint
 
@@ -533,19 +550,25 @@ identity are explicitly deferred.
 
 ### Durable `HumanRequest` / NEEDS YOU
 
-`HumanRequest` is a first-class durable request for a specific human reply or
-daemon-authorized action. It is not a generic warning or attention score.
+`HumanRequest` is a first-class durable request for one specific human reply.
+It is not a generic warning or attention score. Daemon-authorized typed actions
+share its browser card later, but do not widen the first question foundation.
 Routine failure, delay, capacity wait, finalization stall and any condition
 routine automation can resolve stay in task/run/system status.
 
-The fresh schema uses one concrete request table plus a finite action table or
-equivalent normalized rows. It records exact 16-byte identifiers for project,
-agent, task, task incarnation and (for an agent question) run; positive
-revision and timestamps; bounded daemon-derived `kind`, `title`, `summary`,
-`why_human_is_needed`, typed context items, status, idempotency identity,
-resolution and delivery identity. The initial closed kinds are `question`,
-`action`, and `combined`; statuses are `open`, `delivering`, `resolved`,
-`stale`, and policy-gated `dismissed`.
+The first fresh-schema foundation is exactly one `human_requests` table. It
+stores a 16-byte request ID, exact `run_id`, 16-byte idempotency key, closed
+`question` kind and `provider_question` reason code, private UTF-8
+`question_text` capped at 8 KiB, positive revision and timestamps. Its closed
+statuses are `open`, `delivering`, `delivery_unknown`, `resolved`, and `stale`.
+Delivery ID/start time, resolution kind and close time are nullable only in the
+states that use them. A unique `(run_id, idempotency_key)` makes creation
+idempotent; a partial unique index permits at most one `open`, `delivering` or
+`delivery_unknown` request per run. The same immediate write transaction caps
+all unresolved requests at 1,024. Store only `run_id`: project, agent, task and
+incarnation are derived through canonical joins instead of duplicating foreign
+keys and creating mismatch states. There is no action table, arbitrary JSON,
+generic request kind or dismissal state in this slice.
 
 The bounded watch/dashboard projection contains only daemon-derived safe
 metadata:
@@ -563,52 +586,66 @@ interaction labels, action choices, destinations or public fields. The daemon
 derives the public card from canonical agent/task/run facts and a closed reason
 code. Arbitrary agent question text is stored as private request detail, never
 embedded in invalidations, snapshots, logs, metrics or errors. It is fetched
-only by a paired client with an explicit `human_request_detail` capability,
+only by a paired client with the explicit
+`private_human_request_detail` capability,
 escaped/rendered as hostile text, and capped independently. Observation-only
 clients without that capability see only safe metadata. This is an intentional
 private operator channel, not a public projection or sanitization claim.
 
-Interactions are one explicit union:
+The question card initially exposes only this explicit interaction union:
 
 - `InlineReply(max_bytes)`;
-- daemon-minted `TypedAction(id, label, kind)` with opaque server-owned
-  arguments and revalidated preconditions;
 - `OpenTerminal(run_id)`.
 
-The initial typed action set is finite: approve, reject, retry, cancel, resume,
-publish and narrowly defined permission grants. An agent may create only a
-bounded private question through an authenticated `request_human` operation.
-It cannot mint public card text, a button, label, action kind, arguments or
-authority. The daemon derives all identity from the exact attempt credential
-and decides which actions exist.
+An agent may create only a bounded private question through an authenticated
+`request_human` operation. It cannot mint public card text, a button, label,
+action kind, arguments or authority. The daemon derives all identity from the
+exact attempt credential and decides which interactions exist.
 
 Creation is unique for one exact `(run, request idempotency identity)`. Viewing,
-subscribing or opening the terminal never resolves it. Reply/action requires
-expected request revision and revalidates the exact current run/state. A stale
-origin never routes to a later run. Underlying-state resolution, explicit
-staleness and permitted dismissal each commit once with one invalidation.
+subscribing or opening the terminal never resolves it. Reply requires expected
+request revision and revalidates the exact current run/state. A stale origin
+never routes to a later run. Underlying-state resolution and explicit staleness
+each commit once with one `HumanRequest` invalidation.
 
 Inline PTY delivery is an external effect and therefore explicit:
 
 ```text
 open
-→ delivering(delivery_id, bounded reply)
-→ daemon commits the delivery receipt before issuing the runner command
+→ daemon commits delivering(delivery_id) before issuing the runner command
 → exact live runner writes once and acknowledges delivery_id
 → resolved(reply)
+
+or, after any partial/timed-out/uncertain effect:
+
+delivering → delivery_unknown → never replay automatically
 ```
 
 The daemon owns the Store transaction and durable delivery state; the runner is
-Store-blind. The daemon first commits `delivering(delivery_id, bounded reply)`,
-then sends that exact command to the live runner. The runner suppresses
-duplicate delivery IDs in the live session, performs the PTY write and returns
-an ACK; only the daemon may commit `resolved(reply)`. If recovery proves no
-delivery receipt exists, delivery may be attempted once. A committed receipt
-without positive write acknowledgement is `delivery unknown`, never replayed.
-The request remains visible and non-resolved for operator recovery. This
-fail-closed edge is preferable to injecting a duplicate answer. Purely internal
-typed actions commit their state effect, request resolution and invalidations
-in one immediate SQLite transaction.
+Store-blind. `BeginHumanReply` commits the exact delivery receipt before the
+daemon sends one bounded reply to the live runner; the reply bytes remain
+ephemeral and are not copied into durable/public state. Only a complete PTY
+write ACK lets the daemon commit `resolved(reply)`. Partial, timeout, daemon
+crash, lost ACK or any uncertainty commits or recovers to `delivery_unknown`;
+restart converts a stranded `delivering` row to `delivery_unknown` and never
+replays it. The request remains visible and non-resolved for operator recovery.
+This fail-closed edge is preferable to injecting a duplicate answer.
+
+Entering finalizing atomically changes `open` to `stale` and `delivering` to
+`delivery_unknown` in the same transaction as outcome selection, attempt and
+terminal-input revocation, and run/request invalidations. Terminalization may
+then make residual `delivery_unknown` requests stale exactly once. No request
+transition may route to a later retry run.
+
+The first real typed action is deliberately deferred until the question
+foundation and live runner gate hold. Its frozen boundary is only
+`cancel_run`, because the kernel already owns that finite transition. A paired
+client with `human_actions` submits no arguments, only exact request and run
+revisions. One immediate Store transaction revalidates both sources and the
+client capability, enters the exact run into finalizing, revokes attempt/input
+authority, resolves the request as `action_cancel_run`, and emits both
+invalidations. Do not add action rows or implement approve, reject, retry,
+resume, publish or permission grants without a concrete product contract.
 
 ### Browser protocol v1
 `factoryd` initially hosts the loopback WebSocket adapter in
@@ -647,13 +684,51 @@ The adapter never imports `internal/kernel` or `internal/runner`, and no service
 or repository wrapper sits between daemon and Store.
 
 Transport implementation remains blocked until the daemon owns a registered
-live-attempt object outside `RunNext`: exact runner/PTY owner, one PTY reader,
-bounded scrollback and subscribers, resize, and fixed per-client-then-per-run
-operation gates. Existing supervisor wake hints are not a browser event bus.
-The live-attempt surface exposes no PID, PGID, descriptor, signal or child
+live-attempt object outside the current indivisible `RunNext` call. The daemon
+root owns and joins one named execution context per admitted attempt. That
+context is the sole reader and sole serialized writer of its
+`AttemptController`; browser handlers and local-API handlers never read or
+write the controller. It owns a bounded typed command mailbox, exact run and
+terminal-session identity, lifecycle state and a direct subscriber map. It
+exposes no PID, PGID, descriptor, signal or child authority.
+
+The command mailbox, not a generic RPC/pubsub layer, lets the same owner loop
+interleave runner frames and terminal operations. Each command has one
+capacity-one result path and a bounded deadline. The owner never spawns an
+operation goroutine and never abandons a reserved input sequence because its
+caller disconnected. Once Store reserves input, the owner either obtains the
+one bounded runner result or revokes that generation as unusable; it never
+retries a partial or unknown effect. Durable lease acquisition precedes runner
+generation installation. Failure or uncertain acknowledgement advances and
+revokes that exact Store generation before any later input may be accepted.
+Local-API outcome requests use this same per-run serialization path rather
+than calling finalizing Store transitions around it.
+
+The runner ring remains the only replay buffer. Each daemon subscriber stores
+only its expected byte cursor plus a bounded transient delivery queue. For an
+output range, exact start advances the subscriber, an already-covered end is
+suppressed, a gap or overlap resets that subscriber, and reconnect replay is
+routed only to the requesting subscriber. A slow observer is reset/detached;
+it cannot block controller reads, PTY drain or another observer. Multiple
+attachments therefore do not turn the runner's aggregate cursor into shared
+browser state or require a second byte ring.
+
+The browser-owned backend interface uses only browser DTOs for pairing/auth,
+snapshot/watch, HumanRequest operations, terminal attach/detach, lease,
+input and resize. A terminal attachment provides bounded `Next(ctx)` and a
+synchronous `Close` that detaches and joins; it is not a raw channel. The
+adapter never imports Store or runner types. Client then run is the only gate
+order; the attempt owner never acquires a client gate.
+
+PTY EOF remains observation, not terminal/process authority. Exact child wait
+and owned-group convergence precede resource release and browser terminal-exit
+projection. Normal daemon shutdown closes listeners, rejects new commands,
+asks every live runner to converge and synchronously joins each attempt,
+connection and attachment owner. It remains visibly stopping and does not
+abandon a live owner merely because a timeout elapsed. Forced daemon death is
+handled by restart as unresolved numeric identity, never recovered signal
 authority. Revocation commits before a non-reentrant callback closes that
-client's connections; shutdown cancels and joins every listener, connection,
-attachment, reader and subscription owner.
+client's connections.
 
 The source of truth stays deliberately small:
 
@@ -1086,14 +1161,16 @@ browser manifest, terminal messages or HumanRequest transitions concurrently.
    Chrome evidence. Freeze direct ws or the smallest fallback before production
    browser transport.
 3. **Lane A: kernel** — complete current recovery/close integration, then own
-   HumanRequest schema, Store transitions, action authority and public
-   projection.
+   the question-only HumanRequest schema, Store transitions, lifecycle staling,
+   private detail and safe public projection. Add only `cancel_run` after that
+   foundation and the daemon run gate are proven; do not prebuild action rows.
 4. **Lane B: PTY runtime** — adapt `internal/runner` and supervisor to PTY,
    bounded scrollback, input sequencing/receipts, lease enforcement, shutdown
    and process/FD/goroutine proof.
-5. **Lane C: browser transport** — own `internal/browser`, loopback listener,
-   WebSocket frames, Host/Origin, pairing, client credentials, multiplexing,
-   backpressure and reconnect. It consumes frozen A/B contracts.
+5. **Lane C: browser transport** — first add the joined daemon live-attempt
+   registry/mailbox and observer routing, then own `internal/browser`, loopback
+   listener, WebSocket frames, Host/Origin, pairing, client credentials,
+   multiplexing, backpressure and reconnect. It consumes frozen A/B contracts.
 6. **Lane D: TypeScript client** — own `protocol/browser/v1`,
    `web/packages/client`, fixtures and real-Go-server compatibility tests.
 7. **Lane E: public UI** — own `web/packages/ui` and `web/apps/dev`: BUILDING,
@@ -1153,14 +1230,16 @@ matrix, the following must exist and kill the named guard mutations:
   safety cleanup.
 - HumanRequest creation is idempotent; viewing does not clear; restart
   preserves; stale run/revision refuses; duplicate/uncertain delivery never
-  injects twice; routine failure never creates one.
+  injects twice; routine failure never creates one. The same write transaction
+  enforces one unresolved request per run and the fixed 1,024 global bound.
 - HumanRequest delivery cuts after the daemon receipt commit, before the runner
   command, after the PTY write and before the ACK prove that the Store-blind
   runner never owns durable state and every uncertain delivery remains visible
   without replay.
 - Attempts can supply only private bounded question text. Mutations that copy it
   into safe metadata/watch/log/error frames are killed by per-field secret
-  exfiltration tests; clients without `human_request_detail` cannot fetch it.
+  exfiltration tests; clients without `private_human_request_detail` cannot
+  fetch it.
 - An attempt cannot mint a typed action. Removing daemon action allowlisting or
   current-state precondition checks is killed by authority tests.
 - Every public/browser frame is scanned against private sentinels from task
@@ -1468,15 +1547,16 @@ not a compatibility target.
   API used by the CLI (#30).
 - Replace display-string control flow and whole-profile read/modify/write with
   typed actions and revision-checked granular updates.
-- Define NEEDS YOU as a typed projection derived from canonical durable facts,
-  not a second decision table. Initial actionable producers are
-  paused-with-queued-work (`ResumeAgent`), exhausted-budget-with-queued-work
-  (`ResetBudget`), and a blocked task (`RetryTask`). Failed runs,
-  finalization stalls, and capacity waits remain status/inspection, not fake
-  decisions. Each choice binds source entity/revision; only operator authority
-  may execute it, and the mutation, invalidation, and resulting durable intent
-  commit atomically. Exact replay is idempotent; stale/conflicting/already
-  resolved or attempt-authenticated choices fail closed (#199, #358, #362).
+- Replace the old generic NEEDS YOU/attention projection with the question-first
+  durable `HumanRequest` contract above. A request exists only for one exact
+  authenticated running attempt that explicitly needs a human reply. Failed
+  runs, finalization stalls, capacity waits, paused agents, exhausted budgets
+  and blocked tasks remain canonical status unless a later concrete
+  daemon-owned action contract proves they require an operator decision. The
+  first such typed action is only exact revision-checked `cancel_run`; no
+  `ResumeAgent`, `ResetBudget`, `RetryTask` or generic action rows are carried
+  forward merely because the Rust projection once named them (#199, #358,
+  #362).
 - Prove budget exhaustion directly gates admission (#332) and make durable
   capacity policy Store-owned rather than ordinary-caller supplied.
 - Give `GoWorkspaceTest` an explicit, bounded environment:
