@@ -213,121 +213,29 @@ func TestFinalizerRequiresEveryReleasedResourceAndExactTask(t *testing.T) {
 	}
 }
 
-func TestWorkerVerificationFailureIsTheOnlyTerminalRefinement(t *testing.T) {
-	proposal, _ := NewSuccessProposal("proposed result")
-	store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationRustWorkspaceTest, proposal)
-	path := storePath(t, store)
-	second, err := Open(context.Background(), path)
-	if err != nil {
-		store.Close()
-		t.Fatal(err)
-	}
-	defer store.Close()
-	defer second.Close()
-	failure, _ := NewVerificationFailure("verification failed")
-	before, _ := store.Factory(context.Background())
-	start := make(chan struct{})
-	errorsSeen := make(chan error, 2)
-	for _, candidate := range []*Store{store, second} {
-		go func(candidate *Store) {
-			<-start
-			_, err := candidate.FinalizeRunAfterVerification(context.Background(), finalizing.ID, finalizing.Revision, failure, mustTime(t, 80))
-			errorsSeen <- err
-		}(candidate)
-	}
-	close(start)
-	for range 2 {
-		if err := <-errorsSeen; err != nil {
-			t.Fatalf("concurrent exact refinement: %v", err)
+func TestConfiguredWorkerSuccessCannotFinalizeWithoutVerifierState(t *testing.T) {
+	success, _ := NewSuccessProposal("done")
+	for _, policy := range []VerificationPolicy{VerificationRustWorkspaceTest, VerificationGoWorkspaceTest} {
+		store, finalizing := finalizingReleasedRun(t, RoleWorker, policy, success)
+		before, _ := store.Factory(context.Background())
+		if _, err := store.FinalizeRun(context.Background(), finalizing.ID, finalizing.Revision, mustTime(t, 80)); !errors.Is(err, ErrConflict) {
+			store.Close()
+			t.Fatalf("policy %s finalization = %v", policy.String(), err)
 		}
-	}
-	terminal, found, err := store.Run(context.Background(), finalizing.ID)
-	if err != nil || !found || terminal.Phase != RunTerminal || terminal.Proposal == nil || !terminal.Proposal.equal(proposal) || terminal.Terminal == nil || terminal.Terminal.kind != OutcomeFailed || terminal.Terminal.code != FailureUnverifiable || terminal.Terminal.detail != failure.detail || terminal.CredentialRevokedAt == nil || finalizing.CredentialRevokedAt == nil || *terminal.CredentialRevokedAt != *finalizing.CredentialRevokedAt {
-		t.Fatalf("refined terminal = %+v found=%v err=%v", terminal, found, err)
-	}
-	task, _, _ := store.Task(context.Background(), finalizing.TaskID)
-	if task.Status != TaskFailed || task.Result != "" {
-		t.Fatalf("refined task = %+v", task)
-	}
-	after, _ := store.Factory(context.Background())
-	if after.Head.Int64() != before.Head.Int64()+3 {
-		t.Fatalf("terminal invalidations before=%+v after=%+v", before, after)
-	}
-	different, _ := NewVerificationFailure("different")
-	if _, err := store.FinalizeRunAfterVerification(context.Background(), terminal.ID, finalizing.Revision, different, mustTime(t, 90)); !errors.Is(err, ErrConflict) {
-		t.Fatalf("different refinement replay = %v", err)
-	}
-	if _, err := store.FinalizeRun(context.Background(), terminal.ID, finalizing.Revision, mustTime(t, 91)); !errors.Is(err, ErrConflict) {
-		t.Fatalf("plain finalizer rewrote refined terminal = %v", err)
-	}
-	finalHead, _ := store.Factory(context.Background())
-	if finalHead.Head != after.Head {
-		t.Fatalf("conflicting replay appended invalidation: before=%+v after=%+v", after, finalHead)
+		fresh, found, err := store.Run(context.Background(), finalizing.ID)
+		after, _ := store.Factory(context.Background())
+		store.Close()
+		if err != nil || !found || fresh.Phase != RunFinalizing || fresh.Terminal != nil || fresh.CredentialRevokedAt == nil || after.Head != before.Head {
+			t.Fatalf("policy %s footprint run=%+v found=%v err=%v before=%+v after=%+v", policy.String(), fresh, found, err, before, after)
+		}
 	}
 }
 
-func TestConcurrentPlainAndRefinedFinalizersChooseOneTerminal(t *testing.T) {
-	proposal, _ := NewSuccessProposal("proposed result")
-	store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationGoWorkspaceTest, proposal)
-	path := storePath(t, store)
-	second, err := Open(context.Background(), path)
-	if err != nil {
-		store.Close()
-		t.Fatal(err)
-	}
-	defer store.Close()
-	defer second.Close()
-	failure, _ := NewVerificationFailure("verification failed")
-	before, _ := store.Factory(context.Background())
-	start := make(chan struct{})
-	errorsSeen := make(chan error, 2)
-	go func() {
-		<-start
-		_, err := store.FinalizeRun(context.Background(), finalizing.ID, finalizing.Revision, mustTime(t, 80))
-		errorsSeen <- err
-	}()
-	go func() {
-		<-start
-		_, err := second.FinalizeRunAfterVerification(context.Background(), finalizing.ID, finalizing.Revision, failure, mustTime(t, 80))
-		errorsSeen <- err
-	}()
-	close(start)
-	accepted, conflicts := 0, 0
-	for range 2 {
-		err := <-errorsSeen
-		if err == nil {
-			accepted++
-		} else if errors.Is(err, ErrConflict) {
-			conflicts++
-		} else {
-			t.Fatalf("concurrent finalizer = %v", err)
-		}
-	}
-	if accepted != 1 || conflicts != 1 {
-		t.Fatalf("accepted=%d conflicts=%d", accepted, conflicts)
-	}
-	terminal, _, err := store.Run(context.Background(), finalizing.ID)
-	if err != nil || terminal.Terminal == nil || terminal.Proposal == nil || terminal.Phase != RunTerminal {
-		t.Fatalf("terminal = %+v, %v", terminal, err)
-	}
-	if !terminal.Terminal.equal(*terminal.Proposal) && terminal.Terminal.code != FailureUnverifiable {
-		t.Fatalf("terminal escaped narrow outcomes: %+v", terminal)
-	}
-	after, _ := store.Factory(context.Background())
-	if after.Head.Int64() != before.Head.Int64()+3 {
-		t.Fatalf("concurrent finalizer invalidations before=%+v after=%+v", before, after)
-	}
-}
-
-func TestVerificationRefinementRejectsInapplicableRuns(t *testing.T) {
-	if _, err := NewFailureProposal(FailureUnverifiable, "cannot be proposed"); !errors.Is(err, ErrInvalidValue) {
-		t.Fatalf("unverifiable proposal = %v", err)
-	}
+func TestOnlyConfiguredWorkerSuccessRequiresLaterVerifier(t *testing.T) {
 	success, _ := NewSuccessProposal("done")
 	blocked, _ := NewBlockedProposal("blocked")
 	failed, _ := NewFailureProposal(FailureInternal, "failed")
 	cancelled, _ := NewCancelledProposal("cancelled")
-	runnerExit, _ := NewFailureProposal(FailureRunnerExit, "provider exited")
 	tests := []struct {
 		name     string
 		role     AgentRole
@@ -339,24 +247,14 @@ func TestVerificationRefinementRejectsInapplicableRuns(t *testing.T) {
 		{name: "blocked", role: RoleWorker, policy: VerificationGoWorkspaceTest, proposal: blocked},
 		{name: "failed", role: RoleWorker, policy: VerificationGoWorkspaceTest, proposal: failed},
 		{name: "cancelled", role: RoleWorker, policy: VerificationGoWorkspaceTest, proposal: cancelled},
-		{name: "provider exit", role: RoleWorker, policy: VerificationGoWorkspaceTest, proposal: runnerExit},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			store, finalizing := finalizingReleasedRun(t, test.role, test.policy, test.proposal)
 			defer store.Close()
-			failure, _ := NewVerificationFailure("not applicable")
-			before, _ := store.Factory(context.Background())
-			if _, err := store.FinalizeRunAfterVerification(context.Background(), finalizing.ID, finalizing.Revision, failure, mustTime(t, 80)); !errors.Is(err, ErrConflict) {
-				t.Fatalf("refinement = %v", err)
-			}
-			fresh, _, _ := store.Run(context.Background(), finalizing.ID)
-			after, _ := store.Factory(context.Background())
-			if fresh.Phase != RunFinalizing || after.Head != before.Head {
-				t.Fatalf("rejected refinement footprint run=%+v before=%+v after=%+v", fresh, before, after)
-			}
-			if _, err := store.FinalizeRun(context.Background(), finalizing.ID, finalizing.Revision, mustTime(t, 81)); err != nil {
-				t.Fatalf("ordinary finalization after rejection: %v", err)
+			terminal, err := store.FinalizeRun(context.Background(), finalizing.ID, finalizing.Revision, mustTime(t, 81))
+			if err != nil || terminal.Phase != RunTerminal || terminal.Terminal == nil || !terminal.Terminal.equal(test.proposal) {
+				t.Fatalf("terminal = %+v, %v", terminal, err)
 			}
 		})
 	}
@@ -373,11 +271,10 @@ func TestVerificationAndTerminalCorruptionFailClosed(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			proposal, _ := NewSuccessProposal("done")
+			proposal, _ := NewFailureProposal(FailureInternal, "failed")
 			store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationGoWorkspaceTest, proposal)
 			path := storePath(t, store)
-			failure, _ := NewVerificationFailure("verification failed")
-			if _, err := store.FinalizeRunAfterVerification(context.Background(), finalizing.ID, finalizing.Revision, failure, mustTime(t, 80)); err != nil {
+			if _, err := store.FinalizeRun(context.Background(), finalizing.ID, finalizing.Revision, mustTime(t, 80)); err != nil {
 				t.Fatal(err)
 			}
 			corruptSQL(t, store, test.mutate)
@@ -628,13 +525,19 @@ func TestTaskGuardAndPermanentDigestUniquenessRollbackTerminalOrAdmission(t *tes
 			t.Fatal(err)
 		}
 		before, _ := store.Factory(context.Background())
-		if _, err := store.FinalizeRun(context.Background(), run.ID, finalizing.Revision, mustTime(t, 60)); !errors.Is(err, ErrConflict) {
+		if _, err := store.FinalizeRun(context.Background(), run.ID, finalizing.Revision, mustTime(t, 60)); !errors.Is(err, ErrCorruptState) {
 			t.Fatalf("stale task finalization = %v", err)
 		}
-		fresh, _, _ := store.Run(context.Background(), run.ID)
+		if _, _, err := store.Run(context.Background(), run.ID); !errors.Is(err, ErrCorruptState) {
+			t.Fatalf("corrupt joined run read = %v", err)
+		}
+		var phase string
+		if err := store.writer.QueryRow(`SELECT phase FROM runs WHERE id = ?`, run.ID.Bytes()).Scan(&phase); err != nil {
+			t.Fatal(err)
+		}
 		after, _ := store.Factory(context.Background())
-		if fresh.Phase != RunFinalizing || after.Head != before.Head {
-			t.Fatalf("stale guard footprint run=%+v before=%+v after=%+v", fresh, before, after)
+		if phase != RunFinalizing.String() || after.Head != before.Head {
+			t.Fatalf("stale guard footprint phase=%s before=%+v after=%+v", phase, before, after)
 		}
 	})
 	t.Run("digest never reused", func(t *testing.T) {

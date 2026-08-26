@@ -92,9 +92,6 @@ func scanRun(scanner rowScanner) (Run, bool, error) {
 		return Run{}, false, fmt.Errorf("%w: invalid run outcome", ErrCorruptState)
 	}
 	if proposalPresent {
-		if proposal.code == FailureUnverifiable {
-			return Run{}, false, fmt.Errorf("%w: invalid proposed verification outcome", ErrCorruptState)
-		}
 		result.Proposal = &proposal
 	}
 	if terminalPresent {
@@ -152,7 +149,7 @@ func scanRun(scanner rowScanner) (Run, bool, error) {
 			return Run{}, false, fmt.Errorf("%w: inconsistent finalizing run", ErrCorruptState)
 		}
 	case RunTerminal:
-		if result.FinalizingAt == nil || result.TerminalAt == nil || result.CredentialRevokedAt == nil || result.Proposal == nil || result.Terminal == nil || !validTerminalRefinement(result) {
+		if result.FinalizingAt == nil || result.TerminalAt == nil || result.CredentialRevokedAt == nil || result.Proposal == nil || result.Terminal == nil || !result.Proposal.equal(*result.Terminal) || result.Role == RoleWorker && result.VerificationPolicy != VerificationNone && result.Proposal.kind == OutcomeSucceeded {
 			return Run{}, false, fmt.Errorf("%w: inconsistent terminal run", ErrCorruptState)
 		}
 	}
@@ -307,11 +304,10 @@ func (store *Store) Run(ctx context.Context, id RunID) (Run, bool, error) {
 	if err != nil || !found {
 		return run, found, err
 	}
-	resources, err := resourcesForRun(ctx, tx.connection, run.ID)
-	if err != nil || !resourcesMatchRunPhase(run.Phase, resources) {
-		if err == nil {
-			err = ErrCorruptState
-		}
+	if err := validateOwnershipLocators(ctx, tx.connection); err != nil {
+		return Run{}, false, err
+	}
+	if _, err := loadRunRelationships(ctx, tx.connection, run); err != nil {
 		return Run{}, false, err
 	}
 	return run, true, nil
@@ -334,11 +330,10 @@ func (store *Store) Resource(ctx context.Context, id ResourceID) (Resource, bool
 		}
 		return Resource{}, false, err
 	}
-	resources, err := resourcesForRun(ctx, tx.connection, run.ID)
-	if err != nil || !resourcesMatchRunPhase(run.Phase, resources) {
-		if err == nil {
-			err = ErrCorruptState
-		}
+	if err := validateOwnershipLocators(ctx, tx.connection); err != nil {
+		return Resource{}, false, err
+	}
+	if _, err := loadRunRelationships(ctx, tx.connection, run); err != nil {
 		return Resource{}, false, err
 	}
 	return resource, true, nil
@@ -395,22 +390,11 @@ func (store *Store) RecoverableRuns(ctx context.Context) ([]RecoverableRun, erro
 	}
 	result := make([]RecoverableRun, 0, len(runs))
 	for _, run := range runs {
-		recovered := RecoverableRun{Run: run}
-		if run.ChangeID != nil {
-			change, found, err := changeByID(ctx, tx.connection, *run.ChangeID)
-			if err != nil || !found {
-				if err == nil {
-					err = ErrCorruptState
-				}
-				return nil, err
-			}
-			recovered.Change = &change
-		}
-		resources, err := resourcesForRun(ctx, tx.connection, run.ID)
+		relationships, err := loadRunRelationships(ctx, tx.connection, run)
 		if err != nil {
 			return nil, err
 		}
-		recovered.Resources = resources
+		recovered := RecoverableRun{Run: run, Change: relationships.change, Resources: relationships.resources}
 		result = append(result, recovered)
 	}
 	return result, nil
@@ -429,12 +413,11 @@ func (store *Store) AuthenticateAttempt(ctx context.Context, digest AttemptDiges
 	if !found || run.Phase != RunRunning || run.CredentialRevokedAt != nil || !bytes.Equal(run.CredentialDigest.Bytes(), digest.Bytes()) {
 		return AttemptAuthority{}, ErrUnauthorized
 	}
-	resources, err := resourcesForRun(ctx, tx.connection, run.ID)
-	if err != nil {
+	if err := validateOwnershipLocators(ctx, tx.connection); err != nil {
 		return AttemptAuthority{}, err
 	}
-	if !resourcesMatchRunPhase(run.Phase, resources) {
-		return AttemptAuthority{}, ErrCorruptState
+	if _, err := loadRunRelationships(ctx, tx.connection, run); err != nil {
+		return AttemptAuthority{}, err
 	}
 	return AttemptAuthority{RunID: run.ID, ProjectID: run.ProjectID, AgentID: run.AgentID, TaskID: run.TaskID, TaskIncarnation: run.TaskIncarnationID, Role: run.Role, Provider: run.Provider, ExecutionMode: run.ExecutionMode, ChangeID: run.ChangeID}, nil
 }

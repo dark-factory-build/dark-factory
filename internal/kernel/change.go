@@ -48,7 +48,7 @@ func scanChange(scanner rowScanner) (Change, bool, error) {
 	rev, revisionErr := NewRevision(revision)
 	created, createdErr := NewUnixMillis(createdAt)
 	updated, updatedErr := NewUnixMillis(updatedAt)
-	if idErr != nil || projectErr != nil || taskErr != nil || incarnationErr != nil || phaseErr != nil || revisionErr != nil || createdErr != nil || updatedErr != nil || !validOwnedLocator(sourceRoot) || !validOwnedLocator(stagingRoot) || sourceRoot == stagingRoot || updatedAt < createdAt {
+	if idErr != nil || projectErr != nil || taskErr != nil || incarnationErr != nil || phaseErr != nil || revisionErr != nil || createdErr != nil || updatedErr != nil || !validOwnedLocator(sourceRoot) || !validOwnedLocator(stagingRoot) || pathsOverlap(sourceRoot, stagingRoot) || updatedAt < createdAt {
 		return Change{}, false, fmt.Errorf("%w: invalid Change row", ErrCorruptState)
 	}
 	result := Change{
@@ -125,12 +125,15 @@ func scanChange(scanner rowScanner) (Change, bool, error) {
 }
 
 func (store *Store) Change(ctx context.Context, id ChangeID) (Change, bool, error) {
-	connection, err := store.readerConnection(ctx)
+	tx, err := store.beginRead(ctx)
 	if err != nil {
 		return Change{}, false, err
 	}
-	defer connection.Close()
-	return changeByID(ctx, connection, id)
+	defer tx.Close()
+	if err := validateOwnershipLocators(ctx, tx.connection); err != nil {
+		return Change{}, false, err
+	}
+	return changeByID(ctx, tx.connection, id)
 }
 
 func (store *Store) RecordChangeSelection(ctx context.Context, id ChangeID, expected Revision, selection ChangeSelection, at UnixMillis) (Change, error) {

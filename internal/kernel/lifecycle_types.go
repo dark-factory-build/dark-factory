@@ -200,7 +200,7 @@ type ChangeReservation struct {
 }
 
 func (reservation ChangeReservation) valid() bool {
-	return !reservation.ID.zero() && validOwnedLocator(reservation.SourceRoot) && validOwnedLocator(reservation.StagingRoot) && reservation.SourceRoot != reservation.StagingRoot && (reservation.ExpectedReuseRevision == nil || reservation.ExpectedReuseRevision.Int64() >= 1)
+	return !reservation.ID.zero() && validOwnedLocator(reservation.SourceRoot) && validOwnedLocator(reservation.StagingRoot) && !pathsOverlap(reservation.SourceRoot, reservation.StagingRoot) && (reservation.ExpectedReuseRevision == nil || reservation.ExpectedReuseRevision.Int64() >= 1)
 }
 
 type RunPhase uint8
@@ -290,7 +290,6 @@ const (
 	FailureRunnerExit
 	FailureProtocol
 	FailureInternal
-	FailureUnverifiable
 )
 
 func parseFailureCode(value string) (FailureCode, error) {
@@ -307,8 +306,6 @@ func parseFailureCode(value string) (FailureCode, error) {
 		return FailureProtocol, nil
 	case "internal":
 		return FailureInternal, nil
-	case "unverifiable":
-		return FailureUnverifiable, nil
 	default:
 		return 0, corruptControl("failure code", value)
 	}
@@ -328,8 +325,6 @@ func (value FailureCode) String() string {
 		return "protocol"
 	case FailureInternal:
 		return "internal"
-	case FailureUnverifiable:
-		return "unverifiable"
 	default:
 		return ""
 	}
@@ -357,7 +352,7 @@ func NewBlockedProposal(detail string) (Proposal, error) {
 }
 
 func NewFailureProposal(code FailureCode, detail string) (Proposal, error) {
-	if code.String() == "" || code == FailureUnverifiable || byteLen(detail) > 4096 {
+	if code.String() == "" || byteLen(detail) > 4096 {
 		return Proposal{}, fmt.Errorf("%w: invalid failure proposal", ErrInvalidValue)
 	}
 	return Proposal{kind: OutcomeFailed, code: code, detail: detail}, nil
@@ -420,26 +415,6 @@ func (policy VerificationPolicy) String() string {
 	default:
 		return ""
 	}
-}
-
-type VerificationFailure struct {
-	detail string
-}
-
-func NewVerificationFailure(detail string) (VerificationFailure, error) {
-	if byteLen(detail) < 1 || byteLen(detail) > 4096 {
-		return VerificationFailure{}, fmt.Errorf("%w: invalid verification failure", ErrInvalidValue)
-	}
-	return VerificationFailure{detail: detail}, nil
-}
-
-func (failure VerificationFailure) Detail() string { return failure.detail }
-func (failure VerificationFailure) valid() bool {
-	return byteLen(failure.detail) >= 1 && byteLen(failure.detail) <= 4096
-}
-
-func (failure VerificationFailure) terminal() Proposal {
-	return Proposal{kind: OutcomeFailed, code: FailureUnverifiable, detail: failure.detail}
 }
 
 type RunnerExit struct {
@@ -643,18 +618,6 @@ type Run struct {
 	UpdatedAt                UnixMillis
 }
 
-func validTerminalRefinement(run Run) bool {
-	if run.Proposal == nil || run.Terminal == nil {
-		return false
-	}
-	if run.Proposal.equal(*run.Terminal) {
-		return true
-	}
-	return run.Role == RoleWorker && run.VerificationPolicy != VerificationNone &&
-		run.Proposal.kind == OutcomeSucceeded && run.Terminal.kind == OutcomeFailed &&
-		run.Terminal.code == FailureUnverifiable && byteLen(run.Terminal.detail) >= 1
-}
-
 type Resource struct {
 	ID               ResourceID
 	RunID            RunID
@@ -697,7 +660,10 @@ type AdmissionKeys struct {
 }
 
 func (keys AdmissionKeys) valid() bool {
-	return !keys.RunID.zero() && keys.Resources.valid() && validOwnedLocator(keys.RuntimeRoot) && (keys.Change == nil || keys.Change.valid())
+	if keys.RunID.zero() || !keys.Resources.valid() || !validOwnedLocator(keys.RuntimeRoot) || keys.Change != nil && !keys.Change.valid() {
+		return false
+	}
+	return keys.Change == nil || !pathsOverlap(keys.RuntimeRoot, keys.Change.SourceRoot) && !pathsOverlap(keys.RuntimeRoot, keys.Change.StagingRoot)
 }
 
 type NoAdmissionReason uint8
@@ -764,4 +730,12 @@ func validAbsolutePath(value string) bool {
 
 func validOwnedLocator(value string) bool {
 	return validAbsolutePath(value) && value != string(filepath.Separator)
+}
+
+func pathsOverlap(left, right string) bool {
+	if left == right {
+		return true
+	}
+	separator := string(filepath.Separator)
+	return strings.HasPrefix(left, right+separator) || strings.HasPrefix(right, left+separator)
 }

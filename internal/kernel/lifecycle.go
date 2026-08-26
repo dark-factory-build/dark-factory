@@ -192,35 +192,14 @@ func (store *Store) ActivateRun(ctx context.Context, runID RunID, expected Revis
 	if run.Phase != RunAdmitted || run.Revision != expected || at.Int64() < run.UpdatedAt.Int64() {
 		return Run{}, tx.Rollback(ErrRevisionConflict)
 	}
-	task, found, err := taskByID(ctx, tx.connection, run.TaskID)
-	if err != nil || !found {
-		if err == nil {
-			err = ErrCorruptState
-		}
-		return Run{}, tx.Rollback(err)
-	}
-	if task.ProjectID != run.ProjectID || task.IncarnationID != run.TaskIncarnationID || task.WorkRevision != run.AdmittedTaskWorkRevision || task.Status != TaskRunning {
-		return Run{}, tx.Rollback(ErrConflict)
-	}
-	if run.Role == RoleWorker {
-		if run.ChangeID == nil {
-			return Run{}, tx.Rollback(ErrCorruptState)
-		}
-		change, found, err := changeByID(ctx, tx.connection, *run.ChangeID)
-		if err != nil || !found {
-			if err == nil {
-				err = ErrCorruptState
-			}
-			return Run{}, tx.Rollback(err)
-		}
-		if change.Phase != ChangeAvailable || change.ProjectID != run.ProjectID || change.TaskID != run.TaskID || change.TaskIncarnationID != run.TaskIncarnationID {
-			return Run{}, tx.Rollback(ErrConflict)
-		}
-	}
-	resources, err := resourcesForRun(ctx, tx.connection, run.ID)
+	relationships, err := loadRunRelationships(ctx, tx.connection, run)
 	if err != nil {
 		return Run{}, tx.Rollback(err)
 	}
+	if run.Role == RoleWorker && relationships.change.Phase != ChangeAvailable {
+		return Run{}, tx.Rollback(ErrConflict)
+	}
+	resources := relationships.resources
 	if !exactResourceSet(resources, true) {
 		return Run{}, tx.Rollback(ErrConflict)
 	}
@@ -259,6 +238,9 @@ func (store *Store) ProposeAttemptOutcome(ctx context.Context, digest AttemptDig
 	}
 	if !found || run.Phase != RunRunning || run.CredentialRevokedAt != nil {
 		return Run{}, tx.Rollback(ErrUnauthorized)
+	}
+	if err := validateOwnershipLocators(ctx, tx.connection); err != nil {
+		return Run{}, tx.Rollback(err)
 	}
 	return store.enterFinalizing(ctx, tx, run, run.Revision, proposal, at)
 }
@@ -321,6 +303,9 @@ func (store *Store) CancelRun(ctx context.Context, runID RunID, expected Revisio
 }
 
 func (store *Store) enterFinalizing(ctx context.Context, tx *writeTx, run Run, expected Revision, proposal Proposal, at UnixMillis) (Run, error) {
+	if _, err := loadRunRelationships(ctx, tx.connection, run); err != nil {
+		return Run{}, tx.Rollback(err)
+	}
 	if run.Revision != expected || at.Int64() < run.UpdatedAt.Int64() {
 		return Run{}, tx.Rollback(ErrRevisionConflict)
 	}
@@ -364,6 +349,9 @@ func (store *Store) ObserveRunnerExit(ctx context.Context, runID RunID, expected
 	}
 	if !found {
 		return Run{}, tx.Rollback(ErrNotFound)
+	}
+	if _, err := loadRunRelationships(ctx, tx.connection, run); err != nil {
+		return Run{}, tx.Rollback(err)
 	}
 	if run.RunnerExit != nil {
 		if !run.RunnerExit.equal(exit) {
@@ -415,17 +403,6 @@ func (store *Store) ObserveRunnerExit(ctx context.Context, runID RunID, expected
 }
 
 func (store *Store) FinalizeRun(ctx context.Context, runID RunID, expected Revision, at UnixMillis) (Run, error) {
-	return store.finalizeRun(ctx, runID, expected, nil, at)
-}
-
-func (store *Store) FinalizeRunAfterVerification(ctx context.Context, runID RunID, expected Revision, failure VerificationFailure, at UnixMillis) (Run, error) {
-	if !failure.valid() {
-		return Run{}, fmt.Errorf("%w: invalid verification refinement", ErrInvalidValue)
-	}
-	return store.finalizeRun(ctx, runID, expected, &failure, at)
-}
-
-func (store *Store) finalizeRun(ctx context.Context, runID RunID, expected Revision, verification *VerificationFailure, at UnixMillis) (Run, error) {
 	if runID.zero() {
 		return Run{}, fmt.Errorf("%w: zero run identifier", ErrInvalidValue)
 	}
@@ -441,13 +418,13 @@ func (store *Store) finalizeRun(ctx context.Context, runID RunID, expected Revis
 	if !found {
 		return Run{}, tx.Rollback(ErrNotFound)
 	}
+	relationships, err := loadRunRelationships(ctx, tx.connection, run)
+	if err != nil {
+		return Run{}, tx.Rollback(err)
+	}
 	if run.Phase == RunTerminal && run.Revision.Int64() > expected.Int64() {
-		terminal, err := terminalOutcome(run, verification)
-		if err != nil || run.Terminal == nil || !run.Terminal.equal(terminal) {
-			if err == nil {
-				err = ErrConflict
-			}
-			return Run{}, tx.Rollback(err)
+		if run.Proposal == nil || run.Terminal == nil || !run.Terminal.equal(*run.Proposal) {
+			return Run{}, tx.Rollback(ErrConflict)
 		}
 		if err := tx.Rollback(nil); err != nil {
 			return Run{}, err
@@ -457,14 +434,11 @@ func (store *Store) finalizeRun(ctx context.Context, runID RunID, expected Revis
 	if run.Phase != RunFinalizing || run.Proposal == nil || run.CredentialRevokedAt == nil || run.Revision != expected || at.Int64() < run.UpdatedAt.Int64() {
 		return Run{}, tx.Rollback(ErrRevisionConflict)
 	}
-	terminal, err := terminalOutcome(run, verification)
-	if err != nil {
-		return Run{}, tx.Rollback(err)
+	if run.Role == RoleWorker && run.VerificationPolicy != VerificationNone && run.Proposal.kind == OutcomeSucceeded {
+		return Run{}, tx.Rollback(ErrConflict)
 	}
-	resources, err := resourcesForRun(ctx, tx.connection, run.ID)
-	if err != nil {
-		return Run{}, tx.Rollback(err)
-	}
+	terminal := *run.Proposal
+	resources := relationships.resources
 	if !exactResourceSet(resources, false) {
 		return Run{}, tx.Rollback(ErrConflict)
 	}
@@ -480,16 +454,7 @@ func (store *Store) finalizeRun(ctx context.Context, runID RunID, expected Revis
 	if requiresExit && run.RunnerExit == nil {
 		return Run{}, tx.Rollback(ErrConflict)
 	}
-	task, found, err := taskByID(ctx, tx.connection, run.TaskID)
-	if err != nil || !found {
-		if err == nil {
-			err = ErrCorruptState
-		}
-		return Run{}, tx.Rollback(err)
-	}
-	if task.ProjectID != run.ProjectID || task.IncarnationID != run.TaskIncarnationID || task.WorkRevision != run.AdmittedTaskWorkRevision || task.Status != TaskRunning {
-		return Run{}, tx.Rollback(ErrConflict)
-	}
+	task := relationships.task
 	taskRevision := task.Revision.Int64() + 1
 	var taskStatus string
 	var blocked, result, completed any
@@ -542,22 +507,6 @@ func (store *Store) finalizeRun(ctx context.Context, runID RunID, expected Revis
 		return Run{}, err
 	}
 	return run, nil
-}
-
-func terminalOutcome(run Run, verification *VerificationFailure) (Proposal, error) {
-	if run.Proposal == nil {
-		return Proposal{}, ErrCorruptState
-	}
-	if verification == nil {
-		return *run.Proposal, nil
-	}
-	if !verification.valid() {
-		return Proposal{}, ErrInvalidValue
-	}
-	if run.Role != RoleWorker || run.VerificationPolicy == VerificationNone || run.Proposal.kind != OutcomeSucceeded {
-		return Proposal{}, ErrConflict
-	}
-	return verification.terminal(), nil
 }
 
 func exactResourceSet(resources []Resource, requireActive bool) bool {

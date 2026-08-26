@@ -82,6 +82,9 @@ func (store *Store) AdmitNext(ctx context.Context, agentID AgentID, keys Admissi
 		}
 		return AdmissionResult{}, tx.Rollback(err)
 	}
+	if err := validateAdmissionLocatorOwnership(ctx, tx.connection, keys); err != nil {
+		return AdmissionResult{}, tx.Rollback(err)
+	}
 
 	var change *Change
 	changeCreated := false
@@ -180,13 +183,6 @@ func rollbackNoAdmission(tx *writeTx, reason NoAdmissionReason) (AdmissionResult
 }
 
 func reserveAdmissionChange(ctx context.Context, connection *sql.Conn, task Task, reservation ChangeReservation, at UnixMillis) (Change, bool, error) {
-	var locatorCollisions int
-	if err := connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM changes WHERE id <> ? AND (source_root IN (?, ?) OR staging_root IN (?, ?))`, reservation.ID.Bytes(), reservation.SourceRoot, reservation.StagingRoot, reservation.SourceRoot, reservation.StagingRoot).Scan(&locatorCollisions); err != nil {
-		return Change{}, false, err
-	}
-	if locatorCollisions != 0 {
-		return Change{}, false, ErrConflict
-	}
 	existing, found, err := changeByID(ctx, connection, reservation.ID)
 	if err != nil {
 		return Change{}, false, err
@@ -248,6 +244,13 @@ func reconcileAdmissionOnConnection(ctx context.Context, connection *sql.Conn, k
 	if !bytes.Equal(run.CredentialDigest.Bytes(), keys.AttemptDigest.Bytes()) {
 		return AdmissionResult{}, true, ErrConflict
 	}
+	relationships, err := loadRunRelationships(ctx, connection, run)
+	if err != nil {
+		return AdmissionResult{}, true, err
+	}
+	if err := validateAdmissionLocatorOwnership(ctx, connection, keys); err != nil {
+		return AdmissionResult{}, true, err
+	}
 	if keys.Change == nil {
 		if run.ChangeID != nil || run.Role != RoleOrchestrator {
 			return AdmissionResult{}, true, ErrConflict
@@ -256,12 +259,9 @@ func reconcileAdmissionOnConnection(ctx context.Context, connection *sql.Conn, k
 		if run.ChangeID == nil || *run.ChangeID != keys.Change.ID || run.Role != RoleWorker {
 			return AdmissionResult{}, true, ErrConflict
 		}
-		change, found, err := changeByID(ctx, connection, keys.Change.ID)
-		if err != nil || !found {
-			if err == nil {
-				err = ErrCorruptState
-			}
-			return AdmissionResult{}, true, err
+		change := relationships.change
+		if change == nil {
+			return AdmissionResult{}, true, ErrCorruptState
 		}
 		if change.ProjectID != run.ProjectID || change.TaskID != run.TaskID || change.TaskIncarnationID != run.TaskIncarnationID || change.SourceRoot != keys.Change.SourceRoot || change.StagingRoot != keys.Change.StagingRoot {
 			return AdmissionResult{}, true, ErrConflict
@@ -270,10 +270,7 @@ func reconcileAdmissionOnConnection(ctx context.Context, connection *sql.Conn, k
 			return AdmissionResult{}, true, ErrConflict
 		}
 	}
-	resources, err := resourcesForRun(ctx, connection, run.ID)
-	if err != nil {
-		return AdmissionResult{}, true, err
-	}
+	resources := relationships.resources
 	expected := map[ResourceKind]ResourceID{
 		ResourceRuntimeRoot:     keys.Resources.RuntimeRoot,
 		ResourceRunnerProcess:   keys.Resources.RunnerProcess,
@@ -288,9 +285,6 @@ func reconcileAdmissionOnConnection(ctx context.Context, connection *sql.Conn, k
 		if !ok || resource.ID != id || resource.RunID != run.ID || resource.Kind == ResourceRuntimeRoot && resource.Path != keys.RuntimeRoot {
 			return AdmissionResult{}, true, ErrConflict
 		}
-	}
-	if !resourcesMatchRunPhase(run.Phase, resources) {
-		return AdmissionResult{}, true, ErrCorruptState
 	}
 	return AdmissionResult{Run: &run}, true, nil
 }

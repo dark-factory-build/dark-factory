@@ -668,6 +668,9 @@ func seedDurableAuthority(t *testing.T, store *Store) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.writer.Exec(`UPDATE tasks SET status = 'running', revision = revision + 1, updated_at_ms = 5 WHERE id = ?`, task.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := store.writer.Exec(`INSERT INTO runs(
             id, project_id, agent_id, task_id, task_incarnation_id, admitted_task_work_revision,
 	            change_id, role, provider, execution_mode, model, reasoning_effort, verification_policy, phase,
