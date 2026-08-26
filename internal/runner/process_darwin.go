@@ -122,7 +122,7 @@ func StartBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, kee
 		return nil, err
 	}
 	defer config.Close()
-	if err := writeFrame(config, gateConfig{Version: 1, Target: spec.commit, LeaseDirectory: lease.dirIdentity, MarkerName: lease.basename, KeepLease: keepLeaseAcrossExec}, maxConfigBytes); err != nil {
+	if err := writeFrame(config, gateConfig{Version: 1, Target: spec.commit, LeaseDirectory: lease.dirIdentity, MarkerName: lease.basename, KeepLease: keepLeaseAcrossExec, TestFinalCheck: spec.testFinal != nil}, maxConfigBytes); err != nil {
 		return nil, err
 	}
 	if _, err := config.Seek(0, 0); err != nil {
@@ -178,6 +178,9 @@ func StartBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, kee
 	cmd.Env = []string{}
 	cmd.Stderr = stderr
 	cmd.ExtraFiles = []*os.File{config, leashR, statusW, stdin, stdout, stderr, leaseFile}
+	if spec.testFinal != nil {
+		cmd.ExtraFiles = append(cmd.ExtraFiles, spec.testFinal)
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		unix.Close(kq)
@@ -413,6 +416,10 @@ func (c *OwnedChild) Terminate(timeout time.Duration) (Exit, error) {
 }
 
 func killRemainingGroup(leader Identity) error {
+	observed, err := readIdentity(leader.PID)
+	if err != nil || observed != leader {
+		return fmt.Errorf("%w: direct leader is no longer exact and unreaped", ErrUnresolved)
+	}
 	members, err := unix.SysctlKinfoProcSlice("kern.proc.pgrp", leader.PGID)
 	if err != nil && !errors.Is(err, unix.ESRCH) && !errors.Is(err, unix.EIO) {
 		return fmt.Errorf("%w: enumerate: %v", ErrUnresolved, err)
@@ -538,10 +545,14 @@ func ObserveProcess(want Identity) Observation {
 	}
 	pzero := unix.Kill(want.PID, 0)
 	gzero := unix.Kill(-want.PGID, 0)
-	if (errors.Is(err, unix.EIO) || errors.Is(err, unix.ESRCH) || errors.Is(err, unix.ENOENT)) && errors.Is(pzero, unix.ESRCH) && errors.Is(gzero, unix.ESRCH) {
+	return classifyUnavailable(err, pzero, gzero)
+}
+
+func classifyUnavailable(infoErr, processProbe, groupProbe error) Observation {
+	if (errors.Is(infoErr, unix.EIO) || errors.Is(infoErr, unix.ESRCH) || errors.Is(infoErr, unix.ENOENT)) && errors.Is(processProbe, unix.ESRCH) && errors.Is(groupProbe, unix.ESRCH) {
 		return Observation{Presence: Absent}
 	}
-	return Observation{Presence: Unknown, Err: fmt.Errorf("%w: info=%v pid=%v group=%v", ErrUnresolved, err, pzero, gzero)}
+	return Observation{Presence: Unknown, Err: fmt.Errorf("%w: info=%v pid=%v group=%v", ErrUnresolved, infoErr, processProbe, groupProbe)}
 }
 
 func ObserveProcessGroup(want Identity) Observation {
@@ -634,12 +645,30 @@ func RunExecGate() error {
 		_ = writeFrame(status, gateFrame{Kind: "launch-error", Error: err.Error()}, maxFrameBytes)
 		return err
 	}
+	if cfg.TestFinalCheck {
+		// This package-test-only barrier makes the documented cooperative
+		// same-UID pathname race measurable; it is not a production defense.
+		seam := os.NewFile(10, "test-final-check")
+		if seam == nil {
+			return ErrIdentity
+		}
+		if _, err := seam.Write([]byte{'R'}); err != nil {
+			return err
+		}
+		var ack [1]byte
+		if _, err := io.ReadFull(seam, ack[:]); err != nil || ack[0] != 'X' {
+			return fmt.Errorf("runner: test final-check seam: %v", err)
+		}
+		_ = seam.Close()
+	}
 	_ = target.Close()
 	if err := unix.Fchdir(int(cwd.Fd())); err != nil {
 		return err
 	}
 	_ = cwd.Close()
-	_ = leaseDir.Close()
+	if !cfg.KeepLease {
+		_ = leaseDir.Close()
+	}
 	if err := unix.Dup2(int(stdin.Fd()), 0); err != nil {
 		return err
 	}

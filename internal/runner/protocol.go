@@ -13,6 +13,7 @@ type gateConfig struct {
 	LeaseDirectory fileCommitment   `json:"lease_directory"`
 	MarkerName     string           `json:"marker_name"`
 	KeepLease      bool             `json:"keep_lease"`
+	TestFinalCheck bool             `json:"test_final_check,omitempty"`
 }
 
 type gateFrame struct {

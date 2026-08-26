@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -18,6 +19,13 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if os.Getenv("RUNNER_TEST_OWNER") == "1" {
+		if err := runParentDeathOwner(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(98)
+		}
+		os.Exit(0)
+	}
 	if len(os.Args) == 2 && os.Args[1] == "--exec-gate" {
 		if err := RunExecGate(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -128,6 +136,20 @@ func (f *fixture) start(target string, args []string, input []byte, stdout *os.F
 	f.child = child
 	return child
 }
+
+func (f *fixture) startPrepared(spec *LaunchSpec, keepLease bool) *OwnedChild {
+	f.t.Helper()
+	gate, err := os.Executable()
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	child, err := StartBlocked(f.lease, gate, spec, keepLease)
+	if err != nil {
+		f.t.Fatalf("StartBlocked: %v", err)
+	}
+	f.child = child
+	return child
+}
 func outputFile(t *testing.T, path string) *os.File {
 	t.Helper()
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_EXCL, 0o600)
@@ -151,12 +173,182 @@ func waitFile(t *testing.T, path string) {
 	}
 }
 
+func runParentDeathOwner() error {
+	root := os.Getenv("RUNNER_TEST_ROOT")
+	if root == "" {
+		return errors.New("runner test owner: missing root")
+	}
+	dir, err := os.Open(root)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	lease, _, err := CreateGateLease(dir, "activate")
+	if err != nil {
+		return err
+	}
+	defer lease.Close()
+	effect := filepath.Join(root, "effect")
+	spec, err := PrepareExecSpec(ExecSpec{
+		Target: "/bin/sh",
+		Args:   []string{"-c", fmt.Sprintf("printf bad > %q", effect)},
+		Env:    []string{"PATH=/usr/bin:/bin", "LANG=C"},
+		Cwd:    filepath.Join(root, "work"),
+	})
+	if err != nil {
+		return err
+	}
+	gate, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	child, err := StartBlocked(lease, gate, spec, false)
+	if err != nil {
+		return err
+	}
+	defer child.Close()
+	report := os.NewFile(3, "owner-report")
+	if report == nil {
+		return errors.New("runner test owner: missing report capability")
+	}
+	if err := writeFrame(report, gateFrame{Kind: "owned-gate", Identity: child.Identity()}, maxFrameBytes); err != nil {
+		return err
+	}
+	if err := report.Close(); err != nil {
+		return err
+	}
+	for {
+		time.Sleep(time.Hour)
+	}
+}
+
+func waitKqueueExit(t *testing.T, kq int, want Identity) {
+	t.Helper()
+	ts := unix.NsecToTimespec((4 * time.Second).Nanoseconds())
+	events := make([]unix.Kevent_t, 1)
+	n, err := unix.Kevent(kq, nil, events, &ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatal("timeout waiting for exact gate NOTE_EXIT")
+	}
+	event := events[0]
+	if int(event.Ident) != want.PID || event.Filter != unix.EVFILT_PROC || event.Fflags&unix.NOTE_EXIT == 0 || event.Flags&unix.EV_ERROR != 0 {
+		t.Fatalf("unexpected gate exit event %+v", event)
+	}
+}
+
+func waitExactAbsence(t *testing.T, want Identity) {
+	t.Helper()
+	deadline := time.Now().Add(4 * time.Second)
+	for {
+		observation := ObserveProcess(want)
+		if observation.Presence == Absent {
+			return
+		}
+		if observation.Presence != Present || time.Now().After(deadline) {
+			t.Fatalf("exact process did not become absent: %+v", observation)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestRealParentSIGKILLAbortsInertGate(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "work"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	reportR, reportW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reportR.Close()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	diagnostic := outputFile(t, filepath.Join(root, "owner-output"))
+	owner := exec.Command(executable, "-test.run=^$")
+	owner.Env = []string{"RUNNER_TEST_OWNER=1", "RUNNER_TEST_ROOT=" + root, "TMPDIR=" + root}
+	owner.ExtraFiles = []*os.File{reportW}
+	owner.Stdout = diagnostic
+	owner.Stderr = diagnostic
+	owner.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := owner.Start(); err != nil {
+		t.Fatal(err)
+	}
+	_ = reportW.Close()
+	ownerWaited := false
+	var gate Identity
+	defer func() {
+		if !ownerWaited {
+			_ = owner.Process.Kill()
+			_ = owner.Wait()
+		}
+		if gate.Valid() {
+			if got, identityErr := readIdentity(gate.PID); identityErr == nil && got == gate {
+				_ = unix.Kill(-gate.PGID, unix.SIGKILL)
+			}
+			deadline := time.Now().Add(4 * time.Second)
+			for time.Now().Before(deadline) {
+				if observation := ObserveProcess(gate); observation.Presence == Absent || observation.Presence == Reused {
+					break
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+		}
+	}()
+	if err := reportR.SetReadDeadline(time.Now().Add(4 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var report gateFrame
+	if err := readFrame(reportR, &report, maxFrameBytes); err != nil {
+		t.Fatalf("owner report: %v", err)
+	}
+	gate = report.Identity
+	if report.Kind != "owned-gate" || !gate.Valid() || gate.PID != gate.PGID {
+		t.Fatalf("bad owner report %+v", report)
+	}
+	if _, err := os.Stat(filepath.Join(root, "effect")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("provider effect before real parent death")
+	}
+	kq, err := unix.Kqueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(kq)
+	if err := registerExit(kq, gate.PID); err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.Process.Signal(unix.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	waitErr := owner.Wait()
+	ownerWaited = true
+	var exitErr *exec.ExitError
+	if !errors.As(waitErr, &exitErr) || !exitErr.ProcessState.Sys().(syscall.WaitStatus).Signaled() || exitErr.ProcessState.Sys().(syscall.WaitStatus).Signal() != unix.SIGKILL {
+		t.Fatalf("owner was not SIGKILLed: %v", waitErr)
+	}
+	waitKqueueExit(t, kq, gate)
+	waitExactAbsence(t, gate)
+	if _, err := os.Stat(filepath.Join(root, "effect")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("provider ran after its real owner was SIGKILLed before activation")
+	}
+	if err := unix.Kill(-gate.PGID, 0); !errors.Is(err, unix.ESRCH) {
+		t.Fatalf("gate group remains after real parent death: %v", err)
+	}
+}
+
 func TestBlockedActivateExecutesOnceWithExactIdentityAndInput(t *testing.T) {
 	f := newFixture(t)
 	effect := filepath.Join(f.root, "effect")
 	stdinCopy := filepath.Join(f.root, "stdin")
 	out := outputFile(t, filepath.Join(f.root, "output"))
-	child := f.start("/bin/sh", []string{"-c", fmt.Sprintf("test -z \"${HOME+x}\" || exit 90; for n in 3 4 5 6 7 8 9; do test ! -e /dev/fd/$n || exit 91; done; printf x >> %q; cat > %q; printf '%%s' $$", effect, stdinCopy)}, []byte("one-input"), out)
+	child := f.start("/bin/sh", []string{"-c", fmt.Sprintf("test -z \"${HOME+x}\" || exit 90; for n in 3 4 5 6 7 8 9 10; do test ! -e /dev/fd/$n || exit 91; done; printf x >> %q; cat > %q; printf '%%s' $$", effect, stdinCopy)}, []byte("one-input"), out)
 	id := child.Identity()
 	if !id.Valid() || id.PID != id.PGID {
 		t.Fatalf("bad ready identity %+v", id)
@@ -192,6 +384,34 @@ func TestBlockedActivateExecutesOnceWithExactIdentityAndInput(t *testing.T) {
 	}
 	if got := ObserveProcess(id); got.Presence != Absent {
 		t.Fatalf("post-Wait=%+v", got)
+	}
+}
+
+func TestKeepLeaseAcrossExecIsExplicit(t *testing.T) {
+	f := newFixture(t)
+	effect := filepath.Join(f.root, "effect")
+	out := outputFile(t, filepath.Join(f.root, "out"))
+	spec, err := PrepareExecSpec(ExecSpec{
+		Target: "/bin/sh",
+		Args:   []string{"-c", fmt.Sprintf("test -d /dev/fd/9 || exit 92; test ! -e /dev/fd/10 || exit 93; printf kept > %q", effect)},
+		Env:    []string{"PATH=/usr/bin:/bin", "LANG=C"},
+		Cwd:    f.cwd,
+		Stdout: out,
+		Stderr: out,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := f.startPrepared(spec, true)
+	if _, err := child.Activate(); err != nil {
+		t.Fatal(err)
+	}
+	exit, err := child.FinishAfterExit(4 * time.Second)
+	if err != nil || exit.Code != 0 {
+		t.Fatalf("exit=%+v err=%v", exit, err)
+	}
+	if body, err := os.ReadFile(effect); err != nil || string(body) != "kept" {
+		t.Fatalf("kept lease witness=%q err=%v", body, err)
 	}
 }
 
@@ -276,6 +496,133 @@ func TestFrozenExecutableRejectsReplacementAndMutation(t *testing.T) {
 				t.Fatal("mutated target ran")
 			}
 		})
+	}
+}
+
+func buildWitnessBinary(t *testing.T, output, value string) {
+	t.Helper()
+	source := filepath.Join(t.TempDir(), "main.go")
+	body := fmt.Sprintf("package main\nimport \"os\"\nfunc main() { if len(os.Args) != 2 { os.Exit(2) }; if os.WriteFile(os.Args[1], []byte(%q), 0600) != nil { os.Exit(3) } }\n", value)
+	if err := os.WriteFile(source, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	goBinary := filepath.Join(runtime.GOROOT(), "bin", "go")
+	command := exec.Command(goBinary, "build", "-o", output, source)
+	environment := []string{"GOENV=off", "GOWORK=off", "GOTOOLCHAIN=local", "CGO_ENABLED=0", "TMPDIR=" + t.TempDir()}
+	for _, key := range []string{"GOCACHE", "GOMODCACHE", "GOPATH", "GOTMPDIR"} {
+		if value := os.Getenv(key); value != "" {
+			environment = append(environment, key+"="+value)
+		}
+	}
+	command.Env = environment
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("build witness: %v: %s", err, output)
+	}
+}
+
+func TestSameUIDReplacementAfterFinalCheckIsExplicitlyOutOfScope(t *testing.T) {
+	f := newFixture(t)
+	target := filepath.Join(f.root, "prepared-provider")
+	replacement := filepath.Join(f.root, "replacement-provider")
+	buildWitnessBinary(t, target, "prepared")
+	buildWitnessBinary(t, replacement, "replacement")
+	effect := filepath.Join(f.root, "effect")
+	spec, err := PrepareExecSpec(ExecSpec{Target: target, Args: []string{effect}, Cwd: f.cwd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sockets, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unix.CloseOnExec(sockets[0])
+	unix.CloseOnExec(sockets[1])
+	barrier := os.NewFile(uintptr(sockets[0]), "final-check-test-barrier")
+	gateBarrier := os.NewFile(uintptr(sockets[1]), "gate-final-check-test-barrier")
+	defer barrier.Close()
+	defer gateBarrier.Close()
+	spec.testFinal = gateBarrier
+	child := f.startPrepared(spec, false)
+	if err := gateBarrier.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := child.Activate(); err != nil {
+		t.Fatal(err)
+	}
+	poll := []unix.PollFd{{Fd: int32(barrier.Fd()), Events: unix.POLLIN}}
+	if n, err := unix.Poll(poll, 4000); err != nil || n != 1 || poll[0].Revents&unix.POLLIN == 0 {
+		t.Fatalf("final-check barrier timeout/error: n=%d poll=%+v err=%v", n, poll[0], err)
+	}
+	var ready [1]byte
+	if _, err := io.ReadFull(barrier, ready[:]); err != nil || ready[0] != 'R' {
+		t.Fatalf("final-check barrier ready=%q err=%v", ready, err)
+	}
+	if err := os.Rename(replacement, target); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := barrier.Write([]byte{'X'}); err != nil {
+		t.Fatal(err)
+	}
+	exit, err := child.FinishAfterExit(4 * time.Second)
+	if err != nil || exit.Code != 0 || exit.LaunchErr != "" {
+		t.Fatalf("replacement exit=%+v err=%v", exit, err)
+	}
+	body, err := os.ReadFile(effect)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "replacement" {
+		t.Fatalf("post-check replacement did not demonstrate pathname TOCTOU: %q", body)
+	}
+}
+
+func TestExecErrorAfterFinalCheckIsTyped(t *testing.T) {
+	f := newFixture(t)
+	target := filepath.Join(f.root, "prepared-provider")
+	buildWitnessBinary(t, target, "unexpected")
+	effect := filepath.Join(f.root, "effect")
+	spec, err := PrepareExecSpec(ExecSpec{Target: target, Args: []string{effect}, Cwd: f.cwd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sockets, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unix.CloseOnExec(sockets[0])
+	unix.CloseOnExec(sockets[1])
+	barrier := os.NewFile(uintptr(sockets[0]), "final-check-test-barrier")
+	gateBarrier := os.NewFile(uintptr(sockets[1]), "gate-final-check-test-barrier")
+	defer barrier.Close()
+	defer gateBarrier.Close()
+	spec.testFinal = gateBarrier
+	child := f.startPrepared(spec, false)
+	if err := gateBarrier.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := child.Activate(); err != nil {
+		t.Fatal(err)
+	}
+	poll := []unix.PollFd{{Fd: int32(barrier.Fd()), Events: unix.POLLIN}}
+	if n, err := unix.Poll(poll, 4000); err != nil || n != 1 || poll[0].Revents&unix.POLLIN == 0 {
+		t.Fatalf("final-check barrier timeout/error: n=%d poll=%+v err=%v", n, poll[0], err)
+	}
+	var ready [1]byte
+	if _, err := io.ReadFull(barrier, ready[:]); err != nil || ready[0] != 'R' {
+		t.Fatalf("final-check barrier ready=%q err=%v", ready, err)
+	}
+	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := barrier.Write([]byte{'X'}); err != nil {
+		t.Fatal(err)
+	}
+	exit, err := child.FinishAfterExit(4 * time.Second)
+	if err != nil || exit.Code == 0 || exit.LaunchErr == "" {
+		t.Fatalf("exec error was not typed: exit=%+v err=%v", exit, err)
+	}
+	if _, err := os.Stat(effect); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("removed target produced provider effect")
 	}
 }
 
@@ -367,6 +714,27 @@ func TestObservationFailsClosed(t *testing.T) {
 	reused.Birth.Microseconds++
 	if got := ObserveProcess(reused); got.Presence != Reused {
 		t.Fatalf("reuse=%+v", got)
+	}
+}
+
+func TestUnavailableProcessClassifierFailsClosed(t *testing.T) {
+	tests := []struct {
+		name                 string
+		info, process, group error
+		want                 Presence
+	}{
+		{name: "EPERM never proves absence", info: unix.EPERM, process: unix.ESRCH, group: unix.ESRCH, want: Unknown},
+		{name: "EIO needs process corroboration", info: unix.EIO, process: nil, group: unix.ESRCH, want: Unknown},
+		{name: "EIO needs group corroboration", info: unix.EIO, process: unix.ESRCH, group: nil, want: Unknown},
+		{name: "EIO with both negative probes", info: unix.EIO, process: unix.ESRCH, group: unix.ESRCH, want: Absent},
+		{name: "ESRCH with both negative probes", info: unix.ESRCH, process: unix.ESRCH, group: unix.ESRCH, want: Absent},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := classifyUnavailable(test.info, test.process, test.group); got.Presence != test.want {
+				t.Fatalf("classification=%+v want=%s", got, test.want)
+			}
+		})
 	}
 }
 

@@ -81,10 +81,11 @@ type ExecSpec struct {
 }
 
 type LaunchSpec struct {
-	commit launchCommitment
-	stdin  []byte
-	stdout *os.File
-	stderr *os.File
+	commit    launchCommitment
+	stdin     []byte
+	stdout    *os.File
+	stderr    *os.File
+	testFinal *os.File // package-test-only barrier after the final pathname check
 }
 
 type fileCommitment struct {
