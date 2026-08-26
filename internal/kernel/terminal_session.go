@@ -8,15 +8,18 @@ import (
 )
 
 const terminalSessionColumns = `id, run_id, state, unresolved_reason, revision,
-    declared_at_ms, activated_at_ms, closed_at_ms, updated_at_ms`
+    declared_at_ms, activated_at_ms, closed_at_ms, updated_at_ms,
+    lease_client_id, lease_generation, lease_expires_at_ms, last_input_sequence`
 
 func scanTerminalSession(scanner rowScanner) (TerminalSession, bool, error) {
 	var rawID, rawRunID []byte
+	var rawLeaseClientID nullableBlob
 	var stateValue string
 	var reason sql.NullString
 	var revision, declaredAt, updatedAt int64
-	var activatedAt, closedAt sql.NullInt64
-	if err := scanner.Scan(&rawID, &rawRunID, &stateValue, &reason, &revision, &declaredAt, &activatedAt, &closedAt, &updatedAt); err != nil {
+	var activatedAt, closedAt, leaseExpiresAt sql.NullInt64
+	var leaseGeneration, lastInputSequence int64
+	if err := scanner.Scan(&rawID, &rawRunID, &stateValue, &reason, &revision, &declaredAt, &activatedAt, &closedAt, &updatedAt, &rawLeaseClientID, &leaseGeneration, &leaseExpiresAt, &lastInputSequence); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return TerminalSession{}, false, nil
 		}
@@ -28,10 +31,25 @@ func scanTerminalSession(scanner rowScanner) (TerminalSession, bool, error) {
 	rev, revisionErr := NewRevision(revision)
 	declared, declaredErr := NewUnixMillis(declaredAt)
 	updated, updatedErr := NewUnixMillis(updatedAt)
-	if idErr != nil || runErr != nil || stateErr != nil || revisionErr != nil || declaredErr != nil || updatedErr != nil || updatedAt < declaredAt || reason.Valid && (byteLen(reason.String) < 1 || byteLen(reason.String) > 4096) {
+	if idErr != nil || runErr != nil || stateErr != nil || revisionErr != nil || declaredErr != nil || updatedErr != nil || updatedAt < declaredAt || reason.Valid && (byteLen(reason.String) < 1 || byteLen(reason.String) > 4096) || leaseGeneration < 0 || lastInputSequence < 0 || rawLeaseClientID.valid && leaseGeneration < 1 || rawLeaseClientID.valid != leaseExpiresAt.Valid || !rawLeaseClientID.valid && lastInputSequence != 0 {
 		return TerminalSession{}, false, fmt.Errorf("%w: invalid terminal session controls", ErrCorruptState)
 	}
-	result := TerminalSession{ID: id, RunID: runID, State: state, UnresolvedReason: nullStringValue(reason), Revision: rev, DeclaredAt: declared, UpdatedAt: updated}
+	result := TerminalSession{ID: id, RunID: runID, State: state, UnresolvedReason: nullStringValue(reason), Revision: rev, DeclaredAt: declared, UpdatedAt: updated, LeaseGeneration: uint64(leaseGeneration), LastInputSequence: uint64(lastInputSequence)}
+	if rawLeaseClientID.valid {
+		leaseClientID, err := BrowserClientIDFromBytes(rawLeaseClientID.bytes)
+		if err != nil {
+			return TerminalSession{}, false, fmt.Errorf("%w: invalid terminal lease client", ErrCorruptState)
+		}
+		result.LeaseClientID = &leaseClientID
+		if leaseExpiresAt.Int64 < 0 {
+			return TerminalSession{}, false, fmt.Errorf("%w: invalid terminal lease expiry", ErrCorruptState)
+		}
+		expires, err := NewUnixMillis(leaseExpiresAt.Int64)
+		if err != nil {
+			return TerminalSession{}, false, fmt.Errorf("%w: invalid terminal lease expiry", ErrCorruptState)
+		}
+		result.LeaseExpiresAt = &expires
+	}
 	if activatedAt.Valid {
 		value, err := NewUnixMillis(activatedAt.Int64)
 		if err != nil || activatedAt.Int64 < declaredAt || activatedAt.Int64 > updatedAt {

@@ -53,6 +53,9 @@ type ChangeID struct{ identifier }
 type RunID struct{ identifier }
 type ResourceID struct{ identifier }
 type TerminalSessionID struct{ identifier }
+type DaemonID struct{ identifier }
+type BootID struct{ identifier }
+type BrowserClientID struct{ identifier }
 
 func ProjectIDFromBytes(value []byte) (ProjectID, error) {
 	id, err := identifierFromBytes(value)
@@ -92,6 +95,18 @@ func TerminalSessionIDFromBytes(value []byte) (TerminalSessionID, error) {
 	id, err := identifierFromBytes(value)
 	return TerminalSessionID{id}, err
 }
+func DaemonIDFromBytes(value []byte) (DaemonID, error) {
+	id, err := identifierFromBytes(value)
+	return DaemonID{id}, err
+}
+func BootIDFromBytes(value []byte) (BootID, error) {
+	id, err := identifierFromBytes(value)
+	return BootID{id}, err
+}
+func BrowserClientIDFromBytes(value []byte) (BrowserClientID, error) {
+	id, err := identifierFromBytes(value)
+	return BrowserClientID{id}, err
+}
 
 func (id ProjectID) Bytes() []byte         { return id.bytes() }
 func (id AgentID) Bytes() []byte           { return id.bytes() }
@@ -101,6 +116,9 @@ func (id ChangeID) Bytes() []byte          { return id.bytes() }
 func (id RunID) Bytes() []byte             { return id.bytes() }
 func (id ResourceID) Bytes() []byte        { return id.bytes() }
 func (id TerminalSessionID) Bytes() []byte { return id.bytes() }
+func (id DaemonID) Bytes() []byte          { return id.bytes() }
+func (id BootID) Bytes() []byte            { return id.bytes() }
+func (id BrowserClientID) Bytes() []byte   { return id.bytes() }
 
 func (id ProjectID) MarshalText() ([]byte, error)         { return []byte(id.String()), nil }
 func (id AgentID) MarshalText() ([]byte, error)           { return []byte(id.String()), nil }
@@ -110,6 +128,9 @@ func (id ChangeID) MarshalText() ([]byte, error)          { return []byte(id.Str
 func (id RunID) MarshalText() ([]byte, error)             { return []byte(id.String()), nil }
 func (id ResourceID) MarshalText() ([]byte, error)        { return []byte(id.String()), nil }
 func (id TerminalSessionID) MarshalText() ([]byte, error) { return []byte(id.String()), nil }
+func (id DaemonID) MarshalText() ([]byte, error)          { return []byte(id.String()), nil }
+func (id BootID) MarshalText() ([]byte, error)            { return []byte(id.String()), nil }
+func (id BrowserClientID) MarshalText() ([]byte, error)   { return []byte(id.String()), nil }
 
 type digest struct {
 	b [DigestBytes]byte
@@ -152,6 +173,14 @@ func BirthDigestFromBytes(value []byte) (BirthDigest, error) {
 func (d AttemptDigest) Bytes() []byte { return d.digest.Bytes() }
 func (d TreeDigest) Bytes() []byte    { return d.digest.Bytes() }
 func (d BirthDigest) Bytes() []byte   { return d.digest.Bytes() }
+
+type BrowserChallengeDigest struct{ digest }
+
+func BrowserChallengeDigestFromBytes(value []byte) (BrowserChallengeDigest, error) {
+	d, err := digestFromBytes(value)
+	return BrowserChallengeDigest{d}, err
+}
+func (d BrowserChallengeDigest) Bytes() []byte { return d.digest.Bytes() }
 
 type UnixMillis struct{ value int64 }
 
@@ -448,6 +477,7 @@ type NewTask struct {
 }
 
 type FactoryState struct {
+	DaemonID        DaemonID
 	DispatchEnabled bool
 	Capacity        uint16
 	Revision        Revision

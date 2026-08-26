@@ -181,21 +181,23 @@ func scanTask(scanner rowScanner) (Task, bool, error) {
 }
 
 func factoryState(ctx context.Context, connection *sql.Conn) (FactoryState, error) {
+	var rawDaemonID []byte
 	var dispatch, capacity, revision, next, floor, updatedAt int64
-	if err := connection.QueryRowContext(ctx, `SELECT dispatch_enabled, capacity, revision, next_invalidation_sequence, invalidation_floor, updated_at_ms FROM factory WHERE singleton = 1`).Scan(&dispatch, &capacity, &revision, &next, &floor, &updatedAt); err != nil {
+	if err := connection.QueryRowContext(ctx, `SELECT daemon_id, dispatch_enabled, capacity, revision, next_invalidation_sequence, invalidation_floor, updated_at_ms FROM factory WHERE singleton = 1`).Scan(&rawDaemonID, &dispatch, &capacity, &revision, &next, &floor, &updatedAt); err != nil {
 		return FactoryState{}, fmt.Errorf("read factory: %w", err)
 	}
-	if dispatch != 0 && dispatch != 1 || capacity < 1 || capacity > MaxFactoryCapacity || next < 1 || floor < 1 || floor > next || updatedAt < 0 {
+	daemonID, daemonErr := DaemonIDFromBytes(rawDaemonID)
+	if daemonErr != nil || dispatch != 0 && dispatch != 1 || capacity < 1 || capacity > MaxFactoryCapacity || next < 1 || floor < 1 || floor > next || updatedAt < 0 {
 		return FactoryState{}, fmt.Errorf("%w: invalid factory controls", ErrCorruptState)
 	}
 	rev, revErr := NewRevision(revision)
 	head, headErr := NewEventSequence(next - 1)
 	floorSequence, floorErr := NewEventSequence(floor)
 	updated, updatedErr := NewUnixMillis(updatedAt)
-	if revErr != nil || headErr != nil || floorErr != nil || updatedErr != nil {
+	if daemonErr != nil || revErr != nil || headErr != nil || floorErr != nil || updatedErr != nil {
 		return FactoryState{}, fmt.Errorf("%w: invalid factory revision or invalidation metadata", ErrCorruptState)
 	}
-	return FactoryState{DispatchEnabled: dispatch == 1, Capacity: uint16(capacity), Revision: rev, Head: head, Floor: floorSequence, updatedAt: updated}, nil
+	return FactoryState{DaemonID: daemonID, DispatchEnabled: dispatch == 1, Capacity: uint16(capacity), Revision: rev, Head: head, Floor: floorSequence, updatedAt: updated}, nil
 }
 
 func (store *Store) Factory(ctx context.Context) (FactoryState, error) {

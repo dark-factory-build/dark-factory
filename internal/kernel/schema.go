@@ -18,6 +18,7 @@ var schemaStatements = []string{
 	// is absent until its owning slice can add it before the incompatible v1 ships.
 	`CREATE TABLE factory (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    daemon_id BLOB NOT NULL CHECK (length(daemon_id) = 16 AND daemon_id <> zeroblob(16)),
     dispatch_enabled INTEGER NOT NULL CHECK (dispatch_enabled IN (0, 1)),
     capacity INTEGER NOT NULL CHECK (capacity BETWEEN 1 AND 1024),
     revision INTEGER NOT NULL CHECK (revision >= 1),
@@ -227,13 +228,45 @@ var schemaStatements = []string{
     activated_at_ms INTEGER CHECK (activated_at_ms IS NULL OR (activated_at_ms >= declared_at_ms AND activated_at_ms >= 0)),
     closed_at_ms INTEGER CHECK (closed_at_ms IS NULL OR (closed_at_ms >= declared_at_ms AND (activated_at_ms IS NULL OR closed_at_ms >= activated_at_ms) AND closed_at_ms = updated_at_ms)),
     updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= declared_at_ms AND (activated_at_ms IS NULL OR updated_at_ms >= activated_at_ms)),
+    lease_client_id BLOB CHECK (lease_client_id IS NULL OR (length(lease_client_id) = 16 AND lease_client_id <> zeroblob(16))) REFERENCES browser_clients(id),
+    lease_generation INTEGER NOT NULL DEFAULT 0 CHECK (lease_generation >= 0),
+    lease_expires_at_ms INTEGER CHECK (lease_expires_at_ms IS NULL OR lease_expires_at_ms >= 0),
+    last_input_sequence INTEGER NOT NULL DEFAULT 0 CHECK (last_input_sequence >= 0),
     CHECK ((state = 'unresolved') = (unresolved_reason IS NOT NULL)),
     CHECK (state <> 'declared' OR (activated_at_ms IS NULL AND closed_at_ms IS NULL AND updated_at_ms = declared_at_ms)),
     CHECK (state <> 'active' OR (activated_at_ms IS NOT NULL AND closed_at_ms IS NULL AND unresolved_reason IS NULL)),
     CHECK (state <> 'unresolved' OR closed_at_ms IS NULL),
     CHECK (state <> 'closed' OR (closed_at_ms IS NOT NULL AND unresolved_reason IS NULL))
+    ,CHECK ((lease_client_id IS NULL) = (lease_expires_at_ms IS NULL))
+    ,CHECK (lease_client_id IS NOT NULL OR last_input_sequence = 0)
 ) STRICT, WITHOUT ROWID`,
 	`CREATE UNIQUE INDEX terminal_sessions_run_unique ON terminal_sessions(run_id)`,
+	`CREATE TABLE browser_pairing_challenges (
+    secret_digest BLOB PRIMARY KEY CHECK (length(secret_digest) = 32),
+    boot_id BLOB NOT NULL CHECK (length(boot_id) = 16 AND boot_id <> zeroblob(16)),
+    intended_origin TEXT NOT NULL CHECK (length(CAST(intended_origin AS BLOB)) BETWEEN 1 AND 4096),
+    capability_mask INTEGER NOT NULL CHECK (capability_mask BETWEEN 1 AND 15 AND (capability_mask & 1) = 1),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    expires_at_ms INTEGER NOT NULL CHECK (expires_at_ms > created_at_ms AND expires_at_ms <= created_at_ms + 300000),
+    redeemed_at_ms INTEGER CHECK (redeemed_at_ms IS NULL OR (redeemed_at_ms >= created_at_ms AND redeemed_at_ms >= 0))
+) STRICT, WITHOUT ROWID`,
+	`CREATE TABLE browser_clients (
+    id BLOB PRIMARY KEY CHECK (length(id) = 16 AND id <> zeroblob(16)),
+    public_key BLOB NOT NULL CHECK (length(public_key) = 65 AND substr(public_key, 1, 1) = X'04'),
+    fingerprint BLOB NOT NULL UNIQUE CHECK (length(fingerprint) = 32),
+    capability_mask INTEGER NOT NULL CHECK (capability_mask BETWEEN 1 AND 15 AND (capability_mask & 1) = 1),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
+    revoked_at_ms INTEGER CHECK (revoked_at_ms IS NULL OR (revoked_at_ms >= created_at_ms AND revoked_at_ms >= 0))
+) STRICT, WITHOUT ROWID`,
+	`CREATE TABLE browser_security_events (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT CHECK (sequence >= 1),
+    kind TEXT NOT NULL CHECK (kind IN ('challenge_minted', 'client_paired', 'duplicate_fingerprint', 'client_revoked')),
+    client_id BLOB CHECK (client_id IS NULL OR (length(client_id) = 16 AND client_id <> zeroblob(16))) REFERENCES browser_clients(id),
+    occurred_at_ms INTEGER NOT NULL CHECK (occurred_at_ms >= 0)
+) STRICT`,
+	`CREATE INDEX browser_security_events_client ON browser_security_events(client_id, sequence)`,
 	`CREATE TABLE invalidations (
     sequence INTEGER PRIMARY KEY CHECK (sequence >= 1),
     occurred_at_ms INTEGER NOT NULL CHECK (occurred_at_ms >= 0),

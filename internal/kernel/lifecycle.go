@@ -3,6 +3,7 @@ package kernel
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 )
 
@@ -663,6 +664,27 @@ func (store *Store) enterFinalizing(ctx context.Context, tx *writeTx, run Run, e
 	releasing, err := tx.connection.ExecContext(ctx, `UPDATE resources SET state = 'releasing', revision = revision + 1, updated_at_ms = ? WHERE run_id = ? AND state IN ('declared', 'active')`, at.Int64(), run.ID.Bytes())
 	if err := requireRows(releasing, err, 4); err != nil {
 		return Run{}, tx.Rollback(err)
+	}
+	// Finalizing revokes terminal input in this same transaction. It does not
+	// emit another run invalidation: the finalizing run update above is the one
+	// aggregate revision visible to clients.
+	var generation int64
+	leaseErr := tx.connection.QueryRowContext(ctx, `SELECT lease_generation FROM terminal_sessions WHERE run_id = ? AND lease_client_id IS NOT NULL`, run.ID.Bytes()).Scan(&generation)
+	if leaseErr != nil && !errors.Is(leaseErr, sql.ErrNoRows) {
+		return Run{}, tx.Rollback(leaseErr)
+	}
+	if leaseErr == nil {
+		next, overflowErr := leaseGenerationNext(generation)
+		if overflowErr != nil {
+			return Run{}, tx.Rollback(overflowErr)
+		}
+		updatedSession, updateErr := tx.connection.ExecContext(ctx, `UPDATE terminal_sessions SET lease_client_id = NULL, lease_expires_at_ms = NULL, lease_generation = ?, last_input_sequence = 0, revision = revision + 1, updated_at_ms = ? WHERE run_id = ? AND lease_client_id IS NOT NULL AND lease_generation = ?`, next, at.Int64(), run.ID.Bytes(), generation)
+		if updateErr != nil {
+			return Run{}, tx.Rollback(updateErr)
+		}
+		if err := requireOneRow(updatedSession, nil); err != nil {
+			return Run{}, tx.Rollback(err)
+		}
 	}
 	if err := appendInvalidations(ctx, tx.connection, at, []pendingInvalidation{{kind: EntityRun, id: run.ID.Bytes(), revision: expected.Int64() + 1}}); err != nil {
 		return Run{}, tx.Rollback(err)

@@ -291,15 +291,19 @@ func (value TerminalSessionState) String() string {
 }
 
 type TerminalSession struct {
-	ID               TerminalSessionID
-	RunID            RunID
-	State            TerminalSessionState
-	UnresolvedReason string
-	Revision         Revision
-	DeclaredAt       UnixMillis
-	ActivatedAt      *UnixMillis
-	ClosedAt         *UnixMillis
-	UpdatedAt        UnixMillis
+	ID                TerminalSessionID
+	RunID             RunID
+	State             TerminalSessionState
+	UnresolvedReason  string
+	Revision          Revision
+	DeclaredAt        UnixMillis
+	ActivatedAt       *UnixMillis
+	ClosedAt          *UnixMillis
+	UpdatedAt         UnixMillis
+	LeaseClientID     *BrowserClientID
+	LeaseGeneration   uint64
+	LeaseExpiresAt    *UnixMillis
+	LastInputSequence uint64
 }
 
 type OutcomeKind uint8

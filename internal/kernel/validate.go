@@ -36,10 +36,160 @@ func validateDurableControls(ctx context.Context, connection *sql.Conn) error {
 	if err := validateRunRelationships(ctx, connection); err != nil {
 		return err
 	}
+	if err := validateBrowserAuthority(ctx, connection); err != nil {
+		return err
+	}
 	if err := validateResourceIdentityCollisions(ctx, connection); err != nil {
 		return err
 	}
 	return validateInvalidations(ctx, connection, state)
+}
+
+// validateBrowserAuthority is intentionally a concrete integrity pass. Browser
+// rows are credentials and leases, not a general permission/state framework.
+func validateBrowserAuthority(ctx context.Context, connection *sql.Conn) error {
+	rows, err := connection.QueryContext(ctx, `SELECT id FROM browser_clients ORDER BY id`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			rows.Close()
+			return err
+		}
+		id, err := BrowserClientIDFromBytes(raw)
+		if err != nil {
+			rows.Close()
+			return fmt.Errorf("%w: invalid browser client identity", ErrCorruptState)
+		}
+		if _, found, err := browserClientByID(ctx, connection, id); err != nil || !found {
+			rows.Close()
+			if err == nil {
+				err = ErrCorruptState
+			}
+			return err
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	rows, err = connection.QueryContext(ctx, `SELECT secret_digest FROM browser_pairing_challenges ORDER BY secret_digest`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			rows.Close()
+			return err
+		}
+		digest, err := BrowserChallengeDigestFromBytes(raw)
+		if err != nil {
+			rows.Close()
+			return fmt.Errorf("%w: invalid browser challenge identity", ErrCorruptState)
+		}
+		if _, found, err := browserChallengeByDigest(ctx, connection, digest); err != nil || !found {
+			rows.Close()
+			if err == nil {
+				err = ErrCorruptState
+			}
+			return err
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	var count int64
+	if err := connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM browser_security_events`).Scan(&count); err != nil {
+		return err
+	}
+	if count > EventRetentionLimit {
+		return fmt.Errorf("%w: browser security event retention exceeded", ErrCorruptState)
+	}
+	rows, err = connection.QueryContext(ctx, `SELECT sequence, kind, client_id, occurred_at_ms FROM browser_security_events ORDER BY sequence`)
+	if err != nil {
+		return err
+	}
+	var previous int64
+	for rows.Next() {
+		var sequence, occurred int64
+		var kind string
+		var client nullableBlob
+		if err := rows.Scan(&sequence, &kind, &client, &occurred); err != nil {
+			rows.Close()
+			return err
+		}
+		if sequence < 1 || sequence <= previous || !validBrowserSecurityKind(BrowserSecurityEventKind(kind)) || occurred < 0 {
+			rows.Close()
+			return fmt.Errorf("%w: invalid browser security event", ErrCorruptState)
+		}
+		if client.valid {
+			id, err := BrowserClientIDFromBytes(client.bytes)
+			if err != nil {
+				rows.Close()
+				return fmt.Errorf("%w: invalid browser event client", ErrCorruptState)
+			}
+			if _, found, err := browserClientByID(ctx, connection, id); err != nil || !found {
+				rows.Close()
+				if err == nil {
+					err = ErrCorruptState
+				}
+				return err
+			}
+		}
+		previous = sequence
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	rows, err = connection.QueryContext(ctx, `SELECT id, run_id, state, lease_client_id, lease_generation, lease_expires_at_ms, last_input_sequence FROM terminal_sessions`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var rawID, rawRun []byte
+		var state string
+		var client nullableBlob
+		var generation, expiry, sequence sql.NullInt64
+		if err := rows.Scan(&rawID, &rawRun, &state, &client, &generation, &expiry, &sequence); err != nil {
+			rows.Close()
+			return err
+		}
+		if !generation.Valid || !sequence.Valid || generation.Int64 < 0 || sequence.Int64 < 0 || expiry.Valid && expiry.Int64 < 0 {
+			rows.Close()
+			return fmt.Errorf("%w: invalid terminal lease controls", ErrCorruptState)
+		}
+		if client.valid {
+			if state != "active" || !expiry.Valid || !generation.Valid || generation.Int64 < 1 {
+				rows.Close()
+				return fmt.Errorf("%w: lease on inactive terminal session", ErrCorruptState)
+			}
+			id, err := BrowserClientIDFromBytes(client.bytes)
+			if err != nil {
+				rows.Close()
+				return fmt.Errorf("%w: invalid terminal lease client", ErrCorruptState)
+			}
+			browser, found, err := browserClientByID(ctx, connection, id)
+			if err != nil || !found || browser.RevokedAt != nil || !browser.CapabilityMask.Has(BrowserCapabilityTerminalInput) {
+				rows.Close()
+				return fmt.Errorf("%w: terminal lease client is not active", ErrCorruptState)
+			}
+			var phase string
+			if err := connection.QueryRowContext(ctx, `SELECT phase FROM runs WHERE id = ?`, rawRun).Scan(&phase); err != nil || phase != "running" {
+				rows.Close()
+				return fmt.Errorf("%w: terminal lease run is not running", ErrCorruptState)
+			}
+		} else if expiry.Valid || sequence.Int64 != 0 {
+			rows.Close()
+			return fmt.Errorf("%w: terminal lease nullability mismatch", ErrCorruptState)
+		}
+		if _, err := TerminalSessionIDFromBytes(rawID); err != nil {
+			rows.Close()
+			return fmt.Errorf("%w: invalid terminal session identity", ErrCorruptState)
+		}
+	}
+	return rows.Close()
 }
 
 func validateResourceIdentityCollisions(ctx context.Context, connection *sql.Conn) error {

@@ -2,6 +2,7 @@ package kernel
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"database/sql/driver"
 	"errors"
@@ -316,13 +317,15 @@ func (store *Store) initialize(ctx context.Context, config FactoryConfig, at Uni
 			_, err = tx.connection.ExecContext(ctx, statement)
 		}
 		if err == nil {
-			_, err = tx.connection.ExecContext(
-				ctx,
-				`INSERT INTO factory(singleton, dispatch_enabled, capacity, revision, next_invalidation_sequence, invalidation_floor, updated_at_ms) VALUES(1, ?, ?, 1, 1, 1, ?)`,
-				boolInt(config.DispatchEnabled),
-				int64(config.Capacity),
-				at.Int64(),
-			)
+			var rawDaemonID [IDBytes]byte
+			if _, err = rand.Read(rawDaemonID[:]); err == nil && rawDaemonID == [IDBytes]byte{} {
+				err = fmt.Errorf("%w: generated zero daemon identifier", ErrCorruptState)
+			}
+			if err == nil {
+				_, err = tx.connection.ExecContext(ctx,
+					`INSERT INTO factory(singleton, daemon_id, dispatch_enabled, capacity, revision, next_invalidation_sequence, invalidation_floor, updated_at_ms) VALUES(1, ?, ?, ?, 1, 1, 1, ?)`,
+					rawDaemonID[:], boolInt(config.DispatchEnabled), int64(config.Capacity), at.Int64())
+			}
 		}
 		if err != nil {
 			result := tx.Rollback(err)
