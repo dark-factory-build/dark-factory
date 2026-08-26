@@ -441,19 +441,22 @@ func (store *Store) RecoverableRun(ctx context.Context, id RunID) (RecoverableRu
 		return RecoverableRun{}, false, err
 	}
 	defer tx.Close()
+	if err := validateOwnershipLocators(ctx, tx.connection); err != nil {
+		return RecoverableRun{}, false, err
+	}
+	if err := validateResourceIdentityCollisions(ctx, tx.connection); err != nil {
+		return RecoverableRun{}, false, err
+	}
 	run, found, err := runByID(ctx, tx.connection, id)
 	if err != nil || !found {
 		return RecoverableRun{}, false, err
 	}
-	if err := validateOwnershipLocators(ctx, tx.connection); err != nil {
+	recovered, err := recoverableRunFrom(ctx, tx.connection, run)
+	if err != nil {
 		return RecoverableRun{}, false, err
 	}
 	if run.Phase == RunTerminal {
 		return RecoverableRun{}, false, nil
-	}
-	recovered, err := recoverableRunFrom(ctx, tx.connection, run)
-	if err != nil {
-		return RecoverableRun{}, false, err
 	}
 	return recovered, true, nil
 }

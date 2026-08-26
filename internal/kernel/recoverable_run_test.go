@@ -81,8 +81,69 @@ func TestRecoverableRunExactLookupRejectsUnrelatedOwnershipCorruption(t *testing
 	}
 	firstRuntime := resourceOfKind(t, resourcesForRunTest(t, store, first.Run.ID), ResourceRuntimeRoot)
 	corruptSQL(t, store, `UPDATE resources SET path = ? WHERE run_id = ? AND kind = 'runtime_root'`, firstRuntime.Path, second.Run.ID.Bytes())
+	for _, requestedID := range []RunID{first.Run.ID, runID(t, 187)} {
+		if _, found, err := store.RecoverableRun(context.Background(), requestedID); !errors.Is(err, ErrCorruptState) || found {
+			t.Fatalf("unrelated ownership corruption for %s = found=%v, err=%v", requestedID, found, err)
+		}
+	}
+}
+
+func TestRecoverableRunExactLookupRejectsUnrelatedIdentityCollision(t *testing.T) {
+	store, _, project, firstAgent := newAdmissionStore(t, RoleOrchestrator, 4)
+	defer store.Close()
+	if _, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 190), ProjectID: project.ID, AssignedAgentID: firstAgent.ID, IncarnationID: incarnationID(t, 191), Title: "first"}, mustTime(t, 5)); err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.AdmitNext(context.Background(), firstAgent.ID, admissionKeys(t, 192, nil), mustTime(t, 10))
+	if err != nil || !first.Admitted() {
+		t.Fatalf("first admission = %+v, %v", first, err)
+	}
+	secondAgent, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 193), ProjectID: project.ID, Name: "second", Role: RoleOrchestrator, Provider: ProviderCodex, ExecutionMode: ExecutionWorkspaceWrite, ToolBudgetLimit: 5}, mustTime(t, 11))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 194), ProjectID: project.ID, AssignedAgentID: secondAgent.ID, IncarnationID: incarnationID(t, 195), Title: "second"}, mustTime(t, 12)); err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.AdmitNext(context.Background(), secondAgent.ID, admissionKeys(t, 196, nil), mustTime(t, 13))
+	if err != nil || !second.Admitted() {
+		t.Fatalf("second admission = %+v, %v", second, err)
+	}
+	firstRunner := resourceOfKind(t, resourcesForRunTest(t, store, first.Run.ID), ResourceRunnerProcess)
+	firstRunner, err = store.ActivateResource(context.Background(), first.Run.ID, firstRunner.ID, firstRunner.Revision, processIdentity(t, 300), mustTime(t, 20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRunner := resourceOfKind(t, resourcesForRunTest(t, store, second.Run.ID), ResourceRunnerProcess)
+	secondRunner, err = store.ActivateResource(context.Background(), second.Run.ID, secondRunner.ID, secondRunner.Revision, processIdentity(t, 301), mustTime(t, 21))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, pgid, birth, ok := firstRunner.Identity.Process()
+	if !ok {
+		t.Fatal("first runner identity is not a process identity")
+	}
+	corruptSQL(t, store, `UPDATE resources SET pid = ?, pgid = ?, birth_digest = ? WHERE id = ?`, pid, pgid, birth.Bytes(), secondRunner.ID.Bytes())
+	before := captureWriteFootprint(t, store)
 	if _, found, err := store.RecoverableRun(context.Background(), first.Run.ID); !errors.Is(err, ErrCorruptState) || found {
-		t.Fatalf("unrelated ownership corruption = found=%v, err=%v", found, err)
+		t.Fatalf("unrelated identity collision = found=%v, err=%v", found, err)
+	}
+	if after := captureWriteFootprint(t, store); after != before {
+		t.Fatalf("identity collision lookup footprint before=%+v after=%+v", before, after)
+	}
+}
+
+func TestRecoverableRunExactLookupValidatesTerminalGraphBeforeNotFound(t *testing.T) {
+	failure, _ := NewFailureProposal(FailureInternal, "terminal")
+	store, finalizing := finalizingReleasedRun(t, RoleOrchestrator, VerificationNone, failure)
+	defer store.Close()
+	terminal, err := store.FinalizeRun(context.Background(), finalizing.ID, finalizing.Revision, mustTime(t, 70))
+	if err != nil {
+		t.Fatal(err)
+	}
+	corruptSQL(t, store, `UPDATE tasks SET status = 'running', result = NULL, completed_at_ms = NULL WHERE id = ?`, terminal.TaskID.Bytes())
+	if _, found, err := store.RecoverableRun(context.Background(), terminal.ID); !errors.Is(err, ErrCorruptState) || found {
+		t.Fatalf("corrupt terminal graph = found=%v, err=%v", found, err)
 	}
 }
 
