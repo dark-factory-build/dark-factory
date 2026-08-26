@@ -216,6 +216,65 @@ func TestTerminalSpoolRejectsUnsafeFileAndSwapWithoutAck(t *testing.T) {
 	})
 }
 
+func TestTerminalScratchInitialMetadataFailureCleansOnlyExactOpenedIdentity(t *testing.T) {
+	terminal := testTerminal("attempt-scratch", "private")
+	for _, mutation := range []string{"mode", "link", "replacement"} {
+		t.Run(mutation, func(t *testing.T) {
+			root, dir := openTestSpool(t)
+			moved := filepath.Join(root, "moved-scratch")
+			replacement := []byte("replacement")
+			_, err := publishTerminal(dir, TerminalSpoolName, terminal, func(fd int) {
+				scratch := filepath.Join(root, TerminalScratchName)
+				switch mutation {
+				case "mode":
+					if err := os.Chmod(scratch, 0o640); err != nil {
+						t.Fatal(err)
+					}
+				case "link":
+					if err := os.Link(scratch, filepath.Join(root, "scratch-link")); err != nil {
+						t.Fatal(err)
+					}
+				case "replacement":
+					if err := os.Rename(scratch, moved); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(scratch, replacement, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			})
+			if err == nil {
+				t.Fatal("invalid initial scratch metadata published")
+			}
+			if mutation == "replacement" {
+				if body, readErr := os.ReadFile(filepath.Join(root, TerminalScratchName)); readErr != nil || string(body) != string(replacement) {
+					t.Fatalf("foreign replacement changed: %q %v", body, readErr)
+				}
+				if _, statErr := os.Lstat(moved); !errors.Is(statErr, os.ErrNotExist) {
+					t.Fatalf("exact moved scratch retained: %v", statErr)
+				}
+			} else if _, statErr := os.Lstat(filepath.Join(root, TerminalScratchName)); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("invalid exact scratch retained: %v", statErr)
+			}
+		})
+	}
+
+	t.Run("unknown-opened-identity-is-visible-and-not-broadly-unlinked", func(t *testing.T) {
+		root, dir := openTestSpool(t)
+		_, err := publishTerminal(dir, TerminalSpoolName, terminal, func(fd int) {
+			if err := unix.Close(fd); err != nil {
+				t.Fatal(err)
+			}
+		})
+		if !errors.Is(err, ErrUnresolved) {
+			t.Fatalf("unknown initial identity = %v", err)
+		}
+		if _, statErr := os.Lstat(filepath.Join(root, TerminalScratchName)); statErr != nil {
+			t.Fatalf("unknown identity was broadly unlinked: %v", statErr)
+		}
+	})
+}
+
 func TestTerminalSpoolRejectsForeignOwnershipWherePermitted(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("changing ownership safely requires a root test process")

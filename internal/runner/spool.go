@@ -23,6 +23,10 @@ type TerminalRecord struct {
 }
 
 func PublishTerminal(dir *os.File, basename string, terminal Terminal) (_ *TerminalRecord, resultErr error) {
+	return publishTerminal(dir, basename, terminal, nil)
+}
+
+func publishTerminal(dir *os.File, basename string, terminal Terminal, afterOpen func(int)) (_ *TerminalRecord, resultErr error) {
 	if err := validateTerminalName(dir, basename); err != nil {
 		return nil, err
 	}
@@ -42,10 +46,13 @@ func PublishTerminal(dir *os.File, basename string, terminal Terminal) (_ *Termi
 	if err != nil {
 		return nil, err
 	}
+	if afterOpen != nil {
+		afterOpen(fd)
+	}
 	var created unix.Stat_t
-	if err := unix.Fstat(fd, &created); err != nil || !validTerminalFile(created, 0) || created.Size != 0 {
+	if err := unix.Fstat(fd, &created); err != nil {
 		_ = unix.Close(fd)
-		return nil, errors.Join(ErrIdentity, err)
+		return nil, errors.Join(ErrUnresolved, err)
 	}
 	cleanup := true
 	defer func() {
@@ -58,6 +65,9 @@ func PublishTerminal(dir *os.File, basename string, terminal Terminal) (_ *Termi
 			resultErr = errors.Join(resultErr, closeErr)
 		}
 	}()
+	if !validTerminalFile(created, 0) || created.Size != 0 {
+		return nil, ErrIdentity
+	}
 	if err := writeAll(fd, body); err != nil {
 		return nil, err
 	}
@@ -183,13 +193,47 @@ func validTerminalFile(stat unix.Stat_t, exactSize int64) bool {
 
 func unlinkExactScratch(dir *os.File, name string, opened unix.Stat_t) error {
 	var named unix.Stat_t
-	if err := unix.Fstatat(int(dir.Fd()), name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+	if err := unix.Fstatat(int(dir.Fd()), name, &named, unix.AT_SYMLINK_NOFOLLOW); err == nil && named.Dev == opened.Dev && named.Ino == opened.Ino && named.Mode&unix.S_IFMT == unix.S_IFREG {
+		if err := unix.Unlinkat(int(dir.Fd()), name, 0); err != nil {
+			return err
+		}
+		return unix.Fsync(int(dir.Fd()))
+	} else if err != nil && !errors.Is(err, unix.ENOENT) {
 		return err
 	}
-	if named.Dev != opened.Dev || named.Ino != opened.Ino || named.Mode&unix.S_IFMT != unix.S_IFREG || named.Uid != uint32(os.Geteuid()) || named.Nlink != 1 {
-		return ErrIdentity
+	fd, err := unix.Openat(int(dir.Fd()), ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
+	if err != nil {
+		return err
 	}
-	return unix.Unlinkat(int(dir.Fd()), name, 0)
+	scan := os.NewFile(uintptr(fd), "terminal-scratch-cleanup")
+	defer scan.Close()
+	entries, err := scan.ReadDir(17)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	if len(entries) > 16 {
+		return ErrUnresolved
+	}
+	found := ""
+	for _, entry := range entries {
+		var stat unix.Stat_t
+		if err := unix.Fstatat(int(dir.Fd()), entry.Name(), &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			return err
+		}
+		if stat.Dev == opened.Dev && stat.Ino == opened.Ino && stat.Mode&unix.S_IFMT == unix.S_IFREG {
+			if found != "" {
+				return ErrUnresolved
+			}
+			found = entry.Name()
+		}
+	}
+	if found == "" {
+		return ErrUnresolved
+	}
+	if err := unix.Unlinkat(int(dir.Fd()), found, 0); err != nil {
+		return err
+	}
+	return unix.Fsync(int(dir.Fd()))
 }
 
 func writeAll(fd int, p []byte) error {
