@@ -1819,3 +1819,36 @@ Shell-provider candidate review at unintegrated head `d0ce0d9`:
   regression attacks are same-size content mutation, late `.git`, unrelated
   private directories, intermediate replacement, binding forgery and the
   unchanged successful shell path.
+
+Runtime-ownership candidate review at unintegrated head `ca222fd`:
+
+- The candidate added the reviewed cooperative `.runtime.lock`, exact
+  `RuntimeBinding`, fixed top-level grammar, inherited lifetime flock, bounded
+  descriptor-relative cleanup, zero-effect terminal-spool preflight, durable
+  absence recheck and exact scratch cleanup. Its focused, race, CGO-free,
+  cross-build and full Go gates passed, and mutations killed the parent-lock,
+  lifetime-lock, binding-metadata, terminal-guard, hardlink, symlink and final-
+  absence guards. Independent review nevertheless returned **BLOCK**.
+- The reviewer traced the real current-exec path and found that FD 9 is marked
+  close-on-exec and explicitly closed immediately before the final provider
+  `exec`. Normal tests passed only because the outer runner retained another
+  duplicate until its Wait. If that runner dies while the provider survives,
+  the provider carries no lifetime lease; recovery can observe the lease as
+  available and remove a live runtime. A real crash test must prove the final
+  provider retains one least-privilege lifetime capability until its exit even
+  after outer-runner death.
+- The repair must not blindly expose a runtime-directory descriptor containing
+  config/source authority to provider code. It must state and test the exact
+  provider-visible descriptor set and use the smallest lifetime capability
+  that survives both exec gates. No wrapper process, PID authority, second
+  liveness state or generic lease framework is permitted.
+- The reviewer also found that initial invalid metadata on the terminal scratch
+  returned before exact-inode cleanup, leaving a cleanup-stalling residue. The
+  repair must split observation failure from known invalid metadata and remove
+  only the exact opened scratch identity, never a replacement.
+- All earlier review items held: fresh independent product lock opens, exact
+  creation cleanup, complete lock metadata checks, centralized runner names,
+  nested cleanup progress semantics, zero-effect terminal guard, bounded reads/
+  depth/descriptors and already-absent fsync/recheck. This candidate remains
+  unintegrated until both new findings receive causal tests and exact-head
+  independent ALLOW.
