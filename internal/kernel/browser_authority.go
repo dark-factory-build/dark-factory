@@ -475,10 +475,7 @@ func (store *Store) ReleaseTerminalLease(ctx context.Context, runID RunID, sessi
 	if err != nil {
 		return TerminalLease{}, tx.Rollback(err)
 	}
-	if run.Revision == expectedRun && session.Revision == expectedSession && session.LeaseClientID == nil && session.LeaseGeneration == generation {
-		return TerminalLease{RunID: run.ID, SessionID: session.ID, ClientID: clientID, Generation: session.LeaseGeneration, LastInputSequence: session.LastInputSequence, RunRevision: run.Revision, SessionRevision: session.Revision}, tx.Rollback(nil)
-	}
-	if run.Revision != expectedRun || session.Revision != expectedSession || at.Int64() < run.UpdatedAt.Int64() || at.Int64() < session.UpdatedAt.Int64() || session.LeaseClientID == nil || *session.LeaseClientID != clientID || session.LeaseGeneration != generation {
+	if run.Revision != expectedRun || session.Revision != expectedSession || at.Int64() < run.UpdatedAt.Int64() || at.Int64() < session.UpdatedAt.Int64() || session.LeaseClientID == nil || *session.LeaseClientID != clientID || session.LeaseGeneration != generation || session.LeaseExpiresAt == nil || at.Int64() >= session.LeaseExpiresAt.Int64() {
 		return TerminalLease{}, tx.Rollback(ErrRevisionConflict)
 	}
 	next, err := leaseGenerationNext(int64(generation))

@@ -61,6 +61,42 @@ func browserTableCount(t *testing.T, store *Store, table string) int64 {
 	return count
 }
 
+func sameBrowserID(left, right *BrowserClientID) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
+func sameUnixMillis(left, right *UnixMillis) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
+func assertReleaseRejectedWithoutMutation(t *testing.T, store *Store, runID RunID, sessionID TerminalSessionID, beforeRun Run, beforeSession TerminalSession, beforeFactory FactoryState) {
+	t.Helper()
+	afterRun, _, err := store.Run(context.Background(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterSession := terminalSessionForRunTest(t, store, runID)
+	afterFactory, err := store.Factory(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterRun.Phase != beforeRun.Phase || afterRun.Revision != beforeRun.Revision || afterRun.UpdatedAt != beforeRun.UpdatedAt {
+		t.Fatalf("rejected release changed run lifecycle: before=%+v after=%+v", beforeRun, afterRun)
+	}
+	if afterSession.ID != beforeSession.ID || afterSession.RunID != beforeSession.RunID || afterSession.State != beforeSession.State || afterSession.UnresolvedReason != beforeSession.UnresolvedReason || afterSession.Revision != beforeSession.Revision || afterSession.DeclaredAt != beforeSession.DeclaredAt || !sameUnixMillis(afterSession.ActivatedAt, beforeSession.ActivatedAt) || !sameUnixMillis(afterSession.ClosedAt, beforeSession.ClosedAt) || afterSession.UpdatedAt != beforeSession.UpdatedAt || !sameBrowserID(afterSession.LeaseClientID, beforeSession.LeaseClientID) || afterSession.LeaseGeneration != beforeSession.LeaseGeneration || !sameUnixMillis(afterSession.LeaseExpiresAt, beforeSession.LeaseExpiresAt) || afterSession.LastInputSequence != beforeSession.LastInputSequence {
+		t.Fatalf("rejected release changed session: before=%+v after=%+v", beforeSession, afterSession)
+	}
+	if afterFactory != beforeFactory {
+		t.Fatalf("rejected release changed factory invalidation state: before=%+v after=%+v", beforeFactory, afterFactory)
+	}
+}
+
 func TestBrowserDaemonIDFreshStableAndCorruptionFailsClosed(t *testing.T) {
 	ctx := context.Background()
 	store, path := newBrowserStore(t)
@@ -841,16 +877,82 @@ func TestTerminalLeaseSequenceReleasePartialResetAndFreshGeneration(t *testing.T
 	if _, err := store.ReleaseTerminalLease(ctx, run.ID, session.ID, client.ID, newLease.Generation, run.Revision, session.Revision, mustTime(t, 41)); !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("stale release error = %v", err)
 	}
-	if _, err := store.ReleaseTerminalLease(ctx, run.ID, session.ID, client.ID, afterReset.LeaseGeneration, run.Revision, session.Revision, mustTime(t, 41)); err != nil {
-		t.Fatalf("no-holder current-generation release = %v", err)
+	if _, err := store.ReleaseTerminalLease(ctx, run.ID, session.ID, client.ID, afterReset.LeaseGeneration, run.Revision, session.Revision, mustTime(t, 41)); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("cleared-holder release error = %v", err)
 	}
 	secondRun := addRunningRunOnStore(t, store, 180)
 	secondSession := terminalSessionForRunTest(t, store, secondRun.ID)
 	secondClientID := browserTestID(t, 131)
 	secondClient := pairBrowserClient(t, store, mintBrowserChallenge(t, store, 131, boot, 400, 500, BrowserCapabilityObserve|BrowserCapabilityTerminalInput), boot, secondClientID, browserKey(t), 401)
-	if _, err := store.ReleaseTerminalLease(ctx, secondRun.ID, secondSession.ID, secondClient.ID, 0, secondRun.Revision, secondSession.Revision, mustTime(t, 401)); err != nil {
-		t.Fatalf("fresh generation zero release = %v", err)
+	if _, err := store.ReleaseTerminalLease(ctx, secondRun.ID, secondSession.ID, secondClient.ID, 0, secondRun.Revision, secondSession.Revision, mustTime(t, 401)); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("fresh generation release error = %v", err)
 	}
+}
+
+func TestTerminalLeaseReleaseRequiresActiveExactHolder(t *testing.T) {
+	ctx := context.Background()
+	store, run, _ := runningOrchestratorRun(t)
+	defer store.Close()
+	session := terminalSessionForRunTest(t, store, run.ID)
+	boot := browserTestBoot(t, 150)
+	first := pairBrowserClient(t, store, mintBrowserChallenge(t, store, 150, boot, 10, 100, BrowserCapabilityObserve|BrowserCapabilityTerminalInput), boot, browserTestID(t, 150), browserKey(t), 11)
+	second := pairBrowserClient(t, store, mintBrowserChallenge(t, store, 151, boot, 12, 100, BrowserCapabilityObserve|BrowserCapabilityTerminalInput), boot, browserTestID(t, 151), browserKey(t), 13)
+	lease, err := store.AcquireTerminalLease(ctx, run.ID, session.ID, first.ID, run.Revision, session.Revision, mustTime(t, 31))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	beforeRun, _, err := store.Run(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeSession := terminalSessionForRunTest(t, store, run.ID)
+	beforeFactory, err := store.Factory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReleaseTerminalLease(ctx, run.ID, session.ID, second.ID, lease.Generation, run.Revision, session.Revision, mustTime(t, 32)); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("wrong-client release error = %v", err)
+	}
+	assertReleaseRejectedWithoutMutation(t, store, run.ID, session.ID, beforeRun, beforeSession, beforeFactory)
+
+	beforeRun, _, err = store.Run(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeSession = terminalSessionForRunTest(t, store, run.ID)
+	beforeFactory, err = store.Factory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReleaseTerminalLease(ctx, run.ID, session.ID, first.ID, lease.Generation, run.Revision, session.Revision, lease.ExpiresAt); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("expired-holder release error = %v", err)
+	}
+	assertReleaseRejectedWithoutMutation(t, store, run.ID, session.ID, beforeRun, beforeSession, beforeFactory)
+
+	if _, err := store.ReleaseTerminalLease(ctx, run.ID, session.ID, first.ID, lease.Generation, run.Revision, session.Revision, mustTime(t, 32)); err != nil {
+		t.Fatal(err)
+	}
+	beforeRun, _, err = store.Run(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeSession = terminalSessionForRunTest(t, store, run.ID)
+	beforeFactory, err = store.Factory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if beforeSession.LeaseClientID != nil {
+		t.Fatalf("successful release retained holder: %+v", beforeSession)
+	}
+	if _, err := store.ReleaseTerminalLease(ctx, run.ID, session.ID, first.ID, lease.Generation+1, run.Revision, session.Revision, mustTime(t, 33)); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("repeat cleared-holder release error = %v", err)
+	}
+	assertReleaseRejectedWithoutMutation(t, store, run.ID, session.ID, beforeRun, beforeSession, beforeFactory)
+	if _, err := store.ReleaseTerminalLease(ctx, run.ID, session.ID, first.ID, lease.Generation, run.Revision, session.Revision, mustTime(t, 33)); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("stale-generation release error = %v", err)
+	}
+	assertReleaseRejectedWithoutMutation(t, store, run.ID, session.ID, beforeRun, beforeSession, beforeFactory)
 }
 
 func TestRevokeBrowserClientAtomicallyClearsMultipleLeases(t *testing.T) {

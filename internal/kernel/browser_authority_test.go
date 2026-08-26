@@ -169,8 +169,8 @@ func TestTerminalLeaseGuardsAndPrivateChronology(t *testing.T) {
 	if releasedRun.Revision != run.Revision || releasedRun.UpdatedAt != run.UpdatedAt || releasedSession.Revision != session.Revision || releasedSession.UpdatedAt != session.UpdatedAt {
 		t.Fatalf("release changed lifecycle authority: run=%+v session=%+v", releasedRun, releasedSession)
 	}
-	if _, err := store.ReleaseTerminalLease(ctx, run.ID, session.ID, clientID, 2, run.Revision, session.Revision, UnixMillis{value: 34}); err != nil {
-		t.Fatalf("release replay = %v", err)
+	if _, err := store.ReleaseTerminalLease(ctx, run.ID, session.ID, clientID, 2, run.Revision, session.Revision, UnixMillis{value: 34}); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("release replay error = %v", err)
 	}
 	lease, err = store.AcquireTerminalLease(ctx, run.ID, session.ID, clientID, run.Revision, session.Revision, UnixMillis{value: 35})
 	if err != nil {
