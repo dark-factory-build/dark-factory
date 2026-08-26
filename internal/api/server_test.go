@@ -224,7 +224,12 @@ func TestServerDecodesClosedNineMethodMatrix(t *testing.T) {
 			}
 		}},
 		{name: "block", domain: attemptDomain, bearer: attemptBearer, body: `{"method":"block","params":{"detail":"blocked"}}`, kind: CallBlock},
-		{name: "fail", domain: attemptDomain, bearer: attemptBearer, body: `{"method":"fail","params":{"detail":"failed"}}`, kind: CallFail},
+		{name: "fail empty detail", domain: attemptDomain, bearer: attemptBearer, body: `{"method":"fail","params":{"detail":""}}`, kind: CallFail, check: func(t *testing.T, call Call) {
+			detail, ok := call.Detail()
+			if !ok || detail != "" {
+				t.Fatalf("failure detail = %q, %t", detail, ok)
+			}
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -302,6 +307,8 @@ func TestServerRejectsDomainFallbackAndInvalidRequests(t *testing.T) {
 		{name: "unknown nested", generation: 1, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"set_dispatch","params":{"expected_revision":1,"enabled":true,"private":"sentinel"}}`), code: RemoteInvalidRequest},
 		{name: "attempt cannot supply id", generation: 1, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"fail","params":{"detail":"x","id":"` + id('1') + `"}}`), code: RemoteInvalidRequest},
 		{name: "attempt cannot supply failure code", generation: 1, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"fail","params":{"detail":"x","code":"internal"}}`), code: RemoteInvalidRequest},
+		{name: "empty block detail", generation: 1, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"block","params":{"detail":""}}`), code: RemoteInvalidRequest},
+		{name: "oversized failure detail", generation: 1, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"fail","params":{"detail":"` + strings.Repeat("x", 4097) + `"}}`), code: RemoteInvalidRequest},
 		{name: "invalid UTF-8", generation: 1, domain: operatorDomain, bearer: operatorBearer, body: []byte("{\"method\":\"health\",\"params\":{},\"x\":\"\xff\"}"), code: RemoteInvalidRequest},
 	}
 	for _, test := range tests {

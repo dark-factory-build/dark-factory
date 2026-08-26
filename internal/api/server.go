@@ -445,16 +445,30 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 			return Call{}, RemoteInvalidRequest
 		}
 		call.text = input.Result
-	case CallBlock, CallFail:
-		var input struct {
-			Detail string `json:"detail"`
-		}
-		if err := decodeExact(request.Params, &input); err != nil || !validText(input.Detail, 1, 4096) {
+	case CallBlock:
+		detail, ok := decodeAttemptDetail(request.Params)
+		if !ok || !validText(detail, 1, 4096) {
 			return Call{}, RemoteInvalidRequest
 		}
-		call.text = input.Detail
+		call.text = detail
+	case CallFail:
+		detail, ok := decodeAttemptDetail(request.Params)
+		if !ok || !validText(detail, 0, 4096) {
+			return Call{}, RemoteInvalidRequest
+		}
+		call.text = detail
 	}
 	return call, ""
+}
+
+func decodeAttemptDetail(encoded []byte) (string, bool) {
+	var input struct {
+		Detail string `json:"detail"`
+	}
+	if err := decodeExact(encoded, &input); err != nil {
+		return "", false
+	}
+	return input.Detail, true
 }
 
 func jsonObject(encoded []byte) bool {

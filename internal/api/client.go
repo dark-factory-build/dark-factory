@@ -145,17 +145,20 @@ func (client *AttemptClient) Succeed(ctx context.Context, result string) (Mutati
 }
 
 func (client *AttemptClient) Block(ctx context.Context, detail string) (MutationResult, error) {
+	if !validText(detail, 1, 4096) {
+		return MutationResult{}, ErrInvalidInput
+	}
 	return client.client.attemptDetail(ctx, "block", detail)
 }
 
 func (client *AttemptClient) Fail(ctx context.Context, detail string) (MutationResult, error) {
+	if !validText(detail, 0, 4096) {
+		return MutationResult{}, ErrInvalidInput
+	}
 	return client.client.attemptDetail(ctx, "fail", detail)
 }
 
 func (client client) attemptDetail(ctx context.Context, method, detail string) (MutationResult, error) {
-	if !validText(detail, 1, 4096) {
-		return MutationResult{}, ErrInvalidInput
-	}
 	return client.mutate(ctx, method, struct {
 		Detail string `json:"detail"`
 	}{Detail: detail})

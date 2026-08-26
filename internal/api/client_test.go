@@ -288,8 +288,12 @@ func TestAttemptClientHasExactScopedOutcomesAndNoOperatorFallback(t *testing.T) 
 			_, err := client.Block(context.Background(), "blocked")
 			return err
 		}},
-		{name: "fail", request: `{"method":"fail","params":{"detail":"failed"}}`, invoke: func(client *AttemptClient) error {
-			_, err := client.Fail(context.Background(), "failed")
+		{name: "fail empty detail", request: `{"method":"fail","params":{"detail":""}}`, invoke: func(client *AttemptClient) error {
+			_, err := client.Fail(context.Background(), "")
+			return err
+		}},
+		{name: "fail maximum detail", request: `{"method":"fail","params":{"detail":"` + strings.Repeat("x", 4096) + `"}}`, invoke: func(client *AttemptClient) error {
+			_, err := client.Fail(context.Background(), strings.Repeat("x", 4096))
 			return err
 		}},
 	}
@@ -839,6 +843,12 @@ func TestInputBoundsFailBeforeConnection(t *testing.T) {
 	}
 	if _, err := attempt.Block(context.Background(), strings.Repeat("x", 4097)); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("oversized detail = %v", err)
+	}
+	if _, err := attempt.Block(context.Background(), ""); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("empty blocked detail = %v", err)
+	}
+	if _, err := attempt.Fail(context.Background(), strings.Repeat("x", 4097)); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("oversized failure detail = %v", err)
 	}
 	if _, err := attempt.Succeed(context.Background(), strings.Repeat("x", 131073)); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("oversized result = %v", err)
