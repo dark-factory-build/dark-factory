@@ -183,12 +183,13 @@ func createRuntime(parent *RuntimeParent, basename string, beforeCreate, afterOp
 		return nil, retainedContract(err)
 	}
 	createdName := basename
+	var createdLifetime *runner.FileIdentity
 	cleanupCreated := true
 	defer func() {
 		if !cleanupCreated {
 			return
 		}
-		cleanupErr := cleanupCreatedDirectory(parentFD, createdName, created, syncDirectory)
+		cleanupErr := cleanupCreatedDirectory(parentFD, createdName, created, createdLifetime, syncDirectory)
 		if cleanupErr != nil {
 			resultErr = retainedContract(errors.Join(resultErr, cleanupErr))
 		}
@@ -217,6 +218,7 @@ func createRuntime(parent *RuntimeParent, basename string, beforeCreate, afterOp
 	if err != nil {
 		return nil, err
 	}
+	createdLifetime = &lifetimeID
 	keepLifetime := false
 	defer func() {
 		if !keepLifetime {
@@ -612,7 +614,7 @@ func writePrivate(ctx context.Context, fd int, value []byte, write privateWrite)
 	return nil
 }
 
-func cleanupCreatedDirectory(parentFD int, preferred string, identity directoryIdentity, syncDirectory func(int) error) error {
+func cleanupCreatedDirectory(parentFD int, preferred string, identity directoryIdentity, lifetime *runner.FileIdentity, syncDirectory func(int) error) error {
 	name, err := locateExactEntry(parentFD, preferred, identity.device, identity.inode, true)
 	if err != nil {
 		return err
@@ -625,7 +627,7 @@ func cleanupCreatedDirectory(parentFD int, preferred string, identity directoryI
 		return err
 	}
 	directory := os.NewFile(uintptr(fd), "failed-attempt-runtime")
-	if err := cleanupRuntimeLayout(fd, identity, syncDirectory); err != nil {
+	if err := cleanupRuntimeLayout(fd, identity, lifetime, syncDirectory); err != nil {
 		directory.Close()
 		return err
 	}
@@ -673,7 +675,7 @@ func inspectRuntimeLayout(rootFD int, root directoryIdentity) (directoryIdentity
 	return identities[0], identities[1], nil
 }
 
-func adoptRuntimeLayout(rootFD int, root directoryIdentity, syncDirectory func(int) error) (*os.File, runner.FileIdentity, error) {
+func adoptRuntimeLayout(rootFD int, root directoryIdentity, syncDirectory func(int) error) (_ *os.File, _ runner.FileIdentity, resultErr error) {
 	entries, more, err := readRuntimeEntries(rootFD, 3)
 	if err != nil || more {
 		return nil, runner.FileIdentity{}, invalidContract(err)
@@ -712,6 +714,28 @@ func adoptRuntimeLayout(rootFD int, root directoryIdentity, syncDirectory func(i
 			return nil, runner.FileIdentity{}, invalidContract(errors.Join(readErr, closeErr))
 		}
 	}
+	// A released provider cannot exist without already holding this lifetime
+	// lease. An absent lease therefore identifies only the bounded pre-release
+	// creation residue accepted above. Acquire or create the lease before any
+	// repair so a live or uncertain runtime is never mutated by adoption.
+	var lifetime *os.File
+	var lifetimeID runner.FileIdentity
+	if lifetimePresent {
+		lifetime, lifetimeID, err = openRuntimeLifetime(rootFD, root.device, nil)
+	} else {
+		lifetime, lifetimeID, err = createRuntimeLifetime(rootFD, syncDirectory)
+	}
+	if err != nil {
+		return nil, runner.FileIdentity{}, err
+	}
+	keepLifetime := false
+	defer func() {
+		if !keepLifetime {
+			if closeErr := lifetime.Close(); closeErr != nil {
+				resultErr = invalidContract(errors.Join(resultErr, closeErr))
+			}
+		}
+	}()
 	for _, name := range []string{runtimeHomeName, runtimeTempName} {
 		present := name == runtimeHomeName && homePresent || name == runtimeTempName && tempPresent
 		if !present {
@@ -720,10 +744,8 @@ func adoptRuntimeLayout(rootFD int, root directoryIdentity, syncDirectory func(i
 			}
 		}
 	}
-	if !lifetimePresent {
-		return createRuntimeLifetime(rootFD, syncDirectory)
-	}
-	return openRuntimeLifetime(rootFD, root.device, nil)
+	keepLifetime = true
+	return lifetime, lifetimeID, nil
 }
 
 func createRuntimeLifetime(rootFD int, syncDirectory func(int) error) (_ *os.File, _ runner.FileIdentity, resultErr error) {
@@ -772,12 +794,11 @@ func openRuntimeLifetime(rootFD int, device uint64, expected *runner.FileIdentit
 		return nil, runner.FileIdentity{}, invalidContract(err)
 	}
 	file := os.NewFile(uintptr(fd), "runtime-lifetime")
-	var opened, named unix.Stat_t
-	if err := unix.Fstat(fd, &opened); err != nil || unix.Fstatat(rootFD, runner.RuntimeLifetimeLeaseName, &named, unix.AT_SYMLINK_NOFOLLOW) != nil || !validRuntimeLifetime(opened, device) || !sameFileObject(opened, named) || !validRuntimeLifetime(named, device) {
+	opened, identity, err := inspectRuntimeLifetimeBinding(rootFD, fd, device)
+	if err != nil {
 		file.Close()
-		return nil, runner.FileIdentity{}, invalidContract(err)
+		return nil, runner.FileIdentity{}, err
 	}
-	identity := runner.FileIdentity{Device: uint64(opened.Dev), Inode: opened.Ino}
 	if expected != nil && identity != *expected {
 		file.Close()
 		return nil, runner.FileIdentity{}, invalidContract(nil)
@@ -789,12 +810,22 @@ func openRuntimeLifetime(rootFD int, device uint64, expected *runner.FileIdentit
 		}
 		return nil, runner.FileIdentity{}, invalidContract(err)
 	}
-	var recheck, namedRecheck unix.Stat_t
-	if err := unix.Fstat(fd, &recheck); err != nil || unix.Fstatat(rootFD, runner.RuntimeLifetimeLeaseName, &namedRecheck, unix.AT_SYMLINK_NOFOLLOW) != nil || !validRuntimeLifetime(recheck, device) || !validRuntimeLifetime(namedRecheck, device) || !sameFileObject(opened, recheck) || !sameFileObject(opened, namedRecheck) {
+	recheck, recheckIdentity, err := inspectRuntimeLifetimeBinding(rootFD, fd, device)
+	if err != nil || recheckIdentity != identity || !sameFileObject(opened, recheck) {
 		file.Close()
 		return nil, runner.FileIdentity{}, invalidContract(err)
 	}
 	return file, identity, nil
+}
+
+func inspectRuntimeLifetimeBinding(rootFD int, fd int, device uint64) (unix.Stat_t, runner.FileIdentity, error) {
+	var opened, named unix.Stat_t
+	if err := unix.Fstat(fd, &opened); err != nil ||
+		unix.Fstatat(rootFD, runner.RuntimeLifetimeLeaseName, &named, unix.AT_SYMLINK_NOFOLLOW) != nil ||
+		!validRuntimeLifetime(opened, device) || !validRuntimeLifetime(named, device) || !sameFileObject(opened, named) {
+		return unix.Stat_t{}, runner.FileIdentity{}, invalidContract(err)
+	}
+	return opened, runner.FileIdentity{Device: uint64(opened.Dev), Inode: opened.Ino}, nil
 }
 
 func validRuntimeLifetime(stat unix.Stat_t, device uint64) bool {
@@ -818,7 +849,7 @@ func createRuntimeLayoutChild(rootFD int, name string, root directoryIdentity, s
 	return nil
 }
 
-func cleanupRuntimeLayout(rootFD int, root directoryIdentity, syncDirectory func(int) error) error {
+func cleanupRuntimeLayout(rootFD int, root directoryIdentity, lifetime *runner.FileIdentity, syncDirectory func(int) error) error {
 	mutated := false
 	for _, name := range []string{runtimeTempName, runtimeHomeName} {
 		var named unix.Stat_t
@@ -851,22 +882,38 @@ func cleanupRuntimeLayout(rootFD int, root directoryIdentity, syncDirectory func
 		}
 		mutated = true
 	}
-	var lifetime unix.Stat_t
-	if err := unix.Fstatat(rootFD, runner.RuntimeLifetimeLeaseName, &lifetime, unix.AT_SYMLINK_NOFOLLOW); err == nil {
-		if !validRuntimeLifetime(lifetime, root.device) {
-			return errRetainedRuntime
-		}
-		if err := unix.Unlinkat(rootFD, runner.RuntimeLifetimeLeaseName, 0); err != nil {
+	if lifetime != nil {
+		if err := cleanupCreatedRuntimeLifetime(rootFD, root, *lifetime, syncDirectory); err != nil {
 			return err
 		}
 		mutated = true
-	} else if !errors.Is(err, unix.ENOENT) {
-		return err
 	}
 	if mutated {
 		return syncDirectory(rootFD)
 	}
 	return nil
+}
+
+func cleanupCreatedRuntimeLifetime(rootFD int, root directoryIdentity, identity runner.FileIdentity, syncDirectory func(int) error) error {
+	if identity.Device == 0 || identity.Inode == 0 || identity.Device != root.device {
+		return errRetainedRuntime
+	}
+	name, err := locateExactEntry(rootFD, runner.RuntimeLifetimeLeaseName, identity.Device, identity.Inode, false)
+	if err != nil {
+		return err
+	}
+	if name == "" {
+		return errRetainedRuntime
+	}
+	var named unix.Stat_t
+	if err := unix.Fstatat(rootFD, name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil ||
+		!validRuntimeLifetime(named, root.device) || uint64(named.Dev) != identity.Device || named.Ino != identity.Inode {
+		return errRetainedRuntime
+	}
+	if err := unix.Unlinkat(rootFD, name, 0); err != nil {
+		return err
+	}
+	return syncDirectory(rootFD)
 }
 
 func cleanupCreatedFile(directoryFD int, preferred string, identity unix.Stat_t, syncDirectory func(int) error) error {

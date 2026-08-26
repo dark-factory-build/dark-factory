@@ -472,6 +472,153 @@ func TestAdoptRuntimeClosesPreBindingCreationCrash(t *testing.T) {
 	})
 }
 
+func TestAdoptRuntimeAcquiresLifetimeBeforeRepair(t *testing.T) {
+	t.Run("held lifetime with missing layout", func(t *testing.T) {
+		parentPath := filepath.Join(t.TempDir(), "private")
+		if err := os.Mkdir(parentPath, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		parent := createManagedParent(t, parentPath)
+		defer parent.Close()
+		root := filepath.Join(parentPath, "run")
+		if err := os.Mkdir(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		lifetime := createTestRuntimeLifetime(t, root, true)
+		defer lifetime.Close()
+		before := snapshotRuntimeGraph(t, root)
+		if runtime, err := AdoptRuntime(parent, "run"); !errors.Is(err, errRuntimeBusy) || runtime != nil {
+			t.Fatalf("held lifetime adoption = %v, %v", runtime, err)
+		}
+		if after := snapshotRuntimeGraph(t, root); after != before {
+			t.Fatalf("held lifetime adoption mutated graph\nbefore:\n%s\nafter:\n%s", before, after)
+		}
+	})
+
+	t.Run("held lifetime with malformed graph", func(t *testing.T) {
+		parentPath := filepath.Join(t.TempDir(), "private")
+		if err := os.Mkdir(parentPath, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		parent := createManagedParent(t, parentPath)
+		defer parent.Close()
+		root := filepath.Join(parentPath, "run")
+		if err := os.Mkdir(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		lifetime := createTestRuntimeLifetime(t, root, true)
+		defer lifetime.Close()
+		if err := os.WriteFile(filepath.Join(root, "unexpected"), []byte("sentinel"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		before := snapshotRuntimeGraph(t, root)
+		if runtime, err := AdoptRuntime(parent, "run"); !errors.Is(err, errInvalidContract) || runtime != nil {
+			t.Fatalf("malformed held lifetime adoption = %v, %v", runtime, err)
+		}
+		if after := snapshotRuntimeGraph(t, root); after != before {
+			t.Fatalf("malformed held adoption mutated graph\nbefore:\n%s\nafter:\n%s", before, after)
+		}
+	})
+
+	t.Run("lifetime replacement during acquisition", func(t *testing.T) {
+		parentPath := filepath.Join(t.TempDir(), "private")
+		if err := os.Mkdir(parentPath, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		parent := createManagedParent(t, parentPath)
+		defer parent.Close()
+		root := filepath.Join(parentPath, "run")
+		if err := os.Mkdir(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := createTestRuntimeLifetime(t, root, false).Close(); err != nil {
+			t.Fatal(err)
+		}
+		rootDirectory := openDirectory(t, root)
+		defer rootDirectory.Close()
+		rootIdentity, err := inspectPrivateDirectory(int(rootDirectory.Fd()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		fd, err := unix.Openat(int(rootDirectory.Fd()), runner.RuntimeLifetimeLeaseName, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		opened := os.NewFile(uintptr(fd), "replaced-lifetime-proof")
+		defer opened.Close()
+		if _, _, err := inspectRuntimeLifetimeBinding(int(rootDirectory.Fd()), fd, rootIdentity.device); err != nil {
+			t.Fatal(err)
+		}
+		leasePath := filepath.Join(root, runner.RuntimeLifetimeLeaseName)
+		movedPath := filepath.Join(root, "moved-lifetime")
+		if err := os.Rename(leasePath, movedPath); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(leasePath, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		replacement, err := os.Lstat(leasePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := inspectRuntimeLifetimeBinding(int(rootDirectory.Fd()), fd, rootIdentity.device); !errors.Is(err, errInvalidContract) {
+			t.Fatalf("replacement binding recheck = %v", err)
+		}
+		after, statErr := os.Lstat(leasePath)
+		if statErr != nil || !os.SameFile(replacement, after) {
+			t.Fatalf("replacement lifetime changed: %v, %v", after, statErr)
+		}
+		if _, statErr := os.Lstat(movedPath); statErr != nil {
+			t.Fatalf("opened original lifetime changed: %v", statErr)
+		}
+		for _, name := range []string{runtimeHomeName, runtimeTempName} {
+			if _, statErr := os.Lstat(filepath.Join(root, name)); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("replacement race created %s: %v", name, statErr)
+			}
+		}
+	})
+
+	t.Run("pre-lifetime adoption is parent-lock serialized", func(t *testing.T) {
+		parentPath := filepath.Join(t.TempDir(), "private")
+		if err := os.Mkdir(parentPath, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		parent := createManagedParent(t, parentPath)
+		defer parent.Close()
+		root := filepath.Join(parentPath, "run")
+		if err := os.Mkdir(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		operation, err := parent.begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		before := snapshotRuntimeGraph(t, root)
+		if runtime, err := AdoptRuntime(parent, "run"); !errors.Is(err, errRuntimeBusy) || runtime != nil {
+			t.Fatalf("concurrent adoption = %v, %v", runtime, err)
+		}
+		if after := snapshotRuntimeGraph(t, root); after != before {
+			t.Fatalf("losing adopter mutated graph\nbefore:\n%s\nafter:\n%s", before, after)
+		}
+		if err := operation.Close(); err != nil {
+			t.Fatal(err)
+		}
+		runtime, err := AdoptRuntime(parent, "run")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer runtime.Close()
+		for _, name := range []string{runtimeHomeName, runtimeTempName, runner.RuntimeLifetimeLeaseName} {
+			if _, err := os.Lstat(filepath.Join(root, name)); err != nil {
+				t.Fatalf("adopted layout missing %s: %v", name, err)
+			}
+		}
+	})
+}
+
 func TestRuntimeBindingAndDuplicationRejectChangedParentLockMetadata(t *testing.T) {
 	for _, mutation := range []string{"mode", "hardlink"} {
 		t.Run(mutation, func(t *testing.T) {
@@ -719,6 +866,84 @@ func TestFailedRuntimeCreationCleansOnlyExactEmptyIdentity(t *testing.T) {
 		}
 		if _, err := os.Lstat(filepath.Join(parentPath, "run")); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("failed runtime retained after exact cleanup: %v", err)
+		}
+	})
+
+	t.Run("post-lifetime failure cleans exact layout", func(t *testing.T) {
+		parentPath := filepath.Join(t.TempDir(), "private")
+		if err := os.Mkdir(parentPath, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		parent := createManagedParent(t, parentPath)
+		defer parent.Close()
+		rootSyncs := 0
+		syncDirectory := func(fd int) error {
+			var lifetime unix.Stat_t
+			if err := unix.Fstatat(fd, runner.RuntimeLifetimeLeaseName, &lifetime, unix.AT_SYMLINK_NOFOLLOW); err == nil {
+				rootSyncs++
+				if rootSyncs == 2 {
+					return syscall.EIO
+				}
+			}
+			return unix.Fsync(fd)
+		}
+		if _, err := createRuntime(parent, "run", nil, nil, syncDirectory); !errors.Is(err, syscall.EIO) || errors.Is(err, errRetainedRuntime) {
+			t.Fatalf("post-lifetime failure = %v", err)
+		}
+		if rootSyncs < 2 {
+			t.Fatalf("post-lifetime failure was not reached: syncs=%d", rootSyncs)
+		}
+		if _, err := os.Lstat(filepath.Join(parentPath, "run")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("exact failed runtime retained: %v", err)
+		}
+	})
+
+	t.Run("moved exact lifetime cleanup preserves replacement", func(t *testing.T) {
+		parentPath := filepath.Join(t.TempDir(), "private")
+		if err := os.Mkdir(parentPath, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		parent := createManagedParent(t, parentPath)
+		defer parent.Close()
+		root := filepath.Join(parentPath, "run")
+		leasePath := filepath.Join(root, runner.RuntimeLifetimeLeaseName)
+		movedPath := filepath.Join(root, "moved-lifetime")
+		rootSyncs := 0
+		var replacement os.FileInfo
+		syncDirectory := func(fd int) error {
+			var lifetime unix.Stat_t
+			if err := unix.Fstatat(fd, runner.RuntimeLifetimeLeaseName, &lifetime, unix.AT_SYMLINK_NOFOLLOW); err == nil {
+				rootSyncs++
+				if rootSyncs == 2 {
+					if err := os.Rename(leasePath, movedPath); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(leasePath, nil, 0o600); err != nil {
+						t.Fatal(err)
+					}
+					replacement, err = os.Lstat(leasePath)
+					if err != nil {
+						t.Fatal(err)
+					}
+					return syscall.EIO
+				}
+			}
+			return unix.Fsync(fd)
+		}
+		if _, err := createRuntime(parent, "run", nil, nil, syncDirectory); !errors.Is(err, errRetainedRuntime) || !errors.Is(err, syscall.EIO) {
+			t.Fatalf("replaced lifetime cleanup = %v", err)
+		}
+		if _, err := os.Lstat(movedPath); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("moved exact lifetime retained: %v", err)
+		}
+		after, err := os.Lstat(leasePath)
+		if err != nil || !os.SameFile(replacement, after) {
+			t.Fatalf("replacement lifetime changed: %v, %v", after, err)
+		}
+		for _, name := range []string{runtimeHomeName, runtimeTempName} {
+			if _, err := os.Lstat(filepath.Join(root, name)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("exact layout child %s retained: %v", name, err)
+			}
 		}
 	})
 
@@ -1451,6 +1676,70 @@ func assertFDCensus(t testing.TB, before int) {
 	if after != before {
 		t.Fatalf("FD census before=%d after=%d", before, after)
 	}
+}
+
+func createTestRuntimeLifetime(t testing.TB, root string, lock bool) *os.File {
+	t.Helper()
+	path := filepath.Join(root, runner.RuntimeLifetimeLeaseName)
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Sync(); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if lock {
+		if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+			file.Close()
+			t.Fatal(err)
+		}
+	}
+	return file
+}
+
+func snapshotRuntimeGraph(t testing.TB, root string) string {
+	t.Helper()
+	var snapshot bytes.Buffer
+	inspect := func(name, path string) os.FileInfo {
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			t.Fatalf("missing stat for %s", path)
+		}
+		fmt.Fprintf(&snapshot, "%s dev=%d ino=%d mode=%#o uid=%d gid=%d nlink=%d size=%d mtime=%d.%d ctime=%d.%d\n",
+			name, stat.Dev, stat.Ino, stat.Mode, stat.Uid, stat.Gid, stat.Nlink, stat.Size,
+			stat.Mtimespec.Sec, stat.Mtimespec.Nsec, stat.Ctimespec.Sec, stat.Ctimespec.Nsec)
+		return info
+	}
+	inspect(".", root)
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		path := filepath.Join(root, entry.Name())
+		info := inspect(entry.Name(), path)
+		if info.IsDir() {
+			children, err := os.ReadDir(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, child := range children {
+				fmt.Fprintf(&snapshot, "%s/%s\n", entry.Name(), child.Name())
+			}
+		} else if info.Mode().IsRegular() {
+			contents, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fmt.Fprintf(&snapshot, "%s contents=%x\n", entry.Name(), contents)
+		}
+	}
+	return snapshot.String()
 }
 
 func stringsContainsAny(value string, candidates ...string) bool {
