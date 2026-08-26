@@ -71,6 +71,10 @@ func commitRuntimeLifetime(dir, lifetime *os.File) (descriptorCommitment, error)
 	if dir == nil || lifetime == nil {
 		return descriptorCommitment{}, ErrIdentity
 	}
+	flags, err := unix.FcntlInt(lifetime.Fd(), unix.F_GETFL, 0)
+	if err != nil || flags&unix.O_ACCMODE != unix.O_RDONLY {
+		return descriptorCommitment{}, errors.Join(ErrIdentity, err)
+	}
 	var opened, named unix.Stat_t
 	if err := unix.Fstat(int(lifetime.Fd()), &opened); err != nil {
 		return descriptorCommitment{}, err

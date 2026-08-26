@@ -52,6 +52,9 @@ func TestRuntimeCreatePublishClosePreservesExactPrivateEffects(t *testing.T) {
 	if err := unix.Fchdir(int(lifetime.Fd())); !errors.Is(err, unix.ENOTDIR) && !errors.Is(err, unix.EBADF) {
 		t.Fatalf("lifetime duplicate grants directory authority: %v", err)
 	}
+	if _, err := lifetime.Write([]byte{1}); !errors.Is(err, os.ErrPermission) && !errors.Is(err, unix.EBADF) {
+		t.Fatalf("lifetime duplicate grants write authority: %v", err)
+	}
 	if err := duplicate.Close(); err != nil {
 		t.Fatal(err)
 	}

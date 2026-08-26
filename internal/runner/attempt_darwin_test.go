@@ -350,7 +350,7 @@ func TestRuntimeLifetimeRemainsHeldAcrossOuterAndInnerOwnership(t *testing.T) {
 	if err := f.lifetime.Close(); err != nil {
 		t.Fatal(err)
 	}
-	probe, err := unix.Open(filepath.Join(f.root, RuntimeLifetimeLeaseName), unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	probe, err := unix.Open(filepath.Join(f.root, RuntimeLifetimeLeaseName), unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

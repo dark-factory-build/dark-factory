@@ -102,6 +102,12 @@ func runLifetimeProviderHelper(root string) error {
 	if err := unix.Fchdir(10); !errors.Is(err, unix.ENOTDIR) && !errors.Is(err, unix.EBADF) {
 		return fmt.Errorf("provider lifetime allowed fchdir: %v", err)
 	}
+	if _, err := unix.Write(10, []byte{1}); !errors.Is(err, unix.EBADF) {
+		return fmt.Errorf("provider lifetime allowed write: %v", err)
+	}
+	if err := unix.Ftruncate(10, 1); !errors.Is(err, unix.EBADF) && !errors.Is(err, unix.EINVAL) {
+		return fmt.Errorf("provider lifetime allowed truncate: %v", err)
+	}
 	if fd, err := unix.Openat(10, "change-worker.config", unix.O_RDONLY|unix.O_CLOEXEC, 0); !errors.Is(err, unix.ENOTDIR) && !errors.Is(err, unix.EBADF) {
 		if err == nil {
 			unix.Close(fd)
@@ -196,7 +202,18 @@ func newFixture(t *testing.T) *fixture {
 
 func createTestRuntimeLifetime(t testing.TB, dir *os.File) *os.File {
 	t.Helper()
-	fd, err := unix.Openat(int(dir.Fd()), RuntimeLifetimeLeaseName, unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+	created, err := unix.Openat(int(dir.Fd()), RuntimeLifetimeLeaseName, unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Fsync(created); err != nil {
+		unix.Close(created)
+		t.Fatal(err)
+	}
+	if err := unix.Close(created); err != nil {
+		t.Fatal(err)
+	}
+	fd, err := unix.Openat(int(dir.Fd()), RuntimeLifetimeLeaseName, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -542,7 +559,7 @@ func TestInheritedRuntimeLifetimeSurvivesGateExecUntilTargetExit(t *testing.T) {
 	if err := f.lifetime.Close(); err != nil {
 		t.Fatal(err)
 	}
-	probe, err := unix.Open(filepath.Join(f.root, RuntimeLifetimeLeaseName), unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	probe, err := unix.Open(filepath.Join(f.root, RuntimeLifetimeLeaseName), unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1225,7 +1242,14 @@ func TestGateLeaseRejectsMissingMalformedAndReplacedLifetime(t *testing.T) {
 }
 
 func createTestRuntimeLifetimeTest(dir *os.File) *os.File {
-	fd, err := unix.Openat(int(dir.Fd()), RuntimeLifetimeLeaseName, unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+	created, err := unix.Openat(int(dir.Fd()), RuntimeLifetimeLeaseName, unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil
+	}
+	if unix.Fsync(created) != nil || unix.Close(created) != nil {
+		return nil
+	}
+	fd, err := unix.Openat(int(dir.Fd()), RuntimeLifetimeLeaseName, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil
 	}

@@ -767,7 +767,7 @@ func createRuntimeLifetime(rootFD int, syncDirectory func(int) error) (_ *os.Fil
 }
 
 func openRuntimeLifetime(rootFD int, device uint64, expected *runner.FileIdentity) (*os.File, runner.FileIdentity, error) {
-	fd, err := unix.Openat(rootFD, runner.RuntimeLifetimeLeaseName, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	fd, err := unix.Openat(rootFD, runner.RuntimeLifetimeLeaseName, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, runner.FileIdentity{}, invalidContract(err)
 	}
