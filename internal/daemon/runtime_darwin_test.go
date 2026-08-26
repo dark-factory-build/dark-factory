@@ -7,11 +7,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"syscall"
 	"testing"
 
+	"github.com/dark-factory-build/dark-factory/internal/runner"
 	"golang.org/x/sys/unix"
 )
 
@@ -21,16 +24,19 @@ func TestRuntimeCreatePublishClosePreservesExactPrivateEffects(t *testing.T) {
 	if err := os.Mkdir(parentPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	parent := openDirectory(t, parentPath)
+	parent := createManagedParent(t, parentPath)
 	runtime, err := CreateRuntime(parent, "run-1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	runtimePath := mustRuntimePath(t, runtime)
-	if runtimePath != filepath.Join(parentPath, "run-1") || runtime.Identity().Device == 0 || runtime.Identity().Inode == 0 {
-		t.Fatalf("runtime = %q %+v", runtimePath, runtime.Identity())
+	identity := mustRuntimeIdentity(t, runtime)
+	if runtimePath != filepath.Join(parentPath, "run-1") || identity.Device == 0 || identity.Inode == 0 {
+		t.Fatalf("runtime = %q %+v", runtimePath, identity)
 	}
-	assertDirectory(t, runtimePath, runtime.Identity().Device, runtime.Identity().Inode, 0o700)
+	assertDirectory(t, runtimePath, identity.Device, identity.Inode, 0o700)
+	assertDirectory(t, filepath.Join(runtimePath, runtimeHomeName), 0, 0, 0o700)
+	assertDirectory(t, filepath.Join(runtimePath, runtimeTempName), 0, 0, 0o700)
 
 	duplicate, err := runtime.DuplicateDirectory()
 	if err != nil {
@@ -72,8 +78,8 @@ func TestRuntimeCreatePublishClosePreservesExactPrivateEffects(t *testing.T) {
 	if err := runtime.Close(); err != nil {
 		t.Fatalf("second close = %v", err)
 	}
-	if _, err := runtime.Path(); !errors.Is(err, errInvalidContract) {
-		t.Fatalf("closed runtime path error = %v", err)
+	if _, err := runtime.Binding(); !errors.Is(err, errInvalidContract) {
+		t.Fatalf("closed runtime binding error = %v", err)
 	}
 	if _, err := os.Stat(runtimePath); err != nil {
 		t.Fatalf("Close removed runtime: %v", err)
@@ -105,7 +111,7 @@ func TestRuntimeRejectsExistingAndUnsafeAuthoritiesWithoutMutation(t *testing.T)
 			if err != nil {
 				t.Fatal(err)
 			}
-			parent := openDirectory(t, parentPath)
+			parent := createManagedParent(t, parentPath)
 			defer parent.Close()
 			if _, err := CreateRuntime(parent, "run"); !errors.Is(err, errInvalidContract) {
 				t.Fatalf("CreateRuntime error = %v", err)
@@ -127,13 +133,398 @@ func TestRuntimeRejectsExistingAndUnsafeAuthoritiesWithoutMutation(t *testing.T)
 	if err := os.Mkdir(parentPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	parent := openDirectory(t, parentPath)
+	rawParent := openDirectory(t, parentPath)
+	defer rawParent.Close()
+	if _, err := CreateRuntimeParent(rawParent); !errors.Is(err, errInvalidContract) {
+		t.Fatalf("shared parent capability error = %v", err)
+	}
+	parent := (*RuntimeParent)(nil)
 	defer parent.Close()
 	if _, err := CreateRuntime(parent, "run"); !errors.Is(err, errInvalidContract) {
 		t.Fatalf("shared parent error = %v", err)
 	}
 	if _, err := os.Lstat(filepath.Join(parentPath, "run")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("shared parent gained effect: %v", err)
+	}
+}
+
+func TestRuntimeParentLockSerializesAndRejectsChangedAuthority(t *testing.T) {
+	t.Run("independent process", func(t *testing.T) {
+		parentPath := filepath.Join(t.TempDir(), "private")
+		if err := os.Mkdir(parentPath, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		parent := createManagedParent(t, parentPath)
+		defer parent.Close()
+		readyR, readyW, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		releaseR, releaseW, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		command := exec.Command(os.Args[0], "-test.run=^TestRuntimeParentLockProcessHelper$")
+		command.Env = append(os.Environ(), "DARK_FACTORY_RUNTIME_LOCK_HELPER=1", "DARK_FACTORY_RUNTIME_LOCK_PATH="+filepath.Join(parentPath, runtimeParentLockName))
+		command.ExtraFiles = []*os.File{readyW, releaseR}
+		if err := command.Start(); err != nil {
+			t.Fatal(err)
+		}
+		readyW.Close()
+		releaseR.Close()
+		waited := false
+		defer func() {
+			readyR.Close()
+			releaseW.Close()
+			if !waited {
+				_ = command.Process.Kill()
+				_ = command.Wait()
+			}
+		}()
+		frame := []byte{0}
+		if n, err := readyR.Read(frame); err != nil || n != 1 || frame[0] != 1 {
+			t.Fatalf("helper readiness = %x, %v", frame[:n], err)
+		}
+		if _, err := CreateRuntime(parent, "run"); !errors.Is(err, errRuntimeBusy) {
+			t.Fatalf("cross-process contention = %v", err)
+		}
+		if _, err := releaseW.Write([]byte{1}); err != nil {
+			t.Fatal(err)
+		}
+		if err := command.Wait(); err != nil {
+			t.Fatal(err)
+		}
+		waited = true
+		runtime, err := CreateRuntime(parent, "run")
+		if err != nil {
+			t.Fatalf("create after helper release = %v", err)
+		}
+		if err := runtime.Close(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("contention is before effect", func(t *testing.T) {
+		parentPath := filepath.Join(t.TempDir(), "private")
+		if err := os.Mkdir(parentPath, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		parent := createManagedParent(t, parentPath)
+		defer parent.Close()
+		lockFD, err := unix.Open(filepath.Join(parentPath, runtimeParentLockName), unix.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer unix.Close(lockFD)
+		if err := unix.Flock(lockFD, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+			t.Fatal(err)
+		}
+		defer unix.Flock(lockFD, unix.LOCK_UN)
+		if _, err := CreateRuntime(parent, "run"); !errors.Is(err, errRuntimeBusy) {
+			t.Fatalf("contended create = %v", err)
+		}
+		if _, err := os.Lstat(filepath.Join(parentPath, "run")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("contended create gained effect: %v", err)
+		}
+	})
+
+	for _, mutation := range []string{"missing", "replacement", "hardlink", "mode"} {
+		t.Run(mutation, func(t *testing.T) {
+			parentPath := filepath.Join(t.TempDir(), "private")
+			if err := os.Mkdir(parentPath, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			parent := createManagedParent(t, parentPath)
+			defer parent.Close()
+			lockPath := filepath.Join(parentPath, runtimeParentLockName)
+			switch mutation {
+			case "missing":
+				if err := os.Remove(lockPath); err != nil {
+					t.Fatal(err)
+				}
+			case "replacement":
+				if err := os.Rename(lockPath, lockPath+".old"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(lockPath, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "hardlink":
+				if err := os.Link(lockPath, lockPath+".link"); err != nil {
+					t.Fatal(err)
+				}
+			case "mode":
+				if err := os.Chmod(lockPath, 0o640); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := CreateRuntime(parent, "run"); !errors.Is(err, errInvalidContract) {
+				t.Fatalf("changed lock create = %v", err)
+			}
+			if _, err := os.Lstat(filepath.Join(parentPath, "run")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("changed lock gained effect: %v", err)
+			}
+		})
+	}
+}
+
+func TestRuntimeParentLockProcessHelper(t *testing.T) {
+	if os.Getenv("DARK_FACTORY_RUNTIME_LOCK_HELPER") != "1" {
+		return
+	}
+	fd, err := unix.Open(os.Getenv("DARK_FACTORY_RUNTIME_LOCK_PATH"), unix.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(fd)
+	if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	ready := os.NewFile(3, "runtime-lock-ready")
+	release := os.NewFile(4, "runtime-lock-release")
+	defer ready.Close()
+	defer release.Close()
+	if _, err := ready.Write([]byte{1}); err != nil {
+		t.Fatal(err)
+	}
+	frame := []byte{0}
+	if n, err := release.Read(frame); err != nil || n != 1 || frame[0] != 1 {
+		t.Fatalf("release = %x, %v", frame[:n], err)
+	}
+}
+
+func TestRuntimeParentCreationNeverUnlinksReplacement(t *testing.T) {
+	parentPath := filepath.Join(t.TempDir(), "private")
+	if err := os.Mkdir(parentPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	raw := openDirectory(t, parentPath)
+	defer raw.Close()
+	lockPath := filepath.Join(parentPath, runtimeParentLockName)
+	replacement := []byte("foreign")
+	_, err := createRuntimeParent(raw, func() {
+		if err := os.Rename(lockPath, lockPath+".created"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(lockPath, replacement, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}, nil)
+	if !errors.Is(err, errRetainedRuntime) {
+		t.Fatalf("lock replacement = %v", err)
+	}
+	if got, readErr := os.ReadFile(lockPath); readErr != nil || !bytes.Equal(got, replacement) {
+		t.Fatalf("replacement lock mutated: %q %v", got, readErr)
+	}
+}
+
+func TestRuntimeParentReopensDurableLockAuthority(t *testing.T) {
+	parentPath := filepath.Join(t.TempDir(), "private")
+	if err := os.Mkdir(parentPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	created := createManagedParent(t, parentPath)
+	wantLock := created.lockIdentity
+	if err := created.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw := openDirectory(t, parentPath)
+	reopened, err := OpenRuntimeParent(raw)
+	closeErr := raw.Close()
+	if err != nil || closeErr != nil {
+		t.Fatalf("OpenRuntimeParent = %v, close = %v", err, closeErr)
+	}
+	defer reopened.Close()
+	if reopened.lockIdentity != wantLock {
+		t.Fatalf("reopened lock = %+v want %+v", reopened.lockIdentity, wantLock)
+	}
+	runtime, err := CreateRuntime(reopened, "run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRuntimeLifetimeLeaseRequiresLastDuplicateClose(t *testing.T) {
+	parentPath := filepath.Join(t.TempDir(), "private")
+	if err := os.Mkdir(parentPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	parent := createManagedParent(t, parentPath)
+	defer parent.Close()
+	runtime, err := CreateRuntime(parent, "run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := mustRuntimeIdentity(t, runtime)
+	duplicate, err := runtime.DuplicateDirectory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ObserveRuntimeLifetime(parent, "run", identity); err != nil || got != RuntimeLeaseHeld {
+		t.Fatalf("live runtime observation = %v, %v", got, err)
+	}
+	if err := runtime.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ObserveRuntimeLifetime(parent, "run", identity); err != nil || got != RuntimeLeaseHeld {
+		t.Fatalf("duplicate-held observation = %v, %v", got, err)
+	}
+	if err := duplicate.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ObserveRuntimeLifetime(parent, "run", identity); err != nil || got != RuntimeLeaseAvailable {
+		t.Fatalf("released observation = %v, %v", got, err)
+	}
+}
+
+func TestAdoptRuntimeClosesPreBindingCreationCrash(t *testing.T) {
+	for _, partial := range []string{"empty", "home"} {
+		t.Run(partial, func(t *testing.T) {
+			parentPath := filepath.Join(t.TempDir(), "private")
+			if err := os.Mkdir(parentPath, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			parent := createManagedParent(t, parentPath)
+			defer parent.Close()
+			operation, err := parent.begin()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := unix.Mkdirat(int(operation.dir.Fd()), "run", 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if partial == "home" {
+				rootFD, err := unix.Openat(int(operation.dir.Fd()), "run", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := unix.Mkdirat(rootFD, runtimeHomeName, 0o700); err != nil {
+					unix.Close(rootFD)
+					t.Fatal(err)
+				}
+				if err := unix.Close(rootFD); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := operation.Close(); err != nil {
+				t.Fatal(err)
+			}
+			runtime, err := AdoptRuntime(parent, "run")
+			if err != nil {
+				t.Fatal(err)
+			}
+			path, identity := mustRuntimeValues(t, runtime)
+			for _, name := range []string{runtimeHomeName, runtimeTempName} {
+				assertDirectory(t, filepath.Join(path, name), 0, 0, 0o700)
+			}
+			if got, err := ObserveRuntimeLifetime(parent, "run", identity); err != nil || got != RuntimeLeaseHeld {
+				t.Fatalf("adopted lifetime = %v, %v", got, err)
+			}
+			if err := runtime.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+
+	t.Run("later phase effect is not adoptable", func(t *testing.T) {
+		parentPath := filepath.Join(t.TempDir(), "private")
+		if err := os.Mkdir(parentPath, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		parent := createManagedParent(t, parentPath)
+		defer parent.Close()
+		runtime, err := CreateRuntime(parent, "run")
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := mustRuntimePath(t, runtime)
+		if _, err := runtime.PublishAttemptToken(context.Background(), [32]byte{1}); err != nil {
+			t.Fatal(err)
+		}
+		if err := runtime.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if adopted, err := AdoptRuntime(parent, "run"); !errors.Is(err, errInvalidContract) || adopted != nil {
+			t.Fatalf("later phase adoption = %v, %v", adopted, err)
+		}
+		if _, err := os.Stat(filepath.Join(path, attemptTokenName)); err != nil {
+			t.Fatalf("rejected adoption mutated token: %v", err)
+		}
+	})
+}
+
+func TestRuntimeBindingAndDuplicationRejectChangedParentLockMetadata(t *testing.T) {
+	for _, mutation := range []string{"mode", "hardlink"} {
+		t.Run(mutation, func(t *testing.T) {
+			parentPath := filepath.Join(t.TempDir(), "private")
+			if err := os.Mkdir(parentPath, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			parent := createManagedParent(t, parentPath)
+			defer parent.Close()
+			runtime, err := CreateRuntime(parent, "run")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer runtime.Close()
+			binding, err := runtime.Binding()
+			if err != nil {
+				t.Fatal(err)
+			}
+			lockPath := filepath.Join(parentPath, runtimeParentLockName)
+			if mutation == "mode" {
+				if err := os.Chmod(lockPath, 0o640); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.Link(lockPath, lockPath+".link"); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := binding.Values(); !errors.Is(err, errInvalidContract) {
+				t.Fatalf("cached Binding after %s = %v", mutation, err)
+			}
+			if duplicate, err := runtime.DuplicateDirectory(); !errors.Is(err, errInvalidContract) || duplicate != nil {
+				t.Fatalf("DuplicateDirectory after %s = %v, %v", mutation, duplicate, err)
+			}
+		})
+	}
+}
+
+func TestRuntimeBindingRejectsFixedChildReplacement(t *testing.T) {
+	for _, name := range []string{runtimeHomeName, runtimeTempName} {
+		t.Run(name, func(t *testing.T) {
+			runtime := newTestRuntime(t)
+			defer runtime.Close()
+			binding, err := runtime.Binding()
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := mustRuntimePath(t, runtime)
+			child := filepath.Join(path, name)
+			if err := os.Rename(child, child+".old"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(child, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := binding.Values(); !errors.Is(err, errInvalidContract) {
+				t.Fatalf("cached binding accepted replaced %s: %v", name, err)
+			}
+			if _, err := binding.ProviderHome(); !errors.Is(err, errInvalidContract) {
+				t.Fatalf("home locator accepted replaced %s: %v", name, err)
+			}
+			if _, err := binding.ProviderTemp(); !errors.Is(err, errInvalidContract) {
+				t.Fatalf("temp locator accepted replaced %s: %v", name, err)
+			}
+			if _, err := binding.AttemptTokenPath(); !errors.Is(err, errInvalidContract) {
+				t.Fatalf("token locator accepted replaced %s: %v", name, err)
+			}
+			if _, err := binding.WorkerConfigPath(); !errors.Is(err, errInvalidContract) {
+				t.Fatalf("config locator accepted replaced %s: %v", name, err)
+			}
+		})
 	}
 }
 
@@ -144,7 +535,7 @@ func TestRuntimeParentAndLeafSwapsFailClosed(t *testing.T) {
 		if err := os.Mkdir(parentPath, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		parent := openDirectory(t, parentPath)
+		parent := createManagedParent(t, parentPath)
 		defer parent.Close()
 		_, err := createRuntime(parent, "run", func() {
 			if err := os.Rename(parentPath, parentPath+".old"); err != nil {
@@ -167,7 +558,7 @@ func TestRuntimeParentAndLeafSwapsFailClosed(t *testing.T) {
 		if err := os.Mkdir(parentPath, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		parent := openDirectory(t, parentPath)
+		parent := createManagedParent(t, parentPath)
 		defer parent.Close()
 		_, err := createRuntime(parent, "run", nil, func() {
 			if err := os.Rename(filepath.Join(parentPath, "run"), filepath.Join(parentPath, "old")); err != nil {
@@ -202,8 +593,8 @@ func TestRuntimeAuthorityRejectsPathReplacementAtEveryAccessor(t *testing.T) {
 		if err := os.Mkdir(path, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := runtime.Path(); !errors.Is(err, errInvalidContract) {
-			t.Fatalf("Path after replacement = %v", err)
+		if _, err := runtime.Binding(); !errors.Is(err, errInvalidContract) {
+			t.Fatalf("Binding after replacement = %v", err)
 		}
 		if duplicate, err := runtime.DuplicateDirectory(); !errors.Is(err, errInvalidContract) || duplicate != nil {
 			t.Fatalf("DuplicateDirectory after replacement = %v, %v", duplicate, err)
@@ -241,8 +632,8 @@ func TestRuntimeAuthorityRejectsPathReplacementAtEveryAccessor(t *testing.T) {
 		if _, err := file.Path(); !errors.Is(err, errInvalidContract) {
 			t.Fatalf("private file path after runtime replacement = %v", err)
 		}
-		if _, err := runtime.Path(); !errors.Is(err, errInvalidContract) {
-			t.Fatalf("runtime path after publication replacement = %v", err)
+		if _, err := runtime.Binding(); !errors.Is(err, errInvalidContract) {
+			t.Fatalf("runtime binding after publication replacement = %v", err)
 		}
 		if _, err := os.Lstat(filepath.Join(path, attemptTokenName)); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("foreign replacement gained token: %v", err)
@@ -256,7 +647,7 @@ func TestFailedRuntimeCreationCleansOnlyExactEmptyIdentity(t *testing.T) {
 		if err := os.Mkdir(parentPath, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		parent := openDirectory(t, parentPath)
+		parent := createManagedParent(t, parentPath)
 		defer parent.Close()
 		calls := 0
 		syncDirectory := func(fd int) error {
@@ -282,7 +673,7 @@ func TestFailedRuntimeCreationCleansOnlyExactEmptyIdentity(t *testing.T) {
 		if err := os.Mkdir(parentPath, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		parent := openDirectory(t, parentPath)
+		parent := createManagedParent(t, parentPath)
 		defer parent.Close()
 		_, err := createRuntime(parent, "run", nil, func() {
 			if err := os.Rename(filepath.Join(parentPath, "run"), filepath.Join(parentPath, "retained")); err != nil {
@@ -317,7 +708,7 @@ func TestFailedRuntimeCreationCleansOnlyExactEmptyIdentity(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		parent := openDirectory(t, parentPath)
+		parent := createManagedParent(t, parentPath)
 		defer parent.Close()
 		_, err := createRuntime(parent, "run", nil, func() {
 			if err := os.Rename(filepath.Join(parentPath, "run"), filepath.Join(parentPath, "retained")); err != nil {
@@ -530,29 +921,380 @@ func TestRuntimeValuesAndErrorsRedactPrivateSentinels(t *testing.T) {
 	}
 }
 
+func TestRemoveRecordedRuntimeUsesFixedBoundedGrammar(t *testing.T) {
+	t.Run("active then complete and idempotent", func(t *testing.T) {
+		parentPath := filepath.Join(t.TempDir(), "private")
+		if err := os.Mkdir(parentPath, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		parent := createManagedParent(t, parentPath)
+		defer parent.Close()
+		runtime, err := CreateRuntime(parent, "run")
+		if err != nil {
+			t.Fatal(err)
+		}
+		path, identity := mustRuntimeValues(t, runtime)
+		if err := os.MkdirAll(filepath.Join(path, runtimeHomeName, "deep"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, runtimeHomeName, "deep", "provider"), []byte("ordinary"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if done, err := RemoveRecordedRuntime(context.Background(), parent, "run", identity); err != nil || done {
+			t.Fatalf("active removal = %v, %v", done, err)
+		}
+		if err := runtime.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if done, err := RemoveRecordedRuntime(context.Background(), parent, "run", identity); err != nil || !done {
+			t.Fatalf("complete removal = %v, %v", done, err)
+		}
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("runtime retained: %v", err)
+		}
+		if done, err := RemoveRecordedRuntime(context.Background(), parent, "run", identity); err != nil || !done {
+			t.Fatalf("idempotent removal = %v, %v", done, err)
+		}
+	})
+
+	t.Run("terminal and unexpected entries block", func(t *testing.T) {
+		for _, name := range []string{runner.TerminalSpoolName, "unexpected"} {
+			t.Run(name, func(t *testing.T) {
+				parentPath := filepath.Join(t.TempDir(), "private")
+				if err := os.Mkdir(parentPath, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				parent := createManagedParent(t, parentPath)
+				defer parent.Close()
+				runtime, err := CreateRuntime(parent, "run")
+				if err != nil {
+					t.Fatal(err)
+				}
+				path, identity := mustRuntimeValues(t, runtime)
+				if err := os.WriteFile(filepath.Join(path, name), []byte("sentinel"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := runtime.Close(); err != nil {
+					t.Fatal(err)
+				}
+				got, removeErr := RemoveRecordedRuntime(context.Background(), parent, "run", identity)
+				if !errors.Is(removeErr, errInvalidContract) || got {
+					t.Fatalf("unexpected removal = %v, %v", got, removeErr)
+				}
+				contents, err := os.ReadFile(filepath.Join(path, name))
+				if err != nil || string(contents) != "sentinel" {
+					t.Fatalf("blocking entry mutated: %q %v", contents, err)
+				}
+			})
+		}
+	})
+
+	t.Run("bounded progress", func(t *testing.T) {
+		parentPath := filepath.Join(t.TempDir(), "private")
+		if err := os.Mkdir(parentPath, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		parent := createManagedParent(t, parentPath)
+		defer parent.Close()
+		runtime, err := CreateRuntime(parent, "run")
+		if err != nil {
+			t.Fatal(err)
+		}
+		path, identity := mustRuntimeValues(t, runtime)
+		for index := 0; index < 4; index++ {
+			if err := os.WriteFile(filepath.Join(path, runtimeTempName, fmt.Sprintf("%d", index)), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := runtime.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if done, err := removeRecordedRuntime(context.Background(), parent, "run", identity, 2, nil); err != nil || done {
+			t.Fatalf("bounded pass = %v, %v", done, err)
+		}
+		for attempts := 0; attempts < 8; attempts++ {
+			done, err := removeRecordedRuntime(context.Background(), parent, "run", identity, 2, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if done {
+				return
+			}
+		}
+		t.Fatal("bounded removal did not converge")
+	})
+}
+
+func TestRemoveRecordedRuntimeRejectsUnsafeTreesAndAuthorityChanges(t *testing.T) {
+	t.Run("terminal blocks before any deletion", func(t *testing.T) {
+		parent, runtime, path, identity := removableRuntimeFixture(t)
+		defer parent.Close()
+		if err := os.WriteFile(filepath.Join(path, attemptTokenName), []byte("token"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, runner.TerminalSpoolName), []byte("terminal"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := runtime.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if done, err := RemoveRecordedRuntime(context.Background(), parent, "run", identity); !errors.Is(err, errInvalidContract) || done {
+			t.Fatalf("terminal removal = %v, %v", done, err)
+		}
+		if body, err := os.ReadFile(filepath.Join(path, attemptTokenName)); err != nil || string(body) != "token" {
+			t.Fatalf("preflight deleted token: %q %v", body, err)
+		}
+	})
+
+	for _, kind := range []string{"symlink", "fifo", "socket", "hardlink"} {
+		t.Run(kind, func(t *testing.T) {
+			var parent *RuntimeParent
+			var runtime *Runtime
+			var path string
+			var identity runner.FileIdentity
+			if kind == "socket" {
+				short, err := os.MkdirTemp("/private/tmp", "df-runtime-socket-")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(short, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.RemoveAll(short) })
+				parent, runtime, path, identity = removableRuntimeFixtureAt(t, filepath.Join(short, "private"))
+			} else {
+				parent, runtime, path, identity = removableRuntimeFixture(t)
+			}
+			defer parent.Close()
+			target := filepath.Join(t.TempDir(), "external")
+			if err := os.WriteFile(target, []byte("external"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			leaf := filepath.Join(path, runtimeHomeName, "unsafe")
+			switch kind {
+			case "symlink":
+				if err := os.Symlink(target, leaf); err != nil {
+					t.Fatal(err)
+				}
+			case "fifo":
+				if err := unix.Mkfifo(leaf, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "socket":
+				listener, err := net.Listen("unix", leaf)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer listener.Close()
+			case "hardlink":
+				if err := os.Link(target, leaf); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := runtime.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if done, err := RemoveRecordedRuntime(context.Background(), parent, "run", identity); !errors.Is(err, errInvalidContract) || done {
+				t.Fatalf("unsafe %s removal = %v, %v", kind, done, err)
+			}
+			if body, err := os.ReadFile(target); err != nil || string(body) != "external" {
+				t.Fatalf("external target mutated: %q %v", body, err)
+			}
+		})
+	}
+
+	t.Run("root replacement", func(t *testing.T) {
+		parent, runtime, path, identity := removableRuntimeFixture(t)
+		defer parent.Close()
+		if err := runtime.Close(); err != nil {
+			t.Fatal(err)
+		}
+		moved := path + ".old"
+		if err := os.Rename(path, moved); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if done, err := RemoveRecordedRuntime(context.Background(), parent, "run", identity); !errors.Is(err, errInvalidContract) || done {
+			t.Fatalf("replacement removal = %v, %v", done, err)
+		}
+		for _, retained := range []string{path, moved} {
+			if info, err := os.Lstat(retained); err != nil || !info.IsDir() {
+				t.Fatalf("replacement attack mutated %s: %v %v", retained, info, err)
+			}
+		}
+	})
+
+	t.Run("parent lock contention", func(t *testing.T) {
+		parent, runtime, path, identity := removableRuntimeFixture(t)
+		defer parent.Close()
+		if err := runtime.Close(); err != nil {
+			t.Fatal(err)
+		}
+		lockFD, err := unix.Open(filepath.Join(filepath.Dir(path), runtimeParentLockName), unix.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer unix.Close(lockFD)
+		if err := unix.Flock(lockFD, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+			t.Fatal(err)
+		}
+		defer unix.Flock(lockFD, unix.LOCK_UN)
+		if done, err := RemoveRecordedRuntime(context.Background(), parent, "run", identity); err != nil || done {
+			t.Fatalf("contended removal = %v, %v", done, err)
+		}
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("contended removal mutated runtime: %v", err)
+		}
+	})
+}
+
+func TestRemoveRecordedRuntimeBoundsDepthAndReestablishesDurableAbsence(t *testing.T) {
+	t.Run("depth bound", func(t *testing.T) {
+		parent, runtime, path, identity := removableRuntimeFixture(t)
+		defer parent.Close()
+		current := filepath.Join(path, runtimeHomeName)
+		for depth := 0; depth <= runtimeRemovalDepthLimit; depth++ {
+			current = filepath.Join(current, "d")
+			if err := os.Mkdir(current, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := runtime.Close(); err != nil {
+			t.Fatal(err)
+		}
+		before := openFDCensus(t)
+		if done, err := RemoveRecordedRuntime(context.Background(), parent, "run", identity); !errors.Is(err, errInvalidContract) || done {
+			t.Fatalf("deep removal = %v, %v", done, err)
+		}
+		assertFDCensus(t, before)
+	})
+
+	t.Run("already absent fsync and recheck", func(t *testing.T) {
+		parentPath := filepath.Join(t.TempDir(), "private")
+		if err := os.Mkdir(parentPath, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		parent := createManagedParent(t, parentPath)
+		defer parent.Close()
+		expected := runner.FileIdentity{Device: 1, Inode: 1}
+		calls := 0
+		if done, err := removeRecordedRuntime(context.Background(), parent, "gone", expected, 1, func(int) error {
+			calls++
+			return syscall.EIO
+		}); !errors.Is(err, syscall.EIO) || done {
+			t.Fatalf("absent fsync failure = %v, %v", done, err)
+		}
+		if calls != 1 {
+			t.Fatalf("absent fsync calls = %d", calls)
+		}
+		if done, err := RemoveRecordedRuntime(context.Background(), parent, "gone", expected); err != nil || !done {
+			t.Fatalf("durable absent retry = %v, %v", done, err)
+		}
+	})
+
+	t.Run("final absence rejects concurrent replacement", func(t *testing.T) {
+		parent, runtime, path, identity := removableRuntimeFixture(t)
+		defer parent.Close()
+		if err := runtime.Close(); err != nil {
+			t.Fatal(err)
+		}
+		done, err := removeRecordedRuntimeWithHook(context.Background(), parent, "run", identity, runtimeRemovalEffectLimit, nil, func() {
+			if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		})
+		if !errors.Is(err, errInvalidContract) || done {
+			t.Fatalf("replacement after parent fsync = %v, %v", done, err)
+		}
+		if info, err := os.Lstat(path); err != nil || !info.IsDir() {
+			t.Fatalf("replacement removed: %v %v", info, err)
+		}
+	})
+
+	t.Run("cancellation before effect", func(t *testing.T) {
+		parent, runtime, path, identity := removableRuntimeFixture(t)
+		defer parent.Close()
+		if err := runtime.Close(); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if done, err := RemoveRecordedRuntime(ctx, parent, "run", identity); !errors.Is(err, context.Canceled) || done {
+			t.Fatalf("canceled removal = %v, %v", done, err)
+		}
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("canceled removal mutated runtime: %v", err)
+		}
+	})
+}
+
+func removableRuntimeFixture(t testing.TB) (*RuntimeParent, *Runtime, string, runner.FileIdentity) {
+	t.Helper()
+	parentPath := filepath.Join(t.TempDir(), "private")
+	return removableRuntimeFixtureAt(t, parentPath)
+}
+
+func removableRuntimeFixtureAt(t testing.TB, parentPath string) (*RuntimeParent, *Runtime, string, runner.FileIdentity) {
+	t.Helper()
+	if err := os.Mkdir(parentPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	parent := createManagedParent(t, parentPath)
+	runtime, err := CreateRuntime(parent, "run")
+	if err != nil {
+		parent.Close()
+		t.Fatal(err)
+	}
+	path, identity := mustRuntimeValues(t, runtime)
+	return parent, runtime, path, identity
+}
+
 func newTestRuntime(t testing.TB) *Runtime {
 	t.Helper()
 	parentPath := filepath.Join(t.TempDir(), "private")
 	if err := os.Mkdir(parentPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	parent := openDirectory(t, parentPath)
+	parent := createManagedParent(t, parentPath)
 	runtime, err := CreateRuntime(parent, "run")
-	if closeErr := parent.Close(); err != nil || closeErr != nil {
-		t.Fatalf("CreateRuntime = %v, close = %v", err, closeErr)
+	if err != nil {
+		parent.Close()
+		t.Fatalf("CreateRuntime = %v", err)
 	}
+	t.Cleanup(func() { parent.Close() })
 	return runtime
 }
 
 func workerConfigForRuntime(t testing.TB, runtime *Runtime) workerConfig {
 	t.Helper()
-	path := mustRuntimePath(t, runtime)
+	binding, err := runtime.Binding()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, identity, err := binding.Values()
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, err := binding.ProviderHome()
+	if err != nil {
+		t.Fatal(err)
+	}
+	temp, err := binding.ProviderTemp()
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := binding.AttemptTokenPath()
+	if err != nil {
+		t.Fatal(err)
+	}
 	config := workerConfigFixture()
 	config.RuntimePath = path
-	config.RuntimeIdentity = runtime.Identity()
-	config.ProviderHome = filepath.Join(path, "home")
-	config.ProviderTemp = filepath.Join(path, "tmp")
-	config.AttemptTokenPath = filepath.Join(path, attemptTokenName)
+	config.RuntimeIdentity = identity
+	config.ProviderHome = home
+	config.ProviderTemp = temp
+	config.AttemptTokenPath = token
 	return config
 }
 
@@ -572,7 +1314,8 @@ func assertDirectory(t testing.TB, path string, device, inode uint64, mode os.Fi
 		t.Fatal(err)
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || !info.IsDir() || info.Mode().Perm() != mode || uint64(stat.Dev) != device || stat.Ino != inode || stat.Uid != uint32(os.Geteuid()) {
+	wrongIdentity := device != 0 && inode != 0 && (uint64(stat.Dev) != device || stat.Ino != inode)
+	if !ok || !info.IsDir() || info.Mode().Perm() != mode || wrongIdentity || stat.Uid != uint32(os.Geteuid()) {
 		t.Fatalf("unsafe directory: %+v", info)
 	}
 }
@@ -596,11 +1339,38 @@ func assertPrivateFile(t testing.TB, file PrivateFile, want []byte) {
 
 func mustRuntimePath(t testing.TB, runtime *Runtime) string {
 	t.Helper()
-	path, err := runtime.Path()
+	path, _ := mustRuntimeValues(t, runtime)
+	return path
+}
+
+func mustRuntimeIdentity(t testing.TB, runtime *Runtime) runner.FileIdentity {
+	t.Helper()
+	_, identity := mustRuntimeValues(t, runtime)
+	return identity
+}
+
+func mustRuntimeValues(t testing.TB, runtime *Runtime) (string, runner.FileIdentity) {
+	t.Helper()
+	binding, err := runtime.Binding()
 	if err != nil {
 		t.Fatal(err)
 	}
-	return path
+	path, identity, err := binding.Values()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path, identity
+}
+
+func createManagedParent(t testing.TB, path string) *RuntimeParent {
+	t.Helper()
+	raw := openDirectory(t, path)
+	parent, err := CreateRuntimeParent(raw)
+	closeErr := raw.Close()
+	if err != nil || closeErr != nil {
+		t.Fatalf("CreateRuntimeParent = %v, close = %v", err, closeErr)
+	}
+	return parent
 }
 
 func mustPrivatePath(t testing.TB, file PrivateFile) string {

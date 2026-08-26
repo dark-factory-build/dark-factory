@@ -21,6 +21,13 @@ const (
 	cleanupSearchLimit = 128
 )
 
+type RuntimeLeasePresence uint8
+
+const (
+	RuntimeLeaseHeld RuntimeLeasePresence = iota + 1
+	RuntimeLeaseAvailable
+)
+
 type Runtime struct {
 	mu             sync.Mutex
 	path           string
@@ -30,8 +37,16 @@ type Runtime struct {
 	parent         *os.File
 	parentPath     string
 	parentIdentity directoryIdentity
+	parentLock     runner.FileIdentity
 	identity       runner.FileIdentity
+	home           directoryIdentity
+	temp           directoryIdentity
 }
+
+// RuntimeBinding is the non-forgeable per-run filesystem capability. Every
+// locator method revalidates the retained root and exact fixed child identities;
+// it is deliberately distinct from the daemon-global API socket authority.
+type RuntimeBinding struct{ runtime *Runtime }
 
 type PrivateFile struct {
 	runtime  *Runtime
@@ -59,36 +74,88 @@ func (file PrivateFile) Identity() runner.FileIdentity { return file.identity }
 func (PrivateFile) String() string                     { return "private runtime file" }
 func (PrivateFile) GoString() string                   { return "daemon.PrivateFile{private}" }
 
-func CreateRuntime(parent *os.File, basename string) (*Runtime, error) {
+func CreateRuntime(parent *RuntimeParent, basename string) (*Runtime, error) {
 	return createRuntime(parent, basename, nil, nil, nil)
 }
 
-func createRuntime(parent *os.File, basename string, beforeCreate, afterOpen func(), syncDirectory func(int) error) (_ *Runtime, resultErr error) {
+// AdoptRuntime recovers only a declared runtime whose creation died before
+// Binding could be durably registered. The named root may be empty or contain
+// empty, exact home/tmp children; any later-phase effect is not adoptable.
+func AdoptRuntime(parent *RuntimeParent, basename string) (*Runtime, error) {
+	if parent == nil || !validBasename(basename) {
+		return nil, invalidContract(nil)
+	}
+	operation, err := parent.begin()
+	if err != nil {
+		return nil, err
+	}
+	defer operation.Close()
+	parentFD := int(operation.dir.Fd())
+	created, err := inspectNamedPrivateDirectory(parentFD, basename)
+	if err != nil {
+		return nil, invalidContract(err)
+	}
+	fd, err := unix.Openat(parentFD, basename, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
+	if err != nil {
+		return nil, invalidContract(err)
+	}
+	dir := os.NewFile(uintptr(fd), "adopted-attempt-runtime")
+	keepDir := false
+	defer func() {
+		if !keepDir {
+			dir.Close()
+		}
+	}()
+	if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		if errors.Is(err, unix.EWOULDBLOCK) {
+			return nil, errRuntimeBusy
+		}
+		return nil, invalidContract(err)
+	}
+	if err := adoptRuntimeLayout(fd, created, unix.Fsync); err != nil {
+		return nil, err
+	}
+	home, temp, err := inspectRuntimeLayout(fd, created)
+	if err != nil {
+		return nil, invalidContract(err)
+	}
+	if err := unix.Fsync(fd); err != nil {
+		return nil, invalidContract(err)
+	}
+	if err := verifyNamedChild(parentFD, basename, created); err != nil {
+		return nil, invalidContract(err)
+	}
+	if err := unix.Fsync(parentFD); err != nil {
+		return nil, invalidContract(err)
+	}
+	runtime := &Runtime{
+		path: filepath.Join(parent.path, basename), basename: basename, dir: dir, directory: created,
+		parent: operation.dir, parentPath: parent.path, parentIdentity: parent.identity,
+		parentLock: parent.lockIdentity, identity: created.fileIdentity(), home: home, temp: temp,
+	}
+	if err := runtime.verifyAuthority(); err != nil {
+		return nil, invalidContract(err)
+	}
+	keepDir = true
+	operation.takeDirectory()
+	return runtime, nil
+}
+
+func createRuntime(parent *RuntimeParent, basename string, beforeCreate, afterOpen func(), syncDirectory func(int) error) (_ *Runtime, resultErr error) {
 	if parent == nil || !validBasename(basename) {
 		return nil, invalidContract(nil)
 	}
 	if syncDirectory == nil {
 		syncDirectory = unix.Fsync
 	}
-	parentPath, err := descriptorPath(parent)
-	if err != nil || !filepath.IsAbs(parentPath) || filepath.Clean(parentPath) != parentPath {
-		return nil, invalidContract(err)
-	}
-	wantParent, err := inspectPrivateDirectory(int(parent.Fd()))
-	if err != nil || verifyNamedDirectory(parentPath, wantParent) != nil {
-		return nil, invalidContract(err)
-	}
-	parentFD, err := unix.FcntlInt(parent.Fd(), unix.F_DUPFD_CLOEXEC, 0)
+	operation, err := parent.begin()
 	if err != nil {
-		return nil, invalidContract(err)
+		return nil, err
 	}
-	ownedParent := os.NewFile(uintptr(parentFD), "attempt-runtime-parent")
-	keepParent := false
-	defer func() {
-		if !keepParent {
-			_ = ownedParent.Close()
-		}
-	}()
+	defer operation.Close()
+	ownedParent := operation.dir
+	parentFD := int(ownedParent.Fd())
+	parentPath, wantParent, lockIdentity := parent.path, parent.identity, parent.lockIdentity
 	if err := verifyDirectoryDescriptor(ownedParent, parentPath, wantParent); err != nil {
 		return nil, invalidContract(err)
 	}
@@ -141,6 +208,16 @@ func createRuntime(parent *os.File, basename string, beforeCreate, afterOpen fun
 	if openedErr != nil || opened != created || namedErr != nil || parentErr != nil {
 		return nil, invalidContract(errors.Join(openedErr, namedErr, parentErr))
 	}
+	if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		return nil, invalidContract(err)
+	}
+	if err := createRuntimeLayout(fd, syncDirectory); err != nil {
+		return nil, err
+	}
+	home, temp, err := inspectRuntimeLayout(fd, created)
+	if err != nil {
+		return nil, invalidContract(err)
+	}
 	if err := syncDirectory(fd); err != nil {
 		return nil, invalidContract(err)
 	}
@@ -152,36 +229,83 @@ func createRuntime(parent *os.File, basename string, beforeCreate, afterOpen fun
 	}
 	runtime := &Runtime{
 		path: filepath.Join(parentPath, basename), basename: basename, dir: dir, directory: created,
-		parent: ownedParent, parentPath: parentPath, parentIdentity: wantParent, identity: created.fileIdentity(),
+		parent: ownedParent, parentPath: parentPath, parentIdentity: wantParent, parentLock: lockIdentity,
+		identity: created.fileIdentity(), home: home, temp: temp,
 	}
 	if err := runtime.verifyAuthority(); err != nil {
 		return nil, invalidContract(err)
 	}
 	cleanupCreated = false
 	keepDir = true
-	keepParent = true
+	operation.takeDirectory()
 	return runtime, nil
 }
 
-func (runtime *Runtime) Path() (string, error) {
+func (runtime *Runtime) Binding() (*RuntimeBinding, error) {
 	if runtime == nil {
-		return "", invalidContract(nil)
+		return nil, invalidContract(nil)
 	}
 	runtime.mu.Lock()
 	defer runtime.mu.Unlock()
 	if err := runtime.verifyAuthority(); err != nil {
-		return "", invalidContract(err)
+		return nil, invalidContract(err)
 	}
-	return runtime.path, nil
+	return &RuntimeBinding{runtime: runtime}, nil
 }
 
-func (runtime *Runtime) Identity() runner.FileIdentity {
-	if runtime == nil {
-		return runner.FileIdentity{}
+func (binding *RuntimeBinding) Values() (string, runner.FileIdentity, error) {
+	if binding == nil || binding.runtime == nil {
+		return "", runner.FileIdentity{}, invalidContract(nil)
 	}
-	runtime.mu.Lock()
-	defer runtime.mu.Unlock()
-	return runtime.identity
+	binding.runtime.mu.Lock()
+	defer binding.runtime.mu.Unlock()
+	if err := binding.runtime.verifyAuthority(); err != nil {
+		return "", runner.FileIdentity{}, invalidContract(err)
+	}
+	return binding.runtime.path, binding.runtime.identity, nil
+}
+
+func (binding *RuntimeBinding) ProviderHome() (string, error) {
+	return binding.fixedDirectory(runtimeHomeName)
+}
+
+func (binding *RuntimeBinding) ProviderTemp() (string, error) {
+	return binding.fixedDirectory(runtimeTempName)
+}
+
+func (binding *RuntimeBinding) AttemptTokenPath() (string, error) {
+	return binding.fixedFile(attemptTokenName)
+}
+
+func (binding *RuntimeBinding) WorkerConfigPath() (string, error) {
+	return binding.fixedFile(workerConfigName)
+}
+
+func (binding *RuntimeBinding) fixedDirectory(name string) (string, error) {
+	if binding == nil || binding.runtime == nil {
+		return "", invalidContract(nil)
+	}
+	binding.runtime.mu.Lock()
+	defer binding.runtime.mu.Unlock()
+	if err := binding.runtime.verifyAuthority(); err != nil {
+		return "", invalidContract(err)
+	}
+	if name != runtimeHomeName && name != runtimeTempName {
+		return "", invalidContract(nil)
+	}
+	return filepath.Join(binding.runtime.path, name), nil
+}
+
+func (binding *RuntimeBinding) fixedFile(name string) (string, error) {
+	if binding == nil || binding.runtime == nil || name != attemptTokenName && name != workerConfigName {
+		return "", invalidContract(nil)
+	}
+	binding.runtime.mu.Lock()
+	defer binding.runtime.mu.Unlock()
+	if err := binding.runtime.verifyAuthority(); err != nil {
+		return "", invalidContract(err)
+	}
+	return filepath.Join(binding.runtime.path, name), nil
 }
 
 // DuplicateDirectory transfers one independently closable descriptor to a
@@ -209,6 +333,42 @@ func (runtime *Runtime) DuplicateDirectory() (*os.File, error) {
 		return nil, invalidContract(err)
 	}
 	return duplicate, nil
+}
+
+// ObserveRuntimeLifetime tests the exact runtime-root lock using a fresh open
+// file description. Held means a cooperating live owner still retains the
+// inherited lifetime lease. Available is positive evidence that no such owner
+// does. Errors, replacement, and missing authorities are never absence.
+func ObserveRuntimeLifetime(parent *RuntimeParent, basename string, expected runner.FileIdentity) (RuntimeLeasePresence, error) {
+	if parent == nil || !validBasename(basename) || expected.Device == 0 || expected.Inode == 0 {
+		return 0, invalidContract(nil)
+	}
+	operation, err := parent.begin()
+	if err != nil {
+		return 0, err
+	}
+	defer operation.Close()
+	fd, err := unix.Openat(int(operation.dir.Fd()), basename, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
+	if err != nil {
+		return 0, invalidContract(err)
+	}
+	root := os.NewFile(uintptr(fd), "runtime-lifetime-observation")
+	defer root.Close()
+	identity, err := inspectExpectedDirectory(fd, expected)
+	if err != nil || verifyNamedChild(int(operation.dir.Fd()), basename, identity) != nil {
+		return 0, invalidContract(err)
+	}
+	if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		if errors.Is(err, unix.EWOULDBLOCK) {
+			return RuntimeLeaseHeld, nil
+		}
+		return 0, invalidContract(err)
+	}
+	defer unix.Flock(fd, unix.LOCK_UN)
+	if _, err := inspectExpectedDirectory(fd, expected); err != nil || verifyNamedChild(int(operation.dir.Fd()), basename, identity) != nil {
+		return 0, invalidContract(err)
+	}
+	return RuntimeLeaseAvailable, nil
 }
 
 func (runtime *Runtime) PublishAttemptToken(ctx context.Context, token [32]byte) (PrivateFile, error) {
@@ -322,7 +482,39 @@ func (runtime *Runtime) verifyAuthority() error {
 	if err := verifyNamedChild(int(runtime.parent.Fd()), runtime.basename, runtime.directory); err != nil {
 		return errInvalidContract
 	}
-	return verifyNamedDirectory(runtime.path, runtime.directory)
+	if err := verifyNamedDirectory(runtime.path, runtime.directory); err != nil {
+		return err
+	}
+	if err := verifyRuntimeLayoutDirectory(runtime, runtimeHomeName, runtime.home); err != nil {
+		return err
+	}
+	if err := verifyRuntimeLayoutDirectory(runtime, runtimeTempName, runtime.temp); err != nil {
+		return err
+	}
+	lock, err := inspectNamedRuntimeLock(int(runtime.parent.Fd()))
+	if err != nil || lock != runtime.parentLock {
+		return errInvalidContract
+	}
+	return nil
+}
+
+func verifyRuntimeLayoutDirectory(runtime *Runtime, name string, expected directoryIdentity) error {
+	if expected.device != runtime.directory.device {
+		return errInvalidContract
+	}
+	fd, err := unix.Openat(int(runtime.dir.Fd()), name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
+	if err != nil {
+		return err
+	}
+	actual, inspectErr := inspectPrivateDirectory(fd)
+	closeErr := unix.Close(fd)
+	if inspectErr != nil || closeErr != nil || actual != expected {
+		return errors.Join(errInvalidContract, inspectErr, closeErr)
+	}
+	if err := verifyNamedChild(int(runtime.dir.Fd()), name, expected); err != nil {
+		return err
+	}
+	return verifyNamedDirectory(filepath.Join(runtime.path, name), expected)
 }
 
 func verifyPrivateFileAuthority(runtime *Runtime, name string, identity runner.FileIdentity, size int64) error {
@@ -393,6 +585,10 @@ func cleanupCreatedDirectory(parentFD int, preferred string, identity directoryI
 		return err
 	}
 	directory := os.NewFile(uintptr(fd), "failed-attempt-runtime")
+	if err := cleanupRuntimeLayout(fd, identity, syncDirectory); err != nil {
+		directory.Close()
+		return err
+	}
 	entries, readErr := directory.ReadDir(1)
 	closeErr := directory.Close()
 	if readErr != nil && !errors.Is(readErr, io.EOF) || len(entries) != 0 || closeErr != nil {
@@ -405,6 +601,133 @@ func cleanupCreatedDirectory(parentFD int, preferred string, identity directoryI
 		return err
 	}
 	return syncDirectory(parentFD)
+}
+
+func createRuntimeLayout(rootFD int, syncDirectory func(int) error) error {
+	root, err := inspectPrivateDirectory(rootFD)
+	if err != nil {
+		return invalidContract(err)
+	}
+	for _, name := range []string{runtimeHomeName, runtimeTempName} {
+		if err := createRuntimeLayoutChild(rootFD, name, root, syncDirectory); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func inspectRuntimeLayout(rootFD int, root directoryIdentity) (directoryIdentity, directoryIdentity, error) {
+	identities := make([]directoryIdentity, 0, 2)
+	for _, name := range []string{runtimeHomeName, runtimeTempName} {
+		fd, err := unix.Openat(rootFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
+		if err != nil {
+			return directoryIdentity{}, directoryIdentity{}, err
+		}
+		identity, inspectErr := inspectPrivateDirectory(fd)
+		closeErr := unix.Close(fd)
+		if inspectErr != nil || closeErr != nil || identity.device != root.device {
+			return directoryIdentity{}, directoryIdentity{}, errors.Join(inspectErr, closeErr, errInvalidContract)
+		}
+		identities = append(identities, identity)
+	}
+	return identities[0], identities[1], nil
+}
+
+func adoptRuntimeLayout(rootFD int, root directoryIdentity, syncDirectory func(int) error) error {
+	entries, more, err := readRuntimeEntries(rootFD, 2)
+	if err != nil || more {
+		return invalidContract(err)
+	}
+	homePresent := false
+	tempPresent := false
+	for _, name := range entries {
+		if name != runtimeHomeName && name != runtimeTempName {
+			return invalidContract(nil)
+		}
+		if name == runtimeHomeName {
+			homePresent = true
+		} else {
+			tempPresent = true
+		}
+		var named unix.Stat_t
+		if err := unix.Fstatat(rootFD, name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil || !validRuntimeOrdinaryDirectory(named, root.device, true) {
+			return invalidContract(err)
+		}
+		fd, err := unix.Openat(rootFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
+		if err != nil {
+			return invalidContract(err)
+		}
+		children, more, readErr := readRuntimeEntries(fd, 1)
+		closeErr := unix.Close(fd)
+		if readErr != nil || more || len(children) != 0 || closeErr != nil {
+			return invalidContract(errors.Join(readErr, closeErr))
+		}
+	}
+	for _, name := range []string{runtimeHomeName, runtimeTempName} {
+		present := name == runtimeHomeName && homePresent || name == runtimeTempName && tempPresent
+		if !present {
+			if err := createRuntimeLayoutChild(rootFD, name, root, syncDirectory); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func createRuntimeLayoutChild(rootFD int, name string, root directoryIdentity, syncDirectory func(int) error) error {
+	if err := unix.Mkdirat(rootFD, name, 0o700); err != nil {
+		return invalidContract(err)
+	}
+	fd, err := unix.Openat(rootFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
+	if err != nil {
+		return invalidContract(err)
+	}
+	child, inspectErr := inspectPrivateDirectory(fd)
+	syncErr := syncDirectory(fd)
+	closeErr := unix.Close(fd)
+	if inspectErr != nil || child.device != root.device || syncErr != nil || closeErr != nil {
+		return invalidContract(errors.Join(inspectErr, syncErr, closeErr))
+	}
+	return nil
+}
+
+func cleanupRuntimeLayout(rootFD int, root directoryIdentity, syncDirectory func(int) error) error {
+	mutated := false
+	for _, name := range []string{runtimeTempName, runtimeHomeName} {
+		var named unix.Stat_t
+		err := unix.Fstatat(rootFD, name, &named, unix.AT_SYMLINK_NOFOLLOW)
+		if errors.Is(err, unix.ENOENT) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		identity := directoryIdentity{device: uint64(named.Dev), inode: named.Ino, uid: named.Uid, mode: uint32(named.Mode)}
+		if identity.device != root.device || identity.uid != uint32(os.Geteuid()) || identity.mode&uint32(unix.S_IFMT) != uint32(unix.S_IFDIR) || identity.mode&0o7777 != 0o700 || named.Nlink == 0 {
+			return errRetainedRuntime
+		}
+		fd, err := unix.Openat(rootFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
+		if err != nil {
+			return err
+		}
+		directory := os.NewFile(uintptr(fd), "failed-runtime-layout")
+		entries, readErr := directory.ReadDir(1)
+		closeErr := directory.Close()
+		if readErr != nil && !errors.Is(readErr, io.EOF) || len(entries) != 0 || closeErr != nil {
+			return errRetainedRuntime
+		}
+		if err := verifyNamedChild(rootFD, name, identity); err != nil {
+			return errRetainedRuntime
+		}
+		if err := unix.Unlinkat(rootFD, name, unix.AT_REMOVEDIR); err != nil {
+			return err
+		}
+		mutated = true
+	}
+	if mutated {
+		return syncDirectory(rootFD)
+	}
+	return nil
 }
 
 func cleanupCreatedFile(directoryFD int, preferred string, identity unix.Stat_t, syncDirectory func(int) error) error {

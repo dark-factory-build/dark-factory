@@ -15,6 +15,8 @@ import (
 
 const (
 	contractVersion      = 1
+	runtimeHomeName      = "home"
+	runtimeTempName      = "tmp"
 	checkpointLimit      = 32 << 10
 	workerConfigLimit    = 256 << 10
 	workerInputLimit     = 128 << 10
@@ -44,7 +46,6 @@ type workerConfig struct {
 	ChangeParent       string
 	FinalName          string
 	StagingName        string
-	ProviderProgram    string
 	ProviderHome       string
 	ProviderTemp       string
 	AttemptSocket      string
@@ -93,7 +94,7 @@ func encodeWorkerConfig(config workerConfig) ([]byte, error) {
 	encoded = binary.BigEndian.AppendUint64(encoded, config.RepositoryIdentity.Inode())
 	for _, value := range []string{
 		config.RuntimePath, config.GitExecutable, config.RepositoryRoot, config.Revision,
-		config.ChangeParent, config.FinalName, config.StagingName, config.ProviderProgram,
+		config.ChangeParent, config.FinalName, config.StagingName,
 		config.ProviderHome, config.ProviderTemp, config.AttemptSocket, config.AttemptTokenPath,
 	} {
 		encoded = appendString(encoded, value)
@@ -131,7 +132,7 @@ func decodeWorkerConfig(encoded []byte) (workerConfig, error) {
 	if err != nil {
 		return workerConfig{}, invalidContract(err)
 	}
-	values := make([]string, 12)
+	values := make([]string, 11)
 	for index := range values {
 		values[index], err = reader.string()
 		if err != nil {
@@ -146,8 +147,8 @@ func decodeWorkerConfig(encoded []byte) (workerConfig, error) {
 		RuntimePath: values[0], RuntimeIdentity: runner.FileIdentity{Device: device, Inode: inode},
 		GitExecutable: values[1], RepositoryRoot: values[2], RepositoryIdentity: repositoryIdentity, Revision: values[3],
 		ChangeParent: values[4], FinalName: values[5], StagingName: values[6],
-		ProviderProgram: values[7], ProviderHome: values[8], ProviderTemp: values[9],
-		AttemptSocket: values[10], AttemptTokenPath: values[11], StartupInput: input,
+		ProviderHome: values[7], ProviderTemp: values[8],
+		AttemptSocket: values[9], AttemptTokenPath: values[10], StartupInput: input,
 	}
 	if err := validateWorkerConfig(config); err != nil {
 		return workerConfig{}, err
@@ -156,7 +157,7 @@ func decodeWorkerConfig(encoded []byte) (workerConfig, error) {
 }
 
 func validateWorkerConfig(config workerConfig) error {
-	paths := []string{config.RuntimePath, config.GitExecutable, config.RepositoryRoot, config.ChangeParent, config.ProviderProgram, config.ProviderHome, config.ProviderTemp, config.AttemptSocket, config.AttemptTokenPath}
+	paths := []string{config.RuntimePath, config.GitExecutable, config.RepositoryRoot, config.ChangeParent, config.ProviderHome, config.ProviderTemp, config.AttemptSocket, config.AttemptTokenPath}
 	for _, path := range paths {
 		if !validAbsolute(path, maximumLocatorBytes) {
 			return invalidContract(nil)
@@ -170,16 +171,9 @@ func validateWorkerConfig(config workerConfig) error {
 	if _, err := change.NewRepositoryIdentity(config.RepositoryIdentity.Device(), config.RepositoryIdentity.Inode()); err != nil {
 		return invalidContract(err)
 	}
-	private := []string{config.ProviderHome, config.ProviderTemp, config.AttemptTokenPath}
-	for _, path := range private {
-		if !strictDescendant(config.RuntimePath, path) {
-			return invalidContract(nil)
-		}
-	}
-	if config.ProviderHome == config.ProviderTemp || config.ProviderHome == config.AttemptTokenPath || config.ProviderTemp == config.AttemptTokenPath {
-		return invalidContract(nil)
-	}
-	if config.AttemptTokenPath != filepath.Join(config.RuntimePath, attemptTokenName) {
+	if config.ProviderHome != filepath.Join(config.RuntimePath, runtimeHomeName) ||
+		config.ProviderTemp != filepath.Join(config.RuntimePath, runtimeTempName) ||
+		config.AttemptTokenPath != filepath.Join(config.RuntimePath, attemptTokenName) {
 		return invalidContract(nil)
 	}
 	return nil
@@ -418,10 +412,6 @@ func validAbsolute(value string, maximum int) bool {
 
 func validChangeName(value string) bool {
 	return validText(value, 255) && filepath.Base(value) == value && value != "." && value != ".." && !strings.EqualFold(value, ".git")
-}
-
-func strictDescendant(parent, child string) bool {
-	return child != parent && strings.HasPrefix(child, parent+string(filepath.Separator))
 }
 
 type contractReader struct {

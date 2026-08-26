@@ -17,8 +17,15 @@ func TestUnsupportedRuntimeFailsBeforeEffect(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer parent.Close()
-	if _, err := CreateRuntime(parent, "run"); !errors.Is(err, errUnsupported) {
+	managed, err := CreateRuntimeParent(parent)
+	if !errors.Is(err, errUnsupported) || managed != nil {
+		t.Fatalf("CreateRuntimeParent error = %v", err)
+	}
+	if _, err := CreateRuntime(managed, "run"); !errors.Is(err, errUnsupported) {
 		t.Fatalf("CreateRuntime error = %v", err)
+	}
+	if _, err := AdoptRuntime(managed, "run"); !errors.Is(err, errUnsupported) {
+		t.Fatalf("AdoptRuntime error = %v", err)
 	}
 	if _, err := os.Lstat(filepath.Join(root, "run")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("unsupported runtime gained effect: %v", err)

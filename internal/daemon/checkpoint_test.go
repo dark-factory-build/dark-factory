@@ -174,7 +174,7 @@ func workerConfigFixture() workerConfig {
 		RuntimePath: "/private/runtime/run-1", RuntimeIdentity: runner.FileIdentity{Device: 1, Inode: 2},
 		GitExecutable: "/usr/bin/git", RepositoryRoot: "/private/repository", RepositoryIdentity: repository, Revision: "refs/heads/main",
 		ChangeParent: "/private/changes", FinalName: "change-1", StagingName: ".change-1.stage",
-		ProviderProgram: "/bin/sh", ProviderHome: "/private/runtime/run-1/home", ProviderTemp: "/private/runtime/run-1/tmp",
+		ProviderHome: "/private/runtime/run-1/home", ProviderTemp: "/private/runtime/run-1/tmp",
 		AttemptSocket: "/private/api.sock", AttemptTokenPath: "/private/runtime/run-1/attempt.token", StartupInput: []byte("private prompt\n"),
 	}
 }
@@ -188,7 +188,7 @@ func withConfig(value workerConfig, mutate func(*workerConfig)) workerConfig {
 func equalWorkerConfig(left, right workerConfig) bool {
 	return left.RuntimePath == right.RuntimePath && left.RuntimeIdentity == right.RuntimeIdentity && left.GitExecutable == right.GitExecutable &&
 		left.RepositoryRoot == right.RepositoryRoot && left.RepositoryIdentity.Equal(right.RepositoryIdentity) && left.Revision == right.Revision && left.ChangeParent == right.ChangeParent &&
-		left.FinalName == right.FinalName && left.StagingName == right.StagingName && left.ProviderProgram == right.ProviderProgram &&
+		left.FinalName == right.FinalName && left.StagingName == right.StagingName &&
 		left.ProviderHome == right.ProviderHome && left.ProviderTemp == right.ProviderTemp && left.AttemptSocket == right.AttemptSocket &&
 		left.AttemptTokenPath == right.AttemptTokenPath && bytes.Equal(left.StartupInput, right.StartupInput)
 }

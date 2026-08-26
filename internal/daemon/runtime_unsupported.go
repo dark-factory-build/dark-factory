@@ -11,6 +11,17 @@ import (
 
 type Runtime struct{}
 
+type RuntimeBinding struct{}
+
+type RuntimeParent struct{}
+
+type RuntimeLeasePresence uint8
+
+const (
+	RuntimeLeaseHeld RuntimeLeasePresence = iota + 1
+	RuntimeLeaseAvailable
+)
+
 type PrivateFile struct{}
 
 func (PrivateFile) Path() (string, error)         { return "", errUnsupported }
@@ -18,10 +29,28 @@ func (PrivateFile) Identity() runner.FileIdentity { return runner.FileIdentity{}
 func (PrivateFile) String() string                { return "private runtime file" }
 func (PrivateFile) GoString() string              { return "daemon.PrivateFile{private}" }
 
-func CreateRuntime(*os.File, string) (*Runtime, error) { return nil, errUnsupported }
-func (*Runtime) Path() (string, error)                 { return "", errUnsupported }
-func (*Runtime) Identity() runner.FileIdentity         { return runner.FileIdentity{} }
-func (*Runtime) DuplicateDirectory() (*os.File, error) { return nil, errUnsupported }
+func CreateRuntimeParent(*os.File) (*RuntimeParent, error) { return nil, errUnsupported }
+func OpenRuntimeParent(*os.File) (*RuntimeParent, error)   { return nil, errUnsupported }
+func (*RuntimeParent) Close() error                        { return nil }
+func CreateRuntime(*RuntimeParent, string) (*Runtime, error) {
+	return nil, errUnsupported
+}
+func AdoptRuntime(*RuntimeParent, string) (*Runtime, error) { return nil, errUnsupported }
+func (*Runtime) Binding() (*RuntimeBinding, error)          { return nil, errUnsupported }
+func (*RuntimeBinding) Values() (string, runner.FileIdentity, error) {
+	return "", runner.FileIdentity{}, errUnsupported
+}
+func (*RuntimeBinding) ProviderHome() (string, error)     { return "", errUnsupported }
+func (*RuntimeBinding) ProviderTemp() (string, error)     { return "", errUnsupported }
+func (*RuntimeBinding) AttemptTokenPath() (string, error) { return "", errUnsupported }
+func (*RuntimeBinding) WorkerConfigPath() (string, error) { return "", errUnsupported }
+func (*Runtime) DuplicateDirectory() (*os.File, error)    { return nil, errUnsupported }
+func ObserveRuntimeLifetime(*RuntimeParent, string, runner.FileIdentity) (RuntimeLeasePresence, error) {
+	return 0, errUnsupported
+}
+func RemoveRecordedRuntime(context.Context, *RuntimeParent, string, runner.FileIdentity) (bool, error) {
+	return false, errUnsupported
+}
 func (*Runtime) PublishAttemptToken(context.Context, [32]byte) (PrivateFile, error) {
 	return PrivateFile{}, errUnsupported
 }
