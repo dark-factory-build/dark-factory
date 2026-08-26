@@ -56,6 +56,7 @@ const (
 	TerminalGenerationResult TerminalEventKind = "terminal-generation-result"
 	TerminalInputResult      TerminalEventKind = "terminal-input-result"
 	TerminalResizeResult     TerminalEventKind = "terminal-resize-result"
+	TerminalAttached         TerminalEventKind = "terminal-attached"
 	TerminalOutput           TerminalEventKind = "terminal-output"
 	TerminalReset            TerminalEventKind = "terminal-reset"
 	TerminalPTYEOF           TerminalEventKind = "terminal-pty-eof"
@@ -117,28 +118,28 @@ type TerminalFrame struct {
 }
 
 func (c TerminalCommand) validate() error {
-	if c.Correlation == 0 || c.Correlation > maxTerminalCorrelation {
-		return fmt.Errorf("runner: terminal command correlation is invalid")
-	}
 	switch c.Kind {
 	case TerminalGenerationInstall, TerminalGenerationRevoke:
+		if !validTerminalCorrelation(c.Correlation) {
+			return fmt.Errorf("runner: terminal command correlation is invalid")
+		}
 		if c.Generation == 0 || c.Sequence != 0 || c.Credit != 0 || c.Rows != 0 || c.Cols != 0 || len(c.Payload) != 0 {
 			return ErrState
 		}
 	case TerminalAttach:
-		if c.Generation != 0 || c.Sequence == ^uint64(0) || c.Credit != 0 || c.Rows != 0 || c.Cols != 0 || len(c.Payload) != 0 {
+		if !validTerminalCorrelation(c.Correlation) || c.Generation != 0 || c.Credit != 0 || c.Rows != 0 || c.Cols != 0 || len(c.Payload) != 0 {
 			return ErrState
 		}
 	case TerminalCredit:
-		if c.Generation != 0 || c.Sequence != 0 || c.Credit == 0 || c.Credit > maxTerminalCredit || c.Rows != 0 || c.Cols != 0 || len(c.Payload) != 0 {
+		if c.Correlation != 0 || c.Generation != 0 || c.Sequence != 0 || c.Credit == 0 || c.Credit > maxTerminalCredit || c.Rows != 0 || c.Cols != 0 || len(c.Payload) != 0 {
 			return ErrState
 		}
 	case TerminalInput:
-		if c.Generation == 0 || c.Sequence == 0 || len(c.Payload) == 0 || len(c.Payload) > maxTerminalFramePayload || c.Credit != 0 || c.Rows != 0 || c.Cols != 0 {
+		if !validTerminalCorrelation(c.Correlation) || c.Generation == 0 || c.Sequence == 0 || len(c.Payload) == 0 || len(c.Payload) > maxTerminalFramePayload || c.Credit != 0 || c.Rows != 0 || c.Cols != 0 {
 			return ErrState
 		}
 	case TerminalResize:
-		if c.Generation == 0 || c.Rows == 0 || c.Rows > maxTerminalDimension || c.Cols == 0 || c.Cols > maxTerminalDimension || c.Sequence != 0 || c.Credit != 0 || len(c.Payload) != 0 {
+		if !validTerminalCorrelation(c.Correlation) || c.Generation == 0 || c.Rows == 0 || c.Rows > maxTerminalDimension || c.Cols == 0 || c.Cols > maxTerminalDimension || c.Sequence != 0 || c.Credit != 0 || len(c.Payload) != 0 {
 			return ErrState
 		}
 	default:
@@ -161,22 +162,42 @@ func (f TerminalFrame) validate() error {
 		if f.Correlation == 0 || f.Correlation > maxTerminalCorrelation || f.Generation == 0 || !validTerminalResult(f.Status) || f.Sequence != 0 || f.Start != 0 || f.End != 0 || f.Floor != 0 || f.Head != 0 || f.Count != 0 || f.Rows == 0 || f.Rows > maxTerminalDimension || f.Cols == 0 || f.Cols > maxTerminalDimension || len(f.Payload) != 0 {
 			return ErrState
 		}
+	case TerminalAttached:
+		if !validTerminalCorrelation(f.Correlation) || f.Generation != 0 || f.Floor > f.Head || f.Rows != 0 || f.Cols != 0 || f.Count != 0 || f.Start != 0 || f.End != 0 || len(f.Payload) != 0 {
+			return ErrState
+		}
+		switch f.Status {
+		case TerminalResultOK:
+			if f.Sequence < f.Floor || f.Sequence > f.Head {
+				return ErrState
+			}
+		case TerminalResultRejected:
+			if f.Sequence <= f.Head {
+				return ErrState
+			}
+		default:
+			return ErrState
+		}
 	case TerminalOutput:
-		if f.Correlation != 0 || f.Generation == 0 || f.Start >= f.End || f.End-f.Start != uint64(len(f.Payload)) || len(f.Payload) == 0 || len(f.Payload) > maxTerminalFramePayload || f.Sequence != 0 || f.Floor != 0 || f.Head != 0 || f.Count != 0 || f.Rows != 0 || f.Cols != 0 || f.Status != "" {
+		if f.Correlation > maxTerminalCorrelation || f.Generation != 0 || f.Start >= f.End || f.End-f.Start != uint64(len(f.Payload)) || len(f.Payload) == 0 || len(f.Payload) > maxTerminalFramePayload || f.Sequence != 0 || f.Floor != 0 || f.Head != 0 || f.Count != 0 || f.Rows != 0 || f.Cols != 0 || f.Status != "" {
 			return ErrState
 		}
 	case TerminalReset:
-		if f.Correlation == 0 || f.Correlation > maxTerminalCorrelation || f.Generation == 0 || f.Floor > f.Head || f.Start != 0 || f.End != 0 || f.Sequence != 0 || f.Count != 0 || f.Rows != 0 || f.Cols != 0 || f.Status != "" || len(f.Payload) != 0 {
+		if f.Correlation > maxTerminalCorrelation || f.Generation != 0 || f.Floor > f.Head || f.Start != 0 || f.End != 0 || f.Sequence != 0 || f.Count != 0 || f.Rows != 0 || f.Cols != 0 || f.Status != "" || len(f.Payload) != 0 {
 			return ErrState
 		}
 	case TerminalPTYEOF:
-		if f.Correlation != 0 || f.Generation == 0 || f.Sequence != 0 || f.Start != 0 || f.End != 0 || f.Floor != 0 || f.Head != 0 || f.Count != 0 || f.Rows != 0 || f.Cols != 0 || f.Status != "" || len(f.Payload) != 0 {
+		if f.Correlation != 0 || f.Generation != 0 || f.Sequence != 0 || f.Start != 0 || f.End != 0 || f.Floor != 0 || f.Head != 0 || f.Count != 0 || f.Rows != 0 || f.Cols != 0 || f.Status != "" || len(f.Payload) != 0 {
 			return ErrState
 		}
 	default:
 		return ErrState
 	}
 	return nil
+}
+
+func validTerminalCorrelation(value uint64) bool {
+	return value != 0 && value <= maxTerminalCorrelation
 }
 
 func validTerminalResult(value TerminalResultStatus) bool {

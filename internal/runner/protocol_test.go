@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"reflect"
 	"syscall"
 	"testing"
 )
@@ -72,7 +73,7 @@ func TestTerminalCommandAndEventFramesRoundTrip(t *testing.T) {
 		{Kind: TerminalGenerationInstall, Correlation: 1, Generation: 2},
 		{Kind: TerminalGenerationRevoke, Correlation: 2, Generation: 2},
 		{Kind: TerminalAttach, Correlation: 3, Sequence: 4},
-		{Kind: TerminalCredit, Correlation: 4, Credit: 4096},
+		{Kind: TerminalCredit, Credit: 4096},
 		{Kind: TerminalInput, Correlation: 5, Generation: 2, Sequence: 1, Payload: []byte("input")},
 		{Kind: TerminalResize, Correlation: 6, Generation: 2, Rows: 24, Cols: 80},
 	}
@@ -98,9 +99,12 @@ func TestTerminalCommandAndEventFramesRoundTrip(t *testing.T) {
 		{Kind: TerminalGenerationResult, Correlation: 7, Generation: 2, Status: TerminalResultOK},
 		{Kind: TerminalInputResult, Correlation: 8, Generation: 2, Sequence: 1, Status: TerminalResultPartial, Count: 3},
 		{Kind: TerminalResizeResult, Correlation: 9, Generation: 2, Rows: 24, Cols: 80, Status: TerminalResultOK},
-		{Kind: TerminalOutput, Generation: 2, Start: 10, End: 15, Payload: []byte("hello")},
-		{Kind: TerminalReset, Correlation: 10, Generation: 2, Floor: 10, Head: 15},
-		{Kind: TerminalPTYEOF, Generation: 2},
+		{Kind: TerminalAttached, Correlation: 10, Sequence: 12, Floor: 10, Head: 15, Status: TerminalResultOK},
+		{Kind: TerminalOutput, Start: 10, End: 15, Payload: []byte("hello")},
+		{Kind: TerminalOutput, Correlation: 11, Start: 10, End: 15, Payload: []byte("hello")},
+		{Kind: TerminalReset, Floor: 10, Head: 15},
+		{Kind: TerminalReset, Correlation: 12, Floor: 10, Head: 15},
+		{Kind: TerminalPTYEOF},
 	}
 	for _, want := range events {
 		if err := want.validate(); err != nil {
@@ -125,7 +129,7 @@ func TestTerminalWireValidationRejectsAmbiguousFrames(t *testing.T) {
 	badCommands := []TerminalCommand{
 		{Kind: TerminalInput, Correlation: 1, Generation: 1, Sequence: 1},
 		{Kind: TerminalResize, Correlation: 1, Generation: 1, Rows: 0, Cols: 80},
-		{Kind: TerminalCredit, Correlation: 1, Credit: maxTerminalCredit + 1},
+		{Kind: TerminalCredit, Credit: maxTerminalCredit + 1},
 		{Kind: TerminalInput, Correlation: 1, Generation: 1, Sequence: 1, Payload: bytes.Repeat([]byte{'x'}, maxTerminalFramePayload+1)},
 		{Kind: "terminal-unknown", Correlation: 1},
 		{Kind: TerminalResize, Correlation: 1, Generation: 1, Rows: 4097, Cols: 80},
@@ -136,7 +140,11 @@ func TestTerminalWireValidationRejectsAmbiguousFrames(t *testing.T) {
 		}
 	}
 	badEvents := []TerminalFrame{
-		{Kind: TerminalOutput, Generation: 1, Start: 2, End: 4, Payload: []byte("x")},
+		{Kind: TerminalOutput, Start: 2, End: 4, Payload: []byte("x")},
+		{Kind: TerminalOutput, Correlation: maxTerminalCorrelation + 1, Start: 2, End: 3, Payload: []byte("x")},
+		{Kind: TerminalAttached, Correlation: 1, Sequence: 5, Floor: 0, Head: 4, Status: TerminalResultOK},
+		{Kind: TerminalAttached, Correlation: 1, Sequence: 4, Floor: 0, Head: 4, Status: TerminalResultRejected},
+		{Kind: TerminalAttached, Correlation: 1, Sequence: 4, Floor: 0, Head: 4, Status: TerminalResultPartial},
 		{Kind: TerminalReset, Correlation: 1, Generation: 1, Floor: 3, Head: 2},
 		{Kind: TerminalGenerationResult, Correlation: 1, Generation: 1, Status: "unknown"},
 		{Kind: TerminalPTYEOF, Generation: 1, Payload: []byte("unexpected")},
@@ -149,18 +157,97 @@ func TestTerminalWireValidationRejectsAmbiguousFrames(t *testing.T) {
 	}
 }
 
+func TestTerminalObservationFramesAreIndependentOfGeneration(t *testing.T) {
+	valid := []TerminalFrame{
+		{Kind: TerminalOutput, Start: 0, End: 5, Payload: []byte("hello")},
+		{Kind: TerminalOutput, Correlation: 1, Start: 5, End: 10, Payload: []byte("world")},
+		{Kind: TerminalOutput, Correlation: 2, Start: 0, End: 5, Payload: []byte("hello")},
+		{Kind: TerminalReset, Floor: 5, Head: 10},
+		{Kind: TerminalReset, Correlation: 1, Floor: 5, Head: 10},
+		{Kind: TerminalPTYEOF},
+	}
+	for _, frame := range valid {
+		if err := frame.validate(); err != nil {
+			t.Errorf("%s rejected before generation or lease: %v", frame.Kind, err)
+		}
+		wire := terminalEventFrame(frame)
+		got, err := terminalEventFromFrame(wire)
+		if err != nil {
+			t.Errorf("%s conversion failed: %v", frame.Kind, err)
+			continue
+		}
+		if !reflect.DeepEqual(got, frame) {
+			t.Errorf("%s conversion changed frame: got %+v want %+v", frame.Kind, got, frame)
+		}
+	}
+}
+
+func TestTerminalAttachResultBoundaries(t *testing.T) {
+	for _, sequence := range []uint64{4, 5, 9} {
+		frame := TerminalFrame{Kind: TerminalAttached, Correlation: 1, Sequence: sequence, Floor: 4, Head: 9, Status: TerminalResultOK}
+		if err := frame.validate(); err != nil {
+			t.Fatalf("attach success at sequence %d rejected: %v", sequence, err)
+		}
+	}
+	for _, frame := range []TerminalFrame{
+		{Kind: TerminalAttached, Correlation: 1, Sequence: 10, Floor: 4, Head: 9, Status: TerminalResultRejected},
+		{Kind: TerminalAttached, Correlation: 1, Sequence: 10, Floor: 4, Head: 9, Status: TerminalResultOK},
+	} {
+		if err := frame.validate(); frame.Status == TerminalResultRejected && err != nil {
+			t.Fatalf("attach rejection above head rejected: %v", err)
+		} else if frame.Status == TerminalResultOK && err == nil {
+			t.Fatalf("attach success above head accepted")
+		}
+	}
+	for _, status := range []TerminalResultStatus{TerminalResultPartial, TerminalResultUncertain, ""} {
+		frame := TerminalFrame{Kind: TerminalAttached, Correlation: 1, Sequence: 5, Floor: 4, Head: 9, Status: status}
+		if err := frame.validate(); err == nil {
+			t.Fatalf("attach status %q accepted", status)
+		}
+	}
+}
+
+func TestTerminalCreditIsAggregateAndResponseCommandsNeedCorrelation(t *testing.T) {
+	if err := (TerminalCommand{Kind: TerminalCredit, Credit: 1}).validate(); err != nil {
+		t.Fatalf("aggregate credit rejected: %v", err)
+	}
+	if err := (TerminalCommand{Kind: TerminalCredit, Correlation: 1, Credit: 1}).validate(); err == nil {
+		t.Fatal("credit with response correlation accepted")
+	}
+	for _, kind := range []TerminalCommandKind{TerminalGenerationInstall, TerminalGenerationRevoke, TerminalAttach, TerminalInput, TerminalResize} {
+		command := TerminalCommand{Kind: kind}
+		switch kind {
+		case TerminalGenerationInstall, TerminalGenerationRevoke:
+			command.Generation = 1
+		case TerminalAttach:
+			command.Sequence = ^uint64(0)
+		case TerminalInput:
+			command.Generation, command.Sequence, command.Payload = 1, 1, []byte("x")
+		case TerminalResize:
+			command.Generation, command.Rows, command.Cols = 1, 24, 80
+		}
+		if err := command.validate(); err == nil {
+			t.Fatalf("response command %q without correlation accepted", kind)
+		}
+		command.Correlation = 1
+		if err := command.validate(); err != nil {
+			t.Fatalf("response command %q with correlation rejected: %v", kind, err)
+		}
+	}
+}
+
 func TestTerminalResizeUsesPTYOwnerBounds(t *testing.T) {
 	valid := TerminalCommand{Kind: TerminalResize, Correlation: 1, Generation: 1, Rows: maxPTYDimension, Cols: maxPTYDimension}
 	if err := valid.validate(); err != nil {
 		t.Fatalf("owner-bound resize rejected: %v", err)
 	}
 	for _, version := range []int{0, commandVersion - 1, commandVersion + 1, 99} {
-		frame := terminalCommandFrame(TerminalCommand{Kind: TerminalCredit, Correlation: 1, Credit: 1})
+		frame := terminalCommandFrame(TerminalCommand{Kind: TerminalCredit, Credit: 1})
 		frame.Version = version
 		if _, err := terminalCommandFromFrame(frame); !errors.Is(err, ErrIdentity) {
 			t.Fatalf("command version %d accepted: %v", version, err)
 		}
-		event := terminalEventFrame(TerminalFrame{Kind: TerminalPTYEOF, Generation: 1})
+		event := terminalEventFrame(TerminalFrame{Kind: TerminalPTYEOF})
 		event.Version = version
 		if _, err := terminalEventFromFrame(event); !errors.Is(err, ErrIdentity) {
 			t.Fatalf("event version %d accepted: %v", version, err)
@@ -169,7 +256,7 @@ func TestTerminalResizeUsesPTYOwnerBounds(t *testing.T) {
 }
 
 func TestTerminalConversionsRejectLifecycleAndCrossUnionFields(t *testing.T) {
-	commandBase := terminalCommandFrame(TerminalCommand{Kind: TerminalCredit, Correlation: 1, Credit: 1})
+	commandBase := terminalCommandFrame(TerminalCommand{Kind: TerminalCredit, Credit: 1})
 	commandContaminations := []struct {
 		name   string
 		mutate func(*attemptFrame)
@@ -202,7 +289,7 @@ func TestTerminalConversionsRejectLifecycleAndCrossUnionFields(t *testing.T) {
 		})
 	}
 
-	eventBase := terminalEventFrame(TerminalFrame{Kind: TerminalPTYEOF, Generation: 1})
+	eventBase := terminalEventFrame(TerminalFrame{Kind: TerminalPTYEOF})
 	eventContaminations := []struct {
 		name   string
 		mutate func(*attemptFrame)

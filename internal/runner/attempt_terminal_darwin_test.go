@@ -39,7 +39,7 @@ func TestAttemptControllerWriteFailurePoisonsCapability(t *testing.T) {
 	controller.state = controllerProviderReleased
 	saturateControllerSendBuffer(t, controller)
 	started := time.Now()
-	err = controller.SendTerminalCommand(TerminalCommand{Kind: TerminalCredit, Correlation: 1, Credit: 1})
+	err = controller.SendTerminalCommand(TerminalCommand{Kind: TerminalCredit, Credit: 1})
 	if !errors.Is(err, syscall.EAGAIN) && !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, os.ErrDeadlineExceeded) {
 		t.Fatalf("saturated write = %v, want EAGAIN or deadline", err)
 	}
@@ -49,7 +49,7 @@ func TestAttemptControllerWriteFailurePoisonsCapability(t *testing.T) {
 	if controller.file != nil || controller.state != controllerPoisoned {
 		t.Fatalf("failed writer remained usable: file=%v state=%d", controller.file, controller.state)
 	}
-	if err := controller.SendTerminalCommand(TerminalCommand{Kind: TerminalCredit, Correlation: 2, Credit: 1}); !errors.Is(err, ErrState) {
+	if err := controller.SendTerminalCommand(TerminalCommand{Kind: TerminalCredit, Credit: 1}); !errors.Is(err, ErrState) {
 		t.Fatalf("retry after poison = %v", err)
 	}
 	if err := controller.Terminate(); !errors.Is(err, ErrState) {
@@ -75,7 +75,7 @@ func TestAttemptControllerTerminalCommandsRequireProviderRelease(t *testing.T) {
 	defer controller.Close()
 	defer peer.Close()
 
-	command := TerminalCommand{Kind: TerminalCredit, Correlation: 1, Credit: 4096}
+	command := TerminalCommand{Kind: TerminalCredit, Credit: 4096}
 	if err := controller.SendTerminalCommand(command); !errors.Is(err, ErrState) {
 		t.Fatalf("pre-release command = %v", err)
 	}
@@ -87,7 +87,7 @@ func TestAttemptControllerTerminalCommandsRequireProviderRelease(t *testing.T) {
 	if err := readFrame(peer, &got, maxFrameBytes); err != nil {
 		t.Fatal(err)
 	}
-	if got.Kind != string(TerminalCredit) || got.Correlation != command.Correlation || got.Credit != command.Credit {
+	if got.Kind != string(TerminalCredit) || got.Correlation != 0 || got.Credit != command.Credit {
 		t.Fatalf("command frame = %+v", got)
 	}
 }
@@ -103,7 +103,7 @@ func TestAttemptControllerTerminalEventsInterleaveWithoutLifecycleMutation(t *te
 	controller.attemptID = "attempt-terminal"
 	controller.inner = Identity{PID: 22, PGID: 22, Birth: Birth{Seconds: 3, Microseconds: 4}}
 
-	output := TerminalFrame{Kind: TerminalOutput, Generation: 1, Start: 0, End: 5, Payload: []byte("hello")}
+	output := TerminalFrame{Kind: TerminalOutput, Start: 0, End: 5, Payload: []byte("hello")}
 	if err := writeControlFrame(peer, terminalEventFrame(output), maxFrameBytes); err != nil {
 		t.Fatal(err)
 	}
@@ -139,9 +139,9 @@ func TestAttemptControllerTerminalEventsInterleaveWithoutLifecycleMutation(t *te
 
 func TestAttemptControllerRejectsMalformedTerminalEvents(t *testing.T) {
 	bad := []attemptFrame{
-		{Version: 1, Kind: string(TerminalOutput), Generation: 1, Start: 0, End: 2, Payload: []byte("x")},
+		{Version: 1, Kind: string(TerminalOutput), Start: 0, End: 2, Payload: []byte("x")},
 		{Version: 1, Kind: string(TerminalReset), Correlation: 1, Generation: 1, Floor: 3, Head: 2},
-		{Version: 1, Kind: string(TerminalPTYEOF), Generation: 1, Payload: []byte("bytes")},
+		{Version: 1, Kind: string(TerminalPTYEOF), Payload: []byte("bytes")},
 	}
 	for _, frame := range bad {
 		controller, peer, err := NewAttemptController()
