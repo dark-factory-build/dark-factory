@@ -2059,3 +2059,80 @@ Registered Change-worker proof on integrated head `43a94ee`:
   release the provider once, observe its terminal spool, clean exact resources,
   and prove crash/restart convergence. The cooperative same-EUID boundary and
   scan-to-exec assumption remain explicit residual limits.
+
+Synchronous shell-supervisor proof on integrated head `4c2da24`:
+
+- `Daemon.RunNext` is one concrete synchronous owner for the kernel vertical
+  slice. It admits the canonical task, creates and binds the private runtime,
+  starts the inert outer runner, durably binds its exact identity, receives and
+  atomically binds the exact provider process/group identity, commits each
+  Change checkpoint, marks the run running and only then releases the shell
+  provider. No production goroutine, provider interface, retry framework,
+  stage table or second state authority was added.
+- Provider and outer-runner termination are separate durable external facts.
+  One private-field `ProcessExit` representation backs explicitly named
+  `ProviderExit` and `RunnerExit` fields. The daemon validates and commits the
+  exact provider terminal record before acknowledging and deleting its spool,
+  then waits the outer child and commits that distinct exit. A causal provider
+  exit-7/outer-exit-0 test kills the old conflation. Either exact recovered
+  absence may arrive first after a crash; reused, malformed, permission-denied
+  or otherwise uncertain identity never becomes absence.
+- Releasing a nonempty provider process/group requires `ProviderExit`; releasing
+  a nonempty outer-runner resource requires `RunnerExit`. Finalization derives
+  the same requirements from the durable resource identities, including an
+  admitted run that acquired processes before failing. Exit observations are
+  identity- and timestamp-bound, exact replay is idempotent, conflicts fail,
+  and the first typed outcome or exit-domain failure remains immutable.
+- Provider process and group activation is one concrete Store transaction.
+  `ActivateProviderResources` binds the same identity to exactly two declared
+  rows and requires an affected-row count of two; single-resource activation
+  rejects either provider kind. Trigger suppression of either row rolls back
+  both, commit ambiguity leaves both declared or both active, and durable
+  validation rejects one-sided or mismatched identities while allowing later
+  sequential cleanup states.
+- Commit/revocation reconciliation is bounded to three independent 250 ms Store
+  attempts. Permanent unavailability returns typed outcome-unknown with no
+  stale `Run`; the one-time bearer is discarded and any live owner is still
+  synchronously joined. The durable nonterminal row remains discoverable by
+  `RecoverableRuns` for the next recovery pass. Ownership-convergence loops
+  that retain a live child or wait for exact runtime removal remain deliberately
+  distinct from transaction replay and are retained for the final audit.
+- Independent review repeatedly blocked green candidates. The Store review
+  found unchecked admission/finalizing footprints, forged failure domains and
+  unresolved admission ambiguity. Process review found release-after-cancel,
+  a replay-insensitive witness, missing descendant proof and the inner/outer
+  exit conflation. The slice elegance review found unbounded Store retry. The
+  final Store review found independently committed provider process/group rows
+  could create an unreleasable partial identity. Repairs received exact-head
+  **ALLOW** from Store/authority, process-lifecycle and slice-elegance reviewers
+  at `cf00fe0`; the whole-runtime elegance audit remains a later hard gate.
+- Mutations removing admission or finalizing row-count guards, bounded typed-
+  unknown handoff, pre-release cancellation, exact-one witness detection,
+  provider/runner exit separation, exit timestamp checks, process-release exit
+  guards and the atomic provider two-row guard were killed by their causal
+  tests and removed. Real descendants, activation acknowledgement loss,
+  partial provider release, unavailable Store, completion/exit orderings and
+  provider-7/outer-0 all leave an exact process/authority census.
+- After unchanged integration with the API directory-identity repair, the full
+  serial Go suite passed (`factory-runner 0.139s`, `factoryctl 0.214s`, `api
+  1.610s`, `change 12.916s`, `changeworker 1.250s`, `daemon 3.541s`, `kernel
+  9.690s`, `processcontract 0.177s`, `runner 5.904s`, `sqlitecontract
+  10.390s`). The full serial race suite passed (`factory-runner 2.289s`,
+  `factoryctl 1.394s`, `api 2.876s`, `change 28.219s`, `changeworker 8.812s`,
+  `daemon 26.095s`, `kernel 257.457s`, `processcontract 6.468s`, `runner
+  40.801s`, `sqlitecontract 13.803s`). API and daemon then passed 20 package-
+  parallel iterations (`26.495s`, `68.656s`). Vet, format and diff checks were
+  clean.
+- Two setup-only attempts are not counted as evidence: a deliberately fresh
+  empty module cache could not reach the network sandbox, and an unprivileged
+  run was denied isolated Unix-socket binds before its assertions. Reusing the
+  established isolated module cache and permitting only the temporary socket
+  fixtures produced the green gates above. The failed socket attempt left six
+  exact private fixture roots; after confirming their ownership, contents and
+  absence of live processes, the orchestrator unlinked only those socket/token
+  artifacts and removed the now-empty roots.
+- This proves the normal integrated shell lifecycle but does **not** pass the
+  kernel go/no-go gate. A concrete recovery sweep and real subprocess daemon
+  crash matrix must still prove every pre/post-release, terminal-spool, Store-
+  observation, cleanup and terminal-commit cut without replay, invented
+  release or recovered numeric signal authority.
