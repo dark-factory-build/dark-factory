@@ -192,14 +192,20 @@ func TestPTYResizeRejectsNonPTYAndClosedMaster(t *testing.T) {
 	if _, err := ptyChild.Activate(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ptyChild.Terminate(2 * time.Second); err != nil {
+	if err := ptyChild.ptyMaster.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := ptyChild.closePTY(); err != nil {
-		t.Fatal(err)
+	if ptyChild.state != stateActivated || ptyChild.exitObserved {
+		t.Fatalf("closed-master fixture stopped before resize: state=%v exitObserved=%v", ptyChild.state, ptyChild.exitObserved)
 	}
-	if err := ptyChild.ResizePTY(80, 24); !errors.Is(err, ErrState) {
-		t.Fatalf("closed-master resize error=%v, want ErrState", err)
+	if err := ptyChild.ResizePTY(80, 24); !errors.Is(err, unix.EBADF) {
+		t.Fatalf("active closed-master resize error=%v, want EBADF", err)
+	}
+	// The owner no longer has a usable master, but still owns the live child;
+	// discard the closed descriptor before ordinary lifecycle cleanup.
+	ptyChild.ptyMaster = nil
+	if _, err := ptyChild.FinishAfterExit(2 * time.Second); err != nil {
+		t.Fatal(err)
 	}
 }
 
