@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -29,7 +30,7 @@ type dispatchFixture struct {
 
 func newDispatchFixture(t *testing.T) *dispatchFixture {
 	t.Helper()
-	directory, err := os.MkdirTemp(".", "dark-factory-dispatch-")
+	directory, err := os.MkdirTemp("/private/tmp", "dark-factory-dispatch-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,6 +110,22 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 	ctx := context.Background()
 
 	done := fixture.serve(t)
+	initialSnapshot, err := client.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitDispatch(t, done)
+	if initialSnapshot.Head != 0 || initialSnapshot.Projects == nil || initialSnapshot.Agents == nil || initialSnapshot.Tasks == nil || len(initialSnapshot.Projects) != 0 || len(initialSnapshot.Agents) != 0 || len(initialSnapshot.Tasks) != 0 {
+		t.Fatalf("fresh snapshot = %+v", initialSnapshot)
+	}
+	done = fixture.serve(t)
+	noOp, err := client.SetDispatch(ctx, 1, false)
+	if err != nil || noOp.Head != 0 || noOp.Revision != 1 {
+		t.Fatalf("head-zero no-op mutation = %+v, %v", noOp, err)
+	}
+	waitDispatch(t, done)
+
+	done = fixture.serve(t)
 	health, err := client.Health(ctx)
 	if err != nil || !health.Ready {
 		t.Fatalf("health = %+v, %v", health, err)
@@ -181,58 +198,81 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 
 func TestDaemonDispatchesAttemptOutcomeAndWakesAfterCommit(t *testing.T) {
 	fixture := newDispatchFixture(t)
+	active := prepareActiveAttempt(t, fixture, 11)
+	ctx := context.Background()
+	done := fixture.serve(t)
+	result, err := active.client.Succeed(ctx, "private result sentinel")
+	if err != nil || result.Revision != uint64(active.run.Revision.Int64()+1) || result.Head != 9 {
+		t.Fatalf("attempt succeed = %+v, %v", result, err)
+	}
+	waitDispatch(t, done)
+	select {
+	case <-active.wake:
+	case <-time.After(time.Second):
+		t.Fatal("durable outcome did not notify registered supervisor")
+	}
+	finalizing, found, err := fixture.store.Run(ctx, active.run.ID)
+	if err != nil || !found || finalizing.Phase != kernel.RunFinalizing || finalizing.Proposal == nil || finalizing.Proposal.Kind() != kernel.OutcomeSucceeded || finalizing.Proposal.Result() != "private result sentinel" {
+		t.Fatalf("durable outcome = %+v, found=%v, err=%v", finalizing, found, err)
+	}
+	fixture.daemon.unregisterRunWake(active.run.ID)
+
+	done = fixture.serve(t)
+	if _, err := active.client.Fail(ctx, "late"); err == nil {
+		t.Fatal("revoked attempt credential remained usable")
+	}
+	waitDispatch(t, done)
+}
+
+type activeAttempt struct {
+	client *api.AttemptClient
+	run    kernel.Run
+	wake   <-chan struct{}
+}
+
+func prepareActiveAttempt(t *testing.T, fixture *dispatchFixture, seed byte) activeAttempt {
+	t.Helper()
+	ctx := context.Background()
+	projectID, agentID, taskID, incarnationID := testID(seed), testID(seed+1), testID(seed+2), testID(seed+3)
 	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := context.Background()
-	projectID := testID(11)
-	agentID := testID(12)
-	taskID := testID(13)
-	incarnationID := testID(14)
-	for _, invoke := range []func() error{
-		func() error {
-			done := fixture.serve(t)
-			_, err := operator.CreateProject(ctx, api.CreateProjectInput{ID: projectID, Name: "project", Root: filepath.Join(t.TempDir(), "root")})
-			waitDispatch(t, done)
-			return err
-		},
-		func() error {
-			done := fixture.serve(t)
-			_, err := operator.CreateShellAgent(ctx, api.CreateShellAgentInput{ID: agentID, ProjectID: projectID, Name: "agent", Role: "orchestrator", ToolBudgetLimit: 10})
-			waitDispatch(t, done)
-			return err
-		},
-		func() error {
-			done := fixture.serve(t)
-			_, err := operator.EnqueueTask(ctx, api.EnqueueTaskInput{ID: taskID, ProjectID: projectID, AssignedAgentID: agentID, IncarnationID: incarnationID, Title: "task", Body: "private", Priority: 1})
-			waitDispatch(t, done)
-			return err
-		},
-		func() error {
-			done := fixture.serve(t)
-			_, err := operator.SetDispatch(ctx, 1, true)
-			waitDispatch(t, done)
-			return err
-		},
-	} {
+	call := func(invoke func() error) {
+		done := fixture.serve(t)
 		if err := invoke(); err != nil {
 			t.Fatal(err)
 		}
+		waitDispatch(t, done)
 	}
-
-	bearer := bytes.Repeat([]byte{'a'}, 32)
+	call(func() error {
+		_, err := operator.CreateProject(ctx, api.CreateProjectInput{ID: projectID, Name: "project", Root: filepath.Join(filepath.Dir(fixture.socket), "source-root")})
+		return err
+	})
+	call(func() error {
+		_, err := operator.CreateShellAgent(ctx, api.CreateShellAgentInput{ID: agentID, ProjectID: projectID, Name: "agent", Role: "orchestrator", ToolBudgetLimit: 10})
+		return err
+	})
+	call(func() error {
+		_, err := operator.EnqueueTask(ctx, api.EnqueueTaskInput{ID: taskID, ProjectID: projectID, AssignedAgentID: agentID, IncarnationID: incarnationID, Title: "task", Body: "private", Priority: 1})
+		return err
+	})
+	call(func() error {
+		_, err := operator.SetDispatch(ctx, 1, true)
+		return err
+	})
+	bearer := bytes.Repeat([]byte{seed}, 32)
 	digestBytes := sha256.Sum256(bearer)
 	digest, err := kernel.AttemptDigestFromBytes(digestBytes[:])
 	if err != nil {
 		t.Fatal(err)
 	}
-	runID := mustRunID(t, testID(15))
 	keys := kernel.AdmissionKeys{
-		RunID: runID, AttemptDigest: digest, RuntimeRoot: filepath.Join(t.TempDir(), "runtime"),
+		RunID: mustRunID(t, testID(seed+4)), AttemptDigest: digest,
+		RuntimeRoot: filepath.Join(filepath.Dir(fixture.socket), "runtime"),
 		Resources: kernel.AdmissionResourceIDs{
-			RuntimeRoot: mustResourceID(t, testID(16)), RunnerProcess: mustResourceID(t, testID(17)),
-			ProviderProcess: mustResourceID(t, testID(18)), ProviderGroup: mustResourceID(t, testID(19)),
+			RuntimeRoot: mustResourceID(t, testID(seed+5)), RunnerProcess: mustResourceID(t, testID(seed+6)),
+			ProviderProcess: mustResourceID(t, testID(seed+7)), ProviderGroup: mustResourceID(t, testID(seed+8)),
 		},
 	}
 	at := mustKernelTime(t, 1000)
@@ -241,34 +281,27 @@ func TestDaemonDispatchesAttemptOutcomeAndWakesAfterCommit(t *testing.T) {
 		t.Fatalf("admission = %+v, %v", admission, err)
 	}
 	run := admission.Run
-	pathIdentity, err := kernel.NewPathResourceIdentity(1, 2)
+	pathIdentity, err := kernel.NewPathResourceIdentity(1, int64(seed)+100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	activate := func(id kernel.ResourceID, identity kernel.ResourceIdentity) error {
+	activate := func(id kernel.ResourceID, identity kernel.ResourceIdentity) {
 		resource, found, readErr := fixture.store.Resource(ctx, id)
 		if readErr != nil || !found {
-			return errors.Join(readErr, errors.New("resource not found"))
+			t.Fatalf("resource %s = %+v, found=%v, err=%v", id, resource, found, readErr)
 		}
-		_, activateErr := fixture.store.ActivateResource(ctx, run.ID, id, resource.Revision, identity, at)
-		return activateErr
+		if _, err := fixture.store.ActivateResource(ctx, run.ID, id, resource.Revision, identity, at); err != nil {
+			t.Fatal(err)
+		}
 	}
-	birthOne, _ := kernel.BirthDigestFromBytes(bytes.Repeat([]byte{1}, 32))
-	birthTwo, _ := kernel.BirthDigestFromBytes(bytes.Repeat([]byte{2}, 32))
-	processOne, _ := kernel.NewProcessResourceIdentity(10, 11, birthOne)
-	processTwo, _ := kernel.NewProcessResourceIdentity(12, 13, birthTwo)
-	if err := activate(keys.Resources.RuntimeRoot, pathIdentity); err != nil {
-		t.Fatal(err)
-	}
-	if err := activate(keys.Resources.RunnerProcess, processOne); err != nil {
-		t.Fatal(err)
-	}
-	if err := activate(keys.Resources.ProviderProcess, processTwo); err != nil {
-		t.Fatal(err)
-	}
-	if err := activate(keys.Resources.ProviderGroup, processTwo); err != nil {
-		t.Fatal(err)
-	}
+	birthOne, _ := kernel.BirthDigestFromBytes(bytes.Repeat([]byte{seed + 1}, 32))
+	birthTwo, _ := kernel.BirthDigestFromBytes(bytes.Repeat([]byte{seed + 2}, 32))
+	processOne, _ := kernel.NewProcessResourceIdentity(int64(seed)+10, int64(seed)+11, birthOne)
+	processTwo, _ := kernel.NewProcessResourceIdentity(int64(seed)+12, int64(seed)+13, birthTwo)
+	activate(keys.Resources.RuntimeRoot, pathIdentity)
+	activate(keys.Resources.RunnerProcess, processOne)
+	activate(keys.Resources.ProviderProcess, processTwo)
+	activate(keys.Resources.ProviderGroup, processTwo)
 	active, err := fixture.store.ActivateRun(ctx, run.ID, run.Revision, at)
 	if err != nil {
 		t.Fatal(err)
@@ -277,8 +310,7 @@ func TestDaemonDispatchesAttemptOutcomeAndWakesAfterCommit(t *testing.T) {
 	if !ok || wake == nil {
 		t.Fatal("run wake registration failed")
 	}
-
-	attemptToken := filepath.Join(t.TempDir(), "attempt.token")
+	attemptToken := filepath.Join(filepath.Dir(fixture.socket), "attempt.token")
 	if err := os.WriteFile(attemptToken, bearer, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -287,32 +319,130 @@ func TestDaemonDispatchesAttemptOutcomeAndWakesAfterCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", previous) })
-	attempt, err := api.NewAttemptClientFromEnvironment(fixture.socket)
+	client, err := api.NewAttemptClientFromEnvironment(fixture.socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return activeAttempt{client: client, run: active, wake: wake}
+}
+
+func TestDaemonDispatchesBlockAndFailCalls(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		call func(context.Context, *api.AttemptClient) (api.MutationResult, error)
+		kind kernel.OutcomeKind
+	}{
+		{name: "block", call: func(ctx context.Context, client *api.AttemptClient) (api.MutationResult, error) {
+			return client.Block(ctx, "needs operator")
+		}, kind: kernel.OutcomeBlocked},
+		{name: "fail empty detail", call: func(ctx context.Context, client *api.AttemptClient) (api.MutationResult, error) {
+			return client.Fail(ctx, "")
+		}, kind: kernel.OutcomeFailed},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newDispatchFixture(t)
+			active := prepareActiveAttempt(t, fixture, byte(21+len(test.name)))
+			done := fixture.serve(t)
+			result, err := test.call(context.Background(), active.client)
+			if err != nil || result.Revision != uint64(active.run.Revision.Int64()+1) || result.Head != 9 {
+				t.Fatalf("outcome = %+v, %v", result, err)
+			}
+			waitDispatch(t, done)
+			select {
+			case <-active.wake:
+			case <-time.After(time.Second):
+				t.Fatal("outcome did not wake supervisor")
+			}
+			observed, found, err := fixture.store.Run(context.Background(), active.run.ID)
+			if err != nil || !found || observed.Phase != kernel.RunFinalizing || observed.Proposal == nil || observed.Proposal.Kind() != test.kind {
+				t.Fatalf("durable proposal = %+v, found=%v, err=%v", observed, found, err)
+			}
+		})
+	}
+}
+
+func TestDaemonDoesNotWakeRejectedAttemptOutcome(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttempt(t, fixture, 61)
+	wrongBearer := bytes.Repeat([]byte{'z'}, 32)
+	wrongToken := filepath.Join(filepath.Dir(fixture.socket), "wrong.token")
+	if err := os.WriteFile(wrongToken, wrongBearer, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := os.Getenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE")
+	if err := os.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", wrongToken); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", previous) })
+	wrong, err := api.NewAttemptClientFromEnvironment(fixture.socket)
 	if err != nil {
 		t.Fatal(err)
 	}
 	done := fixture.serve(t)
-	result, err := attempt.Succeed(ctx, "private result sentinel")
-	if err != nil || result.Revision != uint64(active.Revision.Int64()+1) || result.Head != 5 {
-		t.Fatalf("attempt succeed = %+v, %v", result, err)
+	if _, err := wrong.Succeed(context.Background(), "forged"); err == nil {
+		t.Fatal("forged attempt outcome succeeded")
 	}
 	waitDispatch(t, done)
 	select {
-	case <-wake:
-	case <-time.After(time.Second):
-		t.Fatal("durable outcome did not notify registered supervisor")
+	case <-active.wake:
+		t.Fatal("rejected outcome emitted a supervisor wake")
+	default:
 	}
-	finalizing, found, err := fixture.store.Run(ctx, active.ID)
-	if err != nil || !found || finalizing.Phase != kernel.RunFinalizing || finalizing.Proposal == nil || finalizing.Proposal.Kind() != kernel.OutcomeSucceeded || finalizing.Proposal.Result() != "private result sentinel" {
-		t.Fatalf("durable outcome = %+v, found=%v, err=%v", finalizing, found, err)
-	}
-	fixture.daemon.unregisterRunWake(active.ID)
+}
 
-	done = fixture.serve(t)
-	if _, err := attempt.Fail(ctx, "late"); err == nil {
-		t.Fatal("revoked attempt credential remained usable")
+func TestDaemonConcurrentAttemptOutcomesHaveOneDurableWinner(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttempt(t, fixture, 71)
+	type outcomeResult struct {
+		result api.MutationResult
+		err    error
 	}
-	waitDispatch(t, done)
+	firstDone := fixture.serve(t)
+	secondDone := fixture.serve(t)
+	results := make(chan outcomeResult, 2)
+	var group sync.WaitGroup
+	group.Add(2)
+	go func() {
+		defer group.Done()
+		result, err := active.client.Succeed(context.Background(), "winner")
+		results <- outcomeResult{result: result, err: err}
+	}()
+	go func() {
+		defer group.Done()
+		result, err := active.client.Block(context.Background(), "loser")
+		results <- outcomeResult{result: result, err: err}
+	}()
+	group.Wait()
+	waitDispatch(t, firstDone)
+	waitDispatch(t, secondDone)
+	var accepted, rejected int
+	for range 2 {
+		outcome := <-results
+		if outcome.err == nil {
+			accepted++
+			if outcome.result.Revision == 0 {
+				t.Fatal("accepted outcome omitted revision")
+			}
+			continue
+		}
+		rejected++
+		var remote *api.RemoteError
+		if !errors.As(outcome.err, &remote) || remote.Code() != api.RemoteUnauthorized {
+			t.Fatalf("losing outcome error = %v", outcome.err)
+		}
+	}
+	if accepted != 1 || rejected != 1 {
+		t.Fatalf("outcome counts accepted=%d rejected=%d", accepted, rejected)
+	}
+	select {
+	case <-active.wake:
+	case <-time.After(time.Second):
+		t.Fatal("winning outcome did not wake supervisor")
+	}
+	observed, found, err := fixture.store.Run(context.Background(), active.run.ID)
+	if err != nil || !found || observed.Phase != kernel.RunFinalizing || observed.Proposal == nil {
+		t.Fatalf("concurrent durable result = %+v, found=%v, err=%v", observed, found, err)
+	}
 }
 
 func TestWakeHintsAreCapacityOneAndUnregisterIsHarmless(t *testing.T) {

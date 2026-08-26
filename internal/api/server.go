@@ -125,9 +125,15 @@ func NewSnapshotReply(snapshot DashboardSnapshot) (Reply, error) {
 	if !validSnapshot(snapshot) {
 		return Reply{}, ErrInvalidInput
 	}
-	snapshot.Projects = append([]ProjectSummary(nil), snapshot.Projects...)
-	snapshot.Agents = append([]AgentSummary(nil), snapshot.Agents...)
-	snapshot.Tasks = append([]TaskSummary(nil), snapshot.Tasks...)
+	projects := make([]ProjectSummary, len(snapshot.Projects))
+	copy(projects, snapshot.Projects)
+	snapshot.Projects = projects
+	agents := make([]AgentSummary, len(snapshot.Agents))
+	copy(agents, snapshot.Agents)
+	snapshot.Agents = agents
+	tasks := make([]TaskSummary, len(snapshot.Tasks))
+	copy(tasks, snapshot.Tasks)
+	snapshot.Tasks = tasks
 	return Reply{kind: replySnapshot, snapshot: snapshot}, nil
 }
 
