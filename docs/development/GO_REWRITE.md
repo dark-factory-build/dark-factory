@@ -1929,3 +1929,43 @@ Runtime ownership and cleanup proof on integrated head `a35a435`:
   threat model does not claim OS isolation. Final Change tree/CWD reinspection
   remains assigned to the registered Change worker and is not implied by this
   proof.
+
+Final Change-directory authority and runner cwd proof on integrated head
+`68ef763`:
+
+- `Published.Reinspect` now invokes the one central Change scanner after the
+  caller's chosen lifecycle cut and returns an opaque `VerifiedPublished`
+  retaining that exact scanner-owned root descriptor and immutable tree facts.
+  It exposes only checked facts, exact `F_DUPFD_CLOEXEC` duplication and
+  explicit close. Copies share close state; independently duplicated descriptors
+  own their own lifetime. No path, provider, runner, callback or second walker
+  entered the Change package.
+- Same-size content mutation, late nested `.git`/case variants, commitment/
+  count/bytes/base/format/identity corruption, in-scan root replacement,
+  cancellation and closed/corrupt capability attacks fail. Replacement of the
+  published pathname after a successful scan cannot retarget duplication; the
+  retained original inode remains authority. Exact Change head `9a9e068`
+  received independent **ALLOW** with no findings.
+- `WorkerControl.ExecProvider` now consumes one exact caller-owned cwd
+  descriptor on every outcome. Runner validates strict directory metadata and
+  equality to its prepared cwd commitment, rechecks immediately before
+  `fchdir`, closes the descriptor plus FD 3/control and FD 9/runtime-directory,
+  retains only the read-only FD 10 lifetime lease, and execs. It imports no
+  Change policy and never reopens or stats the cwd pathname at final exec.
+- Parent/name replacement after descriptor acquisition executes in the
+  retained original inode. Unrelated directory, ordinary file, closed/reused
+  descriptor, mode/final-seam mutation and error/unsupported ownership paths
+  reject without provider effect or descriptor leak. Same PID/PGID/birth,
+  one-input/EOF, sole-Wait, executable replacement, outer-runner-death lifetime
+  and provider FD census proofs remain green. Exact runner head `76e4fe9`
+  received independent **ALLOW** with no findings.
+- Mutations disabling reconstructed facts equality, reopening Change by path,
+  reopening cwd by path and omitting descriptor/commit equality were killed by
+  the intended causal tests and removed. After unchanged integration the
+  orchestrator passed the combined Change/runner/command focused gate, full
+  nine-package Go suite and combined race gate (`change 28.174s`, `runner`
+  40.678s, command 1.706s).
+- Composition still must call `Reinspect` only after the provider release is
+  authorized and immediately pass its duplicate to `ExecProvider`. The
+  capability proves scan-time content, not hostile same-EUID immutability; no
+  cooperative product mutator may exist in the scan-to-exec interval.
