@@ -1981,3 +1981,34 @@ Final Change-directory authority and runner cwd proof on integrated head
   authorized and immediately pass its duplicate to `ExecProvider`. The
   capability proves scan-time content, not hostile same-EUID immutability; no
   cooperative product mutator may exist in the scan-to-exec interval.
+
+Bounded API dispatcher proof on integrated head `157af0c`:
+
+- One concrete synchronous daemon switch maps exactly nine typed calls to the
+  Store. Attempt calls use only the transport-derived digest and call atomic
+  `ProposeAttemptOutcome` directly; fixed creation defaults and sanitized error
+  codes prevent caller-selected provider/verification/failure authority.
+- The public projection contains only bounded factory/project/agent/task
+  summaries. Roots, bodies, results, tokens, provider/source/path/Change and
+  private detail are not representable. Empty collections now clone
+  independently and serialize as `[]`, including head-zero fresh state.
+- Capacity-one run wakes occur only after durable proposal, are nonblocking,
+  never closed during unregister and remain hints requiring Store reread.
+  Credential/domain, concurrent-first-outcome, revision, privacy, framing,
+  cancellation, wake-race and empty-array attacks held over a real isolated
+  Unix listener. Exact head `cbb6f6b` received independent **ALLOW** with no
+  findings; focused/race/CGO-free/vet/cross-build gates passed.
+
+Registered Change-worker candidate review at unintegrated head `4d00168`:
+
+- The codec was moved from daemon into one concrete `internal/changeworker` and
+  the real four-release Git/materialization/final-scan/shell sequence passed.
+  Git descendants correctly block population, late `.git`/same-size content
+  and HOME replacement block provider exec, and same-PID/process/FD/privacy
+  tests held. Independent review nevertheless returned **BLOCK**.
+- Initial HOME/TMP/token identity-capture errors were discarded, permitting Git
+  selection before the first complete authority verification. Fixed child and
+  config validation also omitted exact device equality with the fd9 runtime
+  root. Every capture error must close before any effect, and initial/final
+  checks must bind every fixed child to the root device. The candidate remains
+  unintegrated pending causal repair and exact-head re-review.
