@@ -1,15 +1,18 @@
 package browserprotocol
 
 import (
+	"bytes"
 	"crypto/elliptic"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"math/big"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -33,9 +36,11 @@ type fixtureAuth struct {
 	BootID          string `json:"boot_id"`
 	ConnectionNonce string `json:"connection_nonce"`
 	ClientID        string `json:"client_id"`
+	PublicKeySEC1   string `json:"public_key_sec1"`
 	Host            string `json:"host"`
 	Origin          string `json:"origin"`
 	Transcript      string `json:"transcript"`
+	Signature       string `json:"signature"`
 }
 
 func readFixture(t *testing.T) fixture {
@@ -48,9 +53,21 @@ func readFixture(t *testing.T) fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
 	var value fixture
-	if err := json.Unmarshal(data, &value); err != nil {
+	if err := decoder.Decode(&value); err != nil {
 		t.Fatal(err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		t.Fatalf("fixture has trailing JSON: %v", err)
+	}
+	lower := bytes.ToLower(data)
+	for _, forbidden := range []string{`"private"`, `"private_key"`, `"private_scalar"`, `"secret"`} {
+		if bytes.Contains(lower, []byte(forbidden)) {
+			t.Fatalf("fixture contains forbidden private field %q", forbidden)
+		}
 	}
 	return value
 }
@@ -59,6 +76,21 @@ func decodeFixtureHex(t *testing.T, value string) []byte {
 	decoded, err := hex.DecodeString(value)
 	if err != nil {
 		t.Fatal(err)
+	}
+	return decoded
+}
+
+func assertCanonicalHex(t *testing.T, name, value string, size int) []byte {
+	t.Helper()
+	if len(value)%2 != 0 || value != strings.ToLower(value) {
+		t.Fatalf("%s is not lowercase even-length hex", name)
+	}
+	decoded := decodeFixtureHex(t, value)
+	if len(decoded) != size {
+		t.Fatalf("%s is %d bytes, want %d", name, len(decoded), size)
+	}
+	if encoded := hex.EncodeToString(decoded); encoded != value {
+		t.Fatalf("%s is not canonical hex", name)
 	}
 	return decoded
 }
@@ -84,12 +116,63 @@ func TestTranscriptFixturesRoundTripAndVerify(t *testing.T) {
 	if err := VerifySignature(pair.PublicKeySEC1, decodeFixtureHex(t, value.Pair.Signature), gotPair); err != nil {
 		t.Fatalf("valid pair signature rejected: %v", err)
 	}
-	auth, err := BuildAuthTranscript(authFromFixture(t, value.Auth))
+	authInput := authFromFixture(t, value.Auth)
+	auth, err := BuildAuthTranscript(authInput)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(auth) != string(decodeFixtureHex(t, value.Auth.Transcript)) {
 		t.Fatalf("auth transcript changed: got %x", auth)
+	}
+	if err := VerifySignature(assertCanonicalHex(t, "auth.public_key_sec1", value.Auth.PublicKeySEC1, PublicKeySize), assertCanonicalHex(t, "auth.signature", value.Auth.Signature, SignatureSize), auth); err != nil {
+		t.Fatalf("valid auth signature rejected: %v", err)
+	}
+}
+
+func TestFixtureHexIntegrity(t *testing.T) {
+	value := readFixture(t)
+	pair := pairFromFixture(t, value.Pair)
+	pairTranscript, err := BuildPairTranscript(pair)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCanonicalHex(t, "pair.daemon_id", value.Pair.DaemonID, DaemonIDSize)
+	assertCanonicalHex(t, "pair.boot_id", value.Pair.BootID, BootIDSize)
+	assertCanonicalHex(t, "pair.connection_nonce", value.Pair.ConnectionNonce, NonceSize)
+	assertCanonicalHex(t, "pair.challenge", value.Pair.Challenge, ChallengeSize)
+	assertCanonicalHex(t, "pair.public_key_sec1", value.Pair.PublicKeySEC1, PublicKeySize)
+	assertCanonicalHex(t, "pair.transcript", value.Pair.Transcript, len(pairTranscript))
+	assertCanonicalHex(t, "pair.signature", value.Pair.Signature, SignatureSize)
+
+	auth := authFromFixture(t, value.Auth)
+	authTranscript, err := BuildAuthTranscript(auth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCanonicalHex(t, "auth.daemon_id", value.Auth.DaemonID, DaemonIDSize)
+	assertCanonicalHex(t, "auth.boot_id", value.Auth.BootID, BootIDSize)
+	assertCanonicalHex(t, "auth.connection_nonce", value.Auth.ConnectionNonce, NonceSize)
+	assertCanonicalHex(t, "auth.client_id", value.Auth.ClientID, ClientIDSize)
+	assertCanonicalHex(t, "auth.public_key_sec1", value.Auth.PublicKeySEC1, PublicKeySize)
+	assertCanonicalHex(t, "auth.transcript", value.Auth.Transcript, len(authTranscript))
+	assertCanonicalHex(t, "auth.signature", value.Auth.Signature, SignatureSize)
+}
+
+func TestAuthTranscriptMutationCannotVerify(t *testing.T) {
+	value := readFixture(t)
+	input := authFromFixture(t, value.Auth)
+	transcript, err := BuildAuthTranscript(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := decodeFixtureHex(t, value.Auth.PublicKeySEC1)
+	signature := decodeFixtureHex(t, value.Auth.Signature)
+	for _, index := range []int{0, len(authDomain) - 1, len(authDomain), len(authDomain) + 1, len(transcript) - 1} {
+		mutated := append([]byte(nil), transcript...)
+		mutated[index] ^= 1
+		if err := VerifySignature(key, signature, mutated); err == nil {
+			t.Fatalf("AUTH mutation at transcript byte %d still verified", index)
+		}
 	}
 }
 
