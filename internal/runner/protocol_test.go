@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"syscall"
 	"testing"
 )
 
@@ -22,6 +23,18 @@ func (w *shortWriter) Write(p []byte) (int, error) {
 type noProgressWriter struct{}
 
 func (noProgressWriter) Write([]byte) (int, error) { return 0, nil }
+
+type errnoWriter struct {
+	partial int
+	err     error
+}
+
+func (w errnoWriter) Write(p []byte) (int, error) {
+	if w.partial > len(p) {
+		w.partial = len(p)
+	}
+	return w.partial, w.err
+}
 
 func TestWriteFrameCompletesShortHeaderAndBody(t *testing.T) {
 	var wire shortWriter
@@ -42,6 +55,15 @@ func TestWriteFrameCompletesShortHeaderAndBody(t *testing.T) {
 func TestWriteFrameRejectsZeroProgress(t *testing.T) {
 	if err := writeFrame(noProgressWriter{}, gateFrame{Kind: "ready"}, maxFrameBytes); !errors.Is(err, io.ErrNoProgress) {
 		t.Fatalf("zero-progress write = %v, want io.ErrNoProgress", err)
+	}
+}
+
+func TestWriteFullySurfacesWouldBlockBeforeAndAfterProgress(t *testing.T) {
+	if err := writeFully(errnoWriter{err: syscall.EAGAIN}, []byte("header")); !errors.Is(err, syscall.EAGAIN) {
+		t.Fatalf("would-block before progress = %v", err)
+	}
+	if err := writeFully(errnoWriter{partial: 1, err: syscall.EAGAIN}, []byte("body")); !errors.Is(err, syscall.EAGAIN) {
+		t.Fatalf("would-block after progress = %v", err)
 	}
 }
 
@@ -106,6 +128,7 @@ func TestTerminalWireValidationRejectsAmbiguousFrames(t *testing.T) {
 		{Kind: TerminalCredit, Correlation: 1, Credit: maxTerminalCredit + 1},
 		{Kind: TerminalInput, Correlation: 1, Generation: 1, Sequence: 1, Payload: bytes.Repeat([]byte{'x'}, maxTerminalFramePayload+1)},
 		{Kind: "terminal-unknown", Correlation: 1},
+		{Kind: TerminalResize, Correlation: 1, Generation: 1, Rows: 4097, Cols: 80},
 	}
 	for _, command := range badCommands {
 		if err := command.validate(); err == nil {
@@ -122,6 +145,25 @@ func TestTerminalWireValidationRejectsAmbiguousFrames(t *testing.T) {
 	for _, event := range badEvents {
 		if err := event.validate(); err == nil {
 			t.Fatalf("accepted invalid event %+v", event)
+		}
+	}
+}
+
+func TestTerminalResizeUsesPTYOwnerBounds(t *testing.T) {
+	valid := TerminalCommand{Kind: TerminalResize, Correlation: 1, Generation: 1, Rows: maxPTYDimension, Cols: maxPTYDimension}
+	if err := valid.validate(); err != nil {
+		t.Fatalf("owner-bound resize rejected: %v", err)
+	}
+	for _, version := range []int{0, commandVersion - 1, commandVersion + 1, 99} {
+		frame := terminalCommandFrame(TerminalCommand{Kind: TerminalCredit, Correlation: 1, Credit: 1})
+		frame.Version = version
+		if _, err := terminalCommandFromFrame(frame); !errors.Is(err, ErrIdentity) {
+			t.Fatalf("command version %d accepted: %v", version, err)
+		}
+		event := terminalEventFrame(TerminalFrame{Kind: TerminalPTYEOF, Generation: 1})
+		event.Version = version
+		if _, err := terminalEventFromFrame(event); !errors.Is(err, ErrIdentity) {
+			t.Fatalf("event version %d accepted: %v", version, err)
 		}
 	}
 }

@@ -69,6 +69,9 @@ func terminalCommandFrame(command TerminalCommand) attemptFrame {
 }
 
 func terminalCommandFromFrame(frame attemptFrame) (TerminalCommand, error) {
+	if frame.Version != commandVersion {
+		return TerminalCommand{}, ErrIdentity
+	}
 	command := TerminalCommand{
 		Kind: TerminalCommandKind(frame.Kind), Correlation: frame.Correlation,
 		Generation: frame.Generation, Sequence: frame.Sequence, Credit: frame.Credit,
@@ -81,6 +84,9 @@ func terminalCommandFromFrame(frame attemptFrame) (TerminalCommand, error) {
 }
 
 func terminalEventFromFrame(frame attemptFrame) (TerminalFrame, error) {
+	if frame.Version != commandVersion {
+		return TerminalFrame{}, ErrIdentity
+	}
 	event := TerminalFrame{
 		Kind: TerminalEventKind(frame.Kind), Correlation: frame.Correlation,
 		Generation: frame.Generation, Sequence: frame.Sequence,

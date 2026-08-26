@@ -30,6 +30,7 @@ const (
 	controllerProviderReleased
 	controllerTerminal
 	controllerAcknowledged
+	controllerPoisoned
 )
 
 // AttemptController is the daemon side of one fixed attempt-runner protocol.
@@ -40,6 +41,23 @@ type AttemptController struct {
 	attemptID string
 	inner     Identity
 	last      *TerminalRecord
+}
+
+// writeFrame is the controller's only authoritative write path. A failed
+// framed write may have left a peer with an indistinguishable prefix, so the
+// capability is poisoned immediately and can never append a retry to it.
+func (c *AttemptController) writeFrame(value any, limit int) error {
+	if c == nil || c.file == nil {
+		return ErrState
+	}
+	err := writeControlFrame(c.file, value, limit)
+	if err == nil {
+		return nil
+	}
+	closeErr := c.file.Close()
+	c.file = nil
+	c.state = controllerPoisoned
+	return errors.Join(err, closeErr)
 }
 
 func NewAttemptController() (*AttemptController, *os.File, error) {
@@ -88,7 +106,7 @@ func (c *AttemptController) Configure(spec AttemptSpec) error {
 		return fmt.Errorf("runner: wrapper launch contains unsupported capabilities")
 	}
 	cfg := attemptConfig{Version: 1, AttemptID: spec.AttemptID, Wrapper: spec.Wrapper.commit, MarkerName: spec.MarkerName, TerminalName: spec.TerminalName}
-	if err := writeControlFrame(c.file, cfg, maxConfigBytes); err != nil {
+	if err := c.writeFrame(cfg, maxConfigBytes); err != nil {
 		return err
 	}
 	c.state = controllerConfigured
@@ -229,7 +247,7 @@ func (c *AttemptController) Release(stage AttemptStage) error {
 	if c.state != want {
 		return ErrState
 	}
-	if err := writeControlFrame(c.file, attemptFrame{Version: 1, Kind: "release", Stage: stage}, maxFrameBytes); err != nil {
+	if err := c.writeFrame(attemptFrame{Version: 1, Kind: "release", Stage: stage}, maxFrameBytes); err != nil {
 		return err
 	}
 	c.state = next
@@ -247,14 +265,14 @@ func (c *AttemptController) SendTerminalCommand(command TerminalCommand) error {
 	if err := command.validate(); err != nil {
 		return err
 	}
-	return writeControlFrame(c.file, terminalCommandFrame(command), maxFrameBytes)
+	return c.writeFrame(terminalCommandFrame(command), maxFrameBytes)
 }
 
 func (c *AttemptController) Terminate() error {
 	if c == nil || c.file == nil || c.state < controllerInnerReady || c.state >= controllerTerminal {
 		return ErrState
 	}
-	return writeControlFrame(c.file, attemptFrame{Version: 1, Kind: "terminate"}, maxFrameBytes)
+	return c.writeFrame(attemptFrame{Version: 1, Kind: "terminate"}, maxFrameBytes)
 }
 
 func (c *AttemptController) AcknowledgeTerminal(want *TerminalRecord, storeCommitted bool) error {
@@ -264,7 +282,7 @@ func (c *AttemptController) AcknowledgeTerminal(want *TerminalRecord, storeCommi
 	if want.Digest != c.last.Digest || want.Identity != c.last.Identity || want.Terminal != c.last.Terminal {
 		return ErrIdentity
 	}
-	if err := writeControlFrame(c.file, attemptFrame{Version: 1, Kind: "terminal-ack", Terminal: &want.Terminal, FileIdentity: &want.Identity, Digest: want.Digest, StoreCommitted: true}, maxFrameBytes); err != nil {
+	if err := c.writeFrame(attemptFrame{Version: 1, Kind: "terminal-ack", Terminal: &want.Terminal, FileIdentity: &want.Identity, Digest: want.Digest, StoreCommitted: true}, maxFrameBytes); err != nil {
 		return err
 	}
 	c.state = controllerAcknowledged
@@ -278,7 +296,7 @@ func (c *AttemptController) acknowledgeCurrentExecCheck() error {
 	if c == nil || c.file == nil || c.state != controllerProviderReleased {
 		return ErrState
 	}
-	return writeControlFrame(c.file, attemptFrame{Version: 1, Kind: "current-exec-check-ack"}, maxFrameBytes)
+	return c.writeFrame(attemptFrame{Version: 1, Kind: "current-exec-check-ack"}, maxFrameBytes)
 }
 
 func (c *AttemptController) Close() error {

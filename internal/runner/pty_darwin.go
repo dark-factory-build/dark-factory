@@ -12,8 +12,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const maxPTYDimension = 4096
-
 // openPTY deliberately uses the Darwin kernel's /dev/ptmx interface instead
 // of adding a PTY library. Both descriptors are CLOEXEC; os/exec makes the
 // slave its 0/1/2 descriptors for the blocked gate, while the parent retains

@@ -4,10 +4,68 @@ package runner
 
 import (
 	"errors"
+	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
+
+func saturateControllerSendBuffer(t *testing.T, controller *AttemptController) {
+	t.Helper()
+	if err := unix.SetsockoptInt(int(controller.file.Fd()), unix.SOL_SOCKET, unix.SO_SNDBUF, 1024); err != nil {
+		t.Fatal(err)
+	}
+	filler := make([]byte, 4096)
+	for {
+		_, err := unix.Write(int(controller.file.Fd()), filler)
+		if errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK) {
+			return
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestAttemptControllerWriteFailurePoisonsCapability(t *testing.T) {
+	controller, peer, err := NewAttemptController()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peer.Close()
+	controller.state = controllerProviderReleased
+	saturateControllerSendBuffer(t, controller)
+	started := time.Now()
+	err = controller.SendTerminalCommand(TerminalCommand{Kind: TerminalCredit, Correlation: 1, Credit: 1})
+	if !errors.Is(err, syscall.EAGAIN) && !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("saturated write = %v, want EAGAIN or deadline", err)
+	}
+	if elapsed := time.Since(started); elapsed > attemptControlTimeout+time.Second {
+		t.Fatalf("EAGAIN write took %s; nonblocking failure must be bounded", elapsed)
+	}
+	if controller.file != nil || controller.state != controllerPoisoned {
+		t.Fatalf("failed writer remained usable: file=%v state=%d", controller.file, controller.state)
+	}
+	if err := controller.SendTerminalCommand(TerminalCommand{Kind: TerminalCredit, Correlation: 2, Credit: 1}); !errors.Is(err, ErrState) {
+		t.Fatalf("retry after poison = %v", err)
+	}
+	if err := controller.Terminate(); !errors.Is(err, ErrState) {
+		t.Fatalf("terminate after poison = %v", err)
+	}
+	var frame attemptFrame
+	if err := peer.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := readFrame(peer, &frame, maxFrameBytes); err == nil {
+		t.Fatal("poisoned controller appended a decodable frame")
+	}
+	if err := controller.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestAttemptControllerTerminalCommandsRequireProviderRelease(t *testing.T) {
 	controller, peer, err := NewAttemptController()

@@ -78,9 +78,9 @@ const (
 	// valid terminal frame below that existing private framing limit.
 	maxTerminalFramePayload = 8 << 10
 	maxTerminalCredit       = 1 << 20
-	maxTerminalRows         = 1000
-	maxTerminalCols         = 1000
+	maxTerminalDimension    = 4096
 	maxTerminalCorrelation  = ^uint64(0) >> 1
+	maxPTYDimension         = maxTerminalDimension
 )
 
 // TerminalCommand is the only supported daemon-to-runner terminal command.
@@ -118,7 +118,7 @@ type TerminalFrame struct {
 
 func (c TerminalCommand) validate() error {
 	if c.Correlation == 0 || c.Correlation > maxTerminalCorrelation {
-		return fmt.Errorf("runner: terminal command correlation is zero")
+		return fmt.Errorf("runner: terminal command correlation is invalid")
 	}
 	switch c.Kind {
 	case TerminalGenerationInstall, TerminalGenerationRevoke:
@@ -138,7 +138,7 @@ func (c TerminalCommand) validate() error {
 			return ErrState
 		}
 	case TerminalResize:
-		if c.Generation == 0 || c.Rows == 0 || c.Rows > maxTerminalRows || c.Cols == 0 || c.Cols > maxTerminalCols || c.Sequence != 0 || c.Credit != 0 || len(c.Payload) != 0 {
+		if c.Generation == 0 || c.Rows == 0 || c.Rows > maxTerminalDimension || c.Cols == 0 || c.Cols > maxTerminalDimension || c.Sequence != 0 || c.Credit != 0 || len(c.Payload) != 0 {
 			return ErrState
 		}
 	default:
@@ -158,7 +158,7 @@ func (f TerminalFrame) validate() error {
 			return ErrState
 		}
 	case TerminalResizeResult:
-		if f.Correlation == 0 || f.Correlation > maxTerminalCorrelation || f.Generation == 0 || !validTerminalResult(f.Status) || f.Sequence != 0 || f.Start != 0 || f.End != 0 || f.Floor != 0 || f.Head != 0 || f.Count != 0 || f.Rows == 0 || f.Rows > maxTerminalRows || f.Cols == 0 || f.Cols > maxTerminalCols || len(f.Payload) != 0 {
+		if f.Correlation == 0 || f.Correlation > maxTerminalCorrelation || f.Generation == 0 || !validTerminalResult(f.Status) || f.Sequence != 0 || f.Start != 0 || f.End != 0 || f.Floor != 0 || f.Head != 0 || f.Count != 0 || f.Rows == 0 || f.Rows > maxTerminalDimension || f.Cols == 0 || f.Cols > maxTerminalDimension || len(f.Payload) != 0 {
 			return ErrState
 		}
 	case TerminalOutput:
