@@ -1,0 +1,11 @@
+{
+  "name": "@dark-factory/client",
+  "version": "0.1.0",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": { "types": "./dist/src/index.d.ts", "import": "./dist/src/index.js" }
+  },
+  "files": ["dist/src"],
+  "scripts": { "typecheck": "tsc --noEmit", "build": "tsc -p ../../tsconfig.build.json" }
+}

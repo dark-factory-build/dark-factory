@@ -1,0 +1,14 @@
+{
+  "name": "dark-factory-web",
+  "private": true,
+  "packageManager": "pnpm@11.19.0",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "test": "pnpm build && node --test packages/client/test/*.test.mjs"
+  },
+  "devDependencies": {
+    "typescript": "5.8.3"
+  }
+}
