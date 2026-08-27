@@ -23,7 +23,6 @@ export type PairProveBody = {
 export type PairResultBody = { client_id: string; capabilities: CapabilityMask };
 export type AuthProveBody = {
   client_id: string;
-  public_key_sec1: string;
   signature: string;
 };
 export type AuthResultBody = { client_id: string; capabilities: CapabilityMask };
@@ -151,8 +150,8 @@ function validateBody(type: ControlType, body: Record<string, unknown>): HelloBo
     return body as unknown as PairProveBody;
   }
   if (type === "AUTH_PROVE") {
-    exactKeys(body, ["client_id", "public_key_sec1", "signature"]);
-    fixedHex(body.client_id, HEX_BYTES.client_id); fixedHex(body.public_key_sec1, HEX_BYTES.public_key_sec1, true); fixedHex(body.signature, HEX_BYTES.signature);
+    exactKeys(body, ["client_id", "signature"]);
+    fixedHex(body.client_id, HEX_BYTES.client_id); fixedHex(body.signature, HEX_BYTES.signature);
     return body as unknown as AuthProveBody;
   }
   if (type === "PAIR_RESULT" || type === "AUTH_RESULT") {

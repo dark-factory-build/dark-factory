@@ -51,6 +51,7 @@ test("control role, envelope, field and capability validation is closed", () => 
   ]) expectMalformed(() => decodeServerControl(mutation(fixture("auth_result.json"))));
   expectMalformed(() => decodeClientControl('{"v":1,"type":"ERROR","body":{"code":"secret","retryable":false}}'));
   expectMalformed(() => decodeClientControl('{"v":1,"type":"ERROR","body":{"code":"internal","retryable":false,"message":"private"}}'));
+  expectMalformed(() => decodeClientControl(fixture("auth_prove.json").replace('"signature"', '"public_key_sec1":"046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5","signature"')));
   for (const number of ["1.0", "1e0", "01", "+1", "9007199254740992", "-9007199254740992"]) {
     expectMalformed(() => decodeServerControl(`{"v":1,"type":"AUTH_RESULT","id":"auth-1","body":{"client_id":"606162636465666768696a6b6c6d6e6f","capabilities":${number}}}`));
   }

@@ -41,7 +41,7 @@ func TestControlFixturesRoundTrip(t *testing.T) {
 			return EncodePairResult("pair-1", PairResult{ClientID: "606162636465666768696a6b6c6d6e6f", Capabilities: 15})
 		}},
 		{"auth_prove", func() ([]byte, error) {
-			return EncodeAuthProve("auth-1", AuthProve{ClientID: "606162636465666768696a6b6c6d6e6f", PublicKeySEC1: "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5", Signature: "7cf27b188d034f7e8a52380304b51ac3c08969e277f21b35a60b48fc476699787e2963d01c3c5aa8d7cbb5fcf666c7a16e892b0e889805d2a547e76b4450ee80"})
+			return EncodeAuthProve("auth-1", AuthProve{ClientID: "606162636465666768696a6b6c6d6e6f", Signature: "7cf27b188d034f7e8a52380304b51ac3c08969e277f21b35a60b48fc476699787e2963d01c3c5aa8d7cbb5fcf666c7a16e892b0e889805d2a547e76b4450ee80"})
 		}},
 		{"auth_result", func() ([]byte, error) {
 			return EncodeAuthResult("auth-1", AuthResult{ClientID: "606162636465666768696a6b6c6d6e6f", Capabilities: 9})
@@ -160,6 +160,14 @@ func TestControlMalformed(t *testing.T) {
 	}
 	if _, err := DecodeServerControl(bytes.Repeat([]byte{' '}, MaxControlBytes+1)); !errors.Is(err, ErrOversized) {
 		t.Fatalf("oversize error = %v", err)
+	}
+}
+
+func TestAuthProveRejectsCallerSuppliedPublicKey(t *testing.T) {
+	valid := string(fixtureBytes(t, "auth_prove.json"))
+	withKey := strings.Replace(valid, `"signature"`, `"public_key_sec1":"046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5","signature"`, 1)
+	if _, err := DecodeClientControl([]byte(withKey)); err != ErrMalformed {
+		t.Fatalf("AUTH_PROVE accepted redundant public key: %v", err)
 	}
 }
 

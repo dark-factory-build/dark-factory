@@ -68,9 +68,8 @@ type PairResult struct {
 }
 
 type AuthProve struct {
-	ClientID      string `json:"client_id"`
-	PublicKeySEC1 string `json:"public_key_sec1"`
-	Signature     string `json:"signature"`
+	ClientID  string `json:"client_id"`
+	Signature string `json:"signature"`
 }
 
 type AuthResult struct {
@@ -445,11 +444,6 @@ func validatePairResult(value PairResult) error {
 func validateAuthProve(value AuthProve) error {
 	if _, err := fixedHex("client_id", value.ClientID, ClientIDSize); err != nil {
 		return err
-	}
-	if key, err := fixedHex("public_key_sec1", value.PublicKeySEC1, PublicKeySize); err != nil {
-		return err
-	} else if key[0] != 4 {
-		return fmt.Errorf("%w: public key encoding", ErrMalformed)
 	}
 	_, err := fixedHex("signature", value.Signature, SignatureSize)
 	return err
