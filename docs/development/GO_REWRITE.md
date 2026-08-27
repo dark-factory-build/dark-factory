@@ -43,12 +43,12 @@ branch/worktree and obeys that repository's `AGENTS.md`.
 
 | State | Exact work retained or stopped |
 |---|---|
-| Complete and retained | Fresh SQLite contract; typed kernel; atomic admission; exact attempt credentials; run/finalizing/resource state; bounded invalidations; Change ownership/materialization groundwork; owner-only Unix control API; typed `factoryctl` client; Darwin process identity; two blocked-exec gates; terminal-exit spool; gated Darwin PTY primitive; durable terminal-session admission, activation, recovery uncertainty and finalization guards; durable browser clients/challenges/revocation/input leases; exact PAIR/AUTH transcripts; strict browser-v1 handshake/binary codecs; strict runner terminal union, complete-write poisoning, incremental frame decoder and one fixed replay ring through `f1f72aa`; reviewed framework-neutral `@dark-factory/client` handshake/transcript/binary core and exact package gate through `d03491f`; independently reviewed question-only durable HumanRequest creation, private detail, reply reservation/acknowledgement/uncertainty, restart recovery, lifecycle convergence and bounded public projection through `40f5873`; the single-owner PTY execution loop, exact ready/input handoff, correlated retained replay, bounded filter retirement, poisoned writes, actual-EOF ordering and daemon-loss convergence through `ebcfd24`; exact two-field `AUTH_PROVE` through `4b18c38`; runner-owned exact HumanRequest PTY reply through `0f313a9`; daemon live-attempt registry, mailbox, bounded observers, finalization gate, active supervisor cancellation and joined shutdown through `d9709b9`; the closed attempt-only `request_human` API plus direct durable dispatch through `c29d154`; exact 8 KiB browser/Go/TypeScript terminal payload bound through `9ab44c3`; read-only exact lease authorization and one-shot failed-install/input-reservation revocation through `8853acb`; finalization/release linearization, natural-exit acknowledgement convergence, cancellation visibility and real descendant reaping through `ea1ee4b`; canonical Darwin runtime, Change and Change-worker fixtures through `699515d`; exact committed provider access to the attempt-only `request-human` command through `d4ce713`; independently reviewed fixed-page browser canonical state and private-detail separation through `1a562e4`; strict Go/TypeScript browser state/detail wire and causal reducer through `9b7689d` |
+| Complete and retained | Fresh SQLite contract; typed kernel; atomic admission; exact attempt credentials; run/finalizing/resource state; bounded invalidations; Change ownership/materialization groundwork; owner-only Unix control API; typed `factoryctl` client; Darwin process identity; two blocked-exec gates; terminal-exit spool; gated Darwin PTY primitive; durable terminal-session admission, activation, recovery uncertainty and finalization guards; durable browser clients/challenges/revocation/input leases; exact PAIR/AUTH transcripts; strict browser-v1 handshake/binary codecs; strict runner terminal union, complete-write poisoning, incremental frame decoder and one fixed replay ring through `f1f72aa`; reviewed framework-neutral `@dark-factory/client` handshake/transcript/binary core and exact package gate through `d03491f`; independently reviewed question-only durable HumanRequest creation, private detail, reply reservation/acknowledgement/uncertainty, restart recovery, lifecycle convergence and bounded public projection through `40f5873`; the single-owner PTY execution loop, exact ready/input handoff, correlated retained replay, bounded filter retirement, poisoned writes, actual-EOF ordering and daemon-loss convergence through `ebcfd24`; exact two-field `AUTH_PROVE` through `4b18c38`; runner-owned exact HumanRequest PTY reply through `0f313a9`; daemon live-attempt registry, mailbox, bounded observers, finalization gate, active supervisor cancellation and joined shutdown through `d9709b9`; the closed attempt-only `request_human` API plus direct durable dispatch through `c29d154`; exact 8 KiB browser/Go/TypeScript terminal payload bound through `9ab44c3`; read-only exact lease authorization and one-shot failed-install/input-reservation revocation through `8853acb`; finalization/release linearization, natural-exit acknowledgement convergence, cancellation visibility and real descendant reaping through `ea1ee4b`; canonical Darwin runtime, Change and Change-worker fixtures through `699515d`; exact committed provider access to the attempt-only `request-human` command through `d4ce713`; independently reviewed fixed-page browser canonical state and private-detail separation through `1a562e4`; strict Go/TypeScript browser state/detail wire and causal reducer through `9b7689d`; exact-run HumanRequest terminal projection, fail-closed loopback browser state transport, guarded framework-neutral TypeScript Session client, direct daemon Store adapter and daemon-owned durable browser revocation through `b61fca8` |
 | Reusable with adaptation | `internal/runner` live-child/process-group ownership; daemon supervisor choreography; bounded API framing/auth separation; dashboard projection/client reducer direction; rebased recovery branch `go-recovery-reserved-fix` at `185cd5f`; fail-closed runtime/spool/Change close branches at `f239815`, `347c977`, and `4183205` |
-| In progress but held | Daemon-side terminal lease/input/resize and reserved HumanRequest delivery now have reviewed Store, runner and owner-mailbox foundations but not the exact correlated effect choreography. The loopback WebSocket transport is the next isolated browser lane. Recovery still needs replay onto the PTY design. The development/Go sub-gates are integrated and green; final browser E2E and the post-test system census remain cutover blockers. |
+| In progress but held | Daemon-side terminal lease/input/resize and reserved HumanRequest delivery have reviewed Store, runner and owner-mailbox foundations but not the exact correlated effect choreography on the current canonical head. Browser terminal binary/effect routing is the next isolated lane. Recovery still needs replay onto the PTY design. The development/Go sub-gates are integrated and green; final browser E2E and the post-test system census remain cutover blockers. |
 | Obsolete | Startup-input-only/closed-stdin provider contract; separate stdin/stdout/stderr provider pipes as the product transport; TUI/Bubble Tea packages, lanes and parity tests; generic attention projection; message-on-next-run as the live-question answer |
-| Proved for revised architecture | Current Chrome on macOS can connect from the protected hosted HTTPS preview to exact `ws://127.0.0.1:43123` with the dedicated loopback permission; strict Origin/Host checks, binary traffic, reconnect, denial, no-daemon, port-collision and cross-site refusal are causal. A fresh Darwin PTY child remains inert until release, owns a controlling terminal/process group and is reaped without orphaning. SQLite owns exactly one terminal session per admitted run and refuses terminalization until its exact close is proved. The outer runner owns the live PTY loop without goroutines, transfers initial input exactly once, gates terminal commands on readiness, bounds and correlates replay before and after actual EOF, and writes one HumanRequest reply byte-for-byte without borrowing browser lease authority. The daemon registers one joined owner before release, rejects wrong sessions, routes bounded replay to multiple observers, actively cancels pre-live supervisors on shutdown and serializes infrastructure failure with terminal effects. |
-| Blocked until proved | Exact daemon delivery of lease generation/input/resize and a reserved HumanRequest reply; loopback transport authentication/Host/Origin security over the durable browser authority; TypeScript connection/reconnect client; public web UI; complete private host integration; revised crash-cut vertical slice |
+| Proved for revised architecture | Current Chrome on macOS can connect from the protected hosted HTTPS preview to exact `ws://127.0.0.1:43123` with the dedicated loopback permission; strict Origin/Host checks, binary traffic, reconnect, denial, no-daemon, port-collision and cross-site refusal are causal. A fresh Darwin PTY child remains inert until release, owns a controlling terminal/process group and is reaped without orphaning. SQLite owns exactly one terminal session per admitted run and refuses terminalization until its exact close is proved. The outer runner owns the live PTY loop without goroutines, transfers initial input exactly once, gates terminal commands on readiness, bounds and correlates replay before and after actual EOF, and writes one HumanRequest reply byte-for-byte without borrowing browser lease authority. The daemon registers one joined owner before release, rejects wrong sessions, routes bounded replay to multiple observers, actively cancels pre-live supervisors on shutdown and serializes infrastructure failure with terminal effects. The loopback server now enforces exact Host/Origin, pairing and per-operation durable client authority, serves bounded canonical state, joins subscriptions/connections, and couples exact-revision durable revocation to all-runtime socket close. The TypeScript Session client signs exact transcripts, publishes only complete fixed-head state, fences stale generations and ambiguous pairing, rate-bounds reconnect, and consumes the same pagination/empty-chronology contract. |
+| Blocked until proved | Exact daemon delivery of lease generation/input/resize and a reserved HumanRequest reply; binary terminal and typed HumanRequest browser transport; public web UI; complete private host integration; factoryctl web bootstrap/recovery; revised crash-cut vertical slice |
 
 Read-only redirection audits were assigned without overlapping writes:
 
@@ -3803,3 +3803,71 @@ Synchronous shell-supervisor proof on integrated head `4c2da24`:
   crash matrix must still prove every pre/post-release, terminal-spool, Store-
   observation, cleanup and terminal-commit cut without replay, invented
   release or recovered numeric signal authority.
+
+Loopback browser state transport and TypeScript Session proof on integrated
+head `b61fca8`:
+
+- `internal/browser` is one state-only loopback adapter with an exact IPv4
+  bind, path, Host including port and finite Origin allowlist. It disables
+  compression and wildcard CORS, bounds connections, frame bytes, request
+  lifetime, snapshot traversal and subscription queues, owns one reader per
+  connection, and synchronously joins connection and subscription cleanup.
+  HELLO, PAIR and AUTH are exact transcript operations. Only durable
+  `observe` and private-detail capabilities are advertised; terminal and
+  HumanRequest effects remain unimplemented rather than accepted by a stub.
+- The concrete daemon adapter maps the kernel's fixed-head public pages,
+  exact entity/tombstone reads, private HumanRequest detail and typed watch
+  restarts directly into that transport. It adds no service, repository,
+  cache or second event ring. Each browser operation reloads the exact durable
+  client under one bounded per-client gate. One owned polling goroutine exists
+  per subscription; cancellation, terminal restart and daemon shutdown expose
+  an observable join.
+- One daemon-owned `RevokeBrowserClient` operation shares that gate across all
+  browser runtimes. Exact-revision revocation, its private security event and
+  terminal-lease clearing commit before every matching socket is closed and
+  joined. Cleanup uncertainty is returned distinctly while the durable revoke
+  remains committed. Listener registration is fenced so a concurrent revoke
+  or daemon close cannot miss a newly accepted runtime.
+- Canonical chronology is explicit. A requested subscription cursor is
+  untrusted: only its first exact `gap` restart may return a lower canonical
+  Store head. Once server chronology is accepted, regression poisons and joins
+  the connection. The one valid empty chronology is exactly `head=0,floor=1`;
+  Go and TypeScript reject every other floor-above-head shape. Final
+  HumanRequest pages may contain exactly eight items with no continuation;
+  nine items split as eight plus a cursor and one final item.
+- `@dark-factory/client` now owns a dependency-free browser `Session` and
+  reconnecting `BrowserClient`. WebCrypto P-256 proofs, non-exportable key
+  persistence, pairing uncertainty, fixed-head snapshot correlation, state
+  subscription/entity refresh, stale-generation fencing, guarded consumer
+  callbacks and bounded exponential reconnect are framework neutral. Pairing
+  is never replayed while result persistence is uncertain. React, xterm.js,
+  CSS, routing and site assumptions remain absent.
+- Exact-head reviews repeatedly blocked green candidates. The integrated Go
+  review found the exact-eight protocol mismatch, regressed backend restarts
+  and direct HumanRequest lease-validation bypass. Cross-language re-review
+  then found the TypeScript decoder retained the obsolete page rule. Three
+  TypeScript review rounds found post-pair reconnect suppression, callback-
+  exception reader loss, zero-delay retry churn, stale timer ownership,
+  async-persistence resurrection, reentrant close before promise ownership,
+  duplicate one-shot PAIR proof and timer-handle aliasing. Adapter review found
+  durable revocation was not coupled to socket close/join and that an honest
+  future cursor could not be represented. All findings became causal tests;
+  final reviewers returned **ALLOW** on TypeScript head `a0b7fae`, shared Go
+  repair `06ad16a`, and adapter repair `dd4073b` before unchanged integration.
+- Mutations killed include cached post-revocation state authority, accepting a
+  regressed established restart, omitting the daemon client gate, restoring
+  the obsolete exact-eight predicate, removing direct lease validation,
+  dropping session generation/auth phase guards and allowing user callbacks to
+  escape cleanup. Mutation code was removed.
+- Author/reviewer gates passed browser/daemon/protocol/kernel count-three and
+  full race matrices, vet, format/diff, exact loopback Store/WebSocket tests,
+  clean connection/process censuses, TypeScript typecheck, packed clean-
+  consumer import and all 44 client tests. After integration the orchestrator
+  passed the four affected Go packages (`daemon 16.525s`, `browser 21.567s`,
+  `browserprotocol 0.793s`, `kernel 15.025s`), daemon/browser race (`51.419s`,
+  `24.750s`), vet, all 44 web tests, typecheck, formatting and diff checks.
+- This proof deliberately excludes PTY input/resize/lease effects,
+  HumanRequest reply/action frames, the operator web bootstrap API, the public
+  UI and private site host. Those operations must reuse the durable authority
+  and live-owner seams proven here; they may not widen this state-only browser
+  capability set implicitly.
