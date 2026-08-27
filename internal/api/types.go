@@ -139,3 +139,11 @@ type EnqueueTaskInput struct {
 	Body            string `json:"body"`
 	Priority        int64  `json:"priority"`
 }
+
+// HumanQuestionInput is the bounded provider-authored portion of a
+// HumanRequest. The daemon derives the run and all public projection fields
+// from the authenticated attempt; callers cannot supply those identities.
+type HumanQuestionInput struct {
+	IdempotencyKey string `json:"idempotency_key"`
+	Question       string `json:"question"`
+}

@@ -158,6 +158,13 @@ func (client *AttemptClient) Fail(ctx context.Context, detail string) (MutationR
 	return client.client.attemptDetail(ctx, "fail", detail)
 }
 
+func (client *AttemptClient) RequestHuman(ctx context.Context, input HumanQuestionInput) (MutationResult, error) {
+	if !validID(input.IdempotencyKey) || !validText(input.Question, 1, 8192) {
+		return MutationResult{}, ErrInvalidInput
+	}
+	return client.client.mutate(ctx, "request_human", input)
+}
+
 func (client client) attemptDetail(ctx context.Context, method, detail string) (MutationResult, error) {
 	return client.mutate(ctx, method, struct {
 		Detail string `json:"detail"`

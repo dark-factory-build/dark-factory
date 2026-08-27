@@ -180,7 +180,7 @@ func TestListenerCreatesExactOwnerSocketAndGuardsRemoval(t *testing.T) {
 	}
 }
 
-func TestServerDecodesClosedNineMethodMatrix(t *testing.T) {
+func TestServerDecodesClosedMethodMatrix(t *testing.T) {
 	operatorBearer := testCredential('O')
 	attemptBearer := testCredential('A')
 	tests := []struct {
@@ -240,6 +240,12 @@ func TestServerDecodesClosedNineMethodMatrix(t *testing.T) {
 			detail, ok := call.Detail()
 			if !ok || detail != "" {
 				t.Fatalf("failure detail = %q, %t", detail, ok)
+			}
+		}},
+		{name: "request human", domain: attemptDomain, bearer: attemptBearer, body: `{"method":"request_human","params":{"idempotency_key":"0123456789abcdef0123456789abcdef","question":"private-question-sentinel"}}`, kind: CallRequestHuman, check: func(t *testing.T, call Call) {
+			input, ok := call.HumanQuestionInput()
+			if !ok || input.IdempotencyKey != "0123456789abcdef0123456789abcdef" || input.Question != "private-question-sentinel" {
+				t.Fatalf("human question input = %+v, %t", input, ok)
 			}
 		}},
 	}
@@ -321,6 +327,15 @@ func TestServerRejectsDomainFallbackAndInvalidRequests(t *testing.T) {
 		{name: "attempt cannot supply failure code", generation: 1, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"fail","params":{"detail":"x","code":"internal"}}`), code: RemoteInvalidRequest},
 		{name: "empty block detail", generation: 1, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"block","params":{"detail":""}}`), code: RemoteInvalidRequest},
 		{name: "oversized failure detail", generation: 1, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"fail","params":{"detail":"` + strings.Repeat("x", 4097) + `"}}`), code: RemoteInvalidRequest},
+		{name: "request human operator domain", generation: 1, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"request_human","params":{"idempotency_key":"0123456789abcdef0123456789abcdef","question":"question"}}`), code: RemoteForbidden},
+		{name: "request human zero key", generation: 1, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"request_human","params":{"idempotency_key":"00000000000000000000000000000000","question":"question"}}`), code: RemoteInvalidRequest},
+		{name: "request human uppercase key", generation: 1, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"request_human","params":{"idempotency_key":"0123456789ABCDEF0123456789abcdef","question":"question"}}`), code: RemoteInvalidRequest},
+		{name: "request human nonhex key", generation: 1, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"request_human","params":{"idempotency_key":"0123456789abcdef0123456789abcdegf","question":"question"}}`), code: RemoteInvalidRequest},
+		{name: "request human empty question", generation: 1, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"request_human","params":{"idempotency_key":"0123456789abcdef0123456789abcdef","question":""}}`), code: RemoteInvalidRequest},
+		{name: "request human oversized question", generation: 1, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"request_human","params":{"idempotency_key":"0123456789abcdef0123456789abcdef","question":"` + strings.Repeat("x", 8193) + `"}}`), code: RemoteInvalidRequest},
+		{name: "request human duplicate question", generation: 1, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"request_human","params":{"idempotency_key":"0123456789abcdef0123456789abcdef","question":"one","question":"two"}}`), code: RemoteInvalidRequest},
+		{name: "request human unknown run", generation: 1, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"request_human","params":{"idempotency_key":"0123456789abcdef0123456789abcdef","question":"question","run_id":"` + id('1') + `"}}`), code: RemoteInvalidRequest},
+		{name: "request human unknown action", generation: 1, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"request_human","params":{"idempotency_key":"0123456789abcdef0123456789abcdef","question":"question","action":"publish"}}`), code: RemoteInvalidRequest},
 		{name: "invalid UTF-8", generation: 1, domain: operatorDomain, bearer: operatorBearer, body: []byte("{\"method\":\"health\",\"params\":{},\"x\":\"\xff\"}"), code: RemoteInvalidRequest},
 		{name: "lone high surrogate", generation: 1, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"create_project","params":{"id":"` + id('1') + `","name":"\ud800","root":"/private/project"}}`), code: RemoteInvalidRequest},
 		{name: "lone low surrogate", generation: 1, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"create_project","params":{"id":"` + id('1') + `","name":"\udc00","root":"/private/project"}}`), code: RemoteInvalidRequest},

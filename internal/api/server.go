@@ -30,6 +30,7 @@ const (
 	CallSucceed
 	CallBlock
 	CallFail
+	CallRequestHuman
 )
 
 // AttemptDigest is the SHA-256 digest of one raw attempt bearer. The bearer is
@@ -52,6 +53,7 @@ type Call struct {
 	project          CreateProjectInput
 	agent            CreateShellAgentInput
 	task             EnqueueTaskInput
+	humanQuestion    HumanQuestionInput
 	expectedRevision uint64
 	enabled          bool
 	text             string
@@ -65,7 +67,7 @@ func (call Call) GoString() string {
 
 func (call Call) AttemptDigest() (AttemptDigest, bool) {
 	switch call.kind {
-	case CallSucceed, CallBlock, CallFail:
+	case CallSucceed, CallBlock, CallFail, CallRequestHuman:
 		return call.digest, true
 	default:
 		return AttemptDigest{}, false
@@ -94,6 +96,10 @@ func (call Call) Result() (string, bool) {
 
 func (call Call) Detail() (string, bool) {
 	return call.text, call.kind == CallBlock || call.kind == CallFail
+}
+
+func (call Call) HumanQuestionInput() (HumanQuestionInput, bool) {
+	return call.humanQuestion, call.kind == CallRequestHuman
 }
 
 type replyKind uint8
@@ -471,6 +477,10 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 			return Call{}, RemoteInvalidRequest
 		}
 		call.text = detail
+	case CallRequestHuman:
+		if err := decodeExact(request.Params, &call.humanQuestion); err != nil || !validID(call.humanQuestion.IdempotencyKey) || !validText(call.humanQuestion.Question, 1, 8192) {
+			return Call{}, RemoteInvalidRequest
+		}
 	}
 	return call, ""
 }
@@ -510,6 +520,8 @@ func methodKind(method string) (CallKind, byte) {
 		return CallBlock, attemptDomain
 	case "fail":
 		return CallFail, attemptDomain
+	case "request_human":
+		return CallRequestHuman, attemptDomain
 	default:
 		return 0, 0
 	}
@@ -537,7 +549,7 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyHealth
 	case CallSnapshot:
 		return reply == replySnapshot
-	case CallCreateProject, CallCreateShellAgent, CallEnqueueTask, CallSetDispatch, CallSucceed, CallBlock, CallFail:
+	case CallCreateProject, CallCreateShellAgent, CallEnqueueTask, CallSetDispatch, CallSucceed, CallBlock, CallFail, CallRequestHuman:
 		return reply == replyMutation
 	default:
 		return false

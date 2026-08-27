@@ -296,6 +296,10 @@ func TestAttemptClientHasExactScopedOutcomesAndNoOperatorFallback(t *testing.T) 
 			_, err := client.Fail(context.Background(), strings.Repeat("x", 4096))
 			return err
 		}},
+		{name: "request human", request: `{"method":"request_human","params":{"idempotency_key":"0123456789abcdef0123456789abcdef","question":"private-question-sentinel"}}`, invoke: func(client *AttemptClient) error {
+			_, err := client.RequestHuman(context.Background(), HumanQuestionInput{IdempotencyKey: "0123456789abcdef0123456789abcdef", Question: "private-question-sentinel"})
+			return err
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -910,6 +914,20 @@ func TestInputBoundsFailBeforeConnection(t *testing.T) {
 	}
 	if _, err := attempt.Succeed(context.Background(), strings.Repeat("x", 131073)); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("oversized result = %v", err)
+	}
+	for name, input := range map[string]HumanQuestionInput{
+		"zero key":       {IdempotencyKey: strings.Repeat("0", 32), Question: "question"},
+		"uppercase key":  {IdempotencyKey: "0123456789ABCDEF0123456789abcdef", Question: "question"},
+		"short key":      {IdempotencyKey: "abc", Question: "question"},
+		"empty question": {IdempotencyKey: id('1'), Question: ""},
+		"large question": {IdempotencyKey: id('1'), Question: strings.Repeat("x", 8193)},
+		"invalid utf8":   {IdempotencyKey: id('1'), Question: string([]byte{0xff})},
+	} {
+		t.Run("request human "+name, func(t *testing.T) {
+			if _, err := attempt.RequestHuman(context.Background(), input); !errors.Is(err, ErrInvalidInput) {
+				t.Fatalf("invalid human question = %v", err)
+			}
+		})
 	}
 	if err := listener.SetDeadline(time.Now().Add(75 * time.Millisecond)); err != nil {
 		t.Fatal(err)
