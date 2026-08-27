@@ -35,14 +35,19 @@ func (daemon *Daemon) RevokeBrowserClient(ctx context.Context, id kernel.Browser
 // mutation separate from gate acquisition makes both causal gate orders
 // testable without adding a generic operation framework.
 func (daemon *Daemon) revokeBrowserClientHeld(ctx context.Context, id kernel.BrowserClientID, expected kernel.Revision) (kernel.BrowserClient, error) {
+	daemon.operationMu.Lock()
 	at, err := kernel.NewUnixMillis(daemon.now().UnixMilli())
 	if err != nil {
+		daemon.operationMu.Unlock()
 		return kernel.BrowserClient{}, err
 	}
 	client, err := daemon.store.RevokeBrowserClient(ctx, id, expected, at)
 	if err != nil {
+		daemon.operationMu.Unlock()
 		return kernel.BrowserClient{}, err
 	}
+	effectCleanupErr := daemon.revokeBrowserClientEffectsHeld(id)
+	daemon.operationMu.Unlock()
 
 	// Take the transport snapshot only after commit. A concurrently added
 	// transport shares this client gate, while one already removed has joined
@@ -53,7 +58,7 @@ func (daemon *Daemon) revokeBrowserClientHeld(ctx context.Context, id kernel.Bro
 		runtimes = append(runtimes, runtime)
 	}
 	daemon.browserMu.Unlock()
-	var cleanupErrors []error
+	cleanupErrors := []error{effectCleanupErr}
 	for _, runtime := range runtimes {
 		cleanupErrors = append(cleanupErrors, runtime.closeClient(id))
 	}

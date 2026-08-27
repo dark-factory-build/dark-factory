@@ -6,4 +6,6 @@ import (
 	"context"
 )
 
+const terminalEffectsSupported = false
+
 func startLiveAttempt(*liveAttempt, context.Context) {}

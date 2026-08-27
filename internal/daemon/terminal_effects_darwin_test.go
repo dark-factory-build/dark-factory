@@ -1,0 +1,800 @@
+//go:build darwin
+
+package daemon
+
+import (
+	"context"
+	"encoding/binary"
+	"encoding/json"
+	"errors"
+	"io"
+	"os"
+	"strings"
+	"testing"
+	"time"
+	"unsafe"
+
+	"github.com/dark-factory-build/dark-factory/internal/browser"
+	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/runner"
+)
+
+type terminalEffectWireFrame struct {
+	Version      int                  `json:"version"`
+	Kind         string               `json:"kind"`
+	Stage        runner.AttemptStage  `json:"stage,omitempty"`
+	Identity     runner.Identity      `json:"identity,omitempty"`
+	Correlation  uint64               `json:"correlation,omitempty"`
+	Generation   uint64               `json:"generation,omitempty"`
+	Sequence     uint64               `json:"sequence,omitempty"`
+	Count        uint32               `json:"count,omitempty"`
+	Rows         uint16               `json:"rows,omitempty"`
+	Cols         uint16               `json:"cols,omitempty"`
+	Status       string               `json:"status,omitempty"`
+	Payload      []byte               `json:"payload,omitempty"`
+	Terminal     *runner.Terminal     `json:"terminal,omitempty"`
+	FileIdentity *runner.FileIdentity `json:"file_identity,omitempty"`
+	Digest       string               `json:"digest,omitempty"`
+}
+
+type terminalEffectFixture struct {
+	adapter   *adapterFixture
+	run       kernel.Run
+	session   kernel.TerminalSession
+	attempt   *liveAttempt
+	peer      *os.File
+	identity  runner.Identity
+	principal browser.Principal
+}
+
+func newTerminalEffectFixture(t *testing.T) *terminalEffectFixture {
+	t.Helper()
+	adapter := newAdapterFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityTerminalInput|kernel.BrowserCapabilityHumanActions)
+	adapter.pair(t)
+	run := adapterRunningRun(t, adapter.store, 170)
+	session, found, err := adapter.store.TerminalSessionForRun(context.Background(), run.ID)
+	if err != nil || !found {
+		t.Fatalf("terminal session = %+v, found=%v, err=%v", session, found, err)
+	}
+	controller, peer := readyTerminalEffectController(t)
+	attempt := newLiveAttempt(adapter.daemon, run.ID, session.ID, controller)
+	attempt.releaseSent = true
+	attempt.readySeen = true
+	attempt.effectLimit = 100 * time.Millisecond
+	if err := adapter.daemon.registerLiveAttempt(attempt); err != nil {
+		t.Fatal(err)
+	}
+	startLiveAttempt(attempt, context.Background())
+	fixture := &terminalEffectFixture{
+		adapter: adapter, run: run, session: session, attempt: attempt, peer: peer,
+		identity:  runner.Identity{PID: 41001, PGID: 41001, Birth: runner.Birth{Seconds: 17, Microseconds: 9}},
+		principal: terminalEffectPrincipal(adapter.client.ID, 1),
+	}
+	t.Cleanup(func() {
+		_ = attempt.close()
+		_ = peer.Close()
+	})
+	return fixture
+}
+
+func readyTerminalEffectController(t *testing.T) (*runner.AttemptController, *os.File) {
+	t.Helper()
+	controller, peer, err := runner.NewAttemptController()
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapper, err := runner.PrepareExecSpec(runner.ExecSpec{Target: executable, Args: []string{"--unused"}, Env: []string{"PATH=/usr/bin:/bin"}, Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.Configure(runner.AttemptSpec{AttemptID: "daemon-terminal-effect", Wrapper: wrapper, MarkerName: runner.InnerActivationMarkerName, TerminalName: runner.TerminalSpoolName}); err != nil {
+		t.Fatal(err)
+	}
+	_ = readTerminalEffectWire(t, peer)
+	identity := runner.Identity{PID: 41001, PGID: 41001, Birth: runner.Birth{Seconds: 17, Microseconds: 9}}
+	writeTerminalEffectWire(t, peer, terminalEffectWireFrame{Version: 1, Kind: "inner-ready", Identity: identity})
+	if event, err := controller.Next(time.Second); err != nil || event.Kind != runner.AttemptInnerReady {
+		t.Fatalf("inner ready = %+v, %v", event, err)
+	}
+	for _, stage := range []runner.AttemptStage{runner.StageSelection, runner.StagePreparation, runner.StagePopulation} {
+		if err := controller.Release(stage); err != nil {
+			t.Fatal(err)
+		}
+		if frame := readTerminalEffectWire(t, peer); frame.Kind != "release" || frame.Stage != stage {
+			t.Fatalf("release frame = %+v", frame)
+		}
+		writeTerminalEffectWire(t, peer, terminalEffectWireFrame{Version: 1, Kind: "checkpoint", Stage: stage})
+		if event, err := controller.Next(time.Second); err != nil || event.Kind != runner.AttemptCheckpoint || event.Stage != stage {
+			t.Fatalf("checkpoint %s = %+v, %v", stage, event, err)
+		}
+	}
+	if err := controller.Release(runner.StageProvider); err != nil {
+		t.Fatal(err)
+	}
+	if frame := readTerminalEffectWire(t, peer); frame.Kind != "release" || frame.Stage != runner.StageProvider {
+		t.Fatalf("provider release = %+v", frame)
+	}
+	writeTerminalEffectWire(t, peer, terminalEffectWireFrame{Version: 1, Kind: string(runner.TerminalReady)})
+	if event, err := controller.Next(time.Second); err != nil || event.Kind != runner.AttemptTerminalFrame || event.Frame == nil || event.Frame.Kind != runner.TerminalReady {
+		t.Fatalf("terminal ready = %+v, %v", event, err)
+	}
+	return controller, peer
+}
+
+func terminalEffectPrincipal(client kernel.BrowserClientID, seed byte) browser.Principal {
+	var principal browser.Principal
+	copy(principal.ClientID[:], client.Bytes())
+	// ConnectionID deliberately has no public constructor. This package-level
+	// causal fixture needs two transport-minted identities without weakening
+	// that production boundary, so it initializes only the opaque test value.
+	if unsafe.Sizeof(principal.ConnectionID) != kernel.IDBytes {
+		panic("unexpected browser connection identity size")
+	}
+	raw := (*[kernel.IDBytes]byte)(unsafe.Pointer(&principal.ConnectionID))
+	for index := range raw {
+		raw[index] = seed
+	}
+	raw[kernel.IDBytes-1] ^= 0x5a
+	return principal
+}
+
+func readTerminalEffectWire(t *testing.T, peer *os.File) terminalEffectWireFrame {
+	t.Helper()
+	if err := peer.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	defer peer.SetReadDeadline(time.Time{})
+	var header [4]byte
+	if _, err := io.ReadFull(peer, header[:]); err != nil {
+		t.Fatal(err)
+	}
+	size := int(binary.BigEndian.Uint32(header[:]))
+	if size <= 0 || size > 256<<10 {
+		t.Fatalf("invalid terminal effect frame size %d", size)
+	}
+	body := make([]byte, size)
+	if _, err := io.ReadFull(peer, body); err != nil {
+		t.Fatal(err)
+	}
+	var frame terminalEffectWireFrame
+	if err := json.Unmarshal(body, &frame); err != nil {
+		t.Fatalf("decode terminal effect frame: %v", err)
+	}
+	return frame
+}
+
+func writeTerminalEffectWire(t *testing.T, peer *os.File, frame terminalEffectWireFrame) {
+	t.Helper()
+	body, err := json.Marshal(frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var header [4]byte
+	binary.BigEndian.PutUint32(header[:], uint32(len(body)))
+	if err := peer.SetWriteDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	defer peer.SetWriteDeadline(time.Time{})
+	if _, err := peer.Write(append(header[:], body...)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func replyTerminalEffect(t *testing.T, peer *os.File, command terminalEffectWireFrame, status runner.TerminalResultStatus, count uint32) {
+	t.Helper()
+	result := terminalEffectWireFrame{
+		Version: 1, Correlation: command.Correlation, Generation: command.Generation,
+		Sequence: command.Sequence, Rows: command.Rows, Cols: command.Cols,
+		Status: string(status), Count: count,
+	}
+	switch command.Kind {
+	case string(runner.TerminalGenerationInstall), string(runner.TerminalGenerationRevoke):
+		result.Kind = string(runner.TerminalGenerationResult)
+	case string(runner.TerminalInput):
+		result.Kind = string(runner.TerminalInputResult)
+	case string(runner.TerminalResize):
+		result.Kind = string(runner.TerminalResizeResult)
+	case string(runner.TerminalHumanReply):
+		result.Kind = string(runner.TerminalHumanReplyResult)
+		result.Generation, result.Sequence, result.Rows, result.Cols = 0, 0, 0, 0
+	default:
+		t.Fatalf("cannot reply to terminal command %+v", command)
+	}
+	writeTerminalEffectWire(t, peer, result)
+}
+
+func (fixture *terminalEffectFixture) acquire(t *testing.T, principal browser.Principal) kernel.TerminalLease {
+	t.Helper()
+	type response struct {
+		lease kernel.TerminalLease
+		err   error
+	}
+	done := make(chan response, 1)
+	go func() {
+		lease, err := fixture.adapter.daemon.terminalLeaseAcquire(context.Background(), principal, fixture.run.ID, fixture.session.ID, fixture.run.Revision, fixture.session.Revision)
+		done <- response{lease: lease, err: err}
+	}()
+	command := readTerminalEffectWire(t, fixture.peer)
+	if command.Kind != string(runner.TerminalGenerationInstall) || command.Generation == 0 {
+		t.Fatalf("lease install command = %+v", command)
+	}
+	replyTerminalEffect(t, fixture.peer, command, runner.TerminalResultOK, 0)
+	result := <-done
+	if result.err != nil {
+		t.Fatalf("acquire terminal lease: %v", result.err)
+	}
+	return result.lease
+}
+
+func TestTerminalEffectsBindOneExactConnectionAndReleaseDurableFirst(t *testing.T) {
+	fixture := newTerminalEffectFixture(t)
+	other := terminalEffectPrincipal(fixture.adapter.client.ID, 2)
+	type acquireResult struct {
+		lease kernel.TerminalLease
+		err   error
+	}
+	acquired := make(chan acquireResult, 1)
+	go func() {
+		lease, err := fixture.adapter.daemon.terminalLeaseAcquire(context.Background(), fixture.principal, fixture.run.ID, fixture.session.ID, fixture.run.Revision, fixture.session.Revision)
+		acquired <- acquireResult{lease: lease, err: err}
+	}()
+	install := readTerminalEffectWire(t, fixture.peer)
+	committed, found, err := fixture.adapter.store.TerminalSession(context.Background(), fixture.session.ID)
+	if err != nil || !found || committed.LeaseClientID == nil || *committed.LeaseClientID != fixture.adapter.client.ID || committed.LeaseGeneration != install.Generation {
+		t.Fatalf("durable lease before install ACK = %+v, found=%v, err=%v", committed, found, err)
+	}
+	replyTerminalEffect(t, fixture.peer, install, runner.TerminalResultOK, 0)
+	leaseResult := <-acquired
+	if leaseResult.err != nil {
+		t.Fatal(leaseResult.err)
+	}
+	lease := leaseResult.lease
+
+	if _, err := fixture.adapter.daemon.terminalLeaseRenew(context.Background(), other, fixture.run.ID, fixture.session.ID, lease.Generation, fixture.run.Revision, fixture.session.Revision); !errors.Is(err, ErrTerminalEffectRejected) {
+		t.Fatalf("second connection renew = %v", err)
+	}
+	if _, err := fixture.adapter.daemon.terminalInput(context.Background(), other, fixture.run.ID, fixture.session.ID, lease.Generation, 1, fixture.run.Revision, fixture.session.Revision, []byte("blocked")); !errors.Is(err, ErrTerminalEffectRejected) {
+		t.Fatalf("second connection input = %v", err)
+	}
+	if err := fixture.adapter.daemon.terminalResize(context.Background(), other, fixture.run.ID, fixture.session.ID, lease.Generation, fixture.run.Revision, fixture.session.Revision, 24, 80); !errors.Is(err, ErrTerminalEffectRejected) {
+		t.Fatalf("second connection resize = %v", err)
+	}
+	if _, err := fixture.adapter.daemon.terminalLeaseRelease(context.Background(), other, fixture.run.ID, fixture.session.ID, lease.Generation, fixture.run.Revision, fixture.session.Revision); !errors.Is(err, ErrTerminalEffectRejected) {
+		t.Fatalf("second connection release = %v", err)
+	}
+
+	fixture.adapter.daemon.now = func() time.Time { return time.UnixMilli(2_100) }
+	renewed, err := fixture.adapter.daemon.terminalLeaseRenew(context.Background(), fixture.principal, fixture.run.ID, fixture.session.ID, lease.Generation, fixture.run.Revision, fixture.session.Revision)
+	if err != nil || renewed.Generation != lease.Generation || renewed.LastInputSequence != 0 || renewed.ExpiresAt.Int64() <= lease.ExpiresAt.Int64() {
+		t.Fatalf("renewed lease = %+v, %v", renewed, err)
+	}
+
+	released := make(chan acquireResult, 1)
+	go func() {
+		lease, err := fixture.adapter.daemon.terminalLeaseRelease(context.Background(), fixture.principal, fixture.run.ID, fixture.session.ID, lease.Generation, fixture.run.Revision, fixture.session.Revision)
+		released <- acquireResult{lease: lease, err: err}
+	}()
+	revoke := readTerminalEffectWire(t, fixture.peer)
+	cleared, found, err := fixture.adapter.store.TerminalSession(context.Background(), fixture.session.ID)
+	if err != nil || !found || cleared.LeaseClientID != nil || cleared.LeaseExpiresAt != nil || cleared.LeaseGeneration != revoke.Generation {
+		t.Fatalf("durable release before runner revoke ACK = %+v, found=%v, err=%v", cleared, found, err)
+	}
+	replyTerminalEffect(t, fixture.peer, revoke, runner.TerminalResultOK, 0)
+	releaseResult := <-released
+	if releaseResult.err != nil || releaseResult.lease.Generation != lease.Generation+1 {
+		t.Fatalf("release result = %+v, %v", releaseResult.lease, releaseResult.err)
+	}
+	if _, err := fixture.adapter.daemon.terminalLeaseRelease(context.Background(), fixture.principal, fixture.run.ID, fixture.session.ID, lease.Generation, fixture.run.Revision, fixture.session.Revision); !errors.Is(err, ErrTerminalEffectRejected) {
+		t.Fatalf("repeated release = %v", err)
+	}
+}
+
+func TestTerminalEffectsRefuseZeroAndStaleConnectionIdentity(t *testing.T) {
+	fixture := newTerminalEffectFixture(t)
+	if _, err := fixture.adapter.daemon.terminalLeaseAcquire(context.Background(), fixture.principal, kernel.RunID{}, fixture.session.ID, fixture.run.Revision, fixture.session.Revision); !errors.Is(err, kernel.ErrInvalidValue) {
+		t.Fatalf("zero acquire run locator = %v", err)
+	}
+	zero := browser.Principal{ClientID: fixture.principal.ClientID}
+	if _, err := fixture.adapter.daemon.terminalLeaseAcquire(context.Background(), zero, fixture.run.ID, fixture.session.ID, fixture.run.Revision, fixture.session.Revision); !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Fatalf("zero/backend-selected connection = %v", err)
+	}
+	lease := fixture.acquire(t, fixture.principal)
+	stale := terminalEffectPrincipal(fixture.adapter.client.ID, 3)
+	if _, err := fixture.adapter.daemon.terminalInput(context.Background(), stale, fixture.run.ID, fixture.session.ID, lease.Generation, 1, fixture.run.Revision, fixture.session.Revision, []byte("stale")); !errors.Is(err, ErrTerminalEffectRejected) {
+		t.Fatalf("stale connection = %v", err)
+	}
+}
+
+func TestExpiredLeaseReplacementRevokesOldConnectionBeforeInstallingNewOne(t *testing.T) {
+	fixture := newTerminalEffectFixture(t)
+	first := fixture.acquire(t, fixture.principal)
+	replacementPrincipal := terminalEffectPrincipal(fixture.adapter.client.ID, 4)
+	fixture.adapter.daemon.now = func() time.Time { return time.UnixMilli(first.ExpiresAt.Int64()) }
+	type result struct {
+		lease kernel.TerminalLease
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		lease, err := fixture.adapter.daemon.terminalLeaseAcquire(context.Background(), replacementPrincipal, fixture.run.ID, fixture.session.ID, fixture.run.Revision, fixture.session.Revision)
+		done <- result{lease: lease, err: err}
+	}()
+	revoke := readTerminalEffectWire(t, fixture.peer)
+	if revoke.Kind != string(runner.TerminalGenerationRevoke) || revoke.Generation != first.Generation {
+		t.Fatalf("expired binding revoke = %+v", revoke)
+	}
+	replyTerminalEffect(t, fixture.peer, revoke, runner.TerminalResultOK, 0)
+	install := readTerminalEffectWire(t, fixture.peer)
+	if install.Kind != string(runner.TerminalGenerationInstall) || install.Generation != first.Generation+1 {
+		t.Fatalf("replacement install = %+v", install)
+	}
+	replyTerminalEffect(t, fixture.peer, install, runner.TerminalResultOK, 0)
+	replaced := <-done
+	if replaced.err != nil || replaced.lease.Generation != first.Generation+1 {
+		t.Fatalf("replacement lease = %+v, %v", replaced.lease, replaced.err)
+	}
+	if _, err := fixture.adapter.daemon.terminalInput(context.Background(), fixture.principal, fixture.run.ID, fixture.session.ID, first.Generation, 1, fixture.run.Revision, fixture.session.Revision, []byte("stale")); !errors.Is(err, ErrTerminalEffectRejected) {
+		t.Fatalf("expired connection resumed = %v", err)
+	}
+}
+
+func TestTerminalAcquireFailuresRevokeDurableLeaseAndFenceRunner(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		status runner.TerminalResultStatus
+		late   bool
+	}{
+		{name: "rejected", status: runner.TerminalResultRejected},
+		{name: "partial", status: runner.TerminalResultPartial},
+		{name: "timeout", status: runner.TerminalResultUncertain, late: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newTerminalEffectFixture(t)
+			if test.late {
+				fixture.attempt.effectLimit = 25 * time.Millisecond
+			}
+			done := make(chan error, 1)
+			go func() {
+				_, err := fixture.adapter.daemon.terminalLeaseAcquire(context.Background(), fixture.principal, fixture.run.ID, fixture.session.ID, fixture.run.Revision, fixture.session.Revision)
+				done <- err
+			}()
+			install := readTerminalEffectWire(t, fixture.peer)
+			if !test.late {
+				replyTerminalEffect(t, fixture.peer, install, test.status, 0)
+			}
+			revoke := readTerminalEffectWire(t, fixture.peer)
+			if revoke.Kind != string(runner.TerminalGenerationRevoke) || revoke.Generation != install.Generation+1 {
+				t.Fatalf("failed-install revoke = %+v after %+v", revoke, install)
+			}
+			cleared, found, err := fixture.adapter.store.TerminalSession(context.Background(), fixture.session.ID)
+			if err != nil || !found || cleared.LeaseClientID != nil || cleared.LeaseGeneration != revoke.Generation {
+				t.Fatalf("failed-install durable cleanup = %+v, found=%v, err=%v", cleared, found, err)
+			}
+			if test.late {
+				replyTerminalEffect(t, fixture.peer, install, runner.TerminalResultOK, 0)
+			}
+			replyTerminalEffect(t, fixture.peer, revoke, runner.TerminalResultOK, 0)
+			err = <-done
+			if test.status == runner.TerminalResultRejected && !errors.Is(err, ErrTerminalEffectRejected) || test.status == runner.TerminalResultPartial && !errors.Is(err, ErrTerminalEffectPartial) || test.late && !errors.Is(err, ErrTerminalEffectUncertain) {
+				t.Fatalf("failed acquire error = %v", err)
+			}
+		})
+	}
+
+	t.Run("controller loss", func(t *testing.T) {
+		fixture := newTerminalEffectFixture(t)
+		done := make(chan error, 1)
+		go func() {
+			_, err := fixture.adapter.daemon.terminalLeaseAcquire(context.Background(), fixture.principal, fixture.run.ID, fixture.session.ID, fixture.run.Revision, fixture.session.Revision)
+			done <- err
+		}()
+		_ = readTerminalEffectWire(t, fixture.peer)
+		if err := fixture.peer.Close(); err != nil {
+			t.Fatal(err)
+		}
+		err := <-done
+		if !errors.Is(err, ErrTerminalEffectUncertain) {
+			t.Fatalf("controller loss = %v", err)
+		}
+		cleared, found, readErr := fixture.adapter.store.TerminalSession(context.Background(), fixture.session.ID)
+		if readErr != nil || !found || cleared.LeaseClientID != nil {
+			t.Fatalf("controller-loss durable cleanup = %+v, found=%v, err=%v", cleared, found, readErr)
+		}
+	})
+}
+
+func TestTerminalEffectWrongCorrelationFailsClosed(t *testing.T) {
+	fixture := newTerminalEffectFixture(t)
+	done := make(chan error, 1)
+	go func() {
+		_, err := fixture.adapter.daemon.terminalLeaseAcquire(context.Background(), fixture.principal, fixture.run.ID, fixture.session.ID, fixture.run.Revision, fixture.session.Revision)
+		done <- err
+	}()
+	install := readTerminalEffectWire(t, fixture.peer)
+	writeTerminalEffectWire(t, fixture.peer, terminalEffectWireFrame{
+		Version: 1, Kind: string(runner.TerminalGenerationResult), Correlation: install.Correlation + 1,
+		Generation: install.Generation, Status: string(runner.TerminalResultOK),
+	})
+	if err := <-done; !errors.Is(err, ErrTerminalEffectUncertain) || !errors.Is(err, runner.ErrIdentity) {
+		t.Fatalf("wrong correlation = %v", err)
+	}
+	cleared, found, err := fixture.adapter.store.TerminalSession(context.Background(), fixture.session.ID)
+	if err != nil || !found || cleared.LeaseClientID != nil || cleared.LeaseGeneration != install.Generation+1 {
+		t.Fatalf("wrong-correlation durable fence = %+v, found=%v, err=%v", cleared, found, err)
+	}
+}
+
+func TestTerminalInputReservesExactlyOnceAndPartialNeverReplays(t *testing.T) {
+	fixture := newTerminalEffectFixture(t)
+	lease := fixture.acquire(t, fixture.principal)
+	type inputResult struct {
+		count uint32
+		err   error
+	}
+	callInput := func(sequence uint64, payload string) (<-chan inputResult, terminalEffectWireFrame) {
+		done := make(chan inputResult, 1)
+		go func() {
+			count, err := fixture.adapter.daemon.terminalInput(context.Background(), fixture.principal, fixture.run.ID, fixture.session.ID, lease.Generation, sequence, fixture.run.Revision, fixture.session.Revision, []byte(payload))
+			done <- inputResult{count: count, err: err}
+		}()
+		return done, readTerminalEffectWire(t, fixture.peer)
+	}
+
+	firstDone, first := callInput(1, "first")
+	reserved, found, err := fixture.adapter.store.TerminalSession(context.Background(), fixture.session.ID)
+	if err != nil || !found || reserved.LastInputSequence != 1 {
+		t.Fatalf("input reservation before write = %+v, found=%v, err=%v", reserved, found, err)
+	}
+	replyTerminalEffect(t, fixture.peer, first, runner.TerminalResultOK, uint32(len("first")))
+	if result := <-firstDone; result.err != nil || result.count != uint32(len("first")) {
+		t.Fatalf("complete input = %+v", result)
+	}
+	for _, sequence := range []uint64{1, 3} {
+		if _, err := fixture.adapter.daemon.terminalInput(context.Background(), fixture.principal, fixture.run.ID, fixture.session.ID, lease.Generation, sequence, fixture.run.Revision, fixture.session.Revision, []byte("refused")); !errors.Is(err, kernel.ErrRevisionConflict) {
+			t.Fatalf("sequence %d = %v", sequence, err)
+		}
+	}
+
+	secondDone, second := callInput(2, "partial")
+	replyTerminalEffect(t, fixture.peer, second, runner.TerminalResultPartial, 2)
+	revoke := readTerminalEffectWire(t, fixture.peer)
+	if revoke.Kind != string(runner.TerminalGenerationRevoke) || revoke.Generation != lease.Generation+1 {
+		t.Fatalf("partial input fence = %+v", revoke)
+	}
+	cleared, found, err := fixture.adapter.store.TerminalSession(context.Background(), fixture.session.ID)
+	if err != nil || !found || cleared.LeaseClientID != nil || cleared.LastInputSequence != 0 || cleared.LeaseGeneration != revoke.Generation {
+		t.Fatalf("partial input durable revoke = %+v, found=%v, err=%v", cleared, found, err)
+	}
+	replyTerminalEffect(t, fixture.peer, revoke, runner.TerminalResultOK, 0)
+	result := <-secondDone
+	if result.count != 2 || !errors.Is(result.err, ErrTerminalEffectPartial) {
+		t.Fatalf("partial input result = %+v", result)
+	}
+	if _, err := fixture.adapter.daemon.terminalInput(context.Background(), fixture.principal, fixture.run.ID, fixture.session.ID, lease.Generation, 2, fixture.run.Revision, fixture.session.Revision, []byte("partial")); !errors.Is(err, ErrTerminalEffectRejected) {
+		t.Fatalf("partial input replay = %v", err)
+	}
+}
+
+func TestTerminalInputRequiresExactCompleteByteCount(t *testing.T) {
+	fixture := newTerminalEffectFixture(t)
+	lease := fixture.acquire(t, fixture.principal)
+	type result struct {
+		count uint32
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		count, err := fixture.adapter.daemon.terminalInput(context.Background(), fixture.principal, fixture.run.ID, fixture.session.ID, lease.Generation, 1, fixture.run.Revision, fixture.session.Revision, []byte("exact"))
+		done <- result{count: count, err: err}
+	}()
+	input := readTerminalEffectWire(t, fixture.peer)
+	replyTerminalEffect(t, fixture.peer, input, runner.TerminalResultOK, uint32(len("exact")-1))
+	revoke := readTerminalEffectWire(t, fixture.peer)
+	if revoke.Kind != string(runner.TerminalGenerationRevoke) || revoke.Generation != lease.Generation+1 {
+		t.Fatalf("short OK result fence = %+v", revoke)
+	}
+	replyTerminalEffect(t, fixture.peer, revoke, runner.TerminalResultOK, 0)
+	got := <-done
+	if got.count != uint32(len("exact")-1) || !errors.Is(got.err, ErrTerminalEffectUncertain) {
+		t.Fatalf("short OK result = %+v", got)
+	}
+	session, found, err := fixture.adapter.store.TerminalSession(context.Background(), fixture.session.ID)
+	if err != nil || !found || session.LeaseClientID != nil || session.LeaseGeneration != lease.Generation+1 {
+		t.Fatalf("short OK durable fence = %+v, found=%v, err=%v", session, found, err)
+	}
+}
+
+func TestTerminalResizeIsExactAndUncertaintyIsVisible(t *testing.T) {
+	fixture := newTerminalEffectFixture(t)
+	lease := fixture.acquire(t, fixture.principal)
+	done := make(chan error, 1)
+	go func() {
+		done <- fixture.adapter.daemon.terminalResize(context.Background(), fixture.principal, fixture.run.ID, fixture.session.ID, lease.Generation, fixture.run.Revision, fixture.session.Revision, 37, 111)
+	}()
+	command := readTerminalEffectWire(t, fixture.peer)
+	if command.Kind != string(runner.TerminalResize) || command.Rows != 37 || command.Cols != 111 || command.Generation != lease.Generation {
+		t.Fatalf("resize command = %+v", command)
+	}
+	replyTerminalEffect(t, fixture.peer, command, runner.TerminalResultUncertain, 0)
+	if err := <-done; !errors.Is(err, ErrTerminalEffectUncertain) {
+		t.Fatalf("uncertain resize = %v", err)
+	}
+	other := terminalEffectPrincipal(fixture.adapter.client.ID, 8)
+	if err := fixture.adapter.daemon.terminalResize(context.Background(), other, fixture.run.ID, fixture.session.ID, lease.Generation, fixture.run.Revision, fixture.session.Revision, 37, 111); !errors.Is(err, ErrTerminalEffectRejected) {
+		t.Fatalf("stale resize = %v", err)
+	}
+}
+
+func TestHumanReplyUsesExactRunAndResolvesOnlyAfterFullDelivery(t *testing.T) {
+	fixture := newTerminalEffectFixture(t)
+	var key [kernel.IDBytes]byte
+	copy(key[:], adapterID(t, 210))
+	request, err := fixture.adapter.store.CreateHumanQuestionForAttempt(context.Background(), fixture.run.CredentialDigest, kernel.NewHumanQuestion{IdempotencyKey: key, QuestionText: "question"}, adapterTime(t, 400))
+	if err != nil {
+		t.Fatal(err)
+	}
+	type replyResult struct {
+		count uint32
+		err   error
+	}
+	done := make(chan replyResult, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		count, err := fixture.adapter.daemon.humanReply(ctx, fixture.principal, fixture.run.ID, request.ID, request.Revision, "exact reply")
+		done <- replyResult{count: count, err: err}
+	}()
+	command := readTerminalEffectWire(t, fixture.peer)
+	if command.Kind != string(runner.TerminalHumanReply) || string(command.Payload) != "exact reply" || command.Generation != 0 || command.Sequence != 0 {
+		t.Fatalf("human reply command = %+v", command)
+	}
+	delivering, found, err := fixture.adapter.store.HumanRequest(context.Background(), request.ID)
+	if err != nil || !found || delivering.Status != kernel.HumanRequestDelivering || delivering.Revision.Int64() != request.Revision.Int64()+1 {
+		t.Fatalf("durable delivery before write ACK = %+v, found=%v, err=%v", delivering, found, err)
+	}
+	cancel()
+	replyTerminalEffect(t, fixture.peer, command, runner.TerminalResultOK, uint32(len("exact reply")))
+	result := <-done
+	if result.err != nil || result.count != uint32(len("exact reply")) {
+		t.Fatalf("human reply after caller cancellation = %+v", result)
+	}
+	resolved, found, err := fixture.adapter.store.HumanRequest(context.Background(), request.ID)
+	if err != nil || !found || resolved.Status != kernel.HumanRequestResolved {
+		t.Fatalf("resolved human request = %+v, found=%v, err=%v", resolved, found, err)
+	}
+	if _, err := fixture.adapter.daemon.humanReply(context.Background(), fixture.principal, fixture.run.ID, request.ID, request.Revision, "duplicate"); !errors.Is(err, kernel.ErrRevisionConflict) {
+		t.Fatalf("duplicate reply = %v", err)
+	}
+
+	copy(key[:], adapterID(t, 211))
+	second, err := fixture.adapter.store.CreateHumanQuestionForAttempt(context.Background(), fixture.run.CredentialDigest, kernel.NewHumanQuestion{IdempotencyKey: key, QuestionText: "second"}, adapterTime(t, 401))
+	if err != nil {
+		t.Fatal(err)
+	}
+	partialDone := make(chan replyResult, 1)
+	go func() {
+		count, err := fixture.adapter.daemon.humanReply(context.Background(), fixture.principal, fixture.run.ID, second.ID, second.Revision, "partial reply")
+		partialDone <- replyResult{count: count, err: err}
+	}()
+	partial := readTerminalEffectWire(t, fixture.peer)
+	replyTerminalEffect(t, fixture.peer, partial, runner.TerminalResultPartial, 3)
+	partialResult := <-partialDone
+	if partialResult.count != 3 || !errors.Is(partialResult.err, ErrTerminalEffectPartial) {
+		t.Fatalf("partial human reply = %+v", partialResult)
+	}
+	unknown, found, err := fixture.adapter.store.HumanRequest(context.Background(), second.ID)
+	if err != nil || !found || unknown.Status != kernel.HumanRequestDeliveryUnknown {
+		t.Fatalf("unknown human delivery = %+v, found=%v, err=%v", unknown, found, err)
+	}
+	wrongRun, _ := liveTestIDs(t, 55_000)
+	if _, err := fixture.adapter.daemon.humanReply(context.Background(), fixture.principal, wrongRun, second.ID, unknown.Revision, "stale"); !errors.Is(err, kernel.ErrRevisionConflict) {
+		t.Fatalf("wrong originating run = %v", err)
+	}
+}
+
+func TestUncertainHumanReplyRemainsDurablyVisibleWithoutReplay(t *testing.T) {
+	fixture := newTerminalEffectFixture(t)
+	var key [kernel.IDBytes]byte
+	copy(key[:], adapterID(t, 212))
+	request, err := fixture.adapter.store.CreateHumanQuestionForAttempt(context.Background(), fixture.run.CredentialDigest, kernel.NewHumanQuestion{IdempotencyKey: key, QuestionText: "uncertain"}, adapterTime(t, 400))
+	if err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		count uint32
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		count, err := fixture.adapter.daemon.humanReply(context.Background(), fixture.principal, fixture.run.ID, request.ID, request.Revision, "one shot")
+		done <- result{count: count, err: err}
+	}()
+	command := readTerminalEffectWire(t, fixture.peer)
+	replyTerminalEffect(t, fixture.peer, command, runner.TerminalResultUncertain, 0)
+	got := <-done
+	if got.count != 0 || !errors.Is(got.err, ErrTerminalEffectUncertain) {
+		t.Fatalf("uncertain human reply = %+v", got)
+	}
+	unknown, found, err := fixture.adapter.store.HumanRequest(context.Background(), request.ID)
+	if err != nil || !found || unknown.Status != kernel.HumanRequestDeliveryUnknown {
+		t.Fatalf("uncertain human delivery = %+v, found=%v, err=%v", unknown, found, err)
+	}
+	if _, err := fixture.adapter.daemon.humanReply(context.Background(), fixture.principal, fixture.run.ID, request.ID, request.Revision, "replay"); !errors.Is(err, kernel.ErrRevisionConflict) {
+		t.Fatalf("uncertain delivery replay = %v", err)
+	}
+}
+
+func TestClientRevocationDurablyClearsLeaseBeforeRunnerFence(t *testing.T) {
+	fixture := newTerminalEffectFixture(t)
+	lease := fixture.acquire(t, fixture.principal)
+	done := make(chan error, 1)
+	go func() {
+		_, err := fixture.adapter.daemon.RevokeBrowserClient(context.Background(), fixture.adapter.client.ID, fixture.adapter.client.Revision)
+		done <- err
+	}()
+	revoke := readTerminalEffectWire(t, fixture.peer)
+	if revoke.Kind != string(runner.TerminalGenerationRevoke) || revoke.Generation != lease.Generation+1 {
+		t.Fatalf("client revoke runner fence = %+v", revoke)
+	}
+	client, found, err := fixture.adapter.store.BrowserClient(context.Background(), fixture.adapter.client.ID)
+	if err != nil || !found || client.RevokedAt == nil {
+		t.Fatalf("durable client revocation before runner ACK = %+v, found=%v, err=%v", client, found, err)
+	}
+	session, found, err := fixture.adapter.store.TerminalSession(context.Background(), fixture.session.ID)
+	if err != nil || !found || session.LeaseClientID != nil || session.LeaseGeneration != revoke.Generation {
+		t.Fatalf("durable client lease clear before runner ACK = %+v, found=%v, err=%v", session, found, err)
+	}
+	replyTerminalEffect(t, fixture.peer, revoke, runner.TerminalResultOK, 0)
+	if err := <-done; err != nil {
+		t.Fatalf("client revocation: %v", err)
+	}
+}
+
+func TestFinalizationOrdersAcceptedEffectsAndFencesBothRevocationOrderings(t *testing.T) {
+	t.Run("finalizing before effect and client revoke", func(t *testing.T) {
+		fixture := newTerminalEffectFixture(t)
+		lease := fixture.acquire(t, fixture.principal)
+		proposal, err := kernel.NewSuccessProposal("done")
+		if err != nil {
+			t.Fatal(err)
+		}
+		fixture.adapter.daemon.operationMu.Lock()
+		finalizing, err := fixture.adapter.store.ProposeAttemptOutcome(context.Background(), fixture.run.CredentialDigest, proposal, adapterTime(t, 2_200))
+		fixture.adapter.daemon.operationMu.Unlock()
+		if err != nil || finalizing.Phase != kernel.RunFinalizing {
+			t.Fatalf("finalizing = %+v, %v", finalizing, err)
+		}
+		terminate := readTerminalEffectWire(t, fixture.peer)
+		if terminate.Kind != "terminate" {
+			t.Fatalf("finalization fence = %+v", terminate)
+		}
+		if _, err := fixture.adapter.daemon.terminalInput(context.Background(), fixture.principal, fixture.run.ID, fixture.session.ID, lease.Generation, 1, fixture.run.Revision, fixture.session.Revision, []byte("too late")); err == nil {
+			t.Fatal("input after finalizing succeeded")
+		}
+		if _, err := fixture.adapter.daemon.terminalLeaseRelease(context.Background(), fixture.principal, fixture.run.ID, fixture.session.ID, lease.Generation, fixture.run.Revision, fixture.session.Revision); err == nil {
+			t.Fatal("release after finalizing succeeded")
+		}
+		if _, err := fixture.adapter.daemon.RevokeBrowserClient(context.Background(), fixture.adapter.client.ID, fixture.adapter.client.Revision); err != nil {
+			t.Fatalf("client revoke after finalization: %v", err)
+		}
+		session, found, err := fixture.adapter.store.TerminalSession(context.Background(), fixture.session.ID)
+		if err != nil || !found || session.LeaseClientID != nil || session.LeaseGeneration != lease.Generation+1 {
+			t.Fatalf("finalization/revocation convergence = %+v, found=%v, err=%v", session, found, err)
+		}
+	})
+
+	t.Run("accepted input before finalizing", func(t *testing.T) {
+		fixture := newTerminalEffectFixture(t)
+		lease := fixture.acquire(t, fixture.principal)
+		inputDone := make(chan error, 1)
+		go func() {
+			_, err := fixture.adapter.daemon.terminalInput(context.Background(), fixture.principal, fixture.run.ID, fixture.session.ID, lease.Generation, 1, fixture.run.Revision, fixture.session.Revision, []byte("accepted"))
+			inputDone <- err
+		}()
+		input := readTerminalEffectWire(t, fixture.peer)
+		if input.Kind != string(runner.TerminalInput) {
+			t.Fatalf("accepted input command = %+v", input)
+		}
+		finalized := make(chan error, 1)
+		go func() {
+			proposal, _ := kernel.NewSuccessProposal("done")
+			fixture.adapter.daemon.operationMu.Lock()
+			_, err := fixture.adapter.store.ProposeAttemptOutcome(context.Background(), fixture.run.CredentialDigest, proposal, adapterTime(t, 2_200))
+			fixture.adapter.daemon.operationMu.Unlock()
+			finalized <- err
+		}()
+		select {
+		case err := <-finalized:
+			t.Fatalf("finalization crossed accepted effect: %v", err)
+		case <-time.After(25 * time.Millisecond):
+		}
+		replyTerminalEffect(t, fixture.peer, input, runner.TerminalResultOK, uint32(len("accepted")))
+		if err := <-inputDone; err != nil {
+			t.Fatalf("accepted input result: %v", err)
+		}
+		if err := <-finalized; err != nil {
+			t.Fatalf("serialized finalization: %v", err)
+		}
+		terminate := readTerminalEffectWire(t, fixture.peer)
+		if terminate.Kind != "terminate" {
+			t.Fatalf("post-effect finalization fence = %+v", terminate)
+		}
+		session, found, err := fixture.adapter.store.TerminalSession(context.Background(), fixture.session.ID)
+		if err != nil || !found || session.LeaseClientID != nil || session.LeaseGeneration != lease.Generation+1 {
+			t.Fatalf("post-effect finalization lease = %+v, found=%v, err=%v", session, found, err)
+		}
+	})
+
+	t.Run("client revoke before finalizing", func(t *testing.T) {
+		fixture := newTerminalEffectFixture(t)
+		lease := fixture.acquire(t, fixture.principal)
+		revoked := make(chan error, 1)
+		go func() {
+			_, err := fixture.adapter.daemon.RevokeBrowserClient(context.Background(), fixture.adapter.client.ID, fixture.adapter.client.Revision)
+			revoked <- err
+		}()
+		revoke := readTerminalEffectWire(t, fixture.peer)
+		if revoke.Kind != string(runner.TerminalGenerationRevoke) || revoke.Generation != lease.Generation+1 {
+			t.Fatalf("client-first fence = %+v", revoke)
+		}
+		replyTerminalEffect(t, fixture.peer, revoke, runner.TerminalResultOK, 0)
+		if err := <-revoked; err != nil {
+			t.Fatal(err)
+		}
+		proposal, _ := kernel.NewSuccessProposal("done")
+		fixture.adapter.daemon.operationMu.Lock()
+		_, err := fixture.adapter.store.ProposeAttemptOutcome(context.Background(), fixture.run.CredentialDigest, proposal, adapterTime(t, 2_200))
+		fixture.adapter.daemon.operationMu.Unlock()
+		if err != nil {
+			t.Fatalf("finalization after client revoke: %v", err)
+		}
+		if terminate := readTerminalEffectWire(t, fixture.peer); terminate.Kind != "terminate" {
+			t.Fatalf("client-first finalization fence = %+v", terminate)
+		}
+	})
+}
+
+func TestProviderExitAndOwnerDeathFencePrivateBinding(t *testing.T) {
+	t.Run("provider exit", func(t *testing.T) {
+		fixture := newTerminalEffectFixture(t)
+		lease := fixture.acquire(t, fixture.principal)
+		terminal := runner.Terminal{AttemptID: "daemon-terminal-effect", Process: fixture.identity, Exit: runner.Exit{Code: 0}}
+		identity := runner.FileIdentity{Device: 7, Inode: 9}
+		writeTerminalEffectWire(t, fixture.peer, terminalEffectWireFrame{
+			Version: 1, Kind: "terminal", Terminal: &terminal, FileIdentity: &identity, Digest: strings.Repeat("0", 64),
+		})
+		select {
+		case result := <-fixture.attempt.terminal:
+			if result.err != nil || result.event.Kind != runner.AttemptTerminal {
+				t.Fatalf("provider terminal = %+v", result)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("provider terminal was not routed")
+		}
+		if _, err := fixture.adapter.daemon.terminalInput(context.Background(), fixture.principal, fixture.run.ID, fixture.session.ID, lease.Generation, 1, fixture.run.Revision, fixture.session.Revision, []byte("after exit")); !errors.Is(err, ErrTerminalEffectRejected) {
+			t.Fatalf("input after provider exit = %v", err)
+		}
+	})
+
+	t.Run("owner death", func(t *testing.T) {
+		fixture := newTerminalEffectFixture(t)
+		lease := fixture.acquire(t, fixture.principal)
+		if err := fixture.peer.Close(); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-fixture.attempt.done:
+		case <-time.After(time.Second):
+			t.Fatal("dead owner did not join")
+		}
+		if fixture.attempt.binding != (terminalBinding{}) {
+			t.Fatalf("owner death retained private binding = %+v", fixture.attempt.binding)
+		}
+		if _, err := fixture.adapter.daemon.terminalInput(context.Background(), fixture.principal, fixture.run.ID, fixture.session.ID, lease.Generation, 1, fixture.run.Revision, fixture.session.Revision, []byte("after death")); !errors.Is(err, kernel.ErrNotFound) {
+			t.Fatalf("input after owner death = %v", err)
+		}
+	})
+}

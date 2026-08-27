@@ -22,6 +22,7 @@ const (
 	terminalPendingBytesCap = 256 << 10
 	liveAttemptCredit       = 1 << 20
 	liveAttemptStoreTimeout = 2 * time.Second
+	liveAttemptEffectLimit  = 4 * time.Second
 )
 
 var (
@@ -194,6 +195,8 @@ func (daemon *Daemon) AttachTerminal(ctx context.Context, runID kernel.RunID, se
 	if attempt == nil {
 		return nil, kernel.ErrNotFound
 	}
+	daemon.operationMu.Lock()
+	defer daemon.operationMu.Unlock()
 	return attempt.attach(ctx, sessionID, sequence)
 }
 
@@ -203,6 +206,7 @@ const (
 	liveCommandReleaseProvider liveAttemptCommandKind = iota + 1
 	liveCommandAttach
 	liveCommandDetach
+	liveCommandEffect
 	liveCommandAcknowledge
 	liveCommandShutdown
 )
@@ -214,6 +218,8 @@ type liveAttemptCommand struct {
 	sequence   uint64
 	terminal   *runner.TerminalRecord
 	result     chan error
+	effect     *terminalEffect
+	effectDone chan terminalEffectResult
 }
 
 type liveAttemptResult struct {
@@ -247,6 +253,8 @@ type liveAttempt struct {
 	creditOutstanding uint64
 	controllerClosed  bool
 	finalErr          error
+	binding           terminalBinding
+	effectLimit       time.Duration
 }
 
 func newLiveAttempt(daemon *Daemon, runID kernel.RunID, sessionID kernel.TerminalSessionID, controller *runner.AttemptController) *liveAttempt {
@@ -255,6 +263,7 @@ func newLiveAttempt(daemon *Daemon, runID kernel.RunID, sessionID kernel.Termina
 		commands: make(chan liveAttemptCommand, liveAttemptMailboxCap),
 		wake:     make(chan struct{}, 1), done: make(chan struct{}), terminal: make(chan liveAttemptResult, 1),
 		subs: make(map[*TerminalAttachment]struct{}), correlations: make(map[uint64]*TerminalAttachment),
+		effectLimit: liveAttemptEffectLimit,
 	}
 }
 
@@ -395,6 +404,37 @@ func (attempt *liveAttempt) submit(ctx context.Context, command liveAttemptComma
 
 func (attempt *liveAttempt) releaseProvider(ctx context.Context) error {
 	return attempt.submit(ctx, liveAttemptCommand{kind: liveCommandReleaseProvider})
+}
+
+// submitEffect is separate from submit so the established error-only
+// lifecycle path remains unchanged. Cancellation can prevent mailbox
+// acceptance; once accepted, the owner completes the exact command and the
+// caller observes its result even if the caller context is subsequently
+// cancelled.
+func (attempt *liveAttempt) submitEffect(ctx context.Context, effect terminalEffect) terminalEffectResult {
+	if attempt == nil || ctx == nil {
+		return uncertainTerminalEffect(ErrTerminalClosed)
+	}
+	done := make(chan terminalEffectResult, 1)
+	command := liveAttemptCommand{kind: liveCommandEffect, effect: &effect, effectDone: done}
+	select {
+	case <-attempt.done:
+		return uncertainTerminalEffect(ErrTerminalClosed)
+	case <-ctx.Done():
+		return terminalEffectResult{err: ctx.Err()}
+	case attempt.commands <- command:
+	}
+	select {
+	case result := <-done:
+		return result
+	case <-attempt.done:
+		select {
+		case result := <-done:
+			return result
+		default:
+			return uncertainTerminalEffect(ErrTerminalClosed)
+		}
+	}
 }
 
 func (attempt *liveAttempt) attach(ctx context.Context, sessionID kernel.TerminalSessionID, sequence uint64) (*TerminalAttachment, error) {

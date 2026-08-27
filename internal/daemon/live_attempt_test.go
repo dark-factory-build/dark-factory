@@ -103,6 +103,12 @@ func TestLiveAttemptSubmitReturnsWhenOwnerExitsAfterAcceptingCommand(t *testing.
 	}
 }
 
+func TestTerminalEffectZeroResultFailsClosed(t *testing.T) {
+	if err := (terminalEffectResult{}).effectError(-1); !errors.Is(err, ErrTerminalEffectUncertain) {
+		t.Fatalf("zero terminal effect result = %v", err)
+	}
+}
+
 func TestLiveAttemptShutdownClosesRegistryToNewOwners(t *testing.T) {
 	daemon := &Daemon{attempts: make(map[kernel.RunID]*liveAttempt)}
 	if err := daemon.closeLiveAttempts(); err != nil {

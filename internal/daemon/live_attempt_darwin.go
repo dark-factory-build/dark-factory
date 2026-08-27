@@ -8,11 +8,13 @@ import (
 	"io"
 	"time"
 
+	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 const liveAttemptPoll = 100 * time.Millisecond
+const terminalEffectsSupported = true
 
 func startLiveAttempt(attempt *liveAttempt, ctx context.Context) {
 	if ctx == nil {
@@ -23,6 +25,7 @@ func startLiveAttempt(attempt *liveAttempt, ctx context.Context) {
 
 func (attempt *liveAttempt) run(ctx context.Context) {
 	err := attempt.loop(ctx)
+	attempt.binding = terminalBinding{}
 	// The owner must retain controller authority until it has synchronously
 	// requested convergence and closed the capability. A read/protocol/Store
 	// error is not evidence that the child disappeared.
@@ -192,6 +195,7 @@ func (attempt *liveAttempt) processLifecycle(ctx context.Context) (bool, error) 
 		return false, kernel.ErrCorruptState
 	}
 	if run.Phase == kernel.RunFinalizing {
+		attempt.binding = terminalBinding{}
 		return false, attempt.terminateController()
 	}
 	return false, nil
@@ -225,6 +229,13 @@ func (attempt *liveAttempt) handleRunningCommand(command liveAttemptCommand) (bo
 		err := attempt.handleDetach(command.attachment)
 		command.result <- err
 		return false, nil
+	case liveCommandEffect:
+		if command.effect == nil || command.effectDone == nil {
+			return false, runner.ErrState
+		}
+		result, fatal := attempt.handleTerminalEffect(*command.effect)
+		command.effectDone <- result
+		return false, fatal
 	case liveCommandAcknowledge:
 		if !attempt.terminalSeen || attempt.terminalEvent == nil || command.terminal == nil || *command.terminal != *attempt.terminalEvent.Terminal {
 			err := runner.ErrIdentity
@@ -247,11 +258,174 @@ func (attempt *liveAttempt) handleRunningCommand(command liveAttemptCommand) (bo
 	}
 }
 
+func (attempt *liveAttempt) handleTerminalEffect(effect terminalEffect) (terminalEffectResult, error) {
+	if !attempt.readySeen || attempt.terminalSeen || attempt.controller == nil {
+		return terminalEffectResult{status: runner.TerminalResultRejected, err: ErrTerminalNotReady}, nil
+	}
+	switch effect.kind {
+	case terminalEffectCheck:
+		if !sameTerminalBinding(attempt.binding, effect.client, effect.connection, effect.generation) {
+			return terminalEffectResult{status: runner.TerminalResultRejected}, nil
+		}
+		return terminalEffectResult{status: runner.TerminalResultOK}, nil
+	case terminalEffectInstall:
+		if effect.client == (kernel.BrowserClientID{}) || effect.connection == (browser.ConnectionID{}) || effect.generation == 0 {
+			return terminalEffectResult{status: runner.TerminalResultRejected}, nil
+		}
+		if attempt.binding != (terminalBinding{}) {
+			if attempt.binding.generation >= effect.generation {
+				return terminalEffectResult{status: runner.TerminalResultRejected}, nil
+			}
+			oldGeneration := attempt.binding.generation
+			attempt.binding = terminalBinding{}
+			result, fatal := attempt.runTerminalEffect(runner.TerminalCommand{Kind: runner.TerminalGenerationRevoke, Generation: oldGeneration})
+			if result.effectError(-1) != nil || fatal != nil {
+				return result, fatal
+			}
+		}
+		result, fatal := attempt.runTerminalEffect(runner.TerminalCommand{Kind: runner.TerminalGenerationInstall, Generation: effect.generation})
+		if result.effectError(-1) == nil {
+			attempt.binding = terminalBinding{client: effect.client, connection: effect.connection, generation: effect.generation}
+		} else {
+			attempt.binding = terminalBinding{}
+		}
+		return result, fatal
+	case terminalEffectRevoke:
+		if effect.generation == 0 {
+			return terminalEffectResult{status: runner.TerminalResultRejected}, nil
+		}
+		if effect.requireBinding {
+			if effect.generation == 1 || !sameTerminalBinding(attempt.binding, effect.client, effect.connection, effect.generation-1) {
+				return terminalEffectResult{status: runner.TerminalResultRejected}, nil
+			}
+			attempt.binding = terminalBinding{}
+		} else if attempt.binding != (terminalBinding{}) && attempt.binding.generation < effect.generation {
+			attempt.binding = terminalBinding{}
+		}
+		return attempt.runTerminalEffect(runner.TerminalCommand{Kind: runner.TerminalGenerationRevoke, Generation: effect.generation})
+	case terminalEffectInput:
+		if !sameTerminalBinding(attempt.binding, effect.client, effect.connection, effect.generation) {
+			return terminalEffectResult{status: runner.TerminalResultRejected}, nil
+		}
+		result, fatal := attempt.runTerminalEffect(runner.TerminalCommand{
+			Kind: runner.TerminalInput, Generation: effect.generation, Sequence: effect.sequence,
+			Payload: append([]byte(nil), effect.payload...),
+		})
+		if result.status != runner.TerminalResultOK || result.count != uint32(len(effect.payload)) || result.err != nil {
+			attempt.binding = terminalBinding{}
+			if result.status == runner.TerminalResultOK {
+				result.status = runner.TerminalResultUncertain
+			}
+		}
+		return result, fatal
+	case terminalEffectResize:
+		if !sameTerminalBinding(attempt.binding, effect.client, effect.connection, effect.generation) {
+			return terminalEffectResult{status: runner.TerminalResultRejected}, nil
+		}
+		return attempt.runTerminalEffect(runner.TerminalCommand{
+			Kind: runner.TerminalResize, Generation: effect.generation, Rows: effect.rows, Cols: effect.cols,
+		})
+	case terminalEffectHumanReply:
+		return attempt.runTerminalEffect(runner.TerminalCommand{Kind: runner.TerminalHumanReply, Payload: append([]byte(nil), effect.payload...)})
+	case terminalEffectRevokeClient:
+		if attempt.binding == (terminalBinding{}) || attempt.binding.client != effect.client {
+			return terminalEffectResult{status: runner.TerminalResultOK}, nil
+		}
+		generation := attempt.binding.generation + 1
+		attempt.binding = terminalBinding{}
+		return attempt.runTerminalEffect(runner.TerminalCommand{Kind: runner.TerminalGenerationRevoke, Generation: generation})
+	default:
+		return terminalEffectResult{status: runner.TerminalResultRejected, err: runner.ErrState}, nil
+	}
+}
+
+func (attempt *liveAttempt) runTerminalEffect(command runner.TerminalCommand) (terminalEffectResult, error) {
+	correlation, err := attempt.nextCorrelation()
+	if err != nil {
+		return uncertainTerminalEffect(err), err
+	}
+	command.Correlation = correlation
+	if err := attempt.controller.SendTerminalCommand(command); err != nil {
+		return uncertainTerminalEffect(err), err
+	}
+	limit := attempt.effectLimit
+	if limit <= 0 {
+		limit = liveAttemptEffectLimit
+	}
+	deadline := time.Now().Add(limit)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return uncertainTerminalEffect(context.DeadlineExceeded), nil
+		}
+		poll := liveAttemptPoll
+		if remaining < poll {
+			poll = remaining
+		}
+		ready, err := attempt.controller.NextReady(poll)
+		if err != nil {
+			return uncertainTerminalEffect(err), err
+		}
+		if !ready {
+			continue
+		}
+		event, err := attempt.controller.Next(remaining)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				err = errors.New("daemon: attempt controller closed")
+			}
+			return uncertainTerminalEffect(err), err
+		}
+		if event.Kind == runner.AttemptTerminalFrame && event.Frame != nil && terminalOperationResult(event.Frame.Kind) {
+			frame := *event.Frame
+			if frame.Correlation < correlation {
+				continue
+			}
+			if frame.Correlation != correlation || !terminalResultMatches(command, frame) {
+				return uncertainTerminalEffect(runner.ErrIdentity), runner.ErrIdentity
+			}
+			return terminalEffectResult{status: frame.Status, count: frame.Count}, nil
+		}
+		stop, err := attempt.handleRunnerEvent(event)
+		if err != nil {
+			return uncertainTerminalEffect(err), err
+		}
+		if stop || attempt.terminalSeen {
+			return uncertainTerminalEffect(ErrTerminalClosed), nil
+		}
+	}
+}
+
+func terminalOperationResult(kind runner.TerminalEventKind) bool {
+	switch kind {
+	case runner.TerminalGenerationResult, runner.TerminalInputResult, runner.TerminalResizeResult, runner.TerminalHumanReplyResult:
+		return true
+	default:
+		return false
+	}
+}
+
+func terminalResultMatches(command runner.TerminalCommand, frame runner.TerminalFrame) bool {
+	switch command.Kind {
+	case runner.TerminalGenerationInstall, runner.TerminalGenerationRevoke:
+		return frame.Kind == runner.TerminalGenerationResult && frame.Generation == command.Generation
+	case runner.TerminalInput:
+		return frame.Kind == runner.TerminalInputResult && frame.Generation == command.Generation && frame.Sequence == command.Sequence
+	case runner.TerminalResize:
+		return frame.Kind == runner.TerminalResizeResult && frame.Generation == command.Generation && frame.Rows == command.Rows && frame.Cols == command.Cols
+	case runner.TerminalHumanReply:
+		return frame.Kind == runner.TerminalHumanReplyResult
+	default:
+		return false
+	}
+}
+
 func (attempt *liveAttempt) shutdownController() error {
 	if attempt == nil || attempt.controller == nil {
 		return nil
 	}
 	var result error
+	attempt.binding = terminalBinding{}
 	if !attempt.terminalSeen {
 		result = attempt.terminateController()
 	}
@@ -276,6 +450,7 @@ func (attempt *liveAttempt) handleRunnerEvent(event runner.AttemptEvent) (bool, 
 			return false, runner.ErrState
 		}
 		attempt.terminalSeen = true
+		attempt.binding = terminalBinding{}
 		attempt.terminalEvent = &event
 		attempt.broadcast(TerminalEvent{Kind: TerminalEventExit, ExitCode: event.Terminal.Terminal.Exit.Code, ExitSignal: event.Terminal.Terminal.Exit.Signal, Aborted: event.Terminal.Terminal.Exit.Aborted})
 		attempt.closeSubscribers(ErrTerminalClosed)
@@ -322,6 +497,15 @@ func (attempt *liveAttempt) routeFrame(frame runner.TerminalFrame) error {
 		return nil
 	case runner.TerminalPTYEOF:
 		attempt.broadcast(TerminalEvent{Kind: TerminalEventPTYEOF})
+		return nil
+	case runner.TerminalGenerationResult, runner.TerminalInputResult, runner.TerminalResizeResult, runner.TerminalHumanReplyResult:
+		// A bounded effect may already have returned uncertainty before its
+		// correlated result arrives. The caller never treats that late frame as
+		// success or retries the effect; correlations the owner never allocated
+		// remain a protocol violation.
+		if frame.Correlation == 0 || frame.Correlation > attempt.lastCorrelation {
+			return runner.ErrState
+		}
 		return nil
 	default:
 		return runner.ErrState
@@ -442,9 +626,9 @@ func (attempt *liveAttempt) acceptOutput(subscriber *TerminalAttachment, event T
 }
 
 func (attempt *liveAttempt) handleAttach(attachment *TerminalAttachment, sessionID kernel.TerminalSessionID, sequence uint64) error {
-	// The operation gate is acquired below before reading durable phase/session
-	// state. An attach processed before terminalSeen/finalizing wins; after
-	// either boundary it is refused, never delivered across that boundary.
+	// AttachTerminal holds the operation gate before this command enters the
+	// owner mailbox. An attach accepted before finalizing wins; one queued after
+	// the durable boundary reloads that state and is refused.
 	if !attempt.readySeen || attempt.terminalSeen {
 		return ErrTerminalNotReady
 	}
@@ -457,8 +641,6 @@ func (attempt *liveAttempt) handleAttach(attachment *TerminalAttachment, session
 	if attempt.daemon == nil || attempt.daemon.store == nil {
 		return kernel.ErrCorruptState
 	}
-	attempt.daemon.operationMu.Lock()
-	defer attempt.daemon.operationMu.Unlock()
 	attempt.daemon.attemptMu.Lock()
 	closing := attempt.daemon.closing
 	attempt.daemon.attemptMu.Unlock()
