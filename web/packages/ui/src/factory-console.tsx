@@ -19,25 +19,25 @@ const STATUS_LABELS: Record<SessionStatus, string> = {
   closed: "CLOSED",
 };
 
-const ERROR_LABELS: Record<string, string> = {
-  connection: "Connection unavailable.",
-  closed: "Connection closed.",
-  pairing_required: "Pair this browser client before connecting.",
-  pairing_uncertain: "Pairing result is uncertain. Wait before trying again.",
-  storage_unavailable: "Browser key storage is unavailable.",
-  crypto_unavailable: "Browser cryptography is unavailable.",
-  malformed: "The server sent an invalid frame.",
-  oversized: "The server frame exceeded the protocol limit.",
-  unsupported_version: "The server protocol version is unsupported.",
-  wrong_direction: "The server sent an invalid frame direction.",
-  unauthorized: "This browser client is not authorized.",
-  invalid_request: "The request was rejected.",
-  rate_limited: "The request was rate limited.",
-  not_found: "The requested item was not found.",
-  stale: "The requested state is stale.",
-  too_large: "The request was too large.",
-  internal: "The server could not complete the request.",
-};
+const ERROR_LABELS = new Map<string, string>([
+  ["connection", "Connection unavailable."],
+  ["closed", "Connection closed."],
+  ["pairing_required", "Pair this browser client before connecting."],
+  ["pairing_uncertain", "Pairing result is uncertain. Wait before trying again."],
+  ["storage_unavailable", "Browser key storage is unavailable."],
+  ["crypto_unavailable", "Browser cryptography is unavailable."],
+  ["malformed", "The server sent an invalid frame."],
+  ["oversized", "The server frame exceeded the protocol limit."],
+  ["unsupported_version", "The server protocol version is unsupported."],
+  ["wrong_direction", "The server sent an invalid frame direction."],
+  ["unauthorized", "This browser client is not authorized."],
+  ["invalid_request", "The request was rejected."],
+  ["rate_limited", "The request was rate limited."],
+  ["not_found", "The requested item was not found."],
+  ["stale", "The requested state is stale."],
+  ["too_large", "The request was too large."],
+  ["internal", "The server could not complete the request."],
+]);
 
 export function FactoryConsole({ status, state, error, onRetry }: FactoryConsoleProps) {
   const projects = state === undefined ? undefined : state.projects;
@@ -61,7 +61,7 @@ export function FactoryConsole({ status, state, error, onRetry }: FactoryConsole
 
       {error === undefined ? null : (
         <p className="dfFactoryConsole__error" role="alert">
-          {ERROR_LABELS[error.code] ?? "The connection could not continue."}
+          {ERROR_LABELS.get(error.code) ?? "The connection could not continue."}
         </p>
       )}
 

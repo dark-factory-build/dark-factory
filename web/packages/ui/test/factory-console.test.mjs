@@ -24,12 +24,21 @@ const render = (props = {}) => renderToStaticMarkup(createElement(FactoryConsole
 }));
 
 test("projects, agents, tasks, and requests retain their canonical relationships", () => {
+  const request = [...fixtureState.humanRequests.values()][0];
+  const task = fixtureState.tasks.get(request.task_id);
+  const agent = fixtureState.agents.get(request.agent_id);
+  assert.ok(task);
+  assert.ok(agent);
+  assert.equal(request.project_id, task.project_id);
+  assert.equal(request.project_id, agent.project_id);
+  assert.equal(request.agent_id, task.assigned_agent_id);
+
   const markup = render();
   assert.match(markup, /North Workshop/);
   assert.match(markup, /South Workshop/);
   assert.match(markup, /WORKER · North Workshop/);
   assert.match(markup, /PRIORITY 10 · North Workshop/);
-  assert.match(markup, /South Workshop · TASK 31313131/);
+  assert.match(markup, /North Workshop · TASK 31313131/);
   assert.match(markup, /AGENT 21212121/);
 });
 
@@ -71,6 +80,14 @@ test("protocol errors remain finite and never expose their message", () => {
   const markup = render({ status: "closed", error: new ProtocolError("malformed"), onRetry: () => {} });
   assert.match(markup, /The server sent an invalid frame\./);
   assert.equal(markup.includes("malformed"), false);
+});
+
+test("unknown and inherited error codes use a finite fallback", () => {
+  for (const code of ["__proto__", "constructor", "toString", "hasOwnProperty", ""]) {
+    const markup = render({ status: "closed", error: { code } });
+    assert.match(markup, /The connection could not continue\./);
+    if (code !== "") assert.equal(markup.includes(code), false);
+  }
 });
 
 test("empty and maximum bounded collections have explicit, semantic output", () => {
