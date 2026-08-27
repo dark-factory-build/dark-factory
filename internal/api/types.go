@@ -86,12 +86,23 @@ type WebStatus struct {
 	ProtocolVersion  uint16   `json:"protocol_version"`
 }
 
+// WebLaunchOutcome describes whether the daemon knows that the challenge mint
+// committed. A commit-uncertain launch carries an exact cleanup identity but
+// must never be opened by factoryctl.
+type WebLaunchOutcome string
+
+const (
+	WebLaunchReady     WebLaunchOutcome = "ready"
+	WebLaunchUncertain WebLaunchOutcome = "uncertain"
+)
+
 // WebLaunch contains the one-shot browser URL only inside the owner-only
 // local API response. factoryctl consumes it without printing or logging it.
 type WebLaunch struct {
-	LaunchURL       string `json:"launch_url"`
-	ExpiresAtMs     uint64 `json:"expires_at_ms"`
-	ChallengeDigest string `json:"challenge_digest"`
+	LaunchURL       string           `json:"launch_url"`
+	ExpiresAtMs     uint64           `json:"expires_at_ms"`
+	ChallengeDigest string           `json:"challenge_digest"`
+	Outcome         WebLaunchOutcome `json:"outcome"`
 }
 
 type WebClient struct {

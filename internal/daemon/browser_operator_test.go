@@ -27,6 +27,9 @@ func TestWebOperatorOpenStatusListAndRevoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if launch.Outcome != api.WebLaunchReady {
+		t.Fatalf("launch outcome = %q, want %q", launch.Outcome, api.WebLaunchReady)
+	}
 	parsed, err := url.Parse(launch.LaunchURL)
 	if err != nil || parsed.Scheme != "https" || parsed.Host != "app.darkfactory.build" || parsed.Path != "/" || parsed.RawQuery != "" || !strings.HasPrefix(parsed.Fragment, "df_pair=") {
 		t.Fatalf("launch URL = %q, err=%v", launch.LaunchURL, err)

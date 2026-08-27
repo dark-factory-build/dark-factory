@@ -1367,8 +1367,8 @@ may select a subset of those fixed optional bits, subject to daemon policy.
 The browser never submits, proposes or widens capabilities. This is one
 concrete bitmask, not a generic permission framework.
 
-Security-event kinds are exactly `challenge_minted`, `client_paired`,
-`duplicate_fingerprint`, and `client_revoked` in v1. Challenge consumption is
+Security-event kinds are exactly `challenge_minted`, `challenge_abandoned`,
+`client_paired`, `duplicate_fingerprint`, and `client_revoked` in v1. Challenge consumption is
 already represented by its row and does not receive a duplicate event.
 Unauthenticated refusal traffic is bounded in memory rather than becoming a
 SQLite write-amplification path. After appending an event, the same transaction
@@ -1521,15 +1521,30 @@ reset, capability escalation and daemon restart are explicit tests.
 `factoryctl web open` asks the owner-only Unix API to create one short-lived,
 single-use challenge bound to the current boot ID and intended Origin, then
 opens the hosted app with that challenge only in the URL fragment. A challenge
-is forbidden in the path or query. The host sends `Referrer-Policy: no-referrer`
-and loads no analytics or third-party resource. Its first synchronous
-first-party bootstrap reads and clears the fragment with `history.replaceState`
-before starting any application network request, then registers the browser
-public key with the loopback daemon. HTTP access logs, requests, referrers,
-telemetry, errors and copied post-bootstrap URLs must never contain the
-challenge. Reuse, expiry, wrong daemon/origin/key/client and revocation fail
-closed. `web status`, `pair/open`, `list-clients`, and `revoke` are the initial
-CLI recovery surfaces; exact names may collapse if one command suffices.
+is forbidden in the path or query, including an empty query marker. The host
+sends `Referrer-Policy: no-referrer` and loads no analytics or third-party
+resource. Its first synchronous first-party bootstrap reads and clears the
+fragment with `history.replaceState` before starting any application network
+request, then registers the browser public key with the loopback daemon. HTTP
+access logs, requests, referrers, telemetry, errors and copied post-bootstrap
+URLs must never contain the challenge. Reuse, expiry, wrong daemon/origin/key/
+client and revocation fail closed. The exact CLI recovery surface is
+`web status`, `web open`, `web list-clients`, and `web revoke`; there is no
+separate pairing alias.
+
+The daemon returns a typed launch outcome. `ready` means the challenge mint
+transaction committed and factoryctl may invoke its injected browser opener.
+If SQLite reports an ambiguous COMMIT, the Store reconciles the exact digest
+on a fresh reader: a durably observed challenge is returned as `uncertain`
+with the URL fragment and SHA-256 digest still paired, but factoryctl never
+opens or retries it and instead performs one exact owner-authenticated
+abandonment. A commit-before-apply or otherwise durably absent challenge
+returns no launch identity and the ordinary pre-mint error. If exact identity
+or cleanup cannot be proved, factoryctl reports `challenge cleanup remains
+unresolved`; it never chooses a digest from a malformed or mismatched URL.
+Successful abandonment is an empty acknowledgement backed by the durable
+`challenge_abandoned` security event and proves that no active exact challenge
+remains.
 
 The hosted app must use first-party bundled scripts, strict CSP, controlled
 dependencies, no third-party analytics in the terminal context, and safe
@@ -1744,8 +1759,8 @@ browser manifest, terminal messages or HumanRequest transitions concurrently.
 8. **Lane E: public UI** — own `web/packages/ui` and `web/apps/dev`: BUILDING,
    AGENT, xterm terminal, NEEDS YOU, responsive/accessibility and browser-state
    tests. It depends only on the public client.
-9. **Lane F: platform/CLI** — init, service, doctor, recovery, web open/pair/list/
-   revoke, packaging and hard-cutover plumbing after C stabilizes.
+9. **Lane F: platform/CLI** — init, service, doctor, recovery, web status/open/
+   list-clients/revoke, packaging and hard-cutover plumbing after C stabilizes.
 10. **Lane G: private host** — separate `dark-factory-site` worktree consuming
    an exact public artifact after D/E stabilize; no daemon-contract edits.
 11. **Integration gate** — revised shell-provider vertical slice, crash cuts,

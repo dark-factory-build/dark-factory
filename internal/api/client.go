@@ -633,6 +633,9 @@ func validWebStatus(status WebStatus) bool {
 }
 
 func validWebLaunch(launch WebLaunch) bool {
+	if launch.Outcome != WebLaunchReady && launch.Outcome != WebLaunchUncertain {
+		return false
+	}
 	return validText(launch.LaunchURL, 1, 4096) && strings.HasPrefix(launch.LaunchURL, "https://") && launch.ExpiresAtMs > 0 && validDigest(launch.ChallengeDigest)
 }
 

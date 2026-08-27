@@ -122,14 +122,36 @@ func (daemon *Daemon) OpenBrowser(ctx context.Context) (api.WebLaunch, error) {
 		return api.WebLaunch{}, fmt.Errorf("%w: browser challenge generation failed", kernel.ErrBusy)
 	}
 	digest := kernel.HashBrowserChallenge(challenge[:])
-	if _, err := daemon.store.CreateBrowserPairingChallenge(ctx, digest, runtime.backend.boot, webProductionOrigin, webCapabilities, at, expires); err != nil {
+	persisted, err := daemon.store.CreateBrowserPairingChallenge(ctx, digest, runtime.backend.boot, webProductionOrigin, webCapabilities, at, expires)
+	if err != nil {
+		var unknown *kernel.OutcomeUnknownError
+		if errors.As(err, &unknown) && browserChallengeDigestKnown(persisted.Digest) {
+			// The write may have committed even though SQLite could not report
+			// COMMIT success. Return the exact identity only as a cleanup
+			// opportunity; factoryctl will never open an uncertain launch.
+			return browserLaunch(challenge, digest, expires, api.WebLaunchUncertain), nil
+		}
 		return api.WebLaunch{}, err
 	}
+	return browserLaunch(challenge, digest, expires, api.WebLaunchReady), nil
+}
+
+func browserLaunch(challenge [browserprotocol.ChallengeSize]byte, digest kernel.BrowserChallengeDigest, expires kernel.UnixMillis, outcome api.WebLaunchOutcome) api.WebLaunch {
 	return api.WebLaunch{
 		LaunchURL:       webProductionOrigin + "/#df_pair=" + hex.EncodeToString(challenge[:]),
 		ExpiresAtMs:     uint64(expires.Int64()),
 		ChallengeDigest: hex.EncodeToString(digest.Bytes()),
-	}, nil
+		Outcome:         outcome,
+	}
+}
+
+func browserChallengeDigestKnown(digest kernel.BrowserChallengeDigest) bool {
+	for _, value := range digest.Bytes() {
+		if value != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func (daemon *Daemon) AbandonBrowserOpen(ctx context.Context, input api.WebAbandonOpenInput) (api.WebAbandonOpenResult, error) {

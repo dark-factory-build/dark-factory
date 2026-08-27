@@ -388,7 +388,7 @@ func writeJSON(stdout io.Writer, value any) int {
 
 func validLaunch(launch api.WebLaunch) bool {
 	_, exact := exactLaunchDigest(launch)
-	return exact && launch.ExpiresAtMs > 0
+	return exact && launch.ExpiresAtMs > 0 && launch.Outcome == api.WebLaunchReady
 }
 
 // exactLaunchDigest proves the only cleanup identity accepted by factoryctl:
@@ -400,7 +400,7 @@ func exactLaunchDigest(launch api.WebLaunch) (string, bool) {
 		return "", false
 	}
 	parsed, err := url.Parse(launch.LaunchURL)
-	if err != nil || parsed.Scheme != "https" || parsed.Host != "app.darkfactory.build" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment == "" || parsed.RawFragment != "" || parsed.Path != "/" || !strings.HasPrefix(parsed.Fragment, "df_pair=") {
+	if err != nil || parsed.Scheme != "https" || parsed.Host != "app.darkfactory.build" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment == "" || parsed.RawFragment != "" || parsed.Path != "/" || !strings.HasPrefix(parsed.Fragment, "df_pair=") {
 		return "", false
 	}
 	raw := strings.TrimPrefix(parsed.Fragment, "df_pair=")

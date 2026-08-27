@@ -135,6 +135,10 @@ func validateBrowserID(id BrowserClientID) error {
 	return nil
 }
 
+// CreateBrowserPairingChallenge returns the durable challenge when the write
+// commits. On an ambiguous COMMIT it reconciles by digest: a returned
+// challenge is an exact cleanup identity, while a zero challenge means the
+// write was durably absent. Callers must not retry the ambiguous write.
 func (store *Store) CreateBrowserPairingChallenge(ctx context.Context, digest BrowserChallengeDigest, bootID BootID, origin string, capabilities BrowserCapabilityMask, created, expires UnixMillis) (BrowserPairingChallenge, error) {
 	if err := validateOrigin(origin); err != nil || bootID.zero() || created.Int64() < 0 || expires.Int64() < 0 || !capabilities.validPairing() || expires.Int64() <= created.Int64() || expires.Int64()-created.Int64() > 5*60*1000 {
 		if err != nil {
@@ -182,9 +186,34 @@ func (store *Store) CreateBrowserPairingChallenge(ctx context.Context, digest Br
 		return BrowserPairingChallenge{}, tx.Rollback(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return BrowserPairingChallenge{}, err
+		var unknown *OutcomeUnknownError
+		if !errors.As(err, &unknown) {
+			return BrowserPairingChallenge{}, err
+		}
+		// COMMIT can be durable even when SQLite reports an ambiguous result.
+		// Reconcile by the exact digest before returning: a found row lets the
+		// daemon return a safe cleanup identity, while a missing row preserves
+		// the ordinary pre-mint rejection. If the read itself is uncertain,
+		// retain the locally known identity so the caller fails closed.
+		observed, found, observeErr := store.browserChallengeAfterCommitUnknown(ctx, digest)
+		if observeErr != nil {
+			return challenge, errors.Join(err, observeErr)
+		}
+		if !found {
+			return BrowserPairingChallenge{}, err
+		}
+		return observed, err
 	}
 	return challenge, nil
+}
+
+func (store *Store) browserChallengeAfterCommitUnknown(ctx context.Context, digest BrowserChallengeDigest) (BrowserPairingChallenge, bool, error) {
+	connection, err := store.readerConnection(ctx)
+	if err != nil {
+		return BrowserPairingChallenge{}, false, err
+	}
+	defer connection.Close()
+	return browserChallengeByDigest(ctx, connection, digest)
 }
 
 // AbandonBrowserPairingChallenge removes exactly one daemon-minted,

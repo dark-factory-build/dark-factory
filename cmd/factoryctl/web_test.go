@@ -130,7 +130,7 @@ func TestWebOpenUsesExactPrivateLaunchAndDoesNotPrintChallenge(t *testing.T) {
 		if call.Kind() != api.CallWebOpen {
 			return mustWebErrorReply(t, api.RemoteInvalidRequest)
 		}
-		reply, err := api.NewWebLaunchReply(api.WebLaunch{LaunchURL: "https://app.darkfactory.build/#df_pair=" + challenge, ExpiresAtMs: 1234, ChallengeDigest: "4884fdaafea47c29fea7159d0daddd9c085d6200e1359e85bb81736af6b7c837"})
+		reply, err := api.NewWebLaunchReply(api.WebLaunch{LaunchURL: "https://app.darkfactory.build/#df_pair=" + challenge, ExpiresAtMs: 1234, ChallengeDigest: "4884fdaafea47c29fea7159d0daddd9c085d6200e1359e85bb81736af6b7c837", Outcome: api.WebLaunchReady})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -159,7 +159,7 @@ func TestWebOpenRejectsQueryLaunchWithoutOpening(t *testing.T) {
 		if call.Kind() != api.CallWebOpen {
 			return mustWebErrorReply(t, api.RemoteInvalidRequest)
 		}
-		reply, err := api.NewWebLaunchReply(api.WebLaunch{LaunchURL: "https://app.darkfactory.build/?leak=1#df_pair=" + challenge, ExpiresAtMs: 1234, ChallengeDigest: "4884fdaafea47c29fea7159d0daddd9c085d6200e1359e85bb81736af6b7c837"})
+		reply, err := api.NewWebLaunchReply(api.WebLaunch{LaunchURL: "https://app.darkfactory.build/?leak=1#df_pair=" + challenge, ExpiresAtMs: 1234, ChallengeDigest: "4884fdaafea47c29fea7159d0daddd9c085d6200e1359e85bb81736af6b7c837", Outcome: api.WebLaunchReady})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -177,6 +177,55 @@ func TestWebOpenRejectsQueryLaunchWithoutOpening(t *testing.T) {
 	}
 	if result.err != nil {
 		t.Fatal(result.err)
+	}
+}
+
+func TestWebOpenUncertainLaunchIsAbandonedWithoutOpeningOrRetrying(t *testing.T) {
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	challenge := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	digest := "4884fdaafea47c29fea7159d0daddd9c085d6200e1359e85bb81736af6b7c837"
+	responses := serveMany(fixture.listener,
+		func(call api.Call) api.Reply {
+			if call.Kind() != api.CallWebOpen {
+				return mustWebErrorReply(t, api.RemoteInvalidRequest)
+			}
+			reply, err := api.NewWebLaunchReply(api.WebLaunch{
+				LaunchURL:       "https://app.darkfactory.build/#df_pair=" + challenge,
+				ExpiresAtMs:     1234,
+				ChallengeDigest: digest,
+				Outcome:         api.WebLaunchUncertain,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return reply
+		},
+		func(call api.Call) api.Reply {
+			if call.Kind() != api.CallWebAbandonOpen {
+				return mustWebErrorReply(t, api.RemoteInvalidRequest)
+			}
+			input, ok := call.WebAbandonOpenInput()
+			if !ok || input.ChallengeDigest != digest {
+				return mustWebErrorReply(t, api.RemoteInvalidRequest)
+			}
+			return api.NewWebAbandonReply(api.WebAbandonOpenResult{})
+		},
+	)
+	opened := 0
+	var stdout, stderr bytes.Buffer
+	exit := runWithOpener(context.Background(), []string{"web", "open"}, webEnvironment(fixture), &stdout, &stderr, func(context.Context, string) error {
+		opened++
+		return nil
+	})
+	results := awaitMany(t, responses, 2)
+	if exit == 0 || opened != 0 || stdout.Len() != 0 || stderr.String() != "factoryctl: web open failed\n" {
+		t.Fatalf("uncertain launch = exit %d opened %d stdout %q stderr %q", exit, opened, stdout.String(), stderr.String())
+	}
+	for index, result := range results {
+		if result.err != nil {
+			t.Fatalf("server call %d: %v", index, result.err)
+		}
 	}
 }
 
@@ -204,6 +253,7 @@ func TestWebOpenMismatchesLeaveAllChallengesAndReportUnresolved(t *testing.T) {
 					LaunchURL:       "https://app.darkfactory.build/#df_pair=" + test.url,
 					ExpiresAtMs:     1234,
 					ChallengeDigest: test.digest,
+					Outcome:         api.WebLaunchReady,
 				})
 				if err != nil {
 					t.Fatal(err)
@@ -239,13 +289,14 @@ func TestExactLaunchDigestRejectsInvalidAndUnmatchedLaunches(t *testing.T) {
 		digest string
 	}{
 		{name: "invalid URL", url: "https://app.darkfactory.build/?query=secret#df_pair=" + challenge, digest: digest},
+		{name: "empty query marker", url: "https://app.darkfactory.build/?#df_pair=" + challenge, digest: digest},
 		{name: "encoded fragment", url: "https://app.darkfactory.build/#df_pair=%30" + challenge[2:], digest: digest},
 		{name: "missing digest", url: "https://app.darkfactory.build/#df_pair=" + challenge},
 		{name: "short digest", url: "https://app.darkfactory.build/#df_pair=" + challenge, digest: digest[:63]},
 		{name: "mismatched digest", url: "https://app.darkfactory.build/#df_pair=" + challenge, digest: "1111111111111111111111111111111111111111111111111111111111111111"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if got, ok := exactLaunchDigest(api.WebLaunch{LaunchURL: test.url, ExpiresAtMs: 1234, ChallengeDigest: test.digest}); ok || got != "" {
+			if got, ok := exactLaunchDigest(api.WebLaunch{LaunchURL: test.url, ExpiresAtMs: 1234, ChallengeDigest: test.digest, Outcome: api.WebLaunchReady}); ok || got != "" {
 				t.Fatalf("invalid launch identity = %q, %t", got, ok)
 			}
 		})
@@ -262,7 +313,7 @@ func TestWebOpenFailureAbandonsExactChallengeWithFreshContext(t *testing.T) {
 			if call.Kind() != api.CallWebOpen {
 				return mustWebErrorReply(t, api.RemoteInvalidRequest)
 			}
-			reply, err := api.NewWebLaunchReply(api.WebLaunch{LaunchURL: "https://app.darkfactory.build/#df_pair=" + challenge, ExpiresAtMs: 1234, ChallengeDigest: digest})
+			reply, err := api.NewWebLaunchReply(api.WebLaunch{LaunchURL: "https://app.darkfactory.build/#df_pair=" + challenge, ExpiresAtMs: 1234, ChallengeDigest: digest, Outcome: api.WebLaunchReady})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -307,7 +358,7 @@ func TestWebOpenFailureReportsCleanupUncertainty(t *testing.T) {
 	digest := "4884fdaafea47c29fea7159d0daddd9c085d6200e1359e85bb81736af6b7c837"
 	responses := serveMany(fixture.listener,
 		func(call api.Call) api.Reply {
-			reply, err := api.NewWebLaunchReply(api.WebLaunch{LaunchURL: "https://app.darkfactory.build/#df_pair=" + challenge, ExpiresAtMs: 1234, ChallengeDigest: digest})
+			reply, err := api.NewWebLaunchReply(api.WebLaunch{LaunchURL: "https://app.darkfactory.build/#df_pair=" + challenge, ExpiresAtMs: 1234, ChallengeDigest: digest, Outcome: api.WebLaunchReady})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -347,7 +398,7 @@ func TestWebOpenRepeatedFailuresDoNotAccumulateCleanupChallenges(t *testing.T) {
 			if call.Kind() != api.CallWebOpen {
 				return mustWebErrorReply(t, api.RemoteInvalidRequest)
 			}
-			reply, err := api.NewWebLaunchReply(api.WebLaunch{LaunchURL: "https://app.darkfactory.build/#df_pair=" + challenge, ExpiresAtMs: 1234, ChallengeDigest: digest})
+			reply, err := api.NewWebLaunchReply(api.WebLaunch{LaunchURL: "https://app.darkfactory.build/#df_pair=" + challenge, ExpiresAtMs: 1234, ChallengeDigest: digest, Outcome: api.WebLaunchReady})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -364,7 +415,7 @@ func TestWebOpenRepeatedFailuresDoNotAccumulateCleanupChallenges(t *testing.T) {
 		if call.Kind() != api.CallWebOpen {
 			return mustWebErrorReply(t, api.RemoteInvalidRequest)
 		}
-		reply, err := api.NewWebLaunchReply(api.WebLaunch{LaunchURL: "https://app.darkfactory.build/#df_pair=" + challenge, ExpiresAtMs: 1234, ChallengeDigest: digest})
+		reply, err := api.NewWebLaunchReply(api.WebLaunch{LaunchURL: "https://app.darkfactory.build/#df_pair=" + challenge, ExpiresAtMs: 1234, ChallengeDigest: digest, Outcome: api.WebLaunchReady})
 		if err != nil {
 			t.Fatal(err)
 		}

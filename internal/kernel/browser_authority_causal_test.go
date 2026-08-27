@@ -43,6 +43,40 @@ func mintBrowserChallenge(t *testing.T, store *Store, seed byte, boot BootID, cr
 	return digest
 }
 
+func TestBrowserChallengeCommitOutcomeReconcilesExactIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		fault      storeFaultKind
+		wantDigest bool
+		wantRows   int64
+	}{
+		{name: "commit before apply", fault: storeFaultCommitBefore, wantRows: 0},
+		{name: "commit after apply", fault: storeFaultCommitAfter, wantDigest: true, wantRows: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, path := newBrowserStore(t)
+			defer store.Close()
+			boot := browserTestBoot(t, 190)
+			digest := HashBrowserChallenge([]byte("ambiguous-browser-challenge"))
+			plan := installFaultWriter(t, store, path)
+			plan.arm(test.fault)
+			challenge, err := store.CreateBrowserPairingChallenge(context.Background(), digest, boot, "https://app.example", BrowserCapabilityObserve, mustTime(t, 10), mustTime(t, 100))
+			requireStoreOutcomeUnknown(t, err)
+			assertFaultWriterEvicted(t, store, plan)
+			got := !bytes.Equal(challenge.Digest.Bytes(), make([]byte, DigestBytes))
+			if got != test.wantDigest {
+				t.Fatalf("returned cleanup identity known = %t, want %t", got, test.wantDigest)
+			}
+			if got := browserTableCount(t, store, "browser_pairing_challenges"); got != test.wantRows {
+				t.Fatalf("durable challenge rows = %d, want %d", got, test.wantRows)
+			}
+			if test.wantDigest && !bytes.Equal(challenge.Digest.Bytes(), digest.Bytes()) {
+				t.Fatalf("returned digest = %x, want exact %x", challenge.Digest.Bytes(), digest.Bytes())
+			}
+		})
+	}
+}
+
 func pairBrowserClient(t *testing.T, store *Store, digest BrowserChallengeDigest, boot BootID, id BrowserClientID, publicKey []byte, at int64) BrowserClient {
 	t.Helper()
 	client, err := store.RedeemBrowserPairingChallenge(context.Background(), digest, boot, "https://app.example", id, publicKey, mustTime(t, at))
@@ -671,7 +705,7 @@ func TestBrowserSecurityEventsArePrivateBoundedAndGapSafe(t *testing.T) {
 	if err := store.readers.QueryRow(`SELECT COUNT(*) FROM browser_pairing_challenges WHERE secret_digest = ?`, secret).Scan(&rawDigestMatches); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.readers.QueryRow(`SELECT COUNT(*) FROM browser_security_events WHERE kind NOT IN ('challenge_minted', 'client_paired', 'duplicate_fingerprint', 'client_revoked')`).Scan(&secretEvents); err != nil {
+	if err := store.readers.QueryRow(`SELECT COUNT(*) FROM browser_security_events WHERE kind NOT IN ('challenge_minted', 'challenge_abandoned', 'client_paired', 'duplicate_fingerprint', 'client_revoked')`).Scan(&secretEvents); err != nil {
 		t.Fatal(err)
 	}
 	if rawDigestMatches != 0 || secretEvents != 0 {
