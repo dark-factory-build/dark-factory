@@ -819,7 +819,10 @@ func validateStateSnapshot(value StateSnapshot) error {
 }
 
 func validateStateRestart(value StateRestart) error {
-	if value.Floor > value.Head {
+	// A fresh Store has no events and therefore uses the canonical empty
+	// chronology head=0,floor=1. Every other restart is nonempty and cannot
+	// place the retention floor beyond its durable head.
+	if value.Head == 0 && value.Floor != 1 || value.Head != 0 && value.Floor > value.Head {
 		return fmt.Errorf("%w: restart chronology", ErrMalformed)
 	}
 	switch value.Reason {

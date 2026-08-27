@@ -168,7 +168,7 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
     case "STATE_SNAPSHOT": return stateSnapshot(body, wire);
     case "STATE_RESTART": {
       exactKeys(body, ["head", "floor", "reason"]); const head = decimal(body.head, wire); const floor = decimal(body.floor, wire);
-      if (floor > head || typeof body.reason !== "string" || !["head_changed", "gap", "pruned", "hidden_dependency"].includes(body.reason)) malformed();
+      if ((head === 0n ? floor !== 1n : floor > head) || typeof body.reason !== "string" || !["head_changed", "gap", "pruned", "hidden_dependency"].includes(body.reason)) malformed();
       return { head, floor, reason: body.reason as RestartReason };
     }
     case "STATE_SUBSCRIBE": exactKeys(body, ["after"]); return { after: decimal(body.after, wire) };

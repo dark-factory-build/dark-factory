@@ -411,7 +411,7 @@ func (current *connection) sendUpdate(update StateUpdate) error {
 			if current.subscriptionSequence < update.Floor {
 				reason = browserprotocol.RestartPruned
 			}
-			return current.sendRestart(browserprotocol.StateRestart{Head: head, Floor: update.Floor, Reason: reason})
+			return current.sendRestart(browserprotocol.StateRestart{Head: head, Floor: update.Floor, Reason: reason}, false)
 		}
 		payload, err := browserprotocol.EncodeStateEvent(current.subscriptionID, *update.Event)
 		if err == nil {
@@ -424,15 +424,16 @@ func (current *connection) sendUpdate(update StateUpdate) error {
 		}
 		return err
 	}
-	return current.sendRestart(*update.Restart)
+	return current.sendRestart(*update.Restart, true)
 }
 
 func (current *connection) stateHeadRegressed(next browserprotocol.Decimal) bool {
 	return current.subscriptionHeadSet && next < current.subscriptionHead
 }
 
-func (current *connection) sendRestart(restart browserprotocol.StateRestart) error {
-	if restart.Head < current.subscriptionSequence || current.subscriptionHeadSet && restart.Head < current.subscriptionHead {
+func (current *connection) sendRestart(restart browserprotocol.StateRestart, backendRestart bool) error {
+	initialFutureCursor := backendRestart && !current.subscriptionHeadSet && restart.Reason == browserprotocol.RestartGap
+	if restart.Head < current.subscriptionSequence && !initialFutureCursor || current.subscriptionHeadSet && restart.Head < current.subscriptionHead {
 		return fmt.Errorf("restart chronology regressed")
 	}
 	payload, err := browserprotocol.EncodeStateRestart(current.subscriptionID, restart)

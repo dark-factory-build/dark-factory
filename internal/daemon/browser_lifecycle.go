@@ -31,11 +31,10 @@ func (daemon *Daemon) ListenBrowser(address string, allowedOrigins []string) (*B
 		return nil, fmt.Errorf("%w: invalid browser daemon", kernel.ErrInvalidValue)
 	}
 	daemon.browserMu.Lock()
+	defer daemon.browserMu.Unlock()
 	if daemon.browserClosing {
-		daemon.browserMu.Unlock()
 		return nil, browser.ErrUnauthorized
 	}
-	daemon.browserMu.Unlock()
 	backend, err := newProductionBrowserBackend(daemon)
 	if err != nil {
 		return nil, err
@@ -46,17 +45,10 @@ func (daemon *Daemon) ListenBrowser(address string, allowedOrigins []string) (*B
 		return nil, err
 	}
 	runtime := &BrowserRuntime{daemon: daemon, server: server, backend: backend}
-	daemon.browserMu.Lock()
-	if daemon.browserClosing {
-		daemon.browserMu.Unlock()
-		_ = runtime.Close()
-		return nil, browser.ErrUnauthorized
-	}
 	if daemon.browsers == nil {
 		daemon.browsers = make(map[*BrowserRuntime]struct{})
 	}
 	daemon.browsers[runtime] = struct{}{}
-	daemon.browserMu.Unlock()
 	return runtime, nil
 }
 
@@ -107,10 +99,10 @@ func (daemon *Daemon) closeBrowsers() error {
 	return errors.Join(closeErrors...)
 }
 
-// CloseClient terminates all existing sockets for a client after a durable
+// closeClient terminates all existing sockets for a client after a durable
 // revocation has committed. The owner-only revocation lane must use the same
 // backend client gate before calling this non-reentrant transport callback.
-func (runtime *BrowserRuntime) CloseClient(id kernel.BrowserClientID) error {
+func (runtime *BrowserRuntime) closeClient(id kernel.BrowserClientID) error {
 	if runtime == nil || runtime.server == nil {
 		return nil
 	}

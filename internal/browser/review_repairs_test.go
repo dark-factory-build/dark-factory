@@ -297,8 +297,8 @@ func TestSubscriptionRestartCannotRegressAcceptedChronology(t *testing.T) {
 		after   browserprotocol.Decimal
 		restart browserprotocol.StateRestart
 	}{
-		{name: "below accepted sequence", after: 7, restart: browserprotocol.StateRestart{Head: 6, Reason: browserprotocol.RestartGap}},
-		{name: "below accepted head", after: 7, restart: browserprotocol.StateRestart{Head: 7, Reason: browserprotocol.RestartHeadChanged}},
+		{name: "initial non-gap regression", after: 7, restart: browserprotocol.StateRestart{Head: 6, Reason: browserprotocol.RestartPruned}},
+		{name: "below accepted head", after: 7, restart: browserprotocol.StateRestart{Head: 8, Reason: browserprotocol.RestartHeadChanged}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			backend := newFakeBackend()
@@ -313,7 +313,7 @@ func TestSubscriptionRestartCannotRegressAcceptedChronology(t *testing.T) {
 				return backend.subCalls == 1
 			})
 			if test.name == "below accepted head" {
-				event := browserprotocol.HiddenAdvanceEvent(browserprotocol.HiddenAdvance{Sequence: 8, Head: 8})
+				event := browserprotocol.HiddenAdvanceEvent(browserprotocol.HiddenAdvance{Sequence: 8, Head: 9})
 				backend.sub.updates <- StateUpdate{Event: &event}
 				if frame := readServerFrame(t, connection); frame.Type != browserprotocol.TypeStateEvent {
 					t.Fatalf("accepted event=%+v", frame)
@@ -323,6 +323,29 @@ func TestSubscriptionRestartCannotRegressAcceptedChronology(t *testing.T) {
 			assertError(t, readServerFrame(t, connection), browserprotocol.ErrorInternal)
 			waitFor(t, func() bool { return backend.sub.closed.Load() == 1 })
 		})
+	}
+}
+
+func TestInitialFutureCursorGetsCanonicalGapRestart(t *testing.T) {
+	backend := newFakeBackend()
+	server := startServer(t, backend)
+	connection, _ := dialServer(t, server, testOrigin)
+	authenticate(t, connection)
+	subscribe, _ := browserprotocol.EncodeStateSubscribe("future", browserprotocol.StateSubscribe{After: 90})
+	writeClientFrame(t, connection, subscribe)
+	waitFor(t, func() bool {
+		backend.mu.Lock()
+		defer backend.mu.Unlock()
+		return backend.subCalls == 1
+	})
+	restart := browserprotocol.StateRestart{Head: 7, Floor: 2, Reason: browserprotocol.RestartGap}
+	backend.sub.updates <- StateUpdate{Restart: &restart}
+	frame := readServerFrame(t, connection)
+	if frame.Type != browserprotocol.TypeStateRestart || frame.ID != "future" || frame.Body.(browserprotocol.StateRestart) != restart {
+		t.Fatalf("future cursor restart = %+v", frame)
+	}
+	if backend.sub.closed.Load() != 1 {
+		t.Fatal("future cursor restart did not join subscription")
 	}
 }
 

@@ -59,6 +59,17 @@ test("control role, envelope, field and capability validation is closed", () => 
   assert.equal(decodeServerControl('{"v":1,"type":"AUTH_RESULT","id":"auth-1","body":{"client_id":"606162636465666768696a6b6c6d6e6f","capabilities":1} }').body.capabilities, 1);
 });
 
+test("state restart accepts only the canonical empty chronology", () => {
+  const restart = (head, floor) => `{"v":1,"type":"STATE_RESTART","id":"empty","body":{"head":"${head}","floor":"${floor}","reason":"gap"}}`;
+  const empty = decodeServerControl(restart(0, 1));
+  assert.equal(empty.body.head, 0n);
+  assert.equal(empty.body.floor, 1n);
+  assert.equal(encodeServerControl(empty), restart(0, 1));
+  for (const [head, floor] of [[0, 0], [0, 2], [2, 3]]) {
+    expectMalformed(() => decodeServerControl(restart(head, floor)));
+  }
+});
+
 test("pair and auth transcripts are byte-exact and verify with WebCrypto P-1363", async () => {
   const value = json("transcript_v1.json");
   const pair = value.pair;

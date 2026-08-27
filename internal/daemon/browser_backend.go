@@ -29,8 +29,7 @@ type browserBackend struct {
 	randomMu sync.Mutex
 	random   io.Reader
 
-	gateMu sync.Mutex
-	gates  map[kernel.BrowserClientID]*browserClientGate
+	clientGates *browserClientGates
 
 	subMu       sync.Mutex
 	closing     bool
@@ -43,14 +42,22 @@ type browserClientGate struct {
 	slot  chan struct{}
 }
 
+// browserClientGates serializes only operations for one exact durable browser
+// client. Store reads and writes remain the authority; this small ephemeral
+// gate merely closes the authenticate/effect-versus-revoke race.
+type browserClientGates struct {
+	mu    sync.Mutex
+	gates map[kernel.BrowserClientID]*browserClientGate
+}
+
 func newBrowserBackend(store *kernel.Store, now func() time.Time, random io.Reader) (*browserBackend, error) {
 	if store == nil || now == nil || random == nil {
 		return nil, fmt.Errorf("%w: invalid browser backend", kernel.ErrInvalidValue)
 	}
 	backend := &browserBackend{
 		store: store, now: now, random: random,
-		gates: make(map[kernel.BrowserClientID]*browserClientGate),
-		subs:  make(map[*browserStateSubscription]struct{}), stateSignal: make(chan struct{}),
+		clientGates: &browserClientGates{gates: make(map[kernel.BrowserClientID]*browserClientGate)},
+		subs:        make(map[*browserStateSubscription]struct{}), stateSignal: make(chan struct{}),
 	}
 	raw, err := backend.randomIdentifier()
 	if err != nil {
@@ -64,10 +71,15 @@ func newBrowserBackend(store *kernel.Store, now func() time.Time, random io.Read
 }
 
 func newProductionBrowserBackend(daemon *Daemon) (*browserBackend, error) {
-	if daemon == nil || daemon.store == nil || daemon.now == nil {
+	if daemon == nil || daemon.store == nil || daemon.now == nil || daemon.browserClientGates == nil {
 		return nil, fmt.Errorf("%w: invalid daemon browser backend", kernel.ErrInvalidValue)
 	}
-	return newBrowserBackend(daemon.store, daemon.now, rand.Reader)
+	backend, err := newBrowserBackend(daemon.store, daemon.now, rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	backend.clientGates = daemon.browserClientGates
+	return backend, nil
 }
 
 func (backend *browserBackend) Identity(ctx context.Context) (browser.Identity, error) {
@@ -248,34 +260,47 @@ func (backend *browserBackend) authorize(ctx context.Context, rawID [browserprot
 }
 
 func (backend *browserBackend) acquireClient(ctx context.Context, clientID kernel.BrowserClientID) (func(), error) {
-	backend.gateMu.Lock()
-	gate := backend.gates[clientID]
+	if backend == nil || backend.clientGates == nil {
+		return nil, browser.ErrUnauthorized
+	}
+	return backend.clientGates.acquire(ctx, clientID)
+}
+
+func (gates *browserClientGates) acquire(ctx context.Context, clientID kernel.BrowserClientID) (func(), error) {
+	if gates == nil {
+		return nil, browser.ErrUnauthorized
+	}
+	gates.mu.Lock()
+	if gates.gates == nil {
+		gates.gates = make(map[kernel.BrowserClientID]*browserClientGate)
+	}
+	gate := gates.gates[clientID]
 	if gate == nil {
 		gate = &browserClientGate{slot: make(chan struct{}, 1)}
 		gate.slot <- struct{}{}
-		backend.gates[clientID] = gate
+		gates.gates[clientID] = gate
 	}
 	gate.users++
-	backend.gateMu.Unlock()
+	gates.mu.Unlock()
 	select {
 	case <-gate.slot:
 		return func() {
 			gate.slot <- struct{}{}
-			backend.releaseClientGate(clientID, gate)
+			gates.release(clientID, gate)
 		}, nil
 	case <-ctx.Done():
-		backend.releaseClientGate(clientID, gate)
+		gates.release(clientID, gate)
 		return nil, ctx.Err()
 	}
 }
 
-func (backend *browserBackend) releaseClientGate(clientID kernel.BrowserClientID, gate *browserClientGate) {
-	backend.gateMu.Lock()
+func (gates *browserClientGates) release(clientID kernel.BrowserClientID, gate *browserClientGate) {
+	gates.mu.Lock()
 	gate.users--
-	if gate.users == 0 && backend.gates[clientID] == gate {
-		delete(backend.gates, clientID)
+	if gate.users == 0 && gates.gates[clientID] == gate {
+		delete(gates.gates, clientID)
 	}
-	backend.gateMu.Unlock()
+	gates.mu.Unlock()
 }
 
 func (backend *browserBackend) randomIdentifier() ([kernel.IDBytes]byte, error) {

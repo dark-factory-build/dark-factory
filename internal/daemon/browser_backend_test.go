@@ -28,6 +28,8 @@ const adapterOrigin = "https://app.darkfactory.build"
 
 type adapterFixture struct {
 	store   *kernel.Store
+	daemon  *Daemon
+	runtime *BrowserRuntime
 	backend *browserBackend
 	server  *browser.Server
 	key     *ecdsa.PrivateKey
@@ -42,34 +44,29 @@ func newAdapterFixture(t *testing.T, capabilities kernel.BrowserCapabilityMask) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	randomBytes := append(bytes.Repeat([]byte{0x70}, kernel.IDBytes), bytes.Repeat([]byte{0x71}, kernel.IDBytes)...)
-	randomBytes = append(randomBytes, bytes.Repeat([]byte{0x72}, kernel.IDBytes*8)...)
-	backend, err := newBrowserBackend(store, func() time.Time { return clock }, bytes.NewReader(randomBytes))
+	daemon, err := newDaemon(store, func() time.Time { return clock })
 	if err != nil {
 		_ = store.Close()
 		t.Fatal(err)
 	}
-	server, err := browser.Listen(browser.Config{Address: "127.0.0.1:0", AllowedOrigins: []string{adapterOrigin}, Backend: backend})
+	runtime, err := daemon.ListenBrowser("127.0.0.1:0", []string{adapterOrigin})
 	if err != nil {
-		_ = backend.close()
 		_ = store.Close()
 		t.Fatal(err)
 	}
+	backend, server := runtime.backend, runtime.server
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixture := &adapterFixture{store: store, backend: backend, server: server, key: key, clock: clock}
+	fixture := &adapterFixture{store: store, daemon: daemon, runtime: runtime, backend: backend, server: server, key: key, clock: clock}
 	challenge := bytes.Repeat([]byte{0x43}, browserprotocol.ChallengeSize)
 	if _, err := store.CreateBrowserPairingChallenge(context.Background(), kernel.HashBrowserChallenge(challenge), backend.boot, adapterOrigin, capabilities, adapterTime(t, 1_000), adapterTime(t, 3_000)); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if err := server.Close(); err != nil {
-			t.Errorf("close browser server: %v", err)
-		}
-		if err := backend.close(); err != nil {
-			t.Errorf("close browser backend: %v", err)
+		if err := daemon.Close(); err != nil {
+			t.Errorf("close daemon: %v", err)
 		}
 		if err := store.Close(); err != nil {
 			t.Errorf("close store: %v", err)
@@ -359,6 +356,37 @@ func TestBrowserAdapterFixedHeadPaginationAndSubscribeBridgesCommit(t *testing.T
 	event, ok := eventFrame.Body.(browserprotocol.StateEvent).EntityChanged()
 	if !ok || event.Sequence != factory.Head+1 || event.EntityKind != browserprotocol.StateProject || event.EntityID != newID.String() {
 		t.Fatalf("bridged event = %+v", eventFrame.Body)
+	}
+}
+
+func TestBrowserAdapterFutureCursorReturnsCanonicalFiniteRestart(t *testing.T) {
+	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
+	connection := fixture.pair(t)
+	state, err := fixture.store.Factory(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	subscribe, err := browserprotocol.EncodeStateSubscribe("future", browserprotocol.StateSubscribe{After: browserprotocol.Decimal(state.Head.Int64() + 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapterWrite(t, connection, subscribe)
+	frame := adapterRead(t, connection)
+	if frame.Type != browserprotocol.TypeStateRestart || frame.ID != "future" {
+		t.Fatalf("future cursor response = %+v", frame)
+	}
+	restart := frame.Body.(browserprotocol.StateRestart)
+	if restart.Head != decimalSequence(state.Head) || restart.Floor != decimalSequence(state.Floor) || restart.Reason != browserprotocol.RestartGap {
+		t.Fatalf("future cursor restart = %+v, durable head=%d floor=%d", restart, state.Head.Int64(), state.Floor.Int64())
+	}
+
+	// Restart terminates and joins only the rejected subscription. The client
+	// remains connected and can fetch the exact canonical replacement state.
+	stateGet, _ := browserprotocol.EncodeStateGet("resync", browserprotocol.StateGet{})
+	adapterWrite(t, connection, stateGet)
+	resync := adapterRead(t, connection)
+	if resync.Type != browserprotocol.TypeStateSnapshot || resync.ID != "resync" || resync.Body.(browserprotocol.StateSnapshot).Head != decimalSequence(state.Head) {
+		t.Fatalf("future cursor resync = %+v", resync)
 	}
 }
 

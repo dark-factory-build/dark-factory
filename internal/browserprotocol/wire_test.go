@@ -181,6 +181,27 @@ func TestControlMalformed(t *testing.T) {
 	}
 }
 
+func TestStateRestartCanonicalEmptyChronology(t *testing.T) {
+	empty := StateRestart{Head: 0, Floor: 1, Reason: RestartGap}
+	payload, err := EncodeStateRestart("empty", empty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame, err := DecodeServerControl(payload)
+	if err != nil || frame.Body.(StateRestart) != empty {
+		t.Fatalf("empty restart = %+v, %v", frame, err)
+	}
+	for _, invalid := range []StateRestart{
+		{Head: 0, Floor: 0, Reason: RestartGap},
+		{Head: 0, Floor: 2, Reason: RestartGap},
+		{Head: 2, Floor: 3, Reason: RestartGap},
+	} {
+		if _, err := EncodeStateRestart("invalid", invalid); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("invalid restart %+v = %v, want ErrMalformed", invalid, err)
+		}
+	}
+}
+
 func TestAuthProveRejectsCallerSuppliedPublicKey(t *testing.T) {
 	valid := string(fixtureBytes(t, "auth_prove.json"))
 	withKey := strings.Replace(valid, `"signature"`, `"public_key_sec1":"046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5","signature"`, 1)

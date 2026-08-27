@@ -18,9 +18,10 @@ type Daemon struct {
 	store *kernel.Store
 	now   func() time.Time
 
-	browserMu      sync.Mutex
-	browsers       map[*BrowserRuntime]struct{}
-	browserClosing bool
+	browserMu          sync.Mutex
+	browsers           map[*BrowserRuntime]struct{}
+	browserClosing     bool
+	browserClientGates *browserClientGates
 
 	// operationMu is the single linearization gate for live-attempt operations
 	// that combine durable state with an owner-side action. It is deliberately
@@ -55,14 +56,14 @@ func NewDaemon(store *kernel.Store) (*Daemon, error) {
 	if store == nil {
 		return nil, fmt.Errorf("%w: nil kernel store", kernel.ErrInvalidValue)
 	}
-	return &Daemon{store: store, now: time.Now, browsers: make(map[*BrowserRuntime]struct{}), attempts: make(map[kernel.RunID]*liveAttempt), supervisors: make(map[*supervisorRegistration]struct{})}, nil
+	return &Daemon{store: store, now: time.Now, browsers: make(map[*BrowserRuntime]struct{}), browserClientGates: &browserClientGates{}, attempts: make(map[kernel.RunID]*liveAttempt), supervisors: make(map[*supervisorRegistration]struct{})}, nil
 }
 
 func newDaemon(store *kernel.Store, now func() time.Time) (*Daemon, error) {
 	if store == nil || now == nil {
 		return nil, fmt.Errorf("%w: invalid daemon", kernel.ErrInvalidValue)
 	}
-	return &Daemon{store: store, now: now, browsers: make(map[*BrowserRuntime]struct{}), attempts: make(map[kernel.RunID]*liveAttempt), supervisors: make(map[*supervisorRegistration]struct{})}, nil
+	return &Daemon{store: store, now: now, browsers: make(map[*BrowserRuntime]struct{}), browserClientGates: &browserClientGates{}, attempts: make(map[kernel.RunID]*liveAttempt), supervisors: make(map[*supervisorRegistration]struct{})}, nil
 }
 
 // HandleConnection synchronously consumes exactly one authenticated request,
