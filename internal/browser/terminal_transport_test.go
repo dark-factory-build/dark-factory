@@ -20,20 +20,25 @@ import (
 type terminalTestBackend struct {
 	*fakeBackend
 
-	terminalMu    sync.Mutex
-	attachment    *terminalTestAttachment
-	attachmentHit chan struct{}
-	input         TerminalInputRequest
-	inputCalls    int
-	replyResult   browserprotocol.HumanRequestReplyResult
-	actionResult  browserprotocol.HumanRequestActionResult
-	leaseResult   TerminalLeaseResult
+	terminalMu                                  sync.Mutex
+	attachment                                  *terminalTestAttachment
+	attachmentHit                               chan struct{}
+	invalidAttach                               bool
+	attachmentCloseErr, attachmentCloseFirstErr error
+	input                                       TerminalInputRequest
+	inputCalls                                  int
+	replyResult                                 browserprotocol.HumanRequestReplyResult
+	actionResult                                browserprotocol.HumanRequestActionResult
+	leaseResult                                 TerminalLeaseResult
 }
 
 type terminalTestAttachment struct {
-	events    chan TerminalEvent
-	closed    atomic.Int32
-	closeOnce sync.Once
+	events        chan TerminalEvent
+	closed        atomic.Int32
+	closeCalls    atomic.Int32
+	closeOnce     sync.Once
+	closeErr      error
+	closeFirstErr error
 }
 
 func newTerminalTestBackend() *terminalTestBackend {
@@ -61,12 +66,23 @@ func startTerminalServerWithAckTimeout(t *testing.T, backend *terminalTestBacken
 
 func (attachment *terminalTestAttachment) Events() <-chan TerminalEvent { return attachment.events }
 func (attachment *terminalTestAttachment) Close() error {
+	call := attachment.closeCalls.Add(1)
+	if call == 1 && attachment.closeFirstErr != nil {
+		return attachment.closeFirstErr
+	}
+	if attachment.closeErr != nil {
+		return attachment.closeErr
+	}
 	attachment.closeOnce.Do(func() { attachment.closed.Add(1) })
 	return nil
 }
 
 func (backend *terminalTestBackend) AttachTerminal(context.Context, TerminalAttachRequest) (TerminalAttachment, error) {
-	attachment := &terminalTestAttachment{events: make(chan TerminalEvent, 128)}
+	var events chan TerminalEvent
+	if !backend.invalidAttach {
+		events = make(chan TerminalEvent, 128)
+	}
+	attachment := &terminalTestAttachment{events: events, closeErr: backend.attachmentCloseErr, closeFirstErr: backend.attachmentCloseFirstErr}
 	backend.terminalMu.Lock()
 	backend.attachment = attachment
 	backend.terminalMu.Unlock()
@@ -420,8 +436,8 @@ func TestTerminalTransportResetAndDetachJoinAttachment(t *testing.T) {
 	if reset.Type != browserprotocol.TypeTerminalReset || reset.ID != "attach" {
 		t.Fatalf("reset frame=%+v", reset)
 	}
-	if backend.currentAttachment(t).closed.Load() != 1 {
-		t.Fatalf("reset close count=%d", backend.currentAttachment(t).closed.Load())
+	if attachment := backend.currentAttachment(t); attachment.closed.Load() != 1 || attachment.closeCalls.Load() != 1 {
+		t.Fatalf("reset close count=%d calls=%d", attachment.closed.Load(), attachment.closeCalls.Load())
 	}
 	// A reset retires the attachment; a late queue event cannot become output.
 	sendTerminalEvent(t, backend, TerminalEvent{Kind: TerminalEventOutput, Start: 1, End: 2, Payload: []byte("x")})
@@ -444,8 +460,110 @@ func TestTerminalTransportResetAndDetachJoinAttachment(t *testing.T) {
 	if frame := readServerFrame(t, connection2); frame.Type != browserprotocol.TypeTerminalDetached {
 		t.Fatalf("detached frame=%+v", frame)
 	}
-	if backend2.currentAttachment(t).closed.Load() != 1 {
-		t.Fatalf("detach close count=%d", backend2.currentAttachment(t).closed.Load())
+	if attachment := backend2.currentAttachment(t); attachment.closed.Load() != 1 || attachment.closeCalls.Load() != 1 {
+		t.Fatalf("detach close count=%d calls=%d", attachment.closed.Load(), attachment.closeCalls.Load())
+	}
+}
+
+func TestTerminalTransportRetainsAttachmentAfterCloseFailure(t *testing.T) {
+	backend := newTerminalTestBackend()
+	backend.authentication.Capabilities = browserprotocol.CapabilityObserve
+	server := startTerminalServer(t, backend)
+	connection, _ := dialServer(t, server, testOrigin)
+	authenticateTerminalTest(t, connection)
+	writeClientFrame(t, connection, terminalAttachRequest(t, "attach", 0))
+	sendTerminalEvent(t, backend, TerminalEvent{Kind: TerminalEventAttached, Accepted: true, Sequence: 0, Floor: 0, Head: 0})
+	if frame := readServerFrame(t, connection); frame.Type != browserprotocol.TypeTerminalAttached {
+		t.Fatalf("attached frame=%+v", frame)
+	}
+	attachment := backend.currentAttachment(t)
+	closeErr := errors.New("attachment close failed once")
+	attachment.closeFirstErr = closeErr
+	detach, err := browserprotocol.EncodeTerminalDetach("detach-fail", browserprotocol.TerminalDetach{SessionID: projectID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeClientFrame(t, connection, detach)
+	assertError(t, readServerFrame(t, connection), browserprotocol.ErrorInternal)
+	if attachment.closeCalls.Load() != 1 || attachment.closed.Load() != 0 {
+		t.Fatalf("failed detach cleanup = calls %d, closed %d", attachment.closeCalls.Load(), attachment.closed.Load())
+	}
+
+	secondAttach := terminalAttachRequest(t, "attach-again", 0)
+	writeClientFrame(t, connection, secondAttach)
+	assertError(t, readServerFrame(t, connection), browserprotocol.ErrorUnauthorized)
+	expectTerminalReadError(t, connection)
+	if attachment.closeCalls.Load() != 2 || attachment.closed.Load() != 1 {
+		t.Fatalf("shutdown attachment cleanup = calls %d, closed %d", attachment.closeCalls.Load(), attachment.closed.Load())
+	}
+}
+
+func TestTerminalTransportRetriesFailedDetachAndClearsOnlyAfterSuccess(t *testing.T) {
+	backend := newTerminalTestBackend()
+	backend.authentication.Capabilities = browserprotocol.CapabilityObserve
+	server := startTerminalServer(t, backend)
+	connection, _ := dialServer(t, server, testOrigin)
+	authenticateTerminalTest(t, connection)
+	writeClientFrame(t, connection, terminalAttachRequest(t, "attach", 0))
+	sendTerminalEvent(t, backend, TerminalEvent{Kind: TerminalEventAttached, Accepted: true, Sequence: 0, Floor: 0, Head: 0})
+	_ = readServerFrame(t, connection)
+	attachment := backend.currentAttachment(t)
+	attachment.closeFirstErr = errors.New("temporary attachment close failure")
+	for _, test := range []struct {
+		id       string
+		wantType browserprotocol.MessageType
+	}{
+		{id: "detach-fail", wantType: browserprotocol.TypeError},
+		{id: "detach-success", wantType: browserprotocol.TypeTerminalDetached},
+	} {
+		detach, err := browserprotocol.EncodeTerminalDetach(test.id, browserprotocol.TerminalDetach{SessionID: projectID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeClientFrame(t, connection, detach)
+		frame := readServerFrame(t, connection)
+		if frame.Type != test.wantType {
+			t.Fatalf("%s response=%+v", test.id, frame)
+		}
+		if test.wantType == browserprotocol.TypeError {
+			assertError(t, frame, browserprotocol.ErrorInternal)
+			if attachment.closeCalls.Load() != 1 || attachment.closed.Load() != 0 {
+				t.Fatalf("failed detach state = calls %d, closed %d", attachment.closeCalls.Load(), attachment.closed.Load())
+			}
+		}
+	}
+	if attachment.closeCalls.Load() != 2 || attachment.closed.Load() != 1 {
+		t.Fatalf("successful detach cleanup = calls %d, closed %d", attachment.closeCalls.Load(), attachment.closed.Load())
+	}
+}
+
+func TestTerminalTransportClosesInvalidBackendAttachment(t *testing.T) {
+	closeErr := errors.New("invalid attachment close failed")
+	backend := newTerminalTestBackend()
+	backend.authentication.Capabilities = browserprotocol.CapabilityObserve
+	backend.invalidAttach = true
+	backend.attachmentCloseErr = closeErr
+	server, err := Listen(Config{Address: "127.0.0.1:0", AllowedOrigins: []string{testOrigin, devOrigin}, Backend: backend})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.terminalAckTimeout = time.Duration(browserprotocol.TerminalAckTimeoutMS) * time.Millisecond
+	defer func() { _ = server.Close() }()
+	connection, _ := dialServer(t, server, testOrigin)
+	authenticateTerminalTest(t, connection)
+	attachmentRequest := terminalAttachRequest(t, "invalid-attach", 0)
+	writeClientFrame(t, connection, attachmentRequest)
+	attachment := backend.currentAttachment(t)
+	// The backend call and validation are synchronous, so the invalid
+	// attachment has already been closed before its error reaches the client.
+	assertError(t, readServerFrame(t, connection), browserprotocol.ErrorInternal)
+	expectTerminalReadError(t, connection)
+	if attachment.closeCalls.Load() != 1 {
+		t.Fatalf("invalid attachment close calls=%d", attachment.closeCalls.Load())
+	}
+	cleanupErr := server.Close()
+	if !errors.Is(cleanupErr, errInvalidTerminalAttachment) || !errors.Is(cleanupErr, closeErr) {
+		t.Fatalf("invalid attachment cleanup = %v", cleanupErr)
 	}
 }
 

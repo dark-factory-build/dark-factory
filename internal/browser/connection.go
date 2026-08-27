@@ -18,7 +18,10 @@ const (
 	subscriptionCloseLimit = time.Second
 )
 
-var errBackendResult = errors.New("browser: invalid backend result")
+var (
+	errBackendResult             = errors.New("browser: invalid backend result")
+	errInvalidTerminalAttachment = errors.New("browser: invalid terminal attachment")
+)
 
 type incoming struct {
 	kind websocket.MessageType
@@ -267,7 +270,10 @@ func (current *connection) serve() {
 			return
 		case event, ok := <-terminalEvents:
 			if !ok {
-				current.clearTerminal()
+				if err := current.closeTerminal(); err != nil {
+					current.recordCleanup(err)
+					return
+				}
 				continue
 			}
 			if !current.sendTerminalEvent(event) {
@@ -438,11 +444,23 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 			err = backendErr
 			break
 		}
-		if attachment == nil || attachment.Events() == nil {
-			err = fmt.Errorf("invalid terminal attachment")
-			break
+		if attachment == nil {
+			current.sendError(frame.ID, browserprotocol.ErrorInternal, false)
+			return false
 		}
-		current.attachment, current.terminalEvents, current.terminalAttachID, current.terminalAttach = attachment, attachment.Events(), frame.ID, body
+		events := attachment.Events()
+		if events == nil {
+			invalidErr := errInvalidTerminalAttachment
+			if closeErr := attachment.Close(); closeErr != nil {
+				err = errors.Join(invalidErr, closeErr)
+				current.recordCleanup(err)
+			} else {
+				err = invalidErr
+			}
+			current.sendError(frame.ID, browserprotocol.ErrorInternal, false)
+			return false
+		}
+		current.attachment, current.terminalEvents, current.terminalAttachID, current.terminalAttach = attachment, events, frame.ID, body
 		current.terminalAck = uint64(body.AfterSequence)
 		current.terminalSent = current.terminalAck
 		return true
@@ -666,8 +684,11 @@ func (current *connection) closeTerminal() error {
 		return nil
 	}
 	attachment := current.attachment
+	if err := attachment.Close(); err != nil {
+		return err
+	}
 	current.clearTerminal()
-	return attachment.Close()
+	return nil
 }
 
 func (current *connection) clearTerminal() {
