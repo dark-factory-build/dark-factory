@@ -17,6 +17,7 @@ import {
   encodeTerminalInput,
   encodeTerminalOutput,
   hexBytes,
+  MAX_TERMINAL_PAYLOAD,
   verifyP256Signature,
 } from "../dist/src/index.js";
 
@@ -128,11 +129,23 @@ test("terminal framing rejects wrong direction, identity, bounds and overflow", 
   expectMalformed(() => encodeTerminalInput(session, 0n, 1n, new Uint8Array([1])));
   expectMalformed(() => encodeTerminalInput(session, 1n, 0n, new Uint8Array([1])));
   expectMalformed(() => encodeTerminalOutput(session, 0xffff_ffff_ffff_ffffn, new Uint8Array([1, 2])));
-  expectMalformed(() => encodeTerminalOutput(session, 1n, new Uint8Array(65537)));
+  expectMalformed(() => encodeTerminalOutput(session, 1n, new Uint8Array(MAX_TERMINAL_PAYLOAD + 1)));
   expectMalformed(() => decodeTerminalInput(null));
   expectMalformed(() => encodeTerminalInput(null, 1n, 1n, new Uint8Array([1])));
   expectMalformed(() => encodeTerminalInput(session, 1, 1n, new Uint8Array([1])));
   expectMalformed(() => encodeTerminalInput(session, 1n, 1n, null));
+});
+
+test("terminal payload boundary matches the runner limit", () => {
+  const session = bytes("101112131415161718191a1b1c1d1e1f");
+  for (const [encode, decode] of [[encodeTerminalInput, decodeTerminalInput], [encodeTerminalOutput, decodeTerminalOutput]]) {
+    const frame = encode === encodeTerminalInput
+      ? encode(session, 1n, 1n, new Uint8Array(MAX_TERMINAL_PAYLOAD))
+      : encode(session, 1n, new Uint8Array(MAX_TERMINAL_PAYLOAD));
+    assert.equal(decode(frame).payload.length, MAX_TERMINAL_PAYLOAD);
+  }
+  expectMalformed(() => encodeTerminalInput(session, 1n, 1n, new Uint8Array(MAX_TERMINAL_PAYLOAD + 1)));
+  expectMalformed(() => encodeTerminalOutput(session, 1n, new Uint8Array(MAX_TERMINAL_PAYLOAD + 1)));
 });
 
 test("all public malformed boundaries return the finite ProtocolError", async () => {

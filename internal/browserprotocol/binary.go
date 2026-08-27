@@ -7,7 +7,7 @@ import (
 
 const (
 	TerminalHeaderSize           = 40
-	MaxTerminalPayload           = 64 << 10
+	MaxTerminalPayload           = 8 << 10
 	TerminalProtocolVersion byte = 1
 )
 

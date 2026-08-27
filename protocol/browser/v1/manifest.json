@@ -18,7 +18,7 @@
     "magic": "DF",
     "version": 1,
     "header_bytes": 40,
-    "max_payload_bytes": 65536,
+    "max_payload_bytes": 8192,
     "opcodes": [
       {"name": "TERMINAL_INPUT", "value": 1, "direction": "client", "fixture": "terminal_input.hex"},
       {"name": "TERMINAL_OUTPUT", "value": 2, "direction": "server", "fixture": "terminal_output.hex"}

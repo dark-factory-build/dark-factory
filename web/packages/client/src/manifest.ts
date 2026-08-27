@@ -1,6 +1,6 @@
 export const PROTOCOL_VERSION = 1 as const;
 export const MAX_CONTROL_BYTES = 64 * 1024;
-export const MAX_TERMINAL_PAYLOAD = 64 * 1024;
+export const MAX_TERMINAL_PAYLOAD = 8 * 1024;
 export const TERMINAL_HEADER_BYTES = 40;
 
 export const CAPABILITIES = {

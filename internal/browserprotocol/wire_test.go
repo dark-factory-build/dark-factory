@@ -450,6 +450,34 @@ func TestBinaryMalformed(t *testing.T) {
 	}
 }
 
+func TestBinaryPayloadBoundary(t *testing.T) {
+	id := [16]byte{1}
+	payload := bytes.Repeat([]byte{'x'}, MaxTerminalPayload)
+	input, err := EncodeTerminalInput(id, 1, 1, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := EncodeTerminalOutput(id, 1, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range [][]byte{input, output} {
+		frame, err := DecodeTerminalFrame(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(frame.Payload) != MaxTerminalPayload {
+			t.Fatalf("payload length = %d, want %d", len(frame.Payload), MaxTerminalPayload)
+		}
+	}
+	if _, err := EncodeTerminalInput(id, 1, 1, append(payload, 'x')); err == nil {
+		t.Fatal("8193-byte input accepted")
+	}
+	if _, err := EncodeTerminalOutput(id, 1, append(payload, 'x')); err == nil {
+		t.Fatal("8193-byte output accepted")
+	}
+}
+
 func TestBinaryMutationGuards(t *testing.T) {
 	id := [16]byte{1}
 	if _, err := EncodeTerminalOutput(id, 1, []byte("x")); err != nil {
