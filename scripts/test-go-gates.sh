@@ -27,12 +27,16 @@ esac
 EOF
 /bin/chmod 700 "$fake"
 
-export DARK_FACTORY_SECRET=should-not-cross HOME="$temporary/home" PATH="$temporary/fake-path"
+export DARK_FACTORY_SECRET=should-not-cross HOME="$temporary/home"
 go_gate_stage 5 "$fake" "$go_gate_test_log" || fail "whitelist fixture failed"
-/usr/bin/grep -F 'HOME=unset' "$go_gate_test_log" >/dev/null || fail "HOME crossed env boundary"
+/usr/bin/grep -F "HOME=$go_gate_root/home" "$go_gate_test_log" >/dev/null || fail "HOME was not confined to owned root"
 /usr/bin/grep -F 'SECRET=unset' "$go_gate_test_log" >/dev/null || fail "ambient secret crossed env boundary"
-/usr/bin/grep -F 'PATH=/opt/homebrew/bin:/usr/bin:/bin' "$go_gate_test_log" >/dev/null || fail "PATH was not fixed"
+/usr/bin/grep -F "PATH=$go_gate_node_bin_dir:/usr/bin:/bin" "$go_gate_test_log" >/dev/null || fail "PATH was not fixed"
 /usr/bin/grep -F "TMPDIR=$go_gate_root/tmp" "$go_gate_test_log" >/dev/null || fail "TMPDIR was not controlled"
+
+# Captured absolute tools remain authoritative after the caller's PATH is
+# replaced. The same hostile path must not select a second Node/Corepack pair.
+export PATH="$temporary/fake-path"
 
 # Exercise the shared fast-stage composition through test-local explicit tool
 # arguments. The production entrypoints have no environment override for
@@ -89,12 +93,15 @@ go_gate_git=$fast_git; go_gate_git_identity=$(go_gate_stat "$fast_git")
 go_gate_xargs=$fast_xargs; go_gate_xargs_identity=$(go_gate_stat "$fast_xargs")
 go_gate_corepack=$fast_corepack; go_gate_corepack_identity=$(go_gate_stat "$fast_corepack")
 go_gate_corepack_hash=$(go_gate_hash "$fast_corepack")
+# The production helper invokes Corepack through its pinned Node binary. The
+# fixture intentionally exercises the direct fake-Corepack branch.
+go_gate_package_manager_direct=1
 : >"$fast_mode"
 go_gate_fast_stage || fail "fast stage fixture failed"
 /usr/bin/grep -F 'go mod download GOPROXY=https://proxy.golang.org' "$fast_log" >/dev/null || fail "download did not use network stage"
 /usr/bin/grep -F 'go mod verify GOPROXY=off' "$fast_log" >/dev/null || fail "verify was not offline"
 /usr/bin/grep -F 'corepack pnpm install --frozen-lockfile --ignore-scripts NETWORK=1' "$fast_log" >/dev/null || fail "install was not the sole package network stage"
-/usr/bin/grep -F 'corepack pnpm --offline run test NETWORK=0' "$fast_log" >/dev/null || fail "package tests were not offline"
+/usr/bin/grep -F 'corepack pnpm run test NETWORK=0' "$fast_log" >/dev/null || fail "package tests were not offline"
 /usr/bin/grep -F 'INTEGRITY=unset' "$fast_log" >/dev/null || fail "Corepack signature verification was disabled"
 printf '# mutation\n' >>"$fast_go"
 if go_gate_before_stage; then fail "in-place Go mutation was accepted"; fi
@@ -172,11 +179,24 @@ go_gate_owned=0
 # Matching caller variables cannot select a root or inject a cache.
 export DARK_FACTORY_GO_GATE_ROOT=/tmp DARK_FACTORY_GO_GATE_NONCE=forged
 go_gate_environment_cleanup || true
+export PATH="$go_gate_node_bin_dir:/usr/bin:/bin"
 go_gate_environment_setup || fail "second environment setup failed"
 second_root=$go_gate_root
 case "$second_root" in /private/tmp/dark-factory-go.*) ;; *) fail "root escaped canonical prefix" ;; esac
 [ "$second_root" != "$go_gate_test_root" ] || fail "root was reused"
 go_gate_environment_cleanup || fail "cleanup failed"
+
+# Cleanup owns the exact root even when a stage leaves restrictive cache
+# entries behind. Exercise both a nested read-only directory and file.
+go_gate_environment_setup || fail "read-only cleanup setup failed"
+readonly_root="$go_gate_root/cache/readonly/child"
+/bin/mkdir -p "$readonly_root"
+: >"$readonly_root/cache-entry"
+/bin/chmod 0500 "$go_gate_root/cache/readonly" "$readonly_root"
+/bin/chmod 0400 "$readonly_root/cache-entry"
+readonly_gate_root=$go_gate_root
+go_gate_environment_cleanup || fail "read-only cleanup failed"
+[ ! -e "$readonly_gate_root" ] || fail "read-only cleanup retained its root"
 
 # A top-level TERM must join the active supervisor before cleanup. The fixture
 # writes its child PID only after the bounded owner has started the stage.
@@ -220,7 +240,8 @@ if /bin/kill -0 "$signal_child_pid" 2>/dev/null; then fail "TERM fixture left it
 [ ! -e "$(/bin/cat "$signal_root_file")" ] || fail "TERM fixture cleaned up before joining supervisor"
 
 /usr/bin/grep -F 'go_gate_go=/opt/homebrew/bin/go' "$repository_root/scripts/go-gate-environment.sh" >/dev/null || fail "Go path is not fixed"
-/usr/bin/grep -F 'go_gate_corepack=/opt/homebrew/bin/corepack' "$repository_root/scripts/go-gate-environment.sh" >/dev/null || fail "Corepack path is not fixed"
+/usr/bin/grep -F 'command -v node' "$repository_root/scripts/go-gate-environment.sh" >/dev/null || fail "Node was not captured before isolation"
+/usr/bin/grep -F 'command -v corepack' "$repository_root/scripts/go-gate-environment.sh" >/dev/null || fail "Corepack was not captured before isolation"
 /usr/bin/grep -F '/usr/bin/dirname' "$repository_root/scripts/go-ci.sh" >/dev/null || fail "go-ci bootstrap uses ambient dirname"
 /usr/bin/grep -F 'go_gate_supervisor_pid' "$repository_root/scripts/go-ci-owned.sh" >/dev/null || fail "go-ci signal join is missing"
 /usr/bin/grep -F '$SIG{TERM}' "$repository_root/scripts/go-gate-environment.sh" >/dev/null || fail "supervisor TERM handler is missing"

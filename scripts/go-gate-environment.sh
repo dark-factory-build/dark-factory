@@ -2,8 +2,8 @@
 
 # Shared by the Go gates. Entry points always create the root themselves;
 # there is intentionally no caller-selected root or provenance nonce. The
-# boundary trusts fixed system/Homebrew tools and excludes malicious concurrent
-# same-UID pathname races; hashes detect ordinary in-place tool mutation.
+# boundary trusts the caller's captured system tools and excludes malicious
+# concurrent same-UID pathname races; hashes detect ordinary in-place mutation.
 
 go_gate_stat() { /usr/bin/stat -f '%d:%i:%u:%Lp' "$1" 2>/dev/null; }
 
@@ -15,6 +15,7 @@ go_gate_validate_tool() {
 go_gate_validate_tools() {
     go_gate_validate_tool "$go_gate_go" "$go_gate_go_identity" \
         && go_gate_validate_tool "$go_gate_gofmt" "$go_gate_gofmt_identity" \
+        && go_gate_validate_tool "$go_gate_node" "$go_gate_node_identity" \
         && go_gate_validate_tool "$go_gate_git" "$go_gate_git_identity" \
         && go_gate_validate_tool "$go_gate_xargs" "$go_gate_xargs_identity" \
         && go_gate_validate_tool "$go_gate_perl" "$go_gate_perl_identity" \
@@ -23,10 +24,21 @@ go_gate_validate_tools() {
         && go_gate_validate_tool "$go_gate_shasum" "$go_gate_shasum_identity" \
         && [ "$(go_gate_hash "$go_gate_go")" = "$go_gate_go_hash" ] \
         && [ "$(go_gate_hash "$go_gate_gofmt")" = "$go_gate_gofmt_hash" ] \
+        && [ "$(go_gate_hash "$go_gate_node")" = "$go_gate_node_hash" ] \
         && [ "$(go_gate_hash "$go_gate_corepack")" = "$go_gate_corepack_hash" ]
 }
 
 go_gate_hash() { /usr/bin/shasum -a 256 "$1" | /usr/bin/awk '{print $1}'; }
+
+go_gate_package_manager_stage() {
+    go_gate_package_manager_timeout=$1
+    shift
+    if [ "${go_gate_package_manager_direct-0}" -eq 1 ]; then
+        go_gate_stage "$go_gate_package_manager_timeout" "$go_gate_corepack" "$@"
+    else
+        go_gate_stage "$go_gate_package_manager_timeout" "$go_gate_node" "$go_gate_corepack" "$@"
+    fi
+}
 
 go_gate_validate_identity() {
     [ -n "${go_gate_root-}" ] && [ ! -L "$go_gate_root" ] \
@@ -38,7 +50,7 @@ go_gate_validate_identity() {
 }
 
 go_gate_validate_directories() {
-    for go_gate_directory in tmp cache modcache corepack npm-cache; do
+    for go_gate_directory in tmp cache modcache corepack npm-cache home; do
         go_gate_directory_path="$go_gate_root/$go_gate_directory"
         [ ! -L "$go_gate_directory_path" ] && [ -d "$go_gate_directory_path" ] || return 1
         [ "$(CDPATH= cd -P -- "$go_gate_directory_path" 2>/dev/null && pwd -P)" = "$go_gate_directory_path" ] || return 1
@@ -48,6 +60,7 @@ go_gate_validate_directories() {
             modcache) go_gate_expected_identity=$go_gate_modcache_identity ;;
             corepack) go_gate_expected_identity=$go_gate_corepack_dir_identity ;;
             npm-cache) go_gate_expected_identity=$go_gate_npm_cache_identity ;;
+            home) go_gate_expected_identity=$go_gate_home_identity ;;
             *) return 1 ;;
         esac
         [ "$(go_gate_stat "$go_gate_directory_path")" = "$go_gate_expected_identity" ] || return 1
@@ -71,7 +84,8 @@ go_gate_run_bounded() {
     shift
     [ "$#" -gt 0 ] || return 64
     "$go_gate_env" -i \
-        "PATH=/opt/homebrew/bin:/usr/bin:/bin" \
+        "PATH=$go_gate_node_bin_dir:/usr/bin:/bin" \
+        "HOME=$go_gate_root/home" \
         "TMPDIR=$go_gate_root/tmp" "GOTMPDIR=$go_gate_root/tmp" \
         "GOCACHE=$go_gate_root/cache" "GOMODCACHE=$go_gate_root/modcache" \
         "COREPACK_HOME=$go_gate_root/corepack" \
@@ -86,10 +100,12 @@ go_gate_run_bounded() {
         "NODE_OPTIONS=" "NETRC=/dev/null" \
         "GIT_CONFIG_GLOBAL=/dev/null" "GIT_CONFIG_SYSTEM=/dev/null" \
         "GIT_CONFIG_NOSYSTEM=1" "GIT_TERMINAL_PROMPT=0" "GIT_PAGER=cat" \
-        "npm_config_userconfig=/dev/null" "NPM_CONFIG_USERCONFIG=/dev/null" \
+        "npm_config_userconfig=$go_gate_root/home/npm-user-config" "NPM_CONFIG_USERCONFIG=$go_gate_root/home/npm-user-config" \
         "npm_config_globalconfig=/dev/null" "NPM_CONFIG_GLOBALCONFIG=/dev/null" \
         "npm_config_registry=https://registry.npmjs.org/" \
         "NPM_CONFIG_REGISTRY=https://registry.npmjs.org/" \
+        "npm_config_offline=${npm_config_offline-false}" \
+        "NPM_CONFIG_OFFLINE=${npm_config_offline-false}" \
         "$go_gate_perl" -e '
 use strict;
 use warnings;
@@ -192,17 +208,23 @@ go_gate_environment_setup() {
     [ "$(/usr/bin/stat -f '%Lp' "$go_gate_root" 2>/dev/null)" = 700 ] || return 1
     case "$go_gate_root" in /private/tmp/dark-factory-go.*) ;; *) return 1 ;; esac
 
-    # Fixed trusted locations; no PATH-selected fake can become a gate tool.
+    # Capture the caller's installed Node/Corepack pair once, before entering
+    # the isolated stage environment. Canonical paths and content hashes then
+    # prevent ordinary in-place replacement or PATH drift between stages.
+    go_gate_node=$(/bin/realpath "$(command -v node)") || return 1
+    go_gate_corepack=$(/bin/realpath "$(command -v corepack)") || return 1
+    case "$go_gate_node:$go_gate_corepack" in /*:/*) ;; *) return 1 ;; esac
+    go_gate_node_bin_dir=${go_gate_node%/*}
     go_gate_go=/opt/homebrew/bin/go
     go_gate_gofmt=/opt/homebrew/bin/gofmt
     go_gate_git=/usr/bin/git
     go_gate_xargs=/usr/bin/xargs
     go_gate_perl=/usr/bin/perl
-    go_gate_corepack=/opt/homebrew/bin/corepack
     go_gate_env=/usr/bin/env
     go_gate_shasum=/usr/bin/shasum
     go_gate_go_identity=$(go_gate_stat "$go_gate_go") || return 1
     go_gate_gofmt_identity=$(go_gate_stat "$go_gate_gofmt") || return 1
+    go_gate_node_identity=$(go_gate_stat "$go_gate_node") || return 1
     go_gate_git_identity=$(go_gate_stat "$go_gate_git") || return 1
     go_gate_xargs_identity=$(go_gate_stat "$go_gate_xargs") || return 1
     go_gate_perl_identity=$(go_gate_stat "$go_gate_perl") || return 1
@@ -211,10 +233,11 @@ go_gate_environment_setup() {
     go_gate_shasum_identity=$(go_gate_stat "$go_gate_shasum") || return 1
     go_gate_go_hash=$(go_gate_hash "$go_gate_go") || return 1
     go_gate_gofmt_hash=$(go_gate_hash "$go_gate_gofmt") || return 1
+    go_gate_node_hash=$(go_gate_hash "$go_gate_node") || return 1
     go_gate_corepack_hash=$(go_gate_hash "$go_gate_corepack") || return 1
     go_gate_validate_tools || { echo "go gate: fixed tool is unavailable" >&2; return 1; }
 
-    for go_gate_directory in tmp cache modcache corepack npm-cache; do
+    for go_gate_directory in tmp cache modcache corepack npm-cache home; do
         /bin/mkdir "$go_gate_root/$go_gate_directory" || return 1
         /bin/chmod 700 "$go_gate_root/$go_gate_directory" || return 1
         case "$go_gate_directory" in
@@ -223,8 +246,11 @@ go_gate_environment_setup() {
             modcache) go_gate_modcache_identity=$(go_gate_stat "$go_gate_root/$go_gate_directory") ;;
             corepack) go_gate_corepack_dir_identity=$(go_gate_stat "$go_gate_root/$go_gate_directory") ;;
             npm-cache) go_gate_npm_cache_identity=$(go_gate_stat "$go_gate_root/$go_gate_directory") ;;
+            home) go_gate_home_identity=$(go_gate_stat "$go_gate_root/$go_gate_directory") ;;
         esac
     done
+    : >"$go_gate_root/home/npm-user-config"
+    /bin/chmod 600 "$go_gate_root/home/npm-user-config"
     go_gate_setup_complete=1
     go_gate_validate_identity && go_gate_validate_directories || return 1
     export TMPDIR="$go_gate_root/tmp" GOTMPDIR="$go_gate_root/tmp"
@@ -262,6 +288,10 @@ go_gate_environment_cleanup() {
         echo "go gate: retaining replaced scratch object: $go_gate_cleanup_target" >&2
         return 1
     fi
+    # Test stages may leave read-only cache entries. This is still the exact
+    # inode validated above, so restore owner permissions before removing it.
+    /usr/bin/find "$go_gate_cleanup_target" -type d -exec /bin/chmod u+rwx {} + || return 1
+    /usr/bin/find "$go_gate_cleanup_target" -type f -exec /bin/chmod u+rw {} + || return 1
     /bin/rm -rf -- "$go_gate_cleanup_target" || return 1
     /bin/rmdir "$go_gate_cleanup_parent" 2>/dev/null || true
 }
