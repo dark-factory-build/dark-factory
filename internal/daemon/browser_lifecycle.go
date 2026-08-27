@@ -18,9 +18,10 @@ var ErrBrowserRuntimeCleanup = errors.New("daemon: browser runtime cleanup unres
 // BrowserRuntime owns the loopback listener, every accepted WebSocket and
 // every Store-watch subscription created through its backend. Close marks the
 // runtime unavailable, then performs the only safe order: stop and join the
-// transport, cancel and join backend subscriptions, invalidate unredeemed
-// challenges, and finally unregister the runtime. The caller may close the
-// Store only after Close returns.
+// transport, cancel and join backend subscriptions, and invalidate unredeemed
+// challenges. It unregisters only after every cleanup succeeds; unresolved
+// cleanup stays registered and visible to later daemon shutdown calls. The
+// caller may close the Store only after Close returns.
 type BrowserRuntime struct {
 	daemon  *Daemon
 	server  *browser.Server
