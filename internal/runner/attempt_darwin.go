@@ -36,11 +36,12 @@ const (
 // AttemptController is the daemon side of one fixed attempt-runner protocol.
 // Its peer is the sole control capability accepted by --attempt-runner.
 type AttemptController struct {
-	file      *os.File
-	state     attemptControllerState
-	attemptID string
-	inner     Identity
-	last      *TerminalRecord
+	file          *os.File
+	state         attemptControllerState
+	attemptID     string
+	inner         Identity
+	terminalReady bool
+	last          *TerminalRecord
 }
 
 // writeFrame is the controller's only authoritative write path. A failed
@@ -155,6 +156,12 @@ func (c *AttemptController) Next(timeout time.Duration) (AttemptEvent, error) {
 			if err != nil {
 				return AttemptEvent{}, err
 			}
+			if event.Kind == TerminalReady {
+				if c.terminalReady {
+					return AttemptEvent{}, ErrState
+				}
+				c.terminalReady = true
+			}
 			return AttemptEvent{Kind: AttemptTerminalFrame, Frame: &event}, nil
 		}
 		if frame.Kind == "current-exec-check" && noLegacyFields(frame) && noTerminalFields(frame) && len(frame.Payload) == 0 {
@@ -177,7 +184,7 @@ func (c *AttemptController) Next(timeout time.Duration) (AttemptEvent, error) {
 
 func isTerminalEventKind(kind string) bool {
 	switch TerminalEventKind(kind) {
-	case TerminalGenerationResult, TerminalInputResult, TerminalResizeResult, TerminalAttached, TerminalOutput, TerminalReset, TerminalPTYEOF:
+	case TerminalGenerationResult, TerminalInputResult, TerminalResizeResult, TerminalAttached, TerminalOutput, TerminalReset, TerminalReady, TerminalPTYEOF:
 		return true
 	default:
 		return false
@@ -259,7 +266,7 @@ func (c *AttemptController) Release(stage AttemptStage) error {
 // call and serializes it with its other lifecycle operations; this method does
 // not add a concurrent RPC abstraction or a background writer.
 func (c *AttemptController) SendTerminalCommand(command TerminalCommand) error {
-	if c == nil || c.file == nil || c.state != controllerProviderReleased {
+	if c == nil || c.file == nil || c.state != controllerProviderReleased || !c.terminalReady {
 		return ErrState
 	}
 	if err := command.validate(); err != nil {
@@ -334,6 +341,7 @@ type WorkerControl struct {
 	identity                Identity
 	state                   workerState
 	providerInputRegistered bool
+	providerErrorReported   bool
 }
 
 func OpenWorkerControl() (*WorkerControl, error) {
@@ -485,6 +493,24 @@ func (w *WorkerControl) RegisterProviderInput(input []byte) error {
 	return nil
 }
 
+// ReportProviderError is the one bounded pre-exec failure report. It lets the
+// outer owner distinguish a deliberate final source/authority rejection from
+// an unexplained capability close, without introducing a general worker RPC.
+func (w *WorkerControl) ReportProviderError(cause error) error {
+	if w == nil || w.file == nil || w.state != workerProvider || w.providerErrorReported || cause == nil {
+		return ErrState
+	}
+	message := []byte(cause.Error())
+	if len(message) == 0 || len(message) > maxAttemptReportBytes {
+		return ErrState
+	}
+	if err := writeControlFrame(w.file, attemptFrame{Version: 1, Kind: "provider-exec-error", Payload: message}, maxFrameBytes); err != nil {
+		return err
+	}
+	w.providerErrorReported = true
+	return nil
+}
+
 func (w *WorkerControl) report(stage AttemptStage, before, after workerState, payload []byte) error {
 	if w == nil || w.file == nil || w.state != before || len(payload) > maxAttemptReportBytes {
 		return ErrState
@@ -539,6 +565,7 @@ func (w *WorkerControl) ExecProvider(spec *LaunchSpec, cwd *os.File) error {
 		// diagnostic before the worker exits; this is private control evidence,
 		// not public provider output.
 		_ = writeControlFrame(w.file, attemptFrame{Version: 1, Kind: "provider-exec-error", Payload: message}, maxFrameBytes)
+		w.providerErrorReported = true
 	}
 	return err
 }
@@ -939,22 +966,38 @@ func (reads *attemptReadSet) unregister(fd int) error {
 	return unregisterRead(reads.kq, fd)
 }
 
-func retireReadableFilter(remove func() error) {
+func retireReadableFilter(remove func() error) error {
+	if remove == nil {
+		return ErrState
+	}
+	deadline := time.Now().Add(500 * time.Millisecond)
+	var lastErr error
 	for {
 		if err := remove(); err == nil {
-			return
+			return nil
+		} else {
+			lastErr = err
 		}
-		time.Sleep(25 * time.Millisecond)
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return errors.Join(ErrUnresolved, lastErr)
+		}
+		if remaining > 25*time.Millisecond {
+			remaining = 25 * time.Millisecond
+		}
+		time.Sleep(remaining)
 	}
 }
 
-func (reads *attemptReadSet) processOnly() {
+func (reads *attemptReadSet) processOnly() error {
 	if reads == nil {
-		return
+		return nil
 	}
-	retireReadableFilter(reads.removeDaemon)
-	retireReadableFilter(reads.removeWorker)
-	retireReadableFilter(reads.removePTY)
+	return errors.Join(
+		retireReadableFilter(reads.removeDaemon),
+		retireReadableFilter(reads.removeWorker),
+		retireReadableFilter(reads.removePTY),
+	)
 }
 
 func nextAttemptFrame(child *OwnedChild, daemon, worker *os.File, daemonOpen, workerOpen bool, timeout time.Duration) (attemptFrame, attemptSource, error) {
@@ -1025,9 +1068,11 @@ func finishAttemptFailure(child *OwnedChild, dir *os.File, cfg attemptConfig, re
 }
 
 func finishAttemptWithExit(child *OwnedChild, dir *os.File, cfg attemptConfig, reads *attemptReadSet, daemon *os.File, daemonOpen bool, cause error) error {
+	var filterErr error
 	if reads != nil {
-		reads.processOnly()
+		filterErr = reads.processOnly()
 	}
+	cause = errors.Join(cause, filterErr)
 	exit, cleanupErr := waitForAttemptChild(child)
 	if cleanupErr != nil {
 		return errors.Join(cause, cleanupErr)

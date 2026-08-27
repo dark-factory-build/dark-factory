@@ -21,7 +21,7 @@ func runReleasedProvider(child *OwnedChild, daemon, worker *os.File, reads *atte
 	}
 	loop := terminalOwner{child: child, daemon: daemon, worker: worker, reads: reads, daemonOpen: true, workerOpen: true}
 	if err := loop.awaitInitialInput(); err != nil {
-		return true, err
+		return loop.daemonOpen, err
 	}
 	if err := reads.removeWorker(); err != nil {
 		return true, err
@@ -33,6 +33,12 @@ func runReleasedProvider(child *OwnedChild, daemon, worker *os.File, reads *atte
 	loop.ptyOpen = true
 	if err := loop.writeInitialInput(); err != nil {
 		return true, err
+	}
+	// This is the bounded handoff barrier. The daemon may not send terminal
+	// commands until the owner has registered the PTY and performed the one
+	// initial write exactly once.
+	if err := loop.send(TerminalFrame{Kind: TerminalReady}); err != nil {
+		return false, err
 	}
 	return loop.serve()
 }
@@ -53,11 +59,20 @@ type terminalOwner struct {
 	initialInput   []byte
 	initialWritten bool
 	ptyEOF         bool
+	ptyDrained     bool
 	stopRequested  bool
 
-	ring   terminalByteRing
-	credit uint64
-	sent   uint64
+	ring             terminalByteRing
+	credit           uint64
+	sent             uint64
+	observerAttached bool
+	replay           []terminalReplay
+}
+
+type terminalReplay struct {
+	correlation uint64
+	cursor      uint64
+	head        uint64
 }
 
 func (o *terminalOwner) awaitInitialInput() error {
@@ -83,6 +98,9 @@ func (o *terminalOwner) awaitInitialInput() error {
 		if source != sourceWorker {
 			return protocolError("provider input registration", source, err)
 		}
+		if err == nil && frame.Version == 1 && frame.Kind == "provider-exec-error" && noLegacyFields(frame) && noTerminalFields(frame) && len(frame.Payload) > 0 && len(frame.Payload) <= maxAttemptReportBytes {
+			return fmt.Errorf("runner: provider exec: %s", frame.Payload)
+		}
 		if errors.Is(err, io.EOF) {
 			return errors.New("runner: worker closed before provider input registration")
 		}
@@ -93,7 +111,7 @@ func (o *terminalOwner) awaitInitialInput() error {
 			return ErrState
 		}
 		o.initialInput = append([]byte(nil), frame.Payload...)
-		if err := writeControlFrame(o.worker, attemptFrame{Version: 1, Kind: "provider-input-registered"}, maxFrameBytes); err != nil {
+		if err := o.writeWorkerFrame(attemptFrame{Version: 1, Kind: "provider-input-registered"}); err != nil {
 			return err
 		}
 		for {
@@ -105,14 +123,14 @@ func (o *terminalOwner) awaitInitialInput() error {
 				return fmt.Errorf("runner: provider exec: %s", frame.Payload)
 			}
 			if source == sourceWorker && err == nil && validCurrentExecCheck(frame) {
-				if err := writeControlFrame(o.daemon, frame, maxFrameBytes); err != nil {
+				if err := o.writeDaemonFrame(frame); err != nil {
 					return err
 				}
 				ack, ackSource, ackErr := nextAttemptFrame(o.child, o.daemon, o.worker, o.daemonOpen, o.workerOpen, 0)
 				if ackErr != nil || ackSource != sourceDaemon || !validCurrentExecCheckAck(ack) {
 					return protocolError("current exec check ack", ackSource, ackErr)
 				}
-				if err := writeControlFrame(o.worker, ack, maxFrameBytes); err != nil {
+				if err := o.writeWorkerFrame(ack); err != nil {
 					return err
 				}
 				continue
@@ -167,11 +185,9 @@ func (o *terminalOwner) serve() (bool, error) {
 		}
 		switch ev.source {
 		case sourceChild:
-			if err := o.emitPTYEOF(); err != nil {
-				return o.daemonOpen, err
-			}
 			// First converge the exact process group and perform the sole Wait;
-			// only then is PTY tail output drained and spooled.
+			// only then is PTY tail output drained. PTY EOF is emitted exclusively
+			// from an actual EOF/EIO read, never from child exit.
 			if _, err := o.child.FinishAfterExit(8 * time.Second); err != nil {
 				return o.daemonOpen, err
 			}
@@ -306,17 +322,18 @@ func (o *terminalOwner) command(raw attemptFrame) error {
 func (o *terminalOwner) stop() error {
 	o.stopRequested = true
 	o.inputActive = false
+	var cleanupErr error
 	if o.reads != nil {
-		retireReadableFilter(o.reads.removeWorker)
-		retireReadableFilter(o.reads.removePTY)
+		cleanupErr = errors.Join(cleanupErr, retireReadableFilter(o.reads.removeWorker))
+		cleanupErr = errors.Join(cleanupErr, retireReadableFilter(o.reads.removePTY))
 	}
 	if o.child == nil || o.child.state != stateActivated {
-		return ErrState
+		return errors.Join(cleanupErr, ErrState)
 	}
 	if _, err := o.child.Terminate(defaultStopTimeout); err != nil {
-		return err
+		return errors.Join(cleanupErr, err)
 	}
-	return o.drainPTY()
+	return errors.Join(cleanupErr, o.drainPTY())
 }
 
 func (o *terminalOwner) install(c TerminalCommand) error {
@@ -386,15 +403,29 @@ func (o *terminalOwner) attach(c TerminalCommand) error {
 		return o.send(TerminalFrame{Kind: TerminalAttached, Correlation: c.Correlation, Sequence: c.Sequence, Floor: o.ring.Floor(), Head: o.ring.Head(), Status: TerminalResultRejected})
 	}
 	head := o.ring.Head()
+	if len(o.replay) >= terminalReplayRequestCapacity {
+		return errors.Join(ErrUnresolved, errors.New("runner: terminal replay request queue is full"))
+	}
 	if err := o.send(TerminalFrame{Kind: TerminalAttached, Correlation: c.Correlation, Sequence: c.Sequence, Floor: o.ring.Floor(), Head: head, Status: TerminalResultOK}); err != nil {
 		return err
 	}
-	o.sent = c.Sequence
+	// The first observer owns the live cursor. Its historical bytes are routed
+	// by correlation, so advancing the live cursor here prevents replay from
+	// being emitted a second time as uncorrelated live output. Later observers
+	// never mutate that cursor.
+	if !o.observerAttached {
+		o.observerAttached = true
+		o.sent = head
+	}
+	o.replay = append(o.replay, terminalReplay{correlation: c.Correlation, cursor: c.Sequence, head: head})
 	return o.flush()
 }
 
 func (o *terminalOwner) consumePTY(data []byte, readErr error) error {
 	if len(data) > 0 {
+		if o.ptyEOF {
+			return ErrState
+		}
 		if appendErr := o.ring.Append(data); appendErr != nil {
 			return appendErr
 		}
@@ -403,10 +434,17 @@ func (o *terminalOwner) consumePTY(data []byte, readErr error) error {
 		}
 	}
 	if errors.Is(readErr, unix.EIO) || errors.Is(readErr, io.EOF) {
+		var retireErr error
 		if o.reads != nil && o.ptyOpen {
-			retireReadableFilter(o.reads.removePTY)
-			o.ptyOpen = false
+			retireErr = retireReadableFilter(o.reads.removePTY)
+			if retireErr == nil {
+				o.ptyOpen = false
+			}
 		}
+		if retireErr != nil {
+			return retireErr
+		}
+		o.ptyDrained = true
 		return o.emitPTYEOF()
 	}
 	if errors.Is(readErr, unix.EAGAIN) || errors.Is(readErr, unix.EWOULDBLOCK) || readErr == nil {
@@ -430,10 +468,17 @@ func (o *terminalOwner) drainPTY() error {
 			continue
 		}
 		if errors.Is(err, unix.EIO) || errors.Is(err, io.EOF) {
+			var retireErr error
 			if o.reads != nil && o.ptyOpen {
-				retireReadableFilter(o.reads.removePTY)
-				o.ptyOpen = false
+				retireErr = retireReadableFilter(o.reads.removePTY)
+				if retireErr == nil {
+					o.ptyOpen = false
+				}
 			}
+			if retireErr != nil {
+				return retireErr
+			}
+			o.ptyDrained = true
 			return o.emitPTYEOF()
 		}
 		if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
@@ -449,7 +494,50 @@ func (o *terminalOwner) drainPTY() error {
 }
 
 func (o *terminalOwner) flush() error {
-	if o.credit == 0 || !o.daemonOpen {
+	if o.ptyEOF || o.credit == 0 || !o.daemonOpen {
+		return nil
+	}
+	for len(o.replay) > 0 && o.credit != 0 {
+		replay := &o.replay[0]
+		if replay.cursor < o.ring.Floor() {
+			if err := o.send(TerminalFrame{Kind: TerminalReset, Correlation: replay.correlation, Floor: o.ring.Floor(), Head: o.ring.Head()}); err != nil {
+				return err
+			}
+			o.replay = o.replay[1:]
+			continue
+		}
+		if replay.cursor > replay.head {
+			return ErrIdentity
+		}
+		if replay.cursor == replay.head {
+			o.replay = o.replay[1:]
+			continue
+		}
+		chunk, next, err := o.ring.Read(replay.cursor)
+		if err != nil {
+			return err
+		}
+		if next > replay.head {
+			chunk = chunk[:replay.head-replay.cursor]
+			next = replay.head
+		}
+		if uint64(len(chunk)) > o.credit {
+			chunk = chunk[:o.credit]
+			next = replay.cursor + uint64(len(chunk))
+		}
+		if len(chunk) == 0 {
+			return ErrState
+		}
+		if err := o.send(TerminalFrame{Kind: TerminalOutput, Correlation: replay.correlation, Start: replay.cursor, End: next, Payload: chunk}); err != nil {
+			return err
+		}
+		replay.cursor = next
+		o.credit -= uint64(len(chunk))
+		if replay.cursor == replay.head {
+			o.replay = o.replay[1:]
+		}
+	}
+	if o.credit == 0 {
 		return nil
 	}
 	if o.sent < o.ring.Floor() {
@@ -477,13 +565,62 @@ func (o *terminalOwner) flush() error {
 }
 
 func (o *terminalOwner) send(frame TerminalFrame) error {
-	if !o.daemonOpen {
+	if o == nil || !o.daemonOpen || o.daemon == nil {
 		return io.EOF
 	}
-	return writeControlFrame(o.daemon, terminalEventFrame(frame), maxFrameBytes)
+	if err := writeControlFrame(o.daemon, terminalEventFrame(frame), maxFrameBytes); err != nil {
+		return o.poisonDaemon(err)
+	}
+	return nil
+}
+
+func (o *terminalOwner) writeDaemonFrame(frame attemptFrame) error {
+	if o == nil || !o.daemonOpen || o.daemon == nil {
+		return io.EOF
+	}
+	if err := writeControlFrame(o.daemon, frame, maxFrameBytes); err != nil {
+		return o.poisonDaemon(err)
+	}
+	return nil
+}
+
+func (o *terminalOwner) writeWorkerFrame(frame attemptFrame) error {
+	if o == nil || !o.workerOpen || o.worker == nil {
+		return io.EOF
+	}
+	if err := writeControlFrame(o.worker, frame, maxFrameBytes); err != nil {
+		o.workerOpen = false
+		var closeErr error
+		if o.reads != nil {
+			closeErr = retireReadableFilter(o.reads.removeWorker)
+		}
+		closeErr = errors.Join(closeErr, o.worker.Close())
+		o.worker = nil
+		return errors.Join(err, closeErr)
+	}
+	return nil
+}
+
+func (o *terminalOwner) poisonDaemon(cause error) error {
+	if o == nil {
+		return cause
+	}
+	o.daemonOpen = false
+	var cleanupErr error
+	if o.reads != nil {
+		cleanupErr = errors.Join(cleanupErr, retireReadableFilter(o.reads.removeDaemon))
+	}
+	if o.daemon != nil {
+		cleanupErr = errors.Join(cleanupErr, o.daemon.Close())
+		o.daemon = nil
+	}
+	return errors.Join(cause, cleanupErr)
 }
 
 func (o *terminalOwner) emitPTYEOF() error {
+	if o == nil || !o.ptyDrained {
+		return ErrState
+	}
 	if o.ptyEOF {
 		return nil
 	}
@@ -497,20 +634,25 @@ func (o *terminalOwner) emitPTYEOF() error {
 
 func (o *terminalOwner) daemonLost() error {
 	o.daemonOpen = false
+	var cleanupErr error
 	if o.reads != nil {
-		retireReadableFilter(o.reads.removeDaemon)
-		retireReadableFilter(o.reads.removeWorker)
-		retireReadableFilter(o.reads.removePTY)
+		cleanupErr = errors.Join(cleanupErr, retireReadableFilter(o.reads.removeDaemon))
+		cleanupErr = errors.Join(cleanupErr, retireReadableFilter(o.reads.removeWorker))
+		cleanupErr = errors.Join(cleanupErr, retireReadableFilter(o.reads.removePTY))
+	}
+	if o.daemon != nil {
+		cleanupErr = errors.Join(cleanupErr, o.daemon.Close())
+		o.daemon = nil
 	}
 	o.inputActive = false
 	if o.child != nil && o.child.state == stateActivated {
 		_, err := o.child.Terminate(defaultStopTimeout)
 		if err != nil {
-			return err
+			return errors.Join(cleanupErr, err)
 		}
-		return o.drainPTY()
+		return errors.Join(cleanupErr, o.drainPTY())
 	}
-	return nil
+	return cleanupErr
 }
 
 func validBareAttemptFrame(frame attemptFrame) bool {

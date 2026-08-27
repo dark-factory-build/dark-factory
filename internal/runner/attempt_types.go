@@ -59,6 +59,7 @@ const (
 	TerminalAttached         TerminalEventKind = "terminal-attached"
 	TerminalOutput           TerminalEventKind = "terminal-output"
 	TerminalReset            TerminalEventKind = "terminal-reset"
+	TerminalReady            TerminalEventKind = "terminal-ready"
 	TerminalPTYEOF           TerminalEventKind = "terminal-pty-eof"
 )
 
@@ -184,6 +185,10 @@ func (f TerminalFrame) validate() error {
 		}
 	case TerminalReset:
 		if f.Correlation > maxTerminalCorrelation || f.Generation != 0 || f.Floor > f.Head || f.Start != 0 || f.End != 0 || f.Sequence != 0 || f.Count != 0 || f.Rows != 0 || f.Cols != 0 || f.Status != "" || len(f.Payload) != 0 {
+			return ErrState
+		}
+	case TerminalReady:
+		if f.Correlation != 0 || f.Generation != 0 || f.Sequence != 0 || f.Start != 0 || f.End != 0 || f.Floor != 0 || f.Head != 0 || f.Count != 0 || f.Rows != 0 || f.Cols != 0 || f.Status != "" || len(f.Payload) != 0 {
 			return ErrState
 		}
 	case TerminalPTYEOF:

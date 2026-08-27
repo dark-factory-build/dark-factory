@@ -215,7 +215,10 @@ func TestFinalReinspectionRejectsLateGitMetadata(t *testing.T) {
 	if err := fixture.controller.Release(runner.StageProvider); err != nil {
 		t.Fatal(err)
 	}
-	record := fixture.finish(t)
+	record := fixture.finish(t, false)
+	if diagnostic := fixture.output(); !strings.Contains(diagnostic, "invalid Change input: .git path components are forbidden") {
+		t.Fatalf("missing exact late-metadata rejection: %q", diagnostic)
+	}
 	if record.Terminal.Exit.Code == 0 && record.Terminal.Exit.Signal == 0 {
 		t.Fatalf("late forbidden metadata reached provider: %+v", record.Terminal)
 	}
@@ -237,7 +240,10 @@ func TestFinalReinspectionRejectsSameSizeContentMutation(t *testing.T) {
 	if err := fixture.controller.Release(runner.StageProvider); err != nil {
 		t.Fatal(err)
 	}
-	record := fixture.finish(t)
+	record := fixture.finish(t, false)
+	if diagnostic := fixture.output(); !strings.Contains(diagnostic, "invalid Change input: published Change facts changed") {
+		t.Fatalf("missing exact content rejection: %q", diagnostic)
+	}
 	if record.Terminal.Exit.Code == 0 && record.Terminal.Exit.Signal == 0 {
 		t.Fatalf("mutated content reached provider: %+v", record.Terminal)
 	}
@@ -269,7 +275,10 @@ func TestFinalRuntimeRecheckRejectsFixedChildReplacement(t *testing.T) {
 	if err := fixture.controller.Release(runner.StageProvider); err != nil {
 		t.Fatal(err)
 	}
-	record := fixture.finish(t)
+	record := fixture.finish(t, false)
+	if diagnostic := fixture.output(); !strings.Contains(diagnostic, "runtime authority verification: Change worker failed") {
+		t.Fatalf("missing exact runtime rejection: %q", diagnostic)
+	}
 	if record.Terminal.Exit.Code == 0 && record.Terminal.Exit.Signal == 0 {
 		t.Fatalf("replacement HOME reached provider: %+v", record.Terminal)
 	}
@@ -354,7 +363,10 @@ func newWorkerFixture(t *testing.T) *workerFixture {
 	}
 	witness, cwdWitness, envWitness := filepath.Join(root, "provider.witness"), filepath.Join(root, "provider.cwd"), filepath.Join(root, "provider.env")
 	quote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
-	program := fmt.Sprintf("set -eu\nfor n in 3 9; do test ! -e /dev/fd/$n; done\ntest -e /dev/fd/10\ngit rev-parse --is-inside-work-tree >/dev/null 2>&1 && exit 81 || :\nprintf x > %s\npwd > %s\nenv | sort > %s\n", quote(witness), quote(cwdWitness), quote(envWitness))
+	// A PTY has no implicit EOF after the initial handoff. The fixture selects
+	// the complete byte sequence explicitly, including exit, rather than
+	// relying on the worker to mutate it with a hidden newline or close.
+	program := fmt.Sprintf("set -eu\nfor n in 3 9; do test ! -e /dev/fd/$n; done\ntest -e /dev/fd/10\ngit rev-parse --is-inside-work-tree >/dev/null 2>&1 && exit 81 || :\nprintf x > %s\npwd > %s\nenv | sort > %s\nexit\n", quote(witness), quote(cwdWitness), quote(envWitness))
 	config := changeworker.Config{RuntimePath: runtimePath, RuntimeIdentity: runtimeID, GitExecutable: git, RepositoryRoot: repository, RepositoryIdentity: repositoryID, Revision: "HEAD", ChangeParent: changeParent, FinalName: "published", StagingName: ".stage", AttemptSocket: "/private/tmp/dark-factory-worker-api.sock", InitialTerminalInput: []byte(program)}
 	if _, err := runtimeValue.PublishWorkerConfig(context.Background(), config); err != nil {
 		t.Fatal(err)
@@ -441,8 +453,12 @@ func (f *workerFixture) release(t *testing.T, release, report runner.AttemptStag
 	}
 	return event
 }
-func (f *workerFixture) finish(t *testing.T) *runner.TerminalRecord {
+func (f *workerFixture) finish(t *testing.T, expectedSuccess ...bool) *runner.TerminalRecord {
 	t.Helper()
+	wantSuccess := true
+	if len(expectedSuccess) != 0 {
+		wantSuccess = expectedSuccess[0]
+	}
 	var event runner.AttemptEvent
 	var err error
 	for {
@@ -458,7 +474,7 @@ func (f *workerFixture) finish(t *testing.T) *runner.TerminalRecord {
 		t.Fatal(err)
 	}
 	exit, err := f.child.FinishAfterExit(8 * time.Second)
-	if err != nil || exit.Code != 0 {
+	if err != nil || wantSuccess && exit.Code != 0 || !wantSuccess && exit.Code == 0 && exit.Signal == 0 {
 		t.Fatalf("outer exit=%+v err=%v diag=%q", exit, err, f.output())
 	}
 	return event.Terminal

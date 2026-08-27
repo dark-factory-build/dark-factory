@@ -78,13 +78,16 @@ func runAttemptWorkerHelper(args []string) error {
 	var provider ExecSpec
 	var initialInput []byte
 	switch mode {
-	case "shell", "term", "leader":
+	case "shell", "term", "leader", "tail":
 		script := fmt.Sprintf("test -z \"${HOME+x}\" || exit 90; test -z \"${DARK_FACTORY_ATTEMPT_TOKEN+x}\" || exit 91; for n in 3 4 5 6 7 8 9 11; do test ! -e /dev/fd/$n || exit 92; done; test -f /dev/fd/10 || exit 93; test ! -s /dev/fd/10 || exit 94; cat /dev/fd/10/change-worker.config >/dev/null 2>&1 && exit 95; cd /dev/fd/10 >/dev/null 2>&1 && exit 96; printf '%%s' $$ > %q; printf 'pre-output\\n'; while test ! -f %q; do sleep 0.01; done; printf 'post-output\\n'; printf x >> %q; while test ! -f %q; do sleep 0.01; done; IFS= read -r line; printf '%%s' \"$line\" > %q", filepath.Join(root, "provider.pid"), filepath.Join(root, "continue"), filepath.Join(root, "provider.effect"), filepath.Join(root, "finish"), filepath.Join(root, "provider.stdin"))
 		if mode == "term" {
 			script = fmt.Sprintf("trap '' TERM; sleep 30 & printf '%%s' $! > %q; printf '%%s' $$ > %q; while :; do sleep 1; done", filepath.Join(root, "descendant.pid"), filepath.Join(root, "provider.pid"))
 		}
 		if mode == "leader" {
 			script = fmt.Sprintf("sleep 30 & printf '%%s' $! > %q; printf '%%s' $$ > %q; exit 0", filepath.Join(root, "descendant.pid"), filepath.Join(root, "provider.pid"))
+		}
+		if mode == "tail" {
+			script = "printf 'tail-output\\n'; exit 0"
 		}
 		initialInput = []byte("one-startup\n")
 		provider = ExecSpec{Target: "/bin/sh", Args: []string{"-c", script}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: providerCwd}
@@ -437,10 +440,14 @@ func TestAttemptRunnerPTYTerminalOwnerCommandsAndReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFile(t, filepath.Join(f.root, "provider.pid"))
+	event, err := f.controller.Next(4 * time.Second)
+	if err != nil || event.Kind != AttemptTerminalFrame || event.Frame == nil || event.Frame.Kind != TerminalReady {
+		t.Fatalf("terminal ready=%+v err=%v", event, err)
+	}
 	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalGenerationInstall, Correlation: 1, Generation: 1}); err != nil {
 		t.Fatal(err)
 	}
-	event, err := f.controller.Next(4 * time.Second)
+	event, err = f.controller.Next(4 * time.Second)
 	if err != nil || event.Kind != AttemptTerminalFrame || event.Frame == nil || event.Frame.Kind != TerminalGenerationResult || event.Frame.Status != TerminalResultOK {
 		t.Fatalf("generation install=%+v err=%v", event, err)
 	}
@@ -515,6 +522,9 @@ func TestAttemptRunnerPTYTerminalOwnerCommandsAndReplay(t *testing.T) {
 		}
 		switch event.Frame.Kind {
 		case TerminalOutput:
+			if eofSeen {
+				t.Fatal("terminal output followed PTY EOF")
+			}
 			outputSeen = outputSeen || strings.Contains(string(event.Frame.Payload), "output")
 			if !finishSent {
 				if err := os.WriteFile(filepath.Join(f.root, "finish"), nil, 0o600); err != nil {
@@ -528,6 +538,53 @@ func TestAttemptRunnerPTYTerminalOwnerCommandsAndReplay(t *testing.T) {
 	}
 	if !outputSeen || !eofSeen || event.Terminal == nil || event.Terminal.Terminal.Process != inner {
 		t.Fatalf("terminal evidence output=%t eof=%t event=%+v", outputSeen, eofSeen, event)
+	}
+	if err := f.controller.AcknowledgeTerminal(event.Terminal, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.outer.FinishAfterExit(6 * time.Second); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAttemptRunnerPTYEOFFollowsQueuedTailOutput(t *testing.T) {
+	f := newAttemptFixture(t, "tail", "")
+	inner := f.activateOuter()
+	f.advanceToProvider()
+	if err := f.controller.Release(StageProvider); err != nil {
+		t.Fatal(err)
+	}
+	event, err := f.controller.Next(4 * time.Second)
+	if err != nil || event.Kind != AttemptTerminalFrame || event.Frame == nil || event.Frame.Kind != TerminalReady {
+		t.Fatalf("terminal ready=%+v err=%v", event, err)
+	}
+	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalCredit, Credit: 256}); err != nil {
+		t.Fatal(err)
+	}
+	outputSeen, eofSeen := false, false
+	for {
+		event, err = f.controller.Next(6 * time.Second)
+		if err != nil {
+			t.Fatalf("tail stream event=%+v err=%v output=%t eof=%t diagnostic=%q", event, err, outputSeen, eofSeen, f.output())
+		}
+		if event.Kind == AttemptTerminal {
+			break
+		}
+		if event.Kind != AttemptTerminalFrame || event.Frame == nil {
+			t.Fatalf("unexpected tail stream event=%+v", event)
+		}
+		switch event.Frame.Kind {
+		case TerminalOutput:
+			if eofSeen {
+				t.Fatal("terminal output followed PTY EOF")
+			}
+			outputSeen = outputSeen || strings.Contains(string(event.Frame.Payload), "tail-output")
+		case TerminalPTYEOF:
+			eofSeen = true
+		}
+	}
+	if !outputSeen || !eofSeen || event.Terminal == nil || event.Terminal.Terminal.Process != inner {
+		t.Fatalf("tail evidence output=%t eof=%t terminal=%+v", outputSeen, eofSeen, event.Terminal)
 	}
 	if err := f.controller.AcknowledgeTerminal(event.Terminal, true); err != nil {
 		t.Fatal(err)

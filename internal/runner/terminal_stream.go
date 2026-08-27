@@ -15,7 +15,11 @@ const (
 	// replay authority and its memory use must not depend on client behaviour.
 	terminalReplayCapacity = 1 << 20
 	terminalReplayChunk    = 8 << 10
-	maxFrameDecoderFrames  = 64
+	// Attach requests are serialized on the owner loop and this queue is a
+	// bounded handoff to the single live ring. A peer that never grants credit
+	// cannot consume unbounded owner memory.
+	terminalReplayRequestCapacity = 32
+	maxFrameDecoderFrames         = 64
 )
 
 var (

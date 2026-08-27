@@ -38,6 +38,7 @@ func TestAttemptControllerWriteFailurePoisonsCapability(t *testing.T) {
 	}
 	defer peer.Close()
 	controller.state = controllerProviderReleased
+	controller.terminalReady = true
 	saturateControllerSendBuffer(t, controller)
 	started := time.Now()
 	err = controller.SendTerminalCommand(TerminalCommand{Kind: TerminalCredit, Credit: 1})
@@ -81,6 +82,10 @@ func TestAttemptControllerTerminalCommandsRequireProviderRelease(t *testing.T) {
 		t.Fatalf("pre-release command = %v", err)
 	}
 	controller.state = controllerProviderReleased
+	if err := controller.SendTerminalCommand(command); !errors.Is(err, ErrState) {
+		t.Fatalf("pre-ready command = %v", err)
+	}
+	controller.terminalReady = true
 	if err := controller.SendTerminalCommand(command); err != nil {
 		t.Fatal(err)
 	}
@@ -101,6 +106,7 @@ func TestAttemptControllerTerminalEventsInterleaveWithoutLifecycleMutation(t *te
 	defer controller.Close()
 	defer peer.Close()
 	controller.state = controllerProviderReleased
+	controller.terminalReady = true
 	controller.attemptID = "attempt-terminal"
 	controller.inner = Identity{PID: 22, PGID: 22, Birth: Birth{Seconds: 3, Microseconds: 4}}
 
@@ -146,6 +152,7 @@ func TestAttemptControllerAcceptsAttachResultsWithoutLifecycleMutation(t *testin
 	defer controller.Close()
 	defer peer.Close()
 	controller.state = controllerProviderReleased
+	controller.terminalReady = true
 
 	frames := []TerminalFrame{
 		{Kind: TerminalAttached, Correlation: 1, Sequence: 8, Floor: 2, Head: 8, Status: TerminalResultOK},
@@ -176,6 +183,7 @@ func TestEveryDeclaredTerminalEventKindIsHandled(t *testing.T) {
 		TerminalAttached,
 		TerminalOutput,
 		TerminalReset,
+		TerminalReady,
 		TerminalPTYEOF,
 	}
 	for _, kind := range declared {
@@ -199,6 +207,7 @@ func TestAttemptControllerRejectsMalformedTerminalEvents(t *testing.T) {
 			t.Fatal(err)
 		}
 		controller.state = controllerProviderReleased
+		controller.terminalReady = true
 		if err := writeControlFrame(peer, frame, maxFrameBytes); err != nil {
 			t.Fatal(err)
 		}

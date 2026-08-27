@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -33,7 +34,15 @@ func runShell(ctx context.Context) (resultErr error) {
 	if err != nil {
 		return err
 	}
-	defer func() { resultErr = errors.Join(resultErr, control.Close()) }()
+	defer func() {
+		if resultErr != nil {
+			// The worker may fail during the final source/authority scan, before
+			// the one-shot input registration. Preserve that exact bounded cause
+			// for the outer owner instead of reducing it to an unexplained EOF.
+			_ = control.ReportProviderError(resultErr)
+		}
+		resultErr = errors.Join(resultErr, control.Close())
+	}()
 	runtimeDir, err := control.DuplicateRuntimeDirectory(ctx)
 	if err != nil {
 		return err
@@ -129,7 +138,7 @@ func runShell(ctx context.Context) (resultErr error) {
 		}
 	}()
 	if err := authority.verify(ctx); err != nil {
-		return err
+		return fmt.Errorf("runtime authority verification: %w", err)
 	}
 	cwd, err := verified.DuplicateDirectory(ctx)
 	if err != nil {
@@ -143,7 +152,7 @@ func runShell(ctx context.Context) (resultErr error) {
 	verifiedOpen = false
 	if err := authority.verify(ctx); err != nil {
 		_ = cwd.Close()
-		return err
+		return fmt.Errorf("runtime authority verification: %w", err)
 	}
 
 	home := filepath.Join(config.RuntimePath, HomeName)
@@ -158,9 +167,6 @@ func runShell(ctx context.Context) (resultErr error) {
 		"GIT_ASKPASS=/usr/bin/false", "GIT_SSH_COMMAND=/usr/bin/false", "GH_CONFIG_DIR=/dev/null",
 	}
 	initialInput := bytes.Clone(config.InitialTerminalInput)
-	if len(initialInput) != 0 && initialInput[len(initialInput)-1] != '\n' {
-		initialInput = append(initialInput, '\n')
-	}
 	spec, err := runner.PrepareExecSpec(runner.ExecSpec{Target: shellPath, Args: []string{"-s"}, Env: environment, Cwd: published.Path()})
 	if err != nil {
 		_ = cwd.Close()
@@ -168,7 +174,7 @@ func runShell(ctx context.Context) (resultErr error) {
 	}
 	if err := authority.verify(ctx); err != nil {
 		_ = cwd.Close()
-		return err
+		return fmt.Errorf("runtime authority verification: %w", err)
 	}
 	if err := authority.close(); err != nil {
 		_ = cwd.Close()
