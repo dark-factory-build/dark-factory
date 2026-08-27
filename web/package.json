@@ -4,9 +4,9 @@
   "packageManager": "pnpm@11.19.0",
   "engines": { "node": ">=20" },
   "scripts": {
-    "typecheck": "tsc --noEmit",
-    "build": "tsc -p tsconfig.build.json",
-    "test": "tsc -p tsconfig.build.json && node --test packages/client/test/*.test.mjs"
+    "typecheck": "pnpm --filter @dark-factory/client build && pnpm --filter @dark-factory/ui build && pnpm --filter dark-factory-dev typecheck",
+    "build": "pnpm --filter @dark-factory/client build && pnpm --filter @dark-factory/ui build && pnpm --filter dark-factory-dev build",
+    "test": "pnpm --filter @dark-factory/client build && pnpm --filter @dark-factory/ui build && node --test packages/client/test/*.test.mjs packages/ui/test/*.test.mjs"
   },
   "devDependencies": {
     "typescript": "5.8.3"

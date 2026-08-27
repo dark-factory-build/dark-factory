@@ -8,9 +8,10 @@
     "noImplicitOverride": true,
     "verbatimModuleSyntax": true,
     "isolatedModules": true,
+    "jsx": "react-jsx",
     "skipLibCheck": true,
     "lib": ["ES2022", "DOM"],
     "types": []
   },
-  "include": ["packages/client/src"]
+  "include": ["packages/client/src", "packages/ui/src"]
 }
