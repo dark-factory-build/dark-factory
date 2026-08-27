@@ -1104,31 +1104,122 @@ pre-implementation result, not a kernel regression:
 - the existing binary terminal session ID carries no authority by itself. The
   authenticated Principal, exact run/session/revisions, private connection
   identity and current lease generation must all reach the daemon effect seam;
-- Go accepts an output range whose half-open endpoint is exactly `2^64`; the
-  TypeScript codec currently rejects it. The first contract change must choose
-  one exact rule, align both codecs and add a mutation test at that boundary.
+- the initial audit reported an output-end mismatch. Direct arithmetic review
+  shows both current codecs already allow an exclusive end equal to
+  `MaxUint64` and reject an end equal to `2^64`; neither suite proves both sides
+  in both languages. V1 freezes that rule explicitly and adds shared fixtures
+  plus mutations at the last accepted and first rejected endpoints.
 
-The first wire slice freezes one small state machine. Structured controls own:
+The first wire slice freezes one small state machine. Every ordinary client
+request has a required envelope ID and exactly one response with the same ID;
+`ERROR` also echoes that ID. The client-to-server output `TERMINAL_ACK` is
+unilateral and forbids an ID. Server terminal events use the original attach
+request ID for the lifetime of that attachment, so no second public attachment
+identity exists. Structured controls own these exact bounded bodies:
 
 ```text
-attach -> attached | reset | error
-lease acquire | renew | release -> exact lease result | error
-resize -> terminal acknowledgement | error
-detach -> terminal acknowledgement | error
-HumanRequest reply -> resolved | delivery_unknown | error
-cancel_run -> resolved | error
-terminal EOF/exit -> observation only
+TERMINAL_ATTACH {
+  run_id, session_id, expected_run_revision, expected_session_revision,
+  after_sequence
+}
+  -> TERMINAL_ATTACHED {
+       session_id, floor, head, acknowledged_sequence,
+       max_unacked_bytes
+     }
+  | TERMINAL_RESET { session_id, floor, head }
+  | ERROR
+
+TERMINAL_ACK { session_id, next_sequence } -> no response
+
+TERMINAL_LEASE_ACQUIRE {
+  run_id, session_id, expected_run_revision, expected_session_revision
+}
+TERMINAL_LEASE_RENEW | TERMINAL_LEASE_RELEASE {
+  run_id, session_id, generation,
+  expected_run_revision, expected_session_revision
+}
+  -> TERMINAL_LEASE_RESULT {
+       operation: acquired | renewed | released,
+       run_id, session_id, generation, expires_at_ms?,
+       last_input_sequence, run_revision, session_revision
+     }
+  | ERROR
+
+TERMINAL_RESIZE {
+  run_id, session_id, generation,
+  expected_run_revision, expected_session_revision, rows, cols
+}
+  -> TERMINAL_RESIZED { session_id, generation, rows, cols }
+  | ERROR
+
+TERMINAL_DETACH { session_id }
+  -> TERMINAL_DETACHED { session_id }
+  | ERROR
+
+binary TERMINAL_INPUT
+  -> TERMINAL_INPUT_RESULT {
+       session_id, generation, sequence,
+       status: accepted | rejected | partial | uncertain,
+       accepted_bytes
+     }
+
+HUMAN_REQUEST_REPLY {
+  run_id, request_id, expected_revision, reply
+}
+  -> HUMAN_REQUEST_REPLY_RESULT {
+       request_id, revision, status: resolved | delivery_unknown
+     }
+  | ERROR
+
+HUMAN_REQUEST_CANCEL_RUN {
+  run_id, request_id, expected_request_revision, expected_run_revision
+}
+  -> HUMAN_REQUEST_ACTION_RESULT {
+       action: cancel_run, run_id, run_revision,
+       request_id, request_revision, status: resolved
+     }
+  | ERROR
+
+TERMINAL_EOF { session_id }             # attach ID; observation only
+TERMINAL_EXIT { session_id, exit_code, exit_signal, aborted }
+                                             # attach ID; observation only
+TERMINAL_RESET { session_id, floor, head }   # attach ID; detach follows
 ```
+
+All identifiers are exact lower-case 16-byte hex; revisions, generations,
+sequences, timestamps, byte counts and dimensions use their existing bounded
+decimal wire forms. Reply is bounded UTF-8 text, not terminal bytes. The only
+action is the literal `cancel_run`; it has no argument bag. Lease results never
+identify another client and a released result omits expiry. Attach authorizes
+observation with the exact Principal and revalidates the running run, active
+session and supplied revisions under the same daemon operation gate that
+installs the live observer.
 
 Binary client frames carry exact session, positive lease generation, strictly
 next input sequence and at most 8 KiB of bytes. Binary server frames carry the
 exact session, generation zero, contiguous output range and at most 8 KiB of
-bytes. Wrong direction, unattached/wrong session, zero/overflow, unknown
-opcode, malformed or oversized input closes the connection fail-closed. Input
-acknowledgement distinguishes complete acceptance from rejected, partial and
-uncertain outcomes; partial or uncertain input freezes/revokes the generation
-and is never retried. Output reset carries exact retained floor/head and forces
-a fresh rendering correlation. EOF/exit does not authorize process completion.
+bytes. For output, `sequence + payload_length <= MaxUint64`; the exclusive end
+`MaxUint64` is accepted and `2^64` is rejected. Wrong direction,
+unattached/wrong session, zero/overflow, unknown opcode, malformed or oversized
+input closes the connection fail-closed. A structurally valid exact-session
+input gets one `TERMINAL_INPUT_RESULT`; partial or uncertain input
+freezes/revokes the generation and is never retried. Output reset carries exact
+retained floor/head and forces a fresh rendering correlation. EOF/exit does not
+authorize process completion.
+
+Browser output uses one explicit per-attachment acknowledgement window, not a
+second queue. The manifest fixes `max_terminal_unacked_bytes` at 65,536 and
+`terminal_ack_timeout_ms` at 10,000. Attach starts with
+`acknowledged_sequence = after_sequence`; the server advances `sent_head` only
+after a successful WebSocket write and sends no frame that would make
+`sent_head - acknowledged_sequence` exceed the window. It may retain at most
+one already-selected 8 KiB event while waiting for credit. `TERMINAL_ACK`
+advances monotonically only within `(acknowledged_sequence, sent_head]`; an
+equal or out-of-range ACK is malformed and closes the connection. Credit
+reopens by the acknowledged byte delta. Lost credit never blocks the daemon or
+PTY: the existing attachment queue stays bounded, and the connection
+synchronously detaches/closes when the ACK deadline expires. A reset or close
+discards credit state; a new attach begins a new correlation.
 
 One authenticated connection owner selects its WebSocket input, state watch
 and the attachment's existing bounded event queue. It owns at most one terminal
@@ -1162,14 +1253,16 @@ Shared protocol ownership is serialized before implementation fans out:
    private repository remains an exact-artifact host rather than the terminal
    implementation.
 
-Required causal tests cover replay/live ordering, gap/reset, acknowledgement
-chronology, stale connection/generation/revision, partial/uncertain input,
+Required causal tests cover replay/live ordering, gap/reset, exact 64 KiB
+window exhaustion/replenishment/lost-ACK timeout, acknowledgement chronology,
+stale connection/generation/revision, partial/uncertain input,
 resize uncertainty, reply one-shot delivery, attach/finalization races,
 multiple observers/one writer, revocation, malformed frames, slow-client
 isolation and attachment/socket/goroutine cleanup. Mutations must kill the
-exact-maximum endpoint mismatch, removed private connection identity, skipped
-lease/revision checks, input replay, reset suppression, output without ACK
-credit and detach without join.
+accepted-`MaxUint64`/rejected-`2^64` endpoint boundary, removed private
+connection identity, skipped lease/revision checks, input replay, reset
+suppression, output past credit, equal/ahead ACK acceptance, missing ACK timeout
+and detach without join.
 
 ### Browser security and pairing
 
