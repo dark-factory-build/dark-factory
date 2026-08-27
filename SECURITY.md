@@ -87,11 +87,14 @@ reserves a unique delivery against the Store-derived origin before live-owner
 lookup, writes at most once, and permanently marks ambiguity as
 `delivery_unknown`. Cancellation derives the same origin inside one SQLite
 transaction, checks exact request and run revisions, and atomically finalizes,
-revokes, resolves, and invalidates before any best-effort live-owner fence. A
-stale request therefore cannot redirect either effect to a retry run. Browser
-results are correlated by envelope, request, and exact post-transition
-revisions; malformed, generic-action, or forged results close the operation
-fail-closed.
+revokes, resolves, and invalidates before synchronously fencing the exact live
+attempt's current terminal binding. That owner fence uses the binding's actual
+client, connection, and generation rather than the cancelling principal. No
+binding is definitive success; rejected, partial, uncertain, or controller
+failure is visible after the durable commit and is never retried. A stale
+request therefore cannot redirect either effect to a retry run. Browser results
+are correlated by envelope, request, and exact post-transition revisions;
+malformed, generic-action, or forged results close the operation fail-closed.
 
 ## Process and cleanup safety
 

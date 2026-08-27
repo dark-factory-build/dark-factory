@@ -101,13 +101,16 @@ or other private source data.
 Private detail is one pinned SQLite read. A client with
 `private_human_request_detail` may receive the exact hostile question and, only
 for an open request whose originating run is running with its exact active
-terminal session, an observation-only terminal target. `human_actions` is
-checked independently: without it, detail may contain that target but cannot
-advertise reply or cancellation. With it, the same snapshot may mint the one
-concrete cancellation descriptor containing exact request and run revisions.
-Delivering, delivery-unknown, finalizing, terminal, missing, and non-active
-origins expose no reply or cancellation authority; corrupt relationships fail
-closed.
+terminal session, an observation-only terminal target. Before minting that
+target, the same snapshot validates the canonical task assignment, resource
+topology and identities, run/resource/session chronology, and requires the
+validated terminal session to equal the selected active session.
+`human_actions` is checked independently: without it, detail may contain that
+target but cannot advertise reply or cancellation. With it, the same snapshot
+may mint the one concrete cancellation descriptor containing exact request and
+run revisions. Delivering, delivery-unknown, finalizing, terminal, missing, and
+non-active origins expose no reply or cancellation authority; corrupt active
+relationships fail closed rather than resembling unavailability.
 
 A reply request contains only request ID, expected request revision, and bounded
 reply text. The Store transaction reloads the client and request, derives the
@@ -119,6 +122,12 @@ origin, checks exact request/run revisions and capability, enters finalizing,
 revokes attempt and terminal-input authority, resolves the request, and appends
 all invalidations. The concrete response may report the server-derived run and
 post-transition revisions; it is result metadata, never caller authority.
+After that durable commit, the exact live attempt synchronously inspects its
+current terminal binding under the shared operation ordering. If one exists it
+revokes that binding's actual generation regardless of which authorized client
+submitted cancellation; no binding is definitive success. A rejected, partial,
+uncertain, or controller-failed fence is returned as post-commit uncertainty
+without rollback or retry against another run.
 
 ## Process and resource ownership
 

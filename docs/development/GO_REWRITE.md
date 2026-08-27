@@ -50,10 +50,12 @@ branch/worktree and obeys that repository's `AGENTS.md`.
 | Proved for revised architecture | Current Chrome on macOS can connect from the protected hosted HTTPS preview to exact `ws://127.0.0.1:43123` with the dedicated loopback permission; strict Origin/Host checks, binary traffic, reconnect, denial, no-daemon, port-collision and cross-site refusal are causal. A fresh Darwin PTY child remains inert until release, owns a controlling terminal/process group and is reaped without orphaning. SQLite owns exactly one terminal session per admitted run and refuses terminalization until its exact close is proved. The outer runner owns the live PTY loop without goroutines, transfers initial input exactly once, gates terminal commands on readiness, bounds and correlates replay before and after actual EOF, and writes one HumanRequest reply byte-for-byte without borrowing browser lease authority. The daemon registers one joined owner before release, rejects wrong sessions, routes bounded replay to multiple observers, actively cancels pre-live supervisors on shutdown and serializes infrastructure failure with terminal effects. Its exact effect bridge binds the durable client to one private WebSocket identity and generation, commits Store authority before runner effects, never replays ambiguous input/replies, and preserves positive terminal evidence until exact supervisor acknowledgement. The loopback server now enforces exact Host/Origin, pairing and per-operation durable client authority, serves bounded canonical state, joins subscriptions/connections, and couples exact-revision durable revocation to all-runtime socket close. The TypeScript Session client signs exact transcripts, publishes only complete fixed-head state, fences stale generations and ambiguous pairing, rate-bounds reconnect, and consumes the same pagination/empty-chronology contract. Each authenticated socket receives a private transport-minted identity that cannot be selected by a backend, serialized or exposed by formatting. The public React package renders bounded BUILDING, AGENT, task and read-only NEEDS YOU state without private detail or policy, installs and builds under the stripped Corepack gate, and remains consumable as an exact packed artifact. |
 | Blocked until proved | Real Go-server TypeScript terminal/HumanRequest vertical slice; automatic client lease renewal; interactive terminal/reply/cancel expansion of the public UI; complete private host integration; remaining factoryctl service/recovery cutover plumbing; revised crash-cut vertical slice |
 
-The final HumanRequest authority slice landed at `afb5fdf`: one pinned private
-detail, Store-derived reply/cancel routing, a concrete cancel result, no public
-run/terminal routing, and a high-level frozen TypeScript Session API. It adds no
-generic action framework or compatibility surface.
+The final HumanRequest authority slice landed through `bd674b0`: one pinned
+private detail with canonical active-run relationship validation, Store-derived
+reply/cancel routing, a synchronous current-binding cancellation fence, a
+concrete cancel result, no public run/terminal routing, and a high-level frozen
+TypeScript Session API. It adds no generic action framework or compatibility
+surface.
 
 Read-only redirection audits were assigned without overlapping writes:
 
@@ -428,6 +430,11 @@ Only a durable nonrevoked `private_human_request_detail` client can read it;
 pinned snapshot. An exact open request/running origin/active terminal session
 may expose its observation target even to a private-detail-only client, but
 reply and the one concrete cancel descriptor require `human_actions` as well.
+Before projecting any target/reply/cancel metadata, that active branch reuses
+the canonical run relationship validator on the same pinned connection and
+requires its validated session to equal the selected session. Task assignment,
+resource topology/identity, or run/session/resource chronology corruption
+therefore returns corrupt state rather than plausible null affordances.
 Delivering, delivery-unknown, finalizing, terminal, missing and non-active
 origins advertise no target/reply/cancel authority. Impossible durable
 relationships fail closed. Reply and cancel requests carry no run destination;
@@ -997,10 +1004,15 @@ but no run ID or argument bag. One immediate Store transaction derives the run,
 revalidates both sources and client capability, enters the exact run into
 finalizing, revokes attempt/input authority, resolves the request as
 `cancel_run`, and emits both invalidations. The result reports the
-server-derived run ID and exact post-transition revisions. There is no action
-table, action/status result wrapper, generic union, token, arbitrary arguments,
-or compatibility alias. Do not implement approve, reject, retry, resume,
-publish, or permission grants without a concrete product contract.
+server-derived run ID and exact post-transition revisions. Still under the
+daemon's operation serialization, the exact live attempt then inspects its
+current binding and sends one generation revoke for that binding regardless of
+the cancelling client. No binding is definitive success; rejected, partial,
+uncertain and controller-failed fences remain visible after the durable commit
+without rollback or retry. There is no action table, action/status result
+wrapper, generic union, token, arbitrary arguments, or compatibility alias. Do
+not implement approve, reject, retry, resume, publish, or permission grants
+without a concrete product contract.
 
 ### Browser protocol v1
 `factoryd` initially hosts the loopback WebSocket adapter in
@@ -1298,12 +1310,12 @@ replay ring.
 
 The framework-neutral TypeScript surface owns a `TerminalHandle`, explicit
 lease, complete input receipts, typed reset/output/EOF/exit events and
-revision-bound HumanRequest reply plus the single `cancel_run` action. It does
-not expose connection IDs, delivery IDs, runner/process identities, another
-client's lease, generic action arguments or private reply bytes in public
-state. `connect()` reaching authenticated/syncing is distinct from canonical
-state becoming ready; UI code must observe the ready state rather than infer it
-from connection resolution.
+revision-bound HumanRequest reply plus the single `cancel_run` descriptor. It
+does not expose connection IDs, delivery IDs, runner/process identities,
+another client's lease, generic action arguments or private reply bytes in
+public state. `connect()` reaching authenticated/syncing is distinct from
+canonical state becoming ready; UI code must observe the ready state rather
+than infer it from connection resolution.
 
 Shared protocol ownership is serialized before implementation fans out:
 
@@ -4236,7 +4248,7 @@ Shared browser terminal contract proof on integrated head `a10b9f0`:
 - Browser v1 now has one exact manifest row, direction, envelope-ID policy,
   fixture and closed Go/TypeScript codec case for terminal attach, output ACK,
   lease acquire/renew/release, resize, detach, input result, EOF/exit/reset,
-  HumanRequest reply and the single `cancel_run` action. Ordinary responses
+  HumanRequest reply and the single `cancel_run` descriptor. Ordinary responses
   echo one request ID; attachment-lifetime events reuse only the attach ID;
   `TERMINAL_ACK` alone forbids an ID.
 - The binary contract remains two opcodes and no base64. Input and output are
@@ -4384,8 +4396,9 @@ Go browser terminal and HumanRequest effect transport proof on integrated head
   with no unknown capability bit. Target-specific revocation linearization,
   backend cancellation, codec, null-result, stale-observation and forged
   correlation tests are causal and pass at count twenty.
-- HumanRequest private-detail authority, concrete cancel discovery and the
-  high-level TypeScript methods are complete at `afb5fdf`. Automatic lease
+- HumanRequest private-detail authority, canonical active-graph validation,
+  exact current-binding cancel fencing and the high-level TypeScript methods
+  are complete through `bd674b0`. Automatic lease
   renewal, real cross-language Go/TypeScript E2E, and interactive public UI
   terminal/request/cancel work remain blocked. Recovery replay, private host
   integration and the final cutover gates remain incomplete.
