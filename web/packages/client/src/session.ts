@@ -32,6 +32,7 @@ import { buildAuthTranscript, buildPairTranscript, hexBytes } from "./transcript
 const CLOSED = 3;
 const PUBLIC_KEY_BYTES = 65;
 const SIGNATURE_BYTES = 64;
+const MAX_PENDING_STATE_REFRESHES = 32;
 
 export interface BrowserTimer {
   setTimeout(callback: () => void, delayMs: number): unknown;
@@ -179,7 +180,10 @@ export class BrowserSession {
   #pending = new Map<string, Pending>();
   #targetPending = new Map<string, TargetPending>();
   #entities = new Map<string, PendingEntity>();
+  #retiredEntities = new Map<string, PendingEntity>();
   #subscriptionID: string | undefined;
+  #stateHeadFloor = 0n;
+  #firstSnapshotPage = true;
   #requestNumber = 1;
   #closed = false;
   #pairing = false;
@@ -321,6 +325,7 @@ export class BrowserSession {
     for (const handle of this.#terminalHandles) handle.terminate(new SessionError("closed"));
     this.#terminalHandles.clear();
     this.#entities.clear();
+    this.#retiredEntities.clear();
     this.#accumulator.applyRestart("gap");
     const socket = this.#socket;
     this.#socket = undefined;
@@ -491,7 +496,7 @@ export class BrowserSession {
     }
     switch (frame.type) {
       case "STATE_SNAPSHOT": this.#snapshot(frame); return;
-      case "STATE_RESTART": this.#resync(frame.body.reason); return;
+      case "STATE_RESTART": this.#wireRestart(frame); return;
       case "STATE_EVENT": this.#event(frame); return;
       case "STATE_ENTITY": this.#entity(frame); return;
       case "ERROR": this.#errorFrame(frame); return;
@@ -500,10 +505,13 @@ export class BrowserSession {
   }
 
   #snapshot(frame: StateSnapshotFrame): void {
-    if (this.#pending.get(frame.id) === "snapshot") this.#pending.delete(frame.id);
+    if (this.#pending.get(frame.id) !== "snapshot" || this.#retiredEntities.size !== 0) throw new ProtocolError("malformed");
+    if (this.#firstSnapshotPage && frame.body.head < this.#stateHeadFloor) throw new ProtocolError("malformed");
+    this.#pending.delete(frame.id);
     const result = this.#accumulator.applySnapshot(frame);
-    if (result.kind === "restart") { this.#resync(result.reason); return; }
+    if (result.kind === "restart") throw new ProtocolError("malformed");
     if (result.kind === "published") {
+      this.#advanceStateHead(result.state.head);
       notify(this.#options.onState, result.state);
       this.#ensureLive();
       this.#setStatus("ready");
@@ -511,15 +519,18 @@ export class BrowserSession {
       this.#subscriptionID = id;
       this.#send(encodeStateSubscribe(id, { after: result.state.head }));
     } else if (result.kind === "staged") {
+      this.#firstSnapshotPage = false;
       this.#beginSnapshot(this.#accumulator.nextCursor);
     }
   }
 
   #event(frame: StateEventFrame): void {
     if (frame.id !== this.#subscriptionID) throw new ProtocolError("malformed");
+    if (frame.body.event === "entity_changed" && !frame.body.deleted && this.#entities.size >= MAX_PENDING_STATE_REFRESHES) throw new SessionError("rate_limited", true);
     const result = this.#accumulator.apply(frame);
-    if (result.kind === "restart") { this.#resync(result.reason); return; }
+    if (result.kind === "restart") throw new ProtocolError("malformed");
     if (result.kind === "applied" || result.kind === "ignored") {
+      this.#advanceStateHead(result.state.head);
       notify(this.#options.onState, result.state);
       this.#ensureLive();
       if (frame.body.event === "entity_changed" && !frame.body.deleted) this.#refresh(frame.body);
@@ -527,6 +538,7 @@ export class BrowserSession {
   }
 
   #refresh(event: EntityChangedEvent): void {
+    if (this.#entities.size >= MAX_PENDING_STATE_REFRESHES) throw new SessionError("rate_limited", true);
     const id = this.#nextID("entity");
     this.#entities.set(id, { kind: event.entity_kind, id: event.entity_id });
     this.#pending.set(id, "entity");
@@ -534,13 +546,20 @@ export class BrowserSession {
   }
 
   #entity(frame: StateEntityFrame): void {
+    const retired = this.#retiredEntities.get(frame.id);
+    if (retired !== undefined) {
+      if (retired.kind !== frame.body.kind || retired.id !== frame.body.id) throw new ProtocolError("malformed");
+      this.#retiredEntities.delete(frame.id);
+      return;
+    }
     const expected = this.#entities.get(frame.id);
     if (expected === undefined || expected.kind !== frame.body.kind || expected.id !== frame.body.id) throw new ProtocolError("malformed");
     this.#entities.delete(frame.id);
     this.#pending.delete(frame.id);
     const result = this.#accumulator.applyEntity(frame.body);
-    if (result.kind === "restart") this.#resync(result.reason);
+    if (result.kind === "restart") throw new ProtocolError("malformed");
     else if (result.kind === "applied" || result.kind === "ignored") {
+      this.#advanceStateHead(result.state.head);
       notify(this.#options.onState, result.state);
       this.#ensureLive();
     }
@@ -548,6 +567,7 @@ export class BrowserSession {
 
   #errorFrame(frame: ErrorFrame): void {
     const id = frame.id;
+    if (id !== undefined && this.#retiredEntities.delete(id)) return;
     if (id !== undefined) {
       const target = this.#targetPending.get(id);
       if (target !== undefined) {
@@ -573,20 +593,40 @@ export class BrowserSession {
 
   #beginSnapshot(cursor: string | null): void {
     const result = this.#accumulator.beginSnapshot(cursor);
-    if (result.kind === "restart") { this.#resync(result.reason); return; }
+    if (result.kind === "restart") throw new ProtocolError("malformed");
     if (result.kind !== "requested") throw new ProtocolError("malformed");
     this.#pending.set(result.request.id, "snapshot");
     this.#send(encodeStateGet(result.request.id, { cursor }));
   }
 
-  #resync(_reason: string): void {
-    this.#pending.clear();
-    this.#entities.clear();
-    this.#subscriptionID = undefined;
+  #wireRestart(frame: Extract<ServerControlFrame, { type: "STATE_RESTART" }>): void {
+    const fromWatch = frame.id === this.#subscriptionID;
+    const fromSnapshot = this.#pending.get(frame.id) === "snapshot";
+    if (!fromWatch && !fromSnapshot || frame.body.head < this.#stateHeadFloor) throw new ProtocolError("malformed");
+    if (fromWatch) {
+      if (this.#retiredEntities.size !== 0) throw new ProtocolError("malformed");
+      for (const [id, entity] of this.#entities) {
+        if (this.#pending.get(id) !== "entity") throw new ProtocolError("malformed");
+        this.#retiredEntities.set(id, entity);
+        this.#pending.delete(id);
+      }
+      this.#entities.clear();
+      this.#subscriptionID = undefined;
+    } else {
+      if (this.#subscriptionID !== undefined || this.#entities.size !== 0) throw new ProtocolError("malformed");
+      this.#pending.delete(frame.id);
+    }
+    this.#stateHeadFloor = frame.body.head;
     this.#accumulator.applyRestart("gap");
-    // A restart clears the accumulator's published and staged state. No old
-    // request is replayed; this is a fresh canonical fetch on this generation.
+    this.#firstSnapshotPage = true;
+    this.#setStatus("syncing");
+    this.#ensureLive();
     this.#beginSnapshot(null);
+  }
+
+  #advanceStateHead(head: bigint): void {
+    if (head < this.#stateHeadFloor) throw new ProtocolError("malformed");
+    this.#stateHeadFloor = head;
   }
 
   #terminalTarget(frame: Extract<ServerControlFrame, { type: "TERMINAL_TARGET" }>): void {
@@ -668,6 +708,7 @@ export class BrowserSession {
     this.#closeTargetPending(normalized);
     this.#closeHumanPending(normalized);
     this.#entities.clear();
+    this.#retiredEntities.clear();
     for (const handle of this.#terminalHandles) handle.terminate(normalized);
     this.#terminalHandles.clear();
     this.#accumulator.applyRestart("gap");

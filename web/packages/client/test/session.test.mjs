@@ -10,12 +10,14 @@ import {
   decodeClientControl,
   encodeHello,
   encodePairResult,
+  encodeServerError,
   encodeAuthResult,
   encodeHumanRequestCancelRunResult,
   encodeHumanRequestDetail,
   encodeHumanRequestReplyResult,
   encodeStateEntity,
   encodeStateEvent,
+  encodeStateRestart,
   encodeStateSnapshot,
   encodeTerminalAttached,
   encodeTerminalExit,
@@ -58,13 +60,72 @@ function serverFor(socket) {
   const capabilities = CAPABILITIES.observe | CAPABILITIES.private_human_request_detail | CAPABILITIES.human_actions | CAPABILITIES.terminal_input;
   if (frame.type === "PAIR_PROVE") socket.reply(encodePairResult(frame.id, { client_id: clientID, capabilities }));
   if (frame.type === "AUTH_PROVE") socket.reply(encodeAuthResult(frame.id, { client_id: clientID, capabilities }));
-  if (frame.type === "STATE_GET") {
-    const pagesByCursor = {
-      null: ["factory", [factory()], "p"], p: ["project", [], "a"], a: ["agent", [], "t"], t: ["task", [], "r"], r: ["human_request", [], null],
-    };
-    const [kind, items, next_cursor] = pagesByCursor[String(frame.body.cursor)];
-    socket.reply(encodeStateSnapshot(frame.id, { head: 1n, kind, items, next_cursor }));
+  if (frame.type === "STATE_GET") replyStatePage(socket, frame, 1n);
+}
+
+const statePages = {
+  null: ["factory", [factory()], "p"], p: ["project", [], "a"], a: ["agent", [], "t"], t: ["task", [], "r"], r: ["human_request", [], null],
+};
+
+function replyStatePage(socket, frame, head) {
+  const [kind, originalItems, next_cursor] = statePages[String(frame.body.cursor)];
+  const items = kind === "factory" ? [factory(head)] : originalItems;
+  socket.reply(encodeStateSnapshot(frame.id, { head, kind, items, next_cursor }));
+}
+
+function tick() { return new Promise((resolve) => setTimeout(resolve, 0)); }
+
+function lastFrame(socket, type) {
+  return decodeClientControl(socket.sent.findLast((wire) => decodeClientControl(wire).type === type));
+}
+
+async function openControlledStateSession(options = {}) {
+  let socket;
+  let automatic = true;
+  const capabilities = CAPABILITIES.observe | CAPABILITIES.private_human_request_detail | CAPABILITIES.human_actions | CAPABILITIES.terminal_input;
+  const server = (current, frame) => {
+    if (frame.type === "PAIR_PROVE") current.reply(encodePairResult(frame.id, { client_id: clientID, capabilities }));
+    if (frame.type === "AUTH_PROVE") current.reply(encodeAuthResult(frame.id, { client_id: clientID, capabilities }));
+    if (frame.type === "STATE_GET" && automatic) replyStatePage(current, frame, 1n);
+  };
+  const session = new BrowserSession({
+    url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example",
+    challenge, keyStore: new MemoryKeys(), socketFactory: () => { socket = new Socket(server); return socket; }, ...options,
+  });
+  await session.connect();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(session.status, "ready");
+  automatic = false;
+  return { session, socket };
+}
+
+async function completePendingSnapshot(socket, head) {
+  for (const cursor of [null, "p", "a", "t", "r"]) {
+    const frame = decodeClientControl(socket.sent.at(-1));
+    assert.equal(frame.type, "STATE_GET");
+    assert.equal(frame.body.cursor, cursor);
+    replyStatePage(socket, frame, head);
+    await tick();
   }
+}
+
+const firstEntityID = "aa".repeat(16);
+const secondEntityID = "bb".repeat(16);
+
+async function beginRetiredEntityRace(options = {}) {
+  const opened = await openControlledStateSession(options);
+  const watch = lastFrame(opened.socket, "STATE_SUBSCRIBE");
+  opened.socket.reply(encodeStateEvent(watch.id, { event: "entity_changed", sequence: 2n, head: 2n, entity_kind: "project", entity_id: firstEntityID, revision: 2n, deleted: false }));
+  await tick();
+  const first = lastFrame(opened.socket, "STATE_ENTITY_GET");
+  opened.socket.reply(encodeStateEvent(watch.id, { event: "entity_changed", sequence: 3n, head: 3n, entity_kind: "agent", entity_id: secondEntityID, revision: 2n, deleted: false }));
+  await tick();
+  const second = lastFrame(opened.socket, "STATE_ENTITY_GET");
+  opened.socket.reply(encodeStateRestart(watch.id, { head: 3n, floor: 1n, reason: "gap" }));
+  await tick();
+  assert.equal(opened.session.status, "syncing");
+  const snapshot = lastFrame(opened.socket, "STATE_GET");
+  return { ...opened, watch, first, second, snapshot };
 }
 
 async function openHumanSession(onError) {
@@ -323,6 +384,208 @@ test("event refresh is correlated to its entity and updates canonical state", as
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(states.at(-1).factory[0].revision, 2n);
   session.close();
+});
+
+test("wire restart retires exact entity responses, then publishes one fresh monotonic snapshot on the same socket", async () => {
+  const states = [];
+  const errors = [];
+  const { session, socket, watch, first, second } = await beginRetiredEntityRace({ onState: (state) => states.push(state), onError: (error) => errors.push(error) });
+  const beforeRetired = states.length;
+  socket.reply(encodeStateEntity(first.id, { head: 3n, kind: "project", id: firstEntityID, revision: 2n, deleted: true, item: null }));
+  await tick();
+  assert.equal(session.status, "syncing", errors.map((error) => `${error.name}:${error.code}`).join(","));
+  assert.equal(states.length, beforeRetired, "a retired response must not publish its body");
+  socket.reply(encodeServerError({ code: "not_found", retryable: false }, second.id));
+  await tick();
+  assert.equal(session.status, "syncing", errors.map((error) => `${error.name}:${error.code}`).join(","));
+
+  await completePendingSnapshot(socket, 4n);
+  assert.equal(session.status, "ready");
+  assert.equal(socket.readyState, 1);
+  assert.deepEqual(states.map((state) => state.head), [1n, 2n, 3n, 4n]);
+  assert.equal(states.at(-1).projects.size, 0, "retired project body never entered the fresh snapshot");
+  const replacementWatch = lastFrame(socket, "STATE_SUBSCRIBE");
+  assert.notEqual(replacementWatch.id, watch.id);
+  assert.equal(replacementWatch.body.after, 4n);
+  session.close();
+});
+
+test("retired entity correlations match exactly and consume one entity or error response", async (t) => {
+  for (const mismatch of ["kind", "id", "duplicate entity", "duplicate error"]) {
+    await t.test(mismatch, async () => {
+      const errors = [];
+      const { session, socket, first } = await beginRetiredEntityRace({ onError: (error) => errors.push(error) });
+      const exact = { head: 3n, kind: "project", id: firstEntityID, revision: 2n, deleted: true, item: null };
+      if (mismatch === "kind") socket.reply(encodeStateEntity(first.id, { ...exact, kind: "task" }));
+      else if (mismatch === "id") socket.reply(encodeStateEntity(first.id, { ...exact, id: secondEntityID }));
+      else if (mismatch === "duplicate entity") {
+        socket.reply(encodeStateEntity(first.id, exact));
+        await tick();
+        assert.equal(session.status, "syncing");
+        socket.reply(encodeStateEntity(first.id, exact));
+      } else {
+        const error = encodeServerError({ code: "not_found", retryable: false }, first.id);
+        socket.reply(error);
+        await tick();
+        assert.equal(session.status, "syncing");
+        socket.reply(error);
+      }
+      await tick();
+      assert.equal(session.status, "closed");
+      assert.equal(mismatch === "duplicate error"
+        ? errors.at(-1) instanceof SessionError && errors.at(-1).code === "not_found"
+        : errors.at(-1) instanceof ProtocolError && errors.at(-1).code === "malformed", true);
+    });
+  }
+});
+
+test("unknown state entities, restart IDs, and snapshot IDs fail closed", async (t) => {
+  await t.test("unknown entity", async () => {
+    const errors = [];
+    const { session, socket } = await openControlledStateSession({ onError: (error) => errors.push(error) });
+    socket.reply(encodeStateEntity("unknown-entity", { head: 1n, kind: "project", id: firstEntityID, revision: 1n, deleted: true, item: null }));
+    await tick();
+    assert.equal(session.status, "closed");
+    assert.equal(errors.at(-1) instanceof ProtocolError && errors.at(-1).code === "malformed", true);
+  });
+
+  await t.test("arbitrary restart", async () => {
+    const errors = [];
+    const { session, socket } = await openControlledStateSession({ onError: (error) => errors.push(error) });
+    socket.reply(encodeStateRestart("forged-watch", { head: 1n, floor: 1n, reason: "gap" }));
+    await tick();
+    assert.equal(session.status, "closed");
+    assert.equal(errors.at(-1) instanceof ProtocolError && errors.at(-1).code === "malformed", true);
+  });
+
+  await t.test("unknown snapshot", async () => {
+    const errors = [];
+    const { session, socket } = await openControlledStateSession({ onError: (error) => errors.push(error) });
+    const watch = lastFrame(socket, "STATE_SUBSCRIBE");
+    socket.reply(encodeStateRestart(watch.id, { head: 1n, floor: 1n, reason: "gap" }));
+    await tick();
+    socket.reply(encodeStateSnapshot("forged-snapshot", { head: 1n, kind: "factory", items: [factory()], next_cursor: "p" }));
+    await tick();
+    assert.equal(session.status, "closed");
+    assert.equal(errors.at(-1) instanceof ProtocolError && errors.at(-1).code === "malformed", true);
+  });
+});
+
+test("a fresh snapshot cannot overtake its retired entity responses", async () => {
+  const errors = [];
+  const { session, socket, snapshot } = await beginRetiredEntityRace({ onError: (error) => errors.push(error) });
+  socket.reply(encodeStateSnapshot(snapshot.id, { head: 3n, kind: "factory", items: [factory(3n)], next_cursor: "p" }));
+  await tick();
+  assert.equal(session.status, "closed");
+  assert.equal(errors.at(-1) instanceof ProtocolError && errors.at(-1).code === "malformed", true);
+});
+
+test("outstanding entity refreshes are capped at 32 and close retryably before a 33rd request", async () => {
+  const errors = [];
+  const { session, socket } = await openControlledStateSession({ onError: (error) => errors.push(error) });
+  const watch = lastFrame(socket, "STATE_SUBSCRIBE");
+  for (let index = 0; index < 33; index += 1) {
+    const sequence = BigInt(index + 2);
+    socket.reply(encodeStateEvent(watch.id, { event: "entity_changed", sequence, head: sequence, entity_kind: "project", entity_id: firstEntityID, revision: sequence, deleted: false }));
+    await tick();
+  }
+  assert.equal(session.status, "closed");
+  assert.equal(socket.sent.filter((wire) => decodeClientControl(wire).type === "STATE_ENTITY_GET").length, 32);
+  assert.equal(errors.at(-1) instanceof SessionError && errors.at(-1).code === "rate_limited" && errors.at(-1).retryable, true);
+});
+
+test("an exact pending snapshot restart starts a fresh bounded snapshot on the same socket", async () => {
+  const { session, socket } = await openControlledStateSession();
+  const watch = lastFrame(socket, "STATE_SUBSCRIBE");
+  socket.reply(encodeStateRestart(watch.id, { head: 2n, floor: 1n, reason: "gap" }));
+  await tick();
+  const firstSnapshot = lastFrame(socket, "STATE_GET");
+  socket.reply(encodeStateRestart(firstSnapshot.id, { head: 2n, floor: 1n, reason: "head_changed" }));
+  await tick();
+  const replacement = lastFrame(socket, "STATE_GET");
+  assert.notEqual(replacement.id, firstSnapshot.id);
+  await completePendingSnapshot(socket, 2n);
+  assert.equal(session.status, "ready");
+  assert.equal(session.state.head, 2n);
+  session.close();
+});
+
+test("closing from the restart status callback cannot send a post-close snapshot request", async () => {
+  let session;
+  let becameReady = false;
+  const opened = await openControlledStateSession({ onStatus: (status) => {
+    if (status === "ready") becameReady = true;
+    if (becameReady && status === "syncing") session?.close();
+  } });
+  session = opened.session;
+  const stateGets = opened.socket.sent.filter((wire) => decodeClientControl(wire).type === "STATE_GET").length;
+  const watch = lastFrame(opened.socket, "STATE_SUBSCRIBE");
+  opened.socket.reply(encodeStateRestart(watch.id, { head: 2n, floor: 1n, reason: "gap" }));
+  await tick();
+  assert.equal(session.status, "closed");
+  assert.equal(opened.socket.sent.filter((wire) => decodeClientControl(wire).type === "STATE_GET").length, stateGets);
+});
+
+test("late old-watch events and reducer-detected gaps close instead of installing another watch", async (t) => {
+  await t.test("late old-watch event", async () => {
+    const errors = [];
+    const { session, socket } = await openControlledStateSession({ onError: (error) => errors.push(error) });
+    const watch = lastFrame(socket, "STATE_SUBSCRIBE");
+    socket.reply(encodeStateRestart(watch.id, { head: 2n, floor: 1n, reason: "gap" }));
+    await tick();
+    socket.reply(encodeStateEvent(watch.id, { event: "hidden_advance", sequence: 2n, head: 2n }));
+    await tick();
+    assert.equal(session.status, "closed");
+    assert.equal(errors.at(-1) instanceof ProtocolError && errors.at(-1).code === "malformed", true);
+  });
+
+  await t.test("reducer gap", async () => {
+    const errors = [];
+    const { session, socket } = await openControlledStateSession({ onError: (error) => errors.push(error) });
+    const initialGets = socket.sent.filter((wire) => decodeClientControl(wire).type === "STATE_GET").length;
+    const watch = lastFrame(socket, "STATE_SUBSCRIBE");
+    socket.reply(encodeStateEvent(watch.id, { event: "hidden_advance", sequence: 3n, head: 3n }));
+    await tick();
+    assert.equal(session.status, "closed");
+    assert.equal(socket.sent.filter((wire) => decodeClientControl(wire).type === "STATE_GET").length, initialGets);
+    assert.equal(errors.at(-1) instanceof ProtocolError && errors.at(-1).code === "malformed", true);
+  });
+});
+
+test("wire restart and the first fresh snapshot preserve a session-lifetime monotonic head floor", async (t) => {
+  await t.test("restart cannot lower the published head", async () => {
+    const errors = [];
+    const { session, socket } = await openControlledStateSession({ onError: (error) => errors.push(error) });
+    const watch = lastFrame(socket, "STATE_SUBSCRIBE");
+    socket.reply(encodeStateRestart(watch.id, { head: 0n, floor: 1n, reason: "gap" }));
+    await tick();
+    assert.equal(session.status, "closed");
+    assert.equal(errors.at(-1) instanceof ProtocolError && errors.at(-1).code === "malformed", true);
+  });
+
+  for (const [label, head, accepted] of [["N-1", 4n, false], ["N", 5n, true], ["N+1", 6n, true]]) {
+    await t.test(label, async () => {
+      const errors = [];
+      const states = [];
+      const { session, socket } = await openControlledStateSession({ onError: (error) => errors.push(error), onState: (state) => states.push(state) });
+      const watch = lastFrame(socket, "STATE_SUBSCRIBE");
+      socket.reply(encodeStateRestart(watch.id, { head: 5n, floor: 1n, reason: "gap" }));
+      await tick();
+      if (!accepted) {
+        const snapshot = lastFrame(socket, "STATE_GET");
+        socket.reply(encodeStateSnapshot(snapshot.id, { head, kind: "factory", items: [factory(head)], next_cursor: "p" }));
+        await tick();
+        assert.equal(session.status, "closed");
+        assert.equal(errors.at(-1) instanceof ProtocolError && errors.at(-1).code === "malformed", true);
+        assert.deepEqual(states.map((state) => state.head), [1n]);
+        return;
+      }
+      await completePendingSnapshot(socket, head);
+      assert.equal(session.status, "ready");
+      assert.deepEqual(states.map((state) => state.head), [1n, head]);
+      session.close();
+    });
+  }
 });
 
 test("reconnect creates a fresh generation and stale socket frames are fenced", async () => {
