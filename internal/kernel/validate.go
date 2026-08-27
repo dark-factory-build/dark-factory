@@ -194,7 +194,7 @@ func validateBrowserAuthority(ctx context.Context, connection *sql.Conn) error {
 			return err
 		}
 		parsedKind := BrowserSecurityEventKind(kind)
-		if sequence < 1 || sequence <= previous || !validBrowserSecurityKind(parsedKind) || (parsedKind == BrowserSecurityChallengeMinted) != !client.valid || occurred < 0 {
+		if sequence < 1 || sequence <= previous || !validBrowserSecurityKind(parsedKind) || isBrowserChallengeEvent(parsedKind) != !client.valid || occurred < 0 {
 			rows.Close()
 			return fmt.Errorf("%w: invalid browser security event", ErrCorruptState)
 		}

@@ -95,6 +95,7 @@ type BrowserSecurityEventKind string
 
 const (
 	BrowserSecurityChallengeMinted      BrowserSecurityEventKind = "challenge_minted"
+	BrowserSecurityChallengeAbandoned   BrowserSecurityEventKind = "challenge_abandoned"
 	BrowserSecurityClientPaired         BrowserSecurityEventKind = "client_paired"
 	BrowserSecurityDuplicateFingerprint BrowserSecurityEventKind = "duplicate_fingerprint"
 	BrowserSecurityClientRevoked        BrowserSecurityEventKind = "client_revoked"
@@ -184,6 +185,42 @@ func (store *Store) CreateBrowserPairingChallenge(ctx context.Context, digest Br
 		return BrowserPairingChallenge{}, err
 	}
 	return challenge, nil
+}
+
+// AbandonBrowserPairingChallenge removes exactly one daemon-minted,
+// unredeemed challenge after its GUI launch failed. The boot and origin bind
+// the cleanup to the runtime that minted it; a missing or already redeemed
+// challenge is an idempotent no-op, never a reason to delete another row.
+func (store *Store) AbandonBrowserPairingChallenge(ctx context.Context, digest BrowserChallengeDigest, bootID BootID, origin string, at UnixMillis) (bool, error) {
+	if digest.b == [DigestBytes]byte{} || bootID.zero() || validateOrigin(origin) != nil {
+		return false, fmt.Errorf("%w: invalid browser challenge abandonment", ErrInvalidValue)
+	}
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Close()
+	challenge, found, err := browserChallengeByDigest(ctx, tx.connection, digest)
+	if err != nil {
+		return false, tx.Rollback(err)
+	}
+	if !found || challenge.RedeemedAt != nil {
+		return false, tx.Rollback(nil)
+	}
+	if challenge.BootID != bootID || challenge.IntendedOrigin != origin || at.Int64() < challenge.CreatedAt.Int64() {
+		return false, tx.Rollback(ErrUnauthorized)
+	}
+	removed, err := tx.connection.ExecContext(ctx, `DELETE FROM browser_pairing_challenges WHERE secret_digest = ? AND boot_id = ? AND intended_origin = ? AND redeemed_at_ms IS NULL`, digest.Bytes(), bootID.Bytes(), origin)
+	if err := requireOneRow(removed, err); err != nil {
+		return false, tx.Rollback(err)
+	}
+	if err := insertBrowserSecurityEvent(ctx, tx.connection, BrowserSecurityChallengeAbandoned, nil, at); err != nil {
+		return false, tx.Rollback(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // RedeemBrowserPairingChallenge consumes a challenge before checking duplicate identity.
@@ -339,12 +376,14 @@ func (store *Store) ListBrowserClients(ctx context.Context, after *BrowserClient
 	query := `SELECT id FROM browser_clients ORDER BY created_at_ms, id LIMIT ?`
 	args := []any{BrowserClientPageSize + 1}
 	if after != nil {
-		var created int64
-		if err := c.QueryRowContext(ctx, `SELECT created_at_ms FROM browser_clients WHERE id = ?`, after.Bytes()).Scan(&created); errors.Is(err, sql.ErrNoRows) {
-			return BrowserClientPage{}, ErrNotFound
-		} else if err != nil {
+		cursor, found, err := browserClientByID(ctx, c, *after)
+		if err != nil {
 			return BrowserClientPage{}, err
 		}
+		if !found {
+			return BrowserClientPage{}, ErrNotFound
+		}
+		created := cursor.CreatedAt.Int64()
 		query = `SELECT id FROM browser_clients WHERE (created_at_ms > ? OR (created_at_ms = ? AND id > ?)) ORDER BY created_at_ms, id LIMIT ?`
 		args = []any{created, created, after.Bytes(), BrowserClientPageSize + 1}
 	}
@@ -422,7 +461,7 @@ func (store *Store) AuthenticateBrowserClient(ctx context.Context, id BrowserCli
 }
 
 func insertBrowserSecurityEvent(ctx context.Context, c *sql.Conn, kind BrowserSecurityEventKind, clientID *BrowserClientID, at UnixMillis) error {
-	if !validBrowserSecurityKind(kind) || (kind == BrowserSecurityChallengeMinted) != (clientID == nil) {
+	if !validBrowserSecurityKind(kind) || isBrowserChallengeEvent(kind) != (clientID == nil) {
 		return fmt.Errorf("%w: invalid browser security event", ErrInvalidValue)
 	}
 	inserted, err := c.ExecContext(ctx, `INSERT INTO browser_security_events(kind, client_id, occurred_at_ms) VALUES(?, ?, ?)`, string(kind), nullableBrowserClient(clientID), at.Int64())
@@ -450,11 +489,15 @@ func nullableBrowserClient(id *BrowserClientID) any {
 }
 func validBrowserSecurityKind(kind BrowserSecurityEventKind) bool {
 	switch kind {
-	case BrowserSecurityChallengeMinted, BrowserSecurityClientPaired, BrowserSecurityDuplicateFingerprint, BrowserSecurityClientRevoked:
+	case BrowserSecurityChallengeMinted, BrowserSecurityChallengeAbandoned, BrowserSecurityClientPaired, BrowserSecurityDuplicateFingerprint, BrowserSecurityClientRevoked:
 		return true
 	default:
 		return false
 	}
+}
+
+func isBrowserChallengeEvent(kind BrowserSecurityEventKind) bool {
+	return kind == BrowserSecurityChallengeMinted || kind == BrowserSecurityChallengeAbandoned
 }
 
 type TerminalLease struct {

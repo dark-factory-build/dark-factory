@@ -2,7 +2,10 @@
 
 package api
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func TestWebStatusAndClientPageValidationIsStrict(t *testing.T) {
 	stopped := WebStatus{State: "stopped", ProtocolVersion: 1}
@@ -33,5 +36,18 @@ func TestWebStatusAndClientPageValidationIsStrict(t *testing.T) {
 	page.NextAfter = &next
 	if validWebClientPage(page) {
 		t.Fatal("short page with next cursor accepted")
+	}
+	full := WebClientPage{Clients: make([]WebClient, 128)}
+	for index := range full.Clients {
+		full.Clients[index] = WebClient{ID: fmt.Sprintf("%032x", index+1), CapabilityMask: 1, Revision: 1, CreatedAtMs: uint64(index + 1), UpdatedAtMs: uint64(index + 1)}
+	}
+	full.NextAfter = &full.Clients[len(full.Clients)-1].ID
+	if !validWebClientPage(full) {
+		t.Fatal("canonical full client page rejected")
+	}
+	wrong := "00000000000000000000000000000001"
+	full.NextAfter = &wrong
+	if validWebClientPage(full) {
+		t.Fatal("wrong full-page cursor accepted")
 	}
 }

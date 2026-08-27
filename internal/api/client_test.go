@@ -838,6 +838,29 @@ func testListener(t testing.TB, directory string) (*net.UnixListener, string) {
 	return listener, socket
 }
 
+func TestWebOpenPreservesDecodedLaunchOnProtocolError(t *testing.T) {
+	bearer := testCredential('L')
+	challenge := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	digest := "4884fdaafea47c29fea7159d0daddd9c085d6200e1359e85bb81736af6b7c837"
+	fixture := newWireFixture(t, bearer, func(connection net.Conn, _ []byte) error {
+		body := `{"launch_url":"https://app.darkfactory.build/#df_pair=` + challenge + `","expires_at_ms":1234,"challenge_digest":"` + digest + `","unexpected":"sentinel"}`
+		return writeTestResponse(connection, wireGeneration, wireOperatorDomain, successResponse(body))
+	})
+	client, err := NewOperatorClient(fixture.socket, fixture.token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := client.WebOpen(context.Background())
+	if !errors.Is(err, ErrProtocol) {
+		t.Fatalf("web open error = %v", err)
+	}
+	if result.LaunchURL == "" || result.ExpiresAtMs != 1234 || result.ChallengeDigest != digest {
+		t.Fatalf("web open discarded decoded launch = %+v", result)
+	}
+	<-fixture.request
+	fixture.wait(t)
+}
+
 func TestSocketParentSwapAfterDialIsRejected(t *testing.T) {
 	bearer := testCredential('W')
 	tokenDirectory := privateTestDirectory(t)

@@ -264,10 +264,10 @@ var schemaStatements = []string{
 ) STRICT, WITHOUT ROWID`,
 	`CREATE TABLE browser_security_events (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT CHECK (sequence >= 1),
-    kind TEXT NOT NULL CHECK (kind IN ('challenge_minted', 'client_paired', 'duplicate_fingerprint', 'client_revoked')),
+    kind TEXT NOT NULL CHECK (kind IN ('challenge_minted', 'challenge_abandoned', 'client_paired', 'duplicate_fingerprint', 'client_revoked')),
     client_id BLOB CHECK (client_id IS NULL OR (length(client_id) = 16 AND client_id <> zeroblob(16))) REFERENCES browser_clients(id),
     occurred_at_ms INTEGER NOT NULL CHECK (occurred_at_ms >= 0),
-    CHECK ((kind = 'challenge_minted' AND client_id IS NULL) OR (kind <> 'challenge_minted' AND client_id IS NOT NULL))
+    CHECK ((kind IN ('challenge_minted', 'challenge_abandoned') AND client_id IS NULL) OR (kind NOT IN ('challenge_minted', 'challenge_abandoned') AND client_id IS NOT NULL))
 ) STRICT`,
 	`CREATE INDEX browser_security_events_client ON browser_security_events(client_id, sequence)`,
 	`CREATE TABLE human_requests (

@@ -125,7 +125,35 @@ func (daemon *Daemon) OpenBrowser(ctx context.Context) (api.WebLaunch, error) {
 	if _, err := daemon.store.CreateBrowserPairingChallenge(ctx, digest, runtime.backend.boot, webProductionOrigin, webCapabilities, at, expires); err != nil {
 		return api.WebLaunch{}, err
 	}
-	return api.WebLaunch{LaunchURL: webProductionOrigin + "/#df_pair=" + hex.EncodeToString(challenge[:]), ExpiresAtMs: uint64(expires.Int64())}, nil
+	return api.WebLaunch{
+		LaunchURL:       webProductionOrigin + "/#df_pair=" + hex.EncodeToString(challenge[:]),
+		ExpiresAtMs:     uint64(expires.Int64()),
+		ChallengeDigest: hex.EncodeToString(digest.Bytes()),
+	}, nil
+}
+
+func (daemon *Daemon) AbandonBrowserOpen(ctx context.Context, input api.WebAbandonOpenInput) (api.WebAbandonOpenResult, error) {
+	raw, err := hex.DecodeString(input.ChallengeDigest)
+	if err != nil || len(raw) != kernel.DigestBytes {
+		return api.WebAbandonOpenResult{}, kernel.ErrInvalidValue
+	}
+	digest, err := kernel.BrowserChallengeDigestFromBytes(raw)
+	if err != nil {
+		return api.WebAbandonOpenResult{}, err
+	}
+	runtime, valid := daemon.webRuntime()
+	if !valid {
+		return api.WebAbandonOpenResult{}, fmt.Errorf("%w: browser transport unavailable", kernel.ErrBusy)
+	}
+	at, err := daemon.timestamp()
+	if err != nil {
+		return api.WebAbandonOpenResult{}, err
+	}
+	abandoned, err := daemon.store.AbandonBrowserPairingChallenge(ctx, digest, runtime.backend.boot, webProductionOrigin, at)
+	if err != nil {
+		return api.WebAbandonOpenResult{}, err
+	}
+	return api.WebAbandonOpenResult{Abandoned: abandoned}, nil
 }
 
 func (daemon *Daemon) WebListClients(ctx context.Context, after string) (api.WebClientPage, error) {

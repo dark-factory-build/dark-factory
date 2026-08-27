@@ -89,8 +89,9 @@ type WebStatus struct {
 // WebLaunch contains the one-shot browser URL only inside the owner-only
 // local API response. factoryctl consumes it without printing or logging it.
 type WebLaunch struct {
-	LaunchURL   string `json:"launch_url"`
-	ExpiresAtMs uint64 `json:"expires_at_ms"`
+	LaunchURL       string `json:"launch_url"`
+	ExpiresAtMs     uint64 `json:"expires_at_ms"`
+	ChallengeDigest string `json:"challenge_digest"`
 }
 
 type WebClient struct {
@@ -195,4 +196,12 @@ type HumanQuestionInput struct {
 type WebClientRevocationInput struct {
 	ID               string `json:"id"`
 	ExpectedRevision uint64 `json:"expected_revision"`
+}
+
+type WebAbandonOpenInput struct {
+	ChallengeDigest string `json:"challenge_digest"`
+}
+
+type WebAbandonOpenResult struct {
+	Abandoned bool `json:"abandoned"`
 }

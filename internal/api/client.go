@@ -106,10 +106,25 @@ func (client *OperatorClient) WebStatus(ctx context.Context) (WebStatus, error) 
 func (client *OperatorClient) WebOpen(ctx context.Context) (WebLaunch, error) {
 	var result WebLaunch
 	if err := client.client.call(ctx, "web_open", struct{}{}, &result); err != nil {
-		return WebLaunch{}, err
+		// Keep any bounded launch fields decoded before a strict protocol
+		// failure. factoryctl may be able to derive the exact one-shot
+		// challenge digest and abandon it; dropping them would strand it.
+		return result, err
 	}
 	if !validWebLaunch(result) {
-		return WebLaunch{}, ErrProtocol
+		return result, ErrProtocol
+	}
+	return result, nil
+}
+
+func (client *OperatorClient) WebAbandonOpen(ctx context.Context, challengeDigest string) (WebAbandonOpenResult, error) {
+	if !validDigest(challengeDigest) {
+		return WebAbandonOpenResult{}, ErrInvalidInput
+	}
+	params := WebAbandonOpenInput{ChallengeDigest: challengeDigest}
+	var result WebAbandonOpenResult
+	if err := client.client.call(ctx, "web_abandon_open", params, &result); err != nil {
+		return WebAbandonOpenResult{}, err
 	}
 	return result, nil
 }
@@ -618,7 +633,16 @@ func validWebStatus(status WebStatus) bool {
 }
 
 func validWebLaunch(launch WebLaunch) bool {
-	return validText(launch.LaunchURL, 1, 4096) && strings.HasPrefix(launch.LaunchURL, "https://") && launch.ExpiresAtMs > 0
+	return validText(launch.LaunchURL, 1, 4096) && strings.HasPrefix(launch.LaunchURL, "https://") && launch.ExpiresAtMs > 0 && validDigest(launch.ChallengeDigest)
+}
+
+func validDigest(value string) bool {
+	if len(value) != 64 || value == strings.Repeat("0", 64) {
+		return false
+	}
+	decoded := make([]byte, 32)
+	_, err := hex.Decode(decoded, []byte(value))
+	return err == nil && value == strings.ToLower(value)
 }
 
 func validWebClient(client WebClient) bool {
@@ -649,10 +673,7 @@ func validWebClientPage(page WebClientPage) bool {
 		seen[client.ID] = struct{}{}
 	}
 	if page.NextAfter != nil {
-		if len(page.Clients) != 128 || !validID(*page.NextAfter) {
-			return false
-		}
-		if _, ok := seen[*page.NextAfter]; ok {
+		if len(page.Clients) != 128 || !validID(*page.NextAfter) || *page.NextAfter != page.Clients[len(page.Clients)-1].ID {
 			return false
 		}
 	}

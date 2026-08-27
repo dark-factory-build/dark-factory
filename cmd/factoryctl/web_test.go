@@ -5,10 +5,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"golang.org/x/sys/unix"
@@ -128,7 +130,7 @@ func TestWebOpenUsesExactPrivateLaunchAndDoesNotPrintChallenge(t *testing.T) {
 		if call.Kind() != api.CallWebOpen {
 			return mustWebErrorReply(t, api.RemoteInvalidRequest)
 		}
-		reply, err := api.NewWebLaunchReply(api.WebLaunch{LaunchURL: "https://app.darkfactory.build/#df_pair=" + challenge, ExpiresAtMs: 1234})
+		reply, err := api.NewWebLaunchReply(api.WebLaunch{LaunchURL: "https://app.darkfactory.build/#df_pair=" + challenge, ExpiresAtMs: 1234, ChallengeDigest: "4884fdaafea47c29fea7159d0daddd9c085d6200e1359e85bb81736af6b7c837"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -153,15 +155,20 @@ func TestWebOpenRejectsQueryLaunchWithoutOpening(t *testing.T) {
 	fixture := newAPIFixture(t)
 	defer fixture.close(t)
 	challenge := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+	responses := serveMany(fixture.listener, func(call api.Call) api.Reply {
 		if call.Kind() != api.CallWebOpen {
 			return mustWebErrorReply(t, api.RemoteInvalidRequest)
 		}
-		reply, err := api.NewWebLaunchReply(api.WebLaunch{LaunchURL: "https://app.darkfactory.build/?leak=1#df_pair=" + challenge, ExpiresAtMs: 1234})
+		reply, err := api.NewWebLaunchReply(api.WebLaunch{LaunchURL: "https://app.darkfactory.build/?leak=1#df_pair=" + challenge, ExpiresAtMs: 1234, ChallengeDigest: "4884fdaafea47c29fea7159d0daddd9c085d6200e1359e85bb81736af6b7c837"})
 		if err != nil {
 			t.Fatal(err)
 		}
 		return reply
+	}, func(call api.Call) api.Reply {
+		if call.Kind() != api.CallWebAbandonOpen {
+			return mustWebErrorReply(t, api.RemoteInvalidRequest)
+		}
+		return api.NewWebAbandonReply(api.WebAbandonOpenResult{Abandoned: true})
 	})
 	var opened string
 	var stdout, stderr bytes.Buffer
@@ -169,9 +176,207 @@ func TestWebOpenRejectsQueryLaunchWithoutOpening(t *testing.T) {
 		opened = value
 		return nil
 	})
-	result := awaitServer(t, done)
-	if exit == 0 || result.err != nil || opened != "" || stdout.Len() != 0 || stderr.String() != "factoryctl: web open failed\n" {
-		t.Fatalf("query launch = exit %d opened %q stdout %q stderr %q server %v", exit, opened, stdout.String(), stderr.String(), result.err)
+	results := awaitMany(t, responses, 2)
+	if exit == 0 || opened != "" || stdout.Len() != 0 || stderr.String() != "factoryctl: web open failed\n" {
+		t.Fatalf("query launch = exit %d opened %q stdout %q stderr %q server %+v", exit, opened, stdout.String(), stderr.String(), results)
+	}
+	for index, result := range results {
+		if result.err != nil {
+			t.Fatalf("server call %d: %v", index, result.err)
+		}
+	}
+}
+
+func TestWebOpenMismatchCleansURLChallengeNotReturnedDigest(t *testing.T) {
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	challenge := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	urlDigest := "4884fdaafea47c29fea7159d0daddd9c085d6200e1359e85bb81736af6b7c837"
+	wrongDigest := "1111111111111111111111111111111111111111111111111111111111111111"
+	responses := serveMany(fixture.listener,
+		func(call api.Call) api.Reply {
+			if call.Kind() != api.CallWebOpen {
+				return mustWebErrorReply(t, api.RemoteInvalidRequest)
+			}
+			reply, err := api.NewWebLaunchReply(api.WebLaunch{
+				LaunchURL:       "https://app.darkfactory.build/#df_pair=" + challenge,
+				ExpiresAtMs:     1234,
+				ChallengeDigest: wrongDigest,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return reply
+		},
+		func(call api.Call) api.Reply {
+			if call.Kind() != api.CallWebAbandonOpen {
+				return mustWebErrorReply(t, api.RemoteInvalidRequest)
+			}
+			input, ok := call.WebAbandonOpenInput()
+			if !ok || input.ChallengeDigest != urlDigest {
+				return mustWebErrorReply(t, api.RemoteInvalidRequest)
+			}
+			return api.NewWebAbandonReply(api.WebAbandonOpenResult{Abandoned: true})
+		},
+	)
+	var opened string
+	var stdout, stderr bytes.Buffer
+	exit := runWithOpener(context.Background(), []string{"web", "open"}, webEnvironment(fixture), &stdout, &stderr, func(_ context.Context, value string) error {
+		opened = value
+		return nil
+	})
+	results := awaitMany(t, responses, 2)
+	if exit == 0 || opened != "" || stdout.Len() != 0 || stderr.String() != "factoryctl: web open failed\n" {
+		t.Fatalf("mismatched launch = exit %d opened %q stdout %q stderr %q server %+v", exit, opened, stdout.String(), stderr.String(), results)
+	}
+	for index, result := range results {
+		if result.err != nil {
+			t.Fatalf("server call %d: %v", index, result.err)
+		}
+	}
+}
+
+func TestWebOpenFailureAbandonsExactChallengeWithFreshContext(t *testing.T) {
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	challenge := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	digest := "4884fdaafea47c29fea7159d0daddd9c085d6200e1359e85bb81736af6b7c837"
+	responses := serveMany(fixture.listener,
+		func(call api.Call) api.Reply {
+			if call.Kind() != api.CallWebOpen {
+				return mustWebErrorReply(t, api.RemoteInvalidRequest)
+			}
+			reply, err := api.NewWebLaunchReply(api.WebLaunch{LaunchURL: "https://app.darkfactory.build/#df_pair=" + challenge, ExpiresAtMs: 1234, ChallengeDigest: digest})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return reply
+		},
+		func(call api.Call) api.Reply {
+			if call.Kind() != api.CallWebAbandonOpen {
+				return mustWebErrorReply(t, api.RemoteInvalidRequest)
+			}
+			input, ok := call.WebAbandonOpenInput()
+			if !ok || input.ChallengeDigest != digest {
+				return mustWebErrorReply(t, api.RemoteInvalidRequest)
+			}
+			return api.NewWebAbandonReply(api.WebAbandonOpenResult{Abandoned: true})
+		},
+	)
+	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var stdout, stderr bytes.Buffer
+	exit := runWithOpener(parent, []string{"web", "open"}, webEnvironment(fixture), &stdout, &stderr, func(_ context.Context, value string) error {
+		if value == "" {
+			t.Fatal("opener received no launch URL")
+		}
+		cancel()
+		return context.Canceled
+	})
+	results := awaitMany(t, responses, 2)
+	if exit == 0 || stdout.Len() != 0 || stderr.String() != "factoryctl: web browser could not be opened\n" {
+		t.Fatalf("open cancellation = exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
+	}
+	for index, result := range results {
+		if result.err != nil {
+			t.Fatalf("server call %d: %v", index, result.err)
+		}
+	}
+}
+
+func TestWebOpenFailureReportsCleanupUncertainty(t *testing.T) {
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	challenge := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	digest := "4884fdaafea47c29fea7159d0daddd9c085d6200e1359e85bb81736af6b7c837"
+	responses := serveMany(fixture.listener,
+		func(call api.Call) api.Reply {
+			reply, err := api.NewWebLaunchReply(api.WebLaunch{LaunchURL: "https://app.darkfactory.build/#df_pair=" + challenge, ExpiresAtMs: 1234, ChallengeDigest: digest})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return reply
+		},
+		func(call api.Call) api.Reply {
+			if call.Kind() != api.CallWebAbandonOpen {
+				return mustWebErrorReply(t, api.RemoteInvalidRequest)
+			}
+			return mustWebErrorReply(t, api.RemoteUnavailable)
+		},
+	)
+	var stdout, stderr bytes.Buffer
+	exit := runWithOpener(context.Background(), []string{"web", "open"}, webEnvironment(fixture), &stdout, &stderr, func(context.Context, string) error {
+		return errors.New("injected opener failure")
+	})
+	results := awaitMany(t, responses, 2)
+	if exit == 0 || stdout.Len() != 0 || stderr.String() != "factoryctl: web browser could not be opened; challenge cleanup remains unresolved\n" {
+		t.Fatalf("cleanup uncertainty = exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
+	}
+	for index, result := range results {
+		if result.err != nil {
+			t.Fatalf("server call %d: %v", index, result.err)
+		}
+	}
+}
+
+func TestWebOpenRepeatedFailuresDoNotAccumulateCleanupChallenges(t *testing.T) {
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	challenge := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	digest := "4884fdaafea47c29fea7159d0daddd9c085d6200e1359e85bb81736af6b7c837"
+	const failures = 33
+	responses := make([]func(api.Call) api.Reply, 0, failures*2+1)
+	for index := 0; index < failures; index++ {
+		responses = append(responses, func(call api.Call) api.Reply {
+			if call.Kind() != api.CallWebOpen {
+				return mustWebErrorReply(t, api.RemoteInvalidRequest)
+			}
+			reply, err := api.NewWebLaunchReply(api.WebLaunch{LaunchURL: "https://app.darkfactory.build/#df_pair=" + challenge, ExpiresAtMs: 1234, ChallengeDigest: digest})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return reply
+		})
+		responses = append(responses, func(call api.Call) api.Reply {
+			if call.Kind() != api.CallWebAbandonOpen {
+				return mustWebErrorReply(t, api.RemoteInvalidRequest)
+			}
+			return api.NewWebAbandonReply(api.WebAbandonOpenResult{Abandoned: true})
+		})
+	}
+	responses = append(responses, func(call api.Call) api.Reply {
+		if call.Kind() != api.CallWebOpen {
+			return mustWebErrorReply(t, api.RemoteInvalidRequest)
+		}
+		reply, err := api.NewWebLaunchReply(api.WebLaunch{LaunchURL: "https://app.darkfactory.build/#df_pair=" + challenge, ExpiresAtMs: 1234, ChallengeDigest: digest})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return reply
+	})
+	responsesDone := serveMany(fixture.listener, responses...)
+	failuresSeen := 0
+	var stdout, stderr bytes.Buffer
+	for index := 0; index <= failures; index++ {
+		exit := runWithOpener(context.Background(), []string{"web", "open"}, webEnvironment(fixture), &stdout, &stderr, func(context.Context, string) error {
+			if failuresSeen < failures {
+				failuresSeen++
+				return errors.New("injected opener failure")
+			}
+			return nil
+		})
+		if index < failures && exit == 0 || index == failures && exit != 0 {
+			t.Fatalf("open %d exit = %d", index, exit)
+		}
+	}
+	results := awaitMany(t, responsesDone, failures*2+1)
+	if failuresSeen != failures || stdout.String() != `{"state":"opened","expires_at_ms":1234}`+"\n" || stderr.String() != strings.Repeat("factoryctl: web browser could not be opened\n", failures) {
+		t.Fatalf("repeated open failures = failures=%d stdout %q stderr %q", failuresSeen, stdout.String(), stderr.String())
+	}
+	for index, result := range results {
+		if result.err != nil {
+			t.Fatalf("server call %d: %v", index, result.err)
+		}
 	}
 }
 
@@ -267,6 +472,44 @@ func webEnvironment(fixture *apiFixture) func(string) string {
 		default:
 			return ""
 		}
+	}
+}
+
+func serveMany(listener *api.Listener, replies ...func(api.Call) api.Reply) <-chan []serverResult {
+	done := make(chan []serverResult, 1)
+	go func() {
+		results := make([]serverResult, 0, len(replies))
+		for _, reply := range replies {
+			connection, err := listener.Accept()
+			if err != nil {
+				results = append(results, serverResult{err: err})
+				break
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			call, receiveErr := connection.Receive(ctx)
+			cancel()
+			if receiveErr == nil {
+				receiveErr = connection.Respond(reply(call))
+			}
+			_ = connection.Close()
+			results = append(results, serverResult{call: call, err: receiveErr})
+		}
+		done <- results
+	}()
+	return done
+}
+
+func awaitMany(t testing.TB, done <-chan []serverResult, want int) []serverResult {
+	t.Helper()
+	select {
+	case results := <-done:
+		if len(results) != want {
+			t.Fatalf("server calls = %d, want %d", len(results), want)
+		}
+		return results
+	case <-time.After(2 * time.Second):
+		t.Fatal("server calls did not finish")
+		return nil
 	}
 }
 

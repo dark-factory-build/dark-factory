@@ -123,6 +123,16 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 			return newErrorReply(api.RemoteInternal)
 		}
 		return reply
+	case api.CallWebAbandonOpen:
+		input, ok := call.WebAbandonOpenInput()
+		if !ok {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+		result, err := daemon.AbandonBrowserOpen(ctx, input)
+		if err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		return api.NewWebAbandonReply(result)
 	case api.CallWebListClients:
 		after, ok := call.WebListAfter()
 		if !ok {

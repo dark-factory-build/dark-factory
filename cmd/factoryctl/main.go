@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -297,13 +299,19 @@ func runWeb(ctx context.Context, command attemptCommand, getenv func(string) str
 	case commandWebOpen:
 		result, callErr := client.WebOpen(callContext)
 		if callErr != nil {
-			return writeWebFailure(stderr, "web open", callErr)
+			return handleWebOpenFailure(client, result, callErr, stderr)
 		}
-		if !validLaunchURL(result.LaunchURL) {
-			return writeWebFailure(stderr, "web open", api.ErrProtocol)
+		if !validLaunch(result) {
+			return handleWebOpenFailure(client, result, api.ErrProtocol, stderr)
 		}
+		challengeDigest, _ := launchChallengeDigest(result)
 		if opener == nil || opener(callContext, result.LaunchURL) != nil {
-			_, _ = io.WriteString(stderr, "factoryctl: web browser could not be opened\n")
+			cleanupErr := abandonWebOpen(client, challengeDigest)
+			if cleanupErr != nil {
+				_, _ = io.WriteString(stderr, "factoryctl: web browser could not be opened; challenge cleanup remains unresolved\n")
+			} else {
+				_, _ = io.WriteString(stderr, "factoryctl: web browser could not be opened\n")
+			}
 			return exitFailure
 		}
 		return writeJSON(stdout, struct {
@@ -325,6 +333,33 @@ func runWeb(ctx context.Context, command attemptCommand, getenv func(string) str
 	default:
 		return exitUsage
 	}
+}
+
+func handleWebOpenFailure(client *api.OperatorClient, launch api.WebLaunch, openErr error, stderr io.Writer) int {
+	if challengeDigest, exact := launchChallengeDigest(launch); exact {
+		if cleanupErr := abandonWebOpen(client, challengeDigest); cleanupErr == nil {
+			return writeWebFailure(stderr, "web open", openErr)
+		}
+		_, _ = io.WriteString(stderr, "factoryctl: web open failed; challenge cleanup remains unresolved\n")
+		return exitFailure
+	}
+
+	// A daemon rejection is authoritative and occurs before a launch is
+	// minted. Every other error may have happened after minting, but without
+	// an exact digest it cannot be safely cleaned up, so report uncertainty.
+	var remote *api.RemoteError
+	if errors.As(openErr, &remote) {
+		return writeWebFailure(stderr, "web open", openErr)
+	}
+	_, _ = io.WriteString(stderr, "factoryctl: web open failed; challenge cleanup remains unresolved\n")
+	return exitFailure
+}
+
+func abandonWebOpen(client *api.OperatorClient, challengeDigest string) error {
+	cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), attemptRequestTimeout)
+	defer cleanupCancel()
+	_, err := client.WebAbandonOpen(cleanupContext, challengeDigest)
+	return err
 }
 
 // socketDaemonPresent distinguishes a missing or stale pathname from a
@@ -357,6 +392,35 @@ func validLaunchURL(value string) bool {
 		return false
 	}
 	return validHex(parsed.Fragment[len("df_pair="):], 64)
+}
+
+func validLaunch(launch api.WebLaunch) bool {
+	digest, exact := launchChallengeDigest(launch)
+	if !validLaunchURL(launch.LaunchURL) || !exact || !validHex(launch.ChallengeDigest, 64) {
+		return false
+	}
+	return digest == launch.ChallengeDigest
+}
+
+// launchChallengeDigest extracts only the fragment's raw 32-byte challenge
+// and derives the non-secret identity used by the owner-only abandonment API.
+// It deliberately does not trust launch.ChallengeDigest: an internally
+// inconsistent response must never cause cleanup of a different challenge.
+func launchChallengeDigest(launch api.WebLaunch) (string, bool) {
+	parsed, err := url.Parse(launch.LaunchURL)
+	if err != nil || !strings.HasPrefix(parsed.Fragment, "df_pair=") {
+		return "", false
+	}
+	raw := strings.TrimPrefix(parsed.Fragment, "df_pair=")
+	if !validHex(raw, 64) {
+		return "", false
+	}
+	challenge, err := hex.DecodeString(raw)
+	if err != nil || len(challenge) != 32 {
+		return "", false
+	}
+	digest := sha256.Sum256(challenge)
+	return hex.EncodeToString(digest[:]), true
 }
 
 func validHex(value string, length int) bool {

@@ -60,3 +60,25 @@ func TestWebOperatorOpenStatusListAndRevoke(t *testing.T) {
 		t.Fatalf("revoked client page = %+v, %v", page, err)
 	}
 }
+
+func TestWebOpenAbandonmentReclaimsChallengeCapacity(t *testing.T) {
+	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityPrivateHumanRequestDetail)
+	ctx := context.Background()
+	for index := 0; index < 33; index++ {
+		launch, err := fixture.daemon.OpenBrowser(ctx)
+		if err != nil {
+			t.Fatalf("open %d: %v", index, err)
+		}
+		result, err := fixture.daemon.AbandonBrowserOpen(ctx, api.WebAbandonOpenInput{ChallengeDigest: launch.ChallengeDigest})
+		if err != nil || !result.Abandoned {
+			t.Fatalf("abandon %d = %+v, %v", index, result, err)
+		}
+		status, err := fixture.daemon.WebStatus(ctx)
+		if err != nil || status.ActiveChallenges != 1 {
+			t.Fatalf("challenge count after abandon %d = %+v, %v", index, status, err)
+		}
+	}
+	if _, err := fixture.daemon.OpenBrowser(ctx); err != nil {
+		t.Fatalf("open after repeated abandonment: %v", err)
+	}
+}
