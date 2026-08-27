@@ -200,9 +200,10 @@ func (daemon *Daemon) cancelHumanRequestRun(ctx context.Context, clientID kernel
 		fenceCtx, cancel := context.WithTimeout(context.Background(), liveAttemptEffectLimit)
 		fence := attempt.submitEffect(fenceCtx, terminalEffect{kind: terminalEffectRevokeClient, client: clientID})
 		cancel()
-		if fence.effectError(-1) != nil && !fence.terminalFence {
-			return run, request, errors.Join(err, fence.effectError(-1))
-		}
+		// The transaction above already revoked the durable generation and
+		// entered finalizing. A late owner-fence result cannot turn the action
+		// into a retry or report a second outcome after the request was resolved.
+		_ = fence
 	}
 	return run, request, nil
 }

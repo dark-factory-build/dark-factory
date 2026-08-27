@@ -326,11 +326,17 @@ func (backend *browserBackend) timestamp() (kernel.UnixMillis, error) {
 
 func projectBrowserAuthentication(client kernel.BrowserClient) (browser.Authentication, error) {
 	capabilities := browserprotocol.CapabilityObserve
-	if !client.CapabilityMask.Has(kernel.BrowserCapabilityObserve) || client.RevokedAt != nil {
+	if client.CapabilityMask&^kernel.BrowserCapabilityKnownMask != 0 || !client.CapabilityMask.Has(kernel.BrowserCapabilityObserve) || client.RevokedAt != nil {
 		return browser.Authentication{}, browser.ErrUnauthorized
 	}
 	if client.CapabilityMask.Has(kernel.BrowserCapabilityPrivateHumanRequestDetail) {
 		capabilities |= browserprotocol.CapabilityPrivateHumanRequestDetail
+	}
+	if client.CapabilityMask.Has(kernel.BrowserCapabilityHumanActions) {
+		capabilities |= browserprotocol.CapabilityHumanActions
+	}
+	if client.CapabilityMask.Has(kernel.BrowserCapabilityTerminalInput) {
+		capabilities |= browserprotocol.CapabilityTerminalInput
 	}
 	var principal browser.Principal
 	copy(principal.ClientID[:], client.ID.Bytes())

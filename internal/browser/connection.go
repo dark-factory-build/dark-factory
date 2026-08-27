@@ -50,14 +50,15 @@ type connection struct {
 	subscriptionHead     browserprotocol.Decimal
 	subscriptionHeadSet  bool
 
-	attachment       TerminalAttachment
-	terminalEvents   <-chan TerminalEvent
-	terminalAttachID string
-	terminalAttach   browserprotocol.TerminalAttach
-	terminalAck      uint64
-	terminalSent     uint64
-	terminalPending  *TerminalEvent
-	terminalAckTimer *time.Timer
+	attachment        TerminalAttachment
+	terminalEvents    <-chan TerminalEvent
+	terminalAttachID  string
+	terminalAttach    browserprotocol.TerminalAttach
+	terminalAnnounced bool
+	terminalAck       uint64
+	terminalSent      uint64
+	terminalPending   *TerminalEvent
+	terminalAckTimer  *time.Timer
 }
 
 func (current *connection) stop() {
@@ -613,6 +614,7 @@ func (current *connection) clearTerminal() {
 	current.terminalEvents = nil
 	current.terminalAttachID = ""
 	current.terminalAttach = browserprotocol.TerminalAttach{}
+	current.terminalAnnounced = false
 	current.terminalPending = nil
 	current.terminalAck, current.terminalSent = 0, 0
 }
@@ -650,6 +652,11 @@ func (current *connection) sendTerminalEvent(event TerminalEvent) bool {
 	}
 	switch event.Kind {
 	case TerminalEventAttached:
+		// The runner echoes the cursor it actually accepted. Use that echoed
+		// sequence as the credit origin; request bytes are not authority after
+		// the daemon/runner attach gate has run.
+		current.terminalAck = event.Sequence
+		current.terminalSent = event.Sequence
 		if !event.Accepted {
 			payload, err := browserprotocol.EncodeTerminalReset(current.terminalAttachID, browserprotocol.TerminalReset{SessionID: current.terminalAttach.SessionID, Floor: browserprotocol.Decimal(event.Floor), Head: browserprotocol.Decimal(event.Head)})
 			if err != nil || current.write(payload) != nil {
@@ -657,16 +664,26 @@ func (current *connection) sendTerminalEvent(event TerminalEvent) bool {
 			}
 			return current.closeTerminal() == nil
 		}
-		payload, err := browserprotocol.EncodeTerminalAttached(current.terminalAttachID, browserprotocol.TerminalAttached{SessionID: current.terminalAttach.SessionID, Floor: browserprotocol.Decimal(event.Floor), Head: browserprotocol.Decimal(event.Head), AcknowledgedSequence: browserprotocol.Decimal(current.terminalAck), MaxUnackedBytes: browserprotocol.MaxTerminalUnackedBytes})
-		return err == nil && current.write(payload) == nil
+		payload, err := browserprotocol.EncodeTerminalAttached(current.terminalAttachID, browserprotocol.TerminalAttached{SessionID: current.terminalAttach.SessionID, Floor: browserprotocol.Decimal(event.Floor), Head: browserprotocol.Decimal(event.Head), AcknowledgedSequence: browserprotocol.Decimal(event.Sequence), MaxUnackedBytes: browserprotocol.MaxTerminalUnackedBytes})
+		if err != nil || current.write(payload) != nil {
+			return false
+		}
+		current.terminalAnnounced = true
+		return true
 	case TerminalEventOutput:
-		if event.End <= event.Start {
+		if !current.terminalAnnounced {
+			return false
+		}
+		if event.End <= event.Start || event.End-event.Start != uint64(len(event.Payload)) {
 			return false
 		}
 		if event.End <= current.terminalAck {
 			return true
 		}
-		if event.Start < current.terminalAck || event.End-current.terminalAck > browserprotocol.MaxTerminalUnackedBytes {
+		if event.Start != current.terminalSent {
+			return false
+		}
+		if event.End-current.terminalAck > browserprotocol.MaxTerminalUnackedBytes {
 			if current.terminalPending != nil {
 				return false
 			}
@@ -689,9 +706,15 @@ func (current *connection) sendTerminalEvent(event TerminalEvent) bool {
 		}
 		return current.closeTerminal() == nil
 	case TerminalEventPTYEOF:
+		if !current.terminalAnnounced {
+			return false
+		}
 		payload, err := browserprotocol.EncodeTerminalEOF(current.terminalAttachID, browserprotocol.TerminalEOF{SessionID: current.terminalAttach.SessionID})
 		return err == nil && current.write(payload) == nil
 	case TerminalEventExit:
+		if !current.terminalAnnounced {
+			return false
+		}
 		payload, err := browserprotocol.EncodeTerminalExit(current.terminalAttachID, browserprotocol.TerminalExit{SessionID: current.terminalAttach.SessionID, ExitCode: int64(event.ExitCode), ExitSignal: int64(event.ExitSignal), Aborted: event.Aborted})
 		if err != nil || current.write(payload) != nil {
 			return false

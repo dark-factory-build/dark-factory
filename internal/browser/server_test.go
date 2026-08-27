@@ -460,7 +460,7 @@ func TestProofFailuresAndUnsupportedCapabilitiesFailClosed(t *testing.T) {
 			assertError(t, readServerFrame(t, connection), browserprotocol.ErrorUnauthorized)
 		})
 	}
-	for _, capability := range []browserprotocol.Capabilities{browserprotocol.CapabilityObserve | browserprotocol.CapabilityHumanActions, browserprotocol.CapabilityObserve | browserprotocol.CapabilityTerminalInput} {
+	for _, capability := range []browserprotocol.Capabilities{1 << 12, browserprotocol.CapabilityObserve | (1 << 12)} {
 		backend := newFakeBackend()
 		backend.authentication.Capabilities = capability
 		server := startServer(t, backend)

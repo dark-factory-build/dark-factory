@@ -1,0 +1,526 @@
+package browser
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/coder/websocket"
+	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
+)
+
+// terminalTestBackend keeps the transport tests causal: events are delivered
+// through the same receive-only attachment queue that production uses, and
+// effect requests are captured at the backend boundary.
+type terminalTestBackend struct {
+	*fakeBackend
+
+	terminalMu    sync.Mutex
+	attachment    *terminalTestAttachment
+	attachmentHit chan struct{}
+	input         TerminalInputRequest
+	inputCalls    int
+	replyResult   browserprotocol.HumanRequestReplyResult
+	actionResult  browserprotocol.HumanRequestActionResult
+}
+
+type terminalTestAttachment struct {
+	events    chan TerminalEvent
+	closed    atomic.Int32
+	closeOnce sync.Once
+}
+
+func newTerminalTestBackend() *terminalTestBackend {
+	return &terminalTestBackend{fakeBackend: newFakeBackend(), attachmentHit: make(chan struct{})}
+}
+
+func startTerminalServer(t *testing.T, backend *terminalTestBackend) *Server {
+	t.Helper()
+	server, err := Listen(Config{Address: "127.0.0.1:0", AllowedOrigins: []string{testOrigin, devOrigin}, Backend: backend})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := server.Close(); err != nil {
+			t.Errorf("close: %v", err)
+		}
+	})
+	return server
+}
+
+func (attachment *terminalTestAttachment) Events() <-chan TerminalEvent { return attachment.events }
+func (attachment *terminalTestAttachment) Close() error {
+	attachment.closeOnce.Do(func() { attachment.closed.Add(1) })
+	return nil
+}
+
+func (backend *terminalTestBackend) AttachTerminal(context.Context, TerminalAttachRequest) (TerminalAttachment, error) {
+	attachment := &terminalTestAttachment{events: make(chan TerminalEvent, 128)}
+	backend.terminalMu.Lock()
+	backend.attachment = attachment
+	backend.terminalMu.Unlock()
+	select {
+	case <-backend.attachmentHit:
+	default:
+		close(backend.attachmentHit)
+	}
+	return attachment, nil
+}
+
+func (backend *terminalTestBackend) currentAttachment(t *testing.T) *terminalTestAttachment {
+	t.Helper()
+	select {
+	case <-backend.attachmentHit:
+	case <-time.After(time.Second):
+		t.Fatal("terminal attachment was not created")
+	}
+	backend.terminalMu.Lock()
+	defer backend.terminalMu.Unlock()
+	return backend.attachment
+}
+
+func (backend *terminalTestBackend) AcquireTerminalLease(context.Context, Principal, browserprotocol.TerminalLeaseAcquire) (TerminalLeaseResult, error) {
+	return TerminalLeaseResult{}, errors.New("unexpected lease acquire")
+}
+func (backend *terminalTestBackend) RenewTerminalLease(context.Context, Principal, browserprotocol.TerminalLeaseRenew) (TerminalLeaseResult, error) {
+	return TerminalLeaseResult{}, errors.New("unexpected lease renew")
+}
+func (backend *terminalTestBackend) ReleaseTerminalLease(context.Context, Principal, browserprotocol.TerminalLeaseRelease) (TerminalLeaseResult, error) {
+	return TerminalLeaseResult{}, errors.New("unexpected lease release")
+}
+func (backend *terminalTestBackend) ResizeTerminal(context.Context, TerminalResizeRequest) error {
+	return errors.New("unexpected terminal resize")
+}
+func (backend *terminalTestBackend) InputTerminal(_ context.Context, request TerminalInputRequest) (uint32, error) {
+	backend.terminalMu.Lock()
+	backend.input = request
+	backend.inputCalls++
+	backend.terminalMu.Unlock()
+	return uint32(len(request.Frame.Payload)), nil
+}
+func (backend *terminalTestBackend) ReplyHumanRequest(context.Context, Principal, browserprotocol.HumanRequestReply) (browserprotocol.HumanRequestReplyResult, error) {
+	return backend.replyResult, nil
+}
+func (backend *terminalTestBackend) CancelHumanRequestRun(context.Context, Principal, browserprotocol.HumanRequestCancelRun) (browserprotocol.HumanRequestActionResult, error) {
+	return backend.actionResult, nil
+}
+
+func authenticateTerminalTest(t *testing.T, connection *websocket.Conn) browserprotocol.AuthResult {
+	t.Helper()
+	_ = readServerFrame(t, connection)
+	proof, err := browserprotocol.EncodeAuthProve("auth", browserprotocol.AuthProve{
+		ClientID: testID, Signature: strings.Repeat("01", browserprotocol.SignatureSize),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeClientFrame(t, connection, proof)
+	frame := readServerFrame(t, connection)
+	if frame.Type != browserprotocol.TypeAuthResult || frame.ID != "auth" {
+		t.Fatalf("auth result = %+v", frame)
+	}
+	return frame.Body.(browserprotocol.AuthResult)
+}
+
+func readTerminalBinary(t *testing.T, connection *websocket.Conn) browserprotocol.TerminalFrame {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	kind, payload, err := connection.Read(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kind != websocket.MessageBinary {
+		t.Fatalf("terminal frame kind=%v", kind)
+	}
+	frame, err := browserprotocol.DecodeTerminalFrame(payload)
+	if err != nil {
+		t.Fatalf("decode terminal frame: %v", err)
+	}
+	return frame
+}
+
+type terminalReadResult struct {
+	kind    websocket.MessageType
+	payload []byte
+	err     error
+}
+
+func beginTerminalRead(connection *websocket.Conn) <-chan terminalReadResult {
+	result := make(chan terminalReadResult, 1)
+	go func() {
+		kind, payload, err := connection.Read(context.Background())
+		result <- terminalReadResult{kind: kind, payload: payload, err: err}
+	}()
+	return result
+}
+
+func expectTerminalReadError(t *testing.T, connection *websocket.Conn) {
+	t.Helper()
+	result := beginTerminalRead(connection)
+	select {
+	case read := <-result:
+		if read.err == nil {
+			t.Fatal("unexpected terminal frame")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("connection remained open")
+	}
+}
+
+func terminalAttachRequest(t *testing.T, id string, after uint64) []byte {
+	t.Helper()
+	payload, err := browserprotocol.EncodeTerminalAttach(id, browserprotocol.TerminalAttach{
+		RunID: testID, SessionID: projectID, ExpectedRunRevision: 1, ExpectedSessionRevision: 1,
+		AfterSequence: browserprotocol.Decimal(after),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return payload
+}
+
+func sendTerminalEvent(t *testing.T, backend *terminalTestBackend, event TerminalEvent) {
+	t.Helper()
+	attachment := backend.currentAttachment(t)
+	select {
+	case attachment.events <- event:
+	case <-time.After(time.Second):
+		t.Fatal("terminal event queue did not accept event")
+	}
+}
+
+func TestTerminalTransportAdvertisesExactDurableCapabilities(t *testing.T) {
+	all := browserprotocol.CapabilityObserve | browserprotocol.CapabilityPrivateHumanRequestDetail | browserprotocol.CapabilityHumanActions | browserprotocol.CapabilityTerminalInput
+	for _, test := range []struct {
+		name string
+		caps browserprotocol.Capabilities
+	}{
+		{name: "all", caps: all},
+		{name: "observe only", caps: browserprotocol.CapabilityObserve},
+		{name: "human action only", caps: browserprotocol.CapabilityObserve | browserprotocol.CapabilityHumanActions},
+		{name: "terminal input only", caps: browserprotocol.CapabilityObserve | browserprotocol.CapabilityTerminalInput},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			backend := newTerminalTestBackend()
+			backend.authentication.Capabilities = test.caps
+			server := startTerminalServer(t, backend)
+			connection, _ := dialServer(t, server, testOrigin)
+			result := authenticateTerminalTest(t, connection)
+			if result.Capabilities != test.caps {
+				t.Fatalf("capabilities=%d want %d", result.Capabilities, test.caps)
+			}
+		})
+	}
+}
+
+func TestTerminalTransportAttachCreditReplayAndInput(t *testing.T) {
+	backend := newTerminalTestBackend()
+	backend.authentication.Capabilities = browserprotocol.CapabilityObserve | browserprotocol.CapabilityTerminalInput
+	server := startTerminalServer(t, backend)
+	connection, _ := dialServer(t, server, testOrigin)
+	authenticateTerminalTest(t, connection)
+
+	writeClientFrame(t, connection, terminalAttachRequest(t, "attach", 77))
+	sendTerminalEvent(t, backend, TerminalEvent{Kind: TerminalEventAttached, Accepted: true, Sequence: 91, Floor: 90, Head: 94})
+	attached := readServerFrame(t, connection)
+	if attached.Type != browserprotocol.TypeTerminalAttached || attached.ID != "attach" {
+		t.Fatalf("attached frame=%+v", attached)
+	}
+	attachedBody := attached.Body.(browserprotocol.TerminalAttached)
+	if attachedBody.AcknowledgedSequence != 91 || attachedBody.Floor != 90 || attachedBody.Head != 94 {
+		t.Fatalf("attached body=%+v", attachedBody)
+	}
+
+	sendTerminalEvent(t, backend, TerminalEvent{Kind: TerminalEventOutput, Start: 91, End: 94, Payload: []byte("out")})
+	output := readTerminalBinary(t, connection)
+	if output.Opcode != browserprotocol.TerminalOutputOpcode || output.SessionID != fixedID(projectID) || output.Sequence != 91 || !bytes.Equal(output.Payload, []byte("out")) {
+		t.Fatalf("output frame=%+v", output)
+	}
+
+	input, err := browserprotocol.EncodeTerminalInput(fixedID(projectID), 1, 7, []byte("in"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeRawClientFrame(t, connection, websocket.MessageBinary, input)
+	result := readServerFrame(t, connection)
+	if result.Type != browserprotocol.TypeTerminalInputResult || result.ID != "attach" {
+		t.Fatalf("input result=%+v", result)
+	}
+	inputResult := result.Body.(browserprotocol.TerminalInputResult)
+	if inputResult.Status != "accepted" || inputResult.AcceptedBytes != 2 || inputResult.Sequence != 1 || inputResult.Generation != 7 {
+		t.Fatalf("input result body=%+v", inputResult)
+	}
+
+	ack, err := browserprotocol.EncodeTerminalAck(browserprotocol.TerminalAck{SessionID: projectID, NextSequence: 94})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeClientFrame(t, connection, ack)
+	writeClientFrame(t, connection, ack)
+	expectTerminalReadError(t, connection)
+}
+
+func writeRawClientFrame(t *testing.T, connection *websocket.Conn, kind websocket.MessageType, payload []byte) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := connection.Write(ctx, kind, payload); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTerminalTransportCreditWindowHoldsOnePendingOutput(t *testing.T) {
+	backend := newTerminalTestBackend()
+	backend.authentication.Capabilities = browserprotocol.CapabilityObserve | browserprotocol.CapabilityTerminalInput
+	server := startTerminalServer(t, backend)
+	connection, _ := dialServer(t, server, testOrigin)
+	authenticateTerminalTest(t, connection)
+	writeClientFrame(t, connection, terminalAttachRequest(t, "attach", 0))
+	sendTerminalEvent(t, backend, TerminalEvent{Kind: TerminalEventAttached, Accepted: true, Sequence: 0, Floor: 0, Head: 73728})
+	if frame := readServerFrame(t, connection); frame.Type != browserprotocol.TypeTerminalAttached {
+		t.Fatalf("attached frame=%+v", frame)
+	}
+	for index := 0; index < browserprotocol.MaxTerminalUnackedBytes/browserprotocol.MaxTerminalPayload; index++ {
+		start := uint64(index * browserprotocol.MaxTerminalPayload)
+		payload := bytes.Repeat([]byte{'x'}, browserprotocol.MaxTerminalPayload)
+		sendTerminalEvent(t, backend, TerminalEvent{Kind: TerminalEventOutput, Start: start, End: start + uint64(len(payload)), Payload: payload})
+		frame := readTerminalBinary(t, connection)
+		if frame.Sequence != start || len(frame.Payload) != browserprotocol.MaxTerminalPayload {
+			t.Fatalf("output[%d]=sequence %d payload=%d", index, frame.Sequence, len(frame.Payload))
+		}
+	}
+	// The ninth event is queued by the daemon but must remain pending while the
+	// full 64KiB window is unacknowledged.
+	payload := bytes.Repeat([]byte{'y'}, browserprotocol.MaxTerminalPayload)
+	sendTerminalEvent(t, backend, TerminalEvent{Kind: TerminalEventOutput, Start: browserprotocol.MaxTerminalUnackedBytes, End: browserprotocol.MaxTerminalUnackedBytes + browserprotocol.MaxTerminalPayload, Payload: payload})
+	read := beginTerminalRead(connection)
+	select {
+	case result := <-read:
+		if result.err == nil {
+			t.Fatalf("output exceeded credit window: kind=%v bytes=%d", result.kind, len(result.payload))
+		}
+		t.Fatalf("connection closed before credit ACK: %v", result.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	ack, err := browserprotocol.EncodeTerminalAck(browserprotocol.TerminalAck{SessionID: projectID, NextSequence: browserprotocol.MaxTerminalUnackedBytes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeClientFrame(t, connection, ack)
+	result := <-read
+	if result.err != nil || result.kind != websocket.MessageBinary {
+		t.Fatalf("pending output read = kind=%v err=%v", result.kind, result.err)
+	}
+	frame, err := browserprotocol.DecodeTerminalFrame(result.payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame.Sequence != browserprotocol.MaxTerminalUnackedBytes || !bytes.Equal(frame.Payload, payload) {
+		t.Fatalf("pending output=%+v", frame)
+	}
+
+	// Duplicate ACKs are not idempotent: the browser must not be able to move
+	// credit state backward or reuse a cursor outside the sent range.
+	writeClientFrame(t, connection, ack)
+	expectTerminalReadError(t, connection)
+}
+
+func TestTerminalTransportRejectsAheadAndBackwardACKs(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		firstACK   uint64
+		invalidACK uint64
+		ackSession string
+	}{
+		{name: "ahead", invalidACK: 3},
+		{name: "backward", firstACK: 2, invalidACK: 1},
+		{name: "wrong session", invalidACK: 1, ackSession: testID},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			backend := newTerminalTestBackend()
+			backend.authentication.Capabilities = browserprotocol.CapabilityObserve | browserprotocol.CapabilityTerminalInput
+			server := startTerminalServer(t, backend)
+			connection, _ := dialServer(t, server, testOrigin)
+			authenticateTerminalTest(t, connection)
+			writeClientFrame(t, connection, terminalAttachRequest(t, "attach", 0))
+			sendTerminalEvent(t, backend, TerminalEvent{Kind: TerminalEventAttached, Accepted: true, Sequence: 0, Floor: 0, Head: 2})
+			if frame := readServerFrame(t, connection); frame.Type != browserprotocol.TypeTerminalAttached {
+				t.Fatalf("attached frame=%+v", frame)
+			}
+			sendTerminalEvent(t, backend, TerminalEvent{Kind: TerminalEventOutput, Start: 0, End: 2, Payload: []byte("xy")})
+			_ = readTerminalBinary(t, connection)
+			if test.firstACK != 0 {
+				ack, err := browserprotocol.EncodeTerminalAck(browserprotocol.TerminalAck{SessionID: projectID, NextSequence: browserprotocol.Decimal(test.firstACK)})
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeClientFrame(t, connection, ack)
+			}
+			ackSession := test.ackSession
+			if ackSession == "" {
+				ackSession = projectID
+			}
+			ack, err := browserprotocol.EncodeTerminalAck(browserprotocol.TerminalAck{SessionID: ackSession, NextSequence: browserprotocol.Decimal(test.invalidACK)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeClientFrame(t, connection, ack)
+			expectTerminalReadError(t, connection)
+		})
+	}
+}
+
+func TestTerminalTransportResetAndDetachJoinAttachment(t *testing.T) {
+	backend := newTerminalTestBackend()
+	backend.authentication.Capabilities = browserprotocol.CapabilityObserve | browserprotocol.CapabilityTerminalInput
+	server := startTerminalServer(t, backend)
+	connection, _ := dialServer(t, server, testOrigin)
+	authenticateTerminalTest(t, connection)
+	writeClientFrame(t, connection, terminalAttachRequest(t, "attach", 1))
+	sendTerminalEvent(t, backend, TerminalEvent{Kind: TerminalEventAttached, Accepted: true, Sequence: 1, Floor: 1, Head: 1})
+	if frame := readServerFrame(t, connection); frame.Type != browserprotocol.TypeTerminalAttached {
+		t.Fatalf("attached frame=%+v", frame)
+	}
+	sendTerminalEvent(t, backend, TerminalEvent{Kind: TerminalEventReset, Floor: 5, Head: 7})
+	reset := readServerFrame(t, connection)
+	if reset.Type != browserprotocol.TypeTerminalReset || reset.ID != "attach" {
+		t.Fatalf("reset frame=%+v", reset)
+	}
+	if backend.currentAttachment(t).closed.Load() != 1 {
+		t.Fatalf("reset close count=%d", backend.currentAttachment(t).closed.Load())
+	}
+	// A reset retires the attachment; a late queue event cannot become output.
+	sendTerminalEvent(t, backend, TerminalEvent{Kind: TerminalEventOutput, Start: 1, End: 2, Payload: []byte("x")})
+
+	backend2 := newTerminalTestBackend()
+	backend2.authentication.Capabilities = browserprotocol.CapabilityObserve | browserprotocol.CapabilityTerminalInput
+	server2 := startTerminalServer(t, backend2)
+	connection2, _ := dialServer(t, server2, testOrigin)
+	authenticateTerminalTest(t, connection2)
+	writeClientFrame(t, connection2, terminalAttachRequest(t, "attach", 1))
+	sendTerminalEvent(t, backend2, TerminalEvent{Kind: TerminalEventAttached, Accepted: true, Sequence: 1, Floor: 1, Head: 1})
+	if frame := readServerFrame(t, connection2); frame.Type != browserprotocol.TypeTerminalAttached {
+		t.Fatalf("attached frame=%+v", frame)
+	}
+	detach, err := browserprotocol.EncodeTerminalDetach("detach", browserprotocol.TerminalDetach{SessionID: projectID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeClientFrame(t, connection2, detach)
+	if frame := readServerFrame(t, connection2); frame.Type != browserprotocol.TypeTerminalDetached {
+		t.Fatalf("detached frame=%+v", frame)
+	}
+	if backend2.currentAttachment(t).closed.Load() != 1 {
+		t.Fatalf("detach close count=%d", backend2.currentAttachment(t).closed.Load())
+	}
+}
+
+func TestTerminalTransportHumanRequestEffectDispatch(t *testing.T) {
+	backend := newTerminalTestBackend()
+	backend.authentication.Capabilities = browserprotocol.CapabilityObserve | browserprotocol.CapabilityHumanActions
+	backend.replyResult = browserprotocol.HumanRequestReplyResult{RequestID: requestID, Revision: 2, Status: "resolved"}
+	backend.actionResult = browserprotocol.HumanRequestActionResult{Action: "cancel_run", RunID: testID, RunRevision: 3, RequestID: requestID, RequestRevision: 2, Status: "resolved"}
+	server := startTerminalServer(t, backend)
+	connection, _ := dialServer(t, server, testOrigin)
+	authenticateTerminalTest(t, connection)
+	reply, err := browserprotocol.EncodeHumanRequestReply("reply", browserprotocol.HumanRequestReply{RunID: testID, RequestID: requestID, ExpectedRevision: 1, Reply: "yes"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeClientFrame(t, connection, reply)
+	if frame := readServerFrame(t, connection); frame.Type != browserprotocol.TypeHumanRequestReplyResult || frame.ID != "reply" || frame.Body.(browserprotocol.HumanRequestReplyResult).Status != "resolved" {
+		t.Fatalf("reply result=%+v", frame)
+	}
+	cancel, err := browserprotocol.EncodeHumanRequestCancelRun("cancel", browserprotocol.HumanRequestCancelRun{RunID: testID, RequestID: requestID, ExpectedRequestRevision: 1, ExpectedRunRevision: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeClientFrame(t, connection, cancel)
+	frame := readServerFrame(t, connection)
+	if frame.Type != browserprotocol.TypeHumanRequestActionResult || frame.ID != "cancel" || frame.Body.(browserprotocol.HumanRequestActionResult).Action != "cancel_run" {
+		t.Fatalf("cancel result=%+v", frame)
+	}
+}
+
+func TestTerminalTransportBinaryDirectionAndSessionGuards(t *testing.T) {
+	backend := newTerminalTestBackend()
+	backend.authentication.Capabilities = browserprotocol.CapabilityObserve | browserprotocol.CapabilityTerminalInput
+	server := startTerminalServer(t, backend)
+	connection, _ := dialServer(t, server, testOrigin)
+	authenticateTerminalTest(t, connection)
+	input, err := browserprotocol.EncodeTerminalInput(fixedID(projectID), 1, 1, []byte("x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeRawClientFrame(t, connection, websocket.MessageBinary, input)
+	if frame := readServerFrame(t, connection); frame.Type != browserprotocol.TypeError || frame.Body.(browserprotocol.Error).Code != browserprotocol.ErrorInvalidRequest {
+		t.Fatalf("unattached binary result=%+v", frame)
+	}
+
+	backend2 := newTerminalTestBackend()
+	backend2.authentication.Capabilities = browserprotocol.CapabilityObserve | browserprotocol.CapabilityTerminalInput
+	server2 := startTerminalServer(t, backend2)
+	connection2, _ := dialServer(t, server2, testOrigin)
+	authenticateTerminalTest(t, connection2)
+	writeClientFrame(t, connection2, terminalAttachRequest(t, "attach", 0))
+	sendTerminalEvent(t, backend2, TerminalEvent{Kind: TerminalEventAttached, Accepted: true, Sequence: 0, Floor: 0, Head: 1})
+	_ = readServerFrame(t, connection2)
+	wrong, err := browserprotocol.EncodeTerminalInput(fixedID(testID), 1, 1, []byte("x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeRawClientFrame(t, connection2, websocket.MessageBinary, wrong)
+	if frame := readServerFrame(t, connection2); frame.Type != browserprotocol.TypeError || frame.Body.(browserprotocol.Error).Code != browserprotocol.ErrorInvalidRequest {
+		t.Fatalf("wrong-session binary result=%+v", frame)
+	}
+}
+
+func TestTerminalTransportOversizedBinaryCloses(t *testing.T) {
+	backend := newTerminalTestBackend()
+	backend.authentication.Capabilities = browserprotocol.CapabilityObserve | browserprotocol.CapabilityTerminalInput
+	server := startTerminalServer(t, backend)
+	connection, _ := dialServer(t, server, testOrigin)
+	authenticateTerminalTest(t, connection)
+	oversize := make([]byte, browserprotocol.TerminalHeaderSize+browserprotocol.MaxTerminalPayload+1)
+	copy(oversize[:4], []byte{'D', 'F', 1, byte(browserprotocol.TerminalInputOpcode)})
+	sessionID := fixedID(projectID)
+	copy(oversize[4:20], sessionID[:])
+	writeRawClientFrame(t, connection, websocket.MessageBinary, oversize)
+	if frame := readServerFrame(t, connection); frame.Type != browserprotocol.TypeError {
+		t.Fatalf("oversize result=%+v", frame)
+	}
+	expectTerminalReadError(t, connection)
+}
+
+func TestTerminalTransportInputResultKeepsExactBackendCount(t *testing.T) {
+	backend := newTerminalTestBackend()
+	backend.authentication.Capabilities = browserprotocol.CapabilityObserve | browserprotocol.CapabilityTerminalInput
+	server := startTerminalServer(t, backend)
+	connection, _ := dialServer(t, server, testOrigin)
+	authenticateTerminalTest(t, connection)
+	writeClientFrame(t, connection, terminalAttachRequest(t, "attach", 0))
+	sendTerminalEvent(t, backend, TerminalEvent{Kind: TerminalEventAttached, Accepted: true, Sequence: 0, Floor: 0, Head: 1})
+	_ = readServerFrame(t, connection)
+	input, err := browserprotocol.EncodeTerminalInput(fixedID(projectID), 1, 3, []byte("exact"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeRawClientFrame(t, connection, websocket.MessageBinary, input)
+	frame := readServerFrame(t, connection)
+	if frame.Type != browserprotocol.TypeTerminalInputResult || frame.Body.(browserprotocol.TerminalInputResult).AcceptedBytes != 5 {
+		t.Fatalf("input result=%+v", frame)
+	}
+	backend.terminalMu.Lock()
+	got := backend.input
+	calls := backend.inputCalls
+	backend.terminalMu.Unlock()
+	if calls != 1 || got.RunID != testID || got.SessionID != projectID || got.RunRevision != 1 || got.SessionRevision != 1 || got.Frame.Sequence != 1 || got.Frame.LeaseGeneration != 3 {
+		t.Fatalf("backend input=%+v calls=%d", got, calls)
+	}
+}
