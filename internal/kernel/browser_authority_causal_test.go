@@ -166,20 +166,20 @@ func TestBrowserChallengeAbandonmentIsExactIdempotentAndAudited(t *testing.T) {
 	digest := mintBrowserChallenge(t, store, 230, boot, 10, 100, BrowserCapabilityObserve)
 	other := mintBrowserChallenge(t, store, 231, boot, 11, 100, BrowserCapabilityObserve)
 
-	if abandoned, err := store.AbandonBrowserPairingChallenge(ctx, digest, browserTestBoot(t, 231), "https://app.example", mustTime(t, 12)); !errors.Is(err, ErrUnauthorized) || abandoned {
-		t.Fatalf("wrong boot abandonment = abandoned=%v err=%v", abandoned, err)
+	if err := store.AbandonBrowserPairingChallenge(ctx, digest, browserTestBoot(t, 231), "https://app.example", mustTime(t, 12)); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("wrong boot abandonment = err=%v", err)
 	}
-	if abandoned, err := store.AbandonBrowserPairingChallenge(ctx, digest, boot, "https://wrong.example", mustTime(t, 12)); !errors.Is(err, ErrUnauthorized) || abandoned {
-		t.Fatalf("wrong origin abandonment = abandoned=%v err=%v", abandoned, err)
+	if err := store.AbandonBrowserPairingChallenge(ctx, digest, boot, "https://wrong.example", mustTime(t, 12)); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("wrong origin abandonment = err=%v", err)
 	}
-	if abandoned, err := store.AbandonBrowserPairingChallenge(ctx, HashBrowserChallenge([]byte("missing")), boot, "https://app.example", mustTime(t, 12)); err != nil || abandoned {
-		t.Fatalf("missing challenge abandonment = abandoned=%v err=%v", abandoned, err)
+	if err := store.AbandonBrowserPairingChallenge(ctx, HashBrowserChallenge([]byte("missing")), boot, "https://app.example", mustTime(t, 12)); err != nil {
+		t.Fatalf("missing challenge abandonment = err=%v", err)
 	}
-	if abandoned, err := store.AbandonBrowserPairingChallenge(ctx, digest, boot, "https://app.example", mustTime(t, 12)); err != nil || !abandoned {
-		t.Fatalf("exact challenge abandonment = abandoned=%v err=%v", abandoned, err)
+	if err := store.AbandonBrowserPairingChallenge(ctx, digest, boot, "https://app.example", mustTime(t, 12)); err != nil {
+		t.Fatalf("exact challenge abandonment = err=%v", err)
 	}
-	if abandoned, err := store.AbandonBrowserPairingChallenge(ctx, digest, boot, "https://app.example", mustTime(t, 13)); err != nil || abandoned {
-		t.Fatalf("idempotent challenge abandonment = abandoned=%v err=%v", abandoned, err)
+	if err := store.AbandonBrowserPairingChallenge(ctx, digest, boot, "https://app.example", mustTime(t, 13)); err != nil {
+		t.Fatalf("idempotent challenge abandonment = err=%v", err)
 	}
 	if got := browserTableCount(t, store, "browser_pairing_challenges"); got != 1 {
 		t.Fatalf("challenge rows after exact abandonment = %d, want 1", got)
@@ -201,8 +201,54 @@ func TestBrowserChallengeAbandonmentIsExactIdempotentAndAudited(t *testing.T) {
 
 	redeemed := mintBrowserChallenge(t, store, 232, boot, 20, 100, BrowserCapabilityObserve)
 	pairBrowserClient(t, store, redeemed, boot, browserTestID(t, 232), browserKey(t), 21)
-	if abandoned, err := store.AbandonBrowserPairingChallenge(ctx, redeemed, boot, "https://app.example", mustTime(t, 22)); err != nil || abandoned {
-		t.Fatalf("redeemed challenge abandonment = abandoned=%v err=%v", abandoned, err)
+	if err := store.AbandonBrowserPairingChallenge(ctx, redeemed, boot, "https://app.example", mustTime(t, 22)); err != nil {
+		t.Fatalf("redeemed challenge abandonment = err=%v", err)
+	}
+	if err := store.AbandonBrowserPairingChallenge(ctx, redeemed, browserTestBoot(t, 233), "https://app.example", mustTime(t, 23)); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("redeemed challenge wrong boot = err=%v", err)
+	}
+	if err := store.AbandonBrowserPairingChallenge(ctx, redeemed, boot, "https://wrong.example", mustTime(t, 23)); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("redeemed challenge wrong origin = err=%v", err)
+	}
+}
+
+func TestBrowserChallengeAbandonAndRedeemConvergeToInactive(t *testing.T) {
+	store, _ := newBrowserStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	boot := browserTestBoot(t, 240)
+	digest := mintBrowserChallenge(t, store, 240, boot, 10, 100, BrowserCapabilityObserve)
+	clientID := browserTestID(t, 241)
+	publicKey := browserKey(t)
+	at := mustTime(t, 11)
+	start := make(chan struct{})
+	var wait sync.WaitGroup
+	var abandonErr, redeemErr error
+	wait.Add(2)
+	go func() {
+		defer wait.Done()
+		<-start
+		abandonErr = store.AbandonBrowserPairingChallenge(ctx, digest, boot, "https://app.example", at)
+	}()
+	go func() {
+		defer wait.Done()
+		<-start
+		_, redeemErr = store.RedeemBrowserPairingChallenge(ctx, digest, boot, "https://app.example", clientID, publicKey, at)
+	}()
+	close(start)
+	wait.Wait()
+	if abandonErr != nil {
+		t.Fatalf("concurrent abandonment = %v", abandonErr)
+	}
+	if redeemErr != nil && !errors.Is(redeemErr, ErrUnauthorized) {
+		t.Fatalf("concurrent redemption = %v", redeemErr)
+	}
+	var active int
+	if err := store.readers.QueryRow(`SELECT COUNT(*) FROM browser_pairing_challenges WHERE secret_digest = ? AND redeemed_at_ms IS NULL`, digest.Bytes()).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if active != 0 {
+		t.Fatalf("concurrent challenge remained active: %d", active)
 	}
 }
 

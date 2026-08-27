@@ -304,7 +304,7 @@ func runWeb(ctx context.Context, command attemptCommand, getenv func(string) str
 		if !validLaunch(result) {
 			return handleWebOpenFailure(client, result, api.ErrProtocol, stderr)
 		}
-		challengeDigest, _ := launchChallengeDigest(result)
+		challengeDigest, _ := exactLaunchDigest(result)
 		if opener == nil || opener(callContext, result.LaunchURL) != nil {
 			cleanupErr := abandonWebOpen(client, challengeDigest)
 			if cleanupErr != nil {
@@ -336,7 +336,7 @@ func runWeb(ctx context.Context, command attemptCommand, getenv func(string) str
 }
 
 func handleWebOpenFailure(client *api.OperatorClient, launch api.WebLaunch, openErr error, stderr io.Writer) int {
-	if challengeDigest, exact := launchChallengeDigest(launch); exact {
+	if challengeDigest, exact := exactLaunchDigest(launch); exact {
 		if cleanupErr := abandonWebOpen(client, challengeDigest); cleanupErr == nil {
 			return writeWebFailure(stderr, "web open", openErr)
 		}
@@ -344,11 +344,11 @@ func handleWebOpenFailure(client *api.OperatorClient, launch api.WebLaunch, open
 		return exitFailure
 	}
 
-	// A daemon rejection is authoritative and occurs before a launch is
-	// minted. Every other error may have happened after minting, but without
-	// an exact digest it cannot be safely cleaned up, so report uncertainty.
+	// A completely empty result paired with a daemon rejection is authoritative
+	// and occurs before a launch is minted. Any partial or malformed launch
+	// must remain an uncertainty: no cleanup target is safe to choose.
 	var remote *api.RemoteError
-	if errors.As(openErr, &remote) {
+	if launch == (api.WebLaunch{}) && errors.As(openErr, &remote) {
 		return writeWebFailure(stderr, "web open", openErr)
 	}
 	_, _ = io.WriteString(stderr, "factoryctl: web open failed; challenge cleanup remains unresolved\n")
@@ -386,29 +386,21 @@ func writeJSON(stdout io.Writer, value any) int {
 	return 0
 }
 
-func validLaunchURL(value string) bool {
-	parsed, err := url.Parse(value)
-	if err != nil || parsed.Scheme != "https" || parsed.Host != "app.darkfactory.build" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment == "" || parsed.Path != "/" || !strings.HasPrefix(parsed.Fragment, "df_pair=") {
-		return false
-	}
-	return validHex(parsed.Fragment[len("df_pair="):], 64)
-}
-
 func validLaunch(launch api.WebLaunch) bool {
-	digest, exact := launchChallengeDigest(launch)
-	if !validLaunchURL(launch.LaunchURL) || !exact || !validHex(launch.ChallengeDigest, 64) {
-		return false
-	}
-	return digest == launch.ChallengeDigest
+	_, exact := exactLaunchDigest(launch)
+	return exact && launch.ExpiresAtMs > 0
 }
 
-// launchChallengeDigest extracts only the fragment's raw 32-byte challenge
-// and derives the non-secret identity used by the owner-only abandonment API.
-// It deliberately does not trust launch.ChallengeDigest: an internally
-// inconsistent response must never cause cleanup of a different challenge.
-func launchChallengeDigest(launch api.WebLaunch) (string, bool) {
+// exactLaunchDigest proves the only cleanup identity accepted by factoryctl:
+// the launch URL is the fixed syntactic form, its fragment carries raw
+// challenge A, and the daemon's returned digest is SHA-256(A). No digest is
+// returned for an invalid or internally inconsistent launch.
+func exactLaunchDigest(launch api.WebLaunch) (string, bool) {
+	if len(launch.LaunchURL) < 1 || len(launch.LaunchURL) > 4096 || !utf8.ValidString(launch.LaunchURL) || strings.ContainsRune(launch.LaunchURL, 0) || !validHex(launch.ChallengeDigest, 64) {
+		return "", false
+	}
 	parsed, err := url.Parse(launch.LaunchURL)
-	if err != nil || !strings.HasPrefix(parsed.Fragment, "df_pair=") {
+	if err != nil || parsed.Scheme != "https" || parsed.Host != "app.darkfactory.build" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment == "" || parsed.RawFragment != "" || parsed.Path != "/" || !strings.HasPrefix(parsed.Fragment, "df_pair=") {
 		return "", false
 	}
 	raw := strings.TrimPrefix(parsed.Fragment, "df_pair=")
@@ -420,7 +412,11 @@ func launchChallengeDigest(launch api.WebLaunch) (string, bool) {
 		return "", false
 	}
 	digest := sha256.Sum256(challenge)
-	return hex.EncodeToString(digest[:]), true
+	encoded := hex.EncodeToString(digest[:])
+	if encoded != launch.ChallengeDigest {
+		return "", false
+	}
+	return encoded, true
 }
 
 func validHex(value string, length int) bool {

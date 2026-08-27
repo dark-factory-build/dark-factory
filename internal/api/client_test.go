@@ -861,6 +861,38 @@ func TestWebOpenPreservesDecodedLaunchOnProtocolError(t *testing.T) {
 	fixture.wait(t)
 }
 
+func TestWebAbandonOpenUsesUnambiguousEmptyAcknowledgement(t *testing.T) {
+	bearer := testCredential('A')
+	digest := "4884fdaafea47c29fea7159d0daddd9c085d6200e1359e85bb81736af6b7c837"
+	fixture := newWireFixture(t, bearer, func(connection net.Conn, _ []byte) error {
+		return writeTestResponse(connection, wireGeneration, wireOperatorDomain, successResponse(`{}`))
+	})
+	client, err := NewOperatorClient(fixture.socket, fixture.token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.WebAbandonOpen(context.Background(), digest); err != nil {
+		t.Fatal(err)
+	}
+	if got := requestJSON(t, <-fixture.request, wireOperatorDomain, bearer); got != `{"method":"web_abandon_open","params":{"challenge_digest":"`+digest+`"}}` {
+		t.Fatalf("abandon request = %s", got)
+	}
+	fixture.wait(t)
+
+	fixture = newWireFixture(t, bearer, func(connection net.Conn, _ []byte) error {
+		return writeTestResponse(connection, wireGeneration, wireOperatorDomain, successResponse(`{"abandoned":true}`))
+	})
+	client, err = NewOperatorClient(fixture.socket, fixture.token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.WebAbandonOpen(context.Background(), digest); !errors.Is(err, ErrProtocol) {
+		t.Fatalf("legacy abandonment result = %v", err)
+	}
+	<-fixture.request
+	fixture.wait(t)
+}
+
 func TestSocketParentSwapAfterDialIsRejected(t *testing.T) {
 	bearer := testCredential('W')
 	tokenDirectory := privateTestDirectory(t)

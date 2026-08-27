@@ -202,6 +202,8 @@ type WebAbandonOpenInput struct {
 	ChallengeDigest string `json:"challenge_digest"`
 }
 
-type WebAbandonOpenResult struct {
-	Abandoned bool `json:"abandoned"`
-}
+// WebAbandonOpenResult is an exact empty acknowledgement. Success means the
+// daemon's durable transaction proved that no active challenge remains for
+// the requested digest, boot and origin; absence and prior redemption are
+// intentionally idempotent success states.
+type WebAbandonOpenResult struct{}

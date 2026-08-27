@@ -191,36 +191,41 @@ func (store *Store) CreateBrowserPairingChallenge(ctx context.Context, digest Br
 // unredeemed challenge after its GUI launch failed. The boot and origin bind
 // the cleanup to the runtime that minted it; a missing or already redeemed
 // challenge is an idempotent no-op, never a reason to delete another row.
-func (store *Store) AbandonBrowserPairingChallenge(ctx context.Context, digest BrowserChallengeDigest, bootID BootID, origin string, at UnixMillis) (bool, error) {
+// A nil error proves that no active challenge remains for this exact
+// digest/boot/origin tuple.
+func (store *Store) AbandonBrowserPairingChallenge(ctx context.Context, digest BrowserChallengeDigest, bootID BootID, origin string, at UnixMillis) error {
 	if digest.b == [DigestBytes]byte{} || bootID.zero() || validateOrigin(origin) != nil {
-		return false, fmt.Errorf("%w: invalid browser challenge abandonment", ErrInvalidValue)
+		return fmt.Errorf("%w: invalid browser challenge abandonment", ErrInvalidValue)
 	}
 	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
-		return false, err
+		return err
 	}
 	defer tx.Close()
 	challenge, found, err := browserChallengeByDigest(ctx, tx.connection, digest)
 	if err != nil {
-		return false, tx.Rollback(err)
+		return tx.Rollback(err)
 	}
-	if !found || challenge.RedeemedAt != nil {
-		return false, tx.Rollback(nil)
+	if !found {
+		return tx.Rollback(nil)
 	}
 	if challenge.BootID != bootID || challenge.IntendedOrigin != origin || at.Int64() < challenge.CreatedAt.Int64() {
-		return false, tx.Rollback(ErrUnauthorized)
+		return tx.Rollback(ErrUnauthorized)
+	}
+	if challenge.RedeemedAt != nil {
+		return tx.Rollback(nil)
 	}
 	removed, err := tx.connection.ExecContext(ctx, `DELETE FROM browser_pairing_challenges WHERE secret_digest = ? AND boot_id = ? AND intended_origin = ? AND redeemed_at_ms IS NULL`, digest.Bytes(), bootID.Bytes(), origin)
 	if err := requireOneRow(removed, err); err != nil {
-		return false, tx.Rollback(err)
+		return tx.Rollback(err)
 	}
 	if err := insertBrowserSecurityEvent(ctx, tx.connection, BrowserSecurityChallengeAbandoned, nil, at); err != nil {
-		return false, tx.Rollback(err)
+		return tx.Rollback(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return false, err
+		return err
 	}
-	return true, nil
+	return nil
 }
 
 // RedeemBrowserPairingChallenge consumes a challenge before checking duplicate identity.

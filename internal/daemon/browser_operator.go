@@ -149,11 +149,10 @@ func (daemon *Daemon) AbandonBrowserOpen(ctx context.Context, input api.WebAband
 	if err != nil {
 		return api.WebAbandonOpenResult{}, err
 	}
-	abandoned, err := daemon.store.AbandonBrowserPairingChallenge(ctx, digest, runtime.backend.boot, webProductionOrigin, at)
-	if err != nil {
+	if err := daemon.store.AbandonBrowserPairingChallenge(ctx, digest, runtime.backend.boot, webProductionOrigin, at); err != nil {
 		return api.WebAbandonOpenResult{}, err
 	}
-	return api.WebAbandonOpenResult{Abandoned: abandoned}, nil
+	return api.WebAbandonOpenResult{}, nil
 }
 
 func (daemon *Daemon) WebListClients(ctx context.Context, after string) (api.WebClientPage, error) {

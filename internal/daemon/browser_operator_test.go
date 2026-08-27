@@ -69,9 +69,9 @@ func TestWebOpenAbandonmentReclaimsChallengeCapacity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("open %d: %v", index, err)
 		}
-		result, err := fixture.daemon.AbandonBrowserOpen(ctx, api.WebAbandonOpenInput{ChallengeDigest: launch.ChallengeDigest})
-		if err != nil || !result.Abandoned {
-			t.Fatalf("abandon %d = %+v, %v", index, result, err)
+		_, err = fixture.daemon.AbandonBrowserOpen(ctx, api.WebAbandonOpenInput{ChallengeDigest: launch.ChallengeDigest})
+		if err != nil {
+			t.Fatalf("abandon %d = %v", index, err)
 		}
 		status, err := fixture.daemon.WebStatus(ctx)
 		if err != nil || status.ActiveChallenges != 1 {
