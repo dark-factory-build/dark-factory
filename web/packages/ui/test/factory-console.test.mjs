@@ -150,6 +150,7 @@ test("selected hostile private detail is escaped and actions remain semantic", (
       question: hostile,
       canReply: true,
       canCancel: true,
+      replyMaxBytes: 8192,
       reply: "<reply>",
     },
     onHumanReplyChange: () => {},
@@ -187,7 +188,7 @@ test("request, reply, cancel, and close controls forward only presentation inten
 
   const selectedElements = expand(FactoryConsole({
     ...baseProps,
-    selectedHumanRequest: { request, phase: "ready", question: "Proceed?", canReply: true, canCancel: true, reply: "" },
+    selectedHumanRequest: { request, phase: "ready", question: "Proceed?", canReply: true, canCancel: true, replyMaxBytes: 8192, reply: "" },
   }));
   selectedElements.find((element) => element.type === "textarea").props.onChange({ currentTarget: { value: "Proceed." } });
   let prevented = false;

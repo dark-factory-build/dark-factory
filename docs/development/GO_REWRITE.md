@@ -4493,7 +4493,9 @@ Public UI lifecycle and HumanRequest candidate on 2026-08-27:
   Reconnect, deletion, revision change and unmount clear or fence private state.
   React never constructs a request destination, revision or action argument.
 - DOM-free lifecycle and authority tests, hostile-text/accessibility rendering,
-  SSR, packed-consumer import, UI/dev typecheck and the production Vite build
-  are the causal gate for this checkpoint. Interactive xterm lifecycle remains
-  the next separate reviewed UI commit; no terminal abstraction or dependency
-  enters this slice.
+  a mounted StrictMode setup/cleanup/setup proof, SSR, packed-consumer import,
+  UI/dev typecheck and the production Vite build are the causal gate for this
+  checkpoint. The endpoint has no public configuration surface, and reply
+  drafts are retained only within the exact daemon-minted UTF-8 byte bound.
+  Interactive xterm lifecycle remains the next separate reviewed UI commit; no
+  terminal abstraction enters this slice.

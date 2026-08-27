@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { SessionError } from "@dark-factory/client";
-import { DEFAULT_BROWSER_URL, FactoryAppController } from "../dist/src/factory-app-controller.js";
+import { FactoryAppController } from "../dist/src/factory-app-controller.js";
 import { fixtureState } from "../../../fixtures/state.mjs";
 
 const challenge = "51".repeat(32);
@@ -14,13 +14,13 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-function detailFor(item = request, suffix = "") {
+function detailFor(item = request, suffix = "", replyMaxBytes = 8192) {
   return Object.freeze({
     requestId: item.id,
     revision: item.revision,
     question: `Should I continue${suffix}?`,
     canReply: true,
-    replyMaxBytes: 8192,
+    replyMaxBytes,
     terminalTarget: Object.freeze({ target: suffix }),
     cancelRun: Object.freeze({ requestId: item.id, expectedRequestRevision: item.revision, expectedRunRevision: 17n }),
   });
@@ -46,7 +46,6 @@ function harness(overrides = {}) {
   let clientOptions;
   const historyState = { route: "factory" };
   const controller = new FactoryAppController({
-    url: overrides.url ?? DEFAULT_BROWSER_URL,
     origin: overrides.origin ?? "https://app.darkfactory.build",
     location: { hash: overrides.hash ?? `#df_pair=${challenge}`, pathname: "/factory", search: "?preview=1" },
     history: {
@@ -99,7 +98,6 @@ test("a failed fragment scrub creates no client or browser effect", () => {
   let clients = 0;
   const snapshots = [];
   const controller = new FactoryAppController({
-    url: DEFAULT_BROWSER_URL,
     origin: "https://app.darkfactory.build",
     location: { hash: `#df_pair=${challenge}`, pathname: "/", search: "" },
     history: { state: null, replaceState: () => { throw new Error("history unavailable"); } },
@@ -109,7 +107,82 @@ test("a failed fragment scrub creates no client or browser effect", () => {
   controller.start();
   assert.equal(clients, 0);
   assert.equal(snapshots.at(-1).status, "closed");
-  assert.equal(snapshots.at(-1).error.code, "storage_unavailable");
+  assert.equal(snapshots.at(-1).error.code, "connection");
+  assert.equal(snapshots.at(-1).error.retryable, true);
+});
+
+test("factory construction cannot retain a client after a reentrant close", () => {
+  const snapshots = [];
+  let controller;
+  let callbacks;
+  let connects = 0;
+  let closes = 0;
+  controller = new FactoryAppController({
+    origin: "https://app.darkfactory.build",
+    location: { hash: "", pathname: "/", search: "" },
+    history: { state: null, replaceState: () => {} },
+    onChange: (snapshot) => {
+      snapshots.push(snapshot);
+      controller.close();
+    },
+    clientFactory: (options) => {
+      callbacks = options;
+      options.onStatus("ready");
+      return {
+        session: {},
+        connect: () => { connects += 1; return Promise.resolve(); },
+        close: () => {
+          closes += 1;
+          options.onStatus("connecting");
+          options.onState(fixtureState);
+        },
+      };
+    },
+  });
+
+  controller.start();
+  const published = snapshots.length;
+  callbacks.onStatus("closed");
+  callbacks.onState(fixtureState);
+  assert.equal(connects, 0);
+  assert.equal(closes, 1);
+  assert.equal(snapshots.length, published);
+});
+
+test("a reentrant close during connect closes the exact installed client once", () => {
+  const snapshots = [];
+  let controller;
+  let callbacks;
+  let connects = 0;
+  let closes = 0;
+  controller = new FactoryAppController({
+    origin: "https://app.darkfactory.build",
+    location: { hash: "", pathname: "/", search: "" },
+    history: { state: null, replaceState: () => {} },
+    onChange: (snapshot) => {
+      snapshots.push(snapshot);
+      if (snapshot.status === "ready") controller.close();
+    },
+    clientFactory: (options) => {
+      callbacks = options;
+      return {
+        session: {},
+        connect: () => {
+          connects += 1;
+          options.onStatus("ready");
+          return Promise.resolve();
+        },
+        close: () => { closes += 1; options.onStatus("connecting"); },
+      };
+    },
+  });
+
+  controller.start();
+  const published = snapshots.length;
+  callbacks.onStatus("closed");
+  assert.equal(connects, 1);
+  assert.equal(closes, 1);
+  assert.equal(snapshots.length, published);
 });
 
 test("current callbacks publish while close is once-only and fences synchronous or late callbacks", () => {
@@ -204,6 +277,59 @@ test("reply and cancel each consume only their exact returned authority once", a
   cancelDone.resolve({ request_id: request.id });
   await Promise.all([firstCancel, duplicateCancel]);
   assert.equal(context.latest().selectedHumanRequest, undefined);
+});
+
+test("reply drafts obey the exact daemon byte bound before retention or delivery", async () => {
+  const replies = [];
+  const boundedDetail = detailFor(request, "", 8);
+  const context = harness({
+    getDetail: async () => boundedDetail,
+    reply: async (detail, value) => { replies.push([detail, value]); },
+  });
+  context.controller.start();
+  context.emitState(fixtureState);
+  context.emitStatus("ready");
+  await context.controller.selectHumanRequest(request);
+
+  context.controller.setHumanReply("ok");
+  assert.equal(context.latest().selectedHumanRequest.reply, "ok");
+
+  const OriginalTextEncoder = globalThis.TextEncoder;
+  let encoded = 0;
+  globalThis.TextEncoder = class {
+    encode() { encoded += 1; throw new Error("oversized strings must not be encoded"); }
+  };
+  try {
+    context.controller.setHumanReply("x".repeat(1_000_000));
+  } finally {
+    globalThis.TextEncoder = OriginalTextEncoder;
+  }
+  assert.equal(encoded, 0);
+  assert.equal(context.latest().error.code, "too_large");
+  assert.equal(context.latest().selectedHumanRequest.reply, "ok");
+
+  context.controller.setHumanReply("😀😀");
+  assert.equal(context.latest().selectedHumanRequest.reply, "😀😀");
+  context.controller.setHumanReply("😀😀😀");
+  assert.equal(context.latest().error.code, "too_large");
+  assert.equal(context.latest().selectedHumanRequest.reply, "😀😀");
+
+  await context.controller.replyHumanRequest();
+  assert.deepEqual(replies, [[boundedDetail, "😀😀"]]);
+});
+
+test("an empty reply is refused without consuming its exact request authority", async () => {
+  let replies = 0;
+  const context = harness({ reply: async () => { replies += 1; } });
+  context.controller.start();
+  context.emitState(fixtureState);
+  context.emitStatus("ready");
+  await context.controller.selectHumanRequest(request);
+
+  await context.controller.replyHumanRequest();
+  assert.equal(replies, 0);
+  assert.equal(context.latest().error.code, "invalid_request");
+  assert.equal(context.latest().selectedHumanRequest.phase, "ready");
 });
 
 test("deletion or revision change clears detail and fences a late private response", async () => {

@@ -12,7 +12,8 @@ import {
   type StateView,
 } from "@dark-factory/client";
 
-export const DEFAULT_BROWSER_URL = "ws://127.0.0.1:43123/browser/v1";
+const BROWSER_URL = "ws://127.0.0.1:43123/browser/v1";
+const BROWSER_HOST = "127.0.0.1:43123";
 
 export type FactoryHumanRequestView = Readonly<{
   request: HumanRequestItem;
@@ -20,6 +21,7 @@ export type FactoryHumanRequestView = Readonly<{
   question?: string;
   canReply: boolean;
   canCancel: boolean;
+  replyMaxBytes: number;
   reply: string;
 }>;
 
@@ -35,7 +37,6 @@ type ControlledClient = Pick<BrowserClient, "connect" | "close"> & { readonly se
 type ClientFactory = (options: BrowserSessionOptions) => ControlledClient;
 
 export type FactoryAppControllerOptions = {
-  url: string;
   origin: string;
   location: Pick<Location, "hash" | "pathname" | "search">;
   history: Pick<History, "replaceState" | "state">;
@@ -81,26 +82,17 @@ export class FactoryAppController {
       challenge = consumePairingChallenge(this.#options.location, this.#options.history);
     } catch {
       this.#status = "closed";
-      this.#error = new SessionError("storage_unavailable");
-      this.#publish();
-      return;
-    }
-
-    let endpoint: URL;
-    try {
-      endpoint = new URL(this.#options.url);
-    } catch {
-      this.#status = "closed";
-      this.#error = new SessionError("invalid_request");
+      this.#error = new SessionError("connection", true);
       this.#publish();
       return;
     }
 
     const factory = this.#options.clientFactory ?? createBrowserClient;
+    let client: ControlledClient;
     try {
-      this.#client = factory({
-        url: endpoint.toString(),
-        host: endpoint.host,
+      client = factory({
+        url: BROWSER_URL,
+        host: BROWSER_HOST,
         origin: this.#options.origin,
         challenge: challenge ?? undefined,
         onStatus: (status) => this.#receiveStatus(generation, status),
@@ -113,6 +105,11 @@ export class FactoryAppController {
       this.#publish();
       return;
     }
+    if (!this.#current(generation)) {
+      client.close();
+      return;
+    }
+    this.#client = client;
     this.#connect(generation);
   }
 
@@ -169,8 +166,16 @@ export class FactoryAppController {
   }
 
   setHumanReply(reply: string): void {
-    if (this.#selection?.phase !== "ready") return;
-    this.#selection.reply = reply;
+    const selection = this.#selection;
+    const maximum = selection?.detail?.replyMaxBytes;
+    if (selection?.phase !== "ready" || maximum === undefined) return;
+    if (reply.length > maximum || new TextEncoder().encode(reply).length > maximum) {
+      this.#error = new SessionError("too_large");
+      this.#publish();
+      return;
+    }
+    selection.reply = reply;
+    this.#error = undefined;
     this.#publish();
   }
 
@@ -188,6 +193,11 @@ export class FactoryAppController {
     const token = selection.token;
     const detail = selection.detail;
     const reply = selection.reply;
+    if (reply.length === 0) {
+      this.#error = new SessionError("invalid_request");
+      this.#publish();
+      return;
+    }
     selection.phase = "replying";
     this.#error = undefined;
     this.#publish();
@@ -229,7 +239,7 @@ export class FactoryAppController {
 
   #connect(generation: number): void {
     const client = this.#client;
-    if (client === undefined) return;
+    if (client === undefined || !this.#current(generation)) return;
     void client.connect().catch((error) => {
       if (!this.#current(generation) || this.#status === "closed") return;
       this.#status = "closed";
@@ -290,6 +300,7 @@ export class FactoryAppController {
         question: selection.detail?.question,
         canReply: selection.detail?.canReply ?? false,
         canCancel: selection.detail?.cancelRun !== null && selection.detail?.cancelRun !== undefined,
+        replyMaxBytes: selection.detail?.replyMaxBytes ?? 0,
         reply: selection.reply,
       },
     };

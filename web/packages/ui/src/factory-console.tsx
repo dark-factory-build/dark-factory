@@ -206,6 +206,7 @@ function HumanRequestPanel({
               <textarea
                 id="dfHumanRequestReply"
                 value={selected.reply}
+                maxLength={selected.replyMaxBytes}
                 disabled={busy || onReplyChange === undefined}
                 onChange={(event) => onReplyChange?.(event.currentTarget.value)}
               />

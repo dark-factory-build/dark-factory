@@ -1,21 +1,25 @@
+"use client";
+
 import { useEffect, useRef, useState } from "react";
-import { FactoryAppController, DEFAULT_BROWSER_URL, type FactoryAppSnapshot } from "./factory-app-controller.js";
+import { FactoryAppController, type FactoryAppControllerOptions, type FactoryAppSnapshot } from "./factory-app-controller.js";
 import { FactoryConsole } from "./factory-console.js";
 
-export type FactoryAppProps = {
-  browserURL?: string;
-};
-
 const INITIAL_SNAPSHOT: FactoryAppSnapshot = { status: "idle" };
+type ControllerFactory = (options: FactoryAppControllerOptions) => FactoryAppController;
+const createController: ControllerFactory = (options) => new FactoryAppController(options);
 
 /** Complete browser application lifecycle; hosts only render this component. */
-export function FactoryApp({ browserURL = DEFAULT_BROWSER_URL }: FactoryAppProps) {
+export function FactoryApp() {
+  return <FactoryAppLifecycle />;
+}
+
+/** Package-internal mounted-effect seam; absent from the package root export. */
+export function FactoryAppLifecycle({ controllerFactory = createController }: { controllerFactory?: ControllerFactory }) {
   const [snapshot, setSnapshot] = useState<FactoryAppSnapshot>(INITIAL_SNAPSHOT);
   const owner = useRef<FactoryAppController | undefined>(undefined);
 
   useEffect(() => {
-    const controller = new FactoryAppController({
-      url: browserURL,
+    const controller = controllerFactory({
       origin: window.location.origin,
       location: window.location,
       history: window.history,
@@ -27,7 +31,7 @@ export function FactoryApp({ browserURL = DEFAULT_BROWSER_URL }: FactoryAppProps
       if (owner.current === controller) owner.current = undefined;
       controller.close();
     };
-  }, [browserURL]);
+  }, [controllerFactory]);
 
   return (
     <FactoryConsole
