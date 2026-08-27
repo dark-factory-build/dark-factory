@@ -104,6 +104,7 @@ export class BrowserSession {
   #status: SessionStatus = "idle";
   #hello: HelloBody | undefined;
   #clientId: string | undefined;
+  #authenticated = false;
   #capabilities = 0;
   #key: CryptoKey | undefined;
   #publicKey: Uint8Array | undefined;
@@ -191,7 +192,7 @@ export class BrowserSession {
         await this.#authenticate();
         return;
       }
-      if (this.#clientId === undefined) {
+      if (!this.#authenticated) {
         await this.#authenticationFrame(frame);
         return;
       }
@@ -270,12 +271,14 @@ export class BrowserSession {
     this.#pairing = false;
     this.#clientId = frame.body.client_id;
     this.#capabilities = frame.body.capabilities;
+    this.#authenticated = true;
     this.#ready();
   }
 
   #finishAuth(frame: AuthResultFrame): void {
     if (frame.body.client_id !== this.#clientId) throw new ProtocolError("unauthorized");
     this.#capabilities = frame.body.capabilities;
+    this.#authenticated = true;
     this.#ready();
   }
 
@@ -335,7 +338,7 @@ export class BrowserSession {
     if (expected === undefined || expected.kind !== frame.body.kind || expected.id !== frame.body.id) throw new ProtocolError("malformed");
     this.#entities.delete(frame.id);
     this.#pending.delete(frame.id);
-    const result = this.accumulator.apply(frame.body);
+    const result = this.accumulator.applyEntity(frame.body);
     if (result.kind === "restart") this.#resync(result.reason);
     else if (result.kind === "applied" || result.kind === "ignored") this.#options.onState?.(result.state);
   }
@@ -351,6 +354,7 @@ export class BrowserSession {
   #beginSnapshot(cursor: string | null): void {
     const result = this.accumulator.beginSnapshot(cursor);
     if (result.kind === "restart") { this.#resync(result.reason); return; }
+    if (result.kind !== "requested") throw new ProtocolError("malformed");
     this.#pending.set(result.request.id, "snapshot");
     this.#send(result.request.id, encodeStateGet(result.request.id, { cursor }));
   }
@@ -426,7 +430,7 @@ export class BrowserSession {
 
   #closedByPeer(): void {
     if (this.#closed) return;
-    this.#fail(this.#pairing ? new SessionError("pairing_uncertain") : new SessionError("connection"), false);
+    this.#fail(this.#pairing ? new SessionError("pairing_uncertain") : new SessionError("connection"));
   }
 }
 

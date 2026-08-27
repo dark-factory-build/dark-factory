@@ -144,17 +144,20 @@ test("event refresh is correlated to its entity and updates canonical state", as
 test("reconnect creates a fresh generation and stale socket frames are fenced", async () => {
   const store = new MemoryKeys();
   const sockets = [];
-  const options = { url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => { const socket = new Socket(serverFor); sockets.push(socket); return socket; } };
-  const client = new BrowserClient(options);
+  const pairing = new BrowserSession({ url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => { const socket = new Socket(serverFor); sockets.push(socket); return socket; } });
+  await pairing.connect();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  pairing.close();
+  const errors = [];
+  const client = new BrowserClient({ url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", keyStore: store, socketFactory: () => { const socket = new Socket(serverFor); sockets.push(socket); return socket; }, onError: (error) => errors.push(error) });
   await client.connect();
   await new Promise((resolve) => setTimeout(resolve, 10));
-  options.challenge = undefined;
-  sockets[0].close();
+  sockets[1].close();
   await new Promise((resolve) => setTimeout(resolve, 10));
-  assert.equal(sockets.length, 2);
-  sockets[0].reply(encodeHello({ daemon_id: "aa".repeat(16), boot_id: "bb".repeat(16), connection_nonce: "cc".repeat(32) }));
+  assert.equal(sockets.length, 3, errors.map((error) => error.code).join(","));
+  sockets[1].reply(encodeHello({ daemon_id: "aa".repeat(16), boot_id: "bb".repeat(16), connection_nonce: "cc".repeat(32) }));
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.notEqual(client.session, undefined);
-  assert.equal(client.session.status, "ready");
+  assert.equal(client.session.status, "ready", errors.map((error) => error.code).join(","));
   client.close();
 });
