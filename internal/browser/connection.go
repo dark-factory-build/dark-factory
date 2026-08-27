@@ -39,6 +39,7 @@ type connection struct {
 
 	authenticated        bool
 	principal            Principal
+	pairing              bool
 	authenticating       bool
 	authenticatingID     [browserprotocol.ClientIDSize]byte
 	seen                 map[string]struct{}
@@ -47,6 +48,7 @@ type connection struct {
 	subscriptionID       string
 	subscriptionSequence browserprotocol.Decimal
 	subscriptionHead     browserprotocol.Decimal
+	subscriptionHeadSet  bool
 }
 
 func (current *connection) stop() {
@@ -149,7 +151,7 @@ func (current *connection) authenticate(identity Identity, nonce [browserprotoco
 			if tracked {
 				registered = current.server.finishAuthentication(current, *requested, result, accept)
 			}
-		} else {
+		} else if tracked {
 			registered = current.server.registerPair(current, result, accept)
 		}
 		if !registered {
@@ -192,8 +194,11 @@ func (current *connection) prove(ctx context.Context, identity Identity, nonce [
 		copy(request.PublicKeySEC1[:], publicKey)
 		copy(request.Signature[:], signature)
 		request.Host, request.Origin = current.host, current.origin
+		if !current.server.beginPairing(current) {
+			return Authentication{}, nil, false, ErrUnauthorized
+		}
 		result, err := current.server.backend.Pair(ctx, request)
-		return result, nil, false, err
+		return result, nil, true, err
 	case browserprotocol.AuthProve:
 		clientID, err := fixedBytes(body.ClientID, browserprotocol.ClientIDSize)
 		if err != nil {
@@ -354,16 +359,11 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 		}
 		subscription, backendErr := current.server.backend.SubscribeState(ctx, current.principal.ClientID, body.After)
 		if ctx.Err() != nil {
-			if subscription != nil {
-				if closeErr := stopSubscription(subscription); closeErr != nil {
-					current.cleanupErr = errors.Join(current.cleanupErr, closeErr)
-				}
-			}
-			err = ctx.Err()
+			err = current.discardSubscription(subscription, ctx.Err())
 			break
 		}
 		if backendErr != nil {
-			err = backendErr
+			err = current.discardSubscription(subscription, backendErr)
 			break
 		}
 		if subscription == nil {
@@ -372,7 +372,7 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 		}
 		updates := subscription.Updates()
 		if updates == nil {
-			err = fmt.Errorf("invalid subscription")
+			err = current.discardSubscription(subscription, fmt.Errorf("invalid subscription"))
 			break
 		}
 		current.subscription = subscription
@@ -380,6 +380,7 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 		current.subscriptionID = frame.ID
 		current.subscriptionSequence = body.After
 		current.subscriptionHead = 0
+		current.subscriptionHeadSet = false
 		return true
 	default:
 		current.sendError(frame.ID, browserprotocol.ErrorInvalidRequest, false)
@@ -402,7 +403,7 @@ func (current *connection) sendUpdate(update StateUpdate) error {
 	}
 	if update.Event != nil {
 		sequence, head, chronologyErr := eventChronology(*update.Event)
-		if chronologyErr != nil || update.Floor > head || current.subscriptionHead != 0 && head < current.subscriptionHead {
+		if chronologyErr != nil || sequence == 0 || head < sequence || update.Floor > head || current.stateHeadRegressed(head) {
 			return fmt.Errorf("invalid state event chronology")
 		}
 		if current.subscriptionSequence < update.Floor || current.subscriptionSequence == browserprotocol.Decimal(browserprotocol.MaxSQLiteInteger) || sequence != current.subscriptionSequence+1 {
@@ -419,10 +420,15 @@ func (current *connection) sendUpdate(update StateUpdate) error {
 		if err == nil {
 			current.subscriptionSequence = sequence
 			current.subscriptionHead = head
+			current.subscriptionHeadSet = true
 		}
 		return err
 	}
 	return current.sendRestart(*update.Restart)
+}
+
+func (current *connection) stateHeadRegressed(next browserprotocol.Decimal) bool {
+	return current.subscriptionHeadSet && next < current.subscriptionHead
 }
 
 func (current *connection) sendRestart(restart browserprotocol.StateRestart) error {
@@ -447,7 +453,19 @@ func (current *connection) closeSubscription() error {
 	current.subscriptionID = ""
 	current.subscriptionSequence = 0
 	current.subscriptionHead = 0
+	current.subscriptionHeadSet = false
 	return stopSubscription(subscription)
+}
+
+func (current *connection) discardSubscription(subscription StateSubscription, cause error) error {
+	if subscription == nil {
+		return cause
+	}
+	if err := stopSubscription(subscription); err != nil {
+		current.cleanupErr = errors.Join(current.cleanupErr, err)
+		return errors.Join(cause, err)
+	}
+	return cause
 }
 
 func stopSubscription(subscription StateSubscription) error {

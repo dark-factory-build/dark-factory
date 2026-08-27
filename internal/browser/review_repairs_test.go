@@ -59,12 +59,16 @@ func TestRevocationClosesInflightAuthenticationBeforeReturn(t *testing.T) {
 		t.Fatal("revocation did not cancel and join in-flight authentication")
 	}
 	server.mu.Lock()
-	registered := len(server.clients[clientID])
-	inflight := len(server.authenticating[clientID])
-	_, blocked := server.blockedClients[clientID]
+	lifecycle := server.clientLifecycle[clientID]
+	registered, inflight, revoking := 0, 0, 0
+	if lifecycle != nil {
+		registered = len(lifecycle.connections)
+		inflight = len(lifecycle.authenticating)
+		revoking = lifecycle.revoking
+	}
 	server.mu.Unlock()
-	if registered != 0 || inflight != 0 || !blocked {
-		t.Fatalf("revocation barrier registered=%d inflight=%d blocked=%v", registered, inflight, blocked)
+	if registered != 0 || inflight != 0 || revoking != 0 {
+		t.Fatalf("revocation did not quiesce registered=%d inflight=%d revoking=%d", registered, inflight, revoking)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -82,7 +86,11 @@ func TestAuthResultMustMatchRequestedClient(t *testing.T) {
 	authProof(t, connection)
 	assertError(t, readServerFrame(t, connection), browserprotocol.ErrorUnauthorized)
 	server.mu.Lock()
-	registered := len(server.clients[backend.authentication.Principal.ClientID])
+	lifecycle := server.clientLifecycle[backend.authentication.Principal.ClientID]
+	registered := 0
+	if lifecycle != nil {
+		registered = len(lifecycle.connections)
+	}
 	server.mu.Unlock()
 	if registered != 0 {
 		t.Fatalf("mismatched backend principal registered %d connections", registered)
@@ -116,7 +124,41 @@ func TestPairResultCannotRegisterAfterExactClientRevocation(t *testing.T) {
 		t.Fatal(err)
 	}
 	close(release)
-	assertError(t, readServerFrame(t, connection), browserprotocol.ErrorUnauthorized)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, payload, err := connection.Read(ctx); err == nil {
+		t.Fatalf("revoked pairing received a result: %s", payload)
+	}
+}
+
+func TestRevocationFenceIsTemporaryAndBounded(t *testing.T) {
+	backend := newFakeBackend()
+	server := startServer(t, backend)
+	for value := 1; value <= 4096; value++ {
+		var clientID [browserprotocol.ClientIDSize]byte
+		clientID[0] = byte(value)
+		clientID[1] = byte(value >> 8)
+		if err := server.CloseClient(clientID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server.mu.Lock()
+	lifecycles, pairingBlocked := len(server.clientLifecycle), server.pairingBlocked
+	server.mu.Unlock()
+	if lifecycles != 0 || pairingBlocked != 0 {
+		t.Fatalf("quiescent revocation state lifecycles=%d pairing_blocked=%d", lifecycles, pairingBlocked)
+	}
+
+	// Transport fencing is not durable authorization. Once CloseClient has
+	// quiesced, a later proof reaches Backend, which must enforce revocation.
+	connection, _ := dialServer(t, server, testOrigin)
+	authenticate(t, connection)
+	backend.mu.Lock()
+	authCalls := backend.authCalls
+	backend.mu.Unlock()
+	if authCalls != 1 {
+		t.Fatalf("future authentication did not reach durable authority: calls=%d", authCalls)
+	}
 }
 
 func TestOperationAuthorizationIsReloadedByBackend(t *testing.T) {
@@ -291,6 +333,97 @@ func TestLateSubscriptionIsCancelledAndNeverInstalled(t *testing.T) {
 	assertError(t, readServerFrame(t, connection), browserprotocol.ErrorInternal)
 	if backend.sub.closed.Load() != 1 {
 		t.Fatalf("late subscription cleanup count=%d", backend.sub.closed.Load())
+	}
+}
+
+func TestRejectedSubscriptionsAreCancelledAndJoined(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*fakeBackend)
+		code  browserprotocol.ErrorCode
+	}{
+		{
+			name: "backend result plus error",
+			setup: func(backend *fakeBackend) {
+				backend.subErr = ErrRateLimited
+			},
+			code: browserprotocol.ErrorRateLimited,
+		},
+		{
+			name: "nil updates",
+			setup: func(backend *fakeBackend) {
+				backend.sub.updates = nil
+			},
+			code: browserprotocol.ErrorInternal,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			backend := newFakeBackend()
+			test.setup(backend)
+			server := startServer(t, backend)
+			connection, _ := dialServer(t, server, testOrigin)
+			authenticate(t, connection)
+			request, _ := browserprotocol.EncodeStateSubscribe("rejected", browserprotocol.StateSubscribe{})
+			writeClientFrame(t, connection, request)
+			assertError(t, readServerFrame(t, connection), test.code)
+			if got := backend.sub.closed.Load(); got != 1 {
+				t.Fatalf("rejected subscription cleanup count=%d", got)
+			}
+		})
+	}
+}
+
+func TestRejectedSubscriptionCleanupUncertaintyIsObservable(t *testing.T) {
+	backend := newFakeBackend()
+	backend.sub.updates = nil
+	backend.sub.neverDone = true
+	server, err := Listen(Config{Address: "127.0.0.1:0", AllowedOrigins: []string{testOrigin}, Backend: backend})
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, _ := dialServer(t, server, testOrigin)
+	authenticate(t, connection)
+	request, _ := browserprotocol.EncodeStateSubscribe("unresolved-rejected", browserprotocol.StateSubscribe{})
+	writeClientFrame(t, connection, request)
+	assertError(t, readServerFrame(t, connection), browserprotocol.ErrorInternal)
+	_ = connection.CloseNow()
+	waitFor(t, func() bool {
+		server.mu.Lock()
+		defer server.mu.Unlock()
+		return len(server.connections) == 0
+	})
+	if err := server.Close(); !errors.Is(err, ErrSubscriptionUnresolved) {
+		t.Fatalf("close error=%v", err)
+	}
+}
+
+func TestSubscriptionHeadInitializationCannotUseZeroSentinel(t *testing.T) {
+	current := &connection{subscriptionHead: browserprotocol.Decimal(browserprotocol.MaxSQLiteInteger)}
+	if current.stateHeadRegressed(0) {
+		t.Fatal("uninitialized stale numeric head constrained first event")
+	}
+	current.subscriptionHead = 0
+	current.subscriptionHeadSet = true
+	if current.stateHeadRegressed(0) {
+		t.Fatal("initialized zero head was treated as absent")
+	}
+	current.subscriptionHead = 1
+	if !current.stateHeadRegressed(0) {
+		t.Fatal("explicitly initialized monotonic head check was bypassed")
+	}
+
+	current = &connection{
+		subscriptionSequence: 0,
+		subscriptionHead:     0,
+		subscriptionHeadSet:  true,
+	}
+	impossible := browserprotocol.HiddenAdvanceEvent(browserprotocol.HiddenAdvance{Sequence: 1, Head: 0})
+	if err := current.sendUpdate(StateUpdate{Event: &impossible}); err == nil {
+		t.Fatal("impossible first chronology was accepted")
+	}
+	if !current.subscriptionHeadSet || current.subscriptionHead != 0 {
+		t.Fatal("zero head lost explicit initialization state")
 	}
 }
 

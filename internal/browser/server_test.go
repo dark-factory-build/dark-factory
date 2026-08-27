@@ -583,7 +583,11 @@ func TestAuthenticationDeadlineIncludesBackendProof(t *testing.T) {
 		t.Fatalf("proof deadline elapsed=%v", elapsed)
 	}
 	server.mu.Lock()
-	registered := len(server.clients[backend.authentication.Principal.ClientID])
+	lifecycle := server.clientLifecycle[backend.authentication.Principal.ClientID]
+	registered := 0
+	if lifecycle != nil {
+		registered = len(lifecycle.connections)
+	}
 	server.mu.Unlock()
 	if registered != 0 {
 		t.Fatalf("timed-out proof registered %d connections", registered)
@@ -848,7 +852,11 @@ func TestCloseClientAndServerJoinConnectionsWithoutReauthorization(t *testing.T)
 	}
 	backend.mu.Unlock()
 	server.mu.Lock()
-	clientConnections := len(server.clients[backend.authentication.Principal.ClientID])
+	lifecycle := server.clientLifecycle[backend.authentication.Principal.ClientID]
+	clientConnections := 0
+	if lifecycle != nil {
+		clientConnections = len(lifecycle.connections)
+	}
 	server.mu.Unlock()
 	if clientConnections != 0 {
 		t.Fatalf("client registry retained %d connections", clientConnections)

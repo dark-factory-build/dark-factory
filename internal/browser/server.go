@@ -40,6 +40,12 @@ type Config struct {
 	Backend        Backend
 }
 
+type clientLifecycle struct {
+	connections    map[*connection]struct{}
+	authenticating map[*connection]struct{}
+	revoking       int
+}
+
 type Server struct {
 	backend Backend
 	host    string
@@ -49,17 +55,18 @@ type Server struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu             sync.Mutex
-	closing        bool
-	connections    map[*connection]struct{}
-	clients        map[[browserprotocol.ClientIDSize]byte]map[*connection]struct{}
-	authenticating map[[browserprotocol.ClientIDSize]byte]map[*connection]struct{}
-	blockedClients map[[browserprotocol.ClientIDSize]byte]struct{}
-	slots          chan struct{}
-	serveDone      chan struct{}
-	serveErr       error
-	closeErr       error
-	closeOnce      sync.Once
+	mu              sync.Mutex
+	closing         bool
+	connections     map[*connection]struct{}
+	clientLifecycle map[[browserprotocol.ClientIDSize]byte]*clientLifecycle
+	pairing         map[*connection]struct{}
+	pairingBlocked  int
+	slots           chan struct{}
+	serveDone       chan struct{}
+	serveErr        error
+	cleanupErr      error
+	closeErr        error
+	closeOnce       sync.Once
 }
 
 func Listen(config Config) (*Server, error) {
@@ -83,17 +90,16 @@ func Listen(config Config) (*Server, error) {
 func start(backend Backend, origins map[string]struct{}, listener net.Listener) *Server {
 	ctx, cancel := context.WithCancel(context.Background())
 	server := &Server{
-		backend:        backend,
-		host:           listener.Addr().String(),
-		origins:        origins,
-		ctx:            ctx,
-		cancel:         cancel,
-		connections:    make(map[*connection]struct{}),
-		clients:        make(map[[browserprotocol.ClientIDSize]byte]map[*connection]struct{}),
-		authenticating: make(map[[browserprotocol.ClientIDSize]byte]map[*connection]struct{}),
-		blockedClients: make(map[[browserprotocol.ClientIDSize]byte]struct{}),
-		slots:          make(chan struct{}, maxConnections),
-		serveDone:      make(chan struct{}),
+		backend:         backend,
+		host:            listener.Addr().String(),
+		origins:         origins,
+		ctx:             ctx,
+		cancel:          cancel,
+		connections:     make(map[*connection]struct{}),
+		clientLifecycle: make(map[[browserprotocol.ClientIDSize]byte]*clientLifecycle),
+		pairing:         make(map[*connection]struct{}),
+		slots:           make(chan struct{}, maxConnections),
+		serveDone:       make(chan struct{}),
 	}
 	server.http = &http.Server{
 		Handler:           http.HandlerFunc(server.handle),
@@ -170,14 +176,14 @@ func (server *Server) Close() error {
 		}
 		for _, current := range connections {
 			<-current.done
-			if current.cleanupErr != nil {
-				closeErrors = append(closeErrors, current.cleanupErr)
-			}
 		}
 		<-server.serveDone
 		server.mu.Lock()
 		if server.serveErr != nil {
 			closeErrors = append(closeErrors, server.serveErr)
+		}
+		if server.cleanupErr != nil {
+			closeErrors = append(closeErrors, server.cleanupErr)
 		}
 		server.closeErr = errors.Join(closeErrors...)
 		server.mu.Unlock()
@@ -194,12 +200,20 @@ func (server *Server) CloseClient(clientID [browserprotocol.ClientIDSize]byte) e
 		return nil
 	}
 	server.mu.Lock()
-	server.blockedClients[clientID] = struct{}{}
+	lifecycle := server.lifecycleLocked(clientID)
+	lifecycle.revoking++
+	server.pairingBlocked++
 	set := make(map[*connection]struct{})
-	for current := range server.clients[clientID] {
+	for current := range lifecycle.connections {
 		set[current] = struct{}{}
 	}
-	for current := range server.authenticating[clientID] {
+	for current := range lifecycle.authenticating {
+		set[current] = struct{}{}
+	}
+	// A pairing call has no client ID until Backend returns its daemon-minted
+	// result. Fence and join all calls already in flight so none can register
+	// this client after revocation returns.
+	for current := range server.pairing {
 		set[current] = struct{}{}
 	}
 	connections := make([]*connection, 0, len(set))
@@ -219,6 +233,14 @@ func (server *Server) CloseClient(clientID [browserprotocol.ClientIDSize]byte) e
 			closeErrors = append(closeErrors, current.cleanupErr)
 		}
 	}
+	server.mu.Lock()
+	lifecycle = server.clientLifecycle[clientID]
+	if lifecycle != nil {
+		lifecycle.revoking--
+		server.removeLifecycleIfIdleLocked(clientID)
+	}
+	server.pairingBlocked--
+	server.mu.Unlock()
 	return errors.Join(closeErrors...)
 }
 
@@ -302,17 +324,25 @@ func (server *Server) beginAuthentication(current *connection, clientID [browser
 	if server.closing || zero16(clientID) {
 		return false
 	}
-	if _, blocked := server.blockedClients[clientID]; blocked {
+	lifecycle := server.lifecycleLocked(clientID)
+	if lifecycle.revoking != 0 {
+		server.removeLifecycleIfIdleLocked(clientID)
 		return false
 	}
-	set := server.authenticating[clientID]
-	if set == nil {
-		set = make(map[*connection]struct{})
-		server.authenticating[clientID] = set
-	}
-	set[current] = struct{}{}
+	lifecycle.authenticating[current] = struct{}{}
 	current.authenticating = true
 	current.authenticatingID = clientID
+	return true
+}
+
+func (server *Server) beginPairing(current *connection) bool {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if server.closing || server.pairingBlocked != 0 {
+		return false
+	}
+	server.pairing[current] = struct{}{}
+	current.pairing = true
 	return true
 }
 
@@ -323,7 +353,9 @@ func (server *Server) finishAuthentication(current *connection, requested [brows
 	if !accept || server.closing || result.Principal.ClientID != requested {
 		return false
 	}
-	if _, blocked := server.blockedClients[requested]; blocked {
+	lifecycle := server.lifecycleLocked(requested)
+	if lifecycle.revoking != 0 {
+		server.removeLifecycleIfIdleLocked(requested)
 		return false
 	}
 	server.registerLocked(current, result.Principal)
@@ -333,10 +365,13 @@ func (server *Server) finishAuthentication(current *connection, requested [brows
 func (server *Server) registerPair(current *connection, result Authentication, accept bool) bool {
 	server.mu.Lock()
 	defer server.mu.Unlock()
+	server.removePairingLocked(current)
 	if !accept || server.closing || zero16(result.Principal.ClientID) {
 		return false
 	}
-	if _, blocked := server.blockedClients[result.Principal.ClientID]; blocked {
+	lifecycle := server.lifecycleLocked(result.Principal.ClientID)
+	if lifecycle.revoking != 0 {
+		server.removeLifecycleIfIdleLocked(result.Principal.ClientID)
 		return false
 	}
 	server.registerLocked(current, result.Principal)
@@ -346,37 +381,65 @@ func (server *Server) registerPair(current *connection, result Authentication, a
 func (server *Server) registerLocked(current *connection, principal Principal) {
 	current.principal = principal
 	current.authenticated = true
-	set := server.clients[principal.ClientID]
-	if set == nil {
-		set = make(map[*connection]struct{})
-		server.clients[principal.ClientID] = set
-	}
-	set[current] = struct{}{}
+	server.lifecycleLocked(principal.ClientID).connections[current] = struct{}{}
 }
 
 func (server *Server) removeAuthenticatingLocked(current *connection) {
 	if !current.authenticating {
 		return
 	}
-	set := server.authenticating[current.authenticatingID]
-	delete(set, current)
-	if len(set) == 0 {
-		delete(server.authenticating, current.authenticatingID)
+	clientID := current.authenticatingID
+	if lifecycle := server.clientLifecycle[clientID]; lifecycle != nil {
+		delete(lifecycle.authenticating, current)
 	}
 	current.authenticating = false
 	current.authenticatingID = [browserprotocol.ClientIDSize]byte{}
+	server.removeLifecycleIfIdleLocked(clientID)
+}
+
+func (server *Server) removePairingLocked(current *connection) {
+	if !current.pairing {
+		return
+	}
+	delete(server.pairing, current)
+	current.pairing = false
+}
+
+func (server *Server) lifecycleLocked(clientID [browserprotocol.ClientIDSize]byte) *clientLifecycle {
+	lifecycle := server.clientLifecycle[clientID]
+	if lifecycle == nil {
+		lifecycle = &clientLifecycle{
+			connections:    make(map[*connection]struct{}),
+			authenticating: make(map[*connection]struct{}),
+		}
+		server.clientLifecycle[clientID] = lifecycle
+	}
+	return lifecycle
+}
+
+func (server *Server) removeLifecycleIfIdleLocked(clientID [browserprotocol.ClientIDSize]byte) {
+	lifecycle := server.clientLifecycle[clientID]
+	if lifecycle != nil && lifecycle.revoking == 0 && len(lifecycle.connections) == 0 && len(lifecycle.authenticating) == 0 {
+		delete(server.clientLifecycle, clientID)
+	}
 }
 
 func (server *Server) unregister(current *connection) {
 	server.mu.Lock()
+	if server.cleanupErr == nil && current.cleanupErr != nil {
+		// Cleanup uncertainty is load-bearing server state until Close reports
+		// it. Keep one bounded typed error instead of an attacker-growable log.
+		server.cleanupErr = current.cleanupErr
+	}
 	delete(server.connections, current)
+	server.removePairingLocked(current)
 	server.removeAuthenticatingLocked(current)
 	if current.authenticated {
-		set := server.clients[current.principal.ClientID]
-		delete(set, current)
-		if len(set) == 0 {
-			delete(server.clients, current.principal.ClientID)
+		clientID := current.principal.ClientID
+		if lifecycle := server.clientLifecycle[clientID]; lifecycle != nil {
+			delete(lifecycle.connections, current)
 		}
+		server.removeLifecycleIfIdleLocked(clientID)
 	}
 	server.mu.Unlock()
 }
