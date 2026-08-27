@@ -47,11 +47,12 @@ type clientLifecycle struct {
 }
 
 type Server struct {
-	backend         Backend
-	terminalBackend TerminalBackend
-	host            string
-	origins         map[string]struct{}
-	http            *http.Server
+	backend            Backend
+	terminalBackend    TerminalBackend
+	host               string
+	origins            map[string]struct{}
+	terminalAckTimeout time.Duration
+	http               *http.Server
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -91,17 +92,18 @@ func Listen(config Config) (*Server, error) {
 func start(backend Backend, origins map[string]struct{}, listener net.Listener) *Server {
 	ctx, cancel := context.WithCancel(context.Background())
 	server := &Server{
-		backend:         backend,
-		terminalBackend: func() TerminalBackend { value, _ := backend.(TerminalBackend); return value }(),
-		host:            listener.Addr().String(),
-		origins:         origins,
-		ctx:             ctx,
-		cancel:          cancel,
-		connections:     make(map[*connection]struct{}),
-		clientLifecycle: make(map[[browserprotocol.ClientIDSize]byte]*clientLifecycle),
-		pairing:         make(map[*connection]struct{}),
-		slots:           make(chan struct{}, maxConnections),
-		serveDone:       make(chan struct{}),
+		backend:            backend,
+		terminalBackend:    func() TerminalBackend { value, _ := backend.(TerminalBackend); return value }(),
+		host:               listener.Addr().String(),
+		origins:            origins,
+		terminalAckTimeout: time.Duration(browserprotocol.TerminalAckTimeoutMS) * time.Millisecond,
+		ctx:                ctx,
+		cancel:             cancel,
+		connections:        make(map[*connection]struct{}),
+		clientLifecycle:    make(map[[browserprotocol.ClientIDSize]byte]*clientLifecycle),
+		pairing:            make(map[*connection]struct{}),
+		slots:              make(chan struct{}, maxConnections),
+		serveDone:          make(chan struct{}),
 	}
 	server.http = &http.Server{
 		Handler:           http.HandlerFunc(server.handle),

@@ -621,7 +621,7 @@ func (current *connection) clearTerminal() {
 
 func (current *connection) armTerminalAckTimer() {
 	if current.terminalAckTimer == nil {
-		current.terminalAckTimer = time.NewTimer(time.Duration(browserprotocol.TerminalAckTimeoutMS) * time.Millisecond)
+		current.terminalAckTimer = time.NewTimer(current.server.terminalAckTimeout)
 	}
 }
 

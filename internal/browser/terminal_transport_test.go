@@ -40,6 +40,10 @@ func newTerminalTestBackend() *terminalTestBackend {
 }
 
 func startTerminalServer(t *testing.T, backend *terminalTestBackend) *Server {
+	return startTerminalServerWithAckTimeout(t, backend, time.Duration(browserprotocol.TerminalAckTimeoutMS)*time.Millisecond)
+}
+
+func startTerminalServerWithAckTimeout(t *testing.T, backend *terminalTestBackend, ackTimeout time.Duration) *Server {
 	t.Helper()
 	server, err := Listen(Config{Address: "127.0.0.1:0", AllowedOrigins: []string{testOrigin, devOrigin}, Backend: backend})
 	if err != nil {
@@ -50,6 +54,7 @@ func startTerminalServer(t *testing.T, backend *terminalTestBackend) *Server {
 			t.Errorf("close: %v", err)
 		}
 	})
+	server.terminalAckTimeout = ackTimeout
 	return server
 }
 
@@ -374,6 +379,22 @@ func TestTerminalTransportRejectsAheadAndBackwardACKs(t *testing.T) {
 			expectTerminalReadError(t, connection)
 		})
 	}
+}
+
+func TestTerminalTransportDisconnectsAfterControlledACKTimeout(t *testing.T) {
+	backend := newTerminalTestBackend()
+	backend.authentication.Capabilities = browserprotocol.CapabilityObserve | browserprotocol.CapabilityTerminalInput
+	server := startTerminalServerWithAckTimeout(t, backend, 5*time.Millisecond)
+	connection, _ := dialServer(t, server, testOrigin)
+	authenticateTerminalTest(t, connection)
+	writeClientFrame(t, connection, terminalAttachRequest(t, "attach", 0))
+	sendTerminalEvent(t, backend, TerminalEvent{Kind: TerminalEventAttached, Accepted: true, Sequence: 0, Floor: 0, Head: 1})
+	if frame := readServerFrame(t, connection); frame.Type != browserprotocol.TypeTerminalAttached {
+		t.Fatalf("attached frame=%+v", frame)
+	}
+	sendTerminalEvent(t, backend, TerminalEvent{Kind: TerminalEventOutput, Start: 0, End: 1, Payload: []byte("x")})
+	_ = readTerminalBinary(t, connection)
+	expectTerminalReadError(t, connection)
 }
 
 func TestTerminalTransportResetAndDetachJoinAttachment(t *testing.T) {
