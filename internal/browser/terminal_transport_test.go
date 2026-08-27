@@ -247,6 +247,73 @@ func TestTerminalTransportAdvertisesExactDurableCapabilities(t *testing.T) {
 	}
 }
 
+func TestTerminalTransportDeliversCanonicalExitAndRetainsConnection(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		code, signal int
+		aborted      bool
+	}{
+		{name: "success"},
+		{name: "failure", code: 7, aborted: true},
+		{name: "signal", signal: 15},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			backend := newTerminalTestBackend()
+			backend.authentication.Capabilities = browserprotocol.CapabilityObserve
+			server := startTerminalServer(t, backend)
+			connection, _ := dialServer(t, server, testOrigin)
+			authenticateTerminalTest(t, connection)
+			writeClientFrame(t, connection, terminalAttachRequest(t, "attach", 0))
+			sendTerminalEvent(t, backend, TerminalEvent{Kind: TerminalEventAttached, Accepted: true})
+			_ = readServerFrame(t, connection)
+
+			attachment := backend.currentAttachment(t)
+			sendTerminalEvent(t, backend, TerminalEvent{Kind: TerminalEventExit, ExitCode: test.code, ExitSignal: test.signal, Aborted: test.aborted})
+			frame := readServerFrame(t, connection)
+			exit, ok := frame.Body.(browserprotocol.TerminalExit)
+			if frame.Type != browserprotocol.TypeTerminalExit || !ok || exit.ExitCode != int64(test.code) || exit.ExitSignal != int64(test.signal) || exit.Aborted != test.aborted {
+				t.Fatalf("terminal exit = %+v", frame)
+			}
+			if attachment.closed.Load() != 1 || attachment.closeCalls.Load() != 1 {
+				t.Fatalf("exit attachment close = %d calls %d", attachment.closed.Load(), attachment.closeCalls.Load())
+			}
+
+			target, err := browserprotocol.EncodeTerminalTargetGet("still-open", browserprotocol.TerminalTargetGet{AgentID: strings.Repeat("01", 16), ExpectedAgentRevision: 1, ExpectedHead: 7})
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeClientFrame(t, connection, target)
+			if next := readServerFrame(t, connection); next.Type != browserprotocol.TypeTerminalTarget || next.ID != "still-open" {
+				t.Fatalf("connection was not retained: %+v", next)
+			}
+		})
+	}
+}
+
+func TestTerminalTransportRejectsNoncanonicalExitWithoutFrame(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		event TerminalEvent
+	}{
+		{name: "runner sentinel", event: TerminalEvent{Kind: TerminalEventExit, ExitCode: -1, ExitSignal: 15}},
+		{name: "contradictory", event: TerminalEvent{Kind: TerminalEventExit, ExitCode: 7, ExitSignal: 9}},
+		{name: "negative signal", event: TerminalEvent{Kind: TerminalEventExit, ExitSignal: -1}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			backend := newTerminalTestBackend()
+			backend.authentication.Capabilities = browserprotocol.CapabilityObserve
+			server := startTerminalServer(t, backend)
+			connection, _ := dialServer(t, server, testOrigin)
+			authenticateTerminalTest(t, connection)
+			writeClientFrame(t, connection, terminalAttachRequest(t, "attach", 0))
+			sendTerminalEvent(t, backend, TerminalEvent{Kind: TerminalEventAttached, Accepted: true})
+			_ = readServerFrame(t, connection)
+			sendTerminalEvent(t, backend, test.event)
+			expectTerminalReadError(t, connection)
+		})
+	}
+}
+
 func TestTerminalTransportAttachCreditReplayAndInput(t *testing.T) {
 	backend := newTerminalTestBackend()
 	backend.authentication.Capabilities = browserprotocol.CapabilityObserve | browserprotocol.CapabilityTerminalInput

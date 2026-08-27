@@ -1257,6 +1257,13 @@ TERMINAL_EXIT { session_id, exit_code, exit_signal, aborted }
 TERMINAL_RESET { session_id, floor, head }   # attach ID; detach follows
 ```
 
+Terminal exit has one canonical wire status arm: ordinary exit is
+`exit_code >= 0, exit_signal == 0`, while a signaled provider is
+`exit_code == 0, exit_signal > 0`. The daemon alone translates the runner's
+exact internal `Code == -1, Signal > 0` wait sentinel to that signaled wire
+shape; contradictory, negative or oversized pairs fail closed in both Go and
+TypeScript.
+
 All identifiers are exact lower-case 16-byte hex; revisions, generations,
 sequences, timestamps and byte counts use their existing bounded decimal wire
 forms. Rows and columns are integers in the closed range 1 through 4,096.

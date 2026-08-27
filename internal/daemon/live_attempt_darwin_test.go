@@ -38,6 +38,65 @@ func TestLiveAttemptGlobalResetAdvancesEveryObserverCursor(t *testing.T) {
 	}
 }
 
+func TestLiveAttemptProjectsCanonicalBrowserExit(t *testing.T) {
+	for _, test := range []struct {
+		name              string
+		exit              runner.Exit
+		wantCode, wantSig int
+	}{
+		{name: "success", exit: runner.Exit{Code: 0}},
+		{name: "failure", exit: runner.Exit{Code: 7}, wantCode: 7},
+		{name: "signal", exit: runner.Exit{Code: -1, Signal: 15, Aborted: true}, wantSig: 15},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runID, sessionID := liveTestIDs(t, 11000)
+			attempt := newLiveAttempt(nil, runID, sessionID, nil)
+			attachment := &TerminalAttachment{queue: make(chan TerminalEvent, terminalSubscriberCap)}
+			attempt.subs[attachment] = struct{}{}
+			record := &runner.TerminalRecord{Terminal: runner.Terminal{Exit: test.exit}}
+			stop, err := attempt.handleRunnerEvent(runner.AttemptEvent{Kind: runner.AttemptTerminal, Terminal: record})
+			if err != nil || stop {
+				t.Fatalf("terminal event = stop %v err %v", stop, err)
+			}
+			event, err := attachment.Next(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if event.Kind != TerminalEventExit || event.ExitCode != test.wantCode || event.ExitSignal != test.wantSig || event.Aborted != test.exit.Aborted {
+				t.Fatalf("browser exit = %+v", event)
+			}
+			if !attempt.terminalSeen || attempt.terminalEvent == nil {
+				t.Fatal("canonical terminal was not retained")
+			}
+			if result := <-attempt.terminal; result.err != nil || result.event.Terminal != record {
+				t.Fatalf("terminal result = %+v", result)
+			}
+		})
+	}
+}
+
+func TestLiveAttemptRejectsNoncanonicalBrowserExitBeforeBroadcast(t *testing.T) {
+	for _, exit := range []runner.Exit{
+		{Code: -1},
+		{Code: -2, Signal: 15},
+		{Code: 0, Signal: 15},
+		{Code: 7, Signal: 9},
+		{Code: -1, Signal: -9},
+	} {
+		runID, sessionID := liveTestIDs(t, 11001)
+		attempt := newLiveAttempt(nil, runID, sessionID, nil)
+		attachment := &TerminalAttachment{queue: make(chan TerminalEvent, terminalSubscriberCap)}
+		attempt.subs[attachment] = struct{}{}
+		record := &runner.TerminalRecord{Terminal: runner.Terminal{Exit: exit}}
+		if stop, err := attempt.handleRunnerEvent(runner.AttemptEvent{Kind: runner.AttemptTerminal, Terminal: record}); stop || !errors.Is(err, runner.ErrState) {
+			t.Fatalf("exit %+v = stop %v err %v", exit, stop, err)
+		}
+		if attempt.terminalSeen || attempt.terminalEvent != nil || len(attachment.queue) != 0 || len(attempt.terminal) != 0 {
+			t.Fatalf("noncanonical exit changed state: attempt=%+v queued=%d", attempt.terminalEvent, len(attachment.queue))
+		}
+	}
+}
+
 func TestLiveAttemptRejectsWrongSessionBeforeRunnerAttach(t *testing.T) {
 	runID, sessionID := liveTestIDs(t, 10009)
 	_, wrongSession := liveTestIDs(t, 10010)

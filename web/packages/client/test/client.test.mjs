@@ -15,6 +15,7 @@ import {
   encodeClientControl,
   encodeServerControl,
   encodeServerError,
+  encodeTerminalExit,
   encodeTerminalInput,
   encodeTerminalInputResult,
   encodeTerminalOutput,
@@ -161,6 +162,23 @@ test("browser terminal and HumanRequest controls are typed, directional, and bou
   for (const field of ["exit_code", "exit_signal", "aborted"]) {
     const exit = fixture("terminal_exit.json").replace(new RegExp(`"${field}":(?:0|false)`), `"${field}":null`);
     expectMalformed(() => decodeServerControl(exit));
+  }
+});
+
+test("terminal exit has one canonical code-or-signal status arm", () => {
+  const session_id = "22".repeat(16);
+  for (const [exit_code, exit_signal, aborted] of [[0, 0, false], [7, 0, true], [0, 15, false]]) {
+    const wire = encodeTerminalExit("exit", { session_id, exit_code, exit_signal, aborted });
+    const exit = decodeServerControl(wire).body;
+    assert.equal(exit.exit_code, exit_code);
+    assert.equal(exit.exit_signal, exit_signal);
+    assert.equal(exit.aborted, aborted);
+  }
+  for (const [exit_code, exit_signal] of [
+    [-1, 0], [-1, 15], [7, 9], [0, -1], [Number.MAX_SAFE_INTEGER + 1, 0], [0, Number.MAX_SAFE_INTEGER + 1], [null, 0], [0, null],
+  ]) {
+    expectMalformed(() => encodeTerminalExit("exit", { session_id, exit_code, exit_signal, aborted: false }));
+    expectMalformed(() => decodeServerControl(JSON.stringify({ v: 1, type: "TERMINAL_EXIT", id: "exit", body: { session_id, exit_code, exit_signal, aborted: false } })));
   }
 });
 

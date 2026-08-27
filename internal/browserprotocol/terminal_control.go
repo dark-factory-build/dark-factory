@@ -346,7 +346,7 @@ func validTerminalControl(kind MessageType, body any) error {
 			return bad()
 		}
 	case TerminalExit:
-		if !id(v.SessionID) || v.ExitCode < 0 || v.ExitCode > MaxJSONInteger || v.ExitSignal < 0 || v.ExitSignal > MaxJSONInteger {
+		if !id(v.SessionID) || !validTerminalExit(v.ExitCode, v.ExitSignal) {
 			return bad()
 		}
 	case TerminalReset:
@@ -357,6 +357,13 @@ func validTerminalControl(kind MessageType, body any) error {
 		return bad()
 	}
 	return nil
+}
+
+func validTerminalExit(code, signal int64) bool {
+	if code < 0 || code > MaxJSONInteger || signal < 0 || signal > MaxJSONInteger {
+		return false
+	}
+	return signal == 0 || code == 0
 }
 
 func validTerminalTargetDescriptor(value TerminalTargetDescriptor) error {

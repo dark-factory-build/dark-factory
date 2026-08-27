@@ -260,7 +260,7 @@ test("exit rejects a pending input before clearing writable authority", async ()
   terminal = context.handle;
   const { attachFrame } = await attachedWithLease(context);
   const input = terminal.sendInput(new Uint8Array([1]));
-  assert.equal(terminal.receiveExit(attachFrame.id, { session_id: sessionId, exit_code: 0, exit_signal: 0, aborted: false }), true);
+  assert.equal(terminal.receiveExit(attachFrame.id, { session_id: sessionId, exit_code: 0, exit_signal: 15, aborted: true }), true);
   await assert.rejects(input, /terminal exited/);
   assert.equal(writableAtCallback, false);
   assert.equal(terminal.writable, false);

@@ -743,6 +743,55 @@ func TestTerminalControlRejectsSurrogateAndNullMutations(t *testing.T) {
 	}
 }
 
+func TestTerminalExitRequiresOneCanonicalStatusArm(t *testing.T) {
+	const sessionID = "22222222222222222222222222222222"
+	for _, test := range []struct {
+		name         string
+		code, signal int64
+	}{
+		{name: "success", code: 0, signal: 0},
+		{name: "failure", code: 7, signal: 0},
+		{name: "signal", code: 0, signal: 15},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			payload, err := EncodeTerminalExit("exit", TerminalExit{SessionID: sessionID, ExitCode: test.code, ExitSignal: test.signal})
+			if err != nil {
+				t.Fatal(err)
+			}
+			frame, err := DecodeServerControl(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := frame.Body.(TerminalExit)
+			if got.ExitCode != test.code || got.ExitSignal != test.signal {
+				t.Fatalf("exit = code %d signal %d", got.ExitCode, got.ExitSignal)
+			}
+		})
+	}
+
+	for _, test := range []struct {
+		name         string
+		code, signal int64
+	}{
+		{name: "negative code", code: -1, signal: 0},
+		{name: "runner sentinel", code: -1, signal: 15},
+		{name: "contradictory", code: 7, signal: 9},
+		{name: "negative signal", code: 0, signal: -1},
+		{name: "code overflow", code: MaxJSONInteger + 1, signal: 0},
+		{name: "signal overflow", code: 0, signal: MaxJSONInteger + 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := EncodeTerminalExit("exit", TerminalExit{SessionID: sessionID, ExitCode: test.code, ExitSignal: test.signal}); !errors.Is(err, ErrMalformed) {
+				t.Fatalf("noncanonical terminal exit accepted: %v", err)
+			}
+			wire := fmt.Sprintf(`{"v":1,"type":"TERMINAL_EXIT","id":"exit","body":{"session_id":"%s","exit_code":%d,"exit_signal":%d,"aborted":false}}`, sessionID, test.code, test.signal)
+			if _, err := DecodeServerControl([]byte(wire)); !errors.Is(err, ErrMalformed) {
+				t.Fatalf("noncanonical terminal exit decoded: %v", err)
+			}
+		})
+	}
+}
+
 func TestHumanRequestAuthorityWireRejectsLegacyAndForgedShapes(t *testing.T) {
 	reply := string(fixtureBytes(t, "human_request_reply.json"))
 	cancel := string(fixtureBytes(t, "human_request_cancel_run.json"))

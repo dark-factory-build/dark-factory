@@ -521,15 +521,30 @@ func (attempt *liveAttempt) handleRunnerEvent(event runner.AttemptEvent) (bool, 
 		if event.Terminal == nil {
 			return false, runner.ErrState
 		}
+		exit, err := browserTerminalExit(event.Terminal.Terminal.Exit)
+		if err != nil {
+			return false, err
+		}
 		attempt.terminalSeen = true
 		attempt.binding = terminalBinding{}
 		attempt.terminalEvent = &event
-		attempt.broadcast(TerminalEvent{Kind: TerminalEventExit, ExitCode: event.Terminal.Terminal.Exit.Code, ExitSignal: event.Terminal.Terminal.Exit.Signal, Aborted: event.Terminal.Terminal.Exit.Aborted})
+		attempt.broadcast(exit)
 		attempt.closeSubscribers(ErrTerminalClosed)
 		attempt.terminal <- liveAttemptResult{event: event}
 		return false, nil
 	default:
 		return false, runner.ErrState
+	}
+}
+
+func browserTerminalExit(exit runner.Exit) (TerminalEvent, error) {
+	switch {
+	case exit.Code >= 0 && exit.Signal == 0:
+		return TerminalEvent{Kind: TerminalEventExit, ExitCode: exit.Code, Aborted: exit.Aborted}, nil
+	case exit.Code == -1 && exit.Signal > 0:
+		return TerminalEvent{Kind: TerminalEventExit, ExitSignal: exit.Signal, Aborted: exit.Aborted}, nil
+	default:
+		return TerminalEvent{}, runner.ErrState
 	}
 }
 
