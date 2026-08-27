@@ -196,7 +196,7 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 	}
 }
 
-func TestDaemonDispatchesAttemptOutcomeAndWakesAfterCommit(t *testing.T) {
+func TestDaemonDispatchesAttemptOutcomeAfterCommit(t *testing.T) {
 	fixture := newDispatchFixture(t)
 	active := prepareActiveAttempt(t, fixture, 11)
 	ctx := context.Background()
@@ -206,17 +206,10 @@ func TestDaemonDispatchesAttemptOutcomeAndWakesAfterCommit(t *testing.T) {
 		t.Fatalf("attempt succeed = %+v, %v", result, err)
 	}
 	waitDispatch(t, done)
-	select {
-	case <-active.wake:
-	case <-time.After(time.Second):
-		t.Fatal("durable outcome did not notify registered supervisor")
-	}
 	finalizing, found, err := fixture.store.Run(ctx, active.run.ID)
 	if err != nil || !found || finalizing.Phase != kernel.RunFinalizing || finalizing.Proposal == nil || finalizing.Proposal.Kind() != kernel.OutcomeSucceeded || finalizing.Proposal.Result() != "private result sentinel" {
 		t.Fatalf("durable outcome = %+v, found=%v, err=%v", finalizing, found, err)
 	}
-	fixture.daemon.unregisterRunWake(active.run.ID)
-
 	done = fixture.serve(t)
 	if _, err := active.client.Fail(ctx, "late"); err == nil {
 		t.Fatal("revoked attempt credential remained usable")
@@ -227,7 +220,6 @@ func TestDaemonDispatchesAttemptOutcomeAndWakesAfterCommit(t *testing.T) {
 type activeAttempt struct {
 	client *api.AttemptClient
 	run    kernel.Run
-	wake   <-chan struct{}
 }
 
 func prepareActiveAttempt(t *testing.T, fixture *dispatchFixture, seed byte) activeAttempt {
@@ -319,10 +311,6 @@ func prepareActiveAttempt(t *testing.T, fixture *dispatchFixture, seed byte) act
 	if err != nil {
 		t.Fatal(err)
 	}
-	wake, ok := fixture.daemon.registerRunWake(active.ID)
-	if !ok || wake == nil {
-		t.Fatal("run wake registration failed")
-	}
 	attemptToken := filepath.Join(filepath.Dir(fixture.socket), "attempt.token")
 	if err := os.WriteFile(attemptToken, bearer, 0o600); err != nil {
 		t.Fatal(err)
@@ -336,7 +324,7 @@ func prepareActiveAttempt(t *testing.T, fixture *dispatchFixture, seed byte) act
 	if err != nil {
 		t.Fatal(err)
 	}
-	return activeAttempt{client: client, run: active, wake: wake}
+	return activeAttempt{client: client, run: active}
 }
 
 func TestDaemonDispatchesBlockAndFailCalls(t *testing.T) {
@@ -361,11 +349,6 @@ func TestDaemonDispatchesBlockAndFailCalls(t *testing.T) {
 				t.Fatalf("outcome = %+v, %v", result, err)
 			}
 			waitDispatch(t, done)
-			select {
-			case <-active.wake:
-			case <-time.After(time.Second):
-				t.Fatal("outcome did not wake supervisor")
-			}
 			observed, found, err := fixture.store.Run(context.Background(), active.run.ID)
 			if err != nil || !found || observed.Phase != kernel.RunFinalizing || observed.Proposal == nil || observed.Proposal.Kind() != test.kind {
 				t.Fatalf("durable proposal = %+v, found=%v, err=%v", observed, found, err)
@@ -374,9 +357,9 @@ func TestDaemonDispatchesBlockAndFailCalls(t *testing.T) {
 	}
 }
 
-func TestDaemonDoesNotWakeRejectedAttemptOutcome(t *testing.T) {
+func TestDaemonRejectsForgedAttemptOutcome(t *testing.T) {
 	fixture := newDispatchFixture(t)
-	active := prepareActiveAttempt(t, fixture, 61)
+	_ = prepareActiveAttempt(t, fixture, 61)
 	wrongBearer := bytes.Repeat([]byte{'z'}, 32)
 	wrongToken := filepath.Join(filepath.Dir(fixture.socket), "wrong.token")
 	if err := os.WriteFile(wrongToken, wrongBearer, 0o600); err != nil {
@@ -396,11 +379,6 @@ func TestDaemonDoesNotWakeRejectedAttemptOutcome(t *testing.T) {
 		t.Fatal("forged attempt outcome succeeded")
 	}
 	waitDispatch(t, done)
-	select {
-	case <-active.wake:
-		t.Fatal("rejected outcome emitted a supervisor wake")
-	default:
-	}
 }
 
 func TestDaemonConcurrentAttemptOutcomesHaveOneDurableWinner(t *testing.T) {
@@ -447,42 +425,10 @@ func TestDaemonConcurrentAttemptOutcomesHaveOneDurableWinner(t *testing.T) {
 	if accepted != 1 || rejected != 1 {
 		t.Fatalf("outcome counts accepted=%d rejected=%d", accepted, rejected)
 	}
-	select {
-	case <-active.wake:
-	case <-time.After(time.Second):
-		t.Fatal("winning outcome did not wake supervisor")
-	}
 	observed, found, err := fixture.store.Run(context.Background(), active.run.ID)
 	if err != nil || !found || observed.Phase != kernel.RunFinalizing || observed.Proposal == nil {
 		t.Fatalf("concurrent durable result = %+v, found=%v, err=%v", observed, found, err)
 	}
-}
-
-func TestWakeHintsAreCapacityOneAndUnregisterIsHarmless(t *testing.T) {
-	daemon := &Daemon{wakes: make(map[kernel.RunID]chan struct{})}
-	runID := mustRunID(t, testID(41))
-	wake, ok := daemon.registerRunWake(runID)
-	if !ok || wake == nil {
-		t.Fatal("wake registration failed")
-	}
-	duplicate, ok := daemon.registerRunWake(runID)
-	if !ok || duplicate != wake {
-		t.Fatal("duplicate registration did not retain the same hint")
-	}
-	daemon.notifyRun(runID)
-	daemon.notifyRun(runID)
-	select {
-	case <-wake:
-	default:
-		t.Fatal("wake was not delivered")
-	}
-	select {
-	case <-wake:
-		t.Fatal("wake channel exceeded capacity one")
-	default:
-	}
-	daemon.unregisterRunWake(runID)
-	daemon.notifyRun(runID)
 }
 
 func TestProjectionHasNoPrivateFieldsAndKeepsEmptySlices(t *testing.T) {

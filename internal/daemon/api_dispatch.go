@@ -11,21 +11,16 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
-// maxRunWakeEntries bounds the in-memory notification index. Notifications
-// are hints only: the Store remains the authority and a missing or dropped
-// hint cannot change any durable decision.
-const maxRunWakeEntries = 1024
-
 // Daemon is the concrete composition root for the local API. It owns the
-// durable Store and the short-lived supervisor wake hints. It does not own an
-// accept loop; the caller accepts and hands one connection to
-// HandleConnection.
+// durable Store and live attempt owners. It does not own an accept loop; the
+// caller accepts and hands one connection to HandleConnection.
 type Daemon struct {
 	store *kernel.Store
 	now   func() time.Time
 
-	wakeMu sync.Mutex
-	wakes  map[kernel.RunID]chan struct{}
+	attemptMu sync.Mutex
+	attempts  map[kernel.RunID]*liveAttempt
+	closing   bool
 }
 
 // NewDaemon creates an API composition root using the wall clock for durable
@@ -34,14 +29,14 @@ func NewDaemon(store *kernel.Store) (*Daemon, error) {
 	if store == nil {
 		return nil, fmt.Errorf("%w: nil kernel store", kernel.ErrInvalidValue)
 	}
-	return &Daemon{store: store, now: time.Now, wakes: make(map[kernel.RunID]chan struct{})}, nil
+	return &Daemon{store: store, now: time.Now, attempts: make(map[kernel.RunID]*liveAttempt)}, nil
 }
 
 func newDaemon(store *kernel.Store, now func() time.Time) (*Daemon, error) {
 	if store == nil || now == nil {
 		return nil, fmt.Errorf("%w: invalid daemon", kernel.ErrInvalidValue)
 	}
-	return &Daemon{store: store, now: now, wakes: make(map[kernel.RunID]chan struct{})}, nil
+	return &Daemon{store: store, now: now, attempts: make(map[kernel.RunID]*liveAttempt)}, nil
 }
 
 // HandleConnection synchronously consumes exactly one authenticated request,
@@ -234,8 +229,9 @@ func (daemon *Daemon) proposeOutcome(ctx context.Context, call api.Call) api.Rep
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
-	// The commit completed before ProposeAttemptOutcome returned. The wake is
-	// deliberately best-effort and carries no authority or state payload.
+	// The commit completed before ProposeAttemptOutcome returned. The owner
+	// notification is deliberately best-effort and carries no authority or
+	// state payload; it only shortens the next durable Store poll.
 	daemon.notifyRun(run.ID)
 	return daemon.mutation(ctx, run.Revision)
 }
@@ -288,48 +284,15 @@ func (daemon *Daemon) timestamp() (kernel.UnixMillis, error) {
 	return kernel.NewUnixMillis(daemon.now().UnixMilli())
 }
 
-// registerRunWake returns a capacity-one hint channel. Registering the same
-// run twice returns the original channel; exceeding the bounded index fails
-// without changing durable state.
-func (daemon *Daemon) registerRunWake(runID kernel.RunID) (<-chan struct{}, bool) {
-	if daemon == nil {
-		return nil, false
-	}
-	daemon.wakeMu.Lock()
-	defer daemon.wakeMu.Unlock()
-	if existing := daemon.wakes[runID]; existing != nil {
-		return existing, true
-	}
-	if len(daemon.wakes) >= maxRunWakeEntries {
-		return nil, false
-	}
-	channel := make(chan struct{}, 1)
-	daemon.wakes[runID] = channel
-	return channel, true
-}
-
-func (daemon *Daemon) unregisterRunWake(runID kernel.RunID) {
-	if daemon == nil {
-		return
-	}
-	daemon.wakeMu.Lock()
-	delete(daemon.wakes, runID)
-	daemon.wakeMu.Unlock()
-}
-
 func (daemon *Daemon) notifyRun(runID kernel.RunID) {
 	if daemon == nil {
 		return
 	}
-	daemon.wakeMu.Lock()
-	channel := daemon.wakes[runID]
-	daemon.wakeMu.Unlock()
-	if channel == nil {
-		return
-	}
-	select {
-	case channel <- struct{}{}:
-	default:
+	daemon.attemptMu.Lock()
+	attempt := daemon.attempts[runID]
+	daemon.attemptMu.Unlock()
+	if attempt != nil {
+		attempt.notify()
 	}
 }
 

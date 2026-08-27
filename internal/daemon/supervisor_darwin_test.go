@@ -131,7 +131,7 @@ func TestSupervisorPersistsOuterRunnerExitNotProviderExit(t *testing.T) {
 	fixture.assertOneWitness(t)
 }
 
-func TestSupervisorRereadsStoreWhenWakeIsDropped(t *testing.T) {
+func TestSupervisorRereadsStoreAfterDirectOutcome(t *testing.T) {
 	fixture := newSupervisorFixture(t, supervisorProgram(t, true, true))
 	// Keep the provider alive without an API request. This goroutine owns only
 	// the test observation and is joined before the assertion returns.

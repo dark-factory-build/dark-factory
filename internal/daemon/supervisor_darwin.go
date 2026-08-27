@@ -20,7 +20,6 @@ import (
 )
 
 const (
-	supervisorPollInterval       = 100 * time.Millisecond
 	supervisorReconcileAttempts  = 3
 	supervisorStoreAttemptWindow = 250 * time.Millisecond
 )
@@ -33,12 +32,14 @@ type supervisorKeys struct {
 	token     [32]byte
 }
 
-// supervisorAttemptOwner is the one live outer-runner owner in factoryd. On
-// every nonterminal return it first closes the authenticated controller so the
-// outer runner converges its inner group, then synchronously terminates/waits
-// the outer child. A context or goroutine ending is never treated as cleanup.
+// supervisorAttemptOwner owns the outer runner until the live attempt is
+// registered. After registration, the per-attempt owner loop owns all
+// controller operations; this outer owner only joins that loop and then
+// synchronously terminates/waits the outer child. A context or goroutine
+// ending is never treated as cleanup.
 type supervisorAttemptOwner struct {
 	controller *runner.AttemptController
+	live       *liveAttempt
 	child      *runner.OwnedChild
 	activated  bool
 	reaped     bool
@@ -49,7 +50,11 @@ func (owner *supervisorAttemptOwner) close() error {
 		return nil
 	}
 	var terminationErr, controllerErr error
-	if owner.controller != nil {
+	if owner.live != nil {
+		controllerErr = owner.live.close()
+		owner.live = nil
+		owner.controller = nil
+	} else if owner.controller != nil {
 		// A released provider belongs to the inner attempt runner's distinct
 		// process group. Ask that live owner to converge it before dropping the
 		// control capability; killing only the outer group cannot prove absence.
@@ -396,11 +401,6 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	if err != nil {
 		return daemon.failRun(run, kernel.FailureSource, err)
 	}
-	wake, registered := daemon.registerRunWake(run.ID)
-	if !registered {
-		return daemon.failRun(run, kernel.FailureInternal, fmt.Errorf("%w: supervisor wake registry is full", kernel.ErrBusy))
-	}
-	defer daemon.unregisterRunWake(run.ID)
 	at, err = daemon.timestamp()
 	if err != nil {
 		return daemon.failRun(run, kernel.FailureInternal, err)
@@ -416,6 +416,16 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	if err != nil {
 		return daemon.failRun(run, kernel.FailureActivation, err)
 	}
+	// Register the owner before provider release. The owner is not attachable
+	// until it observes TerminalReady, but it already owns the controller and
+	// will synchronously converge it if any later step fails.
+	live := newLiveAttempt(daemon, run.ID, session.ID, controller)
+	if err := daemon.registerLiveAttempt(live); err != nil {
+		return daemon.failRun(run, kernel.FailureInternal, err)
+	}
+	startLiveAttempt(live, ctx)
+	owner.live = live
+	owner.controller = nil
 	if spec.beforeProviderRelease != nil {
 		spec.beforeProviderRelease()
 	}
@@ -430,7 +440,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	// The controller write is the irreversible effect immediately following the
 	// cancellation decision. Test-only acknowledgement loss is injected only
 	// after this write, so a hook cannot stand in for or delay provider release.
-	if err := controller.Release(runner.StageProvider); err != nil {
+	if err := live.releaseProvider(ctx); err != nil {
 		return daemon.failRun(run, kernel.FailureProtocol, err)
 	}
 	if spec.afterProviderRelease != nil {
@@ -439,7 +449,8 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		}
 	}
 
-	terminalEvent, waitErr := daemon.awaitTerminal(ctx, run.ID, wake, controller)
+	terminalResult := live.waitTerminal()
+	terminalEvent, waitErr := terminalResult.event, terminalResult.err
 	if terminalEvent.Kind != runner.AttemptTerminal || terminalEvent.Terminal == nil {
 		return daemon.failRun(run, kernel.FailureProtocol, waitErr)
 	}
@@ -473,7 +484,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	if err := daemon.releaseResources(context.Background(), run.ID, kernel.ResourceProviderProcess, kernel.ResourceProviderGroup); err != nil {
 		return run, err
 	}
-	if err := controller.AcknowledgeTerminal(terminalEvent.Terminal, true); err != nil {
+	if err := live.acknowledge(context.Background(), terminalEvent.Terminal); err != nil {
 		return run, err
 	}
 	outerExit, err := child.FinishAfterExit(8 * time.Second)
@@ -500,10 +511,10 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		return run, err
 	}
 	owner.child = nil
-	if err := controller.Close(); err != nil {
+	if err := live.join(); err != nil {
 		return run, err
 	}
-	owner.controller = nil
+	owner.live = nil
 	if err := lease.Close(); err != nil {
 		return run, err
 	}
@@ -734,66 +745,6 @@ func (daemon *Daemon) releaseResources(ctx context.Context, runID kernel.RunID, 
 		}
 	}
 	return nil
-}
-
-func (daemon *Daemon) awaitTerminal(ctx context.Context, runID kernel.RunID, wake <-chan struct{}, controller *runner.AttemptController) (runner.AttemptEvent, error) {
-	terminated := false
-	cancelled := false
-	finalizingObserved := false
-	for {
-		select {
-		case <-wake:
-		case <-ctx.Done():
-			cancelled = true
-		default:
-		}
-		current, found, err := daemon.store.Run(context.Background(), runID)
-		if err != nil {
-			return runner.AttemptEvent{}, err
-		}
-		if !found {
-			return runner.AttemptEvent{}, kernel.ErrCorruptState
-		}
-		if (cancelled || current.Phase == kernel.RunFinalizing && finalizingObserved) && !terminated {
-			if err := controller.Terminate(); err != nil {
-				return runner.AttemptEvent{}, err
-			}
-			terminated = true
-		}
-		if current.Phase == kernel.RunFinalizing {
-			// Give an attempt that just committed its outcome one bounded readiness
-			// interval to exit naturally. The next Store reread terminates it if it
-			// remains live; cancellation never receives this grace interval.
-			finalizingObserved = true
-		}
-		ready, err := controller.NextReady(supervisorPollInterval)
-		if err != nil {
-			return runner.AttemptEvent{}, err
-		}
-		if !ready {
-			continue
-		}
-		event, err := controller.Next(8 * time.Second)
-		if err != nil {
-			return runner.AttemptEvent{}, err
-		}
-		if event.Kind == runner.AttemptTerminalFrame {
-			// PTY output, EOF, replay/reset and typed terminal results are
-			// observations of the live owner. They are not final evidence and
-			// must be consumed before awaiting the durable terminal record.
-			if event.Frame == nil {
-				return runner.AttemptEvent{}, runner.ErrState
-			}
-			continue
-		}
-		if event.Kind != runner.AttemptTerminal || event.Terminal == nil {
-			return runner.AttemptEvent{}, runner.ErrState
-		}
-		if cancelled {
-			return event, ctx.Err()
-		}
-		return event, nil
-	}
 }
 
 func kernelProcessExit(exit runner.Exit, at kernel.UnixMillis) (kernel.ProcessExit, error) {
