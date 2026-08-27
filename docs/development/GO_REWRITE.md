@@ -997,10 +997,14 @@ WebSocket frames and are never base64 JSON. V1 explicitly covers:
 HELLO / PAIR_PROVE / PAIR_RESULT / AUTH_PROVE / AUTH_RESULT
 STATE_GET / STATE_SNAPSHOT / STATE_RESTART
 STATE_SUBSCRIBE / STATE_EVENT / STATE_ENTITY_GET / STATE_ENTITY
-HUMAN_REQUEST_DETAIL_GET / HUMAN_REQUEST_DETAIL / HUMAN_REQUEST_REPLY
+HUMAN_REQUEST_DETAIL_GET / HUMAN_REQUEST_DETAIL
+HUMAN_REQUEST_REPLY / HUMAN_REQUEST_REPLY_RESULT
+HUMAN_REQUEST_CANCEL_RUN / HUMAN_REQUEST_ACTION_RESULT
 TERMINAL_ATTACH / TERMINAL_ATTACHED / TERMINAL_ACK
 TERMINAL_LEASE_ACQUIRE / TERMINAL_LEASE_RENEW / TERMINAL_LEASE_RELEASE
-TERMINAL_RESIZE / TERMINAL_DETACH / TERMINAL_EXIT / TERMINAL_RESET
+TERMINAL_LEASE_RESULT / TERMINAL_RESIZE / TERMINAL_RESIZED
+TERMINAL_DETACH / TERMINAL_DETACHED / TERMINAL_INPUT_RESULT
+TERMINAL_EOF / TERMINAL_EXIT / TERMINAL_RESET
 ERROR
 ```
 
@@ -1088,6 +1092,39 @@ The source of truth stays deliberately small:
 This avoids a general schema/code-generation framework while satisfying the
 rule that a Go protocol change cannot pass with a silently incompatible
 TypeScript client.
+
+The shared-contract commit adds these exact manifest entries. “Attach ID” is
+the original required `TERMINAL_ATTACH` envelope ID reused for repeated events
+only while that one connection-local attachment exists; it is not a backend or
+durable identity.
+
+| Type | Direction | Envelope ID | Fixture |
+|---|---|---|---|
+| `HUMAN_REQUEST_REPLY` | client | required request ID | `human_request_reply.json` |
+| `HUMAN_REQUEST_REPLY_RESULT` | server | required matching request ID | `human_request_reply_result.json` |
+| `HUMAN_REQUEST_CANCEL_RUN` | client | required request ID | `human_request_cancel_run.json` |
+| `HUMAN_REQUEST_ACTION_RESULT` | server | required matching request ID | `human_request_action_result.json` |
+| `TERMINAL_ATTACH` | client | required request/attachment ID | `terminal_attach.json` |
+| `TERMINAL_ATTACHED` | server | required matching attach ID | `terminal_attached.json` |
+| `TERMINAL_ACK` | client | forbidden | `terminal_ack.json` |
+| `TERMINAL_LEASE_ACQUIRE` | client | required request ID | `terminal_lease_acquire.json` |
+| `TERMINAL_LEASE_RENEW` | client | required request ID | `terminal_lease_renew.json` |
+| `TERMINAL_LEASE_RELEASE` | client | required request ID | `terminal_lease_release.json` |
+| `TERMINAL_LEASE_RESULT` | server | required matching request ID | `terminal_lease_result.json` |
+| `TERMINAL_RESIZE` | client | required request ID | `terminal_resize.json` |
+| `TERMINAL_RESIZED` | server | required matching request ID | `terminal_resized.json` |
+| `TERMINAL_DETACH` | client | required request ID | `terminal_detach.json` |
+| `TERMINAL_DETACHED` | server | required matching request ID | `terminal_detached.json` |
+| `TERMINAL_INPUT_RESULT` | server | required attach ID | `terminal_input_result.json` |
+| `TERMINAL_EOF` | server | required attach ID | `terminal_eof.json` |
+| `TERMINAL_EXIT` | server | required attach ID | `terminal_exit.json` |
+| `TERMINAL_RESET` | server | required attach ID | `terminal_reset.json` |
+
+Each manifest row maps to exactly one role-specific Go codec case, one checked
+golden fixture and one TypeScript registry case. An ordinary response ID appears
+once; an attach ID may repeat only on `TERMINAL_INPUT_RESULT`, `TERMINAL_EOF`,
+`TERMINAL_EXIT` and `TERMINAL_RESET` for that live attachment. Detach or reset
+retires it, and a later attachment requires a fresh request ID.
 
 ### Browser terminal wire pre-implementation audit
 
@@ -1187,13 +1224,14 @@ TERMINAL_RESET { session_id, floor, head }   # attach ID; detach follows
 ```
 
 All identifiers are exact lower-case 16-byte hex; revisions, generations,
-sequences, timestamps, byte counts and dimensions use their existing bounded
-decimal wire forms. Reply is bounded UTF-8 text, not terminal bytes. The only
-action is the literal `cancel_run`; it has no argument bag. Lease results never
-identify another client and a released result omits expiry. Attach authorizes
-observation with the exact Principal and revalidates the running run, active
-session and supplied revisions under the same daemon operation gate that
-installs the live observer.
+sequences, timestamps and byte counts use their existing bounded decimal wire
+forms. Rows and columns are integers in the closed range 1 through 4,096.
+Reply is bounded UTF-8 text, not terminal bytes. The only action is the literal
+`cancel_run`; it has no argument bag. Lease results never identify another
+client and a released result omits expiry. Attach authorizes observation with
+the exact Principal and revalidates the running run, active session and
+supplied revisions under the same daemon operation gate that installs the live
+observer.
 
 Binary client frames carry exact session, positive lease generation, strictly
 next input sequence and at most 8 KiB of bytes. Binary server frames carry the
@@ -1220,6 +1258,14 @@ reopens by the acknowledged byte delta. Lost credit never blocks the daemon or
 PTY: the existing attachment queue stays bounded, and the connection
 synchronously detaches/closes when the ACK deadline expires. A reset or close
 discards credit state; a new attach begins a new correlation.
+
+Memory remains explicit across the two distinct links. The daemon attachment
+queue is the existing 64-event queue, so its absolute output-payload ceiling is
+512 KiB; replay staging remains independently capped at 256 KiB inside the live
+attempt. The browser connection adds no payload queue: its 64 KiB unacknowledged
+window plus at most one selected 8 KiB event is the entire adapter-owned byte
+budget. Payload slices may be shared read-only until the WebSocket write
+returns, then released. Tests census both the event and byte bounds.
 
 One authenticated connection owner selects its WebSocket input, state watch
 and the attachment's existing bounded event queue. It owns at most one terminal
