@@ -76,6 +76,7 @@ func TestTerminalCommandAndEventFramesRoundTrip(t *testing.T) {
 		{Kind: TerminalCredit, Credit: 4096},
 		{Kind: TerminalInput, Correlation: 5, Generation: 2, Sequence: 1, Payload: []byte("input")},
 		{Kind: TerminalResize, Correlation: 6, Generation: 2, Rows: 24, Cols: 80},
+		{Kind: TerminalHumanReply, Correlation: 7, Payload: []byte("reply without newline")},
 	}
 	for _, want := range commands {
 		if err := want.validate(); err != nil {
@@ -99,6 +100,9 @@ func TestTerminalCommandAndEventFramesRoundTrip(t *testing.T) {
 		{Kind: TerminalGenerationResult, Correlation: 7, Generation: 2, Status: TerminalResultOK},
 		{Kind: TerminalInputResult, Correlation: 8, Generation: 2, Sequence: 1, Status: TerminalResultPartial, Count: 3},
 		{Kind: TerminalResizeResult, Correlation: 9, Generation: 2, Rows: 24, Cols: 80, Status: TerminalResultOK},
+		{Kind: TerminalHumanReplyResult, Correlation: 13, Status: TerminalResultOK, Count: 20},
+		{Kind: TerminalHumanReplyResult, Correlation: 14, Status: TerminalResultPartial, Count: 3},
+		{Kind: TerminalHumanReplyResult, Correlation: 15, Status: TerminalResultUncertain},
 		{Kind: TerminalAttached, Correlation: 10, Sequence: 12, Floor: 10, Head: 15, Status: TerminalResultOK},
 		{Kind: TerminalOutput, Start: 10, End: 15, Payload: []byte("hello")},
 		{Kind: TerminalOutput, Correlation: 11, Start: 10, End: 15, Payload: []byte("hello")},
@@ -131,6 +135,10 @@ func TestTerminalWireValidationRejectsAmbiguousFrames(t *testing.T) {
 		{Kind: TerminalResize, Correlation: 1, Generation: 1, Rows: 0, Cols: 80},
 		{Kind: TerminalCredit, Credit: maxTerminalCredit + 1},
 		{Kind: TerminalInput, Correlation: 1, Generation: 1, Sequence: 1, Payload: bytes.Repeat([]byte{'x'}, maxTerminalFramePayload+1)},
+		{Kind: TerminalHumanReply, Correlation: 1, Payload: bytes.Repeat([]byte{'x'}, maxTerminalFramePayload+1)},
+		{Kind: TerminalHumanReply, Correlation: 1, Generation: 1, Payload: []byte("reply")},
+		{Kind: TerminalHumanReply, Correlation: 1, Sequence: 1, Payload: []byte("reply")},
+		{Kind: TerminalHumanReply, Correlation: 1, Payload: nil},
 		{Kind: "terminal-unknown", Correlation: 1},
 		{Kind: TerminalResize, Correlation: 1, Generation: 1, Rows: 4097, Cols: 80},
 	}
@@ -148,6 +156,9 @@ func TestTerminalWireValidationRejectsAmbiguousFrames(t *testing.T) {
 		{Kind: TerminalReset, Correlation: 1, Generation: 1, Floor: 3, Head: 2},
 		{Kind: TerminalGenerationResult, Correlation: 1, Generation: 1, Status: "unknown"},
 		{Kind: TerminalPTYEOF, Generation: 1, Payload: []byte("unexpected")},
+		{Kind: TerminalHumanReplyResult, Correlation: 1, Generation: 1, Status: TerminalResultOK},
+		{Kind: TerminalHumanReplyResult, Correlation: 1, Status: "unknown"},
+		{Kind: TerminalHumanReplyResult, Correlation: 1, Status: TerminalResultOK, Count: maxTerminalFramePayload + 1},
 		{Kind: "terminal-unknown", Generation: 1},
 	}
 	for _, event := range badEvents {
@@ -214,7 +225,7 @@ func TestTerminalCreditIsAggregateAndResponseCommandsNeedCorrelation(t *testing.
 	if err := (TerminalCommand{Kind: TerminalCredit, Correlation: 1, Credit: 1}).validate(); err == nil {
 		t.Fatal("credit with response correlation accepted")
 	}
-	for _, kind := range []TerminalCommandKind{TerminalGenerationInstall, TerminalGenerationRevoke, TerminalAttach, TerminalInput, TerminalResize} {
+	for _, kind := range []TerminalCommandKind{TerminalGenerationInstall, TerminalGenerationRevoke, TerminalAttach, TerminalInput, TerminalResize, TerminalHumanReply} {
 		command := TerminalCommand{Kind: kind}
 		switch kind {
 		case TerminalGenerationInstall, TerminalGenerationRevoke:
@@ -225,6 +236,8 @@ func TestTerminalCreditIsAggregateAndResponseCommandsNeedCorrelation(t *testing.
 			command.Generation, command.Sequence, command.Payload = 1, 1, []byte("x")
 		case TerminalResize:
 			command.Generation, command.Rows, command.Cols = 1, 24, 80
+		case TerminalHumanReply:
+			command.Payload = []byte("reply")
 		}
 		if err := command.validate(); err == nil {
 			t.Fatalf("response command %q without correlation accepted", kind)

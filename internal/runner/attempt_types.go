@@ -48,6 +48,7 @@ const (
 	TerminalCredit            TerminalCommandKind = "terminal-credit"
 	TerminalInput             TerminalCommandKind = "terminal-input"
 	TerminalResize            TerminalCommandKind = "terminal-resize"
+	TerminalHumanReply        TerminalCommandKind = "terminal-human-reply"
 )
 
 type TerminalEventKind string
@@ -61,6 +62,7 @@ const (
 	TerminalReset            TerminalEventKind = "terminal-reset"
 	TerminalReady            TerminalEventKind = "terminal-ready"
 	TerminalPTYEOF           TerminalEventKind = "terminal-pty-eof"
+	TerminalHumanReplyResult TerminalEventKind = "terminal-human-reply-result"
 )
 
 type TerminalResultStatus string
@@ -139,6 +141,14 @@ func (c TerminalCommand) validate() error {
 		if !validTerminalCorrelation(c.Correlation) || c.Generation == 0 || c.Sequence == 0 || len(c.Payload) == 0 || len(c.Payload) > maxTerminalFramePayload || c.Credit != 0 || c.Rows != 0 || c.Cols != 0 {
 			return ErrState
 		}
+	case TerminalHumanReply:
+		// A human reply is daemon-authorized separately from the browser's
+		// terminal lease. It deliberately carries no generation or sequence:
+		// the daemon has already resolved the exact HumanRequest/run before
+		// sending this one-shot payload to its owner.
+		if !validTerminalCorrelation(c.Correlation) || c.Generation != 0 || c.Sequence != 0 || c.Credit != 0 || c.Rows != 0 || c.Cols != 0 || len(c.Payload) == 0 || len(c.Payload) > maxTerminalFramePayload {
+			return ErrState
+		}
 	case TerminalResize:
 		if !validTerminalCorrelation(c.Correlation) || c.Generation == 0 || c.Rows == 0 || c.Rows > maxTerminalDimension || c.Cols == 0 || c.Cols > maxTerminalDimension || c.Sequence != 0 || c.Credit != 0 || len(c.Payload) != 0 {
 			return ErrState
@@ -157,6 +167,10 @@ func (f TerminalFrame) validate() error {
 		}
 	case TerminalInputResult:
 		if f.Correlation == 0 || f.Correlation > maxTerminalCorrelation || f.Generation == 0 || f.Sequence == 0 || !validTerminalResult(f.Status) || f.Start != 0 || f.End != 0 || f.Floor != 0 || f.Head != 0 || f.Rows != 0 || f.Cols != 0 || f.Count > maxTerminalFramePayload || len(f.Payload) != 0 {
+			return ErrState
+		}
+	case TerminalHumanReplyResult:
+		if f.Correlation == 0 || f.Correlation > maxTerminalCorrelation || f.Generation != 0 || f.Sequence != 0 || f.Start != 0 || f.End != 0 || f.Floor != 0 || f.Head != 0 || f.Rows != 0 || f.Cols != 0 || !validTerminalResult(f.Status) || f.Count > maxTerminalFramePayload || len(f.Payload) != 0 {
 			return ErrState
 		}
 	case TerminalResizeResult:

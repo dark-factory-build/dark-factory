@@ -164,6 +164,50 @@ func TestTerminalOwnerPostEOFStaleAttachResets(t *testing.T) {
 	}
 }
 
+func TestTerminalOwnerHumanReplyIsRejectedAfterEOFWithoutPTYEffect(t *testing.T) {
+	daemon, peer, err := newControlPair("terminal-owner-reply-eof", "terminal-peer-reply-eof")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peer.Close()
+	defer daemon.Close()
+	owner := &terminalOwner{daemon: daemon, daemonOpen: true, ptyDrained: true}
+	if err := owner.emitPTYEOF(); err != nil {
+		t.Fatal(err)
+	}
+	if got := readOwnerFrame(t, peer); got.Kind != TerminalPTYEOF {
+		t.Fatalf("EOF frame = %+v", got)
+	}
+	command := TerminalCommand{Kind: TerminalHumanReply, Correlation: 31, Payload: []byte("reply")}
+	if err := owner.command(terminalCommandFrame(command)); err != nil {
+		t.Fatal(err)
+	}
+	got := readOwnerFrame(t, peer)
+	if got.Kind != TerminalHumanReplyResult || got.Correlation != command.Correlation || got.Status != TerminalResultRejected || got.Count != 0 || got.Generation != 0 || got.Sequence != 0 {
+		t.Fatalf("post-EOF reply result = %+v", got)
+	}
+}
+
+func TestTerminalPayloadResultPreservesExactWriteOutcome(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		written int
+		err     error
+		status  TerminalResultStatus
+	}{
+		{name: "complete", written: 5, status: TerminalResultOK},
+		{name: "partial", written: 2, err: io.ErrUnexpectedEOF, status: TerminalResultPartial},
+		{name: "uncertain", written: 0, err: os.ErrDeadlineExceeded, status: TerminalResultUncertain},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			count, status := terminalPayloadResult(test.written, 5, test.err)
+			if count != uint32(test.written) || status != test.status {
+				t.Fatalf("result=(%d,%q), want=(%d,%q)", count, status, test.written, test.status)
+			}
+		})
+	}
+}
+
 func TestTerminalOwnerWriteFailurePoisonsDaemonCapability(t *testing.T) {
 	daemon, peer, err := newControlPair("terminal-owner", "terminal-peer")
 	if err != nil {

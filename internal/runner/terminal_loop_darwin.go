@@ -311,6 +311,8 @@ func (o *terminalOwner) command(raw attemptFrame) error {
 		return o.input(command)
 	case TerminalResize:
 		return o.resize(command)
+	case TerminalHumanReply:
+		return o.humanReply(command)
 	default:
 		return ErrState
 	}
@@ -369,20 +371,51 @@ func (o *terminalOwner) input(c TerminalCommand) error {
 	if !o.inputActive || c.Generation != o.generation || c.Sequence != o.nextInput {
 		status = TerminalResultRejected
 	} else {
-		n, err := o.child.writePTYOwned(c.Payload)
-		count = uint32(n)
-		if err != nil || n != len(c.Payload) {
+		count, status = o.writeTerminalPayload(c.Payload)
+		if status != TerminalResultOK {
 			o.inputActive = false
-			if n > 0 {
-				status = TerminalResultPartial
-			} else {
-				status = TerminalResultUncertain
-			}
 		} else {
 			o.nextInput++
 		}
 	}
 	return o.send(TerminalFrame{Kind: TerminalInputResult, Correlation: c.Correlation, Generation: c.Generation, Sequence: c.Sequence, Count: count, Status: status})
+}
+
+// humanReply is a daemon-authorized one-shot write for an exact durable
+// HumanRequest. It intentionally bypasses browser generation/sequence checks,
+// but shares the sole owner-only PTY write primitive and its fail-closed
+// result mapping with terminal input. The payload is written byte-for-byte;
+// this path never appends a newline or retries a partial write.
+func (o *terminalOwner) humanReply(c TerminalCommand) error {
+	count, status := o.writeTerminalPayload(c.Payload)
+	return o.send(TerminalFrame{Kind: TerminalHumanReplyResult, Correlation: c.Correlation, Count: count, Status: status})
+}
+
+func (o *terminalOwner) writeTerminalPayload(payload []byte) (uint32, TerminalResultStatus) {
+	if o == nil || o.stopRequested || o.ptyEOF || !o.ptyOpen || o.child == nil {
+		return 0, TerminalResultRejected
+	}
+	n, err := o.child.writePTYOwned(payload)
+	count, status := terminalPayloadResult(n, len(payload), err)
+	if status == TerminalResultOK {
+		return count, status
+	}
+	// A partial or uncertain write is an irreversible operation boundary. Do
+	// not retry or write a suffix; the caller receives the exact count and must
+	// decide how to recover. Browser input separately loses its generation
+	// authority in input, while daemon-authorized HumanRequest delivery remains
+	// a distinct deliberate operation.
+	return count, status
+}
+
+func terminalPayloadResult(written, total int, err error) (uint32, TerminalResultStatus) {
+	if written == total && err == nil {
+		return uint32(written), TerminalResultOK
+	}
+	if written > 0 {
+		return uint32(written), TerminalResultPartial
+	}
+	return 0, TerminalResultUncertain
 }
 
 func (o *terminalOwner) resize(c TerminalCommand) error {

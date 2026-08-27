@@ -184,7 +184,7 @@ func (c *AttemptController) Next(timeout time.Duration) (AttemptEvent, error) {
 
 func isTerminalEventKind(kind string) bool {
 	switch TerminalEventKind(kind) {
-	case TerminalGenerationResult, TerminalInputResult, TerminalResizeResult, TerminalAttached, TerminalOutput, TerminalReset, TerminalReady, TerminalPTYEOF:
+	case TerminalGenerationResult, TerminalInputResult, TerminalResizeResult, TerminalHumanReplyResult, TerminalAttached, TerminalOutput, TerminalReset, TerminalReady, TerminalPTYEOF:
 		return true
 	default:
 		return false

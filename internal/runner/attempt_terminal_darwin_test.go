@@ -98,6 +98,28 @@ func TestAttemptControllerTerminalCommandsRequireProviderRelease(t *testing.T) {
 	}
 }
 
+func TestAttemptControllerHumanReplyUsesOnlyItsCorrelationAndPayload(t *testing.T) {
+	controller, peer, err := NewAttemptController()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controller.Close()
+	defer peer.Close()
+	controller.state = controllerProviderReleased
+	controller.terminalReady = true
+	want := TerminalCommand{Kind: TerminalHumanReply, Correlation: 27, Payload: []byte("exact reply")}
+	if err := controller.SendTerminalCommand(want); err != nil {
+		t.Fatal(err)
+	}
+	var got attemptFrame
+	if err := readFrame(peer, &got, maxFrameBytes); err != nil {
+		t.Fatal(err)
+	}
+	if got.Kind != string(TerminalHumanReply) || got.Correlation != want.Correlation || string(got.Payload) != string(want.Payload) || got.Generation != 0 || got.Sequence != 0 || got.Credit != 0 || got.Rows != 0 || got.Cols != 0 {
+		t.Fatalf("human reply frame = %+v", got)
+	}
+}
+
 func TestAttemptControllerTerminalEventsInterleaveWithoutLifecycleMutation(t *testing.T) {
 	controller, peer, err := NewAttemptController()
 	if err != nil {
@@ -180,6 +202,7 @@ func TestEveryDeclaredTerminalEventKindIsHandled(t *testing.T) {
 		TerminalGenerationResult,
 		TerminalInputResult,
 		TerminalResizeResult,
+		TerminalHumanReplyResult,
 		TerminalAttached,
 		TerminalOutput,
 		TerminalReset,

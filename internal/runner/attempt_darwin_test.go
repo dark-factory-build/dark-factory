@@ -3,6 +3,7 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -78,7 +79,7 @@ func runAttemptWorkerHelper(args []string) error {
 	var provider ExecSpec
 	var initialInput []byte
 	switch mode {
-	case "shell", "term", "leader", "tail":
+	case "shell", "term", "leader", "tail", "reply":
 		script := fmt.Sprintf("test -z \"${HOME+x}\" || exit 90; test -z \"${DARK_FACTORY_ATTEMPT_TOKEN+x}\" || exit 91; for n in 3 4 5 6 7 8 9 11; do test ! -e /dev/fd/$n || exit 92; done; test -f /dev/fd/10 || exit 93; test ! -s /dev/fd/10 || exit 94; cat /dev/fd/10/change-worker.config >/dev/null 2>&1 && exit 95; cd /dev/fd/10 >/dev/null 2>&1 && exit 96; printf '%%s' $$ > %q; printf 'pre-output\\n'; while test ! -f %q; do sleep 0.01; done; printf 'post-output\\n'; printf x >> %q; while test ! -f %q; do sleep 0.01; done; IFS= read -r line; printf '%%s' \"$line\" > %q", filepath.Join(root, "provider.pid"), filepath.Join(root, "continue"), filepath.Join(root, "provider.effect"), filepath.Join(root, "finish"), filepath.Join(root, "provider.stdin"))
 		if mode == "term" {
 			script = fmt.Sprintf("trap '' TERM; sleep 30 & printf '%%s' $! > %q; printf '%%s' $$ > %q; while :; do sleep 1; done", filepath.Join(root, "descendant.pid"), filepath.Join(root, "provider.pid"))
@@ -89,7 +90,12 @@ func runAttemptWorkerHelper(args []string) error {
 		if mode == "tail" {
 			script = "printf 'tail-output\\n'; exit 0"
 		}
-		initialInput = []byte("one-startup\n")
+		if mode == "reply" {
+			script = fmt.Sprintf("printf '%%s' $$ > %q; printf 'pre-output\\n'; while test ! -f %q; do sleep 0.01; done; printf 'post-output\\n'; stty -icanon -echo min 1 time 0; dd if=/dev/stdin bs=12 count=1 2>/dev/null > %q; while test ! -f %q; do sleep 0.01; done", filepath.Join(root, "provider.pid"), filepath.Join(root, "continue"), filepath.Join(root, "provider.reply"), filepath.Join(root, "finish"))
+			initialInput = nil
+		} else {
+			initialInput = []byte("one-startup\n")
+		}
 		provider = ExecSpec{Target: "/bin/sh", Args: []string{"-c", script}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: providerCwd}
 	case "binary", "seam", "lifetime", "lease-seam", "cwd", "cwd-seam", "cwd-unrelated", "cwd-file", "cwd-closed", "cwd-reused", "cwd-mode":
 		if len(args) != 3 {
@@ -545,6 +551,63 @@ func TestAttemptRunnerPTYTerminalOwnerCommandsAndReplay(t *testing.T) {
 	if _, err := f.outer.FinishAfterExit(6 * time.Second); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestAttemptRunnerHumanReplyWritesExactBytesOnce(t *testing.T) {
+	f := newAttemptFixture(t, "reply", "")
+	f.activateOuter()
+	f.advanceToProvider()
+	if err := f.controller.Release(StageProvider); err != nil {
+		t.Fatal(err)
+	}
+	if event, err := f.controller.Next(4 * time.Second); err != nil || event.Kind != AttemptTerminalFrame || event.Frame == nil || event.Frame.Kind != TerminalReady {
+		t.Fatalf("terminal ready=%+v err=%v", event, err)
+	}
+
+	// HumanRequest delivery has its own daemon authority. It must not require
+	// a browser generation or sequence and must reach the PTY byte-for-byte.
+	payload := []byte("human-reply!")
+	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalHumanReply, Correlation: 41, Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		event, err := f.controller.Next(4 * time.Second)
+		if err != nil {
+			t.Fatalf("human reply=%+v err=%v", event, err)
+		}
+		if event.Kind != AttemptTerminalFrame || event.Frame == nil {
+			t.Fatalf("human reply=%+v", event)
+		}
+		if event.Frame.Kind != TerminalHumanReplyResult {
+			continue
+		}
+		if event.Frame.Correlation != 41 || event.Frame.Status != TerminalResultOK || event.Frame.Count != uint32(len(payload)) || event.Frame.Generation != 0 || event.Frame.Sequence != 0 {
+			t.Fatalf("human reply result=%+v", event.Frame)
+		}
+		break
+	}
+
+	if err := os.WriteFile(filepath.Join(f.root, "continue"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	replyPath := filepath.Join(f.root, "provider.reply")
+	deadline := time.Now().Add(4 * time.Second)
+	var received []byte
+	var err error
+	for {
+		received, err = os.ReadFile(replyPath)
+		if err == nil && bytes.Equal(received, payload) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("provider received %q err=%v, want exact %q", received, err, payload)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := os.WriteFile(filepath.Join(f.root, "finish"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.finishAndAck()
 }
 
 func TestAttemptRunnerPTYEOFFollowsQueuedTailOutput(t *testing.T) {
