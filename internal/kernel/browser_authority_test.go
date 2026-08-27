@@ -34,7 +34,7 @@ func browserTestBoot(t *testing.T, first byte) BootID {
 
 func TestBrowserPairingConsumesAndDerivesIdentity(t *testing.T) {
 	ctx := context.Background()
-	store, err := Create(ctx, filepath.Join(t.TempDir(), "kernel.db"), FactoryConfig{}, UnixMillis{})
+	store, err := createTestStore(ctx, filepath.Join(t.TempDir(), "kernel.db"), FactoryConfig{}, UnixMillis{})
 	if err != nil {
 		t.Fatal(err)
 	}

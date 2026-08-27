@@ -198,7 +198,7 @@ func TestConcreteStoreAmbiguousBeginAndCommitAreNotReplayed(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			path := t.TempDir() + "/kernel.db"
-			store, err := Create(context.Background(), path, FactoryConfig{}, mustTime(t, 1))
+			store, err := createTestStore(context.Background(), path, FactoryConfig{}, mustTime(t, 1))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -232,7 +232,7 @@ func TestConcreteStoreAmbiguousRollbackDiscardsWriterAndState(t *testing.T) {
 	}{{"before apply", storeFaultRollbackBefore}, {"after apply", storeFaultRollbackAfter}} {
 		t.Run(test.name, func(t *testing.T) {
 			path := t.TempDir() + "/kernel.db"
-			store, err := Create(context.Background(), path, FactoryConfig{}, mustTime(t, 1))
+			store, err := createTestStore(context.Background(), path, FactoryConfig{}, mustTime(t, 1))
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -50,7 +50,7 @@ func newDispatchFixture(t *testing.T) *dispatchFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := kernel.Create(context.Background(), databasePath, kernel.FactoryConfig{Capacity: 2}, initial)
+	store, err := createTestStore(context.Background(), databasePath, kernel.FactoryConfig{Capacity: 2}, initial)
 	if err != nil {
 		t.Fatal(err)
 	}

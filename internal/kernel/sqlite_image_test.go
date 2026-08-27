@@ -4,20 +4,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"io"
-	"math"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 
-	sqliteIO "github.com/ncruces/go-sqlite3/util/ioutil"
-	"github.com/ncruces/go-sqlite3/vfs/readervfs"
 	"golang.org/x/sys/unix"
 )
 
@@ -450,7 +444,7 @@ func TestDatabaseFileBindingsAreRecheckedAfterPreflight(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer files.Close()
-		if err := preflightExisting(context.Background(), files); err != nil {
+		if _, err := preflightExisting(context.Background(), files); err != nil {
 			t.Fatal(err)
 		}
 		moved := path + ".old"
@@ -470,7 +464,7 @@ func TestDatabaseFileBindingsAreRecheckedAfterPreflight(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer files.Close()
-		if err := preflightExisting(context.Background(), files); err != nil {
+		if _, err := preflightExisting(context.Background(), files); err != nil {
 			t.Fatal(err)
 		}
 		writeSidecar(t, path+"-journal", []byte("appeared"), 0o600)
@@ -486,7 +480,8 @@ func TestDatabaseFileBindingsAreRecheckedAfterPreflight(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer files.Close()
-		if err := preflightExisting(context.Background(), files); err != nil {
+		snapshot, err := preflightExisting(context.Background(), files)
+		if err != nil {
 			t.Fatal(err)
 		}
 		file, err := os.OpenFile(path, os.O_WRONLY, 0)
@@ -498,18 +493,98 @@ func TestDatabaseFileBindingsAreRecheckedAfterPreflight(t *testing.T) {
 			t.Fatal(err)
 		}
 		file.Close()
-		if err := files.recheckPaths(); !errors.Is(err, ErrCorruptState) {
-			t.Fatalf("in-place main mutation recheck error = %v", err)
+		if err := files.verifySnapshot(context.Background(), snapshot); !errors.Is(err, errDatabaseSnapshotChanged) {
+			t.Fatalf("in-place main mutation snapshot error = %v", err)
+		}
+	})
+
+	for name, suffix := range map[string]string{"WAL main changed in place": "", "WAL changed in place": "-wal", "SHM changed in place": "-shm"} {
+		t.Run(name, func(t *testing.T) {
+			path, _ := walSnapshotFixture(t, "")
+			files, err := openDatabaseFiles(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer files.Close()
+			snapshot, err := preflightExisting(context.Background(), files)
+			if err != nil {
+				t.Fatal(err)
+			}
+			file, err := os.OpenFile(path+suffix, os.O_RDWR, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			offset := int64(0)
+			if suffix == "" {
+				offset = 4096
+			} else if suffix == "-wal" {
+				offset = walHeaderSize
+			}
+			original := []byte{0}
+			if _, err := file.ReadAt(original, offset); err != nil {
+				file.Close()
+				t.Fatal(err)
+			}
+			if _, err := file.WriteAt([]byte{original[0] ^ 0xff}, offset); err != nil {
+				file.Close()
+				t.Fatal(err)
+			}
+			if err := file.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := files.verifySnapshot(context.Background(), snapshot); !errors.Is(err, errDatabaseSnapshotChanged) {
+				t.Fatalf("in-place %q mutation snapshot error = %v", suffix, err)
+			}
+		})
+	}
+
+	t.Run("WAL length changed in place", func(t *testing.T) {
+		path, _ := walSnapshotFixture(t, "")
+		files, err := openDatabaseFiles(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer files.Close()
+		snapshot, err := preflightExisting(context.Background(), files)
+		if err != nil {
+			t.Fatal(err)
+		}
+		file, err := os.OpenFile(path+"-wal", os.O_WRONLY|os.O_APPEND, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := file.Write([]byte{0}); err != nil {
+			file.Close()
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := files.verifySnapshot(context.Background(), snapshot); !errors.Is(err, errDatabaseSnapshotChanged) {
+			t.Fatalf("in-place WAL length mutation snapshot error = %v", err)
 		}
 	})
 }
 
+func TestRejectedOpenPreservesStoreCloseError(t *testing.T) {
+	cause := errors.New("rejected open")
+	closeFailure := errors.New("store close failure")
+	store := &Store{}
+	store.close.Do(func() { store.closeErr = closeFailure })
+	err := closeRejectedOpen(store, nil, cause)
+	if !errors.Is(err, cause) || !errors.Is(err, closeFailure) {
+		t.Fatalf("rejected Open error = %v", err)
+	}
+}
+
 func TestOpenFreshRollbackRequiresExactChronology(t *testing.T) {
 	for name, statement := range map[string]string{
-		"revision":              `UPDATE factory SET revision = 2`,
-		"head":                  `UPDATE factory SET next_invalidation_sequence = 2`,
-		"floor":                 `UPDATE factory SET next_invalidation_sequence = 2, invalidation_floor = 2`,
-		"retained sequence row": `INSERT INTO sqlite_sequence(name, seq) VALUES('browser_security_events', 1)`,
+		"revision":               `UPDATE factory SET revision = 2`,
+		"head":                   `UPDATE factory SET next_invalidation_sequence = 2`,
+		"floor":                  `UPDATE factory SET next_invalidation_sequence = 2, invalidation_floor = 2`,
+		"retained sequence row":  `INSERT INTO sqlite_sequence(name, seq) VALUES('browser_security_events', 1)`,
+		"internal analyze state": `ANALYZE`,
+		"free pages":             `CREATE TABLE discarded(value BLOB); INSERT INTO discarded VALUES(zeroblob(32768)); DROP TABLE discarded`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := mutatedRollbackPath(t, statement)
@@ -568,6 +643,45 @@ func TestInspectImmutableValidStateIsReadOnlyAndKeepsReaderOpen(t *testing.T) {
 	}
 }
 
+func TestInspectPristineRequiresExactFreshRollbackState(t *testing.T) {
+	ctx := context.Background()
+	image, err := NewDatabaseImage(ctx, FactoryConfig{Capacity: 3}, mustTime(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := InspectPristine(ctx, bytes.NewReader(image), int64(len(image))); err != nil {
+		t.Fatalf("fresh image: %v", err)
+	}
+	for name, statement := range map[string]string{
+		"retained product row": `INSERT INTO projects(id, name, root, verification_policy, revision, created_at_ms, updated_at_ms) VALUES(zeroblob(16), 'retained', '/retained', 'none', 1, 1, 1)`,
+		"analysis state":       `ANALYZE`,
+		"free pages":           `CREATE TABLE discarded(value BLOB); INSERT INTO discarded VALUES(zeroblob(32768)); DROP TABLE discarded`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := mutatedRollbackPath(t, statement)
+			contents, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := InspectPristine(ctx, bytes.NewReader(contents), int64(len(contents))); err == nil {
+				t.Fatalf("non-pristine image error = %v", err)
+			}
+		})
+	}
+
+	store, path := newTestStore(t)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := InspectPristine(ctx, bytes.NewReader(contents), int64(len(contents))); !errors.Is(err, ErrForeignDatabase) {
+		t.Fatalf("WAL-header image error = %v", err)
+	}
+}
+
 func TestInspectImmutableRejectsForeignTruncatedAndCorruptState(t *testing.T) {
 	ctx := context.Background()
 	image, err := NewDatabaseImage(ctx, FactoryConfig{}, mustTime(t, 1))
@@ -613,7 +727,7 @@ func TestInspectImmutableRejectsForeignTruncatedAndCorruptState(t *testing.T) {
 		t.Fatalf("negative size error = %v", err)
 	}
 	readerFailure := errors.New("injected ReaderAt failure")
-	if err := InspectImmutable(ctx, failingReaderAt{err: readerFailure}, int64(len(image))); !errors.Is(err, readerFailure) || !errors.Is(err, ErrForeignDatabase) {
+	if err := InspectImmutable(ctx, failingReaderAt{err: readerFailure}, int64(len(image))); !errors.Is(err, readerFailure) {
 		t.Fatalf("ReaderAt failure error = %v", err)
 	}
 	shortReader := &shortNilReaderAt{reader: bytes.NewReader(image), after: 0}
@@ -624,6 +738,24 @@ func TestInspectImmutableRejectsForeignTruncatedAndCorruptState(t *testing.T) {
 	laterReader := &failAfterReaderAt{reader: bytes.NewReader(image), after: 100, err: laterFailure}
 	if err := InspectImmutable(ctx, laterReader, int64(len(image))); !errors.Is(err, laterFailure) {
 		t.Fatalf("later ReaderAt failure error = %v", err)
+	}
+	for name, reader := range map[string]io.ReaderAt{
+		"first full read":   &fullErrorReaderAt{reader: bytes.NewReader(image), err: errors.Join(io.EOF, readerFailure)},
+		"later full read":   &failAfterReaderAt{reader: bytes.NewReader(image), after: 128 << 10, err: errors.Join(io.EOF, laterFailure)},
+		"short joined read": &shortErrorReaderAt{reader: bytes.NewReader(image), err: errors.Join(io.EOF, laterFailure)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := InspectImmutable(ctx, reader, int64(len(image)))
+			if !errors.Is(err, io.EOF) {
+				t.Fatalf("joined ReaderAt error lost EOF: %v", err)
+			}
+			if name == "short joined read" && !errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Fatalf("short joined ReaderAt error lost unexpected EOF: %v", err)
+			}
+			if !errors.Is(err, readerFailure) && !errors.Is(err, laterFailure) {
+				t.Fatalf("joined ReaderAt error lost sentinel: %v", err)
+			}
+		})
 	}
 
 	for name, mutation := range map[string]string{
@@ -693,98 +825,65 @@ func TestInspectImmutableEnforcesDeclaredSizeBeforeReader(t *testing.T) {
 	}
 }
 
-func TestInspectImmutableRegistrationsAreUniqueAndAlwaysDeleted(t *testing.T) {
+func TestInspectImmutableConcurrentImagesDoNotCrossWire(t *testing.T) {
 	ctx := context.Background()
 	image, err := NewDatabaseImage(ctx, FactoryConfig{}, mustTime(t, 1))
 	if err != nil {
 		t.Fatal(err)
 	}
-	start := immutableReaderSequence.Load()
-	const inspections = 24
-	errorsByInspection := make(chan error, inspections)
+	foreign := append([]byte(nil), image...)
+	clear(foreign[68:72])
+
+	const inspections = 48
+	type result struct {
+		foreign bool
+		err     error
+	}
+	results := make(chan result, inspections)
 	var wait sync.WaitGroup
-	for range inspections {
+	for index := range inspections {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			errorsByInspection <- InspectImmutable(ctx, bytes.NewReader(image), int64(len(image)))
+			isForeign := index%2 != 0
+			contents := image
+			if isForeign {
+				contents = foreign
+			}
+			results <- result{foreign: isForeign, err: InspectImmutable(ctx, bytes.NewReader(contents), int64(len(contents)))}
 		}()
 	}
 	wait.Wait()
-	close(errorsByInspection)
-	for err := range errorsByInspection {
-		if err != nil {
-			t.Fatalf("concurrent inspection: %v", err)
+	close(results)
+	for result := range results {
+		if result.foreign && !errors.Is(result.err, ErrForeignDatabase) {
+			t.Fatalf("concurrent foreign inspection error = %v", result.err)
 		}
-	}
-	end := immutableReaderSequence.Load()
-	if end-start != inspections {
-		t.Fatalf("immutable reader names consumed = %d, want %d", end-start, inspections)
-	}
-	for sequence := start + 1; sequence <= end; sequence++ {
-		assertImmutableRegistrationAbsent(t, sequence)
+		if !result.foreign && result.err != nil {
+			t.Fatalf("concurrent valid inspection error = %v", result.err)
+		}
 	}
 
 	preCancelled, cancel := context.WithCancel(ctx)
 	cancel()
 	preCancelledReader := &readExtentRecorder{reader: bytes.NewReader(image)}
-	beforeCancelled := immutableReaderSequence.Load()
 	if err := InspectImmutable(preCancelled, preCancelledReader, int64(len(image))); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled inspection error = %v", err)
 	}
-	if immutableReaderSequence.Load() != beforeCancelled || preCancelledReader.MaxEnd() != 0 {
-		t.Fatal("pre-cancelled inspection touched reader or global registration")
+	if preCancelledReader.MaxEnd() != 0 {
+		t.Fatal("pre-cancelled inspection touched reader")
 	}
 
 	midCancelled, cancelMid := context.WithCancel(ctx)
 	midCancelledReader := cancelAfterRead{reader: bytes.NewReader(image), cancel: cancelMid}
-	beforeMidCancelled := immutableReaderSequence.Load()
 	if err := InspectImmutable(midCancelled, midCancelledReader, int64(len(image))); !errors.Is(err, context.Canceled) {
 		t.Fatalf("mid-inspection cancellation error = %v", err)
 	}
-	if immutableReaderSequence.Load() != beforeMidCancelled+1 {
-		t.Fatal("mid-inspection cancellation did not reserve exactly one reader name")
-	}
-	assertImmutableRegistrationAbsent(t, beforeMidCancelled+1)
 
 	corrupt := append([]byte(nil), image...)
 	clear(corrupt[68:72])
-	beforeCorrupt := immutableReaderSequence.Load()
 	if err := InspectImmutable(ctx, bytes.NewReader(corrupt), int64(len(corrupt))); !errors.Is(err, ErrForeignDatabase) {
 		t.Fatalf("corrupt inspection error = %v", err)
-	}
-	assertImmutableRegistrationAbsent(t, beforeCorrupt+1)
-}
-
-func TestInspectImmutableRegistrationSequenceFailsBeforeWrap(t *testing.T) {
-	image, err := NewDatabaseImage(context.Background(), FactoryConfig{}, mustTime(t, 1))
-	if err != nil {
-		t.Fatal(err)
-	}
-	previous := immutableReaderSequence.Load()
-	immutableReaderSequence.Store(math.MaxUint64 - 1)
-	t.Cleanup(func() { immutableReaderSequence.Store(previous) })
-
-	if err := InspectImmutable(context.Background(), bytes.NewReader(image), int64(len(image))); err != nil {
-		t.Fatalf("last immutable reader name: %v", err)
-	}
-	assertImmutableRegistrationAbsent(t, math.MaxUint64)
-
-	wrappedName := "dark-factory-kernel-0"
-	wrappedSentinel := sqliteIO.NewSizeReaderAt(bytes.NewReader(image))
-	readervfs.Create(wrappedName, wrappedSentinel)
-	t.Cleanup(func() { readervfs.Delete(wrappedName) })
-	if err := InspectImmutable(context.Background(), bytes.NewReader(image), int64(len(image))); !errors.Is(err, ErrCorruptState) {
-		t.Fatalf("exhausted immutable reader sequence error = %v", err)
-	}
-	query := url.Values{"vfs": {"reader"}}
-	pool, err := sql.Open(driverName, "file:"+wrappedName+"?"+query.Encode())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
-	if err := pool.PingContext(context.Background()); err != nil {
-		t.Fatalf("exhaustion overwrote or deleted existing registration: %v", err)
 	}
 }
 
@@ -1015,6 +1114,16 @@ type failAfterReaderAt struct {
 	err    error
 }
 
+type fullErrorReaderAt struct {
+	reader io.ReaderAt
+	err    error
+}
+
+type shortErrorReaderAt struct {
+	reader io.ReaderAt
+	err    error
+}
+
 func (reader failingReaderAt) ReadAt([]byte, int64) (int, error) { return 0, reader.err }
 
 func (reader *shortNilReaderAt) ReadAt(buffer []byte, offset int64) (int, error) {
@@ -1030,6 +1139,16 @@ func (reader *failAfterReaderAt) ReadAt(buffer []byte, offset int64) (int, error
 		return reader.reader.ReadAt(buffer, offset)
 	}
 	read, _ := reader.reader.ReadAt(buffer, offset)
+	return read, reader.err
+}
+
+func (reader *fullErrorReaderAt) ReadAt(buffer []byte, offset int64) (int, error) {
+	read, _ := reader.reader.ReadAt(buffer, offset)
+	return read, reader.err
+}
+
+func (reader *shortErrorReaderAt) ReadAt(buffer []byte, offset int64) (int, error) {
+	read, _ := reader.reader.ReadAt(buffer[:len(buffer)-1], offset)
 	return read, reader.err
 }
 
@@ -1052,18 +1171,4 @@ func (reader *readExtentRecorder) MaxEnd() int64 {
 	reader.mu.Lock()
 	defer reader.mu.Unlock()
 	return reader.maxEnd
-}
-
-func assertImmutableRegistrationAbsent(t *testing.T, sequence uint64) {
-	t.Helper()
-	name := fmt.Sprintf("dark-factory-kernel-%d", sequence)
-	query := url.Values{"vfs": {"reader"}}
-	pool, err := sql.Open(driverName, "file:"+name+"?"+query.Encode())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
-	if err := pool.PingContext(context.Background()); err == nil {
-		t.Fatalf("immutable reader registration %q remained usable", name)
-	}
 }

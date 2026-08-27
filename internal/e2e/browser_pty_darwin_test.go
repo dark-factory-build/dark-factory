@@ -208,7 +208,7 @@ func newFixture(t *testing.T, seed byte, test scenario, factoryctl, runnerExecut
 	}
 
 	now := e2eTime(t)
-	result.store, err = kernel.Create(context.Background(), filepath.Join(root, "factory.sqlite3"), kernel.FactoryConfig{Capacity: 1}, now)
+	result.store, err = createTestStore(context.Background(), filepath.Join(root, "factory.sqlite3"), kernel.FactoryConfig{Capacity: 1}, now)
 	if err != nil {
 		t.Fatal(err)
 	}

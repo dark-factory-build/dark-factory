@@ -15,13 +15,13 @@ import (
 	"github.com/ncruces/go-sqlite3"
 )
 
-func TestCreateOpenExactSchemaAndIdentity(t *testing.T) {
+func TestDatabaseImageOpenExactSchemaAndIdentity(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "kernel.db")
 	at := mustTime(t, 42)
-	store, err := Create(ctx, path, FactoryConfig{}, at)
+	store, err := createTestStore(ctx, path, FactoryConfig{}, at)
 	if err != nil {
-		t.Fatalf("Create: %v", err)
+		t.Fatalf("bootstrap: %v", err)
 	}
 	state, err := store.Factory(ctx)
 	if err != nil {
@@ -56,20 +56,6 @@ func TestCreateOpenExactSchemaAndIdentity(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	before, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Create(ctx, path, FactoryConfig{}, at); err == nil {
-		t.Fatal("Create accepted an existing database")
-	}
-	after, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(before, after) {
-		t.Fatal("refused Create modified the existing database")
-	}
 	reopened, err := Open(ctx, path)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -79,12 +65,9 @@ func TestCreateOpenExactSchemaAndIdentity(t *testing.T) {
 	}
 }
 
-func TestCreateAndOpenRejectForeignPathsWithoutModification(t *testing.T) {
+func TestOpenRejectsForeignPathsWithoutModification(t *testing.T) {
 	ctx := context.Background()
 	at := mustTime(t, 1)
-	if _, err := Create(ctx, "relative.db", FactoryConfig{}, at); !errors.Is(err, ErrInvalidValue) {
-		t.Fatalf("relative Create error = %v", err)
-	}
 
 	t.Run("empty", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "empty.db")
@@ -126,7 +109,7 @@ func TestCreateAndOpenRejectForeignPathsWithoutModification(t *testing.T) {
 
 	t.Run("wrong mode", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "mode.db")
-		store, err := Create(ctx, path, FactoryConfig{}, at)
+		store, err := createTestStore(ctx, path, FactoryConfig{}, at)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -144,7 +127,7 @@ func TestCreateAndOpenRejectForeignPathsWithoutModification(t *testing.T) {
 	t.Run("symlink", func(t *testing.T) {
 		directory := t.TempDir()
 		target := filepath.Join(directory, "target.db")
-		store, err := Create(ctx, target, FactoryConfig{}, at)
+		store, err := createTestStore(ctx, target, FactoryConfig{}, at)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -174,7 +157,7 @@ func TestOpenRejectsUnknownVersionAndPartialIdentity(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "kernel.db")
-			store, err := Create(context.Background(), path, FactoryConfig{}, mustTime(t, 1))
+			store, err := createTestStore(context.Background(), path, FactoryConfig{}, mustTime(t, 1))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -200,7 +183,7 @@ func TestOpenRejectsEverySchemaDrift(t *testing.T) {
 	for name, mutation := range tests {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "kernel.db")
-			store, err := Create(context.Background(), path, FactoryConfig{}, mustTime(t, 1))
+			store, err := createTestStore(context.Background(), path, FactoryConfig{}, mustTime(t, 1))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -314,7 +297,7 @@ func TestLiteralImmediateExclusionAndCancelledWait(t *testing.T) {
 func newTestStore(t *testing.T) (*Store, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "kernel.db")
-	store, err := Create(context.Background(), path, FactoryConfig{}, mustTime(t, 1))
+	store, err := createTestStore(context.Background(), path, FactoryConfig{}, mustTime(t, 1))
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

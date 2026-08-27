@@ -383,7 +383,7 @@ func BenchmarkWriteEntryValidation(b *testing.B) {
 
 func benchmarkValidationStore(b *testing.B) *Store {
 	b.Helper()
-	store, err := Create(context.Background(), filepath.Join(b.TempDir(), "kernel.db"), FactoryConfig{DispatchEnabled: true, Capacity: 2}, UnixMillis{})
+	store, err := createTestStore(context.Background(), filepath.Join(b.TempDir(), "kernel.db"), FactoryConfig{DispatchEnabled: true, Capacity: 2}, UnixMillis{})
 	if err != nil {
 		b.Fatal(err)
 	}

@@ -842,7 +842,7 @@ func runningOrchestratorRun(t *testing.T) (*Store, Run, AdmissionKeys) {
 func finalizingReleasedRun(t *testing.T, role AgentRole, policy VerificationPolicy, proposal Proposal) (*Store, Run) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "kernel.db")
-	store, err := Create(context.Background(), path, FactoryConfig{DispatchEnabled: true, Capacity: 2}, mustTime(t, 1))
+	store, err := createTestStore(context.Background(), path, FactoryConfig{DispatchEnabled: true, Capacity: 2}, mustTime(t, 1))
 	if err != nil {
 		t.Fatal(err)
 	}

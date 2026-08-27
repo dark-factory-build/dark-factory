@@ -3368,14 +3368,25 @@ Store foundation on integrated head `6272a8d`:
 Fresh-home SQLite publication uses one filesystem-free kernel seam rather than
 a path-based partial-home recovery protocol. `NewDatabaseImage` builds the one
 canonical schema and initial control row in SQLite memory, serializes an at-most
-8 MiB rollback-header image, and self-validates it. Ordinary `Open` may promote
-that form only while it is the exact pristine bootstrap: factory revision 1,
-head 0, floor 1, and no row in any other authority, event or sequence table.
-Retained rollback state is foreign and never adopted. `InspectImmutable`
-validates a caller-owned stable main-file descriptor read-only, bounds the image
-at 256 MiB before reading, enforces the declared extent and exact reads, and
-preserves later `ReaderAt` errors that SQLite cannot return through its VFS.
-The caller still owns the home lifetime lock and sidecar-absence proof.
+8 MiB rollback-header image, and self-validates it. The unused path-publishing
+`kernel.Create` API was deleted: production publication belongs to the install
+layer's descriptor-owned staging directory, while tests compose
+`NewDatabaseImage`, one create-only 0600 write, and `Open` in test-only helpers.
+This removes a sidecar-ownership lifecycle from the kernel instead of teaching
+it to adopt SQLite-recreated pathnames.
+
+`InspectImmutable` bounds the declared image at 256 MiB before allocation,
+copies it from the caller's stable `ReaderAt` in exact 128 KiB chunks, restores
+the owned bytes into one private in-memory SQLite connection, and runs the
+canonical schema/control/integrity validators with no filesystem or global VFS
+registration. Any caller error is preserved even when a full read also returns
+or wraps EOF; short nil-error reads fail. `InspectPristine` adds an exact 1/1
+rollback-header and pristine-bootstrap proof for stopped-home initialization:
+factory revision 1, head 0, floor 1; every product and sequence table empty;
+zero free pages; and only the exact SQLite autoindexes plus empty
+`sqlite_sequence` present. `ANALYZE` state, retained rows, free pages and a
+mature WAL header all fail. Both APIs leave reader ownership with the caller;
+the caller owns the home lifetime lock, stable-descriptor and no-sidecar proof.
 
 Mature WAL reopen pins exact owner-only regular main/WAL/SHM files through one
 parent directory descriptor, bounds main at 256 MiB, WAL at 272 MiB and SHM at
@@ -3390,14 +3401,48 @@ does not duplicate its WAL frame parser. All runtime sidecars are exact regular
 0600 files; malformed pairs, hot rollback journals, unsafe identities and
 over-bound files fail before authoritative SQLite open.
 
+SHA-256 digests and exact lengths bind disposable validation to the pinned
+main, WAL and SHM bytes immediately before the real path open; any same-inode
+content or length change retries a live WAL snapshot or rejects a standalone
+image. A final binding/identity/mode recheck follows. The remaining
+recheck-to-path-open gap is deliberately an external home lifetime-lock
+obligation rather than a second kernel locking abstraction.
+
 The focused mutation pass removed each guard temporarily and then restored it.
-`TestOpenRefusesRetainedRollbackDatabaseWithoutMutation` and
-`TestOpenFreshRollbackRequiresExactChronology` killed removal of the pristine
-bootstrap check; the immutable corruption test killed both the short-nil-read
-and lost-late-reader-error mutations; the registration exhaustion and cleanup
-tests killed counter wrap and omitted VFS deletion; the pre-read oversize test
-killed removal of the 256 MiB bound; and `TestValidateWALHeaderFailsClosed`
-killed removal of malformed-WAL validation. No mutation remains in the tree.
+`TestOpenRefusesRetainedRollbackDatabaseWithoutMutation` killed removal of the
+fresh-only rollback guard; `TestInspectPristineRequiresExactFreshRollbackState`
+killed permitting `sqlite_stat`/`ANALYZE` state; the immutable corruption test
+killed short-nil reads and ignoring full wrapped-EOF caller errors; the
+pre-read oversize test killed removal of the 256 MiB bound;
+`TestDatabaseFileBindingsAreRecheckedAfterPreflight` killed omitted main/WAL/SHM
+digest comparison; `TestRejectedOpenPreservesStoreCloseError` killed discarding
+the failed Store close; and `TestValidateWALHeaderFailsClosed` killed a disabled
+malformed-WAL validator. The global readervfs registration, counter, allocation
+and deletion paths and path-based `Create` sidecar ownership were deleted
+structurally, so their former mutations no longer exist. No mutation remains in
+the tree.
+
+The repaired pre-rebase candidate passed the focused image/pristine/WAL/live
+writer matrix three times (`24.407s`), the same focused matrix twice under race
+(`370.165s`), the full kernel suite (`24.048s`; `24.79s` wall), and the full
+kernel race suite (`536.071s`; `536.65s` wall). `go vet`, the complete
+`scripts/go-check.sh` gate (`49.92s`), daemon/E2E compile-only checks, Linux
+amd64 CGO-free kernel compilation and diff checks passed. The race cost is
+reported honestly: cryptographic snapshot continuity makes the 300-open/2,000-
+write stress more expensive, while ordinary focused and full non-race time
+remain about 24 seconds.
+
+The database capability now occupies 1,410 production lines across the 396-line
+Store/transaction core, 310-line image/immutable file and 704-line existing-
+file/WAL file. That is 116 production lines more than the independently blocked
+1,294-line candidate and 862 more than the 548-line pre-capability kernel. The
+increase is the concrete descriptor/identity/mode/bound/digest/crash-tail proof,
+not compatibility or a framework. In exchange, the repair deletes the exported
+path-creation lifecycle, global VFS registration/counter/error recorder and
+boolean ownership phases, and separates the two reasons to change. The focused
+image test file is 1,174 lines; three explicit 37-line package-local test
+bootstrap helpers replace production `Create` use without exporting test or
+publication policy.
 
 Admission, attempt authority and finalization Store proof on integrated head
 `3f2c255`:

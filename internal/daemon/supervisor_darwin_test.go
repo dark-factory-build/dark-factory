@@ -305,7 +305,7 @@ func TestSupervisorRejectsInvalidFactoryctlBeforeAdmissionOrProviderEffect(t *te
 func TestFailRunSharesOperationGateWithTerminalEffects(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	store, err := kernel.Create(ctx, filepath.Join(root, "kernel.sqlite"), kernel.FactoryConfig{Capacity: 1}, supervisorTime())
+	store, err := createTestStore(ctx, filepath.Join(root, "kernel.sqlite"), kernel.FactoryConfig{Capacity: 1}, supervisorTime())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1206,7 +1206,7 @@ func newSupervisorFixture(t *testing.T, program string) *supervisorFixture {
 	fixture.runtimeParent, fixture.runtimeParentPath, fixture.changeParent = runtimeParent, runtimeParentPath, changeParent
 
 	storePath := filepath.Join(root, "factory.sqlite3")
-	store, err := kernel.Create(context.Background(), storePath, kernel.FactoryConfig{Capacity: 1}, supervisorTime())
+	store, err := createTestStore(context.Background(), storePath, kernel.FactoryConfig{Capacity: 1}, supervisorTime())
 	if err != nil {
 		t.Fatal(err)
 	}

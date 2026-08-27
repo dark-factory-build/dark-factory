@@ -18,7 +18,7 @@ import (
 func newBrowserStore(t *testing.T) (*Store, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "kernel.db")
-	store, err := Create(context.Background(), path, FactoryConfig{}, mustTime(t, 1))
+	store, err := createTestStore(context.Background(), path, FactoryConfig{}, mustTime(t, 1))
 	if err != nil {
 		t.Fatal(err)
 	}

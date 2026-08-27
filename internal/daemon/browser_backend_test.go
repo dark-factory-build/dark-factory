@@ -41,7 +41,7 @@ type adapterFixture struct {
 func newAdapterFixture(t *testing.T, capabilities kernel.BrowserCapabilityMask) *adapterFixture {
 	t.Helper()
 	clock := time.UnixMilli(2_000)
-	store, err := kernel.Create(context.Background(), filepath.Join(t.TempDir(), "kernel.sqlite"), kernel.FactoryConfig{DispatchEnabled: true, Capacity: 8}, adapterTime(t, 1))
+	store, err := createTestStore(context.Background(), filepath.Join(t.TempDir(), "kernel.sqlite"), kernel.FactoryConfig{DispatchEnabled: true, Capacity: 8}, adapterTime(t, 1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -697,7 +697,7 @@ func TestBrowserAdapterRestartUsesNewBootAndDurableClient(t *testing.T) {
 }
 
 func TestDaemonCloseJoinsHijackedBrowserConnectionsBeforeStoreClose(t *testing.T) {
-	store, err := kernel.Create(context.Background(), filepath.Join(t.TempDir(), "kernel.sqlite"), kernel.FactoryConfig{Capacity: 2}, adapterTime(t, 1))
+	store, err := createTestStore(context.Background(), filepath.Join(t.TempDir(), "kernel.sqlite"), kernel.FactoryConfig{Capacity: 2}, adapterTime(t, 1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -738,7 +738,7 @@ func TestDaemonCloseJoinsHijackedBrowserConnectionsBeforeStoreClose(t *testing.T
 }
 
 func TestBrowserCloseLinearizesOpenAndClearsChallenges(t *testing.T) {
-	store, err := kernel.Create(context.Background(), filepath.Join(t.TempDir(), "kernel.sqlite"), kernel.FactoryConfig{Capacity: 2}, adapterTime(t, 1))
+	store, err := createTestStore(context.Background(), filepath.Join(t.TempDir(), "kernel.sqlite"), kernel.FactoryConfig{Capacity: 2}, adapterTime(t, 1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -842,7 +842,7 @@ func TestOpenRejectsMarkedRuntimeBeforeMint(t *testing.T) {
 }
 
 func TestBrowserCloseJoinsSharedCleanupAndRetainsRegistry(t *testing.T) {
-	store, err := kernel.Create(context.Background(), filepath.Join(t.TempDir(), "kernel.sqlite"), kernel.FactoryConfig{Capacity: 2}, adapterTime(t, 1))
+	store, err := createTestStore(context.Background(), filepath.Join(t.TempDir(), "kernel.sqlite"), kernel.FactoryConfig{Capacity: 2}, adapterTime(t, 1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -915,7 +915,7 @@ func TestBrowserCloseJoinsSharedCleanupAndRetainsRegistry(t *testing.T) {
 }
 
 func TestDaemonCloseFirstSharesRuntimeCleanupWithDirectClose(t *testing.T) {
-	store, err := kernel.Create(context.Background(), filepath.Join(t.TempDir(), "kernel.sqlite"), kernel.FactoryConfig{Capacity: 2}, adapterTime(t, 1))
+	store, err := createTestStore(context.Background(), filepath.Join(t.TempDir(), "kernel.sqlite"), kernel.FactoryConfig{Capacity: 2}, adapterTime(t, 1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -985,7 +985,7 @@ func TestDaemonCloseFirstSharesRuntimeCleanupWithDirectClose(t *testing.T) {
 }
 
 func TestBrowserCleanupFailureRetainsRuntimeOwnership(t *testing.T) {
-	store, err := kernel.Create(context.Background(), filepath.Join(t.TempDir(), "kernel.sqlite"), kernel.FactoryConfig{Capacity: 2}, adapterTime(t, 1))
+	store, err := createTestStore(context.Background(), filepath.Join(t.TempDir(), "kernel.sqlite"), kernel.FactoryConfig{Capacity: 2}, adapterTime(t, 1))
 	if err != nil {
 		t.Fatal(err)
 	}
