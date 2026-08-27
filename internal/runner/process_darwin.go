@@ -287,21 +287,29 @@ func (c *OwnedChild) refreshExit() error {
 	if c == nil || c.kq < 0 || c.exitObserved {
 		return nil
 	}
-	events := make([]unix.Kevent_t, 1)
 	zero := unix.Timespec{}
-	n, err := unix.Kevent(c.kq, nil, events, &zero)
-	if err != nil {
-		return err
-	}
-	if n == 0 {
+	for {
+		events := make([]unix.Kevent_t, 1)
+		n, err := unix.Kevent(c.kq, nil, events, &zero)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return nil
+		}
+		if events[0].Filter == unix.EVFILT_READ {
+			// A filter removed just before cleanup may already have queued one
+			// readiness record. It carries no lifecycle authority; keep draining
+			// until the exact process filter is observed.
+			continue
+		}
+		if events[0].Ident != uint64(c.identity.PID) || events[0].Filter != unix.EVFILT_PROC || events[0].Fflags&unix.NOTE_EXIT == 0 {
+			return ErrIdentity
+		}
+		c.exitObserved = true
+		c.state = stateExited
 		return nil
 	}
-	if events[0].Ident != uint64(c.identity.PID) || events[0].Filter != unix.EVFILT_PROC || events[0].Fflags&unix.NOTE_EXIT == 0 {
-		return ErrIdentity
-	}
-	c.exitObserved = true
-	c.state = stateExited
-	return nil
 }
 
 func StartBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, keepDirectoryAcrossExec bool) (child *OwnedChild, err error) {
@@ -625,6 +633,11 @@ func (c *OwnedChild) waitForExit(timeout time.Duration) (unix.Kevent_t, error) {
 			return unix.Kevent_t{}, os.ErrDeadlineExceeded
 		}
 		ev := events[0]
+		if ev.Filter == unix.EVFILT_READ {
+			// Readiness from a filter retired by the owner loop can remain queued;
+			// it is not a process transition and must not make cleanup fail open.
+			continue
+		}
 		if ev.Ident != uint64(c.identity.PID) || ev.Filter != unix.EVFILT_PROC || ev.Fflags&unix.NOTE_EXIT == 0 {
 			return unix.Kevent_t{}, ErrIdentity
 		}
@@ -775,6 +788,9 @@ func waitForOwnedGroupQuiescence(leader Identity, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for {
 		census, err := censusOwnedGroup(leader)
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
 		if err != nil {
 			return err
 		}
@@ -792,6 +808,9 @@ func killRemainingGroup(leader Identity) error {
 	deadline := time.Now().Add(4 * time.Second)
 	for {
 		census, err := censusOwnedGroup(leader)
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
 		if err != nil {
 			return err
 		}
@@ -850,10 +869,16 @@ const darwinZombieState = 5
 func censusOwnedGroup(leader Identity) (ownedGroupCensus, error) {
 	observed, err := readIdentity(leader.PID)
 	if err != nil || observed != leader {
+		if errors.Is(err, unix.EINTR) {
+			return ownedGroupCensus{}, unix.EINTR
+		}
 		return ownedGroupCensus{}, fmt.Errorf("%w: direct leader identity changed during group census", ErrUnresolved)
 	}
 	members, err := unix.SysctlKinfoProcSlice("kern.proc.pgrp", leader.PGID)
 	if err != nil {
+		if errors.Is(err, unix.EINTR) {
+			return ownedGroupCensus{}, unix.EINTR
+		}
 		return ownedGroupCensus{}, fmt.Errorf("%w: group census: %v", ErrUnresolved, err)
 	}
 	foundLeader := false

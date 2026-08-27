@@ -774,8 +774,20 @@ func (daemon *Daemon) awaitTerminal(ctx context.Context, runID kernel.RunID, wak
 			continue
 		}
 		event, err := controller.Next(8 * time.Second)
-		if err != nil || event.Kind != runner.AttemptTerminal || event.Terminal == nil {
-			return runner.AttemptEvent{}, errors.Join(err, runner.ErrState)
+		if err != nil {
+			return runner.AttemptEvent{}, err
+		}
+		if event.Kind == runner.AttemptTerminalFrame {
+			// PTY output, EOF, replay/reset and typed terminal results are
+			// observations of the live owner. They are not final evidence and
+			// must be consumed before awaiting the durable terminal record.
+			if event.Frame == nil {
+				return runner.AttemptEvent{}, runner.ErrState
+			}
+			continue
+		}
+		if event.Kind != runner.AttemptTerminal || event.Terminal == nil {
+			return runner.AttemptEvent{}, runner.ErrState
 		}
 		if cancelled {
 			return event, ctx.Err()

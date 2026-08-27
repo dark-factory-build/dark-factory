@@ -443,7 +443,14 @@ func (f *workerFixture) release(t *testing.T, release, report runner.AttemptStag
 }
 func (f *workerFixture) finish(t *testing.T) *runner.TerminalRecord {
 	t.Helper()
-	event, err := f.controller.Next(8 * time.Second)
+	var event runner.AttemptEvent
+	var err error
+	for {
+		event, err = f.controller.Next(8 * time.Second)
+		if err != nil || event.Kind != runner.AttemptTerminalFrame {
+			break
+		}
+	}
 	if err != nil || event.Kind != runner.AttemptTerminal || event.Terminal == nil {
 		t.Fatalf("terminal=%+v err=%v diag=%q", event, err, f.output())
 	}

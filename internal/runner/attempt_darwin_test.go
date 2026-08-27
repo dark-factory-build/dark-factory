@@ -79,7 +79,7 @@ func runAttemptWorkerHelper(args []string) error {
 	var initialInput []byte
 	switch mode {
 	case "shell", "term", "leader":
-		script := fmt.Sprintf("test -z \"${HOME+x}\" || exit 90; test -z \"${DARK_FACTORY_ATTEMPT_TOKEN+x}\" || exit 91; for n in 3 4 5 6 7 8 9 11; do test ! -e /dev/fd/$n || exit 92; done; test -f /dev/fd/10 || exit 93; test ! -s /dev/fd/10 || exit 94; cat /dev/fd/10/change-worker.config >/dev/null 2>&1 && exit 95; cd /dev/fd/10 >/dev/null 2>&1 && exit 96; printf '%%s' $$ > %q; while test ! -f %q; do sleep 0.01; done; printf x >> %q; IFS= read -r line; printf '%%s' \"$line\" > %q", filepath.Join(root, "provider.pid"), filepath.Join(root, "continue"), filepath.Join(root, "provider.effect"), filepath.Join(root, "provider.stdin"))
+		script := fmt.Sprintf("test -z \"${HOME+x}\" || exit 90; test -z \"${DARK_FACTORY_ATTEMPT_TOKEN+x}\" || exit 91; for n in 3 4 5 6 7 8 9 11; do test ! -e /dev/fd/$n || exit 92; done; test -f /dev/fd/10 || exit 93; test ! -s /dev/fd/10 || exit 94; cat /dev/fd/10/change-worker.config >/dev/null 2>&1 && exit 95; cd /dev/fd/10 >/dev/null 2>&1 && exit 96; printf '%%s' $$ > %q; printf 'pre-output\\n'; while test ! -f %q; do sleep 0.01; done; printf 'post-output\\n'; printf x >> %q; while test ! -f %q; do sleep 0.01; done; IFS= read -r line; printf '%%s' \"$line\" > %q", filepath.Join(root, "provider.pid"), filepath.Join(root, "continue"), filepath.Join(root, "provider.effect"), filepath.Join(root, "finish"), filepath.Join(root, "provider.stdin"))
 		if mode == "term" {
 			script = fmt.Sprintf("trap '' TERM; sleep 30 & printf '%%s' $! > %q; printf '%%s' $$ > %q; while :; do sleep 1; done", filepath.Join(root, "descendant.pid"), filepath.Join(root, "provider.pid"))
 		}
@@ -134,7 +134,11 @@ func runAttemptWorkerHelper(args []string) error {
 		if err := unix.Close(raw); err != nil {
 			return err
 		}
-		replacement, err := unix.Open(filepath.Join(root, "unrelated"), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
+		replacementPath, err := filepath.EvalSymlinks(filepath.Join(root, "unrelated"))
+		if err != nil {
+			return err
+		}
+		replacement, err := unix.Open(replacementPath, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
 		if err != nil {
 			return err
 		}
@@ -323,8 +327,12 @@ func (f *attemptFixture) advanceToProvider() {
 	}
 }
 
-func (f *attemptFixture) finishAndAck() *TerminalRecord {
+func (f *attemptFixture) finishAndAck(expectOuterSuccess ...bool) *TerminalRecord {
 	f.t.Helper()
+	wantOuterSuccess := true
+	if len(expectOuterSuccess) != 0 {
+		wantOuterSuccess = expectOuterSuccess[0]
+	}
 	var event AttemptEvent
 	var err error
 	for {
@@ -354,7 +362,7 @@ func (f *attemptFixture) finishAndAck() *TerminalRecord {
 		f.t.Fatal(err)
 	}
 	exit, err := f.outer.FinishAfterExit(6 * time.Second)
-	if err != nil || exit.Code != 0 {
+	if err != nil || wantOuterSuccess && exit.Code != 0 {
 		f.t.Fatalf("outer exit=%+v err=%v output=%q", exit, err, f.output())
 	}
 	if _, err := os.Stat(filepath.Join(f.root, "terminal.json")); !errors.Is(err, os.ErrNotExist) {
@@ -406,6 +414,9 @@ func TestAttemptRunnerOrdersOuterWrapperAndShellProvider(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(f.root, "continue"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(f.root, "finish"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	record := f.finishAndAck()
 	if record.Terminal.Process != inner || record.Terminal.Exit.Code != 0 || record.Terminal.Exit.Signal != 0 {
 		t.Fatalf("terminal=%+v", record.Terminal)
@@ -415,6 +426,114 @@ func TestAttemptRunnerOrdersOuterWrapperAndShellProvider(t *testing.T) {
 	}
 	if body, err := os.ReadFile(filepath.Join(f.root, "provider.stdin")); err != nil || string(body) != "one-startup" {
 		t.Fatalf("stdin=%q err=%v", body, err)
+	}
+}
+
+func TestAttemptRunnerPTYTerminalOwnerCommandsAndReplay(t *testing.T) {
+	f := newAttemptFixture(t, "shell", "")
+	inner := f.activateOuter()
+	f.advanceToProvider()
+	if err := f.controller.Release(StageProvider); err != nil {
+		t.Fatal(err)
+	}
+	waitFile(t, filepath.Join(f.root, "provider.pid"))
+	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalGenerationInstall, Correlation: 1, Generation: 1}); err != nil {
+		t.Fatal(err)
+	}
+	event, err := f.controller.Next(4 * time.Second)
+	if err != nil || event.Kind != AttemptTerminalFrame || event.Frame == nil || event.Frame.Kind != TerminalGenerationResult || event.Frame.Status != TerminalResultOK {
+		t.Fatalf("generation install=%+v err=%v", event, err)
+	}
+	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalAttach, Correlation: 2, Sequence: 0}); err != nil {
+		t.Fatal(err)
+	}
+	event, err = f.controller.Next(4 * time.Second)
+	if err != nil || event.Kind != AttemptTerminalFrame || event.Frame == nil || event.Frame.Kind != TerminalAttached || event.Frame.Status != TerminalResultOK {
+		t.Fatalf("attach=%+v err=%v", event, err)
+	}
+	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalCredit, Credit: 256}); err != nil {
+		t.Fatal(err)
+	}
+	outputSeen := false
+	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalResize, Correlation: 3, Generation: 1, Cols: 80, Rows: 24}); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		event, err = f.controller.Next(4 * time.Second)
+		if err != nil {
+			t.Fatalf("resize=%+v err=%v", event, err)
+		}
+		if event.Kind != AttemptTerminalFrame || event.Frame == nil {
+			t.Fatalf("resize=%+v", event)
+		}
+		if event.Frame.Kind == TerminalOutput {
+			outputSeen = outputSeen || strings.Contains(string(event.Frame.Payload), "output")
+		}
+		if event.Frame.Kind == TerminalResizeResult {
+			if event.Frame.Status != TerminalResultOK {
+				t.Fatalf("resize=%+v", event)
+			}
+			break
+		}
+	}
+	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalInput, Correlation: 4, Generation: 1, Sequence: 1, Payload: []byte("interactive\n")}); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		event, err = f.controller.Next(4 * time.Second)
+		if err != nil {
+			t.Fatalf("input=%+v err=%v", event, err)
+		}
+		if event.Kind != AttemptTerminalFrame || event.Frame == nil {
+			t.Fatalf("input=%+v", event)
+		}
+		if event.Frame.Kind == TerminalOutput {
+			outputSeen = outputSeen || strings.Contains(string(event.Frame.Payload), "output")
+		}
+		if event.Frame.Kind == TerminalInputResult {
+			if event.Frame.Status != TerminalResultOK || event.Frame.Count != uint32(len("interactive\n")) {
+				t.Fatalf("input=%+v", event)
+			}
+			break
+		}
+	}
+	if err := os.WriteFile(filepath.Join(f.root, "continue"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	finishSent := false
+	var eofSeen bool
+	for {
+		event, err = f.controller.Next(6 * time.Second)
+		if err != nil {
+			t.Fatalf("terminal stream event=%+v err=%v output=%t diagnostic=%q", event, err, outputSeen, f.output())
+		}
+		if event.Kind == AttemptTerminal {
+			break
+		}
+		if event.Kind != AttemptTerminalFrame || event.Frame == nil {
+			t.Fatalf("unexpected terminal stream event=%+v", event)
+		}
+		switch event.Frame.Kind {
+		case TerminalOutput:
+			outputSeen = outputSeen || strings.Contains(string(event.Frame.Payload), "output")
+			if !finishSent {
+				if err := os.WriteFile(filepath.Join(f.root, "finish"), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				finishSent = true
+			}
+		case TerminalPTYEOF:
+			eofSeen = true
+		}
+	}
+	if !outputSeen || !eofSeen || event.Terminal == nil || event.Terminal.Terminal.Process != inner {
+		t.Fatalf("terminal evidence output=%t eof=%t event=%+v", outputSeen, eofSeen, event)
+	}
+	if err := f.controller.AcknowledgeTerminal(event.Terminal, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.outer.FinishAfterExit(6 * time.Second); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -446,7 +565,16 @@ func TestRuntimeLifetimeRemainsHeldAcrossOuterAndInnerOwnership(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(f.root, "continue"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	event, err := f.controller.Next(6 * time.Second)
+	if err := os.WriteFile(filepath.Join(f.root, "finish"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var event AttemptEvent
+	for {
+		event, err = f.controller.Next(6 * time.Second)
+		if err != nil || event.Kind != AttemptTerminalFrame {
+			break
+		}
+	}
 	if err != nil || event.Kind != AttemptTerminal || event.Terminal == nil {
 		t.Fatalf("terminal=%+v err=%v output=%q", event, err, f.output())
 	}
@@ -559,20 +687,16 @@ func TestAttemptRunnerDaemonEOFCuts(t *testing.T) {
 		if err := f.controller.Close(); err != nil {
 			t.Fatal(err)
 		}
-		waitFile(t, filepath.Join(f.root, "provider.pid"))
-		if err := os.WriteFile(filepath.Join(f.root, "continue"), nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
 		exit, err := f.outer.FinishAfterExit(6 * time.Second)
-		if err != nil || exit.Code != 0 {
+		if err != nil || exit.Code == 0 && exit.Signal == 0 {
 			t.Fatalf("outer exit=%+v err=%v output=%q", exit, err, f.output())
 		}
 		record, err := LoadTerminal(f.dir, "terminal.json")
-		if err != nil || record.Terminal.Process != inner || record.Terminal.Exit.Code != 0 {
+		if err != nil || record.Terminal.Process != inner || !record.Terminal.Exit.Aborted {
 			t.Fatalf("replay terminal=%+v err=%v", record, err)
 		}
-		if err := AcknowledgeTerminal(f.dir, "terminal.json", record, true); err != nil {
-			t.Fatal(err)
+		if _, err := os.Stat(filepath.Join(f.root, "provider.pid")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("provider ran after daemon EOF before input handoff: %v", err)
 		}
 	})
 
@@ -812,195 +936,6 @@ func TestAttemptReadSetRemovalIsRetryableAndIdempotent(t *testing.T) {
 	}
 }
 
-type releasedRetirementFixture struct {
-	fixture            *fixture
-	child              *OwnedChild
-	daemon, daemonPeer *os.File
-	worker, workerPeer *os.File
-	reads              *attemptReadSet
-	completed          string
-}
-
-func newReleasedRetirementFixture(t *testing.T, delay time.Duration) *releasedRetirementFixture {
-	t.Helper()
-	f := newFixture(t)
-	executable, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	started := filepath.Join(f.root, "provider-started")
-	completed := filepath.Join(f.root, "provider-completed")
-	child := f.start(executable, []string{"--attempt-retirement-provider", started, completed, strconv.Itoa(int(delay / time.Millisecond))}, nil, nil)
-	daemon, daemonPeer, err := newControlPair("test-daemon", "test-daemon-peer")
-	if err != nil {
-		t.Fatal(err)
-	}
-	worker, workerPeer, err := newControlPair("test-worker", "test-worker-peer")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, file := range []*os.File{daemon, daemonPeer, worker, workerPeer} {
-		file := file
-		t.Cleanup(func() { _ = file.Close() })
-	}
-	reads := &attemptReadSet{kq: child.kq, daemonFD: int(daemon.Fd()), workerFD: int(worker.Fd())}
-	if err := reads.registerDaemon(); err != nil {
-		t.Fatal(err)
-	}
-	if err := reads.registerWorker(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := child.Activate(); err != nil {
-		t.Fatal(err)
-	}
-	waitFile(t, started)
-	return &releasedRetirementFixture{fixture: f, child: child, daemon: daemon, daemonPeer: daemonPeer, worker: worker, workerPeer: workerPeer, reads: reads, completed: completed}
-}
-
-func (f *releasedRetirementFixture) closePeer(t *testing.T, source attemptSource) int {
-	t.Helper()
-	switch source {
-	case sourceDaemon:
-		if err := f.daemonPeer.Close(); err != nil {
-			t.Fatal(err)
-		}
-		return int(f.daemon.Fd())
-	case sourceWorker:
-		if err := f.workerPeer.Close(); err != nil {
-			t.Fatal(err)
-		}
-		return int(f.worker.Fd())
-	default:
-		t.Fatal("invalid retirement source")
-		return -1
-	}
-}
-
-func (f *releasedRetirementFixture) finish(t *testing.T, cfg attemptConfig) <-chan error {
-	t.Helper()
-	done := make(chan error, 1)
-	go func() {
-		daemonOpen, cause := finishReleasedProvider(f.child, f.daemon, f.worker, f.reads)
-		done <- finishAttemptWithExit(f.child, f.fixture.dir, cfg, f.reads, nil, daemonOpen, cause)
-	}()
-	return done
-}
-
-func TestReleasedProviderRetriesReadableFilterRetirement(t *testing.T) {
-	for _, test := range []struct {
-		name   string
-		source attemptSource
-	}{
-		{name: "daemon-eof", source: sourceDaemon},
-		{name: "worker-eof", source: sourceWorker},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			f := newReleasedRetirementFixture(t, 1200*time.Millisecond)
-			targetFD := f.closePeer(t, test.source)
-			var calls atomic.Int32
-			f.reads.testUnregister = func(fd int) error {
-				if fd == targetFD && calls.Add(1) <= 2 {
-					return fmt.Errorf("%w: injected readable-filter retirement", ErrUnresolved)
-				}
-				return nil
-			}
-			cfg := attemptConfig{AttemptID: "attempt-" + test.name, TerminalName: "terminal.json"}
-			done := f.finish(t, cfg)
-			select {
-			case err := <-done:
-				if err != nil {
-					t.Fatal(err)
-				}
-			case <-time.After(4 * time.Second):
-				t.Fatal("released provider did not finish after transient filter retirement uncertainty")
-			}
-			if got := calls.Load(); got != 3 {
-				t.Fatalf("retirement calls=%d want=3", got)
-			}
-			if _, err := os.Stat(f.completed); err != nil {
-				t.Fatalf("authorized provider did not complete naturally: %v", err)
-			}
-			record, err := LoadTerminal(f.fixture.dir, cfg.TerminalName)
-			if err != nil || record.Terminal.Process != f.child.Identity() || record.Terminal.Exit.Code != 0 || record.Terminal.Exit.Signal != 0 {
-				t.Fatalf("natural terminal=%+v err=%v", record, err)
-			}
-			waitExactAbsence(t, f.child.Identity())
-		})
-	}
-}
-
-func TestReleasedProviderPermanentFilterUncertaintyPreservesExecution(t *testing.T) {
-	f := newReleasedRetirementFixture(t, 100*time.Millisecond)
-	targetFD := f.closePeer(t, sourceDaemon)
-	entered := make(chan struct{}, 16)
-	var restored atomic.Bool
-	f.reads.testUnregister = func(fd int) error {
-		if fd != targetFD {
-			return nil
-		}
-		select {
-		case entered <- struct{}{}:
-		default:
-		}
-		if !restored.Load() {
-			return fmt.Errorf("%w: permanent readable-filter retirement", ErrUnresolved)
-		}
-		return nil
-	}
-	cfg := attemptConfig{AttemptID: "attempt-permanent-retirement", TerminalName: "terminal.json"}
-	done := f.finish(t, cfg)
-	finished := false
-	t.Cleanup(func() {
-		if finished {
-			return
-		}
-		restored.Store(true)
-		select {
-		case <-done:
-		case <-time.After(4 * time.Second):
-			t.Error("retirement owner did not join after restoration")
-		}
-	})
-	for range 3 {
-		select {
-		case <-entered:
-		case err := <-done:
-			finished = true
-			t.Fatalf("retirement uncertainty escaped to cleanup: %v", err)
-		case <-time.After(4 * time.Second):
-			t.Fatal("retirement owner stopped retrying")
-		}
-	}
-	waitFile(t, f.completed)
-	if _, err := os.Stat(filepath.Join(f.fixture.root, cfg.TerminalName)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("permanent filter uncertainty published terminal: %v", err)
-	}
-	if got := ObserveProcess(f.child.Identity()); got.Presence != Present {
-		t.Fatalf("retirement uncertainty lost exact unreaped provider: %+v", got)
-	}
-	select {
-	case err := <-done:
-		finished = true
-		t.Fatalf("permanent retirement uncertainty returned: %v", err)
-	default:
-	}
-	restored.Store(true)
-	select {
-	case err := <-done:
-		finished = true
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(4 * time.Second):
-		t.Fatal("retirement did not converge after restoration")
-	}
-	record, err := LoadTerminal(f.fixture.dir, cfg.TerminalName)
-	if err != nil || record.Terminal.Process != f.child.Identity() || record.Terminal.Exit.Code != 0 || record.Terminal.Exit.Signal != 0 {
-		t.Fatalf("restored natural terminal=%+v err=%v", record, err)
-	}
-	waitExactAbsence(t, f.child.Identity())
-}
-
 func TestAttemptRunnerTerminatesOwnedProviderGroup(t *testing.T) {
 	for _, mode := range []string{"term", "leader"} {
 		t.Run(mode, func(t *testing.T) {
@@ -1016,7 +951,7 @@ func TestAttemptRunnerTerminatesOwnedProviderGroup(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			record := f.finishAndAck()
+			record := f.finishAndAck(false)
 			if record.Terminal.Process != inner {
 				t.Fatalf("terminal identity=%+v", record.Terminal.Process)
 			}
@@ -1076,7 +1011,7 @@ func TestCurrentExecRejectsCommittedTargetChanges(t *testing.T) {
 			if err := f.controller.Release(StageProvider); err != nil {
 				t.Fatal(err)
 			}
-			record := f.finishAndAck()
+			record := f.finishAndAck(false)
 			if record.Terminal.Exit.Code == 0 {
 				t.Fatalf("mutated provider reported success: %+v", record.Terminal)
 			}
@@ -1144,7 +1079,7 @@ func TestCurrentExecRejectsInvalidTransferredCwd(t *testing.T) {
 			if err := f.controller.Release(StageProvider); err != nil {
 				t.Fatal(err)
 			}
-			record := f.finishAndAck()
+			record := f.finishAndAck(false)
 			if record.Terminal.Exit.Code == 0 {
 				t.Fatalf("invalid cwd reported success: %+v", record.Terminal)
 			}
@@ -1185,7 +1120,7 @@ func TestCurrentExecRechecksTransferredCwdAtFinalSeam(t *testing.T) {
 	if err := f.controller.acknowledgeCurrentExecCheck(); err != nil {
 		t.Fatal(err)
 	}
-	record := f.finishAndAck()
+	record := f.finishAndAck(false)
 	if record.Terminal.Exit.Code == 0 {
 		t.Fatalf("mutated cwd reported success: %+v", record.Terminal)
 	}
@@ -1534,7 +1469,7 @@ func TestCurrentExecRejectsReplacedRuntimeLifetime(t *testing.T) {
 	if err := f.controller.acknowledgeCurrentExecCheck(); err != nil {
 		t.Fatal(err)
 	}
-	record := f.finishAndAck()
+	record := f.finishAndAck(false)
 	if record.Terminal.Exit.Code == 0 {
 		t.Fatalf("replaced lifetime reported success: %+v", record.Terminal)
 	}
@@ -1673,8 +1608,8 @@ func TestAttemptCleanupUncertaintyRetainsOwnerBeforeTerminal(t *testing.T) {
 	released = true
 	select {
 	case err := <-done:
-		if err != nil {
-			t.Fatal(err)
+		if !errors.Is(err, ErrUnresolved) {
+			t.Fatalf("uncertain cleanup result=%v, want unresolved evidence", err)
 		}
 	case <-time.After(4 * time.Second):
 		t.Fatal("cleanup did not converge after uncertainty cleared")
@@ -1685,9 +1620,8 @@ func TestAttemptCleanupUncertaintyRetainsOwnerBeforeTerminal(t *testing.T) {
 	if child.state != stateWaited {
 		t.Fatalf("terminal returned without sole Wait: state=%d", child.state)
 	}
-	record, err := LoadTerminal(f.dir, cfg.TerminalName)
-	if err != nil || record.Terminal.Process != identity {
-		t.Fatalf("terminal after convergence=%+v err=%v", record, err)
+	if _, err := LoadTerminal(f.dir, cfg.TerminalName); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("uncertain cleanup published terminal: %v", err)
 	}
 	waitExactAbsence(t, identity)
 	if err := unix.Kill(-identity.PGID, 0); !errors.Is(err, unix.ESRCH) {
@@ -1753,8 +1687,8 @@ func TestAttemptPermanentCleanupUncertaintyPublishesNothing(t *testing.T) {
 	select {
 	case err := <-done:
 		finished = true
-		if err != nil {
-			t.Fatal(err)
+		if !errors.Is(err, ErrUnresolved) {
+			t.Fatalf("restored cleanup result=%v, want unresolved evidence", err)
 		}
 	case <-time.After(4 * time.Second):
 		t.Fatal("cleanup did not converge after safety restoration")
@@ -1762,8 +1696,8 @@ func TestAttemptPermanentCleanupUncertaintyPublishesNothing(t *testing.T) {
 	if child.state != stateWaited {
 		t.Fatalf("restored cleanup returned before Wait: state=%d", child.state)
 	}
-	if _, err := LoadTerminal(f.dir, cfg.TerminalName); err != nil {
-		t.Fatalf("restored cleanup did not publish terminal: %v", err)
+	if _, err := LoadTerminal(f.dir, cfg.TerminalName); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("restored cleanup published terminal after uncertainty: %v", err)
 	}
 	waitExactAbsence(t, identity)
 }

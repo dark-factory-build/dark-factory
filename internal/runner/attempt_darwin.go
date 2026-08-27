@@ -518,7 +518,8 @@ func (w *WorkerControl) await(stage AttemptStage, before, after workerState) err
 // ExecProvider takes ownership of cwd on every call. The registered worker
 // supplies this exact descriptor only after its final source scan; runner does
 // not reopen or interpret the Change pathname. On failure the descriptor is
-// closed before return, and on success it is closed before the provider exec.
+// closed by the worker owner after its bounded diagnostic; on success it is
+// CLOEXEC and disappears at provider exec.
 func (w *WorkerControl) ExecProvider(spec *LaunchSpec, cwd *os.File) error {
 	if w == nil || w.file == nil || w.dir == nil || w.lifetime == nil || w.state != workerProvider || !w.providerInputRegistered || spec == nil || cwd == nil || len(spec.stdin) != 0 || spec.control != nil || spec.controlID != nil || spec.stdout != nil || spec.stderr != nil {
 		if cwd != nil {
@@ -527,7 +528,19 @@ func (w *WorkerControl) ExecProvider(spec *LaunchSpec, cwd *os.File) error {
 		return ErrState
 	}
 	w.state = workerExec
-	return execPreparedCurrent(spec, cwd, w)
+	err := execPreparedCurrent(spec, cwd, w)
+	if err != nil && w.file != nil {
+		message := []byte(err.Error())
+		if len(message) > maxAttemptReportBytes {
+			message = message[:maxAttemptReportBytes]
+		}
+		// A failed pre-exec check must be observable by the outer owner. EOF
+		// alone is ambiguous with successful unix.Exec, so publish one bounded
+		// diagnostic before the worker exits; this is private control evidence,
+		// not public provider output.
+		_ = writeControlFrame(w.file, attemptFrame{Version: 1, Kind: "provider-exec-error", Payload: message}, maxFrameBytes)
+	}
+	return err
 }
 
 func (w *WorkerControl) Close() error {
@@ -591,15 +604,13 @@ func execPreparedCurrent(spec *LaunchSpec, cwd *os.File, worker *WorkerControl) 
 	if err := closing.Close(); err != nil {
 		return err
 	}
-	if err := worker.file.Close(); err != nil {
-		return err
-	}
-	worker.file = nil
 	if err := worker.dir.Close(); err != nil {
 		return err
 	}
 	worker.dir = nil
-	_ = unix.Close(3)
+	// The worker capability remains open only as a CLOEXEC diagnostic path for
+	// a failed final exec. A successful provider never inherits it.
+	unix.CloseOnExec(3)
 	_ = unix.Close(9)
 	if _, err := unix.FcntlInt(worker.lifetime.Fd(), unix.F_SETFD, 0); err != nil {
 		return fmt.Errorf("runner: retain current runtime lifetime: %w", err)
@@ -876,7 +887,7 @@ func (reads *attemptReadSet) registerWorker() error {
 }
 
 func (reads *attemptReadSet) registerPTY() error {
-	if reads == nil || reads.ptyRegistered || reads.ptyFD <= 0 {
+	if reads == nil || reads.ptyRegistered || reads.ptyFD < 0 {
 		return ErrState
 	}
 	if err := registerRead(reads.kq, reads.ptyFD); err != nil {
@@ -1013,56 +1024,6 @@ func finishAttemptFailure(child *OwnedChild, dir *os.File, cfg attemptConfig, re
 	return finishAttemptWithExit(child, dir, cfg, reads, nil, false, cause)
 }
 
-func finishReleasedProvider(child *OwnedChild, daemon, worker *os.File, reads *attemptReadSet) (bool, error) {
-	daemonOpen := true
-	workerOpen := true
-	for {
-		frame, source, err := nextAttemptFrame(child, daemon, worker, daemonOpen, workerOpen, 0)
-		if source == sourceChild && err == nil {
-			return daemonOpen, nil
-		}
-		if source == sourceDaemon {
-			if errors.Is(err, io.EOF) {
-				retireReadableFilter(reads.removeDaemon)
-				daemonOpen = false
-				continue
-			}
-			if err != nil {
-				return daemonOpen, err
-			}
-			if frame.Version != 1 || frame.Kind != "terminate" || frame.Stage != "" || frame.Identity != (Identity{}) || len(frame.Payload) != 0 || frame.Terminal != nil || frame.FileIdentity != nil || frame.Digest != "" || frame.StoreCommitted || !noTerminalFields(frame) {
-				return daemonOpen, ErrState
-			}
-			return daemonOpen, nil
-		}
-		if source == sourceWorker {
-			if errors.Is(err, io.EOF) {
-				retireReadableFilter(reads.removeWorker)
-				workerOpen = false
-				continue
-			}
-			if err != nil {
-				return daemonOpen, err
-			}
-			if frame.Version != 1 || frame.Kind != "current-exec-check" || !noTerminalFields(frame) || frame.Stage != "" || frame.Identity != (Identity{}) || len(frame.Payload) != 0 || frame.Terminal != nil || frame.FileIdentity != nil || frame.Digest != "" || frame.StoreCommitted || !daemonOpen {
-				return daemonOpen, ErrState
-			}
-			if err := writeControlFrame(daemon, frame, maxFrameBytes); err != nil {
-				return false, err
-			}
-			ack, ackSource, err := nextAttemptFrame(child, daemon, worker, true, true, 0)
-			if err != nil || ackSource != sourceDaemon || ack.Version != 1 || ack.Kind != "current-exec-check-ack" || ack.Stage != "" || ack.Identity != (Identity{}) || len(ack.Payload) != 0 || ack.Terminal != nil || ack.FileIdentity != nil || ack.Digest != "" || ack.StoreCommitted || !noTerminalFields(ack) {
-				return false, protocolError("current exec check ack", ackSource, err)
-			}
-			if err := writeControlFrame(worker, ack, maxFrameBytes); err != nil {
-				return daemonOpen, err
-			}
-			continue
-		}
-		return daemonOpen, err
-	}
-}
-
 func finishAttemptWithExit(child *OwnedChild, dir *os.File, cfg attemptConfig, reads *attemptReadSet, daemon *os.File, daemonOpen bool, cause error) error {
 	if reads != nil {
 		reads.processOnly()
@@ -1070,6 +1031,15 @@ func finishAttemptWithExit(child *OwnedChild, dir *os.File, cfg attemptConfig, r
 	exit, cleanupErr := waitForAttemptChild(child)
 	if cleanupErr != nil {
 		return errors.Join(cause, cleanupErr)
+	}
+	// A terminal spool is evidence that the complete owner cleanup path was
+	// observed. Protocol or kill errors marked unresolved must never be turned
+	// into durable terminal evidence merely because Wait eventually returned.
+	if errors.Is(cause, ErrUnresolved) {
+		return cause
+	}
+	if cause != nil {
+		exit.Aborted = true
 	}
 	return errors.Join(cause, publishAttemptTerminal(child, dir, cfg, exit, daemon, daemonOpen, cause))
 }
@@ -1083,29 +1053,57 @@ func waitForAttemptChild(child *OwnedChild) (Exit, error) {
 	if child == nil {
 		return Exit{}, ErrState
 	}
+	var cleanupErr error
 	for {
 		if exit, err := child.waitedExit(); err == nil {
-			return exit, nil
+			return exit, cleanupErr
+		}
+		// Failure paths may arrive after the owner loop has retired its read
+		// filters. Observe the exact child exit before attempting a group signal;
+		// otherwise a dead gate can make every retry look like an authority
+		// failure and prevent deterministic reaping.
+		if child.state == stateActivated && !child.exitObserved {
+			if err := child.refreshExit(); err != nil {
+				if !interruptedCleanup(err) {
+					cleanupErr = errors.Join(cleanupErr, err)
+				}
+			}
 		}
 		switch child.state {
 		case stateBlocked:
-			_ = child.Abort()
+			if err := child.Abort(); err != nil {
+				cleanupErr = errors.Join(cleanupErr, err)
+			}
 		case stateActivated:
+			// A signal can race a natural exit (Darwin may report EPERM after
+			// census but before kill). Retry while the exact owner is live; only
+			// uncertainty observed after exit is retained as a publication block.
 			_, _ = child.Terminate(defaultStopTimeout)
 		case stateExited:
 			if child.activated {
-				_, _ = child.FinishAfterExit(attemptControlTimeout)
+				_, err := child.FinishAfterExit(attemptControlTimeout)
+				if err != nil && child.state != stateWaited && !interruptedCleanup(err) {
+					cleanupErr = errors.Join(cleanupErr, err)
+				}
 			} else {
-				_, _ = child.finishInertAfterExit()
+				_, err := child.finishInertAfterExit()
+				if err != nil && child.state != stateWaited && !interruptedCleanup(err) {
+					cleanupErr = errors.Join(cleanupErr, err)
+				}
 			}
 		case stateWaited:
-			return child.waitedExit()
+			exit, err := child.waitedExit()
+			return exit, errors.Join(cleanupErr, err)
 		}
 		if exit, err := child.waitedExit(); err == nil {
-			return exit, nil
+			return exit, cleanupErr
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
+}
+
+func interruptedCleanup(err error) bool {
+	return errors.Is(err, unix.EINTR) || strings.Contains(err.Error(), "interrupted system call")
 }
 
 func publishAttemptTerminal(child *OwnedChild, dir *os.File, cfg attemptConfig, exit Exit, daemon *os.File, daemonOpen bool, cause error) error {

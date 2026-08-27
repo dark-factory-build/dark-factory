@@ -53,6 +53,7 @@ type terminalOwner struct {
 	initialInput   []byte
 	initialWritten bool
 	ptyEOF         bool
+	stopRequested  bool
 
 	ring   terminalByteRing
 	credit uint64
@@ -99,6 +100,9 @@ func (o *terminalOwner) awaitInitialInput() error {
 			frame, source, err := nextAttemptFrame(o.child, o.daemon, o.worker, o.daemonOpen, o.workerOpen, 0)
 			if source == sourceWorker && errors.Is(err, io.EOF) {
 				return nil
+			}
+			if source == sourceWorker && err == nil && frame.Version == 1 && frame.Kind == "provider-exec-error" && noLegacyFields(frame) && noTerminalFields(frame) && len(frame.Payload) > 0 && len(frame.Payload) <= maxAttemptReportBytes {
+				return fmt.Errorf("runner: provider exec: %s", frame.Payload)
 			}
 			if source == sourceWorker && err == nil && validCurrentExecCheck(frame) {
 				if err := writeControlFrame(o.daemon, frame, maxFrameBytes); err != nil {
@@ -176,7 +180,7 @@ func (o *terminalOwner) serve() (bool, error) {
 			}
 			return o.daemonOpen, nil
 		case sourcePTY:
-			if err := o.readPTY(); err != nil {
+			if err := o.consumePTY(ev.bytes, ev.err); err != nil {
 				return o.daemonOpen, err
 			}
 		case sourceDaemon:
@@ -196,6 +200,9 @@ func (o *terminalOwner) serve() (bool, error) {
 			for _, frame := range frames {
 				if err := o.command(frame); err != nil {
 					return o.daemonOpen, err
+				}
+				if o.stopRequested {
+					return o.daemonOpen, nil
 				}
 			}
 		}
@@ -264,6 +271,9 @@ func (o *terminalOwner) nextEvent() (terminalReady, error) {
 }
 
 func (o *terminalOwner) command(raw attemptFrame) error {
+	if raw.Version == 1 && raw.Kind == "terminate" && validBareAttemptFrame(raw) {
+		return o.stop()
+	}
 	command, err := terminalCommandFromFrame(raw)
 	if err != nil {
 		return err
@@ -288,6 +298,25 @@ func (o *terminalOwner) command(raw attemptFrame) error {
 	default:
 		return ErrState
 	}
+}
+
+// stop is the typed owner transition used by daemon cancellation/finalizing.
+// Competing kqueue filters are retired before group convergence so no stale
+// PTY or process event can race the exact kill/wait owner.
+func (o *terminalOwner) stop() error {
+	o.stopRequested = true
+	o.inputActive = false
+	if o.reads != nil {
+		retireReadableFilter(o.reads.removeWorker)
+		retireReadableFilter(o.reads.removePTY)
+	}
+	if o.child == nil || o.child.state != stateActivated {
+		return ErrState
+	}
+	if _, err := o.child.Terminate(defaultStopTimeout); err != nil {
+		return err
+	}
+	return o.drainPTY()
 }
 
 func (o *terminalOwner) install(c TerminalCommand) error {
@@ -364,28 +393,26 @@ func (o *terminalOwner) attach(c TerminalCommand) error {
 	return o.flush()
 }
 
-func (o *terminalOwner) readPTY() error {
-	buf := make([]byte, terminalReplayChunk)
-	n, err := unix.Read(int(o.child.ptyMaster.Fd()), buf)
-	if n > 0 {
-		if appendErr := o.ring.Append(buf[:n]); appendErr != nil {
+func (o *terminalOwner) consumePTY(data []byte, readErr error) error {
+	if len(data) > 0 {
+		if appendErr := o.ring.Append(data); appendErr != nil {
 			return appendErr
 		}
 		if flushErr := o.flush(); flushErr != nil {
 			return flushErr
 		}
 	}
-	if errors.Is(err, unix.EIO) || errors.Is(err, io.EOF) {
+	if errors.Is(readErr, unix.EIO) || errors.Is(readErr, io.EOF) {
 		if o.reads != nil && o.ptyOpen {
 			retireReadableFilter(o.reads.removePTY)
 			o.ptyOpen = false
 		}
 		return o.emitPTYEOF()
 	}
-	if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) || err == nil {
+	if errors.Is(readErr, unix.EAGAIN) || errors.Is(readErr, unix.EWOULDBLOCK) || readErr == nil {
 		return nil
 	}
-	return err
+	return readErr
 }
 
 func (o *terminalOwner) drainPTY() error {
