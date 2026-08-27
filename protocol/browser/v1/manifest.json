@@ -24,6 +24,7 @@
     "max_sqlite_integer": "9223372036854775807",
     "max_terminal_unacked_bytes": 65536,
     "terminal_ack_timeout_ms": 10000,
+    "terminal_lease_renew_interval_ms": 10000,
     "max_terminal_rows": 4096,
     "max_terminal_cols": 4096
   },
@@ -46,6 +47,8 @@
     {"type": "HUMAN_REQUEST_REPLY_RESULT", "direction": "server", "id": "required", "fixture": "human_request_reply_result.json"},
     {"type": "HUMAN_REQUEST_CANCEL_RUN", "direction": "client", "id": "required", "fixture": "human_request_cancel_run.json"},
     {"type": "HUMAN_REQUEST_ACTION_RESULT", "direction": "server", "id": "required", "fixture": "human_request_action_result.json"},
+    {"type": "TERMINAL_TARGET_GET", "direction": "client", "id": "required", "fixture": "terminal_target_get.json"},
+    {"type": "TERMINAL_TARGET", "direction": "server", "id": "required", "fixture": "terminal_target.json"},
     {"type": "TERMINAL_ATTACH", "direction": "client", "id": "required", "fixture": "terminal_attach.json"},
     {"type": "TERMINAL_ATTACHED", "direction": "server", "id": "required", "fixture": "terminal_attached.json"},
     {"type": "TERMINAL_ACK", "direction": "client", "id": "forbidden", "fixture": "terminal_ack.json"},

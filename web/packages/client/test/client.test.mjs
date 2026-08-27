@@ -64,8 +64,8 @@ test("control role, envelope, field and capability validation is closed", () => 
 });
 
 test("browser terminal and HumanRequest controls are typed, directional, and bounded", () => {
-  const client = ["human_request_reply", "human_request_cancel_run", "terminal_attach", "terminal_ack", "terminal_lease_acquire", "terminal_lease_renew", "terminal_lease_release", "terminal_resize", "terminal_detach"];
-  const server = ["human_request_reply_result", "human_request_action_result", "terminal_attached", "terminal_lease_result", "terminal_resized", "terminal_detached", "terminal_input_result", "terminal_eof", "terminal_exit", "terminal_reset"];
+  const client = ["human_request_reply", "human_request_cancel_run", "terminal_target_get", "terminal_attach", "terminal_ack", "terminal_lease_acquire", "terminal_lease_renew", "terminal_lease_release", "terminal_resize", "terminal_detach"];
+  const server = ["human_request_reply_result", "human_request_action_result", "terminal_target", "terminal_attached", "terminal_lease_result", "terminal_resized", "terminal_detached", "terminal_input_result", "terminal_eof", "terminal_exit", "terminal_reset"];
   for (const name of client) {
     const frame = decodeClientControl(fixture(`${name}.json`));
     assert.equal(typeof frame.body, "object");
@@ -101,6 +101,18 @@ test("browser terminal and HumanRequest controls are typed, directional, and bou
   const pairedReply = decodeClientControl(fixture("human_request_reply.json").replace('"reply":"ok"', '"reply":"\\ud83d\\ude00"'));
   assert.equal(pairedReply.body.reply, "😀");
   const lease = fixture("terminal_lease_result.json");
+  const target = fixture("terminal_target.json");
+  const targetGet = fixture("terminal_target_get.json");
+  expectMalformed(() => decodeClientControl(targetGet.replace('"expected_agent_revision":"7"', '"expected_agent_revision":"0"')));
+  expectMalformed(() => decodeClientControl(targetGet.replace('"expected_head":"9007199254740993"', '"expected_head":"01"')));
+  expectMalformed(() => decodeClientControl(targetGet.replace('"agent_id"', '"Agent_ID"')));
+  assert.equal(decodeServerControl(target).body.target.run_id, "11".repeat(16));
+  assert.equal(decodeServerControl(target).body.head, 9007199254740993n);
+  expectMalformed(() => decodeServerControl(target.replace('"target":{', '"target":{"pid":1,')));
+  expectMalformed(() => decodeServerControl(target.replace(',"session_revision":"9"', '')));
+  const unavailable = target.replace(/"target":\{[^}]+\}/, '"target":null');
+  assert.equal(encodeServerControl(decodeServerControl(unavailable)), unavailable);
+  expectMalformed(() => decodeServerControl(lease.replace('"expires_at_ms":"10000"', '"expires_at_ms":"10000","renew_after_ms":"10000"')));
   expectMalformed(() => decodeServerControl(lease.replace('"expires_at_ms":"10000"', '"expires_at_ms":null')));
   expectMalformed(() => decodeServerControl(lease.replace(',"expires_at_ms":"10000"', '')));
   expectMalformed(() => decodeServerControl(lease.replace('"expires_at_ms":"10000"', '"expires_at_ms":"0"')));

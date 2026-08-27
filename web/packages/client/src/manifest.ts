@@ -18,6 +18,7 @@ export const MAX_TASK_PRIORITY = 1_000_000;
 export const MAX_SQLITE_INTEGER = 9_223_372_036_854_775_807n;
 export const MAX_TERMINAL_UNACKED_BYTES = 65_536;
 export const TERMINAL_ACK_TIMEOUT_MS = 10_000;
+export const TERMINAL_LEASE_RENEW_INTERVAL_MS = 10_000;
 export const MAX_TERMINAL_ROWS = 4096;
 export const MAX_TERMINAL_COLS = 4096;
 
@@ -50,6 +51,8 @@ export const CONTROL_MANIFEST = [
   { type: "HUMAN_REQUEST_REPLY_RESULT", direction: "server", id: "required", fixture: "human_request_reply_result.json" },
   { type: "HUMAN_REQUEST_CANCEL_RUN", direction: "client", id: "required", fixture: "human_request_cancel_run.json" },
   { type: "HUMAN_REQUEST_ACTION_RESULT", direction: "server", id: "required", fixture: "human_request_action_result.json" },
+  { type: "TERMINAL_TARGET_GET", direction: "client", id: "required", fixture: "terminal_target_get.json" },
+  { type: "TERMINAL_TARGET", direction: "server", id: "required", fixture: "terminal_target.json" },
   { type: "TERMINAL_ATTACH", direction: "client", id: "required", fixture: "terminal_attach.json" },
   { type: "TERMINAL_ATTACHED", direction: "server", id: "required", fixture: "terminal_attached.json" },
   { type: "TERMINAL_ACK", direction: "client", id: "forbidden", fixture: "terminal_ack.json" },
@@ -108,6 +111,7 @@ export const BROWSER_MANIFEST = {
     maxSQLiteInteger: MAX_SQLITE_INTEGER,
     maxTerminalUnackedBytes: MAX_TERMINAL_UNACKED_BYTES,
     terminalAckTimeoutMs: TERMINAL_ACK_TIMEOUT_MS,
+    terminalLeaseRenewIntervalMs: TERMINAL_LEASE_RENEW_INTERVAL_MS,
     maxTerminalRows: MAX_TERMINAL_ROWS,
     maxTerminalCols: MAX_TERMINAL_COLS,
   },

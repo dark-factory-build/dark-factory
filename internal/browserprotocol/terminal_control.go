@@ -20,6 +20,12 @@ func EncodeHumanRequestActionResult(id string, v HumanRequestActionResult) ([]by
 func EncodeTerminalAttach(id string, v TerminalAttach) ([]byte, error) {
 	return encodeControl(TypeTerminalAttach, id, v)
 }
+func EncodeTerminalTargetGet(id string, v TerminalTargetGet) ([]byte, error) {
+	return encodeControl(TypeTerminalTargetGet, id, v)
+}
+func EncodeTerminalTarget(id string, v TerminalTarget) ([]byte, error) {
+	return encodeControl(TypeTerminalTarget, id, v)
+}
 func EncodeTerminalAttached(id string, v TerminalAttached) ([]byte, error) {
 	return encodeControl(TypeTerminalAttached, id, v)
 }
@@ -62,11 +68,12 @@ func EncodeTerminalReset(id string, v TerminalReset) ([]byte, error) {
 }
 
 const (
-	MaxTerminalUnackedBytes        = 65536
-	TerminalAckTimeoutMS           = 10000
-	MaxTerminalRows         uint16 = 4096
-	MaxTerminalCols         uint16 = 4096
-	MaxJSONInteger          int64  = 1<<53 - 1
+	MaxTerminalUnackedBytes             = 65536
+	TerminalAckTimeoutMS                = 10000
+	TerminalLeaseRenewIntervalMS        = 10000
+	MaxTerminalRows              uint16 = 4096
+	MaxTerminalCols              uint16 = 4096
+	MaxJSONInteger               int64  = 1<<53 - 1
 )
 
 type HumanRequestReply struct {
@@ -100,6 +107,23 @@ type TerminalAttach struct {
 	ExpectedRunRevision     Decimal `json:"expected_run_revision"`
 	ExpectedSessionRevision Decimal `json:"expected_session_revision"`
 	AfterSequence           Decimal `json:"after_sequence"`
+}
+type TerminalTargetGet struct {
+	AgentID               string  `json:"agent_id"`
+	ExpectedAgentRevision Decimal `json:"expected_agent_revision"`
+	ExpectedHead          Decimal `json:"expected_head"`
+}
+type TerminalTargetDescriptor struct {
+	RunID           string  `json:"run_id"`
+	SessionID       string  `json:"session_id"`
+	RunRevision     Decimal `json:"run_revision"`
+	SessionRevision Decimal `json:"session_revision"`
+}
+type TerminalTarget struct {
+	AgentID       string                    `json:"agent_id"`
+	AgentRevision Decimal                   `json:"agent_revision"`
+	Head          Decimal                   `json:"head"`
+	Target        *TerminalTargetDescriptor `json:"target"`
 }
 type TerminalAttached struct {
 	SessionID            string  `json:"session_id"`
@@ -197,6 +221,10 @@ func validTerminalControl(kind MessageType, body any) error {
 		return validTerminalControl(kind, *value)
 	case *TerminalAttach:
 		return validTerminalControl(kind, *value)
+	case *TerminalTargetGet:
+		return validTerminalControl(kind, *value)
+	case *TerminalTarget:
+		return validTerminalControl(kind, *value)
 	case *TerminalAttached:
 		return validTerminalControl(kind, *value)
 	case *TerminalAck:
@@ -260,6 +288,17 @@ func validTerminalControl(kind MessageType, body any) error {
 		}
 	case TerminalAttach:
 		if !id(v.RunID) || !id(v.SessionID) || !pos(v.ExpectedRunRevision) || !pos(v.ExpectedSessionRevision) {
+			return bad()
+		}
+	case TerminalTargetGet:
+		if !id(v.AgentID) || !pos(v.ExpectedAgentRevision) {
+			return bad()
+		}
+	case TerminalTarget:
+		if !id(v.AgentID) || !pos(v.AgentRevision) {
+			return bad()
+		}
+		if v.Target != nil && (!id(v.Target.RunID) || !id(v.Target.SessionID) || !pos(v.Target.RunRevision) || !pos(v.Target.SessionRevision)) {
 			return bad()
 		}
 	case TerminalAttached:

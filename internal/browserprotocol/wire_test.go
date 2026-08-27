@@ -78,7 +78,7 @@ func TestControlFixturesRoundTrip(t *testing.T) {
 
 func decodeFixtureControl(name string, data []byte) (ControlFrame, error) {
 	switch name {
-	case "pair_prove", "auth_prove", "state_get", "state_subscribe", "state_entity_get", "human_request_detail_get":
+	case "pair_prove", "auth_prove", "state_get", "state_subscribe", "state_entity_get", "human_request_detail_get", "terminal_target_get":
 		return DecodeClientControl(data)
 	default:
 		return DecodeServerControl(data)
@@ -123,6 +123,10 @@ func encodeDecoded(frame ControlFrame) ([]byte, error) {
 		return encodeControl(TypeHumanRequestCancelRun, frame.ID, value)
 	case HumanRequestActionResult:
 		return encodeControl(TypeHumanRequestActionResult, frame.ID, value)
+	case TerminalTargetGet:
+		return EncodeTerminalTargetGet(frame.ID, value)
+	case TerminalTarget:
+		return EncodeTerminalTarget(frame.ID, value)
 	case TerminalAttach:
 		return encodeControl(TypeTerminalAttach, frame.ID, value)
 	case TerminalAttached:
@@ -312,25 +316,26 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 			Value byte   `json:"value"`
 		} `json:"capabilities"`
 		Bounds struct {
-			MaxControlBytes         int    `json:"max_control_bytes"`
-			MaxJSONDepth            int    `json:"max_json_depth"`
-			MaxArrayItems           int    `json:"max_array_items"`
-			MaxObjectMembers        int    `json:"max_object_members"`
-			MaxStatePageItems       int    `json:"max_state_page_items"`
-			MaxFactoryPageItems     int    `json:"max_factory_page_items"`
-			MaxCursorBytes          int    `json:"max_cursor_bytes"`
-			MaxProjectNameBytes     int    `json:"max_project_name_bytes"`
-			MaxAgentNameBytes       int    `json:"max_agent_name_bytes"`
-			MaxTaskTitleBytes       int    `json:"max_task_title_bytes"`
-			MaxHumanQuestionBytes   int    `json:"max_human_question_bytes"`
-			MaxHumanReplyBytes      int    `json:"max_human_reply_bytes"`
-			MaxFactoryCapacity      int    `json:"max_factory_capacity"`
-			MaxTaskPriority         int64  `json:"max_task_priority"`
-			MaxSQLiteInteger        string `json:"max_sqlite_integer"`
-			MaxTerminalUnackedBytes int    `json:"max_terminal_unacked_bytes"`
-			TerminalAckTimeoutMS    int    `json:"terminal_ack_timeout_ms"`
-			MaxTerminalRows         int    `json:"max_terminal_rows"`
-			MaxTerminalCols         int    `json:"max_terminal_cols"`
+			MaxControlBytes              int    `json:"max_control_bytes"`
+			MaxJSONDepth                 int    `json:"max_json_depth"`
+			MaxArrayItems                int    `json:"max_array_items"`
+			MaxObjectMembers             int    `json:"max_object_members"`
+			MaxStatePageItems            int    `json:"max_state_page_items"`
+			MaxFactoryPageItems          int    `json:"max_factory_page_items"`
+			MaxCursorBytes               int    `json:"max_cursor_bytes"`
+			MaxProjectNameBytes          int    `json:"max_project_name_bytes"`
+			MaxAgentNameBytes            int    `json:"max_agent_name_bytes"`
+			MaxTaskTitleBytes            int    `json:"max_task_title_bytes"`
+			MaxHumanQuestionBytes        int    `json:"max_human_question_bytes"`
+			MaxHumanReplyBytes           int    `json:"max_human_reply_bytes"`
+			MaxFactoryCapacity           int    `json:"max_factory_capacity"`
+			MaxTaskPriority              int64  `json:"max_task_priority"`
+			MaxSQLiteInteger             string `json:"max_sqlite_integer"`
+			MaxTerminalUnackedBytes      int    `json:"max_terminal_unacked_bytes"`
+			TerminalAckTimeoutMS         int    `json:"terminal_ack_timeout_ms"`
+			TerminalLeaseRenewIntervalMS int    `json:"terminal_lease_renew_interval_ms"`
+			MaxTerminalRows              int    `json:"max_terminal_rows"`
+			MaxTerminalCols              int    `json:"max_terminal_cols"`
 		} `json:"bounds"`
 		Control []struct {
 			Type      string `json:"type"`
@@ -360,7 +365,7 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 	if err := decoder.Decode(&trailing); err != io.EOF {
 		t.Fatalf("manifest trailing JSON: %v", err)
 	}
-	if manifest.Version != 1 || len(manifest.Control) != 34 || len(manifest.Terminal.Opcodes) != 2 {
+	if manifest.Version != 1 || len(manifest.Control) != 36 || len(manifest.Terminal.Opcodes) != 2 {
 		t.Fatalf("manifest registry incomplete: %+v", manifest)
 	}
 	capabilityNames := []string{"observe", "private_human_request_detail", "human_actions", "terminal_input"}
@@ -374,14 +379,14 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 		}
 	}
 	wantBounds := struct {
-		MaxControlBytes, MaxJSONDepth, MaxArrayItems, MaxObjectMembers                  int
-		MaxStatePageItems, MaxFactoryPageItems, MaxCursorBytes                          int
-		MaxProjectNameBytes, MaxAgentNameBytes, MaxTaskTitleBytes                       int
-		MaxHumanQuestionBytes, MaxHumanReplyBytes, MaxFactoryCapacity                   int
-		MaxTaskPriority                                                                 int64
-		MaxSQLiteInteger                                                                string
-		MaxTerminalUnackedBytes, TerminalAckTimeoutMS, MaxTerminalRows, MaxTerminalCols int
-	}{MaxControlBytes, MaxJSONDepth, MaxJSONArray, MaxJSONObject, MaxStatePageItems, MaxFactoryPageItems, MaxCursorBytes, MaxProjectNameBytes, MaxAgentNameBytes, MaxTaskTitleBytes, MaxHumanQuestionBytes, MaxHumanReplyBytes, MaxFactoryCapacity, MaxTaskPriority, fmt.Sprint(MaxSQLiteInteger), MaxTerminalUnackedBytes, TerminalAckTimeoutMS, int(MaxTerminalRows), int(MaxTerminalCols)}
+		MaxControlBytes, MaxJSONDepth, MaxArrayItems, MaxObjectMembers                                                int
+		MaxStatePageItems, MaxFactoryPageItems, MaxCursorBytes                                                        int
+		MaxProjectNameBytes, MaxAgentNameBytes, MaxTaskTitleBytes                                                     int
+		MaxHumanQuestionBytes, MaxHumanReplyBytes, MaxFactoryCapacity                                                 int
+		MaxTaskPriority                                                                                               int64
+		MaxSQLiteInteger                                                                                              string
+		MaxTerminalUnackedBytes, TerminalAckTimeoutMS, TerminalLeaseRenewIntervalMS, MaxTerminalRows, MaxTerminalCols int
+	}{MaxControlBytes, MaxJSONDepth, MaxJSONArray, MaxJSONObject, MaxStatePageItems, MaxFactoryPageItems, MaxCursorBytes, MaxProjectNameBytes, MaxAgentNameBytes, MaxTaskTitleBytes, MaxHumanQuestionBytes, MaxHumanReplyBytes, MaxFactoryCapacity, MaxTaskPriority, fmt.Sprint(MaxSQLiteInteger), MaxTerminalUnackedBytes, TerminalAckTimeoutMS, TerminalLeaseRenewIntervalMS, int(MaxTerminalRows), int(MaxTerminalCols)}
 	if fmt.Sprint(manifest.Bounds) != fmt.Sprint(wantBounds) {
 		t.Fatalf("bounds drift: got %+v want %+v", manifest.Bounds, wantBounds)
 	}
@@ -404,6 +409,8 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 		{"HUMAN_REQUEST_REPLY_RESULT", "server", "required", "human_request_reply_result.json"},
 		{"HUMAN_REQUEST_CANCEL_RUN", "client", "required", "human_request_cancel_run.json"},
 		{"HUMAN_REQUEST_ACTION_RESULT", "server", "required", "human_request_action_result.json"},
+		{"TERMINAL_TARGET_GET", "client", "required", "terminal_target_get.json"},
+		{"TERMINAL_TARGET", "server", "required", "terminal_target.json"},
 		{"TERMINAL_ATTACH", "client", "required", "terminal_attach.json"},
 		{"TERMINAL_ATTACHED", "server", "required", "terminal_attached.json"},
 		{"TERMINAL_ACK", "client", "forbidden", "terminal_ack.json"},
@@ -492,7 +499,7 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expectedFiles := map[string]bool{"transcript_v1.json": true, "hello.json": true, "pair_prove.json": true, "pair_result.json": true, "auth_prove.json": true, "auth_result.json": true, "state_get.json": true, "state_snapshot.json": true, "state_restart.json": true, "state_subscribe.json": true, "state_event.json": true, "state_entity_get.json": true, "state_entity.json": true, "human_request_detail_get.json": true, "human_request_detail.json": true, "error.json": true, "terminal_input.hex": true, "terminal_output.hex": true, "human_request_reply.json": true, "human_request_reply_result.json": true, "human_request_cancel_run.json": true, "human_request_action_result.json": true, "terminal_attach.json": true, "terminal_attached.json": true, "terminal_ack.json": true, "terminal_lease_acquire.json": true, "terminal_lease_renew.json": true, "terminal_lease_release.json": true, "terminal_lease_result.json": true, "terminal_resize.json": true, "terminal_resized.json": true, "terminal_detach.json": true, "terminal_detached.json": true, "terminal_input_result.json": true, "terminal_eof.json": true, "terminal_exit.json": true, "terminal_reset.json": true}
+	expectedFiles := map[string]bool{"transcript_v1.json": true, "hello.json": true, "pair_prove.json": true, "pair_result.json": true, "auth_prove.json": true, "auth_result.json": true, "state_get.json": true, "state_snapshot.json": true, "state_restart.json": true, "state_subscribe.json": true, "state_event.json": true, "state_entity_get.json": true, "state_entity.json": true, "human_request_detail_get.json": true, "human_request_detail.json": true, "error.json": true, "terminal_input.hex": true, "terminal_output.hex": true, "human_request_reply.json": true, "human_request_reply_result.json": true, "human_request_cancel_run.json": true, "human_request_action_result.json": true, "terminal_target_get.json": true, "terminal_target.json": true, "terminal_attach.json": true, "terminal_attached.json": true, "terminal_ack.json": true, "terminal_lease_acquire.json": true, "terminal_lease_renew.json": true, "terminal_lease_release.json": true, "terminal_lease_result.json": true, "terminal_resize.json": true, "terminal_resized.json": true, "terminal_detach.json": true, "terminal_detached.json": true, "terminal_input_result.json": true, "terminal_eof.json": true, "terminal_exit.json": true, "terminal_reset.json": true}
 	if len(entries) != len(expectedFiles) {
 		t.Fatalf("fixture count = %d, want %d", len(entries), len(expectedFiles))
 	}
@@ -733,6 +740,59 @@ func TestTerminalControlRejectsSurrogateAndNullMutations(t *testing.T) {
 		if _, err := DecodeServerControl([]byte(exit)); err != ErrMalformed {
 			t.Fatalf("null terminal exit %s accepted: %v", field, err)
 		}
+	}
+}
+
+func TestTerminalTargetContract(t *testing.T) {
+	get := fixtureBytes(t, "terminal_target_get.json")
+	request, err := DecodeClientControl(get)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.Type != TypeTerminalTargetGet || request.ID != "target-get-1" {
+		t.Fatalf("request = %+v", request)
+	}
+	if encoded, err := encodeDecoded(request); err != nil || !bytes.Equal(encoded, get) {
+		t.Fatalf("request round trip: %v", err)
+	}
+
+	response := fixtureBytes(t, "terminal_target.json")
+	frame, err := DecodeServerControl(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, ok := frame.Body.(TerminalTarget)
+	if !ok || value.Target == nil || value.Head != 9007199254740993 {
+		t.Fatalf("response = %+v", frame.Body)
+	}
+	if encoded, err := encodeDecoded(frame); err != nil || !bytes.Equal(encoded, response) {
+		t.Fatalf("response round trip: %v", err)
+	}
+
+	unavailable := bytes.Replace(response, []byte(`"target":{"run_id":"11111111111111111111111111111111","session_id":"22222222222222222222222222222222","run_revision":"8","session_revision":"9"}`), []byte(`"target":null`), 1)
+	if decoded, err := DecodeServerControl(unavailable); err != nil || decoded.Body.(TerminalTarget).Target != nil {
+		t.Fatalf("null target = %+v, %v", decoded, err)
+	}
+	nullValue := TerminalTarget{AgentID: "02020202020202020202020202020202", AgentRevision: 7, Head: 9007199254740993}
+	if encoded, err := EncodeTerminalTarget("target-1", nullValue); err != nil || !bytes.Equal(encoded, unavailable) {
+		t.Fatalf("null target round trip: %v", err)
+	}
+	for _, mutation := range []string{
+		strings.Replace(string(response), `"agent_revision":"7"`, `"agent_revision":"0"`, 1),
+		strings.Replace(string(response), `"head":"9007199254740993"`, `"head":"01"`, 1),
+		strings.Replace(string(response), `,"session_revision":"9"`, "", 1),
+		strings.Replace(string(response), `"target":{`, `"target":{"pid":1,`, 1),
+	} {
+		if _, err := DecodeServerControl([]byte(mutation)); err != ErrMalformed {
+			t.Fatalf("target mutation accepted: %v", err)
+		}
+	}
+	lease := strings.Replace(string(fixtureBytes(t, "terminal_lease_result.json")), `"expires_at_ms":"10000"`, `"expires_at_ms":"10000","renew_after_ms":"10000"`, 1)
+	if _, err := DecodeServerControl([]byte(lease)); err != ErrMalformed {
+		t.Fatalf("lease renew_after_ms accepted: %v", err)
+	}
+	if _, err := DecodeClientControl(bytes.Replace(get, []byte(`"id":"target-get-1"`), nil, 1)); err != ErrMalformed {
+		t.Fatalf("missing request id accepted: %v", err)
 	}
 }
 
