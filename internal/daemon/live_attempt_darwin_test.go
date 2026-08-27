@@ -44,7 +44,11 @@ func TestLiveAttemptRejectsWrongSessionBeforeRunnerAttach(t *testing.T) {
 	attempt := newLiveAttempt(nil, runID, sessionID, nil)
 	attempt.readySeen = true
 	attachment := &TerminalAttachment{queue: make(chan TerminalEvent, terminalSubscriberCap)}
-	if err := attempt.handleAttach(attachment, wrongSession, 0); !errors.Is(err, kernel.ErrConflict) {
+	revision, err := kernel.NewRevision(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := attempt.handleAttach(attachment, wrongSession, revision, revision, 0); !errors.Is(err, kernel.ErrConflict) {
 		t.Fatalf("wrong session attach = %v", err)
 	}
 	if len(attempt.subs) != 0 || len(attempt.correlations) != 0 {

@@ -212,6 +212,19 @@ func (attempt *liveAttempt) processLifecycle(ctx context.Context) (bool, error) 
 		return false, kernel.ErrCorruptState
 	}
 	if run.Phase == kernel.RunFinalizing {
+		// A durable finalization revokes input, but a cancel action still has a
+		// queued owner-fence effect to deliver. Let one already-submitted command
+		// run before terminating the controller; the next lifecycle pass closes
+		// an idle finalizing owner.
+		select {
+		case command := <-attempt.commands:
+			stop, commandErr := attempt.handleRunningCommand(command)
+			if commandErr != nil {
+				return false, commandErr
+			}
+			return stop, nil
+		default:
+		}
 		attempt.binding = terminalBinding{}
 		return false, attempt.terminateController()
 	}
@@ -236,7 +249,7 @@ func (attempt *liveAttempt) terminateController() error {
 func (attempt *liveAttempt) handleRunningCommand(command liveAttemptCommand) (bool, error) {
 	switch command.kind {
 	case liveCommandAttach:
-		err := attempt.handleAttach(command.attachment, command.session, command.sequence)
+		err := attempt.handleAttach(command.attachment, command.session, command.expectedRun, command.expectedSession, command.sequence)
 		command.result <- err
 		// Validation and durable-state conflicts belong to this request, not to
 		// the provider. A controller write failure poisons the controller itself;
@@ -677,7 +690,7 @@ func (attempt *liveAttempt) acceptOutput(subscriber *TerminalAttachment, event T
 	return true
 }
 
-func (attempt *liveAttempt) handleAttach(attachment *TerminalAttachment, sessionID kernel.TerminalSessionID, sequence uint64) error {
+func (attempt *liveAttempt) handleAttach(attachment *TerminalAttachment, sessionID kernel.TerminalSessionID, expectedRun, expectedSession kernel.Revision, sequence uint64) error {
 	// AttachTerminal holds the operation gate before this command enters the
 	// owner mailbox. An attach accepted before finalizing wins; one queued after
 	// the durable boundary reloads that state and is refused.
@@ -717,7 +730,7 @@ func (attempt *liveAttempt) handleAttach(attachment *TerminalAttachment, session
 	if !found {
 		return kernel.ErrCorruptState
 	}
-	if run.Phase != kernel.RunRunning {
+	if run.Phase != kernel.RunRunning || run.Revision != expectedRun || session.Revision != expectedSession {
 		return kernel.ErrConflict
 	}
 	correlation, err := attempt.nextCorrelation()

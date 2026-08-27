@@ -176,7 +176,7 @@ func (attachment *TerminalAttachment) enqueue(event TerminalEvent) bool {
 // AttachTerminal validates the durable run/session relationship before it
 // creates an in-memory observer. The runner and its replay ring remain hidden
 // behind the attempt owner.
-func (daemon *Daemon) AttachTerminal(ctx context.Context, runID kernel.RunID, sessionID kernel.TerminalSessionID, sequence uint64) (*TerminalAttachment, error) {
+func (daemon *Daemon) AttachTerminal(ctx context.Context, runID kernel.RunID, sessionID kernel.TerminalSessionID, expectedRun, expectedSession kernel.Revision, sequence uint64) (*TerminalAttachment, error) {
 	if daemon == nil || daemon.store == nil || ctx == nil || runID == (kernel.RunID{}) || sessionID == (kernel.TerminalSessionID{}) {
 		return nil, fmt.Errorf("%w: invalid terminal attachment", kernel.ErrInvalidValue)
 	}
@@ -192,7 +192,7 @@ func (daemon *Daemon) AttachTerminal(ctx context.Context, runID kernel.RunID, se
 	}
 	daemon.operationMu.Lock()
 	defer daemon.operationMu.Unlock()
-	return attempt.attach(ctx, sessionID, sequence)
+	return attempt.attach(ctx, sessionID, expectedRun, expectedSession, sequence)
 }
 
 type liveAttemptCommandKind uint8
@@ -207,14 +207,15 @@ const (
 )
 
 type liveAttemptCommand struct {
-	kind       liveAttemptCommandKind
-	attachment *TerminalAttachment
-	session    kernel.TerminalSessionID
-	sequence   uint64
-	terminal   *runner.TerminalRecord
-	result     chan error
-	effect     *terminalEffect
-	effectDone chan terminalEffectResult
+	kind                         liveAttemptCommandKind
+	attachment                   *TerminalAttachment
+	session                      kernel.TerminalSessionID
+	expectedRun, expectedSession kernel.Revision
+	sequence                     uint64
+	terminal                     *runner.TerminalRecord
+	result                       chan error
+	effect                       *terminalEffect
+	effectDone                   chan terminalEffectResult
 }
 
 type liveAttemptResult struct {
@@ -444,12 +445,12 @@ func (attempt *liveAttempt) submitEffect(ctx context.Context, effect terminalEff
 	}
 }
 
-func (attempt *liveAttempt) attach(ctx context.Context, sessionID kernel.TerminalSessionID, sequence uint64) (*TerminalAttachment, error) {
+func (attempt *liveAttempt) attach(ctx context.Context, sessionID kernel.TerminalSessionID, expectedRun, expectedSession kernel.Revision, sequence uint64) (*TerminalAttachment, error) {
 	if attempt == nil || ctx == nil {
 		return nil, ErrTerminalClosed
 	}
 	attachment := &TerminalAttachment{owner: attempt, queue: make(chan TerminalEvent, terminalSubscriberCap)}
-	command := liveAttemptCommand{kind: liveCommandAttach, attachment: attachment, session: sessionID, sequence: sequence, result: make(chan error, 1)}
+	command := liveAttemptCommand{kind: liveCommandAttach, attachment: attachment, session: sessionID, expectedRun: expectedRun, expectedSession: expectedSession, sequence: sequence, result: make(chan error, 1)}
 	if err := attempt.submit(ctx, command); err != nil {
 		return nil, err
 	}

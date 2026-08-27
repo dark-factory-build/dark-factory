@@ -15,6 +15,7 @@ import (
 	"unsafe"
 
 	"github.com/dark-factory-build/dark-factory/internal/browser"
+	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
@@ -907,6 +908,127 @@ func TestClientRevocationDurablyClearsLeaseBeforeRunnerFence(t *testing.T) {
 	}
 }
 
+func TestCancelHumanRequestSurfacesOwnerFenceFailureAfterCommit(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		status runner.TerminalResultStatus
+	}{
+		{name: "rejected", status: runner.TerminalResultRejected},
+		{name: "partial", status: runner.TerminalResultPartial},
+		{name: "uncertain", status: runner.TerminalResultUncertain},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newTerminalEffectFixture(t)
+			lease := fixture.acquire(t, fixture.principal)
+			var key [kernel.IDBytes]byte
+			copy(key[:], adapterID(t, 220))
+			request, err := fixture.adapter.store.CreateHumanQuestionForAttempt(context.Background(), fixture.run.CredentialDigest, kernel.NewHumanQuestion{IdempotencyKey: key, QuestionText: "cancel"}, adapterTime(t, 2_000))
+			if err != nil {
+				t.Fatal(err)
+			}
+			currentRun, found, err := fixture.adapter.store.Run(context.Background(), fixture.run.ID)
+			if err != nil || !found {
+				t.Fatalf("current run = %+v, found=%v, err=%v", currentRun, found, err)
+			}
+			done := make(chan error, 1)
+			go func() {
+				_, _, cancelErr := fixture.adapter.daemon.cancelHumanRequestRun(context.Background(), fixture.adapter.client.ID, request.ID, fixture.run.ID, request.Revision, currentRun.Revision, adapterTime(t, 2_001))
+				done <- cancelErr
+			}()
+			revoke := readTerminalEffectWire(t, fixture.peer)
+			if revoke.Kind != string(runner.TerminalGenerationRevoke) || revoke.Generation <= lease.Generation {
+				t.Fatalf("cancel owner fence = %+v", revoke)
+			}
+			replyTerminalEffect(t, fixture.peer, revoke, test.status, 0)
+			if cancelErr := <-done; !errors.Is(cancelErr, ErrHumanRequestOwnerFence) {
+				t.Fatalf("cancel fence status = %v", cancelErr)
+			}
+			observedRun, found, err := fixture.adapter.store.Run(context.Background(), fixture.run.ID)
+			if err != nil || !found || observedRun.Phase != kernel.RunFinalizing {
+				t.Fatalf("durable cancel run = %+v, found=%v, err=%v", observedRun, found, err)
+			}
+			resolved, found, err := fixture.adapter.store.HumanRequest(context.Background(), request.ID)
+			if err != nil || !found || resolved.Status != kernel.HumanRequestResolved {
+				t.Fatalf("durable cancel request = %+v, found=%v, err=%v", resolved, found, err)
+			}
+			if _, _, duplicateErr := fixture.adapter.daemon.cancelHumanRequestRun(context.Background(), fixture.adapter.client.ID, request.ID, fixture.run.ID, request.Revision, currentRun.Revision, adapterTime(t, 2_002)); !errors.Is(duplicateErr, kernel.ErrRevisionConflict) {
+				t.Fatalf("duplicate cancel = %v", duplicateErr)
+			}
+			if !fixture.attempt.controllerClosed {
+				t.Fatal("owner was not closed after an unacknowledged fence")
+			}
+		})
+	}
+}
+
+func TestBrowserCancelOwnerFenceErrorIsNonRetryable(t *testing.T) {
+	fixture := newTerminalEffectFixture(t)
+	fixture.acquire(t, fixture.principal)
+	var key [kernel.IDBytes]byte
+	copy(key[:], adapterID(t, 221))
+	request, err := fixture.adapter.store.CreateHumanQuestionForAttempt(context.Background(), fixture.run.CredentialDigest, kernel.NewHumanQuestion{IdempotencyKey: key, QuestionText: "cancel over browser"}, adapterTime(t, 2_000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentRun, found, err := fixture.adapter.store.Run(context.Background(), fixture.run.ID)
+	if err != nil || !found {
+		t.Fatalf("current run = %+v, found=%v, err=%v", currentRun, found, err)
+	}
+	connection := fixture.adapter.authenticate(t)
+	payload, err := browserprotocol.EncodeHumanRequestCancelRun("cancel-browser", browserprotocol.HumanRequestCancelRun{
+		RunID: fixture.run.ID.String(), RequestID: request.ID.String(), ExpectedRequestRevision: browserprotocol.Decimal(request.Revision.Int64()), ExpectedRunRevision: browserprotocol.Decimal(currentRun.Revision.Int64()),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapterWrite(t, connection, payload)
+	revoke := readTerminalEffectWire(t, fixture.peer)
+	replyTerminalEffect(t, fixture.peer, revoke, runner.TerminalResultPartial, 0)
+	frame := adapterRead(t, connection)
+	if frame.Type != browserprotocol.TypeError {
+		t.Fatalf("browser cancel response = %+v", frame)
+	}
+	response := frame.Body.(browserprotocol.Error)
+	if response.Code != browserprotocol.ErrorInternal || response.Retryable {
+		t.Fatalf("browser cancel error = %+v", response)
+	}
+	resolved, found, err := fixture.adapter.store.HumanRequest(context.Background(), request.ID)
+	if err != nil || !found || resolved.Status != kernel.HumanRequestResolved {
+		t.Fatalf("durable browser cancel request = %+v, found=%v, err=%v", resolved, found, err)
+	}
+}
+
+func TestPublicAttachRequiresExactDurableRevisions(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		staleRun     bool
+		staleSession bool
+	}{
+		{name: "run revision", staleRun: true},
+		{name: "session revision", staleSession: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newTerminalEffectFixture(t)
+			runRevision := fixture.run.Revision
+			sessionRevision := fixture.session.Revision
+			if test.staleRun {
+				runRevision = mustRevision(t, runRevision.Int64()+1)
+			}
+			if test.staleSession {
+				sessionRevision = mustRevision(t, sessionRevision.Int64()+1)
+			}
+			attachment, err := fixture.adapter.daemon.AttachTerminal(context.Background(), fixture.run.ID, fixture.session.ID, runRevision, sessionRevision, 0)
+			if attachment != nil || !errors.Is(err, kernel.ErrConflict) {
+				t.Fatalf("stale attach = attachment %v, err %v", attachment, err)
+			}
+			expectNoTerminalEffectWire(t, fixture.peer)
+			if len(fixture.attempt.subs) != 0 || len(fixture.attempt.correlations) != 0 {
+				t.Fatalf("stale attach registered observer: subs=%d correlations=%d", len(fixture.attempt.subs), len(fixture.attempt.correlations))
+			}
+		})
+	}
+}
+
 func TestPublicAttachSerializesWithFinalization(t *testing.T) {
 	t.Run("finalization commits before queued attach", func(t *testing.T) {
 		fixture := newTerminalEffectFixture(t)
@@ -917,7 +1039,7 @@ func TestPublicAttachSerializesWithFinalization(t *testing.T) {
 		}
 		attached := make(chan result, 1)
 		go func() {
-			attachment, err := fixture.adapter.daemon.AttachTerminal(context.Background(), fixture.run.ID, fixture.session.ID, 0)
+			attachment, err := fixture.adapter.daemon.AttachTerminal(context.Background(), fixture.run.ID, fixture.session.ID, fixture.run.Revision, fixture.session.Revision, 0)
 			attached <- result{attachment: attachment, err: err}
 		}()
 		select {
@@ -960,7 +1082,7 @@ func TestPublicAttachSerializesWithFinalization(t *testing.T) {
 		}
 		attached := make(chan result, 1)
 		go func() {
-			attachment, err := fixture.adapter.daemon.AttachTerminal(context.Background(), fixture.run.ID, fixture.session.ID, 0)
+			attachment, err := fixture.adapter.daemon.AttachTerminal(context.Background(), fixture.run.ID, fixture.session.ID, fixture.run.Revision, fixture.session.Revision, 0)
 			attached <- result{attachment: attachment, err: err}
 		}()
 		select {

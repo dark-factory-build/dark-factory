@@ -18,6 +18,8 @@ const (
 	subscriptionCloseLimit = time.Second
 )
 
+var errBackendResult = errors.New("browser: invalid backend result")
+
 type incoming struct {
 	kind websocket.MessageType
 	data []byte
@@ -406,6 +408,10 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 			err = backendErr
 			break
 		}
+		if validationErr := validateHumanReplyResult(body, result); validationErr != nil {
+			current.sendError(frame.ID, browserprotocol.ErrorInternal, false)
+			return false
+		}
 		payload, err = browserprotocol.EncodeHumanRequestReplyResult(frame.ID, result)
 	case browserprotocol.HumanRequestCancelRun:
 		if current.server.terminalBackend == nil {
@@ -416,6 +422,10 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 		if backendErr != nil {
 			err = backendErr
 			break
+		}
+		if validationErr := validateHumanActionResult(body, result); validationErr != nil {
+			current.sendError(frame.ID, browserprotocol.ErrorInternal, false)
+			return false
 		}
 		payload, err = browserprotocol.EncodeHumanRequestActionResult(frame.ID, result)
 	case browserprotocol.TerminalAttach:
@@ -446,6 +456,10 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 			err = backendErr
 			break
 		}
+		if validationErr := validateLeaseResult("acquired", body.RunID, body.SessionID, 0, body.ExpectedRunRevision, body.ExpectedSessionRevision, result); validationErr != nil {
+			current.sendError(frame.ID, browserprotocol.ErrorInternal, false)
+			return false
+		}
 		payload, err = browserprotocol.EncodeTerminalLeaseResult(frame.ID, browserprotocol.TerminalLeaseResult(result))
 	case browserprotocol.TerminalLeaseRenew:
 		if current.server.terminalBackend == nil {
@@ -457,6 +471,10 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 			err = backendErr
 			break
 		}
+		if validationErr := validateLeaseResult("renewed", body.RunID, body.SessionID, body.Generation, body.ExpectedRunRevision, body.ExpectedSessionRevision, result); validationErr != nil {
+			current.sendError(frame.ID, browserprotocol.ErrorInternal, false)
+			return false
+		}
 		payload, err = browserprotocol.EncodeTerminalLeaseResult(frame.ID, browserprotocol.TerminalLeaseResult(result))
 	case browserprotocol.TerminalLeaseRelease:
 		if current.server.terminalBackend == nil {
@@ -467,6 +485,10 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 		if backendErr != nil {
 			err = backendErr
 			break
+		}
+		if validationErr := validateLeaseResult("released", body.RunID, body.SessionID, body.Generation, body.ExpectedRunRevision, body.ExpectedSessionRevision, result); validationErr != nil {
+			current.sendError(frame.ID, browserprotocol.ErrorInternal, false)
+			return false
 		}
 		payload, err = browserprotocol.EncodeTerminalLeaseResult(frame.ID, browserprotocol.TerminalLeaseResult(result))
 	case browserprotocol.TerminalResize:
@@ -560,6 +582,49 @@ func (current *connection) sendUpdate(update StateUpdate) error {
 		return err
 	}
 	return current.sendRestart(*update.Restart, true)
+}
+
+func validateHumanReplyResult(request browserprotocol.HumanRequestReply, result browserprotocol.HumanRequestReplyResult) error {
+	if result.RequestID != request.RequestID || (result.Status != "resolved" && result.Status != "delivery_unknown") {
+		return fmt.Errorf("%w: human reply identity or status", errBackendResult)
+	}
+	if uint64(request.ExpectedRevision) > browserprotocol.MaxSQLiteInteger-2 || result.Revision != request.ExpectedRevision+2 {
+		return fmt.Errorf("%w: human reply revision", errBackendResult)
+	}
+	return nil
+}
+
+func validateHumanActionResult(request browserprotocol.HumanRequestCancelRun, result browserprotocol.HumanRequestActionResult) error {
+	if result.Action != "cancel_run" || result.RunID != request.RunID || result.RequestID != request.RequestID || result.Status != "resolved" {
+		return fmt.Errorf("%w: human action identity or status", errBackendResult)
+	}
+	if uint64(request.ExpectedRunRevision) > browserprotocol.MaxSQLiteInteger-1 || result.RunRevision != request.ExpectedRunRevision+1 {
+		return fmt.Errorf("%w: human action run revision", errBackendResult)
+	}
+	if uint64(request.ExpectedRequestRevision) > browserprotocol.MaxSQLiteInteger-1 || result.RequestRevision != request.ExpectedRequestRevision+1 {
+		return fmt.Errorf("%w: human action request revision", errBackendResult)
+	}
+	return nil
+}
+
+func validateLeaseResult(operation, runID, sessionID string, generation, expectedRun, expectedSession browserprotocol.Decimal, result TerminalLeaseResult) error {
+	if result.Operation != operation || result.RunID != runID || result.SessionID != sessionID || result.Generation == 0 || uint64(result.Generation) > browserprotocol.MaxSQLiteInteger || uint64(result.LastInputSequence) > browserprotocol.MaxSQLiteInteger || uint64(result.RunRevision) > browserprotocol.MaxSQLiteInteger || uint64(result.SessionRevision) > browserprotocol.MaxSQLiteInteger || result.RunRevision != expectedRun || result.SessionRevision != expectedSession {
+		return fmt.Errorf("%w: terminal lease identity or revision", errBackendResult)
+	}
+	if operation != "acquired" && result.Generation != generation {
+		return fmt.Errorf("%w: terminal lease generation", errBackendResult)
+	}
+	if operation == "acquired" && result.LastInputSequence != 0 {
+		return fmt.Errorf("%w: acquired terminal lease sequence", errBackendResult)
+	}
+	if operation == "released" {
+		if result.ExpiresAtMS != nil {
+			return fmt.Errorf("%w: released terminal lease expiry", errBackendResult)
+		}
+	} else if result.ExpiresAtMS == nil || *result.ExpiresAtMS == 0 || uint64(*result.ExpiresAtMS) > browserprotocol.MaxSQLiteInteger {
+		return fmt.Errorf("%w: active terminal lease expiry", errBackendResult)
+	}
+	return nil
 }
 
 func (current *connection) stateHeadRegressed(next browserprotocol.Decimal) bool {

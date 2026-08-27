@@ -10,6 +10,12 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
+// ErrHumanRequestOwnerFence reports that the durable cancel committed but the
+// live owner did not positively acknowledge the follow-up input fence. The
+// action is intentionally not retryable: its durable request/run transition
+// remains authoritative while the owner is converged through its close path.
+var ErrHumanRequestOwnerFence = errors.New("daemon: human request owner fence uncertain")
+
 func (backend *browserBackend) AttachTerminal(ctx context.Context, request browser.TerminalAttachRequest) (browser.TerminalAttachment, error) {
 	_, release, err := backend.authorizePrincipal(ctx, request.Principal, kernel.BrowserCapabilityObserve)
 	if err != nil {
@@ -28,7 +34,15 @@ func (backend *browserBackend) AttachTerminal(ctx context.Context, request brows
 	if err != nil {
 		return nil, browser.ErrStale
 	}
-	attachment, err := backend.owner.AttachTerminal(ctx, runID, sessionID, after)
+	expectedRun, err := browserDecimal(request.Request.ExpectedRunRevision)
+	if err != nil {
+		return nil, browser.ErrStale
+	}
+	expectedSession, err := browserDecimal(request.Request.ExpectedSessionRevision)
+	if err != nil {
+		return nil, browser.ErrStale
+	}
+	attachment, err := backend.owner.AttachTerminal(ctx, runID, sessionID, expectedRun, expectedSession, after)
 	if err != nil {
 		return nil, mapBrowserError(err)
 	}
@@ -192,7 +206,8 @@ func (daemon *Daemon) cancelHumanRequestRun(ctx context.Context, clientID kernel
 		return kernel.Run{}, kernel.HumanRequest{}, err
 	}
 	// Durable revocation is authoritative. The owner-side generation fence is
-	// best-effort only after that commit and never turns the action into a retry.
+	// checked after that commit; failure is visible but never turns the action
+	// into a retry.
 	daemon.attemptMu.Lock()
 	attempt := daemon.attempts[runID]
 	daemon.attemptMu.Unlock()
@@ -200,10 +215,12 @@ func (daemon *Daemon) cancelHumanRequestRun(ctx context.Context, clientID kernel
 		fenceCtx, cancel := context.WithTimeout(context.Background(), liveAttemptEffectLimit)
 		fence := attempt.submitEffect(fenceCtx, terminalEffect{kind: terminalEffectRevokeClient, client: clientID})
 		cancel()
-		// The transaction above already revoked the durable generation and
-		// entered finalizing. A late owner-fence result cannot turn the action
-		// into a retry or report a second outcome after the request was resolved.
-		_ = fence
+		if fenceErr := fence.effectError(-1); fenceErr != nil && !fence.terminalFence {
+			// The transaction above already revoked the durable generation and
+			// entered finalizing. Converge the owner without undoing that commit,
+			// and preserve both the typed fence failure and any close uncertainty.
+			return run, request, errors.Join(ErrHumanRequestOwnerFence, fenceErr, attempt.close())
+		}
 	}
 	return run, request, nil
 }

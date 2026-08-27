@@ -27,6 +27,7 @@ type terminalTestBackend struct {
 	inputCalls    int
 	replyResult   browserprotocol.HumanRequestReplyResult
 	actionResult  browserprotocol.HumanRequestActionResult
+	leaseResult   TerminalLeaseResult
 }
 
 type terminalTestAttachment struct {
@@ -90,13 +91,19 @@ func (backend *terminalTestBackend) currentAttachment(t *testing.T) *terminalTes
 }
 
 func (backend *terminalTestBackend) AcquireTerminalLease(context.Context, Principal, browserprotocol.TerminalLeaseAcquire) (TerminalLeaseResult, error) {
-	return TerminalLeaseResult{}, errors.New("unexpected lease acquire")
+	backend.terminalMu.Lock()
+	defer backend.terminalMu.Unlock()
+	return backend.leaseResult, nil
 }
 func (backend *terminalTestBackend) RenewTerminalLease(context.Context, Principal, browserprotocol.TerminalLeaseRenew) (TerminalLeaseResult, error) {
-	return TerminalLeaseResult{}, errors.New("unexpected lease renew")
+	backend.terminalMu.Lock()
+	defer backend.terminalMu.Unlock()
+	return backend.leaseResult, nil
 }
 func (backend *terminalTestBackend) ReleaseTerminalLease(context.Context, Principal, browserprotocol.TerminalLeaseRelease) (TerminalLeaseResult, error) {
-	return TerminalLeaseResult{}, errors.New("unexpected lease release")
+	backend.terminalMu.Lock()
+	defer backend.terminalMu.Unlock()
+	return backend.leaseResult, nil
 }
 func (backend *terminalTestBackend) ResizeTerminal(context.Context, TerminalResizeRequest) error {
 	return errors.New("unexpected terminal resize")
@@ -445,7 +452,7 @@ func TestTerminalTransportResetAndDetachJoinAttachment(t *testing.T) {
 func TestTerminalTransportHumanRequestEffectDispatch(t *testing.T) {
 	backend := newTerminalTestBackend()
 	backend.authentication.Capabilities = browserprotocol.CapabilityObserve | browserprotocol.CapabilityHumanActions
-	backend.replyResult = browserprotocol.HumanRequestReplyResult{RequestID: requestID, Revision: 2, Status: "resolved"}
+	backend.replyResult = browserprotocol.HumanRequestReplyResult{RequestID: requestID, Revision: 3, Status: "resolved"}
 	backend.actionResult = browserprotocol.HumanRequestActionResult{Action: "cancel_run", RunID: testID, RunRevision: 3, RequestID: requestID, RequestRevision: 2, Status: "resolved"}
 	server := startTerminalServer(t, backend)
 	connection, _ := dialServer(t, server, testOrigin)
@@ -466,6 +473,251 @@ func TestTerminalTransportHumanRequestEffectDispatch(t *testing.T) {
 	frame := readServerFrame(t, connection)
 	if frame.Type != browserprotocol.TypeHumanRequestActionResult || frame.ID != "cancel" || frame.Body.(browserprotocol.HumanRequestActionResult).Action != "cancel_run" {
 		t.Fatalf("cancel result=%+v", frame)
+	}
+}
+
+func TestTerminalTransportRejectsMismatchedHumanEffectResults(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*terminalTestBackend)
+		write     func(*testing.T, *websocket.Conn)
+	}{
+		{
+			name: "reply request id",
+			configure: func(backend *terminalTestBackend) {
+				backend.replyResult = browserprotocol.HumanRequestReplyResult{RequestID: testID, Revision: 3, Status: "resolved"}
+			},
+			write: func(t *testing.T, connection *websocket.Conn) {
+				payload, err := browserprotocol.EncodeHumanRequestReply("reply-request", browserprotocol.HumanRequestReply{RunID: testID, RequestID: requestID, ExpectedRevision: 1, Reply: "yes"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeClientFrame(t, connection, payload)
+			},
+		},
+		{
+			name: "reply revision",
+			configure: func(backend *terminalTestBackend) {
+				backend.replyResult = browserprotocol.HumanRequestReplyResult{RequestID: requestID, Revision: 1, Status: "resolved"}
+			},
+			write: func(t *testing.T, connection *websocket.Conn) {
+				payload, err := browserprotocol.EncodeHumanRequestReply("reply-revision", browserprotocol.HumanRequestReply{RunID: testID, RequestID: requestID, ExpectedRevision: 1, Reply: "yes"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeClientFrame(t, connection, payload)
+			},
+		},
+		{
+			name: "reply status",
+			configure: func(backend *terminalTestBackend) {
+				backend.replyResult = browserprotocol.HumanRequestReplyResult{RequestID: requestID, Revision: 3, Status: "pending"}
+			},
+			write: func(t *testing.T, connection *websocket.Conn) {
+				payload, err := browserprotocol.EncodeHumanRequestReply("reply-status", browserprotocol.HumanRequestReply{RunID: testID, RequestID: requestID, ExpectedRevision: 1, Reply: "yes"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeClientFrame(t, connection, payload)
+			},
+		},
+		{
+			name: "action run id",
+			configure: func(backend *terminalTestBackend) {
+				backend.actionResult = browserprotocol.HumanRequestActionResult{Action: "cancel_run", RunID: projectID, RunRevision: 3, RequestID: requestID, RequestRevision: 2, Status: "resolved"}
+			},
+			write: func(t *testing.T, connection *websocket.Conn) {
+				payload, err := browserprotocol.EncodeHumanRequestCancelRun("action-run", browserprotocol.HumanRequestCancelRun{RunID: testID, RequestID: requestID, ExpectedRequestRevision: 1, ExpectedRunRevision: 2})
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeClientFrame(t, connection, payload)
+			},
+		},
+		{
+			name: "action request id",
+			configure: func(backend *terminalTestBackend) {
+				backend.actionResult = browserprotocol.HumanRequestActionResult{Action: "cancel_run", RunID: testID, RunRevision: 3, RequestID: testID, RequestRevision: 2, Status: "resolved"}
+			},
+			write: func(t *testing.T, connection *websocket.Conn) {
+				payload, err := browserprotocol.EncodeHumanRequestCancelRun("action-request", browserprotocol.HumanRequestCancelRun{RunID: testID, RequestID: requestID, ExpectedRequestRevision: 1, ExpectedRunRevision: 2})
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeClientFrame(t, connection, payload)
+			},
+		},
+		{
+			name: "action revisions",
+			configure: func(backend *terminalTestBackend) {
+				backend.actionResult = browserprotocol.HumanRequestActionResult{Action: "cancel_run", RunID: testID, RunRevision: 2, RequestID: requestID, RequestRevision: 1, Status: "resolved"}
+			},
+			write: func(t *testing.T, connection *websocket.Conn) {
+				payload, err := browserprotocol.EncodeHumanRequestCancelRun("action-revisions", browserprotocol.HumanRequestCancelRun{RunID: testID, RequestID: requestID, ExpectedRequestRevision: 1, ExpectedRunRevision: 2})
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeClientFrame(t, connection, payload)
+			},
+		},
+		{
+			name: "action status",
+			configure: func(backend *terminalTestBackend) {
+				backend.actionResult = browserprotocol.HumanRequestActionResult{Action: "cancel_run", RunID: testID, RunRevision: 3, RequestID: requestID, RequestRevision: 2, Status: "pending"}
+			},
+			write: func(t *testing.T, connection *websocket.Conn) {
+				payload, err := browserprotocol.EncodeHumanRequestCancelRun("action-status", browserprotocol.HumanRequestCancelRun{RunID: testID, RequestID: requestID, ExpectedRequestRevision: 1, ExpectedRunRevision: 2})
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeClientFrame(t, connection, payload)
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			backend := newTerminalTestBackend()
+			backend.authentication.Capabilities = browserprotocol.CapabilityObserve | browserprotocol.CapabilityHumanActions
+			test.configure(backend)
+			server := startTerminalServer(t, backend)
+			connection, _ := dialServer(t, server, testOrigin)
+			authenticateTerminalTest(t, connection)
+			test.write(t, connection)
+			assertError(t, readServerFrame(t, connection), browserprotocol.ErrorInternal)
+			expectTerminalReadError(t, connection)
+		})
+	}
+}
+
+func TestTerminalTransportValidatesLeaseResultRelations(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*terminalTestBackend)
+		write     func(*testing.T, *websocket.Conn)
+	}{
+		{
+			name: "operation",
+			configure: func(backend *terminalTestBackend) {
+				expires := browserprotocol.Decimal(20)
+				backend.leaseResult = TerminalLeaseResult{Operation: "renewed", RunID: testID, SessionID: projectID, Generation: 3, ExpiresAtMS: &expires, RunRevision: 1, SessionRevision: 1}
+			},
+			write: func(t *testing.T, connection *websocket.Conn) {
+				payload, err := browserprotocol.EncodeTerminalLeaseAcquire("lease-operation", browserprotocol.TerminalLeaseAcquire{RunID: testID, SessionID: projectID, ExpectedRunRevision: 1, ExpectedSessionRevision: 1})
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeClientFrame(t, connection, payload)
+			},
+		},
+		{
+			name: "run session",
+			configure: func(backend *terminalTestBackend) {
+				expires := browserprotocol.Decimal(20)
+				backend.leaseResult = TerminalLeaseResult{Operation: "acquired", RunID: testID, SessionID: testID, Generation: 3, ExpiresAtMS: &expires, RunRevision: 1, SessionRevision: 1}
+			},
+			write: func(t *testing.T, connection *websocket.Conn) {
+				payload, err := browserprotocol.EncodeTerminalLeaseAcquire("lease-identity", browserprotocol.TerminalLeaseAcquire{RunID: testID, SessionID: projectID, ExpectedRunRevision: 1, ExpectedSessionRevision: 1})
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeClientFrame(t, connection, payload)
+			},
+		},
+		{
+			name: "generation",
+			configure: func(backend *terminalTestBackend) {
+				expires := browserprotocol.Decimal(20)
+				backend.leaseResult = TerminalLeaseResult{Operation: "renewed", RunID: testID, SessionID: projectID, Generation: 4, ExpiresAtMS: &expires, RunRevision: 1, SessionRevision: 1}
+			},
+			write: func(t *testing.T, connection *websocket.Conn) {
+				payload, err := browserprotocol.EncodeTerminalLeaseRenew("lease-generation", browserprotocol.TerminalLeaseRenew{RunID: testID, SessionID: projectID, Generation: 3, ExpectedRunRevision: 1, ExpectedSessionRevision: 1})
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeClientFrame(t, connection, payload)
+			},
+		},
+		{
+			name: "revisions",
+			configure: func(backend *terminalTestBackend) {
+				expires := browserprotocol.Decimal(20)
+				backend.leaseResult = TerminalLeaseResult{Operation: "renewed", RunID: testID, SessionID: projectID, Generation: 3, ExpiresAtMS: &expires, RunRevision: 2, SessionRevision: 1}
+			},
+			write: func(t *testing.T, connection *websocket.Conn) {
+				payload, err := browserprotocol.EncodeTerminalLeaseRenew("lease-revisions", browserprotocol.TerminalLeaseRenew{RunID: testID, SessionID: projectID, Generation: 3, ExpectedRunRevision: 1, ExpectedSessionRevision: 1})
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeClientFrame(t, connection, payload)
+			},
+		},
+		{
+			name: "expiry",
+			configure: func(backend *terminalTestBackend) {
+				backend.leaseResult = TerminalLeaseResult{Operation: "released", RunID: testID, SessionID: projectID, Generation: 3, ExpiresAtMS: pointerDecimal(20), RunRevision: 1, SessionRevision: 1}
+			},
+			write: func(t *testing.T, connection *websocket.Conn) {
+				payload, err := browserprotocol.EncodeTerminalLeaseRelease("lease-expiry", browserprotocol.TerminalLeaseRelease{RunID: testID, SessionID: projectID, Generation: 3, ExpectedRunRevision: 1, ExpectedSessionRevision: 1})
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeClientFrame(t, connection, payload)
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			backend := newTerminalTestBackend()
+			backend.authentication.Capabilities = browserprotocol.CapabilityObserve | browserprotocol.CapabilityTerminalInput
+			test.configure(backend)
+			server := startTerminalServer(t, backend)
+			connection, _ := dialServer(t, server, testOrigin)
+			authenticateTerminalTest(t, connection)
+			test.write(t, connection)
+			assertError(t, readServerFrame(t, connection), browserprotocol.ErrorInternal)
+			expectTerminalReadError(t, connection)
+		})
+	}
+}
+
+func pointerDecimal(value browserprotocol.Decimal) *browserprotocol.Decimal { return &value }
+
+func TestTerminalTransportAcceptsExactLeaseResults(t *testing.T) {
+	backend := newTerminalTestBackend()
+	backend.authentication.Capabilities = browserprotocol.CapabilityObserve | browserprotocol.CapabilityTerminalInput
+	server := startTerminalServer(t, backend)
+	connection, _ := dialServer(t, server, testOrigin)
+	authenticateTerminalTest(t, connection)
+
+	expires := browserprotocol.Decimal(20)
+	backend.leaseResult = TerminalLeaseResult{Operation: "acquired", RunID: testID, SessionID: projectID, Generation: 3, ExpiresAtMS: &expires, RunRevision: 1, SessionRevision: 1}
+	acquire, err := browserprotocol.EncodeTerminalLeaseAcquire("lease-acquire", browserprotocol.TerminalLeaseAcquire{RunID: testID, SessionID: projectID, ExpectedRunRevision: 1, ExpectedSessionRevision: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeClientFrame(t, connection, acquire)
+	if frame := readServerFrame(t, connection); frame.Type != browserprotocol.TypeTerminalLeaseResult || frame.Body.(browserprotocol.TerminalLeaseResult).Operation != "acquired" {
+		t.Fatalf("acquire result=%+v", frame)
+	}
+
+	backend.leaseResult = TerminalLeaseResult{Operation: "renewed", RunID: testID, SessionID: projectID, Generation: 3, ExpiresAtMS: &expires, LastInputSequence: 4, RunRevision: 1, SessionRevision: 1}
+	renew, err := browserprotocol.EncodeTerminalLeaseRenew("lease-renew", browserprotocol.TerminalLeaseRenew{RunID: testID, SessionID: projectID, Generation: 3, ExpectedRunRevision: 1, ExpectedSessionRevision: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeClientFrame(t, connection, renew)
+	if frame := readServerFrame(t, connection); frame.Type != browserprotocol.TypeTerminalLeaseResult || frame.Body.(browserprotocol.TerminalLeaseResult).Operation != "renewed" {
+		t.Fatalf("renew result=%+v", frame)
+	}
+
+	backend.leaseResult = TerminalLeaseResult{Operation: "released", RunID: testID, SessionID: projectID, Generation: 3, LastInputSequence: 4, RunRevision: 1, SessionRevision: 1}
+	release, err := browserprotocol.EncodeTerminalLeaseRelease("lease-release", browserprotocol.TerminalLeaseRelease{RunID: testID, SessionID: projectID, Generation: 3, ExpectedRunRevision: 1, ExpectedSessionRevision: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeClientFrame(t, connection, release)
+	if frame := readServerFrame(t, connection); frame.Type != browserprotocol.TypeTerminalLeaseResult || frame.Body.(browserprotocol.TerminalLeaseResult).Operation != "released" {
+		t.Fatalf("release result=%+v", frame)
 	}
 }
 
