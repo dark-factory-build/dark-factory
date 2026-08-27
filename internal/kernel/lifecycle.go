@@ -426,9 +426,9 @@ func (store *Store) MarkTerminalSessionUnresolved(ctx context.Context, runID Run
 	return commitTerminalSessionMutation(ctx, tx, run, session, expectedRun, at)
 }
 
-// CloseRecoveredTerminalSession requires both recovered absence exits and
-// released provider ownership. Recovered numeric identities never authorize
-// a close by themselves.
+// CloseRecoveredTerminalSession closes only a pre-activation unresolved
+// session. Activated recovery uses CloseRecoveredActiveTerminalSession so the
+// live-owner close rules cannot be widened accidentally.
 func (store *Store) CloseRecoveredTerminalSession(ctx context.Context, runID RunID, sessionID TerminalSessionID, expectedRun Revision, expectedSession Revision, at UnixMillis) (TerminalSession, error) {
 	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
@@ -442,10 +442,36 @@ func (store *Store) CloseRecoveredTerminalSession(ctx context.Context, runID Run
 	if run.Phase == RunFinalizing && run.Revision.Int64() == expectedRun.Int64()+1 && session.Revision.Int64() == expectedSession.Int64()+1 && session.State == TerminalSessionClosed {
 		return session, tx.Rollback(nil)
 	}
-	if run.Revision != expectedRun || session.Revision != expectedSession || at.Int64() < run.UpdatedAt.Int64() || at.Int64() < session.UpdatedAt.Int64() || session.State != TerminalSessionUnresolved {
+	if run.Revision != expectedRun || session.Revision != expectedSession || at.Int64() < run.UpdatedAt.Int64() || at.Int64() < session.UpdatedAt.Int64() || session.State != TerminalSessionUnresolved || session.ActivatedAt != nil {
 		return TerminalSession{}, tx.Rollback(ErrRevisionConflict)
 	}
 	if err := terminalSessionCloseEvidence(run, relationships.resources, session); err != nil {
+		return TerminalSession{}, tx.Rollback(err)
+	}
+	return commitClosedTerminalSession(ctx, tx, run, session, expectedRun, expectedSession, at)
+}
+
+// CloseRecoveredActiveTerminalSession closes an activated session after a
+// restart only when Store already proves the exact process owners released.
+// Persisted exit rows alone are not absence evidence: all three process
+// resources must have crossed their guarded ReleaseResource transitions.
+func (store *Store) CloseRecoveredActiveTerminalSession(ctx context.Context, runID RunID, sessionID TerminalSessionID, expectedRun Revision, expectedSession Revision, at UnixMillis) (TerminalSession, error) {
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return TerminalSession{}, err
+	}
+	defer tx.Close()
+	run, session, relationships, err := loadTerminalSessionMutation(ctx, tx, runID, sessionID)
+	if err != nil {
+		return TerminalSession{}, tx.Rollback(err)
+	}
+	if run.Phase == RunFinalizing && run.Revision.Int64() == expectedRun.Int64()+1 && session.Revision.Int64() == expectedSession.Int64()+1 && session.State == TerminalSessionClosed {
+		return session, tx.Rollback(nil)
+	}
+	if run.Revision != expectedRun || session.Revision != expectedSession || at.Int64() < run.UpdatedAt.Int64() || at.Int64() < session.UpdatedAt.Int64() || session.State != TerminalSessionUnresolved || session.ActivatedAt == nil {
+		return TerminalSession{}, tx.Rollback(ErrRevisionConflict)
+	}
+	if err := recoveredActiveTerminalSessionCloseEvidence(run, relationships.resources, session); err != nil {
 		return TerminalSession{}, tx.Rollback(err)
 	}
 	return commitClosedTerminalSession(ctx, tx, run, session, expectedRun, expectedSession, at)
@@ -553,12 +579,44 @@ func terminalSessionCloseEvidence(run Run, resources []Resource, session Termina
 			}
 			return nil
 		}
-		if run.ProviderExit == nil || !run.ProviderExit.RecoveredAbsence() || run.RunnerExit == nil || !run.RunnerExit.RecoveredAbsence() || providerProcess.Identity.Empty() || !resourceIdentityEqual(providerProcess.Identity, providerGroup.Identity) || runner.Identity.Empty() {
-			return ErrConflict
-		}
-		return nil
+		return ErrConflict
 	}
 	if session.State == TerminalSessionActive && (run.ProviderExit == nil || run.ProviderExit.RecoveredAbsence() || run.RunnerExit == nil || run.RunnerExit.RecoveredAbsence() || providerProcess.Identity.Empty() || !resourceIdentityEqual(providerProcess.Identity, providerGroup.Identity) || runner.Identity.Empty()) {
+		return ErrConflict
+	}
+	return nil
+}
+
+func recoveredActiveTerminalSessionCloseEvidence(run Run, resources []Resource, session TerminalSession) error {
+	if run.Phase != RunFinalizing || run.CredentialRevokedAt == nil || run.FinalizingAt == nil || session.RunID != run.ID || session.State != TerminalSessionUnresolved || session.ActivatedAt == nil || session.LeaseClientID != nil || session.LeaseExpiresAt != nil || session.LastInputSequence != 0 || !exactResourceSet(resources, false) {
+		return ErrConflict
+	}
+	var runtimeRoot, providerProcess, providerGroup, runnerProcess *Resource
+	for index := range resources {
+		resource := &resources[index]
+		if resource.RunID != run.ID {
+			return ErrConflict
+		}
+		switch resource.Kind {
+		case ResourceRuntimeRoot:
+			runtimeRoot = resource
+		case ResourceProviderProcess:
+			providerProcess = resource
+		case ResourceProviderGroup:
+			providerGroup = resource
+		case ResourceRunnerProcess:
+			runnerProcess = resource
+		}
+	}
+	if runtimeRoot == nil || runtimeRoot.Identity.Empty() || runtimeRoot.Path == "" || runtimeRoot.ActivatedAt == nil || (runtimeRoot.State != ResourceReleasing && runtimeRoot.State != ResourceUnresolved && runtimeRoot.State != ResourceReleased) || providerProcess == nil || providerGroup == nil || runnerProcess == nil || run.ProviderExit == nil || run.RunnerExit == nil {
+		return ErrConflict
+	}
+	for _, resource := range []*Resource{providerProcess, providerGroup, runnerProcess} {
+		if resource.State != ResourceReleased || resource.Identity.Empty() || resource.ActivatedAt == nil || resource.ReleasedAt == nil {
+			return ErrConflict
+		}
+	}
+	if !resourceIdentityEqual(providerProcess.Identity, providerGroup.Identity) || *providerProcess.ActivatedAt != *providerGroup.ActivatedAt || run.ProviderExit.At().Int64() < providerProcess.ActivatedAt.Int64() || run.RunnerExit.At().Int64() < runnerProcess.ActivatedAt.Int64() || providerProcess.ReleasedAt.Int64() < run.ProviderExit.At().Int64() || providerGroup.ReleasedAt.Int64() < run.ProviderExit.At().Int64() || runnerProcess.ReleasedAt.Int64() < run.RunnerExit.At().Int64() || !run.ProviderExit.valid() || !run.RunnerExit.valid() {
 		return ErrConflict
 	}
 	return nil

@@ -297,7 +297,7 @@ func TestRecoveredRunnerAbsenceFromRunningRunRevokesAuthorityAndRoundTrips(t *te
 		t.Fatalf("unresolved recovered reload = %+v, found=%v, err=%v", fresh, found, err)
 	}
 	session = terminalSessionForRunTest(t, reopened, run.ID)
-	if _, err := reopened.CloseRecoveredTerminalSession(context.Background(), run.ID, session.ID, fresh.Revision, session.Revision, mustTime(t, 60)); err != nil {
+	if _, err := reopened.CloseRecoveredActiveTerminalSession(context.Background(), run.ID, session.ID, fresh.Revision, session.Revision, mustTime(t, 60)); err != nil {
 		t.Fatal(err)
 	}
 	fresh, found, err = reopened.Run(context.Background(), run.ID)
@@ -425,7 +425,11 @@ func closeTerminalSessionAtCurrent(t testing.TB, store *Store, runID RunID, at i
 	case TerminalSessionActive:
 		_, err = store.CloseActiveTerminalSession(context.Background(), runID, session.ID, run.Revision, session.Revision, mustTimeTB(t, at))
 	case TerminalSessionUnresolved:
-		_, err = store.CloseRecoveredTerminalSession(context.Background(), runID, session.ID, run.Revision, session.Revision, mustTimeTB(t, at))
+		if session.ActivatedAt == nil {
+			_, err = store.CloseRecoveredTerminalSession(context.Background(), runID, session.ID, run.Revision, session.Revision, mustTimeTB(t, at))
+		} else {
+			_, err = store.CloseRecoveredActiveTerminalSession(context.Background(), runID, session.ID, run.Revision, session.Revision, mustTimeTB(t, at))
+		}
 	case TerminalSessionClosed:
 		return run
 	}

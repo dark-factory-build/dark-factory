@@ -178,6 +178,160 @@ func TestTerminalSessionUnresolvedCannotTerminalize(t *testing.T) {
 	}
 }
 
+func TestRecoveredActiveTerminalCloseRequiresReleasedExactOwners(t *testing.T) {
+	tests := []struct {
+		name         string
+		providerExit string
+		runnerExit   string
+	}{
+		{name: "provider code runner absence", providerExit: "code", runnerExit: "absence"},
+		{name: "provider absence runner code", providerExit: "absence", runnerExit: "code"},
+		{name: "both absence", providerExit: "absence", runnerExit: "absence"},
+		{name: "both code", providerExit: "code", runnerExit: "code"},
+		{name: "provider signal runner absence", providerExit: "signal", runnerExit: "absence"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store, run, keys := runningOrchestratorRun(t)
+			defer store.Close()
+			proposal, _ := NewFailureProposal(FailureInternal, "restart")
+			current, err := store.ProposeAttemptOutcome(context.Background(), keys.AttemptDigest, proposal, mustTime(t, 40))
+			if err != nil {
+				t.Fatal(err)
+			}
+			providerExit := recoveredCloseExit(t, test.providerExit, 1, 41)
+			current, err = store.ObserveProviderExit(context.Background(), run.ID, current.Revision, registeredProcessIdentity(t, store, run.ID, ResourceProviderProcess), providerExit, mustTime(t, 41))
+			if err != nil {
+				t.Fatal(err)
+			}
+			runnerExit := recoveredCloseExit(t, test.runnerExit, 2, 42)
+			current, err = store.ObserveRunnerExit(context.Background(), run.ID, current.Revision, registeredProcessIdentity(t, store, run.ID, ResourceRunnerProcess), runnerExit, mustTime(t, 42))
+			if err != nil {
+				t.Fatal(err)
+			}
+			session := terminalSessionForRunTest(t, store, run.ID)
+			if _, err := store.CloseRecoveredActiveTerminalSession(context.Background(), run.ID, session.ID, current.Revision, session.Revision, mustTime(t, 43)); !errors.Is(err, ErrRevisionConflict) {
+				t.Fatalf("active session recovered close = %v", err)
+			}
+			unresolved, err := store.MarkTerminalSessionUnresolved(context.Background(), run.ID, session.ID, current.Revision, session.Revision, "restart", mustTime(t, 43))
+			if err != nil {
+				t.Fatal(err)
+			}
+			current, _, err = store.Run(context.Background(), run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.CloseRecoveredActiveTerminalSession(context.Background(), run.ID, session.ID, current.Revision, unresolved.Revision, mustTime(t, 44)); !errors.Is(err, ErrConflict) {
+				t.Fatalf("exit rows without released resources = %v", err)
+			}
+			releaseAllRunResources(t, store, run.ID, 50)
+			current, _, err = store.Run(context.Background(), run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			session = terminalSessionForRunTest(t, store, run.ID)
+			if _, err := store.CloseRecoveredTerminalSession(context.Background(), run.ID, session.ID, current.Revision, session.Revision, mustTime(t, 59)); !errors.Is(err, ErrRevisionConflict) {
+				t.Fatalf("activated recovery used pre-activation close = %v", err)
+			}
+			closed, err := store.CloseRecoveredActiveTerminalSession(context.Background(), run.ID, session.ID, current.Revision, session.Revision, mustTime(t, 60))
+			if err != nil || closed.State != TerminalSessionClosed {
+				t.Fatalf("mixed recovered close = %+v, %v", closed, err)
+			}
+			replayed, err := store.CloseRecoveredActiveTerminalSession(context.Background(), run.ID, session.ID, current.Revision, session.Revision, mustTime(t, 60))
+			if err != nil || replayed.Revision != closed.Revision {
+				t.Fatalf("mixed recovered close replay = %+v, %v", replayed, err)
+			}
+			current, _, err = store.Run(context.Background(), run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			terminal, err := store.FinalizeRun(context.Background(), run.ID, current.Revision, mustTime(t, 70))
+			if err != nil || terminal.Phase != RunTerminal {
+				t.Fatalf("mixed recovered finalization = %+v, %v", terminal, err)
+			}
+		})
+	}
+}
+
+func TestRecoveredActiveTerminalCloseRequiresResetLeaseAndInput(t *testing.T) {
+	store, run, keys := runningOrchestratorRun(t)
+	defer store.Close()
+	session := terminalSessionForRunTest(t, store, run.ID)
+	boot := browserTestBoot(t, 241)
+	client := pairBrowserClient(t, store, mintBrowserChallenge(t, store, 241, boot, 30, 100, BrowserCapabilityObserve|BrowserCapabilityTerminalInput), boot, browserTestID(t, 241), browserKey(t), 31)
+	lease, err := store.AcquireTerminalLease(context.Background(), run.ID, session.ID, client.ID, run.Revision, session.Revision, mustTime(t, 31))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReserveTerminalInputSequence(context.Background(), run.ID, session.ID, client.ID, lease.Generation, 1, run.Revision, session.Revision, mustTime(t, 32)); err != nil {
+		t.Fatal(err)
+	}
+	proposal, _ := NewFailureProposal(FailureInternal, "restart")
+	current, err := store.ProposeAttemptOutcome(context.Background(), keys.AttemptDigest, proposal, mustTime(t, 40))
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerExit := recoveredCloseExit(t, "code", 1, 41)
+	current, err = store.ObserveProviderExit(context.Background(), run.ID, current.Revision, registeredProcessIdentity(t, store, run.ID, ResourceProviderProcess), providerExit, mustTime(t, 41))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runnerExit := recoveredCloseExit(t, "absence", 2, 42)
+	current, err = store.ObserveRunnerExit(context.Background(), run.ID, current.Revision, registeredProcessIdentity(t, store, run.ID, ResourceRunnerProcess), runnerExit, mustTime(t, 42))
+	if err != nil {
+		t.Fatal(err)
+	}
+	session = terminalSessionForRunTest(t, store, run.ID)
+	if _, err := store.MarkTerminalSessionUnresolved(context.Background(), run.ID, session.ID, current.Revision, session.Revision, "restart", mustTime(t, 43)); err != nil {
+		t.Fatal(err)
+	}
+	releaseAllRunResources(t, store, run.ID, 50)
+	current, _, err = store.Run(context.Background(), run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session = terminalSessionForRunTest(t, store, run.ID)
+	if session.LeaseClientID != nil || session.LeaseExpiresAt != nil || session.LastInputSequence != 0 {
+		t.Fatalf("finalizing retained terminal authority: %+v", session)
+	}
+	resources := resourcesForRunTest(t, store, run.ID)
+	leased := session
+	leased.LeaseClientID = &client.ID
+	expires := mustTime(t, 80)
+	leased.LeaseExpiresAt = &expires
+	if err := recoveredActiveTerminalSessionCloseEvidence(current, resources, leased); !errors.Is(err, ErrConflict) {
+		t.Fatalf("lease survived evidence guard = %v", err)
+	}
+	input := session
+	input.LastInputSequence = 1
+	if err := recoveredActiveTerminalSessionCloseEvidence(current, resources, input); !errors.Is(err, ErrConflict) {
+		t.Fatalf("input survived evidence guard = %v", err)
+	}
+	if _, err := store.CloseRecoveredActiveTerminalSession(context.Background(), run.ID, session.ID, current.Revision, session.Revision, mustTime(t, 61)); err != nil {
+		t.Fatalf("close after finalizing authority reset = %v", err)
+	}
+}
+
+func recoveredCloseExit(t *testing.T, kind string, sequence uint64, at int64) ProcessExit {
+	t.Helper()
+	var exit ProcessExit
+	var err error
+	switch kind {
+	case "code":
+		exit, err = NewProcessExitCode(sequence, 0, mustTime(t, at))
+	case "signal":
+		exit, err = NewProcessExitSignal(sequence, 15, mustTime(t, at))
+	case "absence":
+		exit, err = NewProcessExitRecoveredAbsence(sequence, mustTime(t, at))
+	default:
+		t.Fatalf("unknown exit kind %q", kind)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return exit
+}
+
 func TestTerminalSessionChronologyCorruptionFailsClosed(t *testing.T) {
 	tests := []struct {
 		name   string
