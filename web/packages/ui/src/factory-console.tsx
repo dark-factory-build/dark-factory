@@ -1,16 +1,16 @@
-import type { ProtocolError, SessionError, SessionStatus, StateView } from "@dark-factory/client";
-import type { ReactNode } from "react";
+import type { FormEvent, ReactNode } from "react";
+import type { FactoryAppSnapshot, FactoryHumanRequestView } from "./factory-app-controller.js";
 
-export type FactoryConsoleProps = {
-  /** The host owns BrowserClient creation, lifetime, and callback wiring. */
-  status: SessionStatus;
-  state: StateView | undefined;
-  error?: SessionError | ProtocolError;
-  /** Retry is deliberately the only control in this read-only slice. */
+export type FactoryConsoleProps = FactoryAppSnapshot & {
   onRetry?: () => void;
+  onSelectHumanRequest?: (request: FactoryHumanRequestView["request"]) => void;
+  onHumanReplyChange?: (reply: string) => void;
+  onReplyHumanRequest?: () => void;
+  onCancelHumanRequest?: () => void;
+  onCloseHumanRequest?: () => void;
 };
 
-const STATUS_LABELS: Record<SessionStatus, string> = {
+const STATUS_LABELS: Record<FactoryAppSnapshot["status"], string> = {
   idle: "IDLE",
   connecting: "CONNECTING",
   authenticating: "AUTHENTICATING",
@@ -39,8 +39,19 @@ const ERROR_LABELS = new Map<string, string>([
   ["internal", "The server could not complete the request."],
 ]);
 
-export function FactoryConsole({ status, state, error, onRetry }: FactoryConsoleProps) {
-  const projects = state === undefined ? undefined : state.projects;
+export function FactoryConsole({
+  status,
+  state,
+  error,
+  selectedHumanRequest,
+  onRetry,
+  onSelectHumanRequest,
+  onHumanReplyChange,
+  onReplyHumanRequest,
+  onCancelHumanRequest,
+  onCloseHumanRequest,
+}: FactoryConsoleProps) {
+  const projects = state?.projects;
   const canRetry = onRetry !== undefined && (status === "idle" || status === "closed");
 
   return (
@@ -121,20 +132,93 @@ export function FactoryConsole({ status, state, error, onRetry }: FactoryConsole
       <CollectionSection title="NEEDS YOU" count={state?.humanRequests.size ?? 0}>
         {state === undefined ? <EmptyItem label="WAITING FOR SNAPSHOT" /> : state.humanRequests.size === 0 ? <EmptyItem label="NO OPEN REQUESTS" /> : (
           <ul className="dfFactoryConsole__list dfFactoryConsole__list--requests">
-            {[...state.humanRequests.values()].map((request) => (
-              <li className="dfFactoryConsole__card" key={request.id}>
-                <div className="dfFactoryConsole__cardTitle">
-                  <strong>REQUEST {shortID(request.id)}</strong>
-                  <span>{request.status.toUpperCase()}</span>
-                </div>
-                <p>{projectLabel(projects, request.project_id)} · TASK {shortID(request.task_id)}</p>
-                <small>Awaiting operator response</small>
-              </li>
-            ))}
+            {[...state.humanRequests.values()].map((request) => {
+              const selected = selectedHumanRequest?.request.id === request.id;
+              return (
+                <li className="dfFactoryConsole__card" key={request.id}>
+                  <div className="dfFactoryConsole__cardTitle">
+                    <strong>REQUEST {shortID(request.id)}</strong>
+                    <span>{request.status.toUpperCase()}</span>
+                  </div>
+                  <p>{projectLabel(projects, request.project_id)} · TASK {shortID(request.task_id)}</p>
+                  <small>Awaiting operator response</small>
+                  {onSelectHumanRequest === undefined ? null : (
+                    <button type="button" aria-pressed={selected} disabled={selected || status !== "ready"} onClick={() => onSelectHumanRequest(request)}>
+                      {selected ? "REQUEST OPEN" : "VIEW REQUEST"}
+                    </button>
+                  )}
+                </li>
+              );
+            })}
           </ul>
+        )}
+        {selectedHumanRequest === undefined ? null : (
+          <HumanRequestPanel
+            selected={selectedHumanRequest}
+            project={projectLabel(projects, selectedHumanRequest.request.project_id)}
+            agent={entityLabel(state?.agents, selectedHumanRequest.request.agent_id, "AGENT")}
+            task={entityLabel(state?.tasks, selectedHumanRequest.request.task_id, "TASK")}
+            onReplyChange={onHumanReplyChange}
+            onReply={onReplyHumanRequest}
+            onCancel={onCancelHumanRequest}
+            onClose={onCloseHumanRequest}
+          />
         )}
       </CollectionSection>
     </main>
+  );
+}
+
+function HumanRequestPanel({
+  selected,
+  project,
+  agent,
+  task,
+  onReplyChange,
+  onReply,
+  onCancel,
+  onClose,
+}: {
+  selected: FactoryHumanRequestView;
+  project: string;
+  agent: string;
+  task: string;
+  onReplyChange?: (reply: string) => void;
+  onReply?: () => void;
+  onCancel?: () => void;
+  onClose?: () => void;
+}) {
+  const busy = selected.phase === "replying" || selected.phase === "cancelling";
+  const submit = (event: FormEvent) => { event.preventDefault(); onReply?.(); };
+  return (
+    <article className="dfFactoryConsole__humanRequest" aria-label="Selected human request" aria-live="polite">
+      <div className="dfFactoryConsole__cardTitle">
+        <strong>{agent} needs you</strong>
+        <span>{selected.phase.toUpperCase()}</span>
+      </div>
+      <p>{project} · {task}</p>
+      {selected.phase === "loading" ? <p className="dfFactoryConsole__empty">LOADING PRIVATE REQUEST…</p> : (
+        <>
+          <p className="dfFactoryConsole__question">{selected.question}</p>
+          {selected.canReply ? (
+            <form className="dfFactoryConsole__reply" aria-label="Reply to human request" onSubmit={submit}>
+              <label htmlFor="dfHumanRequestReply">WRITE A REPLY</label>
+              <textarea
+                id="dfHumanRequestReply"
+                value={selected.reply}
+                disabled={busy || onReplyChange === undefined}
+                onChange={(event) => onReplyChange?.(event.currentTarget.value)}
+              />
+              <button type="submit" disabled={busy || onReply === undefined}>{selected.phase === "replying" ? "SENDING…" : "SEND REPLY"}</button>
+            </form>
+          ) : null}
+          <div className="dfFactoryConsole__humanActions">
+            {selected.canCancel ? <button type="button" disabled={busy || onCancel === undefined} onClick={onCancel}>CANCEL RUN</button> : null}
+            <button type="button" disabled={busy || onClose === undefined} onClick={onClose}>CLOSE</button>
+          </div>
+        </>
+      )}
+    </article>
   );
 }
 
@@ -160,6 +244,11 @@ function EmptyItem({ label }: { label: string }) {
 
 function projectLabel(projects: ReadonlyMap<string, { name: string }> | undefined, projectID: string): string {
   return projects?.get(projectID)?.name ?? `PROJECT ${shortID(projectID)}`;
+}
+
+function entityLabel(entities: ReadonlyMap<string, { name?: string; title?: string }> | undefined, id: string, fallback: string): string {
+  const entity = entities?.get(id);
+  return entity?.name ?? entity?.title ?? `${fallback} ${shortID(id)}`;
 }
 
 function shortID(value: string): string {

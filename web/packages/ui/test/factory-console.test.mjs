@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createElement } from "react";
+import { createElement, isValidElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ProtocolError, SessionError } from "@dark-factory/client";
-import { FactoryConsole } from "../dist/src/index.js";
+import { FactoryApp, FactoryConsole } from "../dist/src/index.js";
 import { fixtureState } from "../../../fixtures/state.mjs";
 
 const ids = {
@@ -132,3 +132,83 @@ test("an unavailable snapshot is explicit and does not invent runtime state", ()
   assert.match(markup, /WAITING FOR SNAPSHOT/);
   assert.equal(markup.includes("ACTIVE RUNS"), false);
 });
+
+test("FactoryApp server-renders without reading browser globals", () => {
+  const markup = renderToStaticMarkup(createElement(FactoryApp));
+  assert.match(markup, /Factory operator console/);
+  assert.match(markup, />IDLE</);
+  assert.match(markup, /NO SNAPSHOT/);
+});
+
+test("selected hostile private detail is escaped and actions remain semantic", () => {
+  const request = fixtureState.humanRequests.get(ids.request);
+  const hostile = "<script>steal(authority)</script>";
+  const markup = render({
+    selectedHumanRequest: {
+      request,
+      phase: "ready",
+      question: hostile,
+      canReply: true,
+      canCancel: true,
+      reply: "<reply>",
+    },
+    onHumanReplyChange: () => {},
+    onReplyHumanRequest: () => {},
+    onCancelHumanRequest: () => {},
+    onCloseHumanRequest: () => {},
+  });
+  assert.match(markup, /aria-label="Selected human request"/);
+  assert.match(markup, /aria-label="Reply to human request"/);
+  assert.match(markup, /&lt;script&gt;steal\(authority\)&lt;\/script&gt;/);
+  assert.equal(markup.includes("<script>"), false);
+  assert.match(markup, /<textarea[^>]*>&lt;reply&gt;<\/textarea>/);
+  assert.match(markup, /SEND REPLY/);
+  assert.match(markup, /CANCEL RUN/);
+  assert.equal(markup.includes("expectedRunRevision"), false);
+});
+
+test("request, reply, cancel, and close controls forward only presentation intent", () => {
+  const request = fixtureState.humanRequests.get(ids.request);
+  const calls = [];
+  const baseProps = {
+    status: "ready",
+    state: baseState(),
+    onSelectHumanRequest: (value) => calls.push(["select", value]),
+    onHumanReplyChange: (value) => calls.push(["change", value]),
+    onReplyHumanRequest: () => calls.push(["reply"]),
+    onCancelHumanRequest: () => calls.push(["cancel"]),
+    onCloseHumanRequest: () => calls.push(["close"]),
+  };
+
+  const requestElements = expand(FactoryConsole(baseProps));
+  requestElements.find((element) => element.type === "button" && element.props.children === "VIEW REQUEST").props.onClick();
+  assert.equal(calls[0][0], "select");
+  assert.equal(calls[0][1], request);
+
+  const selectedElements = expand(FactoryConsole({
+    ...baseProps,
+    selectedHumanRequest: { request, phase: "ready", question: "Proceed?", canReply: true, canCancel: true, reply: "" },
+  }));
+  selectedElements.find((element) => element.type === "textarea").props.onChange({ currentTarget: { value: "Proceed." } });
+  let prevented = false;
+  selectedElements.find((element) => element.type === "form").props.onSubmit({ preventDefault: () => { prevented = true; } });
+  selectedElements.find((element) => element.type === "button" && element.props.children === "CANCEL RUN").props.onClick();
+  selectedElements.find((element) => element.type === "button" && element.props.children === "CLOSE").props.onClick();
+  assert.equal(prevented, true);
+  assert.deepEqual(calls.slice(1), [["change", "Proceed."], ["reply"], ["cancel"], ["close"]]);
+});
+
+function expand(node, result = []) {
+  if (Array.isArray(node)) {
+    for (const child of node) expand(child, result);
+    return result;
+  }
+  if (!isValidElement(node)) return result;
+  if (typeof node.type === "function") {
+    expand(node.type(node.props), result);
+    return result;
+  }
+  result.push(node);
+  expand(node.props.children, result);
+  return result;
+}

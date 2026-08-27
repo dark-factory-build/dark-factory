@@ -4477,3 +4477,23 @@ Real Go/TypeScript browser PTY lifecycle candidate on 2026-08-27:
   lease renewal interval. Renewal scheduling, correlation, expiry fencing and
   retry prohibition remain covered by the deterministic TypeScript lifecycle
   tests; this E2E does not claim a real-time renewal composition proof.
+
+Public UI lifecycle and HumanRequest candidate on 2026-08-27:
+
+- The MIT `@dark-factory/ui` package now owns one `FactoryApp` effect and one
+  DOM-free concrete controller. Pairing is consumed and scrubbed before client
+  construction; the exact loopback URL supplies Host while the actual page
+  supplies Origin. The controller owns connect/retry/close, canonical state,
+  finite errors and generation fencing. Server rendering imports and renders
+  without reading `window`, history, IndexedDB or WebSocket.
+- `FactoryConsole` remains controlled and presentational. It may select at most
+  one exact public HumanRequest revision, while the controller alone retains
+  the returned private detail and daemon-minted `cancel_run` descriptor. View
+  does not resolve; reply and cancel each consume that exact authority once.
+  Reconnect, deletion, revision change and unmount clear or fence private state.
+  React never constructs a request destination, revision or action argument.
+- DOM-free lifecycle and authority tests, hostile-text/accessibility rendering,
+  SSR, packed-consumer import, UI/dev typecheck and the production Vite build
+  are the causal gate for this checkpoint. Interactive xterm lifecycle remains
+  the next separate reviewed UI commit; no terminal abstraction or dependency
+  enters this slice.

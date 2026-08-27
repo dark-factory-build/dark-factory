@@ -4,24 +4,3 @@ body,
   min-height: 100%;
   margin: 0;
 }
-
-.dfDevFixture__label {
-  position: fixed;
-  top: 0.5rem;
-  left: 0.75rem;
-  z-index: 1;
-  margin: 0;
-  color: #817c70;
-  font: 0.65rem/1 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  letter-spacing: 0.08em;
-}
-
-.dfDevFixture__simulate {
-  position: fixed;
-  right: 0.75rem;
-  bottom: 0.75rem;
-  padding: 0.5rem;
-  color: #d8d3c4;
-  background: #0d1210;
-  border: 1px solid #26302c;
-}

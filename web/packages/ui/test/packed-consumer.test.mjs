@@ -31,7 +31,7 @@ test("packed UI is importable by a clean consumer with its stylesheet export", (
       if (!existsSync(target)) cpSync(source, target, { recursive: true });
     }
     const probe = join(consumer, "probe.mjs");
-    writeFileSync(probe, "import { FactoryConsole } from '@dark-factory/ui'; const css = await import.meta.resolve('@dark-factory/ui/styles.css'); if (typeof FactoryConsole !== 'function' || !css.endsWith('/factory-console.css')) throw new Error('bad UI package exports');");
+    writeFileSync(probe, "import { FactoryApp, FactoryConsole } from '@dark-factory/ui'; const css = await import.meta.resolve('@dark-factory/ui/styles.css'); if (typeof FactoryApp !== 'function' || typeof FactoryConsole !== 'function' || !css.endsWith('/factory-console.css')) throw new Error('bad UI package exports');");
     execFileSync(process.execPath, [probe], { cwd: consumer, stdio: "pipe" });
     const installedManifest = JSON.parse(readFileSync(join(consumer, "node_modules", "@dark-factory", "ui", "package.json"), "utf8"));
     assert.deepEqual(installedManifest.peerDependencies, { react: "19.1.0" });

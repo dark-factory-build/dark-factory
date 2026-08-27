@@ -43,7 +43,8 @@
 .dfFactoryConsole__card p,
 .dfFactoryConsole__card small,
 .dfFactoryConsole__status,
-.dfFactoryConsole__connection button {
+.dfFactoryConsole button,
+.dfFactoryConsole__reply label {
   font-size: 0.7rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -98,7 +99,7 @@
 .dfFactoryConsole__statusDot--closed { background: var(--df-console-alert); }
 .dfFactoryConsole__statusDot--idle { background: var(--df-console-warning); }
 
-.dfFactoryConsole__connection button {
+.dfFactoryConsole button {
   padding: 0.6rem 0.75rem;
   color: var(--df-console-text);
   background: transparent;
@@ -106,11 +107,14 @@
   cursor: pointer;
 }
 
-.dfFactoryConsole__connection button:hover { border-color: var(--df-console-accent); }
-.dfFactoryConsole__connection button:focus-visible {
+.dfFactoryConsole button:hover:not(:disabled) { border-color: var(--df-console-accent); }
+.dfFactoryConsole button:focus-visible,
+.dfFactoryConsole textarea:focus-visible {
   outline: 2px solid var(--df-console-accent);
   outline-offset: 3px;
 }
+
+.dfFactoryConsole button:disabled { cursor: default; opacity: 0.5; }
 
 .dfFactoryConsole__error {
   max-width: 90rem;
@@ -192,7 +196,55 @@
 
 .dfFactoryConsole__card p { margin-top: 0.75rem; line-height: 1.5; }
 .dfFactoryConsole__card small { display: block; margin-top: 0.5rem; overflow-wrap: anywhere; }
+.dfFactoryConsole__card button { margin-top: 0.75rem; }
 .dfFactoryConsole__empty { color: var(--df-console-muted); font-size: 0.75rem; }
+
+.dfFactoryConsole__humanRequest {
+  margin-top: 1rem;
+  padding: 1rem;
+  border: 1px solid var(--df-console-accent);
+}
+
+.dfFactoryConsole__humanRequest > p {
+  margin-top: 0.75rem;
+  color: var(--df-console-muted);
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+.dfFactoryConsole__humanRequest .dfFactoryConsole__question {
+  color: var(--df-console-text);
+  font-size: 1rem;
+  text-transform: none;
+  overflow-wrap: anywhere;
+}
+
+.dfFactoryConsole__reply {
+  display: grid;
+  gap: 0.65rem;
+  margin-top: 1rem;
+}
+
+.dfFactoryConsole__reply label { color: var(--df-console-muted); }
+
+.dfFactoryConsole__reply textarea {
+  min-height: 7rem;
+  resize: vertical;
+  padding: 0.75rem;
+  color: var(--df-console-text);
+  background: var(--df-console-background);
+  border: 1px solid var(--df-console-rule);
+  font: inherit;
+}
+
+.dfFactoryConsole__reply button { justify-self: start; }
+
+.dfFactoryConsole__humanActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  margin-top: 1rem;
+}
 
 @media (max-width: 720px) {
   .dfFactoryConsole__header,
