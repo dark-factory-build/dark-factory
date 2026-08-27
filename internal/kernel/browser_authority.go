@@ -529,8 +529,10 @@ func (store *Store) ReleaseTerminalLease(ctx context.Context, runID RunID, sessi
 
 // RevokeTerminalLease clears one already-committed lease after a runner
 // generation install fails or becomes uncertain. Unlike an operator release,
-// this cleanup remains valid after expiry. It is exact-generation guarded and
-// cannot clear a replacement lease.
+// this cleanup remains valid after expiry. It is a one-shot, exact-generation
+// transition and cannot clear a replacement lease. If the caller cannot prove
+// whether the commit completed, it must not retry this method; the daemon must
+// converge or finalize instead.
 func (store *Store) RevokeTerminalLease(ctx context.Context, runID RunID, sessionID TerminalSessionID, clientID BrowserClientID, generation uint64, expectedRun, expectedSession Revision, at UnixMillis) (TerminalLease, error) {
 	if runID.zero() || sessionID.zero() || validateBrowserID(clientID) != nil || generation == 0 || generation > math.MaxInt64 {
 		return TerminalLease{}, fmt.Errorf("%w: invalid terminal lease revocation", ErrInvalidValue)
@@ -550,12 +552,6 @@ func (store *Store) RevokeTerminalLease(ctx context.Context, runID RunID, sessio
 	next, err := leaseGenerationNext(int64(generation))
 	if err != nil {
 		return TerminalLease{}, tx.Rollback(err)
-	}
-	if session.LeaseClientID == nil && session.LeaseExpiresAt == nil && session.LastInputSequence == 0 && session.LeaseGeneration == uint64(next) {
-		if err := tx.Rollback(nil); err != nil {
-			return TerminalLease{}, err
-		}
-		return TerminalLease{RunID: run.ID, SessionID: session.ID, ClientID: clientID, Generation: uint64(next), RunRevision: run.Revision, SessionRevision: session.Revision}, nil
 	}
 	if session.LeaseClientID == nil || session.LeaseExpiresAt == nil || *session.LeaseClientID != clientID || session.LeaseGeneration != generation {
 		return TerminalLease{}, tx.Rollback(ErrRevisionConflict)

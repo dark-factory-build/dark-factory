@@ -976,6 +976,7 @@ func TestRevokeTerminalLeaseAllowsExpiredExactGenerationAndCannotTouchReplacemen
 	session := terminalSessionForRunTest(t, store, run.ID)
 	boot := browserTestBoot(t, 145)
 	client := pairBrowserClient(t, store, mintBrowserChallenge(t, store, 145, boot, 30, 100, BrowserCapabilityObserve|BrowserCapabilityTerminalInput), boot, browserTestID(t, 145), browserKey(t), 31)
+	otherClient := pairBrowserClient(t, store, mintBrowserChallenge(t, store, 146, boot, 30, 100, BrowserCapabilityObserve|BrowserCapabilityTerminalInput), boot, browserTestID(t, 146), browserKey(t), 31)
 	lease, err := store.AcquireTerminalLease(ctx, run.ID, session.ID, client.ID, run.Revision, session.Revision, mustTime(t, 31))
 	if err != nil {
 		t.Fatal(err)
@@ -1002,9 +1003,11 @@ func TestRevokeTerminalLeaseAllowsExpiredExactGenerationAndCannotTouchReplacemen
 	if afterFactory != beforeFactory {
 		t.Fatalf("expired revoke emitted lifecycle change: before=%+v after=%+v", beforeFactory, afterFactory)
 	}
-	idempotent, err := store.RevokeTerminalLease(ctx, run.ID, session.ID, client.ID, lease.Generation, run.Revision, session.Revision, mustTime(t, lease.ExpiresAt.Int64()+1))
-	if err != nil || idempotent.Generation != lease.Generation+1 {
-		t.Fatalf("revoke replay = %+v, err=%v", idempotent, err)
+	if _, err := store.RevokeTerminalLease(ctx, run.ID, session.ID, client.ID, lease.Generation, run.Revision, session.Revision, mustTime(t, lease.ExpiresAt.Int64()+1)); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("same-client revoke replay succeeded: %v", err)
+	}
+	if _, err := store.RevokeTerminalLease(ctx, run.ID, session.ID, otherClient.ID, lease.Generation, run.Revision, session.Revision, mustTime(t, lease.ExpiresAt.Int64()+1)); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("different-client revoke replay succeeded: %v", err)
 	}
 
 	replacement, err := store.AcquireTerminalLease(ctx, run.ID, session.ID, client.ID, run.Revision, session.Revision, mustTime(t, 200))
