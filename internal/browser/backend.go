@@ -23,10 +23,28 @@ type Identity struct {
 	BootID   [browserprotocol.BootIDSize]byte
 }
 
-// Principal contains only daemon-minted browser authority. The transport
-// never accepts capabilities or a client identity from an operation frame.
+// ConnectionID is one transport-minted WebSocket generation. Its bytes stay
+// private to this package: callers may retain and compare the value but cannot
+// construct a nonzero identity or put it on the wire.
+type ConnectionID struct {
+	value [browserprotocol.ClientIDSize]byte
+}
+
+func (id ConnectionID) zero() bool { return id == (ConnectionID{}) }
+
+// String deliberately redacts the ephemeral identity from diagnostics.
+func (ConnectionID) String() string { return "[private browser connection]" }
+
+// GoString applies the same redaction to detailed Go diagnostics.
+func (ConnectionID) GoString() string { return "browser.ConnectionID{private}" }
+
+// Principal contains durable daemon-minted client authority plus one private,
+// transport-minted connection identity. Backend authentication results must
+// leave ConnectionID zero; the transport installs it after proof succeeds and
+// before any operation can run.
 type Principal struct {
-	ClientID [browserprotocol.ClientIDSize]byte
+	ClientID     [browserprotocol.ClientIDSize]byte
+	ConnectionID ConnectionID `json:"-"`
 }
 
 // Authentication is used only for the daemon-minted handshake result.

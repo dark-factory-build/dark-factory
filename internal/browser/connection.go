@@ -146,6 +146,10 @@ func (current *connection) authenticate(identity Identity, nonce [browserprotoco
 		current.seen = map[string]struct{}{frame.ID: {}}
 		result, requested, tracked, err := current.prove(authContext, identity, nonce, frame)
 		accept := err == nil && authContext.Err() == nil && validateAuthentication(result) == nil
+		if accept {
+			result.Principal.ConnectionID, err = newConnectionID()
+			accept = err == nil
+		}
 		registered := false
 		if requested != nil {
 			if tracked {

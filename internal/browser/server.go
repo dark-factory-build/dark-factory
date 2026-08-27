@@ -350,7 +350,7 @@ func (server *Server) finishAuthentication(current *connection, requested [brows
 	server.mu.Lock()
 	defer server.mu.Unlock()
 	server.removeAuthenticatingLocked(current)
-	if !accept || server.closing || result.Principal.ClientID != requested {
+	if !accept || server.closing || result.Principal.ClientID != requested || result.Principal.ConnectionID.zero() {
 		return false
 	}
 	lifecycle := server.lifecycleLocked(requested)
@@ -366,7 +366,7 @@ func (server *Server) registerPair(current *connection, result Authentication, a
 	server.mu.Lock()
 	defer server.mu.Unlock()
 	server.removePairingLocked(current)
-	if !accept || server.closing || zero16(result.Principal.ClientID) {
+	if !accept || server.closing || zero16(result.Principal.ClientID) || result.Principal.ConnectionID.zero() {
 		return false
 	}
 	lifecycle := server.lifecycleLocked(result.Principal.ClientID)
@@ -444,6 +444,8 @@ func (server *Server) unregister(current *connection) {
 			delete(lifecycle.connections, current)
 		}
 		server.removeLifecycleIfIdleLocked(clientID)
+		current.authenticated = false
+		current.principal = Principal{}
 	}
 	server.mu.Unlock()
 }
@@ -484,6 +486,17 @@ func randomNonce() ([browserprotocol.NonceSize]byte, error) {
 	return value, err
 }
 
+func newConnectionID() (ConnectionID, error) {
+	var id ConnectionID
+	if _, err := rand.Read(id.value[:]); err != nil {
+		return ConnectionID{}, err
+	}
+	if id.zero() {
+		return ConnectionID{}, fmt.Errorf("browser: random connection identity is zero")
+	}
+	return id, nil
+}
+
 func nonzero(value []byte) bool {
 	for _, item := range value {
 		if item != 0 {
@@ -494,7 +507,10 @@ func nonzero(value []byte) bool {
 }
 
 func validateAuthentication(result Authentication) error {
-	if zero16(result.Principal.ClientID) || result.Capabilities&browserprotocol.CapabilityObserve == 0 || result.Capabilities&^implementedCaps != 0 {
+	// A backend proves only durable client authority. Accepting or overwriting a
+	// backend-selected connection identity would conceal an authority-boundary
+	// violation, so fail closed before transport registration instead.
+	if zero16(result.Principal.ClientID) || !result.Principal.ConnectionID.zero() || result.Capabilities&browserprotocol.CapabilityObserve == 0 || result.Capabilities&^implementedCaps != 0 {
 		return ErrUnauthorized
 	}
 	return nil
