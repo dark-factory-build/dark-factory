@@ -18,6 +18,8 @@ import {
 import { ProtocolError, type ProtocolErrorCode } from "./errors.js";
 import { CAPABILITIES, type CapabilityMask, type ErrorCode } from "./manifest.js";
 import { StateAccumulator, type StateView } from "./state.js";
+import { HumanRequestClient, TerminalHandle, terminalControlFrame, type HumanCancelResult, type HumanReplyResult, type TerminalCancelRunRequest, type TerminalHandleOptions, type TerminalReplyRequest } from "./terminal_session.js";
+import { decodeTerminalServer } from "./terminal_session.js";
 import { buildAuthTranscript, buildPairTranscript, hexBytes } from "./transcript.js";
 
 const CLOSED = 3;
@@ -42,7 +44,7 @@ export interface BrowserSocket {
   onmessage: ((event: { data: unknown }) => void) | null;
   onerror: ((event: unknown) => void) | null;
   onclose: ((event: { code?: number; reason?: string }) => void) | null;
-  send(data: string): void;
+  send(data: string | Uint8Array): void;
   close(code?: number, reason?: string): void;
 }
 
@@ -132,6 +134,8 @@ export class BrowserSession {
   #connectPromise: Promise<void> | undefined;
   #resolveConnect: (() => void) | undefined;
   #rejectConnect: ((error: unknown) => void) | undefined;
+  #terminalHandles = new Set<TerminalHandle>();
+  #human = new HumanRequestClient((id, payload) => this.#send(payload), (prefix) => this.#nextID(prefix));
 
   constructor(options: BrowserSessionOptions) {
     this.#options = { ...options, keyStore: options.keyStore ?? createIndexedDBKeyStore() };
@@ -142,6 +146,29 @@ export class BrowserSession {
   get clientId(): string | undefined { return this.#clientId; }
   get capabilities(): CapabilityMask { return this.#capabilities; }
   get pairingBlocked(): boolean { return this.#pairingBlocked; }
+
+  /** Create one attachment owned by this authenticated socket generation. */
+  createTerminalHandle(options: TerminalHandleOptions): TerminalHandle {
+    this.#ensureLive();
+    for (const existing of this.#terminalHandles) {
+      if (existing.closed) this.#terminalHandles.delete(existing);
+      else throw new SessionError("invalid_request");
+    }
+    const handle = new TerminalHandle(options, (id, payload) => {
+      this.#ensureLive();
+      if (!this.#authenticated) throw new SessionError("unauthorized");
+      this.#send(payload);
+    }, (prefix) => this.#nextID(prefix));
+    this.#terminalHandles.add(handle);
+    return handle;
+  }
+
+  attachTerminal(options: TerminalHandleOptions): TerminalHandle { return this.createTerminalHandle(options); }
+  openTerminal(options: TerminalHandleOptions): TerminalHandle { return this.createTerminalHandle(options); }
+  replyHumanRequest(request: TerminalReplyRequest): Promise<HumanReplyResult> { this.#ensureLive(); if (!this.#authenticated) return Promise.reject(new SessionError("unauthorized")); return this.#human.reply(request); }
+  reply(request: TerminalReplyRequest): Promise<HumanReplyResult> { return this.replyHumanRequest(request); }
+  cancelRun(request: TerminalCancelRunRequest): Promise<HumanCancelResult> { this.#ensureLive(); if (!this.#authenticated) return Promise.reject(new SessionError("unauthorized")); return this.#human.cancelRun(request); }
+  get humanRequests(): HumanRequestClient { return this.#human; }
 
   connect(): Promise<void> {
     if (this.#connectPromise !== undefined) return this.#connectPromise;
@@ -179,6 +206,9 @@ export class BrowserSession {
     if (this.#closed) return;
     this.#closed = true;
     this.#pending.clear();
+    for (const handle of this.#terminalHandles) handle.close(new SessionError("closed"));
+    this.#terminalHandles.clear();
+    this.#human.close(new SessionError("closed"));
     this.#entities.clear();
     this.#accumulator.applyRestart("gap");
     const socket = this.#socket;
@@ -197,8 +227,16 @@ export class BrowserSession {
 
   async #receive(data: unknown): Promise<void> {
     if (this.#closed) return;
+    if (typeof Blob !== "undefined" && data instanceof Blob) { try { data = new Uint8Array(await data.arrayBuffer()); } catch { this.#fail(new ProtocolError("malformed")); return; } }
+    else if (data instanceof ArrayBuffer) data = new Uint8Array(data);
+    else if (ArrayBuffer.isView(data)) data = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
     if (typeof data !== "string") {
-      this.#fail(new ProtocolError("malformed"));
+      if (!this.#authenticated || !(data instanceof Uint8Array)) { this.#fail(new ProtocolError("malformed")); return; }
+      try {
+        const terminal = decodeTerminalServer(data);
+        const matched = await this.#routeBinary(terminal);
+        if (!matched) this.#fail(new ProtocolError("malformed"));
+      } catch (error) { this.#fail(error instanceof ProtocolError ? error : new ProtocolError("malformed")); }
       return;
     }
     let frame: ServerControlFrame;
@@ -325,6 +363,17 @@ export class BrowserSession {
   }
 
   #applicationFrame(frame: ServerControlFrame): void {
+    if (terminalControlFrame(frame)) {
+      if (frame.type === "TERMINAL_EOF") { if (!this.#anyTerminal((handle) => handle.receiveEOF(frame.id, frame.body))) throw new ProtocolError("malformed"); return; }
+      if (frame.type === "TERMINAL_EXIT") { if (!this.#anyTerminal((handle) => handle.receiveExit(frame.id, { sessionId: frame.body.session_id, exitCode: frame.body.exit_code, exitSignal: frame.body.exit_signal, aborted: frame.body.aborted }))) throw new ProtocolError("malformed"); return; }
+      if (frame.type === "TERMINAL_RESET") { if (!this.#anyTerminal((handle) => handle.receiveReset(frame.id, frame.body))) throw new ProtocolError("malformed"); return; }
+      if (!this.#anyTerminal((handle) => handle.receive(frame))) throw new ProtocolError("malformed");
+      return;
+    }
+    if (frame.type === "HUMAN_REQUEST_REPLY_RESULT" || frame.type === "HUMAN_REQUEST_ACTION_RESULT") {
+      if (!this.#human.receive(frame)) throw new ProtocolError("malformed");
+      return;
+    }
     switch (frame.type) {
       case "STATE_SNAPSHOT": this.#snapshot(frame); return;
       case "STATE_RESTART": this.#resync(frame.body.reason); return;
@@ -345,7 +394,7 @@ export class BrowserSession {
       this.#setStatus("ready");
       const id = this.#nextID("watch");
       this.#subscriptionID = id;
-      this.#send(id, encodeStateSubscribe(id, { after: result.state.head }));
+      this.#send(encodeStateSubscribe(id, { after: result.state.head }));
     } else if (result.kind === "staged") {
       this.#beginSnapshot(this.#accumulator.nextCursor);
     }
@@ -366,7 +415,7 @@ export class BrowserSession {
     const id = this.#nextID("entity");
     this.#entities.set(id, { kind: event.entity_kind, id: event.entity_id });
     this.#pending.set(id, "entity");
-    this.#send(id, encodeStateEntityGet(id, { kind: event.entity_kind, id: event.entity_id }));
+    this.#send(encodeStateEntityGet(id, { kind: event.entity_kind, id: event.entity_id }));
   }
 
   #entity(frame: StateEntityFrame): void {
@@ -384,6 +433,7 @@ export class BrowserSession {
 
   #errorFrame(frame: ErrorFrame): void {
     const id = frame.id;
+    if (id !== undefined && (this.#anyTerminal((handle) => handle.receiveError(id, new SessionError(frame.body.code, frame.body.retryable))) || this.#human.receiveError(id, new SessionError(frame.body.code, frame.body.retryable)))) return;
     if (id !== undefined && this.#pending.has(id)) {
       this.#pending.delete(id);
     }
@@ -395,7 +445,7 @@ export class BrowserSession {
     if (result.kind === "restart") { this.#resync(result.reason); return; }
     if (result.kind !== "requested") throw new ProtocolError("malformed");
     this.#pending.set(result.request.id, "snapshot");
-    this.#send(result.request.id, encodeStateGet(result.request.id, { cursor }));
+    this.#send(encodeStateGet(result.request.id, { cursor }));
   }
 
   #resync(_reason: string): void {
@@ -410,12 +460,23 @@ export class BrowserSession {
 
   #sendAuth(kind: "pair" | "auth", id: string, payload: string): void {
     this.#pending.set(id, kind);
-    this.#send(id, payload);
+    this.#send(payload);
   }
 
-  #send(id: string, payload: string): void {
+  #send(payload: string | Uint8Array): void {
     if (this.#closed || this.#socket === undefined || this.#socket.readyState === CLOSED) throw new SessionError("closed");
     try { this.#socket.send(payload); } catch { throw new SessionError("connection"); }
+  }
+
+  async #routeBinary(frame: import("./terminal.js").TerminalFrame): Promise<boolean> {
+    let matched = false;
+    for (const handle of this.#terminalHandles) if (await handle.receiveBinary(frame)) matched = true;
+    return matched;
+  }
+
+  #anyTerminal(test: (handle: TerminalHandle) => boolean): boolean {
+    for (const handle of this.#terminalHandles) if (test(handle)) return true;
+    return false;
   }
 
   #nextID(prefix: string): string { return `${prefix}-${this.#requestNumber++}`; }
@@ -461,6 +522,9 @@ export class BrowserSession {
     this.#closed = true;
     this.#pending.clear();
     this.#entities.clear();
+    for (const handle of this.#terminalHandles) handle.close(error);
+    this.#terminalHandles.clear();
+    this.#human.close(error);
     this.#accumulator.applyRestart("gap");
     const socket = this.#socket;
     this.#socket = undefined;
