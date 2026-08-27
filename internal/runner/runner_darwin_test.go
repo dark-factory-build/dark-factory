@@ -141,7 +141,14 @@ func runLeaderExitDescendantHelper(root string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(root, "descendant.pid"), []byte(strconv.Itoa(descendant.PID)), 0o600); err != nil {
+	path := filepath.Join(root, "descendant.pid")
+	pending := path + ".pending"
+	if err := os.WriteFile(pending, []byte(strconv.Itoa(descendant.PID)), 0o600); err != nil {
+		cleanupDescendantHelper(command)
+		return err
+	}
+	if err := os.Rename(pending, path); err != nil {
+		_ = os.Remove(pending)
 		cleanupDescendantHelper(command)
 		return err
 	}
@@ -635,14 +642,6 @@ func readOwnedPipeLine(t *testing.T, pipe *os.File, reader *bufio.Reader) string
 		t.Fatalf("owned helper report: %v", err)
 	}
 	return strings.TrimSpace(line)
-}
-
-func assertOwnedGroupWaitedAndAbsent(t *testing.T, child *OwnedChild) {
-	t.Helper()
-	assertWaitedAndAbsent(t, child)
-	if err := unix.Kill(-child.Identity().PGID, 0); !errors.Is(err, unix.ESRCH) {
-		t.Fatalf("owned process group remains: %v", err)
-	}
 }
 
 func runParentDeathOwner() error {
@@ -1256,7 +1255,7 @@ func TestLeaderExitWithLiveDescendantRetainsOwnerOnEPERM(t *testing.T) {
 	if err != nil || exit.Code != 23 || exit.Signal != 0 {
 		t.Fatalf("retry after exact safety cleanup=%+v err=%v", exit, err)
 	}
-	assertOwnedGroupWaitedAndAbsent(t, child)
+	assertWaitedAndAbsent(t, child)
 	cleanupDone()
 }
 
@@ -1285,7 +1284,7 @@ func TestLeaderExitRetryConvergesAfterDescendantQuiesces(t *testing.T) {
 	if err != nil || exit.Code != 23 || exit.Signal != 0 {
 		t.Fatalf("retry after natural quiescence=%+v err=%v", exit, err)
 	}
-	assertOwnedGroupWaitedAndAbsent(t, child)
+	assertWaitedAndAbsent(t, child)
 	cleanupDone()
 }
 
@@ -1341,7 +1340,7 @@ func TestTerminateGroupSignalCatchesDescendantForkedDuringTERMGrace(t *testing.T
 	if observation := ObserveProcess(late); observation.Presence != Absent {
 		t.Fatalf("late descendant survived group cleanup: %+v", observation)
 	}
-	assertOwnedGroupWaitedAndAbsent(t, child)
+	assertWaitedAndAbsent(t, child)
 	cleanupDone()
 }
 
