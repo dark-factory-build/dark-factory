@@ -230,6 +230,17 @@ test("rejected input preserves lease and sequence for deliberate retry", async (
   await retry;
 });
 
+test("TERMINAL_ATTACHED resolves the exact frozen snapshot", async () => {
+  const context = makeHandle();
+  const attaching = context.handle.attach();
+  const attachFrame = lastControl(context.sent);
+  context.handle.receive(serverFrame(replyAttached({ head: 4n }, attachFrame)));
+  const attached = await attaching;
+  assert.equal(Object.isFrozen(attached), true);
+  assert.throws(() => { attached.head = 99n; }, TypeError);
+  assert.equal(attached.head, 4n);
+});
+
 test("an input ERROR is ambiguous, fences the socket, and forbids replay", async () => {
   const context = makeHandle();
   const { attachFrame } = await attachedWithLease(context);
@@ -281,24 +292,23 @@ test("reset rejects a pending input, clears authority, and ignores its duplicate
   assert.equal(context.handle.writable, false);
 });
 
-test("pending attach reset resolves explicitly before a callback may attach a fresh generation", async () => {
-  let freshAttach;
+test("pending attach reset resolves explicitly before closing the old handle", async () => {
+  let callbackClosed;
   let resetResult;
   const context = makeHandle({ options: { onReset: () => {
+    callbackClosed = context.handle.closed;
     assert.equal(context.handle.writable, false);
-    freshAttach = context.handle.attach();
+    assert.throws(() => context.handle.attach(), /closed/);
   } } });
   const pending = context.handle.attach();
   const attachFrame = lastControl(context.sent);
   assert.equal(context.handle.receiveReset(attachFrame.id, { session_id: sessionId, floor: 7n, head: 8n }), true);
   resetResult = await pending;
   assert.deepEqual(resetResult, { sessionId, floor: 7n, head: 8n, kind: "reset", freshAttachRequired: true });
-  assert.ok(freshAttach);
-  const freshFrame = lastControl(context.sent);
-  assert.equal(freshFrame.type, "TERMINAL_ATTACH");
-  context.handle.receive(serverFrame(replyAttached({}, freshFrame)));
-  await freshAttach;
-  assert.equal(context.handle.writable, false);
+  assert.equal(callbackClosed, true);
+  assert.equal(context.handle.closed, true);
+  assert.equal(context.sent.length, 1);
+  assert.equal(context.handle.receiveReset(attachFrame.id, { session_id: sessionId, floor: 7n, head: 8n }), true);
 });
 
 test("acquire timer installation failure rejects the completed operation", async () => {
@@ -499,21 +509,37 @@ test("partial and uncertain input consume the reservation and recover only with 
     assert.equal(context.handle.writable, false, status);
     assert.equal(context.sent.filter(({ payload }) => payload instanceof Uint8Array).length, 1, status);
 
-    const fresh = context.handle.acquireInput();
-    const freshFrame = lastControl(context.sent);
-    context.handle.receive(serverFrame(encodeTerminalLeaseResult(freshFrame.id, {
-      operation: "acquired", run_id: runId, session_id: sessionId, generation: 3n,
+    const sameGeneration = context.handle.acquireInput();
+    const sameGenerationFrame = lastControl(context.sent);
+    assert.throws(() => context.handle.receive(serverFrame(encodeTerminalLeaseResult(sameGenerationFrame.id, {
+      operation: "acquired", run_id: runId, session_id: sessionId, generation: 1n,
       expires_at_ms: BigInt(context.timer.now + 30_000), last_input_sequence: 0n,
       run_revision: 1n, session_revision: 1n,
+    }))), /malformed/, status);
+    context.handle.terminate(new Error("same generation rejected"));
+    await assert.rejects(sameGeneration, /same generation rejected|closed/, status);
+    assert.equal(context.handle.writable, false, status);
+    assert.equal(context.sent.filter(({ payload }) => payload instanceof Uint8Array).length, 1, status);
+
+    const fresh = makeHandle();
+    const freshAttach = await attachedOnly(fresh);
+    const freshLease = fresh.handle.acquireInput();
+    const freshFrame = lastControl(fresh.sent);
+    fresh.handle.receive(serverFrame(encodeTerminalLeaseResult(freshFrame.id, {
+      operation: "acquired", run_id: runId, session_id: sessionId, generation: 3n,
+      expires_at_ms: BigInt(fresh.timer.now + 30_000), last_input_sequence: 0n,
+      run_revision: 1n, session_revision: 1n,
     })));
-    await fresh;
-    const retry = context.handle.sendInput(new Uint8Array([9]));
-    const inputFrames = context.sent.filter(({ payload }) => payload instanceof Uint8Array);
+    await freshLease;
+    assert.equal(fresh.handle.writable, true, status);
+    const retry = fresh.handle.sendInput(new Uint8Array([9]));
+    const inputFrames = fresh.sent.filter(({ payload }) => payload instanceof Uint8Array);
     assert.deepEqual([...inputFrames.at(-1).payload.slice(40)], [9], status);
-    context.handle.receive(serverFrame(encodeTerminalInputResult(attachFrame.id, {
+    fresh.handle.receive(serverFrame(encodeTerminalInputResult(freshAttach.attachFrame.id, {
       session_id: sessionId, generation: 3n, sequence: 1n, status: "accepted", accepted_bytes: 1n,
     })));
     await retry;
+    fresh.handle.terminate();
   }
 });
 
@@ -558,7 +584,7 @@ test("exit and reset observation callback rejections stay outside transport owne
   const { attachFrame } = await attachedOnly(exitContext);
   assert.equal(exitContext.handle.receiveExit(attachFrame.id, { session_id: sessionId, exit_code: 0, exit_signal: 0, aborted: false }), true);
   await Promise.resolve();
-  assert.equal(exitContext.handle.closed, false);
+  assert.equal(exitContext.handle.closed, true);
 
   const resetContext = makeHandle({ options: { onReset: async () => { throw new Error("reset observer failed"); } } });
   const attach = resetContext.handle.attach();
@@ -566,7 +592,7 @@ test("exit and reset observation callback rejections stay outside transport owne
   resetContext.handle.receiveReset(resetFrame.id, { session_id: sessionId, floor: 1n, head: 1n });
   await attach;
   await Promise.resolve();
-  assert.equal(resetContext.handle.closed, false);
+  assert.equal(resetContext.handle.closed, true);
 });
 
 test("generation exhaustion refuses release without emitting an overflow operation", async () => {
@@ -612,6 +638,39 @@ test("late duplicate responses consume only exact retired operations", async () 
   context.handle.terminate();
   assert.equal(context.handle.receive(attached), true);
   assert.equal(context.handle.receive({ ...attached, id: "ff".repeat(16) }), false);
+
+  const leaseContext = makeHandle();
+  const { attachFrame: leaseAttachFrame } = await attachedOnly(leaseContext);
+  const acquire = leaseContext.handle.acquireInput();
+  const acquireFrame = lastControl(leaseContext.sent);
+  leaseContext.handle.terminate();
+  await assert.rejects(acquire, /closed/);
+  assert.equal(leaseContext.handle.receive(leaseResult(acquireFrame.id, {
+    operation: "acquired", run_id: runId, session_id: sessionId, generation: 1n,
+    expires_at_ms: 130_000n, last_input_sequence: 0n, run_revision: 1n, session_revision: 1n,
+  })), true);
+  assert.equal(leaseContext.handle.receive(leaseResult("ff".repeat(16), {
+    operation: "acquired", run_id: runId, session_id: sessionId, generation: 1n,
+    expires_at_ms: 130_000n, last_input_sequence: 0n, run_revision: 1n, session_revision: 1n,
+  })), false);
+
+  const errorContext = makeHandle();
+  await attachedOnly(errorContext);
+  const pendingAcquire = errorContext.handle.acquireInput();
+  const pendingAcquireFrame = lastControl(errorContext.sent);
+  assert.equal(errorContext.handle.receiveError("ff".repeat(16), new Error("unrelated")), false);
+  assert.equal(errorContext.handle.receiveError(pendingAcquireFrame.id, new Error("correlated")), true);
+  await assert.rejects(pendingAcquire, /correlated/);
+  assert.equal(errorContext.handle.closed, false);
+  errorContext.handle.terminate();
+  assert.equal(errorContext.handle.receiveError(pendingAcquireFrame.id, new Error("late")), false);
+
+  assert.equal(await leaseContext.handle.receiveBinary({ ...outputFrame(0n), sessionId: new Uint8Array(16).fill(0x33) }), false);
+  assert.equal(await leaseContext.handle.receiveBinary(outputFrame(0n)), false);
+  assert.equal(leaseContext.handle.receiveEOF("ff".repeat(16), { session_id: sessionId }), false);
+  assert.equal(leaseContext.handle.receiveEOF(leaseAttachFrame.id, { session_id: sessionId }), false);
+  assert.equal(leaseContext.handle.receiveReset("ff".repeat(16), { session_id: sessionId, floor: 0n, head: 0n }), false);
+  assert.equal(leaseContext.handle.receiveReset(leaseAttachFrame.id, { session_id: sessionId, floor: 0n, head: 0n }), false);
 });
 
 test("partial input fences authority and never replays a suffix", async () => {
@@ -690,6 +749,26 @@ test("detach cannot overtake a pending input effect", async () => {
   await detached;
 });
 
+test("detach cannot overtake a pending resize effect", async () => {
+  const context = makeHandle();
+  await attachedWithLease(context);
+  const resize = context.handle.resize(24, 80);
+  await assert.rejects(context.handle.detach(), /terminal operation pending/);
+  assert.equal(context.sent.filter(({ payload }) => typeof payload === "string" && decodeClientControl(payload).type === "TERMINAL_DETACH").length, 0);
+  const resizeFrame = lastControl(context.sent);
+  context.handle.receive(serverFrame(encodeTerminalResized(resizeFrame.id, { session_id: sessionId, generation: 1n, rows: 24, cols: 80 })));
+  await resize;
+  const detached = context.handle.detach();
+  const releaseFrame = lastControl(context.sent);
+  context.handle.receive(serverFrame(encodeTerminalLeaseResult(releaseFrame.id, {
+    operation: "released", run_id: runId, session_id: sessionId, generation: 2n,
+    last_input_sequence: 0n, run_revision: 1n, session_revision: 1n,
+  })));
+  const detachFrame = lastControl(context.sent);
+  context.handle.receive(serverFrame(encodeTerminalDetached(detachFrame.id, { session_id: sessionId })));
+  await detached;
+});
+
 test("exit and reset clear writable state before callbacks", async () => {
   let terminal;
   let exitWritable;
@@ -734,6 +813,27 @@ test("receiveBinary delivers output before ACK and advances the exact byte curso
   assert.equal(await context.handle.receiveBinary(outputFrame(2n, [6])), true);
   assert.equal(lastControl(context.sent).body.next_sequence, 3n);
   assert.equal(outputs, 2);
+});
+
+test("synchronous ACK failure closes exactly once without advancing the output cursor", async () => {
+  let outputs = 0;
+  let context;
+  context = makeHandle({
+    options: { onOutput: () => { outputs += 1; } },
+    send: (requestId, payload) => {
+      context.sent.push({ requestId, payload });
+      if (typeof payload === "string" && decodeClientControl(payload).type === "TERMINAL_ACK") throw new Error("ACK transport failed");
+    },
+  });
+  await attachedOnly(context);
+  assert.equal(await context.handle.receiveBinary(outputFrame(0n, [4])), true);
+  assert.equal(context.handle.closed, true);
+  assert.equal(context.fatals.length, 1);
+  assert.equal(outputs, 1);
+  assert.equal(context.sent.filter(({ payload }) => typeof payload === "string" && decodeClientControl(payload).type === "TERMINAL_ACK").length, 1);
+  assert.equal(await context.handle.receiveBinary(outputFrame(0n, [4])), false);
+  assert.equal(outputs, 1);
+  assert.equal(context.sent.filter(({ payload }) => typeof payload === "string" && decodeClientControl(payload).type === "TERMINAL_ACK").length, 1);
 });
 
 test("output callback rejection closes without a false ACK", async () => {

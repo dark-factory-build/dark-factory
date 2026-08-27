@@ -77,7 +77,7 @@ type Operation = {
 };
 type RetiredResponse = {
   id: string;
-  type: "TERMINAL_ATTACHED" | "TERMINAL_LEASE_RESULT" | "TERMINAL_RESIZED" | "TERMINAL_DETACHED" | "TERMINAL_INPUT_RESULT" | "TERMINAL_RESET";
+  type: "TERMINAL_ATTACHED" | "TERMINAL_LEASE_RESULT" | "TERMINAL_RESIZED" | "TERMINAL_DETACHED" | "TERMINAL_INPUT_RESULT" | "TERMINAL_RESET" | "TERMINAL_EXIT";
   generation?: bigint;
   sequence?: bigint;
 };
@@ -224,7 +224,8 @@ class TerminalHandleImpl implements InternalTerminalHandle {
     switch (frame.type) {
       case "TERMINAL_ATTACHED":
         if (operation.kind !== "attach" || frame.body.floor > frame.body.acknowledged_sequence || frame.body.acknowledged_sequence > frame.body.head || frame.body.acknowledged_sequence !== this.#requestedAfterSequence) throw new ProtocolError("malformed");
-        this.#complete(operation, { sessionId: frame.body.session_id, floor: frame.body.floor, head: frame.body.head, acknowledgedSequence: frame.body.acknowledged_sequence, maxUnackedBytes: frame.body.max_unacked_bytes }, () => {
+        const attached = frozenAttached({ sessionId: frame.body.session_id, floor: frame.body.floor, head: frame.body.head, acknowledgedSequence: frame.body.acknowledged_sequence, maxUnackedBytes: frame.body.max_unacked_bytes });
+        this.#complete(operation, attached, () => {
           this.#attached = true;
           this.#acknowledgedSequence = frame.body.acknowledged_sequence;
           this.#nextOutputSequence = frame.body.acknowledged_sequence;
@@ -303,11 +304,15 @@ class TerminalHandleImpl implements InternalTerminalHandle {
   }
 
   receiveExit(id: string, body: { session_id: string; exit_code: number; exit_signal: number; aborted: boolean }): boolean {
-    if (this.#closed || !this.#attached || id !== this.#attachmentID || body.session_id !== this.#target.sessionId) return false;
+    if (this.#closed) return this.#matchesRetired("TERMINAL_EXIT", id, body.session_id);
+    if (!this.#attached || id !== this.#attachmentID || body.session_id !== this.#target.sessionId) return false;
     const event = { sessionId: body.session_id, exitCode: body.exit_code, exitSignal: body.exit_signal, aborted: body.aborted };
     const operation = this.#operation;
     if (operation !== undefined) { this.#operation = undefined; operation.reject(new SessionErrorLikeError("terminal exited")); }
-    this.#clearAuthority(); this.#observe(this.#options.onExit, event); return true;
+    this.#clearAuthority();
+    this.#rememberRetired({ id, type: "TERMINAL_EXIT" });
+    this.#closeLocal();
+    this.#observe(this.#options.onExit, event); return true;
   }
 
   receiveReset(id: string, body: { session_id: string; floor: bigint; head: bigint }): boolean {
@@ -324,6 +329,7 @@ class TerminalHandleImpl implements InternalTerminalHandle {
       if (operation !== undefined) { this.#operation = undefined; operation.reject(new SessionErrorLikeError("terminal reset")); }
       this.#attached = false; this.#clearAuthority(); this.#rememberRetired({ id, type: "TERMINAL_RESET" });
     }
+    this.#closeLocal();
     this.#observe(this.#options.onReset, reset); return true;
   }
 
@@ -538,7 +544,7 @@ class TerminalHandleImpl implements InternalTerminalHandle {
   }
   #rememberRetired(record: RetiredResponse): void { if (this.#retired.some((candidate) => candidate.id === record.id && candidate.type === record.type && candidate.generation === record.generation && candidate.sequence === record.sequence)) return; this.#retired.push(record); if (this.#retired.length > MAX_RETIRED_RESPONSES) this.#retired.shift(); }
   #isRetired(frame: TerminalServerControlFrame): boolean {
-    if (frame.type === "TERMINAL_EOF" || frame.type === "TERMINAL_EXIT") return false;
+    if (frame.type === "TERMINAL_EOF") return false;
     if (frame.type === "TERMINAL_INPUT_RESULT") return this.#matchesRetired(frame.type, frame.id, frame.body.session_id, frame.body.generation, frame.body.sequence);
     return this.#matchesRetired(frame.type, frame.id, frame.body.session_id);
   }
@@ -564,6 +570,7 @@ export function hexSessionID(value: string): Uint8Array {
   const result = new Uint8Array(16); for (let index = 0; index < 16; index++) result[index] = Number.parseInt(value.slice(index * 2, index * 2 + 2), 16); return result;
 }
 function sameBytes(a: Uint8Array, b: Uint8Array): boolean { return a.length === b.length && a.every((value, index) => value === b[index]); }
+function frozenAttached(value: TerminalAttached): TerminalAttached { return Object.freeze({ ...value }); }
 function frozenLease(value: TerminalLease): TerminalLease { return Object.freeze({ ...value }); }
 function frozenLeaseResult(value: TerminalLeaseResultBody): TerminalLeaseResult { return Object.freeze({ ...value }); }
 function frozenReset(value: TerminalReset): TerminalReset { return Object.freeze({ ...value }); }

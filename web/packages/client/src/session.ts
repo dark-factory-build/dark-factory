@@ -158,8 +158,6 @@ type TargetAuthority = {
   owner: BrowserSession;
   generation: object;
   descriptor: Readonly<TerminalTargetDescriptor>;
-  agentId?: string;
-  head?: bigint;
 };
 const TARGET_AUTHORITIES = new WeakMap<object, TargetAuthority>();
 
@@ -227,10 +225,7 @@ export class BrowserSession {
     if (typeof target !== "object" || target === null) throw new SessionError("stale");
     const authority = TARGET_AUTHORITIES.get(target as object);
     if (authority === undefined || authority.owner !== this || authority.generation !== this.#generationToken) throw new SessionError("stale");
-    for (const existing of this.#terminalHandles) {
-      if (existing.closed) this.#terminalHandles.delete(existing);
-      else throw new SessionError("invalid_request");
-    }
+    for (const existing of this.#terminalHandles) if (!existing.closed) throw new SessionError("invalid_request");
     const handle = createTerminalHandle({ runId: authority.descriptor.run_id, sessionId: authority.descriptor.session_id, runRevision: authority.descriptor.run_revision, sessionRevision: authority.descriptor.session_revision }, options, (id, payload) => {
       this.#ensureLive();
       if (!this.#authenticated) throw new SessionError("unauthorized");
@@ -597,7 +592,7 @@ export class BrowserSession {
       return;
     }
     this.#ensureLive();
-    pending.resolve(this.#mintTarget(frame.body.target, pending.agentId, pending.expectedHead));
+    pending.resolve(this.#mintTarget(frame.body.target));
   }
 
   #sendAuth(kind: "pair" | "auth", id: string, payload: string): void {
@@ -745,9 +740,9 @@ export class BrowserSession {
     this.#targetPending.clear();
   }
 
-  #mintTarget(descriptor: TerminalTargetDescriptor, agentId?: string, head?: bigint): TerminalTarget {
+  #mintTarget(descriptor: TerminalTargetDescriptor): TerminalTarget {
     const target = Object.freeze(Object.create(null)) as TerminalTarget;
-    TARGET_AUTHORITIES.set(target as object, { owner: this, generation: this.#generationToken, descriptor: Object.freeze({ ...descriptor }), agentId, head });
+    TARGET_AUTHORITIES.set(target as object, { owner: this, generation: this.#generationToken, descriptor: Object.freeze({ ...descriptor }) });
     return target;
   }
 

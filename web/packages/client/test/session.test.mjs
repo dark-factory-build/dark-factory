@@ -18,6 +18,8 @@ import {
   encodeStateEvent,
   encodeStateSnapshot,
   encodeTerminalAttached,
+  encodeTerminalExit,
+  encodeTerminalReset,
   encodeTerminalTarget,
 } from "../dist/src/index.js";
 
@@ -721,4 +723,98 @@ test("terminal target discovery is bounded, exact-correlated, and null is explic
   malformedSocket.reply(encodeTerminalTarget(badFrame.id, { agent_id: agentId, agent_revision: 3n, head: 4n, target: null }));
   await assert.rejects(bad, (error) => error instanceof ProtocolError && error.code === "malformed");
   assert.equal(malformed.status, "closed");
+});
+
+test("EXIT closes the old handle and routes its duplicate away from a replacement", async () => {
+  const agentId = "81".repeat(16);
+  const terminalSessionId = "82".repeat(16);
+  let socket;
+  const targetServer = (current) => {
+    serverFor(current);
+    const frame = decodeClientControl(current.sent.at(-1));
+    if (frame.type === "TERMINAL_TARGET_GET") current.reply(encodeTerminalTarget(frame.id, {
+      agent_id: frame.body.agent_id,
+      agent_revision: frame.body.expected_agent_revision,
+      head: frame.body.expected_head,
+      target: { run_id: runID, session_id: terminalSessionId, run_revision: 3n, session_revision: 4n },
+    }));
+  };
+  const session = new BrowserSession({
+    url: "ws://127.0.0.1:43123/browser/v1", host: "127.0.0.1:43123", origin: "https://preview.example",
+    challenge, keyStore: new MemoryKeys(), socketFactory: () => { socket = new Socket(targetServer); return socket; },
+  });
+  await session.connect();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const targetPending = session.resolveAgentTerminal({ agentId, expectedAgentRevision: 1n, expectedHead: 1n });
+  const target = await targetPending;
+  const terminal = session.openTerminal(target);
+  const attach = terminal.attach();
+  const attachFrame = decodeClientControl(socket.sent.at(-1));
+  socket.reply(encodeTerminalAttached(attachFrame.id, { session_id: terminalSessionId, floor: 0n, head: 0n, acknowledged_sequence: 0n, max_unacked_bytes: 65536n }));
+  await attach;
+  const exit = { session_id: terminalSessionId, exit_code: 0, exit_signal: 0, aborted: false };
+  socket.reply(encodeTerminalExit(attachFrame.id, exit));
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(terminal.closed, true);
+  const before = socket.sent.length;
+  assert.throws(() => terminal.attach(), /closed/);
+  assert.equal(socket.sent.length, before);
+
+  const replacement = session.openTerminal(target);
+  const replacementAttach = replacement.attach();
+  const replacementFrame = decodeClientControl(socket.sent.at(-1));
+  assert.equal(replacementFrame.body.after_sequence, 0n);
+  socket.reply(encodeTerminalAttached(replacementFrame.id, { session_id: terminalSessionId, floor: 0n, head: 0n, acknowledged_sequence: 0n, max_unacked_bytes: 65536n }));
+  await replacementAttach;
+  socket.reply(encodeTerminalExit(attachFrame.id, exit));
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(replacement.closed, false);
+  session.close();
+});
+
+test("RESET closes the old handle and a replacement may select a fresh after-sequence", async () => {
+  const agentId = "83".repeat(16);
+  const terminalSessionId = "84".repeat(16);
+  let socket;
+  const targetServer = (current) => {
+    serverFor(current);
+    const frame = decodeClientControl(current.sent.at(-1));
+    if (frame.type === "TERMINAL_TARGET_GET") current.reply(encodeTerminalTarget(frame.id, {
+      agent_id: frame.body.agent_id,
+      agent_revision: frame.body.expected_agent_revision,
+      head: frame.body.expected_head,
+      target: { run_id: runID, session_id: terminalSessionId, run_revision: 3n, session_revision: 4n },
+    }));
+  };
+  const session = new BrowserSession({
+    url: "ws://127.0.0.1:43123/browser/v1", host: "127.0.0.1:43123", origin: "https://preview.example",
+    challenge, keyStore: new MemoryKeys(), socketFactory: () => { socket = new Socket(targetServer); return socket; },
+  });
+  await session.connect();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const targetPending = session.resolveAgentTerminal({ agentId, expectedAgentRevision: 1n, expectedHead: 1n });
+  const target = await targetPending;
+  const terminal = session.openTerminal(target);
+  const attach = terminal.attach();
+  const attachFrame = decodeClientControl(socket.sent.at(-1));
+  socket.reply(encodeTerminalAttached(attachFrame.id, { session_id: terminalSessionId, floor: 0n, head: 8n, acknowledged_sequence: 0n, max_unacked_bytes: 65536n }));
+  await attach;
+  const reset = { session_id: terminalSessionId, floor: 4n, head: 8n };
+  socket.reply(encodeTerminalReset(attachFrame.id, reset));
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(terminal.closed, true);
+  const before = socket.sent.length;
+  assert.throws(() => terminal.attach(), /closed/);
+  assert.equal(socket.sent.length, before);
+
+  const replacement = session.openTerminal(target, { afterSequence: 6n });
+  const replacementAttach = replacement.attach();
+  const replacementFrame = decodeClientControl(socket.sent.at(-1));
+  assert.equal(replacementFrame.body.after_sequence, 6n);
+  socket.reply(encodeTerminalAttached(replacementFrame.id, { session_id: terminalSessionId, floor: 4n, head: 8n, acknowledged_sequence: 6n, max_unacked_bytes: 65536n }));
+  await replacementAttach;
+  socket.reply(encodeTerminalReset(attachFrame.id, reset));
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(replacement.closed, false);
+  session.close();
 });
