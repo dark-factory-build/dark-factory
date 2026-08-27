@@ -488,7 +488,10 @@ responsive and accessibility behavior, mocks, fixtures, and real-server tests.
 The public UI uses React because the existing production host is Next.js 15 and
 React 19; the transport client remains framework-neutral. The dev host may use
 the smallest Vite/Playwright setup that exercises the same packages without
-copying product state.
+copying product state. The public UI owns the xterm lifecycle adapter behind a
+small product-neutral terminal component, with xterm.js as a deliberate peer
+dependency. The private host must not reimplement that adapter; keeping it MIT
+is part of the contributor contract, not merely a packaging preference.
 
 The private site stays a thin host. It imports exact public npm versions of
 `@dark-factory/client` and `@dark-factory/ui`, supplies only production hosting,
@@ -1050,10 +1053,13 @@ browser state or require a second byte ring.
 
 The browser-owned backend interface uses only browser DTOs for pairing/auth,
 snapshot/watch, HumanRequest operations, terminal attach/detach, lease,
-input and resize. A terminal attachment provides bounded `Next(ctx)` and a
-synchronous `Close` that detaches and joins; it is not a raw channel. The
-adapter never imports Store or runner types. Client then run is the only gate
-order; the attempt owner never acquires a client gate.
+input and resize. A terminal attachment exposes one receive-only event stream
+backed directly by the daemon's existing bounded subscriber queue plus a
+synchronous `Close` that detaches and joins. This is the one place a channel is
+needed so the connection owner can select terminal output with browser input;
+it is not a second buffer, replay ring or generic event bus. The adapter never
+imports Store or runner types. Client then run is the only gate order; the
+attempt owner never acquires a client gate.
 
 PTY EOF remains observation, not terminal/process authority. Exact child wait
 and owned-group convergence precede resource release and browser terminal-exit
@@ -1082,6 +1088,88 @@ The source of truth stays deliberately small:
 This avoids a general schema/code-generation framework while satisfying the
 rule that a Go protocol change cannot pass with a silently incompatible
 TypeScript client.
+
+### Browser terminal wire pre-implementation audit
+
+Two independent read-only audits at canonical head `c84f4bb` returned
+**BLOCK** on calling the current adapter terminal-capable. That is the intended
+pre-implementation result, not a kernel regression:
+
+- the manifest currently registers only the binary terminal input/output
+  opcodes, not attach, lease, resize, acknowledgement, reset, exit, detach or
+  HumanRequest effect controls;
+- the browser backend is state-only, the Go connection rejects binary frames,
+  the TypeScript socket sends only strings and its Session rejects non-string
+  frames;
+- the existing binary terminal session ID carries no authority by itself. The
+  authenticated Principal, exact run/session/revisions, private connection
+  identity and current lease generation must all reach the daemon effect seam;
+- Go accepts an output range whose half-open endpoint is exactly `2^64`; the
+  TypeScript codec currently rejects it. The first contract change must choose
+  one exact rule, align both codecs and add a mutation test at that boundary.
+
+The first wire slice freezes one small state machine. Structured controls own:
+
+```text
+attach -> attached | reset | error
+lease acquire | renew | release -> exact lease result | error
+resize -> terminal acknowledgement | error
+detach -> terminal acknowledgement | error
+HumanRequest reply -> resolved | delivery_unknown | error
+cancel_run -> resolved | error
+terminal EOF/exit -> observation only
+```
+
+Binary client frames carry exact session, positive lease generation, strictly
+next input sequence and at most 8 KiB of bytes. Binary server frames carry the
+exact session, generation zero, contiguous output range and at most 8 KiB of
+bytes. Wrong direction, unattached/wrong session, zero/overflow, unknown
+opcode, malformed or oversized input closes the connection fail-closed. Input
+acknowledgement distinguishes complete acceptance from rejected, partial and
+uncertain outcomes; partial or uncertain input freezes/revokes the generation
+and is never retried. Output reset carries exact retained floor/head and forces
+a fresh rendering correlation. EOF/exit does not authorize process completion.
+
+One authenticated connection owner selects its WebSocket input, state watch
+and the attachment's existing bounded event queue. It owns at most one terminal
+attachment, synchronously closes/joins it on detach or socket loss and never
+stops the provider. Slow-client policy may reset or detach that observer, but
+cannot block PTY drain or another observer. Runner scrollback remains the only
+replay ring.
+
+The framework-neutral TypeScript surface owns a `TerminalHandle`, explicit
+lease, complete input receipts, typed reset/output/EOF/exit events and
+revision-bound HumanRequest reply plus the single `cancel_run` action. It does
+not expose connection IDs, delivery IDs, runner/process identities, another
+client's lease, generic action arguments or private reply bytes in public
+state. `connect()` reaching authenticated/syncing is distinct from canonical
+state becoming ready; UI code must observe the ready state rather than infer it
+from connection resolution.
+
+Shared protocol ownership is serialized before implementation fans out:
+
+1. one contract owner changes the manifest, Go control/binary codecs, checked
+   fixtures and TypeScript codec registry together, including the exact-maximum
+   sequence mutation;
+2. after independent review freezes that commit, the Go transport owner may
+   change `internal/browser` and the direct daemon browser adapter while the
+   TypeScript owner changes only `web/packages/client`;
+3. a real-Go-server TypeScript gate must prove attach, replay/live output,
+   input/resize/lease, reset/reconnect, exact HumanRequest reply,
+   `delivery_unknown`, `cancel_run` and structured errors before the public UI
+   consumes the effects;
+4. the public UI then owns the xterm adapter and NEEDS YOU interactions; the
+   private repository remains an exact-artifact host rather than the terminal
+   implementation.
+
+Required causal tests cover replay/live ordering, gap/reset, acknowledgement
+chronology, stale connection/generation/revision, partial/uncertain input,
+resize uncertainty, reply one-shot delivery, attach/finalization races,
+multiple observers/one writer, revocation, malformed frames, slow-client
+isolation and attachment/socket/goroutine cleanup. Mutations must kill the
+exact-maximum endpoint mismatch, removed private connection identity, skipped
+lease/revision checks, input replay, reset suppression, output without ACK
+credit and detach without join.
 
 ### Browser security and pairing
 
@@ -1502,22 +1590,28 @@ browser manifest, terminal messages or HumanRequest transitions concurrently.
 4. **Lane B: PTY runtime** — adapt `internal/runner` and supervisor to PTY,
    bounded scrollback, input sequencing/receipts, lease enforcement, shutdown
    and process/FD/goroutine proof.
-5. **Lane C: browser transport** — first add the joined daemon live-attempt
-   registry/mailbox and observer routing, then own `internal/browser`, loopback
-   listener, WebSocket frames, Host/Origin, pairing, client credentials,
-   multiplexing, backpressure and reconnect. It consumes frozen A/B contracts.
-6. **Lane D: TypeScript client** — own `protocol/browser/v1`,
-   `web/packages/client`, fixtures and real-Go-server compatibility tests.
-7. **Lane E: public UI** — own `web/packages/ui` and `web/apps/dev`: BUILDING,
+5. **Shared browser contract gate** — one writer owns
+   `protocol/browser/v1`, `internal/browserprotocol`, checked fixtures and the
+   TypeScript codec registry until message names, directions, binary bounds and
+   exact fixtures receive independent **ALLOW**. No transport/client writer
+   overlaps this gate.
+6. **Lane C: browser transport** — own `internal/browser` and the direct
+   `internal/daemon` browser adapter: loopback WebSocket control/binary routing,
+   terminal attachment lifecycle, multiplexing, backpressure and reconnect. It
+   consumes the already-proved daemon effect contract and frozen wire contract.
+7. **Lane D: TypeScript client** — own `web/packages/client` and real-Go-server
+   compatibility tests after the shared wire commit freezes. It does not own
+   the manifest or Go fixtures concurrently with Lane C.
+8. **Lane E: public UI** — own `web/packages/ui` and `web/apps/dev`: BUILDING,
    AGENT, xterm terminal, NEEDS YOU, responsive/accessibility and browser-state
    tests. It depends only on the public client.
-8. **Lane F: platform/CLI** — init, service, doctor, recovery, web open/pair/list/
+9. **Lane F: platform/CLI** — init, service, doctor, recovery, web open/pair/list/
    revoke, packaging and hard-cutover plumbing after C stabilizes.
-9. **Lane G: private host** — separate `dark-factory-site` worktree consuming
+10. **Lane G: private host** — separate `dark-factory-site` worktree consuming
    an exact public artifact after D/E stabilize; no daemon-contract edits.
-10. **Integration gate** — revised shell-provider vertical slice, crash cuts,
+11. **Integration gate** — revised shell-provider vertical slice, crash cuts,
     mutation matrix, authoritative race/process/browser tests and leak census.
-11. **Elegance/cutover** — dedicated whole-runtime and whole-web DRY/YAGNI
+12. **Elegance/cutover** — dedicated whole-runtime and whole-web DRY/YAGNI
     audit, independent architecture/security/process/Store/browser reviews,
     delete Rust local runtime/TUI and transitional residue, clean-checkout gate.
 
