@@ -257,14 +257,14 @@ func humanRequestProjectionByID(ctx context.Context, connection *sql.Conn, id Hu
 		return HumanRequestProjection{}, false, fmt.Errorf("%w: zero human request identifier", ErrInvalidValue)
 	}
 	var rawID, rawProjectID, rawAgentID, rawTaskID, rawRunID []byte
-	var kindValue, statusValue, runPhase string
+	var kindValue, statusValue, runPhaseValue string
 	var createdAt, updatedAt, revision int64
 	err := connection.QueryRowContext(ctx, `SELECT h.id, p.id, a.id, t.id, r.id, h.kind, h.status, r.phase, h.created_at_ms, h.updated_at_ms, h.revision
         FROM human_requests h JOIN runs r ON r.id = h.run_id
         JOIN projects p ON p.id = r.project_id
         JOIN agents a ON a.id = r.agent_id AND a.project_id = r.project_id
         JOIN tasks t ON t.id = r.task_id AND t.project_id = r.project_id AND t.incarnation_id = r.task_incarnation_id
-		WHERE h.id = ?`, id.Bytes()).Scan(&rawID, &rawProjectID, &rawAgentID, &rawTaskID, &rawRunID, &kindValue, &statusValue, &runPhase, &createdAt, &updatedAt, &revision)
+		WHERE h.id = ?`, id.Bytes()).Scan(&rawID, &rawProjectID, &rawAgentID, &rawTaskID, &rawRunID, &kindValue, &statusValue, &runPhaseValue, &createdAt, &updatedAt, &revision)
 	if errors.Is(err, sql.ErrNoRows) {
 		return HumanRequestProjection{}, false, nil
 	}
@@ -278,14 +278,23 @@ func humanRequestProjectionByID(ctx context.Context, connection *sql.Conn, id Hu
 	runID, runErr := RunIDFromBytes(rawRunID)
 	kind, kindErr := parseHumanRequestKind(kindValue)
 	status, statusErr := parseHumanRequestStatus(statusValue)
+	runPhase, runPhaseErr := parseRunPhase(runPhaseValue)
 	created, createdErr := NewUnixMillis(createdAt)
 	updated, updatedErr := NewUnixMillis(updatedAt)
 	rev, revErr := NewRevision(revision)
-	if idErr != nil || projectErr != nil || agentErr != nil || taskErr != nil || runErr != nil || kindErr != nil || statusErr != nil || createdErr != nil || updatedErr != nil || revErr != nil || updatedAt < createdAt || (status == HumanRequestOpen || status == HumanRequestDelivering) && runPhase != RunRunning.String() {
+	if idErr != nil || projectErr != nil || agentErr != nil || taskErr != nil || runErr != nil || kindErr != nil || statusErr != nil || runPhaseErr != nil || createdErr != nil || updatedErr != nil || revErr != nil || updatedAt < createdAt || (status == HumanRequestOpen || status == HumanRequestDelivering) && runPhase != RunRunning {
 		return HumanRequestProjection{}, false, fmt.Errorf("%w: invalid human request projection", ErrCorruptState)
 	}
+	terminal, terminalFound, err := terminalSessionByRunID(ctx, connection, runID)
+	if err != nil || !terminalFound {
+		if err == nil {
+			err = ErrCorruptState
+		}
+		return HumanRequestProjection{}, false, fmt.Errorf("%w: invalid human request terminal session", err)
+	}
 	unresolved := status == HumanRequestOpen || status == HumanRequestDelivering || status == HumanRequestDeliveryUnknown
-	return HumanRequestProjection{ID: requestID, ProjectID: projectID, AgentID: agentID, TaskID: taskID, RunID: runID, CreatedAt: created, UpdatedAt: updated, Revision: rev, Kind: kind, Status: status, ReplyMaxBytes: MaxHumanRequestReplyBytes, CanReply: status == HumanRequestOpen, CanOpenTerminal: unresolved}, true, nil
+	terminalAttachable := unresolved && runPhase == RunRunning && terminal.State == TerminalSessionActive
+	return HumanRequestProjection{ID: requestID, ProjectID: projectID, AgentID: agentID, TaskID: taskID, RunID: runID, CreatedAt: created, UpdatedAt: updated, Revision: rev, Kind: kind, Status: status, ReplyMaxBytes: MaxHumanRequestReplyBytes, CanReply: status == HumanRequestOpen, CanOpenTerminal: terminalAttachable}, true, nil
 }
 
 func (store *Store) HumanRequestDetail(ctx context.Context, clientID BrowserClientID, id HumanRequestID, expected Revision) (HumanRequestDetail, error) {

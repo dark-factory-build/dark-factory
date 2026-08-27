@@ -623,7 +623,7 @@ func TestHumanQuestionProcessExitConvergesRequestsAtomically(t *testing.T) {
 				t.Fatalf("process exit = %+v, %v", observed, err)
 			}
 			projection, found, err := store.HumanRequest(ctx, request.ID)
-			if err != nil || !found || projection.Status != test.wantStatus {
+			if err != nil || !found || projection.Status != test.wantStatus || projection.CanOpenTerminal {
 				t.Fatalf("request after process exit = %+v, found=%v, err=%v", projection, found, err)
 			}
 			if _, err := store.Snapshot(ctx); err != nil {
