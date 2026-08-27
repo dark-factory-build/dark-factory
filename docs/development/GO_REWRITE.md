@@ -43,12 +43,12 @@ branch/worktree and obeys that repository's `AGENTS.md`.
 
 | State | Exact work retained or stopped |
 |---|---|
-| Complete and retained | Fresh SQLite contract; typed kernel; atomic admission; exact attempt credentials; run/finalizing/resource state; bounded invalidations; Change ownership/materialization groundwork; owner-only Unix control API; typed `factoryctl` client; Darwin process identity; two blocked-exec gates; terminal-exit spool; gated Darwin PTY primitive; durable terminal-session admission, activation, recovery uncertainty and finalization guards; durable browser clients/challenges/revocation/input leases; exact PAIR/AUTH transcripts; strict browser-v1 handshake/binary codecs; strict runner terminal union, complete-write poisoning, incremental frame decoder and one fixed replay ring through `f1f72aa`; reviewed framework-neutral `@dark-factory/client` handshake/transcript/binary core and exact package gate through `d03491f`; independently reviewed question-only durable HumanRequest creation, private detail, reply reservation/acknowledgement/uncertainty, restart recovery, lifecycle convergence and bounded public projection through `40f5873`; the single-owner PTY execution loop, exact ready/input handoff, correlated retained replay, bounded filter retirement, poisoned writes, actual-EOF ordering and daemon-loss convergence through `ebcfd24` |
+| Complete and retained | Fresh SQLite contract; typed kernel; atomic admission; exact attempt credentials; run/finalizing/resource state; bounded invalidations; Change ownership/materialization groundwork; owner-only Unix control API; typed `factoryctl` client; Darwin process identity; two blocked-exec gates; terminal-exit spool; gated Darwin PTY primitive; durable terminal-session admission, activation, recovery uncertainty and finalization guards; durable browser clients/challenges/revocation/input leases; exact PAIR/AUTH transcripts; strict browser-v1 handshake/binary codecs; strict runner terminal union, complete-write poisoning, incremental frame decoder and one fixed replay ring through `f1f72aa`; reviewed framework-neutral `@dark-factory/client` handshake/transcript/binary core and exact package gate through `d03491f`; independently reviewed question-only durable HumanRequest creation, private detail, reply reservation/acknowledgement/uncertainty, restart recovery, lifecycle convergence and bounded public projection through `40f5873`; the single-owner PTY execution loop, exact ready/input handoff, correlated retained replay, bounded filter retirement, poisoned writes, actual-EOF ordering and daemon-loss convergence through `ebcfd24`; exact two-field `AUTH_PROVE` through `4b18c38`; runner-owned exact HumanRequest PTY reply through `0f313a9`; daemon live-attempt registry, mailbox, bounded observers, finalization gate, active supervisor cancellation and joined shutdown through `d9709b9`; the closed attempt-only `request_human` API contract through `2266e50` |
 | Reusable with adaptation | `internal/runner` live-child/process-group ownership; daemon supervisor choreography; bounded API framing/auth separation; dashboard projection/client reducer direction; rebased recovery branch `go-recovery-reserved-fix` at `185cd5f`; fail-closed runtime/spool/Change close branches at `f239815`, `347c977`, and `4183205` |
-| In progress but held | HumanRequest delivery and browser terminal routing now await the daemon live-attempt mailbox; their durable Store and runner contracts are complete. Recovery still needs replay onto the PTY design. The development/Go sub-gates are integrated and green; final browser E2E and the post-test system census remain cutover blockers. |
+| In progress but held | Daemon-side terminal lease/input/resize and reserved HumanRequest delivery now have durable Store, runner and owner-mailbox foundations but not the exact effect choreography. Durable daemon dispatch for the integrated `request_human` attempt API is an active isolated workstream. Four pre-mailbox supervisor lifecycle tests around outer exit, cancellation and descendant reap are an active process workstream. Recovery still needs replay onto the PTY design. The development/Go sub-gates are integrated and green; final browser E2E and the post-test system census remain cutover blockers. |
 | Obsolete | Startup-input-only/closed-stdin provider contract; separate stdin/stdout/stderr provider pipes as the product transport; TUI/Bubble Tea packages, lanes and parity tests; generic attention projection; message-on-next-run as the live-question answer |
-| Proved for revised architecture | Current Chrome on macOS can connect from the protected hosted HTTPS preview to exact `ws://127.0.0.1:43123` with the dedicated loopback permission; strict Origin/Host checks, binary traffic, reconnect, denial, no-daemon, port-collision and cross-site refusal are causal. A fresh Darwin PTY child remains inert until release, owns a controlling terminal/process group and is reaped without orphaning. SQLite owns exactly one terminal session per admitted run and refuses terminalization until its exact close is proved. The outer runner now owns the live PTY loop without goroutines, transfers initial input exactly once, gates terminal commands on readiness, bounds and correlates replay before and after actual EOF, poisons uncertain writes, and converges on daemon loss; full runner/changeworker normal and race tests passed on exact reviewed head and normal suites passed again after integration. |
-| Blocked until proved | Daemon mailbox serialization and subscriber routing over the integrated runner; daemon-owned delivery of a reserved HumanRequest reply to the exact live run; loopback transport authentication/Host/Origin security over the durable browser authority; complete browser protocol operations beyond the reviewed handshake/binary core; TypeScript connection/reconnect client; public web UI; complete private host integration; revised crash-cut vertical slice |
+| Proved for revised architecture | Current Chrome on macOS can connect from the protected hosted HTTPS preview to exact `ws://127.0.0.1:43123` with the dedicated loopback permission; strict Origin/Host checks, binary traffic, reconnect, denial, no-daemon, port-collision and cross-site refusal are causal. A fresh Darwin PTY child remains inert until release, owns a controlling terminal/process group and is reaped without orphaning. SQLite owns exactly one terminal session per admitted run and refuses terminalization until its exact close is proved. The outer runner owns the live PTY loop without goroutines, transfers initial input exactly once, gates terminal commands on readiness, bounds and correlates replay before and after actual EOF, and writes one HumanRequest reply byte-for-byte without borrowing browser lease authority. The daemon registers one joined owner before release, rejects wrong sessions, routes bounded replay to multiple observers, actively cancels pre-live supervisors on shutdown and serializes infrastructure failure with terminal effects. |
+| Blocked until proved | Exact daemon delivery of lease generation/input/resize and a reserved HumanRequest reply; the four older supervisor lifecycle failures enumerated in the daemon checkpoint; durable dispatch and explicit provider invocation of `request_human` through the authenticated daemon; loopback transport authentication/Host/Origin security over the durable browser authority; complete browser protocol operations beyond the reviewed handshake/binary core; TypeScript connection/reconnect client; public web UI; complete private host integration; revised crash-cut vertical slice |
 
 Read-only redirection audits were assigned without overlapping writes:
 
@@ -120,6 +120,50 @@ This checkpoint does not yet provide browser attachment or live terminal data.
 The next shared schema slice adds real browser clients, pairing credentials and
 terminal lease columns together so no fake foreign key or temporary identity
 model is introduced.
+
+### Daemon live-attempt and HumanRequest reply checkpoint
+
+Canonical head `d9709b9bfde97f12715695a0dc43e24b6f361d23` retains the
+reviewed authority and live-owner work needed before a browser can control a
+PTY:
+
+- `4b18c38` removes the redundant public key from `AUTH_PROVE`. Pairing remains
+  the only operation that installs the client key; subsequent authentication
+  sends exactly the client identity and transcript signature. Go and
+  TypeScript fixtures share that two-field body, and an obsolete third field
+  is rejected rather than silently tolerated.
+- `2266e50` adds the independently reviewed closed `request_human` API method.
+  It is attempt-domain only, accepts exactly a nonzero 16-byte idempotency key
+  encoded as lower-case hex plus a bounded question, and returns only the
+  ordinary mutation projection. The operator client has no equivalent method,
+  and callers cannot select a run, request identity, action or destination.
+  The API-only exact head passed normal and race tests and received **ALLOW**;
+  its daemon Store dispatch remains deliberately separate and unproved here.
+- `0f313a9` adds a distinct runner `HumanReply` operation. It writes one
+  bounded reply byte-for-byte to the exact live PTY, adds no newline, never
+  retries a suffix after an uncertain write and does not borrow the browser
+  terminal input lease or sequence space. Normal and race runner suites passed;
+  removing the generation rule and adding a newline were both killed by tests.
+- `3e32eae` through `d9709b9` install one daemon-owned live-attempt controller
+  before provider release. A bounded mailbox serializes authoritative effects;
+  observer attachment is session-bound and receives retained runner replay;
+  infrastructure failure is serialized with those effects. Shutdown rejects
+  new supervisors, actively cancels pre-live supervisors, joins their result,
+  then joins any installed live owner. The candidate was blocked three times
+  for controller abandonment, wrong-session attachment, a non-joined outer
+  supervisor and a finalization race; the repaired exact source head
+  `cedba46bbfce38b6559a7137a8c9ab2feb1fda40` received independent **ALLOW**
+  before integration.
+- The provider-exit fixture now exits explicitly. A PTY remains open for
+  interactive input, so treating stdin EOF as provider completion would encode
+  the obsolete non-interactive process model.
+
+This is not the browser terminal gate. Daemon delivery of lease generations,
+input, resize and reserved HumanRequest replies is still absent. Four older
+process tests also remain red or unstable around outer-runner exit,
+cancellation after release and descendant reaping; they reproduced before the
+mailbox changes and are a dedicated repair lane, not waived regressions. No
+full daemon or process-cleanup gate is claimed at this checkpoint.
 
 ### Product and repository ownership
 
