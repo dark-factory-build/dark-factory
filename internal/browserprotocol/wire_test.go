@@ -78,7 +78,7 @@ func TestControlFixturesRoundTrip(t *testing.T) {
 
 func decodeFixtureControl(name string, data []byte) (ControlFrame, error) {
 	switch name {
-	case "pair_prove", "auth_prove":
+	case "pair_prove", "auth_prove", "state_get", "state_subscribe", "state_entity_get", "human_request_detail_get":
 		return DecodeClientControl(data)
 	default:
 		return DecodeServerControl(data)
@@ -97,6 +97,24 @@ func encodeDecoded(frame ControlFrame) ([]byte, error) {
 		return EncodeAuthProve(frame.ID, value)
 	case AuthResult:
 		return EncodeAuthResult(frame.ID, value)
+	case StateGet:
+		return EncodeStateGet(frame.ID, value)
+	case StateSnapshot:
+		return EncodeStateSnapshot(frame.ID, value)
+	case StateRestart:
+		return EncodeStateRestart(frame.ID, value)
+	case StateSubscribe:
+		return EncodeStateSubscribe(frame.ID, value)
+	case StateEvent:
+		return EncodeStateEvent(frame.ID, value)
+	case StateEntityGet:
+		return EncodeStateEntityGet(frame.ID, value)
+	case StateEntity:
+		return EncodeStateEntity(frame.ID, value)
+	case HumanRequestDetailGet:
+		return EncodeHumanRequestDetailGet(frame.ID, value)
+	case HumanRequestDetail:
+		return EncodeHumanRequestDetail(frame.ID, value)
 	case Error:
 		return EncodeError(frame.ID, value)
 	default:
@@ -234,6 +252,22 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 			Bit   int    `json:"bit"`
 			Value byte   `json:"value"`
 		} `json:"capabilities"`
+		Bounds struct {
+			MaxControlBytes       int    `json:"max_control_bytes"`
+			MaxJSONDepth          int    `json:"max_json_depth"`
+			MaxArrayItems         int    `json:"max_array_items"`
+			MaxObjectMembers      int    `json:"max_object_members"`
+			MaxStatePageItems     int    `json:"max_state_page_items"`
+			MaxCursorBytes        int    `json:"max_cursor_bytes"`
+			MaxProjectNameBytes   int    `json:"max_project_name_bytes"`
+			MaxAgentNameBytes     int    `json:"max_agent_name_bytes"`
+			MaxTaskTitleBytes     int    `json:"max_task_title_bytes"`
+			MaxHumanQuestionBytes int    `json:"max_human_question_bytes"`
+			MaxHumanReplyBytes    int    `json:"max_human_reply_bytes"`
+			MaxFactoryCapacity    int    `json:"max_factory_capacity"`
+			MaxTaskPriority       int64  `json:"max_task_priority"`
+			MaxSQLiteInteger      string `json:"max_sqlite_integer"`
+		} `json:"bounds"`
 		Control []struct {
 			Type      string `json:"type"`
 			Direction string `json:"direction"`
@@ -262,7 +296,7 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 	if err := decoder.Decode(&trailing); err != io.EOF {
 		t.Fatalf("manifest trailing JSON: %v", err)
 	}
-	if manifest.Version != 1 || len(manifest.Control) != 6 || len(manifest.Terminal.Opcodes) != 2 {
+	if manifest.Version != 1 || len(manifest.Control) != 15 || len(manifest.Terminal.Opcodes) != 2 {
 		t.Fatalf("manifest registry incomplete: %+v", manifest)
 	}
 	capabilityNames := []string{"observe", "private_human_request_detail", "human_actions", "terminal_input"}
@@ -275,12 +309,32 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 			t.Fatalf("capability[%d] drift: %+v", i, manifest.Capabilities[i])
 		}
 	}
+	wantBounds := struct {
+		MaxControlBytes, MaxJSONDepth, MaxArrayItems, MaxObjectMembers int
+		MaxStatePageItems, MaxCursorBytes                              int
+		MaxProjectNameBytes, MaxAgentNameBytes, MaxTaskTitleBytes      int
+		MaxHumanQuestionBytes, MaxHumanReplyBytes, MaxFactoryCapacity  int
+		MaxTaskPriority                                                int64
+		MaxSQLiteInteger                                               string
+	}{MaxControlBytes, MaxJSONDepth, MaxJSONArray, MaxJSONObject, MaxStatePageItems, MaxCursorBytes, MaxProjectNameBytes, MaxAgentNameBytes, MaxTaskTitleBytes, MaxHumanQuestionBytes, MaxHumanReplyBytes, MaxFactoryCapacity, MaxTaskPriority, fmt.Sprint(MaxSQLiteInteger)}
+	if fmt.Sprint(manifest.Bounds) != fmt.Sprint(wantBounds) {
+		t.Fatalf("bounds drift: got %+v want %+v", manifest.Bounds, wantBounds)
+	}
 	want := []struct{ name, direction, id, fixture string }{
 		{"HELLO", "server", "forbidden", "hello.json"},
 		{"PAIR_PROVE", "client", "required", "pair_prove.json"},
 		{"PAIR_RESULT", "server", "required", "pair_result.json"},
 		{"AUTH_PROVE", "client", "required", "auth_prove.json"},
 		{"AUTH_RESULT", "server", "required", "auth_result.json"},
+		{"STATE_GET", "client", "required", "state_get.json"},
+		{"STATE_SNAPSHOT", "server", "required", "state_snapshot.json"},
+		{"STATE_RESTART", "server", "required", "state_restart.json"},
+		{"STATE_SUBSCRIBE", "client", "required", "state_subscribe.json"},
+		{"STATE_EVENT", "server", "required", "state_event.json"},
+		{"STATE_ENTITY_GET", "client", "required", "state_entity_get.json"},
+		{"STATE_ENTITY", "server", "required", "state_entity.json"},
+		{"HUMAN_REQUEST_DETAIL_GET", "client", "required", "human_request_detail_get.json"},
+		{"HUMAN_REQUEST_DETAIL", "server", "required", "human_request_detail.json"},
 		{"ERROR", "both", "optional", "error.json"},
 	}
 	seenFixtures := make(map[string]bool, len(want))
@@ -354,7 +408,7 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expectedFiles := map[string]bool{"transcript_v1.json": true, "hello.json": true, "pair_prove.json": true, "pair_result.json": true, "auth_prove.json": true, "auth_result.json": true, "error.json": true, "terminal_input.hex": true, "terminal_output.hex": true}
+	expectedFiles := map[string]bool{"transcript_v1.json": true, "hello.json": true, "pair_prove.json": true, "pair_result.json": true, "auth_prove.json": true, "auth_result.json": true, "state_get.json": true, "state_snapshot.json": true, "state_restart.json": true, "state_subscribe.json": true, "state_event.json": true, "state_entity_get.json": true, "state_entity.json": true, "human_request_detail_get.json": true, "human_request_detail.json": true, "error.json": true, "terminal_input.hex": true, "terminal_output.hex": true}
 	if len(entries) != len(expectedFiles) {
 		t.Fatalf("fixture count = %d, want %d", len(entries), len(expectedFiles))
 	}
@@ -372,7 +426,7 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 			t.Fatalf("manifest fixture not exercised: %q", entry.Fixture)
 		}
 	}
-	for _, name := range []string{"hello", "pair_prove", "pair_result", "auth_prove", "auth_result", "error"} {
+	for _, name := range []string{"hello", "pair_prove", "pair_result", "auth_prove", "auth_result", "state_get", "state_snapshot", "state_restart", "state_subscribe", "state_event", "state_entity_get", "state_entity", "human_request_detail_get", "human_request_detail", "error"} {
 		if len(fixtureBytes(t, name+".json")) == 0 {
 			t.Fatal("empty fixture")
 		}

@@ -7,14 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 )
 
-// The v1 control protocol intentionally contains only the handshake and
-// authentication messages needed before the rest of the browser API exists.
-// Adding a message is a contract change: add its manifest entry, fixture and
+// Adding a v1 message is a contract change: add its manifest entry, fixture and
 // explicit case in the role-specific decoders together.
 const (
 	MaxControlBytes = 64 << 10
@@ -26,12 +25,21 @@ const (
 type MessageType string
 
 const (
-	TypeHello      MessageType = "HELLO"
-	TypePairProve  MessageType = "PAIR_PROVE"
-	TypePairResult MessageType = "PAIR_RESULT"
-	TypeAuthProve  MessageType = "AUTH_PROVE"
-	TypeAuthResult MessageType = "AUTH_RESULT"
-	TypeError      MessageType = "ERROR"
+	TypeHello                 MessageType = "HELLO"
+	TypePairProve             MessageType = "PAIR_PROVE"
+	TypePairResult            MessageType = "PAIR_RESULT"
+	TypeAuthProve             MessageType = "AUTH_PROVE"
+	TypeAuthResult            MessageType = "AUTH_RESULT"
+	TypeStateGet              MessageType = "STATE_GET"
+	TypeStateSnapshot         MessageType = "STATE_SNAPSHOT"
+	TypeStateRestart          MessageType = "STATE_RESTART"
+	TypeStateSubscribe        MessageType = "STATE_SUBSCRIBE"
+	TypeStateEvent            MessageType = "STATE_EVENT"
+	TypeStateEntityGet        MessageType = "STATE_ENTITY_GET"
+	TypeStateEntity           MessageType = "STATE_ENTITY"
+	TypeHumanRequestDetailGet MessageType = "HUMAN_REQUEST_DETAIL_GET"
+	TypeHumanRequestDetail    MessageType = "HUMAN_REQUEST_DETAIL"
+	TypeError                 MessageType = "ERROR"
 )
 
 // Capability bits are deliberately a fixed wire bitmask, not an extensible
@@ -93,6 +101,7 @@ const (
 	ErrorRateLimited        ErrorCode = "rate_limited"
 	ErrorNotFound           ErrorCode = "not_found"
 	ErrorStale              ErrorCode = "stale"
+	ErrorTooLarge           ErrorCode = "too_large"
 	ErrorInternal           ErrorCode = "internal"
 )
 
@@ -129,6 +138,33 @@ func EncodeAuthProve(id string, value AuthProve) ([]byte, error) {
 }
 func EncodeAuthResult(id string, value AuthResult) ([]byte, error) {
 	return encodeControl(TypeAuthResult, id, value)
+}
+func EncodeStateGet(id string, value StateGet) ([]byte, error) {
+	return encodeControl(TypeStateGet, id, value)
+}
+func EncodeStateSnapshot(id string, value StateSnapshot) ([]byte, error) {
+	return encodeControl(TypeStateSnapshot, id, value)
+}
+func EncodeStateRestart(id string, value StateRestart) ([]byte, error) {
+	return encodeControl(TypeStateRestart, id, value)
+}
+func EncodeStateSubscribe(id string, value StateSubscribe) ([]byte, error) {
+	return encodeControl(TypeStateSubscribe, id, value)
+}
+func EncodeStateEvent(id string, value StateEvent) ([]byte, error) {
+	return encodeControl(TypeStateEvent, id, value)
+}
+func EncodeStateEntityGet(id string, value StateEntityGet) ([]byte, error) {
+	return encodeControl(TypeStateEntityGet, id, value)
+}
+func EncodeStateEntity(id string, value StateEntity) ([]byte, error) {
+	return encodeControl(TypeStateEntity, id, value)
+}
+func EncodeHumanRequestDetailGet(id string, value HumanRequestDetailGet) ([]byte, error) {
+	return encodeControl(TypeHumanRequestDetailGet, id, value)
+}
+func EncodeHumanRequestDetail(id string, value HumanRequestDetail) ([]byte, error) {
+	return encodeControl(TypeHumanRequestDetail, id, value)
 }
 func EncodeError(id string, value Error) ([]byte, error) {
 	return encodeControl(TypeError, id, value)
@@ -220,6 +256,36 @@ func decodeControl(data []byte, role senderRole) (ControlFrame, error) {
 		body = new(AuthProve)
 	case TypeAuthResult:
 		body = new(AuthResult)
+	case TypeStateGet:
+		body = new(StateGet)
+	case TypeStateSnapshot:
+		value, err := decodeStateSnapshot(envelope.Body)
+		if err != nil {
+			return ControlFrame{}, ErrMalformed
+		}
+		body = value
+	case TypeStateRestart:
+		body = new(StateRestart)
+	case TypeStateSubscribe:
+		body = new(StateSubscribe)
+	case TypeStateEvent:
+		value, err := decodeStateEvent(envelope.Body)
+		if err != nil {
+			return ControlFrame{}, ErrMalformed
+		}
+		body = value
+	case TypeStateEntityGet:
+		body = new(StateEntityGet)
+	case TypeStateEntity:
+		value, err := decodeStateEntity(envelope.Body)
+		if err != nil {
+			return ControlFrame{}, ErrMalformed
+		}
+		body = value
+	case TypeHumanRequestDetailGet:
+		body = new(HumanRequestDetailGet)
+	case TypeHumanRequestDetail:
+		body = new(HumanRequestDetail)
 	case TypeError:
 		var value struct {
 			Code      ErrorCode `json:"code"`
@@ -239,13 +305,19 @@ func decodeControl(data []byte, role senderRole) (ControlFrame, error) {
 	default:
 		return ControlFrame{}, ErrMalformed
 	}
-	if err := unmarshalObject(envelope.Body, body); err != nil {
-		return ControlFrame{}, ErrMalformed
+	if !bodyAlreadyDecoded(envelope.Type) {
+		if err := unmarshalObject(envelope.Body, body); err != nil {
+			return ControlFrame{}, ErrMalformed
+		}
 	}
 	if err := validateBody(envelope.Type, body); err != nil {
 		return ControlFrame{}, ErrMalformed
 	}
 	return ControlFrame{Version: envelope.Version, Type: envelope.Type, ID: id, Body: dereferenceBody(body)}, nil
+}
+
+func bodyAlreadyDecoded(kind MessageType) bool {
+	return kind == TypeStateSnapshot || kind == TypeStateEvent || kind == TypeStateEntity
 }
 
 func decodeID(raw json.RawMessage) (string, bool, bool) {
@@ -263,7 +335,7 @@ func decodeID(raw json.RawMessage) (string, bool, bool) {
 }
 
 func validIDPresence(id string, present bool, kind MessageType) bool {
-	required := kind == TypePairProve || kind == TypePairResult || kind == TypeAuthProve || kind == TypeAuthResult
+	required := idRequired(kind)
 	if !present {
 		return !required && (kind == TypeHello || kind == TypeError)
 	}
@@ -273,14 +345,29 @@ func validIDPresence(id string, present bool, kind MessageType) bool {
 	return validateID(id, kind) == nil
 }
 
+func idRequired(kind MessageType) bool {
+	switch kind {
+	case TypePairProve, TypePairResult, TypeAuthProve, TypeAuthResult,
+		TypeStateGet, TypeStateSnapshot, TypeStateRestart, TypeStateSubscribe,
+		TypeStateEvent, TypeStateEntityGet, TypeStateEntity,
+		TypeHumanRequestDetailGet, TypeHumanRequestDetail:
+		return true
+	default:
+		return false
+	}
+}
+
 func typeAllowed(role senderRole, kind MessageType) bool {
 	if kind == TypeError {
 		return true
 	}
 	if role == clientRole {
-		return kind == TypePairProve || kind == TypeAuthProve
+		return kind == TypePairProve || kind == TypeAuthProve || kind == TypeStateGet ||
+			kind == TypeStateSubscribe || kind == TypeStateEntityGet || kind == TypeHumanRequestDetailGet
 	}
-	return role == serverRole && (kind == TypeHello || kind == TypePairResult || kind == TypeAuthResult)
+	return role == serverRole && (kind == TypeHello || kind == TypePairResult || kind == TypeAuthResult ||
+		kind == TypeStateSnapshot || kind == TypeStateRestart || kind == TypeStateEvent ||
+		kind == TypeStateEntity || kind == TypeHumanRequestDetail)
 }
 
 func dereferenceBody(body any) any {
@@ -295,6 +382,20 @@ func dereferenceBody(body any) any {
 		return *value
 	case *AuthResult:
 		return *value
+	case *StateGet:
+		return *value
+	case *StateRestart:
+		return *value
+	case *StateSubscribe:
+		return *value
+	case *StateEntityGet:
+		return *value
+	case *HumanRequestDetailGet:
+		return *value
+	case *HumanRequestDetail:
+		return *value
+	case StateSnapshot, StateEvent, StateEntity:
+		return value
 	case *Error:
 		return *value
 	default:
@@ -306,6 +407,9 @@ func unmarshalObject(data []byte, target any) error {
 	trimmed := bytes.TrimSpace(data)
 	if len(trimmed) < 2 || trimmed[0] != '{' || trimmed[len(trimmed)-1] != '}' {
 		return fmt.Errorf("%w: object required", ErrMalformed)
+	}
+	if err := validateExactJSONShape(trimmed, reflect.TypeOf(target)); err != nil {
+		return err
 	}
 	decoder := json.NewDecoder(bytes.NewReader(trimmed))
 	decoder.DisallowUnknownFields()
@@ -319,8 +423,87 @@ func unmarshalObject(data []byte, target any) error {
 	return nil
 }
 
+func unmarshalArray(data []byte, target any) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) < 2 || trimmed[0] != '[' || trimmed[len(trimmed)-1] != ']' {
+		return fmt.Errorf("%w: array required", ErrMalformed)
+	}
+	if err := validateExactJSONShape(trimmed, reflect.TypeOf(target)); err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return fmt.Errorf("%w: %v", ErrMalformed, err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return fmt.Errorf("%w: trailing JSON", ErrMalformed)
+	}
+	return nil
+}
+
+func validateExactJSONShape(data []byte, target reflect.Type) error {
+	for target.Kind() == reflect.Pointer {
+		target = target.Elem()
+	}
+	if target == reflect.TypeOf(json.RawMessage{}) {
+		return nil
+	}
+	switch target.Kind() {
+	case reflect.Struct:
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal(data, &object); err != nil {
+			return fmt.Errorf("%w: object required", ErrMalformed)
+		}
+		fields := make(map[string]reflect.Type, target.NumField())
+		required := make(map[string]bool, target.NumField())
+		for index := 0; index < target.NumField(); index++ {
+			field := target.Field(index)
+			tag := field.Tag.Get("json")
+			name, options, _ := strings.Cut(tag, ",")
+			if name == "-" {
+				continue
+			}
+			if name == "" {
+				name = field.Name
+			}
+			fields[name] = field.Type
+			required[name] = options != "omitempty"
+		}
+		for name, raw := range object {
+			fieldType, ok := fields[name]
+			if !ok {
+				return fmt.Errorf("%w: unknown object field", ErrMalformed)
+			}
+			if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) && fieldType.Kind() == reflect.Pointer {
+				continue
+			}
+			if err := validateExactJSONShape(raw, fieldType); err != nil {
+				return err
+			}
+		}
+		for name, needed := range required {
+			if _, ok := object[name]; needed && !ok {
+				return fmt.Errorf("%w: missing object field", ErrMalformed)
+			}
+		}
+	case reflect.Slice, reflect.Array:
+		var values []json.RawMessage
+		if err := json.Unmarshal(data, &values); err != nil {
+			return fmt.Errorf("%w: array required", ErrMalformed)
+		}
+		for _, raw := range values {
+			if err := validateExactJSONShape(raw, target.Elem()); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func validateID(id string, kind MessageType) error {
-	required := kind == TypePairProve || kind == TypePairResult || kind == TypeAuthProve || kind == TypeAuthResult
+	required := idRequired(kind)
 	if id == "" {
 		if required {
 			return fmt.Errorf("%w: %s requires id", ErrMalformed, kind)
@@ -393,6 +576,84 @@ func validateBody(kind MessageType, body any) error {
 			}
 		}
 		return validateAuthResult(value)
+	case TypeStateGet:
+		value, ok := body.(StateGet)
+		if !ok {
+			if pointer, ok := body.(*StateGet); ok {
+				value = *pointer
+			} else {
+				return fmt.Errorf("%w: STATE_GET body type", ErrMalformed)
+			}
+		}
+		return validateStateGet(value)
+	case TypeStateSnapshot:
+		value, ok := body.(StateSnapshot)
+		if !ok {
+			return fmt.Errorf("%w: STATE_SNAPSHOT body type", ErrMalformed)
+		}
+		return validateStateSnapshot(value)
+	case TypeStateRestart:
+		value, ok := body.(StateRestart)
+		if !ok {
+			if pointer, ok := body.(*StateRestart); ok {
+				value = *pointer
+			} else {
+				return fmt.Errorf("%w: STATE_RESTART body type", ErrMalformed)
+			}
+		}
+		return validateStateRestart(value)
+	case TypeStateSubscribe:
+		value, ok := body.(StateSubscribe)
+		if !ok {
+			if pointer, ok := body.(*StateSubscribe); ok {
+				value = *pointer
+			} else {
+				return fmt.Errorf("%w: STATE_SUBSCRIBE body type", ErrMalformed)
+			}
+		}
+		return validateStateSubscribe(value)
+	case TypeStateEvent:
+		value, ok := body.(StateEvent)
+		if !ok {
+			return fmt.Errorf("%w: STATE_EVENT body type", ErrMalformed)
+		}
+		return validateStateEvent(value)
+	case TypeStateEntityGet:
+		value, ok := body.(StateEntityGet)
+		if !ok {
+			if pointer, ok := body.(*StateEntityGet); ok {
+				value = *pointer
+			} else {
+				return fmt.Errorf("%w: STATE_ENTITY_GET body type", ErrMalformed)
+			}
+		}
+		return validateStateEntityGet(value)
+	case TypeStateEntity:
+		value, ok := body.(StateEntity)
+		if !ok {
+			return fmt.Errorf("%w: STATE_ENTITY body type", ErrMalformed)
+		}
+		return validateStateEntity(value)
+	case TypeHumanRequestDetailGet:
+		value, ok := body.(HumanRequestDetailGet)
+		if !ok {
+			if pointer, ok := body.(*HumanRequestDetailGet); ok {
+				value = *pointer
+			} else {
+				return fmt.Errorf("%w: HUMAN_REQUEST_DETAIL_GET body type", ErrMalformed)
+			}
+		}
+		return validateHumanRequestDetailGet(value)
+	case TypeHumanRequestDetail:
+		value, ok := body.(HumanRequestDetail)
+		if !ok {
+			if pointer, ok := body.(*HumanRequestDetail); ok {
+				value = *pointer
+			} else {
+				return fmt.Errorf("%w: HUMAN_REQUEST_DETAIL body type", ErrMalformed)
+			}
+		}
+		return validateHumanRequestDetail(value)
 	case TypeError:
 		value, ok := body.(Error)
 		if !ok {
@@ -465,7 +726,7 @@ func validateCapabilities(value Capabilities) error {
 
 func validateError(value Error) error {
 	switch value.Code {
-	case ErrorUnauthorized, ErrorInvalidRequest, ErrorUnsupportedVersion, ErrorRateLimited, ErrorNotFound, ErrorStale, ErrorInternal:
+	case ErrorUnauthorized, ErrorInvalidRequest, ErrorUnsupportedVersion, ErrorRateLimited, ErrorNotFound, ErrorStale, ErrorTooLarge, ErrorInternal:
 		return nil
 	default:
 		return fmt.Errorf("%w: unknown error code %q", ErrMalformed, value.Code)
@@ -575,7 +836,7 @@ func validateJSONNumber(value string) error {
 	if negative {
 		digits = value[1:]
 	}
-	if digits == "" || (len(digits) > 1 && digits[0] == '0') || (len(digits) > 0 && digits[0] == '+') {
+	if digits == "" || (len(digits) > 1 && digits[0] == '0') || (len(digits) > 0 && digits[0] == '+') || negative && digits == "0" {
 		return errors.New("invalid integer")
 	}
 	parsed, err := strconv.ParseUint(digits, 10, 64)
