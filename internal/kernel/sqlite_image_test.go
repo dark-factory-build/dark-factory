@@ -3,16 +3,25 @@ package kernel
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
+
+	sqliteIO "github.com/ncruces/go-sqlite3/util/ioutil"
+	"github.com/ncruces/go-sqlite3/vfs/readervfs"
+	"golang.org/x/sys/unix"
 )
+
+const walFrameHeaderSizeForTest = 24
 
 func TestNewDatabaseImageIsExactAndOpens(t *testing.T) {
 	ctx := context.Background()
@@ -168,6 +177,351 @@ func TestOpenRefusesRollbackImageWithHotJournalWithoutMutation(t *testing.T) {
 	}
 }
 
+func TestOpenValidatesWALOnDisposableCopy(t *testing.T) {
+	t.Run("valid committed state is recovered", func(t *testing.T) {
+		path, project := walSnapshotFixture(t, "")
+		store, err := Open(context.Background(), path)
+		if err != nil {
+			t.Fatalf("Open valid WAL snapshot: %v", err)
+		}
+		defer store.Close()
+		if retained, found, err := store.Project(context.Background(), project.ID); err != nil || !found || retained.Name != project.Name {
+			t.Fatalf("WAL project found=%v project=%+v err=%v", found, retained, err)
+		}
+		info, err := os.Stat(path + "-shm")
+		if err != nil || info.Size() == 0 {
+			t.Fatalf("successful WAL open did not rebuild disposable SHM: size=%d err=%v", info.Size(), err)
+		}
+	})
+
+	for name, mutation := range map[string]string{
+		"invalid controls never touch originals": `UPDATE factory SET next_invalidation_sequence = 3`,
+		"invalid schema never touches originals": `DROP INDEX tasks_canonical_queue`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path, _ := walSnapshotFixture(t, mutation)
+			before := captureSQLiteSet(t, path)
+			if _, err := Open(context.Background(), path); err == nil {
+				t.Fatal("Open accepted invalid WAL state")
+			}
+			assertSQLiteSetUnchanged(t, path, before)
+			info, err := os.Stat(path + "-shm")
+			if err != nil || info.Size() != walIndexRegionSize {
+				size := int64(-1)
+				if info != nil {
+					size = info.Size()
+				}
+				t.Fatalf("rejected WAL changed zero-cache SHM: size=%d err=%v", size, err)
+			}
+		})
+	}
+}
+
+func TestOpenAcceptsSQLiteWALCrashTails(t *testing.T) {
+	for name, tail := range map[string]func([]byte, uint32) []byte{
+		"partial": func(wal []byte, _ uint32) []byte {
+			return append(wal, []byte("partial crash tail")...)
+		},
+		"checksum invalid frame": func(wal []byte, pageSize uint32) []byte {
+			return append(wal, make([]byte, walFrameHeaderSizeForTest+int(pageSize))...)
+		},
+		"salt mismatched frame": func(wal []byte, pageSize uint32) []byte {
+			frame := make([]byte, walFrameHeaderSizeForTest+int(pageSize))
+			binary.BigEndian.PutUint32(frame[0:4], 1)
+			binary.BigEndian.PutUint32(frame[8:12], ^binary.BigEndian.Uint32(wal[16:20]))
+			binary.BigEndian.PutUint32(frame[12:16], ^binary.BigEndian.Uint32(wal[20:24]))
+			return append(wal, frame...)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path, project := walSnapshotFixture(t, "")
+			main, err := os.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pageSize, err := databasePageSize(main)
+			main.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			wal, err := os.ReadFile(path + "-wal")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path+"-wal", tail(wal, pageSize), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			store, err := Open(context.Background(), path)
+			if err != nil {
+				t.Fatalf("Open WAL with legitimate tail: %v", err)
+			}
+			if _, found, err := store.Project(context.Background(), project.ID); err != nil || !found {
+				store.Close()
+				t.Fatalf("recovered committed prefix found=%v err=%v", found, err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestOpenRejectsUnsafeWALSidecarsWithoutMutation(t *testing.T) {
+	for name, mutate := range map[string]func(*testing.T, string){
+		"malformed pair": func(t *testing.T, path string) {
+			writeSidecar(t, path+"-wal", []byte("thirteen-byte!"), 0o600)
+			writeSidecar(t, path+"-shm", make([]byte, walIndexRegionSize), 0o600)
+		},
+		"wrong WAL mode": func(t *testing.T, path string) {
+			path, _ = walSnapshotFixtureAt(t, filepath.Dir(path), filepath.Base(path), "")
+			if err := os.Chmod(path+"-wal", 0o644); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"WAL special mode bits": func(t *testing.T, path string) {
+			path, _ = walSnapshotFixtureAt(t, filepath.Dir(path), filepath.Base(path), "")
+			if err := os.Chmod(path+"-wal", os.ModeSetuid|0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"wrong WAL checksum": func(t *testing.T, path string) {
+			path, _ = walSnapshotFixtureAt(t, filepath.Dir(path), filepath.Base(path), "")
+			wal, err := os.ReadFile(path + "-wal")
+			if err != nil {
+				t.Fatal(err)
+			}
+			wal[24] ^= 0x80
+			writeSidecar(t, path+"-wal", wal, 0o600)
+		},
+		"wrong WAL version": func(t *testing.T, path string) {
+			path, _ = walSnapshotFixtureAt(t, filepath.Dir(path), filepath.Base(path), "")
+			wal, err := os.ReadFile(path + "-wal")
+			if err != nil {
+				t.Fatal(err)
+			}
+			binary.BigEndian.PutUint32(wal[4:8], walFormatVersion+1)
+			writeSidecar(t, path+"-wal", wal, 0o600)
+		},
+		"WAL without SHM": func(t *testing.T, path string) {
+			path, _ = walSnapshotFixtureAt(t, filepath.Dir(path), filepath.Base(path), "")
+			if err := os.Remove(path + "-shm"); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"SHM without WAL": func(t *testing.T, path string) {
+			writeSidecar(t, path+"-shm", make([]byte, walIndexRegionSize), 0o600)
+		},
+		"WAL symlink": func(t *testing.T, path string) {
+			target := filepath.Join(filepath.Dir(path), "target-wal")
+			writeSidecar(t, target, make([]byte, walHeaderSize), 0o600)
+			if err := os.Symlink(target, path+"-wal"); err != nil {
+				t.Fatal(err)
+			}
+			writeSidecar(t, path+"-shm", make([]byte, walIndexRegionSize), 0o600)
+		},
+		"WAL fifo": func(t *testing.T, path string) {
+			if err := unix.Mkfifo(path+"-wal", 0o600); err != nil {
+				t.Fatal(err)
+			}
+			writeSidecar(t, path+"-shm", make([]byte, walIndexRegionSize), 0o600)
+		},
+		"WAL hard link": func(t *testing.T, path string) {
+			target := filepath.Join(filepath.Dir(path), "target-wal")
+			writeSidecar(t, target, make([]byte, walHeaderSize), 0o600)
+			if err := os.Link(target, path+"-wal"); err != nil {
+				t.Fatal(err)
+			}
+			writeSidecar(t, path+"-shm", make([]byte, walIndexRegionSize), 0o600)
+		},
+		"oversized WAL": func(t *testing.T, path string) {
+			file, err := os.OpenFile(path+"-wal", os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := file.Truncate(maxSQLiteWALSize + 1); err != nil {
+				t.Fatal(err)
+			}
+			file.Close()
+			writeSidecar(t, path+"-shm", make([]byte, walIndexRegionSize), 0o600)
+		},
+		"mis-sized SHM": func(t *testing.T, path string) {
+			writeSidecar(t, path+"-wal", make([]byte, walHeaderSize), 0o600)
+			writeSidecar(t, path+"-shm", make([]byte, walIndexRegionSize+1), 0o600)
+		},
+		"oversized SHM": func(t *testing.T, path string) {
+			writeSidecar(t, path+"-wal", make([]byte, walHeaderSize), 0o600)
+			file, err := os.OpenFile(path+"-shm", os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := file.Truncate(maxSQLiteSHMSize + walIndexRegionSize); err != nil {
+				t.Fatal(err)
+			}
+			file.Close()
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			image, err := NewDatabaseImage(context.Background(), FactoryConfig{}, mustTime(t, 1))
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "kernel.db")
+			if err := os.WriteFile(path, image, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			mutate(t, path)
+			before := captureSQLiteSet(t, path)
+			if _, err := Open(context.Background(), path); err == nil {
+				t.Fatal("unsafe WAL sidecars passed Open")
+			}
+			assertSQLiteSetUnchanged(t, path, before)
+		})
+	}
+}
+
+func TestWALPreflightAlwaysRemovesPrivateCopy(t *testing.T) {
+	temporaryRoot := t.TempDir()
+	t.Setenv("TMPDIR", temporaryRoot)
+
+	validPath, _ := walSnapshotFixture(t, "")
+	valid, err := Open(context.Background(), validPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := valid.Close(); err != nil {
+		t.Fatal(err)
+	}
+	assertDirectoryEmpty(t, temporaryRoot)
+
+	invalidPath, _ := walSnapshotFixture(t, `UPDATE factory SET next_invalidation_sequence = 3`)
+	if _, err := Open(context.Background(), invalidPath); !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("invalid WAL Open error = %v", err)
+	}
+	assertDirectoryEmpty(t, temporaryRoot)
+}
+
+func TestValidateWALHeaderFailsClosed(t *testing.T) {
+	path, _ := walSnapshotFixture(t, "")
+	main, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pageSize, err := databasePageSize(main)
+	main.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wal, err := os.ReadFile(path + "-wal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateWAL(bytes.NewReader(wal), int64(len(wal)), pageSize); err != nil {
+		t.Fatalf("valid WAL header: %v", err)
+	}
+	if err := validateWAL(bytes.NewReader(nil), 0, pageSize); err != nil {
+		t.Fatalf("valid empty WAL: %v", err)
+	}
+	if err := validateWAL(bytes.NewReader([]byte("malformed WAL")), 13, pageSize); !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("malformed WAL error = %v", err)
+	}
+	corrupt := append([]byte(nil), wal...)
+	corrupt[24] ^= 0x80
+	if err := validateWAL(bytes.NewReader(corrupt), int64(len(corrupt)), pageSize); !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("checksum-corrupt WAL error = %v", err)
+	}
+}
+
+func TestDatabaseFileBindingsAreRecheckedAfterPreflight(t *testing.T) {
+	newStandalone := func(t *testing.T) string {
+		t.Helper()
+		image, err := NewDatabaseImage(context.Background(), FactoryConfig{}, mustTime(t, 1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(t.TempDir(), "kernel.db")
+		writeSidecar(t, path, image, 0o600)
+		return path
+	}
+
+	t.Run("main rebound", func(t *testing.T) {
+		path := newStandalone(t)
+		files, err := openDatabaseFiles(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer files.Close()
+		if err := preflightExisting(context.Background(), files); err != nil {
+			t.Fatal(err)
+		}
+		moved := path + ".old"
+		if err := os.Rename(path, moved); err != nil {
+			t.Fatal(err)
+		}
+		writeSidecar(t, path, make([]byte, 4096), 0o600)
+		if err := files.recheckPaths(); !errors.Is(err, ErrCorruptState) {
+			t.Fatalf("rebound main recheck error = %v", err)
+		}
+	})
+
+	t.Run("journal appeared", func(t *testing.T) {
+		path := newStandalone(t)
+		files, err := openDatabaseFiles(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer files.Close()
+		if err := preflightExisting(context.Background(), files); err != nil {
+			t.Fatal(err)
+		}
+		writeSidecar(t, path+"-journal", []byte("appeared"), 0o600)
+		if err := files.recheckPaths(); !errors.Is(err, ErrCorruptState) {
+			t.Fatalf("appeared journal recheck error = %v", err)
+		}
+	})
+
+	t.Run("standalone main changed in place", func(t *testing.T) {
+		path := newStandalone(t)
+		files, err := openDatabaseFiles(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer files.Close()
+		if err := preflightExisting(context.Background(), files); err != nil {
+			t.Fatal(err)
+		}
+		file, err := os.OpenFile(path, os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := file.WriteAt([]byte{0xff}, 4096); err != nil {
+			file.Close()
+			t.Fatal(err)
+		}
+		file.Close()
+		if err := files.recheckPaths(); !errors.Is(err, ErrCorruptState) {
+			t.Fatalf("in-place main mutation recheck error = %v", err)
+		}
+	})
+}
+
+func TestOpenFreshRollbackRequiresExactChronology(t *testing.T) {
+	for name, statement := range map[string]string{
+		"revision":              `UPDATE factory SET revision = 2`,
+		"head":                  `UPDATE factory SET next_invalidation_sequence = 2`,
+		"floor":                 `UPDATE factory SET next_invalidation_sequence = 2, invalidation_floor = 2`,
+		"retained sequence row": `INSERT INTO sqlite_sequence(name, seq) VALUES('browser_security_events', 1)`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := mutatedRollbackPath(t, statement)
+			before := captureSQLiteSet(t, path)
+			if _, err := Open(context.Background(), path); err == nil {
+				t.Fatal("non-pristine rollback database passed Open")
+			}
+			assertSQLiteSetUnchanged(t, path, before)
+		})
+	}
+}
+
 func TestInspectImmutableValidStateIsReadOnlyAndKeepsReaderOpen(t *testing.T) {
 	ctx := context.Background()
 	image, err := NewDatabaseImage(ctx, FactoryConfig{}, mustTime(t, 1))
@@ -262,6 +616,15 @@ func TestInspectImmutableRejectsForeignTruncatedAndCorruptState(t *testing.T) {
 	if err := InspectImmutable(ctx, failingReaderAt{err: readerFailure}, int64(len(image))); !errors.Is(err, readerFailure) || !errors.Is(err, ErrForeignDatabase) {
 		t.Fatalf("ReaderAt failure error = %v", err)
 	}
+	shortReader := &shortNilReaderAt{reader: bytes.NewReader(image), after: 0}
+	if err := InspectImmutable(ctx, shortReader, int64(len(image))); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("short nil ReaderAt error = %v", err)
+	}
+	laterFailure := errors.New("injected later ReaderAt failure")
+	laterReader := &failAfterReaderAt{reader: bytes.NewReader(image), after: 100, err: laterFailure}
+	if err := InspectImmutable(ctx, laterReader, int64(len(image))); !errors.Is(err, laterFailure) {
+		t.Fatalf("later ReaderAt failure error = %v", err)
+	}
 
 	for name, mutation := range map[string]string{
 		"schema":    `DROP INDEX tasks_canonical_queue`,
@@ -274,6 +637,44 @@ func TestInspectImmutableRejectsForeignTruncatedAndCorruptState(t *testing.T) {
 				t.Fatalf("%s corruption passed immutable inspection", name)
 			}
 		})
+	}
+}
+
+func TestInspectImmutableRejectsOversizeBeforeReading(t *testing.T) {
+	reader := &readExtentRecorder{reader: bytes.NewReader(nil)}
+	if err := InspectImmutable(context.Background(), reader, maxImmutableDatabaseImageSize+1); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("oversized immutable image error = %v", err)
+	}
+	if reader.MaxEnd() != 0 {
+		t.Fatal("oversized immutable image touched reader")
+	}
+}
+
+func TestInspectImmutableExactSizeBoundReachesReader(t *testing.T) {
+	image, err := NewDatabaseImage(context.Background(), FactoryConfig{}, mustTime(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader := &readExtentRecorder{reader: bytes.NewReader(image)}
+	if err := InspectImmutable(context.Background(), reader, maxImmutableDatabaseImageSize); err == nil {
+		t.Fatal("declared exact immutable bound unexpectedly passed short image")
+	}
+	if reader.MaxEnd() == 0 || reader.MaxEnd() > maxImmutableDatabaseImageSize {
+		t.Fatalf("exact-bound reader extent = %d", reader.MaxEnd())
+	}
+}
+
+func TestCreateUsesPrivateSQLiteSidecars(t *testing.T) {
+	store, path := newTestStore(t)
+	defer store.Close()
+	for _, suffix := range []string{"-wal", "-shm"} {
+		info, err := os.Lstat(path + suffix)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+			t.Fatalf("sqlite sidecar %s mode = %v", suffix, info.Mode())
+		}
 	}
 }
 
@@ -355,6 +756,38 @@ func TestInspectImmutableRegistrationsAreUniqueAndAlwaysDeleted(t *testing.T) {
 	assertImmutableRegistrationAbsent(t, beforeCorrupt+1)
 }
 
+func TestInspectImmutableRegistrationSequenceFailsBeforeWrap(t *testing.T) {
+	image, err := NewDatabaseImage(context.Background(), FactoryConfig{}, mustTime(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := immutableReaderSequence.Load()
+	immutableReaderSequence.Store(math.MaxUint64 - 1)
+	t.Cleanup(func() { immutableReaderSequence.Store(previous) })
+
+	if err := InspectImmutable(context.Background(), bytes.NewReader(image), int64(len(image))); err != nil {
+		t.Fatalf("last immutable reader name: %v", err)
+	}
+	assertImmutableRegistrationAbsent(t, math.MaxUint64)
+
+	wrappedName := "dark-factory-kernel-0"
+	wrappedSentinel := sqliteIO.NewSizeReaderAt(bytes.NewReader(image))
+	readervfs.Create(wrappedName, wrappedSentinel)
+	t.Cleanup(func() { readervfs.Delete(wrappedName) })
+	if err := InspectImmutable(context.Background(), bytes.NewReader(image), int64(len(image))); !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("exhausted immutable reader sequence error = %v", err)
+	}
+	query := url.Values{"vfs": {"reader"}}
+	pool, err := sql.Open(driverName, "file:"+wrappedName+"?"+query.Encode())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := pool.PingContext(context.Background()); err != nil {
+		t.Fatalf("exhaustion overwrote or deleted existing registration: %v", err)
+	}
+}
+
 func openImageStore(t *testing.T, image []byte) (FactoryState, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "factory.sqlite3")
@@ -397,6 +830,154 @@ func mutatedDatabaseBytes(t *testing.T, mutation string) []byte {
 	return contents
 }
 
+func walSnapshotFixture(t *testing.T, mutation string) (string, Project) {
+	t.Helper()
+	directory := t.TempDir()
+	return walSnapshotFixtureAt(t, directory, "kernel.db", mutation)
+}
+
+func walSnapshotFixtureAt(t *testing.T, directory, name, mutation string) (string, Project) {
+	t.Helper()
+	store, sourcePath := newTestStore(t)
+	project, err := store.CreateProject(context.Background(), NewProject{ID: projectID(t, 81), Name: "wal-only", Root: filepath.Join(t.TempDir(), "project")}, mustTime(t, 2))
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	if mutation != "" {
+		if _, err := store.writer.ExecContext(context.Background(), mutation); err != nil {
+			store.Close()
+			t.Fatal(err)
+		}
+	}
+	mainBytes, err := os.ReadFile(sourcePath)
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	walBytes, err := os.ReadFile(sourcePath + "-wal")
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(directory, name)
+	for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
+		if err := os.Remove(target + suffix); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+	}
+	writeSidecar(t, target, mainBytes, 0o600)
+	writeSidecar(t, target+"-wal", walBytes, 0o600)
+	writeSidecar(t, target+"-shm", make([]byte, walIndexRegionSize), 0o600)
+	return target, project
+}
+
+func writeSidecar(t *testing.T, path string, contents []byte, mode os.FileMode) {
+	t.Helper()
+	if err := os.WriteFile(path, contents, mode); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mutatedRollbackPath(t *testing.T, statement string) string {
+	t.Helper()
+	image, err := NewDatabaseImage(context.Background(), FactoryConfig{}, mustTime(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "kernel.db")
+	writeSidecar(t, path, image, 0o600)
+	raw := openRaw(t, path)
+	if _, err := raw.Exec(statement); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func assertDirectoryEmpty(t *testing.T, path string) {
+	t.Helper()
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("temporary directory retained entries: %v", entries)
+	}
+}
+
+type sqliteFileEvidence struct {
+	exists bool
+	info   os.FileInfo
+	hash   [sha256.Size]byte
+	hashed bool
+}
+
+type sqliteSetEvidence struct {
+	files      map[string]sqliteFileEvidence
+	dirEntries []string
+}
+
+func captureSQLiteSet(t *testing.T, path string) sqliteSetEvidence {
+	t.Helper()
+	result := sqliteSetEvidence{files: make(map[string]sqliteFileEvidence)}
+	for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
+		candidate := path + suffix
+		info, err := os.Lstat(candidate)
+		if errors.Is(err, os.ErrNotExist) {
+			result.files[suffix] = sqliteFileEvidence{}
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		evidence := sqliteFileEvidence{exists: true, info: info}
+		if info.Mode().IsRegular() && info.Size() <= 2<<20 {
+			contents, err := os.ReadFile(candidate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			evidence.hash = sha256.Sum256(contents)
+			evidence.hashed = true
+		}
+		result.files[suffix] = evidence
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		result.dirEntries = append(result.dirEntries, entry.Name()+":"+entry.Type().String())
+	}
+	return result
+}
+
+func assertSQLiteSetUnchanged(t *testing.T, path string, before sqliteSetEvidence) {
+	t.Helper()
+	after := captureSQLiteSet(t, path)
+	if !equalStrings(before.dirEntries, after.dirEntries) {
+		t.Fatalf("sqlite directory entries changed: before=%v after=%v", before.dirEntries, after.dirEntries)
+	}
+	for suffix, want := range before.files {
+		got := after.files[suffix]
+		if got.exists != want.exists {
+			t.Fatalf("sqlite file %q existence changed", suffix)
+		}
+		if !want.exists {
+			continue
+		}
+		if !os.SameFile(want.info, got.info) || want.info.Size() != got.info.Size() || want.info.Mode() != got.info.Mode() || !want.info.ModTime().Equal(got.info.ModTime()) || want.hashed != got.hashed || want.hashed && want.hash != got.hash {
+			t.Fatalf("sqlite file %q changed", suffix)
+		}
+	}
+}
+
 func directoryEntryNames(t *testing.T, path string) []string {
 	t.Helper()
 	entries, err := os.ReadDir(path)
@@ -423,7 +1004,34 @@ type cancelAfterRead struct {
 
 type failingReaderAt struct{ err error }
 
+type shortNilReaderAt struct {
+	reader io.ReaderAt
+	after  int64
+}
+
+type failAfterReaderAt struct {
+	reader io.ReaderAt
+	after  int64
+	err    error
+}
+
 func (reader failingReaderAt) ReadAt([]byte, int64) (int, error) { return 0, reader.err }
+
+func (reader *shortNilReaderAt) ReadAt(buffer []byte, offset int64) (int, error) {
+	if offset >= reader.after && len(buffer) > 1 {
+		read, _ := reader.reader.ReadAt(buffer[:len(buffer)-1], offset)
+		return read, nil
+	}
+	return reader.reader.ReadAt(buffer, offset)
+}
+
+func (reader *failAfterReaderAt) ReadAt(buffer []byte, offset int64) (int, error) {
+	if offset < reader.after && offset+int64(len(buffer)) <= reader.after {
+		return reader.reader.ReadAt(buffer, offset)
+	}
+	read, _ := reader.reader.ReadAt(buffer, offset)
+	return read, reader.err
+}
 
 func (reader cancelAfterRead) ReadAt(buffer []byte, offset int64) (int, error) {
 	read, err := reader.reader.ReadAt(buffer, offset)

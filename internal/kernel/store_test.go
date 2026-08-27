@@ -599,38 +599,23 @@ func TestOpenRefusesHiddenCorruptionWithoutFilesystemMutation(t *testing.T) {
 
 }
 
-func TestOpenPromotesExactSidecarFreeRollbackDatabaseToWAL(t *testing.T) {
-	store, path := newTestStore(t)
-	project := NewProject{ID: projectID(t, 91), Name: "retained", Root: filepath.Join(t.TempDir(), "project")}
-	if _, err := store.CreateProject(context.Background(), project, mustTime(t, 2)); err != nil {
+func TestOpenPromotesOnlyExactFreshRollbackDatabaseToWAL(t *testing.T) {
+	image, err := NewDatabaseImage(context.Background(), FactoryConfig{DispatchEnabled: true, Capacity: 7}, mustTime(t, 91))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Close(); err != nil {
+	path := filepath.Join(t.TempDir(), "kernel.db")
+	if err := os.WriteFile(path, image, 0o600); err != nil {
 		t.Fatal(err)
-	}
-	raw := openRaw(t, path)
-	var mode string
-	if err := raw.QueryRow(`PRAGMA journal_mode = DELETE`).Scan(&mode); err != nil {
-		t.Fatal(err)
-	}
-	if err := raw.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if mode != "delete" {
-		t.Fatalf("journal mode = %q", mode)
-	}
-	for _, suffix := range []string{"-wal", "-shm"} {
-		if _, err := os.Stat(path + suffix); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("rollback database sidecar %q exists: %v", suffix, err)
-		}
 	}
 	promoted, err := Open(context.Background(), path)
 	if err != nil {
 		t.Fatalf("Open rollback database: %v", err)
 	}
-	if retained, found, err := promoted.Project(context.Background(), project.ID); err != nil || !found || retained.Name != project.Name {
+	state, err := promoted.Factory(context.Background())
+	if err != nil || !state.DispatchEnabled || state.Capacity != 7 || state.Revision.Int64() != 1 || state.Head.Int64() != 0 || state.Floor.Int64() != 1 {
 		promoted.Close()
-		t.Fatalf("promoted database lost durable state: found=%v project=%+v err=%v", found, retained, err)
+		t.Fatalf("promoted factory state = %+v, %v", state, err)
 	}
 	if err := promoted.Close(); err != nil {
 		t.Fatal(err)
@@ -651,6 +636,33 @@ func TestOpenPromotesExactSidecarFreeRollbackDatabaseToWAL(t *testing.T) {
 	if header[18] != 2 || header[19] != 2 || info.Size() == 0 {
 		t.Fatalf("Open left rollback database unpromoted: header=%d/%d size=%d", header[18], header[19], info.Size())
 	}
+}
+
+func TestOpenRefusesRetainedRollbackDatabaseWithoutMutation(t *testing.T) {
+	store, path := newTestStore(t)
+	project := NewProject{ID: projectID(t, 91), Name: "retained", Root: filepath.Join(t.TempDir(), "project")}
+	if _, err := store.CreateProject(context.Background(), project, mustTime(t, 2)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw := openRaw(t, path)
+	var mode string
+	if err := raw.QueryRow(`PRAGMA journal_mode = DELETE`).Scan(&mode); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if mode != "delete" {
+		t.Fatalf("journal mode = %q", mode)
+	}
+	before := captureDatabaseEvidence(t, path)
+	if _, err := Open(context.Background(), path); !errors.Is(err, ErrForeignDatabase) {
+		t.Fatalf("retained rollback Open error = %v", err)
+	}
+	assertDatabaseEvidenceUnchanged(t, path, before)
 }
 
 func TestSnapshotAndWatchRejectHiddenControlsInPinnedSnapshot(t *testing.T) {

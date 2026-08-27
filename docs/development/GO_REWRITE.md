@@ -3365,6 +3365,31 @@ Store foundation on integrated head `6272a8d`:
   exact busy proofs exercise concrete domain methods and natural reconciliation
   without replay.
 
+Fresh-home SQLite publication uses one filesystem-free kernel seam rather than
+a path-based partial-home recovery protocol. `NewDatabaseImage` builds the one
+canonical schema and initial control row in SQLite memory, serializes an at-most
+8 MiB rollback-header image, and self-validates it. Ordinary `Open` may promote
+that form only while it is the exact pristine bootstrap: factory revision 1,
+head 0, floor 1, and no row in any other authority, event or sequence table.
+Retained rollback state is foreign and never adopted. `InspectImmutable`
+validates a caller-owned stable main-file descriptor read-only, bounds the image
+at 256 MiB before reading, enforces the declared extent and exact reads, and
+preserves later `ReaderAt` errors that SQLite cannot return through its VFS.
+The caller still owns the home lifetime lock and sidecar-absence proof.
+
+Mature WAL reopen pins exact owner-only regular main/WAL/SHM files through one
+parent directory descriptor, bounds main at 256 MiB, WAL at 272 MiB and SHM at
+4 MiB, and validates a nonempty WAL header before SQLite sees it. The complete
+main plus WAL is streamed into a private 0700 disposable directory; SHM is not
+copied because it is a rebuildable cache. The pinned SQLite build reconstructs
+only the disposable SHM and validates the recovered schema, controls and
+integrity there. Only then may configured pools touch the authoritative files,
+whose parent and pathname bindings stay pinned through the final validation.
+SQLite remains the authority for valid-frame/crash-tail recovery; the kernel
+does not duplicate its WAL frame parser. All runtime sidecars are exact regular
+0600 files; malformed pairs, hot rollback journals, unsafe identities and
+over-bound files fail before authoritative SQLite open.
+
 Admission, attempt authority and finalization Store proof on integrated head
 `3f2c255`:
 
