@@ -47,7 +47,9 @@ echo "go-ci: TypeScript client proof"
     go_gate_stage 600 "$go_gate_corepack" pnpm --offline run typecheck || exit
     go_gate_stage 600 "$go_gate_corepack" pnpm --offline run test
 )
+echo "go-ci: serial real Go/TypeScript browser PTY E2E"
+go_gate_stage 600 "$script_dir/go-browser-e2e.sh"
 echo "go-ci: git diff --check"
 go_gate_stage 120 "$go_gate_git" diff --check
-echo "go-ci: NOTE: final shell-provider/browser E2E and system census remain cutover-only gates"
+echo "go-ci: NOTE: final system census remains a cutover-only gate"
 echo "go-ci: PASS"

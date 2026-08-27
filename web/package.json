@@ -9,6 +9,7 @@
     "test": "corepack pnpm --filter @dark-factory/client build && corepack pnpm --filter @dark-factory/ui build && node --test packages/client/test/*.test.mjs packages/ui/test/*.test.mjs"
   },
   "devDependencies": {
-    "typescript": "5.8.3"
+    "typescript": "5.8.3",
+    "ws": "8.18.3"
   }
 }
