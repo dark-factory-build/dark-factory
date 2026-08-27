@@ -127,15 +127,14 @@ export class StateAccumulator {
     if (pageKindIndex !== staging.expectedKindIndex || page.items.length > MAX_STATE_PAGE_ITEMS) return this.#restart("gap");
     const full = page.items.length === MAX_STATE_PAGE_ITEMS;
     if (page.kind === "human_request") {
-      if (full !== (page.next_cursor !== null)) return this.#restart("gap");
+      if (!full && page.next_cursor !== null) return this.#restart("gap");
     } else if (page.next_cursor === null) {
       return this.#restart("gap");
     }
     if (page.next_cursor !== null && (page.next_cursor === pending.cursor || staging.consumedCursors.has(page.next_cursor))) return this.#restart("gap");
     if (!stagePage(staging.state, page, staging.lastIDs)) return this.#restart("gap");
     staging.consumedCursors.add(pending.cursor);
-    if (page.kind !== "human_request" || full) {
-      if (page.next_cursor === null) return this.#restart("gap");
+    if (page.next_cursor !== null) {
       staging.nextCursor = page.next_cursor;
       staging.expectedKindIndex = full ? pageKindIndex : pageKindIndex + 1;
       return { kind: "staged" };

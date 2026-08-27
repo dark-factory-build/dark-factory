@@ -102,12 +102,12 @@ test("wire page cardinality fixes every continuation boundary", () => {
     expectMalformed(() => encodeStateSnapshot("page", { head: 1n, kind, items: [{ ...sample }], next_cursor: null }));
     expectMalformed(() => encodeStateSnapshot("page", { head: 1n, kind, items: Array.from({ length: MAX_STATE_PAGE_ITEMS + 1 }, () => ({ ...sample })), next_cursor: null }));
   }
-  for (const count of [0, MAX_STATE_PAGE_ITEMS - 1]) {
+  for (const count of [0, MAX_STATE_PAGE_ITEMS - 1, MAX_STATE_PAGE_ITEMS]) {
     assert.equal(decodeServerControl(encodeStateSnapshot("page", { head: 1n, kind: "human_request", items: Array.from({ length: count }, () => requestItem()), next_cursor: null })).body.items.length, count);
-    expectMalformed(() => encodeStateSnapshot("page", { head: 1n, kind: "human_request", items: Array.from({ length: count }, () => requestItem()), next_cursor: "more" }));
+    if (count < MAX_STATE_PAGE_ITEMS) expectMalformed(() => encodeStateSnapshot("page", { head: 1n, kind: "human_request", items: Array.from({ length: count }, () => requestItem()), next_cursor: "more" }));
   }
   assert.equal(decodeServerControl(encodeStateSnapshot("page", { head: 1n, kind: "human_request", items: Array.from({ length: MAX_STATE_PAGE_ITEMS }, () => requestItem()), next_cursor: "more" })).body.items.length, MAX_STATE_PAGE_ITEMS);
-  expectMalformed(() => encodeStateSnapshot("page", { head: 1n, kind: "human_request", items: Array.from({ length: MAX_STATE_PAGE_ITEMS }, () => requestItem()), next_cursor: null }));
+  expectMalformed(() => encodeStateSnapshot("page", { head: 1n, kind: "human_request", items: Array.from({ length: MAX_STATE_PAGE_ITEMS + 1 }, () => requestItem()), next_cursor: null }));
   assert.equal(decodeServerControl(encodeStateSnapshot("page", { head: 1n, kind: "factory", items: [factoryItem()], next_cursor: "projects" })).body.items.length, 1);
   expectMalformed(() => encodeStateSnapshot("page", { head: 1n, kind: "factory", items: [factoryItem()], next_cursor: null }));
   for (const count of [0, 2, MAX_STATE_PAGE_ITEMS, MAX_STATE_PAGE_ITEMS + 1]) {
@@ -249,6 +249,19 @@ test("page length uniquely determines same-kind continuation or adjacent advance
       assert.deepEqual(exchange(reducer, "adjacent", { head: 1n, kind, items: itemsForKind(kind, 2, 1), next_cursor: "forged" }), { kind: "restart", reason: "gap" }, `${kind}/short-repeated-kind`);
     }
   }
+});
+
+test("human_request terminal pages accept 0, 7, or 8 items and split 9 safely", () => {
+  for (const count of [0, MAX_STATE_PAGE_ITEMS - 1, MAX_STATE_PAGE_ITEMS]) {
+    const reducer = new StateAccumulator();
+    const cursor = stageToKind(reducer, "human_request");
+    assert.equal(exchange(reducer, cursor, { head: 1n, kind: "human_request", items: itemsForKind("human_request", 1, count), next_cursor: null }).kind, "published", `terminal/${count}`);
+  }
+
+  const reducer = new StateAccumulator();
+  const cursor = stageToKind(reducer, "human_request");
+  assert.equal(exchange(reducer, cursor, { head: 1n, kind: "human_request", items: itemsForKind("human_request", 1, MAX_STATE_PAGE_ITEMS), next_cursor: "requests-more" }).kind, "staged");
+  assert.equal(exchange(reducer, "requests-more", { head: 1n, kind: "human_request", items: itemsForKind("human_request", MAX_STATE_PAGE_ITEMS + 1, 1), next_cursor: null }).kind, "published", "nine rows are full continuation plus one terminal row");
 });
 
 test("snapshot response correlation is owned, single-flight, consumed, and restart-safe", () => {

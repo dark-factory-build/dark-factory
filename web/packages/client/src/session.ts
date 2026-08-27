@@ -126,6 +126,7 @@ export class BrowserSession {
   #requestNumber = 1;
   #closed = false;
   #pairing = false;
+  #pairingBlocked = false;
   #authPromise: Promise<void> | undefined;
   #incoming = Promise.resolve();
   #connectPromise: Promise<void> | undefined;
@@ -140,31 +141,37 @@ export class BrowserSession {
   get state(): StateView | undefined { return this.#accumulator.current; }
   get clientId(): string | undefined { return this.#clientId; }
   get capabilities(): CapabilityMask { return this.#capabilities; }
+  get pairingBlocked(): boolean { return this.#pairingBlocked; }
 
   connect(): Promise<void> {
     if (this.#connectPromise !== undefined) return this.#connectPromise;
     if (this.#closed) return Promise.reject(new SessionError("closed"));
-    this.#setStatus("connecting");
     this.#connectPromise = new Promise<void>((resolve, reject) => {
       this.#resolveConnect = resolve;
       this.#rejectConnect = reject;
-      try {
-        const factory = this.#options.socketFactory ?? ((url: string) => new WebSocket(url) as unknown as BrowserSocket);
-        const socket = factory(this.#options.url);
-        this.#socket = socket;
-        socket.binaryType = "arraybuffer";
-        socket.onopen = () => { /* HELLO is the first meaningful frame. */ };
-        // Keep one reader owner: WebSocket callbacks may arrive while an
-        // earlier handler is awaiting WebCrypto or IndexedDB.
-        socket.onmessage = (event) => {
-          this.#incoming = this.#incoming.then(() => this.#receive(event.data));
-        };
-        socket.onerror = () => this.#fail(new SessionError("connection"));
-        socket.onclose = () => this.#closedByPeer();
-      } catch {
-        this.#fail(new SessionError("connection"));
-      }
     });
+    this.#setStatus("connecting");
+    if (this.#closed) return this.#connectPromise;
+    try {
+      const factory = this.#options.socketFactory ?? ((url: string) => new WebSocket(url) as unknown as BrowserSocket);
+      const socket = factory(this.#options.url);
+      if (this.#closed) {
+        try { socket.close(1000, "closed"); } catch { /* the session is already closed */ }
+        return this.#connectPromise;
+      }
+      this.#socket = socket;
+      socket.binaryType = "arraybuffer";
+      socket.onopen = () => { /* HELLO is the first meaningful frame. */ };
+      // Keep one reader owner: WebSocket callbacks may arrive while an
+      // earlier handler is awaiting WebCrypto or IndexedDB.
+      socket.onmessage = (event) => {
+        this.#incoming = this.#incoming.then(() => this.#receive(event.data));
+      };
+      socket.onerror = () => this.#fail(new SessionError("connection"));
+      socket.onclose = () => this.#closedByPeer();
+    } catch {
+      this.#fail(new SessionError("connection"));
+    }
     return this.#connectPromise;
   }
 
@@ -243,6 +250,7 @@ export class BrowserSession {
 
   async #pair(): Promise<void> {
     this.#pairing = true;
+    this.#pairingBlocked = true;
     const crypto = this.#crypto();
     let generated: CryptoKeyPair;
     try {
@@ -287,6 +295,10 @@ export class BrowserSession {
     try {
       await this.#options.keyStore!.save({ clientId: frame.body.client_id, publicKeySEC1: publicKey.slice(), key, capabilities: frame.body.capabilities });
     } catch { throw new SessionError("storage_unavailable"); }
+    // Persistence resolves the one-shot pairing outcome even if close raced
+    // the await. The live-session fence below still prevents any old socket
+    // or closed lifecycle from being revived.
+    this.#pairingBlocked = false;
     this.#ensureLive();
     this.#pairing = false;
     this.#options = { ...this.#options, challenge: undefined };
@@ -479,6 +491,8 @@ export class BrowserClient {
   #reconnect = true;
   #timer: BrowserTimer;
   #timerHandle: unknown;
+  #timerScheduled = false;
+  #timerToken = 0;
   #reconnectAttempt = 0;
   #initialDelay: number;
   #maxDelay: number;
@@ -494,6 +508,10 @@ export class BrowserClient {
   get status(): SessionStatus { return this.#session?.status ?? "idle"; }
 
   connect(): Promise<void> {
+    // A one-shot PAIR_PROVE may have an uncertain result while its durable
+    // PairResult is being saved. Do not create another generation that would
+    // replay that proof for the same challenge.
+    if (this.#session?.pairingBlocked) return this.#session.connect();
     this.#cancelTimer();
     this.#reconnectAttempt = 0;
     this.#closed = false;
@@ -533,27 +551,40 @@ export class BrowserClient {
   }
 
   #schedule(generation: number): void {
-    if (this.#timerHandle !== undefined || generation !== this.#generation) return;
+    if (this.#timerScheduled || generation !== this.#generation) return;
     const exponent = Math.min(this.#reconnectAttempt, 6);
     const delay = Math.min(this.#maxDelay, this.#initialDelay * 2 ** exponent);
     this.#reconnectAttempt += 1;
+    const token = ++this.#timerToken;
+    this.#timerScheduled = true;
     try {
-      this.#timerHandle = this.#timer.setTimeout(() => {
-        // Clear ownership before every exit path, including a stale generation.
+      const handle = this.#timer.setTimeout(() => {
+        // A cleared timer can still invoke its callback in a host or test
+        // implementation. Only its exact schedule may release ownership.
+        if (!this.#timerScheduled || this.#timerToken !== token || generation !== this.#generation) return;
+        this.#timerScheduled = false;
         this.#timerHandle = undefined;
         if (this.#closed || !this.#reconnect || generation !== this.#generation) return;
         const next = this.#newSession();
         void next.connect().catch(() => { /* status/error callback is the public signal */ });
       }, delay);
+      // A synchronous timer callback may already have scheduled a successor.
+      if (this.#timerScheduled && this.#timerToken === token) this.#timerHandle = handle;
     } catch {
-      this.#timerHandle = undefined;
+      if (this.#timerToken === token) {
+        this.#timerScheduled = false;
+        this.#timerHandle = undefined;
+      }
     }
   }
 
   #cancelTimer(): void {
+    const scheduled = this.#timerScheduled;
     const handle = this.#timerHandle;
-    if (handle === undefined) return;
+    this.#timerScheduled = false;
     this.#timerHandle = undefined;
+    ++this.#timerToken;
+    if (!scheduled) return;
     try { this.#timer.clearTimeout(handle); } catch { /* timer cleanup is best-effort */ }
   }
 }

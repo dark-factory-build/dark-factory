@@ -310,3 +310,143 @@ test("close fences deferred load, sign, and pairing persistence completions", as
   await assert.rejects(savingConnect, (error) => error instanceof SessionError && error.code === "closed");
   assert.equal(saveSocket.sent.filter((wire) => decodeClientControl(wire).type === "STATE_GET").length, 0);
 });
+
+test("reentrant connecting status close rejects before creating a socket", async () => {
+  let session;
+  let sessionSockets = 0;
+  session = new BrowserSession({
+    url: "ws://127.0.0.1/browser/v1",
+    host: "127.0.0.1",
+    origin: "https://preview.example",
+    keyStore: new MemoryKeys(),
+    onStatus: (status) => { if (status === "connecting") session.close(); },
+    socketFactory: () => { sessionSockets += 1; return new Socket(() => {}); },
+  });
+  await assert.rejects(session.connect(), (error) => error instanceof SessionError && error.code === "closed");
+  assert.equal(sessionSockets, 0);
+  assert.equal(session.status, "closed");
+
+  let factorySession;
+  let factorySocket;
+  factorySession = new BrowserSession({
+    url: "ws://127.0.0.1/browser/v1",
+    host: "127.0.0.1",
+    origin: "https://preview.example",
+    keyStore: new MemoryKeys(),
+    socketFactory: () => {
+      factorySocket = new Socket(() => {});
+      factorySession.close();
+      return factorySocket;
+    },
+  });
+  await assert.rejects(factorySession.connect(), (error) => error instanceof SessionError && error.code === "closed");
+  assert.equal(factorySocket.readyState, 3);
+
+  let client;
+  let clientSockets = 0;
+  client = new BrowserClient({
+    url: "ws://127.0.0.1/browser/v1",
+    host: "127.0.0.1",
+    origin: "https://preview.example",
+    keyStore: new MemoryKeys(),
+    onStatus: (status) => { if (status === "connecting") client.close(); },
+    socketFactory: () => { clientSockets += 1; return new Socket(() => {}); },
+  });
+  await assert.rejects(client.connect(), (error) => error instanceof SessionError && error.code === "closed");
+  assert.equal(clientSockets, 0);
+  assert.equal(client.status, "closed");
+});
+
+test("BrowserClient does not replay a one-shot proof while PairResult save is deferred", async () => {
+  let releaseSave;
+  let saveStarted;
+  let saved;
+  let persisted = null;
+  const store = {
+    async load() { return persisted; },
+    async save(value) {
+      saved = value;
+      saveStarted?.();
+      await new Promise((resolve) => { releaseSave = resolve; });
+      persisted = value;
+    },
+  };
+  const timer = new VirtualTimer();
+  const sockets = [];
+  const client = new BrowserClient({
+    url: "ws://127.0.0.1/browser/v1",
+    host: "127.0.0.1",
+    origin: "https://preview.example",
+    challenge,
+    keyStore: store,
+    timer,
+    socketFactory: () => { const socket = new Socket(serverFor); sockets.push(socket); return socket; },
+  });
+  const saveReady = new Promise((resolve) => { saveStarted = resolve; });
+  const first = client.connect();
+  await saveReady;
+  assert.equal(sockets[0].sent.filter((wire) => decodeClientControl(wire).type === "PAIR_PROVE").length, 1);
+  const second = client.connect();
+  assert.strictEqual(second, first);
+  client.close();
+  releaseSave();
+  await assert.rejects(first, (error) => error instanceof SessionError && error.code === "closed");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.ok(saved);
+  assert.ok(persisted);
+  assert.equal(client.status, "closed");
+  assert.equal(sockets[0].sent.filter((wire) => decodeClientControl(wire).type === "STATE_GET").length, 0);
+  await client.connect();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(sockets.length, 2);
+  assert.equal(decodeClientControl(sockets[1].sent[0]).type, "AUTH_PROVE");
+  assert.equal(sockets[1].sent.filter((wire) => decodeClientControl(wire).type === "PAIR_PROVE").length, 0);
+  client.close();
+});
+
+class HostileTimer {
+  callbacks = [];
+  clearCalls = [];
+  setTimeout(callback, delay) {
+    this.callbacks.push({ callback, delay });
+    return undefined;
+  }
+  clearTimeout(handle) {
+    this.clearCalls.push(handle);
+    throw new Error("timer cleanup failed");
+  }
+}
+
+test("reconnect timer ownership fences stale callbacks with undefined handles", async () => {
+  const store = new MemoryKeys();
+  const timer = new HostileTimer();
+  let attempts = 0;
+  const client = new BrowserClient({
+    url: "ws://127.0.0.1/browser/v1",
+    host: "127.0.0.1",
+    origin: "https://preview.example",
+    keyStore: store,
+    timer,
+    reconnectInitialDelayMs: 10,
+    reconnectMaxDelayMs: 20,
+    socketFactory: () => { attempts += 1; throw new Error("no daemon"); },
+  });
+  await assert.rejects(client.connect(), (error) => error instanceof SessionError && error.code === "connection");
+  assert.equal(attempts, 1);
+  assert.equal(timer.callbacks.length, 1);
+
+  await assert.rejects(client.connect(), (error) => error instanceof SessionError && error.code === "connection");
+  assert.equal(attempts, 2);
+  assert.equal(timer.callbacks.length, 2);
+  timer.callbacks[0].callback();
+  assert.equal(attempts, 2, "stale callback must not consume the current schedule");
+  timer.callbacks[1].callback();
+  assert.equal(attempts, 3);
+  assert.equal(timer.callbacks.length, 3);
+
+  client.close();
+  assert.ok(timer.clearCalls.length >= 2);
+  assert.ok(timer.clearCalls.every((handle) => handle === undefined));
+  timer.callbacks[2].callback();
+  assert.equal(attempts, 3, "callback after close must remain fenced");
+});

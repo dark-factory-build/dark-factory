@@ -190,7 +190,10 @@ function stateSnapshot(body: Record<string, unknown>, wire: boolean): StateSnaps
     case "project": if (next_cursor === null) malformed(); return { head, kind, items: body.items.map((item) => projectItem(item, wire)), next_cursor };
     case "agent": if (next_cursor === null) malformed(); return { head, kind, items: body.items.map((item) => agentItem(item, wire)), next_cursor };
     case "task": if (next_cursor === null) malformed(); return { head, kind, items: body.items.map((item) => taskItem(item, wire)), next_cursor };
-    case "human_request": if ((body.items.length === MAX_STATE_PAGE_ITEMS) !== (next_cursor !== null)) malformed(); return { head, kind, items: body.items.map((item) => humanRequestItem(item, wire)), next_cursor };
+    // A full final page is valid: exactly MAX_STATE_PAGE_ITEMS can be the
+    // terminal page when the traversal has no more rows. Short pages remain
+    // terminal, while any non-final page must be full.
+    case "human_request": if (body.items.length < MAX_STATE_PAGE_ITEMS && next_cursor !== null) malformed(); return { head, kind, items: body.items.map((item) => humanRequestItem(item, wire)), next_cursor };
   }
 }
 function stateEvent(body: Record<string, unknown>, wire: boolean): StateEventBody {
