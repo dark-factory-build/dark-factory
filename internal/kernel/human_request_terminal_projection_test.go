@@ -116,6 +116,29 @@ func TestHumanRequestProjectionMissingOrMalformedDurableControlsFailClosed(t *te
 	}
 }
 
+func TestHumanRequestProjectionRejectsDuplicateTerminalSessionsRegardlessOfOrder(t *testing.T) {
+	for _, duplicateSeed := range []byte{1, 0xfe} {
+		t.Run(terminalSessionID(t, duplicateSeed).String(), func(t *testing.T) {
+			store, run, _ := runningOrchestratorRun(t)
+			defer store.Close()
+			request, err := store.CreateHumanQuestionForAttempt(context.Background(), run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(188), QuestionText: "private"}, mustTime(t, 400))
+			if err != nil {
+				t.Fatal(err)
+			}
+			corruptSQL(t, store, `DROP INDEX terminal_sessions_run_unique`)
+			if _, err := store.writer.Exec(`INSERT INTO terminal_sessions(id, run_id, state, revision, declared_at_ms, updated_at_ms) VALUES(?, ?, 'declared', 1, ?, ?)`, terminalSessionID(t, duplicateSeed).Bytes(), run.ID.Bytes(), run.AdmittedAt.Int64(), run.AdmittedAt.Int64()); err != nil {
+				t.Fatal(err)
+			}
+			if projection, found, err := store.HumanRequest(context.Background(), request.ID); !errors.Is(err, ErrCorruptState) || found || projection != (HumanRequestProjection{}) {
+				t.Fatalf("projection = %+v, found=%v, err=%v", projection, found, err)
+			}
+			if session, found, err := store.TerminalSessionForRun(context.Background(), run.ID); !errors.Is(err, ErrCorruptState) || found || session != (TerminalSession{}) {
+				t.Fatalf("terminal session = %+v, found=%v, err=%v", session, found, err)
+			}
+		})
+	}
+}
+
 func TestHumanRequestProjectionReadPinsRunAndTerminalState(t *testing.T) {
 	ctx := context.Background()
 	store, run, keys := runningOrchestratorRun(t)

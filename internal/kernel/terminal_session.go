@@ -92,7 +92,24 @@ func terminalSessionByRunID(ctx context.Context, connection *sql.Conn, id RunID)
 	if id.zero() {
 		return TerminalSession{}, false, fmt.Errorf("%w: zero run identifier", ErrInvalidValue)
 	}
-	return scanTerminalSession(connection.QueryRowContext(ctx, `SELECT `+terminalSessionColumns+` FROM terminal_sessions WHERE run_id = ?`, id.Bytes()))
+	rows, err := connection.QueryContext(ctx, `SELECT `+terminalSessionColumns+` FROM terminal_sessions WHERE run_id = ? ORDER BY id LIMIT 2`, id.Bytes())
+	if err != nil {
+		return TerminalSession{}, false, err
+	}
+	if !rows.Next() {
+		return TerminalSession{}, false, errors.Join(rows.Err(), rows.Close())
+	}
+	session, _, err := scanTerminalSession(rows)
+	if err != nil {
+		return TerminalSession{}, false, errors.Join(err, rows.Close())
+	}
+	if rows.Next() {
+		return TerminalSession{}, false, errors.Join(fmt.Errorf("%w: run has multiple terminal sessions", ErrCorruptState), rows.Close())
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return TerminalSession{}, false, err
+	}
+	return session, true, nil
 }
 
 func (store *Store) TerminalSession(ctx context.Context, id TerminalSessionID) (TerminalSession, bool, error) {
