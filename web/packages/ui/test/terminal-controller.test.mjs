@@ -175,6 +175,28 @@ test("output waits for the display write and copies payload bytes", async () => 
   assert.equal(completed, true);
 });
 
+test("handle end aborts a pending display and fences a post-await output", async () => {
+  for (const event of ["onReset", "onExit", "onClose"]) {
+    const context = harness();
+    await ready(context);
+    const pending = context.callbacks().onOutput({ sequence: 0n, payload: new Uint8Array([1]) });
+    await tick();
+    context.callbacks()[event]?.(event === "onClose" ? new SessionError("connection") : undefined);
+    await assert.rejects(pending, (error) => error.code === "closed");
+    assert.equal(context.surfaceAborts(), 1, event);
+    await assert.rejects(context.callbacks().onOutput({ sequence: 1n, payload: new Uint8Array([2]) }), (error) => error.code === "closed");
+  }
+
+  const postAwait = harness();
+  await ready(postAwait);
+  const output = postAwait.callbacks().onOutput({ sequence: 0n, payload: new Uint8Array([3]) });
+  await tick();
+  postAwait.surfaceGate.resolve();
+  postAwait.callbacks().onReset();
+  await assert.rejects(output, (error) => error.code === "closed");
+  assert.equal(postAwait.surfaceAborts(), 1);
+});
+
 test("post-close output rejects without writing and cannot ACK", async () => {
   const context = harness();
   await ready(context);
@@ -236,6 +258,63 @@ test("real TerminalHandle sends no ACK when controller closes during display out
   await controller.close();
   assert.equal(await receiving, true);
   assert.equal(sent.filter(({ payload }) => typeof payload === "string" && decodeClientControl(payload).type === "TERMINAL_ACK").length, 0);
+});
+
+test("real TerminalHandle close during display output aborts without closing the session or ACKing", async () => {
+  const sent = [];
+  const outputGate = deferred();
+  let handle;
+  let responseNumber = 0;
+  let sessionCloses = 0;
+  const session = {
+    resolveAgentTerminal: async () => target,
+    openTerminal: (_target, options) => {
+      handle = createTerminalHandle(
+        { runId: "66".repeat(16), sessionId: "77".repeat(16), runRevision: 1n, sessionRevision: 1n },
+        options,
+        (requestId, payload) => sent.push({ requestId, payload }),
+        () => `${String(++responseNumber).padStart(2, "0")}`.repeat(16),
+        () => {},
+        { now: 100_000, setTimeout: () => 1, clearTimeout: () => {} },
+        true,
+      );
+      return handle;
+    },
+    close: () => { sessionCloses += 1; handle?.terminate(new SessionError("closed")); },
+  };
+  let outputPending = false;
+  const controller = new TerminalController({
+    session,
+    agentId: "88".repeat(16),
+    expectedAgentRevision: 1n,
+    expectedHead: 1n,
+    surface: {
+      write: () => { outputPending = true; return outputGate.promise; },
+      abort: () => { if (outputPending) outputGate.reject(new Error("surface disposed")); },
+    },
+    onChange: () => {},
+  });
+  controller.start();
+  await tick();
+  let request = decodeClientControl(sent.at(-1).payload);
+  handle.receive(decodeServerControl(encodeTerminalAttached(request.id, {
+    session_id: "77".repeat(16), floor: 0n, head: 0n, acknowledged_sequence: 0n, max_unacked_bytes: 65536n,
+  })));
+  await tick();
+  request = decodeClientControl(sent.at(-1).payload);
+  handle.receive(decodeServerControl(encodeTerminalLeaseResult(request.id, {
+    operation: "acquired", run_id: "66".repeat(16), session_id: "77".repeat(16), generation: 1n,
+    expires_at_ms: 200_000n, last_input_sequence: 0n, run_revision: 1n, session_revision: 1n,
+  })));
+  await tick();
+  const receiving = handle.receiveBinary({ direction: "output", sessionId: new Uint8Array(16).fill(0x77), sequence: 0n, leaseGeneration: 0n, payload: new Uint8Array([1]) });
+  await tick();
+  handle.terminate(new SessionError("closed"));
+  assert.equal(await receiving, true);
+  assert.equal(sessionCloses, 0);
+  assert.equal(sent.filter(({ payload }) => typeof payload === "string" && decodeClientControl(payload).type === "TERMINAL_ACK").length, 0);
+  await controller.close();
+  assert.equal(sessionCloses, 1);
 });
 
 test("text uses UTF-8 and binary preserves each 0..255 byte", async () => {

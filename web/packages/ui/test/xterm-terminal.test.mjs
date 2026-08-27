@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createTerminalSurface, startXtermTerminal } from "../dist/src/xterm-terminal.js";
+import { createTerminalSurface, loadXtermModules, startXtermTerminal } from "../dist/src/xterm-terminal.js";
 
 function deferred() {
   let resolve;
@@ -71,6 +71,29 @@ test("module completion after unmount does not construct or publish a terminal",
   await tick();
   assert.equal(modules.state.terminals, 0);
   assert.equal(surfaces, 0);
+});
+
+test("a stale loader rejection cannot report into a StrictMode-shaped new owner", async () => {
+  const oldLoading = deferred();
+  const newLoading = deferred();
+  const oldModules = fakeModules();
+  const newModules = fakeModules();
+  const failures = [];
+  const stopOld = startXtermTerminal(() => ({}), () => oldLoading.promise, { onSurface: () => {}, onError: () => failures.push("old") }, fakeWindow(oldModules.state));
+  stopOld();
+  startXtermTerminal(() => ({}), () => newLoading.promise, { onSurface: () => {}, onError: () => failures.push("new") }, fakeWindow(newModules.state));
+  oldLoading.reject(new Error("old module"));
+  await tick();
+  assert.deepEqual(failures, []);
+  newLoading.reject(new Error("new module"));
+  await tick();
+  assert.deepEqual(failures, ["new"]);
+});
+
+test("the real dynamic modules expose usable constructors in Node", async () => {
+  const modules = await loadXtermModules();
+  assert.equal(typeof modules.Terminal, "function");
+  assert.equal(typeof modules.FitAddon, "function");
 });
 
 test("module or mount failure is reported to the finite owner", async () => {

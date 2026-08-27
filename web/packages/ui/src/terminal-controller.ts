@@ -50,6 +50,7 @@ class TerminalController {
   #started = false;
   #closing = false;
   #generation = 0;
+  #surfaceAborted = false;
   #inputBuffer: Input = new Uint8Array(0);
   #inputInFlightBytes = 0;
   #pendingResize: Resize | undefined;
@@ -135,7 +136,7 @@ class TerminalController {
     this.#inputBuffer = new Uint8Array(0);
     this.#pendingResize = undefined;
     this.#phase = "closing";
-    try { this.#options.surface.abort(); } catch { if (this.#error === undefined) this.#error = new SessionError("internal"); }
+    this.#abortSurface();
     try { this.#options.session.close(); } catch { if (this.#error === undefined) this.#error = new SessionError("connection"); }
     this.#publish();
     this.#phase = "closed";
@@ -200,9 +201,11 @@ class TerminalController {
     try {
       await this.#options.surface.write(payload.slice());
     } catch {
-      if (this.#current(generation)) this.#fail(new SessionError("internal"));
-      throw new SessionError(this.#closing ? "closed" : "internal");
+      const live = this.#current(generation) && this.#liveHandle();
+      if (live) this.#fail(new SessionError("internal"));
+      throw new SessionError(live ? "internal" : "closed");
     }
+    if (!this.#current(generation) || !this.#liveHandle()) throw new SessionError("closed");
   }
 
   #pumpEffects(): void {
@@ -267,10 +270,15 @@ class TerminalController {
   }
 
   #handleEnded(error: SessionError | ProtocolError): void {
+    if (this.#handleClosed) return;
     this.#handleClosed = true;
     this.#writable = false;
+    this.#inputBuffer = new Uint8Array(0);
+    this.#inputInFlightBytes = 0;
+    this.#pendingResize = undefined;
+    ++this.#generation;
+    this.#abortSurface();
     if (!this.#closing && this.#phase !== "closed") {
-      ++this.#generation;
       this.#error = error;
       this.#phase = "closed";
       this.#publish();
@@ -289,6 +297,12 @@ class TerminalController {
 
   #liveHandle(handle = this.#handle): boolean {
     return handle !== undefined && handle === this.#handle && !this.#handleClosed && !this.#closing && this.#phase !== "closed";
+  }
+
+  #abortSurface(): void {
+    if (this.#surfaceAborted) return;
+    this.#surfaceAborted = true;
+    try { this.#options.surface.abort(); } catch { if (this.#error === undefined) this.#error = new SessionError("internal"); }
   }
 
   #canEffect(handle = this.#handle): boolean {

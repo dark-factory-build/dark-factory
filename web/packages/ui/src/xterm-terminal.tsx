@@ -24,10 +24,23 @@ type XtermCallbacks = Readonly<{
 export type XtermTerminalProps = XtermCallbacks;
 
 export function loadXtermModules(): Promise<XtermModules> {
-  return Promise.all([import("@xterm/xterm"), import("@xterm/addon-fit")]).then(([xterm, fit]) => ({
-    Terminal: xterm.Terminal,
-    FitAddon: fit.FitAddon,
-  }));
+  return Promise.all([import("@xterm/xterm"), import("@xterm/addon-fit")]).then(([xterm, fit]) => {
+    const Terminal = moduleConstructor(xterm, "Terminal");
+    const FitAddon = moduleConstructor(fit, "FitAddon");
+    if (typeof Terminal !== "function" || typeof FitAddon !== "function") {
+      throw new Error("terminal display unavailable");
+    }
+    return { Terminal: Terminal as XtermModules["Terminal"], FitAddon: FitAddon as XtermModules["FitAddon"] };
+  });
+}
+
+function moduleConstructor(module: Record<string, unknown>, name: "Terminal" | "FitAddon"): unknown {
+  if (typeof module[name] === "function") return module[name];
+  const defaultExport = module.default;
+  if (defaultExport !== null && typeof defaultExport === "object") {
+    return (defaultExport as Record<string, unknown>)[name];
+  }
+  return undefined;
 }
 
 /**
@@ -88,6 +101,7 @@ export function startXtermTerminal(
       cleanup = undefined;
     }
   }).catch(() => {
+    if (disposed) return;
     try { callbacks.onError(); } catch { /* failure reporting cannot own teardown */ }
   });
   return () => {
