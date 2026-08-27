@@ -175,8 +175,22 @@ func assertPrivateConnectionID(t *testing.T, id ConnectionID, payload []byte) {
 	if bytes.Contains(payload, id.value[:]) || bytes.Contains(payload, encoded) {
 		t.Fatal("private connection identity reached a public frame")
 	}
-	if diagnostic := fmt.Sprintf("%v %+v %#v", id, id, id); bytes.Contains([]byte(diagnostic), id.value[:]) || bytes.Contains([]byte(diagnostic), encoded) {
-		t.Fatal("private connection identity reached diagnostics")
+	formats := []string{
+		"%d", "%b", "%o", "%O", "%U", "%c",
+		"%e", "%E", "%f", "%F", "%g", "%G",
+		"%v", "%+v", "%#v", "%s", "%q", "%x", "%X",
+		"%20v", "%-20v", "%020x", "%.3v", "%20.3f", "%#08x", "%+d",
+	}
+	principal := Principal{ConnectionID: id}
+	for _, format := range formats {
+		diagnostic := fmt.Sprintf(format, id)
+		if diagnostic != connectionIDRedaction || bytes.Contains([]byte(diagnostic), id.value[:]) || bytes.Contains([]byte(diagnostic), encoded) {
+			t.Fatalf("private connection identity diagnostic %q = %q", format, diagnostic)
+		}
+		structured := fmt.Sprintf(format, principal)
+		if !strings.Contains(structured, connectionIDRedaction) || bytes.Contains([]byte(structured), id.value[:]) || bytes.Contains([]byte(structured), encoded) {
+			t.Fatalf("private principal diagnostic %q = %q", format, structured)
+		}
 	}
 }
 

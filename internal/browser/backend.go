@@ -3,6 +3,7 @@ package browser
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
 )
@@ -32,11 +33,13 @@ type ConnectionID struct {
 
 func (id ConnectionID) zero() bool { return id == (ConnectionID{}) }
 
-// String deliberately redacts the ephemeral identity from diagnostics.
-func (ConnectionID) String() string { return "[private browser connection]" }
+const connectionIDRedaction = "[private browser connection]"
 
-// GoString applies the same redaction to detailed Go diagnostics.
-func (ConnectionID) GoString() string { return "browser.ConnectionID{private}" }
+// Format ignores every verb, flag, width and precision so no diagnostic form
+// can fall through to the private numeric byte representation.
+func (ConnectionID) Format(state fmt.State, _ rune) {
+	_, _ = state.Write([]byte(connectionIDRedaction))
+}
 
 // Principal contains durable daemon-minted client authority plus one private,
 // transport-minted connection identity. Backend authentication results must
