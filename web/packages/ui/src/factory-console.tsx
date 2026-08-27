@@ -1,12 +1,17 @@
 import type { FormEvent, ReactNode } from "react";
-import type { FactoryAppSnapshot, FactoryHumanRequestView } from "./factory-app-controller.js";
+import type { AgentItem } from "@dark-factory/client";
+import type { FactoryAgentSelection, FactoryAppSnapshot, FactoryHumanRequestView } from "./factory-app-controller.js";
 
 export type FactoryConsoleProps = FactoryAppSnapshot & {
+  selectedAgent?: FactoryAgentSelection;
+  onSelectAgent?: (agent: AgentItem) => void;
+  onOpenTerminalForHumanRequest?: (request: FactoryHumanRequestView["request"]) => void;
   onSelectHumanRequest?: (request: FactoryHumanRequestView["request"]) => void;
   onHumanReplyChange?: (reply: string) => void;
   onReplyHumanRequest?: () => void;
   onCancelHumanRequest?: () => void;
   onCloseHumanRequest?: () => void;
+  terminalContent?: ReactNode;
 };
 
 const STATUS_LABELS: Record<FactoryAppSnapshot["status"], string> = {
@@ -43,11 +48,15 @@ export function FactoryConsole({
   state,
   error,
   selectedHumanRequest,
+  selectedAgent,
+  onSelectAgent,
+  onOpenTerminalForHumanRequest,
   onSelectHumanRequest,
   onHumanReplyChange,
   onReplyHumanRequest,
   onCancelHumanRequest,
   onCloseHumanRequest,
+  terminalContent,
 }: FactoryConsoleProps) {
   const projects = state?.projects;
 
@@ -101,6 +110,16 @@ export function FactoryConsole({
                   </div>
                   <p>{agent.role.toUpperCase()} · {projectLabel(projects, agent.project_id)}</p>
                   <small>ID {shortID(agent.id)}</small>
+                  {onSelectAgent === undefined ? null : (
+                    <button
+                      type="button"
+                      aria-pressed={selectedAgent?.id === agent.id && selectedAgent.revision === agent.revision}
+                      disabled={status !== "ready"}
+                      onClick={() => onSelectAgent(agent)}
+                    >
+                      {selectedAgent?.id === agent.id && selectedAgent.revision === agent.revision ? "TERMINAL OPEN" : "OPEN TERMINAL"}
+                    </button>
+                  )}
                 </li>
               ))}
             </ul>
@@ -158,9 +177,12 @@ export function FactoryConsole({
             onReply={onReplyHumanRequest}
             onCancel={onCancelHumanRequest}
             onClose={onCloseHumanRequest}
+            onOpenTerminal={onOpenTerminalForHumanRequest}
+            terminalReady={status === "ready"}
           />
         )}
       </CollectionSection>
+      {terminalContent}
     </main>
   );
 }
@@ -174,6 +196,8 @@ function HumanRequestPanel({
   onReply,
   onCancel,
   onClose,
+  onOpenTerminal,
+  terminalReady,
 }: {
   selected: FactoryHumanRequestView;
   project: string;
@@ -183,6 +207,8 @@ function HumanRequestPanel({
   onReply?: () => void;
   onCancel?: () => void;
   onClose?: () => void;
+  onOpenTerminal?: (request: FactoryHumanRequestView["request"]) => void;
+  terminalReady: boolean;
 }) {
   const busy = selected.phase === "replying" || selected.phase === "cancelling";
   const submit = (event: FormEvent) => { event.preventDefault(); onReply?.(); };
@@ -211,6 +237,7 @@ function HumanRequestPanel({
           ) : null}
           <div className="dfFactoryConsole__humanActions">
             {selected.canCancel ? <button type="button" disabled={busy || onCancel === undefined} onClick={onCancel}>CANCEL RUN</button> : null}
+            {onOpenTerminal === undefined ? null : <button type="button" disabled={busy || !terminalReady} onClick={() => onOpenTerminal(selected.request)}>OPEN TERMINAL</button>}
             <button type="button" disabled={busy || onClose === undefined} onClick={onClose}>CLOSE</button>
           </div>
         </>

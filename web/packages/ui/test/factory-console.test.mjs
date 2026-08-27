@@ -198,6 +198,30 @@ test("request, reply, cancel, and close controls forward only presentation inten
   assert.deepEqual(calls.slice(1), [["change", "Proceed."], ["reply"], ["cancel"], ["close"]]);
 });
 
+test("agent and HumanRequest terminal actions expose only current public intent", () => {
+  const request = fixtureState.humanRequests.get(ids.request);
+  const agent = fixtureState.agents.get(ids.agent);
+  const calls = [];
+  const elements = expand(FactoryConsole({
+    status: "ready",
+    state: baseState(),
+    selectedAgent: { id: agent.id, name: agent.name, revision: agent.revision },
+    selectedHumanRequest: { request, phase: "ready", question: "Proceed?", canReply: true, canCancel: true, replyMaxBytes: 8192, reply: "" },
+    onSelectAgent: (value) => calls.push(["agent", value]),
+    onOpenTerminalForHumanRequest: (value) => calls.push(["request", value]),
+    terminalContent: createElement("div", null, "terminal output is not React state"),
+  }));
+  elements.find((element) => element.type === "button" && element.props.children === "TERMINAL OPEN").props.onClick();
+  elements.filter((element) => element.type === "button" && element.props.children === "OPEN TERMINAL").at(-1).props.onClick();
+  assert.equal(calls[0][0], "agent");
+  assert.equal(calls[0][1], agent);
+  assert.deepEqual(calls[1], ["request", request]);
+  const markup = render({ terminalContent: createElement("div", null, "<raw-output>") });
+  assert.match(markup, /&lt;raw-output&gt;/);
+  assert.equal(markup.includes("runId"), false);
+  assert.equal(markup.includes("sessionId"), false);
+});
+
 function expand(node, result = []) {
   if (Array.isArray(node)) {
     for (const child of node) expand(child, result);

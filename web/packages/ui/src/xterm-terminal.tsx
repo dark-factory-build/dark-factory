@@ -151,8 +151,8 @@ function mountXtermTerminal(element: HTMLDivElement, modules: XtermModules, call
     });
     fit.fit();
     initialResize = false;
-    callbacks.onResize?.(terminal.rows, terminal.cols);
     callbacks.onSurface(surface);
+    callbacks.onResize?.(terminal.rows, terminal.cols);
     terminal.focus();
     listenerInstalled = true;
     windowTarget.addEventListener("resize", onWindowResize);

@@ -255,6 +255,28 @@
   overflow: hidden;
 }
 
+.dfFactoryConsole__terminalPanel {
+  max-width: 90rem;
+  margin: 0 auto 1.5rem;
+  padding: 1rem;
+  background: var(--df-console-surface);
+  border: 1px solid var(--df-console-accent);
+}
+
+.dfFactoryConsole__terminalAgent {
+  margin-bottom: 0.75rem;
+  color: var(--df-console-muted);
+  font-size: 0.75rem;
+}
+
+.dfFactoryConsole__terminalError {
+  margin-bottom: 0.75rem;
+  color: var(--df-console-alert);
+  font-size: 0.75rem;
+}
+
+.dfFactoryConsole__terminalPanel > button { margin-top: 0.75rem; }
+
 @media (max-width: 720px) {
   .dfFactoryConsole__header,
   .dfFactoryConsole__sectionHeading { align-items: flex-start; flex-direction: column; }
