@@ -89,12 +89,45 @@ pretends the resource disappeared or rewrites the outcome.
    Candidate snapshots derive `is_current` from that pointer so reconciliation
    can recover exact causal authority after restart.
 
+## Browser HumanRequest authority
+
+The pre-release Go runtime keeps HumanRequest authority in SQLite and exposes
+only bounded, correlated browser operations. Public HumanRequest state contains
+the request/project/agent/task relationships, chronology, revision, kind,
+status, the fixed reply bound, and display-only `can_reply`. It contains no run
+locator, terminal locator, question, reply, cancel descriptor, process identity,
+or other private source data.
+
+Private detail is one pinned SQLite read. A client with
+`private_human_request_detail` may receive the exact hostile question and, only
+for an open request whose originating run is running with its exact active
+terminal session, an observation-only terminal target. `human_actions` is
+checked independently: without it, detail may contain that target but cannot
+advertise reply or cancellation. With it, the same snapshot may mint the one
+concrete cancellation descriptor containing exact request and run revisions.
+Delivering, delivery-unknown, finalizing, terminal, missing, and non-active
+origins expose no reply or cancellation authority; corrupt relationships fail
+closed.
+
+A reply request contains only request ID, expected request revision, and bounded
+reply text. The Store transaction reloads the client and request, derives the
+originating running run, and commits a unique delivery receipt before the daemon
+looks up that exact live owner or writes once to its PTY. Failure or uncertainty
+after reservation becomes `delivery_unknown` and is never replayed. Cancellation
+likewise contains no caller-selected run: one Store transaction derives the
+origin, checks exact request/run revisions and capability, enters finalizing,
+revokes attempt and terminal-input authority, resolves the request, and appends
+all invalidations. The concrete response may report the server-derived run and
+post-transition revisions; it is result metadata, never caller authority.
+
 ## Process and resource ownership
 
-One admitted run launches one fresh non-interactive provider process.
+The retained Rust runtime launches one fresh non-interactive provider process.
 Providers receive one `startup_input` on stdin; stdin then closes. There is no
 resident process, PTY attach surface, terminal input, delivery replay, or
-provider-process resume.
+provider-process resume in that retained runtime. The pre-release Go runtime's
+runner-owned PTY and browser authority are constrained by the section above and
+the implementation record in `docs/development/GO_REWRITE.md`.
 
 Launch is one nested register-before-exec handshake:
 

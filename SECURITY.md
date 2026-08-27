@@ -23,10 +23,11 @@ attempt; it does **not** isolate a hostile same-user process from readable
 files, credentials, other processes, or the local socket. That claim requires
 a separate OS user, container, or sandbox.
 
-The only request boundary is a private Unix socket with owner-only
-directory/socket modes. There is no HTTP webhook or generic connector listener.
-Exposing the local API beyond the machine is external deployment work and is
-unsupported.
+The operator API boundary is a private Unix socket with owner-only
+directory/socket modes. The pre-release browser boundary is a loopback-only
+WebSocket with exact Host/Origin checks and proof-of-possession client keys; it
+is not a webhook or generic connector listener. Exposing either local surface
+beyond the machine is external deployment work and is unsupported.
 
 The operator-only quarantine API is not a network ingress or trust decision.
 It stores bounded external observations as untrusted `InputEnvelope` and
@@ -70,6 +71,27 @@ strict descendants, and assign queued tasks to strict descendants. They cannot
 edit tasks or unassign them. Factoryd rechecks the exact running run, project,
 role, current task, and `agents.parent_agent_id` inside the same immediate
 SQLite transaction that writes the message, task, revision, and event.
+
+Paired browser clients have one durable, revocable capability mask. Public
+observation, private HumanRequest detail, HumanRequest effects, and terminal
+input are separate bits and are reloaded for every operation while an exact
+per-client gate orders them against revocation. A transport-minted connection
+identity fences live effects but is never serialized or accepted from a
+caller. Private detail does not imply reply/cancel authority, and a terminal
+target returned by detail is only an observation coordinate: attach and input
+independently revalidate the exact running run, active session, live owner, and
+their own capabilities.
+
+HumanRequest reply and cancellation never accept a run destination. Reply
+reserves a unique delivery against the Store-derived origin before live-owner
+lookup, writes at most once, and permanently marks ambiguity as
+`delivery_unknown`. Cancellation derives the same origin inside one SQLite
+transaction, checks exact request and run revisions, and atomically finalizes,
+revokes, resolves, and invalidates before any best-effort live-owner fence. A
+stale request therefore cannot redirect either effect to a retry run. Browser
+results are correlated by envelope, request, and exact post-transition
+revisions; malformed, generic-action, or forged results close the operation
+fail-closed.
 
 ## Process and cleanup safety
 
@@ -213,6 +235,13 @@ an authority ledger.
 Provider credentials, repository credentials, prompts, raw output, message
 bodies, and source content do not belong in public events or diagnostic
 projections.
+
+HumanRequest questions and replies are private operator data. Public
+HumanRequest state/events contain no run/session locator, question, reply,
+terminal target, cancellation descriptor, delivery identity, provider data,
+process identity, token, or diagnostic sentinel. Only the separately authorized
+exact-revision detail response may contain the question; the reply remains
+ephemeral across the one-shot PTY delivery.
 
 Quarantined input content is private operator data. Receipt events contain only
 bounded project/envelope/candidate IDs; candidate-status events add only the

@@ -45,10 +45,15 @@ branch/worktree and obeys that repository's `AGENTS.md`.
 |---|---|
 | Complete and retained | Fresh SQLite contract; typed kernel; atomic admission; exact attempt credentials; run/finalizing/resource state; bounded invalidations; Change ownership/materialization groundwork; owner-only Unix control API; typed `factoryctl` client; Darwin process identity; two blocked-exec gates; terminal-exit spool; gated Darwin PTY primitive; durable terminal-session admission, activation, recovery uncertainty and finalization guards; durable browser clients/challenges/revocation/input leases; exact PAIR/AUTH transcripts; strict browser-v1 handshake/binary codecs; strict runner terminal union, complete-write poisoning, incremental frame decoder and one fixed replay ring through `f1f72aa`; reviewed framework-neutral `@dark-factory/client` handshake/transcript/binary core and exact package gate through `d03491f`; independently reviewed question-only durable HumanRequest creation, private detail, reply reservation/acknowledgement/uncertainty, restart recovery, lifecycle convergence and bounded public projection through `40f5873`; the single-owner PTY execution loop, exact ready/input handoff, correlated retained replay, bounded filter retirement, poisoned writes, actual-EOF ordering and daemon-loss convergence through `ebcfd24`; exact two-field `AUTH_PROVE` through `4b18c38`; runner-owned exact HumanRequest PTY reply through `0f313a9`; daemon live-attempt registry, mailbox, bounded observers, finalization gate, active supervisor cancellation and joined shutdown through `d9709b9`; the closed attempt-only `request_human` API plus direct durable dispatch through `c29d154`; exact 8 KiB browser/Go/TypeScript terminal payload bound through `9ab44c3`; read-only exact lease authorization and one-shot failed-install/input-reservation revocation through `8853acb`; finalization/release linearization, natural-exit acknowledgement convergence, cancellation visibility and real descendant reaping through `ea1ee4b`; canonical Darwin runtime, Change and Change-worker fixtures through `699515d`; exact committed provider access to the attempt-only `request-human` command through `d4ce713`; independently reviewed fixed-page browser canonical state and private-detail separation through `1a562e4`; strict Go/TypeScript browser state/detail wire and causal reducer through `9b7689d`; exact-run HumanRequest terminal projection, fail-closed loopback browser state transport, guarded framework-neutral TypeScript Session client, direct daemon Store adapter and daemon-owned durable browser revocation through `b61fca8`; private transport-minted per-WebSocket connection identity through `53d68dd`; independently reviewed public MIT `@dark-factory/ui` package and contributor fixture through `18b5b0e`; exact daemon terminal acquire/renew/release/input/resize and HumanRequest reply effects through `ae28dc8`; exact browser-v1 terminal/HumanRequest manifest, Go codecs, golden fixtures and TypeScript mirror through `a10b9f0`; independently reviewed `factoryctl web status/open/list-clients/revoke`, exact launch ambiguity and bounded browser-runtime cleanup through `2f883c1`; reviewed framework-neutral TypeScript terminal Session authority through `b2eef51`; reviewed Go browser terminal/HumanRequest effect transport and cleanup through `7f449ce`; the exact agent terminal-target wire/Store/browser-daemon route and four-capability production pairing mask through `219d036` |
 | Reusable with adaptation | `internal/runner` live-child/process-group ownership; daemon supervisor choreography; bounded API framing/auth separation; dashboard projection/client reducer direction; rebased recovery branch `go-recovery-reserved-fix` at `185cd5f`; fail-closed runtime/spool/Change close branches at `f239815`, `347c977`, and `4183205` |
-| In progress but held | Bounded HumanRequest detail/action projection and client-owned lease renewal are the next serialized shared-contract lane. Recovery still needs replay onto the PTY design. The development/Go sub-gates are integrated and green; real Go/TypeScript/browser E2E and the post-test system census remain cutover blockers. |
+| In progress but held | Client-owned automatic lease renewal is the next serialized shared-contract lane. Recovery still needs replay onto the PTY design. The development/Go sub-gates are integrated and green; real Go/TypeScript/browser E2E and the post-test system census remain cutover blockers. |
 | Obsolete | Startup-input-only/closed-stdin provider contract; separate stdin/stdout/stderr provider pipes as the product transport; TUI/Bubble Tea packages, lanes and parity tests; generic attention projection; message-on-next-run as the live-question answer |
 | Proved for revised architecture | Current Chrome on macOS can connect from the protected hosted HTTPS preview to exact `ws://127.0.0.1:43123` with the dedicated loopback permission; strict Origin/Host checks, binary traffic, reconnect, denial, no-daemon, port-collision and cross-site refusal are causal. A fresh Darwin PTY child remains inert until release, owns a controlling terminal/process group and is reaped without orphaning. SQLite owns exactly one terminal session per admitted run and refuses terminalization until its exact close is proved. The outer runner owns the live PTY loop without goroutines, transfers initial input exactly once, gates terminal commands on readiness, bounds and correlates replay before and after actual EOF, and writes one HumanRequest reply byte-for-byte without borrowing browser lease authority. The daemon registers one joined owner before release, rejects wrong sessions, routes bounded replay to multiple observers, actively cancels pre-live supervisors on shutdown and serializes infrastructure failure with terminal effects. Its exact effect bridge binds the durable client to one private WebSocket identity and generation, commits Store authority before runner effects, never replays ambiguous input/replies, and preserves positive terminal evidence until exact supervisor acknowledgement. The loopback server now enforces exact Host/Origin, pairing and per-operation durable client authority, serves bounded canonical state, joins subscriptions/connections, and couples exact-revision durable revocation to all-runtime socket close. The TypeScript Session client signs exact transcripts, publishes only complete fixed-head state, fences stale generations and ambiguous pairing, rate-bounds reconnect, and consumes the same pagination/empty-chronology contract. Each authenticated socket receives a private transport-minted identity that cannot be selected by a backend, serialized or exposed by formatting. The public React package renders bounded BUILDING, AGENT, task and read-only NEEDS YOU state without private detail or policy, installs and builds under the stripped Corepack gate, and remains consumable as an exact packed artifact. |
-| Blocked until proved | HumanRequest detail/action redesign; real Go-server TypeScript terminal/HumanRequest vertical slice; interactive terminal/reply/action expansion of the public UI; complete private host integration; remaining factoryctl service/recovery cutover plumbing; revised crash-cut vertical slice |
+| Blocked until proved | Real Go-server TypeScript terminal/HumanRequest vertical slice; automatic client lease renewal; interactive terminal/reply/cancel expansion of the public UI; complete private host integration; remaining factoryctl service/recovery cutover plumbing; revised crash-cut vertical slice |
+
+The final HumanRequest authority slice landed at `afb5fdf`: one pinned private
+detail, Store-derived reply/cancel routing, a concrete cancel result, no public
+run/terminal routing, and a high-level frozen TypeScript Session API. It adds no
+generic action framework or compatibility surface.
 
 Read-only redirection audits were assigned without overlapping writes:
 
@@ -351,9 +356,9 @@ partial snapshot.
 The HumanRequest list item reuses one smaller kernel projection:
 
 ```text
-id project_id agent_id task_id run_id
+id project_id agent_id task_id
 created_at updated_at revision kind status
-reply_max_bytes can_reply can_open_terminal
+reply_max_bytes can_reply
 ```
 
 It deletes duplicated project/agent/task names and fixed display prose. The
@@ -407,17 +412,27 @@ Private question detail is a separate exact-revision operation and capability:
 
 ```text
 HUMAN_REQUEST_DETAIL_GET { request_id, expected_revision }
-  -> HUMAN_REQUEST_DETAIL { request_id, revision, question }
+  -> HUMAN_REQUEST_DETAIL {
+       request_id, revision, question, can_reply, reply_max_bytes,
+       terminal_target: null | {
+         run_id, session_id, run_revision, session_revision
+       },
+       cancel_run: null | {
+         expected_request_revision, expected_run_revision
+       }
+     }
 ```
 
-An observe-only or human-reply-only client cannot read it. Reply remains the
-existing exact-revision `BeginHumanReply -> one runner write -> acknowledge or
-delivery_unknown` transition. Browser v1 will not advertise a generic
-`HUMAN_REQUEST_ACTION` merely to reserve a shape. The existing `human_actions`
-capability gates exact HumanRequest replies; it does not advertise an arbitrary
-action operation. The first typed action is added with its concrete daemon
-operation, finite arguments and preconditions; `cancel_run` remains the likely
-first slice.
+Only a durable nonrevoked `private_human_request_detail` client can read it;
+`human_actions` alone is insufficient. The Store projects every field from one
+pinned snapshot. An exact open request/running origin/active terminal session
+may expose its observation target even to a private-detail-only client, but
+reply and the one concrete cancel descriptor require `human_actions` as well.
+Delivering, delivery-unknown, finalizing, terminal, missing and non-active
+origins advertise no target/reply/cancel authority. Impossible durable
+relationships fail closed. Reply and cancel requests carry no run destination;
+the Store derives it transactionally. Browser v1 has no generic HumanRequest
+action union, argument bag, token, policy table, or compatibility alias.
 
 Required mutations remove the 4,096 total guard, cursor-head equality, private-
 detail capability or delayed-response revision guard; replace the cursor with
@@ -886,8 +901,9 @@ identity are explicitly deferred.
 ### Durable `HumanRequest` / NEEDS YOU
 
 `HumanRequest` is a first-class durable request for one specific human reply.
-It is not a generic warning or attention score. Daemon-authorized typed actions
-share its browser card later, but do not widen the first question foundation.
+It is not a generic warning or attention score. The one daemon-authorized
+`cancel_run` operation shares its browser card without creating an action
+framework or widening the first question foundation.
 Routine failure, delay, capacity wait, finalization stall and any condition
 routine automation can resolve stay in task/run/system status.
 
@@ -909,10 +925,9 @@ The bounded watch/dashboard projection contains only daemon-derived safe
 metadata:
 
 ```text
-id, project, agent, task, run,
-created_at, updated_at, revision,
-kind, title, summary, why_human_is_needed,
-safe typed context items, available interactions, status
+id, project_id, agent_id, task_id,
+created_at, updated_at, revision, kind, status,
+reply_max_bytes, can_reply
 ```
 
 An attempt may supply exactly one bounded private `question_text` field and an
@@ -927,10 +942,11 @@ escaped/rendered as hostile text, and capped independently. Observation-only
 clients without that capability see only safe metadata. This is an intentional
 private operator channel, not a public projection or sanitization claim.
 
-The question card initially exposes only this explicit interaction union:
-
-- `InlineReply(max_bytes)`;
-- `OpenTerminal(run_id)`.
+The public question card exposes no interaction union or terminal locator. Its
+`can_reply` bit is display eligibility for the exact open/running condition,
+never authority. The separately authorized private detail may expose the exact
+active terminal target as an observation coordinate and, with `human_actions`,
+reply availability plus one concrete cancel precondition.
 
 An agent may create only a bounded private question through an authenticated
 `request_human` operation. It cannot mint public card text, a button, label,
@@ -938,8 +954,10 @@ action kind, arguments or authority. The daemon derives all identity from the
 exact attempt credential and decides which interactions exist.
 
 Creation is unique for one exact `(run, request idempotency identity)`. Viewing,
-subscribing or opening the terminal never resolves it. Reply requires expected
-request revision and revalidates the exact current run/state. A stale origin
+subscribing or opening the terminal never resolves it. Reply accepts only the
+request ID, expected request revision, and bounded text. `BeginHumanReply`
+transactionally reloads the client/request and derives the exact current
+run/state before returning the delivery's run to the daemon. A stale origin
 never routes to a later run. Underlying-state resolution and explicit staleness
 each commit once with one `HumanRequest` invalidation.
 
@@ -972,15 +990,17 @@ terminal-input revocation, and run/request invalidations. Terminalization may
 then make residual `delivery_unknown` requests stale exactly once. No request
 transition may route to a later retry run.
 
-The first real typed action is deliberately deferred until the question
-foundation and live runner gate hold. Its frozen boundary is only
-`cancel_run`, because the kernel already owns that finite transition. A paired
-client with `human_actions` submits no arguments, only exact request and run
-revisions. One immediate Store transaction revalidates both sources and the
-client capability, enters the exact run into finalizing, revokes attempt/input
-authority, resolves the request as `action_cancel_run`, and emits both
-invalidations. Do not add action rows or implement approve, reject, retry,
-resume, publish or permission grants without a concrete product contract.
+The one concrete cancellation is `cancel_run`, because the kernel already owns
+that finite transition. A paired client with `human_actions` submits the
+request ID and exact request/run revisions from the daemon-minted descriptor,
+but no run ID or argument bag. One immediate Store transaction derives the run,
+revalidates both sources and client capability, enters the exact run into
+finalizing, revokes attempt/input authority, resolves the request as
+`cancel_run`, and emits both invalidations. The result reports the
+server-derived run ID and exact post-transition revisions. There is no action
+table, action/status result wrapper, generic union, token, arbitrary arguments,
+or compatibility alias. Do not implement approve, reject, retry, resume,
+publish, or permission grants without a concrete product contract.
 
 ### Browser protocol v1
 `factoryd` initially hosts the loopback WebSocket adapter in
@@ -999,7 +1019,7 @@ STATE_GET / STATE_SNAPSHOT / STATE_RESTART
 STATE_SUBSCRIBE / STATE_EVENT / STATE_ENTITY_GET / STATE_ENTITY
 HUMAN_REQUEST_DETAIL_GET / HUMAN_REQUEST_DETAIL
 HUMAN_REQUEST_REPLY / HUMAN_REQUEST_REPLY_RESULT
-HUMAN_REQUEST_CANCEL_RUN / HUMAN_REQUEST_ACTION_RESULT
+HUMAN_REQUEST_CANCEL_RUN / HUMAN_REQUEST_CANCEL_RUN_RESULT
 TERMINAL_TARGET_GET / TERMINAL_TARGET
 TERMINAL_ATTACH / TERMINAL_ATTACHED / TERMINAL_ACK
 TERMINAL_LEASE_ACQUIRE / TERMINAL_LEASE_RENEW / TERMINAL_LEASE_RELEASE
@@ -1018,7 +1038,7 @@ values fail closed.
 `internal/browser` owns one small consumer-side backend interface implemented
 directly by `internal/daemon`. It contains only pairing/authentication,
 canonical state/watch, exact agent terminal-target discovery, HumanRequest
-reply/action, and terminal attach/lease/input/resize operations. Target
+detail/reply/cancel, and terminal attach/lease/input/resize operations. Target
 discovery accepts only an observed agent ID, agent revision and state head;
 it does not accept a caller-selected run or session. The only streaming member is one terminal attachment
 whose owner synchronously closes and joins it. Principals contain the browser
@@ -1106,7 +1126,7 @@ durable identity.
 | `HUMAN_REQUEST_REPLY` | client | required request ID | `human_request_reply.json` |
 | `HUMAN_REQUEST_REPLY_RESULT` | server | required matching request ID | `human_request_reply_result.json` |
 | `HUMAN_REQUEST_CANCEL_RUN` | client | required request ID | `human_request_cancel_run.json` |
-| `HUMAN_REQUEST_ACTION_RESULT` | server | required matching request ID | `human_request_action_result.json` |
+| `HUMAN_REQUEST_CANCEL_RUN_RESULT` | server | required matching request ID | `human_request_cancel_run_result.json` |
 | `TERMINAL_ATTACH` | client | required request/attachment ID | `terminal_attach.json` |
 | `TERMINAL_ATTACHED` | server | required matching attach ID | `terminal_attached.json` |
 | `TERMINAL_ACK` | client | forbidden | `terminal_ack.json` |
@@ -1204,7 +1224,7 @@ binary TERMINAL_INPUT
      }
 
 HUMAN_REQUEST_REPLY {
-  run_id, request_id, expected_revision, reply
+  request_id, expected_revision, reply
 }
   -> HUMAN_REQUEST_REPLY_RESULT {
        request_id, revision, status: resolved | delivery_unknown
@@ -1212,11 +1232,10 @@ HUMAN_REQUEST_REPLY {
   | ERROR
 
 HUMAN_REQUEST_CANCEL_RUN {
-  run_id, request_id, expected_request_revision, expected_run_revision
+  request_id, expected_request_revision, expected_run_revision
 }
-  -> HUMAN_REQUEST_ACTION_RESULT {
-       action: cancel_run, run_id, run_revision,
-       request_id, request_revision, status: resolved
+  -> HUMAN_REQUEST_CANCEL_RUN_RESULT {
+       request_id, run_id, request_revision, run_revision
      }
   | ERROR
 
@@ -1229,8 +1248,8 @@ TERMINAL_RESET { session_id, floor, head }   # attach ID; detach follows
 All identifiers are exact lower-case 16-byte hex; revisions, generations,
 sequences, timestamps and byte counts use their existing bounded decimal wire
 forms. Rows and columns are integers in the closed range 1 through 4,096.
-Reply is bounded UTF-8 text, not terminal bytes. The only action is the literal
-`cancel_run`; it has no argument bag. Lease results never identify another
+Reply is bounded UTF-8 text, not terminal bytes. Cancellation is one concrete
+request/result pair; it has no action string or argument bag. Lease results never identify another
 client and a released result omits expiry. Attach authorizes observation with
 the exact Principal and revalidates the running run, active session and
 supplied revisions under the same daemon operation gate that installs the live
@@ -1483,7 +1502,7 @@ authority identity. No per-operation signature is needed inside the
 authenticated WebSocket.
 
 A small per-client daemon operation gate orders every browser effect with the
-owner-only Unix revocation path. Terminal input, HumanRequest reply/action,
+owner-only Unix revocation path. Terminal input, HumanRequest reply/cancel,
 lease acquire/release, mutation and subscription setup all acquire that exact
 client gate, reload active client/capabilities, perform their bounded external
 effect or durable transaction, then release it. Terminal/run operations also
@@ -1718,7 +1737,7 @@ fresh SQLite database
 → browser renders it without transcript/private fields
 → inline reply is acknowledged at most once by that exact run, or becomes
   visibly delivery-unknown without replay
-→ one daemon-minted typed action is revalidated and committed
+→ one daemon-minted concrete cancellation is revalidated and committed
 → completion request enters finalizing and revokes all input
 → provider, descendants and PTY are reaped/closed
 → stable verification and resource cleanup
@@ -1826,8 +1845,8 @@ matrix, the following must exist and kill the named guard mutations:
   into safe metadata/watch/log/error frames are killed by per-field secret
   exfiltration tests; clients without `private_human_request_detail` cannot
   fetch it.
-- An attempt cannot mint a typed action. Removing daemon action allowlisting or
-  current-state precondition checks is killed by authority tests.
+- An attempt cannot mint a cancel descriptor. Removing daemon derivation or
+  exact request/run precondition checks is killed by authority tests.
 - Every public/browser frame is scanned against private sentinels from task
   bodies, prompts, output, credentials, source and result detail.
 - Terminal/UI tests treat all bytes as hostile, disable or explicitly mediate
@@ -1846,13 +1865,13 @@ matrix, the following must exist and kill the named guard mutations:
   message, version, capability or binary envelope without updating the client
   fails the gate.
 - The TypeScript client is proved against a real Go server for pairing, state,
-  HumanRequest, typed action, attach, input, resize, binary output, reset,
+  HumanRequest detail/reply/cancel, attach, input, resize, binary output, reset,
   reconnect and structured errors; TypeScript compilation alone is not proof.
 - Public UI tests prove revision/gap/stale-response behavior, terminal lease and
   reconnect UX, HumanRequest card rendering without transcript reads,
   accessibility and responsive layouts.
 - The private host proves it imports the exact public artifact and completes
-  the same pair/state/terminal/request/action/refresh slice without a protocol
+  the same pair/state/terminal/request/cancel/refresh slice without a protocol
   or reducer copy.
 
 Required temporary mutations now also include PTY release ordering, terminal
@@ -1889,11 +1908,11 @@ loopback Host/Origin/pairing/revocation/security matrix GREEN
 interactive terminal output/input/resize/reconnect/reset GREEN
 single-writer lease and finalization revocation GREEN
 stalled-provider input bound and no-post-revocation-write GREEN
-HumanRequest inline reply, typed action, stale/idempotent/restart/privacy GREEN
+HumanRequest inline reply/cancel, stale/idempotent/restart/privacy GREEN
 browser protocol v1 Go/TypeScript fixture and real-server integration GREEN
 factoryctl web bootstrap/recovery GREEN
 public UI BUILDING/AGENT/NEEDS YOU/terminal/accessibility/responsive gate GREEN
-private site exact-artifact pair/state/terminal/request/action/refresh integration GREEN
+private site exact-artifact pair/state/terminal/request/cancel/refresh integration GREEN
 fresh isolated install/service/restart/uninstall GREEN
 whole-runtime/web elegance audit complete
 independent exact-head architecture/security/process/Store/browser reviews ALLOW
@@ -2139,7 +2158,7 @@ not a compatibility target.
   runs, finalization stalls, capacity waits, paused agents, exhausted budgets
   and blocked tasks remain canonical status unless a later concrete
   daemon-owned action contract proves they require an operator decision. The
-  first such typed action is only exact revision-checked `cancel_run`; no
+  sole concrete operation is exact revision-checked `cancel_run`; no
   `ResumeAgent`, `ResetBudget`, `RetryTask` or generic action rows are carried
   forward merely because the Rust projection once named them (#199, #358,
   #362).
@@ -2630,7 +2649,7 @@ fresh Go-marked home and SQLite schema
   -> release the exact shell provider once
   -> pair browser; attach, observe output, acquire lease, input and resize
   -> create exact HumanRequest; fetch private detail with explicit capability
-  -> deliver reply at most once or surface delivery-unknown; commit one typed action
+  -> deliver reply at most once or surface delivery-unknown; commit one concrete cancel
   -> provider makes a typed authenticated completion request
   -> serialize finalizing barrier; revoke credential and all input
   -> stop/reap provider; for configured worker success only, take a stable
@@ -4206,8 +4225,8 @@ head `b61fca8`:
   Vite production build and the stripped-path gate self-test passed.
 - This state-transport proof deliberately excludes terminal and HumanRequest
   effect frames. Exact daemon PTY input/resize/lease and HumanRequest reply
-  effects are proved separately at `ae28dc8`; the binary browser wire, typed
-  action, operator web bootstrap integration, interactive terminal/reply/action
+  effects are proved separately at `ae28dc8`; the binary browser wire, concrete
+  cancel result, operator web bootstrap integration, interactive terminal/reply/cancel
   UI and private site host remain outside this checkpoint. They must reuse the
   durable authority and live-owner seams rather than widen this state-only
   browser capability set implicitly.
@@ -4305,10 +4324,11 @@ Framework-neutral TypeScript terminal Session proof on integrated head
   semantics fence stale or ambiguous authority. Callback failure cannot ACK
   unseen output, and close settles every pending operation without leaking an
   asynchronous rejection.
-- HumanRequest reply and `cancel_run` are bounded correlated operations. The
-  final repair deleted raw HumanRequest access from `BrowserSession`; future
-  UI code must consume the reviewed exact detail/action projection rather than
-  construct run destinations itself.
+- HumanRequest detail, reply and `cancel_run` are bounded correlated operations.
+  `BrowserSession` now exposes only high-level detail-bound methods: it deeply
+  freezes Store-produced detail/cancel values, never accepts a run destination,
+  and fences every pending operation on exact envelope/subject/revision,
+  capacity, close and reconnect. The raw HumanRequest helper was deleted.
 - Independent review repeatedly blocked apparently green candidates for
   chronology rewinds, reentrant output/ACK handling, ambiguous sends, lease
   mutation races, detach ordering, unbounded pending work and raw authority
@@ -4364,7 +4384,8 @@ Go browser terminal and HumanRequest effect transport proof on integrated head
   with no unknown capability bit. Target-specific revocation linearization,
   backend cancellation, codec, null-result, stale-observation and forged
   correlation tests are causal and pass at count twenty.
-- HumanRequest detail/action redesign, a client discovery method and automatic
-  lease renewal, real cross-language Go/TypeScript E2E, and interactive public
-  UI terminal/request/action work remain blocked. Recovery replay, private
-  host integration and the final cutover gates remain incomplete.
+- HumanRequest private-detail authority, concrete cancel discovery and the
+  high-level TypeScript methods are complete at `afb5fdf`. Automatic lease
+  renewal, real cross-language Go/TypeScript E2E, and interactive public UI
+  terminal/request/cancel work remain blocked. Recovery replay, private host
+  integration and the final cutover gates remain incomplete.
