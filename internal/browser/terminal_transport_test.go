@@ -756,6 +756,84 @@ func TestTerminalTransportValidatesLeaseResultRelations(t *testing.T) {
 				writeClientFrame(t, connection, payload)
 			},
 		},
+		{
+			name: "release same generation",
+			configure: func(backend *terminalTestBackend) {
+				backend.leaseResult = TerminalLeaseResult{Operation: "released", RunID: testID, SessionID: projectID, Generation: 3, RunRevision: 1, SessionRevision: 1}
+			},
+			write: func(t *testing.T, connection *websocket.Conn) {
+				payload, err := browserprotocol.EncodeTerminalLeaseRelease("lease-release-same", browserprotocol.TerminalLeaseRelease{RunID: testID, SessionID: projectID, Generation: 3, ExpectedRunRevision: 1, ExpectedSessionRevision: 1})
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeClientFrame(t, connection, payload)
+			},
+		},
+		{
+			name: "release skips generation",
+			configure: func(backend *terminalTestBackend) {
+				backend.leaseResult = TerminalLeaseResult{Operation: "released", RunID: testID, SessionID: projectID, Generation: 5, RunRevision: 1, SessionRevision: 1}
+			},
+			write: func(t *testing.T, connection *websocket.Conn) {
+				payload, err := browserprotocol.EncodeTerminalLeaseRelease("lease-release-skip", browserprotocol.TerminalLeaseRelease{RunID: testID, SessionID: projectID, Generation: 3, ExpectedRunRevision: 1, ExpectedSessionRevision: 1})
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeClientFrame(t, connection, payload)
+			},
+		},
+		{
+			name: "release rewinds generation",
+			configure: func(backend *terminalTestBackend) {
+				backend.leaseResult = TerminalLeaseResult{Operation: "released", RunID: testID, SessionID: projectID, Generation: 2, RunRevision: 1, SessionRevision: 1}
+			},
+			write: func(t *testing.T, connection *websocket.Conn) {
+				payload, err := browserprotocol.EncodeTerminalLeaseRelease("lease-release-rewind", browserprotocol.TerminalLeaseRelease{RunID: testID, SessionID: projectID, Generation: 3, ExpectedRunRevision: 1, ExpectedSessionRevision: 1})
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeClientFrame(t, connection, payload)
+			},
+		},
+		{
+			name: "release resets input sequence",
+			configure: func(backend *terminalTestBackend) {
+				backend.leaseResult = TerminalLeaseResult{Operation: "released", RunID: testID, SessionID: projectID, Generation: 4, LastInputSequence: 1, RunRevision: 1, SessionRevision: 1}
+			},
+			write: func(t *testing.T, connection *websocket.Conn) {
+				payload, err := browserprotocol.EncodeTerminalLeaseRelease("lease-release-sequence", browserprotocol.TerminalLeaseRelease{RunID: testID, SessionID: projectID, Generation: 3, ExpectedRunRevision: 1, ExpectedSessionRevision: 1})
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeClientFrame(t, connection, payload)
+			},
+		},
+		{
+			name: "release zero generation",
+			configure: func(backend *terminalTestBackend) {
+				backend.leaseResult = TerminalLeaseResult{Operation: "released", RunID: testID, SessionID: projectID, Generation: 0, RunRevision: 1, SessionRevision: 1}
+			},
+			write: func(t *testing.T, connection *websocket.Conn) {
+				payload, err := browserprotocol.EncodeTerminalLeaseRelease("lease-release-zero", browserprotocol.TerminalLeaseRelease{RunID: testID, SessionID: projectID, Generation: 3, ExpectedRunRevision: 1, ExpectedSessionRevision: 1})
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeClientFrame(t, connection, payload)
+			},
+		},
+		{
+			name: "release generation overflow",
+			configure: func(backend *terminalTestBackend) {
+				backend.leaseResult = TerminalLeaseResult{Operation: "released", RunID: testID, SessionID: projectID, Generation: browserprotocol.Decimal(browserprotocol.MaxSQLiteInteger), RunRevision: 1, SessionRevision: 1}
+			},
+			write: func(t *testing.T, connection *websocket.Conn) {
+				payload, err := browserprotocol.EncodeTerminalLeaseRelease("lease-release-overflow", browserprotocol.TerminalLeaseRelease{RunID: testID, SessionID: projectID, Generation: browserprotocol.Decimal(browserprotocol.MaxSQLiteInteger), ExpectedRunRevision: 1, ExpectedSessionRevision: 1})
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeClientFrame(t, connection, payload)
+			},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -802,13 +880,13 @@ func TestTerminalTransportAcceptsExactLeaseResults(t *testing.T) {
 		t.Fatalf("renew result=%+v", frame)
 	}
 
-	backend.leaseResult = TerminalLeaseResult{Operation: "released", RunID: testID, SessionID: projectID, Generation: 3, LastInputSequence: 4, RunRevision: 1, SessionRevision: 1}
+	backend.leaseResult = TerminalLeaseResult{Operation: "released", RunID: testID, SessionID: projectID, Generation: 4, RunRevision: 1, SessionRevision: 1}
 	release, err := browserprotocol.EncodeTerminalLeaseRelease("lease-release", browserprotocol.TerminalLeaseRelease{RunID: testID, SessionID: projectID, Generation: 3, ExpectedRunRevision: 1, ExpectedSessionRevision: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	writeClientFrame(t, connection, release)
-	if frame := readServerFrame(t, connection); frame.Type != browserprotocol.TypeTerminalLeaseResult || frame.Body.(browserprotocol.TerminalLeaseResult).Operation != "released" {
+	if frame := readServerFrame(t, connection); frame.Type != browserprotocol.TypeTerminalLeaseResult || frame.Body.(browserprotocol.TerminalLeaseResult).Operation != "released" || frame.Body.(browserprotocol.TerminalLeaseResult).Generation != 4 || frame.Body.(browserprotocol.TerminalLeaseResult).LastInputSequence != 0 || frame.Body.(browserprotocol.TerminalLeaseResult).ExpiresAtMS != nil {
 		t.Fatalf("release result=%+v", frame)
 	}
 }

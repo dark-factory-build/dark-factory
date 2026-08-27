@@ -655,11 +655,27 @@ func validateLeaseResult(operation, runID, sessionID string, generation, expecte
 	if result.Operation != operation || result.RunID != runID || result.SessionID != sessionID || result.Generation == 0 || uint64(result.Generation) > browserprotocol.MaxSQLiteInteger || uint64(result.LastInputSequence) > browserprotocol.MaxSQLiteInteger || uint64(result.RunRevision) > browserprotocol.MaxSQLiteInteger || uint64(result.SessionRevision) > browserprotocol.MaxSQLiteInteger || result.RunRevision != expectedRun || result.SessionRevision != expectedSession {
 		return fmt.Errorf("%w: terminal lease identity or revision", errBackendResult)
 	}
-	if operation != "acquired" && result.Generation != generation {
-		return fmt.Errorf("%w: terminal lease generation", errBackendResult)
-	}
-	if operation == "acquired" && result.LastInputSequence != 0 {
-		return fmt.Errorf("%w: acquired terminal lease sequence", errBackendResult)
+	switch operation {
+	case "acquired":
+		if result.LastInputSequence != 0 {
+			return fmt.Errorf("%w: acquired terminal lease sequence", errBackendResult)
+		}
+	case "renewed":
+		if generation == 0 || result.Generation != generation {
+			return fmt.Errorf("%w: terminal lease generation", errBackendResult)
+		}
+	case "released":
+		// Store clears the lease and increments its generation in one
+		// transaction. The post-release generation is therefore the exact
+		// fence for all effects issued under the released generation.
+		if generation == 0 || uint64(generation) >= browserprotocol.MaxSQLiteInteger || result.Generation != generation+1 {
+			return fmt.Errorf("%w: terminal lease generation", errBackendResult)
+		}
+		if result.LastInputSequence != 0 {
+			return fmt.Errorf("%w: released terminal lease sequence", errBackendResult)
+		}
+	default:
+		return fmt.Errorf("%w: terminal lease operation", errBackendResult)
 	}
 	if operation == "released" {
 		if result.ExpiresAtMS != nil {
