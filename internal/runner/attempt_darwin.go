@@ -1177,17 +1177,26 @@ func publishAttemptTerminal(child *OwnedChild, dir *os.File, cfg attemptConfig, 
 		return err
 	}
 	defer daemon.SetReadDeadline(time.Time{})
-	var ack attemptFrame
-	if err := readFrame(daemon, &ack, maxConfigBytes); err != nil {
-		if errors.Is(err, io.EOF) || errors.Is(err, os.ErrDeadlineExceeded) {
-			return nil
+	for {
+		var ack attemptFrame
+		if err := readFrame(daemon, &ack, maxConfigBytes); err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, os.ErrDeadlineExceeded) {
+				return nil
+			}
+			return err
 		}
-		return err
+		// A terminate sent just before natural provider exit can remain queued
+		// while the owner publishes its terminal evidence. It is already
+		// satisfied by the exact child wait above; consume this one idempotent
+		// stale command and continue waiting for the authenticated acknowledgement.
+		if ack.Kind == "terminate" && validBareAttemptFrame(ack) {
+			continue
+		}
+		if !validTerminalAck(ack, record) {
+			return ErrIdentity
+		}
+		return AcknowledgeTerminal(dir, cfg.TerminalName, record, true)
 	}
-	if !validTerminalAck(ack, record) {
-		return ErrIdentity
-	}
-	return AcknowledgeTerminal(dir, cfg.TerminalName, record, true)
 }
 
 func writeControlFrame(file *os.File, value any, limit int) error {

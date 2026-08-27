@@ -608,7 +608,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		return run, errors.Join(waitErr, err)
 	}
 	final, err := daemon.store.FinalizeRun(context.Background(), run.ID, current.Revision, at)
-	return final, errors.Join(waitErr, err)
+	return final, errors.Join(waitErr, err, ctx.Err())
 }
 
 func newSupervisorKeys(reader io.Reader) (supervisorKeys, error) {

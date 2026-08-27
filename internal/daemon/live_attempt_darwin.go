@@ -121,7 +121,40 @@ func (attempt *liveAttempt) handleBeforeRelease(ctx context.Context, command liv
 			command.result <- ctx.Err()
 			return false, ctx.Err()
 		}
-		if err := attempt.controller.Release(runner.StageProvider); err != nil {
+		if attempt.daemon == nil || attempt.daemon.store == nil {
+			err := kernel.ErrCorruptState
+			command.result <- err
+			return false, err
+		}
+		// Durable finalization and the irreversible provider release share one
+		// linearization gate. Re-read both run and session state while holding
+		// it; a stale supervisor observation can never release a run that has
+		// already entered finalizing.
+		attempt.daemon.operationMu.Lock()
+		storeCtx, cancel := context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
+		run, found, err := attempt.daemon.store.Run(storeCtx, attempt.runID)
+		cancel()
+		if err == nil && (!found || run.Phase != kernel.RunRunning) {
+			err = kernel.ErrConflict
+		}
+		if err == nil {
+			storeCtx, cancel = context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
+			session, sessionFound, sessionErr := attempt.daemon.store.TerminalSessionForRun(storeCtx, attempt.runID)
+			cancel()
+			if sessionErr != nil {
+				err = sessionErr
+			} else if !sessionFound || session.ID != attempt.sessionID || session.State != kernel.TerminalSessionActive {
+				err = kernel.ErrConflict
+			}
+		}
+		if err == nil && ctx.Err() != nil {
+			err = ctx.Err()
+		}
+		if err == nil {
+			err = attempt.controller.Release(runner.StageProvider)
+		}
+		attempt.daemon.operationMu.Unlock()
+		if err != nil {
 			command.result <- err
 			return false, err
 		}
@@ -140,7 +173,7 @@ func (attempt *liveAttempt) handleBeforeRelease(ctx context.Context, command liv
 }
 
 func (attempt *liveAttempt) processLifecycle(ctx context.Context) (bool, error) {
-	if attempt.terminationSent {
+	if attempt.terminationSent || attempt.terminalSeen {
 		return false, nil
 	}
 	if ctx.Err() != nil {

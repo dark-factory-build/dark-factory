@@ -48,6 +48,43 @@ func TestMain(m *testing.M) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			_, err = client.Succeed(ctx, os.Args[2])
 			cancel()
+		case "--supervisor-descendant-provider":
+			receipt := os.Getenv("DARK_FACTORY_CHILD_RECEIPT")
+			continuePath := os.Getenv("DARK_FACTORY_CONTINUE_RECEIPT")
+			if receipt == "" || continuePath == "" {
+				err = errors.New("invalid descendant provider environment")
+				break
+			}
+			child := exec.Command("/bin/sh", "-c", "trap '' TERM; while :; do sleep 1; done")
+			if err = child.Start(); err != nil {
+				break
+			}
+			if err = os.WriteFile(receipt, []byte(strconv.Itoa(child.Process.Pid)), 0o600); err != nil {
+				_ = child.Process.Kill()
+				break
+			}
+			for err == nil {
+				if _, statErr := os.Stat(continuePath); statErr == nil {
+					break
+				} else if !errors.Is(statErr, os.ErrNotExist) {
+					err = statErr
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if err == nil {
+				client, clientErr := api.NewAttemptClientFromEnvironment(os.Getenv("DARK_FACTORY_SOCKET"))
+				if clientErr != nil {
+					err = clientErr
+				} else {
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					_, err = client.Succeed(ctx, "typed-success")
+					cancel()
+				}
+			}
+			for err == nil {
+				time.Sleep(time.Second)
+			}
 		default:
 			os.Exit(m.Run())
 		}
@@ -304,6 +341,41 @@ func TestSupervisorCompletionBeforeProviderExitKeepsFirstOutcome(t *testing.T) {
 		t.Fatalf("process exit evidence missing: provider=%+v runner=%+v", run.ProviderExit, run.RunnerExit)
 	}
 	fixture.assertOneWitness(t)
+}
+
+func TestSupervisorDoesNotReleaseAfterFinalizationWinsBeforeProviderRelease(t *testing.T) {
+	fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
+	var hookErr error
+	fixture.spec.beforeProviderRelease = func() {
+		recoverable, err := fixture.store.RecoverableRuns(context.Background())
+		if err != nil {
+			hookErr = err
+			return
+		}
+		if len(recoverable) != 1 {
+			hookErr = fmt.Errorf("recoverable run count = %d, want one", len(recoverable))
+			return
+		}
+		proposal, err := kernel.NewSuccessProposal("outcome-before-release")
+		if err != nil {
+			hookErr = err
+			return
+		}
+		_, hookErr = fixture.store.ProposeAttemptOutcome(context.Background(), recoverable[0].Run.CredentialDigest, proposal, supervisorTime())
+	}
+	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if hookErr != nil {
+		t.Fatal(hookErr)
+	}
+	if err == nil || !errors.Is(err, kernel.ErrConflict) {
+		t.Fatalf("release after finalization error = %v, want conflict", err)
+	}
+	if run.Phase != kernel.RunFinalizing || run.Proposal == nil || run.Proposal.Result() != "outcome-before-release" {
+		t.Fatalf("run after finalization-before-release = %+v", run)
+	}
+	if _, statErr := os.Stat(fixture.witness); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("provider crossed finalization-before-release boundary: %v", statErr)
+	}
 }
 
 func TestSupervisorProviderExitWithoutTypedOutcomeFails(t *testing.T) {
@@ -838,6 +910,9 @@ func TestSupervisorReapsProviderDescendant(t *testing.T) {
 	})
 	childPID := supervisorWaitForPIDReceipt(t, fixture.childReceipt)
 	child := supervisorIdentityForPID(t, childPID)
+	if observation := runner.ObserveProcess(child); observation.Presence != runner.Present {
+		t.Fatalf("provider descendant was not live at cleanup boundary: %+v", observation)
+	}
 	if err := os.WriteFile(fixture.continueReceipt, []byte("continue"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1299,7 +1374,15 @@ func descendantProgram(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return "set -eu\nprintf x >> __WITNESS__\nsleep 30 &\nprintf '%s' \"$!\" > __CHILD_RECEIPT__\nwhile [ ! -f __CONTINUE_RECEIPT__ ]; do sleep 0.01; done\n" +
+	// The provider is intentionally interactive because it owns a PTY. Do not
+	// use Bash history-sensitive `$!` syntax in this fixture; the deterministic
+	// helper records its own PID while remaining in the provider's process
+	// group, so this test still proves descendant cleanup without relying on
+	// pipe-era shell semantics.
+	helper := quoteShell(executable)
+	return "set -eu\nprintf x >> __WITNESS__\n" +
+		"DARK_FACTORY_CHILD_RECEIPT=__CHILD_RECEIPT__ DARK_FACTORY_CONTINUE_RECEIPT=__CONTINUE_RECEIPT__ " + helper + " --supervisor-descendant-provider\n" +
+		"while [ ! -f __CONTINUE_RECEIPT__ ]; do sleep 0.01; done\n" +
 		quoteShell(executable) + " --supervisor-attempt-succeed typed-success\nsleep 30\n"
 }
 
