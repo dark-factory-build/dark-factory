@@ -307,7 +307,7 @@ func TestSupervisorCompletionBeforeProviderExitKeepsFirstOutcome(t *testing.T) {
 }
 
 func TestSupervisorProviderExitWithoutTypedOutcomeFails(t *testing.T) {
-	fixture := newSupervisorFixture(t, supervisorProgram(t, false, true))
+	fixture := newSupervisorFixture(t, providerExitWithoutOutcomeProgram(t))
 	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
 	if err != nil {
 		t.Fatalf("RunNext: %v", err)
@@ -1277,6 +1277,11 @@ func supervisorProgram(t *testing.T, waitAfterRequest, noRequest bool) string {
 		wait = "sleep 30\n"
 	}
 	return "set -eu\nprintf x >> __WITNESS__\n" + request + wait
+}
+
+func providerExitWithoutOutcomeProgram(t *testing.T) string {
+	t.Helper()
+	return "set -eu\nprintf x >> __WITNESS__\nexit 0\n"
 }
 
 func providerExitAfterSuccessProgram(t *testing.T, code int) string {
