@@ -73,6 +73,61 @@ func TestBrowserCapabilityHasRequiresSingleKnownBit(t *testing.T) {
 	}
 }
 
+func TestBrowserClientPagesAreBoundedDeterministicAndPrivate(t *testing.T) {
+	store, _ := newBrowserStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	boot := browserTestBoot(t, 201)
+	for index := 0; index < BrowserClientPageSize+2; index++ {
+		digest := mintBrowserChallenge(t, store, byte(index+1), boot, int64(10+index), 10_000, BrowserCapabilityObserve|BrowserCapabilityPrivateHumanRequestDetail)
+		pairBrowserClient(t, store, digest, boot, browserTestID(t, byte(index+1)), browserKey(t), int64(20+index))
+	}
+	first, err := store.ListBrowserClients(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Items) != BrowserClientPageSize || first.NextAfter == nil || first.Items[0].ID != browserTestID(t, 1) || first.Items[len(first.Items)-1].ID != browserTestID(t, BrowserClientPageSize) {
+		t.Fatalf("first page = len %d next %v first %v last %v", len(first.Items), first.NextAfter, first.Items[0].ID, first.Items[len(first.Items)-1].ID)
+	}
+	second, err := store.ListBrowserClients(ctx, first.NextAfter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Items) != 2 || second.NextAfter != nil || second.Items[0].ID != browserTestID(t, BrowserClientPageSize+1) {
+		t.Fatalf("second page = %+v", second)
+	}
+	if _, err := store.ListBrowserClients(ctx, &BrowserClientID{}); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("zero cursor error = %v", err)
+	}
+	unknown := browserTestID(t, 250)
+	if _, err := store.ListBrowserClients(ctx, &unknown); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown cursor error = %v", err)
+	}
+	counts, err := store.BrowserClientCounts(ctx, boot, mustTime(t, 100))
+	if err != nil || counts.Active != BrowserClientPageSize+2 || counts.Revoked != 0 || counts.ActiveChallenges != 0 {
+		t.Fatalf("initial client counts = %+v, %v", counts, err)
+	}
+	client, found, err := store.BrowserClient(ctx, browserTestID(t, 1))
+	if err != nil || !found {
+		t.Fatalf("client lookup = %+v, %t, %v", client, found, err)
+	}
+	if _, err := store.RevokeBrowserClient(ctx, client.ID, client.Revision, mustTime(t, 101)); err != nil {
+		t.Fatal(err)
+	}
+	counts, err = store.BrowserClientCounts(ctx, boot, mustTime(t, 101))
+	if err != nil || counts.Active != BrowserClientPageSize+1 || counts.Revoked != 1 {
+		t.Fatalf("revoked client counts = %+v, %v", counts, err)
+	}
+	pending := HashBrowserChallenge([]byte("pending-list-count"))
+	if _, err := store.CreateBrowserPairingChallenge(ctx, pending, boot, "https://app.example", BrowserCapabilityObserve, mustTime(t, 102), mustTime(t, 202)); err != nil {
+		t.Fatal(err)
+	}
+	counts, err = store.BrowserClientCounts(ctx, boot, mustTime(t, 102))
+	if err != nil || counts.ActiveChallenges != 1 {
+		t.Fatalf("pending challenge count = %+v, %v", counts, err)
+	}
+}
+
 func sameBrowserID(left, right *BrowserClientID) bool {
 	if left == nil || right == nil {
 		return left == nil && right == nil

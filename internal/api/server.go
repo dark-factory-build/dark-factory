@@ -31,6 +31,10 @@ const (
 	CallBlock
 	CallFail
 	CallRequestHuman
+	CallWebStatus
+	CallWebOpen
+	CallWebListClients
+	CallWebRevokeClient
 )
 
 // AttemptDigest is the SHA-256 digest of one raw attempt bearer. The bearer is
@@ -54,6 +58,8 @@ type Call struct {
 	agent            CreateShellAgentInput
 	task             EnqueueTaskInput
 	humanQuestion    HumanQuestionInput
+	webClient        WebClientRevocationInput
+	webAfter         string
 	expectedRevision uint64
 	enabled          bool
 	text             string
@@ -102,22 +108,38 @@ func (call Call) HumanQuestionInput() (HumanQuestionInput, bool) {
 	return call.humanQuestion, call.kind == CallRequestHuman
 }
 
+func (call Call) WebClientRevocationInput() (WebClientRevocationInput, bool) {
+	return call.webClient, call.kind == CallWebRevokeClient
+}
+
+func (call Call) WebListAfter() (string, bool) {
+	return call.webAfter, call.kind == CallWebListClients
+}
+
 type replyKind uint8
 
 const (
 	replyHealth replyKind = iota + 1
 	replySnapshot
 	replyMutation
+	replyWebStatus
+	replyWebLaunch
+	replyWebClients
+	replyWebRevoke
 	replyError
 )
 
 // Reply is constructed only through the four fixed reply constructors.
 type Reply struct {
-	kind     replyKind
-	health   HealthStatus
-	snapshot DashboardSnapshot
-	mutation MutationResult
-	code     RemoteErrorCode
+	kind       replyKind
+	health     HealthStatus
+	snapshot   DashboardSnapshot
+	mutation   MutationResult
+	webStatus  WebStatus
+	webLaunch  WebLaunch
+	webClients WebClientPage
+	webRevoke  WebRevokeResult
+	code       RemoteErrorCode
 }
 
 func (Reply) String() string   { return "Reply(<redacted>)" }
@@ -148,6 +170,40 @@ func NewMutationReply(result MutationResult) (Reply, error) {
 		return Reply{}, ErrInvalidInput
 	}
 	return Reply{kind: replyMutation, mutation: result}, nil
+}
+
+func NewWebStatusReply(status WebStatus) (Reply, error) {
+	if !validWebStatus(status) {
+		return Reply{}, ErrInvalidInput
+	}
+	status.Origins = append([]string(nil), status.Origins...)
+	return Reply{kind: replyWebStatus, webStatus: status}, nil
+}
+
+func NewWebLaunchReply(launch WebLaunch) (Reply, error) {
+	if !validWebLaunch(launch) {
+		return Reply{}, ErrInvalidInput
+	}
+	return Reply{kind: replyWebLaunch, webLaunch: launch}, nil
+}
+
+func NewWebClientsReply(page WebClientPage) (Reply, error) {
+	if !validWebClientPage(page) {
+		return Reply{}, ErrInvalidInput
+	}
+	page.Clients = append([]WebClient(nil), page.Clients...)
+	if page.NextAfter != nil {
+		next := *page.NextAfter
+		page.NextAfter = &next
+	}
+	return Reply{kind: replyWebClients, webClients: page}, nil
+}
+
+func NewWebRevokeReply(result WebRevokeResult) (Reply, error) {
+	if !validWebRevokeResult(result) {
+		return Reply{}, ErrInvalidInput
+	}
+	return Reply{kind: replyWebRevoke, webRevoke: result}, nil
 }
 
 func NewErrorReply(code RemoteErrorCode) (Reply, error) {
@@ -432,10 +488,18 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		call.digest = digestAttemptCredential(bearer)
 	}
 	switch kind {
-	case CallHealth, CallSnapshot:
+	case CallHealth, CallSnapshot, CallWebStatus, CallWebOpen:
 		if err := decodeExact(request.Params, &struct{}{}); err != nil {
 			return Call{}, RemoteInvalidRequest
 		}
+	case CallWebListClients:
+		var input struct {
+			After string `json:"after"`
+		}
+		if err := decodeExact(request.Params, &input); err != nil || input.After != "" && !validID(input.After) {
+			return Call{}, RemoteInvalidRequest
+		}
+		call.webAfter = input.After
 	case CallCreateProject:
 		if err := decodeExact(request.Params, &call.project); err != nil || !validID(call.project.ID) || !validText(call.project.Name, 1, 128) || !validText(call.project.Root, 1, 4096) {
 			return Call{}, RemoteInvalidRequest
@@ -481,6 +545,10 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		if err := decodeExact(request.Params, &call.humanQuestion); err != nil || !validID(call.humanQuestion.IdempotencyKey) || !validText(call.humanQuestion.Question, 1, 8192) {
 			return Call{}, RemoteInvalidRequest
 		}
+	case CallWebRevokeClient:
+		if err := decodeExact(request.Params, &call.webClient); err != nil || !validID(call.webClient.ID) || call.webClient.ExpectedRevision == 0 {
+			return Call{}, RemoteInvalidRequest
+		}
 	}
 	return call, ""
 }
@@ -522,6 +590,14 @@ func methodKind(method string) (CallKind, byte) {
 		return CallFail, attemptDomain
 	case "request_human":
 		return CallRequestHuman, attemptDomain
+	case "web_status":
+		return CallWebStatus, operatorDomain
+	case "web_open":
+		return CallWebOpen, operatorDomain
+	case "web_list_clients":
+		return CallWebListClients, operatorDomain
+	case "web_revoke_client":
+		return CallWebRevokeClient, operatorDomain
 	default:
 		return 0, 0
 	}
@@ -551,6 +627,14 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replySnapshot
 	case CallCreateProject, CallCreateShellAgent, CallEnqueueTask, CallSetDispatch, CallSucceed, CallBlock, CallFail, CallRequestHuman:
 		return reply == replyMutation
+	case CallWebStatus:
+		return reply == replyWebStatus
+	case CallWebOpen:
+		return reply == replyWebLaunch
+	case CallWebListClients:
+		return reply == replyWebClients
+	case CallWebRevokeClient:
+		return reply == replyWebRevoke
 	default:
 		return false
 	}
@@ -579,6 +663,14 @@ func (connection *Connection) writeReply(reply Reply) error {
 		data, err = json.Marshal(reply.snapshot)
 	case replyMutation:
 		data, err = json.Marshal(reply.mutation)
+	case replyWebStatus:
+		data, err = json.Marshal(reply.webStatus)
+	case replyWebLaunch:
+		data, err = json.Marshal(reply.webLaunch)
+	case replyWebClients:
+		data, err = json.Marshal(reply.webClients)
+	case replyWebRevoke:
+		data, err = json.Marshal(reply.webRevoke)
 	case replyError:
 	default:
 		return ErrProtocol

@@ -92,6 +92,63 @@ func (client *OperatorClient) Health(ctx context.Context) (HealthStatus, error) 
 	return result, err
 }
 
+func (client *OperatorClient) WebStatus(ctx context.Context) (WebStatus, error) {
+	var result WebStatus
+	if err := client.client.call(ctx, "web_status", struct{}{}, &result); err != nil {
+		return WebStatus{}, err
+	}
+	if !validWebStatus(result) {
+		return WebStatus{}, ErrProtocol
+	}
+	return result, nil
+}
+
+func (client *OperatorClient) WebOpen(ctx context.Context) (WebLaunch, error) {
+	var result WebLaunch
+	if err := client.client.call(ctx, "web_open", struct{}{}, &result); err != nil {
+		return WebLaunch{}, err
+	}
+	if !validWebLaunch(result) {
+		return WebLaunch{}, ErrProtocol
+	}
+	return result, nil
+}
+
+func (client *OperatorClient) WebListClients(ctx context.Context, after string) (WebClientPage, error) {
+	if after != "" && !validID(after) {
+		return WebClientPage{}, ErrInvalidInput
+	}
+	params := struct {
+		After string `json:"after"`
+	}{After: after}
+	var result WebClientPage
+	if err := client.client.call(ctx, "web_list_clients", params, &result); err != nil {
+		return WebClientPage{}, err
+	}
+	if !validWebClientPage(result) {
+		return WebClientPage{}, ErrProtocol
+	}
+	return result, nil
+}
+
+func (client *OperatorClient) WebRevokeClient(ctx context.Context, id string, expectedRevision uint64) (WebRevokeResult, error) {
+	if !validID(id) || expectedRevision == 0 {
+		return WebRevokeResult{}, ErrInvalidInput
+	}
+	params := struct {
+		ID               string `json:"id"`
+		ExpectedRevision uint64 `json:"expected_revision"`
+	}{ID: id, ExpectedRevision: expectedRevision}
+	var result WebRevokeResult
+	if err := client.client.call(ctx, "web_revoke_client", params, &result); err != nil {
+		return WebRevokeResult{}, err
+	}
+	if !validWebRevokeResult(result) {
+		return WebRevokeResult{}, ErrProtocol
+	}
+	return result, nil
+}
+
 func (client *OperatorClient) Snapshot(ctx context.Context) (DashboardSnapshot, error) {
 	var result DashboardSnapshot
 	if err := client.client.call(ctx, "snapshot", struct{}{}, &result); err != nil {
@@ -497,7 +554,7 @@ func canonicalJSONName(name string) bool {
 
 func validRemoteCode(code RemoteErrorCode) bool {
 	switch code {
-	case RemoteInvalidRequest, RemoteUnsupportedProtocol, RemoteUnauthorized, RemoteForbidden, RemoteNotFound, RemoteConflict, RemoteRevisionConflict, RemoteTooLarge, RemoteUnavailable, RemoteInternal:
+	case RemoteInvalidRequest, RemoteUnsupportedProtocol, RemoteUnauthorized, RemoteForbidden, RemoteNotFound, RemoteConflict, RemoteRevisionConflict, RemoteTooLarge, RemoteUnavailable, RemoteCleanupUnresolved, RemoteInternal:
 		return true
 	default:
 		return false
@@ -537,6 +594,73 @@ func validSnapshot(snapshot DashboardSnapshot) bool {
 		}
 	}
 	return true
+}
+
+func validWebStatus(status WebStatus) bool {
+	if status.State != "ready" && status.State != "stopped" && status.State != "degraded" {
+		return false
+	}
+	if status.ProtocolVersion != 1 {
+		return false
+	}
+	if status.State == "stopped" {
+		return !status.Ready && status.Address == "" && status.Path == "" && status.Origins == nil && status.ActiveClients == 0 && status.RevokedClients == 0 && status.ActiveChallenges == 0
+	}
+	if status.Ready != (status.State == "ready") || !validText(status.Address, 1, 128) || !validText(status.Path, 1, 128) || len(status.Origins) == 0 || len(status.Origins) > 8 {
+		return false
+	}
+	for _, origin := range status.Origins {
+		if !validText(origin, 1, 4096) || strings.ContainsAny(origin, " \t\r\n*") {
+			return false
+		}
+	}
+	return true
+}
+
+func validWebLaunch(launch WebLaunch) bool {
+	return validText(launch.LaunchURL, 1, 4096) && strings.HasPrefix(launch.LaunchURL, "https://") && launch.ExpiresAtMs > 0
+}
+
+func validWebClient(client WebClient) bool {
+	if !validID(client.ID) || client.CapabilityMask == 0 || client.CapabilityMask&1 == 0 || client.CapabilityMask&^15 != 0 || client.Revision == 0 || client.UpdatedAtMs < client.CreatedAtMs {
+		return false
+	}
+	return client.RevokedAtMs == nil || *client.RevokedAtMs >= client.CreatedAtMs && *client.RevokedAtMs <= client.UpdatedAtMs
+}
+
+func validWebClientPage(page WebClientPage) bool {
+	if page.Clients == nil || len(page.Clients) > 128 {
+		return false
+	}
+	seen := make(map[string]struct{}, len(page.Clients))
+	for index, client := range page.Clients {
+		if !validWebClient(client) {
+			return false
+		}
+		if index > 0 {
+			previous := page.Clients[index-1]
+			if client.CreatedAtMs < previous.CreatedAtMs || client.CreatedAtMs == previous.CreatedAtMs && client.ID <= previous.ID {
+				return false
+			}
+		}
+		if _, ok := seen[client.ID]; ok {
+			return false
+		}
+		seen[client.ID] = struct{}{}
+	}
+	if page.NextAfter != nil {
+		if len(page.Clients) != 128 || !validID(*page.NextAfter) {
+			return false
+		}
+		if _, ok := seen[*page.NextAfter]; ok {
+			return false
+		}
+	}
+	return true
+}
+
+func validWebRevokeResult(result WebRevokeResult) bool {
+	return validID(result.ID) && result.Revision > 0
 }
 
 func validTaskStatus(status string) bool {

@@ -18,6 +18,7 @@ type BrowserRuntime struct {
 	daemon  *Daemon
 	server  *browser.Server
 	backend *browserBackend
+	origins []string
 
 	closeOnce sync.Once
 	closeErr  error
@@ -44,7 +45,7 @@ func (daemon *Daemon) ListenBrowser(address string, allowedOrigins []string) (*B
 		_ = backend.close()
 		return nil, err
 	}
-	runtime := &BrowserRuntime{daemon: daemon, server: server, backend: backend}
+	runtime := &BrowserRuntime{daemon: daemon, server: server, backend: backend, origins: append([]string(nil), allowedOrigins...)}
 	if daemon.browsers == nil {
 		daemon.browsers = make(map[*BrowserRuntime]struct{})
 	}

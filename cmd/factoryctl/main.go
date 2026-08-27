@@ -2,10 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -23,6 +27,10 @@ const (
   factoryctl attempt block --detail TEXT
   factoryctl attempt fail [--detail TEXT]
   factoryctl attempt request-human --idempotency-key HEX32 --question TEXT
+  factoryctl web status
+  factoryctl web open
+  factoryctl web list-clients [--after CLIENT_ID]
+  factoryctl web revoke CLIENT_ID --revision REVISION
 `
 )
 
@@ -33,12 +41,19 @@ const (
 	commandBlock
 	commandFail
 	commandRequestHuman
+	commandWebStatus
+	commandWebOpen
+	commandWebListClients
+	commandWebRevoke
 )
 
 type attemptCommand struct {
-	kind           commandKind
-	idempotencyKey string
-	text           string
+	kind             commandKind
+	idempotencyKey   string
+	text             string
+	id               string
+	after            string
+	expectedRevision uint64
 }
 
 func main() {
@@ -46,6 +61,12 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) int {
+	return runWithOpener(ctx, args, getenv, stdout, stderr, openBrowser)
+}
+
+type browserOpener func(context.Context, string) error
+
+func runWithOpener(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer, opener browserOpener) int {
 	command, help, ok := parse(args)
 	if help {
 		_, _ = io.WriteString(stdout, usage)
@@ -54,6 +75,9 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 	if !ok {
 		_, _ = io.WriteString(stderr, usage)
 		return exitUsage
+	}
+	if command.kind >= commandWebStatus {
+		return runWeb(ctx, command, getenv, stdout, stderr, opener)
 	}
 
 	socket := getenv("DARK_FACTORY_SOCKET")
@@ -98,7 +122,7 @@ func parse(args []string) (attemptCommand, bool, bool) {
 	if len(args) == 1 && helpFlag(args[0]) {
 		return attemptCommand{}, true, true
 	}
-	if len(args) < 2 || args[0] != "attempt" {
+	if len(args) < 2 || args[0] != "attempt" && args[0] != "web" {
 		return attemptCommand{}, false, false
 	}
 	if len(args) == 2 && helpFlag(args[1]) {
@@ -108,11 +132,18 @@ func parse(args []string) (attemptCommand, bool, bool) {
 		switch args[1] {
 		case "succeed", "block", "fail", "request-human":
 			return attemptCommand{}, true, true
+		case "status", "open", "list-clients", "revoke":
+			if args[0] == "web" {
+				return attemptCommand{}, true, true
+			}
 		default:
 			return attemptCommand{}, false, false
 		}
 	}
 
+	if args[0] == "web" {
+		return parseWeb(args)
+	}
 	switch args[1] {
 	case "succeed":
 		if len(args) == 2 {
@@ -138,6 +169,49 @@ func parse(args []string) (attemptCommand, bool, bool) {
 		}
 	}
 	return attemptCommand{}, false, false
+}
+
+func parseWeb(args []string) (attemptCommand, bool, bool) {
+	switch args[1] {
+	case "status":
+		if len(args) == 2 {
+			return attemptCommand{kind: commandWebStatus}, false, true
+		}
+	case "open":
+		if len(args) == 2 {
+			return attemptCommand{kind: commandWebOpen}, false, true
+		}
+	case "list-clients":
+		if len(args) == 2 {
+			return attemptCommand{kind: commandWebListClients}, false, true
+		}
+		if len(args) == 4 && args[2] == "--after" && validBrowserClientID(args[3]) {
+			return attemptCommand{kind: commandWebListClients, after: args[3]}, false, true
+		}
+	case "revoke":
+		if len(args) == 5 && validBrowserClientID(args[2]) && args[3] == "--revision" {
+			revision, ok := parseRevision(args[4])
+			if ok {
+				return attemptCommand{kind: commandWebRevoke, id: args[2], expectedRevision: revision}, false, true
+			}
+		}
+	}
+	return attemptCommand{}, false, false
+}
+
+func validBrowserClientID(value string) bool { return validHumanRequestKey(value) }
+
+func parseRevision(value string) (uint64, bool) {
+	if value == "" || value[0] == '0' || len(value) > 19 {
+		return 0, false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return 0, false
+		}
+	}
+	parsed, err := strconv.ParseUint(value, 10, 64)
+	return parsed, err == nil && parsed > 0 && parsed <= uint64(^uint64(0)>>1)
 }
 
 func helpFlag(value string) bool { return value == "-h" || value == "--help" }
@@ -182,4 +256,137 @@ func writeFailure(stderr io.Writer, kind commandKind, err error) {
 		message = "factoryctl: " + subject + " was not accepted\n"
 	}
 	_, _ = io.WriteString(stderr, message)
+}
+
+func runWeb(ctx context.Context, command attemptCommand, getenv func(string) string, stdout, stderr io.Writer, opener browserOpener) int {
+	socket := getenv("DARK_FACTORY_SOCKET")
+	if socket == "" {
+		_, _ = io.WriteString(stderr, "factoryctl: web client configuration is invalid\n")
+		return exitFailure
+	}
+	if command.kind == commandWebStatus {
+		if !socketDaemonPresent(socket) {
+			return writeJSON(stdout, api.WebStatus{State: "stopped", Ready: false, ProtocolVersion: 1})
+		}
+	}
+	token := getenv("DARK_FACTORY_OPERATOR_TOKEN_FILE")
+	if token == "" {
+		_, _ = io.WriteString(stderr, "factoryctl: web client configuration is invalid\n")
+		return exitFailure
+	}
+	client, err := api.NewOperatorClient(socket, token)
+	if err != nil {
+		if command.kind == commandWebStatus && errors.Is(err, api.ErrInvalidClient) {
+			return writeJSON(stdout, api.WebStatus{State: "stopped", Ready: false, ProtocolVersion: 1})
+		}
+		_, _ = io.WriteString(stderr, "factoryctl: web client configuration is invalid\n")
+		return exitFailure
+	}
+	callContext, cancel := context.WithTimeout(ctx, attemptRequestTimeout)
+	defer cancel()
+	switch command.kind {
+	case commandWebStatus:
+		result, callErr := client.WebStatus(callContext)
+		if callErr != nil {
+			if errors.Is(callErr, api.ErrInvalidClient) || errors.Is(callErr, api.ErrTransport) {
+				return writeJSON(stdout, api.WebStatus{State: "stopped", Ready: false, ProtocolVersion: 1})
+			}
+			return writeWebFailure(stderr, "web status", callErr)
+		}
+		return writeJSON(stdout, result)
+	case commandWebOpen:
+		result, callErr := client.WebOpen(callContext)
+		if callErr != nil {
+			return writeWebFailure(stderr, "web open", callErr)
+		}
+		if !validLaunchURL(result.LaunchURL) {
+			return writeWebFailure(stderr, "web open", api.ErrProtocol)
+		}
+		if opener == nil || opener(callContext, result.LaunchURL) != nil {
+			_, _ = io.WriteString(stderr, "factoryctl: web browser could not be opened\n")
+			return exitFailure
+		}
+		return writeJSON(stdout, struct {
+			State       string `json:"state"`
+			ExpiresAtMs uint64 `json:"expires_at_ms"`
+		}{State: "opened", ExpiresAtMs: result.ExpiresAtMs})
+	case commandWebListClients:
+		result, callErr := client.WebListClients(callContext, command.after)
+		if callErr != nil {
+			return writeWebFailure(stderr, "web list clients", callErr)
+		}
+		return writeJSON(stdout, result)
+	case commandWebRevoke:
+		result, callErr := client.WebRevokeClient(callContext, command.id, command.expectedRevision)
+		if callErr != nil {
+			return writeWebFailure(stderr, "web revoke", callErr)
+		}
+		return writeJSON(stdout, result)
+	default:
+		return exitUsage
+	}
+}
+
+// socketDaemonPresent distinguishes a missing or stale pathname from a
+// daemon that can actually accept a local connection. The probe sends no
+// request and is used only by the read-only status command; all other web
+// commands still require the authenticated API client.
+func socketDaemonPresent(path string) bool {
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSocket == 0 {
+		return false
+	}
+	connection, err := net.DialTimeout("unix", path, 100*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = connection.Close()
+	return true
+}
+
+func writeJSON(stdout io.Writer, value any) int {
+	if err := json.NewEncoder(stdout).Encode(value); err != nil {
+		return exitFailure
+	}
+	return 0
+}
+
+func validLaunchURL(value string) bool {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "https" || parsed.Host != "app.darkfactory.build" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment == "" || parsed.Path != "/" || !strings.HasPrefix(parsed.Fragment, "df_pair=") {
+		return false
+	}
+	return validHex(parsed.Fragment[len("df_pair="):], 64)
+}
+
+func validHex(value string, length int) bool {
+	if len(value) != length {
+		return false
+	}
+	for _, character := range value {
+		if character >= '0' && character <= '9' || character >= 'a' && character <= 'f' {
+			continue
+		}
+		return false
+	}
+	return value != strings.Repeat("0", length)
+}
+
+func writeWebFailure(stderr io.Writer, subject string, err error) int {
+	message := "factoryctl: " + subject + " failed\n"
+	var remote *api.RemoteError
+	switch {
+	case errors.Is(err, context.Canceled):
+		message = "factoryctl: " + subject + " canceled\n"
+	case errors.Is(err, context.DeadlineExceeded):
+		message = "factoryctl: " + subject + " timed out\n"
+	case errors.As(err, &remote):
+		if remote.Code() == api.RemoteCleanupUnresolved {
+			message = "factoryctl: web revoke committed but browser cleanup remains unresolved\n"
+		} else {
+			message = "factoryctl: " + subject + " was not accepted\n"
+		}
+	}
+	_, _ = io.WriteString(stderr, message)
+	return exitFailure
 }

@@ -56,6 +56,32 @@ type BrowserClient struct {
 	RevokedAt      *UnixMillis
 }
 
+// BrowserClientSummary is the bounded operator projection of one browser
+// identity. It deliberately does not carry the public key or fingerprint;
+// neither is needed to identify or revoke a client and neither belongs in a
+// routine diagnostic response.
+type BrowserClientSummary struct {
+	ID             BrowserClientID
+	CapabilityMask BrowserCapabilityMask
+	Revision       Revision
+	CreatedAt      UnixMillis
+	UpdatedAt      UnixMillis
+	RevokedAt      *UnixMillis
+}
+
+type BrowserClientPage struct {
+	Items     []BrowserClientSummary
+	NextAfter *BrowserClientID
+}
+
+const BrowserClientPageSize = 128
+
+type BrowserClientCounts struct {
+	Active           uint64
+	Revoked          uint64
+	ActiveChallenges uint64
+}
+
 // BrowserClientPrincipal is deliberately only a durable client identity. The
 // daemon reloads BrowserClient before every effect instead of caching authority
 // in a connection principal.
@@ -292,6 +318,96 @@ func (store *Store) BrowserClient(ctx context.Context, id BrowserClientID) (Brow
 	}
 	defer c.Close()
 	return browserClientByID(ctx, c, id)
+}
+
+// ListBrowserClients returns a deterministic, fixed-size page. Browser client
+// rows are never deleted because their fingerprints remain a durable anti-
+// cloning boundary; pagination keeps this operator response bounded even if
+// an installation accumulates many revoked identities.
+func (store *Store) ListBrowserClients(ctx context.Context, after *BrowserClientID) (BrowserClientPage, error) {
+	if after != nil {
+		if err := validateBrowserID(*after); err != nil {
+			return BrowserClientPage{}, err
+		}
+	}
+	c, err := store.readerConnection(ctx)
+	if err != nil {
+		return BrowserClientPage{}, err
+	}
+	defer c.Close()
+
+	query := `SELECT id FROM browser_clients ORDER BY created_at_ms, id LIMIT ?`
+	args := []any{BrowserClientPageSize + 1}
+	if after != nil {
+		var created int64
+		if err := c.QueryRowContext(ctx, `SELECT created_at_ms FROM browser_clients WHERE id = ?`, after.Bytes()).Scan(&created); errors.Is(err, sql.ErrNoRows) {
+			return BrowserClientPage{}, ErrNotFound
+		} else if err != nil {
+			return BrowserClientPage{}, err
+		}
+		query = `SELECT id FROM browser_clients WHERE (created_at_ms > ? OR (created_at_ms = ? AND id > ?)) ORDER BY created_at_ms, id LIMIT ?`
+		args = []any{created, created, after.Bytes(), BrowserClientPageSize + 1}
+	}
+	rows, err := c.QueryContext(ctx, query, args...)
+	if err != nil {
+		return BrowserClientPage{}, err
+	}
+	defer rows.Close()
+	ids := make([]BrowserClientID, 0, BrowserClientPageSize+1)
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return BrowserClientPage{}, err
+		}
+		id, err := BrowserClientIDFromBytes(raw)
+		if err != nil {
+			return BrowserClientPage{}, fmt.Errorf("%w: invalid browser client list row", ErrCorruptState)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return BrowserClientPage{}, err
+	}
+	page := BrowserClientPage{Items: make([]BrowserClientSummary, 0, len(ids))}
+	if len(ids) > BrowserClientPageSize {
+		ids = ids[:BrowserClientPageSize]
+		last := ids[len(ids)-1]
+		page.NextAfter = &last
+	}
+	for _, id := range ids {
+		client, found, err := browserClientByID(ctx, c, id)
+		if err != nil {
+			return BrowserClientPage{}, err
+		}
+		if !found {
+			return BrowserClientPage{}, fmt.Errorf("%w: browser client disappeared during page read", ErrCorruptState)
+		}
+		page.Items = append(page.Items, BrowserClientSummary{
+			ID: client.ID, CapabilityMask: client.CapabilityMask, Revision: client.Revision,
+			CreatedAt: client.CreatedAt, UpdatedAt: client.UpdatedAt, RevokedAt: client.RevokedAt,
+		})
+	}
+	return page, nil
+}
+
+func (store *Store) BrowserClientCounts(ctx context.Context, bootID BootID, at UnixMillis) (BrowserClientCounts, error) {
+	if bootID.zero() || at.Int64() < 0 {
+		return BrowserClientCounts{}, fmt.Errorf("%w: invalid browser client count request", ErrInvalidValue)
+	}
+	c, err := store.readerConnection(ctx)
+	if err != nil {
+		return BrowserClientCounts{}, err
+	}
+	defer c.Close()
+	var result BrowserClientCounts
+	if err := c.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(CASE WHEN revoked_at_ms IS NOT NULL THEN 1 ELSE 0 END), 0), (SELECT COUNT(*) FROM browser_pairing_challenges WHERE boot_id = ? AND redeemed_at_ms IS NULL AND expires_at_ms > ?) FROM browser_clients`, bootID.Bytes(), at.Int64()).Scan(&result.Active, &result.Revoked, &result.ActiveChallenges); err != nil {
+		return BrowserClientCounts{}, err
+	}
+	if result.Revoked > result.Active {
+		return BrowserClientCounts{}, fmt.Errorf("%w: invalid browser client counts", ErrCorruptState)
+	}
+	result.Active -= result.Revoked
+	return result, nil
 }
 
 func (store *Store) AuthenticateBrowserClient(ctx context.Context, id BrowserClientID) (BrowserClientPrincipal, error) {

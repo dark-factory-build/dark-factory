@@ -28,6 +28,7 @@ const (
 	RemoteRevisionConflict    RemoteErrorCode = "revision_conflict"
 	RemoteTooLarge            RemoteErrorCode = "too_large"
 	RemoteUnavailable         RemoteErrorCode = "unavailable"
+	RemoteCleanupUnresolved   RemoteErrorCode = "cleanup_unresolved"
 	RemoteInternal            RemoteErrorCode = "internal"
 )
 
@@ -55,6 +56,8 @@ func (err *RemoteError) Error() string {
 		return "local API request exceeds a bound"
 	case RemoteUnavailable:
 		return "local API is unavailable"
+	case RemoteCleanupUnresolved:
+		return "local API completed revocation but could not prove browser cleanup"
 	case RemoteInternal:
 		return "local API failed internally"
 	default:
@@ -66,6 +69,47 @@ func (err *RemoteError) Code() RemoteErrorCode { return err.code }
 
 type HealthStatus struct {
 	Ready bool `json:"ready"`
+}
+
+// WebStatus is the bounded, non-secret operator view of the loopback browser
+// adapter. It intentionally contains no challenge, key, token or client
+// identity data.
+type WebStatus struct {
+	State            string   `json:"state"`
+	Ready            bool     `json:"ready"`
+	Address          string   `json:"address"`
+	Path             string   `json:"path"`
+	Origins          []string `json:"origins"`
+	ActiveClients    uint64   `json:"active_clients"`
+	RevokedClients   uint64   `json:"revoked_clients"`
+	ActiveChallenges uint64   `json:"active_challenges"`
+	ProtocolVersion  uint16   `json:"protocol_version"`
+}
+
+// WebLaunch contains the one-shot browser URL only inside the owner-only
+// local API response. factoryctl consumes it without printing or logging it.
+type WebLaunch struct {
+	LaunchURL   string `json:"launch_url"`
+	ExpiresAtMs uint64 `json:"expires_at_ms"`
+}
+
+type WebClient struct {
+	ID             string  `json:"id"`
+	CapabilityMask uint8   `json:"capability_mask"`
+	Revision       uint64  `json:"revision"`
+	CreatedAtMs    uint64  `json:"created_at_ms"`
+	UpdatedAtMs    uint64  `json:"updated_at_ms"`
+	RevokedAtMs    *uint64 `json:"revoked_at_ms"`
+}
+
+type WebClientPage struct {
+	Clients   []WebClient `json:"clients"`
+	NextAfter *string     `json:"next_after"`
+}
+
+type WebRevokeResult struct {
+	ID       string `json:"id"`
+	Revision uint64 `json:"revision"`
 }
 
 type MutationResult struct {
@@ -146,4 +190,9 @@ type EnqueueTaskInput struct {
 type HumanQuestionInput struct {
 	IdempotencyKey string `json:"idempotency_key"`
 	Question       string `json:"question"`
+}
+
+type WebClientRevocationInput struct {
+	ID               string `json:"id"`
+	ExpectedRevision uint64 `json:"expected_revision"`
 }

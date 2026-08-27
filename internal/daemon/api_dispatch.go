@@ -103,6 +103,57 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.proposeOutcome(ctx, call)
 	case api.CallRequestHuman:
 		return daemon.requestHuman(ctx, call)
+	case api.CallWebStatus:
+		status, err := daemon.WebStatus(ctx)
+		if err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		reply, err := api.NewWebStatusReply(status)
+		if err != nil {
+			return newErrorReply(api.RemoteInternal)
+		}
+		return reply
+	case api.CallWebOpen:
+		launch, err := daemon.OpenBrowser(ctx)
+		if err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		reply, err := api.NewWebLaunchReply(launch)
+		if err != nil {
+			return newErrorReply(api.RemoteInternal)
+		}
+		return reply
+	case api.CallWebListClients:
+		after, ok := call.WebListAfter()
+		if !ok {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+		page, err := daemon.WebListClients(ctx, after)
+		if err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		reply, err := api.NewWebClientsReply(page)
+		if err != nil {
+			return newErrorReply(api.RemoteInternal)
+		}
+		return reply
+	case api.CallWebRevokeClient:
+		input, ok := call.WebClientRevocationInput()
+		if !ok {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+		result, err := daemon.WebRevokeClient(ctx, input)
+		if err != nil {
+			if errors.Is(err, ErrBrowserClientCleanup) {
+				return newErrorReply(api.RemoteCleanupUnresolved)
+			}
+			return newErrorReply(remoteErrorCode(err))
+		}
+		reply, err := api.NewWebRevokeReply(result)
+		if err != nil {
+			return newErrorReply(api.RemoteInternal)
+		}
+		return reply
 	default:
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
