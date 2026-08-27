@@ -7,10 +7,22 @@ import (
 	"os"
 
 	"github.com/dark-factory-build/dark-factory/internal/changeworker"
+	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 type Runtime struct{}
+
+type RecoveredRuntime struct{}
+
+type RecoveredRuntimeEvidence struct {
+	AttemptToken bool
+	WorkerConfig bool
+	Terminal     *runner.TerminalRecord
+}
+
+func (RecoveredRuntimeEvidence) String() string   { return "recovered runtime evidence (private)" }
+func (RecoveredRuntimeEvidence) GoString() string { return "daemon.RecoveredRuntimeEvidence{private}" }
 
 type RuntimeBinding struct{}
 
@@ -37,7 +49,17 @@ func CreateRuntime(*RuntimeParent, string) (*Runtime, error) {
 	return nil, errUnsupported
 }
 func AdoptRuntime(*RuntimeParent, string) (*Runtime, error) { return nil, errUnsupported }
-func (*Runtime) Binding() (*RuntimeBinding, error)          { return nil, errUnsupported }
+func OpenRecoveredRuntime(context.Context, *RuntimeParent, string, runner.FileIdentity) (*RecoveredRuntime, error) {
+	return nil, errUnsupported
+}
+func (*RecoveredRuntime) InspectEvidence(context.Context, kernel.AttemptDigest, *changeworker.Config, bool) (RecoveredRuntimeEvidence, error) {
+	return RecoveredRuntimeEvidence{}, errUnsupported
+}
+func (*RecoveredRuntime) AcknowledgeTerminal(*runner.TerminalRecord, kernel.Run, kernel.Resource, kernel.Resource, kernel.Resource) error {
+	return errUnsupported
+}
+func (*RecoveredRuntime) Close() error             { return nil }
+func (*Runtime) Binding() (*RuntimeBinding, error) { return nil, errUnsupported }
 func (*RuntimeBinding) Values() (string, runner.FileIdentity, error) {
 	return "", runner.FileIdentity{}, errUnsupported
 }
