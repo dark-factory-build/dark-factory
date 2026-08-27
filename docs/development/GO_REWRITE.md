@@ -4483,8 +4483,10 @@ Public UI lifecycle and HumanRequest candidate on 2026-08-27:
 - The MIT `@dark-factory/ui` package now owns one `FactoryApp` effect and one
   DOM-free concrete controller. Pairing is consumed and scrubbed before client
   construction; the exact loopback URL supplies Host while the actual page
-  supplies Origin. The controller owns connect/retry/close, canonical state,
-  finite errors and generation fencing. Server rendering imports and renders
+  supplies Origin. FactoryApp/controller own connect/close lifecycle and
+  canonical state; BrowserClient alone owns automatic reconnect, and the UI
+  exposes no pairing-proof replay or manual retry action. The controller also
+  owns finite errors and generation fencing. Server rendering imports and renders
   without reading `window`, history, IndexedDB or WebSocket.
 - `FactoryConsole` remains controlled and presentational. It may select at most
   one exact public HumanRequest revision, while the controller alone retains
