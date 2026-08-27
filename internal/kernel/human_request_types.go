@@ -70,6 +70,7 @@ type HumanRequestResolution uint8
 const (
 	HumanRequestResolutionReply HumanRequestResolution = iota + 1
 	HumanRequestResolutionStale
+	HumanRequestResolutionCancelRun
 )
 
 func (resolution HumanRequestResolution) String() string {
@@ -78,13 +79,15 @@ func (resolution HumanRequestResolution) String() string {
 		return "reply"
 	case HumanRequestResolutionStale:
 		return "stale"
+	case HumanRequestResolutionCancelRun:
+		return "action_cancel_run"
 	default:
 		return ""
 	}
 }
 
 func parseHumanRequestResolution(value string) (HumanRequestResolution, error) {
-	for resolution := HumanRequestResolutionReply; resolution <= HumanRequestResolutionStale; resolution++ {
+	for resolution := HumanRequestResolutionReply; resolution <= HumanRequestResolutionCancelRun; resolution++ {
 		if resolution.String() == value {
 			return resolution, nil
 		}

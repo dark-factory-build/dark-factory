@@ -649,6 +649,10 @@ func (store *Store) CancelRun(ctx context.Context, runID RunID, expected Revisio
 }
 
 func (store *Store) enterFinalizing(ctx context.Context, tx *writeTx, run Run, expected Revision, proposal Proposal, at UnixMillis) (Run, error) {
+	return store.enterFinalizingForHumanAction(ctx, tx, run, expected, proposal, at, nil)
+}
+
+func (store *Store) enterFinalizingForHumanAction(ctx context.Context, tx *writeTx, run Run, expected Revision, proposal Proposal, at UnixMillis, actionRequest *HumanRequestID) (Run, error) {
 	if run.Revision != expected || at.Int64() < run.UpdatedAt.Int64() {
 		return Run{}, tx.Rollback(ErrRevisionConflict)
 	}
@@ -684,7 +688,7 @@ func (store *Store) enterFinalizing(ctx context.Context, tx *writeTx, run Run, e
 		}
 	}
 	pending := []pendingInvalidation{{kind: EntityRun, id: run.ID.Bytes(), revision: expected.Int64() + 1}}
-	requestInvalidations, err := transitionHumanRequestsForRun(ctx, tx.connection, run.ID, at, false)
+	requestInvalidations, err := transitionHumanRequestsForRun(ctx, tx.connection, run.ID, at, false, actionRequest)
 	if err != nil {
 		return Run{}, tx.Rollback(err)
 	}

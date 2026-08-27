@@ -100,7 +100,7 @@ func validateHumanRequestState(request HumanRequest, reasonValid bool) error {
 			return fmt.Errorf("%w: invalid pending human delivery", ErrCorruptState)
 		}
 	case HumanRequestResolved:
-		if !withDelivery || request.Resolution == nil || *request.Resolution != HumanRequestResolutionReply || request.ClosedAt == nil || request.ClosedAt.Int64() != request.UpdatedAt.Int64() {
+		if request.Resolution == nil || (*request.Resolution != HumanRequestResolutionReply && *request.Resolution != HumanRequestResolutionCancelRun) || *request.Resolution == HumanRequestResolutionReply && !withDelivery || *request.Resolution == HumanRequestResolutionCancelRun && withDelivery || request.ClosedAt == nil || request.ClosedAt.Int64() != request.UpdatedAt.Int64() {
 			return fmt.Errorf("%w: invalid resolved human request", ErrCorruptState)
 		}
 	case HumanRequestStale:
@@ -212,6 +212,67 @@ func (store *Store) HumanRequest(ctx context.Context, id HumanRequestID) (HumanR
 	}
 	defer tx.Close()
 	return humanRequestProjectionByID(ctx, tx.connection, id)
+}
+
+// CancelHumanRequestRun is the sole daemon-authorized HumanRequest action.
+// Client capability, exact request/run revisions and the finalizing/revocation
+// transition are one SQLite transaction; callers cannot split or replay it.
+func (store *Store) CancelHumanRequestRun(ctx context.Context, clientID BrowserClientID, requestID HumanRequestID, runID RunID, expectedRequest, expectedRun Revision, at UnixMillis) (Run, HumanRequest, error) {
+	if requestID.zero() || runID.zero() || expectedRequest.Int64() < 1 || expectedRun.Int64() < 1 {
+		return Run{}, HumanRequest{}, fmt.Errorf("%w: invalid human request action", ErrInvalidValue)
+	}
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return Run{}, HumanRequest{}, err
+	}
+	defer tx.Close()
+	client, found, err := browserClientByID(ctx, tx.connection, clientID)
+	if err != nil {
+		return Run{}, HumanRequest{}, tx.Rollback(err)
+	}
+	if !found || client.RevokedAt != nil || !client.CapabilityMask.Has(BrowserCapabilityHumanActions) {
+		return Run{}, HumanRequest{}, tx.Rollback(ErrUnauthorized)
+	}
+	request, found, err := humanRequestByID(ctx, tx.connection, requestID)
+	if err != nil {
+		return Run{}, HumanRequest{}, tx.Rollback(err)
+	}
+	if !found {
+		return Run{}, HumanRequest{}, tx.Rollback(ErrNotFound)
+	}
+	run, found, err := runByID(ctx, tx.connection, runID)
+	if err != nil {
+		return Run{}, HumanRequest{}, tx.Rollback(err)
+	}
+	if !found {
+		return Run{}, HumanRequest{}, tx.Rollback(ErrNotFound)
+	}
+	if request.RunID != run.ID || request.Status != HumanRequestOpen || request.Revision != expectedRequest || run.Phase != RunRunning || run.Revision != expectedRun || at.Int64() < request.UpdatedAt.Int64() || at.Int64() < run.UpdatedAt.Int64() {
+		return Run{}, HumanRequest{}, tx.Rollback(ErrRevisionConflict)
+	}
+	proposal, err := NewCancelledProposal("cancelled by human request action")
+	if err != nil {
+		return Run{}, HumanRequest{}, tx.Rollback(err)
+	}
+	updatedRun, err := store.enterFinalizingForHumanAction(ctx, tx, run, expectedRun, proposal, at, &request.ID)
+	if err != nil {
+		return Run{}, HumanRequest{}, err
+	}
+	// enterFinalizingForHumanAction commits the shared transaction. Construct
+	// the exact post-transition request from the validated source row rather
+	// than opening a second write or read transaction before its close.
+	updatedRequest := request
+	updatedRequest.Status = HumanRequestResolved
+	resolution := HumanRequestResolutionCancelRun
+	updatedRequest.Resolution = &resolution
+	closed := at
+	updatedRequest.ClosedAt = &closed
+	updatedRequest.Revision, err = NewRevision(request.Revision.Int64() + 1)
+	if err != nil {
+		return Run{}, HumanRequest{}, err
+	}
+	updatedRequest.UpdatedAt = at
+	return updatedRun, updatedRequest, nil
 }
 
 func humanRequestProjections(ctx context.Context, connection *sql.Conn, limit int) ([]HumanRequestProjection, error) {
@@ -514,7 +575,7 @@ func (store *Store) RecoverHumanDeliveries(ctx context.Context, at UnixMillis) (
 // transitionHumanRequestsForRun is called from the run transition transaction.
 // It never delivers or removes a request: it only makes the loss of its exact
 // running origin durable before the run transition becomes observable.
-func transitionHumanRequestsForRun(ctx context.Context, connection *sql.Conn, runID RunID, at UnixMillis, terminal bool) ([]pendingInvalidation, error) {
+func transitionHumanRequestsForRun(ctx context.Context, connection *sql.Conn, runID RunID, at UnixMillis, terminal bool, actionRequest ...*HumanRequestID) ([]pendingInvalidation, error) {
 	rows, err := connection.QueryContext(ctx, `SELECT id, status, revision, updated_at_ms FROM human_requests WHERE run_id = ? AND status IN ('open', 'delivering', 'delivery_unknown') ORDER BY id`, runID.Bytes())
 	if err != nil {
 		return nil, err
@@ -554,8 +615,19 @@ func transitionHumanRequestsForRun(ctx context.Context, connection *sql.Conn, ru
 		}
 		target := item.status
 		resolution, closed := "", any(nil)
+		isAction := len(actionRequest) != 0 && actionRequest[0] != nil && item.id == *actionRequest[0]
+		if isAction {
+			if item.status != HumanRequestOpen || terminal {
+				return nil, ErrRevisionConflict
+			}
+			target = HumanRequestResolved
+			resolution, closed = HumanRequestResolutionCancelRun.String(), at.Int64()
+		}
 		switch item.status {
 		case HumanRequestOpen:
+			if isAction {
+				break
+			}
 			target = HumanRequestStale
 			resolution, closed = HumanRequestResolutionStale.String(), at.Int64()
 		case HumanRequestDelivering:
@@ -575,7 +647,9 @@ func transitionHumanRequestsForRun(ctx context.Context, connection *sql.Conn, ru
 			continue
 		}
 		var result sql.Result
-		if target == HumanRequestStale {
+		if target == HumanRequestResolved {
+			result, err = connection.ExecContext(ctx, `UPDATE human_requests SET status = 'resolved', resolution_kind = ?, closed_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND status = 'open' AND revision = ?`, resolution, closed, at.Int64(), item.id.Bytes(), item.revision.Int64())
+		} else if target == HumanRequestStale {
 			result, err = connection.ExecContext(ctx, `UPDATE human_requests SET status = 'stale', resolution_kind = ?, closed_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND status = ? AND revision = ?`, resolution, closed, at.Int64(), item.id.Bytes(), item.status.String(), item.revision.Int64())
 		} else {
 			result, err = connection.ExecContext(ctx, `UPDATE human_requests SET status = 'delivery_unknown', revision = revision + 1, updated_at_ms = ? WHERE id = ? AND status = 'delivering' AND revision = ?`, at.Int64(), item.id.Bytes(), item.revision.Int64())

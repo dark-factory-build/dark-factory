@@ -102,6 +102,27 @@ func TestHumanQuestionCreationProjectionDetailAndIdempotency(t *testing.T) {
 	}
 }
 
+func TestCancelHumanRequestRunAtomicallyResolvesRequestAndRevokesRun(t *testing.T) {
+	ctx := context.Background()
+	store, run, _ := runningOrchestratorRun(t)
+	defer store.Close()
+	client := humanQuestionClient(t, store, 240, BrowserCapabilityObserve|BrowserCapabilityHumanActions)
+	request, err := store.CreateHumanQuestionForAttempt(ctx, run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(240), QuestionText: "cancel me"}, mustTime(t, 400))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelled, resolved, err := store.CancelHumanRequestRun(ctx, client.ID, request.ID, run.ID, request.Revision, run.Revision, mustTime(t, 401))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cancelled.Phase != RunFinalizing || cancelled.Proposal == nil || cancelled.Proposal.kind != OutcomeCancelled || resolved.Status != HumanRequestResolved || resolved.Resolution == nil || *resolved.Resolution != HumanRequestResolutionCancelRun {
+		t.Fatalf("cancel result = run=%+v request=%+v", cancelled, resolved)
+	}
+	if _, _, err := store.CancelHumanRequestRun(ctx, client.ID, request.ID, run.ID, request.Revision, run.Revision, mustTime(t, 402)); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("duplicate action = %v", err)
+	}
+}
+
 func TestHumanQuestionDeliveryRecoveryAndAckAreAtMostOnce(t *testing.T) {
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
