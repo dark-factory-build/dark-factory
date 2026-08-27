@@ -928,16 +928,16 @@ function notify<T extends readonly unknown[]>(callback: ((...args: T) => void) |
 export function createBrowserClient(options: BrowserSessionOptions): BrowserClient { return new BrowserClient(options); }
 
 /** Read-and-clear a one-shot challenge fragment before constructing a session. */
-export function consumePairingChallenge(location: Pick<Location, "hash" | "pathname" | "search">, history?: Pick<History, "replaceState">): string | null {
-  const hash = location.hash.startsWith("#") ? location.hash.slice(1) : location.hash;
-  let pairingKey = false;
-  new URLSearchParams(hash).forEach((_value, key) => {
-    pairingKey ||= key.toLowerCase() === "df_pair" || key.toLowerCase() === "challenge";
-  });
-  if (!pairingKey) return null;
+export function consumePairingChallenge(location: Pick<Location, "hash" | "pathname" | "search">, history?: Pick<History, "replaceState" | "state">): string | null {
+  const hash = location.hash;
+  const exact = /^#df_pair=([0-9a-f]{64})$/.exec(hash);
+  let decoded = hash;
+  try { decoded = decodeURIComponent(hash); } catch { /* malformed pairing attempts still match their raw key */ }
+  const pairingKey = /(?:^|[#&])(?:df_pair|challenge)=/i;
+  if (!pairingKey.test(hash) && !pairingKey.test(decoded)) return null;
+  const browserHistory = history ?? globalThis.history;
   const target = `${location.pathname}${location.search}`;
-  (history ?? globalThis.history).replaceState(null, "", target);
-  const exact = /^df_pair=([0-9a-f]{64})$/.exec(hash);
+  browserHistory.replaceState(browserHistory.state, "", target);
   const value = exact?.[1];
   return value === undefined || /^0+$/.test(value) ? null : value;
 }

@@ -653,10 +653,16 @@ test("successful pairing consumes challenge state and reconnects through AUTH af
 
 test("pairing challenge helper consumes the exact factoryctl fragment and clears it first", () => {
   const location = { hash: `#df_pair=${challenge}`, pathname: "/", search: "?preview=1" };
-  let replaced;
-  const value = consumePairingChallenge(location, { replaceState: (_state, _title, url) => { replaced = url; } });
+  const state = { route: "factory" };
+  let replacedState;
+  let replacedURL;
+  const value = consumePairingChallenge(location, {
+    state,
+    replaceState: (nextState, _title, url) => { replacedState = nextState; replacedURL = url; },
+  });
   assert.equal(value, challenge);
-  assert.equal(replaced, "/?preview=1");
+  assert.equal(replacedState, state);
+  assert.equal(replacedURL, "/?preview=1");
 });
 
 test("pairing challenge helper scrubs and refuses every noncanonical pairing fragment", () => {
@@ -673,13 +679,16 @@ test("pairing challenge helper scrubs and refuses every noncanonical pairing fra
     `#df_pair=${challenge.slice(0, 62)}%31%31`,
     `#DF_PAIR=${challenge}`,
     `#%64f_pair=${challenge}`,
+    `#df_pair%3D${challenge}`,
+    `##df_pair=${challenge}`,
+    `df_pair=${challenge}`,
     `#challenge=${challenge}`,
   ];
   for (const hash of rejected) {
     let replaced;
     const value = consumePairingChallenge(
       { hash, pathname: "/factory", search: "?preview=1" },
-      { replaceState: (_state, _title, url) => { replaced = url; } },
+      { state: null, replaceState: (_state, _title, url) => { replaced = url; } },
     );
     assert.equal(value, null, hash);
     assert.equal(replaced, "/factory?preview=1", hash);
@@ -691,7 +700,7 @@ test("pairing challenge helper never returns authority if fragment scrubbing fai
   assert.throws(
     () => consumePairingChallenge(
       { hash: `#df_pair=${challenge}`, pathname: "/", search: "" },
-      { replaceState: () => { throw scrubFailure; } },
+      { state: null, replaceState: () => { throw scrubFailure; } },
     ),
     scrubFailure,
   );
@@ -702,7 +711,7 @@ test("ordinary anchors are neither pairing authority nor scrubbed", () => {
     let replaced = false;
     const value = consumePairingChallenge(
       { hash, pathname: "/", search: "" },
-      { replaceState: () => { replaced = true; } },
+      { state: null, replaceState: () => { replaced = true; } },
     );
     assert.equal(value, null, hash);
     assert.equal(replaced, false, hash);
