@@ -135,7 +135,7 @@ export class BrowserSession {
   #resolveConnect: (() => void) | undefined;
   #rejectConnect: ((error: unknown) => void) | undefined;
   #terminalHandles = new Set<TerminalHandle>();
-  #human = new HumanRequestClient((id, payload) => this.#send(payload), (prefix) => this.#nextID(prefix));
+  #human = new HumanRequestClient((id, payload) => this.#send(payload), (prefix) => this.#nextID(prefix), () => this.#fail(new SessionError("connection")));
 
   constructor(options: BrowserSessionOptions) {
     this.#options = { ...options, keyStore: options.keyStore ?? createIndexedDBKeyStore() };

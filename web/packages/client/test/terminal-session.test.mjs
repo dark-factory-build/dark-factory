@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  HumanRequestClient,
+  MAX_SQLITE_INTEGER,
   TerminalHandle,
   decodeClientControl,
   decodeServerControl,
@@ -10,6 +12,7 @@ import {
   encodeTerminalLeaseResult,
   encodeTerminalResized,
   encodeTerminalDetached,
+  encodeHumanRequestReplyResult,
   encodeTerminalOutput,
 } from "../dist/src/index.js";
 
@@ -193,16 +196,16 @@ test("partial and uncertain input consume their sequence and require a fresh can
   assert.throws(() => terminal.sendInput(new Uint8Array([9])), /terminal lease required/);
 
   const fresh = terminal.acquireLease();
-  terminal.receive(control(encodeTerminalLeaseResult(id4, { operation: "acquired", run_id: runId, session_id: sessionId, generation: 8n, expires_at_ms: 200n, last_input_sequence: 0n, run_revision: 1n, session_revision: 1n })));
+  terminal.receive(control(encodeTerminalLeaseResult(id4, { operation: "acquired", run_id: runId, session_id: sessionId, generation: 9n, expires_at_ms: 200n, last_input_sequence: 0n, run_revision: 1n, session_revision: 1n })));
   await fresh;
   assert.equal(terminal.nextInputSequence, 1n);
   const uncertain = terminal.sendInput(new Uint8Array([4]));
-  terminal.receive(control(encodeTerminalInputResult(attachId, { session_id: sessionId, generation: 8n, sequence: 1n, status: "uncertain", accepted_bytes: 0n })));
+  terminal.receive(control(encodeTerminalInputResult(attachId, { session_id: sessionId, generation: 9n, sequence: 1n, status: "uncertain", accepted_bytes: 0n })));
   await uncertain;
   assert.equal(terminal.nextInputSequence, 2n);
   assert.equal(terminal.lease, undefined);
   const recovered = terminal.acquireLease();
-  terminal.receive(control(encodeTerminalLeaseResult(id6, { operation: "acquired", run_id: runId, session_id: sessionId, generation: 9n, expires_at_ms: 300n, last_input_sequence: 0n, run_revision: 1n, session_revision: 1n })));
+  terminal.receive(control(encodeTerminalLeaseResult(id6, { operation: "acquired", run_id: runId, session_id: sessionId, generation: 11n, expires_at_ms: 300n, last_input_sequence: 0n, run_revision: 1n, session_revision: 1n })));
   await recovered;
   assert.equal(terminal.nextInputSequence, 1n);
   assert.equal(decodeTerminalInput(sent.filter(({ payload }) => payload instanceof Uint8Array).map(({ payload }) => payload).at(-1)).sequence, 1n);
@@ -321,4 +324,212 @@ test("resize result must match the requested dimensions exactly", async () => {
   terminal.close();
   await assert.rejects(resize, /closed/);
   assert.equal(terminal.lease, undefined);
+});
+
+test("generation floor survives release and rejects rewinds", async () => {
+  const sent = [];
+  const terminal = await attachedWithLease(sent);
+  const release = terminal.releaseLease();
+  terminal.receive(control(encodeTerminalLeaseResult(inputId, { operation: "released", run_id: runId, session_id: sessionId, generation: 8n, last_input_sequence: 0n, run_revision: 1n, session_revision: 1n })));
+  await release;
+  const rewind = terminal.acquireLease();
+  assert.throws(() => terminal.receive(control(encodeTerminalLeaseResult(id4, { operation: "acquired", run_id: runId, session_id: sessionId, generation: 1n, expires_at_ms: 200n, last_input_sequence: 0n, run_revision: 1n, session_revision: 1n }))), /malformed/);
+  terminal.close();
+  await assert.rejects(rewind, /closed/);
+
+  const fresh = await attachedOnly([]);
+  const acquire = fresh.acquireLease();
+  fresh.receive(control(encodeTerminalLeaseResult(leaseId, { operation: "acquired", run_id: runId, session_id: sessionId, generation: 9n, expires_at_ms: 200n, last_input_sequence: 0n, run_revision: 1n, session_revision: 1n })));
+  assert.equal((await acquire).generation, 9n);
+});
+
+test("reset retires state before the observer can reenter", async () => {
+  const sent = [];
+  let terminal;
+  let resets = 0;
+  let callbackClosed = false;
+  let callbackSent = -1;
+  terminal = handle(sent, { onReset: () => {
+    resets += 1;
+    callbackClosed = terminal.closed;
+    callbackSent = sent.length;
+    try { terminal.attach(); } catch { /* closed handles reject re-entry */ }
+  } });
+  const attached = terminal.attach();
+  assert.equal(terminal.receiveReset(attachId, { session_id: sessionId, floor: 2n, head: 3n }), true);
+  assert.deepEqual(await attached, { sessionId, floor: 2n, head: 3n, kind: "reset", freshAttachRequired: true });
+  assert.equal(resets, 1);
+  assert.equal(callbackClosed, true);
+  assert.equal(callbackSent, 1);
+  assert.equal(terminal.receiveReset(attachId, { session_id: sessionId, floor: 2n, head: 3n }), true);
+  assert.equal(resets, 1);
+});
+
+test("public lease and attachment snapshots are frozen copies", async () => {
+  const terminal = await attachedWithLease([]);
+  const lease = terminal.lease;
+  assert.equal(Object.isFrozen(lease), true);
+  assert.throws(() => { lease.generation = 99n; }, TypeError);
+  assert.equal(terminal.lease?.generation, 7n);
+  const attached = terminal.attachedState;
+  assert.equal(Object.isFrozen(attached), true);
+  assert.throws(() => { attached.head = 99n; }, TypeError);
+  assert.equal(terminal.attachedState?.head, 0n);
+  terminal.close();
+});
+
+test("detach is mutually exclusive with pending input and resize", async () => {
+  const sent = [];
+  const terminal = await attachedWithLease(sent);
+  const input = terminal.sendInput(new Uint8Array([1]));
+  await assert.rejects(terminal.detach(), /detach pending/);
+  assert.equal(sent.filter(({ payload }) => typeof payload === "string" && decodeClientControl(payload).type === "TERMINAL_DETACH").length, 0);
+  terminal.receive(control(encodeTerminalInputResult(attachId, { session_id: sessionId, generation: 7n, sequence: 1n, status: "accepted", accepted_bytes: 1n })));
+  await input;
+  const detach = terminal.detach();
+  terminal.receive(control(encodeTerminalDetached(id4, { session_id: sessionId })));
+  await detach;
+
+  const secondSent = [];
+  const second = await attachedWithLease(secondSent);
+  const resize = second.resize(24, 80);
+  await assert.rejects(second.detach(), /detach pending/);
+  assert.equal(secondSent.filter(({ payload }) => typeof payload === "string" && decodeClientControl(payload).type === "TERMINAL_DETACH").length, 0);
+  second.close();
+  await assert.rejects(resize, /closed/);
+});
+
+test("closed handles consume only exact retired response duplicates", async () => {
+  const terminal = await attachedOnly([]);
+  const acquire = terminal.acquireLease();
+  terminal.close();
+  await assert.rejects(acquire, /closed/);
+  assert.equal(terminal.receive(control(encodeTerminalAttached(attachId, { session_id: sessionId, floor: 0n, head: 0n, acknowledged_sequence: 0n, max_unacked_bytes: 65536n }))), true);
+  assert.equal(terminal.receive(control(encodeTerminalLeaseResult(leaseId, { operation: "acquired", run_id: runId, session_id: sessionId, generation: 7n, expires_at_ms: 100n, last_input_sequence: 0n, run_revision: 1n, session_revision: 1n }))), true);
+  assert.equal(terminal.receive(control(encodeTerminalLeaseResult(id4, { operation: "acquired", run_id: runId, session_id: sessionId, generation: 7n, expires_at_ms: 100n, last_input_sequence: 0n, run_revision: 1n, session_revision: 1n }))), false);
+  assert.equal(terminal.receiveError(leaseId, new Error("late")), false);
+  assert.equal(await terminal.receiveBinary({ direction: "output", sessionId: new Uint8Array(16).fill(0x22), sequence: 0n, leaseGeneration: 0n, payload: new Uint8Array([1]) }), false);
+  assert.equal(terminal.receiveEOF(attachId, { session_id: sessionId }), false);
+  assert.equal(terminal.receiveReset(attachId, { session_id: sessionId, floor: 0n, head: 0n }), false);
+});
+
+test("rejected input does not consume chronology and can retry exactly once", async () => {
+  const sent = [];
+  const terminal = await attachedWithLease(sent);
+  const rejected = terminal.sendInput(new Uint8Array([1, 2]));
+  terminal.receive(control(encodeTerminalInputResult(attachId, { session_id: sessionId, generation: 7n, sequence: 1n, status: "rejected", accepted_bytes: 0n })));
+  assert.equal((await rejected).status, "rejected");
+  assert.equal(terminal.nextInputSequence, 1n);
+  assert.equal(terminal.lease?.lastInputSequence, 0n);
+  const retry = terminal.sendInput(new Uint8Array([3]));
+  const inputFrames = sent.filter(({ payload }) => payload instanceof Uint8Array);
+  assert.ok(inputFrames.length > 0, sent.map(({ payload }) => payload?.constructor?.name));
+  assert.equal(decodeTerminalInput(inputFrames.at(-1).payload).sequence, 1n);
+  terminal.receive(control(encodeTerminalInputResult(attachId, { session_id: sessionId, generation: 7n, sequence: 1n, status: "accepted", accepted_bytes: 1n })));
+  await retry;
+  assert.equal(terminal.nextInputSequence, 2n);
+});
+
+test("every terminal control send failure closes and prevents retry", async () => {
+  const failingTerminal = async (type, setup) => {
+    const sent = [];
+    const send = (id, payload) => {
+      sent.push({ id, payload });
+      if (typeof payload === "string" && decodeClientControl(payload).type === type) throw new Error("private send detail");
+    };
+    const terminal = await setup(sent, {}, send);
+    return { terminal, sent };
+  };
+
+  const acquire = await failingTerminal("TERMINAL_LEASE_ACQUIRE", attachedOnly);
+  await assert.rejects(acquire.terminal.acquireLease(), (error) => error.code === "connection");
+  assert.equal(acquire.terminal.closed, true);
+  assert.throws(() => acquire.terminal.attach(), /closed/);
+
+  const renew = await failingTerminal("TERMINAL_LEASE_RENEW", attachedWithLease);
+  await assert.rejects(renew.terminal.renewLease(), (error) => error.code === "connection");
+  assert.equal(renew.terminal.closed, true);
+
+  const release = await failingTerminal("TERMINAL_LEASE_RELEASE", attachedWithLease);
+  await assert.rejects(release.terminal.releaseLease(), (error) => error.code === "connection");
+  assert.equal(release.terminal.closed, true);
+
+  const resize = await failingTerminal("TERMINAL_RESIZE", attachedWithLease);
+  await assert.rejects(resize.terminal.resize(24, 80), (error) => error.code === "connection");
+  assert.equal(resize.terminal.closed, true);
+
+  const detach = await failingTerminal("TERMINAL_DETACH", attachedWithLease);
+  await assert.rejects(detach.terminal.detach(), (error) => error.code === "connection");
+  assert.equal(detach.terminal.closed, true);
+});
+
+test("oversized HumanRequest can be retried and settled requests are replayable by revision", async () => {
+  const sent = [];
+  let number = 100;
+  const client = new HumanRequestClient((id, payload) => sent.push({ id, payload }), () => (number++).toString(16).padStart(32, "0"));
+  const request = { runId, requestId: "aa".repeat(16), expectedRevision: 1n, reply: "x".repeat(8193) };
+  await assert.rejects(client.reply(request), /oversized|malformed/);
+  const valid = { ...request, reply: "ok" };
+  const pending = client.reply(valid);
+  assert.equal(sent.length, 1);
+  await assert.rejects(client.reply(valid), /human request pending/);
+  const firstID = sent[0].id;
+  client.receive(control(encodeHumanRequestReplyResult(firstID, { request_id: valid.requestId, revision: 2n, status: "resolved" })));
+  await pending;
+  const replay = client.reply(valid);
+  assert.equal(sent.length, 2);
+  const secondID = sent[1].id;
+  client.receive(control(encodeHumanRequestReplyResult(secondID, { request_id: valid.requestId, revision: 3n, status: "delivery_unknown" })));
+  assert.equal((await replay).status, "delivery_unknown");
+  client.close();
+});
+
+test("HumanRequest pending capacity is bounded and settlement frees a slot", async () => {
+  const sent = [];
+  let number = 200;
+  const client = new HumanRequestClient((id, payload) => sent.push({ id, payload }), () => (number++).toString(16).padStart(32, "0"));
+  const requests = Array.from({ length: 33 }, (_, index) => ({ runId, requestId: (index + 1).toString(16).padStart(32, "0"), expectedRevision: 1n, reply: "ok" }));
+  const pending = requests.slice(0, 32).map((request) => client.reply(request));
+  assert.equal(sent.length, 32);
+  await assert.rejects(client.reply(requests[32]), /capacity/);
+  const firstID = sent[0].id;
+  client.receive(control(encodeHumanRequestReplyResult(firstID, { request_id: requests[0].requestId, revision: 2n, status: "resolved" })));
+  await pending[0];
+  const final = client.reply(requests[32]);
+  assert.equal(sent.length, 33);
+  const finalID = sent[32].id;
+  client.receive(control(encodeHumanRequestReplyResult(finalID, { request_id: requests[32].requestId, revision: 2n, status: "resolved" })));
+  await final;
+  client.close();
+  await Promise.allSettled(pending.slice(1));
+});
+
+test("async observation callback rejection is isolated from terminal authority", async () => {
+  const terminal = await attachedOnly([], {
+    onEOF: async () => { throw new Error("EOF detail"); },
+    onExit: async () => { throw new Error("exit detail"); },
+  });
+  assert.equal(terminal.receiveEOF(attachId, { session_id: sessionId }), true);
+  assert.equal(terminal.receiveExit(attachId, { sessionId, exitCode: 0, exitSignal: 0, aborted: false }), true);
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(terminal.closed, false);
+  const reset = handle([], { onReset: async () => { throw new Error("reset detail"); } });
+  const attached = reset.attach();
+  assert.equal(reset.receiveReset(attachId, { session_id: sessionId, floor: 0n, head: 0n }), true);
+  await attached;
+  await Promise.resolve();
+  assert.equal(reset.closed, true);
+});
+
+test("generation exhaustion rejects without emitting an overflow generation", async () => {
+  const sent = [];
+  const terminal = await attachedOnly(sent);
+  const acquire = terminal.acquireLease();
+  terminal.receive(control(encodeTerminalLeaseResult(leaseId, { operation: "acquired", run_id: runId, session_id: sessionId, generation: MAX_SQLITE_INTEGER, expires_at_ms: 100n, last_input_sequence: 0n, run_revision: 1n, session_revision: 1n })));
+  assert.equal((await acquire).generation, MAX_SQLITE_INTEGER);
+  const before = sent.length;
+  await assert.rejects(terminal.releaseLease(), /generation exhausted/);
+  assert.equal(sent.length, before);
+  terminal.close();
 });

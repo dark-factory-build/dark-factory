@@ -16,7 +16,7 @@ import {
   type TerminalServerControlFrame,
 } from "./control.js";
 import { ProtocolError } from "./errors.js";
-import { MAX_SQLITE_INTEGER, MAX_TERMINAL_COLS, MAX_TERMINAL_ROWS } from "./manifest.js";
+import { MAX_ARRAY_ITEMS, MAX_SQLITE_INTEGER, MAX_TERMINAL_COLS, MAX_TERMINAL_PAYLOAD, MAX_TERMINAL_ROWS } from "./manifest.js";
 import { decodeTerminalOutput, encodeTerminalInput, type TerminalFrame } from "./terminal.js";
 
 export type TerminalOutput = {
@@ -24,27 +24,28 @@ export type TerminalOutput = {
   payload: Uint8Array;
 };
 
-export type TerminalAttached = {
+export type TerminalAttached = Readonly<{
   sessionId: string;
   floor: bigint;
   head: bigint;
   acknowledgedSequence: bigint;
   maxUnackedBytes: bigint;
-};
+}>;
 export type TerminalAttachReset = TerminalReset & { kind: "reset"; freshAttachRequired: true };
 export type TerminalAttachOutcome = TerminalAttached | TerminalAttachReset;
 
-export type TerminalLease = {
+export type TerminalLease = Readonly<{
   generation: bigint;
   expiresAtMs: bigint;
   lastInputSequence: bigint;
   runRevision: bigint;
   sessionRevision: bigint;
-};
+}>;
+export type TerminalLeaseResult = Readonly<TerminalLeaseResultBody>;
 
 export type TerminalInputResult = TerminalInputResultBody;
 export type TerminalExit = { sessionId: string; exitCode: number; exitSignal: number; aborted: boolean };
-export type TerminalReset = { sessionId: string; floor: bigint; head: bigint };
+export type TerminalReset = Readonly<{ sessionId: string; floor: bigint; head: bigint }>;
 
 export type TerminalHandleOptions = {
   runId: string;
@@ -53,9 +54,9 @@ export type TerminalHandleOptions = {
   expectedSessionRevision: bigint;
   afterSequence?: bigint;
   onOutput?: (output: TerminalOutput) => void | Promise<void>;
-  onEOF?: (event: { sessionId: string }) => void;
-  onExit?: (event: TerminalExit) => void;
-  onReset?: (event: TerminalReset) => void;
+  onEOF?: (event: { sessionId: string }) => void | Promise<void>;
+  onExit?: (event: TerminalExit) => void | Promise<void>;
+  onReset?: (event: TerminalReset) => void | Promise<void>;
   onClose?: (error?: SessionErrorLike) => void;
 };
 
@@ -89,6 +90,15 @@ type Pending = {
   cols?: number;
 };
 
+type RetiredResponse = {
+  id: string;
+  type: "TERMINAL_ATTACHED" | "TERMINAL_LEASE_RESULT" | "TERMINAL_RESIZED" | "TERMINAL_DETACHED" | "TERMINAL_INPUT_RESULT" | "TERMINAL_RESET";
+  generation?: bigint;
+  sequence?: bigint;
+};
+
+const MAX_RETIRED_RESPONSES = 8;
+
 /**
  * The sole owner of one browser terminal attachment. A handle is bound to
  * one socket generation and is intentionally not reconnectable: callers
@@ -103,6 +113,7 @@ export class TerminalHandle {
   readonly #nextID: NextID;
   readonly #options: TerminalHandleOptions;
   readonly #pending = new Map<string, Pending>();
+  readonly #retired: RetiredResponse[] = [];
   #attached = false;
   #closed = false;
   #attachedState: TerminalAttached | undefined;
@@ -113,7 +124,8 @@ export class TerminalHandle {
   #acknowledgedSequence = 0n;
   #nextInputSequence = 0n;
   #outputInFlight = false;
-  #requiresFreshLeaseAfterGeneration: bigint | undefined;
+  #generationFloor = 0n;
+  #inputSequenceExhausted = false;
   #outputCloseResolve: (() => void) | undefined;
 
   constructor(options: TerminalHandleOptions, send: Send, nextID: NextID) {
@@ -128,14 +140,14 @@ export class TerminalHandle {
 
   get attached(): boolean { return this.#attached; }
   get closed(): boolean { return this.#closed; }
-  get attachedState(): TerminalAttached | undefined { return this.#attachedState; }
-  get lease(): TerminalLease | undefined { return this.#lease; }
+  get attachedState(): TerminalAttached | undefined { return this.#attachedState === undefined ? undefined : frozenAttached(this.#attachedState); }
+  get lease(): TerminalLease | undefined { return this.#lease === undefined ? undefined : frozenLease(this.#lease); }
   get acknowledgedSequence(): bigint { return this.#acknowledgedSequence; }
   get nextInputSequence(): bigint { return this.#nextInputSequence; }
 
   attach(): Promise<TerminalAttachOutcome> {
     this.#ensureOpen();
-    if (this.#attached || this.#hasPending("attach")) return Promise.reject(new SessionErrorLikeError("already attached"));
+    if (this.#attached || this.#operationPending()) return Promise.reject(new SessionErrorLikeError("already attached"));
     const id = this.#nextID("terminal-attach");
     this.#attachmentID = id;
     const afterSequence = this.#options.afterSequence ?? this.#acknowledgedSequence;
@@ -153,7 +165,8 @@ export class TerminalHandle {
 
   acquireLease(): Promise<TerminalLease> {
     this.#ensureAttached();
-    if (this.#lease !== undefined || this.#hasLeaseOperation() || this.#hasPending("resize") || this.#hasPending("input")) return Promise.reject(new SessionErrorLikeError("lease operation pending"));
+    if (this.#generationFloor === MAX_SQLITE_INTEGER) return Promise.reject(new SessionErrorLikeError("generation exhausted"));
+    if (this.#lease !== undefined || this.#operationPending()) return Promise.reject(new SessionErrorLikeError("lease operation pending"));
     const id = this.#nextID("terminal-lease-acquire");
     return this.#request(id, { kind: "lease", leaseOperation: "acquired", resolve: () => undefined, reject: () => undefined }, encodeTerminalLeaseAcquire(id, {
       run_id: this.runId, session_id: this.sessionId,
@@ -164,7 +177,7 @@ export class TerminalHandle {
 
   renewLease(): Promise<TerminalLease> {
     const lease = this.#requireLease();
-    if (this.#hasLeaseOperation() || this.#hasPending("resize") || this.#hasPending("input")) return Promise.reject(new SessionErrorLikeError("lease operation pending"));
+    if (this.#operationPending()) return Promise.reject(new SessionErrorLikeError("lease operation pending"));
     const id = this.#nextID("terminal-lease-renew");
     return this.#request(id, { kind: "lease", leaseOperation: "renewed", generation: lease.generation, resolve: () => undefined, reject: () => undefined }, encodeTerminalLeaseRenew(id, {
       run_id: this.runId, session_id: this.sessionId, generation: lease.generation,
@@ -173,9 +186,10 @@ export class TerminalHandle {
     }));
   }
 
-  releaseLease(): Promise<TerminalLeaseResultBody> {
+  releaseLease(): Promise<TerminalLeaseResult> {
     const lease = this.#requireLease();
-    if (this.#hasLeaseOperation() || this.#hasPending("resize") || this.#hasPending("input")) return Promise.reject(new SessionErrorLikeError("lease operation pending"));
+    if (lease.generation === MAX_SQLITE_INTEGER) return Promise.reject(new SessionErrorLikeError("generation exhausted"));
+    if (this.#operationPending()) return Promise.reject(new SessionErrorLikeError("lease operation pending"));
     const id = this.#nextID("terminal-lease-release");
     return this.#request(id, { kind: "lease", leaseOperation: "released", generation: lease.generation, resolve: () => undefined, reject: () => undefined }, encodeTerminalLeaseRelease(id, {
       run_id: this.runId, session_id: this.sessionId, generation: lease.generation,
@@ -186,7 +200,7 @@ export class TerminalHandle {
 
   resize(rows: number, cols: number): Promise<{ sessionId: string; generation: bigint; rows: number; cols: number }> {
     const lease = this.#requireLease();
-    if (this.#hasPending("resize") || this.#hasLeaseOperation() || this.#hasPending("input")) return Promise.reject(new SessionErrorLikeError("terminal operation pending"));
+    if (this.#operationPending()) return Promise.reject(new SessionErrorLikeError("terminal operation pending"));
     if (!Number.isSafeInteger(rows) || rows < 1 || rows > MAX_TERMINAL_ROWS || !Number.isSafeInteger(cols) || cols < 1 || cols > MAX_TERMINAL_COLS) return Promise.reject(new ProtocolError("malformed"));
     const id = this.#nextID("terminal-resize");
     return this.#request(id, { kind: "resize", generation: lease.generation, rows, cols, resolve: () => undefined, reject: () => undefined }, encodeTerminalResize(id, {
@@ -197,9 +211,11 @@ export class TerminalHandle {
   }
 
   sendInput(payload: Uint8Array): Promise<TerminalInputResult> {
+    this.#ensureAttached();
+    if (this.#inputSequenceExhausted) return Promise.reject(new SessionErrorLikeError("input sequence exhausted"));
     const lease = this.#requireLease();
     if (!(payload instanceof Uint8Array)) return Promise.reject(new ProtocolError("malformed"));
-    if (this.#hasPending("input") || this.#hasLeaseOperation() || this.#hasPending("resize")) return Promise.reject(new SessionErrorLikeError("terminal operation pending"));
+    if (this.#operationPending()) return Promise.reject(new SessionErrorLikeError("terminal operation pending"));
     const bytes = payload.slice();
     const sequence = this.#nextInputSequence;
     const encoded = encodeTerminalInput(hexSessionID(this.sessionId), sequence, lease.generation, bytes);
@@ -211,8 +227,8 @@ export class TerminalHandle {
 
   detach(): Promise<void> {
     this.#ensureOpen();
+    if (this.#operationPending()) return Promise.reject(new SessionErrorLikeError("detach pending"));
     if (!this.#attached) { this.close(); return Promise.resolve(); }
-    if (this.#hasPending("detach")) return Promise.reject(new SessionErrorLikeError("detach pending"));
     const id = this.#nextID("terminal-detach");
     return this.#request(id, { kind: "detach", resolve: () => undefined, reject: () => undefined }, encodeTerminalDetach(id, { session_id: this.sessionId }));
   }
@@ -227,12 +243,13 @@ export class TerminalHandle {
     this.#pending.clear();
     this.#lease = undefined;
     this.#attached = false;
+    this.#attachedState = undefined;
     try { this.#options.onClose?.(error); } catch { /* callbacks never own transport */ }
   }
 
   /** Called only by BrowserSession while routing a server terminal frame. */
   receive(frame: TerminalServerControlFrame): boolean {
-    if (this.#closed) return frame.body.session_id === this.sessionId;
+    if (this.#closed) return this.#isRetired(frame);
     if (frame.body.session_id !== this.sessionId) return false;
     if (frame.type === "TERMINAL_INPUT_RESULT") {
       if (frame.id !== this.#attachmentID) return false;
@@ -252,7 +269,7 @@ export class TerminalHandle {
         if (pending.kind !== "attach" || frame.body.floor > frame.body.acknowledged_sequence || frame.body.acknowledged_sequence > frame.body.head || frame.body.acknowledged_sequence !== this.#requestedAfterSequence) throw new ProtocolError("malformed");
         this.#pending.delete(frame.id);
         this.#attached = true;
-        this.#attachedState = { sessionId: frame.body.session_id, floor: frame.body.floor, head: frame.body.head, acknowledgedSequence: frame.body.acknowledged_sequence, maxUnackedBytes: frame.body.max_unacked_bytes };
+        this.#attachedState = frozenAttached({ sessionId: frame.body.session_id, floor: frame.body.floor, head: frame.body.head, acknowledgedSequence: frame.body.acknowledged_sequence, maxUnackedBytes: frame.body.max_unacked_bytes });
         this.#acknowledgedSequence = frame.body.acknowledged_sequence;
         this.#nextOutputSequence = frame.body.acknowledged_sequence;
         this.#nextInputSequence = 0n;
@@ -264,23 +281,26 @@ export class TerminalHandle {
         if (frame.body.operation === "released") {
           if (pending.generation === undefined || pending.generation === MAX_SQLITE_INTEGER || frame.body.generation !== pending.generation + 1n || frame.body.last_input_sequence !== 0n) throw new ProtocolError("malformed");
           this.#pending.delete(frame.id);
+          this.#generationFloor = frame.body.generation > this.#generationFloor ? frame.body.generation : this.#generationFloor;
           this.#lease = undefined;
-          pending.resolve(frame.body);
+          pending.resolve(frozenLeaseResult(frame.body));
         } else {
           if (frame.body.expires_at_ms === undefined) throw new ProtocolError("malformed");
           if (frame.body.operation === "acquired") {
-            if (pending.generation !== undefined || frame.body.last_input_sequence !== 0n || this.#requiresFreshLeaseAfterGeneration !== undefined && frame.body.generation <= this.#requiresFreshLeaseAfterGeneration) throw new ProtocolError("malformed");
-            this.#requiresFreshLeaseAfterGeneration = undefined;
+            if (pending.generation !== undefined || frame.body.last_input_sequence !== 0n || frame.body.generation <= this.#generationFloor) throw new ProtocolError("malformed");
+            this.#generationFloor = frame.body.generation;
+            this.#inputSequenceExhausted = false;
             this.#nextInputSequence = 1n;
             this.#lease = { generation: frame.body.generation, expiresAtMs: frame.body.expires_at_ms, lastInputSequence: 0n, runRevision: frame.body.run_revision, sessionRevision: frame.body.session_revision };
           } else {
             const lease = this.#lease;
             if (pending.generation === undefined || frame.body.generation !== pending.generation || lease === undefined || lease.generation !== pending.generation || frame.body.last_input_sequence !== lease.lastInputSequence || frame.body.expires_at_ms < lease.expiresAtMs) throw new ProtocolError("malformed");
             this.#pending.delete(frame.id);
+            this.#generationFloor = frame.body.generation > this.#generationFloor ? frame.body.generation : this.#generationFloor;
             this.#lease = { ...lease, expiresAtMs: frame.body.expires_at_ms };
           }
           if (frame.body.operation === "acquired") this.#pending.delete(frame.id);
-          pending.resolve(this.#lease);
+          pending.resolve(frozenLease(this.#lease!));
         }
         return true;
       }
@@ -297,7 +317,7 @@ export class TerminalHandle {
   }
 
   receiveError(id: string, error: SessionErrorLike): boolean {
-    if (this.#closed) return true;
+    if (this.#closed) return false;
     let pending = this.#pending.get(id);
     if (pending === undefined && id === this.#attachmentID) {
       for (const [pendingID, candidate] of this.#pending) {
@@ -312,8 +332,8 @@ export class TerminalHandle {
   }
 
   async receiveBinary(frame: TerminalFrame): Promise<boolean> {
-    if (this.#closed) return sameBytes(frame.sessionId, hexSessionID(this.sessionId));
-    if (!this.#attached || !sameBytes(frame.sessionId, hexSessionID(this.sessionId)) || frame.leaseGeneration !== 0n) return false;
+    if (this.#closed) return false;
+    if (!this.#attached || frame.direction !== "output" || !(frame.payload instanceof Uint8Array) || frame.payload.length === 0 || frame.payload.length > MAX_TERMINAL_PAYLOAD || !sameBytes(frame.sessionId, hexSessionID(this.sessionId)) || frame.leaseGeneration !== 0n) return false;
     if (this.#outputInFlight) { this.close(new SessionErrorLikeError("output callback reentrant")); return true; }
     if (frame.sequence !== this.#nextOutputSequence) return false;
     this.#outputInFlight = true;
@@ -343,55 +363,113 @@ export class TerminalHandle {
     }
   }
 
-  receiveEOF(id: string, body: { session_id: string }): boolean { if (this.#closed) return id === this.#attachmentID && body.session_id === this.sessionId; if (!this.#attached || id !== this.#attachmentID || body.session_id !== this.sessionId) return false; try { this.#options.onEOF?.({ sessionId: body.session_id }); } catch { /* observation callbacks are isolated */ } return true; }
-  receiveExit(id: string, body: TerminalExit): boolean { if (this.#closed) return id === this.#attachmentID && body.sessionId === this.sessionId; if (!this.#attached || id !== this.#attachmentID || body.sessionId !== this.sessionId) return false; try { this.#options.onExit?.(body); } catch { /* observation callbacks are isolated */ } return true; }
+  receiveEOF(id: string, body: { session_id: string }): boolean { if (this.#closed) return false; if (!this.#attached || id !== this.#attachmentID || body.session_id !== this.sessionId) return false; this.#observe(this.#options.onEOF, { sessionId: body.session_id }); return true; }
+  receiveExit(id: string, body: TerminalExit): boolean { if (this.#closed) return false; if (!this.#attached || id !== this.#attachmentID || body.sessionId !== this.sessionId) return false; this.#observe(this.#options.onExit, body); return true; }
   receiveReset(id: string, body: { session_id: string; floor: bigint; head: bigint }): boolean {
-    if (this.#closed) return id === this.#attachmentID && body.session_id === this.sessionId;
+    if (this.#closed) return this.#matchesRetired("TERMINAL_RESET", id, body.session_id);
     if (id !== this.#attachmentID || body.session_id !== this.sessionId) return false;
-    const reset = { sessionId: body.session_id, floor: body.floor, head: body.head };
-    try { this.#options.onReset?.(reset); } catch { /* observation callbacks are isolated */ }
+    const reset = frozenReset({ sessionId: body.session_id, floor: body.floor, head: body.head });
+    this.#forgetRetired(id, "TERMINAL_ATTACHED");
     const pending = this.#pending.get(id);
     if (pending?.kind === "attach") {
+      this.#rememberRetired({ id, type: "TERMINAL_RESET" });
       this.#pending.delete(id);
-      pending.resolve({ ...reset, kind: "reset", freshAttachRequired: true });
+      pending.resolve(Object.freeze({ ...reset, kind: "reset", freshAttachRequired: true }));
     }
     this.close();
+    this.#rememberRetired({ id, type: "TERMINAL_RESET" });
+    this.#observe(this.#options.onReset, reset);
     return true;
   }
 
   #inputResult(body: TerminalInputResultBody, pending: Pending): void {
     if (pending.kind !== "input" || body.generation !== pending.generation || body.sequence !== pending.sequence || body.accepted_bytes > BigInt(pending.payloadLength ?? 0)) throw new ProtocolError("malformed");
     if (body.status === "accepted" && body.accepted_bytes !== BigInt(pending.payloadLength ?? 0) || body.status === "partial" && body.accepted_bytes === BigInt(pending.payloadLength ?? 0)) throw new ProtocolError("malformed");
-    this.#nextInputSequence = body.sequence + 1n;
+    if (body.status === "rejected") {
+      pending.resolve(body);
+      return;
+    }
+    if (body.sequence === MAX_SQLITE_INTEGER) {
+      this.#nextInputSequence = MAX_SQLITE_INTEGER;
+      this.#inputSequenceExhausted = true;
+    } else this.#nextInputSequence = body.sequence + 1n;
     if (body.status === "accepted") {
       const lease = this.#lease;
       if (lease === undefined) throw new ProtocolError("malformed");
-      this.#lease = { ...lease, lastInputSequence: body.sequence };
+      if (this.#inputSequenceExhausted) {
+        this.#lease = undefined;
+        this.#fenceGeneration(body.generation);
+      } else this.#lease = { ...lease, lastInputSequence: body.sequence };
     } else if (body.status === "partial" || body.status === "uncertain") {
       this.#lease = undefined;
-      this.#requiresFreshLeaseAfterGeneration = body.generation;
+      this.#fenceGeneration(body.generation);
     }
     pending.resolve(body);
   }
 
   #request<T>(id: string, pending: Pending, payload: string | Uint8Array): Promise<T> {
     const result = new Promise<T>((resolve, reject) => { pending.resolve = resolve as (value: unknown) => void; pending.reject = reject; this.#pending.set(id, pending); });
-    try { this.#send(id, payload); } catch (error) {
-      this.#pending.delete(id);
+    this.#rememberSent(id, pending);
+    try { this.#send(id, payload); } catch {
       const safeError = new SessionErrorLikeError("connection");
       if (pending.kind === "input") this.#freezeInput(pending, safeError);
-      pending.reject(safeError);
+      else this.close(safeError);
     }
     return result;
   }
 
-  #hasPending(kind: Pending["kind"]): boolean { for (const pending of this.#pending.values()) if (pending.kind === kind) return true; return false; }
-  #hasLeaseOperation(): boolean { return this.#hasPending("lease"); }
+  #operationPending(): boolean { return this.#pending.size !== 0; }
   #freezeInput(pending: Pending, error: unknown): void {
-    this.#nextInputSequence = (pending.sequence ?? this.#nextInputSequence) + 1n;
+    const sequence = pending.sequence ?? this.#nextInputSequence;
+    if (sequence >= MAX_SQLITE_INTEGER) {
+      this.#nextInputSequence = MAX_SQLITE_INTEGER;
+      this.#inputSequenceExhausted = true;
+    } else this.#nextInputSequence = sequence + 1n;
     this.#lease = undefined;
-    this.#requiresFreshLeaseAfterGeneration = pending.generation;
+    if (pending.generation !== undefined) this.#fenceGeneration(pending.generation);
     this.close(error as SessionErrorLike);
+  }
+
+  #fenceGeneration(generation: bigint): void {
+    const next = generation >= MAX_SQLITE_INTEGER ? MAX_SQLITE_INTEGER : generation + 1n;
+    if (next > this.#generationFloor) this.#generationFloor = next;
+  }
+
+  #rememberSent(id: string, pending: Pending): void {
+    const responseID = pending.kind === "input" ? this.#attachmentID : id;
+    if (responseID === undefined) return;
+    const type = pending.kind === "attach" ? "TERMINAL_ATTACHED" : pending.kind === "lease" ? "TERMINAL_LEASE_RESULT" : pending.kind === "resize" ? "TERMINAL_RESIZED" : pending.kind === "detach" ? "TERMINAL_DETACHED" : "TERMINAL_INPUT_RESULT";
+    this.#rememberRetired({ id: responseID, type, generation: pending.generation, sequence: pending.sequence });
+  }
+
+  #rememberRetired(record: RetiredResponse): void {
+    if (this.#retired.some((candidate) => candidate.id === record.id && candidate.type === record.type && candidate.generation === record.generation && candidate.sequence === record.sequence)) return;
+    this.#retired.push(record);
+    if (this.#retired.length > MAX_RETIRED_RESPONSES) this.#retired.shift();
+  }
+
+  #forgetRetired(id: string, type: RetiredResponse["type"]): void {
+    for (let index = this.#retired.length - 1; index >= 0; index--) {
+      const candidate = this.#retired[index];
+      if (candidate !== undefined && candidate.id === id && candidate.type === type) this.#retired.splice(index, 1);
+    }
+  }
+
+  #isRetired(frame: TerminalServerControlFrame): boolean {
+    if (frame.type === "TERMINAL_EOF" || frame.type === "TERMINAL_EXIT") return false;
+    const body = frame.body;
+    const inputGeneration = frame.type === "TERMINAL_INPUT_RESULT" ? frame.body.generation : undefined;
+    const inputSequence = frame.type === "TERMINAL_INPUT_RESULT" ? frame.body.sequence : undefined;
+    return this.#matchesRetired(frame.type, frame.id, body.session_id, inputGeneration, inputSequence);
+  }
+
+  #matchesRetired(type: RetiredResponse["type"], id: string, sessionId: string, generation?: bigint, sequence?: bigint): boolean {
+    return this.#retired.some((record) => record.id === id && record.type === type && sessionId === this.sessionId && (type !== "TERMINAL_INPUT_RESULT" || record.generation === generation && record.sequence === sequence));
+  }
+
+  #observe<T>(callback: ((event: T) => void | Promise<void>) | undefined, event: T): void {
+    if (callback === undefined) return;
+    try { void Promise.resolve(callback(event)).catch(() => undefined); } catch { /* observation callbacks are isolated */ }
   }
 
   #requireLease(): TerminalLease { this.#ensureAttached(); if (this.#lease === undefined) throw new SessionErrorLikeError("terminal lease required"); return this.#lease; }
@@ -421,26 +499,38 @@ export function hexSessionID(value: string): Uint8Array {
 
 function sameBytes(a: Uint8Array, b: Uint8Array): boolean { return a.length === b.length && a.every((value, index) => value === b[index]); }
 
+function frozenAttached(value: TerminalAttached): TerminalAttached { return Object.freeze({ ...value }); }
+function frozenLease(value: TerminalLease): TerminalLease { return Object.freeze({ ...value }); }
+function frozenLeaseResult(value: TerminalLeaseResultBody): TerminalLeaseResult { return Object.freeze({ ...value }); }
+function frozenReset(value: TerminalReset): TerminalReset { return Object.freeze({ ...value }); }
+
 export type HumanReplyResult = HumanRequestReplyResultBody;
 export type HumanCancelResult = HumanRequestActionResultBody;
 
 export class HumanRequestClient {
   readonly #send: Send;
   readonly #nextID: NextID;
+  readonly #onSendFailure: ((error: SessionErrorLike) => void) | undefined;
   readonly #pending = new Map<string, { kind: "reply" | "cancel"; resolve: (value: unknown) => void; reject: (error: unknown) => void; requestId: string; runId: string; expectedRevision: bigint; expectedRunRevision: bigint }>();
-  readonly #used = new Set<string>();
-  constructor(send: Send, nextID: NextID) { this.#send = send; this.#nextID = nextID; }
+  #closed = false;
+  constructor(send: Send, nextID: NextID, onSendFailure?: (error: SessionErrorLike) => void) { this.#send = send; this.#nextID = nextID; this.#onSendFailure = onSendFailure; }
   reply(request: TerminalReplyRequest): Promise<HumanReplyResult> {
-    if (this.#used.has(request.requestId)) return Promise.reject(new SessionErrorLikeError("human request already submitted"));
-    this.#used.add(request.requestId);
+    if (this.#closed) return Promise.reject(new SessionErrorLikeError("closed"));
+    if (this.#hasRequest(request.requestId)) return Promise.reject(new SessionErrorLikeError("human request pending"));
+    if (this.#pending.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionErrorLikeError("human request capacity"));
     const id = this.#nextID("human-reply");
-    return this.#request(id, "reply", request, encodeHumanRequestReply(id, { run_id: request.runId, request_id: request.requestId, expected_revision: request.expectedRevision, reply: request.reply }));
+    let payload: string;
+    try { payload = encodeHumanRequestReply(id, { run_id: request.runId, request_id: request.requestId, expected_revision: request.expectedRevision, reply: request.reply }); } catch (error) { return Promise.reject(error); }
+    return this.#request(id, "reply", request, payload);
   }
   cancelRun(request: TerminalCancelRunRequest): Promise<HumanCancelResult> {
-    if (this.#used.has(request.requestId)) return Promise.reject(new SessionErrorLikeError("human request already submitted"));
-    this.#used.add(request.requestId);
+    if (this.#closed) return Promise.reject(new SessionErrorLikeError("closed"));
+    if (this.#hasRequest(request.requestId)) return Promise.reject(new SessionErrorLikeError("human request pending"));
+    if (this.#pending.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionErrorLikeError("human request capacity"));
     const id = this.#nextID("human-cancel");
-    return this.#request(id, "cancel", request, encodeHumanRequestCancelRun(id, { run_id: request.runId, request_id: request.requestId, expected_request_revision: request.expectedRequestRevision, expected_run_revision: request.expectedRunRevision }));
+    let payload: string;
+    try { payload = encodeHumanRequestCancelRun(id, { run_id: request.runId, request_id: request.requestId, expected_request_revision: request.expectedRequestRevision, expected_run_revision: request.expectedRunRevision }); } catch (error) { return Promise.reject(error); }
+    return this.#request(id, "cancel", request, payload);
   }
   receive(frame: ServerControlFrame): boolean {
     if (frame.type !== "HUMAN_REQUEST_REPLY_RESULT" && frame.type !== "HUMAN_REQUEST_ACTION_RESULT") return false;
@@ -451,17 +541,18 @@ export class HumanRequestClient {
     this.#pending.delete(frame.id); pending.resolve(frame.body); return true;
   }
   receiveError(id: string, error: SessionErrorLike): boolean { const pending = this.#pending.get(id); if (!pending) return false; this.#pending.delete(id); pending.reject(error); return true; }
-  close(error: SessionErrorLike = new SessionErrorLikeError("closed")): void { for (const pending of this.#pending.values()) pending.reject(error); this.#pending.clear(); }
+  close(error: SessionErrorLike = new SessionErrorLikeError("closed")): void { if (this.#closed) return; this.#closed = true; for (const pending of this.#pending.values()) pending.reject(error); this.#pending.clear(); }
+  #hasRequest(requestId: string): boolean { for (const pending of this.#pending.values()) if (pending.requestId === requestId) return true; return false; }
   #request<T>(id: string, kind: "reply" | "cancel", request: TerminalReplyRequest | TerminalCancelRunRequest, payload: string): Promise<T> {
     let expectedRevision = 0n;
     let expectedRunRevision = 0n;
     if (kind === "reply") expectedRevision = (request as TerminalReplyRequest).expectedRevision;
     else { const cancel = request as TerminalCancelRunRequest; expectedRevision = cancel.expectedRequestRevision; expectedRunRevision = cancel.expectedRunRevision; }
     const result = new Promise<T>((resolve, reject) => this.#pending.set(id, { kind, requestId: request.requestId, runId: request.runId, expectedRevision, expectedRunRevision, resolve: resolve as (value: unknown) => void, reject }));
-    try { this.#send(id, payload); } catch (error) {
-      const failed = this.#pending.get(id);
-      this.#pending.delete(id);
-      failed?.reject(error);
+    try { this.#send(id, payload); } catch {
+      const safeError = new SessionErrorLikeError("connection");
+      this.close(safeError);
+    try { this.#onSendFailure?.(safeError); } catch { /* cleanup callbacks never own transport */ }
     }
     return result;
   }
