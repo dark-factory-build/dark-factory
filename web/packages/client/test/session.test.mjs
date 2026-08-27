@@ -682,6 +682,9 @@ test("pairing challenge helper scrubs and refuses every noncanonical pairing fra
     `#df_pair%3D${challenge}`,
     `##df_pair=${challenge}`,
     `df_pair=${challenge}`,
+    `#?df_pair=${challenge}`,
+    `#building?df_pair=${challenge}`,
+    `#building%3Fdf_pair%3D${challenge}`,
     `#challenge=${challenge}`,
   ];
   for (const hash of rejected) {

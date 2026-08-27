@@ -933,7 +933,7 @@ export function consumePairingChallenge(location: Pick<Location, "hash" | "pathn
   const exact = /^#df_pair=([0-9a-f]{64})$/.exec(hash);
   let decoded = hash;
   try { decoded = decodeURIComponent(hash); } catch { /* malformed pairing attempts still match their raw key */ }
-  const pairingKey = /(?:^|[#&])(?:df_pair|challenge)=/i;
+  const pairingKey = /(?:^|[?#&])(?:df_pair|challenge)=/i;
   if (!pairingKey.test(hash) && !pairingKey.test(decoded)) return null;
   const browserHistory = history ?? globalThis.history;
   const target = `${location.pathname}${location.search}`;
