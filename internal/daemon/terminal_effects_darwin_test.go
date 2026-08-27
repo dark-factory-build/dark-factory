@@ -799,7 +799,7 @@ func TestHumanReplyUsesExactRunAndResolvesOnlyAfterFullDelivery(t *testing.T) {
 	done := make(chan replyResult, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		count, err := fixture.adapter.daemon.humanReply(ctx, fixture.principal, fixture.run.ID, request.ID, request.Revision, "exact reply")
+		count, err := fixture.adapter.daemon.humanReply(ctx, fixture.principal, request.ID, request.Revision, "exact reply")
 		done <- replyResult{count: count, err: err}
 	}()
 	command := readTerminalEffectWire(t, fixture.peer)
@@ -820,7 +820,7 @@ func TestHumanReplyUsesExactRunAndResolvesOnlyAfterFullDelivery(t *testing.T) {
 	if err != nil || !found || resolved.Status != kernel.HumanRequestResolved {
 		t.Fatalf("resolved human request = %+v, found=%v, err=%v", resolved, found, err)
 	}
-	if _, err := fixture.adapter.daemon.humanReply(context.Background(), fixture.principal, fixture.run.ID, request.ID, request.Revision, "duplicate"); !errors.Is(err, kernel.ErrRevisionConflict) {
+	if _, err := fixture.adapter.daemon.humanReply(context.Background(), fixture.principal, request.ID, request.Revision, "duplicate"); !errors.Is(err, kernel.ErrRevisionConflict) {
 		t.Fatalf("duplicate reply = %v", err)
 	}
 
@@ -831,7 +831,7 @@ func TestHumanReplyUsesExactRunAndResolvesOnlyAfterFullDelivery(t *testing.T) {
 	}
 	partialDone := make(chan replyResult, 1)
 	go func() {
-		count, err := fixture.adapter.daemon.humanReply(context.Background(), fixture.principal, fixture.run.ID, second.ID, second.Revision, "partial reply")
+		count, err := fixture.adapter.daemon.humanReply(context.Background(), fixture.principal, second.ID, second.Revision, "partial reply")
 		partialDone <- replyResult{count: count, err: err}
 	}()
 	partial := readTerminalEffectWire(t, fixture.peer)
@@ -844,9 +844,8 @@ func TestHumanReplyUsesExactRunAndResolvesOnlyAfterFullDelivery(t *testing.T) {
 	if err != nil || !found || unknown.Status != kernel.HumanRequestDeliveryUnknown {
 		t.Fatalf("unknown human delivery = %+v, found=%v, err=%v", unknown, found, err)
 	}
-	wrongRun, _ := liveTestIDs(t, 55_000)
-	if _, err := fixture.adapter.daemon.humanReply(context.Background(), fixture.principal, wrongRun, second.ID, unknown.Revision, "stale"); !errors.Is(err, kernel.ErrRevisionConflict) {
-		t.Fatalf("wrong originating run = %v", err)
+	if _, err := fixture.adapter.daemon.humanReply(context.Background(), fixture.principal, second.ID, unknown.Revision, "stale"); !errors.Is(err, kernel.ErrRevisionConflict) {
+		t.Fatalf("uncertain request reply = %v", err)
 	}
 }
 
@@ -864,7 +863,7 @@ func TestUncertainHumanReplyRemainsDurablyVisibleWithoutReplay(t *testing.T) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		count, err := fixture.adapter.daemon.humanReply(context.Background(), fixture.principal, fixture.run.ID, request.ID, request.Revision, "one shot")
+		count, err := fixture.adapter.daemon.humanReply(context.Background(), fixture.principal, request.ID, request.Revision, "one shot")
 		done <- result{count: count, err: err}
 	}()
 	command := readTerminalEffectWire(t, fixture.peer)
@@ -877,9 +876,33 @@ func TestUncertainHumanReplyRemainsDurablyVisibleWithoutReplay(t *testing.T) {
 	if err != nil || !found || unknown.Status != kernel.HumanRequestDeliveryUnknown {
 		t.Fatalf("uncertain human delivery = %+v, found=%v, err=%v", unknown, found, err)
 	}
-	if _, err := fixture.adapter.daemon.humanReply(context.Background(), fixture.principal, fixture.run.ID, request.ID, request.Revision, "replay"); !errors.Is(err, kernel.ErrRevisionConflict) {
+	if _, err := fixture.adapter.daemon.humanReply(context.Background(), fixture.principal, request.ID, request.Revision, "replay"); !errors.Is(err, kernel.ErrRevisionConflict) {
 		t.Fatalf("uncertain delivery replay = %v", err)
 	}
+}
+
+func TestHumanReplyReservesDerivedRunBeforeLiveOwnerLookup(t *testing.T) {
+	fixture := newTerminalEffectFixture(t)
+	var key [kernel.IDBytes]byte
+	copy(key[:], adapterID(t, 213))
+	request, err := fixture.adapter.store.CreateHumanQuestionForAttempt(context.Background(), fixture.run.CredentialDigest, kernel.NewHumanQuestion{IdempotencyKey: key, QuestionText: "owner vanished"}, adapterTime(t, 400))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.adapter.daemon.unregisterLiveAttempt(fixture.run.ID, fixture.attempt)
+	count, err := fixture.adapter.daemon.humanReply(context.Background(), fixture.principal, request.ID, request.Revision, "one shot")
+	if count != 0 || !errors.Is(err, kernel.ErrNotFound) {
+		t.Fatalf("missing owner reply = count %d, err %v", count, err)
+	}
+	expectNoTerminalEffectWire(t, fixture.peer)
+	unknown, found, err := fixture.adapter.store.HumanRequest(context.Background(), request.ID)
+	if err != nil || !found || unknown.Status != kernel.HumanRequestDeliveryUnknown || unknown.Revision.Int64() != request.Revision.Int64()+2 {
+		t.Fatalf("missing owner durable reservation = %+v, found=%v, err=%v", unknown, found, err)
+	}
+	if _, err := fixture.adapter.daemon.humanReply(context.Background(), fixture.principal, request.ID, request.Revision, "replay"); !errors.Is(err, kernel.ErrRevisionConflict) {
+		t.Fatalf("missing owner replay = %v", err)
+	}
+	expectNoTerminalEffectWire(t, fixture.peer)
 }
 
 func TestClientRevocationDurablyClearsLeaseBeforeRunnerFence(t *testing.T) {
@@ -932,7 +955,7 @@ func TestCancelHumanRequestSurfacesOwnerFenceFailureAfterCommit(t *testing.T) {
 			}
 			done := make(chan error, 1)
 			go func() {
-				_, _, cancelErr := fixture.adapter.daemon.cancelHumanRequestRun(context.Background(), fixture.adapter.client.ID, request.ID, fixture.run.ID, request.Revision, currentRun.Revision, adapterTime(t, 2_001))
+				_, _, cancelErr := fixture.adapter.daemon.cancelHumanRequestRun(context.Background(), fixture.adapter.client.ID, request.ID, request.Revision, currentRun.Revision, adapterTime(t, 2_001))
 				done <- cancelErr
 			}()
 			revoke := readTerminalEffectWire(t, fixture.peer)
@@ -951,7 +974,7 @@ func TestCancelHumanRequestSurfacesOwnerFenceFailureAfterCommit(t *testing.T) {
 			if err != nil || !found || resolved.Status != kernel.HumanRequestResolved {
 				t.Fatalf("durable cancel request = %+v, found=%v, err=%v", resolved, found, err)
 			}
-			if _, _, duplicateErr := fixture.adapter.daemon.cancelHumanRequestRun(context.Background(), fixture.adapter.client.ID, request.ID, fixture.run.ID, request.Revision, currentRun.Revision, adapterTime(t, 2_002)); !errors.Is(duplicateErr, kernel.ErrRevisionConflict) {
+			if _, _, duplicateErr := fixture.adapter.daemon.cancelHumanRequestRun(context.Background(), fixture.adapter.client.ID, request.ID, request.Revision, currentRun.Revision, adapterTime(t, 2_002)); !errors.Is(duplicateErr, kernel.ErrRevisionConflict) {
 				t.Fatalf("duplicate cancel = %v", duplicateErr)
 			}
 			if !fixture.attempt.controllerClosed {
@@ -976,7 +999,7 @@ func TestBrowserCancelOwnerFenceErrorIsNonRetryable(t *testing.T) {
 	}
 	connection := fixture.adapter.authenticate(t)
 	payload, err := browserprotocol.EncodeHumanRequestCancelRun("cancel-browser", browserprotocol.HumanRequestCancelRun{
-		RunID: fixture.run.ID.String(), RequestID: request.ID.String(), ExpectedRequestRevision: browserprotocol.Decimal(request.Revision.Int64()), ExpectedRunRevision: browserprotocol.Decimal(currentRun.Revision.Int64()),
+		RequestID: request.ID.String(), ExpectedRequestRevision: browserprotocol.Decimal(request.Revision.Int64()), ExpectedRunRevision: browserprotocol.Decimal(currentRun.Revision.Int64()),
 	})
 	if err != nil {
 		t.Fatal(err)

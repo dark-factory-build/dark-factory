@@ -6,263 +6,112 @@ import (
 	"testing"
 )
 
-func TestHumanRequestProjectionTerminalAvailabilityFollowsExactLifecycle(t *testing.T) {
+func TestHumanRequestDetailProjectsExactTargetAndCapabilityBoundAuthority(t *testing.T) {
 	ctx := context.Background()
-	store, run, keys := runningOrchestratorRun(t)
+	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
-	client := humanQuestionClient(t, store, 180, BrowserCapabilityObserve|BrowserCapabilityHumanActions)
 	request, err := store.CreateHumanQuestionForAttempt(ctx, run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(180), QuestionText: "private question"}, mustTime(t, 400))
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertHumanRequestProjectionSources(t, store, request.ID, HumanRequestOpen, true)
+	private := humanQuestionClient(t, store, 181, BrowserCapabilityObserve|BrowserCapabilityPrivateHumanRequestDetail)
+	detail, err := store.HumanRequestDetail(ctx, private.ID, request.ID, request.Revision)
+	if err != nil || detail.TerminalTarget == nil || detail.TerminalTarget.RunID() != run.ID || detail.CanReply || detail.CancelRun != nil || detail.ReplyMaxBytes != MaxHumanRequestReplyBytes {
+		t.Fatalf("private-only detail = %+v, err=%v", detail, err)
+	}
+	actions := humanQuestionClient(t, store, 182, BrowserCapabilityObserve|BrowserCapabilityPrivateHumanRequestDetail|BrowserCapabilityHumanActions)
+	detail, err = store.HumanRequestDetail(ctx, actions.ID, request.ID, request.Revision)
+	if err != nil || detail.TerminalTarget == nil || !detail.CanReply || detail.CancelRun == nil || detail.CancelRun.ExpectedRequestRevision() != request.Revision || detail.CancelRun.ExpectedRunRevision() != run.Revision {
+		t.Fatalf("action detail = %+v, err=%v", detail, err)
+	}
+}
 
-	delivery, err := store.BeginHumanReply(ctx, client.ID, request.ID, request.Revision, humanDeliveryID(t, 181), "private reply", mustTime(t, 401))
+func TestHumanRequestDetailUnavailableStatesCarryNoTargetOrAuthority(t *testing.T) {
+	ctx := context.Background()
+	store, run, _ := runningOrchestratorRun(t)
+	defer store.Close()
+	client := humanQuestionClient(t, store, 183, BrowserCapabilityObserve|BrowserCapabilityPrivateHumanRequestDetail|BrowserCapabilityHumanActions)
+	request, err := store.CreateHumanQuestionForAttempt(ctx, run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(183), QuestionText: "private"}, mustTime(t, 400))
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertHumanRequestProjectionSources(t, store, request.ID, HumanRequestDelivering, true)
+	delivery, err := store.BeginHumanReply(ctx, client.ID, request.ID, request.Revision, humanDeliveryID(t, 184), "reply", mustTime(t, 401))
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail, err := store.HumanRequestDetail(ctx, client.ID, request.ID, delivery.Revision)
+	if err != nil || detail.TerminalTarget != nil || detail.CanReply || detail.CancelRun != nil {
+		t.Fatalf("delivering detail = %+v, err=%v", detail, err)
+	}
 	if err := store.MarkHumanDeliveryUnknown(ctx, request.ID, delivery.DeliveryID, delivery.Revision, mustTime(t, 402)); err != nil {
 		t.Fatal(err)
 	}
-	assertHumanRequestProjectionSources(t, store, request.ID, HumanRequestDeliveryUnknown, true)
-
-	proposal, err := NewBlockedProposal("waiting")
+	current, _, err := store.HumanRequest(ctx, request.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.ProposeAttemptOutcome(ctx, keys.AttemptDigest, proposal, mustTime(t, 403)); err != nil {
-		t.Fatal(err)
+	detail, err = store.HumanRequestDetail(ctx, client.ID, request.ID, current.Revision)
+	if err != nil || detail.TerminalTarget != nil || detail.CanReply || detail.CancelRun != nil {
+		t.Fatalf("delivery-unknown detail = %+v, err=%v", detail, err)
 	}
-	assertHumanRequestProjectionSources(t, store, request.ID, HumanRequestDeliveryUnknown, false)
 }
 
-func TestHumanRequestProjectionResolvedAndStaleNeverOpenTerminal(t *testing.T) {
-	ctx := context.Background()
-
-	resolvedStore, resolvedRun, _ := runningOrchestratorRun(t)
-	defer resolvedStore.Close()
-	client := humanQuestionClient(t, resolvedStore, 182, BrowserCapabilityObserve|BrowserCapabilityHumanActions)
-	resolved, err := resolvedStore.CreateHumanQuestionForAttempt(ctx, resolvedRun.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(182), QuestionText: "resolved"}, mustTime(t, 400))
-	if err != nil {
-		t.Fatal(err)
-	}
-	delivery, err := resolvedStore.BeginHumanReply(ctx, client.ID, resolved.ID, resolved.Revision, humanDeliveryID(t, 183), "reply", mustTime(t, 401))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := resolvedStore.AcknowledgeHumanReply(ctx, resolved.ID, delivery.DeliveryID, delivery.Revision, mustTime(t, 402)); err != nil {
-		t.Fatal(err)
-	}
-	assertHumanRequestDirectProjection(t, resolvedStore, resolved.ID, HumanRequestResolved, false)
-
-	staleStore, staleRun, staleKeys := runningOrchestratorRun(t)
-	defer staleStore.Close()
-	stale, err := staleStore.CreateHumanQuestionForAttempt(ctx, staleRun.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(184), QuestionText: "stale"}, mustTime(t, 400))
-	if err != nil {
-		t.Fatal(err)
-	}
-	proposal, _ := NewBlockedProposal("done")
-	if _, err := staleStore.ProposeAttemptOutcome(ctx, staleKeys.AttemptDigest, proposal, mustTime(t, 401)); err != nil {
-		t.Fatal(err)
-	}
-	assertHumanRequestDirectProjection(t, staleStore, stale.ID, HumanRequestStale, false)
-}
-
-func TestHumanRequestProjectionKnownNonAttachableTerminalStatesAreFalse(t *testing.T) {
+func TestHumanRequestDetailMissingSessionIsUnavailableAndCorruptFailsClosed(t *testing.T) {
 	for _, test := range []struct {
-		name string
-		sql  string
+		name, mutate string
+		corrupt      bool
 	}{
-		{name: "declared", sql: `UPDATE terminal_sessions SET state = 'declared', unresolved_reason = NULL, activated_at_ms = NULL, closed_at_ms = NULL, updated_at_ms = declared_at_ms WHERE run_id = ?`},
-		{name: "unresolved", sql: `UPDATE terminal_sessions SET state = 'unresolved', unresolved_reason = 'owner uncertain', closed_at_ms = NULL WHERE run_id = ?`},
-		{name: "closed", sql: `UPDATE terminal_sessions SET state = 'closed', unresolved_reason = NULL, closed_at_ms = updated_at_ms WHERE run_id = ?`},
+		{name: "missing", mutate: `DELETE FROM terminal_sessions WHERE run_id = ?`},
+		{name: "non-active", mutate: `UPDATE terminal_sessions SET state = 'closed', closed_at_ms = updated_at_ms, revision = revision + 1 WHERE run_id = ?`},
+		{name: "corrupt", mutate: `UPDATE terminal_sessions SET state = 'unknown' WHERE run_id = ?`, corrupt: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			store, run, _ := runningOrchestratorRun(t)
 			defer store.Close()
+			client := humanQuestionClient(t, store, 185, BrowserCapabilityObserve|BrowserCapabilityPrivateHumanRequestDetail|BrowserCapabilityHumanActions)
 			request, err := store.CreateHumanQuestionForAttempt(context.Background(), run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(185), QuestionText: "private"}, mustTime(t, 400))
 			if err != nil {
 				t.Fatal(err)
 			}
-			corruptSQL(t, store, test.sql, run.ID.Bytes())
-			assertHumanRequestDirectProjection(t, store, request.ID, HumanRequestOpen, false)
-		})
-	}
-}
-
-func TestHumanRequestProjectionMissingOrMalformedDurableControlsFailClosed(t *testing.T) {
-	for _, test := range []struct {
-		name string
-		sql  string
-	}{
-		{name: "missing terminal session", sql: `DELETE FROM terminal_sessions WHERE run_id = ?`},
-		{name: "unknown terminal state", sql: `UPDATE terminal_sessions SET state = 'unknown' WHERE run_id = ?`},
-		{name: "malformed terminal chronology", sql: `UPDATE terminal_sessions SET activated_at_ms = NULL WHERE run_id = ?`},
-		{name: "unknown run phase", sql: `UPDATE runs SET phase = 'unknown' WHERE id = ?`},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			store, run, _ := runningOrchestratorRun(t)
-			defer store.Close()
-			request, err := store.CreateHumanQuestionForAttempt(context.Background(), run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(186), QuestionText: "private"}, mustTime(t, 400))
-			if err != nil {
-				t.Fatal(err)
-			}
-			corruptSQL(t, store, test.sql, run.ID.Bytes())
-			if projection, found, err := store.HumanRequest(context.Background(), request.ID); !errors.Is(err, ErrCorruptState) || found || projection != (HumanRequestProjection{}) {
-				t.Fatalf("projection = %+v, found=%v, err=%v", projection, found, err)
+			corruptSQL(t, store, test.mutate, run.ID.Bytes())
+			detail, err := store.HumanRequestDetail(context.Background(), client.ID, request.ID, request.Revision)
+			if test.corrupt {
+				if !errors.Is(err, ErrCorruptState) {
+					t.Fatalf("corrupt detail = %+v, err=%v", detail, err)
+				}
+			} else if err != nil || detail.TerminalTarget != nil || detail.CanReply || detail.CancelRun != nil {
+				t.Fatalf("missing-session detail = %+v, err=%v", detail, err)
 			}
 		})
 	}
 }
 
-func TestHumanRequestDirectProjectionValidatesActiveLeaseRelationship(t *testing.T) {
-	for index, test := range []struct {
-		name   string
-		mutate func(*testing.T, *Store, BrowserClient)
-	}{
-		{name: "missing client", mutate: func(t *testing.T, store *Store, _ BrowserClient) {
-			corruptSQL(t, store, `UPDATE terminal_sessions SET lease_client_id = ?`, browserTestID(t, 250).Bytes())
-		}},
-		{name: "revoked client", mutate: func(t *testing.T, store *Store, client BrowserClient) {
-			corruptSQL(t, store, `UPDATE browser_clients SET revoked_at_ms = updated_at_ms WHERE id = ?`, client.ID.Bytes())
-		}},
-		{name: "client without terminal capability", mutate: func(t *testing.T, store *Store, client BrowserClient) {
-			corruptSQL(t, store, `UPDATE browser_clients SET capability_mask = ? WHERE id = ?`, int64(BrowserCapabilityObserve), client.ID.Bytes())
-		}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			store, run, _ := runningOrchestratorRun(t)
-			defer store.Close()
-			request, err := store.CreateHumanQuestionForAttempt(context.Background(), run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(byte(190 + index)), QuestionText: "private"}, mustTime(t, 400))
-			if err != nil {
-				t.Fatal(err)
-			}
-			session := terminalSessionForRunTest(t, store, run.ID)
-			client := humanQuestionClient(t, store, byte(190+index), BrowserCapabilityObserve|BrowserCapabilityTerminalInput)
-			if _, err := store.AcquireTerminalLease(context.Background(), run.ID, session.ID, client.ID, run.Revision, session.Revision, mustTime(t, 401)); err != nil {
-				t.Fatal(err)
-			}
-			assertHumanRequestDirectProjection(t, store, request.ID, HumanRequestOpen, true)
-			test.mutate(t, store, client)
-			if projection, found, err := store.HumanRequest(context.Background(), request.ID); !errors.Is(err, ErrCorruptState) || found || projection != (HumanRequestProjection{}) {
-				t.Fatalf("corrupt lease projection = %+v, found=%v, err=%v", projection, found, err)
-			}
-		})
-	}
-}
-
-func TestHumanRequestProjectionRejectsDuplicateTerminalSessionsRegardlessOfOrder(t *testing.T) {
-	for _, duplicateSeed := range []byte{1, 0xfe} {
-		t.Run(terminalSessionID(t, duplicateSeed).String(), func(t *testing.T) {
-			store, run, _ := runningOrchestratorRun(t)
-			defer store.Close()
-			request, err := store.CreateHumanQuestionForAttempt(context.Background(), run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(188), QuestionText: "private"}, mustTime(t, 400))
-			if err != nil {
-				t.Fatal(err)
-			}
-			corruptSQL(t, store, `DROP INDEX terminal_sessions_run_unique`)
-			if _, err := store.writer.Exec(`INSERT INTO terminal_sessions(id, run_id, state, revision, declared_at_ms, updated_at_ms) VALUES(?, ?, 'declared', 1, ?, ?)`, terminalSessionID(t, duplicateSeed).Bytes(), run.ID.Bytes(), run.AdmittedAt.Int64(), run.AdmittedAt.Int64()); err != nil {
-				t.Fatal(err)
-			}
-			if projection, found, err := store.HumanRequest(context.Background(), request.ID); !errors.Is(err, ErrCorruptState) || found || projection != (HumanRequestProjection{}) {
-				t.Fatalf("projection = %+v, found=%v, err=%v", projection, found, err)
-			}
-			if session, found, err := store.TerminalSessionForRun(context.Background(), run.ID); !errors.Is(err, ErrCorruptState) || found || session != (TerminalSession{}) {
-				t.Fatalf("terminal session = %+v, found=%v, err=%v", session, found, err)
-			}
-		})
-	}
-}
-
-func TestHumanRequestProjectionReadPinsRunAndTerminalState(t *testing.T) {
+func TestHumanRequestDetailFinalizingAndTerminalOriginsAreUnavailable(t *testing.T) {
 	ctx := context.Background()
-	store, run, keys := runningOrchestratorRun(t)
+	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
-	request, err := store.CreateHumanQuestionForAttempt(ctx, run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(187), QuestionText: "private"}, mustTime(t, 400))
+	client := humanQuestionClient(t, store, 186, BrowserCapabilityObserve|BrowserCapabilityPrivateHumanRequestDetail|BrowserCapabilityHumanActions)
+	request, err := store.CreateHumanQuestionForAttempt(ctx, run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(186), QuestionText: "private"}, mustTime(t, 400))
 	if err != nil {
 		t.Fatal(err)
 	}
-	tx, err := store.beginRead(ctx)
+	proposal, err := NewBlockedProposal("done")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer tx.Close()
-	before, found, err := humanRequestProjectionByID(ctx, tx.connection, request.ID)
-	if err != nil || !found || !before.CanOpenTerminal {
-		t.Fatalf("before = %+v, found=%v, err=%v", before, found, err)
-	}
-	proposal, _ := NewBlockedProposal("waiting")
-	if _, err := store.ProposeAttemptOutcome(ctx, keys.AttemptDigest, proposal, mustTime(t, 401)); err != nil {
+	if _, err := store.ProposeAttemptOutcome(ctx, run.CredentialDigest, proposal, mustTime(t, 401)); err != nil {
 		t.Fatal(err)
 	}
-	pinned, found, err := humanRequestProjectionByID(ctx, tx.connection, request.ID)
-	if err != nil || !found || !pinned.CanOpenTerminal || pinned.Status != HumanRequestOpen {
-		t.Fatalf("pinned = %+v, found=%v, err=%v", pinned, found, err)
+	if _, err := store.HumanRequestDetail(ctx, client.ID, request.ID, request.Revision); !errors.Is(err, ErrConflict) {
+		t.Fatalf("finalizing detail = %v", err)
 	}
-	if err := tx.Close(); err != nil {
+	observeMissingProcessExits(t, store, run.ID, 402)
+	releaseAllRunResources(t, store, run.ID, 410)
+	closed := closeTerminalSessionAtCurrent(t, store, run.ID, 415)
+	if _, err := store.FinalizeRun(ctx, run.ID, closed.Revision, mustTime(t, 420)); err != nil {
 		t.Fatal(err)
 	}
-	current, found, err := store.HumanRequest(ctx, request.ID)
-	if err != nil || !found || current.CanOpenTerminal || current.Status != HumanRequestStale {
-		t.Fatalf("current = %+v, found=%v, err=%v", current, found, err)
-	}
-}
-
-func assertHumanRequestDirectProjection(t *testing.T, store *Store, id HumanRequestID, status HumanRequestStatus, canOpenTerminal bool) {
-	t.Helper()
-	projection, found, err := store.HumanRequest(context.Background(), id)
-	if err != nil || !found || projection.Status != status || projection.CanOpenTerminal != canOpenTerminal {
-		t.Fatalf("projection = %+v, found=%v, err=%v, want status=%s can_open_terminal=%v", projection, found, err, status.String(), canOpenTerminal)
-	}
-}
-
-func assertHumanRequestProjectionSources(t *testing.T, store *Store, id HumanRequestID, status HumanRequestStatus, canOpenTerminal bool) {
-	t.Helper()
-	ctx := context.Background()
-	assertHumanRequestDirectProjection(t, store, id, status, canOpenTerminal)
-
-	snapshot, err := store.Snapshot(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var fromSnapshot *HumanRequestProjection
-	for index := range snapshot.HumanRequests {
-		if snapshot.HumanRequests[index].ID == id {
-			fromSnapshot = &snapshot.HumanRequests[index]
-			break
-		}
-	}
-	if fromSnapshot == nil || fromSnapshot.Status != status || fromSnapshot.CanOpenTerminal != canOpenTerminal {
-		t.Fatalf("snapshot projection = %+v, want status=%s can_open_terminal=%v", fromSnapshot, status.String(), canOpenTerminal)
-	}
-
-	state, err := store.Factory(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	page, err := store.ReadPublicStatePage(ctx, &PublicStateCursor{Head: state.Head, Kind: PublicStateHumanRequest})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var fromPage *HumanRequestProjection
-	for _, item := range page.Items {
-		projection, ok := item.HumanRequest()
-		if ok && projection.ID == id {
-			fromPage = &projection
-			break
-		}
-	}
-	if fromPage == nil || fromPage.Status != status || fromPage.CanOpenTerminal != canOpenTerminal {
-		t.Fatalf("page projection = %+v, want status=%s can_open_terminal=%v", fromPage, status.String(), canOpenTerminal)
-	}
-
-	entity, err := store.ReadPublicStateEntity(ctx, PublicStateHumanRequest, mustPublicStateID(t, id.Bytes()))
-	if err != nil || entity.Item == nil {
-		t.Fatalf("entity = %+v, err=%v", entity, err)
-	}
-	fromEntity, ok := entity.Item.HumanRequest()
-	if !ok || fromEntity.Status != status || fromEntity.CanOpenTerminal != canOpenTerminal {
-		t.Fatalf("entity projection = %+v, ok=%v, want status=%s can_open_terminal=%v", fromEntity, ok, status.String(), canOpenTerminal)
+	if _, err := store.HumanRequestDetail(ctx, client.ID, request.ID, request.Revision); !errors.Is(err, ErrConflict) {
+		t.Fatalf("terminal detail = %v", err)
 	}
 }

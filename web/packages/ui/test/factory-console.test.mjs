@@ -107,7 +107,7 @@ test("empty and maximum bounded collections have explicit, semantic output", () 
     const requestID = `${suffix}${"41".repeat(15)}`;
     agents.set(agentID, { id: agentID, project_id: ids.project, name: `Agent ${index}`, role: "worker", paused: false, revision: BigInt(index + 1) });
     tasks.set(taskID, { id: taskID, project_id: ids.project, assigned_agent_id: agentID, title: `Task ${index}`, status: "queued", priority: index, revision: BigInt(index + 1) });
-    requests.set(requestID, { id: requestID, project_id: ids.project, agent_id: agentID, task_id: taskID, run_id: "51".repeat(16), created_at: 1n, updated_at: 1n, revision: BigInt(index + 1), kind: "question", status: "open", reply_max_bytes: 8192, can_reply: true, can_open_terminal: false });
+    requests.set(requestID, { id: requestID, project_id: ids.project, agent_id: agentID, task_id: taskID, created_at: 1n, updated_at: 1n, revision: BigInt(index + 1), kind: "question", status: "open", reply_max_bytes: 8192, can_reply: true });
   }
   const markup = render({ state: baseState({ agents, tasks, humanRequests: requests }) });
   assert.equal((markup.match(/class="dfFactoryConsole__card"/g) ?? []).length, 24);

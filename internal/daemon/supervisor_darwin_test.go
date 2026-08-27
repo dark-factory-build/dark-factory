@@ -202,9 +202,6 @@ func TestSupervisorShellProviderRequestsExactlyOneDurableHumanRequest(t *testing
 	if result.err != nil {
 		t.Fatalf("RunNext: %v", result.err)
 	}
-	if request.RunID != result.run.ID {
-		t.Fatalf("human request run=%s terminal run=%s", request.RunID, result.run.ID)
-	}
 	fixture.assertTerminal(t, result.run, kernel.OutcomeSucceeded)
 	fixture.assertOneWitness(t)
 	durable, found, err := fixture.store.HumanRequest(context.Background(), request.ID)

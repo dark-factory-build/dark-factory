@@ -14,8 +14,8 @@ func EncodeHumanRequestReplyResult(id string, v HumanRequestReplyResult) ([]byte
 func EncodeHumanRequestCancelRun(id string, v HumanRequestCancelRun) ([]byte, error) {
 	return encodeControl(TypeHumanRequestCancelRun, id, v)
 }
-func EncodeHumanRequestActionResult(id string, v HumanRequestActionResult) ([]byte, error) {
-	return encodeControl(TypeHumanRequestActionResult, id, v)
+func EncodeHumanRequestCancelRunResult(id string, v HumanRequestCancelRunResult) ([]byte, error) {
+	return encodeControl(TypeHumanRequestCancelRunResult, id, v)
 }
 func EncodeTerminalAttach(id string, v TerminalAttach) ([]byte, error) {
 	return encodeControl(TypeTerminalAttach, id, v)
@@ -77,7 +77,6 @@ const (
 )
 
 type HumanRequestReply struct {
-	RunID            string  `json:"run_id"`
 	RequestID        string  `json:"request_id"`
 	ExpectedRevision Decimal `json:"expected_revision"`
 	Reply            string  `json:"reply"`
@@ -88,18 +87,15 @@ type HumanRequestReplyResult struct {
 	Status    string  `json:"status"`
 }
 type HumanRequestCancelRun struct {
-	RunID                   string  `json:"run_id"`
 	RequestID               string  `json:"request_id"`
 	ExpectedRequestRevision Decimal `json:"expected_request_revision"`
 	ExpectedRunRevision     Decimal `json:"expected_run_revision"`
 }
-type HumanRequestActionResult struct {
-	Action          string  `json:"action"`
+type HumanRequestCancelRunResult struct {
 	RunID           string  `json:"run_id"`
 	RunRevision     Decimal `json:"run_revision"`
 	RequestID       string  `json:"request_id"`
 	RequestRevision Decimal `json:"request_revision"`
-	Status          string  `json:"status"`
 }
 type TerminalAttach struct {
 	RunID                   string  `json:"run_id"`
@@ -217,7 +213,7 @@ func validTerminalControl(kind MessageType, body any) error {
 		return validTerminalControl(kind, *value)
 	case *HumanRequestCancelRun:
 		return validTerminalControl(kind, *value)
-	case *HumanRequestActionResult:
+	case *HumanRequestCancelRunResult:
 		return validTerminalControl(kind, *value)
 	case *TerminalAttach:
 		return validTerminalControl(kind, *value)
@@ -271,7 +267,7 @@ func validTerminalControl(kind MessageType, body any) error {
 	dims := func(n uint16) bool { return n >= 1 && n <= 4096 }
 	switch v := body.(type) {
 	case HumanRequestReply:
-		if !id(v.RunID) || !id(v.RequestID) || v.ExpectedRevision == 0 || !utf8.ValidString(v.Reply) || v.Reply == "" || len([]byte(v.Reply)) > MaxHumanReplyBytes {
+		if !id(v.RequestID) || v.ExpectedRevision == 0 || !utf8.ValidString(v.Reply) || v.Reply == "" || len([]byte(v.Reply)) > MaxHumanReplyBytes {
 			return bad()
 		}
 	case HumanRequestReplyResult:
@@ -279,11 +275,11 @@ func validTerminalControl(kind MessageType, body any) error {
 			return bad()
 		}
 	case HumanRequestCancelRun:
-		if !id(v.RunID) || !id(v.RequestID) || !pos(v.ExpectedRequestRevision) || !pos(v.ExpectedRunRevision) {
+		if !id(v.RequestID) || !pos(v.ExpectedRequestRevision) || !pos(v.ExpectedRunRevision) {
 			return bad()
 		}
-	case HumanRequestActionResult:
-		if v.Action != "cancel_run" || !id(v.RunID) || !id(v.RequestID) || !pos(v.RunRevision) || !pos(v.RequestRevision) || v.Status != "resolved" {
+	case HumanRequestCancelRunResult:
+		if !id(v.RunID) || !id(v.RequestID) || !pos(v.RunRevision) || !pos(v.RequestRevision) {
 			return bad()
 		}
 	case TerminalAttach:
@@ -359,6 +355,16 @@ func validTerminalControl(kind MessageType, body any) error {
 		}
 	default:
 		return bad()
+	}
+	return nil
+}
+
+func validTerminalTargetDescriptor(value TerminalTargetDescriptor) error {
+	if _, err := fixedHex("run_id", value.RunID, 16); err != nil || value.RunID == "00000000000000000000000000000000" {
+		return fmt.Errorf("%w: terminal target run", ErrMalformed)
+	}
+	if _, err := fixedHex("session_id", value.SessionID, 16); err != nil || value.SessionID == "00000000000000000000000000000000" || value.RunRevision == 0 || value.SessionRevision == 0 {
+		return fmt.Errorf("%w: terminal target session", ErrMalformed)
 	}
 	return nil
 }

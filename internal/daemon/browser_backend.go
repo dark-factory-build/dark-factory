@@ -238,7 +238,23 @@ func (backend *browserBackend) HumanRequestDetail(ctx context.Context, rawClient
 	if err != nil {
 		return browserprotocol.HumanRequestDetail{}, mapBrowserError(err)
 	}
-	return browserprotocol.HumanRequestDetail{RequestID: detail.ID.String(), Revision: decimalRevision(detail.Revision), Question: detail.QuestionText}, nil
+	result := browserprotocol.HumanRequestDetail{
+		RequestID: detail.ID.String(), Revision: decimalRevision(detail.Revision), Question: detail.QuestionText,
+		CanReply: browserprotocol.Bool(detail.CanReply), ReplyMaxBytes: uint16(detail.ReplyMaxBytes),
+	}
+	if detail.TerminalTarget != nil {
+		result.TerminalTarget = &browserprotocol.TerminalTargetDescriptor{
+			RunID: detail.TerminalTarget.RunID().String(), SessionID: detail.TerminalTarget.SessionID().String(),
+			RunRevision: decimalRevision(detail.TerminalTarget.RunRevision()), SessionRevision: decimalRevision(detail.TerminalTarget.SessionRevision()),
+		}
+	}
+	if detail.CancelRun != nil {
+		result.CancelRun = &browserprotocol.HumanRequestCancelRunDescriptor{
+			ExpectedRequestRevision: decimalRevision(detail.CancelRun.ExpectedRequestRevision()),
+			ExpectedRunRevision:     decimalRevision(detail.CancelRun.ExpectedRunRevision()),
+		}
+	}
+	return result, nil
 }
 
 func (backend *browserBackend) TerminalTarget(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, request browserprotocol.TerminalTargetGet) (browserprotocol.TerminalTarget, error) {
@@ -604,10 +620,10 @@ func projectHumanRequest(item kernel.HumanRequestProjection) (browserprotocol.Hu
 		return browserprotocol.HumanRequestItem{}, fmt.Errorf("human-request reply bound exceeds wire")
 	}
 	return browserprotocol.HumanRequestItem{
-		ID: item.ID.String(), ProjectID: item.ProjectID.String(), AgentID: item.AgentID.String(), TaskID: item.TaskID.String(), RunID: item.RunID.String(),
+		ID: item.ID.String(), ProjectID: item.ProjectID.String(), AgentID: item.AgentID.String(), TaskID: item.TaskID.String(),
 		CreatedAt: decimalMillis(item.CreatedAt), UpdatedAt: decimalMillis(item.UpdatedAt), Revision: decimalRevision(item.Revision),
 		Kind: item.Kind.String(), Status: item.Status.String(), ReplyMaxBytes: uint16(item.ReplyMaxBytes),
-		CanReply: browserprotocol.Bool(item.CanReply), CanOpenTerminal: browserprotocol.Bool(item.CanOpenTerminal),
+		CanReply: browserprotocol.Bool(item.CanReply),
 	}, nil
 }
 

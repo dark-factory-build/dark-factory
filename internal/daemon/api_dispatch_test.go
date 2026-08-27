@@ -239,7 +239,7 @@ func TestDaemonDispatchesHumanQuestionWithDurableIdempotency(t *testing.T) {
 		t.Fatalf("durable human requests = %+v, %v", requests.HumanRequests, err)
 	}
 	request := requests.HumanRequests[0]
-	if request.RunID != active.run.ID || request.Status != kernel.HumanRequestOpen {
+	if request.Status != kernel.HumanRequestOpen {
 		t.Fatalf("durable human request = %+v", request)
 	}
 	encoded, err := json.Marshal(created)

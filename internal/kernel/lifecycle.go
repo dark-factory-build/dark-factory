@@ -649,10 +649,14 @@ func (store *Store) CancelRun(ctx context.Context, runID RunID, expected Revisio
 }
 
 func (store *Store) enterFinalizing(ctx context.Context, tx *writeTx, run Run, expected Revision, proposal Proposal, at UnixMillis) (Run, error) {
-	return store.enterFinalizingForHumanAction(ctx, tx, run, expected, proposal, at, nil)
+	return store.enterFinalizingWithHumanRequestCancel(ctx, tx, run, expected, proposal, at, nil)
 }
 
-func (store *Store) enterFinalizingForHumanAction(ctx context.Context, tx *writeTx, run Run, expected Revision, proposal Proposal, at UnixMillis, actionRequest *HumanRequestID) (Run, error) {
+func (store *Store) enterFinalizingForHumanRequestCancel(ctx context.Context, tx *writeTx, run Run, expected Revision, proposal Proposal, at UnixMillis, requestID HumanRequestID) (Run, error) {
+	return store.enterFinalizingWithHumanRequestCancel(ctx, tx, run, expected, proposal, at, &requestID)
+}
+
+func (store *Store) enterFinalizingWithHumanRequestCancel(ctx context.Context, tx *writeTx, run Run, expected Revision, proposal Proposal, at UnixMillis, cancelRequest *HumanRequestID) (Run, error) {
 	if run.Revision != expected || at.Int64() < run.UpdatedAt.Int64() {
 		return Run{}, tx.Rollback(ErrRevisionConflict)
 	}
@@ -688,7 +692,7 @@ func (store *Store) enterFinalizingForHumanAction(ctx context.Context, tx *write
 		}
 	}
 	pending := []pendingInvalidation{{kind: EntityRun, id: run.ID.Bytes(), revision: expected.Int64() + 1}}
-	requestInvalidations, err := transitionHumanRequestsForRun(ctx, tx.connection, run.ID, at, false, actionRequest)
+	requestInvalidations, err := transitionHumanRequestsForRun(ctx, tx.connection, run.ID, at, false, cancelRequest)
 	if err != nil {
 		return Run{}, tx.Rollback(err)
 	}
@@ -802,7 +806,7 @@ func (store *Store) observeProcessExit(ctx context.Context, runID RunID, expecte
 		if err := requireRows(releasing, err, 4); err != nil {
 			return Run{}, tx.Rollback(err)
 		}
-		requestInvalidations, transitionErr := transitionHumanRequestsForRun(ctx, tx.connection, run.ID, at, false)
+		requestInvalidations, transitionErr := transitionHumanRequestsForRun(ctx, tx.connection, run.ID, at, false, nil)
 		if transitionErr != nil {
 			return Run{}, tx.Rollback(transitionErr)
 		}
@@ -980,7 +984,7 @@ func (store *Store) FinalizeRun(ctx context.Context, runID RunID, expected Revis
 	if err := requireOneRow(updated, err); err != nil {
 		return Run{}, tx.Rollback(err)
 	}
-	requestInvalidations, err := transitionHumanRequestsForRun(ctx, tx.connection, run.ID, at, true)
+	requestInvalidations, err := transitionHumanRequestsForRun(ctx, tx.connection, run.ID, at, true, nil)
 	if err != nil {
 		return Run{}, tx.Rollback(err)
 	}

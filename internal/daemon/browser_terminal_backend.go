@@ -133,10 +133,6 @@ func (backend *browserBackend) InputTerminal(ctx context.Context, request browse
 }
 
 func (backend *browserBackend) ReplyHumanRequest(ctx context.Context, principal browser.Principal, request browserprotocol.HumanRequestReply) (browserprotocol.HumanRequestReplyResult, error) {
-	runID, err := browserID(request.RunID, kernel.RunIDFromBytes)
-	if err != nil {
-		return browserprotocol.HumanRequestReplyResult{}, browser.ErrStale
-	}
 	requestID, err := browserID(request.RequestID, kernel.HumanRequestIDFromBytes)
 	if err != nil {
 		return browserprotocol.HumanRequestReplyResult{}, browser.ErrStale
@@ -145,7 +141,7 @@ func (backend *browserBackend) ReplyHumanRequest(ctx context.Context, principal 
 	if err != nil {
 		return browserprotocol.HumanRequestReplyResult{}, browser.ErrStale
 	}
-	_, err = backend.owner.humanReply(ctx, principal, runID, requestID, expected, request.Reply)
+	_, err = backend.owner.humanReply(ctx, principal, requestID, expected, request.Reply)
 	if err != nil {
 		if projection, found, readErr := backend.store.HumanRequest(ctx, requestID); readErr == nil && found && projection.Status == kernel.HumanRequestDeliveryUnknown {
 			return browserprotocol.HumanRequestReplyResult{RequestID: request.RequestID, Revision: decimalRevision(projection.Revision), Status: "delivery_unknown"}, nil
@@ -162,46 +158,42 @@ func (backend *browserBackend) ReplyHumanRequest(ctx context.Context, principal 
 	return browserprotocol.HumanRequestReplyResult{RequestID: request.RequestID, Revision: decimalRevision(projection.Revision), Status: "resolved"}, nil
 }
 
-func (backend *browserBackend) CancelHumanRequestRun(ctx context.Context, principal browser.Principal, request browserprotocol.HumanRequestCancelRun) (browserprotocol.HumanRequestActionResult, error) {
-	runID, err := browserID(request.RunID, kernel.RunIDFromBytes)
-	if err != nil {
-		return browserprotocol.HumanRequestActionResult{}, browser.ErrStale
-	}
+func (backend *browserBackend) CancelHumanRequestRun(ctx context.Context, principal browser.Principal, request browserprotocol.HumanRequestCancelRun) (browserprotocol.HumanRequestCancelRunResult, error) {
 	requestID, err := browserID(request.RequestID, kernel.HumanRequestIDFromBytes)
 	if err != nil {
-		return browserprotocol.HumanRequestActionResult{}, browser.ErrStale
+		return browserprotocol.HumanRequestCancelRunResult{}, browser.ErrStale
 	}
 	expectedRequest, err := browserDecimal(request.ExpectedRequestRevision)
 	if err != nil {
-		return browserprotocol.HumanRequestActionResult{}, browser.ErrStale
+		return browserprotocol.HumanRequestCancelRunResult{}, browser.ErrStale
 	}
 	expectedRun, err := browserDecimal(request.ExpectedRunRevision)
 	if err != nil {
-		return browserprotocol.HumanRequestActionResult{}, browser.ErrStale
+		return browserprotocol.HumanRequestCancelRunResult{}, browser.ErrStale
 	}
 	clientID, release, err := backend.authorizePrincipal(ctx, principal, kernel.BrowserCapabilityHumanActions)
 	if err != nil {
-		return browserprotocol.HumanRequestActionResult{}, err
+		return browserprotocol.HumanRequestCancelRunResult{}, err
 	}
 	defer release()
 	at, err := backend.timestamp()
 	if err != nil {
-		return browserprotocol.HumanRequestActionResult{}, err
+		return browserprotocol.HumanRequestCancelRunResult{}, err
 	}
-	run, requestRow, err := backend.owner.cancelHumanRequestRun(ctx, clientID, requestID, runID, expectedRequest, expectedRun, at)
+	run, requestRow, err := backend.owner.cancelHumanRequestRun(ctx, clientID, requestID, expectedRequest, expectedRun, at)
 	if err != nil {
-		return browserprotocol.HumanRequestActionResult{}, mapBrowserError(err)
+		return browserprotocol.HumanRequestCancelRunResult{}, mapBrowserError(err)
 	}
-	return browserprotocol.HumanRequestActionResult{Action: "cancel_run", RunID: run.ID.String(), RunRevision: decimalRevision(run.Revision), RequestID: requestRow.ID.String(), RequestRevision: decimalRevision(requestRow.Revision), Status: "resolved"}, nil
+	return browserprotocol.HumanRequestCancelRunResult{RunID: run.ID.String(), RunRevision: decimalRevision(run.Revision), RequestID: requestRow.ID.String(), RequestRevision: decimalRevision(requestRow.Revision)}, nil
 }
 
-func (daemon *Daemon) cancelHumanRequestRun(ctx context.Context, clientID kernel.BrowserClientID, requestID kernel.HumanRequestID, runID kernel.RunID, expectedRequest, expectedRun kernel.Revision, at kernel.UnixMillis) (kernel.Run, kernel.HumanRequest, error) {
+func (daemon *Daemon) cancelHumanRequestRun(ctx context.Context, clientID kernel.BrowserClientID, requestID kernel.HumanRequestID, expectedRequest, expectedRun kernel.Revision, at kernel.UnixMillis) (kernel.Run, kernel.HumanRequest, error) {
 	if daemon == nil || daemon.store == nil {
 		return kernel.Run{}, kernel.HumanRequest{}, kernel.ErrUnauthorized
 	}
 	daemon.operationMu.Lock()
 	defer daemon.operationMu.Unlock()
-	run, request, err := daemon.store.CancelHumanRequestRun(ctx, clientID, requestID, runID, expectedRequest, expectedRun, at)
+	run, request, err := daemon.store.CancelHumanRequestRun(ctx, clientID, requestID, expectedRequest, expectedRun, at)
 	if err != nil {
 		return kernel.Run{}, kernel.HumanRequest{}, err
 	}
@@ -209,7 +201,7 @@ func (daemon *Daemon) cancelHumanRequestRun(ctx context.Context, clientID kernel
 	// checked after that commit; failure is visible but never turns the action
 	// into a retry.
 	daemon.attemptMu.Lock()
-	attempt := daemon.attempts[runID]
+	attempt := daemon.attempts[run.ID]
 	daemon.attemptMu.Unlock()
 	if attempt != nil && terminalEffectsSupported {
 		fenceCtx, cancel := context.WithTimeout(context.Background(), liveAttemptEffectLimit)

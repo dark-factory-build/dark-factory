@@ -214,5 +214,5 @@ type TerminalBackend interface {
 	ResizeTerminal(context.Context, TerminalResizeRequest) error
 	InputTerminal(context.Context, TerminalInputRequest) (uint32, error)
 	ReplyHumanRequest(context.Context, Principal, browserprotocol.HumanRequestReply) (browserprotocol.HumanRequestReplyResult, error)
-	CancelHumanRequestRun(context.Context, Principal, browserprotocol.HumanRequestCancelRun) (browserprotocol.HumanRequestActionResult, error)
+	CancelHumanRequestRun(context.Context, Principal, browserprotocol.HumanRequestCancelRun) (browserprotocol.HumanRequestCancelRunResult, error)
 }

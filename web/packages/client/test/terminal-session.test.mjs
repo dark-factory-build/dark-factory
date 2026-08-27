@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  HumanRequestClient,
   MAX_SQLITE_INTEGER,
   TerminalHandle,
   decodeClientControl,
@@ -12,7 +11,6 @@ import {
   encodeTerminalLeaseResult,
   encodeTerminalResized,
   encodeTerminalDetached,
-  encodeHumanRequestReplyResult,
   encodeTerminalOutput,
 } from "../dist/src/index.js";
 
@@ -461,47 +459,6 @@ test("every terminal control send failure closes and prevents retry", async () =
   const detach = await failingTerminal("TERMINAL_DETACH", attachedWithLease);
   await assert.rejects(detach.terminal.detach(), (error) => error.code === "connection");
   assert.equal(detach.terminal.closed, true);
-});
-
-test("oversized HumanRequest can be retried and settled requests are replayable by revision", async () => {
-  const sent = [];
-  let number = 100;
-  const client = new HumanRequestClient((id, payload) => sent.push({ id, payload }), () => (number++).toString(16).padStart(32, "0"));
-  const request = { runId, requestId: "aa".repeat(16), expectedRevision: 1n, reply: "x".repeat(8193) };
-  await assert.rejects(client.reply(request), /oversized|malformed/);
-  const valid = { ...request, reply: "ok" };
-  const pending = client.reply(valid);
-  assert.equal(sent.length, 1);
-  await assert.rejects(client.reply(valid), /human request pending/);
-  const firstID = sent[0].id;
-  client.receive(control(encodeHumanRequestReplyResult(firstID, { request_id: valid.requestId, revision: 2n, status: "resolved" })));
-  await pending;
-  const replay = client.reply(valid);
-  assert.equal(sent.length, 2);
-  const secondID = sent[1].id;
-  client.receive(control(encodeHumanRequestReplyResult(secondID, { request_id: valid.requestId, revision: 3n, status: "delivery_unknown" })));
-  assert.equal((await replay).status, "delivery_unknown");
-  client.close();
-});
-
-test("HumanRequest pending capacity is bounded and settlement frees a slot", async () => {
-  const sent = [];
-  let number = 200;
-  const client = new HumanRequestClient((id, payload) => sent.push({ id, payload }), () => (number++).toString(16).padStart(32, "0"));
-  const requests = Array.from({ length: 33 }, (_, index) => ({ runId, requestId: (index + 1).toString(16).padStart(32, "0"), expectedRevision: 1n, reply: "ok" }));
-  const pending = requests.slice(0, 32).map((request) => client.reply(request));
-  assert.equal(sent.length, 32);
-  await assert.rejects(client.reply(requests[32]), /capacity/);
-  const firstID = sent[0].id;
-  client.receive(control(encodeHumanRequestReplyResult(firstID, { request_id: requests[0].requestId, revision: 2n, status: "resolved" })));
-  await pending[0];
-  const final = client.reply(requests[32]);
-  assert.equal(sent.length, 33);
-  const finalID = sent[32].id;
-  client.receive(control(encodeHumanRequestReplyResult(finalID, { request_id: requests[32].requestId, revision: 2n, status: "resolved" })));
-  await final;
-  client.close();
-  await Promise.allSettled(pending.slice(1));
 });
 
 test("async observation callback rejection is isolated from terminal authority", async () => {

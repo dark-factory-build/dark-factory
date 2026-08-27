@@ -121,8 +121,8 @@ func encodeDecoded(frame ControlFrame) ([]byte, error) {
 		return encodeControl(TypeHumanRequestReplyResult, frame.ID, value)
 	case HumanRequestCancelRun:
 		return encodeControl(TypeHumanRequestCancelRun, frame.ID, value)
-	case HumanRequestActionResult:
-		return encodeControl(TypeHumanRequestActionResult, frame.ID, value)
+	case HumanRequestCancelRunResult:
+		return encodeControl(TypeHumanRequestCancelRunResult, frame.ID, value)
 	case TerminalTargetGet:
 		return EncodeTerminalTargetGet(frame.ID, value)
 	case TerminalTarget:
@@ -408,7 +408,7 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 		{"HUMAN_REQUEST_REPLY", "client", "required", "human_request_reply.json"},
 		{"HUMAN_REQUEST_REPLY_RESULT", "server", "required", "human_request_reply_result.json"},
 		{"HUMAN_REQUEST_CANCEL_RUN", "client", "required", "human_request_cancel_run.json"},
-		{"HUMAN_REQUEST_ACTION_RESULT", "server", "required", "human_request_action_result.json"},
+		{"HUMAN_REQUEST_CANCEL_RUN_RESULT", "server", "required", "human_request_cancel_run_result.json"},
 		{"TERMINAL_TARGET_GET", "client", "required", "terminal_target_get.json"},
 		{"TERMINAL_TARGET", "server", "required", "terminal_target.json"},
 		{"TERMINAL_ATTACH", "client", "required", "terminal_attach.json"},
@@ -499,7 +499,7 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expectedFiles := map[string]bool{"transcript_v1.json": true, "hello.json": true, "pair_prove.json": true, "pair_result.json": true, "auth_prove.json": true, "auth_result.json": true, "state_get.json": true, "state_snapshot.json": true, "state_restart.json": true, "state_subscribe.json": true, "state_event.json": true, "state_entity_get.json": true, "state_entity.json": true, "human_request_detail_get.json": true, "human_request_detail.json": true, "error.json": true, "terminal_input.hex": true, "terminal_output.hex": true, "human_request_reply.json": true, "human_request_reply_result.json": true, "human_request_cancel_run.json": true, "human_request_action_result.json": true, "terminal_target_get.json": true, "terminal_target.json": true, "terminal_attach.json": true, "terminal_attached.json": true, "terminal_ack.json": true, "terminal_lease_acquire.json": true, "terminal_lease_renew.json": true, "terminal_lease_release.json": true, "terminal_lease_result.json": true, "terminal_resize.json": true, "terminal_resized.json": true, "terminal_detach.json": true, "terminal_detached.json": true, "terminal_input_result.json": true, "terminal_eof.json": true, "terminal_exit.json": true, "terminal_reset.json": true}
+	expectedFiles := map[string]bool{"transcript_v1.json": true, "hello.json": true, "pair_prove.json": true, "pair_result.json": true, "auth_prove.json": true, "auth_result.json": true, "state_get.json": true, "state_snapshot.json": true, "state_restart.json": true, "state_subscribe.json": true, "state_event.json": true, "state_entity_get.json": true, "state_entity.json": true, "human_request_detail_get.json": true, "human_request_detail.json": true, "error.json": true, "terminal_input.hex": true, "terminal_output.hex": true, "human_request_reply.json": true, "human_request_reply_result.json": true, "human_request_cancel_run.json": true, "human_request_cancel_run_result.json": true, "terminal_target_get.json": true, "terminal_target.json": true, "terminal_attach.json": true, "terminal_attached.json": true, "terminal_ack.json": true, "terminal_lease_acquire.json": true, "terminal_lease_renew.json": true, "terminal_lease_release.json": true, "terminal_lease_result.json": true, "terminal_resize.json": true, "terminal_resized.json": true, "terminal_detach.json": true, "terminal_detached.json": true, "terminal_input_result.json": true, "terminal_eof.json": true, "terminal_exit.json": true, "terminal_reset.json": true}
 	if len(entries) != len(expectedFiles) {
 		t.Fatalf("fixture count = %d, want %d", len(entries), len(expectedFiles))
 	}
@@ -739,6 +739,47 @@ func TestTerminalControlRejectsSurrogateAndNullMutations(t *testing.T) {
 		exit := strings.Replace(string(fixtureBytes(t, "terminal_exit.json")), `"`+field+`":`+map[string]string{"exit_code": "0", "exit_signal": "0", "aborted": "false"}[field], `"`+field+`":null`, 1)
 		if _, err := DecodeServerControl([]byte(exit)); err != ErrMalformed {
 			t.Fatalf("null terminal exit %s accepted: %v", field, err)
+		}
+	}
+}
+
+func TestHumanRequestAuthorityWireRejectsLegacyAndForgedShapes(t *testing.T) {
+	reply := string(fixtureBytes(t, "human_request_reply.json"))
+	cancel := string(fixtureBytes(t, "human_request_cancel_run.json"))
+	detail := string(fixtureBytes(t, "human_request_detail.json"))
+	result := string(fixtureBytes(t, "human_request_cancel_run_result.json"))
+	for name, test := range map[string]struct {
+		wire   string
+		server bool
+	}{
+		"reply caller run":      {wire: strings.Replace(reply, `"request_id":`, `"run_id":"11111111111111111111111111111111","request_id":`, 1)},
+		"cancel caller run":     {wire: strings.Replace(cancel, `"request_id":`, `"run_id":"11111111111111111111111111111111","request_id":`, 1)},
+		"cancel field case":     {wire: strings.Replace(cancel, `"expected_run_revision"`, `"Expected_Run_Revision"`, 1)},
+		"detail missing target": {wire: strings.Replace(detail, `,"terminal_target":{"run_id":"11111111111111111111111111111111","session_id":"22222222222222222222222222222222","run_revision":"8","session_revision":"9"}`, ``, 1), server: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var err error
+			if test.server {
+				_, err = DecodeServerControl([]byte(test.wire))
+			} else {
+				_, err = DecodeClientControl([]byte(test.wire))
+			}
+			if err != ErrMalformed {
+				t.Fatalf("legacy/forged authority accepted: %v", err)
+			}
+		})
+	}
+	legacyResult := strings.Replace(result, `"type":"HUMAN_REQUEST_CANCEL_RUN_RESULT"`, `"type":"HUMAN_REQUEST_ACTION_RESULT"`, 1)
+	legacyResult = strings.Replace(legacyResult, `"body":{`, `"body":{"action":"cancel_run","status":"resolved",`, 1)
+	if _, err := DecodeServerControl([]byte(legacyResult)); err != ErrMalformed {
+		t.Fatalf("legacy generic result accepted: %v", err)
+	}
+	for _, mutation := range []string{
+		strings.Replace(result, `"run_id":`, `"action":"cancel_run","run_id":`, 1),
+		strings.Replace(result, `"request_revision":"2"`, `"request_revision":"2","status":"resolved"`, 1),
+	} {
+		if _, err := DecodeServerControl([]byte(mutation)); err != ErrMalformed {
+			t.Fatalf("generic result residue accepted: %v", err)
 		}
 	}
 }

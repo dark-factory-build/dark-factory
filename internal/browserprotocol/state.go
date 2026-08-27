@@ -136,19 +136,17 @@ type TaskItem struct {
 // HumanRequestItem is deliberately only the public card projection. Private
 // question/reply text and copied display prose cannot be represented here.
 type HumanRequestItem struct {
-	ID              string  `json:"id"`
-	ProjectID       string  `json:"project_id"`
-	AgentID         string  `json:"agent_id"`
-	TaskID          string  `json:"task_id"`
-	RunID           string  `json:"run_id"`
-	CreatedAt       Decimal `json:"created_at"`
-	UpdatedAt       Decimal `json:"updated_at"`
-	Revision        Decimal `json:"revision"`
-	Kind            string  `json:"kind"`
-	Status          string  `json:"status"`
-	ReplyMaxBytes   uint16  `json:"reply_max_bytes"`
-	CanReply        Bool    `json:"can_reply"`
-	CanOpenTerminal Bool    `json:"can_open_terminal"`
+	ID            string  `json:"id"`
+	ProjectID     string  `json:"project_id"`
+	AgentID       string  `json:"agent_id"`
+	TaskID        string  `json:"task_id"`
+	CreatedAt     Decimal `json:"created_at"`
+	UpdatedAt     Decimal `json:"updated_at"`
+	Revision      Decimal `json:"revision"`
+	Kind          string  `json:"kind"`
+	Status        string  `json:"status"`
+	ReplyMaxBytes uint16  `json:"reply_max_bytes"`
+	CanReply      Bool    `json:"can_reply"`
 }
 
 // StateItems is a closed kind-selected page union.
@@ -413,9 +411,18 @@ type HumanRequestDetailGet struct {
 }
 
 type HumanRequestDetail struct {
-	RequestID string  `json:"request_id"`
-	Revision  Decimal `json:"revision"`
-	Question  string  `json:"question"`
+	RequestID      string                           `json:"request_id"`
+	Revision       Decimal                          `json:"revision"`
+	Question       string                           `json:"question"`
+	CanReply       Bool                             `json:"can_reply"`
+	ReplyMaxBytes  uint16                           `json:"reply_max_bytes"`
+	TerminalTarget *TerminalTargetDescriptor        `json:"terminal_target"`
+	CancelRun      *HumanRequestCancelRunDescriptor `json:"cancel_run"`
+}
+
+type HumanRequestCancelRunDescriptor struct {
+	ExpectedRequestRevision Decimal `json:"expected_request_revision"`
+	ExpectedRunRevision     Decimal `json:"expected_run_revision"`
 }
 
 func decodeStateSnapshot(data []byte) (StateSnapshot, error) {
@@ -650,7 +657,7 @@ func validateTaskItem(value TaskItem) error {
 }
 
 func validateHumanRequestItem(value HumanRequestItem) error {
-	if validateEntityID(StateHumanRequest, value.ID) != nil || validateEntityID(StateProject, value.ProjectID) != nil || validateEntityID(StateAgent, value.AgentID) != nil || validateEntityID(StateTask, value.TaskID) != nil || validateEntityID(StateTask, value.RunID) != nil || value.UpdatedAt < value.CreatedAt || value.Revision == 0 || value.Kind != "question" || value.ReplyMaxBytes < 1 || value.ReplyMaxBytes > MaxHumanReplyBytes {
+	if validateEntityID(StateHumanRequest, value.ID) != nil || validateEntityID(StateProject, value.ProjectID) != nil || validateEntityID(StateAgent, value.AgentID) != nil || validateEntityID(StateTask, value.TaskID) != nil || value.UpdatedAt < value.CreatedAt || value.Revision == 0 || value.Kind != "question" || value.ReplyMaxBytes < 1 || value.ReplyMaxBytes > MaxHumanReplyBytes {
 		return fmt.Errorf("%w: human request item", ErrMalformed)
 	}
 	switch value.Status {
@@ -881,8 +888,21 @@ func validateHumanRequestDetailGet(value HumanRequestDetailGet) error {
 }
 
 func validateHumanRequestDetail(value HumanRequestDetail) error {
-	if validateEntityID(StateHumanRequest, value.RequestID) != nil || value.Revision == 0 || validateBoundedText(value.Question, 1, MaxHumanQuestionBytes) != nil {
+	if validateEntityID(StateHumanRequest, value.RequestID) != nil || value.Revision == 0 || validateBoundedText(value.Question, 1, MaxHumanQuestionBytes) != nil || value.ReplyMaxBytes != MaxHumanReplyBytes {
 		return fmt.Errorf("%w: human request detail", ErrMalformed)
+	}
+	if value.TerminalTarget != nil {
+		if err := validTerminalTargetDescriptor(*value.TerminalTarget); err != nil {
+			return fmt.Errorf("%w: human request terminal target", ErrMalformed)
+		}
+	}
+	if value.CancelRun != nil {
+		if value.TerminalTarget == nil || !bool(value.CanReply) || value.CancelRun.ExpectedRequestRevision != value.Revision || value.CancelRun.ExpectedRunRevision != value.TerminalTarget.RunRevision {
+			return fmt.Errorf("%w: human request cancellation", ErrMalformed)
+		}
+	}
+	if bool(value.CanReply) && (value.TerminalTarget == nil || value.CancelRun == nil) {
+		return fmt.Errorf("%w: human request reply availability", ErrMalformed)
 	}
 	return nil
 }

@@ -249,9 +249,9 @@ func TestHumanRequestPageBoundariesOverTransport(t *testing.T) {
 					items := make([]browserprotocol.HumanRequestItem, count)
 					for index := range items {
 						items[index] = browserprotocol.HumanRequestItem{
-							ID: requestID, ProjectID: projectID, AgentID: testID, TaskID: projectID, RunID: testID,
+							ID: requestID, ProjectID: projectID, AgentID: testID, TaskID: projectID,
 							CreatedAt: 1, UpdatedAt: 1, Revision: 1, Kind: "question", Status: "open",
-							ReplyMaxBytes: browserprotocol.MaxHumanReplyBytes, CanReply: true, CanOpenTerminal: true,
+							ReplyMaxBytes: browserprotocol.MaxHumanReplyBytes, CanReply: true,
 						}
 					}
 					if call == 5 && test.humanCount > browserprotocol.MaxStatePageItems {

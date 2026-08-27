@@ -28,7 +28,7 @@ type terminalTestBackend struct {
 	input                                       TerminalInputRequest
 	inputCalls                                  int
 	replyResult                                 browserprotocol.HumanRequestReplyResult
-	actionResult                                browserprotocol.HumanRequestActionResult
+	actionResult                                browserprotocol.HumanRequestCancelRunResult
 	leaseResult                                 TerminalLeaseResult
 }
 
@@ -134,7 +134,7 @@ func (backend *terminalTestBackend) InputTerminal(_ context.Context, request Ter
 func (backend *terminalTestBackend) ReplyHumanRequest(context.Context, Principal, browserprotocol.HumanRequestReply) (browserprotocol.HumanRequestReplyResult, error) {
 	return backend.replyResult, nil
 }
-func (backend *terminalTestBackend) CancelHumanRequestRun(context.Context, Principal, browserprotocol.HumanRequestCancelRun) (browserprotocol.HumanRequestActionResult, error) {
+func (backend *terminalTestBackend) CancelHumanRequestRun(context.Context, Principal, browserprotocol.HumanRequestCancelRun) (browserprotocol.HumanRequestCancelRunResult, error) {
 	return backend.actionResult, nil
 }
 
@@ -571,11 +571,11 @@ func TestTerminalTransportHumanRequestEffectDispatch(t *testing.T) {
 	backend := newTerminalTestBackend()
 	backend.authentication.Capabilities = browserprotocol.CapabilityObserve | browserprotocol.CapabilityHumanActions
 	backend.replyResult = browserprotocol.HumanRequestReplyResult{RequestID: requestID, Revision: 3, Status: "resolved"}
-	backend.actionResult = browserprotocol.HumanRequestActionResult{Action: "cancel_run", RunID: testID, RunRevision: 3, RequestID: requestID, RequestRevision: 2, Status: "resolved"}
+	backend.actionResult = browserprotocol.HumanRequestCancelRunResult{RunID: testID, RunRevision: 3, RequestID: requestID, RequestRevision: 2}
 	server := startTerminalServer(t, backend)
 	connection, _ := dialServer(t, server, testOrigin)
 	authenticateTerminalTest(t, connection)
-	reply, err := browserprotocol.EncodeHumanRequestReply("reply", browserprotocol.HumanRequestReply{RunID: testID, RequestID: requestID, ExpectedRevision: 1, Reply: "yes"})
+	reply, err := browserprotocol.EncodeHumanRequestReply("reply", browserprotocol.HumanRequestReply{RequestID: requestID, ExpectedRevision: 1, Reply: "yes"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -583,13 +583,13 @@ func TestTerminalTransportHumanRequestEffectDispatch(t *testing.T) {
 	if frame := readServerFrame(t, connection); frame.Type != browserprotocol.TypeHumanRequestReplyResult || frame.ID != "reply" || frame.Body.(browserprotocol.HumanRequestReplyResult).Status != "resolved" {
 		t.Fatalf("reply result=%+v", frame)
 	}
-	cancel, err := browserprotocol.EncodeHumanRequestCancelRun("cancel", browserprotocol.HumanRequestCancelRun{RunID: testID, RequestID: requestID, ExpectedRequestRevision: 1, ExpectedRunRevision: 2})
+	cancel, err := browserprotocol.EncodeHumanRequestCancelRun("cancel", browserprotocol.HumanRequestCancelRun{RequestID: requestID, ExpectedRequestRevision: 1, ExpectedRunRevision: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
 	writeClientFrame(t, connection, cancel)
 	frame := readServerFrame(t, connection)
-	if frame.Type != browserprotocol.TypeHumanRequestActionResult || frame.ID != "cancel" || frame.Body.(browserprotocol.HumanRequestActionResult).Action != "cancel_run" {
+	if frame.Type != browserprotocol.TypeHumanRequestCancelRunResult || frame.ID != "cancel" || frame.Body.(browserprotocol.HumanRequestCancelRunResult).RunID != testID {
 		t.Fatalf("cancel result=%+v", frame)
 	}
 }
@@ -606,7 +606,7 @@ func TestTerminalTransportRejectsMismatchedHumanEffectResults(t *testing.T) {
 				backend.replyResult = browserprotocol.HumanRequestReplyResult{RequestID: testID, Revision: 3, Status: "resolved"}
 			},
 			write: func(t *testing.T, connection *websocket.Conn) {
-				payload, err := browserprotocol.EncodeHumanRequestReply("reply-request", browserprotocol.HumanRequestReply{RunID: testID, RequestID: requestID, ExpectedRevision: 1, Reply: "yes"})
+				payload, err := browserprotocol.EncodeHumanRequestReply("reply-request", browserprotocol.HumanRequestReply{RequestID: requestID, ExpectedRevision: 1, Reply: "yes"})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -619,7 +619,7 @@ func TestTerminalTransportRejectsMismatchedHumanEffectResults(t *testing.T) {
 				backend.replyResult = browserprotocol.HumanRequestReplyResult{RequestID: requestID, Revision: 1, Status: "resolved"}
 			},
 			write: func(t *testing.T, connection *websocket.Conn) {
-				payload, err := browserprotocol.EncodeHumanRequestReply("reply-revision", browserprotocol.HumanRequestReply{RunID: testID, RequestID: requestID, ExpectedRevision: 1, Reply: "yes"})
+				payload, err := browserprotocol.EncodeHumanRequestReply("reply-revision", browserprotocol.HumanRequestReply{RequestID: requestID, ExpectedRevision: 1, Reply: "yes"})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -632,20 +632,7 @@ func TestTerminalTransportRejectsMismatchedHumanEffectResults(t *testing.T) {
 				backend.replyResult = browserprotocol.HumanRequestReplyResult{RequestID: requestID, Revision: 3, Status: "pending"}
 			},
 			write: func(t *testing.T, connection *websocket.Conn) {
-				payload, err := browserprotocol.EncodeHumanRequestReply("reply-status", browserprotocol.HumanRequestReply{RunID: testID, RequestID: requestID, ExpectedRevision: 1, Reply: "yes"})
-				if err != nil {
-					t.Fatal(err)
-				}
-				writeClientFrame(t, connection, payload)
-			},
-		},
-		{
-			name: "action run id",
-			configure: func(backend *terminalTestBackend) {
-				backend.actionResult = browserprotocol.HumanRequestActionResult{Action: "cancel_run", RunID: projectID, RunRevision: 3, RequestID: requestID, RequestRevision: 2, Status: "resolved"}
-			},
-			write: func(t *testing.T, connection *websocket.Conn) {
-				payload, err := browserprotocol.EncodeHumanRequestCancelRun("action-run", browserprotocol.HumanRequestCancelRun{RunID: testID, RequestID: requestID, ExpectedRequestRevision: 1, ExpectedRunRevision: 2})
+				payload, err := browserprotocol.EncodeHumanRequestReply("reply-status", browserprotocol.HumanRequestReply{RequestID: requestID, ExpectedRevision: 1, Reply: "yes"})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -655,10 +642,10 @@ func TestTerminalTransportRejectsMismatchedHumanEffectResults(t *testing.T) {
 		{
 			name: "action request id",
 			configure: func(backend *terminalTestBackend) {
-				backend.actionResult = browserprotocol.HumanRequestActionResult{Action: "cancel_run", RunID: testID, RunRevision: 3, RequestID: testID, RequestRevision: 2, Status: "resolved"}
+				backend.actionResult = browserprotocol.HumanRequestCancelRunResult{RunID: testID, RunRevision: 3, RequestID: testID, RequestRevision: 2}
 			},
 			write: func(t *testing.T, connection *websocket.Conn) {
-				payload, err := browserprotocol.EncodeHumanRequestCancelRun("action-request", browserprotocol.HumanRequestCancelRun{RunID: testID, RequestID: requestID, ExpectedRequestRevision: 1, ExpectedRunRevision: 2})
+				payload, err := browserprotocol.EncodeHumanRequestCancelRun("action-request", browserprotocol.HumanRequestCancelRun{RequestID: requestID, ExpectedRequestRevision: 1, ExpectedRunRevision: 2})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -668,23 +655,10 @@ func TestTerminalTransportRejectsMismatchedHumanEffectResults(t *testing.T) {
 		{
 			name: "action revisions",
 			configure: func(backend *terminalTestBackend) {
-				backend.actionResult = browserprotocol.HumanRequestActionResult{Action: "cancel_run", RunID: testID, RunRevision: 2, RequestID: requestID, RequestRevision: 1, Status: "resolved"}
+				backend.actionResult = browserprotocol.HumanRequestCancelRunResult{RunID: testID, RunRevision: 2, RequestID: requestID, RequestRevision: 1}
 			},
 			write: func(t *testing.T, connection *websocket.Conn) {
-				payload, err := browserprotocol.EncodeHumanRequestCancelRun("action-revisions", browserprotocol.HumanRequestCancelRun{RunID: testID, RequestID: requestID, ExpectedRequestRevision: 1, ExpectedRunRevision: 2})
-				if err != nil {
-					t.Fatal(err)
-				}
-				writeClientFrame(t, connection, payload)
-			},
-		},
-		{
-			name: "action status",
-			configure: func(backend *terminalTestBackend) {
-				backend.actionResult = browserprotocol.HumanRequestActionResult{Action: "cancel_run", RunID: testID, RunRevision: 3, RequestID: requestID, RequestRevision: 2, Status: "pending"}
-			},
-			write: func(t *testing.T, connection *websocket.Conn) {
-				payload, err := browserprotocol.EncodeHumanRequestCancelRun("action-status", browserprotocol.HumanRequestCancelRun{RunID: testID, RequestID: requestID, ExpectedRequestRevision: 1, ExpectedRunRevision: 2})
+				payload, err := browserprotocol.EncodeHumanRequestCancelRun("action-revisions", browserprotocol.HumanRequestCancelRun{RequestID: requestID, ExpectedRequestRevision: 1, ExpectedRunRevision: 2})
 				if err != nil {
 					t.Fatal(err)
 				}

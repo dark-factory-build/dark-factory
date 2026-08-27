@@ -64,8 +64,8 @@ test("control role, envelope, field and capability validation is closed", () => 
 });
 
 test("browser terminal and HumanRequest controls are typed, directional, and bounded", () => {
-  const client = ["human_request_reply", "human_request_cancel_run", "terminal_target_get", "terminal_attach", "terminal_ack", "terminal_lease_acquire", "terminal_lease_renew", "terminal_lease_release", "terminal_resize", "terminal_detach"];
-  const server = ["human_request_reply_result", "human_request_action_result", "terminal_target", "terminal_attached", "terminal_lease_result", "terminal_resized", "terminal_detached", "terminal_input_result", "terminal_eof", "terminal_exit", "terminal_reset"];
+  const client = ["human_request_detail_get", "human_request_reply", "human_request_cancel_run", "terminal_target_get", "terminal_attach", "terminal_ack", "terminal_lease_acquire", "terminal_lease_renew", "terminal_lease_release", "terminal_resize", "terminal_detach"];
+  const server = ["human_request_detail", "human_request_reply_result", "human_request_cancel_run_result", "terminal_target", "terminal_attached", "terminal_lease_result", "terminal_resized", "terminal_detached", "terminal_input_result", "terminal_eof", "terminal_exit", "terminal_reset"];
   for (const name of client) {
     const frame = decodeClientControl(fixture(`${name}.json`));
     assert.equal(typeof frame.body, "object");
@@ -100,6 +100,17 @@ test("browser terminal and HumanRequest controls are typed, directional, and bou
   expectMalformed(() => decodeClientControl(fixture("human_request_reply.json").replace('"reply":"ok"', `"reply":"${"x".repeat(8193)}"`)));
   const pairedReply = decodeClientControl(fixture("human_request_reply.json").replace('"reply":"ok"', '"reply":"\\ud83d\\ude00"'));
   assert.equal(pairedReply.body.reply, "😀");
+  const humanReply = fixture("human_request_reply.json");
+  const humanCancel = fixture("human_request_cancel_run.json");
+  const humanDetail = fixture("human_request_detail.json");
+  const humanCancelResult = fixture("human_request_cancel_run_result.json");
+  expectMalformed(() => decodeClientControl(humanReply.replace('"request_id":', `"run_id":"${"11".repeat(16)}","request_id":`)));
+  expectMalformed(() => decodeClientControl(humanCancel.replace('"request_id":', `"run_id":"${"11".repeat(16)}","request_id":`)));
+  expectMalformed(() => decodeClientControl(humanCancel.replace('"expected_run_revision"', '"Expected_Run_Revision"')));
+  expectMalformed(() => decodeServerControl(humanDetail.replace('"expected_run_revision":"8"', '"expected_run_revision":"7"')));
+  expectMalformed(() => decodeServerControl(humanDetail.replace('"cancel_run":{', '"cancel_run":{"action":"cancel_run",')));
+  expectMalformed(() => decodeServerControl(humanCancelResult.replace('"run_id":', '"action":"cancel_run","run_id":')));
+  expectMalformed(() => decodeServerControl(humanCancelResult.replace('"type":"HUMAN_REQUEST_CANCEL_RUN_RESULT"', '"type":"HUMAN_REQUEST_ACTION_RESULT"')));
   const lease = fixture("terminal_lease_result.json");
   const target = fixture("terminal_target.json");
   const targetGet = fixture("terminal_target_get.json");

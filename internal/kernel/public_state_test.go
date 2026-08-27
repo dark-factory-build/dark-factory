@@ -415,15 +415,15 @@ func TestPublicStateEntityReadsAreExactSlimAndDeleted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, private := range []string{"PRIVATE_QUESTION_SENTINEL", "orchestrator", "task", "Agent needs", "WhyHumanNeeded", "QuestionText", "ProjectName", "AgentName", "TaskTitle"} {
+	for _, private := range []string{"PRIVATE_QUESTION_SENTINEL", "orchestrator", "task", "Agent needs", "WhyHumanNeeded", "QuestionText", "TerminalTarget", "CancelRun", "RunID", "ProjectName", "AgentName", "TaskTitle"} {
 		if strings.Contains(string(encoded), private) {
 			t.Fatalf("human request projection exposed %q: %s", private, encoded)
 		}
 	}
-	if !hr.CanReply || !hr.CanOpenTerminal || hr.ReplyMaxBytes != MaxHumanRequestReplyBytes {
-		t.Fatalf("human request actions = %+v", hr)
+	if !hr.CanReply || hr.ReplyMaxBytes != MaxHumanRequestReplyBytes {
+		t.Fatalf("human request public projection = %+v", hr)
 	}
-	wantFields := []string{"ID", "ProjectID", "AgentID", "TaskID", "RunID", "CreatedAt", "UpdatedAt", "Revision", "Kind", "Status", "ReplyMaxBytes", "CanReply", "CanOpenTerminal"}
+	wantFields := []string{"ID", "ProjectID", "AgentID", "TaskID", "CreatedAt", "UpdatedAt", "Revision", "Kind", "Status", "ReplyMaxBytes", "CanReply"}
 	projectionType := reflect.TypeOf(HumanRequestProjection{})
 	gotFields := make([]string, projectionType.NumField())
 	for index := range gotFields {

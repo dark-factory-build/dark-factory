@@ -25,42 +25,42 @@ const (
 type MessageType string
 
 const (
-	TypeHello                    MessageType = "HELLO"
-	TypePairProve                MessageType = "PAIR_PROVE"
-	TypePairResult               MessageType = "PAIR_RESULT"
-	TypeAuthProve                MessageType = "AUTH_PROVE"
-	TypeAuthResult               MessageType = "AUTH_RESULT"
-	TypeStateGet                 MessageType = "STATE_GET"
-	TypeStateSnapshot            MessageType = "STATE_SNAPSHOT"
-	TypeStateRestart             MessageType = "STATE_RESTART"
-	TypeStateSubscribe           MessageType = "STATE_SUBSCRIBE"
-	TypeStateEvent               MessageType = "STATE_EVENT"
-	TypeStateEntityGet           MessageType = "STATE_ENTITY_GET"
-	TypeStateEntity              MessageType = "STATE_ENTITY"
-	TypeHumanRequestDetailGet    MessageType = "HUMAN_REQUEST_DETAIL_GET"
-	TypeHumanRequestDetail       MessageType = "HUMAN_REQUEST_DETAIL"
-	TypeHumanRequestReply        MessageType = "HUMAN_REQUEST_REPLY"
-	TypeHumanRequestReplyResult  MessageType = "HUMAN_REQUEST_REPLY_RESULT"
-	TypeHumanRequestCancelRun    MessageType = "HUMAN_REQUEST_CANCEL_RUN"
-	TypeHumanRequestActionResult MessageType = "HUMAN_REQUEST_ACTION_RESULT"
-	TypeTerminalTargetGet        MessageType = "TERMINAL_TARGET_GET"
-	TypeTerminalTarget           MessageType = "TERMINAL_TARGET"
-	TypeTerminalAttach           MessageType = "TERMINAL_ATTACH"
-	TypeTerminalAttached         MessageType = "TERMINAL_ATTACHED"
-	TypeTerminalAck              MessageType = "TERMINAL_ACK"
-	TypeTerminalLeaseAcquire     MessageType = "TERMINAL_LEASE_ACQUIRE"
-	TypeTerminalLeaseRenew       MessageType = "TERMINAL_LEASE_RENEW"
-	TypeTerminalLeaseRelease     MessageType = "TERMINAL_LEASE_RELEASE"
-	TypeTerminalLeaseResult      MessageType = "TERMINAL_LEASE_RESULT"
-	TypeTerminalResize           MessageType = "TERMINAL_RESIZE"
-	TypeTerminalResized          MessageType = "TERMINAL_RESIZED"
-	TypeTerminalDetach           MessageType = "TERMINAL_DETACH"
-	TypeTerminalDetached         MessageType = "TERMINAL_DETACHED"
-	TypeTerminalInputResult      MessageType = "TERMINAL_INPUT_RESULT"
-	TypeTerminalEOF              MessageType = "TERMINAL_EOF"
-	TypeTerminalExit             MessageType = "TERMINAL_EXIT"
-	TypeTerminalReset            MessageType = "TERMINAL_RESET"
-	TypeError                    MessageType = "ERROR"
+	TypeHello                       MessageType = "HELLO"
+	TypePairProve                   MessageType = "PAIR_PROVE"
+	TypePairResult                  MessageType = "PAIR_RESULT"
+	TypeAuthProve                   MessageType = "AUTH_PROVE"
+	TypeAuthResult                  MessageType = "AUTH_RESULT"
+	TypeStateGet                    MessageType = "STATE_GET"
+	TypeStateSnapshot               MessageType = "STATE_SNAPSHOT"
+	TypeStateRestart                MessageType = "STATE_RESTART"
+	TypeStateSubscribe              MessageType = "STATE_SUBSCRIBE"
+	TypeStateEvent                  MessageType = "STATE_EVENT"
+	TypeStateEntityGet              MessageType = "STATE_ENTITY_GET"
+	TypeStateEntity                 MessageType = "STATE_ENTITY"
+	TypeHumanRequestDetailGet       MessageType = "HUMAN_REQUEST_DETAIL_GET"
+	TypeHumanRequestDetail          MessageType = "HUMAN_REQUEST_DETAIL"
+	TypeHumanRequestReply           MessageType = "HUMAN_REQUEST_REPLY"
+	TypeHumanRequestReplyResult     MessageType = "HUMAN_REQUEST_REPLY_RESULT"
+	TypeHumanRequestCancelRun       MessageType = "HUMAN_REQUEST_CANCEL_RUN"
+	TypeHumanRequestCancelRunResult MessageType = "HUMAN_REQUEST_CANCEL_RUN_RESULT"
+	TypeTerminalTargetGet           MessageType = "TERMINAL_TARGET_GET"
+	TypeTerminalTarget              MessageType = "TERMINAL_TARGET"
+	TypeTerminalAttach              MessageType = "TERMINAL_ATTACH"
+	TypeTerminalAttached            MessageType = "TERMINAL_ATTACHED"
+	TypeTerminalAck                 MessageType = "TERMINAL_ACK"
+	TypeTerminalLeaseAcquire        MessageType = "TERMINAL_LEASE_ACQUIRE"
+	TypeTerminalLeaseRenew          MessageType = "TERMINAL_LEASE_RENEW"
+	TypeTerminalLeaseRelease        MessageType = "TERMINAL_LEASE_RELEASE"
+	TypeTerminalLeaseResult         MessageType = "TERMINAL_LEASE_RESULT"
+	TypeTerminalResize              MessageType = "TERMINAL_RESIZE"
+	TypeTerminalResized             MessageType = "TERMINAL_RESIZED"
+	TypeTerminalDetach              MessageType = "TERMINAL_DETACH"
+	TypeTerminalDetached            MessageType = "TERMINAL_DETACHED"
+	TypeTerminalInputResult         MessageType = "TERMINAL_INPUT_RESULT"
+	TypeTerminalEOF                 MessageType = "TERMINAL_EOF"
+	TypeTerminalExit                MessageType = "TERMINAL_EXIT"
+	TypeTerminalReset               MessageType = "TERMINAL_RESET"
+	TypeError                       MessageType = "ERROR"
 )
 
 // Capability bits are deliberately a fixed wire bitmask, not an extensible
@@ -316,8 +316,8 @@ func decodeControl(data []byte, role senderRole) (ControlFrame, error) {
 		body = new(HumanRequestReplyResult)
 	case TypeHumanRequestCancelRun:
 		body = new(HumanRequestCancelRun)
-	case TypeHumanRequestActionResult:
-		body = new(HumanRequestActionResult)
+	case TypeHumanRequestCancelRunResult:
+		body = new(HumanRequestCancelRunResult)
 	case TypeTerminalTargetGet:
 		body = new(TerminalTargetGet)
 	case TypeTerminalTarget:
@@ -420,7 +420,7 @@ func idRequired(kind MessageType) bool {
 		TypeStateGet, TypeStateSnapshot, TypeStateRestart, TypeStateSubscribe,
 		TypeStateEvent, TypeStateEntityGet, TypeStateEntity,
 		TypeHumanRequestDetailGet, TypeHumanRequestDetail,
-		TypeHumanRequestReply, TypeHumanRequestReplyResult, TypeHumanRequestCancelRun, TypeHumanRequestActionResult,
+		TypeHumanRequestReply, TypeHumanRequestReplyResult, TypeHumanRequestCancelRun, TypeHumanRequestCancelRunResult,
 		TypeTerminalTargetGet, TypeTerminalTarget,
 		TypeTerminalAttach, TypeTerminalAttached, TypeTerminalLeaseAcquire, TypeTerminalLeaseRenew, TypeTerminalLeaseRelease,
 		TypeTerminalLeaseResult, TypeTerminalResize, TypeTerminalResized, TypeTerminalDetach, TypeTerminalDetached,
@@ -441,7 +441,7 @@ func typeAllowed(role senderRole, kind MessageType) bool {
 	}
 	return role == serverRole && (kind == TypeHello || kind == TypePairResult || kind == TypeAuthResult ||
 		kind == TypeStateSnapshot || kind == TypeStateRestart || kind == TypeStateEvent ||
-		kind == TypeStateEntity || kind == TypeHumanRequestDetail || kind == TypeHumanRequestReplyResult || kind == TypeHumanRequestActionResult || kind == TypeTerminalTarget || kind == TypeTerminalAttached || kind == TypeTerminalLeaseResult || kind == TypeTerminalResized || kind == TypeTerminalDetached || kind == TypeTerminalInputResult || kind == TypeTerminalEOF || kind == TypeTerminalExit || kind == TypeTerminalReset)
+		kind == TypeStateEntity || kind == TypeHumanRequestDetail || kind == TypeHumanRequestReplyResult || kind == TypeHumanRequestCancelRunResult || kind == TypeTerminalTarget || kind == TypeTerminalAttached || kind == TypeTerminalLeaseResult || kind == TypeTerminalResized || kind == TypeTerminalDetached || kind == TypeTerminalInputResult || kind == TypeTerminalEOF || kind == TypeTerminalExit || kind == TypeTerminalReset)
 }
 
 func dereferenceBody(body any) any {
@@ -474,7 +474,7 @@ func dereferenceBody(body any) any {
 		return *value
 	case *HumanRequestCancelRun:
 		return *value
-	case *HumanRequestActionResult:
+	case *HumanRequestCancelRunResult:
 		return *value
 	case *TerminalTargetGet:
 		return *value
@@ -776,7 +776,7 @@ func validateBody(kind MessageType, body any) error {
 		return validTerminalControl(kind, body)
 	case TypeHumanRequestCancelRun:
 		return validTerminalControl(kind, body)
-	case TypeHumanRequestActionResult:
+	case TypeHumanRequestCancelRunResult:
 		return validTerminalControl(kind, body)
 	case TypeTerminalTargetGet, TypeTerminalTarget:
 		return validTerminalControl(kind, body)

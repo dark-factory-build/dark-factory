@@ -1,6 +1,4 @@
 import {
-  encodeHumanRequestCancelRun,
-  encodeHumanRequestReply,
   encodeTerminalAck,
   encodeTerminalAttach,
   encodeTerminalDetach,
@@ -8,8 +6,6 @@ import {
   encodeTerminalLeaseRelease,
   encodeTerminalLeaseRenew,
   encodeTerminalResize,
-  type HumanRequestActionResultBody,
-  type HumanRequestReplyResultBody,
   type ServerControlFrame,
   type TerminalInputResultBody,
   type TerminalLeaseResultBody,
@@ -58,20 +54,6 @@ export type TerminalHandleOptions = {
   onExit?: (event: TerminalExit) => void | Promise<void>;
   onReset?: (event: TerminalReset) => void | Promise<void>;
   onClose?: (error?: SessionErrorLike) => void;
-};
-
-export type TerminalReplyRequest = {
-  runId: string;
-  requestId: string;
-  expectedRevision: bigint;
-  reply: string;
-};
-
-export type TerminalCancelRunRequest = {
-  runId: string;
-  requestId: string;
-  expectedRequestRevision: bigint;
-  expectedRunRevision: bigint;
 };
 
 export type SessionErrorLike = Error & { code?: string; retryable?: boolean };
@@ -503,57 +485,3 @@ function frozenAttached(value: TerminalAttached): TerminalAttached { return Obje
 function frozenLease(value: TerminalLease): TerminalLease { return Object.freeze({ ...value }); }
 function frozenLeaseResult(value: TerminalLeaseResultBody): TerminalLeaseResult { return Object.freeze({ ...value }); }
 function frozenReset(value: TerminalReset): TerminalReset { return Object.freeze({ ...value }); }
-
-export type HumanReplyResult = HumanRequestReplyResultBody;
-export type HumanCancelResult = HumanRequestActionResultBody;
-
-export class HumanRequestClient {
-  readonly #send: Send;
-  readonly #nextID: NextID;
-  readonly #onSendFailure: ((error: SessionErrorLike) => void) | undefined;
-  readonly #pending = new Map<string, { kind: "reply" | "cancel"; resolve: (value: unknown) => void; reject: (error: unknown) => void; requestId: string; runId: string; expectedRevision: bigint; expectedRunRevision: bigint }>();
-  #closed = false;
-  constructor(send: Send, nextID: NextID, onSendFailure?: (error: SessionErrorLike) => void) { this.#send = send; this.#nextID = nextID; this.#onSendFailure = onSendFailure; }
-  reply(request: TerminalReplyRequest): Promise<HumanReplyResult> {
-    if (this.#closed) return Promise.reject(new SessionErrorLikeError("closed"));
-    if (this.#hasRequest(request.requestId)) return Promise.reject(new SessionErrorLikeError("human request pending"));
-    if (this.#pending.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionErrorLikeError("human request capacity"));
-    const id = this.#nextID("human-reply");
-    let payload: string;
-    try { payload = encodeHumanRequestReply(id, { run_id: request.runId, request_id: request.requestId, expected_revision: request.expectedRevision, reply: request.reply }); } catch (error) { return Promise.reject(error); }
-    return this.#request(id, "reply", request, payload);
-  }
-  cancelRun(request: TerminalCancelRunRequest): Promise<HumanCancelResult> {
-    if (this.#closed) return Promise.reject(new SessionErrorLikeError("closed"));
-    if (this.#hasRequest(request.requestId)) return Promise.reject(new SessionErrorLikeError("human request pending"));
-    if (this.#pending.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionErrorLikeError("human request capacity"));
-    const id = this.#nextID("human-cancel");
-    let payload: string;
-    try { payload = encodeHumanRequestCancelRun(id, { run_id: request.runId, request_id: request.requestId, expected_request_revision: request.expectedRequestRevision, expected_run_revision: request.expectedRunRevision }); } catch (error) { return Promise.reject(error); }
-    return this.#request(id, "cancel", request, payload);
-  }
-  receive(frame: ServerControlFrame): boolean {
-    if (frame.type !== "HUMAN_REQUEST_REPLY_RESULT" && frame.type !== "HUMAN_REQUEST_ACTION_RESULT") return false;
-    const pending = this.#pending.get(frame.id);
-    if (pending === undefined || pending.requestId !== frame.body.request_id || pending.kind !== (frame.type === "HUMAN_REQUEST_REPLY_RESULT" ? "reply" : "cancel")) return false;
-    if (frame.type === "HUMAN_REQUEST_ACTION_RESULT" && (frame.body.run_id !== pending.runId || frame.body.run_revision <= pending.expectedRunRevision || frame.body.request_revision <= pending.expectedRevision || frame.body.action !== "cancel_run" || frame.body.status !== "resolved")) throw new ProtocolError("malformed");
-    if (frame.type === "HUMAN_REQUEST_REPLY_RESULT" && frame.body.revision <= pending.expectedRevision) throw new ProtocolError("malformed");
-    this.#pending.delete(frame.id); pending.resolve(frame.body); return true;
-  }
-  receiveError(id: string, error: SessionErrorLike): boolean { const pending = this.#pending.get(id); if (!pending) return false; this.#pending.delete(id); pending.reject(error); return true; }
-  close(error: SessionErrorLike = new SessionErrorLikeError("closed")): void { if (this.#closed) return; this.#closed = true; for (const pending of this.#pending.values()) pending.reject(error); this.#pending.clear(); }
-  #hasRequest(requestId: string): boolean { for (const pending of this.#pending.values()) if (pending.requestId === requestId) return true; return false; }
-  #request<T>(id: string, kind: "reply" | "cancel", request: TerminalReplyRequest | TerminalCancelRunRequest, payload: string): Promise<T> {
-    let expectedRevision = 0n;
-    let expectedRunRevision = 0n;
-    if (kind === "reply") expectedRevision = (request as TerminalReplyRequest).expectedRevision;
-    else { const cancel = request as TerminalCancelRunRequest; expectedRevision = cancel.expectedRequestRevision; expectedRunRevision = cancel.expectedRunRevision; }
-    const result = new Promise<T>((resolve, reject) => this.#pending.set(id, { kind, requestId: request.requestId, runId: request.runId, expectedRevision, expectedRunRevision, resolve: resolve as (value: unknown) => void, reject }));
-    try { this.#send(id, payload); } catch {
-      const safeError = new SessionErrorLikeError("connection");
-      this.close(safeError);
-    try { this.#onSendFailure?.(safeError); } catch { /* cleanup callbacks never own transport */ }
-    }
-    return result;
-  }
-}

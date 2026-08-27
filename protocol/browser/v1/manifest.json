@@ -46,7 +46,7 @@
     {"type": "HUMAN_REQUEST_REPLY", "direction": "client", "id": "required", "fixture": "human_request_reply.json"},
     {"type": "HUMAN_REQUEST_REPLY_RESULT", "direction": "server", "id": "required", "fixture": "human_request_reply_result.json"},
     {"type": "HUMAN_REQUEST_CANCEL_RUN", "direction": "client", "id": "required", "fixture": "human_request_cancel_run.json"},
-    {"type": "HUMAN_REQUEST_ACTION_RESULT", "direction": "server", "id": "required", "fixture": "human_request_action_result.json"},
+    {"type": "HUMAN_REQUEST_CANCEL_RUN_RESULT", "direction": "server", "id": "required", "fixture": "human_request_cancel_run_result.json"},
     {"type": "TERMINAL_TARGET_GET", "direction": "client", "id": "required", "fixture": "terminal_target_get.json"},
     {"type": "TERMINAL_TARGET", "direction": "server", "id": "required", "fixture": "terminal_target.json"},
     {"type": "TERMINAL_ATTACH", "direction": "client", "id": "required", "fixture": "terminal_attach.json"},

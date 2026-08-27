@@ -448,11 +448,11 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 			err = backendErr
 			break
 		}
-		if validationErr := validateHumanActionResult(body, result); validationErr != nil {
+		if validationErr := validateHumanCancelRunResult(body, result); validationErr != nil {
 			current.sendError(frame.ID, browserprotocol.ErrorInternal, false)
 			return false
 		}
-		payload, err = browserprotocol.EncodeHumanRequestActionResult(frame.ID, result)
+		payload, err = browserprotocol.EncodeHumanRequestCancelRunResult(frame.ID, result)
 	case browserprotocol.TerminalAttach:
 		if current.attachment != nil || current.server.terminalBackend == nil {
 			err = ErrUnauthorized
@@ -631,15 +631,15 @@ func validateHumanReplyResult(request browserprotocol.HumanRequestReply, result 
 	return nil
 }
 
-func validateHumanActionResult(request browserprotocol.HumanRequestCancelRun, result browserprotocol.HumanRequestActionResult) error {
-	if result.Action != "cancel_run" || result.RunID != request.RunID || result.RequestID != request.RequestID || result.Status != "resolved" {
-		return fmt.Errorf("%w: human action identity or status", errBackendResult)
+func validateHumanCancelRunResult(request browserprotocol.HumanRequestCancelRun, result browserprotocol.HumanRequestCancelRunResult) error {
+	if result.RequestID != request.RequestID {
+		return fmt.Errorf("%w: human cancellation identity", errBackendResult)
 	}
 	if uint64(request.ExpectedRunRevision) > browserprotocol.MaxSQLiteInteger-1 || result.RunRevision != request.ExpectedRunRevision+1 {
-		return fmt.Errorf("%w: human action run revision", errBackendResult)
+		return fmt.Errorf("%w: human cancellation run revision", errBackendResult)
 	}
 	if uint64(request.ExpectedRequestRevision) > browserprotocol.MaxSQLiteInteger-1 || result.RequestRevision != request.ExpectedRequestRevision+1 {
-		return fmt.Errorf("%w: human action request revision", errBackendResult)
+		return fmt.Errorf("%w: human cancellation request revision", errBackendResult)
 	}
 	return nil
 }

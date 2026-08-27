@@ -78,7 +78,7 @@ func TestHumanQuestionCreationProjectionDetailAndIdempotency(t *testing.T) {
 	if !seen {
 		t.Fatalf("human request invalidation missing: %+v", batch.Invalidations)
 	}
-	if projection.Status != HumanRequestOpen || !projection.CanReply || !projection.CanOpenTerminal || projection.ProjectID != run.ProjectID || projection.AgentID != run.AgentID || projection.TaskID != run.TaskID || projection.RunID != run.ID {
+	if projection.Status != HumanRequestOpen || !projection.CanReply || projection.ProjectID != run.ProjectID || projection.AgentID != run.AgentID || projection.TaskID != run.TaskID {
 		t.Fatalf("unsafe projection = %+v", projection)
 	}
 	encoded, err := json.Marshal(projection)
@@ -104,22 +104,111 @@ func TestHumanQuestionCreationProjectionDetailAndIdempotency(t *testing.T) {
 
 func TestCancelHumanRequestRunAtomicallyResolvesRequestAndRevokesRun(t *testing.T) {
 	ctx := context.Background()
-	store, run, _ := runningOrchestratorRun(t)
+	store, run, keys := runningOrchestratorRun(t)
 	defer store.Close()
 	client := humanQuestionClient(t, store, 240, BrowserCapabilityObserve|BrowserCapabilityHumanActions)
+	terminalClient := humanQuestionClient(t, store, 239, BrowserCapabilityObserve|BrowserCapabilityTerminalInput)
+	session, found, err := store.TerminalSession(ctx, keys.TerminalSessionID)
+	if err != nil || !found {
+		t.Fatalf("terminal session = %+v, found=%v, err=%v", session, found, err)
+	}
+	lease, err := store.AcquireTerminalLease(ctx, run.ID, session.ID, terminalClient.ID, run.Revision, session.Revision, mustTime(t, 300))
+	if err != nil {
+		t.Fatal(err)
+	}
 	request, err := store.CreateHumanQuestionForAttempt(ctx, run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(240), QuestionText: "cancel me"}, mustTime(t, 400))
 	if err != nil {
 		t.Fatal(err)
 	}
-	cancelled, resolved, err := store.CancelHumanRequestRun(ctx, client.ID, request.ID, run.ID, request.Revision, run.Revision, mustTime(t, 401))
+	before, err := store.Factory(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cancelled.Phase != RunFinalizing || cancelled.Proposal == nil || cancelled.Proposal.kind != OutcomeCancelled || resolved.Status != HumanRequestResolved || resolved.Resolution == nil || *resolved.Resolution != HumanRequestResolutionCancelRun {
+	for name, revisions := range map[string][2]Revision{
+		"stale request": {mustRevision(t, request.Revision.Int64()+1), run.Revision},
+		"stale run":     {request.Revision, mustRevision(t, run.Revision.Int64()+1)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := store.CancelHumanRequestRun(ctx, client.ID, request.ID, revisions[0], revisions[1], mustTime(t, 401)); !errors.Is(err, ErrRevisionConflict) {
+				t.Fatalf("cancellation = %v", err)
+			}
+		})
+	}
+	unchangedRun, _, err := store.Run(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unchangedRequest, _, err := store.HumanRequest(ctx, request.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unchangedFactory, err := store.Factory(ctx)
+	if err != nil || unchangedRun.Revision != run.Revision || unchangedRun.Phase != RunRunning || unchangedRequest.Revision != request.Revision || unchangedRequest.Status != HumanRequestOpen || unchangedFactory.Head != before.Head {
+		t.Fatalf("stale cancellation changed state: run=%+v request=%+v factory=%+v err=%v", unchangedRun, unchangedRequest, unchangedFactory, err)
+	}
+	cancelled, resolved, err := store.CancelHumanRequestRun(ctx, client.ID, request.ID, request.Revision, run.Revision, mustTime(t, 401))
+	if err != nil {
+		t.Fatal(err)
+	}
+	closedSession, found, sessionErr := store.TerminalSession(ctx, session.ID)
+	if cancelled.ID != run.ID || cancelled.Revision.Int64() != run.Revision.Int64()+1 || cancelled.Phase != RunFinalizing || cancelled.CredentialRevokedAt == nil || cancelled.Proposal == nil || cancelled.Proposal.kind != OutcomeCancelled || resolved.ID != request.ID || resolved.Revision.Int64() != request.Revision.Int64()+1 || resolved.Status != HumanRequestResolved || resolved.Resolution == nil || *resolved.Resolution != HumanRequestResolutionCancelRun || !found || sessionErr != nil || closedSession.LeaseClientID != nil || closedSession.LeaseGeneration != lease.Generation+1 {
 		t.Fatalf("cancel result = run=%+v request=%+v", cancelled, resolved)
 	}
-	if _, _, err := store.CancelHumanRequestRun(ctx, client.ID, request.ID, run.ID, request.Revision, run.Revision, mustTime(t, 402)); !errors.Is(err, ErrRevisionConflict) {
-		t.Fatalf("duplicate action = %v", err)
+	assertHumanRequestInvalidation(t, store, before.Head, request.ID, resolved.Revision, true)
+	if _, _, err := store.CancelHumanRequestRun(ctx, client.ID, request.ID, request.Revision, run.Revision, mustTime(t, 402)); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("duplicate cancellation = %v", err)
+	}
+}
+
+func TestHumanReplyAndCancellationRaceCommitsExactlyOneDecision(t *testing.T) {
+	for iteration := 0; iteration < 10; iteration++ {
+		store, run, _ := runningOrchestratorRun(t)
+		client := humanQuestionClient(t, store, byte(220+iteration), BrowserCapabilityObserve|BrowserCapabilityHumanActions)
+		request, err := store.CreateHumanQuestionForAttempt(context.Background(), run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(byte(220 + iteration)), QuestionText: "choose once"}, mustTime(t, 400))
+		if err != nil {
+			store.Close()
+			t.Fatal(err)
+		}
+		deliveryID := humanDeliveryID(t, byte(220+iteration))
+		start := make(chan struct{})
+		errorsSeen := make(chan error, 2)
+		go func() {
+			<-start
+			_, err := store.BeginHumanReply(context.Background(), client.ID, request.ID, request.Revision, deliveryID, "reply", mustTime(t, 401))
+			errorsSeen <- err
+		}()
+		go func() {
+			<-start
+			_, _, err := store.CancelHumanRequestRun(context.Background(), client.ID, request.ID, request.Revision, run.Revision, mustTime(t, 401))
+			errorsSeen <- err
+		}()
+		close(start)
+		first, second := <-errorsSeen, <-errorsSeen
+		if (first == nil) == (second == nil) || first != nil && !errors.Is(first, ErrRevisionConflict) || second != nil && !errors.Is(second, ErrRevisionConflict) {
+			store.Close()
+			t.Fatalf("race errors = %v, %v", first, second)
+		}
+		projection, found, err := store.HumanRequest(context.Background(), request.ID)
+		currentRun, runFound, runErr := store.Run(context.Background(), run.ID)
+		if err != nil || runErr != nil || !found || !runFound {
+			store.Close()
+			t.Fatalf("race state read: request found=%v err=%v run found=%v err=%v", found, err, runFound, runErr)
+		}
+		if projection.Status == HumanRequestDelivering {
+			if currentRun.Phase != RunRunning {
+				store.Close()
+				t.Fatalf("reply winner redirected run: request=%+v run=%+v", projection, currentRun)
+			}
+		} else if projection.Status == HumanRequestResolved {
+			if currentRun.Phase != RunFinalizing {
+				store.Close()
+				t.Fatalf("cancel winner did not finalize origin: request=%+v run=%+v", projection, currentRun)
+			}
+		} else {
+			store.Close()
+			t.Fatalf("race request = %+v", projection)
+		}
+		store.Close()
 	}
 }
 
@@ -644,7 +733,7 @@ func TestHumanQuestionProcessExitConvergesRequestsAtomically(t *testing.T) {
 				t.Fatalf("process exit = %+v, %v", observed, err)
 			}
 			projection, found, err := store.HumanRequest(ctx, request.ID)
-			if err != nil || !found || projection.Status != test.wantStatus || projection.CanOpenTerminal {
+			if err != nil || !found || projection.Status != test.wantStatus {
 				t.Fatalf("request after process exit = %+v, found=%v, err=%v", projection, found, err)
 			}
 			if _, err := store.Snapshot(ctx); err != nil {

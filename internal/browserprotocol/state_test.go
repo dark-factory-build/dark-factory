@@ -31,7 +31,7 @@ func taskItem() TaskItem {
 	return TaskItem{ID: taskID, ProjectID: projectID, AssignedAgentID: agentID, Title: "Ship", Status: "queued", Priority: 1, Revision: 1}
 }
 func humanRequestItem() HumanRequestItem {
-	return HumanRequestItem{ID: requestID, ProjectID: projectID, AgentID: agentID, TaskID: taskID, RunID: runID, CreatedAt: 10, UpdatedAt: 11, Revision: 1, Kind: "question", Status: "open", ReplyMaxBytes: MaxHumanReplyBytes, CanReply: true, CanOpenTerminal: true}
+	return HumanRequestItem{ID: requestID, ProjectID: projectID, AgentID: agentID, TaskID: taskID, CreatedAt: 10, UpdatedAt: 11, Revision: 1, Kind: "question", Status: "open", ReplyMaxBytes: MaxHumanReplyBytes, CanReply: true}
 }
 
 func repeatedStateItems(kind StateKind, count int) StateItems {
@@ -384,7 +384,6 @@ func TestStateBooleanNullIsAlwaysRejected(t *testing.T) {
 		{"factory dispatch", mustEncodeStateSnapshot(t, StateSnapshot{Head: 1, Kind: StateFactory, Items: FactoryItems([]FactoryItem{factoryItem()}), NextCursor: pointer("next")}), "dispatch_enabled", "true"},
 		{"agent paused", mustEncodeStateSnapshot(t, StateSnapshot{Head: 1, Kind: StateAgent, Items: AgentItems([]AgentItem{agentItem()}), NextCursor: pointer("next")}), "paused", "false"},
 		{"human can reply", mustEncodeStateSnapshot(t, StateSnapshot{Head: 1, Kind: StateHumanRequest, Items: HumanRequestItems([]HumanRequestItem{humanRequestItem()})}), "can_reply", "true"},
-		{"human can open terminal", mustEncodeStateSnapshot(t, StateSnapshot{Head: 1, Kind: StateHumanRequest, Items: HumanRequestItems([]HumanRequestItem{humanRequestItem()})}), "can_open_terminal", "true"},
 		{"event deleted", mustEncodeStateEvent(t, EntityChangedEvent(EntityChanged{Sequence: 1, Head: 1, EntityKind: StateTask, EntityID: taskID, Revision: 1})), "deleted", "false"},
 		{"entity deleted", mustEncodeStateEntity(t, StateEntity{Head: 1, Kind: StateTask, ID: taskID, Revision: 1, Item: TaskStateItem(taskItem())}), "deleted", "false"},
 		{"error retryable", mustEncodeError(t, Error{Code: ErrorInvalidRequest}), "retryable", "false"},
@@ -444,7 +443,7 @@ func TestHumanRequestPublicPrivacyAndDetailBounds(t *testing.T) {
 	for _, field := range fields {
 		actual = append(actual, field.Tag.Get("json"))
 	}
-	want := []string{"id", "project_id", "agent_id", "task_id", "run_id", "created_at", "updated_at", "revision", "kind", "status", "reply_max_bytes", "can_reply", "can_open_terminal"}
+	want := []string{"id", "project_id", "agent_id", "task_id", "created_at", "updated_at", "revision", "kind", "status", "reply_max_bytes", "can_reply"}
 	if !reflect.DeepEqual(actual, want) {
 		t.Fatalf("public HumanRequest fields drifted: got %v want %v", actual, want)
 	}
@@ -452,7 +451,7 @@ func TestHumanRequestPublicPrivacyAndDetailBounds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, private := range []string{`"question":`, `"reply":`, `"project_name":`, `"agent_name":`, `"task_title":`, `"summary":`, `"why_human_needed":`} {
+	for _, private := range []string{`"run_id":`, `"question":`, `"reply":`, `"terminal_target":`, `"cancel_run":`, `"action":`, `"project_name":`, `"agent_name":`, `"task_title":`, `"summary":`, `"why_human_needed":`} {
 		if bytes.Contains(encoded, []byte(private)) {
 			t.Fatalf("public item exposed private field %q: %s", private, encoded)
 		}
@@ -461,7 +460,7 @@ func TestHumanRequestPublicPrivacyAndDetailBounds(t *testing.T) {
 		if !utf8.ValidString(question) {
 			t.Fatal("test question invalid")
 		}
-		wire, err := EncodeHumanRequestDetail("detail", HumanRequestDetail{RequestID: requestID, Revision: 1, Question: question})
+		wire, err := EncodeHumanRequestDetail("detail", HumanRequestDetail{RequestID: requestID, Revision: 1, Question: question, ReplyMaxBytes: MaxHumanReplyBytes})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -470,12 +469,35 @@ func TestHumanRequestPublicPrivacyAndDetailBounds(t *testing.T) {
 		}
 	}
 	for _, question := range []string{"", strings.Repeat("x", MaxHumanQuestionBytes+1), string([]byte{0xff})} {
-		if _, err := EncodeHumanRequestDetail("detail", HumanRequestDetail{RequestID: requestID, Revision: 1, Question: question}); err == nil {
+		if _, err := EncodeHumanRequestDetail("detail", HumanRequestDetail{RequestID: requestID, Revision: 1, Question: question, ReplyMaxBytes: MaxHumanReplyBytes}); err == nil {
 			t.Fatalf("invalid question accepted: %d bytes", len(question))
 		}
 	}
 	if _, err := EncodeHumanRequestDetailGet("detail", HumanRequestDetailGet{RequestID: requestID}); err == nil {
 		t.Fatal("zero expected revision accepted")
+	}
+	target := TerminalTargetDescriptor{RunID: "11111111111111111111111111111111", SessionID: "22222222222222222222222222222222", RunRevision: 8, SessionRevision: 9}
+	action := HumanRequestCancelRunDescriptor{ExpectedRequestRevision: 2, ExpectedRunRevision: 8}
+	authorized := HumanRequestDetail{RequestID: requestID, Revision: 2, Question: "choose", CanReply: true, ReplyMaxBytes: MaxHumanReplyBytes, TerminalTarget: &target, CancelRun: &action}
+	if _, err := EncodeHumanRequestDetail("detail", authorized); err != nil {
+		t.Fatalf("authorized detail = %v", err)
+	}
+	for name, mutate := range map[string]func(*HumanRequestDetail){
+		"reply without target": func(value *HumanRequestDetail) { value.TerminalTarget = nil },
+		"reply without cancel": func(value *HumanRequestDetail) { value.CancelRun = nil },
+		"cancel without reply": func(value *HumanRequestDetail) { value.CanReply = false },
+		"request revision":     func(value *HumanRequestDetail) { value.CancelRun.ExpectedRequestRevision++ },
+		"run revision":         func(value *HumanRequestDetail) { value.CancelRun.ExpectedRunRevision++ },
+	} {
+		t.Run(name, func(t *testing.T) {
+			value := authorized
+			copiedTarget, copiedAction := *authorized.TerminalTarget, *authorized.CancelRun
+			value.TerminalTarget, value.CancelRun = &copiedTarget, &copiedAction
+			mutate(&value)
+			if _, err := EncodeHumanRequestDetail("detail", value); err == nil {
+				t.Fatalf("inconsistent detail accepted: %+v", value)
+			}
+		})
 	}
 }
 
@@ -490,7 +512,7 @@ func TestMaximallyEscapedFramesStayBounded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	detail, err := EncodeHumanRequestDetail("max-detail", HumanRequestDetail{RequestID: requestID, Revision: Decimal(MaxSQLiteInteger), Question: strings.Repeat("\x00", MaxHumanQuestionBytes)})
+	detail, err := EncodeHumanRequestDetail("max-detail", HumanRequestDetail{RequestID: requestID, Revision: Decimal(MaxSQLiteInteger), Question: strings.Repeat("\x00", MaxHumanQuestionBytes), ReplyMaxBytes: MaxHumanReplyBytes})
 	if err != nil {
 		t.Fatal(err)
 	}

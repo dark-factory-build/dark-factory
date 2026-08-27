@@ -489,13 +489,17 @@ func TestBrowserAdapterHumanRequestDetailAndExactTombstone(t *testing.T) {
 	detail, err := fixture.backend.HumanRequestDetail(context.Background(), rawBrowserClient(fixture.client.ID), browserprotocol.HumanRequestDetailGet{
 		RequestID: request.ID.String(), ExpectedRevision: decimalRevision(request.Revision),
 	})
-	if err != nil || detail.Question != "QUESTION_PRIVATE_SENTINEL" {
+	if err != nil || detail.Question != "QUESTION_PRIVATE_SENTINEL" || !bool(detail.CanReply) || detail.TerminalTarget == nil || detail.TerminalTarget.RunID != run.ID.String() || detail.CancelRun == nil || detail.CancelRun.ExpectedRequestRevision != decimalRevision(request.Revision) || detail.CancelRun.ExpectedRunRevision != decimalRevision(run.Revision) {
 		t.Fatalf("authorized detail = %+v, %v", detail, err)
 	}
 	deliveryID, _ := kernel.HumanRequestDeliveryIDFromBytes(adapterID(t, 121))
 	delivery, err := fixture.store.BeginHumanReply(context.Background(), fixture.client.ID, request.ID, request.Revision, deliveryID, "reply", adapterTime(t, 501))
 	if err != nil {
 		t.Fatal(err)
+	}
+	deliveringDetail, err := fixture.backend.HumanRequestDetail(context.Background(), rawBrowserClient(fixture.client.ID), browserprotocol.HumanRequestDetailGet{RequestID: request.ID.String(), ExpectedRevision: decimalRevision(delivery.Revision)})
+	if err != nil || bool(deliveringDetail.CanReply) || deliveringDetail.TerminalTarget != nil || deliveringDetail.CancelRun != nil {
+		t.Fatalf("delivering detail = %+v, %v", deliveringDetail, err)
 	}
 	if err := fixture.store.AcknowledgeHumanReply(context.Background(), request.ID, delivery.DeliveryID, delivery.Revision, adapterTime(t, 502)); err != nil {
 		t.Fatal(err)
@@ -508,6 +512,24 @@ func TestBrowserAdapterHumanRequestDetailAndExactTombstone(t *testing.T) {
 	_, err = fixture.backend.StateEntity(context.Background(), rawBrowserClient(fixture.client.ID), browserprotocol.StateEntityGet{Kind: browserprotocol.StateHumanRequest, ID: missingID})
 	if !errors.Is(err, browser.ErrNotFound) {
 		t.Fatalf("never-existing request = %v", err)
+	}
+
+	copy(key[:], adapterID(t, 123))
+	unknownRequest, err := fixture.store.CreateHumanQuestionForAttempt(context.Background(), run.CredentialDigest, kernel.NewHumanQuestion{IdempotencyKey: key, QuestionText: "UNKNOWN_PRIVATE_SENTINEL"}, adapterTime(t, 503))
+	if err != nil {
+		t.Fatal(err)
+	}
+	unknownDeliveryID, _ := kernel.HumanRequestDeliveryIDFromBytes(adapterID(t, 124))
+	unknownDelivery, err := fixture.store.BeginHumanReply(context.Background(), fixture.client.ID, unknownRequest.ID, unknownRequest.Revision, unknownDeliveryID, "reply", adapterTime(t, 504))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.store.MarkHumanDeliveryUnknown(context.Background(), unknownRequest.ID, unknownDelivery.DeliveryID, unknownDelivery.Revision, adapterTime(t, 505)); err != nil {
+		t.Fatal(err)
+	}
+	unknownDetail, err := fixture.backend.HumanRequestDetail(context.Background(), rawBrowserClient(fixture.client.ID), browserprotocol.HumanRequestDetailGet{RequestID: unknownRequest.ID.String(), ExpectedRevision: browserprotocol.Decimal(unknownRequest.Revision.Int64() + 2)})
+	if err != nil || bool(unknownDetail.CanReply) || unknownDetail.TerminalTarget != nil || unknownDetail.CancelRun != nil {
+		t.Fatalf("delivery-unknown detail = %+v, %v", unknownDetail, err)
 	}
 }
 

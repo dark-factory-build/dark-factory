@@ -305,8 +305,8 @@ func (daemon *Daemon) terminalResize(ctx context.Context, principal browser.Prin
 	return result.effectError(-1)
 }
 
-func (daemon *Daemon) humanReply(ctx context.Context, principal browser.Principal, runID kernel.RunID, requestID kernel.HumanRequestID, expected kernel.Revision, reply string) (uint32, error) {
-	if runID == (kernel.RunID{}) || requestID == (kernel.HumanRequestID{}) || expected.Int64() < 1 || !utf8.ValidString(reply) || len(reply) == 0 || len(reply) > kernel.MaxHumanRequestReplyBytes {
+func (daemon *Daemon) humanReply(ctx context.Context, principal browser.Principal, requestID kernel.HumanRequestID, expected kernel.Revision, reply string) (uint32, error) {
+	if requestID == (kernel.HumanRequestID{}) || expected.Int64() < 1 || !utf8.ValidString(reply) || len(reply) == 0 || len(reply) > kernel.MaxHumanRequestReplyBytes {
 		return 0, fmt.Errorf("%w: invalid human reply", kernel.ErrInvalidValue)
 	}
 	clientID, releaseClient, err := daemon.authorizeEffectPrincipal(ctx, principal, kernel.BrowserCapabilityHumanActions)
@@ -316,20 +316,6 @@ func (daemon *Daemon) humanReply(ctx context.Context, principal browser.Principa
 	defer releaseClient()
 	if !terminalEffectsSupported {
 		return 0, ErrTerminalEffectsUnsupported
-	}
-	request, found, err := daemon.store.HumanRequest(ctx, requestID)
-	if err != nil {
-		return 0, err
-	}
-	if !found {
-		return 0, kernel.ErrNotFound
-	}
-	if request.RunID != runID || request.Revision != expected || request.Status != kernel.HumanRequestOpen {
-		return 0, kernel.ErrRevisionConflict
-	}
-	attempt, err := daemon.liveTerminalAttempt(runID, kernel.TerminalSessionID{})
-	if err != nil {
-		return 0, err
 	}
 	daemon.operationMu.Lock()
 	defer daemon.operationMu.Unlock()
@@ -353,9 +339,13 @@ func (daemon *Daemon) humanReply(ctx context.Context, principal browser.Principa
 		}
 		return 0, err
 	}
-	if delivery.RunID != runID || delivery.RequestID != requestID || delivery.DeliveryID != deliveryID {
-		_ = attempt.close()
+	if delivery.RequestID != requestID || delivery.DeliveryID != deliveryID {
 		return 0, kernel.ErrCorruptState
+	}
+	attempt, err := daemon.liveTerminalAttempt(delivery.RunID, kernel.TerminalSessionID{})
+	if err != nil {
+		unknownErr := daemon.markHumanReplyUnknown(requestID, deliveryID, delivery.Revision)
+		return 0, errors.Join(err, unknownErr)
 	}
 	result := attempt.submitEffect(ctx, terminalEffect{kind: terminalEffectHumanReply, payload: append([]byte(nil), delivery.Reply...)})
 	effectErr := result.effectError(len(delivery.Reply))

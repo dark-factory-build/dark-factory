@@ -214,12 +214,12 @@ func (store *Store) HumanRequest(ctx context.Context, id HumanRequestID) (HumanR
 	return humanRequestProjectionByID(ctx, tx.connection, id)
 }
 
-// CancelHumanRequestRun is the sole daemon-authorized HumanRequest action.
+// CancelHumanRequestRun is the sole daemon-authorized HumanRequest cancellation.
 // Client capability, exact request/run revisions and the finalizing/revocation
 // transition are one SQLite transaction; callers cannot split or replay it.
-func (store *Store) CancelHumanRequestRun(ctx context.Context, clientID BrowserClientID, requestID HumanRequestID, runID RunID, expectedRequest, expectedRun Revision, at UnixMillis) (Run, HumanRequest, error) {
-	if requestID.zero() || runID.zero() || expectedRequest.Int64() < 1 || expectedRun.Int64() < 1 {
-		return Run{}, HumanRequest{}, fmt.Errorf("%w: invalid human request action", ErrInvalidValue)
+func (store *Store) CancelHumanRequestRun(ctx context.Context, clientID BrowserClientID, requestID HumanRequestID, expectedRequest, expectedRun Revision, at UnixMillis) (Run, HumanRequest, error) {
+	if requestID.zero() || expectedRequest.Int64() < 1 || expectedRun.Int64() < 1 {
+		return Run{}, HumanRequest{}, fmt.Errorf("%w: invalid human request cancellation", ErrInvalidValue)
 	}
 	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
@@ -240,25 +240,25 @@ func (store *Store) CancelHumanRequestRun(ctx context.Context, clientID BrowserC
 	if !found {
 		return Run{}, HumanRequest{}, tx.Rollback(ErrNotFound)
 	}
-	run, found, err := runByID(ctx, tx.connection, runID)
+	run, found, err := runByID(ctx, tx.connection, request.RunID)
 	if err != nil {
 		return Run{}, HumanRequest{}, tx.Rollback(err)
 	}
 	if !found {
-		return Run{}, HumanRequest{}, tx.Rollback(ErrNotFound)
+		return Run{}, HumanRequest{}, tx.Rollback(corruptControl("human request run", request.RunID.String()))
 	}
-	if request.RunID != run.ID || request.Status != HumanRequestOpen || request.Revision != expectedRequest || run.Phase != RunRunning || run.Revision != expectedRun || at.Int64() < request.UpdatedAt.Int64() || at.Int64() < run.UpdatedAt.Int64() {
+	if request.Status != HumanRequestOpen || request.Revision != expectedRequest || run.Phase != RunRunning || run.Revision != expectedRun || at.Int64() < request.UpdatedAt.Int64() || at.Int64() < run.UpdatedAt.Int64() {
 		return Run{}, HumanRequest{}, tx.Rollback(ErrRevisionConflict)
 	}
-	proposal, err := NewCancelledProposal("cancelled by human request action")
+	proposal, err := NewCancelledProposal("cancelled by human request")
 	if err != nil {
 		return Run{}, HumanRequest{}, tx.Rollback(err)
 	}
-	updatedRun, err := store.enterFinalizingForHumanAction(ctx, tx, run, expectedRun, proposal, at, &request.ID)
+	updatedRun, err := store.enterFinalizingForHumanRequestCancel(ctx, tx, run, expectedRun, proposal, at, request.ID)
 	if err != nil {
 		return Run{}, HumanRequest{}, err
 	}
-	// enterFinalizingForHumanAction commits the shared transaction. Construct
+	// enterFinalizingForHumanRequestCancel commits the shared transaction. Construct
 	// the exact post-transition request from the validated source row rather
 	// than opening a second write or read transaction before its close.
 	updatedRequest := request
@@ -317,15 +317,15 @@ func humanRequestProjectionByID(ctx context.Context, connection *sql.Conn, id Hu
 	if id.zero() {
 		return HumanRequestProjection{}, false, fmt.Errorf("%w: zero human request identifier", ErrInvalidValue)
 	}
-	var rawID, rawProjectID, rawAgentID, rawTaskID, rawRunID []byte
+	var rawID, rawProjectID, rawAgentID, rawTaskID []byte
 	var kindValue, statusValue, runPhaseValue string
 	var createdAt, updatedAt, revision int64
-	err := connection.QueryRowContext(ctx, `SELECT h.id, p.id, a.id, t.id, r.id, h.kind, h.status, r.phase, h.created_at_ms, h.updated_at_ms, h.revision
+	err := connection.QueryRowContext(ctx, `SELECT h.id, p.id, a.id, t.id, h.kind, h.status, r.phase, h.created_at_ms, h.updated_at_ms, h.revision
         FROM human_requests h JOIN runs r ON r.id = h.run_id
         JOIN projects p ON p.id = r.project_id
         JOIN agents a ON a.id = r.agent_id AND a.project_id = r.project_id
         JOIN tasks t ON t.id = r.task_id AND t.project_id = r.project_id AND t.incarnation_id = r.task_incarnation_id
-		WHERE h.id = ?`, id.Bytes()).Scan(&rawID, &rawProjectID, &rawAgentID, &rawTaskID, &rawRunID, &kindValue, &statusValue, &runPhaseValue, &createdAt, &updatedAt, &revision)
+		WHERE h.id = ?`, id.Bytes()).Scan(&rawID, &rawProjectID, &rawAgentID, &rawTaskID, &kindValue, &statusValue, &runPhaseValue, &createdAt, &updatedAt, &revision)
 	if errors.Is(err, sql.ErrNoRows) {
 		return HumanRequestProjection{}, false, nil
 	}
@@ -336,36 +336,16 @@ func humanRequestProjectionByID(ctx context.Context, connection *sql.Conn, id Hu
 	projectID, projectErr := ProjectIDFromBytes(rawProjectID)
 	agentID, agentErr := AgentIDFromBytes(rawAgentID)
 	taskID, taskErr := TaskIDFromBytes(rawTaskID)
-	runID, runErr := RunIDFromBytes(rawRunID)
 	kind, kindErr := parseHumanRequestKind(kindValue)
 	status, statusErr := parseHumanRequestStatus(statusValue)
 	runPhase, runPhaseErr := parseRunPhase(runPhaseValue)
 	created, createdErr := NewUnixMillis(createdAt)
 	updated, updatedErr := NewUnixMillis(updatedAt)
 	rev, revErr := NewRevision(revision)
-	if idErr != nil || projectErr != nil || agentErr != nil || taskErr != nil || runErr != nil || kindErr != nil || statusErr != nil || runPhaseErr != nil || createdErr != nil || updatedErr != nil || revErr != nil || updatedAt < createdAt || (status == HumanRequestOpen || status == HumanRequestDelivering) && runPhase != RunRunning {
+	if idErr != nil || projectErr != nil || agentErr != nil || taskErr != nil || kindErr != nil || statusErr != nil || runPhaseErr != nil || createdErr != nil || updatedErr != nil || revErr != nil || updatedAt < createdAt || (status == HumanRequestOpen || status == HumanRequestDelivering) && runPhase != RunRunning {
 		return HumanRequestProjection{}, false, fmt.Errorf("%w: invalid human request projection", ErrCorruptState)
 	}
-	terminal, terminalFound, err := terminalSessionByRunID(ctx, connection, runID)
-	if err != nil || !terminalFound {
-		if err == nil {
-			err = ErrCorruptState
-		}
-		return HumanRequestProjection{}, false, fmt.Errorf("%w: invalid human request terminal session", err)
-	}
-	run, runFound, err := runByID(ctx, connection, runID)
-	if err != nil || !runFound {
-		if err == nil {
-			err = ErrCorruptState
-		}
-		return HumanRequestProjection{}, false, fmt.Errorf("%w: invalid human request run", err)
-	}
-	if err := validateTerminalSessionLease(ctx, connection, run, terminal); err != nil {
-		return HumanRequestProjection{}, false, err
-	}
-	unresolved := status == HumanRequestOpen || status == HumanRequestDelivering || status == HumanRequestDeliveryUnknown
-	terminalAttachable := unresolved && runPhase == RunRunning && terminal.State == TerminalSessionActive
-	return HumanRequestProjection{ID: requestID, ProjectID: projectID, AgentID: agentID, TaskID: taskID, RunID: runID, CreatedAt: created, UpdatedAt: updated, Revision: rev, Kind: kind, Status: status, ReplyMaxBytes: MaxHumanRequestReplyBytes, CanReply: status == HumanRequestOpen, CanOpenTerminal: terminalAttachable}, true, nil
+	return HumanRequestProjection{ID: requestID, ProjectID: projectID, AgentID: agentID, TaskID: taskID, CreatedAt: created, UpdatedAt: updated, Revision: rev, Kind: kind, Status: status, ReplyMaxBytes: MaxHumanRequestReplyBytes, CanReply: status == HumanRequestOpen && runPhase == RunRunning}, true, nil
 }
 
 func (store *Store) HumanRequestDetail(ctx context.Context, clientID BrowserClientID, id HumanRequestID, expected Revision) (HumanRequestDetail, error) {
@@ -397,7 +377,40 @@ func (store *Store) HumanRequestDetail(ctx context.Context, clientID BrowserClie
 	if request.Revision != expected {
 		return HumanRequestDetail{}, ErrRevisionConflict
 	}
-	return HumanRequestDetail{ID: request.ID, Revision: request.Revision, QuestionText: request.QuestionText}, nil
+	detail := HumanRequestDetail{ID: request.ID, Revision: request.Revision, QuestionText: request.QuestionText, ReplyMaxBytes: MaxHumanRequestReplyBytes}
+	if request.Status != HumanRequestOpen {
+		return detail, nil
+	}
+	run, found, err := runByID(ctx, tx.connection, request.RunID)
+	if err != nil {
+		return HumanRequestDetail{}, err
+	}
+	if !found {
+		return HumanRequestDetail{}, fmt.Errorf("%w: human request origin missing", ErrCorruptState)
+	}
+	if run.Phase != RunRunning {
+		return detail, nil
+	}
+	session, found, err := terminalSessionByRunID(ctx, tx.connection, run.ID)
+	if err != nil {
+		return HumanRequestDetail{}, err
+	}
+	if !found || session.State != TerminalSessionActive {
+		return detail, nil
+	}
+	if err := validateTerminalSessionLease(ctx, tx.connection, run, session); err != nil {
+		return HumanRequestDetail{}, err
+	}
+	target, err := newTerminalTarget(run.ProjectID, run.AgentID, run, session)
+	if err != nil {
+		return HumanRequestDetail{}, err
+	}
+	detail.TerminalTarget = &target
+	if client.CapabilityMask.Has(BrowserCapabilityHumanActions) {
+		detail.CanReply = true
+		detail.CancelRun = &HumanRequestCancelRun{expectedRequestRevision: request.Revision, expectedRunRevision: run.Revision}
+	}
+	return detail, nil
 }
 
 func (store *Store) BeginHumanReply(ctx context.Context, clientID BrowserClientID, requestID HumanRequestID, expected Revision, deliveryID HumanRequestDeliveryID, reply string, at UnixMillis) (HumanDelivery, error) {
@@ -575,7 +588,7 @@ func (store *Store) RecoverHumanDeliveries(ctx context.Context, at UnixMillis) (
 // transitionHumanRequestsForRun is called from the run transition transaction.
 // It never delivers or removes a request: it only makes the loss of its exact
 // running origin durable before the run transition becomes observable.
-func transitionHumanRequestsForRun(ctx context.Context, connection *sql.Conn, runID RunID, at UnixMillis, terminal bool, actionRequest ...*HumanRequestID) ([]pendingInvalidation, error) {
+func transitionHumanRequestsForRun(ctx context.Context, connection *sql.Conn, runID RunID, at UnixMillis, terminal bool, cancelRequest *HumanRequestID) ([]pendingInvalidation, error) {
 	rows, err := connection.QueryContext(ctx, `SELECT id, status, revision, updated_at_ms FROM human_requests WHERE run_id = ? AND status IN ('open', 'delivering', 'delivery_unknown') ORDER BY id`, runID.Bytes())
 	if err != nil {
 		return nil, err
@@ -615,8 +628,8 @@ func transitionHumanRequestsForRun(ctx context.Context, connection *sql.Conn, ru
 		}
 		target := item.status
 		resolution, closed := "", any(nil)
-		isAction := len(actionRequest) != 0 && actionRequest[0] != nil && item.id == *actionRequest[0]
-		if isAction {
+		isCancel := cancelRequest != nil && item.id == *cancelRequest
+		if isCancel {
 			if item.status != HumanRequestOpen || terminal {
 				return nil, ErrRevisionConflict
 			}
@@ -625,7 +638,7 @@ func transitionHumanRequestsForRun(ctx context.Context, connection *sql.Conn, ru
 		}
 		switch item.status {
 		case HumanRequestOpen:
-			if isAction {
+			if isCancel {
 				break
 			}
 			target = HumanRequestStale

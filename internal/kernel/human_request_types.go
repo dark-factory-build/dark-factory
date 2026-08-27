@@ -80,7 +80,7 @@ func (resolution HumanRequestResolution) String() string {
 	case HumanRequestResolutionStale:
 		return "stale"
 	case HumanRequestResolutionCancelRun:
-		return "action_cancel_run"
+		return "cancel_run"
 	default:
 		return ""
 	}
@@ -115,26 +115,42 @@ type HumanRequest struct {
 // agent, and task display text is joined by the client from their summaries;
 // provider-authored question and reply text are never present here.
 type HumanRequestProjection struct {
-	ID              HumanRequestID
-	ProjectID       ProjectID
-	AgentID         AgentID
-	TaskID          TaskID
-	RunID           RunID
-	CreatedAt       UnixMillis
-	UpdatedAt       UnixMillis
-	Revision        Revision
-	Kind            HumanRequestKind
-	Status          HumanRequestStatus
-	ReplyMaxBytes   uint32
-	CanReply        bool
-	CanOpenTerminal bool
+	ID            HumanRequestID
+	ProjectID     ProjectID
+	AgentID       AgentID
+	TaskID        TaskID
+	CreatedAt     UnixMillis
+	UpdatedAt     UnixMillis
+	Revision      Revision
+	Kind          HumanRequestKind
+	Status        HumanRequestStatus
+	ReplyMaxBytes uint32
+	CanReply      bool
 }
 
 type HumanRequestDetail struct {
-	ID           HumanRequestID
-	Revision     Revision
-	QuestionText string
+	ID             HumanRequestID
+	Revision       Revision
+	QuestionText   string
+	CanReply       bool
+	ReplyMaxBytes  uint32
+	TerminalTarget *TerminalTarget
+	CancelRun      *HumanRequestCancelRun
 }
+
+// HumanRequestCancelRun is the one concrete daemon-minted cancellation
+// precondition. The fields remain private so a caller cannot substitute a run
+// or revision after Store has projected the exact originating relationship.
+type HumanRequestCancelRun struct {
+	expectedRequestRevision Revision
+	expectedRunRevision     Revision
+}
+
+func (action HumanRequestCancelRun) ExpectedRequestRevision() Revision {
+	return action.expectedRequestRevision
+}
+
+func (action HumanRequestCancelRun) ExpectedRunRevision() Revision { return action.expectedRunRevision }
 
 type NewHumanQuestion struct {
 	IdempotencyKey [IDBytes]byte

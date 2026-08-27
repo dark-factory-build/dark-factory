@@ -1,6 +1,9 @@
 import {
   decodeServerControl,
   encodeAuthProve,
+  encodeHumanRequestCancelRun,
+  encodeHumanRequestDetailGet,
+  encodeHumanRequestReply,
   encodePairProve,
   encodeStateEntityGet,
   encodeStateGet,
@@ -9,16 +12,19 @@ import {
   type EntityChangedEvent,
   type ErrorFrame,
   type HelloBody,
+  type HumanRequestCancelRunResultBody,
+  type HumanRequestReplyResultBody,
   type PairResultFrame,
   type ServerControlFrame,
   type StateEntityFrame,
   type StateEventFrame,
   type StateSnapshotFrame,
+  type TerminalTargetDescriptor,
 } from "./control.js";
 import { ProtocolError, type ProtocolErrorCode } from "./errors.js";
-import { CAPABILITIES, type CapabilityMask, type ErrorCode } from "./manifest.js";
+import { CAPABILITIES, MAX_ARRAY_ITEMS, MAX_HUMAN_REPLY_BYTES, MAX_SQLITE_INTEGER, type CapabilityMask, type ErrorCode } from "./manifest.js";
 import { StateAccumulator, type StateView } from "./state.js";
-import { HumanRequestClient, TerminalHandle, terminalControlFrame, type HumanCancelResult, type HumanReplyResult, type TerminalCancelRunRequest, type TerminalHandleOptions, type TerminalReplyRequest } from "./terminal_session.js";
+import { TerminalHandle, terminalControlFrame, type TerminalHandleOptions } from "./terminal_session.js";
 import { decodeTerminalServer } from "./terminal_session.js";
 import { buildAuthTranscript, buildPairTranscript, hexBytes } from "./transcript.js";
 
@@ -106,6 +112,34 @@ export type BrowserSessionOptions = {
 
 type Pending = "pair" | "auth" | "snapshot" | "entity";
 type PendingEntity = { kind: EntityChangedEvent["entity_kind"]; id: string };
+type HumanPending = {
+  kind: "detail" | "reply" | "cancel";
+  requestId: string;
+  expectedRevision: bigint;
+  expectedRunRevision: bigint;
+  runId?: string;
+  resolve: (value: unknown) => void;
+  reject: (error: unknown) => void;
+};
+
+export type HumanRequestCancelRunAction = Readonly<{
+  requestId: string;
+  expectedRequestRevision: bigint;
+  expectedRunRevision: bigint;
+}>;
+
+export type HumanRequestDetail = Readonly<{
+  requestId: string;
+  revision: bigint;
+  question: string;
+  canReply: boolean;
+  replyMaxBytes: number;
+  terminalTarget: Readonly<TerminalTargetDescriptor> | null;
+  cancelRun: HumanRequestCancelRunAction | null;
+}>;
+
+export type HumanReplyResult = Readonly<HumanRequestReplyResultBody>;
+export type HumanCancelRunResult = Readonly<HumanRequestCancelRunResultBody>;
 
 /**
  * One connection generation. It owns one socket and one accumulator and is
@@ -135,7 +169,9 @@ export class BrowserSession {
   #resolveConnect: (() => void) | undefined;
   #rejectConnect: ((error: unknown) => void) | undefined;
   #terminalHandles = new Set<TerminalHandle>();
-  #human = new HumanRequestClient((id, payload) => this.#send(payload), (prefix) => this.#nextID(prefix), () => this.#fail(new SessionError("connection")));
+  #humanPending = new Map<string, HumanPending>();
+  #humanDetails = new WeakSet<HumanRequestDetail>();
+  #humanActions = new WeakMap<HumanRequestCancelRunAction, { detail: HumanRequestDetail; requestId: string; runId: string; expectedRequestRevision: bigint; expectedRunRevision: bigint }>();
 
   constructor(options: BrowserSessionOptions) {
     this.#options = { ...options, keyStore: options.keyStore ?? createIndexedDBKeyStore() };
@@ -163,8 +199,43 @@ export class BrowserSession {
     return handle;
   }
 
-  replyHumanRequest(request: TerminalReplyRequest): Promise<HumanReplyResult> { if (this.#closed) return Promise.reject(new SessionError("closed")); if (!this.#authenticated) return Promise.reject(new SessionError("unauthorized")); return this.#human.reply(request); }
-  cancelRun(request: TerminalCancelRunRequest): Promise<HumanCancelResult> { if (this.#closed) return Promise.reject(new SessionError("closed")); if (!this.#authenticated) return Promise.reject(new SessionError("unauthorized")); return this.#human.cancelRun(request); }
+  getHumanRequestDetail(request: { requestId: string; expectedRevision: bigint }): Promise<HumanRequestDetail> {
+    try { this.#ensureHumanOperation(request.requestId); } catch (error) { return Promise.reject(error); }
+    if ((this.#capabilities & CAPABILITIES.private_human_request_detail) === 0) return Promise.reject(new SessionError("unauthorized"));
+    if (request.expectedRevision < 1n || request.expectedRevision > MAX_SQLITE_INTEGER) return Promise.reject(new SessionError("invalid_request"));
+    const id = this.#nextID("human-detail");
+    let payload: string;
+    try { payload = encodeHumanRequestDetailGet(id, { request_id: request.requestId, expected_revision: request.expectedRevision }); } catch (error) { return Promise.reject(error); }
+    return this.#humanRequest<HumanRequestDetail>(id, { kind: "detail", requestId: request.requestId, expectedRevision: request.expectedRevision, expectedRunRevision: 0n }, payload);
+  }
+
+  replyHumanRequest(detail: HumanRequestDetail, reply: string): Promise<HumanReplyResult> {
+    try { this.#ensureHumanOperation(detail.requestId); } catch (error) { return Promise.reject(error); }
+    if ((this.#capabilities & CAPABILITIES.human_actions) === 0) return Promise.reject(new SessionError("unauthorized"));
+    if (!this.#humanDetails.has(detail) || !detail.canReply || detail.terminalTarget === null || detail.cancelRun === null) return Promise.reject(new SessionError("stale"));
+    if (new TextEncoder().encode(reply).length < 1 || new TextEncoder().encode(reply).length > detail.replyMaxBytes || detail.replyMaxBytes !== MAX_HUMAN_REPLY_BYTES) return Promise.reject(new SessionError("invalid_request"));
+    if (detail.revision > MAX_SQLITE_INTEGER - 2n) return Promise.reject(new SessionError("stale"));
+    const id = this.#nextID("human-reply");
+    let payload: string;
+    try { payload = encodeHumanRequestReply(id, { request_id: detail.requestId, expected_revision: detail.revision, reply }); } catch (error) { return Promise.reject(error); }
+    this.#humanDetails.delete(detail);
+    this.#humanActions.delete(detail.cancelRun);
+    return this.#humanRequest<HumanReplyResult>(id, { kind: "reply", requestId: detail.requestId, expectedRevision: detail.revision, expectedRunRevision: 0n }, payload);
+  }
+
+  cancelHumanRequest(action: HumanRequestCancelRunAction): Promise<HumanCancelRunResult> {
+    const authority = this.#humanActions.get(action);
+    if (authority === undefined || authority.requestId !== action.requestId || authority.expectedRequestRevision !== action.expectedRequestRevision || authority.expectedRunRevision !== action.expectedRunRevision) return Promise.reject(new SessionError("stale"));
+    try { this.#ensureHumanOperation(authority.requestId); } catch (error) { return Promise.reject(error); }
+    if ((this.#capabilities & CAPABILITIES.human_actions) === 0) return Promise.reject(new SessionError("unauthorized"));
+    if (action.expectedRequestRevision > MAX_SQLITE_INTEGER - 1n || action.expectedRunRevision > MAX_SQLITE_INTEGER - 1n) return Promise.reject(new SessionError("stale"));
+    const id = this.#nextID("human-cancel");
+    let payload: string;
+    try { payload = encodeHumanRequestCancelRun(id, { request_id: action.requestId, expected_request_revision: action.expectedRequestRevision, expected_run_revision: action.expectedRunRevision }); } catch (error) { return Promise.reject(error); }
+    this.#humanActions.delete(action);
+    this.#humanDetails.delete(authority.detail);
+    return this.#humanRequest<HumanCancelRunResult>(id, { kind: "cancel", requestId: action.requestId, expectedRevision: action.expectedRequestRevision, expectedRunRevision: action.expectedRunRevision, runId: authority.runId }, payload);
+  }
 
   connect(): Promise<void> {
     if (this.#connectPromise !== undefined) return this.#connectPromise;
@@ -202,9 +273,9 @@ export class BrowserSession {
     if (this.#closed) return;
     this.#closed = true;
     this.#pending.clear();
+    this.#closeHumanPending(new SessionError("closed"));
     for (const handle of this.#terminalHandles) handle.close(new SessionError("closed"));
     this.#terminalHandles.clear();
-    this.#human.close(new SessionError("closed"));
     this.#entities.clear();
     this.#accumulator.applyRestart("gap");
     const socket = this.#socket;
@@ -366,8 +437,8 @@ export class BrowserSession {
       if (!this.#anyTerminal((handle) => handle.receive(frame))) throw new ProtocolError("malformed");
       return;
     }
-    if (frame.type === "HUMAN_REQUEST_REPLY_RESULT" || frame.type === "HUMAN_REQUEST_ACTION_RESULT") {
-      if (!this.#human.receive(frame)) throw new ProtocolError("malformed");
+    if (frame.type === "HUMAN_REQUEST_DETAIL" || frame.type === "HUMAN_REQUEST_REPLY_RESULT" || frame.type === "HUMAN_REQUEST_CANCEL_RUN_RESULT") {
+      this.#humanResult(frame);
       return;
     }
     switch (frame.type) {
@@ -429,7 +500,15 @@ export class BrowserSession {
 
   #errorFrame(frame: ErrorFrame): void {
     const id = frame.id;
-    if (id !== undefined && (this.#anyTerminal((handle) => handle.receiveError(id, new SessionError(frame.body.code, frame.body.retryable))) || this.#human.receiveError(id, new SessionError(frame.body.code, frame.body.retryable)))) return;
+    if (id !== undefined && this.#anyTerminal((handle) => handle.receiveError(id, new SessionError(frame.body.code, frame.body.retryable)))) return;
+    if (id !== undefined) {
+      const pending = this.#humanPending.get(id);
+      if (pending !== undefined) {
+        this.#humanPending.delete(id);
+        pending.reject(new SessionError(frame.body.code, frame.body.retryable));
+        return;
+      }
+    }
     if (id !== undefined && this.#pending.has(id)) {
       this.#pending.delete(id);
     }
@@ -517,10 +596,10 @@ export class BrowserSession {
     if (this.#pairing && !(error instanceof ProtocolError) && (error.code === "connection" || error.code === "closed")) error = new SessionError("pairing_uncertain");
     this.#closed = true;
     this.#pending.clear();
+    this.#closeHumanPending(error);
     this.#entities.clear();
     for (const handle of this.#terminalHandles) handle.close(error);
     this.#terminalHandles.clear();
-    this.#human.close(error);
     this.#accumulator.applyRestart("gap");
     const socket = this.#socket;
     this.#socket = undefined;
@@ -530,6 +609,66 @@ export class BrowserSession {
     this.#resolveConnect = undefined;
     notify(this.#options.onError, error);
     this.#setStatus("closed");
+  }
+
+  #humanResult(frame: Extract<ServerControlFrame, { type: "HUMAN_REQUEST_DETAIL" | "HUMAN_REQUEST_REPLY_RESULT" | "HUMAN_REQUEST_CANCEL_RUN_RESULT" }>): void {
+    const pending = this.#humanPending.get(frame.id);
+    const kind = frame.type === "HUMAN_REQUEST_DETAIL" ? "detail" : frame.type === "HUMAN_REQUEST_REPLY_RESULT" ? "reply" : "cancel";
+    if (pending === undefined || pending.kind !== kind || frame.body.request_id !== pending.requestId) throw new ProtocolError("malformed");
+    if (frame.type === "HUMAN_REQUEST_DETAIL") {
+      if (frame.body.revision !== pending.expectedRevision) throw new ProtocolError("malformed");
+      const terminalTarget = frame.body.terminal_target === null ? null : Object.freeze({ ...frame.body.terminal_target });
+      let action: HumanRequestCancelRunAction | null = null;
+      if (frame.body.cancel_run !== null) {
+        if (terminalTarget === null) throw new ProtocolError("malformed");
+        action = Object.freeze({
+          requestId: frame.body.request_id,
+          expectedRequestRevision: frame.body.cancel_run.expected_request_revision,
+          expectedRunRevision: frame.body.cancel_run.expected_run_revision,
+        });
+      }
+      const detail: HumanRequestDetail = Object.freeze({
+        requestId: frame.body.request_id,
+        revision: frame.body.revision,
+        question: frame.body.question,
+        canReply: frame.body.can_reply,
+        replyMaxBytes: frame.body.reply_max_bytes,
+        terminalTarget,
+        cancelRun: action,
+      });
+      this.#humanDetails.add(detail);
+      if (action !== null && terminalTarget !== null) this.#humanActions.set(action, { detail, requestId: action.requestId, runId: terminalTarget.run_id, expectedRequestRevision: action.expectedRequestRevision, expectedRunRevision: action.expectedRunRevision });
+      this.#humanPending.delete(frame.id);
+      pending.resolve(detail);
+      return;
+    }
+    if (frame.type === "HUMAN_REQUEST_REPLY_RESULT") {
+      if (frame.body.revision !== pending.expectedRevision + 2n) throw new ProtocolError("malformed");
+      this.#humanPending.delete(frame.id);
+      pending.resolve(Object.freeze({ ...frame.body }));
+      return;
+    }
+    if (pending.runId === undefined || frame.body.run_id !== pending.runId || frame.body.run_revision !== pending.expectedRunRevision + 1n || frame.body.request_revision !== pending.expectedRevision + 1n) throw new ProtocolError("malformed");
+    this.#humanPending.delete(frame.id);
+    pending.resolve(Object.freeze({ ...frame.body }));
+  }
+
+  #ensureHumanOperation(requestId: string): void {
+    this.#ensureLive();
+    if (!this.#authenticated) throw new SessionError("unauthorized");
+    if (this.#humanPending.size >= MAX_ARRAY_ITEMS) throw new SessionError("rate_limited");
+    for (const pending of this.#humanPending.values()) if (pending.requestId === requestId) throw new SessionError("rate_limited");
+  }
+
+  #humanRequest<T>(id: string, pending: Omit<HumanPending, "resolve" | "reject">, payload: string): Promise<T> {
+    const result = new Promise<T>((resolve, reject) => this.#humanPending.set(id, { ...pending, resolve: resolve as (value: unknown) => void, reject }));
+    try { this.#send(payload); } catch { this.#fail(new SessionError("connection")); }
+    return result;
+  }
+
+  #closeHumanPending(error: SessionError | ProtocolError): void {
+    for (const pending of this.#humanPending.values()) pending.reject(error);
+    this.#humanPending.clear();
   }
 
   #ensureLive(): void {

@@ -86,7 +86,7 @@ func newFakeBackend() *fakeBackend {
 		Head: 7, Kind: browserprotocol.StateProject, ID: projectID, Revision: 1,
 		Item: browserprotocol.ProjectStateItem(browserprotocol.ProjectItem{ID: projectID, Name: "Factory", Revision: 1}),
 	}
-	backend.detail = browserprotocol.HumanRequestDetail{RequestID: requestID, Revision: 1, Question: "Choose one"}
+	backend.detail = browserprotocol.HumanRequestDetail{RequestID: requestID, Revision: 1, Question: "Choose one", ReplyMaxBytes: browserprotocol.MaxHumanReplyBytes}
 	backend.target = browserprotocol.TerminalTarget{AgentID: strings.Repeat("01", 16), AgentRevision: 1, Head: 7}
 	backend.sub = newFakeSubscription()
 	return backend
@@ -766,9 +766,9 @@ func TestDuplicateRequestIDAndConnectionLimit(t *testing.T) {
 func TestMaximumValidStateTraversalFitsLifetimeRequestBudget(t *testing.T) {
 	backend := newFakeBackend()
 	item := browserprotocol.HumanRequestItem{
-		ID: requestID, ProjectID: projectID, AgentID: testID, TaskID: projectID, RunID: testID,
+		ID: requestID, ProjectID: projectID, AgentID: testID, TaskID: projectID,
 		CreatedAt: 1, UpdatedAt: 1, Revision: 1, Kind: "question", Status: "open",
-		ReplyMaxBytes: browserprotocol.MaxHumanReplyBytes, CanReply: true, CanOpenTerminal: true,
+		ReplyMaxBytes: browserprotocol.MaxHumanReplyBytes, CanReply: true,
 	}
 	backend.pageFunc = func(call int, _ *Cursor) StatePage {
 		nextFor := func(kind browserprotocol.StateKind) *Cursor {

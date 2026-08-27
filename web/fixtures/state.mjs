@@ -21,6 +21,6 @@ export const fixtureState = {
     [taskID, { id: taskID, project_id: projectID, assigned_agent_id: agentID, title: "Review the state projection", status: "running", priority: 10, revision: 12n }],
   ]),
   humanRequests: new Map([
-    [requestID, { id: requestID, project_id: projectID, agent_id: agentID, task_id: taskID, run_id: "51".repeat(16), created_at: 40n, updated_at: 42n, revision: 13n, kind: "question", status: "open", reply_max_bytes: 8192, can_reply: true, can_open_terminal: false }],
+    [requestID, { id: requestID, project_id: projectID, agent_id: agentID, task_id: taskID, created_at: 40n, updated_at: 42n, revision: 13n, kind: "question", status: "open", reply_max_bytes: 8192, can_reply: true }],
   ]),
 };

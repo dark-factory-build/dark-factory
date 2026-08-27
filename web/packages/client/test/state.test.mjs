@@ -37,7 +37,7 @@ const factoryItem = (revision = 1n) => ({ dispatch_enabled: true, capacity: 8, a
 const projectItem = (revision = 1n) => ({ id: ids.project, name: "Factory", revision });
 const agentItem = (revision = 1n) => ({ id: ids.agent, project_id: ids.project, name: "Worker", role: "worker", paused: false, revision });
 const taskItem = (revision = 1n, title = "Ship") => ({ id: ids.task, project_id: ids.project, assigned_agent_id: ids.agent, title, status: "queued", priority: 1, revision });
-const requestItem = (revision = 1n) => ({ id: ids.request, project_id: ids.project, agent_id: ids.agent, task_id: ids.task, run_id: ids.run, created_at: 10n, updated_at: 11n, revision, kind: "question", status: "open", reply_max_bytes: 8192, can_reply: true, can_open_terminal: true });
+const requestItem = (revision = 1n) => ({ id: ids.request, project_id: ids.project, agent_id: ids.agent, task_id: ids.task, created_at: 10n, updated_at: 11n, revision, kind: "question", status: "open", reply_max_bytes: 8192, can_reply: true });
 const rawID = (value) => BigInt(value).toString(16).padStart(32, "0");
 const itemForKind = (kind, value) => {
   const id = rawID(value);
@@ -160,7 +160,6 @@ test("every JSON boolean rejects null exactly", () => {
     [encodeStateSnapshot("boolean", { head: 1n, kind: "factory", items: [factoryItem()], next_cursor: "projects" }), '"dispatch_enabled":true'],
     [encodeStateSnapshot("boolean", { head: 1n, kind: "agent", items: [agentItem()], next_cursor: "tasks" }), '"paused":false'],
     [encodeStateSnapshot("boolean", { head: 1n, kind: "human_request", items: [requestItem()], next_cursor: null }), '"can_reply":true'],
-    [encodeStateSnapshot("boolean", { head: 1n, kind: "human_request", items: [requestItem()], next_cursor: null }), '"can_open_terminal":true'],
     [encodeStateEvent("boolean", { event: "entity_changed", sequence: 1n, head: 1n, entity_kind: "task", entity_id: ids.task, revision: 1n, deleted: false }), '"deleted":false'],
     [encodeStateEntity("boolean", { head: 1n, kind: "task", id: ids.task, revision: 1n, deleted: false, item: taskItem() }), '"deleted":false'],
     [encodeServerControl({ v: 1, type: "ERROR", id: "boolean", body: { code: "invalid_request", retryable: false } }), '"retryable":false'],
@@ -170,9 +169,9 @@ test("every JSON boolean rejects null exactly", () => {
 
 test("public HumanRequest state cannot carry private fields and detail is separately bounded", () => {
   const wire = encodeStateSnapshot("page", { head: 1n, kind: "human_request", items: [requestItem()], next_cursor: null });
-  for (const field of ["question", "reply", "project_name", "agent_name", "task_title", "summary", "why_human_needed"]) assert.equal(wire.includes(`"${field}":`), false, field);
+  for (const field of ["run_id", "question", "reply", "terminal_target", "cancel_run", "action", "project_name", "agent_name", "task_title", "summary", "why_human_needed"]) assert.equal(wire.includes(`"${field}":`), false, field);
   expectMalformed(() => encodeStateSnapshot("page", { head: 1n, kind: "human_request", items: [{ ...requestItem(), question: "private" }], next_cursor: null }));
-  const detail = { v: 1, type: "HUMAN_REQUEST_DETAIL", id: "detail", body: { request_id: ids.request, revision: 1n, question: "\0".repeat(MAX_HUMAN_QUESTION_BYTES) } };
+  const detail = { v: 1, type: "HUMAN_REQUEST_DETAIL", id: "detail", body: { request_id: ids.request, revision: 1n, question: "\0".repeat(MAX_HUMAN_QUESTION_BYTES), can_reply: false, reply_max_bytes: 8192, terminal_target: null, cancel_run: null } };
   const detailWire = encodeServerControl(detail);
   assert.ok(Buffer.byteLength(detailWire) < MAX_CONTROL_BYTES);
   assert.ok(Buffer.byteLength(detailWire) > 49_000);
