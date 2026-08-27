@@ -807,7 +807,7 @@ func validateStateSnapshot(value StateSnapshot) error {
 	}
 	count := stateItemCount(value.Items)
 	if value.Kind == StateHumanRequest {
-		if (count == MaxStatePageItems && value.NextCursor == nil) || (count < MaxStatePageItems && value.NextCursor != nil) {
+		if count < MaxStatePageItems && value.NextCursor != nil {
 			return fmt.Errorf("%w: human request page continuation", ErrMalformed)
 		}
 		return nil

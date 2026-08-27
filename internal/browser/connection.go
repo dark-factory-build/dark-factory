@@ -432,6 +432,9 @@ func (current *connection) stateHeadRegressed(next browserprotocol.Decimal) bool
 }
 
 func (current *connection) sendRestart(restart browserprotocol.StateRestart) error {
+	if restart.Head < current.subscriptionSequence || current.subscriptionHeadSet && restart.Head < current.subscriptionHead {
+		return fmt.Errorf("restart chronology regressed")
+	}
 	payload, err := browserprotocol.EncodeStateRestart(current.subscriptionID, restart)
 	if err != nil {
 		return err

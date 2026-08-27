@@ -116,6 +116,42 @@ func TestHumanRequestProjectionMissingOrMalformedDurableControlsFailClosed(t *te
 	}
 }
 
+func TestHumanRequestDirectProjectionValidatesActiveLeaseRelationship(t *testing.T) {
+	for index, test := range []struct {
+		name   string
+		mutate func(*testing.T, *Store, BrowserClient)
+	}{
+		{name: "missing client", mutate: func(t *testing.T, store *Store, _ BrowserClient) {
+			corruptSQL(t, store, `UPDATE terminal_sessions SET lease_client_id = ?`, browserTestID(t, 250).Bytes())
+		}},
+		{name: "revoked client", mutate: func(t *testing.T, store *Store, client BrowserClient) {
+			corruptSQL(t, store, `UPDATE browser_clients SET revoked_at_ms = updated_at_ms WHERE id = ?`, client.ID.Bytes())
+		}},
+		{name: "client without terminal capability", mutate: func(t *testing.T, store *Store, client BrowserClient) {
+			corruptSQL(t, store, `UPDATE browser_clients SET capability_mask = ? WHERE id = ?`, int64(BrowserCapabilityObserve), client.ID.Bytes())
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, run, _ := runningOrchestratorRun(t)
+			defer store.Close()
+			request, err := store.CreateHumanQuestionForAttempt(context.Background(), run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(byte(190 + index)), QuestionText: "private"}, mustTime(t, 400))
+			if err != nil {
+				t.Fatal(err)
+			}
+			session := terminalSessionForRunTest(t, store, run.ID)
+			client := humanQuestionClient(t, store, byte(190+index), BrowserCapabilityObserve|BrowserCapabilityTerminalInput)
+			if _, err := store.AcquireTerminalLease(context.Background(), run.ID, session.ID, client.ID, run.Revision, session.Revision, mustTime(t, 401)); err != nil {
+				t.Fatal(err)
+			}
+			assertHumanRequestDirectProjection(t, store, request.ID, HumanRequestOpen, true)
+			test.mutate(t, store, client)
+			if projection, found, err := store.HumanRequest(context.Background(), request.ID); !errors.Is(err, ErrCorruptState) || found || projection != (HumanRequestProjection{}) {
+				t.Fatalf("corrupt lease projection = %+v, found=%v, err=%v", projection, found, err)
+			}
+		})
+	}
+}
+
 func TestHumanRequestProjectionRejectsDuplicateTerminalSessionsRegardlessOfOrder(t *testing.T) {
 	for _, duplicateSeed := range []byte{1, 0xfe} {
 		t.Run(terminalSessionID(t, duplicateSeed).String(), func(t *testing.T) {

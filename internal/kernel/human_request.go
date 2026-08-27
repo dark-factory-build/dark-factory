@@ -292,6 +292,16 @@ func humanRequestProjectionByID(ctx context.Context, connection *sql.Conn, id Hu
 		}
 		return HumanRequestProjection{}, false, fmt.Errorf("%w: invalid human request terminal session", err)
 	}
+	run, runFound, err := runByID(ctx, connection, runID)
+	if err != nil || !runFound {
+		if err == nil {
+			err = ErrCorruptState
+		}
+		return HumanRequestProjection{}, false, fmt.Errorf("%w: invalid human request run", err)
+	}
+	if err := validateTerminalSessionLease(ctx, connection, run, terminal); err != nil {
+		return HumanRequestProjection{}, false, err
+	}
 	unresolved := status == HumanRequestOpen || status == HumanRequestDelivering || status == HumanRequestDeliveryUnknown
 	terminalAttachable := unresolved && runPhase == RunRunning && terminal.State == TerminalSessionActive
 	return HumanRequestProjection{ID: requestID, ProjectID: projectID, AgentID: agentID, TaskID: taskID, RunID: runID, CreatedAt: created, UpdatedAt: updated, Revision: rev, Kind: kind, Status: status, ReplyMaxBytes: MaxHumanRequestReplyBytes, CanReply: status == HumanRequestOpen, CanOpenTerminal: terminalAttachable}, true, nil

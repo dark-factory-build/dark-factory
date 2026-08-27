@@ -139,8 +139,8 @@ func TestStatePageKindsAndItemCap(t *testing.T) {
 	if _, err := EncodeStateSnapshot("page", StateSnapshot{Head: 1, Kind: StateHumanRequest, Items: repeatedStateItems(StateHumanRequest, MaxStatePageItems), NextCursor: &cursor}); err != nil {
 		t.Fatalf("full human request page did not continue: %v", err)
 	}
-	if _, err := EncodeStateSnapshot("page", StateSnapshot{Head: 1, Kind: StateHumanRequest, Items: repeatedStateItems(StateHumanRequest, MaxStatePageItems)}); err == nil {
-		t.Fatal("full human request page terminated")
+	if _, err := EncodeStateSnapshot("page", StateSnapshot{Head: 1, Kind: StateHumanRequest, Items: repeatedStateItems(StateHumanRequest, MaxStatePageItems)}); err != nil {
+		t.Fatalf("full human request final page rejected: %v", err)
 	}
 	encoded, err := EncodeStateSnapshot("page", StateSnapshot{Head: 1, Kind: StateFactory, Items: FactoryItems([]FactoryItem{factoryItem()}), NextCursor: &cursor})
 	if err != nil {

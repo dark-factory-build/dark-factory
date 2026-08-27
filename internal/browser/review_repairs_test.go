@@ -218,6 +218,114 @@ func TestSubscriptionChronologyRestartsInsteadOfPublishingGap(t *testing.T) {
 	}
 }
 
+func TestHumanRequestPageBoundariesOverTransport(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		humanCount int
+	}{
+		{name: "exact full final page", humanCount: browserprotocol.MaxStatePageItems},
+		{name: "full page then one final item", humanCount: browserprotocol.MaxStatePageItems + 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			backend := newFakeBackend()
+			backend.pageFunc = func(call int, _ *Cursor) StatePage {
+				next := func(kind browserprotocol.StateKind) *Cursor {
+					return &Cursor{Head: 1, Kind: kind}
+				}
+				switch call {
+				case 1:
+					return StatePage{Head: 1, Kind: browserprotocol.StateFactory, Items: browserprotocol.FactoryItems([]browserprotocol.FactoryItem{{DispatchEnabled: true, Capacity: 1, Revision: 1}}), NextCursor: next(browserprotocol.StateProject)}
+				case 2:
+					return StatePage{Head: 1, Kind: browserprotocol.StateProject, Items: browserprotocol.ProjectItems(nil), NextCursor: next(browserprotocol.StateAgent)}
+				case 3:
+					return StatePage{Head: 1, Kind: browserprotocol.StateAgent, Items: browserprotocol.AgentItems(nil), NextCursor: next(browserprotocol.StateTask)}
+				case 4:
+					return StatePage{Head: 1, Kind: browserprotocol.StateTask, Items: browserprotocol.TaskItems(nil), NextCursor: next(browserprotocol.StateHumanRequest)}
+				default:
+					count := test.humanCount
+					if call > 5 {
+						count = 1
+					}
+					items := make([]browserprotocol.HumanRequestItem, count)
+					for index := range items {
+						items[index] = browserprotocol.HumanRequestItem{
+							ID: requestID, ProjectID: projectID, AgentID: testID, TaskID: projectID, RunID: testID,
+							CreatedAt: 1, UpdatedAt: 1, Revision: 1, Kind: "question", Status: "open",
+							ReplyMaxBytes: browserprotocol.MaxHumanReplyBytes, CanReply: true, CanOpenTerminal: true,
+						}
+					}
+					if call == 5 && test.humanCount > browserprotocol.MaxStatePageItems {
+						continuation := next(browserprotocol.StateHumanRequest)
+						continuation.HasAfter = true
+						continuation.AfterID[0] = 1
+						return StatePage{Head: 1, Kind: browserprotocol.StateHumanRequest, Items: browserprotocol.HumanRequestItems(items[:browserprotocol.MaxStatePageItems]), NextCursor: continuation}
+					}
+					return StatePage{Head: 1, Kind: browserprotocol.StateHumanRequest, Items: browserprotocol.HumanRequestItems(items)}
+				}
+			}
+			server := startServer(t, backend)
+			connection, _ := dialServer(t, server, testOrigin)
+			authenticate(t, connection)
+			var cursor *string
+			pages := 5
+			if test.humanCount > browserprotocol.MaxStatePageItems {
+				pages = 6
+			}
+			for page := 0; page < pages; page++ {
+				request, err := browserprotocol.EncodeStateGet("page-"+string(rune('a'+page)), browserprotocol.StateGet{Cursor: cursor})
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeClientFrame(t, connection, request)
+				frame := readServerFrame(t, connection)
+				if frame.Type != browserprotocol.TypeStateSnapshot {
+					t.Fatalf("page %d response=%+v", page, frame)
+				}
+				snapshot := frame.Body.(browserprotocol.StateSnapshot)
+				cursor = snapshot.NextCursor
+				if page == pages-1 && cursor != nil {
+					t.Fatalf("final page retained cursor=%q", *cursor)
+				}
+			}
+		})
+	}
+}
+
+func TestSubscriptionRestartCannotRegressAcceptedChronology(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		after   browserprotocol.Decimal
+		restart browserprotocol.StateRestart
+	}{
+		{name: "below accepted sequence", after: 7, restart: browserprotocol.StateRestart{Head: 6, Reason: browserprotocol.RestartGap}},
+		{name: "below accepted head", after: 7, restart: browserprotocol.StateRestart{Head: 7, Reason: browserprotocol.RestartHeadChanged}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			backend := newFakeBackend()
+			server := startServer(t, backend)
+			connection, _ := dialServer(t, server, testOrigin)
+			authenticate(t, connection)
+			subscribe, _ := browserprotocol.EncodeStateSubscribe("chronology", browserprotocol.StateSubscribe{After: test.after})
+			writeClientFrame(t, connection, subscribe)
+			waitFor(t, func() bool {
+				backend.mu.Lock()
+				defer backend.mu.Unlock()
+				return backend.subCalls == 1
+			})
+			if test.name == "below accepted head" {
+				event := browserprotocol.HiddenAdvanceEvent(browserprotocol.HiddenAdvance{Sequence: 8, Head: 8})
+				backend.sub.updates <- StateUpdate{Event: &event}
+				if frame := readServerFrame(t, connection); frame.Type != browserprotocol.TypeStateEvent {
+					t.Fatalf("accepted event=%+v", frame)
+				}
+			}
+			backend.sub.updates <- StateUpdate{Restart: &test.restart}
+			assertError(t, readServerFrame(t, connection), browserprotocol.ErrorInternal)
+			waitFor(t, func() bool { return backend.sub.closed.Load() == 1 })
+		})
+	}
+}
+
 func eventPointer(value browserprotocol.StateEvent) *browserprotocol.StateEvent { return &value }
 
 func TestHiddenChronologyAdvancesAndExplicitDependencyRestartCloses(t *testing.T) {
