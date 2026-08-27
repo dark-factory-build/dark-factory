@@ -2,7 +2,6 @@ import type { FormEvent, ReactNode } from "react";
 import type { FactoryAppSnapshot, FactoryHumanRequestView } from "./factory-app-controller.js";
 
 export type FactoryConsoleProps = FactoryAppSnapshot & {
-  onRetry?: () => void;
   onSelectHumanRequest?: (request: FactoryHumanRequestView["request"]) => void;
   onHumanReplyChange?: (reply: string) => void;
   onReplyHumanRequest?: () => void;
@@ -23,7 +22,7 @@ const ERROR_LABELS = new Map<string, string>([
   ["connection", "Connection unavailable."],
   ["closed", "Connection closed."],
   ["pairing_required", "Pair this browser client before connecting."],
-  ["pairing_uncertain", "Pairing result is uncertain. Wait before trying again."],
+  ["pairing_uncertain", "Pairing result is uncertain. Pair this browser client again."],
   ["storage_unavailable", "Browser key storage is unavailable."],
   ["crypto_unavailable", "Browser cryptography is unavailable."],
   ["malformed", "The server sent an invalid frame."],
@@ -41,11 +40,9 @@ const ERROR_LABELS = new Map<string, string>([
 
 export function FactoryConsole({
   status,
-  canRetry: retryable,
   state,
   error,
   selectedHumanRequest,
-  onRetry,
   onSelectHumanRequest,
   onHumanReplyChange,
   onReplyHumanRequest,
@@ -53,7 +50,6 @@ export function FactoryConsole({
   onCloseHumanRequest,
 }: FactoryConsoleProps) {
   const projects = state?.projects;
-  const canRetry = retryable && onRetry !== undefined && (status === "idle" || status === "closed");
 
   return (
     <main className="dfFactoryConsole" aria-label="Factory operator console">
@@ -67,7 +63,6 @@ export function FactoryConsole({
             <span className={`dfFactoryConsole__statusDot dfFactoryConsole__statusDot--${status}`} aria-hidden="true" />
             {STATUS_LABELS[status]}
           </p>
-          {canRetry ? <button type="button" onClick={onRetry}>RETRY CONNECTION</button> : null}
         </div>
       </header>
 

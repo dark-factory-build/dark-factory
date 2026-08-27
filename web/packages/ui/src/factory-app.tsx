@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { FactoryAppController, type FactoryAppSnapshot } from "./factory-app-controller.js";
 import { FactoryConsole } from "./factory-console.js";
 
-const INITIAL_SNAPSHOT: FactoryAppSnapshot = { status: "idle", canRetry: false };
+const INITIAL_SNAPSHOT: FactoryAppSnapshot = { status: "idle" };
 
 /** Complete browser application lifecycle; hosts only render this component. */
 export function FactoryApp() {
@@ -29,7 +29,6 @@ export function FactoryApp() {
   return (
     <FactoryConsole
       {...snapshot}
-      onRetry={snapshot.canRetry ? () => owner.current?.retry() : undefined}
       onSelectHumanRequest={(request) => { void owner.current?.selectHumanRequest(request); }}
       onHumanReplyChange={(reply) => owner.current?.setHumanReply(reply)}
       onReplyHumanRequest={() => { void owner.current?.replyHumanRequest(); }}

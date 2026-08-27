@@ -28,7 +28,6 @@ export type FactoryHumanRequestView = Readonly<{
 
 export type FactoryAppSnapshot = Readonly<{
   status: SessionStatus;
-  canRetry: boolean;
   state?: StateView;
   error?: SessionError | ProtocolError;
   selectedHumanRequest?: FactoryHumanRequestView;
@@ -60,7 +59,6 @@ export class FactoryAppController {
   readonly #options: FactoryAppControllerOptions;
   #client: ControlledClient | undefined;
   #status: SessionStatus = "idle";
-  #canRetry = false;
   #state: StateView | undefined;
   #error: SessionError | ProtocolError | undefined;
   #selection: Selection | undefined;
@@ -85,7 +83,6 @@ export class FactoryAppController {
       challenge = consumePairingChallenge(this.#options.location, this.#options.history);
     } catch {
       this.#status = "closed";
-      this.#canRetry = false;
       this.#error = new SessionError("connection");
       this.#publish();
       return;
@@ -105,7 +102,6 @@ export class FactoryAppController {
       });
     } catch {
       this.#status = "closed";
-      this.#canRetry = false;
       this.#error = new SessionError("connection");
       this.#publish();
       return;
@@ -115,16 +111,7 @@ export class FactoryAppController {
       return;
     }
     this.#client = client;
-    this.#canRetry = true;
     this.#connect(generation);
-  }
-
-  retry(): void {
-    if (this.#closed || this.#client === undefined) return;
-    this.#clearSelection();
-    this.#error = undefined;
-    this.#publish();
-    this.#connect(this.#generation);
   }
 
   close(): void {
@@ -298,7 +285,6 @@ export class FactoryAppController {
     const selection = this.#selection;
     return {
       status: this.#status,
-      canRetry: this.#canRetry,
       state: this.#state,
       error: this.#error,
       selectedHumanRequest: selection === undefined ? undefined : {

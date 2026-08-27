@@ -2,9 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { SessionError } from "@dark-factory/client";
 import { FactoryAppController } from "../dist/src/factory-app-controller.js";
-import { FactoryConsole } from "../dist/src/factory-console.js";
-import { createElement } from "react";
-import { renderToStaticMarkup } from "react-dom/server";
 import { fixtureState } from "../../../fixtures/state.mjs";
 
 const challenge = "51".repeat(32);
@@ -111,14 +108,11 @@ test("a failed fragment scrub creates no client or browser effect", () => {
   assert.equal(clients, 0);
   const snapshot = snapshots.at(-1);
   assert.equal(snapshot.status, "closed");
-  assert.equal(snapshot.canRetry, false);
   assert.equal(snapshot.error.code, "connection");
   assert.equal(snapshot.error.retryable, false);
-  const markup = renderToStaticMarkup(createElement(FactoryConsole, { ...snapshot, onRetry: () => {} }));
-  assert.equal(markup.includes("RETRY CONNECTION"), false);
 });
 
-test("a failed client construction is closed and cannot advertise retry", () => {
+test("a failed client construction is closed without a client", () => {
   const snapshots = [];
   const controller = new FactoryAppController({
     origin: "https://app.darkfactory.build",
@@ -130,9 +124,6 @@ test("a failed client construction is closed and cannot advertise retry", () => 
   controller.start();
   const snapshot = snapshots.at(-1);
   assert.equal(snapshot.status, "closed");
-  assert.equal(snapshot.canRetry, false);
-  const markup = renderToStaticMarkup(createElement(FactoryConsole, { ...snapshot, onRetry: () => {} }));
-  assert.equal(markup.includes("RETRY CONNECTION"), false);
 });
 
 test("factory construction cannot retain a client after a reentrant close", () => {
@@ -228,16 +219,6 @@ test("current callbacks publish while close is once-only and fences synchronous 
   context.emitState(fixtureState);
   assert.equal(context.calls.close, 1);
   assert.equal(context.snapshots.length, beforeClose);
-});
-
-test("retry reuses the BrowserClient recovery owner and clears transient state", () => {
-  const context = harness();
-  context.controller.start();
-  context.emitError(new SessionError("connection", true));
-  assert.equal(context.latest().canRetry, true);
-  context.controller.retry();
-  assert.equal(context.calls.connect, 2);
-  assert.equal(context.latest().error, undefined);
 });
 
 test("detail selection is exact, unique, view-only, and reconnect clears private state", async () => {

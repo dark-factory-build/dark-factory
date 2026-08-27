@@ -60,24 +60,23 @@ test("all session statuses have stable live labels and no unsupported ready cont
   for (const status of ["idle", "connecting", "authenticating", "syncing", "ready", "closed"]) {
     const markup = render({ status });
     assert.match(markup, new RegExp(`>${status.toUpperCase()}<`));
+    assert.equal(markup.includes("<button"), false);
   }
-  assert.equal(render().includes("<button"), false);
-  assert.equal(render({ status: "connecting", onRetry: () => {} }).includes("<button"), false);
 });
 
-test("closed connection exposes retry only when the snapshot has a client owner", () => {
-  let retries = 0;
-  const markup = render({ status: "closed", canRetry: true, error: new SessionError("connection", true), onRetry: () => { retries += 1; } });
-  assert.match(markup, /Connection unavailable\./);
-  assert.match(markup, /role="alert"/);
-  assert.match(markup, /RETRY CONNECTION/);
-  assert.equal(markup.includes("Error:"), false);
-  assert.equal(markup.includes("secret"), false);
-  assert.equal(retries, 0);
+test("closed and pairing-uncertain errors have no ineffective action", () => {
+  for (const error of [new SessionError("connection", true), new SessionError("pairing_uncertain"), new ProtocolError("malformed")]) {
+    const markup = render({ status: "closed", error });
+    assert.match(markup, /role="alert"/);
+    assert.equal(markup.includes("<button"), false);
+    assert.equal(markup.includes("RETRY CONNECTION"), false);
+    assert.equal(markup.includes("Error:"), false);
+    assert.equal(markup.includes("secret"), false);
+  }
 });
 
 test("protocol errors remain finite and never expose their message", () => {
-  const markup = render({ status: "closed", error: new ProtocolError("malformed"), onRetry: () => {} });
+  const markup = render({ status: "closed", error: new ProtocolError("malformed") });
   assert.match(markup, /The server sent an invalid frame\./);
   assert.equal(markup.includes("malformed"), false);
 });
