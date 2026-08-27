@@ -42,7 +42,7 @@ test("canonical control fixtures decode by sender role and re-encode exactly", (
   assert.equal(encodeServerControl(decodeServerControl(error)), error);
 });
 
-test("ERROR alone has an optional bounded correlation ID", () => {
+test("control envelope IDs are symmetrically required, optional, or forbidden", () => {
   const withoutID = encodeServerError({ code: "not_found", retryable: false });
   const withID = encodeServerError({ code: "not_found", retryable: false }, "entity-1");
   for (const decode of [decodeClientControl, decodeServerControl]) {
@@ -52,8 +52,21 @@ test("ERROR alone has an optional bounded correlation ID", () => {
       expectMalformed(() => decode(JSON.stringify({ v: 1, type: "ERROR", id, body: { code: "not_found", retryable: false } })));
     }
   }
+  for (const id of ["", "x".repeat(65), 1, null]) expectMalformed(() => encodeServerError({ code: "not_found", retryable: false }, id));
+
+  const hello = decodeServerControl(fixture("hello.json"));
+  const acknowledgement = decodeClientControl(fixture("terminal_ack.json"));
+  assert.equal(encodeServerControl(hello), fixture("hello.json"));
+  assert.equal(encodeClientControl(acknowledgement), fixture("terminal_ack.json"));
+  expectMalformed(() => encodeServerControl({ ...hello, id: "hello" }));
+  expectMalformed(() => encodeClientControl({ ...acknowledgement, id: "ack" }));
   expectMalformed(() => decodeServerControl(fixture("hello.json").replace('"body":', '"id":"hello","body":')));
   expectMalformed(() => decodeClientControl(fixture("terminal_ack.json").replace('"body":', '"id":"ack","body":')));
+
+  const required = decodeServerControl(fixture("auth_result.json"));
+  assert.equal(encodeServerControl(required), fixture("auth_result.json"));
+  const { id: _id, ...missingID } = required;
+  expectMalformed(() => encodeServerControl(missingID));
 });
 
 test("control role, envelope, field and capability validation is closed", () => {

@@ -190,7 +190,7 @@ export function decodeServerControl(data: string | Uint8Array): ServerControlFra
 
 function encode(frame: ClientControlFrame | ServerControlFrame, body: ControlBody): string {
   const envelope: Record<string, unknown> = { v: 1, type: frame.type };
-  if ("id" in frame) envelope.id = frame.id;
+  if (Object.prototype.hasOwnProperty.call(frame, "id") && "id" in frame) envelope.id = frame.id;
   envelope.body = wireValue(body);
   const result = JSON.stringify(envelope);
   if (new TextEncoder().encode(result).length > MAX_CONTROL_BYTES) throw new ProtocolError("oversized");
@@ -215,10 +215,7 @@ function decodeControl(data: string | Uint8Array, role: "client" | "server"): Cl
   if (value.v !== 1) throw new ProtocolError("unsupported_version");
   if (!isControlType(value.type)) malformed();
   const hasID = Object.prototype.hasOwnProperty.call(value, "id");
-  if (hasID && (typeof value.id !== "string" || !validID(value.id))) malformed();
-  const optionalID = value.type === "ERROR";
-  const requiredID = value.type !== "HELLO" && !optionalID && value.type !== "TERMINAL_ACK";
-  if (!optionalID && requiredID !== hasID) malformed();
+  validateControlID(value.type, hasID, value.id);
   if (role === "client" && !CLIENT_TYPES.includes(value.type)) throw new ProtocolError("wrong_direction");
   if (role === "server" && !SERVER_TYPES.includes(value.type)) throw new ProtocolError("wrong_direction");
   const body = validateBody(value.type, value.body, true);
@@ -227,10 +224,14 @@ function decodeControl(data: string | Uint8Array, role: "client" | "server"): Cl
 function validateControl(frame: ClientControlFrame | ServerControlFrame, role: "client" | "server"): ControlBody {
   if (!isObject(frame) || frame.v !== 1 || !isControlType(frame.type)) malformed();
   if (role === "client" && !CLIENT_TYPES.includes(frame.type) || role === "server" && !SERVER_TYPES.includes(frame.type)) throw new ProtocolError("wrong_direction");
-  const requires = frame.type !== "HELLO" && frame.type !== "ERROR" && frame.type !== "TERMINAL_ACK";
-  if (requires && (!("id" in frame) || !validID(frame.id))) malformed();
-  if (!requires && "id" in frame && (typeof frame.id !== "string" || !validID(frame.id))) malformed();
+  const hasID = Object.prototype.hasOwnProperty.call(frame, "id");
+  validateControlID(frame.type, hasID, "id" in frame ? frame.id : undefined);
   return validateBody(frame.type, frame.body, false);
+}
+
+function validateControlID(type: ControlType, hasID: boolean, id: unknown): void {
+  const policy: "required" | "optional" | "forbidden" = type === "ERROR" ? "optional" : type === "HELLO" || type === "TERMINAL_ACK" ? "forbidden" : "required";
+  if (hasID && (typeof id !== "string" || !validID(id)) || policy === "forbidden" && hasID || policy === "required" && !hasID) malformed();
 }
 
 function validateBody(type: ControlType, body: unknown, wire: boolean): ControlBody {
