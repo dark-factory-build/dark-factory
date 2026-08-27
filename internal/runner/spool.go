@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -99,7 +100,7 @@ func publishTerminal(dir *os.File, basename string, terminal Terminal, afterOpen
 	return &TerminalRecord{Terminal: terminal, Identity: FileIdentity{Device: uint64(st.Dev), Inode: st.Ino}, Digest: hex.EncodeToString(digest[:])}, nil
 }
 
-func LoadTerminal(dir *os.File, basename string) (*TerminalRecord, error) {
+func LoadTerminal(dir *os.File, basename string) (result *TerminalRecord, resultErr error) {
 	if err := validateTerminalName(dir, basename); err != nil {
 		return nil, err
 	}
@@ -108,7 +109,12 @@ func LoadTerminal(dir *os.File, basename string) (*TerminalRecord, error) {
 		return nil, err
 	}
 	f := os.NewFile(uintptr(fd), "terminal")
-	defer f.Close()
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil {
+			result = nil
+			resultErr = errors.Join(resultErr, closeErr)
+		}
+	}()
 	var a, b unix.Stat_t
 	if err := unix.Fstat(fd, &a); err != nil {
 		return nil, err
@@ -128,6 +134,9 @@ func LoadTerminal(dir *os.File, basename string) (*TerminalRecord, error) {
 	}
 	if statSpool(a) != statSpool(b) {
 		return nil, ErrIdentity
+	}
+	if err := rejectDuplicateJSONFields(body); err != nil {
+		return nil, err
 	}
 	dec := json.NewDecoder(strings.NewReader(string(body)))
 	dec.DisallowUnknownFields()
@@ -178,7 +187,72 @@ func validateTerminalName(dir *os.File, name string) error {
 }
 
 func validateTerminal(terminal Terminal) error {
-	if terminal.AttemptID == "" || len(terminal.AttemptID) > 256 || !terminal.Process.Valid() || len(terminal.Message) > 8192 {
+	codeExit := terminal.Exit.Code >= 0 && terminal.Exit.Signal == 0
+	signalExit := terminal.Exit.Code == -1 && terminal.Exit.Signal > 0
+	if terminal.AttemptID == "" || len(terminal.AttemptID) > 256 || !terminal.Process.Valid() || len(terminal.Message) > 8192 || !codeExit && !signalExit {
+		return ErrIdentity
+	}
+	return nil
+}
+
+func rejectDuplicateJSONFields(body []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	if err := consumeJSONValue(decoder); err != nil {
+		return fmt.Errorf("runner: invalid terminal JSON: %w", err)
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		if err == nil {
+			err = ErrIdentity
+		}
+		return fmt.Errorf("runner: trailing terminal JSON: %w", err)
+	}
+	return nil
+}
+
+func consumeJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, composite := token.(json.Delim)
+	if !composite {
+		return nil
+	}
+	switch delimiter {
+	case '{':
+		seen := make(map[string]struct{})
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return ErrIdentity
+			}
+			if _, duplicate := seen[key]; duplicate {
+				return ErrIdentity
+			}
+			seen[key] = struct{}{}
+			if err := consumeJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		end, err := decoder.Token()
+		if err != nil || end != json.Delim('}') {
+			return errors.Join(ErrIdentity, err)
+		}
+	case '[':
+		for decoder.More() {
+			if err := consumeJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		end, err := decoder.Token()
+		if err != nil || end != json.Delim(']') {
+			return errors.Join(ErrIdentity, err)
+		}
+	default:
 		return ErrIdentity
 	}
 	return nil

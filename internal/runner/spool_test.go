@@ -411,3 +411,57 @@ func TestTerminalLoadRejectsSymlinkAndTrailingData(t *testing.T) {
 		t.Fatalf("rejected symlink ack mutated entry: info=%v err=%v", info, err)
 	}
 }
+
+func TestTerminalLoadRejectsAmbiguousJSONAndInvalidExitUnion(t *testing.T) {
+	valid := `{"attempt_id":"attempt","process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":{"code":0,"signal":0,"aborted":false}}`
+	invalidJSON := map[string]string{
+		"duplicate top-level": `{"attempt_id":"attempt","attempt_id":"other","process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":{"code":0,"signal":0,"aborted":false}}`,
+		"duplicate nested":    `{"attempt_id":"attempt","process":{"pid":22,"pid":23,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":{"code":0,"signal":0,"aborted":false}}`,
+		"unknown":             `{"attempt_id":"attempt","process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":{"code":0,"signal":0,"aborted":false},"authority":true}`,
+		"trailing":            valid + `{}`,
+		"truncated":           valid[:len(valid)-1],
+		"oversized":           valid + strings.Repeat(" ", maxTerminalBytes),
+	}
+	for name, body := range invalidJSON {
+		t.Run(name, func(t *testing.T) {
+			root, dir := openTestSpool(t)
+			path := filepath.Join(root, TerminalSpoolName)
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadTerminal(dir, TerminalSpoolName); err == nil {
+				t.Fatal("ambiguous JSON loaded")
+			}
+			if got, err := os.ReadFile(path); err != nil || string(got) != body {
+				t.Fatalf("rejected evidence changed: %q, %v", got, err)
+			}
+		})
+	}
+
+	for name, exit := range map[string]Exit{
+		"code and signal": {Code: 0, Signal: int(unix.SIGTERM)},
+		"negative code":   {Code: -1},
+		"other negative":  {Code: -2, Signal: int(unix.SIGTERM)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root, dir := openTestSpool(t)
+			terminal := testTerminal("attempt", "private")
+			terminal.Exit = exit
+			if _, err := PublishTerminal(dir, TerminalSpoolName, terminal); err == nil {
+				t.Fatalf("invalid exit published: %v", err)
+			}
+			body, err := json.Marshal(terminal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body = append(body, '\n')
+			path := filepath.Join(root, TerminalSpoolName)
+			if err := os.WriteFile(path, body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadTerminal(dir, TerminalSpoolName); !errors.Is(err, ErrIdentity) {
+				t.Fatalf("invalid exit loaded: %v", err)
+			}
+		})
+	}
+}
