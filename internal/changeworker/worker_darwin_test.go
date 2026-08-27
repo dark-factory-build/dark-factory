@@ -509,9 +509,6 @@ func workerSecureTempDir(t testing.TB) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(path, 0o700); err != nil {
-		t.Fatal(err)
-	}
 	t.Cleanup(func() { _ = os.RemoveAll(path) })
 	return path
 }
