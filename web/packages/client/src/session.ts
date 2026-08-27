@@ -21,9 +21,18 @@ import { StateAccumulator, type StateView } from "./state.js";
 import { buildAuthTranscript, buildPairTranscript, hexBytes } from "./transcript.js";
 
 const CLOSED = 3;
-const CHALLENGE_BYTES = 32;
 const PUBLIC_KEY_BYTES = 65;
 const SIGNATURE_BYTES = 64;
+
+export interface BrowserTimer {
+  setTimeout(callback: () => void, delayMs: number): unknown;
+  clearTimeout(handle: unknown): void;
+}
+
+const REAL_TIMER: BrowserTimer = {
+  setTimeout: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
+  clearTimeout: (handle) => globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>),
+};
 
 /** The intentionally tiny socket surface makes the client usable without a DOM test framework. */
 export interface BrowserSocket {
@@ -85,6 +94,9 @@ export type BrowserSessionOptions = {
   keyStore?: BrowserKeyStore;
   socketFactory?: BrowserSocketFactory;
   crypto?: Crypto;
+  timer?: BrowserTimer;
+  reconnectInitialDelayMs?: number;
+  reconnectMaxDelayMs?: number;
   onStatus?: (status: SessionStatus) => void;
   onState?: (state: StateView) => void;
   onError?: (error: SessionError | ProtocolError) => void;
@@ -98,7 +110,7 @@ type PendingEntity = { kind: EntityChangedEvent["entity_kind"]; id: string };
  * never reused after close. BrowserClient is the optional reconnect owner.
  */
 export class BrowserSession {
-  readonly accumulator = new StateAccumulator();
+  #accumulator = new StateAccumulator();
   #options: BrowserSessionOptions;
   #socket: BrowserSocket | undefined;
   #status: SessionStatus = "idle";
@@ -125,7 +137,7 @@ export class BrowserSession {
   }
 
   get status(): SessionStatus { return this.#status; }
-  get state(): StateView | undefined { return this.accumulator.current; }
+  get state(): StateView | undefined { return this.#accumulator.current; }
   get clientId(): string | undefined { return this.#clientId; }
   get capabilities(): CapabilityMask { return this.#capabilities; }
 
@@ -159,19 +171,21 @@ export class BrowserSession {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
-    this.#setStatus("closed");
+    this.#pending.clear();
+    this.#entities.clear();
+    this.#accumulator.applyRestart("gap");
+    const socket = this.#socket;
+    this.#socket = undefined;
+    try { socket?.close(1000, "closed"); } catch { /* finite close semantics */ }
     this.#rejectConnect?.(new SessionError("closed"));
     this.#rejectConnect = undefined;
     this.#resolveConnect = undefined;
-    try { this.#socket?.close(1000, "closed"); } catch { /* finite close semantics */ }
-    this.#socket = undefined;
-    this.#pending.clear();
-    this.#entities.clear();
+    this.#setStatus("closed");
   }
 
   #setStatus(status: SessionStatus): void {
     this.#status = status;
-    this.#options.onStatus?.(status);
+    notify(this.#options.onStatus, status);
   }
 
   async #receive(data: unknown): Promise<void> {
@@ -208,6 +222,7 @@ export class BrowserSession {
     this.#authPromise = (async () => {
       let stored: StoredClientKey | null;
       try { stored = await this.#options.keyStore!.load(); } catch { throw new SessionError("storage_unavailable"); }
+      this.#ensureLive();
       if (stored === null) {
         if (this.#options.challenge === undefined) throw new SessionError("pairing_required");
         await this.#pair();
@@ -218,6 +233,7 @@ export class BrowserSession {
         this.#clientId = stored.clientId;
         this.#capabilities = stored.capabilities;
         const signature = await this.#sign(buildAuthTranscript({ ...this.#transcriptBase(), client_id: stored.clientId }));
+        this.#ensureLive();
         const id = this.#nextID("auth");
         this.#sendAuth("auth", id, encodeAuthProve(id, { client_id: stored.clientId, signature }));
       }
@@ -235,6 +251,7 @@ export class BrowserSession {
       if (!(publicKey instanceof ArrayBuffer) || publicKey.byteLength !== PUBLIC_KEY_BYTES) throw new SessionError("crypto_unavailable");
       this.#key = generated.privateKey;
       this.#publicKey = new Uint8Array(publicKey);
+      this.#ensureLive();
     } catch (error) {
       if (error instanceof SessionError) throw error;
       throw new SessionError("crypto_unavailable");
@@ -242,6 +259,7 @@ export class BrowserSession {
     const challenge = this.#options.challenge;
     if (challenge === undefined) throw new SessionError("pairing_required");
     const signature = await this.#sign(buildPairTranscript({ ...this.#transcriptBase(), challenge, public_key_sec1: toHex(this.#publicKey) }));
+    this.#ensureLive();
     const id = this.#nextID("pair");
     this.#sendAuth("pair", id, encodePairProve(id, { challenge, public_key_sec1: toHex(this.#publicKey), signature }));
   }
@@ -265,10 +283,13 @@ export class BrowserSession {
     const key = this.#key;
     const publicKey = this.#publicKey;
     if (key === undefined || publicKey === undefined) throw new SessionError("crypto_unavailable");
+    this.#ensureLive();
     try {
       await this.#options.keyStore!.save({ clientId: frame.body.client_id, publicKeySEC1: publicKey.slice(), key, capabilities: frame.body.capabilities });
     } catch { throw new SessionError("storage_unavailable"); }
+    this.#ensureLive();
     this.#pairing = false;
+    this.#options = { ...this.#options, challenge: undefined };
     this.#clientId = frame.body.client_id;
     this.#capabilities = frame.body.capabilities;
     this.#authenticated = true;
@@ -284,6 +305,7 @@ export class BrowserSession {
 
   #ready(): void {
     this.#setStatus("syncing");
+    this.#ensureLive();
     this.#resolveConnect?.();
     this.#resolveConnect = undefined;
     this.#rejectConnect = undefined;
@@ -303,25 +325,27 @@ export class BrowserSession {
 
   #snapshot(frame: StateSnapshotFrame): void {
     if (this.#pending.get(frame.id) === "snapshot") this.#pending.delete(frame.id);
-    const result = this.accumulator.applySnapshot(frame);
+    const result = this.#accumulator.applySnapshot(frame);
     if (result.kind === "restart") { this.#resync(result.reason); return; }
     if (result.kind === "published") {
-      this.#options.onState?.(result.state);
+      notify(this.#options.onState, result.state);
+      this.#ensureLive();
       this.#setStatus("ready");
       const id = this.#nextID("watch");
       this.#subscriptionID = id;
       this.#send(id, encodeStateSubscribe(id, { after: result.state.head }));
     } else if (result.kind === "staged") {
-      this.#beginSnapshot(this.accumulator.nextCursor);
+      this.#beginSnapshot(this.#accumulator.nextCursor);
     }
   }
 
   #event(frame: StateEventFrame): void {
     if (frame.id !== this.#subscriptionID) throw new ProtocolError("malformed");
-    const result = this.accumulator.apply(frame);
+    const result = this.#accumulator.apply(frame);
     if (result.kind === "restart") { this.#resync(result.reason); return; }
     if (result.kind === "applied" || result.kind === "ignored") {
-      this.#options.onState?.(result.state);
+      notify(this.#options.onState, result.state);
+      this.#ensureLive();
       if (frame.body.event === "entity_changed" && !frame.body.deleted) this.#refresh(frame.body);
     }
   }
@@ -338,9 +362,12 @@ export class BrowserSession {
     if (expected === undefined || expected.kind !== frame.body.kind || expected.id !== frame.body.id) throw new ProtocolError("malformed");
     this.#entities.delete(frame.id);
     this.#pending.delete(frame.id);
-    const result = this.accumulator.applyEntity(frame.body);
+    const result = this.#accumulator.applyEntity(frame.body);
     if (result.kind === "restart") this.#resync(result.reason);
-    else if (result.kind === "applied" || result.kind === "ignored") this.#options.onState?.(result.state);
+    else if (result.kind === "applied" || result.kind === "ignored") {
+      notify(this.#options.onState, result.state);
+      this.#ensureLive();
+    }
   }
 
   #errorFrame(frame: ErrorFrame): void {
@@ -352,7 +379,7 @@ export class BrowserSession {
   }
 
   #beginSnapshot(cursor: string | null): void {
-    const result = this.accumulator.beginSnapshot(cursor);
+    const result = this.#accumulator.beginSnapshot(cursor);
     if (result.kind === "restart") { this.#resync(result.reason); return; }
     if (result.kind !== "requested") throw new ProtocolError("malformed");
     this.#pending.set(result.request.id, "snapshot");
@@ -363,7 +390,7 @@ export class BrowserSession {
     this.#pending.clear();
     this.#entities.clear();
     this.#subscriptionID = undefined;
-    this.accumulator.applyRestart("gap");
+    this.#accumulator.applyRestart("gap");
     // A restart clears the accumulator's published and staged state. No old
     // request is replayed; this is a fresh canonical fetch on this generation.
     this.#beginSnapshot(null);
@@ -398,6 +425,7 @@ export class BrowserSession {
     if (key === undefined || key.extractable || key.algorithm.name !== "ECDSA") throw new SessionError("crypto_unavailable");
     try {
       const signed = await this.#crypto().subtle.sign({ name: "ECDSA", hash: "SHA-256" }, key, message as unknown as BufferSource);
+      this.#ensureLive();
       if (!(signed instanceof ArrayBuffer) || signed.byteLength !== SIGNATURE_BYTES) throw new SessionError("crypto_unavailable");
       return toHex(new Uint8Array(signed));
     } catch (error) {
@@ -418,14 +446,22 @@ export class BrowserSession {
   #fail(error: SessionError | ProtocolError): void {
     if (this.#closed) return;
     if (this.#pairing && !(error instanceof ProtocolError) && (error.code === "connection" || error.code === "closed")) error = new SessionError("pairing_uncertain");
-    this.#options.onError?.(error);
     this.#closed = true;
-    this.#setStatus("closed");
+    this.#pending.clear();
+    this.#entities.clear();
+    this.#accumulator.applyRestart("gap");
+    const socket = this.#socket;
+    this.#socket = undefined;
+    try { socket?.close(1000, "protocol"); } catch { /* ignore close failures */ }
     this.#rejectConnect?.(error);
     this.#rejectConnect = undefined;
     this.#resolveConnect = undefined;
-    try { this.#socket?.close(1000, "protocol"); } catch { /* ignore close failures */ }
-    this.#socket = undefined;
+    notify(this.#options.onError, error);
+    this.#setStatus("closed");
+  }
+
+  #ensureLive(): void {
+    if (this.#closed) throw new SessionError("closed");
   }
 
   #closedByPeer(): void {
@@ -441,14 +477,25 @@ export class BrowserClient {
   #generation = 0;
   #closed = false;
   #reconnect = true;
-  #timer: ReturnType<typeof setTimeout> | undefined;
+  #timer: BrowserTimer;
+  #timerHandle: unknown;
+  #reconnectAttempt = 0;
+  #initialDelay: number;
+  #maxDelay: number;
 
-  constructor(options: BrowserSessionOptions) { this.#options = options; }
+  constructor(options: BrowserSessionOptions) {
+    this.#options = options;
+    this.#timer = options.timer ?? REAL_TIMER;
+    this.#initialDelay = reconnectDelay(options.reconnectInitialDelayMs, 100);
+    this.#maxDelay = Math.max(this.#initialDelay, reconnectDelay(options.reconnectMaxDelayMs, 5_000));
+  }
   get session(): BrowserSession | undefined { return this.#session; }
   get state(): StateView | undefined { return this.#session?.state; }
   get status(): SessionStatus { return this.#session?.status ?? "idle"; }
 
   connect(): Promise<void> {
+    this.#cancelTimer();
+    this.#reconnectAttempt = 0;
     this.#closed = false;
     this.#reconnect = true;
     return this.#newSession().connect();
@@ -457,7 +504,7 @@ export class BrowserClient {
   close(): void {
     this.#closed = true;
     this.#reconnect = false;
-    if (this.#timer !== undefined) clearTimeout(this.#timer);
+    this.#cancelTimer();
     this.#session?.close();
   }
 
@@ -469,14 +516,16 @@ export class BrowserClient {
       ...this.#options,
       onStatus: (status) => {
         if (generation !== this.#generation) return;
-        this.#options.onStatus?.(status);
-        if (status === "closed" && reconnectable && this.#reconnect && !this.#closed && this.#options.challenge === undefined) this.#schedule(generation);
+        if (session.clientId !== undefined && this.#options.challenge !== undefined) this.#options = { ...this.#options, challenge: undefined };
+        if (status === "ready") this.#reconnectAttempt = 0;
+        if (status === "closed" && reconnectable && this.#reconnect && !this.#closed && (this.#options.challenge === undefined || session.clientId !== undefined)) this.#schedule(generation);
+        notify(this.#options.onStatus, status);
       },
-      onState: (state) => { if (generation === this.#generation) this.#options.onState?.(state); },
+      onState: (state) => { if (generation === this.#generation) notify(this.#options.onState, state); },
       onError: (error) => {
         if (generation !== this.#generation) return;
         reconnectable = error instanceof SessionError && (error.code === "connection" || error.retryable);
-        this.#options.onError?.(error);
+        notify(this.#options.onError, error);
       },
     });
     this.#session = session;
@@ -484,14 +533,37 @@ export class BrowserClient {
   }
 
   #schedule(generation: number): void {
-    if (this.#timer !== undefined || generation !== this.#generation) return;
-    this.#timer = setTimeout(() => {
-      this.#timer = undefined;
-      if (this.#closed || !this.#reconnect || generation !== this.#generation) return;
-      const next = this.#newSession();
-      void next.connect().catch(() => { /* status/error callback is the public signal */ });
-    }, 0);
+    if (this.#timerHandle !== undefined || generation !== this.#generation) return;
+    const exponent = Math.min(this.#reconnectAttempt, 6);
+    const delay = Math.min(this.#maxDelay, this.#initialDelay * 2 ** exponent);
+    this.#reconnectAttempt += 1;
+    try {
+      this.#timerHandle = this.#timer.setTimeout(() => {
+        // Clear ownership before every exit path, including a stale generation.
+        this.#timerHandle = undefined;
+        if (this.#closed || !this.#reconnect || generation !== this.#generation) return;
+        const next = this.#newSession();
+        void next.connect().catch(() => { /* status/error callback is the public signal */ });
+      }, delay);
+    } catch {
+      this.#timerHandle = undefined;
+    }
   }
+
+  #cancelTimer(): void {
+    const handle = this.#timerHandle;
+    if (handle === undefined) return;
+    this.#timerHandle = undefined;
+    try { this.#timer.clearTimeout(handle); } catch { /* timer cleanup is best-effort */ }
+  }
+}
+
+function reconnectDelay(value: number | undefined, fallback: number): number {
+  return value !== undefined && Number.isFinite(value) && value >= 1 ? Math.min(Math.floor(value), 60_000) : fallback;
+}
+
+function notify<T extends readonly unknown[]>(callback: ((...args: T) => void) | undefined, ...args: T): void {
+  try { callback?.(...args); } catch { /* consumer callbacks cannot break protocol ownership */ }
 }
 
 export function createBrowserClient(options: BrowserSessionOptions): BrowserClient { return new BrowserClient(options); }
