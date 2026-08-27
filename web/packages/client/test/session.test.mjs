@@ -832,3 +832,66 @@ test("RESET closes the old handle and a replacement may select a fresh after-seq
   assert.equal(replacement.closed, false);
   session.close();
 });
+
+test("terminal replacement retains only the previous closed handle and fences evicted evidence", async () => {
+  const agentId = "85".repeat(16);
+  const terminalSessionId = "86".repeat(16);
+  const errors = [];
+  let socket;
+  const targetServer = (current) => {
+    serverFor(current);
+    const frame = decodeClientControl(current.sent.at(-1));
+    if (frame.type === "TERMINAL_TARGET_GET") current.reply(encodeTerminalTarget(frame.id, {
+      agent_id: frame.body.agent_id,
+      agent_revision: frame.body.expected_agent_revision,
+      head: frame.body.expected_head,
+      target: { run_id: runID, session_id: terminalSessionId, run_revision: 3n, session_revision: 4n },
+    }));
+  };
+  const session = new BrowserSession({
+    url: "ws://127.0.0.1:43123/browser/v1", host: "127.0.0.1:43123", origin: "https://preview.example",
+    challenge, keyStore: new MemoryKeys(), socketFactory: () => { socket = new Socket(targetServer); return socket; },
+    onError: (error) => errors.push(error),
+  });
+  await session.connect();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const target = await session.resolveAgentTerminal({ agentId, expectedAgentRevision: 1n, expectedHead: 1n });
+  const attachFrames = [];
+  let live;
+  for (let cycle = 0; cycle < 64; cycle += 1) {
+    live = session.openTerminal(target, { afterSequence: BigInt(cycle) });
+    const attach = live.attach();
+    const attachFrame = decodeClientControl(socket.sent.at(-1));
+    attachFrames.push(attachFrame);
+    socket.reply(encodeTerminalAttached(attachFrame.id, {
+      session_id: terminalSessionId,
+      floor: 0n,
+      head: BigInt(cycle),
+      acknowledged_sequence: BigInt(cycle),
+      max_unacked_bytes: 65536n,
+    }));
+    await attach;
+    socket.reply(encodeTerminalExit(attachFrame.id, { session_id: terminalSessionId, exit_code: 0, exit_signal: 0, aborted: false }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(live.closed, true);
+    if (cycle > 0) {
+      socket.reply(encodeTerminalExit(attachFrames[cycle - 1].id, { session_id: terminalSessionId, exit_code: 0, exit_signal: 0, aborted: false }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.equal(live.closed, true, "immediately previous retired evidence cannot affect the current closed handle");
+    }
+  }
+
+  const replacement = session.openTerminal(target);
+  const replacementAttach = replacement.attach();
+  const replacementFrame = decodeClientControl(socket.sent.at(-1));
+  socket.reply(encodeTerminalAttached(replacementFrame.id, {
+    session_id: terminalSessionId, floor: 0n, head: 0n, acknowledged_sequence: 0n, max_unacked_bytes: 65536n,
+  }));
+  await replacementAttach;
+  socket.reply(encodeTerminalExit(attachFrames[0].id, { session_id: terminalSessionId, exit_code: 0, exit_signal: 0, aborted: false }));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(session.status, "closed", "evidence older than the immediately previous handle is a protocol violation");
+  assert.equal(replacement.closed, true);
+  assert.equal(errors.filter((error) => error instanceof ProtocolError && error.code === "malformed").length, 1);
+  session.close();
+});

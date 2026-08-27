@@ -225,7 +225,13 @@ export class BrowserSession {
     if (typeof target !== "object" || target === null) throw new SessionError("stale");
     const authority = TARGET_AUTHORITIES.get(target as object);
     if (authority === undefined || authority.owner !== this || authority.generation !== this.#generationToken) throw new SessionError("stale");
-    for (const existing of this.#terminalHandles) if (!existing.closed) throw new SessionError("invalid_request");
+    let previous: InternalTerminalHandle | undefined;
+    for (const existing of this.#terminalHandles) {
+      if (!existing.closed) throw new SessionError("invalid_request");
+      previous = existing;
+    }
+    this.#terminalHandles.clear();
+    if (previous !== undefined) this.#terminalHandles.add(previous);
     const handle = createTerminalHandle({ runId: authority.descriptor.run_id, sessionId: authority.descriptor.session_id, runRevision: authority.descriptor.run_revision, sessionRevision: authority.descriptor.session_revision }, options, (id, payload) => {
       this.#ensureLive();
       if (!this.#authenticated) throw new SessionError("unauthorized");
