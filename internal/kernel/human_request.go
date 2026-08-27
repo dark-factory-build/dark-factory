@@ -657,7 +657,7 @@ func transitionHumanRequestsForRun(ctx context.Context, connection *sql.Conn, ru
 		if err := requireOneRow(result, err); err != nil {
 			return nil, err
 		}
-		pending = append(pending, pendingInvalidation{kind: EntityHumanRequest, id: item.id.Bytes(), revision: item.revision.Int64() + 1, deleted: target == HumanRequestStale})
+		pending = append(pending, pendingInvalidation{kind: EntityHumanRequest, id: item.id.Bytes(), revision: item.revision.Int64() + 1, deleted: target == HumanRequestStale || target == HumanRequestResolved})
 	}
 	return pending, nil
 }

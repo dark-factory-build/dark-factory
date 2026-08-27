@@ -22,6 +22,7 @@ const browserStatePollInterval = 100 * time.Millisecond
 // operation reloads the exact browser client while holding its ephemeral
 // operation gate.
 type browserBackend struct {
+	owner *Daemon
 	store *kernel.Store
 	now   func() time.Time
 	boot  kernel.BootID
@@ -79,6 +80,7 @@ func newProductionBrowserBackend(daemon *Daemon) (*browserBackend, error) {
 		return nil, err
 	}
 	backend.clientGates = daemon.browserClientGates
+	backend.owner = daemon
 	return backend, nil
 }
 
@@ -330,8 +332,6 @@ func projectBrowserAuthentication(client kernel.BrowserClient) (browser.Authenti
 	if client.CapabilityMask.Has(kernel.BrowserCapabilityPrivateHumanRequestDetail) {
 		capabilities |= browserprotocol.CapabilityPrivateHumanRequestDetail
 	}
-	// Human actions and terminal input remain deliberately unadvertised until
-	// the transport implements their exact effect contracts.
 	var principal browser.Principal
 	copy(principal.ClientID[:], client.ID.Bytes())
 	return browser.Authentication{Principal: principal, Capabilities: capabilities}, nil

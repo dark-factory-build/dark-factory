@@ -47,10 +47,11 @@ type clientLifecycle struct {
 }
 
 type Server struct {
-	backend Backend
-	host    string
-	origins map[string]struct{}
-	http    *http.Server
+	backend         Backend
+	terminalBackend TerminalBackend
+	host            string
+	origins         map[string]struct{}
+	http            *http.Server
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -91,6 +92,7 @@ func start(backend Backend, origins map[string]struct{}, listener net.Listener) 
 	ctx, cancel := context.WithCancel(context.Background())
 	server := &Server{
 		backend:         backend,
+		terminalBackend: func() TerminalBackend { value, _ := backend.(TerminalBackend); return value }(),
 		host:            listener.Addr().String(),
 		origins:         origins,
 		ctx:             ctx,

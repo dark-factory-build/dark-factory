@@ -15,6 +15,8 @@ var (
 	ErrTooLarge               = errors.New("browser: too large")
 	ErrRateLimited            = errors.New("browser: rate limited")
 	ErrSubscriptionUnresolved = errors.New("browser: subscription cleanup unresolved")
+	ErrTerminalPartial        = errors.New("browser: terminal input was partial")
+	ErrTerminalUncertain      = errors.New("browser: terminal input outcome is uncertain")
 )
 
 // Identity is the daemon identity sent in HELLO. The boot ID changes on every
@@ -112,6 +114,66 @@ type StateUpdate struct {
 	Floor browserprotocol.Decimal
 }
 
+// TerminalEvent is the small daemon-to-transport projection. It contains no
+// runner identity or descriptor and is delivered from the daemon's existing
+// bounded attachment queue.
+type TerminalEvent struct {
+	Kind       TerminalEventKind
+	Accepted   bool
+	Sequence   uint64
+	Start      uint64
+	End        uint64
+	Floor      uint64
+	Head       uint64
+	ExitCode   int
+	ExitSignal int
+	Aborted    bool
+	Payload    []byte
+}
+
+type TerminalEventKind uint8
+
+const (
+	TerminalEventAttached TerminalEventKind = iota + 1
+	TerminalEventOutput
+	TerminalEventReset
+	TerminalEventPTYEOF
+	TerminalEventExit
+)
+
+// TerminalAttachment exposes the daemon's receive-only queue directly. Close
+// is synchronous: it does not return until the owner has joined the detach.
+type TerminalAttachment interface {
+	Events() <-chan TerminalEvent
+	Close() error
+}
+
+type TerminalAttachRequest struct {
+	Principal Principal
+	Request   browserprotocol.TerminalAttach
+}
+type TerminalResizeRequest struct {
+	Principal Principal
+	Request   browserprotocol.TerminalResize
+}
+type TerminalInputRequest struct {
+	Principal                    Principal
+	RunID                        string
+	SessionID                    string
+	RunRevision, SessionRevision browserprotocol.Decimal
+	Frame                        browserprotocol.TerminalFrame
+}
+type TerminalLeaseResult struct {
+	Operation         string
+	RunID             string
+	SessionID         string
+	Generation        browserprotocol.Decimal
+	ExpiresAtMS       *browserprotocol.Decimal
+	LastInputSequence browserprotocol.Decimal
+	RunRevision       browserprotocol.Decimal
+	SessionRevision   browserprotocol.Decimal
+}
+
 // StateSubscription is owned by one WebSocket connection. Cancel must be
 // nonblocking. Updates, Done and Err are nonblocking accessors. Done must close
 // after the producer exits, after which Err is stable. This lets the connection
@@ -137,4 +199,19 @@ type Backend interface {
 	StateEntity(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.StateEntityGet) (browserprotocol.StateEntity, error)
 	HumanRequestDetail(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.HumanRequestDetailGet) (browserprotocol.HumanRequestDetail, error)
 	SubscribeState(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.Decimal) (StateSubscription, error)
+}
+
+// TerminalBackend is the optional effect half of browser v1. Keeping it
+// separate preserves the small state backend seam used by bootstrap/tests;
+// production daemon backends implement both interfaces.
+type TerminalBackend interface {
+	Backend
+	AttachTerminal(context.Context, TerminalAttachRequest) (TerminalAttachment, error)
+	AcquireTerminalLease(context.Context, Principal, browserprotocol.TerminalLeaseAcquire) (TerminalLeaseResult, error)
+	RenewTerminalLease(context.Context, Principal, browserprotocol.TerminalLeaseRenew) (TerminalLeaseResult, error)
+	ReleaseTerminalLease(context.Context, Principal, browserprotocol.TerminalLeaseRelease) (TerminalLeaseResult, error)
+	ResizeTerminal(context.Context, TerminalResizeRequest) error
+	InputTerminal(context.Context, TerminalInputRequest) (uint32, error)
+	ReplyHumanRequest(context.Context, Principal, browserprotocol.HumanRequestReply) (browserprotocol.HumanRequestReplyResult, error)
+	CancelHumanRequestRun(context.Context, Principal, browserprotocol.HumanRequestCancelRun) (browserprotocol.HumanRequestActionResult, error)
 }

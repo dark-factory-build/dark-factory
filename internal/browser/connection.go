@@ -49,6 +49,15 @@ type connection struct {
 	subscriptionSequence browserprotocol.Decimal
 	subscriptionHead     browserprotocol.Decimal
 	subscriptionHeadSet  bool
+
+	attachment       TerminalAttachment
+	terminalEvents   <-chan TerminalEvent
+	terminalAttachID string
+	terminalAttach   browserprotocol.TerminalAttach
+	terminalAck      uint64
+	terminalSent     uint64
+	terminalPending  *TerminalEvent
+	terminalAckTimer *time.Timer
 }
 
 func (current *connection) stop() {
@@ -65,6 +74,9 @@ func (current *connection) run() {
 	readerDone := make(chan struct{})
 	readerStarted := false
 	defer func() {
+		if err := current.closeTerminal(); err != nil {
+			current.recordCleanup(err)
+		}
 		if err := current.closeSubscription(); err != nil {
 			current.recordCleanup(err)
 		}
@@ -234,6 +246,11 @@ func (current *connection) serve() {
 		if current.subscription != nil {
 			updates = current.updates
 		}
+		terminalEvents := current.terminalEvents
+		var ackTimeout <-chan time.Time
+		if current.terminalAckTimer != nil {
+			ackTimeout = current.terminalAckTimer.C
+		}
 		select {
 		case <-current.ctx.Done():
 			return
@@ -243,9 +260,25 @@ func (current *connection) serve() {
 				current.sendError(subscriptionID, browserprotocol.ErrorInternal, false)
 				return
 			}
+		case <-ackTimeout:
+			return
+		case event, ok := <-terminalEvents:
+			if !ok {
+				current.clearTerminal()
+				continue
+			}
+			if !current.sendTerminalEvent(event) {
+				return
+			}
 		case message := <-current.frames:
 			if message.err != nil {
 				return
+			}
+			if message.kind == websocket.MessageBinary {
+				if !current.dispatchBinary(message.data) {
+					return
+				}
+				continue
 			}
 			if message.kind != websocket.MessageText {
 				current.sendError("", browserprotocol.ErrorInvalidRequest, false)
@@ -263,6 +296,12 @@ func (current *connection) serve() {
 			if frame.Type == browserprotocol.TypePairProve || frame.Type == browserprotocol.TypeAuthProve || frame.Type == browserprotocol.TypeError {
 				current.sendError(frame.ID, browserprotocol.ErrorInvalidRequest, false)
 				return
+			}
+			if frame.Type == browserprotocol.TypeTerminalAck {
+				if !current.handleTerminalAck(frame.Body.(browserprotocol.TerminalAck)) {
+					return
+				}
+				continue
 			}
 			if _, duplicate := current.seen[frame.ID]; duplicate {
 				current.sendError(frame.ID, browserprotocol.ErrorInvalidRequest, false)
@@ -356,6 +395,97 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 			break
 		}
 		payload, err = browserprotocol.EncodeHumanRequestDetail(frame.ID, detail)
+	case browserprotocol.HumanRequestReply:
+		if current.server.terminalBackend == nil {
+			err = ErrUnauthorized
+			break
+		}
+		result, backendErr := current.server.terminalBackend.ReplyHumanRequest(ctx, current.principal, body)
+		if backendErr != nil {
+			err = backendErr
+			break
+		}
+		payload, err = browserprotocol.EncodeHumanRequestReplyResult(frame.ID, result)
+	case browserprotocol.HumanRequestCancelRun:
+		if current.server.terminalBackend == nil {
+			err = ErrUnauthorized
+			break
+		}
+		result, backendErr := current.server.terminalBackend.CancelHumanRequestRun(ctx, current.principal, body)
+		if backendErr != nil {
+			err = backendErr
+			break
+		}
+		payload, err = browserprotocol.EncodeHumanRequestActionResult(frame.ID, result)
+	case browserprotocol.TerminalAttach:
+		if current.attachment != nil || current.server.terminalBackend == nil {
+			err = ErrUnauthorized
+			break
+		}
+		attachment, backendErr := current.server.terminalBackend.AttachTerminal(ctx, TerminalAttachRequest{Principal: current.principal, Request: body})
+		if backendErr != nil {
+			err = backendErr
+			break
+		}
+		if attachment == nil || attachment.Events() == nil {
+			err = fmt.Errorf("invalid terminal attachment")
+			break
+		}
+		current.attachment, current.terminalEvents, current.terminalAttachID, current.terminalAttach = attachment, attachment.Events(), frame.ID, body
+		current.terminalAck = uint64(body.AfterSequence)
+		current.terminalSent = current.terminalAck
+		return true
+	case browserprotocol.TerminalLeaseAcquire:
+		if current.server.terminalBackend == nil {
+			err = ErrUnauthorized
+			break
+		}
+		result, backendErr := current.server.terminalBackend.AcquireTerminalLease(ctx, current.principal, body)
+		if backendErr != nil {
+			err = backendErr
+			break
+		}
+		payload, err = browserprotocol.EncodeTerminalLeaseResult(frame.ID, browserprotocol.TerminalLeaseResult(result))
+	case browserprotocol.TerminalLeaseRenew:
+		if current.server.terminalBackend == nil {
+			err = ErrUnauthorized
+			break
+		}
+		result, backendErr := current.server.terminalBackend.RenewTerminalLease(ctx, current.principal, body)
+		if backendErr != nil {
+			err = backendErr
+			break
+		}
+		payload, err = browserprotocol.EncodeTerminalLeaseResult(frame.ID, browserprotocol.TerminalLeaseResult(result))
+	case browserprotocol.TerminalLeaseRelease:
+		if current.server.terminalBackend == nil {
+			err = ErrUnauthorized
+			break
+		}
+		result, backendErr := current.server.terminalBackend.ReleaseTerminalLease(ctx, current.principal, body)
+		if backendErr != nil {
+			err = backendErr
+			break
+		}
+		payload, err = browserprotocol.EncodeTerminalLeaseResult(frame.ID, browserprotocol.TerminalLeaseResult(result))
+	case browserprotocol.TerminalResize:
+		if current.server.terminalBackend == nil {
+			err = ErrUnauthorized
+			break
+		}
+		err = current.server.terminalBackend.ResizeTerminal(ctx, TerminalResizeRequest{Principal: current.principal, Request: body})
+		if err == nil {
+			payload, err = browserprotocol.EncodeTerminalResized(frame.ID, browserprotocol.TerminalResized{SessionID: body.SessionID, Generation: body.Generation, Rows: body.Rows, Cols: body.Cols})
+		}
+	case browserprotocol.TerminalDetach:
+		if current.attachment == nil || body.SessionID != current.terminalAttach.SessionID {
+			err = ErrStale
+			break
+		}
+		err = current.closeTerminal()
+		if err == nil {
+			payload, err = browserprotocol.EncodeTerminalDetached(frame.ID, browserprotocol.TerminalDetached{SessionID: body.SessionID})
+		}
 	case browserprotocol.StateSubscribe:
 		if current.subscription != nil {
 			current.sendError(frame.ID, browserprotocol.ErrorInvalidRequest, false)
@@ -463,6 +593,151 @@ func (current *connection) closeSubscription() error {
 	current.subscriptionHead = 0
 	current.subscriptionHeadSet = false
 	return stopSubscription(subscription)
+}
+
+func (current *connection) closeTerminal() error {
+	if current.attachment == nil {
+		return nil
+	}
+	attachment := current.attachment
+	current.clearTerminal()
+	return attachment.Close()
+}
+
+func (current *connection) clearTerminal() {
+	if current.terminalAckTimer != nil {
+		current.terminalAckTimer.Stop()
+		current.terminalAckTimer = nil
+	}
+	current.attachment = nil
+	current.terminalEvents = nil
+	current.terminalAttachID = ""
+	current.terminalAttach = browserprotocol.TerminalAttach{}
+	current.terminalPending = nil
+	current.terminalAck, current.terminalSent = 0, 0
+}
+
+func (current *connection) armTerminalAckTimer() {
+	if current.terminalAckTimer == nil {
+		current.terminalAckTimer = time.NewTimer(time.Duration(browserprotocol.TerminalAckTimeoutMS) * time.Millisecond)
+	}
+}
+
+func (current *connection) handleTerminalAck(ack browserprotocol.TerminalAck) bool {
+	if current.attachment == nil || ack.SessionID != current.terminalAttach.SessionID || uint64(ack.NextSequence) <= current.terminalAck || uint64(ack.NextSequence) > current.terminalSent {
+		return false
+	}
+	current.terminalAck = uint64(ack.NextSequence)
+	if current.terminalAck == current.terminalSent && current.terminalAckTimer != nil {
+		current.terminalAckTimer.Stop()
+		current.terminalAckTimer = nil
+	}
+	if current.terminalPending != nil && current.terminalPending.End-current.terminalAck <= browserprotocol.MaxTerminalUnackedBytes {
+		pending := *current.terminalPending
+		current.terminalPending = nil
+		current.terminalEvents = current.attachment.Events()
+		return current.sendTerminalEvent(pending)
+	}
+	if current.terminalPending == nil {
+		current.terminalEvents = current.attachment.Events()
+	}
+	return true
+}
+
+func (current *connection) sendTerminalEvent(event TerminalEvent) bool {
+	if current.attachment == nil {
+		return false
+	}
+	switch event.Kind {
+	case TerminalEventAttached:
+		if !event.Accepted {
+			payload, err := browserprotocol.EncodeTerminalReset(current.terminalAttachID, browserprotocol.TerminalReset{SessionID: current.terminalAttach.SessionID, Floor: browserprotocol.Decimal(event.Floor), Head: browserprotocol.Decimal(event.Head)})
+			if err != nil || current.write(payload) != nil {
+				return false
+			}
+			return current.closeTerminal() == nil
+		}
+		payload, err := browserprotocol.EncodeTerminalAttached(current.terminalAttachID, browserprotocol.TerminalAttached{SessionID: current.terminalAttach.SessionID, Floor: browserprotocol.Decimal(event.Floor), Head: browserprotocol.Decimal(event.Head), AcknowledgedSequence: browserprotocol.Decimal(current.terminalAck), MaxUnackedBytes: browserprotocol.MaxTerminalUnackedBytes})
+		return err == nil && current.write(payload) == nil
+	case TerminalEventOutput:
+		if event.End <= event.Start {
+			return false
+		}
+		if event.End <= current.terminalAck {
+			return true
+		}
+		if event.Start < current.terminalAck || event.End-current.terminalAck > browserprotocol.MaxTerminalUnackedBytes {
+			if current.terminalPending != nil {
+				return false
+			}
+			copyEvent := event
+			current.terminalPending = &copyEvent
+			current.terminalEvents = nil
+			return true
+		}
+		payload, err := browserprotocol.EncodeTerminalOutput(fixedID(current.terminalAttach.SessionID), event.Start, event.Payload)
+		if err != nil || current.writeBinary(payload) != nil {
+			return false
+		}
+		current.terminalSent = event.End
+		current.armTerminalAckTimer()
+		return true
+	case TerminalEventReset:
+		payload, err := browserprotocol.EncodeTerminalReset(current.terminalAttachID, browserprotocol.TerminalReset{SessionID: current.terminalAttach.SessionID, Floor: browserprotocol.Decimal(event.Floor), Head: browserprotocol.Decimal(event.Head)})
+		if err != nil || current.write(payload) != nil {
+			return false
+		}
+		return current.closeTerminal() == nil
+	case TerminalEventPTYEOF:
+		payload, err := browserprotocol.EncodeTerminalEOF(current.terminalAttachID, browserprotocol.TerminalEOF{SessionID: current.terminalAttach.SessionID})
+		return err == nil && current.write(payload) == nil
+	case TerminalEventExit:
+		payload, err := browserprotocol.EncodeTerminalExit(current.terminalAttachID, browserprotocol.TerminalExit{SessionID: current.terminalAttach.SessionID, ExitCode: int64(event.ExitCode), ExitSignal: int64(event.ExitSignal), Aborted: event.Aborted})
+		if err != nil || current.write(payload) != nil {
+			return false
+		}
+		return current.closeTerminal() == nil
+	default:
+		return false
+	}
+}
+
+func (current *connection) dispatchBinary(data []byte) bool {
+	frame, err := browserprotocol.DecodeTerminalFrame(data)
+	if err != nil || frame.Opcode != browserprotocol.TerminalInputOpcode || current.attachment == nil || frame.SessionID != fixedID(current.terminalAttach.SessionID) {
+		current.sendError("", browserprotocol.ErrorInvalidRequest, false)
+		return false
+	}
+	if current.server.terminalBackend == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(current.ctx, backendCallLimit)
+	count, effectErr := current.server.terminalBackend.InputTerminal(ctx, TerminalInputRequest{Principal: current.principal, RunID: current.terminalAttach.RunID, SessionID: current.terminalAttach.SessionID, RunRevision: current.terminalAttach.ExpectedRunRevision, SessionRevision: current.terminalAttach.ExpectedSessionRevision, Frame: frame})
+	cancel()
+	status := "accepted"
+	if effectErr != nil {
+		status = "rejected"
+		if errors.Is(effectErr, ErrTerminalPartial) {
+			status = "partial"
+		} else if errors.Is(effectErr, ErrTerminalUncertain) {
+			status = "uncertain"
+		}
+	}
+	if count > uint32(len(frame.Payload)) {
+		return false
+	}
+	payload, encodeErr := browserprotocol.EncodeTerminalInputResult(current.terminalAttachID, browserprotocol.TerminalInputResult{SessionID: current.terminalAttach.SessionID, Generation: browserprotocol.Decimal(frame.LeaseGeneration), Sequence: browserprotocol.Decimal(frame.Sequence), Status: status, AcceptedBytes: browserprotocol.Decimal(count)})
+	if encodeErr != nil || current.write(payload) != nil {
+		return false
+	}
+	return true
+}
+
+func fixedID(encoded string) [16]byte {
+	var result [16]byte
+	raw, _ := hex.DecodeString(encoded)
+	copy(result[:], raw)
+	return result
 }
 
 func (current *connection) discardSubscription(subscription StateSubscription, cause error) error {
@@ -575,6 +850,15 @@ func (current *connection) write(payload []byte) error {
 	ctx, cancel := context.WithTimeout(current.ctx, writeLimit)
 	defer cancel()
 	return current.ws.Write(ctx, websocket.MessageText, payload)
+}
+
+func (current *connection) writeBinary(payload []byte) error {
+	if len(payload) < browserprotocol.TerminalHeaderSize || len(payload) > browserprotocol.TerminalHeaderSize+browserprotocol.MaxTerminalPayload {
+		return fmt.Errorf("invalid outbound terminal frame")
+	}
+	ctx, cancel := context.WithTimeout(current.ctx, writeLimit)
+	defer cancel()
+	return current.ws.Write(ctx, websocket.MessageBinary, payload)
 }
 
 func fixedBytes(encoded string, size int) ([]byte, error) {

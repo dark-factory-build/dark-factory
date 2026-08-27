@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
@@ -34,28 +35,15 @@ var (
 
 // TerminalEvent is the daemon-owned, browser-facing terminal projection. It
 // intentionally contains no runner frames, process identities or descriptors.
-type TerminalEvent struct {
-	Kind       TerminalEventKind
-	Accepted   bool
-	Sequence   uint64
-	Start      uint64
-	End        uint64
-	Floor      uint64
-	Head       uint64
-	ExitCode   int
-	ExitSignal int
-	Aborted    bool
-	Payload    []byte
-}
-
-type TerminalEventKind uint8
+type TerminalEvent = browser.TerminalEvent
+type TerminalEventKind = browser.TerminalEventKind
 
 const (
-	TerminalEventAttached TerminalEventKind = iota + 1
-	TerminalEventOutput
-	TerminalEventReset
-	TerminalEventPTYEOF
-	TerminalEventExit
+	TerminalEventAttached = browser.TerminalEventAttached
+	TerminalEventOutput   = browser.TerminalEventOutput
+	TerminalEventReset    = browser.TerminalEventReset
+	TerminalEventPTYEOF   = browser.TerminalEventPTYEOF
+	TerminalEventExit     = browser.TerminalEventExit
 )
 
 // TerminalAttachment is one read-only observer of one exact live terminal.
@@ -80,6 +68,13 @@ type TerminalAttachment struct {
 	replaying    bool
 	pending      []TerminalEvent
 	pendingBytes int
+}
+
+func (attachment *TerminalAttachment) Events() <-chan browser.TerminalEvent {
+	if attachment == nil {
+		return nil
+	}
+	return attachment.queue
 }
 
 // Next waits for one bounded terminal event. Context cancellation only stops
