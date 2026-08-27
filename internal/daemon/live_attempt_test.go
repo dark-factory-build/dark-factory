@@ -142,6 +142,32 @@ func TestLiveAttemptShutdownIsRepeatableAndReportsOwnerError(t *testing.T) {
 	}
 }
 
+func TestDaemonCloseWaitsForSupervisorAndRejectsNewOwners(t *testing.T) {
+	daemon := &Daemon{attempts: make(map[kernel.RunID]*liveAttempt)}
+	if err := daemon.beginSupervisor(); err != nil {
+		t.Fatal(err)
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- daemon.Close() }()
+	select {
+	case err := <-closed:
+		t.Fatalf("Close returned before RunNext owner finished: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	daemon.endSupervisor()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Close after supervisor completion: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not join the in-flight supervisor")
+	}
+	if err := daemon.beginSupervisor(); !errors.Is(err, ErrTerminalClosed) {
+		t.Fatalf("new supervisor after Close = %v", err)
+	}
+}
+
 func TestTerminalAttachmentCloseIsConcurrentAndIdempotent(t *testing.T) {
 	runID, sessionID := liveTestIDs(t, 10001)
 	attempt := newLiveAttempt(nil, runID, sessionID, nil)

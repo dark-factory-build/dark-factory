@@ -12,9 +12,11 @@ import (
 )
 
 const (
-	maxLiveAttempts         = 1024
-	liveAttemptMailboxCap   = 64
-	terminalSubscriberCap   = 64
+	maxLiveAttempts       = 1024
+	liveAttemptMailboxCap = 64
+	// Sixteen observers covers several tabs/devices while keeping the fixed
+	// per-run queue budget small and auditable.
+	terminalSubscriberCap   = 16
 	terminalPendingCap      = 64
 	terminalPayloadCap      = 8 << 10
 	terminalPendingBytesCap = 256 << 10
@@ -192,7 +194,7 @@ func (daemon *Daemon) AttachTerminal(ctx context.Context, runID kernel.RunID, se
 	if attempt == nil {
 		return nil, kernel.ErrNotFound
 	}
-	return attempt.attach(ctx, sequence)
+	return attempt.attach(ctx, sessionID, sequence)
 }
 
 type liveAttemptCommandKind uint8
@@ -208,6 +210,7 @@ const (
 type liveAttemptCommand struct {
 	kind       liveAttemptCommandKind
 	attachment *TerminalAttachment
+	session    kernel.TerminalSessionID
 	sequence   uint64
 	terminal   *runner.TerminalRecord
 	result     chan error
@@ -317,6 +320,11 @@ func (daemon *Daemon) closeLiveAttempts() error {
 	for _, attempt := range attempts {
 		result = errors.Join(result, attempt.join())
 	}
+	// RunNext owns the outer child and resource cleanup even before it can
+	// register a live attempt. Wait for those synchronous owners as the final
+	// shutdown step; no Add can race this Wait because beginSupervisor checks
+	// closing under attemptMu above.
+	daemon.supervisors.Wait()
 	return result
 }
 
@@ -365,12 +373,12 @@ func (attempt *liveAttempt) releaseProvider(ctx context.Context) error {
 	return attempt.submit(ctx, liveAttemptCommand{kind: liveCommandReleaseProvider})
 }
 
-func (attempt *liveAttempt) attach(ctx context.Context, sequence uint64) (*TerminalAttachment, error) {
+func (attempt *liveAttempt) attach(ctx context.Context, sessionID kernel.TerminalSessionID, sequence uint64) (*TerminalAttachment, error) {
 	if attempt == nil || ctx == nil {
 		return nil, ErrTerminalClosed
 	}
 	attachment := &TerminalAttachment{owner: attempt, queue: make(chan TerminalEvent, terminalSubscriberCap)}
-	command := liveAttemptCommand{kind: liveCommandAttach, attachment: attachment, sequence: sequence, result: make(chan error, 1)}
+	command := liveAttemptCommand{kind: liveCommandAttach, attachment: attachment, session: sessionID, sequence: sequence, result: make(chan error, 1)}
 	if err := attempt.submit(ctx, command); err != nil {
 		return nil, err
 	}

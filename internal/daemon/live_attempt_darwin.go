@@ -182,7 +182,7 @@ func (attempt *liveAttempt) terminateController() error {
 func (attempt *liveAttempt) handleRunningCommand(command liveAttemptCommand) (bool, error) {
 	switch command.kind {
 	case liveCommandAttach:
-		err := attempt.handleAttach(command.attachment, command.sequence)
+		err := attempt.handleAttach(command.attachment, command.session, command.sequence)
 		command.result <- err
 		// Validation and durable-state conflicts belong to this request, not to
 		// the provider. A controller write failure poisons the controller itself;
@@ -408,9 +408,15 @@ func (attempt *liveAttempt) acceptOutput(subscriber *TerminalAttachment, event T
 	return true
 }
 
-func (attempt *liveAttempt) handleAttach(attachment *TerminalAttachment, sequence uint64) error {
+func (attempt *liveAttempt) handleAttach(attachment *TerminalAttachment, sessionID kernel.TerminalSessionID, sequence uint64) error {
+	// The operation gate is acquired below before reading durable phase/session
+	// state. An attach processed before terminalSeen/finalizing wins; after
+	// either boundary it is refused, never delivered across that boundary.
 	if !attempt.readySeen || attempt.terminalSeen {
 		return ErrTerminalNotReady
+	}
+	if sessionID == (kernel.TerminalSessionID{}) || sessionID != attempt.sessionID {
+		return kernel.ErrConflict
 	}
 	if attachment == nil || len(attempt.correlations) >= terminalSubscriberCap {
 		return kernel.ErrBusy

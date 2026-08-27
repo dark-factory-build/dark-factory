@@ -27,6 +27,10 @@ type Daemon struct {
 	attemptMu sync.Mutex
 	attempts  map[kernel.RunID]*liveAttempt
 	closing   bool
+	// supervisors counts synchronous RunNext calls, including the phase before
+	// a live attempt can register. Add is serialized with closing under
+	// attemptMu, so Close can safely Wait after it rejects new work.
+	supervisors sync.WaitGroup
 }
 
 // NewDaemon creates an API composition root using the wall clock for durable
@@ -232,6 +236,9 @@ func (daemon *Daemon) proposeOutcome(ctx context.Context, call api.Call) api.Rep
 		return newErrorReply(api.RemoteInternal)
 	}
 	daemon.operationMu.Lock()
+	// This durable transition and the owner-side attach check share one
+	// linearization gate. Whichever operation acquires it first owns the
+	// running/finalizing boundary; notification carries no authority.
 	operationCtx, cancel := context.WithTimeout(ctx, liveAttemptStoreTimeout)
 	run, err := daemon.store.ProposeAttemptOutcome(operationCtx, kDigest, proposal, at)
 	cancel()
@@ -305,6 +312,25 @@ func (daemon *Daemon) notifyRun(runID kernel.RunID) {
 	daemon.attemptMu.Unlock()
 	if attempt != nil {
 		attempt.notify()
+	}
+}
+
+func (daemon *Daemon) beginSupervisor() error {
+	if daemon == nil {
+		return fmt.Errorf("%w: nil daemon", kernel.ErrInvalidValue)
+	}
+	daemon.attemptMu.Lock()
+	defer daemon.attemptMu.Unlock()
+	if daemon.closing {
+		return ErrTerminalClosed
+	}
+	daemon.supervisors.Add(1)
+	return nil
+}
+
+func (daemon *Daemon) endSupervisor() {
+	if daemon != nil {
+		daemon.supervisors.Done()
 	}
 }
 

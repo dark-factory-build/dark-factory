@@ -4,6 +4,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
@@ -34,6 +35,20 @@ func TestLiveAttemptGlobalResetAdvancesEveryObserverCursor(t *testing.T) {
 		if !ok || event.Kind != TerminalEventReset || event.Floor != 8 || event.Head != 11 {
 			t.Fatalf("%s reset event = %+v, present=%v", name, event, ok)
 		}
+	}
+}
+
+func TestLiveAttemptRejectsWrongSessionBeforeRunnerAttach(t *testing.T) {
+	runID, sessionID := liveTestIDs(t, 10009)
+	_, wrongSession := liveTestIDs(t, 10010)
+	attempt := newLiveAttempt(nil, runID, sessionID, nil)
+	attempt.readySeen = true
+	attachment := &TerminalAttachment{queue: make(chan TerminalEvent, terminalSubscriberCap)}
+	if err := attempt.handleAttach(attachment, wrongSession, 0); !errors.Is(err, kernel.ErrConflict) {
+		t.Fatalf("wrong session attach = %v", err)
+	}
+	if len(attempt.subs) != 0 || len(attempt.correlations) != 0 {
+		t.Fatalf("wrong session changed subscribers: subs=%d correlations=%d", len(attempt.subs), len(attempt.correlations))
 	}
 }
 
