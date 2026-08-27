@@ -404,6 +404,25 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 			break
 		}
 		payload, err = browserprotocol.EncodeHumanRequestDetail(frame.ID, detail)
+	case browserprotocol.TerminalTargetGet:
+		target, backendErr := current.server.backend.TerminalTarget(ctx, current.principal.ClientID, body)
+		if ctx.Err() != nil {
+			err = ctx.Err()
+			break
+		}
+		if backendErr != nil {
+			err = backendErr
+			break
+		}
+		if correlationErr := validateTerminalTargetCorrelation(body, target); correlationErr != nil {
+			current.sendError(frame.ID, browserprotocol.ErrorInternal, false)
+			return false
+		}
+		payload, err = browserprotocol.EncodeTerminalTarget(frame.ID, target)
+		if err != nil {
+			current.sendError(frame.ID, browserprotocol.ErrorInternal, false)
+			return false
+		}
 	case browserprotocol.HumanRequestReply:
 		if current.server.terminalBackend == nil {
 			err = ErrUnauthorized
@@ -621,6 +640,13 @@ func validateHumanActionResult(request browserprotocol.HumanRequestCancelRun, re
 	}
 	if uint64(request.ExpectedRequestRevision) > browserprotocol.MaxSQLiteInteger-1 || result.RequestRevision != request.ExpectedRequestRevision+1 {
 		return fmt.Errorf("%w: human action request revision", errBackendResult)
+	}
+	return nil
+}
+
+func validateTerminalTargetCorrelation(request browserprotocol.TerminalTargetGet, result browserprotocol.TerminalTarget) error {
+	if result.AgentID != request.AgentID || result.AgentRevision != request.ExpectedAgentRevision || result.Head != request.ExpectedHead {
+		return fmt.Errorf("%w: terminal target identity or observation", errBackendResult)
 	}
 	return nil
 }

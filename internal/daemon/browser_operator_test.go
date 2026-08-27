@@ -13,6 +13,13 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
+func TestProductionBrowserPairingUsesExactlyImplementedCapabilities(t *testing.T) {
+	want := kernel.BrowserCapabilityObserve | kernel.BrowserCapabilityPrivateHumanRequestDetail | kernel.BrowserCapabilityHumanActions | kernel.BrowserCapabilityTerminalInput
+	if webCapabilities != want || webCapabilities&^kernel.BrowserCapabilityKnownMask != 0 {
+		t.Fatalf("production browser capabilities = %#x, want exactly %#x", webCapabilities, want)
+	}
+}
+
 func TestWebOperatorOpenStatusListAndRevoke(t *testing.T) {
 	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityPrivateHumanRequestDetail)
 	ctx := context.Background()

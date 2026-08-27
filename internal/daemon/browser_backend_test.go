@@ -408,6 +408,63 @@ func TestBrowserAdapterObserveOnlyCannotReadPrivateDetail(t *testing.T) {
 	}
 }
 
+func TestBrowserAdapterTerminalTargetProjectsExactActiveAndNoTarget(t *testing.T) {
+	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
+	connection := fixture.pair(t)
+	run := adapterRunningRun(t, fixture.store, 140)
+	agent, found, err := fixture.store.Agent(context.Background(), run.AgentID)
+	if err != nil || !found {
+		t.Fatalf("agent = %+v, found=%v, err=%v", agent, found, err)
+	}
+	state, err := fixture.store.Factory(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := browserprotocol.TerminalTargetGet{AgentID: agent.ID.String(), ExpectedAgentRevision: decimalRevision(agent.Revision), ExpectedHead: decimalSequence(state.Head)}
+	result, err := fixture.backend.TerminalTarget(context.Background(), rawBrowserClient(fixture.client.ID), request)
+	if err != nil || result.AgentID != request.AgentID || result.AgentRevision != request.ExpectedAgentRevision || result.Head != request.ExpectedHead || result.Target == nil {
+		t.Fatalf("active target = %+v, err=%v", result, err)
+	}
+	if result.Target.RunID != run.ID.String() || result.Target.SessionID == "" || result.Target.RunRevision != decimalRevision(run.Revision) {
+		t.Fatalf("active target coordinates = %+v, run=%+v", result.Target, run)
+	}
+	wireRequest, err := browserprotocol.EncodeTerminalTargetGet("target-wire", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapterWrite(t, connection, wireRequest)
+	wireResult := adapterRead(t, connection)
+	wireTarget, ok := wireResult.Body.(browserprotocol.TerminalTarget)
+	if wireResult.Type != browserprotocol.TypeTerminalTarget || wireResult.ID != "target-wire" || !ok || wireTarget.AgentID != request.AgentID || wireTarget.AgentRevision != request.ExpectedAgentRevision || wireTarget.Head != request.ExpectedHead || wireTarget.Target == nil || wireTarget.Target.RunID != run.ID.String() || wireTarget.Target.SessionID != result.Target.SessionID || wireTarget.Target.RunRevision != result.Target.RunRevision || wireTarget.Target.SessionRevision != result.Target.SessionRevision {
+		t.Fatalf("wire target = %+v", wireResult)
+	}
+
+	projectID, _ := kernel.ProjectIDFromBytes(adapterID(t, 150))
+	agentID, _ := kernel.AgentIDFromBytes(adapterID(t, 151))
+	project, err := fixture.store.CreateProject(context.Background(), kernel.NewProject{ID: projectID, Name: "no-target-project", Root: "/no-target-project"}, adapterTime(t, 700))
+	if err != nil {
+		t.Fatal(err)
+	}
+	noRunAgent, err := fixture.store.CreateAgent(context.Background(), kernel.NewAgent{ID: agentID, ProjectID: project.ID, Name: "no-target-agent", Role: kernel.RoleWorker, Provider: kernel.ProviderShell, ExecutionMode: kernel.ExecutionUnrestricted, ToolBudgetLimit: 1}, adapterTime(t, 701))
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err = fixture.store.Factory(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	noTargetRequest := browserprotocol.TerminalTargetGet{AgentID: noRunAgent.ID.String(), ExpectedAgentRevision: decimalRevision(noRunAgent.Revision), ExpectedHead: decimalSequence(state.Head)}
+	noTarget, err := fixture.backend.TerminalTarget(context.Background(), rawBrowserClient(fixture.client.ID), noTargetRequest)
+	if err != nil || noTarget.Target != nil || noTarget.AgentID != noTargetRequest.AgentID || noTarget.AgentRevision != noTargetRequest.ExpectedAgentRevision || noTarget.Head != noTargetRequest.ExpectedHead {
+		t.Fatalf("no target = %+v, err=%v", noTarget, err)
+	}
+	stale := noTargetRequest
+	stale.ExpectedHead++
+	if _, err := fixture.backend.TerminalTarget(context.Background(), rawBrowserClient(fixture.client.ID), stale); !errors.Is(err, browser.ErrStale) {
+		t.Fatalf("stale head error = %v", err)
+	}
+}
+
 func TestBrowserAdapterHumanRequestDetailAndExactTombstone(t *testing.T) {
 	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityPrivateHumanRequestDetail|kernel.BrowserCapabilityHumanActions)
 	fixture.pair(t)

@@ -440,6 +440,60 @@ func TestBackendResponseCorrelationFailsClosed(t *testing.T) {
 		writeClientFrame(t, connection, request)
 		assertError(t, readServerFrame(t, connection), browserprotocol.ErrorInternal)
 	})
+	t.Run("terminal target identity and observation", func(t *testing.T) {
+		for _, mutate := range []func(*browserprotocol.TerminalTarget){
+			func(value *browserprotocol.TerminalTarget) { value.AgentID = projectID },
+			func(value *browserprotocol.TerminalTarget) { value.AgentRevision = 2 },
+			func(value *browserprotocol.TerminalTarget) { value.Head = 8 },
+			func(value *browserprotocol.TerminalTarget) {
+				value.Target = &browserprotocol.TerminalTargetDescriptor{}
+			},
+		} {
+			backend := newFakeBackend()
+			mutate(&backend.target)
+			server := startServer(t, backend)
+			connection, _ := dialServer(t, server, testOrigin)
+			authenticate(t, connection)
+			request, _ := browserprotocol.EncodeTerminalTargetGet("target-mismatch", browserprotocol.TerminalTargetGet{AgentID: strings.Repeat("01", 16), ExpectedAgentRevision: 1, ExpectedHead: 7})
+			writeClientFrame(t, connection, request)
+			assertError(t, readServerFrame(t, connection), browserprotocol.ErrorInternal)
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if _, _, err := connection.Read(ctx); err == nil {
+				t.Fatal("forged terminal target left connection open")
+			}
+		}
+	})
+}
+
+func TestTerminalTargetRoutesThroughCodecAndPreservesNull(t *testing.T) {
+	backend := newFakeBackend()
+	backend.target.Target = &browserprotocol.TerminalTargetDescriptor{
+		RunID: strings.Repeat("02", 16), SessionID: strings.Repeat("03", 16), RunRevision: 4, SessionRevision: 5,
+	}
+	server := startServer(t, backend)
+	connection, _ := dialServer(t, server, testOrigin)
+	authenticate(t, connection)
+	requestBody := browserprotocol.TerminalTargetGet{AgentID: strings.Repeat("01", 16), ExpectedAgentRevision: 1, ExpectedHead: 7}
+	request, _ := browserprotocol.EncodeTerminalTargetGet("target-active", requestBody)
+	writeClientFrame(t, connection, request)
+	frame := readServerFrame(t, connection)
+	if frame.Type != browserprotocol.TypeTerminalTarget || frame.ID != "target-active" {
+		t.Fatalf("target response = %+v", frame)
+	}
+	got := frame.Body.(browserprotocol.TerminalTarget)
+	if got.AgentID != backend.target.AgentID || got.AgentRevision != backend.target.AgentRevision || got.Head != backend.target.Head || got.Target == nil || *got.Target != *backend.target.Target {
+		t.Fatalf("active target = %+v, want %+v", got, backend.target)
+	}
+	backend.mu.Lock()
+	backend.target.Target = nil
+	backend.mu.Unlock()
+	request, _ = browserprotocol.EncodeTerminalTargetGet("target-null", requestBody)
+	writeClientFrame(t, connection, request)
+	frame = readServerFrame(t, connection)
+	if got := frame.Body.(browserprotocol.TerminalTarget); got.Target != nil || got.AgentID != requestBody.AgentID || got.AgentRevision != requestBody.ExpectedAgentRevision || got.Head != requestBody.ExpectedHead {
+		t.Fatalf("null target = %+v", got)
+	}
 }
 
 func TestBackendSuccessAfterOperationDeadlineIsDiscarded(t *testing.T) {

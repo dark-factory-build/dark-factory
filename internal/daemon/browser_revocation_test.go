@@ -240,6 +240,9 @@ func (backend *unresolvedDaemonBackend) StateEntity(context.Context, [browserpro
 func (backend *unresolvedDaemonBackend) HumanRequestDetail(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.HumanRequestDetailGet) (browserprotocol.HumanRequestDetail, error) {
 	return browserprotocol.HumanRequestDetail{}, browser.ErrUnauthorized
 }
+func (backend *unresolvedDaemonBackend) TerminalTarget(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.TerminalTargetGet) (browserprotocol.TerminalTarget, error) {
+	return browserprotocol.TerminalTarget{}, browser.ErrUnauthorized
+}
 func (backend *unresolvedDaemonBackend) SubscribeState(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.Decimal) (browser.StateSubscription, error) {
 	if backend.calls.Add(1) == 1 {
 		close(backend.started)

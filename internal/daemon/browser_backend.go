@@ -241,6 +241,41 @@ func (backend *browserBackend) HumanRequestDetail(ctx context.Context, rawClient
 	return browserprotocol.HumanRequestDetail{RequestID: detail.ID.String(), Revision: decimalRevision(detail.Revision), Question: detail.QuestionText}, nil
 }
 
+func (backend *browserBackend) TerminalTarget(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, request browserprotocol.TerminalTargetGet) (browserprotocol.TerminalTarget, error) {
+	clientID, release, _, err := backend.authorize(ctx, rawClient, kernel.BrowserCapabilityObserve)
+	if err != nil {
+		return browserprotocol.TerminalTarget{}, err
+	}
+	defer release()
+	agentID, err := browserID(request.AgentID, kernel.AgentIDFromBytes)
+	if err != nil {
+		return browserprotocol.TerminalTarget{}, browser.ErrStale
+	}
+	expectedAgent, err := browserDecimal(request.ExpectedAgentRevision)
+	if err != nil {
+		return browserprotocol.TerminalTarget{}, browser.ErrStale
+	}
+	if request.ExpectedHead > math.MaxInt64 {
+		return browserprotocol.TerminalTarget{}, browser.ErrStale
+	}
+	expectedHead, err := kernel.NewEventSequence(int64(request.ExpectedHead))
+	if err != nil {
+		return browserprotocol.TerminalTarget{}, browser.ErrStale
+	}
+	target, available, err := backend.store.ResolveAgentTerminalTarget(ctx, clientID, agentID, expectedAgent, expectedHead)
+	if err != nil {
+		return browserprotocol.TerminalTarget{}, mapBrowserError(err)
+	}
+	result := browserprotocol.TerminalTarget{AgentID: request.AgentID, AgentRevision: request.ExpectedAgentRevision, Head: request.ExpectedHead}
+	if available {
+		result.Target = &browserprotocol.TerminalTargetDescriptor{
+			RunID: target.RunID().String(), SessionID: target.SessionID().String(),
+			RunRevision: decimalRevision(target.RunRevision()), SessionRevision: decimalRevision(target.SessionRevision()),
+		}
+	}
+	return result, nil
+}
+
 func (backend *browserBackend) authorize(ctx context.Context, rawID [browserprotocol.ClientIDSize]byte, capability kernel.BrowserCapabilityMask) (kernel.BrowserClientID, func(), kernel.BrowserClient, error) {
 	clientID, err := kernel.BrowserClientIDFromBytes(rawID[:])
 	if err != nil {

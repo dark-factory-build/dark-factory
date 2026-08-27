@@ -18,10 +18,10 @@ import (
 const (
 	webProductionOrigin = "https://app.darkfactory.build"
 	webChallengeTTL     = 5 * time.Minute
-	// The browser transport currently implements observation and private
-	// HumanRequest detail. More authority is added only when its effect path is
-	// implemented and reviewed; the CLI never selects this mask.
-	webCapabilities = kernel.BrowserCapabilityObserve | kernel.BrowserCapabilityPrivateHumanRequestDetail
+	// All four browser effect paths are now reviewed and implemented:
+	// observation/private HumanRequest detail, HumanRequest actions, and
+	// terminal input. The CLI never selects this mask.
+	webCapabilities = kernel.BrowserCapabilityObserve | kernel.BrowserCapabilityPrivateHumanRequestDetail | kernel.BrowserCapabilityHumanActions | kernel.BrowserCapabilityTerminalInput
 )
 
 func (daemon *Daemon) webRuntime() (*BrowserRuntime, bool) {

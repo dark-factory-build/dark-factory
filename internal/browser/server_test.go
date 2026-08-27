@@ -48,6 +48,8 @@ type fakeBackend struct {
 	pageFunc       func(int, *Cursor) StatePage
 	entity         browserprotocol.StateEntity
 	detail         browserprotocol.HumanRequestDetail
+	target         browserprotocol.TerminalTarget
+	targetErr      error
 	sub            *fakeSubscription
 
 	pairRequest PairRequest
@@ -57,6 +59,7 @@ type fakeBackend struct {
 	authCalls   int
 	stateCalls  int
 	detailCalls int
+	targetCalls int
 	subCalls    int
 }
 
@@ -81,6 +84,7 @@ func newFakeBackend() *fakeBackend {
 		Item: browserprotocol.ProjectStateItem(browserprotocol.ProjectItem{ID: projectID, Name: "Factory", Revision: 1}),
 	}
 	backend.detail = browserprotocol.HumanRequestDetail{RequestID: requestID, Revision: 1, Question: "Choose one"}
+	backend.target = browserprotocol.TerminalTarget{AgentID: strings.Repeat("01", 16), AgentRevision: 1, Head: 7}
 	backend.sub = newFakeSubscription()
 	return backend
 }
@@ -140,6 +144,13 @@ func (backend *fakeBackend) HumanRequestDetail(_ context.Context, client [16]byt
 	backend.detailCalls++
 	backend.clients = append(backend.clients, client)
 	return backend.detail, backend.detailErr
+}
+func (backend *fakeBackend) TerminalTarget(_ context.Context, client [16]byte, _ browserprotocol.TerminalTargetGet) (browserprotocol.TerminalTarget, error) {
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	backend.targetCalls++
+	backend.clients = append(backend.clients, client)
+	return backend.target, backend.targetErr
 }
 func (backend *fakeBackend) SubscribeState(ctx context.Context, client [16]byte, _ browserprotocol.Decimal) (StateSubscription, error) {
 	backend.mu.Lock()
