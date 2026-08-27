@@ -108,26 +108,22 @@ type HumanRequest struct {
 	UpdatedAt         UnixMillis
 }
 
-// HumanRequestProjection is the bounded, safe card sent to clients. It has
-// no provider-authored question or reply text.
+// HumanRequestProjection is the bounded public list item. Canonical project,
+// agent, and task display text is joined by the client from their summaries;
+// provider-authored question and reply text are never present here.
 type HumanRequestProjection struct {
 	ID              HumanRequestID
 	ProjectID       ProjectID
-	ProjectName     string
 	AgentID         AgentID
-	AgentName       string
 	TaskID          TaskID
-	TaskTitle       string
 	RunID           RunID
 	CreatedAt       UnixMillis
 	UpdatedAt       UnixMillis
 	Revision        Revision
 	Kind            HumanRequestKind
-	Title           string
-	Summary         string
-	WhyHumanNeeded  string
 	Status          HumanRequestStatus
 	ReplyMaxBytes   uint32
+	CanReply        bool
 	CanOpenTerminal bool
 }
 

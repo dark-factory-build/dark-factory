@@ -69,20 +69,23 @@ func TestHumanQuestionCreationProjectionDetailAndIdempotency(t *testing.T) {
 	seen := false
 	for _, invalidation := range batch.Invalidations {
 		if invalidation.EntityKind == EntityHumanRequest.String() && invalidation.EntityID == request.ID.String() && invalidation.Revision.Int64() == 1 {
+			if invalidation.Deleted {
+				t.Fatalf("open request emitted tombstone: %+v", invalidation)
+			}
 			seen = true
 		}
 	}
 	if !seen {
 		t.Fatalf("human request invalidation missing: %+v", batch.Invalidations)
 	}
-	if projection.Status != HumanRequestOpen || projection.Title == "" || projection.Summary == "" || strings.Contains(projection.Summary, input.QuestionText) {
+	if projection.Status != HumanRequestOpen || !projection.CanReply || !projection.CanOpenTerminal || projection.ProjectID != run.ProjectID || projection.AgentID != run.AgentID || projection.TaskID != run.TaskID || projection.RunID != run.ID {
 		t.Fatalf("unsafe projection = %+v", projection)
 	}
 	encoded, err := json.Marshal(projection)
 	if err != nil || bytes.Contains(encoded, []byte(input.QuestionText)) {
 		t.Fatalf("public projection leaked question: %s, %v", encoded, err)
 	}
-	detail, err := store.HumanRequestDetail(ctx, client.ID, request.ID)
+	detail, err := store.HumanRequestDetail(ctx, client.ID, request.ID, request.Revision)
 	if err != nil || detail.QuestionText != input.QuestionText || detail.Revision != request.Revision {
 		t.Fatalf("detail = %+v, %v", detail, err)
 	}
@@ -91,8 +94,11 @@ func TestHumanQuestionCreationProjectionDetailAndIdempotency(t *testing.T) {
 	} else if encoded, marshalErr := json.Marshal(snapshot); marshalErr != nil || bytes.Contains(encoded, []byte(input.QuestionText)) {
 		t.Fatalf("snapshot leaked question: %s, %v", encoded, marshalErr)
 	}
-	if _, err := store.HumanRequestDetail(ctx, humanQuestionClient(t, store, 202, BrowserCapabilityObserve).ID, request.ID); !errors.Is(err, ErrUnauthorized) {
+	if _, err := store.HumanRequestDetail(ctx, humanQuestionClient(t, store, 202, BrowserCapabilityObserve).ID, request.ID, request.Revision); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("observation-only detail = %v", err)
+	}
+	if _, err := store.HumanRequestDetail(ctx, client.ID, request.ID, mustRevision(t, request.Revision.Int64()+1)); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("wrong-revision detail = %v", err)
 	}
 }
 
@@ -105,13 +111,23 @@ func TestHumanQuestionDeliveryRecoveryAndAckAreAtMostOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	beforeDelivery, err := store.Factory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	delivery, err := store.BeginHumanReply(ctx, client.ID, request.ID, request.Revision, humanDeliveryID(t, 4), "reply", mustTime(t, 401))
 	if err != nil || delivery.Revision.Int64() != request.Revision.Int64()+1 || string(delivery.Reply) != "reply" {
 		t.Fatalf("begin delivery = %+v, %v", delivery, err)
 	}
+	assertHumanRequestInvalidation(t, store, beforeDelivery.Head, request.ID, delivery.Revision, false)
+	beforeResolution, err := store.Factory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := store.AcknowledgeHumanReply(ctx, request.ID, delivery.DeliveryID, delivery.Revision, mustTime(t, 402)); err != nil {
 		t.Fatalf("acknowledge = %v", err)
 	}
+	assertHumanRequestInvalidation(t, store, beforeResolution.Head, request.ID, mustRevision(t, delivery.Revision.Int64()+1), true)
 	if err := store.AcknowledgeHumanReply(ctx, request.ID, delivery.DeliveryID, delivery.Revision, mustTime(t, 403)); err != nil {
 		t.Fatalf("duplicate acknowledge = %v", err)
 	}
@@ -167,6 +183,43 @@ func TestHumanQuestionRevokedClientCannotReply(t *testing.T) {
 	}
 	if _, err := store.BeginHumanReply(ctx, client.ID, request.ID, request.Revision, humanDeliveryID(t, 19), "reply", mustTime(t, 402)); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("revoked client reply = %v", err)
+	}
+}
+
+func TestHumanRequestDetailRequiresLivePrivateCapabilityAndExactRevision(t *testing.T) {
+	ctx := context.Background()
+	store, run, _ := runningOrchestratorRun(t)
+	defer store.Close()
+	request, err := store.CreateHumanQuestionForAttempt(ctx, run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(120), QuestionText: "private detail"}, mustTime(t, 400))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, capabilities := range map[string]BrowserCapabilityMask{
+		"observe only":       BrowserCapabilityObserve,
+		"human actions only": BrowserCapabilityObserve | BrowserCapabilityHumanActions,
+	} {
+		t.Run(name, func(t *testing.T) {
+			client := humanQuestionClient(t, store, byte(121+len(name)), capabilities)
+			if _, err := store.HumanRequestDetail(ctx, client.ID, request.ID, request.Revision); !errors.Is(err, ErrUnauthorized) {
+				t.Fatalf("detail = %v", err)
+			}
+		})
+	}
+	private := humanQuestionClient(t, store, 150, BrowserCapabilityObserve|BrowserCapabilityPrivateHumanRequestDetail)
+	if _, err := store.HumanRequestDetail(ctx, private.ID, request.ID, Revision{}); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("zero revision detail = %v", err)
+	}
+	if _, err := store.HumanRequestDetail(ctx, private.ID, request.ID, mustRevision(t, request.Revision.Int64()+1)); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("future revision detail = %v", err)
+	}
+	if detail, err := store.HumanRequestDetail(ctx, private.ID, request.ID, request.Revision); err != nil || detail.QuestionText != "private detail" {
+		t.Fatalf("exact detail = %+v, %v", detail, err)
+	}
+	if _, err := store.RevokeBrowserClient(ctx, private.ID, private.Revision, mustTime(t, 401)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.HumanRequestDetail(ctx, private.ID, request.ID, request.Revision); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("revoked detail = %v", err)
 	}
 }
 
@@ -273,6 +326,46 @@ func TestHumanQuestionInvalidationFailureRollsBackRequestAndRun(t *testing.T) {
 	}
 }
 
+func TestHumanQuestionResolutionTombstoneFailureRollsBackStatusAndHead(t *testing.T) {
+	ctx := context.Background()
+	store, run, _ := runningOrchestratorRun(t)
+	defer store.Close()
+	client := humanQuestionClient(t, store, 151, BrowserCapabilityObserve|BrowserCapabilityHumanActions)
+	request, err := store.CreateHumanQuestionForAttempt(ctx, run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(122), QuestionText: "question"}, mustTime(t, 400))
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivery, err := store.BeginHumanReply(ctx, client.ID, request.ID, request.Revision, humanDeliveryID(t, 123), "reply", mustTime(t, 401))
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.Factory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.Exec(`CREATE TRIGGER reject_resolution_tombstone BEFORE INSERT ON invalidations WHEN NEW.entity_kind = 'human_request' AND NEW.deleted = 1 BEGIN SELECT RAISE(ABORT, 'forced resolution tombstone failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AcknowledgeHumanReply(ctx, request.ID, delivery.DeliveryID, delivery.Revision, mustTime(t, 402)); err == nil {
+		t.Fatal("resolution accepted failed tombstone")
+	}
+	if _, err := store.writer.Exec(`DROP TRIGGER reject_resolution_tombstone`); err != nil {
+		t.Fatal(err)
+	}
+	current, found, err := store.HumanRequest(ctx, request.ID)
+	if err != nil || !found || current.Status != HumanRequestDelivering || current.Revision != delivery.Revision {
+		t.Fatalf("failed resolution request = %+v, found=%v, err=%v", current, found, err)
+	}
+	after, err := store.Factory(ctx)
+	if err != nil || after.Head != before.Head {
+		t.Fatalf("failed resolution head = before %d after %d, err=%v", before.Head.Int64(), after.Head.Int64(), err)
+	}
+	if err := store.AcknowledgeHumanReply(ctx, request.ID, delivery.DeliveryID, delivery.Revision, mustTime(t, 403)); err != nil {
+		t.Fatal(err)
+	}
+	assertHumanRequestInvalidation(t, store, before.Head, request.ID, mustRevision(t, delivery.Revision.Int64()+1), true)
+}
+
 func TestHumanQuestionCorruptChronologyFailsClosed(t *testing.T) {
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
@@ -324,6 +417,10 @@ func TestHumanQuestionUncertainDeliveryIsNotReplayedAndRestartRecovery(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
+	beforeRecovery, err := store.Factory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -335,6 +432,7 @@ func TestHumanQuestionUncertainDeliveryIsNotReplayedAndRestartRecovery(t *testin
 	if count, err := reopened.RecoverHumanDeliveries(ctx, mustTime(t, 402)); err != nil || count != 1 {
 		t.Fatalf("recovery = count %d, err %v", count, err)
 	}
+	assertHumanRequestInvalidation(t, reopened, beforeRecovery.Head, request.ID, mustRevision(t, delivery.Revision.Int64()+1), false)
 	if count, err := reopened.RecoverHumanDeliveries(ctx, mustTime(t, 403)); err != nil || count != 0 {
 		t.Fatalf("idempotent recovery = count %d, err %v", count, err)
 	}
@@ -360,6 +458,10 @@ func TestHumanQuestionFinalizingStalesOpenAndMakesDeliveryUnknown(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	beforeStale, err := store.Factory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	finalizing, err := store.ProposeAttemptOutcome(ctx, run.CredentialDigest, proposal, mustTime(t, 401))
 	if err != nil || finalizing.Phase != RunFinalizing {
 		t.Fatalf("finalizing = %+v, %v", finalizing, err)
@@ -368,6 +470,7 @@ func TestHumanQuestionFinalizingStalesOpenAndMakesDeliveryUnknown(t *testing.T) 
 	if err != nil || projection.Status != HumanRequestStale {
 		t.Fatalf("staled open request = %+v, %v", projection, err)
 	}
+	assertHumanRequestInvalidation(t, store, beforeStale.Head, open.ID, projection.Revision, true)
 
 	// A second run proves that an already accepted external delivery is never
 	// represented as a delivered answer merely because finalization started.
@@ -431,6 +534,10 @@ func TestHumanQuestionTerminalizationStalesResidualDeliveryExactlyOnce(t *testin
 	if err != nil || unchanged.Phase != RunFinalizing || unchanged.Revision != closed.Revision {
 		t.Fatalf("failed terminalization changed run: %+v, %v", unchanged, err)
 	}
+	beforeTerminal, err := store.Factory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	terminal, err := store.FinalizeRun(ctx, run.ID, closed.Revision, mustTime(t, 421))
 	if err != nil || terminal.Phase != RunTerminal {
 		t.Fatalf("terminal = %+v, %v", terminal, err)
@@ -439,7 +546,8 @@ func TestHumanQuestionTerminalizationStalesResidualDeliveryExactlyOnce(t *testin
 	if err != nil || stale.Status != HumanRequestStale {
 		t.Fatalf("terminal request = %+v, %v", stale, err)
 	}
-	if _, err := store.HumanRequestDetail(ctx, client.ID, request.ID); !errors.Is(err, ErrConflict) {
+	assertHumanRequestInvalidation(t, store, beforeTerminal.Head, request.ID, stale.Revision, true)
+	if _, err := store.HumanRequestDetail(ctx, client.ID, request.ID, request.Revision); !errors.Is(err, ErrConflict) {
 		t.Fatalf("closed detail = %v", err)
 	}
 	snapshot, err := store.Snapshot(ctx)
@@ -531,6 +639,9 @@ func TestHumanQuestionProcessExitConvergesRequestsAtomically(t *testing.T) {
 				case invalidation.EntityKind == EntityRun.String() && invalidation.EntityID == run.ID.String() && invalidation.Revision == observed.Revision:
 					runEvents++
 				case invalidation.EntityKind == EntityHumanRequest.String() && invalidation.EntityID == request.ID.String() && invalidation.Revision == projection.Revision:
+					if invalidation.Deleted != (test.wantStatus == HumanRequestStale) {
+						t.Fatalf("process-exit tombstone = %+v, want deleted=%v", invalidation, test.wantStatus == HumanRequestStale)
+					}
 					requestEvents++
 				}
 			}
@@ -561,6 +672,23 @@ func TestHumanQuestionProcessExitConvergesRequestsAtomically(t *testing.T) {
 			}
 		})
 	}
+}
+
+func assertHumanRequestInvalidation(t *testing.T, store *Store, after EventSequence, id HumanRequestID, revision Revision, deleted bool) {
+	t.Helper()
+	batch, err := store.WatchAfter(context.Background(), after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, invalidation := range batch.Invalidations {
+		if invalidation.EntityKind == EntityHumanRequest.String() && invalidation.EntityID == id.String() && invalidation.Revision == revision {
+			if invalidation.Deleted != deleted {
+				t.Fatalf("human request invalidation = %+v, want deleted=%v", invalidation, deleted)
+			}
+			return
+		}
+	}
+	t.Fatalf("human request invalidation id=%s revision=%d missing from %+v", id.String(), revision.Int64(), batch.Invalidations)
 }
 
 func TestHumanQuestionProcessExitInvalidationFailureRollsBackBothTransitions(t *testing.T) {
