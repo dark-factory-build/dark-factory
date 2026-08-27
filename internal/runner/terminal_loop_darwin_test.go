@@ -3,6 +3,7 @@
 package runner
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"os"
@@ -89,6 +90,77 @@ func TestTerminalOwnerReplayUsesCorrelationWithoutMovingLiveCursor(t *testing.T)
 	}
 	if owner.sent != 7 {
 		t.Fatalf("live cursor after second attach = %d, want 7", owner.sent)
+	}
+}
+
+func TestTerminalOwnerReplaysRetainedOutputAfterPTYEOF(t *testing.T) {
+	daemon, peer, err := newControlPair("terminal-owner-eof", "terminal-peer-eof")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peer.Close()
+	defer daemon.Close()
+	owner := &terminalOwner{daemon: daemon, daemonOpen: true, credit: 0, ptyDrained: true}
+	if err := owner.ring.Append([]byte("retained")); err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.emitPTYEOF(); err != nil {
+		t.Fatal(err)
+	}
+	if got := readOwnerFrame(t, peer); got.Kind != TerminalPTYEOF {
+		t.Fatalf("EOF frame = %+v", got)
+	}
+	if err := owner.attach(TerminalCommand{Kind: TerminalAttach, Correlation: 17, Sequence: 0}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readOwnerFrame(t, peer); got.Kind != TerminalAttached || got.Correlation != 17 || got.Head != 8 {
+		t.Fatalf("post-EOF attach = %+v", got)
+	}
+	if err := owner.command(terminalCommandFrame(TerminalCommand{Kind: TerminalCredit, Credit: 64})); err != nil {
+		t.Fatal(err)
+	}
+	if got := readOwnerFrame(t, peer); got.Kind != TerminalOutput || got.Correlation != 17 || got.Start != 0 || got.End != 8 || string(got.Payload) != "retained" {
+		t.Fatalf("post-EOF replay = %+v", got)
+	}
+	if len(owner.replay) != 0 {
+		t.Fatalf("replay request remained after head: %+v", owner.replay)
+	}
+	// Once replay is complete, EOF must not produce a new uncorrelated stream.
+	if err := owner.command(terminalCommandFrame(TerminalCommand{Kind: TerminalCredit, Credit: 64})); err != nil {
+		t.Fatal(err)
+	}
+	if err := peer.SetReadDeadline(time.Now().Add(50 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	var raw attemptFrame
+	if err := readFrame(peer, &raw, maxFrameBytes); err == nil {
+		t.Fatal("post-EOF flush emitted unsolicited output")
+	}
+}
+
+func TestTerminalOwnerPostEOFStaleAttachResets(t *testing.T) {
+	daemon, peer, err := newControlPair("terminal-owner-stale-eof", "terminal-peer-stale-eof")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peer.Close()
+	defer daemon.Close()
+	owner := &terminalOwner{daemon: daemon, daemonOpen: true, ptyDrained: true}
+	if err := owner.ring.Append(bytes.Repeat([]byte{'x'}, terminalReplayCapacity+1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.emitPTYEOF(); err != nil {
+		t.Fatal(err)
+	}
+	if got := readOwnerFrame(t, peer); got.Kind != TerminalPTYEOF {
+		t.Fatalf("EOF frame = %+v", got)
+	}
+	if err := owner.attach(TerminalCommand{Kind: TerminalAttach, Correlation: 23, Sequence: 0}); err != nil {
+		t.Fatal(err)
+	}
+	got := readOwnerFrame(t, peer)
+	if got.Kind != TerminalReset || got.Correlation != 23 || got.Floor != 1 || got.Head != terminalReplayCapacity+1 {
+		t.Fatalf("post-EOF stale reset = %+v", got)
 	}
 }
 

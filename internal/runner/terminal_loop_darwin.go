@@ -494,7 +494,7 @@ func (o *terminalOwner) drainPTY() error {
 }
 
 func (o *terminalOwner) flush() error {
-	if o.ptyEOF || o.credit == 0 || !o.daemonOpen {
+	if o.credit == 0 || !o.daemonOpen {
 		return nil
 	}
 	for len(o.replay) > 0 && o.credit != 0 {
@@ -536,6 +536,11 @@ func (o *terminalOwner) flush() error {
 		if replay.cursor == replay.head {
 			o.replay = o.replay[1:]
 		}
+	}
+	// PTY EOF stops only future uncorrelated live output. Correlated replay
+	// above remains valid for reconnecting observers after the PTY closes.
+	if o.ptyEOF {
+		return nil
 	}
 	if o.credit == 0 {
 		return nil
