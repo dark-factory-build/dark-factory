@@ -468,6 +468,177 @@ func TestHumanQuestionTerminalizationStalesResidualDeliveryExactlyOnce(t *testin
 	}
 }
 
+func TestHumanQuestionProcessExitConvergesRequestsAtomically(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name       string
+		provider   bool
+		pending    bool
+		wantStatus HumanRequestStatus
+	}{
+		{name: "provider/open", provider: true, wantStatus: HumanRequestStale},
+		{name: "provider/delivering", provider: true, pending: true, wantStatus: HumanRequestDeliveryUnknown},
+		{name: "runner/open", wantStatus: HumanRequestStale},
+		{name: "runner/delivering", pending: true, wantStatus: HumanRequestDeliveryUnknown},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store, run, _ := runningOrchestratorRun(t)
+			defer store.Close()
+			request, err := store.CreateHumanQuestionForAttempt(ctx, run.CredentialDigest, NewHumanQuestion{
+				IdempotencyKey: humanKey(byte(40 + index)), QuestionText: "private process-exit question",
+			}, mustTime(t, 400))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.pending {
+				client := humanQuestionClient(t, store, byte(60+index), BrowserCapabilityObserve|BrowserCapabilityHumanActions)
+				if _, err := store.BeginHumanReply(ctx, client.ID, request.ID, request.Revision, humanDeliveryID(t, byte(70+index)), "private reply", mustTime(t, 401)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := store.Factory(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			exit, err := NewProcessExitCode(1, 7, mustTime(t, 402))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var observed Run
+			if test.provider {
+				observed, err = store.ObserveProviderExit(ctx, run.ID, run.Revision, registeredProcessIdentity(t, store, run.ID, ResourceProviderProcess), exit, mustTime(t, 403))
+			} else {
+				observed, err = store.ObserveRunnerExit(ctx, run.ID, run.Revision, registeredProcessIdentity(t, store, run.ID, ResourceRunnerProcess), exit, mustTime(t, 403))
+			}
+			if err != nil || observed.Phase != RunFinalizing {
+				t.Fatalf("process exit = %+v, %v", observed, err)
+			}
+			projection, found, err := store.HumanRequest(ctx, request.ID)
+			if err != nil || !found || projection.Status != test.wantStatus {
+				t.Fatalf("request after process exit = %+v, found=%v, err=%v", projection, found, err)
+			}
+			if _, err := store.Snapshot(ctx); err != nil {
+				t.Fatalf("snapshot after process exit = %v", err)
+			}
+			batch, err := store.WatchAfter(ctx, before.Head)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var runEvents, requestEvents int
+			for _, invalidation := range batch.Invalidations {
+				switch {
+				case invalidation.EntityKind == EntityRun.String() && invalidation.EntityID == run.ID.String() && invalidation.Revision == observed.Revision:
+					runEvents++
+				case invalidation.EntityKind == EntityHumanRequest.String() && invalidation.EntityID == request.ID.String() && invalidation.Revision == projection.Revision:
+					requestEvents++
+				}
+			}
+			if runEvents != 1 || requestEvents != 1 {
+				t.Fatalf("process-exit invalidations run=%d request=%d: %+v", runEvents, requestEvents, batch.Invalidations)
+			}
+
+			// The other owner may report later; the request transition must not
+			// wedge finalization or route anything to a future retry.
+			otherExit, _ := NewProcessExitCode(2, 0, mustTime(t, 404))
+			if test.provider {
+				observed, err = store.ObserveRunnerExit(ctx, run.ID, observed.Revision, registeredProcessIdentity(t, store, run.ID, ResourceRunnerProcess), otherExit, mustTime(t, 405))
+			} else {
+				observed, err = store.ObserveProviderExit(ctx, run.ID, observed.Revision, registeredProcessIdentity(t, store, run.ID, ResourceProviderProcess), otherExit, mustTime(t, 405))
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			releaseAllRunResources(t, store, run.ID, 410)
+			closed := closeTerminalSessionAtCurrent(t, store, run.ID, 420)
+			terminal, err := store.FinalizeRun(ctx, run.ID, closed.Revision, mustTime(t, 430))
+			if err != nil || terminal.Phase != RunTerminal {
+				t.Fatalf("terminal after process exit = %+v, %v", terminal, err)
+			}
+			finalRequest, _, err := store.HumanRequest(ctx, request.ID)
+			if err != nil || finalRequest.Status != HumanRequestStale {
+				t.Fatalf("terminal request = %+v, %v", finalRequest, err)
+			}
+		})
+	}
+}
+
+func TestHumanQuestionProcessExitInvalidationFailureRollsBackBothTransitions(t *testing.T) {
+	ctx := context.Background()
+	for _, provider := range []bool{true, false} {
+		name := "runner"
+		if provider {
+			name = "provider"
+		}
+		t.Run(name, func(t *testing.T) {
+			store, run, _ := runningOrchestratorRun(t)
+			defer store.Close()
+			request, err := store.CreateHumanQuestionForAttempt(ctx, run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(byte(90 + len(name))), QuestionText: "question"}, mustTime(t, 400))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.writer.Exec(`CREATE TRIGGER reject_process_exit_human_invalidation BEFORE INSERT ON invalidations WHEN NEW.entity_kind = 'human_request' BEGIN SELECT RAISE(ABORT, 'forced process-exit human invalidation failure'); END`); err != nil {
+				t.Fatal(err)
+			}
+			beforeFactory, err := store.Factory(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			exit, _ := NewProcessExitCode(1, 7, mustTime(t, 402))
+			var observeErr error
+			if provider {
+				_, observeErr = store.ObserveProviderExit(ctx, run.ID, run.Revision, registeredProcessIdentity(t, store, run.ID, ResourceProviderProcess), exit, mustTime(t, 403))
+			} else {
+				_, observeErr = store.ObserveRunnerExit(ctx, run.ID, run.Revision, registeredProcessIdentity(t, store, run.ID, ResourceRunnerProcess), exit, mustTime(t, 403))
+			}
+			if observeErr == nil {
+				t.Fatal("process exit accepted failed request invalidation")
+			}
+			if _, err := store.writer.Exec(`DROP TRIGGER reject_process_exit_human_invalidation`); err != nil {
+				t.Fatal(err)
+			}
+			unchanged, found, err := store.Run(ctx, run.ID)
+			if err != nil || !found || unchanged.Phase != RunRunning || unchanged.Revision != run.Revision {
+				t.Fatalf("failed process exit changed run = %+v, found=%v, err=%v", unchanged, found, err)
+			}
+			unchangedRequest, _, err := store.HumanRequest(ctx, request.ID)
+			if err != nil || unchangedRequest.Status != HumanRequestOpen || unchangedRequest.Revision != request.Revision {
+				t.Fatalf("failed process exit changed request = %+v, err=%v", unchangedRequest, err)
+			}
+			afterFactory, err := store.Factory(ctx)
+			if err != nil || afterFactory.Head != beforeFactory.Head {
+				t.Fatalf("failed process exit changed invalidations = before=%d after=%d err=%v", beforeFactory.Head.Int64(), afterFactory.Head.Int64(), err)
+			}
+		})
+	}
+}
+
+func TestHumanQuestionImpossibleAdmittedRunPhasesFailClosed(t *testing.T) {
+	ctx := context.Background()
+	for _, status := range []string{"delivery_unknown", "resolved"} {
+		t.Run(status, func(t *testing.T) {
+			store, run, _ := admittedOrchestratorRun(t)
+			defer store.Close()
+			requestID := bytes.Repeat([]byte{0x91}, IDBytes)
+			key := bytes.Repeat([]byte{0x92}, IDBytes)
+			delivery := bytes.Repeat([]byte{0x93}, IDBytes)
+			var deliveryID, resolution, closed any
+			if status == "delivery_unknown" {
+				deliveryID, resolution, closed = delivery, nil, nil
+			} else {
+				deliveryID, resolution, closed = delivery, "reply", int64(12)
+			}
+			_, err := store.writer.Exec(`INSERT INTO human_requests(id, run_id, idempotency_key, kind, reason_code, question_text, status, delivery_id, delivery_started_at_ms, resolution_kind, closed_at_ms, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, 'question', 'provider_question', 'private question', ?, ?, ?, ?, ?, ?, ?, ?)`, requestID, run.ID.Bytes(), key, status, deliveryID, 11, resolution, closed, 2, 11, 12)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Snapshot(ctx); !errors.Is(err, ErrCorruptState) {
+				t.Fatalf("%s request attached to admitted run = %v", status, err)
+			}
+		})
+	}
+}
+
 func TestHumanQuestionCreationRequiresExactRunningAttempt(t *testing.T) {
 	ctx := context.Background()
 	store, run, keys := runningOrchestratorRun(t)

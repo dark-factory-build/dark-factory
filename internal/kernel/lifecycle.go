@@ -772,6 +772,7 @@ func (store *Store) observeProcessExit(ctx context.Context, runID RunID, expecte
 	}
 	exitKind, code, signal := exitSQL(exit)
 	newRevision := expected.Int64() + 1
+	pending := []pendingInvalidation{{kind: EntityRun, id: run.ID.Bytes(), revision: newRevision}}
 	if run.Phase == RunAdmitted || run.Phase == RunRunning {
 		if err := requireFinalizingTime(ctx, tx.connection, run, at); err != nil {
 			return Run{}, tx.Rollback(err)
@@ -797,6 +798,11 @@ func (store *Store) observeProcessExit(ctx context.Context, runID RunID, expecte
 		if err := requireRows(releasing, err, 4); err != nil {
 			return Run{}, tx.Rollback(err)
 		}
+		requestInvalidations, transitionErr := transitionHumanRequestsForRun(ctx, tx.connection, run.ID, at, false)
+		if transitionErr != nil {
+			return Run{}, tx.Rollback(transitionErr)
+		}
+		pending = append(pending, requestInvalidations...)
 	} else if run.Phase == RunFinalizing {
 		var updated sql.Result
 		if owner == providerExitOwner {
@@ -810,7 +816,7 @@ func (store *Store) observeProcessExit(ctx context.Context, runID RunID, expecte
 	} else {
 		return Run{}, tx.Rollback(ErrConflict)
 	}
-	if err := appendInvalidations(ctx, tx.connection, at, []pendingInvalidation{{kind: EntityRun, id: run.ID.Bytes(), revision: newRevision}}); err != nil {
+	if err := appendInvalidations(ctx, tx.connection, at, pending); err != nil {
 		return Run{}, tx.Rollback(err)
 	}
 	run, found, err = runByID(ctx, tx.connection, run.ID)

@@ -77,13 +77,24 @@ func validateHumanRequests(ctx context.Context, connection *sql.Conn) error {
 			}
 			return err
 		}
-		if request.Status == HumanRequestOpen || request.Status == HumanRequestDelivering {
-			if phase != RunRunning.String() {
-				return fmt.Errorf("%w: active human request has non-running origin", ErrCorruptState)
-			}
+		validPhase := false
+		switch request.Status {
+		case HumanRequestOpen, HumanRequestDelivering:
+			validPhase = phase == RunRunning.String()
+		case HumanRequestDeliveryUnknown:
+			// Recovery can discover an uncertain delivery while the run is
+			// still running; finalization preserves that uncertainty until
+			// terminalization makes it stale.
+			validPhase = phase == RunRunning.String() || phase == RunFinalizing.String()
+		case HumanRequestResolved:
+			// A reply may resolve before the run later enters finalizing or
+			// terminal. The request remains historical after that point.
+			validPhase = phase == RunRunning.String() || phase == RunFinalizing.String() || phase == RunTerminal.String()
+		case HumanRequestStale:
+			validPhase = phase == RunFinalizing.String() || phase == RunTerminal.String()
 		}
-		if request.Status == HumanRequestStale && phase == RunRunning.String() {
-			return fmt.Errorf("%w: stale human request has running origin", ErrCorruptState)
+		if !validPhase {
+			return fmt.Errorf("%w: human request status has impossible run phase", ErrCorruptState)
 		}
 	}
 	return rows.Err()
