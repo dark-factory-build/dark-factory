@@ -93,6 +93,10 @@ func (subscription *browserStateSubscription) Err() error {
 }
 
 func (subscription *browserStateSubscription) run() {
+	subscription.runReading(subscription.readBatch)
+}
+
+func (subscription *browserStateSubscription) runReading(readBatch func() (kernel.WatchBatch, error)) {
 	var result error
 	defer func() {
 		subscription.errMu.Lock()
@@ -104,9 +108,9 @@ func (subscription *browserStateSubscription) run() {
 	}()
 
 	for {
-		batch, err := subscription.readBatch()
+		batch, err := readBatch()
 		if err != nil {
-			if errors.Is(err, context.Canceled) {
+			if subscription.ctx.Err() != nil {
 				return
 			}
 			var restart *browser.RestartError
