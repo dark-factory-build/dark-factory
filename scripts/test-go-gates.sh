@@ -178,6 +178,47 @@ case "$second_root" in /private/tmp/dark-factory-go.*) ;; *) fail "root escaped 
 [ "$second_root" != "$go_gate_test_root" ] || fail "root was reused"
 go_gate_environment_cleanup || fail "cleanup failed"
 
+# A top-level TERM must join the active supervisor before cleanup. The fixture
+# writes its child PID only after the bounded owner has started the stage.
+signal_fixture="$temporary/signal-fixture.sh"
+signal_marker="$temporary/signal-active"
+signal_root_file="$temporary/signal-root"
+signal_child_file="$temporary/signal-child"
+/bin/cat >"$signal_fixture" <<'EOF'
+#!/bin/sh
+set -eu
+. "$1"
+go_gate_environment_setup
+printf '%s\n' "$go_gate_root" >"$3"
+go_gate_signal() {
+    signal=$1
+    trap - EXIT HUP INT TERM
+    if [ -n "${go_gate_supervisor_pid-}" ]; then
+        /bin/kill -TERM "$go_gate_supervisor_pid" 2>/dev/null || true
+        wait "$go_gate_supervisor_pid" 2>/dev/null || true
+    fi
+    go_gate_environment_cleanup || true
+    exit $((128 + signal))
+}
+trap 'go_gate_signal 15' TERM
+go_gate_run_bounded 30 /bin/sh -c "printf active >'$2'; printf '%s\\n' \"\$\$\" >'$4'; /bin/sleep 30"
+EOF
+/bin/chmod 700 "$signal_fixture"
+/bin/sh "$signal_fixture" "$repository_root/scripts/go-gate-environment.sh" "$signal_marker" "$signal_root_file" "$signal_child_file" &
+signal_fixture_pid=$!
+signal_attempts=0
+while [ ! -f "$signal_marker" ] && [ "$signal_attempts" -lt 100 ]; do
+    /bin/sleep 0.01
+    signal_attempts=$((signal_attempts + 1))
+done
+[ -f "$signal_marker" ] || fail "signal fixture did not start its stage"
+/bin/kill -TERM "$signal_fixture_pid"
+if wait "$signal_fixture_pid"; then signal_status=0; else signal_status=$?; fi
+[ "$signal_status" -eq 143 ] || fail "TERM fixture returned $signal_status"
+signal_child_pid=$(/bin/cat "$signal_child_file")
+if /bin/kill -0 "$signal_child_pid" 2>/dev/null; then fail "TERM fixture left its child alive"; fi
+[ ! -e "$(/bin/cat "$signal_root_file")" ] || fail "TERM fixture cleaned up before joining supervisor"
+
 /usr/bin/grep -F 'go_gate_go=/opt/homebrew/bin/go' "$repository_root/scripts/go-gate-environment.sh" >/dev/null || fail "Go path is not fixed"
 /usr/bin/grep -F 'go_gate_corepack=/opt/homebrew/bin/corepack' "$repository_root/scripts/go-gate-environment.sh" >/dev/null || fail "Corepack path is not fixed"
 /usr/bin/grep -F '/usr/bin/dirname' "$repository_root/scripts/go-ci.sh" >/dev/null || fail "go-ci bootstrap uses ambient dirname"
