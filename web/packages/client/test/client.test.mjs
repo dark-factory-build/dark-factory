@@ -15,6 +15,7 @@ import {
   encodeClientControl,
   encodeServerControl,
   encodeTerminalInput,
+  encodeTerminalInputResult,
   encodeTerminalOutput,
   MAX_TERMINAL_COLS,
   MAX_TERMINAL_ROWS,
@@ -109,6 +110,28 @@ test("browser terminal and HumanRequest controls are typed, directional, and bou
   for (const field of ["exit_code", "exit_signal", "aborted"]) {
     const exit = fixture("terminal_exit.json").replace(new RegExp(`"${field}":(?:0|false)`), `"${field}":null`);
     expectMalformed(() => decodeServerControl(exit));
+  }
+});
+
+test("terminal input result status and accepted bytes are physically consistent", () => {
+  const base = { session_id: "22".repeat(16), generation: 1n, sequence: 1n };
+  for (const [status, accepted_bytes] of [
+    ["accepted", 1n], ["accepted", BigInt(MAX_TERMINAL_PAYLOAD)],
+    ["partial", 1n], ["partial", BigInt(MAX_TERMINAL_PAYLOAD)],
+    ["rejected", 0n], ["uncertain", 0n],
+  ]) {
+    const wire = encodeTerminalInputResult("input-result", { ...base, status, accepted_bytes });
+    const decoded = decodeServerControl(wire);
+    assert.equal(decoded.body.status, status);
+    assert.equal(decoded.body.accepted_bytes, accepted_bytes);
+  }
+  const fixtureWire = fixture("terminal_input_result.json");
+  for (const [status, accepted_bytes] of [
+    ["accepted", 0n], ["rejected", 1n], ["partial", 0n], ["uncertain", 1n], ["accepted", 8193n],
+  ]) {
+    expectMalformed(() => encodeTerminalInputResult("input-result", { ...base, status, accepted_bytes }));
+    const mutated = fixtureWire.replace('"status":"accepted"', `"status":"${status}"`).replace('"accepted_bytes":"2"', `"accepted_bytes":"${accepted_bytes}"`);
+    expectMalformed(() => decodeServerControl(mutated));
   }
 });
 

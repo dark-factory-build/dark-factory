@@ -303,7 +303,7 @@ func validTerminalControl(kind MessageType, body any) error {
 			return bad()
 		}
 	case TerminalInputResult:
-		if !id(v.SessionID) || !pos(v.Generation) || !pos(v.Sequence) || (v.Status != "accepted" && v.Status != "rejected" && v.Status != "partial" && v.Status != "uncertain") || v.AcceptedBytes > MaxTerminalPayload {
+		if !id(v.SessionID) || !pos(v.Generation) || !pos(v.Sequence) || !validTerminalInputResult(v.Status, v.AcceptedBytes) {
 			return bad()
 		}
 	case TerminalEOF:
@@ -322,4 +322,15 @@ func validTerminalControl(kind MessageType, body any) error {
 		return bad()
 	}
 	return nil
+}
+
+func validTerminalInputResult(status string, acceptedBytes Decimal) bool {
+	switch status {
+	case "accepted", "partial":
+		return acceptedBytes >= 1 && acceptedBytes <= MaxTerminalPayload
+	case "rejected", "uncertain":
+		return acceptedBytes == 0
+	default:
+		return false
+	}
 }

@@ -735,3 +735,59 @@ func TestTerminalControlRejectsSurrogateAndNullMutations(t *testing.T) {
 		}
 	}
 }
+
+func TestTerminalInputResultStatusAndCountContract(t *testing.T) {
+	const id = "01010101010101010101010101010101"
+	base := TerminalInputResult{SessionID: "22222222222222222222222222222222", Generation: 1, Sequence: 1}
+	for _, test := range []struct {
+		status string
+		count  Decimal
+	}{
+		{status: "accepted", count: 1},
+		{status: "accepted", count: MaxTerminalPayload},
+		{status: "partial", count: 1},
+		{status: "partial", count: MaxTerminalPayload},
+		{status: "rejected", count: 0},
+		{status: "uncertain", count: 0},
+	} {
+		body := base
+		body.Status, body.AcceptedBytes = test.status, test.count
+		wire, err := EncodeTerminalInputResult(id, body)
+		if err != nil {
+			t.Fatalf("valid %s/%d encode: %v", test.status, test.count, err)
+		}
+		if _, err := DecodeServerControl(wire); err != nil {
+			t.Fatalf("valid %s/%d decode: %v", test.status, test.count, err)
+		}
+	}
+
+	fixture := string(fixtureBytes(t, "terminal_input_result.json"))
+	for _, test := range []struct {
+		status string
+		count  string
+	}{
+		{status: "accepted", count: "0"},
+		{status: "rejected", count: "1"},
+		{status: "partial", count: "0"},
+		{status: "uncertain", count: "1"},
+		{status: "accepted", count: "8193"},
+	} {
+		body := base
+		body.Status = test.status
+		body.AcceptedBytes = Decimal(0)
+		if test.count != "0" {
+			body.AcceptedBytes = Decimal(1)
+		}
+		if test.count == "8193" {
+			body.AcceptedBytes = Decimal(MaxTerminalPayload + 1)
+		}
+		if _, err := EncodeTerminalInputResult(id, body); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("invalid %s/%s encode accepted: %v", test.status, test.count, err)
+		}
+		wire := strings.Replace(fixture, `"status":"accepted"`, `"status":"`+test.status+`"`, 1)
+		wire = strings.Replace(wire, `"accepted_bytes":"2"`, `"accepted_bytes":"`+test.count+`"`, 1)
+		if _, err := DecodeServerControl([]byte(wire)); err != ErrMalformed {
+			t.Fatalf("invalid %s/%s decode accepted: %v", test.status, test.count, err)
+		}
+	}
+}
