@@ -66,6 +66,22 @@ export type StateEntityBody =
   | { head: bigint; kind: "human_request"; id: string; revision: bigint; deleted: false; item: HumanRequestItem };
 export type HumanRequestDetailGetBody = { request_id: string; expected_revision: bigint };
 export type HumanRequestDetailBody = { request_id: string; revision: bigint; question: string };
+export type HumanRequestReplyBody = { run_id: string; request_id: string; expected_revision: bigint; reply: string };
+export type HumanRequestReplyResultBody = { request_id: string; revision: bigint; status: "resolved" | "delivery_unknown" };
+export type HumanRequestCancelRunBody = { run_id: string; request_id: string; expected_request_revision: bigint; expected_run_revision: bigint };
+export type HumanRequestActionResultBody = { action: "cancel_run"; run_id: string; run_revision: bigint; request_id: string; request_revision: bigint; status: "resolved" };
+export type TerminalAttachBody = { run_id: string; session_id: string; expected_run_revision: bigint; expected_session_revision: bigint; after_sequence: bigint };
+export type TerminalAttachedBody = { session_id: string; floor: bigint; head: bigint; acknowledged_sequence: bigint; max_unacked_bytes: number };
+export type TerminalAckBody = { session_id: string; next_sequence: bigint };
+export type TerminalLeaseBody = { run_id: string; session_id: string; generation?: bigint; expected_run_revision: bigint; expected_session_revision: bigint };
+export type TerminalLeaseResultBody = { operation: "acquired" | "renewed" | "released"; run_id: string; session_id: string; generation: bigint; expires_at_ms?: bigint; last_input_sequence: bigint; run_revision: bigint; session_revision: bigint };
+export type TerminalResizeBody = { run_id: string; session_id: string; generation: bigint; expected_run_revision: bigint; expected_session_revision: bigint; rows: number; cols: number };
+export type TerminalResizedBody = { session_id: string; generation: bigint; rows: number; cols: number };
+export type TerminalDetachBody = { session_id: string };
+export type TerminalInputResultBody = { session_id: string; generation: bigint; sequence: bigint; status: "accepted" | "rejected" | "partial" | "uncertain"; accepted_bytes: number };
+export type TerminalEOFBody = { session_id: string };
+export type TerminalExitBody = { session_id: string; exit_code: number; exit_signal: number; aborted: boolean };
+export type TerminalResetBody = { session_id: string; floor: bigint; head: bigint };
 
 export type HelloFrame = { v: 1; type: "HELLO"; body: HelloBody };
 export type PairProveFrame = { v: 1; type: "PAIR_PROVE"; id: string; body: PairProveBody };
@@ -82,14 +98,16 @@ export type StateEntityFrame = { v: 1; type: "STATE_ENTITY"; id: string; body: S
 export type HumanRequestDetailGetFrame = { v: 1; type: "HUMAN_REQUEST_DETAIL_GET"; id: string; body: HumanRequestDetailGetBody };
 export type HumanRequestDetailFrame = { v: 1; type: "HUMAN_REQUEST_DETAIL"; id: string; body: HumanRequestDetailBody };
 export type ErrorFrame = { v: 1; type: "ERROR"; id?: string; body: ErrorBody };
+export type TerminalControlFrame = { v: 1; type: "TERMINAL_ATTACH"; id: string; body: TerminalAttachBody } | { v: 1; type: "TERMINAL_ACK"; body: TerminalAckBody } | { v: 1; type: "TERMINAL_LEASE_ACQUIRE" | "TERMINAL_LEASE_RENEW" | "TERMINAL_LEASE_RELEASE"; id: string; body: TerminalLeaseBody } | { v: 1; type: "TERMINAL_RESIZE"; id: string; body: TerminalResizeBody } | { v: 1; type: "TERMINAL_DETACH"; id: string; body: TerminalDetachBody };
+export type TerminalServerControlFrame = { v: 1; type: "TERMINAL_ATTACHED"; id: string; body: TerminalAttachedBody } | { v: 1; type: "TERMINAL_LEASE_RESULT"; id: string; body: TerminalLeaseResultBody } | { v: 1; type: "TERMINAL_RESIZED"; id: string; body: TerminalResizedBody } | { v: 1; type: "TERMINAL_DETACHED"; id: string; body: TerminalDetachBody } | { v: 1; type: "TERMINAL_INPUT_RESULT"; id: string; body: TerminalInputResultBody } | { v: 1; type: "TERMINAL_EOF" | "TERMINAL_EXIT" | "TERMINAL_RESET"; id: string; body: TerminalEOFBody | TerminalExitBody | TerminalResetBody };
 
-export type ServerControlFrame = HelloFrame | PairResultFrame | AuthResultFrame | StateSnapshotFrame | StateRestartFrame | StateEventFrame | StateEntityFrame | HumanRequestDetailFrame | ErrorFrame;
-export type ClientControlFrame = PairProveFrame | AuthProveFrame | StateGetFrame | StateSubscribeFrame | StateEntityGetFrame | HumanRequestDetailGetFrame | ErrorFrame;
+export type ServerControlFrame = HelloFrame | PairResultFrame | AuthResultFrame | StateSnapshotFrame | StateRestartFrame | StateEventFrame | StateEntityFrame | HumanRequestDetailFrame | TerminalServerControlFrame | ErrorFrame;
+export type ClientControlFrame = PairProveFrame | AuthProveFrame | StateGetFrame | StateSubscribeFrame | StateEntityGetFrame | HumanRequestDetailGetFrame | TerminalControlFrame | ErrorFrame;
 type ControlBody = ClientControlFrame["body"] | ServerControlFrame["body"];
 
 const HEX_BYTES = { daemon_id: 16, boot_id: 16, connection_nonce: 32, challenge: 32, client_id: 16, public_key_sec1: 65, signature: 64 } as const;
-const CLIENT_TYPES: readonly ControlType[] = ["PAIR_PROVE", "AUTH_PROVE", "STATE_GET", "STATE_SUBSCRIBE", "STATE_ENTITY_GET", "HUMAN_REQUEST_DETAIL_GET", "ERROR"];
-const SERVER_TYPES: readonly ControlType[] = ["HELLO", "PAIR_RESULT", "AUTH_RESULT", "STATE_SNAPSHOT", "STATE_RESTART", "STATE_EVENT", "STATE_ENTITY", "HUMAN_REQUEST_DETAIL", "ERROR"];
+const CLIENT_TYPES: readonly ControlType[] = ["PAIR_PROVE", "AUTH_PROVE", "STATE_GET", "STATE_SUBSCRIBE", "STATE_ENTITY_GET", "HUMAN_REQUEST_DETAIL_GET", "HUMAN_REQUEST_REPLY", "HUMAN_REQUEST_CANCEL_RUN", "TERMINAL_ATTACH", "TERMINAL_ACK", "TERMINAL_LEASE_ACQUIRE", "TERMINAL_LEASE_RENEW", "TERMINAL_LEASE_RELEASE", "TERMINAL_RESIZE", "TERMINAL_DETACH", "ERROR"];
+const SERVER_TYPES: readonly ControlType[] = ["HELLO", "PAIR_RESULT", "AUTH_RESULT", "STATE_SNAPSHOT", "STATE_RESTART", "STATE_EVENT", "STATE_ENTITY", "HUMAN_REQUEST_DETAIL", "HUMAN_REQUEST_REPLY_RESULT", "HUMAN_REQUEST_ACTION_RESULT", "TERMINAL_ATTACHED", "TERMINAL_LEASE_RESULT", "TERMINAL_RESIZED", "TERMINAL_DETACHED", "TERMINAL_INPUT_RESULT", "TERMINAL_EOF", "TERMINAL_EXIT", "TERMINAL_RESET", "ERROR"];
 
 export function encodeClientControl(frame: ClientControlFrame): string { return normalizeBoundary(() => encode(frame, validateControl(frame, "client"))); }
 export function encodePairProve(id: string, body: PairProveBody): string { return encodeClientControl({ v: 1, type: "PAIR_PROVE", id, body }); }

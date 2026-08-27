@@ -392,6 +392,9 @@ func decodeID(raw json.RawMessage) (string, bool, bool) {
 }
 
 func validIDPresence(id string, present bool, kind MessageType) bool {
+	if kind == TypeTerminalAck {
+		return !present
+	}
 	required := idRequired(kind)
 	if !present {
 		return !required && (kind == TypeHello || kind == TypeError)
