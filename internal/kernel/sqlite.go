@@ -26,12 +26,12 @@ const (
 )
 
 type Store struct {
-	writer   *sql.DB
-	readers  *sql.DB
-	writerMu sync.Mutex
-	closed   atomic.Bool
-	close    sync.Once
-	closeErr error
+	writer     *sql.DB
+	readers    *sql.DB
+	writerGate chan struct{}
+	closed     atomic.Bool
+	close      sync.Once
+	closeErr   error
 }
 
 func Create(ctx context.Context, absolutePath string, config FactoryConfig, at UnixMillis) (*Store, error) {
@@ -193,7 +193,9 @@ func openPools(path string) (*Store, error) {
 		_ = writer.Close()
 		return nil, err
 	}
-	store := &Store{writer: writer, readers: readers}
+	writerGate := make(chan struct{}, 1)
+	writerGate <- struct{}{}
+	store := &Store{writer: writer, readers: readers, writerGate: writerGate}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Duration(busyMilliseconds)*time.Millisecond)
 	defer cancel()
 	writerConnection, err := store.writerConnection(ctx)
@@ -382,19 +384,26 @@ func validateDatabaseSnapshot(ctx context.Context, connection *sql.Conn) error {
 func (store *Store) Close() error {
 	store.close.Do(func() {
 		store.closed.Store(true)
-		store.writerMu.Lock()
-		defer store.writerMu.Unlock()
+		// Wait for the one already-admitted writer, if any, before closing
+		// either pool. New writers observe closed after acquiring the gate and
+		// leave without touching SQLite.
+		if err := store.acquireWriter(context.Background()); err != nil {
+			store.closeErr = err
+			return
+		}
+		defer store.releaseWriter()
 		store.closeErr = errors.Join(store.readers.Close(), store.writer.Close())
 	})
 	return store.closeErr
 }
 
 type writeTx struct {
-	store      *Store
-	connection *sql.Conn
-	active     bool
-	discarded  bool
-	closed     bool
+	store          *Store
+	connection     *sql.Conn
+	active         bool
+	discarded      bool
+	closed         bool
+	writerAdmitted bool
 }
 
 func (store *Store) beginValidatedWrite(ctx context.Context) (*writeTx, error) {
@@ -414,17 +423,19 @@ func (store *Store) beginValidatedWrite(ctx context.Context) (*writeTx, error) {
 // graph to validate until initialize creates it. Public mutations must enter
 // through beginValidatedWrite.
 func (store *Store) beginUncheckedWrite(ctx context.Context) (*writeTx, error) {
-	store.writerMu.Lock()
+	if err := store.acquireWriter(ctx); err != nil {
+		return nil, err
+	}
 	if store.closed.Load() {
-		store.writerMu.Unlock()
+		store.releaseWriter()
 		return nil, ErrStoreClosed
 	}
 	connection, err := store.writerConnection(ctx)
 	if err != nil {
-		store.writerMu.Unlock()
+		store.releaseWriter()
 		return nil, err
 	}
-	tx := &writeTx{store: store, connection: connection}
+	tx := &writeTx{store: store, connection: connection, writerAdmitted: true}
 	if _, err := connection.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		if cancellation := ctx.Err(); cancellation != nil {
 			tx.discard()
@@ -498,7 +509,30 @@ func (tx *writeTx) Close() {
 		_ = tx.connection.Close()
 	}
 	tx.closed = true
-	tx.store.writerMu.Unlock()
+	if tx.writerAdmitted {
+		tx.writerAdmitted = false
+		tx.store.releaseWriter()
+	}
+}
+
+func (store *Store) acquireWriter(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-store.writerGate:
+	}
+	if err := ctx.Err(); err != nil {
+		store.releaseWriter()
+		return err
+	}
+	return nil
+}
+
+func (store *Store) releaseWriter() {
+	store.writerGate <- struct{}{}
 }
 
 func discardConnection(connection *sql.Conn) {

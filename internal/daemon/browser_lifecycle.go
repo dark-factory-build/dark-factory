@@ -98,7 +98,7 @@ func (runtime *BrowserRuntime) Close() error {
 			}
 		}
 		runtime.closeErr = errors.Join(closeErrors...)
-		if runtime.daemon != nil {
+		if runtime.daemon != nil && runtime.closeErr == nil {
 			runtime.daemon.browserMu.Lock()
 			delete(runtime.daemon.browsers, runtime)
 			runtime.daemon.browserMu.Unlock()

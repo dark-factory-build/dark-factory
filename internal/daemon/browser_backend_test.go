@@ -899,6 +899,56 @@ func TestDaemonCloseFirstSharesRuntimeCleanupWithDirectClose(t *testing.T) {
 	}
 }
 
+func TestBrowserCleanupFailureRetainsRuntimeOwnership(t *testing.T) {
+	store, err := kernel.Create(context.Background(), filepath.Join(t.TempDir(), "kernel.sqlite"), kernel.FactoryConfig{Capacity: 2}, adapterTime(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	daemon, err := newDaemon(store, func() time.Time { return time.UnixMilli(2_000) })
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	boot, err := kernel.BootIDFromBytes(bytes.Repeat([]byte{0x5c}, 16))
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	backend := &browserBackend{store: store, boot: boot, subs: make(map[*browserStateSubscription]struct{}), stateSignal: make(chan struct{})}
+	runtime := &BrowserRuntime{daemon: daemon, backend: backend}
+	daemon.browserMu.Lock()
+	daemon.browsers[runtime] = struct{}{}
+	daemon.browserMu.Unlock()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	first := runtime.Close()
+	if !errors.Is(first, ErrBrowserRuntimeCleanup) {
+		t.Fatalf("first runtime close = %v, want cleanup uncertainty", first)
+	}
+	second := runtime.Close()
+	if second != first {
+		t.Fatalf("repeated runtime close changed stable error: first=%v second=%v", first, second)
+	}
+	daemonErr := daemon.Close()
+	if !errors.Is(daemonErr, ErrBrowserRuntimeCleanup) {
+		t.Fatalf("daemon close = %v, want cleanup uncertainty", daemonErr)
+	}
+	if !errors.Is(daemon.Close(), ErrBrowserRuntimeCleanup) {
+		t.Fatal("repeated daemon close lost cleanup uncertainty")
+	}
+	daemon.browserMu.Lock()
+	_, registered := daemon.browsers[runtime]
+	daemon.browserMu.Unlock()
+	if !registered {
+		t.Fatal("runtime was unregistered after unresolved cleanup")
+	}
+	if _, err := daemon.OpenBrowser(context.Background()); !errors.Is(err, kernel.ErrBusy) {
+		t.Fatalf("open after unresolved cleanup = %v, want busy", err)
+	}
+}
+
 func adapterNextUpdate(t *testing.T, subscription browser.StateSubscription) browser.StateUpdate {
 	t.Helper()
 	select {
