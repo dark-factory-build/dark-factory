@@ -303,10 +303,7 @@ type workerFixture struct {
 
 func newWorkerFixture(t *testing.T) *workerFixture {
 	t.Helper()
-	root := t.TempDir()
-	if err := os.Chmod(root, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	root := workerSecureTempDir(t)
 	git := nativeGit(t)
 	repository := filepath.Join(root, "repository")
 	if err := os.Mkdir(repository, 0o700); err != nil {
@@ -490,7 +487,7 @@ func (f *workerFixture) output() string {
 func nativeGit(t testing.TB) string {
 	t.Helper()
 	command := exec.Command("/usr/bin/xcrun", "--find", "git")
-	command.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + t.TempDir(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null"}
+	command.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + workerSecureTempDir(t), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null"}
 	body, err := command.Output()
 	if err != nil {
 		t.Fatal(err)
@@ -500,10 +497,23 @@ func nativeGit(t testing.TB) string {
 func runGit(t testing.TB, git string, args ...string) {
 	t.Helper()
 	command := exec.Command(git, args...)
-	command.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + t.TempDir(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0"}
+	command.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + workerSecureTempDir(t), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0"}
 	if body, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("git failed: %v (%s)", err, body)
 	}
+}
+
+func workerSecureTempDir(t testing.TB) string {
+	t.Helper()
+	path, err := os.MkdirTemp("/private/tmp", "dark-factory-worker-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(path) })
+	return path
 }
 
 func fdCensus(t testing.TB) map[int][2]uint64 {

@@ -86,7 +86,6 @@ func TestPrepareRetainsDeclaredEmptyStageBeforeExplicitPopulate(t *testing.T) {
 
 func TestAdoptPreparedRetainsExactIdentityAndUsesExistingLifecycle(t *testing.T) {
 	parent := secureTempDir(t)
-	defer os.RemoveAll(parent)
 	fixture := newFixture(t, "sha1", []fixtureFile{{[]byte("nested/a"), "100644", []byte("a")}})
 	original := mustPrepare(t, parent, "change", "crash-stage")
 	wantIdentity := original.Identity()
@@ -117,7 +116,6 @@ func TestAdoptPreparedRetainsExactIdentityAndUsesExistingLifecycle(t *testing.T)
 func TestAdoptPreparedRequiresAbsentTargetAndEmptyPrivateStageWithoutMutation(t *testing.T) {
 	t.Run("missing stage", func(t *testing.T) {
 		parent := secureTempDir(t)
-		defer os.RemoveAll(parent)
 		if _, err := AdoptPrepared(context.Background(), parent, "target", "stage"); err == nil {
 			t.Fatal("missing stage adopted")
 		}
@@ -126,7 +124,6 @@ func TestAdoptPreparedRequiresAbsentTargetAndEmptyPrivateStageWithoutMutation(t 
 
 	t.Run("existing target", func(t *testing.T) {
 		parent := secureTempDir(t)
-		defer os.RemoveAll(parent)
 		prepared := mustPrepare(t, parent, "target", "stage")
 		identity := prepared.Identity()
 		if err := prepared.Close(); err != nil {
@@ -146,7 +143,6 @@ func TestAdoptPreparedRequiresAbsentTargetAndEmptyPrivateStageWithoutMutation(t 
 
 	t.Run("target appears after stage open", func(t *testing.T) {
 		parent := secureTempDir(t)
-		defer os.RemoveAll(parent)
 		prepared := mustPrepare(t, parent, "target", "stage")
 		identity := prepared.Identity()
 		if err := prepared.Close(); err != nil {
@@ -237,7 +233,6 @@ func TestAdoptPreparedRequiresAbsentTargetAndEmptyPrivateStageWithoutMutation(t 
 	for _, mutation := range mutations {
 		t.Run(mutation.name, func(t *testing.T) {
 			parent := secureTempDir(t)
-			defer os.RemoveAll(parent)
 			stage := filepath.Join(parent, "stage")
 			mutation.create(t, stage)
 			if _, err := AdoptPrepared(context.Background(), parent, "target", "stage"); err == nil {
@@ -291,7 +286,6 @@ func TestAdoptPreparedRequiresAbsentTargetAndEmptyPrivateStageWithoutMutation(t 
 	for _, content := range contents {
 		t.Run("nonempty "+content.name, func(t *testing.T) {
 			parent := secureTempDir(t)
-			defer os.RemoveAll(parent)
 			prepared := mustPrepare(t, parent, "target", "stage")
 			if err := prepared.Close(); err != nil {
 				t.Fatal(err)
@@ -313,7 +307,6 @@ func TestAdoptPreparedRejectsStageAndParentSwapsAtOpenBoundaries(t *testing.T) {
 	for _, step := range []materializeStep{stepBeforeAdoptOpen, stepAfterAdoptOpen} {
 		t.Run("stage "+string(step), func(t *testing.T) {
 			parent := secureTempDir(t)
-			defer os.RemoveAll(parent)
 			prepared := mustPrepare(t, parent, "target", "stage")
 			identity := prepared.Identity()
 			if err := prepared.Close(); err != nil {
@@ -340,7 +333,6 @@ func TestAdoptPreparedRejectsStageAndParentSwapsAtOpenBoundaries(t *testing.T) {
 
 		t.Run("parent "+string(step), func(t *testing.T) {
 			root := secureTempDir(t)
-			defer os.RemoveAll(root)
 			parent := filepath.Join(root, "parent")
 			if err := os.Mkdir(parent, 0o700); err != nil {
 				t.Fatal(err)
@@ -373,7 +365,6 @@ func TestAdoptPreparedCancellationRepeatedOpenAndDescriptorOwnership(t *testing.
 	previousGC := debug.SetGCPercent(-1)
 	defer debug.SetGCPercent(previousGC)
 	parent := secureTempDir(t)
-	defer os.RemoveAll(parent)
 	prepared := mustPrepare(t, parent, "target", "stage")
 	identity := prepared.Identity()
 	if err := prepared.Close(); err != nil {
@@ -1596,7 +1587,7 @@ func removeRecorded(t testing.TB, parent, name string, identity StageIdentity) {
 
 func secureTempDir(t testing.TB) string {
 	t.Helper()
-	path, err := os.MkdirTemp(os.Getenv("TMPDIR"), "dark-factory-change-")
+	path, err := os.MkdirTemp("/private/tmp", "dark-factory-change-")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -16,7 +16,7 @@ import (
 )
 
 func TestPublicSelectGitFortyCallsHaveExactZeroFDDeltaWithoutGC(t *testing.T) {
-	root := t.TempDir()
+	root := externalSecureTempDir(t)
 	repository := filepath.Join(root, "repository")
 	git := externalGitExecutable(t)
 	runExternalGit(t, root, git, root, "init", repository)
@@ -50,6 +50,19 @@ func TestPublicSelectGitFortyCallsHaveExactZeroFDDeltaWithoutGC(t *testing.T) {
 	if after := externalFDCount(t); after != before {
 		t.Fatalf("public SelectGit leaked descriptors without finalizers: before=%d after=%d", before, after)
 	}
+}
+
+func externalSecureTempDir(t testing.TB) string {
+	t.Helper()
+	path, err := os.MkdirTemp("/private/tmp", "dark-factory-change-external-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(path) })
+	return path
 }
 
 func externalGitExecutable(t testing.TB) string {

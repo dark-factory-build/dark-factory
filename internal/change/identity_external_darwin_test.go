@@ -53,10 +53,7 @@ func TestStageIdentityReconstructsRecoveryAuthorityAcrossClose(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	parent := t.TempDir()
-	if err := os.Chmod(parent, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	parent := externalSecureTempDir(t)
 	prepared, err := change.Prepare(ctx, parent, "published", "recorded-stage")
 	if err != nil {
 		t.Fatal(err)
