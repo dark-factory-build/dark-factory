@@ -1561,7 +1561,8 @@ reset, capability escalation and daemon restart are explicit tests.
 
 `factoryctl web open` asks the owner-only Unix API to create one short-lived,
 single-use challenge bound to the current boot ID and intended Origin, then
-opens the hosted app with that challenge only in the URL fragment. A challenge
+opens the hosted app with that challenge only as exact
+`#df_pair=<64 lowercase hex>` in the URL fragment. A challenge
 is forbidden in the path or query, including an empty query marker. The host
 sends `Referrer-Policy: no-referrer` and loads no analytics or third-party
 resource. Its first synchronous first-party bootstrap reads and clears the

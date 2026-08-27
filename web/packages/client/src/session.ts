@@ -930,11 +930,16 @@ export function createBrowserClient(options: BrowserSessionOptions): BrowserClie
 /** Read-and-clear a one-shot challenge fragment before constructing a session. */
 export function consumePairingChallenge(location: Pick<Location, "hash" | "pathname" | "search">, history?: Pick<History, "replaceState">): string | null {
   const hash = location.hash.startsWith("#") ? location.hash.slice(1) : location.hash;
-  const value = new URLSearchParams(hash).get("challenge");
-  if (value === null) return null;
+  let pairingKey = false;
+  new URLSearchParams(hash).forEach((_value, key) => {
+    pairingKey ||= key.toLowerCase() === "df_pair" || key.toLowerCase() === "challenge";
+  });
+  if (!pairingKey) return null;
   const target = `${location.pathname}${location.search}`;
   (history ?? globalThis.history).replaceState(null, "", target);
-  return value;
+  const exact = /^df_pair=([0-9a-f]{64})$/.exec(hash);
+  const value = exact?.[1];
+  return value === undefined || /^0+$/.test(value) ? null : value;
 }
 
 /** Native IndexedDB store for the non-exportable profile key. No localStorage fallback exists. */
