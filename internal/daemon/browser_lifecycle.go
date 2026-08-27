@@ -5,22 +5,28 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
+const browserCleanupTimeout = 5 * time.Second
+
+var ErrBrowserRuntimeCleanup = errors.New("daemon: browser runtime cleanup unresolved")
+
 // BrowserRuntime owns the loopback listener, every accepted WebSocket and
-// every Store-watch subscription created through its backend. Close performs
-// the only safe order: stop and join the transport first, then cancel and join
-// any backend subscription left by an interrupted connection, then invalidate
-// unredeemed challenges for this runtime boot. The caller may close the Store
-// only after Close returns.
+// every Store-watch subscription created through its backend. Close marks the
+// runtime unavailable, then performs the only safe order: stop and join the
+// transport, cancel and join backend subscriptions, invalidate unredeemed
+// challenges, and finally unregister the runtime. The caller may close the
+// Store only after Close returns.
 type BrowserRuntime struct {
 	daemon  *Daemon
 	server  *browser.Server
 	backend *browserBackend
 	origins []string
+	closing bool
 
 	closeOnce sync.Once
 	closeErr  error
@@ -67,12 +73,11 @@ func (runtime *BrowserRuntime) Close() error {
 		return nil
 	}
 	if runtime.daemon != nil {
-		// Remove the runtime under the same gate OpenBrowser uses. The gate is
-		// released before server/backend callbacks so a transport cannot
-		// deadlock by re-entering daemon lifecycle code.
+		// Mark the runtime unavailable under the same gate OpenBrowser uses, but
+		// retain registry ownership until the once-owned cleanup is complete.
 		runtime.daemon.browserLifecycleMu.Lock()
 		runtime.daemon.browserMu.Lock()
-		delete(runtime.daemon.browsers, runtime)
+		runtime.closing = true
 		runtime.daemon.browserMu.Unlock()
 		runtime.daemon.browserLifecycleMu.Unlock()
 	}
@@ -85,9 +90,19 @@ func (runtime *BrowserRuntime) Close() error {
 			closeErrors = append(closeErrors, runtime.backend.close())
 		}
 		if runtime.daemon != nil && runtime.daemon.store != nil && runtime.backend != nil {
-			closeErrors = append(closeErrors, runtime.daemon.store.InvalidateBrowserPairingChallenges(context.Background(), runtime.backend.boot))
+			cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), browserCleanupTimeout)
+			cleanupErr := runtime.daemon.store.InvalidateBrowserPairingChallenges(cleanupContext, runtime.backend.boot)
+			cleanupCancel()
+			if cleanupErr != nil {
+				closeErrors = append(closeErrors, errors.Join(ErrBrowserRuntimeCleanup, cleanupErr))
+			}
 		}
 		runtime.closeErr = errors.Join(closeErrors...)
+		if runtime.daemon != nil {
+			runtime.daemon.browserMu.Lock()
+			delete(runtime.daemon.browsers, runtime)
+			runtime.daemon.browserMu.Unlock()
+		}
 	})
 	return runtime.closeErr
 }

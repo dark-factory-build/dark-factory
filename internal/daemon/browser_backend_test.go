@@ -734,6 +734,171 @@ func TestBrowserCloseLinearizesOpenAndClearsChallenges(t *testing.T) {
 	}
 }
 
+func TestOpenRejectsMarkedRuntimeBeforeMint(t *testing.T) {
+	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
+	ctx := context.Background()
+	before, err := fixture.store.BrowserClientCounts(ctx, fixture.backend.boot, adapterTime(t, 2_000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.daemon.browserMu.Lock()
+	fixture.runtime.closing = true
+	fixture.daemon.browserMu.Unlock()
+	if _, err := fixture.daemon.OpenBrowser(ctx); !errors.Is(err, kernel.ErrBusy) {
+		t.Fatalf("open on marked runtime = %v, want busy", err)
+	}
+	after, err := fixture.store.BrowserClientCounts(ctx, fixture.backend.boot, adapterTime(t, 2_000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.ActiveChallenges != before.ActiveChallenges {
+		t.Fatalf("marked-runtime open changed active challenges: before=%d after=%d", before.ActiveChallenges, after.ActiveChallenges)
+	}
+}
+
+func TestBrowserCloseJoinsSharedCleanupAndRetainsRegistry(t *testing.T) {
+	store, err := kernel.Create(context.Background(), filepath.Join(t.TempDir(), "kernel.sqlite"), kernel.FactoryConfig{Capacity: 2}, adapterTime(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	daemon, err := newDaemon(store, func() time.Time { return time.UnixMilli(2_000) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	boot, err := kernel.BootIDFromBytes(bytes.Repeat([]byte{0x5a}, 16))
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &browserBackend{store: store, boot: boot, subs: make(map[*browserStateSubscription]struct{}), stateSignal: make(chan struct{})}
+	blocked := &browserStateSubscription{backend: backend, done: make(chan struct{}), cancel: func() {}}
+	backend.subs[blocked] = struct{}{}
+	runtime := &BrowserRuntime{daemon: daemon, backend: backend}
+	daemon.browserMu.Lock()
+	daemon.browsers[runtime] = struct{}{}
+	daemon.browserMu.Unlock()
+	release := func() {
+		select {
+		case <-blocked.done:
+		default:
+			close(blocked.done)
+		}
+	}
+	defer release()
+
+	directDone := make(chan error, 1)
+	go func() { directDone <- runtime.Close() }()
+	closingDeadline := time.After(3 * time.Second)
+	for {
+		daemon.browserMu.Lock()
+		closing := runtime.closing
+		_, registered := daemon.browsers[runtime]
+		daemon.browserMu.Unlock()
+		if closing && registered {
+			break
+		}
+		select {
+		case <-closingDeadline:
+			t.Fatal("runtime did not become marked-closing while cleanup was blocked")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	if _, err := daemon.OpenBrowser(context.Background()); !errors.Is(err, kernel.ErrBusy) {
+		t.Fatalf("open while runtime cleanup is blocked = %v, want busy", err)
+	}
+
+	daemonDone := make(chan error, 1)
+	go func() { daemonDone <- daemon.Close() }()
+	select {
+	case err := <-daemonDone:
+		t.Fatalf("daemon close returned before shared runtime cleanup: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	release()
+	directErr := <-directDone
+	daemonErr := <-daemonDone
+	if directErr != nil || daemonErr != nil || (directErr == nil) != (daemonErr == nil) {
+		t.Fatalf("shared close results: direct=%v daemon=%v", directErr, daemonErr)
+	}
+	daemon.browserMu.Lock()
+	_, registered := daemon.browsers[runtime]
+	daemon.browserMu.Unlock()
+	if registered {
+		t.Fatal("runtime remained registered after joined cleanup")
+	}
+}
+
+func TestDaemonCloseFirstSharesRuntimeCleanupWithDirectClose(t *testing.T) {
+	store, err := kernel.Create(context.Background(), filepath.Join(t.TempDir(), "kernel.sqlite"), kernel.FactoryConfig{Capacity: 2}, adapterTime(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	daemon, err := newDaemon(store, func() time.Time { return time.UnixMilli(2_000) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	boot, err := kernel.BootIDFromBytes(bytes.Repeat([]byte{0x5b}, 16))
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &browserBackend{store: store, boot: boot, subs: make(map[*browserStateSubscription]struct{}), stateSignal: make(chan struct{})}
+	blocked := &browserStateSubscription{backend: backend, done: make(chan struct{}), cancel: func() {}}
+	backend.subs[blocked] = struct{}{}
+	runtime := &BrowserRuntime{daemon: daemon, backend: backend}
+	daemon.browserMu.Lock()
+	daemon.browsers[runtime] = struct{}{}
+	daemon.browserMu.Unlock()
+	release := func() {
+		select {
+		case <-blocked.done:
+		default:
+			close(blocked.done)
+		}
+	}
+	defer release()
+
+	daemonDone := make(chan error, 1)
+	go func() { daemonDone <- daemon.Close() }()
+	closingDeadline := time.After(3 * time.Second)
+	for {
+		daemon.browserMu.Lock()
+		globalClosing := daemon.browserClosing
+		closing := runtime.closing
+		_, registered := daemon.browsers[runtime]
+		daemon.browserMu.Unlock()
+		if globalClosing && closing && registered {
+			break
+		}
+		select {
+		case <-closingDeadline:
+			t.Fatal("daemon close did not mark and retain runtime")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	directDone := make(chan error, 1)
+	go func() { directDone <- runtime.Close() }()
+	select {
+	case err := <-directDone:
+		t.Fatalf("direct close returned before daemon cleanup: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	release()
+	daemonErr := <-daemonDone
+	directErr := <-directDone
+	if daemonErr != nil || directErr != nil {
+		t.Fatalf("daemon-first close results: daemon=%v direct=%v", daemonErr, directErr)
+	}
+	daemon.browserMu.Lock()
+	_, registered := daemon.browsers[runtime]
+	daemon.browserMu.Unlock()
+	if registered {
+		t.Fatal("daemon-first runtime remained registered after cleanup")
+	}
+}
+
 func adapterNextUpdate(t *testing.T, subscription browser.StateSubscription) browser.StateUpdate {
 	t.Helper()
 	select {

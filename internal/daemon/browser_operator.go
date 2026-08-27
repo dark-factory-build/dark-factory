@@ -34,7 +34,7 @@ func (daemon *Daemon) webRuntime() (*BrowserRuntime, bool) {
 		return nil, false
 	}
 	for runtime := range daemon.browsers {
-		return runtime, runtime != nil && runtime.server != nil && runtime.backend != nil
+		return runtime, runtime != nil && !runtime.closing && runtime.server != nil && runtime.backend != nil
 	}
 	return nil, false
 }

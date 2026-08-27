@@ -77,6 +77,32 @@ func TestBrowserChallengeCommitOutcomeReconcilesExactIdentity(t *testing.T) {
 	}
 }
 
+func TestInvalidateBrowserPairingChallengesSurfacesAmbiguousCommit(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		fault    storeFaultKind
+		wantRows int64
+	}{
+		{name: "commit before apply", fault: storeFaultCommitBefore, wantRows: 1},
+		{name: "commit after apply", fault: storeFaultCommitAfter, wantRows: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, path := newBrowserStore(t)
+			defer store.Close()
+			boot := browserTestBoot(t, 191)
+			mintBrowserChallenge(t, store, 191, boot, 10, 100, BrowserCapabilityObserve)
+			plan := installFaultWriter(t, store, path)
+			plan.arm(test.fault)
+			err := store.InvalidateBrowserPairingChallenges(context.Background(), boot)
+			requireStoreOutcomeUnknown(t, err)
+			assertFaultWriterEvicted(t, store, plan)
+			if got := browserTableCount(t, store, "browser_pairing_challenges"); got != test.wantRows {
+				t.Fatalf("remaining challenge rows = %d, want %d", got, test.wantRows)
+			}
+		})
+	}
+}
+
 func pairBrowserClient(t *testing.T, store *Store, digest BrowserChallengeDigest, boot BootID, id BrowserClientID, publicKey []byte, at int64) BrowserClient {
 	t.Helper()
 	client, err := store.RedeemBrowserPairingChallenge(context.Background(), digest, boot, "https://app.example", id, publicKey, mustTime(t, at))
