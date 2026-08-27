@@ -43,12 +43,12 @@ branch/worktree and obeys that repository's `AGENTS.md`.
 
 | State | Exact work retained or stopped |
 |---|---|
-| Complete and retained | Fresh SQLite contract; typed kernel; atomic admission; exact attempt credentials; run/finalizing/resource state; bounded invalidations; Change ownership/materialization groundwork; owner-only Unix control API; typed `factoryctl` client; Darwin process identity; two blocked-exec gates; terminal-exit spool; gated Darwin PTY primitive; durable terminal-session admission, activation, recovery uncertainty and finalization guards; durable browser clients/challenges/revocation/input leases; exact PAIR/AUTH transcripts; strict browser-v1 handshake/binary codecs; strict runner terminal union, complete-write poisoning, incremental frame decoder and one fixed replay ring through `f1f72aa`; reviewed framework-neutral `@dark-factory/client` handshake/transcript/binary core and exact package gate through `d03491f`; independently reviewed question-only durable HumanRequest creation, private detail, reply reservation/acknowledgement/uncertainty, restart recovery, lifecycle convergence and bounded public projection through `40f5873`; the single-owner PTY execution loop, exact ready/input handoff, correlated retained replay, bounded filter retirement, poisoned writes, actual-EOF ordering and daemon-loss convergence through `ebcfd24`; exact two-field `AUTH_PROVE` through `4b18c38`; runner-owned exact HumanRequest PTY reply through `0f313a9`; daemon live-attempt registry, mailbox, bounded observers, finalization gate, active supervisor cancellation and joined shutdown through `d9709b9`; the closed attempt-only `request_human` API plus direct durable dispatch through `c29d154`; exact 8 KiB browser/Go/TypeScript terminal payload bound through `9ab44c3`; read-only exact lease authorization and one-shot failed-install/input-reservation revocation through `8853acb`; finalization/release linearization, natural-exit acknowledgement convergence, cancellation visibility and real descendant reaping through `ea1ee4b`; canonical Darwin runtime, Change and Change-worker fixtures through `699515d` |
+| Complete and retained | Fresh SQLite contract; typed kernel; atomic admission; exact attempt credentials; run/finalizing/resource state; bounded invalidations; Change ownership/materialization groundwork; owner-only Unix control API; typed `factoryctl` client; Darwin process identity; two blocked-exec gates; terminal-exit spool; gated Darwin PTY primitive; durable terminal-session admission, activation, recovery uncertainty and finalization guards; durable browser clients/challenges/revocation/input leases; exact PAIR/AUTH transcripts; strict browser-v1 handshake/binary codecs; strict runner terminal union, complete-write poisoning, incremental frame decoder and one fixed replay ring through `f1f72aa`; reviewed framework-neutral `@dark-factory/client` handshake/transcript/binary core and exact package gate through `d03491f`; independently reviewed question-only durable HumanRequest creation, private detail, reply reservation/acknowledgement/uncertainty, restart recovery, lifecycle convergence and bounded public projection through `40f5873`; the single-owner PTY execution loop, exact ready/input handoff, correlated retained replay, bounded filter retirement, poisoned writes, actual-EOF ordering and daemon-loss convergence through `ebcfd24`; exact two-field `AUTH_PROVE` through `4b18c38`; runner-owned exact HumanRequest PTY reply through `0f313a9`; daemon live-attempt registry, mailbox, bounded observers, finalization gate, active supervisor cancellation and joined shutdown through `d9709b9`; the closed attempt-only `request_human` API plus direct durable dispatch through `c29d154`; exact 8 KiB browser/Go/TypeScript terminal payload bound through `9ab44c3`; read-only exact lease authorization and one-shot failed-install/input-reservation revocation through `8853acb`; finalization/release linearization, natural-exit acknowledgement convergence, cancellation visibility and real descendant reaping through `ea1ee4b`; canonical Darwin runtime, Change and Change-worker fixtures through `699515d`; exact committed provider access to the attempt-only `request-human` command through `d4ce713` |
 | Reusable with adaptation | `internal/runner` live-child/process-group ownership; daemon supervisor choreography; bounded API framing/auth separation; dashboard projection/client reducer direction; rebased recovery branch `go-recovery-reserved-fix` at `185cd5f`; fail-closed runtime/spool/Change close branches at `f239815`, `347c977`, and `4183205` |
 | In progress but held | Daemon-side terminal lease/input/resize and reserved HumanRequest delivery now have reviewed Store, runner and owner-mailbox foundations but not the exact correlated effect choreography. An isolated implementation lane owns that next effect boundary. A read-only lane is fixing the smaller browser canonical-state/page contract before the 64 KiB v1 control union freezes. Recovery still needs replay onto the PTY design. The development/Go sub-gates are integrated and green; final browser E2E and the post-test system census remain cutover blockers. |
 | Obsolete | Startup-input-only/closed-stdin provider contract; separate stdin/stdout/stderr provider pipes as the product transport; TUI/Bubble Tea packages, lanes and parity tests; generic attention projection; message-on-next-run as the live-question answer |
 | Proved for revised architecture | Current Chrome on macOS can connect from the protected hosted HTTPS preview to exact `ws://127.0.0.1:43123` with the dedicated loopback permission; strict Origin/Host checks, binary traffic, reconnect, denial, no-daemon, port-collision and cross-site refusal are causal. A fresh Darwin PTY child remains inert until release, owns a controlling terminal/process group and is reaped without orphaning. SQLite owns exactly one terminal session per admitted run and refuses terminalization until its exact close is proved. The outer runner owns the live PTY loop without goroutines, transfers initial input exactly once, gates terminal commands on readiness, bounds and correlates replay before and after actual EOF, and writes one HumanRequest reply byte-for-byte without borrowing browser lease authority. The daemon registers one joined owner before release, rejects wrong sessions, routes bounded replay to multiple observers, actively cancels pre-live supervisors on shutdown and serializes infrastructure failure with terminal effects. |
-| Blocked until proved | Exact daemon delivery of lease generation/input/resize and a reserved HumanRequest reply; explicit provider invocation of `request_human` through the authenticated daemon; a browser-specific bounded canonical snapshot including safe HumanRequest projection; loopback transport authentication/Host/Origin security over the durable browser authority; complete browser protocol operations beyond the reviewed handshake/binary core; TypeScript connection/reconnect client; public web UI; complete private host integration; revised crash-cut vertical slice |
+| Blocked until proved | Exact daemon delivery of lease generation/input/resize and a reserved HumanRequest reply; a browser-specific bounded canonical snapshot including safe HumanRequest projection; loopback transport authentication/Host/Origin security over the durable browser authority; complete browser protocol operations beyond the reviewed handshake/binary core; TypeScript connection/reconnect client; public web UI; complete private host integration; revised crash-cut vertical slice |
 
 Read-only redirection audits were assigned without overlapping writes:
 
@@ -3177,8 +3177,9 @@ Two-owner runner/process proof on integrated head `85d4841`:
 Bounded local-API client proof on integrated head `3ca153f`:
 
 - `internal/api` exposes only six operator calls (`health`, `snapshot`,
-  `create_project`, `create_shell_agent`, `enqueue_task`, `set_dispatch`) and
-  three attempt outcome calls (`succeed`, `block`, `fail`). The attempt client
+  `create_project`, `create_shell_agent`, `enqueue_task`, `set_dispatch`),
+  three attempt outcome calls (`succeed`, `block`, `fail`) and the bounded
+  attempt-only `request_human` call. The attempt client
   can discover only its one token-file environment variable; it cannot name or
   fall back to operator authority. Attempt requests carry no run/task/entity ID
   or caller-selected failure code.
@@ -3341,6 +3342,26 @@ Minimal typed attempt CLI proof on integrated head `f812ae6`:
   pipes currently do not change the already-completed API result; output-error
   policy and any later non-attempt commands remain explicit subjects for the
   CLI portion of the final elegance audit.
+
+Exact provider `request-human` proof on integrated head `d4ce713`:
+
+- `factoryctl attempt request-human --idempotency-key HEX32 --question TEXT`
+  is the only added spelling. It validates an exact lowercase, nonzero 32-byte
+  hex identity and bounded UTF-8/NUL-free question before environment access,
+  then uses only `AttemptClient`; operator authority is never a fallback.
+- The daemon and Change worker commit the exact absolute native `factoryctl`
+  executable identity before selection/admission and revalidate it immediately
+  before provider execution/release. The provider receives only that locator;
+  its cleared `PATH` remains `/usr/bin:/bin`.
+- A deterministic shell-provider test invokes the exact helper twice with one
+  idempotency identity and observes exactly one durable HumanRequest, with no
+  provider effect before the final release stage. Independent review returned
+  ALLOW. The integrated causal test passed three repetitions in `3.870s` using
+  only isolated temporary homes and the shell fixture.
+- Same-UID replacement between the final pathname verification and `execve`
+  remains a documented Darwin pathname TOCTOU outside the current threat model.
+  The release layout must retain an immutable sibling `factoryctl` executable;
+  this does not authorize path search or a compatibility fallback.
 
 Closed runner environment proof on integrated head `c7d74cc`:
 
