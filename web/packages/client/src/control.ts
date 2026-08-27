@@ -216,8 +216,9 @@ function decodeControl(data: string | Uint8Array, role: "client" | "server"): Cl
   if (!isControlType(value.type)) malformed();
   const hasID = Object.prototype.hasOwnProperty.call(value, "id");
   if (hasID && (typeof value.id !== "string" || !validID(value.id))) malformed();
-  const requiredID = value.type !== "HELLO" && value.type !== "ERROR" && value.type !== "TERMINAL_ACK";
-  if (requiredID !== hasID) malformed();
+  const optionalID = value.type === "ERROR";
+  const requiredID = value.type !== "HELLO" && !optionalID && value.type !== "TERMINAL_ACK";
+  if (!optionalID && requiredID !== hasID) malformed();
   if (role === "client" && !CLIENT_TYPES.includes(value.type)) throw new ProtocolError("wrong_direction");
   if (role === "server" && !SERVER_TYPES.includes(value.type)) throw new ProtocolError("wrong_direction");
   const body = validateBody(value.type, value.body, true);

@@ -14,6 +14,7 @@ import {
   decodeTerminalOutput,
   encodeClientControl,
   encodeServerControl,
+  encodeServerError,
   encodeTerminalInput,
   encodeTerminalInputResult,
   encodeTerminalOutput,
@@ -39,6 +40,20 @@ test("canonical control fixtures decode by sender role and re-encode exactly", (
   const error = fixture("error.json");
   assert.equal(encodeClientControl(decodeClientControl(error)), error);
   assert.equal(encodeServerControl(decodeServerControl(error)), error);
+});
+
+test("ERROR alone has an optional bounded correlation ID", () => {
+  const withoutID = encodeServerError({ code: "not_found", retryable: false });
+  const withID = encodeServerError({ code: "not_found", retryable: false }, "entity-1");
+  for (const decode of [decodeClientControl, decodeServerControl]) {
+    assert.equal(decode(withoutID).id, undefined);
+    assert.equal(decode(withID).id, "entity-1");
+    for (const id of ["", "x".repeat(65), 1, null]) {
+      expectMalformed(() => decode(JSON.stringify({ v: 1, type: "ERROR", id, body: { code: "not_found", retryable: false } })));
+    }
+  }
+  expectMalformed(() => decodeServerControl(fixture("hello.json").replace('"body":', '"id":"hello","body":')));
+  expectMalformed(() => decodeClientControl(fixture("terminal_ack.json").replace('"body":', '"id":"ack","body":')));
 });
 
 test("control role, envelope, field and capability validation is closed", () => {
