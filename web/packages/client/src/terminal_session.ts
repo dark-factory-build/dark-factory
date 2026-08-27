@@ -16,7 +16,7 @@ import {
   type TerminalServerControlFrame,
 } from "./control.js";
 import { ProtocolError } from "./errors.js";
-import { MAX_TERMINAL_COLS, MAX_TERMINAL_ROWS } from "./manifest.js";
+import { MAX_SQLITE_INTEGER, MAX_TERMINAL_COLS, MAX_TERMINAL_ROWS } from "./manifest.js";
 import { decodeTerminalOutput, encodeTerminalInput, type TerminalFrame } from "./terminal.js";
 
 export type TerminalOutput = {
@@ -85,6 +85,8 @@ type Pending = {
   leaseOperation?: "acquired" | "renewed" | "released";
   sequence?: bigint;
   payloadLength?: number;
+  rows?: number;
+  cols?: number;
 };
 
 /**
@@ -111,7 +113,8 @@ export class TerminalHandle {
   #acknowledgedSequence = 0n;
   #nextInputSequence = 0n;
   #outputInFlight = false;
-  #inputAuthorityFrozen = false;
+  #requiresFreshLeaseAfterGeneration: bigint | undefined;
+  #outputCloseResolve: (() => void) | undefined;
 
   constructor(options: TerminalHandleOptions, send: Send, nextID: NextID) {
     this.#options = { ...options };
@@ -150,7 +153,6 @@ export class TerminalHandle {
 
   acquireLease(): Promise<TerminalLease> {
     this.#ensureAttached();
-    if (this.#inputAuthorityFrozen) return Promise.reject(new SessionErrorLikeError("input authority frozen"));
     if (this.#lease !== undefined || this.#hasLeaseOperation() || this.#hasPending("resize") || this.#hasPending("input")) return Promise.reject(new SessionErrorLikeError("lease operation pending"));
     const id = this.#nextID("terminal-lease-acquire");
     return this.#request(id, { kind: "lease", leaseOperation: "acquired", resolve: () => undefined, reject: () => undefined }, encodeTerminalLeaseAcquire(id, {
@@ -187,7 +189,7 @@ export class TerminalHandle {
     if (this.#hasPending("resize") || this.#hasLeaseOperation() || this.#hasPending("input")) return Promise.reject(new SessionErrorLikeError("terminal operation pending"));
     if (!Number.isSafeInteger(rows) || rows < 1 || rows > MAX_TERMINAL_ROWS || !Number.isSafeInteger(cols) || cols < 1 || cols > MAX_TERMINAL_COLS) return Promise.reject(new ProtocolError("malformed"));
     const id = this.#nextID("terminal-resize");
-    return this.#request(id, { kind: "resize", generation: lease.generation, resolve: () => undefined, reject: () => undefined }, encodeTerminalResize(id, {
+    return this.#request(id, { kind: "resize", generation: lease.generation, rows, cols, resolve: () => undefined, reject: () => undefined }, encodeTerminalResize(id, {
       run_id: this.runId, session_id: this.sessionId, generation: lease.generation,
       expected_run_revision: this.expectedRunRevision,
       expected_session_revision: this.expectedSessionRevision, rows, cols,
@@ -196,7 +198,6 @@ export class TerminalHandle {
 
   sendInput(payload: Uint8Array): Promise<TerminalInputResult> {
     const lease = this.#requireLease();
-    if (this.#inputAuthorityFrozen) return Promise.reject(new SessionErrorLikeError("input authority frozen"));
     if (!(payload instanceof Uint8Array)) return Promise.reject(new ProtocolError("malformed"));
     if (this.#hasPending("input") || this.#hasLeaseOperation() || this.#hasPending("resize")) return Promise.reject(new SessionErrorLikeError("terminal operation pending"));
     const bytes = payload.slice();
@@ -211,6 +212,7 @@ export class TerminalHandle {
   detach(): Promise<void> {
     this.#ensureOpen();
     if (!this.#attached) { this.close(); return Promise.resolve(); }
+    if (this.#hasPending("detach")) return Promise.reject(new SessionErrorLikeError("detach pending"));
     const id = this.#nextID("terminal-detach");
     return this.#request(id, { kind: "detach", resolve: () => undefined, reject: () => undefined }, encodeTerminalDetach(id, { session_id: this.sessionId }));
   }
@@ -218,6 +220,9 @@ export class TerminalHandle {
   close(error?: SessionErrorLike): void {
     if (this.#closed) return;
     this.#closed = true;
+    const wakeOutput = this.#outputCloseResolve;
+    this.#outputCloseResolve = undefined;
+    wakeOutput?.();
     for (const pending of this.#pending.values()) pending.reject(error ?? new SessionErrorLikeError("closed"));
     this.#pending.clear();
     this.#lease = undefined;
@@ -227,14 +232,14 @@ export class TerminalHandle {
 
   /** Called only by BrowserSession while routing a server terminal frame. */
   receive(frame: TerminalServerControlFrame): boolean {
-    if (this.#closed) return false;
+    if (this.#closed) return frame.body.session_id === this.sessionId;
     if (frame.body.session_id !== this.sessionId) return false;
     if (frame.type === "TERMINAL_INPUT_RESULT") {
       if (frame.id !== this.#attachmentID) return false;
       for (const [id, pending] of this.#pending) {
         if (pending.kind === "input" && pending.generation === frame.body.generation && pending.sequence === frame.body.sequence) {
-          this.#pending.delete(id);
           this.#inputResult(frame.body, pending);
+          this.#pending.delete(id);
           return true;
         }
       }
@@ -242,42 +247,57 @@ export class TerminalHandle {
     }
     const pending = this.#pending.get(frame.id);
     if (pending === undefined) return false;
-    this.#pending.delete(frame.id);
     switch (frame.type) {
       case "TERMINAL_ATTACHED": {
         if (pending.kind !== "attach" || frame.body.floor > frame.body.acknowledged_sequence || frame.body.acknowledged_sequence > frame.body.head || frame.body.acknowledged_sequence !== this.#requestedAfterSequence) throw new ProtocolError("malformed");
+        this.#pending.delete(frame.id);
         this.#attached = true;
         this.#attachedState = { sessionId: frame.body.session_id, floor: frame.body.floor, head: frame.body.head, acknowledgedSequence: frame.body.acknowledged_sequence, maxUnackedBytes: frame.body.max_unacked_bytes };
         this.#acknowledgedSequence = frame.body.acknowledged_sequence;
         this.#nextOutputSequence = frame.body.acknowledged_sequence;
-        this.#nextInputSequence = this.#lease?.lastInputSequence ?? 0n;
+        this.#nextInputSequence = 0n;
         pending.resolve(this.#attachedState);
         return true;
       }
       case "TERMINAL_LEASE_RESULT": {
-        if (pending.kind !== "lease" || pending.leaseOperation !== frame.body.operation || frame.body.run_id !== this.runId || frame.body.run_revision !== this.expectedRunRevision || frame.body.session_revision !== this.expectedSessionRevision || frame.body.generation !== pending.generation && pending.generation !== undefined) throw new ProtocolError("malformed");
+        if (pending.kind !== "lease" || pending.leaseOperation !== frame.body.operation || frame.body.run_id !== this.runId || frame.body.session_id !== this.sessionId || frame.body.run_revision !== this.expectedRunRevision || frame.body.session_revision !== this.expectedSessionRevision) throw new ProtocolError("malformed");
         if (frame.body.operation === "released") {
+          if (pending.generation === undefined || pending.generation === MAX_SQLITE_INTEGER || frame.body.generation !== pending.generation + 1n || frame.body.last_input_sequence !== 0n) throw new ProtocolError("malformed");
+          this.#pending.delete(frame.id);
           this.#lease = undefined;
           pending.resolve(frame.body);
         } else {
           if (frame.body.expires_at_ms === undefined) throw new ProtocolError("malformed");
-          this.#lease = { generation: frame.body.generation, expiresAtMs: frame.body.expires_at_ms, lastInputSequence: frame.body.last_input_sequence, runRevision: frame.body.run_revision, sessionRevision: frame.body.session_revision };
-          this.#nextInputSequence = frame.body.last_input_sequence + 1n;
+          if (frame.body.operation === "acquired") {
+            if (pending.generation !== undefined || frame.body.last_input_sequence !== 0n || this.#requiresFreshLeaseAfterGeneration !== undefined && frame.body.generation <= this.#requiresFreshLeaseAfterGeneration) throw new ProtocolError("malformed");
+            this.#requiresFreshLeaseAfterGeneration = undefined;
+            this.#nextInputSequence = 1n;
+            this.#lease = { generation: frame.body.generation, expiresAtMs: frame.body.expires_at_ms, lastInputSequence: 0n, runRevision: frame.body.run_revision, sessionRevision: frame.body.session_revision };
+          } else {
+            const lease = this.#lease;
+            if (pending.generation === undefined || frame.body.generation !== pending.generation || lease === undefined || lease.generation !== pending.generation || frame.body.last_input_sequence !== lease.lastInputSequence || frame.body.expires_at_ms < lease.expiresAtMs) throw new ProtocolError("malformed");
+            this.#pending.delete(frame.id);
+            this.#lease = { ...lease, expiresAtMs: frame.body.expires_at_ms };
+          }
+          if (frame.body.operation === "acquired") this.#pending.delete(frame.id);
           pending.resolve(this.#lease);
         }
         return true;
       }
       case "TERMINAL_RESIZED":
-        if (pending.kind !== "resize" || frame.body.generation !== pending.generation) throw new ProtocolError("malformed");
+        if (pending.kind !== "resize" || frame.body.generation !== pending.generation || frame.body.rows !== pending.rows || frame.body.cols !== pending.cols) throw new ProtocolError("malformed");
+        this.#pending.delete(frame.id);
         pending.resolve({ sessionId: frame.body.session_id, generation: frame.body.generation, rows: frame.body.rows, cols: frame.body.cols }); return true;
       case "TERMINAL_DETACHED":
         if (pending.kind !== "detach") throw new ProtocolError("malformed");
+        this.#pending.delete(frame.id);
         this.#attached = false; this.#lease = undefined; pending.resolve(undefined); this.close(); return true;
       default: return false;
     }
   }
 
   receiveError(id: string, error: SessionErrorLike): boolean {
+    if (this.#closed) return true;
     let pending = this.#pending.get(id);
     if (pending === undefined && id === this.#attachmentID) {
       for (const [pendingID, candidate] of this.#pending) {
@@ -292,34 +312,42 @@ export class TerminalHandle {
   }
 
   async receiveBinary(frame: TerminalFrame): Promise<boolean> {
-    if (this.#closed || !this.#attached || !sameBytes(frame.sessionId, hexSessionID(this.sessionId)) || frame.leaseGeneration !== 0n) return false;
+    if (this.#closed) return sameBytes(frame.sessionId, hexSessionID(this.sessionId));
+    if (!this.#attached || !sameBytes(frame.sessionId, hexSessionID(this.sessionId)) || frame.leaseGeneration !== 0n) return false;
     if (this.#outputInFlight) { this.close(new SessionErrorLikeError("output callback reentrant")); return true; }
     if (frame.sequence !== this.#nextOutputSequence) return false;
     this.#outputInFlight = true;
     const output = { sequence: frame.sequence, payload: frame.payload.slice() };
-    try { await this.#options.onOutput?.(output); } catch {
-      this.close(new SessionErrorLikeError("terminal output consumer failed"));
-      this.#outputInFlight = false;
+    let closeResolve: (() => void) | undefined;
+    const closed = new Promise<void>((resolve) => { closeResolve = resolve; this.#outputCloseResolve = resolve; });
+    try {
+      let accepted: Promise<void>;
+      try { accepted = Promise.resolve(this.#options.onOutput?.(output)); } catch { accepted = Promise.reject(new Error("consumer")); }
+      try { await Promise.race([accepted, closed]); } catch {
+        this.close(new SessionErrorLikeError("terminal output consumer failed"));
+        return true;
+      }
+      if (this.#closed || !this.#attached) return true;
+      const nextSequence = this.#nextOutputSequence + BigInt(frame.payload.length);
+      try { this.#send(undefined, encodeTerminalAck({ session_id: this.sessionId, next_sequence: nextSequence })); } catch {
+        this.close(new SessionErrorLikeError("terminal ACK send failed"));
+        return true;
+      }
+      if (this.#closed || !this.#attached) return true;
+      this.#nextOutputSequence = nextSequence;
+      this.#acknowledgedSequence = nextSequence;
       return true;
-    }
-    if (this.#closed || !this.#attached) { this.#outputInFlight = false; return true; }
-    const nextSequence = this.#nextOutputSequence + BigInt(frame.payload.length);
-    try { this.#send(undefined, encodeTerminalAck({ session_id: this.sessionId, next_sequence: nextSequence })); } catch {
-      this.close(new SessionErrorLikeError("terminal ACK send failed"));
+    } finally {
+      if (this.#outputCloseResolve === closeResolve) this.#outputCloseResolve = undefined;
       this.#outputInFlight = false;
-      return true;
     }
-    if (this.#closed || !this.#attached) { this.#outputInFlight = false; return true; }
-    this.#nextOutputSequence = nextSequence;
-    this.#acknowledgedSequence = nextSequence;
-    this.#outputInFlight = false;
-    return true;
   }
 
-  receiveEOF(id: string, body: { session_id: string }): boolean { if (!this.#attached || id !== this.#attachmentID || body.session_id !== this.sessionId) return false; try { this.#options.onEOF?.({ sessionId: body.session_id }); } catch { /* observation callbacks are isolated */ } return true; }
-  receiveExit(id: string, body: TerminalExit): boolean { if (!this.#attached || id !== this.#attachmentID || body.sessionId !== this.sessionId) return false; try { this.#options.onExit?.(body); } catch { /* observation callbacks are isolated */ } return true; }
+  receiveEOF(id: string, body: { session_id: string }): boolean { if (this.#closed) return id === this.#attachmentID && body.session_id === this.sessionId; if (!this.#attached || id !== this.#attachmentID || body.session_id !== this.sessionId) return false; try { this.#options.onEOF?.({ sessionId: body.session_id }); } catch { /* observation callbacks are isolated */ } return true; }
+  receiveExit(id: string, body: TerminalExit): boolean { if (this.#closed) return id === this.#attachmentID && body.sessionId === this.sessionId; if (!this.#attached || id !== this.#attachmentID || body.sessionId !== this.sessionId) return false; try { this.#options.onExit?.(body); } catch { /* observation callbacks are isolated */ } return true; }
   receiveReset(id: string, body: { session_id: string; floor: bigint; head: bigint }): boolean {
-    if (this.#closed || id !== this.#attachmentID || body.session_id !== this.sessionId) return false;
+    if (this.#closed) return id === this.#attachmentID && body.session_id === this.sessionId;
+    if (id !== this.#attachmentID || body.session_id !== this.sessionId) return false;
     const reset = { sessionId: body.session_id, floor: body.floor, head: body.head };
     try { this.#options.onReset?.(reset); } catch { /* observation callbacks are isolated */ }
     const pending = this.#pending.get(id);
@@ -334,10 +362,14 @@ export class TerminalHandle {
   #inputResult(body: TerminalInputResultBody, pending: Pending): void {
     if (pending.kind !== "input" || body.generation !== pending.generation || body.sequence !== pending.sequence || body.accepted_bytes > BigInt(pending.payloadLength ?? 0)) throw new ProtocolError("malformed");
     if (body.status === "accepted" && body.accepted_bytes !== BigInt(pending.payloadLength ?? 0) || body.status === "partial" && body.accepted_bytes === BigInt(pending.payloadLength ?? 0)) throw new ProtocolError("malformed");
-    if (body.status === "accepted") this.#nextInputSequence = body.sequence + body.accepted_bytes;
-    if (body.status === "partial" || body.status === "uncertain") {
+    this.#nextInputSequence = body.sequence + 1n;
+    if (body.status === "accepted") {
+      const lease = this.#lease;
+      if (lease === undefined) throw new ProtocolError("malformed");
+      this.#lease = { ...lease, lastInputSequence: body.sequence };
+    } else if (body.status === "partial" || body.status === "uncertain") {
       this.#lease = undefined;
-      this.#inputAuthorityFrozen = true;
+      this.#requiresFreshLeaseAfterGeneration = body.generation;
     }
     pending.resolve(body);
   }
@@ -356,9 +388,9 @@ export class TerminalHandle {
   #hasPending(kind: Pending["kind"]): boolean { for (const pending of this.#pending.values()) if (pending.kind === kind) return true; return false; }
   #hasLeaseOperation(): boolean { return this.#hasPending("lease"); }
   #freezeInput(pending: Pending, error: unknown): void {
-    this.#nextInputSequence = (pending.sequence ?? this.#nextInputSequence) + BigInt(pending.payloadLength ?? 0);
+    this.#nextInputSequence = (pending.sequence ?? this.#nextInputSequence) + 1n;
     this.#lease = undefined;
-    this.#inputAuthorityFrozen = true;
+    this.#requiresFreshLeaseAfterGeneration = pending.generation;
     this.close(error as SessionErrorLike);
   }
 
