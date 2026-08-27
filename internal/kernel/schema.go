@@ -288,10 +288,13 @@ var schemaStatements = []string{
     UNIQUE(run_id, idempotency_key),
     UNIQUE(delivery_id),
     CHECK ((delivery_id IS NULL) = (delivery_started_at_ms IS NULL)),
+    CHECK (delivery_started_at_ms IS NULL OR (delivery_started_at_ms >= created_at_ms AND delivery_started_at_ms <= updated_at_ms)),
+    CHECK (closed_at_ms IS NULL OR (closed_at_ms >= created_at_ms AND closed_at_ms <= updated_at_ms)),
     CHECK (status = 'open' AND delivery_id IS NULL OR status IN ('delivering', 'delivery_unknown', 'resolved') AND delivery_id IS NOT NULL OR status = 'stale'),
     CHECK ((status IN ('resolved', 'stale')) = (closed_at_ms IS NOT NULL)),
     CHECK (status = 'resolved' AND resolution_kind = 'reply' OR status = 'stale' AND resolution_kind = 'stale' OR status IN ('open', 'delivering', 'delivery_unknown') AND resolution_kind IS NULL),
-    CHECK (status IN ('open', 'delivering', 'delivery_unknown') AND closed_at_ms IS NULL OR status IN ('resolved', 'stale'))
+    CHECK (status IN ('open', 'delivering', 'delivery_unknown') AND closed_at_ms IS NULL OR status IN ('resolved', 'stale')),
+    CHECK (status NOT IN ('resolved', 'stale') OR closed_at_ms = updated_at_ms)
 ) STRICT, WITHOUT ROWID`,
 	`CREATE UNIQUE INDEX human_requests_one_unresolved_per_run ON human_requests(run_id) WHERE status IN ('open', 'delivering', 'delivery_unknown')`,
 	`CREATE TABLE invalidations (

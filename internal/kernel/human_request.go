@@ -36,7 +36,7 @@ func scanHumanRequest(scanner rowScanner) (HumanRequest, bool, error) {
 	rev, revErr := NewRevision(revision)
 	created, createdErr := NewUnixMillis(createdAt)
 	updated, updatedErr := NewUnixMillis(updatedAt)
-	if idErr != nil || runErr != nil || len(rawKey) != IDBytes || bytes.Equal(rawKey, make([]byte, IDBytes)) || kindErr != nil || rawReason.String != "provider_question" || !rawReason.Valid || statusErr != nil || revErr != nil || createdErr != nil || updatedErr != nil || !utf8TextWithin(question, 1, MaxHumanRequestQuestionBytes) || createdAt > updatedAt || deliveryAt.Valid && deliveryAt.Int64 < 0 || closedAt.Valid && closedAt.Int64 < 0 {
+	if idErr != nil || runErr != nil || len(rawKey) != IDBytes || bytes.Equal(rawKey, make([]byte, IDBytes)) || kindErr != nil || rawReason.String != "provider_question" || !rawReason.Valid || statusErr != nil || revErr != nil || createdErr != nil || updatedErr != nil || !utf8TextWithin(question, 1, MaxHumanRequestQuestionBytes) || createdAt > updatedAt || deliveryAt.Valid && (deliveryAt.Int64 < createdAt || deliveryAt.Int64 > updatedAt) || closedAt.Valid && (closedAt.Int64 < createdAt || closedAt.Int64 > updatedAt) {
 		return HumanRequest{}, false, fmt.Errorf("%w: invalid human request row", ErrCorruptState)
 	}
 	var key [IDBytes]byte
@@ -84,6 +84,12 @@ func validateHumanRequestState(request HumanRequest, reasonValid bool) error {
 	if (request.DeliveryStartedAt != nil) != withDelivery {
 		return fmt.Errorf("%w: human delivery nullability mismatch", ErrCorruptState)
 	}
+	if request.DeliveryStartedAt != nil && (request.DeliveryStartedAt.Int64() < request.CreatedAt.Int64() || request.DeliveryStartedAt.Int64() > request.UpdatedAt.Int64()) {
+		return fmt.Errorf("%w: invalid human delivery chronology", ErrCorruptState)
+	}
+	if request.ClosedAt != nil && (request.ClosedAt.Int64() < request.CreatedAt.Int64() || request.ClosedAt.Int64() > request.UpdatedAt.Int64()) {
+		return fmt.Errorf("%w: invalid human request close chronology", ErrCorruptState)
+	}
 	switch request.Status {
 	case HumanRequestOpen:
 		if withDelivery || request.Resolution != nil || request.ClosedAt != nil {
@@ -94,11 +100,11 @@ func validateHumanRequestState(request HumanRequest, reasonValid bool) error {
 			return fmt.Errorf("%w: invalid pending human delivery", ErrCorruptState)
 		}
 	case HumanRequestResolved:
-		if !withDelivery || request.Resolution == nil || *request.Resolution != HumanRequestResolutionReply || request.ClosedAt == nil {
+		if !withDelivery || request.Resolution == nil || *request.Resolution != HumanRequestResolutionReply || request.ClosedAt == nil || request.ClosedAt.Int64() != request.UpdatedAt.Int64() {
 			return fmt.Errorf("%w: invalid resolved human request", ErrCorruptState)
 		}
 	case HumanRequestStale:
-		if request.Resolution == nil || *request.Resolution != HumanRequestResolutionStale || request.ClosedAt == nil {
+		if request.Resolution == nil || *request.Resolution != HumanRequestResolutionStale || request.ClosedAt == nil || request.ClosedAt.Int64() != request.UpdatedAt.Int64() {
 			return fmt.Errorf("%w: invalid stale human request", ErrCorruptState)
 		}
 	default:
@@ -115,8 +121,17 @@ func humanRequestByID(ctx context.Context, connection *sql.Conn, id HumanRequest
 }
 
 func (store *Store) CreateHumanQuestionForAttempt(ctx context.Context, digest AttemptDigest, input NewHumanQuestion, at UnixMillis) (HumanRequest, error) {
+	return store.createHumanQuestionForAttempt(ctx, digest, input, at, MaxOpenHumanRequests)
+}
+
+// createHumanQuestionForAttempt keeps the cap as an argument only for bounded
+// package tests; production always uses MaxOpenHumanRequests above.
+func (store *Store) createHumanQuestionForAttempt(ctx context.Context, digest AttemptDigest, input NewHumanQuestion, at UnixMillis, openLimit int64) (HumanRequest, error) {
 	if err := input.valid(); err != nil {
 		return HumanRequest{}, err
+	}
+	if openLimit < 1 {
+		return HumanRequest{}, fmt.Errorf("%w: invalid human request bound", ErrInvalidValue)
 	}
 	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
@@ -152,7 +167,7 @@ func (store *Store) CreateHumanQuestionForAttempt(ctx context.Context, digest At
 	if err := tx.connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM human_requests WHERE status IN ('open', 'delivering', 'delivery_unknown')`).Scan(&open); err != nil {
 		return HumanRequest{}, tx.Rollback(err)
 	}
-	if open >= MaxOpenHumanRequests {
+	if open >= openLimit {
 		return HumanRequest{}, tx.Rollback(ErrBusy)
 	}
 	var rawID [IDBytes]byte
@@ -291,6 +306,9 @@ func (store *Store) HumanRequestDetail(ctx context.Context, clientID BrowserClie
 	}
 	if !found {
 		return HumanRequestDetail{}, ErrNotFound
+	}
+	if request.Status == HumanRequestResolved || request.Status == HumanRequestStale {
+		return HumanRequestDetail{}, ErrConflict
 	}
 	return HumanRequestDetail{ID: request.ID, Revision: request.Revision, QuestionText: request.QuestionText}, nil
 }
@@ -515,7 +533,12 @@ func transitionHumanRequestsForRun(ctx context.Context, connection *sql.Conn, ru
 			target = HumanRequestStale
 			resolution, closed = HumanRequestResolutionStale.String(), at.Int64()
 		case HumanRequestDelivering:
-			target = HumanRequestDeliveryUnknown
+			if terminal {
+				target = HumanRequestStale
+				resolution, closed = HumanRequestResolutionStale.String(), at.Int64()
+			} else {
+				target = HumanRequestDeliveryUnknown
+			}
 		case HumanRequestDeliveryUnknown:
 			if terminal {
 				target = HumanRequestStale
