@@ -8,6 +8,7 @@ import {
   encodeStateEntityGet,
   encodeStateGet,
   encodeStateSubscribe,
+  encodeTerminalTargetGet,
   type AuthResultFrame,
   type EntityChangedEvent,
   type ErrorFrame,
@@ -24,7 +25,7 @@ import {
 import { ProtocolError, type ProtocolErrorCode } from "./errors.js";
 import { CAPABILITIES, MAX_ARRAY_ITEMS, MAX_HUMAN_REPLY_BYTES, MAX_SQLITE_INTEGER, type CapabilityMask, type ErrorCode } from "./manifest.js";
 import { StateAccumulator, type StateView } from "./state.js";
-import { TerminalHandle, terminalControlFrame, type TerminalHandleOptions } from "./terminal_session.js";
+import { createTerminalHandle, terminalControlFrame, type InternalTerminalHandle, type TerminalHandle, type TerminalOptions } from "./terminal_session.js";
 import { decodeTerminalServer } from "./terminal_session.js";
 import { buildAuthTranscript, buildPairTranscript, hexBytes } from "./transcript.js";
 
@@ -35,6 +36,7 @@ const SIGNATURE_BYTES = 64;
 export interface BrowserTimer {
   setTimeout(callback: () => void, delayMs: number): unknown;
   clearTimeout(handle: unknown): void;
+  now?: () => number;
 }
 
 const REAL_TIMER: BrowserTimer = {
@@ -112,6 +114,13 @@ export type BrowserSessionOptions = {
 
 type Pending = "pair" | "auth" | "snapshot" | "entity";
 type PendingEntity = { kind: EntityChangedEvent["entity_kind"]; id: string };
+type TargetPending = {
+  agentId: string;
+  expectedAgentRevision: bigint;
+  expectedHead: bigint;
+  resolve: (value: TerminalTarget | null) => void;
+  reject: (error: unknown) => void;
+};
 type HumanPending = {
   kind: "detail" | "reply" | "cancel";
   requestId: string;
@@ -134,12 +143,25 @@ export type HumanRequestDetail = Readonly<{
   question: string;
   canReply: boolean;
   replyMaxBytes: number;
-  terminalTarget: Readonly<TerminalTargetDescriptor> | null;
+  terminalTarget: TerminalTarget | null;
   cancelRun: HumanRequestCancelRunDescriptor | null;
 }>;
 
 export type HumanReplyResult = Readonly<HumanRequestReplyResultBody>;
 export type HumanCancelRunResult = Readonly<HumanRequestCancelRunResultBody>;
+
+declare const TERMINAL_TARGET_BRAND: unique symbol;
+/** A target is only constructible by a live BrowserSession. */
+export type TerminalTarget = Readonly<{ readonly [TERMINAL_TARGET_BRAND]: true }>;
+
+type TargetAuthority = {
+  owner: BrowserSession;
+  generation: object;
+  descriptor: Readonly<TerminalTargetDescriptor>;
+  agentId?: string;
+  head?: bigint;
+};
+const TARGET_AUTHORITIES = new WeakMap<object, TargetAuthority>();
 
 /**
  * One connection generation. It owns one socket and one accumulator and is
@@ -157,6 +179,7 @@ export class BrowserSession {
   #key: CryptoKey | undefined;
   #publicKey: Uint8Array | undefined;
   #pending = new Map<string, Pending>();
+  #targetPending = new Map<string, TargetPending>();
   #entities = new Map<string, PendingEntity>();
   #subscriptionID: string | undefined;
   #requestNumber = 1;
@@ -168,10 +191,11 @@ export class BrowserSession {
   #connectPromise: Promise<void> | undefined;
   #resolveConnect: (() => void) | undefined;
   #rejectConnect: ((error: unknown) => void) | undefined;
-  #terminalHandles = new Set<TerminalHandle>();
+  #terminalHandles = new Set<InternalTerminalHandle>();
   #humanPending = new Map<string, HumanPending>();
   #humanDetails = new WeakSet<HumanRequestDetail>();
   #humanCancelRuns = new WeakMap<HumanRequestCancelRunDescriptor, { detail: HumanRequestDetail; runId: string }>();
+  #generationToken: object = {};
 
   constructor(options: BrowserSessionOptions) {
     this.#options = { ...options, keyStore: options.keyStore ?? createIndexedDBKeyStore() };
@@ -183,18 +207,35 @@ export class BrowserSession {
   get capabilities(): CapabilityMask { return this.#capabilities; }
   get pairingBlocked(): boolean { return this.#pairingBlocked; }
 
-  /** Create one attachment owned by this authenticated socket generation. */
-  createTerminalHandle(options: TerminalHandleOptions): TerminalHandle {
+  resolveAgentTerminal(request: { agentId: string; expectedAgentRevision: bigint; expectedHead: bigint }): Promise<TerminalTarget | null> {
+    try { this.#ensureLive(); } catch (error) { return Promise.reject(error); }
+    if (!this.#authenticated) return Promise.reject(new SessionError("unauthorized"));
+    if ((this.#capabilities & CAPABILITIES.observe) === 0) return Promise.reject(new SessionError("unauthorized"));
+    if (!validDynamicID(request.agentId) || request.expectedAgentRevision < 1n || request.expectedAgentRevision > MAX_SQLITE_INTEGER || request.expectedHead < 0n || request.expectedHead > MAX_SQLITE_INTEGER) return Promise.reject(new SessionError("invalid_request"));
+    if (this.#targetPending.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
+    const id = this.#nextID("terminal-target");
+    let payload: string;
+    try { payload = encodeTerminalTargetGet(id, { agent_id: request.agentId, expected_agent_revision: request.expectedAgentRevision, expected_head: request.expectedHead }); } catch (error) { return Promise.reject(error); }
+    const result = new Promise<TerminalTarget | null>((resolve, reject) => this.#targetPending.set(id, { ...request, resolve, reject }));
+    try { this.#send(payload); } catch { this.#fail(new SessionError("connection")); }
+    return result;
+  }
+
+  openTerminal(target: TerminalTarget, options: TerminalOptions = {}): TerminalHandle {
     this.#ensureLive();
+    if (!this.#authenticated) throw new SessionError("unauthorized");
+    if (typeof target !== "object" || target === null) throw new SessionError("stale");
+    const authority = TARGET_AUTHORITIES.get(target as object);
+    if (authority === undefined || authority.owner !== this || authority.generation !== this.#generationToken) throw new SessionError("stale");
     for (const existing of this.#terminalHandles) {
       if (existing.closed) this.#terminalHandles.delete(existing);
       else throw new SessionError("invalid_request");
     }
-    const handle = new TerminalHandle(options, (id, payload) => {
+    const handle = createTerminalHandle({ runId: authority.descriptor.run_id, sessionId: authority.descriptor.session_id, runRevision: authority.descriptor.run_revision, sessionRevision: authority.descriptor.session_revision }, options, (id, payload) => {
       this.#ensureLive();
       if (!this.#authenticated) throw new SessionError("unauthorized");
       this.#send(payload);
-    }, (prefix) => this.#nextID(prefix));
+    }, (prefix) => this.#nextID(prefix), (error) => this.#fail(error instanceof SessionError ? error : new SessionError("connection")), this.#options.timer ?? REAL_TIMER, (this.#capabilities & CAPABILITIES.terminal_input) !== 0);
     this.#terminalHandles.add(handle);
     return handle;
   }
@@ -274,8 +315,9 @@ export class BrowserSession {
     if (this.#closed) return;
     this.#closed = true;
     this.#pending.clear();
+    this.#closeTargetPending(new SessionError("closed"));
     this.#closeHumanPending(new SessionError("closed"));
-    for (const handle of this.#terminalHandles) handle.close(new SessionError("closed"));
+    for (const handle of this.#terminalHandles) handle.terminate(new SessionError("closed"));
     this.#terminalHandles.clear();
     this.#entities.clear();
     this.#accumulator.applyRestart("gap");
@@ -431,9 +473,13 @@ export class BrowserSession {
   }
 
   #applicationFrame(frame: ServerControlFrame): void {
+    if (frame.type === "TERMINAL_TARGET") {
+      this.#terminalTarget(frame);
+      return;
+    }
     if (terminalControlFrame(frame)) {
       if (frame.type === "TERMINAL_EOF") { if (!this.#anyTerminal((handle) => handle.receiveEOF(frame.id, frame.body))) throw new ProtocolError("malformed"); return; }
-      if (frame.type === "TERMINAL_EXIT") { if (!this.#anyTerminal((handle) => handle.receiveExit(frame.id, { sessionId: frame.body.session_id, exitCode: frame.body.exit_code, exitSignal: frame.body.exit_signal, aborted: frame.body.aborted }))) throw new ProtocolError("malformed"); return; }
+      if (frame.type === "TERMINAL_EXIT") { if (!this.#anyTerminal((handle) => handle.receiveExit(frame.id, frame.body))) throw new ProtocolError("malformed"); return; }
       if (frame.type === "TERMINAL_RESET") { if (!this.#anyTerminal((handle) => handle.receiveReset(frame.id, frame.body))) throw new ProtocolError("malformed"); return; }
       if (!this.#anyTerminal((handle) => handle.receive(frame))) throw new ProtocolError("malformed");
       return;
@@ -501,6 +547,14 @@ export class BrowserSession {
 
   #errorFrame(frame: ErrorFrame): void {
     const id = frame.id;
+    if (id !== undefined) {
+      const target = this.#targetPending.get(id);
+      if (target !== undefined) {
+        this.#targetPending.delete(id);
+        target.reject(new SessionError(frame.body.code, frame.body.retryable));
+        return;
+      }
+    }
     if (id !== undefined && this.#anyTerminal((handle) => handle.receiveError(id, new SessionError(frame.body.code, frame.body.retryable)))) return;
     if (id !== undefined) {
       const pending = this.#humanPending.get(id);
@@ -534,6 +588,18 @@ export class BrowserSession {
     this.#beginSnapshot(null);
   }
 
+  #terminalTarget(frame: Extract<ServerControlFrame, { type: "TERMINAL_TARGET" }>): void {
+    const pending = this.#targetPending.get(frame.id);
+    if (pending === undefined || frame.body.agent_id !== pending.agentId || frame.body.agent_revision !== pending.expectedAgentRevision || frame.body.head !== pending.expectedHead) throw new ProtocolError("malformed");
+    this.#targetPending.delete(frame.id);
+    if (frame.body.target === null) {
+      pending.resolve(null);
+      return;
+    }
+    this.#ensureLive();
+    pending.resolve(this.#mintTarget(frame.body.target, pending.agentId, pending.expectedHead));
+  }
+
   #sendAuth(kind: "pair" | "auth", id: string, payload: string): void {
     this.#pending.set(id, kind);
     this.#send(payload);
@@ -550,7 +616,7 @@ export class BrowserSession {
     return matched;
   }
 
-  #anyTerminal(test: (handle: TerminalHandle) => boolean): boolean {
+  #anyTerminal(test: (handle: InternalTerminalHandle) => boolean): boolean {
     for (const handle of this.#terminalHandles) if (test(handle)) return true;
     return false;
   }
@@ -592,23 +658,25 @@ export class BrowserSession {
     try { hexBytes(value.clientId, 16); } catch { throw new SessionError("storage_unavailable"); }
   }
 
-  #fail(error: SessionError | ProtocolError): void {
+  #fail(error: SessionError | ProtocolError | import("./terminal_session.js").SessionErrorLike): void {
     if (this.#closed) return;
-    if (this.#pairing && !(error instanceof ProtocolError) && (error.code === "connection" || error.code === "closed")) error = new SessionError("pairing_uncertain");
+    let normalized: SessionError | ProtocolError = error instanceof SessionError || error instanceof ProtocolError ? error : new SessionError("connection");
+    if (this.#pairing && !(normalized instanceof ProtocolError) && (normalized.code === "connection" || normalized.code === "closed")) normalized = new SessionError("pairing_uncertain");
     this.#closed = true;
     this.#pending.clear();
-    this.#closeHumanPending(error);
+    this.#closeTargetPending(normalized);
+    this.#closeHumanPending(normalized);
     this.#entities.clear();
-    for (const handle of this.#terminalHandles) handle.close(error);
+    for (const handle of this.#terminalHandles) handle.terminate(normalized);
     this.#terminalHandles.clear();
     this.#accumulator.applyRestart("gap");
     const socket = this.#socket;
     this.#socket = undefined;
     try { socket?.close(1000, "protocol"); } catch { /* ignore close failures */ }
-    this.#rejectConnect?.(error);
+    this.#rejectConnect?.(normalized);
     this.#rejectConnect = undefined;
     this.#resolveConnect = undefined;
-    notify(this.#options.onError, error);
+    notify(this.#options.onError, normalized);
     this.#setStatus("closed");
   }
 
@@ -618,7 +686,7 @@ export class BrowserSession {
     if (pending === undefined || pending.kind !== kind || frame.body.request_id !== pending.requestId) throw new ProtocolError("malformed");
     if (frame.type === "HUMAN_REQUEST_DETAIL") {
       if (frame.body.revision !== pending.expectedRevision) throw new ProtocolError("malformed");
-      const terminalTarget = frame.body.terminal_target === null ? null : Object.freeze({ ...frame.body.terminal_target });
+      const terminalTarget = frame.body.terminal_target === null ? null : this.#mintTarget(frame.body.terminal_target);
       let cancelRun: HumanRequestCancelRunDescriptor | null = null;
       if (frame.body.cancel_run !== null) {
         if (terminalTarget === null) throw new ProtocolError("malformed");
@@ -638,7 +706,7 @@ export class BrowserSession {
         cancelRun,
       });
       this.#humanDetails.add(detail);
-      if (cancelRun !== null && terminalTarget !== null) this.#humanCancelRuns.set(cancelRun, { detail, runId: terminalTarget.run_id });
+      if (cancelRun !== null && terminalTarget !== null) this.#humanCancelRuns.set(cancelRun, { detail, runId: this.#targetAuthority(terminalTarget).descriptor.run_id });
       this.#humanPending.delete(frame.id);
       pending.resolve(detail);
       return;
@@ -670,6 +738,23 @@ export class BrowserSession {
   #closeHumanPending(error: SessionError | ProtocolError): void {
     for (const pending of this.#humanPending.values()) pending.reject(error);
     this.#humanPending.clear();
+  }
+
+  #closeTargetPending(error: SessionError | ProtocolError): void {
+    for (const pending of this.#targetPending.values()) pending.reject(error);
+    this.#targetPending.clear();
+  }
+
+  #mintTarget(descriptor: TerminalTargetDescriptor, agentId?: string, head?: bigint): TerminalTarget {
+    const target = Object.freeze(Object.create(null)) as TerminalTarget;
+    TARGET_AUTHORITIES.set(target as object, { owner: this, generation: this.#generationToken, descriptor: Object.freeze({ ...descriptor }), agentId, head });
+    return target;
+  }
+
+  #targetAuthority(target: TerminalTarget): TargetAuthority {
+    const authority = TARGET_AUTHORITIES.get(target as object);
+    if (authority === undefined || authority.owner !== this || authority.generation !== this.#generationToken) throw new ProtocolError("malformed");
+    return authority;
   }
 
   #ensureLive(): void {
@@ -792,6 +877,8 @@ export class BrowserClient {
 function reconnectDelay(value: number | undefined, fallback: number): number {
   return value !== undefined && Number.isFinite(value) && value >= 1 ? Math.min(Math.floor(value), 60_000) : fallback;
 }
+
+function validDynamicID(value: unknown): value is string { return typeof value === "string" && /^[0-9a-f]{32}$/.test(value) && !/^0+$/.test(value); }
 
 function notify<T extends readonly unknown[]>(callback: ((...args: T) => void) | undefined, ...args: T): void {
   try { callback?.(...args); } catch { /* consumer callbacks cannot break protocol ownership */ }

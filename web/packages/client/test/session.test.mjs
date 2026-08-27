@@ -17,6 +17,8 @@ import {
   encodeStateEntity,
   encodeStateEvent,
   encodeStateSnapshot,
+  encodeTerminalAttached,
+  encodeTerminalTarget,
 } from "../dist/src/index.js";
 
 const challenge = "11".repeat(32);
@@ -639,4 +641,76 @@ test("reconnect timer ownership fences stale callbacks with undefined handles", 
   assert.ok(timer.clearCalls.every((handle) => handle === undefined));
   timer.callbacks[2].callback();
   assert.equal(attempts, 3, "callback after close must remain fenced");
+});
+
+test("agent terminal discovery mints an opaque generation-bound target for openTerminal", async () => {
+  const store = new MemoryKeys();
+  const agentId = "77".repeat(16);
+  const terminalSessionId = "88".repeat(16);
+  let socket;
+  const targetServer = (current) => {
+    serverFor(current);
+    const frame = decodeClientControl(current.sent.at(-1));
+    if (frame.type === "TERMINAL_TARGET_GET") current.reply(encodeTerminalTarget(frame.id, {
+      agent_id: frame.body.agent_id,
+      agent_revision: frame.body.expected_agent_revision,
+      head: frame.body.expected_head,
+      target: { run_id: runID, session_id: terminalSessionId, run_revision: 3n, session_revision: 4n },
+    }));
+  };
+  const session = new BrowserSession({
+    url: "ws://127.0.0.1:43123/browser/v1", host: "127.0.0.1:43123", origin: "https://preview.example",
+    challenge, keyStore: store, socketFactory: () => { socket = new Socket(targetServer); return socket; },
+  });
+  await session.connect();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const pending = session.resolveAgentTerminal({ agentId, expectedAgentRevision: 9n, expectedHead: 12n });
+  const targetGet = decodeClientControl(socket.sent.at(-1));
+  assert.equal(targetGet.type, "TERMINAL_TARGET_GET");
+  const target = await pending;
+  assert.equal(Object.isFrozen(target), true);
+  assert.equal("runId" in target, false);
+  assert.throws(() => session.openTerminal({ ...target }), (error) => error instanceof SessionError && error.code === "stale");
+  const terminal = session.openTerminal(target);
+  const attach = terminal.attach();
+  const attachFrame = decodeClientControl(socket.sent.at(-1));
+  assert.deepEqual(attachFrame.body, { run_id: runID, session_id: terminalSessionId, expected_run_revision: 3n, expected_session_revision: 4n, after_sequence: 0n });
+  socket.reply(encodeTerminalAttached(attachFrame.id, { session_id: terminalSessionId, floor: 0n, head: 0n, acknowledged_sequence: 0n, max_unacked_bytes: 65536n }));
+  await attach;
+  session.close();
+  assert.throws(() => session.openTerminal(target), (error) => error instanceof SessionError && error.code === "closed");
+});
+
+test("terminal target discovery is bounded, exact-correlated, and null is explicit", async () => {
+  const store = new MemoryKeys();
+  const agentId = "79".repeat(16);
+  let socket;
+  const session = new BrowserSession({
+    url: "ws://127.0.0.1:43123/browser/v1", host: "127.0.0.1:43123", origin: "https://preview.example",
+    challenge, keyStore: store, socketFactory: () => { socket = new Socket(serverFor); return socket; },
+  });
+  await session.connect();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const pending = Array.from({ length: 32 }, () => session.resolveAgentTerminal({ agentId, expectedAgentRevision: 1n, expectedHead: 1n }));
+  await assert.rejects(session.resolveAgentTerminal({ agentId, expectedAgentRevision: 1n, expectedHead: 1n }), (error) => error instanceof SessionError && error.code === "rate_limited");
+  const first = decodeClientControl(socket.sent.find((wire) => decodeClientControl(wire).type === "TERMINAL_TARGET_GET"));
+  socket.reply(encodeTerminalTarget(first.id, { agent_id: agentId, agent_revision: 1n, head: 1n, target: null }));
+  assert.equal(await pending[0], null);
+  const next = session.resolveAgentTerminal({ agentId, expectedAgentRevision: 1n, expectedHead: 1n });
+  session.close();
+  await assert.rejects(next, (error) => error instanceof SessionError && error.code === "closed");
+  await Promise.allSettled(pending.slice(1));
+
+  let malformedSocket;
+  const malformed = new BrowserSession({
+    url: "ws://127.0.0.1:43123/browser/v1", host: "127.0.0.1:43123", origin: "https://preview.example",
+    challenge, keyStore: new MemoryKeys(), socketFactory: () => { malformedSocket = new Socket(serverFor); return malformedSocket; },
+  });
+  await malformed.connect();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const bad = malformed.resolveAgentTerminal({ agentId, expectedAgentRevision: 2n, expectedHead: 4n });
+  const badFrame = decodeClientControl(malformedSocket.sent.at(-1));
+  malformedSocket.reply(encodeTerminalTarget(badFrame.id, { agent_id: agentId, agent_revision: 3n, head: 4n, target: null }));
+  await assert.rejects(bad, (error) => error instanceof ProtocolError && error.code === "malformed");
+  assert.equal(malformed.status, "closed");
 });
