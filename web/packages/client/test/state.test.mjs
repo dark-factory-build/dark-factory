@@ -47,12 +47,15 @@ const itemForKind = (kind, value) => {
   return { ...requestItem(), id };
 };
 const itemsForKind = (kind, start, count) => Array.from({ length: count }, (_, index) => itemForKind(kind, start + index));
-const requestFrame = (id, cursor) => ({ v: 1, type: "STATE_GET", id, body: { cursor } });
 const responseFrame = (id, body) => ({ v: 1, type: "STATE_SNAPSHOT", id, body });
-let requestSequence = 0;
-const exchange = (reducer, cursor, body, id = `snapshot-${++requestSequence}`) => {
-  assert.deepEqual(reducer.beginSnapshot(requestFrame(id, cursor)), { kind: "requested" });
-  return reducer.applySnapshot(responseFrame(id, body));
+const beginRequest = (reducer, cursor) => {
+  const result = reducer.beginSnapshot(cursor);
+  assert.equal(result.kind, "requested");
+  return result.request;
+};
+const exchange = (reducer, cursor, body) => {
+  const request = beginRequest(reducer, cursor);
+  return reducer.applySnapshot(responseFrame(request.id, body));
 };
 const publishState = (reducer, head, { projects = [], agents = [], tasks = [], requests = [] } = {}) => {
   assert.equal(exchange(reducer, null, { head, kind: "factory", items: [factoryItem()], next_cursor: "projects" }).kind, "staged");
@@ -252,64 +255,84 @@ test("snapshot response correlation is owned, single-flight, consumed, and resta
   const factory = { head: 1n, kind: "factory", items: [factoryItem()], next_cursor: "projects" };
   let reducer = new StateAccumulator();
   assert.deepEqual(reducer.applySnapshot(responseFrame("absent", factory)), { kind: "restart", reason: "gap" });
-  assert.deepEqual(reducer.beginSnapshot({ v: 1, type: "STATE_GET", body: { cursor: null } }), { kind: "restart", reason: "gap" });
-  assert.deepEqual(reducer.beginSnapshot({ v: 1, type: "STATE_SUBSCRIBE", id: "cross-wire", body: { after: 0n } }), { kind: "restart", reason: "gap" });
+  assert.deepEqual(reducer.beginSnapshot("forged"), { kind: "restart", reason: "gap" });
 
   reducer = new StateAccumulator();
-  reducer.beginSnapshot(requestFrame("one", null));
+  beginRequest(reducer, null);
   assert.deepEqual(reducer.applySnapshot({ v: 1, type: "STATE_SNAPSHOT", body: factory }), { kind: "restart", reason: "gap" });
 
   reducer = new StateAccumulator();
-  reducer.beginSnapshot(requestFrame("one", null));
-  assert.deepEqual(reducer.applySnapshot({ v: 1, type: "STATE_ENTITY", id: "one", body: { head: 1n } }), { kind: "restart", reason: "gap" });
+  const crossWire = beginRequest(reducer, null);
+  assert.deepEqual(reducer.applySnapshot({ v: 1, type: "STATE_ENTITY", id: crossWire.id, body: { head: 1n } }), { kind: "restart", reason: "gap" });
 
   reducer = new StateAccumulator();
-  assert.deepEqual(reducer.beginSnapshot(requestFrame("one", null)), { kind: "requested" });
-  assert.deepEqual(reducer.beginSnapshot(requestFrame("two", null)), { kind: "restart", reason: "gap" });
+  beginRequest(reducer, null);
+  assert.deepEqual(reducer.beginSnapshot(null), { kind: "restart", reason: "gap" });
 
   reducer = new StateAccumulator();
-  reducer.beginSnapshot(requestFrame("one", null));
+  beginRequest(reducer, null);
   assert.deepEqual(reducer.applySnapshot(responseFrame("wrong", factory)), { kind: "restart", reason: "gap" });
 
   reducer = new StateAccumulator();
-  reducer.beginSnapshot(requestFrame("one", null));
-  const firstResponse = responseFrame("one", factory);
+  const first = beginRequest(reducer, null);
+  const firstResponse = responseFrame(first.id, factory);
   assert.equal(reducer.applySnapshot(firstResponse).kind, "staged");
   assert.deepEqual(reducer.applySnapshot(firstResponse), { kind: "restart", reason: "gap" }, "duplicate response accepted");
 
   reducer = new StateAccumulator();
-  reducer.beginSnapshot(requestFrame("one", null));
-  assert.equal(reducer.applySnapshot(firstResponse).kind, "staged");
-  assert.deepEqual(reducer.beginSnapshot(requestFrame("one", "projects")), { kind: "restart", reason: "gap" }, "duplicate request id accepted");
+  const cursorRequest = beginRequest(reducer, null);
+  assert.equal(reducer.applySnapshot(responseFrame(cursorRequest.id, factory)).kind, "staged");
+  assert.deepEqual(reducer.beginSnapshot("forged"), { kind: "restart", reason: "gap" }, "wrong next cursor accepted");
 
   reducer = new StateAccumulator();
-  reducer.beginSnapshot(requestFrame("one", null));
-  assert.equal(reducer.applySnapshot(firstResponse).kind, "staged");
-  assert.deepEqual(reducer.beginSnapshot(requestFrame("two", "forged")), { kind: "restart", reason: "gap" }, "wrong next cursor accepted");
+  const sameCursor = beginRequest(reducer, null);
+  assert.equal(reducer.applySnapshot(responseFrame(sameCursor.id, factory)).kind, "staged");
+  const repeatedCursor = beginRequest(reducer, "projects");
+  assert.deepEqual(reducer.applySnapshot(responseFrame(repeatedCursor.id, { head: 1n, kind: "project", items: [], next_cursor: "projects" })), { kind: "restart", reason: "gap" }, "same cursor continuation accepted");
 
   reducer = new StateAccumulator();
-  reducer.beginSnapshot(requestFrame("one", null));
-  assert.equal(reducer.applySnapshot(firstResponse).kind, "staged");
-  reducer.beginSnapshot(requestFrame("two", "projects"));
-  assert.deepEqual(reducer.applySnapshot(responseFrame("two", { head: 1n, kind: "project", items: [], next_cursor: "projects" })), { kind: "restart", reason: "gap" }, "same cursor continuation accepted");
-
-  reducer = new StateAccumulator();
-  reducer.beginSnapshot(requestFrame("one", null));
-  assert.equal(reducer.applySnapshot(firstResponse).kind, "staged");
+  const cycle = beginRequest(reducer, null);
+  assert.equal(reducer.applySnapshot(responseFrame(cycle.id, factory)).kind, "staged");
   assert.equal(exchange(reducer, "projects", { head: 1n, kind: "project", items: [], next_cursor: "agents" }).kind, "staged");
-  reducer.beginSnapshot(requestFrame("three", "agents"));
-  assert.deepEqual(reducer.applySnapshot(responseFrame("three", { head: 1n, kind: "agent", items: [], next_cursor: "projects" })), { kind: "restart", reason: "gap" }, "cursor cycle accepted");
+  const cycleContinuation = beginRequest(reducer, "agents");
+  assert.deepEqual(reducer.applySnapshot(responseFrame(cycleContinuation.id, { head: 1n, kind: "agent", items: [], next_cursor: "projects" })), { kind: "restart", reason: "gap" }, "cursor cycle accepted");
 
   reducer = new StateAccumulator();
-  reducer.beginSnapshot(requestFrame("one", null));
-  assert.equal(reducer.applySnapshot(firstResponse).kind, "staged");
-  assert.deepEqual(reducer.beginSnapshot(requestFrame("two", "projects")), { kind: "requested" });
-  assert.deepEqual(reducer.applySnapshot(firstResponse), { kind: "restart", reason: "gap" }, "cross-wire replay accepted");
+  const replay = beginRequest(reducer, null);
+  const replayResponse = responseFrame(replay.id, factory);
+  assert.equal(reducer.applySnapshot(replayResponse).kind, "staged");
+  const next = beginRequest(reducer, "projects");
+  assert.notEqual(next.id, replay.id);
+  assert.deepEqual(reducer.applySnapshot(replayResponse), { kind: "restart", reason: "gap" }, "cross-wire replay accepted");
 
   reducer = new StateAccumulator();
-  reducer.beginSnapshot(requestFrame("pending", null));
+  const pending = beginRequest(reducer, null);
   assert.deepEqual(reducer.applyRestart("pruned"), { kind: "restart", reason: "pruned" });
-  assert.deepEqual(reducer.applySnapshot(responseFrame("pending", factory)), { kind: "restart", reason: "gap" }, "restart retained pending request");
+  assert.deepEqual(reducer.applySnapshot(responseFrame(pending.id, factory)), { kind: "restart", reason: "gap" }, "restart retained pending request");
+});
+
+test("minted snapshot IDs never repeat across restart or publication", () => {
+  let reducer = new StateAccumulator();
+  const minted = new Set();
+  for (let index = 0; index < 3; index++) {
+    const request = beginRequest(reducer, null);
+    assert.equal(minted.has(request.id), false);
+    minted.add(request.id);
+    reducer.applyRestart("gap");
+  }
+
+  reducer = new StateAccumulator();
+  const oldRequest = beginRequest(reducer, null);
+  const oldResponse = responseFrame(oldRequest.id, { head: 1n, kind: "factory", items: [factoryItem()], next_cursor: "projects" });
+  assert.equal(reducer.applySnapshot(oldResponse).kind, "staged");
+  assert.equal(exchange(reducer, "projects", { head: 1n, kind: "project", items: [], next_cursor: "agents" }).kind, "staged");
+  assert.equal(exchange(reducer, "agents", { head: 1n, kind: "agent", items: [], next_cursor: "tasks" }).kind, "staged");
+  assert.equal(exchange(reducer, "tasks", { head: 1n, kind: "task", items: [], next_cursor: "requests" }).kind, "staged");
+  assert.equal(exchange(reducer, "requests", { head: 1n, kind: "human_request", items: [], next_cursor: null }).kind, "published");
+  const laterRequest = beginRequest(reducer, null);
+  assert.notEqual(laterRequest.id, oldRequest.id);
+  assert.deepEqual(reducer.applySnapshot(oldResponse), { kind: "restart", reason: "gap" });
+  assert.equal(reducer.current, undefined);
 });
 
 test("every dynamic kind requires strictly increasing raw IDs within and across pages", () => {
@@ -344,7 +367,7 @@ test("entity refresh during staging restarts without mutating the previously pub
   reducer = new StateAccumulator();
   publishState(reducer, 1n, { tasks: [taskItem(1n, "published")] });
   const pendingView = reducer.current;
-  assert.deepEqual(reducer.beginSnapshot(requestFrame("pending-refresh", null)), { kind: "requested" });
+  beginRequest(reducer, null);
   assert.deepEqual(reducer.applyEntity({ head: 2n, kind: "task", id: ids.task, revision: 2n, deleted: false, item: taskItem(2n, "refresh") }), { kind: "restart", reason: "gap" });
   assert.equal(pendingView.tasks.get(ids.task).title, "published");
 });

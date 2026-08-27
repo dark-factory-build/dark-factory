@@ -31,7 +31,7 @@ export type StateView = {
 // so the context-free frame reducer intentionally excludes it.
 export type StateReducerFrame = StateRestartFrame | StateEventFrame | StateEntityFrame;
 export type StateReducerResult =
-  | { kind: "requested" }
+  | { kind: "requested"; request: StateGetFrame }
   | { kind: "staged" }
   | { kind: "published"; state: StateView }
   | { kind: "applied"; state: StateView }
@@ -53,7 +53,6 @@ type StagingState = {
   state: MutableState;
   expectedKindIndex: number;
   nextCursor: string;
-  requestIDs: Set<string>;
   consumedCursors: Set<string>;
   lastIDs: Map<StateKind, string>;
 };
@@ -65,13 +64,15 @@ const STATE_TRAVERSAL: readonly StateKind[] = ["factory", "project", "agent", "t
 /**
  * One framework-neutral causal state accumulator. Same-head pages are staged
  * away from readers and become visible only after a terminal HumanRequest
- * page. The accumulator owns one typed STATE_GET correlation at a time so an
- * untrusted response cannot splice or replay a page chain.
+ * page. One accumulator belongs to exactly one WebSocket/session and owns a
+ * lifetime-monotonic STATE_GET correlation sequence, so an untrusted response
+ * cannot splice or replay a page chain.
  */
 export class StateAccumulator {
   #published: MutableState | undefined;
   #staging: StagingState | undefined;
   #pending: PendingSnapshot | undefined;
+  #nextRequest = 1n;
 
   get current(): StateView | undefined {
     return this.#published === undefined ? undefined : view(this.#published);
@@ -85,13 +86,16 @@ export class StateAccumulator {
     }
   }
 
-  beginSnapshot(request: StateGetFrame): StateReducerResult {
-    if (request?.v !== 1 || request.type !== "STATE_GET" || request.body === undefined || this.#pending !== undefined || !validRequestID(request.id)) return this.#restart("gap");
+  beginSnapshot(cursor: string | null): StateReducerResult {
+    if (this.#pending !== undefined) return this.#restart("gap");
     const expectedCursor = this.#staging?.nextCursor ?? null;
-    if (request.body.cursor !== expectedCursor || this.#staging?.requestIDs.has(request.id)) return this.#restart("gap");
-    this.#staging?.requestIDs.add(request.id);
-    this.#pending = { requestID: request.id, cursor: request.body.cursor };
-    return { kind: "requested" };
+    if (cursor !== expectedCursor) return this.#restart("gap");
+    const requestID = `state-${this.#nextRequest}`;
+    if (!validRequestID(requestID)) return this.#restart("gap");
+    this.#nextRequest += 1n;
+    const request = { v: 1, type: "STATE_GET", id: requestID, body: { cursor } } as const;
+    this.#pending = { requestID, cursor };
+    return { kind: "requested", request };
   }
 
   applySnapshot(response: StateSnapshotFrame): StateReducerResult {
@@ -108,7 +112,7 @@ export class StateAccumulator {
       const state = emptyState(page.head);
       const lastIDs = new Map<StateKind, string>();
       if (!stagePage(state, page, lastIDs)) return this.#restart("gap");
-      this.#staging = { state, expectedKindIndex: 1, nextCursor: page.next_cursor, requestIDs: new Set([pending.requestID]), consumedCursors: new Set(), lastIDs };
+      this.#staging = { state, expectedKindIndex: 1, nextCursor: page.next_cursor, consumedCursors: new Set(), lastIDs };
       return { kind: "staged" };
     }
 
