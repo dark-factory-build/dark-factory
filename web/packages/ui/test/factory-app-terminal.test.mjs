@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { SessionError } from "@dark-factory/client";
+import { ProtocolError, SessionError } from "@dark-factory/client";
 import { FactoryAppController } from "../dist/src/factory-app-controller.js";
 import { fixtureState } from "../../../fixtures/state.mjs";
 
@@ -24,7 +24,7 @@ function stateAt(head, overrides = {}) {
   return { ...fixtureState, head: BigInt(head), sequence: BigInt(head), ...overrides };
 }
 
-function terminalHarness({ closeStatus = false, fail } = {}) {
+function terminalHarness({ closeStatus = false, fail, failError = new SessionError("connection") } = {}) {
   const snapshots = [];
   const calls = [];
   const targetGates = [];
@@ -52,13 +52,13 @@ function terminalHarness({ closeStatus = false, fail } = {}) {
     },
     openTerminal: (value, callbacks) => {
       calls.push({ kind: "open", value });
-      if (fail === "open") throw new SessionError("connection");
+      if (fail === "open") throw failError;
       handleOptions = callbacks;
       const handle = {
-        attach: async () => { calls.push({ kind: "attach" }); if (fail === "attach") throw new SessionError("connection"); return { sessionId: "31".repeat(16), floor: 0n, head: 0n, acknowledgedSequence: 0n, maxUnackedBytes: 65536n }; },
-        acquireInput: async () => { calls.push({ kind: "acquire" }); if (fail === "acquire") throw new SessionError("connection"); return { generation: 1n }; },
-        sendInput: async (bytes) => { calls.push({ kind: "input", bytes }); if (fail === "input") throw new SessionError("connection"); return { status: "accepted", accepted_bytes: BigInt(bytes.length) }; },
-        resize: async (rows, cols) => { calls.push({ kind: "resize", rows, cols }); if (fail === "resize") throw new SessionError("connection"); return { rows, cols }; },
+        attach: async () => { calls.push({ kind: "attach" }); if (fail === "attach") throw failError; return { sessionId: "31".repeat(16), floor: 0n, head: 0n, acknowledgedSequence: 0n, maxUnackedBytes: 65536n }; },
+        acquireInput: async () => { calls.push({ kind: "acquire" }); if (fail === "acquire") throw failError; return { generation: 1n }; },
+        sendInput: async (bytes) => { calls.push({ kind: "input", bytes }); if (fail === "input") throw failError; return { status: "accepted", accepted_bytes: BigInt(bytes.length) }; },
+        resize: async (rows, cols) => { calls.push({ kind: "resize", rows, cols }); if (fail === "resize") throw failError; return { rows, cols }; },
         get writable() { return true; },
       };
       handles.push(handle);
@@ -175,7 +175,7 @@ async function assertNoAutomaticRestart(context) {
 }
 
 test("fatal discovery and terminal failures disarm selection before reconnect can rediscover", async () => {
-  for (const failure of ["null", "throw", "open", "attach", "acquire", "input", "resize", "surface"]) {
+  for (const failure of ["null", "throw", "open", "attach", "input", "resize", "surface"]) {
     const context = terminalHarness({ closeStatus: true, fail: failure === "null" || failure === "throw" ? undefined : failure });
     context.controller.start();
     context.ready();
@@ -205,6 +205,39 @@ test("fatal discovery and terminal failures disarm selection before reconnect ca
     assert.equal(context.targetGates.length, 1, failure);
     assert.equal(context.sessionCloses(), 1, failure);
     await assertNoAutomaticRestart(context);
+  }
+});
+
+test("fatal lifecycle state, not an error-code exception, fences reusable failure codes", async () => {
+  for (const error of [new SessionError("invalid_request"), new ProtocolError("malformed")]) {
+    for (const failure of ["resolve", "open", "attach", "input", "resize", "surface"]) {
+      const context = terminalHarness({ closeStatus: true, fail: failure === "resolve" ? undefined : failure, failError: error });
+      context.controller.start();
+      context.ready();
+      context.controller.selectAgent(agent);
+      const token = {};
+      context.controller.beginTerminalSurface(token);
+      context.controller.setTerminalSurface(token, {
+        write: async () => { if (failure === "surface") throw error; },
+        abort: () => {},
+      });
+      await flush();
+      if (failure === "resolve") context.targetGates[0].reject(error);
+      else context.targetGates[0].resolve(target);
+      await flush();
+      if (failure === "input") {
+        context.controller.sendTerminalText(token, "input");
+        await flush();
+      } else if (failure === "resize") {
+        context.controller.resizeTerminal(token, 24, 80);
+        await flush();
+      } else if (failure === "surface") {
+        await assert.rejects(context.handleOptions().onOutput({ sequence: 0n, payload: new Uint8Array([1]) }));
+        await flush();
+      }
+      assert.equal(context.sessionCloses(), 1, `${error.code}:${failure}`);
+      await assertNoAutomaticRestart(context);
+    }
   }
 });
 

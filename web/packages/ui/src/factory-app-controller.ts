@@ -447,8 +447,8 @@ export class FactoryAppController {
       this.#publish();
       return;
     }
-    if (snapshot.error !== undefined && snapshot.error.code !== "invalid_request") {
-      this.#disarmTerminal(snapshot.error);
+    if (snapshot.phase === "closing") {
+      if (snapshot.error !== undefined) this.#disarmTerminal(snapshot.error);
       return;
     }
     this.#publish();

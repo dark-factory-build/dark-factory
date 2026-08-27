@@ -185,8 +185,15 @@ class TerminalController {
         }
         this.#writable = true;
       } catch (error) {
-        if (!this.#current(generation)) return;
-        this.#error = finiteError(error);
+        // A lease can be occupied by another observer. Keep the attached
+        // display alive as a truthful read-only observer; the session/handle
+        // still owns transport and terminal-end failures.
+        if (this.#current(generation)) {
+          this.#error = finiteError(error);
+          this.#phase = "ready";
+          this.#publish();
+        }
+        return;
       }
       if (!this.#current(generation)) return;
       this.#phase = "ready";
@@ -291,6 +298,7 @@ class TerminalController {
     this.#writable = false;
     this.#inputBuffer = new Uint8Array(0);
     this.#pendingResize = undefined;
+    this.#phase = "closing";
     this.#publish();
     void this.close();
   }
@@ -316,7 +324,9 @@ class TerminalController {
     return false;
   }
 
-  #current(generation: number): boolean { return generation === this.#generation && !this.#closing && this.#phase !== "closed"; }
+  #current(generation: number): boolean {
+    return generation === this.#generation && !this.#closing && this.#phase !== "closing" && this.#phase !== "closed";
+  }
 
   #snapshot(): TerminalControllerSnapshot {
     return { phase: this.#phase, writable: this.#writable, error: this.#error };

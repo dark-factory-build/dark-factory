@@ -1,8 +1,26 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import test from "node:test";
 import { createElement, StrictMode } from "react";
 import { act, create } from "react-test-renderer";
 import { FactoryApp } from "../dist/src/index.js";
+
+function runStrictCompositionProbe() {
+  const loader = new URL("./fixtures/strict-composition-loader.mjs", import.meta.url);
+  const probe = new URL("./fixtures/strict-composition-probe.mjs", import.meta.url);
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ["--experimental-loader", loader.pathname, probe.pathname], { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", reject);
+    const timeout = setTimeout(() => child.kill("SIGKILL"), 5_000);
+    child.on("close", (code, signal) => { clearTimeout(timeout); resolve({ code, signal, stdout, stderr }); });
+  });
+}
 
 test("StrictMode mounts the public FactoryApp and closes each owned BrowserClient once", async () => {
   const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
@@ -52,4 +70,13 @@ test("StrictMode mounts the public FactoryApp and closes each owned BrowserClien
     else Object.defineProperty(globalThis, "WebSocket", previousWebSocket);
     globalThis.IS_REACT_ACT_ENVIRONMENT = previousAct;
   }
+});
+
+test("StrictMode selected-agent composition owns one real terminal surface", async () => {
+  const result = await runStrictCompositionProbe();
+  assert.equal(result.signal, null, result.stderr);
+  assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stdout, /"opens":1/);
+  assert.match(result.stdout, /"attaches":1/);
+  assert.match(result.stdout, /"acquires":1/);
 });

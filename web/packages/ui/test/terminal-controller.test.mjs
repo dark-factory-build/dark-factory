@@ -24,6 +24,7 @@ function tick() { return new Promise((resolve) => setTimeout(resolve, 0)); }
 function harness({
   resolvedTarget = target,
   onChange = () => {},
+  onSessionClose = () => {},
   closeOnOpen = false,
   closeOnAcquire = false,
 } = {}) {
@@ -83,6 +84,7 @@ function harness({
       for (const call of inputCalls) closePending(call.result);
       for (const call of resizeCalls) closePending(call.result);
       callbacks?.onClose?.(new SessionError("closed"));
+      onSessionClose();
     },
   };
   const controller = new TerminalController({
@@ -441,4 +443,60 @@ test("reset, exit and handle close revoke writable authority", async () => {
     assert.equal(context.controller.snapshot.writable, false, event);
     assert.equal(context.controller.sendText("late"), false, event);
   }
+});
+
+test("fatal closing state is published before synchronous session close reentry", async () => {
+  const events = [];
+  let sessionCloseObserved = false;
+  const context = harness({
+    onChange: (snapshot) => events.push({ phase: snapshot.phase, sessionCloseObserved }),
+    onSessionClose: () => { sessionCloseObserved = true; events.push({ event: "session-close" }); },
+  });
+  context.controller.start();
+  await tick();
+  context.targetGate.resolve(null);
+  await tick();
+  const closing = events.findIndex((event) => event.phase === "closing");
+  const sessionClose = events.findIndex((event) => event.event === "session-close");
+  assert.notEqual(closing, -1);
+  assert.notEqual(sessionClose, -1);
+  assert.ok(closing < sessionClose);
+  assert.equal(events[closing].sessionCloseObserved, false);
+  assert.equal(context.sessionCloses(), 1);
+});
+
+test("rejected input remains ready and writable without closing the session", async () => {
+  const context = harness();
+  await ready(context);
+  assert.equal(context.controller.sendText("first"), true);
+  context.inputCalls[0].result.resolve({ status: "rejected", accepted_bytes: 0n });
+  await tick();
+  assert.equal(context.controller.snapshot.phase, "ready");
+  assert.equal(context.controller.snapshot.writable, true);
+  assert.equal(context.sessionCloses(), 0);
+  assert.equal(context.controller.sendText("second"), true);
+  assert.equal(context.inputCalls.length, 2);
+  context.inputCalls[1].result.resolve({ status: "accepted", accepted_bytes: 6n });
+  await context.controller.close();
+});
+
+test("lease refusal keeps an attached observer ready and read-only", async () => {
+  const context = harness();
+  context.controller.start();
+  await tick();
+  context.targetGate.resolve(target);
+  await tick();
+  context.attachGate().resolve({ sessionId: "22".repeat(16), floor: 0n, head: 0n, acknowledgedSequence: 0n, maxUnackedBytes: 65536n });
+  await tick();
+  context.acquireGate().reject(new SessionError("invalid_request"));
+  await tick();
+  assert.equal(context.controller.snapshot.phase, "ready");
+  assert.equal(context.controller.snapshot.writable, false);
+  assert.equal(context.sessionCloses(), 0);
+  const output = context.callbacks().onOutput({ sequence: 0n, payload: new Uint8Array([7]) });
+  await tick();
+  context.surfaceGate.resolve();
+  await output;
+  assert.deepEqual([...context.writes[0]], [7]);
+  await context.controller.close();
 });
