@@ -223,6 +223,146 @@ blocked until acquire/install failure cleanup, input partial/uncertain cleanup,
 resize authorization, HumanReply delivery-unknown, finalization races and
 terminal-before-result routing pass causal and mutation tests.
 
+### Browser canonical-state contract
+
+An adversarial read-only audit of the unchanged state/protocol files between
+`3db05a0` and `33d7bbe` returned **ALLOW** for one narrow implementation and
+**BLOCK** for sending the existing operator `DashboardSnapshot` through the
+browser. The operator snapshot has a 1 MiB transport, can contain 4,096 total
+entities and currently drops HumanRequests at its API projection. It is not a
+64 KiB browser message and will remain a separate local-API contract.
+
+Browser v1 instead uses head-pinned typed pages:
+
+```text
+STATE_GET { cursor? }
+  -> STATE_SNAPSHOT { head, kind, items[0..8], next_cursor }
+  -> STATE_RESTART { head, floor, reason }
+  -> ERROR
+```
+
+The first request pins the current durable invalidation head. One opaque cursor
+decodes to `{ head, kind, after_id? }`. Missing `after_id` means the first page
+of that kind and is never represented by an all-zero identifier. Kinds traverse
+a fixed order:
+
+```text
+factory -> project -> agent -> task -> human_request
+```
+
+The factory page has exactly one item and no `after_id`; its `next_cursor` is
+the first project cursor with `after_id` omitted. A full dynamic page continues
+the same kind after its final exact raw 16-byte ID. A short or empty page moves
+to the next kind with `after_id` omitted. Empty kinds remain explicit parts of
+the traversal. After the final HumanRequest page, `next_cursor` is JSON `null`.
+Factory events use entity kind `factory` and literal entity ID `factory`; the
+all-zero SQLite invalidation identity never crosses the browser boundary.
+Every dynamic kind uses raw 16-byte identifier order.
+The wire `kind` is the closed five-value union above, its item shape is selected
+by that kind, every items array is present and bounded, and `next_cursor` is
+always present as either a bounded opaque string or JSON `null`.
+
+Each Store page opens one read transaction, validates the durable controls and
+counts all browser-visible entities, including the singleton factory. It
+refuses the entire read above 4,096, so projects + agents + tasks + unresolved
+HumanRequests may total at most 4,095. A continuation succeeds only while the
+current head still equals the cursor head. Any intervening commit returns
+`STATE_RESTART`; the client discards staged pages rather than mixing heads. The
+final page's pinned head is also the exact `after` value used to begin
+subscription, so a commit between the page and subscription is replayed or
+causes an explicit retention gap. Cursors are read-only locators, never
+authority; arbitrary decoded values still undergo the same kind, head, ID and
+bound validation.
+
+Eight is the fixed v1 page size, not a caller-selected tuning parameter. At
+the current field bounds, eight task summaries containing maximally escaped
+1,024-byte titles encode in approximately 51.4 KiB including the envelope and
+cursor. One maximally escaped 8 KiB private question detail encodes in
+approximately 49.4 KiB. Both remain below 64 KiB and below the existing JSON
+depth/member/array limits. With 4,095 dynamic entities distributed across four
+kinds, the worst valid state needs at most `1 + 512 + 3 = 516` pages. 4,097
+visible entities including factory return a bounded `too_large` error with no
+partial snapshot.
+
+The HumanRequest list item reuses one smaller kernel projection:
+
+```text
+id project_id agent_id task_id run_id
+created_at updated_at revision kind status
+reply_max_bytes can_reply can_open_terminal
+```
+
+It deletes duplicated project/agent/task names and fixed display prose. The
+browser joins exact canonical summaries and owns copy such as “Agent needs your
+reply.” Question and reply text remain absent. Only unresolved `open`,
+`delivering` and `delivery_unknown` requests appear; a resolved/stale row is a
+browser projection deletion even though SQLite retains its audit row. The same
+write transaction that changes an unresolved request to `resolved` or `stale`
+appends its invalidation with `deleted=true`; `open`, `delivering` and
+`delivery_unknown` transitions use `deleted=false`. The browser never infers a
+deletion by reading a private terminal status.
+
+After the snapshot, v1 uses small durable invalidations rather than embedded
+snapshots. `STATE_EVENT` has exactly two variants:
+
+```text
+entity_changed { sequence, head, entity_kind, entity_id, revision, deleted }
+hidden_advance { sequence, head }
+```
+
+Public project/agent/task/HumanRequest changes identify only their safe entity
+and prompt one bounded `STATE_ENTITY_GET`. A Change-only invalidation emits one
+real `hidden_advance` frame with no entity ID, and the client advances only its
+sequence/head. A hidden run invalidation, unknown hidden dependency, gap or
+pruned history emits `STATE_RESTART { head, floor, reason }` and terminates the
+subscription because derived factory/task presentation may have changed. This
+can later be optimized by a direct derived refresh only if measurement
+justifies the added mapping. Hidden durable sequence values are never omitted.
+
+Entity refresh and subscription are exact:
+
+```text
+STATE_ENTITY_GET { kind, entity_id }
+  -> STATE_ENTITY { head, kind, entity_id, deleted, item }
+
+STATE_SUBSCRIBE { after }
+```
+
+`STATE_ENTITY.item` is the exact kind-selected page item when `deleted=false`
+and JSON `null` when `deleted=true`. Factory uses literal entity ID `factory`;
+all dynamic IDs are lower-case 32-character hex. The first subscription event
+has sequence `after + 1`; every later event is exactly one greater. A gap,
+prune, hidden dependency or run invalidation sends one `STATE_RESTART` and
+closes that subscription. Restart reason is the closed union `head_changed`,
+`gap`, `pruned` or `hidden_dependency`; arbitrary prose cannot cross the wire.
+Browser `ERROR.code` adds the finite `too_large` value for the over-4,096 state
+case. Entity responses, restart reasons and errors retain the same 64 KiB
+encoder bound as every other control frame.
+
+Private question detail is a separate exact-revision operation and capability:
+
+```text
+HUMAN_REQUEST_DETAIL_GET { request_id, expected_revision }
+  -> HUMAN_REQUEST_DETAIL { request_id, revision, question }
+```
+
+An observe-only or human-reply-only client cannot read it. Reply remains the
+existing exact-revision `BeginHumanReply -> one runner write -> acknowledge or
+delivery_unknown` transition. Browser v1 will not advertise a generic
+`HUMAN_REQUEST_ACTION` merely to reserve a shape. The existing `human_actions`
+capability gates exact HumanRequest replies; it does not advertise an arbitrary
+action operation. The first typed action is added with its concrete daemon
+operation, finite arguments and preconditions; `cancel_run` remains the likely
+first slice.
+
+Required mutations remove the 4,096 total guard, cursor-head equality, private-
+detail capability or delayed-response revision guard; replace the cursor with
+offsets; expose private question/source/token sentinels; omit a closed request's
+projection deletion; publish hidden run/Change IDs; and let Go fixtures pass
+while the TypeScript client drifts. Each must be killed before the state union
+is accepted. No schema, generic pagination framework or browser-side policy is
+introduced.
+
 ### Product and repository ownership
 
 The runtime repository is MIT and intentionally owns the largest useful
@@ -762,8 +902,9 @@ WebSocket frames and are never base64 JSON. V1 explicitly covers:
 
 ```text
 HELLO / PAIR_PROVE / PAIR_RESULT / AUTH_PROVE / AUTH_RESULT
-STATE_GET / STATE_SNAPSHOT / STATE_SUBSCRIBE / STATE_EVENT
-HUMAN_REQUEST_REPLY / HUMAN_REQUEST_ACTION
+STATE_GET / STATE_SNAPSHOT / STATE_RESTART
+STATE_SUBSCRIBE / STATE_EVENT / STATE_ENTITY_GET / STATE_ENTITY
+HUMAN_REQUEST_DETAIL_GET / HUMAN_REQUEST_DETAIL / HUMAN_REQUEST_REPLY
 TERMINAL_ATTACH / TERMINAL_ATTACHED / TERMINAL_ACK
 TERMINAL_LEASE_ACQUIRE / TERMINAL_LEASE_RENEW / TERMINAL_LEASE_RELEASE
 TERMINAL_RESIZE / TERMINAL_DETACH / TERMINAL_EXIT / TERMINAL_RESET
