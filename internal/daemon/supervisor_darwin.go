@@ -121,7 +121,11 @@ func (owner *supervisorAttemptOwner) close() error {
 func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kernel.Run, resultErr error) {
 	if ctx == nil || daemon == nil || daemon.store == nil || spec.RuntimeParent == nil ||
 		spec.ChangeParent == "" || !filepath.IsAbs(spec.ChangeParent) || filepath.Clean(spec.ChangeParent) != spec.ChangeParent ||
-		spec.GitExecutable == "" || spec.BaseRevision == "" || spec.AttemptSocket == "" || spec.RunnerExecutable == "" {
+		spec.GitExecutable == "" || spec.BaseRevision == "" || spec.AttemptSocket == "" || spec.RunnerExecutable == "" || spec.FactoryctlExecutable == "" {
+		return kernel.Run{}, fmt.Errorf("%w: invalid supervisor specification", kernel.ErrInvalidValue)
+	}
+	factoryctl, err := runner.CommitExecutableLocator(spec.FactoryctlExecutable)
+	if err != nil {
 		return kernel.Run{}, fmt.Errorf("%w: invalid supervisor specification", kernel.ErrInvalidValue)
 	}
 
@@ -249,7 +253,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	}
 	config := changeworker.Config{
 		RuntimePath: gotRuntimePath, RuntimeIdentity: runtimeFileIdentity,
-		GitExecutable: spec.GitExecutable, RepositoryRoot: project.Root, RepositoryIdentity: repositoryIdentity,
+		GitExecutable: spec.GitExecutable, FactoryctlExecutable: factoryctl.Path(), RepositoryRoot: project.Root, RepositoryIdentity: repositoryIdentity,
 		Revision: spec.BaseRevision, ChangeParent: spec.ChangeParent, FinalName: finalName, StagingName: stagingName,
 		AttemptSocket: spec.AttemptSocket, InitialTerminalInput: []byte(task.Body),
 	}
@@ -458,6 +462,9 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	// only reaches it after live.close has synchronously joined the owner.
 	if spec.beforeProviderRelease != nil {
 		spec.beforeProviderRelease()
+	}
+	if err := factoryctl.Verify(); err != nil {
+		return daemon.failRun(run, kernel.FailureActivation, err)
 	}
 	// This check is the cancellation/release linearization point. Cancellation
 	// already visible here leaves the provider inert. Once it returns nil, the

@@ -3,6 +3,8 @@
 package runner
 
 import (
+	"debug/macho"
+	"encoding/binary"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,6 +17,7 @@ import (
 var shellEnvironmentNames = []string{
 	"DARK_FACTORY_SOCKET",
 	"DARK_FACTORY_ATTEMPT_TOKEN_FILE",
+	"DARK_FACTORY_FACTORYCTL",
 	"HOME",
 	"TMPDIR",
 	"PATH",
@@ -45,7 +48,7 @@ func TestPrepareExecSpecAcceptsOnlyClosedShellEnvironmentNames(t *testing.T) {
 		"SSH_AUTH_SOCK", "GIT_SSH", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
 		"GIT_DIR", "GIT_WORK_TREE", "GH_TOKEN", "GITHUB_TOKEN",
 		"DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "LD_PRELOAD", "LD_LIBRARY_PATH",
-		"DARK_FACTORY_HOME", "DARK_FACTORY_RUN_ID", "DARK_FACTORY_TASK_ID", "ARBITRARY",
+		"DARK_FACTORY_HOME", "DARK_FACTORY_RUN_ID", "DARK_FACTORY_TASK_ID", "DARK_FACTORY_FACTORYCTL_PATH", "DARK_FACTORY_FACTORYCTL_HELPER", "ARBITRARY",
 	}
 	missing := filepath.Join(t.TempDir(), "must-not-be-observed")
 	for _, name := range forbidden {
@@ -70,6 +73,8 @@ func TestPrepareExecSpecRejectsDuplicateAndMalformedEnvironmentBeforePaths(t *te
 	}{
 		{name: "same duplicate", env: []string{"PATH=/usr/bin", "PATH=/usr/bin"}, want: "duplicate environment"},
 		{name: "different-value duplicate", env: []string{"PATH=/usr/bin", "PATH=/bin"}, want: "duplicate environment"},
+		{name: "factoryctl duplicate", env: []string{"DARK_FACTORY_FACTORYCTL=/private/a", "DARK_FACTORY_FACTORYCTL=/private/b"}, want: "duplicate environment"},
+		{name: "factoryctl empty", env: []string{"DARK_FACTORY_FACTORYCTL="}, want: "invalid environment"},
 		{name: "case-distinct remains distinct and unallowed", env: []string{"PATH=/usr/bin", "path=/bin"}, want: "environment key"},
 		{name: "missing separator", env: []string{"PATH"}, want: "invalid environment"},
 		{name: "empty name", env: []string{"=value"}, want: "invalid environment"},
@@ -135,6 +140,7 @@ func TestPreparedEnvironmentOrderAndBytesReachRealChildExactly(t *testing.T) {
 	environment := []string{
 		"DARK_FACTORY_SOCKET=/private/runtime/api.sock",
 		"DARK_FACTORY_ATTEMPT_TOKEN_FILE=/private/runtime/attempt.token",
+		"DARK_FACTORY_FACTORYCTL=/private/release/factoryctl",
 		"HOME=/private/provider-home",
 		"TMPDIR=/private/provider-tmp",
 		"PATH=/usr/bin:/bin",
@@ -183,7 +189,104 @@ func TestPreparedEnvironmentOrderAndBytesReachRealChildExactly(t *testing.T) {
 	if got, expected := string(body), strings.Join(want, "\n")+"\n"; got != expected {
 		t.Fatalf("child environment bytes/order differ\ngot:  %q\nwant: %q", got, expected)
 	}
+	if !slices.Contains(want, "PATH=/usr/bin:/bin") {
+		t.Fatal("provider PATH changed")
+	}
 	if got := ObserveProcess(child.Identity()); got.Presence != Absent {
 		t.Fatalf("environment child remains after Wait: %+v", got)
+	}
+}
+
+func TestExecutableCommitmentRequiresExactDirectNativeTarget(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	newTarget := func(t *testing.T) string {
+		t.Helper()
+		root, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(root, "factoryctl")
+		copyNative(t, executable, target)
+		return target
+	}
+	t.Run("exact and replacement", func(t *testing.T) {
+		target := newTarget(t)
+		commitment, err := CommitExecutableLocator(target)
+		if err != nil || commitment.Path() != target || commitment.Verify() != nil {
+			t.Fatalf("commitment=%v path=%q err=%v", commitment, commitment.Path(), err)
+		}
+		if formatted := commitment.String() + commitment.GoString(); strings.Contains(formatted, target) {
+			t.Fatal("commitment formatting exposed locator")
+		}
+		replacement := filepath.Join(t.TempDir(), "replacement")
+		copyNative(t, executable, replacement)
+		if err := os.Rename(replacement, target); err != nil {
+			t.Fatal(err)
+		}
+		if err := commitment.Verify(); err == nil || strings.Contains(err.Error(), target) {
+			t.Fatalf("replacement verification=%v", err)
+		}
+	})
+	for _, test := range []struct {
+		name   string
+		mutate func(*testing.T, string) string
+	}{
+		{name: "missing", mutate: func(t *testing.T, target string) string { return target + ".missing" }},
+		{name: "relative", mutate: func(t *testing.T, target string) string { return "factoryctl" }},
+		{name: "unclean", mutate: func(t *testing.T, target string) string {
+			return filepath.Dir(target) + "/sub/../" + filepath.Base(target)
+		}},
+		{name: "symlink", mutate: func(t *testing.T, target string) string {
+			link := target + ".link"
+			if err := os.Symlink(target, link); err != nil {
+				t.Fatal(err)
+			}
+			return link
+		}},
+		{name: "unsafe mode", mutate: func(t *testing.T, target string) string {
+			if err := os.Chmod(target, 0o775); err != nil {
+				t.Fatal(err)
+			}
+			return target
+		}},
+		{name: "wrong architecture", mutate: func(t *testing.T, target string) string {
+			rewriteMachOArchitecture(t, target)
+			return target
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			target := test.mutate(t, newTarget(t))
+			if _, err := CommitExecutableLocator(target); err == nil || strings.Contains(err.Error(), target) {
+				t.Fatalf("invalid locator accepted or exposed: %v", err)
+			}
+		})
+	}
+}
+
+func rewriteMachOArchitecture(t testing.TB, path string) {
+	t.Helper()
+	file, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	header := make([]byte, 8)
+	if _, err := file.ReadAt(header, 0); err != nil {
+		t.Fatal(err)
+	}
+	order := binary.LittleEndian
+	if binary.LittleEndian.Uint32(header[:4]) != macho.Magic32 && binary.LittleEndian.Uint32(header[:4]) != macho.Magic64 {
+		t.Fatal("test helper is not a thin little-endian Mach-O")
+	}
+	want := uint32(macho.CpuAmd64)
+	if binary.LittleEndian.Uint32(header[4:8]) == want {
+		want = uint32(macho.CpuArm64)
+	}
+	order.PutUint32(header[4:8], want)
+	if _, err := file.WriteAt(header[4:8], 4); err != nil {
+		t.Fatal(err)
 	}
 }

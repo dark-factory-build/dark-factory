@@ -1569,9 +1569,18 @@ func workerConfigForRuntime(t testing.TB, runtime *Runtime) changeworker.Config 
 	if err != nil {
 		t.Fatal(err)
 	}
+	factoryctl, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	factoryctl, err = filepath.EvalSymlinks(factoryctl)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return changeworker.Config{
 		RuntimePath: path, RuntimeIdentity: identity, GitExecutable: "/usr/local/bin/git",
-		RepositoryRoot: "/private/repository", RepositoryIdentity: repository, Revision: "main",
+		FactoryctlExecutable: factoryctl,
+		RepositoryRoot:       "/private/repository", RepositoryIdentity: repository, Revision: "main",
 		ChangeParent: "/private/changes", FinalName: "change", StagingName: ".change.stage",
 		AttemptSocket: "/private/api.sock", InitialTerminalInput: []byte("echo exact"),
 	}

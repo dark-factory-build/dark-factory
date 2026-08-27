@@ -37,10 +37,6 @@ func newAPIFixture(t testing.TB) *apiFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(directory, 0o700); err != nil {
-		_ = os.RemoveAll(directory)
-		t.Fatal(err)
-	}
 	cleanup := true
 	defer func() {
 		if cleanup {
@@ -130,13 +126,15 @@ func TestParseExactAttemptCommands(t *testing.T) {
 		{name: "root help", args: []string{"--help"}, help: true},
 		{name: "attempt help", args: []string{"attempt", "-h"}, help: true},
 		{name: "verb help", args: []string{"attempt", "block", "--help"}, help: true},
-		{name: "empty success", args: []string{"attempt", "succeed"}, command: attemptCommand{outcome: outcomeSucceed}},
-		{name: "success", args: []string{"attempt", "succeed", "--result", "done"}, command: attemptCommand{outcome: outcomeSucceed, text: "done"}},
-		{name: "block", args: []string{"attempt", "block", "--detail", "waiting"}, command: attemptCommand{outcome: outcomeBlock, text: "waiting"}},
-		{name: "empty failure", args: []string{"attempt", "fail"}, command: attemptCommand{outcome: outcomeFail}},
-		{name: "failure", args: []string{"attempt", "fail", "--detail", "broken"}, command: attemptCommand{outcome: outcomeFail, text: "broken"}},
-		{name: "explicit empty success", args: []string{"attempt", "succeed", "--result", ""}, command: attemptCommand{outcome: outcomeSucceed}},
-		{name: "explicit empty failure", args: []string{"attempt", "fail", "--detail", ""}, command: attemptCommand{outcome: outcomeFail}},
+		{name: "empty success", args: []string{"attempt", "succeed"}, command: attemptCommand{kind: commandSucceed}},
+		{name: "success", args: []string{"attempt", "succeed", "--result", "done"}, command: attemptCommand{kind: commandSucceed, text: "done"}},
+		{name: "block", args: []string{"attempt", "block", "--detail", "waiting"}, command: attemptCommand{kind: commandBlock, text: "waiting"}},
+		{name: "empty failure", args: []string{"attempt", "fail"}, command: attemptCommand{kind: commandFail}},
+		{name: "failure", args: []string{"attempt", "fail", "--detail", "broken"}, command: attemptCommand{kind: commandFail, text: "broken"}},
+		{name: "explicit empty success", args: []string{"attempt", "succeed", "--result", ""}, command: attemptCommand{kind: commandSucceed}},
+		{name: "explicit empty failure", args: []string{"attempt", "fail", "--detail", ""}, command: attemptCommand{kind: commandFail}},
+		{name: "human request", args: []string{"attempt", "request-human", "--idempotency-key", "0123456789abcdef0123456789abcdef", "--question", "what now?"}, command: attemptCommand{kind: commandRequestHuman, idempotencyKey: "0123456789abcdef0123456789abcdef", text: "what now?"}},
+		{name: "human request maximum question", args: []string{"attempt", "request-human", "--idempotency-key", "ffffffffffffffffffffffffffffffff", "--question", strings.Repeat("q", 8192)}, command: attemptCommand{kind: commandRequestHuman, idempotencyKey: "ffffffffffffffffffffffffffffffff", text: strings.Repeat("q", 8192)}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -164,6 +162,28 @@ func TestInvalidSyntaxStopsBeforeEnvironmentOrConnection(t *testing.T) {
 		{"attempt", "block", "--detail", "a", "extra"},
 		{"attempt", "succeed", "--socket", "/private/socket"},
 		{"attempt", "fail", "--run", "private-run"},
+		{"attempt", "request-human"},
+		{"attempt", "request-human", "--idempotency-key", "0123456789abcdef0123456789abcdef", "--question"},
+		{"attempt", "request-human", "--idempotency-key=0123456789abcdef0123456789abcdef", "--question", "private-question"},
+		{"attempt", "request-human", "--question", "private-question", "--idempotency-key", "0123456789abcdef0123456789abcdef"},
+		{"attempt", "request-human", "--idempotency-key", "00000000000000000000000000000000", "--question", "private-question"},
+		{"attempt", "request-human", "--idempotency-key", "0123456789abcdef", "--question", "private-question"},
+		{"attempt", "request-human", "--idempotency-key", "0123456789ABCDEF0123456789abcdef", "--question", "private-question"},
+		{"attempt", "request-human", "--idempotency-key", "0123456789abcdef0123456789abcdegf", "--question", "private-question"},
+		{"attempt", "request-human", "--idempotency-key", "0123456789abcdef0123456789abcdef", "--question", ""},
+		{"attempt", "request-human", "--idempotency-key", "0123456789abcdef0123456789abcdef", "--question", string([]byte{0xff})},
+		{"attempt", "request-human", "--idempotency-key", "0123456789abcdef0123456789abcdef", "--question", "bad\x00question"},
+		{"attempt", "request-human", "--idempotency-key", "0123456789abcdef0123456789abcdef", "--question", strings.Repeat("q", 8193)},
+		{"attempt", "request-human", "--idempotency-key", "0123456789abcdef0123456789abcdef", "--question=private-question"},
+		{"attempt", "request-human", "--idempotency-key", "0123456789abcdef0123456789abcdef", "--question", "private-question", "--socket", "/private/socket"},
+		{"attempt", "request-human", "--idempotency-key", "0123456789abcdef0123456789abcdef", "--question", "private-question", "--token", "private-token"},
+		{"attempt", "request-human", "--idempotency-key", "0123456789abcdef0123456789abcdef", "--question", "private-question", "--run", "private-run"},
+		{"attempt", "request-human", "--idempotency-key", "0123456789abcdef0123456789abcdef", "--question", "private-question", "--task", "private-task"},
+		{"attempt", "request-human", "--idempotency-key", "0123456789abcdef0123456789abcdef", "--question", "private-question", "--destination", "private-destination"},
+		{"attempt", "request-human", "--idempotency-key", "0123456789abcdef0123456789abcdef", "--question", "private-question", "--action", "private-action"},
+		{"attempt", "request-human", "--idempotency-key", "0123456789abcdef0123456789abcdef", "--idempotency-key", "fedcba9876543210fedcba9876543210", "--question", "private-question"},
+		{"attempt", "request-human", "--idempotency-key", "0123456789abcdef0123456789abcdef", "--question", "private-question", "--question", "private-question-two"},
+		{"attempt", "request_human", "--idempotency-key", "0123456789abcdef0123456789abcdef", "--question", "private-question"},
 	}
 	for index, args := range tests {
 		t.Run(fmt.Sprintf("case-%d", index), func(t *testing.T) {
@@ -176,7 +196,7 @@ func TestInvalidSyntaxStopsBeforeEnvironmentOrConnection(t *testing.T) {
 			if exit != exitUsage || lookups != 0 || stdout.Len() != 0 || stderr.String() != usage {
 				t.Fatalf("run = exit %d, lookups %d, stdout %q, stderr %q", exit, lookups, stdout.String(), stderr.String())
 			}
-			for _, private := range []string{"private-result", "private-detail", "/private/socket", "private-run"} {
+			for _, private := range []string{"private-result", "private-detail", "private-question", "private-token", "/private/socket", "private-run", "private-task", "private-destination", "private-action"} {
 				if strings.Contains(stderr.String(), private) {
 					t.Fatalf("usage leaked %q", private)
 				}
@@ -202,6 +222,7 @@ func TestAttemptCommandsUseExactTypedCalls(t *testing.T) {
 		name string
 		args []string
 		kind api.CallKind
+		key  string
 		text string
 	}{
 		{name: "succeed empty", args: []string{"attempt", "succeed"}, kind: api.CallSucceed},
@@ -209,6 +230,7 @@ func TestAttemptCommandsUseExactTypedCalls(t *testing.T) {
 		{name: "block", args: []string{"attempt", "block", "--detail", "private-block-sentinel"}, kind: api.CallBlock, text: "private-block-sentinel"},
 		{name: "fail empty", args: []string{"attempt", "fail"}, kind: api.CallFail},
 		{name: "fail detail", args: []string{"attempt", "fail", "--detail", "private-fail-sentinel"}, kind: api.CallFail, text: "private-fail-sentinel"},
+		{name: "human request", args: []string{"attempt", "request-human", "--idempotency-key", "0123456789abcdef0123456789abcdef", "--question", "private-question-sentinel"}, kind: api.CallRequestHuman, key: "0123456789abcdef0123456789abcdef", text: "private-question-sentinel"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -249,12 +271,20 @@ func TestAttemptCommandsUseExactTypedCalls(t *testing.T) {
 				if !ok || text != test.text {
 					t.Fatalf("detail = %q, %t", text, ok)
 				}
+			case api.CallRequestHuman:
+				input, ok := result.call.HumanQuestionInput()
+				if !ok || input != (api.HumanQuestionInput{IdempotencyKey: test.key, Question: test.text}) {
+					t.Fatalf("human question = %+v, %t", input, ok)
+				}
 			}
 			wantOutput := "attempt outcome request accepted: head=17 revision=9\n"
+			if test.kind == api.CallRequestHuman {
+				wantOutput = "human request accepted: head=17 revision=9\n"
+			}
 			if stdout.String() != wantOutput || stderr.Len() != 0 {
 				t.Fatalf("output = stdout %q, stderr %q", stdout.String(), stderr.String())
 			}
-			for _, private := range []string{fixture.socket, fixture.attemptPath, string(fixture.bearer[:]), test.text} {
+			for _, private := range []string{fixture.socket, fixture.attemptPath, string(fixture.bearer[:]), test.key, test.text} {
 				if private != "" && strings.Contains(stdout.String()+stderr.String(), private) {
 					t.Fatalf("output leaked private sentinel")
 				}
@@ -285,6 +315,8 @@ func TestAcceptedOutputDoesNotClaimTerminalState(t *testing.T) {
 }
 
 func TestRuntimeErrorsAreFixedAndPrivate(t *testing.T) {
+	key := "0123456789abcdef0123456789abcdef"
+	question := "private-human-question-sentinel"
 	tests := []api.RemoteErrorCode{
 		api.RemoteInvalidRequest,
 		api.RemoteUnsupportedProtocol,
@@ -310,14 +342,14 @@ func TestRuntimeErrorsAreFixedAndPrivate(t *testing.T) {
 				return reply
 			})
 			var stdout, stderr bytes.Buffer
-			exit := run(context.Background(), []string{"attempt", "fail", "--detail", "private-detail"}, func(string) string { return fixture.socket }, &stdout, &stderr)
+			exit := run(context.Background(), []string{"attempt", "request-human", "--idempotency-key", key, "--question", question}, func(string) string { return fixture.socket }, &stdout, &stderr)
 			if result := awaitServer(t, done); result.err != nil {
 				t.Fatal(result.err)
 			}
-			if exit != exitFailure || stdout.Len() != 0 || stderr.String() != "factoryctl: outcome request was not accepted\n" {
+			if exit != exitFailure || stdout.Len() != 0 || stderr.String() != "factoryctl: human request was not accepted\n" {
 				t.Fatalf("error output = exit %d, stdout %q, stderr %q", exit, stdout.String(), stderr.String())
 			}
-			for _, private := range []string{fixture.socket, fixture.attemptPath, string(fixture.bearer[:]), "private-detail"} {
+			for _, private := range []string{fixture.socket, fixture.attemptPath, string(fixture.bearer[:]), key, question} {
 				if strings.Contains(stdout.String()+stderr.String(), private) {
 					t.Fatalf("error output leaked private sentinel")
 				}
@@ -330,7 +362,7 @@ func TestMissingSocketOrAttemptTokenCannotFallBack(t *testing.T) {
 	t.Run("missing socket", func(t *testing.T) {
 		t.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", "/private/missing-attempt-token")
 		var stdout, stderr bytes.Buffer
-		exit := run(context.Background(), []string{"attempt", "fail"}, func(string) string { return "" }, &stdout, &stderr)
+		exit := run(context.Background(), []string{"attempt", "request-human", "--idempotency-key", "0123456789abcdef0123456789abcdef", "--question", "private-question"}, func(string) string { return "" }, &stdout, &stderr)
 		if exit != exitFailure || stdout.Len() != 0 || stderr.String() != "factoryctl: attempt client configuration is invalid\n" {
 			t.Fatalf("missing socket = exit %d, stdout %q, stderr %q", exit, stdout.String(), stderr.String())
 		}
@@ -367,7 +399,7 @@ func TestMissingSocketOrAttemptTokenCannotFallBack(t *testing.T) {
 				accepted <- false
 			}()
 			var stdout, stderr bytes.Buffer
-			exit := run(context.Background(), []string{"attempt", "succeed"}, func(string) string { return fixture.socket }, &stdout, &stderr)
+			exit := run(context.Background(), []string{"attempt", "request-human", "--idempotency-key", "0123456789abcdef0123456789abcdef", "--question", "private-question"}, func(string) string { return fixture.socket }, &stdout, &stderr)
 			_ = listener.Close()
 			select {
 			case connected := <-accepted:

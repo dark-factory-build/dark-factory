@@ -54,6 +54,10 @@ func runShell(ctx context.Context) (resultErr error) {
 	}
 	authority.root = runtimeDir
 	defer func() { resultErr = errors.Join(resultErr, authority.close()) }()
+	factoryctl, err := runner.CommitExecutableLocator(config.FactoryctlExecutable)
+	if err != nil {
+		return err
+	}
 
 	selection, err := change.SelectGit(ctx, config.GitExecutable, config.RepositoryRoot, config.Revision, config.RepositoryIdentity)
 	if err != nil {
@@ -161,6 +165,7 @@ func runShell(ctx context.Context) (resultErr error) {
 	environment := []string{
 		"DARK_FACTORY_SOCKET=" + config.AttemptSocket,
 		"DARK_FACTORY_ATTEMPT_TOKEN_FILE=" + token,
+		"DARK_FACTORY_FACTORYCTL=" + factoryctl.Path(),
 		"HOME=" + home, "TMPDIR=" + temp, "PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", "TERM=dumb", "NO_COLOR=1",
 		"GIT_CEILING_DIRECTORIES=" + filepath.Dir(published.Path()), "GIT_DISCOVERY_ACROSS_FILESYSTEM=0",
 		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0",
@@ -177,6 +182,10 @@ func runShell(ctx context.Context) (resultErr error) {
 		return fmt.Errorf("runtime authority verification: %w", err)
 	}
 	if err := authority.close(); err != nil {
+		_ = cwd.Close()
+		return err
+	}
+	if err := factoryctl.Verify(); err != nil {
 		_ = cwd.Close()
 		return err
 	}

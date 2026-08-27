@@ -92,7 +92,7 @@ func verifyControl(f *os.File, want descriptorCommitment) error {
 func allowedEnv(k string) bool {
 	switch k {
 	case "HOME", "PATH", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TERM", "SHELL", "USER", "LOGNAME",
-		"DARK_FACTORY_SOCKET", "DARK_FACTORY_ATTEMPT_TOKEN_FILE", "NO_COLOR",
+		"DARK_FACTORY_SOCKET", "DARK_FACTORY_ATTEMPT_TOKEN_FILE", "DARK_FACTORY_FACTORYCTL", "NO_COLOR",
 		"GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL",
 		"GIT_TERMINAL_PROMPT", "GIT_ASKPASS", "GIT_SSH_COMMAND", "GH_CONFIG_DIR":
 		return true
@@ -138,6 +138,50 @@ func canonical(path string) (string, error) {
 		return "", fmt.Errorf("runner: non-absolute path")
 	}
 	return resolved, nil
+}
+
+// ExecutableCommitment freezes one exact direct native executable locator.
+// Its formatting is intentionally private because provider helper paths are
+// runtime authority, not diagnostics.
+type ExecutableCommitment struct{ executable fileCommitment }
+
+func (ExecutableCommitment) String() string   { return "runner executable commitment (private)" }
+func (ExecutableCommitment) GoString() string { return "runner.ExecutableCommitment{private}" }
+
+func CommitExecutableLocator(path string) (ExecutableCommitment, error) {
+	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path || path == string(filepath.Separator) {
+		return ExecutableCommitment{}, fmt.Errorf("runner: invalid executable locator: %w", ErrIdentity)
+	}
+	var named unix.Stat_t
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil || resolved != path || unix.Lstat(path, &named) != nil || named.Mode&unix.S_IFMT != unix.S_IFREG {
+		return ExecutableCommitment{}, fmt.Errorf("runner: invalid executable locator: %w", ErrIdentity)
+	}
+	committed, err := commitExecutable(path)
+	if err != nil || committed.Path != path || committed.Mode&0o022 != 0 {
+		return ExecutableCommitment{}, fmt.Errorf("runner: invalid executable locator: %w", ErrIdentity)
+	}
+	return ExecutableCommitment{executable: committed}, nil
+}
+
+func (commitment ExecutableCommitment) Path() string { return commitment.executable.Path }
+
+func (commitment ExecutableCommitment) Verify() error {
+	if commitment.executable.Path == "" {
+		return fmt.Errorf("runner: executable commitment changed: %w", ErrIdentity)
+	}
+	file, err := verifyCommit(commitment.executable, true)
+	if err == nil {
+		err = sameNamedIdentity(commitment.executable.Path, commitment.executable.FileIdentity)
+		closeErr := file.Close()
+		if err == nil {
+			err = closeErr
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("runner: executable commitment changed: %w", ErrIdentity)
+	}
+	return nil
 }
 
 func commitExecutable(path string) (fileCommitment, error) {

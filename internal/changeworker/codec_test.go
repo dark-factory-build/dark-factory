@@ -2,6 +2,7 @@ package changeworker
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"reflect"
@@ -31,11 +32,33 @@ func TestConfigRoundTripIsExactBoundedAndPrivate(t *testing.T) {
 	}
 	for _, value := range []any{want, SelectionReport{}, PreparationReport{}, PopulationReport{}} {
 		formatted := fmt.Sprintf("%v %+v %#v", value, value, value)
-		for _, sentinel := range []string{want.RuntimePath, want.RepositoryRoot, string(want.InitialTerminalInput)} {
+		for _, sentinel := range []string{want.RuntimePath, want.FactoryctlExecutable, want.RepositoryRoot, string(want.InitialTerminalInput)} {
 			if strings.Contains(formatted, sentinel) {
 				t.Fatalf("private value leaked: %q", formatted)
 			}
 		}
+	}
+}
+
+func TestConfigV1HardCutoverRejectsOldUnknownTrailingAndDuplicateLocator(t *testing.T) {
+	want := configFixture(t)
+	encoded, err := EncodeConfig(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	locatorStart, locatorEnd := configStringBounds(t, encoded, 2)
+	old := append(bytes.Clone(encoded[:locatorStart]), encoded[locatorEnd:]...)
+	unknown := bytes.Clone(encoded)
+	unknown[4]++
+	trailing := append(bytes.Clone(encoded), 0)
+	duplicate := append(bytes.Clone(encoded[:locatorEnd]), encoded[locatorStart:locatorEnd]...)
+	duplicate = append(duplicate, encoded[locatorEnd:]...)
+	for name, value := range map[string][]byte{"old": old, "unknown": unknown, "trailing": trailing, "duplicate locator": duplicate} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := DecodeConfig(value); !errors.Is(err, ErrInvalidContract) {
+				t.Fatalf("foreign v1 config accepted: %v", err)
+			}
+		})
 	}
 }
 
@@ -80,6 +103,11 @@ func TestConfigRejectsRawAuthorityAndInputCorruption(t *testing.T) {
 	mutations := []func(*Config){
 		func(v *Config) { v.RuntimeIdentity = runner.FileIdentity{} },
 		func(v *Config) { v.RepositoryRoot = "relative" },
+		func(v *Config) { v.FactoryctlExecutable = "" },
+		func(v *Config) { v.FactoryctlExecutable = "relative/factoryctl" },
+		func(v *Config) { v.FactoryctlExecutable = "/private/../factoryctl" },
+		func(v *Config) { v.FactoryctlExecutable = "/private/factoryctl\x00foreign" },
+		func(v *Config) { v.FactoryctlExecutable = "/" + strings.Repeat("f", maximumLocatorBytes) },
 		func(v *Config) { v.FinalName = ".GiT" },
 		func(v *Config) { v.StagingName = v.FinalName },
 		func(v *Config) { v.AttemptSocket = "/" + strings.Repeat("s", maximumSocketBytes) },
@@ -111,7 +139,27 @@ func configFixture(t testing.TB) Config {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return Config{RuntimePath: "/private/runtime", RuntimeIdentity: runner.FileIdentity{Device: 1, Inode: 2}, GitExecutable: "/Library/Developer/CommandLineTools/usr/bin/git", RepositoryRoot: "/private/repository", RepositoryIdentity: repository, Revision: "main", ChangeParent: "/private/changes", FinalName: "change", StagingName: ".change.stage", AttemptSocket: "/private/api.sock", InitialTerminalInput: []byte("printf exact")}
+	return Config{RuntimePath: "/private/runtime", RuntimeIdentity: runner.FileIdentity{Device: 1, Inode: 2}, GitExecutable: "/Library/Developer/CommandLineTools/usr/bin/git", FactoryctlExecutable: "/private/release/factoryctl", RepositoryRoot: "/private/repository", RepositoryIdentity: repository, Revision: "main", ChangeParent: "/private/changes", FinalName: "change", StagingName: ".change.stage", AttemptSocket: "/private/api.sock", InitialTerminalInput: []byte("printf exact")}
+}
+
+func configStringBounds(t testing.TB, encoded []byte, want int) (int, int) {
+	t.Helper()
+	offset := 8 + 4*8
+	for index := 0; index <= want; index++ {
+		if offset+2 > len(encoded) {
+			t.Fatal("short encoded config")
+		}
+		start := offset
+		length := int(binary.BigEndian.Uint16(encoded[offset : offset+2]))
+		offset += 2 + length
+		if offset > len(encoded) {
+			t.Fatal("invalid encoded config string")
+		}
+		if index == want {
+			return start, offset
+		}
+	}
+	return 0, 0
 }
 
 func selectionFixture(t testing.TB) SelectionReport {

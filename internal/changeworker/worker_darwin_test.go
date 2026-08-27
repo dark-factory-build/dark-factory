@@ -105,8 +105,91 @@ func TestRegisteredShellWorkerCompletesExactFourReleaseSequence(t *testing.T) {
 			t.Fatalf("ambient/source authority leaked in environment")
 		}
 	}
+	if strings.Count(string(environment), "DARK_FACTORY_FACTORYCTL="+fixture.factoryctl+"\n") != 1 || strings.Count(string(environment), "PATH=/usr/bin:/bin\n") != 1 {
+		t.Fatalf("provider helper/PATH environment is not exact: %q", environment)
+	}
 	if diagnostic := fixture.output(); strings.Contains(diagnostic, fixture.repositoryRoot) || strings.Contains(diagnostic, "printf x") {
 		t.Fatalf("private source/input leaked: %q", diagnostic)
+	}
+}
+
+func TestFactoryctlLocatorValidationPrecedesSelectionAndProviderEffects(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name    string
+		locator func(*testing.T) string
+	}{
+		{name: "missing", locator: func(t *testing.T) string { return filepath.Join(workerSecureTempDir(t), "missing-factoryctl") }},
+		{name: "symlink", locator: func(t *testing.T) string {
+			link := filepath.Join(workerSecureTempDir(t), "factoryctl")
+			if err := os.Symlink(executable, link); err != nil {
+				t.Fatal(err)
+			}
+			return link
+		}},
+		{name: "unsafe mode", locator: func(t *testing.T) string {
+			target := filepath.Join(workerSecureTempDir(t), "factoryctl")
+			copyWorkerExecutable(t, executable, target)
+			if err := os.Chmod(target, 0o775); err != nil {
+				t.Fatal(err)
+			}
+			return target
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			locator := test.locator(t)
+			fixture := newWorkerFixtureWithFactoryctl(t, locator)
+			fixture.start(t)
+			if err := fixture.controller.Release(runner.StageSelection); err != nil {
+				t.Fatal(err)
+			}
+			if event, err := fixture.controller.Next(8 * time.Second); !errors.Is(err, io.EOF) || event.Kind != "" {
+				t.Fatalf("event=%+v err=%v diagnostic=%q", event, err, fixture.output())
+			}
+			if exit, err := fixture.child.FinishAfterExit(8 * time.Second); err != nil || exit.Code == 0 && exit.Signal == 0 {
+				t.Fatalf("outer=%+v err=%v", exit, err)
+			}
+			for _, path := range []string{filepath.Join(fixture.changeParent, fixture.finalName), filepath.Join(fixture.changeParent, ".stage"), fixture.witness} {
+				if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("effect %q exists: %v", path, err)
+				}
+			}
+			if strings.Contains(fixture.output(), locator) {
+				t.Fatal("private factoryctl locator leaked in worker diagnostic")
+			}
+		})
+	}
+}
+
+func TestFinalFactoryctlCommitmentRejectsReplacementBeforeProviderWitness(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(workerSecureTempDir(t), "factoryctl")
+	copyWorkerExecutable(t, executable, target)
+	fixture := newWorkerFixtureWithFactoryctl(t, target)
+	fixture.start(t)
+	fixture.release(t, runner.StageSelection, runner.StageSelection)
+	fixture.release(t, runner.StagePreparation, runner.StagePreparation)
+	fixture.release(t, runner.StagePopulation, runner.StagePopulation)
+	replacement := filepath.Join(workerSecureTempDir(t), "replacement")
+	copyWorkerExecutable(t, executable, replacement)
+	if err := os.Rename(replacement, target); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.controller.Release(runner.StageProvider); err != nil {
+		t.Fatal(err)
+	}
+	fixture.finish(t, false)
+	if _, err := os.Stat(fixture.witness); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("provider witness exists after factoryctl replacement: %v", err)
+	}
+	if strings.Contains(fixture.output(), target) {
+		t.Fatal("private factoryctl locator leaked in worker diagnostic")
 	}
 }
 
@@ -290,6 +373,7 @@ func TestFinalRuntimeRecheckRejectsFixedChildReplacement(t *testing.T) {
 type workerFixture struct {
 	root, repositoryRoot, changeParent, finalName string
 	witness, cwdWitness, envWitness               string
+	factoryctl                                    string
 	repositoryIdentity                            change.RepositoryIdentity
 	runtime                                       *daemon.Runtime
 	parent                                        *daemon.RuntimeParent
@@ -302,6 +386,19 @@ type workerFixture struct {
 }
 
 func newWorkerFixture(t *testing.T) *workerFixture {
+	t.Helper()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, err = filepath.EvalSymlinks(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return newWorkerFixtureWithFactoryctl(t, executable)
+}
+
+func newWorkerFixtureWithFactoryctl(t *testing.T, factoryctl string) *workerFixture {
 	t.Helper()
 	root := workerSecureTempDir(t)
 	git := nativeGit(t)
@@ -364,7 +461,7 @@ func newWorkerFixture(t *testing.T) *workerFixture {
 	// the complete byte sequence explicitly, including exit, rather than
 	// relying on the worker to mutate it with a hidden newline or close.
 	program := fmt.Sprintf("set -eu\nfor n in 3 9; do test ! -e /dev/fd/$n; done\ntest -e /dev/fd/10\ngit rev-parse --is-inside-work-tree >/dev/null 2>&1 && exit 81 || :\nprintf x > %s\npwd > %s\nenv | sort > %s\nexit\n", quote(witness), quote(cwdWitness), quote(envWitness))
-	config := changeworker.Config{RuntimePath: runtimePath, RuntimeIdentity: runtimeID, GitExecutable: git, RepositoryRoot: repository, RepositoryIdentity: repositoryID, Revision: "HEAD", ChangeParent: changeParent, FinalName: "published", StagingName: ".stage", AttemptSocket: "/private/tmp/dark-factory-worker-api.sock", InitialTerminalInput: []byte(program)}
+	config := changeworker.Config{RuntimePath: runtimePath, RuntimeIdentity: runtimeID, GitExecutable: git, FactoryctlExecutable: factoryctl, RepositoryRoot: repository, RepositoryIdentity: repositoryID, Revision: "HEAD", ChangeParent: changeParent, FinalName: "published", StagingName: ".stage", AttemptSocket: "/private/tmp/dark-factory-worker-api.sock", InitialTerminalInput: []byte(program)}
 	if _, err := runtimeValue.PublishWorkerConfig(context.Background(), config); err != nil {
 		t.Fatal(err)
 	}
@@ -408,9 +505,29 @@ func newWorkerFixture(t *testing.T) *workerFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &workerFixture{root: root, repositoryRoot: repository, changeParent: changeParent, finalName: "published", witness: witness, cwdWitness: cwdWitness, envWitness: envWitness, repositoryIdentity: repositoryID, runtime: runtimeValue, parent: parent, dir: dir, lifetime: lifetime, lease: lease, controller: controller, child: child, diagnostic: diagnostic}
+	f := &workerFixture{root: root, repositoryRoot: repository, changeParent: changeParent, finalName: "published", witness: witness, cwdWitness: cwdWitness, envWitness: envWitness, factoryctl: factoryctl, repositoryIdentity: repositoryID, runtime: runtimeValue, parent: parent, dir: dir, lifetime: lifetime, lease: lease, controller: controller, child: child, diagnostic: diagnostic}
 	t.Cleanup(f.close)
 	return f
+}
+
+func copyWorkerExecutable(t testing.TB, from, to string) {
+	t.Helper()
+	source, err := os.Open(from)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	destination, err := os.OpenFile(to, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o700)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(destination, source); err != nil {
+		_ = destination.Close()
+		t.Fatal(err)
+	}
+	if err := destination.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (f *workerFixture) close() {

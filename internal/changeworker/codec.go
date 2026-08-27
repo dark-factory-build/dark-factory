@@ -42,16 +42,17 @@ const (
 )
 
 type Config struct {
-	RuntimePath        string
-	RuntimeIdentity    runner.FileIdentity
-	GitExecutable      string
-	RepositoryRoot     string
-	RepositoryIdentity change.RepositoryIdentity
-	Revision           string
-	ChangeParent       string
-	FinalName          string
-	StagingName        string
-	AttemptSocket      string
+	RuntimePath          string
+	RuntimeIdentity      runner.FileIdentity
+	GitExecutable        string
+	FactoryctlExecutable string
+	RepositoryRoot       string
+	RepositoryIdentity   change.RepositoryIdentity
+	Revision             string
+	ChangeParent         string
+	FinalName            string
+	StagingName          string
+	AttemptSocket        string
 	// InitialTerminalInput is delivered once to the runner-owned PTY after the
 	// provider has crossed the release gate. It is not provider stdin: the PTY
 	// remains interactive for the lifetime of the run.
@@ -98,7 +99,7 @@ func EncodeConfig(config Config) ([]byte, error) {
 	encoded = binary.BigEndian.AppendUint64(encoded, config.RepositoryIdentity.Device())
 	encoded = binary.BigEndian.AppendUint64(encoded, config.RepositoryIdentity.Inode())
 	for _, value := range []string{
-		config.RuntimePath, config.GitExecutable, config.RepositoryRoot, config.Revision,
+		config.RuntimePath, config.GitExecutable, config.FactoryctlExecutable, config.RepositoryRoot, config.Revision,
 		config.ChangeParent, config.FinalName, config.StagingName, config.AttemptSocket,
 	} {
 		encoded = appendString(encoded, value)
@@ -136,7 +137,7 @@ func DecodeConfig(encoded []byte) (Config, error) {
 	if err != nil {
 		return Config{}, invalidContract(err)
 	}
-	values := make([]string, 8)
+	values := make([]string, 9)
 	for index := range values {
 		values[index], err = reader.string()
 		if err != nil {
@@ -149,9 +150,9 @@ func DecodeConfig(encoded []byte) (Config, error) {
 	}
 	config := Config{
 		RuntimePath: values[0], RuntimeIdentity: runner.FileIdentity{Device: device, Inode: inode},
-		GitExecutable: values[1], RepositoryRoot: values[2], RepositoryIdentity: repositoryIdentity, Revision: values[3],
-		ChangeParent: values[4], FinalName: values[5], StagingName: values[6],
-		AttemptSocket: values[7], InitialTerminalInput: input,
+		GitExecutable: values[1], FactoryctlExecutable: values[2], RepositoryRoot: values[3], RepositoryIdentity: repositoryIdentity, Revision: values[4],
+		ChangeParent: values[5], FinalName: values[6], StagingName: values[7],
+		AttemptSocket: values[8], InitialTerminalInput: input,
 	}
 	if err := validateConfig(config); err != nil {
 		return Config{}, err
@@ -160,7 +161,7 @@ func DecodeConfig(encoded []byte) (Config, error) {
 }
 
 func validateConfig(config Config) error {
-	paths := []string{config.RuntimePath, config.GitExecutable, config.RepositoryRoot, config.ChangeParent, config.AttemptSocket}
+	paths := []string{config.RuntimePath, config.GitExecutable, config.FactoryctlExecutable, config.RepositoryRoot, config.ChangeParent, config.AttemptSocket}
 	for _, path := range paths {
 		if !validAbsolute(path, maximumLocatorBytes) {
 			return invalidContract(nil)

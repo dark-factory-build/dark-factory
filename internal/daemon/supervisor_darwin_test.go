@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -47,6 +48,19 @@ func TestMain(m *testing.M) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			_, err = client.Succeed(ctx, os.Args[2])
+			cancel()
+		case "attempt":
+			if len(os.Args) != 7 || os.Args[2] != "request-human" || os.Args[3] != "--idempotency-key" || os.Args[5] != "--question" {
+				err = errors.New("invalid factoryctl fixture invocation")
+				break
+			}
+			client, clientErr := api.NewAttemptClientFromEnvironment(os.Getenv("DARK_FACTORY_SOCKET"))
+			if clientErr != nil {
+				err = clientErr
+				break
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_, err = client.RequestHuman(ctx, api.HumanQuestionInput{IdempotencyKey: os.Args[4], Question: os.Args[6]})
 			cancel()
 		case "--supervisor-descendant-provider":
 			receipt := os.Getenv("DARK_FACTORY_CHILD_RECEIPT")
@@ -118,6 +132,176 @@ func TestSupervisorRunsRegisteredShellWorkerToTypedSuccess(t *testing.T) {
 	changeState, found, err := fixture.store.Change(context.Background(), *run.ChangeID)
 	if err != nil || !found || changeState.Selection == nil || fmt.Sprintf("%x", changeState.Selection.Commit().Bytes()) != fixture.base {
 		t.Fatalf("Change exact base = %+v, found=%v, err=%v", changeState.Selection, found, err)
+	}
+}
+
+func TestSupervisorShellProviderRequestsExactlyOneDurableHumanRequest(t *testing.T) {
+	const (
+		key      = "0123456789abcdef0123456789abcdef"
+		question = "private-provider-question-sentinel"
+	)
+	fixture := newSupervisorFixture(t, supervisorHumanRequestProgram(t, key, question))
+	releaseChecked := make(chan error, 1)
+	fixture.spec.beforeProviderRelease = func() {
+		if _, err := os.Stat(fixture.witness); !errors.Is(err, os.ErrNotExist) {
+			releaseChecked <- fmt.Errorf("provider effect exists before StageProvider release: %v", err)
+			return
+		}
+		snapshot, err := fixture.store.Snapshot(context.Background())
+		if err != nil || len(snapshot.HumanRequests) != 0 {
+			releaseChecked <- fmt.Errorf("human request exists before StageProvider release: %+v, %v", snapshot.HumanRequests, err)
+			return
+		}
+		releaseChecked <- nil
+	}
+	type runResult struct {
+		run kernel.Run
+		err error
+	}
+	done := make(chan runResult, 1)
+	go func() {
+		run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+		done <- runResult{run: run, err: err}
+	}()
+	select {
+	case err := <-releaseChecked:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case result := <-done:
+		t.Fatalf("RunNext ended before provider release proof: %+v", result)
+	case <-time.After(8 * time.Second):
+		t.Fatal("provider release proof timed out")
+	}
+	if err := waitForWitness(fixture.childReceipt, 8*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := fixture.store.Snapshot(context.Background())
+	if err != nil || len(snapshot.HumanRequests) != 1 {
+		t.Fatalf("durable human requests=%+v err=%v", snapshot.HumanRequests, err)
+	}
+	request := snapshot.HumanRequests[0]
+	if request.Status != kernel.HumanRequestOpen || request.Revision.Int64() != 1 {
+		t.Fatalf("durable human request=%+v", request)
+	}
+	public := fmt.Sprintf("%+v", snapshot)
+	for _, private := range []string{key, question, fixture.spec.FactoryctlExecutable, fixture.spec.AttemptSocket} {
+		if strings.Contains(public, private) {
+			t.Fatalf("private provider request detail crossed public formatting: %q", public)
+		}
+	}
+	if err := os.WriteFile(fixture.continueReceipt, []byte("continue"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var result runResult
+	select {
+	case result = <-done:
+	case <-time.After(12 * time.Second):
+		t.Fatal("RunNext did not finish")
+	}
+	if result.err != nil {
+		t.Fatalf("RunNext: %v", result.err)
+	}
+	if request.RunID != result.run.ID {
+		t.Fatalf("human request run=%s terminal run=%s", request.RunID, result.run.ID)
+	}
+	fixture.assertTerminal(t, result.run, kernel.OutcomeSucceeded)
+	fixture.assertOneWitness(t)
+	durable, found, err := fixture.store.HumanRequest(context.Background(), request.ID)
+	if err != nil || !found || durable.ID != request.ID || durable.Status != kernel.HumanRequestStale {
+		t.Fatalf("final durable human request=%+v found=%v err=%v", durable, found, err)
+	}
+}
+
+func TestSupervisorRevalidatesFactoryctlImmediatelyBeforeProviderRelease(t *testing.T) {
+	fixture := newSupervisorFixture(t, supervisorHumanRequestProgram(t, "0123456789abcdef0123456789abcdef", "private-replacement-question"))
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(fixture.root, "factoryctl")
+	copySupervisorExecutable(t, executable, target)
+	fixture.spec.FactoryctlExecutable = target
+	released := false
+	fixture.spec.beforeProviderRelease = func() {
+		replacement := filepath.Join(fixture.root, "factoryctl.replacement")
+		copySupervisorExecutable(t, executable, replacement)
+		if err := os.Rename(replacement, target); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fixture.spec.afterProviderRelease = func() error {
+		released = true
+		return errors.New("replacement crossed provider release")
+	}
+	if _, err := fixture.daemon.RunNext(context.Background(), fixture.spec); err == nil {
+		t.Fatal("replaced factoryctl reached provider release")
+	} else if strings.Contains(err.Error(), target) {
+		t.Fatalf("private factoryctl locator leaked: %v", err)
+	}
+	if released {
+		t.Fatal("replaced factoryctl crossed StageProvider release")
+	}
+	if _, err := os.Stat(fixture.witness); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("provider witness exists after factoryctl replacement: %v", err)
+	}
+	snapshot, err := fixture.store.Snapshot(context.Background())
+	if err != nil || len(snapshot.HumanRequests) != 0 {
+		t.Fatalf("replacement created a human request: %+v, %v", snapshot.HumanRequests, err)
+	}
+}
+
+func TestSupervisorRejectsInvalidFactoryctlBeforeAdmissionOrProviderEffect(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name    string
+		locator func(*testing.T, *supervisorFixture) string
+	}{
+		{name: "relative", locator: func(*testing.T, *supervisorFixture) string { return "factoryctl" }},
+		{name: "missing", locator: func(t *testing.T, fixture *supervisorFixture) string {
+			return filepath.Join(fixture.root, "missing-factoryctl")
+		}},
+		{name: "symlink", locator: func(t *testing.T, fixture *supervisorFixture) string {
+			link := filepath.Join(fixture.root, "factoryctl.link")
+			if err := os.Symlink(executable, link); err != nil {
+				t.Fatal(err)
+			}
+			return link
+		}},
+		{name: "unsafe mode", locator: func(t *testing.T, fixture *supervisorFixture) string {
+			target := filepath.Join(fixture.root, "factoryctl.unsafe")
+			copySupervisorExecutable(t, executable, target)
+			if err := os.Chmod(target, 0o775); err != nil {
+				t.Fatal(err)
+			}
+			return target
+		}},
+		{name: "non native", locator: func(t *testing.T, fixture *supervisorFixture) string {
+			target := filepath.Join(fixture.root, "factoryctl.text")
+			if err := os.WriteFile(target, []byte("not a native executable"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			return target
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newSupervisorFixture(t, supervisorHumanRequestProgram(t, "0123456789abcdef0123456789abcdef", "private-invalid-question"))
+			locator := test.locator(t, fixture)
+			fixture.spec.FactoryctlExecutable = locator
+			if _, err := fixture.daemon.RunNext(context.Background(), fixture.spec); !errors.Is(err, kernel.ErrInvalidValue) || strings.Contains(err.Error(), locator) {
+				t.Fatalf("invalid factoryctl result=%v", err)
+			}
+			if _, err := os.Stat(fixture.witness); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("provider witness exists: %v", err)
+			}
+			snapshot, err := fixture.store.Snapshot(context.Background())
+			if err != nil || snapshot.Factory.ActiveRuns != 0 || len(snapshot.HumanRequests) != 0 {
+				t.Fatalf("invalid factoryctl admitted state: active=%d requests=%+v err=%v", snapshot.Factory.ActiveRuns, snapshot.HumanRequests, err)
+			}
+		})
 	}
 }
 
@@ -1099,9 +1283,13 @@ func newSupervisorFixture(t *testing.T, program string) *supervisorFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	factoryctl, err := filepath.EvalSymlinks(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
 	fixture.spec = SupervisorSpec{
 		AgentID: agentID, RuntimeParent: runtimeParent, ChangeParent: changeParent,
-		GitExecutable: git, BaseRevision: base, AttemptSocket: socket, RunnerExecutable: executable,
+		GitExecutable: git, BaseRevision: base, AttemptSocket: socket, RunnerExecutable: executable, FactoryctlExecutable: factoryctl,
 	}
 	return fixture
 }
@@ -1354,6 +1542,23 @@ func supervisorProgram(t *testing.T, waitAfterRequest, noRequest bool) string {
 	return "set -eu\nprintf x >> __WITNESS__\n" + request + wait
 }
 
+func supervisorHumanRequestProgram(t *testing.T, key, question string) string {
+	t.Helper()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := "\"$DARK_FACTORY_FACTORYCTL\" attempt request-human --idempotency-key " + quoteShell(key) + " --question " + quoteShell(question) + "\n"
+	return "set -eu\n" +
+		"test \"$PATH\" = /usr/bin:/bin\n" +
+		"case \"$DARK_FACTORY_FACTORYCTL\" in /*) ;; *) exit 83 ;; esac\n" +
+		"test -x \"$DARK_FACTORY_FACTORYCTL\"\n" +
+		"printf x >> __WITNESS__\n" + request + request +
+		"printf ready > __CHILD_RECEIPT__\n" +
+		"while [ ! -f __CONTINUE_RECEIPT__ ]; do sleep 0.01; done\n" +
+		quoteShell(executable) + " --supervisor-attempt-succeed typed-success\n"
+}
+
 func providerExitWithoutOutcomeProgram(t *testing.T) string {
 	t.Helper()
 	return "set -eu\nprintf x >> __WITNESS__\nexit 0\n"
@@ -1432,6 +1637,26 @@ func cleanupFailureProgram(t *testing.T) string {
 }
 
 func quoteShell(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
+
+func copySupervisorExecutable(t testing.TB, from, to string) {
+	t.Helper()
+	source, err := os.Open(from)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	destination, err := os.OpenFile(to, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o700)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(destination, source); err != nil {
+		_ = destination.Close()
+		t.Fatal(err)
+	}
+	if err := destination.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func supervisorTime() kernel.UnixMillis {
 	value, err := kernel.NewUnixMillis(time.Now().UnixMilli())
