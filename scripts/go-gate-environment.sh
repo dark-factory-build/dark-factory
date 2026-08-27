@@ -97,6 +97,7 @@ go_gate_run_bounded() {
         "LC_ALL=C" "LANG=C" \
         "COREPACK_ENABLE_NETWORK=${COREPACK_ENABLE_NETWORK-0}" \
         "COREPACK_DEFAULT_TO_LATEST=0" \
+        "CI=true" \
         "NODE_OPTIONS=" "NETRC=/dev/null" \
         "GIT_CONFIG_GLOBAL=/dev/null" "GIT_CONFIG_SYSTEM=/dev/null" \
         "GIT_CONFIG_NOSYSTEM=1" "GIT_TERMINAL_PROMPT=0" "GIT_PAGER=cat" \
