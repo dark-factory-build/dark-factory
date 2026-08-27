@@ -324,7 +324,7 @@ func decodeControl(data []byte, role senderRole) (ControlFrame, error) {
 	case TypeTerminalLeaseRenew:
 		body = new(TerminalLeaseRenew)
 	case TypeTerminalLeaseRelease:
-		body = new(TerminalLeaseRenew)
+		body = new(TerminalLeaseRelease)
 	case TypeTerminalLeaseResult:
 		body = new(TerminalLeaseResult)
 	case TypeTerminalResize:
@@ -476,6 +476,8 @@ func dereferenceBody(body any) any {
 		return *value
 	case *TerminalLeaseRenew:
 		return *value
+	case *TerminalLeaseRelease:
+		return *value
 	case *TerminalLeaseResult:
 		return *value
 	case *TerminalResize:
@@ -483,6 +485,8 @@ func dereferenceBody(body any) any {
 	case *TerminalResized:
 		return *value
 	case *TerminalDetach:
+		return *value
+	case *TerminalDetached:
 		return *value
 	case *TerminalInputResult:
 		return *value
@@ -776,7 +780,9 @@ func validateBody(kind MessageType, body any) error {
 		return validTerminalControl(kind, body)
 	case TypeTerminalResized:
 		return validTerminalControl(kind, body)
-	case TypeTerminalDetach, TypeTerminalDetached:
+	case TypeTerminalDetach:
+		return validTerminalControl(kind, body)
+	case TypeTerminalDetached:
 		return validTerminalControl(kind, body)
 	case TypeTerminalInputResult:
 		return validTerminalControl(kind, body)

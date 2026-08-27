@@ -133,6 +133,8 @@ func encodeDecoded(frame ControlFrame) ([]byte, error) {
 		return encodeControl(TypeTerminalLeaseAcquire, frame.ID, value)
 	case TerminalLeaseRenew:
 		return encodeControl(frame.Type, frame.ID, value)
+	case TerminalLeaseRelease:
+		return EncodeTerminalLeaseRelease(frame.ID, value)
 	case TerminalLeaseResult:
 		return encodeControl(TypeTerminalLeaseResult, frame.ID, value)
 	case TerminalResize:
@@ -141,6 +143,8 @@ func encodeDecoded(frame ControlFrame) ([]byte, error) {
 		return encodeControl(TypeTerminalResized, frame.ID, value)
 	case TerminalDetach:
 		return encodeControl(frame.Type, frame.ID, value)
+	case TerminalDetached:
+		return EncodeTerminalDetached(frame.ID, value)
 	case TerminalInputResult:
 		return encodeControl(TypeTerminalInputResult, frame.ID, value)
 	case TerminalEOF:

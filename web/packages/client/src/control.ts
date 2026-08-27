@@ -16,6 +16,10 @@ import {
   MAX_PROJECT_NAME_BYTES,
   MAX_SQLITE_INTEGER,
   MAX_STATE_PAGE_ITEMS,
+  MAX_TERMINAL_COLS,
+  MAX_TERMINAL_PAYLOAD,
+  MAX_TERMINAL_ROWS,
+  MAX_TERMINAL_UNACKED_BYTES,
   MAX_TASK_PRIORITY,
   MAX_TASK_TITLE_BYTES,
   type CapabilityMask,
@@ -71,14 +75,19 @@ export type HumanRequestReplyResultBody = { request_id: string; revision: bigint
 export type HumanRequestCancelRunBody = { run_id: string; request_id: string; expected_request_revision: bigint; expected_run_revision: bigint };
 export type HumanRequestActionResultBody = { action: "cancel_run"; run_id: string; run_revision: bigint; request_id: string; request_revision: bigint; status: "resolved" };
 export type TerminalAttachBody = { run_id: string; session_id: string; expected_run_revision: bigint; expected_session_revision: bigint; after_sequence: bigint };
-export type TerminalAttachedBody = { session_id: string; floor: bigint; head: bigint; acknowledged_sequence: bigint; max_unacked_bytes: number };
+export type TerminalAttachedBody = { session_id: string; floor: bigint; head: bigint; acknowledged_sequence: bigint; max_unacked_bytes: bigint };
 export type TerminalAckBody = { session_id: string; next_sequence: bigint };
-export type TerminalLeaseBody = { run_id: string; session_id: string; generation?: bigint; expected_run_revision: bigint; expected_session_revision: bigint };
-export type TerminalLeaseResultBody = { operation: "acquired" | "renewed" | "released"; run_id: string; session_id: string; generation: bigint; expires_at_ms?: bigint; last_input_sequence: bigint; run_revision: bigint; session_revision: bigint };
+export type TerminalLeaseAcquireBody = { run_id: string; session_id: string; expected_run_revision: bigint; expected_session_revision: bigint };
+export type TerminalLeaseRenewBody = { run_id: string; session_id: string; generation: bigint; expected_run_revision: bigint; expected_session_revision: bigint };
+export type TerminalLeaseReleaseBody = { run_id: string; session_id: string; generation: bigint; expected_run_revision: bigint; expected_session_revision: bigint };
+export type TerminalLeaseResultBody =
+  | { operation: "acquired" | "renewed"; run_id: string; session_id: string; generation: bigint; expires_at_ms: bigint; last_input_sequence: bigint; run_revision: bigint; session_revision: bigint }
+  | { operation: "released"; run_id: string; session_id: string; generation: bigint; last_input_sequence: bigint; run_revision: bigint; session_revision: bigint };
 export type TerminalResizeBody = { run_id: string; session_id: string; generation: bigint; expected_run_revision: bigint; expected_session_revision: bigint; rows: number; cols: number };
 export type TerminalResizedBody = { session_id: string; generation: bigint; rows: number; cols: number };
 export type TerminalDetachBody = { session_id: string };
-export type TerminalInputResultBody = { session_id: string; generation: bigint; sequence: bigint; status: "accepted" | "rejected" | "partial" | "uncertain"; accepted_bytes: number };
+export type TerminalDetachedBody = { session_id: string };
+export type TerminalInputResultBody = { session_id: string; generation: bigint; sequence: bigint; status: "accepted" | "rejected" | "partial" | "uncertain"; accepted_bytes: bigint };
 export type TerminalEOFBody = { session_id: string };
 export type TerminalExitBody = { session_id: string; exit_code: number; exit_signal: number; aborted: boolean };
 export type TerminalResetBody = { session_id: string; floor: bigint; head: bigint };
@@ -98,11 +107,32 @@ export type StateEntityFrame = { v: 1; type: "STATE_ENTITY"; id: string; body: S
 export type HumanRequestDetailGetFrame = { v: 1; type: "HUMAN_REQUEST_DETAIL_GET"; id: string; body: HumanRequestDetailGetBody };
 export type HumanRequestDetailFrame = { v: 1; type: "HUMAN_REQUEST_DETAIL"; id: string; body: HumanRequestDetailBody };
 export type ErrorFrame = { v: 1; type: "ERROR"; id?: string; body: ErrorBody };
-export type TerminalControlFrame = { v: 1; type: "TERMINAL_ATTACH"; id: string; body: TerminalAttachBody } | { v: 1; type: "TERMINAL_ACK"; body: TerminalAckBody } | { v: 1; type: "TERMINAL_LEASE_ACQUIRE" | "TERMINAL_LEASE_RENEW" | "TERMINAL_LEASE_RELEASE"; id: string; body: TerminalLeaseBody } | { v: 1; type: "TERMINAL_RESIZE"; id: string; body: TerminalResizeBody } | { v: 1; type: "TERMINAL_DETACH"; id: string; body: TerminalDetachBody };
-export type TerminalServerControlFrame = { v: 1; type: "TERMINAL_ATTACHED"; id: string; body: TerminalAttachedBody } | { v: 1; type: "TERMINAL_LEASE_RESULT"; id: string; body: TerminalLeaseResultBody } | { v: 1; type: "TERMINAL_RESIZED"; id: string; body: TerminalResizedBody } | { v: 1; type: "TERMINAL_DETACHED"; id: string; body: TerminalDetachBody } | { v: 1; type: "TERMINAL_INPUT_RESULT"; id: string; body: TerminalInputResultBody } | { v: 1; type: "TERMINAL_EOF" | "TERMINAL_EXIT" | "TERMINAL_RESET"; id: string; body: TerminalEOFBody | TerminalExitBody | TerminalResetBody };
+export type TerminalControlFrame =
+  | { v: 1; type: "TERMINAL_ATTACH"; id: string; body: TerminalAttachBody }
+  | { v: 1; type: "TERMINAL_ACK"; body: TerminalAckBody }
+  | { v: 1; type: "TERMINAL_LEASE_ACQUIRE"; id: string; body: TerminalLeaseAcquireBody }
+  | { v: 1; type: "TERMINAL_LEASE_RENEW"; id: string; body: TerminalLeaseRenewBody }
+  | { v: 1; type: "TERMINAL_LEASE_RELEASE"; id: string; body: TerminalLeaseReleaseBody }
+  | { v: 1; type: "TERMINAL_RESIZE"; id: string; body: TerminalResizeBody }
+  | { v: 1; type: "TERMINAL_DETACH"; id: string; body: TerminalDetachBody };
+export type TerminalServerControlFrame =
+  | { v: 1; type: "TERMINAL_ATTACHED"; id: string; body: TerminalAttachedBody }
+  | { v: 1; type: "TERMINAL_LEASE_RESULT"; id: string; body: TerminalLeaseResultBody }
+  | { v: 1; type: "TERMINAL_RESIZED"; id: string; body: TerminalResizedBody }
+  | { v: 1; type: "TERMINAL_DETACHED"; id: string; body: TerminalDetachedBody }
+  | { v: 1; type: "TERMINAL_INPUT_RESULT"; id: string; body: TerminalInputResultBody }
+  | { v: 1; type: "TERMINAL_EOF"; id: string; body: TerminalEOFBody }
+  | { v: 1; type: "TERMINAL_EXIT"; id: string; body: TerminalExitBody }
+  | { v: 1; type: "TERMINAL_RESET"; id: string; body: TerminalResetBody };
 
-export type ServerControlFrame = HelloFrame | PairResultFrame | AuthResultFrame | StateSnapshotFrame | StateRestartFrame | StateEventFrame | StateEntityFrame | HumanRequestDetailFrame | TerminalServerControlFrame | ErrorFrame;
-export type ClientControlFrame = PairProveFrame | AuthProveFrame | StateGetFrame | StateSubscribeFrame | StateEntityGetFrame | HumanRequestDetailGetFrame | TerminalControlFrame | ErrorFrame;
+export type ServerControlFrame = HelloFrame | PairResultFrame | AuthResultFrame | StateSnapshotFrame | StateRestartFrame | StateEventFrame | StateEntityFrame | HumanRequestDetailFrame
+  | { v: 1; type: "HUMAN_REQUEST_REPLY_RESULT"; id: string; body: HumanRequestReplyResultBody }
+  | { v: 1; type: "HUMAN_REQUEST_ACTION_RESULT"; id: string; body: HumanRequestActionResultBody }
+  | TerminalServerControlFrame | ErrorFrame;
+export type ClientControlFrame = PairProveFrame | AuthProveFrame | StateGetFrame | StateSubscribeFrame | StateEntityGetFrame | HumanRequestDetailGetFrame
+  | { v: 1; type: "HUMAN_REQUEST_REPLY"; id: string; body: HumanRequestReplyBody }
+  | { v: 1; type: "HUMAN_REQUEST_CANCEL_RUN"; id: string; body: HumanRequestCancelRunBody }
+  | TerminalControlFrame | ErrorFrame;
 type ControlBody = ClientControlFrame["body"] | ServerControlFrame["body"];
 
 const HEX_BYTES = { daemon_id: 16, boot_id: 16, connection_nonce: 32, challenge: 32, client_id: 16, public_key_sec1: 65, signature: 64 } as const;
@@ -116,6 +146,15 @@ export function encodeStateGet(id: string, body: StateGetBody): string { return 
 export function encodeStateSubscribe(id: string, body: StateSubscribeBody): string { return encodeClientControl({ v: 1, type: "STATE_SUBSCRIBE", id, body }); }
 export function encodeStateEntityGet(id: string, body: StateEntityGetBody): string { return encodeClientControl({ v: 1, type: "STATE_ENTITY_GET", id, body }); }
 export function encodeHumanRequestDetailGet(id: string, body: HumanRequestDetailGetBody): string { return encodeClientControl({ v: 1, type: "HUMAN_REQUEST_DETAIL_GET", id, body }); }
+export function encodeHumanRequestReply(id: string, body: HumanRequestReplyBody): string { return encodeClientControl({ v: 1, type: "HUMAN_REQUEST_REPLY", id, body }); }
+export function encodeHumanRequestCancelRun(id: string, body: HumanRequestCancelRunBody): string { return encodeClientControl({ v: 1, type: "HUMAN_REQUEST_CANCEL_RUN", id, body }); }
+export function encodeTerminalAttach(id: string, body: TerminalAttachBody): string { return encodeClientControl({ v: 1, type: "TERMINAL_ATTACH", id, body }); }
+export function encodeTerminalAck(body: TerminalAckBody): string { return encodeClientControl({ v: 1, type: "TERMINAL_ACK", body }); }
+export function encodeTerminalLeaseAcquire(id: string, body: TerminalLeaseAcquireBody): string { return encodeClientControl({ v: 1, type: "TERMINAL_LEASE_ACQUIRE", id, body }); }
+export function encodeTerminalLeaseRenew(id: string, body: TerminalLeaseRenewBody): string { return encodeClientControl({ v: 1, type: "TERMINAL_LEASE_RENEW", id, body }); }
+export function encodeTerminalLeaseRelease(id: string, body: TerminalLeaseReleaseBody): string { return encodeClientControl({ v: 1, type: "TERMINAL_LEASE_RELEASE", id, body }); }
+export function encodeTerminalResize(id: string, body: TerminalResizeBody): string { return encodeClientControl({ v: 1, type: "TERMINAL_RESIZE", id, body }); }
+export function encodeTerminalDetach(id: string, body: TerminalDetachBody): string { return encodeClientControl({ v: 1, type: "TERMINAL_DETACH", id, body }); }
 export function encodeClientError(body: ErrorBody, id?: string): string { return encodeClientControl({ v: 1, type: "ERROR", ...(id === undefined ? {} : { id }), body }); }
 
 export function encodeServerControl(frame: ServerControlFrame): string { return normalizeBoundary(() => encode(frame, validateControl(frame, "server"))); }
@@ -127,6 +166,16 @@ export function encodeStateRestart(id: string, body: StateRestartBody): string {
 export function encodeStateEvent(id: string, body: StateEventBody): string { return encodeServerControl({ v: 1, type: "STATE_EVENT", id, body }); }
 export function encodeStateEntity(id: string, body: StateEntityBody): string { return encodeServerControl({ v: 1, type: "STATE_ENTITY", id, body }); }
 export function encodeHumanRequestDetail(id: string, body: HumanRequestDetailBody): string { return encodeServerControl({ v: 1, type: "HUMAN_REQUEST_DETAIL", id, body }); }
+export function encodeHumanRequestReplyResult(id: string, body: HumanRequestReplyResultBody): string { return encodeServerControl({ v: 1, type: "HUMAN_REQUEST_REPLY_RESULT", id, body }); }
+export function encodeHumanRequestActionResult(id: string, body: HumanRequestActionResultBody): string { return encodeServerControl({ v: 1, type: "HUMAN_REQUEST_ACTION_RESULT", id, body }); }
+export function encodeTerminalAttached(id: string, body: TerminalAttachedBody): string { return encodeServerControl({ v: 1, type: "TERMINAL_ATTACHED", id, body }); }
+export function encodeTerminalLeaseResult(id: string, body: TerminalLeaseResultBody): string { return encodeServerControl({ v: 1, type: "TERMINAL_LEASE_RESULT", id, body }); }
+export function encodeTerminalResized(id: string, body: TerminalResizedBody): string { return encodeServerControl({ v: 1, type: "TERMINAL_RESIZED", id, body }); }
+export function encodeTerminalDetached(id: string, body: TerminalDetachedBody): string { return encodeServerControl({ v: 1, type: "TERMINAL_DETACHED", id, body }); }
+export function encodeTerminalInputResult(id: string, body: TerminalInputResultBody): string { return encodeServerControl({ v: 1, type: "TERMINAL_INPUT_RESULT", id, body }); }
+export function encodeTerminalEOF(id: string, body: TerminalEOFBody): string { return encodeServerControl({ v: 1, type: "TERMINAL_EOF", id, body }); }
+export function encodeTerminalExit(id: string, body: TerminalExitBody): string { return encodeServerControl({ v: 1, type: "TERMINAL_EXIT", id, body }); }
+export function encodeTerminalReset(id: string, body: TerminalResetBody): string { return encodeServerControl({ v: 1, type: "TERMINAL_RESET", id, body }); }
 export function encodeServerError(body: ErrorBody, id?: string): string { return encodeServerControl({ v: 1, type: "ERROR", ...(id === undefined ? {} : { id }), body }); }
 export function decodeClientControl(data: string | Uint8Array): ClientControlFrame { return normalizeBoundary(() => decodeControl(data, "client") as ClientControlFrame); }
 export function decodeServerControl(data: string | Uint8Array): ServerControlFrame { return normalizeBoundary(() => decodeControl(data, "server") as ServerControlFrame); }
@@ -159,7 +208,7 @@ function decodeControl(data: string | Uint8Array, role: "client" | "server"): Cl
   if (!isControlType(value.type)) malformed();
   const hasID = Object.prototype.hasOwnProperty.call(value, "id");
   if (hasID && (typeof value.id !== "string" || !validID(value.id))) malformed();
-  const requiredID = value.type !== "HELLO" && value.type !== "ERROR";
+  const requiredID = value.type !== "HELLO" && value.type !== "ERROR" && value.type !== "TERMINAL_ACK";
   if (requiredID !== hasID) malformed();
   if (role === "client" && !CLIENT_TYPES.includes(value.type)) throw new ProtocolError("wrong_direction");
   if (role === "server" && !SERVER_TYPES.includes(value.type)) throw new ProtocolError("wrong_direction");
@@ -169,7 +218,7 @@ function decodeControl(data: string | Uint8Array, role: "client" | "server"): Cl
 function validateControl(frame: ClientControlFrame | ServerControlFrame, role: "client" | "server"): ControlBody {
   if (!isObject(frame) || frame.v !== 1 || !isControlType(frame.type)) malformed();
   if (role === "client" && !CLIENT_TYPES.includes(frame.type) || role === "server" && !SERVER_TYPES.includes(frame.type)) throw new ProtocolError("wrong_direction");
-  const requires = frame.type !== "HELLO" && frame.type !== "ERROR";
+  const requires = frame.type !== "HELLO" && frame.type !== "ERROR" && frame.type !== "TERMINAL_ACK";
   if (requires && (!("id" in frame) || !validID(frame.id))) malformed();
   if (!requires && "id" in frame && (typeof frame.id !== "string" || !validID(frame.id))) malformed();
   return validateBody(frame.type, frame.body, false);
@@ -195,6 +244,24 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
     case "STATE_ENTITY": return stateEntity(body, wire);
     case "HUMAN_REQUEST_DETAIL_GET": exactKeys(body, ["request_id", "expected_revision"]); return { request_id: dynamicID(body.request_id), expected_revision: decimal(body.expected_revision, wire, true) };
     case "HUMAN_REQUEST_DETAIL": exactKeys(body, ["request_id", "revision", "question"]); return { request_id: dynamicID(body.request_id), revision: decimal(body.revision, wire, true), question: boundedText(body.question, 1, MAX_HUMAN_QUESTION_BYTES) };
+    case "HUMAN_REQUEST_REPLY": exactKeys(body, ["run_id", "request_id", "expected_revision", "reply"]); return { run_id: dynamicID(body.run_id), request_id: dynamicID(body.request_id), expected_revision: decimal(body.expected_revision, wire, true), reply: boundedText(body.reply, 1, MAX_HUMAN_REPLY_BYTES) };
+    case "HUMAN_REQUEST_REPLY_RESULT": exactKeys(body, ["request_id", "revision", "status"]); if (body.status !== "resolved" && body.status !== "delivery_unknown") malformed(); return { request_id: dynamicID(body.request_id), revision: decimal(body.revision, wire, true), status: body.status };
+    case "HUMAN_REQUEST_CANCEL_RUN": exactKeys(body, ["run_id", "request_id", "expected_request_revision", "expected_run_revision"]); return { run_id: dynamicID(body.run_id), request_id: dynamicID(body.request_id), expected_request_revision: decimal(body.expected_request_revision, wire, true), expected_run_revision: decimal(body.expected_run_revision, wire, true) };
+    case "HUMAN_REQUEST_ACTION_RESULT": exactKeys(body, ["action", "run_id", "run_revision", "request_id", "request_revision", "status"]); if (body.action !== "cancel_run" || body.status !== "resolved") malformed(); return { action: "cancel_run", run_id: dynamicID(body.run_id), run_revision: decimal(body.run_revision, wire, true), request_id: dynamicID(body.request_id), request_revision: decimal(body.request_revision, wire, true), status: "resolved" };
+    case "TERMINAL_ATTACH": exactKeys(body, ["run_id", "session_id", "expected_run_revision", "expected_session_revision", "after_sequence"]); return { run_id: dynamicID(body.run_id), session_id: dynamicID(body.session_id), expected_run_revision: decimal(body.expected_run_revision, wire, true), expected_session_revision: decimal(body.expected_session_revision, wire, true), after_sequence: decimal(body.after_sequence, wire) };
+    case "TERMINAL_ATTACHED": exactKeys(body, ["session_id", "floor", "head", "acknowledged_sequence", "max_unacked_bytes"]); { const floor = decimal(body.floor, wire); const head = decimal(body.head, wire); const acknowledged_sequence = decimal(body.acknowledged_sequence, wire); const max_unacked_bytes = decimal(body.max_unacked_bytes, wire); if (floor > head || acknowledged_sequence > head || max_unacked_bytes !== BigInt(MAX_TERMINAL_UNACKED_BYTES)) malformed(); return { session_id: dynamicID(body.session_id), floor, head, acknowledged_sequence, max_unacked_bytes }; }
+    case "TERMINAL_ACK": exactKeys(body, ["session_id", "next_sequence"]); return { session_id: dynamicID(body.session_id), next_sequence: decimal(body.next_sequence, wire, true) };
+    case "TERMINAL_LEASE_ACQUIRE": exactKeys(body, ["run_id", "session_id", "expected_run_revision", "expected_session_revision"]); return { run_id: dynamicID(body.run_id), session_id: dynamicID(body.session_id), expected_run_revision: decimal(body.expected_run_revision, wire, true), expected_session_revision: decimal(body.expected_session_revision, wire, true) };
+    case "TERMINAL_LEASE_RENEW": case "TERMINAL_LEASE_RELEASE": exactKeys(body, ["run_id", "session_id", "generation", "expected_run_revision", "expected_session_revision"]); return { run_id: dynamicID(body.run_id), session_id: dynamicID(body.session_id), generation: decimal(body.generation, wire, true), expected_run_revision: decimal(body.expected_run_revision, wire, true), expected_session_revision: decimal(body.expected_session_revision, wire, true) };
+    case "TERMINAL_LEASE_RESULT": exactKeys(body, ["operation", "run_id", "session_id", "generation", "last_input_sequence", "run_revision", "session_revision"], ["expires_at_ms"]); if (body.operation !== "acquired" && body.operation !== "renewed" && body.operation !== "released") malformed(); { const operation = body.operation; const run_id = dynamicID(body.run_id); const session_id = dynamicID(body.session_id); const generation = decimal(body.generation, wire, true); const expires_at_ms = Object.prototype.hasOwnProperty.call(body, "expires_at_ms") ? decimal(body.expires_at_ms, wire, true) : undefined; const last_input_sequence = decimal(body.last_input_sequence, wire); const run_revision = decimal(body.run_revision, wire, true); const session_revision = decimal(body.session_revision, wire, true); if (operation === "released") { if (expires_at_ms !== undefined) malformed(); return { operation, run_id, session_id, generation, last_input_sequence, run_revision, session_revision }; } if (expires_at_ms === undefined) malformed(); return { operation, run_id, session_id, generation, expires_at_ms, last_input_sequence, run_revision, session_revision }; }
+    case "TERMINAL_RESIZE": exactKeys(body, ["run_id", "session_id", "generation", "expected_run_revision", "expected_session_revision", "rows", "cols"]); return { run_id: dynamicID(body.run_id), session_id: dynamicID(body.session_id), generation: decimal(body.generation, wire, true), expected_run_revision: decimal(body.expected_run_revision, wire, true), expected_session_revision: decimal(body.expected_session_revision, wire, true), rows: integer(body.rows, 1, MAX_TERMINAL_ROWS), cols: integer(body.cols, 1, MAX_TERMINAL_COLS) };
+    case "TERMINAL_RESIZED": exactKeys(body, ["session_id", "generation", "rows", "cols"]); return { session_id: dynamicID(body.session_id), generation: decimal(body.generation, wire, true), rows: integer(body.rows, 1, MAX_TERMINAL_ROWS), cols: integer(body.cols, 1, MAX_TERMINAL_COLS) };
+    case "TERMINAL_DETACH": exactKeys(body, ["session_id"]); return { session_id: dynamicID(body.session_id) };
+    case "TERMINAL_DETACHED": exactKeys(body, ["session_id"]); return { session_id: dynamicID(body.session_id) };
+    case "TERMINAL_INPUT_RESULT": exactKeys(body, ["session_id", "generation", "sequence", "status", "accepted_bytes"]); if (body.status !== "accepted" && body.status !== "rejected" && body.status !== "partial" && body.status !== "uncertain") malformed(); { const accepted_bytes = decimal(body.accepted_bytes, wire); if (accepted_bytes > BigInt(MAX_TERMINAL_PAYLOAD)) malformed(); return { session_id: dynamicID(body.session_id), generation: decimal(body.generation, wire, true), sequence: decimal(body.sequence, wire, true), status: body.status, accepted_bytes }; }
+    case "TERMINAL_EOF": exactKeys(body, ["session_id"]); return { session_id: dynamicID(body.session_id) };
+    case "TERMINAL_EXIT": exactKeys(body, ["session_id", "exit_code", "exit_signal", "aborted"]); if (typeof body.aborted !== "boolean") malformed(); return { session_id: dynamicID(body.session_id), exit_code: integer(body.exit_code, 0, Number.MAX_SAFE_INTEGER), exit_signal: integer(body.exit_signal, 0, Number.MAX_SAFE_INTEGER), aborted: body.aborted };
+    case "TERMINAL_RESET": exactKeys(body, ["session_id", "floor", "head"]); { const floor = decimal(body.floor, wire); const head = decimal(body.head, wire); if (floor > head) malformed(); return { session_id: dynamicID(body.session_id), floor, head }; }
     case "ERROR": exactKeys(body, ["code", "retryable"]); if (typeof body.code !== "string" || !(ERROR_CODES as readonly string[]).includes(body.code) || typeof body.retryable !== "boolean") malformed(); return { code: body.code as ErrorCode, retryable: body.retryable };
   }
 }
@@ -277,7 +344,15 @@ function dynamicID(value: unknown): string { if (typeof value !== "string" || !/
 function cursor(value: unknown): string | null { if (value === null) return null; if (typeof value !== "string" || value.length === 0 || new TextEncoder().encode(value).length > MAX_CURSOR_BYTES || !/^[A-Za-z0-9_-]+$/.test(value)) malformed(); return value; }
 function boundedText(value: unknown, minimum: number, maximum: number): string { if (typeof value !== "string" || hasLoneSurrogate(value)) malformed(); const length = new TextEncoder().encode(value).length; if (length < minimum || length > maximum) malformed(); return value; }
 function hasLoneSurrogate(value: string): boolean {
-  for (let index = 0; index < value.length; index++) { const code = value.charCodeAt(index); if (code >= 0xd800 && code <= 0xdbff) { const next = value.charCodeAt(++index); if (next < 0xdc00 || next > 0xdfff) return true; } else if (code >= 0xdc00 && code <= 0xdfff) return true; }
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      if (index + 1 >= value.length) return true;
+      const next = value.charCodeAt(index + 1);
+      if (next < 0xdc00 || next > 0xdfff) return true;
+      index++;
+    } else if (code >= 0xdc00 && code <= 0xdfff) return true;
+  }
   return false;
 }
 function integer(value: unknown, minimum: number, maximum: number): number { if (typeof value !== "number" || !Number.isSafeInteger(value) || value < minimum || value > maximum) malformed(); return value; }

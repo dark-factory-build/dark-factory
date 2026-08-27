@@ -1,6 +1,9 @@
 package browserprotocol
 
-import "fmt"
+import (
+	"fmt"
+	"unicode/utf8"
+)
 
 func EncodeHumanRequestReply(id string, v HumanRequestReply) ([]byte, error) {
 	return encodeControl(TypeHumanRequestReply, id, v)
@@ -63,6 +66,7 @@ const (
 	TerminalAckTimeoutMS           = 10000
 	MaxTerminalRows         uint16 = 4096
 	MaxTerminalCols         uint16 = 4096
+	MaxJSONInteger          int64  = 1<<53 - 1
 )
 
 type HumanRequestReply struct {
@@ -102,7 +106,7 @@ type TerminalAttached struct {
 	Floor                Decimal `json:"floor"`
 	Head                 Decimal `json:"head"`
 	AcknowledgedSequence Decimal `json:"acknowledged_sequence"`
-	MaxUnackedBytes      uint64  `json:"max_unacked_bytes"`
+	MaxUnackedBytes      Decimal `json:"max_unacked_bytes"`
 }
 type TerminalAck struct {
 	SessionID    string  `json:"session_id"`
@@ -121,7 +125,13 @@ type TerminalLeaseRenew struct {
 	ExpectedRunRevision     Decimal `json:"expected_run_revision"`
 	ExpectedSessionRevision Decimal `json:"expected_session_revision"`
 }
-type TerminalLeaseRelease = TerminalLeaseRenew
+type TerminalLeaseRelease struct {
+	RunID                   string  `json:"run_id"`
+	SessionID               string  `json:"session_id"`
+	Generation              Decimal `json:"generation"`
+	ExpectedRunRevision     Decimal `json:"expected_run_revision"`
+	ExpectedSessionRevision Decimal `json:"expected_session_revision"`
+}
 type TerminalLeaseResult struct {
 	Operation         string   `json:"operation"`
 	RunID             string   `json:"run_id"`
@@ -150,13 +160,15 @@ type TerminalResized struct {
 type TerminalDetach struct {
 	SessionID string `json:"session_id"`
 }
-type TerminalDetached = TerminalDetach
+type TerminalDetached struct {
+	SessionID string `json:"session_id"`
+}
 type TerminalInputResult struct {
 	SessionID     string  `json:"session_id"`
 	Generation    Decimal `json:"generation"`
 	Sequence      Decimal `json:"sequence"`
 	Status        string  `json:"status"`
-	AcceptedBytes uint64  `json:"accepted_bytes"`
+	AcceptedBytes Decimal `json:"accepted_bytes"`
 }
 type TerminalEOF struct {
 	SessionID string `json:"session_id"`
@@ -193,6 +205,8 @@ func validTerminalControl(kind MessageType, body any) error {
 		return validTerminalControl(kind, *value)
 	case *TerminalLeaseRenew:
 		return validTerminalControl(kind, *value)
+	case *TerminalLeaseRelease:
+		return validTerminalControl(kind, *value)
 	case *TerminalLeaseResult:
 		return validTerminalControl(kind, *value)
 	case *TerminalResize:
@@ -200,6 +214,8 @@ func validTerminalControl(kind MessageType, body any) error {
 	case *TerminalResized:
 		return validTerminalControl(kind, *value)
 	case *TerminalDetach:
+		return validTerminalControl(kind, *value)
+	case *TerminalDetached:
 		return validTerminalControl(kind, *value)
 	case *TerminalInputResult:
 		return validTerminalControl(kind, *value)
@@ -211,12 +227,23 @@ func validTerminalControl(kind MessageType, body any) error {
 		return validTerminalControl(kind, *value)
 	}
 	bad := func() error { return fmt.Errorf("%w: invalid %s", ErrMalformed, kind) }
-	id := func(s string) bool { _, err := fixedHex("id", s, 16); return err == nil }
+	id := func(s string) bool {
+		value, err := fixedHex("id", s, 16)
+		if err != nil {
+			return false
+		}
+		for _, b := range value {
+			if b != 0 {
+				return true
+			}
+		}
+		return false
+	}
 	pos := func(d Decimal) bool { return d > 0 }
 	dims := func(n uint16) bool { return n >= 1 && n <= 4096 }
 	switch v := body.(type) {
 	case HumanRequestReply:
-		if !id(v.RunID) || !id(v.RequestID) || v.ExpectedRevision == 0 || v.Reply == "" || len([]byte(v.Reply)) > MaxHumanReplyBytes {
+		if !id(v.RunID) || !id(v.RequestID) || v.ExpectedRevision == 0 || !utf8.ValidString(v.Reply) || v.Reply == "" || len([]byte(v.Reply)) > MaxHumanReplyBytes {
 			return bad()
 		}
 	case HumanRequestReplyResult:
@@ -236,7 +263,7 @@ func validTerminalControl(kind MessageType, body any) error {
 			return bad()
 		}
 	case TerminalAttached:
-		if !id(v.SessionID) || v.MaxUnackedBytes != MaxTerminalUnackedBytes || v.AcknowledgedSequence > v.Head {
+		if !id(v.SessionID) || v.Floor > v.Head || v.AcknowledgedSequence > v.Head || v.MaxUnackedBytes != MaxTerminalUnackedBytes {
 			return bad()
 		}
 	case TerminalAck:
@@ -251,8 +278,12 @@ func validTerminalControl(kind MessageType, body any) error {
 		if !id(v.RunID) || !id(v.SessionID) || !pos(v.Generation) || !pos(v.ExpectedRunRevision) || !pos(v.ExpectedSessionRevision) {
 			return bad()
 		}
+	case TerminalLeaseRelease:
+		if !id(v.RunID) || !id(v.SessionID) || !pos(v.Generation) || !pos(v.ExpectedRunRevision) || !pos(v.ExpectedSessionRevision) {
+			return bad()
+		}
 	case TerminalLeaseResult:
-		if (v.Operation != "acquired" && v.Operation != "renewed" && v.Operation != "released") || !id(v.RunID) || !id(v.SessionID) || !pos(v.Generation) || v.Operation == "released" && v.ExpiresAtMS != nil {
+		if (v.Operation != "acquired" && v.Operation != "renewed" && v.Operation != "released") || !id(v.RunID) || !id(v.SessionID) || !pos(v.Generation) || (v.Operation == "released" && v.ExpiresAtMS != nil) || (v.Operation != "released" && (v.ExpiresAtMS == nil || !pos(*v.ExpiresAtMS))) {
 			return bad()
 		}
 	case TerminalResize:
@@ -267,6 +298,10 @@ func validTerminalControl(kind MessageType, body any) error {
 		if !id(v.SessionID) {
 			return bad()
 		}
+	case TerminalDetached:
+		if !id(v.SessionID) {
+			return bad()
+		}
 	case TerminalInputResult:
 		if !id(v.SessionID) || !pos(v.Generation) || !pos(v.Sequence) || (v.Status != "accepted" && v.Status != "rejected" && v.Status != "partial" && v.Status != "uncertain") || v.AcceptedBytes > MaxTerminalPayload {
 			return bad()
@@ -276,7 +311,7 @@ func validTerminalControl(kind MessageType, body any) error {
 			return bad()
 		}
 	case TerminalExit:
-		if !id(v.SessionID) || v.ExitCode < 0 || v.ExitSignal < 0 {
+		if !id(v.SessionID) || v.ExitCode < 0 || v.ExitCode > MaxJSONInteger || v.ExitSignal < 0 || v.ExitSignal > MaxJSONInteger {
 			return bad()
 		}
 	case TerminalReset:

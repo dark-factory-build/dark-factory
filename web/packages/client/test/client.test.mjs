@@ -16,6 +16,9 @@ import {
   encodeServerControl,
   encodeTerminalInput,
   encodeTerminalOutput,
+  MAX_TERMINAL_COLS,
+  MAX_TERMINAL_ROWS,
+  MAX_TERMINAL_UNACKED_BYTES,
   hexBytes,
   MAX_TERMINAL_PAYLOAD,
   verifyP256Signature,
@@ -57,6 +60,38 @@ test("control role, envelope, field and capability validation is closed", () => 
     expectMalformed(() => decodeServerControl(`{"v":1,"type":"AUTH_RESULT","id":"auth-1","body":{"client_id":"606162636465666768696a6b6c6d6e6f","capabilities":${number}}}`));
   }
   assert.equal(decodeServerControl('{"v":1,"type":"AUTH_RESULT","id":"auth-1","body":{"client_id":"606162636465666768696a6b6c6d6e6f","capabilities":1} }').body.capabilities, 1);
+});
+
+test("browser terminal and HumanRequest controls are typed, directional, and bounded", () => {
+  const client = ["human_request_reply", "human_request_cancel_run", "terminal_attach", "terminal_ack", "terminal_lease_acquire", "terminal_lease_renew", "terminal_lease_release", "terminal_resize", "terminal_detach"];
+  const server = ["human_request_reply_result", "human_request_action_result", "terminal_attached", "terminal_lease_result", "terminal_resized", "terminal_detached", "terminal_input_result", "terminal_eof", "terminal_exit", "terminal_reset"];
+  for (const name of client) {
+    const frame = decodeClientControl(fixture(`${name}.json`));
+    assert.equal(typeof frame.body, "object");
+    assert.equal(encodeClientControl(frame), fixture(`${name}.json`));
+    expectMalformed(() => decodeServerControl(fixture(`${name}.json`)));
+  }
+  for (const name of server) {
+    const frame = decodeServerControl(fixture(`${name}.json`));
+    assert.equal(typeof frame.body, "object");
+    assert.equal(encodeServerControl(frame), fixture(`${name}.json`));
+    expectMalformed(() => decodeClientControl(fixture(`${name}.json`)));
+  }
+  const ack = fixture("terminal_ack.json");
+  expectMalformed(() => decodeClientControl(ack.replace('"body"', '"id":"ack","body"')));
+  expectMalformed(() => decodeClientControl(ack.replace('"next_sequence":"1"', '"next_sequence":"0"')));
+  const attached = fixture("terminal_attached.json");
+  assert.equal(decodeServerControl(attached).body.max_unacked_bytes, BigInt(MAX_TERMINAL_UNACKED_BYTES));
+  expectMalformed(() => decodeServerControl(attached.replace('"max_unacked_bytes":"65536"', '"max_unacked_bytes":"65535"')));
+  for (const [name, role, field, value] of [["terminal_resize", "client", "rows", MAX_TERMINAL_ROWS], ["terminal_resize", "client", "cols", MAX_TERMINAL_COLS], ["terminal_resized", "server", "rows", MAX_TERMINAL_ROWS], ["terminal_resized", "server", "cols", MAX_TERMINAL_COLS]]) {
+    const raw = fixture(`${name}.json`);
+    const decode = role === "client" ? decodeClientControl : decodeServerControl;
+    const atMaximum = raw.replace(new RegExp(`"${field}":\\d+`), `"${field}":${value}`);
+    assert.doesNotThrow(() => decode(atMaximum));
+    expectMalformed(() => decode(atMaximum.replace(`"${field}":${value}`, `"${field}":${value + 1}`)));
+  }
+  expectMalformed(() => decodeClientControl(fixture("human_request_reply.json").replace('"reply":"ok"', '"reply":"\\ud800"')));
+  expectMalformed(() => decodeClientControl(fixture("human_request_reply.json").replace('"reply":"ok"', `"reply":"${"x".repeat(8193)}"`)));
 });
 
 test("state restart accepts only the canonical empty chronology", () => {
@@ -140,6 +175,9 @@ test("terminal framing rejects wrong direction, identity, bounds and overflow", 
   expectMalformed(() => encodeTerminalInput(session, 0n, 1n, new Uint8Array([1])));
   expectMalformed(() => encodeTerminalInput(session, 1n, 0n, new Uint8Array([1])));
   expectMalformed(() => encodeTerminalOutput(session, 0xffff_ffff_ffff_ffffn, new Uint8Array([1, 2])));
+  const maxEnd = encodeTerminalOutput(session, 0xffff_ffff_ffff_ffffn - 1n, new Uint8Array([1]));
+  assert.equal(decodeTerminalOutput(maxEnd).sequence, 0xffff_ffff_ffff_ffffn - 1n);
+  expectMalformed(() => encodeTerminalOutput(session, 0xffff_ffff_ffff_ffffn, new Uint8Array([1])));
   expectMalformed(() => encodeTerminalOutput(session, 1n, new Uint8Array(MAX_TERMINAL_PAYLOAD + 1)));
   expectMalformed(() => decodeTerminalInput(null));
   expectMalformed(() => encodeTerminalInput(null, 1n, 1n, new Uint8Array([1])));

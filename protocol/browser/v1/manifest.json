@@ -21,11 +21,11 @@
     "max_human_reply_bytes": 8192,
     "max_factory_capacity": 1024,
     "max_task_priority": 1000000,
-    "max_sqlite_integer": "9223372036854775807"
-    ,"max_terminal_unacked_bytes": 65536
-    ,"terminal_ack_timeout_ms": 10000
-    ,"max_terminal_rows": 4096
-    ,"max_terminal_cols": 4096
+    "max_sqlite_integer": "9223372036854775807",
+    "max_terminal_unacked_bytes": 65536,
+    "terminal_ack_timeout_ms": 10000,
+    "max_terminal_rows": 4096,
+    "max_terminal_cols": 4096
   },
   "control": [
     {"type": "HELLO", "direction": "server", "id": "forbidden", "fixture": "hello.json"},
