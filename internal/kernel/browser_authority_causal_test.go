@@ -903,6 +903,149 @@ func TestTerminalLeaseConcurrentAcquireHasOneDurableWinner(t *testing.T) {
 	}
 }
 
+func TestCheckTerminalLeaseIsExactReadOnlyAuthorization(t *testing.T) {
+	ctx := context.Background()
+	store, run, _ := runningOrchestratorRun(t)
+	defer store.Close()
+	session := terminalSessionForRunTest(t, store, run.ID)
+	boot := browserTestBoot(t, 140)
+	client := pairBrowserClient(t, store, mintBrowserChallenge(t, store, 140, boot, 30, 100, BrowserCapabilityObserve|BrowserCapabilityTerminalInput), boot, browserTestID(t, 140), browserKey(t), 31)
+	lease, err := store.AcquireTerminalLease(ctx, run.ID, session.ID, client.ID, run.Revision, session.Revision, mustTime(t, 31))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReserveTerminalInputSequence(ctx, run.ID, session.ID, client.ID, lease.Generation, 1, run.Revision, session.Revision, mustTime(t, 32)); err != nil {
+		t.Fatal(err)
+	}
+	beforeRun, _, err := store.Run(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeSession := terminalSessionForRunTest(t, store, run.ID)
+	beforeFactory, err := store.Factory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checked, err := store.CheckTerminalLease(ctx, run.ID, session.ID, client.ID, lease.Generation, run.Revision, session.Revision, mustTime(t, 33))
+	if err != nil || checked.Generation != lease.Generation || checked.LastInputSequence != 1 || checked.ExpiresAt != lease.ExpiresAt {
+		t.Fatalf("checked lease = %+v, err=%v", checked, err)
+	}
+	afterRun, _, err := store.Run(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterSession := terminalSessionForRunTest(t, store, run.ID)
+	afterFactory, err := store.Factory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterRun.ID != beforeRun.ID || afterRun.Phase != beforeRun.Phase || afterRun.Revision != beforeRun.Revision || afterRun.UpdatedAt != beforeRun.UpdatedAt || !sameUnixMillis(afterRun.RunningAt, beforeRun.RunningAt) || afterSession.ID != beforeSession.ID || afterSession.RunID != beforeSession.RunID || afterSession.State != beforeSession.State || afterSession.Revision != beforeSession.Revision || afterSession.UpdatedAt != beforeSession.UpdatedAt || !sameBrowserID(afterSession.LeaseClientID, beforeSession.LeaseClientID) || afterSession.LeaseGeneration != beforeSession.LeaseGeneration || !sameUnixMillis(afterSession.LeaseExpiresAt, beforeSession.LeaseExpiresAt) || afterSession.LastInputSequence != beforeSession.LastInputSequence || afterFactory != beforeFactory {
+		t.Fatalf("check mutated durable state: run before=%+v after=%+v session before=%+v after=%+v factory before=%+v after=%+v", beforeRun, afterRun, beforeSession, afterSession, beforeFactory, afterFactory)
+	}
+
+	for name, check := range map[string]func() error{
+		"wrong client": func() error {
+			_, err := store.CheckTerminalLease(ctx, run.ID, session.ID, browserTestID(t, 141), lease.Generation, run.Revision, session.Revision, mustTime(t, 33))
+			return err
+		},
+		"wrong generation": func() error {
+			_, err := store.CheckTerminalLease(ctx, run.ID, session.ID, client.ID, lease.Generation+1, run.Revision, session.Revision, mustTime(t, 33))
+			return err
+		},
+		"wrong run revision": func() error {
+			_, err := store.CheckTerminalLease(ctx, run.ID, session.ID, client.ID, lease.Generation, Revision{value: run.Revision.Int64() + 1}, session.Revision, mustTime(t, 33))
+			return err
+		},
+		"expired": func() error {
+			_, err := store.CheckTerminalLease(ctx, run.ID, session.ID, client.ID, lease.Generation, run.Revision, session.Revision, mustTime(t, lease.ExpiresAt.Int64()))
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := check(); err == nil {
+				t.Fatal("invalid lease check succeeded")
+			}
+		})
+	}
+}
+
+func TestRevokeTerminalLeaseAllowsExpiredExactGenerationAndCannotTouchReplacement(t *testing.T) {
+	ctx := context.Background()
+	store, run, _ := runningOrchestratorRun(t)
+	defer store.Close()
+	session := terminalSessionForRunTest(t, store, run.ID)
+	boot := browserTestBoot(t, 145)
+	client := pairBrowserClient(t, store, mintBrowserChallenge(t, store, 145, boot, 30, 100, BrowserCapabilityObserve|BrowserCapabilityTerminalInput), boot, browserTestID(t, 145), browserKey(t), 31)
+	lease, err := store.AcquireTerminalLease(ctx, run.ID, session.ID, client.ID, run.Revision, session.Revision, mustTime(t, 31))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReserveTerminalInputSequence(ctx, run.ID, session.ID, client.ID, lease.Generation, 1, run.Revision, session.Revision, mustTime(t, 32)); err != nil {
+		t.Fatal(err)
+	}
+	beforeFactory, err := store.Factory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revoked, err := store.RevokeTerminalLease(ctx, run.ID, session.ID, client.ID, lease.Generation, run.Revision, session.Revision, mustTime(t, lease.ExpiresAt.Int64()))
+	if err != nil || revoked.Generation != lease.Generation+1 {
+		t.Fatalf("expired revoke = %+v, err=%v", revoked, err)
+	}
+	after := terminalSessionForRunTest(t, store, run.ID)
+	if after.LeaseClientID != nil || after.LeaseExpiresAt != nil || after.LastInputSequence != 0 || after.LeaseGeneration != lease.Generation+1 {
+		t.Fatalf("expired revoke state = %+v", after)
+	}
+	afterFactory, err := store.Factory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterFactory != beforeFactory {
+		t.Fatalf("expired revoke emitted lifecycle change: before=%+v after=%+v", beforeFactory, afterFactory)
+	}
+	idempotent, err := store.RevokeTerminalLease(ctx, run.ID, session.ID, client.ID, lease.Generation, run.Revision, session.Revision, mustTime(t, lease.ExpiresAt.Int64()+1))
+	if err != nil || idempotent.Generation != lease.Generation+1 {
+		t.Fatalf("revoke replay = %+v, err=%v", idempotent, err)
+	}
+
+	replacement, err := store.AcquireTerminalLease(ctx, run.ID, session.ID, client.ID, run.Revision, session.Revision, mustTime(t, 200))
+	if err != nil || replacement.Generation != lease.Generation+2 {
+		t.Fatalf("replacement lease = %+v, err=%v", replacement, err)
+	}
+	if _, err := store.RevokeTerminalLease(ctx, run.ID, session.ID, client.ID, lease.Generation, run.Revision, session.Revision, mustTime(t, 201)); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("old generation revoked replacement: %v", err)
+	}
+	current := terminalSessionForRunTest(t, store, run.ID)
+	if current.LeaseClientID == nil || *current.LeaseClientID != client.ID || current.LeaseGeneration != replacement.Generation {
+		t.Fatalf("replacement lease was changed by stale revoke = %+v", current)
+	}
+}
+
+func TestRevokeTerminalLeaseGuardedUpdateRollsBack(t *testing.T) {
+	ctx := context.Background()
+	store, run, _ := runningOrchestratorRun(t)
+	defer store.Close()
+	session := terminalSessionForRunTest(t, store, run.ID)
+	boot := browserTestBoot(t, 150)
+	client := pairBrowserClient(t, store, mintBrowserChallenge(t, store, 150, boot, 30, 100, BrowserCapabilityObserve|BrowserCapabilityTerminalInput), boot, browserTestID(t, 150), browserKey(t), 31)
+	lease, err := store.AcquireTerminalLease(ctx, run.ID, session.ID, client.ID, run.Revision, session.Revision, mustTime(t, 31))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.Exec(`CREATE TRIGGER suppress_terminal_system_revoke BEFORE UPDATE OF lease_client_id ON terminal_sessions BEGIN SELECT RAISE(IGNORE); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RevokeTerminalLease(ctx, run.ID, session.ID, client.ID, lease.Generation, run.Revision, session.Revision, mustTime(t, lease.ExpiresAt.Int64()+1)); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("suppressed system revoke error = %v", err)
+	}
+	if _, err := store.writer.Exec(`DROP TRIGGER suppress_terminal_system_revoke`); err != nil {
+		t.Fatal(err)
+	}
+	unchanged := terminalSessionForRunTest(t, store, run.ID)
+	if unchanged.LeaseClientID == nil || *unchanged.LeaseClientID != client.ID || unchanged.LeaseGeneration != lease.Generation || unchanged.LastInputSequence != 0 {
+		t.Fatalf("suppressed system revoke changed state = %+v", unchanged)
+	}
+}
+
 func TestTerminalLeaseSuppressedUpdateRollsBackAuthority(t *testing.T) {
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
@@ -946,10 +1089,10 @@ func TestTerminalLeaseSequenceReleasePartialResetAndFreshGeneration(t *testing.T
 	if _, err := store.ReserveTerminalInputSequence(ctx, run.ID, session.ID, client.ID, lease.Generation, 3, run.Revision, session.Revision, mustTime(t, 32)); !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("sequence gap error = %v", err)
 	}
-	if err := store.RevokeTerminalInputAfterPartialWrite(ctx, run.ID, session.ID, client.ID, lease.Generation, 0, run.Revision, session.Revision, mustTime(t, 33)); !errors.Is(err, ErrRevisionConflict) {
+	if err := store.RevokeTerminalInputReservation(ctx, run.ID, session.ID, client.ID, lease.Generation, 0, run.Revision, session.Revision, mustTime(t, 33)); !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("zero partial sequence error = %v", err)
 	}
-	if err := store.RevokeTerminalInputAfterPartialWrite(ctx, run.ID, session.ID, client.ID, lease.Generation, 1, run.Revision, session.Revision, mustTime(t, 33)); err != nil {
+	if err := store.RevokeTerminalInputReservation(ctx, run.ID, session.ID, client.ID, lease.Generation, 1, run.Revision, session.Revision, mustTime(t, 33)); err != nil {
 		t.Fatal(err)
 	}
 	afterPartial := terminalSessionForRunTest(t, store, run.ID)
@@ -963,7 +1106,7 @@ func TestTerminalLeaseSequenceReleasePartialResetAndFreshGeneration(t *testing.T
 	if afterRun.Phase != RunRunning || afterRun.Revision != run.Revision || afterPartial.Revision != session.Revision || afterPartial.UpdatedAt != session.UpdatedAt {
 		t.Fatalf("partial write changed lifecycle = run=%+v session=%+v", afterRun, afterPartial)
 	}
-	if err := store.RevokeTerminalInputAfterPartialWrite(ctx, run.ID, session.ID, client.ID, lease.Generation, 1, run.Revision, session.Revision, mustTime(t, 33)); !errors.Is(err, ErrRevisionConflict) {
+	if err := store.RevokeTerminalInputReservation(ctx, run.ID, session.ID, client.ID, lease.Generation, 1, run.Revision, session.Revision, mustTime(t, 33)); !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("stale partial replay error = %v", err)
 	}
 	newLease, err := store.AcquireTerminalLease(ctx, run.ID, session.ID, client.ID, run.Revision, session.Revision, mustTime(t, 40))

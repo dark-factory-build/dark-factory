@@ -410,6 +410,28 @@ func (store *Store) AcquireTerminalLease(ctx context.Context, runID RunID, sessi
 	return TerminalLease{RunID: run.ID, SessionID: session.ID, ClientID: clientID, Generation: uint64(next), ExpiresAt: UnixMillis{value: expiry}, RunRevision: run.Revision, SessionRevision: session.Revision}, nil
 }
 
+// CheckTerminalLease authorizes a terminal effect without changing any
+// durable state. The pinned read transaction keeps the run, session and
+// client observations from crossing a concurrent lifecycle boundary.
+func (store *Store) CheckTerminalLease(ctx context.Context, runID RunID, sessionID TerminalSessionID, clientID BrowserClientID, generation uint64, expectedRun, expectedSession Revision, at UnixMillis) (TerminalLease, error) {
+	if runID.zero() || sessionID.zero() || validateBrowserID(clientID) != nil || generation == 0 || generation > math.MaxInt64 {
+		return TerminalLease{}, fmt.Errorf("%w: invalid terminal lease check", ErrInvalidValue)
+	}
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return TerminalLease{}, err
+	}
+	defer tx.Close()
+	run, session, client, err := leaseRows(ctx, tx.connection, runID, sessionID, clientID)
+	if err != nil {
+		return TerminalLease{}, err
+	}
+	if run.Revision != expectedRun || session.Revision != expectedSession || at.Int64() < run.UpdatedAt.Int64() || at.Int64() < session.UpdatedAt.Int64() || run.Phase != RunRunning || session.State != TerminalSessionActive || client.RevokedAt != nil || !client.CapabilityMask.Has(BrowserCapabilityTerminalInput) || session.LeaseClientID == nil || *session.LeaseClientID != clientID || session.LeaseGeneration != generation || session.LeaseExpiresAt == nil || session.LeaseExpiresAt.Int64() <= at.Int64() {
+		return TerminalLease{}, ErrUnauthorized
+	}
+	return TerminalLease{RunID: run.ID, SessionID: session.ID, ClientID: client.ID, Generation: generation, ExpiresAt: *session.LeaseExpiresAt, LastInputSequence: session.LastInputSequence, RunRevision: run.Revision, SessionRevision: session.Revision}, nil
+}
+
 // RenewTerminalLease changes only expiry. Generation, sequence and lifecycle
 // revisions are deliberately untouched by renewal.
 func (store *Store) RenewTerminalLease(ctx context.Context, runID RunID, sessionID TerminalSessionID, clientID BrowserClientID, generation uint64, expectedRun, expectedSession Revision, at UnixMillis) (TerminalLease, error) {
@@ -505,6 +527,49 @@ func (store *Store) ReleaseTerminalLease(ctx context.Context, runID RunID, sessi
 	return TerminalLease{RunID: run.ID, SessionID: session.ID, ClientID: clientID, Generation: uint64(next), RunRevision: run.Revision, SessionRevision: session.Revision}, nil
 }
 
+// RevokeTerminalLease clears one already-committed lease after a runner
+// generation install fails or becomes uncertain. Unlike an operator release,
+// this cleanup remains valid after expiry. It is exact-generation guarded and
+// cannot clear a replacement lease.
+func (store *Store) RevokeTerminalLease(ctx context.Context, runID RunID, sessionID TerminalSessionID, clientID BrowserClientID, generation uint64, expectedRun, expectedSession Revision, at UnixMillis) (TerminalLease, error) {
+	if runID.zero() || sessionID.zero() || validateBrowserID(clientID) != nil || generation == 0 || generation > math.MaxInt64 {
+		return TerminalLease{}, fmt.Errorf("%w: invalid terminal lease revocation", ErrInvalidValue)
+	}
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return TerminalLease{}, err
+	}
+	defer tx.Close()
+	run, session, _, err := leaseRows(ctx, tx.connection, runID, sessionID, clientID)
+	if err != nil {
+		return TerminalLease{}, tx.Rollback(err)
+	}
+	if run.Revision != expectedRun || session.Revision != expectedSession || at.Int64() < run.UpdatedAt.Int64() || at.Int64() < session.UpdatedAt.Int64() || run.Phase != RunRunning || session.State != TerminalSessionActive {
+		return TerminalLease{}, tx.Rollback(ErrRevisionConflict)
+	}
+	next, err := leaseGenerationNext(int64(generation))
+	if err != nil {
+		return TerminalLease{}, tx.Rollback(err)
+	}
+	if session.LeaseClientID == nil && session.LeaseExpiresAt == nil && session.LastInputSequence == 0 && session.LeaseGeneration == uint64(next) {
+		if err := tx.Rollback(nil); err != nil {
+			return TerminalLease{}, err
+		}
+		return TerminalLease{RunID: run.ID, SessionID: session.ID, ClientID: clientID, Generation: uint64(next), RunRevision: run.Revision, SessionRevision: session.Revision}, nil
+	}
+	if session.LeaseClientID == nil || session.LeaseExpiresAt == nil || *session.LeaseClientID != clientID || session.LeaseGeneration != generation {
+		return TerminalLease{}, tx.Rollback(ErrRevisionConflict)
+	}
+	updated, err := tx.connection.ExecContext(ctx, `UPDATE terminal_sessions SET lease_client_id = NULL, lease_expires_at_ms = NULL, lease_generation = ?, last_input_sequence = 0 WHERE id = ? AND lease_client_id = ? AND lease_generation = ?`, next, session.ID.Bytes(), clientID.Bytes(), generation)
+	if err := requireOneRow(updated, err); err != nil {
+		return TerminalLease{}, tx.Rollback(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return TerminalLease{}, err
+	}
+	return TerminalLease{RunID: run.ID, SessionID: session.ID, ClientID: clientID, Generation: uint64(next), RunRevision: run.Revision, SessionRevision: session.Revision}, nil
+}
+
 func (store *Store) ReserveTerminalInputSequence(ctx context.Context, runID RunID, sessionID TerminalSessionID, clientID BrowserClientID, generation, sequence uint64, expectedRun, expectedSession Revision, at UnixMillis) (InputReservation, error) {
 	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
@@ -539,7 +604,10 @@ func reserveTerminalInputSequenceTx(ctx context.Context, tx *writeTx, run Run, s
 	return InputReservation{RunID: run.ID, SessionID: session.ID, ClientID: client.ID, Generation: generation, Sequence: uint64(next), RunRevision: run.Revision, SessionRevision: session.Revision}, nil
 }
 
-func (store *Store) RevokeTerminalInputAfterPartialWrite(ctx context.Context, runID RunID, sessionID TerminalSessionID, clientID BrowserClientID, generation uint64, sequence uint64, expectedRun, expectedSession Revision, at UnixMillis) error {
+// RevokeTerminalInputReservation consumes a reserved input sequence and
+// revokes its lease generation. It is used for every non-complete delivery,
+// not only a known partial write; the reservation is never replayed.
+func (store *Store) RevokeTerminalInputReservation(ctx context.Context, runID RunID, sessionID TerminalSessionID, clientID BrowserClientID, generation uint64, sequence uint64, expectedRun, expectedSession Revision, at UnixMillis) error {
 	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return err
