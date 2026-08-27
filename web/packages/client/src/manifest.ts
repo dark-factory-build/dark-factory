@@ -16,6 +16,10 @@ export const MAX_HUMAN_REPLY_BYTES = 8192;
 export const MAX_FACTORY_CAPACITY = 1024;
 export const MAX_TASK_PRIORITY = 1_000_000;
 export const MAX_SQLITE_INTEGER = 9_223_372_036_854_775_807n;
+export const MAX_TERMINAL_UNACKED_BYTES = 65_536;
+export const TERMINAL_ACK_TIMEOUT_MS = 10_000;
+export const MAX_TERMINAL_ROWS = 4096;
+export const MAX_TERMINAL_COLS = 4096;
 
 export const CAPABILITIES = {
   observe: 1,
@@ -42,6 +46,25 @@ export const CONTROL_MANIFEST = [
   { type: "STATE_ENTITY", direction: "server", id: "required", fixture: "state_entity.json" },
   { type: "HUMAN_REQUEST_DETAIL_GET", direction: "client", id: "required", fixture: "human_request_detail_get.json" },
   { type: "HUMAN_REQUEST_DETAIL", direction: "server", id: "required", fixture: "human_request_detail.json" },
+  { type: "HUMAN_REQUEST_REPLY", direction: "client", id: "required", fixture: "human_request_reply.json" },
+  { type: "HUMAN_REQUEST_REPLY_RESULT", direction: "server", id: "required", fixture: "human_request_reply_result.json" },
+  { type: "HUMAN_REQUEST_CANCEL_RUN", direction: "client", id: "required", fixture: "human_request_cancel_run.json" },
+  { type: "HUMAN_REQUEST_ACTION_RESULT", direction: "server", id: "required", fixture: "human_request_action_result.json" },
+  { type: "TERMINAL_ATTACH", direction: "client", id: "required", fixture: "terminal_attach.json" },
+  { type: "TERMINAL_ATTACHED", direction: "server", id: "required", fixture: "terminal_attached.json" },
+  { type: "TERMINAL_ACK", direction: "client", id: "forbidden", fixture: "terminal_ack.json" },
+  { type: "TERMINAL_LEASE_ACQUIRE", direction: "client", id: "required", fixture: "terminal_lease_acquire.json" },
+  { type: "TERMINAL_LEASE_RENEW", direction: "client", id: "required", fixture: "terminal_lease_renew.json" },
+  { type: "TERMINAL_LEASE_RELEASE", direction: "client", id: "required", fixture: "terminal_lease_release.json" },
+  { type: "TERMINAL_LEASE_RESULT", direction: "server", id: "required", fixture: "terminal_lease_result.json" },
+  { type: "TERMINAL_RESIZE", direction: "client", id: "required", fixture: "terminal_resize.json" },
+  { type: "TERMINAL_RESIZED", direction: "server", id: "required", fixture: "terminal_resized.json" },
+  { type: "TERMINAL_DETACH", direction: "client", id: "required", fixture: "terminal_detach.json" },
+  { type: "TERMINAL_DETACHED", direction: "server", id: "required", fixture: "terminal_detached.json" },
+  { type: "TERMINAL_INPUT_RESULT", direction: "server", id: "required", fixture: "terminal_input_result.json" },
+  { type: "TERMINAL_EOF", direction: "server", id: "required", fixture: "terminal_eof.json" },
+  { type: "TERMINAL_EXIT", direction: "server", id: "required", fixture: "terminal_exit.json" },
+  { type: "TERMINAL_RESET", direction: "server", id: "required", fixture: "terminal_reset.json" },
   { type: "ERROR", direction: "both", id: "optional", fixture: "error.json" },
 ] as const;
 export const CONTROL_TYPES = CONTROL_MANIFEST.map((entry) => entry.type);
@@ -83,6 +106,10 @@ export const BROWSER_MANIFEST = {
     maxFactoryCapacity: MAX_FACTORY_CAPACITY,
     maxTaskPriority: MAX_TASK_PRIORITY,
     maxSQLiteInteger: MAX_SQLITE_INTEGER,
+    maxTerminalUnackedBytes: MAX_TERMINAL_UNACKED_BYTES,
+    terminalAckTimeoutMs: TERMINAL_ACK_TIMEOUT_MS,
+    maxTerminalRows: MAX_TERMINAL_ROWS,
+    maxTerminalCols: MAX_TERMINAL_COLS,
   },
   control: CONTROL_MANIFEST,
   terminal: {

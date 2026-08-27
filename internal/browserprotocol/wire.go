@@ -25,21 +25,40 @@ const (
 type MessageType string
 
 const (
-	TypeHello                 MessageType = "HELLO"
-	TypePairProve             MessageType = "PAIR_PROVE"
-	TypePairResult            MessageType = "PAIR_RESULT"
-	TypeAuthProve             MessageType = "AUTH_PROVE"
-	TypeAuthResult            MessageType = "AUTH_RESULT"
-	TypeStateGet              MessageType = "STATE_GET"
-	TypeStateSnapshot         MessageType = "STATE_SNAPSHOT"
-	TypeStateRestart          MessageType = "STATE_RESTART"
-	TypeStateSubscribe        MessageType = "STATE_SUBSCRIBE"
-	TypeStateEvent            MessageType = "STATE_EVENT"
-	TypeStateEntityGet        MessageType = "STATE_ENTITY_GET"
-	TypeStateEntity           MessageType = "STATE_ENTITY"
-	TypeHumanRequestDetailGet MessageType = "HUMAN_REQUEST_DETAIL_GET"
-	TypeHumanRequestDetail    MessageType = "HUMAN_REQUEST_DETAIL"
-	TypeError                 MessageType = "ERROR"
+	TypeHello                    MessageType = "HELLO"
+	TypePairProve                MessageType = "PAIR_PROVE"
+	TypePairResult               MessageType = "PAIR_RESULT"
+	TypeAuthProve                MessageType = "AUTH_PROVE"
+	TypeAuthResult               MessageType = "AUTH_RESULT"
+	TypeStateGet                 MessageType = "STATE_GET"
+	TypeStateSnapshot            MessageType = "STATE_SNAPSHOT"
+	TypeStateRestart             MessageType = "STATE_RESTART"
+	TypeStateSubscribe           MessageType = "STATE_SUBSCRIBE"
+	TypeStateEvent               MessageType = "STATE_EVENT"
+	TypeStateEntityGet           MessageType = "STATE_ENTITY_GET"
+	TypeStateEntity              MessageType = "STATE_ENTITY"
+	TypeHumanRequestDetailGet    MessageType = "HUMAN_REQUEST_DETAIL_GET"
+	TypeHumanRequestDetail       MessageType = "HUMAN_REQUEST_DETAIL"
+	TypeHumanRequestReply        MessageType = "HUMAN_REQUEST_REPLY"
+	TypeHumanRequestReplyResult  MessageType = "HUMAN_REQUEST_REPLY_RESULT"
+	TypeHumanRequestCancelRun    MessageType = "HUMAN_REQUEST_CANCEL_RUN"
+	TypeHumanRequestActionResult MessageType = "HUMAN_REQUEST_ACTION_RESULT"
+	TypeTerminalAttach           MessageType = "TERMINAL_ATTACH"
+	TypeTerminalAttached         MessageType = "TERMINAL_ATTACHED"
+	TypeTerminalAck              MessageType = "TERMINAL_ACK"
+	TypeTerminalLeaseAcquire     MessageType = "TERMINAL_LEASE_ACQUIRE"
+	TypeTerminalLeaseRenew       MessageType = "TERMINAL_LEASE_RENEW"
+	TypeTerminalLeaseRelease     MessageType = "TERMINAL_LEASE_RELEASE"
+	TypeTerminalLeaseResult      MessageType = "TERMINAL_LEASE_RESULT"
+	TypeTerminalResize           MessageType = "TERMINAL_RESIZE"
+	TypeTerminalResized          MessageType = "TERMINAL_RESIZED"
+	TypeTerminalDetach           MessageType = "TERMINAL_DETACH"
+	TypeTerminalDetached         MessageType = "TERMINAL_DETACHED"
+	TypeTerminalInputResult      MessageType = "TERMINAL_INPUT_RESULT"
+	TypeTerminalEOF              MessageType = "TERMINAL_EOF"
+	TypeTerminalExit             MessageType = "TERMINAL_EXIT"
+	TypeTerminalReset            MessageType = "TERMINAL_RESET"
+	TypeError                    MessageType = "ERROR"
 )
 
 // Capability bits are deliberately a fixed wire bitmask, not an extensible
@@ -286,6 +305,44 @@ func decodeControl(data []byte, role senderRole) (ControlFrame, error) {
 		body = new(HumanRequestDetailGet)
 	case TypeHumanRequestDetail:
 		body = new(HumanRequestDetail)
+	case TypeHumanRequestReply:
+		body = new(HumanRequestReply)
+	case TypeHumanRequestReplyResult:
+		body = new(HumanRequestReplyResult)
+	case TypeHumanRequestCancelRun:
+		body = new(HumanRequestCancelRun)
+	case TypeHumanRequestActionResult:
+		body = new(HumanRequestActionResult)
+	case TypeTerminalAttach:
+		body = new(TerminalAttach)
+	case TypeTerminalAttached:
+		body = new(TerminalAttached)
+	case TypeTerminalAck:
+		body = new(TerminalAck)
+	case TypeTerminalLeaseAcquire:
+		body = new(TerminalLeaseAcquire)
+	case TypeTerminalLeaseRenew:
+		body = new(TerminalLeaseRenew)
+	case TypeTerminalLeaseRelease:
+		body = new(TerminalLeaseRenew)
+	case TypeTerminalLeaseResult:
+		body = new(TerminalLeaseResult)
+	case TypeTerminalResize:
+		body = new(TerminalResize)
+	case TypeTerminalResized:
+		body = new(TerminalResized)
+	case TypeTerminalDetach:
+		body = new(TerminalDetach)
+	case TypeTerminalDetached:
+		body = new(TerminalDetached)
+	case TypeTerminalInputResult:
+		body = new(TerminalInputResult)
+	case TypeTerminalEOF:
+		body = new(TerminalEOF)
+	case TypeTerminalExit:
+		body = new(TerminalExit)
+	case TypeTerminalReset:
+		body = new(TerminalReset)
 	case TypeError:
 		var value struct {
 			Code      ErrorCode `json:"code"`
@@ -350,7 +407,11 @@ func idRequired(kind MessageType) bool {
 	case TypePairProve, TypePairResult, TypeAuthProve, TypeAuthResult,
 		TypeStateGet, TypeStateSnapshot, TypeStateRestart, TypeStateSubscribe,
 		TypeStateEvent, TypeStateEntityGet, TypeStateEntity,
-		TypeHumanRequestDetailGet, TypeHumanRequestDetail:
+		TypeHumanRequestDetailGet, TypeHumanRequestDetail,
+		TypeHumanRequestReply, TypeHumanRequestReplyResult, TypeHumanRequestCancelRun, TypeHumanRequestActionResult,
+		TypeTerminalAttach, TypeTerminalAttached, TypeTerminalLeaseAcquire, TypeTerminalLeaseRenew, TypeTerminalLeaseRelease,
+		TypeTerminalLeaseResult, TypeTerminalResize, TypeTerminalResized, TypeTerminalDetach, TypeTerminalDetached,
+		TypeTerminalInputResult, TypeTerminalEOF, TypeTerminalExit, TypeTerminalReset:
 		return true
 	default:
 		return false
@@ -363,11 +424,11 @@ func typeAllowed(role senderRole, kind MessageType) bool {
 	}
 	if role == clientRole {
 		return kind == TypePairProve || kind == TypeAuthProve || kind == TypeStateGet ||
-			kind == TypeStateSubscribe || kind == TypeStateEntityGet || kind == TypeHumanRequestDetailGet
+			kind == TypeStateSubscribe || kind == TypeStateEntityGet || kind == TypeHumanRequestDetailGet || kind == TypeHumanRequestReply || kind == TypeHumanRequestCancelRun || kind == TypeTerminalAttach || kind == TypeTerminalAck || kind == TypeTerminalLeaseAcquire || kind == TypeTerminalLeaseRenew || kind == TypeTerminalLeaseRelease || kind == TypeTerminalResize || kind == TypeTerminalDetach
 	}
 	return role == serverRole && (kind == TypeHello || kind == TypePairResult || kind == TypeAuthResult ||
 		kind == TypeStateSnapshot || kind == TypeStateRestart || kind == TypeStateEvent ||
-		kind == TypeStateEntity || kind == TypeHumanRequestDetail)
+		kind == TypeStateEntity || kind == TypeHumanRequestDetail || kind == TypeHumanRequestReplyResult || kind == TypeHumanRequestActionResult || kind == TypeTerminalAttached || kind == TypeTerminalLeaseResult || kind == TypeTerminalResized || kind == TypeTerminalDetached || kind == TypeTerminalInputResult || kind == TypeTerminalEOF || kind == TypeTerminalExit || kind == TypeTerminalReset)
 }
 
 func dereferenceBody(body any) any {
@@ -393,6 +454,40 @@ func dereferenceBody(body any) any {
 	case *HumanRequestDetailGet:
 		return *value
 	case *HumanRequestDetail:
+		return *value
+	case *HumanRequestReply:
+		return *value
+	case *HumanRequestReplyResult:
+		return *value
+	case *HumanRequestCancelRun:
+		return *value
+	case *HumanRequestActionResult:
+		return *value
+	case *TerminalAttach:
+		return *value
+	case *TerminalAttached:
+		return *value
+	case *TerminalAck:
+		return *value
+	case *TerminalLeaseAcquire:
+		return *value
+	case *TerminalLeaseRenew:
+		return *value
+	case *TerminalLeaseResult:
+		return *value
+	case *TerminalResize:
+		return *value
+	case *TerminalResized:
+		return *value
+	case *TerminalDetach:
+		return *value
+	case *TerminalInputResult:
+		return *value
+	case *TerminalEOF:
+		return *value
+	case *TerminalExit:
+		return *value
+	case *TerminalReset:
 		return *value
 	case StateSnapshot, StateEvent, StateEntity:
 		return value
@@ -654,6 +749,40 @@ func validateBody(kind MessageType, body any) error {
 			}
 		}
 		return validateHumanRequestDetail(value)
+	case TypeHumanRequestReply:
+		return validTerminalControl(kind, body)
+	case TypeHumanRequestReplyResult:
+		return validTerminalControl(kind, body)
+	case TypeHumanRequestCancelRun:
+		return validTerminalControl(kind, body)
+	case TypeHumanRequestActionResult:
+		return validTerminalControl(kind, body)
+	case TypeTerminalAttach:
+		return validTerminalControl(kind, body)
+	case TypeTerminalAttached:
+		return validTerminalControl(kind, body)
+	case TypeTerminalAck:
+		return validTerminalControl(kind, body)
+	case TypeTerminalLeaseAcquire:
+		return validTerminalControl(kind, body)
+	case TypeTerminalLeaseRenew, TypeTerminalLeaseRelease:
+		return validTerminalControl(kind, body)
+	case TypeTerminalLeaseResult:
+		return validTerminalControl(kind, body)
+	case TypeTerminalResize:
+		return validTerminalControl(kind, body)
+	case TypeTerminalResized:
+		return validTerminalControl(kind, body)
+	case TypeTerminalDetach, TypeTerminalDetached:
+		return validTerminalControl(kind, body)
+	case TypeTerminalInputResult:
+		return validTerminalControl(kind, body)
+	case TypeTerminalEOF:
+		return validTerminalControl(kind, body)
+	case TypeTerminalExit:
+		return validTerminalControl(kind, body)
+	case TypeTerminalReset:
+		return validTerminalControl(kind, body)
 	case TypeError:
 		value, ok := body.(Error)
 		if !ok {
