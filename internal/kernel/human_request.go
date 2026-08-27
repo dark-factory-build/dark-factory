@@ -409,10 +409,7 @@ func humanRequestDetail(ctx context.Context, connection *sql.Conn, clientID Brow
 	if err != nil {
 		return HumanRequestDetail{}, err
 	}
-	if !sameTerminalSession(relationships.session, session) {
-		return HumanRequestDetail{}, fmt.Errorf("%w: selected human request terminal session changed", ErrCorruptState)
-	}
-	target, err := newTerminalTarget(run.ProjectID, run.AgentID, run, relationships.session)
+	target, err := humanRequestTerminalTarget(run, session, relationships.session)
 	if err != nil {
 		return HumanRequestDetail{}, err
 	}
@@ -422,6 +419,13 @@ func humanRequestDetail(ctx context.Context, connection *sql.Conn, clientID Brow
 		detail.CancelRun = &HumanRequestCancelRun{expectedRequestRevision: request.Revision, expectedRunRevision: run.Revision}
 	}
 	return detail, nil
+}
+
+func humanRequestTerminalTarget(run Run, selected, validated TerminalSession) (TerminalTarget, error) {
+	if !sameTerminalSession(validated, selected) {
+		return TerminalTarget{}, fmt.Errorf("%w: selected human request terminal session changed", ErrCorruptState)
+	}
+	return newTerminalTarget(run.ProjectID, run.AgentID, run, validated)
 }
 
 func (store *Store) BeginHumanReply(ctx context.Context, clientID BrowserClientID, requestID HumanRequestID, expected Revision, deliveryID HumanRequestDeliveryID, reply string, at UnixMillis) (HumanDelivery, error) {

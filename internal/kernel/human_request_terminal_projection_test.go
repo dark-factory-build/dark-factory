@@ -139,6 +139,17 @@ func TestHumanRequestDetailRejectsCorruptActiveRunRelationships(t *testing.T) {
 	}
 }
 
+func TestHumanRequestDetailRejectsCanonicalSessionMismatchBeforeProjection(t *testing.T) {
+	store, run, _ := runningOrchestratorRun(t)
+	defer store.Close()
+	selected := terminalSessionForRunTest(t, store, run.ID)
+	validated := selected
+	validated.Revision = mustRevision(t, selected.Revision.Int64()+1)
+	if target, err := humanRequestTerminalTarget(run, selected, validated); !errors.Is(err, ErrCorruptState) || target != (TerminalTarget{}) {
+		t.Fatalf("mismatched validated terminal target = %+v, err=%v", target, err)
+	}
+}
+
 func TestHumanRequestDetailFinalizingAndTerminalOriginsAreUnavailable(t *testing.T) {
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
