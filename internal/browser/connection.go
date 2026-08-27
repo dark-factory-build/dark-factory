@@ -13,7 +13,10 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
 )
 
-const backendCallLimit = 3 * time.Second
+const (
+	backendCallLimit       = 3 * time.Second
+	subscriptionCloseLimit = time.Second
+)
 
 type incoming struct {
 	kind websocket.MessageType
@@ -31,14 +34,19 @@ type connection struct {
 	frames chan incoming
 	done   chan struct{}
 
-	stopOnce sync.Once
+	stopOnce   sync.Once
+	cleanupErr error
 
-	authenticated  bool
-	principal      Principal
-	seen           map[string]struct{}
-	subscription   StateSubscription
-	updates        <-chan StateUpdate
-	subscriptionID string
+	authenticated        bool
+	principal            Principal
+	authenticating       bool
+	authenticatingID     [browserprotocol.ClientIDSize]byte
+	seen                 map[string]struct{}
+	subscription         StateSubscription
+	updates              <-chan StateUpdate
+	subscriptionID       string
+	subscriptionSequence browserprotocol.Decimal
+	subscriptionHead     browserprotocol.Decimal
 }
 
 func (current *connection) stop() {
@@ -55,9 +63,8 @@ func (current *connection) run() {
 	readerDone := make(chan struct{})
 	readerStarted := false
 	defer func() {
-		if current.subscription != nil {
-			_ = current.subscription.Close()
-			current.subscription = nil
+		if err := current.closeSubscription(); err != nil {
+			current.cleanupErr = errors.Join(current.cleanupErr, err)
 		}
 		current.stop()
 		if readerStarted {
@@ -135,39 +142,48 @@ func (current *connection) authenticate(identity Identity, nonce [browserprotoco
 			return false
 		}
 		current.seen = map[string]struct{}{frame.ID: {}}
-		principal, err := current.prove(authContext, identity, nonce, frame)
-		if err != nil || authContext.Err() != nil || validatePrincipal(principal) != nil || !current.server.registerPrincipal(current, principal) {
+		result, requested, tracked, err := current.prove(authContext, identity, nonce, frame)
+		accept := err == nil && authContext.Err() == nil && validateAuthentication(result) == nil
+		registered := false
+		if requested != nil {
+			if tracked {
+				registered = current.server.finishAuthentication(current, *requested, result, accept)
+			}
+		} else {
+			registered = current.server.registerPair(current, result, accept)
+		}
+		if !registered {
 			current.sendError(frame.ID, browserprotocol.ErrorUnauthorized, false)
 			return false
 		}
 		var response []byte
 		if frame.Type == browserprotocol.TypePairProve {
 			response, err = browserprotocol.EncodePairResult(frame.ID, browserprotocol.PairResult{
-				ClientID: hex.EncodeToString(principal.ClientID[:]), Capabilities: principal.Capabilities,
+				ClientID: hex.EncodeToString(result.Principal.ClientID[:]), Capabilities: result.Capabilities,
 			})
 		} else {
 			response, err = browserprotocol.EncodeAuthResult(frame.ID, browserprotocol.AuthResult{
-				ClientID: hex.EncodeToString(principal.ClientID[:]), Capabilities: principal.Capabilities,
+				ClientID: hex.EncodeToString(result.Principal.ClientID[:]), Capabilities: result.Capabilities,
 			})
 		}
 		return err == nil && current.write(response) == nil
 	}
 }
 
-func (current *connection) prove(ctx context.Context, identity Identity, nonce [browserprotocol.NonceSize]byte, frame browserprotocol.ControlFrame) (Principal, error) {
+func (current *connection) prove(ctx context.Context, identity Identity, nonce [browserprotocol.NonceSize]byte, frame browserprotocol.ControlFrame) (Authentication, *[browserprotocol.ClientIDSize]byte, bool, error) {
 	switch body := frame.Body.(type) {
 	case browserprotocol.PairProve:
 		challenge, err := fixedBytes(body.Challenge, browserprotocol.ChallengeSize)
 		if err != nil {
-			return Principal{}, err
+			return Authentication{}, nil, false, err
 		}
 		publicKey, err := fixedBytes(body.PublicKeySEC1, browserprotocol.PublicKeySize)
 		if err != nil {
-			return Principal{}, err
+			return Authentication{}, nil, false, err
 		}
 		signature, err := fixedBytes(body.Signature, browserprotocol.SignatureSize)
 		if err != nil {
-			return Principal{}, err
+			return Authentication{}, nil, false, err
 		}
 		var request PairRequest
 		request.Identity = identity
@@ -176,15 +192,16 @@ func (current *connection) prove(ctx context.Context, identity Identity, nonce [
 		copy(request.PublicKeySEC1[:], publicKey)
 		copy(request.Signature[:], signature)
 		request.Host, request.Origin = current.host, current.origin
-		return current.server.backend.Pair(ctx, request)
+		result, err := current.server.backend.Pair(ctx, request)
+		return result, nil, false, err
 	case browserprotocol.AuthProve:
 		clientID, err := fixedBytes(body.ClientID, browserprotocol.ClientIDSize)
 		if err != nil {
-			return Principal{}, err
+			return Authentication{}, nil, false, err
 		}
 		signature, err := fixedBytes(body.Signature, browserprotocol.SignatureSize)
 		if err != nil {
-			return Principal{}, err
+			return Authentication{}, nil, false, err
 		}
 		var request AuthRequest
 		request.Identity = identity
@@ -192,9 +209,13 @@ func (current *connection) prove(ctx context.Context, identity Identity, nonce [
 		copy(request.ClientID[:], clientID)
 		copy(request.Signature[:], signature)
 		request.Host, request.Origin = current.host, current.origin
-		return current.server.backend.Authenticate(ctx, request)
+		if !current.server.beginAuthentication(current, request.ClientID) {
+			return Authentication{}, &request.ClientID, false, ErrUnauthorized
+		}
+		result, err := current.server.backend.Authenticate(ctx, request)
+		return result, &request.ClientID, true, err
 	default:
-		return Principal{}, ErrUnauthorized
+		return Authentication{}, nil, false, ErrUnauthorized
 	}
 }
 
@@ -267,6 +288,10 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 			cursor = &decoded
 		}
 		page, pageErr := current.server.backend.StatePage(ctx, current.principal.ClientID, cursor)
+		if ctx.Err() != nil {
+			err = ctx.Err()
+			break
+		}
 		var restart *RestartError
 		if errors.As(pageErr, &restart) {
 			payload, err = browserprotocol.EncodeStateRestart(frame.ID, restart.State)
@@ -274,6 +299,10 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 		}
 		if pageErr != nil {
 			err = pageErr
+			break
+		}
+		if correlationErr := validatePageCorrelation(page, cursor); correlationErr != nil {
+			err = correlationErr
 			break
 		}
 		var next *string
@@ -290,19 +319,31 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 		})
 	case browserprotocol.StateEntityGet:
 		entity, backendErr := current.server.backend.StateEntity(ctx, current.principal.ClientID, body)
+		if ctx.Err() != nil {
+			err = ctx.Err()
+			break
+		}
 		if backendErr != nil {
 			err = backendErr
+			break
+		}
+		if entity.Kind != body.Kind || entity.ID != body.ID {
+			err = fmt.Errorf("backend returned mismatched state entity")
 			break
 		}
 		payload, err = browserprotocol.EncodeStateEntity(frame.ID, entity)
 	case browserprotocol.HumanRequestDetailGet:
-		if current.principal.Capabilities&browserprotocol.CapabilityPrivateHumanRequestDetail == 0 {
-			err = ErrUnauthorized
+		detail, backendErr := current.server.backend.HumanRequestDetail(ctx, current.principal.ClientID, body)
+		if ctx.Err() != nil {
+			err = ctx.Err()
 			break
 		}
-		detail, backendErr := current.server.backend.HumanRequestDetail(ctx, current.principal.ClientID, body)
 		if backendErr != nil {
 			err = backendErr
+			break
+		}
+		if detail.RequestID != body.RequestID || detail.Revision != body.ExpectedRevision {
+			err = fmt.Errorf("backend returned mismatched human request detail")
 			break
 		}
 		payload, err = browserprotocol.EncodeHumanRequestDetail(frame.ID, detail)
@@ -312,6 +353,15 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 			return false
 		}
 		subscription, backendErr := current.server.backend.SubscribeState(ctx, current.principal.ClientID, body.After)
+		if ctx.Err() != nil {
+			if subscription != nil {
+				if closeErr := stopSubscription(subscription); closeErr != nil {
+					current.cleanupErr = errors.Join(current.cleanupErr, closeErr)
+				}
+			}
+			err = ctx.Err()
+			break
+		}
 		if backendErr != nil {
 			err = backendErr
 			break
@@ -328,6 +378,8 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 		current.subscription = subscription
 		current.updates = updates
 		current.subscriptionID = frame.ID
+		current.subscriptionSequence = body.After
+		current.subscriptionHead = 0
 		return true
 	default:
 		current.sendError(frame.ID, browserprotocol.ErrorInvalidRequest, false)
@@ -345,27 +397,137 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 }
 
 func (current *connection) sendUpdate(update StateUpdate) error {
-	if (update.Event == nil) == (update.Restart == nil) {
+	if (update.Event == nil) == (update.Restart == nil) || update.Restart != nil && update.Floor != 0 {
 		return fmt.Errorf("invalid state update")
 	}
-	var payload []byte
-	var err error
 	if update.Event != nil {
-		payload, err = browserprotocol.EncodeStateEvent(current.subscriptionID, *update.Event)
-	} else {
-		payload, err = browserprotocol.EncodeStateRestart(current.subscriptionID, *update.Restart)
-		closeErr := current.subscription.Close()
-		current.subscription = nil
-		current.updates = nil
-		current.subscriptionID = ""
-		if closeErr != nil && err == nil {
-			err = closeErr
+		sequence, head, chronologyErr := eventChronology(*update.Event)
+		if chronologyErr != nil || update.Floor > head || current.subscriptionHead != 0 && head < current.subscriptionHead {
+			return fmt.Errorf("invalid state event chronology")
 		}
+		if current.subscriptionSequence < update.Floor || current.subscriptionSequence == browserprotocol.Decimal(browserprotocol.MaxSQLiteInteger) || sequence != current.subscriptionSequence+1 {
+			reason := browserprotocol.RestartGap
+			if current.subscriptionSequence < update.Floor {
+				reason = browserprotocol.RestartPruned
+			}
+			return current.sendRestart(browserprotocol.StateRestart{Head: head, Floor: update.Floor, Reason: reason})
+		}
+		payload, err := browserprotocol.EncodeStateEvent(current.subscriptionID, *update.Event)
+		if err == nil {
+			err = current.write(payload)
+		}
+		if err == nil {
+			current.subscriptionSequence = sequence
+			current.subscriptionHead = head
+		}
+		return err
 	}
+	return current.sendRestart(*update.Restart)
+}
+
+func (current *connection) sendRestart(restart browserprotocol.StateRestart) error {
+	payload, err := browserprotocol.EncodeStateRestart(current.subscriptionID, restart)
 	if err != nil {
 		return err
 	}
+	if err := current.closeSubscription(); err != nil {
+		current.cleanupErr = errors.Join(current.cleanupErr, err)
+		return err
+	}
 	return current.write(payload)
+}
+
+func (current *connection) closeSubscription() error {
+	if current.subscription == nil {
+		return nil
+	}
+	subscription := current.subscription
+	current.subscription = nil
+	current.updates = nil
+	current.subscriptionID = ""
+	current.subscriptionSequence = 0
+	current.subscriptionHead = 0
+	return stopSubscription(subscription)
+}
+
+func stopSubscription(subscription StateSubscription) error {
+	if subscription == nil {
+		return ErrSubscriptionUnresolved
+	}
+	done := subscription.Done()
+	if done == nil {
+		return ErrSubscriptionUnresolved
+	}
+	subscription.Cancel()
+	timer := time.NewTimer(subscriptionCloseLimit)
+	defer timer.Stop()
+	select {
+	case <-done:
+		if err := subscription.Err(); err != nil {
+			return fmt.Errorf("%w: %v", ErrSubscriptionUnresolved, err)
+		}
+		return nil
+	case <-timer.C:
+		return ErrSubscriptionUnresolved
+	}
+}
+
+func eventChronology(event browserprotocol.StateEvent) (browserprotocol.Decimal, browserprotocol.Decimal, error) {
+	if changed, ok := event.EntityChanged(); ok {
+		return changed.Sequence, changed.Head, nil
+	}
+	if hidden, ok := event.HiddenAdvance(); ok {
+		return hidden.Sequence, hidden.Head, nil
+	}
+	return 0, 0, fmt.Errorf("invalid state event")
+}
+
+func validatePageCorrelation(page StatePage, cursor *Cursor) error {
+	expectedKind := browserprotocol.StateFactory
+	if cursor != nil {
+		expectedKind = cursor.Kind
+		if page.Head != cursor.Head {
+			return fmt.Errorf("backend returned mismatched state head")
+		}
+	}
+	if page.Kind != expectedKind {
+		return fmt.Errorf("backend returned mismatched state kind")
+	}
+	if page.NextCursor == nil {
+		if page.Kind != browserprotocol.StateHumanRequest {
+			return fmt.Errorf("backend omitted state continuation")
+		}
+		return nil
+	}
+	next := page.NextCursor
+	if next.Head != page.Head {
+		return fmt.Errorf("backend returned mismatched continuation head")
+	}
+	if next.Kind == page.Kind {
+		if page.Kind == browserprotocol.StateFactory || !next.HasAfter {
+			return fmt.Errorf("backend returned invalid same-kind continuation")
+		}
+		return nil
+	}
+	if next.Kind != nextStateKind(page.Kind) || next.HasAfter {
+		return fmt.Errorf("backend returned invalid kind continuation")
+	}
+	return nil
+}
+
+func nextStateKind(kind browserprotocol.StateKind) browserprotocol.StateKind {
+	switch kind {
+	case browserprotocol.StateFactory:
+		return browserprotocol.StateProject
+	case browserprotocol.StateProject:
+		return browserprotocol.StateAgent
+	case browserprotocol.StateAgent:
+		return browserprotocol.StateTask
+	case browserprotocol.StateTask:
+		return browserprotocol.StateHumanRequest
+	default:
+		return ""
+	}
 }
 
 func (current *connection) sendError(id string, code browserprotocol.ErrorCode, retryable bool) {

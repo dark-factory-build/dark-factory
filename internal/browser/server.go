@@ -41,22 +41,25 @@ type Config struct {
 }
 
 type Server struct {
-	backend  Backend
-	host     string
-	origins  map[string]struct{}
-	listener net.Listener
-	http     *http.Server
+	backend Backend
+	host    string
+	origins map[string]struct{}
+	http    *http.Server
 
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu          sync.Mutex
-	closing     bool
-	connections map[*connection]struct{}
-	clients     map[[browserprotocol.ClientIDSize]byte]map[*connection]struct{}
-	slots       chan struct{}
-	serveDone   chan struct{}
-	closeOnce   sync.Once
+	mu             sync.Mutex
+	closing        bool
+	connections    map[*connection]struct{}
+	clients        map[[browserprotocol.ClientIDSize]byte]map[*connection]struct{}
+	authenticating map[[browserprotocol.ClientIDSize]byte]map[*connection]struct{}
+	blockedClients map[[browserprotocol.ClientIDSize]byte]struct{}
+	slots          chan struct{}
+	serveDone      chan struct{}
+	serveErr       error
+	closeErr       error
+	closeOnce      sync.Once
 }
 
 func Listen(config Config) (*Server, error) {
@@ -74,18 +77,23 @@ func Listen(config Config) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("browser: listen: %w", err)
 	}
+	return start(config.Backend, origins, listener), nil
+}
+
+func start(backend Backend, origins map[string]struct{}, listener net.Listener) *Server {
 	ctx, cancel := context.WithCancel(context.Background())
 	server := &Server{
-		backend:     config.Backend,
-		host:        listener.Addr().String(),
-		origins:     origins,
-		listener:    listener,
-		ctx:         ctx,
-		cancel:      cancel,
-		connections: make(map[*connection]struct{}),
-		clients:     make(map[[browserprotocol.ClientIDSize]byte]map[*connection]struct{}),
-		slots:       make(chan struct{}, maxConnections),
-		serveDone:   make(chan struct{}),
+		backend:        backend,
+		host:           listener.Addr().String(),
+		origins:        origins,
+		ctx:            ctx,
+		cancel:         cancel,
+		connections:    make(map[*connection]struct{}),
+		clients:        make(map[[browserprotocol.ClientIDSize]byte]map[*connection]struct{}),
+		authenticating: make(map[[browserprotocol.ClientIDSize]byte]map[*connection]struct{}),
+		blockedClients: make(map[[browserprotocol.ClientIDSize]byte]struct{}),
+		slots:          make(chan struct{}, maxConnections),
+		serveDone:      make(chan struct{}),
 	}
 	server.http = &http.Server{
 		Handler:           http.HandlerFunc(server.handle),
@@ -95,9 +103,22 @@ func Listen(config Config) (*Server, error) {
 	}
 	go func() {
 		defer close(server.serveDone)
-		_ = server.http.Serve(listener)
+		if err := server.http.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			server.mu.Lock()
+			server.serveErr = fmt.Errorf("browser: serve: %w", err)
+			server.closing = true
+			connections := make([]*connection, 0, len(server.connections))
+			for current := range server.connections {
+				connections = append(connections, current)
+			}
+			server.mu.Unlock()
+			server.cancel()
+			for _, current := range connections {
+				current.stop()
+			}
+		}
 	}()
-	return server, nil
+	return server
 }
 
 func (server *Server) Addr() string {
@@ -107,11 +128,32 @@ func (server *Server) Addr() string {
 	return server.host
 }
 
+// ServeDone closes if the listener stops, including an unexpected Serve
+// failure. Err reports that bounded failure without exposing request data.
+func (server *Server) ServeDone() <-chan struct{} {
+	if server == nil {
+		closed := make(chan struct{})
+		close(closed)
+		return closed
+	}
+	return server.serveDone
+}
+
+func (server *Server) Err() error {
+	if server == nil {
+		return nil
+	}
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	return server.serveErr
+}
+
 func (server *Server) Close() error {
 	if server == nil {
 		return nil
 	}
 	server.closeOnce.Do(func() {
+		var closeErrors []error
 		server.mu.Lock()
 		server.closing = true
 		connections := make([]*connection, 0, len(server.connections))
@@ -120,26 +162,46 @@ func (server *Server) Close() error {
 		}
 		server.mu.Unlock()
 		server.cancel()
-		_ = server.http.Close()
+		if err := server.http.Close(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			closeErrors = append(closeErrors, err)
+		}
 		for _, current := range connections {
 			current.stop()
 		}
 		for _, current := range connections {
 			<-current.done
+			if current.cleanupErr != nil {
+				closeErrors = append(closeErrors, current.cleanupErr)
+			}
 		}
 		<-server.serveDone
+		server.mu.Lock()
+		if server.serveErr != nil {
+			closeErrors = append(closeErrors, server.serveErr)
+		}
+		server.closeErr = errors.Join(closeErrors...)
+		server.mu.Unlock()
 	})
-	return nil
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	return server.closeErr
 }
 
 // CloseClient is the non-reentrant revocation seam. The daemon commits
 // revocation before calling it; this method performs no authorization call.
-func (server *Server) CloseClient(clientID [browserprotocol.ClientIDSize]byte) {
+func (server *Server) CloseClient(clientID [browserprotocol.ClientIDSize]byte) error {
 	if server == nil || zero16(clientID) {
-		return
+		return nil
 	}
 	server.mu.Lock()
-	set := server.clients[clientID]
+	server.blockedClients[clientID] = struct{}{}
+	set := make(map[*connection]struct{})
+	for current := range server.clients[clientID] {
+		set[current] = struct{}{}
+	}
+	for current := range server.authenticating[clientID] {
+		set[current] = struct{}{}
+	}
 	connections := make([]*connection, 0, len(set))
 	for current := range set {
 		connections = append(connections, current)
@@ -151,6 +213,13 @@ func (server *Server) CloseClient(clientID [browserprotocol.ClientIDSize]byte) {
 	for _, current := range connections {
 		<-current.done
 	}
+	var closeErrors []error
+	for _, current := range connections {
+		if current.cleanupErr != nil {
+			closeErrors = append(closeErrors, current.cleanupErr)
+		}
+	}
+	return errors.Join(closeErrors...)
 }
 
 func (server *Server) handle(writer http.ResponseWriter, request *http.Request) {
@@ -227,12 +296,54 @@ func (server *Server) validRequest(request *http.Request) (string, bool) {
 	return values[0], ok
 }
 
-func (server *Server) registerPrincipal(current *connection, principal Principal) bool {
+func (server *Server) beginAuthentication(current *connection, clientID [browserprotocol.ClientIDSize]byte) bool {
 	server.mu.Lock()
 	defer server.mu.Unlock()
-	if server.closing {
+	if server.closing || zero16(clientID) {
 		return false
 	}
+	if _, blocked := server.blockedClients[clientID]; blocked {
+		return false
+	}
+	set := server.authenticating[clientID]
+	if set == nil {
+		set = make(map[*connection]struct{})
+		server.authenticating[clientID] = set
+	}
+	set[current] = struct{}{}
+	current.authenticating = true
+	current.authenticatingID = clientID
+	return true
+}
+
+func (server *Server) finishAuthentication(current *connection, requested [browserprotocol.ClientIDSize]byte, result Authentication, accept bool) bool {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	server.removeAuthenticatingLocked(current)
+	if !accept || server.closing || result.Principal.ClientID != requested {
+		return false
+	}
+	if _, blocked := server.blockedClients[requested]; blocked {
+		return false
+	}
+	server.registerLocked(current, result.Principal)
+	return true
+}
+
+func (server *Server) registerPair(current *connection, result Authentication, accept bool) bool {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if !accept || server.closing || zero16(result.Principal.ClientID) {
+		return false
+	}
+	if _, blocked := server.blockedClients[result.Principal.ClientID]; blocked {
+		return false
+	}
+	server.registerLocked(current, result.Principal)
+	return true
+}
+
+func (server *Server) registerLocked(current *connection, principal Principal) {
 	current.principal = principal
 	current.authenticated = true
 	set := server.clients[principal.ClientID]
@@ -241,12 +352,25 @@ func (server *Server) registerPrincipal(current *connection, principal Principal
 		server.clients[principal.ClientID] = set
 	}
 	set[current] = struct{}{}
-	return true
+}
+
+func (server *Server) removeAuthenticatingLocked(current *connection) {
+	if !current.authenticating {
+		return
+	}
+	set := server.authenticating[current.authenticatingID]
+	delete(set, current)
+	if len(set) == 0 {
+		delete(server.authenticating, current.authenticatingID)
+	}
+	current.authenticating = false
+	current.authenticatingID = [browserprotocol.ClientIDSize]byte{}
 }
 
 func (server *Server) unregister(current *connection) {
 	server.mu.Lock()
 	delete(server.connections, current)
+	server.removeAuthenticatingLocked(current)
 	if current.authenticated {
 		set := server.clients[current.principal.ClientID]
 		delete(set, current)
@@ -302,8 +426,8 @@ func nonzero(value []byte) bool {
 	return false
 }
 
-func validatePrincipal(principal Principal) error {
-	if zero16(principal.ClientID) || principal.Capabilities&browserprotocol.CapabilityObserve == 0 || principal.Capabilities&^implementedCaps != 0 {
+func validateAuthentication(result Authentication) error {
+	if zero16(result.Principal.ClientID) || result.Capabilities&browserprotocol.CapabilityObserve == 0 || result.Capabilities&^implementedCaps != 0 {
 		return ErrUnauthorized
 	}
 	return nil

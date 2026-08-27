@@ -1,0 +1,347 @@
+package browser
+
+import (
+	"context"
+	"encoding/hex"
+	"errors"
+	"net"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/coder/websocket"
+	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
+)
+
+func authProof(t *testing.T, connection *websocket.Conn) {
+	t.Helper()
+	proof, err := browserprotocol.EncodeAuthProve("auth", browserprotocol.AuthProve{
+		ClientID: testID, Signature: strings.Repeat("01", browserprotocol.SignatureSize),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeClientFrame(t, connection, proof)
+}
+
+func waitFor(t *testing.T, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !condition() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition did not become true")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestRevocationClosesInflightAuthenticationBeforeReturn(t *testing.T) {
+	backend := newFakeBackend()
+	backend.authWait = true
+	server := startServer(t, backend)
+	connection, _ := dialServer(t, server, testOrigin)
+	_ = readServerFrame(t, connection)
+	authProof(t, connection)
+	waitFor(t, func() bool {
+		backend.mu.Lock()
+		defer backend.mu.Unlock()
+		return backend.authCalls == 1
+	})
+	clientID := backend.authentication.Principal.ClientID
+	done := make(chan error, 1)
+	go func() { done <- server.CloseClient(clientID) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("revocation did not cancel and join in-flight authentication")
+	}
+	server.mu.Lock()
+	registered := len(server.clients[clientID])
+	inflight := len(server.authenticating[clientID])
+	_, blocked := server.blockedClients[clientID]
+	server.mu.Unlock()
+	if registered != 0 || inflight != 0 || !blocked {
+		t.Fatalf("revocation barrier registered=%d inflight=%d blocked=%v", registered, inflight, blocked)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, _, err := connection.Read(ctx); err == nil {
+		t.Fatal("revoked in-flight authentication received a result")
+	}
+}
+
+func TestAuthResultMustMatchRequestedClient(t *testing.T) {
+	backend := newFakeBackend()
+	backend.authentication.Principal.ClientID[0] ^= 0xff
+	server := startServer(t, backend)
+	connection, _ := dialServer(t, server, testOrigin)
+	_ = readServerFrame(t, connection)
+	authProof(t, connection)
+	assertError(t, readServerFrame(t, connection), browserprotocol.ErrorUnauthorized)
+	server.mu.Lock()
+	registered := len(server.clients[backend.authentication.Principal.ClientID])
+	server.mu.Unlock()
+	if registered != 0 {
+		t.Fatalf("mismatched backend principal registered %d connections", registered)
+	}
+}
+
+func TestPairResultCannotRegisterAfterExactClientRevocation(t *testing.T) {
+	backend := newFakeBackend()
+	backend.pairStarted = make(chan struct{})
+	release := make(chan struct{})
+	backend.pairRelease = release
+	server := startServer(t, backend)
+	connection, _ := dialServer(t, server, testOrigin)
+	_ = readServerFrame(t, connection)
+	publicKey := append([]byte{4}, make([]byte, browserprotocol.PublicKeySize-1)...)
+	pair, err := browserprotocol.EncodePairProve("pair", browserprotocol.PairProve{
+		Challenge:     strings.Repeat("04", browserprotocol.ChallengeSize),
+		PublicKeySEC1: hex.EncodeToString(publicKey),
+		Signature:     strings.Repeat("05", browserprotocol.SignatureSize),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeClientFrame(t, connection, pair)
+	select {
+	case <-backend.pairStarted:
+	case <-time.After(time.Second):
+		t.Fatal("pair backend did not start")
+	}
+	if err := server.CloseClient(backend.authentication.Principal.ClientID); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	assertError(t, readServerFrame(t, connection), browserprotocol.ErrorUnauthorized)
+}
+
+func TestOperationAuthorizationIsReloadedByBackend(t *testing.T) {
+	backend := newFakeBackend()
+	server := startServer(t, backend)
+	connection, _ := dialServer(t, server, testOrigin)
+	authenticate(t, connection)
+	backend.mu.Lock()
+	backend.detailErr = ErrUnauthorized
+	backend.mu.Unlock()
+	request, _ := browserprotocol.EncodeHumanRequestDetailGet("detail-revoked", browserprotocol.HumanRequestDetailGet{RequestID: requestID, ExpectedRevision: 1})
+	writeClientFrame(t, connection, request)
+	assertError(t, readServerFrame(t, connection), browserprotocol.ErrorUnauthorized)
+	backend.mu.Lock()
+	calls := backend.detailCalls
+	backend.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("backend authorization calls=%d want 1", calls)
+	}
+}
+
+func TestSubscriptionChronologyRestartsInsteadOfPublishingGap(t *testing.T) {
+	tests := []struct {
+		name   string
+		update StateUpdate
+		reason browserprotocol.RestartReason
+	}{
+		{"gap", StateUpdate{Event: eventPointer(browserprotocol.HiddenAdvanceEvent(browserprotocol.HiddenAdvance{Sequence: 9, Head: 9}))}, browserprotocol.RestartGap},
+		{"pruned", StateUpdate{Event: eventPointer(browserprotocol.HiddenAdvanceEvent(browserprotocol.HiddenAdvance{Sequence: 8, Head: 8})), Floor: 8}, browserprotocol.RestartPruned},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			backend := newFakeBackend()
+			server := startServer(t, backend)
+			connection, _ := dialServer(t, server, testOrigin)
+			authenticate(t, connection)
+			subscribe, _ := browserprotocol.EncodeStateSubscribe("chronology", browserprotocol.StateSubscribe{After: 7})
+			writeClientFrame(t, connection, subscribe)
+			waitFor(t, func() bool {
+				backend.mu.Lock()
+				defer backend.mu.Unlock()
+				return backend.subCalls == 1
+			})
+			backend.sub.updates <- test.update
+			frame := readServerFrame(t, connection)
+			if frame.Type != browserprotocol.TypeStateRestart || frame.ID != "chronology" {
+				t.Fatalf("gap published instead of restart: %+v", frame)
+			}
+			if got := frame.Body.(browserprotocol.StateRestart).Reason; got != test.reason {
+				t.Fatalf("reason=%s want %s", got, test.reason)
+			}
+			if backend.sub.closed.Load() != 1 {
+				t.Fatal("chronology restart did not join subscription")
+			}
+		})
+	}
+}
+
+func eventPointer(value browserprotocol.StateEvent) *browserprotocol.StateEvent { return &value }
+
+func TestHiddenChronologyAdvancesAndExplicitDependencyRestartCloses(t *testing.T) {
+	backend := newFakeBackend()
+	server := startServer(t, backend)
+	connection, _ := dialServer(t, server, testOrigin)
+	authenticate(t, connection)
+	subscribe, _ := browserprotocol.EncodeStateSubscribe("hidden", browserprotocol.StateSubscribe{After: 7})
+	writeClientFrame(t, connection, subscribe)
+	waitFor(t, func() bool {
+		backend.mu.Lock()
+		defer backend.mu.Unlock()
+		return backend.subCalls == 1
+	})
+	event := browserprotocol.HiddenAdvanceEvent(browserprotocol.HiddenAdvance{Sequence: 8, Head: 8})
+	backend.sub.updates <- StateUpdate{Event: &event}
+	if frame := readServerFrame(t, connection); frame.Type != browserprotocol.TypeStateEvent || frame.ID != "hidden" {
+		t.Fatalf("hidden advance=%+v", frame)
+	}
+	restart := browserprotocol.StateRestart{Head: 9, Floor: 0, Reason: browserprotocol.RestartHiddenDependency}
+	backend.sub.updates <- StateUpdate{Restart: &restart}
+	frame := readServerFrame(t, connection)
+	if frame.Type != browserprotocol.TypeStateRestart || frame.Body.(browserprotocol.StateRestart).Reason != browserprotocol.RestartHiddenDependency {
+		t.Fatalf("hidden dependency restart=%+v", frame)
+	}
+}
+
+func TestBackendResponseCorrelationFailsClosed(t *testing.T) {
+	t.Run("entity id", func(t *testing.T) {
+		backend := newFakeBackend()
+		backend.entity.ID = requestID
+		backend.entity.Item = browserprotocol.ProjectStateItem(browserprotocol.ProjectItem{ID: requestID, Name: "Wrong", Revision: 1})
+		server := startServer(t, backend)
+		connection, _ := dialServer(t, server, testOrigin)
+		authenticate(t, connection)
+		request, _ := browserprotocol.EncodeStateEntityGet("entity-mismatch", browserprotocol.StateEntityGet{Kind: browserprotocol.StateProject, ID: projectID})
+		writeClientFrame(t, connection, request)
+		assertError(t, readServerFrame(t, connection), browserprotocol.ErrorInternal)
+	})
+	t.Run("detail id and revision", func(t *testing.T) {
+		for _, mutate := range []func(*browserprotocol.HumanRequestDetail){
+			func(value *browserprotocol.HumanRequestDetail) { value.RequestID = projectID },
+			func(value *browserprotocol.HumanRequestDetail) { value.Revision = 2 },
+		} {
+			backend := newFakeBackend()
+			mutate(&backend.detail)
+			server := startServer(t, backend)
+			connection, _ := dialServer(t, server, testOrigin)
+			authenticate(t, connection)
+			request, _ := browserprotocol.EncodeHumanRequestDetailGet("detail-mismatch", browserprotocol.HumanRequestDetailGet{RequestID: requestID, ExpectedRevision: 1})
+			writeClientFrame(t, connection, request)
+			assertError(t, readServerFrame(t, connection), browserprotocol.ErrorInternal)
+		}
+	})
+	t.Run("page kind", func(t *testing.T) {
+		backend := newFakeBackend()
+		next := Cursor{Head: 7, Kind: browserprotocol.StateAgent}
+		backend.page = StatePage{Head: 7, Kind: browserprotocol.StateProject, Items: browserprotocol.ProjectItems(nil), NextCursor: &next}
+		server := startServer(t, backend)
+		connection, _ := dialServer(t, server, testOrigin)
+		authenticate(t, connection)
+		request, _ := browserprotocol.EncodeStateGet("page-kind", browserprotocol.StateGet{})
+		writeClientFrame(t, connection, request)
+		assertError(t, readServerFrame(t, connection), browserprotocol.ErrorInternal)
+	})
+	t.Run("page continuation head", func(t *testing.T) {
+		backend := newFakeBackend()
+		backend.page.NextCursor.Head = 8
+		server := startServer(t, backend)
+		connection, _ := dialServer(t, server, testOrigin)
+		authenticate(t, connection)
+		request, _ := browserprotocol.EncodeStateGet("page-head", browserprotocol.StateGet{})
+		writeClientFrame(t, connection, request)
+		assertError(t, readServerFrame(t, connection), browserprotocol.ErrorInternal)
+	})
+	t.Run("page pinned cursor head", func(t *testing.T) {
+		backend := newFakeBackend()
+		server := startServer(t, backend)
+		connection, _ := dialServer(t, server, testOrigin)
+		authenticate(t, connection)
+		first, _ := browserprotocol.EncodeStateGet("page-first", browserprotocol.StateGet{})
+		writeClientFrame(t, connection, first)
+		snapshot := readServerFrame(t, connection).Body.(browserprotocol.StateSnapshot)
+		backend.mu.Lock()
+		next := Cursor{Head: 8, Kind: browserprotocol.StateAgent}
+		backend.page = StatePage{Head: 8, Kind: browserprotocol.StateProject, Items: browserprotocol.ProjectItems(nil), NextCursor: &next}
+		backend.mu.Unlock()
+		request, _ := browserprotocol.EncodeStateGet("page-pinned", browserprotocol.StateGet{Cursor: snapshot.NextCursor})
+		writeClientFrame(t, connection, request)
+		assertError(t, readServerFrame(t, connection), browserprotocol.ErrorInternal)
+	})
+}
+
+func TestBackendSuccessAfterOperationDeadlineIsDiscarded(t *testing.T) {
+	backend := newFakeBackend()
+	backend.stateWait = true
+	server := startServer(t, backend)
+	connection, _ := dialServer(t, server, testOrigin)
+	authenticate(t, connection)
+	request, _ := browserprotocol.EncodeStateGet("late-state", browserprotocol.StateGet{})
+	writeClientFrame(t, connection, request)
+	frame := readServerFrame(t, connection)
+	assertError(t, frame, browserprotocol.ErrorInternal)
+}
+
+func TestLateSubscriptionIsCancelledAndNeverInstalled(t *testing.T) {
+	backend := newFakeBackend()
+	backend.subWait = true
+	server := startServer(t, backend)
+	connection, _ := dialServer(t, server, testOrigin)
+	authenticate(t, connection)
+	request, _ := browserprotocol.EncodeStateSubscribe("late-sub", browserprotocol.StateSubscribe{})
+	writeClientFrame(t, connection, request)
+	assertError(t, readServerFrame(t, connection), browserprotocol.ErrorInternal)
+	if backend.sub.closed.Load() != 1 {
+		t.Fatalf("late subscription cleanup count=%d", backend.sub.closed.Load())
+	}
+}
+
+func TestUncooperativeSubscriptionCleanupIsBoundedAndObservable(t *testing.T) {
+	backend := newFakeBackend()
+	backend.sub.neverDone = true
+	server, err := Listen(Config{Address: "127.0.0.1:0", AllowedOrigins: []string{testOrigin}, Backend: backend})
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, _ := dialServer(t, server, testOrigin)
+	authenticate(t, connection)
+	subscribe, _ := browserprotocol.EncodeStateSubscribe("unresolved", browserprotocol.StateSubscribe{})
+	writeClientFrame(t, connection, subscribe)
+	waitFor(t, func() bool {
+		backend.mu.Lock()
+		defer backend.mu.Unlock()
+		return backend.subCalls == 1
+	})
+	started := time.Now()
+	err = server.Close()
+	if !errors.Is(err, ErrSubscriptionUnresolved) {
+		t.Fatalf("close error=%v", err)
+	}
+	if elapsed := time.Since(started); elapsed > subscriptionCloseLimit+time.Second {
+		t.Fatalf("uncooperative cleanup took %v", elapsed)
+	}
+}
+
+type failingListener struct {
+	err error
+}
+
+func (listener failingListener) Accept() (net.Conn, error) { return nil, listener.err }
+func (failingListener) Close() error                       { return nil }
+func (failingListener) Addr() net.Addr {
+	return &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 43123}
+}
+
+func TestUnexpectedServeFailureIsObservable(t *testing.T) {
+	sentinel := errors.New("serve-SENTINEL")
+	server := start(newFakeBackend(), map[string]struct{}{testOrigin: {}}, failingListener{err: sentinel})
+	select {
+	case <-server.ServeDone():
+	case <-time.After(time.Second):
+		t.Fatal("Serve failure was not observable")
+	}
+	if !errors.Is(server.Err(), sentinel) {
+		t.Fatalf("server Err=%v", server.Err())
+	}
+	if err := server.Close(); !errors.Is(err, sentinel) {
+		t.Fatalf("Close error=%v", err)
+	}
+}

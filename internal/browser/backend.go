@@ -8,11 +8,12 @@ import (
 )
 
 var (
-	ErrUnauthorized = errors.New("browser: unauthorized")
-	ErrNotFound     = errors.New("browser: not found")
-	ErrStale        = errors.New("browser: stale")
-	ErrTooLarge     = errors.New("browser: too large")
-	ErrRateLimited  = errors.New("browser: rate limited")
+	ErrUnauthorized           = errors.New("browser: unauthorized")
+	ErrNotFound               = errors.New("browser: not found")
+	ErrStale                  = errors.New("browser: stale")
+	ErrTooLarge               = errors.New("browser: too large")
+	ErrRateLimited            = errors.New("browser: rate limited")
+	ErrSubscriptionUnresolved = errors.New("browser: subscription cleanup unresolved")
 )
 
 // Identity is the daemon identity sent in HELLO. The boot ID changes on every
@@ -25,7 +26,14 @@ type Identity struct {
 // Principal contains only daemon-minted browser authority. The transport
 // never accepts capabilities or a client identity from an operation frame.
 type Principal struct {
-	ClientID     [browserprotocol.ClientIDSize]byte
+	ClientID [browserprotocol.ClientIDSize]byte
+}
+
+// Authentication is used only for the daemon-minted handshake result.
+// Capabilities are negotiated once and are deliberately not cached on the
+// connection as later authorization; Backend reloads authority per operation.
+type Authentication struct {
+	Principal    Principal
 	Capabilities browserprotocol.Capabilities
 }
 
@@ -78,22 +86,32 @@ func (err *RestartError) Error() string { return "browser: state restart require
 type StateUpdate struct {
 	Event   *browserprotocol.StateEvent
 	Restart *browserprotocol.StateRestart
+	// Floor is the current durable event-retention floor for Event updates.
+	// Explicit Restart already contains its floor and requires this field zero.
+	Floor browserprotocol.Decimal
 }
 
-// StateSubscription is owned by one WebSocket connection. Close must stop and
-// join its producer before returning.
+// StateSubscription is owned by one WebSocket connection. Cancel must be
+// nonblocking. Updates, Done and Err are nonblocking accessors. Done must close
+// after the producer exits, after which Err is stable. This lets the connection
+// bound shutdown without abandoning a goroutine inside an uncooperative
+// synchronous Close call.
 type StateSubscription interface {
 	Updates() <-chan StateUpdate
-	Close() error
+	Cancel()
+	Done() <-chan struct{}
+	Err() error
 }
 
 // Backend is the complete daemon boundary for this state-only slice. Every
 // operation after authentication receives only the daemon-minted client ID;
 // the implementation revalidates durable authority and canonical state.
+// Every method must return promptly when its context is cancelled. The
+// transport never wraps a noncooperative call in an orphanable goroutine.
 type Backend interface {
 	Identity(context.Context) (Identity, error)
-	Pair(context.Context, PairRequest) (Principal, error)
-	Authenticate(context.Context, AuthRequest) (Principal, error)
+	Pair(context.Context, PairRequest) (Authentication, error)
+	Authenticate(context.Context, AuthRequest) (Authentication, error)
 	StatePage(context.Context, [browserprotocol.ClientIDSize]byte, *Cursor) (StatePage, error)
 	StateEntity(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.StateEntityGet) (browserprotocol.StateEntity, error)
 	HumanRequestDetail(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.HumanRequestDetailGet) (browserprotocol.HumanRequestDetail, error)

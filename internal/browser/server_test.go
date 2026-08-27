@@ -30,20 +30,24 @@ const (
 type fakeBackend struct {
 	mu sync.Mutex
 
-	identity  Identity
-	principal Principal
-	pairErr   error
-	authErr   error
-	authWait  bool
-	stateErr  error
-	entityErr error
-	detailErr error
-	subErr    error
-	page      StatePage
-	pageFunc  func(int, *Cursor) StatePage
-	entity    browserprotocol.StateEntity
-	detail    browserprotocol.HumanRequestDetail
-	sub       *fakeSubscription
+	identity       Identity
+	authentication Authentication
+	pairErr        error
+	pairStarted    chan struct{}
+	pairRelease    <-chan struct{}
+	authErr        error
+	authWait       bool
+	stateErr       error
+	stateWait      bool
+	entityErr      error
+	detailErr      error
+	subErr         error
+	subWait        bool
+	page           StatePage
+	pageFunc       func(int, *Cursor) StatePage
+	entity         browserprotocol.StateEntity
+	detail         browserprotocol.HumanRequestDetail
+	sub            *fakeSubscription
 
 	pairRequest PairRequest
 	authRequest AuthRequest
@@ -59,8 +63,9 @@ func newFakeBackend() *fakeBackend {
 	backend := &fakeBackend{}
 	backend.identity.DaemonID[0] = 1
 	backend.identity.BootID[0] = 2
-	backend.principal.ClientID[0] = 3
-	backend.principal.Capabilities = browserprotocol.CapabilityObserve | browserprotocol.CapabilityPrivateHumanRequestDetail
+	clientBytes, _ := hex.DecodeString(testID)
+	copy(backend.authentication.Principal.ClientID[:], clientBytes)
+	backend.authentication.Capabilities = browserprotocol.CapabilityObserve | browserprotocol.CapabilityPrivateHumanRequestDetail
 	next := Cursor{Head: 7, Kind: browserprotocol.StateProject}
 	backend.page = StatePage{
 		Head: 7,
@@ -80,33 +85,47 @@ func newFakeBackend() *fakeBackend {
 }
 
 func (backend *fakeBackend) Identity(context.Context) (Identity, error) { return backend.identity, nil }
-func (backend *fakeBackend) Pair(_ context.Context, request PairRequest) (Principal, error) {
+func (backend *fakeBackend) Pair(ctx context.Context, request PairRequest) (Authentication, error) {
 	backend.mu.Lock()
-	defer backend.mu.Unlock()
 	backend.pairCalls++
 	backend.pairRequest = request
-	return backend.principal, backend.pairErr
+	started, release, result, err := backend.pairStarted, backend.pairRelease, backend.authentication, backend.pairErr
+	backend.mu.Unlock()
+	if started != nil {
+		close(started)
+	}
+	if release != nil {
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+	}
+	return result, err
 }
-func (backend *fakeBackend) Authenticate(ctx context.Context, request AuthRequest) (Principal, error) {
+func (backend *fakeBackend) Authenticate(ctx context.Context, request AuthRequest) (Authentication, error) {
 	backend.mu.Lock()
 	backend.authCalls++
 	backend.authRequest = request
-	wait, principal, err := backend.authWait, backend.principal, backend.authErr
+	wait, result, err := backend.authWait, backend.authentication, backend.authErr
 	backend.mu.Unlock()
 	if wait {
 		<-ctx.Done()
 	}
-	return principal, err
+	return result, err
 }
-func (backend *fakeBackend) StatePage(_ context.Context, client [16]byte, cursor *Cursor) (StatePage, error) {
+func (backend *fakeBackend) StatePage(ctx context.Context, client [16]byte, cursor *Cursor) (StatePage, error) {
 	backend.mu.Lock()
-	defer backend.mu.Unlock()
 	backend.stateCalls++
 	backend.clients = append(backend.clients, client)
-	if backend.pageFunc != nil {
-		return backend.pageFunc(backend.stateCalls, cursor), backend.stateErr
+	wait, page, backendErr, pageFunc, call := backend.stateWait, backend.page, backend.stateErr, backend.pageFunc, backend.stateCalls
+	backend.mu.Unlock()
+	if wait {
+		<-ctx.Done()
 	}
-	return backend.page, backend.stateErr
+	if pageFunc != nil {
+		return pageFunc(call, cursor), backendErr
+	}
+	return page, backendErr
 }
 func (backend *fakeBackend) StateEntity(_ context.Context, client [16]byte, _ browserprotocol.StateEntityGet) (browserprotocol.StateEntity, error) {
 	backend.mu.Lock()
@@ -121,36 +140,53 @@ func (backend *fakeBackend) HumanRequestDetail(_ context.Context, client [16]byt
 	backend.clients = append(backend.clients, client)
 	return backend.detail, backend.detailErr
 }
-func (backend *fakeBackend) SubscribeState(_ context.Context, client [16]byte, _ browserprotocol.Decimal) (StateSubscription, error) {
+func (backend *fakeBackend) SubscribeState(ctx context.Context, client [16]byte, _ browserprotocol.Decimal) (StateSubscription, error) {
 	backend.mu.Lock()
-	defer backend.mu.Unlock()
 	backend.subCalls++
 	backend.clients = append(backend.clients, client)
-	return backend.sub, backend.subErr
+	wait, subscription, err := backend.subWait, backend.sub, backend.subErr
+	backend.mu.Unlock()
+	if wait {
+		<-ctx.Done()
+	}
+	return subscription, err
 }
 
 type fakeSubscription struct {
-	updates    chan StateUpdate
-	once       sync.Once
-	closed     atomic.Int32
-	done       chan struct{}
-	closeBlock <-chan struct{}
+	updates         chan StateUpdate
+	once            sync.Once
+	closed          atomic.Int32
+	done            chan struct{}
+	completionBlock <-chan struct{}
+	neverDone       bool
+	err             error
 }
 
 func newFakeSubscription() *fakeSubscription {
 	return &fakeSubscription{updates: make(chan StateUpdate, 8), done: make(chan struct{})}
 }
 func (subscription *fakeSubscription) Updates() <-chan StateUpdate { return subscription.updates }
-func (subscription *fakeSubscription) Close() error {
+func (subscription *fakeSubscription) Cancel() {
 	subscription.once.Do(func() {
-		if subscription.closeBlock != nil {
-			<-subscription.closeBlock
+		if subscription.neverDone {
+			return
 		}
-		subscription.closed.Add(1)
-		close(subscription.done)
+		finish := func() {
+			if subscription.completionBlock != nil {
+				<-subscription.completionBlock
+			}
+			subscription.closed.Add(1)
+			close(subscription.done)
+		}
+		if subscription.completionBlock == nil {
+			finish()
+		} else {
+			go finish()
+		}
 	})
-	return nil
 }
+func (subscription *fakeSubscription) Done() <-chan struct{} { return subscription.done }
+func (subscription *fakeSubscription) Err() error            { return subscription.err }
 
 func startServer(t *testing.T, backend *fakeBackend) *Server {
 	t.Helper()
@@ -168,7 +204,7 @@ func startServer(t *testing.T, backend *fakeBackend) *Server {
 
 func dialServer(t *testing.T, server *Server, origin string) (*websocket.Conn, *http.Response) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), backendCallLimit+2*time.Second)
 	defer cancel()
 	header := make(http.Header)
 	header.Set("Origin", origin)
@@ -188,7 +224,7 @@ func dialServer(t *testing.T, server *Server, origin string) (*websocket.Conn, *
 
 func readServerFrame(t *testing.T, connection *websocket.Conn) browserprotocol.ControlFrame {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), backendCallLimit+2*time.Second)
 	defer cancel()
 	kind, payload, err := connection.Read(ctx)
 	if err != nil {
@@ -421,7 +457,7 @@ func TestProofFailuresAndUnsupportedCapabilitiesFailClosed(t *testing.T) {
 	}
 	for _, capability := range []browserprotocol.Capabilities{browserprotocol.CapabilityObserve | browserprotocol.CapabilityHumanActions, browserprotocol.CapabilityObserve | browserprotocol.CapabilityTerminalInput} {
 		backend := newFakeBackend()
-		backend.principal.Capabilities = capability
+		backend.authentication.Capabilities = capability
 		server := startServer(t, backend)
 		connection, _ := dialServer(t, server, testOrigin)
 		_ = readServerFrame(t, connection)
@@ -547,7 +583,7 @@ func TestAuthenticationDeadlineIncludesBackendProof(t *testing.T) {
 		t.Fatalf("proof deadline elapsed=%v", elapsed)
 	}
 	server.mu.Lock()
-	registered := len(server.clients[backend.principal.ClientID])
+	registered := len(server.clients[backend.authentication.Principal.ClientID])
 	server.mu.Unlock()
 	if registered != 0 {
 		t.Fatalf("timed-out proof registered %d connections", registered)
@@ -605,7 +641,7 @@ func TestStateOperationsChronologyCapabilitiesAndRedaction(t *testing.T) {
 	clients := append([][16]byte(nil), backend.clients...)
 	backend.mu.Unlock()
 	for _, client := range clients {
-		if client != backend.principal.ClientID {
+		if client != backend.authentication.Principal.ClientID {
 			t.Fatalf("operation used non-principal client %x", client)
 		}
 	}
@@ -644,7 +680,8 @@ func TestStateRestartAndFiniteErrorMapping(t *testing.T) {
 
 func TestPrivateDetailRequiresCapabilityBeforeBackend(t *testing.T) {
 	backend := newFakeBackend()
-	backend.principal.Capabilities = browserprotocol.CapabilityObserve
+	backend.authentication.Capabilities = browserprotocol.CapabilityObserve
+	backend.detailErr = ErrUnauthorized
 	server := startServer(t, backend)
 	connection, _ := dialServer(t, server, testOrigin)
 	authenticate(t, connection)
@@ -654,8 +691,8 @@ func TestPrivateDetailRequiresCapabilityBeforeBackend(t *testing.T) {
 	backend.mu.Lock()
 	calls := backend.detailCalls
 	backend.mu.Unlock()
-	if calls != 0 {
-		t.Fatalf("unauthorized detail reached backend %d times", calls)
+	if calls != 1 {
+		t.Fatalf("detail authority was not reloaded exactly once: %d", calls)
 	}
 }
 
@@ -721,7 +758,10 @@ func TestMaximumValidStateTraversalFitsLifetimeRequestBudget(t *testing.T) {
 				items = items[:7]
 				return StatePage{Head: 1, Kind: browserprotocol.StateHumanRequest, Items: browserprotocol.HumanRequestItems(items)}
 			}
-			return StatePage{Head: 1, Kind: browserprotocol.StateHumanRequest, Items: browserprotocol.HumanRequestItems(items), NextCursor: nextFor(browserprotocol.StateHumanRequest)}
+			next := nextFor(browserprotocol.StateHumanRequest)
+			next.HasAfter = true
+			next.AfterID[0] = 1
+			return StatePage{Head: 1, Kind: browserprotocol.StateHumanRequest, Items: browserprotocol.HumanRequestItems(items), NextCursor: next}
 		}
 	}
 	server := startServer(t, backend)
@@ -794,7 +834,7 @@ func TestCloseClientAndServerJoinConnectionsWithoutReauthorization(t *testing.T)
 	backend.mu.Unlock()
 	done := make(chan struct{})
 	go func() {
-		server.CloseClient(backend.principal.ClientID)
+		_ = server.CloseClient(backend.authentication.Principal.ClientID)
 		close(done)
 	}()
 	select {
@@ -808,7 +848,7 @@ func TestCloseClientAndServerJoinConnectionsWithoutReauthorization(t *testing.T)
 	}
 	backend.mu.Unlock()
 	server.mu.Lock()
-	clientConnections := len(server.clients[backend.principal.ClientID])
+	clientConnections := len(server.clients[backend.authentication.Principal.ClientID])
 	server.mu.Unlock()
 	if clientConnections != 0 {
 		t.Fatalf("client registry retained %d connections", clientConnections)
@@ -829,7 +869,7 @@ func TestCloseClientAndServerJoinConnectionsWithoutReauthorization(t *testing.T)
 func TestServerCloseWaitsForConnectionOwnedSubscriptionJoin(t *testing.T) {
 	backend := newFakeBackend()
 	release := make(chan struct{})
-	backend.sub.closeBlock = release
+	backend.sub.completionBlock = release
 	server := startServer(t, backend)
 	connection, _ := dialServer(t, server, testOrigin)
 	authenticate(t, connection)
