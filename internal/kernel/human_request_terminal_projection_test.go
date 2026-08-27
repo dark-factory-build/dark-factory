@@ -115,3 +115,45 @@ func TestHumanRequestDetailFinalizingAndTerminalOriginsAreUnavailable(t *testing
 		t.Fatalf("terminal detail = %v", err)
 	}
 }
+
+func TestHumanRequestDetailUsesOnePinnedClientAndStateSnapshot(t *testing.T) {
+	ctx := context.Background()
+	store, run, _ := runningOrchestratorRun(t)
+	defer store.Close()
+	detailClient := humanQuestionClient(t, store, 187, BrowserCapabilityObserve|BrowserCapabilityPrivateHumanRequestDetail|BrowserCapabilityHumanActions)
+	deliveryClient := humanQuestionClient(t, store, 188, BrowserCapabilityObserve|BrowserCapabilityHumanActions)
+	request, err := store.CreateHumanQuestionForAttempt(ctx, run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(187), QuestionText: "snapshot question"}, mustTime(t, 400))
+	if err != nil {
+		t.Fatal(err)
+	}
+	read, err := store.beginRead(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer read.Close()
+	if _, found, err := browserClientByID(ctx, read.connection, detailClient.ID); err != nil || !found {
+		t.Fatalf("pin client = found %v, err %v", found, err)
+	}
+	if _, err := store.RevokeBrowserClient(ctx, detailClient.ID, detailClient.Revision, mustTime(t, 401)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.BeginHumanReply(ctx, deliveryClient.ID, request.ID, request.Revision, humanDeliveryID(t, 189), "new state", mustTime(t, 402)); err != nil {
+		t.Fatal(err)
+	}
+	detail, err := humanRequestDetail(ctx, read.connection, detailClient.ID, request.ID, request.Revision)
+	if err != nil || detail.QuestionText != "snapshot question" || detail.Revision != request.Revision || detail.ReplyMaxBytes != MaxHumanRequestReplyBytes || detail.TerminalTarget == nil || detail.TerminalTarget.RunID() != run.ID || !detail.CanReply || detail.CancelRun == nil || detail.CancelRun.ExpectedRequestRevision() != request.Revision || detail.CancelRun.ExpectedRunRevision() != run.Revision {
+		t.Fatalf("pinned detail = %+v, err=%v", detail, err)
+	}
+	if _, err := store.HumanRequestDetail(ctx, detailClient.ID, request.ID, request.Revision); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("current revoked detail = %v", err)
+	}
+	currentClient := humanQuestionClient(t, store, 190, BrowserCapabilityObserve|BrowserCapabilityPrivateHumanRequestDetail|BrowserCapabilityHumanActions)
+	current, _, err := store.HumanRequest(ctx, request.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentDetail, err := store.HumanRequestDetail(ctx, currentClient.ID, request.ID, current.Revision)
+	if err != nil || currentDetail.TerminalTarget != nil || currentDetail.CanReply || currentDetail.CancelRun != nil {
+		t.Fatalf("current detail = %+v, err=%v", currentDetail, err)
+	}
+}

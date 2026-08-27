@@ -357,14 +357,18 @@ func (store *Store) HumanRequestDetail(ctx context.Context, clientID BrowserClie
 		return HumanRequestDetail{}, err
 	}
 	defer tx.Close()
-	client, found, err := browserClientByID(ctx, tx.connection, clientID)
+	return humanRequestDetail(ctx, tx.connection, clientID, id, expected)
+}
+
+func humanRequestDetail(ctx context.Context, connection *sql.Conn, clientID BrowserClientID, id HumanRequestID, expected Revision) (HumanRequestDetail, error) {
+	client, found, err := browserClientByID(ctx, connection, clientID)
 	if err != nil {
 		return HumanRequestDetail{}, err
 	}
 	if !found || client.RevokedAt != nil || !client.CapabilityMask.Has(BrowserCapabilityPrivateHumanRequestDetail) {
 		return HumanRequestDetail{}, ErrUnauthorized
 	}
-	request, found, err := humanRequestByID(ctx, tx.connection, id)
+	request, found, err := humanRequestByID(ctx, connection, id)
 	if err != nil {
 		return HumanRequestDetail{}, err
 	}
@@ -381,7 +385,7 @@ func (store *Store) HumanRequestDetail(ctx context.Context, clientID BrowserClie
 	if request.Status != HumanRequestOpen {
 		return detail, nil
 	}
-	run, found, err := runByID(ctx, tx.connection, request.RunID)
+	run, found, err := runByID(ctx, connection, request.RunID)
 	if err != nil {
 		return HumanRequestDetail{}, err
 	}
@@ -391,14 +395,14 @@ func (store *Store) HumanRequestDetail(ctx context.Context, clientID BrowserClie
 	if run.Phase != RunRunning {
 		return detail, nil
 	}
-	session, found, err := terminalSessionByRunID(ctx, tx.connection, run.ID)
+	session, found, err := terminalSessionByRunID(ctx, connection, run.ID)
 	if err != nil {
 		return HumanRequestDetail{}, err
 	}
 	if !found || session.State != TerminalSessionActive {
 		return detail, nil
 	}
-	if err := validateTerminalSessionLease(ctx, tx.connection, run, session); err != nil {
+	if err := validateTerminalSessionLease(ctx, connection, run, session); err != nil {
 		return HumanRequestDetail{}, err
 	}
 	target, err := newTerminalTarget(run.ProjectID, run.AgentID, run, session)
