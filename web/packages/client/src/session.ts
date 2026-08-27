@@ -32,7 +32,7 @@ import { buildAuthTranscript, buildPairTranscript, hexBytes } from "./transcript
 const CLOSED = 3;
 const PUBLIC_KEY_BYTES = 65;
 const SIGNATURE_BYTES = 64;
-const MAX_PENDING_STATE_REFRESHES = 32;
+const MAX_PENDING_ENTITY_REFRESHES = 32;
 
 export interface BrowserTimer {
   setTimeout(callback: () => void, delayMs: number): unknown;
@@ -526,7 +526,7 @@ export class BrowserSession {
 
   #event(frame: StateEventFrame): void {
     if (frame.id !== this.#subscriptionID) throw new ProtocolError("malformed");
-    if (frame.body.event === "entity_changed" && !frame.body.deleted && this.#entities.size >= MAX_PENDING_STATE_REFRESHES) throw new SessionError("rate_limited", true);
+    if (frame.body.event === "entity_changed" && !frame.body.deleted && this.#entities.size >= MAX_PENDING_ENTITY_REFRESHES) throw new SessionError("rate_limited", true);
     const result = this.#accumulator.apply(frame);
     if (result.kind === "restart") throw new ProtocolError("malformed");
     if (result.kind === "applied" || result.kind === "ignored") {
@@ -538,7 +538,6 @@ export class BrowserSession {
   }
 
   #refresh(event: EntityChangedEvent): void {
-    if (this.#entities.size >= MAX_PENDING_STATE_REFRESHES) throw new SessionError("rate_limited", true);
     const id = this.#nextID("entity");
     this.#entities.set(id, { kind: event.entity_kind, id: event.entity_id });
     this.#pending.set(id, "entity");
@@ -602,7 +601,8 @@ export class BrowserSession {
   #wireRestart(frame: Extract<ServerControlFrame, { type: "STATE_RESTART" }>): void {
     const fromWatch = frame.id === this.#subscriptionID;
     const fromSnapshot = this.#pending.get(frame.id) === "snapshot";
-    if (!fromWatch && !fromSnapshot || frame.body.head < this.#stateHeadFloor) throw new ProtocolError("malformed");
+    if (!fromWatch && !fromSnapshot) throw new ProtocolError("malformed");
+    this.#advanceStateHead(frame.body.head);
     if (fromWatch) {
       if (this.#retiredEntities.size !== 0) throw new ProtocolError("malformed");
       for (const [id, entity] of this.#entities) {
@@ -616,7 +616,6 @@ export class BrowserSession {
       if (this.#subscriptionID !== undefined || this.#entities.size !== 0) throw new ProtocolError("malformed");
       this.#pending.delete(frame.id);
     }
-    this.#stateHeadFloor = frame.body.head;
     this.#accumulator.applyRestart("gap");
     this.#firstSnapshotPage = true;
     this.#setStatus("syncing");
