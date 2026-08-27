@@ -255,7 +255,7 @@ if /usr/bin/grep -F 'DARK_FACTORY_LOCAL_CI_LEASE_HELD' "$repository_root/scripts
 [ -x "$repository_root/scripts/go-ci.sh" ] || fail "official go-ci lost executable mode"
 [ -x "$repository_root/scripts/go-ci-owned.sh" ] || fail "owned go-ci body lost executable mode"
 if /usr/bin/grep -F 'internal/processcontract' "$repository_root/scripts/go-ci.sh" >/dev/null; then fail "go-ci duplicated full package proof"; fi
-/usr/bin/grep -F 'final shell-provider/browser E2E and system census remain cutover-only' "$repository_root/scripts/go-ci-owned.sh" >/dev/null || fail "pending cutover evidence is not explicit"
+/usr/bin/grep -F 'final system census remains a cutover-only gate' "$repository_root/scripts/go-ci-owned.sh" >/dev/null || fail "pending cutover evidence is not explicit"
 
 for web_script in typecheck build test; do
     /usr/bin/grep -F "\"$web_script\": \"corepack pnpm " "$repository_root/web/package.json" >/dev/null \
