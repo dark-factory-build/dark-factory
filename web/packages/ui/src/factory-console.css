@@ -1,3 +1,5 @@
+@import "@xterm/xterm/css/xterm.css";
+
 .dfFactoryConsole {
   --df-console-background: #070a09;
   --df-console-surface: #0d1210;
@@ -244,6 +246,13 @@
   flex-wrap: wrap;
   gap: 0.65rem;
   margin-top: 1rem;
+}
+
+.dfFactoryConsole__terminal {
+  min-height: 22rem;
+  padding: 0.75rem;
+  background: #000;
+  overflow: hidden;
 }
 
 @media (max-width: 720px) {

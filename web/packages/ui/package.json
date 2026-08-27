@@ -9,7 +9,11 @@
   },
   "files": ["dist/src"],
   "scripts": { "typecheck": "tsc --noEmit", "build": "tsc -p tsconfig.json && cp src/factory-console.css dist/src/factory-console.css" },
-  "dependencies": { "@dark-factory/client": "workspace:*" },
+  "dependencies": {
+    "@dark-factory/client": "workspace:*",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/xterm": "6.0.0"
+  },
   "peerDependencies": { "react": "19.1.0" },
   "devDependencies": {
     "@types/react": "19.2.18",
