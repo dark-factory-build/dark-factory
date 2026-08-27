@@ -13,8 +13,8 @@ test("packed UI is importable by a clean consumer with its stylesheet export", (
   const consumer = mkdtempSync(join(tmpdir(), "dark-factory-ui-consumer-"));
   try {
     const env = { ...process.env, npm_config_cache: join(consumer, "npm-cache"), npm_config_update_notifier: "false" };
-    execFileSync("pnpm", ["pack", "--pack-destination", consumer], { cwd: clientRoot, stdio: "pipe", env });
-    execFileSync("pnpm", ["pack", "--pack-destination", consumer], { cwd: packageRoot, stdio: "pipe", env });
+    execFileSync("corepack", ["pnpm", "pack", "--pack-destination", consumer], { cwd: clientRoot, stdio: "pipe", env });
+    execFileSync("corepack", ["pnpm", "pack", "--pack-destination", consumer], { cwd: packageRoot, stdio: "pipe", env });
     const clientTarball = join(consumer, "dark-factory-client-0.1.0.tgz");
     const uiTarball = join(consumer, "dark-factory-ui-0.1.0.tgz");
     writeFileSync(join(consumer, "package.json"), JSON.stringify({ name: "clean-ui-consumer", private: true, type: "module" }));

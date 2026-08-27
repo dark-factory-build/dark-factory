@@ -257,6 +257,19 @@ if /usr/bin/grep -F 'DARK_FACTORY_LOCAL_CI_LEASE_HELD' "$repository_root/scripts
 if /usr/bin/grep -F 'internal/processcontract' "$repository_root/scripts/go-ci.sh" >/dev/null; then fail "go-ci duplicated full package proof"; fi
 /usr/bin/grep -F 'final shell-provider/browser E2E and system census remain cutover-only' "$repository_root/scripts/go-ci-owned.sh" >/dev/null || fail "pending cutover evidence is not explicit"
 
+for web_script in typecheck build test; do
+    /usr/bin/grep -F "\"$web_script\": \"corepack pnpm " "$repository_root/web/package.json" >/dev/null \
+        || fail "web $web_script does not use the fixed Corepack invocation"
+done
+if /usr/bin/grep -E '"(typecheck|build|test)": "pnpm ' "$repository_root/web/package.json" >/dev/null; then
+    fail "web scripts depend on an ambient pnpm executable"
+fi
+if /usr/bin/grep -F 'execFileSync("pnpm"' "$repository_root/web/packages/ui/test/packed-consumer.test.mjs" >/dev/null; then
+    fail "packed UI test depends on an ambient pnpm executable"
+fi
+/usr/bin/grep -F 'execFileSync("corepack", ["pnpm", "pack"' "$repository_root/web/packages/ui/test/packed-consumer.test.mjs" >/dev/null \
+    || fail "packed UI test does not use the fixed Corepack invocation"
+
 /bin/sh -n "$repository_root/scripts/go-check.sh" "$repository_root/scripts/go-ci.sh" \
     "$repository_root/scripts/go-fast-stage.sh" "$repository_root/scripts/go-gate-environment.sh" "$0"
 echo "go gate tests passed"

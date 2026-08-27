@@ -4,9 +4,9 @@
   "packageManager": "pnpm@11.19.0",
   "engines": { "node": ">=20" },
   "scripts": {
-    "typecheck": "pnpm --filter @dark-factory/client build && pnpm --filter @dark-factory/ui build && pnpm --filter dark-factory-dev typecheck",
-    "build": "pnpm --filter @dark-factory/client build && pnpm --filter @dark-factory/ui build && pnpm --filter dark-factory-dev build",
-    "test": "pnpm --filter @dark-factory/client build && pnpm --filter @dark-factory/ui build && node --test packages/client/test/*.test.mjs packages/ui/test/*.test.mjs"
+    "typecheck": "corepack pnpm --filter @dark-factory/client build && corepack pnpm --filter @dark-factory/ui build && corepack pnpm --filter dark-factory-dev typecheck",
+    "build": "corepack pnpm --filter @dark-factory/client build && corepack pnpm --filter @dark-factory/ui build && corepack pnpm --filter dark-factory-dev build",
+    "test": "corepack pnpm --filter @dark-factory/client build && corepack pnpm --filter @dark-factory/ui build && node --test packages/client/test/*.test.mjs packages/ui/test/*.test.mjs"
   },
   "devDependencies": {
     "typescript": "5.8.3"
