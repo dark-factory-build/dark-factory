@@ -3390,6 +3390,15 @@ does not duplicate its WAL frame parser. All runtime sidecars are exact regular
 0600 files; malformed pairs, hot rollback journals, unsafe identities and
 over-bound files fail before authoritative SQLite open.
 
+The focused mutation pass removed each guard temporarily and then restored it.
+`TestOpenRefusesRetainedRollbackDatabaseWithoutMutation` and
+`TestOpenFreshRollbackRequiresExactChronology` killed removal of the pristine
+bootstrap check; the immutable corruption test killed both the short-nil-read
+and lost-late-reader-error mutations; the registration exhaustion and cleanup
+tests killed counter wrap and omitted VFS deletion; the pre-read oversize test
+killed removal of the 256 MiB bound; and `TestValidateWALHeaderFailsClosed`
+killed removal of malformed-WAL validation. No mutation remains in the tree.
+
 Admission, attempt authority and finalization Store proof on integrated head
 `3f2c255`:
 
