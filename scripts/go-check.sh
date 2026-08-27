@@ -37,6 +37,7 @@ trap 'go_gate_signal 1' HUP
 trap 'go_gate_signal 2' INT
 trap 'go_gate_signal 15' TERM
 
+export GOTOOLCHAIN=local
 go_gate_expected_version=$(awk '
     $1 == "go" { count++; value=$2 }
     END { if (count != 1 || value !~ /^[0-9]+\.[0-9]+\.[0-9]+$/) exit 1; print value }
@@ -52,10 +53,9 @@ go_gate_actual_version=$(printf '%s\n' "$go_gate_actual_line" \
     exit 1
 }
 
-export GOTOOLCHAIN=local
 # Network is permitted only in these explicit dependency stages. The module
 # cache and Corepack home survive into go-ci's full tests when it owns the root.
-GOPROXY='https://proxy.golang.org,direct' GOSUMDB=sum.golang.org go mod download
+GOPROXY='https://proxy.golang.org' GOSUMDB=sum.golang.org go mod download
 GOPROXY=off GOSUMDB=off go mod verify
 
 go_gate_go_files=$(git ls-files '*.go')
@@ -64,8 +64,12 @@ go_gate_go_files=$(git ls-files '*.go')
     exit 1
 }
 # Read-only formatting check; never rewrite a contributor's work.
-# shellcheck disable=SC2086
-gofmt -l $go_gate_go_files | tee "$go_gate_root/gofmt.out"
+# Keep the formatter's exit status and output separate. A formatter failure
+# must not become a false-green empty pipeline.
+if ! gofmt -l $go_gate_go_files >"$go_gate_root/gofmt.out"; then
+    echo "go-check: gofmt failed" >&2
+    exit 1
+fi
 [ ! -s "$go_gate_root/gofmt.out" ] || {
     echo "go-check: gofmt required for the files listed above" >&2
     exit 1
@@ -75,7 +79,8 @@ echo "go-check: go vet ./..."
 GOPROXY=off GOSUMDB=off go vet ./...
 
 echo "go-check: focused pure-package tests"
-GOPROXY=off GOSUMDB=off go test -count=1 ./internal/browserprotocol ./internal/sqlitecontract
+GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off \
+    go test -timeout=5m -count=1 ./internal/kernel ./internal/browserprotocol ./internal/sqlitecontract
 
 command -v corepack >/dev/null 2>&1 || {
     echo "go-check: corepack is required for the TypeScript client gate" >&2
@@ -89,8 +94,8 @@ echo "go-check: frozen TypeScript dependency install"
 echo "go-check: TypeScript client typecheck and tests"
 (
     cd "$repository_root/web"
-    COREPACK_ENABLE_NETWORK=0 corepack pnpm run typecheck
-    COREPACK_ENABLE_NETWORK=0 corepack pnpm run test
+    COREPACK_ENABLE_NETWORK=0 corepack pnpm --offline run typecheck
+    COREPACK_ENABLE_NETWORK=0 corepack pnpm --offline run test
 )
 
 echo "go-check: git diff --check"

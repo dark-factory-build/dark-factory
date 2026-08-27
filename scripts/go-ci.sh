@@ -51,16 +51,18 @@ export GOTOOLCHAIN=local
 export GOPROXY=off
 export GOSUMDB=off
 echo "go-ci: serial full Go tests"
-go test -count=1 -p 1 ./...
+GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off \
+    go test -timeout=20m -count=1 -p 1 ./...
 
 echo "go-ci: serial full Go race tests"
-go test -race -count=1 -p 1 ./...
+GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off \
+    go test -race -timeout=30m -count=1 -p 1 ./...
 
 echo "go-ci: TypeScript client proof"
 (
     cd "$repository_root/web"
-    COREPACK_ENABLE_NETWORK=0 corepack pnpm run typecheck
-    COREPACK_ENABLE_NETWORK=0 corepack pnpm run test
+    COREPACK_ENABLE_NETWORK=0 corepack pnpm --offline run typecheck
+    COREPACK_ENABLE_NETWORK=0 corepack pnpm --offline run test
 )
 
 echo "go-ci: git diff --check"
