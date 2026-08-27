@@ -50,6 +50,9 @@ type fakeBackend struct {
 	detail         browserprotocol.HumanRequestDetail
 	target         browserprotocol.TerminalTarget
 	targetErr      error
+	targetWait     bool
+	targetStarted  chan struct{}
+	targetDone     chan struct{}
 	sub            *fakeSubscription
 
 	pairRequest PairRequest
@@ -145,12 +148,23 @@ func (backend *fakeBackend) HumanRequestDetail(_ context.Context, client [16]byt
 	backend.clients = append(backend.clients, client)
 	return backend.detail, backend.detailErr
 }
-func (backend *fakeBackend) TerminalTarget(_ context.Context, client [16]byte, _ browserprotocol.TerminalTargetGet) (browserprotocol.TerminalTarget, error) {
+func (backend *fakeBackend) TerminalTarget(ctx context.Context, client [16]byte, _ browserprotocol.TerminalTargetGet) (browserprotocol.TerminalTarget, error) {
 	backend.mu.Lock()
-	defer backend.mu.Unlock()
 	backend.targetCalls++
+	wait, started, done := backend.targetWait, backend.targetStarted, backend.targetDone
 	backend.clients = append(backend.clients, client)
-	return backend.target, backend.targetErr
+	result, backendErr := backend.target, backend.targetErr
+	if started != nil {
+		close(started)
+	}
+	backend.mu.Unlock()
+	if wait {
+		<-ctx.Done()
+	}
+	if done != nil {
+		close(done)
+	}
+	return result, backendErr
 }
 func (backend *fakeBackend) SubscribeState(ctx context.Context, client [16]byte, _ browserprotocol.Decimal) (StateSubscription, error) {
 	backend.mu.Lock()

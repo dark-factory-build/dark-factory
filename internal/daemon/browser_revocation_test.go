@@ -116,6 +116,67 @@ func TestBrowserRevocationIsRevisionGuardedIdempotentAndClearsLease(t *testing.T
 	}
 }
 
+func TestBrowserRevocationLinearizesTerminalTargetResolution(t *testing.T) {
+	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
+	connection := fixture.pair(t)
+	run := adapterRunningRun(t, fixture.store, 170)
+	agent, found, err := fixture.store.Agent(context.Background(), run.AgentID)
+	if err != nil || !found {
+		t.Fatalf("agent = %+v, found=%v, err=%v", agent, found, err)
+	}
+	state, err := fixture.store.Factory(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := browserprotocol.TerminalTargetGet{AgentID: agent.ID.String(), ExpectedAgentRevision: decimalRevision(agent.Revision), ExpectedHead: decimalSequence(state.Head)}
+	hold, err := fixture.daemon.browserClientGates.acquire(context.Background(), fixture.client.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetDone := make(chan struct {
+		result browserprotocol.TerminalTarget
+		err    error
+	}, 1)
+	go func() {
+		result, targetErr := fixture.backend.TerminalTarget(context.Background(), rawBrowserClient(fixture.client.ID), request)
+		targetDone <- struct {
+			result browserprotocol.TerminalTarget
+			err    error
+		}{result, targetErr}
+	}()
+	adapterWaitGateUsers(t, fixture.daemon.browserClientGates, fixture.client.ID, 2)
+	revokeDone := make(chan struct {
+		client kernel.BrowserClient
+		err    error
+	}, 1)
+	go func() {
+		client, revokeErr := fixture.daemon.RevokeBrowserClient(context.Background(), fixture.client.ID, fixture.client.Revision)
+		revokeDone <- struct {
+			client kernel.BrowserClient
+			err    error
+		}{client, revokeErr}
+	}()
+	adapterWaitGateUsers(t, fixture.daemon.browserClientGates, fixture.client.ID, 3)
+	hold()
+	target := <-targetDone
+	revoked := <-revokeDone
+	if revoked.err != nil || revoked.client.RevokedAt == nil {
+		t.Fatalf("revoke = %+v, %v", revoked.client, revoked.err)
+	}
+	if target.err != nil && !errors.Is(target.err, browser.ErrUnauthorized) {
+		t.Fatalf("target race error = %v", target.err)
+	}
+	if target.err == nil {
+		if target.result.AgentID != request.AgentID || target.result.AgentRevision != request.ExpectedAgentRevision || target.result.Head != request.ExpectedHead || target.result.Target == nil || target.result.Target.RunID != run.ID.String() {
+			t.Fatalf("target race result = %+v", target.result)
+		}
+	}
+	if _, err := fixture.backend.TerminalTarget(context.Background(), rawBrowserClient(fixture.client.ID), request); !errors.Is(err, browser.ErrUnauthorized) {
+		t.Fatalf("post-revocation target = %v, want unauthorized", err)
+	}
+	adapterAssertSocketClosed(t, connection)
+}
+
 func TestBrowserRevocationReportsCleanupFailureAfterDurableCommit(t *testing.T) {
 	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
 	fixture.pair(t)

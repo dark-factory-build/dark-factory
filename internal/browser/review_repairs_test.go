@@ -496,6 +496,47 @@ func TestTerminalTargetRoutesThroughCodecAndPreservesNull(t *testing.T) {
 	}
 }
 
+func TestTerminalTargetBackendCancellationDoesNotPublishLateResult(t *testing.T) {
+	backend := newFakeBackend()
+	backend.targetWait = true
+	backend.targetStarted = make(chan struct{})
+	backend.targetDone = make(chan struct{})
+	server := startServer(t, backend)
+	connection, _ := dialServer(t, server, testOrigin)
+	authenticate(t, connection)
+	request, _ := browserprotocol.EncodeTerminalTargetGet("target-cancel", browserprotocol.TerminalTargetGet{AgentID: strings.Repeat("01", 16), ExpectedAgentRevision: 1, ExpectedHead: 7})
+	writeClientFrame(t, connection, request)
+	select {
+	case <-backend.targetStarted:
+	case <-time.After(time.Second):
+		t.Fatal("target backend did not start")
+	}
+	if err := server.CloseClient(backend.authentication.Principal.ClientID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-backend.targetDone:
+	case <-time.After(time.Second):
+		t.Fatal("target backend was not cancelled after connection close")
+	}
+	server.mu.Lock()
+	lifecycle := server.clientLifecycle[backend.authentication.Principal.ClientID]
+	registered := 0
+	if lifecycle != nil {
+		registered = len(lifecycle.connections)
+	}
+	server.mu.Unlock()
+	if registered != 0 {
+		t.Fatalf("cancelled target retained %d connection(s)", registered)
+	}
+	backend.mu.Lock()
+	calls := backend.targetCalls
+	backend.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("target backend calls = %d, want one cancelled call", calls)
+	}
+}
+
 func TestBackendSuccessAfterOperationDeadlineIsDiscarded(t *testing.T) {
 	backend := newFakeBackend()
 	backend.stateWait = true
