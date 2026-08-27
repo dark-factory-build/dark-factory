@@ -9,7 +9,10 @@ go_gate_fast_stage() {
         echo "go-check: go.mod must contain exactly one fully pinned go directive" >&2
         return 1
     }
-    go_gate_actual_line=$(go_gate_stage 30 "$go_gate_go" version)
+    go_gate_version_output="$go_gate_root/go-version"
+    go_gate_prepare_output "$go_gate_version_output" || return
+    go_gate_stage 30 "$go_gate_go" version >"$go_gate_version_output" || return
+    go_gate_actual_line=$(/bin/cat "$go_gate_version_output")
     go_gate_actual_version=$(printf '%s\n' "$go_gate_actual_line" \
         | /usr/bin/awk '$1 == "go" && $2 == "version" && $3 ~ /^go[0-9]+\.[0-9]+\.[0-9]+$/ { sub(/^go/, "", $3); print $3 }')
     [ "$go_gate_actual_version" = "$go_gate_expected_version" ] || {
@@ -23,13 +26,16 @@ go_gate_fast_stage() {
     go_gate_stage 120 "$go_gate_go" mod verify || return
 
     go_gate_go_files="$go_gate_root/go-files"
+    go_gate_prepare_output "$go_gate_go_files" || return
     go_gate_stage 120 "$go_gate_git" ls-files -z -- '*.go' >"$go_gate_go_files" || return
     [ -s "$go_gate_go_files" ] || { echo "go-check: no tracked Go files" >&2; return 1; }
-    if ! go_gate_stage 120 "$go_gate_xargs" -0 "$go_gate_gofmt" -l -- <"$go_gate_go_files" >"$go_gate_root/gofmt.out"; then
+    go_gate_format_output="$go_gate_root/gofmt.out"
+    go_gate_prepare_output "$go_gate_format_output" || return
+    if ! go_gate_stage 120 "$go_gate_xargs" -0 "$go_gate_gofmt" -l -- <"$go_gate_go_files" >"$go_gate_format_output"; then
         echo "go-check: gofmt failed" >&2
         return 1
     fi
-    [ ! -s "$go_gate_root/gofmt.out" ] || { echo "go-check: gofmt required" >&2; return 1; }
+    [ ! -s "$go_gate_format_output" ] || { echo "go-check: gofmt required" >&2; return 1; }
 
     echo "go-check: go vet ./..."
     go_gate_stage 600 "$go_gate_go" vet ./... || return
@@ -53,4 +59,13 @@ go_gate_fast_stage() {
 
     echo "go-check: git diff --check"
     go_gate_stage 120 "$go_gate_git" diff --check
+}
+
+go_gate_prepare_output() {
+    go_gate_before_stage || return 1
+    if [ -L "$1" ]; then
+        echo "go gate: refusing symlink output path: $1" >&2
+        return 1
+    fi
+    [ ! -e "$1" ] || /bin/rm -f -- "$1"
 }

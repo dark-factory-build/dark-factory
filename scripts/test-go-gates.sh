@@ -76,29 +76,48 @@ exec "$fast_gofmt" "\$@"
 EOF
 /bin/cat >"$fast_corepack" <<EOF
 #!/bin/sh
-printf 'corepack %s NETWORK=%s\n' "\$*" "\${COREPACK_ENABLE_NETWORK-}" >>"$fast_log"
+printf 'corepack %s NETWORK=%s INTEGRITY=%s\n' "\$*" "\${COREPACK_ENABLE_NETWORK-}" "\${COREPACK_INTEGRITY_KEYS-unset}" >>"$fast_log"
 case "\$(/bin/cat "$fast_mode" 2>/dev/null)" in corepack-fail) exit 45 ;; esac
 EOF
 for fast_tool in "$fast_go" "$fast_gofmt" "$fast_git" "$fast_xargs" "$fast_corepack"; do /bin/chmod 700 "$fast_tool"; done
 . "$repository_root/scripts/go-fast-stage.sh"
 go_gate_go=$fast_go; go_gate_go_identity=$(go_gate_stat "$fast_go")
+go_gate_go_hash=$(go_gate_hash "$fast_go")
 go_gate_gofmt=$fast_gofmt; go_gate_gofmt_identity=$(go_gate_stat "$fast_gofmt")
+go_gate_gofmt_hash=$(go_gate_hash "$fast_gofmt")
 go_gate_git=$fast_git; go_gate_git_identity=$(go_gate_stat "$fast_git")
 go_gate_xargs=$fast_xargs; go_gate_xargs_identity=$(go_gate_stat "$fast_xargs")
 go_gate_corepack=$fast_corepack; go_gate_corepack_identity=$(go_gate_stat "$fast_corepack")
+go_gate_corepack_hash=$(go_gate_hash "$fast_corepack")
 : >"$fast_mode"
 go_gate_fast_stage || fail "fast stage fixture failed"
 /usr/bin/grep -F 'go mod download GOPROXY=https://proxy.golang.org' "$fast_log" >/dev/null || fail "download did not use network stage"
 /usr/bin/grep -F 'go mod verify GOPROXY=off' "$fast_log" >/dev/null || fail "verify was not offline"
 /usr/bin/grep -F 'corepack pnpm install --frozen-lockfile --ignore-scripts NETWORK=1' "$fast_log" >/dev/null || fail "install was not the sole package network stage"
 /usr/bin/grep -F 'corepack pnpm --offline run test NETWORK=0' "$fast_log" >/dev/null || fail "package tests were not offline"
+/usr/bin/grep -F 'INTEGRITY=unset' "$fast_log" >/dev/null || fail "Corepack signature verification was disabled"
+printf '# mutation\n' >>"$fast_go"
+if go_gate_before_stage; then fail "in-place Go mutation was accepted"; fi
+go_gate_go_hash=$(go_gate_hash "$fast_go")
+printf '# mutation\n' >>"$fast_corepack"
+if go_gate_before_stage; then fail "in-place Corepack mutation was accepted"; fi
+go_gate_corepack_hash=$(go_gate_hash "$fast_corepack")
+# A pre-existing output symlink must be rejected before shell redirection can
+# write outside the owned root.
+outside="$temporary/outside"
+printf 'sentinel\n' >"$outside"
+/bin/rm -f "$go_gate_root/go-files"
+/bin/ln -s "$outside" "$go_gate_root/go-files"
+if go_gate_fast_stage; then fail "external output symlink passed"; fi
+/usr/bin/grep -F 'sentinel' "$outside" >/dev/null || fail "outside sentinel changed"
+/bin/rm -f "$go_gate_root/go-files"
 printf '%s\n' format-fail >"$fast_mode"
 if go_gate_fast_stage; then fail "formatter failure passed"; fi
 printf '%s\n' verify-fail >"$fast_mode"
 if go_gate_fast_stage; then fail "verification failure passed"; fi
 
-go_gate_go=/private/tmp/dark-factory-go1.27.0/bin/go
-go_gate_gofmt=/private/tmp/dark-factory-go1.27.0/bin/gofmt
+go_gate_go=/opt/homebrew/bin/go
+go_gate_gofmt=/opt/homebrew/bin/gofmt
 go_gate_git=/usr/bin/git
 go_gate_xargs=/usr/bin/xargs
 go_gate_corepack=/opt/homebrew/bin/corepack
@@ -107,6 +126,9 @@ go_gate_gofmt_identity=$(go_gate_stat "$go_gate_gofmt")
 go_gate_git_identity=$(go_gate_stat "$go_gate_git")
 go_gate_xargs_identity=$(go_gate_stat "$go_gate_xargs")
 go_gate_corepack_identity=$(go_gate_stat "$go_gate_corepack")
+go_gate_go_hash=$(go_gate_hash "$go_gate_go")
+go_gate_gofmt_hash=$(go_gate_hash "$go_gate_gofmt")
+go_gate_corepack_hash=$(go_gate_hash "$go_gate_corepack")
 
 if go_gate_stage 5 "$fake" "$go_gate_test_log" fail; then
     fail "child failure passed"
@@ -156,15 +178,22 @@ case "$second_root" in /private/tmp/dark-factory-go.*) ;; *) fail "root escaped 
 [ "$second_root" != "$go_gate_test_root" ] || fail "root was reused"
 go_gate_environment_cleanup || fail "cleanup failed"
 
-/usr/bin/grep -F 'go_gate_go=/private/tmp/dark-factory-go1.27.0/bin/go' "$repository_root/scripts/go-gate-environment.sh" >/dev/null || fail "Go path is not fixed"
+/usr/bin/grep -F 'go_gate_go=/opt/homebrew/bin/go' "$repository_root/scripts/go-gate-environment.sh" >/dev/null || fail "Go path is not fixed"
 /usr/bin/grep -F 'go_gate_corepack=/opt/homebrew/bin/corepack' "$repository_root/scripts/go-gate-environment.sh" >/dev/null || fail "Corepack path is not fixed"
+/usr/bin/grep -F '/usr/bin/dirname' "$repository_root/scripts/go-ci.sh" >/dev/null || fail "go-ci bootstrap uses ambient dirname"
+/usr/bin/grep -F 'go_gate_supervisor_pid' "$repository_root/scripts/go-ci-owned.sh" >/dev/null || fail "go-ci signal join is missing"
+/usr/bin/grep -F '$SIG{TERM}' "$repository_root/scripts/go-gate-environment.sh" >/dev/null || fail "supervisor TERM handler is missing"
 /usr/bin/grep -F 'if (!setpgid(0, 0))' "$repository_root/scripts/go-gate-environment.sh" >/dev/null || fail "child setpgid errors are not checked"
 /usr/bin/grep -F 'if (!setpgid($pid, $pid))' "$repository_root/scripts/go-gate-environment.sh" >/dev/null || fail "parent setpgid errors are not checked"
 /usr/bin/grep -F 'my $group_clean = stop_group();' "$repository_root/scripts/go-gate-environment.sh" >/dev/null || fail "post-exit group census is missing"
-/usr/bin/grep -F '. "$script_dir/go-fast-stage.sh"' "$repository_root/scripts/go-ci.sh" >/dev/null || fail "go-ci does not share fast stage"
+/usr/bin/grep -F '. "$script_dir/go-fast-stage.sh"' "$repository_root/scripts/go-ci-owned.sh" >/dev/null || fail "go-ci does not share fast stage"
 if /usr/bin/grep -F 'go-check.sh' "$repository_root/scripts/go-ci.sh" >/dev/null; then fail "go-ci still spawns a second gate"; fi
+if /usr/bin/grep -F 'DARK_FACTORY_LOCAL_CI_LEASE_HELD' "$repository_root/scripts/go-ci.sh" >/dev/null; then fail "go-ci still exposes lease bypass"; fi
+/usr/bin/grep -F 'exec "$script_dir/with-local-ci-lease.sh" /bin/sh "$script_dir/go-ci-owned.sh"' "$repository_root/scripts/go-ci.sh" >/dev/null || fail "go-ci does not invoke the kernel lease"
+[ -x "$repository_root/scripts/go-ci.sh" ] || fail "official go-ci lost executable mode"
+[ -x "$repository_root/scripts/go-ci-owned.sh" ] || fail "owned go-ci body lost executable mode"
 if /usr/bin/grep -F 'internal/processcontract' "$repository_root/scripts/go-ci.sh" >/dev/null; then fail "go-ci duplicated full package proof"; fi
-/usr/bin/grep -F 'final shell-provider/browser E2E and system census remain cutover-only' "$repository_root/scripts/go-ci.sh" >/dev/null || fail "pending cutover evidence is not explicit"
+/usr/bin/grep -F 'final shell-provider/browser E2E and system census remain cutover-only' "$repository_root/scripts/go-ci-owned.sh" >/dev/null || fail "pending cutover evidence is not explicit"
 
 /bin/sh -n "$repository_root/scripts/go-check.sh" "$repository_root/scripts/go-ci.sh" \
     "$repository_root/scripts/go-fast-stage.sh" "$repository_root/scripts/go-gate-environment.sh" "$0"

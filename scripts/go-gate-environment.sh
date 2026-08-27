@@ -1,7 +1,9 @@
 #!/bin/sh
 
 # Shared by the Go gates. Entry points always create the root themselves;
-# there is intentionally no caller-selected root or provenance nonce.
+# there is intentionally no caller-selected root or provenance nonce. The
+# boundary trusts fixed system/Homebrew tools and excludes malicious concurrent
+# same-UID pathname races; hashes detect ordinary in-place tool mutation.
 
 go_gate_stat() { /usr/bin/stat -f '%d:%i:%u:%Lp' "$1" 2>/dev/null; }
 
@@ -17,8 +19,14 @@ go_gate_validate_tools() {
         && go_gate_validate_tool "$go_gate_xargs" "$go_gate_xargs_identity" \
         && go_gate_validate_tool "$go_gate_perl" "$go_gate_perl_identity" \
         && go_gate_validate_tool "$go_gate_corepack" "$go_gate_corepack_identity" \
-        && go_gate_validate_tool "$go_gate_env" "$go_gate_env_identity"
+        && go_gate_validate_tool "$go_gate_env" "$go_gate_env_identity" \
+        && go_gate_validate_tool "$go_gate_shasum" "$go_gate_shasum_identity" \
+        && [ "$(go_gate_hash "$go_gate_go")" = "$go_gate_go_hash" ] \
+        && [ "$(go_gate_hash "$go_gate_gofmt")" = "$go_gate_gofmt_hash" ] \
+        && [ "$(go_gate_hash "$go_gate_corepack")" = "$go_gate_corepack_hash" ]
 }
+
+go_gate_hash() { /usr/bin/shasum -a 256 "$1" | /usr/bin/awk '{print $1}'; }
 
 go_gate_validate_identity() {
     [ -n "${go_gate_root-}" ] && [ ! -L "$go_gate_root" ] \
@@ -56,7 +64,8 @@ go_gate_before_stage() {
 
 # Every external stage is run in this explicit whitelist environment. HOME and
 # all credentials/configuration controls are absent, while tool paths remain
-# fixed in the trusted parent and are not selected through PATH.
+# fixed in the trusted parent and are not selected through PATH. SIGKILL cannot
+# be trapped; a killed gate may retain its 0700 root for the external census.
 go_gate_run_bounded() {
     go_gate_timeout_seconds=$1
     shift
@@ -73,7 +82,7 @@ go_gate_run_bounded() {
         "GOPRIVATE=" "GONOSUMDB=" "GONOPROXY=" \
         "LC_ALL=C" "LANG=C" \
         "COREPACK_ENABLE_NETWORK=${COREPACK_ENABLE_NETWORK-0}" \
-        "COREPACK_DEFAULT_TO_LATEST=0" "COREPACK_INTEGRITY_KEYS=0" \
+        "COREPACK_DEFAULT_TO_LATEST=0" \
         "NODE_OPTIONS=" "NETRC=/dev/null" \
         "GIT_CONFIG_GLOBAL=/dev/null" "GIT_CONFIG_SYSTEM=/dev/null" \
         "GIT_CONFIG_NOSYSTEM=1" "GIT_TERMINAL_PROMPT=0" "GIT_PAGER=cat" \
@@ -120,11 +129,15 @@ syswrite($go_w, "G") == 1 or do { kill "TERM", -$pid; waitpid($pid, 0); exit 125
 close $ready_r; close $go_w;
 my $timed_out = 0;
 my $term_sent = 0;
-$SIG{ALRM} = sub {
+sub request_stop {
     $timed_out = 1;
     if (!$term_sent) { kill "TERM", -$pid; $term_sent = 1; alarm 1; }
     else { kill "KILL", -$pid; alarm 1; }
-};
+}
+$SIG{ALRM} = \&request_stop;
+$SIG{TERM} = \&request_stop;
+$SIG{HUP} = \&request_stop;
+$SIG{INT} = \&request_stop;
 alarm $seconds;
 waitpid($pid, 0);
 alarm 0;
@@ -145,10 +158,19 @@ sub stop_group {
     return 0;
 }
 my $group_clean = stop_group();
-exit 125 if $group_clean == 0 || $group_clean == 2;
+exit 125 if $group_clean == 0;
 exit 124 if $timed_out;
+exit 125 if $group_clean == 2;
 exit (WIFEXITED($status) ? WEXITSTATUS($status) : 128 + WTERMSIG($status));
-' "$go_gate_timeout_seconds" "$@"
+' "$go_gate_timeout_seconds" "$@" &
+    go_gate_supervisor_pid=$!
+    if wait "$go_gate_supervisor_pid"; then
+        go_gate_stage_status=0
+    else
+        go_gate_stage_status=$?
+    fi
+    go_gate_supervisor_pid=
+    return "$go_gate_stage_status"
 }
 
 go_gate_stage() {
@@ -171,13 +193,14 @@ go_gate_environment_setup() {
     case "$go_gate_root" in /private/tmp/dark-factory-go.*) ;; *) return 1 ;; esac
 
     # Fixed trusted locations; no PATH-selected fake can become a gate tool.
-    go_gate_go=/private/tmp/dark-factory-go1.27.0/bin/go
-    go_gate_gofmt=/private/tmp/dark-factory-go1.27.0/bin/gofmt
+    go_gate_go=/opt/homebrew/bin/go
+    go_gate_gofmt=/opt/homebrew/bin/gofmt
     go_gate_git=/usr/bin/git
     go_gate_xargs=/usr/bin/xargs
     go_gate_perl=/usr/bin/perl
     go_gate_corepack=/opt/homebrew/bin/corepack
     go_gate_env=/usr/bin/env
+    go_gate_shasum=/usr/bin/shasum
     go_gate_go_identity=$(go_gate_stat "$go_gate_go") || return 1
     go_gate_gofmt_identity=$(go_gate_stat "$go_gate_gofmt") || return 1
     go_gate_git_identity=$(go_gate_stat "$go_gate_git") || return 1
@@ -185,6 +208,10 @@ go_gate_environment_setup() {
     go_gate_perl_identity=$(go_gate_stat "$go_gate_perl") || return 1
     go_gate_corepack_identity=$(go_gate_stat "$go_gate_corepack") || return 1
     go_gate_env_identity=$(go_gate_stat "$go_gate_env") || return 1
+    go_gate_shasum_identity=$(go_gate_stat "$go_gate_shasum") || return 1
+    go_gate_go_hash=$(go_gate_hash "$go_gate_go") || return 1
+    go_gate_gofmt_hash=$(go_gate_hash "$go_gate_gofmt") || return 1
+    go_gate_corepack_hash=$(go_gate_hash "$go_gate_corepack") || return 1
     go_gate_validate_tools || { echo "go gate: fixed tool is unavailable" >&2; return 1; }
 
     for go_gate_directory in tmp cache modcache corepack npm-cache; do
