@@ -168,6 +168,7 @@ test("authenticated HumanRequest methods emit exact frames and correlate results
   assert.equal(Object.isFrozen(detail), true);
   assert.equal(Object.isFrozen(detail.terminalTarget), true);
   assert.equal(Object.isFrozen(detail.cancelRun), true);
+  assert.equal(typeof session.openTerminal(detail.terminalTarget).attach, "function");
 
   const reply = session.replyHumanRequest(detail, "ok");
   const replyFrame = decodeClientControl(socket.sent.at(-1));
@@ -672,11 +673,18 @@ test("agent terminal discovery mints an opaque generation-bound target for openT
   assert.equal("runId" in target, false);
   assert.throws(() => session.openTerminal({ ...target }), (error) => error instanceof SessionError && error.code === "stale");
   const terminal = session.openTerminal(target);
+  const other = await openHumanSession();
+  assert.throws(() => other.session.openTerminal(target), (error) => error instanceof SessionError && error.code === "stale");
+  other.session.close();
   const attach = terminal.attach();
   const attachFrame = decodeClientControl(socket.sent.at(-1));
   assert.deepEqual(attachFrame.body, { run_id: runID, session_id: terminalSessionId, expected_run_revision: 3n, expected_session_revision: 4n, after_sequence: 0n });
   socket.reply(encodeTerminalAttached(attachFrame.id, { session_id: terminalSessionId, floor: 0n, head: 0n, acknowledged_sequence: 0n, max_unacked_bytes: 65536n }));
   await attach;
+  const pendingDetach = terminal.detach();
+  socket.close();
+  await assert.rejects(pendingDetach, (error) => error instanceof SessionError && error.code === "connection");
+  assert.equal(session.status, "closed");
   session.close();
   assert.throws(() => session.openTerminal(target), (error) => error instanceof SessionError && error.code === "closed");
 });

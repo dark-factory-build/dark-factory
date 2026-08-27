@@ -102,7 +102,6 @@ class TerminalHandleImpl implements InternalTerminalHandle {
   #attached = false;
   #detaching = false;
   #closed = false;
-  #attachedState: TerminalAttached | undefined;
   #attachmentID: string | undefined;
   #requestedAfterSequence = 0n;
   #lease: TerminalLease | undefined;
@@ -134,6 +133,7 @@ class TerminalHandleImpl implements InternalTerminalHandle {
 
   attach(): Promise<TerminalAttachOutcome> {
     this.#ensureOpen();
+    if (this.#outputInFlight) return Promise.reject(new SessionErrorLikeError("terminal output callback pending"));
     if (this.#attached || this.#operation !== undefined || this.#detaching) return Promise.reject(new SessionErrorLikeError("terminal operation pending"));
     const afterSequence = this.#options.afterSequence ?? this.#acknowledgedSequence;
     if (afterSequence < 0n || afterSequence > MAX_SQLITE_INTEGER) return Promise.reject(new ProtocolError("malformed"));
@@ -149,6 +149,7 @@ class TerminalHandleImpl implements InternalTerminalHandle {
 
   acquireInput(): Promise<TerminalLease> {
     this.#ensureAttached();
+    if (this.#outputInFlight) return Promise.reject(new SessionErrorLikeError("terminal output callback pending"));
     if (!this.#inputAllowed) return Promise.reject(new SessionErrorLikeError("unauthorized"));
     if (this.#lease !== undefined || this.#operation !== undefined || this.#detaching) return Promise.reject(new SessionErrorLikeError("terminal operation pending"));
     if (this.#generationFloor >= MAX_SQLITE_INTEGER) return Promise.reject(new SessionErrorLikeError("generation exhausted"));
@@ -161,6 +162,7 @@ class TerminalHandleImpl implements InternalTerminalHandle {
 
   releaseInput(): Promise<TerminalLeaseResult> {
     this.#ensureAttached();
+    if (this.#outputInFlight) return Promise.reject(new SessionErrorLikeError("terminal output callback pending"));
     if (this.#lease === undefined) return Promise.reject(new SessionErrorLikeError("terminal lease required"));
     if (this.#operation !== undefined || this.#detaching) return Promise.reject(new SessionErrorLikeError("terminal operation pending"));
     return this.#beginRelease(false) as Promise<TerminalLeaseResult>;
@@ -168,6 +170,7 @@ class TerminalHandleImpl implements InternalTerminalHandle {
 
   sendInput(bytes: Uint8Array): Promise<TerminalInputResult> {
     this.#ensureAttached();
+    if (this.#outputInFlight) return Promise.reject(new SessionErrorLikeError("terminal output callback pending"));
     if (this.#inputSequenceExhausted) return Promise.reject(new SessionErrorLikeError("input sequence exhausted"));
     const lease = this.#requireLease();
     if (!(bytes instanceof Uint8Array)) return Promise.reject(new ProtocolError("malformed"));
@@ -181,6 +184,7 @@ class TerminalHandleImpl implements InternalTerminalHandle {
 
   resize(rows: number, cols: number): Promise<{ sessionId: string; generation: bigint; rows: number; cols: number }> {
     this.#ensureAttached();
+    if (this.#outputInFlight) return Promise.reject(new SessionErrorLikeError("terminal output callback pending"));
     const lease = this.#requireLease();
     if (this.#operation !== undefined || this.#detaching) return Promise.reject(new SessionErrorLikeError("terminal operation pending"));
     if (!Number.isSafeInteger(rows) || rows < 1 || rows > MAX_TERMINAL_ROWS || !Number.isSafeInteger(cols) || cols < 1 || cols > MAX_TERMINAL_COLS) return Promise.reject(new ProtocolError("malformed"));
@@ -193,6 +197,7 @@ class TerminalHandleImpl implements InternalTerminalHandle {
 
   detach(): Promise<void> {
     this.#ensureOpen();
+    if (this.#outputInFlight) return Promise.reject(new SessionErrorLikeError("terminal output callback pending"));
     if (this.#operation !== undefined) return Promise.reject(new SessionErrorLikeError("terminal operation pending"));
     if (!this.#attached) { this.#closeLocal(); return Promise.resolve(); }
     this.#detaching = true;
@@ -221,7 +226,6 @@ class TerminalHandleImpl implements InternalTerminalHandle {
         if (operation.kind !== "attach" || frame.body.floor > frame.body.acknowledged_sequence || frame.body.acknowledged_sequence > frame.body.head || frame.body.acknowledged_sequence !== this.#requestedAfterSequence) throw new ProtocolError("malformed");
         this.#complete(operation, { sessionId: frame.body.session_id, floor: frame.body.floor, head: frame.body.head, acknowledgedSequence: frame.body.acknowledged_sequence, maxUnackedBytes: frame.body.max_unacked_bytes }, () => {
           this.#attached = true;
-          this.#attachedState = frozenAttached({ sessionId: frame.body.session_id, floor: frame.body.floor, head: frame.body.head, acknowledgedSequence: frame.body.acknowledged_sequence, maxUnackedBytes: frame.body.max_unacked_bytes });
           this.#acknowledgedSequence = frame.body.acknowledged_sequence;
           this.#nextOutputSequence = frame.body.acknowledged_sequence;
           this.#nextInputSequence = 0n;
@@ -238,7 +242,7 @@ class TerminalHandleImpl implements InternalTerminalHandle {
       case "TERMINAL_DETACHED":
         if (operation.kind !== "detach") throw new ProtocolError("malformed");
         this.#complete(operation, undefined, () => {
-          this.#attached = false; this.#attachedState = undefined; this.#lease = undefined; this.#cancelTimer(); this.#renewDue = false;
+          this.#attached = false; this.#lease = undefined; this.#cancelTimer(); this.#renewDue = false;
         }, true);
         return true;
       default:
@@ -251,10 +255,14 @@ class TerminalHandleImpl implements InternalTerminalHandle {
     const operation = this.#operation;
     const matches = operation !== undefined && (operation.kind === "input" ? id === this.#attachmentID : id === operation.id);
     if (!matches || operation === undefined) return false;
+    // A binary input ERROR is transport-ambiguous: the server cannot prove
+    // whether any bytes reached the runner, so the generation must be fenced
+    // rather than allowing a different payload to reuse its reservation.
+    if (operation.kind === "input") { this.#fatal(error); return true; }
     if (operation.kind === "renew" || operation.kind === "release" || operation.kind === "detach") { this.#fatal(error); return true; }
     this.#operation = undefined;
     if (operation.kind === "acquire") { this.#cancelTimer(); this.#renewDue = false; this.#lease = undefined; }
-    if (operation.kind === "input" || operation.kind === "resize") this.#serviceRenewal();
+    if (operation.kind === "resize") this.#serviceRenewal();
     operation.reject(error);
     return true;
   }
@@ -297,21 +305,24 @@ class TerminalHandleImpl implements InternalTerminalHandle {
   receiveExit(id: string, body: { session_id: string; exit_code: number; exit_signal: number; aborted: boolean }): boolean {
     if (this.#closed || !this.#attached || id !== this.#attachmentID || body.session_id !== this.#target.sessionId) return false;
     const event = { sessionId: body.session_id, exitCode: body.exit_code, exitSignal: body.exit_signal, aborted: body.aborted };
+    const operation = this.#operation;
+    if (operation !== undefined) { this.#operation = undefined; operation.reject(new SessionErrorLikeError("terminal exited")); }
     this.#clearAuthority(); this.#observe(this.#options.onExit, event); return true;
   }
 
   receiveReset(id: string, body: { session_id: string; floor: bigint; head: bigint }): boolean {
     if (this.#closed) return this.#matchesRetired("TERMINAL_RESET", id, body.session_id);
     if (id !== this.#attachmentID || body.session_id !== this.#target.sessionId) return false;
+    if (this.#matchesRetired("TERMINAL_RESET", id, body.session_id)) return true;
     const reset = frozenReset({ sessionId: body.session_id, floor: body.floor, head: body.head });
     const operation = this.#operation;
     if (operation?.kind === "attach") {
-      this.#operation = undefined; this.#attached = false; this.#attachedState = undefined; this.#clearAuthority();
+      this.#operation = undefined; this.#attached = false; this.#clearAuthority();
       this.#rememberRetired({ id, type: "TERMINAL_RESET" });
       operation.resolve(Object.freeze({ ...reset, kind: "reset", freshAttachRequired: true }));
     } else {
       if (operation !== undefined) { this.#operation = undefined; operation.reject(new SessionErrorLikeError("terminal reset")); }
-      this.#attached = false; this.#attachedState = undefined; this.#clearAuthority(); this.#rememberRetired({ id, type: "TERMINAL_RESET" });
+      this.#attached = false; this.#clearAuthority(); this.#rememberRetired({ id, type: "TERMINAL_RESET" });
     }
     this.#observe(this.#options.onReset, reset); return true;
   }
@@ -349,7 +360,7 @@ class TerminalHandleImpl implements InternalTerminalHandle {
   #inputResult(body: TerminalInputResultBody, operation: Operation): void {
     if (operation.kind !== "input" || body.generation !== operation.generation || body.sequence !== operation.sequence || body.accepted_bytes > BigInt(operation.payloadLength ?? 0)) throw new ProtocolError("malformed");
     const length = BigInt(operation.payloadLength ?? 0);
-    if (body.status === "accepted" && body.accepted_bytes !== length || body.status === "partial" && body.accepted_bytes === length) throw new ProtocolError("malformed");
+    if (body.status === "accepted" && body.accepted_bytes !== length || body.status === "partial" && (body.accepted_bytes === 0n || body.accepted_bytes === length) || (body.status === "rejected" || body.status === "uncertain") && body.accepted_bytes !== 0n) throw new ProtocolError("malformed");
     this.#complete(operation, body, () => {
       if (body.status === "rejected") return;
       this.#nextInputSequence = body.sequence >= MAX_SQLITE_INTEGER ? MAX_SQLITE_INTEGER : body.sequence + 1n;
@@ -392,6 +403,7 @@ class TerminalHandleImpl implements InternalTerminalHandle {
     const id = this.#nextID("terminal-lease-renew");
     const operation: Operation = { kind: "renew", id, generation: lease.generation, resolve: () => undefined, reject: () => undefined };
     const pending = this.#install<void>(operation);
+    this.#rememberSent(id, operation);
     this.#armExpiryWatchdog(expiry);
     if (this.#closed || this.#operation !== operation) { void pending.catch(() => undefined); return; }
     try {
@@ -414,7 +426,19 @@ class TerminalHandleImpl implements InternalTerminalHandle {
 
   #complete<T>(operation: Operation, value: T, apply?: () => void, closeAfter = false): void {
     if (this.#operation !== operation) throw new ProtocolError("malformed");
-    this.#operation = undefined; apply?.();
+    try { apply?.(); } catch (error) {
+      // Apply hooks can discover a malformed chronology. Reject the caller
+      // before fencing the generation so no completed response leaves a
+      // promise behind while the fatal path closes the socket.
+      if (this.#operation === operation) this.#operation = undefined;
+      operation.reject(error);
+      if (!this.#closed) this.#fatal(error as SessionErrorLike);
+      throw error;
+    }
+    // Timer installation or authority clearing may have failed inside the
+    // apply hook and already closed this operation. Do not resurrect it.
+    if (this.#operation !== operation) return;
+    this.#operation = undefined;
     if (operation.detachAfter) {
       try {
         const detached = this.#beginDetach();
@@ -426,8 +450,11 @@ class TerminalHandleImpl implements InternalTerminalHandle {
       return;
     }
     if (closeAfter) { this.#closeLocal(); operation.resolve(value); return; }
+    // Resolve before servicing a due renewal. A synchronous renewal send or
+    // watchdog failure may close the generation, but must not strand the
+    // operation whose response was already received.
+    operation.resolve(value);
     if (!this.#closed) this.#serviceRenewal();
-    if (!this.#closed) operation.resolve(value);
   }
 
   #serviceRenewal(): void { if (!this.#renewDue || this.#lease === undefined || this.#closed || this.#detaching) return; this.#renewDue = false; this.#beginRenew(); }
@@ -483,7 +510,7 @@ class TerminalHandleImpl implements InternalTerminalHandle {
     if (this.#closed) return;
     this.#closed = true; this.#cancelTimer(); this.#renewDue = false;
     const wakeOutput = this.#outputCloseResolve; this.#outputCloseResolve = undefined; wakeOutput?.();
-    const operation = this.#operation; this.#operation = undefined; this.#lease = undefined; this.#attached = false; this.#attachedState = undefined;
+    const operation = this.#operation; this.#operation = undefined; this.#lease = undefined; this.#attached = false;
     operation?.reject(error ?? new SessionErrorLikeError("closed"));
     try { this.#options.onClose?.(error); } catch { /* callbacks never own transport */ }
   }
@@ -537,7 +564,6 @@ export function hexSessionID(value: string): Uint8Array {
   const result = new Uint8Array(16); for (let index = 0; index < 16; index++) result[index] = Number.parseInt(value.slice(index * 2, index * 2 + 2), 16); return result;
 }
 function sameBytes(a: Uint8Array, b: Uint8Array): boolean { return a.length === b.length && a.every((value, index) => value === b[index]); }
-function frozenAttached(value: TerminalAttached): TerminalAttached { return Object.freeze({ ...value }); }
 function frozenLease(value: TerminalLease): TerminalLease { return Object.freeze({ ...value }); }
 function frozenLeaseResult(value: TerminalLeaseResultBody): TerminalLeaseResult { return Object.freeze({ ...value }); }
 function frozenReset(value: TerminalReset): TerminalReset { return Object.freeze({ ...value }); }
