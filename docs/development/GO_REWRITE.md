@@ -45,7 +45,7 @@ branch/worktree and obeys that repository's `AGENTS.md`.
 |---|---|
 | Complete and retained | Fresh SQLite contract; typed kernel; atomic admission; exact attempt credentials; run/finalizing/resource state; bounded invalidations; Change ownership/materialization groundwork; owner-only Unix control API; typed `factoryctl` client; Darwin process identity; two blocked-exec gates; terminal-exit spool; gated Darwin PTY primitive; durable terminal-session admission, activation, recovery uncertainty and finalization guards; durable browser clients/challenges/revocation/input leases; exact PAIR/AUTH transcripts; strict browser-v1 handshake/binary codecs; strict runner terminal union, complete-write poisoning, incremental frame decoder and one fixed replay ring through `f1f72aa`; reviewed framework-neutral `@dark-factory/client` handshake/transcript/binary core and exact package gate through `d03491f`; independently reviewed question-only durable HumanRequest creation, private detail, reply reservation/acknowledgement/uncertainty, restart recovery, lifecycle convergence and bounded public projection through `40f5873`; the single-owner PTY execution loop, exact ready/input handoff, correlated retained replay, bounded filter retirement, poisoned writes, actual-EOF ordering and daemon-loss convergence through `ebcfd24` |
 | Reusable with adaptation | `internal/runner` live-child/process-group ownership; daemon supervisor choreography; bounded API framing/auth separation; dashboard projection/client reducer direction; rebased recovery branch `go-recovery-reserved-fix` at `185cd5f`; fail-closed runtime/spool/Change close branches at `f239815`, `347c977`, and `4183205` |
-| In progress but held | HumanRequest delivery and browser terminal routing now await the daemon live-attempt mailbox; their durable Store and runner contracts are complete. Recovery still needs replay onto the PTY design. The simplified Go gate candidate remains isolated pending exact-head review. |
+| In progress but held | HumanRequest delivery and browser terminal routing now await the daemon live-attempt mailbox; their durable Store and runner contracts are complete. Recovery still needs replay onto the PTY design. The development/Go sub-gates are integrated and green; final browser E2E and the post-test system census remain cutover blockers. |
 | Obsolete | Startup-input-only/closed-stdin provider contract; separate stdin/stdout/stderr provider pipes as the product transport; TUI/Bubble Tea packages, lanes and parity tests; generic attention projection; message-on-next-run as the live-question answer |
 | Proved for revised architecture | Current Chrome on macOS can connect from the protected hosted HTTPS preview to exact `ws://127.0.0.1:43123` with the dedicated loopback permission; strict Origin/Host checks, binary traffic, reconnect, denial, no-daemon, port-collision and cross-site refusal are causal. A fresh Darwin PTY child remains inert until release, owns a controlling terminal/process group and is reaped without orphaning. SQLite owns exactly one terminal session per admitted run and refuses terminalization until its exact close is proved. The outer runner now owns the live PTY loop without goroutines, transfers initial input exactly once, gates terminal commands on readiness, bounds and correlates replay before and after actual EOF, poisons uncertain writes, and converges on daemon loss; full runner/changeworker normal and race tests passed on exact reviewed head and normal suites passed again after integration. |
 | Blocked until proved | Daemon mailbox serialization and subscriber routing over the integrated runner; daemon-owned delivery of a reserved HumanRequest reply to the exact live run; loopback transport authentication/Host/Origin security over the durable browser authority; complete browser protocol operations beyond the reviewed handshake/binary core; TypeScript connection/reconnect client; public web UI; complete private host integration; revised crash-cut vertical slice |
@@ -2341,6 +2341,43 @@ the Go sub-gate plus retained release/script checks and the standalone
 same cutover commit; two competing authoritative entry points never exist.
 Script-fixture coverage proves this top-level gate invokes the Go and standalone
 control-plane sub-gates exactly once each.
+
+Integrated Go sub-gate checkpoint on head `b5e42ee`:
+
+- `scripts/go-check.sh` and `scripts/go-ci.sh` now share one concrete fast
+  stage. The latter acquires the repository lease once and owns serial full Go,
+  race and TypeScript stages; it does not expose a caller-forgeable lease
+  marker. Stage environments use owned scratch HOME/cache/config locations and
+  captured absolute Node/Corepack tools, never the operator's HOME or Git
+  credential configuration.
+- Bounded stage supervision creates a fresh process group before exec, forwards
+  TERM, joins descendants, distinguishes timeout (`124`) from unresolved
+  cleanup (`125`), and refuses a pass while the group remains live or uncertain.
+  Exact-root identity checks precede output redirection and cleanup; ordinary
+  read-only module caches are made owner-writable only after that check and are
+  then removed. SIGKILL can still retain a mode-0700 quarantine and requires the
+  final external census; malicious concurrent same-UID pathname races remain
+  outside the cooperative gate threat model.
+- Independent reviews blocked earlier candidates for ambient bootstrap tools,
+  disabled Corepack integrity, nondeterministic timeout status, unsafe output
+  redirection, weak tool identity, Git redirection, forgeable lease ownership,
+  unjoined TERM, a real Node/Corepack failure and leaked read-only caches. The
+  repaired exact head `50462ea` passed the real focused gate, the shell attack
+  harness twice, syntax/diff checks, old-Node refusal and exact cleanup; the
+  reviewer returned **ALLOW**.
+- After unchanged integration the orchestrator ran `scripts/test-go-gates.sh`
+  and `git diff --check` successfully, then ran `scripts/go-check.sh`. Its first
+  attempt failed before testing because the sandbox denied DNS to the pinned Go
+  proxy; the authorized dependency-download rerun passed module verification,
+  vet, kernel (`12.958s`), browser protocol (`0.586s`) and SQLite contract
+  (`11.017s`) tests, frozen pnpm 11.19.0 install, TypeScript typecheck and all ten
+  client tests (`452ms`), plus the final diff check. The failed network attempt
+  is not counted as green evidence.
+- Final shell-provider/browser E2E and the exact post-test process/socket/PTY/
+  goroutine census are intentionally not claimed by this checkpoint. They must
+  be added before the hard-cutover gate can pass. The roughly 514 production
+  shell lines and duplicated entrypoint setup remain explicit targets for the
+  scheduled whole-runtime elegance audit.
 
 Process-sensitive fixtures use an externally supervised ownership harness.
 Readiness/cuts use inherited pipes or locked descriptors, not sleeps. The
