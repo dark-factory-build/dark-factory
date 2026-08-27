@@ -49,6 +49,8 @@ echo "go-ci: TypeScript client proof"
 )
 echo "go-ci: serial real Go/TypeScript browser PTY E2E"
 go_gate_stage 600 "$script_dir/go-browser-e2e.sh"
+echo "go-ci: serial real Go/TypeScript browser PTY race E2E"
+go_gate_stage 600 "$script_dir/go-browser-e2e.sh" --race
 echo "go-ci: git diff --check"
 go_gate_stage 120 "$go_gate_git" diff --check
 echo "go-ci: NOTE: final system census remains a cutover-only gate"

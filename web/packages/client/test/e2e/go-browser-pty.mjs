@@ -188,6 +188,11 @@ async function scenarioInteractive(config, client, signals, sockets, errors, fra
   await first.handle.acquireInput();
   accepted(await first.handle.sendInput(new TextEncoder().encode("input-one\n")), "first terminal input");
   await signals.until(() => observer.text.includes("E2E_INPUT:input-one"), "provider input response");
+  const resized = await first.handle.resize(37, 111);
+  assert.equal(resized.rows, 37);
+  assert.equal(resized.cols, 111);
+  accepted(await first.handle.sendInput(new TextEncoder().encode("measure\n")), "terminal resize witness input");
+  await signals.until(() => observer.text.includes("E2E_SIZE:37:111"), "provider-visible PTY resize");
 
   await first.handle.releaseInput();
   assert.equal(first.handle.writable, false);
@@ -233,12 +238,11 @@ async function scenarioInteractive(config, client, signals, sockets, errors, fra
   assert.equal(secondSocket.readyState, WebSocket.OPEN, "post-exit request left the replacement WebSocket closed");
   assert.deepEqual(errors, ["connection"], "intentional disconnect was not the sole connection error");
   assert.equal(frames.some((frame) => frame.type === "INVALID_JSON"), false, "real server emitted a malformed frame");
-  const restartIndexes = frames.flatMap((frame, index) => frame.type === "STATE_RESTART" ? [index] : []);
-  const retiredEntities = frames.filter((frame, index) => frame.type === "STATE_ENTITY" && restartIndexes.some((restart) => restart < index)).length;
   assert.equal(client.status, "ready", "state repair closed the client after terminal exit");
   assert.ok(client.state !== undefined && client.state.head.toString() === postExit.head, "post-exit canonical state did not remain coherent");
   assert.equal(observer.reset, undefined);
   assert.equal(observer.count("E2E_INPUT:input-one"), 1, "terminal input was replayed");
+  assert.equal(observer.count("E2E_SIZE:37:111"), 1, "provider-visible resize witness was duplicated");
   assert.equal(observer.count("E2E_REPLY:human-answer"), 1, "HumanRequest reply was duplicated");
   assert.equal(observer.exitCount, 1, "terminal exit was duplicated");
   return {
@@ -246,14 +250,13 @@ async function scenarioInteractive(config, client, signals, sockets, errors, fra
     requestId: request.id,
     outputCursor: observer.cursor.toString(),
     inputMarkers: observer.count("E2E_INPUT:input-one"),
+    resizeMarkers: observer.count("E2E_SIZE:37:111"),
     replyMarkers: observer.count("E2E_REPLY:human-answer"),
-    exit: observer.exit,
+    exit: { sessionId: observer.exit.sessionId, exitCode: observer.exit.exitCode, exitSignal: observer.exit.exitSignal },
     exitCount: observer.exitCount,
     postExitRequest: postExit.requestSucceeded,
     canonicalHead: postExit.head,
     canonicalAgentRevision: postExit.agentRevision,
-    stateRestarts: restartIndexes.length,
-    retiredEntities,
     reconnects: sockets.length - 1,
   };
 }
@@ -293,11 +296,8 @@ async function scenarioCancel(config, client, signals) {
     scenario: "cancel",
     requestId: request.id,
     runId: cancelled.run_id,
-    runRevision: cancelled.run_revision.toString(),
-    requestRevision: cancelled.request_revision.toString(),
     staleInput,
-    forbiddenMarker: false,
-    exit: observer.exit,
+    exit: { sessionId: observer.exit.sessionId, exitCode: observer.exit.exitCode, exitSignal: observer.exit.exitSignal },
     exitCount: observer.exitCount,
     postExitRequest: postExit.requestSucceeded,
     canonicalHead: postExit.head,

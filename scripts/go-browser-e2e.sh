@@ -3,6 +3,12 @@ set -eu
 
 script_dir=$(CDPATH= cd -- "$(/usr/bin/dirname "$0")" && pwd -P)
 repository_root=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
+race=0
+case "$#:${1-}" in
+    0:) ;;
+    1:--race) race=1 ;;
+    *) echo "usage: $0 [--race]" >&2; exit 2 ;;
+esac
 e2e_root=$(/usr/bin/mktemp -d /private/tmp/dark-factory-go-browser-e2e.XXXXXX)
 
 cleanup() {
@@ -21,8 +27,13 @@ esac
 
 CDPATH= cd -- "$repository_root"
 export GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off
-go build -o "$e2e_root/factory-runner" ./cmd/factory-runner
-go build -o "$e2e_root/factoryctl" ./cmd/factoryctl
+if [ "$race" -eq 1 ]; then
+    go build -race -o "$e2e_root/factory-runner" ./cmd/factory-runner
+    go build -race -o "$e2e_root/factoryctl" ./cmd/factoryctl
+else
+    go build -o "$e2e_root/factory-runner" ./cmd/factory-runner
+    go build -o "$e2e_root/factoryctl" ./cmd/factoryctl
+fi
 
 (
     CDPATH= cd -- "$repository_root/web"
@@ -42,5 +53,10 @@ case "$count" in
     ''|*[!0-9]*|0) echo "go-browser-e2e: repeat count must be a positive integer" >&2; exit 1 ;;
 esac
 
-go test -timeout=2m -count="$count" -p 1 ./internal/e2e
-echo "go-browser-e2e: PASS ($count serial run(s))"
+if [ "$race" -eq 1 ]; then
+    go test -race -timeout=2m -count="$count" -p 1 ./internal/e2e
+    echo "go-browser-e2e: PASS ($count serial race run(s))"
+else
+    go test -timeout=2m -count="$count" -p 1 ./internal/e2e
+    echo "go-browser-e2e: PASS ($count serial run(s))"
+fi

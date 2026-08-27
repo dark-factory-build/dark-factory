@@ -42,19 +42,15 @@ type nodeResult struct {
 	Scenario               string `json:"scenario"`
 	RequestID              string `json:"requestId"`
 	RunID                  string `json:"runId"`
-	RunRevision            string `json:"runRevision"`
-	RequestRevision        string `json:"requestRevision"`
 	OutputCursor           string `json:"outputCursor"`
 	StaleInput             string `json:"staleInput"`
 	ClientID               string `json:"clientId"`
 	Capabilities           uint8  `json:"capabilities"`
 	InputMarkers           int    `json:"inputMarkers"`
+	ResizeMarkers          int    `json:"resizeMarkers"`
 	ReplyMarkers           int    `json:"replyMarkers"`
 	Reconnects             int    `json:"reconnects"`
 	ConnectionErrors       int    `json:"connectionErrors"`
-	StateRestarts          int    `json:"stateRestarts"`
-	RetiredEntities        int    `json:"retiredEntities"`
-	ForbiddenMarker        bool   `json:"forbiddenMarker"`
 	ExitCount              int    `json:"exitCount"`
 	PostExitRequest        bool   `json:"postExitRequest"`
 	CanonicalHead          string `json:"canonicalHead"`
@@ -63,7 +59,6 @@ type nodeResult struct {
 		SessionID  string `json:"sessionId"`
 		ExitCode   int    `json:"exitCode"`
 		ExitSignal int    `json:"exitSignal"`
-		Aborted    bool   `json:"aborted"`
 	} `json:"exit"`
 }
 
@@ -90,6 +85,10 @@ func TestGoTypeScriptBrowserPTYLifecycle(t *testing.T) {
 printf 'E2E_READY\n'
 IFS= read -r first
 printf 'E2E_INPUT:%s\n' "$first"
+IFS= read -r measure
+test "$measure" = measure
+set -- $(/bin/stty size)
+printf 'E2E_SIZE:%s:%s\n' "$1" "$2"
 IFS= read -r proceed
 test "$proceed" = proceed
 "$DARK_FACTORY_FACTORYCTL" attempt request-human --idempotency-key 11111111111111111111111111111111 --question 'Which deterministic answer should this exact run use?'
@@ -137,7 +136,6 @@ type fixture struct {
 	root                  string
 	store                 *kernel.Store
 	daemon                *daemon.Daemon
-	browser               *daemon.BrowserRuntime
 	runtimeParent         *daemon.RuntimeParent
 	listener              *api.Listener
 	apiDone               chan error
@@ -169,6 +167,11 @@ func newFixture(t *testing.T, seed byte, test scenario, factoryctl, runnerExecut
 		t.Fatal(err)
 	}
 	result := &fixture{t: t, root: root, baselineFDs: fdCount(t), baselineGoroutines: runtime.NumGoroutine()}
+	// Cleanups run last-in-first-out. The ordinary owner gets the first chance
+	// to close and assert everything; the separately registered fallback then
+	// retries only retained live capabilities if ordinary cleanup panics or
+	// returns partway through. Neither path derives signal authority from Store.
+	t.Cleanup(result.safetyClose)
 	t.Cleanup(result.close)
 
 	gitHome := filepath.Join(root, "git-home")
@@ -263,11 +266,11 @@ func newFixture(t *testing.T, seed byte, test scenario, factoryctl, runnerExecut
 		}
 	}()
 
-	result.browser, err = result.daemon.ListenBrowser("127.0.0.1:0", []string{e2eOrigin})
+	browserRuntime, err := result.daemon.ListenBrowser("127.0.0.1:0", []string{e2eOrigin})
 	if err != nil {
 		t.Fatal(err)
 	}
-	result.browserAddress = result.browser.Addr()
+	result.browserAddress = browserRuntime.Addr()
 	result.spec = daemon.SupervisorSpec{
 		AgentID: result.agentID, RuntimeParent: result.runtimeParent, ChangeParent: changeParent,
 		GitExecutable: git, BaseRevision: base, AttemptSocket: socket,
@@ -502,7 +505,7 @@ func (fixture *fixture) assertNodeResult(result nodeResult, test scenario) {
 		}
 	}
 	if test.want == kernel.OutcomeSucceeded {
-		if result.Scenario != "interactive" || result.InputMarkers != 1 || result.ReplyMarkers != 1 || result.Reconnects != 1 || result.ConnectionErrors != 1 {
+		if result.Scenario != "interactive" || result.InputMarkers != 1 || result.ResizeMarkers != 1 || result.ReplyMarkers != 1 || result.Reconnects != 1 || result.ConnectionErrors != 1 {
 			fixture.t.Fatalf("interactive Node proof = %+v", result)
 		}
 		if result.OutputCursor == "" {
@@ -510,7 +513,7 @@ func (fixture *fixture) assertNodeResult(result nodeResult, test scenario) {
 		}
 		return
 	}
-	if result.Scenario != "cancel" || result.RunID != fixture.run.ID.String() || result.Exit.ExitSignal <= 0 || result.ForbiddenMarker || result.StaleInput != "locally_rejected" && result.StaleInput != "rejected" {
+	if result.Scenario != "cancel" || result.RunID != fixture.run.ID.String() || result.Exit.ExitSignal <= 0 || result.StaleInput != "locally_rejected" && result.StaleInput != "rejected" {
 		fixture.t.Fatalf("cancel Node proof = %+v", result)
 	}
 }
@@ -604,130 +607,111 @@ func (fixture *fixture) close() {
 	if fixture == nil {
 		return
 	}
-	fixture.closeOnce.Do(func() {
-		if fixture.runCancel != nil {
-			fixture.runCancel()
-		}
-		fixture.nodeMu.Lock()
-		node, nodeDone := fixture.node, fixture.nodeDone
-		fixture.nodeMu.Unlock()
-		if node != nil && node.Process != nil {
-			_ = node.Process.Kill()
-			if nodeDone != nil {
-				select {
-				case <-nodeDone:
-				case <-time.After(3 * time.Second):
-					fixture.t.Errorf("Node child did not join")
-				}
-			}
-		}
-		// On a failed scenario the released provider intentionally outlives its
-		// caller context. Converge only the exact Store-recorded groups before
-		// asking Daemon.Close to join the synchronous RunNext owner.
-		fixture.hardSafetyCleanup()
-		if fixture.daemon != nil {
-			if err := fixture.daemon.Close(); err != nil {
-				fixture.t.Errorf("daemon close: %v", err)
-			}
-		}
-		if fixture.listener != nil {
-			if err := fixture.listener.Close(); err != nil {
-				fixture.t.Errorf("API listener close: %v", err)
-			}
-			select {
-			case err := <-fixture.apiDone:
-				if err != nil && !errors.Is(err, api.ErrTransport) {
-					fixture.t.Errorf("API owner: %v", err)
-				}
-			case <-time.After(3 * time.Second):
-				fixture.t.Errorf("API owner did not join")
-			}
-		}
-		if fixture.runtimeParent != nil {
-			if err := fixture.runtimeParent.Close(); err != nil {
-				fixture.t.Errorf("runtime parent close: %v", err)
-			}
-		}
-		if fixture.store != nil {
-			if err := fixture.store.Close(); err != nil {
-				fixture.t.Errorf("Store close: %v", err)
-			}
-		}
-		if fixture.browserAddress != "" {
-			probe, err := net.Listen("tcp4", fixture.browserAddress)
-			if err != nil {
-				fixture.t.Errorf("browser socket retained: %v", err)
-			} else {
-				_ = probe.Close()
-			}
-		}
-		if fixture.root != "" {
-			if err := os.RemoveAll(fixture.root); err != nil {
-				fixture.t.Errorf("temporary root cleanup: %v", err)
-			}
-			if _, err := os.Stat(fixture.root); !errors.Is(err, os.ErrNotExist) {
-				fixture.t.Errorf("temporary root remains: %v", err)
-			}
-		}
-		fixture.assertCensus()
-	})
+	fixture.closeOnce.Do(fixture.closeOwned)
 }
 
-func (fixture *fixture) hardSafetyCleanup() {
-	if fixture.store == nil {
-		return
+// safetyClose is deliberately registered separately from close and does not
+// share closeOnce. If ordinary cleanup panics or returns after retaining an
+// owner, this fallback retries the actual Daemon/exec.Cmd capabilities. Store
+// process rows remain observation evidence only and never authorize a signal.
+func (fixture *fixture) safetyClose() {
+	if fixture != nil {
+		fixture.closeOwned()
 	}
-	recoverable, err := fixture.store.RecoverableRuns(context.Background())
-	if err != nil {
-		fixture.t.Errorf("hard safety recovery read: %v", err)
-		return
+}
+
+func (fixture *fixture) closeOwned() {
+	if fixture.runCancel != nil {
+		fixture.runCancel()
 	}
-	identities := make(map[runner.Identity]struct{})
-	for _, recovered := range recoverable {
-		for _, resource := range recovered.Resources {
-			identity, ok, identityErr := processIdentity(resource)
-			if identityErr != nil {
-				fixture.t.Errorf("hard safety identity: %v", identityErr)
-				continue
-			}
-			if ok {
-				identities[identity] = struct{}{}
-			}
-		}
-	}
-	if fixture.run.ID != (kernel.RunID{}) {
-		resources, resourceErr := fixture.store.Resources(context.Background(), fixture.run.ID)
-		if resourceErr == nil {
-			for _, resource := range resources {
-				identity, ok, identityErr := processIdentity(resource)
-				if identityErr == nil && ok {
-					identities[identity] = struct{}{}
+	fixture.nodeMu.Lock()
+	node, nodeDone := fixture.node, fixture.nodeDone
+	fixture.nodeMu.Unlock()
+	if node != nil && node.Process != nil {
+		_ = node.Process.Kill()
+		if nodeDone != nil {
+			select {
+			case <-nodeDone:
+				fixture.nodeMu.Lock()
+				if fixture.node == node {
+					fixture.node = nil
 				}
+				fixture.nodeMu.Unlock()
+			case <-time.After(3 * time.Second):
+				fixture.t.Errorf("Node child did not join")
+				return
 			}
 		}
 	}
-	for identity := range identities {
-		first := runner.ObserveProcess(identity)
-		second := runner.ObserveProcess(identity)
-		if first.Presence != runner.Present || second.Presence != runner.Present {
-			continue
-		}
-		if err := unix.Kill(-identity.PGID, unix.SIGTERM); err != nil && !errors.Is(err, unix.ESRCH) {
-			fixture.t.Errorf("hard safety TERM %+v: %v", identity, err)
+	if fixture.daemon != nil {
+		if err := fixture.daemon.Close(); err != nil {
+			fixture.t.Errorf("daemon close: %v", err)
+			return
+		} else {
+			fixture.daemon = nil
 		}
 	}
-	waitProcesses(fixture.t, identities, 500*time.Millisecond, false)
-	for identity := range identities {
-		first := runner.ObserveProcess(identity)
-		second := runner.ObserveProcess(identity)
-		if first.Presence != runner.Present || second.Presence != runner.Present {
-			continue
+	if fixture.listener != nil {
+		closeErr := fixture.listener.Close()
+		joined := false
+		select {
+		case err := <-fixture.apiDone:
+			joined = true
+			if err != nil && !errors.Is(err, api.ErrTransport) {
+				fixture.t.Errorf("API owner: %v", err)
+			}
+		case <-time.After(3 * time.Second):
+			fixture.t.Errorf("API owner did not join")
 		}
-		if err := unix.Kill(-identity.PGID, unix.SIGKILL); err != nil && !errors.Is(err, unix.ESRCH) {
-			fixture.t.Errorf("hard safety KILL %+v: %v", identity, err)
+		if closeErr != nil {
+			fixture.t.Errorf("API listener close: %v", closeErr)
+			return
+		} else if joined {
+			fixture.listener = nil
+		} else {
+			return
 		}
 	}
-	waitProcesses(fixture.t, identities, 4*time.Second, true)
+	if fixture.runtimeParent != nil {
+		if err := fixture.runtimeParent.Close(); err != nil {
+			fixture.t.Errorf("runtime parent close: %v", err)
+			return
+		} else {
+			fixture.runtimeParent = nil
+		}
+	}
+	if fixture.store != nil {
+		if err := fixture.store.Close(); err != nil {
+			fixture.t.Errorf("Store close: %v", err)
+			return
+		} else {
+			fixture.store = nil
+		}
+	}
+	if fixture.browserAddress != "" {
+		probe, err := net.Listen("tcp4", fixture.browserAddress)
+		if err != nil {
+			fixture.t.Errorf("browser socket retained: %v", err)
+			return
+		} else {
+			_ = probe.Close()
+			fixture.browserAddress = ""
+		}
+	}
+	if fixture.root != "" {
+		root := fixture.root
+		if err := os.RemoveAll(root); err != nil {
+			fixture.t.Errorf("temporary root cleanup: %v", err)
+			return
+		}
+		if _, err := os.Stat(root); !errors.Is(err, os.ErrNotExist) {
+			fixture.t.Errorf("temporary root remains: %v", err)
+			return
+		} else {
+			fixture.root = ""
+		}
+	}
+	fixture.assertCensus()
 }
 
 func (fixture *fixture) assertCensus() {
@@ -745,26 +729,6 @@ func (fixture *fixture) assertCensus() {
 		}
 		runtime.Gosched()
 		time.Sleep(10 * time.Millisecond)
-	}
-}
-
-func waitProcesses(t testing.TB, identities map[runner.Identity]struct{}, timeout time.Duration, requireAbsent bool) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for identity := range identities {
-		for {
-			observation := runner.ObserveProcess(identity)
-			if observation.Presence == runner.Absent || observation.Presence == runner.Reused {
-				break
-			}
-			if time.Now().After(deadline) {
-				if requireAbsent {
-					t.Errorf("hard safety residual %+v: %+v", identity, observation)
-				}
-				break
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
 	}
 }
 

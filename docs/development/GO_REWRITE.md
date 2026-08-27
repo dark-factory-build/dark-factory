@@ -4417,10 +4417,12 @@ Real Go/TypeScript browser PTY lifecycle candidate on 2026-08-27:
 
 - `scripts/go-browser-e2e.sh` builds the production `factory-runner`,
   `factoryctl` and framework-neutral TypeScript client, then runs one Darwin
-  package serially with a two-minute outer bound. The Node harness uses only
-  the built client. Its sole test dependency is `ws@8.18.3`, needed to set the
-  exact production Origin header; no browser protocol or lifecycle behavior is
-  reimplemented in the harness.
+  package serially with a two-minute outer bound. Its explicit `--race` mode
+  builds both Go binaries with race instrumentation and runs the same real
+  lifecycle under `go test -race`; the authoritative Go gate invokes both
+  modes. The Node harness uses only the built client. Its sole test dependency
+  is `ws@8.18.3`, needed to set the exact production Origin header; no browser
+  protocol or lifecycle behavior is reimplemented in the harness.
 - Each subtest creates a private temporary Git repository, Go home, Store,
   owner-only API socket, runtime parent and loopback browser listener. It uses
   real `Daemon.RunNext`, one-time pairing, Host/Origin validation, the real
@@ -4428,7 +4430,8 @@ Real Go/TypeScript browser PTY lifecycle candidate on 2026-08-27:
   reads an operator home, live socket, installed service, provider credential
   or real Claude/Codex session.
 - Scenario A proves attach and binary output, one leased input and exact
-  response, deliberate browser disconnect, exactly one authenticated
+  response, an exact resize whose rows/columns are observed by `stty` inside
+  the provider PTY, deliberate browser disconnect, exactly one authenticated
   reconnect, retained contiguous output without input replay, one explicit
   bounded HumanRequest, exact inline reply, typed success and terminal exit.
   The second WebSocket remains the same usable authenticated session through
@@ -4447,14 +4450,21 @@ Real Go/TypeScript browser PTY lifecycle candidate on 2026-08-27:
   identities positively absent or reused. Cleanup joins the Node child,
   browser runtime, daemon owner, API listener, runtime parent and Store;
   rebinds the exact browser address; removes the private root; and returns to
-  the starting FD and goroutine census. The independent safety path signals
-  only twice-observed exact Store-recorded process groups and never treats
-  uncertainty as absence.
-- The candidate passed one serial run (`2.995s`) and three serial repeats
-  (`6.899s`) through the real built runner. Earlier candidate failures exposed
-  and retained causal coverage for contradictory signaled exits, late entity
-  replies during state restart, the Darwin natural-exit/TERM observation race,
-  unread terminal readiness, resize starvation and SQLite subscription
+  the starting FD and goroutine census. Ordinary and separately registered
+  fallback cleanups both retain the actual `exec.Cmd` Node owner and
+  daemon/controller capabilities; fallback does not share the ordinary
+  `sync.Once`, and Store/root closure cannot precede a failed daemon-owner
+  retry. Persisted process identities are used only for final observation and
+  never authorize a signal. This in-process fallback covers failed and panicked
+  Go tests; it does not claim to survive SIGKILL or a forced test-process exit.
+- After the cleanup/resize repair, the candidate passed one serial run
+  (`3.441s`), three serial repeats (`7.787s`) and the explicit serial race run
+  (`9.439s`) through the real built runner. A separate verbose run returned to
+  exactly five file descriptors and three goroutines after both the normal and
+  fallback cleanup callbacks in each scenario. Earlier candidate failures
+  exposed and retained causal coverage for contradictory signaled exits, late
+  entity replies during state restart, the Darwin natural-exit/TERM observation
+  race, unread terminal readiness, resize starvation and SQLite subscription
   interruption during exact owner cancellation. Each production repair was
   independently reviewed before entering this combined branch.
 - This is an in-process composition-root proof because the repository still
@@ -4462,3 +4472,7 @@ Real Go/TypeScript browser PTY lifecycle candidate on 2026-08-27:
   test, daemon-restart terminal reset/recovery, private-host UI integration and
   crash-cut matrix remain separate cutover gates. This candidate must receive
   an independent exact-head review before canonical integration.
+- The composition test intentionally finishes well before the ten-second input
+  lease renewal interval. Renewal scheduling, correlation, expiry fencing and
+  retry prohibition remain covered by the deterministic TypeScript lifecycle
+  tests; this E2E does not claim a real-time renewal composition proof.
