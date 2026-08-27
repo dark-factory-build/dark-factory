@@ -163,10 +163,7 @@ export class BrowserSession {
     return handle;
   }
 
-  attachTerminal(options: TerminalHandleOptions): TerminalHandle { return this.createTerminalHandle(options); }
-  openTerminal(options: TerminalHandleOptions): TerminalHandle { return this.createTerminalHandle(options); }
   replyHumanRequest(request: TerminalReplyRequest): Promise<HumanReplyResult> { this.#ensureLive(); if (!this.#authenticated) return Promise.reject(new SessionError("unauthorized")); return this.#human.reply(request); }
-  reply(request: TerminalReplyRequest): Promise<HumanReplyResult> { return this.replyHumanRequest(request); }
   cancelRun(request: TerminalCancelRunRequest): Promise<HumanCancelResult> { this.#ensureLive(); if (!this.#authenticated) return Promise.reject(new SessionError("unauthorized")); return this.#human.cancelRun(request); }
   get humanRequests(): HumanRequestClient { return this.#human; }
 
