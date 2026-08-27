@@ -11,6 +11,8 @@ import {
   encodeHello,
   encodePairResult,
   encodeAuthResult,
+  encodeHumanRequestActionResult,
+  encodeHumanRequestReplyResult,
   encodeStateEntity,
   encodeStateEvent,
   encodeStateSnapshot,
@@ -21,6 +23,7 @@ const daemonID = "22".repeat(16);
 const bootID = "33".repeat(16);
 const nonce = "44".repeat(32);
 const clientID = "55".repeat(16);
+const runID = "66".repeat(16);
 const factory = (revision = 1n) => ({ dispatch_enabled: true, capacity: 8, active_runs: 0, revision });
 
 class MemoryKeys {
@@ -79,6 +82,64 @@ test("pairing signs through WebCrypto, persists the key, fetches all pages, and 
   assert.equal(states.at(-1).head, 1n);
   assert.equal(decodeClientControl(sockets[0].sent.at(-1)).type, "STATE_SUBSCRIBE");
   assert.equal(sockets[0].sent.some((wire) => wire.includes(challenge)), true, "challenge is used only in proof, never URL");
+  session.close();
+});
+
+test("HumanRequest methods are fenced before HELLO and after close, without a raw getter", async () => {
+  let socket;
+  const session = new BrowserSession({
+    url: "ws://127.0.0.1:43123/browser/v1",
+    host: "127.0.0.1:43123",
+    origin: "https://preview.example",
+    keyStore: new MemoryKeys(),
+    socketFactory: () => { socket = new Socket(() => {}); return socket; },
+  });
+  const connecting = session.connect();
+  const reply = session.replyHumanRequest({ runId: runID, requestId: "77".repeat(16), expectedRevision: 1n, reply: "ok" });
+  const cancel = session.cancelRun({ runId: runID, requestId: "88".repeat(16), expectedRequestRevision: 1n, expectedRunRevision: 1n });
+  assert.equal("humanRequests" in session, false);
+  assert.equal(socket.sent.length, 0);
+  session.close();
+  await assert.rejects(reply, (error) => error instanceof SessionError && error.code === "unauthorized");
+  await assert.rejects(cancel, (error) => error instanceof SessionError && error.code === "unauthorized");
+  await assert.rejects(connecting, (error) => error instanceof SessionError && error.code === "closed");
+  const closedReply = session.replyHumanRequest({ runId: runID, requestId: "77".repeat(16), expectedRevision: 1n, reply: "ok" });
+  const closedCancel = session.cancelRun({ runId: runID, requestId: "88".repeat(16), expectedRequestRevision: 1n, expectedRunRevision: 1n });
+  assert.equal(socket.sent.length, 0);
+  await assert.rejects(closedReply, (error) => error instanceof SessionError && error.code === "closed");
+  await assert.rejects(closedCancel, (error) => error instanceof SessionError && error.code === "closed");
+});
+
+test("authenticated HumanRequest methods emit exact frames and correlate results", async () => {
+  const store = new MemoryKeys();
+  let socket;
+  const session = new BrowserSession({
+    url: "ws://127.0.0.1:43123/browser/v1",
+    host: "127.0.0.1:43123",
+    origin: "https://preview.example",
+    challenge,
+    keyStore: store,
+    socketFactory: () => { socket = new Socket(serverFor); return socket; },
+  });
+  await session.connect();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal("humanRequests" in session, false);
+
+  const replyRequest = { runId: runID, requestId: "77".repeat(16), expectedRevision: 1n, reply: "ok" };
+  const reply = session.replyHumanRequest(replyRequest);
+  const replyFrame = decodeClientControl(socket.sent.at(-1));
+  assert.equal(replyFrame.type, "HUMAN_REQUEST_REPLY");
+  assert.deepEqual(replyFrame.body, { run_id: runID, request_id: replyRequest.requestId, expected_revision: 1n, reply: "ok" });
+  socket.reply(encodeHumanRequestReplyResult(replyFrame.id, { request_id: replyRequest.requestId, revision: 2n, status: "resolved" }));
+  assert.equal((await reply).status, "resolved");
+
+  const cancelRequest = { runId: runID, requestId: "88".repeat(16), expectedRequestRevision: 1n, expectedRunRevision: 1n };
+  const cancel = session.cancelRun(cancelRequest);
+  const cancelFrame = decodeClientControl(socket.sent.at(-1));
+  assert.equal(cancelFrame.type, "HUMAN_REQUEST_CANCEL_RUN");
+  assert.deepEqual(cancelFrame.body, { run_id: runID, request_id: cancelRequest.requestId, expected_request_revision: 1n, expected_run_revision: 1n });
+  socket.reply(encodeHumanRequestActionResult(cancelFrame.id, { action: "cancel_run", run_id: runID, run_revision: 2n, request_id: cancelRequest.requestId, request_revision: 2n, status: "resolved" }));
+  assert.equal((await cancel).action, "cancel_run");
   session.close();
 });
 

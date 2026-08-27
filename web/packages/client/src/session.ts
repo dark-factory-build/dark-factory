@@ -163,9 +163,8 @@ export class BrowserSession {
     return handle;
   }
 
-  replyHumanRequest(request: TerminalReplyRequest): Promise<HumanReplyResult> { this.#ensureLive(); if (!this.#authenticated) return Promise.reject(new SessionError("unauthorized")); return this.#human.reply(request); }
-  cancelRun(request: TerminalCancelRunRequest): Promise<HumanCancelResult> { this.#ensureLive(); if (!this.#authenticated) return Promise.reject(new SessionError("unauthorized")); return this.#human.cancelRun(request); }
-  get humanRequests(): HumanRequestClient { return this.#human; }
+  replyHumanRequest(request: TerminalReplyRequest): Promise<HumanReplyResult> { if (this.#closed) return Promise.reject(new SessionError("closed")); if (!this.#authenticated) return Promise.reject(new SessionError("unauthorized")); return this.#human.reply(request); }
+  cancelRun(request: TerminalCancelRunRequest): Promise<HumanCancelResult> { if (this.#closed) return Promise.reject(new SessionError("closed")); if (!this.#authenticated) return Promise.reject(new SessionError("unauthorized")); return this.#human.cancelRun(request); }
 
   connect(): Promise<void> {
     if (this.#connectPromise !== undefined) return this.#connectPromise;
