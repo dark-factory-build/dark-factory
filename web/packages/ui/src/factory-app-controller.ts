@@ -12,8 +12,9 @@ import {
   type StateView,
 } from "@dark-factory/client";
 
-const BROWSER_URL = "ws://127.0.0.1:43123/browser/v1";
-const BROWSER_HOST = "127.0.0.1:43123";
+const BROWSER_ENDPOINT = new URL("ws://127.0.0.1:43123/browser/v1");
+const BROWSER_URL = BROWSER_ENDPOINT.toString();
+const BROWSER_HOST = BROWSER_ENDPOINT.host;
 
 export type FactoryHumanRequestView = Readonly<{
   request: HumanRequestItem;
@@ -27,6 +28,7 @@ export type FactoryHumanRequestView = Readonly<{
 
 export type FactoryAppSnapshot = Readonly<{
   status: SessionStatus;
+  canRetry: boolean;
   state?: StateView;
   error?: SessionError | ProtocolError;
   selectedHumanRequest?: FactoryHumanRequestView;
@@ -58,6 +60,7 @@ export class FactoryAppController {
   readonly #options: FactoryAppControllerOptions;
   #client: ControlledClient | undefined;
   #status: SessionStatus = "idle";
+  #canRetry = false;
   #state: StateView | undefined;
   #error: SessionError | ProtocolError | undefined;
   #selection: Selection | undefined;
@@ -82,7 +85,8 @@ export class FactoryAppController {
       challenge = consumePairingChallenge(this.#options.location, this.#options.history);
     } catch {
       this.#status = "closed";
-      this.#error = new SessionError("connection", true);
+      this.#canRetry = false;
+      this.#error = new SessionError("connection");
       this.#publish();
       return;
     }
@@ -101,6 +105,7 @@ export class FactoryAppController {
       });
     } catch {
       this.#status = "closed";
+      this.#canRetry = false;
       this.#error = new SessionError("connection");
       this.#publish();
       return;
@@ -110,6 +115,7 @@ export class FactoryAppController {
       return;
     }
     this.#client = client;
+    this.#canRetry = true;
     this.#connect(generation);
   }
 
@@ -292,6 +298,7 @@ export class FactoryAppController {
     const selection = this.#selection;
     return {
       status: this.#status,
+      canRetry: this.#canRetry,
       state: this.#state,
       error: this.#error,
       selectedHumanRequest: selection === undefined ? undefined : {

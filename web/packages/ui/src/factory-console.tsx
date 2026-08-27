@@ -41,6 +41,7 @@ const ERROR_LABELS = new Map<string, string>([
 
 export function FactoryConsole({
   status,
+  canRetry: retryable,
   state,
   error,
   selectedHumanRequest,
@@ -52,7 +53,7 @@ export function FactoryConsole({
   onCloseHumanRequest,
 }: FactoryConsoleProps) {
   const projects = state?.projects;
-  const canRetry = onRetry !== undefined && (status === "idle" || status === "closed");
+  const canRetry = retryable && onRetry !== undefined && (status === "idle" || status === "closed");
 
   return (
     <main className="dfFactoryConsole" aria-label="Factory operator console">

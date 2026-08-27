@@ -65,9 +65,9 @@ test("all session statuses have stable live labels and no unsupported ready cont
   assert.equal(render({ status: "connecting", onRetry: () => {} }).includes("<button"), false);
 });
 
-test("closed connection exposes only the retry callback and a finite safe error", () => {
+test("closed connection exposes retry only when the snapshot has a client owner", () => {
   let retries = 0;
-  const markup = render({ status: "closed", error: new SessionError("connection", true), onRetry: () => { retries += 1; } });
+  const markup = render({ status: "closed", canRetry: true, error: new SessionError("connection", true), onRetry: () => { retries += 1; } });
   assert.match(markup, /Connection unavailable\./);
   assert.match(markup, /role="alert"/);
   assert.match(markup, /RETRY CONNECTION/);
