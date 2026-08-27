@@ -2370,21 +2370,56 @@ do not add interfaces to preserve the sketch.
 
 ### Fresh home and schema
 
-An initialized Go home carries an owner-only regular file named `format` with
-exact contents `dark-factory-go-home-v1\n` and mode `0600`. The database is
-`factory.sqlite3`, with SQLite `application_id=0x4446474f` (`DFGO`) and
-`user_version=1`. Initialization creates, configures, validates, closes, and
-syncs the database before atomically publishing `format` as the final home
-publication point. An exact database-only Go v1 partial initialization may be
-validated and completed; marker-only, mixed, symlinked, Rust-layout, unknown
-application-ID/version, or otherwise nonempty unmarked homes fail closed
-without any write and explain that Rust-home migration is unsupported.
+An initialized but not-yet-started Go home is one atomically published private
+directory with this exact bounded census:
 
-The intended layout is one private home with database, operator credential,
-socket, daemon-owned Changes, per-run runtime roots/token files/runner sockets
-and terminal spool, and verification scratch/cache. Exact names are frozen by
-the kernel slice and then shared by daemon/install/tests; no binary reads an
-ambient default during tests.
+```text
+format             regular 0600, "dark-factory-go-home-v1\n"
+factory.sqlite3    regular 0600, one link, complete rollback-header image
+operator.token     regular 0600, one link, exactly 32 nonzero random bytes
+home.lock          regular 0600, one link, empty and reserved for daemon use
+runtimes/          directory 0700, empty
+changes/           directory 0700, empty
+```
+
+The database uses SQLite `application_id=0x4446474f` (`DFGO`) and
+`user_version=1`. Initialization never creates or completes a prefix inside the
+final home. It creates exactly one fixed private sibling staging directory,
+writes and syncs every member through directory-relative descriptors, validates
+the database with the read-only immutable-image seam, validates the complete
+stage census, and publishes the directory with Darwin no-replace rename before
+syncing the parent. The fixed staging name is
+`.<home-basename>.dark-factory-go-v1.stage`; an existing staging object is
+durable crash evidence and is refused, not adopted, repaired, randomized,
+deleted, or overwritten.
+
+The final home is also never adopted or repaired. An exact already-ready home
+may be reported ready after strict read-only inspection. A database-only,
+marker-only, mixed, partial, symlinked, Rust-layout, unknown-version, or
+otherwise unmarked home fails unchanged and explains that Rust-home migration
+is unsupported. A publication result that cannot prove both the no-replace
+rename outcome and parent-directory durability remains explicitly uncertain;
+initialization never retries an ambiguous rename.
+
+Fresh-home inspection opens the absolute path component by component from `/`
+with `openat`/`O_NOFOLLOW`, retains and rechecks the parent/home/database
+identities, enumerates an exact bounded census, and passes the already-open
+sidecar-free database descriptor to `kernel.InspectImmutable`. It performs no
+write-capable SQLite open, flock, creation, chmod, rename, unlink, repair, or
+cleanup. SQLite journals/WAL/SHM, a socket, populated runtime/change
+directories, a nonempty or malformed reserved lock, arbitrary entries,
+symlinks, hard links, wrong owners/modes, and schema or byte disagreement are
+refused without mutation. `home.lock` is an exact reserved member, not
+bootstrap authority. The initial `factoryctl doctor --home ABSOLUTE` is this
+strict stopped/fresh-home inspector; later live-service diagnostics must use
+the owner API rather than weakening this filesystem contract.
+
+After the daemon starts, this same private root additionally owns its socket,
+daemon-owned Changes, per-run runtime roots/token files/runner sockets and
+terminal spool, and verification scratch. Those operational objects are not
+accepted by the strict fresh-home inspector. Exact names are frozen once by
+kernel/install tests and shared by daemon/install; no binary reads an ambient
+default during tests.
 
 The fresh schema contains only current product authority:
 
