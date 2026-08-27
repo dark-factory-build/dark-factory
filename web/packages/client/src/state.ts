@@ -78,6 +78,11 @@ export class StateAccumulator {
     return this.#published === undefined ? undefined : view(this.#published);
   }
 
+  /** The cursor required for the next page in the currently staged snapshot. */
+  get nextCursor(): string | null {
+    return this.#staging?.nextCursor ?? null;
+  }
+
   apply(frame: StateReducerFrame): StateReducerResult {
     switch (frame.type) {
       case "STATE_RESTART": return this.applyRestart(frame.body.reason);

@@ -4,3 +4,4 @@ export * from "./control.js";
 export * from "./state.js";
 export * from "./transcript.js";
 export * from "./terminal.js";
+export * from "./session.js";
