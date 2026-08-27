@@ -36,7 +36,7 @@ func scanHumanRequest(scanner rowScanner) (HumanRequest, bool, error) {
 	rev, revErr := NewRevision(revision)
 	created, createdErr := NewUnixMillis(createdAt)
 	updated, updatedErr := NewUnixMillis(updatedAt)
-	if idErr != nil || runErr != nil || len(rawKey) != IDBytes || bytes.Equal(rawKey, make([]byte, IDBytes)) || kindErr != nil || rawReason.String != "provider_question" || !rawReason.Valid || statusErr != nil || revErr != nil || createdErr != nil || updatedErr != nil || !utf8TextWithin(question, 1, MaxHumanRequestQuestionBytes) || createdAt > updatedAt || deliveryAt.Valid && (deliveryAt.Int64 < createdAt || deliveryAt.Int64 > updatedAt) || closedAt.Valid && (closedAt.Int64 < createdAt || closedAt.Int64 > updatedAt) {
+	if idErr != nil || runErr != nil || len(rawKey) != IDBytes || bytes.Equal(rawKey, make([]byte, IDBytes)) || kindErr != nil || rawReason.String != "provider_question" || !rawReason.Valid || statusErr != nil || revErr != nil || createdErr != nil || updatedErr != nil || !utf8TextWithin(question, 1, MaxHumanRequestQuestionBytes) {
 		return HumanRequest{}, false, fmt.Errorf("%w: invalid human request row", ErrCorruptState)
 	}
 	var key [IDBytes]byte
@@ -70,14 +70,14 @@ func scanHumanRequest(scanner rowScanner) (HumanRequest, bool, error) {
 		}
 		result.ClosedAt = &value
 	}
-	if err := validateHumanRequestState(result, rawReason.Valid); err != nil {
+	if err := validateHumanRequestState(result); err != nil {
 		return HumanRequest{}, false, err
 	}
 	return result, true, nil
 }
 
-func validateHumanRequestState(request HumanRequest, reasonValid bool) error {
-	if !reasonValid || request.Kind != HumanRequestQuestion || request.Status.String() == "" || request.Revision.Int64() < 1 || request.CreatedAt.Int64() > request.UpdatedAt.Int64() {
+func validateHumanRequestState(request HumanRequest) error {
+	if request.Kind != HumanRequestQuestion || request.Status.String() == "" || request.Revision.Int64() < 1 || request.CreatedAt.Int64() > request.UpdatedAt.Int64() {
 		return fmt.Errorf("%w: invalid human request controls", ErrCorruptState)
 	}
 	withDelivery := request.DeliveryID != nil
@@ -254,11 +254,11 @@ func (store *Store) CancelHumanRequestRun(ctx context.Context, clientID BrowserC
 	if err != nil {
 		return Run{}, HumanRequest{}, tx.Rollback(err)
 	}
-	updatedRun, err := store.enterFinalizingForHumanRequestCancel(ctx, tx, run, expectedRun, proposal, at, request.ID)
+	updatedRun, err := store.enterFinalizing(ctx, tx, run, expectedRun, proposal, at, &request.ID)
 	if err != nil {
 		return Run{}, HumanRequest{}, err
 	}
-	// enterFinalizingForHumanRequestCancel commits the shared transaction. Construct
+	// enterFinalizing commits the shared transaction. Construct
 	// the exact post-transition request from the validated source row rather
 	// than opening a second write or read transaction before its close.
 	updatedRequest := request
@@ -405,7 +405,14 @@ func humanRequestDetail(ctx context.Context, connection *sql.Conn, clientID Brow
 	if err := validateTerminalSessionLease(ctx, connection, run, session); err != nil {
 		return HumanRequestDetail{}, err
 	}
-	target, err := newTerminalTarget(run.ProjectID, run.AgentID, run, session)
+	relationships, err := loadRunRelationships(ctx, connection, run)
+	if err != nil {
+		return HumanRequestDetail{}, err
+	}
+	if !sameTerminalSession(relationships.session, session) {
+		return HumanRequestDetail{}, fmt.Errorf("%w: selected human request terminal session changed", ErrCorruptState)
+	}
+	target, err := newTerminalTarget(run.ProjectID, run.AgentID, run, relationships.session)
 	if err != nil {
 		return HumanRequestDetail{}, err
 	}

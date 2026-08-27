@@ -477,8 +477,8 @@ func TestHumanRequestPublicPrivacyAndDetailBounds(t *testing.T) {
 		t.Fatal("zero expected revision accepted")
 	}
 	target := TerminalTargetDescriptor{RunID: "11111111111111111111111111111111", SessionID: "22222222222222222222222222222222", RunRevision: 8, SessionRevision: 9}
-	action := HumanRequestCancelRunDescriptor{ExpectedRequestRevision: 2, ExpectedRunRevision: 8}
-	authorized := HumanRequestDetail{RequestID: requestID, Revision: 2, Question: "choose", CanReply: true, ReplyMaxBytes: MaxHumanReplyBytes, TerminalTarget: &target, CancelRun: &action}
+	cancelRun := HumanRequestCancelRunDescriptor{ExpectedRequestRevision: 2, ExpectedRunRevision: 8}
+	authorized := HumanRequestDetail{RequestID: requestID, Revision: 2, Question: "choose", CanReply: true, ReplyMaxBytes: MaxHumanReplyBytes, TerminalTarget: &target, CancelRun: &cancelRun}
 	if _, err := EncodeHumanRequestDetail("detail", authorized); err != nil {
 		t.Fatalf("authorized detail = %v", err)
 	}
@@ -491,8 +491,8 @@ func TestHumanRequestPublicPrivacyAndDetailBounds(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			value := authorized
-			copiedTarget, copiedAction := *authorized.TerminalTarget, *authorized.CancelRun
-			value.TerminalTarget, value.CancelRun = &copiedTarget, &copiedAction
+			copiedTarget, copiedCancelRun := *authorized.TerminalTarget, *authorized.CancelRun
+			value.TerminalTarget, value.CancelRun = &copiedTarget, &copiedCancelRun
 			mutate(&value)
 			if _, err := EncodeHumanRequestDetail("detail", value); err == nil {
 				t.Fatalf("inconsistent detail accepted: %+v", value)

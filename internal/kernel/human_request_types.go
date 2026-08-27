@@ -146,11 +146,13 @@ type HumanRequestCancelRun struct {
 	expectedRunRevision     Revision
 }
 
-func (action HumanRequestCancelRun) ExpectedRequestRevision() Revision {
-	return action.expectedRequestRevision
+func (cancelRun HumanRequestCancelRun) ExpectedRequestRevision() Revision {
+	return cancelRun.expectedRequestRevision
 }
 
-func (action HumanRequestCancelRun) ExpectedRunRevision() Revision { return action.expectedRunRevision }
+func (cancelRun HumanRequestCancelRun) ExpectedRunRevision() Revision {
+	return cancelRun.expectedRunRevision
+}
 
 type NewHumanQuestion struct {
 	IdempotencyKey [IDBytes]byte

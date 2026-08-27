@@ -580,7 +580,7 @@ func (store *Store) ProposeAttemptOutcome(ctx context.Context, digest AttemptDig
 	if !found || run.Phase != RunRunning || run.CredentialRevokedAt != nil {
 		return Run{}, tx.Rollback(ErrUnauthorized)
 	}
-	return store.enterFinalizing(ctx, tx, run, run.Revision, proposal, at)
+	return store.enterFinalizing(ctx, tx, run, run.Revision, proposal, at, nil)
 }
 
 // FailRun records a daemon-owned infrastructure failure before or during a
@@ -616,7 +616,7 @@ func (store *Store) FailRun(ctx context.Context, runID RunID, expected Revision,
 	if run.Phase != RunAdmitted && run.Phase != RunRunning {
 		return Run{}, tx.Rollback(ErrConflict)
 	}
-	return store.enterFinalizing(ctx, tx, run, expected, failure, at)
+	return store.enterFinalizing(ctx, tx, run, expected, failure, at, nil)
 }
 
 func (store *Store) CancelRun(ctx context.Context, runID RunID, expected Revision, detail string, at UnixMillis) (Run, error) {
@@ -645,18 +645,10 @@ func (store *Store) CancelRun(ctx context.Context, runID RunID, expected Revisio
 	if run.Phase != RunAdmitted && run.Phase != RunRunning {
 		return Run{}, tx.Rollback(ErrConflict)
 	}
-	return store.enterFinalizing(ctx, tx, run, expected, proposal, at)
+	return store.enterFinalizing(ctx, tx, run, expected, proposal, at, nil)
 }
 
-func (store *Store) enterFinalizing(ctx context.Context, tx *writeTx, run Run, expected Revision, proposal Proposal, at UnixMillis) (Run, error) {
-	return store.enterFinalizingWithHumanRequestCancel(ctx, tx, run, expected, proposal, at, nil)
-}
-
-func (store *Store) enterFinalizingForHumanRequestCancel(ctx context.Context, tx *writeTx, run Run, expected Revision, proposal Proposal, at UnixMillis, requestID HumanRequestID) (Run, error) {
-	return store.enterFinalizingWithHumanRequestCancel(ctx, tx, run, expected, proposal, at, &requestID)
-}
-
-func (store *Store) enterFinalizingWithHumanRequestCancel(ctx context.Context, tx *writeTx, run Run, expected Revision, proposal Proposal, at UnixMillis, cancelRequest *HumanRequestID) (Run, error) {
+func (store *Store) enterFinalizing(ctx context.Context, tx *writeTx, run Run, expected Revision, proposal Proposal, at UnixMillis, cancelRequest *HumanRequestID) (Run, error) {
 	if run.Revision != expected || at.Int64() < run.UpdatedAt.Int64() {
 		return Run{}, tx.Rollback(ErrRevisionConflict)
 	}

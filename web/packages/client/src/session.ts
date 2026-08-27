@@ -122,7 +122,7 @@ type HumanPending = {
   reject: (error: unknown) => void;
 };
 
-export type HumanRequestCancelRunAction = Readonly<{
+export type HumanRequestCancelRunDescriptor = Readonly<{
   requestId: string;
   expectedRequestRevision: bigint;
   expectedRunRevision: bigint;
@@ -135,7 +135,7 @@ export type HumanRequestDetail = Readonly<{
   canReply: boolean;
   replyMaxBytes: number;
   terminalTarget: Readonly<TerminalTargetDescriptor> | null;
-  cancelRun: HumanRequestCancelRunAction | null;
+  cancelRun: HumanRequestCancelRunDescriptor | null;
 }>;
 
 export type HumanReplyResult = Readonly<HumanRequestReplyResultBody>;
@@ -171,7 +171,7 @@ export class BrowserSession {
   #terminalHandles = new Set<TerminalHandle>();
   #humanPending = new Map<string, HumanPending>();
   #humanDetails = new WeakSet<HumanRequestDetail>();
-  #humanActions = new WeakMap<HumanRequestCancelRunAction, { detail: HumanRequestDetail; requestId: string; runId: string; expectedRequestRevision: bigint; expectedRunRevision: bigint }>();
+  #humanCancelRuns = new WeakMap<HumanRequestCancelRunDescriptor, { detail: HumanRequestDetail; runId: string }>();
 
   constructor(options: BrowserSessionOptions) {
     this.#options = { ...options, keyStore: options.keyStore ?? createIndexedDBKeyStore() };
@@ -213,28 +213,29 @@ export class BrowserSession {
     try { this.#ensureHumanOperation(detail.requestId); } catch (error) { return Promise.reject(error); }
     if ((this.#capabilities & CAPABILITIES.human_actions) === 0) return Promise.reject(new SessionError("unauthorized"));
     if (!this.#humanDetails.has(detail) || !detail.canReply || detail.terminalTarget === null || detail.cancelRun === null) return Promise.reject(new SessionError("stale"));
-    if (new TextEncoder().encode(reply).length < 1 || new TextEncoder().encode(reply).length > detail.replyMaxBytes || detail.replyMaxBytes !== MAX_HUMAN_REPLY_BYTES) return Promise.reject(new SessionError("invalid_request"));
+    const replyBytes = new TextEncoder().encode(reply).length;
+    if (replyBytes < 1 || replyBytes > detail.replyMaxBytes || detail.replyMaxBytes !== MAX_HUMAN_REPLY_BYTES) return Promise.reject(new SessionError("invalid_request"));
     if (detail.revision > MAX_SQLITE_INTEGER - 2n) return Promise.reject(new SessionError("stale"));
     const id = this.#nextID("human-reply");
     let payload: string;
     try { payload = encodeHumanRequestReply(id, { request_id: detail.requestId, expected_revision: detail.revision, reply }); } catch (error) { return Promise.reject(error); }
     this.#humanDetails.delete(detail);
-    this.#humanActions.delete(detail.cancelRun);
+    this.#humanCancelRuns.delete(detail.cancelRun);
     return this.#humanRequest<HumanReplyResult>(id, { kind: "reply", requestId: detail.requestId, expectedRevision: detail.revision, expectedRunRevision: 0n }, payload);
   }
 
-  cancelHumanRequest(action: HumanRequestCancelRunAction): Promise<HumanCancelRunResult> {
-    const authority = this.#humanActions.get(action);
-    if (authority === undefined || authority.requestId !== action.requestId || authority.expectedRequestRevision !== action.expectedRequestRevision || authority.expectedRunRevision !== action.expectedRunRevision) return Promise.reject(new SessionError("stale"));
-    try { this.#ensureHumanOperation(authority.requestId); } catch (error) { return Promise.reject(error); }
+  cancelHumanRequest(cancelRun: HumanRequestCancelRunDescriptor): Promise<HumanCancelRunResult> {
+    const authority = this.#humanCancelRuns.get(cancelRun);
+    if (authority === undefined) return Promise.reject(new SessionError("stale"));
+    try { this.#ensureHumanOperation(cancelRun.requestId); } catch (error) { return Promise.reject(error); }
     if ((this.#capabilities & CAPABILITIES.human_actions) === 0) return Promise.reject(new SessionError("unauthorized"));
-    if (action.expectedRequestRevision > MAX_SQLITE_INTEGER - 1n || action.expectedRunRevision > MAX_SQLITE_INTEGER - 1n) return Promise.reject(new SessionError("stale"));
+    if (cancelRun.expectedRequestRevision > MAX_SQLITE_INTEGER - 1n || cancelRun.expectedRunRevision > MAX_SQLITE_INTEGER - 1n) return Promise.reject(new SessionError("stale"));
     const id = this.#nextID("human-cancel");
     let payload: string;
-    try { payload = encodeHumanRequestCancelRun(id, { request_id: action.requestId, expected_request_revision: action.expectedRequestRevision, expected_run_revision: action.expectedRunRevision }); } catch (error) { return Promise.reject(error); }
-    this.#humanActions.delete(action);
+    try { payload = encodeHumanRequestCancelRun(id, { request_id: cancelRun.requestId, expected_request_revision: cancelRun.expectedRequestRevision, expected_run_revision: cancelRun.expectedRunRevision }); } catch (error) { return Promise.reject(error); }
+    this.#humanCancelRuns.delete(cancelRun);
     this.#humanDetails.delete(authority.detail);
-    return this.#humanRequest<HumanCancelRunResult>(id, { kind: "cancel", requestId: action.requestId, expectedRevision: action.expectedRequestRevision, expectedRunRevision: action.expectedRunRevision, runId: authority.runId }, payload);
+    return this.#humanRequest<HumanCancelRunResult>(id, { kind: "cancel", requestId: cancelRun.requestId, expectedRevision: cancelRun.expectedRequestRevision, expectedRunRevision: cancelRun.expectedRunRevision, runId: authority.runId }, payload);
   }
 
   connect(): Promise<void> {
@@ -618,10 +619,10 @@ export class BrowserSession {
     if (frame.type === "HUMAN_REQUEST_DETAIL") {
       if (frame.body.revision !== pending.expectedRevision) throw new ProtocolError("malformed");
       const terminalTarget = frame.body.terminal_target === null ? null : Object.freeze({ ...frame.body.terminal_target });
-      let action: HumanRequestCancelRunAction | null = null;
+      let cancelRun: HumanRequestCancelRunDescriptor | null = null;
       if (frame.body.cancel_run !== null) {
         if (terminalTarget === null) throw new ProtocolError("malformed");
-        action = Object.freeze({
+        cancelRun = Object.freeze({
           requestId: frame.body.request_id,
           expectedRequestRevision: frame.body.cancel_run.expected_request_revision,
           expectedRunRevision: frame.body.cancel_run.expected_run_revision,
@@ -634,10 +635,10 @@ export class BrowserSession {
         canReply: frame.body.can_reply,
         replyMaxBytes: frame.body.reply_max_bytes,
         terminalTarget,
-        cancelRun: action,
+        cancelRun,
       });
       this.#humanDetails.add(detail);
-      if (action !== null && terminalTarget !== null) this.#humanActions.set(action, { detail, requestId: action.requestId, runId: terminalTarget.run_id, expectedRequestRevision: action.expectedRequestRevision, expectedRunRevision: action.expectedRunRevision });
+      if (cancelRun !== null && terminalTarget !== null) this.#humanCancelRuns.set(cancelRun, { detail, runId: terminalTarget.run_id });
       this.#humanPending.delete(frame.id);
       pending.resolve(detail);
       return;

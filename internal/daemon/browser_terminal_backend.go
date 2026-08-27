@@ -12,7 +12,7 @@ import (
 
 // ErrHumanRequestOwnerFence reports that the durable cancel committed but the
 // live owner did not positively acknowledge the follow-up input fence. The
-// action is intentionally not retryable: its durable request/run transition
+// cancellation is intentionally not retryable: its durable request/run transition
 // remains authoritative while the owner is converged through its close path.
 var ErrHumanRequestOwnerFence = errors.New("daemon: human request owner fence uncertain")
 
@@ -198,14 +198,14 @@ func (daemon *Daemon) cancelHumanRequestRun(ctx context.Context, clientID kernel
 		return kernel.Run{}, kernel.HumanRequest{}, err
 	}
 	// Durable revocation is authoritative. The owner-side generation fence is
-	// checked after that commit; failure is visible but never turns the action
+	// checked after that commit; failure is visible but never turns cancellation
 	// into a retry.
 	daemon.attemptMu.Lock()
 	attempt := daemon.attempts[run.ID]
 	daemon.attemptMu.Unlock()
 	if attempt != nil && terminalEffectsSupported {
 		fenceCtx, cancel := context.WithTimeout(context.Background(), liveAttemptEffectLimit)
-		fence := attempt.submitEffect(fenceCtx, terminalEffect{kind: terminalEffectRevokeClient, client: clientID})
+		fence := attempt.submitEffect(fenceCtx, terminalEffect{kind: terminalEffectRevokeCurrentBinding})
 		cancel()
 		if fenceErr := fence.effectError(-1); fenceErr != nil && !fence.terminalFence {
 			// The transaction above already revoked the durable generation and

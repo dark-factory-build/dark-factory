@@ -296,7 +296,7 @@ func (attempt *liveAttempt) handleTerminalEffect(effect terminalEffect) (termina
 		// Provider exit is already a stronger runner-input fence than a
 		// generation revoke. Cleanup may therefore converge durable state without
 		// replacing the controller before the supervisor acknowledges this exit.
-		if effect.kind == terminalEffectRevoke || effect.kind == terminalEffectRevokeClient {
+		if effect.kind == terminalEffectRevoke || effect.kind == terminalEffectRevokeClient || effect.kind == terminalEffectRevokeCurrentBinding {
 			return terminalEffectResult{status: runner.TerminalResultOK, terminalFence: true}, nil
 		}
 		return terminalEffectResult{status: runner.TerminalResultRejected, terminalFence: true, err: ErrTerminalNotReady}, nil
@@ -394,6 +394,13 @@ func (attempt *liveAttempt) handleTerminalEffect(effect terminalEffect) (termina
 		return attempt.runTerminalEffect(runner.TerminalCommand{Kind: runner.TerminalHumanReply, Payload: append([]byte(nil), effect.payload...)})
 	case terminalEffectRevokeClient:
 		if attempt.binding == (terminalBinding{}) || attempt.binding.client != effect.client {
+			return terminalEffectResult{status: runner.TerminalResultOK}, nil
+		}
+		generation := attempt.binding.generation + 1
+		attempt.binding = terminalBinding{}
+		return attempt.runTerminalEffect(runner.TerminalCommand{Kind: runner.TerminalGenerationRevoke, Generation: generation})
+	case terminalEffectRevokeCurrentBinding:
+		if attempt.binding == (terminalBinding{}) {
 			return terminalEffectResult{status: runner.TerminalResultOK}, nil
 		}
 		generation := attempt.binding.generation + 1

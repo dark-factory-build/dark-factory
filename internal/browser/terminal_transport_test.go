@@ -28,7 +28,7 @@ type terminalTestBackend struct {
 	input                                       TerminalInputRequest
 	inputCalls                                  int
 	replyResult                                 browserprotocol.HumanRequestReplyResult
-	actionResult                                browserprotocol.HumanRequestCancelRunResult
+	cancelResult                                browserprotocol.HumanRequestCancelRunResult
 	leaseResult                                 TerminalLeaseResult
 }
 
@@ -135,7 +135,7 @@ func (backend *terminalTestBackend) ReplyHumanRequest(context.Context, Principal
 	return backend.replyResult, nil
 }
 func (backend *terminalTestBackend) CancelHumanRequestRun(context.Context, Principal, browserprotocol.HumanRequestCancelRun) (browserprotocol.HumanRequestCancelRunResult, error) {
-	return backend.actionResult, nil
+	return backend.cancelResult, nil
 }
 
 func authenticateTerminalTest(t *testing.T, connection *websocket.Conn) browserprotocol.AuthResult {
@@ -571,7 +571,7 @@ func TestTerminalTransportHumanRequestEffectDispatch(t *testing.T) {
 	backend := newTerminalTestBackend()
 	backend.authentication.Capabilities = browserprotocol.CapabilityObserve | browserprotocol.CapabilityHumanActions
 	backend.replyResult = browserprotocol.HumanRequestReplyResult{RequestID: requestID, Revision: 3, Status: "resolved"}
-	backend.actionResult = browserprotocol.HumanRequestCancelRunResult{RunID: testID, RunRevision: 3, RequestID: requestID, RequestRevision: 2}
+	backend.cancelResult = browserprotocol.HumanRequestCancelRunResult{RunID: testID, RunRevision: 3, RequestID: requestID, RequestRevision: 2}
 	server := startTerminalServer(t, backend)
 	connection, _ := dialServer(t, server, testOrigin)
 	authenticateTerminalTest(t, connection)
@@ -640,12 +640,12 @@ func TestTerminalTransportRejectsMismatchedHumanEffectResults(t *testing.T) {
 			},
 		},
 		{
-			name: "action request id",
+			name: "cancel request id",
 			configure: func(backend *terminalTestBackend) {
-				backend.actionResult = browserprotocol.HumanRequestCancelRunResult{RunID: testID, RunRevision: 3, RequestID: testID, RequestRevision: 2}
+				backend.cancelResult = browserprotocol.HumanRequestCancelRunResult{RunID: testID, RunRevision: 3, RequestID: testID, RequestRevision: 2}
 			},
 			write: func(t *testing.T, connection *websocket.Conn) {
-				payload, err := browserprotocol.EncodeHumanRequestCancelRun("action-request", browserprotocol.HumanRequestCancelRun{RequestID: requestID, ExpectedRequestRevision: 1, ExpectedRunRevision: 2})
+				payload, err := browserprotocol.EncodeHumanRequestCancelRun("cancel-request", browserprotocol.HumanRequestCancelRun{RequestID: requestID, ExpectedRequestRevision: 1, ExpectedRunRevision: 2})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -653,12 +653,12 @@ func TestTerminalTransportRejectsMismatchedHumanEffectResults(t *testing.T) {
 			},
 		},
 		{
-			name: "action revisions",
+			name: "cancel revisions",
 			configure: func(backend *terminalTestBackend) {
-				backend.actionResult = browserprotocol.HumanRequestCancelRunResult{RunID: testID, RunRevision: 2, RequestID: requestID, RequestRevision: 1}
+				backend.cancelResult = browserprotocol.HumanRequestCancelRunResult{RunID: testID, RunRevision: 2, RequestID: requestID, RequestRevision: 1}
 			},
 			write: func(t *testing.T, connection *websocket.Conn) {
-				payload, err := browserprotocol.EncodeHumanRequestCancelRun("action-revisions", browserprotocol.HumanRequestCancelRun{RequestID: requestID, ExpectedRequestRevision: 1, ExpectedRunRevision: 2})
+				payload, err := browserprotocol.EncodeHumanRequestCancelRun("cancel-revisions", browserprotocol.HumanRequestCancelRun{RequestID: requestID, ExpectedRequestRevision: 1, ExpectedRunRevision: 2})
 				if err != nil {
 					t.Fatal(err)
 				}

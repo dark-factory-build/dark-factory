@@ -69,8 +69,8 @@ export type StateEntityBody =
   | { head: bigint; kind: "task"; id: string; revision: bigint; deleted: false; item: TaskItem }
   | { head: bigint; kind: "human_request"; id: string; revision: bigint; deleted: false; item: HumanRequestItem };
 export type HumanRequestDetailGetBody = { request_id: string; expected_revision: bigint };
-export type HumanRequestCancelRunDescriptor = { expected_request_revision: bigint; expected_run_revision: bigint };
-export type HumanRequestDetailBody = { request_id: string; revision: bigint; question: string; can_reply: boolean; reply_max_bytes: number; terminal_target: TerminalTargetDescriptor | null; cancel_run: HumanRequestCancelRunDescriptor | null };
+type HumanRequestCancelRunDetail = { expected_request_revision: bigint; expected_run_revision: bigint };
+export type HumanRequestDetailBody = { request_id: string; revision: bigint; question: string; can_reply: boolean; reply_max_bytes: number; terminal_target: TerminalTargetDescriptor | null; cancel_run: HumanRequestCancelRunDetail | null };
 export type HumanRequestReplyBody = { request_id: string; expected_revision: bigint; reply: string };
 export type HumanRequestReplyResultBody = { request_id: string; revision: bigint; status: "resolved" | "delivery_unknown" };
 export type HumanRequestCancelRunBody = { request_id: string; expected_request_revision: bigint; expected_run_revision: bigint };
@@ -257,7 +257,7 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
       if (typeof body.can_reply !== "boolean") malformed();
       const can_reply = body.can_reply; const reply_max_bytes = integer(body.reply_max_bytes, MAX_HUMAN_REPLY_BYTES, MAX_HUMAN_REPLY_BYTES);
       const terminal_target = body.terminal_target === null ? null : terminalTargetDescriptor(body.terminal_target, wire);
-      let cancel_run: HumanRequestCancelRunDescriptor | null = null;
+      let cancel_run: HumanRequestCancelRunDetail | null = null;
       if (body.cancel_run !== null) {
         if (!isObject(body.cancel_run)) malformed();
         exactKeys(body.cancel_run, ["expected_request_revision", "expected_run_revision"]);

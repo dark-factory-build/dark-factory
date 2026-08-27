@@ -19,10 +19,10 @@ func TestHumanRequestDetailProjectsExactTargetAndCapabilityBoundAuthority(t *tes
 	if err != nil || detail.TerminalTarget == nil || detail.TerminalTarget.RunID() != run.ID || detail.CanReply || detail.CancelRun != nil || detail.ReplyMaxBytes != MaxHumanRequestReplyBytes {
 		t.Fatalf("private-only detail = %+v, err=%v", detail, err)
 	}
-	actions := humanQuestionClient(t, store, 182, BrowserCapabilityObserve|BrowserCapabilityPrivateHumanRequestDetail|BrowserCapabilityHumanActions)
-	detail, err = store.HumanRequestDetail(ctx, actions.ID, request.ID, request.Revision)
+	cancelClient := humanQuestionClient(t, store, 182, BrowserCapabilityObserve|BrowserCapabilityPrivateHumanRequestDetail|BrowserCapabilityHumanActions)
+	detail, err = store.HumanRequestDetail(ctx, cancelClient.ID, request.ID, request.Revision)
 	if err != nil || detail.TerminalTarget == nil || !detail.CanReply || detail.CancelRun == nil || detail.CancelRun.ExpectedRequestRevision() != request.Revision || detail.CancelRun.ExpectedRunRevision() != run.Revision {
-		t.Fatalf("action detail = %+v, err=%v", detail, err)
+		t.Fatalf("cancel detail = %+v, err=%v", detail, err)
 	}
 }
 
@@ -81,6 +81,59 @@ func TestHumanRequestDetailMissingSessionIsUnavailableAndCorruptFailsClosed(t *t
 				}
 			} else if err != nil || detail.TerminalTarget != nil || detail.CanReply || detail.CancelRun != nil {
 				t.Fatalf("missing-session detail = %+v, err=%v", detail, err)
+			}
+		})
+	}
+}
+
+func TestHumanRequestDetailRejectsCorruptActiveRunRelationships(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		prepare func(*testing.T, *Store, Run)
+		mutate  string
+		args    func(Run) []any
+	}{
+		{
+			name:   "terminal activation differs from run",
+			mutate: `UPDATE terminal_sessions SET activated_at_ms = activated_at_ms - 1 WHERE run_id = ?`,
+			args:   func(run Run) []any { return []any{run.ID.Bytes()} },
+		},
+		{
+			name:   "terminal update exceeds run",
+			mutate: `UPDATE terminal_sessions SET updated_at_ms = updated_at_ms + 1 WHERE run_id = ?`,
+			args:   func(run Run) []any { return []any{run.ID.Bytes()} },
+		},
+		{
+			name: "task assigned agent differs from run",
+			prepare: func(t *testing.T, store *Store, run Run) {
+				if _, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 253), ProjectID: run.ProjectID, Name: "different", Role: RoleOrchestrator, Provider: ProviderCodex, ExecutionMode: ExecutionWorkspaceWrite, ToolBudgetLimit: 2}, mustTime(t, 399)); err != nil {
+					t.Fatal(err)
+				}
+			},
+			mutate: `UPDATE tasks SET assigned_agent_id = ? WHERE id = ?`,
+			args:   func(run Run) []any { return []any{agentID(t, 253).Bytes(), run.TaskID.Bytes()} },
+		},
+		{
+			name:   "provider resource identity is not atomic",
+			mutate: `UPDATE resources SET pgid = pgid + 1 WHERE run_id = ? AND kind = 'provider_group'`,
+			args:   func(run Run) []any { return []any{run.ID.Bytes()} },
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, run, _ := runningOrchestratorRun(t)
+			defer store.Close()
+			if test.prepare != nil {
+				test.prepare(t, store, run)
+			}
+			client := humanQuestionClient(t, store, 191, BrowserCapabilityObserve|BrowserCapabilityPrivateHumanRequestDetail|BrowserCapabilityHumanActions)
+			request, err := store.CreateHumanQuestionForAttempt(context.Background(), run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(191), QuestionText: "private"}, mustTime(t, 400))
+			if err != nil {
+				t.Fatal(err)
+			}
+			corruptSQL(t, store, test.mutate, test.args(run)...)
+			detail, err := store.HumanRequestDetail(context.Background(), client.ID, request.ID, request.Revision)
+			if !errors.Is(err, ErrCorruptState) || detail != (HumanRequestDetail{}) {
+				t.Fatalf("corrupt active detail = %+v, err=%v", detail, err)
 			}
 		})
 	}

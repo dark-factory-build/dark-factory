@@ -3,7 +3,11 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -149,6 +153,27 @@ func terminalEffectPrincipal(client kernel.BrowserClientID, seed byte) browser.P
 	}
 	raw[kernel.IDBytes-1] ^= 0x5a
 	return principal
+}
+
+func newTerminalEffectClient(t *testing.T, fixture *terminalEffectFixture, seed byte, capabilities kernel.BrowserCapabilityMask) kernel.BrowserClient {
+	t.Helper()
+	challenge := bytes.Repeat([]byte{seed}, browserprotocol.ChallengeSize)
+	if _, err := fixture.adapter.store.CreateBrowserPairingChallenge(context.Background(), kernel.HashBrowserChallenge(challenge), fixture.adapter.backend.boot, adapterOrigin, capabilities, adapterTime(t, 2_000), adapterTime(t, 3_000)); err != nil {
+		t.Fatal(err)
+	}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientID, err := kernel.BrowserClientIDFromBytes(adapterID(t, seed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := fixture.adapter.store.RedeemBrowserPairingChallenge(context.Background(), kernel.HashBrowserChallenge(challenge), fixture.adapter.backend.boot, adapterOrigin, clientID, elliptic.Marshal(elliptic.P256(), key.X, key.Y), adapterTime(t, 2_000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return client
 }
 
 func readTerminalEffectWire(t *testing.T, peer *os.File) terminalEffectWireFrame {
@@ -943,6 +968,10 @@ func TestCancelHumanRequestSurfacesOwnerFenceFailureAfterCommit(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newTerminalEffectFixture(t)
 			lease := fixture.acquire(t, fixture.principal)
+			cancellingClient := newTerminalEffectClient(t, fixture, 222, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityHumanActions)
+			if !sameTerminalBinding(fixture.attempt.binding, fixture.adapter.client.ID, fixture.principal.ConnectionID, lease.Generation) || cancellingClient.ID == fixture.adapter.client.ID {
+				t.Fatalf("pre-cancel binding = %+v, cancelling client=%v", fixture.attempt.binding, cancellingClient.ID)
+			}
 			var key [kernel.IDBytes]byte
 			copy(key[:], adapterID(t, 220))
 			request, err := fixture.adapter.store.CreateHumanQuestionForAttempt(context.Background(), fixture.run.CredentialDigest, kernel.NewHumanQuestion{IdempotencyKey: key, QuestionText: "cancel"}, adapterTime(t, 2_000))
@@ -955,11 +984,11 @@ func TestCancelHumanRequestSurfacesOwnerFenceFailureAfterCommit(t *testing.T) {
 			}
 			done := make(chan error, 1)
 			go func() {
-				_, _, cancelErr := fixture.adapter.daemon.cancelHumanRequestRun(context.Background(), fixture.adapter.client.ID, request.ID, request.Revision, currentRun.Revision, adapterTime(t, 2_001))
+				_, _, cancelErr := fixture.adapter.daemon.cancelHumanRequestRun(context.Background(), cancellingClient.ID, request.ID, request.Revision, currentRun.Revision, adapterTime(t, 2_001))
 				done <- cancelErr
 			}()
 			revoke := readTerminalEffectWire(t, fixture.peer)
-			if revoke.Kind != string(runner.TerminalGenerationRevoke) || revoke.Generation <= lease.Generation {
+			if revoke.Kind != string(runner.TerminalGenerationRevoke) || revoke.Generation != lease.Generation+1 {
 				t.Fatalf("cancel owner fence = %+v", revoke)
 			}
 			replyTerminalEffect(t, fixture.peer, revoke, test.status, 0)
@@ -974,13 +1003,76 @@ func TestCancelHumanRequestSurfacesOwnerFenceFailureAfterCommit(t *testing.T) {
 			if err != nil || !found || resolved.Status != kernel.HumanRequestResolved {
 				t.Fatalf("durable cancel request = %+v, found=%v, err=%v", resolved, found, err)
 			}
-			if _, _, duplicateErr := fixture.adapter.daemon.cancelHumanRequestRun(context.Background(), fixture.adapter.client.ID, request.ID, request.Revision, currentRun.Revision, adapterTime(t, 2_002)); !errors.Is(duplicateErr, kernel.ErrRevisionConflict) {
+			session, found, err := fixture.adapter.store.TerminalSession(context.Background(), fixture.session.ID)
+			if err != nil || !found || session.LeaseClientID != nil || session.LeaseGeneration != lease.Generation+1 {
+				t.Fatalf("durable cancel input revoke = %+v, found=%v, err=%v", session, found, err)
+			}
+			if _, _, duplicateErr := fixture.adapter.daemon.cancelHumanRequestRun(context.Background(), cancellingClient.ID, request.ID, request.Revision, currentRun.Revision, adapterTime(t, 2_002)); !errors.Is(duplicateErr, kernel.ErrRevisionConflict) {
 				t.Fatalf("duplicate cancel = %v", duplicateErr)
 			}
 			if !fixture.attempt.controllerClosed {
 				t.Fatal("owner was not closed after an unacknowledged fence")
 			}
 		})
+	}
+}
+
+func TestCancelHumanRequestWithoutLiveBindingIsDefinitiveSuccess(t *testing.T) {
+	fixture := newTerminalEffectFixture(t)
+	var key [kernel.IDBytes]byte
+	copy(key[:], adapterID(t, 223))
+	request, err := fixture.adapter.store.CreateHumanQuestionForAttempt(context.Background(), fixture.run.CredentialDigest, kernel.NewHumanQuestion{IdempotencyKey: key, QuestionText: "cancel without binding"}, adapterTime(t, 2_000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentRun, found, err := fixture.adapter.store.Run(context.Background(), fixture.run.ID)
+	if err != nil || !found {
+		t.Fatalf("current run = %+v, found=%v, err=%v", currentRun, found, err)
+	}
+	updatedRun, resolved, err := fixture.adapter.daemon.cancelHumanRequestRun(context.Background(), fixture.adapter.client.ID, request.ID, request.Revision, currentRun.Revision, adapterTime(t, 2_001))
+	if err != nil || updatedRun.Phase != kernel.RunFinalizing || resolved.Status != kernel.HumanRequestResolved {
+		t.Fatalf("cancel without binding = run %+v, request %+v, err=%v", updatedRun, resolved, err)
+	}
+	expectNoTerminalEffectWire(t, fixture.peer)
+}
+
+func TestCancelHumanRequestSurfacesControllerFailureAfterCommit(t *testing.T) {
+	fixture := newTerminalEffectFixture(t)
+	fixture.acquire(t, fixture.principal)
+	cancellingClient := newTerminalEffectClient(t, fixture, 224, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityHumanActions)
+	var key [kernel.IDBytes]byte
+	copy(key[:], adapterID(t, 225))
+	request, err := fixture.adapter.store.CreateHumanQuestionForAttempt(context.Background(), fixture.run.CredentialDigest, kernel.NewHumanQuestion{IdempotencyKey: key, QuestionText: "cancel after controller loss"}, adapterTime(t, 2_000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentRun, found, err := fixture.adapter.store.Run(context.Background(), fixture.run.ID)
+	if err != nil || !found {
+		t.Fatalf("current run = %+v, found=%v, err=%v", currentRun, found, err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, _, cancelErr := fixture.adapter.daemon.cancelHumanRequestRun(context.Background(), cancellingClient.ID, request.ID, request.Revision, currentRun.Revision, adapterTime(t, 2_001))
+		done <- cancelErr
+	}()
+	revoke := readTerminalEffectWire(t, fixture.peer)
+	if revoke.Kind != string(runner.TerminalGenerationRevoke) {
+		t.Fatalf("controller-failure revoke = %+v", revoke)
+	}
+	if err := fixture.peer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cancelErr := <-done
+	if !errors.Is(cancelErr, ErrHumanRequestOwnerFence) {
+		t.Fatalf("controller failure = %v", cancelErr)
+	}
+	observedRun, found, err := fixture.adapter.store.Run(context.Background(), fixture.run.ID)
+	if err != nil || !found || observedRun.Phase != kernel.RunFinalizing {
+		t.Fatalf("durable controller-failure run = %+v, found=%v, err=%v", observedRun, found, err)
+	}
+	resolved, found, err := fixture.adapter.store.HumanRequest(context.Background(), request.ID)
+	if err != nil || !found || resolved.Status != kernel.HumanRequestResolved {
+		t.Fatalf("durable controller-failure request = %+v, found=%v, err=%v", resolved, found, err)
 	}
 }
 

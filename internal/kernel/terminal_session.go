@@ -112,6 +112,16 @@ func terminalSessionByRunID(ctx context.Context, connection *sql.Conn, id RunID)
 	return session, true, nil
 }
 
+func sameTerminalSession(left, right TerminalSession) bool {
+	if left.ID != right.ID || left.RunID != right.RunID || left.State != right.State || left.UnresolvedReason != right.UnresolvedReason || left.Revision != right.Revision || left.DeclaredAt != right.DeclaredAt || left.UpdatedAt != right.UpdatedAt || left.LeaseGeneration != right.LeaseGeneration || left.LastInputSequence != right.LastInputSequence {
+		return false
+	}
+	if (left.ActivatedAt == nil) != (right.ActivatedAt == nil) || left.ActivatedAt != nil && *left.ActivatedAt != *right.ActivatedAt || (left.ClosedAt == nil) != (right.ClosedAt == nil) || left.ClosedAt != nil && *left.ClosedAt != *right.ClosedAt || (left.LeaseClientID == nil) != (right.LeaseClientID == nil) || left.LeaseClientID != nil && *left.LeaseClientID != *right.LeaseClientID || (left.LeaseExpiresAt == nil) != (right.LeaseExpiresAt == nil) || left.LeaseExpiresAt != nil && *left.LeaseExpiresAt != *right.LeaseExpiresAt {
+		return false
+	}
+	return true
+}
+
 func (store *Store) TerminalSession(ctx context.Context, id TerminalSessionID) (TerminalSession, bool, error) {
 	tx, err := store.beginRead(ctx)
 	if err != nil {

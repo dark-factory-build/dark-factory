@@ -34,6 +34,7 @@ const (
 	terminalEffectResize
 	terminalEffectHumanReply
 	terminalEffectRevokeClient
+	terminalEffectRevokeCurrentBinding
 )
 
 type terminalBinding struct {

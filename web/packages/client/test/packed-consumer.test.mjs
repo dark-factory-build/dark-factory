@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { dirname } from "node:path";
@@ -21,4 +21,11 @@ test("packed client is importable by a clean consumer through package exports", 
   } finally {
     rmSync(consumer, { recursive: true, force: true });
   }
+});
+
+test("published declarations expose only the concrete HumanRequest cancel descriptor", () => {
+  const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const declaration = readFileSync(join(packageRoot, "dist", "src", "session.d.ts"), "utf8");
+  assert.match(declaration, /export type HumanRequestCancelRunDescriptor =/);
+  assert.doesNotMatch(declaration, /HumanRequestCancelRunAction/);
 });
