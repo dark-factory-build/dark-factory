@@ -143,7 +143,91 @@ func TestTypedTerminalTerminateIsNotStarvedByUnreadDaemonReadiness(t *testing.T)
 	ready := filepath.Join(f.root, "terminal-owner-ready")
 	child := startLivePTYChild(t, f, ready)
 	installOwnedChildSafetyCleanup(t, child)
+	unread := newUnreadTerminalOwner(t, child)
+	started := time.Now()
+	err := unread.owner.command(attemptFrame{Version: 1, Kind: "terminate"})
+	elapsed := time.Since(started)
+	unread.cancelRelease()
+	if err != nil {
+		t.Fatalf("typed terminal termination: %v", err)
+	}
+	if elapsed >= 600*time.Millisecond {
+		t.Fatalf("typed terminal termination starved behind unread daemon readiness for %s", elapsed)
+	}
+	if !unread.owner.stopRequested {
+		t.Fatal("terminal owner did not commit its typed stop transition")
+	}
+	exit, err := child.waitedExit()
+	if err != nil || exit.Signal != int(unix.SIGTERM) {
+		t.Fatalf("terminal evidence=%+v err=%v", exit, err)
+	}
+	if err := unread.reads.removeDaemon(); err != nil {
+		t.Fatal(err)
+	}
+	assertWaitedAndAbsent(t, child)
+}
 
+func TestTypedTerminalResizeIsNotStarvedByUnreadDaemonReadiness(t *testing.T) {
+	f := newFixture(t)
+	ready := filepath.Join(f.root, "terminal-resize-ready")
+	child := startLivePTYChild(t, f, ready)
+	installOwnedChildSafetyCleanup(t, child)
+	for _, dimensions := range [][2]int{{0, 24}, {80, 0}, {maxPTYDimension + 1, 24}, {80, maxPTYDimension + 1}} {
+		if err := child.resizePTYOwned(dimensions[0], dimensions[1]); !errors.Is(err, ErrState) {
+			t.Fatalf("owner resize %dx%d error=%v, want ErrState", dimensions[0], dimensions[1], err)
+		}
+	}
+
+	unread := newUnreadTerminalOwner(t, child)
+	unread.owner.inputActive = true
+	unread.owner.generation = 7
+	want := TerminalCommand{Kind: TerminalResize, Correlation: 31, Generation: 7, Rows: 43, Cols: 132}
+	started := time.Now()
+	err := unread.owner.command(terminalCommandFrame(want))
+	elapsed := time.Since(started)
+	unread.cancelRelease()
+	if err != nil {
+		t.Fatalf("typed terminal resize: %v", err)
+	}
+	if elapsed >= 600*time.Millisecond {
+		t.Fatalf("typed terminal resize starved behind unread daemon readiness for %s", elapsed)
+	}
+	if err := unread.peer.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var raw attemptFrame
+	if err := readFrame(unread.peer, &raw, maxFrameBytes); err != nil {
+		t.Fatal(err)
+	}
+	got, err := terminalEventFromFrame(raw)
+	if err != nil || got.Kind != TerminalResizeResult || got.Correlation != want.Correlation || got.Generation != want.Generation || got.Rows != want.Rows || got.Cols != want.Cols || got.Status != TerminalResultOK {
+		t.Fatalf("resize result=%+v err=%v", got, err)
+	}
+	size, err := unix.IoctlGetWinsize(int(child.ptyMaster.Fd()), unix.TIOCGWINSZ)
+	if err != nil || size.Row != want.Rows || size.Col != want.Cols {
+		t.Fatalf("owned PTY size=%+v err=%v", size, err)
+	}
+	if err := unread.owner.command(attemptFrame{Version: 1, Kind: "terminate"}); err != nil {
+		t.Fatalf("owner stopped responding after resize: %v", err)
+	}
+	if err := unread.reads.removeDaemon(); err != nil {
+		t.Fatal(err)
+	}
+	if err := child.resizePTYOwned(80, 24); !errors.Is(err, ErrState) {
+		t.Fatalf("post-Wait owner resize error=%v, want ErrState", err)
+	}
+	assertWaitedAndAbsent(t, child)
+}
+
+type unreadTerminalOwner struct {
+	owner         terminalOwner
+	reads         *attemptReadSet
+	peer          *os.File
+	cancelRelease func()
+}
+
+func newUnreadTerminalOwner(t *testing.T, child *OwnedChild) *unreadTerminalOwner {
+	t.Helper()
 	daemon, peer, err := newControlPair("unread-daemon", "unread-daemon-peer")
 	if err != nil {
 		t.Fatal(err)
@@ -164,30 +248,12 @@ func TestTypedTerminalTerminateIsNotStarvedByUnreadDaemonReadiness(t *testing.T)
 		t.Fatal(err)
 	}
 	assertLevelTriggeredReadiness(t, child.kq, int(daemon.Fd()))
-	cancelRelease := releaseUnreadReadinessAfter(t, daemon, 1200*time.Millisecond)
-
-	owner := terminalOwner{child: child, daemon: daemon, reads: reads, daemonOpen: true, ptyOpen: true}
-	started := time.Now()
-	err = owner.command(attemptFrame{Version: 1, Kind: "terminate"})
-	elapsed := time.Since(started)
-	cancelRelease()
-	if err != nil {
-		t.Fatalf("typed terminal termination: %v", err)
+	return &unreadTerminalOwner{
+		owner:         terminalOwner{child: child, daemon: daemon, reads: reads, daemonOpen: true, ptyOpen: true},
+		reads:         reads,
+		peer:          peer,
+		cancelRelease: releaseUnreadReadinessAfter(t, daemon, 1200*time.Millisecond),
 	}
-	if elapsed >= 600*time.Millisecond {
-		t.Fatalf("typed terminal termination starved behind unread daemon readiness for %s", elapsed)
-	}
-	if !owner.stopRequested {
-		t.Fatal("terminal owner did not commit its typed stop transition")
-	}
-	exit, err := child.waitedExit()
-	if err != nil || exit.Signal != int(unix.SIGTERM) {
-		t.Fatalf("terminal evidence=%+v err=%v", exit, err)
-	}
-	if err := reads.removeDaemon(); err != nil {
-		t.Fatal(err)
-	}
-	assertWaitedAndAbsent(t, child)
 }
 
 func startLivePTYChild(t *testing.T, f *fixture, ready string) *OwnedChild {

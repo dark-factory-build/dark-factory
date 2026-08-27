@@ -422,7 +422,7 @@ func (o *terminalOwner) resize(c TerminalCommand) error {
 	status := TerminalResultOK
 	if !o.inputActive || c.Generation != o.generation {
 		status = TerminalResultRejected
-	} else if err := o.child.ResizePTY(int(c.Cols), int(c.Rows)); err != nil {
+	} else if err := o.child.resizePTYOwned(int(c.Cols), int(c.Rows)); err != nil {
 		status = TerminalResultUncertain
 	}
 	return o.send(TerminalFrame{Kind: TerminalResizeResult, Correlation: c.Correlation, Generation: c.Generation, Rows: c.Rows, Cols: c.Cols, Status: status})

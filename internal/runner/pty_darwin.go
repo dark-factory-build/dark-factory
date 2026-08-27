@@ -67,20 +67,28 @@ func ptyIoctl(fd int, request uintptr, arg unsafe.Pointer) error {
 // callers holding only a numeric descriptor cannot reach this operation.
 // Callers serialize it with other terminal operations at the daemon boundary.
 func (c *OwnedChild) ResizePTY(columns, rows int) error {
-	if c == nil || c.ptyMaster == nil || c.state != stateActivated || c.exitObserved {
-		return ErrState
-	}
-	if columns < 1 || columns > maxPTYDimension || rows < 1 || rows > maxPTYDimension {
+	if !c.validPTYResize(columns, rows) {
 		return ErrState
 	}
 	if err := c.refreshExit(); err != nil {
 		return err
 	}
-	if c.exitObserved {
+	return c.resizePTYOwned(columns, rows)
+}
+
+// resizePTYOwned is for the synchronous terminal owner, which already owns
+// the child kqueue and must not poll it while readable filters are installed.
+func (c *OwnedChild) resizePTYOwned(columns, rows int) error {
+	if !c.validPTYResize(columns, rows) {
 		return ErrState
 	}
 	winsize := unix.Winsize{Col: uint16(columns), Row: uint16(rows)}
 	return unix.IoctlSetWinsize(int(c.ptyMaster.Fd()), unix.TIOCSWINSZ, &winsize)
+}
+
+func (c *OwnedChild) validPTYResize(columns, rows int) bool {
+	return c != nil && c.ptyMaster != nil && c.state == stateActivated && !c.exitObserved &&
+		columns >= 1 && columns <= maxPTYDimension && rows >= 1 && rows <= maxPTYDimension
 }
 
 func validatePTYDescriptors() error {
