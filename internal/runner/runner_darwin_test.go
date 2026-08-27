@@ -3,6 +3,7 @@
 package runner
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -11,6 +12,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -86,6 +88,38 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
+	if len(os.Args) == 4 && os.Args[1] == "--owned-descendant-helper" {
+		switch os.Args[2] {
+		case "leader":
+			if err := runLeaderExitDescendantHelper(os.Args[3]); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(92)
+			}
+			os.Exit(23)
+		case "term-fork":
+			if err := runTERMForkDescendantHelper(os.Args[3]); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(92)
+			}
+			os.Exit(0)
+		case "fifo-child":
+			if err := runFIFODescendantHelper(os.Args[3]); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(91)
+			}
+			os.Exit(0)
+		case "paused-child":
+			term := make(chan os.Signal, 1)
+			signal.Notify(term, unix.SIGTERM)
+			if err := signalHelperReady(); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(91)
+			}
+			for range term {
+			}
+			os.Exit(91)
+		}
+	}
 	beforeFD := fdCensus()
 	beforeG := runtime.NumGoroutine()
 	code := m.Run()
@@ -100,6 +134,114 @@ func TestMain(m *testing.M) {
 		code = 1
 	}
 	os.Exit(code)
+}
+
+func runLeaderExitDescendantHelper(root string) error {
+	command, descendant, err := startDescendantHelper("fifo-child", filepath.Join(root, "descendant.release"))
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(root, "descendant.pid"), []byte(strconv.Itoa(descendant.PID)), 0o600); err != nil {
+		cleanupDescendantHelper(command)
+		return err
+	}
+	return nil
+}
+
+func runTERMForkDescendantHelper(root string) error {
+	term := make(chan os.Signal, 1)
+	signal.Notify(term, unix.SIGTERM)
+	defer signal.Stop(term)
+	if _, err := fmt.Fprintln(os.Stdout, "ready"); err != nil {
+		return err
+	}
+	<-term
+	command, descendant, err := startDescendantHelper("paused-child", root)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(os.Stdout, "late:%d\n", descendant.PID); err != nil {
+		cleanupDescendantHelper(command)
+		return err
+	}
+	for range term {
+	}
+	return errors.New("TERM signal channel closed")
+}
+
+func startDescendantHelper(mode, argument string) (*exec.Cmd, Identity, error) {
+	readyReader, readyWriter, err := os.Pipe()
+	if err != nil {
+		return nil, Identity{}, err
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		_ = readyReader.Close()
+		_ = readyWriter.Close()
+		return nil, Identity{}, err
+	}
+	command := exec.Command(executable, "--owned-descendant-helper", mode, argument)
+	command.ExtraFiles = []*os.File{readyWriter}
+	if err := command.Start(); err != nil {
+		_ = readyReader.Close()
+		_ = readyWriter.Close()
+		return nil, Identity{}, err
+	}
+	_ = readyWriter.Close()
+	cleanup := true
+	defer func() {
+		_ = readyReader.Close()
+		if cleanup {
+			_ = command.Process.Kill()
+			_, _ = command.Process.Wait()
+		}
+	}()
+	if err := readyReader.SetReadDeadline(time.Now().Add(4 * time.Second)); err != nil {
+		return nil, Identity{}, err
+	}
+	var ready [1]byte
+	if _, err := io.ReadFull(readyReader, ready[:]); err != nil {
+		return nil, Identity{}, fmt.Errorf("descendant readiness: %w", err)
+	}
+	identity, err := readIdentity(command.Process.Pid)
+	if err != nil {
+		return nil, Identity{}, err
+	}
+	pgid, err := unix.Getpgid(0)
+	if err != nil || identity.PGID != pgid {
+		return nil, Identity{}, fmt.Errorf("descendant group identity=%+v parent_pgid=%d err=%v", identity, pgid, err)
+	}
+	cleanup = false
+	return command, identity, nil
+}
+
+func cleanupDescendantHelper(command *exec.Cmd) {
+	_ = command.Process.Kill()
+	_, _ = command.Process.Wait()
+}
+
+func runFIFODescendantHelper(path string) error {
+	release, err := os.OpenFile(path, os.O_RDONLY, 0)
+	if err != nil {
+		return err
+	}
+	defer release.Close()
+	if err := signalHelperReady(); err != nil {
+		return err
+	}
+	var byte [1]byte
+	_, err = io.ReadFull(release, byte[:])
+	return err
+}
+
+func signalHelperReady() error {
+	ready := os.NewFile(3, "descendant-ready")
+	if ready == nil {
+		return errors.New("missing descendant readiness descriptor")
+	}
+	defer ready.Close()
+	_, err := ready.Write([]byte{1})
+	return err
 }
 
 func runPTYProviderHelper(root string) error {
@@ -364,6 +506,142 @@ func waitFile(t *testing.T, path string) {
 			t.Fatalf("witness %s absent", path)
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func startExitedLeaderWithDescendant(t *testing.T, f *fixture) (*OwnedChild, *os.File, Identity) {
+	t.Helper()
+	releasePath := filepath.Join(f.root, "descendant.release")
+	if err := unix.Mkfifo(releasePath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	releaseFD, err := unix.Open(releasePath, unix.O_RDWR|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := os.NewFile(uintptr(releaseFD), "descendant-release")
+	executable, err := os.Executable()
+	if err != nil {
+		_ = release.Close()
+		t.Fatal(err)
+	}
+	child := f.start(executable, []string{"--owned-descendant-helper", "leader", f.root}, nil, outputFile(t, filepath.Join(f.root, "out")))
+	if _, err := child.Activate(); err != nil {
+		_ = release.Close()
+		t.Fatal(err)
+	}
+	descendantPath := filepath.Join(f.root, "descendant.pid")
+	waitFile(t, descendantPath)
+	body, err := os.ReadFile(descendantPath)
+	if err != nil {
+		_ = release.Close()
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(body)))
+	if err != nil {
+		_ = release.Close()
+		t.Fatal(err)
+	}
+	descendant, err := readIdentity(pid)
+	if err != nil || descendant.PGID != child.Identity().PGID {
+		_ = release.Close()
+		t.Fatalf("descendant identity=%+v err=%v", descendant, err)
+	}
+	if _, err := child.waitForExit(4 * time.Second); err != nil {
+		_ = release.Close()
+		t.Fatal(err)
+	}
+	observation := ObserveProcessGroup(child.Identity())
+	if observation.Presence != Present || len(observation.Members) < 2 {
+		_ = release.Close()
+		t.Fatalf("leader exit mistaken for group absence: %+v", observation)
+	}
+	return child, release, descendant
+}
+
+func installExactDescendantSafetyCleanup(t *testing.T, descendant Identity) func() {
+	t.Helper()
+	clean := false
+	t.Cleanup(func() {
+		if clean {
+			return
+		}
+		observation := ObserveProcess(descendant)
+		if observation.Presence == Absent {
+			return
+		}
+		current, err := readIdentity(descendant.PID)
+		if err != nil || current != descendant {
+			t.Errorf("refusing unsafe descendant cleanup: want=%+v current=%+v err=%v", descendant, current, err)
+			return
+		}
+		kq, err := unix.Kqueue()
+		if err != nil {
+			t.Errorf("exact descendant cleanup kqueue: %v", err)
+			return
+		}
+		defer unix.Close(kq)
+		if err := registerExit(kq, descendant.PID); err != nil {
+			t.Errorf("exact descendant cleanup registration: %v", err)
+			return
+		}
+		if err := unix.Kill(descendant.PID, unix.SIGKILL); err != nil && !errors.Is(err, unix.ESRCH) {
+			t.Errorf("exact descendant cleanup: %v", err)
+			return
+		}
+		timeout := unix.NsecToTimespec((4 * time.Second).Nanoseconds())
+		events := make([]unix.Kevent_t, 1)
+		n, err := unix.Kevent(kq, nil, events, &timeout)
+		if err != nil || n != 1 || int(events[0].Ident) != descendant.PID || events[0].Filter != unix.EVFILT_PROC || events[0].Fflags&unix.NOTE_EXIT == 0 {
+			t.Errorf("exact descendant cleanup exit evidence: n=%d event=%+v err=%v", n, events[0], err)
+		}
+	})
+	return func() { clean = true }
+}
+
+func killExactTestDescendant(t *testing.T, descendant Identity) {
+	t.Helper()
+	kq := exactExitKqueue(t, descendant)
+	current, err := readIdentity(descendant.PID)
+	if err != nil || current != descendant {
+		t.Fatalf("refusing unsafe descendant kill: want=%+v current=%+v err=%v", descendant, current, err)
+	}
+	if err := unix.Kill(descendant.PID, unix.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	waitKqueueExit(t, kq, descendant)
+}
+
+func exactExitKqueue(t *testing.T, identity Identity) int {
+	t.Helper()
+	kq, err := unix.Kqueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = unix.Close(kq) })
+	if err := registerExit(kq, identity.PID); err != nil {
+		t.Fatal(err)
+	}
+	return kq
+}
+
+func readOwnedPipeLine(t *testing.T, pipe *os.File, reader *bufio.Reader) string {
+	t.Helper()
+	if err := pipe.SetReadDeadline(time.Now().Add(4 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("owned helper report: %v", err)
+	}
+	return strings.TrimSpace(line)
+}
+
+func assertOwnedGroupWaitedAndAbsent(t *testing.T, child *OwnedChild) {
+	t.Helper()
+	assertWaitedAndAbsent(t, child)
+	if err := unix.Kill(-child.Identity().PGID, 0); !errors.Is(err, unix.ESRCH) {
+		t.Fatalf("owned process group remains: %v", err)
 	}
 }
 
@@ -947,132 +1225,124 @@ func TestTerminateOwnsTERMKillAndWait(t *testing.T) {
 	}
 }
 
-func TestLeaderExitWithDescendantRequiresOwnedCleanup(t *testing.T) {
+func TestLeaderExitWithLiveDescendantRetainsOwnerOnEPERM(t *testing.T) {
 	f := newFixture(t)
-	descPath := filepath.Join(f.root, "desc")
-	out := outputFile(t, filepath.Join(f.root, "out"))
-	child := f.start("/bin/sh", []string{"-c", "sleep 30 & echo $! > " + descPath + "; exit 0"}, nil, out)
-	if _, err := child.Activate(); err != nil {
-		t.Fatal(err)
-	}
-	waitFile(t, descPath)
-	if _, err := child.waitForExit(4 * time.Second); err != nil {
-		t.Fatal(err)
-	}
-	obs := ObserveProcessGroup(child.Identity())
-	if obs.Presence != Present || len(obs.Members) < 2 {
-		t.Fatalf("leader exit mistaken for group absence: %+v", obs)
-	}
-	if _, err := child.Terminate(100 * time.Millisecond); err != nil {
-		t.Fatal(err)
-	}
-	if got := unix.Kill(-child.Identity().PGID, 0); !errors.Is(got, unix.ESRCH) {
-		t.Fatalf("group remains: %v", got)
-	}
-}
-
-func TestFinishAfterNaturalLeaderExitCleansOwnedGroupBeforeWait(t *testing.T) {
-	f := newFixture(t)
-	descendantPath := filepath.Join(f.root, "descendant")
-	out := outputFile(t, filepath.Join(f.root, "out"))
-	child := f.start("/bin/sh", []string{"-c", "sleep 30 & echo $! > " + descendantPath + "; exit 23"}, nil, out)
-	if _, err := child.Activate(); err != nil {
-		t.Fatal(err)
-	}
-	waitFile(t, descendantPath)
-	body, err := os.ReadFile(descendantPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(body)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	descendant, err := readIdentity(pid)
-	if err != nil || descendant.PGID != child.Identity().PGID {
-		t.Fatalf("descendant identity=%+v err=%v", descendant, err)
-	}
-	defer func() {
-		if current, err := readIdentity(descendant.PID); err == nil && current == descendant {
-			_ = unix.Kill(descendant.PID, unix.SIGKILL)
+	child, release, descendant := startExitedLeaderWithDescendant(t, f)
+	defer release.Close()
+	cleanupDone := installExactDescendantSafetyCleanup(t, descendant)
+	child.testSignal = func(signal unix.Signal) error {
+		if signal != unix.SIGKILL {
+			return fmt.Errorf("unexpected signal %d", signal)
 		}
-	}()
+		return fmt.Errorf("injected group EPERM: %w", classifyGroupSignal(unix.EPERM, false))
+	}
+
+	if _, err := child.Terminate(25 * time.Millisecond); !errors.Is(err, ErrUnresolved) || !strings.Contains(fmt.Sprint(err), "injected group EPERM") {
+		t.Fatalf("leader-exit EPERM termination=%v", err)
+	}
+	if child.state != stateExited || !child.exitObserved || child.cmd.ProcessState != nil {
+		t.Fatalf("EPERM lost unreaped owner: state=%d observed=%t process_state=%v", child.state, child.exitObserved, child.cmd.ProcessState)
+	}
+	if observation := ObserveProcess(child.Identity()); observation.Presence != Present {
+		t.Fatalf("EPERM lost exact leader: %+v", observation)
+	}
+	if observation := ObserveProcess(descendant); observation.Presence != Present {
+		t.Fatalf("EPERM invented descendant absence: %+v", observation)
+	}
+
+	killExactTestDescendant(t, descendant)
+	child.testSignal = nil
 	exit, err := child.FinishAfterExit(4 * time.Second)
 	if err != nil || exit.Code != 23 || exit.Signal != 0 {
-		t.Fatalf("natural exit=%+v err=%v", exit, err)
+		t.Fatalf("retry after exact safety cleanup=%+v err=%v", exit, err)
 	}
-	if observation := ObserveProcess(descendant); observation.Presence != Absent {
-		t.Fatalf("FinishAfterExit left descendant: %+v", observation)
+	assertOwnedGroupWaitedAndAbsent(t, child)
+	cleanupDone()
+}
+
+func TestLeaderExitRetryConvergesAfterDescendantQuiesces(t *testing.T) {
+	f := newFixture(t)
+	child, release, descendant := startExitedLeaderWithDescendant(t, f)
+	defer release.Close()
+	cleanupDone := installExactDescendantSafetyCleanup(t, descendant)
+	child.testSignal = func(signal unix.Signal) error {
+		if signal != unix.SIGKILL {
+			return fmt.Errorf("unexpected signal %d", signal)
+		}
+		return fmt.Errorf("injected group EPERM: %w", classifyGroupSignal(unix.EPERM, false))
 	}
-	if err := unix.Kill(-child.Identity().PGID, 0); !errors.Is(err, unix.ESRCH) {
-		t.Fatalf("FinishAfterExit left process group: %v", err)
+	if _, err := child.Terminate(25 * time.Millisecond); !errors.Is(err, ErrUnresolved) {
+		t.Fatalf("live descendant did not retain owner: %v", err)
 	}
+	descendantExit := exactExitKqueue(t, descendant)
+	if _, err := release.Write([]byte{1}); err != nil {
+		t.Fatal(err)
+	}
+	waitKqueueExit(t, descendantExit, descendant)
+
+	child.testSignal = nil
+	exit, err := child.FinishAfterExit(4 * time.Second)
+	if err != nil || exit.Code != 23 || exit.Signal != 0 {
+		t.Fatalf("retry after natural quiescence=%+v err=%v", exit, err)
+	}
+	assertOwnedGroupWaitedAndAbsent(t, child)
+	cleanupDone()
 }
 
 func TestTerminateGroupSignalCatchesDescendantForkedDuringTERMGrace(t *testing.T) {
 	f := newFixture(t)
-	readyPath := filepath.Join(f.root, "ready")
-	termPath := filepath.Join(f.root, "term")
-	latePath := filepath.Join(f.root, "late")
-	out := outputFile(t, filepath.Join(f.root, "out"))
-	command := fmt.Sprintf("trap 'sleep 30 & echo $! > %q; printf term > %q' TERM; printf ready > %q; while :; do sleep 1; done", latePath, termPath, readyPath)
-	child := f.start("/bin/sh", []string{"-c", command}, nil, out)
+	reportReader, reportWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reportReader.Close() })
+	t.Cleanup(func() { _ = reportWriter.Close() })
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := f.start(executable, []string{"--owned-descendant-helper", "term-fork", f.root}, nil, reportWriter)
 	if _, err := child.Activate(); err != nil {
 		t.Fatal(err)
 	}
-	waitFile(t, readyPath)
+	_ = reportWriter.Close()
+	reports := bufio.NewReader(reportReader)
+	if line := readOwnedPipeLine(t, reportReader, reports); line != "ready" {
+		t.Fatalf("provider readiness=%q", line)
+	}
 	type terminationResult struct {
 		exit Exit
 		err  error
 	}
 	done := make(chan terminationResult, 1)
 	go func() {
-		exit, err := child.Terminate(500 * time.Millisecond)
+		exit, err := child.Terminate(2 * time.Second)
 		done <- terminationResult{exit: exit, err: err}
 	}()
-	var late Identity
-	lateDeadline := time.Now().Add(400 * time.Millisecond)
-	for time.Now().Before(lateDeadline) {
-		body, err := os.ReadFile(latePath)
-		if err == nil {
-			pid, parseErr := strconv.Atoi(strings.TrimSpace(string(body)))
-			if parseErr == nil {
-				late, err = readIdentity(pid)
-				if err == nil && late.PGID == child.Identity().PGID {
-					break
-				}
-			}
-		}
-		time.Sleep(5 * time.Millisecond)
+	line := readOwnedPipeLine(t, reportReader, reports)
+	pid, err := strconv.Atoi(strings.TrimPrefix(line, "late:"))
+	if err != nil || !strings.HasPrefix(line, "late:") {
+		t.Fatalf("late descendant report=%q err=%v", line, err)
 	}
-	defer func() {
-		if late.Valid() {
-			if current, err := readIdentity(late.PID); err == nil && current == late {
-				_ = unix.Kill(late.PID, unix.SIGKILL)
-			}
-		}
-	}()
+	late, err := readIdentity(pid)
+	if err != nil || late.PGID != child.Identity().PGID {
+		t.Fatalf("late descendant identity=%+v err=%v", late, err)
+	}
+	cleanupDone := installExactDescendantSafetyCleanup(t, late)
 	var result terminationResult
 	select {
 	case result = <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(7 * time.Second):
 		t.Fatal("Terminate did not join after late descendant fork")
-	}
-	if !late.Valid() {
-		t.Fatal("TERM handler did not create an exact late descendant")
 	}
 	if result.err != nil || result.exit.Signal != int(unix.SIGKILL) {
 		t.Fatalf("termination=%+v err=%v", result.exit, result.err)
 	}
-	if body, err := os.ReadFile(termPath); err != nil || string(body) != "term" {
-		t.Fatalf("TERM grace witness=%q err=%v", body, err)
-	}
 	if observation := ObserveProcess(late); observation.Presence != Absent {
 		t.Fatalf("late descendant survived group cleanup: %+v", observation)
 	}
-	if err := unix.Kill(-child.Identity().PGID, 0); !errors.Is(err, unix.ESRCH) {
-		t.Fatalf("late-fork group remains: %v", err)
-	}
+	assertOwnedGroupWaitedAndAbsent(t, child)
+	cleanupDone()
 }
 
 func TestGroupSignalRequiresExactUnreapedLeader(t *testing.T) {

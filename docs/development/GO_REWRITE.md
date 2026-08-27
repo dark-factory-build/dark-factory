@@ -3256,9 +3256,10 @@ Darwin process-semantics proof on integrated head `47e50e7`:
   an `EV_RECEIPT` `ESRCH`; therefore production must register while the child
   is still inert. A raced registration is launch failure followed by the live
   owner's synchronous sole `Wait`, never a recovered/missed watcher.
-- Proved leader exit does not imply group absence, group KILL reaches a
-  remaining exact member while the leader stays unreaped, TERM-ignore requires
-  bounded KILL escalation, create-only/no-follow markers do not replace, leash
+- Proved leader exit does not imply group absence: `EPERM` retains the exact
+  unreaped owner and live descendant as unresolved until a later retry observes
+  real group quiescence. TERM-ignore requires bounded KILL escalation,
+  create-only/no-follow markers do not replace, leash
   EOF prevents pre-marker effect, marker creation linearizes a single possible
   effect, and an explicit kqueue wake permits bounded watcher join.
 - Mutations killed include ignoring birth time, a watcher calling `Wait`,
