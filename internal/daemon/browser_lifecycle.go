@@ -1,0 +1,120 @@
+package daemon
+
+import (
+	"errors"
+	"fmt"
+	"sync"
+
+	"github.com/dark-factory-build/dark-factory/internal/browser"
+	"github.com/dark-factory-build/dark-factory/internal/kernel"
+)
+
+// BrowserRuntime owns the loopback listener, every accepted WebSocket and
+// every Store-watch subscription created through its backend. Close performs
+// the only safe order: stop and join the transport first, then cancel and join
+// any backend subscription left by an interrupted connection. The caller may
+// close the Store only after Close returns.
+type BrowserRuntime struct {
+	daemon  *Daemon
+	server  *browser.Server
+	backend *browserBackend
+
+	closeOnce sync.Once
+	closeErr  error
+}
+
+// ListenBrowser starts the state-only browser-v1 surface. Address is still
+// validated by internal/browser and therefore accepts only exact IPv4
+// loopback. Terminal and HumanRequest effects are not part of this slice.
+func (daemon *Daemon) ListenBrowser(address string, allowedOrigins []string) (*BrowserRuntime, error) {
+	if daemon == nil || daemon.store == nil {
+		return nil, fmt.Errorf("%w: invalid browser daemon", kernel.ErrInvalidValue)
+	}
+	daemon.browserMu.Lock()
+	if daemon.browserClosing {
+		daemon.browserMu.Unlock()
+		return nil, browser.ErrUnauthorized
+	}
+	daemon.browserMu.Unlock()
+	backend, err := newProductionBrowserBackend(daemon)
+	if err != nil {
+		return nil, err
+	}
+	server, err := browser.Listen(browser.Config{Address: address, AllowedOrigins: allowedOrigins, Backend: backend})
+	if err != nil {
+		_ = backend.close()
+		return nil, err
+	}
+	runtime := &BrowserRuntime{daemon: daemon, server: server, backend: backend}
+	daemon.browserMu.Lock()
+	if daemon.browserClosing {
+		daemon.browserMu.Unlock()
+		_ = runtime.Close()
+		return nil, browser.ErrUnauthorized
+	}
+	if daemon.browsers == nil {
+		daemon.browsers = make(map[*BrowserRuntime]struct{})
+	}
+	daemon.browsers[runtime] = struct{}{}
+	daemon.browserMu.Unlock()
+	return runtime, nil
+}
+
+func (runtime *BrowserRuntime) Addr() string {
+	if runtime == nil || runtime.server == nil {
+		return ""
+	}
+	return runtime.server.Addr()
+}
+
+func (runtime *BrowserRuntime) Close() error {
+	if runtime == nil {
+		return nil
+	}
+	runtime.closeOnce.Do(func() {
+		var closeErrors []error
+		if runtime.server != nil {
+			closeErrors = append(closeErrors, runtime.server.Close())
+		}
+		if runtime.backend != nil {
+			closeErrors = append(closeErrors, runtime.backend.close())
+		}
+		runtime.closeErr = errors.Join(closeErrors...)
+		if runtime.daemon != nil {
+			runtime.daemon.browserMu.Lock()
+			delete(runtime.daemon.browsers, runtime)
+			runtime.daemon.browserMu.Unlock()
+		}
+	})
+	return runtime.closeErr
+}
+
+func (daemon *Daemon) closeBrowsers() error {
+	if daemon == nil {
+		return nil
+	}
+	daemon.browserMu.Lock()
+	daemon.browserClosing = true
+	runtimes := make([]*BrowserRuntime, 0, len(daemon.browsers))
+	for runtime := range daemon.browsers {
+		runtimes = append(runtimes, runtime)
+	}
+	daemon.browserMu.Unlock()
+	var closeErrors []error
+	for _, runtime := range runtimes {
+		closeErrors = append(closeErrors, runtime.Close())
+	}
+	return errors.Join(closeErrors...)
+}
+
+// CloseClient terminates all existing sockets for a client after a durable
+// revocation has committed. The owner-only revocation lane must use the same
+// backend client gate before calling this non-reentrant transport callback.
+func (runtime *BrowserRuntime) CloseClient(id kernel.BrowserClientID) error {
+	if runtime == nil || runtime.server == nil {
+		return nil
+	}
+	var raw [16]byte
+	copy(raw[:], id.Bytes())
+	return runtime.server.CloseClient(raw)
+}
