@@ -290,6 +290,39 @@ func TestWatchAfterRestartClassificationsAreFiniteAndPrivate(t *testing.T) {
 		}
 	})
 
+	t.Run("empty retained log only represents initial state", func(t *testing.T) {
+		store, _ := newTestStore(t)
+		defer store.Close()
+		batch, err := store.WatchAfter(context.Background(), mustSequence(t, 0))
+		if err != nil || batch.Head.Int64() != 0 || batch.Floor.Int64() != 1 || len(batch.Invalidations) != 0 {
+			t.Fatalf("initial empty log = %+v, %v", batch, err)
+		}
+	})
+
+	for _, metadata := range []struct {
+		name  string
+		next  int64
+		floor int64
+	}{
+		{name: "one missing event", next: 2, floor: 2},
+		{name: "noninitial missing history", next: 4, floor: 4},
+	} {
+		t.Run(metadata.name, func(t *testing.T) {
+			store, _ := newTestStore(t)
+			defer store.Close()
+			corruptSQL(t, store, `UPDATE factory SET next_invalidation_sequence = ?, invalidation_floor = ?`, metadata.next, metadata.floor)
+			state, err := store.Factory(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, after := range []int64{0, state.Head.Int64(), state.Floor.Int64()} {
+				if _, err := store.WatchAfter(context.Background(), mustSequence(t, after)); !isWatchRestart(err, WatchRestartGap, state) || !errors.Is(err, ErrCorruptState) {
+					t.Fatalf("after=%d empty advanced log error = %v", after, err)
+				}
+			}
+		})
+	}
+
 	t.Run("unknown kind is hidden dependency", func(t *testing.T) {
 		store, _ := newTestStore(t)
 		defer store.Close()

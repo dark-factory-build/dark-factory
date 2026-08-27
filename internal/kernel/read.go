@@ -459,6 +459,9 @@ func (store *Store) WatchAfter(ctx context.Context, after EventSequence) (WatchB
 	if err := rows.Err(); err != nil {
 		return WatchBatch{}, fmt.Errorf("iterate invalidations: %w", err)
 	}
+	if count == 0 && (state.Head.Int64() != 0 || state.Floor.Int64() != 1) {
+		return WatchBatch{}, newWatchRestart(state, WatchRestartGap)
+	}
 	if expected != state.Head.Int64()+1 {
 		return WatchBatch{}, newWatchRestart(state, WatchRestartGap)
 	}
