@@ -139,6 +139,9 @@ type OwnedChild struct {
 	exitRegistered bool
 	keepDirectory  bool
 	ptyMaster      *os.File
+	// testSignal injects a package-test-only owned-group signal result.
+	// Production children always leave it nil and call signalOwnedGroup.
+	testSignal func(unix.Signal) error
 	// testConvergence injects a package-test-only failure immediately before
 	// activated group convergence. Production children always leave it nil.
 	testConvergence func() error
@@ -291,6 +294,9 @@ func (c *OwnedChild) refreshExit() error {
 	for {
 		events := make([]unix.Kevent_t, 1)
 		n, err := unix.Kevent(c.kq, nil, events, &zero)
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
 		if err != nil {
 			return err
 		}
@@ -739,15 +745,32 @@ func (c *OwnedChild) Terminate(timeout time.Duration) (Exit, error) {
 	if timeout <= 0 {
 		timeout = defaultStopTimeout
 	}
-	if err := signalOwnedGroup(c.identity, unix.SIGTERM); err != nil {
-		return Exit{}, fmt.Errorf("%w: TERM: %v", ErrUnresolved, err)
+	if err := c.refreshExit(); err != nil {
+		return Exit{}, err
+	}
+	var signalFailure error
+	if !c.exitObserved {
+		if err := c.signalGroup(unix.SIGTERM); err != nil {
+			// The exact child can exit between signalOwnedGroup's census and
+			// kill. Retain the failure while the owned kqueue waits for proof.
+			signalFailure = fmt.Errorf("%w: TERM: %v", ErrUnresolved, err)
+			if _, exitErr := c.waitForExit(timeout); exitErr != nil {
+				return Exit{}, errors.Join(signalFailure, exitErr)
+			}
+		}
+	}
+	withSignalFailure := func(err error) error {
+		if signalFailure == nil {
+			return err
+		}
+		return errors.Join(signalFailure, err)
 	}
 	escalate := false
 	if !c.exitObserved {
 		_, err := c.waitForExit(timeout)
 		if err != nil {
 			if !errors.Is(err, os.ErrDeadlineExceeded) {
-				return Exit{}, err
+				return Exit{}, withSignalFailure(err)
 			}
 			escalate = true
 		}
@@ -755,26 +778,33 @@ func (c *OwnedChild) Terminate(timeout time.Duration) (Exit, error) {
 	if !escalate {
 		if err := waitForOwnedGroupQuiescence(c.identity, timeout); err != nil {
 			if !errors.Is(err, os.ErrDeadlineExceeded) {
-				return Exit{}, err
+				return Exit{}, withSignalFailure(err)
 			}
 			escalate = true
 		}
 	}
 	if escalate {
-		if err := signalOwnedGroup(c.identity, unix.SIGKILL); err != nil {
-			return Exit{}, fmt.Errorf("%w: KILL: %v", ErrUnresolved, err)
+		if err := c.signalGroup(unix.SIGKILL); err != nil {
+			return Exit{}, withSignalFailure(fmt.Errorf("%w: KILL: %v", ErrUnresolved, err))
 		}
 		if !c.exitObserved {
 			if _, err := c.waitForExit(4 * time.Second); err != nil {
-				return Exit{}, err
+				return Exit{}, withSignalFailure(err)
 			}
 		}
 	}
 	waitErr := c.waitActivatedOnce()
 	if c.state != stateWaited {
-		return Exit{}, waitErr
+		return Exit{}, withSignalFailure(waitErr)
 	}
 	return c.exit, nil
+}
+
+func (c *OwnedChild) signalGroup(signal unix.Signal) error {
+	if c.testSignal != nil {
+		return c.testSignal(signal)
+	}
+	return signalOwnedGroup(c.identity, signal)
 }
 
 func (c *OwnedChild) waitedExit() (Exit, error) {
