@@ -255,16 +255,28 @@ type liveAttempt struct {
 	finalErr          error
 	binding           terminalBinding
 	effectLimit       time.Duration
+	// These exact seams are fixed before the owner starts. Production uses the
+	// concrete Store renewal below; daemon tests replace it or pause one phase
+	// to prove ambiguous Store and operation-gate schedules causally.
+	renewLease         terminalLeaseRenewal
+	beforeRenewCommit  func()
+	beforeAttachEffect func()
 }
 
 func newLiveAttempt(daemon *Daemon, runID kernel.RunID, sessionID kernel.TerminalSessionID, controller *runner.AttemptController) *liveAttempt {
-	return &liveAttempt{
+	attempt := &liveAttempt{
 		daemon: daemon, runID: runID, sessionID: sessionID, controller: controller,
 		commands: make(chan liveAttemptCommand, liveAttemptMailboxCap),
 		wake:     make(chan struct{}, 1), done: make(chan struct{}), terminal: make(chan liveAttemptResult, 1),
 		subs: make(map[*TerminalAttachment]struct{}), correlations: make(map[uint64]*TerminalAttachment),
 		effectLimit: liveAttemptEffectLimit,
 	}
+	if daemon != nil && daemon.store != nil {
+		attempt.renewLease = func(ctx context.Context, client kernel.BrowserClientID, generation uint64, expectedRun, expectedSession kernel.Revision, at kernel.UnixMillis) (kernel.TerminalLease, error) {
+			return daemon.store.RenewTerminalLease(ctx, runID, sessionID, client, generation, expectedRun, expectedSession, at)
+		}
+	}
+	return attempt
 }
 
 func (daemon *Daemon) registerLiveAttempt(attempt *liveAttempt) error {

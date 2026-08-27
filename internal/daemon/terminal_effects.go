@@ -27,6 +27,7 @@ type terminalEffectKind uint8
 
 const (
 	terminalEffectCheck terminalEffectKind = iota + 1
+	terminalEffectRenew
 	terminalEffectInstall
 	terminalEffectRevoke
 	terminalEffectInput
@@ -41,22 +42,28 @@ type terminalBinding struct {
 	generation uint64
 }
 
+type terminalLeaseRenewal func(context.Context, kernel.BrowserClientID, uint64, kernel.Revision, kernel.Revision, kernel.UnixMillis) (kernel.TerminalLease, error)
+
 type terminalEffect struct {
-	kind           terminalEffectKind
-	client         kernel.BrowserClientID
-	connection     browser.ConnectionID
-	generation     uint64
-	sequence       uint64
-	rows           uint16
-	cols           uint16
-	payload        []byte
-	requireBinding bool
+	kind            terminalEffectKind
+	client          kernel.BrowserClientID
+	connection      browser.ConnectionID
+	generation      uint64
+	sequence        uint64
+	rows            uint16
+	cols            uint16
+	payload         []byte
+	requireBinding  bool
+	expectedRun     kernel.Revision
+	expectedSession kernel.Revision
 }
 
 type terminalEffectResult struct {
-	status runner.TerminalResultStatus
-	count  uint32
-	err    error
+	status        runner.TerminalResultStatus
+	count         uint32
+	lease         kernel.TerminalLease
+	terminalFence bool
+	err           error
 }
 
 func uncertainTerminalEffect(cause error) terminalEffectResult {
@@ -64,7 +71,7 @@ func uncertainTerminalEffect(cause error) terminalEffectResult {
 }
 
 func (result terminalEffectResult) effectError(expectedBytes int) error {
-	if result.status == runner.TerminalResultOK && (expectedBytes < 0 || result.count == uint32(expectedBytes)) && result.err == nil {
+	if result.status == runner.TerminalResultOK && (expectedBytes < 0 || result.count == uint32(expectedBytes)) && !result.terminalFence && result.err == nil {
 		return nil
 	}
 	if result.status == "" {
@@ -149,17 +156,22 @@ func (daemon *Daemon) terminalLeaseRenew(ctx context.Context, principal browser.
 	}
 	daemon.operationMu.Lock()
 	defer daemon.operationMu.Unlock()
-	checked := attempt.submitEffect(ctx, terminalEffect{
-		kind: terminalEffectCheck, client: clientID, connection: principal.ConnectionID, generation: generation,
+	result := attempt.submitEffect(ctx, terminalEffect{
+		kind: terminalEffectRenew, client: clientID, connection: principal.ConnectionID, generation: generation,
+		expectedRun: expectedRun, expectedSession: expectedSession,
 	})
-	if err := checked.effectError(-1); err != nil {
-		return kernel.TerminalLease{}, err
+	effectErr := result.effectError(-1)
+	if effectErr == nil {
+		return result.lease, nil
 	}
-	at, err := daemon.timestamp()
-	if err != nil {
-		return kernel.TerminalLease{}, err
+	// A lost Store response, or an impossible post-commit owner mismatch,
+	// cannot preserve writable authority. Revoke the exact generation without
+	// retrying the renewal itself.
+	if terminalStoreOutcomeUnknown(result.err) || result.lease != (kernel.TerminalLease{}) {
+		cleanupErr := daemon.revokeAmbiguousRenewal(attempt, clientID, principal.ConnectionID, runID, sessionID, generation, expectedRun, expectedSession)
+		return kernel.TerminalLease{}, errors.Join(ErrTerminalEffectUncertain, effectErr, cleanupErr)
 	}
-	return daemon.store.RenewTerminalLease(ctx, runID, sessionID, clientID, generation, expectedRun, expectedSession, at)
+	return kernel.TerminalLease{}, effectErr
 }
 
 // terminalLeaseRelease shares operationMu with finalization. It either clears
@@ -196,12 +208,12 @@ func (daemon *Daemon) terminalLeaseRelease(ctx context.Context, principal browse
 	lease, err := daemon.store.ReleaseTerminalLease(ctx, runID, sessionID, clientID, generation, expectedRun, expectedSession, at)
 	if err != nil {
 		if terminalStoreOutcomeUnknown(err) {
-			fenceErr := daemon.revokeRunnerGeneration(attempt, clientID, principal.ConnectionID, generation+1, true)
+			fenceErr := daemon.revokeRunnerGeneration(attempt, clientID, principal.ConnectionID, generation+1, true, false)
 			return kernel.TerminalLease{}, errors.Join(err, fenceErr)
 		}
 		return kernel.TerminalLease{}, err
 	}
-	if err := daemon.revokeRunnerGeneration(attempt, clientID, principal.ConnectionID, lease.Generation, true); err != nil {
+	if err := daemon.revokeRunnerGeneration(attempt, clientID, principal.ConnectionID, lease.Generation, true, false); err != nil {
 		return lease, err
 	}
 	return lease, nil
@@ -425,10 +437,10 @@ func (daemon *Daemon) revokeFailedLease(attempt *liveAttempt, lease kernel.Termi
 		_, err = daemon.store.RevokeTerminalLease(storeCtx, lease.RunID, lease.SessionID, lease.ClientID, lease.Generation, lease.RunRevision, lease.SessionRevision, at)
 		cancel()
 	}
+	fenceErr := daemon.revokeRunnerGeneration(attempt, lease.ClientID, browser.ConnectionID{}, lease.Generation+1, false, true)
 	if err != nil {
-		return errors.Join(effectErr, ErrTerminalEffectUncertain, err, attempt.close())
+		return errors.Join(effectErr, ErrTerminalEffectUncertain, err, fenceErr)
 	}
-	fenceErr := daemon.revokeRunnerGeneration(attempt, lease.ClientID, browser.ConnectionID{}, lease.Generation+1, false)
 	return errors.Join(effectErr, fenceErr)
 }
 
@@ -439,22 +451,43 @@ func (daemon *Daemon) revokeReservedInput(attempt *liveAttempt, client kernel.Br
 		err = daemon.store.RevokeTerminalInputReservation(storeCtx, runID, sessionID, client, generation, sequence, expectedRun, expectedSession, at)
 		cancel()
 	}
+	fenceErr := daemon.revokeRunnerGeneration(attempt, client, connection, generation+1, false, true)
 	if err != nil {
-		return errors.Join(ErrTerminalEffectUncertain, err, attempt.close())
+		return errors.Join(ErrTerminalEffectUncertain, err, fenceErr)
 	}
-	return daemon.revokeRunnerGeneration(attempt, client, connection, generation+1, false)
+	return fenceErr
 }
 
-func (daemon *Daemon) revokeRunnerGeneration(attempt *liveAttempt, client kernel.BrowserClientID, connection browser.ConnectionID, generation uint64, requireBinding bool) error {
+func (daemon *Daemon) revokeRunnerGeneration(attempt *liveAttempt, client kernel.BrowserClientID, connection browser.ConnectionID, generation uint64, requireBinding, acceptTerminalFence bool) error {
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
 	defer cancel()
 	result := attempt.submitEffect(cleanupCtx, terminalEffect{
 		kind: terminalEffectRevoke, client: client, connection: connection, generation: generation, requireBinding: requireBinding,
 	})
 	if err := result.effectError(-1); err != nil {
+		if result.terminalFence {
+			if acceptTerminalFence {
+				return nil
+			}
+			return err
+		}
 		return errors.Join(err, attempt.close())
 	}
 	return nil
+}
+
+func (daemon *Daemon) revokeAmbiguousRenewal(attempt *liveAttempt, client kernel.BrowserClientID, connection browser.ConnectionID, runID kernel.RunID, sessionID kernel.TerminalSessionID, generation uint64, expectedRun, expectedSession kernel.Revision) error {
+	at, err := daemon.timestamp()
+	if err == nil {
+		storeCtx, cancel := context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
+		_, err = daemon.store.RevokeTerminalLease(storeCtx, runID, sessionID, client, generation, expectedRun, expectedSession, at)
+		cancel()
+	}
+	fenceErr := daemon.revokeRunnerGeneration(attempt, client, connection, generation+1, false, true)
+	if err != nil {
+		return errors.Join(ErrTerminalEffectUncertain, err, fenceErr)
+	}
+	return fenceErr
 }
 
 func (daemon *Daemon) markHumanReplyUnknown(requestID kernel.HumanRequestID, deliveryID kernel.HumanRequestDeliveryID, expected kernel.Revision) error {
@@ -498,6 +531,9 @@ func (daemon *Daemon) revokeBrowserClientEffectsHeld(clientID kernel.BrowserClie
 		effect := attempt.submitEffect(cleanupCtx, terminalEffect{kind: terminalEffectRevokeClient, client: clientID})
 		cancel()
 		if err := effect.effectError(-1); err != nil {
+			if effect.terminalFence {
+				continue
+			}
 			result = errors.Join(result, err, attempt.close())
 		}
 	}

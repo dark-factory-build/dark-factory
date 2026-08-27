@@ -78,6 +78,23 @@ func (attempt *liveAttempt) loop(ctx context.Context) error {
 		} else if stop {
 			return nil
 		}
+		// AttemptTerminal is positive provider-exit evidence. Once observed, the
+		// controller remains owned exclusively for the supervisor's exact ACK;
+		// do not consume late effect frames or close it on caller cancellation.
+		if attempt.terminalSeen {
+			select {
+			case command := <-attempt.commands:
+				stop, err := attempt.handleRunningCommand(command)
+				if err != nil {
+					return err
+				}
+				if stop {
+					return nil
+				}
+			case <-attempt.wake:
+			}
+			continue
+		}
 		select {
 		case command := <-attempt.commands:
 			stop, err := attempt.handleRunningCommand(command)
@@ -259,8 +276,17 @@ func (attempt *liveAttempt) handleRunningCommand(command liveAttemptCommand) (bo
 }
 
 func (attempt *liveAttempt) handleTerminalEffect(effect terminalEffect) (terminalEffectResult, error) {
-	if !attempt.readySeen || attempt.terminalSeen || attempt.controller == nil {
+	if !attempt.readySeen || attempt.controller == nil {
 		return terminalEffectResult{status: runner.TerminalResultRejected, err: ErrTerminalNotReady}, nil
+	}
+	if attempt.terminalSeen {
+		// Provider exit is already a stronger runner-input fence than a
+		// generation revoke. Cleanup may therefore converge durable state without
+		// replacing the controller before the supervisor acknowledges this exit.
+		if effect.kind == terminalEffectRevoke || effect.kind == terminalEffectRevokeClient {
+			return terminalEffectResult{status: runner.TerminalResultOK, terminalFence: true}, nil
+		}
+		return terminalEffectResult{status: runner.TerminalResultRejected, terminalFence: true, err: ErrTerminalNotReady}, nil
 	}
 	switch effect.kind {
 	case terminalEffectCheck:
@@ -268,6 +294,32 @@ func (attempt *liveAttempt) handleTerminalEffect(effect terminalEffect) (termina
 			return terminalEffectResult{status: runner.TerminalResultRejected}, nil
 		}
 		return terminalEffectResult{status: runner.TerminalResultOK}, nil
+	case terminalEffectRenew:
+		if !sameTerminalBinding(attempt.binding, effect.client, effect.connection, effect.generation) {
+			return terminalEffectResult{status: runner.TerminalResultRejected}, nil
+		}
+		if attempt.daemon == nil || attempt.renewLease == nil {
+			return uncertainTerminalEffect(kernel.ErrCorruptState), nil
+		}
+		if attempt.beforeRenewCommit != nil {
+			attempt.beforeRenewCommit()
+		}
+		at, err := attempt.daemon.timestamp()
+		if err != nil {
+			return uncertainTerminalEffect(err), nil
+		}
+		storeCtx, cancel := context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
+		lease, err := attempt.renewLease(storeCtx, effect.client, effect.generation, effect.expectedRun, effect.expectedSession, at)
+		cancel()
+		if err != nil {
+			return terminalEffectResult{err: err}, nil
+		}
+		result := terminalEffectResult{status: runner.TerminalResultOK, lease: lease}
+		if lease.RunID != attempt.runID || lease.SessionID != attempt.sessionID || lease.ClientID != effect.client || lease.Generation != effect.generation || lease.RunRevision != effect.expectedRun || lease.SessionRevision != effect.expectedSession || lease.ExpiresAt.Int64() < 1 || !sameTerminalBinding(attempt.binding, effect.client, effect.connection, effect.generation) {
+			result.status = runner.TerminalResultUncertain
+			result.err = kernel.ErrCorruptState
+		}
+		return result, nil
 	case terminalEffectInstall:
 		if effect.client == (kernel.BrowserClientID{}) || effect.connection == (browser.ConnectionID{}) || effect.generation == 0 {
 			return terminalEffectResult{status: runner.TerminalResultRejected}, nil
@@ -391,7 +443,7 @@ func (attempt *liveAttempt) runTerminalEffect(command runner.TerminalCommand) (t
 			return uncertainTerminalEffect(err), err
 		}
 		if stop || attempt.terminalSeen {
-			return uncertainTerminalEffect(ErrTerminalClosed), nil
+			return terminalEffectResult{status: runner.TerminalResultUncertain, terminalFence: attempt.terminalSeen, err: ErrTerminalClosed}, nil
 		}
 	}
 }
@@ -671,6 +723,9 @@ func (attempt *liveAttempt) handleAttach(attachment *TerminalAttachment, session
 	correlation, err := attempt.nextCorrelation()
 	if err != nil {
 		return err
+	}
+	if attempt.beforeAttachEffect != nil {
+		attempt.beforeAttachEffect()
 	}
 	attachment.correlation = correlation
 	attachment.expected = sequence

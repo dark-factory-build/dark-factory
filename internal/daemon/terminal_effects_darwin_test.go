@@ -20,21 +20,22 @@ import (
 )
 
 type terminalEffectWireFrame struct {
-	Version      int                  `json:"version"`
-	Kind         string               `json:"kind"`
-	Stage        runner.AttemptStage  `json:"stage,omitempty"`
-	Identity     runner.Identity      `json:"identity,omitempty"`
-	Correlation  uint64               `json:"correlation,omitempty"`
-	Generation   uint64               `json:"generation,omitempty"`
-	Sequence     uint64               `json:"sequence,omitempty"`
-	Count        uint32               `json:"count,omitempty"`
-	Rows         uint16               `json:"rows,omitempty"`
-	Cols         uint16               `json:"cols,omitempty"`
-	Status       string               `json:"status,omitempty"`
-	Payload      []byte               `json:"payload,omitempty"`
-	Terminal     *runner.Terminal     `json:"terminal,omitempty"`
-	FileIdentity *runner.FileIdentity `json:"file_identity,omitempty"`
-	Digest       string               `json:"digest,omitempty"`
+	Version        int                  `json:"version"`
+	Kind           string               `json:"kind"`
+	Stage          runner.AttemptStage  `json:"stage,omitempty"`
+	Identity       runner.Identity      `json:"identity,omitempty"`
+	Correlation    uint64               `json:"correlation,omitempty"`
+	Generation     uint64               `json:"generation,omitempty"`
+	Sequence       uint64               `json:"sequence,omitempty"`
+	Count          uint32               `json:"count,omitempty"`
+	Rows           uint16               `json:"rows,omitempty"`
+	Cols           uint16               `json:"cols,omitempty"`
+	Status         string               `json:"status,omitempty"`
+	Payload        []byte               `json:"payload,omitempty"`
+	Terminal       *runner.Terminal     `json:"terminal,omitempty"`
+	FileIdentity   *runner.FileIdentity `json:"file_identity,omitempty"`
+	Digest         string               `json:"digest,omitempty"`
+	StoreCommitted bool                 `json:"store_committed,omitempty"`
 }
 
 type terminalEffectFixture struct {
@@ -48,6 +49,10 @@ type terminalEffectFixture struct {
 }
 
 func newTerminalEffectFixture(t *testing.T) *terminalEffectFixture {
+	return newTerminalEffectFixtureConfigured(t, nil)
+}
+
+func newTerminalEffectFixtureConfigured(t *testing.T, configure func(*liveAttempt)) *terminalEffectFixture {
 	t.Helper()
 	adapter := newAdapterFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityTerminalInput|kernel.BrowserCapabilityHumanActions)
 	adapter.pair(t)
@@ -61,6 +66,9 @@ func newTerminalEffectFixture(t *testing.T) *terminalEffectFixture {
 	attempt.releaseSent = true
 	attempt.readySeen = true
 	attempt.effectLimit = 100 * time.Millisecond
+	if configure != nil {
+		configure(attempt)
+	}
 	if err := adapter.daemon.registerLiveAttempt(attempt); err != nil {
 		t.Fatal(err)
 	}
@@ -207,6 +215,62 @@ func replyTerminalEffect(t *testing.T, peer *os.File, command terminalEffectWire
 	writeTerminalEffectWire(t, peer, result)
 }
 
+func sendTerminalEffectExit(t *testing.T, fixture *terminalEffectFixture) {
+	t.Helper()
+	terminal := runner.Terminal{AttemptID: "daemon-terminal-effect", Process: fixture.identity, Exit: runner.Exit{Code: 0}}
+	identity := runner.FileIdentity{Device: 7, Inode: 9}
+	writeTerminalEffectWire(t, fixture.peer, terminalEffectWireFrame{
+		Version: 1, Kind: "terminal", Terminal: &terminal, FileIdentity: &identity, Digest: strings.Repeat("0", 64),
+	})
+}
+
+func awaitTerminalEffectExit(t *testing.T, attempt *liveAttempt) *runner.TerminalRecord {
+	t.Helper()
+	select {
+	case result := <-attempt.terminal:
+		if result.err != nil || result.event.Kind != runner.AttemptTerminal || result.event.Terminal == nil {
+			t.Fatalf("provider terminal = %+v", result)
+		}
+		return result.event.Terminal
+	case <-time.After(time.Second):
+		t.Fatal("provider terminal was not routed")
+		return nil
+	}
+}
+
+func acknowledgeTerminalEffectExit(t *testing.T, fixture *terminalEffectFixture, terminal *runner.TerminalRecord) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- fixture.attempt.acknowledge(context.Background(), terminal) }()
+	ack := readTerminalEffectWire(t, fixture.peer)
+	if ack.Kind != "terminal-ack" || !ack.StoreCommitted || ack.Terminal == nil || *ack.Terminal != terminal.Terminal || ack.FileIdentity == nil || *ack.FileIdentity != terminal.Identity || ack.Digest != terminal.Digest {
+		t.Fatalf("terminal acknowledgement = %+v, want exact persisted terminal", ack)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("terminal acknowledgement: %v", err)
+	}
+	select {
+	case <-fixture.attempt.done:
+	case <-time.After(time.Second):
+		t.Fatal("terminal owner did not join after acknowledgement")
+	}
+	if !fixture.attempt.controllerClosed || fixture.attempt.binding != (terminalBinding{}) {
+		t.Fatalf("acknowledged owner census: closed=%v binding=%+v", fixture.attempt.controllerClosed, fixture.attempt.binding)
+	}
+}
+
+func expectNoTerminalEffectWire(t *testing.T, peer *os.File) {
+	t.Helper()
+	if err := peer.SetReadDeadline(time.Now().Add(25 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	defer peer.SetReadDeadline(time.Time{})
+	var octet [1]byte
+	if count, err := peer.Read(octet[:]); count != 0 || !os.IsTimeout(err) {
+		t.Fatalf("unexpected runner command prefix count=%d byte=%x err=%v", count, octet[0], err)
+	}
+}
+
 func (fixture *terminalEffectFixture) acquire(t *testing.T, principal browser.Principal) kernel.TerminalLease {
 	t.Helper()
 	type response struct {
@@ -290,6 +354,117 @@ func TestTerminalEffectsBindOneExactConnectionAndReleaseDurableFirst(t *testing.
 	}
 	if _, err := fixture.adapter.daemon.terminalLeaseRelease(context.Background(), fixture.principal, fixture.run.ID, fixture.session.ID, lease.Generation, fixture.run.Revision, fixture.session.Revision); !errors.Is(err, ErrTerminalEffectRejected) {
 		t.Fatalf("repeated release = %v", err)
+	}
+}
+
+func TestTerminalRenewalIsSerializedWithOwnerEvidence(t *testing.T) {
+	t.Run("terminal evidence first rejects renewal", func(t *testing.T) {
+		fixture := newTerminalEffectFixture(t)
+		lease := fixture.acquire(t, fixture.principal)
+		sendTerminalEffectExit(t, fixture)
+		terminal := awaitTerminalEffectExit(t, fixture.attempt)
+		if renewed, err := fixture.adapter.daemon.terminalLeaseRenew(context.Background(), fixture.principal, fixture.run.ID, fixture.session.ID, lease.Generation, fixture.run.Revision, fixture.session.Revision); err == nil || renewed != (kernel.TerminalLease{}) {
+			t.Fatalf("renewal after terminal evidence = %+v, %v", renewed, err)
+		}
+		acknowledgeTerminalEffectExit(t, fixture, terminal)
+	})
+
+	t.Run("accepted renewal commits before queued terminal evidence", func(t *testing.T) {
+		checked := make(chan struct{})
+		resume := make(chan struct{})
+		fixture := newTerminalEffectFixtureConfigured(t, func(attempt *liveAttempt) {
+			attempt.beforeRenewCommit = func() {
+				close(checked)
+				<-resume
+			}
+		})
+		lease := fixture.acquire(t, fixture.principal)
+		fixture.adapter.daemon.now = func() time.Time { return time.UnixMilli(2_100) }
+		type result struct {
+			lease kernel.TerminalLease
+			err   error
+		}
+		done := make(chan result, 1)
+		go func() {
+			renewed, err := fixture.adapter.daemon.terminalLeaseRenew(context.Background(), fixture.principal, fixture.run.ID, fixture.session.ID, lease.Generation, fixture.run.Revision, fixture.session.Revision)
+			done <- result{lease: renewed, err: err}
+		}()
+		select {
+		case <-checked:
+		case <-time.After(time.Second):
+			t.Fatal("renewal did not reach owner-serialized commit boundary")
+		}
+		sendTerminalEffectExit(t, fixture)
+		select {
+		case terminal := <-fixture.attempt.terminal:
+			t.Fatalf("terminal crossed owner-serialized renewal: %+v", terminal)
+		case <-time.After(25 * time.Millisecond):
+		}
+		close(resume)
+		renewed := <-done
+		if renewed.err != nil || renewed.lease.Generation != lease.Generation || renewed.lease.ExpiresAt.Int64() <= lease.ExpiresAt.Int64() {
+			t.Fatalf("owner-first renewal = %+v, %v", renewed.lease, renewed.err)
+		}
+		terminal := awaitTerminalEffectExit(t, fixture.attempt)
+		acknowledgeTerminalEffectExit(t, fixture, terminal)
+	})
+}
+
+func TestTerminalRenewalOutcomeUnknownRevokesExactGeneration(t *testing.T) {
+	injected := errors.New("injected renewal response loss")
+	fixture := newTerminalEffectFixtureConfigured(t, func(attempt *liveAttempt) {
+		attempt.renewLease = func(context.Context, kernel.BrowserClientID, uint64, kernel.Revision, kernel.Revision, kernel.UnixMillis) (kernel.TerminalLease, error) {
+			return kernel.TerminalLease{}, kernel.NewOutcomeUnknownError(injected)
+		}
+	})
+	lease := fixture.acquire(t, fixture.principal)
+	type result struct {
+		lease kernel.TerminalLease
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		renewed, err := fixture.adapter.daemon.terminalLeaseRenew(context.Background(), fixture.principal, fixture.run.ID, fixture.session.ID, lease.Generation, fixture.run.Revision, fixture.session.Revision)
+		done <- result{lease: renewed, err: err}
+	}()
+	revoke := readTerminalEffectWire(t, fixture.peer)
+	if revoke.Kind != string(runner.TerminalGenerationRevoke) || revoke.Generation != lease.Generation+1 {
+		t.Fatalf("ambiguous renewal runner fence = %+v", revoke)
+	}
+	cleared, found, err := fixture.adapter.store.TerminalSession(context.Background(), fixture.session.ID)
+	if err != nil || !found || cleared.LeaseClientID != nil || cleared.LeaseGeneration != lease.Generation+1 {
+		t.Fatalf("ambiguous renewal durable fence = %+v, found=%v, err=%v", cleared, found, err)
+	}
+	replyTerminalEffect(t, fixture.peer, revoke, runner.TerminalResultOK, 0)
+	got := <-done
+	var unknown *kernel.OutcomeUnknownError
+	if got.lease != (kernel.TerminalLease{}) || !errors.Is(got.err, ErrTerminalEffectUncertain) || !errors.As(got.err, &unknown) || !errors.Is(got.err, injected) {
+		t.Fatalf("ambiguous renewal result = %+v, %v", got.lease, got.err)
+	}
+}
+
+func TestTerminalRenewalPostconditionMismatchCannotReportSuccess(t *testing.T) {
+	fixture := newTerminalEffectFixtureConfigured(t, func(attempt *liveAttempt) {
+		attempt.beforeRenewCommit = func() { attempt.binding = terminalBinding{} }
+	})
+	lease := fixture.acquire(t, fixture.principal)
+	fixture.adapter.daemon.now = func() time.Time { return time.UnixMilli(2_100) }
+	done := make(chan error, 1)
+	go func() {
+		_, err := fixture.adapter.daemon.terminalLeaseRenew(context.Background(), fixture.principal, fixture.run.ID, fixture.session.ID, lease.Generation, fixture.run.Revision, fixture.session.Revision)
+		done <- err
+	}()
+	revoke := readTerminalEffectWire(t, fixture.peer)
+	if revoke.Kind != string(runner.TerminalGenerationRevoke) || revoke.Generation != lease.Generation+1 {
+		t.Fatalf("renewal postcondition runner fence = %+v", revoke)
+	}
+	cleared, found, err := fixture.adapter.store.TerminalSession(context.Background(), fixture.session.ID)
+	if err != nil || !found || cleared.LeaseClientID != nil || cleared.LeaseGeneration != lease.Generation+1 {
+		t.Fatalf("renewal postcondition durable fence = %+v, found=%v, err=%v", cleared, found, err)
+	}
+	replyTerminalEffect(t, fixture.peer, revoke, runner.TerminalResultOK, 0)
+	if err := <-done; !errors.Is(err, ErrTerminalEffectUncertain) || !errors.Is(err, kernel.ErrCorruptState) {
+		t.Fatalf("renewal postcondition result = %v", err)
 	}
 }
 
@@ -508,6 +683,85 @@ func TestTerminalInputRequiresExactCompleteByteCount(t *testing.T) {
 	}
 }
 
+func TestTerminalDuringCorrelatedEffectPreservesSupervisorAcknowledgement(t *testing.T) {
+	for _, phase := range []string{"install", "input", "release"} {
+		t.Run(phase, func(t *testing.T) {
+			fixture := newTerminalEffectFixture(t)
+			type result struct {
+				count uint32
+				lease kernel.TerminalLease
+				err   error
+			}
+			done := make(chan result, 1)
+			var generation uint64
+			switch phase {
+			case "install":
+				go func() {
+					lease, err := fixture.adapter.daemon.terminalLeaseAcquire(context.Background(), fixture.principal, fixture.run.ID, fixture.session.ID, fixture.run.Revision, fixture.session.Revision)
+					done <- result{lease: lease, err: err}
+				}()
+			case "input":
+				lease := fixture.acquire(t, fixture.principal)
+				generation = lease.Generation
+				go func() {
+					count, err := fixture.adapter.daemon.terminalInput(context.Background(), fixture.principal, fixture.run.ID, fixture.session.ID, lease.Generation, 1, fixture.run.Revision, fixture.session.Revision, []byte("terminal race"))
+					done <- result{count: count, err: err}
+				}()
+			case "release":
+				lease := fixture.acquire(t, fixture.principal)
+				generation = lease.Generation
+				go func() {
+					released, err := fixture.adapter.daemon.terminalLeaseRelease(context.Background(), fixture.principal, fixture.run.ID, fixture.session.ID, lease.Generation, fixture.run.Revision, fixture.session.Revision)
+					done <- result{lease: released, err: err}
+				}()
+			}
+			command := readTerminalEffectWire(t, fixture.peer)
+			if phase == "install" {
+				generation = command.Generation
+			}
+			sendTerminalEffectExit(t, fixture)
+			terminal := awaitTerminalEffectExit(t, fixture.attempt)
+			got := <-done
+			if !errors.Is(got.err, ErrTerminalEffectUncertain) || !errors.Is(got.err, ErrTerminalClosed) {
+				t.Fatalf("terminal during %s = count %d lease %+v err %v", phase, got.count, got.lease, got.err)
+			}
+			cleared, found, err := fixture.adapter.store.TerminalSession(context.Background(), fixture.session.ID)
+			if err != nil || !found || cleared.LeaseClientID != nil || cleared.LeaseGeneration != generation+1 {
+				t.Fatalf("terminal during %s durable cleanup = %+v, found=%v, err=%v", phase, cleared, found, err)
+			}
+			select {
+			case <-fixture.attempt.done:
+				t.Fatalf("terminal during %s closed controller before supervisor ACK", phase)
+			default:
+			}
+			expectNoTerminalEffectWire(t, fixture.peer)
+			acknowledgeTerminalEffectExit(t, fixture, terminal)
+		})
+	}
+}
+
+func TestLateEffectResultAfterTerminalEvidenceCannotResurrectBinding(t *testing.T) {
+	fixture := newTerminalEffectFixture(t)
+	lease := fixture.acquire(t, fixture.principal)
+	done := make(chan error, 1)
+	go func() {
+		_, err := fixture.adapter.daemon.terminalInput(context.Background(), fixture.principal, fixture.run.ID, fixture.session.ID, lease.Generation, 1, fixture.run.Revision, fixture.session.Revision, []byte("one shot"))
+		done <- err
+	}()
+	input := readTerminalEffectWire(t, fixture.peer)
+	sendTerminalEffectExit(t, fixture)
+	terminal := awaitTerminalEffectExit(t, fixture.attempt)
+	replyTerminalEffect(t, fixture.peer, input, runner.TerminalResultOK, uint32(len("one shot")))
+	if err := <-done; !errors.Is(err, ErrTerminalEffectUncertain) || !errors.Is(err, ErrTerminalClosed) {
+		t.Fatalf("input interrupted by terminal = %v", err)
+	}
+	if fixture.attempt.binding != (terminalBinding{}) {
+		t.Fatalf("late effect result resurrected binding %+v", fixture.attempt.binding)
+	}
+	expectNoTerminalEffectWire(t, fixture.peer)
+	acknowledgeTerminalEffectExit(t, fixture, terminal)
+}
+
 func TestTerminalResizeIsExactAndUncertaintyIsVisible(t *testing.T) {
 	fixture := newTerminalEffectFixture(t)
 	lease := fixture.acquire(t, fixture.principal)
@@ -651,6 +905,104 @@ func TestClientRevocationDurablyClearsLeaseBeforeRunnerFence(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatalf("client revocation: %v", err)
 	}
+}
+
+func TestPublicAttachSerializesWithFinalization(t *testing.T) {
+	t.Run("finalization commits before queued attach", func(t *testing.T) {
+		fixture := newTerminalEffectFixture(t)
+		fixture.adapter.daemon.operationMu.Lock()
+		type result struct {
+			attachment *TerminalAttachment
+			err        error
+		}
+		attached := make(chan result, 1)
+		go func() {
+			attachment, err := fixture.adapter.daemon.AttachTerminal(context.Background(), fixture.run.ID, fixture.session.ID, 0)
+			attached <- result{attachment: attachment, err: err}
+		}()
+		select {
+		case got := <-attached:
+			fixture.adapter.daemon.operationMu.Unlock()
+			t.Fatalf("public attach crossed operation gate: %+v", got)
+		case <-time.After(25 * time.Millisecond):
+		}
+		expectNoTerminalEffectWire(t, fixture.peer)
+		proposal, err := kernel.NewSuccessProposal("done")
+		if err == nil {
+			_, err = fixture.adapter.store.ProposeAttemptOutcome(context.Background(), fixture.run.CredentialDigest, proposal, adapterTime(t, 2_200))
+		}
+		fixture.adapter.daemon.operationMu.Unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := <-attached
+		if got.attachment != nil || got.err == nil {
+			t.Fatalf("attach queued behind finalization = %+v", got)
+		}
+		if terminate := readTerminalEffectWire(t, fixture.peer); terminate.Kind != "terminate" {
+			t.Fatalf("post-finalization command = %+v", terminate)
+		}
+		expectNoTerminalEffectWire(t, fixture.peer)
+	})
+
+	t.Run("accepted attach completes before finalization", func(t *testing.T) {
+		entered := make(chan struct{})
+		resume := make(chan struct{})
+		fixture := newTerminalEffectFixtureConfigured(t, func(attempt *liveAttempt) {
+			attempt.beforeAttachEffect = func() {
+				close(entered)
+				<-resume
+			}
+		})
+		type result struct {
+			attachment *TerminalAttachment
+			err        error
+		}
+		attached := make(chan result, 1)
+		go func() {
+			attachment, err := fixture.adapter.daemon.AttachTerminal(context.Background(), fixture.run.ID, fixture.session.ID, 0)
+			attached <- result{attachment: attachment, err: err}
+		}()
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			t.Fatal("public attach did not reach runner-effect boundary")
+		}
+		finalized := make(chan error, 1)
+		go func() {
+			proposal, _ := kernel.NewSuccessProposal("done")
+			fixture.adapter.daemon.operationMu.Lock()
+			_, err := fixture.adapter.store.ProposeAttemptOutcome(context.Background(), fixture.run.CredentialDigest, proposal, adapterTime(t, 2_200))
+			fixture.adapter.daemon.operationMu.Unlock()
+			finalized <- err
+		}()
+		select {
+		case err := <-finalized:
+			t.Fatalf("finalization crossed accepted public attach: %v", err)
+		case <-time.After(25 * time.Millisecond):
+		}
+		observed, found, err := fixture.adapter.store.Run(context.Background(), fixture.run.ID)
+		if err != nil || !found || observed.Phase != kernel.RunRunning {
+			t.Fatalf("run changed before accepted attach effect: %+v, found=%v, err=%v", observed, found, err)
+		}
+		close(resume)
+		got := <-attached
+		if got.err != nil || got.attachment == nil {
+			t.Fatalf("accepted public attach = %+v", got)
+		}
+		if attach := readTerminalEffectWire(t, fixture.peer); attach.Kind != string(runner.TerminalAttach) {
+			t.Fatalf("accepted public attach command = %+v", attach)
+		}
+		if credit := readTerminalEffectWire(t, fixture.peer); credit.Kind != string(runner.TerminalCredit) {
+			t.Fatalf("accepted public attach credit = %+v", credit)
+		}
+		if err := <-finalized; err != nil {
+			t.Fatalf("serialized finalization: %v", err)
+		}
+		if terminate := readTerminalEffectWire(t, fixture.peer); terminate.Kind != "terminate" {
+			t.Fatalf("post-attach finalization command = %+v", terminate)
+		}
+	})
 }
 
 func TestFinalizationOrdersAcceptedEffectsAndFencesBothRevocationOrderings(t *testing.T) {
