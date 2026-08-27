@@ -24,7 +24,7 @@ function stateAt(head, overrides = {}) {
   return { ...fixtureState, head: BigInt(head), sequence: BigInt(head), ...overrides };
 }
 
-function terminalHarness() {
+function terminalHarness({ closeStatus = false, fail } = {}) {
   const snapshots = [];
   const calls = [];
   const targetGates = [];
@@ -52,18 +52,19 @@ function terminalHarness() {
     },
     openTerminal: (value, callbacks) => {
       calls.push({ kind: "open", value });
+      if (fail === "open") throw new SessionError("connection");
       handleOptions = callbacks;
       const handle = {
-        attach: async () => { calls.push({ kind: "attach" }); return { sessionId: "31".repeat(16), floor: 0n, head: 0n, acknowledgedSequence: 0n, maxUnackedBytes: 65536n }; },
-        acquireInput: async () => { calls.push({ kind: "acquire" }); return { generation: 1n }; },
-        sendInput: async (bytes) => { calls.push({ kind: "input", bytes }); return { status: "accepted", accepted_bytes: BigInt(bytes.length) }; },
-        resize: async (rows, cols) => { calls.push({ kind: "resize", rows, cols }); return { rows, cols }; },
+        attach: async () => { calls.push({ kind: "attach" }); if (fail === "attach") throw new SessionError("connection"); return { sessionId: "31".repeat(16), floor: 0n, head: 0n, acknowledgedSequence: 0n, maxUnackedBytes: 65536n }; },
+        acquireInput: async () => { calls.push({ kind: "acquire" }); if (fail === "acquire") throw new SessionError("connection"); return { generation: 1n }; },
+        sendInput: async (bytes) => { calls.push({ kind: "input", bytes }); if (fail === "input") throw new SessionError("connection"); return { status: "accepted", accepted_bytes: BigInt(bytes.length) }; },
+        resize: async (rows, cols) => { calls.push({ kind: "resize", rows, cols }); if (fail === "resize") throw new SessionError("connection"); return { rows, cols }; },
         get writable() { return true; },
       };
       handles.push(handle);
       return handle;
     },
-    close: () => { sessionCloses += 1; },
+    close: () => { sessionCloses += 1; if (closeStatus) clientOptions?.onStatus("closed"); },
   };
   const client = {
     session,
@@ -88,6 +89,7 @@ function terminalHarness() {
     sessionCloses: () => sessionCloses,
     clientOptions: () => clientOptions,
     handleOptions: () => handleOptions,
+    surfaceFailure: fail === "surface",
     latest: () => snapshots.at(-1),
     ready: () => { clientOptions.onState(fixtureState); clientOptions.onStatus("ready"); },
   };
@@ -99,7 +101,7 @@ async function openTerminal(context, selectedAgent = agent) {
   const writes = [];
   context.controller.beginTerminalSurface(token);
   context.controller.setTerminalSurface(token, {
-    write: async (bytes) => { writes.push(bytes); },
+    write: async (bytes) => { writes.push(bytes); if (context.surfaceFailure) throw new Error("display failed"); },
     abort: () => {},
   });
   await flush();
@@ -143,6 +145,7 @@ test("a later state head does not restart a live terminal, while waiting discove
   const live = await openTerminal(context);
   const resolveCount = context.targetGates.length;
   context.clientOptions().onState(stateAt(43));
+  context.controller.selectAgent(agent);
   assert.equal(context.sessionCloses(), 0);
   assert.equal(context.targetGates.length, resolveCount);
   context.controller.sendTerminalText(live.token, "same session");
@@ -159,6 +162,74 @@ test("a later state head does not restart a live terminal, while waiting discove
   waiting.controller.setTerminalSurface(token, { write: async () => {}, abort: () => {} });
   await flush();
   assert.equal(waiting.calls.at(-1).value.expectedHead, 44n);
+});
+
+async function assertNoAutomaticRestart(context) {
+  const attempts = context.targetGates.length;
+  context.clientOptions().onStatus("connecting");
+  context.clientOptions().onState(fixtureState);
+  context.clientOptions().onStatus("ready");
+  await flush();
+  assert.equal(context.targetGates.length, attempts);
+  assert.equal(context.latest().selectedAgent, undefined);
+}
+
+test("fatal discovery and terminal failures disarm selection before reconnect can rediscover", async () => {
+  for (const failure of ["null", "throw", "open", "attach", "acquire", "input", "resize", "surface"]) {
+    const context = terminalHarness({ closeStatus: true, fail: failure === "null" || failure === "throw" ? undefined : failure });
+    context.controller.start();
+    context.ready();
+    context.controller.selectAgent(agent);
+    const token = {};
+    context.controller.beginTerminalSurface(token);
+    context.controller.setTerminalSurface(token, {
+      write: async (bytes) => { if (failure === "surface") throw new Error("display failed"); },
+      abort: () => {},
+    });
+    await flush();
+    assert.equal(context.targetGates.length, 1, failure);
+    if (failure === "null") context.targetGates[0].resolve(null);
+    else if (failure === "throw") context.targetGates[0].reject(new SessionError("connection"));
+    else context.targetGates[0].resolve(target);
+    await flush();
+    if (failure === "input") {
+      context.controller.sendTerminalText(token, "input");
+      await flush();
+    } else if (failure === "resize") {
+      context.controller.resizeTerminal(token, 24, 80);
+      await flush();
+    } else if (failure === "surface") {
+      await assert.rejects(context.handleOptions().onOutput({ sequence: 0n, payload: new Uint8Array([1]) }));
+      await flush();
+    }
+    assert.equal(context.targetGates.length, 1, failure);
+    assert.equal(context.sessionCloses(), 1, failure);
+    await assertNoAutomaticRestart(context);
+  }
+});
+
+test("a fresh explicit selection can start one new terminal attempt after a fatal failure", async () => {
+  const context = terminalHarness({ closeStatus: true });
+  context.controller.start();
+  context.ready();
+  context.controller.selectAgent(agent);
+  const token = {};
+  context.controller.beginTerminalSurface(token);
+  context.controller.setTerminalSurface(token, { write: async () => {}, abort: () => {} });
+  await flush();
+  context.targetGates[0].resolve(null);
+  await flush();
+  assert.equal(context.latest().selectedAgent, undefined);
+  assert.equal(context.sessionCloses(), 1);
+  context.clientOptions().onStatus("connecting");
+  context.clientOptions().onState(fixtureState);
+  context.clientOptions().onStatus("ready");
+  context.controller.selectAgent(agent);
+  const freshToken = {};
+  context.controller.beginTerminalSurface(freshToken);
+  context.controller.setTerminalSurface(freshToken, { write: async () => {}, abort: () => {} });
+  await flush();
+  assert.equal(context.targetGates.length, 2);
 });
 
 test("selection replaces the old controller before resolving the new public agent and fences stale callbacks", async () => {

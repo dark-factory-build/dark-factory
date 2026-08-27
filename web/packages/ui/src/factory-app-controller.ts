@@ -166,7 +166,7 @@ export class FactoryAppController {
       return;
     }
     const selected = this.#selectedAgent;
-    if (selected?.agent.id === current.id && selected.agent.revision === current.revision && selected.head === this.#state?.head) return;
+    if (selected?.agent.id === current.id && selected.agent.revision === current.revision && (selected.head === this.#state?.head || this.#terminal !== undefined)) return;
     this.#dropTerminal(true);
     this.#selectedAgent = { agent: { ...current }, head: this.#state?.head ?? 0n };
     this.#error = undefined;
@@ -447,6 +447,10 @@ export class FactoryAppController {
       this.#publish();
       return;
     }
+    if (snapshot.error !== undefined && snapshot.error.code !== "invalid_request") {
+      this.#disarmTerminal(snapshot.error);
+      return;
+    }
     this.#publish();
     if (snapshot.writable) this.#flushTerminalResize();
   }
@@ -468,6 +472,15 @@ export class FactoryAppController {
     this.#pendingTerminalResize = undefined;
     ++this.#terminalSurfaceVersion;
     if (closeSession && terminal !== undefined) void terminal.close();
+  }
+
+  #disarmTerminal(error: SessionError | ProtocolError): void {
+    const terminal = this.#terminal;
+    this.#selectedAgent = undefined;
+    this.#dropTerminal(false);
+    this.#error = error;
+    if (terminal !== undefined) void terminal.close();
+    this.#publish();
   }
 
   #snapshot(): FactoryAppSnapshot {
