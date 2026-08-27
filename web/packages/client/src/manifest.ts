@@ -106,6 +106,10 @@ export const BROWSER_MANIFEST = {
     maxFactoryCapacity: MAX_FACTORY_CAPACITY,
     maxTaskPriority: MAX_TASK_PRIORITY,
     maxSQLiteInteger: MAX_SQLITE_INTEGER,
+    maxTerminalUnackedBytes: MAX_TERMINAL_UNACKED_BYTES,
+    terminalAckTimeoutMs: TERMINAL_ACK_TIMEOUT_MS,
+    maxTerminalRows: MAX_TERMINAL_ROWS,
+    maxTerminalCols: MAX_TERMINAL_COLS,
   },
   control: CONTROL_MANIFEST,
   terminal: {

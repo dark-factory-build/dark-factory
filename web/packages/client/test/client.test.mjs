@@ -90,8 +90,26 @@ test("browser terminal and HumanRequest controls are typed, directional, and bou
     assert.doesNotThrow(() => decode(atMaximum));
     expectMalformed(() => decode(atMaximum.replace(`"${field}":${value}`, `"${field}":${value + 1}`)));
   }
-  expectMalformed(() => decodeClientControl(fixture("human_request_reply.json").replace('"reply":"ok"', '"reply":"\\ud800"')));
+  for (const escape of ["\\ud800", "\\udc00", "\\udc00\\ud800", "\\ud800\\u0041"]) {
+    expectMalformed(() => decodeClientControl(fixture("human_request_reply.json").replace('"reply":"ok"', `"reply":"${escape}"`)));
+  }
+  for (const literal of ["\ud800", "\udc00"]) {
+    expectMalformed(() => decodeClientControl(fixture("human_request_reply.json").replace('"reply":"ok"', `"reply":"${literal}"`)));
+  }
   expectMalformed(() => decodeClientControl(fixture("human_request_reply.json").replace('"reply":"ok"', `"reply":"${"x".repeat(8193)}"`)));
+  const pairedReply = decodeClientControl(fixture("human_request_reply.json").replace('"reply":"ok"', '"reply":"\\ud83d\\ude00"'));
+  assert.equal(pairedReply.body.reply, "😀");
+  const lease = fixture("terminal_lease_result.json");
+  expectMalformed(() => decodeServerControl(lease.replace('"expires_at_ms":"10000"', '"expires_at_ms":null')));
+  expectMalformed(() => decodeServerControl(lease.replace(',"expires_at_ms":"10000"', '')));
+  expectMalformed(() => decodeServerControl(lease.replace('"expires_at_ms":"10000"', '"expires_at_ms":"0"')));
+  const released = lease.replace('"operation":"acquired"', '"operation":"released"').replace(',"expires_at_ms":"10000"', '');
+  assert.doesNotThrow(() => decodeServerControl(released));
+  expectMalformed(() => decodeServerControl(released.replace('"operation":"released"', '"operation":"released","expires_at_ms":null')));
+  for (const field of ["exit_code", "exit_signal", "aborted"]) {
+    const exit = fixture("terminal_exit.json").replace(new RegExp(`"${field}":(?:0|false)`), `"${field}":null`);
+    expectMalformed(() => decodeServerControl(exit));
+  }
 });
 
 test("state restart accepts only the canonical empty chronology", () => {
@@ -208,6 +226,16 @@ test("manifest has exactly one public mapping for every v1 stable entry", () => 
   const source = json("../manifest.json");
   assert.deepEqual(Object.keys(BROWSER_MANIFEST.capabilities), source.capabilities.map((x) => x.name));
   assert.deepEqual(Object.values(BROWSER_MANIFEST.capabilities), source.capabilities.map((x) => x.value));
+  const camel = (key) => key.split("_").map((word, index) => index === 0 ? word : ({ json: "JSON", sqlite: "SQLite" }[word] ?? `${word[0].toUpperCase()}${word.slice(1)}`)).join("");
+  const bounds = Object.fromEntries(Object.entries(source.bounds).map(([key, value]) => [camel(key), key === "max_sqlite_integer" ? BigInt(value) : value]));
+  assert.deepEqual(BROWSER_MANIFEST.bounds, bounds);
+  for (const key of Object.keys(bounds)) {
+    const mutated = { ...bounds };
+    delete mutated[key];
+    assert.notDeepEqual(mutated, BROWSER_MANIFEST.bounds);
+    const changed = { ...bounds, [key]: typeof bounds[key] === "bigint" ? bounds[key] + 1n : bounds[key] + 1 };
+    assert.notDeepEqual(changed, BROWSER_MANIFEST.bounds);
+  }
   assert.deepEqual(BROWSER_MANIFEST.control, source.control);
   assert.equal(BROWSER_MANIFEST.terminal.headerBytes, source.terminal.header_bytes);
   assert.equal(BROWSER_MANIFEST.terminal.maxPayloadBytes, source.terminal.max_payload_bytes);

@@ -696,3 +696,42 @@ func TestDecodeErrorsAreStable(t *testing.T) {
 		t.Fatalf("binary public error = %v", err)
 	}
 }
+
+func TestTerminalControlRejectsSurrogateAndNullMutations(t *testing.T) {
+	reply := string(fixtureBytes(t, "human_request_reply.json"))
+	for _, escape := range []string{`\ud800`, `\udc00`, `\udc00\ud800`, `\ud800\u0041`} {
+		mutated := strings.Replace(reply, `"reply":"ok"`, `"reply":"`+escape+`"`, 1)
+		if _, err := DecodeClientControl([]byte(mutated)); err != ErrMalformed {
+			t.Fatalf("reply escape %q accepted: %v", escape, err)
+		}
+	}
+	paired := strings.Replace(reply, `"reply":"ok"`, `"reply":"\ud83d\ude00"`, 1)
+	frame, err := DecodeClientControl([]byte(paired))
+	if err != nil || frame.Body.(HumanRequestReply).Reply != "😀" {
+		t.Fatalf("paired surrogate rejected or changed: frame=%+v err=%v", frame, err)
+	}
+
+	lease := string(fixtureBytes(t, "terminal_lease_result.json"))
+	for _, mutated := range []string{
+		strings.Replace(lease, `"expires_at_ms":"10000"`, `"expires_at_ms":null`, 1),
+		strings.Replace(lease, `,"expires_at_ms":"10000"`, ``, 1),
+		strings.Replace(lease, `"expires_at_ms":"10000"`, `"expires_at_ms":"0"`, 1),
+		strings.Replace(strings.Replace(lease, `"operation":"acquired"`, `"operation":"released"`, 1), `,"expires_at_ms":"10000"`, ``, 1),
+	} {
+		if strings.Contains(mutated, `"operation":"released"`) {
+			if _, err := DecodeServerControl([]byte(mutated)); err != nil {
+				t.Fatalf("released lease without expiry rejected: %v", err)
+			}
+			continue
+		}
+		if _, err := DecodeServerControl([]byte(mutated)); err != ErrMalformed {
+			t.Fatalf("null lease expiry accepted: %v", err)
+		}
+	}
+	for _, field := range []string{"exit_code", "exit_signal", "aborted"} {
+		exit := strings.Replace(string(fixtureBytes(t, "terminal_exit.json")), `"`+field+`":`+map[string]string{"exit_code": "0", "exit_signal": "0", "aborted": "false"}[field], `"`+field+`":null`, 1)
+		if _, err := DecodeServerControl([]byte(exit)); err != ErrMalformed {
+			t.Fatalf("null terminal exit %s accepted: %v", field, err)
+		}
+	}
+}

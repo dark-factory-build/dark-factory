@@ -260,6 +260,9 @@ func decodeControl(data []byte, role senderRole) (ControlFrame, error) {
 	if len(envelope.Body) == 0 || bytes.Equal(bytes.TrimSpace(envelope.Body), []byte("null")) {
 		return ControlFrame{}, ErrMalformed
 	}
+	if err := rejectTerminalNulls(envelope.Type, envelope.Body); err != nil {
+		return ControlFrame{}, ErrMalformed
+	}
 	if !typeAllowed(role, envelope.Type) {
 		return ControlFrame{}, ErrMalformed
 	}
@@ -886,6 +889,9 @@ func fixedHex(name, value string, size int) ([]byte, error) {
 // permissive: duplicate names, bounded nesting/arrays, and safe integer
 // spelling. Typed decoding below then rejects unknown fields.
 func validateJSON(data []byte) error {
+	if err := validateSurrogateEscapes(data); err != nil {
+		return fmt.Errorf("%w: %v", ErrMalformed, err)
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
 	if err := scanJSONValue(decoder, 0); err != nil {
@@ -894,6 +900,99 @@ func validateJSON(data []byte) error {
 	var extra any
 	if err := decoder.Decode(&extra); err != io.EOF {
 		return fmt.Errorf("%w: trailing JSON", ErrMalformed)
+	}
+	return nil
+}
+
+// encoding/json replaces an escaped lone UTF-16 surrogate with U+FFFD. Scan
+// the source spelling first so the wire cannot silently change the reply or
+// any other protocol text while decoding.
+func validateSurrogateEscapes(data []byte) error {
+	for index := 0; index < len(data); index++ {
+		if data[index] != '"' {
+			continue
+		}
+		for index++; index < len(data); index++ {
+			switch data[index] {
+			case '"':
+				goto nextString
+			case '\\':
+				index++
+				if index >= len(data) {
+					return errors.New("unterminated escape")
+				}
+				if data[index] != 'u' {
+					continue
+				}
+				if index+4 >= len(data) {
+					return errors.New("short unicode escape")
+				}
+				value, ok := parseUnicodeEscape(data[index+1 : index+5])
+				if !ok {
+					return errors.New("invalid unicode escape")
+				}
+				index += 4
+				if value >= 0xdc00 && value <= 0xdfff {
+					return errors.New("lone low surrogate")
+				}
+				if value < 0xd800 || value > 0xdbff {
+					continue
+				}
+				if index+6 >= len(data) || data[index+1] != '\\' || data[index+2] != 'u' {
+					return errors.New("lone high surrogate")
+				}
+				low, ok := parseUnicodeEscape(data[index+3 : index+7])
+				if !ok || low < 0xdc00 || low > 0xdfff {
+					return errors.New("invalid surrogate pair")
+				}
+				index += 6
+			}
+		}
+		return errors.New("unterminated string")
+	nextString:
+	}
+	return nil
+}
+
+func parseUnicodeEscape(value []byte) (uint16, bool) {
+	if len(value) != 4 {
+		return 0, false
+	}
+	var result uint16
+	for _, digit := range value {
+		result <<= 4
+		switch {
+		case digit >= '0' && digit <= '9':
+			result |= uint16(digit - '0')
+		case digit >= 'a' && digit <= 'f':
+			result |= uint16(digit-'a') + 10
+		case digit >= 'A' && digit <= 'F':
+			result |= uint16(digit-'A') + 10
+		default:
+			return 0, false
+		}
+	}
+	return result, true
+}
+
+func rejectTerminalNulls(kind MessageType, body []byte) error {
+	var fields []string
+	switch kind {
+	case TypeTerminalLeaseResult:
+		fields = []string{"expires_at_ms"}
+	case TypeTerminalExit:
+		fields = []string{"session_id", "exit_code", "exit_signal", "aborted"}
+	default:
+		return nil
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(body, &object); err != nil {
+		return err
+	}
+	for _, field := range fields {
+		if raw, ok := object[field]; ok && bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			return errors.New("null scalar")
+		}
 	}
 	return nil
 }

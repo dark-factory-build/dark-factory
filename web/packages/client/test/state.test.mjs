@@ -444,5 +444,9 @@ test("manifest bounds and registry are an exact readable mirror", () => {
     maxFactoryCapacity: manifest.bounds.max_factory_capacity,
     maxTaskPriority: manifest.bounds.max_task_priority,
     maxSQLiteInteger: BigInt(manifest.bounds.max_sqlite_integer),
+    maxTerminalUnackedBytes: manifest.bounds.max_terminal_unacked_bytes,
+    terminalAckTimeoutMs: manifest.bounds.terminal_ack_timeout_ms,
+    maxTerminalRows: manifest.bounds.max_terminal_rows,
+    maxTerminalCols: manifest.bounds.max_terminal_cols,
   });
 });
