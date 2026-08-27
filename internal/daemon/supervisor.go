@@ -33,10 +33,11 @@ type SupervisorSpec struct {
 
 // RunNext admits and synchronously owns one complete shell-worker attempt.
 // The Darwin implementation does not return while it still owns a child.
-func (daemon *Daemon) RunNext(ctx context.Context, spec SupervisorSpec) (kernel.Run, error) {
-	if err := daemon.beginSupervisor(); err != nil {
+func (daemon *Daemon) RunNext(ctx context.Context, spec SupervisorSpec) (run kernel.Run, resultErr error) {
+	registration, err := daemon.registerSupervisor(ctx)
+	if err != nil {
 		return kernel.Run{}, err
 	}
-	defer daemon.endSupervisor()
-	return daemon.runNext(ctx, spec)
+	defer func() { daemon.endSupervisor(registration, resultErr) }()
+	return daemon.runNext(registration.ctx, spec)
 }

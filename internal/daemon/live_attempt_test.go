@@ -144,7 +144,8 @@ func TestLiveAttemptShutdownIsRepeatableAndReportsOwnerError(t *testing.T) {
 
 func TestDaemonCloseWaitsForSupervisorAndRejectsNewOwners(t *testing.T) {
 	daemon := &Daemon{attempts: make(map[kernel.RunID]*liveAttempt)}
-	if err := daemon.beginSupervisor(); err != nil {
+	registration, err := daemon.registerSupervisor(context.Background())
+	if err != nil {
 		t.Fatal(err)
 	}
 	closed := make(chan error, 1)
@@ -154,7 +155,7 @@ func TestDaemonCloseWaitsForSupervisorAndRejectsNewOwners(t *testing.T) {
 		t.Fatalf("Close returned before RunNext owner finished: %v", err)
 	case <-time.After(25 * time.Millisecond):
 	}
-	daemon.endSupervisor()
+	daemon.endSupervisor(registration, nil)
 	select {
 	case err := <-closed:
 		if err != nil {
@@ -163,8 +164,72 @@ func TestDaemonCloseWaitsForSupervisorAndRejectsNewOwners(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("Close did not join the in-flight supervisor")
 	}
-	if err := daemon.beginSupervisor(); !errors.Is(err, ErrTerminalClosed) {
+	if _, err := daemon.registerSupervisor(context.Background()); !errors.Is(err, ErrTerminalClosed) {
 		t.Fatalf("new supervisor after Close = %v", err)
+	}
+}
+
+func TestDaemonCloseCancelsAndJoinsPreLiveSupervisor(t *testing.T) {
+	daemon := &Daemon{attempts: make(map[kernel.RunID]*liveAttempt)}
+	registration, err := daemon.registerSupervisor(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerErr := errors.New("pre-live owner stopped")
+	ownerDone := make(chan struct{})
+	go func() {
+		defer close(ownerDone)
+		<-registration.ctx.Done()
+		daemon.endSupervisor(registration, ownerErr)
+	}()
+
+	if err := daemon.Close(); !errors.Is(err, ownerErr) {
+		t.Fatalf("Close error = %v, want joined owner error", err)
+	}
+	select {
+	case <-ownerDone:
+	case <-time.After(time.Second):
+		t.Fatal("Close returned before pre-live owner joined")
+	}
+	if err := daemon.Close(); !errors.Is(err, ownerErr) {
+		t.Fatalf("repeated Close error = %v, want retained owner error", err)
+	}
+}
+
+func TestDaemonCloseCancelsEveryRegisteredSupervisorExactlyOnce(t *testing.T) {
+	daemon := &Daemon{attempts: make(map[kernel.RunID]*liveAttempt)}
+	const count = 3
+	registrations := make([]*supervisorRegistration, 0, count)
+	for range count {
+		registration, err := daemon.registerSupervisor(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		registrations = append(registrations, registration)
+	}
+	var group sync.WaitGroup
+	group.Add(count)
+	ownerErr := errors.New("owner canceled")
+	for _, registration := range registrations {
+		go func(registration *supervisorRegistration) {
+			defer group.Done()
+			<-registration.ctx.Done()
+			daemon.endSupervisor(registration, ownerErr)
+		}(registration)
+	}
+	results := make(chan error, 2)
+	go func() { results <- daemon.Close() }()
+	go func() { results <- daemon.Close() }()
+	group.Wait()
+	for range 2 {
+		select {
+		case err := <-results:
+			if !errors.Is(err, ownerErr) {
+				t.Fatalf("concurrent Close error = %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("concurrent Close did not join all supervisors")
+		}
 	}
 }
 

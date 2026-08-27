@@ -788,6 +788,12 @@ func kernelProcessExit(exit runner.Exit, at kernel.UnixMillis) (kernel.ProcessEx
 }
 
 func (daemon *Daemon) failRun(run kernel.Run, code kernel.FailureCode, cause error) (kernel.Run, error) {
+	// Infrastructure failure is another path into finalizing. It must share
+	// the same linearization gate as attach and later terminal effects: an
+	// attach cannot validate Running and then send a controller command after
+	// this transition has revoked durable authority.
+	daemon.operationMu.Lock()
+	defer daemon.operationMu.Unlock()
 	failure, err := kernel.NewFailureProposal(code, "daemon attempt failure")
 	if err != nil {
 		return run, errors.Join(cause, err)

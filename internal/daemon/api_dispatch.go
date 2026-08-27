@@ -27,10 +27,22 @@ type Daemon struct {
 	attemptMu sync.Mutex
 	attempts  map[kernel.RunID]*liveAttempt
 	closing   bool
-	// supervisors counts synchronous RunNext calls, including the phase before
-	// a live attempt can register. Add is serialized with closing under
-	// attemptMu, so Close can safely Wait after it rejects new work.
-	supervisors sync.WaitGroup
+	closeDone chan struct{}
+	closeErr  error
+	// supervisors contains every synchronous RunNext owner, including the
+	// phase before a live attempt can register. Registration and closing share
+	// attemptMu, so Close can cancel a real owner rather than passively waiting
+	// for a caller that may still be blocked in pre-release setup.
+	supervisors map[*supervisorRegistration]struct{}
+}
+
+type supervisorRegistration struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	done   chan struct{}
+
+	mu     sync.Mutex
+	result error
 }
 
 // NewDaemon creates an API composition root using the wall clock for durable
@@ -39,14 +51,14 @@ func NewDaemon(store *kernel.Store) (*Daemon, error) {
 	if store == nil {
 		return nil, fmt.Errorf("%w: nil kernel store", kernel.ErrInvalidValue)
 	}
-	return &Daemon{store: store, now: time.Now, attempts: make(map[kernel.RunID]*liveAttempt)}, nil
+	return &Daemon{store: store, now: time.Now, attempts: make(map[kernel.RunID]*liveAttempt), supervisors: make(map[*supervisorRegistration]struct{})}, nil
 }
 
 func newDaemon(store *kernel.Store, now func() time.Time) (*Daemon, error) {
 	if store == nil || now == nil {
 		return nil, fmt.Errorf("%w: invalid daemon", kernel.ErrInvalidValue)
 	}
-	return &Daemon{store: store, now: now, attempts: make(map[kernel.RunID]*liveAttempt)}, nil
+	return &Daemon{store: store, now: now, attempts: make(map[kernel.RunID]*liveAttempt), supervisors: make(map[*supervisorRegistration]struct{})}, nil
 }
 
 // HandleConnection synchronously consumes exactly one authenticated request,
@@ -315,23 +327,47 @@ func (daemon *Daemon) notifyRun(runID kernel.RunID) {
 	}
 }
 
-func (daemon *Daemon) beginSupervisor() error {
-	if daemon == nil {
-		return fmt.Errorf("%w: nil daemon", kernel.ErrInvalidValue)
+func (daemon *Daemon) registerSupervisor(parent context.Context) (*supervisorRegistration, error) {
+	if daemon == nil || parent == nil {
+		return nil, fmt.Errorf("%w: invalid supervisor", kernel.ErrInvalidValue)
 	}
+	ctx, cancel := context.WithCancel(parent)
+	registration := &supervisorRegistration{ctx: ctx, cancel: cancel, done: make(chan struct{})}
 	daemon.attemptMu.Lock()
 	defer daemon.attemptMu.Unlock()
 	if daemon.closing {
-		return ErrTerminalClosed
+		cancel()
+		return nil, ErrTerminalClosed
 	}
-	daemon.supervisors.Add(1)
-	return nil
+	if daemon.supervisors == nil {
+		daemon.supervisors = make(map[*supervisorRegistration]struct{})
+	}
+	daemon.supervisors[registration] = struct{}{}
+	return registration, nil
 }
 
-func (daemon *Daemon) endSupervisor() {
-	if daemon != nil {
-		daemon.supervisors.Done()
+func (daemon *Daemon) endSupervisor(registration *supervisorRegistration, result error) {
+	if daemon == nil || registration == nil {
+		return
 	}
+	registration.mu.Lock()
+	registration.result = result
+	close(registration.done)
+	registration.mu.Unlock()
+	registration.cancel()
+	daemon.attemptMu.Lock()
+	delete(daemon.supervisors, registration)
+	daemon.attemptMu.Unlock()
+}
+
+func (registration *supervisorRegistration) wait() error {
+	if registration == nil {
+		return nil
+	}
+	<-registration.done
+	registration.mu.Lock()
+	defer registration.mu.Unlock()
+	return registration.result
 }
 
 // Close stops accepting live attempts and synchronously joins every owner.

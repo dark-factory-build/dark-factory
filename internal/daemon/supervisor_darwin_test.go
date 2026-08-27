@@ -5,6 +5,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -80,6 +81,215 @@ func TestSupervisorRunsRegisteredShellWorkerToTypedSuccess(t *testing.T) {
 	changeState, found, err := fixture.store.Change(context.Background(), *run.ChangeID)
 	if err != nil || !found || changeState.Selection == nil || fmt.Sprintf("%x", changeState.Selection.Commit().Bytes()) != fixture.base {
 		t.Fatalf("Change exact base = %+v, found=%v, err=%v", changeState.Selection, found, err)
+	}
+}
+
+func TestFailRunSharesOperationGateWithTerminalEffects(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	store, err := kernel.Create(ctx, filepath.Join(root, "kernel.sqlite"), kernel.FactoryConfig{Capacity: 1}, supervisorTime())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	projectID := supervisorProjectID(t, 210)
+	agentID := supervisorAgentID(t, 211)
+	taskID := supervisorTaskID(t, 212)
+	project, err := store.CreateProject(ctx, kernel.NewProject{ID: projectID, Name: "gate-project", Root: filepath.Join(root, "source")}, supervisorTime())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateAgent(ctx, kernel.NewAgent{ID: agentID, ProjectID: project.ID, Name: "gate-agent", Role: kernel.RoleOrchestrator, Provider: kernel.ProviderShell, ExecutionMode: kernel.ExecutionUnrestricted, ToolBudgetLimit: 1}, supervisorTime()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnqueueTask(ctx, kernel.NewTask{ID: taskID, ProjectID: project.ID, AssignedAgentID: agentID, IncarnationID: supervisorIncarnationID(t, 213), Title: "gate-task"}, supervisorTime()); err != nil {
+		t.Fatal(err)
+	}
+	factory, err := store.Factory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetDispatch(ctx, factory.Revision, true, supervisorTime()); err != nil {
+		t.Fatal(err)
+	}
+	runID, err := kernel.RunIDFromBytes(supervisorIDBytes(214))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID, err := kernel.TerminalSessionIDFromBytes(supervisorIDBytes(215))
+	if err != nil {
+		t.Fatal(err)
+	}
+	digestBytes := sha256.Sum256([]byte("gate-attempt"))
+	digest, err := kernel.AttemptDigestFromBytes(digestBytes[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	resource := func(seed byte) kernel.ResourceID {
+		id, idErr := kernel.ResourceIDFromBytes(supervisorIDBytes(seed))
+		if idErr != nil {
+			t.Fatal(idErr)
+		}
+		return id
+	}
+	admission, err := store.AdmitNext(ctx, agentID, kernel.AdmissionKeys{
+		RunID: runID, TerminalSessionID: sessionID, AttemptDigest: digest,
+		Resources:   kernel.AdmissionResourceIDs{RuntimeRoot: resource(216), RunnerProcess: resource(217), ProviderProcess: resource(218), ProviderGroup: resource(219)},
+		RuntimeRoot: filepath.Join(root, "runtime"),
+	}, supervisorTime())
+	if err != nil || !admission.Admitted() || admission.Run == nil {
+		t.Fatalf("admission = %+v, %v", admission, err)
+	}
+	daemon, err := newDaemon(store, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	daemon.operationMu.Lock()
+	finished := make(chan struct{})
+	failureCause := errors.New("infrastructure failure")
+	var failed kernel.Run
+	var failErr error
+	go func() {
+		failed, failErr = daemon.failRun(*admission.Run, kernel.FailureInternal, failureCause)
+		close(finished)
+	}()
+	select {
+	case <-finished:
+		t.Fatal("failRun crossed the terminal operation gate")
+	case <-time.After(50 * time.Millisecond):
+	}
+	observed, found, readErr := store.Run(ctx, runID)
+	if readErr != nil || !found || observed.Phase != kernel.RunAdmitted {
+		t.Fatalf("run changed while operation gate held: run=%+v found=%v err=%v", observed, found, readErr)
+	}
+	daemon.operationMu.Unlock()
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("failRun did not finish after operation gate release")
+	}
+	if !errors.Is(failErr, failureCause) {
+		t.Fatalf("failRun error = %v, want infrastructure failure", failErr)
+	}
+	if failed.Phase != kernel.RunFinalizing {
+		t.Fatalf("failRun phase = %s, want finalizing", failed.Phase)
+	}
+}
+
+func TestDaemonCloseActivelyCancelsPreReleaseSupervisor(t *testing.T) {
+	fixture := newSupervisorFixture(t, supervisorProgram(t, false, true))
+	entered := make(chan struct{})
+	continueHook := make(chan struct{})
+	fixture.spec.beforeProviderRelease = func() {
+		close(entered)
+		<-continueHook
+	}
+	runDone := make(chan struct {
+		run kernel.Run
+		err error
+	}, 1)
+	go func() {
+		run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+		runDone <- struct {
+			run kernel.Run
+			err error
+		}{run: run, err: err}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(8 * time.Second):
+		t.Fatal("supervisor did not reach pre-release owner seam")
+	}
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- fixture.daemon.Close() }()
+	select {
+	case err := <-closeDone:
+		t.Fatalf("Close returned while pre-release owner was held: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(continueHook)
+	var result struct {
+		run kernel.Run
+		err error
+	}
+	select {
+	case result = <-runDone:
+	case <-time.After(12 * time.Second):
+		t.Fatal("canceled supervisor did not return")
+	}
+	if result.err == nil || !errors.Is(result.err, context.Canceled) {
+		t.Fatalf("canceled supervisor error = %v, want visible context cancellation", result.err)
+	}
+	select {
+	case closeErr := <-closeDone:
+		if closeErr == nil || !errors.Is(closeErr, context.Canceled) {
+			t.Fatalf("Close error = %v, want joined context cancellation", closeErr)
+		}
+	case <-time.After(12 * time.Second):
+		t.Fatal("Close did not join canceled supervisor")
+	}
+	fixture.assertInterruptedFinalizing(t, result.run, kernel.TerminalSessionActive)
+	if _, err := os.Stat(fixture.witness); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("provider executed before release: stat err=%v", err)
+	}
+}
+
+func TestDaemonCloseActivelyCancelsBeforeLiveRegistration(t *testing.T) {
+	fixture := newSupervisorFixture(t, supervisorProgram(t, false, true))
+	entered := make(chan struct{})
+	continueHook := make(chan struct{})
+	fixture.spec.afterAdmission = func() error {
+		close(entered)
+		<-continueHook
+		return nil
+	}
+	runDone := make(chan struct {
+		run kernel.Run
+		err error
+	}, 1)
+	go func() {
+		run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+		runDone <- struct {
+			run kernel.Run
+			err error
+		}{run: run, err: err}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(8 * time.Second):
+		t.Fatal("supervisor did not reach post-admission/pre-live seam")
+	}
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- fixture.daemon.Close() }()
+	select {
+	case err := <-closeDone:
+		t.Fatalf("Close returned while pre-live owner was held: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(continueHook)
+	var result struct {
+		run kernel.Run
+		err error
+	}
+	select {
+	case result = <-runDone:
+	case <-time.After(8 * time.Second):
+		t.Fatal("canceled pre-live supervisor did not return")
+	}
+	if result.err == nil || !errors.Is(result.err, context.Canceled) {
+		t.Fatal("canceled pre-live supervisor unexpectedly succeeded")
+	}
+	select {
+	case closeErr := <-closeDone:
+		if closeErr == nil || !errors.Is(closeErr, context.Canceled) {
+			t.Fatalf("Close error = %v, want joined context cancellation", closeErr)
+		}
+	case <-time.After(8 * time.Second):
+		t.Fatal("Close did not join canceled pre-live supervisor")
+	}
+	fixture.assertInterruptedFinalizing(t, result.run, kernel.TerminalSessionDeclared)
+	if _, err := os.Stat(fixture.witness); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("provider executed after pre-live cancellation: stat err=%v", err)
 	}
 }
 
@@ -955,6 +1165,37 @@ func (fixture *supervisorFixture) assertTerminal(t *testing.T, run kernel.Run, k
 	}
 	if task.Status != want {
 		t.Fatalf("task status = %s, want %s", task.Status.String(), want.String())
+	}
+}
+
+func (fixture *supervisorFixture) assertInterruptedFinalizing(t *testing.T, run kernel.Run, sessionState kernel.TerminalSessionState) {
+	t.Helper()
+	if run.ID == (kernel.RunID{}) || run.Phase != kernel.RunFinalizing || run.Terminal != nil || run.CredentialRevokedAt == nil || run.Proposal == nil {
+		t.Fatalf("interrupted run = %+v, want revoked finalizing state", run)
+	}
+	fixture.trackRun(run.ID)
+	durable, found, err := fixture.store.Run(context.Background(), run.ID)
+	if err != nil || !found {
+		t.Fatalf("durable interrupted run: found=%v err=%v", found, err)
+	}
+	if durable.Phase != kernel.RunFinalizing || durable.Terminal != nil || durable.CredentialRevokedAt == nil || durable.Revision != run.Revision {
+		t.Fatalf("durable interrupted run = %+v", durable)
+	}
+	session, found, err := fixture.store.TerminalSessionForRun(context.Background(), run.ID)
+	if err != nil || !found {
+		t.Fatalf("durable interrupted session: found=%v err=%v", found, err)
+	}
+	if session.State != sessionState || session.ClosedAt != nil {
+		t.Fatalf("interrupted session = %+v, want state %s and not closed", session, sessionState)
+	}
+	resources := fixture.resources(t, run.ID)
+	if len(resources) != 4 {
+		t.Fatalf("interrupted resource count = %d, want 4", len(resources))
+	}
+	for _, resource := range resources {
+		if resource.State != kernel.ResourceReleasing {
+			t.Fatalf("interrupted resource %s = %s, want releasing", resource.Kind, resource.State)
+		}
 	}
 }
 

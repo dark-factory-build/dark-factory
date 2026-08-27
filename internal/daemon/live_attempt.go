@@ -301,30 +301,54 @@ func (daemon *Daemon) closeLiveAttempts() error {
 	}
 	daemon.operationMu.Lock()
 	daemon.attemptMu.Lock()
-	alreadyClosing := daemon.closing
-	if !alreadyClosing {
-		daemon.closing = true
+	if daemon.closing {
+		done := daemon.closeDone
+		daemon.attemptMu.Unlock()
+		daemon.operationMu.Unlock()
+		if done != nil {
+			<-done
+		}
+		return daemon.closeErr
 	}
+	daemon.closing = true
+	daemon.closeDone = make(chan struct{})
+	done := daemon.closeDone
 	attempts := make([]*liveAttempt, 0, len(daemon.attempts))
 	for _, attempt := range daemon.attempts {
 		attempts = append(attempts, attempt)
 	}
+	supervisors := make([]*supervisorRegistration, 0, len(daemon.supervisors))
+	for registration := range daemon.supervisors {
+		supervisors = append(supervisors, registration)
+	}
 	daemon.attemptMu.Unlock()
 	daemon.operationMu.Unlock()
+	for _, registration := range supervisors {
+		registration.cancel()
+	}
 	var result error
-	if !alreadyClosing {
-		for _, attempt := range attempts {
-			result = errors.Join(result, attempt.close())
-		}
+	// RunNext owns the outer child and resource cleanup even before it can
+	// register a live attempt. Cancellation lets that same outer owner finish
+	// its terminal acknowledgement and resource cleanup; do not preempt a
+	// terminal-seen owner by closing its controller before that acknowledgement.
+	for _, registration := range supervisors {
+		result = errors.Join(result, registration.wait())
+	}
+	// A live attempt can exist without a supervisor only in a lower-level test
+	// or a failed handoff. Close those leftovers as a fail-safe after all
+	// registered outer owners have joined. Registered owners close their live
+	// attempt as part of their own synchronous cleanup, so these calls are
+	// idempotent joins rather than a second controller owner.
+	for _, attempt := range attempts {
+		result = errors.Join(result, attempt.close())
 	}
 	for _, attempt := range attempts {
 		result = errors.Join(result, attempt.join())
 	}
-	// RunNext owns the outer child and resource cleanup even before it can
-	// register a live attempt. Wait for those synchronous owners as the final
-	// shutdown step; no Add can race this Wait because beginSupervisor checks
-	// closing under attemptMu above.
-	daemon.supervisors.Wait()
+	daemon.attemptMu.Lock()
+	daemon.closeErr = result
+	close(done)
+	daemon.attemptMu.Unlock()
 	return result
 }
 
