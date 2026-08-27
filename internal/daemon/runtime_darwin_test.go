@@ -20,9 +20,23 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func runtimeTempDir(t testing.TB) string {
+	t.Helper()
+	path, err := os.MkdirTemp("/private/tmp", "dark-factory-runtime-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o700); err != nil {
+		_ = os.RemoveAll(path)
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(path) })
+	return path
+}
+
 func TestRuntimeCreatePublishClosePreservesExactPrivateEffects(t *testing.T) {
 	before := openFDCensus(t)
-	parentPath := filepath.Join(t.TempDir(), "private")
+	parentPath := filepath.Join(runtimeTempDir(t), "private")
 	if err := os.Mkdir(parentPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +128,7 @@ func TestRuntimeRejectsExistingAndUnsafeAuthoritiesWithoutMutation(t *testing.T)
 	}
 	for name, create := range tests {
 		t.Run(name, func(t *testing.T) {
-			parentPath := filepath.Join(t.TempDir(), "private")
+			parentPath := filepath.Join(runtimeTempDir(t), "private")
 			if err := os.Mkdir(parentPath, 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -144,7 +158,7 @@ func TestRuntimeRejectsExistingAndUnsafeAuthoritiesWithoutMutation(t *testing.T)
 		})
 	}
 
-	parentPath := filepath.Join(t.TempDir(), "shared")
+	parentPath := filepath.Join(runtimeTempDir(t), "shared")
 	if err := os.Mkdir(parentPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +179,7 @@ func TestRuntimeRejectsExistingAndUnsafeAuthoritiesWithoutMutation(t *testing.T)
 
 func TestRuntimeParentLockSerializesAndRejectsChangedAuthority(t *testing.T) {
 	t.Run("independent process", func(t *testing.T) {
-		parentPath := filepath.Join(t.TempDir(), "private")
+		parentPath := filepath.Join(runtimeTempDir(t), "private")
 		if err := os.Mkdir(parentPath, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -220,7 +234,7 @@ func TestRuntimeParentLockSerializesAndRejectsChangedAuthority(t *testing.T) {
 	})
 
 	t.Run("contention is before effect", func(t *testing.T) {
-		parentPath := filepath.Join(t.TempDir(), "private")
+		parentPath := filepath.Join(runtimeTempDir(t), "private")
 		if err := os.Mkdir(parentPath, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -245,7 +259,7 @@ func TestRuntimeParentLockSerializesAndRejectsChangedAuthority(t *testing.T) {
 
 	for _, mutation := range []string{"missing", "replacement", "hardlink", "mode"} {
 		t.Run(mutation, func(t *testing.T) {
-			parentPath := filepath.Join(t.TempDir(), "private")
+			parentPath := filepath.Join(runtimeTempDir(t), "private")
 			if err := os.Mkdir(parentPath, 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -309,7 +323,7 @@ func TestRuntimeParentLockProcessHelper(t *testing.T) {
 }
 
 func TestRuntimeParentCreationNeverUnlinksReplacement(t *testing.T) {
-	parentPath := filepath.Join(t.TempDir(), "private")
+	parentPath := filepath.Join(runtimeTempDir(t), "private")
 	if err := os.Mkdir(parentPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -334,7 +348,7 @@ func TestRuntimeParentCreationNeverUnlinksReplacement(t *testing.T) {
 }
 
 func TestRuntimeParentReopensDurableLockAuthority(t *testing.T) {
-	parentPath := filepath.Join(t.TempDir(), "private")
+	parentPath := filepath.Join(runtimeTempDir(t), "private")
 	if err := os.Mkdir(parentPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -363,7 +377,7 @@ func TestRuntimeParentReopensDurableLockAuthority(t *testing.T) {
 }
 
 func TestRuntimeLifetimeLeaseRequiresLastDuplicateClose(t *testing.T) {
-	parentPath := filepath.Join(t.TempDir(), "private")
+	parentPath := filepath.Join(runtimeTempDir(t), "private")
 	if err := os.Mkdir(parentPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -401,7 +415,7 @@ func TestRuntimeLifetimeLeaseRequiresLastDuplicateClose(t *testing.T) {
 func TestAdoptRuntimeClosesPreBindingCreationCrash(t *testing.T) {
 	for _, partial := range []string{"empty", "home"} {
 		t.Run(partial, func(t *testing.T) {
-			parentPath := filepath.Join(t.TempDir(), "private")
+			parentPath := filepath.Join(runtimeTempDir(t), "private")
 			if err := os.Mkdir(parentPath, 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -448,7 +462,7 @@ func TestAdoptRuntimeClosesPreBindingCreationCrash(t *testing.T) {
 	}
 
 	t.Run("later phase effect is not adoptable", func(t *testing.T) {
-		parentPath := filepath.Join(t.TempDir(), "private")
+		parentPath := filepath.Join(runtimeTempDir(t), "private")
 		if err := os.Mkdir(parentPath, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -476,7 +490,7 @@ func TestAdoptRuntimeClosesPreBindingCreationCrash(t *testing.T) {
 
 func TestAdoptRuntimeAcquiresLifetimeBeforeRepair(t *testing.T) {
 	t.Run("held lifetime with missing layout", func(t *testing.T) {
-		parentPath := filepath.Join(t.TempDir(), "private")
+		parentPath := filepath.Join(runtimeTempDir(t), "private")
 		if err := os.Mkdir(parentPath, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -498,7 +512,7 @@ func TestAdoptRuntimeAcquiresLifetimeBeforeRepair(t *testing.T) {
 	})
 
 	t.Run("held lifetime with malformed graph", func(t *testing.T) {
-		parentPath := filepath.Join(t.TempDir(), "private")
+		parentPath := filepath.Join(runtimeTempDir(t), "private")
 		if err := os.Mkdir(parentPath, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -523,7 +537,7 @@ func TestAdoptRuntimeAcquiresLifetimeBeforeRepair(t *testing.T) {
 	})
 
 	t.Run("lifetime replacement during acquisition", func(t *testing.T) {
-		parentPath := filepath.Join(t.TempDir(), "private")
+		parentPath := filepath.Join(runtimeTempDir(t), "private")
 		if err := os.Mkdir(parentPath, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -584,7 +598,7 @@ func TestAdoptRuntimeAcquiresLifetimeBeforeRepair(t *testing.T) {
 	})
 
 	t.Run("pre-lifetime adoption is parent-lock serialized", func(t *testing.T) {
-		parentPath := filepath.Join(t.TempDir(), "private")
+		parentPath := filepath.Join(runtimeTempDir(t), "private")
 		if err := os.Mkdir(parentPath, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -624,7 +638,7 @@ func TestAdoptRuntimeAcquiresLifetimeBeforeRepair(t *testing.T) {
 func TestRuntimeBindingAndDuplicationRejectChangedParentLockMetadata(t *testing.T) {
 	for _, mutation := range []string{"mode", "hardlink"} {
 		t.Run(mutation, func(t *testing.T) {
-			parentPath := filepath.Join(t.TempDir(), "private")
+			parentPath := filepath.Join(runtimeTempDir(t), "private")
 			if err := os.Mkdir(parentPath, 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -733,7 +747,7 @@ func TestRuntimeBindingRejectsLifetimeMutation(t *testing.T) {
 
 func TestRuntimeParentAndLeafSwapsFailClosed(t *testing.T) {
 	t.Run("parent", func(t *testing.T) {
-		root := t.TempDir()
+		root := runtimeTempDir(t)
 		parentPath := filepath.Join(root, "private")
 		if err := os.Mkdir(parentPath, 0o700); err != nil {
 			t.Fatal(err)
@@ -757,7 +771,7 @@ func TestRuntimeParentAndLeafSwapsFailClosed(t *testing.T) {
 	})
 
 	t.Run("leaf", func(t *testing.T) {
-		parentPath := filepath.Join(t.TempDir(), "private")
+		parentPath := filepath.Join(runtimeTempDir(t), "private")
 		if err := os.Mkdir(parentPath, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -846,7 +860,7 @@ func TestRuntimeAuthorityRejectsPathReplacementAtEveryAccessor(t *testing.T) {
 
 func TestFailedRuntimeCreationCleansOnlyExactEmptyIdentity(t *testing.T) {
 	t.Run("fsync failure", func(t *testing.T) {
-		parentPath := filepath.Join(t.TempDir(), "private")
+		parentPath := filepath.Join(runtimeTempDir(t), "private")
 		if err := os.Mkdir(parentPath, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -872,7 +886,7 @@ func TestFailedRuntimeCreationCleansOnlyExactEmptyIdentity(t *testing.T) {
 	})
 
 	t.Run("post-lifetime failure cleans exact layout", func(t *testing.T) {
-		parentPath := filepath.Join(t.TempDir(), "private")
+		parentPath := filepath.Join(runtimeTempDir(t), "private")
 		if err := os.Mkdir(parentPath, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -901,7 +915,7 @@ func TestFailedRuntimeCreationCleansOnlyExactEmptyIdentity(t *testing.T) {
 	})
 
 	t.Run("moved exact lifetime cleanup preserves replacement", func(t *testing.T) {
-		parentPath := filepath.Join(t.TempDir(), "private")
+		parentPath := filepath.Join(runtimeTempDir(t), "private")
 		if err := os.Mkdir(parentPath, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -950,7 +964,7 @@ func TestFailedRuntimeCreationCleansOnlyExactEmptyIdentity(t *testing.T) {
 	})
 
 	t.Run("nonempty retained uncertainty", func(t *testing.T) {
-		parentPath := filepath.Join(t.TempDir(), "private")
+		parentPath := filepath.Join(runtimeTempDir(t), "private")
 		if err := os.Mkdir(parentPath, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -980,7 +994,7 @@ func TestFailedRuntimeCreationCleansOnlyExactEmptyIdentity(t *testing.T) {
 	})
 
 	t.Run("bounded search refusal", func(t *testing.T) {
-		parentPath := filepath.Join(t.TempDir(), "private")
+		parentPath := filepath.Join(runtimeTempDir(t), "private")
 		if err := os.Mkdir(parentPath, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -1204,7 +1218,7 @@ func TestRuntimeValuesAndErrorsRedactPrivateSentinels(t *testing.T) {
 
 func TestRemoveRecordedRuntimeUsesFixedBoundedGrammar(t *testing.T) {
 	t.Run("active then complete and idempotent", func(t *testing.T) {
-		parentPath := filepath.Join(t.TempDir(), "private")
+		parentPath := filepath.Join(runtimeTempDir(t), "private")
 		if err := os.Mkdir(parentPath, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -1241,7 +1255,7 @@ func TestRemoveRecordedRuntimeUsesFixedBoundedGrammar(t *testing.T) {
 	t.Run("terminal and unexpected entries block", func(t *testing.T) {
 		for _, name := range []string{runner.TerminalSpoolName, "unexpected"} {
 			t.Run(name, func(t *testing.T) {
-				parentPath := filepath.Join(t.TempDir(), "private")
+				parentPath := filepath.Join(runtimeTempDir(t), "private")
 				if err := os.Mkdir(parentPath, 0o700); err != nil {
 					t.Fatal(err)
 				}
@@ -1271,7 +1285,7 @@ func TestRemoveRecordedRuntimeUsesFixedBoundedGrammar(t *testing.T) {
 	})
 
 	t.Run("bounded progress", func(t *testing.T) {
-		parentPath := filepath.Join(t.TempDir(), "private")
+		parentPath := filepath.Join(runtimeTempDir(t), "private")
 		if err := os.Mkdir(parentPath, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -1334,20 +1348,13 @@ func TestRemoveRecordedRuntimeRejectsUnsafeTreesAndAuthorityChanges(t *testing.T
 			var path string
 			var identity runner.FileIdentity
 			if kind == "socket" {
-				short, err := os.MkdirTemp("/private/tmp", "df-runtime-socket-")
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Chmod(short, 0o700); err != nil {
-					t.Fatal(err)
-				}
-				t.Cleanup(func() { _ = os.RemoveAll(short) })
+				short := runtimeTempDir(t)
 				parent, runtime, path, identity = removableRuntimeFixtureAt(t, filepath.Join(short, "private"))
 			} else {
 				parent, runtime, path, identity = removableRuntimeFixture(t)
 			}
 			defer parent.Close()
-			target := filepath.Join(t.TempDir(), "external")
+			target := filepath.Join(runtimeTempDir(t), "external")
 			if err := os.WriteFile(target, []byte("external"), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -1453,7 +1460,7 @@ func TestRemoveRecordedRuntimeBoundsDepthAndReestablishesDurableAbsence(t *testi
 	})
 
 	t.Run("already absent fsync and recheck", func(t *testing.T) {
-		parentPath := filepath.Join(t.TempDir(), "private")
+		parentPath := filepath.Join(runtimeTempDir(t), "private")
 		if err := os.Mkdir(parentPath, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -1513,7 +1520,7 @@ func TestRemoveRecordedRuntimeBoundsDepthAndReestablishesDurableAbsence(t *testi
 
 func removableRuntimeFixture(t testing.TB) (*RuntimeParent, *Runtime, string, runner.FileIdentity) {
 	t.Helper()
-	parentPath := filepath.Join(t.TempDir(), "private")
+	parentPath := filepath.Join(runtimeTempDir(t), "private")
 	return removableRuntimeFixtureAt(t, parentPath)
 }
 
@@ -1534,7 +1541,7 @@ func removableRuntimeFixtureAt(t testing.TB, parentPath string) (*RuntimeParent,
 
 func newTestRuntime(t testing.TB) *Runtime {
 	t.Helper()
-	parentPath := filepath.Join(t.TempDir(), "private")
+	parentPath := filepath.Join(runtimeTempDir(t), "private")
 	if err := os.Mkdir(parentPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
