@@ -15,8 +15,7 @@ import (
 
 type subscriptionInterruptError struct{}
 
-func (subscriptionInterruptError) Error() string   { return "independent driver interruption" }
-func (subscriptionInterruptError) Temporary() bool { return true }
+func (subscriptionInterruptError) Error() string { return "independent driver interruption" }
 
 func TestBrowserStateSubscriptionOwnerCancellationIgnoresDriverInterrupt(t *testing.T) {
 	subscription, backend := newBrowserStateSubscriptionLoopTest()
@@ -98,7 +97,9 @@ func TestBrowserRuntimeCloseJoinsDisconnectedActiveStateSubscription(t *testing.
 		t.Fatalf("active subscription barrier = %+v", frame)
 	}
 
-	_ = connection.CloseNow()
+	if err := connection.CloseNow(); err != nil {
+		t.Fatalf("browser disconnect = %v", err)
+	}
 	if err := fixture.runtime.Close(); err != nil {
 		t.Fatalf("runtime close after browser disconnect = %v", err)
 	}
