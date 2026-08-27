@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -15,7 +16,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func TestTerminateConsumesQueuedNaturalExitBeforeSignal(t *testing.T) {
+func TestTerminateConvergesQueuedNaturalExit(t *testing.T) {
 	f := newFixture(t)
 	child := f.start("/bin/sh", []string{"-c", "exit 23"}, nil, outputFile(t, filepath.Join(f.root, "out")))
 	if _, err := child.Activate(); err != nil {
@@ -23,18 +24,10 @@ func TestTerminateConsumesQueuedNaturalExitBeforeSignal(t *testing.T) {
 	}
 	installOwnedChildSafetyCleanup(t, child)
 	waitOwnedGroupWithoutLiveMembers(t, child.Identity())
-	var signals atomic.Int32
-	child.testSignal = func(unix.Signal) error {
-		signals.Add(1)
-		return errors.New("unexpected signal")
-	}
 
 	exit, err := child.Terminate(time.Second)
 	if err != nil || exit.Code != 23 || exit.Signal != 0 {
 		t.Fatalf("queued natural exit=%+v err=%v", exit, err)
-	}
-	if got := signals.Load(); got != 0 {
-		t.Fatalf("queued NOTE_EXIT reached signal path %d times", got)
 	}
 	assertWaitedAndAbsent(t, child)
 	if _, err := child.Terminate(time.Second); !errors.Is(err, ErrState) {
@@ -143,6 +136,114 @@ func TestTerminatePreservesEPERMAfterExitWhenConvergenceFails(t *testing.T) {
 		t.Fatalf("restored convergence exit=%+v err=%v", exit, err)
 	}
 	assertWaitedAndAbsent(t, child)
+}
+
+func TestTypedTerminalTerminateIsNotStarvedByUnreadDaemonReadiness(t *testing.T) {
+	f := newFixture(t)
+	ready := filepath.Join(f.root, "terminal-owner-ready")
+	child := startLivePTYChild(t, f, ready)
+	installOwnedChildSafetyCleanup(t, child)
+
+	daemon, peer, err := newControlPair("unread-daemon", "unread-daemon-peer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = daemon.Close()
+		_ = peer.Close()
+	})
+	reads := &attemptReadSet{kq: child.kq, daemonFD: int(daemon.Fd()), workerFD: -1, ptyFD: int(child.ptyMaster.Fd())}
+	if err := reads.registerDaemon(); err != nil {
+		t.Fatal(err)
+	}
+	if err := reads.registerPTY(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reads.processOnly() })
+	if err := writeControlFrame(peer, terminalCommandFrame(TerminalCommand{Kind: TerminalCredit, Credit: 1}), maxFrameBytes); err != nil {
+		t.Fatal(err)
+	}
+	assertLevelTriggeredReadiness(t, child.kq, int(daemon.Fd()))
+	cancelRelease := releaseUnreadReadinessAfter(t, daemon, 1200*time.Millisecond)
+
+	owner := terminalOwner{child: child, daemon: daemon, reads: reads, daemonOpen: true, ptyOpen: true}
+	started := time.Now()
+	err = owner.command(attemptFrame{Version: 1, Kind: "terminate"})
+	elapsed := time.Since(started)
+	cancelRelease()
+	if err != nil {
+		t.Fatalf("typed terminal termination: %v", err)
+	}
+	if elapsed >= 600*time.Millisecond {
+		t.Fatalf("typed terminal termination starved behind unread daemon readiness for %s", elapsed)
+	}
+	if !owner.stopRequested {
+		t.Fatal("terminal owner did not commit its typed stop transition")
+	}
+	exit, err := child.waitedExit()
+	if err != nil || exit.Signal != int(unix.SIGTERM) {
+		t.Fatalf("terminal evidence=%+v err=%v", exit, err)
+	}
+	if err := reads.removeDaemon(); err != nil {
+		t.Fatal(err)
+	}
+	assertWaitedAndAbsent(t, child)
+}
+
+func startLivePTYChild(t *testing.T, f *fixture, ready string) *OwnedChild {
+	t.Helper()
+	gate, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := fmt.Sprintf("printf ready > %q; exec /bin/sleep 30", ready)
+	spec, err := PrepareExecSpec(ExecSpec{Target: "/bin/sh", Args: []string{"-c", command}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C", "TERM=xterm"}, Cwd: f.cwd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := StartBlockedPTY(f.lease, gate, spec, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.child = child
+	if _, err := child.Activate(); err != nil {
+		t.Fatal(err)
+	}
+	waitFile(t, ready)
+	return child
+}
+
+func assertLevelTriggeredReadiness(t *testing.T, kq, fd int) {
+	t.Helper()
+	events := make([]unix.Kevent_t, 1)
+	zero := unix.Timespec{}
+	n, err := unix.Kevent(kq, nil, events, &zero)
+	if err != nil || n != 1 || events[0].Filter != unix.EVFILT_READ || events[0].Ident != uint64(fd) {
+		t.Fatalf("daemon readiness event=%+v count=%d err=%v", events[0], n, err)
+	}
+}
+
+func releaseUnreadReadinessAfter(t *testing.T, daemon *os.File, delay time.Duration) func() {
+	t.Helper()
+	cancel := make(chan struct{})
+	done := make(chan struct{})
+	var once sync.Once
+	go func() {
+		defer close(done)
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			_, _ = unix.Read(int(daemon.Fd()), make([]byte, maxFrameBytes))
+		case <-cancel:
+		}
+	}()
+	stop := func() {
+		once.Do(func() { close(cancel) })
+		<-done
+	}
+	t.Cleanup(stop)
+	return stop
 }
 
 func startControlledNaturalExit(t *testing.T, f *fixture, code int) (*OwnedChild, *os.File) {

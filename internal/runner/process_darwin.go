@@ -745,9 +745,6 @@ func (c *OwnedChild) Terminate(timeout time.Duration) (Exit, error) {
 	if timeout <= 0 {
 		timeout = defaultStopTimeout
 	}
-	if err := c.refreshExit(); err != nil {
-		return Exit{}, err
-	}
 	var signalFailure error
 	if !c.exitObserved {
 		if err := c.signalGroup(unix.SIGTERM); err != nil {
