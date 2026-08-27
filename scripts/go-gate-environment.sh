@@ -19,12 +19,23 @@ go_gate_scrub_environment() {
         GIT_CREDENTIAL_HELPER GIT_SSL_CERT GIT_SSL_KEY GIT_SSL_CAINFO \
         GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM GIT_TERMINAL_PROMPT \
         GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_CONFIG_COUNT \
+        GIT_CONFIG_PARAMETERS GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_EXTERNAL_DIFF \
+        GIT_DIFF_OPTS GIT_PAGER GIT_EDITOR GIT_SEQUENCE_EDITOR GIT_TRACE GIT_TRACE_PACKET \
+        GIT_TRACE_PERFORMANCE GIT_TRACE_SETUP GIT_TRACE_CURL GIT_CURL_VERBOSE \
         GH_CONFIG_DIR GITHUB_CONFIG_DIR \
         NPM_TOKEN NODE_AUTH_TOKEN AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY \
         AWS_SESSION_TOKEN AWS_PROFILE AWS_SHARED_CREDENTIALS_FILE AWS_CONFIG_FILE \
-        GOAUTH GOPRIVATE GONOSUMDB GONOPROXY NETRC \
+        GOAUTH GOPRIVATE GONOSUMDB GONOPROXY GOINSECURE GOVCS GOFLAGS \
+        GO111MODULE GOAMD64 GOARM64 GOFIPS140 GODEBUG GOEXPERIMENT NETRC \
         HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY \
-        npm_config_proxy npm_config_https_proxy npm_config_userconfig NPM_CONFIG_USERCONFIG
+        npm_config_proxy npm_config_https_proxy npm_config_userconfig NPM_CONFIG_USERCONFIG \
+        npm_config_cache NPM_CONFIG_CACHE npm_config_store_dir NPM_CONFIG_STORE_DIR \
+        npm_config_registry NPM_CONFIG_REGISTRY npm_config_globalconfig NPM_CONFIG_GLOBALCONFIG \
+        npm_config_prefix NPM_CONFIG_PREFIX npm_config_node_gyp NPM_CONFIG_NODE_GYP \
+        COREPACK_DEFAULT_TO_LATEST COREPACK_INTEGRITY_KEYS NODE_OPTIONS NODE_EXTRA_CA_CERTS \
+        NODE_PATH NODE_DEBUG DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH DYLD_FRAMEWORK_PATH \
+        LD_PRELOAD LD_LIBRARY_PATH LIBRARY_PATH CPATH C_INCLUDE_PATH CPLUS_INCLUDE_PATH \
+        NPM_CONFIG_WORKSPACE
 }
 
 go_gate_stat() {
@@ -39,9 +50,97 @@ go_gate_validate_identity() {
     [ "$(id -u)" = "${go_gate_root_uid-}" ] || return 1
     [ "$(stat -f '%Lp' "$go_gate_root" 2>/dev/null)" = 700 ] || return 1
     [ -n "${go_gate_marker-}" ] && [ -n "${go_gate_marker_identity-}" ] || return 0
-    [ "$(cat "$go_gate_marker" 2>/dev/null)" = "$go_gate_nonce" ] || return 1
     [ ! -L "$go_gate_marker" ] && [ -f "$go_gate_marker" ] || return 1
     [ "$(go_gate_stat "$go_gate_marker")" = "$go_gate_marker_identity" ] || return 1
+    [ "$(awk -v nonce="$go_gate_nonce" \
+        'NR == 1 { value=$0 } NR > 1 { invalid=1 } END { if (invalid || value != nonce) exit 1; print value }' \
+        "$go_gate_marker" 2>/dev/null)" = "$go_gate_nonce" ] || return 1
+}
+
+go_gate_validate_directories() {
+    for go_gate_directory in tmp cache modcache corepack npm-cache; do
+        go_gate_directory_path="$go_gate_root/$go_gate_directory"
+        [ ! -L "$go_gate_directory_path" ] && [ -d "$go_gate_directory_path" ] || return 1
+        [ "$(CDPATH= cd -P -- "$go_gate_directory_path" 2>/dev/null && pwd -P)" = "$go_gate_directory_path" ] || return 1
+        case "$go_gate_directory" in
+            tmp) go_gate_expected_identity=${go_gate_tmp_identity-} ;;
+            cache) go_gate_expected_identity=${go_gate_cache_identity-} ;;
+            modcache) go_gate_expected_identity=${go_gate_modcache_identity-} ;;
+            corepack) go_gate_expected_identity=${go_gate_corepack_identity-} ;;
+            npm-cache) go_gate_expected_identity=${go_gate_npm_cache_identity-} ;;
+            *) return 1 ;;
+        esac
+        [ "$(go_gate_stat "$go_gate_directory_path")" = "$go_gate_expected_identity" ] || return 1
+        [ "$(stat -f '%Lp' "$go_gate_directory_path" 2>/dev/null)" = 700 ] || return 1
+    done
+}
+
+go_gate_before_stage() {
+    go_gate_validate_identity && go_gate_validate_directories || {
+        echo "go gate: scratch identity changed before stage" >&2
+        return 1
+    }
+}
+
+go_gate_run_bounded() {
+    go_gate_timeout_seconds=$1
+    shift
+    command -v perl >/dev/null 2>&1 || {
+        echo "go gate: perl is required for bounded stages" >&2
+        return 1
+    }
+    perl -e '
+use strict;
+use warnings;
+use POSIX qw(setpgid WIFEXITED WEXITSTATUS WIFSIGNALED WTERMSIG);
+
+my $seconds = shift @ARGV;
+die "invalid timeout\n" unless defined $seconds && $seconds =~ /^\d+$/ && $seconds > 0;
+die "missing command\n" unless @ARGV;
+my $pid = fork();
+die "fork failed: $!\n" unless defined $pid;
+if ($pid == 0) {
+    setpgid(0, 0);
+    exec @ARGV;
+    exit 127;
+}
+setpgid($pid, $pid);
+my $timed_out = 0;
+my $term_sent = 0;
+$SIG{ALRM} = sub {
+    $timed_out = 1;
+    if (!$term_sent) {
+        kill "TERM", -$pid;
+        $term_sent = 1;
+        alarm 1;
+    } else {
+        kill "KILL", -$pid;
+        alarm 1;
+    }
+};
+alarm $seconds;
+waitpid($pid, 0);
+alarm 0;
+if ($timed_out) {
+    waitpid($pid, 0);
+    exit 124;
+}
+my $status = $?;
+my $exit_code = WIFEXITED($status) ? WEXITSTATUS($status) : 128 + WTERMSIG($status);
+exit $exit_code;
+' "$go_gate_timeout_seconds" "$@"
+}
+
+go_gate_stage() {
+    go_gate_before_stage || return 1
+    go_gate_stage_status=0
+    if go_gate_run_bounded "$@"; then
+        go_gate_stage_status=0
+    else
+        go_gate_stage_status=$?
+    fi
+    go_gate_before_stage || return 1
+    return "$go_gate_stage_status"
 }
 
 go_gate_environment_setup() {
@@ -114,8 +213,16 @@ go_gate_environment_setup() {
             echo "go gate: scratch directory is not mode 0700: $go_gate_directory" >&2
             return 1
         }
+        case "$go_gate_directory" in
+            tmp) go_gate_tmp_identity=$(go_gate_stat "$go_gate_root/$go_gate_directory") ;;
+            cache) go_gate_cache_identity=$(go_gate_stat "$go_gate_root/$go_gate_directory") ;;
+            modcache) go_gate_modcache_identity=$(go_gate_stat "$go_gate_root/$go_gate_directory") ;;
+            corepack) go_gate_corepack_identity=$(go_gate_stat "$go_gate_root/$go_gate_directory") ;;
+            npm-cache) go_gate_npm_cache_identity=$(go_gate_stat "$go_gate_root/$go_gate_directory") ;;
+            *) return 1 ;;
+        esac
     done
-    go_gate_validate_identity || {
+    go_gate_validate_identity && go_gate_validate_directories || {
         echo "go gate: scratch identity changed during setup" >&2
         return 1
     }
@@ -123,24 +230,66 @@ go_gate_environment_setup() {
     export GOTMPDIR="$go_gate_root/tmp"
     export GOCACHE="$go_gate_root/cache"
     export GOMODCACHE="$go_gate_root/modcache"
+    export GOPROXY=off
+    export GOSUMDB=off
     export GOENV=off
     export GOWORK=off
     export LC_ALL=C
     export LANG=C
     export COREPACK_HOME="$go_gate_root/corepack"
     export npm_config_cache="$go_gate_root/npm-cache"
+    export NPM_CONFIG_CACHE="$go_gate_root/npm-cache"
+    go_gate_scrub_environment
+    # /dev/null is an immutable, descriptor-stable negative config. Keeping
+    # these paths outside the scratch tree avoids creating more cleanup
+    # authority or another path-swap surface.
+    export GIT_CONFIG_GLOBAL=/dev/null
+    export GIT_CONFIG_SYSTEM=/dev/null
+    export GIT_CONFIG_NOSYSTEM=1
+    export NETRC=/dev/null
+    export GOAUTH=off
+    export GOFLAGS=
+    export GOINSECURE=
+    export GOVCS='*:off'
+    export npm_config_userconfig=/dev/null
+    export NPM_CONFIG_USERCONFIG=/dev/null
+    export npm_config_globalconfig=/dev/null
+    export NPM_CONFIG_GLOBALCONFIG=/dev/null
+    export npm_config_cache="$go_gate_root/npm-cache"
+    export NPM_CONFIG_CACHE="$go_gate_root/npm-cache"
+    export npm_config_registry=https://registry.npmjs.org/
+    export NPM_CONFIG_REGISTRY=https://registry.npmjs.org/
     export DARK_FACTORY_GO_GATE_ROOT="$go_gate_root"
     export DARK_FACTORY_GO_GATE_NONCE="$go_gate_nonce"
-    go_gate_scrub_environment
 }
 
 go_gate_environment_cleanup() {
     if [ "${go_gate_owned-0}" -eq 1 ] && [ -n "${go_gate_root-}" ] \
         && [ -d "$go_gate_root" ]; then
-        if ! go_gate_validate_identity; then
+        if ! go_gate_validate_identity || ! go_gate_validate_directories; then
             echo "go gate: refusing cleanup after scratch identity/provenance changed: $go_gate_root" >&2
             return 1
         fi
-        rm -rf -- "$go_gate_root"
+        go_gate_cleanup_parent=$(mktemp -d /private/tmp/dark-factory-go-cleanup.XXXXXXXX) || {
+            echo "go gate: cannot create cleanup quarantine" >&2
+            return 1
+        }
+        chmod 700 "$go_gate_cleanup_parent" || return 1
+        go_gate_cleanup_target="$go_gate_cleanup_parent/root"
+        if ! /bin/mv "$go_gate_root" "$go_gate_cleanup_target"; then
+            /bin/rmdir "$go_gate_cleanup_parent" 2>/dev/null || true
+            echo "go gate: refusing cleanup after scratch path changed" >&2
+            return 1
+        fi
+        if [ ! -d "$go_gate_cleanup_target" ] || [ -L "$go_gate_cleanup_target" ] \
+            || [ "$(go_gate_stat "$go_gate_cleanup_target")" != "$go_gate_root_identity" ]; then
+            echo "go gate: refusing cleanup of a replaced scratch object: $go_gate_cleanup_target" >&2
+            return 1
+        fi
+        /bin/rm -rf -- "$go_gate_cleanup_target" || {
+            echo "go gate: cleanup quarantine removal failed: $go_gate_cleanup_target" >&2
+            return 1
+        }
+        /bin/rmdir "$go_gate_cleanup_parent" 2>/dev/null || true
     fi
 }

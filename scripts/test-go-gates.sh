@@ -68,6 +68,12 @@ GIT_WORK_TREE
 GIT_INDEX_FILE
 GIT_COMMON_DIR
 GIT_CONFIG_COUNT
+GIT_CONFIG_PARAMETERS
+GIT_EXTERNAL_DIFF
+GIT_TRACE
+GIT_TRACE_PACKET
+GIT_TRACE_CURL
+GIT_CURL_VERBOSE
 GH_CONFIG_DIR
 GITHUB_CONFIG_DIR
 AWS_PROFILE
@@ -77,6 +83,15 @@ GOAUTH
 GOPRIVATE
 GONOSUMDB
 GONOPROXY
+GOINSECURE
+GOVCS
+GOFLAGS
+GO111MODULE
+GOAMD64
+GOARM64
+GOFIPS140
+GODEBUG
+GOEXPERIMENT
 NETRC
 HTTP_PROXY
 HTTPS_PROXY
@@ -84,8 +99,36 @@ ALL_PROXY
 NO_PROXY
 npm_config_proxy
 npm_config_https_proxy
+npm_config_cache
+NPM_CONFIG_CACHE
 npm_config_userconfig
 NPM_CONFIG_USERCONFIG
+npm_config_store_dir
+NPM_CONFIG_STORE_DIR
+NPM_CONFIG_REGISTRY
+npm_config_registry
+npm_config_globalconfig
+NPM_CONFIG_GLOBALCONFIG
+NPM_CONFIG_PREFIX
+npm_config_prefix
+NPM_CONFIG_NODE_GYP
+npm_config_node_gyp
+COREPACK_DEFAULT_TO_LATEST
+COREPACK_INTEGRITY_KEYS
+NODE_OPTIONS
+NODE_EXTRA_CA_CERTS
+NODE_PATH
+NODE_DEBUG
+DYLD_INSERT_LIBRARIES
+DYLD_LIBRARY_PATH
+DYLD_FRAMEWORK_PATH
+LD_PRELOAD
+LD_LIBRARY_PATH
+LIBRARY_PATH
+CPATH
+C_INCLUDE_PATH
+CPLUS_INCLUDE_PATH
+NPM_CONFIG_WORKSPACE
 EOF
 
 cat >"$fake_bin/go" <<'EOF'
@@ -94,6 +137,13 @@ set -eu
 printf 'go %s GOPROXY=%s GOSUMDB=%s GOTOOLCHAIN=%s TMPDIR=%s GOTMPDIR=%s GOCACHE=%s GOMODCACHE=%s\n' \
     "$*" "${GOPROXY-}" "${GOSUMDB-}" "${GOTOOLCHAIN-}" "${TMPDIR-}" \
     "${GOTMPDIR-}" "${GOCACHE-}" "${GOMODCACHE-}" >>"$FAKE_GO_LOG"
+printf 'config GIT_CONFIG_GLOBAL=%s GIT_CONFIG_SYSTEM=%s NETRC=%s GOFLAGS=%s GOVCS=%s GOINSECURE=%s\n' \
+    "${GIT_CONFIG_GLOBAL-}" "${GIT_CONFIG_SYSTEM-}" "${NETRC-}" "${GOFLAGS-}" \
+    "${GOVCS-}" "${GOINSECURE-}" >>"$FAKE_GO_LOG"
+if [ "${GIT_CONFIG_GLOBAL-}" = "${HOME-}/.gitconfig" ] || \
+    [ "${NETRC-}" = "${HOME-}/.netrc" ]; then
+    printf 'home-config-read\n' >>"$FAKE_GO_LOG"
+fi
 while IFS= read -r security_name; do
     eval "security_value=\${$security_name+x}"
     if [ -n "$security_value" ]; then
@@ -103,7 +153,14 @@ while IFS= read -r security_name; do
     fi
 done <"$FAKE_SECURITY_NAMES"
 case "$1 ${2-}" in
-    version*) printf 'go version go%s darwin/arm64\n' "${FAKE_GO_VERSION-1.27.0}"; exit 0 ;;
+    version*)
+        if [ "${FAKE_GO_SWAP_BEFORE-}" = 1 ]; then
+            fake_root=${TMPDIR%/tmp}
+            mv "$fake_root" "$fake_root.original"
+            mkdir "$fake_root"
+            chmod 700 "$fake_root"
+        fi
+        printf 'go version go%s darwin/arm64\n' "${FAKE_GO_VERSION-1.27.0}"; exit 0 ;;
     mod\ download)
         if [ "${FAKE_GO_SIGNAL-}" = 1 ]; then
             kill -TERM "$PPID"
@@ -159,6 +216,12 @@ set -eu
 printf 'corepack %s NETWORK=%s COREPACK_HOME=%s npm_config_cache=%s\n' \
     "$*" "${COREPACK_ENABLE_NETWORK-}" "${COREPACK_HOME-}" \
     "${npm_config_cache-}" >>"$FAKE_GO_LOG"
+printf 'config npm_config_userconfig=%s npm_config_globalconfig=%s npm_config_registry=%s NODE_OPTIONS=%s\n' \
+    "${npm_config_userconfig-}" "${npm_config_globalconfig-}" \
+    "${npm_config_registry-}" "${NODE_OPTIONS-}" >>"$FAKE_GO_LOG"
+if [ "${npm_config_userconfig-}" = "${HOME-}/.npmrc" ]; then
+    printf 'home-config-read\n' >>"$FAKE_GO_LOG"
+fi
 while IFS= read -r security_name; do
     eval "security_value=\${$security_name+x}"
     if [ -n "$security_value" ]; then
@@ -171,6 +234,19 @@ done <"$FAKE_SECURITY_NAMES"
 exit 0
 EOF
 chmod +x "$fake_bin/corepack"
+
+cat >"$fake_bin/rm" <<'EOF'
+#!/bin/sh
+printf 'rm-intercepted\n' >>"$FAKE_GO_LOG"
+if [ -n "${RACE_ROOT-}" ] && [ -d "$RACE_ROOT" ]; then
+    mv "$RACE_ROOT" "$RACE_ROOT.original"
+    mkdir "$RACE_ROOT"
+    chmod 700 "$RACE_ROOT"
+    printf 'replacement\n' >"$RACE_ROOT/replacement"
+fi
+exec /bin/rm "$@"
+EOF
+chmod +x "$fake_bin/rm"
 
 run_check() {
     : >"$log"
@@ -213,13 +289,23 @@ while IFS= read -r security_name; do
     security_assignments="$security_assignments $security_name=hostile-secret"
 done <"$security_names_file"
 
+hostile_home="$temporary/hostile-home"
+mkdir "$hostile_home"
+printf '%s\n' '[credential]' 'helper = store' >"$hostile_home/.gitconfig"
+printf '%s\n' '//registry.npmjs.org/:_authToken=hostile-secret' >"$hostile_home/.npmrc"
+printf '%s\n' 'machine proxy.golang.org login hostile password hostile-secret' >"$hostile_home/.netrc"
+
 # A successful run has the explicit network stage first, then no-network test
 # stages, and cleans its canonical scratch root.
 run_check env \
+    HOME="$hostile_home" \
     GOTOOLCHAIN=auto \
     $security_assignments \
     "$repository_root/scripts/go-check.sh" 2>"$temporary/success.err" \
     || fail "successful go-check failed"
+if grep -Fq 'home-config-read' "$log"; then
+    fail "a child fell back to HOME configuration"
+fi
 grep -F 'go mod download GOPROXY=https://proxy.golang.org' "$log" >/dev/null \
     || fail "module download was not explicit"
 grep -F 'go vet ./... GOPROXY=off' "$log" >/dev/null \
@@ -239,15 +325,38 @@ grep -F 'GOTMPDIR=/private/tmp/dark-factory-go.' "$log" >/dev/null \
 grep -F 'go version ' "$log" | grep -F 'GOTOOLCHAIN=local' >/dev/null \
     || fail "hostile inherited GOTOOLCHAIN was not replaced before version check"
 while IFS= read -r security_name; do
-    grep -F "env $security_name=absent" "$log" >/dev/null \
-        || fail "scrubbed environment reached Go child: $security_name"
+    case "$security_name" in
+        GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM|GIT_CONFIG_NOSYSTEM|NETRC|GOAUTH|GOVCS|GOFLAGS|GOINSECURE|npm_config_cache|NPM_CONFIG_CACHE|npm_config_userconfig|NPM_CONFIG_USERCONFIG|npm_config_globalconfig|NPM_CONFIG_GLOBALCONFIG|npm_config_registry|NPM_CONFIG_REGISTRY)
+            grep -F "env $security_name=present" "$log" >/dev/null \
+                || fail "controlled $security_name did not reach Go child"
+            ;;
+        *)
+            grep -F "env $security_name=absent" "$log" >/dev/null \
+                || fail "scrubbed environment reached Go child: $security_name"
+            ;;
+    esac
 done <"$security_names_file"
 while IFS= read -r security_name; do
-    grep -F "gofmt-env $security_name=absent" "$log" >/dev/null \
-        || fail "scrubbed environment reached formatter child: $security_name"
-    grep -F "corepack-env $security_name=absent" "$log" >/dev/null \
-        || fail "scrubbed environment reached package-manager child: $security_name"
+    case "$security_name" in
+        GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM|GIT_CONFIG_NOSYSTEM|NETRC|GOAUTH|GOVCS|GOFLAGS|GOINSECURE|npm_config_cache|NPM_CONFIG_CACHE|npm_config_userconfig|NPM_CONFIG_USERCONFIG|npm_config_globalconfig|NPM_CONFIG_GLOBALCONFIG|npm_config_registry|NPM_CONFIG_REGISTRY)
+            :
+            ;;
+        *)
+            grep -F "gofmt-env $security_name=absent" "$log" >/dev/null \
+                || fail "scrubbed environment reached formatter child: $security_name"
+            grep -F "corepack-env $security_name=absent" "$log" >/dev/null \
+                || fail "scrubbed environment reached package-manager child: $security_name"
+            ;;
+    esac
 done <"$security_names_file"
+grep -F 'config GIT_CONFIG_GLOBAL=/dev/null' "$log" >/dev/null \
+    || fail "Go did not receive the controlled Git config"
+grep -F 'config npm_config_userconfig=/dev/null' "$log" >/dev/null \
+    || fail "package manager did not receive the controlled npm config"
+grep -F 'GOFLAGS=' "$log" | grep -v 'GOFLAGS=hostile-secret' >/dev/null \
+    || fail "ambient Go flags survived the gate"
+grep -F 'NODE_OPTIONS=' "$log" | grep -v 'NODE_OPTIONS=hostile-secret' >/dev/null \
+    || fail "ambient Node options survived the gate"
 download_line=$(grep -n 'go mod download' "$log" | cut -d: -f1)
 verify_line=$(grep -n 'go mod verify' "$log" | cut -d: -f1)
 format_line=$(grep -n '^gofmt ' "$log" | cut -d: -f1)
@@ -275,6 +384,21 @@ grep -F 'expected Go 1.27.0' "$temporary/version.err" >/dev/null \
 if grep -Eq 'mod download|mod verify|go vet|go test|corepack' "$log"; then
     fail "toolchain mismatch reached a later stage"
 fi
+
+# Replacing the scratch root during a stage must stop before the next stage.
+: >"$log"
+if env PATH="$fake_bin:$PATH" FAKE_GO_LOG="$log" \
+    FAKE_SECURITY_NAMES="$security_names_file" FAKE_GO_SWAP_BEFORE=1 \
+    "$repository_root/scripts/go-check.sh" >"$temporary/pre-stage-swap.out" 2>"$temporary/pre-stage-swap.err"; then
+    fail "pre-stage scratch replacement unexpectedly passed"
+fi
+if grep -Eq 'mod download|mod verify|go vet|go test|corepack' "$log"; then
+    fail "scratch replacement was not rejected before the next stage"
+fi
+pre_stage_tmp=$(sed -n 's/.*TMPDIR=\([^ ]*\).*/\1/p' "$log" | head -1)
+[ -n "$pre_stage_tmp" ] || fail "pre-stage replacement did not expose its scratch root"
+pre_stage_root=${pre_stage_tmp%/tmp}
+rm -rf "$pre_stage_root" "$pre_stage_root.original"
 
 # A failed dependency stage stops vet, tests and TypeScript.
 : >"$log"
@@ -314,6 +438,9 @@ swap_tmp=$(sed -n 's/.*TMPDIR=\([^ ]*\).*/\1/p' "$log" | head -1)
 swap_root=${swap_tmp%/tmp}
 [ -d "$swap_root" ] || fail "replacement scratch root was deleted"
 [ -d "$swap_root.original" ] || fail "original scratch root was not preserved"
+if grep -Eq 'go vet|go test|corepack' "$log"; then
+    fail "scratch replacement was detected only after later stages ran"
+fi
 rm -rf "$swap_root" "$swap_root.original"
 
 # A formatter that exits nonzero without output must still stop the gate; this
@@ -356,10 +483,46 @@ fi
     || fail "go-ci full tests were not run exactly once"
 [ "$(grep -c '^go test -race -timeout=30m -count=1 -p 1 ./\.\.\.' "$log")" -eq 1 ] \
     || fail "go-ci race tests were not run exactly once"
+grep -F 'go test -timeout=20m -count=1 -p 1 ./internal/processcontract ./internal/runner ./internal/changeworker ./internal/daemon ./internal/change' "$log" >/dev/null \
+    || fail "go-ci process/Change proof packages were not run explicitly"
 grep -F 'go test -race -timeout=30m' "$log" >/dev/null \
     || fail "go-ci race tests lacked a timeout"
 grep -F 'corepack pnpm --offline run typecheck NETWORK=0' "$log" >/dev/null \
     || fail "go-ci TypeScript tests lacked pnpm offline mode"
 
-sh -n "$repository_root/scripts/go-check.sh" "$repository_root/scripts/go-ci.sh" "$0"
+# The bounded owner kills the whole stage process group and preserves the
+# timeout status. This is the common mechanism used by every external stage.
+. "$repository_root/scripts/go-gate-environment.sh"
+unset DARK_FACTORY_GO_GATE_ROOT DARK_FACTORY_GO_GATE_NONCE
+go_gate_environment_setup
+timeout_pid="$temporary/timeout.pid"
+timeout_descendant_pid="$temporary/timeout-descendant.pid"
+timeout_status=0
+if go_gate_stage 1 sh -c "sleep 10 & child=\$!; echo \$\$ >'$timeout_pid'; echo \$child >'$timeout_descendant_pid'; wait"; then
+    fail "bounded stage unexpectedly passed a hung command"
+else
+    timeout_status=$?
+fi
+[ "$timeout_status" -eq 124 ] || fail "hung stage returned $timeout_status instead of 124"
+[ -s "$timeout_pid" ] || fail "hung stage did not start its fixture"
+timeout_child=$(cat "$timeout_pid")
+if kill -0 "$timeout_child" 2>/dev/null; then
+    fail "timed-out stage left its process alive"
+fi
+[ -s "$timeout_descendant_pid" ] || fail "hung stage did not start its descendant"
+timeout_descendant=$(cat "$timeout_descendant_pid")
+if kill -0 "$timeout_descendant" 2>/dev/null; then
+    fail "timed-out stage left its descendant alive"
+fi
+cleanup_root="$go_gate_root"
+PATH="$fake_bin:$PATH" RACE_ROOT="$cleanup_root" go_gate_environment_cleanup \
+    || fail "bounded-stage scratch cleanup failed"
+[ ! -e "$cleanup_root.original" ] || fail "cleanup raced through a replacement path"
+
+if grep -Fq 'rm-intercepted' "$log"; then
+    fail "cleanup used PATH rm instead of its exact cleanup command"
+fi
+
+sh -n "$repository_root/scripts/go-check.sh" "$repository_root/scripts/go-ci.sh" \
+    "$repository_root/scripts/go-gate-environment.sh" "$0"
 echo "go gate tests passed"

@@ -45,7 +45,7 @@ go_gate_expected_version=$(awk '
     echo "go-check: go.mod must contain exactly one fully pinned go directive" >&2
     exit 1
 }
-go_gate_actual_line=$(go version)
+go_gate_actual_line=$(go_gate_stage 30 go version)
 go_gate_actual_version=$(printf '%s\n' "$go_gate_actual_line" \
     | awk '$1 == "go" && $2 == "version" && $3 ~ /^go[0-9]+\.[0-9]+\.[0-9]+$/ { sub(/^go/, "", $3); print $3 }')
 [ "$go_gate_actual_version" = "$go_gate_expected_version" ] || {
@@ -55,18 +55,23 @@ go_gate_actual_version=$(printf '%s\n' "$go_gate_actual_line" \
 
 # Network is permitted only in these explicit dependency stages. The module
 # cache and Corepack home survive into go-ci's full tests when it owns the root.
-GOPROXY='https://proxy.golang.org' GOSUMDB=sum.golang.org go mod download
-GOPROXY=off GOSUMDB=off go mod verify
+export GOPROXY='https://proxy.golang.org'
+export GOSUMDB=sum.golang.org
+go_gate_stage 600 go mod download
+export GOPROXY=off
+export GOSUMDB=off
+go_gate_stage 120 go mod verify
 
-go_gate_go_files=$(git ls-files '*.go')
-[ -n "$go_gate_go_files" ] || {
+go_gate_go_files="$go_gate_root/go-files"
+go_gate_stage 120 git ls-files -z -- '*.go' >"$go_gate_go_files"
+[ -s "$go_gate_go_files" ] || {
     echo "go-check: no tracked Go files" >&2
     exit 1
 }
 # Read-only formatting check; never rewrite a contributor's work.
 # Keep the formatter's exit status and output separate. A formatter failure
 # must not become a false-green empty pipeline.
-if ! gofmt -l $go_gate_go_files >"$go_gate_root/gofmt.out"; then
+if ! go_gate_stage 120 xargs -0 gofmt -l -- <"$go_gate_go_files" >"$go_gate_root/gofmt.out"; then
     echo "go-check: gofmt failed" >&2
     exit 1
 fi
@@ -76,11 +81,11 @@ fi
 }
 
 echo "go-check: go vet ./..."
-GOPROXY=off GOSUMDB=off go vet ./...
+GOPROXY=off GOSUMDB=off go_gate_stage 600 go vet ./...
 
 echo "go-check: focused pure-package tests"
-GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off \
-    go test -timeout=5m -count=1 ./internal/kernel ./internal/browserprotocol ./internal/sqlitecontract
+export GOTOOLCHAIN=local
+go_gate_stage 900 go test -timeout=5m -count=1 ./internal/kernel ./internal/browserprotocol ./internal/sqlitecontract
 
 command -v corepack >/dev/null 2>&1 || {
     echo "go-check: corepack is required for the TypeScript client gate" >&2
@@ -89,15 +94,17 @@ command -v corepack >/dev/null 2>&1 || {
 echo "go-check: frozen TypeScript dependency install"
 (
     cd "$repository_root/web"
-    COREPACK_ENABLE_NETWORK=1 corepack pnpm install --frozen-lockfile --ignore-scripts
+    export COREPACK_ENABLE_NETWORK=1
+    go_gate_stage 600 corepack pnpm install --frozen-lockfile --ignore-scripts
 )
 echo "go-check: TypeScript client typecheck and tests"
 (
     cd "$repository_root/web"
-    COREPACK_ENABLE_NETWORK=0 corepack pnpm --offline run typecheck
-    COREPACK_ENABLE_NETWORK=0 corepack pnpm --offline run test
+    export COREPACK_ENABLE_NETWORK=0
+    go_gate_stage 600 corepack pnpm --offline run typecheck
+    go_gate_stage 600 corepack pnpm --offline run test
 )
 
 echo "go-check: git diff --check"
-git diff --check
+go_gate_stage 120 git diff --check
 echo "go-check: PASS"
