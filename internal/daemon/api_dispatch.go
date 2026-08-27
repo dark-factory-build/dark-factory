@@ -18,6 +18,12 @@ type Daemon struct {
 	store *kernel.Store
 	now   func() time.Time
 
+	// operationMu is the single linearization gate for live-attempt operations
+	// that combine durable state with an owner-side action. It is deliberately
+	// concrete and global: the local operator has no throughput requirement,
+	// and one gate avoids a second digest-to-owner authority index.
+	operationMu sync.Mutex
+
 	attemptMu sync.Mutex
 	attempts  map[kernel.RunID]*liveAttempt
 	closing   bool
@@ -225,14 +231,20 @@ func (daemon *Daemon) proposeOutcome(ctx context.Context, call api.Call) api.Rep
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
-	run, err := daemon.store.ProposeAttemptOutcome(ctx, kDigest, proposal, at)
+	daemon.operationMu.Lock()
+	operationCtx, cancel := context.WithTimeout(ctx, liveAttemptStoreTimeout)
+	run, err := daemon.store.ProposeAttemptOutcome(operationCtx, kDigest, proposal, at)
+	cancel()
+	if err == nil {
+		// The commit completed before ProposeAttemptOutcome returned. The owner
+		// notification is deliberately best-effort and carries no authority or
+		// state payload; it only shortens the next durable Store poll.
+		daemon.notifyRun(run.ID)
+	}
+	daemon.operationMu.Unlock()
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
-	// The commit completed before ProposeAttemptOutcome returned. The owner
-	// notification is deliberately best-effort and carries no authority or
-	// state payload; it only shortens the next durable Store poll.
-	daemon.notifyRun(run.ID)
 	return daemon.mutation(ctx, run.Revision)
 }
 
@@ -294,6 +306,16 @@ func (daemon *Daemon) notifyRun(runID kernel.RunID) {
 	if attempt != nil {
 		attempt.notify()
 	}
+}
+
+// Close stops accepting live attempts and synchronously joins every owner.
+// The API listener and Store are owned by their callers and are intentionally
+// not closed here.
+func (daemon *Daemon) Close() error {
+	if daemon == nil {
+		return nil
+	}
+	return daemon.closeLiveAttempts()
 }
 
 func newErrorReply(code api.RemoteErrorCode) api.Reply {

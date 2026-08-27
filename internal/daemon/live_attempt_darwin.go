@@ -23,19 +23,32 @@ func startLiveAttempt(attempt *liveAttempt, ctx context.Context) {
 
 func (attempt *liveAttempt) run(ctx context.Context) {
 	err := attempt.loop(ctx)
+	// The owner must retain controller authority until it has synchronously
+	// requested convergence and closed the capability. A read/protocol/Store
+	// error is not evidence that the child disappeared.
+	cleanupErr := attempt.shutdownController()
+	err = errors.Join(err, cleanupErr)
 	if !attempt.terminalSeen {
 		if err == nil {
 			err = ErrTerminalClosed
 		}
+	}
+	attempt.finalErr = err
+	if !attempt.terminalSeen {
 		attempt.terminal <- liveAttemptResult{err: err}
 	}
 	attempt.finishSubscribers(err)
 	close(attempt.done)
-	attempt.daemon.unregisterLiveAttempt(attempt.runID, attempt)
+	if attempt.daemon != nil {
+		attempt.daemon.unregisterLiveAttempt(attempt.runID, attempt)
+	}
 }
 
 func (attempt *liveAttempt) loop(ctx context.Context) error {
-	released := false
+	// The owner is normally started before releaseSent becomes true. Keeping
+	// this derived from the owner state also makes a restarted/test owner
+	// converge immediately when release has already been durably sent.
+	released := attempt.releaseSent
 	for {
 		if !released {
 			select {
@@ -136,7 +149,9 @@ func (attempt *liveAttempt) processLifecycle(ctx context.Context) (bool, error) 
 	if attempt.daemon == nil || attempt.daemon.store == nil {
 		return false, nil
 	}
-	run, found, err := attempt.daemon.store.Run(context.Background(), attempt.runID)
+	storeCtx, cancel := context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
+	run, found, err := attempt.daemon.store.Run(storeCtx, attempt.runID)
+	cancel()
 	if err != nil {
 		return false, err
 	}
@@ -169,9 +184,9 @@ func (attempt *liveAttempt) handleRunningCommand(command liveAttemptCommand) (bo
 	case liveCommandAttach:
 		err := attempt.handleAttach(command.attachment, command.sequence)
 		command.result <- err
-		if err != nil && !errors.Is(err, ErrTerminalNotReady) && !errors.Is(err, kernel.ErrBusy) {
-			return false, err
-		}
+		// Validation and durable-state conflicts belong to this request, not to
+		// the provider. A controller write failure poisons the controller itself;
+		// the next owner read observes that and the run cleanup below converges it.
 		return false, nil
 	case liveCommandDetach:
 		err := attempt.handleDetach(command.attachment)
@@ -188,7 +203,6 @@ func (attempt *liveAttempt) handleRunningCommand(command liveAttemptCommand) (bo
 		if err != nil {
 			return false, err
 		}
-		attempt.acknowledged = true
 		return true, nil
 	case liveCommandShutdown:
 		err := attempt.shutdownController()
@@ -201,11 +215,17 @@ func (attempt *liveAttempt) handleRunningCommand(command liveAttemptCommand) (bo
 }
 
 func (attempt *liveAttempt) shutdownController() error {
+	if attempt == nil || attempt.controller == nil {
+		return nil
+	}
 	var result error
 	if !attempt.terminalSeen {
 		result = attempt.terminateController()
 	}
-	if closeErr := attempt.controller.Close(); closeErr != nil && !errors.Is(closeErr, runner.ErrState) {
+	closeErr := attempt.controller.Close()
+	if closeErr == nil || errors.Is(closeErr, runner.ErrState) {
+		attempt.controllerClosed = true
+	} else {
 		result = errors.Join(result, closeErr)
 	}
 	return result
@@ -250,18 +270,20 @@ func (attempt *liveAttempt) routeFrame(frame runner.TerminalFrame) error {
 			}
 		} else if subscriber := attempt.correlations[frame.Correlation]; subscriber != nil {
 			attempt.routeReplay(subscriber, frame)
-		} else if _, retired := attempt.retired[frame.Correlation]; !retired {
+		} else if frame.Correlation > attempt.lastCorrelation {
 			return runner.ErrState
 		}
 		return attempt.replenishCredit(uint64(len(frame.Payload)))
 	case runner.TerminalReset:
 		if frame.Correlation == 0 {
-			attempt.broadcast(toTerminalEvent(frame))
+			for subscriber := range attempt.subs {
+				attempt.resetSubscriber(subscriber, frame)
+			}
 			return nil
 		}
 		if subscriber := attempt.correlations[frame.Correlation]; subscriber != nil {
 			attempt.finishReplay(subscriber, toTerminalEvent(frame), frame.Head, false)
-		} else if _, retired := attempt.retired[frame.Correlation]; !retired {
+		} else if frame.Correlation > attempt.lastCorrelation {
 			return runner.ErrState
 		}
 		return nil
@@ -276,7 +298,7 @@ func (attempt *liveAttempt) routeFrame(frame runner.TerminalFrame) error {
 func (attempt *liveAttempt) routeAttached(frame runner.TerminalFrame) error {
 	subscriber := attempt.correlations[frame.Correlation]
 	if subscriber == nil {
-		if _, retired := attempt.retired[frame.Correlation]; retired {
+		if frame.Correlation <= attempt.lastCorrelation {
 			return nil
 		}
 		return runner.ErrState
@@ -298,6 +320,9 @@ func (attempt *liveAttempt) routeAttached(frame runner.TerminalFrame) error {
 }
 
 func (attempt *liveAttempt) routeReplay(subscriber *TerminalAttachment, frame runner.TerminalFrame) {
+	if subscriber == nil {
+		return
+	}
 	if !subscriber.replaying {
 		if !attempt.acceptOutput(subscriber, toTerminalEvent(frame)) {
 			attempt.dropSubscriber(subscriber, ErrTerminalReset)
@@ -321,15 +346,23 @@ func (attempt *liveAttempt) routeReplay(subscriber *TerminalAttachment, frame ru
 }
 
 func (attempt *liveAttempt) routeLive(subscriber *TerminalAttachment, frame runner.TerminalFrame) {
+	if subscriber == nil {
+		return
+	}
+	if _, present := attempt.subs[subscriber]; !present {
+		return
+	}
 	if subscriber.replaying {
 		if frame.End <= subscriber.replayHead {
 			return
 		}
-		if frame.Start < subscriber.replayHead || len(subscriber.pending) >= terminalPendingCap {
+		event := toTerminalEvent(frame)
+		if frame.Start < subscriber.replayHead || len(subscriber.pending) >= terminalPendingCap || subscriber.pendingBytes+len(event.Payload) > terminalPendingBytesCap {
 			attempt.dropSubscriber(subscriber, ErrTerminalReset)
 			return
 		}
-		subscriber.pending = append(subscriber.pending, toTerminalEvent(frame))
+		subscriber.pending = append(subscriber.pending, event)
+		subscriber.pendingBytes += len(event.Payload)
 		return
 	}
 	if !attempt.acceptOutput(subscriber, toTerminalEvent(frame)) {
@@ -351,12 +384,14 @@ func (attempt *liveAttempt) finishReplay(subscriber *TerminalAttachment, event T
 		return
 	}
 	for _, pending := range subscriber.pending {
+		subscriber.pendingBytes -= len(pending.Payload)
 		if !attempt.acceptOutput(subscriber, pending) {
 			attempt.dropSubscriber(subscriber, ErrTerminalReset)
 			return
 		}
 	}
 	subscriber.pending = nil
+	subscriber.pendingBytes = 0
 }
 
 func (attempt *liveAttempt) acceptOutput(subscriber *TerminalAttachment, event TerminalEvent) bool {
@@ -383,13 +418,26 @@ func (attempt *liveAttempt) handleAttach(attachment *TerminalAttachment, sequenc
 	if attempt.daemon == nil || attempt.daemon.store == nil {
 		return kernel.ErrCorruptState
 	}
+	attempt.daemon.operationMu.Lock()
+	defer attempt.daemon.operationMu.Unlock()
 	attempt.daemon.attemptMu.Lock()
 	closing := attempt.daemon.closing
 	attempt.daemon.attemptMu.Unlock()
 	if closing {
 		return ErrTerminalClosed
 	}
-	run, found, err := attempt.daemon.store.Run(context.Background(), attempt.runID)
+	storeCtx, cancel := context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
+	session, found, err := attempt.daemon.store.TerminalSessionForRun(storeCtx, attempt.runID)
+	cancel()
+	if err != nil {
+		return err
+	}
+	if !found || session.ID != attempt.sessionID || session.State != kernel.TerminalSessionActive {
+		return kernel.ErrConflict
+	}
+	storeCtx, cancel = context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
+	run, found, err := attempt.daemon.store.Run(storeCtx, attempt.runID)
+	cancel()
 	if err != nil {
 		return err
 	}
@@ -465,6 +513,27 @@ func (attempt *liveAttempt) routeEventTo(subscriber *TerminalAttachment, event T
 	}
 }
 
+func (attempt *liveAttempt) resetSubscriber(subscriber *TerminalAttachment, frame runner.TerminalFrame) {
+	// A global reset means the runner's live cursor can no longer cover the
+	// observer's previous position. Retire any correlated replay, move the
+	// live cursor to the advertised head, and let the browser reattach from
+	// that exact point. This keeps the reset scoped to each observer without
+	// replaying stale bytes.
+	if subscriber == nil {
+		return
+	}
+	if subscriber.correlation != 0 {
+		delete(attempt.correlations, subscriber.correlation)
+		subscriber.correlation = 0
+	}
+	subscriber.pending = nil
+	subscriber.pendingBytes = 0
+	subscriber.replaying = false
+	subscriber.expected = frame.Head
+	subscriber.replayHead = frame.Head
+	attempt.routeEventTo(subscriber, toTerminalEvent(frame))
+}
+
 func (attempt *liveAttempt) broadcast(event TerminalEvent) {
 	for subscriber := range attempt.subs {
 		attempt.routeEventTo(subscriber, event)
@@ -481,7 +550,6 @@ func (attempt *liveAttempt) removeSubscriber(subscriber *TerminalAttachment) {
 	delete(attempt.subs, subscriber)
 	if subscriber.correlation != 0 {
 		delete(attempt.correlations, subscriber.correlation)
-		attempt.retireCorrelation(subscriber.correlation)
 	}
 	subscriber.finish(ErrTerminalClosed)
 }
@@ -496,7 +564,6 @@ func (attempt *liveAttempt) dropSubscriber(subscriber *TerminalAttachment, err e
 	delete(attempt.subs, subscriber)
 	if subscriber.correlation != 0 {
 		delete(attempt.correlations, subscriber.correlation)
-		attempt.retireCorrelation(subscriber.correlation)
 	}
 	subscriber.finish(err)
 }

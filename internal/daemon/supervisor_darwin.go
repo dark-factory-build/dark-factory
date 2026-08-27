@@ -51,9 +51,34 @@ func (owner *supervisorAttemptOwner) close() error {
 	}
 	var terminationErr, controllerErr error
 	if owner.live != nil {
-		controllerErr = owner.live.close()
-		owner.live = nil
-		owner.controller = nil
+		live := owner.live
+		controllerErr = live.close()
+		// live.close joins the owner before returning. If its close attempt was
+		// uncertain, this outer owner still retains the original controller and
+		// can make the final synchronous convergence attempt without a second
+		// concurrent reader/writer.
+		if !live.controllerClosed && owner.controller != nil {
+			terminationErr = owner.controller.Terminate()
+			if errors.Is(terminationErr, runner.ErrState) {
+				terminationErr = nil
+			}
+			fallbackCloseErr := owner.controller.Close()
+			controllerErr = errors.Join(controllerErr, fallbackCloseErr)
+			if fallbackCloseErr == nil || errors.Is(fallbackCloseErr, runner.ErrState) {
+				live.controllerClosed = true
+			}
+		}
+		if live.controllerClosed {
+			owner.live = nil
+			owner.controller = nil
+		}
+		if !live.controllerClosed {
+			// The outer child is not safe to reap while the released provider
+			// capability remains open: its process group is distinct and could
+			// outlive this owner. Leave the exact references intact so a caller
+			// can retry cleanup and surface the unresolved condition.
+			return errors.Join(terminationErr, controllerErr, fmt.Errorf("daemon: live attempt controller remains open"))
+		}
 	} else if owner.controller != nil {
 		// A released provider belongs to the inner attempt runner's distinct
 		// process group. Ask that live owner to converge it before dropping the
@@ -62,8 +87,11 @@ func (owner *supervisorAttemptOwner) close() error {
 		if errors.Is(terminationErr, runner.ErrState) {
 			terminationErr = nil
 		}
-		controllerErr = owner.controller.Close()
-		owner.controller = nil
+		closeErr := owner.controller.Close()
+		controllerErr = closeErr
+		if closeErr == nil || errors.Is(closeErr, runner.ErrState) {
+			owner.controller = nil
+		}
 	}
 	if owner.child != nil {
 		if owner.activated && !owner.reaped {
@@ -425,7 +453,9 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	}
 	startLiveAttempt(live, ctx)
 	owner.live = live
-	owner.controller = nil
+	// Retain the exact controller fallback until the live owner has joined and
+	// proved Close. It is not used concurrently: supervisorAttemptOwner.close
+	// only reaches it after live.close has synchronously joined the owner.
 	if spec.beforeProviderRelease != nil {
 		spec.beforeProviderRelease()
 	}

@@ -5,18 +5,21 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 const (
-	maxLiveAttempts       = 1024
-	liveAttemptMailboxCap = 64
-	terminalSubscriberCap = 64
-	terminalPendingCap    = 64
-	terminalPayloadCap    = 64 << 10
-	liveAttemptCredit     = 1 << 20
+	maxLiveAttempts         = 1024
+	liveAttemptMailboxCap   = 64
+	terminalSubscriberCap   = 64
+	terminalPendingCap      = 64
+	terminalPayloadCap      = 8 << 10
+	terminalPendingBytesCap = 256 << 10
+	liveAttemptCredit       = 1 << 20
+	liveAttemptStoreTimeout = 2 * time.Second
 )
 
 var (
@@ -56,10 +59,8 @@ const (
 // The owner loop is the only writer or closer of queue. Close synchronously
 // submits a detach command and waits until the owner has removed the observer.
 type TerminalAttachment struct {
-	owner   *liveAttempt
-	runID   kernel.RunID
-	session kernel.TerminalSessionID
-	queue   chan TerminalEvent
+	owner *liveAttempt
+	queue chan TerminalEvent
 
 	mu          sync.Mutex
 	closed      bool
@@ -70,11 +71,12 @@ type TerminalAttachment struct {
 
 	// The fields below are owned by the attempt loop. They are not read by
 	// callers; the mutex above protects only Close/Next lifecycle state.
-	correlation uint64
-	expected    uint64
-	replayHead  uint64
-	replaying   bool
-	pending     []TerminalEvent
+	correlation  uint64
+	expected     uint64
+	replayHead   uint64
+	replaying    bool
+	pending      []TerminalEvent
+	pendingBytes int
 }
 
 // Next waits for one bounded terminal event. Context cancellation only stops
@@ -180,20 +182,6 @@ func (daemon *Daemon) AttachTerminal(ctx context.Context, runID kernel.RunID, se
 	if daemon == nil || daemon.store == nil || ctx == nil || runID == (kernel.RunID{}) || sessionID == (kernel.TerminalSessionID{}) {
 		return nil, fmt.Errorf("%w: invalid terminal attachment", kernel.ErrInvalidValue)
 	}
-	session, found, err := daemon.store.TerminalSessionForRun(ctx, runID)
-	if err != nil {
-		return nil, err
-	}
-	if !found || session.ID != sessionID || session.State != kernel.TerminalSessionActive {
-		return nil, kernel.ErrConflict
-	}
-	run, found, err := daemon.store.Run(ctx, runID)
-	if err != nil {
-		return nil, err
-	}
-	if !found || run.Phase != kernel.RunRunning {
-		return nil, kernel.ErrConflict
-	}
 	daemon.attemptMu.Lock()
 	if daemon.closing {
 		daemon.attemptMu.Unlock()
@@ -246,17 +234,16 @@ type liveAttempt struct {
 
 	subs            map[*TerminalAttachment]struct{}
 	correlations    map[uint64]*TerminalAttachment
-	retired         map[uint64]struct{}
-	retiredOrder    []uint64
 	lastCorrelation uint64
 
 	readySeen         bool
 	releaseSent       bool
 	terminationSent   bool
 	terminalSeen      bool
-	acknowledged      bool
 	terminalEvent     *runner.AttemptEvent
 	creditOutstanding uint64
+	controllerClosed  bool
+	finalErr          error
 }
 
 func newLiveAttempt(daemon *Daemon, runID kernel.RunID, sessionID kernel.TerminalSessionID, controller *runner.AttemptController) *liveAttempt {
@@ -264,24 +251,8 @@ func newLiveAttempt(daemon *Daemon, runID kernel.RunID, sessionID kernel.Termina
 		daemon: daemon, runID: runID, sessionID: sessionID, controller: controller,
 		commands: make(chan liveAttemptCommand, liveAttemptMailboxCap),
 		wake:     make(chan struct{}, 1), done: make(chan struct{}), terminal: make(chan liveAttemptResult, 1),
-		subs: make(map[*TerminalAttachment]struct{}), correlations: make(map[uint64]*TerminalAttachment), retired: make(map[uint64]struct{}),
+		subs: make(map[*TerminalAttachment]struct{}), correlations: make(map[uint64]*TerminalAttachment),
 	}
-}
-
-func (attempt *liveAttempt) retireCorrelation(correlation uint64) {
-	if attempt == nil || correlation == 0 {
-		return
-	}
-	if _, exists := attempt.retired[correlation]; exists {
-		return
-	}
-	if len(attempt.retiredOrder) >= terminalSubscriberCap {
-		oldest := attempt.retiredOrder[0]
-		attempt.retiredOrder = attempt.retiredOrder[1:]
-		delete(attempt.retired, oldest)
-	}
-	attempt.retired[correlation] = struct{}{}
-	attempt.retiredOrder = append(attempt.retiredOrder, correlation)
 }
 
 func (daemon *Daemon) registerLiveAttempt(attempt *liveAttempt) error {
@@ -325,20 +296,23 @@ func (daemon *Daemon) closeLiveAttempts() error {
 	if daemon == nil {
 		return nil
 	}
+	daemon.operationMu.Lock()
 	daemon.attemptMu.Lock()
-	if daemon.closing {
-		daemon.attemptMu.Unlock()
-		return nil
+	alreadyClosing := daemon.closing
+	if !alreadyClosing {
+		daemon.closing = true
 	}
-	daemon.closing = true
 	attempts := make([]*liveAttempt, 0, len(daemon.attempts))
 	for _, attempt := range daemon.attempts {
 		attempts = append(attempts, attempt)
 	}
 	daemon.attemptMu.Unlock()
+	daemon.operationMu.Unlock()
 	var result error
-	for _, attempt := range attempts {
-		result = errors.Join(result, attempt.close())
+	if !alreadyClosing {
+		for _, attempt := range attempts {
+			result = errors.Join(result, attempt.close())
+		}
 	}
 	for _, attempt := range attempts {
 		result = errors.Join(result, attempt.join())
@@ -395,7 +369,7 @@ func (attempt *liveAttempt) attach(ctx context.Context, sequence uint64) (*Termi
 	if attempt == nil || ctx == nil {
 		return nil, ErrTerminalClosed
 	}
-	attachment := &TerminalAttachment{owner: attempt, runID: attempt.runID, session: attempt.sessionID, queue: make(chan TerminalEvent, terminalSubscriberCap)}
+	attachment := &TerminalAttachment{owner: attempt, queue: make(chan TerminalEvent, terminalSubscriberCap)}
 	command := liveAttemptCommand{kind: liveCommandAttach, attachment: attachment, sequence: sequence, result: make(chan error, 1)}
 	if err := attempt.submit(ctx, command); err != nil {
 		return nil, err
@@ -417,12 +391,11 @@ func (attempt *liveAttempt) close() error {
 	}
 	select {
 	case <-attempt.done:
-		return nil
+		return attempt.join()
 	default:
 	}
 	err := attempt.submit(context.Background(), liveAttemptCommand{kind: liveCommandShutdown})
-	<-attempt.done
-	return err
+	return errors.Join(err, attempt.join())
 }
 
 func (attempt *liveAttempt) join() error {
@@ -430,7 +403,7 @@ func (attempt *liveAttempt) join() error {
 		return nil
 	}
 	<-attempt.done
-	return nil
+	return attempt.finalErr
 }
 
 func (attempt *liveAttempt) waitTerminal() liveAttemptResult {

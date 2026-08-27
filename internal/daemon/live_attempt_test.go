@@ -114,11 +114,39 @@ func TestLiveAttemptShutdownClosesRegistryToNewOwners(t *testing.T) {
 	}
 }
 
+func TestLiveAttemptShutdownIsRepeatableAndReportsOwnerError(t *testing.T) {
+	daemon := &Daemon{attempts: make(map[kernel.RunID]*liveAttempt)}
+	runID, sessionID := liveTestIDs(t, 10005)
+	attempt := newLiveAttempt(daemon, runID, sessionID, nil)
+	ownerErr := errors.New("owner cleanup failed")
+	attempt.finalErr = ownerErr
+	close(attempt.done)
+	if err := daemon.registerLiveAttempt(attempt); err != nil {
+		t.Fatal(err)
+	}
+	results := make(chan error, 2)
+	var group sync.WaitGroup
+	group.Add(2)
+	for range 2 {
+		go func() {
+			defer group.Done()
+			results <- daemon.Close()
+		}()
+	}
+	group.Wait()
+	close(results)
+	for err := range results {
+		if !errors.Is(err, ownerErr) {
+			t.Fatalf("shutdown lost owner error: %v", err)
+		}
+	}
+}
+
 func TestTerminalAttachmentCloseIsConcurrentAndIdempotent(t *testing.T) {
 	runID, sessionID := liveTestIDs(t, 10001)
 	attempt := newLiveAttempt(nil, runID, sessionID, nil)
 	close(attempt.done)
-	attachment := &TerminalAttachment{owner: attempt, runID: runID, session: sessionID, queue: make(chan TerminalEvent, 1)}
+	attachment := &TerminalAttachment{owner: attempt, queue: make(chan TerminalEvent, 1)}
 	results := make(chan error, 2)
 	var group sync.WaitGroup
 	group.Add(2)
@@ -140,15 +168,7 @@ func TestTerminalAttachmentCloseIsConcurrentAndIdempotent(t *testing.T) {
 	}
 }
 
-func TestTerminalAttachmentFinishAndCorrelationTombstonesAreBounded(t *testing.T) {
-	runID, sessionID := liveTestIDs(t, 10002)
-	attempt := newLiveAttempt(nil, runID, sessionID, nil)
-	for i := uint64(1); i <= terminalSubscriberCap*3; i++ {
-		attempt.retireCorrelation(i)
-	}
-	if len(attempt.retired) > terminalSubscriberCap || len(attempt.retiredOrder) > terminalSubscriberCap {
-		t.Fatalf("retired correlations grew beyond bound: map=%d order=%d", len(attempt.retired), len(attempt.retiredOrder))
-	}
+func TestTerminalAttachmentFinishIsIdempotentAndPayloadBounded(t *testing.T) {
 	attachment := &TerminalAttachment{queue: make(chan TerminalEvent, 1)}
 	closeErr := errors.New("closed")
 	attachment.finish(closeErr)
