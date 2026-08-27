@@ -11,7 +11,6 @@ import type {
   StateKind,
   StateRestartFrame,
   StateSnapshotBody,
-  StateSnapshotFrame,
   TaskItem,
 } from "./control.js";
 
@@ -25,7 +24,9 @@ export type StateView = {
   humanRequests: ReadonlyMap<string, HumanRequestItem>;
 };
 
-export type StateReducerFrame = StateSnapshotFrame | StateRestartFrame | StateEventFrame | StateEntityFrame;
+// Snapshot application also needs the cursor from its correlated STATE_GET,
+// so the context-free frame reducer intentionally excludes it.
+export type StateReducerFrame = StateRestartFrame | StateEventFrame | StateEntityFrame;
 export type StateReducerResult =
   | { kind: "staged" }
   | { kind: "published"; state: StateView }
@@ -41,16 +42,27 @@ type MutableState = {
   agents: Map<string, AgentItem>;
   tasks: Map<string, TaskItem>;
   humanRequests: Map<string, HumanRequestItem>;
-  revisions: Map<string, bigint>;
+  revisions: Map<string, { revision: bigint; deleted: boolean }>;
 };
+
+type StagingState = {
+  state: MutableState;
+  kindIndex: number;
+  nextCursor: string;
+  consumedCursors: Set<string>;
+};
+
+const STATE_TRAVERSAL: readonly StateKind[] = ["factory", "project", "agent", "task", "human_request"];
 
 /**
  * One framework-neutral causal state accumulator. Same-head pages are staged
- * away from readers and become visible only when next_cursor is null.
+ * away from readers and become visible only after a terminal HumanRequest
+ * page. The caller supplies the cursor used by the correlated STATE_GET so an
+ * untrusted response cannot splice or replay a page chain.
  */
 export class StateAccumulator {
   #published: MutableState | undefined;
-  #staging: MutableState | undefined;
+  #staging: StagingState | undefined;
 
   get current(): StateView | undefined {
     return this.#published === undefined ? undefined : view(this.#published);
@@ -58,20 +70,39 @@ export class StateAccumulator {
 
   apply(frame: StateReducerFrame): StateReducerResult {
     switch (frame.type) {
-      case "STATE_SNAPSHOT": return this.applySnapshot(frame.body);
       case "STATE_RESTART": return this.applyRestart(frame.body.reason);
       case "STATE_EVENT": return this.applyEvent(frame.body);
       case "STATE_ENTITY": return this.applyEntity(frame.body);
     }
   }
 
-  applySnapshot(page: StateSnapshotBody): StateReducerResult {
-    if (this.#staging !== undefined && this.#staging.head !== page.head) return this.#restart("head_changed");
-    this.#staging ??= emptyState(page.head);
-    stagePage(this.#staging, page);
-    if (page.next_cursor !== null) return { kind: "staged" };
-    this.#staging.sequence = page.head;
-    this.#published = this.#staging;
+  applySnapshot(page: StateSnapshotBody, cursor: string | null): StateReducerResult {
+    const pageKindIndex = STATE_TRAVERSAL.indexOf(page.kind);
+    if (this.#staging === undefined) {
+      if (cursor !== null || pageKindIndex !== 0 || page.next_cursor === null) return this.#restart("gap");
+      if (this.#published !== undefined && page.head < this.#published.head) return this.#restart("head_changed");
+      const state = emptyState(page.head);
+      if (!stagePage(state, page)) return this.#restart("gap");
+      this.#staging = { state, kindIndex: 0, nextCursor: page.next_cursor, consumedCursors: new Set() };
+      return { kind: "staged" };
+    }
+
+    const staging = this.#staging;
+    if (staging.state.head !== page.head) return this.#restart("head_changed");
+    if (cursor === null || cursor !== staging.nextCursor || staging.consumedCursors.has(cursor)) return this.#restart("gap");
+    if (pageKindIndex < staging.kindIndex || pageKindIndex > staging.kindIndex + 1 || pageKindIndex === 0) return this.#restart("gap");
+    if (page.next_cursor !== null && (page.next_cursor === cursor || staging.consumedCursors.has(page.next_cursor))) return this.#restart("gap");
+    if (page.next_cursor === null && page.kind !== "human_request") return this.#restart("gap");
+    if (!stagePage(staging.state, page)) return this.#restart("gap");
+    staging.consumedCursors.add(cursor);
+    staging.kindIndex = pageKindIndex;
+    if (page.next_cursor !== null) {
+      staging.nextCursor = page.next_cursor;
+      return { kind: "staged" };
+    }
+
+    staging.state.sequence = page.head;
+    this.#published = staging.state;
     this.#staging = undefined;
     return { kind: "published", state: view(this.#published) };
   }
@@ -88,28 +119,29 @@ export class StateAccumulator {
 
     const key = entityKey(event.entity_kind, event.entity_id);
     const known = state.revisions.get(key);
-    if (known !== undefined && event.revision < known) return { kind: "ignored", state: view(state) };
-    if (known === undefined || event.revision > known) state.revisions.set(key, event.revision);
+    if (known !== undefined && (event.revision < known.revision || event.revision === known.revision && known.deleted && !event.deleted)) return { kind: "ignored", state: view(state) };
     if (event.deleted) {
-      state.revisions.set(key, event.revision);
+      state.revisions.set(key, { revision: event.revision, deleted: true });
       removeEntity(state, event.entity_kind, event.entity_id);
+    } else if (known === undefined || event.revision > known.revision) {
+      state.revisions.set(key, { revision: event.revision, deleted: false });
     }
     return { kind: "applied", state: view(state) };
   }
 
   applyEntity(entity: StateEntityBody): StateReducerResult {
     const state = this.#published;
-    if (state === undefined) return this.#restart("gap");
+    if (state === undefined || this.#staging !== undefined) return this.#restart("gap");
     if (entity.head < state.head) return { kind: "ignored", state: view(state) };
     const key = entityKey(entity.kind, entity.id);
+    const known = state.revisions.get(key);
+    if (known !== undefined && (entity.revision < known.revision || entity.revision === known.revision && known.deleted && !entity.deleted)) return { kind: "ignored", state: view(state) };
     if (entity.deleted) {
+      state.revisions.set(key, { revision: entity.revision, deleted: true });
       removeEntity(state, entity.kind, entity.id);
       return { kind: "applied", state: view(state) };
     }
-    const revision = entity.item.revision;
-    const known = state.revisions.get(key);
-    if (known !== undefined && revision < known) return { kind: "ignored", state: view(state) };
-    state.revisions.set(key, revision);
+    state.revisions.set(key, { revision: entity.revision, deleted: false });
     setEntity(state, entity);
     return { kind: "applied", state: view(state) };
   }
@@ -125,16 +157,18 @@ function emptyState(head: bigint): MutableState {
   return { head, sequence: head, factory: [], projects: new Map(), agents: new Map(), tasks: new Map(), humanRequests: new Map(), revisions: new Map() };
 }
 
-function stagePage(state: MutableState, page: StateSnapshotBody): void {
+function stagePage(state: MutableState, page: StateSnapshotBody): boolean {
   switch (page.kind) {
     case "factory":
-      for (const item of page.items) { state.factory.push(item); state.revisions.set(entityKey("factory", "factory"), item.revision); }
+      if (state.factory.length !== 0) return false;
+      for (const item of page.items) { state.factory.push(item); state.revisions.set(entityKey("factory", "factory"), { revision: item.revision, deleted: false }); }
       break;
-    case "project": for (const item of page.items) { state.projects.set(item.id, item); state.revisions.set(entityKey(page.kind, item.id), item.revision); } break;
-    case "agent": for (const item of page.items) { state.agents.set(item.id, item); state.revisions.set(entityKey(page.kind, item.id), item.revision); } break;
-    case "task": for (const item of page.items) { state.tasks.set(item.id, item); state.revisions.set(entityKey(page.kind, item.id), item.revision); } break;
-    case "human_request": for (const item of page.items) { state.humanRequests.set(item.id, item); state.revisions.set(entityKey(page.kind, item.id), item.revision); } break;
+    case "project": for (const item of page.items) { if (state.projects.has(item.id)) return false; state.projects.set(item.id, item); state.revisions.set(entityKey(page.kind, item.id), { revision: item.revision, deleted: false }); } break;
+    case "agent": for (const item of page.items) { if (state.agents.has(item.id)) return false; state.agents.set(item.id, item); state.revisions.set(entityKey(page.kind, item.id), { revision: item.revision, deleted: false }); } break;
+    case "task": for (const item of page.items) { if (state.tasks.has(item.id)) return false; state.tasks.set(item.id, item); state.revisions.set(entityKey(page.kind, item.id), { revision: item.revision, deleted: false }); } break;
+    case "human_request": for (const item of page.items) { if (state.humanRequests.has(item.id)) return false; state.humanRequests.set(item.id, item); state.revisions.set(entityKey(page.kind, item.id), { revision: item.revision, deleted: false }); } break;
   }
+  return true;
 }
 
 function setEntity(state: MutableState, entity: Exclude<StateEntityBody, { deleted: true }>): void {

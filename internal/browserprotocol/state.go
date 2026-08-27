@@ -11,6 +11,7 @@ import (
 
 const (
 	MaxStatePageItems            = 8
+	MaxFactoryPageItems          = 1
 	MaxCursorBytes               = 256
 	MaxProjectNameBytes          = 128
 	MaxAgentNameBytes            = 128
@@ -62,6 +63,30 @@ func parseDecimal(value string) (Decimal, error) {
 	return Decimal(parsed), nil
 }
 
+// Bool is an exact JSON boolean. encoding/json otherwise accepts null for a
+// bool field and silently turns it into false, which would make Go looser than
+// the browser parser at the authority boundary.
+type Bool bool
+
+func (value Bool) MarshalJSON() ([]byte, error) {
+	if value {
+		return []byte("true"), nil
+	}
+	return []byte("false"), nil
+}
+
+func (value *Bool) UnmarshalJSON(data []byte) error {
+	switch string(bytes.TrimSpace(data)) {
+	case "true":
+		*value = true
+	case "false":
+		*value = false
+	default:
+		return fmt.Errorf("%w: boolean required", ErrMalformed)
+	}
+	return nil
+}
+
 type StateKind string
 
 const (
@@ -77,7 +102,7 @@ type StateGet struct {
 }
 
 type FactoryItem struct {
-	DispatchEnabled bool    `json:"dispatch_enabled"`
+	DispatchEnabled Bool    `json:"dispatch_enabled"`
 	Capacity        uint16  `json:"capacity"`
 	ActiveRuns      uint16  `json:"active_runs"`
 	Revision        Decimal `json:"revision"`
@@ -94,7 +119,7 @@ type AgentItem struct {
 	ProjectID string  `json:"project_id"`
 	Name      string  `json:"name"`
 	Role      string  `json:"role"`
-	Paused    bool    `json:"paused"`
+	Paused    Bool    `json:"paused"`
 	Revision  Decimal `json:"revision"`
 }
 
@@ -122,8 +147,8 @@ type HumanRequestItem struct {
 	Kind            string  `json:"kind"`
 	Status          string  `json:"status"`
 	ReplyMaxBytes   uint16  `json:"reply_max_bytes"`
-	CanReply        bool    `json:"can_reply"`
-	CanOpenTerminal bool    `json:"can_open_terminal"`
+	CanReply        Bool    `json:"can_reply"`
+	CanOpenTerminal Bool    `json:"can_open_terminal"`
 }
 
 // StateItems is a closed kind-selected page union.
@@ -240,7 +265,7 @@ type EntityChanged struct {
 	EntityKind StateKind
 	EntityID   string
 	Revision   Decimal
-	Deleted    bool
+	Deleted    Bool
 }
 
 type HiddenAdvance struct {
@@ -289,7 +314,7 @@ func (event StateEvent) MarshalJSON() ([]byte, error) {
 			EntityKind StateKind      `json:"entity_kind"`
 			EntityID   string         `json:"entity_id"`
 			Revision   Decimal        `json:"revision"`
-			Deleted    bool           `json:"deleted"`
+			Deleted    Bool           `json:"deleted"`
 		}{event.kind, value.Sequence, value.Head, value.EntityKind, value.EntityID, value.Revision, value.Deleted})
 	case EventHiddenAdvance:
 		if event.hiddenAdvance == nil {
@@ -363,21 +388,23 @@ func (item StateItem) MarshalJSON() ([]byte, error) {
 }
 
 type StateEntity struct {
-	Head    Decimal
-	Kind    StateKind
-	ID      string
-	Deleted bool
-	Item    StateItem
+	Head     Decimal
+	Kind     StateKind
+	ID       string
+	Revision Decimal
+	Deleted  Bool
+	Item     StateItem
 }
 
 func (value StateEntity) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
-		Head    Decimal   `json:"head"`
-		Kind    StateKind `json:"kind"`
-		ID      string    `json:"id"`
-		Deleted bool      `json:"deleted"`
-		Item    StateItem `json:"item"`
-	}{value.Head, value.Kind, value.ID, value.Deleted, value.Item})
+		Head     Decimal   `json:"head"`
+		Kind     StateKind `json:"kind"`
+		ID       string    `json:"id"`
+		Revision Decimal   `json:"revision"`
+		Deleted  Bool      `json:"deleted"`
+		Item     StateItem `json:"item"`
+	}{value.Head, value.Kind, value.ID, value.Revision, value.Deleted, value.Item})
 }
 
 type HumanRequestDetailGet struct {
@@ -461,7 +488,7 @@ func decodeStateEvent(data []byte) (StateEvent, error) {
 			EntityKind StateKind      `json:"entity_kind"`
 			EntityID   string         `json:"entity_id"`
 			Revision   Decimal        `json:"revision"`
-			Deleted    bool           `json:"deleted"`
+			Deleted    Bool           `json:"deleted"`
 		}
 		if err := unmarshalObject(data, &value); err != nil {
 			return StateEvent{}, err
@@ -484,11 +511,12 @@ func decodeStateEvent(data []byte) (StateEvent, error) {
 
 func decodeStateEntity(data []byte) (StateEntity, error) {
 	var wire struct {
-		Head    Decimal         `json:"head"`
-		Kind    StateKind       `json:"kind"`
-		ID      string          `json:"id"`
-		Deleted bool            `json:"deleted"`
-		Item    json.RawMessage `json:"item"`
+		Head     Decimal         `json:"head"`
+		Kind     StateKind       `json:"kind"`
+		ID       string          `json:"id"`
+		Revision Decimal         `json:"revision"`
+		Deleted  Bool            `json:"deleted"`
+		Item     json.RawMessage `json:"item"`
 	}
 	if err := unmarshalObject(data, &wire); err != nil {
 		return StateEntity{}, err
@@ -497,7 +525,7 @@ func decodeStateEntity(data []byte) (StateEntity, error) {
 	if err != nil {
 		return StateEntity{}, err
 	}
-	return StateEntity{wire.Head, wire.Kind, wire.ID, wire.Deleted, item}, nil
+	return StateEntity{wire.Head, wire.Kind, wire.ID, wire.Revision, wire.Deleted, item}, nil
 }
 
 func decodeStateItem(kind StateKind, data []byte) (StateItem, error) {
@@ -638,6 +666,9 @@ func validateStateItems(items StateItems) error {
 	switch items.kind {
 	case StateFactory:
 		length = len(items.factory)
+		if length != MaxFactoryPageItems {
+			return fmt.Errorf("%w: factory page item count", ErrMalformed)
+		}
 		for _, item := range items.factory {
 			if err := validateFactoryItem(item); err != nil {
 				return err
@@ -731,6 +762,23 @@ func stateItemID(item StateItem) string {
 	}
 }
 
+func stateItemRevision(item StateItem) Decimal {
+	switch item.kind {
+	case StateFactory:
+		return item.factory.Revision
+	case StateProject:
+		return item.project.Revision
+	case StateAgent:
+		return item.agent.Revision
+	case StateTask:
+		return item.task.Revision
+	case StateHumanRequest:
+		return item.humanRequest.Revision
+	default:
+		return 0
+	}
+}
+
 func validateStateGet(value StateGet) error { return validateCursor(value.Cursor) }
 
 func validateStateSnapshot(value StateSnapshot) error {
@@ -780,13 +828,13 @@ func validateStateEntityGet(value StateEntityGet) error {
 }
 
 func validateStateEntity(value StateEntity) error {
-	if validateEntityID(value.Kind, value.ID) != nil || validateStateItem(value.Item) != nil {
+	if validateEntityID(value.Kind, value.ID) != nil || validateStateItem(value.Item) != nil || value.Revision == 0 {
 		return fmt.Errorf("%w: state entity", ErrMalformed)
 	}
-	if value.Deleted != value.Item.IsDeleted() {
+	if bool(value.Deleted) != value.Item.IsDeleted() {
 		return fmt.Errorf("%w: entity tombstone", ErrMalformed)
 	}
-	if !value.Deleted && (value.Item.Kind() != value.Kind || stateItemID(value.Item) != value.ID) {
+	if !value.Deleted && (value.Item.Kind() != value.Kind || stateItemID(value.Item) != value.ID || stateItemRevision(value.Item) != value.Revision) {
 		return fmt.Errorf("%w: entity item mismatch", ErrMalformed)
 	}
 	return nil

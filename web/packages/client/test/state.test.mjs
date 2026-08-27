@@ -38,6 +38,13 @@ const projectItem = (revision = 1n) => ({ id: ids.project, name: "Factory", revi
 const agentItem = (revision = 1n) => ({ id: ids.agent, project_id: ids.project, name: "Worker", role: "worker", paused: false, revision });
 const taskItem = (revision = 1n, title = "Ship") => ({ id: ids.task, project_id: ids.project, assigned_agent_id: ids.agent, title, status: "queued", priority: 1, revision });
 const requestItem = (revision = 1n) => ({ id: ids.request, project_id: ids.project, agent_id: ids.agent, task_id: ids.task, run_id: ids.run, created_at: 10n, updated_at: 11n, revision, kind: "question", status: "open", reply_max_bytes: 8192, can_reply: true, can_open_terminal: true });
+const publishState = (reducer, head, { projects = [], agents = [], tasks = [], requests = [] } = {}) => {
+  assert.equal(reducer.applySnapshot({ head, kind: "factory", items: [factoryItem()], next_cursor: "projects" }, null).kind, "staged");
+  assert.equal(reducer.applySnapshot({ head, kind: "project", items: projects, next_cursor: "agents" }, "projects").kind, "staged");
+  assert.equal(reducer.applySnapshot({ head, kind: "agent", items: agents, next_cursor: "tasks" }, "agents").kind, "staged");
+  assert.equal(reducer.applySnapshot({ head, kind: "task", items: tasks, next_cursor: "requests" }, "tasks").kind, "staged");
+  return reducer.applySnapshot({ head, kind: "human_request", items: requests, next_cursor: null }, "requests");
+};
 
 test("every Go control fixture is consumed by the matching closed TypeScript direction", () => {
   for (const entry of manifest.control) {
@@ -53,9 +60,9 @@ test("every Go control fixture is consumed by the matching closed TypeScript dir
   assert.equal(decodeServerControl(fixture("state_snapshot.json")).body.head, 9_007_199_254_740_993n);
 });
 
-test("all state page kinds accept zero/eight items and reject nine", () => {
+test("dynamic state pages accept zero/eight, factory accepts exactly one, and all reject overflow", () => {
   const samples = {
-    factory: factoryItem(), project: projectItem(), agent: agentItem(), task: taskItem(), human_request: requestItem(),
+    project: projectItem(), agent: agentItem(), task: taskItem(), human_request: requestItem(),
   };
   for (const [kind, sample] of Object.entries(samples)) {
     for (const count of [0, MAX_STATE_PAGE_ITEMS]) {
@@ -64,6 +71,10 @@ test("all state page kinds accept zero/eight items and reject nine", () => {
       assert.equal(decoded.body.items.length, count);
     }
     expectMalformed(() => encodeStateSnapshot("page", { head: 1n, kind, items: Array.from({ length: MAX_STATE_PAGE_ITEMS + 1 }, () => ({ ...sample })), next_cursor: null }));
+  }
+  assert.equal(decodeServerControl(encodeStateSnapshot("page", { head: 1n, kind: "factory", items: [factoryItem()], next_cursor: "projects" })).body.items.length, 1);
+  for (const count of [0, 2, MAX_STATE_PAGE_ITEMS, MAX_STATE_PAGE_ITEMS + 1]) {
+    expectMalformed(() => encodeStateSnapshot("page", { head: 1n, kind: "factory", items: Array.from({ length: count }, () => factoryItem()), next_cursor: "projects" }));
   }
 });
 
@@ -97,12 +108,27 @@ test("cursor, entity identity, item bounds and event variants remain closed", ()
 });
 
 test("entity tombstones are null and live items match kind and identity", () => {
-  const live = { head: 2n, kind: "task", id: ids.task, deleted: false, item: taskItem(2n) };
+  const live = { head: 2n, kind: "task", id: ids.task, revision: 2n, deleted: false, item: taskItem(2n) };
   assert.equal(decodeServerControl(encodeStateEntity("entity", live)).body.item.revision, 2n);
-  assert.equal(decodeServerControl(encodeStateEntity("entity", { head: 2n, kind: "task", id: ids.task, deleted: true, item: null })).body.item, null);
+  assert.equal(decodeServerControl(encodeStateEntity("entity", { head: 2n, kind: "task", id: ids.task, revision: 3n, deleted: true, item: null })).body.item, null);
   expectMalformed(() => encodeStateEntity("entity", { ...live, deleted: true }));
   expectMalformed(() => encodeStateEntity("entity", { ...live, item: { ...live.item, id: ids.project } }));
+  expectMalformed(() => encodeStateEntity("entity", { ...live, revision: 3n }));
+  expectMalformed(() => decodeServerControl(fixture("state_entity.json").replace('"revision":"2","deleted"', '"deleted"')));
   expectMalformed(() => decodeServerControl(fixture("state_entity.json").replace('"kind":"human_request"', '"kind":"task"')));
+});
+
+test("every JSON boolean rejects null exactly", () => {
+  const samples = [
+    [encodeStateSnapshot("boolean", { head: 1n, kind: "factory", items: [factoryItem()], next_cursor: "projects" }), '"dispatch_enabled":true'],
+    [encodeStateSnapshot("boolean", { head: 1n, kind: "agent", items: [agentItem()], next_cursor: "tasks" }), '"paused":false'],
+    [encodeStateSnapshot("boolean", { head: 1n, kind: "human_request", items: [requestItem()], next_cursor: null }), '"can_reply":true'],
+    [encodeStateSnapshot("boolean", { head: 1n, kind: "human_request", items: [requestItem()], next_cursor: null }), '"can_open_terminal":true'],
+    [encodeStateEvent("boolean", { event: "entity_changed", sequence: 1n, head: 1n, entity_kind: "task", entity_id: ids.task, revision: 1n, deleted: false }), '"deleted":false'],
+    [encodeStateEntity("boolean", { head: 1n, kind: "task", id: ids.task, revision: 1n, deleted: false, item: taskItem() }), '"deleted":false'],
+    [encodeServerControl({ v: 1, type: "ERROR", id: "boolean", body: { code: "invalid_request", retryable: false } }), '"retryable":false'],
+  ];
+  for (const [wire, field] of samples) expectMalformed(() => decodeServerControl(wire.replace(field, field.replace(/(true|false)$/, "null"))));
 });
 
 test("public HumanRequest state cannot carry private fields and detail is separately bounded", () => {
@@ -136,51 +162,115 @@ test("state parsing rejects case-folded/duplicate/unknown/trailing/depth/member/
   expectMalformed(() => decodeServerControl(new Uint8Array(MAX_CONTROL_BYTES + 1).fill(0x20)));
 });
 
-test("state accumulator stages atomically, requires one head and discards on restart", () => {
+test("state accumulator stages the fixed traversal atomically and never publishes a lower head", () => {
   const reducer = new StateAccumulator();
-  assert.equal(reducer.applySnapshot({ head: 7n, kind: "factory", items: [factoryItem()], next_cursor: "next" }).kind, "staged");
+  assert.equal(reducer.applySnapshot({ head: 7n, kind: "factory", items: [factoryItem()], next_cursor: "projects" }, null).kind, "staged");
   assert.equal(reducer.current, undefined);
-  const published = reducer.applySnapshot({ head: 7n, kind: "project", items: [projectItem()], next_cursor: null });
+  assert.equal(reducer.applySnapshot({ head: 7n, kind: "project", items: [projectItem()], next_cursor: "agents" }, "projects").kind, "staged");
+  assert.equal(reducer.applySnapshot({ head: 7n, kind: "agent", items: [], next_cursor: "tasks" }, "agents").kind, "staged");
+  assert.equal(reducer.applySnapshot({ head: 7n, kind: "task", items: [], next_cursor: "requests" }, "tasks").kind, "staged");
+  const published = reducer.applySnapshot({ head: 7n, kind: "human_request", items: [], next_cursor: null }, "requests");
   assert.equal(published.kind, "published");
   assert.equal(reducer.current.head, 7n);
   assert.equal(reducer.current.projects.size, 1);
 
-  assert.equal(reducer.applySnapshot({ head: 8n, kind: "factory", items: [], next_cursor: "next" }).kind, "staged");
-  assert.equal(reducer.current.head, 7n, "partial replacement became visible");
-  assert.deepEqual(reducer.applySnapshot({ head: 9n, kind: "project", items: [], next_cursor: null }), { kind: "restart", reason: "head_changed" });
+  assert.deepEqual(reducer.applySnapshot({ head: 6n, kind: "factory", items: [factoryItem()], next_cursor: "projects" }, null), { kind: "restart", reason: "head_changed" });
   assert.equal(reducer.current, undefined);
 
-  reducer.applySnapshot({ head: 1n, kind: "factory", items: [], next_cursor: null });
+  publishState(reducer, 7n);
+  assert.equal(reducer.applySnapshot({ head: 8n, kind: "factory", items: [factoryItem()], next_cursor: "projects" }, null).kind, "staged");
+  assert.equal(reducer.current.head, 7n, "partial replacement became visible");
+  assert.deepEqual(reducer.applySnapshot({ head: 9n, kind: "project", items: [], next_cursor: "agents" }, "projects"), { kind: "restart", reason: "head_changed" });
+  assert.equal(reducer.current, undefined);
+
+  publishState(reducer, 1n);
   assert.deepEqual(reducer.applyRestart("pruned"), { kind: "restart", reason: "pruned" });
   assert.equal(reducer.current, undefined);
 });
 
+test("state accumulator rejects skipped, replayed, out-of-order, duplicate, and forged continuations", () => {
+  let reducer = new StateAccumulator();
+  assert.deepEqual(reducer.applySnapshot({ head: 1n, kind: "project", items: [], next_cursor: "agents" }, null), { kind: "restart", reason: "gap" });
+
+  reducer = new StateAccumulator();
+  reducer.applySnapshot({ head: 1n, kind: "factory", items: [factoryItem()], next_cursor: "projects" }, null);
+  assert.deepEqual(reducer.applySnapshot({ head: 1n, kind: "project", items: [], next_cursor: "agents" }, "forged"), { kind: "restart", reason: "gap" });
+
+  reducer = new StateAccumulator();
+  reducer.applySnapshot({ head: 1n, kind: "factory", items: [factoryItem()], next_cursor: "projects" }, null);
+  reducer.applySnapshot({ head: 1n, kind: "project", items: [], next_cursor: "agents" }, "projects");
+  assert.deepEqual(reducer.applySnapshot({ head: 1n, kind: "task", items: [], next_cursor: "requests" }, "agents"), { kind: "restart", reason: "gap" });
+
+  reducer = new StateAccumulator();
+  reducer.applySnapshot({ head: 1n, kind: "factory", items: [factoryItem()], next_cursor: "projects" }, null);
+  reducer.applySnapshot({ head: 1n, kind: "project", items: [], next_cursor: "agents" }, "projects");
+  reducer.applySnapshot({ head: 1n, kind: "agent", items: [], next_cursor: "tasks" }, "agents");
+  assert.deepEqual(reducer.applySnapshot({ head: 1n, kind: "project", items: [], next_cursor: "forged" }, "tasks"), { kind: "restart", reason: "gap" });
+
+  reducer = new StateAccumulator();
+  reducer.applySnapshot({ head: 1n, kind: "factory", items: [factoryItem()], next_cursor: "projects" }, null);
+  reducer.applySnapshot({ head: 1n, kind: "project", items: [projectItem()], next_cursor: "project-page-2" }, "projects");
+  assert.deepEqual(reducer.applySnapshot({ head: 1n, kind: "project", items: [projectItem()], next_cursor: "agents" }, "project-page-2"), { kind: "restart", reason: "gap" });
+
+  reducer = new StateAccumulator();
+  reducer.applySnapshot({ head: 1n, kind: "factory", items: [factoryItem()], next_cursor: "projects" }, null);
+  reducer.applySnapshot({ head: 1n, kind: "project", items: [], next_cursor: "agents" }, "projects");
+  assert.deepEqual(reducer.applySnapshot({ head: 1n, kind: "project", items: [], next_cursor: "projects" }, "agents"), { kind: "restart", reason: "gap" });
+
+  reducer = new StateAccumulator();
+  reducer.applySnapshot({ head: 1n, kind: "factory", items: [factoryItem()], next_cursor: "projects" }, null);
+  assert.deepEqual(reducer.applySnapshot({ head: 1n, kind: "project", items: [], next_cursor: null }, "projects"), { kind: "restart", reason: "gap" });
+});
+
+test("entity refresh during staging restarts without mutating the previously published view", () => {
+  const reducer = new StateAccumulator();
+  publishState(reducer, 1n, { tasks: [taskItem(1n, "published")] });
+  const oldView = reducer.current;
+  reducer.applySnapshot({ head: 2n, kind: "factory", items: [factoryItem(2n)], next_cursor: "projects" }, null);
+  assert.deepEqual(reducer.applyEntity({ head: 2n, kind: "task", id: ids.task, revision: 2n, deleted: false, item: taskItem(2n, "refresh") }), { kind: "restart", reason: "gap" });
+  assert.equal(reducer.current, undefined);
+  assert.equal(oldView.tasks.get(ids.task).title, "published");
+});
+
 test("state accumulator advances hidden events, detects gaps, and rejects late/lower revisions", () => {
   const reducer = new StateAccumulator();
-  reducer.applySnapshot({ head: 1n, kind: "task", items: [taskItem(5n, "old")], next_cursor: null });
+  publishState(reducer, 1n, { tasks: [taskItem(5n, "old")] });
   let result = reducer.applyEvent({ event: "hidden_advance", sequence: 2n, head: 2n });
   assert.equal(result.kind, "applied");
   assert.equal(reducer.current.sequence, 2n);
 
   result = reducer.applyEvent({ event: "entity_changed", sequence: 3n, head: 3n, entity_kind: "task", entity_id: ids.task, revision: 7n, deleted: false });
   assert.equal(result.kind, "applied");
-  assert.equal(reducer.applyEntity({ head: 3n, kind: "task", id: ids.task, deleted: false, item: taskItem(6n, "lower") }).kind, "ignored");
+  assert.equal(reducer.applyEntity({ head: 3n, kind: "task", id: ids.task, revision: 6n, deleted: false, item: taskItem(6n, "lower") }).kind, "ignored");
   assert.equal(reducer.current.tasks.get(ids.task).title, "old");
-  assert.equal(reducer.applyEntity({ head: 3n, kind: "task", id: ids.task, deleted: false, item: taskItem(7n, "current") }).kind, "applied");
+  assert.equal(reducer.applyEntity({ head: 3n, kind: "task", id: ids.task, revision: 7n, deleted: false, item: taskItem(7n, "current") }).kind, "applied");
   assert.equal(reducer.current.tasks.get(ids.task).title, "current");
 
   assert.equal(reducer.applyEvent({ event: "entity_changed", sequence: 4n, head: 4n, entity_kind: "task", entity_id: ids.task, revision: 6n, deleted: false }).kind, "ignored");
   assert.equal(reducer.current.sequence, 4n);
-  assert.equal(reducer.applyEntity({ head: 3n, kind: "task", id: ids.task, deleted: true, item: null }).kind, "ignored");
+  assert.equal(reducer.applyEntity({ head: 3n, kind: "task", id: ids.task, revision: 8n, deleted: true, item: null }).kind, "ignored");
   assert.equal(reducer.current.tasks.has(ids.task), true);
 
   reducer.applyEvent({ event: "entity_changed", sequence: 5n, head: 5n, entity_kind: "task", entity_id: ids.task, revision: 8n, deleted: true });
   assert.equal(reducer.current.tasks.has(ids.task), false);
-  assert.equal(reducer.applyEntity({ head: 5n, kind: "task", id: ids.task, deleted: false, item: taskItem(7n, "resurrect") }).kind, "ignored");
+  assert.equal(reducer.applyEntity({ head: 5n, kind: "task", id: ids.task, revision: 8n, deleted: false, item: taskItem(8n, "resurrect") }).kind, "ignored");
   assert.equal(reducer.current.tasks.has(ids.task), false);
 
   assert.deepEqual(reducer.applyEvent({ event: "hidden_advance", sequence: 7n, head: 7n }), { kind: "restart", reason: "gap" });
   assert.equal(reducer.current, undefined);
+});
+
+test("same-head tombstones cannot delete newer state or permit equal-revision resurrection", () => {
+  const reducer = new StateAccumulator();
+  publishState(reducer, 5n, { tasks: [taskItem(5n, "live")] });
+  assert.equal(reducer.applyEntity({ head: 5n, kind: "task", id: ids.task, revision: 4n, deleted: true, item: null }).kind, "ignored");
+  assert.equal(reducer.current.tasks.get(ids.task).title, "live");
+  assert.equal(reducer.applyEntity({ head: 5n, kind: "task", id: ids.task, revision: 5n, deleted: true, item: null }).kind, "applied");
+  assert.equal(reducer.current.tasks.has(ids.task), false);
+  assert.equal(reducer.applyEntity({ head: 5n, kind: "task", id: ids.task, revision: 5n, deleted: false, item: taskItem(5n, "stale resurrection") }).kind, "ignored");
+  assert.equal(reducer.current.tasks.has(ids.task), false);
+  assert.equal(reducer.applyEntity({ head: 5n, kind: "task", id: ids.task, revision: 6n, deleted: false, item: taskItem(6n, "new generation") }).kind, "applied");
+  assert.equal(reducer.current.tasks.get(ids.task).title, "new generation");
 });
 
 test("manifest bounds and registry are an exact readable mirror", () => {
@@ -191,6 +281,7 @@ test("manifest bounds and registry are an exact readable mirror", () => {
     maxArrayItems: manifest.bounds.max_array_items,
     maxObjectMembers: manifest.bounds.max_object_members,
     maxStatePageItems: manifest.bounds.max_state_page_items,
+    maxFactoryPageItems: manifest.bounds.max_factory_page_items,
     maxCursorBytes: manifest.bounds.max_cursor_bytes,
     maxProjectNameBytes: manifest.bounds.max_project_name_bytes,
     maxAgentNameBytes: manifest.bounds.max_agent_name_bytes,

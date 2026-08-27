@@ -258,6 +258,7 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 			MaxArrayItems         int    `json:"max_array_items"`
 			MaxObjectMembers      int    `json:"max_object_members"`
 			MaxStatePageItems     int    `json:"max_state_page_items"`
+			MaxFactoryPageItems   int    `json:"max_factory_page_items"`
 			MaxCursorBytes        int    `json:"max_cursor_bytes"`
 			MaxProjectNameBytes   int    `json:"max_project_name_bytes"`
 			MaxAgentNameBytes     int    `json:"max_agent_name_bytes"`
@@ -311,12 +312,12 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 	}
 	wantBounds := struct {
 		MaxControlBytes, MaxJSONDepth, MaxArrayItems, MaxObjectMembers int
-		MaxStatePageItems, MaxCursorBytes                              int
+		MaxStatePageItems, MaxFactoryPageItems, MaxCursorBytes         int
 		MaxProjectNameBytes, MaxAgentNameBytes, MaxTaskTitleBytes      int
 		MaxHumanQuestionBytes, MaxHumanReplyBytes, MaxFactoryCapacity  int
 		MaxTaskPriority                                                int64
 		MaxSQLiteInteger                                               string
-	}{MaxControlBytes, MaxJSONDepth, MaxJSONArray, MaxJSONObject, MaxStatePageItems, MaxCursorBytes, MaxProjectNameBytes, MaxAgentNameBytes, MaxTaskTitleBytes, MaxHumanQuestionBytes, MaxHumanReplyBytes, MaxFactoryCapacity, MaxTaskPriority, fmt.Sprint(MaxSQLiteInteger)}
+	}{MaxControlBytes, MaxJSONDepth, MaxJSONArray, MaxJSONObject, MaxStatePageItems, MaxFactoryPageItems, MaxCursorBytes, MaxProjectNameBytes, MaxAgentNameBytes, MaxTaskTitleBytes, MaxHumanQuestionBytes, MaxHumanReplyBytes, MaxFactoryCapacity, MaxTaskPriority, fmt.Sprint(MaxSQLiteInteger)}
 	if fmt.Sprint(manifest.Bounds) != fmt.Sprint(wantBounds) {
 		t.Fatalf("bounds drift: got %+v want %+v", manifest.Bounds, wantBounds)
 	}

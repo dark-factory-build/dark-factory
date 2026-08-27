@@ -6,6 +6,7 @@ export const MAX_JSON_DEPTH = 16;
 export const MAX_ARRAY_ITEMS = 32;
 export const MAX_OBJECT_MEMBERS = 32;
 export const MAX_STATE_PAGE_ITEMS = 8;
+export const MAX_FACTORY_PAGE_ITEMS = 1;
 export const MAX_CURSOR_BYTES = 256;
 export const MAX_PROJECT_NAME_BYTES = 128;
 export const MAX_AGENT_NAME_BYTES = 128;
@@ -72,6 +73,7 @@ export const BROWSER_MANIFEST = {
     maxArrayItems: MAX_ARRAY_ITEMS,
     maxObjectMembers: MAX_OBJECT_MEMBERS,
     maxStatePageItems: MAX_STATE_PAGE_ITEMS,
+    maxFactoryPageItems: MAX_FACTORY_PAGE_ITEMS,
     maxCursorBytes: MAX_CURSOR_BYTES,
     maxProjectNameBytes: MAX_PROJECT_NAME_BYTES,
     maxAgentNameBytes: MAX_AGENT_NAME_BYTES,

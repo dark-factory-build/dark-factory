@@ -12,6 +12,7 @@
     "max_array_items": 32,
     "max_object_members": 32,
     "max_state_page_items": 8,
+    "max_factory_page_items": 1,
     "max_cursor_bytes": 256,
     "max_project_name_bytes": 128,
     "max_agent_name_bytes": 128,

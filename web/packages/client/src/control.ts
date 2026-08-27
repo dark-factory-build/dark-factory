@@ -7,6 +7,7 @@ import {
   MAX_ARRAY_ITEMS,
   MAX_CONTROL_BYTES,
   MAX_CURSOR_BYTES,
+  MAX_FACTORY_PAGE_ITEMS,
   MAX_FACTORY_CAPACITY,
   MAX_HUMAN_QUESTION_BYTES,
   MAX_HUMAN_REPLY_BYTES,
@@ -43,7 +44,7 @@ export type HumanRequestItem = {
 
 export type StateGetBody = { cursor: string | null };
 export type StateSnapshotBody =
-  | { head: bigint; kind: "factory"; items: FactoryItem[]; next_cursor: string | null }
+  | { head: bigint; kind: "factory"; items: [FactoryItem]; next_cursor: string | null }
   | { head: bigint; kind: "project"; items: ProjectItem[]; next_cursor: string | null }
   | { head: bigint; kind: "agent"; items: AgentItem[]; next_cursor: string | null }
   | { head: bigint; kind: "task"; items: TaskItem[]; next_cursor: string | null }
@@ -55,14 +56,14 @@ export type EntityChangedEvent = { event: "entity_changed"; sequence: bigint; he
 export type HiddenAdvanceEvent = { event: "hidden_advance"; sequence: bigint; head: bigint };
 export type StateEventBody = EntityChangedEvent | HiddenAdvanceEvent;
 export type StateEntityGetBody = { kind: StateKind; id: string };
-type DeletedStateEntity = { head: bigint; kind: StateKind; id: string; deleted: true; item: null };
+type DeletedStateEntity = { head: bigint; kind: StateKind; id: string; revision: bigint; deleted: true; item: null };
 export type StateEntityBody =
   | DeletedStateEntity
-  | { head: bigint; kind: "factory"; id: "factory"; deleted: false; item: FactoryItem }
-  | { head: bigint; kind: "project"; id: string; deleted: false; item: ProjectItem }
-  | { head: bigint; kind: "agent"; id: string; deleted: false; item: AgentItem }
-  | { head: bigint; kind: "task"; id: string; deleted: false; item: TaskItem }
-  | { head: bigint; kind: "human_request"; id: string; deleted: false; item: HumanRequestItem };
+  | { head: bigint; kind: "factory"; id: "factory"; revision: bigint; deleted: false; item: FactoryItem }
+  | { head: bigint; kind: "project"; id: string; revision: bigint; deleted: false; item: ProjectItem }
+  | { head: bigint; kind: "agent"; id: string; revision: bigint; deleted: false; item: AgentItem }
+  | { head: bigint; kind: "task"; id: string; revision: bigint; deleted: false; item: TaskItem }
+  | { head: bigint; kind: "human_request"; id: string; revision: bigint; deleted: false; item: HumanRequestItem };
 export type HumanRequestDetailGetBody = { request_id: string; expected_revision: bigint };
 export type HumanRequestDetailBody = { request_id: string; revision: bigint; question: string };
 
@@ -185,7 +186,7 @@ function stateSnapshot(body: Record<string, unknown>, wire: boolean): StateSnaps
   const head = decimal(body.head, wire); const kind = stateKind(body.kind); const next_cursor = cursor(body.next_cursor);
   if (!Array.isArray(body.items) || body.items.length > MAX_STATE_PAGE_ITEMS) malformed();
   switch (kind) {
-    case "factory": return { head, kind, items: body.items.map((item) => factoryItem(item, wire)), next_cursor };
+    case "factory": if (body.items.length !== MAX_FACTORY_PAGE_ITEMS) malformed(); return { head, kind, items: [factoryItem(body.items[0], wire)], next_cursor };
     case "project": return { head, kind, items: body.items.map((item) => projectItem(item, wire)), next_cursor };
     case "agent": return { head, kind, items: body.items.map((item) => agentItem(item, wire)), next_cursor };
     case "task": return { head, kind, items: body.items.map((item) => taskItem(item, wire)), next_cursor };
@@ -206,17 +207,17 @@ function stateEvent(body: Record<string, unknown>, wire: boolean): StateEventBod
   malformed();
 }
 function stateEntity(body: Record<string, unknown>, wire: boolean): StateEntityBody {
-  exactKeys(body, ["head", "kind", "id", "deleted", "item"]);
-  const head = decimal(body.head, wire); const kind = stateKind(body.kind); const id = entityID(kind, body.id);
+  exactKeys(body, ["head", "kind", "id", "revision", "deleted", "item"]);
+  const head = decimal(body.head, wire); const kind = stateKind(body.kind); const id = entityID(kind, body.id); const revision = decimal(body.revision, wire, true);
   if (typeof body.deleted !== "boolean") malformed();
-  if (body.deleted) { if (body.item !== null) malformed(); return { head, kind, id, deleted: true, item: null }; }
+  if (body.deleted) { if (body.item !== null) malformed(); return { head, kind, id, revision, deleted: true, item: null }; }
   if (!isObject(body.item)) malformed();
   switch (kind) {
-    case "factory": return { head, kind, id: "factory", deleted: false, item: factoryItem(body.item, wire) };
-    case "project": { const item = projectItem(body.item, wire); if (item.id !== id) malformed(); return { head, kind, id, deleted: false, item }; }
-    case "agent": { const item = agentItem(body.item, wire); if (item.id !== id) malformed(); return { head, kind, id, deleted: false, item }; }
-    case "task": { const item = taskItem(body.item, wire); if (item.id !== id) malformed(); return { head, kind, id, deleted: false, item }; }
-    case "human_request": { const item = humanRequestItem(body.item, wire); if (item.id !== id) malformed(); return { head, kind, id, deleted: false, item }; }
+    case "factory": { const item = factoryItem(body.item, wire); if (item.revision !== revision) malformed(); return { head, kind, id: "factory", revision, deleted: false, item }; }
+    case "project": { const item = projectItem(body.item, wire); if (item.id !== id || item.revision !== revision) malformed(); return { head, kind, id, revision, deleted: false, item }; }
+    case "agent": { const item = agentItem(body.item, wire); if (item.id !== id || item.revision !== revision) malformed(); return { head, kind, id, revision, deleted: false, item }; }
+    case "task": { const item = taskItem(body.item, wire); if (item.id !== id || item.revision !== revision) malformed(); return { head, kind, id, revision, deleted: false, item }; }
+    case "human_request": { const item = humanRequestItem(body.item, wire); if (item.id !== id || item.revision !== revision) malformed(); return { head, kind, id, revision, deleted: false, item }; }
   }
 }
 

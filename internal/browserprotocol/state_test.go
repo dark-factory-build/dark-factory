@@ -104,7 +104,7 @@ func TestStateFixturesRoundTrip(t *testing.T) {
 }
 
 func TestStatePageKindsAndItemCap(t *testing.T) {
-	for _, kind := range []StateKind{StateFactory, StateProject, StateAgent, StateTask, StateHumanRequest} {
+	for _, kind := range []StateKind{StateProject, StateAgent, StateTask, StateHumanRequest} {
 		for _, count := range []int{0, MaxStatePageItems} {
 			t.Run(fmt.Sprintf("%s/%d", kind, count), func(t *testing.T) {
 				cursor := "YWZ0ZXI"
@@ -123,6 +123,22 @@ func TestStatePageKindsAndItemCap(t *testing.T) {
 		}
 		if _, err := DecodeServerControl(rawControl(t, TypeStateSnapshot, "page", body)); err != ErrMalformed {
 			t.Fatalf("%s decoded nine items: %v", kind, err)
+		}
+	}
+	encoded, err := EncodeStateSnapshot("page", StateSnapshot{Head: 1, Kind: StateFactory, Items: FactoryItems([]FactoryItem{factoryItem()})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeServerControl(encoded); err != nil {
+		t.Fatal(err)
+	}
+	for _, count := range []int{0, 2, MaxStatePageItems, MaxStatePageItems + 1} {
+		body := StateSnapshot{Head: 1, Kind: StateFactory, Items: repeatedStateItems(StateFactory, count)}
+		if _, err := EncodeStateSnapshot("page", body); err == nil {
+			t.Fatalf("factory encoded %d items", count)
+		}
+		if _, err := DecodeServerControl(rawControl(t, TypeStateSnapshot, "page", body)); err != ErrMalformed {
+			t.Fatalf("factory decoded %d items: %v", count, err)
 		}
 	}
 }
@@ -298,9 +314,9 @@ func TestStateEventVariantsAndChronology(t *testing.T) {
 
 func TestStateEntityTombstoneAndKindConsistency(t *testing.T) {
 	valid := []StateEntity{
-		{Head: 1, Kind: StateFactory, ID: "factory", Item: FactoryStateItem(factoryItem())},
-		{Head: 1, Kind: StateProject, ID: projectID, Item: ProjectStateItem(projectItem())},
-		{Head: 1, Kind: StateProject, ID: projectID, Deleted: true, Item: DeletedStateItem()},
+		{Head: 1, Kind: StateFactory, ID: "factory", Revision: 1, Item: FactoryStateItem(factoryItem())},
+		{Head: 1, Kind: StateProject, ID: projectID, Revision: 1, Item: ProjectStateItem(projectItem())},
+		{Head: 1, Kind: StateProject, ID: projectID, Revision: 2, Deleted: true, Item: DeletedStateItem()},
 	}
 	for _, value := range valid {
 		wire, err := EncodeStateEntity("entity", value)
@@ -312,10 +328,12 @@ func TestStateEntityTombstoneAndKindConsistency(t *testing.T) {
 		}
 	}
 	invalid := []StateEntity{
-		{Head: 1, Kind: StateProject, ID: projectID, Deleted: true, Item: ProjectStateItem(projectItem())},
-		{Head: 1, Kind: StateProject, ID: projectID, Item: DeletedStateItem()},
-		{Head: 1, Kind: StateProject, ID: projectID, Item: AgentStateItem(agentItem())},
-		{Head: 1, Kind: StateProject, ID: "06060606060606060606060606060606", Item: ProjectStateItem(projectItem())},
+		{Head: 1, Kind: StateProject, ID: projectID, Revision: 1, Deleted: true, Item: ProjectStateItem(projectItem())},
+		{Head: 1, Kind: StateProject, ID: projectID, Revision: 1, Item: DeletedStateItem()},
+		{Head: 1, Kind: StateProject, ID: projectID, Revision: 1, Item: AgentStateItem(agentItem())},
+		{Head: 1, Kind: StateProject, ID: "06060606060606060606060606060606", Revision: 1, Item: ProjectStateItem(projectItem())},
+		{Head: 1, Kind: StateProject, ID: projectID, Revision: 2, Item: ProjectStateItem(projectItem())},
+		{Head: 1, Kind: StateProject, ID: projectID, Item: ProjectStateItem(projectItem())},
 	}
 	for _, value := range invalid {
 		if _, err := EncodeStateEntity("entity", value); err == nil {
@@ -326,6 +344,78 @@ func TestStateEntityTombstoneAndKindConsistency(t *testing.T) {
 	if _, err := DecodeServerControl([]byte(wrongKind)); err != ErrMalformed {
 		t.Fatalf("wrong-kind item accepted: %v", err)
 	}
+	missingRevision := strings.Replace(string(fixtureBytes(t, "state_entity.json")), `"revision":"2","deleted"`, `"deleted"`, 1)
+	if _, err := DecodeServerControl([]byte(missingRevision)); err != ErrMalformed {
+		t.Fatalf("missing entity revision accepted: %v", err)
+	}
+	mismatchedRevision := strings.Replace(string(fixtureBytes(t, "state_entity.json")), `"revision":"2","deleted"`, `"revision":"3","deleted"`, 1)
+	if _, err := DecodeServerControl([]byte(mismatchedRevision)); err != ErrMalformed {
+		t.Fatalf("mismatched entity revision accepted: %v", err)
+	}
+}
+
+func TestStateBooleanNullIsAlwaysRejected(t *testing.T) {
+	serverFrames := []struct {
+		name  string
+		frame []byte
+		field string
+		value string
+	}{
+		{"factory dispatch", mustEncodeStateSnapshot(t, StateSnapshot{Head: 1, Kind: StateFactory, Items: FactoryItems([]FactoryItem{factoryItem()})}), "dispatch_enabled", "true"},
+		{"agent paused", mustEncodeStateSnapshot(t, StateSnapshot{Head: 1, Kind: StateAgent, Items: AgentItems([]AgentItem{agentItem()})}), "paused", "false"},
+		{"human can reply", mustEncodeStateSnapshot(t, StateSnapshot{Head: 1, Kind: StateHumanRequest, Items: HumanRequestItems([]HumanRequestItem{humanRequestItem()})}), "can_reply", "true"},
+		{"human can open terminal", mustEncodeStateSnapshot(t, StateSnapshot{Head: 1, Kind: StateHumanRequest, Items: HumanRequestItems([]HumanRequestItem{humanRequestItem()})}), "can_open_terminal", "true"},
+		{"event deleted", mustEncodeStateEvent(t, EntityChangedEvent(EntityChanged{Sequence: 1, Head: 1, EntityKind: StateTask, EntityID: taskID, Revision: 1})), "deleted", "false"},
+		{"entity deleted", mustEncodeStateEntity(t, StateEntity{Head: 1, Kind: StateTask, ID: taskID, Revision: 1, Item: TaskStateItem(taskItem())}), "deleted", "false"},
+		{"error retryable", mustEncodeError(t, Error{Code: ErrorInvalidRequest}), "retryable", "false"},
+	}
+	for _, test := range serverFrames {
+		t.Run(test.name, func(t *testing.T) {
+			wire := strings.Replace(string(test.frame), fmt.Sprintf(`%q:%s`, test.field, test.value), fmt.Sprintf(`%q:null`, test.field), 1)
+			if wire == string(test.frame) {
+				t.Fatalf("test field %s not found in %s", test.field, test.frame)
+			}
+			if _, err := DecodeServerControl([]byte(wire)); err != ErrMalformed {
+				t.Fatalf("null boolean accepted: %v", err)
+			}
+		})
+	}
+}
+
+func mustEncodeStateSnapshot(t *testing.T, value StateSnapshot) []byte {
+	t.Helper()
+	wire, err := EncodeStateSnapshot("boolean", value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wire
+}
+
+func mustEncodeStateEvent(t *testing.T, value StateEvent) []byte {
+	t.Helper()
+	wire, err := EncodeStateEvent("boolean", value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wire
+}
+
+func mustEncodeStateEntity(t *testing.T, value StateEntity) []byte {
+	t.Helper()
+	wire, err := EncodeStateEntity("boolean", value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wire
+}
+
+func mustEncodeError(t *testing.T, value Error) []byte {
+	t.Helper()
+	wire, err := EncodeError("boolean", value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wire
 }
 
 func TestHumanRequestPublicPrivacyAndDetailBounds(t *testing.T) {
