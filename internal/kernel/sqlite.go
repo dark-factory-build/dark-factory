@@ -1,12 +1,15 @@
 package kernel
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
-	"database/sql/driver"
+	sqldriver "database/sql/driver"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -16,14 +19,20 @@ import (
 	"time"
 
 	"github.com/ncruces/go-sqlite3"
-	_ "github.com/ncruces/go-sqlite3/driver"
+	sqliteDriver "github.com/ncruces/go-sqlite3/driver"
+	"github.com/ncruces/go-sqlite3/ext/serdes"
+	sqliteIO "github.com/ncruces/go-sqlite3/util/ioutil"
+	"github.com/ncruces/go-sqlite3/vfs/readervfs"
 )
 
 const (
-	busyMilliseconds = 5000
-	maxReaders       = 4
-	driverName       = "sqlite3"
+	busyMilliseconds          = 5000
+	maxReaders                = 4
+	driverName                = "sqlite3"
+	maxFreshDatabaseImageSize = 8 << 20
 )
+
+var immutableReaderSequence atomic.Uint64
 
 type Store struct {
 	writer     *sql.DB
@@ -63,6 +72,124 @@ func Create(ctx context.Context, absolutePath string, config FactoryConfig, at U
 		return nil, err
 	}
 	return store, nil
+}
+
+// NewDatabaseImage creates one complete fresh database without touching the
+// filesystem. The returned main-database image uses SQLite's rollback header;
+// Open validates the complete image before promoting it to persistent WAL.
+func NewDatabaseImage(ctx context.Context, config FactoryConfig, at UnixMillis) (image []byte, resultErr error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	config, err := config.normalized()
+	if err != nil {
+		return nil, err
+	}
+	pool, err := sql.Open(driverName, ":memory:")
+	if err != nil {
+		return nil, fmt.Errorf("open in-memory sqlite database: %w", err)
+	}
+	pool.SetMaxOpenConns(1)
+	pool.SetMaxIdleConns(1)
+	defer func() {
+		if err := pool.Close(); err != nil {
+			image = nil
+			resultErr = errors.Join(resultErr, fmt.Errorf("close in-memory sqlite database: %w", err))
+		}
+	}()
+
+	connection, err := pool.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("checkout in-memory sqlite connection: %w", err)
+	}
+	defer func() {
+		if err := connection.Close(); err != nil {
+			image = nil
+			resultErr = errors.Join(resultErr, fmt.Errorf("return in-memory sqlite connection: %w", err))
+		}
+	}()
+	if _, err := connection.ExecContext(ctx, "PRAGMA foreign_keys = ON"); err != nil {
+		return nil, fmt.Errorf("configure in-memory sqlite database: %w", err)
+	}
+	if _, err := connection.ExecContext(ctx, "PRAGMA temp_store = MEMORY"); err != nil {
+		return nil, fmt.Errorf("configure in-memory sqlite temporary storage: %w", err)
+	}
+	if _, err := connection.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return nil, fmt.Errorf("begin in-memory sqlite initialization: %w", err)
+	}
+	if err := initializeFresh(ctx, connection, config, at); err != nil {
+		_, rollbackErr := connection.ExecContext(context.Background(), "ROLLBACK")
+		return nil, errors.Join(err, rollbackErr)
+	}
+	if _, err := connection.ExecContext(ctx, "COMMIT"); err != nil {
+		return nil, fmt.Errorf("commit in-memory sqlite initialization: %w", err)
+	}
+	if err := validateDatabaseSnapshot(ctx, connection); err != nil {
+		return nil, err
+	}
+	if err := connection.Raw(func(raw any) error {
+		driverConnection, ok := raw.(sqliteDriver.Conn)
+		if !ok {
+			return errors.New("sqlite driver does not expose its raw connection")
+		}
+		var serializeErr error
+		image, serializeErr = serdes.Serialize(driverConnection.Raw(), "main")
+		return serializeErr
+	}); err != nil {
+		return nil, fmt.Errorf("serialize fresh sqlite database: %w", err)
+	}
+	if len(image) == 0 || len(image) > maxFreshDatabaseImageSize {
+		return nil, fmt.Errorf("%w: fresh sqlite image size %d outside 1..%d", ErrCorruptState, len(image), maxFreshDatabaseImageSize)
+	}
+	if err := InspectImmutable(ctx, bytes.NewReader(image), int64(len(image))); err != nil {
+		return nil, fmt.Errorf("validate serialized sqlite database: %w", err)
+	}
+	return image, nil
+}
+
+// InspectImmutable validates an already-open, sidecar-free SQLite main
+// database without taking ownership of reader and without any write-capable
+// Store or filesystem path. The caller owns lifetime locking and sidecar
+// policy and must keep reader's bytes stable until this call returns.
+func InspectImmutable(ctx context.Context, reader io.ReaderAt, size int64) (resultErr error) {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if reader == nil || size <= 0 {
+		return fmt.Errorf("%w: immutable sqlite reader and positive size are required", ErrInvalidValue)
+	}
+	section := io.NewSectionReader(reader, 0, size)
+	if err := validateDatabaseHeader(section, size, false); err != nil {
+		return err
+	}
+	name := fmt.Sprintf("dark-factory-kernel-%d", immutableReaderSequence.Add(1))
+	readervfs.Create(name, sqliteIO.NewSizeReaderAt(section))
+	defer readervfs.Delete(name)
+
+	query := url.Values{
+		"_pragma": {"query_only(ON)", "temp_store(MEMORY)"},
+		"vfs":     {"reader"},
+	}
+	pool, err := sql.Open(driverName, "file:"+name+"?"+query.Encode())
+	if err != nil {
+		return fmt.Errorf("open immutable sqlite reader: %w", err)
+	}
+	pool.SetMaxOpenConns(1)
+	pool.SetMaxIdleConns(1)
+	defer func() {
+		resultErr = errors.Join(resultErr, pool.Close())
+	}()
+	connection, err := pool.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("checkout immutable sqlite reader: %w", err)
+	}
+	tx, err := beginPinnedRead(ctx, connection)
+	if err != nil {
+		_ = connection.Close()
+		return fmt.Errorf("begin immutable sqlite inspection: %w", err)
+	}
+	err = validateDatabaseSnapshot(ctx, tx.connection)
+	return errors.Join(err, tx.Close())
 }
 
 func Open(ctx context.Context, absolutePath string) (*Store, error) {
@@ -110,6 +237,13 @@ func validateExistingFile(path string) error {
 func preflightExisting(ctx context.Context, path string) error {
 	query := url.Values{}
 	query.Set("mode", "ro")
+	rollbackJournalPresent, err := pathExists(path + "-journal")
+	if err != nil {
+		return err
+	}
+	if rollbackJournalPresent {
+		return fmt.Errorf("%w: rollback journal requires recovery", ErrCorruptState)
+	}
 	walPresent, err := pathExists(path + "-wal")
 	if err != nil {
 		return err
@@ -142,7 +276,11 @@ func preflightExisting(ctx context.Context, path string) error {
 	}
 	err = validateExactSchema(ctx, tx.connection)
 	if err == nil {
-		err = validateWALHeader(path)
+		// A standalone rollback-header image is the filesystem-free bootstrap
+		// form. It is accepted only through this complete read-only preflight;
+		// openPools then promotes it to WAL and verifies WAL on every connection
+		// before returning a Store. Existing WAL sidecars still require 2/2.
+		err = validateJournalHeaderPath(path, walPresent)
 	}
 	if err == nil {
 		err = validateDurableControls(ctx, tx.connection)
@@ -164,21 +302,51 @@ func pathExists(path string) (bool, error) {
 	return false, fmt.Errorf("inspect sqlite sidecar: %w", err)
 }
 
-func validateWALHeader(path string) error {
+func validateJournalHeaderPath(path string, walRequired bool) error {
 	file, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("open sqlite header: %w", err)
 	}
 	defer file.Close()
-	header := make([]byte, 20)
-	if _, err := file.ReadAt(header, 0); err != nil {
-		return fmt.Errorf("%w: read sqlite header: %v", ErrForeignDatabase, err)
+	return validateJournalHeader(file, walRequired)
+}
+
+func validateDatabaseHeader(reader io.ReaderAt, size int64, walRequired bool) error {
+	header := make([]byte, 100)
+	if _, err := reader.ReadAt(header, 0); err != nil {
+		return fmt.Errorf("%w: read sqlite header: %w", ErrForeignDatabase, err)
 	}
+	if err := validateJournalHeaderBytes(header, walRequired); err != nil {
+		return err
+	}
+	pageSize := int64(binary.BigEndian.Uint16(header[16:18]))
+	if pageSize == 1 {
+		pageSize = 65536
+	}
+	pageCount := int64(binary.BigEndian.Uint32(header[28:32]))
+	if pageSize < 512 || pageSize > 65536 || pageSize&(pageSize-1) != 0 || pageCount < 1 || pageCount > (1<<63-1)/pageSize || pageCount*pageSize != size {
+		return fmt.Errorf("%w: invalid sqlite page size or database length", ErrCorruptState)
+	}
+	return nil
+}
+
+func validateJournalHeader(reader io.ReaderAt, walRequired bool) error {
+	header := make([]byte, 20)
+	if _, err := reader.ReadAt(header, 0); err != nil {
+		return fmt.Errorf("%w: read sqlite header: %w", ErrForeignDatabase, err)
+	}
+	return validateJournalHeaderBytes(header, walRequired)
+}
+
+func validateJournalHeaderBytes(header []byte, walRequired bool) error {
 	if string(header[:16]) != "SQLite format 3\x00" {
 		return fmt.Errorf("%w: invalid sqlite header", ErrForeignDatabase)
 	}
-	if header[18] != 2 || header[19] != 2 {
-		return fmt.Errorf("%w: database header is not WAL mode", ErrCorruptState)
+	if header[18] != header[19] || header[18] != 1 && header[18] != 2 {
+		return fmt.Errorf("%w: invalid database journal header", ErrCorruptState)
+	}
+	if walRequired && header[18] != 2 {
+		return fmt.Errorf("%w: database with WAL sidecars does not have a WAL header", ErrCorruptState)
 	}
 	return nil
 }
@@ -302,34 +470,7 @@ func (store *Store) initialize(ctx context.Context, config FactoryConfig, at Uni
 		if err != nil {
 			return err
 		}
-		empty, err := schemaIsEmpty(ctx, tx.connection)
-		if err == nil && !empty {
-			err = fmt.Errorf("%w: fresh database is not empty", ErrForeignDatabase)
-		}
-		if err == nil {
-			_, err = tx.connection.ExecContext(ctx, fmt.Sprintf("PRAGMA application_id = %d", applicationID))
-		}
-		if err == nil {
-			_, err = tx.connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", userVersion))
-		}
-		for _, statement := range schemaStatements {
-			if err != nil {
-				break
-			}
-			_, err = tx.connection.ExecContext(ctx, statement)
-		}
-		if err == nil {
-			var rawDaemonID [IDBytes]byte
-			if _, err = rand.Read(rawDaemonID[:]); err == nil && rawDaemonID == [IDBytes]byte{} {
-				err = fmt.Errorf("%w: generated zero daemon identifier", ErrCorruptState)
-			}
-			if err == nil {
-				inserted, insertErr := tx.connection.ExecContext(ctx,
-					`INSERT INTO factory(singleton, daemon_id, dispatch_enabled, capacity, revision, next_invalidation_sequence, invalidation_floor, updated_at_ms) VALUES(1, ?, ?, ?, 1, 1, 1, ?)`,
-					rawDaemonID[:], boolInt(config.DispatchEnabled), int64(config.Capacity), at.Int64())
-				err = requireOneRow(inserted, insertErr)
-			}
-		}
+		err = initializeFresh(ctx, tx.connection, config, at)
 		if err != nil {
 			result := tx.Rollback(err)
 			tx.Close()
@@ -360,6 +501,38 @@ func (store *Store) initialize(ctx context.Context, config FactoryConfig, at Uni
 		}
 	}
 	return errors.New("unreachable sqlite initialization state")
+}
+
+func initializeFresh(ctx context.Context, connection *sql.Conn, config FactoryConfig, at UnixMillis) error {
+	empty, err := schemaIsEmpty(ctx, connection)
+	if err == nil && !empty {
+		err = fmt.Errorf("%w: fresh database is not empty", ErrForeignDatabase)
+	}
+	if err == nil {
+		_, err = connection.ExecContext(ctx, fmt.Sprintf("PRAGMA application_id = %d", applicationID))
+	}
+	if err == nil {
+		_, err = connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", userVersion))
+	}
+	for _, statement := range schemaStatements {
+		if err != nil {
+			break
+		}
+		_, err = connection.ExecContext(ctx, statement)
+	}
+	if err == nil {
+		var rawDaemonID [IDBytes]byte
+		if _, err = rand.Read(rawDaemonID[:]); err == nil && rawDaemonID == [IDBytes]byte{} {
+			err = fmt.Errorf("%w: generated zero daemon identifier", ErrCorruptState)
+		}
+		if err == nil {
+			inserted, insertErr := connection.ExecContext(ctx,
+				`INSERT INTO factory(singleton, daemon_id, dispatch_enabled, capacity, revision, next_invalidation_sequence, invalidation_floor, updated_at_ms) VALUES(1, ?, ?, ?, 1, 1, 1, ?)`,
+				rawDaemonID[:], boolInt(config.DispatchEnabled), int64(config.Capacity), at.Int64())
+			err = requireOneRow(inserted, insertErr)
+		}
+	}
+	return err
 }
 
 func (store *Store) validateOpen(ctx context.Context) error {
@@ -536,7 +709,7 @@ func (store *Store) releaseWriter() {
 }
 
 func discardConnection(connection *sql.Conn) {
-	_ = connection.Raw(func(any) error { return driver.ErrBadConn })
+	_ = connection.Raw(func(any) error { return sqldriver.ErrBadConn })
 	_ = connection.Close()
 }
 
