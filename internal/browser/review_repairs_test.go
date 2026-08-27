@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -395,6 +396,71 @@ func TestRejectedSubscriptionCleanupUncertaintyIsObservable(t *testing.T) {
 	})
 	if err := server.Close(); !errors.Is(err, ErrSubscriptionUnresolved) {
 		t.Fatalf("close error=%v", err)
+	}
+}
+
+func TestUnresolvedSubscriptionPoisonsEveryBoundedConnection(t *testing.T) {
+	backend := newFakeBackend()
+	backend.subFactory = func() StateSubscription {
+		subscription := newFakeSubscription()
+		subscription.updates = nil
+		subscription.neverDone = true
+		return subscription
+	}
+	server, err := Listen(Config{Address: "127.0.0.1:0", AllowedOrigins: []string{testOrigin}, Backend: backend})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+
+	connections := make([]*websocket.Conn, 0, maxConnections)
+	for range maxConnections {
+		connection, _ := dialServer(t, server, testOrigin)
+		authenticate(t, connection)
+		connections = append(connections, connection)
+	}
+	first, _ := browserprotocol.EncodeStateSubscribe("poison", browserprotocol.StateSubscribe{})
+	second, _ := browserprotocol.EncodeStateSubscribe("must-not-run", browserprotocol.StateSubscribe{})
+	for _, connection := range connections {
+		writeClientFrame(t, connection, first)
+		writeClientFrame(t, connection, second)
+	}
+	for _, connection := range connections {
+		assertError(t, readServerFrame(t, connection), browserprotocol.ErrorInternal)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_, payload, readErr := connection.Read(ctx)
+		cancel()
+		if readErr == nil {
+			t.Fatalf("poisoned connection remained usable: %s", payload)
+		}
+	}
+	backend.mu.Lock()
+	subCalls := backend.subCalls
+	backend.mu.Unlock()
+	if subCalls != maxConnections {
+		t.Fatalf("SubscribeState calls=%d want exactly %d", subCalls, maxConnections)
+	}
+	if err := server.Close(); !errors.Is(err, ErrSubscriptionUnresolved) {
+		t.Fatalf("close error=%v", err)
+	}
+}
+
+type nilDoneSubscription struct {
+	cancelled atomic.Int32
+}
+
+func (subscription *nilDoneSubscription) Updates() <-chan StateUpdate { return nil }
+func (subscription *nilDoneSubscription) Cancel()                     { subscription.cancelled.Add(1) }
+func (subscription *nilDoneSubscription) Done() <-chan struct{}       { return nil }
+func (subscription *nilDoneSubscription) Err() error                  { return nil }
+
+func TestStopSubscriptionCancelsBeforeNilDoneFailure(t *testing.T) {
+	subscription := &nilDoneSubscription{}
+	if err := stopSubscription(subscription); !errors.Is(err, ErrSubscriptionUnresolved) {
+		t.Fatalf("cleanup error=%v", err)
+	}
+	if got := subscription.cancelled.Load(); got != 1 {
+		t.Fatalf("Cancel calls=%d want 1", got)
 	}
 }
 

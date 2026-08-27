@@ -424,13 +424,17 @@ func (server *Server) removeLifecycleIfIdleLocked(clientID [browserprotocol.Clie
 	}
 }
 
+func (server *Server) recordCleanup(err error) {
+	server.mu.Lock()
+	if server.cleanupErr == nil {
+		// Retain one bounded typed failure, not an attacker-growable log.
+		server.cleanupErr = err
+	}
+	server.mu.Unlock()
+}
+
 func (server *Server) unregister(current *connection) {
 	server.mu.Lock()
-	if server.cleanupErr == nil && current.cleanupErr != nil {
-		// Cleanup uncertainty is load-bearing server state until Close reports
-		// it. Keep one bounded typed error instead of an attacker-growable log.
-		server.cleanupErr = current.cleanupErr
-	}
 	delete(server.connections, current)
 	server.removePairingLocked(current)
 	server.removeAuthenticatingLocked(current)

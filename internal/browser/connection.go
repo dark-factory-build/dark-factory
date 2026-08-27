@@ -66,7 +66,7 @@ func (current *connection) run() {
 	readerStarted := false
 	defer func() {
 		if err := current.closeSubscription(); err != nil {
-			current.cleanupErr = errors.Join(current.cleanupErr, err)
+			current.recordCleanup(err)
 		}
 		current.stop()
 		if readerStarted {
@@ -389,7 +389,7 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 	if err != nil {
 		mapped := errorFrame(err)
 		current.sendError(frame.ID, mapped.Code, mapped.Retryable)
-		return !errors.Is(err, ErrUnauthorized)
+		return !errors.Is(err, ErrUnauthorized) && !errors.Is(err, ErrSubscriptionUnresolved)
 	}
 	if current.write(payload) != nil {
 		return false
@@ -437,7 +437,7 @@ func (current *connection) sendRestart(restart browserprotocol.StateRestart) err
 		return err
 	}
 	if err := current.closeSubscription(); err != nil {
-		current.cleanupErr = errors.Join(current.cleanupErr, err)
+		current.recordCleanup(err)
 		return err
 	}
 	return current.write(payload)
@@ -462,21 +462,26 @@ func (current *connection) discardSubscription(subscription StateSubscription, c
 		return cause
 	}
 	if err := stopSubscription(subscription); err != nil {
-		current.cleanupErr = errors.Join(current.cleanupErr, err)
+		current.recordCleanup(err)
 		return errors.Join(cause, err)
 	}
 	return cause
+}
+
+func (current *connection) recordCleanup(err error) {
+	current.cleanupErr = errors.Join(current.cleanupErr, err)
+	current.server.recordCleanup(err)
 }
 
 func stopSubscription(subscription StateSubscription) error {
 	if subscription == nil {
 		return ErrSubscriptionUnresolved
 	}
+	subscription.Cancel()
 	done := subscription.Done()
 	if done == nil {
 		return ErrSubscriptionUnresolved
 	}
-	subscription.Cancel()
 	timer := time.NewTimer(subscriptionCloseLimit)
 	defer timer.Stop()
 	select {

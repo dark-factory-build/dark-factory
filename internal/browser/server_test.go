@@ -43,6 +43,7 @@ type fakeBackend struct {
 	detailErr      error
 	subErr         error
 	subWait        bool
+	subFactory     func() StateSubscription
 	page           StatePage
 	pageFunc       func(int, *Cursor) StatePage
 	entity         browserprotocol.StateEntity
@@ -144,10 +145,14 @@ func (backend *fakeBackend) SubscribeState(ctx context.Context, client [16]byte,
 	backend.mu.Lock()
 	backend.subCalls++
 	backend.clients = append(backend.clients, client)
-	wait, subscription, err := backend.subWait, backend.sub, backend.subErr
+	wait, defaultSubscription, factory, err := backend.subWait, backend.sub, backend.subFactory, backend.subErr
 	backend.mu.Unlock()
 	if wait {
 		<-ctx.Done()
+	}
+	var subscription StateSubscription = defaultSubscription
+	if factory != nil {
+		subscription = factory()
 	}
 	return subscription, err
 }
