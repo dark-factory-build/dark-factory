@@ -294,8 +294,10 @@ test("reset rejects a pending input, clears authority, and ignores its duplicate
 
 test("pending attach reset resolves explicitly before closing the old handle", async () => {
   let callbackClosed;
+  const callbacks = [];
   let resetResult;
-  const context = makeHandle({ options: { onReset: () => {
+  const context = makeHandle({ options: { onClose: () => { callbacks.push("close"); }, onReset: () => {
+    callbacks.push("reset");
     callbackClosed = context.handle.closed;
     assert.equal(context.handle.writable, false);
     assert.throws(() => context.handle.attach(), /closed/);
@@ -307,6 +309,7 @@ test("pending attach reset resolves explicitly before closing the old handle", a
   assert.deepEqual(resetResult, { sessionId, floor: 7n, head: 8n, kind: "reset", freshAttachRequired: true });
   assert.equal(callbackClosed, true);
   assert.equal(context.handle.closed, true);
+  assert.deepEqual(callbacks, ["close", "reset"]);
   assert.equal(context.sent.length, 1);
   assert.equal(context.handle.receiveReset(attachFrame.id, { session_id: sessionId, floor: 7n, head: 8n }), true);
 });

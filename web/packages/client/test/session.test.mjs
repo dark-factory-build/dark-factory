@@ -757,7 +757,14 @@ test("EXIT closes the old handle and routes its duplicate away from a replacemen
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(terminal.closed, true);
   const before = socket.sent.length;
-  assert.throws(() => terminal.attach(), /closed/);
+  for (const effect of [
+    () => terminal.attach(),
+    () => terminal.acquireInput(),
+    () => terminal.releaseInput(),
+    () => terminal.sendInput(new Uint8Array([1])),
+    () => terminal.resize(24, 80),
+    () => terminal.detach(),
+  ]) assert.throws(effect, /closed/);
   assert.equal(socket.sent.length, before);
 
   const replacement = session.openTerminal(target);
@@ -804,7 +811,14 @@ test("RESET closes the old handle and a replacement may select a fresh after-seq
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(terminal.closed, true);
   const before = socket.sent.length;
-  assert.throws(() => terminal.attach(), /closed/);
+  for (const effect of [
+    () => terminal.attach(),
+    () => terminal.acquireInput(),
+    () => terminal.releaseInput(),
+    () => terminal.sendInput(new Uint8Array([1])),
+    () => terminal.resize(24, 80),
+    () => terminal.detach(),
+  ]) assert.throws(effect, /closed/);
   assert.equal(socket.sent.length, before);
 
   const replacement = session.openTerminal(target, { afterSequence: 6n });
