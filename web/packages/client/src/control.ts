@@ -186,11 +186,11 @@ function stateSnapshot(body: Record<string, unknown>, wire: boolean): StateSnaps
   const head = decimal(body.head, wire); const kind = stateKind(body.kind); const next_cursor = cursor(body.next_cursor);
   if (!Array.isArray(body.items) || body.items.length > MAX_STATE_PAGE_ITEMS) malformed();
   switch (kind) {
-    case "factory": if (body.items.length !== MAX_FACTORY_PAGE_ITEMS) malformed(); return { head, kind, items: [factoryItem(body.items[0], wire)], next_cursor };
-    case "project": return { head, kind, items: body.items.map((item) => projectItem(item, wire)), next_cursor };
-    case "agent": return { head, kind, items: body.items.map((item) => agentItem(item, wire)), next_cursor };
-    case "task": return { head, kind, items: body.items.map((item) => taskItem(item, wire)), next_cursor };
-    case "human_request": return { head, kind, items: body.items.map((item) => humanRequestItem(item, wire)), next_cursor };
+    case "factory": if (body.items.length !== MAX_FACTORY_PAGE_ITEMS || next_cursor === null) malformed(); return { head, kind, items: [factoryItem(body.items[0], wire)], next_cursor };
+    case "project": if (next_cursor === null) malformed(); return { head, kind, items: body.items.map((item) => projectItem(item, wire)), next_cursor };
+    case "agent": if (next_cursor === null) malformed(); return { head, kind, items: body.items.map((item) => agentItem(item, wire)), next_cursor };
+    case "task": if (next_cursor === null) malformed(); return { head, kind, items: body.items.map((item) => taskItem(item, wire)), next_cursor };
+    case "human_request": if ((body.items.length === MAX_STATE_PAGE_ITEMS) !== (next_cursor !== null)) malformed(); return { head, kind, items: body.items.map((item) => humanRequestItem(item, wire)), next_cursor };
   }
 }
 function stateEvent(body: Record<string, unknown>, wire: boolean): StateEventBody {

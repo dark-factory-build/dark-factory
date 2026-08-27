@@ -104,10 +104,10 @@ func TestStateFixturesRoundTrip(t *testing.T) {
 }
 
 func TestStatePageKindsAndItemCap(t *testing.T) {
-	for _, kind := range []StateKind{StateProject, StateAgent, StateTask, StateHumanRequest} {
+	cursor := "YWZ0ZXI"
+	for _, kind := range []StateKind{StateProject, StateAgent, StateTask} {
 		for _, count := range []int{0, MaxStatePageItems} {
 			t.Run(fmt.Sprintf("%s/%d", kind, count), func(t *testing.T) {
-				cursor := "YWZ0ZXI"
 				encoded, err := EncodeStateSnapshot("page", StateSnapshot{Head: 1, Kind: kind, Items: repeatedStateItems(kind, count), NextCursor: &cursor})
 				if err != nil {
 					t.Fatal(err)
@@ -117,6 +117,9 @@ func TestStatePageKindsAndItemCap(t *testing.T) {
 				}
 			})
 		}
+		if _, err := EncodeStateSnapshot("page", StateSnapshot{Head: 1, Kind: kind, Items: repeatedStateItems(kind, 1)}); err == nil {
+			t.Fatalf("%s accepted a terminal page", kind)
+		}
 		body := StateSnapshot{Head: 1, Kind: kind, Items: repeatedStateItems(kind, MaxStatePageItems+1)}
 		if _, err := EncodeStateSnapshot("page", body); err == nil {
 			t.Fatalf("%s encoded nine items", kind)
@@ -125,15 +128,32 @@ func TestStatePageKindsAndItemCap(t *testing.T) {
 			t.Fatalf("%s decoded nine items: %v", kind, err)
 		}
 	}
-	encoded, err := EncodeStateSnapshot("page", StateSnapshot{Head: 1, Kind: StateFactory, Items: FactoryItems([]FactoryItem{factoryItem()})})
+	for _, count := range []int{0, MaxStatePageItems - 1} {
+		if _, err := EncodeStateSnapshot("page", StateSnapshot{Head: 1, Kind: StateHumanRequest, Items: repeatedStateItems(StateHumanRequest, count)}); err != nil {
+			t.Fatalf("human request terminal count %d: %v", count, err)
+		}
+		if _, err := EncodeStateSnapshot("page", StateSnapshot{Head: 1, Kind: StateHumanRequest, Items: repeatedStateItems(StateHumanRequest, count), NextCursor: &cursor}); err == nil {
+			t.Fatalf("human request short count %d continued", count)
+		}
+	}
+	if _, err := EncodeStateSnapshot("page", StateSnapshot{Head: 1, Kind: StateHumanRequest, Items: repeatedStateItems(StateHumanRequest, MaxStatePageItems), NextCursor: &cursor}); err != nil {
+		t.Fatalf("full human request page did not continue: %v", err)
+	}
+	if _, err := EncodeStateSnapshot("page", StateSnapshot{Head: 1, Kind: StateHumanRequest, Items: repeatedStateItems(StateHumanRequest, MaxStatePageItems)}); err == nil {
+		t.Fatal("full human request page terminated")
+	}
+	encoded, err := EncodeStateSnapshot("page", StateSnapshot{Head: 1, Kind: StateFactory, Items: FactoryItems([]FactoryItem{factoryItem()}), NextCursor: &cursor})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := DecodeServerControl(encoded); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := EncodeStateSnapshot("page", StateSnapshot{Head: 1, Kind: StateFactory, Items: FactoryItems([]FactoryItem{factoryItem()})}); err == nil {
+		t.Fatal("factory page terminated")
+	}
 	for _, count := range []int{0, 2, MaxStatePageItems, MaxStatePageItems + 1} {
-		body := StateSnapshot{Head: 1, Kind: StateFactory, Items: repeatedStateItems(StateFactory, count)}
+		body := StateSnapshot{Head: 1, Kind: StateFactory, Items: repeatedStateItems(StateFactory, count), NextCursor: &cursor}
 		if _, err := EncodeStateSnapshot("page", body); err == nil {
 			t.Fatalf("factory encoded %d items", count)
 		}
@@ -361,8 +381,8 @@ func TestStateBooleanNullIsAlwaysRejected(t *testing.T) {
 		field string
 		value string
 	}{
-		{"factory dispatch", mustEncodeStateSnapshot(t, StateSnapshot{Head: 1, Kind: StateFactory, Items: FactoryItems([]FactoryItem{factoryItem()})}), "dispatch_enabled", "true"},
-		{"agent paused", mustEncodeStateSnapshot(t, StateSnapshot{Head: 1, Kind: StateAgent, Items: AgentItems([]AgentItem{agentItem()})}), "paused", "false"},
+		{"factory dispatch", mustEncodeStateSnapshot(t, StateSnapshot{Head: 1, Kind: StateFactory, Items: FactoryItems([]FactoryItem{factoryItem()}), NextCursor: pointer("next")}), "dispatch_enabled", "true"},
+		{"agent paused", mustEncodeStateSnapshot(t, StateSnapshot{Head: 1, Kind: StateAgent, Items: AgentItems([]AgentItem{agentItem()}), NextCursor: pointer("next")}), "paused", "false"},
 		{"human can reply", mustEncodeStateSnapshot(t, StateSnapshot{Head: 1, Kind: StateHumanRequest, Items: HumanRequestItems([]HumanRequestItem{humanRequestItem()})}), "can_reply", "true"},
 		{"human can open terminal", mustEncodeStateSnapshot(t, StateSnapshot{Head: 1, Kind: StateHumanRequest, Items: HumanRequestItems([]HumanRequestItem{humanRequestItem()})}), "can_open_terminal", "true"},
 		{"event deleted", mustEncodeStateEvent(t, EntityChangedEvent(EntityChanged{Sequence: 1, Head: 1, EntityKind: StateTask, EntityID: taskID, Revision: 1})), "deleted", "false"},
@@ -466,7 +486,7 @@ func TestMaximallyEscapedFramesStayBounded(t *testing.T) {
 		tasks[index].ID = fmt.Sprintf("%032x", index+1)
 		tasks[index].Title = strings.Repeat("\x00", MaxTaskTitleBytes)
 	}
-	page, err := EncodeStateSnapshot("max-page", StateSnapshot{Head: Decimal(MaxSQLiteInteger), Kind: StateTask, Items: TaskItems(tasks)})
+	page, err := EncodeStateSnapshot("max-page", StateSnapshot{Head: Decimal(MaxSQLiteInteger), Kind: StateTask, Items: TaskItems(tasks), NextCursor: pointer(strings.Repeat("_", MaxCursorBytes))})
 	if err != nil {
 		t.Fatal(err)
 	}

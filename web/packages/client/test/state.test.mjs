@@ -38,12 +38,40 @@ const projectItem = (revision = 1n) => ({ id: ids.project, name: "Factory", revi
 const agentItem = (revision = 1n) => ({ id: ids.agent, project_id: ids.project, name: "Worker", role: "worker", paused: false, revision });
 const taskItem = (revision = 1n, title = "Ship") => ({ id: ids.task, project_id: ids.project, assigned_agent_id: ids.agent, title, status: "queued", priority: 1, revision });
 const requestItem = (revision = 1n) => ({ id: ids.request, project_id: ids.project, agent_id: ids.agent, task_id: ids.task, run_id: ids.run, created_at: 10n, updated_at: 11n, revision, kind: "question", status: "open", reply_max_bytes: 8192, can_reply: true, can_open_terminal: true });
+const rawID = (value) => BigInt(value).toString(16).padStart(32, "0");
+const itemForKind = (kind, value) => {
+  const id = rawID(value);
+  if (kind === "project") return { ...projectItem(), id };
+  if (kind === "agent") return { ...agentItem(), id };
+  if (kind === "task") return { ...taskItem(), id };
+  return { ...requestItem(), id };
+};
+const itemsForKind = (kind, start, count) => Array.from({ length: count }, (_, index) => itemForKind(kind, start + index));
+const requestFrame = (id, cursor) => ({ v: 1, type: "STATE_GET", id, body: { cursor } });
+const responseFrame = (id, body) => ({ v: 1, type: "STATE_SNAPSHOT", id, body });
+let requestSequence = 0;
+const exchange = (reducer, cursor, body, id = `snapshot-${++requestSequence}`) => {
+  assert.deepEqual(reducer.beginSnapshot(requestFrame(id, cursor)), { kind: "requested" });
+  return reducer.applySnapshot(responseFrame(id, body));
+};
 const publishState = (reducer, head, { projects = [], agents = [], tasks = [], requests = [] } = {}) => {
-  assert.equal(reducer.applySnapshot({ head, kind: "factory", items: [factoryItem()], next_cursor: "projects" }, null).kind, "staged");
-  assert.equal(reducer.applySnapshot({ head, kind: "project", items: projects, next_cursor: "agents" }, "projects").kind, "staged");
-  assert.equal(reducer.applySnapshot({ head, kind: "agent", items: agents, next_cursor: "tasks" }, "agents").kind, "staged");
-  assert.equal(reducer.applySnapshot({ head, kind: "task", items: tasks, next_cursor: "requests" }, "tasks").kind, "staged");
-  return reducer.applySnapshot({ head, kind: "human_request", items: requests, next_cursor: null }, "requests");
+  assert.equal(exchange(reducer, null, { head, kind: "factory", items: [factoryItem()], next_cursor: "projects" }).kind, "staged");
+  assert.equal(exchange(reducer, "projects", { head, kind: "project", items: projects, next_cursor: "agents" }).kind, "staged");
+  assert.equal(exchange(reducer, "agents", { head, kind: "agent", items: agents, next_cursor: "tasks" }).kind, "staged");
+  assert.equal(exchange(reducer, "tasks", { head, kind: "task", items: tasks, next_cursor: "requests" }).kind, "staged");
+  return exchange(reducer, "requests", { head, kind: "human_request", items: requests, next_cursor: null });
+};
+const traversal = ["project", "agent", "task", "human_request"];
+const stageToKind = (reducer, target, head = 1n) => {
+  let cursor = "project-page";
+  assert.equal(exchange(reducer, null, { head, kind: "factory", items: [factoryItem()], next_cursor: cursor }).kind, "staged");
+  for (const kind of traversal) {
+    if (kind === target) return cursor;
+    const next = `${kind}-next`;
+    assert.equal(exchange(reducer, cursor, { head, kind, items: [], next_cursor: next }).kind, "staged");
+    cursor = next;
+  }
+  throw new Error("unknown target kind");
 };
 
 test("every Go control fixture is consumed by the matching closed TypeScript direction", () => {
@@ -60,19 +88,25 @@ test("every Go control fixture is consumed by the matching closed TypeScript dir
   assert.equal(decodeServerControl(fixture("state_snapshot.json")).body.head, 9_007_199_254_740_993n);
 });
 
-test("dynamic state pages accept zero/eight, factory accepts exactly one, and all reject overflow", () => {
-  const samples = {
-    project: projectItem(), agent: agentItem(), task: taskItem(), human_request: requestItem(),
-  };
+test("wire page cardinality fixes every continuation boundary", () => {
+  const samples = { project: projectItem(), agent: agentItem(), task: taskItem() };
   for (const [kind, sample] of Object.entries(samples)) {
     for (const count of [0, MAX_STATE_PAGE_ITEMS]) {
-      const body = { head: 1n, kind, items: Array.from({ length: count }, () => ({ ...sample })), next_cursor: count === 0 ? null : "YWZ0ZXI" };
+      const body = { head: 1n, kind, items: Array.from({ length: count }, () => ({ ...sample })), next_cursor: "YWZ0ZXI" };
       const decoded = decodeServerControl(encodeStateSnapshot("page", body));
       assert.equal(decoded.body.items.length, count);
     }
+    expectMalformed(() => encodeStateSnapshot("page", { head: 1n, kind, items: [{ ...sample }], next_cursor: null }));
     expectMalformed(() => encodeStateSnapshot("page", { head: 1n, kind, items: Array.from({ length: MAX_STATE_PAGE_ITEMS + 1 }, () => ({ ...sample })), next_cursor: null }));
   }
+  for (const count of [0, MAX_STATE_PAGE_ITEMS - 1]) {
+    assert.equal(decodeServerControl(encodeStateSnapshot("page", { head: 1n, kind: "human_request", items: Array.from({ length: count }, () => requestItem()), next_cursor: null })).body.items.length, count);
+    expectMalformed(() => encodeStateSnapshot("page", { head: 1n, kind: "human_request", items: Array.from({ length: count }, () => requestItem()), next_cursor: "more" }));
+  }
+  assert.equal(decodeServerControl(encodeStateSnapshot("page", { head: 1n, kind: "human_request", items: Array.from({ length: MAX_STATE_PAGE_ITEMS }, () => requestItem()), next_cursor: "more" })).body.items.length, MAX_STATE_PAGE_ITEMS);
+  expectMalformed(() => encodeStateSnapshot("page", { head: 1n, kind: "human_request", items: Array.from({ length: MAX_STATE_PAGE_ITEMS }, () => requestItem()), next_cursor: null }));
   assert.equal(decodeServerControl(encodeStateSnapshot("page", { head: 1n, kind: "factory", items: [factoryItem()], next_cursor: "projects" })).body.items.length, 1);
+  expectMalformed(() => encodeStateSnapshot("page", { head: 1n, kind: "factory", items: [factoryItem()], next_cursor: null }));
   for (const count of [0, 2, MAX_STATE_PAGE_ITEMS, MAX_STATE_PAGE_ITEMS + 1]) {
     expectMalformed(() => encodeStateSnapshot("page", { head: 1n, kind: "factory", items: Array.from({ length: count }, () => factoryItem()), next_cursor: "projects" }));
   }
@@ -162,74 +196,157 @@ test("state parsing rejects case-folded/duplicate/unknown/trailing/depth/member/
   expectMalformed(() => decodeServerControl(new Uint8Array(MAX_CONTROL_BYTES + 1).fill(0x20)));
 });
 
-test("state accumulator stages the fixed traversal atomically and never publishes a lower head", () => {
+test("state accumulator publishes only one complete fixed traversal and never lowers head", () => {
   const reducer = new StateAccumulator();
-  assert.equal(reducer.applySnapshot({ head: 7n, kind: "factory", items: [factoryItem()], next_cursor: "projects" }, null).kind, "staged");
-  assert.equal(reducer.current, undefined);
-  assert.equal(reducer.applySnapshot({ head: 7n, kind: "project", items: [projectItem()], next_cursor: "agents" }, "projects").kind, "staged");
-  assert.equal(reducer.applySnapshot({ head: 7n, kind: "agent", items: [], next_cursor: "tasks" }, "agents").kind, "staged");
-  assert.equal(reducer.applySnapshot({ head: 7n, kind: "task", items: [], next_cursor: "requests" }, "tasks").kind, "staged");
-  const published = reducer.applySnapshot({ head: 7n, kind: "human_request", items: [], next_cursor: null }, "requests");
+  const published = publishState(reducer, 7n, { projects: [projectItem()] });
   assert.equal(published.kind, "published");
   assert.equal(reducer.current.head, 7n);
   assert.equal(reducer.current.projects.size, 1);
 
-  assert.deepEqual(reducer.applySnapshot({ head: 6n, kind: "factory", items: [factoryItem()], next_cursor: "projects" }, null), { kind: "restart", reason: "head_changed" });
+  assert.deepEqual(exchange(reducer, null, { head: 6n, kind: "factory", items: [factoryItem()], next_cursor: "projects" }), { kind: "restart", reason: "head_changed" });
   assert.equal(reducer.current, undefined);
 
   publishState(reducer, 7n);
-  assert.equal(reducer.applySnapshot({ head: 8n, kind: "factory", items: [factoryItem()], next_cursor: "projects" }, null).kind, "staged");
+  assert.equal(exchange(reducer, null, { head: 8n, kind: "factory", items: [factoryItem()], next_cursor: "projects" }).kind, "staged");
   assert.equal(reducer.current.head, 7n, "partial replacement became visible");
-  assert.deepEqual(reducer.applySnapshot({ head: 9n, kind: "project", items: [], next_cursor: "agents" }, "projects"), { kind: "restart", reason: "head_changed" });
-  assert.equal(reducer.current, undefined);
-
-  publishState(reducer, 1n);
-  assert.deepEqual(reducer.applyRestart("pruned"), { kind: "restart", reason: "pruned" });
+  assert.deepEqual(exchange(reducer, "projects", { head: 9n, kind: "project", items: [], next_cursor: "agents" }), { kind: "restart", reason: "head_changed" });
   assert.equal(reducer.current, undefined);
 });
 
-test("state accumulator rejects skipped, replayed, out-of-order, duplicate, and forged continuations", () => {
+test("page length uniquely determines same-kind continuation or adjacent advance", () => {
+  for (const kind of traversal) {
+    const index = traversal.indexOf(kind);
+    let reducer = new StateAccumulator();
+    let cursor = stageToKind(reducer, kind);
+    assert.equal(exchange(reducer, cursor, { head: 1n, kind, items: itemsForKind(kind, 1, MAX_STATE_PAGE_ITEMS), next_cursor: "same-kind" }).kind, "staged", `${kind}/full`);
+    const shortResult = exchange(reducer, "same-kind", { head: 1n, kind, items: itemsForKind(kind, 9, 1), next_cursor: kind === "human_request" ? null : "adjacent" });
+    assert.equal(shortResult.kind, kind === "human_request" ? "published" : "staged", `${kind}/full-same`);
+
+    reducer = new StateAccumulator();
+    cursor = stageToKind(reducer, kind);
+    assert.equal(exchange(reducer, cursor, { head: 1n, kind, items: itemsForKind(kind, 1, 1), next_cursor: kind === "human_request" ? null : "adjacent" }).kind, kind === "human_request" ? "published" : "staged", `${kind}/short`);
+    if (kind !== "human_request") {
+      const adjacent = traversal[index + 1];
+      const result = exchange(reducer, "adjacent", { head: 1n, kind: adjacent, items: [], next_cursor: adjacent === "human_request" ? null : "next" });
+      assert.equal(result.kind, adjacent === "human_request" ? "published" : "staged", `${kind}/short-adjacent`);
+    }
+
+    reducer = new StateAccumulator();
+    cursor = stageToKind(reducer, kind);
+    assert.equal(exchange(reducer, cursor, { head: 1n, kind, items: itemsForKind(kind, 1, MAX_STATE_PAGE_ITEMS), next_cursor: "same-kind" }).kind, "staged");
+    if (kind !== "human_request") {
+      const adjacent = traversal[index + 1];
+      assert.deepEqual(exchange(reducer, "same-kind", { head: 1n, kind: adjacent, items: [], next_cursor: adjacent === "human_request" ? null : "next" }), { kind: "restart", reason: "gap" }, `${kind}/full-skipped-same`);
+    }
+
+    if (kind !== "human_request") {
+      reducer = new StateAccumulator();
+      cursor = stageToKind(reducer, kind);
+      assert.equal(exchange(reducer, cursor, { head: 1n, kind, items: itemsForKind(kind, 1, 1), next_cursor: "adjacent" }).kind, "staged");
+      assert.deepEqual(exchange(reducer, "adjacent", { head: 1n, kind, items: itemsForKind(kind, 2, 1), next_cursor: "forged" }), { kind: "restart", reason: "gap" }, `${kind}/short-repeated-kind`);
+    }
+  }
+});
+
+test("snapshot response correlation is owned, single-flight, consumed, and restart-safe", () => {
+  const factory = { head: 1n, kind: "factory", items: [factoryItem()], next_cursor: "projects" };
   let reducer = new StateAccumulator();
-  assert.deepEqual(reducer.applySnapshot({ head: 1n, kind: "project", items: [], next_cursor: "agents" }, null), { kind: "restart", reason: "gap" });
+  assert.deepEqual(reducer.applySnapshot(responseFrame("absent", factory)), { kind: "restart", reason: "gap" });
+  assert.deepEqual(reducer.beginSnapshot({ v: 1, type: "STATE_GET", body: { cursor: null } }), { kind: "restart", reason: "gap" });
+  assert.deepEqual(reducer.beginSnapshot({ v: 1, type: "STATE_SUBSCRIBE", id: "cross-wire", body: { after: 0n } }), { kind: "restart", reason: "gap" });
 
   reducer = new StateAccumulator();
-  reducer.applySnapshot({ head: 1n, kind: "factory", items: [factoryItem()], next_cursor: "projects" }, null);
-  assert.deepEqual(reducer.applySnapshot({ head: 1n, kind: "project", items: [], next_cursor: "agents" }, "forged"), { kind: "restart", reason: "gap" });
+  reducer.beginSnapshot(requestFrame("one", null));
+  assert.deepEqual(reducer.applySnapshot({ v: 1, type: "STATE_SNAPSHOT", body: factory }), { kind: "restart", reason: "gap" });
 
   reducer = new StateAccumulator();
-  reducer.applySnapshot({ head: 1n, kind: "factory", items: [factoryItem()], next_cursor: "projects" }, null);
-  reducer.applySnapshot({ head: 1n, kind: "project", items: [], next_cursor: "agents" }, "projects");
-  assert.deepEqual(reducer.applySnapshot({ head: 1n, kind: "task", items: [], next_cursor: "requests" }, "agents"), { kind: "restart", reason: "gap" });
+  reducer.beginSnapshot(requestFrame("one", null));
+  assert.deepEqual(reducer.applySnapshot({ v: 1, type: "STATE_ENTITY", id: "one", body: { head: 1n } }), { kind: "restart", reason: "gap" });
 
   reducer = new StateAccumulator();
-  reducer.applySnapshot({ head: 1n, kind: "factory", items: [factoryItem()], next_cursor: "projects" }, null);
-  reducer.applySnapshot({ head: 1n, kind: "project", items: [], next_cursor: "agents" }, "projects");
-  reducer.applySnapshot({ head: 1n, kind: "agent", items: [], next_cursor: "tasks" }, "agents");
-  assert.deepEqual(reducer.applySnapshot({ head: 1n, kind: "project", items: [], next_cursor: "forged" }, "tasks"), { kind: "restart", reason: "gap" });
+  assert.deepEqual(reducer.beginSnapshot(requestFrame("one", null)), { kind: "requested" });
+  assert.deepEqual(reducer.beginSnapshot(requestFrame("two", null)), { kind: "restart", reason: "gap" });
 
   reducer = new StateAccumulator();
-  reducer.applySnapshot({ head: 1n, kind: "factory", items: [factoryItem()], next_cursor: "projects" }, null);
-  reducer.applySnapshot({ head: 1n, kind: "project", items: [projectItem()], next_cursor: "project-page-2" }, "projects");
-  assert.deepEqual(reducer.applySnapshot({ head: 1n, kind: "project", items: [projectItem()], next_cursor: "agents" }, "project-page-2"), { kind: "restart", reason: "gap" });
+  reducer.beginSnapshot(requestFrame("one", null));
+  assert.deepEqual(reducer.applySnapshot(responseFrame("wrong", factory)), { kind: "restart", reason: "gap" });
 
   reducer = new StateAccumulator();
-  reducer.applySnapshot({ head: 1n, kind: "factory", items: [factoryItem()], next_cursor: "projects" }, null);
-  reducer.applySnapshot({ head: 1n, kind: "project", items: [], next_cursor: "agents" }, "projects");
-  assert.deepEqual(reducer.applySnapshot({ head: 1n, kind: "project", items: [], next_cursor: "projects" }, "agents"), { kind: "restart", reason: "gap" });
+  reducer.beginSnapshot(requestFrame("one", null));
+  const firstResponse = responseFrame("one", factory);
+  assert.equal(reducer.applySnapshot(firstResponse).kind, "staged");
+  assert.deepEqual(reducer.applySnapshot(firstResponse), { kind: "restart", reason: "gap" }, "duplicate response accepted");
 
   reducer = new StateAccumulator();
-  reducer.applySnapshot({ head: 1n, kind: "factory", items: [factoryItem()], next_cursor: "projects" }, null);
-  assert.deepEqual(reducer.applySnapshot({ head: 1n, kind: "project", items: [], next_cursor: null }, "projects"), { kind: "restart", reason: "gap" });
+  reducer.beginSnapshot(requestFrame("one", null));
+  assert.equal(reducer.applySnapshot(firstResponse).kind, "staged");
+  assert.deepEqual(reducer.beginSnapshot(requestFrame("one", "projects")), { kind: "restart", reason: "gap" }, "duplicate request id accepted");
+
+  reducer = new StateAccumulator();
+  reducer.beginSnapshot(requestFrame("one", null));
+  assert.equal(reducer.applySnapshot(firstResponse).kind, "staged");
+  assert.deepEqual(reducer.beginSnapshot(requestFrame("two", "forged")), { kind: "restart", reason: "gap" }, "wrong next cursor accepted");
+
+  reducer = new StateAccumulator();
+  reducer.beginSnapshot(requestFrame("one", null));
+  assert.equal(reducer.applySnapshot(firstResponse).kind, "staged");
+  reducer.beginSnapshot(requestFrame("two", "projects"));
+  assert.deepEqual(reducer.applySnapshot(responseFrame("two", { head: 1n, kind: "project", items: [], next_cursor: "projects" })), { kind: "restart", reason: "gap" }, "same cursor continuation accepted");
+
+  reducer = new StateAccumulator();
+  reducer.beginSnapshot(requestFrame("one", null));
+  assert.equal(reducer.applySnapshot(firstResponse).kind, "staged");
+  assert.equal(exchange(reducer, "projects", { head: 1n, kind: "project", items: [], next_cursor: "agents" }).kind, "staged");
+  reducer.beginSnapshot(requestFrame("three", "agents"));
+  assert.deepEqual(reducer.applySnapshot(responseFrame("three", { head: 1n, kind: "agent", items: [], next_cursor: "projects" })), { kind: "restart", reason: "gap" }, "cursor cycle accepted");
+
+  reducer = new StateAccumulator();
+  reducer.beginSnapshot(requestFrame("one", null));
+  assert.equal(reducer.applySnapshot(firstResponse).kind, "staged");
+  assert.deepEqual(reducer.beginSnapshot(requestFrame("two", "projects")), { kind: "requested" });
+  assert.deepEqual(reducer.applySnapshot(firstResponse), { kind: "restart", reason: "gap" }, "cross-wire replay accepted");
+
+  reducer = new StateAccumulator();
+  reducer.beginSnapshot(requestFrame("pending", null));
+  assert.deepEqual(reducer.applyRestart("pruned"), { kind: "restart", reason: "pruned" });
+  assert.deepEqual(reducer.applySnapshot(responseFrame("pending", factory)), { kind: "restart", reason: "gap" }, "restart retained pending request");
+});
+
+test("every dynamic kind requires strictly increasing raw IDs within and across pages", () => {
+  for (const kind of traversal) {
+    for (const values of [[2, 1], [1, 1]]) {
+      const reducer = new StateAccumulator();
+      const cursor = stageToKind(reducer, kind);
+      const items = values.map((value) => itemForKind(kind, value));
+      assert.deepEqual(exchange(reducer, cursor, { head: 1n, kind, items, next_cursor: kind === "human_request" ? null : "next" }), { kind: "restart", reason: "gap" }, `${kind}/within/${values}`);
+    }
+    for (const repeated of [8, 7]) {
+      const reducer = new StateAccumulator();
+      const cursor = stageToKind(reducer, kind);
+      assert.equal(exchange(reducer, cursor, { head: 1n, kind, items: itemsForKind(kind, 1, MAX_STATE_PAGE_ITEMS), next_cursor: "same-kind" }).kind, "staged");
+      assert.deepEqual(exchange(reducer, "same-kind", { head: 1n, kind, items: [itemForKind(kind, repeated)], next_cursor: kind === "human_request" ? null : "next" }), { kind: "restart", reason: "gap" }, `${kind}/across/${repeated}`);
+    }
+  }
+  const reducer = new StateAccumulator();
+  const cursor = stageToKind(reducer, "project");
+  assert.equal(exchange(reducer, cursor, { head: 1n, kind: "project", items: [itemForKind("project", 255), itemForKind("project", 256)], next_cursor: "agents" }).kind, "staged");
 });
 
 test("entity refresh during staging restarts without mutating the previously published view", () => {
-  const reducer = new StateAccumulator();
+  let reducer = new StateAccumulator();
   publishState(reducer, 1n, { tasks: [taskItem(1n, "published")] });
   const oldView = reducer.current;
-  reducer.applySnapshot({ head: 2n, kind: "factory", items: [factoryItem(2n)], next_cursor: "projects" }, null);
+  assert.equal(exchange(reducer, null, { head: 2n, kind: "factory", items: [factoryItem(2n)], next_cursor: "projects" }).kind, "staged");
   assert.deepEqual(reducer.applyEntity({ head: 2n, kind: "task", id: ids.task, revision: 2n, deleted: false, item: taskItem(2n, "refresh") }), { kind: "restart", reason: "gap" });
   assert.equal(reducer.current, undefined);
   assert.equal(oldView.tasks.get(ids.task).title, "published");
+
+  reducer = new StateAccumulator();
+  publishState(reducer, 1n, { tasks: [taskItem(1n, "published")] });
+  const pendingView = reducer.current;
+  assert.deepEqual(reducer.beginSnapshot(requestFrame("pending-refresh", null)), { kind: "requested" });
+  assert.deepEqual(reducer.applyEntity({ head: 2n, kind: "task", id: ids.task, revision: 2n, deleted: false, item: taskItem(2n, "refresh") }), { kind: "restart", reason: "gap" });
+  assert.equal(pendingView.tasks.get(ids.task).title, "published");
 });
 
 test("state accumulator advances hidden events, detects gaps, and rejects late/lower revisions", () => {

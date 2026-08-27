@@ -711,6 +711,23 @@ func validateStateItems(items StateItems) error {
 	return nil
 }
 
+func stateItemCount(items StateItems) int {
+	switch items.kind {
+	case StateFactory:
+		return len(items.factory)
+	case StateProject:
+		return len(items.projects)
+	case StateAgent:
+		return len(items.agents)
+	case StateTask:
+		return len(items.tasks)
+	case StateHumanRequest:
+		return len(items.humanRequests)
+	default:
+		return 0
+	}
+}
+
 func validateStateItem(item StateItem) error {
 	switch item.kind {
 	case "":
@@ -785,7 +802,20 @@ func validateStateSnapshot(value StateSnapshot) error {
 	if validateStateKind(value.Kind) != nil || value.Items.Kind() != value.Kind || validateCursor(value.NextCursor) != nil {
 		return fmt.Errorf("%w: state snapshot", ErrMalformed)
 	}
-	return validateStateItems(value.Items)
+	if err := validateStateItems(value.Items); err != nil {
+		return err
+	}
+	count := stateItemCount(value.Items)
+	if value.Kind == StateHumanRequest {
+		if (count == MaxStatePageItems && value.NextCursor == nil) || (count < MaxStatePageItems && value.NextCursor != nil) {
+			return fmt.Errorf("%w: human request page continuation", ErrMalformed)
+		}
+		return nil
+	}
+	if value.NextCursor == nil {
+		return fmt.Errorf("%w: state page continuation", ErrMalformed)
+	}
+	return nil
 }
 
 func validateStateRestart(value StateRestart) error {
