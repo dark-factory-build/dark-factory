@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
@@ -648,6 +649,88 @@ func TestDaemonCloseJoinsHijackedBrowserConnectionsBeforeStoreClose(t *testing.T
 	}
 	if _, err := daemon.ListenBrowser("127.0.0.1:0", []string{adapterOrigin}); !errors.Is(err, browser.ErrUnauthorized) {
 		t.Fatalf("browser listener after daemon close = %v", err)
+	}
+}
+
+func TestBrowserCloseLinearizesOpenAndClearsChallenges(t *testing.T) {
+	store, err := kernel.Create(context.Background(), filepath.Join(t.TempDir(), "kernel.sqlite"), kernel.FactoryConfig{Capacity: 2}, adapterTime(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	enteredClock := make(chan struct{})
+	releaseClock := make(chan struct{})
+	clock := func() time.Time {
+		select {
+		case <-enteredClock:
+		default:
+			close(enteredClock)
+		}
+		<-releaseClock
+		return time.UnixMilli(2_000)
+	}
+	daemon, err := newDaemon(store, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := daemon.ListenBrowser("127.0.0.1:0", []string{adapterOrigin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	openDone := make(chan struct {
+		launch api.WebLaunch
+		err    error
+	}, 1)
+	go func() {
+		launch, openErr := daemon.OpenBrowser(context.Background())
+		openDone <- struct {
+			launch api.WebLaunch
+			err    error
+		}{launch: launch, err: openErr}
+	}()
+	select {
+	case <-enteredClock:
+	case <-time.After(3 * time.Second):
+		t.Fatal("open did not reach its lifecycle gate")
+	}
+	closeDone := make(chan error, 1)
+	startedClose := make(chan struct{})
+	go func() {
+		close(startedClose)
+		closeDone <- runtime.Close()
+	}()
+	<-startedClose
+	for index := 0; index < 100; index++ {
+		daemon.browserMu.Lock()
+		closing := daemon.browserClosing
+		daemon.browserMu.Unlock()
+		if closing {
+			t.Fatal("daemon close passed browser lifecycle gate while open was active")
+		}
+		select {
+		case err := <-closeDone:
+			t.Fatalf("runtime close completed before open released: %v", err)
+		default:
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(releaseClock)
+	opened := <-openDone
+	if opened.err != nil || opened.launch.Outcome != api.WebLaunchReady {
+		t.Fatalf("gated open = %+v, want ready launch", opened)
+	}
+	if err := <-closeDone; err != nil {
+		t.Fatalf("daemon close = %v", err)
+	}
+	counts, err := store.BrowserClientCounts(context.Background(), runtime.backend.boot, adapterTime(t, 2_000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.ActiveChallenges != 0 {
+		t.Fatalf("active challenges after close = %d, want 0", counts.ActiveChallenges)
+	}
+	if _, err := daemon.OpenBrowser(context.Background()); !errors.Is(err, kernel.ErrBusy) {
+		t.Fatalf("open after close = %v, want busy", err)
 	}
 }
 

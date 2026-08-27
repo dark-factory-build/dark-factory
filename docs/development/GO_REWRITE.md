@@ -3630,7 +3630,7 @@ Private local-API server proof on integrated head `1ca7a31`:
   token identity rechecks remain inside transport. An attempt raw bearer is
   erased after conversion to one redacted SHA-256 digest; no raw bearer is
   representable in the decoded call.
-- A closed nine-call union and four reply constructors preserve the exact
+- A closed nine-call union and fixed reply constructors preserve the exact
   domain/method matrix and bounded public DTOs. Request EOF is required before
   dispatch. Mutation replies deliberately carry the canonical observed `head`
   (zero is valid) plus positive entity revision rather than falsely claiming

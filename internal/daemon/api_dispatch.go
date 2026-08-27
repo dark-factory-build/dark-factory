@@ -19,6 +19,7 @@ type Daemon struct {
 	now   func() time.Time
 
 	browserMu          sync.Mutex
+	browserLifecycleMu sync.Mutex
 	browsers           map[*BrowserRuntime]struct{}
 	browserClosing     bool
 	browserClientGates *browserClientGates

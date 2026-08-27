@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -12,8 +13,9 @@ import (
 // BrowserRuntime owns the loopback listener, every accepted WebSocket and
 // every Store-watch subscription created through its backend. Close performs
 // the only safe order: stop and join the transport first, then cancel and join
-// any backend subscription left by an interrupted connection. The caller may
-// close the Store only after Close returns.
+// any backend subscription left by an interrupted connection, then invalidate
+// unredeemed challenges for this runtime boot. The caller may close the Store
+// only after Close returns.
 type BrowserRuntime struct {
 	daemon  *Daemon
 	server  *browser.Server
@@ -64,6 +66,16 @@ func (runtime *BrowserRuntime) Close() error {
 	if runtime == nil {
 		return nil
 	}
+	if runtime.daemon != nil {
+		// Remove the runtime under the same gate OpenBrowser uses. The gate is
+		// released before server/backend callbacks so a transport cannot
+		// deadlock by re-entering daemon lifecycle code.
+		runtime.daemon.browserLifecycleMu.Lock()
+		runtime.daemon.browserMu.Lock()
+		delete(runtime.daemon.browsers, runtime)
+		runtime.daemon.browserMu.Unlock()
+		runtime.daemon.browserLifecycleMu.Unlock()
+	}
 	runtime.closeOnce.Do(func() {
 		var closeErrors []error
 		if runtime.server != nil {
@@ -72,12 +84,10 @@ func (runtime *BrowserRuntime) Close() error {
 		if runtime.backend != nil {
 			closeErrors = append(closeErrors, runtime.backend.close())
 		}
-		runtime.closeErr = errors.Join(closeErrors...)
-		if runtime.daemon != nil {
-			runtime.daemon.browserMu.Lock()
-			delete(runtime.daemon.browsers, runtime)
-			runtime.daemon.browserMu.Unlock()
+		if runtime.daemon != nil && runtime.daemon.store != nil && runtime.backend != nil {
+			closeErrors = append(closeErrors, runtime.daemon.store.InvalidateBrowserPairingChallenges(context.Background(), runtime.backend.boot))
 		}
+		runtime.closeErr = errors.Join(closeErrors...)
 	})
 	return runtime.closeErr
 }
@@ -86,6 +96,10 @@ func (daemon *Daemon) closeBrowsers() error {
 	if daemon == nil {
 		return nil
 	}
+	// This gate is the linearization point shared with OpenBrowser. It is held
+	// only through the readiness/close decision, never across transport
+	// callbacks that may re-enter daemon code.
+	daemon.browserLifecycleMu.Lock()
 	daemon.browserMu.Lock()
 	daemon.browserClosing = true
 	runtimes := make([]*BrowserRuntime, 0, len(daemon.browsers))
@@ -93,6 +107,7 @@ func (daemon *Daemon) closeBrowsers() error {
 		runtimes = append(runtimes, runtime)
 	}
 	daemon.browserMu.Unlock()
+	daemon.browserLifecycleMu.Unlock()
 	var closeErrors []error
 	for _, runtime := range runtimes {
 		closeErrors = append(closeErrors, runtime.Close())

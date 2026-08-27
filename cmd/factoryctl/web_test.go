@@ -290,6 +290,8 @@ func TestExactLaunchDigestRejectsInvalidAndUnmatchedLaunches(t *testing.T) {
 	}{
 		{name: "invalid URL", url: "https://app.darkfactory.build/?query=secret#df_pair=" + challenge, digest: digest},
 		{name: "empty query marker", url: "https://app.darkfactory.build/?#df_pair=" + challenge, digest: digest},
+		{name: "uppercase scheme", url: "HTTPS://app.darkfactory.build/#df_pair=" + challenge, digest: digest},
+		{name: "mixed-case scheme", url: "hTtPs://app.darkfactory.build/#df_pair=" + challenge, digest: digest},
 		{name: "encoded fragment", url: "https://app.darkfactory.build/#df_pair=%30" + challenge[2:], digest: digest},
 		{name: "missing digest", url: "https://app.darkfactory.build/#df_pair=" + challenge},
 		{name: "short digest", url: "https://app.darkfactory.build/#df_pair=" + challenge, digest: digest[:63]},

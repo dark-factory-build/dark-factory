@@ -30,7 +30,7 @@ func (daemon *Daemon) webRuntime() (*BrowserRuntime, bool) {
 	}
 	daemon.browserMu.Lock()
 	defer daemon.browserMu.Unlock()
-	if len(daemon.browsers) != 1 {
+	if daemon.browserClosing || len(daemon.browsers) != 1 {
 		return nil, false
 	}
 	for runtime := range daemon.browsers {
@@ -89,6 +89,11 @@ func (daemon *Daemon) WebStatus(ctx context.Context) (api.WebStatus, error) {
 // separate from launching a GUI: the caller receives the URL only to pass it
 // directly to an opener, never to display or persist it.
 func (daemon *Daemon) OpenBrowser(ctx context.Context) (api.WebLaunch, error) {
+	// Serialize the complete readiness-to-mint operation with daemon browser
+	// shutdown. Close marks browserClosing only after any admitted open has
+	// finished, then closes the transport and invalidates its challenges.
+	daemon.browserLifecycleMu.Lock()
+	defer daemon.browserLifecycleMu.Unlock()
 	runtime, valid := daemon.webRuntime()
 	if !valid || !browserRuntimeReady(runtime) {
 		return api.WebLaunch{}, fmt.Errorf("%w: browser transport unavailable", kernel.ErrBusy)

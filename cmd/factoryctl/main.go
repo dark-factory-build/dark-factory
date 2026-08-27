@@ -396,11 +396,11 @@ func validLaunch(launch api.WebLaunch) bool {
 // challenge A, and the daemon's returned digest is SHA-256(A). No digest is
 // returned for an invalid or internally inconsistent launch.
 func exactLaunchDigest(launch api.WebLaunch) (string, bool) {
-	if len(launch.LaunchURL) < 1 || len(launch.LaunchURL) > 4096 || !utf8.ValidString(launch.LaunchURL) || strings.ContainsRune(launch.LaunchURL, 0) || !validHex(launch.ChallengeDigest, 64) {
+	if len(launch.LaunchURL) < 1 || len(launch.LaunchURL) > 4096 || !utf8.ValidString(launch.LaunchURL) || strings.ContainsRune(launch.LaunchURL, 0) || !strings.HasPrefix(launch.LaunchURL, "https://") || !validHex(launch.ChallengeDigest, 64) {
 		return "", false
 	}
 	parsed, err := url.Parse(launch.LaunchURL)
-	if err != nil || parsed.Scheme != "https" || parsed.Host != "app.darkfactory.build" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment == "" || parsed.RawFragment != "" || parsed.Path != "/" || !strings.HasPrefix(parsed.Fragment, "df_pair=") {
+	if err != nil || parsed.Host != "app.darkfactory.build" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment == "" || parsed.RawFragment != "" || parsed.Path != "/" || !strings.HasPrefix(parsed.Fragment, "df_pair=") {
 		return "", false
 	}
 	raw := strings.TrimPrefix(parsed.Fragment, "df_pair=")

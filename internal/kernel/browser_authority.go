@@ -216,6 +216,26 @@ func (store *Store) browserChallengeAfterCommitUnknown(ctx context.Context, dige
 	return browserChallengeByDigest(ctx, connection, digest)
 }
 
+// InvalidateBrowserPairingChallenges removes every still-unredeemed challenge
+// minted by one browser runtime boot. Runtime shutdown calls this only after
+// joining the transport, so an in-flight pair cannot leave an active
+// challenge behind. Redeemed rows are already inactive and remain bounded
+// until the next mint cleanup.
+func (store *Store) InvalidateBrowserPairingChallenges(ctx context.Context, bootID BootID) error {
+	if bootID.zero() {
+		return fmt.Errorf("%w: invalid browser runtime boot", ErrInvalidValue)
+	}
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Close()
+	if _, err := tx.connection.ExecContext(ctx, `DELETE FROM browser_pairing_challenges WHERE boot_id = ? AND redeemed_at_ms IS NULL`, bootID.Bytes()); err != nil {
+		return tx.Rollback(err)
+	}
+	return tx.Commit(ctx)
+}
+
 // AbandonBrowserPairingChallenge removes exactly one daemon-minted,
 // unredeemed challenge after its GUI launch failed. The boot and origin bind
 // the cleanup to the runtime that minted it; a missing or already redeemed

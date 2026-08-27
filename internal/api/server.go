@@ -136,7 +136,7 @@ const (
 	replyError
 )
 
-// Reply is constructed only through the four fixed reply constructors.
+// Reply is constructed only through its fixed reply constructors.
 type Reply struct {
 	kind       replyKind
 	health     HealthStatus
