@@ -13,12 +13,21 @@ test("packed UI is importable by a clean consumer with its stylesheet export", (
   const consumer = mkdtempSync(join(tmpdir(), "dark-factory-ui-consumer-"));
   try {
     const env = { ...process.env, npm_config_cache: join(consumer, "npm-cache"), npm_config_update_notifier: "false" };
-    execFileSync("corepack", ["pnpm", "pack", "--pack-destination", consumer], { cwd: clientRoot, stdio: "pipe", env });
-    execFileSync("corepack", ["pnpm", "pack", "--pack-destination", consumer], { cwd: packageRoot, stdio: "pipe", env });
+    const packLocal = (cwd) => {
+      execFileSync("corepack", ["pnpm", "pack", "--pack-destination", consumer], { cwd, stdio: "pipe", env });
+    };
+    const packNpm = (cwd) => {
+      const output = execFileSync("npm", ["pack", "--json", "--pack-destination", consumer], { cwd, stdio: "pipe", env, encoding: "utf8" });
+      return join(consumer, JSON.parse(output)[0].filename);
+    };
+    packLocal(clientRoot);
+    packLocal(packageRoot);
     const clientTarball = join(consumer, "dark-factory-client-0.1.0.tgz");
     const uiTarball = join(consumer, "dark-factory-ui-0.1.0.tgz");
+    const xtermTarball = packNpm(join(packageRoot, "node_modules", "@xterm", "xterm"));
+    const fitTarball = packNpm(join(packageRoot, "node_modules", "@xterm", "addon-fit"));
     writeFileSync(join(consumer, "package.json"), JSON.stringify({ name: "clean-ui-consumer", private: true, type: "module" }));
-    execFileSync("npm", ["install", "--offline", "--ignore-scripts", "--legacy-peer-deps", "--no-package-lock", clientTarball, uiTarball], { cwd: consumer, stdio: "pipe", env });
+    execFileSync("npm", ["install", "--offline", "--ignore-scripts", "--legacy-peer-deps", "--no-package-lock", clientTarball, uiTarball, xtermTarball, fitTarball], { cwd: consumer, stdio: "pipe", env });
 
     const packageSources = new Map([
       ["react", join(packageRoot, "node_modules", "react")],
@@ -31,15 +40,17 @@ test("packed UI is importable by a clean consumer with its stylesheet export", (
       if (!existsSync(target)) cpSync(source, target, { recursive: true });
     }
     const probe = join(consumer, "probe.mjs");
-    writeFileSync(probe, "import { FactoryApp, FactoryConsole } from '@dark-factory/ui'; const css = await import.meta.resolve('@dark-factory/ui/styles.css'); if (typeof FactoryApp !== 'function' || FactoryApp.length !== 0 || typeof FactoryConsole !== 'function' || !css.endsWith('/factory-console.css')) throw new Error('bad UI package exports');");
+    writeFileSync(probe, "import { createElement } from 'react'; import { renderToStaticMarkup } from 'react-dom/server'; import { FactoryApp, FactoryConsole } from '@dark-factory/ui'; const css = await import.meta.resolve('@dark-factory/ui/styles.css'); const xtermCss = await import.meta.resolve('@xterm/xterm/css/xterm.css'); if (typeof FactoryApp !== 'function' || FactoryApp.length !== 0 || typeof FactoryConsole !== 'function' || !css.endsWith('/factory-console.css') || !xtermCss.endsWith('/css/xterm.css')) throw new Error('bad UI package exports'); if (typeof renderToStaticMarkup(createElement(FactoryApp)) !== 'string') throw new Error('SSR failed');");
     execFileSync(process.execPath, [probe], { cwd: consumer, stdio: "pipe" });
     const installedManifest = JSON.parse(readFileSync(join(consumer, "node_modules", "@dark-factory", "ui", "package.json"), "utf8"));
     assert.deepEqual(installedManifest.peerDependencies, { react: "19.1.0" });
+    assert.equal(installedManifest.dependencies["@xterm/xterm"], "6.0.0");
+    assert.equal(installedManifest.dependencies["@xterm/addon-fit"], "0.11.0");
     const installedRoot = join(consumer, "node_modules", "@dark-factory", "ui", "dist", "src");
     assert.equal(existsSync(join(installedRoot, "index.d.ts")), true);
     assert.match(readFileSync(join(installedRoot, "factory-app.js"), "utf8"), /^"use client";/);
     const rootTypes = readFileSync(join(installedRoot, "index.d.ts"), "utf8");
-    assert.equal(/browserURL|controllerFactory|FactoryAppLifecycle/.test(rootTypes), false);
+    assert.equal(/browserURL|controllerFactory|FactoryAppLifecycle|TerminalController|TerminalSurface|XtermTerminal/.test(rootTypes), false);
     assert.match(readFileSync(join(consumer, "node_modules", "@dark-factory", "ui", "dist", "src", "factory-console.css"), "utf8"), /\.dfFactoryConsole\b/);
   } finally {
     rmSync(consumer, { recursive: true, force: true });

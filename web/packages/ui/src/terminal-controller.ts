@@ -25,9 +25,9 @@ export type TerminalControllerSnapshot = Readonly<{
   error?: SessionError | ProtocolError;
 }>;
 
-export type TerminalControllerSession = Pick<BrowserSession, "resolveAgentTerminal" | "openTerminal">;
+type TerminalControllerSession = Pick<BrowserSession, "resolveAgentTerminal" | "openTerminal" | "close">;
 
-export type TerminalControllerOptions = Readonly<{
+type TerminalControllerOptions = Readonly<{
   session: TerminalControllerSession;
   agentId: string;
   expectedAgentRevision: bigint;
@@ -40,7 +40,7 @@ type Input = Uint8Array;
 type Resize = { rows: number; cols: number };
 
 /** Owns one exact target, handle, display surface and input lease. */
-export class TerminalController {
+class TerminalController {
   readonly #options: TerminalControllerOptions;
   #phase: TerminalPhase = "idle";
   #writable = false;
@@ -49,14 +49,11 @@ export class TerminalController {
   #handleClosed = false;
   #started = false;
   #closing = false;
-  #detachStarted = false;
   #generation = 0;
-  #inputQueue: Input[] = [];
-  #pendingInputBytes = 0;
+  #inputBuffer: Input = new Uint8Array(0);
+  #inputInFlightBytes = 0;
   #pendingResize: Resize | undefined;
   #effectTask: Promise<void> | undefined;
-  #bootstrapTask: Promise<void> | undefined;
-  #outputTask: Promise<void> | undefined;
   #closePromise: Promise<void> | undefined;
 
   constructor(options: TerminalControllerOptions) {
@@ -71,30 +68,40 @@ export class TerminalController {
     const generation = ++this.#generation;
     this.#phase = "resolving";
     this.#publish();
-    const task = this.#bootstrap(generation);
-    this.#bootstrapTask = task;
-    void task.then(() => this.#taskFinished(task), () => this.#taskFinished(task));
+    if (!this.#current(generation)) return;
+    void this.#bootstrap(generation);
   }
 
   sendInput(bytes: Uint8Array): boolean {
-    if (!this.#writable || this.#closing || this.#handle === undefined || !(bytes instanceof Uint8Array) || bytes.length === 0) return false;
-    if (bytes.length > MAX_TERMINAL_PAYLOAD || this.#pendingInputBytes + bytes.length > MAX_PENDING_INPUT_BYTES) {
+    if (!this.#writable || !this.#canEffect() || !(bytes instanceof Uint8Array) || bytes.length === 0) return false;
+    const total = this.#inputInFlightBytes + this.#inputBuffer.length;
+    if (bytes.length > MAX_TERMINAL_PAYLOAD || bytes.length > MAX_PENDING_INPUT_BYTES || total + bytes.length > MAX_PENDING_INPUT_BYTES) {
       this.#fail(new SessionError("too_large"));
       return false;
     }
-    this.#inputQueue.push(bytes.slice());
-    this.#pendingInputBytes += bytes.length;
+    const next = new Uint8Array(this.#inputBuffer.length + bytes.length);
+    next.set(this.#inputBuffer);
+    next.set(bytes, this.#inputBuffer.length);
+    this.#inputBuffer = next;
     this.#pumpEffects();
     return true;
   }
 
   sendText(value: string): boolean {
     if (typeof value !== "string") return false;
+    if (value.length > MAX_PENDING_INPUT_BYTES) {
+      this.#fail(new SessionError("too_large"));
+      return false;
+    }
     return this.sendInput(new TextEncoder().encode(value));
   }
 
   sendBinary(value: string): boolean {
     if (typeof value !== "string") return false;
+    if (value.length > MAX_PENDING_INPUT_BYTES) {
+      this.#fail(new SessionError("too_large"));
+      return false;
+    }
     const bytes = new Uint8Array(value.length);
     for (let index = 0; index < value.length; index += 1) {
       const code = value.charCodeAt(index);
@@ -108,7 +115,7 @@ export class TerminalController {
   }
 
   resize(rows: number, cols: number): boolean {
-    if (!this.#writable || this.#closing || this.#handle === undefined) return false;
+    if (!this.#writable || !this.#canEffect()) return false;
     if (!Number.isSafeInteger(rows) || rows < 1 || rows > MAX_TERMINAL_ROWS || !Number.isSafeInteger(cols) || cols < 1 || cols > MAX_TERMINAL_COLS) {
       this.#fail(new ProtocolError("malformed"));
       return false;
@@ -120,15 +127,19 @@ export class TerminalController {
 
   close(): Promise<void> {
     if (this.#closePromise !== undefined) return this.#closePromise;
+    // Install the latch before any callback can re-enter the owner.
+    this.#closePromise = Promise.resolve();
     this.#closing = true;
+    ++this.#generation;
     this.#writable = false;
-    this.#inputQueue = [];
-    this.#pendingInputBytes = 0;
+    this.#inputBuffer = new Uint8Array(0);
     this.#pendingResize = undefined;
+    this.#phase = "closing";
     try { this.#options.surface.abort(); } catch { if (this.#error === undefined) this.#error = new SessionError("internal"); }
-    if (this.#phase !== "closed") this.#phase = "closing";
+    try { this.#options.session.close(); } catch { if (this.#error === undefined) this.#error = new SessionError("connection"); }
     this.#publish();
-    this.#closePromise = this.#finishClose();
+    this.#phase = "closed";
+    this.#publish();
     return this.#closePromise;
   }
 
@@ -154,6 +165,7 @@ export class TerminalController {
       if (!this.#current(generation)) return;
       this.#phase = "attaching";
       this.#publish();
+      if (!this.#current(generation)) return;
       const attached = await handle.attach();
       if (!this.#current(generation)) return;
       if ("kind" in attached) {
@@ -162,9 +174,14 @@ export class TerminalController {
       }
       this.#phase = "acquiring";
       this.#publish();
+      if (!this.#current(generation)) return;
       try {
         await handle.acquireInput();
         if (!this.#current(generation)) return;
+        if (!handle.writable) {
+          this.#handleEnded(new SessionError("closed"));
+          return;
+        }
         this.#writable = true;
       } catch (error) {
         if (!this.#current(generation)) return;
@@ -179,36 +196,43 @@ export class TerminalController {
   }
 
   async #writeOutput(generation: number, payload: Uint8Array): Promise<void> {
-    if (!this.#current(generation)) return;
-    let write: Promise<void>;
-    try { write = Promise.resolve(this.#options.surface.write(payload.slice())); } catch (error) { write = Promise.reject(error); }
-    this.#outputTask = write;
+    if (!this.#current(generation) || !this.#liveHandle()) return Promise.reject(new SessionError("closed"));
     try {
-      await write;
-    } catch (error) {
+      await this.#options.surface.write(payload.slice());
+    } catch {
       if (this.#current(generation)) this.#fail(new SessionError("internal"));
-      throw error;
-    } finally {
-      if (this.#outputTask === write) this.#outputTask = undefined;
+      throw new SessionError(this.#closing ? "closed" : "internal");
     }
   }
 
   #pumpEffects(): void {
-    if (this.#effectTask !== undefined || !this.#writable || this.#closing) return;
+    if (this.#effectTask !== undefined || !this.#writable || !this.#liveHandle()) return;
     const task = this.#runEffects();
     this.#effectTask = task;
-    void task.then(() => this.#taskFinished(task), () => this.#taskFinished(task));
+    void task.then(() => this.#effectFinished(task), () => this.#effectFinished(task));
   }
 
   async #runEffects(): Promise<void> {
     const handle = this.#handle;
-    if (handle === undefined) return;
-    while (!this.#closing && this.#writable) {
-      const input = this.#inputQueue.shift();
-      if (input !== undefined) {
-        this.#pendingInputBytes -= input.length;
+    const generation = this.#generation;
+    if (handle === undefined || !this.#canEffect(handle)) return;
+    let inputSinceResize = false;
+    while (this.#current(generation) && this.#canEffect(handle) && this.#writable) {
+      if (this.#inputBuffer.length > 0 && !inputSinceResize) {
+        const payload = this.#inputBuffer.length <= MAX_TERMINAL_PAYLOAD ? this.#inputBuffer : this.#inputBuffer.slice(0, MAX_TERMINAL_PAYLOAD);
+        this.#inputBuffer = this.#inputBuffer.slice(payload.length);
+        this.#inputInFlightBytes = payload.length;
         let result: TerminalInputResult;
-        try { result = await handle.sendInput(input); } catch (error) { this.#fail(finiteError(error)); return; }
+        try {
+          if (!this.#canEffect(handle)) return;
+          result = await handle.sendInput(payload);
+        } catch (error) {
+          this.#inputInFlightBytes = 0;
+          if (this.#current(generation)) this.#fail(finiteError(error));
+          return;
+        }
+        this.#inputInFlightBytes = 0;
+        if (!this.#current(generation) || !this.#canEffect(handle)) return;
         if (result.status === "partial" || result.status === "uncertain") {
           this.#fail(new SessionError("connection"));
           return;
@@ -216,47 +240,37 @@ export class TerminalController {
         if (result.status === "rejected") {
           this.#error = new SessionError("invalid_request");
           this.#publish();
+          if (!this.#current(generation) || !this.#canEffect(handle)) return;
         }
+        inputSinceResize = true;
         continue;
       }
       const resize = this.#pendingResize;
-      this.#pendingResize = undefined;
       if (resize !== undefined) {
-        try { await handle.resize(resize.rows, resize.cols); } catch (error) { this.#fail(finiteError(error)); return; }
+        this.#pendingResize = undefined;
+        if (!this.#canEffect(handle)) return;
+        try { await handle.resize(resize.rows, resize.cols); } catch (error) {
+          if (this.#current(generation)) this.#fail(finiteError(error));
+          return;
+        }
+        if (!this.#current(generation) || !this.#canEffect(handle)) return;
+        inputSinceResize = false;
         continue;
       }
-      return;
+      inputSinceResize = false;
+      if (this.#inputBuffer.length === 0) return;
     }
   }
 
-  async #finishClose(): Promise<void> {
-    await this.#waitForEffects();
-    const handle = this.#handle;
-    if (handle !== undefined && !this.#handleClosed && !this.#detachStarted) {
-      this.#detachStarted = true;
-      try { await handle.detach(); } catch (error) { if (this.#error === undefined) this.#error = finiteError(error); }
-    }
-    this.#writable = false;
-    this.#phase = "closed";
-    this.#publish();
-  }
-
-  async #waitForEffects(): Promise<void> {
-    while (this.#bootstrapTask !== undefined || this.#effectTask !== undefined || this.#outputTask !== undefined) {
-      const pending = [this.#bootstrapTask, this.#effectTask, this.#outputTask].filter((task): task is Promise<void> => task !== undefined);
-      await Promise.all(pending.map((task) => task.catch(() => undefined)));
-    }
-  }
-
-  #taskFinished(task: Promise<void>): void {
-    if (this.#bootstrapTask === task) this.#bootstrapTask = undefined;
+  #effectFinished(task: Promise<void>): void {
     if (this.#effectTask === task) this.#effectTask = undefined;
   }
 
   #handleEnded(error: SessionError | ProtocolError): void {
     this.#handleClosed = true;
     this.#writable = false;
-    if (this.#phase !== "closing" && this.#phase !== "closed") {
+    if (!this.#closing && this.#phase !== "closed") {
+      ++this.#generation;
       this.#error = error;
       this.#phase = "closed";
       this.#publish();
@@ -264,27 +278,44 @@ export class TerminalController {
   }
 
   #fail(error: SessionError | ProtocolError): void {
-    if (this.#phase === "closed" && this.#closing) return;
+    if (this.#closing || this.#phase === "closed") return;
     this.#error = error;
     this.#writable = false;
-    this.#inputQueue = [];
-    this.#pendingInputBytes = 0;
+    this.#inputBuffer = new Uint8Array(0);
     this.#pendingResize = undefined;
     this.#publish();
     void this.close();
   }
 
-  #current(generation: number): boolean { return !this.#closing && generation === this.#generation; }
+  #liveHandle(handle = this.#handle): boolean {
+    return handle !== undefined && handle === this.#handle && !this.#handleClosed && !this.#closing && this.#phase !== "closed";
+  }
+
+  #canEffect(handle = this.#handle): boolean {
+    if (handle === undefined || !this.#liveHandle(handle)) return false;
+    try {
+      if (handle.writable) return true;
+    } catch {
+      // A broken handle is no longer an authority boundary.
+    }
+    this.#handleEnded(new SessionError("closed"));
+    return false;
+  }
+
+  #current(generation: number): boolean { return generation === this.#generation && !this.#closing && this.#phase !== "closed"; }
 
   #snapshot(): TerminalControllerSnapshot {
     return { phase: this.#phase, writable: this.#writable, error: this.#error };
   }
 
-  #publish(): void { this.#options.onChange(this.#snapshot()); }
+  #publish(): void {
+    try { this.#options.onChange(this.#snapshot()); } catch { /* presentation callbacks never own the session */ }
+  }
 }
 
 function finiteError(error: unknown): SessionError | ProtocolError {
   return error instanceof SessionError || error instanceof ProtocolError ? error : new SessionError("connection");
 }
 
-export { MAX_PENDING_INPUT_BYTES };
+export { MAX_PENDING_INPUT_BYTES, TerminalController };
+export type { TerminalControllerOptions, TerminalControllerSession };
