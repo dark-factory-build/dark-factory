@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -215,6 +216,121 @@ func TestDaemonDispatchesAttemptOutcomeAfterCommit(t *testing.T) {
 		t.Fatal("revoked attempt credential remained usable")
 	}
 	waitDispatch(t, done)
+}
+
+func TestDaemonDispatchesHumanQuestionWithDurableIdempotency(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttempt(t, fixture, 31)
+	ctx := context.Background()
+	input := api.HumanQuestionInput{IdempotencyKey: testID(41), Question: "private human question sentinel"}
+	before, err := fixture.store.Factory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	done := fixture.serve(t)
+	created, err := active.client.RequestHuman(ctx, input)
+	if err != nil || created.Revision != 1 || created.Head != uint64(before.Head.Int64()+1) {
+		t.Fatalf("request human = %+v, %v", created, err)
+	}
+	waitDispatch(t, done)
+	requests, err := fixture.store.Snapshot(ctx)
+	if err != nil || len(requests.HumanRequests) != 1 {
+		t.Fatalf("durable human requests = %+v, %v", requests.HumanRequests, err)
+	}
+	request := requests.HumanRequests[0]
+	if request.RunID != active.run.ID || request.Status != kernel.HumanRequestOpen {
+		t.Fatalf("durable human request = %+v", request)
+	}
+	encoded, err := json.Marshal(created)
+	if err != nil || bytes.Contains(encoded, []byte(input.Question)) || bytes.Contains(encoded, []byte(request.ID.String())) {
+		t.Fatalf("mutation response exposed private request data: %s, %v", encoded, err)
+	}
+
+	beforeReplay, err := fixture.store.Factory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done = fixture.serve(t)
+	replay, err := active.client.RequestHuman(ctx, input)
+	if err != nil || replay.Revision != created.Revision || replay.Head != uint64(beforeReplay.Head.Int64()) {
+		t.Fatalf("idempotent request human = %+v, %v", replay, err)
+	}
+	waitDispatch(t, done)
+	afterReplay, err := fixture.store.Snapshot(ctx)
+	if err != nil || len(afterReplay.HumanRequests) != 1 || afterReplay.HumanRequests[0].ID != request.ID {
+		t.Fatalf("idempotent durable human requests = %+v, %v", afterReplay.HumanRequests, err)
+	}
+
+	conflicting := input
+	conflicting.Question = "different private question"
+	done = fixture.serve(t)
+	if _, err := active.client.RequestHuman(ctx, conflicting); err == nil {
+		t.Fatal("same human request key with different question succeeded")
+	} else {
+		var remote *api.RemoteError
+		if !errors.As(err, &remote) || remote.Code() != api.RemoteConflict {
+			t.Fatalf("conflicting human request error = %v", err)
+		}
+	}
+	waitDispatch(t, done)
+	afterConflict, err := fixture.store.Snapshot(ctx)
+	if err != nil || len(afterConflict.HumanRequests) != 1 || afterConflict.HumanRequests[0].ID != request.ID {
+		t.Fatalf("conflicting durable human requests = %+v, %v", afterConflict.HumanRequests, err)
+	}
+}
+
+func TestDaemonRejectsForgedAndFinalizingHumanQuestion(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttempt(t, fixture, 51)
+	ctx := context.Background()
+	wrongToken := filepath.Join(filepath.Dir(fixture.socket), "wrong-human.token")
+	if err := os.WriteFile(wrongToken, bytes.Repeat([]byte{'z'}, 32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	activeToken := os.Getenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE")
+	if err := os.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", wrongToken); err != nil {
+		t.Fatal(err)
+	}
+	wrong, err := api.NewAttemptClientFromEnvironment(fixture.socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", activeToken); err != nil {
+		t.Fatal(err)
+	}
+
+	done := fixture.serve(t)
+	if _, err := wrong.RequestHuman(ctx, api.HumanQuestionInput{IdempotencyKey: testID(61), Question: "forged question"}); err == nil {
+		t.Fatal("forged human request succeeded")
+	} else {
+		var remote *api.RemoteError
+		if !errors.As(err, &remote) || remote.Code() != api.RemoteUnauthorized {
+			t.Fatalf("forged human request error = %v", err)
+		}
+	}
+	waitDispatch(t, done)
+
+	done = fixture.serve(t)
+	if _, err := active.client.Succeed(ctx, "finalize attempt"); err != nil {
+		t.Fatalf("finalize attempt = %v", err)
+	}
+	waitDispatch(t, done)
+
+	done = fixture.serve(t)
+	if _, err := active.client.RequestHuman(ctx, api.HumanQuestionInput{IdempotencyKey: testID(62), Question: "finalizing question"}); err == nil {
+		t.Fatal("finalizing human request succeeded")
+	} else {
+		var remote *api.RemoteError
+		if !errors.As(err, &remote) || remote.Code() != api.RemoteUnauthorized {
+			t.Fatalf("finalizing human request error = %v", err)
+		}
+	}
+	waitDispatch(t, done)
+	requests, err := fixture.store.Snapshot(ctx)
+	if err != nil || len(requests.HumanRequests) != 0 {
+		t.Fatalf("unauthorized human requests became durable = %+v, %v", requests.HumanRequests, err)
+	}
 }
 
 type activeAttempt struct {

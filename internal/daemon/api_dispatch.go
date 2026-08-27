@@ -96,6 +96,8 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.setDispatch(ctx, call)
 	case api.CallSucceed, api.CallBlock, api.CallFail:
 		return daemon.proposeOutcome(ctx, call)
+	case api.CallRequestHuman:
+		return daemon.requestHuman(ctx, call)
 	default:
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
@@ -265,6 +267,39 @@ func (daemon *Daemon) proposeOutcome(ctx context.Context, call api.Call) api.Rep
 		return newErrorReply(remoteErrorCode(err))
 	}
 	return daemon.mutation(ctx, run.Revision)
+}
+
+func (daemon *Daemon) requestHuman(ctx context.Context, call api.Call) api.Reply {
+	digest, ok := call.AttemptDigest()
+	if !ok {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	kDigest, err := attemptDigest(digest)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	input, ok := call.HumanQuestionInput()
+	if !ok {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	rawKey, err := parseID(input.IdempotencyKey)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	var key [kernel.IDBytes]byte
+	copy(key[:], rawKey)
+	at, err := daemon.timestamp()
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	request, err := daemon.store.CreateHumanQuestionForAttempt(ctx, kDigest, kernel.NewHumanQuestion{
+		IdempotencyKey: key,
+		QuestionText:   input.Question,
+	}, at)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	return daemon.mutation(ctx, request.Revision)
 }
 
 func proposalForCall(call api.Call) (kernel.Proposal, error) {
