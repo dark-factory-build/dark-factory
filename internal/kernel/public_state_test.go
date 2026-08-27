@@ -346,6 +346,39 @@ func TestPublicStateConcurrentWriterNeverMixesPageHeadAndCount(t *testing.T) {
 	}
 }
 
+func TestPublicStateEntityReadTransactionPinsHeadAndRevision(t *testing.T) {
+	store, _ := newTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Close()
+	if err := validateDurableControls(ctx, tx.connection); err != nil {
+		t.Fatal(err)
+	}
+	before, err := factoryState(ctx, tx.connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetDispatch(ctx, before.Revision, true, mustTime(t, 2)); err != nil {
+		t.Fatal(err)
+	}
+	item, found, err := readPublicStateEntityItem(ctx, tx.connection, PublicStateFactory, FactoryPublicStateID())
+	if err != nil || !found {
+		t.Fatalf("pinned factory item found=%v err=%v", found, err)
+	}
+	revision, ok := item.revision()
+	if !ok || revision != before.Revision {
+		t.Fatalf("pinned item revision = %d, want %d", revision.Int64(), before.Revision.Int64())
+	}
+	after, err := store.ReadPublicStateEntity(ctx, PublicStateFactory, FactoryPublicStateID())
+	if err != nil || after.Head.Int64() != before.Head.Int64()+1 || after.Revision.Int64() != before.Revision.Int64()+1 {
+		t.Fatalf("current factory entity = %+v, %v", after, err)
+	}
+}
+
 func TestPublicStateEntityReadsAreExactSlimAndDeleted(t *testing.T) {
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
@@ -368,6 +401,10 @@ func TestPublicStateEntityReadsAreExactSlimAndDeleted(t *testing.T) {
 		entity, err := store.ReadPublicStateEntity(ctx, locator.kind, locator.id)
 		if err != nil || entity.Deleted || entity.Item == nil || entity.Kind != locator.kind || entity.EntityID.String() != locator.id.String() {
 			t.Fatalf("%s entity = %+v, %v", locator.kind.String(), entity, err)
+		}
+		itemRevision, ok := entity.Item.revision()
+		if !ok || entity.Revision != itemRevision {
+			t.Fatalf("%s entity revision = %d, item=%d ok=%v", locator.kind.String(), entity.Revision.Int64(), itemRevision.Int64(), ok)
 		}
 	}
 	hr, _ := func() (HumanRequestProjection, bool) {
@@ -398,7 +435,7 @@ func TestPublicStateEntityReadsAreExactSlimAndDeleted(t *testing.T) {
 
 	missing := mustPublicStateID(t, publicRawID(0xfd, 1))
 	entity, err := store.ReadPublicStateEntity(ctx, PublicStateProject, missing)
-	if err != nil || !entity.Deleted || entity.Item != nil {
+	if !errors.Is(err, ErrNotFound) || entity != (PublicStateEntityResult{}) {
 		t.Fatalf("missing entity = %+v, %v", entity, err)
 	}
 	if _, err := store.ReadPublicStateEntity(ctx, PublicStateFactory, PublicStateID{}); !errors.Is(err, ErrInvalidValue) {
@@ -416,9 +453,85 @@ func TestPublicStateEntityReadsAreExactSlimAndDeleted(t *testing.T) {
 	if err := store.AcknowledgeHumanReply(ctx, request.ID, delivery.DeliveryID, delivery.Revision, mustTime(t, 402)); err != nil {
 		t.Fatal(err)
 	}
+	resolved, found, err := store.HumanRequest(ctx, request.ID)
+	if err != nil || !found || resolved.Status != HumanRequestResolved {
+		t.Fatalf("resolved request = %+v, found=%v, err=%v", resolved, found, err)
+	}
 	entity, err = store.ReadPublicStateEntity(ctx, PublicStateHumanRequest, mustPublicStateID(t, request.ID.Bytes()))
-	if err != nil || !entity.Deleted || entity.Item != nil {
+	if err != nil || !entity.Deleted || entity.Item != nil || entity.Revision != resolved.Revision {
 		t.Fatalf("resolved entity = %+v, %v", entity, err)
+	}
+}
+
+func TestPublicStateEntityStaleTombstoneHasExactRevision(t *testing.T) {
+	store, run, _ := runningOrchestratorRun(t)
+	defer store.Close()
+	ctx := context.Background()
+	request, err := store.CreateHumanQuestionForAttempt(ctx, run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(119), QuestionText: "question"}, mustTime(t, 400))
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposal, err := NewBlockedProposal("waiting")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ProposeAttemptOutcome(ctx, run.CredentialDigest, proposal, mustTime(t, 401)); err != nil {
+		t.Fatal(err)
+	}
+	stale, found, err := store.HumanRequest(ctx, request.ID)
+	if err != nil || !found || stale.Status != HumanRequestStale {
+		t.Fatalf("stale request = %+v, found=%v, err=%v", stale, found, err)
+	}
+	entity, err := store.ReadPublicStateEntity(ctx, PublicStateHumanRequest, mustPublicStateID(t, request.ID.Bytes()))
+	if err != nil || !entity.Deleted || entity.Item != nil || entity.Revision != stale.Revision {
+		t.Fatalf("stale entity = %+v, %v", entity, err)
+	}
+}
+
+func TestPublicStateEntityTombstoneMustBeLatestAndMatchDurableRequest(t *testing.T) {
+	store, run, _ := runningOrchestratorRun(t)
+	defer store.Close()
+	ctx := context.Background()
+	client := humanQuestionClient(t, store, 120, BrowserCapabilityObserve|BrowserCapabilityHumanActions)
+	request, err := store.CreateHumanQuestionForAttempt(ctx, run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(121), QuestionText: "question"}, mustTime(t, 400))
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivery, err := store.BeginHumanReply(ctx, client.ID, request.ID, request.Revision, humanDeliveryID(t, 122), "reply", mustTime(t, 401))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AcknowledgeHumanReply(ctx, request.ID, delivery.DeliveryID, delivery.Revision, mustTime(t, 402)); err != nil {
+		t.Fatal(err)
+	}
+	id := mustPublicStateID(t, request.ID.Bytes())
+	resolved, found, err := store.HumanRequest(ctx, request.ID)
+	if err != nil || !found || resolved.Status != HumanRequestResolved {
+		t.Fatalf("resolved request = %+v, found=%v, err=%v", resolved, found, err)
+	}
+
+	corruptSQL(t, store, `UPDATE invalidations SET deleted = 0 WHERE entity_kind = 'human_request' AND entity_id = ? AND revision = ?`, request.ID.Bytes(), resolved.Revision.Int64())
+	if _, err := store.ReadPublicStateEntity(ctx, PublicStateHumanRequest, id); !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("nondeleted latest invalidation = %v", err)
+	}
+	corruptSQL(t, store, `UPDATE invalidations SET deleted = 1, revision = ? WHERE entity_kind = 'human_request' AND entity_id = ? AND revision = ?`, resolved.Revision.Int64()+1, request.ID.Bytes(), resolved.Revision.Int64())
+	if _, err := store.ReadPublicStateEntity(ctx, PublicStateHumanRequest, id); !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("wrong tombstone revision = %v", err)
+	}
+}
+
+func TestPublicStateEntityRejectsInventedDynamicDeletion(t *testing.T) {
+	for _, deleted := range []int{0, 1} {
+		store, _ := newTestStore(t)
+		ctx := context.Background()
+		id := publicProjectID(t, 128+deleted)
+		corruptSQL(t, store, `INSERT INTO invalidations(sequence, occurred_at_ms, entity_kind, entity_id, revision, deleted) VALUES(1, 2, 'project', ?, 1, ?)`, id.Bytes(), deleted)
+		corruptSQL(t, store, `UPDATE factory SET next_invalidation_sequence = 2`)
+		if _, err := store.ReadPublicStateEntity(ctx, PublicStateProject, mustPublicStateID(t, id.Bytes())); !errors.Is(err, ErrCorruptState) {
+			store.Close()
+			t.Fatalf("missing project with deleted=%d invalidation = %v", deleted, err)
+		}
+		store.Close()
 	}
 }
 

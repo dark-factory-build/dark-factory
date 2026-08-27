@@ -265,11 +265,93 @@ func TestInvalidationRetentionBatchAndGapSemantics(t *testing.T) {
 	if _, err := store.writer.Exec(`DELETE FROM invalidations WHERE sequence = 100`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.WatchAfter(ctx, mustSequence(t, 98)); !errors.Is(err, ErrCorruptState) {
+	if _, err := store.WatchAfter(ctx, mustSequence(t, 98)); !isWatchRestart(err, WatchRestartGap, state) || !errors.Is(err, ErrCorruptState) {
 		t.Fatalf("gap error = %v", err)
 	}
-	if _, err := store.WatchAfter(ctx, state.Head); !errors.Is(err, ErrCorruptState) {
+	if _, err := store.WatchAfter(ctx, state.Head); !isWatchRestart(err, WatchRestartGap, state) || !errors.Is(err, ErrCorruptState) {
 		t.Fatalf("gap behind cursor error = %v", err)
+	}
+}
+
+func TestWatchAfterRestartClassificationsAreFiniteAndPrivate(t *testing.T) {
+	if WatchRestartGap.String() != "gap" || WatchRestartHiddenDependency.String() != "hidden_dependency" || WatchRestartReason(99).String() != "" {
+		t.Fatal("watch restart reason strings are not closed")
+	}
+	t.Run("early end is gap", func(t *testing.T) {
+		store, _ := newTestStore(t)
+		defer store.Close()
+		state, err := store.SetDispatch(context.Background(), mustRevision(t, 1), true, mustTime(t, 2))
+		if err != nil {
+			t.Fatal(err)
+		}
+		corruptSQL(t, store, `DELETE FROM invalidations WHERE sequence = 1`)
+		if _, err := store.WatchAfter(context.Background(), mustSequence(t, 0)); !isWatchRestart(err, WatchRestartGap, state) || !errors.Is(err, ErrCorruptState) {
+			t.Fatalf("early-end error = %v", err)
+		}
+	})
+
+	t.Run("unknown kind is hidden dependency", func(t *testing.T) {
+		store, _ := newTestStore(t)
+		defer store.Close()
+		state, err := store.SetDispatch(context.Background(), mustRevision(t, 1), true, mustTime(t, 2))
+		if err != nil {
+			t.Fatal(err)
+		}
+		const secret = "PRIVATE_UNKNOWN_KIND_SENTINEL"
+		corruptSQL(t, store, `UPDATE invalidations SET entity_kind = ? WHERE sequence = 1`, secret)
+		_, err = store.WatchAfter(context.Background(), mustSequence(t, 0))
+		if !isWatchRestart(err, WatchRestartHiddenDependency, state) || !errors.Is(err, ErrCorruptState) {
+			t.Fatalf("unknown-kind error = %v", err)
+		}
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("unknown-kind error exposed durable value: %v", err)
+		}
+	})
+}
+
+func TestWatchAfterMalformedKnownRowsRemainCorruption(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate string
+	}{
+		{name: "revision", mutate: `UPDATE invalidations SET revision = 0 WHERE sequence = 1`},
+		{name: "identity", mutate: `UPDATE invalidations SET entity_id = zeroblob(15) WHERE sequence = 1`},
+		{name: "deleted", mutate: `UPDATE invalidations SET deleted = 2 WHERE sequence = 1`},
+		{name: "time", mutate: `UPDATE invalidations SET occurred_at_ms = -1 WHERE sequence = 1`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, _ := newTestStore(t)
+			defer store.Close()
+			if _, err := store.SetDispatch(context.Background(), mustRevision(t, 1), true, mustTime(t, 2)); err != nil {
+				t.Fatal(err)
+			}
+			corruptSQL(t, store, test.mutate)
+			_, err := store.WatchAfter(context.Background(), mustSequence(t, 0))
+			var restart *WatchRestartError
+			if !errors.Is(err, ErrCorruptState) || errors.As(err, &restart) {
+				t.Fatalf("malformed row error = %v", err)
+			}
+		})
+	}
+}
+
+func TestWatchAfterRetainsExactChangeAndRunChronology(t *testing.T) {
+	store, _, _ := admittedWorkerRun(t)
+	defer store.Close()
+	batch, err := store.WatchAfter(context.Background(), mustSequence(t, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var change, run bool
+	for index, event := range batch.Invalidations {
+		if event.Sequence.Int64() != int64(index+1) {
+			t.Fatalf("event %d sequence = %d", index, event.Sequence.Int64())
+		}
+		change = change || event.EntityKind == EntityChange.String()
+		run = run || event.EntityKind == EntityRun.String()
+	}
+	if !change || !run || batch.Head.Int64() != int64(len(batch.Invalidations)) {
+		t.Fatalf("change/run chronology = %+v", batch)
 	}
 }
 
@@ -791,4 +873,9 @@ func mustSequence(t *testing.T, value int64) EventSequence {
 func isResync(err error) bool {
 	var target *ResyncRequiredError
 	return errors.As(err, &target)
+}
+
+func isWatchRestart(err error, reason WatchRestartReason, state FactoryState) bool {
+	var target *WatchRestartError
+	return errors.As(err, &target) && target.Reason == reason && target.Head == state.Head && target.Floor == state.Floor
 }

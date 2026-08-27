@@ -48,6 +48,39 @@ func (err *ResyncRequiredError) Error() string {
 	return fmt.Sprintf("watch resync required: head=%d floor=%d", err.Head.Int64(), err.Floor.Int64())
 }
 
+type WatchRestartReason uint8
+
+const (
+	WatchRestartGap WatchRestartReason = iota + 1
+	WatchRestartHiddenDependency
+)
+
+func (reason WatchRestartReason) String() string {
+	switch reason {
+	case WatchRestartGap:
+		return "gap"
+	case WatchRestartHiddenDependency:
+		return "hidden_dependency"
+	default:
+		return ""
+	}
+}
+
+// WatchRestartError is a finite subscription restart. It unwraps to
+// ErrCorruptState because the local database still requires repair even when
+// a browser can safely recover by discarding its projection and resyncing.
+type WatchRestartError struct {
+	Head   EventSequence
+	Floor  EventSequence
+	Reason WatchRestartReason
+}
+
+func (err *WatchRestartError) Error() string {
+	return fmt.Sprintf("watch restart required: reason=%s head=%d floor=%d", err.Reason.String(), err.Head.Int64(), err.Floor.Int64())
+}
+
+func (err *WatchRestartError) Unwrap() error { return ErrCorruptState }
+
 func corruptControl(kind, _ string) error {
 	return fmt.Errorf("%w: unknown %s", ErrCorruptState, kind)
 }

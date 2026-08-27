@@ -408,26 +408,18 @@ func (store *Store) WatchAfter(ctx context.Context, after EventSequence) (WatchB
 		return WatchBatch{}, err
 	}
 	defer tx.Close()
-	if err := validateDurableControls(ctx, tx.connection); err != nil {
-		return WatchBatch{}, err
-	}
-	state, err := factoryState(ctx, tx.connection)
+	state, err := validateDurableEntityControls(ctx, tx.connection)
 	if err != nil {
 		return WatchBatch{}, err
 	}
-	if after.Int64() > state.Head.Int64() {
-		return WatchBatch{}, ErrFutureCursor
-	}
-	if after.Int64() < state.Floor.Int64()-1 {
-		return WatchBatch{}, &ResyncRequiredError{Head: state.Head, Floor: state.Floor}
-	}
-	rows, err := tx.connection.QueryContext(ctx, `SELECT sequence, occurred_at_ms, entity_kind, entity_id, revision, deleted FROM invalidations WHERE sequence > ? ORDER BY sequence ASC LIMIT ?`, after.Int64(), WatchBatchLimit+1)
+	rows, err := tx.connection.QueryContext(ctx, `SELECT sequence, occurred_at_ms, entity_kind, entity_id, revision, deleted FROM invalidations ORDER BY sequence ASC`)
 	if err != nil {
 		return WatchBatch{}, fmt.Errorf("read invalidations: %w", err)
 	}
 	defer rows.Close()
 	batch := WatchBatch{Head: state.Head, Floor: state.Floor}
-	expected := after.Int64() + 1
+	expected := state.Floor.Int64()
+	count := 0
 	for rows.Next() {
 		var sequence, occurredAt, revision, deleted int64
 		var rawKind string
@@ -435,7 +427,18 @@ func (store *Store) WatchAfter(ctx context.Context, after EventSequence) (WatchB
 		if err := rows.Scan(&sequence, &occurredAt, &rawKind, &rawID, &revision, &deleted); err != nil {
 			return WatchBatch{}, fmt.Errorf("scan invalidation: %w", err)
 		}
+		if sequence != expected {
+			return WatchBatch{}, newWatchRestart(state, WatchRestartGap)
+		}
+		expected++
+		count++
+		if count > EventRetentionLimit {
+			return WatchBatch{}, fmt.Errorf("%w: invalid invalidation count", ErrCorruptState)
+		}
 		kind, kindErr := parseEntityKind(rawKind)
+		if kindErr != nil {
+			return WatchBatch{}, newWatchRestart(state, WatchRestartHiddenDependency)
+		}
 		seq, sequenceErr := NewEventSequence(sequence)
 		at, atErr := NewUnixMillis(occurredAt)
 		rev, revisionErr := NewRevision(revision)
@@ -446,21 +449,30 @@ func (store *Store) WatchAfter(ctx context.Context, after EventSequence) (WatchB
 			_, idErr := identifierFromBytes(rawID)
 			validID = idErr == nil
 		}
-		if kindErr != nil || sequenceErr != nil || atErr != nil || revisionErr != nil || !validID || deleted != 0 && deleted != 1 || sequence != expected {
+		if sequenceErr != nil || atErr != nil || revisionErr != nil || !validID || deleted != 0 && deleted != 1 {
 			return WatchBatch{}, fmt.Errorf("%w: invalid or discontinuous invalidation at sequence %d", ErrCorruptState, sequence)
 		}
-		expected++
-		if len(batch.Invalidations) < WatchBatchLimit {
+		if sequence > after.Int64() && len(batch.Invalidations) < WatchBatchLimit {
 			batch.Invalidations = append(batch.Invalidations, Invalidation{Sequence: seq, OccurredAt: at, EntityKind: kind.String(), EntityID: fmt.Sprintf("%x", rawID), Revision: rev, Deleted: deleted == 1})
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return WatchBatch{}, fmt.Errorf("iterate invalidations: %w", err)
 	}
-	if expected <= state.Head.Int64() && len(batch.Invalidations) < WatchBatchLimit {
-		return WatchBatch{}, fmt.Errorf("%w: invalidation log ends before durable head", ErrCorruptState)
+	if expected != state.Head.Int64()+1 {
+		return WatchBatch{}, newWatchRestart(state, WatchRestartGap)
+	}
+	if after.Int64() > state.Head.Int64() {
+		return WatchBatch{}, ErrFutureCursor
+	}
+	if after.Int64() < state.Floor.Int64()-1 {
+		return WatchBatch{}, &ResyncRequiredError{Head: state.Head, Floor: state.Floor}
 	}
 	return batch, nil
+}
+
+func newWatchRestart(state FactoryState, reason WatchRestartReason) error {
+	return &WatchRestartError{Head: state.Head, Floor: state.Floor, Reason: reason}
 }
 
 func nullStringValue(value sql.NullString) string {

@@ -159,6 +159,23 @@ func (item PublicStateItem) id() PublicStateID {
 	}
 }
 
+func (item PublicStateItem) revision() (Revision, bool) {
+	switch {
+	case item.factory != nil:
+		return item.factory.Revision, true
+	case item.project != nil:
+		return item.project.Revision, true
+	case item.agent != nil:
+		return item.agent.Revision, true
+	case item.task != nil:
+		return item.task.Revision, true
+	case item.humanRequest != nil:
+		return item.humanRequest.Revision, true
+	default:
+		return Revision{}, false
+	}
+}
+
 type PublicStatePageResult struct {
 	Head       EventSequence
 	Kind       PublicStateKind
@@ -170,6 +187,7 @@ type PublicStateEntityResult struct {
 	Head     EventSequence
 	Kind     PublicStateKind
 	EntityID PublicStateID
+	Revision Revision
 	Deleted  bool
 	Item     *PublicStateItem
 }
@@ -470,11 +488,50 @@ func (store *Store) ReadPublicStateEntity(ctx context.Context, kind PublicStateK
 		return PublicStateEntityResult{}, err
 	}
 	if !found {
+		revision, deleted, exists, err := latestPublicStateInvalidation(ctx, tx.connection, kind, id)
+		if err != nil {
+			return PublicStateEntityResult{}, err
+		}
+		if !exists {
+			return PublicStateEntityResult{}, ErrNotFound
+		}
+		if kind != PublicStateHumanRequest || !deleted {
+			return PublicStateEntityResult{}, fmt.Errorf("%w: public state row disagrees with its latest invalidation", ErrCorruptState)
+		}
+		request, requestFound, err := humanRequestByID(ctx, tx.connection, HumanRequestID{id.dynamic})
+		if err != nil {
+			return PublicStateEntityResult{}, err
+		}
+		if !requestFound || request.Revision != revision || request.Status != HumanRequestResolved && request.Status != HumanRequestStale {
+			return PublicStateEntityResult{}, fmt.Errorf("%w: public state tombstone disagrees with durable request", ErrCorruptState)
+		}
+		result.Revision = revision
 		result.Deleted = true
 		return result, nil
 	}
+	revision, ok := item.revision()
+	if !ok || revision.Int64() < 1 {
+		return PublicStateEntityResult{}, fmt.Errorf("%w: public state item has no revision", ErrCorruptState)
+	}
+	result.Revision = revision
 	result.Item = &item
 	return result, nil
+}
+
+func latestPublicStateInvalidation(ctx context.Context, connection *sql.Conn, kind PublicStateKind, id PublicStateID) (Revision, bool, bool, error) {
+	var revision, deleted int64
+	err := connection.QueryRowContext(ctx, `SELECT revision, deleted FROM invalidations WHERE entity_kind = ? AND entity_id = ? ORDER BY sequence DESC LIMIT 1`, kind.String(), id.Bytes()).Scan(&revision, &deleted)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Revision{}, false, false, nil
+	}
+	if err != nil {
+		return Revision{}, false, false, err
+	}
+	parsed, err := NewRevision(revision)
+	if err != nil || deleted != 0 && deleted != 1 {
+		return Revision{}, false, false, fmt.Errorf("%w: invalid public state invalidation", ErrCorruptState)
+	}
+	return parsed, deleted == 1, true, nil
 }
 
 func readPublicStateEntityItem(ctx context.Context, connection *sql.Conn, kind PublicStateKind, id PublicStateID) (PublicStateItem, bool, error) {

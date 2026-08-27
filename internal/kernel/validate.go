@@ -9,44 +9,55 @@ import (
 )
 
 func validateDurableControls(ctx context.Context, connection *sql.Conn) error {
-	state, err := factoryState(ctx, connection)
+	state, err := validateDurableEntityControls(ctx, connection)
 	if err != nil {
 		return err
 	}
+	return validateInvalidations(ctx, connection, state)
+}
+
+// validateDurableEntityControls validates every durable authority row except
+// invalidations. WatchAfter validates the invalidation log itself so it can
+// distinguish a finite browser restart from malformed durable values.
+func validateDurableEntityControls(ctx context.Context, connection *sql.Conn) (FactoryState, error) {
+	state, err := factoryState(ctx, connection)
+	if err != nil {
+		return FactoryState{}, err
+	}
 	if err := validateProjects(ctx, connection); err != nil {
-		return err
+		return FactoryState{}, err
 	}
 	if err := validateAgents(ctx, connection); err != nil {
-		return err
+		return FactoryState{}, err
 	}
 	if err := validateTasks(ctx, connection); err != nil {
-		return err
+		return FactoryState{}, err
 	}
 	if err := validateChanges(ctx, connection); err != nil {
-		return err
+		return FactoryState{}, err
 	}
 	if err := validateRuns(ctx, connection); err != nil {
-		return err
+		return FactoryState{}, err
 	}
 	if err := validateResources(ctx, connection); err != nil {
-		return err
+		return FactoryState{}, err
 	}
 	if err := validateOwnershipLocators(ctx, connection); err != nil {
-		return err
+		return FactoryState{}, err
 	}
 	if err := validateRunRelationships(ctx, connection); err != nil {
-		return err
+		return FactoryState{}, err
 	}
 	if err := validateBrowserAuthority(ctx, connection); err != nil {
-		return err
+		return FactoryState{}, err
 	}
 	if err := validateHumanRequests(ctx, connection); err != nil {
-		return err
+		return FactoryState{}, err
 	}
 	if err := validateResourceIdentityCollisions(ctx, connection); err != nil {
-		return err
+		return FactoryState{}, err
 	}
-	return validateInvalidations(ctx, connection, state)
+	return state, nil
 }
 
 func validateHumanRequests(ctx context.Context, connection *sql.Conn) error {
