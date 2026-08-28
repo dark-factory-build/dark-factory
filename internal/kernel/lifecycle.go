@@ -309,7 +309,7 @@ func (store *Store) ActivateRun(ctx context.Context, runID RunID, sessionID Term
 	if err != nil {
 		return Run{}, tx.Rollback(err)
 	}
-	if run.Role == RoleWorker && relationships.change.Phase != ChangeAvailable {
+	if run.Role == RoleWorker && !relationships.changeOwnership.available() {
 		return Run{}, tx.Rollback(ErrConflict)
 	}
 	resources := relationships.resources
@@ -1037,6 +1037,18 @@ func (store *Store) finalizeRun(ctx context.Context, runID RunID, expected Revis
 	default:
 		return Run{}, tx.Rollback(ErrCorruptState)
 	}
+	var settlingChange *Change
+	changeRevision := int64(0)
+	if settlement != nil {
+		settlingChange = relationships.change
+		if settlingChange == nil || run.ChangeID == nil || settlingChange.Revision != settlement.expected || at.Int64() < settlingChange.UpdatedAt.Int64() || !relationships.changeOwnership.canSettleAs(settlement.phase) {
+			return Run{}, tx.Rollback(ErrConflict)
+		}
+		if settlement.phase == ChangeRetained && (settlement.availability == nil || settlingChange.TreeIdentity == nil || *settlingChange.TreeIdentity != settlement.availability.tree || run.RunningAt == nil && !changeAvailabilityMatches(*settlingChange, *settlement.availability)) {
+			return Run{}, tx.Rollback(ErrConflict)
+		}
+		changeRevision = settlingChange.Revision.Int64() + 1
+	}
 	updated, err := tx.connection.ExecContext(ctx, `UPDATE tasks SET status = ?, blocked_reason = ?, result = ?, completed_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND project_id = ? AND incarnation_id = ? AND work_revision = ? AND status = 'running' AND revision = ?`,
 		taskStatus, blocked, result, completed, at.Int64(), task.ID.Bytes(), run.ProjectID.Bytes(), run.TaskIncarnationID.Bytes(), run.AdmittedTaskWorkRevision.Int64(), task.Revision.Int64())
 	if err := requireOneRow(updated, err); err != nil {
@@ -1047,23 +1059,12 @@ func (store *Store) finalizeRun(ctx context.Context, runID RunID, expected Revis
 	if err := requireOneRow(updated, err); err != nil {
 		return Run{}, tx.Rollback(err)
 	}
-	changeRevision := int64(0)
 	if settlement != nil {
-		change := relationships.change
-		if change == nil || run.ChangeID == nil || run.AdmittedChangeRevision == nil || change.ID != *run.ChangeID || change.ProjectID != run.ProjectID || change.TaskID != run.TaskID || change.TaskIncarnationID != run.TaskIncarnationID || change.Revision != settlement.expected || settlement.expected.Int64() < run.AdmittedChangeRevision.Int64() || at.Int64() < change.UpdatedAt.Int64() {
-			return Run{}, tx.Rollback(ErrConflict)
-		}
-		changeRevision = change.Revision.Int64() + 1
+		change := settlingChange
 		switch settlement.phase {
 		case ChangeRetained:
-			if change.Phase != ChangeAvailable || settlement.availability == nil || change.TreeIdentity == nil || *change.TreeIdentity != settlement.availability.tree || change.Revision.Int64() != run.AdmittedChangeRevision.Int64() && change.Revision.Int64() != run.AdmittedChangeRevision.Int64()+2 {
-				return Run{}, tx.Rollback(ErrConflict)
-			}
 			updated, err = tx.connection.ExecContext(ctx, `UPDATE changes SET phase = 'retained', tree_digest = ?, entry_count = ?, total_bytes = ?, settled_run_id = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase = 'available' AND revision = ? AND settled_run_id IS NULL AND tree_dev = ? AND tree_inode = ?`, settlement.availability.commitment.Bytes(), int64(settlement.availability.entries), int64(settlement.availability.bytes), run.ID.Bytes(), at.Int64(), change.ID.Bytes(), settlement.expected.Int64(), settlement.availability.tree.device, settlement.availability.tree.inode)
 		case ChangeAbandoned:
-			if change.Phase == ChangeReserved && change.Revision != *run.AdmittedChangeRevision || change.Phase == ChangePrepared && change.Revision.Int64() != run.AdmittedChangeRevision.Int64()+1 || change.Phase != ChangeReserved && change.Phase != ChangePrepared {
-				return Run{}, tx.Rollback(ErrConflict)
-			}
 			updated, err = tx.connection.ExecContext(ctx, `UPDATE changes SET phase = 'abandoned', object_format = NULL, base_commit = NULL, tree_digest = NULL, entry_count = NULL, total_bytes = NULL, tree_dev = NULL, tree_inode = NULL, prepared_at_ms = NULL, available_at_ms = NULL, settled_run_id = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase IN ('reserved', 'prepared') AND revision = ? AND settled_run_id IS NULL`, run.ID.Bytes(), at.Int64(), change.ID.Bytes(), settlement.expected.Int64())
 		default:
 			return Run{}, tx.Rollback(ErrCorruptState)

@@ -226,31 +226,17 @@ func (store *Store) advanceChange(ctx context.Context, id ChangeID, expected Rev
 }
 
 func requireChangeMutationOwner(ctx context.Context, connection *sql.Conn, change Change, expected Revision, at UnixMillis) error {
-	rows, err := connection.QueryContext(ctx, `SELECT phase, running_at_ms, updated_at_ms, admitted_change_revision FROM runs WHERE change_id = ? AND phase <> 'terminal'`, change.ID.Bytes())
+	run, found, err := scanRun(connection.QueryRowContext(ctx, `SELECT `+runColumns+` FROM runs WHERE change_id = ? AND phase <> 'terminal'`, change.ID.Bytes()))
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
-	owners := 0
-	for rows.Next() {
-		var phase string
-		var runningAt, admittedRevision sql.NullInt64
-		var updatedAt int64
-		if err := rows.Scan(&phase, &runningAt, &updatedAt, &admittedRevision); err != nil {
-			return err
-		}
-		owners++
-		if phase != RunAdmitted.String() || runningAt.Valid || !admittedRevision.Valid || admittedRevision.Int64 > expected.Int64() || at.Int64() < updatedAt {
-			return ErrConflict
-		}
+	if !found {
+		return ErrConflict
 	}
-	if err := rows.Err(); err != nil {
+	if _, err := classifyWorkerChangeOwnership(ctx, connection, run, change); err != nil {
 		return err
 	}
-	if owners > 1 {
-		return ErrCorruptState
-	}
-	if owners != 1 {
+	if run.Phase != RunAdmitted || run.RunningAt != nil || change.Revision != expected || at.Int64() < run.UpdatedAt.Int64() {
 		return ErrConflict
 	}
 	return nil

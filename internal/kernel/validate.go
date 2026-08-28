@@ -328,10 +328,129 @@ func validateRunRelationships(ctx context.Context, connection *sql.Conn) error {
 }
 
 type runRelationships struct {
-	task      Task
-	change    *Change
-	resources []Resource
-	session   TerminalSession
+	task            Task
+	change          *Change
+	changeOwnership workerChangeOwnership
+	resources       []Resource
+	session         TerminalSession
+}
+
+type workerChangeOwnership uint8
+
+const (
+	workerChangeReserved workerChangeOwnership = iota + 1
+	workerChangePrepared
+	workerChangeAvailableRetained
+	workerChangeAvailableFresh
+	workerChangeSettledRetainedRetry
+	workerChangeSettledRetainedFresh
+	workerChangeSettledAbandonedReserved
+	workerChangeSettledAbandonedPrepared
+)
+
+func (ownership workerChangeOwnership) available() bool {
+	return ownership == workerChangeAvailableRetained || ownership == workerChangeAvailableFresh
+}
+
+func (ownership workerChangeOwnership) settled() bool {
+	switch ownership {
+	case workerChangeSettledRetainedRetry, workerChangeSettledRetainedFresh, workerChangeSettledAbandonedReserved, workerChangeSettledAbandonedPrepared:
+		return true
+	default:
+		return false
+	}
+}
+
+func (ownership workerChangeOwnership) canSettleAs(phase ChangePhase) bool {
+	switch phase {
+	case ChangeRetained:
+		return ownership.available()
+	case ChangeAbandoned:
+		return ownership == workerChangeReserved || ownership == workerChangePrepared
+	default:
+		return false
+	}
+}
+
+func classifyWorkerChangeOwnership(ctx context.Context, connection *sql.Conn, run Run, change Change) (workerChangeOwnership, error) {
+	if run.Role != RoleWorker || run.ChangeID == nil || run.AdmittedChangeRevision == nil ||
+		change.ID != *run.ChangeID || change.ProjectID != run.ProjectID || change.TaskID != run.TaskID || change.TaskIncarnationID != run.TaskIncarnationID {
+		return 0, fmt.Errorf("%w: Change does not match worker run", ErrCorruptState)
+	}
+	admitted := run.AdmittedChangeRevision.Int64()
+	if change.Revision.Int64() < admitted {
+		return 0, fmt.Errorf("%w: Change predates worker admission", ErrCorruptState)
+	}
+	delta := change.Revision.Int64() - admitted
+	retainedRetry, err := retainedRetryProvenance(ctx, connection, run)
+	if err != nil {
+		return 0, err
+	}
+	var ownership workerChangeOwnership
+	switch {
+	case change.Phase == ChangeReserved && delta == 0 && !retainedRetry:
+		ownership = workerChangeReserved
+	case change.Phase == ChangePrepared && delta == 1 && !retainedRetry:
+		ownership = workerChangePrepared
+	case change.Phase == ChangeAvailable && delta == 0 && retainedRetry:
+		ownership = workerChangeAvailableRetained
+	case change.Phase == ChangeAvailable && delta == 2 && !retainedRetry:
+		ownership = workerChangeAvailableFresh
+	case change.Phase == ChangeRetained && delta == 1 && retainedRetry && change.SettledRunID != nil && *change.SettledRunID == run.ID:
+		ownership = workerChangeSettledRetainedRetry
+	case change.Phase == ChangeRetained && delta == 3 && !retainedRetry && change.SettledRunID != nil && *change.SettledRunID == run.ID:
+		ownership = workerChangeSettledRetainedFresh
+	case change.Phase == ChangeAbandoned && delta == 1 && !retainedRetry && change.SettledRunID != nil && *change.SettledRunID == run.ID:
+		ownership = workerChangeSettledAbandonedReserved
+	case change.Phase == ChangeAbandoned && delta == 2 && !retainedRetry && change.SettledRunID != nil && *change.SettledRunID == run.ID:
+		ownership = workerChangeSettledAbandonedPrepared
+	default:
+		return 0, fmt.Errorf("%w: impossible worker Change revision", ErrCorruptState)
+	}
+	if ownership.settled() {
+		if run.Phase != RunTerminal {
+			return 0, fmt.Errorf("%w: nonterminal worker settled Change", ErrCorruptState)
+		}
+		return ownership, nil
+	}
+	if run.Phase == RunTerminal || change.SettledRunID != nil {
+		return 0, fmt.Errorf("%w: worker Change settlement does not match run", ErrCorruptState)
+	}
+	if run.RunningAt != nil {
+		if !ownership.available() || change.AvailableAt == nil || change.AvailableAt.Int64() > run.RunningAt.Int64() || change.UpdatedAt.Int64() > run.RunningAt.Int64() {
+			return 0, fmt.Errorf("%w: running worker does not own available Change", ErrCorruptState)
+		}
+	}
+	return ownership, nil
+}
+
+// retainedRetryProvenance proves an available-at-A admission by walking the
+// contiguous terminal worker history back to a fresh retained settlement.
+// A +4 gap is the fresh retained base; each later retained retry contributes
+// the exact +2 settle-and-reopen gap.
+func retainedRetryProvenance(ctx context.Context, connection *sql.Conn, run Run) (bool, error) {
+	current := run
+	for current.AdmittedTaskWorkRevision.Int64() > 1 {
+		previous, found, err := scanRun(connection.QueryRowContext(ctx, `SELECT `+runColumns+` FROM runs WHERE task_id = ? AND task_incarnation_id = ? AND admitted_task_work_revision = ?`,
+			current.TaskID.Bytes(), current.TaskIncarnationID.Bytes(), current.AdmittedTaskWorkRevision.Int64()-1))
+		if err != nil {
+			return false, err
+		}
+		if !found || previous.Phase != RunTerminal || previous.Role != RoleWorker || previous.ChangeID == nil || previous.AdmittedChangeRevision == nil ||
+			current.ChangeID == nil || *previous.ChangeID != *current.ChangeID || previous.ProjectID != current.ProjectID || previous.TaskID != current.TaskID || previous.TaskIncarnationID != current.TaskIncarnationID ||
+			previous.TerminalAt == nil || previous.TerminalAt.Int64() > current.AdmittedAt.Int64() || current.AdmittedChangeRevision == nil || current.AdmittedChangeRevision.Int64() <= previous.AdmittedChangeRevision.Int64() {
+			return false, nil
+		}
+		switch current.AdmittedChangeRevision.Int64() - previous.AdmittedChangeRevision.Int64() {
+		case 4:
+			return true, nil
+		case 2:
+			current = previous
+		default:
+			return false, nil
+		}
+	}
+	return false, nil
 }
 
 func loadRunRelationships(ctx context.Context, connection *sql.Conn, run Run) (runRelationships, error) {
@@ -357,6 +476,7 @@ func loadRunRelationships(ctx context.Context, connection *sql.Conn, run Run) (r
 	}
 
 	var change *Change
+	var changeOwnership workerChangeOwnership
 	if run.ChangeID != nil {
 		value, found, err := changeByID(ctx, connection, *run.ChangeID)
 		if err != nil || !found {
@@ -365,17 +485,29 @@ func loadRunRelationships(ctx context.Context, connection *sql.Conn, run Run) (r
 			}
 			return runRelationships{}, err
 		}
-		if run.Role != RoleWorker || run.AdmittedChangeRevision == nil || value.Revision.Int64() < run.AdmittedChangeRevision.Int64() || value.ProjectID != run.ProjectID || value.TaskID != run.TaskID || value.TaskIncarnationID != run.TaskIncarnationID || run.Phase != RunTerminal && run.RunningAt != nil && (value.Phase != ChangeAvailable || value.AvailableAt == nil || value.AvailableAt.Int64() > run.RunningAt.Int64()) {
+		if run.Role != RoleWorker || run.AdmittedChangeRevision == nil || value.ProjectID != run.ProjectID || value.TaskID != run.TaskID || value.TaskIncarnationID != run.TaskIncarnationID {
 			return runRelationships{}, fmt.Errorf("%w: Change does not match run", ErrCorruptState)
 		}
-		if run.Phase == RunTerminal {
+		if run.Phase != RunTerminal {
+			changeOwnership, err = classifyWorkerChangeOwnership(ctx, connection, run, value)
+			if err != nil || changeOwnership.settled() {
+				if err == nil {
+					err = ErrCorruptState
+				}
+				return runRelationships{}, err
+			}
+		} else {
 			var later int64
 			if err := connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs WHERE task_id = ? AND task_incarnation_id = ? AND admitted_task_work_revision > ?`, run.TaskID.Bytes(), run.TaskIncarnationID.Bytes(), run.AdmittedTaskWorkRevision.Int64()).Scan(&later); err != nil {
 				return runRelationships{}, err
 			}
 			if later == 0 {
-				if value.SettledRunID == nil || *value.SettledRunID != run.ID || value.Phase != ChangeRetained && value.Phase != ChangeAbandoned {
-					return runRelationships{}, fmt.Errorf("%w: terminal worker did not settle Change", ErrCorruptState)
+				changeOwnership, err = classifyWorkerChangeOwnership(ctx, connection, run, value)
+				if err != nil || !changeOwnership.settled() {
+					if err == nil {
+						err = ErrCorruptState
+					}
+					return runRelationships{}, err
 				}
 				if run.TerminalAt == nil || value.UpdatedAt.Int64() > run.TerminalAt.Int64() {
 					return runRelationships{}, fmt.Errorf("%w: terminal run predates Change settlement", ErrCorruptState)
@@ -443,7 +575,7 @@ func loadRunRelationships(ctx context.Context, connection *sql.Conn, run Run) (r
 	if err := validateRunResourceChronology(run, change, resources); err != nil {
 		return runRelationships{}, err
 	}
-	return runRelationships{task: task, change: change, resources: resources, session: session}, nil
+	return runRelationships{task: task, change: change, changeOwnership: changeOwnership, resources: resources, session: session}, nil
 }
 
 func validateRunTerminalSession(ctx context.Context, connection *sql.Conn, run Run) (TerminalSession, error) {
@@ -873,12 +1005,8 @@ func validateChanges(ctx context.Context, connection *sql.Conn) error {
 			}
 			return err
 		}
-		validDelta := false
-		if run.AdmittedChangeRevision != nil {
-			delta := change.Revision.Int64() - run.AdmittedChangeRevision.Int64()
-			validDelta = change.Phase == ChangeRetained && (delta == 1 || delta == 3) || change.Phase == ChangeAbandoned && (delta == 1 || delta == 2)
-		}
-		if run.Phase != RunTerminal || run.Role != RoleWorker || run.ChangeID == nil || run.AdmittedChangeRevision == nil || *run.ChangeID != change.ID || run.ProjectID != change.ProjectID || run.TaskID != change.TaskID || run.TaskIncarnationID != change.TaskIncarnationID || !validDelta || run.TerminalAt == nil || change.UpdatedAt.Int64() > run.TerminalAt.Int64() {
+		ownership, ownershipErr := classifyWorkerChangeOwnership(ctx, connection, run, change)
+		if run.Phase != RunTerminal || ownershipErr != nil || !ownership.settled() || run.TerminalAt == nil || change.UpdatedAt.Int64() > run.TerminalAt.Int64() {
 			return fmt.Errorf("%w: invalid Change settlement authority", ErrCorruptState)
 		}
 	}
