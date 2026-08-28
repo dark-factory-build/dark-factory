@@ -949,7 +949,10 @@ func TestConnectionDispatchLeaseLinearizesHomeClose(t *testing.T) {
 		}
 		root := filepath.Join(t.TempDir(), "entered-root")
 		connection, client := newReceived(t, listener, socketPath, bearer, root)
-		alias := *connection
+		alias := &Connection{
+			self: connection, connection: connection.connection, protocol: connection.protocol,
+			domain: connection.domain, kind: connection.kind, call: connection.call, state: connection.state,
+		}
 		aliasEntered := false
 		if _, err := alias.Dispatch(func(Call) Reply { aliasEntered = true; return Reply{} }); !errors.Is(err, ErrProtocol) || aliasEntered {
 			t.Fatalf("copied API connection dispatch = %v, entered=%t", err, aliasEntered)
