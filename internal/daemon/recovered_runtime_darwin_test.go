@@ -103,6 +103,118 @@ func TestOpenRecoveredRuntimeAcceptsRootBeforeTokenPublicationWithoutMutation(t 
 	assertFDCensus(t, beforeFDs)
 }
 
+func TestOpenRecoveredRuntimeAcceptsConsumedConfigAtActivatedAndTerminalCuts(t *testing.T) {
+	tests := []struct {
+		name         string
+		residue      []string
+		wantTerminal bool
+	}{
+		{name: "activated", residue: []string{runner.OuterActivationMarkerName, runner.InnerActivationMarkerName}},
+		{name: "terminal", residue: []string{runner.OuterActivationMarkerName, runner.InnerActivationMarkerName, runner.TerminalSpoolName}, wantTerminal: true},
+		{name: "terminal scratch", residue: []string{runner.OuterActivationMarkerName, runner.InnerActivationMarkerName, runner.TerminalScratchName}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			beforeFDs := openFDCensus(t)
+			parent, path, identity, token, _, terminal := populatedRecoveredRuntime(t, runtimeTestName)
+			if err := os.Remove(filepath.Join(path, changeworker.ConfigName)); err != nil {
+				t.Fatal(err)
+			}
+			configureRecoveredResidue(t, path, test.residue, terminal)
+			before := snapshotRuntimeGraph(t, path)
+			recovered, err := OpenRecoveredRuntime(context.Background(), parent, runtimeTestName, identity)
+			if err != nil {
+				t.Fatal(err)
+			}
+			digest := attemptDigestForToken(t, token)
+			evidence, err := recovered.InspectEvidence(context.Background(), digest, nil, false)
+			if err != nil || !evidence.AttemptToken || evidence.WorkerConfig || (evidence.Terminal != nil) != test.wantTerminal {
+				t.Fatalf("consumed-config evidence = %+v, %v", evidence, err)
+			}
+			if _, err := recovered.InspectEvidence(context.Background(), digest, nil, true); !errors.Is(err, errInvalidContract) {
+				t.Fatalf("missing config accepted as bound runner: %v", err)
+			}
+			if err := recovered.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if after := snapshotRuntimeGraph(t, path); after != before {
+				t.Fatalf("recovery mutated consumed-config graph\nbefore:\n%s\nafter:\n%s", before, after)
+			}
+			if _, err := os.Lstat(filepath.Join(path, changeworker.ConfigName)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("recovery recreated worker config: %v", err)
+			}
+			if err := parent.Close(); err != nil {
+				t.Fatal(err)
+			}
+			assertFDCensus(t, beforeFDs)
+		})
+	}
+}
+
+func TestOpenRecoveredRuntimeRejectsConsumedConfigDuringGateScratch(t *testing.T) {
+	beforeFDs := openFDCensus(t)
+	parent, path, identity, _, _, terminal := populatedRecoveredRuntime(t, runtimeTestName)
+	if err := os.Remove(filepath.Join(path, changeworker.ConfigName)); err != nil {
+		t.Fatal(err)
+	}
+	configureRecoveredResidue(t, path, []string{runner.OuterActivationMarkerName, runner.GateConfigScratchName}, terminal)
+	before := snapshotRuntimeGraph(t, path)
+	if recovered, err := OpenRecoveredRuntime(context.Background(), parent, runtimeTestName, identity); !errors.Is(err, errInvalidContract) || recovered != nil {
+		t.Fatalf("config-free gate scratch accepted: recovered=%+v err=%v", recovered, err)
+	}
+	if after := snapshotRuntimeGraph(t, path); after != before {
+		t.Fatalf("rejected config-free gate scratch mutated graph\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+	if _, err := os.Lstat(filepath.Join(path, changeworker.ConfigName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rejected recovery recreated worker config: %v", err)
+	}
+	if err := parent.Close(); err != nil {
+		t.Fatal(err)
+	}
+	assertFDCensus(t, beforeFDs)
+}
+
+func TestRecoveredRuntimeRejectsReplacedWorkerConfig(t *testing.T) {
+	beforeFDs := openFDCensus(t)
+	parent, path, identity, token, config, terminal := populatedRecoveredRuntime(t, runtimeTestName)
+	if err := os.Remove(filepath.Join(path, runner.TerminalSpoolName)); err != nil {
+		t.Fatal(err)
+	}
+	configureRecoveredResidue(t, path, []string{runner.OuterActivationMarkerName, runner.InnerActivationMarkerName}, terminal)
+	configPath := filepath.Join(path, changeworker.ConfigName)
+	replacementPath := path + ".config.old"
+	if err := os.Rename(configPath, replacementPath); err != nil {
+		t.Fatal(err)
+	}
+	replacement := config
+	replacement.RepositoryRoot += ".replacement"
+	encoded, err := changeworker.EncodeConfig(replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := OpenRecoveredRuntime(context.Background(), parent, runtimeTestName, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := attemptDigestForToken(t, token)
+	if _, err := recovered.InspectEvidence(context.Background(), digest, &config, true); !errors.Is(err, errInvalidContract) {
+		t.Fatalf("replaced worker config accepted: %v", err)
+	}
+	if err := recovered.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(replacementPath); err != nil {
+		t.Fatalf("original worker config was not retained for inspection: %v", err)
+	}
+	if err := parent.Close(); err != nil {
+		t.Fatal(err)
+	}
+	assertFDCensus(t, beforeFDs)
+}
+
 func TestOpenRecoveredRuntimeRejectsMalformedCensusAndReplacement(t *testing.T) {
 	mutations := map[string]func(*testing.T, string){
 		"missing home": func(t *testing.T, path string) {
