@@ -97,7 +97,7 @@ func runAttemptWorkerHelper(args []string) error {
 			initialInput = []byte("one-startup\n")
 		}
 		provider = ExecSpec{Target: "/bin/sh", Args: []string{"-c", script}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: providerCwd}
-	case "binary", "seam", "lifetime", "lease-seam", "cwd", "cwd-seam", "cwd-unrelated", "cwd-file", "cwd-closed", "cwd-reused", "cwd-mode", "cwd-inherited", "cwd-inherited-19", "cwd-inherited-20", "cwd-inherited-30":
+	case "binary", "seam", "lifetime", "lease-seam", "cwd", "cwd-seam", "cwd-unrelated", "cwd-file", "cwd-closed", "cwd-reused", "cwd-mode", "cwd-inherited", "cwd-inherited-11", "cwd-inherited-19", "cwd-inherited-20", "cwd-inherited-30":
 		if len(args) != 3 {
 			return errors.New("attempt worker: missing binary target")
 		}
@@ -133,7 +133,6 @@ func runAttemptWorkerHelper(args []string) error {
 	if err != nil {
 		return err
 	}
-	inheritedFD := 0
 	if strings.HasPrefix(mode, "cwd-inherited") {
 		fd := 20
 		if mode != "cwd-inherited" {
@@ -144,7 +143,6 @@ func runAttemptWorkerHelper(args []string) error {
 			}
 			fd = parsed
 		}
-		inheritedFD = fd
 		if err := unix.Dup2(int(cwd.Fd()), fd); err != nil {
 			cwd.Close()
 			return err
@@ -202,7 +200,7 @@ func runAttemptWorkerHelper(args []string) error {
 		return err
 	}
 	if strings.HasPrefix(mode, "cwd") {
-		if err := writeCwdDescriptorManifest(root, inheritedFD); err != nil {
+		if err := writeCwdDescriptorManifest(root); err != nil {
 			cwd.Close()
 			return err
 		}
@@ -1337,6 +1335,27 @@ func TestCurrentExecRejectsExactInheritedDescriptor(t *testing.T) {
 				test.check(t, f.root)
 			}
 		})
+	}
+}
+
+func TestCurrentExecRejectsUnanticipatedInheritedDescriptor(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newAttemptFixture(t, "cwd-inherited-11", executable)
+	f.activateOuter()
+	f.advanceToProvider()
+	if err := f.controller.Release(StageProvider); err != nil {
+		t.Fatal(err)
+	}
+	record := f.finishAndAck(false)
+	if record.Terminal.Exit.Code != 94 {
+		t.Fatalf("unanticipated descriptor terminal=%+v output=%q", record.Terminal, f.output())
+	}
+	diagnostic, err := os.ReadFile(filepath.Join(f.root, "cwd.error"))
+	if err != nil || !strings.Contains(string(diagnostic), "cwd provider inherited fd 11") {
+		t.Fatalf("unanticipated descriptor diagnostic=%q err=%v", diagnostic, err)
 	}
 }
 
