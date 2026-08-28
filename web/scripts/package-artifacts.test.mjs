@@ -5,7 +5,7 @@ import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readF
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { toolTreeDigest } from "./package-artifacts.mjs";
+import { inspectExecutable, toolTreeDigest } from "./package-artifacts.mjs";
 
 const webRoot = new URL("..", import.meta.url).pathname.slice(0, -1);
 const script = join(webRoot, "scripts", "package-artifacts.mjs");
@@ -87,6 +87,7 @@ test("public artifacts bind clean HEAD, protocol, exact dependencies, and bytes"
       mode: "0755",
       sha512: "f7c721e9624aad59ec244739017b1354cf21a90cc86e32314419c57271d90d95af574885d3c36e2da34ff928032eb9e5954cf2044422d022b4239b845b06c323",
     });
+    assert.equal(Object.hasOwn(packed.buildTools, "corepack"), false);
     const reviewed = JSON.parse(readFileSync(join(webRoot, "toolchain-integrity.json")));
     assert.equal(packed.buildTools.pnpmTreeSha512, reviewed.pnpm.treeSha512);
     assert.equal(packed.buildTools.typescriptTreeSha512, reviewed.typescript.treeSha512);
@@ -373,6 +374,26 @@ test("pack rejects a changed reviewed digest or lockfile integrity", () => {
   } finally {
     writeFileSync(integrityPath, integrityText);
     writeFileSync(lockfilePath, lockfileText);
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("reviewed executable bytes reject same-version Node and tar mutations", () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), "dark-factory-executables-"));
+  const reviewed = JSON.parse(readFileSync(join(webRoot, "toolchain-integrity.json")));
+  try {
+    const nodeCopy = join(tempRoot, "node");
+    cpSync(process.execPath, nodeCopy);
+    assert.doesNotThrow(() => inspectExecutable(nodeCopy, "Node copy", reviewed.node));
+    writeFileSync(nodeCopy, Buffer.concat([readFileSync(nodeCopy), Buffer.from("mutation")]));
+    assert.throws(() => inspectExecutable(nodeCopy, "Node copy", reviewed.node), /content differs/);
+
+    const tarCopy = join(tempRoot, "tar");
+    cpSync("/usr/bin/tar", tarCopy);
+    assert.doesNotThrow(() => inspectExecutable(tarCopy, "tar copy", reviewed.tar));
+    writeFileSync(tarCopy, Buffer.concat([readFileSync(tarCopy), Buffer.from("mutation")]));
+    assert.throws(() => inspectExecutable(tarCopy, "tar copy", reviewed.tar), /content differs/);
+  } finally {
     rmSync(tempRoot, { recursive: true, force: true });
   }
 });

@@ -737,6 +737,6 @@ if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToP
   }
 }
 
-// Exported only for focused tests of the content commitment; pack/verify always
-// derive and validate their production tool roots internally.
-export { toolTreeDigest };
+// Test-only exports; pack/verify always derive and validate their production
+// tool roots internally and never accept these as caller input.
+export { inspectExecutable, toolTreeDigest };
