@@ -1,6 +1,12 @@
 #!/bin/sh
 set -eu
 
+go_gate_ci_web_proof() {
+    echo "go-ci: TypeScript client proof"
+    go_gate_web_test_stage
+}
+
+go_gate_ci_main() {
 script_dir=$(CDPATH= cd -- "$(/usr/bin/dirname "$0")" && pwd -P)
 repository_root=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
 CDPATH= cd -- "$repository_root"
@@ -40,13 +46,7 @@ go_gate_stage 1200 "$go_gate_go" test -timeout=20m -count=1 -p 1 ./...
 echo "go-ci: serial full Go race tests"
 go_gate_stage 1800 "$go_gate_go" test -race -timeout=30m -count=1 -p 1 ./...
 
-echo "go-ci: TypeScript client proof"
-(
-    cd "$repository_root/web" || exit
-    export COREPACK_ENABLE_NETWORK=0
-    go_gate_stage 600 "$go_gate_corepack" pnpm --offline run typecheck || exit
-    go_gate_stage 600 "$go_gate_corepack" pnpm --offline run test
-)
+go_gate_ci_web_proof || exit $?
 echo "go-ci: serial real Go/TypeScript browser PTY E2E"
 go_gate_stage 600 "$script_dir/go-browser-e2e.sh"
 echo "go-ci: serial real Go/TypeScript browser PTY race E2E"
@@ -55,3 +55,8 @@ echo "go-ci: git diff --check"
 go_gate_stage 120 "$go_gate_git" diff --check
 echo "go-ci: NOTE: final system census remains a cutover-only gate"
 echo "go-ci: PASS"
+}
+
+if [ "${GO_GATE_CI_LIBRARY-0}" -ne 1 ]; then
+    go_gate_ci_main "$@"
+fi

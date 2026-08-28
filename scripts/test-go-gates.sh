@@ -516,6 +516,7 @@ go_gate_environment_cleanup || fail "read-only cleanup failed"
 signal_fixture="$temporary/signal-fixture.sh"
 signal_marker="$temporary/signal-active"
 signal_root_file="$temporary/signal-root"
+signal_root_identity_file="$temporary/signal-root-identity"
 signal_wrapper_file="$temporary/signal-wrapper"
 signal_child_file="$temporary/signal-child"
 signal_joined_file="$temporary/signal-joined"
@@ -536,22 +537,28 @@ EOF
 set -eu
 environment_script=$1
 fast_stage_script=$2
-signal_marker=$3
-signal_root_file=$4
-signal_wrapper_file=$5
-signal_child_file=$6
-signal_joined_file=$7
-signal_cleaned_file=$8
-signal_fake_corepack=$9
-repository_root=${10}
+ci_script=$3
+signal_marker=$4
+signal_root_file=$5
+signal_root_identity_file=$6
+signal_wrapper_file=$7
+signal_child_file=$8
+signal_joined_file=$9
+signal_cleaned_file=${10}
+signal_fake_corepack=${11}
+repository_root=${12}
 . "$environment_script"
 . "$fast_stage_script"
+GO_GATE_CI_LIBRARY=1
+export GO_GATE_CI_LIBRARY
+. "$ci_script"
 go_gate_environment_setup
 go_gate_package_manager_direct=1
 go_gate_corepack=$signal_fake_corepack
 go_gate_corepack_identity=$(go_gate_stat "$signal_fake_corepack")
 go_gate_corepack_hash=$(go_gate_hash "$signal_fake_corepack")
 printf '%s\n' "$go_gate_root" >"$signal_root_file"
+printf '%s\n' "$go_gate_root_identity" >"$signal_root_identity_file"
 printf '%s\n' "$$" >"$signal_wrapper_file"
 go_gate_signal() {
     signal=$1
@@ -569,51 +576,91 @@ trap 'go_gate_signal 15' TERM
 go_gate_web_install
 EOF
 /bin/chmod 700 "$signal_fixture"
-PATH="$signal_fake_bin:$PATH" /bin/sh "$signal_fixture" "$repository_root/scripts/go-gate-environment.sh" "$repository_root/scripts/go-fast-stage.sh" "$signal_marker" "$signal_root_file" "$signal_wrapper_file" "$signal_child_file" "$signal_joined_file" "$signal_cleaned_file" "$signal_fake_corepack" "$signal_repository_root" &
-signal_fixture_pid=$!
-signal_attempts=0
-while [ ! -f "$signal_marker" ] && [ "$signal_attempts" -lt 100 ]; do
-    /bin/sleep 0.01
-    signal_attempts=$((signal_attempts + 1))
-done
-[ -f "$signal_marker" ] || fail "signal fixture did not start its stage"
-signal_wrapper_pid=$(/bin/cat "$signal_wrapper_file")
-signal_child_record=$(/bin/cat "$signal_child_file")
-signal_child_pid=$(/usr/bin/awk '{print $1}' <<EOF
-$signal_child_record
-EOF
-)
-signal_child_pgid=$(/usr/bin/awk '{print $2}' <<EOF
-$signal_child_record
-EOF
-)
-[ "$signal_wrapper_pid" = "$signal_fixture_pid" ] || fail "signal fixture wrapper identity changed"
-[ -n "$signal_child_pid" ] && [ "$signal_child_pid" = "$signal_child_pgid" ] || fail "signal fixture child group identity changed"
-/bin/kill -TERM "$signal_fixture_pid"
-signal_join_attempts=0
-while /bin/kill -0 "$signal_fixture_pid" 2>/dev/null; do
-    signal_join_attempts=$((signal_join_attempts + 1))
-    if [ "$signal_join_attempts" -ge 100 ]; then
+
+run_signal_fixture() {
+    signal_ci_script=$1
+    /bin/rm -f "$signal_marker" "$signal_root_file" "$signal_root_identity_file" \
+        "$signal_wrapper_file" "$signal_child_file" "$signal_joined_file" "$signal_cleaned_file"
+    PATH="$signal_fake_bin:$PATH" /bin/sh "$signal_fixture" \
+        "$repository_root/scripts/go-gate-environment.sh" \
+        "$repository_root/scripts/go-fast-stage.sh" "$signal_ci_script" \
+        "$signal_marker" "$signal_root_file" "$signal_root_identity_file" \
+        "$signal_wrapper_file" "$signal_child_file" "$signal_joined_file" \
+        "$signal_cleaned_file" "$signal_fake_corepack" "$signal_repository_root" &
+    signal_fixture_pid=$!
+    signal_attempts=0
+    while [ ! -f "$signal_marker" ] && [ "$signal_attempts" -lt 100 ]; do
+        /bin/sleep 0.01
+        signal_attempts=$((signal_attempts + 1))
+    done
+    if [ ! -f "$signal_marker" ]; then
         /bin/kill -KILL "$signal_fixture_pid" 2>/dev/null || true
-        break
+        wait "$signal_fixture_pid" 2>/dev/null || true
+        return 1
     fi
-    /bin/sleep 0.01
-done
-if wait "$signal_fixture_pid"; then signal_status=0; else signal_status=$?; fi
-signal_survivor=0
-if /bin/kill -0 "$signal_child_pid" 2>/dev/null; then
-    signal_survivor=1
-    /bin/kill -KILL "$signal_child_pid" 2>/dev/null || true
-fi
-if /bin/kill -0 -"$signal_child_pgid" 2>/dev/null; then
-    signal_survivor=1
-    /bin/kill -KILL -"$signal_child_pgid" 2>/dev/null || true
-fi
+    signal_wrapper_pid=$(/bin/cat "$signal_wrapper_file") || return 1
+    signal_child_record=$(/bin/cat "$signal_child_file") || return 1
+    signal_child_pid=$(/usr/bin/awk '{print $1}' <<EOF
+$signal_child_record
+EOF
+)
+    signal_child_pgid=$(/usr/bin/awk '{print $2}' <<EOF
+$signal_child_record
+EOF
+)
+    [ "$signal_wrapper_pid" = "$signal_fixture_pid" ] || return 1
+    [ -n "$signal_child_pid" ] && [ "$signal_child_pid" = "$signal_child_pgid" ] || return 1
+    /bin/kill -TERM "$signal_fixture_pid"
+    signal_join_attempts=0
+    while /bin/kill -0 "$signal_fixture_pid" 2>/dev/null; do
+        signal_join_attempts=$((signal_join_attempts + 1))
+        if [ "$signal_join_attempts" -ge 100 ]; then
+            /bin/kill -KILL "$signal_fixture_pid" 2>/dev/null || true
+            break
+        fi
+        /bin/sleep 0.01
+    done
+    if wait "$signal_fixture_pid"; then signal_status=0; else signal_status=$?; fi
+    signal_survivor=0
+    if /bin/kill -0 "$signal_child_pid" 2>/dev/null; then
+        signal_survivor=1
+        /bin/kill -KILL "$signal_child_pid" 2>/dev/null || true
+    fi
+    if /bin/kill -0 -"$signal_child_pgid" 2>/dev/null; then
+        signal_survivor=1
+        /bin/kill -KILL -"$signal_child_pgid" 2>/dev/null || true
+    fi
+    signal_root_path=$(/bin/cat "$signal_root_file")
+    signal_root_left=0
+    if [ -e "$signal_root_path" ] || [ -L "$signal_root_path" ]; then signal_root_left=1; fi
+    return 0
+}
+
+run_signal_fixture "$repository_root/scripts/go-ci-owned.sh" || fail "signal fixture did not start its production stage"
 [ "$signal_status" -eq 143 ] || fail "TERM fixture returned $signal_status (survivor=$signal_survivor)"
 [ -f "$signal_joined_file" ] || fail "TERM fixture did not join its supervisor (survivor=$signal_survivor)"
 [ -f "$signal_cleaned_file" ] || fail "TERM fixture did not finish cleanup (survivor=$signal_survivor)"
 [ "$signal_survivor" -eq 0 ] || fail "TERM fixture left an exact child or process-group survivor"
-[ ! -e "$(/bin/cat "$signal_root_file")" ] || fail "TERM fixture cleaned up before joining supervisor"
+[ "$signal_root_left" -eq 0 ] || fail "TERM fixture cleaned up before joining supervisor"
+
+# Reintroduce the former process-owning go-ci wrapper. The same readiness and
+# exact-PID cleanup must detect the hidden supervisor rather than accepting it.
+signal_mutated_ci="$temporary/go-ci-owned-nested-mutation.sh"
+/usr/bin/sed 's/^    go_gate_web_test_stage$/    ( go_gate_web_test_stage )/' \
+    "$repository_root/scripts/go-ci-owned.sh" >"$signal_mutated_ci"
+/bin/chmod 700 "$signal_mutated_ci"
+run_signal_fixture "$signal_mutated_ci" || fail "nested mutation fixture did not start"
+[ "$signal_survivor" -eq 1 ] || fail "nested go-ci mutation did not leave a detectable survivor"
+signal_mutation_root=$(/bin/cat "$signal_root_file")
+signal_mutation_identity=$(/bin/cat "$signal_root_identity_file")
+case "$signal_mutation_root" in
+    /private/tmp/dark-factory-go.*) ;;
+    *) fail "nested mutation root escaped the exact scratch prefix" ;;
+esac
+[ ! -L "$signal_mutation_root" ] && [ -d "$signal_mutation_root" ] || fail "nested mutation root was replaced"
+[ "$(go_gate_stat "$signal_mutation_root")" = "$signal_mutation_identity" ] || fail "nested mutation root identity changed"
+/bin/rm -rf -- "$signal_mutation_root"
+[ ! -e "$signal_mutation_root" ] || fail "nested mutation safety cleanup retained scratch"
 
 # Exercise the supported helper with the real cached pnpm in a disposable web
 # workspace. A mode-corrupted TypeScript tree must be reconstructed from the
