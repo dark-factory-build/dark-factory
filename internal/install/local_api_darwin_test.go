@@ -5,6 +5,7 @@ package install
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"net"
 	"os"
@@ -93,6 +94,35 @@ func waitForBlockedLocalAPIAccept(t *testing.T, authority *LocalAPIAuthority) {
 		}
 		time.Sleep(time.Millisecond)
 	}
+}
+
+func acceptLocalAPIConnection(t *testing.T, fixture *localAPIFixture) (*LocalAPIConnection, *net.UnixConn) {
+	t.Helper()
+	accepted := make(chan *LocalAPIConnection, 1)
+	acceptErr := make(chan error, 1)
+	go func() {
+		connection, err := fixture.protocol.Accept()
+		if err != nil {
+			acceptErr <- err
+			return
+		}
+		accepted <- connection
+	}()
+	client, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: fixture.socketPath, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case connection := <-accepted:
+		return connection, client
+	case err := <-acceptErr:
+		_ = client.Close()
+		t.Fatal(err)
+	case <-time.After(time.Second):
+		_ = client.Close()
+		t.Fatal("local API connection was not accepted")
+	}
+	return nil, nil
 }
 
 func resetUncertainLocalAPIForCleanup(authority *LocalAPIAuthority, home *OperationalHome, listenerGone bool, socketGone bool) {
@@ -295,6 +325,63 @@ func TestLocalAPIAuthorityBindingMutationsFailClosed(t *testing.T) {
 			fixture.authority.state.mu.Unlock()
 			fixture.close(t)
 		})
+	}
+}
+
+func TestLocalAPIAuthorityRejectsPostOpenZeroPrincipalPermanently(t *testing.T) {
+	parent := installTempDir(t)
+	homePath := filepath.Join(parent, "home")
+	if _, err := Init(context.Background(), homePath); err != nil {
+		t.Fatal(err)
+	}
+	tokenPath := filepath.Join(homePath, tokenName)
+	original, err := os.ReadFile(tokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, err := OpenOperationalHome(context.Background(), homePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zero := make([]byte, operatorTokenBytes)
+	if err := os.WriteFile(tokenPath, zero, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	authority, openErr := home.OpenLocalAPI(context.Background())
+	if authority == nil || !errors.Is(openErr, ErrUncertain) || authority.state.poisonErr == nil {
+		t.Fatalf("post-open zero principal = %v, %v", authority, openErr)
+	}
+	if protocol, err := authority.ClaimProtocol(); protocol != nil || !errors.Is(err, ErrUncertain) {
+		t.Fatalf("zero principal protocol claim = %v, %v", protocol, err)
+	}
+	if authority.state.checkOperator(zero) || !errors.Is(authority.state.verify(), ErrUncertain) {
+		t.Fatal("zero principal retained operator or attempt authority")
+	}
+	if retry, err := home.OpenLocalAPI(context.Background()); retry != nil || !errors.Is(err, ErrBusy) {
+		t.Fatalf("zero principal activation retry = %v, %v", retry, err)
+	}
+	if err := os.WriteFile(tokenPath, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if authority.state.checkOperator(original) || !errors.Is(authority.state.verify(), ErrUncertain) {
+		t.Fatal("restoring a zero principal revived poisoned authority")
+	}
+	first := home.Close()
+	if !errors.Is(first, ErrUncertain) || home.Close() != first {
+		t.Fatalf("zero principal close result was not stable: %v", first)
+	}
+	if candidate, err := OpenOperationalHome(context.Background(), homePath); candidate != nil || !errors.Is(err, ErrBusy) {
+		if candidate != nil {
+			_ = candidate.Close()
+		}
+		t.Fatalf("zero principal uncertainty released home lease = %v, %v", candidate, err)
+	}
+	authority.state.mu.Lock()
+	authority.state.digest = sha256.Sum256(original)
+	authority.state.mu.Unlock()
+	resetUncertainLocalAPIForCleanup(authority, home, true, true)
+	if err := home.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -1032,6 +1119,90 @@ func TestLocalAPIAuthorityCloseJoinsAcceptAndConnectionsWithoutHomeMutex(t *test
 	_ = client.Close()
 }
 
+func TestOperationalHomeCloseQuarantinesUncertainConnectionAndClosesStore(t *testing.T) {
+	fixture := newLocalAPIFixture(t, 'U')
+	store, err := fixture.home.OpenStore(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, client := acceptLocalAPIConnection(t, fixture)
+	lease, err := fixture.protocol.BeginDispatch()
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalClose := localAPICloseConnection
+	localAPICloseConnection = func(*net.UnixConn) error { return unix.EIO }
+	closed := make(chan error, 1)
+	go func() { closed <- fixture.home.Close() }()
+
+	quarantined := false
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		fixture.authority.state.mu.Lock()
+		quarantined = len(fixture.authority.state.connections) == 0 && len(fixture.authority.state.quarantined) == 1
+		fixture.authority.state.mu.Unlock()
+		if quarantined {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if !quarantined {
+		localAPICloseConnection = originalClose
+		_ = fixture.authority.state.closeExactConnection(server, true)
+		_ = lease.Close()
+		<-closed
+		t.Fatal("uncertain connection close remained in the active join census")
+	}
+	localAPICloseConnection = originalClose
+	if next, err := fixture.protocol.BeginDispatch(); next != nil || !errors.Is(err, ErrClosed) {
+		t.Fatalf("dispatch after home close began = %v, %v", next, err)
+	}
+	if _, err := store.Factory(context.Background()); err != nil {
+		t.Fatalf("entered dispatch lost Store before release: %v", err)
+	}
+	select {
+	case err := <-closed:
+		t.Fatalf("home close passed entered dispatch: %v", err)
+	case <-time.After(30 * time.Millisecond):
+	}
+	if err := lease.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var first error
+	select {
+	case first = <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("home close waited for a quarantined connection owner")
+	}
+	if !errors.Is(first, ErrUncertain) || fixture.home.Close() != first {
+		t.Fatalf("uncertain connection home result was not stable: %v", first)
+	}
+	if _, err := store.Factory(context.Background()); !errors.Is(err, kernel.ErrStoreClosed) {
+		t.Fatalf("Store remained usable after uncertain connection close: %v", err)
+	}
+	if fixture.authority.state.token == nil || fixture.authority.state.runtimes == nil {
+		t.Fatal("uncertain connection close released Local API authority")
+	}
+	if candidate, err := OpenOperationalHome(context.Background(), fixture.homePath); candidate != nil || !errors.Is(err, ErrBusy) {
+		if candidate != nil {
+			_ = candidate.Close()
+		}
+		t.Fatalf("uncertain connection close released home lease = %v, %v", candidate, err)
+	}
+	if err := server.Close(); err != nil {
+		t.Fatalf("exact quarantined owner retry = %v", err)
+	}
+	fixture.authority.state.mu.Lock()
+	remaining := len(fixture.authority.state.quarantined)
+	fixture.authority.state.mu.Unlock()
+	if remaining != 0 || fixture.home.Close() != first {
+		t.Fatalf("quarantined owner retry changed stable home result: remaining=%d result=%v", remaining, fixture.home.Close())
+	}
+	_ = client.Close()
+	resetUncertainLocalAPIForCleanup(fixture.authority, fixture.home, true, false)
+	fixture.close(t)
+}
+
 func TestLocalAPIAuthorityHomeCloseUnblocksBlockedAccept(t *testing.T) {
 	fixture := newLocalAPIFixture(t, 'B')
 	acceptDone := make(chan error, 1)
@@ -1306,6 +1477,68 @@ func TestLocalAPIAuthorityStaleRemovalDurabilityUncertaintyRetainsLease(t *testi
 	resetUncertainLocalAPIForCleanup(authority, home, true, true)
 	if err := home.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestLocalAPIAuthorityStaleUnlinkErrorsRetainAmbiguousOwner(t *testing.T) {
+	for _, unlinkErr := range []error{unix.EIO, unix.EINTR} {
+		t.Run(unlinkErr.Error(), func(t *testing.T) {
+			parent := installTempDir(t)
+			homePath := filepath.Join(parent, "home")
+			if _, err := Init(context.Background(), homePath); err != nil {
+				t.Fatal(err)
+			}
+			socketPath := filepath.Join(homePath, runtimesName, localAPISocketName)
+			stale, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			stale.SetUnlinkOnClose(false)
+			if err := stale.Close(); err != nil {
+				t.Fatal(err)
+			}
+			home, err := OpenOperationalHome(context.Background(), homePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			original := localAPIUnlinkAt
+			calls := 0
+			localAPIUnlinkAt = func(parent int, name string, flags int) error {
+				calls++
+				if err := original(parent, name, flags); err != nil {
+					return err
+				}
+				return unlinkErr
+			}
+			authority, openErr := home.OpenLocalAPI(context.Background())
+			localAPIUnlinkAt = original
+			if authority == nil || !errors.Is(openErr, ErrUncertain) || calls != 1 {
+				t.Fatalf("ambiguous stale unlink = %v, %v, calls=%d", authority, openErr, calls)
+			}
+			if _, err := os.Lstat(socketPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("ambiguous unlink fixture did not exercise removed postcondition: %v", err)
+			}
+			if authority.state.listener != nil || authority.state.token == nil || authority.state.runtimes == nil {
+				t.Fatal("ambiguous stale unlink rebound or released exact authority")
+			}
+			if retry, err := home.OpenLocalAPI(context.Background()); retry != nil || !errors.Is(err, ErrBusy) {
+				t.Fatalf("retry after ambiguous stale unlink = %v, %v", retry, err)
+			}
+			first := home.Close()
+			if !errors.Is(first, ErrUncertain) || home.Close() != first {
+				t.Fatalf("ambiguous stale unlink result was not stable: %v", first)
+			}
+			if candidate, err := OpenOperationalHome(context.Background(), homePath); candidate != nil || !errors.Is(err, ErrBusy) {
+				if candidate != nil {
+					_ = candidate.Close()
+				}
+				t.Fatalf("ambiguous stale unlink released home lease = %v, %v", candidate, err)
+			}
+			resetUncertainLocalAPIForCleanup(authority, home, true, true)
+			if err := home.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 

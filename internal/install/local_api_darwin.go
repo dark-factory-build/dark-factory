@@ -24,7 +24,7 @@ import (
 
 const (
 	localAPISocketName = "factory.sock"
-	localAPITokenBytes = 32
+	localAPITokenBytes = operatorTokenBytes
 	localAPIMaxPath    = 103
 	localAPIProbeLimit = 250 * time.Millisecond
 	localAPIAcceptPoll = 50 * time.Millisecond
@@ -42,29 +42,32 @@ type localAPIState struct {
 	digest     [sha256.Size]byte
 	locator    string
 
-	listener            *net.UnixListener
-	socketID            identity
-	connections         map[*LocalAPIConnection]struct{}
-	retainedConnections []*LocalAPIConnection
-	probeConnections    []net.Conn
-	accepting           int
-	verifying           int
-	dispatching         int
-	protocol            *LocalAPIProtocol
-	closing             bool
-	closeRunning        bool
-	closed              bool
-	poisonErr           error
-	cleanupErr          error
-	closeErr            error
+	listener         *net.UnixListener
+	socketID         identity
+	connections      map[*LocalAPIConnection]struct{}
+	quarantined      map[*LocalAPIConnection]struct{}
+	probeConnections []net.Conn
+	accepting        int
+	verifying        int
+	dispatching      int
+	protocol         *LocalAPIProtocol
+	closing          bool
+	closeRunning     bool
+	closed           bool
+	poisonErr        error
+	cleanupErr       error
+	closeErr         error
 }
 
 type localAPIConnectionState struct {
-	owner    *localAPIState
-	self     *LocalAPIConnection
-	raw      *net.UnixConn
-	once     sync.Once
-	closeErr error
+	owner           *localAPIState
+	self            *LocalAPIConnection
+	raw             *net.UnixConn
+	closeMu         sync.Mutex
+	transportClosed bool
+	closed          bool
+	once            sync.Once
+	closeErr        error
 }
 
 type localAPIDispatchState struct {
@@ -126,6 +129,7 @@ func (state *operationalHomeState) openLocalAPI(ctx context.Context) (*LocalAPIA
 		home: state, token: token, tokenID: tokenMember.identity,
 		locator:     filepath.Join(filepath.Dir(state.databasePath), runtimesName, localAPISocketName),
 		connections: make(map[*LocalAPIConnection]struct{}),
+		quarantined: make(map[*LocalAPIConnection]struct{}),
 	}
 	authorityState.cond = sync.NewCond(&authorityState.mu)
 	authority := &LocalAPIAuthority{state: authorityState}
@@ -140,7 +144,10 @@ func (state *operationalHomeState) openLocalAPI(ctx context.Context) (*LocalAPIA
 	}
 	contents, err := authorityState.readBoundToken()
 	if err != nil {
-		return state.rejectLocalAPIConstruction(authority, errors.Join(ErrUncertain, err))
+		cause := authorityState.poison(err)
+		_ = authorityState.rejectActivation(cause, true)
+		state.localAPI = authority
+		return authority, authorityState.closeErr
 	}
 	authorityState.digest = sha256.Sum256(contents[:])
 	if err := authorityState.activate(ctx); err != nil {
@@ -404,6 +411,9 @@ func (state *localAPIState) readBoundToken() ([localAPITokenBytes]byte, error) {
 	if read, err := state.token.ReadAt(extra[:], localAPITokenBytes); read != 0 || !errors.Is(err, io.EOF) {
 		return contents, fmt.Errorf("%w: operator principal size changed", ErrInvalidHome)
 	}
+	if err := validateOperatorToken(contents[:]); err != nil {
+		return contents, err
+	}
 	if err := sameMemberFileIdentity(state.tokenID, state.token, false); err != nil {
 		return contents, err
 	}
@@ -616,43 +626,55 @@ func (state *localAPIState) accept(protocol *LocalAPIProtocol) (*LocalAPIConnect
 	}
 }
 
-func (state *localAPIState) closeConnection(connection *LocalAPIConnection) error {
+func (state *localAPIState) closeExactConnection(connection *LocalAPIConnection, releaseOwner bool) error {
+	if connection == nil || connection.state == nil || connection.state.self != connection || connection.state.owner != state || connection.state.raw == nil {
+		return ErrClosed
+	}
+	connection.state.closeMu.Lock()
+	defer connection.state.closeMu.Unlock()
+	if connection.state.closed {
+		return nil
+	}
 	state.mu.Lock()
-	if _, owned := state.connections[connection]; !owned || connection == nil || connection.state == nil || connection.state.self != connection || connection.state.owner != state || connection.state.raw == nil {
+	_, active := state.connections[connection]
+	_, quarantined := state.quarantined[connection]
+	if !active && !quarantined {
 		state.mu.Unlock()
 		return ErrClosed
+	}
+	if connection.state.transportClosed {
+		if releaseOwner {
+			connection.state.closed = true
+			delete(state.connections, connection)
+			delete(state.quarantined, connection)
+			state.cond.Broadcast()
+		}
+		state.mu.Unlock()
+		return nil
 	}
 	raw := connection.state.raw
 	state.mu.Unlock()
 
 	closeErr := localAPICloseConnection(raw)
 	state.mu.Lock()
-	delete(state.connections, connection)
 	if closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
-		state.cleanupErr = errors.Join(state.cleanupErr, errors.New("close local API connection failed"))
-		state.retainedConnections = append(state.retainedConnections, connection)
+		delete(state.connections, connection)
+		if !quarantined {
+			state.cleanupErr = errors.Join(state.cleanupErr, errors.New("close local API connection failed"))
+		}
+		state.quarantined[connection] = struct{}{}
+	} else {
+		connection.state.transportClosed = true
+		if releaseOwner {
+			connection.state.closed = true
+			delete(state.connections, connection)
+			delete(state.quarantined, connection)
+		}
 	}
 	state.cond.Broadcast()
 	state.mu.Unlock()
 	if closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
-		return errors.New("close local API connection failed")
-	}
-	return nil
-}
-
-func (state *localAPIState) interruptConnection(connection *LocalAPIConnection) error {
-	state.mu.Lock()
-	if _, owned := state.connections[connection]; !owned || connection == nil || connection.state == nil || connection.state.self != connection || connection.state.owner != state || connection.state.raw == nil {
-		state.mu.Unlock()
-		return ErrClosed
-	}
-	raw := connection.state.raw
-	state.mu.Unlock()
-	if err := localAPICloseConnection(raw); err != nil && !errors.Is(err, net.ErrClosed) {
-		state.mu.Lock()
-		state.retainedConnections = append(state.retainedConnections, connection)
-		state.mu.Unlock()
-		return errors.New("interrupt local API connection failed")
+		return errors.Join(ErrUncertain, errors.New("close local API connection failed"))
 	}
 	return nil
 }
@@ -722,7 +744,7 @@ func (state *localAPIState) close() error {
 		}
 	}
 	for _, connection := range connections {
-		if err := state.interruptConnection(connection); err != nil && !errors.Is(err, ErrClosed) {
+		if err := state.closeExactConnection(connection, false); err != nil && !errors.Is(err, ErrClosed) {
 			result = errors.Join(result, errors.New("close local API connection failed"))
 		}
 	}
@@ -803,7 +825,10 @@ func unlinkExactLocalAPISocket(parent *os.File, expected identity, exactMetadata
 		return errors.New("local API socket changed before removal")
 	}
 	if err := localAPIUnlinkAt(int(parent.Fd()), localAPISocketName, 0); err != nil {
-		return err
+		// Darwin unlinkat does not report whether an interrupted or failed call
+		// removed the directory entry. Every syscall error is therefore an
+		// ambiguous ownership result, not authority to retry or rebind.
+		return errors.Join(ErrUncertain, errors.New("local API socket removal outcome is uncertain"))
 	}
 	return nil
 }
@@ -844,7 +869,7 @@ func (connection *LocalAPIConnection) Close() error {
 		return nil
 	}
 	connection.state.once.Do(func() {
-		connection.state.closeErr = connection.state.owner.closeConnection(connection)
+		connection.state.closeErr = connection.state.owner.closeExactConnection(connection, true)
 	})
 	return connection.state.closeErr
 }

@@ -20,20 +20,21 @@ import (
 )
 
 const (
-	formatName       = "format"
-	databaseName     = "factory.sqlite3"
-	tokenName        = "operator.token"
-	lockName         = "home.lock"
-	lockAnchorName   = "home.lock.anchor"
-	runtimesName     = "runtimes"
-	changesName      = "changes"
-	formatBytes      = "dark-factory-go-home-v1\n"
-	stageSuffix      = ".dark-factory-go-v1.stage"
-	memberCount      = 7
-	maxNameSize      = 255
-	maxHomeBytes     = 4096
-	maxPathDepth     = 128
-	maxDatabaseBytes = 8 << 20
+	formatName         = "format"
+	databaseName       = "factory.sqlite3"
+	tokenName          = "operator.token"
+	lockName           = "home.lock"
+	lockAnchorName     = "home.lock.anchor"
+	runtimesName       = "runtimes"
+	changesName        = "changes"
+	formatBytes        = "dark-factory-go-home-v1\n"
+	stageSuffix        = ".dark-factory-go-v1.stage"
+	memberCount        = 7
+	maxNameSize        = 255
+	maxHomeBytes       = 4096
+	maxPathDepth       = 128
+	maxDatabaseBytes   = 8 << 20
+	operatorTokenBytes = 32
 )
 
 type retainedDir struct {
@@ -198,7 +199,7 @@ func initHome(ctx context.Context, home string) (result Result, resultErr error)
 	if err != nil {
 		return Result{}, fmt.Errorf("build fresh database image: %w", err)
 	}
-	var token [32]byte
+	var token [operatorTokenBytes]byte
 	if _, err := rand.Read(token[:]); err != nil {
 		return Result{}, fmt.Errorf("generate operator token: %w", err)
 	}
@@ -873,18 +874,32 @@ func inspectToken(parent *os.File) error {
 		return fmt.Errorf("inspect operator token: %w", err)
 	}
 	defer file.Close()
-	if stat.Size != 32 {
-		return fmt.Errorf("%w: operator token length is not 32", ErrInvalidHome)
+	if stat.Size != operatorTokenBytes {
+		return fmt.Errorf("%w: operator token length is not %d", ErrInvalidHome, operatorTokenBytes)
 	}
-	var token [32]byte
+	var token [operatorTokenBytes]byte
 	if _, err := io.ReadFull(file, token[:]); err != nil {
 		return fmt.Errorf("read operator token: %w", err)
 	}
-	if bytes.Equal(token[:], make([]byte, len(token))) {
-		return fmt.Errorf("%w: operator token is zero", ErrInvalidHome)
+	if err := validateOperatorToken(token[:]); err != nil {
+		return err
 	}
 	if err := recheckBinding(parent, tokenName, stat); err != nil {
 		return err
+	}
+	return nil
+}
+
+func validateOperatorToken(token []byte) error {
+	if len(token) != operatorTokenBytes {
+		return fmt.Errorf("%w: operator token length is not %d", ErrInvalidHome, operatorTokenBytes)
+	}
+	var nonzero byte
+	for _, value := range token {
+		nonzero |= value
+	}
+	if nonzero == 0 {
+		return fmt.Errorf("%w: operator token is zero", ErrInvalidHome)
 	}
 	return nil
 }
