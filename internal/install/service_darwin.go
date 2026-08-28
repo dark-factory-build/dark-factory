@@ -125,9 +125,15 @@ func inspectServiceAtHome(ctx context.Context, home, userHome string, launchctl 
 	if ctx == nil || launchctl == nil {
 		return ServiceStatus{}, fmt.Errorf("%w: invalid status request", ErrServiceAmbiguous)
 	}
-	if err := inspectServiceHome(ctx, home); err != nil {
+	homeCapability, err := openServiceHomeCapability(ctx, home)
+	if err != nil {
 		return ServiceStatus{}, err
 	}
+	defer func() {
+		if closeErr := homeCapability.close(); closeErr != nil {
+			resultErr = errors.Join(resultErr, ErrServiceAmbiguous, closeErr)
+		}
+	}()
 	userDirectory, err := openServiceDirectory(userHome)
 	if err != nil {
 		return ServiceStatus{State: ServiceAmbiguous}, fmt.Errorf("%w: user home", ErrServiceAmbiguous)
@@ -155,7 +161,10 @@ func inspectServiceAtHome(ctx context.Context, home, userHome string, launchctl 
 	}
 	// launchctl is an external observation boundary: the exact staging name
 	// must be censused again before its result can influence status.
-	if err := inspectServiceStageAbsence(home); err != nil {
+	if err := homeCapability.recheck(ctx); err != nil {
+		return ServiceStatus{State: ServiceAmbiguous}, errors.Join(ErrServiceAmbiguous, err)
+	}
+	if err := homeCapability.stageAbsent(); err != nil {
 		return ServiceStatus{State: ServiceAmbiguous}, errors.Join(ErrServiceAmbiguous, err)
 	}
 	secondPlist, err := inspectServicePlist(userDirectory, home)
@@ -168,7 +177,10 @@ func inspectServiceAtHome(ctx context.Context, home, userHome string, launchctl 
 	if !plist.present && !observation.present {
 		// Keep this check adjacent to the only absent projection. A stage that
 		// appears during the second plist census must not be reported as absent.
-		if err := inspectServiceStageAbsence(home); err != nil {
+		if err := homeCapability.recheck(ctx); err != nil {
+			return ServiceStatus{State: ServiceAmbiguous}, errors.Join(ErrServiceAmbiguous, err)
+		}
+		if err := homeCapability.stageAbsent(); err != nil {
 			return ServiceStatus{State: ServiceAmbiguous}, errors.Join(ErrServiceAmbiguous, err)
 		}
 		return ServiceStatus{State: ServiceAbsent}, nil
@@ -176,55 +188,47 @@ func inspectServiceAtHome(ctx context.Context, home, userHome string, launchctl 
 	return ServiceStatus{State: ServiceAmbiguous, PID: observation.pid}, ErrServiceAmbiguous
 }
 
-func inspectServiceStageAbsence(path string) (resultErr error) {
-	parentPath, base, err := splitHome(path)
-	if err != nil {
-		return err
-	}
-	parent, err := openParent(parentPath)
-	if err != nil {
-		return err
-	}
-	defer func() { resultErr = errors.Join(resultErr, parent.close()) }()
-	return rejectIfPresent(parent.file, "."+base+stageSuffix, "staging path")
+type serviceHomeCapability struct {
+	parent *homeParent
+	home   *os.File
+	base   string
+	stat   unix.Stat_t
+	image  serviceHomeImage
 }
 
-func accountHome() (string, error) {
-	account, err := user.Current()
-	if err != nil || account == nil || account.HomeDir == "" || account.Uid != strconv.Itoa(os.Geteuid()) || !validServicePath(account.HomeDir) {
-		return "", errors.New("current account home is not exact")
-	}
-	return account.HomeDir, nil
-}
-
-func inspectServiceHome(ctx context.Context, path string) (resultErr error) {
+func openServiceHomeCapability(ctx context.Context, path string) (_ *serviceHomeCapability, resultErr error) {
 	if ctx == nil {
-		return context.Canceled
+		return nil, context.Canceled
 	}
 	parentPath, base, err := splitHome(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	parent, err := openParent(parentPath)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer func() { resultErr = errors.Join(resultErr, parent.close()) }()
-	if err := rejectIfPresent(parent.file, "."+base+stageSuffix, "staging path"); err != nil {
-		return err
+	capability := &serviceHomeCapability{parent: parent, base: base}
+	defer func() {
+		if resultErr != nil {
+			resultErr = errors.Join(resultErr, capability.close())
+		}
+	}()
+	if err := capability.stageAbsent(); err != nil {
+		return nil, err
 	}
 	var expected unix.Stat_t
 	var first serviceHomeImage
 	for pass := 0; pass < 2; pass++ {
 		home, stat, err := openDirectoryMember(parent.file, base)
 		if err != nil {
-			return fmt.Errorf("open service home: %w", err)
+			return nil, fmt.Errorf("open service home: %w", err)
 		}
 		if pass == 0 {
 			expected = stat
 		} else if !sameServiceStat(expected, stat) {
 			_ = home.Close()
-			return fmt.Errorf("%w: service home identity changed", ErrInvalidHome)
+			return nil, fmt.Errorf("%w: service home identity changed", ErrInvalidHome)
 		}
 		image, inspectErr := snapshotServiceHome(ctx, home)
 		if inspectErr == nil && pass == 0 {
@@ -235,18 +239,80 @@ func inspectServiceHome(ctx context.Context, path string) (resultErr error) {
 		if inspectErr == nil {
 			inspectErr = recheckBinding(parent.file, base, stat)
 		}
-		closeErr := home.Close()
-		if inspectErr != nil || closeErr != nil {
-			return errors.Join(inspectErr, closeErr)
+		if inspectErr != nil {
+			_ = home.Close()
+			return nil, inspectErr
+		}
+		if pass == 0 {
+			if closeErr := home.Close(); closeErr != nil {
+				return nil, closeErr
+			}
+		} else {
+			capability.home, capability.stat, capability.image = home, stat, image
 		}
 		if err := parent.recheck(); err != nil {
-			return err
+			return nil, err
 		}
 		if err := ctx.Err(); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	return nil
+	return capability, nil
+}
+
+func (capability *serviceHomeCapability) stageAbsent() error {
+	if capability == nil || capability.parent == nil {
+		return ErrInvalidHome
+	}
+	if err := capability.parent.recheck(); err != nil {
+		return err
+	}
+	return rejectIfPresent(capability.parent.file, "."+capability.base+stageSuffix, "staging path")
+}
+
+func (capability *serviceHomeCapability) recheck(ctx context.Context) error {
+	if capability == nil || capability.parent == nil || capability.home == nil {
+		return ErrInvalidHome
+	}
+	if err := capability.parent.recheck(); err != nil {
+		return err
+	}
+	var current, binding unix.Stat_t
+	if err := unix.Fstat(int(capability.home.Fd()), &current); err != nil || !sameServiceStat(capability.stat, current) {
+		return fmt.Errorf("%w: service home descriptor changed", ErrInvalidHome)
+	}
+	if err := unix.Fstatat(int(capability.parent.file.Fd()), capability.base, &binding, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameServiceStat(capability.stat, binding) {
+		return fmt.Errorf("%w: service home binding changed", ErrInvalidHome)
+	}
+	image, err := snapshotServiceHome(ctx, capability.home)
+	if err != nil {
+		return err
+	}
+	return sameServiceHomeImage(capability.image, image)
+}
+
+func (capability *serviceHomeCapability) close() error {
+	if capability == nil {
+		return nil
+	}
+	var result error
+	if capability.home != nil {
+		result = errors.Join(result, capability.home.Close())
+		capability.home = nil
+	}
+	if capability.parent != nil {
+		result = errors.Join(result, capability.parent.close())
+		capability.parent = nil
+	}
+	return result
+}
+
+func accountHome() (string, error) {
+	account, err := user.Current()
+	if err != nil || account == nil || account.HomeDir == "" || account.Uid != strconv.Itoa(os.Geteuid()) || !validServicePath(account.HomeDir) {
+		return "", errors.New("current account home is not exact")
+	}
+	return account.HomeDir, nil
 }
 
 type serviceHomeImage struct {
@@ -282,6 +348,9 @@ func snapshotServiceHome(ctx context.Context, home *os.File) (serviceHomeImage, 
 		return serviceHomeImage{}, err
 	}
 	if err := exactDirectory(home, false); err != nil {
+		return serviceHomeImage{}, err
+	}
+	if _, err := home.Seek(0, io.SeekStart); err != nil {
 		return serviceHomeImage{}, err
 	}
 	names, err := readOperationalCensus(home)
@@ -428,23 +497,24 @@ func parseLaunchctlPrint(output []byte, service, plistPath, programPath string) 
 			return 0, fmt.Errorf("%w: blank service field", ErrServiceLaunchctl)
 		}
 		if len(nesting) == 1 {
+			rawKey, rawValue, found := strings.Cut(trimmed, "=")
+			key, value := strings.TrimSpace(rawKey), strings.TrimSpace(rawValue)
 			recognized := false
-			for _, key := range []string{"path", "state", "program", "pid"} {
-				prefix := key + " = "
-				if !strings.HasPrefix(trimmed, prefix) {
+			for _, authorityKey := range []string{"path", "state", "program", "pid"} {
+				if key != authorityKey {
 					continue
 				}
 				recognized = true
+				if !found || value == "" {
+					return 0, fmt.Errorf("%w: malformed %s", ErrServiceLaunchctl, key)
+				}
 				if _, duplicate := fields[key]; duplicate {
 					return 0, fmt.Errorf("%w: duplicate %s", ErrServiceLaunchctl, key)
 				}
-				fields[key] = strings.TrimPrefix(trimmed, prefix)
+				fields[key] = value
 			}
-			if !recognized {
-				key, value, found := strings.Cut(trimmed, " = ")
-				if !found || !validLaunchctlFieldName(key) || value == "" {
-					return 0, fmt.Errorf("%w: unknown service field", ErrServiceLaunchctl)
-				}
+			if !recognized && (!found || !validLaunchctlFieldName(key) || value == "") {
+				return 0, fmt.Errorf("%w: unknown service field", ErrServiceLaunchctl)
 			}
 		}
 		if err := updateLaunchctlNesting(&nesting, trimmed); err != nil {

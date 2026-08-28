@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -269,17 +270,19 @@ func TestLaunchctlPrintRequiresExactOwnedFields(t *testing.T) {
 		t.Fatalf("successful print stderr accepted: %v", err)
 	}
 	mutations := map[string][]byte{
-		"foreign label":   bytes.Replace(valid("running", "731"), []byte(service), []byte("gui/501/com.foreign"), 1),
-		"wildcard label":  bytes.Replace(valid("running", "731"), []byte(service), []byte("gui/501/*"), 1),
-		"foreign plist":   bytes.Replace(valid("running", "731"), []byte(plist), []byte("/private/foreign.plist"), 1),
-		"foreign program": bytes.Replace(valid("running", "731"), []byte(program), []byte("/private/foreign"), 1),
-		"missing pid":     valid("running", ""),
-		"pid one":         valid("running", "1"),
-		"unknown state":   valid("waiting", ""),
-		"stopped pid":     valid("not running", "731"),
-		"duplicate pid":   bytes.Replace(valid("running", "731"), []byte("\n}"), []byte("\n\tpid = 732\n}"), 1),
-		"malformed field": bytes.Replace(valid("running", "731"), []byte("\n}"), []byte("\n\tunknown value\n}"), 1),
-		"nul":             append(valid("running", "731"), 0),
+		"foreign label":             bytes.Replace(valid("running", "731"), []byte(service), []byte("gui/501/com.foreign"), 1),
+		"wildcard label":            bytes.Replace(valid("running", "731"), []byte(service), []byte("gui/501/*"), 1),
+		"foreign plist":             bytes.Replace(valid("running", "731"), []byte(plist), []byte("/private/foreign.plist"), 1),
+		"whitespace foreign plist":  bytes.Replace(valid("running", "731"), []byte("\tpath = "+plist), []byte("\tpath  = /private/foreign.plist"), 1),
+		"whitespace duplicate path": bytes.Replace(valid("running", "731"), []byte("\tstate = running"), []byte("\tpath  = "+plist+"\n\tstate = running"), 1),
+		"foreign program":           bytes.Replace(valid("running", "731"), []byte(program), []byte("/private/foreign"), 1),
+		"missing pid":               valid("running", ""),
+		"pid one":                   valid("running", "1"),
+		"unknown state":             valid("waiting", ""),
+		"stopped pid":               valid("not running", "731"),
+		"duplicate pid":             bytes.Replace(valid("running", "731"), []byte("\n}"), []byte("\n\tpid = 732\n}"), 1),
+		"malformed field":           bytes.Replace(valid("running", "731"), []byte("\n}"), []byte("\n\tunknown value\n}"), 1),
+		"nul":                       append(valid("running", "731"), 0),
 	}
 	for name, mutation := range mutations {
 		t.Run(name, func(t *testing.T) {
@@ -380,6 +383,51 @@ func TestServiceStatusLaunchctlFailureIsReadOnly(t *testing.T) {
 	}
 }
 
+func TestServiceTreeCensusDetectsSameContentReplacement(t *testing.T) {
+	root := serviceTestRoot(t)
+	home := filepath.Join(root, "factory")
+	if _, err := Init(context.Background(), home); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotServiceTrees(t, home)
+	formatPath := filepath.Join(home, formatName)
+	formatInfo, err := os.Stat(formatPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	homeInfo, err := os.Stat(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(formatPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved := formatPath + ".replacement"
+	if err := os.Rename(formatPath, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(formatPath, body, formatInfo.Mode().Perm()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(formatPath, formatInfo.ModTime(), formatInfo.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(home, homeInfo.ModTime(), homeInfo.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	after := snapshotServiceTrees(t, home)
+	if reflect.DeepEqual(before, after) {
+		t.Fatal("same-content replacement was invisible to census")
+	}
+	if before[formatPath].Ino == after[formatPath].Ino && before[formatPath].Ctime == after[formatPath].Ctime {
+		t.Fatal("replacement identity was not retained")
+	}
+}
+
 func TestServiceStatusRejectsStageCreatedAfterHomeCensus(t *testing.T) {
 	root := serviceTestRoot(t)
 	home := filepath.Join(root, "factory")
@@ -403,6 +451,31 @@ func TestServiceStatusRejectsStageCreatedAfterHomeCensus(t *testing.T) {
 	})
 	if status.State != ServiceAmbiguous || !errors.Is(err, ErrServiceAmbiguous) || !errors.Is(err, ErrInvalidHome) {
 		t.Fatalf("stage created after census accepted: %+v, %v", status, err)
+	}
+}
+
+func TestServiceStatusRejectsHomeRemovalDuringLaunchctl(t *testing.T) {
+	root := serviceTestRoot(t)
+	home := filepath.Join(root, "factory")
+	userHome := filepath.Join(root, "user")
+	if err := os.Mkdir(userHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Init(context.Background(), home); err != nil {
+		t.Fatal(err)
+	}
+	moved := home + ".removed"
+	results := &recordedLaunchctl{results: []launchctlResult{{status: launchctlNotFound}, {status: 0, stdout: []byte(launchctlNotFoundText + "\n")}}}
+	status, err := inspectService(context.Background(), home, userHome, func(ctx context.Context, args ...string) launchctlResult {
+		if len(results.calls) == 0 {
+			if err := os.Rename(home, moved); err != nil {
+				t.Fatalf("remove home binding: %v", err)
+			}
+		}
+		return results.run(ctx, args...)
+	})
+	if status.State != ServiceAmbiguous || !errors.Is(err, ErrServiceAmbiguous) || !errors.Is(err, ErrInvalidHome) {
+		t.Fatalf("home removal during launchctl accepted: %+v, %v", status, err)
 	}
 }
 
@@ -554,6 +627,12 @@ type serviceTreeEntry struct {
 	ModTime int64
 	Digest  [sha256.Size]byte
 	Link    string
+	Dev     uint64
+	Ino     uint64
+	UID     uint32
+	GID     uint32
+	Nlink   uint64
+	Ctime   unix.Timespec
 }
 
 func snapshotServiceTrees(t *testing.T, roots ...string) map[string]serviceTreeEntry {
@@ -565,6 +644,16 @@ func snapshotServiceTrees(t *testing.T, roots ...string) map[string]serviceTreeE
 				return err
 			}
 			entry := serviceTreeEntry{Mode: info.Mode(), Size: info.Size(), ModTime: info.ModTime().UnixNano()}
+			stat, ok := info.Sys().(*syscall.Stat_t)
+			if !ok || stat == nil {
+				return errors.New("service census missing unix identity")
+			}
+			entry.Dev = uint64(stat.Dev)
+			entry.Ino = uint64(stat.Ino)
+			entry.UID = uint32(stat.Uid)
+			entry.GID = uint32(stat.Gid)
+			entry.Nlink = uint64(stat.Nlink)
+			entry.Ctime = unix.Timespec{Sec: stat.Ctimespec.Sec, Nsec: stat.Ctimespec.Nsec}
 			if info.Mode().IsRegular() {
 				body, readErr := os.ReadFile(path)
 				if readErr != nil {
