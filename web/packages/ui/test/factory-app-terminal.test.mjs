@@ -25,6 +25,7 @@ function stateAt(head, overrides = {}) {
 }
 
 function terminalHarness({ closeStatus = false, fail, failError = new SessionError("connection") } = {}) {
+  let attachReset = false;
   const snapshots = [];
   const calls = [];
   const targetGates = [];
@@ -55,7 +56,7 @@ function terminalHarness({ closeStatus = false, fail, failError = new SessionErr
       if (fail === "open") throw failError;
       handleOptions = callbacks;
       const handle = {
-        attach: async () => { calls.push({ kind: "attach" }); if (fail === "attach") throw failError; return { sessionId: "31".repeat(16), floor: 0n, head: 0n, acknowledgedSequence: 0n, maxUnackedBytes: 65536n }; },
+        attach: async () => { calls.push({ kind: "attach" }); if (fail === "attach") throw failError; if (attachReset) return { kind: "reset", freshAttachRequired: true, sessionId: "31".repeat(16), floor: 5n, head: 9n }; return { sessionId: "31".repeat(16), floor: 0n, head: 0n, acknowledgedSequence: 0n, maxUnackedBytes: 65536n }; },
         acquireInput: async () => { calls.push({ kind: "acquire" }); if (fail === "acquire") throw failError; return { generation: 1n }; },
         sendInput: async (bytes) => { calls.push({ kind: "input", bytes }); if (fail === "input") throw failError; return { status: "accepted", accepted_bytes: BigInt(bytes.length) }; },
         resize: async (rows, cols) => { calls.push({ kind: "resize", rows, cols }); if (fail === "resize") throw failError; return { rows, cols }; },
@@ -90,6 +91,7 @@ function terminalHarness({ closeStatus = false, fail, failError = new SessionErr
     clientOptions: () => clientOptions,
     handleOptions: () => handleOptions,
     surfaceFailure: fail === "surface",
+    setAttachReset: (value) => { attachReset = value; },
     latest: () => snapshots.at(-1),
     ready: () => { clientOptions.onState(fixtureState); clientOptions.onStatus("ready"); },
   };
@@ -347,4 +349,97 @@ test("terminal failure is finite and never exposes protocol authority or output 
   assert.equal(snapshotText.includes("lease"), false);
   assert.equal(snapshotText.includes("same session"), false);
   assert.equal(context.latest().terminal, undefined);
+});
+
+async function remountSurface(context) {
+  const token = {};
+  const writes = [];
+  context.controller.beginTerminalSurface(token);
+  context.controller.setTerminalSurface(token, { write: async (bytes) => { writes.push(bytes); }, abort: () => {} });
+  await flush();
+  return { token, writes };
+}
+
+test("a server replay reset recovers in place instead of surfacing an error", async () => {
+  const context = terminalHarness();
+  context.controller.start();
+  context.ready();
+  await openTerminal(context);
+  const resolvesBefore = context.targetGates.length;
+  const versionBefore = context.latest().terminal.surfaceVersion;
+
+  context.handleOptions().onReset({ sessionId: "31".repeat(16), floor: 5n, head: 9n });
+  await flush();
+  let view = context.latest();
+  assert.notEqual(view.selectedAgent, undefined, "reset must keep the sidebar selection");
+  assert.equal(view.error, undefined, "reset is not an error");
+  assert.equal(view.terminal.resets, 1);
+  assert.equal(view.terminal.phase, "idle", "old controller gone, awaiting the remounted display");
+  assert.equal(view.terminal.surfaceVersion, versionBefore + 1, "display remounts to clear the stale scrollback");
+  assert.equal(context.sessionCloses(), 0);
+
+  await remountSurface(context);
+  assert.equal(context.targetGates.length, resolvesBefore + 1, "a fresh controller re-resolves the target");
+  context.targetGates.at(-1).resolve(target);
+  await flush();
+  view = context.latest();
+  assert.equal(view.terminal.phase, "ready");
+  assert.equal(view.terminal.resets, 1, "the banner state survives the successful re-replay");
+});
+
+test("a reset while holding control recovers and re-acquires through the normal path", async () => {
+  const context = terminalHarness();
+  context.controller.start();
+  context.ready();
+  await openTerminal(context);
+  assert.equal(context.latest().terminal.writable, true);
+
+  context.handleOptions().onReset({ sessionId: "31".repeat(16), floor: 5n, head: 9n });
+  await flush();
+  assert.equal(context.latest().terminal.writable, false, "reset revokes local control honestly");
+
+  await remountSurface(context);
+  context.targetGates.at(-1).resolve(target);
+  await flush();
+  const view = context.latest();
+  assert.equal(view.terminal.phase, "ready");
+  assert.equal(view.terminal.writable, true, "control returns only through the normal acquire path");
+  assert.equal(view.terminal.resets, 1);
+});
+
+test("a reset racing buffered input drops the input without replay or error", async () => {
+  const context = terminalHarness();
+  context.controller.start();
+  context.ready();
+  const live = await openTerminal(context);
+  context.controller.sendTerminalText(live.token, "racing");
+  context.handleOptions().onReset({ sessionId: "31".repeat(16), floor: 5n, head: 9n });
+  await flush();
+  assert.equal(context.latest().error, undefined);
+  const inputsBeforeRemount = context.calls.filter((call) => call.kind === "input").length;
+
+  await remountSurface(context);
+  context.targetGates.at(-1).resolve(target);
+  await flush();
+  assert.equal(context.latest().terminal.phase, "ready");
+  const inputsAfter = context.calls.filter((call) => call.kind === "input").length;
+  assert.equal(inputsAfter, inputsBeforeRemount, "recovery never replays input the reset dropped");
+});
+
+test("a reset storm is bounded: past three recoveries the stale teardown stands", async () => {
+  const context = terminalHarness();
+  context.setAttachReset(true);
+  context.controller.start();
+  context.ready();
+  context.controller.selectAgent(agent);
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    await remountSurface(context);
+    const gate = context.targetGates.at(-1);
+    if (gate === undefined) break;
+    gate.resolve(target);
+    await flush();
+  }
+  const view = context.latest();
+  assert.equal(view.selectedAgent, undefined, "past the bound the ordinary teardown stands");
+  assert.equal(view.error?.code, "stale");
 });

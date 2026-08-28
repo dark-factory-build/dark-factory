@@ -529,10 +529,16 @@ func TestSnapshotWatchAgreementAndPrivateStateBoundary(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, private := range []string{privateRoot, privateModel, privateBody, "xhigh", "987654321", "codex", "incarnation"} {
+		// The agent's provider is deliberately a served public fact (the
+		// console's C/X glyphs derive from it); model, reasoning effort,
+		// tool budgets, roots and bodies remain private.
+		for _, private := range []string{privateRoot, privateModel, privateBody, "xhigh", "987654321", "incarnation"} {
 			if strings.Contains(string(encoded), private) {
 				t.Fatalf("%s exposed private sentinel %q: %s", name, private, encoded)
 			}
+		}
+		if name == "snapshot" && !strings.Contains(string(encoded), "codex") {
+			t.Fatalf("%s dropped the served agent provider: %s", name, encoded)
 		}
 	}
 }

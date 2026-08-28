@@ -37,7 +37,7 @@ export type ErrorBody = { code: ErrorCode; retryable: boolean };
 export type StateKind = "factory" | "project" | "agent" | "task" | "human_request";
 export type FactoryItem = { dispatch_enabled: boolean; capacity: number; active_runs: number; revision: bigint };
 export type ProjectItem = { id: string; name: string; revision: bigint };
-export type AgentItem = { id: string; project_id: string; name: string; role: "orchestrator" | "worker"; paused: boolean; revision: bigint };
+export type AgentItem = { id: string; project_id: string; name: string; role: "orchestrator" | "worker"; provider: "claude_code" | "codex" | "shell"; paused: boolean; revision: bigint };
 export type TaskItem = { id: string; project_id: string; assigned_agent_id: string; title: string; status: "queued" | "running" | "blocked" | "succeeded" | "failed" | "cancelled"; priority: number; revision: bigint };
 export type HumanRequestItem = {
   id: string; project_id: string; agent_id: string; task_id: string;
@@ -343,9 +343,10 @@ function factoryItem(value: unknown, wire: boolean): FactoryItem {
 }
 function projectItem(value: unknown, wire: boolean): ProjectItem { if (!isObject(value)) malformed(); exactKeys(value, ["id", "name", "revision"]); return { id: dynamicID(value.id), name: boundedText(value.name, 1, MAX_PROJECT_NAME_BYTES), revision: decimal(value.revision, wire, true) }; }
 function agentItem(value: unknown, wire: boolean): AgentItem {
-  if (!isObject(value)) malformed(); exactKeys(value, ["id", "project_id", "name", "role", "paused", "revision"]);
+  if (!isObject(value)) malformed(); exactKeys(value, ["id", "project_id", "name", "role", "provider", "paused", "revision"]);
   if (value.role !== "orchestrator" && value.role !== "worker" || typeof value.paused !== "boolean") malformed();
-  return { id: dynamicID(value.id), project_id: dynamicID(value.project_id), name: boundedText(value.name, 1, MAX_AGENT_NAME_BYTES), role: value.role, paused: value.paused, revision: decimal(value.revision, wire, true) };
+  if (value.provider !== "claude_code" && value.provider !== "codex" && value.provider !== "shell") malformed();
+  return { id: dynamicID(value.id), project_id: dynamicID(value.project_id), name: boundedText(value.name, 1, MAX_AGENT_NAME_BYTES), role: value.role, provider: value.provider, paused: value.paused, revision: decimal(value.revision, wire, true) };
 }
 function taskItem(value: unknown, wire: boolean): TaskItem {
   if (!isObject(value)) malformed(); exactKeys(value, ["id", "project_id", "assigned_agent_id", "title", "status", "priority", "revision"]);

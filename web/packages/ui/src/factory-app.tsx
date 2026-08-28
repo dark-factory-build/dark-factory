@@ -160,6 +160,11 @@ export function TerminalSidebar({
           <button type="button" onClick={onClose} title="close the terminal">×</button>
         </div>
         {terminal.error === undefined ? null : <p className="dfFactoryConsole__terminalError" role="alert">TERMINAL UNAVAILABLE</p>}
+        {!terminal.resets ? null : (
+          <p className="dfConsoleSidebar__resetBanner" role="status">
+            Replay reset — earlier output is no longer retained; showing what the factory still holds.
+          </p>
+        )}
         {children}
       </div>
     </aside>

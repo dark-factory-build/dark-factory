@@ -18,9 +18,9 @@ export const fixtureState = {
     [secondProjectID, { id: secondProjectID, name: "South Workshop", revision: 5n }],
   ]),
   agents: new Map([
-    [agentID, { id: agentID, project_id: projectID, name: "Builder One", role: "worker", paused: false, revision: 10n }],
-    [secondAgentID, { id: secondAgentID, project_id: secondProjectID, name: "Dispatch Lead", role: "orchestrator", paused: true, revision: 11n }],
-    [thirdAgentID, { id: thirdAgentID, project_id: projectID, name: "Builder Two", role: "worker", paused: false, revision: 12n }],
+    [agentID, { id: agentID, project_id: projectID, name: "Builder One", role: "worker", provider: "claude_code", paused: false, revision: 10n }],
+    [secondAgentID, { id: secondAgentID, project_id: secondProjectID, name: "Dispatch Lead", role: "orchestrator", provider: "claude_code", paused: true, revision: 11n }],
+    [thirdAgentID, { id: thirdAgentID, project_id: projectID, name: "Builder Two", role: "worker", provider: "codex", paused: false, revision: 12n }],
   ]),
   tasks: new Map([
     [taskID, { id: taskID, project_id: projectID, assigned_agent_id: agentID, title: "Review the state projection", status: "running", priority: 10, revision: 12n }],

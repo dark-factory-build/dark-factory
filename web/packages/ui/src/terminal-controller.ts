@@ -26,6 +26,13 @@ export type TerminalControllerSnapshot = Readonly<{
   writable: boolean;
   leaseOperation: TerminalLeaseOperation;
   error?: SessionError | ProtocolError;
+  /**
+   * True when this controller ended because the server reset the replay
+   * (retained output no longer covers the attachment). The protocol closes
+   * the handle on reset, so the controller still ends; the owner may open
+   * a fresh controller against current state instead of surfacing an error.
+   */
+  reset: boolean;
 }>;
 
 type TerminalControllerSession = Pick<BrowserSession, "resolveAgentTerminal" | "openTerminal" | "close">;
@@ -53,6 +60,7 @@ class TerminalController {
   #started = false;
   #closing = false;
   #generation = 0;
+  #reset = false;
   #surfaceAborted = false;
   #inputBuffer: Input = new Uint8Array(0);
   #inputInFlightBytes = 0;
@@ -251,7 +259,7 @@ class TerminalController {
       const handle = this.#options.session.openTerminal(target as TerminalTarget, {
         onOutput: (output) => this.#writeOutput(generation, output.payload),
         onExit: () => this.#handleEnded(new SessionError("closed")),
-        onReset: () => this.#handleEnded(new SessionError("stale")),
+        onReset: () => { this.#reset = true; this.#handleEnded(new SessionError("stale")); },
         onClose: (error) => this.#handleEnded(finiteError(error)),
       });
       this.#handle = handle;
@@ -262,6 +270,7 @@ class TerminalController {
       const attached = await handle.attach();
       if (!this.#current(generation)) return;
       if ("kind" in attached) {
+        this.#reset = true;
         this.#fail(new SessionError("stale"));
         return;
       }
@@ -423,7 +432,7 @@ class TerminalController {
   }
 
   #snapshot(): TerminalControllerSnapshot {
-    return { phase: this.#phase, writable: this.#writable, leaseOperation: this.#leaseOperation, error: this.#error };
+    return { phase: this.#phase, writable: this.#writable, leaseOperation: this.#leaseOperation, error: this.#error, reset: this.#reset };
   }
 
   #publish(): void {

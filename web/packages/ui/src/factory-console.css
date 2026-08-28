@@ -486,3 +486,13 @@
   .dfConsoleSidebar { flex-basis: auto; border-left: 0; border-top: 1px solid var(--df-console-accent); }
   .dfConsoleStrip { flex-direction: column; align-items: flex-start; }
 }
+
+.dfConsoleSidebar__resetBanner {
+  margin: 0;
+  padding: 0.4rem 0.75rem;
+  background: #1a1408;
+  color: #b69a52;
+  border-top: 1px solid #26302c;
+  border-bottom: 1px solid #26302c;
+  font-size: 12.5px;
+}

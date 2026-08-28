@@ -56,7 +56,7 @@ test("projects, agents, tasks, and requests retain their canonical relationships
 test("hostile names and titles are escaped as text and private detail is absent", () => {
   const hostile = "<img src=x onerror=alert(1)>";
   const hostileState = baseState({
-    agents: new Map([[ids.agent, { id: ids.agent, project_id: ids.project, name: hostile, role: "worker", paused: false, revision: 10n }]]),
+    agents: new Map([[ids.agent, { id: ids.agent, project_id: ids.project, name: hostile, role: "worker", provider: "claude_code", paused: false, revision: 10n }]]),
     tasks: new Map([[ids.task, { id: ids.task, project_id: ids.project, assigned_agent_id: ids.agent, title: hostile, status: "running", priority: 10, revision: 12n }]]),
   });
   for (const screen of SCREENS) {
@@ -118,6 +118,7 @@ test("the console never shows a kernel-grammar or retired vocabulary word", () =
     ["sidebar", renderToStaticMarkup(sidebarView())],
     ["sidebar-writable", renderToStaticMarkup(sidebarView({ terminal: { writable: true } }))],
     ["sidebar-collapsed", renderToStaticMarkup(sidebarView({ collapsed: true }))],
+    ["sidebar-reset", renderToStaticMarkup(sidebarView({ terminal: { resets: 1 } }))],
   ];
   for (const [name, markup] of surfaces) {
     for (const forbidden of [/attempt/i, /converge/i, /admission/i, /finalize/i, /unresolved/i, /proposal/i, /verdict/i, /\bALLOW\b/, /\bBLOCK\b/, /lease/i, /intake/i, /quarantine/i, /overseer/i, /work item/i, /cancel run/i]) {
@@ -176,7 +177,7 @@ test("empty and maximum bounded collections have explicit, semantic output", () 
     const agentID = `${suffix}${"21".repeat(15)}`;
     const taskID = `${suffix}${"31".repeat(15)}`;
     const requestID = `${suffix}${"41".repeat(15)}`;
-    agents.set(agentID, { id: agentID, project_id: ids.project, name: `Agent ${index}`, role: "worker", paused: false, revision: BigInt(index + 1) });
+    agents.set(agentID, { id: agentID, project_id: ids.project, name: `Agent ${index}`, role: "worker", provider: "codex", paused: false, revision: BigInt(index + 1) });
     tasks.set(taskID, { id: taskID, project_id: ids.project, assigned_agent_id: agentID, title: `Task ${index}`, status: "queued", priority: index, revision: BigInt(index + 1) });
     requests.set(requestID, { id: requestID, project_id: ids.project, agent_id: agentID, task_id: taskID, created_at: 1n, updated_at: 1n, revision: BigInt(index + 1), kind: "question", status: "open", reply_max_bytes: 8192, can_reply: true });
   }

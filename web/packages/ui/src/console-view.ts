@@ -56,7 +56,6 @@ export type ConsoleExtras = Readonly<{
   diffs?: ReadonlyMap<string, TaskDiffStat>;
   rowTicks?: ReadonlyMap<string, string>;
   records?: ReadonlyMap<string, TaskRecord>;
-  agentGlyphs?: ReadonlyMap<string, string>;
 }>;
 
 /** The durable task status projected into the console stage vocabulary. */
@@ -102,14 +101,17 @@ export function agentActivity(agent: AgentItem, state: StateView): AgentActivity
 }
 
 /**
- * The durable agent row does not name its provider, so a worker cell cannot
- * honestly claim the C (Claude) or X (Codex) glyph from live data; extras
- * carry the glyph until the daemon serves provider identity.
+ * The glyph derives from durable facts only: the orchestrator role and the
+ * served provider identity. C is Claude, X is Codex, s is the shell
+ * provider.
  */
-export function agentGlyph(agent: AgentItem, extras?: ConsoleExtras): string {
-  const served = extras?.agentGlyphs?.get(agent.id);
-  if (served !== undefined) return served;
-  return agent.role === "orchestrator" ? "◆" : "▪";
+export function agentGlyph(agent: AgentItem): string {
+  if (agent.role === "orchestrator") return "◆";
+  switch (agent.provider) {
+    case "claude_code": return "C";
+    case "codex": return "X";
+    case "shell": return "s";
+  }
 }
 
 export type FactoryCounters = Readonly<{

@@ -44,5 +44,4 @@ export const fixtureConsoleExtras = {
       transcript: "run 2 · Builder Two\n> reproducing the race…\n> causal test red on the old code\n> fix applied; test green",
     }],
   ]),
-  agentGlyphs: new Map([[agentID, "C"], [secondAgentID, "◆"], [thirdAgentID, "X"]]),
 };

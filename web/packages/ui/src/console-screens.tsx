@@ -62,7 +62,7 @@ export function AgentStrip({ state, extras, selectedAgentId, ready, onSelectAgen
             const phase = activity === "busy" && task !== undefined ? stageOfTask(task, extras) : activity;
             const cell = (
               <>
-                <span className="dfConsoleStrip__glyph" aria-hidden="true">{agentGlyph(agent, extras)}</span>
+                <span className="dfConsoleStrip__glyph" aria-hidden="true">{agentGlyph(agent)}</span>
                 <span className="dfConsoleStrip__agentName">{agent.name}</span>
                 <span className="dfConsoleStrip__agentPhase">{activity === "needs-you" ? "! needs you" : phase}</span>
               </>

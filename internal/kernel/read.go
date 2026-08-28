@@ -332,32 +332,22 @@ func (store *Store) Snapshot(ctx context.Context) (DashboardSnapshot, error) {
 	if err := projectRows.Close(); err != nil {
 		return DashboardSnapshot{}, err
 	}
-	agentRows, err := tx.connection.QueryContext(ctx, `SELECT id, project_id, name, role, paused, revision FROM agents ORDER BY id LIMIT ?`, SnapshotEntityLimit+1)
+	agentRows, err := tx.connection.QueryContext(ctx, agentSummarySelect+` ORDER BY a.id LIMIT ?`, SnapshotEntityLimit+1)
 	if err != nil {
 		return DashboardSnapshot{}, fmt.Errorf("read agent summaries: %w", err)
 	}
 	for agentRows.Next() {
-		var rawID, rawProjectID []byte
-		var name, rawRole string
-		var paused, rawRevision int64
-		if err := agentRows.Scan(&rawID, &rawProjectID, &name, &rawRole, &paused, &rawRevision); err != nil {
+		summary, err := scanAgentSummary(agentRows)
+		if err != nil {
 			agentRows.Close()
 			return DashboardSnapshot{}, fmt.Errorf("scan agent summary: %w", err)
-		}
-		id, idErr := AgentIDFromBytes(rawID)
-		projectID, projectErr := ProjectIDFromBytes(rawProjectID)
-		role, roleErr := parseAgentRole(rawRole)
-		revision, revisionErr := NewRevision(rawRevision)
-		if idErr != nil || projectErr != nil || roleErr != nil || revisionErr != nil || byteLen(name) < 1 || byteLen(name) > 128 || paused != 0 && paused != 1 {
-			agentRows.Close()
-			return DashboardSnapshot{}, fmt.Errorf("%w: invalid agent summary", ErrCorruptState)
 		}
 		count++
 		if count > SnapshotEntityLimit {
 			agentRows.Close()
 			return DashboardSnapshot{}, ErrSnapshotTooLarge
 		}
-		snapshot.Agents = append(snapshot.Agents, AgentSummary{ID: id, ProjectID: projectID, Name: name, Role: role.String(), Paused: paused == 1, Revision: revision})
+		snapshot.Agents = append(snapshot.Agents, summary)
 	}
 	if err := agentRows.Close(); err != nil {
 		return DashboardSnapshot{}, err

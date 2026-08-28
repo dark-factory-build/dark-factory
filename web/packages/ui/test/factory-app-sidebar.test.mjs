@@ -117,3 +117,24 @@ test("steer is never a dead-looking live control and stop routes only real autho
   const noStopMarkup = renderToStaticMarkup(createElement(TerminalSidebar, withoutStop.props, createElement("div")));
   assert.match(noStopMarkup, /<button[^>]*disabled=""[^>]*title="needs: daemon per-run stop authority outside NEEDS YOU"[^>]*>Stop<\/button>/);
 });
+
+test("the replay-reset banner appears only after a server reset", async () => {
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const { createElement } = await import("react");
+  const props = (resets) => ({
+    terminal: { agentId: "21".repeat(16), agentName: "Builder One", agentRevision: 10n, phase: "ready", writable: false, leaseOperation: "none", resets, surfaceVersion: 0 },
+    snapshot: { status: "ready" },
+    collapsed: false,
+    onToggleCollapsed: () => {},
+    onClose: () => {},
+    onTakeControl: () => {},
+    onHandBack: () => {},
+    onStop: () => {},
+    stopUnavailable: "daemon per-run stop authority outside NEEDS YOU",
+  });
+  const quiet = renderToStaticMarkup(createElement(TerminalSidebar, props(0), createElement("div")));
+  assert.equal(/Replay reset/.test(quiet), false);
+  const reset = renderToStaticMarkup(createElement(TerminalSidebar, props(1), createElement("div")));
+  assert.match(reset, /role="status"/);
+  assert.match(reset, /Replay reset — earlier output is no longer retained/);
+});

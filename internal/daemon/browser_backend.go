@@ -608,7 +608,7 @@ func projectProject(item kernel.ProjectSummary) browserprotocol.ProjectItem {
 }
 
 func projectAgent(item kernel.AgentSummary) browserprotocol.AgentItem {
-	return browserprotocol.AgentItem{ID: item.ID.String(), ProjectID: item.ProjectID.String(), Name: item.Name, Role: item.Role, Paused: browserprotocol.Bool(item.Paused), Revision: decimalRevision(item.Revision)}
+	return browserprotocol.AgentItem{ID: item.ID.String(), ProjectID: item.ProjectID.String(), Name: item.Name, Role: item.Role, Provider: item.Provider, Paused: browserprotocol.Bool(item.Paused), Revision: decimalRevision(item.Revision)}
 }
 
 func projectTask(item kernel.TaskSummary) browserprotocol.TaskItem {
