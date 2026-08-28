@@ -115,7 +115,7 @@ older candidate or test result current.
 | public artifact gate | integrated; exact proof remains at `c732f103` | rerun after the next clean record/integration milestone |
 | local API authority | corrected reviewed contract frozen below; no implementation | install-owned endpoint/socket lifecycle plus API framing/auth matrix |
 | `RuntimeParent` | reviewed contract frozen below; no implementation | lifetime parent capability, child-operation join and recovery matrix |
-| Change disposition/descriptor handoff | corrected reviewed transition contract frozen below; no implementation | schema/Store transition proof, then worker FD 11 and retry proof |
+| Change disposition/descriptor handoff | latest cold-review corrections frozen below; no implementation and exact-contract re-review pending | schema/Store transition proof, then worker FD 11 and retry proof |
 | standalone daemon, recovery and scheduling | not implemented | concrete `cmd/factoryd`, restart/crash cuts, then one scheduler |
 | service/release/private host | not cut over | isolated install/service proof and exact public-artifact site integration |
 | final elegance and deletion | deliberately not started | whole-runtime DRY/YAGNI audit, mutations, exact-head reviews, then Rust deletion |
@@ -184,16 +184,14 @@ fallback. No part of this Local API contract is implemented at `497ecfe4`.
 
 #### Corrected Change disposition and descriptor contract (planned)
 
-The first cold read-only audit **BLOCKED** implementation of the literal
-`c732f103` transition table because it preserved a stale row revision across
-retry and allowed abandonment while a registered child could still create or
-publish the Change. A fresh review then **BLOCKED** the literal `f05eff86`
-correction because it still let callers select retry state, did not freeze
-revision deltas, and omitted crash-safe stage cleanup, publication recovery
-and production descriptor remapping. The contract below incorporates those
-findings and is the reviewed **ALLOW** architecture for later implementation;
-the two earlier literal tables are superseded. No Change/schema/runner/worker
-production code has implemented it yet.
+Successive cold reviews **BLOCKED** the literal `c732f103`, `f05eff86` and
+`88a8ab22` plans. They found stale retry revision, child-live abandonment,
+caller-selected reuse, incomplete crash recovery, ambiguous never-started
+process evidence, a leaked staging namespace and two contradictory worker
+executables. The contract below incorporates every required correction and
+supersedes those literal tables. It still requires a fresh independent
+exact-contract **ALLOW** before implementation begins. No production Change
+schema, runner or worker code has implemented it yet.
 
 The fresh `changes` row contains only:
 
@@ -237,29 +235,43 @@ identity survives the staging-to-final no-replace rename.
 
 Every Change mutation advances `changes.revision` exactly once and appends its
 matching Change invalidation with that new revision in the same immediate
-transaction. Exact replay returns the already-committed value without another
-increment or invalidation. There is no rule equating a phase timestamp with
-`updated_at_ms`: retry legitimately updates the row while preserving original
-preparation/publication timestamps.
+transaction. A transition replay returns the already-committed value without
+another increment or invalidation only while the current run and Change still
+prove that exact post-transition state and immutable payload. Once a later
+transition advances either aggregate, the old transition call conflicts;
+lost-admission and historical-finalization reconciliation use their explicit
+domain relationships instead of replaying an intermediate transition. There
+is no receipt ledger, transition history or generic mutation identity. There
+is also no rule equating a phase timestamp with `updated_at_ms`: retry
+legitimately updates the row while preserving original preparation/publication
+timestamps.
 
 Admission owns Change selection. After `AdmitNext` selects the canonical task
 incarnation inside its immediate write transaction, it queries the Change for
-that incarnation. An existing row, never a caller-supplied Change ID, phase,
-revision or pathname, decides reuse. It is eligible only when `retained` or
-`abandoned` and settled by the exact immediately preceding terminal worker run
-for that incarnation. A request may supply one fresh candidate Change ID only
-when no row exists. The same transaction performs the retry transition and
-binds the actual run, attempt digest, Change ID and post-transition
-`runs.admitted_change_revision`. Lost-response reconciliation uses those
-committed identities; it must not require the Change's later current revision
-to remain equal to the admitted revision.
+that incarnation. Every worker-admission request supplies exactly one freshly
+generated candidate Change ID and no phase, revision, pathname or reuse ID.
+When an existing row is found, the transaction ignores the candidate
+completely and the row decides reuse; only when no row exists may it insert the
+candidate. Existing reuse is eligible only when `retained` or `abandoned` and
+settled by the unique predecessor worker run whose
+`admitted_task_work_revision == task.work_revision - 1`. Timestamps, row order
+and a query for the merely latest run never select that predecessor. The same
+transaction performs the retry transition and binds the actual run, attempt
+digest, actual Change ID and post-transition
+`runs.admitted_change_revision`.
+
+Lost-response reconciliation compares the candidate only for a fresh
+reservation at `A=1`. For existing-row reuse it returns the actual committed
+Change and admitted revision, even though that Change ID differs from the
+ignored fresh candidate. Neither path requires the Change's later current
+revision to remain equal to its admitted revision.
 
 Let `A` be the new run's `admitted_change_revision`. The exact transitions and
 deltas are:
 
 | Admission/transition | Exact revision and committed proof |
 |---|---|
-| no row -> `reserved` | revision 1 and `A=1`; insert one path-free Change and bind it to the new run |
+| no row -> `reserved` | revision 1 and `A=1`; insert the request's fresh candidate as one path-free Change and bind it to the new run |
 | retained retry N -> `available` | `N+1` and `A=N+1`; preserve all content, tree, repository and timestamp facts, clear settlement, bind the new run atomically |
 | abandoned retry N -> `reserved` | `N+1` and `A=N+1`; preserve no obsolete materialization facts, clear settlement, bind the new run atomically |
 | fresh/abandoned `reserved` -> `prepared` | `A+1`; exact Git selection, commitment and empty stage identity commit together before any materialized blob read |
@@ -267,7 +279,7 @@ deltas are:
 | retained retry `available` -> `retained` | `A+1`; stable retained identity and facts are revalidated and settlement binds this run |
 | fresh/abandoned `available` -> `retained` | `A+3`; stable published identity and facts are revalidated and settlement binds this run |
 | direct `reserved` -> `abandoned` | `A+1`; absence/removal proof below succeeds and settlement binds this run |
-| `prepared` -> `abandoned` | `A+2`; exact recorded stage removal and absence proof below succeed, obsolete selection/tree/timestamp facts are cleared, and settlement binds this run |
+| `prepared` -> `abandoned` | `A+2`; stable prior stage absence or exact recorded-identity removal plus the absence proof below succeeds, obsolete selection/tree/timestamp facts are cleared, and settlement binds this run |
 
 Anything else is durable corruption, not a recoverable phase variant. There is
 no admission-mode column. “Preserve retained facts” never means preserve the
@@ -281,15 +293,52 @@ rescanned digest/count/bytes may replace the prior content facts. A mismatch
 never adopts a replacement or rewrites facts to bless it.
 
 There are two explicit process-resource arms before any Change settlement or
-recovery may claim all Change-mutating authority gone. If provider process/group
-identity was bound, exact provider exit, direct-child reap and process-group
-absence must be durable and both resources released. If provider identity was
-never bound, both still-empty resources may be released only with positive
-runner containment/absence proof and without fabricating provider exit. A
-live or ambiguous identified child/group stays nonterminal. The runner-process
-resource must also be released unless the exact one-shot FD choreography below
-proves the outer runner closed its duplicate after child preparation and has
-no respawn path. Runtime-root release is not a Change-settlement precondition.
+recovery may claim all Change-mutating authority gone. With a live owner, the
+exact authenticated outer runner publishes the exact provider terminal record
+only after its sole `Wait` of that child and positive process-group absence;
+the daemon commits that immutable record before acknowledgement, sole-waits
+its exact outer child and commits the separate typed runner exit. Only
+then may the corresponding bound resources release. With no live owner,
+recovery never signals: it requires the exact persisted PID/birth for each
+bound process to observe `Absent` or `Reused` and the exact provider group to
+observe `Absent`, then records the typed `recovered_absence` exit without an
+invented wait status and releases the exact resources. `Unknown`, `EPERM`, a
+weak/replaced identity or uncertain group leaves them nonterminal.
+
+Never-bound provider process/group resources have no exit to invent. They may
+release only from one authenticated outer-runner `AttemptInnerNoStart` receipt
+on the already-configured exact `AttemptController`, followed by the daemon's
+sole `Wait` of that outer runner, commit of its exact typed exit and runner
+resource release. The closed receipt is:
+
+```text
+version: 1
+kind: inner-no-start
+proof: not-created | owned-converged
+identity: absent for not-created; exact inner PID/PGID/birth for owned-converged
+exit: absent for not-created; exact sole-Wait code/signal for owned-converged
+```
+
+It has no caller IDs, booleans, prose or payload. The controller accepts it
+exactly once only before `AttemptInnerReady` or any release. `not-created` is
+valid only on a statically enumerated `StartBlockedPTY` failure path before a
+child-creation syscall can have succeeded, with every prospective child/
+control/PTY/gate descriptor closed. Any path on which creation may have
+succeeded must use `owned-converged` instead.
+`owned-converged` is valid only when the authenticated outer runner retained
+that exact child authority, kill-or-natural-waited it once and positively
+proved its group absent. The Store consumes this live typed evidence while
+releasing the still-empty resources; it persists no receipt row or history.
+If the receipt or its Store commit is lost, ordinary state reconciliation may
+recognize an already-released transition, but outer PID absence, control EOF,
+the runtime lifetime flock or empty resource rows alone never reconstruct the
+receipt or prove no child existed.
+
+A live or ambiguous identified child/group stays nonterminal. The
+runner-process resource must also be released unless the exact one-shot FD
+choreography below proves the outer runner closed its Change-parent duplicate
+after child preparation and has no respawn path. Runtime-root release is not a
+Change-settlement precondition.
 
 A crash immediately after deterministic stage creation but before the
 `prepared` commit leaves the Change `reserved`. Once every child authority is
@@ -302,16 +351,24 @@ fsyncs the parent and rechecks both names absent before
 unstable or ambiguous object, `EPERM`, or fsync failure leaves the Change
 `reserved` and the run `finalizing`.
 
-`prepared -> abandoned` likewise requires final absence and removal of the
-exact persisted stage inode, followed by parent fsync and absence recheck. A
-published `prepared` Change instead has two `prepared -> available` arms: the
-normal admitted worker is blocked at the publication checkpoint, while a
+`prepared -> abandoned` requires final absence and then accepts exactly two
+stage facts: stable prior absence, or a present name matching the persisted
+stage identity that is descriptor-removed. Both paths fsync the parent and
+recheck both deterministic names absent before the Store commit. Recovery is
+cut and restarted after removal but before parent fsync, and again after fsync
+but before the Store transition; neither cut may adopt or leak a replacement.
+
+A published `prepared` Change instead has two `prepared -> available` arms:
+the normal admitted worker is blocked at the publication checkpoint, while a
 finalizing recovery may proceed only after every Change-mutating child
 authority is positively gone. Both arms require the final name to match the
-persisted device/inode and a bounded scan to match the prepared commitment.
-Recovery then settles `available -> retained` without activating or replaying
-a provider. Uncertainty leaves the factual phase unchanged and the run
-finalizing; no durable `unresolved` Change phase is added.
+persisted device/inode and bounded commitment and require the deterministic
+stage name positively absent both before and after the parent-binding recheck.
+A simultaneous, reappeared or replaced stage leaves the Change `prepared` and
+the run finalizing. Recovery then settles `available -> retained` without
+activating or replaying a provider. Uncertainty leaves the factual phase
+unchanged and the run finalizing; no durable `unresolved` Change phase is
+added.
 
 `FinalizeRun` requires exact `retained` or `abandoned` settlement by the
 current run for its first `finalizing -> terminal` write. A replay of an
@@ -339,18 +396,28 @@ preparation and has no respawn path. The worker validates target FD 11, sets
 descriptor censuses must exclude it. The package-test final-check seam sits
 above these production descriptors instead of consuming or renumbering them.
 
-Required causal mutations include caller-selected retry ID/revision/path,
-retry outside canonical task selection, a loose `>` revision comparison,
-wrong exact delta or missing same-transaction invalidation/run binding, a
-crash after stage mkdir before `prepared`, deletion of a nonempty/malformed/
-replaced/unstable orphan, fabricated exit for a never-active provider,
-abandonment with a live identified child/group or runner-held descriptor,
-publish-before-available recovery that replays activation, adopting a different
-final inode, rewriting retained facts from a replacement, retained retry exec
-after digest/count/bytes mismatch, FD 11 inherited by Git/provider, an outer
-runner retaining FD 11, and historical terminal replay rejected after one or
-multiple retries. Each temporary mutation must fail its focused effect/state
-test before this contract is accepted.
+Required causal mutations include an optional or reused candidate, comparing
+that candidate on existing-row reuse, timestamp/latest-run predecessor
+selection, caller-supplied phase/revision/path, retry outside canonical task
+selection, a loose `>` revision comparison, wrong exact delta or missing
+same-transaction invalidation/run binding, and accepting an intermediate replay
+after later progress. Process mutations release without the live terminal/
+sole-Wait/group proof, signal during recovery, omit exact group absence,
+fabricate never-active exit, accept a no-start receipt after `InnerReady`, or
+reconstruct it from outer PID absence, EOF, lifetime flock or empty rows.
+
+Filesystem/process mutations include a crash after stage mkdir before
+`prepared`, deletion of a nonempty/malformed/replaced/unstable orphan, failure
+to accept stable prior prepared-stage absence, skipped parent fsync/recheck,
+`available` with a simultaneous/reappeared/replaced stage, abandonment with a
+live identified child/group or runner-held descriptor, publish recovery that
+replays activation, adopting a different final inode, rewriting retained facts
+from a replacement, retained retry exec after digest/count/bytes mismatch, FD
+11 inherited by Git/provider, an outer runner retaining FD 11, or a second
+daemon-hosted worker mode. Historical terminal replay rejected after one or
+multiple retries is also a required killed mutation. Each temporary
+mutation must fail its focused effect/state test before this contract is
+accepted.
 
 Open implementation risks are the real filesystem-proof/Store-commit crash
 gaps, exact descriptor-remap behavior through both gates, the circular
@@ -366,8 +433,9 @@ than being silently abandoned.
 2. Implement and independently review `RuntimeParent`; reserve
    `factory.sock` and remove path/F_GETPATH authority before shared runner
    changes.
-3. Implement the corrected Change disposition/schema contract, then FD 11
-   worker handoff and retry reinspection in that order.
+3. Obtain independent exact-contract `ALLOW`, implement the corrected Change
+   disposition/schema contract, then FD 11 worker handoff and retry
+   reinspection in that order.
 4. Add one concrete `cmd/factoryd` root and recovery coordinator; only after
    recovery converges add one scheduler. Prove isolated restart/crash cuts.
 5. Complete `factoryctl` service/recovery, release packaging and the exact-
@@ -430,7 +498,7 @@ and dependency order no longer describe the current head.
 | operational Store binding | candidate only; exact-head re-review pending | retain every partially opened pool/file owner and classify hidden close uncertainty |
 | `LocalAPIAuthority` | reviewed contract frozen below; no implementation | capability-bound server listener and stale-socket causal matrix |
 | `RuntimeParent` | reviewed contract frozen below; no implementation | lifetime parent capability, child-operation join and recovery matrix |
-| Change disposition/descriptor handoff | then-proposed literal table; later audit BLOCKED its revision and abandonment rules | superseded by the corrected architecture in the current `497ecfe4` checkpoint |
+| Change disposition/descriptor handoff | then-proposed literal table; later audits BLOCKED its revision, abandonment and recovery rules | superseded by the latest corrected architecture above |
 | standalone daemon, recovery and scheduling | not implemented | concrete `cmd/factoryd`, restart/crash cuts, then one scheduler |
 | service/release/private host | not cut over | isolated install/service proof and exact public-artifact site integration |
 | final elegance and deletion | deliberately not started | whole-runtime DRY/YAGNI audit, mutations, exact-head reviews, then Rust deletion |
@@ -1326,22 +1394,27 @@ Old connections are independently invalid because `boot_id` changed.
 
 Terminal closure has three concrete, non-browser entry points. Live-owner
 closure requires the daemon's exact bound runner control, an active session on
-a finalizing run, frozen input, recorded provider exit and positive owned-group
-absence; one Store transaction releases the provider process/group resources
-and closes the session. Recovered closure requires already-recorded exact
-runner and provider-group absence plus corresponding recovered resource/exit
-evidence. Pre-exec closure requires the exact registered outer owner to have
-synchronously aborted the inert child while provider identity was never
-activated; one transaction releases the still-declared provider resources and
-closes the declared session. Arbitrary booleans, browser calls and recovered
-numeric PID/PGID are not closure evidence.
+a finalizing run, frozen input, the exact provider terminal record produced
+after the owner's sole Wait, and positive owned-group absence; Store commits
+that evidence before acknowledgement and closes the active session with the
+exact resource release. Recovered closure never signals and requires each
+persisted process PID/birth to observe absent-or-reused plus the exact provider
+group absent before recording typed `recovered_absence`. Pre-exec closure
+requires the exact configured controller's one-shot `AttemptInnerNoStart`
+receipt (`not-created` with no identity/exit, or `owned-converged` with exact
+identity and sole-Wait exit), followed by the daemon's sole Wait of its outer
+runner and commit of that exact runner exit; it releases only still-empty
+provider resources and the declared session. Arbitrary booleans, browser
+calls, EOF, outer PID absence, lifetime flock or empty rows are not closure
+evidence.
 
 Admission declares it before allocation; activation binds the already-active
 exact runner identity. A live runner may close it after it has stopped writes,
-closed the master and proved provider-group absence. Recovery may close it only
-after exact runner and provider-group absence; every weaker case becomes
-`unresolved`. Provider leader and group remain separate durable facts because
-leader reap is not group absence.
+closed the master, sole-waited the provider and proved provider-group absence.
+Recovery may close it only after every exact persisted PID/birth observes
+absent-or-reused, the exact group observes absent and typed recovered-absence
+evidence commits; every weaker case becomes `unresolved`. Provider leader and
+group remain separate durable facts because leader reap is not group absence.
 
 The Darwin preparation sequence is explicit and gets its own syscall spike.
 The attempt runner calls `openpty` with close-on-exec, retains the master, and
@@ -1409,7 +1482,7 @@ The existing process tree is retained deliberately:
 ```text
 factoryd
 └── outer attempt-runner child (ordinary blocked process; no PTY)
-    └── inner change-worker child (blocked PTY child)
+    └── `factory-runner --change-worker-shell` (blocked PTY child)
         └── same PID/PGID after exec: shell, Claude or Codex provider
 ```
 
@@ -2967,9 +3040,10 @@ internal/install is added only after client/kernel cutover readiness.
   process identity. It does not know project/task/Change policy.
 - `internal/change`: exact Git-tree selection/materialization, Change
   filesystem identity, manifests, adoption/recovery, and stable snapshot
-  creation. The same package is used by a private `factoryd --change-worker`
-  mode so `factory-runner` remains provider- and Change-policy-blind. It cannot
-  launch a verifier or decide an outcome.
+  creation. One private `factory-runner --change-worker-shell` mode calls the
+  concrete `internal/changeworker` path; the daemon has no Change-worker mode,
+  and `internal/runner` remains provider- and Change-policy-blind. The worker
+  cannot launch a verifier or decide an outcome.
 - `internal/verify`: the three fixed verification policies and their closed
   launch specifications/environments, bounded result/bundle validators,
   and policy-specific refinement. It consumes a stable snapshot; it does not
@@ -3154,21 +3228,25 @@ complete Change preceded provider execution without adding a `selected` state
 or separate selection checkpoint:
 
 1. Inside one immediate write transaction, `AdmitNext` selects the canonical
-   task incarnation, selects its existing eligible Change or inserts the one
-   supplied fresh candidate ID, performs the exact retry/reservation
-   transition, and commits the run, credential digest, admitted Change
-   revision, runtime claim, initial resource declarations and invalidations.
-   No durable filesystem locator or caller-selected reuse fact exists.
+   task incarnation, then selects its Change. Every worker request supplies a
+   fresh candidate ID: an existing eligible row causes the transaction to
+   ignore it completely, while no row causes the candidate to be inserted.
+   The transaction performs the exact retry/reservation transition and commits
+   the run, credential digest, actual Change ID, admitted Change revision,
+   runtime claim, initial resource declarations and invalidations. No durable
+   filesystem locator or caller-selected reuse fact exists.
 2. Daemon creates the exact private runtime root and binds its inode.
 3. Daemon creates/binds a private startup lease before outer runner spawn.
 4. Daemon starts an inert parent-bound runner gate and records exact runner
    PID/birth before releasing it into `factory-runner`.
 5. Runner prepares a second parent-bound child as process-group leader. That
-   child is the private `factoryd --change-worker`, a registered source wrapper
-   blocked before Git selection/provider `exec`; runner reports exact
-   PID/PGID/birth. Both gates use the frozen control-FD-3/Change-parent-FD-11
-   remap, and the outer runner closes its Change-parent duplicate after this
-   one-shot preparation.
+   child is the one private `factory-runner --change-worker-shell` source
+   wrapper, blocked before Git selection/provider `exec`; runner reports exact
+   PID/PGID/birth. There is no second daemon-hosted worker process. Both gates
+   use the frozen control-FD-3/Change-parent-FD-11 remap, and the outer runner
+   closes its Change-parent duplicate after this one-shot preparation.
+   Failure before readiness emits only the closed `AttemptInnerNoStart`
+   receipt defined above and exits; it cannot continue into preparation.
 6. Daemon binds those identities and releases preparation once. The wrapper
    selects an exact local commit without lazy fetch, computes a canonical
    Git-tree commitment, descriptor-creates the deterministic empty stage and
@@ -3498,19 +3576,19 @@ contracts.
 | --- | --- | --- |
 | SQLite configuration | On native macOS and Linux, open fresh/reopen/concurrent connections; assert foreign keys on every pooled connection, WAL readers during an immediate writer, bounded busy behavior, literal immediate exclusion, rollback after SIGKILL, and acknowledged state/event survival | deferred `BEGIN`; connection without PRAGMAs; swallowed/unbounded busy error; split transaction |
 | Atomic canonical admission | Race stale observation, priority/timestamp/ID insertion, dispatch disable, budget/agent gates, factory-wide capacity including finalizing, and two admits; separately prove one-open-run uniqueness per agent/task incarnation/Change and inspect the exact footprint | caller-selected task; stale queue head; per-agent capacity; unchecked task row; process-local-only capacity |
-| Canonical Change admission/revision | In that same write transaction, insert work ahead of a stale caller, select the Change by canonical task incarnation, reject an existing row not settled by the immediately preceding terminal worker run, and prove fresh/retained/abandoned retries bind their actual ID and exact admitted-relative revision deltas with same-transaction invalidations; reconcile a lost reply after the Change has advanced | caller-selected reuse ID/phase/revision/path; retry outside queue selection; `>` revision check; wrong delta; require current revision during reconciliation |
+| Canonical Change admission/revision | In that same write transaction, insert work ahead of a stale caller, select the Change by canonical task incarnation, ignore the always-fresh candidate when a row exists, and require its unique settling predecessor to have `admitted_task_work_revision == task.work_revision-1`; prove fresh/retained/abandoned runs bind their actual ID and exact admitted-relative deltas, then reconcile a lost reply after later Change progress | optional/reused candidate; compare candidate on reuse; timestamp/latest-run predecessor; caller phase/revision/path; `>` revision check; require current revision during reconciliation |
 | Commit ambiguity | Cut/interrupt begin, commit response, and rollback; discard handle, reopen, reconcile by domain ID/revision, return outcome-unknown where not provable, and perform no second transition | retry blindly; reuse ambiguous connection; generic receipt fallback |
 | Fresh schema allowlist | Query schema objects after init and assert the exact table/index/trigger allowlist excludes operations, mutation receipts, decisions, quarantine, intake, compatibility, and migration residue | add speculative authority table; retain Rust compatibility object |
 | Exact attempt authority | Exercise forged, old, admitted, wrong-run/project, operator, finalizing and terminal credentials against every attempt mutation | drop phase join; accept caller IDs; operator fallback; reuse credential on retry |
 | First outcome/finalizing | Run completion-before-exit and exit-before-completion; assert immutable proposal and revoked credential | overwrite first proposal; mutate during finalizing; direct running->terminal |
 | Finalizer only/one-way | With all resources released, repeated/concurrent finalizers create one terminal record/event; with any unresolved resource, they create none; later positive absence permits only unresolved->released->one terminal | terminalize unresolved; released->active/unresolved; duplicate terminal event |
 | Register-before-exec | External provider witness remains absent until run/resource identities are committed running; replacement before activation, version-symlink swap, target removal, byte/mode mutation, final-check failure, and lost activation acknowledgement preserve the frozen launch or fail without execution; a controlled post-check replacement records the explicitly out-of-scope same-UID pathname seam | release either gate early; omit preparation leash; persist identity after exec; re-resolve installation symlink; omit final metadata/digest comparison; retarget on mismatch; claim inode-atomic execution |
-| Owned process authority | Live runner stops exact direct-child group; recovered daemon with only PID/PGID never signals | daemon killpg fallback; retain signal authority after Wait; skip kill-and-wait |
+| Owned process authority | Live settlement requires the exact terminal record after sole Wait and group absence; recovery proves persisted PID/birth absent-or-reused plus exact group absence, records `recovered_absence` and never signals; never-bound release requires the closed exact-controller no-start receipt or owned convergence | daemon killpg fallback; release on PID absence/EOF/flock/empty rows; accept no-start after inner-ready; omit terminal/Wait/group proof |
 | Liveness fails closed | Real ESRCH, EPERM where feasible, malformed/overflow IDs, weak/mismatched/reused identity and leader-with-descendant | EPERM as absent; malformed as released; leader exit equals group absence |
 | Crash/restart at-most-once | SIGKILL daemon/runner at every launch, exit, cleanup and acknowledgement cut; count external witness/input; reopen same home | relaunch admitted run; ack before Store commit; remove runtime before absence |
 | Change exactness | Materialize a real commit and verify manifest/blob/mode/path/base/inode; deny Git discovery/worktree and replacements | resolve moving ref; `git archive`; allow symlink/gitlink/.git; wrong base; delete replacement |
-| Change crash recovery | Kill after stage mkdir before `prepared` and after publish before `available`; prove the former removes only an exact stable empty orphan and abandons, while the latter requires all mutators gone plus exact persisted inode and prepared commitment before becoming available/retained without provider activation | delete nonempty/malformed/replaced stage; trust inode alone; adopt replacement; replay provider |
-| Change settlement arms | Exercise identified provider exit/reap/group absence and never-identified empty process resources separately; prove direct/prepared abandonment deltas, exact settlement, retained-fact reinspection, and historical terminal replay after multiple retries | fabricate never-started exit; abandon live/ambiguous child; bless replacement facts; validate historical terminal against latest settlement |
+| Change crash recovery | Kill after stage mkdir before `prepared`, after exact stage removal before fsync/Store commit, and after publish before `available`; prove stable prior absence or exact removal can abandon, while publication requires all mutators gone, exact final identity/commitment and deterministic stage absence around parent recheck | require present stage; skip fsync; delete replacement; accept simultaneous/reappeared stage; trust inode alone; replay provider |
+| Change settlement arms | Exercise live terminal/sole-Wait/group proof, recovered exact absence and both no-start receipt variants separately; prove direct/prepared abandonment deltas, exact settlement, retained-fact reinspection, and historical terminal replay after multiple retries | fabricate never-started exit; recover without group absence; reconstruct receipt from outer absence/EOF; abandon live/ambiguous child; bless replacement facts |
 | Private Change worker | Invoke the private mode without inherited owner-only descriptors/parent gate and prove no Git read/path/child effect; exercise the registered mode normally | accept direct argv invocation; perform effect before capability check |
 | Stable verification | Provider attempts concurrent write while finalizing; provider must be reaped; scan/copy/scan either yields one digest or refuses; verifier launches controlled snapshot | verify live Change; inherit GOENV/cache/temp/network; launch mutable build output |
 | Verifier bundle identity | Copy two executable fixtures, mutate the second after the first runs, and prove the second never executes | validate a verifier bundle only once; omit immediate pre-launch recheck |
@@ -3533,10 +3611,16 @@ contracts.
 - after runtime/resource declaration and after exact path binding;
 - before and after outer spawn/PID binding/activation;
 - after inner child preparation and identity persistence;
+- before/after each `AttemptInnerNoStart` variant, the daemon's sole outer
+  `Wait` and the still-empty resource/session release commit;
+- between each recovered exact PID/birth observation, exact group-absence
+  observation, typed `recovered_absence` commit and resource release;
 - before/after the one preparation release; immediately after deterministic
   stage mkdir but before the combined prepared report/commit; before/after the
   population release, staging publication, publication report, plain-tree
   rehash, and Change-available commit;
+- after exact prepared-stage removal but before parent fsync, and after parent
+  fsync/absence recheck but before the abandonment Store commit;
 - immediately before/after provider release and lost release acknowledgement;
 - after provider exit, terminal spool publication, Store observation, and
   before/after runner acknowledgement;
@@ -3618,8 +3702,18 @@ At minimum record the killing test for:
   invalidations;
 - identified-provider versus never-identified abandonment proof;
 - exact prepared/final/retained identity and content-fact checks;
+- stable prior prepared-stage absence, parent fsync and both-name recheck;
+- prepared-to-available refusal while the deterministic stage is present,
+  reappears or is replaced around the parent-binding check;
 - Change-parent FD 11 exclusion from Git/provider and outer-runner duplicate
   closure after one-shot child preparation;
+- live terminal/sole-Wait/group proof, recovered absence without signaling and
+  exact `AttemptInnerNoStart` controller-state/shape validation;
+- refusal to reconstruct no-start from outer PID absence, control EOF,
+  lifetime flock or still-empty resource rows;
+- exact `factory-runner --change-worker-shell` worker executable with no
+  daemon-hosted worker fallback;
+- intermediate transition replay rejected after later aggregate progress;
 - historical terminal replay after one and multiple Change retries.
 
 Mutation changes are temporary, one at a time, and never retained. A flaky or
