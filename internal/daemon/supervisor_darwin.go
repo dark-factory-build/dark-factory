@@ -16,6 +16,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/changeworker"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/provider"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
@@ -121,7 +122,7 @@ func (owner *supervisorAttemptOwner) close() error {
 func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kernel.Run, resultErr error) {
 	if ctx == nil || daemon == nil || daemon.store == nil || spec.RuntimeParent == nil ||
 		spec.ChangeParent == "" || !filepath.IsAbs(spec.ChangeParent) || filepath.Clean(spec.ChangeParent) != spec.ChangeParent ||
-		spec.GitExecutable == "" || spec.BaseRevision == "" || spec.AttemptSocket == "" || spec.RunnerExecutable == "" || spec.FactoryctlExecutable == "" {
+		spec.GitExecutable == "" || spec.BaseRevision == "" || spec.AttemptSocket == "" || spec.RunnerExecutable == "" || spec.FactoryctlExecutable == "" || provider.ValidateToolPath(spec.ToolPath) != nil {
 		return kernel.Run{}, fmt.Errorf("%w: invalid supervisor specification", kernel.ErrInvalidValue)
 	}
 	keys, err := newSupervisorKeys(rand.Reader)
@@ -180,8 +181,8 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		return kernel.Run{}, fmt.Errorf("%w: no admission (%s)", kernel.ErrConflict, admission.Reason.String())
 	}
 	run := *admission.Run
-	if run.Role != kernel.RoleWorker || run.Provider != kernel.ProviderShell {
-		return daemon.failRun(run, kernel.FailureSpawn, fmt.Errorf("%w: supervisor spike supports shell workers only", kernel.ErrInvalidValue))
+	if run.Role != kernel.RoleWorker {
+		return daemon.failRun(run, kernel.FailureSpawn, fmt.Errorf("%w: supervisor supports worker runs only", kernel.ErrInvalidValue))
 	}
 	project, found, err := daemon.store.Project(ctx, run.ProjectID)
 	if err != nil || !found {
@@ -213,6 +214,10 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 			err = kernel.ErrCorruptState
 		}
 		return daemon.failRun(run, kernel.FailureInternal, err)
+	}
+	providerTask, err := provider.Task(run.Provider, []byte(task.Body))
+	if err != nil {
+		return daemon.failRun(run, kernel.FailureSpawn, err)
 	}
 	changeState, found, err := daemon.store.Change(ctx, changeID)
 	if err != nil || !found {
@@ -261,10 +266,11 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		return daemon.failRun(run, kernel.FailureSpawn, err)
 	}
 	config := changeworker.Config{
+		Provider: run.Provider, Model: run.Model, ReasoningEffort: run.ReasoningEffort,
 		RuntimePath: gotRuntimePath, RuntimeIdentity: runtimeFileIdentity,
-		GitExecutable: spec.GitExecutable, FactoryctlExecutable: factoryctl.Path(), RepositoryRoot: project.Root, RepositoryIdentity: repositoryIdentity,
+		GitExecutable: spec.GitExecutable, FactoryctlExecutable: factoryctl.Path(), ToolPath: spec.ToolPath, RepositoryRoot: project.Root, RepositoryIdentity: repositoryIdentity,
 		Revision: spec.BaseRevision, ChangeParent: spec.ChangeParent, FinalName: finalName, StagingName: stagingName,
-		AttemptSocket: spec.AttemptSocket, Retained: retained, InitialTerminalInput: []byte(task.Body),
+		AttemptSocket: spec.AttemptSocket, Retained: retained, ProviderTask: providerTask,
 	}
 	if _, err := runtimeValue.PublishWorkerConfig(ctx, config); err != nil {
 		return daemon.failRun(run, kernel.FailureSource, err)
@@ -306,7 +312,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		return daemon.failRun(run, kernel.FailureSpawn, err)
 	}
 	wrapper, err := runner.PrepareExecSpec(runner.ExecSpec{
-		Target: spec.RunnerExecutable, Args: []string{"--change-worker-shell"},
+		Target: spec.RunnerExecutable, Args: []string{"--change-worker"},
 		Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: home,
 	})
 	if err != nil {

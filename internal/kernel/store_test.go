@@ -164,6 +164,14 @@ func TestProviderLaunchControlsAtAgentCreation(t *testing.T) {
 			seed++
 		}
 	}
+	for index, model := range []string{string([]byte{0xff}), "model\x00suffix"} {
+		if _, err := store.CreateAgent(ctx, NewAgent{
+			ID: agentID(t, byte(230+index)), ProjectID: project.ID, Name: "invalid-model", Role: RoleOrchestrator,
+			Provider: ProviderCodex, Model: model, ToolBudgetLimit: 1,
+		}, mustTime(t, int64(230+index))); !errors.Is(err, ErrInvalidValue) {
+			t.Fatalf("invalid model %x error = %v", []byte(model), err)
+		}
+	}
 }
 
 func TestStateAndInvalidationRollbackTogether(t *testing.T) {

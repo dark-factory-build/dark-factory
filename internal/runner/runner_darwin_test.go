@@ -64,6 +64,7 @@ func TestMain(m *testing.M) {
 	}
 	if len(os.Args) == 3 && os.Args[1] == "--lifetime-provider" {
 		if err := runLifetimeProviderHelper(os.Args[2]); err != nil {
+			_ = os.WriteFile(filepath.Join(os.Args[2], "provider.error"), []byte(err.Error()), 0o600)
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(95)
 		}
@@ -824,11 +825,14 @@ func runLifetimeProviderHelper(root string) error {
 	if err := unix.Fstat(10, &lifetime); err != nil || lifetime.Mode&unix.S_IFMT != unix.S_IFREG || lifetime.Mode&0o7777 != 0o600 || lifetime.Size != 0 || lifetime.Nlink != 1 {
 		return fmt.Errorf("provider lifetime descriptor: %v", err)
 	}
-	for _, fd := range []int{3, 4, 5, 6, 7, 8, 9, 11, 12} {
+	for _, fd := range []int{3, 4, 5, 6, 7, 8, 9, 12} {
 		var stat unix.Stat_t
 		if err := unix.Fstat(fd, &stat); !errors.Is(err, unix.EBADF) {
 			return fmt.Errorf("provider inherited fd %d: %v", fd, err)
 		}
+	}
+	if err := validateProviderTaskDescriptor(11); err != nil {
+		return fmt.Errorf("provider task descriptor: %w", err)
 	}
 	if err := unix.Fchdir(10); !errors.Is(err, unix.ENOTDIR) && !errors.Is(err, unix.EBADF) {
 		return fmt.Errorf("provider lifetime allowed fchdir: %v", err)
@@ -1556,8 +1560,8 @@ func buildWitnessBinary(t *testing.T, output, value string) {
 	}
 	goBinary := filepath.Join(runtime.GOROOT(), "bin", "go")
 	command := exec.Command(goBinary, "build", "-o", output, source)
-	environment := []string{"GOENV=off", "GOWORK=off", "GOTOOLCHAIN=local", "CGO_ENABLED=0", "TMPDIR=" + t.TempDir()}
-	for _, key := range []string{"GOCACHE", "GOMODCACHE", "GOPATH", "GOTMPDIR"} {
+	environment := []string{"GOENV=off", "GOWORK=off", "GOTOOLCHAIN=local", "CGO_ENABLED=0", "GOCACHE=" + t.TempDir(), "TMPDIR=" + t.TempDir()}
+	for _, key := range []string{"GOMODCACHE", "GOPATH", "GOTMPDIR"} {
 		if value := os.Getenv(key); value != "" {
 			environment = append(environment, key+"="+value)
 		}

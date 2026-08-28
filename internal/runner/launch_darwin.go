@@ -21,13 +21,11 @@ func PrepareExecSpec(spec ExecSpec) (*LaunchSpec, error) {
 	if len(spec.Stdin) > maxInputBytes {
 		return nil, fmt.Errorf("runner: stdin too large")
 	}
-	if len(spec.Args) > 128 || len(spec.Env) > 128 {
-		return nil, fmt.Errorf("runner: argv/env too large")
+	if err := validateArgv(append([]string{spec.Target}, spec.Args...), ""); err != nil {
+		return nil, err
 	}
-	for _, s := range spec.Args {
-		if len(s) > 8192 || strings.IndexByte(s, 0) >= 0 {
-			return nil, fmt.Errorf("runner: invalid argv/env")
-		}
+	if len(spec.Env) > 128 {
+		return nil, fmt.Errorf("runner: argv/env too large")
 	}
 	if err := validateEnvironment(spec.Env); err != nil {
 		return nil, err
@@ -49,7 +47,54 @@ func PrepareExecSpec(spec ExecSpec) (*LaunchSpec, error) {
 		controlID = &committed
 	}
 	argv := append([]string{target.Path}, spec.Args...)
+	if err := validateArgv(argv, target.Path); err != nil {
+		return nil, err
+	}
 	return &LaunchSpec{commit: launchCommitment{Executable: target, Cwd: cwd, Argv: argv, Env: append([]string{}, spec.Env...)}, stdin: append([]byte{}, spec.Stdin...), stdout: spec.Stdout, stderr: spec.Stderr, control: spec.Control, controlID: controlID}, nil
+}
+
+// PrepareCommittedExecSpec prepares the provider-only launch shape without
+// reopening and recommitting its executable pathname. The executable was
+// already selected and committed by provider construction; the exact argv[0]
+// binding prevents a caller from describing a different process identity.
+func PrepareCommittedExecSpec(executable ExecutableCommitment, argv, environment []string, cwd string) (*LaunchSpec, error) {
+	if err := validateArgv(argv, executable.Path()); err != nil {
+		return nil, err
+	}
+	if len(environment) > 128 {
+		return nil, fmt.Errorf("runner: argv/env too large")
+	}
+	if err := validateEnvironment(environment); err != nil {
+		return nil, err
+	}
+	if err := executable.Verify(); err != nil {
+		return nil, err
+	}
+	directory, err := commitDirectory(cwd)
+	if err != nil {
+		return nil, err
+	}
+	return &LaunchSpec{commit: launchCommitment{
+		Executable: executable.executable,
+		Cwd:        directory,
+		Argv:       append([]string(nil), argv...),
+		Env:        append([]string(nil), environment...),
+	}}, nil
+}
+
+func validateArgv(argv []string, executable string) error {
+	if len(argv) == 0 || len(argv) > 129 {
+		return fmt.Errorf("runner: argv does not name committed executable: %w", ErrIdentity)
+	}
+	if executable != "" && argv[0] != executable {
+		return fmt.Errorf("runner: argv does not name committed executable: %w", ErrIdentity)
+	}
+	for _, value := range argv {
+		if len(value) > 8192 || strings.IndexByte(value, 0) >= 0 || !utf8.ValidString(value) {
+			return fmt.Errorf("runner: invalid argv")
+		}
+	}
+	return nil
 }
 
 func commitControl(f *os.File) (descriptorCommitment, error) {
@@ -92,7 +137,7 @@ func verifyControl(f *os.File, want descriptorCommitment) error {
 func allowedEnv(k string) bool {
 	switch k {
 	case "HOME", "PATH", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TERM", "SHELL", "USER", "LOGNAME",
-		"DARK_FACTORY_SOCKET", "DARK_FACTORY_ATTEMPT_TOKEN_FILE", "DARK_FACTORY_FACTORYCTL", "NO_COLOR",
+		"DARK_FACTORY_SOCKET", "DARK_FACTORY_ATTEMPT_TOKEN_FILE", "DARK_FACTORY_FACTORYCTL",
 		"GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL",
 		"GIT_TERMINAL_PROMPT", "GIT_ASKPASS", "GIT_SSH_COMMAND", "GH_CONFIG_DIR":
 		return true
@@ -103,7 +148,7 @@ func allowedEnv(k string) bool {
 func validateEnvironment(environment []string) error {
 	seen := make(map[string]struct{}, len(environment))
 	for _, entry := range environment {
-		if len(entry) > 8192 || strings.IndexByte(entry, 0) >= 0 || !utf8.ValidString(entry) {
+		if len(entry) > MaxEnvironmentEntryBytes || strings.IndexByte(entry, 0) >= 0 || !utf8.ValidString(entry) {
 			return fmt.Errorf("runner: invalid environment")
 		}
 		parts := strings.SplitN(entry, "=", 2)
@@ -140,14 +185,6 @@ func canonical(path string) (string, error) {
 	return resolved, nil
 }
 
-// ExecutableCommitment freezes one exact direct native executable locator.
-// Its formatting is intentionally private because provider helper paths are
-// runtime authority, not diagnostics.
-type ExecutableCommitment struct{ executable fileCommitment }
-
-func (ExecutableCommitment) String() string   { return "runner executable commitment (private)" }
-func (ExecutableCommitment) GoString() string { return "runner.ExecutableCommitment{private}" }
-
 func CommitExecutableLocator(path string) (ExecutableCommitment, error) {
 	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path || path == string(filepath.Separator) {
 		return ExecutableCommitment{}, fmt.Errorf("runner: invalid executable locator: %w", ErrIdentity)
@@ -163,8 +200,6 @@ func CommitExecutableLocator(path string) (ExecutableCommitment, error) {
 	}
 	return ExecutableCommitment{executable: committed}, nil
 }
-
-func (commitment ExecutableCommitment) Path() string { return commitment.executable.Path }
 
 func (commitment ExecutableCommitment) Verify() error {
 	if commitment.executable.Path == "" {

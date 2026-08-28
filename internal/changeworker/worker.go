@@ -10,14 +10,14 @@ var (
 	ErrUnsupported = errors.New("Change worker unsupported")
 )
 
-// RunShell runs the one registered private Change-worker mode. Errors are
+// Run runs the one registered private Change-worker mode. Errors are
 // deliberately fixed: repository, runtime, Change, token and input values are
 // never exposed through this process boundary.
-func RunShell(ctx context.Context) error {
+func Run(ctx context.Context) error {
 	if ctx == nil {
 		return ErrWorker
 	}
-	err := runShell(ctx)
+	err := runProvider(ctx)
 	if err == nil {
 		return nil
 	}

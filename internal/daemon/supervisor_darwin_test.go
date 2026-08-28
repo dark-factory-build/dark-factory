@@ -25,6 +25,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/changeworker"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/provider"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 	"golang.org/x/sys/unix"
 )
@@ -37,8 +38,8 @@ func TestMain(m *testing.M) {
 			err = runner.RunExecGate()
 		case "--attempt-runner":
 			err = runner.RunAttemptRunner()
-		case "--change-worker-shell":
-			err = changeworker.RunShell(context.Background())
+		case "--change-worker":
+			err = changeworker.Run(context.Background())
 		case "--supervisor-attempt-succeed":
 			if len(os.Args) != 3 {
 				err = errors.New("invalid attempt helper invocation")
@@ -401,7 +402,7 @@ func TestSupervisorRevalidatesFactoryctlImmediatelyBeforeProviderRelease(t *test
 	}
 }
 
-func TestSupervisorRejectsInvalidFactoryctlAfterAdmissionBeforeProviderEffect(t *testing.T) {
+func TestSupervisorRecordsInvalidFactoryctlAfterAdmissionWithoutProviderEffect(t *testing.T) {
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -445,8 +446,9 @@ func TestSupervisorRejectsInvalidFactoryctlAfterAdmissionBeforeProviderEffect(t 
 			if err == nil || strings.Contains(err.Error(), locator) {
 				t.Fatalf("invalid factoryctl result=%v", err)
 			}
-			if run.Phase != kernel.RunFinalizing || run.Proposal == nil || run.Proposal.Kind() != kernel.OutcomeFailed || run.Proposal.Code() != kernel.FailureSpawn || run.CredentialRevokedAt == nil {
-				t.Fatalf("invalid factoryctl run=%+v", run)
+			fixture.trackRun(run.ID)
+			if run.Phase != kernel.RunFinalizing || run.CredentialRevokedAt == nil || run.Proposal == nil || run.Proposal.Kind() != kernel.OutcomeFailed || run.Proposal.Code() != kernel.FailureSpawn || run.Terminal != nil {
+				t.Fatalf("invalid factoryctl durable run = %+v", run)
 			}
 			if _, err := os.Stat(fixture.witness); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("provider witness exists: %v", err)
@@ -457,6 +459,67 @@ func TestSupervisorRejectsInvalidFactoryctlAfterAdmissionBeforeProviderEffect(t 
 			}
 		})
 	}
+}
+
+func TestSupervisorUsesFrozenRunLaunchControlsAfterAdmission(t *testing.T) {
+	fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
+	fixture.spec.afterAdmission = func() error {
+		return replaceSupervisorAgentLaunchControls(fixture.storePath, fixture.agentID, kernel.ProviderCodex, "post-admission-model", "high")
+	}
+	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, run, kernel.OutcomeSucceeded)
+	if run.Provider != kernel.ProviderShell || run.Model != "" || run.ReasoningEffort != "" {
+		t.Fatalf("frozen run controls = provider=%s model=%q effort=%q", run.Provider, run.Model, run.ReasoningEffort)
+	}
+	fixture.assertOneWitness(t)
+}
+
+func TestSupervisorRecordsUnavailableProviderAfterAdmission(t *testing.T) {
+	fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
+	if err := replaceSupervisorAgentLaunchControls(fixture.storePath, fixture.agentID, kernel.ProviderCodex, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if !errors.Is(err, provider.ErrUnavailable) {
+		t.Fatalf("RunNext error = %v, want provider unavailable", err)
+	}
+	fixture.trackRun(run.ID)
+	if run.Provider != kernel.ProviderCodex || run.Phase != kernel.RunFinalizing || run.CredentialRevokedAt == nil || run.Proposal == nil || run.Proposal.Code() != kernel.FailureSpawn || run.Terminal != nil {
+		t.Fatalf("unavailable provider durable run = %+v", run)
+	}
+	if _, err := os.Stat(fixture.witness); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unavailable provider reached execution: %v", err)
+	}
+}
+
+func replaceSupervisorAgentLaunchControls(path string, agentID kernel.AgentID, providerKind kernel.Provider, model, effort string) error {
+	database, err := sql.Open("sqlite3", "file:"+path)
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	var modelValue, effortValue any
+	if model != "" {
+		modelValue = model
+	}
+	if effort != "" {
+		effortValue = effort
+	}
+	result, err := database.Exec(`UPDATE agents SET provider = ?, model = ?, reasoning_effort = ? WHERE id = ?`, providerKind.String(), modelValue, effortValue, agentID.Bytes())
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return fmt.Errorf("mutated agent rows = %d", rows)
+	}
+	return nil
 }
 
 func TestFailRunSharesOperationGateWithTerminalEffects(t *testing.T) {
@@ -1293,6 +1356,7 @@ type supervisorFixture struct {
 	root, witness, childReceipt, continueReceipt string
 	base, changeParent, runtimeParentPath        string
 	storePath                                    string
+	agentID                                      kernel.AgentID
 	daemon                                       *Daemon
 	store                                        *kernel.Store
 	runtimeParent                                *RuntimeParent
@@ -1387,6 +1451,7 @@ func newSupervisorFixture(t *testing.T, program string) *supervisorFixture {
 	fixture.storePath = storePath
 	projectID := supervisorProjectID(t, 1)
 	agentID := supervisorAgentID(t, 2)
+	fixture.agentID = agentID
 	taskID := supervisorTaskID(t, 3)
 	project, err := store.CreateProject(context.Background(), kernel.NewProject{ID: projectID, Name: "project", Root: repository, VerificationPolicy: kernel.VerificationNone}, supervisorTime())
 	if err != nil {
@@ -1453,6 +1518,7 @@ func newSupervisorFixture(t *testing.T, program string) *supervisorFixture {
 	fixture.spec = SupervisorSpec{
 		RuntimeParent: runtimeParent, ChangeParent: changeParent,
 		GitExecutable: git, BaseRevision: base, AttemptSocket: socket, RunnerExecutable: executable, FactoryctlExecutable: factoryctl,
+		ToolPath: filepath.Join(runtime.GOROOT(), "bin") + ":/usr/bin:/bin",
 	}
 	return fixture
 }
@@ -1744,8 +1810,9 @@ func supervisorHumanRequestProgram(t *testing.T, key, question string) string {
 		t.Fatal(err)
 	}
 	request := "\"$DARK_FACTORY_FACTORYCTL\" attempt request-human --idempotency-key " + quoteShell(key) + " --question " + quoteShell(question) + "\n"
+	toolPath := filepath.Join(runtime.GOROOT(), "bin") + ":/usr/bin:/bin"
 	return "set -eu\n" +
-		"test \"$PATH\" = /usr/bin:/bin\n" +
+		"test \"$PATH\" = " + quoteShell(toolPath) + "\n" +
 		"case \"$DARK_FACTORY_FACTORYCTL\" in /*) ;; *) exit 83 ;; esac\n" +
 		"test -x \"$DARK_FACTORY_FACTORYCTL\"\n" +
 		"printf x >> __WITNESS__\n" + request + request +

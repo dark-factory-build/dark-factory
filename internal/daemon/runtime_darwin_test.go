@@ -17,6 +17,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/changeworker"
 	"github.com/dark-factory-build/dark-factory/internal/install"
+	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 	"golang.org/x/sys/unix"
 )
@@ -1408,7 +1409,7 @@ func TestRuntimeValuesAndErrorsRedactPrivateSentinels(t *testing.T) {
 	runtime := newTestRuntime(t)
 	defer runtime.Close()
 	config := workerConfigForRuntime(t, runtime)
-	config.InitialTerminalInput = []byte("PRIVATE-CONTENTS")
+	config.ProviderTask = []byte("PRIVATE-CONTENTS")
 	file, err := runtime.PublishWorkerConfig(context.Background(), config)
 	if err != nil {
 		t.Fatal(err)
@@ -1418,7 +1419,7 @@ func TestRuntimeValuesAndErrorsRedactPrivateSentinels(t *testing.T) {
 			t.Fatalf("private file formatting leaked: %q", formatted)
 		}
 	}
-	config.InitialTerminalInput = []byte("SECOND-PRIVATE")
+	config.ProviderTask = []byte("SECOND-PRIVATE")
 	_, err = runtime.PublishWorkerConfig(context.Background(), config)
 	if err == nil || stringsContainsAny(err.Error(), mustRuntimePath(t, runtime), "SECOND-PRIVATE") {
 		t.Fatalf("private error leaked: %v", err)
@@ -1765,11 +1766,12 @@ func workerConfigForRuntime(t testing.TB, runtime *Runtime) changeworker.Config 
 		t.Fatal(err)
 	}
 	return changeworker.Config{
+		Provider:    kernel.ProviderShell,
 		RuntimePath: path, RuntimeIdentity: identity, GitExecutable: "/usr/local/bin/git",
-		FactoryctlExecutable: factoryctl,
-		RepositoryRoot:       "/private/repository", RepositoryIdentity: repository, Revision: "main",
+		FactoryctlExecutable: factoryctl, ToolPath: "/opt/homebrew/bin:/usr/bin:/bin",
+		RepositoryRoot: "/private/repository", RepositoryIdentity: repository, Revision: "main",
 		ChangeParent: "/private/changes", FinalName: "change", StagingName: ".change.stage",
-		AttemptSocket: "/private/api.sock", InitialTerminalInput: []byte("echo exact"),
+		AttemptSocket: "/private/api.sock", ProviderTask: []byte("echo exact"),
 	}
 }
 

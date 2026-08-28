@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
 )
@@ -77,10 +78,13 @@ func runAttemptWorkerHelper(args []string) error {
 	}
 	providerCwd := filepath.Join(root, "work")
 	var provider ExecSpec
-	var initialInput []byte
+	var providerTask []byte
 	switch mode {
-	case "shell", "term", "leader", "tail", "reply":
-		script := fmt.Sprintf("test -z \"${HOME+x}\" || exit 90; test -z \"${DARK_FACTORY_ATTEMPT_TOKEN+x}\" || exit 91; for n in 3 4 5 6 7 8 9 11; do test ! -e /dev/fd/$n || exit 92; done; test -f /dev/fd/10 || exit 93; test ! -s /dev/fd/10 || exit 94; cat /dev/fd/10/change-worker.config >/dev/null 2>&1 && exit 95; cd /dev/fd/10 >/dev/null 2>&1 && exit 96; printf '%%s' $$ > %q; printf 'pre-output\\n'; while test ! -f %q; do sleep 0.01; done; printf 'post-output\\n'; printf x >> %q; while test ! -f %q; do sleep 0.01; done; IFS= read -r line; printf '%%s' \"$line\" > %q", filepath.Join(root, "provider.pid"), filepath.Join(root, "continue"), filepath.Join(root, "provider.effect"), filepath.Join(root, "finish"), filepath.Join(root, "provider.stdin"))
+	case "shell", "shell-input", "term", "leader", "tail", "reply":
+		script := fmt.Sprintf("test -z \"${HOME+x}\" || exit 90; test -z \"${DARK_FACTORY_ATTEMPT_TOKEN+x}\" || exit 91; for n in 3 4 5 6 7 8 9; do test ! -e /dev/fd/$n || exit 92; done; test -f /dev/fd/10 || exit 93; test ! -s /dev/fd/10 || exit 94; test -f /dev/fd/11 || exit 97; IFS= read -r task < /dev/fd/11; test \"$task\" = one-startup || exit 98; cat /dev/fd/10/change-worker.config >/dev/null 2>&1 && exit 95; cd /dev/fd/10 >/dev/null 2>&1 && exit 96; printf '%%s' $$ > %q; printf 'pre-output\\n'; while test ! -f %q; do sleep 0.01; done; printf 'post-output\\n'; printf x >> %q; while test ! -f %q; do sleep 0.01; done", filepath.Join(root, "provider.pid"), filepath.Join(root, "continue"), filepath.Join(root, "provider.effect"), filepath.Join(root, "finish"))
+		if mode == "shell-input" {
+			script += fmt.Sprintf("; IFS= read -r line; printf '%%s' \"$line\" > %q", filepath.Join(root, "provider.stdin"))
+		}
 		if mode == "term" {
 			script = fmt.Sprintf("trap '' TERM; sleep 30 & printf '%%s' $! > %q; printf '%%s' $$ > %q; while :; do sleep 1; done", filepath.Join(root, "descendant.pid"), filepath.Join(root, "provider.pid"))
 		}
@@ -92,9 +96,9 @@ func runAttemptWorkerHelper(args []string) error {
 		}
 		if mode == "reply" {
 			script = fmt.Sprintf("printf '%%s' $$ > %q; printf 'pre-output\\n'; while test ! -f %q; do sleep 0.01; done; printf 'post-output\\n'; stty -icanon -echo min 1 time 0; dd if=/dev/stdin bs=12 count=1 2>/dev/null > %q; while test ! -f %q; do sleep 0.01; done", filepath.Join(root, "provider.pid"), filepath.Join(root, "continue"), filepath.Join(root, "provider.reply"), filepath.Join(root, "finish"))
-			initialInput = nil
+			providerTask = nil
 		} else {
-			initialInput = []byte("one-startup\n")
+			providerTask = []byte("one-startup\n")
 		}
 		provider = ExecSpec{Target: "/bin/sh", Args: []string{"-c", script}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: providerCwd}
 	case "binary", "seam", "lifetime", "lease-seam", "cwd", "cwd-seam", "cwd-unrelated", "cwd-file", "cwd-closed", "cwd-reused", "cwd-mode", "cwd-inherited", "cwd-inherited-11", "cwd-inherited-19", "cwd-inherited-20", "cwd-inherited-30":
@@ -195,17 +199,46 @@ func runAttemptWorkerHelper(args []string) error {
 		cwd.Close()
 		return err
 	}
-	if err := control.RegisterProviderInput(initialInput); err != nil {
-		cwd.Close()
-		return err
-	}
 	if strings.HasPrefix(mode, "cwd") {
 		if err := writeCwdDescriptorManifest(root); err != nil {
 			cwd.Close()
 			return err
 		}
 	}
-	return control.ExecProvider(prepared, cwd)
+	if len(providerTask) == 0 {
+		providerTask = []byte("test-provider-task\n")
+	}
+	task, err := createUnlinkedProviderTask(root, providerTask)
+	if err != nil {
+		cwd.Close()
+		return err
+	}
+	return control.ExecProvider(prepared, cwd, task)
+}
+
+func createUnlinkedProviderTask(root string, body []byte) (*os.File, error) {
+	path := filepath.Join(root, ".test-provider-task")
+	writer, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	n, writeErr := writer.Write(body)
+	syncErr := writer.Sync()
+	closeErr := writer.Close()
+	if writeErr != nil || n != len(body) || syncErr != nil || closeErr != nil {
+		_ = os.Remove(path)
+		return nil, errors.Join(writeErr, syncErr, closeErr, io.ErrShortWrite)
+	}
+	reader, err := os.Open(path)
+	if err != nil {
+		_ = os.Remove(path)
+		return nil, err
+	}
+	if err := os.Remove(path); err != nil {
+		_ = reader.Close()
+		return nil, err
+	}
+	return reader, nil
 }
 
 func runRetirementProviderHelper(args []string) error {
@@ -414,8 +447,21 @@ func (f *attemptFixture) output() string {
 	return string(body)
 }
 
+func (f *attemptFixture) nextTerminal(kind TerminalEventKind, correlation uint64) TerminalFrame {
+	f.t.Helper()
+	for {
+		event, err := f.controller.Next(4 * time.Second)
+		if err != nil || event.Kind != AttemptTerminalFrame || event.Frame == nil {
+			f.t.Fatalf("terminal %s event=%+v err=%v output=%q", kind, event, err, f.output())
+		}
+		if event.Frame.Kind == kind && event.Frame.Correlation == correlation {
+			return *event.Frame
+		}
+	}
+}
+
 func TestAttemptRunnerOrdersOuterWrapperAndShellProvider(t *testing.T) {
-	f := newAttemptFixture(t, "shell", "")
+	f := newAttemptFixture(t, "shell-input", "")
 	outer := f.outer.Identity()
 	inner := f.activateOuter()
 	if inner == outer || inner.PID == outer.PID || inner.PGID == outer.PGID {
@@ -433,6 +479,21 @@ func TestAttemptRunnerOrdersOuterWrapperAndShellProvider(t *testing.T) {
 	}
 	if err := f.controller.Release(StageProvider); err != nil {
 		t.Fatal(err)
+	}
+	if ready := f.nextTerminal(TerminalReady, 0); ready.Kind != TerminalReady {
+		t.Fatalf("terminal ready=%+v", ready)
+	}
+	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalGenerationInstall, Correlation: 1, Generation: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if result := f.nextTerminal(TerminalGenerationResult, 1); result.Status != TerminalResultOK {
+		t.Fatalf("generation install=%+v", result)
+	}
+	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalInput, Correlation: 2, Generation: 1, Sequence: 1, Payload: []byte("interactive-after-ready\n")}); err != nil {
+		t.Fatal(err)
+	}
+	if result := f.nextTerminal(TerminalInputResult, 2); result.Status != TerminalResultOK || result.Count != uint32(len("interactive-after-ready\n")) {
+		t.Fatalf("terminal input=%+v", result)
 	}
 	waitFile(t, filepath.Join(f.root, "provider.pid"))
 	body, err := os.ReadFile(filepath.Join(f.root, "provider.pid"))
@@ -459,7 +520,7 @@ func TestAttemptRunnerOrdersOuterWrapperAndShellProvider(t *testing.T) {
 	if body, err := os.ReadFile(filepath.Join(f.root, "provider.effect")); err != nil || string(body) != "x" {
 		t.Fatalf("effect=%q err=%v", body, err)
 	}
-	if body, err := os.ReadFile(filepath.Join(f.root, "provider.stdin")); err != nil || string(body) != "one-startup" {
+	if body, err := os.ReadFile(filepath.Join(f.root, "provider.stdin")); err != nil || string(body) != "interactive-after-ready" {
 		t.Fatalf("stdin=%q err=%v", body, err)
 	}
 }
@@ -749,7 +810,32 @@ func TestProviderRetainsLeastPrivilegeLifetimeAfterOuterSIGKILL(t *testing.T) {
 	if err := f.controller.Release(StageProvider); err != nil {
 		t.Fatal(err)
 	}
-	waitFile(t, filepath.Join(f.root, "provider.ready"))
+	readyPath := filepath.Join(f.root, "provider.ready")
+	readyDeadline := time.Now().Add(4 * time.Second)
+	for {
+		if _, err := os.Stat(readyPath); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) || time.Now().After(readyDeadline) {
+			var observed []string
+			for range 4 {
+				event, eventErr := f.controller.Next(500 * time.Millisecond)
+				detail := fmt.Sprintf("kind=%s err=%v", event.Kind, eventErr)
+				if event.Frame != nil {
+					detail += fmt.Sprintf(" frame=%+v", *event.Frame)
+				}
+				if event.Terminal != nil {
+					detail += fmt.Sprintf(" terminal=%+v", event.Terminal.Terminal)
+				}
+				observed = append(observed, detail)
+				if eventErr != nil || event.Kind == AttemptTerminal {
+					break
+				}
+			}
+			providerError, _ := os.ReadFile(filepath.Join(f.root, "provider.error"))
+			t.Fatalf("provider ready absent: %v events=%v provider_error=%q output=%q", err, observed, providerError, f.output())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	if got, err := readIdentity(inner.PID); err != nil || got != inner {
 		t.Fatalf("provider identity=%+v err=%v want=%+v", got, err, inner)
 	}
@@ -1338,7 +1424,7 @@ func TestCurrentExecRejectsExactInheritedDescriptor(t *testing.T) {
 	}
 }
 
-func TestCurrentExecRejectsUnanticipatedInheritedDescriptor(t *testing.T) {
+func TestCurrentExecReplacesReservedProviderTaskDescriptor(t *testing.T) {
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -1350,12 +1436,14 @@ func TestCurrentExecRejectsUnanticipatedInheritedDescriptor(t *testing.T) {
 		t.Fatal(err)
 	}
 	record := f.finishAndAck(false)
-	if record.Terminal.Exit.Code != 94 {
-		t.Fatalf("unanticipated descriptor terminal=%+v output=%q", record.Terminal, f.output())
+	if record.Terminal.Exit.Code != 0 {
+		t.Fatalf("reserved descriptor replacement terminal=%+v output=%q", record.Terminal, f.output())
 	}
-	diagnostic, err := os.ReadFile(filepath.Join(f.root, "cwd.error"))
-	if err != nil || !strings.Contains(string(diagnostic), "cwd provider inherited fd 11") {
-		t.Fatalf("unanticipated descriptor diagnostic=%q err=%v", diagnostic, err)
+	if got, err := os.ReadFile(filepath.Join(f.root, "provider.effect")); err != nil || string(got) != "provider" {
+		t.Fatalf("provider witness=%q err=%v", got, err)
+	}
+	if _, err := os.Lstat(filepath.Join(f.root, "cwd.error")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("reserved descriptor reported foreign authority: %v", err)
 	}
 }
 
@@ -1422,19 +1510,134 @@ func TestCurrentExecRechecksTransferredCwdAtFinalSeam(t *testing.T) {
 	}
 }
 
-func TestExecProviderTakesCwdOwnershipOnRejectedCall(t *testing.T) {
+func TestExecProviderTakesTransferredDescriptorOwnershipOnRejectedCall(t *testing.T) {
 	cwd, err := os.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	fd := int(cwd.Fd())
+	task, err := createUnlinkedProviderTask(t.TempDir(), []byte("task"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwdFD, taskFD := int(cwd.Fd()), int(task.Fd())
 	var worker *WorkerControl
-	if err := worker.ExecProvider(nil, cwd); !errors.Is(err, ErrState) {
+	if err := worker.ExecProvider(nil, cwd, task); !errors.Is(err, ErrState) {
 		t.Fatalf("rejected transfer=%v", err)
 	}
 	var stat unix.Stat_t
-	if err := unix.Fstat(fd, &stat); !errors.Is(err, unix.EBADF) {
+	if err := unix.Fstat(cwdFD, &stat); !errors.Is(err, unix.EBADF) {
 		t.Fatalf("rejected cwd remained open: %v", err)
+	}
+	if err := unix.Fstat(taskFD, &stat); !errors.Is(err, unix.EBADF) {
+		t.Fatalf("rejected task remained open: %v", err)
+	}
+}
+
+func TestProviderTaskDescriptorFailsClosed(t *testing.T) {
+	good, err := createUnlinkedProviderTask(t.TempDir(), []byte("printf '工場'\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateProviderTask(good); err != nil {
+		t.Fatalf("exact task rejected: %v", err)
+	}
+	_ = good.Close()
+
+	cases := []struct {
+		name string
+		open func(*testing.T) *os.File
+	}{
+		{name: "linked", open: func(t *testing.T) *os.File {
+			path := filepath.Join(t.TempDir(), "task")
+			if err := os.WriteFile(path, []byte("task"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			file, err := os.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return file
+		}},
+		{name: "writable", open: func(t *testing.T) *os.File {
+			path := filepath.Join(t.TempDir(), "task")
+			file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := file.Write([]byte("task")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := file.Seek(0, io.SeekStart); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			return file
+		}},
+		{name: "nonzero offset", open: func(t *testing.T) *os.File {
+			file, err := createUnlinkedProviderTask(t.TempDir(), []byte("task"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := file.Seek(1, io.SeekStart); err != nil {
+				t.Fatal(err)
+			}
+			return file
+		}},
+		{name: "empty", open: func(t *testing.T) *os.File {
+			file, err := createUnlinkedProviderTask(t.TempDir(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return file
+		}},
+		{name: "oversized", open: func(t *testing.T) *os.File {
+			file, err := createUnlinkedProviderTask(t.TempDir(), bytes.Repeat([]byte{'x'}, MaxProviderTaskBytes+1))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return file
+		}},
+		{name: "invalid utf8", open: func(t *testing.T) *os.File {
+			file, err := createUnlinkedProviderTask(t.TempDir(), []byte{0xff})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return file
+		}},
+		{name: "nul", open: func(t *testing.T) *os.File {
+			file, err := createUnlinkedProviderTask(t.TempDir(), []byte{'x', 0})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return file
+		}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			file := test.open(t)
+			defer file.Close()
+			if err := validateProviderTask(file); !errors.Is(err, ErrIdentity) {
+				t.Fatalf("invalid descriptor error=%v, want ErrIdentity", err)
+			}
+		})
+	}
+}
+
+func TestProviderErrorPayloadAlwaysFitsPrivateControlFrame(t *testing.T) {
+	payload, err := providerErrorPayload(errors.New(strings.Repeat("工", maxAttemptReportBytes)))
+	if err != nil || len(payload) == 0 || len(payload) > maxProviderErrorBytes || !utf8.Valid(payload) {
+		t.Fatalf("bounded payload len=%d err=%v", len(payload), err)
+	}
+	var wire bytes.Buffer
+	if err := writeFrame(&wire, attemptFrame{Version: 1, Kind: "provider-exec-error", Payload: payload}, maxFrameBytes); err != nil {
+		t.Fatalf("bounded provider error does not fit frame: %v", err)
+	}
+	for _, invalid := range []error{errors.New(""), errors.New("bad\x00error"), errors.New(string([]byte{0xff}))} {
+		if _, err := providerErrorPayload(invalid); !errors.Is(err, ErrState) {
+			t.Fatalf("invalid error %q accepted: %v", invalid, err)
+		}
 	}
 }
 

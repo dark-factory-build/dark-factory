@@ -288,6 +288,7 @@ func newFixture(t *testing.T, seed byte, test scenario, factoryctl, runnerExecut
 		RuntimeParent: result.runtimeParent, ChangeParent: changeParent,
 		GitExecutable: git, BaseRevision: base, AttemptSocket: socket,
 		RunnerExecutable: runnerExecutable, FactoryctlExecutable: factoryctl,
+		ToolPath: filepath.Join(runtime.GOROOT(), "bin") + ":/usr/bin:/bin",
 	}
 	return result
 }

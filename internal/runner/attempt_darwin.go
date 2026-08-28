@@ -3,6 +3,7 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
 )
@@ -332,16 +334,15 @@ const (
 // exposes the fixed checkpoint sequence and the sole same-process provider
 // exec; it does not expose arbitrary frames or descriptors.
 type WorkerControl struct {
-	file                    *os.File
-	dir                     *os.File
-	dirID                   fileCommitment
-	dirIssued               bool
-	lifetime                *os.File
-	lifetimeID              descriptorCommitment
-	identity                Identity
-	state                   workerState
-	providerInputRegistered bool
-	providerErrorReported   bool
+	file                  *os.File
+	dir                   *os.File
+	dirID                 fileCommitment
+	dirIssued             bool
+	lifetime              *os.File
+	lifetimeID            descriptorCommitment
+	identity              Identity
+	state                 workerState
+	providerErrorReported bool
 }
 
 func OpenWorkerControl() (*WorkerControl, error) {
@@ -467,32 +468,6 @@ func (w *WorkerControl) AwaitProvider() error {
 	return w.await(StageProvider, workerPopulationReported, workerProvider)
 }
 
-// RegisterProviderInput transfers the one-shot input selected during
-// admission to the live outer runner. The runner ACK is the durable handoff
-// point: the worker never falls back to anonymous stdin or retries this
-// transfer.
-func (w *WorkerControl) RegisterProviderInput(input []byte) error {
-	if w == nil || w.file == nil || w.state != workerProvider || w.providerInputRegistered || len(input) > maxInputBytes {
-		return ErrState
-	}
-	if err := writeControlFrame(w.file, attemptFrame{Version: 1, Kind: "provider-input", Payload: append([]byte(nil), input...)}, maxFrameBytes); err != nil {
-		return err
-	}
-	if err := w.file.SetReadDeadline(time.Now().Add(attemptControlTimeout)); err != nil {
-		return err
-	}
-	defer w.file.SetReadDeadline(time.Time{})
-	var ack attemptFrame
-	if err := readFrame(w.file, &ack, maxFrameBytes); err != nil {
-		return err
-	}
-	if ack.Version != 1 || ack.Kind != "provider-input-registered" || !noLegacyFields(ack) || !noTerminalFields(ack) || len(ack.Payload) != 0 {
-		return ErrState
-	}
-	w.providerInputRegistered = true
-	return nil
-}
-
 // ReportProviderError is the one bounded pre-exec failure report. It lets the
 // outer owner distinguish a deliberate final source/authority rejection from
 // an unexplained capability close, without introducing a general worker RPC.
@@ -500,9 +475,9 @@ func (w *WorkerControl) ReportProviderError(cause error) error {
 	if w == nil || w.file == nil || w.state != workerProvider || w.providerErrorReported || cause == nil {
 		return ErrState
 	}
-	message := []byte(cause.Error())
-	if len(message) == 0 || len(message) > maxAttemptReportBytes {
-		return ErrState
+	message, err := providerErrorPayload(cause)
+	if err != nil {
+		return err
 	}
 	if err := writeControlFrame(w.file, attemptFrame{Version: 1, Kind: "provider-exec-error", Payload: message}, maxFrameBytes); err != nil {
 		return err
@@ -541,33 +516,55 @@ func (w *WorkerControl) await(stage AttemptStage, before, after workerState) err
 	return nil
 }
 
-// ExecProvider takes ownership of cwd on every call. The registered worker
-// supplies this exact descriptor only after its final source scan; runner does
-// not reopen or interpret the Change pathname. On failure the descriptor is
-// closed by the worker owner after its bounded diagnostic; on success it is
-// CLOEXEC and disappears at provider exec.
-func (w *WorkerControl) ExecProvider(spec *LaunchSpec, cwd *os.File) error {
-	if w == nil || w.file == nil || w.dir == nil || w.lifetime == nil || w.state != workerProvider || !w.providerInputRegistered || spec == nil || cwd == nil || len(spec.stdin) != 0 || spec.control != nil || spec.controlID != nil || spec.stdout != nil || spec.stderr != nil {
+// ExecProvider takes ownership of cwd and task on every call. The registered
+// worker supplies both exact descriptors only after its final authority scan;
+// runner never reopens or interprets their pathnames. The task must already be
+// an unlinked, read-only, offset-zero regular file containing the exact bounded
+// provider program. A successful exec intentionally inherits it only as fd 11.
+func (w *WorkerControl) ExecProvider(spec *LaunchSpec, cwd, task *os.File) error {
+	if w == nil || w.file == nil || w.dir == nil || w.lifetime == nil || w.state != workerProvider || spec == nil || cwd == nil || task == nil || len(spec.stdin) != 0 || spec.control != nil || spec.controlID != nil || spec.stdout != nil || spec.stderr != nil {
 		if cwd != nil {
-			return errors.Join(ErrState, cwd.Close())
+			_ = cwd.Close()
+		}
+		if task != nil {
+			_ = task.Close()
 		}
 		return ErrState
 	}
 	w.state = workerExec
-	err := execPreparedCurrent(spec, cwd, w)
+	err := execPreparedCurrent(spec, cwd, task, w)
 	if err != nil && w.file != nil {
-		message := []byte(err.Error())
-		if len(message) > maxAttemptReportBytes {
-			message = message[:maxAttemptReportBytes]
-		}
+		message, payloadErr := providerErrorPayload(err)
 		// A failed pre-exec check must be observable by the outer owner. EOF
 		// alone is ambiguous with successful unix.Exec, so publish one bounded
 		// diagnostic before the worker exits; this is private control evidence,
 		// not public provider output.
-		_ = writeControlFrame(w.file, attemptFrame{Version: 1, Kind: "provider-exec-error", Payload: message}, maxFrameBytes)
-		w.providerErrorReported = true
+		if payloadErr == nil {
+			_ = writeControlFrame(w.file, attemptFrame{Version: 1, Kind: "provider-exec-error", Payload: message}, maxFrameBytes)
+			w.providerErrorReported = true
+		}
 	}
 	return err
+}
+
+func providerErrorPayload(cause error) ([]byte, error) {
+	if cause == nil {
+		return nil, ErrState
+	}
+	message := cause.Error()
+	if message == "" || !utf8.ValidString(message) || strings.IndexByte(message, 0) >= 0 {
+		return nil, ErrState
+	}
+	if len(message) > maxProviderErrorBytes {
+		message = message[:maxProviderErrorBytes]
+		for !utf8.ValidString(message) {
+			message = message[:len(message)-1]
+		}
+	}
+	if message == "" {
+		return nil, ErrState
+	}
+	return []byte(message), nil
 }
 
 func (w *WorkerControl) Close() error {
@@ -590,12 +587,18 @@ func (w *WorkerControl) Close() error {
 	return err
 }
 
-func execPreparedCurrent(spec *LaunchSpec, cwd *os.File, worker *WorkerControl) (resultErr error) {
+func execPreparedCurrent(spec *LaunchSpec, cwd, task *os.File, worker *WorkerControl) (resultErr error) {
 	defer func() {
 		if cwd != nil {
 			resultErr = errors.Join(resultErr, cwd.Close())
 		}
+		if task != nil {
+			resultErr = errors.Join(resultErr, task.Close())
+		}
 	}()
+	if err := validateProviderTask(task); err != nil {
+		return fmt.Errorf("runner: provider task: %w", err)
+	}
 	unix.CloseOnExec(int(cwd.Fd()))
 	if err := verifyCurrentDirectory(cwd, spec.commit.Cwd); err != nil {
 		return fmt.Errorf("runner: current cwd: %w", err)
@@ -604,18 +607,23 @@ func execPreparedCurrent(spec *LaunchSpec, cwd *os.File, worker *WorkerControl) 
 	if err != nil {
 		return fmt.Errorf("runner: current executable: %w", err)
 	}
-	defer target.Close()
 	if err := sameNamedIdentity(spec.commit.Executable.Path, spec.commit.Executable.FileIdentity); err != nil {
+		_ = target.Close()
 		return err
 	}
 	if spec.testCurrentFinal {
 		if err := writeControlFrame(worker.file, attemptFrame{Version: 1, Kind: "current-exec-check"}, maxFrameBytes); err != nil {
+			_ = target.Close()
 			return err
 		}
 		var ack attemptFrame
 		if err := readFrame(worker.file, &ack, maxFrameBytes); err != nil || !validCurrentExecCheckAck(ack) {
+			_ = target.Close()
 			return fmt.Errorf("runner: current exec test seam: %w", errors.Join(err, ErrState))
 		}
+	}
+	if err := target.Close(); err != nil {
+		return err
 	}
 	if got, err := commitRuntimeLifetime(worker.dir, worker.lifetime); err != nil || got != worker.lifetimeID {
 		return fmt.Errorf("runner: current runtime lifetime: %w", errors.Join(ErrIdentity, err))
@@ -635,6 +643,12 @@ func execPreparedCurrent(spec *LaunchSpec, cwd *os.File, worker *WorkerControl) 
 		return err
 	}
 	worker.dir = nil
+	installing := task
+	task = nil
+	if err := installProviderTask(installing); err != nil {
+		return fmt.Errorf("runner: install provider task: %w", err)
+	}
+	defer unix.Close(providerTaskFD)
 	// The worker capability remains open only as a CLOEXEC diagnostic path for
 	// a failed final exec. A successful provider never inherits it.
 	unix.CloseOnExec(3)
@@ -644,6 +658,85 @@ func execPreparedCurrent(spec *LaunchSpec, cwd *os.File, worker *WorkerControl) 
 	}
 	if err := unix.Exec(spec.commit.Executable.Path, spec.commit.Argv, spec.commit.Env); err != nil {
 		return fmt.Errorf("runner: current exec: %w", err)
+	}
+	return nil
+}
+
+func validateProviderTask(task *os.File) error {
+	if task == nil {
+		return ErrIdentity
+	}
+	return validateProviderTaskDescriptor(task.Fd())
+}
+
+func validateProviderTaskDescriptor(descriptor uintptr) error {
+	fd := int(descriptor)
+	var before unix.Stat_t
+	if err := unix.Fstat(fd, &before); err != nil || before.Mode&unix.S_IFMT != unix.S_IFREG || before.Uid != uint32(os.Geteuid()) || before.Mode&0o7777 != 0o600 || before.Nlink != 0 || before.Size <= 0 || before.Size > int64(MaxProviderTaskBytes) || before.Dev == 0 || before.Ino == 0 {
+		return ErrIdentity
+	}
+	flags, err := unix.FcntlInt(descriptor, unix.F_GETFL, 0)
+	if err != nil || flags&unix.O_ACCMODE != unix.O_RDONLY {
+		return ErrIdentity
+	}
+	offset, err := unix.Seek(fd, 0, io.SeekCurrent)
+	if err != nil || offset != 0 {
+		return ErrIdentity
+	}
+	body := make([]byte, int(before.Size))
+	n, err := unix.Pread(fd, body, 0)
+	if err != nil || n != len(body) || !utf8.Valid(body) || bytes.IndexByte(body, 0) >= 0 {
+		return ErrIdentity
+	}
+	var after unix.Stat_t
+	if err := unix.Fstat(fd, &after); err != nil || !sameProviderTaskStat(&before, &after) {
+		return ErrIdentity
+	}
+	return nil
+}
+
+func sameProviderTaskStat(left, right *unix.Stat_t) bool {
+	return left != nil && right != nil &&
+		left.Dev == right.Dev && left.Ino == right.Ino && left.Mode == right.Mode &&
+		left.Nlink == right.Nlink && left.Uid == right.Uid && left.Gid == right.Gid &&
+		left.Rdev == right.Rdev && left.Size == right.Size
+}
+
+func installProviderTask(task *os.File) (resultErr error) {
+	defer func() {
+		if task != nil {
+			resultErr = errors.Join(resultErr, task.Close())
+		}
+	}()
+	if err := validateProviderTask(task); err != nil {
+		return err
+	}
+	duplicate, err := unix.FcntlInt(task.Fd(), unix.F_DUPFD_CLOEXEC, 64)
+	if err != nil {
+		return err
+	}
+	if err := task.Close(); err != nil {
+		task = nil
+		_ = unix.Close(duplicate)
+		return err
+	}
+	task = nil
+	if err := unix.Dup2(duplicate, providerTaskFD); err != nil {
+		_ = unix.Close(duplicate)
+		return err
+	}
+	if err := unix.Close(duplicate); err != nil {
+		_ = unix.Close(providerTaskFD)
+		return err
+	}
+	if err := validateProviderTaskDescriptor(uintptr(providerTaskFD)); err != nil {
+		_ = unix.Close(providerTaskFD)
+		return err
+	}
+	flags, err := unix.FcntlInt(uintptr(providerTaskFD), unix.F_GETFD, 0)
+	if err != nil || flags&unix.FD_CLOEXEC != 0 {
+		_ = unix.Close(providerTaskFD)
+		return ErrIdentity
 	}
 	return nil
 }
@@ -713,16 +806,14 @@ func validateAttemptConfig(cfg attemptConfig) error {
 	if cfg.Version != 1 || validateAttemptName(cfg.AttemptID, 256) != nil || cfg.MarkerName != InnerActivationMarkerName || cfg.TerminalName != TerminalSpoolName {
 		return ErrIdentity
 	}
-	if cfg.Wrapper.Executable.Path == "" || cfg.Wrapper.Cwd.Path == "" || len(cfg.Wrapper.Argv) == 0 || cfg.Wrapper.Argv[0] != cfg.Wrapper.Executable.Path {
+	if cfg.Wrapper.Executable.Path == "" || cfg.Wrapper.Cwd.Path == "" {
 		return ErrIdentity
 	}
-	if len(cfg.Wrapper.Argv) > 129 || len(cfg.Wrapper.Env) > 128 {
+	if err := validateArgv(cfg.Wrapper.Argv, cfg.Wrapper.Executable.Path); err != nil {
 		return ErrIdentity
 	}
-	for _, value := range cfg.Wrapper.Argv {
-		if len(value) > 8192 || strings.IndexByte(value, 0) >= 0 {
-			return ErrIdentity
-		}
+	if len(cfg.Wrapper.Env) > 128 {
+		return ErrIdentity
 	}
 	if err := validateEnvironment(cfg.Wrapper.Env); err != nil {
 		return ErrIdentity

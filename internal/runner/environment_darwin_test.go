@@ -24,7 +24,6 @@ var shellEnvironmentNames = []string{
 	"LANG",
 	"LC_ALL",
 	"TERM",
-	"NO_COLOR",
 	"GIT_CEILING_DIRECTORIES",
 	"GIT_DISCOVERY_ACROSS_FILESYSTEM",
 	"GIT_CONFIG_NOSYSTEM",
@@ -44,6 +43,7 @@ func TestPrepareExecSpecAcceptsOnlyClosedShellEnvironmentNames(t *testing.T) {
 
 	forbidden := []string{
 		"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+		"NO_COLOR",
 		"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "CODEX_API_KEY",
 		"SSH_AUTH_SOCK", "GIT_SSH", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
 		"GIT_DIR", "GIT_WORK_TREE", "GH_TOKEN", "GITHUB_TOKEN",
@@ -147,7 +147,6 @@ func TestPreparedEnvironmentOrderAndBytesReachRealChildExactly(t *testing.T) {
 		"LANG=工場.UTF-8",
 		"LC_ALL=C",
 		"TERM=dumb",
-		"NO_COLOR=1",
 		"GIT_CEILING_DIRECTORIES=/private/changes",
 		"GIT_DISCOVERY_ACROSS_FILESYSTEM=0",
 		"GIT_CONFIG_NOSYSTEM=1",

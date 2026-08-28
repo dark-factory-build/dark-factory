@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"math"
+	"strings"
+	"unicode/utf8"
 )
 
 var factoryEntityID = [IDBytes]byte{}
@@ -290,13 +292,7 @@ func validateNewAgent(spec NewAgent) error {
 	if spec.ID.zero() || spec.ProjectID.zero() || byteLen(spec.Name) < 1 || byteLen(spec.Name) > 128 || !spec.Role.valid() || !spec.Provider.valid() {
 		return fmt.Errorf("%w: invalid agent", ErrInvalidValue)
 	}
-	if byteLen(spec.Model) > 128 || (spec.Model != "" && byteLen(spec.Model) < 1) {
-		return fmt.Errorf("%w: invalid model", ErrInvalidValue)
-	}
-	if !validReasoningEffort(spec.ReasoningEffort) {
-		return fmt.Errorf("%w: invalid reasoning effort", ErrInvalidValue)
-	}
-	if !providerLaunchControlsValid(spec.Provider, spec.Model, spec.ReasoningEffort) {
+	if ValidateProviderLaunchControls(spec.Provider, spec.Model, spec.ReasoningEffort) != nil {
 		return fmt.Errorf("%w: invalid provider launch controls", ErrInvalidValue)
 	}
 	if spec.ToolBudgetLimit < 1 || spec.ToolBudgetLimit > 1_000_000_000 {
@@ -321,8 +317,14 @@ func validReasoningEffort(value string) bool {
 	}
 }
 
-func providerLaunchControlsValid(provider Provider, model, effort string) bool {
-	return provider != ProviderShell || (model == "" && effort == "")
+// ValidateProviderLaunchControls is the single domain owner for controls that
+// cross Store, private worker and provider boundaries. Wire and launch code
+// must not accept a wider set than durable state.
+func ValidateProviderLaunchControls(provider Provider, model, effort string) error {
+	if !provider.valid() || byteLen(model) > 128 || !utf8.ValidString(model) || strings.ContainsRune(model, 0) || !validReasoningEffort(effort) || provider == ProviderShell && (model != "" || effort != "") {
+		return fmt.Errorf("%w: invalid provider launch controls", ErrInvalidValue)
+	}
+	return nil
 }
 
 func nullableString(value string) any {

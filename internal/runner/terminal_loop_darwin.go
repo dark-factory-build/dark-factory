@@ -20,7 +20,7 @@ func runReleasedProvider(child *OwnedChild, daemon, worker *os.File, reads *atte
 		return false, ErrState
 	}
 	loop := terminalOwner{child: child, daemon: daemon, worker: worker, reads: reads, daemonOpen: true, workerOpen: true}
-	if err := loop.awaitInitialInput(); err != nil {
+	if err := loop.awaitProviderExec(); err != nil {
 		return loop.daemonOpen, err
 	}
 	if err := reads.removeWorker(); err != nil {
@@ -31,12 +31,9 @@ func runReleasedProvider(child *OwnedChild, daemon, worker *os.File, reads *atte
 		return true, err
 	}
 	loop.ptyOpen = true
-	if err := loop.writeInitialInput(); err != nil {
-		return true, err
-	}
-	// This is the bounded handoff barrier. The daemon may not send terminal
-	// commands until the owner has registered the PTY and performed the one
-	// initial write exactly once.
+	// The worker's CLOEXEC capability has closed, proving provider exec, and the
+	// PTY is now registered. Provider task bytes arrived on their own unlinked
+	// descriptor, so every subsequent PTY byte is interactive input.
 	if err := loop.send(TerminalFrame{Kind: TerminalReady}); err != nil {
 		return false, err
 	}
@@ -52,15 +49,13 @@ type terminalOwner struct {
 	workerOpen bool
 	ptyOpen    bool
 
-	daemonDecoder  *attemptFrameDecoder
-	generation     uint64
-	inputActive    bool
-	nextInput      uint64
-	initialInput   []byte
-	initialWritten bool
-	ptyEOF         bool
-	ptyDrained     bool
-	stopRequested  bool
+	daemonDecoder *attemptFrameDecoder
+	generation    uint64
+	inputActive   bool
+	nextInput     uint64
+	ptyEOF        bool
+	ptyDrained    bool
+	stopRequested bool
 
 	ring             terminalByteRing
 	credit           uint64
@@ -75,101 +70,53 @@ type terminalReplay struct {
 	head        uint64
 }
 
-func (o *terminalOwner) awaitInitialInput() error {
+func (o *terminalOwner) awaitProviderExec() error {
 	for {
 		frame, source, err := nextAttemptFrame(o.child, o.daemon, o.worker, o.daemonOpen, o.workerOpen, 0)
-		if source == sourceChild && err == nil {
-			return ErrState
-		}
-		if source == sourceDaemon {
+		switch source {
+		case sourceChild:
+			if err == nil {
+				return ErrState
+			}
+			return err
+		case sourceDaemon:
 			if errors.Is(err, io.EOF) {
-				return errors.New("runner: daemon closed before provider input registration")
+				return errors.New("runner: daemon closed before provider exec")
 			}
 			if err != nil {
 				return err
 			}
-			// No browser terminal operation is accepted until provider input is
-			// registered and the worker has handed off its control fd.
 			if frame.Kind == "terminate" && validBareAttemptFrame(frame) {
 				return errors.New("runner: daemon terminated before provider exec")
 			}
 			return ErrState
-		}
-		if source != sourceWorker {
-			return protocolError("provider input registration", source, err)
-		}
-		if err == nil && frame.Version == 1 && frame.Kind == "provider-exec-error" && noLegacyFields(frame) && noTerminalFields(frame) && len(frame.Payload) > 0 && len(frame.Payload) <= maxAttemptReportBytes {
-			return fmt.Errorf("runner: provider exec: %s", frame.Payload)
-		}
-		if errors.Is(err, io.EOF) {
-			return errors.New("runner: worker closed before provider input registration")
-		}
-		if err != nil {
-			return err
-		}
-		if frame.Version != 1 || frame.Kind != "provider-input" || !noLegacyFields(frame) || !noTerminalFields(frame) || len(frame.Payload) > maxInputBytes {
-			return ErrState
-		}
-		o.initialInput = append([]byte(nil), frame.Payload...)
-		if err := o.writeWorkerFrame(attemptFrame{Version: 1, Kind: "provider-input-registered"}); err != nil {
-			return err
-		}
-		for {
-			frame, source, err := nextAttemptFrame(o.child, o.daemon, o.worker, o.daemonOpen, o.workerOpen, 0)
-			if source == sourceWorker && errors.Is(err, io.EOF) {
+		case sourceWorker:
+			if errors.Is(err, io.EOF) {
 				return nil
-			}
-			if source == sourceWorker && err == nil && frame.Version == 1 && frame.Kind == "provider-exec-error" && noLegacyFields(frame) && noTerminalFields(frame) && len(frame.Payload) > 0 && len(frame.Payload) <= maxAttemptReportBytes {
-				return fmt.Errorf("runner: provider exec: %s", frame.Payload)
-			}
-			if source == sourceWorker && err == nil && validCurrentExecCheck(frame) {
-				if err := o.writeDaemonFrame(frame); err != nil {
-					return err
-				}
-				ack, ackSource, ackErr := nextAttemptFrame(o.child, o.daemon, o.worker, o.daemonOpen, o.workerOpen, 0)
-				if ackErr != nil || ackSource != sourceDaemon || !validCurrentExecCheckAck(ack) {
-					return protocolError("current exec check ack", ackSource, ackErr)
-				}
-				if err := o.writeWorkerFrame(ack); err != nil {
-					return err
-				}
-				continue
-			}
-			if source == sourceDaemon {
-				if errors.Is(err, io.EOF) {
-					return errors.New("runner: daemon closed before provider exec")
-				}
-				if err != nil {
-					return err
-				}
-				if frame.Kind == "terminate" && validBareAttemptFrame(frame) {
-					return errors.New("runner: daemon terminated before provider exec")
-				}
-			}
-			if source == sourceChild && err == nil {
-				return ErrState
 			}
 			if err != nil {
 				return err
 			}
-			return ErrState
+			if frame.Version == 1 && frame.Kind == "provider-exec-error" && noLegacyFields(frame) && noTerminalFields(frame) && len(frame.Payload) > 0 && len(frame.Payload) <= maxProviderErrorBytes {
+				return fmt.Errorf("runner: provider exec: %s", frame.Payload)
+			}
+			if !validCurrentExecCheck(frame) {
+				return ErrState
+			}
+			if err := o.writeDaemonFrame(frame); err != nil {
+				return err
+			}
+			ack, ackSource, ackErr := nextAttemptFrame(o.child, o.daemon, o.worker, o.daemonOpen, o.workerOpen, 0)
+			if ackErr != nil || ackSource != sourceDaemon || !validCurrentExecCheckAck(ack) {
+				return protocolError("current exec check ack", ackSource, ackErr)
+			}
+			if err := o.writeWorkerFrame(ack); err != nil {
+				return err
+			}
+		default:
+			return protocolError("provider exec", source, err)
 		}
 	}
-}
-
-func (o *terminalOwner) writeInitialInput() error {
-	if o == nil || o.initialWritten || o.child == nil {
-		return ErrState
-	}
-	o.initialWritten = true // reservation happens before the effect; never retry.
-	if len(o.initialInput) == 0 {
-		return nil
-	}
-	n, err := o.child.writePTYOwned(o.initialInput)
-	if err != nil || n != len(o.initialInput) {
-		return fmt.Errorf("runner: initial terminal input: %w", errors.Join(err, ErrUnresolved))
-	}
-	return nil
 }
 
 func (o *terminalOwner) serve() (bool, error) {

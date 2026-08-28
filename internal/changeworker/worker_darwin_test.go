@@ -3,6 +3,7 @@
 package changeworker_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -22,6 +23,8 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/changeworker"
 	"github.com/dark-factory-build/dark-factory/internal/daemon"
 	"github.com/dark-factory-build/dark-factory/internal/install"
+	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/provider"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 	"golang.org/x/sys/unix"
 )
@@ -34,8 +37,8 @@ func TestMain(m *testing.M) {
 			err = runner.RunExecGate()
 		case "--attempt-runner":
 			err = runner.RunAttemptRunner()
-		case "--change-worker-shell":
-			err = changeworker.RunShell(context.Background())
+		case "--change-worker":
+			err = changeworker.Run(context.Background())
 		default:
 			os.Exit(m.Run())
 		}
@@ -106,11 +109,116 @@ func TestRegisteredShellWorkerCompletesExactFourReleaseSequence(t *testing.T) {
 			t.Fatalf("ambient/source authority leaked in environment")
 		}
 	}
-	if strings.Count(string(environment), "DARK_FACTORY_FACTORYCTL="+fixture.factoryctl+"\n") != 1 || strings.Count(string(environment), "PATH=/usr/bin:/bin\n") != 1 {
+	if strings.Count(string(environment), "DARK_FACTORY_FACTORYCTL="+fixture.factoryctl+"\n") != 1 || strings.Count(string(environment), "PATH="+fixture.toolPath+"\n") != 1 {
 		t.Fatalf("provider helper/PATH environment is not exact: %q", environment)
+	}
+	for _, exact := range []string{"TERM=xterm-256color\n", "SHELL=/bin/sh\n"} {
+		if strings.Count(string(environment), exact) != 1 {
+			t.Fatalf("provider Build environment omitted %q: %q", exact, environment)
+		}
+	}
+	for _, deleted := range []string{"TERM=dumb\n", "NO_COLOR=", "USER=", "LOGNAME="} {
+		if strings.Contains(string(environment), deleted) {
+			t.Fatalf("provider Build retained duplicate/ambient field %q: %q", deleted, environment)
+		}
 	}
 	if diagnostic := fixture.output(); strings.Contains(diagnostic, fixture.repositoryRoot) || strings.Contains(diagnostic, "printf x") {
 		t.Fatalf("private source/input leaked: %q", diagnostic)
+	}
+}
+
+func TestRegisteredShellWorkerCannotReadLinkedWorkerConfig(t *testing.T) {
+	fixture := newWorkerFixtureWithInput(t, func(witness, _, _ string) []byte {
+		quote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
+		return []byte(fmt.Sprintf("set -eu\nconfig=\"$HOME/../change-worker.config\"\nif test -e \"$config\"; then cat \"$config\" > %s; exit 42; fi\ntest -e /dev/fd/11\nprintf x > %s\nexit\n", quote(witness+".config-copy"), quote(witness)))
+	})
+	inner := fixture.start(t)
+	for _, stage := range []runner.AttemptStage{runner.StageSelection, runner.StagePreparation, runner.StagePopulation} {
+		fixture.release(t, stage, stage)
+	}
+	if err := fixture.controller.Release(runner.StageProvider); err != nil {
+		t.Fatal(err)
+	}
+	record := fixture.finish(t)
+	if record.Terminal.Process != inner || record.Terminal.Exit.Code != 0 || record.Terminal.Exit.Signal != 0 {
+		t.Fatalf("terminal=%+v inner=%+v", record.Terminal, inner)
+	}
+	if body, err := os.ReadFile(fixture.witness); err != nil || string(body) != "x" {
+		t.Fatalf("provider witness=%q err=%v", body, err)
+	}
+	if _, err := os.Stat(fixture.witness + ".config-copy"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("provider copied linked worker config: %v", err)
+	}
+}
+
+func TestRegisteredShellWorkerExecutesMaximumTaskWithoutPTYStartupTraffic(t *testing.T) {
+	fixture := newWorkerFixtureWithInput(t, func(witness, _, _ string) []byte {
+		quote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
+		prefix := []byte("set -eu\n/bin/stty sane\ncount=$(/usr/bin/wc -c <<'DF_MAX_INPUT'\n")
+		suffixTemplate := "DF_MAX_INPUT\n)\ntest \"$count\" -eq 000000\ntest -x \"$(command -v go)\"\nprintf x > " + quote(witness) + "\nexit\n"
+		payloadSize := runner.MaxProviderTaskBytes - len(prefix) - len(suffixTemplate)
+		if payloadSize < 100000 || payloadSize > 999999 {
+			t.Fatalf("unexpected maximum-input payload size %d", payloadSize)
+		}
+		payload := append(bytes.Repeat([]byte{'x'}, payloadSize-1), '\n')
+		suffix := strings.Replace(suffixTemplate, "000000", strconv.Itoa(payloadSize), 1)
+		input := append(prefix, payload...)
+		input = append(input, suffix...)
+		if len(input) != runner.MaxProviderTaskBytes || input[len(input)-1] != '\n' {
+			t.Fatalf("maximum task size=%d, want %d", len(input), runner.MaxProviderTaskBytes)
+		}
+		return input
+	})
+	inner := fixture.start(t)
+	for _, stage := range []runner.AttemptStage{runner.StageSelection, runner.StagePreparation, runner.StagePopulation} {
+		fixture.release(t, stage, stage)
+	}
+	if err := fixture.controller.Release(runner.StageProvider); err != nil {
+		t.Fatal(err)
+	}
+	record := fixture.finish(t)
+	if record.Terminal.Process != inner || record.Terminal.Exit.Code != 0 || record.Terminal.Exit.Signal != 0 {
+		t.Fatalf("terminal=%+v inner=%+v", record.Terminal, inner)
+	}
+	if body, err := os.ReadFile(fixture.witness); err != nil || string(body) != "x" {
+		t.Fatalf("maximum-input witness=%q err=%v", body, err)
+	}
+}
+
+func TestRegisteredShellWorkerKeepsPTYExclusiveForPostReadyInput(t *testing.T) {
+	fixture := newWorkerFixtureWithInput(t, func(witness, reply, _ string) []byte {
+		quote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
+		return []byte("set -eu\nprintf ready > " + quote(witness) + "\nIFS= read -r line\nprintf '%s' \"$line\" > " + quote(reply) + "\nexit\n")
+	})
+	inner := fixture.start(t)
+	for _, stage := range []runner.AttemptStage{runner.StageSelection, runner.StagePreparation, runner.StagePopulation} {
+		fixture.release(t, stage, stage)
+	}
+	if err := fixture.controller.Release(runner.StageProvider); err != nil {
+		t.Fatal(err)
+	}
+	if frame := fixture.nextTerminal(t, runner.TerminalReady, 0); frame.Kind != runner.TerminalReady {
+		t.Fatalf("terminal ready=%+v", frame)
+	}
+	if err := fixture.controller.SendTerminalCommand(runner.TerminalCommand{Kind: runner.TerminalGenerationInstall, Correlation: 1, Generation: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if frame := fixture.nextTerminal(t, runner.TerminalGenerationResult, 1); frame.Status != runner.TerminalResultOK {
+		t.Fatalf("generation install=%+v", frame)
+	}
+	payload := []byte("interactive-after-ready\n")
+	if err := fixture.controller.SendTerminalCommand(runner.TerminalCommand{Kind: runner.TerminalInput, Correlation: 2, Generation: 1, Sequence: 1, Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	if frame := fixture.nextTerminal(t, runner.TerminalInputResult, 2); frame.Status != runner.TerminalResultOK || frame.Count != uint32(len(payload)) {
+		t.Fatalf("terminal input=%+v", frame)
+	}
+	record := fixture.finish(t)
+	if record.Terminal.Process != inner || record.Terminal.Exit.Code != 0 || record.Terminal.Exit.Signal != 0 {
+		t.Fatalf("terminal=%+v inner=%+v", record.Terminal, inner)
+	}
+	if body, err := os.ReadFile(fixture.cwdWitness); err != nil || string(body) != "interactive-after-ready" {
+		t.Fatalf("interactive reply=%q err=%v", body, err)
 	}
 }
 
@@ -374,7 +482,7 @@ func TestFinalRuntimeRecheckRejectsFixedChildReplacement(t *testing.T) {
 type workerFixture struct {
 	root, repositoryRoot, changeParent, finalName string
 	witness, cwdWitness, envWitness               string
-	factoryctl                                    string
+	factoryctl, toolPath                          string
 	repositoryIdentity                            change.RepositoryIdentity
 	runtime                                       *daemon.Runtime
 	parent                                        *daemon.RuntimeParent
@@ -401,6 +509,23 @@ func newWorkerFixture(t *testing.T) *workerFixture {
 }
 
 func newWorkerFixtureWithFactoryctl(t *testing.T, factoryctl string) *workerFixture {
+	return newWorkerFixtureWithFactoryctlAndInput(t, factoryctl, nil)
+}
+
+func newWorkerFixtureWithInput(t *testing.T, input func(witness, cwdWitness, envWitness string) []byte) *workerFixture {
+	t.Helper()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, err = filepath.EvalSymlinks(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return newWorkerFixtureWithFactoryctlAndInput(t, executable, input)
+}
+
+func newWorkerFixtureWithFactoryctlAndInput(t *testing.T, factoryctl string, input func(witness, cwdWitness, envWitness string) []byte) *workerFixture {
 	t.Helper()
 	root := workerSecureTempDir(t)
 	git := nativeGit(t)
@@ -463,12 +588,19 @@ func newWorkerFixtureWithFactoryctl(t *testing.T, factoryctl string) *workerFixt
 		t.Fatal(err)
 	}
 	witness, cwdWitness, envWitness := filepath.Join(root, "provider.witness"), filepath.Join(root, "provider.cwd"), filepath.Join(root, "provider.env")
+	toolPath := workerToolPath(t)
 	quote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
-	// A PTY has no implicit EOF after the initial handoff. The fixture selects
-	// the complete byte sequence explicitly, including exit, rather than
-	// relying on the worker to mutate it with a hidden newline or close.
-	program := fmt.Sprintf("set -eu\nfor n in 3 9; do test ! -e /dev/fd/$n; done\ntest -e /dev/fd/10\ngit rev-parse --is-inside-work-tree >/dev/null 2>&1 && exit 81 || :\nprintf x > %s\npwd > %s\nenv | sort > %s\nexit\n", quote(witness), quote(cwdWitness), quote(envWitness))
-	config := changeworker.Config{RuntimePath: runtimePath, RuntimeIdentity: runtimeID, GitExecutable: git, FactoryctlExecutable: factoryctl, RepositoryRoot: repository, RepositoryIdentity: repositoryID, Revision: "HEAD", ChangeParent: changeParent, FinalName: "published", StagingName: ".stage", AttemptSocket: "/private/tmp/dark-factory-worker-api.sock", InitialTerminalInput: []byte(program)}
+	// The exact program arrives on the deliberate fd 11 capability. The PTY is
+	// untouched until an authenticated terminal command writes interactive data.
+	program := []byte(fmt.Sprintf("set -eu\nfor n in 3 9; do test ! -e /dev/fd/$n; done\ntest -e /dev/fd/10\ntest -e /dev/fd/11\ntest ! -e \"$TMPDIR/.provider-task\"\ngit rev-parse --is-inside-work-tree >/dev/null 2>&1 && exit 81 || :\nprintf x > %s\npwd > %s\nenv | sort > %s\nexit\n", quote(witness), quote(cwdWitness), quote(envWitness)))
+	if input != nil {
+		program = input(witness, cwdWitness, envWitness)
+	}
+	providerTask, err := provider.Task(kernel.ProviderShell, program)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := changeworker.Config{Provider: kernel.ProviderShell, RuntimePath: runtimePath, RuntimeIdentity: runtimeID, GitExecutable: git, FactoryctlExecutable: factoryctl, ToolPath: toolPath, RepositoryRoot: repository, RepositoryIdentity: repositoryID, Revision: "HEAD", ChangeParent: changeParent, FinalName: "published", StagingName: ".stage", AttemptSocket: "/private/tmp/dark-factory-worker-api.sock", ProviderTask: providerTask}
 	if _, err := runtimeValue.PublishWorkerConfig(context.Background(), config); err != nil {
 		t.Fatal(err)
 	}
@@ -492,7 +624,7 @@ func newWorkerFixtureWithFactoryctl(t *testing.T, factoryctl string) *workerFixt
 	if err != nil {
 		t.Fatal(err)
 	}
-	wrapper, err := runner.PrepareExecSpec(runner.ExecSpec{Target: executable, Args: []string{"--change-worker-shell"}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: home})
+	wrapper, err := runner.PrepareExecSpec(runner.ExecSpec{Target: executable, Args: []string{"--change-worker"}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: home})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -512,9 +644,32 @@ func newWorkerFixtureWithFactoryctl(t *testing.T, factoryctl string) *workerFixt
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &workerFixture{root: root, repositoryRoot: repository, changeParent: changeParent, finalName: "published", witness: witness, cwdWitness: cwdWitness, envWitness: envWitness, factoryctl: factoryctl, repositoryIdentity: repositoryID, runtime: runtimeValue, parent: parent, home: operationalHome, dir: dir, lifetime: lifetime, lease: lease, controller: controller, child: child, diagnostic: diagnostic}
+	f := &workerFixture{root: root, repositoryRoot: repository, changeParent: changeParent, finalName: "published", witness: witness, cwdWitness: cwdWitness, envWitness: envWitness, factoryctl: factoryctl, toolPath: toolPath, repositoryIdentity: repositoryID, runtime: runtimeValue, parent: parent, home: operationalHome, dir: dir, lifetime: lifetime, lease: lease, controller: controller, child: child, diagnostic: diagnostic}
 	t.Cleanup(f.close)
 	return f
+}
+
+func workerToolPath(t testing.TB) string {
+	t.Helper()
+	goExecutable, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	goExecutable, err = filepath.EvalSymlinks(goExecutable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	components := []string{filepath.Dir(goExecutable), "/usr/bin", "/bin"}
+	unique := components[:0]
+	seen := make(map[string]struct{}, len(components))
+	for _, component := range components {
+		if _, found := seen[component]; found {
+			continue
+		}
+		seen[component] = struct{}{}
+		unique = append(unique, component)
+	}
+	return strings.Join(unique, string(filepath.ListSeparator))
 }
 
 func copyWorkerExecutable(t testing.TB, from, to string) {
@@ -574,6 +729,19 @@ func (f *workerFixture) release(t *testing.T, release, report runner.AttemptStag
 		t.Fatalf("event=%+v err=%v diag=%q", event, err, f.output())
 	}
 	return event
+}
+
+func (f *workerFixture) nextTerminal(t *testing.T, kind runner.TerminalEventKind, correlation uint64) runner.TerminalFrame {
+	t.Helper()
+	for {
+		event, err := f.controller.Next(8 * time.Second)
+		if err != nil || event.Kind != runner.AttemptTerminalFrame || event.Frame == nil {
+			t.Fatalf("terminal %s event=%+v err=%v diag=%q", kind, event, err, f.output())
+		}
+		if event.Frame.Kind == kind && event.Frame.Correlation == correlation {
+			return *event.Frame
+		}
+	}
 }
 func (f *workerFixture) finish(t *testing.T, expectedSuccess ...bool) *runner.TerminalRecord {
 	t.Helper()

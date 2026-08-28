@@ -14,11 +14,11 @@ import (
 	"strings"
 
 	"github.com/dark-factory-build/dark-factory/internal/change"
+	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/provider"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 	"golang.org/x/sys/unix"
 )
-
-const shellPath = "/bin/sh"
 
 type runtimeAuthority struct {
 	root, namedRoot, config, home, temp, token *os.File
@@ -29,16 +29,18 @@ type runtimeAuthority struct {
 	configDigest                               [32]byte
 }
 
-func runShell(ctx context.Context) (resultErr error) {
+const providerTaskName = ".provider-task"
+
+func runProvider(ctx context.Context) (resultErr error) {
 	control, err := runner.OpenWorkerControl()
 	if err != nil {
 		return err
 	}
 	defer func() {
 		if resultErr != nil {
-			// The worker may fail during the final source/authority scan, before
-			// the one-shot input registration. Preserve that exact bounded cause
-			// for the outer owner instead of reducing it to an unexplained EOF.
+			// The worker may fail during the final source/authority scan or task
+			// sealing. Preserve that exact bounded cause for the outer owner
+			// instead of reducing it to an unexplained EOF.
 			_ = control.ReportProviderError(resultErr)
 		}
 		resultErr = errors.Join(resultErr, control.Close())
@@ -96,17 +98,42 @@ func runShell(ctx context.Context) (resultErr error) {
 	home := filepath.Join(config.RuntimePath, HomeName)
 	temp := filepath.Join(config.RuntimePath, TempName)
 	token := filepath.Join(config.RuntimePath, AttemptTokenName)
-	environment := []string{
-		"DARK_FACTORY_SOCKET=" + config.AttemptSocket,
-		"DARK_FACTORY_ATTEMPT_TOKEN_FILE=" + token,
-		"DARK_FACTORY_FACTORYCTL=" + factoryctl.Path(),
-		"HOME=" + home, "TMPDIR=" + temp, "PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", "TERM=dumb", "NO_COLOR=1",
-		"GIT_CEILING_DIRECTORIES=" + filepath.Dir(publishedPath), "GIT_DISCOVERY_ACROSS_FILESYSTEM=0",
-		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0",
-		"GIT_ASKPASS=/usr/bin/false", "GIT_SSH_COMMAND=/usr/bin/false", "GH_CONFIG_DIR=/dev/null",
+	runtimePaths, err := provider.NewRuntimePaths(
+		home, temp, config.AttemptSocket, token, factoryctl.Path(), filepath.Dir(publishedPath), config.ToolPath,
+	)
+	if err != nil {
+		_ = cwd.Close()
+		return err
 	}
-	initialInput := bytes.Clone(config.InitialTerminalInput)
-	spec, err := runner.PrepareExecSpec(runner.ExecSpec{Target: shellPath, Args: []string{"-s"}, Env: environment, Cwd: publishedPath})
+	var installation provider.Installation
+	if config.Provider == kernel.ProviderShell {
+		executable, commitErr := runner.CommitExecutableLocator("/bin/sh")
+		if commitErr != nil {
+			_ = cwd.Close()
+			return commitErr
+		}
+		installation, err = provider.NewShellInstallation(executable)
+		if err != nil {
+			_ = cwd.Close()
+			return err
+		}
+	}
+	request, err := provider.NewRequest(config.Provider, installation, config.Model, config.ReasoningEffort, runtimePaths)
+	if err != nil {
+		_ = cwd.Close()
+		return err
+	}
+	launch, err := provider.Build(request)
+	if err != nil {
+		_ = cwd.Close()
+		return err
+	}
+	program, err := provider.Task(config.Provider, config.ProviderTask)
+	if err != nil {
+		_ = cwd.Close()
+		return err
+	}
+	spec, err := runner.PrepareCommittedExecSpec(launch.Executable(), launch.Argv(), launch.Environment(), publishedPath)
 	if err != nil {
 		_ = cwd.Close()
 		return err
@@ -115,19 +142,165 @@ func runShell(ctx context.Context) (resultErr error) {
 		_ = cwd.Close()
 		return fmt.Errorf("runtime authority verification: %w", err)
 	}
-	if err := authority.close(); err != nil {
-		_ = cwd.Close()
-		return err
-	}
 	if err := factoryctl.Verify(); err != nil {
 		_ = cwd.Close()
 		return err
 	}
-	if err := control.RegisterProviderInput(initialInput); err != nil {
+	if err := launch.Executable().Verify(); err != nil {
 		_ = cwd.Close()
 		return err
 	}
-	return control.ExecProvider(spec, cwd)
+	task, err := authority.sealProviderTask(config.Provider, program)
+	if err != nil {
+		_ = cwd.Close()
+		return err
+	}
+	taskOpen := true
+	defer func() {
+		if taskOpen {
+			resultErr = errors.Join(resultErr, task.Close())
+		}
+	}()
+	// Retain the descriptor-bound runtime authority until exec. Its members are
+	// CLOEXEC, so a successful provider image receives none of them; a failed
+	// exec returns through the ordinary defer and closes them. The exact task is
+	// already unlinked and read-only, and the PTY has received no startup bytes.
+	if err := authority.verify(ctx); err != nil {
+		_ = cwd.Close()
+		return fmt.Errorf("runtime authority verification: %w", err)
+	}
+	if err := authority.unlinkConfig(); err != nil {
+		_ = cwd.Close()
+		return fmt.Errorf("worker config sealing: %w", err)
+	}
+	taskOpen = false
+	return control.ExecProvider(spec, cwd, task)
+}
+
+// sealProviderTask turns the admission-owned bytes into one exact, unlinked,
+// read-only descriptor. The temporary name exists only inside the already
+// registered private runtime and is removed before the descriptor crosses the
+// runner boundary. No pathname is carried into provider exec.
+func (a *runtimeAuthority) sealProviderTask(kind kernel.Provider, task []byte) (_ *os.File, resultErr error) {
+	if a == nil || a.temp == nil || provider.ValidateTask(kind, task) != nil {
+		return nil, ErrWorker
+	}
+	tempID, err := privateDirectory(a.temp)
+	if err != nil || tempID != a.tempID {
+		return nil, ErrWorker
+	}
+	fd, err := unix.Openat(int(a.temp.Fd()), providerTaskName, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0o600)
+	if err != nil {
+		return nil, ErrWorker
+	}
+	writer := os.NewFile(uintptr(fd), "provider-task-writer")
+	var created runner.FileIdentity
+	named := false
+	var reader *os.File
+	defer func() {
+		if writer != nil {
+			resultErr = errors.Join(resultErr, writer.Close())
+		}
+		if resultErr != nil && reader != nil {
+			resultErr = errors.Join(resultErr, reader.Close())
+		}
+		if named && created.Device != 0 && created.Inode != 0 {
+			var current unix.Stat_t
+			if unix.Fstatat(int(a.temp.Fd()), providerTaskName, &current, unix.AT_SYMLINK_NOFOLLOW) == nil && uint64(current.Dev) == created.Device && current.Ino == created.Inode {
+				resultErr = errors.Join(resultErr, unix.Unlinkat(int(a.temp.Fd()), providerTaskName, 0))
+				resultErr = errors.Join(resultErr, unix.Fsync(int(a.temp.Fd())))
+			}
+		}
+	}()
+	var empty unix.Stat_t
+	if err := unix.Fstat(fd, &empty); err != nil || empty.Mode&unix.S_IFMT != unix.S_IFREG || empty.Uid != uint32(os.Geteuid()) || empty.Mode&0o7777 != 0o600 || empty.Nlink != 1 || empty.Size != 0 || empty.Dev == 0 || empty.Ino == 0 || uint64(empty.Dev) != a.tempID.Device {
+		return nil, ErrWorker
+	}
+	created = runner.FileIdentity{Device: uint64(empty.Dev), Inode: empty.Ino}
+	named = true
+	n, err := writer.Write(task)
+	if err != nil || n != len(task) || writer.Sync() != nil {
+		return nil, ErrWorker
+	}
+	readFD, err := unix.Openat(int(a.temp.Fd()), providerTaskName, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
+	if err != nil {
+		return nil, ErrWorker
+	}
+	reader = os.NewFile(uintptr(readFD), "provider-task")
+	var sealed unix.Stat_t
+	if err := unix.Fstat(readFD, &sealed); err != nil || sealed.Mode&unix.S_IFMT != unix.S_IFREG || sealed.Uid != uint32(os.Geteuid()) || sealed.Mode&0o7777 != 0o600 || sealed.Nlink != 1 || sealed.Size != int64(len(task)) || uint64(sealed.Dev) != created.Device || sealed.Ino != created.Inode {
+		return nil, ErrWorker
+	}
+	flags, err := unix.FcntlInt(reader.Fd(), unix.F_GETFL, 0)
+	if err != nil || flags&unix.O_ACCMODE != unix.O_RDONLY {
+		return nil, ErrWorker
+	}
+	body, err := io.ReadAll(io.LimitReader(reader, int64(runner.MaxProviderTaskBytes)+1))
+	if err != nil || !bytes.Equal(body, task) {
+		return nil, ErrWorker
+	}
+	if _, err := reader.Seek(0, io.SeekStart); err != nil {
+		return nil, ErrWorker
+	}
+	var namedStat unix.Stat_t
+	if err := unix.Fstatat(int(a.temp.Fd()), providerTaskName, &namedStat, unix.AT_SYMLINK_NOFOLLOW); err != nil || uint64(namedStat.Dev) != created.Device || namedStat.Ino != created.Inode {
+		return nil, ErrWorker
+	}
+	if err := unix.Unlinkat(int(a.temp.Fd()), providerTaskName, 0); err != nil {
+		return nil, ErrWorker
+	}
+	named = false
+	if err := unix.Fsync(int(a.temp.Fd())); err != nil {
+		return nil, ErrWorker
+	}
+	if err := writer.Close(); err != nil {
+		writer = nil
+		return nil, ErrWorker
+	}
+	writer = nil
+	var unlinked unix.Stat_t
+	if err := unix.Fstat(readFD, &unlinked); err != nil || unlinked.Nlink != 0 || unlinked.Size != int64(len(task)) || uint64(unlinked.Dev) != created.Device || unlinked.Ino != created.Inode {
+		return nil, ErrWorker
+	}
+	tempID, err = privateDirectory(a.temp)
+	if err != nil || tempID != a.tempID {
+		return nil, ErrWorker
+	}
+	return reader, nil
+}
+
+// unlinkConfig consumes the final pathname that carried admission data. The
+// descriptor and name must still identify the exact validated file; an
+// unlink or directory fsync failure is fatal, so a provider can never execute
+// while this linked source-of-authority path is uncertain.
+func (a *runtimeAuthority) unlinkConfig() error {
+	if a == nil || a.root == nil || a.config == nil {
+		return ErrWorker
+	}
+	if err := verifyOpenPrivateFile(a.config, a.configID, a.configSize); err != nil {
+		return err
+	}
+	var named unix.Stat_t
+	if err := unix.Fstatat(int(a.root.Fd()), ConfigName, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil ||
+		uint64(named.Dev) != a.configID.Device || named.Ino != a.configID.Inode ||
+		named.Mode&unix.S_IFMT != unix.S_IFREG || named.Nlink != 1 {
+		return ErrWorker
+	}
+	if err := unix.Unlinkat(int(a.root.Fd()), ConfigName, 0); err != nil {
+		return err
+	}
+	if err := unix.Fsync(int(a.root.Fd())); err != nil {
+		return err
+	}
+	var unlinked unix.Stat_t
+	if err := unix.Fstat(int(a.config.Fd()), &unlinked); err != nil ||
+		uint64(unlinked.Dev) != a.configID.Device || unlinked.Ino != a.configID.Inode || unlinked.Nlink != 0 {
+		return ErrWorker
+	}
+	if err := unix.Fstatat(int(a.root.Fd()), ConfigName, &named, unix.AT_SYMLINK_NOFOLLOW); !errors.Is(err, unix.ENOENT) {
+		return ErrWorker
+	}
+	return nil
 }
 
 func prepareFreshChange(ctx context.Context, control *runner.WorkerControl, config Config) (_ *change.VerifiedPublished, resultErr error) {

@@ -11,6 +11,20 @@ const (
 	maxInputBytes  = 1 << 20
 	maxTargetBytes = 512 << 20
 	maxFrameBytes  = 16 << 10
+	// Provider errors are JSON/base64 framed inside maxFrameBytes. Keeping this
+	// private diagnostic at 8 KiB leaves deterministic envelope headroom.
+	maxProviderErrorBytes = 8 << 10
+
+	// MaxProviderTaskBytes is the largest exact task sealed in the provider's
+	// unlinked, read-only-at-exec descriptor.
+	MaxProviderTaskBytes = 128 << 10
+	ProviderTaskPath     = "/dev/fd/11"
+	providerTaskFD       = 11
+
+	// MaxEnvironmentEntryBytes is shared with producers of exact environment
+	// entries so a value accepted before admission cannot fail only after a
+	// provider launch is built.
+	MaxEnvironmentEntryBytes = 8192
 )
 
 // These are the complete fixed top-level runtime names emitted by the runner.
@@ -95,6 +109,17 @@ type ExecSpec struct {
 	// runner-owned target as descriptor 3. It is not a general ExtraFiles
 	// surface and is closed before provider exec.
 	Control *os.File
+}
+
+// ExecutableCommitment freezes one exact direct native executable. Its
+// fields stay private so callers can carry, but cannot forge or weaken, the
+// identity and content commitment made by CommitExecutableLocator.
+type ExecutableCommitment struct{ executable fileCommitment }
+
+func (ExecutableCommitment) String() string   { return "runner executable commitment (private)" }
+func (ExecutableCommitment) GoString() string { return "runner.ExecutableCommitment{private}" }
+func (commitment ExecutableCommitment) Path() string {
+	return commitment.executable.Path
 }
 
 type LaunchSpec struct {
