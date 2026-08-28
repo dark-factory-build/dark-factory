@@ -38,6 +38,9 @@ type operationalSource struct {
 }
 
 func openOperationalHome(ctx context.Context, home string) (_ *OperationalHome, resultErr error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	parentPath, base, err := splitHome(home)
 	if err != nil {
 		return nil, err
