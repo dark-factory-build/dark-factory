@@ -17,10 +17,13 @@ runner publish/authenticate protocol.
   digest) plus runtime-lifetime-lease availability. A numeric PID is never
   authority.
 - Lease availability semantics: flock acquirable ⇔ no live holder in the
-  attempt tree. To verify in composition: the exact fd-inheritance chain
-  that guarantees the provider (not just the outer runner) holds the lease
-  OFD; otherwise lease availability proves less than this matrix assumes.
-  (Verification result: recorded below once measured.)
+  attempt tree. VERIFIED in composition: the gate clears CLOEXEC on the
+  inherited lifetime descriptor before exec (process_darwin.go, gate
+  retain step), and the inner gate repeats the same retention, so the
+  outer runner AND the provider each hold the one lease OFD. Arbitrary
+  provider descendants are NOT guaranteed holders, so the sweep never
+  concludes absence from lease availability alone: every absence is a
+  positive per-identity observation on top of the acquired lease.
 - Failure details must state only what was observed (declarations-vs-
   observations rule).
 - A present-but-non-authenticating artifact is evidence of a torn publish
@@ -115,6 +118,34 @@ state.
    defends the artifact channel, not the same-uid boundary; recovery must
    not claim otherwise.
 
+## Built in this phase (status)
+
+- Live composition (supervisor): BeginRunnerStart/ActivateRunner windowed
+  failure convergence, ACK-free consume tail, O1 single-constructor proof
+  binding with a composed causal test, disk-authentication fallback when a
+  late credit/terminate write poisons the control socket (writeFrame
+  closes the socket on any failed write — the notice was never authority).
+- Kernel fix surfaced by composition (own flagged commit, needs
+  re-review): terminalResultPostcondition and the consume replay
+  recognizer compared insignificant exit-arm values, wedging every signal
+  and nonzero-code exit at the replay/close/removal seams; fixed with
+  significance-aware comparison and a causal test over both arms.
+- Recovery sweep: RecoverAbandonedRuns implements cells A, B/C1, C2/E, C3
+  (retain, conclude nothing), D (fail closed, unresolved pair, absence-
+  released runner, deliberately not terminal), F (held lease concludes
+  nothing). Census admits attempt-result.json with outer-marker + token
+  provenance; recovered runtime exposes marker facts, notice-less
+  authentication, and exact removal.
+- Spec corrections from building it: cell D needs no new session-close
+  edge — the run deliberately remains finalizing with unresolved residue
+  (finalizeRun refuses unresolved footprints), which is the intended
+  operator surface; worker-run terminal commit in recovery requires the
+  change settlement (published-tree inspection) and is deferred to the
+  scheduler/factoryd phase; census legality additionally requires an
+  artifact to imply outer marker AND token, and an outer marker without
+  the worker config still implies the inner marker (production publishes
+  config before start — recovery fixtures must too).
+
 ## Migration debt closed by this phase
 
 - internal/daemon compile failures (removed AttemptEvent.Terminal /
@@ -131,3 +162,11 @@ state.
   resultDerivedTerminalClose (same-millisecond fingerprint wedge).
 - Checkpoint ALLOW conditions resolved here: `go build ./...` restored;
   full `go test ./...` green.
+- Deferred with reasons: the legacy terminal-close methods and
+  resultDerivedTerminalClose now have zero production callers but remain
+  load-bearing for kernel tests of no-result histories; their deletion
+  drags a multi-file kernel test migration and is left for the simplicity
+  audit with the wedge no longer reachable from production code.
+  Worker-run terminalization in recovery (settlement reconstruction) and
+  wiring the sweep into daemon boot belong to the scheduler/factoryd
+  activation phase.
