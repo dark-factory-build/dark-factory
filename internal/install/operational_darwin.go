@@ -23,17 +23,19 @@ const (
 )
 
 type operationalHomeState struct {
-	mu       sync.Mutex
-	homeName string
-	parent   *homeParent
-	home     *os.File
-	lock     *os.File
-	anchor   *os.File
-	root     identity
-	lockID   identity
-	anchorID identity
-	members  map[string]retainedMember
-	closed   bool
+	mu           sync.Mutex
+	homeName     string
+	databasePath string
+	parent       *homeParent
+	home         *os.File
+	lock         *os.File
+	anchor       *os.File
+	root         identity
+	lockID       identity
+	anchorID     identity
+	members      map[string]retainedMember
+	store        *kernel.Store
+	closed       bool
 }
 
 type retainedMember struct {
@@ -45,6 +47,10 @@ type retainedMember struct {
 // operationalCloseHook is package-local test instrumentation. Production
 // close has no hook and keeps the lease until all other descriptors are gone.
 var operationalCloseHook func(string)
+
+// operationalStoreHook is package-local deterministic fault instrumentation.
+// Production activation has no hook.
+var operationalStoreHook func(string) error
 
 type operationalSource struct {
 	name string
@@ -145,16 +151,88 @@ func openOperationalHome(ctx context.Context, home string) (_ *OperationalHome, 
 	}
 	cleanup = false
 	return &OperationalHome{state: &operationalHomeState{
-		homeName: base,
-		parent:   parent,
-		home:     homeFile,
-		lock:     lockFile,
-		anchor:   anchorFile,
-		root:     toIdentity(homeStat),
-		lockID:   toIdentity(lockStat),
-		anchorID: toIdentity(anchorStat),
-		members:  members,
+		homeName:     base,
+		databasePath: filepath.Join(home, databaseName),
+		parent:       parent,
+		home:         homeFile,
+		lock:         lockFile,
+		anchor:       anchorFile,
+		root:         toIdentity(homeStat),
+		lockID:       toIdentity(lockStat),
+		anchorID:     toIdentity(anchorStat),
+		members:      members,
 	}}, nil
+}
+
+func (state *operationalHomeState) openStore(ctx context.Context) (*kernel.Store, error) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.closed || state.parent == nil || state.home == nil {
+		return nil, ErrClosed
+	}
+	if state.store != nil {
+		return nil, ErrBusy
+	}
+	if err := recheckOperationalIdentityByState(state); err != nil {
+		return nil, errors.Join(ErrUncertain, err)
+	}
+	if operationalStoreHook != nil {
+		if err := operationalStoreHook("before activation"); err != nil {
+			return nil, err
+		}
+	}
+	if err := recheckOperationalIdentityByState(state); err != nil {
+		return nil, errors.Join(ErrUncertain, err)
+	}
+	boundHome, err := duplicateOperationalFile(state.home, "sqlite home handoff")
+	if err != nil {
+		return nil, err
+	}
+	boundDatabase, err := duplicateOperationalFile(state.members[databaseName].file, "sqlite main handoff")
+	if err != nil {
+		return nil, errors.Join(err, boundHome.Close())
+	}
+	if operationalStoreHook != nil {
+		if err := operationalStoreHook("at activation handoff"); err != nil {
+			return nil, errors.Join(err, boundDatabase.Close(), boundHome.Close())
+		}
+	}
+	store, err := kernel.OpenOperational(ctx, state.databasePath, boundHome, boundDatabase)
+	if err != nil {
+		if bindingErr := recheckOperationalIdentityByState(state); bindingErr != nil {
+			return nil, errors.Join(err, ErrUncertain, bindingErr)
+		}
+		return nil, err
+	}
+	if operationalStoreHook != nil {
+		if err := operationalStoreHook("after activation"); err != nil {
+			return nil, errors.Join(err, store.Close())
+		}
+	}
+	if err := bindActivatedSidecars(state); err != nil {
+		return nil, errors.Join(ErrUncertain, err, store.Close())
+	}
+	if err := recheckOperationalIdentityByState(state); err != nil {
+		return nil, errors.Join(ErrUncertain, err, store.Close())
+	}
+	state.store = store
+	return store, nil
+}
+
+func duplicateOperationalFile(source *os.File, label string) (*os.File, error) {
+	if source == nil {
+		return nil, fmt.Errorf("%s descriptor is unavailable", label)
+	}
+	fd, err := unix.FcntlInt(source.Fd(), unix.F_DUPFD_CLOEXEC, 0)
+	if err != nil {
+		return nil, fmt.Errorf("duplicate %s: %w", label, err)
+	}
+	file := os.NewFile(uintptr(fd), label)
+	if file == nil {
+		_ = unix.Close(fd)
+		return nil, fmt.Errorf("duplicate %s: invalid file descriptor", label)
+	}
+	return file, nil
 }
 
 func (state *operationalHomeState) close() error {
@@ -167,8 +245,15 @@ func (state *operationalHomeState) close() error {
 		return nil
 	}
 	state.closed = true
-	identityErr := recheckOperationalIdentityByState(state)
 	var result error
+	// The Store is a child of this lifetime lease. Closing the home makes
+	// every outstanding Store reference fail closed before any retained home
+	// descriptor or the flock is released.
+	if state.store != nil {
+		result = errors.Join(result, state.store.Close())
+		state.store = nil
+	}
+	identityErr := recheckOperationalIdentityByState(state)
 	if identityErr != nil {
 		result = errors.Join(result, errors.Join(ErrUncertain, identityErr))
 	}
@@ -259,6 +344,16 @@ func (state *operationalHomeState) openCapability(name string) (*os.File, error)
 }
 
 func recheckOperationalIdentityByState(state *operationalHomeState) error {
+	if err := recheckOperationalCoreIdentityByState(state); err != nil {
+		return err
+	}
+	if err := state.recheckMembers(); err != nil {
+		return err
+	}
+	return recheckOperationalCensus(state.parent, state.homeName, state.root, state.members)
+}
+
+func recheckOperationalCoreIdentityByState(state *operationalHomeState) error {
 	if state.parent == nil || state.home == nil || state.lock == nil || state.anchor == nil {
 		return fmt.Errorf("operational home descriptors are unavailable")
 	}
@@ -268,7 +363,7 @@ func recheckOperationalIdentityByState(state *operationalHomeState) error {
 	if err := exactDirectory(state.home, false); err != nil {
 		return err
 	}
-	if err := sameFileIdentity(state.root, state.home); err != nil {
+	if err := sameMemberFileIdentity(state.root, state.home, true); err != nil {
 		return err
 	}
 	if err := recheckIdentityBinding(state.parent.file, state.homeName, state.root); err != nil {
@@ -289,10 +384,7 @@ func recheckOperationalIdentityByState(state *operationalHomeState) error {
 	if err := sameObjectIdentity(state.lockID, state.anchorID); err != nil {
 		return fmt.Errorf("%w: operational home lock pair differs", ErrInvalidHome)
 	}
-	if err := state.recheckMembers(); err != nil {
-		return err
-	}
-	return recheckOperationalCensus(state.parent, state.homeName, state.root, state.members)
+	return nil
 }
 
 func recheckOperationalIdentity(parent *homeParent, name string, home *os.File, homeStat unix.Stat_t, lock *os.File, lockStat unix.Stat_t, anchor *os.File, anchorStat unix.Stat_t) error {
@@ -605,15 +697,60 @@ func (state *operationalHomeState) recheckMembers() error {
 		}
 		if member.directory {
 			if err := exactDirectory(member.file, false); err != nil {
-				return err
+				return fmt.Errorf("recheck retained operational directory %s: %w", name, err)
 			}
 		}
 		if err := sameMemberFileIdentity(member.identity, member.file, member.directory); err != nil {
-			return err
+			return fmt.Errorf("recheck retained operational member %s: %w", name, err)
 		}
 		if err := recheckIdentityBinding(state.home, name, member.identity); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func bindActivatedSidecars(state *operationalHomeState) error {
+	if err := recheckOperationalCoreIdentityByState(state); err != nil {
+		return err
+	}
+	root, stat, err := openDirectoryMember(state.parent.file, state.homeName)
+	if err != nil {
+		return fmt.Errorf("reopen operational home after sqlite activation: %w", err)
+	}
+	seen, censusErr := readOperationalCensus(root)
+	if censusErr != nil {
+		return errors.Join(censusErr, root.Close())
+	}
+	if err := sameObjectIdentity(state.root, toIdentity(stat)); err != nil {
+		return errors.Join(err, root.Close())
+	}
+	if !seen[databaseName+"-wal"] || !seen[databaseName+"-shm"] {
+		return errors.Join(fmt.Errorf("%w: sqlite activation did not leave a complete sidecar pair", ErrUncertain), root.Close())
+	}
+	if err := root.Close(); err != nil {
+		return err
+	}
+	for _, name := range []string{databaseName + "-wal", databaseName + "-shm"} {
+		if retained, ok := state.members[name]; ok {
+			if err := sameMemberFileIdentity(retained.identity, retained.file, false); err != nil {
+				return err
+			}
+			if err := recheckIdentityBinding(state.home, name, retained.identity); err != nil {
+				return err
+			}
+			continue
+		}
+		file, sidecarStat, err := openMember(state.home, name)
+		if err != nil {
+			return fmt.Errorf("retain activated sqlite sidecar %s: %w", name, err)
+		}
+		minimum, maximum := operationalSidecarBounds(name)
+		if sidecarStat.Size < minimum || sidecarStat.Size > maximum {
+			_ = file.Close()
+			return fmt.Errorf("%w: activated sqlite sidecar %s size is outside bounds", ErrInvalidHome, name)
+		}
+		state.members[name] = retainedMember{file: file, identity: toIdentity(sidecarStat)}
 	}
 	return nil
 }

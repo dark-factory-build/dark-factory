@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"os"
+
+	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
 var (
@@ -80,6 +82,16 @@ func (home *OperationalHome) Runtimes() (MemberCapability, error) {
 // Changes returns the bound Changes-parent capability.
 func (home *OperationalHome) Changes() (MemberCapability, error) {
 	return home.memberCapability("changes")
+}
+
+// OpenStore activates the retained database authority exactly once. The
+// returned Store owns a finite, eagerly opened SQLite connection set; closing
+// the OperationalHome closes that Store before releasing the home lease.
+func (home *OperationalHome) OpenStore(ctx context.Context) (*kernel.Store, error) {
+	if home == nil || home.state == nil {
+		return nil, ErrClosed
+	}
+	return home.state.openStore(ctx)
 }
 
 func (home *OperationalHome) memberCapability(name string) (MemberCapability, error) {

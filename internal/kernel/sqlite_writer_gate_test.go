@@ -92,3 +92,57 @@ func TestStoreCloseJoinsAdmittedWriterAndRejectsNewWriters(t *testing.T) {
 		t.Fatalf("repeated Store.Close = %v", err)
 	}
 }
+
+func TestStoreCloseRetainsAuthorityForCheckedOutConnection(t *testing.T) {
+	image, err := NewDatabaseImage(context.Background(), FactoryConfig{}, mustTime(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := mustCanonicalTestDatabasePath(t, filepath.Join(t.TempDir(), "kernel.db"))
+	writeSidecar(t, path, image, 0o600)
+	store, err := openOperationalTestStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, err := store.readerConnection(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- store.Close() }()
+	deadline := time.After(500 * time.Millisecond)
+	for !store.closed.Load() {
+		select {
+		case <-deadline:
+			t.Fatal("Store.Close did not mark the store closed")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	select {
+	case err := <-closeResult:
+		t.Fatalf("Store.Close returned while a checked-out connection was idle: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	if store.pathBinding == nil {
+		t.Fatal("Store.Close released its retained path binding while a connection was checked out")
+	}
+	var singleton int
+	if err := connection.QueryRowContext(context.Background(), `SELECT singleton FROM factory`).Scan(&singleton); err != nil || singleton != 1 {
+		t.Fatalf("checked-out connection could not finish while Close retained authority: singleton=%d err=%v", singleton, err)
+	}
+	select {
+	case err := <-closeResult:
+		t.Fatalf("Store.Close returned before the checked-out connection was returned: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	if err := connection.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-closeResult; err != nil {
+		t.Fatal(err)
+	}
+	if store.pathBinding != nil {
+		t.Fatal("Store.Close retained its path binding after the checked-out connection returned")
+	}
+}

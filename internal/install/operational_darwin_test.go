@@ -178,7 +178,7 @@ func TestOperationalHomeRejectsMalformedSQLiteSidecarsWithoutMutation(t *testing
 		})
 	}
 }
-func TestOperationalHomeHoldsLeaseThroughDatabaseOpen(t *testing.T) {
+func TestOperationalHomeHoldsLeaseThroughStoreLifetime(t *testing.T) {
 	parent := installTempDir(t)
 	homePath := filepath.Join(parent, "home")
 	if _, err := Init(context.Background(), homePath); err != nil {
@@ -188,7 +188,7 @@ func TestOperationalHomeHoldsLeaseThroughDatabaseOpen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := kernel.Open(context.Background(), filepath.Join(homePath, databaseName))
+	store, err := home.OpenStore(context.Background())
 	if err != nil {
 		_ = home.Close()
 		t.Fatal(err)
@@ -197,8 +197,208 @@ func TestOperationalHomeHoldsLeaseThroughDatabaseOpen(t *testing.T) {
 		_ = home.Close()
 		t.Fatal(err)
 	}
+	if another, err := home.OpenStore(context.Background()); another != nil || !errors.Is(err, ErrBusy) {
+		_ = home.Close()
+		t.Fatalf("second OpenStore after child close = %v, %v; want busy", another, err)
+	}
 	if err := home.Close(); err != nil {
 		t.Fatalf("close after database open = %v", err)
+	}
+}
+
+func TestOperationalHomeOpenStoreRejectsWholeHomeReplacementCuts(t *testing.T) {
+	for _, cut := range []string{"before activation", "at activation handoff", "after activation"} {
+		t.Run(cut, func(t *testing.T) {
+			parent := installTempDir(t)
+			homePath := filepath.Join(parent, "home")
+			if _, err := Init(context.Background(), homePath); err != nil {
+				t.Fatal(err)
+			}
+			home, err := OpenOperationalHome(context.Background(), homePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var replacementDigest [32]byte
+			operationalStoreHook = func(point string) error {
+				if point != cut {
+					return nil
+				}
+				operationalStoreHook = nil
+				if err := os.Rename(homePath, filepath.Join(parent, "original")); err != nil {
+					return err
+				}
+				if _, err := Init(context.Background(), homePath); err != nil {
+					return err
+				}
+				replacementDigest = installDigest(t, homePath)
+				return nil
+			}
+			defer func() { operationalStoreHook = nil }()
+			store, err := home.OpenStore(context.Background())
+			if store != nil {
+				_ = store.Close()
+				t.Fatal("OpenStore returned a Store after whole-home replacement")
+			}
+			if !errors.Is(err, ErrUncertain) {
+				t.Fatalf("OpenStore after %s replacement = %v, want uncertain", cut, err)
+			}
+			if got := installDigest(t, homePath); got != replacementDigest {
+				t.Fatalf("replacement home changed after refused %s activation", cut)
+			}
+			if err := home.Close(); !errors.Is(err, ErrUncertain) {
+				t.Fatalf("Close after %s replacement = %v, want uncertain", cut, err)
+			}
+		})
+	}
+}
+
+func TestOperationalHomeOpenStoreRejectsDatabaseReplacementCuts(t *testing.T) {
+	for _, cut := range []string{"before activation", "at activation handoff", "after activation"} {
+		t.Run(cut, func(t *testing.T) {
+			parent := installTempDir(t)
+			homePath := filepath.Join(parent, "home")
+			if _, err := Init(context.Background(), homePath); err != nil {
+				t.Fatal(err)
+			}
+			home, err := OpenOperationalHome(context.Background(), homePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			databasePath := filepath.Join(homePath, databaseName)
+			replacement := []byte("replacement database must remain byte-exact")
+			operationalStoreHook = func(point string) error {
+				if point != cut {
+					return nil
+				}
+				operationalStoreHook = nil
+				if err := os.Rename(databasePath, filepath.Join(parent, "original.sqlite3")); err != nil {
+					return err
+				}
+				return os.WriteFile(databasePath, replacement, 0o600)
+			}
+			defer func() { operationalStoreHook = nil }()
+			store, err := home.OpenStore(context.Background())
+			if store != nil {
+				_ = store.Close()
+				t.Fatal("OpenStore returned a Store after database replacement")
+			}
+			if !errors.Is(err, ErrUncertain) {
+				t.Fatalf("OpenStore after %s replacement = %v, want uncertain", cut, err)
+			}
+			got, readErr := os.ReadFile(databasePath)
+			if readErr != nil || !bytes.Equal(got, replacement) {
+				t.Fatalf("replacement database changed after refused %s activation: %q, %v", cut, got, readErr)
+			}
+			if err := home.Close(); !errors.Is(err, ErrUncertain) {
+				t.Fatalf("Close after %s replacement = %v, want uncertain", cut, err)
+			}
+		})
+	}
+}
+
+func TestOperationalHomeCloseClosesStoreBeforeLeaseRelease(t *testing.T) {
+	parent := installTempDir(t)
+	homePath := filepath.Join(parent, "home")
+	if _, err := Init(context.Background(), homePath); err != nil {
+		t.Fatal(err)
+	}
+	home, err := OpenOperationalHome(context.Background(), homePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := home.OpenStore(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeStarted := make(chan struct{})
+	allowUnlock := make(chan struct{})
+	var hookOnce sync.Once
+	operationalCloseHook = func(point string) {
+		if point != "before lock release" {
+			t.Errorf("close hook point = %q", point)
+		}
+		hookOnce.Do(func() {
+			close(closeStarted)
+			<-allowUnlock
+		})
+	}
+	defer func() { operationalCloseHook = nil }()
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- home.Close() }()
+	select {
+	case <-closeStarted:
+	case <-time.After(10 * time.Second):
+		close(allowUnlock)
+		<-closeResult
+		t.Fatal("Close did not reach the pre-unlock boundary")
+	}
+	if _, err := store.Factory(context.Background()); !errors.Is(err, kernel.ErrStoreClosed) {
+		close(allowUnlock)
+		<-closeResult
+		t.Fatalf("Store during OperationalHome close = %v, want store closed", err)
+	}
+	if candidate, err := OpenOperationalHome(context.Background(), homePath); candidate != nil || !errors.Is(err, ErrBusy) {
+		close(allowUnlock)
+		<-closeResult
+		t.Fatalf("home lease during Store-closed pre-unlock boundary = %v, %v", candidate, err)
+	}
+	close(allowUnlock)
+	if err := <-closeResult; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Factory(context.Background()); !errors.Is(err, kernel.ErrStoreClosed) {
+		t.Fatalf("Store after OperationalHome close = %v, want store closed", err)
+	}
+	reopened, err := OpenOperationalHome(context.Background(), homePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOperationalHomeStoreRejectsLaterSidecarReplacement(t *testing.T) {
+	for _, suffix := range []string{"-wal", "-shm"} {
+		t.Run(suffix[1:], func(t *testing.T) {
+			parent := installTempDir(t)
+			homePath := filepath.Join(parent, "home")
+			if _, err := Init(context.Background(), homePath); err != nil {
+				t.Fatal(err)
+			}
+			home, err := OpenOperationalHome(context.Background(), homePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			store, err := home.OpenStore(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			target := filepath.Join(homePath, databaseName) + suffix
+			if err := os.Rename(target, filepath.Join(parent, "original"+suffix)); err != nil {
+				t.Fatal(err)
+			}
+			replacement := []byte("replacement-sidecar")
+			if suffix == "-shm" {
+				replacement = bytes.Repeat([]byte{9}, operationalMinSHMBytes)
+			}
+			if err := os.WriteFile(target, replacement, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Factory(context.Background()); !errors.Is(err, kernel.ErrCorruptState) {
+				t.Fatalf("Store after %s replacement = %v, want corrupt state", suffix, err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			got, readErr := os.ReadFile(target)
+			if readErr != nil || !bytes.Equal(got, replacement) {
+				t.Fatalf("replacement %s changed: %x, %v", suffix, got, readErr)
+			}
+			if err := home.Close(); !errors.Is(err, ErrUncertain) {
+				t.Fatalf("home close after %s replacement = %v, want uncertain", suffix, err)
+			}
+		})
 	}
 }
 
@@ -742,28 +942,29 @@ func TestOperationalHomeDescriptorCensus(t *testing.T) {
 	if current, _ := descriptorCount(); current != baseline {
 		t.Fatalf("descriptor count after init = %d, baseline %d", current, baseline)
 	}
-	home, err := OpenOperationalHome(context.Background(), homePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if current, _ := descriptorCount(); current <= baseline {
-		t.Fatalf("descriptor count after operational open = %d, baseline %d", current, baseline)
-	}
-	database, err := home.Database()
-	if err != nil {
-		t.Fatal(err)
-	}
-	file, err := database.Open()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := file.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := home.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if current, _ := descriptorCount(); current != baseline {
-		t.Fatalf("descriptor count after operational close = %d, baseline %d", current, baseline)
+	for iteration := 0; iteration < 5; iteration++ {
+		home, err := OpenOperationalHome(context.Background(), homePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		store, err := home.OpenStore(context.Background())
+		if err != nil {
+			_ = home.Close()
+			t.Fatal(err)
+		}
+		if current, _ := descriptorCount(); current <= baseline {
+			_ = home.Close()
+			t.Fatalf("descriptor count after operational Store open = %d, baseline %d", current, baseline)
+		}
+		if _, err := store.Factory(context.Background()); err != nil {
+			_ = home.Close()
+			t.Fatal(err)
+		}
+		if err := home.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if current, _ := descriptorCount(); current != baseline {
+			t.Fatalf("descriptor count after operational Store close %d = %d, baseline %d", iteration+1, current, baseline)
+		}
 	}
 }

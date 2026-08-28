@@ -25,15 +25,38 @@ const (
 	walIndexRegionSize = 32768
 )
 
-// Open validates and activates one canonical absolute database path. The
-// caller must hold exclusive home lifetime authority for the entire call;
-// descriptor checks detect replacement but cannot make SQLite's path open
-// relative to the retained parent descriptors.
+// sqliteActivationHook is package-local deterministic fault instrumentation.
+// Production activation has no hook.
+var sqliteActivationHook func(string) error
+
+// Open validates and activates one canonical absolute database path for fresh
+// construction, tests, and other callers that do not retain a home lease.
 func Open(ctx context.Context, absolutePath string) (*Store, error) {
+	return openExisting(ctx, absolutePath, false)
+}
+
+// OpenOperational validates and activates one canonical absolute database
+// path bound to the supplied retained home and main-database descriptors. It
+// takes ownership of both descriptors and retains the exact path/file
+// authority plus a finite physical connection set through Store.Close.
+// install.OperationalHome is the sole production caller.
+func OpenOperational(ctx context.Context, absolutePath string, home, database *os.File) (*Store, error) {
+	files, err := openBoundDatabaseFiles(absolutePath, home, database)
+	if err != nil {
+		return nil, err
+	}
+	return openExistingFiles(ctx, absolutePath, files, true)
+}
+
+func openExisting(ctx context.Context, absolutePath string, retainBinding bool) (*Store, error) {
 	files, err := openDatabaseFiles(absolutePath)
 	if err != nil {
 		return nil, err
 	}
+	return openExistingFiles(ctx, absolutePath, files, retainBinding)
+}
+
+func openExistingFiles(ctx context.Context, absolutePath string, files *databaseFiles, retainBinding bool) (*Store, error) {
 	if err := files.refreshPinnedInfo(); err != nil {
 		return nil, errors.Join(err, files.Close())
 	}
@@ -53,7 +76,12 @@ func Open(ctx context.Context, absolutePath string) (*Store, error) {
 			return nil, errors.Join(err, files.Close())
 		}
 	}
-	store, err := openPools(absolutePath)
+	var store *Store
+	if retainBinding {
+		store, err = openFixedPools(absolutePath, files.recheckActivationBindings)
+	} else {
+		store, err = openPools(absolutePath)
+	}
 	if err != nil {
 		// SQLite activation may have created or changed sidecars. Without an
 		// exact live creation descriptor they remain visible evidence; cleanup
@@ -61,22 +89,35 @@ func Open(ctx context.Context, absolutePath string) (*Store, error) {
 		return nil, closeFailedActivation(files, err)
 	}
 	if !hadWAL {
-		files.wal, err = files.openDatabaseFile(files.main.name+"-wal", "WAL", 0, maxSQLiteWALSize)
-		if err != nil {
-			return nil, closeRejectedOpen(store, files, err)
+		if files.wal == nil {
+			files.wal, err = files.openDatabaseFile(files.main.name+"-wal", "WAL", 0, maxSQLiteWALSize)
+			if err != nil {
+				return nil, closeRejectedOpen(store, files, err)
+			}
 		}
-		if err := files.refreshPinnedInfo(); err != nil {
-			return nil, closeRejectedOpen(store, files, err)
-		}
+		files.shm.minimum = walIndexRegionSize
+	}
+	if err := files.refreshPinnedInfo(); err != nil {
+		return nil, closeRejectedOpen(store, files, err)
+	}
+	if retainBinding {
+		store.pathBinding = files
 	}
 	if err := store.validateOpen(ctx); err != nil {
 		return nil, closeRejectedOpen(store, files, err)
 	}
+	if sqliteActivationHook != nil {
+		if err := sqliteActivationHook("after validation"); err != nil {
+			return nil, closeRejectedOpen(store, files, err)
+		}
+	}
 	if err := files.recheckPaths(); err != nil {
 		return nil, closeRejectedOpen(store, files, err)
 	}
-	if err := files.Close(); err != nil {
-		return nil, errors.Join(err, store.Close())
+	if !retainBinding {
+		if err := files.Close(); err != nil {
+			return nil, errors.Join(err, store.Close())
+		}
 	}
 	return store, nil
 }
@@ -140,11 +181,12 @@ type databaseFile struct {
 }
 
 type databaseFiles struct {
-	authority *databasePathAuthority
-	directory *os.File
-	main      *databaseFile
-	wal       *databaseFile
-	shm       *databaseFile
+	authority        *databasePathAuthority
+	handoffDirectory *os.File
+	directory        *os.File
+	main             *databaseFile
+	wal              *databaseFile
+	shm              *databaseFile
 }
 
 type databasePathComponent struct {
@@ -290,7 +332,6 @@ func (authority *databasePathAuthority) Close() error {
 }
 
 func openDatabaseFiles(path string) (_ *databaseFiles, resultErr error) {
-	base := filepath.Base(path)
 	authority, err := openDatabasePathAuthority(path)
 	if err != nil {
 		return nil, err
@@ -301,54 +342,143 @@ func openDatabaseFiles(path string) (_ *databaseFiles, resultErr error) {
 			resultErr = errors.Join(resultErr, files.Close())
 		}
 	}()
-
-	journalPresent, err := files.pathPresent(base + "-journal")
-	if err != nil {
-		return nil, err
-	}
-	if journalPresent {
-		return nil, fmt.Errorf("%w: rollback journal requires recovery", ErrCorruptState)
-	}
-	walPresent, err := files.pathPresent(base + "-wal")
-	if err != nil {
-		return nil, err
-	}
-	shmPresent, err := files.pathPresent(base + "-shm")
-	if err != nil {
-		return nil, err
-	}
-	if walPresent != shmPresent {
-		return nil, fmt.Errorf("%w: incomplete WAL sidecar pair", ErrCorruptState)
-	}
-	files.main, err = files.openDatabaseFile(base, "main database", 100, maxImmutableDatabaseImageSize)
-	if err != nil {
-		return nil, err
-	}
-	if err := validateMainFile(files.main, walPresent); err != nil {
-		return nil, err
-	}
-	if !walPresent {
-		return files, nil
-	}
-	files.wal, err = files.openDatabaseFile(base+"-wal", "WAL", 0, maxSQLiteWALSize)
-	if err != nil {
-		return nil, err
-	}
-	files.shm, err = files.openDatabaseFile(base+"-shm", "SHM", walIndexRegionSize, maxSQLiteSHMSize)
-	if err != nil {
-		return nil, err
-	}
-	if files.shm.info.Size()%walIndexRegionSize != 0 {
-		return nil, fmt.Errorf("%w: SHM size %d is not a positive multiple of %d", ErrCorruptState, files.shm.info.Size(), walIndexRegionSize)
-	}
-	pageSize, err := databasePageSize(files.main.file)
-	if err != nil {
-		return nil, err
-	}
-	if err := validateWAL(files.wal.file, files.wal.info.Size(), pageSize); err != nil {
+	if err := populateDatabaseFiles(files, path, nil); err != nil {
 		return nil, err
 	}
 	return files, nil
+}
+
+func openBoundDatabaseFiles(path string, retainedHome, retainedMain *os.File) (_ *databaseFiles, resultErr error) {
+	if retainedHome == nil || retainedMain == nil {
+		var closeErr error
+		if retainedHome != nil {
+			closeErr = errors.Join(closeErr, retainedHome.Close())
+		}
+		if retainedMain != nil {
+			closeErr = errors.Join(closeErr, retainedMain.Close())
+		}
+		return nil, errors.Join(fmt.Errorf("%w: retained sqlite handoff descriptors are required", ErrInvalidValue), closeErr)
+	}
+	authority, err := openDatabasePathAuthority(path)
+	if err != nil {
+		return nil, errors.Join(err, retainedMain.Close(), retainedHome.Close())
+	}
+	files := &databaseFiles{
+		authority:        authority,
+		handoffDirectory: retainedHome,
+		directory:        authority.directory(),
+	}
+	defer func() {
+		if resultErr != nil {
+			if files.main == nil {
+				resultErr = errors.Join(resultErr, retainedMain.Close())
+			}
+			resultErr = errors.Join(resultErr, files.Close())
+		}
+	}()
+
+	homeInfo, err := retainedHome.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("inspect retained sqlite home handoff: %w", err)
+	}
+	if err := validateDatabaseParentInfo(homeInfo); err != nil {
+		return nil, err
+	}
+	pathInfo, err := files.directory.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("inspect sqlite path home handoff: %w", err)
+	}
+	if !os.SameFile(homeInfo, pathInfo) {
+		return nil, fmt.Errorf("%w: sqlite path home differs from retained authority", ErrCorruptState)
+	}
+
+	if err := populateDatabaseFiles(files, path, retainedMain); err != nil {
+		return nil, err
+	}
+	return files, nil
+}
+
+func populateDatabaseFiles(files *databaseFiles, path string, retainedMain *os.File) error {
+	base := filepath.Base(path)
+	journalPresent, err := files.pathPresent(base + "-journal")
+	if err != nil {
+		return err
+	}
+	if journalPresent {
+		return fmt.Errorf("%w: rollback journal requires recovery", ErrCorruptState)
+	}
+	walPresent, err := files.pathPresent(base + "-wal")
+	if err != nil {
+		return err
+	}
+	shmPresent, err := files.pathPresent(base + "-shm")
+	if err != nil {
+		return err
+	}
+	if walPresent != shmPresent {
+		return fmt.Errorf("%w: incomplete WAL sidecar pair", ErrCorruptState)
+	}
+	if retainedMain == nil {
+		files.main, err = files.openDatabaseFile(base, "main database", 100, maxImmutableDatabaseImageSize)
+	} else {
+		files.main, err = inspectRetainedDatabaseFile(retainedMain, base, "main database", 100, maxImmutableDatabaseImageSize)
+	}
+	if err != nil {
+		return err
+	}
+	if err := validateMainFile(files.main, walPresent); err != nil {
+		return err
+	}
+	if retainedMain != nil {
+		if err := files.recheckRetainedFileBinding(files.main); err != nil {
+			return err
+		}
+	}
+	if !walPresent {
+		return nil
+	}
+	files.wal, err = files.openDatabaseFile(base+"-wal", "WAL", 0, maxSQLiteWALSize)
+	if err != nil {
+		return err
+	}
+	files.shm, err = files.openDatabaseFile(base+"-shm", "SHM", walIndexRegionSize, maxSQLiteSHMSize)
+	if err != nil {
+		return err
+	}
+	if files.shm.info.Size()%walIndexRegionSize != 0 {
+		return fmt.Errorf("%w: SHM size %d is not a positive multiple of %d", ErrCorruptState, files.shm.info.Size(), walIndexRegionSize)
+	}
+	pageSize, err := databasePageSize(files.main.file)
+	if err != nil {
+		return err
+	}
+	return validateWAL(files.wal.file, files.wal.info.Size(), pageSize)
+}
+
+func inspectRetainedDatabaseFile(file *os.File, name, kind string, minimum, maximum int64) (*databaseFile, error) {
+	info, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("inspect retained sqlite %s: %w", kind, err)
+	}
+	if err := validateDatabaseFileInfo(info, kind, minimum, maximum); err != nil {
+		return nil, err
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
+		return nil, fmt.Errorf("inspect retained sqlite %s identity: %w", kind, err)
+	}
+	return &databaseFile{name: name, file: file, info: info, stat: stat, minimum: minimum, maximum: maximum}, nil
+}
+
+func (files *databaseFiles) recheckRetainedFileBinding(source *databaseFile) error {
+	var binding unix.Stat_t
+	if err := unix.Fstatat(int(files.directory.Fd()), source.name, &binding, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return fmt.Errorf("recheck retained sqlite handoff binding: %w", err)
+	}
+	if binding.Dev != source.stat.Dev || binding.Ino != source.stat.Ino {
+		return fmt.Errorf("%w: sqlite path database differs from retained authority", ErrCorruptState)
+	}
+	return nil
 }
 
 func (files *databaseFiles) openDatabaseFile(name, kind string, minimum, maximum int64) (*databaseFile, error) {
@@ -566,6 +696,67 @@ func (files *databaseFiles) recheckPaths() error {
 	return nil
 }
 
+func (files *databaseFiles) recheckActivationBindings() error {
+	if err := files.recheckDirectory(); err != nil {
+		return err
+	}
+	if present, err := files.pathPresent(files.main.name + "-journal"); err != nil {
+		return err
+	} else if present {
+		return fmt.Errorf("%w: rollback journal appeared during sqlite activation", ErrCorruptState)
+	}
+	walPresent, err := files.pathPresent(files.main.name + "-wal")
+	if err != nil {
+		return err
+	}
+	shmPresent, err := files.pathPresent(files.main.name + "-shm")
+	if err != nil {
+		return err
+	}
+	if walPresent && !shmPresent {
+		return fmt.Errorf("%w: incomplete WAL sidecar pair during sqlite activation", ErrCorruptState)
+	}
+	if !walPresent && shmPresent {
+		current, statErr := files.shm.file.Stat()
+		if statErr != nil {
+			return fmt.Errorf("inspect reserved sqlite SHM during activation: %w", statErr)
+		}
+		if files.wal != nil || current.Size() != 0 {
+			return fmt.Errorf("%w: incomplete WAL sidecar pair during sqlite activation", ErrCorruptState)
+		}
+	}
+	if walPresent && files.wal == nil {
+		files.wal, err = files.openDatabaseFile(files.main.name+"-wal", "WAL", 0, maxSQLiteWALSize)
+		if err != nil {
+			return err
+		}
+	}
+	for _, source := range []*databaseFile{files.main, files.wal, files.shm} {
+		if source == nil {
+			continue
+		}
+		current, err := source.file.Stat()
+		if err != nil {
+			return fmt.Errorf("recheck pinned sqlite activation file: %w", err)
+		}
+		if !os.SameFile(source.info, current) || current.Mode() != 0o600 {
+			return fmt.Errorf("%w: pinned sqlite activation file identity changed", ErrCorruptState)
+		}
+		stat, ok := current.Sys().(*syscall.Stat_t)
+		if !ok || stat.Uid != uint32(os.Geteuid()) || stat.Nlink != 1 {
+			return fmt.Errorf("%w: pinned sqlite activation file owner or link identity changed", ErrCorruptState)
+		}
+		var binding unix.Stat_t
+		if err := unix.Fstatat(int(files.directory.Fd()), source.name, &binding, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			return fmt.Errorf("recheck sqlite activation binding: %w", err)
+		}
+		if binding.Dev != source.stat.Dev || binding.Ino != source.stat.Ino {
+			return fmt.Errorf("%w: sqlite activation binding changed", ErrCorruptState)
+		}
+	}
+	return nil
+}
+
 func (files *databaseFiles) recheckDirectory() error {
 	return files.authority.recheck()
 }
@@ -585,6 +776,10 @@ func (files *databaseFiles) Close() error {
 		result = errors.Join(result, files.authority.Close())
 		files.authority = nil
 		files.directory = nil
+	}
+	if files.handoffDirectory != nil {
+		result = errors.Join(result, files.handoffDirectory.Close())
+		files.handoffDirectory = nil
 	}
 	return result
 }
@@ -611,7 +806,7 @@ func (files *databaseFiles) reservePrivateSHM() error {
 	if err := unix.Fstat(fd, &stat); err != nil {
 		return errors.Join(fmt.Errorf("inspect private sqlite SHM identity: %w", err), file.Close())
 	}
-	files.shm = &databaseFile{name: name, file: file, info: info, stat: stat, minimum: walIndexRegionSize, maximum: maxSQLiteSHMSize}
+	files.shm = &databaseFile{name: name, file: file, info: info, stat: stat, minimum: 0, maximum: maxSQLiteSHMSize}
 	return nil
 }
 
