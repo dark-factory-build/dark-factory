@@ -3849,6 +3849,16 @@ token/config files, and removal targets need private creation, bounded names,
 device/inode/owner/mode checks, no unsafe links, and explicit ordering with
 SQLite. Cross-filesystem rename and crash ambiguity must fail visibly.
 
+Darwin does not provide an inode-conditional `unlinkat`. Local-API socket
+cleanup therefore performs a descriptor-relative identity check immediately
+before descriptor-relative unlink and preserves every substitution it
+observes, but it does not claim an impossible compare-and-unlink guarantee
+across the final syscall boundary. The held home flock excludes a cooperating
+second daemon. A deliberately racing same-EUID process is outside this local
+trust boundary (and can already read the owner-only operator token); the
+residual final-stat-to-unlink window remains explicit rather than disguised by
+a test hook.
+
 ### Verification
 
 Verification code executes same-UID project tests and is not a hostile-code
