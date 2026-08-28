@@ -307,7 +307,7 @@ func inspectRecoveredRuntimeCensus(rootFD int, device uint64) (map[string]unix.S
 	// exec. A crash after that irreversible cut can therefore leave exact
 	// activation or terminal evidence without the config pathname. Token remains
 	// mandatory, while a gate scratch still proves the cut was pre-consumption.
-	if config && !token || residue && !token || gateScratch && !config {
+	if config && !token || residue && !token || gateScratch && !config || !config && residue && !inner {
 		return nil, invalidContract(nil)
 	}
 	if inner && !outer || terminalResidue && !outer {
