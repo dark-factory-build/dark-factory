@@ -40,9 +40,6 @@ func NewShellInstallation(executable runner.ExecutableCommitment) (Installation,
 	return Installation{provider: kernel.ProviderShell, executable: executable, version: shellVersion}, nil
 }
 
-func (installation Installation) Provider() kernel.Provider { return installation.provider }
-func (installation Installation) Version() string           { return installation.version }
-
 func (Installation) String() string   { return "provider installation (private)" }
 func (Installation) GoString() string { return "provider.Installation{private}" }
 
@@ -78,7 +75,7 @@ type Request struct {
 }
 
 func NewRequest(kind kernel.Provider, installation Installation, model, reasoningEffort string, runtime RuntimePaths) (Request, error) {
-	if !validProvider(kind) || !validOptional(model, 128) || !validOptional(reasoningEffort, 32) || !runtime.valid() {
+	if kernel.ValidateProviderLaunchControls(kind, model, reasoningEffort) != nil || !runtime.valid() {
 		return Request{}, ErrInvalid
 	}
 	return Request{
@@ -190,7 +187,6 @@ func (runtime RuntimePaths) environment() []string {
 		"LC_ALL=C",
 		"TERM=xterm-256color",
 		"SHELL=/bin/sh",
-		"NO_COLOR=1",
 		"GIT_CEILING_DIRECTORIES=" + runtime.gitCeiling,
 		"GIT_DISCOVERY_ACROSS_FILESYSTEM=0",
 		"GIT_CONFIG_NOSYSTEM=1",
@@ -199,15 +195,6 @@ func (runtime RuntimePaths) environment() []string {
 		"GIT_ASKPASS=/usr/bin/false",
 		"GIT_SSH_COMMAND=/usr/bin/false",
 		"GH_CONFIG_DIR=/dev/null",
-	}
-}
-
-func validProvider(kind kernel.Provider) bool {
-	switch kind {
-	case kernel.ProviderShell, kernel.ProviderClaudeCode, kernel.ProviderCodex:
-		return true
-	default:
-		return false
 	}
 }
 
@@ -232,12 +219,17 @@ func validToolPath(value string) bool {
 	return len(seen) > 0
 }
 
-func validGitCeiling(value string) bool {
-	return validAbsolute(value, maxPathBytes) && !strings.ContainsRune(value, rune(filepath.ListSeparator))
+// ValidateToolPath lets the daemon freeze one bounded startup-owned PATH and
+// lets the worker codec reject drift without reimplementing its grammar.
+func ValidateToolPath(value string) error {
+	if !validToolPath(value) {
+		return ErrInvalid
+	}
+	return nil
 }
 
-func validOptional(value string, limit int) bool {
-	return value == "" || validValue(value, limit)
+func validGitCeiling(value string) bool {
+	return validAbsolute(value, maxPathBytes) && !strings.ContainsRune(value, rune(filepath.ListSeparator))
 }
 
 func validValue(value string, limit int) bool {

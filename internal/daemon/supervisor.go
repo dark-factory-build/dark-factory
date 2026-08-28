@@ -20,6 +20,7 @@ type SupervisorSpec struct {
 	AttemptSocket        string
 	RunnerExecutable     string
 	FactoryctlExecutable string
+	ToolPath             string
 
 	// These unexported hooks are package-test-only ambiguity seams. Production
 	// callers outside daemon cannot set them. afterProviderRelease runs only

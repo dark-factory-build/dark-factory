@@ -1768,8 +1768,8 @@ func workerConfigForRuntime(t testing.TB, runtime *Runtime) changeworker.Config 
 	return changeworker.Config{
 		Provider:    kernel.ProviderShell,
 		RuntimePath: path, RuntimeIdentity: identity, GitExecutable: "/usr/local/bin/git",
-		FactoryctlExecutable: factoryctl,
-		RepositoryRoot:       "/private/repository", RepositoryIdentity: repository, Revision: "main",
+		FactoryctlExecutable: factoryctl, ToolPath: "/opt/homebrew/bin:/usr/bin:/bin",
+		RepositoryRoot: "/private/repository", RepositoryIdentity: repository, Revision: "main",
 		ChangeParent: "/private/changes", FinalName: "change", StagingName: ".change.stage",
 		AttemptSocket: "/private/api.sock", InitialTerminalInput: []byte("echo exact"),
 	}

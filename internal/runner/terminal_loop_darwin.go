@@ -58,6 +58,9 @@ type terminalOwner struct {
 	nextInput      uint64
 	initialInput   []byte
 	initialWritten bool
+	initialMode    bool
+	initialBefore  unix.Termios
+	initialRaw     unix.Termios
 	ptyEOF         bool
 	ptyDrained     bool
 	stopRequested  bool
@@ -111,6 +114,9 @@ func (o *terminalOwner) awaitInitialInput() error {
 			return ErrState
 		}
 		o.initialInput = append([]byte(nil), frame.Payload...)
+		if err := o.prepareInitialInputMode(); err != nil {
+			return err
+		}
 		if err := o.writeWorkerFrame(attemptFrame{Version: 1, Kind: "provider-input-registered"}); err != nil {
 			return err
 		}
@@ -158,18 +164,135 @@ func (o *terminalOwner) awaitInitialInput() error {
 }
 
 func (o *terminalOwner) writeInitialInput() error {
-	if o == nil || o.initialWritten || o.child == nil {
+	if o == nil || o.initialWritten || o.child == nil || o.child.ptyMaster == nil || !o.initialMode {
 		return ErrState
 	}
 	o.initialWritten = true // reservation happens before the effect; never retry.
 	if len(o.initialInput) == 0 {
-		return nil
+		return o.restoreInitialInputMode()
 	}
-	n, err := o.child.writePTYOwned(o.initialInput)
-	if err != nil || n != len(o.initialInput) {
-		return fmt.Errorf("runner: initial terminal input: %w", errors.Join(err, ErrUnresolved))
+	if o.child.state != stateActivated || o.child.exitObserved {
+		return ErrState
+	}
+	deadline := time.Now().Add(attemptControlTimeout)
+	written := 0
+	for written < len(o.initialInput) {
+		if err := o.drainInitialOutput(); err != nil {
+			return fmt.Errorf("runner: initial terminal output: %w", errors.Join(err, ErrUnresolved))
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("runner: initial terminal input: %w", errors.Join(os.ErrDeadlineExceeded, ErrUnresolved))
+		}
+		end := min(written+terminalReplayChunk, len(o.initialInput))
+		n, err := unix.Write(int(o.child.ptyMaster.Fd()), o.initialInput[written:end])
+		if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				continue
+			}
+			milliseconds := int(min(remaining, 10*time.Millisecond) / time.Millisecond)
+			if milliseconds < 1 {
+				milliseconds = 1
+			}
+			fds := []unix.PollFd{{Fd: int32(o.child.ptyMaster.Fd()), Events: unix.POLLIN | unix.POLLOUT}}
+			if _, pollErr := unix.Poll(fds, milliseconds); pollErr != nil && !errors.Is(pollErr, unix.EINTR) {
+				return fmt.Errorf("runner: initial terminal input: %w", errors.Join(pollErr, ErrUnresolved))
+			}
+			if fds[0].Revents&(unix.POLLERR|unix.POLLHUP|unix.POLLNVAL) != 0 {
+				return fmt.Errorf("runner: initial terminal input: %w", ErrUnresolved)
+			}
+			continue
+		}
+		if err != nil || n <= 0 {
+			if err == nil {
+				err = io.ErrNoProgress
+			}
+			return fmt.Errorf("runner: initial terminal input: %w", errors.Join(err, ErrUnresolved))
+		}
+		written += n
+	}
+	if err := o.restoreInitialInputMode(); err != nil {
+		return fmt.Errorf("runner: initial terminal mode: %w", errors.Join(err, ErrUnresolved))
 	}
 	return nil
+}
+
+// prepareInitialInputMode runs before the wrapper receives its input
+// registration acknowledgement and therefore before provider exec. The raw
+// handoff is required for exact bounded input: a canonical PTY can truncate a
+// line before the one provider terminator, and echo can fill the output queue
+// while the same synchronous owner is writing. Shell is the only enabled V1
+// provider; a future native adapter must separately prove any terminal-mode
+// changes it performs during startup.
+func (o *terminalOwner) prepareInitialInputMode() error {
+	if o == nil || o.initialMode || o.child == nil || o.child.ptyMaster == nil {
+		return ErrState
+	}
+	before, err := unix.IoctlGetTermios(int(o.child.ptyMaster.Fd()), unix.TIOCGETA)
+	if err != nil {
+		return err
+	}
+	raw := *before
+	raw.Iflag &^= unix.IGNBRK | unix.BRKINT | unix.PARMRK | unix.ISTRIP | unix.INLCR | unix.IGNCR | unix.ICRNL | unix.IXON | unix.IXOFF | unix.IXANY
+	raw.Oflag &^= unix.OPOST
+	raw.Cflag &^= unix.CSIZE | unix.PARENB
+	raw.Cflag |= unix.CS8
+	raw.Lflag &^= unix.ECHO | unix.ECHONL | unix.ICANON | unix.ISIG | unix.IEXTEN
+	raw.Cc[unix.VMIN] = 1
+	raw.Cc[unix.VTIME] = 0
+	if err := unix.IoctlSetTermios(int(o.child.ptyMaster.Fd()), unix.TIOCSETA, &raw); err != nil {
+		return err
+	}
+	got, err := unix.IoctlGetTermios(int(o.child.ptyMaster.Fd()), unix.TIOCGETA)
+	if err != nil || *got != raw {
+		return errors.Join(err, ErrIdentity)
+	}
+	o.initialBefore, o.initialRaw, o.initialMode = *before, raw, true
+	return nil
+}
+
+func (o *terminalOwner) restoreInitialInputMode() error {
+	if o == nil || !o.initialMode || o.child == nil || o.child.ptyMaster == nil {
+		return ErrState
+	}
+	current, err := unix.IoctlGetTermios(int(o.child.ptyMaster.Fd()), unix.TIOCGETA)
+	if err != nil {
+		return err
+	}
+	// A provider that deliberately changed the terminal after exec owns its
+	// new mode. Do not overwrite that change with the pre-exec snapshot.
+	if *current != o.initialRaw {
+		o.initialMode = false
+		return nil
+	}
+	if err := unix.IoctlSetTermios(int(o.child.ptyMaster.Fd()), unix.TIOCSETA, &o.initialBefore); err != nil {
+		return err
+	}
+	o.initialMode = false
+	return nil
+}
+
+func (o *terminalOwner) drainInitialOutput() error {
+	for {
+		buf := make([]byte, terminalReplayChunk)
+		n, err := unix.Read(int(o.child.ptyMaster.Fd()), buf)
+		if n > 0 {
+			if appendErr := o.ring.Append(buf[:n]); appendErr != nil {
+				return appendErr
+			}
+			continue
+		}
+		if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
+			return nil
+		}
+		if errors.Is(err, unix.EIO) || errors.Is(err, io.EOF) {
+			return io.EOF
+		}
+		if err == nil {
+			return io.ErrNoProgress
+		}
+		return err
+	}
 }
 
 func (o *terminalOwner) serve() (bool, error) {

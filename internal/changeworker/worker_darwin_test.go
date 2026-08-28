@@ -3,6 +3,7 @@
 package changeworker_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -107,21 +108,64 @@ func TestRegisteredShellWorkerCompletesExactFourReleaseSequence(t *testing.T) {
 			t.Fatalf("ambient/source authority leaked in environment")
 		}
 	}
-	if strings.Count(string(environment), "DARK_FACTORY_FACTORYCTL="+fixture.factoryctl+"\n") != 1 || strings.Count(string(environment), "PATH=/usr/bin:/bin\n") != 1 {
+	if strings.Count(string(environment), "DARK_FACTORY_FACTORYCTL="+fixture.factoryctl+"\n") != 1 || strings.Count(string(environment), "PATH="+fixture.toolPath+"\n") != 1 {
 		t.Fatalf("provider helper/PATH environment is not exact: %q", environment)
 	}
-	for _, exact := range []string{"TERM=xterm-256color\n", "SHELL=/bin/sh\n", "NO_COLOR=1\n"} {
+	for _, exact := range []string{"TERM=xterm-256color\n", "SHELL=/bin/sh\n"} {
 		if strings.Count(string(environment), exact) != 1 {
 			t.Fatalf("provider Build environment omitted %q: %q", exact, environment)
 		}
 	}
-	for _, deleted := range []string{"TERM=dumb\n", "USER=", "LOGNAME="} {
+	for _, deleted := range []string{"TERM=dumb\n", "NO_COLOR=", "USER=", "LOGNAME="} {
 		if strings.Contains(string(environment), deleted) {
 			t.Fatalf("provider Build retained duplicate/ambient field %q: %q", deleted, environment)
 		}
 	}
 	if diagnostic := fixture.output(); strings.Contains(diagnostic, fixture.repositoryRoot) || strings.Contains(diagnostic, "printf x") {
 		t.Fatalf("private source/input leaked: %q", diagnostic)
+	}
+}
+
+func TestRegisteredShellWorkerDeliversMaximumInputThroughRealPTY(t *testing.T) {
+	fixture := newWorkerFixtureWithInput(t, func(witness, _, _ string) []byte {
+		quote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
+		prefix := []byte("set -eu\ncount=$(/usr/bin/wc -c <<'DF_MAX_INPUT'\n")
+		suffixTemplate := "DF_MAX_INPUT\n)\ntest \"$count\" -eq 000000\ntest -x \"$(command -v go)\"\nprintf x > " + quote(witness) + "\nexit\n"
+		payloadSize := runner.MaxProviderInputBytes - len(prefix) - len(suffixTemplate)
+		if payloadSize < 100000 || payloadSize > 999999 {
+			t.Fatalf("unexpected maximum-input payload size %d", payloadSize)
+		}
+		payload := make([]byte, 0, payloadSize)
+		line := append(bytes.Repeat([]byte{'x'}, 100), '\n')
+		for len(payload)+len(line) <= payloadSize {
+			payload = append(payload, line...)
+		}
+		remaining := payloadSize - len(payload)
+		if remaining != 0 {
+			payload = append(payload, bytes.Repeat([]byte{'x'}, remaining-1)...)
+			payload = append(payload, '\n')
+		}
+		suffix := strings.Replace(suffixTemplate, "000000", strconv.Itoa(payloadSize), 1)
+		input := append(prefix, payload...)
+		input = append(input, suffix...)
+		if len(input) != runner.MaxProviderInputBytes || input[len(input)-1] != '\n' {
+			t.Fatalf("maximum input size=%d, want %d", len(input), runner.MaxProviderInputBytes)
+		}
+		return input
+	})
+	inner := fixture.start(t)
+	for _, stage := range []runner.AttemptStage{runner.StageSelection, runner.StagePreparation, runner.StagePopulation} {
+		fixture.release(t, stage, stage)
+	}
+	if err := fixture.controller.Release(runner.StageProvider); err != nil {
+		t.Fatal(err)
+	}
+	record := fixture.finish(t)
+	if record.Terminal.Process != inner || record.Terminal.Exit.Code != 0 || record.Terminal.Exit.Signal != 0 {
+		t.Fatalf("terminal=%+v inner=%+v", record.Terminal, inner)
+	}
+	if body, err := os.ReadFile(fixture.witness); err != nil || string(body) != "x" {
+		t.Fatalf("maximum-input witness=%q err=%v", body, err)
 	}
 }
 
@@ -385,7 +429,7 @@ func TestFinalRuntimeRecheckRejectsFixedChildReplacement(t *testing.T) {
 type workerFixture struct {
 	root, repositoryRoot, changeParent, finalName string
 	witness, cwdWitness, envWitness               string
-	factoryctl                                    string
+	factoryctl, toolPath                          string
 	repositoryIdentity                            change.RepositoryIdentity
 	runtime                                       *daemon.Runtime
 	parent                                        *daemon.RuntimeParent
@@ -412,6 +456,23 @@ func newWorkerFixture(t *testing.T) *workerFixture {
 }
 
 func newWorkerFixtureWithFactoryctl(t *testing.T, factoryctl string) *workerFixture {
+	return newWorkerFixtureWithFactoryctlAndInput(t, factoryctl, nil)
+}
+
+func newWorkerFixtureWithInput(t *testing.T, input func(witness, cwdWitness, envWitness string) []byte) *workerFixture {
+	t.Helper()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, err = filepath.EvalSymlinks(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return newWorkerFixtureWithFactoryctlAndInput(t, executable, input)
+}
+
+func newWorkerFixtureWithFactoryctlAndInput(t *testing.T, factoryctl string, input func(witness, cwdWitness, envWitness string) []byte) *workerFixture {
 	t.Helper()
 	root := workerSecureTempDir(t)
 	git := nativeGit(t)
@@ -474,12 +535,16 @@ func newWorkerFixtureWithFactoryctl(t *testing.T, factoryctl string) *workerFixt
 		t.Fatal(err)
 	}
 	witness, cwdWitness, envWitness := filepath.Join(root, "provider.witness"), filepath.Join(root, "provider.cwd"), filepath.Join(root, "provider.env")
+	toolPath := workerToolPath(t)
 	quote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
 	// A PTY has no implicit EOF after the initial handoff. The fixture selects
 	// the complete byte sequence explicitly, including exit, rather than
 	// relying on the worker to mutate it with a hidden newline or close.
-	program := fmt.Sprintf("set -eu\nfor n in 3 9; do test ! -e /dev/fd/$n; done\ntest -e /dev/fd/10\ngit rev-parse --is-inside-work-tree >/dev/null 2>&1 && exit 81 || :\nprintf x > %s\npwd > %s\nenv | sort > %s\nexit\n", quote(witness), quote(cwdWitness), quote(envWitness))
-	config := changeworker.Config{Provider: kernel.ProviderShell, RuntimePath: runtimePath, RuntimeIdentity: runtimeID, GitExecutable: git, FactoryctlExecutable: factoryctl, RepositoryRoot: repository, RepositoryIdentity: repositoryID, Revision: "HEAD", ChangeParent: changeParent, FinalName: "published", StagingName: ".stage", AttemptSocket: "/private/tmp/dark-factory-worker-api.sock", InitialTerminalInput: []byte(program)}
+	program := []byte(fmt.Sprintf("set -eu\nfor n in 3 9; do test ! -e /dev/fd/$n; done\ntest -e /dev/fd/10\ngit rev-parse --is-inside-work-tree >/dev/null 2>&1 && exit 81 || :\nprintf x > %s\npwd > %s\nenv | sort > %s\nexit\n", quote(witness), quote(cwdWitness), quote(envWitness)))
+	if input != nil {
+		program = input(witness, cwdWitness, envWitness)
+	}
+	config := changeworker.Config{Provider: kernel.ProviderShell, RuntimePath: runtimePath, RuntimeIdentity: runtimeID, GitExecutable: git, FactoryctlExecutable: factoryctl, ToolPath: toolPath, RepositoryRoot: repository, RepositoryIdentity: repositoryID, Revision: "HEAD", ChangeParent: changeParent, FinalName: "published", StagingName: ".stage", AttemptSocket: "/private/tmp/dark-factory-worker-api.sock", InitialTerminalInput: program}
 	if _, err := runtimeValue.PublishWorkerConfig(context.Background(), config); err != nil {
 		t.Fatal(err)
 	}
@@ -523,9 +588,32 @@ func newWorkerFixtureWithFactoryctl(t *testing.T, factoryctl string) *workerFixt
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &workerFixture{root: root, repositoryRoot: repository, changeParent: changeParent, finalName: "published", witness: witness, cwdWitness: cwdWitness, envWitness: envWitness, factoryctl: factoryctl, repositoryIdentity: repositoryID, runtime: runtimeValue, parent: parent, home: operationalHome, dir: dir, lifetime: lifetime, lease: lease, controller: controller, child: child, diagnostic: diagnostic}
+	f := &workerFixture{root: root, repositoryRoot: repository, changeParent: changeParent, finalName: "published", witness: witness, cwdWitness: cwdWitness, envWitness: envWitness, factoryctl: factoryctl, toolPath: toolPath, repositoryIdentity: repositoryID, runtime: runtimeValue, parent: parent, home: operationalHome, dir: dir, lifetime: lifetime, lease: lease, controller: controller, child: child, diagnostic: diagnostic}
 	t.Cleanup(f.close)
 	return f
+}
+
+func workerToolPath(t testing.TB) string {
+	t.Helper()
+	goExecutable, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	goExecutable, err = filepath.EvalSymlinks(goExecutable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	components := []string{filepath.Dir(goExecutable), "/usr/bin", "/bin"}
+	unique := components[:0]
+	seen := make(map[string]struct{}, len(components))
+	for _, component := range components {
+		if _, found := seen[component]; found {
+			continue
+		}
+		seen[component] = struct{}{}
+		unique = append(unique, component)
+	}
+	return strings.Join(unique, string(filepath.ListSeparator))
 }
 
 func copyWorkerExecutable(t testing.TB, from, to string) {

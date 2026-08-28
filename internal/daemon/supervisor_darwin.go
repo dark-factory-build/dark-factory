@@ -122,37 +122,8 @@ func (owner *supervisorAttemptOwner) close() error {
 func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kernel.Run, resultErr error) {
 	if ctx == nil || daemon == nil || daemon.store == nil || spec.RuntimeParent == nil ||
 		spec.ChangeParent == "" || !filepath.IsAbs(spec.ChangeParent) || filepath.Clean(spec.ChangeParent) != spec.ChangeParent ||
-		spec.GitExecutable == "" || spec.BaseRevision == "" || spec.AttemptSocket == "" || spec.RunnerExecutable == "" || spec.FactoryctlExecutable == "" {
+		spec.GitExecutable == "" || spec.BaseRevision == "" || spec.AttemptSocket == "" || spec.RunnerExecutable == "" || spec.FactoryctlExecutable == "" || provider.ValidateToolPath(spec.ToolPath) != nil {
 		return kernel.Run{}, fmt.Errorf("%w: invalid supervisor specification", kernel.ErrInvalidValue)
-	}
-	factoryctl, err := runner.CommitExecutableLocator(spec.FactoryctlExecutable)
-	if err != nil {
-		return kernel.Run{}, fmt.Errorf("%w: invalid supervisor specification", kernel.ErrInvalidValue)
-	}
-
-	agent, found, err := daemon.store.Agent(ctx, spec.AgentID)
-	if err != nil {
-		return kernel.Run{}, err
-	}
-	if !found {
-		return kernel.Run{}, kernel.ErrNotFound
-	}
-	if agent.Role != kernel.RoleWorker || agent.Provider != kernel.ProviderShell {
-		return kernel.Run{}, fmt.Errorf("%w: supervisor spike supports shell workers only", kernel.ErrInvalidValue)
-	}
-	project, found, err := daemon.store.Project(ctx, agent.ProjectID)
-	if err != nil {
-		return kernel.Run{}, err
-	}
-	if !found {
-		return kernel.Run{}, kernel.ErrCorruptState
-	}
-	if project.VerificationPolicy != kernel.VerificationNone {
-		return kernel.Run{}, fmt.Errorf("%w: verification is not part of the kernel spike", kernel.ErrInvalidValue)
-	}
-	repositoryIdentity, err := inspectRepositoryIdentity(project.Root)
-	if err != nil {
-		return kernel.Run{}, err
 	}
 	keys, err := newSupervisorKeys(rand.Reader)
 	if err != nil {
@@ -216,6 +187,37 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		return kernel.Run{}, fmt.Errorf("%w: no admission (%s)", kernel.ErrConflict, admission.Reason.String())
 	}
 	run := *admission.Run
+	if run.Role != kernel.RoleWorker {
+		return daemon.failRun(run, kernel.FailureSpawn, fmt.Errorf("%w: supervisor supports worker runs only", kernel.ErrInvalidValue))
+	}
+	agent, found, err := daemon.store.Agent(ctx, run.AgentID)
+	if err != nil || !found {
+		if err == nil {
+			err = kernel.ErrCorruptState
+		}
+		return daemon.failRun(run, kernel.FailureInternal, err)
+	}
+	if agent.ID != run.AgentID || agent.ProjectID != run.ProjectID || agent.Role != run.Role {
+		return daemon.failRun(run, kernel.FailureInternal, kernel.ErrCorruptState)
+	}
+	project, found, err := daemon.store.Project(ctx, run.ProjectID)
+	if err != nil || !found {
+		if err == nil {
+			err = kernel.ErrCorruptState
+		}
+		return daemon.failRun(run, kernel.FailureInternal, err)
+	}
+	if project.VerificationPolicy != run.VerificationPolicy || project.VerificationPolicy != kernel.VerificationNone {
+		return daemon.failRun(run, kernel.FailureSpawn, fmt.Errorf("%w: verification is not part of the kernel spike", kernel.ErrInvalidValue))
+	}
+	factoryctl, err := runner.CommitExecutableLocator(spec.FactoryctlExecutable)
+	if err != nil {
+		return daemon.failRun(run, kernel.FailureSpawn, err)
+	}
+	repositoryIdentity, err := inspectRepositoryIdentity(project.Root)
+	if err != nil {
+		return daemon.failRun(run, kernel.FailureSource, err)
+	}
 	task, found, err := daemon.store.Task(ctx, run.TaskID)
 	if err != nil || !found {
 		if err == nil {
@@ -257,9 +259,9 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		return daemon.failRun(run, kernel.FailureSpawn, err)
 	}
 	config := changeworker.Config{
-		Provider: run.Provider, Model: agent.Model, ReasoningEffort: agent.ReasoningEffort,
+		Provider: run.Provider, Model: run.Model, ReasoningEffort: run.ReasoningEffort,
 		RuntimePath: gotRuntimePath, RuntimeIdentity: runtimeFileIdentity,
-		GitExecutable: spec.GitExecutable, FactoryctlExecutable: factoryctl.Path(), RepositoryRoot: project.Root, RepositoryIdentity: repositoryIdentity,
+		GitExecutable: spec.GitExecutable, FactoryctlExecutable: factoryctl.Path(), ToolPath: spec.ToolPath, RepositoryRoot: project.Root, RepositoryIdentity: repositoryIdentity,
 		Revision: spec.BaseRevision, ChangeParent: spec.ChangeParent, FinalName: finalName, StagingName: stagingName,
 		AttemptSocket: spec.AttemptSocket, InitialTerminalInput: initialInput,
 	}

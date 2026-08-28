@@ -65,7 +65,7 @@ func TestBuildShellReturnsExactImmutableLaunch(t *testing.T) {
 		"HOME=" + runtime.home,
 		"TMPDIR=" + runtime.temp,
 		"PATH=" + runtime.toolPath,
-		"LANG=C", "LC_ALL=C", "TERM=xterm-256color", "SHELL=/bin/sh", "NO_COLOR=1",
+		"LANG=C", "LC_ALL=C", "TERM=xterm-256color", "SHELL=/bin/sh",
 		"GIT_CEILING_DIRECTORIES=" + runtime.gitCeiling,
 		"GIT_DISCOVERY_ACROSS_FILESYSTEM=0", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=/usr/bin/false", "GIT_SSH_COMMAND=/usr/bin/false", "GH_CONFIG_DIR=/dev/null",
@@ -108,11 +108,17 @@ func TestBuildShellRejectsModelAndReasoningEffortIndependently(t *testing.T) {
 		{name: "both", model: "model-sentinel", effort: "high"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			request := requestFor(t, kernel.ProviderShell, installation, runtime, test.model, test.effort)
-			if _, err := Build(request); !errors.Is(err, ErrInvalid) {
-				t.Fatalf("Build error=%v, want ErrInvalid", err)
+			if _, err := NewRequest(kernel.ProviderShell, installation, test.model, test.effort, runtime); !errors.Is(err, ErrInvalid) {
+				t.Fatalf("NewRequest error=%v, want ErrInvalid", err)
 			}
 		})
+	}
+}
+
+func TestNewRequestRejectsUnknownDurableReasoningEffort(t *testing.T) {
+	installation, runtime := providerFixture(t)
+	if _, err := NewRequest(kernel.ProviderCodex, installation, "", "speculative", runtime); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("NewRequest error=%v, want ErrInvalid", err)
 	}
 }
 

@@ -1556,8 +1556,8 @@ func buildWitnessBinary(t *testing.T, output, value string) {
 	}
 	goBinary := filepath.Join(runtime.GOROOT(), "bin", "go")
 	command := exec.Command(goBinary, "build", "-o", output, source)
-	environment := []string{"GOENV=off", "GOWORK=off", "GOTOOLCHAIN=local", "CGO_ENABLED=0", "TMPDIR=" + t.TempDir()}
-	for _, key := range []string{"GOCACHE", "GOMODCACHE", "GOPATH", "GOTMPDIR"} {
+	environment := []string{"GOENV=off", "GOWORK=off", "GOTOOLCHAIN=local", "CGO_ENABLED=0", "GOCACHE=" + t.TempDir(), "TMPDIR=" + t.TempDir()}
+	for _, key := range []string{"GOMODCACHE", "GOPATH", "GOTMPDIR"} {
 		if value := os.Getenv(key); value != "" {
 			environment = append(environment, key+"="+value)
 		}

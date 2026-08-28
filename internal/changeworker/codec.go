@@ -12,6 +12,7 @@ import (
 
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/provider"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
@@ -23,7 +24,6 @@ const (
 	TempName             = "tmp"
 	CheckpointLimit      = 32 << 10
 	ConfigLimit          = 256 << 10
-	InputLimit           = runner.MaxProviderInputBytes
 	maximumLocatorBytes  = 4096
 	maximumRevisionBytes = 4096
 	maximumSocketBytes   = 103
@@ -50,6 +50,7 @@ type Config struct {
 	RuntimeIdentity      runner.FileIdentity
 	GitExecutable        string
 	FactoryctlExecutable string
+	ToolPath             string
 	RepositoryRoot       string
 	RepositoryIdentity   change.RepositoryIdentity
 	Revision             string
@@ -104,7 +105,7 @@ func EncodeConfig(config Config) ([]byte, error) {
 	encoded = binary.BigEndian.AppendUint64(encoded, config.RepositoryIdentity.Inode())
 	encoded = append(encoded, encodeProvider(config.Provider))
 	for _, value := range []string{
-		config.Model, config.ReasoningEffort, config.RuntimePath, config.GitExecutable, config.FactoryctlExecutable, config.RepositoryRoot, config.Revision,
+		config.Model, config.ReasoningEffort, config.RuntimePath, config.GitExecutable, config.FactoryctlExecutable, config.ToolPath, config.RepositoryRoot, config.Revision,
 		config.ChangeParent, config.FinalName, config.StagingName, config.AttemptSocket,
 	} {
 		encoded = appendString(encoded, value)
@@ -150,23 +151,23 @@ func DecodeConfig(encoded []byte) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	values := make([]string, 11)
+	values := make([]string, 12)
 	for index := range values {
 		values[index], err = reader.string()
 		if err != nil {
 			return Config{}, err
 		}
 	}
-	input, err := reader.bytes(InputLimit)
+	input, err := reader.bytes(runner.MaxProviderInputBytes)
 	if err != nil || !reader.done() {
 		return Config{}, invalidContract(err)
 	}
 	config := Config{
 		Provider: providerKind, Model: values[0], ReasoningEffort: values[1],
 		RuntimePath: values[2], RuntimeIdentity: runner.FileIdentity{Device: device, Inode: inode},
-		GitExecutable: values[3], FactoryctlExecutable: values[4], RepositoryRoot: values[5], RepositoryIdentity: repositoryIdentity, Revision: values[6],
-		ChangeParent: values[7], FinalName: values[8], StagingName: values[9],
-		AttemptSocket: values[10], InitialTerminalInput: input,
+		GitExecutable: values[3], FactoryctlExecutable: values[4], ToolPath: values[5], RepositoryRoot: values[6], RepositoryIdentity: repositoryIdentity, Revision: values[7],
+		ChangeParent: values[8], FinalName: values[9], StagingName: values[10],
+		AttemptSocket: values[11], InitialTerminalInput: input,
 	}
 	if err := validateConfig(config); err != nil {
 		return Config{}, err
@@ -183,7 +184,7 @@ func validateConfig(config Config) error {
 	}
 	if len(config.AttemptSocket) > maximumSocketBytes || config.RuntimeIdentity.Device == 0 || config.RuntimeIdentity.Inode == 0 ||
 		encodeProvider(config.Provider) == 0 ||
-		!validOptionalText(config.Model, 128) || !validOptionalText(config.ReasoningEffort, 32) ||
+		kernel.ValidateProviderLaunchControls(config.Provider, config.Model, config.ReasoningEffort) != nil || provider.ValidateToolPath(config.ToolPath) != nil ||
 		!validText(config.Revision, maximumRevisionBytes) || !validChangeName(config.FinalName) || !validChangeName(config.StagingName) ||
 		config.FinalName == config.StagingName || len(config.InitialTerminalInput) == 0 || runner.ValidateProviderInput(config.InitialTerminalInput) != nil {
 		return invalidContract(nil)
@@ -444,10 +445,6 @@ func decodeFormat(value byte) (change.ObjectFormat, error) {
 
 func validText(value string, maximum int) bool {
 	return value != "" && len(value) <= maximum && utf8.ValidString(value) && !strings.ContainsRune(value, 0)
-}
-
-func validOptionalText(value string, maximum int) bool {
-	return value == "" || validText(value, maximum)
 }
 
 func validAbsolute(value string, maximum int) bool {
