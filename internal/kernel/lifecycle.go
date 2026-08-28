@@ -584,6 +584,13 @@ func commitClosedTerminalSession(ctx context.Context, tx *writeTx, run Run, sess
 	return commitTerminalSessionMutation(ctx, tx, run, session, expectedRun, at)
 }
 
+// resultDerivedTerminalClose fingerprints result-derived histories with
+// released_at_ms == provider_exit_at_ms so the legacy close methods refuse
+// them. A legacy (observe-then-release) history whose two timestamps happen
+// to land in the same millisecond matches the fingerprint too and is then
+// permanently refused by every legacy close — a fail-closed hazard accepted
+// only for this migration window: the legacy close path is deleted when the
+// daemon migrates to CloseTerminalAfterRunner.
 func resultDerivedTerminalClose(run Run, resources []Resource, session TerminalSession) bool {
 	if session.State != TerminalSessionReleasing && session.State != TerminalSessionUnresolved && session.State != TerminalSessionClosed {
 		return false

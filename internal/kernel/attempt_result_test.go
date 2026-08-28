@@ -714,6 +714,62 @@ func TestRecoveredPreExecRunnerAbsenceFailsClosed(t *testing.T) {
 	})
 }
 
+func TestWrongResultProofDigestIsRefusedAtEveryResultSeam(t *testing.T) {
+	store, run, keys := admittedOrchestratorRun(t)
+	defer store.Close()
+	ctx := context.Background()
+	run, runtimeIdentity, runnerIdentity := activateStartedRunner(t, store, run, 2700)
+	wrongProof, err := ResultProofDigestFromBytes(make([]byte, DigestBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The attempt digest is correct; only the proof digest is forged. Every
+	// result-authenticated seam must refuse it without touching state.
+	forged, err := NewInnerUnregisteredConvergedAttemptResult(run.ID, keys.AttemptDigest, wrongProof, runtimeIdentity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := store.Factory(ctx)
+	if _, err := store.ConsumeAttemptResult(ctx, forged, run.Revision, mustTime(t, 30)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("forged proof consumed = %v", err)
+	}
+	after, _ := store.Factory(ctx)
+	fresh, found, err := store.Run(ctx, run.ID)
+	if err != nil || !found || before.Head != after.Head || fresh.Phase != RunAdmitted || fresh.Proposal != nil {
+		t.Fatalf("forged proof consume mutated state: run=%+v head=%d/%d err=%v", fresh, before.Head.Int64(), after.Head.Int64(), err)
+	}
+	genuine, err := NewInnerUnregisteredConvergedAttemptResult(run.ID, keys.AttemptDigest, keys.ResultProofDigest, runtimeIdentity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumed, err := store.ConsumeAttemptResult(ctx, genuine, run.Revision, mustTime(t, 31))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
+	released, _, err := store.RecordRecoveredRunnerAbsence(ctx, run.ID, runner.ID, consumed.Revision, runner.Revision, runnerIdentity, mustTime(t, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := terminalSessionForRunTest(t, store, run.ID)
+	if _, _, err := store.CloseTerminalAfterRunner(ctx, forged, released.Revision, session.Revision, mustTime(t, 33)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("forged proof closed terminal = %v", err)
+	}
+	if _, err := store.AuthorizeAttemptResultRemoval(ctx, forged); !errors.Is(err, ErrConflict) {
+		t.Fatalf("forged proof authorized removal = %v", err)
+	}
+	closedRun, closed, err := store.CloseTerminalAfterRunner(ctx, genuine, released.Revision, session.Revision, mustTime(t, 33))
+	if err != nil || closed.State != TerminalSessionClosed {
+		t.Fatalf("genuine result close = %+v, %v", closed, err)
+	}
+	if _, err := store.AuthorizeAttemptResultRemoval(ctx, forged); !errors.Is(err, ErrConflict) {
+		t.Fatalf("forged proof authorized removal after close = %v", err)
+	}
+	if authorized, err := store.AuthorizeAttemptResultRemoval(ctx, genuine); err != nil || authorized.Revision != closedRun.Revision {
+		t.Fatalf("genuine removal authorization = %+v, %v", authorized, err)
+	}
+}
+
 func TestConsumeAttemptResultRefusesEveryKindWhileRunnerStarting(t *testing.T) {
 	store, run, keys := admittedOrchestratorRun(t)
 	defer store.Close()

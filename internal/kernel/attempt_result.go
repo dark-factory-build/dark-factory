@@ -630,19 +630,20 @@ func (store *Store) RecordRecoveredRunnerAbsence(ctx context.Context, runID RunI
 	return run, runner, nil
 }
 
-// RecordRecoveredPreExecRunnerAbsence finalizes the one state ActivateRunner
-// can strand: the runner row is active with a bound identity, but the daemon
-// died before releasing the blocked outer exec, so the provider pair is still
-// declared, the session never activated and no marker or result artifact can
-// exist. The caller must hold positive exact-identity absence proof plus
-// stable absence of activation/result residue; this edge then finalizes the
-// run, records the recovered-absence runner exit and releases every runner-
-// side resource in one transaction.
+// RecordRecoveredPreExecRunnerAbsence finalizes the stranded pre-registration
+// state: the runner row is active with a bound identity while the provider
+// pair is still declared and the session never activated. The kernel cannot
+// distinguish whether the outer exec was never released or the runner died
+// after release but before registering anything; both histories share this
+// exact durable state and the same convergence. The caller must hold positive
+// exact-identity absence proof plus stable absence of activation/result
+// residue; this edge then finalizes the run, records the recovered-absence
+// runner exit and releases every runner-side resource in one transaction.
 func (store *Store) RecordRecoveredPreExecRunnerAbsence(ctx context.Context, runID RunID, runnerID ResourceID, expectedRun, expectedRunner Revision, identity ResourceIdentity, at UnixMillis) (Run, error) {
 	if runID.zero() || runnerID.zero() || !identity.validFor(ResourceRunnerProcess) {
 		return Run{}, fmt.Errorf("%w: invalid recovered pre-exec runner absence", ErrInvalidValue)
 	}
-	failure, _ := NewFailureProposal(FailureActivation, "runner absent before outer exec release")
+	failure, _ := NewFailureProposal(FailureActivation, "runner absent without provider registration, attempt result, or session activation")
 	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return Run{}, err
