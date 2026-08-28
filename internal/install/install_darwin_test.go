@@ -169,7 +169,7 @@ func TestDoctorSecondScanRejectsMemberMutationWithoutRepair(t *testing.T) {
 	before := installDigest(t, home)
 	phaseHook = func(point phase) error {
 		if point == phaseBeforeDoctorSecond {
-			return os.WriteFile(filepath.Join(home, formatName), []byte("tampered\n"), 0o600)
+			return os.WriteFile(filepath.Join(home, tokenName), bytes.Repeat([]byte{'Z'}, 32), 0o600)
 		}
 		return nil
 	}
