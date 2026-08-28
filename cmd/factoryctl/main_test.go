@@ -146,6 +146,30 @@ func TestParseExactAttemptCommands(t *testing.T) {
 	}
 }
 
+func TestParseExplicitHomeCommands(t *testing.T) {
+	for _, test := range []struct {
+		args []string
+		kind commandKind
+	}{
+		{args: []string{"init", "--home", "/private/tmp/factory"}, kind: commandInit},
+		{args: []string{"doctor", "--home", "/private/tmp/factory"}, kind: commandDoctor},
+	} {
+		command, help, ok := parse(test.args)
+		if !ok || help || command.kind != test.kind || command.home != test.args[2] {
+			t.Fatalf("parse(%q) = %+v, help=%t, ok=%t", test.args, command, help, ok)
+		}
+	}
+	for _, args := range [][]string{
+		{"init"}, {"doctor"}, {"init", "--home", "relative"},
+		{"doctor", "--home", "/private/tmp/factory/.."},
+		{"init", "--home", "/"},
+	} {
+		if _, _, ok := parse(args); ok {
+			t.Fatalf("parse(%q) accepted invalid explicit home", args)
+		}
+	}
+}
+
 func TestInvalidSyntaxStopsBeforeEnvironmentOrConnection(t *testing.T) {
 	tests := [][]string{
 		nil,

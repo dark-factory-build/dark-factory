@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -74,6 +75,21 @@ func TestInitPublishesExactHomeAndReplaysReadOnly(t *testing.T) {
 	}
 }
 
+func TestInitRefusesStageAlongsideReadyHome(t *testing.T) {
+	parent := installTempDir(t)
+	home := filepath.Join(parent, "home")
+	if _, err := Init(context.Background(), home); err != nil {
+		t.Fatal(err)
+	}
+	stage := filepath.Join(parent, ".home"+stageSuffix)
+	if err := os.WriteFile(stage, []byte("evidence"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Init(context.Background(), home); err == nil {
+		t.Fatal("init accepted ready home with stage evidence")
+	}
+}
+
 func TestInitRefusesStageAndPartialHomeUnchanged(t *testing.T) {
 	parent := installTempDir(t)
 	home := filepath.Join(parent, "home")
@@ -99,6 +115,92 @@ func TestInitRefusesStageAndPartialHomeUnchanged(t *testing.T) {
 	}
 	if _, err := os.Stat(home); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestInitSecondStageInspectionRejectsMemberMutation(t *testing.T) {
+	parent := installTempDir(t)
+	home := filepath.Join(parent, "home")
+	stage := filepath.Join(parent, ".home"+stageSuffix)
+	phaseHook = func(point phase) error {
+		if point == phaseAfterStageInspect {
+			return os.WriteFile(filepath.Join(stage, formatName), []byte("tampered\n"), 0o600)
+		}
+		return nil
+	}
+	defer func() { phaseHook = nil }()
+	if _, err := Init(context.Background(), home); err == nil {
+		t.Fatal("init accepted a stage changed between inspections")
+	} else if errors.Is(err, ErrUncertain) {
+		t.Fatalf("pre-publication mutation became uncertain: %v", err)
+	}
+	if _, err := os.Stat(home); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("final home after rejected stage mutation: %v", err)
+	}
+	if _, err := os.Stat(stage); err != nil {
+		t.Fatalf("stage evidence disappeared: %v", err)
+	}
+}
+
+func TestPublishedProofRejectsFinalMutationAsUncertain(t *testing.T) {
+	parent := installTempDir(t)
+	home := filepath.Join(parent, "home")
+	phaseHook = func(point phase) error {
+		if point == phaseAfterRename {
+			return os.WriteFile(filepath.Join(home, formatName), []byte("tampered\n"), 0o600)
+		}
+		return nil
+	}
+	defer func() { phaseHook = nil }()
+	if _, err := Init(context.Background(), home); !errors.Is(err, ErrUncertain) {
+		t.Fatalf("final mutation error = %v, want uncertain", err)
+	}
+	if _, err := os.Stat(home); err != nil {
+		t.Fatalf("published home disappeared after uncertain proof: %v", err)
+	}
+}
+
+func TestDoctorSecondScanRejectsMemberMutationWithoutRepair(t *testing.T) {
+	parent := installTempDir(t)
+	home := filepath.Join(parent, "home")
+	if _, err := Init(context.Background(), home); err != nil {
+		t.Fatal(err)
+	}
+	before := installDigest(t, home)
+	phaseHook = func(point phase) error {
+		if point == phaseBeforeDoctorSecond {
+			return os.WriteFile(filepath.Join(home, formatName), []byte("tampered\n"), 0o600)
+		}
+		return nil
+	}
+	defer func() { phaseHook = nil }()
+	if _, err := Doctor(context.Background(), home); !errors.Is(err, ErrUncertain) {
+		t.Fatalf("doctor mutation error = %v, want uncertain", err)
+	}
+	if after := installDigest(t, home); after == before {
+		t.Fatal("doctor unexpectedly repaired the mutated home")
+	}
+}
+
+func TestInitParentSyncFailureLeavesFixedStageEvidence(t *testing.T) {
+	parent := installTempDir(t)
+	home := filepath.Join(parent, "home")
+	stage := filepath.Join(parent, ".home"+stageSuffix)
+	phaseHook = func(point phase) error {
+		if point == phaseBeforeParentFsync {
+			return errors.New("injected parent sync failure")
+		}
+		return nil
+	}
+	defer func() { phaseHook = nil }()
+	if _, err := Init(context.Background(), home); err == nil {
+		t.Fatal("init accepted an injected parent sync failure")
+	}
+	if _, err := os.Stat(home); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("final home after parent sync failure: %v", err)
+	}
+	if info, err := os.Stat(stage); err != nil || !info.IsDir() {
+		t.Fatalf("stage evidence after parent sync failure: info=%v err=%v", info, err)
 	}
 }
 

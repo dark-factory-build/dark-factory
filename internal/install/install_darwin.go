@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -42,6 +43,57 @@ type homeParent struct {
 	file  *os.File
 }
 
+type phase string
+
+const (
+	phaseAfterStageMkdir      phase = "after stage mkdir"
+	phaseBeforeParentFsync    phase = "before parent fsync"
+	phaseBeforeFormatCreate   phase = "before format create"
+	phaseBeforeDatabaseCreate phase = "before database create"
+	phaseBeforeTokenCreate    phase = "before token create"
+	phaseBeforeLockCreate     phase = "before lock create"
+	phaseBeforeRuntimesMkdir  phase = "before runtimes mkdir"
+	phaseBeforeChangesMkdir   phase = "before changes mkdir"
+	phaseBeforeStageInspect   phase = "before stage inspect"
+	phaseAfterStageInspect    phase = "after stage inspect"
+	phaseBeforeStageSync      phase = "before stage sync"
+	phaseBeforeRename         phase = "before rename"
+	phaseAfterRename          phase = "after rename"
+	phaseBeforeFinalProof     phase = "before final proof"
+	phaseBeforeDoctorSecond   phase = "before doctor second scan"
+)
+
+// phaseHook is only used by package-local Darwin tests to schedule faults and
+// replacements at filesystem boundaries. Normal production calls leave it nil.
+var phaseHook func(phase) error
+
+func atPhase(point phase) error {
+	if phaseHook == nil {
+		return nil
+	}
+	return phaseHook(point)
+}
+
+type identity struct {
+	dev   uint64
+	ino   uint64
+	mode  uint32
+	uid   uint32
+	nlink uint64
+	size  int64
+}
+
+type memberSnapshot struct {
+	identity
+	digest [sha256.Size]byte
+}
+
+type treeSnapshot struct {
+	root        identity
+	files       map[string]memberSnapshot
+	directories map[string]identity
+}
+
 func initHome(ctx context.Context, home string) (result Result, resultErr error) {
 	parentPath, base, err := splitHome(home)
 	if err != nil {
@@ -54,15 +106,21 @@ func initHome(ctx context.Context, home string) (result Result, resultErr error)
 	defer func() { resultErr = errors.Join(resultErr, parent.close()) }()
 
 	stage := "." + base + stageSuffix
-	if err := rejectIfPresent(parent.file, stage, "staging path"); err != nil {
-		return Result{}, err
-	}
 	present, err := presentAt(parent.file, base)
 	if err != nil {
 		return Result{}, err
 	}
 	if present {
-		if err := inspectBinding(ctx, parent.file, base, home); err == nil {
+		if err := parent.recheck(); err != nil {
+			return Result{}, err
+		}
+		if _, err := inspectBinding(ctx, parent.file, base); err == nil {
+			if err := parent.recheck(); err != nil {
+				return Result{}, err
+			}
+			if err := rejectIfPresent(parent.file, stage, "staging path"); err != nil {
+				return Result{}, err
+			}
 			return Result{State: Ready}, nil
 		} else {
 			return Result{}, fmt.Errorf("existing home is not an exact stopped Go home: %w", err)
@@ -70,6 +128,15 @@ func initHome(ctx context.Context, home string) (result Result, resultErr error)
 	}
 	if err := unix.Mkdirat(int(parent.file.Fd()), stage, 0o700); err != nil {
 		return Result{}, fmt.Errorf("create staging home: %w", err)
+	}
+	if err := atPhase(phaseAfterStageMkdir); err != nil {
+		return Result{}, err
+	}
+	if err := atPhase(phaseBeforeParentFsync); err != nil {
+		return Result{}, err
+	}
+	if err := unix.Fsync(int(parent.file.Fd())); err != nil {
+		return Result{}, fmt.Errorf("sync home parent after staging mkdir: %w", err)
 	}
 	stageFile, err := openDirectoryAt(parent.file, stage)
 	if err != nil {
@@ -94,19 +161,26 @@ func initHome(ctx context.Context, home string) (result Result, resultErr error)
 	if _, err := rand.Read(token[:]); err != nil {
 		return Result{}, fmt.Errorf("generate operator token: %w", err)
 	}
-	if err := writeMember(stageFile, formatName, []byte(formatBytes)); err != nil {
+	if err := writeMember(stageFile, formatName, []byte(formatBytes), phaseBeforeFormatCreate); err != nil {
 		return Result{}, err
 	}
-	if err := writeMember(stageFile, databaseName, image); err != nil {
+	if err := writeMember(stageFile, databaseName, image, phaseBeforeDatabaseCreate); err != nil {
 		return Result{}, err
 	}
-	if err := writeMember(stageFile, tokenName, token[:]); err != nil {
+	if err := writeMember(stageFile, tokenName, token[:], phaseBeforeTokenCreate); err != nil {
 		return Result{}, err
 	}
-	if err := writeMember(stageFile, lockName, nil); err != nil {
+	if err := writeMember(stageFile, lockName, nil, phaseBeforeLockCreate); err != nil {
 		return Result{}, err
 	}
 	for _, name := range []string{runtimesName, changesName} {
+		point := phaseBeforeRuntimesMkdir
+		if name == changesName {
+			point = phaseBeforeChangesMkdir
+		}
+		if err := atPhase(point); err != nil {
+			return Result{}, err
+		}
 		if err := unix.Mkdirat(int(stageFile.Fd()), name, 0o700); err != nil {
 			return Result{}, fmt.Errorf("create staging %s directory: %w", name, err)
 		}
@@ -122,11 +196,40 @@ func initHome(ctx context.Context, home string) (result Result, resultErr error)
 			return Result{}, fmt.Errorf("close staging %s directory: %w", name, closeErr)
 		}
 	}
-	if err := inspectFD(ctx, stageFile, stage); err != nil {
+	if err := atPhase(phaseBeforeStageInspect); err != nil {
+		return Result{}, err
+	}
+	if _, err := inspectFD(ctx, stageFile); err != nil {
 		return Result{}, fmt.Errorf("validate staging home: %w", err)
+	}
+	if err := atPhase(phaseAfterStageInspect); err != nil {
+		return Result{}, err
+	}
+	if err := atPhase(phaseBeforeStageSync); err != nil {
+		return Result{}, err
 	}
 	if err := unix.Fsync(int(stageFile.Fd())); err != nil {
 		return Result{}, fmt.Errorf("sync staging home: %w", err)
+	}
+	// Reopen the stage so the immediately preceding inspection starts at a
+	// fresh directory offset and is not satisfied by an old descriptor view.
+	second, secondStat, err := openDirectoryMember(parent.file, stage)
+	if err != nil {
+		return Result{}, fmt.Errorf("reopen staging home: %w", err)
+	}
+	secondSnapshot, inspectErr := inspectFD(ctx, second)
+	closeErr := second.Close()
+	if inspectErr != nil {
+		return Result{}, fmt.Errorf("revalidate staging home: %w", inspectErr)
+	}
+	if closeErr != nil {
+		return Result{}, fmt.Errorf("close staging home: %w", closeErr)
+	}
+	if err := sameObjectIdentity(toIdentity(stageStat), toIdentity(secondStat)); err != nil {
+		return Result{}, fmt.Errorf("staging home identity changed: %w", err)
+	}
+	if err := atPhase(phaseBeforeRename); err != nil {
+		return Result{}, err
 	}
 	if err := parent.recheck(); err != nil {
 		return Result{}, err
@@ -134,37 +237,42 @@ func initHome(ctx context.Context, home string) (result Result, resultErr error)
 	if err := recheckBinding(parent.file, stage, stageStat); err != nil {
 		return Result{}, err
 	}
-	if err := unix.Fsync(int(parent.file.Fd())); err != nil {
-		return Result{}, fmt.Errorf("sync home parent before publish: %w", err)
-	}
 	if err := unix.RenameatxNp(int(parent.file.Fd()), stage, int(parent.file.Fd()), base, unix.RENAME_EXCL); err != nil {
 		return Result{}, fmt.Errorf("publish home: %w", err)
 	}
+	if err := atPhase(phaseAfterRename); err != nil {
+		return Result{}, fmt.Errorf("%w: %v", ErrUncertain, err)
+	}
 	if err := unix.Fsync(int(parent.file.Fd())); err != nil {
 		return Result{}, fmt.Errorf("%w: publish rename succeeded but parent sync failed", errors.Join(ErrUncertain, err))
+	}
+	if err := atPhase(phaseBeforeFinalProof); err != nil {
+		return Result{}, fmt.Errorf("%w: %v", ErrUncertain, err)
+	}
+	published, err := inspectPublished(ctx, home, stageStat)
+	if err != nil {
+		return Result{}, errors.Join(ErrUncertain, err)
+	}
+	if err := sameSnapshot(secondSnapshot, published); err != nil {
+		return Result{}, errors.Join(ErrUncertain, err)
 	}
 	return Result{State: Published}, nil
 }
 
 func inspectHome(ctx context.Context, home string) (result Result, resultErr error) {
-	parentPath, base, err := splitHome(home)
+	first, err := inspectFreshPath(ctx, home)
 	if err != nil {
 		return Result{}, err
 	}
-	parent, err := openParent(parentPath)
+	if err := atPhase(phaseBeforeDoctorSecond); err != nil {
+		return Result{}, errors.Join(ErrUncertain, err)
+	}
+	second, err := inspectFreshPath(ctx, home)
 	if err != nil {
-		return Result{}, err
+		return Result{}, errors.Join(ErrUncertain, err)
 	}
-	defer func() { resultErr = errors.Join(resultErr, parent.close()) }()
-	if err := parent.recheck(); err != nil {
-		return Result{}, err
-	}
-	stage := "." + base + stageSuffix
-	if err := rejectIfPresent(parent.file, stage, "staging path"); err != nil {
-		return Result{}, err
-	}
-	if err := inspectBinding(ctx, parent.file, base, home); err != nil {
-		return Result{}, fmt.Errorf("home is not an exact stopped Go home: %w", err)
+	if err := sameSnapshot(first, second); err != nil {
+		return Result{}, errors.Join(ErrUncertain, err)
 	}
 	return Result{State: Ready}, nil
 }
@@ -319,7 +427,10 @@ func exactDirectory(file *os.File, parent bool) error {
 	return nil
 }
 
-func writeMember(parent *os.File, name string, contents []byte) error {
+func writeMember(parent *os.File, name string, contents []byte, createPhase phase) error {
+	if err := atPhase(createPhase); err != nil {
+		return err
+	}
 	fd, err := unix.Openat(int(parent.Fd()), name, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return fmt.Errorf("create home member %s: %w", name, err)
@@ -342,105 +453,158 @@ func writeMember(parent *os.File, name string, contents []byte) error {
 			return fmt.Errorf("write home member %s: %w", name, io.ErrShortWrite)
 		}
 	}
+	if err := atPhase(phase("after " + name + " write")); err != nil {
+		return err
+	}
+	if err := atPhase(phase("before " + name + " fsync")); err != nil {
+		return err
+	}
 	if err := unix.Fsync(fd); err != nil {
 		return fmt.Errorf("sync home member %s: %w", name, err)
+	}
+	if err := atPhase(phase("after " + name + " fsync")); err != nil {
+		return err
 	}
 	return nil
 }
 
-func inspectBinding(ctx context.Context, parent *os.File, name, path string) error {
+func inspectFreshPath(ctx context.Context, path string) (treeSnapshot, error) {
+	parentPath, base, err := splitHome(path)
+	if err != nil {
+		return treeSnapshot{}, err
+	}
+	parent, err := openParent(parentPath)
+	if err != nil {
+		return treeSnapshot{}, err
+	}
+	defer parent.close()
+	if err := parent.recheck(); err != nil {
+		return treeSnapshot{}, err
+	}
+	stage := "." + base + stageSuffix
+	if err := rejectIfPresent(parent.file, stage, "staging path"); err != nil {
+		return treeSnapshot{}, err
+	}
+	snapshot, err := inspectBinding(ctx, parent.file, base)
+	if err != nil {
+		return treeSnapshot{}, fmt.Errorf("home is not an exact stopped Go home: %w", err)
+	}
+	if err := parent.recheck(); err != nil {
+		return treeSnapshot{}, err
+	}
+	return snapshot, nil
+}
+
+func inspectPublished(ctx context.Context, path string, expected unix.Stat_t) (treeSnapshot, error) {
+	snapshot, err := inspectFreshPath(ctx, path)
+	if err != nil {
+		return treeSnapshot{}, err
+	}
+	if err := sameObjectIdentity(toIdentity(expected), snapshot.root); err != nil {
+		return treeSnapshot{}, fmt.Errorf("published home identity changed: %w", err)
+	}
+	return snapshot, nil
+}
+
+func inspectBinding(ctx context.Context, parent *os.File, name string) (treeSnapshot, error) {
 	file, err := openDirectoryAt(parent, name)
 	if err != nil {
-		return err
+		return treeSnapshot{}, err
 	}
 	defer file.Close()
 	var stat unix.Stat_t
 	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
-		return err
+		return treeSnapshot{}, err
 	}
 	var binding unix.Stat_t
 	if err := unix.Fstatat(int(parent.Fd()), name, &binding, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-		return err
+		return treeSnapshot{}, err
 	}
 	if stat.Dev != binding.Dev || stat.Ino != binding.Ino {
-		return fmt.Errorf("%w: home identity changed", ErrInvalidHome)
+		return treeSnapshot{}, fmt.Errorf("%w: home identity changed", ErrInvalidHome)
 	}
-	if err := inspectFD(ctx, file, path); err != nil {
-		return err
+	snapshot, err := inspectFD(ctx, file)
+	if err != nil {
+		return treeSnapshot{}, err
 	}
 	if err := unix.Fstatat(int(parent.Fd()), name, &binding, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-		return err
+		return treeSnapshot{}, err
 	}
 	if stat.Dev != binding.Dev || stat.Ino != binding.Ino {
-		return fmt.Errorf("%w: home identity changed", ErrInvalidHome)
+		return treeSnapshot{}, fmt.Errorf("%w: home identity changed", ErrInvalidHome)
 	}
 	if err := recheckBinding(parent, name, stat); err != nil {
-		return err
+		return treeSnapshot{}, err
 	}
-	return nil
+	snapshot.root = toIdentity(stat)
+	return snapshot, nil
 }
 
-func inspectFD(ctx context.Context, home *os.File, path string) error {
+func inspectFD(ctx context.Context, home *os.File) (treeSnapshot, error) {
 	if err := exactDirectory(home, false); err != nil {
-		return err
+		return treeSnapshot{}, err
 	}
 	names, err := home.Readdirnames(memberCount + 1)
 	if err != nil && !errors.Is(err, io.EOF) {
-		return fmt.Errorf("enumerate home: %w", err)
+		return treeSnapshot{}, fmt.Errorf("enumerate home: %w", err)
 	}
 	if len(names) != memberCount {
-		return fmt.Errorf("%w: home census has %d entries", ErrInvalidHome, len(names))
+		return treeSnapshot{}, fmt.Errorf("%w: home census has %d entries", ErrInvalidHome, len(names))
 	}
 	seen := make(map[string]bool, memberCount)
 	for _, name := range names {
 		if seen[name] {
-			return fmt.Errorf("%w: duplicate home entry", ErrInvalidHome)
+			return treeSnapshot{}, fmt.Errorf("%w: duplicate home entry", ErrInvalidHome)
 		}
 		seen[name] = true
 	}
 	for _, name := range []string{formatName, databaseName, tokenName, lockName} {
 		if !seen[name] {
-			return fmt.Errorf("%w: missing home member", ErrInvalidHome)
+			return treeSnapshot{}, fmt.Errorf("%w: missing home member", ErrInvalidHome)
 		}
 	}
 	for _, name := range []string{runtimesName, changesName} {
 		if !seen[name] {
-			return fmt.Errorf("%w: missing home directory", ErrInvalidHome)
+			return treeSnapshot{}, fmt.Errorf("%w: missing home directory", ErrInvalidHome)
 		}
 	}
 	if err := inspectFile(ctx, home, formatName, []byte(formatBytes)); err != nil {
-		return err
+		return treeSnapshot{}, err
 	}
 	if err := inspectDatabase(ctx, home); err != nil {
-		return err
+		return treeSnapshot{}, err
 	}
 	if err := inspectToken(home); err != nil {
-		return err
+		return treeSnapshot{}, err
 	}
 	if err := inspectFile(ctx, home, lockName, nil); err != nil {
-		return err
+		return treeSnapshot{}, err
 	}
 	for _, name := range []string{runtimesName, changesName} {
 		child, childStat, err := openDirectoryMember(home, name)
 		if err != nil {
-			return fmt.Errorf("inspect home %s: %w", name, err)
+			return treeSnapshot{}, fmt.Errorf("inspect home %s: %w", name, err)
 		}
 		entries, readErr := child.Readdirnames(1)
 		closeErr := child.Close()
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
-			return errors.Join(fmt.Errorf("inspect home %s: %w", name, readErr), closeErr)
+			return treeSnapshot{}, errors.Join(fmt.Errorf("inspect home %s: %w", name, readErr), closeErr)
 		}
 		if len(entries) != 0 {
-			return errors.Join(fmt.Errorf("%w: home %s directory is populated", ErrInvalidHome, name), closeErr)
+			return treeSnapshot{}, errors.Join(fmt.Errorf("%w: home %s directory is populated", ErrInvalidHome, name), closeErr)
 		}
 		if closeErr != nil {
-			return closeErr
+			return treeSnapshot{}, closeErr
 		}
 		if err := recheckBinding(home, name, childStat); err != nil {
-			return err
+			return treeSnapshot{}, err
 		}
 	}
-	return nil
+	snapshot, err := snapshotFD(ctx, home)
+	if err != nil {
+		return treeSnapshot{}, err
+	}
+	return snapshot, nil
 }
 
 func openMember(parent *os.File, name string) (*os.File, unix.Stat_t, error) {
@@ -565,4 +729,119 @@ func openDirectoryMember(parent *os.File, name string) (*os.File, unix.Stat_t, e
 		return nil, unix.Stat_t{}, err
 	}
 	return file, stat, nil
+}
+
+func snapshotFD(ctx context.Context, home *os.File) (treeSnapshot, error) {
+	var root unix.Stat_t
+	if err := unix.Fstat(int(home.Fd()), &root); err != nil {
+		return treeSnapshot{}, err
+	}
+	snapshot := treeSnapshot{
+		root:        toIdentity(root),
+		files:       make(map[string]memberSnapshot, 4),
+		directories: make(map[string]identity, 2),
+	}
+	for _, name := range []string{formatName, databaseName, tokenName, lockName} {
+		file, stat, err := openMember(home, name)
+		if err != nil {
+			return treeSnapshot{}, fmt.Errorf("snapshot home member %s: %w", name, err)
+		}
+		digest, digestErr := digestMember(ctx, file, stat.Size)
+		closeErr := file.Close()
+		if digestErr != nil {
+			return treeSnapshot{}, digestErr
+		}
+		if closeErr != nil {
+			return treeSnapshot{}, closeErr
+		}
+		if err := recheckBinding(home, name, stat); err != nil {
+			return treeSnapshot{}, err
+		}
+		snapshot.files[name] = memberSnapshot{identity: toIdentity(stat), digest: digest}
+	}
+	for _, name := range []string{runtimesName, changesName} {
+		directory, stat, err := openDirectoryMember(home, name)
+		if err != nil {
+			return treeSnapshot{}, fmt.Errorf("snapshot home directory %s: %w", name, err)
+		}
+		entries, readErr := directory.Readdirnames(1)
+		closeErr := directory.Close()
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return treeSnapshot{}, readErr
+		}
+		if len(entries) != 0 {
+			return treeSnapshot{}, fmt.Errorf("%w: home %s directory is populated", ErrInvalidHome, name)
+		}
+		if closeErr != nil {
+			return treeSnapshot{}, closeErr
+		}
+		if err := recheckBinding(home, name, stat); err != nil {
+			return treeSnapshot{}, err
+		}
+		snapshot.directories[name] = toIdentity(stat)
+	}
+	return snapshot, nil
+}
+
+func digestMember(ctx context.Context, file *os.File, size int64) ([sha256.Size]byte, error) {
+	hash := sha256.New()
+	buffer := make([]byte, 128<<10)
+	for offset := int64(0); offset < size; {
+		if err := ctx.Err(); err != nil {
+			return [sha256.Size]byte{}, err
+		}
+		want := int64(len(buffer))
+		if remaining := size - offset; want > remaining {
+			want = remaining
+		}
+		read, err := file.ReadAt(buffer[:int(want)], offset)
+		if read != int(want) {
+			return [sha256.Size]byte{}, fmt.Errorf("read home member: %w", errors.Join(io.ErrUnexpectedEOF, err))
+		}
+		if err != nil {
+			return [sha256.Size]byte{}, err
+		}
+		if _, err := hash.Write(buffer[:read]); err != nil {
+			return [sha256.Size]byte{}, err
+		}
+		offset += int64(read)
+	}
+	var digest [sha256.Size]byte
+	copy(digest[:], hash.Sum(nil))
+	return digest, nil
+}
+
+func toIdentity(stat unix.Stat_t) identity {
+	return identity{dev: uint64(stat.Dev), ino: uint64(stat.Ino), mode: uint32(stat.Mode), uid: uint32(stat.Uid), nlink: uint64(stat.Nlink), size: stat.Size}
+}
+
+func sameIdentities(left, right identity) error {
+	if left != right {
+		return fmt.Errorf("%w: filesystem identity or metadata changed", ErrInvalidHome)
+	}
+	return nil
+}
+
+func sameObjectIdentity(left, right identity) error {
+	if left.dev != right.dev || left.ino != right.ino {
+		return fmt.Errorf("%w: filesystem object identity changed", ErrInvalidHome)
+	}
+	return nil
+}
+
+func sameSnapshot(left, right treeSnapshot) error {
+	if err := sameIdentities(left.root, right.root); err != nil {
+		return err
+	}
+	for _, name := range []string{formatName, databaseName, tokenName, lockName} {
+		if left.files[name] != right.files[name] {
+			return fmt.Errorf("%w: home member %s changed between inspections", ErrInvalidHome, name)
+		}
+	}
+	for _, name := range []string{runtimesName, changesName} {
+		if err := sameIdentities(left.directories[name], right.directories[name]); err != nil {
+			return fmt.Errorf("%w: home directory %s changed between inspections", ErrInvalidHome, name)
+		}
+	}
+	return nil
 }
