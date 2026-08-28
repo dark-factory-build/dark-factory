@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -36,6 +36,32 @@ function expectFailure(fn, text) {
 function fixture() {
   const tempRoot = mkdtempSync(join(tmpdir(), "dark-factory-public-artifacts-"));
   return { tempRoot, output: join(tempRoot, "output") };
+}
+
+function archiveMembers(root) {
+  const members = [];
+  const walk = (directory, prefix) => {
+    for (const name of readdirSync(directory)) {
+      const path = join(directory, name);
+      const relative = prefix ? `${prefix}/${name}` : name;
+      const stat = lstatSync(path);
+      if (stat.isDirectory()) walk(path, relative);
+      else members.push(relative);
+    }
+  };
+  walk(root, "");
+  return members;
+}
+
+function rewriteArchive(archive, destination, mutate) {
+  const unpack = mkdtempSync(join(tmpdir(), "dark-factory-archive-edit-"));
+  try {
+    execFileSync("/usr/bin/tar", ["-xzf", archive, "-C", unpack], { stdio: "pipe" });
+    mutate(unpack);
+    execFileSync("/usr/bin/tar", ["-czf", destination, "-C", unpack, ...archiveMembers(unpack)], { stdio: "pipe" });
+  } finally {
+    rmSync(unpack, { recursive: true, force: true });
+  }
 }
 
 test("public artifacts bind clean HEAD, protocol, exact dependencies, and bytes", () => {
@@ -347,6 +373,77 @@ test("pack rejects a changed reviewed digest or lockfile integrity", () => {
   } finally {
     writeFileSync(integrityPath, integrityText);
     writeFileSync(lockfilePath, lockfileText);
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("pack produces two byte-identical reconstructions and verify rebuilds independently", () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), "dark-factory-determinism-"));
+  const first = join(tempRoot, "first");
+  const second = join(tempRoot, "second");
+  try {
+    run("pack", first);
+    run("pack", second);
+    for (const name of ["dark-factory-client-0.1.0.tgz", "dark-factory-ui-0.1.0.tgz", "dark-factory-public-artifacts.json"]) {
+      assert.deepEqual(readFileSync(join(first, name)), readFileSync(join(second, name)), name);
+    }
+    run("verify", second);
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("verify rejects forged self-consistent archive claims by clean reconstruction", () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), "dark-factory-forge-"));
+  const output = join(tempRoot, "output");
+  try {
+    run("pack", output);
+    const path = join(output, "dark-factory-public-artifacts.json");
+    const forged = manifest(output);
+    const clientArchive = join(output, forged.packages[clientName].artifact.filename);
+    const clientBytes = Buffer.concat([readFileSync(clientArchive), Buffer.from("forged client bytes\n")]);
+    writeFileSync(clientArchive, clientBytes);
+    const clientHash = createHash("sha512").update(clientBytes).digest();
+    forged.packages[clientName].artifact.bytes = clientBytes.length;
+    forged.packages[clientName].artifact.sha512 = clientHash.toString("hex");
+    forged.packages[clientName].artifact.integrity = `sha512-${clientHash.toString("base64")}`;
+    forged.packages[uiName].dependency.integrity = forged.packages[clientName].artifact.integrity;
+    writeFileSync(path, `${JSON.stringify(forged, null, 2)}\n`);
+    expectFailure(() => run("verify", output), "differs from clean reconstruction");
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("verify rejects archive members with unsafe shape, mode, JSON, count, and size", () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), "dark-factory-archive-guards-"));
+  const output = join(tempRoot, "output");
+  try {
+    run("pack", output);
+    const archive = join(output, "dark-factory-client-0.1.0.tgz");
+    const original = readFileSync(archive);
+    const mutateAndCheck = (mutate, message) => {
+      const edited = join(tempRoot, "edited.tgz");
+      rewriteArchive(archive, edited, mutate);
+      writeFileSync(archive, readFileSync(edited));
+      expectFailure(() => run("verify", output), message);
+      writeFileSync(archive, original);
+    };
+    mutateAndCheck((root) => chmodSync(join(root, "package/dist/src/control.js"), 0o777), "mode 0644");
+    mutateAndCheck((root) => symlinkSync("index.js", join(root, "package/dist/src/control.js")), "mode 0644");
+    mutateAndCheck((root) => {
+      const packagePath = join(root, "package/package.json");
+      const text = readFileSync(packagePath, "utf8");
+      writeFileSync(packagePath, text.replace('"name": "@dark-factory/client",', '"name": "@dark-factory/client",\n  "name": "@dark-factory/client",'));
+    }, "not canonical JSON");
+    mutateAndCheck((root) => truncateSync(join(root, "package/dist/src/control.js"), 512 * 1024 + 1), "member is too large");
+    mutateAndCheck((root) => {
+      for (let index = 0; index < 50; index += 1) writeFileSync(join(root, `extra-${index}`), "x");
+    }, "too many members");
+    const oversized = Buffer.concat([original, Buffer.alloc(2 * 1024 * 1024, 7)]);
+    writeFileSync(archive, oversized);
+    expectFailure(() => run("verify", output), "archive is too large");
+  } finally {
     rmSync(tempRoot, { recursive: true, force: true });
   }
 });
