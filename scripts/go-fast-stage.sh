@@ -1,6 +1,18 @@
 #!/bin/sh
 
 # Sourced by go-check.sh and go-ci.sh after one shared environment setup.
+go_gate_web_install() {
+    go_gate_previous_umask=$(umask)
+    umask 022
+    if go_gate_package_manager_stage 600 pnpm install --frozen-lockfile --ignore-scripts; then
+        go_gate_install_status=0
+    else
+        go_gate_install_status=$?
+    fi
+    umask "$go_gate_previous_umask"
+    return "$go_gate_install_status"
+}
+
 go_gate_fast_stage() {
     go_gate_expected_version=$(/usr/bin/awk '
         $1 == "go" { count++; value=$2 }
@@ -55,7 +67,7 @@ go_gate_fast_stage() {
         cd "$repository_root/web" || exit
         export COREPACK_ENABLE_NETWORK=1
         export npm_config_offline=false NPM_CONFIG_OFFLINE=false
-        go_gate_package_manager_stage 600 pnpm install --frozen-lockfile --ignore-scripts
+        go_gate_web_install
     ) || return
     echo "go-check: TypeScript client typecheck and tests"
     (
