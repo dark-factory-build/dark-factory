@@ -14,7 +14,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, resolve, sep } from "node:path";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -22,6 +22,11 @@ const repositoryRoot = resolve(webRoot, "..");
 const manifestName = "dark-factory-public-artifacts.json";
 const gitPath = "/usr/bin/git";
 const tarPath = "/usr/bin/tar";
+const toolchainIntegrityPath = join(webRoot, "toolchain-integrity.json");
+const toolTreeVersion = "dark-factory/tool-tree/v1";
+const maxToolTreeFiles = 4096;
+const maxToolTreeBytes = 128 * 1024 * 1024;
+const maxToolTreePathBytes = 4096;
 const packages = {
   client: { key: "client", name: "@dark-factory/client", root: join(webRoot, "packages", "client") },
   ui: { key: "ui", name: "@dark-factory/ui", root: join(webRoot, "packages", "ui") },
@@ -49,7 +54,6 @@ const commandEnvironment = {
   CI: "true",
   COREPACK_DEFAULT_TO_LATEST: "0",
   COREPACK_ENABLE_NETWORK: "0",
-  COREPACK_HOME: process.env.COREPACK_HOME ?? join(homedir(), ".cache", "node", "corepack"),
   HOME: tmpdir(),
   LANG: "C",
   LC_ALL: "C",
@@ -144,13 +148,115 @@ function integerField(value, key, label) {
   return value[key];
 }
 
+function toolTreeDigest(root) {
+  let rootStat;
+  try { rootStat = lstatSync(root); } catch (error) { fail(`could not inspect tool tree ${root}: ${error.message}`); }
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) fail(`tool tree ${root} must be a regular directory`);
+  const files = [];
+  const foldedPaths = new Set();
+  let totalBytes = 0;
+  const walk = (directory, prefix) => {
+    let entries;
+    try { entries = readdirSync(directory).sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b))); } catch (error) { fail(`could not read tool tree ${directory}: ${error.message}`); }
+    const foldedNames = new Set();
+    for (const name of entries) {
+      if (name === "." || name === ".." || name.normalize("NFC") !== name) fail(`tool tree contains a noncanonical path component ${name}`);
+      const foldedName = name.normalize("NFC").toLocaleLowerCase("en-US");
+      if (foldedNames.has(foldedName)) fail(`tool tree contains case-confusable entries in ${directory}`);
+      foldedNames.add(foldedName);
+      const path = join(directory, name);
+      const relative = prefix ? `${prefix}/${name}` : name;
+      const relativeBytes = Buffer.from(relative);
+      if (relativeBytes.length > maxToolTreePathBytes) fail("tool tree path is too long");
+      let stat;
+      try { stat = lstatSync(path); } catch (error) { fail(`could not inspect tool tree entry ${relative}: ${error.message}`); }
+      if (stat.isSymbolicLink()) fail(`tool tree contains symlink ${relative}`);
+      if (stat.isDirectory()) {
+        walk(path, relative);
+      } else if (stat.isFile()) {
+        const foldedPath = relative.normalize("NFC").toLocaleLowerCase("en-US");
+        if (foldedPaths.has(foldedPath)) fail(`tool tree contains case-confusable path ${relative}`);
+        foldedPaths.add(foldedPath);
+        if (files.length >= maxToolTreeFiles) fail("tool tree contains too many files");
+        if (!Number.isSafeInteger(stat.size) || stat.size > maxToolTreeBytes || totalBytes > maxToolTreeBytes - stat.size) fail("tool tree is too large");
+        totalBytes += stat.size;
+        files.push({ path, relative, relativeBytes, size: stat.size });
+      } else {
+        fail(`tool tree contains non-regular entry ${relative}`);
+      }
+    }
+  };
+  walk(root, "");
+  files.sort((a, b) => Buffer.compare(a.relativeBytes, b.relativeBytes));
+  const hash = createHash("sha512");
+  hash.update(Buffer.from(`${toolTreeVersion}\0`));
+  const count = Buffer.alloc(4);
+  count.writeUInt32BE(files.length);
+  hash.update(count);
+  for (const file of files) {
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(file.relativeBytes.length);
+    hash.update(length);
+    hash.update(file.relativeBytes);
+    const bytes = readFileSync(file.path);
+    if (bytes.length !== file.size) fail(`tool tree file changed while hashing ${file.relative}`);
+    const size = Buffer.alloc(8);
+    size.writeBigUInt64BE(BigInt(file.size));
+    hash.update(size);
+    hash.update(bytes);
+  }
+  return hash.digest("hex");
+}
+
+function reviewedToolchain() {
+  const value = strictJsonFile(toolchainIntegrityPath, "toolchain integrity");
+  exactKeys(value, ["schemaVersion", "pnpm", "typescript"], "toolchain integrity");
+  if (value.schemaVersion !== 1) fail("toolchain integrity schema version is unsupported");
+  exactKeys(value.pnpm, ["version", "treeSha512"], "toolchain integrity.pnpm");
+  exactKeys(value.typescript, ["version", "treeSha512", "lockfileIntegrity"], "toolchain integrity.typescript");
+  for (const key of ["version", "treeSha512"]) stringField(value.pnpm, key, "toolchain integrity.pnpm");
+  for (const key of ["version", "treeSha512", "lockfileIntegrity"]) stringField(value.typescript, key, "toolchain integrity.typescript");
+  if (!/^\d+\.\d+\.\d+$/.test(value.pnpm.version) || !/^[0-9a-f]{128}$/.test(value.pnpm.treeSha512)) fail("toolchain integrity.pnpm is invalid");
+  if (!/^\d+\.\d+\.\d+$/.test(value.typescript.version) || !/^[0-9a-f]{128}$/.test(value.typescript.treeSha512) || !/^sha512-[A-Za-z0-9+/]{86}={0,2}$/.test(value.typescript.lockfileIntegrity)) fail("toolchain integrity.typescript is invalid");
+  return value;
+}
+
+function lockfileTypescriptIntegrity(version) {
+  const lockfile = readFileSync(join(webRoot, "pnpm-lock.yaml"), "utf8");
+  const marker = `  typescript@${version}:\n`;
+  const start = lockfile.indexOf(marker);
+  if (start < 0) fail(`pnpm lockfile has no exact typescript@${version} package entry`);
+  const remainder = lockfile.slice(start + marker.length);
+  const nextPackage = remainder.search(/\n  \S/);
+  const block = lockfile.slice(start, start + marker.length + (nextPackage < 0 ? remainder.length : nextPackage));
+  const matches = [...block.matchAll(/^    resolution: \{integrity: (sha512-[^}]+)\}$/gm)];
+  if (matches.length !== 1) fail(`pnpm lockfile has an invalid typescript@${version} package entry`);
+  return matches[0][1];
+}
+
+function pnpmRoot(version) {
+  let home;
+  try { home = userInfo().homedir; } catch (error) { fail(`could not determine the current user's home: ${error.message}`); }
+  return join(home, ".cache", "node", "corepack", "v1", "pnpm", version);
+}
+
 function trustedTools() {
   const node = executable(process.execPath, "Node");
   const corepack = executable(join(dirname(node), "corepack"), "Corepack");
+  const reviewed = reviewedToolchain();
   const webPackage = readJson(join(webRoot, "package.json"));
   const packageManager = webPackage.packageManager?.match(/^pnpm@(\d+\.\d+\.\d+)$/);
   const typescript = webPackage.devDependencies?.typescript;
   if (!packageManager || !/^\d+\.\d+\.\d+$/.test(typescript ?? "")) fail("package/tool versions must be exact");
+  if (packageManager[1] !== reviewed.pnpm.version) fail("package.json pnpm version differs from reviewed toolchain");
+  if (typescript !== reviewed.typescript.version) fail("package.json TypeScript version differs from reviewed toolchain");
+  const pnpmRootPath = pnpmRoot(packageManager[1]);
+  const pnpmPackagePath = join(pnpmRootPath, "package.json");
+  const pnpmPackage = readJson(pnpmPackagePath);
+  if (pnpmPackage.name !== "pnpm" || pnpmPackage.version !== packageManager[1]) fail("cached pnpm differs from web/package.json");
+  const pnpmTreeSha512 = toolTreeDigest(pnpmRootPath);
+  if (pnpmTreeSha512 !== reviewed.pnpm.treeSha512) fail("cached pnpm content differs from reviewed toolchain");
+  if (lockfileTypescriptIntegrity(typescript) !== reviewed.typescript.lockfileIntegrity) fail("pnpm lockfile TypeScript integrity differs from reviewed toolchain");
   const tscPackagePath = realpathSync(join(webRoot, "node_modules", "typescript", "package.json"));
   const nodeModulesRoot = realpathSync(join(webRoot, "node_modules"));
   if (!tscPackagePath.startsWith(`${nodeModulesRoot}${sep}`)) fail("TypeScript resolves outside the installed web dependency tree");
@@ -158,15 +264,26 @@ function trustedTools() {
   const tsc = executable(join(tscRoot, "bin", "tsc"), "TypeScript");
   const tscPackage = readJson(tscPackagePath);
   if (tscPackage.name !== "typescript" || tscPackage.version !== typescript) fail("installed TypeScript differs from web/package.json");
+  const typescriptTreeSha512 = toolTreeDigest(tscRoot);
+  if (typescriptTreeSha512 !== reviewed.typescript.treeSha512) fail("installed TypeScript content differs from reviewed toolchain");
   const safeEnv = { ...commandEnvironment, PATH: `${dirname(node)}:/usr/bin:/bin` };
   const runCorepack = (args) => execFileSync(node, [corepack, ...args], { env: safeEnv, encoding: "utf8" }).trim();
   const corepackVersion = runCorepack(["--version"]);
-  const pnpmVersion = runCorepack([`pnpm@${packageManager[1]}`, "--version"]);
+  const pnpm = executable(join(pnpmRootPath, "bin", "pnpm.mjs"), "pnpm");
+  const pnpmVersion = execFileSync(node, [pnpm, "--version"], { env: safeEnv, encoding: "utf8" }).trim();
   const tscVersion = execFileSync(node, [tsc, "--version"], { cwd: webRoot, env: safeEnv, encoding: "utf8" }).trim();
   if (pnpmVersion !== packageManager[1] || tscVersion !== `Version ${typescript}`) fail("tool executable versions do not match pinned versions");
   return {
-    paths: { node, corepack, tsc, tar: executable(tarPath, "tar") },
-    versions: { node: process.version, corepack: corepackVersion, pnpm: pnpmVersion, typescript },
+    paths: { node, corepack, pnpm, tsc, tar: executable(tarPath, "tar") },
+    versions: {
+      node: process.version,
+      corepack: corepackVersion,
+      pnpm: pnpmVersion,
+      pnpmTreeSha512,
+      typescript,
+      typescriptTreeSha512,
+      typescriptIntegrity: reviewed.typescript.lockfileIntegrity,
+    },
   };
 }
 
@@ -335,8 +452,9 @@ function validateManifestShape(manifest) {
   if (!/^[0-9a-f]{40}$/.test(stringField(manifest.source, "commit", "manifest.source")) || manifest.source.clean !== true) fail("manifest source is invalid");
   exactKeys(manifest.protocol, ["name", "version"], "manifest.protocol");
   if (stringField(manifest.protocol, "name", "manifest.protocol") !== "dark-factory/browser/v1" || integerField(manifest.protocol, "version", "manifest.protocol") !== 1) fail("manifest protocol is invalid");
-  exactKeys(manifest.buildTools, ["node", "corepack", "pnpm", "typescript"], "manifest.buildTools");
-  for (const key of ["node", "corepack", "pnpm", "typescript"]) stringField(manifest.buildTools, key, "manifest.buildTools");
+  exactKeys(manifest.buildTools, ["node", "corepack", "pnpm", "pnpmTreeSha512", "typescript", "typescriptTreeSha512", "typescriptIntegrity"], "manifest.buildTools");
+  for (const key of ["node", "corepack", "pnpm", "pnpmTreeSha512", "typescript", "typescriptTreeSha512", "typescriptIntegrity"]) stringField(manifest.buildTools, key, "manifest.buildTools");
+  if (!/^[0-9a-f]{128}$/.test(manifest.buildTools.pnpmTreeSha512) || !/^[0-9a-f]{128}$/.test(manifest.buildTools.typescriptTreeSha512) || !/^sha512-[A-Za-z0-9+/]{86}={0,2}$/.test(manifest.buildTools.typescriptIntegrity)) fail("manifest build tool content digests are invalid");
   exactKeys(manifest.packages, [packages.client.name, packages.ui.name], "manifest.packages");
   for (const info of Object.values(packages)) {
     const entry = manifest.packages[info.name];
@@ -437,7 +555,7 @@ function stageAndPack(tools, info, artifactDir, stageRoot, dependency) {
   const archive = join(artifactDir, filename);
   if (existsSync(archive)) fail(`stale ${filename} already exists`);
   // npm_config_ignore_scripts is the lifecycle policy boundary for packing.
-  execFileSync(tools.paths.node, [tools.paths.corepack, `pnpm@${tools.versions.pnpm}`, "pack", "--pack-destination", artifactDir], {
+  execFileSync(tools.paths.node, [tools.paths.pnpm, "pack", "--pack-destination", artifactDir], {
     cwd: stage,
     env: { ...commandEnvironment, PATH: `${dirname(tools.paths.node)}:/usr/bin:/bin` },
     stdio: "pipe",
@@ -454,11 +572,17 @@ function parseArgs(argv) {
   return { command, output: rest[1] };
 }
 
-try {
-  const { command, output } = parseArgs(process.argv.slice(2));
-  const manifest = command === "pack" ? await pack(output) : await verify(output);
-  process.stdout.write(stableJson(manifest));
-} catch (error) {
-  process.stderr.write(`${error.message}\n`);
-  process.exitCode = 1;
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
+  try {
+    const { command, output } = parseArgs(process.argv.slice(2));
+    const manifest = command === "pack" ? await pack(output) : await verify(output);
+    process.stdout.write(stableJson(manifest));
+  } catch (error) {
+    process.stderr.write(`${error.message}\n`);
+    process.exitCode = 1;
+  }
 }
+
+// Exported only for focused tests of the content commitment; pack/verify always
+// derive and validate their production tool roots internally.
+export { toolTreeDigest };

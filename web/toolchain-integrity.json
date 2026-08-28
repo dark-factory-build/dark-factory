@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "pnpm": {
+    "version": "11.19.0",
+    "treeSha512": "c2426c11044b38a20a259d155660046c54253edf856693084c9d70d09966c62d4f54c08653988a524b71201737b7d52786b564ecdd19ddc941deb5b9efeaee3f"
+  },
+  "typescript": {
+    "version": "5.8.3",
+    "treeSha512": "d735db307389a4e6879aca8d85eb7ba16f2518c5fc31d81f6e4d0bd4aad6f6d2e4d9cb18347b2cf6e17e9a5af5e335a41542192458dd3f05819dc06347d9311b",
+    "lockfileIntegrity": "sha512-p1diW6TqL9L07nNxvRMM7hMMw4c5XOo/1ibL4aAIGmSAt9slTE1Xgw5KWuof2uTOvCg9BY7ZRi+GaF+7sfgPeQ=="
+  }
+}
