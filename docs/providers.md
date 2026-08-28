@@ -8,21 +8,23 @@ instructions for the cutover. V1 has one concrete provider boundary:
 func Build(Request) (Launch, error)
 ```
 
-`Build` is a pure constructor over facts frozen by daemon admission. `Launch`
-contains only one absolute, daemon-committed executable, one ordered argv, and
-one complete ordered environment. It cannot choose a provider, source path,
-working directory, authority, credential, or lifecycle result. The runner owns
-the already-open descriptor-bound Change cwd, fresh interactive PTY, input,
-process group, wait/reap, output, and cleanup. There is no provider interface,
-registry, plugin, profile, fallback, or adapter-owned supervision framework.
+`Build` constructs one launch from provider/model/effort frozen by admission and
+from daemon-sealed executable/configuration/auth sources resolved after
+admission. `Launch` contains only one exact absolute executable, one ordered
+argv, and one complete ordered environment. It cannot choose a provider,
+source path, working directory, authority, credential, or lifecycle result.
+The runner owns the already-open descriptor-bound Change cwd, fresh interactive
+PTY, input, process group, wait/reap, output, and cleanup. `Build` is the only
+provider boundary; there is no registry, plugin, profile, fallback, or
+provider-owned supervision framework.
 
 ## V1 matrix
 
 | Provider | V1 authority | Model/effort | Launch status |
 |---|---|---|---|
-| `shell` | unrestricted interactive | neither value is present | shipped first; exact `/bin/sh -s` |
-| `claude_code` | unrestricted interactive | each optional independently | shipped only for the exact reviewed executable/version |
-| `codex` | unrestricted interactive | each optional independently | shipped only for the exact reviewed executable/version |
+| `shell` | unrestricted interactive | neither value is present | contract only; package `1ff2e2e6` is unintegrated and not shipped |
+| `claude_code` | unrestricted interactive | each optional independently | blocked pending exact provider integration and witness review |
+| `codex` | unrestricted interactive | each optional independently | blocked pending exact provider integration and witness review |
 
 No bounded provider authority is shipped in V1. The schema and wire contract
 have no permission-mode/profile field. A later bounded provider contract must
@@ -40,11 +42,13 @@ launch table. No paid session is part of this proof.
 ## Launch facts
 
 Admission freezes provider, optional model and optional reasoning effort in the
-Run. It also commits the executable absolute path, digest, and reviewed version
-identity. Immediately before provider release, the daemon/runner revalidates
-that identity and the final Change descriptor identity, generated-config path,
-and config digest. A changed, missing, non-regular, or ambiguous object fails
-closed. PATH lookup is never executable authority.
+Run. It does not commit executable, version, or digest fields. After admission,
+`Build` resolves and commits the exact native executable/configuration/auth
+launch facts from daemon-sealed sources. Immediately before provider release,
+the daemon/runner revalidates those facts and the final Change descriptor
+identity, generated-config path, and config digest. A changed, missing,
+non-regular, or ambiguous object fails closed. PATH lookup is never executable
+authority; unavailable resolution maps to typed `FailureSpawn`.
 
 The shell launch is exactly:
 
@@ -99,7 +103,7 @@ generated-config, auth-reference, and daemon-control values are included. A
 single daemon-sealed validated `PATH` is allowed for non-authoritative child
 behavior; `/bin/sh` and all authority helpers are absolute. Inherited API,
 proxy, Git/GitHub, SSH, credential-helper, dynamic-loader, plugin, and user
-configuration variables are absent. No caller or adapter can merge additions.
+configuration variables are absent. No caller can merge additions.
 
 Every run receives private owner-only `HOME`, `TMP`, provider-state, config,
 and runtime roots below the daemon-owned runtime capability. The Change cwd is

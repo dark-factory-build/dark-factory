@@ -1,22 +1,29 @@
 # Architecture
 
 Dark Factory separates model policy from durable work authority. This file
-describes the attempt kernel, daemon-owned Change model, and fail-closed
-completion-verification boundary implemented by the current kernel.
-It is a contract, not a component catalogue.
+describes the Go target's attempt kernel, daemon-owned Change model, and
+fail-closed completion-verification boundary. It is a contract, not a component
+catalogue.
 
 ## Current status
 
-Live use remains frozen until an independent exact-main boot review passes.
+Live use remains frozen until an independent exact-head boot review passes.
+
+The integration target at `359d46a3` contains production `factoryd`
+composition and ownership of `OperationalHome`, `Store`, `RuntimeParent`, the
+Local API, and browser services. This documentation candidate is not that
+shipped integration: corrected Change/global-admission/provider integration
+remains pending. The shell package at `1ff2e2e6` is a separate unintegrated
+candidate, not canonical or shipped; Claude and Codex remain blocked.
 
 The complete design and causal proof matrix live in
 [`docs/development/SAFE_KERNEL_REFACTOR.md`](docs/development/SAFE_KERNEL_REFACTOR.md).
 
 ### Go hard-cutover planning authority
 
-The implemented Rust kernel remains the historical evidence described by this
-file until cutover. It is not a compatibility or implementation contract for
-the replacement. The canonical planned Go contract is
+The retained Rust kernel is historical evidence only. It is not a migration,
+compatibility, or implementation contract for the replacement. The canonical
+planned Go contract is
 [`docs/development/GO_REWRITE.md`](docs/development/GO_REWRITE.md); when this
 file's retained-Rust historical wording conflicts with that record, the Go
 rewrite record wins and the old wording must not guide implementation.
@@ -58,7 +65,8 @@ nonqueued task is outside the queue. Unknown or malformed durable control is
 corruption. Repository and provider executable/configuration/auth availability
 are post-admission typed failures, not stale eligibility filters.
 The exact contract lives in the rewrite record; this paragraph does not claim
-the Go daemon implements it yet.
+the corrected Change/global-admission/provider contract is implemented in this
+docs candidate.
 
 Planned Go process setup has one additional literal barrier: after the outer
 runner is active and while its provider process/group pair remains declared
@@ -234,23 +242,26 @@ terminalization.
 
 ## Provider boundary
 
-The planned Go boundary is one concrete
+The planned Go boundary is one exhaustive concrete
 `internal/provider.Build(Request) (Launch, error)` function. It returns only
-one absolute committed executable, ordered argv and complete ordered
-environment. The runner owns the descriptor-bound Change cwd, fresh PTY, input,
+one exact absolute executable, ordered argv and complete ordered environment.
+The runner owns the descriptor-bound Change cwd, fresh interactive PTY, input,
 process group, wait/reap, output and cleanup. The provider cannot select a
 source path, authority, credential, lifecycle result or fallback. See [the
 fresh provider contract](docs/providers.md).
 
-V1 provider choice is inherently unrestricted interactive authority. Shell is
-exactly `/bin/sh -s`; Claude Code and Codex use only their exact reviewed
-version-sealed native launch facts. The schema and wire contract contain no
-permission profile or bounded-authority field. Optional model and reasoning
-effort are frozen independently at admission; an unsupported native mapping
-is a typed post-admission `FailureSpawn`. Missing provider executable,
-configuration or auth is likewise post-admission failure, never queue
-ineligibility. Executable identity/digest/version and final Change/config
-identity are revalidated immediately before release.
+The V1 contract allows only unrestricted interactive authority. Shell is
+exactly `/bin/sh -s`; Claude Code and Codex are blocked in this candidate
+pending exact integration and fake-witness review. The schema and wire contract
+contain no permission profile or bounded-authority field. Admission freezes
+provider, optional model, and optional reasoning effort only. After admission,
+`Build` resolves and commits the exact native executable/configuration/auth
+facts from daemon-sealed sources, then immediately before release revalidates
+those facts and the final Change/config identity; these are not admission
+schema fields. An unsupported mapping or missing, changed, or inaccessible
+executable/configuration/auth is typed post-admission `FailureSpawn`, never
+queue ineligibility. Whole-provider API/model network access is not claimed to
+be constrained by this command contract.
 
 The runner starts with `env_clear` and one closed ordered environment builder,
 private per-run roots, a daemon-sealed `PATH`, and no ambient provider/API,
@@ -358,8 +369,9 @@ daemon finalizer from converging.
 
 ## Clients and integrations
 
-`factoryctl` and `factory-tui` are disposable clients of one local API. They do
-not own runtime state. Both use the operator credential for operator requests.
+`factoryctl` and the hosted browser are disposable clients of one local API.
+They do not own runtime state. Both use the operator credential for operator
+requests.
 Generated provider hooks and attempt commands read the private credential file
 for their exact run through `DARK_FACTORY_ATTEMPT_TOKEN_FILE` (or an explicit
 hook `--token-file`). A provider-invoked `factoryctl` process cannot cross into
@@ -374,15 +386,11 @@ local detail and public events carry only project, envelope, candidate, and
 status identities. There is no accept/materialize operation, so receipt cannot
 become executable work or bypass admission.
 
-The official control-plane adapter is a Rust Cloudflare Worker with sharded
-SQLite Durable Objects. That is a hosted deployment choice, not part of the
-daemon protocol: self-hosted brokers preserve the same typed contract without
-loading credentials into `factoryd`. The current bootstrap acknowledges only
-an exact signed maintainer-App `ping`. When configured with App authority, it
-also proves one exact metadata-only repository installation with an App JWT;
-it creates no installation token and exposes no GitHub mutation.
-Every other authenticated event is durably policy-rejected. Product intake and
-the operator/PWA API remain separate inactive planes.
+The separately deployed control plane is outside this local architecture and
+has no daemon or attempt authority. Its implementation and broker choice do
+not load credentials into `factoryd`; any future integration must preserve the
+typed, metadata-only boundary. Product intake and the operator/browser API
+remain separate planes, and no external delivery can bypass local admission.
 
 ## State outside SQLite
 
@@ -402,7 +410,7 @@ launchd job are never test fixtures.
 - No protection from a hostile process running as the operator. Bearer scoping
   prevents confused/cooperative cross-attempt behavior; real isolation needs a
   separate OS user, container, or sandbox.
-- No session compatibility layer beyond decoding historical events needed for
-  migration and replay.
+- No migration, upcaster, or compatibility layer; the Go home/schema and
+  protocol are fresh, and retained Rust history is an archive only.
 - No live installation, release, or external intake before the independent
-  exact-main boot review and a separate operator decision.
+  exact-head boot review and a separate operator decision.

@@ -11,9 +11,11 @@ schema, event log, protocol, or serialized state.
 This section supersedes every later statement that requires a Go TUI, Bubble
 Tea, CLI/TUI parity, closed-stdin provider input, or the Rust attention
 model. The later sections remain the chronological implementation record and
-evidence for already completed kernel work. They are not authority when they
-conflict with this redirection. The final elegance pass must remove the
-superseded prose after its replacement tests are green.
+historical evidence for earlier kernel work. They are not authority when they
+conflict with this redirection, and an old “integrated head” entry does not
+make corrected Change, global admission, or provider integration shipped. The
+final elegance pass must remove superseded prose after its replacement tests
+are green.
 
 The target product is a local Go daemon with durable authority and PTY-backed
 agents, controlled primarily by a hosted responsive web application. The
@@ -27,6 +29,18 @@ The hard-cutover decision is unchanged: fresh Go home, schema and protocols;
 no Rust migration, event upcasting, mixed runtime, or compatibility period.
 The existing Rust TUI and other replaced Rust local-runtime crates are deleted
 only after the revised web/PTY gate passes.
+
+### Candidate and integration status
+
+This document is the docs candidate at `05d3bef7`, based on the old Go source
+base. It does not claim that the corrected Change, global admission, or
+provider integration is implemented or shipped. Integration-target evidence at
+`359d46a3` includes production `factoryd` composition and ownership of
+`OperationalHome`, `Store`, `RuntimeParent`, the Local API, and browser
+services; that evidence is not retroactively an implementation claim for this
+candidate. The shell package at `1ff2e2e6` is a separate unintegrated
+candidate, not canonical or shipped. Claude and Codex remain blocked pending
+the exact provider integration and witness review.
 
 ### Redirection starting point and branch inventory
 
@@ -71,16 +85,21 @@ Read-only redirection audits were assigned without overlapping writes:
 Their concrete conclusions are incorporated below. The revised plan gate is
 complete; the exact current-head work graph below now governs production work.
 
-### Exact current-head checkpoint (2026-08-28, `497ecfe4`)
+### Exact docs-candidate checkpoint (2026-08-28, `05d3bef7`)
 
-This is the one current status checkpoint. Later sections retain the exact
+This is the docs-candidate status checkpoint. Later sections retain the exact
 evidence and decisions available at their named heads, but cannot make an
 older candidate or test result current.
 
-- Canonical source head is
-  `497ecfe4fa34c22af89e6942f7f9d5c65e0050b3` on unpublished branch
-  `go-hard-cutover`. This documentation update is being prepared in its own
-  worktree and does not claim a newer production head until integrated.
+- This docs candidate is `05d3bef7059c9c1347c9cee52d128cc4c85bb42d` on the
+  unpublished `go-change-contract-recovery-docs` branch. It is based on an old
+  Go source head and does not claim corrected Change, global-admission, or
+  provider integration.
+- Integration-target evidence is `359d46a3`: it contains production `factoryd`
+  composition and `OperationalHome`/`Store`/`RuntimeParent`/Local API/browser
+  ownership. That evidence is a separate target, not code shipped by this
+  candidate. The shell package at `1ff2e2e6` is likewise a separate
+  unintegrated candidate; Claude and Codex remain blocked.
   `main`, remotes, the private site, the operator installation, live service,
   socket/home and real providers remain untouched.
 - The operational Store is now integrated through `495ba3f5`, `5be1a76d`,
@@ -104,11 +123,11 @@ older candidate or test result current.
   raw connection remained live and owned without a reconnect or retry. The
   test also proved exact identity and one close/one connect. No mutation code
   remains.
-- The canonical branch now also integrates the exact `RuntimeParent` range
-  `7464e02a` and `15879fe2`. The implementation and its causal lifetime,
-  child-operation join and recovery matrix were independently reviewed at
-  exact source head `0c435705`; the reviewer returned **ALLOW**. This is
-  package/composition authority evidence, not a claim that `factoryd` exists.
+- The integration-target branch also contains the exact `RuntimeParent` range
+  `7464e02a` and `15879fe2`, plus production factoryd composition and the
+  OperationalHome/Store/Local API/browser owners. This is package/composition
+  evidence only; it does not make the corrected Change/global-admission or
+  provider contract implemented in this old-base docs candidate.
 - The public-artifact gate and its exact `c732f103` proof remain integrated and
   are preserved in the historical checkpoint immediately below. Store and
   RuntimeParent commits did not change those artifact files, but no new 13/13
@@ -118,10 +137,10 @@ older candidate or test result current.
 |---|---|---|
 | operational home and Store | integrated, causally tested and independently reviewed | composition must call `OpenStore` once and close child owners in the frozen order |
 | public artifact gate | integrated; exact proof remains at `c732f103` | rerun after the next clean record/integration milestone |
-| local API authority | integrated, causally tested and independently reviewed through `cb1bdebd` | production composition must open it after `RuntimeParent` and fence/join it before Store/home release |
-| `RuntimeParent` | integrated, causally tested and independently reviewed through `7464e02a` and `15879fe2`; exact review source `0c435705` **ALLOW** | composition must own it once, join every child operation and close it before Store/home ancestry |
-| Change disposition/descriptor handoff | latest cold-review corrections frozen below; no implementation; exact-contract review is required before implementation | schema/Store transition proof, then worker FD 11 and retry proof |
-| standalone daemon, recovery and scheduling | corrected global transactional `AdmitNext` contract frozen; exact multi-document review is required; daemon/recovery/scheduler not implemented | concrete `cmd/factoryd`, restart/crash cuts, then one cursor-free scheduler loop |
+| local API/browser authority | integrated on the `359d46a3` composition target; not claimed shipped by this old-base docs candidate | exact composition and browser/Local API ownership review on the integrated head |
+| `RuntimeParent` | integrated on the `359d46a3` target through `7464e02a` and `15879fe2` | exact composition must own it once, join every child operation and close it before Store/home ancestry |
+| Change disposition/descriptor handoff | corrected contract frozen below; implementation and integration remain pending | schema/Store transition proof, then worker FD 11 and retry proof |
+| global admission/recovery/provider integration | corrected contracts frozen below; not implemented or shipped by this candidate | exact kernel, factoryd, provider Build, restart/crash and fake-witness proofs |
 | service/release/private host | not cut over | isolated install/service proof and exact public-artifact site integration |
 | final elegance and deletion | deliberately not started | whole-runtime DRY/YAGNI audit, mutations, exact-head reviews, then Rust deletion |
 
@@ -230,9 +249,10 @@ numeric limits and nullability. Shared Go create/read/wire validation owns
 UTF-8 and NUL rules; it runs before durable creation and on the selected
 canonical task/control facts. A malformed selected value is corruption before
 admission, never normalized or silently coerced. Lower-ranked queued prose is
-not globally UTF-8 scanned merely to decide capacity. Project source roots are
-clean absolute paths that start with `/` but are not exactly `/`, contain no
-NUL, empty, `.` or `..` component, repeated separator, or trailing separator.
+not globally UTF-8 scanned merely to decide capacity. **Implementation gate
+(not yet landed):** project source-root validation and schema tests must reject
+`/`; accepted roots are clean absolute paths with no NUL, empty, `.` or `..`
+component, repeated separator, or trailing separator.
 A root outside that grammar is refused rather than normalized into validity.
 
 The fresh schema has no profile row or status, and no permission-profile field,
@@ -371,28 +391,11 @@ requires a fresh independent exact-contract **ALLOW** before implementation
 begins. No production Change schema, runner or worker code has implemented it
 yet.
 
-The fresh `changes` row contains only:
-
-```text
-id
-project_id
-task_id
-task_incarnation_id
-phase
-object_format
-base_commit
-tree_digest
-entry_count
-total_bytes
-tree_dev
-tree_inode
-prepared_at_ms
-available_at_ms
-settled_run_id
-revision
-created_at_ms
-updated_at_ms
-```
+The fresh Change scalar columns and domains are owned only by
+`internal/kernel/schema.go` and its exact schema allowlist/constraint tests;
+this record intentionally does not duplicate that list. The following are
+cross-row relations and transition facts for the target implementation, not a
+claim that those relations are implemented in this old-base candidate.
 
 Phases are exactly `reserved`, `prepared`, `available`, `retained` and
 `abandoned`. There is no `selected` or durable `unresolved` Change phase, no
@@ -982,8 +985,10 @@ silently abandoned.
    and five independent final reviews. Delete the Rust local runtime only after
    every hard-cutover gate is green on one exact head.
 
-No production `cmd/factoryd`, installed service, final private-host product
-loop or hard cutover exists at `497ecfe4`.
+At the older checkpoint `497ecfe4`, no production `cmd/factoryd`, installed
+service, final private-host product loop or hard cutover existed. The later
+`359d46a3` composition evidence is recorded in the current candidate status
+above and does not make this docs candidate shipped.
 
 ### Historical exact-head checkpoint (later 2026-08-28, `c732f103`)
 
@@ -3332,8 +3337,8 @@ not a compatibility target.
   admission typed failure. `RunNext` launches only from that committed Run.
 - One random credential belongs to one exact admitted/running attempt, but it
   authenticates attempt requests only while that exact run is `running`.
-  Authentication derives project, agent, task, run, role, provider, execution
-  mode, Change, and authority. The first transition to `finalizing` deletes or
+  Authentication derives project, agent, task, run, role, provider, Change,
+  and authority. The first transition to `finalizing` deletes or
   irreversibly revokes it in the same transaction. Operator authentication
   cannot impersonate an attempt.
 - The normal lifecycle remains `admitted -> running -> finalizing -> terminal`.
@@ -3531,9 +3536,11 @@ not a compatibility target.
 - Share one private activation-file/lease primitive across daemon and runner.
 - Model provider leader/group as one owned aggregate where this deletes
   duplication, while retaining distinct leader-reaped and group-absent facts.
-- Keep three concrete provider launch adapters. The consuming daemon boundary
-  may use a small function/interface only if multiple production adapters make
-  it smaller; providers never choose authority or ownership.
+- Keep one exhaustive concrete `provider.Build(Request) (Launch, error)`
+  constructor for every V1 provider. It returns only the exact launch facts;
+  the runner owns cwd, PTY, input, process, reap, and cleanup. Do not add a
+  second provider abstraction, registry, plugin, profile, or conditional
+  implementation escape hatch.
 - Use one bounded dashboard snapshot at sequence N and one watch from N.
   Durable events carry only sequence, safe entity kind/ID, and revision. A
   gap triggers canonical resync; details remain explicit reads.
@@ -3672,8 +3679,9 @@ internal/install is added only after client/kernel cutover readiness.
   for shell, Claude Code and Codex. It receives frozen daemon facts and
   returns only one absolute executable, ordered argv and complete ordered env;
   the runner owns descriptor cwd, PTY, input, process, reap and cleanup. There
-  is no provider interface, registry, profile, plugin or adapter supervision
-  framework. The exact fresh contract is [the provider guide](../providers.md).
+  `Build` is the only provider boundary; there is no registry, plugin, profile,
+  or provider-owned supervision framework. The exact fresh contract is [the
+  provider guide](../providers.md).
 - `internal/api`: bounded private protocol, framing, typed wire values, and the
   three narrow clients (`HealthClient`, `OperatorClient`, `AttemptClient`). It
   has no Store or lifecycle logic.
@@ -3690,18 +3698,23 @@ do not add interfaces to preserve the sketch.
 
 ### Concrete V1 provider boundary
 
-V1 ships only unrestricted interactive shell, Claude Code and Codex. The
-schema and wire contract have no permission-mode/profile field, and no bounded
-provider authority is enabled. A later bounded contract must prove its actual
+The V1 contract defines only unrestricted interactive launches. No provider is
+claimed shipped by this old-base candidate: the shell implementation at
+`1ff2e2e6` is a separate unintegrated candidate, and Claude Code/Codex remain
+blocked pending exact integration and fake-witness review. The schema and wire
+contract have no permission-mode/profile field, and no bounded provider
+authority is enabled. A later bounded contract must prove its actual
 filesystem, process, socket and network effects with a real OS witness.
 
 `Build` cannot select authority, a source path, a working directory, a
-credential, a lifecycle result or a fallback. Admission freezes provider,
-optional model and optional reasoning effort, then commits the executable
-absolute path, digest and reviewed version identity. The daemon/runner
-revalidates those facts and the final Change descriptor/config identity and
-digest immediately before provider release. Missing or changed executable,
-configuration or auth is typed `FailureSpawn` after admission.
+credential, a lifecycle result or a fallback. Admission freezes only provider,
+optional model and optional reasoning effort. After admission, `Build` resolves
+and commits the exact native executable/configuration/auth launch facts from
+daemon-sealed sources, and revalidates those facts plus the final Change
+descriptor/config identity and digest immediately before provider release. No
+executable, version, or digest is an admission schema field. Missing or
+changed executable, configuration or auth is typed `FailureSpawn` after
+admission.
 
 Shell is exactly `/bin/sh` with argv `["/bin/sh", "-s"]`. Claude Code and
 Codex use an ordered, version-sealed argv containing only the reviewed native
@@ -3985,7 +3998,7 @@ No `exec.CommandContext` call, context cancellation, or goroutine completion
 is accepted as proof of process absence.
 
 On Darwin, provider activation uses identity-checked pathname `execve` from
-the already registered gate. Each concrete adapter resolves the
+the already registered gate. After admission, `provider.Build` resolves the
 operator-facing executable to one canonical native Mach-O target and freezes
 its absolute path, device/inode, owner, complete mode, bounded size, nanosecond
 timestamps, SHA-256, running-architecture support, argv, environment, working
@@ -4195,8 +4208,9 @@ contracts; a lane needing a change stops and coordinates before editing.
 - Lane A, kernel: remaining project/agent/task/message behavior and derived
   typed NEEDS YOU actions
   behavior and bounded invalidations.
-- Lane B, runtime: Claude/Codex concrete launch adapters, observation/recovery
-  hardening, and deterministic fake-executable tests.
+- Lane B, runtime: the concrete `provider.Build` launch path (Claude/Codex
+  remain blocked), observation/recovery hardening, and deterministic
+  fake-executable tests.
 - Lane C, source: complete Change lifecycle, Rust/Go verification, retained
   cache only if measured.
 - Lane D, clients/browser: browser v1, pairing/WebSocket adapter,
@@ -4217,7 +4231,7 @@ milestones so process/Cargo/Go gates do not conflict on the machine.
 3. Make Go binaries the only local runtime and Go gates the local-runtime CI.
 4. Update architecture, security, workflow, provider, install, and release
    documentation in the same change.
-5. Delete the five Rust local-runtime crates and root Rust workspace artifacts;
+5. Delete the replaced Rust local-runtime packages and root workspace artifacts;
    retain `control-plane/` as its standalone Rust workspace and gate.
 6. Delete transitional scaffolding/compatibility and repeat clean-checkout
    build, dependency/package review, isolated install E2E, and process census.
@@ -4836,7 +4850,7 @@ following evidence:
   and ends with a clean process/path/resource census.
 
 Only then may the cutover commit make Go the sole local runtime, delete the
-five Rust crates and obsolete root workspace/build/release paths, update the
+replaced Rust local-runtime packages and obsolete root workspace/build/release paths, update the
 repository authority/architecture/security/workflow/install/provider docs, and
 remove rewrite scaffolding. A green source build, a passing happy path, a
 merged PR, or a deterministic shell run alone is not cutover approval.
@@ -5494,10 +5508,12 @@ Exact provider `request-human` proof on integrated head `d4ce713`:
   is the only added spelling. It validates an exact lowercase, nonzero 32-byte
   hex identity and bounded UTF-8/NUL-free question before environment access,
   then uses only `AttemptClient`; operator authority is never a fallback.
-- The daemon and Change worker commit the exact absolute native `factoryctl`
-  executable identity before selection/admission and revalidate it immediately
-  before provider execution/release. The provider receives only that locator;
-  its cleared `PATH` remains `/usr/bin:/bin`.
+- Historical evidence from that old integrated slice recorded the exact
+  absolute native `factoryctl` helper before provider execution. The current
+  V1 rule supersedes its timing: admission freezes provider/model/effort only;
+  post-admission `provider.Build` resolves, commits, and revalidates the helper
+  launch facts immediately before release. The provider receives only that
+  locator; its cleared `PATH` remains `/usr/bin:/bin`.
 - A deterministic shell-provider test invokes the exact helper twice with one
   idempotency identity and observes exactly one durable HumanRequest, with no
   provider effect before the final release stage. Independent review returned
@@ -5846,15 +5862,16 @@ Registered Change-worker proof on integrated head `43a94ee`:
   resources, and prove crash/restart convergence. The cooperative same-EUID boundary and
   scan-to-exec assumption remain explicit residual limits.
 
-Synchronous shell-supervisor proof on integrated head `4c2da24`:
+Historical synchronous shell-supervisor proof on old integrated head `4c2da24`
+(not canonical or shipped provider integration):
 
 - `Daemon.RunNext` is one concrete synchronous owner for the kernel vertical
   slice. It admits the canonical task, creates and binds the private runtime,
   starts the inert outer runner, durably binds its exact identity, receives and
   atomically binds the exact provider process/group identity, commits each
   Change checkpoint, marks the run running and only then releases the shell
-  provider. No production goroutine, provider interface, retry framework,
-  stage table or second state authority was added.
+  provider. No production goroutine, alternate provider boundary, retry
+  framework, stage table or second state authority was added.
 - Provider and outer-runner termination are separate durable external facts.
   One private-field `ProcessExit` representation backs explicitly named
   `ProviderExit` and `RunnerExit` fields. The daemon validates and commits the

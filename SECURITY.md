@@ -24,6 +24,13 @@ contract is [`docs/development/GO_REWRITE.md`](docs/development/GO_REWRITE.md),
 which currently requires fresh exact-head review and does not claim a finished
 daemon.
 
+Integration-target evidence at `359d46a3` includes production `factoryd`
+composition and OperationalHome/Store/RuntimeParent/Local API/browser
+ownership. Corrected Change/global-admission/provider integration remains
+pending in this docs candidate. The shell package at `1ff2e2e6` is a separate
+unintegrated candidate, not canonical or shipped; Claude and Codex remain
+blocked.
+
 Planned Go admission is one global cursor-free immediate Store transaction with
 no caller AgentID/task/observation. It first validates the complete fresh
 schema image before either RunID reconciliation or a new decision. The exact
@@ -184,15 +191,18 @@ labels are reported as unresolved rather than touched. A run remains visibly
 ## Provider and tool boundary
 
 Planned Go uses one concrete `internal/provider.Build(Request) (Launch, error)`
-boundary. It returns only an absolute committed executable, ordered argv and
-complete ordered environment. The runner owns the descriptor-bound Change cwd,
-fresh interactive PTY, input, process group, wait/reap, output and cleanup.
-Provider choice is unrestricted interactive authority in V1; no bounded
-permission profile is persisted or interpreted. Shell is exactly `/bin/sh -s`.
-Claude Code and Codex use only exact reviewed, version-sealed native launch
-facts. Optional model and reasoning effort are frozen independently at
-admission; unsupported native mappings become typed post-admission
-`FailureSpawn`.
+boundary. Admission freezes provider, optional model, and optional reasoning
+effort only. After admission, `Build` resolves and commits one exact native
+executable/configuration/auth launch from daemon-sealed sources, returning only
+that absolute executable, ordered argv, and complete ordered environment. The
+runner owns the descriptor-bound Change cwd, fresh interactive PTY, input,
+process group, wait/reap, output and cleanup. Provider choice is unrestricted
+interactive authority in V1; no bounded permission profile is persisted or
+interpreted. Shell is exactly `/bin/sh -s`. Claude Code and Codex remain blocked
+pending exact integration and fake-witness review. Unsupported native mappings
+become typed post-admission `FailureSpawn`; executable/configuration/auth
+identity is revalidated immediately before release and is not a durable
+admission field.
 
 The runner starts from `env_clear` and one closed ordered environment builder,
 with private per-run roots, a daemon-sealed `PATH`, and no ambient provider/API,

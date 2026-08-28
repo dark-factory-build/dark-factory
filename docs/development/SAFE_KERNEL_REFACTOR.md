@@ -78,9 +78,10 @@ The same predicate proves invalidation continuity: `head =
 next_invalidation_sequence - 1`; an empty log has zero rows, `head = 0` and
 `invalidation_floor = 1`; otherwise rows are contiguous from floor through
 head, with exact count/minimum/maximum and no more than the retention limit.
-Project source roots are clean absolute paths beginning with `/` but not equal
-to `/`, with no NUL, empty, `.` or `..` component, repeated separator, or
-trailing separator. Provider choice inherently means unrestricted interactive
+**Implementation gate (not yet landed):** shared Go path validation and schema
+tests must reject project root `/`; accepted roots are clean absolute paths
+with no NUL, empty, `.` or `..` component, repeated separator, or trailing
+separator. Provider choice inherently means unrestricted interactive
 authority in V1; no permission-profile field exists, and bounded authority is
 deferred until causal OS-effect proof. Exact fresh
 decision precedence after those checks is `dispatch_disabled`, `at_capacity`,
@@ -250,24 +251,16 @@ then cross an explicit quarantine and acceptance boundary before it can create
 or message work. External payloads must never materialize executable tasks
 directly.
 
-## Retained Rust ownership boundaries (historical for Go)
+## Retained Rust evidence (historical for Go)
 
-The following five crates describe the retained Rust implementation and must
-not guide the Go package graph or preserve its TUI:
-
-- `factory-core`: current domain and bounded wire types;
-- `factory-runner`: provider-blind process host and blocked-exec handshake;
-- `factoryd`: Store, admission, principals, resources, finalization, Changes,
-  and verification;
-- `factoryctl`: operator and attempt-scoped requests with no lifecycle logic;
-  and
-- `factory-tui`: operator projections through the same API as `factoryctl`.
-
-Keep one SQLite Store and one ordered migration chain. Do not add an ORM, actor
-framework, generic saga, event-sourcing framework, micro-crates, or repository
-and service traits with one implementation. Split a large module only when
-surviving code has distinct owners; prefer deletion over relocating obsolete
-authority.
+The old Rust package/crate graph and TUI are historical implementation evidence
+only. They do not define a five-crate Go target and must not be preserved by
+compatibility code. The Go target uses one fresh schema and protocol with no
+migration chain, upcaster, or compatibility layer. Do not add an ORM, actor
+framework, generic saga, event-sourcing framework, micro-packages, or
+repository/service traits with one implementation. Split a large module only
+when surviving code has distinct owners; prefer deletion over relocating
+obsolete authority.
 
 ## Causal proof matrix
 
