@@ -4,6 +4,7 @@ package runner
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -291,11 +292,28 @@ func runCwdProviderHelper(root string) error {
 		if len(message) > maxAttemptReportBytes {
 			message = message[:maxAttemptReportBytes]
 		}
-		// Keep helper failures inspectable without exposing provider output or
-		// relying on a PTY diagnostic path. The root is the private fixture.
-		_ = os.WriteFile(filepath.Join(root, "cwd.error"), message, 0o600)
+		writeCwdProviderDiagnostic(root, message)
 	}
 	return err
+}
+
+func writeCwdProviderDiagnostic(root string, message []byte) {
+	// Keep helper failures inspectable without exposing provider output or
+	// relying on a PTY diagnostic path. O_EXCL prevents a preexisting path,
+	// including a symlink, from being followed or replaced.
+	file, err := os.OpenFile(filepath.Join(root, "cwd.error"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return
+	}
+	for len(message) > 0 {
+		n, err := file.Write(message)
+		if err != nil || n <= 0 {
+			_ = file.Close()
+			return
+		}
+		message = message[n:]
+	}
+	_ = file.Close()
 }
 
 func runCwdProviderChecks(root string) error {
@@ -332,6 +350,142 @@ func runCwdProviderChecks(root string) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(root, "provider.effect"), []byte("provider"), 0o600)
+}
+
+func runCwdProviderProcess(t *testing.T, root string) (int, string) {
+	t.Helper()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(executable, "--cwd-provider", root)
+	command.Dir = root
+	command.Env = []string{"PATH=/usr/bin:/bin", "LANG=C"}
+	var output bytes.Buffer
+	command.Stdout = &output
+	command.Stderr = &output
+	err = command.Run()
+	if err == nil {
+		return 0, output.String()
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatal(err)
+	}
+	return exitErr.ExitCode(), output.String()
+}
+
+func TestCwdProviderDiagnosticPreservesExistingPaths(t *testing.T) {
+	const original = "preserve this diagnostic"
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, root string)
+		check func(t *testing.T, root string)
+	}{
+		{
+			name: "regular file",
+			setup: func(t *testing.T, root string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(root, "cwd.error"), []byte(original), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			check: func(t *testing.T, root string) {
+				t.Helper()
+				info, err := os.Lstat(filepath.Join(root, "cwd.error"))
+				if err != nil || info.Mode().Perm() != 0o644 || !info.Mode().IsRegular() {
+					t.Fatalf("diagnostic identity=%v err=%v", info, err)
+				}
+				if got, err := os.ReadFile(filepath.Join(root, "cwd.error")); err != nil || string(got) != original {
+					t.Fatalf("diagnostic=%q err=%v", got, err)
+				}
+			},
+		},
+		{
+			name: "symlink",
+			setup: func(t *testing.T, root string) {
+				t.Helper()
+				outside := filepath.Join(root, "outside")
+				if err := os.WriteFile(outside, []byte(original), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outside, filepath.Join(root, "cwd.error")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			check: func(t *testing.T, root string) {
+				t.Helper()
+				path := filepath.Join(root, "cwd.error")
+				info, err := os.Lstat(path)
+				if err != nil || info.Mode()&os.ModeSymlink == 0 {
+					t.Fatalf("diagnostic identity=%v err=%v", info, err)
+				}
+				target, err := os.Readlink(path)
+				if err != nil || target != filepath.Join(root, "outside") {
+					t.Fatalf("diagnostic target=%q err=%v", target, err)
+				}
+				if got, err := os.ReadFile(path); err != nil || string(got) != original {
+					t.Fatalf("target diagnostic=%q err=%v", got, err)
+				}
+			},
+		},
+		{
+			name: "directory",
+			setup: func(t *testing.T, root string) {
+				t.Helper()
+				if err := os.Mkdir(filepath.Join(root, "cwd.error"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+			check: func(t *testing.T, root string) {
+				t.Helper()
+				info, err := os.Lstat(filepath.Join(root, "cwd.error"))
+				if err != nil || !info.IsDir() {
+					t.Fatalf("diagnostic identity=%v err=%v", info, err)
+				}
+			},
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			test.setup(t, root)
+			path := filepath.Join(root, "cwd.error")
+			before, err := os.Lstat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			code, output := runCwdProviderProcess(t, root)
+			if code != 94 || !strings.Contains(output, "cwd provider lifetime") {
+				t.Fatalf("helper exit=%d output=%q", code, output)
+			}
+			after, err := os.Lstat(path)
+			if err != nil || !os.SameFile(before, after) {
+				t.Fatalf("diagnostic identity before=%v after=%v err=%v", before, after, err)
+			}
+			test.check(t, root)
+		})
+	}
+}
+
+func TestCwdProviderDiagnosticCreatesExactPrivateFile(t *testing.T) {
+	root := t.TempDir()
+	message := []byte("cwd provider inherited fd 5")
+	writeCwdProviderDiagnostic(root, message)
+	info, err := os.Lstat(filepath.Join(root, "cwd.error"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		t.Fatalf("diagnostic mode=%v", info.Mode())
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Nlink != 1 {
+		t.Fatalf("diagnostic stat=%+v", info.Sys())
+	}
+	if got, err := os.ReadFile(filepath.Join(root, "cwd.error")); err != nil || !bytes.Equal(got, message) {
+		t.Fatalf("diagnostic=%q err=%v", got, err)
+	}
 }
 
 func runLifetimeProviderHelper(root string) error {
