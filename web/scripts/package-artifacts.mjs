@@ -199,9 +199,10 @@ function trustedTools() {
   const packageManager = webPackage.packageManager?.match(/^pnpm@(\d+\.\d+\.\d+)$/);
   const typescript = webPackage.devDependencies?.typescript;
   if (!packageManager || !/^\d+\.\d+\.\d+$/.test(typescript ?? "")) fail("package/tool versions must be exact");
-  const tsc = executable(join(webRoot, "node_modules", ".bin", "tsc"), "TypeScript");
-  const tscRoot = resolve(dirname(tsc), "..");
-  const tscPackage = readJson(join(tscRoot, "package.json"));
+  const tscPackagePath = realpathSync(join(webRoot, "node_modules", "typescript", "package.json"));
+  const tscRoot = dirname(tscPackagePath);
+  const tsc = executable(join(tscRoot, "bin", "tsc"), "TypeScript");
+  const tscPackage = readJson(tscPackagePath);
   if (tscPackage.version !== typescript) fail("installed TypeScript differs from web/package.json");
   const safeEnv = { ...commandEnvironment, PATH: `${dirname(node)}:/usr/bin:/bin` };
   const runCorepack = (args) => execFileSync(node, [corepack, ...args], { env: safeEnv, encoding: "utf8" }).trim();
