@@ -476,10 +476,10 @@ function tarEntries(tarPathValue, archive, info) {
   for (const line of details.split("\n").filter(Boolean)) {
     const fields = line.trim().split(/\s+/);
     if (fields.length < 8 || fields[0] !== "-rw-r--r--") fail(`${info.name} archive member is not mode 0644 regular file`);
-    const size = Number(fields[3]);
-    const entry = fields.slice(7).join(" ");
+    const size = Number(fields[4]);
+    const entry = fields.slice(8).join(" ");
     if (!expected.has(entry) || members.has(entry) || !Number.isSafeInteger(size)) fail(`${info.name} archive details are invalid`);
-    if (size > maxArchiveMemberBytes) fail(`${info.name} archive member is too large`);
+    if (size < 0 || size > maxArchiveMemberBytes) fail(`${info.name} archive member is too large`);
     totalBytes += size;
     if (totalBytes > maxArchiveTotalBytes) fail(`${info.name} archive members are too large in total`);
     members.set(entry, size);
