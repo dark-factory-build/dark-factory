@@ -87,7 +87,7 @@ func newAPIFixture(t testing.TB) *apiFixture {
 		_ = home.Close()
 		t.Fatal(err)
 	}
-	socket := filepath.Join(homePath, "runtimes", "factory.sock")
+	socket := install.LocalAPISocketPath(homePath)
 	fixture := &apiFixture{directory: directory, socket: socket, attemptPath: attemptPath, listener: listener, home: home}
 	copy(fixture.bearer[:], attempt)
 	cleanup = false

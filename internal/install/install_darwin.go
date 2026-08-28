@@ -25,7 +25,6 @@ const (
 	tokenName          = "operator.token"
 	lockName           = "home.lock"
 	lockAnchorName     = "home.lock.anchor"
-	runtimesName       = "runtimes"
 	changesName        = "changes"
 	formatBytes        = "dark-factory-go-home-v1\n"
 	stageSuffix        = ".dark-factory-go-v1.stage"

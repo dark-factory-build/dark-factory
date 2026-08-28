@@ -57,7 +57,7 @@ func newLocalAPIFixture(t *testing.T, bearer byte) *localAPIFixture {
 	fixture := &localAPIFixture{
 		homePath: homePath, tokenPath: tokenPath,
 		runtimes:   filepath.Join(homePath, runtimesName),
-		socketPath: filepath.Join(homePath, runtimesName, localAPISocketName),
+		socketPath: LocalAPISocketPath(homePath),
 		home:       home, authority: authority, protocol: protocol,
 	}
 	t.Cleanup(func() {
@@ -1695,5 +1695,24 @@ func TestLocalAPIAuthorityConcurrentVerifyAndCloseConverge(t *testing.T) {
 	}
 	if err := fixture.protocol.Verify(); !errors.Is(err, ErrClosed) {
 		t.Fatalf("Verify after close = %v", err)
+	}
+}
+
+func TestLocalAPISocketPathIsTheOneBindAndDialDerivation(t *testing.T) {
+	fixture := newLocalAPIFixture(t, 'A')
+	derived := LocalAPISocketPath(fixture.homePath)
+	if derived != filepath.Join(fixture.homePath, "runtimes", "factory.sock") {
+		t.Fatalf("socket derivation = %q", derived)
+	}
+	info, err := os.Lstat(derived)
+	if err != nil || info.Mode()&os.ModeSocket == 0 {
+		t.Fatalf("daemon bind at the shared derivation = %v, %v", info, err)
+	}
+	client, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: derived, Net: "unix"})
+	if err != nil {
+		t.Fatalf("client dial at the shared derivation failed: %v", err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
 	}
 }

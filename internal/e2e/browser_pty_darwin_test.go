@@ -263,7 +263,7 @@ func newFixture(t *testing.T, seed byte, test scenario, factoryctl, runnerExecut
 	if err != nil {
 		t.Fatal(err)
 	}
-	socket := filepath.Join(apiHomePath, "runtimes", "factory.sock")
+	socket := install.LocalAPISocketPath(apiHomePath)
 	result.apiDone = make(chan error, 1)
 	go func() {
 		for {

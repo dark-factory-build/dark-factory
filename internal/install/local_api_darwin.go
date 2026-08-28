@@ -23,7 +23,6 @@ import (
 )
 
 const (
-	localAPISocketName = "factory.sock"
 	localAPITokenBytes = operatorTokenBytes
 	localAPIMaxPath    = 103
 	localAPIProbeLimit = 250 * time.Millisecond
@@ -127,7 +126,7 @@ func (state *operationalHomeState) openLocalAPI(ctx context.Context) (*LocalAPIA
 	}
 	authorityState := &localAPIState{
 		home: state, token: token, tokenID: tokenMember.identity,
-		locator:     filepath.Join(filepath.Dir(state.databasePath), runtimesName, localAPISocketName),
+		locator:     LocalAPISocketPath(filepath.Dir(state.databasePath)),
 		connections: make(map[*LocalAPIConnection]struct{}),
 		quarantined: make(map[*LocalAPIConnection]struct{}),
 	}

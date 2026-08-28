@@ -89,7 +89,7 @@ func newDispatchFixture(t *testing.T) *dispatchFixture {
 		_ = listener.Close()
 		_ = home.Close()
 	})
-	socket := filepath.Join(authHomePath, "runtimes", "factory.sock")
+	socket := install.LocalAPISocketPath(authHomePath)
 	return &dispatchFixture{daemon: daemon, store: store, listener: listener, socket: socket, operator: operatorToken}
 }
 

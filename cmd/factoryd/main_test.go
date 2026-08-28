@@ -97,7 +97,7 @@ func TestProcessServesAPIAndBrowserThenReleasesExactHome(t *testing.T) {
 	}
 
 	address := owner.browser.Addr()
-	idle, err := net.Dial("unix", filepath.Join(home, "runtimes", "factory.sock"))
+	idle, err := net.Dial("unix", install.LocalAPISocketPath(home))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +129,7 @@ func TestProcessPortCollisionCleansLocalAPIAndHomeAuthority(t *testing.T) {
 		}
 		t.Fatalf("colliding browser start = %v, %v", owner, err)
 	}
-	if _, err := os.Lstat(filepath.Join(home, "runtimes", "factory.sock")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Lstat(install.LocalAPISocketPath(home)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("failed startup retained socket: %v", err)
 	}
 	reopened, err := install.OpenOperationalHome(context.Background(), home)
@@ -356,7 +356,7 @@ func testConfig(home string) config {
 func waitOperatorClient(t *testing.T, home string) *api.OperatorClient {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
-	socket := filepath.Join(home, "runtimes", "factory.sock")
+	socket := install.LocalAPISocketPath(home)
 	token := filepath.Join(home, "operator.token")
 	for time.Now().Before(deadline) {
 		client, err := api.NewOperatorClient(socket, token)
@@ -371,7 +371,7 @@ func waitOperatorClient(t *testing.T, home string) *api.OperatorClient {
 
 func assertReleased(t *testing.T, home, browserAddress string) {
 	t.Helper()
-	if _, err := os.Lstat(filepath.Join(home, "runtimes", "factory.sock")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Lstat(install.LocalAPISocketPath(home)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("socket remains: %v", err)
 	}
 	listener, err := net.Listen("tcp4", browserAddress)
