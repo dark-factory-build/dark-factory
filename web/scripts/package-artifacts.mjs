@@ -233,6 +233,12 @@ function stableJson(value) {
   return `${JSON.stringify(value, null, 2)}\n`;
 }
 
+function canonicalValue(value) {
+  if (Array.isArray(value)) return value.map(canonicalValue);
+  if (value && typeof value === "object") return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalValue(value[key])]));
+  return value;
+}
+
 function writeStableJson(path, value) {
   writeFileSync(path, stableJson(value), { mode: 0o600 });
 }
@@ -418,7 +424,7 @@ async function verify(requested, tools = trustedTools()) {
     tarEntries(tools.paths.tar, archive, info);
     const packedPackage = JSON.parse(tarMember(tools.paths.tar, archive, "package/package.json"));
     const expectedPackage = expectedPackageJson(info, info === packages.ui ? entry.dependency : undefined);
-    if (JSON.stringify(packedPackage) !== JSON.stringify(expectedPackage)) fail(`${info.name} tarball package metadata is stale or forged`);
+    if (JSON.stringify(canonicalValue(packedPackage)) !== JSON.stringify(canonicalValue(expectedPackage))) fail(`${info.name} tarball package metadata is stale or forged`);
     externalDependencies(packedPackage, info.name);
     const embeddedText = tarMember(tools.paths.tar, archive, "package/dist/src/provenance.json");
     const embedded = parseStrictJson(embeddedText, `${info.name} embedded provenance`);
