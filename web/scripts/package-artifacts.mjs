@@ -746,20 +746,18 @@ function parseArgs(argv) {
   return { command, output: rest[1] };
 }
 
-if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)) && process.env.DARK_FACTORY_ARTIFACT_LAUNCHER !== "posix-v1") {
+async function main(argv) {
+  const { command, output } = parseArgs(argv);
+  return command === "pack" ? pack(output) : verify(output);
+}
+
+// This module is intentionally import-only. The pre-Node launcher imports
+// main through a fixed eval entry after validating the Node executable.
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
   process.stderr.write("package artifacts: use the package-artifacts launcher\n");
   process.exitCode = 1;
-} else if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
-  try {
-    const { command, output } = parseArgs(process.argv.slice(2));
-    const manifest = command === "pack" ? await pack(output) : await verify(output);
-    process.stdout.write(stableJson(manifest));
-  } catch (error) {
-    process.stderr.write(`${error.message}\n`);
-    process.exitCode = 1;
-  }
 }
 
 // Test-only exports; pack/verify always derive and validate their production
 // tool roots internally and never accept these as caller input.
-export { inspectExecutable, toolTreeDigest };
+export { inspectExecutable, main, toolTreeDigest };

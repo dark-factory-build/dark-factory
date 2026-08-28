@@ -44,16 +44,22 @@ child.execFileSync = (file, args, options) => args?.[0] === "rev-parse"
       env: { ...process.env, DARK_FACTORY_ARTIFACT_LAUNCHER: undefined, NODE_OPTIONS: undefined },
       stdio: "pipe",
     }), "use the package-artifacts launcher");
+    expectFailure(() => execFileSync(process.execPath, [script, "verify", "--output", output], {
+      cwd: webRoot,
+      env: { ...process.env, DARK_FACTORY_ARTIFACT_LAUNCHER: "posix-v1", NODE_OPTIONS: `--require=${preload}` },
+      stdio: "pipe",
+    }), "use the package-artifacts launcher");
+    assert.equal(existsSync(witness), true);
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });
   }
 });
 
 function runWithEnv(command, output, envOverrides, ...extra) {
-  return execFileSync(launcher, [command, "--output", output, ...extra], {
+  return execFileSync(launcher, ["--node", process.execPath, command, "--output", output, ...extra], {
     cwd: webRoot,
     encoding: "utf8",
-    env: { ...process.env, DARK_FACTORY_ARTIFACT_NODE: process.execPath, COREPACK_ENABLE_NETWORK: "0", npm_config_registry: "http://127.0.0.1:9/", ...envOverrides },
+    env: { ...process.env, COREPACK_ENABLE_NETWORK: "0", npm_config_registry: "http://127.0.0.1:9/", ...envOverrides },
     stdio: "pipe",
   });
 }
@@ -291,10 +297,28 @@ test("pack uses trusted absolute tools and leaves no partial output", () => {
     writeFileSync(path, "#!/bin/sh\nexit 97\n");
     chmodSync(path, 0o700);
   }
+  const wrapper = join(tempRoot, "node-wrapper");
+  const wrapperWitness = join(tempRoot, "node-wrapper-ran");
+  writeFileSync(wrapper, `#!/bin/sh\n/bin/echo ran > ${wrapperWitness}\nexec ${process.execPath} "$@"\n`);
+  chmodSync(wrapper, 0o755);
   try {
     const env = { PATH: fakeBin, npm_config_offline: "true", npm_config_registry: "http://127.0.0.1:9/" };
+    expectFailure(() => execFileSync(launcher, ["--node", wrapper, "pack", "--output", output], {
+      cwd: webRoot,
+      env: { ...process.env, ...env },
+      stdio: "pipe",
+    }), "content differs from reviewed toolchain");
+    assert.equal(existsSync(wrapperWitness), false);
     runWithEnv("pack", output, env);
     runWithEnv("verify", output, env);
+
+    const pathOutput = join(tempRoot, "path-output");
+    execFileSync(launcher, ["pack", "--output", pathOutput], {
+      cwd: webRoot,
+      env: { ...process.env, ...env },
+      stdio: "pipe",
+    });
+    assert.equal(existsSync(wrapperWitness), false);
 
     const existing = join(tempRoot, "existing");
     mkdirSync(existing);
