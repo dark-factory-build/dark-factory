@@ -455,6 +455,32 @@ signal_child_pid=$(/bin/cat "$signal_child_file")
 if /bin/kill -0 "$signal_child_pid" 2>/dev/null; then fail "TERM fixture left its child alive"; fi
 [ ! -e "$(/bin/cat "$signal_root_file")" ] || fail "TERM fixture cleaned up before joining supervisor"
 
+# Exercise the supported helper with the real cached pnpm and a real web
+# install. A mode-corrupted TypeScript tree must be reconstructed before the
+# offline artifact pack; an absent tree follows the same path.
+real_tsc_root=$(dirname "$(/bin/realpath "$repository_root/web/node_modules/typescript/package.json" 2>/dev/null || true)")
+if [ -n "$real_tsc_root" ] && [ -d "$real_tsc_root" ]; then
+    /usr/bin/find "$real_tsc_root" -type d -exec /bin/chmod 700 {} +
+    /usr/bin/find "$real_tsc_root" -type f -exec /bin/chmod 600 {} +
+    /usr/bin/find "$real_tsc_root/bin" -type f -exec /bin/chmod 755 {} +
+fi
+real_web_install_fixture="$temporary/real-web-install-fixture"
+/bin/cat >"$real_web_install_fixture" <<'EOF'
+#!/bin/sh
+set -eu
+repository_root=$1
+. "$repository_root/scripts/go-gate-environment.sh"
+. "$repository_root/scripts/go-fast-stage.sh"
+go_gate_environment_setup
+trap 'go_gate_environment_cleanup || true' EXIT
+( cd "$repository_root/web" && export COREPACK_ENABLE_NETWORK=1 npm_config_offline=false NPM_CONFIG_OFFLINE=false && go_gate_web_install )
+EOF
+/bin/chmod 700 "$real_web_install_fixture"
+/bin/sh "$real_web_install_fixture" "$repository_root"
+real_artifact_output="$temporary/real-artifacts"
+COREPACK_ENABLE_NETWORK=0 "$repository_root/web/scripts/package-artifacts" pack --output "$real_artifact_output" >/dev/null
+COREPACK_ENABLE_NETWORK=0 "$repository_root/web/scripts/package-artifacts" verify --output "$real_artifact_output" >/dev/null
+
 /usr/bin/grep -F 'go_gate_go=/opt/homebrew/bin/go' "$repository_root/scripts/go-gate-environment.sh" >/dev/null || fail "Go path is not fixed"
 /usr/bin/grep -F 'command -v node' "$repository_root/scripts/go-gate-environment.sh" >/dev/null || fail "Node was not captured before isolation"
 /usr/bin/grep -F 'command -v corepack' "$repository_root/scripts/go-gate-environment.sh" >/dev/null || fail "Corepack was not captured before isolation"
