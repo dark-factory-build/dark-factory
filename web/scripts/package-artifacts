@@ -29,7 +29,7 @@ case "$command" in
   pack|verify)
     ;;
   test)
-    [ "$#" -eq 0 ] || fail "the artifact test file is fixed"
+    [ "$#" -eq 1 ] || fail "the artifact test file is fixed"
     test_script=$script_dir/package-artifacts.test.mjs
     [ -f "$test_script" ] || fail "artifact tests are missing"
     exec /usr/bin/env -i \
