@@ -402,15 +402,18 @@ function validateManifestShape(manifest) {
 async function verify(requested, tools = trustedTools()) {
   const output = outputDestination(requested, false);
   if (!existsSync(output) || !lstatSync(output).isDirectory() || lstatSync(output).isSymbolicLink() || realpathSync(output) !== output) fail("output must be an exact non-symlink directory");
+  const expectedFilenames = new Set([packageFilename(packageJson(packages.client)), packageFilename(packageJson(packages.ui)), manifestName]);
+  const outputFiles = readdirSync(output);
+  if (outputFiles.length !== expectedFilenames.size || outputFiles.some((name) => !expectedFilenames.has(name))) fail("output contains stale or unexpected files");
+  for (const filename of outputFiles) {
+    if (!lstatSync(join(output, filename)).isFile()) fail("output contains a symlink or non-regular file");
+  }
   const manifest = strictJsonFile(join(output, manifestName), "artifact manifest");
   validateManifestShape(manifest);
   const sourceCommit = currentSource();
   const runtimeVersion = await compiledProtocolVersion();
   const identity = sourceIdentity(sourceCommit, tools, runtimeVersion);
   if (JSON.stringify(manifest.source) !== JSON.stringify(identity.source) || JSON.stringify(manifest.protocol) !== JSON.stringify(identity.protocol) || JSON.stringify(manifest.buildTools) !== JSON.stringify(identity.buildTools)) fail("manifest provenance is stale or forged");
-  const expectedFilenames = new Set([packageFilename(packageJson(packages.client)), packageFilename(packageJson(packages.ui)), manifestName]);
-  const outputFiles = readdirSync(output);
-  if (outputFiles.length !== expectedFilenames.size || outputFiles.some((name) => !expectedFilenames.has(name))) fail("output contains stale or unexpected files");
   for (const info of Object.values(packages)) {
     const entry = manifest.packages[info.name];
     if (entry.schemaVersion !== identity.schemaVersion || JSON.stringify(entry.source) !== JSON.stringify(identity.source) || JSON.stringify(entry.protocol) !== JSON.stringify(identity.protocol) || JSON.stringify(entry.buildTools) !== JSON.stringify(identity.buildTools)) fail(`${info.name} provenance identity is stale or forged`);
