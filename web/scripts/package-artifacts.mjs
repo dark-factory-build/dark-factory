@@ -320,7 +320,7 @@ function build(tools) {
 
 function archiveExpected(info) {
   const files = ["package/package.json", ...inventory[info.key].map((name) => `package/dist/src/${name}`)];
-  return new Set(["package", "package/dist", "package/dist/src", ...files]);
+  return new Set(files);
 }
 
 function tarEntries(tarPathValue, archive, info) {
