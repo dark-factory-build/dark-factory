@@ -131,13 +131,14 @@ function packageJson(packageInfo) {
   return readJson(join(packageInfo.root, "package.json"));
 }
 
-function strictJsonText(text, label) {
+function strictJsonText(text, label, allowMissingFinalNewline = false) {
   if (Buffer.byteLength(text, "utf8") > maxJsonBytes) fail(`${label} is too large`);
   let value;
   try { value = JSON.parse(text); } catch (error) { fail(`${label} is invalid JSON: ${error.message}`); }
   // Canonical re-serialization also rejects duplicate keys: JSON.parse drops
   // the duplicate, making the original bytes differ from the canonical form.
-  if (stableJson(value) !== text) fail(`${label} is not canonical JSON`);
+  const canonical = stableJson(value);
+  if (canonical !== text && (!allowMissingFinalNewline || canonical.slice(0, -1) !== text)) fail(`${label} is not canonical JSON`);
   return value;
 }
 
@@ -501,10 +502,10 @@ function tarMember(tarPathValue, archive, member, members) {
   return bytes;
 }
 
-function strictJsonBuffer(bytes, label) {
+function strictJsonBuffer(bytes, label, allowMissingFinalNewline = false) {
   const text = bytes.toString("utf8");
   if (!Buffer.from(text, "utf8").equals(bytes)) fail(`${label} is not valid UTF-8`);
-  return strictJsonText(text, label);
+  return strictJsonText(text, label, allowMissingFinalNewline);
 }
 
 function externalDependencies(packageValue, packageName) {
@@ -602,7 +603,7 @@ function validateArtifactSet(output, manifest, tools, identity) {
     const actual = digest(archive);
     if (actual.bytes !== entry.artifact.bytes || actual.sha512 !== entry.artifact.sha512 || actual.integrity !== entry.artifact.integrity) fail(`${info.name} constructed tarball integrity failed`);
     const members = tarEntries(tools.paths.tar, archive, info);
-    const packedPackage = strictJsonBuffer(tarMember(tools.paths.tar, archive, "package/package.json", members), `${info.name} packed package.json`);
+    const packedPackage = strictJsonBuffer(tarMember(tools.paths.tar, archive, "package/package.json", members), `${info.name} packed package.json`, true);
     const expectedPackage = expectedPackageJson(info, info === packages.ui ? entry.dependency : undefined);
     if (JSON.stringify(canonicalValue(packedPackage)) !== JSON.stringify(canonicalValue(expectedPackage))) fail(`${info.name} constructed package metadata is stale`);
     externalDependencies(packedPackage, info.name);
@@ -615,12 +616,12 @@ function validateCandidateArchives(output, tools) {
   for (const info of Object.values(packages)) {
     const archive = join(output, packageFilename(packageJson(info)));
     const members = tarEntries(tools.paths.tar, archive, info);
-    strictJsonBuffer(tarMember(tools.paths.tar, archive, "package/package.json", members), `${info.name} packed package.json`);
+    strictJsonBuffer(tarMember(tools.paths.tar, archive, "package/package.json", members), `${info.name} packed package.json`, true);
     strictJsonBuffer(tarMember(tools.paths.tar, archive, "package/dist/src/provenance.json", members), `${info.name} embedded provenance`);
   }
   const uiArchive = join(output, packageFilename(packageJson(packages.ui)));
   const uiMembers = tarEntries(tools.paths.tar, uiArchive, packages.ui);
-  strictJsonBuffer(tarMember(tools.paths.tar, uiArchive, "package/package.json", uiMembers), "UI final packed package.json");
+  strictJsonBuffer(tarMember(tools.paths.tar, uiArchive, "package/package.json", uiMembers), "UI final packed package.json", true);
 }
 
 async function constructArtifacts(destination, tools, identity) {
