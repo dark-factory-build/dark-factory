@@ -141,6 +141,7 @@ go_gate_web_verify_toolchain() {
         echo "go-check: web dependency tree path is not canonical" >&2
         return 1
     }
+    go_gate_web_node_modules_identity=$(go_gate_stat "$go_gate_web_node_modules") || return 1
     go_gate_web_typescript_path="$go_gate_web_node_modules/typescript"
     go_gate_web_typescript_root=$(/bin/realpath "$go_gate_web_typescript_path") || return 1
     case "$go_gate_web_typescript_root" in
@@ -151,6 +152,7 @@ go_gate_web_verify_toolchain() {
         echo "go-check: TypeScript tool tree is not a regular directory" >&2
         return 1
     }
+    go_gate_web_typescript_identity=$(go_gate_stat "$go_gate_web_typescript_root") || return 1
     go_gate_web_toolchain_output="$go_gate_root/web-typescript-tree"
     go_gate_stage_to_file "$go_gate_web_toolchain_output" 120 "$go_gate_node" --input-type=module --eval '
 const { readFileSync } = await import("node:fs");
@@ -160,6 +162,14 @@ const actual = toolTreeDigest(process.argv[4]);
 if (actual !== reviewed.typescript.treeSha512) throw new Error("installed TypeScript content differs from reviewed toolchain");
 process.stdout.write(`${actual}\n`);
 ' /dev/null "$repository_root/web/scripts/package-artifacts.mjs" "$repository_root/web/toolchain-integrity.json" "$go_gate_web_typescript_root" || return 1
+    [ "$(go_gate_stat "$go_gate_web_node_modules" 2>/dev/null || true)" = "$go_gate_web_node_modules_identity" ] || {
+        echo "go-check: web dependency tree identity changed while verifying" >&2
+        return 1
+    }
+    [ "$(go_gate_stat "$go_gate_web_typescript_root" 2>/dev/null || true)" = "$go_gate_web_typescript_identity" ] || {
+        echo "go-check: TypeScript tree identity changed while verifying" >&2
+        return 1
+    }
 }
 
 go_gate_fast_stage() {
