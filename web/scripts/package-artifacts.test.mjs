@@ -49,9 +49,10 @@ test("public artifacts bind clean HEAD, protocol, exact dependencies, and bytes"
     assert.deepEqual(packed.protocol, { name: "dark-factory/browser/v1", version: 1 });
     assert.deepEqual(packed.buildTools.pnpm, "11.19.0");
     assert.deepEqual(packed.buildTools.typescript, "5.8.3");
-    assert.match(packed.buildTools.pnpmTreeSha512, /^[0-9a-f]{128}$/);
-    assert.match(packed.buildTools.typescriptTreeSha512, /^[0-9a-f]{128}$/);
-    assert.match(packed.buildTools.typescriptIntegrity, /^sha512-/);
+    const reviewed = JSON.parse(readFileSync(join(webRoot, "toolchain-integrity.json")));
+    assert.equal(packed.buildTools.pnpmTreeSha512, reviewed.pnpm.treeSha512);
+    assert.equal(packed.buildTools.typescriptTreeSha512, reviewed.typescript.treeSha512);
+    assert.equal(packed.buildTools.typescriptIntegrity, reviewed.typescript.lockfileIntegrity);
     const client = packed.packages[clientName];
     const ui = packed.packages[uiName];
     for (const entry of [client, ui]) {
@@ -270,7 +271,9 @@ test("tool tree commitment has framed content and rejects unsafe copied trees", 
     mkdirSync(caseTree);
     writeFileSync(join(caseTree, "Ʃ"), "x");
     writeFileSync(join(caseTree, "ʃ"), "x");
-    assert.throws(() => toolTreeDigest(caseTree), /case-confusable/);
+    // The macOS case/Unicode-insensitive filesystem may collapse this pair
+    // while creating it; Linux CI retains both and exercises the guard.
+    if (readdirSync(caseTree).length === 2) assert.throws(() => toolTreeDigest(caseTree), /case-confusable/);
 
     const countTree = join(tempRoot, "count");
     mkdirSync(countTree);
@@ -302,6 +305,9 @@ test("pack ignores caller Corepack home and rejects changed reviewed tool conten
     writeFileSync(join(fakeCorepackHome, "v1", "pnpm", "11.19.0", "package.json"), "not the reviewed package\n");
     runWithEnv("pack", output, { COREPACK_HOME: fakeCorepackHome });
     runWithEnv("verify", output, { COREPACK_HOME: fakeCorepackHome });
+    writeFileSync(tscWrapper, Buffer.concat([tscBytes, Buffer.from("\n// changed after pack\n")]));
+    expectFailure(() => run("verify", output), "installed TypeScript content differs");
+    writeFileSync(tscWrapper, tscBytes);
     rmSync(output, { recursive: true, force: true });
 
     writeFileSync(tscWrapper, Buffer.concat([tscBytes, Buffer.from("\n// changed same-version wrapper\n")]));
