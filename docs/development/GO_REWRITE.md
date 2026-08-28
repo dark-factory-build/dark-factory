@@ -15,11 +15,13 @@ evidence for already completed kernel work. They are not authority when they
 conflict with this redirection. The final elegance pass must remove the
 superseded prose after its replacement tests are green.
 
-The product is now a local Go daemon with durable authority and PTY-backed
-agents, controlled primarily by a hosted responsive web application. There is
-no Go `factory-tui`. `factoryctl` remains the bootstrap, service, recovery,
-diagnostic, automation, and browser-pairing client; it is not a second primary
-operator interface and does not owe visual feature parity.
+The target product is a local Go daemon with durable authority and PTY-backed
+agents, controlled primarily by a hosted responsive web application. The
+production Go daemon is not yet shipped: this document distinguishes package
+proof, in-process composition proof, and installed-runtime proof throughout.
+There is no Go `factory-tui`. `factoryctl` remains the bootstrap, service,
+recovery, diagnostic, automation, and browser-pairing client; it is not a
+second primary operator interface and does not owe visual feature parity.
 
 The hard-cutover decision is unchanged: fresh Go home, schema and protocols;
 no Rust migration, event upcasting, mixed runtime, or compatibility period.
@@ -66,8 +68,127 @@ Read-only redirection audits were assigned without overlapping writes:
 - `web_redirect_human_protocol_audit`: durable `HumanRequest`, browser v1,
   Go/TypeScript drift prevention and UI package boundaries.
 
-Their concrete conclusions are incorporated below. Broad production work does
-not resume until this revised plan is committed.
+Their concrete conclusions are incorporated below. The revised plan gate is
+complete; the exact current-head work graph below now governs production work.
+
+### Exact current-head checkpoint (2026-08-28)
+
+This checkpoint supersedes the earlier branch-inventory table for current
+status. The table and later dated sections remain useful history, but their
+older heads and test results are not evidence for this exact head unless a
+result is repeated here.
+
+- Source head: `25eb8ea47a63ab0e68ad41bc1bf35a71aa233db8`
+  on branch `go-hard-cutover`, unpublished and 378 local commits ahead of the
+  old `origin/main` base. This plan update is intentionally uncommitted while
+  it is reviewed, so the worktree is not currently clean. `main`, remotes, the
+  operator installation, live sockets/services and real providers remain
+  untouched.
+- Immediately before this documentation edit, `./scripts/go-check.sh` passed
+  on that clean source head: format, vet, focused kernel/browser-protocol/
+  SQLite-contract tests, frozen web install, TypeScript checking, 188 web tests
+  and `git diff --check`. This is pre-edit evidence and must be rerun after the
+  plan commit before it is called current-head proof.
+- The exact reviewed fresh-home slice is integrated through `6c22139`. It
+  atomically publishes the six-entry Go home, retains descriptor/ancestry
+  authority across every construction boundary, refuses adoption or repair,
+  and includes real subprocess SIGKILL cuts. Before this edit, focused
+  `go test ./internal/install ./cmd/factoryctl -count=1` and
+  `go test -race ./internal/install ./cmd/factoryctl -count=1` passed after
+  integration; the result is explicitly pre-edit evidence.
+- Exact reviewed SQLite image construction/inspection is integrated through
+  `2bf7004`; recovered runtime/spool evidence is integrated through `c642fb9`;
+  the fixed local public artifact provenance gate is integrated through
+  `25eb8ea`. Before this edit, the artifact suite passed 13/13 after a frozen
+  offline install and the normal TypeScript suite passed 188/188. During cold
+  review of this uncommitted edit the direct TypeScript suite again passed
+  188/188, while the artifact suite intentionally refused the dirty source
+  tree (3 setup tests passed and 10 packaging tests refused). The exact 13/13
+  artifact proof must be rerun after this plan is committed.
+- The real Go/TypeScript browser PTY proof is present in the integrated tree,
+  as are public React/xterm, HumanRequest reply/cancel and packed client/UI
+  artifacts. This is still an in-process composition proof, not a standalone
+  installed-daemon or crash/restart proof.
+- Before this edit, one isolated
+  `go test ./internal/runner ./internal/daemon -count=1` run passed, but an
+  immediate repeat exposed a nondeterministic test-provider descriptor census
+  failure on a post-exec unnamed Darwin socket in
+  `TestCurrentExecUsesTransferredCwdAfterParentPathReplacement` and the
+  no-extra-descriptor arm of `TestCurrentExecRejectsExactInheritedDescriptor`.
+  The integrated `e8b5b82` change had fixed one earlier scan-descriptor class,
+  but did not cover this Go-runtime-created socket class. The guard remains
+  fail-closed while a focused causal repair is independently reviewed. A green
+  full/race gate is not claimed at this source head.
+
+Current cutover readiness is approximately 42 percent, expressed as a 35–45
+percent range because several remaining gates contain unknown crash/platform
+work. This is a weighted product-gate estimate, never a commit or test-count
+estimate. “Package” means causal unit/package proof, “in-process” means the
+real components are composed without a production daemon executable,
+“black-box” means the installed binary survived the required external cuts,
+and “cutover” means exact-head review plus the authoritative clean-checkout
+gate.
+
+| Product gate | Weight | Current credit | Evidence boundary |
+|---|---:|---:|---|
+| kernel and durable authority | 20 | 16.0 | strong package proof; installed recovery still absent |
+| PTY and process runtime | 15 | 8.25 | real in-process owner proof; descriptor flake and black-box cuts open |
+| browser protocol and transport | 10 | 6.5 | package and in-process proof; installed endpoint absent |
+| public UI and artifacts | 8 | 4.0 | implementation/package proof; installed host absent |
+| recovery and crash convergence | 15 | 2.25 | evidence readers exist; production coordinator/cuts absent |
+| `factoryctl` and service lifecycle | 10 | 2.5 | init/web/attempt commands exist; service/recovery commands absent |
+| install and release integration | 8 | 2.0 | atomic home exists; runnable install and Go release switch absent |
+| private host integration | 6 | 0 | not started on the exact public artifacts |
+| final reviews, elegance and cutover | 8 | 0 | deliberately last and not started |
+| **Total** | **100** | **41.5** | **rounded to about 42 percent** |
+
+The next work graph is deliberately narrow:
+
+1. Stabilize the causal runner descriptor gate without ignoring real inherited
+   descriptors, then rerun the integrated runner/daemon proof.
+2. Add one install-owned operational-home handle: validate the populated Go
+   layout, retain exact home/ancestry identity, acquire the nonblocking
+   exclusive lifetime lock, expose only the fixed member paths/capabilities,
+   and release last. Keep stopped/fresh `Doctor` unchanged.
+3. Add the narrow missing browser-runtime failure-observation seam, then one
+   concrete `cmd/factoryd` bootstrap root that owns the home handle, Store,
+   runtime parent, private API listener and loopback browser runtime. API
+   handlers must be bounded and joined; listener failure cancels the root;
+   cleanup removes only the exact owned socket.
+4. Add one explicit daemon recovery coordinator and causal cuts before adding
+   scheduling. Only after recovery converges may one concrete scheduler call
+   `RunNext`; shutdown must stop admission and join recovery, scheduler,
+   handlers, browser connections, attempts, runtime parent, Store and home lock
+   in their proven order. No parallel writing agent may modify shared
+   `internal/daemon`, `internal/api`, `internal/browser`, recovery or
+   `cmd/factoryd` files during steps 2–4. Do not add a service container,
+   generic recovery/scheduler framework or interface for one implementation.
+5. Prove the composed binary black-box in an isolated home: init/start/API/browser,
+   deterministic shell task, daemon stop/restart, crash cuts, no replay, and
+   exact process/socket/PTY/FD/goroutine cleanup.
+6. Finish `factoryctl` service/recovery plumbing and replace Rust/TUI release
+   packaging with the exact Go binaries and exact public client/UI artifacts.
+7. After the daemon endpoint and artifact contract are stable, integrate the
+   private host from its own worktree against those exact packed artifacts.
+   The private repository remains a thin host and does not own protocol or
+   authority.
+8. Run a dedicated whole-runtime elegance audit before any Rust deletion. It
+   must attack DRY/YAGNI, package graph, exported surface, duplicate validation,
+   wrappers/interfaces with one implementation, test-only seams, dependencies,
+   artifact-tool complexity and obsolete Rust/TUI/release residue. Every
+   accepted deletion or collapse retains a causal guard and is followed by
+   focused, full, race, browser-E2E and artifact gates plus a fresh independent
+   `ALLOW` on the exact refactored head.
+9. Run the final architecture, security/authority, process, Store/concurrency
+   and simplification reviews; only then switch docs/CI/release authority,
+   delete the replaced Rust local-runtime crates and perform the clean-checkout
+   system census.
+
+The production cutover remains blocked specifically on `cmd/factoryd`,
+black-box restart/crash proof, service/release plumbing, private-host exact
+artifact integration, the elegance pass, final exact-head reviews and the
+authoritative clean-checkout gate. Exact-head green evidence must be recreated
+after this plan commit. Historical green results below do not waive any gate.
 
 Two further cold audits reviewed exact canonical head `d03491f` after the
 browser-authority, runner-protocol and TypeScript foundations landed:
