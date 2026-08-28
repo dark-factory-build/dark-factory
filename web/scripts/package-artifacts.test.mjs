@@ -430,6 +430,24 @@ test("verify rejects forged self-consistent archive claims by clean reconstructi
     forged.packages[clientName].artifact.sha512 = clientHash.toString("hex");
     forged.packages[clientName].artifact.integrity = `sha512-${clientHash.toString("base64")}`;
     forged.packages[uiName].dependency.integrity = forged.packages[clientName].artifact.integrity;
+    const uiArchive = join(output, forged.packages[uiName].artifact.filename);
+    const rewrittenUi = join(tempRoot, "rewritten-ui.tgz");
+    rewriteArchive(uiArchive, rewrittenUi, (root) => {
+      const packagePath = join(root, "package/package.json");
+      const packageValue = JSON.parse(readFileSync(packagePath, "utf8"));
+      packageValue.dependencies[clientName] = forged.packages[uiName].dependency.version;
+      writeFileSync(packagePath, JSON.stringify(packageValue, null, 2));
+      const provenancePath = join(root, "package/dist/src/provenance.json");
+      const provenanceValue = JSON.parse(readFileSync(provenancePath, "utf8"));
+      provenanceValue.dependency.integrity = forged.packages[uiName].dependency.integrity;
+      writeFileSync(provenancePath, `${JSON.stringify(provenanceValue, null, 2)}\n`);
+    });
+    const rewrittenUiBytes = readFileSync(rewrittenUi);
+    writeFileSync(uiArchive, rewrittenUiBytes);
+    const uiHash = createHash("sha512").update(rewrittenUiBytes).digest();
+    forged.packages[uiName].artifact.bytes = rewrittenUiBytes.length;
+    forged.packages[uiName].artifact.sha512 = uiHash.toString("hex");
+    forged.packages[uiName].artifact.integrity = `sha512-${uiHash.toString("base64")}`;
     writeFileSync(path, `${JSON.stringify(forged, null, 2)}\n`);
     expectFailure(() => run("verify", output), "differs from clean reconstruction");
   } finally {
