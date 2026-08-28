@@ -34,9 +34,9 @@ go_gate_package_manager_stage() {
     go_gate_package_manager_timeout=$1
     shift
     if [ "${go_gate_package_manager_direct-0}" -eq 1 ]; then
-        go_gate_stage "$go_gate_package_manager_timeout" "$go_gate_corepack" "$@"
+        go_gate_stage --umask 022 "$go_gate_package_manager_timeout" "$go_gate_corepack" "$@"
     else
-        go_gate_stage "$go_gate_package_manager_timeout" "$go_gate_node" "$go_gate_corepack" "$@"
+        go_gate_stage --umask 022 "$go_gate_package_manager_timeout" "$go_gate_node" "$go_gate_corepack" "$@"
     fi
 }
 
@@ -80,6 +80,16 @@ go_gate_before_stage() {
 # fixed in the trusted parent and are not selected through PATH. SIGKILL cannot
 # be trapped; a killed gate may retain its 0700 root for the external census.
 go_gate_run_bounded() {
+    go_gate_run_umask=
+    if [ "${1-}" = --umask ]; then
+        [ "$#" -ge 3 ] || return 64
+        go_gate_run_umask=$2
+        shift 2
+        case "$go_gate_run_umask" in
+            [0-7][0-7][0-7]|[0-7][0-7][0-7][0-7]) ;;
+            *) return 64 ;;
+        esac
+    fi
     go_gate_timeout_seconds=$1
     shift
     [ "$#" -gt 0 ] || return 64
@@ -113,7 +123,9 @@ use warnings;
 use POSIX qw(setpgid WIFEXITED WEXITSTATUS WIFSIGNALED WTERMSIG);
 use Time::HiRes qw(usleep);
 
+my $child_umask = shift @ARGV;
 my $seconds = shift @ARGV;
+die "invalid umask\n" unless defined $child_umask && ($child_umask eq "" || $child_umask =~ /^(?:[0-7]{3}|[0-7]{4})$/);
 die "invalid timeout\n" unless defined $seconds && $seconds =~ /^\d+$/ && $seconds > 0;
 die "missing command\n" unless @ARGV;
 pipe(my $ready_r, my $ready_w) or die "pipe: $!\n";
@@ -127,6 +139,7 @@ if ($pid == 0) {
     my $ack = "";
     sysread($go_r, $ack, 1) == 1 or exit 125;
     close $ready_w; close $go_r;
+    umask oct($child_umask) if length $child_umask;
     exec @ARGV;
     exit 127;
 }
@@ -209,7 +222,7 @@ exit 125 if $group_clean == 0;
 exit 124 if $timed_out;
 exit 125 if $group_clean == 2;
 exit (WIFEXITED($status) ? WEXITSTATUS($status) : 128 + WTERMSIG($status));
-' "$go_gate_timeout_seconds" "$@" &
+' "$go_gate_run_umask" "$go_gate_timeout_seconds" "$@" &
     go_gate_supervisor_pid=$!
     if wait "$go_gate_supervisor_pid"; then
         go_gate_stage_status=0
@@ -221,9 +234,25 @@ exit (WIFEXITED($status) ? WEXITSTATUS($status) : 128 + WTERMSIG($status));
 }
 
 go_gate_stage() {
+    go_gate_stage_umask=
+    if [ "${1-}" = --umask ]; then
+        [ "$#" -ge 4 ] || return 64
+        go_gate_stage_umask=$2
+        shift 2
+    fi
     go_gate_before_stage || return 1
     go_gate_stage_status=0
-    if go_gate_run_bounded "$@"; then go_gate_stage_status=0; else go_gate_stage_status=$?; fi
+    if [ -n "$go_gate_stage_umask" ]; then
+        if go_gate_run_bounded --umask "$go_gate_stage_umask" "$@"; then
+            go_gate_stage_status=0
+        else
+            go_gate_stage_status=$?
+        fi
+    elif go_gate_run_bounded "$@"; then
+        go_gate_stage_status=0
+    else
+        go_gate_stage_status=$?
+    fi
     go_gate_before_stage || return 1
     return "$go_gate_stage_status"
 }

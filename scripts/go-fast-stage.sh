@@ -8,6 +8,10 @@ go_gate_web_scratch_fence() {
     }
 }
 
+go_gate_web_remove() {
+    /bin/rm -rf -- "$1"
+}
+
 go_gate_web_tree_move() {
     go_gate_web_tree_source=$1
     go_gate_web_tree_expected=${3-}
@@ -51,38 +55,37 @@ go_gate_web_tree_discard() {
     go_gate_web_tree_discard_path="$go_gate_root/web-node-modules-discard"
     go_gate_web_tree_move "$go_gate_web_tree_source" "$go_gate_web_tree_discard_path" "$go_gate_web_tree_expected" || return 1
     go_gate_web_scratch_fence || return 1
-    /bin/rm -rf -- "$go_gate_web_tree_discard_path"
+    go_gate_web_remove "$go_gate_web_tree_discard_path" || return 1
     go_gate_web_scratch_fence || return 1
 }
 
-go_gate_web_install() (
-    umask 022
+go_gate_web_install() {
     go_gate_web_install_path="$repository_root/web/node_modules"
     go_gate_web_install_parent="$repository_root/web"
-    go_gate_web_scratch_fence || exit 1
+    go_gate_web_scratch_fence || return 1
     go_gate_web_install_old="$go_gate_root/web-node-modules-old"
-    [ ! -L "$go_gate_web_install_parent" ] && [ -d "$go_gate_web_install_parent" ] || exit 1
-    go_gate_web_install_parent_identity=$(go_gate_stat "$go_gate_web_install_parent") || exit 1
+    [ ! -L "$go_gate_web_install_parent" ] && [ -d "$go_gate_web_install_parent" ] || return 1
+    go_gate_web_install_parent_identity=$(go_gate_stat "$go_gate_web_install_parent") || return 1
     go_gate_web_install_old_identity=
     if [ -L "$go_gate_web_install_path" ]; then
         echo "go-check: refusing symlink web dependency tree: $go_gate_web_install_path" >&2
-        exit 1
+        return 1
     fi
     if [ -e "$go_gate_web_install_path" ]; then
         [ -d "$go_gate_web_install_path" ] || {
             echo "go-check: web dependency tree is not a directory" >&2
-            exit 1
+            return 1
         }
         [ ! -L "$go_gate_web_install_path/.modules.yaml" ] && [ -f "$go_gate_web_install_path/.modules.yaml" ] || {
             echo "go-check: existing web dependency tree is not package-manager-owned" >&2
-            exit 1
+            return 1
         }
         [ ! -L "$go_gate_web_install_path/.pnpm" ] && [ -d "$go_gate_web_install_path/.pnpm" ] || {
             echo "go-check: existing web virtual store is invalid" >&2
-            exit 1
+            return 1
         }
-        go_gate_web_install_old_identity=$(go_gate_stat "$go_gate_web_install_path") || exit 1
-        go_gate_web_tree_move "$go_gate_web_install_path" "$go_gate_web_install_old" "$go_gate_web_install_old_identity" || exit 1
+        go_gate_web_install_old_identity=$(go_gate_stat "$go_gate_web_install_path") || return 1
+        go_gate_web_tree_move "$go_gate_web_install_path" "$go_gate_web_install_old" "$go_gate_web_install_old_identity" || return 1
     fi
 
     if go_gate_package_manager_stage 600 pnpm install --frozen-lockfile --ignore-scripts; then
@@ -128,7 +131,7 @@ go_gate_web_install() (
     fi
     go_gate_web_install_partial_identity=$(go_gate_stat "$go_gate_web_install_path") || return 1
     [ -n "$go_gate_web_install_partial_identity" ]
-)
+}
 
 go_gate_web_verify_toolchain() {
     go_gate_web_node_modules="$repository_root/web/node_modules"
@@ -170,6 +173,38 @@ process.stdout.write(`${actual}\n`);
         echo "go-check: TypeScript tree identity changed while verifying" >&2
         return 1
     }
+}
+
+go_gate_web_install_stage() {
+    go_gate_web_previous_directory=$(pwd -P) || return 1
+    CDPATH= cd -- "$repository_root/web" || return 1
+    export COREPACK_ENABLE_NETWORK=1
+    export npm_config_offline=false NPM_CONFIG_OFFLINE=false
+    if go_gate_web_install; then
+        go_gate_web_install_status=0
+    else
+        go_gate_web_install_status=$?
+    fi
+    CDPATH= cd -- "$go_gate_web_previous_directory" || return 1
+    return "$go_gate_web_install_status"
+}
+
+go_gate_web_test_stage() {
+    go_gate_web_previous_directory=$(pwd -P) || return 1
+    CDPATH= cd -- "$repository_root/web" || return 1
+    export COREPACK_ENABLE_NETWORK=0
+    export npm_config_offline=true NPM_CONFIG_OFFLINE=true
+    if go_gate_package_manager_stage 600 pnpm run typecheck; then
+        if go_gate_package_manager_stage 600 pnpm run test; then
+            go_gate_web_test_status=0
+        else
+            go_gate_web_test_status=$?
+        fi
+    else
+        go_gate_web_test_status=$?
+    fi
+    CDPATH= cd -- "$go_gate_web_previous_directory" || return 1
+    return "$go_gate_web_test_status"
 }
 
 go_gate_fast_stage() {
@@ -222,21 +257,10 @@ go_gate_fast_stage() {
 
     [ -x "$go_gate_corepack" ] || { echo "go-check: fixed corepack is unavailable" >&2; return 1; }
     echo "go-check: frozen TypeScript dependency install"
-    (
-        cd "$repository_root/web" || exit
-        export COREPACK_ENABLE_NETWORK=1
-        export npm_config_offline=false NPM_CONFIG_OFFLINE=false
-        go_gate_web_install
-    ) || return
+    go_gate_web_install_stage || return
     go_gate_web_verify_toolchain || return
     echo "go-check: TypeScript client typecheck and tests"
-    (
-        cd "$repository_root/web" || exit
-        export COREPACK_ENABLE_NETWORK=0
-        export npm_config_offline=true NPM_CONFIG_OFFLINE=true
-        go_gate_package_manager_stage 600 pnpm run typecheck || exit
-        go_gate_package_manager_stage 600 pnpm run test
-    ) || return
+    go_gate_web_test_stage || return
 
     echo "go-check: git diff --check"
     go_gate_stage 120 "$go_gate_git" diff --check

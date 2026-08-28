@@ -98,7 +98,7 @@ printf '%s\n' 'typescript fixture library' >"$fast_typescript_template/lib/types
 /bin/chmod 755 "$fast_typescript_template/bin/tsc"
 /bin/cat >"$fast_corepack" <<EOF
 #!/bin/sh
-printf 'corepack %s NETWORK=%s INTEGRITY=%s\n' "\$*" "\${COREPACK_ENABLE_NETWORK-}" "\${COREPACK_INTEGRITY_KEYS-unset}" >>"$fast_log"
+printf 'corepack %s NETWORK=%s INTEGRITY=%s UMASK=%s\n' "\$*" "\${COREPACK_ENABLE_NETWORK-}" "\${COREPACK_INTEGRITY_KEYS-unset}" "\$(umask)" >>"$fast_log"
 if [ "\${1-}" = pnpm ] && [ "\${2-}" = install ]; then
     /bin/mkdir -p node_modules/.pnpm
     /bin/mkdir -p node_modules/.pnpm/typescript@5.8.3/node_modules
@@ -138,6 +138,7 @@ repository_root=$fast_real_repository_root
 /usr/bin/grep -F 'go mod download GOPROXY=https://proxy.golang.org' "$fast_log" >/dev/null || fail "download did not use network stage"
 /usr/bin/grep -F 'go mod verify GOPROXY=off' "$fast_log" >/dev/null || fail "verify was not offline"
 /usr/bin/grep -F 'corepack pnpm install --frozen-lockfile --ignore-scripts NETWORK=1' "$fast_log" >/dev/null || fail "install was not the sole package network stage"
+/usr/bin/grep -F 'corepack pnpm install --frozen-lockfile --ignore-scripts NETWORK=1 INTEGRITY=unset UMASK=0022' "$fast_log" >/dev/null || fail "install child umask was not 0022"
 /usr/bin/grep -F 'corepack pnpm run test NETWORK=0' "$fast_log" >/dev/null || fail "package tests were not offline"
 /usr/bin/grep -F 'INTEGRITY=unset' "$fast_log" >/dev/null || fail "Corepack signature verification was disabled"
 printf '%s\n' bad-tree >"$fast_mode"
@@ -185,6 +186,11 @@ go_gate_package_manager_stage() {
             : >"$tree/.modules.yaml"
             return 0
             ;;
+        rm-fail)
+            /bin/mkdir -p "$tree/.pnpm"
+            : >"$tree/.modules.yaml"
+            return 43
+            ;;
         hup) /usr/bin/perl -e 'kill "HUP", $$' ;;
         int) /usr/bin/perl -e 'kill "INT", $$' ;;
         term) /usr/bin/perl -e 'kill "TERM", $$' ;;
@@ -215,7 +221,7 @@ depth=0
 go_gate_web_install
 assert_tree
 assert_umask 0077
-[ "$(/usr/bin/grep -c '^nested 0022$' "$log")" -eq 2 ] || exit 46
+[ "$(/usr/bin/grep -c '^nested 0077$' "$log")" -eq 2 ] || exit 46
 
 umask 0027
 mode=fail
@@ -232,6 +238,13 @@ if go_gate_web_install; then exit 49; else result=$?; fi
 mode=success
 go_gate_web_install
 assert_umask 0077
+
+umask 0077
+mode=rm-fail
+go_gate_web_remove() { return 37; }
+if go_gate_web_install; then exit 59; else result=$?; fi
+[ "$result" -eq 1 ] || exit 60
+go_gate_web_remove() { /bin/rm -rf -- "$1"; }
 
 umask 0077
 ( mode=success; go_gate_web_install )
@@ -275,10 +288,9 @@ EOF
 /bin/chmod 700 "$web_install_fixture"
 web_install_log="$temporary/web-install.log"
 web_install_root="$temporary/web-install-root"
-web_install_gate_root="$temporary/web-install-gate"
-/bin/mkdir -p "$web_install_root/web" "$web_install_gate_root"
+/bin/mkdir -p "$web_install_root/web"
 export PATH="$go_gate_node_bin_dir:/usr/bin:/bin"
-if ! /bin/sh "$web_install_fixture" "$repository_root/scripts/go-fast-stage.sh" "$repository_root/scripts/go-gate-environment.sh" "$web_install_log" "$web_install_root" "$web_install_gate_root"; then
+if ! /bin/sh "$web_install_fixture" "$repository_root/scripts/go-fast-stage.sh" "$repository_root/scripts/go-gate-environment.sh" "$web_install_log" "$web_install_root"; then
     fail "web install umask fixture failed"
 fi
 
@@ -493,13 +505,43 @@ go_gate_environment_cleanup || fail "read-only cleanup failed"
 signal_fixture="$temporary/signal-fixture.sh"
 signal_marker="$temporary/signal-active"
 signal_root_file="$temporary/signal-root"
+signal_wrapper_file="$temporary/signal-wrapper"
 signal_child_file="$temporary/signal-child"
+signal_joined_file="$temporary/signal-joined"
+signal_cleaned_file="$temporary/signal-cleaned"
+signal_fake_bin="$temporary/signal-bin"
+signal_fake_corepack="$signal_fake_bin/corepack"
+signal_repository_root="$temporary/signal-repository"
+/bin/mkdir -p "$signal_fake_bin" "$signal_repository_root/web"
+/bin/cat >"$signal_fake_corepack" <<EOF
+#!/bin/sh
+printf '%s %s\n' "\$\$" "\$(/bin/ps -o pgid= -p \$\$ | /usr/bin/tr -d ' ')" >"$signal_child_file"
+printf active >"$signal_marker"
+exec /usr/bin/perl -e 'select undef, undef, undef, 30 while 1'
+EOF
+/bin/chmod 700 "$signal_fake_corepack"
 /bin/cat >"$signal_fixture" <<'EOF'
 #!/bin/sh
 set -eu
-. "$1"
+environment_script=$1
+fast_stage_script=$2
+signal_marker=$3
+signal_root_file=$4
+signal_wrapper_file=$5
+signal_child_file=$6
+signal_joined_file=$7
+signal_cleaned_file=$8
+signal_fake_corepack=$9
+repository_root=${10}
+. "$environment_script"
+. "$fast_stage_script"
 go_gate_environment_setup
-printf '%s\n' "$go_gate_root" >"$3"
+go_gate_package_manager_direct=1
+go_gate_corepack=$signal_fake_corepack
+go_gate_corepack_identity=$(go_gate_stat "$signal_fake_corepack")
+go_gate_corepack_hash=$(go_gate_hash "$signal_fake_corepack")
+printf '%s\n' "$go_gate_root" >"$signal_root_file"
+printf '%s\n' "$$" >"$signal_wrapper_file"
 go_gate_signal() {
     signal=$1
     trap - EXIT HUP INT TERM
@@ -507,14 +549,16 @@ go_gate_signal() {
         /bin/kill -TERM "$go_gate_supervisor_pid" 2>/dev/null || true
         wait "$go_gate_supervisor_pid" 2>/dev/null || true
     fi
+    : >"$signal_joined_file"
     go_gate_environment_cleanup || true
+    : >"$signal_cleaned_file"
     exit $((128 + signal))
 }
 trap 'go_gate_signal 15' TERM
-go_gate_run_bounded 30 /bin/sh -c "printf active >'$2'; printf '%s\\n' \"\$\$\" >'$4'; /bin/sleep 30"
+go_gate_web_install
 EOF
 /bin/chmod 700 "$signal_fixture"
-/bin/sh "$signal_fixture" "$repository_root/scripts/go-gate-environment.sh" "$signal_marker" "$signal_root_file" "$signal_child_file" &
+PATH="$signal_fake_bin:$PATH" /bin/sh "$signal_fixture" "$repository_root/scripts/go-gate-environment.sh" "$repository_root/scripts/go-fast-stage.sh" "$signal_marker" "$signal_root_file" "$signal_wrapper_file" "$signal_child_file" "$signal_joined_file" "$signal_cleaned_file" "$signal_fake_corepack" "$signal_repository_root" &
 signal_fixture_pid=$!
 signal_attempts=0
 while [ ! -f "$signal_marker" ] && [ "$signal_attempts" -lt 100 ]; do
@@ -522,11 +566,42 @@ while [ ! -f "$signal_marker" ] && [ "$signal_attempts" -lt 100 ]; do
     signal_attempts=$((signal_attempts + 1))
 done
 [ -f "$signal_marker" ] || fail "signal fixture did not start its stage"
+signal_wrapper_pid=$(/bin/cat "$signal_wrapper_file")
+signal_child_record=$(/bin/cat "$signal_child_file")
+signal_child_pid=$(/usr/bin/awk '{print $1}' <<EOF
+$signal_child_record
+EOF
+)
+signal_child_pgid=$(/usr/bin/awk '{print $2}' <<EOF
+$signal_child_record
+EOF
+)
+[ "$signal_wrapper_pid" = "$signal_fixture_pid" ] || fail "signal fixture wrapper identity changed"
+[ -n "$signal_child_pid" ] && [ "$signal_child_pid" = "$signal_child_pgid" ] || fail "signal fixture child group identity changed"
 /bin/kill -TERM "$signal_fixture_pid"
+signal_join_attempts=0
+while /bin/kill -0 "$signal_fixture_pid" 2>/dev/null; do
+    signal_join_attempts=$((signal_join_attempts + 1))
+    if [ "$signal_join_attempts" -ge 100 ]; then
+        /bin/kill -KILL "$signal_fixture_pid" 2>/dev/null || true
+        break
+    fi
+    /bin/sleep 0.01
+done
 if wait "$signal_fixture_pid"; then signal_status=0; else signal_status=$?; fi
 [ "$signal_status" -eq 143 ] || fail "TERM fixture returned $signal_status"
-signal_child_pid=$(/bin/cat "$signal_child_file")
-if /bin/kill -0 "$signal_child_pid" 2>/dev/null; then fail "TERM fixture left its child alive"; fi
+[ -f "$signal_joined_file" ] || fail "TERM fixture did not join its supervisor"
+[ -f "$signal_cleaned_file" ] || fail "TERM fixture did not finish cleanup"
+signal_survivor=0
+if /bin/kill -0 "$signal_child_pid" 2>/dev/null; then
+    /bin/kill -KILL "$signal_child_pid" 2>/dev/null || true
+    signal_survivor=1
+fi
+if /bin/kill -0 -"$signal_child_pgid" 2>/dev/null; then
+    /bin/kill -KILL -"$signal_child_pgid" 2>/dev/null || true
+    signal_survivor=1
+fi
+[ "$signal_survivor" -eq 0 ] || fail "TERM fixture left an exact child or process-group survivor"
 [ ! -e "$(/bin/cat "$signal_root_file")" ] || fail "TERM fixture cleaned up before joining supervisor"
 
 # Exercise the supported helper with the real cached pnpm in a disposable web
@@ -538,11 +613,32 @@ real_web_install_fixture="$temporary/real-web-install-fixture"
 set -eu
 repository_root=$1
 script_root=$2
+initial_digest_file=$3
+wrong_digest_file=$4
+rebuilt_digest_file=$5
+second_log=$6
 . "$script_root/scripts/go-gate-environment.sh"
 . "$script_root/scripts/go-fast-stage.sh"
 go_gate_environment_setup
 trap 'go_gate_environment_cleanup || true' EXIT
-( cd "$repository_root/web" && export COREPACK_ENABLE_NETWORK=1 npm_config_offline=false NPM_CONFIG_OFFLINE=false && go_gate_web_install )
+CDPATH= cd -- "$repository_root/web"
+export COREPACK_ENABLE_NETWORK=1 npm_config_offline=false NPM_CONFIG_OFFLINE=false
+go_gate_web_install
+real_tsc_package=$(/bin/realpath "$repository_root/web/node_modules/typescript/package.json")
+real_tsc_root=$(/usr/bin/dirname "$real_tsc_package")
+real_initial_digest=$("$go_gate_node" --input-type=module --eval 'const { toolTreeDigest } = await import(process.argv[2]); process.stdout.write(`${toolTreeDigest(process.argv[3])}\n`);' /dev/null "$script_root/web/scripts/package-artifacts.mjs" "$real_tsc_root")
+printf '%s\n' "$real_initial_digest" >"$initial_digest_file"
+/usr/bin/find "$real_tsc_root" -type d -exec /bin/chmod 700 {} +
+/usr/bin/find "$real_tsc_root" -type f -exec /bin/chmod 600 {} +
+/usr/bin/find "$real_tsc_root/bin" -type f -exec /bin/chmod 755 {} +
+real_wrong_digest=$("$go_gate_node" --input-type=module --eval 'const { toolTreeDigest } = await import(process.argv[2]); process.stdout.write(`${toolTreeDigest(process.argv[3])}\n`);' /dev/null "$script_root/web/scripts/package-artifacts.mjs" "$real_tsc_root")
+printf '%s\n' "$real_wrong_digest" >"$wrong_digest_file"
+export COREPACK_ENABLE_NETWORK=0 npm_config_offline=true NPM_CONFIG_OFFLINE=true
+go_gate_web_install >"$second_log" 2>&1
+real_rebuilt_digest=$("$go_gate_node" --input-type=module --eval 'const { toolTreeDigest } = await import(process.argv[2]); process.stdout.write(`${toolTreeDigest(process.argv[3])}\n`);' /dev/null "$script_root/web/scripts/package-artifacts.mjs" "$real_tsc_root")
+printf '%s\n' "$real_rebuilt_digest" >"$rebuilt_digest_file"
+/usr/bin/grep -F 'downloaded 0' "$second_log" >/dev/null
+if /usr/bin/grep -Eq 'downloaded [1-9]' "$second_log"; then exit 61; fi
 EOF
 /bin/chmod 700 "$real_web_install_fixture"
 /bin/mkdir -p "$temporary/real-web-install-root/web/packages/ui" "$temporary/real-web-install-root/web/packages/client" "$temporary/real-web-install-root/web/apps/dev"
@@ -552,7 +648,8 @@ EOF
 for real_workspace in packages/ui packages/client apps/dev; do
     /bin/cp "$repository_root/web/$real_workspace/package.json" "$temporary/real-web-install-root/web/$real_workspace/package.json"
 done
-/bin/sh "$real_web_install_fixture" "$temporary/real-web-install-root" "$repository_root"
+/bin/sh "$real_web_install_fixture" "$temporary/real-web-install-root" "$repository_root" \
+    "$temporary/real-initial-digest" "$temporary/real-wrong-digest" "$temporary/real-rebuilt-digest" "$temporary/real-second-install.log"
 
 real_node_modules_root=$(/bin/realpath "$temporary/real-web-install-root/web/node_modules") || fail "real install node_modules realpath failed"
 [ -n "$real_node_modules_root" ] && [ "$real_node_modules_root" = "$temporary/real-web-install-root/web/node_modules" ] || fail "real install node_modules escaped its root"
@@ -570,15 +667,11 @@ case "$real_tsc_root" in
 esac
 real_reviewed_digest=$(/bin/cat "$repository_root/web/toolchain-integrity.json" | /usr/bin/awk -F'"' '/"treeSha512"/ { count++; if (count == 2) print $4 }')
 [ -n "$real_reviewed_digest" ] || fail "reviewed TypeScript digest was not read"
-real_initial_digest=$("$go_gate_node" --input-type=module --eval 'const { toolTreeDigest } = await import(process.argv[2]); process.stdout.write(`${toolTreeDigest(process.argv[3])}\n`);' /dev/null "$repository_root/web/scripts/package-artifacts.mjs" "$real_tsc_root")
+real_initial_digest=$(/bin/cat "$temporary/real-initial-digest")
 [ "$real_initial_digest" = "$real_reviewed_digest" ] || fail "fresh real pnpm install did not match reviewed TypeScript tree"
-/usr/bin/find "$real_tsc_root" -type d -exec /bin/chmod 700 {} +
-/usr/bin/find "$real_tsc_root" -type f -exec /bin/chmod 600 {} +
-/usr/bin/find "$real_tsc_root/bin" -type f -exec /bin/chmod 755 {} +
-real_wrong_digest=$("$go_gate_node" --input-type=module --eval 'const { toolTreeDigest } = await import(process.argv[2]); process.stdout.write(`${toolTreeDigest(process.argv[3])}\n`);' /dev/null "$repository_root/web/scripts/package-artifacts.mjs" "$real_tsc_root")
+real_wrong_digest=$(/bin/cat "$temporary/real-wrong-digest")
 [ "$real_wrong_digest" != "$real_reviewed_digest" ] || fail "mode perturbation did not change the reviewed digest"
-/bin/sh "$real_web_install_fixture" "$temporary/real-web-install-root" "$repository_root"
-real_rebuilt_digest=$("$go_gate_node" --input-type=module --eval 'const { toolTreeDigest } = await import(process.argv[2]); process.stdout.write(`${toolTreeDigest(process.argv[3])}\n`);' /dev/null "$repository_root/web/scripts/package-artifacts.mjs" "$real_tsc_root")
+real_rebuilt_digest=$(/bin/cat "$temporary/real-rebuilt-digest")
 [ "$real_rebuilt_digest" = "$real_reviewed_digest" ] || fail "real cached pnpm reconstruction did not restore reviewed TypeScript tree"
 [ "$(/usr/bin/stat -f '%Lp' "$real_tsc_root")" = 755 ] || fail "reconstructed TypeScript root mode is not 0755"
 [ "$(/usr/bin/stat -f '%Lp' "$real_tsc_root/package.json")" = 644 ] || fail "reconstructed TypeScript package mode is not 0644"
