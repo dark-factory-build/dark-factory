@@ -21,7 +21,17 @@ log=$1
 printf 'HOME=%s PATH=%s SECRET=%s TMPDIR=%s\n' "${HOME-unset}" "$PATH" "${DARK_FACTORY_SECRET-unset}" "$TMPDIR" >>"$log"
 case "${2-}" in
     fail) exit 41 ;;
-    timeout) trap '' TERM; (trap '' TERM; sleep 30) & child=$!; printf '%s\n' "$child" >"$3"; wait ;;
+    timeout)
+        trap '' TERM
+        (
+            trap '' TERM
+            (trap '' TERM; sleep 30) & grandchild=$!
+            printf '%s\n' "$grandchild" >"$4"
+            wait
+        ) & child=$!
+        printf '%s\n' "$child" >"$3"
+        wait
+        ;;
     swap) root=${TMPDIR%/tmp}; /bin/mv "$root" "$root.original"; /bin/mkdir "$root"; /bin/chmod 700 "$root"; for d in tmp cache modcache corepack npm-cache; do /bin/mkdir "$root/$d"; done ;;
 esac
 EOF
@@ -248,7 +258,8 @@ else
 fi
 [ "$failure_status" -eq 41 ] || fail "child failure status was lost"
 pid_file="$temporary/descendant.pid"
-if go_gate_stage 1 "$fake" "$go_gate_test_log" timeout "$pid_file"; then
+grandchild_pid_file="$temporary/grandchild.pid"
+if go_gate_stage 1 "$fake" "$go_gate_test_log" timeout "$pid_file" "$grandchild_pid_file"; then
     fail "timeout passed"
 else
     timeout_status=$?
@@ -257,6 +268,9 @@ fi
 [ -s "$pid_file" ] || fail "timeout descendant was not created"
 timeout_pid=$(/bin/cat "$pid_file")
 if /bin/kill -0 "$timeout_pid" 2>/dev/null; then fail "timeout descendant survived"; fi
+[ -s "$grandchild_pid_file" ] || fail "timeout grandchild was not created"
+timeout_grandchild=$(/bin/cat "$grandchild_pid_file")
+if /bin/kill -0 "$timeout_grandchild" 2>/dev/null; then fail "timeout grandchild survived"; fi
 
 # A direct child that exits 0 while a same-group descendant survives is still
 # a failed stage; the owner must terminate the whole group.

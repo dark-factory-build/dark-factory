@@ -165,8 +165,13 @@ sub group_state {
     return "unknown";
 }
 sub stop_group {
-    my $state = group_state();
-    return 1 if $state eq "gone";
+    my $state;
+    for (1..10) {
+        $state = group_state();
+        return 1 if $state eq "gone";
+        last if $state eq "live";
+        usleep(100_000);
+    }
     return 0 if $state eq "unknown";
     return 0 unless kill "TERM", -$pid;
     for (1..10) { usleep(100_000); return 2 if group_state() eq "gone"; }
