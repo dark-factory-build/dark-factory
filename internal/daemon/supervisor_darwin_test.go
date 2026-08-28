@@ -1153,10 +1153,15 @@ func TestSupervisorActivationErrorAfterDurableMarkerJoinsInnerOwner(t *testing.T
 func TestSupervisorReconcilesAmbiguousAdmissionAndRevokesBearer(t *testing.T) {
 	fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
 	commitErr := errors.New("injected lost admission commit acknowledgement")
+	var admissions []bool
+	fixture.spec.admissionObserved = func(admitted bool) { admissions = append(admissions, admitted) }
 	fixture.spec.afterAdmission = func() error { return commitErr }
 	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
 	if !errors.Is(err, commitErr) {
 		t.Fatalf("RunNext admission ambiguity = %v", err)
+	}
+	if len(admissions) != 1 || !admissions[0] {
+		t.Fatalf("durable admission observations = %v", admissions)
 	}
 	if run.Phase != kernel.RunFinalizing || run.Proposal == nil || run.Proposal.Code() != kernel.FailureInternal || run.CredentialRevokedAt == nil || run.Terminal != nil {
 		t.Fatalf("admission ambiguity run = %+v", run)
