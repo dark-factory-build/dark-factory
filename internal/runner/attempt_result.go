@@ -551,11 +551,9 @@ func FinishAttemptResultRemoval(dir *os.File) error {
 	if err := requireAttemptResultAbsent(dir); err != nil {
 		return err
 	}
-	inner, err := inspectAttemptMarkers(dir, directory.FileIdentity.Device)
-	if err != nil {
+	if _, err := inspectAttemptMarkers(dir, directory.FileIdentity.Device); err != nil {
 		return err
 	}
-	_ = inner
 	return nil
 }
 

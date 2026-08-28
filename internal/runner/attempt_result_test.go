@@ -337,6 +337,34 @@ func TestAttemptResultRejectsImpossibleMarkerCensus(t *testing.T) {
 	})
 }
 
+// TestAttemptNameCannotInflateCanonicalResultPastItsBound proves name
+// validation guarantees byte-for-byte JSON encoding, so a length-valid name
+// can never turn into a publish-time canonical-bound failure.
+func TestAttemptNameCannotInflateCanonicalResultPastItsBound(t *testing.T) {
+	for name, id := range map[string]string{
+		"control": strings.Repeat("\x01", 200),
+		"quote":   strings.Repeat(`"`, 200),
+		"escape":  strings.Repeat(`\`, 200),
+		"utf8":    strings.Repeat("é", 100),
+		"delete":  "attempt\x7f",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := innerUnregisteredConvergedResult(id, testResultProof()); !errors.Is(err, ErrIdentity) {
+				t.Fatalf("escape-inflating name accepted: %v", err)
+			}
+		})
+	}
+	longest := strings.Repeat("a", 256)
+	result, err := innerUnregisteredConvergedResult(longest, testResultProof())
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := canonicalAttemptResult(result)
+	if err != nil || len(body) > maxAttemptResultBytes {
+		t.Fatalf("longest valid name body = %d bytes, %v", len(body), err)
+	}
+}
+
 // TestResultProofNeverEscapesDiagnosticFormatting proves no fmt verb, on any
 // proof-carrying value or enclosing struct, can reproduce the raw or hex proof
 // bytes. Stringer alone is not enough: %d bypasses it, and fmt cannot invoke
