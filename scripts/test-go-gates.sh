@@ -88,11 +88,20 @@ EOF
 #!/bin/sh
 exec "$fast_gofmt" "\$@"
 EOF
+fast_typescript_template="$temporary/fast-typescript-template"
+/bin/mkdir -p "$fast_typescript_template/bin" "$fast_typescript_template/lib"
+printf '%s\n' '{"name":"typescript","version":"5.8.3"}' >"$fast_typescript_template/package.json"
+printf '%s\n' 'typescript fixture compiler' >"$fast_typescript_template/bin/tsc"
+printf '%s\n' 'typescript fixture library' >"$fast_typescript_template/lib/typescript.js"
+/bin/chmod 755 "$fast_typescript_template/bin/tsc"
 /bin/cat >"$fast_corepack" <<EOF
 #!/bin/sh
 printf 'corepack %s NETWORK=%s INTEGRITY=%s\n' "\$*" "\${COREPACK_ENABLE_NETWORK-}" "\${COREPACK_INTEGRITY_KEYS-unset}" >>"$fast_log"
 if [ "\${1-}" = pnpm ] && [ "\${2-}" = install ]; then
     /bin/mkdir -p node_modules/.pnpm
+    /bin/mkdir -p node_modules/.pnpm/typescript@5.8.3/node_modules
+    /bin/cp -R "$fast_typescript_template" node_modules/.pnpm/typescript@5.8.3/node_modules/typescript
+    /bin/ln -s .pnpm/typescript@5.8.3/node_modules/typescript node_modules/typescript
     : >node_modules/.modules.yaml
 fi
 case "\$(/bin/cat "$fast_mode" 2>/dev/null)" in corepack-fail) exit 45 ;; esac
@@ -112,7 +121,11 @@ go_gate_corepack_hash=$(go_gate_hash "$fast_corepack")
 go_gate_package_manager_direct=1
 : >"$fast_mode"
 fast_repository_root="$temporary/fast-repository"
-/bin/mkdir -p "$fast_repository_root/web"
+/bin/mkdir -p "$fast_repository_root/web/scripts"
+/bin/cp "$repository_root/web/scripts/package-artifacts.mjs" "$fast_repository_root/web/scripts/package-artifacts.mjs"
+fast_typescript_digest=$("$go_gate_node" --input-type=module --eval 'const { toolTreeDigest } = await import("./web/scripts/package-artifacts.mjs"); process.stdout.write(`${toolTreeDigest(process.argv[1])}\n`);' "$fast_typescript_template")
+fast_reviewed_typescript_digest=$("$go_gate_node" --input-type=module --eval 'const { readFileSync } = await import("node:fs"); process.stdout.write(`${JSON.parse(readFileSync(process.argv[1], "utf8")).typescript.treeSha512}\n`);' "$repository_root/web/toolchain-integrity.json")
+/usr/bin/sed "s/$fast_reviewed_typescript_digest/$fast_typescript_digest/" "$repository_root/web/toolchain-integrity.json" >"$fast_repository_root/web/toolchain-integrity.json"
 fast_real_repository_root=$repository_root
 repository_root=$fast_repository_root
 go_gate_fast_stage || { repository_root=$fast_real_repository_root; fail "fast stage fixture failed"; }
@@ -134,10 +147,11 @@ set -eu
 . "$2"
 log=$3
 repository_root=$4
-go_gate_root=$5
 tree="$repository_root/web/node_modules"
 mode=success
 depth=0
+go_gate_environment_setup
+trap 'go_gate_environment_cleanup || true' EXIT
 go_gate_package_manager_stage() {
     printf '%s %s\n' "$mode" "$(umask)" >>"$log"
     case "$mode" in
@@ -153,12 +167,7 @@ go_gate_package_manager_stage() {
             : >"$tree/.modules.yaml"
             if [ "$depth" -eq 0 ]; then
                 depth=1
-                nested_gate_root="$go_gate_root/nested"
-                /bin/mkdir -p "$nested_gate_root"
-                outer_gate_root=$go_gate_root
-                go_gate_root=$nested_gate_root
-                go_gate_web_install
-                go_gate_root=$outer_gate_root
+                ( go_gate_environment_setup; go_gate_web_install )
             fi
             return 0
             ;;
@@ -249,9 +258,55 @@ web_install_log="$temporary/web-install.log"
 web_install_root="$temporary/web-install-root"
 web_install_gate_root="$temporary/web-install-gate"
 /bin/mkdir -p "$web_install_root" "$web_install_gate_root"
+export PATH="$go_gate_node_bin_dir:/usr/bin:/bin"
 if ! /bin/sh "$web_install_fixture" "$repository_root/scripts/go-fast-stage.sh" "$repository_root/scripts/go-gate-environment.sh" "$web_install_log" "$web_install_root" "$web_install_gate_root"; then
     fail "web install umask fixture failed"
 fi
+
+# A permanent replacement of the exact scratch root must fail before the
+# package-manager-owned source tree is moved. The external sentinel proves a
+# symlinked root cannot redirect quarantine or discard operations.
+scratch_attack_fixture="$temporary/scratch-attack-fixture"
+/bin/cat >"$scratch_attack_fixture" <<'EOF'
+#!/bin/sh
+set -eu
+script_root=$1
+repository_root=$2
+external_root=$3
+. "$script_root/scripts/go-gate-environment.sh"
+. "$script_root/scripts/go-fast-stage.sh"
+go_gate_environment_setup
+trap 'go_gate_environment_cleanup || true' EXIT
+tree="$repository_root/web/node_modules"
+/bin/mkdir -p "$tree/.pnpm"
+: >"$tree/.modules.yaml"
+source_identity=$(go_gate_stat "$tree")
+: >"$external_root/sentinel"
+original_root="$go_gate_root.original"
+/bin/mv "$go_gate_root" "$original_root"
+/bin/ln -s "$external_root" "$go_gate_root"
+if go_gate_web_install; then exit 41; fi
+[ "$(go_gate_stat "$tree")" = "$source_identity" ] || exit 42
+[ -f "$tree/.modules.yaml" ] && [ -d "$tree/.pnpm" ] || exit 43
+[ -f "$external_root/sentinel" ] || exit 44
+[ ! -e "$external_root/web-node-modules-old" ] && [ ! -e "$external_root/web-node-modules-discard" ] || exit 45
+/bin/rm -f "$go_gate_root"
+/bin/mv "$original_root" "$go_gate_root"
+[ -d "$tree" ] || exit 46
+/bin/rm -rf -- "$tree"
+/bin/ln -s "$external_root" "$tree"
+if go_gate_web_install; then exit 47; fi
+[ -L "$tree" ] || exit 48
+[ -f "$external_root/sentinel" ] || exit 49
+/bin/rm -f "$tree"
+go_gate_environment_cleanup
+EOF
+/bin/chmod 700 "$scratch_attack_fixture"
+scratch_attack_repository="$temporary/scratch-attack-repository"
+scratch_attack_external="$temporary/scratch-attack-external"
+/bin/mkdir -p "$scratch_attack_repository/web" "$scratch_attack_external"
+/bin/sh "$scratch_attack_fixture" "$repository_root" "$scratch_attack_repository" "$scratch_attack_external" \
+    || fail "scratch root replacement fixture failed"
 
 printf '# mutation\n' >>"$fast_go"
 if go_gate_before_stage; then fail "in-place Go mutation was accepted"; fi
@@ -455,28 +510,62 @@ signal_child_pid=$(/bin/cat "$signal_child_file")
 if /bin/kill -0 "$signal_child_pid" 2>/dev/null; then fail "TERM fixture left its child alive"; fi
 [ ! -e "$(/bin/cat "$signal_root_file")" ] || fail "TERM fixture cleaned up before joining supervisor"
 
-# Exercise the supported helper with the real cached pnpm and a real web
-# install. A mode-corrupted TypeScript tree must be reconstructed before the
-# offline artifact pack; an absent tree follows the same path.
-real_tsc_root=$(dirname "$(/bin/realpath "$repository_root/web/node_modules/typescript/package.json" 2>/dev/null || true)")
-if [ -n "$real_tsc_root" ] && [ -d "$real_tsc_root" ]; then
-    /usr/bin/find "$real_tsc_root" -type d -exec /bin/chmod 700 {} +
-    /usr/bin/find "$real_tsc_root" -type f -exec /bin/chmod 600 {} +
-    /usr/bin/find "$real_tsc_root/bin" -type f -exec /bin/chmod 755 {} +
-fi
+# Exercise the supported helper with the real cached pnpm in a disposable web
+# workspace. A mode-corrupted TypeScript tree must be reconstructed from the
+# cache; no candidate or repository path is modified by this perturbation.
 real_web_install_fixture="$temporary/real-web-install-fixture"
 /bin/cat >"$real_web_install_fixture" <<'EOF'
 #!/bin/sh
 set -eu
 repository_root=$1
-. "$repository_root/scripts/go-gate-environment.sh"
-. "$repository_root/scripts/go-fast-stage.sh"
+script_root=$2
+. "$script_root/scripts/go-gate-environment.sh"
+. "$script_root/scripts/go-fast-stage.sh"
 go_gate_environment_setup
 trap 'go_gate_environment_cleanup || true' EXIT
 ( cd "$repository_root/web" && export COREPACK_ENABLE_NETWORK=1 npm_config_offline=false NPM_CONFIG_OFFLINE=false && go_gate_web_install )
 EOF
 /bin/chmod 700 "$real_web_install_fixture"
-/bin/sh "$real_web_install_fixture" "$repository_root"
+/bin/mkdir -p "$temporary/real-web-install-root/web/packages/ui" "$temporary/real-web-install-root/web/packages/client" "$temporary/real-web-install-root/web/apps/dev"
+/bin/cp "$repository_root/web/package.json" "$temporary/real-web-install-root/web/package.json"
+/bin/cp "$repository_root/web/pnpm-lock.yaml" "$temporary/real-web-install-root/web/pnpm-lock.yaml"
+/bin/cp "$repository_root/web/pnpm-workspace.yaml" "$temporary/real-web-install-root/web/pnpm-workspace.yaml"
+for real_workspace in packages/ui packages/client apps/dev; do
+    /bin/cp "$repository_root/web/$real_workspace/package.json" "$temporary/real-web-install-root/web/$real_workspace/package.json"
+done
+/bin/sh "$real_web_install_fixture" "$temporary/real-web-install-root" "$repository_root"
+
+real_node_modules_root=$(/bin/realpath "$temporary/real-web-install-root/web/node_modules") || fail "real install node_modules realpath failed"
+[ -n "$real_node_modules_root" ] && [ "$real_node_modules_root" = "$temporary/real-web-install-root/web/node_modules" ] || fail "real install node_modules escaped its root"
+real_tsc_package=$(/bin/realpath "$temporary/real-web-install-root/web/node_modules/typescript/package.json") || fail "real install TypeScript realpath failed"
+[ -n "$real_tsc_package" ] || fail "real install TypeScript realpath was empty"
+case "$real_tsc_package" in
+    "$real_node_modules_root"/*) ;;
+    *) fail "real install TypeScript escaped node_modules" ;;
+esac
+real_tsc_root=$(/usr/bin/dirname "$real_tsc_package")
+[ -n "$real_tsc_root" ] && [ -d "$real_tsc_root" ] || fail "real install TypeScript root is missing"
+case "$real_tsc_root" in
+    "$real_node_modules_root"/*) ;;
+    *) fail "real install TypeScript root escaped node_modules" ;;
+esac
+real_reviewed_digest=$(/bin/cat "$repository_root/web/toolchain-integrity.json" | /usr/bin/awk -F'"' '/"treeSha512"/ { count++; if (count == 2) print $4 }')
+[ -n "$real_reviewed_digest" ] || fail "reviewed TypeScript digest was not read"
+real_initial_digest=$("$go_gate_node" --input-type=module --eval 'const { toolTreeDigest } = await import(process.argv[2]); process.stdout.write(`${toolTreeDigest(process.argv[3])}\n`);' /dev/null "$repository_root/web/scripts/package-artifacts.mjs" "$real_tsc_root")
+[ "$real_initial_digest" = "$real_reviewed_digest" ] || fail "fresh real pnpm install did not match reviewed TypeScript tree"
+/usr/bin/find "$real_tsc_root" -type d -exec /bin/chmod 700 {} +
+/usr/bin/find "$real_tsc_root" -type f -exec /bin/chmod 600 {} +
+/usr/bin/find "$real_tsc_root/bin" -type f -exec /bin/chmod 755 {} +
+real_wrong_digest=$("$go_gate_node" --input-type=module --eval 'const { toolTreeDigest } = await import(process.argv[2]); process.stdout.write(`${toolTreeDigest(process.argv[3])}\n`);' /dev/null "$repository_root/web/scripts/package-artifacts.mjs" "$real_tsc_root")
+[ "$real_wrong_digest" != "$real_reviewed_digest" ] || fail "mode perturbation did not change the reviewed digest"
+/bin/sh "$real_web_install_fixture" "$temporary/real-web-install-root" "$repository_root"
+real_rebuilt_digest=$("$go_gate_node" --input-type=module --eval 'const { toolTreeDigest } = await import(process.argv[2]); process.stdout.write(`${toolTreeDigest(process.argv[3])}\n`);' /dev/null "$repository_root/web/scripts/package-artifacts.mjs" "$real_tsc_root")
+[ "$real_rebuilt_digest" = "$real_reviewed_digest" ] || fail "real cached pnpm reconstruction did not restore reviewed TypeScript tree"
+
+# Run the same helper against the checked-out web tree before the offline
+# artifact proof. This covers an absent or already-correct candidate without
+# using the disposable perturbation as a substitute for public bytes.
+/bin/sh "$real_web_install_fixture" "$repository_root" "$repository_root"
 real_artifact_output="$temporary/real-artifacts"
 COREPACK_ENABLE_NETWORK=0 "$repository_root/web/scripts/package-artifacts" pack --output "$real_artifact_output" >/dev/null
 COREPACK_ENABLE_NETWORK=0 "$repository_root/web/scripts/package-artifacts" verify --output "$real_artifact_output" >/dev/null

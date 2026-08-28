@@ -1,10 +1,18 @@
 #!/bin/sh
 
 # Sourced by go-check.sh and go-ci.sh after one shared environment setup.
+go_gate_web_scratch_fence() {
+    go_gate_validate_identity && go_gate_validate_directories || {
+        echo "go-check: web dependency scratch identity changed" >&2
+        return 1
+    }
+}
+
 go_gate_web_tree_move() {
     go_gate_web_tree_source=$1
-    go_gate_web_tree_destination=$2
     go_gate_web_tree_expected=${3-}
+    go_gate_web_scratch_fence || return 1
+    go_gate_web_tree_destination=$2
     if [ -L "$go_gate_web_tree_source" ]; then
         echo "go-check: refusing symlink web dependency tree: $go_gate_web_tree_source" >&2
         return 1
@@ -29,7 +37,9 @@ go_gate_web_tree_move() {
         echo "go-check: web dependency quarantine already exists" >&2
         return 1
     }
+    go_gate_web_scratch_fence || return 1
     /bin/mv "$go_gate_web_tree_source" "$go_gate_web_tree_destination" || return 1
+    go_gate_web_scratch_fence || return 1
     [ ! -e "$go_gate_web_tree_source" ] && [ ! -L "$go_gate_web_tree_source" ] || return 1
     [ "$(go_gate_stat "$go_gate_web_tree_destination")" = "$go_gate_web_tree_identity" ] || return 1
 }
@@ -37,15 +47,19 @@ go_gate_web_tree_move() {
 go_gate_web_tree_discard() {
     go_gate_web_tree_source=$1
     go_gate_web_tree_expected=$2
+    go_gate_web_scratch_fence || return 1
     go_gate_web_tree_discard_path="$go_gate_root/web-node-modules-discard"
     go_gate_web_tree_move "$go_gate_web_tree_source" "$go_gate_web_tree_discard_path" "$go_gate_web_tree_expected" || return 1
+    go_gate_web_scratch_fence || return 1
     /bin/rm -rf -- "$go_gate_web_tree_discard_path"
+    go_gate_web_scratch_fence || return 1
 }
 
 go_gate_web_install() (
     umask 022
     go_gate_web_install_path="$repository_root/web/node_modules"
     go_gate_web_install_parent="$repository_root/web"
+    go_gate_web_scratch_fence || exit 1
     go_gate_web_install_old="$go_gate_root/web-node-modules-old"
     [ ! -L "$go_gate_web_install_parent" ] && [ -d "$go_gate_web_install_parent" ] || exit 1
     go_gate_web_install_parent_identity=$(go_gate_stat "$go_gate_web_install_parent") || exit 1
@@ -116,6 +130,38 @@ go_gate_web_install() (
     [ -n "$go_gate_web_install_partial_identity" ]
 )
 
+go_gate_web_verify_toolchain() {
+    go_gate_web_node_modules="$repository_root/web/node_modules"
+    [ ! -L "$go_gate_web_node_modules" ] && [ -d "$go_gate_web_node_modules" ] || {
+        echo "go-check: web dependency tree is not a regular directory" >&2
+        return 1
+    }
+    go_gate_web_node_modules_real=$(/bin/realpath "$go_gate_web_node_modules") || return 1
+    [ "$go_gate_web_node_modules_real" = "$go_gate_web_node_modules" ] || {
+        echo "go-check: web dependency tree path is not canonical" >&2
+        return 1
+    }
+    go_gate_web_typescript_path="$go_gate_web_node_modules/typescript"
+    go_gate_web_typescript_root=$(/bin/realpath "$go_gate_web_typescript_path") || return 1
+    case "$go_gate_web_typescript_root" in
+        "$go_gate_web_node_modules_real"/*) ;;
+        *) echo "go-check: TypeScript resolves outside the installed web dependency tree" >&2; return 1 ;;
+    esac
+    [ -d "$go_gate_web_typescript_root" ] && [ ! -L "$go_gate_web_typescript_root" ] || {
+        echo "go-check: TypeScript tool tree is not a regular directory" >&2
+        return 1
+    }
+    go_gate_web_toolchain_output="$go_gate_root/web-typescript-tree"
+    go_gate_stage_to_file "$go_gate_web_toolchain_output" 120 "$go_gate_node" --input-type=module --eval '
+const { readFileSync } = await import("node:fs");
+const { toolTreeDigest } = await import(process.argv[2]);
+const reviewed = JSON.parse(readFileSync(process.argv[3], "utf8"));
+const actual = toolTreeDigest(process.argv[4]);
+if (actual !== reviewed.typescript.treeSha512) throw new Error("installed TypeScript content differs from reviewed toolchain");
+process.stdout.write(`${actual}\n`);
+' /dev/null "$repository_root/web/scripts/package-artifacts.mjs" "$repository_root/web/toolchain-integrity.json" "$go_gate_web_typescript_root" || return 1
+}
+
 go_gate_fast_stage() {
     go_gate_expected_version=$(/usr/bin/awk '
         $1 == "go" { count++; value=$2 }
@@ -172,6 +218,7 @@ go_gate_fast_stage() {
         export npm_config_offline=false NPM_CONFIG_OFFLINE=false
         go_gate_web_install
     ) || return
+    go_gate_web_verify_toolchain || return
     echo "go-check: TypeScript client typecheck and tests"
     (
         cd "$repository_root/web" || exit
