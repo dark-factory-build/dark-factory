@@ -160,6 +160,9 @@ func TestDeclaredNoStartCloseRequiresNoInventedExit(t *testing.T) {
 	if err != nil || closed.State != TerminalSessionClosed {
 		t.Fatalf("no-start declared close = %+v, err=%v", closed, err)
 	}
+	if _, err := store.CloseActiveTerminalSession(context.Background(), run.ID, session.ID, fresh.Revision, session.Revision, mustTime(t, 40)); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("declared close replayed through active method = %v", err)
+	}
 	fresh, found, err = store.Run(context.Background(), run.ID)
 	if err != nil || !found {
 		t.Fatal(err)
@@ -191,8 +194,15 @@ func TestRecoveredNoStartUnresolvedConvergesWithoutExitEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	session = terminalSessionForRunTest(t, store, run.ID)
-	if _, err := store.CloseRecoveredTerminalSession(context.Background(), run.ID, session.ID, fresh.Revision, session.Revision, mustTime(t, 40)); err != nil {
+	closed, err := store.CloseRecoveredTerminalSession(context.Background(), run.ID, session.ID, fresh.Revision, session.Revision, mustTime(t, 40))
+	if err != nil {
 		t.Fatalf("no-start recovered close = %v", err)
+	}
+	if _, err := store.CloseRecoveredActiveTerminalSession(context.Background(), run.ID, session.ID, fresh.Revision, session.Revision, mustTime(t, 40)); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("preactivation close replayed through active-recovery method = %v", err)
+	}
+	if replay, err := store.CloseRecoveredTerminalSession(context.Background(), run.ID, session.ID, fresh.Revision, session.Revision, mustTime(t, 40)); err != nil || replay.Revision != closed.Revision {
+		t.Fatalf("preactivation close replay = %+v, %v", replay, err)
 	}
 	fresh, found, err = store.Run(context.Background(), run.ID)
 	if err != nil || !found || fresh.ProviderExit != nil || fresh.RunnerExit != nil {

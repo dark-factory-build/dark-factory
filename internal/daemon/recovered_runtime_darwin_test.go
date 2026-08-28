@@ -21,6 +21,9 @@ func TestOpenRecoveredRuntimeValidatesPopulatedEvidenceWithoutMutation(t *testin
 	before := openFDCensus(t)
 	parent, path, identity, token, config, terminal := populatedRecoveredRuntime(t, "run")
 	t.Cleanup(func() { _ = parent.Close() })
+	if _, err := os.Lstat(filepath.Join(path, runner.InnerActivationMarkerName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("fixture unexpectedly retained inner marker: %v", err)
+	}
 	recovered, err := OpenRecoveredRuntime(context.Background(), parent, "run", identity)
 	if err != nil {
 		t.Fatal(err)
@@ -76,6 +79,34 @@ func TestOpenRecoveredRuntimeRejectsMalformedCensusAndReplacement(t *testing.T) 
 		"config without token": func(t *testing.T, path string) {
 			if err := os.Remove(filepath.Join(path, attemptTokenName)); err != nil {
 				t.Fatal(err)
+			}
+		},
+		"inner without outer": func(t *testing.T, path string) {
+			if err := os.Remove(filepath.Join(path, runner.OuterActivationMarkerName)); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(filepath.Join(path, runner.TerminalSpoolName)); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(path, runner.InnerActivationMarkerName), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"terminal without outer": func(t *testing.T, path string) {
+			if err := os.Remove(filepath.Join(path, runner.OuterActivationMarkerName)); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"terminal scratch with spool": func(t *testing.T, path string) {
+			if err := os.WriteFile(filepath.Join(path, runner.TerminalScratchName), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"both gate scratch names": func(t *testing.T, path string) {
+			for _, name := range []string{runner.GateConfigScratchName, runner.GateStdinScratchName} {
+				if err := os.WriteFile(filepath.Join(path, name), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
 			}
 		},
 		"token mode": func(t *testing.T, path string) {
@@ -308,7 +339,10 @@ func TestRecoveredRuntimeAcknowledgesOnlyExactDurableTerminalPostcondition(t *te
 			run.ProviderExit = &exit
 		},
 		"wrong runtime binding": func(_ *kernel.Run, runtimeRoot, _, _ *kernel.Resource) { runtimeRoot.Path += ".other" },
-		"unreleased process":    func(_ *kernel.Run, _, process, _ *kernel.Resource) { process.State = kernel.ResourceReleasing },
+		"released runtime root": func(_ *kernel.Run, runtimeRoot, _, _ *kernel.Resource) {
+			runtimeRoot.State = kernel.ResourceReleased
+		},
+		"unreleased process": func(_ *kernel.Run, _, process, _ *kernel.Resource) { process.State = kernel.ResourceReleasing },
 		"wrong group identity": func(_ *kernel.Run, _, _, group *kernel.Resource) {
 			group.Identity = kernel.EmptyResourceIdentity()
 		},
@@ -404,6 +438,9 @@ func populatedRecoveredRuntime(t *testing.T, basename string) (*RuntimeParent, s
 	}
 	terminal := runner.Terminal{AttemptID: basename, Process: runner.Identity{PID: 22, PGID: 22, Birth: runner.Birth{Seconds: 3, Microseconds: 4}}, Exit: runner.Exit{Code: 0}, Message: "private"}
 	if _, err := runner.PublishTerminal(dir, runner.TerminalSpoolName, terminal); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, runner.OuterActivationMarkerName), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := dir.Close(); err != nil {

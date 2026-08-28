@@ -359,7 +359,7 @@ func (store *Store) CloseDeclaredTerminalSession(ctx context.Context, runID RunI
 	if err != nil {
 		return TerminalSession{}, tx.Rollback(err)
 	}
-	if run.Phase == RunFinalizing && run.Revision.Int64() == expectedRun.Int64()+1 && session.Revision.Int64() == expectedSession.Int64()+1 && session.State == TerminalSessionClosed {
+	if closedTerminalSessionReplay(run, session, expectedRun, expectedSession, false) {
 		return session, tx.Rollback(nil)
 	}
 	if run.Revision != expectedRun || session.Revision != expectedSession || at.Int64() < run.UpdatedAt.Int64() || at.Int64() < session.UpdatedAt.Int64() || session.State != TerminalSessionDeclared {
@@ -383,7 +383,7 @@ func (store *Store) CloseActiveTerminalSession(ctx context.Context, runID RunID,
 	if err != nil {
 		return TerminalSession{}, tx.Rollback(err)
 	}
-	if run.Phase == RunFinalizing && run.Revision.Int64() == expectedRun.Int64()+1 && session.Revision.Int64() == expectedSession.Int64()+1 && session.State == TerminalSessionClosed {
+	if closedTerminalSessionReplay(run, session, expectedRun, expectedSession, true) {
 		return session, tx.Rollback(nil)
 	}
 	if run.Revision != expectedRun || session.Revision != expectedSession || at.Int64() < run.UpdatedAt.Int64() || at.Int64() < session.UpdatedAt.Int64() || session.State != TerminalSessionActive {
@@ -439,7 +439,7 @@ func (store *Store) CloseRecoveredTerminalSession(ctx context.Context, runID Run
 	if err != nil {
 		return TerminalSession{}, tx.Rollback(err)
 	}
-	if run.Phase == RunFinalizing && run.Revision.Int64() == expectedRun.Int64()+1 && session.Revision.Int64() == expectedSession.Int64()+1 && session.State == TerminalSessionClosed {
+	if closedTerminalSessionReplay(run, session, expectedRun, expectedSession, false) {
 		return session, tx.Rollback(nil)
 	}
 	if run.Revision != expectedRun || session.Revision != expectedSession || at.Int64() < run.UpdatedAt.Int64() || at.Int64() < session.UpdatedAt.Int64() || session.State != TerminalSessionUnresolved || session.ActivatedAt != nil {
@@ -465,7 +465,7 @@ func (store *Store) CloseRecoveredActiveTerminalSession(ctx context.Context, run
 	if err != nil {
 		return TerminalSession{}, tx.Rollback(err)
 	}
-	if run.Phase == RunFinalizing && run.Revision.Int64() == expectedRun.Int64()+1 && session.Revision.Int64() == expectedSession.Int64()+1 && session.State == TerminalSessionClosed {
+	if closedTerminalSessionReplay(run, session, expectedRun, expectedSession, true) {
 		return session, tx.Rollback(nil)
 	}
 	if run.Revision != expectedRun || session.Revision != expectedSession || at.Int64() < run.UpdatedAt.Int64() || at.Int64() < session.UpdatedAt.Int64() || session.State != TerminalSessionUnresolved || session.ActivatedAt == nil {
@@ -475,6 +475,10 @@ func (store *Store) CloseRecoveredActiveTerminalSession(ctx context.Context, run
 		return TerminalSession{}, tx.Rollback(err)
 	}
 	return commitClosedTerminalSession(ctx, tx, run, session, expectedRun, expectedSession, at)
+}
+
+func closedTerminalSessionReplay(run Run, session TerminalSession, expectedRun, expectedSession Revision, activated bool) bool {
+	return run.Phase == RunFinalizing && run.Revision.Int64() == expectedRun.Int64()+1 && session.Revision.Int64() == expectedSession.Int64()+1 && session.State == TerminalSessionClosed && (session.ActivatedAt != nil) == activated
 }
 
 func loadTerminalSessionMutation(ctx context.Context, tx *writeTx, runID RunID, sessionID TerminalSessionID) (Run, TerminalSession, runRelationships, error) {

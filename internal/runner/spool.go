@@ -10,7 +10,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"golang.org/x/sys/unix"
 )
@@ -101,81 +100,150 @@ func publishTerminal(dir *os.File, basename string, terminal Terminal, afterOpen
 }
 
 func LoadTerminal(dir *os.File, basename string) (result *TerminalRecord, resultErr error) {
-	if err := validateTerminalName(dir, basename); err != nil {
-		return nil, err
-	}
-	fd, err := unix.Openat(int(dir.Fd()), basename, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	record, f, _, err := loadTerminalFile(dir, basename)
 	if err != nil {
 		return nil, err
 	}
-	f := os.NewFile(uintptr(fd), "terminal")
 	defer func() {
 		if closeErr := f.Close(); closeErr != nil {
 			result = nil
 			resultErr = errors.Join(resultErr, closeErr)
 		}
 	}()
-	var a, b unix.Stat_t
-	if err := unix.Fstat(fd, &a); err != nil {
-		return nil, err
-	}
-	if !validTerminalFile(a, 0) || a.Size <= 0 || a.Size > maxTerminalBytes {
-		return nil, ErrIdentity
-	}
-	body, err := io.ReadAll(io.LimitReader(f, maxTerminalBytes+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(body) > maxTerminalBytes {
-		return nil, ErrIdentity
-	}
-	if err := unix.Fstat(fd, &b); err != nil {
-		return nil, err
-	}
-	if statSpool(a) != statSpool(b) {
-		return nil, ErrIdentity
-	}
-	if err := rejectDuplicateJSONFields(body); err != nil {
-		return nil, err
-	}
-	dec := json.NewDecoder(strings.NewReader(string(body)))
-	dec.DisallowUnknownFields()
-	var terminal Terminal
-	if err := dec.Decode(&terminal); err != nil {
-		return nil, err
-	}
-	var trailing json.RawMessage
-	if err := dec.Decode(&trailing); err != io.EOF {
-		return nil, fmt.Errorf("runner: trailing terminal")
-	}
-	if err := validateTerminal(terminal); err != nil {
-		return nil, err
-	}
-	digest := sha256.Sum256(body)
-	return &TerminalRecord{Terminal: terminal, Identity: FileIdentity{Device: uint64(a.Dev), Inode: a.Ino}, Digest: hex.EncodeToString(digest[:])}, nil
+	return record, nil
 }
 
-func AcknowledgeTerminal(dir *os.File, basename string, want *TerminalRecord, storeCommitted bool) error {
+// testAfterTerminalContentProof is a package-test-only seam. Production
+// callers rely on the runtime lifetime lease as the cooperative sole-writer
+// boundary; the final descriptor/name comparison still detects a replacement
+// made before that comparison. It is not an atomic-unlink claim against a
+// hostile same-EUID writer after the final check.
+var testAfterTerminalContentProof func()
+
+func AcknowledgeTerminal(dir *os.File, basename string, want *TerminalRecord, storeCommitted bool) (resultErr error) {
 	if !storeCommitted {
 		return ErrState
 	}
 	if want == nil {
 		return ErrIdentity
 	}
-	got, err := LoadTerminal(dir, basename)
+	got, file, opened, err := loadTerminalFile(dir, basename)
 	if err != nil {
 		return err
 	}
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			resultErr = errors.Join(resultErr, closeErr)
+		}
+	}()
 	if got.Digest != want.Digest || got.Identity != want.Identity || got.Terminal != want.Terminal {
 		return ErrIdentity
 	}
-	if err := validateTerminalName(dir, basename); err != nil {
+	if testAfterTerminalContentProof != nil {
+		testAfterTerminalContentProof()
+	}
+	if err := verifyTerminalDescriptorAndName(file, dir, basename, opened); err != nil {
 		return err
 	}
 	if err := unix.Unlinkat(int(dir.Fd()), basename, 0); err != nil {
 		return err
 	}
 	return unix.Fsync(int(dir.Fd()))
+}
+
+func loadTerminalFile(dir *os.File, basename string) (record *TerminalRecord, file *os.File, opened unix.Stat_t, resultErr error) {
+	if err := validateTerminalName(dir, basename); err != nil {
+		return nil, nil, unix.Stat_t{}, err
+	}
+	fd, err := unix.Openat(int(dir.Fd()), basename, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, nil, unix.Stat_t{}, err
+	}
+	f := os.NewFile(uintptr(fd), "terminal")
+	keep := false
+	defer func() {
+		if !keep {
+			resultErr = errors.Join(resultErr, f.Close())
+		}
+	}()
+	if err := unix.Fstat(fd, &opened); err != nil {
+		return nil, nil, unix.Stat_t{}, err
+	}
+	if !validTerminalFile(opened, 0) || opened.Size <= 0 || opened.Size > maxTerminalBytes {
+		return nil, nil, unix.Stat_t{}, ErrIdentity
+	}
+	body, err := io.ReadAll(io.LimitReader(f, maxTerminalBytes+1))
+	if err != nil {
+		return nil, nil, unix.Stat_t{}, err
+	}
+	if len(body) > maxTerminalBytes {
+		return nil, nil, unix.Stat_t{}, ErrIdentity
+	}
+	var after unix.Stat_t
+	if err := unix.Fstat(fd, &after); err != nil {
+		return nil, nil, unix.Stat_t{}, err
+	}
+	if !sameTerminalFileStat(opened, after) {
+		return nil, nil, unix.Stat_t{}, ErrIdentity
+	}
+	terminal, err := decodeCanonicalTerminal(body)
+	if err != nil {
+		return nil, nil, unix.Stat_t{}, err
+	}
+	digest := sha256.Sum256(body)
+	record = &TerminalRecord{Terminal: terminal, Identity: FileIdentity{Device: uint64(after.Dev), Inode: after.Ino}, Digest: hex.EncodeToString(digest[:])}
+	if err := verifyTerminalDescriptorAndName(f, dir, basename, after); err != nil {
+		return nil, nil, unix.Stat_t{}, err
+	}
+	keep = true
+	return record, f, after, nil
+}
+
+func decodeCanonicalTerminal(body []byte) (Terminal, error) {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	var terminal Terminal
+	if err := decoder.Decode(&terminal); err != nil {
+		return Terminal{}, err
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return Terminal{}, fmt.Errorf("runner: trailing terminal")
+	}
+	if err := validateTerminal(terminal); err != nil {
+		return Terminal{}, err
+	}
+	canonical, err := json.Marshal(terminal)
+	if err != nil {
+		return Terminal{}, err
+	}
+	canonical = append(canonical, '\n')
+	if !bytes.Equal(body, canonical) {
+		return Terminal{}, ErrIdentity
+	}
+	return terminal, nil
+}
+
+func verifyTerminalDescriptorAndName(file *os.File, dir *os.File, basename string, expected unix.Stat_t) error {
+	if err := validateTerminalName(dir, basename); err != nil {
+		return err
+	}
+	var current unix.Stat_t
+	if err := unix.Fstat(int(file.Fd()), &current); err != nil {
+		return errors.Join(ErrIdentity, err)
+	}
+	var named unix.Stat_t
+	if err := unix.Fstatat(int(dir.Fd()), basename, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return errors.Join(ErrIdentity, err)
+	}
+	if !sameTerminalFileAuthority(expected, current, named) {
+		return ErrIdentity
+	}
+	return nil
+}
+
+func sameTerminalFileAuthority(expected, current, named unix.Stat_t) bool {
+	return sameTerminalFileStat(current, expected) && sameTerminalFileStat(named, current)
 }
 
 func validateTerminalName(dir *os.File, name string) error {
@@ -190,69 +258,6 @@ func validateTerminal(terminal Terminal) error {
 	codeExit := terminal.Exit.Code >= 0 && terminal.Exit.Signal == 0
 	signalExit := terminal.Exit.Code == -1 && terminal.Exit.Signal > 0
 	if terminal.AttemptID == "" || len(terminal.AttemptID) > 256 || !terminal.Process.Valid() || len(terminal.Message) > 8192 || !codeExit && !signalExit {
-		return ErrIdentity
-	}
-	return nil
-}
-
-func rejectDuplicateJSONFields(body []byte) error {
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	if err := consumeJSONValue(decoder); err != nil {
-		return fmt.Errorf("runner: invalid terminal JSON: %w", err)
-	}
-	if _, err := decoder.Token(); err != io.EOF {
-		if err == nil {
-			err = ErrIdentity
-		}
-		return fmt.Errorf("runner: trailing terminal JSON: %w", err)
-	}
-	return nil
-}
-
-func consumeJSONValue(decoder *json.Decoder) error {
-	token, err := decoder.Token()
-	if err != nil {
-		return err
-	}
-	delimiter, composite := token.(json.Delim)
-	if !composite {
-		return nil
-	}
-	switch delimiter {
-	case '{':
-		seen := make(map[string]struct{})
-		for decoder.More() {
-			keyToken, err := decoder.Token()
-			if err != nil {
-				return err
-			}
-			key, ok := keyToken.(string)
-			if !ok {
-				return ErrIdentity
-			}
-			if _, duplicate := seen[key]; duplicate {
-				return ErrIdentity
-			}
-			seen[key] = struct{}{}
-			if err := consumeJSONValue(decoder); err != nil {
-				return err
-			}
-		}
-		end, err := decoder.Token()
-		if err != nil || end != json.Delim('}') {
-			return errors.Join(ErrIdentity, err)
-		}
-	case '[':
-		for decoder.More() {
-			if err := consumeJSONValue(decoder); err != nil {
-				return err
-			}
-		}
-		end, err := decoder.Token()
-		if err != nil || end != json.Delim(']') {
-			return errors.Join(ErrIdentity, err)
-		}
-	default:
 		return ErrIdentity
 	}
 	return nil
@@ -326,6 +331,6 @@ func writeAll(fd int, p []byte) error {
 	}
 	return nil
 }
-func statSpool(s unix.Stat_t) string {
-	return fmt.Sprintf("%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d", s.Dev, s.Ino, s.Uid, s.Gid, s.Mode, s.Nlink, s.Size, s.Mtim.Sec, s.Mtim.Nsec, s.Ctim.Sec, s.Ctim.Nsec)
+func sameTerminalFileStat(left, right unix.Stat_t) bool {
+	return left.Dev == right.Dev && left.Ino == right.Ino && left.Uid == right.Uid && left.Gid == right.Gid && left.Mode == right.Mode && left.Nlink == right.Nlink && left.Size == right.Size && left.Mtim == right.Mtim && left.Ctim == right.Ctim
 }

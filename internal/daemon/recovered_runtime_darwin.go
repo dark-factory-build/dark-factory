@@ -214,7 +214,7 @@ func terminalCommitProven(runtimePath string, runtimeIdentity runner.FileIdentit
 		return false
 	}
 	wantRuntimeIdentity, err := pathResourceIdentity(runtimeIdentity)
-	if err != nil || runtimeRoot.RunID != run.ID || runtimeRoot.Kind != kernel.ResourceRuntimeRoot || runtimeRoot.Path != runtimePath || runtimeRoot.Identity != wantRuntimeIdentity || runtimeRoot.Identity.Empty() || runtimeRoot.ActivatedAt == nil || (runtimeRoot.State != kernel.ResourceReleasing && runtimeRoot.State != kernel.ResourceUnresolved && runtimeRoot.State != kernel.ResourceReleased) {
+	if err != nil || runtimeRoot.RunID != run.ID || runtimeRoot.Kind != kernel.ResourceRuntimeRoot || runtimeRoot.Path != runtimePath || runtimeRoot.Identity != wantRuntimeIdentity || runtimeRoot.Identity.Empty() || runtimeRoot.ActivatedAt == nil || (runtimeRoot.State != kernel.ResourceReleasing && runtimeRoot.State != kernel.ResourceUnresolved) {
 		return false
 	}
 	for _, resource := range []kernel.Resource{providerProcess, providerGroup} {
@@ -278,27 +278,28 @@ func inspectRecoveredRuntimeCensus(rootFD int, device uint64) (map[string]unix.S
 	if !home || !temp || !lifetime {
 		return nil, invalidContract(nil)
 	}
-	if _, config := files[workerConfigName]; config {
-		if _, token := files[attemptTokenName]; !token {
-			return nil, invalidContract(nil)
-		}
-	}
-	for _, name := range []string{
-		runner.OuterActivationMarkerName, runner.InnerActivationMarkerName,
-		runner.GateConfigScratchName, runner.GateStdinScratchName,
-		runner.TerminalScratchName, runner.TerminalSpoolName,
-	} {
-		if _, present := files[name]; !present {
-			continue
-		}
-		if _, token := files[attemptTokenName]; !token {
-			return nil, invalidContract(nil)
-		}
-		if _, config := files[workerConfigName]; !config {
-			return nil, invalidContract(nil)
-		}
+	token := hasRecoveredFile(files, attemptTokenName)
+	config := hasRecoveredFile(files, workerConfigName)
+	outer := hasRecoveredFile(files, runner.OuterActivationMarkerName)
+	inner := hasRecoveredFile(files, runner.InnerActivationMarkerName)
+	terminal := hasRecoveredFile(files, runner.TerminalSpoolName)
+	terminalScratch := hasRecoveredFile(files, runner.TerminalScratchName)
+	gateConfig := hasRecoveredFile(files, runner.GateConfigScratchName)
+	gateStdin := hasRecoveredFile(files, runner.GateStdinScratchName)
+	// These are the fixed crash cuts emitted by the producer. The outer gate
+	// precedes the inner gate, but the terminal may outlive the inner marker
+	// after pre-activation cleanup. Each named scratch is created and removed
+	// synchronously, so both gate scratch names cannot be a reachable cut.
+	residue := outer || inner || terminal || terminalScratch || gateConfig || gateStdin
+	if config && !token || residue && (!token || !config) || inner && !outer || terminal && !outer || terminalScratch && terminal || gateConfig && gateStdin {
+		return nil, invalidContract(nil)
 	}
 	return files, nil
+}
+
+func hasRecoveredFile(files map[string]unix.Stat_t, name string) bool {
+	_, present := files[name]
+	return present
 }
 
 func validRecoveredRuntimeFile(name string, stat unix.Stat_t, device uint64) bool {

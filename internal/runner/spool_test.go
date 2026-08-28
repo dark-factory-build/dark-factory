@@ -216,6 +216,68 @@ func TestTerminalSpoolRejectsUnsafeFileAndSwapWithoutAck(t *testing.T) {
 	})
 }
 
+func TestTerminalSpoolAckKeepsVerifiedFDUntilFinalNamedCheck(t *testing.T) {
+	t.Run("replacement", func(t *testing.T) {
+		root, dir := openTestSpool(t)
+		original, err := PublishTerminal(dir, TerminalSpoolName, testTerminal("attempt-1", "original"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		oldPath := filepath.Join(root, "old-terminal")
+		testAfterTerminalContentProof = func() {
+			if err := os.Rename(filepath.Join(root, TerminalSpoolName), oldPath); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := PublishTerminal(dir, TerminalSpoolName, testTerminal("attempt-2", "replacement")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		defer func() { testAfterTerminalContentProof = nil }()
+		if err := AcknowledgeTerminal(dir, TerminalSpoolName, original, true); !errors.Is(err, ErrIdentity) {
+			t.Fatalf("replacement acknowledged at final check: %v", err)
+		}
+		if _, err := os.Stat(oldPath); err != nil {
+			t.Fatalf("verified original evidence was removed: %v", err)
+		}
+		replacement, err := LoadTerminal(dir, TerminalSpoolName)
+		if err != nil || replacement.Terminal.Message != "replacement" {
+			t.Fatalf("replacement evidence changed: %+v, %v", replacement, err)
+		}
+	})
+
+	t.Run("directory authority", func(t *testing.T) {
+		root, dir := openTestSpool(t)
+		original, err := PublishTerminal(dir, TerminalSpoolName, testTerminal("attempt", "original"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		testAfterTerminalContentProof = func() {
+			if err := os.Chmod(root, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		defer func() {
+			testAfterTerminalContentProof = nil
+			_ = os.Chmod(root, 0o700)
+		}()
+		if err := AcknowledgeTerminal(dir, TerminalSpoolName, original, true); !errors.Is(err, ErrIdentity) {
+			t.Fatalf("directory replacement acknowledged at final check: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(root, TerminalSpoolName)); err != nil {
+			t.Fatalf("directory authority mutation removed spool: %v", err)
+		}
+	})
+}
+
+func TestTerminalSpoolFinalNamedIdentityCannotBeOmitted(t *testing.T) {
+	expected := unix.Stat_t{Dev: 1, Ino: 2, Uid: uint32(os.Geteuid()), Gid: uint32(os.Getegid()), Mode: unix.S_IFREG | 0o600, Nlink: 1, Size: 12}
+	named := expected
+	named.Ino++
+	if sameTerminalFileAuthority(expected, expected, named) {
+		t.Fatal("replacement named identity accepted")
+	}
+}
+
 func TestTerminalScratchInitialMetadataFailureCleansOnlyExactOpenedIdentity(t *testing.T) {
 	terminal := testTerminal("attempt-scratch", "private")
 	for _, mutation := range []string{"mode", "link", "replacement"} {
@@ -415,12 +477,25 @@ func TestTerminalLoadRejectsSymlinkAndTrailingData(t *testing.T) {
 func TestTerminalLoadRejectsAmbiguousJSONAndInvalidExitUnion(t *testing.T) {
 	valid := `{"attempt_id":"attempt","process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":{"code":0,"signal":0,"aborted":false}}`
 	invalidJSON := map[string]string{
-		"duplicate top-level": `{"attempt_id":"attempt","attempt_id":"other","process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":{"code":0,"signal":0,"aborted":false}}`,
-		"duplicate nested":    `{"attempt_id":"attempt","process":{"pid":22,"pid":23,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":{"code":0,"signal":0,"aborted":false}}`,
-		"unknown":             `{"attempt_id":"attempt","process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":{"code":0,"signal":0,"aborted":false},"authority":true}`,
-		"trailing":            valid + `{}`,
-		"truncated":           valid[:len(valid)-1],
-		"oversized":           valid + strings.Repeat(" ", maxTerminalBytes),
+		"duplicate top-level":            `{"attempt_id":"attempt","attempt_id":"other","process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":{"code":0,"signal":0,"aborted":false}}`,
+		"duplicate nested":               `{"attempt_id":"attempt","process":{"pid":22,"pid":23,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":{"code":0,"signal":0,"aborted":false}}`,
+		"duplicate top-level case alias": `{"attempt_id":"attempt","ATTEMPT_ID":"other","process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":{"code":0,"signal":0,"aborted":false}}`,
+		"duplicate nested case alias":    `{"attempt_id":"attempt","process":{"pid":22,"PID":23,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":{"code":0,"signal":0,"aborted":false}}`,
+		"top-level case alias":           `{"ATTEMPT_ID":"attempt","process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":{"code":0,"signal":0,"aborted":false}}`,
+		"nested case aliases":            `{"attempt_id":"attempt","process":{"PID":22,"PGID":22,"birth":{"SECONDS":3,"MICROSECONDS":4}},"exit":{"CODE":0,"SIGNAL":0,"ABORTED":false}}`,
+		"omitted exit":                   `{"attempt_id":"attempt","process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}}}`,
+		"null exit":                      `{"attempt_id":"attempt","process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":null}`,
+		"omitted process":                `{"attempt_id":"attempt","exit":{"code":0,"signal":0,"aborted":false}}`,
+		"null process":                   `{"attempt_id":"attempt","process":null,"exit":{"code":0,"signal":0,"aborted":false}}`,
+		"omitted birth":                  `{"attempt_id":"attempt","process":{"pid":22,"pgid":22},"exit":{"code":0,"signal":0,"aborted":false}}`,
+		"null birth":                     `{"attempt_id":"attempt","process":{"pid":22,"pgid":22,"birth":null},"exit":{"code":0,"signal":0,"aborted":false}}`,
+		"unknown":                        `{"attempt_id":"attempt","process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":{"code":0,"signal":0,"aborted":false},"authority":true}`,
+		"alternate order":                `{"exit":{"code":0,"signal":0,"aborted":false},"process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"attempt_id":"attempt"}\n`,
+		"whitespace":                     ` {"attempt_id":"attempt","process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":{"code":0,"signal":0,"aborted":false}}\n`,
+		"numeric spelling":               `{"attempt_id":"attempt","process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":{"code":0.0,"signal":0,"aborted":false}}\n`,
+		"trailing":                       valid + `{}`,
+		"truncated":                      valid[:len(valid)-1],
+		"oversized":                      valid + strings.Repeat(" ", maxTerminalBytes),
 	}
 	for name, body := range invalidJSON {
 		t.Run(name, func(t *testing.T) {

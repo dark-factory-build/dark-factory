@@ -118,6 +118,9 @@ func TestTerminalSessionActivationAndLiveCloseAreDurableTransitions(t *testing.T
 	if err != nil || replay.ID != closed.ID || replay.Revision != closed.Revision || replay.State != closed.State {
 		t.Fatalf("duplicate close replay = %+v, err=%v", replay, err)
 	}
+	if _, err := store.CloseDeclaredTerminalSession(context.Background(), fresh.ID, session.ID, fresh.Revision, session.Revision, mustTime(t, 60)); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("active close replayed through declared method = %v", err)
+	}
 	after, _, err := store.Run(context.Background(), fresh.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -240,6 +243,9 @@ func TestRecoveredActiveTerminalCloseRequiresReleasedExactOwners(t *testing.T) {
 			replayed, err := store.CloseRecoveredActiveTerminalSession(context.Background(), run.ID, session.ID, current.Revision, session.Revision, mustTime(t, 60))
 			if err != nil || replayed.Revision != closed.Revision {
 				t.Fatalf("mixed recovered close replay = %+v, %v", replayed, err)
+			}
+			if _, err := store.CloseRecoveredTerminalSession(context.Background(), run.ID, session.ID, current.Revision, session.Revision, mustTime(t, 60)); !errors.Is(err, ErrRevisionConflict) {
+				t.Fatalf("active recovery close replayed through preactivation method = %v", err)
 			}
 			current, _, err = store.Run(context.Background(), run.ID)
 			if err != nil {
