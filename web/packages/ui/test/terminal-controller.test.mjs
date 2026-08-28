@@ -36,11 +36,15 @@ function harness({
   let callbacks;
   let attachGate = deferred();
   let acquireGate = deferred();
+  let releaseGate = deferred();
   let sessionCloses = 0;
   let handleClosed = false;
   let targetPending = false;
   let attachPending = false;
   let acquirePending = false;
+  let releasePending = false;
+  let acquireCalls = 0;
+  let releaseCalls = 0;
   const surfaceGate = deferred();
   let surfacePending = false;
   let surfaceAborts = 0;
@@ -49,8 +53,14 @@ function harness({
     attach: () => { attachPending = true; return attachGate.promise; },
     acquireInput: () => {
       acquirePending = true;
+      acquireCalls += 1;
       if (closeOnAcquire) callbacks.onClose?.(new SessionError("closed"));
       return acquireGate.promise;
+    },
+    releaseInput: () => {
+      releasePending = true;
+      releaseCalls += 1;
+      return releaseGate.promise;
     },
     sendInput: (bytes) => {
       const call = { bytes, result: deferred() };
@@ -81,6 +91,7 @@ function harness({
       if (targetPending) closePending(targetGate);
       if (attachPending) closePending(attachGate);
       if (acquirePending) closePending(acquireGate);
+      if (releasePending) closePending(releaseGate);
       for (const call of inputCalls) closePending(call.result);
       for (const call of resizeCalls) closePending(call.result);
       callbacks?.onClose?.(new SessionError("closed"));
@@ -119,7 +130,11 @@ function harness({
     attachGate: () => attachGate,
     acquireGate: () => acquireGate,
     resetAttach: () => { attachGate = deferred(); },
-    resetAcquire: () => { acquireGate = deferred(); },
+    resetAcquire: () => { acquireGate = deferred(); acquirePending = false; },
+    releaseGate: () => releaseGate,
+    resetRelease: () => { releaseGate = deferred(); releasePending = false; },
+    acquireCalls: () => acquireCalls,
+    releaseCalls: () => releaseCalls,
     surfaceGate,
     surfaceAborts: () => surfaceAborts,
     sessionCloses: () => sessionCloses,
@@ -499,4 +514,118 @@ test("lease refusal keeps an attached observer ready and read-only", async () =>
   await output;
   assert.deepEqual([...context.writes[0]], [7]);
   await context.controller.close();
+});
+
+test("take control after lease refusal acquires exactly once and reports its pending state", async () => {
+  const context = harness();
+  context.controller.start();
+  await tick();
+  context.targetGate.resolve(target);
+  await tick();
+  context.attachGate().resolve({ sessionId: "22".repeat(16), floor: 0n, head: 0n, acknowledgedSequence: 0n, maxUnackedBytes: 65536n });
+  await tick();
+  context.acquireGate().reject(new SessionError("invalid_request"));
+  await tick();
+  assert.equal(context.controller.snapshot.writable, false);
+  assert.equal(context.acquireCalls(), 1);
+
+  context.resetAcquire();
+  assert.equal(context.controller.takeControl(), true);
+  assert.equal(context.controller.snapshot.leaseOperation, "taking");
+  assert.equal(context.controller.takeControl(), false, "one lease operation at a time");
+  context.acquireGate().resolve({ generation: 2n });
+  await tick();
+  assert.equal(context.controller.snapshot.writable, true);
+  assert.equal(context.controller.snapshot.leaseOperation, "none");
+  assert.equal(context.controller.snapshot.error, undefined);
+  assert.equal(context.acquireCalls(), 2);
+  assert.equal(context.controller.takeControl(), false, "already writable");
+  await context.controller.close();
+});
+
+test("take control failure keeps the read-only observer alive and retryable", async () => {
+  const context = harness();
+  context.controller.start();
+  await tick();
+  context.targetGate.resolve(target);
+  await tick();
+  context.attachGate().resolve({ sessionId: "22".repeat(16), floor: 0n, head: 0n, acknowledgedSequence: 0n, maxUnackedBytes: 65536n });
+  await tick();
+  context.acquireGate().reject(new SessionError("invalid_request"));
+  await tick();
+  context.resetAcquire();
+  assert.equal(context.controller.takeControl(), true);
+  context.acquireGate().reject(new SessionError("invalid_request"));
+  await tick();
+  assert.equal(context.controller.snapshot.phase, "ready");
+  assert.equal(context.controller.snapshot.writable, false);
+  assert.equal(context.controller.snapshot.leaseOperation, "none");
+  assert.equal(context.controller.snapshot.error.code, "invalid_request");
+  assert.equal(context.sessionCloses(), 0);
+  const output = context.callbacks().onOutput({ sequence: 0n, payload: new Uint8Array([9]) });
+  await tick();
+  context.surfaceGate.resolve();
+  await output;
+  assert.deepEqual([...context.writes[0]], [9]);
+  context.resetAcquire();
+  assert.equal(context.controller.takeControl(), true, "failure leaves the retry live");
+  await context.controller.close();
+});
+
+test("hand back stops input before releasing and stays an attached observer", async () => {
+  const context = harness();
+  await ready(context);
+  assert.equal(context.controller.sendText("ls\n"), true);
+  await tick();
+  assert.equal(context.inputCalls.length, 1);
+  assert.equal(context.controller.handBack(), true);
+  assert.equal(context.controller.snapshot.writable, false, "input authority ends before the release settles");
+  assert.equal(context.controller.snapshot.leaseOperation, "releasing");
+  assert.equal(context.controller.sendText("blocked\n"), false);
+  assert.equal(context.controller.handBack(), false, "one lease operation at a time");
+  context.inputCalls[0].result.resolve({ status: "accepted", acceptedBytes: 3n });
+  await tick();
+  await tick();
+  assert.equal(context.releaseCalls(), 1, "release waits for the drained input effect");
+  context.releaseGate().resolve({ released: true });
+  await tick();
+  assert.equal(context.controller.snapshot.phase, "ready");
+  assert.equal(context.controller.snapshot.writable, false);
+  assert.equal(context.controller.snapshot.leaseOperation, "none");
+  assert.equal(context.sessionCloses(), 0);
+  context.resetAcquire();
+  assert.equal(context.controller.takeControl(), true, "control can be taken again after handing back");
+  await context.controller.close();
+});
+
+test("a failed hand-back release is authority uncertainty and closes", async () => {
+  const context = harness();
+  await ready(context);
+  assert.equal(context.controller.handBack(), true);
+  context.releaseGate().reject(new SessionError("connection"));
+  await tick();
+  assert.equal(context.controller.snapshot.phase, "closed");
+  assert.equal(context.controller.snapshot.writable, false);
+  assert.equal(context.sessionCloses(), 1);
+});
+
+test("stale generations fence late lease results after close", async () => {
+  const context = harness();
+  context.controller.start();
+  await tick();
+  context.targetGate.resolve(target);
+  await tick();
+  context.attachGate().resolve({ sessionId: "22".repeat(16), floor: 0n, head: 0n, acknowledgedSequence: 0n, maxUnackedBytes: 65536n });
+  await tick();
+  context.acquireGate().reject(new SessionError("invalid_request"));
+  await tick();
+  context.resetAcquire();
+  assert.equal(context.controller.takeControl(), true);
+  await context.controller.close();
+  const before = context.controller.snapshot;
+  context.acquireGate().resolve({ generation: 9n });
+  await tick();
+  assert.deepEqual(context.controller.snapshot, before, "a late lease result cannot mutate a closed controller");
+  assert.equal(context.controller.snapshot.phase, "closed");
+  assert.equal(context.controller.snapshot.writable, false);
 });
