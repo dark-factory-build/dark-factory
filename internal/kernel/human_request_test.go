@@ -807,11 +807,8 @@ func assertHumanRequestInvalidation(t *testing.T, store *Store, after EventSeque
 
 func TestHumanQuestionProcessExitInvalidationFailureRollsBackBothTransitions(t *testing.T) {
 	ctx := context.Background()
-	for _, provider := range []bool{true, false} {
-		name := "runner"
-		if provider {
-			name = "provider"
-		}
+	// The provider exit is the only remaining direct process-exit edge.
+	for _, name := range []string{"provider"} {
 		t.Run(name, func(t *testing.T) {
 			store, run, _ := runningOrchestratorRun(t)
 			defer store.Close()
@@ -827,7 +824,6 @@ func TestHumanQuestionProcessExitInvalidationFailureRollsBackBothTransitions(t *
 				t.Fatal(err)
 			}
 			exit, _ := NewProcessExitCode(1, 7, mustTime(t, 402))
-			_ = provider
 			_, observeErr := store.ObserveProviderExit(ctx, run.ID, run.Revision, registeredProcessIdentity(t, store, run.ID, ResourceProviderProcess), exit, mustTime(t, 403))
 			if observeErr == nil {
 				t.Fatal("process exit accepted failed request invalidation")
