@@ -336,6 +336,111 @@ func TestAttemptResultRejectsImpossibleMarkerCensus(t *testing.T) {
 	})
 }
 
+// TestAttemptResultMarkerMatrixIsClosed pins the complete kind × outer ×
+// inner marker matrix on the writer, reader and removal paths. Every valid
+// result requires the outer marker; inner_unregistered_converged additionally
+// requires the inner marker absent; inner_converged permits either census.
+func TestAttemptResultMarkerMatrixIsClosed(t *testing.T) {
+	kinds := map[AttemptResultKind]func(t *testing.T, attemptID string) AttemptResult{
+		AttemptResultInnerUnregisteredConverged: func(t *testing.T, attemptID string) AttemptResult {
+			t.Helper()
+			result, err := innerUnregisteredConvergedResult(attemptID, testResultProof())
+			if err != nil {
+				t.Fatal(err)
+			}
+			return result
+		},
+		AttemptResultInnerConverged: testConvergedAttemptResult,
+	}
+	setMarker := func(t *testing.T, root, name string, present bool) {
+		t.Helper()
+		path := filepath.Join(root, name)
+		if present {
+			if err := os.WriteFile(path, nil, 0o600); err != nil && !errors.Is(err, os.ErrExist) {
+				t.Fatal(err)
+			}
+			return
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+	}
+	for kind, build := range kinds {
+		for _, outer := range []bool{true, false} {
+			for _, inner := range []bool{true, false} {
+				accept := outer && !(kind == AttemptResultInnerUnregisteredConverged && inner)
+				name := fmt.Sprintf("%s outer=%t inner=%t", kind, outer, inner)
+				t.Run("publish "+name, func(t *testing.T) {
+					root, dir := openAttemptResultTestDir(t, false)
+					setMarker(t, root, OuterActivationMarkerName, outer)
+					setMarker(t, root, InnerActivationMarkerName, inner)
+					record, err := publishAttemptResult(dir, build(t, "matrix"))
+					if accept {
+						if err != nil || record.InnerActivated() != inner {
+							t.Fatalf("legal census publication = %+v, %v", record, err)
+						}
+						return
+					}
+					if !errors.Is(err, ErrIdentity) {
+						t.Fatalf("forbidden census publication = %v", err)
+					}
+					if _, statErr := os.Stat(filepath.Join(root, AttemptResultSpoolName)); !errors.Is(statErr, os.ErrNotExist) {
+						t.Fatalf("forbidden census left result residue: %v", statErr)
+					}
+				})
+				t.Run("authenticate "+name, func(t *testing.T) {
+					root, dir := openAttemptResultTestDir(t, false)
+					if kind == AttemptResultInnerConverged {
+						setMarker(t, root, InnerActivationMarkerName, true)
+					}
+					record, err := publishAttemptResult(dir, build(t, "matrix"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					setMarker(t, root, OuterActivationMarkerName, outer)
+					setMarker(t, root, InnerActivationMarkerName, inner)
+					loaded, err := AuthenticateAttemptResult(dir, "matrix", ptrNotice(record.Notice()))
+					if accept {
+						if err != nil || loaded.InnerActivated() != inner {
+							t.Fatalf("legal census authentication = %+v, %v", loaded, err)
+						}
+						return
+					}
+					if !errors.Is(err, ErrIdentity) {
+						t.Fatalf("forbidden census authentication = %v", err)
+					}
+				})
+			}
+		}
+	}
+	t.Run("removal rejects outer marker loss", func(t *testing.T) {
+		root, dir := openAttemptResultTestDir(t, true)
+		record, err := publishAttemptResult(dir, testConvergedAttemptResult(t, "matrix"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		setMarker(t, root, OuterActivationMarkerName, false)
+		if err := RemoveAttemptResult(dir, record); !errors.Is(err, ErrIdentity) {
+			t.Fatalf("outerless removal = %v", err)
+		}
+	})
+	t.Run("removal rejects unregistered inner marker gain", func(t *testing.T) {
+		root, dir := openAttemptResultTestDir(t, false)
+		result, err := innerUnregisteredConvergedResult("matrix", testResultProof())
+		if err != nil {
+			t.Fatal(err)
+		}
+		record, err := publishAttemptResult(dir, result)
+		if err != nil {
+			t.Fatal(err)
+		}
+		setMarker(t, root, InnerActivationMarkerName, true)
+		if err := RemoveAttemptResult(dir, record); !errors.Is(err, ErrIdentity) {
+			t.Fatalf("unregistered inner-gain removal = %v", err)
+		}
+	})
+}
+
 func TestAttemptResultRemovalReturnsDescriptorCloseUncertainty(t *testing.T) {
 	_, dir := openAttemptResultTestDir(t, true)
 	record, err := publishAttemptResult(dir, testConvergedAttemptResult(t, "close-uncertain"))
