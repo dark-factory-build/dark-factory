@@ -2,15 +2,10 @@
 
 # Sourced by go-check.sh and go-ci.sh after one shared environment setup.
 go_gate_web_install() {
-    go_gate_previous_umask=$(umask)
-    umask 022
-    if go_gate_package_manager_stage 600 pnpm install --frozen-lockfile --ignore-scripts; then
-        go_gate_install_status=0
-    else
-        go_gate_install_status=$?
-    fi
-    umask "$go_gate_previous_umask"
-    return "$go_gate_install_status"
+    (
+        umask 022
+        go_gate_package_manager_stage 600 pnpm install --frozen-lockfile --ignore-scripts
+    )
 }
 
 go_gate_fast_stage() {

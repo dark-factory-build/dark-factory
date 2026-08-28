@@ -103,6 +103,110 @@ go_gate_fast_stage || fail "fast stage fixture failed"
 /usr/bin/grep -F 'corepack pnpm install --frozen-lockfile --ignore-scripts NETWORK=1' "$fast_log" >/dev/null || fail "install was not the sole package network stage"
 /usr/bin/grep -F 'corepack pnpm run test NETWORK=0' "$fast_log" >/dev/null || fail "package tests were not offline"
 /usr/bin/grep -F 'INTEGRITY=unset' "$fast_log" >/dev/null || fail "Corepack signature verification was disabled"
+
+# The web install deliberately uses a process-local umask. This fixture
+# exercises the helper directly so nested calls and interrupted package
+# manager commands cannot leak a relaxed mode back to the gate owner.
+web_install_fixture="$temporary/web-install-fixture"
+/bin/cat >"$web_install_fixture" <<'EOF'
+#!/bin/sh
+set -eu
+. "$1"
+log=$2
+tree=$3
+mode=success
+depth=0
+go_gate_package_manager_stage() {
+    printf '%s %s\n' "$mode" "$(umask)" >>"$log"
+    case "$mode" in
+        success) return 0 ;;
+        fail) return 43 ;;
+        nested)
+            if [ "$depth" -eq 0 ]; then
+                depth=1
+                go_gate_web_install
+            fi
+            return 0
+            ;;
+        normalize)
+            /bin/rm -rf -- "$tree"
+            /bin/mkdir "$tree"
+            : >"$tree/file"
+            return 0
+            ;;
+        hup) /usr/bin/perl -e 'kill "HUP", $$' ;;
+        int) /usr/bin/perl -e 'kill "INT", $$' ;;
+        term) /usr/bin/perl -e 'kill "TERM", $$' ;;
+        *) return 44 ;;
+    esac
+}
+assert_umask() {
+    [ "$(umask)" = "$1" ] || exit 45
+}
+
+for caller_umask in 0000 0027 0077; do
+    umask "$caller_umask"
+    mode=success
+    go_gate_web_install
+    assert_umask "$caller_umask"
+done
+
+umask 0077
+mode=nested
+depth=0
+go_gate_web_install
+assert_umask 0077
+[ "$(/usr/bin/grep -c '^nested 0022$' "$log")" -eq 2 ] || exit 46
+
+umask 0027
+mode=fail
+if go_gate_web_install; then exit 47; else result=$?; fi
+[ "$result" -eq 43 ] || exit 48
+assert_umask 0027
+
+umask 0077
+mode=success
+go_gate_web_install
+mode=fail
+if go_gate_web_install; then exit 49; else result=$?; fi
+[ "$result" -eq 43 ] || exit 50
+mode=success
+go_gate_web_install
+assert_umask 0077
+
+umask 0077
+( mode=success; go_gate_web_install )
+assert_umask 0077
+
+umask 0077
+mode=normalize
+/bin/mkdir "$tree"
+/bin/chmod 700 "$tree"
+: >"$tree/file"
+/bin/chmod 600 "$tree/file"
+go_gate_web_install
+[ "$(/usr/bin/stat -f '%Lp' "$tree")" = 755 ] || exit 51
+[ "$(/usr/bin/stat -f '%Lp' "$tree/file")" = 644 ] || exit 52
+
+for signal in hup int term; do
+    umask 0077
+    mode=$signal
+    if go_gate_web_install 2>/dev/null; then exit 53; else result=$?; fi
+    case "$signal" in
+        hup) [ "$result" -eq 129 ] || exit 54 ;;
+        int) [ "$result" -eq 130 ] || exit 55 ;;
+        term) [ "$result" -eq 143 ] || exit 56 ;;
+    esac
+    assert_umask 0077
+done
+EOF
+/bin/chmod 700 "$web_install_fixture"
+web_install_log="$temporary/web-install.log"
+web_install_tree="$temporary/web-node-modules"
+if ! /bin/sh "$web_install_fixture" "$repository_root/scripts/go-fast-stage.sh" "$web_install_log" "$web_install_tree"; then
+    fail "web install umask fixture failed"
+fi
+
 printf '# mutation\n' >>"$fast_go"
 if go_gate_before_stage; then fail "in-place Go mutation was accepted"; fi
 go_gate_go_hash=$(go_gate_hash "$fast_go")
