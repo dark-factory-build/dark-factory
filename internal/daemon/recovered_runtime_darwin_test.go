@@ -64,6 +64,45 @@ func TestOpenRecoveredRuntimeValidatesPopulatedEvidenceWithoutMutation(t *testin
 	assertFDCensus(t, before)
 }
 
+func TestOpenRecoveredRuntimeAcceptsRootBeforeTokenPublicationWithoutMutation(t *testing.T) {
+	beforeFDs := openFDCensus(t)
+	parentPath := filepath.Join(runtimeTempDir(t), "private")
+	if err := os.Mkdir(parentPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	parent := createManagedParent(t, parentPath)
+	runtime, err := CreateRuntime(parent, "run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, identity := mustRuntimeValues(t, runtime)
+	if err := runtime.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotRuntimeGraph(t, path)
+	recovered, err := OpenRecoveredRuntime(context.Background(), parent, "run", identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := recovered.InspectEvidence(context.Background(), kernel.AttemptDigest{}, nil, false)
+	if err != nil {
+		t.Fatalf("root-only evidence = %+v, %v", evidence, err)
+	}
+	if evidence.AttemptToken || evidence.WorkerConfig || evidence.Terminal != nil {
+		t.Fatalf("root-only evidence was populated: %+v", evidence)
+	}
+	if err := recovered.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if after := snapshotRuntimeGraph(t, path); after != before {
+		t.Fatalf("root-only recovery mutated graph\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+	if err := parent.Close(); err != nil {
+		t.Fatal(err)
+	}
+	assertFDCensus(t, beforeFDs)
+}
+
 func TestOpenRecoveredRuntimeRejectsMalformedCensusAndReplacement(t *testing.T) {
 	mutations := map[string]func(*testing.T, string){
 		"missing home": func(t *testing.T, path string) {

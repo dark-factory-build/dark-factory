@@ -17,6 +17,8 @@ func testTerminal(attempt, message string) Terminal {
 	return Terminal{AttemptID: attempt, Process: Identity{PID: 22, PGID: 22, Birth: Birth{Seconds: 3, Microseconds: 4}}, Exit: Exit{Code: 0}, Message: message}
 }
 
+func line(raw string) string { return raw + "\n" }
+
 func openTestSpool(t *testing.T) (string, *os.File) {
 	t.Helper()
 	root := t.TempDir()
@@ -475,26 +477,27 @@ func TestTerminalLoadRejectsSymlinkAndTrailingData(t *testing.T) {
 }
 
 func TestTerminalLoadRejectsAmbiguousJSONAndInvalidExitUnion(t *testing.T) {
-	valid := `{"attempt_id":"attempt","process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":{"code":0,"signal":0,"aborted":false}}`
+	validJSON := `{"attempt_id":"attempt","process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":{"code":0,"signal":0,"aborted":false}}`
+	valid := line(validJSON)
 	invalidJSON := map[string]string{
-		"duplicate top-level":            `{"attempt_id":"attempt","attempt_id":"other","process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":{"code":0,"signal":0,"aborted":false}}\n`,
-		"duplicate nested":               `{"attempt_id":"attempt","process":{"pid":22,"pid":23,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":{"code":0,"signal":0,"aborted":false}}\n`,
-		"duplicate top-level case alias": `{"attempt_id":"attempt","ATTEMPT_ID":"other","process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":{"code":0,"signal":0,"aborted":false}}\n`,
-		"duplicate nested case alias":    `{"attempt_id":"attempt","process":{"pid":22,"PID":23,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":{"code":0,"signal":0,"aborted":false}}\n`,
-		"top-level case alias":           `{"ATTEMPT_ID":"attempt","process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":{"code":0,"signal":0,"aborted":false}}\n`,
-		"nested case aliases":            `{"attempt_id":"attempt","process":{"PID":22,"PGID":22,"birth":{"SECONDS":3,"MICROSECONDS":4}},"exit":{"CODE":0,"SIGNAL":0,"ABORTED":false}}\n`,
-		"omitted exit":                   `{"attempt_id":"attempt","process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}}}\n`,
-		"null exit":                      `{"attempt_id":"attempt","process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":null}\n`,
-		"omitted process":                `{"attempt_id":"attempt","exit":{"code":0,"signal":0,"aborted":false}}\n`,
-		"null process":                   `{"attempt_id":"attempt","process":null,"exit":{"code":0,"signal":0,"aborted":false}}\n`,
-		"omitted birth":                  `{"attempt_id":"attempt","process":{"pid":22,"pgid":22},"exit":{"code":0,"signal":0,"aborted":false}}\n`,
-		"null birth":                     `{"attempt_id":"attempt","process":{"pid":22,"pgid":22,"birth":null},"exit":{"code":0,"signal":0,"aborted":false}}\n`,
-		"unknown":                        `{"attempt_id":"attempt","process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":{"code":0,"signal":0,"aborted":false},"authority":true}\n`,
-		"alternate order":                `{"exit":{"code":0,"signal":0,"aborted":false},"process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"attempt_id":"attempt"}\n`,
-		"whitespace":                     ` {"attempt_id":"attempt","process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":{"code":0,"signal":0,"aborted":false}}\n`,
-		"numeric spelling":               `{"attempt_id":"attempt","process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":{"code":0.0,"signal":0,"aborted":false}}\n`,
+		"duplicate top-level":            line(`{"attempt_id":"attempt","attempt_id":"other","process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":{"code":0,"signal":0,"aborted":false}}`),
+		"duplicate nested":               line(`{"attempt_id":"attempt","process":{"pid":22,"pid":23,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":{"code":0,"signal":0,"aborted":false}}`),
+		"duplicate top-level case alias": line(`{"attempt_id":"attempt","ATTEMPT_ID":"other","process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":{"code":0,"signal":0,"aborted":false}}`),
+		"duplicate nested case alias":    line(`{"attempt_id":"attempt","process":{"pid":22,"PID":23,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":{"code":0,"signal":0,"aborted":false}}`),
+		"top-level case alias":           line(`{"ATTEMPT_ID":"attempt","process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":{"code":0,"signal":0,"aborted":false}}`),
+		"nested case aliases":            line(`{"attempt_id":"attempt","process":{"PID":22,"PGID":22,"birth":{"SECONDS":3,"MICROSECONDS":4}},"exit":{"CODE":0,"SIGNAL":0,"ABORTED":false}}`),
+		"omitted exit":                   line(`{"attempt_id":"attempt","process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}}}`),
+		"null exit":                      line(`{"attempt_id":"attempt","process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":null}`),
+		"omitted process":                line(`{"attempt_id":"attempt","exit":{"code":0,"signal":0,"aborted":false}}`),
+		"null process":                   line(`{"attempt_id":"attempt","process":null,"exit":{"code":0,"signal":0,"aborted":false}}`),
+		"omitted birth":                  line(`{"attempt_id":"attempt","process":{"pid":22,"pgid":22},"exit":{"code":0,"signal":0,"aborted":false}}`),
+		"null birth":                     line(`{"attempt_id":"attempt","process":{"pid":22,"pgid":22,"birth":null},"exit":{"code":0,"signal":0,"aborted":false}}`),
+		"unknown":                        line(`{"attempt_id":"attempt","process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":{"code":0,"signal":0,"aborted":false},"authority":true}`),
+		"alternate order":                line(`{"exit":{"code":0,"signal":0,"aborted":false},"process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"attempt_id":"attempt"}`),
+		"whitespace":                     line(` {"attempt_id":"attempt","process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":{"code":0,"signal":0,"aborted":false}}`),
+		"numeric spelling":               line(`{"attempt_id":"attempt","process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":{"code":0.0,"signal":0,"aborted":false}}`),
 		"trailing":                       valid + `{}`,
-		"truncated":                      valid[:len(valid)-1],
+		"truncated":                      line(validJSON[:len(validJSON)-1]),
 		"oversized":                      valid + strings.Repeat(" ", maxTerminalBytes),
 	}
 	for name, body := range invalidJSON {
@@ -538,5 +541,20 @@ func TestTerminalLoadRejectsAmbiguousJSONAndInvalidExitUnion(t *testing.T) {
 				t.Fatalf("invalid exit loaded: %v", err)
 			}
 		})
+	}
+}
+
+func TestTerminalLoadRejectsLFFramedNonCanonicalTerminal(t *testing.T) {
+	root, dir := openTestSpool(t)
+	body := line(`{"exit":{"code":0,"signal":0,"aborted":false},"process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"attempt_id":"attempt"}`)
+	path := filepath.Join(root, TerminalSpoolName)
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadTerminal(dir, TerminalSpoolName); !errors.Is(err, ErrIdentity) {
+		t.Fatalf("LF-framed alternate order accepted: %v", err)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != body {
+		t.Fatalf("rejected canonicality fixture changed: %q, %v", got, err)
 	}
 }
