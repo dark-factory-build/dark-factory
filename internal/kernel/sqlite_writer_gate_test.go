@@ -3,11 +3,15 @@ package kernel
 import (
 	"bytes"
 	"context"
+	"database/sql"
+	sqldriver "database/sql/driver"
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	sqliteDriver "github.com/ncruces/go-sqlite3/driver"
 )
 
 func TestWriterAdmissionHonorsContextBeforeSQL(t *testing.T) {
@@ -406,6 +410,103 @@ func TestPostPoolRejectionRetainsFilesWhenPoolCloseIsUncertain(t *testing.T) {
 	assertReplacementSQLiteHomeUnchanged(t, path, replacements)
 }
 
+func TestFiniteConnectorRetainsRawConnectionForgottenByDatabaseSQLClose(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "close-uncertain.db")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	base, err := (&sqliteDriver.SQLite{}).OpenConnector(configuredDataSource(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := base.Connect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	driverConnection, ok := raw.(sqliteDriver.Conn)
+	if !ok {
+		_ = raw.Close()
+		t.Fatalf("sqlite connection has type %T", raw)
+	}
+	closeBusy := errors.New("injected raw sqlite close BUSY")
+	failing := &closeFailingSQLiteConnection{Conn: driverConnection, err: closeBusy}
+	source := &singleSQLiteConnectionConnector{connection: failing}
+	connector := &finiteConnector{
+		Connector:     source,
+		kind:          "raw retention test",
+		remaining:     1,
+		recheck:       func() error { return nil },
+		activationCtx: context.Background(),
+	}
+	pool := sql.OpenDB(connector)
+	pool.SetMaxOpenConns(1)
+	pool.SetMaxIdleConns(1)
+	t.Cleanup(func() { _ = driverConnection.Close() })
+
+	checkedOut, err := pool.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkedOut.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.Close(); !errors.Is(err, closeBusy) {
+		t.Fatalf("database/sql pool Close = %v, want raw close BUSY", err)
+	}
+	if failing.closeCalls != 1 {
+		t.Fatalf("raw Close calls = %d, want one", failing.closeCalls)
+	}
+	if stats := pool.Stats(); stats.OpenConnections != 0 {
+		t.Fatalf("database/sql retained %d open connections after failed raw Close", stats.OpenConnections)
+	}
+	if err := pool.Close(); err != nil {
+		t.Fatalf("repeated database/sql pool Close = %v, want nil after it forgot the raw connection", err)
+	}
+	if failing.closeCalls != 1 {
+		t.Fatalf("database/sql retried raw Close %d times, want one", failing.closeCalls)
+	}
+	if source.connects != 1 {
+		t.Fatalf("physical Connect calls = %d, want one", source.connects)
+	}
+	connector.mu.Lock()
+	retained := len(connector.connections) == 1 && connector.connections[0] == failing
+	connector.mu.Unlock()
+	if !retained {
+		t.Fatalf("finite connector retained raw connections = %#v, want exact %p", connector.connections, failing)
+	}
+	if err := failing.Raw().Exec("SELECT 1"); err != nil {
+		t.Fatalf("exact retained raw sqlite connection is not live after database/sql forgot it: %v", err)
+	}
+}
+
+type closeFailingSQLiteConnection struct {
+	sqliteDriver.Conn
+	err        error
+	closeCalls int
+}
+
+func (connection *closeFailingSQLiteConnection) Close() error {
+	connection.closeCalls++
+	return connection.err
+}
+
+type singleSQLiteConnectionConnector struct {
+	connection sqldriver.Conn
+	connects   int
+}
+
+func (connector *singleSQLiteConnectionConnector) Connect(context.Context) (sqldriver.Conn, error) {
+	connector.connects++
+	if connector.connects != 1 {
+		return nil, errors.New("unexpected second physical sqlite connection")
+	}
+	return connector.connection, nil
+}
+
+func (*singleSQLiteConnectionConnector) Driver() sqldriver.Driver {
+	return &sqliteDriver.SQLite{}
+}
+
 func openOperationalDescriptors(t *testing.T, path string) (*os.File, *os.File) {
 	t.Helper()
 	home, err := os.Open(filepath.Dir(path))
@@ -483,9 +584,6 @@ func assertRetainedDatabaseFilesLive(t *testing.T, files *databaseFiles) {
 func releaseRetainedStoreForTest(store *Store) {
 	if store == nil {
 		return
-	}
-	for _, connection := range store.connections {
-		_ = connection.Close()
 	}
 	if store.readers != nil {
 		_ = store.readers.Close()

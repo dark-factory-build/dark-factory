@@ -25,7 +25,6 @@ const (
 type Store struct {
 	writer      *sql.DB
 	readers     *sql.DB
-	connections []*sql.Conn // activation checkouts whose return was uncertain
 	writerGate  chan struct{}
 	bindingMu   sync.RWMutex
 	pathBinding *databaseFiles
@@ -43,18 +42,14 @@ func newStore() *Store {
 func openFixedPools(ctx context.Context, store *Store, path string, recheck func() error) error {
 	activationCtx, cancel := context.WithTimeout(ctx, 2*time.Duration(busyMilliseconds)*time.Millisecond)
 	defer cancel()
-	var err error
-	var connections []*sql.Conn
-	connections, err = openFixedPool(activationCtx, path, "writer", 1, recheck, &store.writer)
-	store.connections = append(store.connections, connections...)
+	err := openFixedPool(activationCtx, path, "writer", 1, recheck, &store.writer)
 	if err != nil {
 		if store.writer != nil {
 			store.retainCloseUncertainty(err)
 		}
 		return errors.Join(err, store.Close())
 	}
-	connections, err = openFixedPool(activationCtx, path, "reader", maxReaders, recheck, &store.readers)
-	store.connections = append(store.connections, connections...)
+	err = openFixedPool(activationCtx, path, "reader", maxReaders, recheck, &store.readers)
 	if err != nil {
 		if store.readers != nil {
 			store.retainCloseUncertainty(err)
@@ -199,10 +194,10 @@ func (connector *finiteConnector) seal() {
 	connector.mu.Unlock()
 }
 
-func openFixedPool(ctx context.Context, path, kind string, limit int, recheck func() error, owner **sql.DB) (retainedConnections []*sql.Conn, resultErr error) {
+func openFixedPool(ctx context.Context, path, kind string, limit int, recheck func() error, owner **sql.DB) (resultErr error) {
 	base, err := (&sqliteDriver.SQLite{}).OpenConnector(configuredDataSource(path))
 	if err != nil {
-		return nil, fmt.Errorf("open sqlite pool: %w", err)
+		return fmt.Errorf("open sqlite pool: %w", err)
 	}
 	connector := &finiteConnector{Connector: base, kind: kind, remaining: limit, recheck: recheck, activationCtx: ctx}
 	pool := sql.OpenDB(connector)
@@ -210,6 +205,7 @@ func openFixedPool(ctx context.Context, path, kind string, limit int, recheck fu
 	pool.SetMaxOpenConns(limit)
 	pool.SetMaxIdleConns(limit)
 	connections := make([]*sql.Conn, 0, limit)
+	checkoutReturnUncertain := false
 	defer func() {
 		if resultErr == nil {
 			return
@@ -221,51 +217,51 @@ func openFixedPool(ctx context.Context, path, kind string, limit int, recheck fu
 				continue
 			}
 			if err := connection.Close(); err != nil {
-				retainedConnections = append(retainedConnections, connection)
+				checkoutReturnUncertain = true
 				closeErr = errors.Join(closeErr, err)
 			}
 		}
 		closeErr = errors.Join(closeErr, closeSQLitePool(kind, pool))
 		resultErr = errors.Join(resultErr, closeErr)
-		if closeErr == nil && len(retainedConnections) == 0 && !errors.Is(resultErr, errPhysicalConnectionCloseUncertain) {
+		if closeErr == nil && !checkoutReturnUncertain && !errors.Is(resultErr, errPhysicalConnectionCloseUncertain) {
 			*owner = nil
 		}
 	}()
 	for len(connections) < limit {
 		connection, err := pool.Conn(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("pin %s sqlite connection %d: %w", kind, len(connections)+1, err)
+			return fmt.Errorf("pin %s sqlite connection %d: %w", kind, len(connections)+1, err)
 		}
 		connections = append(connections, connection)
 		if err := verifyConnection(ctx, connection); err != nil {
-			return nil, fmt.Errorf("verify pinned %s sqlite connection %d: %w", kind, len(connections), err)
+			return fmt.Errorf("verify pinned %s sqlite connection %d: %w", kind, len(connections), err)
 		}
 		if sqliteConnectHook != nil {
 			if err := sqliteConnectHook(kind+" verified", len(connections)); err != nil {
-				return nil, err
+				return err
 			}
 		}
 		if err := recheck(); err != nil {
-			return nil, err
+			return err
 		}
 	}
 	if err := recheck(); err != nil {
-		return nil, err
+		return err
 	}
 	connector.seal()
 	for index, connection := range connections {
 		connections[index] = nil
 		if err := connection.Close(); err != nil {
-			retainedConnections = append(retainedConnections, connection)
-			return retainedConnections, fmt.Errorf("return pinned %s sqlite connection %d: %w", kind, index+1, err)
+			checkoutReturnUncertain = true
+			return fmt.Errorf("return pinned %s sqlite connection %d: %w", kind, index+1, err)
 		}
 	}
 	connections = nil
 	stats := pool.Stats()
 	if stats.OpenConnections != limit || stats.Idle != limit {
-		return nil, fmt.Errorf("%w: pinned %s sqlite pool has open=%d idle=%d, want %d", ErrCorruptState, kind, stats.OpenConnections, stats.Idle, limit)
+		return fmt.Errorf("%w: pinned %s sqlite pool has open=%d idle=%d, want %d", ErrCorruptState, kind, stats.OpenConnections, stats.Idle, limit)
 	}
-	return nil, nil
+	return nil
 }
 
 func configuredDataSource(path string) string {
