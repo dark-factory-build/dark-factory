@@ -25,8 +25,8 @@ try {
     });
     await flush();
   });
-  const open = renderer.root.findAllByType("button").find((button) => button.props.children === "OPEN TERMINAL");
-  assert.ok(open, "public FactoryApp must expose the agent terminal action");
+  const open = renderer.root.findAllByType("button").find((button) => typeof button.props.className === "string" && button.props.className.includes("dfConsoleStrip__agent"));
+  assert.ok(open, "public FactoryApp must expose the agent strip terminal action");
   await act(async () => {
     open.props.onClick();
     await flush();
