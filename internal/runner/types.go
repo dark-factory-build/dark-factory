@@ -97,6 +97,17 @@ type ExecSpec struct {
 	Control *os.File
 }
 
+// ExecutableCommitment freezes one exact direct native executable. Its
+// fields stay private so callers can carry, but cannot forge or weaken, the
+// identity and content commitment made by CommitExecutableLocator.
+type ExecutableCommitment struct{ executable fileCommitment }
+
+func (ExecutableCommitment) String() string   { return "runner executable commitment (private)" }
+func (ExecutableCommitment) GoString() string { return "runner.ExecutableCommitment{private}" }
+func (commitment ExecutableCommitment) Path() string {
+	return commitment.executable.Path
+}
+
 type LaunchSpec struct {
 	commit           launchCommitment
 	stdin            []byte

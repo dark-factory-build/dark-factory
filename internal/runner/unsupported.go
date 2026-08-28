@@ -13,6 +13,13 @@ type GateLease struct{}
 type OwnedChild struct{}
 
 func PrepareExecSpec(ExecSpec) (*LaunchSpec, error) { return nil, ErrUnsupported }
+func PrepareCommittedExecSpec(ExecutableCommitment, []string, []string, string) (*LaunchSpec, error) {
+	return nil, ErrUnsupported
+}
+func CommitExecutableLocator(string) (ExecutableCommitment, error) {
+	return ExecutableCommitment{}, ErrUnsupported
+}
+func (ExecutableCommitment) Verify() error { return ErrUnsupported }
 func CreateGateLease(*os.File, *os.File, string) (*GateLease, FileIdentity, error) {
 	return nil, FileIdentity{}, ErrUnsupported
 }
