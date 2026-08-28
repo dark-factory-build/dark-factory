@@ -97,7 +97,7 @@ func runAttemptWorkerHelper(args []string) error {
 			initialInput = []byte("one-startup\n")
 		}
 		provider = ExecSpec{Target: "/bin/sh", Args: []string{"-c", script}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: providerCwd}
-	case "binary", "seam", "lifetime", "lease-seam", "cwd", "cwd-seam", "cwd-unrelated", "cwd-file", "cwd-closed", "cwd-reused", "cwd-mode", "cwd-inherited":
+	case "binary", "seam", "lifetime", "lease-seam", "cwd", "cwd-seam", "cwd-unrelated", "cwd-file", "cwd-closed", "cwd-reused", "cwd-mode", "cwd-inherited", "cwd-inherited-19", "cwd-inherited-20", "cwd-inherited-30":
 		if len(args) != 3 {
 			return errors.New("attempt worker: missing binary target")
 		}
@@ -108,7 +108,7 @@ func runAttemptWorkerHelper(args []string) error {
 		if strings.HasPrefix(mode, "cwd") {
 			providerCwd = filepath.Join(root, "change", "work")
 		}
-		if mode == "cwd" || mode == "cwd-seam" || mode == "cwd-inherited" {
+		if mode == "cwd" || mode == "cwd-seam" || strings.HasPrefix(mode, "cwd-inherited") {
 			providerArgs = []string{"--cwd-provider", root}
 		}
 		provider = ExecSpec{Target: args[2], Args: providerArgs, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: providerCwd}
@@ -133,14 +133,24 @@ func runAttemptWorkerHelper(args []string) error {
 	if err != nil {
 		return err
 	}
-	if mode == "cwd-inherited" {
-		inherited, err := unix.FcntlInt(cwd.Fd(), unix.F_DUPFD, 20)
-		if err != nil {
+	inheritedFD := 0
+	if strings.HasPrefix(mode, "cwd-inherited") {
+		fd := 20
+		if mode != "cwd-inherited" {
+			parsed, err := strconv.Atoi(strings.TrimPrefix(mode, "cwd-inherited-"))
+			if err != nil || parsed <= 2 {
+				cwd.Close()
+				return errors.New("attempt worker: invalid inherited descriptor")
+			}
+			fd = parsed
+		}
+		inheritedFD = fd
+		if err := unix.Dup2(int(cwd.Fd()), fd); err != nil {
 			cwd.Close()
 			return err
 		}
-		if _, err := unix.FcntlInt(uintptr(inherited), unix.F_SETFD, 0); err != nil {
-			unix.Close(inherited)
+		if _, err := unix.FcntlInt(uintptr(fd), unix.F_SETFD, 0); err != nil {
+			unix.Close(fd)
 			cwd.Close()
 			return err
 		}
@@ -190,6 +200,12 @@ func runAttemptWorkerHelper(args []string) error {
 	if err := control.RegisterProviderInput(initialInput); err != nil {
 		cwd.Close()
 		return err
+	}
+	if strings.HasPrefix(mode, "cwd") {
+		if err := writeCwdDescriptorManifest(root, inheritedFD); err != nil {
+			cwd.Close()
+			return err
+		}
 	}
 	return control.ExecProvider(prepared, cwd)
 }
@@ -1206,14 +1222,36 @@ func TestCurrentExecRejectsExactInheritedDescriptor(t *testing.T) {
 	}
 	cases := []struct {
 		name  string
+		mode  string
 		setup func(t *testing.T, root string)
 		check func(t *testing.T, root string)
 	}{
 		{
-			name: "none",
+			name: "fd20",
+			mode: "cwd-inherited",
 			check: func(t *testing.T, root string) {
 				diagnostic, err := os.ReadFile(filepath.Join(root, "cwd.error"))
 				if err != nil || !strings.Contains(string(diagnostic), "cwd provider inherited fd 20") {
+					t.Fatalf("inherited descriptor diagnostic=%q err=%v", diagnostic, err)
+				}
+			},
+		},
+		{
+			name: "fd19",
+			mode: "cwd-inherited-19",
+			check: func(t *testing.T, root string) {
+				diagnostic, err := os.ReadFile(filepath.Join(root, "cwd.error"))
+				if err != nil || !strings.Contains(string(diagnostic), "cwd provider inherited fd 19") {
+					t.Fatalf("inherited descriptor diagnostic=%q err=%v", diagnostic, err)
+				}
+			},
+		},
+		{
+			name: "fd30",
+			mode: "cwd-inherited-30",
+			check: func(t *testing.T, root string) {
+				diagnostic, err := os.ReadFile(filepath.Join(root, "cwd.error"))
+				if err != nil || !strings.Contains(string(diagnostic), "cwd provider inherited fd 30") {
 					t.Fatalf("inherited descriptor diagnostic=%q err=%v", diagnostic, err)
 				}
 			},
@@ -1278,7 +1316,11 @@ func TestCurrentExecRejectsExactInheritedDescriptor(t *testing.T) {
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			f := newAttemptFixture(t, "cwd-inherited", executable)
+			mode := test.mode
+			if mode == "" {
+				mode = "cwd-inherited"
+			}
+			f := newAttemptFixture(t, mode, executable)
 			if test.setup != nil {
 				test.setup(t, f.root)
 			}

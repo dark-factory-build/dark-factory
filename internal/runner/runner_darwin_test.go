@@ -316,6 +316,83 @@ func writeCwdProviderDiagnostic(root string, message []byte) {
 	_ = file.Close()
 }
 
+const cwdDescriptorManifestName = "cwd.descriptors"
+
+type cwdDescriptorProof struct {
+	FileIdentity
+	Mode uint32
+}
+
+// writeCwdDescriptorManifest records the exact descriptors the fixture asks
+// the provider to inherit before exec. The provider's Go runtime may create
+// descriptors after exec (including unnamed sockets); matching both number
+// and fstat identity lets the child distinguish those from inheritance.
+func writeCwdDescriptorManifest(root string, inheritedFD int) error {
+	var manifest strings.Builder
+	for _, fd := range []int{10, inheritedFD} {
+		if fd == 0 {
+			continue
+		}
+		flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0)
+		if errors.Is(err, unix.EBADF) {
+			return err
+		}
+		if err != nil {
+			return err
+		}
+		if flags&unix.FD_CLOEXEC != 0 {
+			return ErrIdentity
+		}
+		var stat unix.Stat_t
+		if err := unix.Fstat(fd, &stat); err != nil {
+			return err
+		}
+		if stat.Dev == 0 || stat.Ino == 0 {
+			return ErrIdentity
+		}
+		fmt.Fprintf(&manifest, "%d %d %d %d\n", fd, stat.Dev, stat.Ino, stat.Mode)
+	}
+	return os.WriteFile(filepath.Join(root, cwdDescriptorManifestName), []byte(manifest.String()), 0o600)
+}
+
+func readCwdDescriptorManifest(root string) (map[int]cwdDescriptorProof, error) {
+	body, err := os.ReadFile(filepath.Join(root, cwdDescriptorManifestName))
+	if err != nil {
+		return nil, err
+	}
+	manifest := map[int]cwdDescriptorProof{}
+	for _, line := range strings.Split(strings.TrimSpace(string(body)), "\n") {
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 4 {
+			return nil, ErrIdentity
+		}
+		fd, err := strconv.Atoi(fields[0])
+		if err != nil || fd <= 2 {
+			return nil, ErrIdentity
+		}
+		device, err := strconv.ParseUint(fields[1], 10, 64)
+		if err != nil || device == 0 {
+			return nil, ErrIdentity
+		}
+		inode, err := strconv.ParseUint(fields[2], 10, 64)
+		if err != nil || inode == 0 {
+			return nil, ErrIdentity
+		}
+		mode, err := strconv.ParseUint(fields[3], 10, 32)
+		if err != nil {
+			return nil, ErrIdentity
+		}
+		if _, exists := manifest[fd]; exists {
+			return nil, ErrIdentity
+		}
+		manifest[fd] = cwdDescriptorProof{FileIdentity: FileIdentity{Device: device, Inode: inode}, Mode: uint32(mode)}
+	}
+	return manifest, nil
+}
+
 func runCwdProviderChecks(root string) error {
 	info, err := os.Stat(".")
 	if err != nil {
@@ -325,17 +402,21 @@ func runCwdProviderChecks(root string) error {
 	if !ok {
 		return ErrIdentity
 	}
+	manifest, err := readCwdDescriptorManifest(root)
+	if err != nil {
+		return err
+	}
 	directory, err := os.Open("/dev/fd")
 	if err != nil {
 		return err
 	}
 	defer directory.Close()
-	entries, err := directory.Readdirnames(-1)
+	entries, err := directory.ReadDir(-1)
 	if err != nil {
 		return err
 	}
 	for _, entry := range entries {
-		fd, err := strconv.Atoi(entry)
+		fd, err := strconv.Atoi(entry.Name())
 		if err != nil || fd <= 2 || fd == 10 || fd == int(directory.Fd()) {
 			continue
 		}
@@ -357,8 +438,11 @@ func runCwdProviderChecks(root string) error {
 		} else if err != nil {
 			return err
 		}
-		target, targetErr := os.Readlink(filepath.Join("/dev/fd", entry))
-		return fmt.Errorf("cwd provider inherited fd %d target=%q stat=%+v flags=%#x target_err=%v", fd, target, inherited, flags, targetErr)
+		want, ok := manifest[fd]
+		if !ok || want.Device != uint64(inherited.Dev) || want.Inode != inherited.Ino || want.Mode != uint32(inherited.Mode) {
+			continue
+		}
+		return fmt.Errorf("cwd provider inherited fd %d stat=%+v flags=%#x", fd, inherited, flags)
 	}
 	var lifetime unix.Stat_t
 	if err := unix.Fstat(10, &lifetime); err != nil || lifetime.Mode&unix.S_IFMT != unix.S_IFREG || lifetime.Size != 0 {
