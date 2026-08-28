@@ -49,6 +49,7 @@ const inventory = {
     "transcript.d.ts", "transcript.js", "provenance.json",
   ],
   ui: [
+    "console-screens.d.ts", "console-screens.js", "console-view.d.ts", "console-view.js",
     "factory-app-controller.d.ts", "factory-app-controller.js", "factory-app.d.ts", "factory-app.js",
     "factory-console.css", "factory-console.d.ts", "factory-console.js", "index.d.ts", "index.js",
     "terminal-controller.d.ts", "terminal-controller.js", "xterm-terminal.d.ts", "xterm-terminal.js",
