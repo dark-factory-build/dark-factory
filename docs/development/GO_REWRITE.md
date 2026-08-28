@@ -186,11 +186,12 @@ fallback. No part of this Local API contract is implemented at `497ecfe4`.
 
 The independently audited V1 decision remains one concrete
 `Store.AdmitNext(ctx, keys, at)` call, but the exact four-document contract is
-pending fresh review after `7e6d00c4` was **BLOCKED** on the capacity set,
-provider-start serialization and queued-corruption coverage. The call accepts
+pending fresh review after `d856dc7b` was **BLOCKED** on incomplete integrity
+across authority rows, an undefined eligibility term, incomplete queued payload/rank
+validation and an unproved retained-Change cap. The call accepts
 no caller `AgentID`, task ID, queue observation, pagination token, round-robin
-position or fairness cursor. `keys`
-contains a complete fresh daemon-minted candidate footprint for every call,
+position or fairness cursor. `keys` contains a complete fresh daemon-minted
+candidate footprint for every call,
 including an unconditional fresh candidate Change ID. That Change ID is used
 only when the transaction selects a worker task incarnation with no canonical
 Change row; an existing Change or selected non-worker ignores it. No candidate
@@ -202,16 +203,38 @@ footprint. The reconcile-only outcome when no such commit can be proved is
 `not_reconciled`; it is never a fresh scheduling reason. Before any fresh
 no-admission reason, the Store reads and validates the singleton global
 settings row; a missing row, unknown enum/status or invalid control value is
-`ErrCorruptState`. One concrete SQL corruption predicate then ranges over
-all structurally queued assignments and their required agent/profile/project
-controls. Missing required relations, unknown status/provider/mode/role/
-verification values, malformed IDs or revisions and invalid model/effort or
-other controls are `ErrCorruptState`, wherever that row would rank. An
-assigned task with an unknown status is included by this predicate rather than
-being silently classified as not queued. This is direct Store SQL, not an
-application row scan, validation framework or eligibility filter.
+`ErrCorruptState`; configured capacity is an integer in `[1, 1024]`. One
+concrete SQL integrity predicate then covers both:
 
-Only after global-settings validation and the queued corruption predicate pass
+- every row/relation/control that can occupy capacity or bind active authority,
+  including all run, attempt-credential, resource, terminal-session and Change
+  phase/control facts; and
+- every structurally queued task assignment plus its required agent, profile
+  and project controls and complete rank/payload facts.
+
+The first arm rejects an unknown run/resource/session/Change phase, invalid
+ID/revision/enum, missing required relation, phase/fact mismatch, incomplete or
+split provider pair, malformed resource/session footprint or authority whose
+scope cannot be derived exactly. Only after this predicate proves every run
+phase is one of `admitted`, `running`, `finalizing` or `terminal` may the Store
+count the first three for capacity. Fresh-schema `CHECK`, foreign-key and
+uniqueness constraints prevent ordinary invalid writes; this SQL predicate is
+the causal proof against constraint-bypassed or damaged durable state, not a
+second validation framework.
+
+The queued arm requires nonzero 16-byte IDs; positive work/task revisions;
+`priority` stored as an integer in `[-1000000, 1000000]`; `created_at_ms`
+stored as an integer in `[0, 9223372036854775807]`; a TEXT title of 1–1024
+encoded bytes; a TEXT body of 0–131072 encoded bytes; valid same-project
+assignment and
+durable role/provider/mode/profile/verification controls; and all queued-row
+blocked/proposal/terminal/completion/result payload columns absent. An assigned
+task with an unknown status is included rather than silently classified as not
+queued. Any malformed higher- or lower-ranked row returns `ErrCorruptState`.
+This is one direct Store SQL predicate, not an application row scan,
+validation framework or eligibility filter.
+
+Only after global-settings validation and the integrity predicate pass
 does the transaction apply this exact no-admission precedence:
 
 | Order | Transactional decision | Exact result |
@@ -222,12 +245,19 @@ does the transaction apply this exact no-admission precedence:
 | 4 | queued rows exist but none satisfies every durable eligibility predicate below | `no_eligible_work` |
 | 5 | select the globally canonical eligible task+agent, then validate its one canonical Change | commit the full footprint, or fail/return exactly as below without considering lower-ranked work |
 
-Eligibility is exactly: the task is queued; its assigned agent exists, is
+Eligibility is exactly: task status is `queued`; its assigned agent exists, is
 valid and belongs to the same project; that agent is not paused and has durable
-budget remaining; there is no conflicting open run; and the selected rows'
-role, provider, execution mode, profile, project and verification controls all
-validate. Known-valid paused, nonworking, budget-exhausted or conflicting-open-
-run rows are ordinary ineligibility and may produce `no_eligible_work`.
+budget remaining; the role is one of the
+two valid values (`worker` or `orchestrator`); and there is no conflicting open
+run. Both valid roles are eligible—role determines the admitted footprint,
+including whether a Change is required, not whether an external tool is
+currently available. Global dispatch-disabled is the earlier exact reason.
+Provider, execution-mode, profile, project and verification controls must be
+structurally valid under the integrity predicate, but valid external provider
+executable/configuration/auth availability is deliberately not eligibility.
+Known-valid paused, budget-exhausted or conflicting-open-run assignments are
+ordinary ineligibility and may produce `no_eligible_work`; known nonqueued task
+statuses are outside the queue.
 Corruption is never ineligibility: the preselection predicate blocks admission
 even when the malformed structurally queued row ranks below an otherwise valid
 candidate.
@@ -244,14 +274,13 @@ These are SQL predicates/order inside the transaction, not a scheduler census
 or memory filter. After selection, the Store validates the selected task
 incarnation's one canonical Change. A corrupt, unsettled or hard-invalid Change
 fails `ErrCorruptState` and is never skipped in favour of lower-priority work.
-If admitting that selected worker would exceed the durable factory-wide
-retained-Change hard cap, the result is the one explicit `change_capacity`
-no-admission reason with zero footprint; it likewise does not fall through.
+There is no separate Change-cap reason or unproved retained-Change count cap in
+V1.
 
 Only then does the transaction derive launch facts, select/reuse or reserve the
 Change, create the complete run/credential/resource/terminal/task/Change
 footprint and append every invalidation before commit. External repository
-availability and provider executable/configuration availability are
+availability and provider executable/configuration/auth availability are
 deliberately not stale eligibility filters; after admission their absence
 converges through typed `FailureSource` or `FailureSpawn`. A stale observation
 can never nominate work or authority. A lost reply reconciles only by the
@@ -274,26 +303,24 @@ priorities, inserts higher-priority work after a stale observation, exercises
 every eligibility/reason-precedence row, and performs concurrent admits at the
 last factory-capacity slot. One admitted setup-stalled run occupies that last
 slot exactly like running and finalizing runs. Exact ties use the 16-byte BLOB
-order. Tests put a corrupt/unsettled Change and a Change-cap-exceeding worker
-ahead of valid work
-and prove no skip. Restart changes no ordering because no cursor exists.
+order. Tests put a corrupt/unsettled Change ahead of valid work and prove no
+skip. Restart changes no ordering because no cursor exists.
 Required mutations accept a caller AgentID/task/cursor, enumerate agents before
 the transaction, select per-agent or from a cached/stale queue, check capacity/
 eligibility outside the write transaction, omit global-settings validation or
-the queued corruption predicate, let malformed higher- or lower-ranked queued
-controls fall through, exclude an
-admitted setup-stalled run from capacity, compare text IDs, reorder reasons,
-skip corrupt/cap-blocked canonical work, treat external availability as
-eligibility, omit a fresh footprint or conditionally mint the Change candidate,
-let that candidate select/reconcile an existing Change, or make process-local
+the integrity predicate, let malformed authority or higher/lower ranked queued
+facts fall through, exclude an admitted setup-stalled run from capacity,
+compare text IDs, reorder reasons, skip corrupt canonical work, treat external
+availability as eligibility, omit a fresh footprint or conditionally mint the
+Change candidate, let that candidate select/reconcile an existing Change, or make process-local
 fairness state affect the choice. Each must be killed by the committed-footprint
 and external-effect tests.
 
 #### Corrected Change disposition and descriptor contract (planned)
 
 Successive cold reviews **BLOCKED** the literal `c732f103`, `f05eff86`,
-`88a8ab22`, `884d63c3`, `7dc2e83b`, `a8d3c395`, `c38ce8a6`, `4a9b7672`
-and `7e6d00c4`
+`88a8ab22`, `884d63c3`, `7dc2e83b`, `a8d3c395`, `c38ce8a6`, `4a9b7672`,
+`7e6d00c4` and `d856dc7b`
 plans. They found stale retry revision, child-live abandonment, caller-selected
 reuse, incomplete crash recovery, a leaked staging namespace, contradictory
 worker executables and finally a transient no-start receipt that became
@@ -302,7 +329,10 @@ ready-frame distinction, no honest outer-runner starting uncertainty, missing
 initial-tree durability, insufficient prepared-abandonment owner proof and
 cross-document admission conflicts. The `7e6d00c4` review then found a capacity
 undercount, an outcome race that could strand a declared empty provider pair,
-and incomplete queued-corruption coverage. The contract below incorporates
+and incomplete queued-corruption coverage. The `d856dc7b` review found that
+unknown authority phases could escape capacity, queued rank/payload facts were
+still underspecified, eligibility contained an undefined label and the
+retained-Change cap was not real. The contract below incorporates
 every required correction and supersedes those literal tables. It still
 requires a fresh independent exact-contract **ALLOW** before implementation
 begins. No production Change schema, runner or worker code has implemented it
@@ -714,11 +744,19 @@ ambiguous stage has no durable identity and remains `reserved` with the run
 finalizing; recovery never deletes it. No stage identity, receipt, table or
 durable unresolved phase is added merely to reclaim this crash residue.
 
-The number of these residues is bounded by the same retained-Change count cap,
-and the admitted run that can create one occupies the single all-nonterminal
-capacity set. The intended residue is empty because population is not released
-before the `prepared` commitment; accepted materialized trees are later bounded
-by the central scanner's entry, byte and depth limits. Those limits do **not**
+Each such `reserved` residue belongs to the one exact Change of one admitted/
+finalizing worker run. For configured capacity `C`, its count is therefore:
+
+```text
+reserved residue count <= nonterminal worker runs
+                       <= all nonterminal runs <= C <= 1024
+```
+There is no separate retained-Change count cap. Terminal retained Changes need
+an explicit retention/count/byte policy before cutover; until that policy is
+chosen, their aggregate storage is an acknowledged cutover blocker rather than
+an admission reason. The intended residue is empty because population is not
+released before the `prepared` commitment; accepted materialized trees are
+later bounded by the central scanner's entry, byte and depth limits. Those limits do **not**
 bound a same-UID-replaced present `reserved` stage that recovery correctly
 refuses to traverse. A storage-byte bound for that adversarial residue is thus
 an explicit missing implementation/cutover gate, visible in diagnostics and
@@ -3118,6 +3156,7 @@ factoryctl web bootstrap/recovery GREEN
 public UI BUILDING/AGENT/NEEDS YOU/terminal/accessibility/responsive gate GREEN
 private site exact-artifact pair/state/terminal/request/cancel/refresh integration GREEN
 fresh isolated install/service/restart/uninstall GREEN
+terminal Change retention count/byte policy and adversarial reserved-residue storage bound GREEN
 whole-runtime/web elegance audit complete
 independent exact-head architecture/security/process/Store/browser reviews ALLOW
 hosted-origin compromise/revocation runbook recorded in SECURITY.md
@@ -3230,16 +3269,18 @@ not a compatibility target.
   commit in one transaction.
 - Admission is one global immediate write transaction. `AdmitNext` accepts
   fresh daemon IDs but no AgentID, task, observation or cursor; it reads durable
-  dispatch and the one capacity set containing every admitted, running and
-  finalizing run; validates global settings and executes the one all-queued-
-  control corruption predicate; then applies exact reason precedence and eligibility, selecting the
+  dispatch and, before counting, uses one integrity predicate to validate every
+  run/resource/session/Change/credential authority fact and all queued rank/
+  payload/control facts. It then counts every admitted, running and finalizing
+  run in the one capacity set and applies exact reason precedence/eligibility,
+  selecting the
   canonical eligible task+agent by priority descending then creation time/exact
   16-byte BLOB task ID ascending, validates rather than skips its one Change,
   derives launch policy, binds exact task incarnation/revision, and creates the
   complete run/credential/resource/session footprint and invalidations before
-  any external effect. Change-cap refusal is `change_capacity` with zero
-  footprint. External repository/provider availability is post-admission typed
-  failure. `RunNext` launches only from that committed Run.
+  any external effect. There is no separate Change-cap reason. External
+  repository/provider executable/configuration/auth availability is post-
+  admission typed failure. `RunNext` launches only from that committed Run.
 - One random credential belongs to one exact admitted/running attempt, but it
   authenticates attempt requests only while that exact run is `running`.
   Authentication derives project, agent, task, run, role, provider, execution
@@ -3421,9 +3462,12 @@ not a compatibility target.
   running, and cleanup-stalled finalizing runs all consume the one Store-owned
   factory-wide capacity set; independent unique constraints permit at most one
   nonterminal run per agent, task incarnation, and Change. The same immediate
-  transaction validates global settings and runs the one all-structurally-
-  queued corruption predicate before ordinary dispatch/eligibility reasons.
-  Valid paused/nonworking agents and exhausted durable budget are ineligible; malformed facts
+  transaction validates global settings and runs the one capacity/authority/
+  queued-rank-and-payload integrity predicate before ordinary
+  dispatch/eligibility reasons.
+  Valid paused agents, exhausted durable budget and open-run conflicts make
+  queued work ineligible; task status defines queue membership, and either
+  valid role remains eligible while determining the footprint. Malformed facts
   fail `ErrCorruptState`. The guarded task update, Change, credential,
   resources, run, session and invalidations commit with the global selection.
 
@@ -4136,7 +4180,7 @@ contracts.
 | Invariant | Causal Go proof | Required mutation killed |
 | --- | --- | --- |
 | SQLite configuration | On native macOS and Linux, open fresh/reopen/concurrent connections; assert foreign keys on every pooled connection, WAL readers during an immediate writer, bounded busy behavior, literal immediate exclusion, rollback after SIGKILL, and acknowledged state/event survival | deferred `BEGIN`; connection without PRAGMAs; swallowed/unbounded busy error; split transaction |
-| Atomic canonical admission | Call `AdmitNext` without AgentID/task/cursor while racing multi-agent priority and stale insertion; exercise exact dispatch/all-nonterminal-capacity/queue/eligibility/Change precedence, every validated durable control, 16-byte BLOB ties, corrupt or Change-cap-blocked canonical work ahead of valid work, post-admission source/provider failure, and two admits at the last factory slot; prove an admitted setup-stalled run occupies that slot, fresh IDs, RunID-only reconciliation, exact zero/full footprints and unchanged restart order. Corrupt global settings and put every malformed queued relation/control class both above and below valid work; direct settings validation and the one concrete queued SQL corruption predicate must block all admission | caller AgentID/task/cursor; per-agent/cache selection; eligibility/capacity outside `BEGIN IMMEDIATE`; omit admitted from capacity; application validation scan; filter malformed higher/lower queued work; text-ID tie; wrong reason precedence; skip corrupt/unsettled/cap-blocked canonical work; external-availability filter; optional/reused candidate; process-local fairness; launch from observed Run |
+| Atomic canonical admission | Call `AdmitNext` without AgentID/task/cursor while racing multi-agent priority and stale insertion; exercise exact integrity/dispatch/all-nonterminal-capacity/queue/eligibility/Change precedence, 16-byte BLOB ties, corrupt canonical work ahead of valid work, post-admission source/provider failure, and two admits at the last factory slot; prove an admitted setup-stalled run occupies that slot, fresh IDs, RunID-only reconciliation, exact zero/full footprints and unchanged restart order. Corrupt global settings; every run/credential/resource/session/Change phase/relation/pair/ID/revision/enum authority class; and every queued priority/time/title/body/lifecycle-payload/control class above and below valid work. Direct settings validation and the one concrete SQL integrity predicate must block all admission before capacity | caller AgentID/task/cursor; per-agent/cache selection; integrity/eligibility/capacity outside `BEGIN IMMEDIATE`; count before integrity; omit admitted from capacity; application validation scan; filter malformed authority or higher/lower queued work; invalid ranking/payload accepted; text-ID tie; wrong reason precedence; skip corrupt canonical work; external-availability filter; optional/reused candidate; process-local fairness; launch from observed Run |
 | Canonical Change admission/revision | In that same write transaction, insert work ahead of a stale caller, select the Change by canonical task incarnation, ignore the always-fresh candidate when a row exists, and require its unique settling predecessor to have `admitted_task_work_revision == task.work_revision-1`; prove fresh/retained/abandoned runs bind their actual ID and exact admitted-relative deltas, then reconcile a lost reply after later Change progress | optional/reused candidate; compare candidate on reuse; timestamp/latest-run predecessor; caller phase/revision/path; `>` revision check; require current revision during reconciliation |
 | Commit ambiguity | Cut/interrupt begin, commit response, and rollback; discard handle, reopen, reconcile by domain ID/revision, return outcome-unknown where not provable, and perform no second transition | retry blindly; reuse ambiguous connection; generic receipt fallback |
 | Fresh schema allowlist | Query schema objects and columns after init and assert the exact allowlist excludes operations, mutation receipts, decisions, quarantine, intake, compatibility, migration residue and unused durable Change repository identity | add speculative authority table; retain Rust compatibility object; add `repository_dev`/`repository_inode` |
@@ -4173,7 +4217,7 @@ contracts.
 ### Required crash cuts
 
 - before/after RunID reconciliation, global-settings validation and the one
-  concrete queued corruption predicate,
+  concrete capacity/authority/queued-rank-and-payload integrity predicate,
   dispatch/all-nonterminal-capacity checks (including an admitted setup-stalled
   last-slot run), global eligible task/agent selection, BLOB tie comparison,
   every reason-precedence boundary,
@@ -4305,15 +4349,18 @@ At minimum record the killing test for:
   priority/creation-time/16-byte-BLOB-task-ID ties, SQL eligibility, exact
   reason precedence and concurrent all-nonterminal factory-capacity
   enforcement, including an admitted setup-stalled last-slot run;
+- integrity-before-capacity across unknown or malformed run/credential/
+  resource/session/Change phases, relations, pairs, IDs, revisions and enums;
+  the test kills counting only recognized phases and thereby hiding corruption;
 - refusal of caller AgentID/task/cursor or agent enumeration/cache/fairness
   state, unconditional fresh candidate Change ID, RunID-only reconciliation and
   restart independence from any scheduler cursor;
-- canonical Change corruption and `change_capacity` refusing with zero
-  footprint/no lower-work skip, global-setting corruption and every malformed
-  higher/lower structurally queued relation/control class returning
-  `ErrCorruptState` through direct settings validation and the one concrete
-  queued SQL predicate, and repository/
-  provider availability becoming post-admission typed failure;
+- canonical Change corruption refusing with zero footprint/no lower-work skip,
+  global-setting corruption, every malformed capacity/authority row and every
+  malformed higher/lower structurally queued rank/payload/relation/control
+  class returning `ErrCorruptState` before the capacity count through direct
+  settings validation and the one concrete SQL integrity predicate, and
+  repository/provider availability becoming post-admission typed failure;
 - attempt phase/credential check and operator fallback;
 - `EPERM`, malformed PID/PGID, and weak identity handling;
 - finalization idempotency and released-resource terminality;
@@ -4605,13 +4652,16 @@ durability for initial stage, recovered final and provider-written settlement;
 a digest alone cannot close dirty-page or rename/parent-fsync cuts.
 Cross-filesystem rename and crash ambiguity must fail visibly.
 
-The global retained-Change cap and all-nonterminal run capacity bound the count
-of ambiguous `reserved` residues. The intended pre-`prepared` residue is empty,
+The all-nonterminal run capacity bounds the count of ambiguous `reserved`
+residues because each belongs to one such run; no separate retained-Change cap
+exists. The intended pre-`prepared` residue is empty,
 and every accepted tree is entry/byte/depth bounded. A same-UID-replaced present
 reserved stage is deliberately neither traversed nor deleted, however, so those
 scanner limits do not bound its bytes. A concrete storage bound for that
 adversarial residue remains a cutover gate; diagnostics expose it and recovery
 stays fail-closed rather than inventing authority or remediation state.
+Aggregate count/byte retention for terminal Changes is also an unresolved
+cutover gate and is never presented as current admission authority.
 
 ### Verification
 
@@ -4665,6 +4715,8 @@ following evidence:
 - `EPERM`/`ESRCH`/malformed/reuse/leader-loss behavior green with no unsafe
   signal or invented release;
 - Change exact-base/bounded-tree/Git-boundary/removal matrix green;
+- a concrete terminal Change retention count/byte policy and bounded handling
+  of an adversarially replaced reserved residue are implemented and green;
 - `None`/non-success/orchestrator no-verifier proofs and configured
   `RustWorkspaceTest`/`GoWorkspaceTest` stable-snapshot, once-only recovery,
   controlled-environment, and exact resource-cleanup proofs green;

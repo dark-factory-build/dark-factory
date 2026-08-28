@@ -25,20 +25,28 @@ In particular, planned Go admission is one cursor-free global
 `Store.AdmitNext(ctx, keys, at)` `BEGIN IMMEDIATE`. No caller nominates an agent,
 task or queue observation. The Store applies durable eligibility and exact
 reason precedence. Before selection it validates global settings and runs one
-concrete SQL corruption predicate over every structurally queued assignment
-and required agent/profile/project control; malformed or missing durable facts
-anywhere block all admission rather than becoming ineligibility. Capacity is
-the single count of all nonterminal runs: admitted, running and finalizing.
+concrete SQL integrity predicate over every row/relation/control that can
+occupy capacity or bind active authority, plus every structurally queued rank,
+payload, assignment and agent/profile/project control. Unknown phases, missing
+relations, split resource pairs, invalid IDs/revisions/enums, malformed rank or
+payload, and other damaged facts anywhere block all admission rather than
+becoming ineligibility. Only after that proof may capacity count the single set
+of all nonterminal runs: admitted, running and finalizing.
+Configured capacity is one integer `C` in `[1, 1024]`; a reserved Change residue
+belongs to one nonterminal worker run, so its count is at most `C`. Terminal
+retained-Change aggregate retention and adversarial residue bytes remain
+explicit cutover gates, not a second admission cap.
 The Store then orders all eligible task+agent rows by priority
 descending, creation time ascending and exact 16-byte task-ID `BLOB` bytes
 ascending. It validates the selected row's one canonical Change and never skips
-a corrupt, unsettled, hard-invalid or retained-Change-cap-blocked higher-ranked
-row for lower work. Fresh no-admission precedence is `dispatch_disabled`,
-`at_capacity`, `queue_empty`, `no_eligible_work`; retained-Change refusal is
-`change_capacity` with zero footprint. Known-valid paused/nonworking/budget-
-exhausted work is ineligible; unknown or malformed durable control is
-corruption. Repository and provider executable/configuration
-availability are post-admission typed failures, not stale eligibility filters.
+a corrupt, unsettled or hard-invalid higher-ranked row for lower work. Fresh
+no-admission precedence is `dispatch_disabled`, `at_capacity`, `queue_empty`,
+`no_eligible_work`; there is no separate Change-cap reason. Known-valid paused,
+budget-exhausted or open-run-conflicting queued work is ineligible; either
+known role remains eligible and determines the footprint, while a known
+nonqueued task is outside the queue. Unknown or malformed durable control is
+corruption. Repository and provider executable/configuration/auth availability
+are post-admission typed failures, not stale eligibility filters.
 The exact contract and its pending review status live only in the rewrite
 record; this paragraph does not claim the Go daemon implements it yet.
 
@@ -108,9 +116,10 @@ pretends the resource disappeared or rewrites the outcome.
    an attempt identity for completion, blocking, or hooks.
 5. Admission is the only transition from queued work to an attempt. For planned
    Go, one global immediate Store transaction accepts no caller-selected agent,
-   task or cursor; it validates global settings and every structurally queued
-   control through the concrete SQL corruption predicate, counts admitted plus
-   running plus finalizing against capacity, checks dispatch/eligibility,
+   task or cursor; it validates global settings and every capacity/authority and
+   queued rank/payload/control fact through the concrete SQL integrity
+   predicate, then counts admitted plus running plus finalizing against capacity
+   and checks dispatch/eligibility,
    selects the canonical task+agent by global priority/time/16-byte-BLOB-ID
    order, validates its one
    Change, derives typed launch controls, and binds the immutable task
@@ -239,7 +248,7 @@ authority.
 The retained Rust runtime validates one exact Claude executable and the finite
 generated settings shapes before its Store admission begins. That ordering is
 historical, not planned Go eligibility: Go durably admits canonical work first,
-then missing source or provider executable/configuration converges through
+then missing source or provider executable/configuration/auth converges through
 typed `FailureSource` or `FailureSpawn` without falling through to lower work.
 Claude `WorkspaceWrite` is macOS-only because its exact AF_UNIX sandbox policy
 is ignored elsewhere.

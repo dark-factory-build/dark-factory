@@ -58,29 +58,43 @@ IDs, including one unconditional candidate Change ID that is used only for a
 selected worker incarnation with no existing canonical Change.
 
 After RunID reconciliation, the transaction first validates global settings
-and runs one concrete SQL corruption predicate over every structurally queued
-assignment and required agent/profile/project control. Missing relations,
-unknown enum/status/provider/mode/role/verification values and malformed IDs,
-revisions, models, efforts or controls are `ErrCorruptState` wherever they
-rank; this is neither an application row scan nor eligibility. Exact fresh-
+and runs one concrete SQL integrity predicate over every row/relation/control
+that can occupy capacity or bind active run/credential/resource/session/Change
+authority and every structurally queued assignment/rank/payload and required
+agent/profile/project control. Unknown phases; missing relations; split pairs;
+invalid IDs, revisions, enums, models or efforts; and malformed queued priority,
+created time, title, body or lifecycle payload are `ErrCorruptState` wherever
+they rank. Queued rank/payload is exactly integer priority `[-1000000,1000000]`,
+nonnegative signed-64-bit integer creation time, nonzero 16-byte IDs, positive
+revisions, TEXT title 1–1024 bytes, TEXT body 0–131072 bytes and no queued
+blocked/proposal/terminal/completion/result payload. Fresh schema constraints
+prevent ordinary invalid writes; this single query proves damaged state before
+capacity and is neither an application row scan nor eligibility. Exact fresh
 decision precedence after those checks is `dispatch_disabled`, `at_capacity`,
-`queue_empty`, then `no_eligible_work`. Capacity is exactly the one count of
-all nonterminal runs: admitted, running and finalizing.
-Eligibility means queued task, valid same-project assigned agent, not paused,
-durable budget remaining, no conflicting open run, and valid role/provider/
-mode/profile/project/verification controls. Known-valid paused, nonworking or
-budget-exhausted rows are ineligible; corrupt facts are never ineligibility.
-The Store selects globally by priority
+`queue_empty`, then `no_eligible_work`. Only after every run phase is known may
+capacity count exactly the one nonterminal set: admitted, running and finalizing.
+Configured capacity is one integer `C` in `[1, 1024]`. One reserved residue
+belongs to one nonterminal worker run, so its count is at most `C`; this does
+not bound terminal retained-Change aggregate storage or an adversarially
+replaced residue's bytes.
+Eligibility means task status exactly queued, valid same-project assigned
+agent, either known role (`worker` or `orchestrator`), not paused, durable
+budget remaining and no conflicting open run. Role determines the footprint,
+not external availability; known nonqueued status is outside the queue.
+Provider/mode/profile/project/verification controls must
+be structurally valid under the integrity predicate, but external availability
+is not eligibility. Known-valid paused, budget-exhausted or open-run-conflicting
+queued rows are ineligible; corrupt facts are never ineligibility. The
+Store selects globally by priority
 descending, creation time ascending and exact 16-byte task-ID SQLite `BLOB`
 bytes ascending. It then validates that row's canonical Change: corrupt,
-unsettled or hard-invalid state fails closed without skipping to lower work;
-the retained-Change hard cap returns `change_capacity` with zero footprint and
-also does not fall through. A successful transaction writes the full task/run/
-bearer/resource/session/Change/invalidation footprint and returns only the
+unsettled or hard-invalid state fails closed without skipping to lower work.
+There is no separate Change-cap reason. A successful transaction writes the
+full task/run/bearer/resource/session/Change/invalidation footprint and returns only the
 committed launch target. Reconcile-only failure is `not_reconciled`.
 
-Repository availability and provider executable/configuration availability are
-deliberate post-admission `FailureSource` and `FailureSpawn` outcomes
+Repository availability and provider executable/configuration/auth availability
+are deliberate post-admission `FailureSource` and `FailureSpawn` outcomes
 respectively, never scheduler filters.
 A reorder or higher-priority insertion before the transaction changes what is
 admitted; a caller's stale observation cannot nominate work. Process-local
@@ -247,7 +261,7 @@ callback or row:
 | --- | --- |
 | Crash and restart | Inject failure after admission, resource declaration, each blocked-exec release, provider exit, external cleanup, and before acknowledgement. Restart yields at most one provider execution, no input replay, exact identity, and idempotent convergence. |
 | Taskless refusal | With no admitted run, no provider exists. Old, forged, taskless, finalizing, and terminal credentials cannot mutate task, budget, source, or outcome state. |
-| Queue race | Race multiple agents, insert higher-priority work after stale observation, and exercise exact reason precedence, SQL eligibility and priority/time/16-byte-BLOB ties. Put an admitted setup-stalled run in the last slot and prove admitted/running/finalizing are the one capacity set. Put each malformed queued relation/control above and below valid work and prove the concrete corruption predicate blocks all admission. Corrupt/unsettled or `change_capacity` canonical work never falls through; caller AgentID/task/cursor and external-availability filters cannot affect selection. |
+| Queue race | Race multiple agents, insert higher-priority work after stale observation, and exercise exact reason precedence, SQL eligibility and priority/time/16-byte-BLOB ties. Put an admitted setup-stalled run in the last slot and prove admitted/running/finalizing are the one capacity set. Corrupt each run/credential/resource/session/Change authority class and each queued rank/payload/relation/control above and below valid work; the concrete integrity predicate blocks all admission before capacity. Corrupt/unsettled canonical work never falls through; caller AgentID/task/cursor and external-availability filters cannot affect selection. |
 | Hierarchy scope | Construct alternate durable agent hierarchies and attempt cross-agent messaging, creation, and assignment. The same mutation transaction uses the stored hierarchy and refuses siblings, ancestors outside the worker allowance, and non-descendants. |
 | Outcome and exit race | Exercise request-before-exit and exit-before-request. The first `finalizing` request wins; only failed configured verification may refine proposed success. |
 | Completion ordering | After a success proposal, further attempt mutation and successor admission are refused until provider reap, exact snapshot and configured verification, release of every resource, and terminalization. |
@@ -255,7 +269,7 @@ callback or row:
 | External finalization | Kill provider, runner, verifier, and daemon at separate cuts. Recovery touches only exact resources. Leader loss with live descendants remains nonterminal past restart and converges only after exact group absence. The operator launchd service is outside attempt ownership, is not a `KernelResource`, and is proven separately by a release fixture. |
 | Source boundary | Materialize one exact commit; repository discovery and ordinary worktree creation fail in the provider view. Removal refuses a replacement identity. |
 | Immutable source and launch | Concurrent Change mutation yields one canonical snapshot or fails before compilation. Replacing or tampering with prepared test output cannot change what launches. |
-| Cache reuse and bounds | Two revisions reuse one project/toolchain cache while producing distinct source-bound manifests. Cache count and measured-byte pressure refuse or reclaim only regenerable entries. Separately, exceeding the hard factory-wide retained-Change count cap returns exact `change_capacity`, commits zero footprint, does not delete retained work and never skips to lower-ranked work. |
+| Cache reuse and Change storage | Two revisions reuse one project/toolchain cache while producing distinct source-bound manifests. Cache count and measured-byte pressure refuse or reclaim only regenerable entries. Nonterminal capacity bounds the count of reserved residues; accepted trees meet entry/byte/depth limits. Terminal retained-Change aggregate retention and a same-UID-replaced reserved stage's bytes remain explicit cutover gates, not invented admission authority. |
 | Orchestrator policy only | Orchestrators remain subject to hierarchy scope and cannot direct-launch, publish repositories, submit another attempt's outcome, mutate capacity or budgets, or invoke operator control. |
 | Dispatch and execution mode | Disabled dispatch admits nothing. An admitted run retains its frozen typed mode across profile and dispatch changes. Retained Rust maps each mode to exact non-interactive flags; planned Go proves its separate PTY adapter mapping without changing admission authority. |
 

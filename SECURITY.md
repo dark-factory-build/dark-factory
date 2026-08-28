@@ -26,20 +26,29 @@ daemon.
 
 Planned Go admission is one global cursor-free immediate Store transaction with
 no caller AgentID/task/observation. It validates global settings and uses one
-concrete SQL corruption predicate over every structurally queued assignment
-and required agent/profile/project control before selection; malformed facts
-anywhere block all admission rather than falling through. Its one capacity set
-counts admitted, running and finalizing runs. It then validates durable
-eligibility and reason precedence, orders by priority descending, creation time
-ascending and exact 16-byte task-ID `BLOB` bytes ascending, then validates the
-selected canonical Change without skipping corrupt/cap-blocked higher work. Known-valid paused,
-nonworking or budget-exhausted work is ineligible; unknown/malformed durable
-control is corruption. Exact fresh no-admission precedence is
-`dispatch_disabled`, `at_capacity`, `queue_empty`, `no_eligible_work`, with
-selected retained-Change refusal reported separately as `change_capacity` and
-zero footprint. External repository and provider executable/config
-availability becomes typed post-admission failure rather than a stale
-scheduler filter.
+concrete SQL integrity predicate over every row/relation/control that can occupy
+capacity or bind active authority and every structurally queued rank, payload,
+assignment and agent/profile/project control. Unknown phases, missing
+relations, split pairs, invalid IDs/revisions/enums and malformed queued
+ranking/payload facts block all admission. Only after that proof may its one
+capacity set count admitted, running and finalizing runs. It then validates
+durable eligibility and reason precedence, orders by priority descending,
+creation time ascending and exact 16-byte task-ID `BLOB` bytes ascending, then validates the
+selected canonical Change without skipping corrupt higher work. Known-valid
+paused, budget-exhausted or open-run-conflicting queued work is ineligible;
+both known roles remain eligible and determine the footprint; known nonqueued
+statuses are outside the queue. Unknown/malformed durable control is
+corruption. Exact fresh no-admission
+precedence is
+`dispatch_disabled`, `at_capacity`, `queue_empty`, `no_eligible_work`; there is
+no separate Change-cap reason. External repository and provider executable/
+configuration/auth availability becomes typed post-admission failure rather
+than a stale scheduler filter.
+
+Configured capacity is an integer `C` in `[1, 1024]`; because each reserved
+residue belongs to one nonterminal worker run, its count is at most `C`.
+Terminal retained-Change aggregate retention and a same-UID-replaced residue's
+bytes are still explicit cutover gates rather than claimed current authority.
 
 After a planned Go outer runner becomes active, a declared empty provider pair
 is a serialization barrier, not absence proof. Generic outcomes, operator
@@ -190,9 +199,9 @@ has one typed execution mode, frozen onto the run at admission:
 - `Unrestricted` uses the provider's explicit approval/sandbox bypass.
 
 For planned Go, the same global `BEGIN IMMEDIATE` validates global settings,
-runs the one queued-control corruption predicate, checks dispatch, the single
-admitted-plus-running-plus-finalizing capacity set and durable eligibility,
-then selects the canonical task+agent across
+runs the one capacity/authority/queued-rank-and-payload integrity predicate,
+then checks dispatch, the single admitted-plus-running-plus-finalizing capacity
+set and durable eligibility, then selects the canonical task+agent across
 the factory; no caller or per-agent loop chooses a queue head. It validates the
 selected Change and derives task revision, role, provider and execution mode in
 that transaction. A stale dispatcher read cannot choose work or authority.
@@ -213,7 +222,7 @@ reviewed Claude executable and every generated settings shape before opening
 the retained Rust Store for admission. Planned Go deliberately does not use
 that availability as eligibility: canonical work admits first and missing or
 invalid external repository state becomes typed `FailureSource`, while missing
-or invalid provider executable/configuration becomes typed `FailureSpawn`,
+or invalid provider executable/configuration/auth becomes typed `FailureSpawn`,
 without selecting lower work. A Claude launch, changed executable, or
 unreviewed version fails closed. Codex launch configuration is
 parsed under `--strict-config` in every mode so a future CLI cannot silently
