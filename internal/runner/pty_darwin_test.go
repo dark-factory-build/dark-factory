@@ -306,13 +306,9 @@ func TestPTYSlaveCloseFailureCleansExactStartedChild(t *testing.T) {
 		testPTYSlaveClose = oldSlaveClose
 	})
 	testPTYAfterStart = func(child *OwnedChild) { started = child }
-	closeCalls := 0
 	testPTYSlaveClose = func(file *os.File) error {
-		closeCalls++
-		if closeCalls == 1 {
-			return errors.New("injected slave close failure")
-		}
-		return file.Close()
+		_ = file.Close()
+		return errors.New("injected slave close failure")
 	}
 	child, err := StartBlockedPTY(f.lease, gate, spec, false)
 	if child != nil || err == nil {
@@ -351,7 +347,10 @@ func TestStartedChildBindUncertaintyRetainsExactOwner(t *testing.T) {
 	want := errors.New("injected hard-cleanup uncertainty")
 	oldSlaveClose := testPTYSlaveClose
 	t.Cleanup(func() { testPTYSlaveClose = oldSlaveClose })
-	testPTYSlaveClose = func(*os.File) error { return errors.New("injected bind failure") }
+	testPTYSlaveClose = func(file *os.File) error {
+		_ = file.Close()
+		return errors.New("injected bind failure")
+	}
 	started.child.testHardCleanup = func() error { return want }
 	if child, err := started.Bind(); child != nil || !errors.Is(err, want) {
 		t.Fatalf("Bind child=%v err=%v", child, err)
@@ -422,13 +421,9 @@ func TestLaunchAttemptDistinguishesStartFailureAndPreRegistrationConvergence(t *
 						return nil
 					}
 				}
-				closeCalls := 0
 				testPTYSlaveClose = func(file *os.File) error {
-					closeCalls++
-					if closeCalls == 1 {
-						return errors.New("injected Bind failure")
-					}
-					return file.Close()
+					_ = file.Close()
+					return errors.New("injected Bind failure")
 				}
 			}
 			child, record, launchErr := prepared.LaunchAttempt(f.dir, "pre-registration", testResultProof())
@@ -452,5 +447,191 @@ func TestLaunchAttemptDistinguishesStartFailureAndPreRegistrationConvergence(t *
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+// startedPTYChildForCleanup starts a real blocked PTY child and registers its
+// exact exit filter the way Bind does, so cleanup tests exercise the
+// exitRegistered arm without a full Bind.
+func startedPTYChildForCleanup(t *testing.T) *StartedChild {
+	t.Helper()
+	f := newFixture(t)
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := PrepareExecSpec(ExecSpec{Target: executable, Args: []string{"--pty-provider", f.root}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C", "TERM=xterm"}, Cwd: f.cwd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := PrepareBlockedPTY(f.lease, executable, spec, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := prepared.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if started.child != nil {
+			started.child.testHardCleanup = nil
+			_ = convergeStartedChild(started)
+		}
+	})
+	if err := registerExit(started.child.kq, started.child.identity.PID); err != nil {
+		t.Fatal(err)
+	}
+	started.child.exitRegistered = true
+	return started
+}
+
+// TestHardCleanupConvergesAfterObservedExit proves cleanup never re-waits a
+// consumed one-shot exit observation: after waitForExit has already observed
+// the exit, hardCleanup must succeed immediately and repeat as a no-op.
+func TestHardCleanupConvergesAfterObservedExit(t *testing.T) {
+	started := startedPTYChildForCleanup(t)
+	child := started.child
+	if err := child.cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := child.waitForExit(4 * time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := child.hardCleanup(); err != nil {
+		t.Fatalf("hard cleanup after observed exit = %v", err)
+	}
+	if err := child.hardCleanup(); err != nil {
+		t.Fatalf("repeated hard cleanup = %v", err)
+	}
+	if child.state != stateWaited || child.kq != -1 {
+		t.Fatalf("cleanup postcondition state=%v kq=%d", child.state, child.kq)
+	}
+	if err := started.Close(); err != nil || started.child != nil {
+		t.Fatalf("converged close = %v child=%v", err, started.child)
+	}
+}
+
+// TestHardCleanupRetriesConvergeAfterLostExitEvent proves a failed first pass
+// keeps retry viable: a lost one-shot exit event costs one bounded timeout,
+// after which the reaped state converges instead of retrying a closed kqueue.
+func TestHardCleanupRetriesConvergeAfterLostExitEvent(t *testing.T) {
+	started := startedPTYChildForCleanup(t)
+	child := started.child
+	if err := child.cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	events := make([]unix.Kevent_t, 1)
+	ts := unix.NsecToTimespec((4 * time.Second).Nanoseconds())
+	if n, err := unix.Kevent(child.kq, nil, events, &ts); err != nil || n != 1 {
+		t.Fatalf("draining exit event = %d, %v", n, err)
+	}
+	if err := child.hardCleanup(); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("first pass with lost event = %v", err)
+	}
+	if child.state != stateWaited {
+		t.Fatalf("first pass did not reap: state=%v", child.state)
+	}
+	if child.kq < 0 {
+		t.Fatal("failed pass closed the kqueue and doomed retry")
+	}
+	if err := child.hardCleanup(); err != nil {
+		t.Fatalf("retry after lost event = %v", err)
+	}
+	if err := started.Close(); err != nil || started.child != nil {
+		t.Fatalf("converged close = %v child=%v", err, started.child)
+	}
+}
+
+// TestStartedChildCloseConvergesAfterPermanentSlaveCloseFailure models the
+// real os.File contract: a failed Close still invalidates the descriptor, so
+// the slave must converge on the first attempt with the error reported once.
+func TestStartedChildCloseConvergesAfterPermanentSlaveCloseFailure(t *testing.T) {
+	started := startedPTYChildForCleanup(t)
+	injected := errors.New("injected permanent slave close failure")
+	oldSlaveClose := testPTYSlaveClose
+	t.Cleanup(func() { testPTYSlaveClose = oldSlaveClose })
+	closeCalls := 0
+	testPTYSlaveClose = func(file *os.File) error {
+		closeCalls++
+		if closeCalls == 1 {
+			_ = file.Close()
+			return injected
+		}
+		return file.Close()
+	}
+	err := started.Close()
+	if !errors.Is(err, injected) {
+		t.Fatalf("first close did not report the slave failure: %v", err)
+	}
+	if started.child != nil {
+		if retryErr := started.Close(); retryErr != nil || started.child != nil {
+			t.Fatalf("close after slave convergence = %v child=%v", retryErr, started.child)
+		}
+	}
+	if closeCalls != 1 {
+		t.Fatalf("slave close attempts = %d, the descriptor was already invalid", closeCalls)
+	}
+}
+
+// TestLaunchAttemptReachesUnresolvedUnderPermanentCleanupFailure proves the
+// designed permanent-uncertainty outcome is live: cleanup that fails on every
+// attempt must surface ErrUnresolved without publishing convergence evidence,
+// not spin forever.
+func TestLaunchAttemptReachesUnresolvedUnderPermanentCleanupFailure(t *testing.T) {
+	f := newFixture(t)
+	if err := os.WriteFile(filepath.Join(f.root, OuterActivationMarkerName), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := PrepareExecSpec(ExecSpec{Target: executable, Args: []string{"--pty-provider", f.root}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C", "TERM=xterm"}, Cwd: f.cwd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := PrepareBlockedPTY(f.lease, executable, spec, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	injected := errors.New("injected permanent cleanup failure")
+	var startedChild *OwnedChild
+	oldAfterStart, oldSlaveClose := testPTYAfterStart, testPTYSlaveClose
+	t.Cleanup(func() {
+		testPTYAfterStart = oldAfterStart
+		testPTYSlaveClose = oldSlaveClose
+		if startedChild != nil {
+			startedChild.testHardCleanup = nil
+			_ = startedChild.hardCleanup()
+		}
+	})
+	testPTYAfterStart = func(child *OwnedChild) {
+		startedChild = child
+		child.testHardCleanup = func() error { return injected }
+	}
+	testPTYSlaveClose = func(file *os.File) error {
+		_ = file.Close()
+		return errors.New("injected Bind failure")
+	}
+	type launchResult struct {
+		child  *OwnedChild
+		record *AttemptResultRecord
+		err    error
+	}
+	done := make(chan launchResult, 1)
+	go func() {
+		child, record, launchErr := prepared.LaunchAttempt(f.dir, "permanent-uncertainty", testResultProof())
+		done <- launchResult{child: child, record: record, err: launchErr}
+	}()
+	select {
+	case got := <-done:
+		if got.child != nil || got.record != nil || !errors.Is(got.err, ErrUnresolved) || !errors.Is(got.err, injected) {
+			t.Fatalf("LaunchAttempt child=%v record=%v err=%v", got.child, got.record, got.err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("LaunchAttempt never surfaced permanent cleanup uncertainty")
+	}
+	if _, err := os.Stat(filepath.Join(f.root, AttemptResultSpoolName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("permanent uncertainty fabricated convergence evidence: %v", err)
 	}
 }

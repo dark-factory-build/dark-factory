@@ -596,12 +596,8 @@ func (started *StartedChild) Bind() (_ *OwnedChild, resultErr error) {
 	c := started.child
 	defer func() {
 		if resultErr != nil && started.child != nil {
-			if started.ptySlave != nil {
-				if err := closePTYSlave(started.ptySlave); err != nil {
-					resultErr = errors.Join(resultErr, err)
-				} else {
-					started.ptySlave = nil
-				}
+			if err := started.releaseSlave(); err != nil {
+				resultErr = errors.Join(resultErr, err)
 			}
 			cleanupErr := c.hardCleanup()
 			if cleanupErr != nil {
@@ -624,11 +620,8 @@ func (started *StartedChild) Bind() (_ *OwnedChild, resultErr error) {
 		return nil, fmt.Errorf("runner: register exit: %w", e)
 	}
 	c.exitRegistered = true
-	if started.ptySlave != nil {
-		if err := closePTYSlave(started.ptySlave); err != nil {
-			return nil, err
-		}
-		started.ptySlave = nil
+	if err := started.releaseSlave(); err != nil {
+		return nil, err
 	}
 	if started.cleanupErr != nil {
 		return nil, errors.Join(ErrUnresolved, started.cleanupErr)
@@ -652,17 +645,26 @@ func (started *StartedChild) Bind() (_ *OwnedChild, resultErr error) {
 	return c, nil
 }
 
+// releaseSlave converges the started PTY slave. os.File.Close invalidates the
+// descriptor even when it reports an error, so the slave never survives one
+// close attempt; os.ErrClosed from a repeated attempt is residue, not failure.
+func (started *StartedChild) releaseSlave() error {
+	if started.ptySlave == nil {
+		return nil
+	}
+	err := closePTYSlave(started.ptySlave)
+	started.ptySlave = nil
+	if errors.Is(err, os.ErrClosed) {
+		return nil
+	}
+	return err
+}
+
 func (started *StartedChild) Close() error {
 	if started == nil || started.child == nil {
 		return nil
 	}
-	var slaveErr error
-	if started.ptySlave != nil {
-		slaveErr = closePTYSlave(started.ptySlave)
-		if slaveErr == nil {
-			started.ptySlave = nil
-		}
-	}
+	slaveErr := started.releaseSlave()
 	cleanupErr := started.child.hardCleanup()
 	err := errors.Join(started.cleanupErr, slaveErr, cleanupErr)
 	if cleanupErr == nil && started.ptySlave == nil && started.child.state == stateWaited && started.child.ptyMaster == nil {
@@ -672,15 +674,16 @@ func (started *StartedChild) Close() error {
 	return err
 }
 
+// convergeStartedChild makes exactly three cleanup attempts. Cleanup still
+// failing afterwards is permanent uncertainty that the caller must surface as
+// its typed outcome; unbounded retry here made that arm unreachable.
 func convergeStartedChild(started *StartedChild) error {
 	var result error
-	for started != nil && started.child != nil {
-		err := started.Close()
-		result = errors.Join(result, err)
-		if started.child == nil {
-			return result
+	for attempt := 0; started != nil && started.child != nil && attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(25 * time.Millisecond)
 		}
-		time.Sleep(25 * time.Millisecond)
+		result = errors.Join(result, started.Close())
 	}
 	return result
 }
@@ -1193,7 +1196,9 @@ func (c *OwnedChild) hardCleanup() error {
 	if err := c.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		cleanupErr = errors.Join(cleanupErr, err)
 	}
-	if c.exitRegistered {
+	// An observed or reaped exit is already proven; re-waiting would consume
+	// nothing and doom every retry once the one-shot event is gone.
+	if c.exitRegistered && !c.exitObserved && c.state != stateWaited && c.kq >= 0 {
 		if _, err := c.waitForExit(4 * time.Second); err != nil {
 			cleanupErr = errors.Join(cleanupErr, err)
 		}
@@ -1205,16 +1210,23 @@ func (c *OwnedChild) hardCleanup() error {
 	}
 	if c.activation != nil {
 		_ = c.activation.Close()
+		c.activation = nil
 	}
 	if c.status != nil {
 		_ = c.status.Close()
+		c.status = nil
+	}
+	cleanupErr = errors.Join(cleanupErr, c.closePTY())
+	// The kqueue is the only remaining exit-observation capability; a failed
+	// pass keeps it so retry can still converge instead of losing the child.
+	if cleanupErr != nil {
+		return cleanupErr
 	}
 	if c.kq >= 0 {
 		_ = unix.Close(c.kq)
 		c.kq = -1
 	}
-	cleanupErr = errors.Join(cleanupErr, c.closePTY())
-	return cleanupErr
+	return nil
 }
 
 func (c *OwnedChild) closePTY() error {
