@@ -11,13 +11,17 @@ const script = join(webRoot, "scripts", "package-artifacts.mjs");
 const clientName = "@dark-factory/client";
 const uiName = "@dark-factory/ui";
 
-function run(command, output, ...extra) {
+function runWithEnv(command, output, envOverrides, ...extra) {
   return execFileSync(process.execPath, [script, command, "--output", output, ...extra], {
     cwd: webRoot,
     encoding: "utf8",
-    env: { ...process.env, COREPACK_ENABLE_NETWORK: "0", npm_config_registry: "http://127.0.0.1:9/" },
+    env: { ...process.env, COREPACK_ENABLE_NETWORK: "0", npm_config_registry: "http://127.0.0.1:9/", ...envOverrides },
     stdio: "pipe",
   });
+}
+
+function run(command, output, ...extra) {
+  return runWithEnv(command, output, {}, ...extra);
 }
 
 function manifest(output) {
@@ -207,9 +211,9 @@ test("pack uses trusted absolute tools and leaves no partial output", () => {
     chmodSync(path, 0o700);
   }
   try {
-    run("pack", output);
     const env = { PATH: fakeBin, npm_config_offline: "true", npm_config_registry: "http://127.0.0.1:9/" };
-    execFileSync(process.execPath, [script, "verify", "--output", output], { cwd: webRoot, env, stdio: "pipe" });
+    runWithEnv("pack", output, env);
+    runWithEnv("verify", output, env);
 
     const existing = join(tempRoot, "existing");
     mkdirSync(existing);
