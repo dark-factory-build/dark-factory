@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"golang.org/x/sys/unix"
 )
 
 func TestInitPublishesExactHomeAndReplaysReadOnly(t *testing.T) {
@@ -242,11 +243,25 @@ func TestInitParentSyncFailureLeavesFixedStageEvidence(t *testing.T) {
 	parent := installTempDir(t)
 	home := filepath.Join(parent, "home")
 	stage := filepath.Join(parent, ".home"+stageSuffix)
+	parentInfo, err := os.Stat(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentStat := parentInfo.Sys().(*syscall.Stat_t)
 	originalSync := syncDirectory
 	defer func() { syncDirectory = originalSync }()
 	calls := 0
 	syncDirectory = func(fd int) error {
 		calls++
+		if calls == 1 {
+			var current unix.Stat_t
+			if err := unix.Fstat(fd, &current); err != nil {
+				t.Fatalf("inspect first sync descriptor: %v", err)
+			}
+			if uint64(current.Dev) != uint64(parentStat.Dev) || uint64(current.Ino) != uint64(parentStat.Ino) {
+				t.Fatalf("first directory sync descriptor is not retained home parent")
+			}
+		}
 		return errors.New("injected parent sync failure")
 	}
 	if _, err := Init(context.Background(), home); err == nil {
@@ -452,10 +467,7 @@ func replaceHomeAncestors(home string) error {
 	if err := os.Mkdir(outer, 0o700); err != nil {
 		return err
 	}
-	if err := os.Mkdir(inner, 0o700); err != nil {
-		return err
-	}
-	return os.Rename(filepath.Join(oldOuter, filepath.Base(inner), filepath.Base(home)), home)
+	return os.Rename(filepath.Join(oldOuter, filepath.Base(inner)), inner)
 }
 
 func TestInitAndDoctorRejectSpecialModeBitsUnchanged(t *testing.T) {
