@@ -93,6 +93,8 @@ fast_typescript_template="$temporary/fast-typescript-template"
 printf '%s\n' '{"name":"typescript","version":"5.8.3"}' >"$fast_typescript_template/package.json"
 printf '%s\n' 'typescript fixture compiler' >"$fast_typescript_template/bin/tsc"
 printf '%s\n' 'typescript fixture library' >"$fast_typescript_template/lib/typescript.js"
+/bin/chmod 755 "$fast_typescript_template" "$fast_typescript_template/bin" "$fast_typescript_template/lib"
+/bin/chmod 644 "$fast_typescript_template/package.json" "$fast_typescript_template/lib/typescript.js"
 /bin/chmod 755 "$fast_typescript_template/bin/tsc"
 /bin/cat >"$fast_corepack" <<EOF
 #!/bin/sh
