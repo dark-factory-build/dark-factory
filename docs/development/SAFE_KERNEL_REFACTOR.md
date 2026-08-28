@@ -57,12 +57,20 @@ task, queue observation or fairness cursor. Every call supplies fresh daemon
 IDs, including one unconditional candidate Change ID that is used only for a
 selected worker incarnation with no existing canonical Change.
 
-After RunID reconciliation, exact fresh-decision precedence is
-`dispatch_disabled`, `at_capacity`, `queue_empty`, then `no_eligible_work`.
+After RunID reconciliation, the transaction first validates global settings
+and runs one concrete SQL corruption predicate over every structurally queued
+assignment and required agent/profile/project control. Missing relations,
+unknown enum/status/provider/mode/role/verification values and malformed IDs,
+revisions, models, efforts or controls are `ErrCorruptState` wherever they
+rank; this is neither an application row scan nor eligibility. Exact fresh-
+decision precedence after those checks is `dispatch_disabled`, `at_capacity`,
+`queue_empty`, then `no_eligible_work`. Capacity is exactly the one count of
+all nonterminal runs: admitted, running and finalizing.
 Eligibility means queued task, valid same-project assigned agent, not paused,
 durable budget remaining, no conflicting open run, and valid role/provider/
-mode/profile/project/verification controls. Unknown durable control is
-`ErrCorruptState`, never ineligibility. The Store selects globally by priority
+mode/profile/project/verification controls. Known-valid paused, nonworking or
+budget-exhausted rows are ineligible; corrupt facts are never ineligibility.
+The Store selects globally by priority
 descending, creation time ascending and exact 16-byte task-ID SQLite `BLOB`
 bytes ascending. It then validates that row's canonical Change: corrupt,
 unsettled or hard-invalid state fails closed without skipping to lower work;
@@ -77,6 +85,14 @@ respectively, never scheduler filters.
 A reorder or higher-priority insertion before the transaction changes what is
 admitted; a caller's stale observation cannot nominate work. Process-local
 locks may serialize effects but never prove durable assignment or authority.
+
+After the outer runner is active, its declared empty provider process/group
+pair is a serialization barrier. Generic outcome, cancellation and
+infrastructure-failure transactions refuse while the already-prepared runner
+performs its sole inner Start even across daemon EOF. Exact Start failure uses
+the existing no-child AttemptResult; successful Start binds an inert exact pair
+before a pending outcome may reap it. No generic transition produces a
+finalizing declared pair, and this rule adds no receipt or lifecycle state.
 
 The bearer resolves to one exact project, agent, task, run, role, provider, and
 Change. It authorizes effects only while that run is `running`. Attempt calls
@@ -231,7 +247,7 @@ callback or row:
 | --- | --- |
 | Crash and restart | Inject failure after admission, resource declaration, each blocked-exec release, provider exit, external cleanup, and before acknowledgement. Restart yields at most one provider execution, no input replay, exact identity, and idempotent convergence. |
 | Taskless refusal | With no admitted run, no provider exists. Old, forged, taskless, finalizing, and terminal credentials cannot mutate task, budget, source, or outcome state. |
-| Queue race | Race multiple agents, insert higher-priority work after stale observation, and exercise exact reason precedence, SQL eligibility and priority/time/16-byte-BLOB ties. Corrupt/unsettled or `change_capacity` canonical work never falls through; caller AgentID/task/cursor and external-availability filters cannot affect selection. |
+| Queue race | Race multiple agents, insert higher-priority work after stale observation, and exercise exact reason precedence, SQL eligibility and priority/time/16-byte-BLOB ties. Put an admitted setup-stalled run in the last slot and prove admitted/running/finalizing are the one capacity set. Put each malformed queued relation/control above and below valid work and prove the concrete corruption predicate blocks all admission. Corrupt/unsettled or `change_capacity` canonical work never falls through; caller AgentID/task/cursor and external-availability filters cannot affect selection. |
 | Hierarchy scope | Construct alternate durable agent hierarchies and attempt cross-agent messaging, creation, and assignment. The same mutation transaction uses the stored hierarchy and refuses siblings, ancestors outside the worker allowance, and non-descendants. |
 | Outcome and exit race | Exercise request-before-exit and exit-before-request. The first `finalizing` request wins; only failed configured verification may refine proposed success. |
 | Completion ordering | After a success proposal, further attempt mutation and successor admission are refused until provider reap, exact snapshot and configured verification, release of every resource, and terminalization. |

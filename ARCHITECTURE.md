@@ -24,17 +24,32 @@ Go rewrite record wins and the old wording must not guide implementation.
 In particular, planned Go admission is one cursor-free global
 `Store.AdmitNext(ctx, keys, at)` `BEGIN IMMEDIATE`. No caller nominates an agent,
 task or queue observation. The Store applies durable eligibility and exact
-reason precedence, then orders all eligible task+agent rows by priority
+reason precedence. Before selection it validates global settings and runs one
+concrete SQL corruption predicate over every structurally queued assignment
+and required agent/profile/project control; malformed or missing durable facts
+anywhere block all admission rather than becoming ineligibility. Capacity is
+the single count of all nonterminal runs: admitted, running and finalizing.
+The Store then orders all eligible task+agent rows by priority
 descending, creation time ascending and exact 16-byte task-ID `BLOB` bytes
 ascending. It validates the selected row's one canonical Change and never skips
 a corrupt, unsettled, hard-invalid or retained-Change-cap-blocked higher-ranked
 row for lower work. Fresh no-admission precedence is `dispatch_disabled`,
 `at_capacity`, `queue_empty`, `no_eligible_work`; retained-Change refusal is
-`change_capacity` with zero footprint, and unknown durable control is
+`change_capacity` with zero footprint. Known-valid paused/nonworking/budget-
+exhausted work is ineligible; unknown or malformed durable control is
 corruption. Repository and provider executable/configuration
 availability are post-admission typed failures, not stale eligibility filters.
 The exact contract and its pending review status live only in the rewrite
 record; this paragraph does not claim the Go daemon implements it yet.
+
+Planned Go process setup has one additional literal barrier: after the outer
+runner is active and while its provider process/group pair remains declared
+with empty identity, generic outcome, cancellation and infrastructure-failure
+transactions refuse. The already-prepared one-shot runner still makes exactly
+one inner Start on cancellation or daemon EOF. Exact Start failure publishes
+the existing no-child result; successful Start binds an inert child before a
+pending outcome may reap it. No generic outcome creates a finalizing run with a
+declared provider pair, and no new receipt or lifecycle state is implied here.
 
 ## Durable model
 
@@ -93,8 +108,11 @@ pretends the resource disappeared or rewrites the outcome.
    an attempt identity for completion, blocking, or hooks.
 5. Admission is the only transition from queued work to an attempt. For planned
    Go, one global immediate Store transaction accepts no caller-selected agent,
-   task or cursor; it checks dispatch/capacity/eligibility, selects the canonical
-   task+agent by global priority/time/16-byte-BLOB-ID order, validates its one
+   task or cursor; it validates global settings and every structurally queued
+   control through the concrete SQL corruption predicate, counts admitted plus
+   running plus finalizing against capacity, checks dispatch/eligibility,
+   selects the canonical task+agent by global priority/time/16-byte-BLOB-ID
+   order, validates its one
    Change, derives typed launch controls, and binds the immutable task
    incarnation/work revision before external effects. The retained Rust
    per-agent queue-head implementation is historical only. The factory-wide

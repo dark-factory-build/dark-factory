@@ -25,16 +25,30 @@ which currently requires fresh exact-head review and does not claim a finished
 daemon.
 
 Planned Go admission is one global cursor-free immediate Store transaction with
-no caller AgentID/task/observation. It validates durable eligibility and reason
-precedence, orders by priority descending, creation time ascending and exact
-16-byte task-ID `BLOB` bytes ascending, then validates the selected canonical
-Change without skipping corrupt/cap-blocked higher work. Unknown durable
+no caller AgentID/task/observation. It validates global settings and uses one
+concrete SQL corruption predicate over every structurally queued assignment
+and required agent/profile/project control before selection; malformed facts
+anywhere block all admission rather than falling through. Its one capacity set
+counts admitted, running and finalizing runs. It then validates durable
+eligibility and reason precedence, orders by priority descending, creation time
+ascending and exact 16-byte task-ID `BLOB` bytes ascending, then validates the
+selected canonical Change without skipping corrupt/cap-blocked higher work. Known-valid paused,
+nonworking or budget-exhausted work is ineligible; unknown/malformed durable
 control is corruption. Exact fresh no-admission precedence is
 `dispatch_disabled`, `at_capacity`, `queue_empty`, `no_eligible_work`, with
 selected retained-Change refusal reported separately as `change_capacity` and
 zero footprint. External repository and provider executable/config
 availability becomes typed post-admission failure rather than a stale
 scheduler filter.
+
+After a planned Go outer runner becomes active, a declared empty provider pair
+is a serialization barrier, not absence proof. Generic outcomes, operator
+cancellation and infrastructure failure refuse until the runner performs its
+one already-prepared inner Start. Cancellation or daemon EOF cannot skip that
+attempt: exact Start failure publishes the canonical no-child result, while a
+successful child remains inert until exact pair binding and daemon release.
+Only then may the pending outcome reap it. No generic path moves the declared
+empty pair to releasing or creates a finalizing declared-pair state.
 
 ## Threat model
 
@@ -175,8 +189,10 @@ has one typed execution mode, frozen onto the run at admission:
   explicit write exception; and
 - `Unrestricted` uses the provider's explicit approval/sandbox bypass.
 
-For planned Go, the same global `BEGIN IMMEDIATE` checks dispatch, factory
-capacity and durable eligibility, then selects the canonical task+agent across
+For planned Go, the same global `BEGIN IMMEDIATE` validates global settings,
+runs the one queued-control corruption predicate, checks dispatch, the single
+admitted-plus-running-plus-finalizing capacity set and durable eligibility,
+then selects the canonical task+agent across
 the factory; no caller or per-agent loop chooses a queue head. It validates the
 selected Change and derives task revision, role, provider and execution mode in
 that transaction. A stale dispatcher read cannot choose work or authority.
