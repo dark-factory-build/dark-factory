@@ -11,12 +11,14 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
+	"github.com/dark-factory-build/dark-factory/internal/install"
 )
 
 const (
@@ -33,6 +35,8 @@ const (
   factoryctl web open
   factoryctl web list-clients [--after CLIENT_ID]
   factoryctl web revoke CLIENT_ID --revision REVISION
+  factoryctl init --home ABSOLUTE
+  factoryctl doctor --home ABSOLUTE
 `
 )
 
@@ -47,10 +51,13 @@ const (
 	commandWebOpen
 	commandWebListClients
 	commandWebRevoke
+	commandInit
+	commandDoctor
 )
 
 type attemptCommand struct {
 	kind             commandKind
+	home             string
 	idempotencyKey   string
 	text             string
 	id               string
@@ -77,6 +84,9 @@ func runWithOpener(ctx context.Context, args []string, getenv func(string) strin
 	if !ok {
 		_, _ = io.WriteString(stderr, usage)
 		return exitUsage
+	}
+	if command.kind == commandInit || command.kind == commandDoctor {
+		return runHome(ctx, command, stdout, stderr)
 	}
 	if command.kind >= commandWebStatus {
 		return runWeb(ctx, command, getenv, stdout, stderr, opener)
@@ -122,6 +132,18 @@ func runWithOpener(ctx context.Context, args []string, getenv func(string) strin
 
 func parse(args []string) (attemptCommand, bool, bool) {
 	if len(args) == 1 && helpFlag(args[0]) {
+		return attemptCommand{}, true, true
+	}
+	if len(args) == 3 && (args[0] == "init" || args[0] == "doctor") && args[1] == "--home" {
+		if validHomeArg(args[2]) {
+			kind := commandInit
+			if args[0] == "doctor" {
+				kind = commandDoctor
+			}
+			return attemptCommand{kind: kind, home: args[2]}, false, true
+		}
+	}
+	if len(args) == 2 && (args[0] == "init" || args[0] == "doctor") && helpFlag(args[1]) {
 		return attemptCommand{}, true, true
 	}
 	if len(args) < 2 || args[0] != "attempt" && args[0] != "web" {
@@ -171,6 +193,39 @@ func parse(args []string) (attemptCommand, bool, bool) {
 		}
 	}
 	return attemptCommand{}, false, false
+}
+
+func validHomeArg(value string) bool {
+	return value != "" && filepath.IsAbs(value) && filepath.Clean(value) == value && filepath.Base(value) != "." && filepath.Base(value) != string(filepath.Separator)
+}
+
+func runHome(ctx context.Context, command attemptCommand, stdout, stderr io.Writer) int {
+	var result install.Result
+	var err error
+	if command.kind == commandInit {
+		result, err = install.Init(ctx, command.home)
+	} else {
+		result, err = install.Doctor(ctx, command.home)
+	}
+	if err != nil {
+		switch {
+		case errors.Is(err, install.ErrUncertain):
+			_, _ = io.WriteString(stderr, "factoryctl: home publication outcome is uncertain; inspect the explicit home path before retrying\n")
+		case errors.Is(err, install.ErrUnsupported):
+			_, _ = io.WriteString(stderr, "factoryctl: Go home operations are unsupported on this platform\n")
+		case errors.Is(err, install.ErrInvalidHome):
+			_, _ = io.WriteString(stderr, "factoryctl: home is invalid or not an exact stopped Go home\n")
+		default:
+			_, _ = io.WriteString(stderr, "factoryctl: home operation failed\n")
+		}
+		return exitFailure
+	}
+	if result.State == install.Ready {
+		_, _ = io.WriteString(stdout, "home ready\n")
+	} else {
+		_, _ = io.WriteString(stdout, "home initialized\n")
+	}
+	return 0
 }
 
 func parseWeb(args []string) (attemptCommand, bool, bool) {
