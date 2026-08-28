@@ -18,7 +18,7 @@ func TestWorkerActivationRequiresExactChangeOwnershipRevision(t *testing.T) {
 			store, run, keys := admittedWorkerRun(t)
 			defer store.Close()
 			materializeAdmittedWorkerChange(t, store, run, 12)
-			activateAllResources(t, store, run, keys, 20)
+			_, run = activateAllResources(t, store, run, keys, 20)
 			session := terminalSessionForRunTest(t, store, run.ID)
 			corruptSQL(t, store, `UPDATE changes SET revision = ? WHERE id = ?`, test.revision(run), run.ChangeID.Bytes())
 			before := captureWriteFootprint(t, store)
@@ -38,7 +38,7 @@ func TestWorkerActivationRequiresExactChangeOwnershipRevision(t *testing.T) {
 		if change.Revision.Int64() != run.AdmittedChangeRevision.Int64()+2 {
 			t.Fatalf("fresh Change revision = %d, A = %d", change.Revision.Int64(), run.AdmittedChangeRevision.Int64())
 		}
-		activateAllResources(t, store, run, keys, 20)
+		_, run = activateAllResources(t, store, run, keys, 20)
 		session := terminalSessionForRunTest(t, store, run.ID)
 		if running, err := store.ActivateRun(context.Background(), run.ID, session.ID, run.Revision, session.Revision, mustTime(t, 30)); err != nil || running.Phase != RunRunning {
 			t.Fatalf("ActivateRun = %+v, %v", running, err)
@@ -57,9 +57,9 @@ func TestWorkerActivationRequiresExactChangeOwnershipRevision(t *testing.T) {
 		if err != nil || !found || change.Phase != ChangeAvailable || change.Revision != *admission.Run.AdmittedChangeRevision {
 			t.Fatalf("retained retry Change = %+v, found=%v, err=%v", change, found, err)
 		}
-		activateAllResources(t, store, *admission.Run, keys, 50)
+		_, activatedRun := activateAllResources(t, store, *admission.Run, keys, 50)
 		session := terminalSessionForRunTest(t, store, admission.Run.ID)
-		if running, err := store.ActivateRun(context.Background(), admission.Run.ID, session.ID, admission.Run.Revision, session.Revision, mustTime(t, 60)); err != nil || running.Phase != RunRunning {
+		if running, err := store.ActivateRun(context.Background(), admission.Run.ID, session.ID, activatedRun.Revision, session.Revision, mustTime(t, 60)); err != nil || running.Phase != RunRunning {
 			t.Fatalf("ActivateRun = %+v, %v", running, err)
 		}
 	})
@@ -216,7 +216,7 @@ func TestPreRunningWorkerSettlementCannotBlessChangedContent(t *testing.T) {
 
 func settleRunningRetainedRetry(t *testing.T, store *Store, run Run, keys AdmissionKeys, at int64) Run {
 	t.Helper()
-	activateAllResourcesUnique(t, store, run, at, at*10)
+	run = activateAllResourcesUnique(t, store, run, at, at*10)
 	session := terminalSessionForRunTest(t, store, run.ID)
 	running, err := store.ActivateRun(context.Background(), run.ID, session.ID, run.Revision, session.Revision, mustTime(t, at+5))
 	if err != nil {
@@ -280,9 +280,9 @@ func TestRetainedRetryHistoryLoadsAndHistoricalFinalizationReplays(t *testing.T)
 	if err != nil || !secondAdmission.Admitted() {
 		t.Fatalf("second admission = %+v, %v", secondAdmission, err)
 	}
-	activateAllResources(t, store, *secondAdmission.Run, secondKeys, 50)
+	_, activatedRun := activateAllResources(t, store, *secondAdmission.Run, secondKeys, 50)
 	session := terminalSessionForRunTest(t, store, secondAdmission.Run.ID)
-	secondRunning, err := store.ActivateRun(context.Background(), secondAdmission.Run.ID, session.ID, secondAdmission.Run.Revision, session.Revision, mustTime(t, 60))
+	secondRunning, err := store.ActivateRun(context.Background(), secondAdmission.Run.ID, session.ID, activatedRun.Revision, session.Revision, mustTime(t, 60))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -356,26 +356,22 @@ func finalizingPreRunningAvailableWorker(t *testing.T, retained bool) (*Store, R
 		store, run, _ = admittedWorkerRun(t)
 		materializeAdmittedWorkerChange(t, store, run, 12)
 	}
-	runner := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
-	runner, err := store.ActivateResource(context.Background(), run.ID, runner.ID, runner.Revision, processIdentity(t, 390), mustTime(t, 50))
-	if err != nil {
-		store.Close()
-		t.Fatal(err)
-	}
-	failure, _ := NewFailureProposal(FailureInternal, "pre-running cleanup")
-	finalizing, err := store.FailRun(context.Background(), run.ID, run.Revision, failure, mustTime(t, 60))
+	active, runtimeIdentity, _ := activateStartedRunnerAt(t, store, run, 390, 50)
+	result, _ := NewInnerUnregisteredConvergedAttemptResult(run.ID, run.CredentialDigest, run.resultProofDigest, runtimeIdentity)
+	finalizing, err := store.ConsumeAttemptResult(context.Background(), result, active.Revision, mustTime(t, 60))
 	if err != nil {
 		store.Close()
 		t.Fatal(err)
 	}
 	runnerExit, _ := NewProcessExitCode(1, 0, mustTime(t, 61))
-	finalizing, err = store.ObserveRunnerExit(context.Background(), run.ID, finalizing.Revision, runner.Identity, runnerExit, mustTime(t, 61))
+	finalizing = recordRunnerExitForTest(t, store, run.ID, runnerExit, 61)
+	releaseAllRunResources(t, store, run.ID, 62)
+	session := terminalSessionForRunTest(t, store, run.ID)
+	finalizing, _, err = store.CloseTerminalAfterRunner(context.Background(), result, finalizing.Revision, session.Revision, mustTime(t, 70))
 	if err != nil {
 		store.Close()
 		t.Fatal(err)
 	}
-	releaseAllRunResources(t, store, run.ID, 62)
-	finalizing = closeTerminalSessionAtCurrent(t, store, run.ID, 70)
 	change, found, err := store.Change(context.Background(), *run.ChangeID)
 	if err != nil || !found {
 		store.Close()

@@ -124,14 +124,14 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 		change_id, admitted_change_revision, role, provider, model, reasoning_effort, verification_policy, phase,
 		proposal_kind, proposal_code, proposal_detail, proposal_result,
 		terminal_kind, terminal_code, terminal_detail, terminal_result,
-		credential_digest, credential_revoked_at_ms,
+		credential_digest, result_proof_digest, credential_revoked_at_ms,
 		provider_exit_kind, provider_exit_sequence, provider_exit_code, provider_exit_signal, provider_exit_at_ms,
 		runner_exit_kind, runner_exit_sequence, runner_exit_code, runner_exit_signal, runner_exit_at_ms,
 		revision, admitted_at_ms, running_at_ms, finalizing_at_ms, terminal_at_ms, updated_at_ms
-		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'admitted', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 1, ?, NULL, NULL, NULL, ?)`,
+		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'admitted', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 1, ?, NULL, NULL, NULL, ?)`,
 		keys.RunID.Bytes(), task.ProjectID.Bytes(), agent.ID.Bytes(), task.ID.Bytes(), task.IncarnationID.Bytes(), task.WorkRevision.Int64(),
 		changeID, admittedChangeRevision, agent.Role.String(), agent.Provider.String(), nullableString(agent.Model), nullableString(agent.ReasoningEffort), project.VerificationPolicy.String(),
-		keys.AttemptDigest.Bytes(), at.Int64(), at.Int64())
+		keys.AttemptDigest.Bytes(), keys.ResultProofDigest.bytes(), at.Int64(), at.Int64())
 	if err != nil {
 		return AdmissionResult{}, tx.Rollback(classifyAdmissionConflict(ctx, tx.connection, keys, err))
 	}
@@ -282,7 +282,7 @@ func reconcileAdmissionOnConnection(ctx context.Context, connection *sql.Conn, k
 	if err != nil || !found {
 		return AdmissionResult{}, found, err
 	}
-	if !bytes.Equal(run.CredentialDigest.Bytes(), keys.AttemptDigest.Bytes()) {
+	if !bytes.Equal(run.CredentialDigest.Bytes(), keys.AttemptDigest.Bytes()) || !bytes.Equal(run.resultProofDigest.bytes(), keys.ResultProofDigest.bytes()) {
 		return AdmissionResult{}, true, ErrConflict
 	}
 	relationships, err := loadRunRelationships(ctx, connection, run)

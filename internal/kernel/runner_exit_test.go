@@ -428,7 +428,17 @@ func releaseAllRunResources(t *testing.T, store *Store, runID RunID, at int64) {
 			t.Fatal(err)
 		}
 	}
-	_ = run
+	runner := resourceOfKind(t, resourcesForRunTest(t, store, runID), ResourceRunnerProcess)
+	if runner.State != ResourceReleased && !runner.Identity.Empty() && run.RunnerExit == nil {
+		exit, exitErr := NewProcessExitCode(1, 0, mustTime(t, at+1))
+		if exitErr != nil {
+			t.Fatal(exitErr)
+		}
+		run, runner, err = store.RecordLiveRunnerExitAndRelease(context.Background(), runID, runner.ID, run.Revision, runner.Revision, runner.Identity, exit, mustTime(t, at+1))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	index := int64(1)
 	for _, kind := range []ResourceKind{ResourceRuntimeRoot, ResourceRunnerProcess} {
 		resource := resourceOfKind(t, resourcesForRunTest(t, store, runID), kind)
@@ -470,7 +480,7 @@ func closeTerminalSessionAtCurrent(t testing.TB, store *Store, runID RunID, at i
 		return run
 	}
 	if err != nil {
-		t.Fatalf("close terminal session: %v", err)
+		t.Fatalf("close terminal session: %v; run=%+v session=%+v resources=%+v", err, run, session, resourcesForRunTB(t, store, runID))
 	}
 	closed, found, err := store.Run(context.Background(), runID)
 	if err != nil || !found {
@@ -498,14 +508,62 @@ func observeMissingProcessExits(t testing.TB, store *Store, runID RunID, at int6
 			}
 		}
 	}
+	resources := resourcesForRunTB(t, store, runID)
+	provider := resourceOfKindTB(t, resources, ResourceProviderProcess)
+	group := resourceOfKindTB(t, resources, ResourceProviderGroup)
+	if provider.State != ResourceReleased {
+		run, _, _, err = store.ReleaseProviderResources(context.Background(), runID, provider.ID, group.ID, run.Revision, provider.Revision, group.Revision, provider.Identity, mustTimeTB(t, at+1))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	if run.RunnerExit == nil {
 		runner := resourceOfKindTB(t, resourcesForRunTB(t, store, runID), ResourceRunnerProcess)
 		if !runner.Identity.Empty() {
-			run, err = store.ObserveRunnerExit(context.Background(), runID, run.Revision, runner.Identity, exit, mustTimeTB(t, at+1))
+			run, _, err = store.RecordLiveRunnerExitAndRelease(context.Background(), runID, runner.ID, run.Revision, runner.Revision, runner.Identity, exit, mustTimeTB(t, at+2))
 			if err != nil {
 				t.Fatal(err)
 			}
 		}
+	}
+	return run
+}
+
+func recordRunnerExitForTest(t testing.TB, store *Store, runID RunID, exit ProcessExit, at int64) Run {
+	t.Helper()
+	run, found, err := store.Run(context.Background(), runID)
+	if err != nil || !found {
+		t.Fatalf("read run before runner exit: found=%v err=%v", found, err)
+	}
+	resources := resourcesForRunTB(t, store, runID)
+	process := resourceOfKindTB(t, resources, ResourceProviderProcess)
+	group := resourceOfKindTB(t, resources, ResourceProviderGroup)
+	if process.State != ResourceReleased {
+		if run.ProviderExit == nil && !process.Identity.Empty() {
+			providerExit := exit
+			if exit.RecoveredAbsence() {
+				providerExit, err = NewProcessExitRecoveredAbsence(1, mustTimeTB(t, at))
+			}
+			if err == nil {
+				run, err = store.ObserveProviderExit(context.Background(), runID, run.Revision, process.Identity, providerExit, mustTimeTB(t, at))
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		run, _, _, err = store.ReleaseProviderResources(context.Background(), runID, process.ID, group.ID, run.Revision, process.Revision, group.Revision, process.Identity, mustTimeTB(t, at+1))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	runner := resourceOfKindTB(t, resourcesForRunTB(t, store, runID), ResourceRunnerProcess)
+	if exit.RecoveredAbsence() {
+		run, _, err = store.RecordRecoveredRunnerAbsence(context.Background(), runID, runner.ID, run.Revision, runner.Revision, runner.Identity, mustTimeTB(t, at+2))
+	} else {
+		run, _, err = store.RecordLiveRunnerExitAndRelease(context.Background(), runID, runner.ID, run.Revision, runner.Revision, runner.Identity, exit, mustTimeTB(t, at+2))
+	}
+	if err != nil {
+		t.Fatal(err)
 	}
 	return run
 }

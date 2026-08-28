@@ -144,6 +144,7 @@ var schemaStatements = []string{
     terminal_detail TEXT CHECK (terminal_detail IS NULL OR length(CAST(terminal_detail AS BLOB)) BETWEEN 1 AND 4096),
     terminal_result TEXT CHECK (terminal_result IS NULL OR length(CAST(terminal_result AS BLOB)) <= 131072),
 	    credential_digest BLOB NOT NULL CHECK (length(credential_digest) = 32),
+	    result_proof_digest BLOB NOT NULL CHECK (length(result_proof_digest) = 32),
 	    credential_revoked_at_ms INTEGER CHECK (credential_revoked_at_ms IS NULL OR credential_revoked_at_ms >= 0),
 	    provider_exit_kind TEXT CHECK (provider_exit_kind IS NULL OR provider_exit_kind IN ('code', 'signal', 'recovered_absence')),
 	    provider_exit_sequence INTEGER CHECK (provider_exit_sequence IS NULL OR provider_exit_sequence >= 1),
@@ -182,6 +183,7 @@ var schemaStatements = []string{
 	    CHECK ((runner_exit_kind IS NULL AND runner_exit_sequence IS NULL AND runner_exit_code IS NULL AND runner_exit_signal IS NULL AND runner_exit_at_ms IS NULL) OR (runner_exit_kind IS 'code' AND runner_exit_sequence IS NOT NULL AND runner_exit_code IS NOT NULL AND runner_exit_signal IS NULL AND runner_exit_at_ms IS NOT NULL) OR (runner_exit_kind IS 'signal' AND runner_exit_sequence IS NOT NULL AND runner_exit_code IS NULL AND runner_exit_signal IS NOT NULL AND runner_exit_at_ms IS NOT NULL) OR (runner_exit_kind IS 'recovered_absence' AND runner_exit_sequence IS NOT NULL AND runner_exit_code IS NULL AND runner_exit_signal IS NULL AND runner_exit_at_ms IS NOT NULL))
 ) STRICT, WITHOUT ROWID`,
 	`CREATE UNIQUE INDEX runs_credential_digest_unique ON runs(credential_digest)`,
+	`CREATE UNIQUE INDEX runs_result_proof_digest_unique ON runs(result_proof_digest)`,
 	`CREATE UNIQUE INDEX runs_one_open_per_agent ON runs(agent_id) WHERE phase <> 'terminal'`,
 	`CREATE UNIQUE INDEX runs_one_open_per_task_incarnation ON runs(task_id, task_incarnation_id) WHERE phase <> 'terminal'`,
 	`CREATE UNIQUE INDEX runs_one_open_per_change ON runs(change_id) WHERE change_id IS NOT NULL AND phase <> 'terminal'`,

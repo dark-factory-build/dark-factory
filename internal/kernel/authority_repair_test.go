@@ -229,9 +229,9 @@ func runningWorkerRun(t *testing.T) (*Store, Run, AdmissionKeys) {
 		store.Close()
 		t.Fatal(err)
 	}
-	activateAllResources(t, store, *admission.Run, keys, 20)
+	_, activatedRun := activateAllResources(t, store, *admission.Run, keys, 20)
 	session := terminalSessionForRunTest(t, store, admission.Run.ID)
-	run, err := store.ActivateRun(context.Background(), admission.Run.ID, session.ID, admission.Run.Revision, session.Revision, mustTime(t, 30))
+	run, err := store.ActivateRun(context.Background(), admission.Run.ID, session.ID, activatedRun.Revision, session.Revision, mustTime(t, 30))
 	if err != nil {
 		store.Close()
 		t.Fatal(err)

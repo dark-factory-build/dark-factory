@@ -10,7 +10,7 @@ import (
 func TestActivateRunRequiresExactTerminalSessionAndRevision(t *testing.T) {
 	store, run, keys := admittedOrchestratorRun(t)
 	defer store.Close()
-	activateAllResources(t, store, run, keys, 20)
+	_, run = activateAllResources(t, store, run, keys, 20)
 	wrong, err := TerminalSessionIDFromBytes(bytes.Repeat([]byte{0xee}, IDBytes))
 	if err != nil {
 		t.Fatal(err)
