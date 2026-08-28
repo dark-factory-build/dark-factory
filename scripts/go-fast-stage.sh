@@ -1,12 +1,120 @@
 #!/bin/sh
 
 # Sourced by go-check.sh and go-ci.sh after one shared environment setup.
-go_gate_web_install() {
-    (
-        umask 022
-        go_gate_package_manager_stage 600 pnpm install --frozen-lockfile --ignore-scripts
-    )
+go_gate_web_tree_move() {
+    go_gate_web_tree_source=$1
+    go_gate_web_tree_destination=$2
+    go_gate_web_tree_expected=${3-}
+    if [ -L "$go_gate_web_tree_source" ]; then
+        echo "go-check: refusing symlink web dependency tree: $go_gate_web_tree_source" >&2
+        return 1
+    fi
+    if [ ! -e "$go_gate_web_tree_source" ]; then
+        [ -z "$go_gate_web_tree_expected" ] || {
+            echo "go-check: web dependency tree disappeared" >&2
+            return 1
+        }
+        return 0
+    fi
+    [ -d "$go_gate_web_tree_source" ] || {
+        echo "go-check: web dependency tree is not a directory" >&2
+        return 1
+    }
+    go_gate_web_tree_identity=$(go_gate_stat "$go_gate_web_tree_source") || return 1
+    [ -z "$go_gate_web_tree_expected" ] || [ "$go_gate_web_tree_identity" = "$go_gate_web_tree_expected" ] || {
+        echo "go-check: web dependency tree identity changed" >&2
+        return 1
+    }
+    [ ! -e "$go_gate_web_tree_destination" ] && [ ! -L "$go_gate_web_tree_destination" ] || {
+        echo "go-check: web dependency quarantine already exists" >&2
+        return 1
+    }
+    /bin/mv "$go_gate_web_tree_source" "$go_gate_web_tree_destination" || return 1
+    [ ! -e "$go_gate_web_tree_source" ] && [ ! -L "$go_gate_web_tree_source" ] || return 1
+    [ "$(go_gate_stat "$go_gate_web_tree_destination")" = "$go_gate_web_tree_identity" ] || return 1
 }
+
+go_gate_web_tree_discard() {
+    go_gate_web_tree_source=$1
+    go_gate_web_tree_expected=$2
+    go_gate_web_tree_discard_path="$go_gate_root/web-node-modules-discard"
+    go_gate_web_tree_move "$go_gate_web_tree_source" "$go_gate_web_tree_discard_path" "$go_gate_web_tree_expected" || return 1
+    /bin/rm -rf -- "$go_gate_web_tree_discard_path"
+}
+
+go_gate_web_install() (
+    umask 022
+    go_gate_web_install_path="$repository_root/web/node_modules"
+    go_gate_web_install_parent="$repository_root/web"
+    go_gate_web_install_old="$go_gate_root/web-node-modules-old"
+    [ ! -L "$go_gate_web_install_parent" ] && [ -d "$go_gate_web_install_parent" ] || exit 1
+    go_gate_web_install_parent_identity=$(go_gate_stat "$go_gate_web_install_parent") || exit 1
+    go_gate_web_install_old_identity=
+    if [ -L "$go_gate_web_install_path" ]; then
+        echo "go-check: refusing symlink web dependency tree: $go_gate_web_install_path" >&2
+        exit 1
+    fi
+    if [ -e "$go_gate_web_install_path" ]; then
+        [ -d "$go_gate_web_install_path" ] || {
+            echo "go-check: web dependency tree is not a directory" >&2
+            exit 1
+        }
+        [ ! -L "$go_gate_web_install_path/.modules.yaml" ] && [ -f "$go_gate_web_install_path/.modules.yaml" ] || {
+            echo "go-check: existing web dependency tree is not package-manager-owned" >&2
+            exit 1
+        }
+        [ ! -L "$go_gate_web_install_path/.pnpm" ] && [ -d "$go_gate_web_install_path/.pnpm" ] || {
+            echo "go-check: existing web virtual store is invalid" >&2
+            exit 1
+        }
+        go_gate_web_install_old_identity=$(go_gate_stat "$go_gate_web_install_path") || exit 1
+        go_gate_web_tree_move "$go_gate_web_install_path" "$go_gate_web_install_old" "$go_gate_web_install_old_identity" || exit 1
+    fi
+
+    if go_gate_package_manager_stage 600 pnpm install --frozen-lockfile --ignore-scripts; then
+        go_gate_web_install_status=0
+    else
+        go_gate_web_install_status=$?
+    fi
+    if [ "$go_gate_web_install_status" -ne 0 ]; then
+        go_gate_web_install_cleanup=0
+        if [ -e "$go_gate_web_install_path" ] || [ -L "$go_gate_web_install_path" ]; then
+            go_gate_web_install_partial_identity=$(go_gate_stat "$go_gate_web_install_path" 2>/dev/null || true)
+            if [ -n "$go_gate_web_install_partial_identity" ]; then
+                go_gate_web_tree_discard "$go_gate_web_install_path" "$go_gate_web_install_partial_identity" || go_gate_web_install_cleanup=1
+            else
+                go_gate_web_install_cleanup=1
+            fi
+        fi
+        if [ -n "$go_gate_web_install_old_identity" ]; then
+            go_gate_web_tree_discard "$go_gate_web_install_old" "$go_gate_web_install_old_identity" || go_gate_web_install_cleanup=1
+        fi
+        [ "$go_gate_web_install_cleanup" -eq 0 ] || return 1
+        return "$go_gate_web_install_status"
+    fi
+    if [ "$(go_gate_stat "$go_gate_web_install_parent" 2>/dev/null || true)" != "$go_gate_web_install_parent_identity" ]; then
+        echo "go-check: web dependency parent identity changed" >&2
+        return 1
+    fi
+    if [ -L "$go_gate_web_install_path" ] || [ ! -d "$go_gate_web_install_path" ] || [ -L "$go_gate_web_install_path/.modules.yaml" ] || [ ! -f "$go_gate_web_install_path/.modules.yaml" ] || [ -L "$go_gate_web_install_path/.pnpm" ] || [ ! -d "$go_gate_web_install_path/.pnpm" ]; then
+        echo "go-check: package manager produced an invalid web dependency tree" >&2
+        go_gate_web_install_cleanup=0
+        go_gate_web_install_partial_identity=$(go_gate_stat "$go_gate_web_install_path" 2>/dev/null || true)
+        if [ -n "$go_gate_web_install_partial_identity" ]; then
+            go_gate_web_tree_discard "$go_gate_web_install_path" "$go_gate_web_install_partial_identity" || go_gate_web_install_cleanup=1
+        fi
+        if [ -n "$go_gate_web_install_old_identity" ]; then
+            go_gate_web_tree_discard "$go_gate_web_install_old" "$go_gate_web_install_old_identity" || go_gate_web_install_cleanup=1
+        fi
+        [ "$go_gate_web_install_cleanup" -eq 0 ] || return 1
+        return 1
+    fi
+    if [ -n "$go_gate_web_install_old_identity" ]; then
+        go_gate_web_tree_discard "$go_gate_web_install_old" "$go_gate_web_install_old_identity" || return 1
+    fi
+    go_gate_web_install_partial_identity=$(go_gate_stat "$go_gate_web_install_path") || return 1
+    [ -n "$go_gate_web_install_partial_identity" ]
+)
 
 go_gate_fast_stage() {
     go_gate_expected_version=$(/usr/bin/awk '

@@ -91,6 +91,10 @@ EOF
 /bin/cat >"$fast_corepack" <<EOF
 #!/bin/sh
 printf 'corepack %s NETWORK=%s INTEGRITY=%s\n' "\$*" "\${COREPACK_ENABLE_NETWORK-}" "\${COREPACK_INTEGRITY_KEYS-unset}" >>"$fast_log"
+if [ "\${1-}" = pnpm ] && [ "\${2-}" = install ]; then
+    /bin/mkdir -p node_modules/.pnpm
+    : >node_modules/.modules.yaml
+fi
 case "\$(/bin/cat "$fast_mode" 2>/dev/null)" in corepack-fail) exit 45 ;; esac
 EOF
 for fast_tool in "$fast_go" "$fast_gofmt" "$fast_git" "$fast_xargs" "$fast_corepack"; do /bin/chmod 700 "$fast_tool"; done
@@ -107,7 +111,12 @@ go_gate_corepack_hash=$(go_gate_hash "$fast_corepack")
 # fixture intentionally exercises the direct fake-Corepack branch.
 go_gate_package_manager_direct=1
 : >"$fast_mode"
-go_gate_fast_stage || fail "fast stage fixture failed"
+fast_repository_root="$temporary/fast-repository"
+/bin/mkdir -p "$fast_repository_root/web"
+fast_real_repository_root=$repository_root
+repository_root=$fast_repository_root
+go_gate_fast_stage || { repository_root=$fast_real_repository_root; fail "fast stage fixture failed"; }
+repository_root=$fast_real_repository_root
 /usr/bin/grep -F 'go mod download GOPROXY=https://proxy.golang.org' "$fast_log" >/dev/null || fail "download did not use network stage"
 /usr/bin/grep -F 'go mod verify GOPROXY=off' "$fast_log" >/dev/null || fail "verify was not offline"
 /usr/bin/grep -F 'corepack pnpm install --frozen-lockfile --ignore-scripts NETWORK=1' "$fast_log" >/dev/null || fail "install was not the sole package network stage"
@@ -122,26 +131,41 @@ web_install_fixture="$temporary/web-install-fixture"
 #!/bin/sh
 set -eu
 . "$1"
-log=$2
-tree=$3
+. "$2"
+log=$3
+repository_root=$4
+go_gate_root=$5
+tree="$repository_root/web/node_modules"
 mode=success
 depth=0
 go_gate_package_manager_stage() {
     printf '%s %s\n' "$mode" "$(umask)" >>"$log"
     case "$mode" in
-        success) return 0 ;;
+        success)
+            /bin/mkdir -p "$tree/.pnpm"
+            : >"$tree/.modules.yaml"
+            : >"$tree/file"
+            return 0
+            ;;
         fail) return 43 ;;
         nested)
+            /bin/mkdir -p "$tree/.pnpm"
+            : >"$tree/.modules.yaml"
             if [ "$depth" -eq 0 ]; then
                 depth=1
+                nested_gate_root="$go_gate_root/nested"
+                /bin/mkdir -p "$nested_gate_root"
+                outer_gate_root=$go_gate_root
+                go_gate_root=$nested_gate_root
                 go_gate_web_install
+                go_gate_root=$outer_gate_root
             fi
             return 0
             ;;
         normalize)
             /bin/rm -rf -- "$tree"
-            /bin/mkdir "$tree"
-            : >"$tree/file"
+            /bin/mkdir -p "$tree/.pnpm"
+            : >"$tree/.modules.yaml"
             return 0
             ;;
         hup) /usr/bin/perl -e 'kill "HUP", $$' ;;
@@ -153,11 +177,17 @@ go_gate_package_manager_stage() {
 assert_umask() {
     [ "$(umask)" = "$1" ] || exit 45
 }
+assert_tree() {
+    [ ! -L "$tree" ] && [ -d "$tree" ] || exit 46
+    [ -f "$tree/.modules.yaml" ] && [ -d "$tree/.pnpm" ] || exit 47
+}
 
+/bin/mkdir -p "$repository_root/web"
 for caller_umask in 0000 0027 0077; do
     umask "$caller_umask"
     mode=success
     go_gate_web_install
+    assert_tree
     assert_umask "$caller_umask"
 done
 
@@ -165,6 +195,7 @@ umask 0077
 mode=nested
 depth=0
 go_gate_web_install
+assert_tree
 assert_umask 0077
 [ "$(/usr/bin/grep -c '^nested 0022$' "$log")" -eq 2 ] || exit 46
 
@@ -190,13 +221,16 @@ assert_umask 0077
 
 umask 0077
 mode=normalize
-/bin/mkdir "$tree"
 /bin/chmod 700 "$tree"
+: >"$tree/.modules.yaml"
+/bin/chmod 700 "$tree/.pnpm"
 : >"$tree/file"
 /bin/chmod 600 "$tree/file"
+/bin/chmod 600 "$tree/.modules.yaml"
 go_gate_web_install
+assert_tree
 [ "$(/usr/bin/stat -f '%Lp' "$tree")" = 755 ] || exit 51
-[ "$(/usr/bin/stat -f '%Lp' "$tree/file")" = 644 ] || exit 52
+[ "$(/usr/bin/stat -f '%Lp' "$tree/.modules.yaml")" = 644 ] || exit 52
 
 for signal in hup int term; do
     umask 0077
@@ -212,8 +246,10 @@ done
 EOF
 /bin/chmod 700 "$web_install_fixture"
 web_install_log="$temporary/web-install.log"
-web_install_tree="$temporary/web-node-modules"
-if ! /bin/sh "$web_install_fixture" "$repository_root/scripts/go-fast-stage.sh" "$web_install_log" "$web_install_tree"; then
+web_install_root="$temporary/web-install-root"
+web_install_gate_root="$temporary/web-install-gate"
+/bin/mkdir -p "$web_install_root" "$web_install_gate_root"
+if ! /bin/sh "$web_install_fixture" "$repository_root/scripts/go-fast-stage.sh" "$repository_root/scripts/go-gate-environment.sh" "$web_install_log" "$web_install_root" "$web_install_gate_root"; then
     fail "web install umask fixture failed"
 fi
 
