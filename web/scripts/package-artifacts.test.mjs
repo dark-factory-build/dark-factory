@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { toolTreeDigest } from "./package-artifacts.mjs";
 
 const webRoot = new URL("..", import.meta.url).pathname.slice(0, -1);
 const script = join(webRoot, "scripts", "package-artifacts.mjs");
@@ -48,6 +49,9 @@ test("public artifacts bind clean HEAD, protocol, exact dependencies, and bytes"
     assert.deepEqual(packed.protocol, { name: "dark-factory/browser/v1", version: 1 });
     assert.deepEqual(packed.buildTools.pnpm, "11.19.0");
     assert.deepEqual(packed.buildTools.typescript, "5.8.3");
+    assert.match(packed.buildTools.pnpmTreeSha512, /^[0-9a-f]{128}$/);
+    assert.match(packed.buildTools.typescriptTreeSha512, /^[0-9a-f]{128}$/);
+    assert.match(packed.buildTools.typescriptIntegrity, /^sha512-/);
     const client = packed.packages[clientName];
     const ui = packed.packages[uiName];
     for (const entry of [client, ui]) {
@@ -231,6 +235,102 @@ test("pack uses trusted absolute tools and leaves no partial output", () => {
     expectFailure(() => run("pack", inside), "outside the source tree");
     assert.equal(existsSync(inside), false);
   } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("tool tree commitment has framed content and rejects unsafe copied trees", () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), "dark-factory-tool-tree-"));
+  const pnpmRoot = join(userInfo().homedir, ".cache", "node", "corepack", "v1", "pnpm", "11.19.0");
+  const typescriptRoot = realpathSync(join(webRoot, "node_modules", "typescript"));
+  try {
+    const first = join(tempRoot, "first");
+    const second = join(tempRoot, "second");
+    mkdirSync(first);
+    mkdirSync(second);
+    writeFileSync(join(first, "a"), "bc");
+    writeFileSync(join(second, "ab"), "c");
+    assert.notEqual(toolTreeDigest(first), toolTreeDigest(second));
+
+    const copy = join(tempRoot, "pnpm");
+    cpSync(pnpmRoot, copy, { recursive: true });
+    const expected = toolTreeDigest(pnpmRoot);
+    assert.equal(toolTreeDigest(copy), expected);
+    const existingName = readdirSync(copy)[0];
+    writeFileSync(join(copy, existingName), `${readFileSync(join(copy, existingName), "utf8")}mutation`);
+    assert.notEqual(toolTreeDigest(copy), expected);
+
+    const symlinkTree = join(tempRoot, "symlink");
+    mkdirSync(symlinkTree);
+    writeFileSync(join(symlinkTree, "file"), "x");
+    symlinkSync("file", join(symlinkTree, "link"));
+    assert.throws(() => toolTreeDigest(symlinkTree), /contains symlink/);
+
+    const caseTree = join(tempRoot, "case");
+    mkdirSync(caseTree);
+    writeFileSync(join(caseTree, "file"), "x");
+    writeFileSync(join(caseTree, "FILE"), "x");
+    assert.throws(() => toolTreeDigest(caseTree), /case-confusable/);
+
+    const countTree = join(tempRoot, "count");
+    mkdirSync(countTree);
+    for (let index = 0; index < 4097; index += 1) writeFileSync(join(countTree, `file-${index}`), "x");
+    assert.throws(() => toolTreeDigest(countTree), /too many files/);
+
+    const sizeTree = join(tempRoot, "size");
+    mkdirSync(sizeTree);
+    const oversized = join(sizeTree, "oversized");
+    writeFileSync(oversized, "x");
+    truncateSync(oversized, 128 * 1024 * 1024 + 1);
+    assert.throws(() => toolTreeDigest(sizeTree), /too large/);
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("pack ignores caller Corepack home and rejects changed reviewed tool content", () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), "dark-factory-toolchain-"));
+  const output = join(tempRoot, "output");
+  const fakeCorepackHome = join(tempRoot, "fake-corepack");
+  const pnpmRoot = join(userInfo().homedir, ".cache", "node", "corepack", "v1", "pnpm", "11.19.0");
+  const tscRoot = realpathSync(join(webRoot, "node_modules", "typescript"));
+  const tscWrapper = join(tscRoot, "bin", "tsc");
+  const tscBytes = readFileSync(tscWrapper);
+  try {
+    mkdirSync(join(fakeCorepackHome, "v1", "pnpm"), { recursive: true });
+    cpSync(pnpmRoot, join(fakeCorepackHome, "v1", "pnpm", "11.19.0"), { recursive: true });
+    writeFileSync(join(fakeCorepackHome, "v1", "pnpm", "11.19.0", "package.json"), "not the reviewed package\n");
+    runWithEnv("pack", output, { COREPACK_HOME: fakeCorepackHome });
+    runWithEnv("verify", output, { COREPACK_HOME: fakeCorepackHome });
+    rmSync(output, { recursive: true, force: true });
+
+    writeFileSync(tscWrapper, Buffer.concat([tscBytes, Buffer.from("\n// changed same-version wrapper\n")]));
+    expectFailure(() => run("pack", output), "installed TypeScript content differs");
+    assert.equal(existsSync(output), false);
+  } finally {
+    writeFileSync(tscWrapper, tscBytes);
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("pack rejects a changed reviewed digest or lockfile integrity", () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), "dark-factory-toolchain-"));
+  const output = join(tempRoot, "output");
+  const integrityPath = join(webRoot, "toolchain-integrity.json");
+  const lockfilePath = join(webRoot, "pnpm-lock.yaml");
+  const integrityText = readFileSync(integrityPath, "utf8");
+  const lockfileText = readFileSync(lockfilePath, "utf8");
+  try {
+    writeFileSync(integrityPath, integrityText.replace(/"treeSha512": "[0-9a-f]{128}"/, `"treeSha512": "${"0".repeat(128)}"`));
+    expectFailure(() => run("pack", output), "cached pnpm content differs");
+    writeFileSync(integrityPath, integrityText);
+
+    const originalSRI = "sha512-p1diW6TqL9L07nNxvRMM7hMMw4c5XOo/1ibL4aAIGmSAt9slTE1Xgw5KWuof2uTOvCg9BY7ZRi+GaF+7sfgPeQ==";
+    writeFileSync(lockfilePath, lockfileText.replace(originalSRI, `${originalSRI.slice(0, -3)}abc`));
+    expectFailure(() => run("pack", output), "lockfile TypeScript integrity differs");
+  } finally {
+    writeFileSync(integrityPath, integrityText);
+    writeFileSync(lockfilePath, lockfileText);
     rmSync(tempRoot, { recursive: true, force: true });
   }
 });
