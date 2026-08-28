@@ -285,6 +285,20 @@ func runPTYProviderHelper(root string) error {
 }
 
 func runCwdProviderHelper(root string) error {
+	err := runCwdProviderChecks(root)
+	if err != nil {
+		message := []byte(err.Error())
+		if len(message) > maxAttemptReportBytes {
+			message = message[:maxAttemptReportBytes]
+		}
+		// Keep helper failures inspectable without exposing provider output or
+		// relying on a PTY diagnostic path. The root is the private fixture.
+		_ = os.WriteFile(filepath.Join(root, "cwd.error"), message, 0o600)
+	}
+	return err
+}
+
+func runCwdProviderChecks(root string) error {
 	info, err := os.Stat(".")
 	if err != nil {
 		return err

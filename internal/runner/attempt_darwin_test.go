@@ -1175,7 +1175,8 @@ func TestCurrentExecUsesTransferredCwdAfterParentPathReplacement(t *testing.T) {
 	}
 	record := f.finishAndAck()
 	if record.Terminal.Exit.Code != 0 || record.Terminal.Process != inner {
-		t.Fatalf("descriptor cwd terminal=%+v", record.Terminal)
+		diagnostic, _ := os.ReadFile(filepath.Join(f.root, "cwd.error"))
+		t.Fatalf("descriptor cwd terminal=%+v output=%q cwd_diagnostic=%q", record.Terminal, f.output(), diagnostic)
 	}
 	want := fmt.Sprintf("%d:%d", original.Dev, original.Ino)
 	if got, err := os.ReadFile(filepath.Join(f.root, "cwd.identity")); err != nil || string(got) != want {
