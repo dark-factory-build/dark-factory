@@ -630,6 +630,96 @@ func (store *Store) RecordRecoveredRunnerAbsence(ctx context.Context, runID RunI
 	return run, runner, nil
 }
 
+// RecordRecoveredPreExecRunnerAbsence finalizes the one state ActivateRunner
+// can strand: the runner row is active with a bound identity, but the daemon
+// died before releasing the blocked outer exec, so the provider pair is still
+// declared, the session never activated and no marker or result artifact can
+// exist. The caller must hold positive exact-identity absence proof plus
+// stable absence of activation/result residue; this edge then finalizes the
+// run, records the recovered-absence runner exit and releases every runner-
+// side resource in one transaction.
+func (store *Store) RecordRecoveredPreExecRunnerAbsence(ctx context.Context, runID RunID, runnerID ResourceID, expectedRun, expectedRunner Revision, identity ResourceIdentity, at UnixMillis) (Run, error) {
+	if runID.zero() || runnerID.zero() || !identity.validFor(ResourceRunnerProcess) {
+		return Run{}, fmt.Errorf("%w: invalid recovered pre-exec runner absence", ErrInvalidValue)
+	}
+	failure, _ := NewFailureProposal(FailureActivation, "runner absent before outer exec release")
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return Run{}, err
+	}
+	defer tx.Close()
+	run, found, err := runByID(ctx, tx.connection, runID)
+	if err != nil || !found {
+		if err == nil {
+			err = ErrNotFound
+		}
+		return Run{}, tx.Rollback(err)
+	}
+	footprint, err := loadLifecycleFootprint(ctx, tx.connection, run)
+	if err != nil {
+		return Run{}, tx.Rollback(err)
+	}
+	if footprint.runner.ID != runnerID || !resourceIdentityEqual(footprint.runner.Identity, identity) {
+		return Run{}, tx.Rollback(ErrConflict)
+	}
+	if preExecRunnerAbsencePostcondition(run, footprint, failure, expectedRun, expectedRunner) {
+		return run, tx.Rollback(nil)
+	}
+	if run.Phase != RunAdmitted || run.Proposal != nil || run.ProviderExit != nil || run.RunnerExit != nil || run.Revision != expectedRun ||
+		footprint.runtime.State != ResourceActive || footprint.runner.State != ResourceActive || footprint.runner.Revision != expectedRunner ||
+		footprint.providerProcess.State != ResourceDeclared || !footprint.providerProcess.Identity.Empty() ||
+		footprint.session.State != TerminalSessionDeclared || footprint.session.ActivatedAt != nil || !lifecycleTimesValid(run, footprint, at) {
+		return Run{}, tx.Rollback(ErrConflict)
+	}
+	if err := requireFinalizingTime(ctx, tx.connection, run, at); err != nil {
+		return Run{}, tx.Rollback(err)
+	}
+	kind, code, proposalDetail, result := proposalSQL(failure)
+	updated, err := tx.connection.ExecContext(ctx, `UPDATE runs SET phase = 'finalizing', proposal_kind = ?, proposal_code = ?, proposal_detail = ?, proposal_result = ?, credential_revoked_at_ms = ?, finalizing_at_ms = ?, runner_exit_kind = 'recovered_absence', runner_exit_sequence = 1, runner_exit_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase = 'admitted' AND proposal_kind IS NULL AND credential_revoked_at_ms IS NULL AND provider_exit_kind IS NULL AND runner_exit_kind IS NULL AND revision = ?`, kind, code, proposalDetail, result, at.Int64(), at.Int64(), at.Int64(), at.Int64(), runID.Bytes(), expectedRun.Int64())
+	if err := requireOneRow(updated, err); err != nil {
+		return Run{}, tx.Rollback(err)
+	}
+	updated, err = tx.connection.ExecContext(ctx, `UPDATE resources SET state = 'releasing', revision = revision + 1, updated_at_ms = ? WHERE id = ? AND run_id = ? AND kind = 'runtime_root' AND state = 'active'`, at.Int64(), footprint.runtime.ID.Bytes(), runID.Bytes())
+	if err := requireOneRow(updated, err); err != nil {
+		return Run{}, tx.Rollback(err)
+	}
+	pid, pgid, birth, _ := identity.Process()
+	updated, err = tx.connection.ExecContext(ctx, `UPDATE resources SET state = 'released', released_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND run_id = ? AND kind = 'runner_process' AND state = 'active' AND revision = ? AND pid = ? AND pgid = ? AND birth_digest = ?`, at.Int64(), at.Int64(), runnerID.Bytes(), runID.Bytes(), expectedRunner.Int64(), pid, pgid, birth.Bytes())
+	if err := requireOneRow(updated, err); err != nil {
+		return Run{}, tx.Rollback(err)
+	}
+	updated, err = tx.connection.ExecContext(ctx, `UPDATE resources SET state = 'released', released_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE run_id = ? AND state = 'declared' AND pid IS NULL AND pgid IS NULL AND birth_digest IS NULL AND kind IN ('provider_process', 'provider_group')`, at.Int64(), at.Int64(), runID.Bytes())
+	if err := requireRows(updated, err, 2); err != nil {
+		return Run{}, tx.Rollback(err)
+	}
+	updated, err = tx.connection.ExecContext(ctx, `UPDATE terminal_sessions SET state = 'closed', closed_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND run_id = ? AND state = 'declared' AND activated_at_ms IS NULL AND closed_at_ms IS NULL`, at.Int64(), at.Int64(), footprint.session.ID.Bytes(), runID.Bytes())
+	if err := requireOneRow(updated, err); err != nil {
+		return Run{}, tx.Rollback(err)
+	}
+	// The exact predecessor is admitted with a never-activated terminal. Human
+	// requests require running attempt authority, so validated state proves
+	// there is no request to converge on this pre-exec edge.
+	if err := appendInvalidations(ctx, tx.connection, at, []pendingInvalidation{{kind: EntityRun, id: runID.Bytes(), revision: expectedRun.Int64() + 1}}); err != nil {
+		return Run{}, tx.Rollback(err)
+	}
+	run, _, err = runByID(ctx, tx.connection, runID)
+	if err != nil {
+		return Run{}, tx.Rollback(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Run{}, err
+	}
+	return run, nil
+}
+
+func preExecRunnerAbsencePostcondition(run Run, footprint lifecycleFootprint, failure Proposal, expectedRun, expectedRunner Revision) bool {
+	return run.Phase == RunFinalizing && run.Revision.Int64() == expectedRun.Int64()+1 && run.Proposal != nil && run.Proposal.equal(failure) &&
+		run.ProviderExit == nil && run.RunnerExit != nil && run.RunnerExit.RecoveredAbsence() &&
+		footprint.runtime.State == ResourceReleasing && footprint.runner.State == ResourceReleased && footprint.runner.Revision.Int64() == expectedRunner.Int64()+1 && !footprint.runner.Identity.Empty() &&
+		footprint.providerProcess.State == ResourceReleased && footprint.providerProcess.Identity.Empty() && footprint.providerGroup.State == ResourceReleased && footprint.providerGroup.Identity.Empty() &&
+		footprint.session.State == TerminalSessionClosed && footprint.session.ActivatedAt == nil
+}
+
 // RecordLiveRunnerExitAndRelease consumes the live owner's exact Wait result
 // and releases the outer runner in the same transaction. Recovery uses the
 // separate positive-absence edge above and cannot manufacture code or signal.

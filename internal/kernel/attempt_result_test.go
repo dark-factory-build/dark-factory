@@ -564,6 +564,141 @@ func TestAttemptResultPhaseGuardRejectsUnknownAndTerminal(t *testing.T) {
 	}
 }
 
+func TestRecoveredPreExecRunnerAbsenceFinalizesExactly(t *testing.T) {
+	store, run, _ := admittedOrchestratorRun(t)
+	defer func() { _ = store.Close() }()
+	path := storeTestPath(t, store)
+	ctx := context.Background()
+	run, _, runnerIdentity := activateStartedRunner(t, store, run, 2200)
+	runner := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
+	before, _ := store.Factory(ctx)
+	settled, err := store.RecordRecoveredPreExecRunnerAbsence(ctx, run.ID, runner.ID, run.Revision, runner.Revision, runnerIdentity, mustTime(t, 30))
+	if err != nil || settled.Phase != RunFinalizing || settled.Proposal == nil || settled.Proposal.code != FailureActivation ||
+		settled.ProviderExit != nil || settled.RunnerExit == nil || !settled.RunnerExit.RecoveredAbsence() || settled.CredentialRevokedAt == nil {
+		t.Fatalf("pre-exec absence settlement = %+v err=%v", settled, err)
+	}
+	resources := resourcesForRunTest(t, store, run.ID)
+	released := resourceOfKind(t, resources, ResourceRunnerProcess)
+	if resourceOfKind(t, resources, ResourceRuntimeRoot).State != ResourceReleasing ||
+		released.State != ResourceReleased || !resourceIdentityEqual(released.Identity, runnerIdentity) ||
+		resourceOfKind(t, resources, ResourceProviderProcess).State != ResourceReleased || !resourceOfKind(t, resources, ResourceProviderProcess).Identity.Empty() ||
+		resourceOfKind(t, resources, ResourceProviderGroup).State != ResourceReleased || !resourceOfKind(t, resources, ResourceProviderGroup).Identity.Empty() {
+		t.Fatalf("pre-exec absence footprint = %+v", resources)
+	}
+	if session := terminalSessionForRunTest(t, store, run.ID); session.State != TerminalSessionClosed || session.ActivatedAt != nil {
+		t.Fatalf("pre-exec absence terminal = %+v", session)
+	}
+	after, _ := store.Factory(ctx)
+	if after.Head.Int64() != before.Head.Int64()+1 {
+		t.Fatalf("pre-exec absence invalidation head = %d -> %d", before.Head.Int64(), after.Head.Int64())
+	}
+	replay, err := store.RecordRecoveredPreExecRunnerAbsence(ctx, run.ID, runner.ID, run.Revision, runner.Revision, runnerIdentity, mustTime(t, 90))
+	afterReplay, _ := store.Factory(ctx)
+	if err != nil || replay.Revision != settled.Revision || afterReplay.Head != after.Head {
+		t.Fatalf("pre-exec absence replay = %+v head=%d/%d err=%v", replay, after.Head.Int64(), afterReplay.Head.Int64(), err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store = reopened
+	durable, found, err := store.Run(ctx, run.ID)
+	if err != nil || !found || durable.Phase != RunFinalizing || durable.RunnerExit == nil || !durable.RunnerExit.RecoveredAbsence() || durable.Proposal == nil || durable.Proposal.code != FailureActivation {
+		t.Fatalf("reopened pre-exec absence = %+v found=%v err=%v", durable, found, err)
+	}
+}
+
+func TestRecoveredPreExecRunnerAbsenceFailsClosed(t *testing.T) {
+	t.Run("identity and phase guards", func(t *testing.T) {
+		store, run, keys := admittedOrchestratorRun(t)
+		defer store.Close()
+		ctx := context.Background()
+		run, runtimeIdentity, runnerIdentity := activateStartedRunner(t, store, run, 2300)
+		runner := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
+		before, _ := store.Factory(ctx)
+		if _, err := store.RecordRecoveredPreExecRunnerAbsence(ctx, run.ID, runner.ID, run.Revision, runner.Revision, processIdentity(t, 2399), mustTime(t, 30)); !errors.Is(err, ErrConflict) {
+			t.Fatalf("wrong identity = %v", err)
+		}
+		if _, err := store.RecordRecoveredPreExecRunnerAbsence(ctx, run.ID, runner.ID, mustRevision(t, run.Revision.Int64()+5), runner.Revision, runnerIdentity, mustTime(t, 30)); !errors.Is(err, ErrConflict) {
+			t.Fatalf("wrong run revision = %v", err)
+		}
+		if _, err := store.RecordRecoveredPreExecRunnerAbsence(ctx, run.ID, runner.ID, run.Revision, mustRevision(t, runner.Revision.Int64()+5), runnerIdentity, mustTime(t, 30)); !errors.Is(err, ErrConflict) {
+			t.Fatalf("wrong runner revision = %v", err)
+		}
+		if _, err := store.RecordRecoveredPreExecRunnerAbsence(ctx, run.ID, runner.ID, run.Revision, runner.Revision, runnerIdentity, mustTime(t, 1)); !errors.Is(err, ErrConflict) {
+			t.Fatalf("time regression = %v", err)
+		}
+		result, _ := NewInnerUnregisteredConvergedAttemptResult(run.ID, keys.AttemptDigest, keys.ResultProofDigest, runtimeIdentity)
+		consumed, err := store.ConsumeAttemptResult(ctx, result, run.Revision, mustTime(t, 31))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.RecordRecoveredPreExecRunnerAbsence(ctx, run.ID, runner.ID, consumed.Revision, runner.Revision, runnerIdentity, mustTime(t, 32)); !errors.Is(err, ErrConflict) {
+			t.Fatalf("finalizing run accepted pre-exec absence = %v", err)
+		}
+		after, _ := store.Factory(ctx)
+		if after.Head.Int64() != before.Head.Int64()+1 {
+			t.Fatalf("rejections advanced invalidation head: %d -> %d", before.Head.Int64(), after.Head.Int64())
+		}
+	})
+
+	t.Run("starting runner has no absence authority", func(t *testing.T) {
+		store, run, _ := admittedOrchestratorRun(t)
+		defer store.Close()
+		ctx := context.Background()
+		runtime := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
+		runtimeIdentity, _ := NewPathResourceIdentity(2400, 2401)
+		if _, err := store.ActivateResource(ctx, run.ID, runtime.ID, runtime.Revision, runtimeIdentity, mustTime(t, 20)); err != nil {
+			t.Fatal(err)
+		}
+		runner := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
+		started, starting, err := store.BeginRunnerStart(ctx, run.ID, runner.ID, run.Revision, runner.Revision, mustTime(t, 21))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.RecordRecoveredPreExecRunnerAbsence(ctx, run.ID, runner.ID, started.Revision, starting.Revision, processIdentity(t, 2402), mustTime(t, 22)); !errors.Is(err, ErrConflict) {
+			t.Fatalf("starting runner accepted absence = %v", err)
+		}
+	})
+
+	t.Run("declared or activated provider pair refuses", func(t *testing.T) {
+		store, run, _ := runningStartedOrchestratorRun(t, 2500)
+		defer store.Close()
+		ctx := context.Background()
+		runner := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
+		if _, err := store.RecordRecoveredPreExecRunnerAbsence(ctx, run.ID, runner.ID, run.Revision, runner.Revision, runner.Identity, mustTime(t, 30)); !errors.Is(err, ErrConflict) {
+			t.Fatalf("activated provider pair accepted = %v", err)
+		}
+	})
+
+	t.Run("partial provider release rolls back atomically", func(t *testing.T) {
+		store, run, _ := admittedOrchestratorRun(t)
+		defer store.Close()
+		ctx := context.Background()
+		run, _, runnerIdentity := activateStartedRunner(t, store, run, 2600)
+		process := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceProviderProcess)
+		corruptSQL(t, store, `UPDATE resources SET state = 'released', released_at_ms = updated_at_ms WHERE id = ?`, process.ID.Bytes())
+		runner := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
+		if _, err := store.RecordRecoveredPreExecRunnerAbsence(ctx, run.ID, runner.ID, run.Revision, runner.Revision, runnerIdentity, mustTime(t, 30)); err == nil {
+			t.Fatal("split provider pair accepted")
+		}
+		var phase, runnerState string
+		var proposal, runnerExit any
+		if err := store.writer.QueryRowContext(ctx, `SELECT phase, proposal_kind, runner_exit_kind FROM runs WHERE id = ?`, run.ID.Bytes()).Scan(&phase, &proposal, &runnerExit); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.writer.QueryRowContext(ctx, `SELECT state FROM resources WHERE id = ?`, runner.ID.Bytes()).Scan(&runnerState); err != nil {
+			t.Fatal(err)
+		}
+		if phase != "admitted" || proposal != nil || runnerExit != nil || runnerState != "active" {
+			t.Fatalf("partial release leaked state: phase=%s proposal=%v runnerExit=%v runner=%s", phase, proposal, runnerExit, runnerState)
+		}
+	})
+}
+
 func TestConsumeAttemptResultRefusesEveryKindWhileRunnerStarting(t *testing.T) {
 	store, run, keys := admittedOrchestratorRun(t)
 	defer store.Close()
