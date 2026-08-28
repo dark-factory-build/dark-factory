@@ -245,6 +245,8 @@ go_gate_web_remove() { return 37; }
 if go_gate_web_install; then exit 59; else result=$?; fi
 [ "$result" -eq 1 ] || exit 60
 go_gate_web_remove() { /bin/rm -rf -- "$1"; }
+go_gate_web_remove "$go_gate_root/web-node-modules-discard"
+go_gate_web_remove "$go_gate_root/web-node-modules-old"
 
 umask 0077
 ( mode=success; go_gate_web_install )
