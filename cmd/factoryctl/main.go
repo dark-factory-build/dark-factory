@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
+	"github.com/dark-factory-build/dark-factory/internal/buildinfo"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 )
 
@@ -38,6 +39,7 @@ const (
   factoryctl web revoke CLIENT_ID --revision REVISION
   factoryctl init --home ABSOLUTE
   factoryctl doctor --home ABSOLUTE
+  factoryctl --version
 `
 )
 
@@ -77,6 +79,10 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 type browserOpener func(context.Context, string) error
 
 func runWithOpener(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer, opener browserOpener) int {
+	if len(args) == 1 && args[0] == "--version" {
+		_, _ = fmt.Fprintf(stdout, "factoryctl %s\n", buildinfo.Current().Version())
+		return 0
+	}
 	command, help, ok := parse(args)
 	if help {
 		_, _ = io.WriteString(stdout, usage)

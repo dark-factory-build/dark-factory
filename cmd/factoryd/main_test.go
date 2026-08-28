@@ -20,6 +20,13 @@ import (
 
 const testOrigin = "https://factoryd.test.invalid"
 
+func TestVersionDoesNotOpenRuntime(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if exit := run(context.Background(), []string{"--version"}, &stdout, &stderr); exit != 0 || stdout.String() != "factoryd development\n" || stderr.Len() != 0 {
+		t.Fatalf("version exit=%d stdout=%q stderr=%q", exit, stdout.String(), stderr.String())
+	}
+}
+
 func TestParseOwnsOneFreshHomeAndExactLoopbackBrowserPolicy(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "factory")
 	tests := []struct {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"os/exec"
@@ -9,16 +10,23 @@ import (
 )
 
 func TestDirectInvocationRequiresExactPrivateMode(t *testing.T) {
-	for _, args := range [][]string{nil, {"--version"}, {"--exec-gate", "extra"}, {"--attempt-runner", "extra"}, {"--change-worker-shell", "extra"}} {
-		if err := run(args); !errors.Is(err, errPrivateCapability) {
+	for _, args := range [][]string{nil, {"--exec-gate", "extra"}, {"--attempt-runner", "extra"}, {"--change-worker-shell", "extra"}} {
+		if err := run(args, &bytes.Buffer{}); !errors.Is(err, errPrivateCapability) {
 			t.Fatalf("args=%q err=%v", args, err)
 		}
 	}
 }
 
+func TestVersionIsTheOnlyPublicRunnerInvocation(t *testing.T) {
+	var output bytes.Buffer
+	if err := run([]string{"--version"}, &output); err != nil || output.String() != "factory-runner development\n" {
+		t.Fatalf("version = %q, %v", output.String(), err)
+	}
+}
+
 func TestChangeWorkerModeRequiresInheritedCapabilitiesBeforeEffect(t *testing.T) {
 	if os.Getenv("FACTORY_RUNNER_DIRECT_WORKER") == "1" {
-		if err := run([]string{"--change-worker-shell"}); err == nil || !strings.Contains(err.Error(), "Change worker failed") {
+		if err := run([]string{"--change-worker-shell"}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "Change worker failed") {
 			t.Fatalf("direct worker error = %v", err)
 		}
 		return

@@ -24,6 +24,14 @@ type serverResult struct {
 	err  error
 }
 
+func TestVersionRequiresNoHomeOrCredential(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	exit := run(context.Background(), []string{"--version"}, func(string) string { return "private" }, &stdout, &stderr)
+	if exit != 0 || stdout.String() != "factoryctl development\n" || stderr.Len() != 0 {
+		t.Fatalf("version exit=%d stdout=%q stderr=%q", exit, stdout.String(), stderr.String())
+	}
+}
+
 type apiFixture struct {
 	directory   string
 	socket      string

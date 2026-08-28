@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
+	"github.com/dark-factory-build/dark-factory/internal/buildinfo"
 	"github.com/dark-factory-build/dark-factory/internal/daemon"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 )
@@ -33,6 +34,7 @@ const (
 
 	usage = `usage:
   factoryd --home ABSOLUTE [--development-browser-origin EXACT_ORIGIN ...]
+  factoryd --version
 `
 )
 
@@ -79,6 +81,10 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	if len(args) == 1 && args[0] == "--version" {
+		_, _ = fmt.Fprintf(stdout, "factoryd %s\n", buildinfo.Current().Version())
+		return 0
+	}
 	configuration, help, ok := parse(args)
 	if help {
 		_, _ = io.WriteString(stdout, usage)
