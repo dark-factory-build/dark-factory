@@ -140,6 +140,7 @@ type fixture struct {
 	runtimeParent         *daemon.RuntimeParent
 	listener              *api.Listener
 	apiHome               *install.OperationalHome
+	apiAuthority          *install.LocalAPIAuthority
 	apiDone               chan error
 	agentID               kernel.AgentID
 	spec                  daemon.SupervisorSpec
@@ -179,8 +180,7 @@ func newFixture(t *testing.T, seed byte, test scenario, factoryctl, runnerExecut
 	gitHome := filepath.Join(root, "git-home")
 	repository := filepath.Join(root, "repository")
 	changeParent := filepath.Join(root, "changes")
-	runtimePath := filepath.Join(root, "runtimes")
-	for _, path := range []string{gitHome, repository, changeParent, runtimePath} {
+	for _, path := range []string{gitHome, repository, changeParent} {
 		if err := os.Mkdir(path, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -199,14 +199,25 @@ func newFixture(t *testing.T, seed byte, test scenario, factoryctl, runnerExecut
 	gitRun(t, git, gitHome, "-C", repository, "commit", "-m", "base")
 	base := strings.TrimSpace(gitOutput(t, git, gitHome, "-C", repository, "rev-parse", "HEAD"))
 
-	parentFile, err := os.Open(runtimePath)
+	apiHomePath := filepath.Join(root, "api-home")
+	if _, err := install.Init(context.Background(), apiHomePath); err != nil {
+		t.Fatal(err)
+	}
+	operatorToken := filepath.Join(apiHomePath, "operator.token")
+	if err := os.WriteFile(operatorToken, bytes.Repeat([]byte{'o'}, 32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result.apiHome, err = install.OpenOperationalHome(context.Background(), apiHomePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	result.runtimeParent, err = daemon.CreateRuntimeParent(parentFile)
-	closeErr := parentFile.Close()
-	if err != nil || closeErr != nil {
-		t.Fatalf("runtime parent: %v; descriptor close: %v", err, closeErr)
+	runtimes, err := result.apiHome.Runtimes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	result.runtimeParent, err = daemon.OpenRuntimeParent(context.Background(), runtimes, filepath.Join(apiHomePath, "runtimes"))
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	now := e2eTime(t)
@@ -244,23 +255,11 @@ func newFixture(t *testing.T, seed byte, test scenario, factoryctl, runnerExecut
 	if err != nil {
 		t.Fatal(err)
 	}
-	apiHomePath := filepath.Join(root, "api-home")
-	if _, err := install.Init(context.Background(), apiHomePath); err != nil {
-		t.Fatal(err)
-	}
-	operatorToken := filepath.Join(apiHomePath, "operator.token")
-	if err := os.WriteFile(operatorToken, bytes.Repeat([]byte{'o'}, 32), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	result.apiHome, err = install.OpenOperationalHome(context.Background(), apiHomePath)
+	result.apiAuthority, err = result.apiHome.OpenLocalAPI(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	authority, err := result.apiHome.OpenLocalAPI(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	result.listener, err = api.Listen(authority)
+	result.listener, err = api.Listen(result.apiAuthority)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -686,12 +685,12 @@ func (fixture *fixture) closeOwned() {
 			return
 		}
 	}
-	if fixture.apiHome != nil {
-		if err := fixture.apiHome.Close(); err != nil {
-			fixture.t.Errorf("API home close: %v", err)
+	if fixture.apiAuthority != nil {
+		if err := fixture.apiAuthority.Close(); err != nil {
+			fixture.t.Errorf("API authority close: %v", err)
 			return
 		}
-		fixture.apiHome = nil
+		fixture.apiAuthority = nil
 	}
 	if fixture.runtimeParent != nil {
 		if err := fixture.runtimeParent.Close(); err != nil {
@@ -700,6 +699,13 @@ func (fixture *fixture) closeOwned() {
 		} else {
 			fixture.runtimeParent = nil
 		}
+	}
+	if fixture.apiHome != nil {
+		if err := fixture.apiHome.Close(); err != nil {
+			fixture.t.Errorf("API home close: %v", err)
+			return
+		}
+		fixture.apiHome = nil
 	}
 	if fixture.store != nil {
 		if err := fixture.store.Close(); err != nil {

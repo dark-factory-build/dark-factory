@@ -54,10 +54,12 @@ func openRecoveredRuntime(ctx context.Context, parent *RuntimeParent, basename s
 	if err != nil {
 		return nil, err
 	}
-	keepOwner := false
+	var child *runtimeParentChild
 	defer func() {
-		if !keepOwner {
+		if child == nil {
 			resultErr = errors.Join(resultErr, operation.Close())
+		} else {
+			resultErr = errors.Join(resultErr, child.Close())
 		}
 	}()
 	ownedParent, err := operation.directory()
@@ -112,9 +114,13 @@ func openRecoveredRuntime(ctx context.Context, parent *RuntimeParent, basename s
 	if err != nil {
 		return nil, err
 	}
+	child, err = operation.transfer()
+	if err != nil {
+		return nil, err
+	}
 	runtime := &Runtime{
 		locator: locator, basename: basename, dir: dir, directory: opened,
-		owner: operation, identity: expected, home: home, temp: temp,
+		owner: child, identity: expected, home: home, temp: temp,
 		lifetime: lifetime, lifetimeID: lifetimeID,
 	}
 	recovered := &RecoveredRuntime{runtime: runtime, files: files}
@@ -123,7 +129,7 @@ func openRecoveredRuntime(ctx context.Context, parent *RuntimeParent, basename s
 	}
 	keepDir = true
 	keepLifetime = true
-	keepOwner = true
+	child = nil
 	return recovered, nil
 }
 

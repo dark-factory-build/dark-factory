@@ -674,15 +674,7 @@ func inspectRepositoryIdentity(path string) (change.RepositoryIdentity, error) {
 }
 
 func runtimeChildPath(parent *RuntimeParent, basename string) (string, error) {
-	if parent == nil || !validBasename(basename) {
-		return "", invalidContract(nil)
-	}
-	parent.mu.Lock()
-	defer parent.mu.Unlock()
-	if parent.dir == nil || parent.path == "" {
-		return "", invalidContract(nil)
-	}
-	return filepath.Join(parent.path, basename), nil
+	return parent.runtimeLocator(basename)
 }
 
 func releaseCheckpoint(controller *runner.AttemptController, stage runner.AttemptStage) (runner.AttemptEvent, error) {

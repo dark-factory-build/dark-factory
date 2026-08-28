@@ -33,10 +33,14 @@ type RuntimeParent struct {
 	directory directoryIdentity
 	lock      *os.File
 	lockID    runner.FileIdentity
-	active    uint64
+	operation bool
+	children  uint64
 	closing   bool
 	closed    bool
 	closeErr  error
+	closeDir  func(*os.File) error
+	unlock    func(int) error
+	closeLock func(*os.File) error
 }
 
 // OpenRuntimeParent consumes the retained operational-home member capability.
@@ -66,6 +70,9 @@ func openRuntimeParent(ctx context.Context, capability install.MemberCapability,
 	}()
 	directory, err := inspectPrivateDirectory(int(dir.Fd()))
 	if err != nil {
+		return nil, invalidContract(err)
+	}
+	if err := verifyNamedDirectory(diagnosticLocator, directory); err != nil {
 		return nil, invalidContract(err)
 	}
 	if err := ctx.Err(); err != nil {
@@ -108,18 +115,26 @@ func openRuntimeParent(ctx context.Context, capability install.MemberCapability,
 		return nil, invalidContract(err)
 	}
 
+	parent := newRuntimeParent(diagnosticLocator, dir, directory, lock, lockID)
+	cleanupCreated = false
+	keepLock = true
+	keepDir = true
+	return parent, nil
+}
+
+func newRuntimeParent(diagnosticLocator string, dir *os.File, directory directoryIdentity, lock *os.File, lockID runner.FileIdentity) *RuntimeParent {
 	parent := &RuntimeParent{
 		locator:   diagnosticLocator,
 		dir:       dir,
 		directory: directory,
 		lock:      lock,
 		lockID:    lockID,
+		closeDir:  func(file *os.File) error { return file.Close() },
+		unlock:    func(fd int) error { return unix.Flock(fd, unix.LOCK_UN) },
+		closeLock: func(file *os.File) error { return file.Close() },
 	}
 	parent.cond = sync.NewCond(&parent.mu)
-	cleanupCreated = false
-	keepLock = true
-	keepDir = true
-	return parent, nil
+	return parent
 }
 
 func openRuntimeParentLock(ctx context.Context, parentFD int, beforeFlock func(bool)) (*os.File, runner.FileIdentity, bool, error) {
@@ -239,8 +254,18 @@ func cleanupCreatedRuntimeLock(parentFD int, expected runner.FileIdentity) error
 }
 
 type runtimeParentOperation struct {
+	mu     sync.Mutex
 	parent *RuntimeParent
-	once   sync.Once
+	closed bool
+}
+
+// runtimeParentChild is the lifetime reference transferred to one live
+// Runtime. It retains the parent without holding the short namespace-operation
+// gate, so distinct admitted runtimes may coexist.
+type runtimeParentChild struct {
+	mu     sync.Mutex
+	parent *RuntimeParent
+	closed bool
 }
 
 func (parent *RuntimeParent) begin() (*runtimeParentOperation, error) {
@@ -252,10 +277,13 @@ func (parent *RuntimeParent) begin() (*runtimeParentOperation, error) {
 	if parent.closing || parent.closed || parent.dir == nil || parent.lock == nil {
 		return nil, invalidContract(parent.closeErr)
 	}
+	if parent.operation {
+		return nil, errRuntimeBusy
+	}
 	if err := parent.verifyRetained(); err != nil {
 		return nil, invalidContract(err)
 	}
-	parent.active++
+	parent.operation = true
 	return &runtimeParentOperation{parent: parent}, nil
 }
 
@@ -271,10 +299,15 @@ func (operation *runtimeParentOperation) directory() (*os.File, error) {
 	if operation == nil || operation.parent == nil {
 		return nil, invalidContract(nil)
 	}
+	operation.mu.Lock()
+	defer operation.mu.Unlock()
+	if operation.closed {
+		return nil, invalidContract(nil)
+	}
 	parent := operation.parent
 	parent.mu.Lock()
 	defer parent.mu.Unlock()
-	if parent.closed || parent.dir == nil || parent.lock == nil {
+	if !parent.operation || parent.closed || parent.dir == nil || parent.lock == nil {
 		return nil, invalidContract(parent.closeErr)
 	}
 	if err := parent.verifyRetained(); err != nil {
@@ -287,25 +320,116 @@ func (operation *runtimeParentOperation) locator(name string) (string, error) {
 	if operation == nil || operation.parent == nil || !validRuntimeName(name) {
 		return "", invalidContract(nil)
 	}
-	return filepath.Join(operation.parent.locator, name), nil
+	operation.mu.Lock()
+	defer operation.mu.Unlock()
+	if operation.closed {
+		return "", invalidContract(nil)
+	}
+	parent := operation.parent
+	parent.mu.Lock()
+	defer parent.mu.Unlock()
+	if !parent.operation || parent.closed || parent.dir == nil || parent.lock == nil {
+		return "", invalidContract(parent.closeErr)
+	}
+	if err := parent.verifyDiagnosticBinding(); err != nil {
+		return "", invalidContract(err)
+	}
+	return filepath.Join(parent.locator, name), nil
 }
 
 func (operation *runtimeParentOperation) Close() error {
 	if operation == nil || operation.parent == nil {
 		return nil
 	}
-	operation.once.Do(func() {
-		parent := operation.parent
-		parent.mu.Lock()
-		if parent.active == 0 {
-			parent.closeErr = errors.Join(parent.closeErr, errInvalidContract)
-		} else {
-			parent.active--
-		}
-		parent.cond.Broadcast()
-		parent.mu.Unlock()
-	})
+	operation.mu.Lock()
+	defer operation.mu.Unlock()
+	if operation.closed {
+		return nil
+	}
+	parent := operation.parent
+	parent.mu.Lock()
+	defer parent.mu.Unlock()
+	if !parent.operation {
+		return invalidContract(nil)
+	}
+	operation.closed = true
+	parent.operation = false
+	parent.cond.Broadcast()
 	return nil
+}
+
+func (operation *runtimeParentOperation) transfer() (*runtimeParentChild, error) {
+	if operation == nil || operation.parent == nil {
+		return nil, invalidContract(nil)
+	}
+	operation.mu.Lock()
+	defer operation.mu.Unlock()
+	if operation.closed {
+		return nil, invalidContract(nil)
+	}
+	parent := operation.parent
+	parent.mu.Lock()
+	defer parent.mu.Unlock()
+	if !parent.operation || parent.closed || parent.dir == nil || parent.lock == nil {
+		return nil, invalidContract(parent.closeErr)
+	}
+	if err := parent.verifyRetained(); err != nil {
+		return nil, invalidContract(err)
+	}
+	operation.closed = true
+	parent.operation = false
+	parent.children++
+	parent.cond.Broadcast()
+	return &runtimeParentChild{parent: parent}, nil
+}
+
+func (child *runtimeParentChild) directory() (*os.File, error) {
+	if child == nil || child.parent == nil {
+		return nil, invalidContract(nil)
+	}
+	child.mu.Lock()
+	defer child.mu.Unlock()
+	if child.closed {
+		return nil, invalidContract(nil)
+	}
+	parent := child.parent
+	parent.mu.Lock()
+	defer parent.mu.Unlock()
+	if parent.closed || parent.dir == nil || parent.lock == nil || parent.children == 0 {
+		return nil, invalidContract(parent.closeErr)
+	}
+	if err := parent.verifyRetained(); err != nil {
+		return nil, invalidContract(err)
+	}
+	return parent.dir, nil
+}
+
+func (child *runtimeParentChild) Close() error {
+	if child == nil || child.parent == nil {
+		return nil
+	}
+	child.mu.Lock()
+	defer child.mu.Unlock()
+	if child.closed {
+		return nil
+	}
+	parent := child.parent
+	parent.mu.Lock()
+	defer parent.mu.Unlock()
+	if parent.children == 0 {
+		return invalidContract(nil)
+	}
+	child.closed = true
+	parent.children--
+	parent.cond.Broadcast()
+	return nil
+}
+
+func (parent *RuntimeParent) verifyDiagnosticBinding() error {
+	if parent == nil || parent.locator == "" {
+		return errInvalidContract
+	}
+	return verifyNamedDirectory(parent.locator, parent.directory)
 }
 
 // runtimeLocator derives only the diagnostic value used in admission and
@@ -314,12 +438,12 @@ func (parent *RuntimeParent) runtimeLocator(name string) (string, error) {
 	if parent == nil || !validRuntimeName(name) {
 		return "", invalidContract(nil)
 	}
-	parent.mu.Lock()
-	defer parent.mu.Unlock()
-	if parent.closing || parent.closed || parent.dir == nil {
-		return "", invalidContract(parent.closeErr)
+	operation, err := parent.begin()
+	if err != nil {
+		return "", err
 	}
-	return filepath.Join(parent.locator, name), nil
+	defer operation.Close()
+	return operation.locator(name)
 }
 
 func (parent *RuntimeParent) Close() error {
@@ -340,16 +464,36 @@ func (parent *RuntimeParent) Close() error {
 		return err
 	}
 	parent.closing = true
-	for parent.active != 0 {
+	for parent.operation || parent.children != 0 {
 		parent.cond.Wait()
 	}
 	verifyErr := parent.verifyRetained()
 	lock, dir := parent.lock, parent.dir
-	parent.lock, parent.dir = nil, nil
+	closeDir, unlock, closeLock := parent.closeDir, parent.unlock, parent.closeLock
 	parent.mu.Unlock()
 
-	closeErr := errors.Join(verifyErr, unix.Flock(int(lock.Fd()), unix.LOCK_UN), lock.Close(), dir.Close())
+	var closeErr error
+	if verifyErr != nil {
+		closeErr = retainedContract(verifyErr)
+	} else if closeDir == nil || unlock == nil || closeLock == nil {
+		closeErr = retainedContract(errInvalidContract)
+	} else if err := closeDir(dir); err != nil {
+		closeErr = retainedContract(err)
+	} else if err := unlock(int(lock.Fd())); err != nil {
+		closeErr = retainedContract(err)
+	} else if err := closeLock(lock); err != nil {
+		closeErr = retainedContract(err)
+	}
 	parent.mu.Lock()
+	if closeErr == nil {
+		parent.lock, parent.dir = nil, nil
+	} else if dir != nil && dir.Fd() == ^uintptr(0) {
+		// A successful directory close is remembered even if later lock
+		// release/close was uncertain. The lifetime lock remains the retained
+		// cooperating-daemon authority until OperationalHome also refuses to
+		// release its own lease.
+		parent.dir = nil
+	}
 	parent.closeErr = closeErr
 	parent.closed = true
 	parent.closing = false

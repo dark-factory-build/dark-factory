@@ -37,7 +37,7 @@ type Runtime struct {
 	basename   string
 	dir        *os.File
 	directory  directoryIdentity
-	owner      *runtimeParentOperation
+	owner      *runtimeParentChild
 	identity   runner.FileIdentity
 	home       directoryIdentity
 	temp       directoryIdentity
@@ -94,10 +94,12 @@ func AdoptRuntime(parent *RuntimeParent, basename string) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
-	keepOwner := false
+	var child *runtimeParentChild
 	defer func() {
-		if !keepOwner {
+		if child == nil {
 			_ = operation.Close()
+		} else {
+			_ = child.Close()
 		}
 	}()
 	ownedParent, err := operation.directory()
@@ -147,9 +149,13 @@ func AdoptRuntime(parent *RuntimeParent, basename string) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
+	child, err = operation.transfer()
+	if err != nil {
+		return nil, err
+	}
 	runtime := &Runtime{
 		locator: locator, basename: basename, dir: dir, directory: created,
-		owner: operation, identity: created.fileIdentity(), home: home, temp: temp,
+		owner: child, identity: created.fileIdentity(), home: home, temp: temp,
 		lifetime: lifetime, lifetimeID: lifetimeID,
 	}
 	if err := runtime.verifyAuthority(); err != nil {
@@ -157,7 +163,7 @@ func AdoptRuntime(parent *RuntimeParent, basename string) (*Runtime, error) {
 	}
 	keepDir = true
 	keepLifetime = true
-	keepOwner = true
+	child = nil
 	return runtime, nil
 }
 
@@ -172,10 +178,12 @@ func createRuntime(parent *RuntimeParent, basename string, beforeCreate, afterOp
 	if err != nil {
 		return nil, err
 	}
-	keepOwner := false
+	var child *runtimeParentChild
 	defer func() {
-		if !keepOwner {
+		if child == nil {
 			_ = operation.Close()
+		} else {
+			_ = child.Close()
 		}
 	}()
 	ownedParent, err := operation.directory()
@@ -261,9 +269,13 @@ func createRuntime(parent *RuntimeParent, basename string, beforeCreate, afterOp
 	if err != nil {
 		return nil, err
 	}
+	child, err = operation.transfer()
+	if err != nil {
+		return nil, err
+	}
 	runtime := &Runtime{
 		locator: locator, basename: basename, dir: dir, directory: created,
-		owner: operation, identity: created.fileIdentity(), home: home, temp: temp,
+		owner: child, identity: created.fileIdentity(), home: home, temp: temp,
 		lifetime: lifetime, lifetimeID: lifetimeID,
 	}
 	if err := runtime.verifyAuthority(); err != nil {
@@ -272,7 +284,7 @@ func createRuntime(parent *RuntimeParent, basename string, beforeCreate, afterOp
 	cleanupCreated = false
 	keepDir = true
 	keepLifetime = true
-	keepOwner = true
+	child = nil
 	return runtime, nil
 }
 

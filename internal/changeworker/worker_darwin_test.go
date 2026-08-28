@@ -21,6 +21,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/changeworker"
 	"github.com/dark-factory-build/dark-factory/internal/daemon"
+	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 	"golang.org/x/sys/unix"
 )
@@ -377,6 +378,7 @@ type workerFixture struct {
 	repositoryIdentity                            change.RepositoryIdentity
 	runtime                                       *daemon.Runtime
 	parent                                        *daemon.RuntimeParent
+	home                                          *install.OperationalHome
 	dir, lifetime                                 *os.File
 	lease                                         *runner.GateLease
 	controller                                    *runner.AttemptController
@@ -427,20 +429,25 @@ func newWorkerFixtureWithFactoryctl(t *testing.T, factoryctl string) *workerFixt
 	if err := os.Mkdir(changeParent, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	runtimeParentPath := filepath.Join(root, "runtimes")
-	if err := os.Mkdir(runtimeParentPath, 0o700); err != nil {
+	homePath := filepath.Join(root, "runtime-home")
+	if _, err := install.Init(context.Background(), homePath); err != nil {
 		t.Fatal(err)
 	}
-	runtimeParentDir, err := os.Open(runtimeParentPath)
+	operationalHome, err := install.OpenOperationalHome(context.Background(), homePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	parent, err := daemon.CreateRuntimeParent(runtimeParentDir)
-	_ = runtimeParentDir.Close()
+	runtimes, err := operationalHome.Runtimes()
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtimeValue, err := daemon.CreateRuntime(parent, "attempt")
+	runtimeParentPath := filepath.Join(homePath, "runtimes")
+	parent, err := daemon.OpenRuntimeParent(context.Background(), runtimes, runtimeParentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const runtimeName = "00000000000000000000000000000001"
+	runtimeValue, err := daemon.CreateRuntime(parent, runtimeName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -505,7 +512,7 @@ func newWorkerFixtureWithFactoryctl(t *testing.T, factoryctl string) *workerFixt
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &workerFixture{root: root, repositoryRoot: repository, changeParent: changeParent, finalName: "published", witness: witness, cwdWitness: cwdWitness, envWitness: envWitness, factoryctl: factoryctl, repositoryIdentity: repositoryID, runtime: runtimeValue, parent: parent, dir: dir, lifetime: lifetime, lease: lease, controller: controller, child: child, diagnostic: diagnostic}
+	f := &workerFixture{root: root, repositoryRoot: repository, changeParent: changeParent, finalName: "published", witness: witness, cwdWitness: cwdWitness, envWitness: envWitness, factoryctl: factoryctl, repositoryIdentity: repositoryID, runtime: runtimeValue, parent: parent, home: operationalHome, dir: dir, lifetime: lifetime, lease: lease, controller: controller, child: child, diagnostic: diagnostic}
 	t.Cleanup(f.close)
 	return f
 }
@@ -542,6 +549,7 @@ func (f *workerFixture) close() {
 	_ = f.dir.Close()
 	_ = f.runtime.Close()
 	_ = f.parent.Close()
+	_ = f.home.Close()
 	_ = f.diagnostic.Close()
 }
 

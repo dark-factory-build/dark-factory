@@ -323,6 +323,79 @@ func TestRuntimeParentCloseWaitsForBegunOperation(t *testing.T) {
 	}
 }
 
+func TestRuntimeParentSerializesNamespaceOperationsAndRevokesClosedHandles(t *testing.T) {
+	parentPath := filepath.Join(runtimeTempDir(t), "private")
+	if err := os.Mkdir(parentPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	parent := createManagedParent(t, parentPath)
+	defer parent.Close()
+
+	first, err := parent.begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second, err := parent.begin(); !errors.Is(err, errRuntimeBusy) || second != nil {
+		t.Fatalf("concurrent namespace operation = %v, %v", second, err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.directory(); !errors.Is(err, errInvalidContract) {
+		t.Fatalf("closed operation directory = %v", err)
+	}
+	if _, err := first.locator(runtimeTestName); !errors.Is(err, errInvalidContract) {
+		t.Fatalf("closed operation locator = %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("duplicate operation close = %v", err)
+	}
+	second, err := parent.begin()
+	if err != nil {
+		t.Fatalf("operation gate did not reopen: %v", err)
+	}
+	child, err := second.transfer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := second.directory(); !errors.Is(err, errInvalidContract) {
+		t.Fatalf("transferred operation directory = %v", err)
+	}
+	if err := second.Close(); err != nil {
+		t.Fatalf("transferred operation close = %v", err)
+	}
+	if _, err := child.directory(); err != nil {
+		t.Fatalf("transferred child lost authority: %v", err)
+	}
+	if err := child.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := child.directory(); !errors.Is(err, errInvalidContract) {
+		t.Fatalf("closed child directory = %v", err)
+	}
+}
+
+func TestOpenRuntimeParentRejectsUnboundDiagnosticBeforeLockCreation(t *testing.T) {
+	home, _, capability, parentPath := newOperationalRuntimeCapability(t)
+	defer home.Close()
+	wrongPath := filepath.Join(runtimeTempDir(t), "wrong")
+	if err := os.Mkdir(wrongPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if parent, err := OpenRuntimeParent(context.Background(), capability, wrongPath); !errors.Is(err, errInvalidContract) || parent != nil {
+		t.Fatalf("unbound diagnostic open = %v, %v", parent, err)
+	}
+	for _, path := range []string{parentPath, wrongPath} {
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("unbound diagnostic created effect in %s: %v", path, entries)
+		}
+	}
+}
+
 func TestRuntimeChildOwnsParentUntilChildClose(t *testing.T) {
 	parentPath := filepath.Join(runtimeTempDir(t), "private")
 	if err := os.Mkdir(parentPath, 0o700); err != nil {
@@ -355,6 +428,123 @@ func TestRuntimeChildOwnsParentUntilChildClose(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("parent Close did not join child")
 	}
+}
+
+func TestRuntimeParentCloseJoinsEveryLiveChild(t *testing.T) {
+	parentPath := filepath.Join(runtimeTempDir(t), "private")
+	if err := os.Mkdir(parentPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	parent := createManagedParent(t, parentPath)
+	first, err := CreateRuntime(parent, "11111111111111111111111111111111")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := CreateRuntime(parent, "22222222222222222222222222222222")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- parent.Close() }()
+	waitForRuntimeParentClosing(t, parent)
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-closed:
+		t.Fatalf("parent closed with second child live: %v", err)
+	default:
+	}
+	if err := second.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("parent Close did not join every child")
+	}
+}
+
+func TestRuntimeParentCloseRetainsAuthorityOnReleaseUncertainty(t *testing.T) {
+	t.Run("directory close", func(t *testing.T) {
+		parentPath := filepath.Join(runtimeTempDir(t), "private")
+		if err := os.Mkdir(parentPath, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		parent := createManagedParent(t, parentPath)
+		dir, lock := parent.dir, parent.lock
+		unlockCalls, lockCloseCalls := 0, 0
+		parent.closeDir = func(*os.File) error { return syscall.EIO }
+		parent.unlock = func(int) error { unlockCalls++; return nil }
+		parent.closeLock = func(*os.File) error { lockCloseCalls++; return nil }
+		err := parent.Close()
+		if !errors.Is(err, errRetainedRuntime) || !errors.Is(err, syscall.EIO) {
+			t.Fatalf("directory close uncertainty = %v", err)
+		}
+		if unlockCalls != 0 || lockCloseCalls != 0 || parent.dir != dir || parent.lock != lock {
+			t.Fatalf("release continued after directory uncertainty: unlock=%d lock-close=%d", unlockCalls, lockCloseCalls)
+		}
+		if again := parent.Close(); !errors.Is(again, syscall.EIO) || unlockCalls != 0 || lockCloseCalls != 0 {
+			t.Fatalf("stable close result = %v, unlock=%d lock-close=%d", again, unlockCalls, lockCloseCalls)
+		}
+		if err := unix.Flock(int(lock.Fd()), unix.LOCK_UN); err != nil {
+			t.Fatal(err)
+		}
+		if err := lock.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := dir.Close(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("lock release", func(t *testing.T) {
+		parentPath := filepath.Join(runtimeTempDir(t), "private")
+		if err := os.Mkdir(parentPath, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		parent := createManagedParent(t, parentPath)
+		lock := parent.lock
+		lockCloseCalls := 0
+		parent.unlock = func(int) error { return syscall.EIO }
+		parent.closeLock = func(*os.File) error { lockCloseCalls++; return nil }
+		err := parent.Close()
+		if !errors.Is(err, errRetainedRuntime) || !errors.Is(err, syscall.EIO) {
+			t.Fatalf("lock release uncertainty = %v", err)
+		}
+		if parent.dir != nil || parent.lock != lock || lockCloseCalls != 0 {
+			t.Fatalf("lock close continued after unlock uncertainty: dir=%v lock=%v calls=%d", parent.dir, parent.lock, lockCloseCalls)
+		}
+		if err := unix.Flock(int(lock.Fd()), unix.LOCK_UN); err != nil {
+			t.Fatal(err)
+		}
+		if err := lock.Close(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("lock close", func(t *testing.T) {
+		parentPath := filepath.Join(runtimeTempDir(t), "private")
+		if err := os.Mkdir(parentPath, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		parent := createManagedParent(t, parentPath)
+		lock := parent.lock
+		parent.closeLock = func(*os.File) error { return syscall.EIO }
+		err := parent.Close()
+		if !errors.Is(err, errRetainedRuntime) || !errors.Is(err, syscall.EIO) {
+			t.Fatalf("lock close uncertainty = %v", err)
+		}
+		if parent.dir != nil || parent.lock != lock {
+			t.Fatalf("uncertain lock descriptor was discarded: dir=%v lock=%v", parent.dir, parent.lock)
+		}
+		if err := lock.Close(); err != nil {
+			t.Fatal(err)
+		}
+	})
 }
 
 func TestRuntimeNamesAreExactAndSocketIsReserved(t *testing.T) {
@@ -761,8 +951,8 @@ func TestRuntimeBindingRejectsLifetimeMutation(t *testing.T) {
 	}
 }
 
-func TestRuntimeParentReplacementCannotRetargetAndLeafSwapFailsClosed(t *testing.T) {
-	t.Run("parent replacement cannot retarget authority", func(t *testing.T) {
+func TestRuntimeParentReplacementFailsClosedAndLeafSwapFailsClosed(t *testing.T) {
+	t.Run("parent replacement revokes diagnostic publication", func(t *testing.T) {
 		root := runtimeTempDir(t)
 		parentPath := filepath.Join(root, "private")
 		if err := os.Mkdir(parentPath, 0o700); err != nil {
@@ -778,17 +968,14 @@ func TestRuntimeParentReplacementCannotRetargetAndLeafSwapFailsClosed(t *testing
 				t.Fatal(err)
 			}
 		}, nil, nil)
-		if err != nil {
-			t.Fatalf("parent replacement create = %v", err)
-		}
-		if err := runtime.Close(); err != nil {
-			t.Fatal(err)
+		if !errors.Is(err, errInvalidContract) || runtime != nil {
+			t.Fatalf("parent replacement create = %v, %v", runtime, err)
 		}
 		if _, err := os.Lstat(filepath.Join(parentPath, runtimeTestName)); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("replacement parent gained runtime: %v", err)
 		}
-		if _, err := os.Lstat(filepath.Join(parentPath+".old", runtimeTestName)); err != nil {
-			t.Fatalf("retained parent missing runtime: %v", err)
+		if _, err := os.Lstat(filepath.Join(parentPath+".old", runtimeTestName)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("retained parent kept unpublished runtime: %v", err)
 		}
 	})
 
@@ -1652,30 +1839,64 @@ func mustRuntimeValues(t testing.TB, runtime *Runtime) (string, runner.FileIdent
 
 func createManagedParent(t testing.TB, path string) *RuntimeParent {
 	t.Helper()
-	home, _, capability, actualPath := newOperationalRuntimeCapability(t)
-	parent, err := OpenRuntimeParent(context.Background(), capability, path)
-	if err != nil {
-		t.Fatalf("OpenRuntimeParent = %v", err)
-	}
-	entries, err := os.ReadDir(path)
+	directoryFD, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, entry := range entries {
-		if err := os.Rename(filepath.Join(path, entry.Name()), filepath.Join(actualPath, entry.Name())); err != nil {
-			t.Fatal(err)
+	directoryFile := os.NewFile(uintptr(directoryFD), "test-runtime-parent")
+	directory, err := inspectPrivateDirectory(directoryFD)
+	if err != nil {
+		_ = directoryFile.Close()
+		t.Fatal(err)
+	}
+	lockFD, err := unix.Openat(directoryFD, runtimeParentLockName, unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0o600)
+	if err != nil {
+		_ = directoryFile.Close()
+		t.Fatal(err)
+	}
+	lockFile := os.NewFile(uintptr(lockFD), "test-runtime-parent-lock")
+	lockID, err := inspectRuntimeLock(lockFD)
+	if err != nil {
+		_ = lockFile.Close()
+		_ = directoryFile.Close()
+		t.Fatal(err)
+	}
+	if err := unix.Flock(lockFD, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		_ = lockFile.Close()
+		_ = directoryFile.Close()
+		t.Fatal(err)
+	}
+	if err := unix.Fsync(lockFD); err != nil {
+		_ = unix.Flock(lockFD, unix.LOCK_UN)
+		_ = lockFile.Close()
+		_ = directoryFile.Close()
+		t.Fatal(err)
+	}
+	if err := unix.Fsync(directoryFD); err != nil {
+		_ = unix.Flock(lockFD, unix.LOCK_UN)
+		_ = lockFile.Close()
+		_ = directoryFile.Close()
+		t.Fatal(err)
+	}
+	parent := newRuntimeParent(path, directoryFile, directory, lockFile, lockID)
+	// Tests deliberately replace retained parents and lock names. Production
+	// Close must retain descriptors on that uncertainty, so the fixture also
+	// owns an independent exact-descriptor safety cleanup after ordinary
+	// defers have had their chance to prove the fail-closed result.
+	t.Cleanup(func() {
+		parent.mu.Lock()
+		dir, lock := parent.dir, parent.lock
+		parent.dir, parent.lock = nil, nil
+		parent.closed = true
+		parent.mu.Unlock()
+		if lock != nil {
+			_ = unix.Flock(int(lock.Fd()), unix.LOCK_UN)
+			_ = lock.Close()
 		}
-	}
-	if err := os.Remove(path); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Rename(actualPath, path); err != nil {
-		t.Fatal(err)
-	}
-	// The fixture deliberately renames the descriptor-derived parent into the
-	// requested diagnostic location. Closing the home releases its unrelated
-	// retained descriptors; RuntimeParent continues through the exact member.
-	_ = home.Close()
+		if dir != nil {
+			_ = dir.Close()
+		}
+	})
 	return parent
 }
 

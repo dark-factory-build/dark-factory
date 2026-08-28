@@ -1139,6 +1139,7 @@ type supervisorFixture struct {
 	spec                                         SupervisorSpec
 	listener                                     *api.Listener
 	apiHome                                      *install.OperationalHome
+	apiAuthority                                 *install.LocalAPIAuthority
 	serverDone                                   chan error
 	serverOnce                                   sync.Once
 	runMu                                        sync.Mutex
@@ -1190,18 +1191,28 @@ func newSupervisorFixture(t *testing.T, program string) *supervisorFixture {
 	fixture.base = base
 
 	changeParent := filepath.Join(root, "changes")
-	runtimeParentPath := filepath.Join(root, "runtimes")
-	for _, path := range []string{changeParent, runtimeParentPath} {
-		if err := os.Mkdir(path, 0o700); err != nil {
-			t.Fatal(err)
-		}
+	if err := os.Mkdir(changeParent, 0o700); err != nil {
+		t.Fatal(err)
 	}
-	rawRuntimeParent, err := os.Open(runtimeParentPath)
+	apiHomePath := filepath.Join(root, "api-home")
+	if _, err := install.Init(context.Background(), apiHomePath); err != nil {
+		t.Fatal(err)
+	}
+	operatorToken := filepath.Join(apiHomePath, "operator.token")
+	if err := os.WriteFile(operatorToken, bytes.Repeat([]byte{'o'}, 32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	apiHome, err := install.OpenOperationalHome(context.Background(), apiHomePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtimeParent, err := CreateRuntimeParent(rawRuntimeParent)
-	_ = rawRuntimeParent.Close()
+	fixture.apiHome = apiHome
+	runtimes, err := apiHome.Runtimes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeParentPath := filepath.Join(apiHomePath, "runtimes")
+	runtimeParent, err := OpenRuntimeParent(context.Background(), runtimes, runtimeParentPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1246,23 +1257,11 @@ func newSupervisorFixture(t *testing.T, program string) *supervisorFixture {
 		t.Fatal(err)
 	}
 	fixture.daemon = daemon
-	apiHomePath := filepath.Join(root, "api-home")
-	if _, err := install.Init(context.Background(), apiHomePath); err != nil {
-		t.Fatal(err)
-	}
-	operatorToken := filepath.Join(apiHomePath, "operator.token")
-	if err := os.WriteFile(operatorToken, bytes.Repeat([]byte{'o'}, 32), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	apiHome, err := install.OpenOperationalHome(context.Background(), apiHomePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fixture.apiHome = apiHome
 	authority, err := apiHome.OpenLocalAPI(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
+	fixture.apiAuthority = authority
 	listener, err := api.Listen(authority)
 	if err != nil {
 		t.Fatal(err)
@@ -1311,17 +1310,23 @@ func (fixture *supervisorFixture) close() {
 				fixture.t.Errorf("API accept owner did not join")
 			}
 		}
-		if fixture.apiHome != nil {
-			if err := fixture.apiHome.Close(); err != nil {
-				fixture.t.Errorf("API home close: %v", err)
+		if fixture.apiAuthority != nil {
+			if err := fixture.apiAuthority.Close(); err != nil {
+				fixture.t.Errorf("API authority close: %v", err)
 			}
-			fixture.apiHome = nil
+			fixture.apiAuthority = nil
 		}
 		fixture.hardSafetyCleanup()
 		if fixture.runtimeParent != nil {
 			if err := fixture.runtimeParent.Close(); err != nil {
 				fixture.t.Errorf("runtime parent close: %v", err)
 			}
+		}
+		if fixture.apiHome != nil {
+			if err := fixture.apiHome.Close(); err != nil {
+				fixture.t.Errorf("API home close: %v", err)
+			}
+			fixture.apiHome = nil
 		}
 		if fixture.store != nil {
 			if err := fixture.store.Close(); err != nil {
