@@ -127,6 +127,30 @@ func TestRegisteredShellWorkerCompletesExactFourReleaseSequence(t *testing.T) {
 	}
 }
 
+func TestRegisteredShellWorkerCannotReadLinkedWorkerConfig(t *testing.T) {
+	fixture := newWorkerFixtureWithInput(t, func(witness, _, _ string) []byte {
+		quote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
+		return []byte(fmt.Sprintf("set -eu\nconfig=\"$HOME/../change-worker.config\"\nif test -e \"$config\"; then cat \"$config\" > %s; exit 42; fi\ntest -e /dev/fd/11\nprintf x > %s\nexit\n", quote(witness+".config-copy"), quote(witness)))
+	})
+	inner := fixture.start(t)
+	for _, stage := range []runner.AttemptStage{runner.StageSelection, runner.StagePreparation, runner.StagePopulation} {
+		fixture.release(t, stage, stage)
+	}
+	if err := fixture.controller.Release(runner.StageProvider); err != nil {
+		t.Fatal(err)
+	}
+	record := fixture.finish(t)
+	if record.Terminal.Process != inner || record.Terminal.Exit.Code != 0 || record.Terminal.Exit.Signal != 0 {
+		t.Fatalf("terminal=%+v inner=%+v", record.Terminal, inner)
+	}
+	if body, err := os.ReadFile(fixture.witness); err != nil || string(body) != "x" {
+		t.Fatalf("provider witness=%q err=%v", body, err)
+	}
+	if _, err := os.Stat(fixture.witness + ".config-copy"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("provider copied linked worker config: %v", err)
+	}
+}
+
 func TestRegisteredShellWorkerExecutesMaximumTaskWithoutPTYStartupTraffic(t *testing.T) {
 	fixture := newWorkerFixtureWithInput(t, func(witness, _, _ string) []byte {
 		quote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }

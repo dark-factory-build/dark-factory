@@ -235,6 +235,10 @@ func runProvider(ctx context.Context) (resultErr error) {
 		_ = cwd.Close()
 		return fmt.Errorf("runtime authority verification: %w", err)
 	}
+	if err := authority.unlinkConfig(); err != nil {
+		_ = cwd.Close()
+		return fmt.Errorf("worker config sealing: %w", err)
+	}
 	taskOpen = false
 	return control.ExecProvider(spec, cwd, task)
 }
@@ -329,6 +333,40 @@ func (a *runtimeAuthority) sealProviderTask(kind kernel.Provider, task []byte) (
 		return nil, ErrWorker
 	}
 	return reader, nil
+}
+
+// unlinkConfig consumes the final pathname that carried admission data. The
+// descriptor and name must still identify the exact validated file; an
+// unlink or directory fsync failure is fatal, so a provider can never execute
+// while this linked source-of-authority path is uncertain.
+func (a *runtimeAuthority) unlinkConfig() error {
+	if a == nil || a.root == nil || a.config == nil {
+		return ErrWorker
+	}
+	if err := verifyOpenPrivateFile(a.config, a.configID, a.configSize); err != nil {
+		return err
+	}
+	var named unix.Stat_t
+	if err := unix.Fstatat(int(a.root.Fd()), ConfigName, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil ||
+		uint64(named.Dev) != a.configID.Device || named.Ino != a.configID.Inode ||
+		named.Mode&unix.S_IFMT != unix.S_IFREG || named.Nlink != 1 {
+		return ErrWorker
+	}
+	if err := unix.Unlinkat(int(a.root.Fd()), ConfigName, 0); err != nil {
+		return err
+	}
+	if err := unix.Fsync(int(a.root.Fd())); err != nil {
+		return err
+	}
+	var unlinked unix.Stat_t
+	if err := unix.Fstat(int(a.config.Fd()), &unlinked); err != nil ||
+		uint64(unlinked.Dev) != a.configID.Device || unlinked.Ino != a.configID.Inode || unlinked.Nlink != 0 {
+		return ErrWorker
+	}
+	if err := unix.Fstatat(int(a.root.Fd()), ConfigName, &named, unix.AT_SYMLINK_NOFOLLOW); !errors.Is(err, unix.ENOENT) {
+		return ErrWorker
+	}
+	return nil
 }
 
 func openRuntimeAuthority(ctx context.Context, runtimeDir *os.File) (*runtimeAuthority, Config, error) {
