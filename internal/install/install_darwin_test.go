@@ -204,6 +204,28 @@ func TestInitParentSyncFailureLeavesFixedStageEvidence(t *testing.T) {
 	}
 }
 
+func TestInitNoReplaceConflictLeavesStageAndFinalUnchanged(t *testing.T) {
+	parent := installTempDir(t)
+	home := filepath.Join(parent, "home")
+	stage := filepath.Join(parent, ".home"+stageSuffix)
+	phaseHook = func(point phase) error {
+		if point == phaseBeforeRename {
+			return os.Mkdir(home, 0o700)
+		}
+		return nil
+	}
+	defer func() { phaseHook = nil }()
+	if _, err := Init(context.Background(), home); err == nil {
+		t.Fatal("init replaced an existing final path")
+	}
+	if info, err := os.Stat(home); err != nil || !info.IsDir() {
+		t.Fatalf("no-replace conflict changed the final path: info=%v err=%v", info, err)
+	}
+	if _, err := os.Stat(stage); err != nil {
+		t.Fatalf("stage evidence after no-replace conflict: %v", err)
+	}
+}
+
 func installTempDir(t *testing.T) string {
 	t.Helper()
 	parent, err := os.MkdirTemp("/private/tmp", "dark-factory-install-")
