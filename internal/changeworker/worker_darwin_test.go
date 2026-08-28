@@ -24,6 +24,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/daemon"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/provider"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 	"golang.org/x/sys/unix"
 )
@@ -129,27 +130,18 @@ func TestRegisteredShellWorkerCompletesExactFourReleaseSequence(t *testing.T) {
 func TestRegisteredShellWorkerDeliversMaximumInputThroughRealPTY(t *testing.T) {
 	fixture := newWorkerFixtureWithInput(t, func(witness, _, _ string) []byte {
 		quote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
-		prefix := []byte("set -eu\ncount=$(/usr/bin/wc -c <<'DF_MAX_INPUT'\n")
+		prefix := []byte("set -eu\n/bin/stty sane\ncount=$(/usr/bin/wc -c <<'DF_MAX_INPUT'\n")
 		suffixTemplate := "DF_MAX_INPUT\n)\ntest \"$count\" -eq 000000\ntest -x \"$(command -v go)\"\nprintf x > " + quote(witness) + "\nexit\n"
-		payloadSize := runner.MaxProviderInputBytes - len(prefix) - len(suffixTemplate)
+		payloadSize := runner.MaxProviderTaskBytes - len(prefix) - len(suffixTemplate)
 		if payloadSize < 100000 || payloadSize > 999999 {
 			t.Fatalf("unexpected maximum-input payload size %d", payloadSize)
 		}
-		payload := make([]byte, 0, payloadSize)
-		line := append(bytes.Repeat([]byte{'x'}, 100), '\n')
-		for len(payload)+len(line) <= payloadSize {
-			payload = append(payload, line...)
-		}
-		remaining := payloadSize - len(payload)
-		if remaining != 0 {
-			payload = append(payload, bytes.Repeat([]byte{'x'}, remaining-1)...)
-			payload = append(payload, '\n')
-		}
+		payload := append(bytes.Repeat([]byte{'x'}, payloadSize-1), '\n')
 		suffix := strings.Replace(suffixTemplate, "000000", strconv.Itoa(payloadSize), 1)
 		input := append(prefix, payload...)
 		input = append(input, suffix...)
-		if len(input) != runner.MaxProviderInputBytes || input[len(input)-1] != '\n' {
-			t.Fatalf("maximum input size=%d, want %d", len(input), runner.MaxProviderInputBytes)
+		if len(input) != runner.MaxProviderTaskBytes || input[len(input)-1] != '\n' {
+			t.Fatalf("maximum task size=%d, want %d", len(input), runner.MaxProviderTaskBytes)
 		}
 		return input
 	})
@@ -544,7 +536,11 @@ func newWorkerFixtureWithFactoryctlAndInput(t *testing.T, factoryctl string, inp
 	if input != nil {
 		program = input(witness, cwdWitness, envWitness)
 	}
-	config := changeworker.Config{Provider: kernel.ProviderShell, RuntimePath: runtimePath, RuntimeIdentity: runtimeID, GitExecutable: git, FactoryctlExecutable: factoryctl, ToolPath: toolPath, RepositoryRoot: repository, RepositoryIdentity: repositoryID, Revision: "HEAD", ChangeParent: changeParent, FinalName: "published", StagingName: ".stage", AttemptSocket: "/private/tmp/dark-factory-worker-api.sock", InitialTerminalInput: program}
+	initialInput, err := provider.InitialInput(kernel.ProviderShell, program)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := changeworker.Config{Provider: kernel.ProviderShell, RuntimePath: runtimePath, RuntimeIdentity: runtimeID, GitExecutable: git, FactoryctlExecutable: factoryctl, ToolPath: toolPath, RepositoryRoot: repository, RepositoryIdentity: repositoryID, Revision: "HEAD", ChangeParent: changeParent, FinalName: "published", StagingName: ".stage", AttemptSocket: "/private/tmp/dark-factory-worker-api.sock", InitialTerminalInput: initialInput}
 	if _, err := runtimeValue.PublishWorkerConfig(context.Background(), config); err != nil {
 		t.Fatal(err)
 	}

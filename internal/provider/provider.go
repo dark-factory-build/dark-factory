@@ -1,9 +1,11 @@
 package provider
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -17,6 +19,8 @@ const (
 	maxInitialInputBytes = runner.MaxProviderTaskBytes
 	maxPathBytes         = 4096
 	maxSocketBytes       = 103
+	shellDelimiterPrefix = "DARK_FACTORY_INPUT_END_"
+	shellInputName       = ".dark-factory-input.sh"
 )
 
 var (
@@ -142,10 +146,17 @@ func InitialInput(kind kernel.Provider, task []byte) ([]byte, error) {
 		if len(task) == 0 || len(task) > maxInitialInputBytes {
 			return nil, ErrInvalid
 		}
-		input := append([]byte(nil), task...)
-		if input[len(input)-1] != '\n' {
+		if !utf8.Valid(task) || bytes.IndexByte(task, 0) >= 0 {
+			return nil, ErrInvalid
+		}
+		delimiter := shellInputDelimiter(task)
+		input := []byte("umask 077\nset -C\nif /bin/cat >\"$TMPDIR/" + shellInputName + "\" <<'" + delimiter + "'\n")
+		input = append(input, task...)
+		if task[len(task)-1] != '\n' {
 			input = append(input, '\n')
 		}
+		input = append(input, delimiter...)
+		input = append(input, []byte("\nthen\n  set +C\n  . \"$TMPDIR/"+shellInputName+"\"\n  exit\nfi\nexit 70\n")...)
 		if err := runner.ValidateProviderInput(input); err != nil {
 			return nil, ErrInvalid
 		}
@@ -154,6 +165,25 @@ func InitialInput(kind kernel.Provider, task []byte) ([]byte, error) {
 		return nil, unavailableError{provider: kind}
 	default:
 		return nil, ErrInvalid
+	}
+}
+
+// shellInputDelimiter selects a line that cannot terminate the task's own
+// here-document. Only candidate lines are retained, so memory remains bounded
+// by the already-bounded task. Among n occupied candidates, one of 0..n must
+// be absent.
+func shellInputDelimiter(task []byte) string {
+	occupied := make(map[string]struct{})
+	for _, line := range bytes.Split(task, []byte{'\n'}) {
+		if bytes.HasPrefix(line, []byte(shellDelimiterPrefix)) {
+			occupied[string(line)] = struct{}{}
+		}
+	}
+	for counter := 0; ; counter++ {
+		candidate := shellDelimiterPrefix + strconv.Itoa(counter)
+		if _, found := occupied[candidate]; !found {
+			return candidate
+		}
 	}
 }
 
@@ -203,7 +233,7 @@ func validAbsolute(value string, limit int) bool {
 }
 
 func validToolPath(value string) bool {
-	if !validValue(value, 8192) {
+	if !validValue(value, runner.MaxEnvironmentEntryBytes-len("PATH=")) {
 		return false
 	}
 	seen := make(map[string]struct{})

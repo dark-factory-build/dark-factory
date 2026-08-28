@@ -273,26 +273,24 @@ func (o *terminalOwner) restoreInitialInputMode() error {
 }
 
 func (o *terminalOwner) drainInitialOutput() error {
-	for {
-		buf := make([]byte, terminalReplayChunk)
-		n, err := unix.Read(int(o.child.ptyMaster.Fd()), buf)
-		if n > 0 {
-			if appendErr := o.ring.Append(buf[:n]); appendErr != nil {
-				return appendErr
-			}
-			continue
+	buf := make([]byte, terminalReplayChunk)
+	n, err := unix.Read(int(o.child.ptyMaster.Fd()), buf)
+	if n > 0 {
+		if appendErr := o.ring.Append(buf[:n]); appendErr != nil {
+			return appendErr
 		}
-		if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
-			return nil
-		}
-		if errors.Is(err, unix.EIO) || errors.Is(err, io.EOF) {
-			return io.EOF
-		}
-		if err == nil {
-			return io.ErrNoProgress
-		}
-		return err
+		return nil
 	}
+	if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
+		return nil
+	}
+	if errors.Is(err, unix.EIO) || errors.Is(err, io.EOF) {
+		return io.EOF
+	}
+	if err == nil {
+		return io.ErrNoProgress
+	}
+	return err
 }
 
 func (o *terminalOwner) serve() (bool, error) {

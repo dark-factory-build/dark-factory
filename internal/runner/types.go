@@ -13,13 +13,17 @@ const (
 	maxFrameBytes         = 16 << 10
 	maxProviderFrameBytes = maxConfigBytes
 
-	// MaxProviderTaskBytes is the largest task body accepted before the
-	// provider's one-line-feed normalization. MaxProviderInputBytes includes
-	// that possible trailing line feed. The private control frame is sized so
-	// the complete bounded task survives JSON base64 framing without silently
-	// narrowing the Store's accepted task contract.
+	// MaxProviderTaskBytes is the largest task body accepted before the fixed
+	// shell capture framing. MaxProviderInputBytes includes that bounded
+	// framing. The private control frame is sized so the complete task survives
+	// JSON base64 framing without silently narrowing the Store contract.
 	MaxProviderTaskBytes  = 128 << 10
-	MaxProviderInputBytes = MaxProviderTaskBytes + 1
+	MaxProviderInputBytes = MaxProviderTaskBytes + 256
+
+	// MaxEnvironmentEntryBytes is shared with producers of exact environment
+	// entries so a value accepted before admission cannot fail only after a
+	// provider launch is built.
+	MaxEnvironmentEntryBytes = 8192
 )
 
 // These are the complete fixed top-level runtime names emitted by the runner.

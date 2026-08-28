@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"errors"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -122,6 +123,15 @@ func TestNewRequestRejectsUnknownDurableReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestNewRequestRejectsInvalidDurableModelText(t *testing.T) {
+	installation, runtime := providerFixture(t)
+	for _, model := range []string{string([]byte{0xff}), "model\x00suffix"} {
+		if _, err := NewRequest(kernel.ProviderCodex, installation, model, "", runtime); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("model %x error=%v, want ErrInvalid", []byte(model), err)
+		}
+	}
+}
+
 func TestBuildFailsClosedForUnknownAndUnimplementedProviders(t *testing.T) {
 	installation, runtime := providerFixture(t)
 	if _, err := NewRequest(kernel.Provider(255), installation, "", "", runtime); !errors.Is(err, ErrInvalid) {
@@ -157,6 +167,17 @@ func TestNewRuntimePathsRejectsMissingAndMalformedSealedValues(t *testing.T) {
 			t.Fatalf("tool path %q error=%v, want ErrInvalid", toolPath, err)
 		}
 	}
+	first := "/" + strings.Repeat("a", maxPathBytes-1)
+	exact := first + ":/" + strings.Repeat("b", runner.MaxEnvironmentEntryBytes-len("PATH=")-len(first)-2)
+	if len(exact) != runner.MaxEnvironmentEntryBytes-len("PATH=") {
+		t.Fatalf("exact ToolPath length = %d", len(exact))
+	}
+	if err := ValidateToolPath(exact); err != nil {
+		t.Fatalf("exact ToolPath rejected: %v", err)
+	}
+	if err := ValidateToolPath(exact + "b"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("ToolPath wider than PATH environment error=%v, want ErrInvalid", err)
+	}
 	invalid := append([]string(nil), valid...)
 	invalid[0] = "relative/home"
 	if _, err := NewRuntimePaths(invalid[0], invalid[1], invalid[2], invalid[3], invalid[4], invalid[5], invalid[6]); !errors.Is(err, ErrInvalid) {
@@ -174,25 +195,55 @@ func TestNewRuntimePathsRejectsMissingAndMalformedSealedValues(t *testing.T) {
 	}
 }
 
-func TestInitialInputCopiesTaskAndAppendsExactlyOneLineFeed(t *testing.T) {
+func TestInitialInputCapturesOneExactTaskBeforeEvaluation(t *testing.T) {
 	for _, test := range []struct {
 		name string
 		task []byte
-		want []byte
 	}{
-		{name: "append", task: []byte("echo TASK_SENTINEL"), want: []byte("echo TASK_SENTINEL\n")},
-		{name: "retained", task: []byte("echo TASK_SENTINEL\n"), want: []byte("echo TASK_SENTINEL\n")},
+		{name: "append", task: []byte("echo TASK_SENTINEL")},
+		{name: "retained", task: []byte("echo TASK_SENTINEL\n")},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			want := bytes.Clone(test.task)
 			input, err := InitialInput(kernel.ProviderShell, test.task)
 			if err != nil {
 				t.Fatal(err)
 			}
 			test.task[0] = 'X'
-			if !bytes.Equal(input, test.want) || bytes.Count(input, []byte("TASK_SENTINEL")) != 1 || input[len(input)-1] != '\n' {
-				t.Fatalf("input=%q, want one exact task and one trailing LF", input)
+			if bytes.Count(input, want) != 1 || bytes.Count(input, []byte("TASK_SENTINEL")) != 1 || !bytes.HasPrefix(input, []byte("umask 077\nset -C\nif /bin/cat")) || !bytes.HasSuffix(input, []byte("\nthen\n  set +C\n  . \"$TMPDIR/.dark-factory-input.sh\"\n  exit\nfi\nexit 70\n")) {
+				t.Fatalf("input=%q, want one exact captured task", input)
 			}
 		})
+	}
+}
+
+func TestInitialInputSelectsDelimiterAbsentFromTaskLines(t *testing.T) {
+	task := []byte("printf before\n" + shellDelimiterPrefix + "0\nprintf after\n")
+	input, err := InitialInput(kernel.ProviderShell, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(input, []byte("<<'"+shellDelimiterPrefix+"1'\n")) || bytes.Count(input, task) != 1 {
+		t.Fatalf("collision-safe framed input = %q", input)
+	}
+}
+
+func TestInitialInputMaximumDelimiterCollisionsFitRunnerFrame(t *testing.T) {
+	var task bytes.Buffer
+	for counter := 0; ; counter++ {
+		line := shellDelimiterPrefix + strconv.Itoa(counter) + "\n"
+		if task.Len()+len(line) > maxInitialInputBytes {
+			task.Write(bytes.Repeat([]byte{'x'}, maxInitialInputBytes-task.Len()))
+			break
+		}
+		task.WriteString(line)
+	}
+	input, err := InitialInput(kernel.ProviderShell, task.Bytes())
+	if err != nil {
+		t.Fatalf("maximum collision task rejected: %v", err)
+	}
+	if len(input) > runner.MaxProviderInputBytes {
+		t.Fatalf("maximum collision frame=%d, runner limit=%d", len(input), runner.MaxProviderInputBytes)
 	}
 }
 
@@ -222,14 +273,14 @@ func TestInitialInputRejectsEmptyShellTask(t *testing.T) {
 	}
 }
 
-func TestInitialInputAcceptsMaximumTaskBodyWithOneNormalizationLineFeed(t *testing.T) {
+func TestInitialInputAcceptsMaximumTaskBodyWithinRunnerFrame(t *testing.T) {
 	task := bytes.Repeat([]byte{'x'}, maxInitialInputBytes)
 	input, err := InitialInput(kernel.ProviderShell, task)
 	if err != nil {
 		t.Fatalf("maximum task body rejected: %v", err)
 	}
-	if len(input) != runner.MaxProviderInputBytes || input[len(input)-1] != '\n' || !bytes.Equal(input[:len(task)], task) {
-		t.Fatalf("normalized maximum input length or bytes changed: len=%d last=%q", len(input), input[len(input)-1])
+	if len(input) <= len(task) || len(input) > runner.MaxProviderInputBytes || input[len(input)-1] != '\n' || bytes.Count(input, task) != 1 {
+		t.Fatalf("captured maximum input length or bytes changed: len=%d last=%q", len(input), input[len(input)-1])
 	}
 	if err := runner.ValidateProviderInput(input); err != nil {
 		t.Fatalf("normalized maximum input fails runner boundary: %v", err)

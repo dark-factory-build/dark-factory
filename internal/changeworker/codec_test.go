@@ -103,7 +103,8 @@ func TestConfigRejectsRawAuthorityAndInputCorruption(t *testing.T) {
 	want := configFixture(t)
 	mutations := []func(*Config){
 		func(v *Config) { v.Provider = kernel.Provider(255) },
-		func(v *Config) { v.Model = string([]byte{0xff}) },
+		func(v *Config) { v.Provider, v.Model = kernel.ProviderCodex, string([]byte{0xff}) },
+		func(v *Config) { v.Provider, v.Model = kernel.ProviderCodex, "model\x00suffix" },
 		func(v *Config) { v.ReasoningEffort = strings.Repeat("x", 33) },
 		func(v *Config) { v.RuntimeIdentity = runner.FileIdentity{} },
 		func(v *Config) { v.RepositoryRoot = "relative" },

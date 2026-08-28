@@ -137,7 +137,7 @@ func verifyControl(f *os.File, want descriptorCommitment) error {
 func allowedEnv(k string) bool {
 	switch k {
 	case "HOME", "PATH", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TERM", "SHELL", "USER", "LOGNAME",
-		"DARK_FACTORY_SOCKET", "DARK_FACTORY_ATTEMPT_TOKEN_FILE", "DARK_FACTORY_FACTORYCTL", "NO_COLOR",
+		"DARK_FACTORY_SOCKET", "DARK_FACTORY_ATTEMPT_TOKEN_FILE", "DARK_FACTORY_FACTORYCTL",
 		"GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL",
 		"GIT_TERMINAL_PROMPT", "GIT_ASKPASS", "GIT_SSH_COMMAND", "GH_CONFIG_DIR":
 		return true
@@ -148,7 +148,7 @@ func allowedEnv(k string) bool {
 func validateEnvironment(environment []string) error {
 	seen := make(map[string]struct{}, len(environment))
 	for _, entry := range environment {
-		if len(entry) > 8192 || strings.IndexByte(entry, 0) >= 0 || !utf8.ValidString(entry) {
+		if len(entry) > MaxEnvironmentEntryBytes || strings.IndexByte(entry, 0) >= 0 || !utf8.ValidString(entry) {
 			return fmt.Errorf("runner: invalid environment")
 		}
 		parts := strings.SplitN(entry, "=", 2)

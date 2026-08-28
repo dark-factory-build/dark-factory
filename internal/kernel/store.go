@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"math"
+	"strings"
+	"unicode/utf8"
 )
 
 var factoryEntityID = [IDBytes]byte{}
@@ -319,7 +321,7 @@ func validReasoningEffort(value string) bool {
 // cross Store, private worker and provider boundaries. Wire and launch code
 // must not accept a wider set than durable state.
 func ValidateProviderLaunchControls(provider Provider, model, effort string) error {
-	if !provider.valid() || byteLen(model) > 128 || !validReasoningEffort(effort) || provider == ProviderShell && (model != "" || effort != "") {
+	if !provider.valid() || byteLen(model) > 128 || !utf8.ValidString(model) || strings.ContainsRune(model, 0) || !validReasoningEffort(effort) || provider == ProviderShell && (model != "" || effort != "") {
 		return fmt.Errorf("%w: invalid provider launch controls", ErrInvalidValue)
 	}
 	return nil
