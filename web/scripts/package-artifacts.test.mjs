@@ -29,7 +29,8 @@ function expectFailure(fn, text) {
 }
 
 test("public artifacts bind clean HEAD, protocol, exact dependencies, and bytes", () => {
-  const output = mkdtempSync(join(tmpdir(), "dark-factory-public-artifacts-"));
+  const tempRoot = mkdtempSync(join(tmpdir(), "dark-factory-public-artifacts-"));
+  const output = join(tempRoot, "output");
   try {
     const packed = JSON.parse(run("pack", output));
     assert.equal(packed.schemaVersion, 1);
@@ -60,12 +61,13 @@ test("public artifacts bind clean HEAD, protocol, exact dependencies, and bytes"
     assert.doesNotMatch(JSON.stringify(client), /workspace:|file:|link:|\^|~|latest/);
     run("verify", output);
   } finally {
-    rmSync(output, { recursive: true, force: true });
+    rmSync(tempRoot, { recursive: true, force: true });
   }
 });
 
 test("artifact pack refuses caller provenance and dirty source", () => {
-  const output = mkdtempSync(join(tmpdir(), "dark-factory-public-artifacts-"));
+  const tempRoot = mkdtempSync(join(tmpdir(), "dark-factory-public-artifacts-"));
+  const output = join(tempRoot, "output");
   const dirty = join(webRoot, "packages", "client", "src", ".artifact-dirty-sentinel");
   try {
     expectFailure(() => run("pack", output, "--source-sha", "0000000000000000000000000000000000000000"), "cannot be caller-selected");
@@ -73,12 +75,13 @@ test("artifact pack refuses caller provenance and dirty source", () => {
     expectFailure(() => run("pack", output), "worktree is dirty");
   } finally {
     rmSync(dirty, { force: true });
-    rmSync(output, { recursive: true, force: true });
+    rmSync(tempRoot, { recursive: true, force: true });
   }
 });
 
 test("verification rejects stale protocol identity and changed tarball bytes", () => {
-  const output = mkdtempSync(join(tmpdir(), "dark-factory-public-artifacts-"));
+  const tempRoot = mkdtempSync(join(tmpdir(), "dark-factory-public-artifacts-"));
+  const output = join(tempRoot, "output");
   try {
     run("pack", output);
     const path = join(output, "dark-factory-public-artifacts.json");
@@ -106,6 +109,6 @@ test("verification rejects stale protocol identity and changed tarball bytes", (
     writeFileSync(tarball, Buffer.concat([bytes, Buffer.from("mutation\n")]));
     expectFailure(() => run("verify", output), "tarball integrity failed");
   } finally {
-    rmSync(output, { recursive: true, force: true });
+    rmSync(tempRoot, { recursive: true, force: true });
   }
 });
