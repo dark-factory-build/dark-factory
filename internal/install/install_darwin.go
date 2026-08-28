@@ -20,18 +20,19 @@ import (
 )
 
 const (
-	formatName   = "format"
-	databaseName = "factory.sqlite3"
-	tokenName    = "operator.token"
-	lockName     = "home.lock"
-	runtimesName = "runtimes"
-	changesName  = "changes"
-	formatBytes  = "dark-factory-go-home-v1\n"
-	stageSuffix  = ".dark-factory-go-v1.stage"
-	memberCount  = 6
-	maxNameSize  = 255
-	maxHomeBytes = 4096
-	maxPathDepth = 128
+	formatName       = "format"
+	databaseName     = "factory.sqlite3"
+	tokenName        = "operator.token"
+	lockName         = "home.lock"
+	runtimesName     = "runtimes"
+	changesName      = "changes"
+	formatBytes      = "dark-factory-go-home-v1\n"
+	stageSuffix      = ".dark-factory-go-v1.stage"
+	memberCount      = 6
+	maxNameSize      = 255
+	maxHomeBytes     = 4096
+	maxPathDepth     = 128
+	maxDatabaseBytes = 8 << 20
 )
 
 type retainedDir struct {
@@ -64,6 +65,7 @@ const (
 	phaseBeforeFinalProof     phase = "before final proof"
 	phaseBeforeExistingSecond phase = "before existing home second scan"
 	phaseBeforeDoctorSecond   phase = "before doctor second scan"
+	phaseBeforeSnapshot       phase = "before snapshot"
 )
 
 // phaseHook is only used by package-local Darwin tests to schedule faults and
@@ -74,6 +76,11 @@ var phaseHook func(phase) error
 // tests replace it to prove that directory fsync errors are observed; normal
 // code always uses unix.Fsync.
 var syncDirectory = unix.Fsync
+
+// syncFile is a deliberately tiny syscall seam. Package-local Darwin tests
+// replace it to prove that each regular member is fsynced and that errors are
+// propagated; normal code always uses unix.Fsync.
+var syncFile = unix.Fsync
 
 func atPhase(point phase) error {
 	if phaseHook == nil {
@@ -493,10 +500,10 @@ func exactDirectory(file *os.File, parent bool) error {
 	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
 		return err
 	}
-	if stat.Mode&unix.S_IFMT != unix.S_IFDIR || !exactMode(uint32(stat.Mode), 0o700) || stat.Uid != uint32(os.Geteuid()) {
+	if stat.Mode&unix.S_IFMT != unix.S_IFDIR || !exactMode(uint32(stat.Mode), 0o700) || !exactOwner(uint32(stat.Uid)) {
 		return fmt.Errorf("%w: directory must be owner-only 0700", ErrInvalidHome)
 	}
-	if parent && stat.Nlink < 2 {
+	if !exactDirectoryLinkCount(uint64(stat.Nlink)) {
 		return fmt.Errorf("%w: directory link count is invalid", ErrInvalidHome)
 	}
 	return nil
@@ -534,7 +541,7 @@ func writeMember(parent *os.File, name string, contents []byte, createPhase phas
 	if err := atPhase(phase("before " + name + " fsync")); err != nil {
 		return err
 	}
-	if err := unix.Fsync(fd); err != nil {
+	if err := syncFile(fd); err != nil {
 		return fmt.Errorf("sync home member %s: %w", name, err)
 	}
 	if err := atPhase(phase("after " + name + " fsync")); err != nil {
@@ -691,6 +698,9 @@ func inspectFD(ctx context.Context, home *os.File) (treeSnapshot, error) {
 			return treeSnapshot{}, err
 		}
 	}
+	if err := atPhase(phaseBeforeSnapshot); err != nil {
+		return treeSnapshot{}, err
+	}
 	snapshot, err := snapshotFD(ctx, home)
 	if err != nil {
 		return treeSnapshot{}, err
@@ -722,7 +732,7 @@ func openMember(parent *os.File, name string) (*os.File, unix.Stat_t, error) {
 		_ = file.Close()
 		return nil, unix.Stat_t{}, fmt.Errorf("%w: member identity changed", ErrInvalidHome)
 	}
-	if stat.Mode&unix.S_IFMT != unix.S_IFREG || !exactMode(uint32(stat.Mode), 0o600) || stat.Uid != uint32(os.Geteuid()) || stat.Nlink != 1 {
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG || !exactMode(uint32(stat.Mode), 0o600) || !exactOwner(uint32(stat.Uid)) || stat.Nlink != 1 {
 		_ = file.Close()
 		return nil, unix.Stat_t{}, fmt.Errorf("%w: member %s is not exact owner-only regular 0600", ErrInvalidHome, name)
 	}
@@ -760,7 +770,7 @@ func inspectDatabase(ctx context.Context, parent *os.File) error {
 		return fmt.Errorf("inspect home database: %w", err)
 	}
 	defer file.Close()
-	if stat.Size <= 0 || stat.Size > 8<<20 {
+	if stat.Size <= 0 || stat.Size > maxDatabaseBytes {
 		return fmt.Errorf("%w: database image size is outside bounds", ErrInvalidHome)
 	}
 	if err := kernel.InspectPristine(ctx, file, stat.Size); err != nil {
@@ -812,6 +822,14 @@ func exactMode(mode, expected uint32) bool {
 	return mode&0o7777 == expected
 }
 
+func exactOwner(uid uint32) bool {
+	return uid == uint32(os.Geteuid())
+}
+
+func exactDirectoryLinkCount(nlink uint64) bool {
+	return nlink >= 2
+}
+
 func openDirectoryMember(parent *os.File, name string) (*os.File, unix.Stat_t, error) {
 	file, err := openDirectoryAt(parent, name)
 	if err != nil {
@@ -844,7 +862,8 @@ func snapshotFD(ctx context.Context, home *os.File) (treeSnapshot, error) {
 		if err != nil {
 			return treeSnapshot{}, fmt.Errorf("snapshot home member %s: %w", name, err)
 		}
-		digest, digestErr := digestMember(ctx, file, stat.Size)
+		minimum, maximum := memberSizeBounds(name)
+		digest, digestErr := digestMember(ctx, file, stat.Size, minimum, maximum)
 		closeErr := file.Close()
 		if digestErr != nil {
 			return treeSnapshot{}, digestErr
@@ -881,7 +900,32 @@ func snapshotFD(ctx context.Context, home *os.File) (treeSnapshot, error) {
 	return snapshot, nil
 }
 
-func digestMember(ctx context.Context, file *os.File, size int64) ([sha256.Size]byte, error) {
+func memberSizeBounds(name string) (int64, int64) {
+	switch name {
+	case formatName:
+		return int64(len(formatBytes)), int64(len(formatBytes))
+	case databaseName:
+		return 1, maxDatabaseBytes
+	case tokenName:
+		return 32, 32
+	case lockName:
+		return 0, 0
+	default:
+		return 0, 0
+	}
+}
+
+func digestMember(ctx context.Context, file *os.File, size, minimum, maximum int64) ([sha256.Size]byte, error) {
+	if size < minimum || size > maximum {
+		return [sha256.Size]byte{}, fmt.Errorf("%w: member size is outside bounded snapshot", ErrInvalidHome)
+	}
+	var initial unix.Stat_t
+	if err := unix.Fstat(int(file.Fd()), &initial); err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	if initial.Size != size || initial.Size < minimum || initial.Size > maximum {
+		return [sha256.Size]byte{}, fmt.Errorf("%w: member changed before bounded snapshot", ErrInvalidHome)
+	}
 	hash := sha256.New()
 	buffer := make([]byte, 128<<10)
 	for offset := int64(0); offset < size; {
@@ -903,6 +947,13 @@ func digestMember(ctx context.Context, file *os.File, size int64) ([sha256.Size]
 			return [sha256.Size]byte{}, err
 		}
 		offset += int64(read)
+	}
+	var final unix.Stat_t
+	if err := unix.Fstat(int(file.Fd()), &final); err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	if final.Dev != initial.Dev || final.Ino != initial.Ino || final.Size != initial.Size {
+		return [sha256.Size]byte{}, fmt.Errorf("%w: member changed during bounded snapshot", ErrInvalidHome)
 	}
 	var digest [sha256.Size]byte
 	copy(digest[:], hash.Sum(nil))

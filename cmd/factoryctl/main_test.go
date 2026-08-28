@@ -163,9 +163,40 @@ func TestParseExplicitHomeCommands(t *testing.T) {
 		{"init"}, {"doctor"}, {"init", "--home", "relative"},
 		{"doctor", "--home", "/private/tmp/factory/.."},
 		{"init", "--home", "/"},
+		{"doctor", "--home", "/" + strings.Repeat("a", maxHomeArgumentBytes)},
 	} {
 		if _, _, ok := parse(args); ok {
 			t.Fatalf("parse(%q) accepted invalid explicit home", args)
+		}
+	}
+}
+
+func TestHomeCLIOutputIsBoundedAndRedacted(t *testing.T) {
+	parent, err := os.MkdirTemp("/private/tmp", "dark-factory-factoryctl-home-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(parent) })
+	secret := "operator-token-must-not-appear"
+	home := filepath.Join(parent, secret)
+	var stdout, stderr bytes.Buffer
+	exit := run(context.Background(), []string{"init", "--home", home}, func(string) string { return "" }, &stdout, &stderr)
+	if runtime.GOOS == "darwin" {
+		if exit != 0 || stdout.String() != "home initialized\n" || stderr.Len() != 0 {
+			t.Fatalf("darwin init output: exit=%d stdout=%q stderr=%q", exit, stdout.String(), stderr.String())
+		}
+	} else if exit != exitFailure || stdout.Len() != 0 || stderr.String() != "factoryctl: Go home operations are unsupported on this platform\n" {
+		t.Fatalf("unsupported init output: exit=%d stdout=%q stderr=%q", exit, stdout.String(), stderr.String())
+	}
+	if len(stdout.Bytes())+len(stderr.Bytes()) > 256 || strings.Contains(stdout.String()+stderr.String(), secret) {
+		t.Fatalf("home output leaked or exceeded bound: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if runtime.GOOS == "darwin" {
+		stdout.Reset()
+		stderr.Reset()
+		exit = run(context.Background(), []string{"doctor", "--home", home}, func(string) string { return "" }, &stdout, &stderr)
+		if exit != 0 || stdout.String() != "home ready\n" || stderr.Len() != 0 {
+			t.Fatalf("darwin doctor output: exit=%d stdout=%q stderr=%q", exit, stdout.String(), stderr.String())
 		}
 	}
 }

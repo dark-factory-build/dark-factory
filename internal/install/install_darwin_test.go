@@ -125,6 +125,67 @@ func TestInitRefusesStageAndPartialHomeUnchanged(t *testing.T) {
 	}
 }
 
+func TestPreexistingStageObjectTypesRefusedUnchanged(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(parent, stage string) error
+	}{
+		{name: "file", setup: func(parent, stage string) error {
+			return os.WriteFile(stage, []byte("stage evidence"), 0o600)
+		}},
+		{name: "directory", setup: func(parent, stage string) error {
+			if err := os.Mkdir(stage, 0o700); err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(stage, "evidence"), []byte("stage evidence"), 0o600)
+		}},
+		{name: "symlink", setup: func(parent, stage string) error {
+			target := filepath.Join(parent, "stage-target")
+			if err := os.WriteFile(target, []byte("stage evidence"), 0o600); err != nil {
+				return err
+			}
+			return os.Symlink(target, stage)
+		}},
+		{name: "hardlink", setup: func(parent, stage string) error {
+			target := filepath.Join(parent, "stage-target")
+			if err := os.WriteFile(target, []byte("stage evidence"), 0o600); err != nil {
+				return err
+			}
+			return os.Link(target, stage)
+		}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			parent := installTempDir(t)
+			home := filepath.Join(parent, "home")
+			stage := filepath.Join(parent, ".home"+stageSuffix)
+			if err := test.setup(parent, stage); err != nil {
+				t.Fatal(err)
+			}
+			before := installDigest(t, parent)
+			for _, operation := range []struct {
+				name string
+				call func() error
+			}{
+				{name: "init", call: func() error { _, err := Init(context.Background(), home); return err }},
+				{name: "doctor", call: func() error { _, err := Doctor(context.Background(), home); return err }},
+			} {
+				t.Run(operation.name, func(t *testing.T) {
+					if err := operation.call(); err == nil {
+						t.Fatalf("%s accepted pre-existing %s stage", operation.name, test.name)
+					}
+					if after := installDigest(t, parent); after != before {
+						t.Fatalf("%s changed pre-existing %s stage", operation.name, test.name)
+					}
+					if _, err := os.Lstat(home); !errors.Is(err, os.ErrNotExist) {
+						t.Fatalf("final home after pre-existing %s stage: %v", test.name, err)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestInitSecondStageInspectionRejectsMemberMutation(t *testing.T) {
 	parent := installTempDir(t)
 	home := filepath.Join(parent, "home")
@@ -323,6 +384,97 @@ func TestDirectorySyncFailureCutsKeepStageOrBecomeUncertain(t *testing.T) {
 	}
 }
 
+func TestRegularMemberSyncFailureCutsKeepStageEvidence(t *testing.T) {
+	memberNames := []string{formatName, databaseName, tokenName, lockName}
+	for callIndex, memberName := range memberNames {
+		failureCall := callIndex + 1
+		t.Run(memberName, func(t *testing.T) {
+			parent := installTempDir(t)
+			home := filepath.Join(parent, "home")
+			stage := filepath.Join(parent, ".home"+stageSuffix)
+			originalSync := syncFile
+			defer func() { syncFile = originalSync }()
+			calls := 0
+			syncFile = func(fd int) error {
+				calls++
+				var stat unix.Stat_t
+				if err := unix.Fstat(fd, &stat); err != nil {
+					t.Fatalf("inspect member fsync descriptor: %v", err)
+				}
+				if stat.Mode&unix.S_IFMT != unix.S_IFREG {
+					t.Fatalf("member fsync descriptor mode = %o, want regular", stat.Mode&unix.S_IFMT)
+				}
+				currentName := memberNames[calls-1]
+				expected, err := os.Stat(filepath.Join(stage, currentName))
+				if err != nil {
+					t.Fatalf("stat expected member: %v", err)
+				}
+				expectedStat := expected.Sys().(*syscall.Stat_t)
+				if uint64(stat.Dev) != uint64(expectedStat.Dev) || uint64(stat.Ino) != uint64(expectedStat.Ino) {
+					t.Fatalf("member fsync descriptor is not %s", currentName)
+				}
+				if calls == failureCall {
+					return errors.New("injected member fsync failure")
+				}
+				return originalSync(fd)
+			}
+			if _, err := Init(context.Background(), home); err == nil {
+				t.Fatal("init accepted an injected member fsync failure")
+			}
+			if calls != failureCall {
+				t.Fatalf("member fsync calls = %d, want failure call %d", calls, failureCall)
+			}
+			if _, err := os.Stat(home); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("final home after member fsync failure: %v", err)
+			}
+			if _, err := os.Stat(stage); err != nil {
+				t.Fatalf("stage evidence after member fsync failure: %v", err)
+			}
+		})
+	}
+}
+
+func TestBoundedSnapshotRejectsOversizedMemberBeforeRead(t *testing.T) {
+	parent := installTempDir(t)
+	file, err := os.CreateTemp(parent, "member-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if _, err := digestMember(context.Background(), file, maxDatabaseBytes+1, 1, maxDatabaseBytes); !errors.Is(err, ErrInvalidHome) {
+		t.Fatalf("oversized digest error = %v, want invalid home", err)
+	}
+}
+
+func TestInitRejectsMemberGrowthBeforeBoundedSnapshot(t *testing.T) {
+	parent := installTempDir(t)
+	home := filepath.Join(parent, "home")
+	stage := filepath.Join(parent, ".home"+stageSuffix)
+	mutated := false
+	phaseHook = func(point phase) error {
+		if point == phaseBeforeSnapshot && !mutated {
+			mutated = true
+			return os.Truncate(filepath.Join(stage, databaseName), maxDatabaseBytes+1)
+		}
+		return nil
+	}
+	defer func() { phaseHook = nil }()
+	if _, err := Init(context.Background(), home); err == nil {
+		t.Fatal("init accepted an oversized member before bounded snapshot")
+	} else if errors.Is(err, ErrUncertain) {
+		t.Fatalf("pre-publication oversized member became uncertain: %v", err)
+	}
+	if !mutated {
+		t.Fatal("snapshot mutation hook was not reached")
+	}
+	if _, err := os.Stat(home); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("final home after oversized member: %v", err)
+	}
+	if info, err := os.Stat(stage); err != nil || !info.IsDir() {
+		t.Fatalf("stage evidence after oversized member: info=%v err=%v", info, err)
+	}
+}
+
 func TestInitNoReplaceConflictLeavesStageAndFinalUnchanged(t *testing.T) {
 	parent := installTempDir(t)
 	home := filepath.Join(parent, "home")
@@ -418,6 +570,95 @@ func TestStableProofBindsReplacedAncestors(t *testing.T) {
 	}
 }
 
+func TestStableProofBindsReplacedImmediateParent(t *testing.T) {
+	tests := []struct {
+		name  string
+		phase phase
+		call  func(context.Context, string) (Result, error)
+	}{
+		{name: "doctor", phase: phaseBeforeDoctorSecond, call: func(ctx context.Context, home string) (Result, error) {
+			return Doctor(ctx, home)
+		}},
+		{name: "existing init", phase: phaseBeforeExistingSecond, call: func(ctx context.Context, home string) (Result, error) {
+			return Init(ctx, home)
+		}},
+		{name: "published init", phase: phaseAfterRename, call: func(ctx context.Context, home string) (Result, error) {
+			return Init(ctx, home)
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			parent := installTempDir(t)
+			outer := filepath.Join(parent, "outer")
+			inner := filepath.Join(outer, "inner")
+			home := filepath.Join(inner, "home")
+			if err := os.MkdirAll(inner, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if test.name != "published init" {
+				if _, err := Init(context.Background(), home); err != nil {
+					t.Fatal(err)
+				}
+			}
+			phaseHook = func(point phase) error {
+				if point == test.phase {
+					return replaceHomeImmediateParent(home)
+				}
+				return nil
+			}
+			defer func() { phaseHook = nil }()
+			if _, err := test.call(context.Background(), home); !errors.Is(err, ErrUncertain) {
+				t.Fatalf("immediate parent replacement error = %v, want uncertain", err)
+			}
+		})
+	}
+}
+
+func replaceHomeImmediateParent(home string) error {
+	inner := filepath.Dir(home)
+	oldInner := inner + ".old"
+	if err := os.Rename(inner, oldInner); err != nil {
+		return err
+	}
+	if err := os.Mkdir(inner, 0o700); err != nil {
+		return err
+	}
+	return os.Rename(filepath.Join(oldInner, filepath.Base(home)), home)
+}
+
+func TestPreRenameImmediateParentReplacementRefusesUnchangedFinal(t *testing.T) {
+	parent := installTempDir(t)
+	outer := filepath.Join(parent, "outer")
+	inner := filepath.Join(outer, "inner")
+	home := filepath.Join(inner, "home")
+	if err := os.MkdirAll(inner, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stage := filepath.Join(inner, ".home"+stageSuffix)
+	oldInner := inner + ".old"
+	phaseHook = func(point phase) error {
+		if point == phaseBeforeRename {
+			return replaceHomeImmediateParent(home)
+		}
+		return nil
+	}
+	defer func() { phaseHook = nil }()
+	if _, err := Init(context.Background(), home); err == nil {
+		t.Fatal("init accepted a replaced immediate parent before publication")
+	} else if errors.Is(err, ErrUncertain) {
+		t.Fatalf("pre-publication immediate parent replacement became uncertain: %v", err)
+	}
+	if _, err := os.Lstat(home); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("final home after immediate parent replacement: %v", err)
+	}
+	if _, err := os.Stat(stage); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unexpected stage at replacement path: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(oldInner, filepath.Base(stage))); err != nil {
+		t.Fatalf("detached stage evidence disappeared: %v", err)
+	}
+}
+
 func TestPreRenameAncestorReplacementRefusesUnchangedFinal(t *testing.T) {
 	parent := installTempDir(t)
 	outer := filepath.Join(parent, "outer")
@@ -454,6 +695,99 @@ func TestPreRenameAncestorReplacementRefusesUnchangedFinal(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(oldOuter, "inner", filepath.Base(stage))); err != nil {
 		t.Fatalf("detached stage evidence disappeared: %v", err)
+	}
+}
+
+func TestSymlinkFinalPathAndMemberRefusedUnchanged(t *testing.T) {
+	t.Run("final path", func(t *testing.T) {
+		parent := installTempDir(t)
+		home := filepath.Join(parent, "home")
+		target := filepath.Join(parent, "target")
+		if err := os.Mkdir(target, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, home); err != nil {
+			t.Fatal(err)
+		}
+		before := installDigest(t, parent)
+		for _, operation := range []struct {
+			name string
+			call func() error
+		}{
+			{name: "init", call: func() error { _, err := Init(context.Background(), home); return err }},
+			{name: "doctor", call: func() error { _, err := Doctor(context.Background(), home); return err }},
+		} {
+			t.Run(operation.name, func(t *testing.T) {
+				if err := operation.call(); err == nil {
+					t.Fatal("accepted final symlink")
+				}
+				if after := installDigest(t, parent); after != before {
+					t.Fatal("final symlink changed after refusal")
+				}
+			})
+		}
+	})
+	t.Run("member symlink", func(t *testing.T) {
+		parent := installTempDir(t)
+		home := filepath.Join(parent, "home")
+		if _, err := Init(context.Background(), home); err != nil {
+			t.Fatal(err)
+		}
+		member := filepath.Join(home, formatName)
+		backup := filepath.Join(parent, "format-target")
+		if err := os.Rename(member, backup); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(backup, member); err != nil {
+			t.Fatal(err)
+		}
+		before := installDigest(t, parent)
+		for _, operation := range []struct {
+			name string
+			call func() error
+		}{
+			{name: "init", call: func() error { _, err := Init(context.Background(), home); return err }},
+			{name: "doctor", call: func() error { _, err := Doctor(context.Background(), home); return err }},
+		} {
+			t.Run(operation.name, func(t *testing.T) {
+				if err := operation.call(); err == nil {
+					t.Fatal("accepted member symlink")
+				}
+				if after := installDigest(t, parent); after != before {
+					t.Fatal("member symlink changed after refusal")
+				}
+			})
+		}
+	})
+}
+
+func TestPathComponentSymlinkRefusedUnchanged(t *testing.T) {
+	parent := installTempDir(t)
+	actual := filepath.Join(parent, "actual")
+	link := filepath.Join(parent, "link")
+	if err := os.Mkdir(actual, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(actual, link); err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(link, "home")
+	before := installDigest(t, parent)
+	for _, operation := range []struct {
+		name string
+		call func() error
+	}{
+		{name: "init", call: func() error { _, err := Init(context.Background(), home); return err }},
+		{name: "doctor", call: func() error { _, err := Doctor(context.Background(), home); return err }},
+	} {
+		t.Run(operation.name, func(t *testing.T) {
+			if err := operation.call(); err == nil {
+				t.Fatal("accepted path component symlink")
+			}
+			if after := installDigest(t, parent); after != before {
+				t.Fatal("path component symlink changed after refusal")
+			}
+		})
 	}
 }
 
@@ -538,6 +872,27 @@ func TestExactModeRejectsEverySpecialBit(t *testing.T) {
 	}
 }
 
+func TestExactOwnerRejectsForeignMetadata(t *testing.T) {
+	owner := uint32(os.Geteuid())
+	if !exactOwner(owner) {
+		t.Fatal("effective owner was rejected")
+	}
+	if exactOwner(^owner) {
+		t.Fatal("foreign owner was accepted")
+	}
+}
+
+func TestExactDirectoryLinkCountRejectsInvalidMetadata(t *testing.T) {
+	for _, nlink := range []uint64{0, 1} {
+		if exactDirectoryLinkCount(nlink) {
+			t.Fatalf("directory link count %d was accepted", nlink)
+		}
+	}
+	if !exactDirectoryLinkCount(2) {
+		t.Fatal("minimum directory link count was rejected")
+	}
+}
+
 func TestHomePathBoundsRefuseBeforeFilesystemTraversal(t *testing.T) {
 	tooLong := "/" + strings.Repeat("a", maxHomeBytes)
 	if _, err := Init(context.Background(), tooLong); !errors.Is(err, ErrInvalidHome) {
@@ -601,15 +956,25 @@ func TestRegularMemberHardlinkIsRejectedUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Doctor(context.Background(), home); !errors.Is(err, ErrInvalidHome) {
-		t.Fatalf("doctor accepted hard-linked member: %v", err)
-	}
-	after, err := os.Lstat(filepath.Join(home, formatName))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if after.Sys().(*syscall.Stat_t).Ino != before.Sys().(*syscall.Stat_t).Ino || after.Sys().(*syscall.Stat_t).Nlink != 2 {
-		t.Fatalf("hardlink evidence changed: before=%+v after=%+v", before.Sys(), after.Sys())
+	for _, operation := range []struct {
+		name string
+		call func() error
+	}{
+		{name: "doctor", call: func() error { _, err := Doctor(context.Background(), home); return err }},
+		{name: "init", call: func() error { _, err := Init(context.Background(), home); return err }},
+	} {
+		t.Run(operation.name, func(t *testing.T) {
+			if err := operation.call(); !errors.Is(err, ErrInvalidHome) {
+				t.Fatalf("%s accepted hard-linked member: %v", operation.name, err)
+			}
+			after, err := os.Lstat(filepath.Join(home, formatName))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.Sys().(*syscall.Stat_t).Ino != before.Sys().(*syscall.Stat_t).Ino || after.Sys().(*syscall.Stat_t).Nlink != 2 {
+				t.Fatalf("hardlink evidence changed: before=%+v after=%+v", before.Sys(), after.Sys())
+			}
+		})
 	}
 }
 
@@ -638,8 +1003,40 @@ func TestDoctorRejectsCorruptionsWithoutMutation(t *testing.T) {
 		{name: "sqlite sidecar", mutate: func(home string) error {
 			return os.WriteFile(filepath.Join(home, databaseName+"-wal"), []byte("sidecar"), 0o600)
 		}},
+		{name: "sqlite journal sidecar", mutate: func(home string) error {
+			return os.WriteFile(filepath.Join(home, databaseName+"-journal"), []byte("sidecar"), 0o600)
+		}},
+		{name: "sqlite shared memory sidecar", mutate: func(home string) error {
+			return os.WriteFile(filepath.Join(home, databaseName+"-shm"), []byte("sidecar"), 0o600)
+		}},
 		{name: "populated runtimes", mutate: func(home string) error {
 			return os.WriteFile(filepath.Join(home, runtimesName, "unexpected"), []byte("entry"), 0o600)
+		}},
+		{name: "populated changes", mutate: func(home string) error {
+			return os.WriteFile(filepath.Join(home, changesName, "unexpected"), []byte("entry"), 0o600)
+		}},
+		{name: "unknown home entry", mutate: func(home string) error {
+			return os.WriteFile(filepath.Join(home, "unexpected"), []byte("entry"), 0o600)
+		}},
+		{name: "nonregular member", mutate: func(home string) error {
+			member := filepath.Join(home, formatName)
+			backup := filepath.Join(filepath.Dir(home), "format-evidence")
+			if err := os.Rename(member, backup); err != nil {
+				return err
+			}
+			return os.Mkdir(member, 0o700)
+		}},
+		{name: "socket entry", mutate: func(home string) error {
+			path := filepath.Join(home, "socket")
+			fd, err := unix.Socket(unix.AF_UNIX, unix.SOCK_STREAM, 0)
+			if err != nil {
+				return err
+			}
+			if err := unix.Bind(fd, &unix.SockaddrUnix{Name: path}); err != nil {
+				_ = unix.Close(fd)
+				return err
+			}
+			return unix.Close(fd)
 		}},
 	}
 	for _, corruption := range corruptions {
@@ -653,14 +1050,108 @@ func TestDoctorRejectsCorruptionsWithoutMutation(t *testing.T) {
 				t.Fatal(err)
 			}
 			before := installDigest(t, home)
-			if _, err := Doctor(context.Background(), home); !errors.Is(err, ErrInvalidHome) {
-				t.Fatalf("doctor accepted %s: %v", corruption.name, err)
-			}
-			if after := installDigest(t, home); after != before {
-				t.Fatalf("doctor changed %s evidence", corruption.name)
+			for _, operation := range []struct {
+				name string
+				call func() error
+			}{
+				{name: "doctor", call: func() error { _, err := Doctor(context.Background(), home); return err }},
+				{name: "init", call: func() error { _, err := Init(context.Background(), home); return err }},
+			} {
+				t.Run(operation.name, func(t *testing.T) {
+					if err := operation.call(); !errors.Is(err, ErrInvalidHome) {
+						t.Fatalf("%s accepted %s: %v", operation.name, corruption.name, err)
+					}
+					if after := installDigest(t, home); after != before {
+						t.Fatalf("%s changed %s evidence", operation.name, corruption.name)
+					}
+				})
 			}
 		})
 	}
+}
+
+func TestLegacyRustMixedAndPartialLayoutsRefusedUnchanged(t *testing.T) {
+	cases := []struct {
+		name  string
+		entry string
+	}{
+		{name: "unmarked", entry: "config"},
+		{name: "legacy database", entry: "factory.db"},
+		{name: "rust marker", entry: "daemon.lock"},
+		{name: "mixed marker", entry: "manifest.json"},
+		{name: "partial format", entry: formatName},
+		{name: "partial token", entry: tokenName},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			parent := installTempDir(t)
+			home := filepath.Join(parent, "home")
+			if err := os.Mkdir(home, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(home, test.entry), []byte("legacy evidence"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			before := installDigest(t, parent)
+			for _, operation := range []struct {
+				name string
+				call func() error
+			}{
+				{name: "init", call: func() error { _, err := Init(context.Background(), home); return err }},
+				{name: "doctor", call: func() error { _, err := Doctor(context.Background(), home); return err }},
+			} {
+				t.Run(operation.name, func(t *testing.T) {
+					if err := operation.call(); err == nil {
+						t.Fatal("accepted unsupported home layout")
+					}
+					if after := installDigest(t, parent); after != before {
+						t.Fatal("unsupported home layout changed after refusal")
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestInitAndDoctorReturnWithBaselineDescriptorCount(t *testing.T) {
+	baseline, ok := descriptorCount()
+	if !ok {
+		t.Skip("/dev/fd is unavailable")
+	}
+	parent := installTempDir(t)
+	home := filepath.Join(parent, "home")
+	if _, err := Init(context.Background(), home); err != nil {
+		t.Fatal(err)
+	}
+	if current, _ := descriptorCount(); current != baseline {
+		t.Fatalf("descriptor count after init = %d, baseline %d", current, baseline)
+	}
+	if _, err := Doctor(context.Background(), home); err != nil {
+		t.Fatal(err)
+	}
+	if current, _ := descriptorCount(); current != baseline {
+		t.Fatalf("descriptor count after doctor = %d, baseline %d", current, baseline)
+	}
+
+	originalSync := syncFile
+	defer func() { syncFile = originalSync }()
+	syncFile = func(fd int) error {
+		return errors.New("injected member fsync failure")
+	}
+	if _, err := Init(context.Background(), filepath.Join(parent, "failed")); err == nil {
+		t.Fatal("init accepted descriptor-count failure cut")
+	}
+	if current, _ := descriptorCount(); current != baseline {
+		t.Fatalf("descriptor count after failed init = %d, baseline %d", current, baseline)
+	}
+}
+
+func descriptorCount() (int, bool) {
+	entries, err := os.ReadDir("/dev/fd")
+	if err != nil {
+		return 0, false
+	}
+	return len(entries), true
 }
 
 func installTempDir(t *testing.T) string {

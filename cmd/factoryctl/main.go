@@ -25,6 +25,7 @@ const (
 	attemptRequestTimeout = 5 * time.Second
 	exitUsage             = 64
 	exitFailure           = 1
+	maxHomeArgumentBytes  = 4096
 
 	usage = `usage:
   factoryctl attempt succeed [--result TEXT]
@@ -196,7 +197,7 @@ func parse(args []string) (attemptCommand, bool, bool) {
 }
 
 func validHomeArg(value string) bool {
-	return value != "" && filepath.IsAbs(value) && filepath.Clean(value) == value && filepath.Base(value) != "." && filepath.Base(value) != string(filepath.Separator)
+	return value != "" && len(value) <= maxHomeArgumentBytes && filepath.IsAbs(value) && filepath.Clean(value) == value && filepath.Base(value) != "." && filepath.Base(value) != string(filepath.Separator)
 }
 
 func runHome(ctx context.Context, command attemptCommand, stdout, stderr io.Writer) int {
