@@ -931,6 +931,17 @@ func exitIdentityMatches(resources []Resource, owner processExitOwner, identity 
 }
 
 func (store *Store) FinalizeRun(ctx context.Context, runID RunID, expected Revision, at UnixMillis) (Run, error) {
+	return store.finalizeRun(ctx, runID, expected, nil, at)
+}
+
+func (store *Store) FinalizeWorkerRun(ctx context.Context, runID RunID, expected Revision, settlement ChangeSettlement, at UnixMillis) (Run, error) {
+	if !settlement.valid() {
+		return Run{}, fmt.Errorf("%w: invalid worker Change settlement", ErrInvalidValue)
+	}
+	return store.finalizeRun(ctx, runID, expected, &settlement, at)
+}
+
+func (store *Store) finalizeRun(ctx context.Context, runID RunID, expected Revision, settlement *ChangeSettlement, at UnixMillis) (Run, error) {
 	if runID.zero() {
 		return Run{}, fmt.Errorf("%w: zero run identifier", ErrInvalidValue)
 	}
@@ -946,10 +957,6 @@ func (store *Store) FinalizeRun(ctx context.Context, runID RunID, expected Revis
 	if !found {
 		return Run{}, tx.Rollback(ErrNotFound)
 	}
-	relationships, err := loadRunRelationships(ctx, tx.connection, run)
-	if err != nil {
-		return Run{}, tx.Rollback(err)
-	}
 	if run.Phase == RunTerminal && run.Revision.Int64() > expected.Int64() {
 		if run.Proposal == nil || run.Terminal == nil || !run.Terminal.equal(*run.Proposal) {
 			return Run{}, tx.Rollback(ErrConflict)
@@ -958,6 +965,13 @@ func (store *Store) FinalizeRun(ctx context.Context, runID RunID, expected Revis
 			return Run{}, err
 		}
 		return run, nil
+	}
+	if run.Role == RoleWorker && settlement == nil || run.Role == RoleOrchestrator && settlement != nil {
+		return Run{}, tx.Rollback(ErrConflict)
+	}
+	relationships, err := loadRunRelationships(ctx, tx.connection, run)
+	if err != nil {
+		return Run{}, tx.Rollback(err)
 	}
 	if run.Phase != RunFinalizing || run.Proposal == nil || run.CredentialRevokedAt == nil || run.Revision != expected || at.Int64() < run.UpdatedAt.Int64() {
 		return Run{}, tx.Rollback(ErrRevisionConflict)
@@ -1033,6 +1047,31 @@ func (store *Store) FinalizeRun(ctx context.Context, runID RunID, expected Revis
 	if err := requireOneRow(updated, err); err != nil {
 		return Run{}, tx.Rollback(err)
 	}
+	changeRevision := int64(0)
+	if settlement != nil {
+		change := relationships.change
+		if change == nil || run.ChangeID == nil || run.AdmittedChangeRevision == nil || change.ID != *run.ChangeID || change.ProjectID != run.ProjectID || change.TaskID != run.TaskID || change.TaskIncarnationID != run.TaskIncarnationID || change.Revision != settlement.expected || settlement.expected.Int64() < run.AdmittedChangeRevision.Int64() || at.Int64() < change.UpdatedAt.Int64() {
+			return Run{}, tx.Rollback(ErrConflict)
+		}
+		changeRevision = change.Revision.Int64() + 1
+		switch settlement.phase {
+		case ChangeRetained:
+			if change.Phase != ChangeAvailable || settlement.availability == nil || change.TreeIdentity == nil || *change.TreeIdentity != settlement.availability.tree || change.Revision.Int64() != run.AdmittedChangeRevision.Int64() && change.Revision.Int64() != run.AdmittedChangeRevision.Int64()+2 {
+				return Run{}, tx.Rollback(ErrConflict)
+			}
+			updated, err = tx.connection.ExecContext(ctx, `UPDATE changes SET phase = 'retained', tree_digest = ?, entry_count = ?, total_bytes = ?, settled_run_id = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase = 'available' AND revision = ? AND settled_run_id IS NULL AND tree_dev = ? AND tree_inode = ?`, settlement.availability.commitment.Bytes(), int64(settlement.availability.entries), int64(settlement.availability.bytes), run.ID.Bytes(), at.Int64(), change.ID.Bytes(), settlement.expected.Int64(), settlement.availability.tree.device, settlement.availability.tree.inode)
+		case ChangeAbandoned:
+			if change.Phase == ChangeReserved && change.Revision != *run.AdmittedChangeRevision || change.Phase == ChangePrepared && change.Revision.Int64() != run.AdmittedChangeRevision.Int64()+1 || change.Phase != ChangeReserved && change.Phase != ChangePrepared {
+				return Run{}, tx.Rollback(ErrConflict)
+			}
+			updated, err = tx.connection.ExecContext(ctx, `UPDATE changes SET phase = 'abandoned', object_format = NULL, base_commit = NULL, tree_digest = NULL, entry_count = NULL, total_bytes = NULL, tree_dev = NULL, tree_inode = NULL, prepared_at_ms = NULL, available_at_ms = NULL, settled_run_id = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase IN ('reserved', 'prepared') AND revision = ? AND settled_run_id IS NULL`, run.ID.Bytes(), at.Int64(), change.ID.Bytes(), settlement.expected.Int64())
+		default:
+			return Run{}, tx.Rollback(ErrCorruptState)
+		}
+		if err := requireOneRow(updated, err); err != nil {
+			return Run{}, tx.Rollback(err)
+		}
+	}
 	factoryRevision := factory.Revision.Int64() + 1
 	updated, err = tx.connection.ExecContext(ctx, `UPDATE factory SET revision = revision + 1, updated_at_ms = ? WHERE singleton = 1 AND revision = ?`, at.Int64(), factory.Revision.Int64())
 	if err := requireOneRow(updated, err); err != nil {
@@ -1046,6 +1085,9 @@ func (store *Store) FinalizeRun(ctx context.Context, runID RunID, expected Revis
 		{kind: EntityFactory, id: factoryEntityID[:], revision: factoryRevision},
 		{kind: EntityTask, id: task.ID.Bytes(), revision: taskRevision},
 		{kind: EntityRun, id: run.ID.Bytes(), revision: expected.Int64() + 1},
+	}
+	if settlement != nil {
+		pending = append(pending, pendingInvalidation{kind: EntityChange, id: (*run.ChangeID).Bytes(), revision: changeRevision})
 	}
 	pending = append(pending, requestInvalidations...)
 	if err := appendInvalidations(ctx, tx.connection, at, pending); err != nil {

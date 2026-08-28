@@ -97,21 +97,24 @@ type ChangePhase uint8
 
 const (
 	ChangeReserved ChangePhase = iota + 1
-	ChangeSelected
 	ChangePrepared
 	ChangeAvailable
+	ChangeRetained
+	ChangeAbandoned
 )
 
 func parseChangePhase(value string) (ChangePhase, error) {
 	switch value {
 	case "reserved":
 		return ChangeReserved, nil
-	case "selected":
-		return ChangeSelected, nil
 	case "prepared":
 		return ChangePrepared, nil
 	case "available":
 		return ChangeAvailable, nil
+	case "retained":
+		return ChangeRetained, nil
+	case "abandoned":
+		return ChangeAbandoned, nil
 	default:
 		return 0, corruptControl("change phase", value)
 	}
@@ -121,65 +124,63 @@ func (value ChangePhase) String() string {
 	switch value {
 	case ChangeReserved:
 		return "reserved"
-	case ChangeSelected:
-		return "selected"
 	case ChangePrepared:
 		return "prepared"
 	case ChangeAvailable:
 		return "available"
+	case ChangeRetained:
+		return "retained"
+	case ChangeAbandoned:
+		return "abandoned"
 	default:
 		return ""
 	}
 }
 
 type ChangeSelection struct {
-	format         ObjectFormat
-	commit         CommitID
-	commitment     TreeDigest
-	entries        uint32
-	bytes          uint64
-	repositoryRoot string
-	repository     FileIdentity
+	format     ObjectFormat
+	commit     CommitID
+	commitment TreeDigest
+	entries    uint32
+	bytes      uint64
 }
 
-func NewChangeSelection(format ObjectFormat, commit CommitID, commitment TreeDigest, entries uint32, totalBytes uint64, repositoryRoot string, repository FileIdentity) (ChangeSelection, error) {
-	if format.oidLength() == 0 || commit.format != format || entries > MaxChangeTreeEntries || totalBytes > MaxChangeTreeBlobBytes || !repository.valid() || !validOwnedLocator(repositoryRoot) {
+func NewChangeSelection(format ObjectFormat, commit CommitID, commitment TreeDigest, entries uint32, totalBytes uint64) (ChangeSelection, error) {
+	if format.oidLength() == 0 || commit.format != format || entries > MaxChangeTreeEntries || totalBytes > MaxChangeTreeBlobBytes {
 		return ChangeSelection{}, fmt.Errorf("%w: invalid Change selection", ErrInvalidValue)
 	}
-	return ChangeSelection{format: format, commit: commit, commitment: commitment, entries: entries, bytes: totalBytes, repositoryRoot: repositoryRoot, repository: repository}, nil
+	return ChangeSelection{format: format, commit: commit, commitment: commitment, entries: entries, bytes: totalBytes}, nil
 }
 
-func (selection ChangeSelection) ObjectFormat() ObjectFormat       { return selection.format }
-func (selection ChangeSelection) Commit() CommitID                 { return selection.commit }
-func (selection ChangeSelection) Commitment() TreeDigest           { return selection.commitment }
-func (selection ChangeSelection) EntryCount() uint32               { return selection.entries }
-func (selection ChangeSelection) TotalBytes() uint64               { return selection.bytes }
-func (selection ChangeSelection) RepositoryRoot() string           { return selection.repositoryRoot }
-func (selection ChangeSelection) RepositoryIdentity() FileIdentity { return selection.repository }
+func (selection ChangeSelection) ObjectFormat() ObjectFormat { return selection.format }
+func (selection ChangeSelection) Commit() CommitID           { return selection.commit }
+func (selection ChangeSelection) Commitment() TreeDigest     { return selection.commitment }
+func (selection ChangeSelection) EntryCount() uint32         { return selection.entries }
+func (selection ChangeSelection) TotalBytes() uint64         { return selection.bytes }
 func (selection ChangeSelection) valid() bool {
-	return selection.format.oidLength() != 0 && selection.commit.format == selection.format && len(selection.commit.Bytes()) == selection.format.oidLength() && selection.entries <= MaxChangeTreeEntries && selection.bytes <= MaxChangeTreeBlobBytes && selection.repository.valid() && validOwnedLocator(selection.repositoryRoot)
+	return selection.format.oidLength() != 0 && selection.commit.format == selection.format && len(selection.commit.Bytes()) == selection.format.oidLength() && selection.entries <= MaxChangeTreeEntries && selection.bytes <= MaxChangeTreeBlobBytes
 }
 
 type ChangeAvailability struct {
 	commitment TreeDigest
 	entries    uint32
 	bytes      uint64
-	source     FileIdentity
+	tree       FileIdentity
 }
 
-func NewChangeAvailability(commitment TreeDigest, entries uint32, totalBytes uint64, source FileIdentity) (ChangeAvailability, error) {
-	if entries > MaxChangeTreeEntries || totalBytes > MaxChangeTreeBlobBytes || !source.valid() {
+func NewChangeAvailability(commitment TreeDigest, entries uint32, totalBytes uint64, tree FileIdentity) (ChangeAvailability, error) {
+	if entries > MaxChangeTreeEntries || totalBytes > MaxChangeTreeBlobBytes || !tree.valid() {
 		return ChangeAvailability{}, fmt.Errorf("%w: invalid Change availability", ErrInvalidValue)
 	}
-	return ChangeAvailability{commitment: commitment, entries: entries, bytes: totalBytes, source: source}, nil
+	return ChangeAvailability{commitment: commitment, entries: entries, bytes: totalBytes, tree: tree}, nil
 }
 
-func (value ChangeAvailability) Commitment() TreeDigest       { return value.commitment }
-func (value ChangeAvailability) EntryCount() uint32           { return value.entries }
-func (value ChangeAvailability) TotalBytes() uint64           { return value.bytes }
-func (value ChangeAvailability) SourceIdentity() FileIdentity { return value.source }
+func (value ChangeAvailability) Commitment() TreeDigest     { return value.commitment }
+func (value ChangeAvailability) EntryCount() uint32         { return value.entries }
+func (value ChangeAvailability) TotalBytes() uint64         { return value.bytes }
+func (value ChangeAvailability) TreeIdentity() FileIdentity { return value.tree }
 func (value ChangeAvailability) valid() bool {
-	return value.entries <= MaxChangeTreeEntries && value.bytes <= MaxChangeTreeBlobBytes && value.source.valid()
+	return value.entries <= MaxChangeTreeEntries && value.bytes <= MaxChangeTreeBlobBytes && value.tree.valid()
 }
 
 type Change struct {
@@ -188,28 +189,38 @@ type Change struct {
 	TaskID            TaskID
 	TaskIncarnationID IncarnationID
 	Phase             ChangePhase
-	SourceRoot        string
-	StagingRoot       string
 	Selection         *ChangeSelection
-	StageIdentity     *FileIdentity
-	Availability      *ChangeAvailability
+	TreeIdentity      *FileIdentity
+	SettledRunID      *RunID
 	Revision          Revision
 	CreatedAt         UnixMillis
 	UpdatedAt         UnixMillis
-	SelectedAt        *UnixMillis
 	PreparedAt        *UnixMillis
 	AvailableAt       *UnixMillis
 }
 
-type ChangeReservation struct {
-	ID                    ChangeID
-	SourceRoot            string
-	StagingRoot           string
-	ExpectedReuseRevision *Revision
+type ChangeSettlement struct {
+	phase        ChangePhase
+	expected     Revision
+	availability *ChangeAvailability
 }
 
-func (reservation ChangeReservation) valid() bool {
-	return !reservation.ID.zero() && validOwnedLocator(reservation.SourceRoot) && validOwnedLocator(reservation.StagingRoot) && !pathsOverlap(reservation.SourceRoot, reservation.StagingRoot) && (reservation.ExpectedReuseRevision == nil || reservation.ExpectedReuseRevision.Int64() >= 1)
+func NewRetainedChangeSettlement(expected Revision, availability ChangeAvailability) (ChangeSettlement, error) {
+	if expected.Int64() < 1 || !availability.valid() {
+		return ChangeSettlement{}, fmt.Errorf("%w: invalid retained Change settlement", ErrInvalidValue)
+	}
+	return ChangeSettlement{phase: ChangeRetained, expected: expected, availability: &availability}, nil
+}
+
+func NewAbandonedChangeSettlement(expected Revision) (ChangeSettlement, error) {
+	if expected.Int64() < 1 {
+		return ChangeSettlement{}, fmt.Errorf("%w: invalid abandoned Change settlement", ErrInvalidValue)
+	}
+	return ChangeSettlement{phase: ChangeAbandoned, expected: expected}, nil
+}
+
+func (settlement ChangeSettlement) valid() bool {
+	return settlement.expected.Int64() >= 1 && (settlement.phase == ChangeRetained && settlement.availability != nil && settlement.availability.valid() || settlement.phase == ChangeAbandoned && settlement.availability == nil)
 }
 
 type RunPhase uint8
@@ -730,6 +741,7 @@ type Run struct {
 	TaskIncarnationID        IncarnationID
 	AdmittedTaskWorkRevision Revision
 	ChangeID                 *ChangeID
+	AdmittedChangeRevision   *Revision
 	Role                     AgentRole
 	Provider                 Provider
 	Model                    string
@@ -788,16 +800,16 @@ type AdmissionKeys struct {
 	RunID             RunID
 	TerminalSessionID TerminalSessionID
 	AttemptDigest     AttemptDigest
-	Change            *ChangeReservation
+	CandidateChangeID ChangeID
 	Resources         AdmissionResourceIDs
 	RuntimeRoot       string
 }
 
 func (keys AdmissionKeys) valid() bool {
-	if keys.RunID.zero() || keys.TerminalSessionID.zero() || !keys.Resources.valid() || !validOwnedLocator(keys.RuntimeRoot) || keys.Change != nil && !keys.Change.valid() {
+	if keys.RunID.zero() || keys.TerminalSessionID.zero() || keys.CandidateChangeID.zero() || !keys.Resources.valid() || !validOwnedLocator(keys.RuntimeRoot) {
 		return false
 	}
-	return keys.Change == nil || !pathsOverlap(keys.RuntimeRoot, keys.Change.SourceRoot) && !pathsOverlap(keys.RuntimeRoot, keys.Change.StagingRoot)
+	return true
 }
 
 type NoAdmissionReason uint8

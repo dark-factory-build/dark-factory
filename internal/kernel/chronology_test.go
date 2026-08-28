@@ -193,100 +193,6 @@ func TestFinalizeRunRejectsBeforeResourceCleanupTime(t *testing.T) {
 	}
 }
 
-func TestFinalizeRunRejectsBeforeLateWorkerChangeCheckpoint(t *testing.T) {
-	failure, _ := NewFailureProposal(FailureInternal, "cleanup")
-	store, run, _ := admittedWorkerRun(t)
-	defer store.Close()
-	runner := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
-	runner, err := store.ActivateResource(context.Background(), run.ID, runner.ID, runner.Revision, processIdentity(t, 303), mustTime(t, 19))
-	if err != nil {
-		t.Fatal(err)
-	}
-	finalizing, err := store.FailRun(context.Background(), run.ID, run.Revision, failure, mustTime(t, 20))
-	if err != nil {
-		t.Fatal(err)
-	}
-	runnerExit, err := NewProcessExitCode(1, 0, mustTime(t, 21))
-	if err != nil {
-		t.Fatal(err)
-	}
-	finalizing, err = store.ObserveRunnerExit(context.Background(), run.ID, finalizing.Revision, runner.Identity, runnerExit, mustTime(t, 21))
-	if err != nil {
-		t.Fatal(err)
-	}
-	selection := testChangeSelection(t)
-	selected, err := store.RecordChangeSelection(context.Background(), *run.ChangeID, mustRevision(t, 1), selection, mustTime(t, 21))
-	if err != nil {
-		t.Fatal(err)
-	}
-	stage, _ := NewFileIdentity(70, 80)
-	prepared, err := store.RecordChangePrepared(context.Background(), *run.ChangeID, selected.Revision, stage, mustTime(t, 22))
-	if err != nil {
-		t.Fatal(err)
-	}
-	availability := mustChangeAvailability(t, selection.commitment, selection.entries, selection.bytes, stage)
-	available, err := store.MarkChangeAvailable(context.Background(), *run.ChangeID, prepared.Revision, availability, mustTime(t, 23))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if available.Phase != ChangeAvailable {
-		t.Fatalf("late Change phase = %s", available.Phase)
-	}
-	before := captureWriteFootprint(t, store)
-	if _, err := store.FinalizeRun(context.Background(), run.ID, finalizing.Revision, mustTime(t, 22)); !errors.Is(err, ErrRevisionConflict) {
-		t.Fatalf("early finalization before late Change = %v", err)
-	}
-	if after := captureWriteFootprint(t, store); after != before {
-		t.Fatalf("late Change footprint before=%+v after=%+v", before, after)
-	}
-	for index, resource := range resourcesForRunTest(t, store, run.ID) {
-		if _, err := store.ReleaseResource(context.Background(), run.ID, resource.ID, resource.Revision, resource.Identity, mustTime(t, int64(30+index))); err != nil {
-			t.Fatal(err)
-		}
-	}
-	finalizing = closeTerminalSessionAtCurrent(t, store, run.ID, 32)
-	if _, err := store.FinalizeRun(context.Background(), run.ID, finalizing.Revision, mustTime(t, 33)); err != nil {
-		t.Fatalf("late Change boundary finalization = %v", err)
-	}
-}
-
-func TestChangeCheckpointCannotPrecedeFinalizingOwner(t *testing.T) {
-	store, run, _ := admittedWorkerRun(t)
-	defer store.Close()
-	failure, _ := NewFailureProposal(FailureInternal, "cleanup")
-	finalizing, err := store.FailRun(context.Background(), run.ID, run.Revision, failure, mustTime(t, 20))
-	if err != nil {
-		t.Fatal(err)
-	}
-	before := captureWriteFootprint(t, store)
-	if _, err := store.RecordChangeSelection(context.Background(), *run.ChangeID, mustRevision(t, 1), testChangeSelection(t), mustTime(t, 15)); !errors.Is(err, ErrRevisionConflict) {
-		t.Fatalf("Change before finalizing owner = %v", err)
-	}
-	if after := captureWriteFootprint(t, store); after != before {
-		t.Fatalf("Change before finalizing owner footprint before=%+v after=%+v", before, after)
-	}
-	if _, err := store.RecordChangeSelection(context.Background(), *run.ChangeID, mustRevision(t, 1), testChangeSelection(t), mustTime(t, 20)); err != nil {
-		t.Fatalf("Change at finalizing owner boundary = %v", err)
-	}
-	_ = finalizing
-}
-
-func TestChangeCheckpointCannotPrecedeRetryAdmission(t *testing.T) {
-	store, _, admission := retryAdmittedWorker(t, 50, 50)
-	defer store.Close()
-	selection := testChangeSelection(t)
-	before := captureWriteFootprint(t, store)
-	if _, err := store.RecordChangeSelection(context.Background(), *admission.ChangeID, mustRevision(t, 1), selection, mustTime(t, 49)); !errors.Is(err, ErrRevisionConflict) {
-		t.Fatalf("Change before retry admission = %v", err)
-	}
-	if after := captureWriteFootprint(t, store); after != before {
-		t.Fatalf("Change before retry admission footprint before=%+v after=%+v", before, after)
-	}
-	if _, err := store.RecordChangeSelection(context.Background(), *admission.ChangeID, mustRevision(t, 1), selection, mustTime(t, 50)); err != nil {
-		t.Fatalf("Change at retry admission boundary = %v", err)
-	}
-}
-
 func TestRetryAdmissionCannotPrecedeQueuedTaskUpdate(t *testing.T) {
 	store, terminal, agentID, keys := retryQueuedWorker(t, 50)
 	defer store.Close()
@@ -307,7 +213,7 @@ func TestSuccessfulTerminalCannotBeRetried(t *testing.T) {
 	success, _ := NewSuccessProposal("finished")
 	store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, success)
 	path := storePath(t, store)
-	terminal, err := store.FinalizeRun(context.Background(), finalizing.ID, finalizing.Revision, mustTime(t, 80))
+	terminal, err := finalizeTestRun(t, store, finalizing, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -354,7 +260,7 @@ func TestNonSuccessTerminalAllowsQueuedRetry(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, test.proposal)
 			defer store.Close()
-			terminal, err := store.FinalizeRun(context.Background(), finalizing.ID, finalizing.Revision, mustTime(t, 80))
+			terminal, err := finalizeTestRun(t, store, finalizing, 80)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -451,7 +357,7 @@ func TestRetryHistoryAllowsMultipleNonSuccessRuns(t *testing.T) {
 	}
 	releaseAllRunResources(t, store, second.Run.ID, 42)
 	finalizing = closeTerminalSessionAtCurrent(t, store, second.Run.ID, 45)
-	secondTerminal, err := store.FinalizeRun(context.Background(), second.Run.ID, finalizing.Revision, mustTime(t, 45))
+	secondTerminal, err := finalizeTestRun(t, store, finalizing, 45)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -600,98 +506,15 @@ func TestRunningWorkerChangeCausalitySurvivesLaterPhases(t *testing.T) {
 		proposal, _ := NewSuccessProposal("done")
 		store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, proposal)
 		defer store.Close()
-		terminal, err := store.FinalizeRun(context.Background(), finalizing.ID, finalizing.Revision, mustTime(t, 80))
+		terminal, err := finalizeTestRun(t, store, finalizing, 80)
 		if err != nil {
 			t.Fatal(err)
 		}
-		corruptSQL(t, store, `UPDATE changes SET available_at_ms = 70, updated_at_ms = 70 WHERE id = ?`, terminal.ChangeID.Bytes())
+		corruptSQL(t, store, `UPDATE changes SET available_at_ms = 90, updated_at_ms = 90 WHERE id = ?`, terminal.ChangeID.Bytes())
 		if _, _, err := store.Run(context.Background(), terminal.ID); !errors.Is(err, ErrCorruptState) {
 			t.Fatalf("terminal Run accepted late Change = %v", err)
 		}
 	})
-}
-
-func TestTerminalRunRejectsNonReplayChangeMutationWithoutOwner(t *testing.T) {
-	store, terminal, _ := terminalPreRunningWorker(t)
-	defer store.Close()
-	before := captureWriteFootprint(t, store)
-	if _, err := store.RecordChangeSelection(context.Background(), *terminal.ChangeID, mustRevision(t, 1), testChangeSelection(t), mustTime(t, 34)); !errors.Is(err, ErrConflict) {
-		t.Fatalf("post-terminal non-replay Change transition = %v", err)
-	}
-	if after := captureWriteFootprint(t, store); after != before {
-		t.Fatalf("post-terminal Change transition footprint before=%+v after=%+v", before, after)
-	}
-}
-
-func TestTerminalChangeReplayRemainsIdempotentWithoutOwner(t *testing.T) {
-	store, run, _ := admittedWorkerRun(t)
-	defer store.Close()
-	selection := testChangeSelection(t)
-	selected, err := store.RecordChangeSelection(context.Background(), *run.ChangeID, mustRevision(t, 1), selection, mustTime(t, 11))
-	if err != nil {
-		t.Fatal(err)
-	}
-	failure, _ := NewFailureProposal(FailureInternal, "cleanup")
-	runner := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
-	runner, err = store.ActivateResource(context.Background(), run.ID, runner.ID, runner.Revision, processIdentity(t, 304), mustTime(t, 19))
-	if err != nil {
-		t.Fatal(err)
-	}
-	finalizing, err := store.FailRun(context.Background(), run.ID, run.Revision, failure, mustTime(t, 20))
-	if err != nil {
-		t.Fatal(err)
-	}
-	runnerExit, err := NewProcessExitCode(1, 0, mustTime(t, 21))
-	if err != nil {
-		t.Fatal(err)
-	}
-	finalizing, err = store.ObserveRunnerExit(context.Background(), run.ID, finalizing.Revision, runner.Identity, runnerExit, mustTime(t, 21))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for index, resource := range resourcesForRunTest(t, store, run.ID) {
-		if _, err := store.ReleaseResource(context.Background(), run.ID, resource.ID, resource.Revision, resource.Identity, mustTime(t, int64(30+index))); err != nil {
-			t.Fatal(err)
-		}
-	}
-	finalizing = closeTerminalSessionAtCurrent(t, store, run.ID, 33)
-	if _, err := store.FinalizeRun(context.Background(), run.ID, finalizing.Revision, mustTime(t, 33)); err != nil {
-		t.Fatal(err)
-	}
-	before := captureWriteFootprint(t, store)
-	replayed, err := store.RecordChangeSelection(context.Background(), *run.ChangeID, mustRevision(t, selected.Revision.Int64()-1), selection, mustTime(t, 5))
-	if err != nil || replayed.Revision != selected.Revision || replayed.UpdatedAt != selected.UpdatedAt {
-		t.Fatalf("post-terminal Change replay = %+v, %v", replayed, err)
-	}
-	if after := captureWriteFootprint(t, store); after != before {
-		t.Fatalf("post-terminal Change replay footprint before=%+v after=%+v", before, after)
-	}
-}
-
-func TestHistoricalTerminalRunAllowsLaterRetainedChangeCheckpoint(t *testing.T) {
-	store, terminal, admission := retryAdmittedWorker(t, 34, 40)
-	defer store.Close()
-	reuseRevision := mustRevision(t, 1)
-	selection := testChangeSelection(t)
-	selected, err := store.RecordChangeSelection(context.Background(), *terminal.ChangeID, reuseRevision, selection, mustTime(t, 41))
-	if err != nil {
-		t.Fatal(err)
-	}
-	stage, _ := NewFileIdentity(70, 80)
-	prepared, err := store.RecordChangePrepared(context.Background(), *terminal.ChangeID, selected.Revision, stage, mustTime(t, 42))
-	if err != nil {
-		t.Fatal(err)
-	}
-	availability := mustChangeAvailability(t, selection.commitment, selection.entries, selection.bytes, stage)
-	if _, err := store.MarkChangeAvailable(context.Background(), *terminal.ChangeID, prepared.Revision, availability, mustTime(t, 43)); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := store.Run(context.Background(), terminal.ID); err != nil {
-		t.Fatalf("historical terminal Run rejected later Change checkpoint = %v", err)
-	}
-	if _, _, err := store.Run(context.Background(), admission.ID); err != nil {
-		t.Fatalf("retry Run rejected retained Change checkpoint = %v", err)
-	}
 }
 
 func retryAdmittedWorker(t *testing.T, taskUpdatedAt, admissionAt int64) (*Store, Run, Run) {
@@ -729,14 +552,8 @@ func queueRetryForTerminalSeed(t *testing.T, store *Store, terminal Run, taskUpd
 		t.Fatal(err)
 	}
 	corruptSQL(t, store, `UPDATE tasks SET assigned_agent_id = ?, work_revision = work_revision + 1, status = 'queued', blocked_reason = NULL, result = NULL, completed_at_ms = NULL, revision = revision + 1, updated_at_ms = ? WHERE id = ?`, secondAgent.ID.Bytes(), taskUpdatedAt, terminal.TaskID.Bytes())
-	change, found, err := store.Change(context.Background(), *terminal.ChangeID)
-	if err != nil || !found {
-		store.Close()
-		t.Fatalf("retry Change = %+v, found=%v, err=%v", change, found, err)
-	}
-	reuseRevision := change.Revision
-	reservation := &ChangeReservation{ID: *terminal.ChangeID, SourceRoot: change.SourceRoot, StagingRoot: change.StagingRoot, ExpectedReuseRevision: &reuseRevision}
-	keys := admissionKeys(t, seed, reservation)
+	candidate := changeID(t, seed+10)
+	keys := admissionKeys(t, seed, &candidate)
 	return secondAgent.ID, keys
 }
 
@@ -888,13 +705,8 @@ func terminalPreRunningAvailableWorker(t *testing.T) (*Store, Run) {
 		t.Fatal(err)
 	}
 	selection := testChangeSelection(t)
-	selected, err := store.RecordChangeSelection(context.Background(), *run.ChangeID, mustRevision(t, 1), selection, mustTime(t, 11))
-	if err != nil {
-		store.Close()
-		t.Fatal(err)
-	}
 	stage, _ := NewFileIdentity(70, 80)
-	prepared, err := store.RecordChangePrepared(context.Background(), *run.ChangeID, selected.Revision, stage, mustTime(t, 12))
+	prepared, err := store.RecordChangePrepared(context.Background(), *run.ChangeID, mustRevision(t, 1), selection, stage, mustTime(t, 12))
 	if err != nil {
 		store.Close()
 		t.Fatal(err)
@@ -927,7 +739,8 @@ func terminalPreRunningAvailableWorker(t *testing.T) (*Store, Run) {
 		}
 	}
 	finalizing = closeTerminalSessionAtCurrent(t, store, run.ID, 33)
-	terminal, err := store.FinalizeRun(context.Background(), run.ID, finalizing.Revision, mustTime(t, 33))
+	settlement, _ := NewRetainedChangeSettlement(mustRevision(t, 3), availability)
+	terminal, err := store.FinalizeWorkerRun(context.Background(), run.ID, finalizing.Revision, settlement, mustTime(t, 33))
 	if err != nil {
 		store.Close()
 		t.Fatal(err)
@@ -968,7 +781,8 @@ func terminalPreRunningWorker(t *testing.T) (*Store, Run, AdmissionKeys) {
 		}
 	}
 	finalizing = closeTerminalSessionAtCurrent(t, store, run.ID, 33)
-	terminal, err := store.FinalizeRun(context.Background(), run.ID, finalizing.Revision, mustTime(t, 33))
+	settlement, _ := NewAbandonedChangeSettlement(*run.AdmittedChangeRevision)
+	terminal, err := store.FinalizeWorkerRun(context.Background(), run.ID, finalizing.Revision, settlement, mustTime(t, 33))
 	if err != nil {
 		store.Close()
 		t.Fatal(err)
@@ -984,8 +798,8 @@ func admittedWorkerRun(t *testing.T) (*Store, Run, AdmissionKeys) {
 		store.Close()
 		t.Fatal(err)
 	}
-	reservation := &ChangeReservation{ID: changeID(t, 212), SourceRoot: "/worker/source", StagingRoot: "/worker/staging"}
-	keys := admissionKeys(t, 213, reservation)
+	candidate := changeID(t, 212)
+	keys := admissionKeys(t, 213, &candidate)
 	keys.RuntimeRoot = "/worker/runtime"
 	admission, err := store.AdmitNext(context.Background(), agent.ID, keys, mustTime(t, 10))
 	if err != nil {
@@ -1031,7 +845,7 @@ func TestChronologyScannersRejectImpossibleRows(t *testing.T) {
 		{name: "terminal before finalizing", setup: func(t *testing.T) (*Store, func() error) {
 			failure, _ := NewFailureProposal(FailureInternal, "cleanup")
 			store, run := finalizingReleasedRun(t, RoleOrchestrator, VerificationNone, failure)
-			terminal, err := store.FinalizeRun(context.Background(), run.ID, run.Revision, mustTime(t, 80))
+			terminal, err := finalizeTestRun(t, store, run, 80)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1061,7 +875,7 @@ func TestChronologyScannersRejectImpossibleRows(t *testing.T) {
 		{name: "terminal before Change", setup: func(t *testing.T) (*Store, func() error) {
 			success, _ := NewSuccessProposal("done")
 			store, run := finalizingReleasedRun(t, RoleWorker, VerificationNone, success)
-			terminal, err := store.FinalizeRun(context.Background(), run.ID, run.Revision, mustTime(t, 80))
+			terminal, err := finalizeTestRun(t, store, run, 80)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1085,14 +899,6 @@ func TestChronologyScannersRejectImpossibleRows(t *testing.T) {
 		corruptSQL(t, store, `UPDATE changes SET updated_at_ms = available_at_ms - 1 WHERE id = ?`, run.ChangeID.Bytes())
 		if _, _, err := store.Change(context.Background(), *run.ChangeID); !errors.Is(err, ErrCorruptState) {
 			t.Fatalf("Change accepted corruption: %v", err)
-		}
-	})
-	t.Run("reserved Change update changed", func(t *testing.T) {
-		store, run, _ := runningWorkerRun(t)
-		defer store.Close()
-		corruptSQL(t, store, `UPDATE changes SET phase = 'reserved', object_format = NULL, selected_commit = NULL, repository_root = NULL, repository_dev = NULL, repository_inode = NULL, selected_at_ms = NULL, stage_dev = NULL, stage_inode = NULL, prepared_at_ms = NULL, tree_digest = NULL, entry_count = NULL, total_bytes = NULL, source_dev = NULL, source_inode = NULL, available_at_ms = NULL, updated_at_ms = created_at_ms + 1 WHERE id = ?`, run.ChangeID.Bytes())
-		if _, _, err := store.Change(context.Background(), *run.ChangeID); !errors.Is(err, ErrCorruptState) {
-			t.Fatalf("reserved Change accepted corruption: %v", err)
 		}
 	})
 	t.Run("task completion checkpoint", func(t *testing.T) {

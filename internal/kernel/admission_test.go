@@ -244,17 +244,17 @@ func TestAdmissionCreatesExactWorkerFootprintAndReconciles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reservation := &ChangeReservation{ID: changeID(t, 72), SourceRoot: "/changes/published", StagingRoot: "/changes/staged"}
-	keys := admissionKeys(t, 73, reservation)
+	candidate := changeID(t, 72)
+	keys := admissionKeys(t, 73, &candidate)
 	result, err := store.AdmitNext(context.Background(), agent.ID, keys, mustTime(t, 10))
 	if err != nil || !result.Admitted() {
 		t.Fatalf("admit = %+v, %v", result, err)
 	}
-	if result.Run.Phase != RunAdmitted || result.Run.ChangeID == nil || *result.Run.ChangeID != reservation.ID || !bytes.Equal(result.Run.CredentialDigest.Bytes(), keys.AttemptDigest.Bytes()) {
+	if result.Run.Phase != RunAdmitted || result.Run.ChangeID == nil || result.Run.AdmittedChangeRevision == nil || *result.Run.ChangeID != candidate || result.Run.AdmittedChangeRevision.Int64() != 1 || !bytes.Equal(result.Run.CredentialDigest.Bytes(), keys.AttemptDigest.Bytes()) {
 		t.Fatalf("run binding = %+v", result.Run)
 	}
 	freshTask, _, _ := store.Task(context.Background(), task.ID)
-	change, found, err := store.Change(context.Background(), reservation.ID)
+	change, found, err := store.Change(context.Background(), candidate)
 	if err != nil || !found || change.Phase != ChangeReserved || freshTask.Status != TaskRunning {
 		t.Fatalf("task/change = %+v %+v %v", freshTask, change, err)
 	}
@@ -294,14 +294,12 @@ func TestAdmissionRejectsNonCanonicalOwnershipLocators(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, mutate := range map[string]func(*AdmissionKeys){
-		"aliased Change roots": func(keys *AdmissionKeys) {
-			keys.Change = &ChangeReservation{ID: changeID(t, 77), SourceRoot: "/changes/same", StagingRoot: "/changes/same/."}
-		},
+		"zero candidate":  func(keys *AdmissionKeys) { keys.CandidateChangeID = ChangeID{} },
 		"unclean runtime": func(keys *AdmissionKeys) { keys.RuntimeRoot = "/runtime/run/." },
 		"root runtime":    func(keys *AdmissionKeys) { keys.RuntimeRoot = "/" },
 	} {
 		t.Run(name, func(t *testing.T) {
-			keys := admissionKeys(t, 78, &ChangeReservation{ID: changeID(t, 79), SourceRoot: "/changes/source", StagingRoot: "/changes/stage"})
+			keys := admissionKeys(t, 78, nil)
 			mutate(&keys)
 			before := admissionFootprint(t, store)
 			if _, err := store.AdmitNext(context.Background(), agent.ID, keys, mustTime(t, 10)); !errors.Is(err, ErrInvalidValue) {
@@ -379,8 +377,7 @@ func TestAdmissionTaskGuardFailureRollsBackEntireFootprint(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := admissionFootprint(t, store)
-	reservation := &ChangeReservation{ID: changeID(t, 107), SourceRoot: "/changes/guarded-published", StagingRoot: "/changes/guarded-staged"}
-	result, err := store.AdmitNext(context.Background(), agent.ID, admissionKeys(t, 108, reservation), mustTime(t, 10))
+	result, err := store.AdmitNext(context.Background(), agent.ID, admissionKeys(t, 108, nil), mustTime(t, 10))
 	if !errors.Is(err, ErrRevisionConflict) || result.Admitted() {
 		t.Fatalf("guarded admission = %+v, %v", result, err)
 	}
@@ -411,8 +408,7 @@ func TestAdmissionRequiresEveryDeclaredResourceInsert(t *testing.T) {
 				t.Fatal(err)
 			}
 			before := admissionFootprint(t, store)
-			reservation := &ChangeReservation{ID: changeID(t, 111), SourceRoot: "/changes/resource-guard", StagingRoot: "/changes/resource-guard-stage"}
-			result, err := store.AdmitNext(context.Background(), agent.ID, admissionKeys(t, 112, reservation), mustTime(t, 10))
+			result, err := store.AdmitNext(context.Background(), agent.ID, admissionKeys(t, 112, nil), mustTime(t, 10))
 			if !errors.Is(err, ErrRevisionConflict) || result.Admitted() {
 				t.Fatalf("suppressed %s admission = %+v, %v", kind.String(), result, err)
 			}
@@ -487,14 +483,18 @@ func newAdmissionStore(t *testing.T, role AgentRole, capacity uint16) (*Store, s
 	return store, path, project, agent
 }
 
-func admissionKeys(t *testing.T, seed byte, change *ChangeReservation) AdmissionKeys {
+func admissionKeys(t *testing.T, seed byte, candidate *ChangeID) AdmissionKeys {
 	t.Helper()
 	digest, err := AttemptDigestFromBytes(bytes.Repeat([]byte{seed}, DigestBytes))
 	if err != nil {
 		t.Fatal(err)
 	}
+	changeID := changeID(t, seed+5)
+	if candidate != nil {
+		changeID = *candidate
+	}
 	return AdmissionKeys{
-		RunID: runID(t, seed), TerminalSessionID: terminalSessionID(t, seed+20), AttemptDigest: digest, Change: change, RuntimeRoot: "/runtime/" + string([]byte{'a' + seed%20}),
+		RunID: runID(t, seed), TerminalSessionID: terminalSessionID(t, seed+20), AttemptDigest: digest, CandidateChangeID: changeID, RuntimeRoot: "/runtime/" + string([]byte{'a' + seed%20}),
 		Resources: AdmissionResourceIDs{RuntimeRoot: resourceID(t, seed+1), RunnerProcess: resourceID(t, seed+2), ProviderProcess: resourceID(t, seed+3), ProviderGroup: resourceID(t, seed+4)},
 	}
 }

@@ -91,40 +91,33 @@ var schemaStatements = []string{
     project_id BLOB NOT NULL CHECK (length(project_id) = 16),
     task_id BLOB NOT NULL CHECK (length(task_id) = 16),
     task_incarnation_id BLOB NOT NULL CHECK (length(task_incarnation_id) = 16),
-	phase TEXT NOT NULL CHECK (phase IN ('reserved', 'selected', 'prepared', 'available')),
-	source_root TEXT NOT NULL CHECK (length(CAST(source_root AS BLOB)) BETWEEN 1 AND 4096 AND substr(source_root, 1, 1) = '/'),
-	staging_root TEXT NOT NULL CHECK (length(CAST(staging_root AS BLOB)) BETWEEN 1 AND 4096 AND substr(staging_root, 1, 1) = '/' AND staging_root <> source_root),
+	phase TEXT NOT NULL CHECK (phase IN ('reserved', 'prepared', 'available', 'retained', 'abandoned')),
     object_format TEXT CHECK (object_format IS NULL OR object_format IN ('sha1', 'sha256')),
-    selected_commit BLOB,
-    repository_root TEXT CHECK (repository_root IS NULL OR (length(CAST(repository_root AS BLOB)) BETWEEN 1 AND 4096 AND substr(repository_root, 1, 1) = '/')),
-    repository_dev INTEGER CHECK (repository_dev IS NULL OR repository_dev >= 0),
-	repository_inode INTEGER CHECK (repository_inode IS NULL OR repository_inode > 0),
-	selected_at_ms INTEGER CHECK (selected_at_ms IS NULL OR selected_at_ms >= 0),
-	stage_dev INTEGER CHECK (stage_dev IS NULL OR stage_dev >= 0),
-	stage_inode INTEGER CHECK (stage_inode IS NULL OR stage_inode > 0),
-	prepared_at_ms INTEGER CHECK (prepared_at_ms IS NULL OR prepared_at_ms >= 0),
+	base_commit BLOB,
+    prepared_at_ms INTEGER CHECK (prepared_at_ms IS NULL OR prepared_at_ms >= 0),
     tree_digest BLOB CHECK (tree_digest IS NULL OR length(tree_digest) = 32),
     entry_count INTEGER CHECK (entry_count IS NULL OR entry_count BETWEEN 0 AND 10000),
     total_bytes INTEGER CHECK (total_bytes IS NULL OR total_bytes BETWEEN 0 AND 1073741824),
-    source_dev INTEGER CHECK (source_dev IS NULL OR source_dev >= 0),
-    source_inode INTEGER CHECK (source_inode IS NULL OR source_inode > 0),
+	tree_dev INTEGER CHECK (tree_dev IS NULL OR tree_dev >= 0),
+	tree_inode INTEGER CHECK (tree_inode IS NULL OR tree_inode > 0),
     available_at_ms INTEGER CHECK (available_at_ms IS NULL OR available_at_ms >= 0),
+	settled_run_id BLOB CHECK (settled_run_id IS NULL OR length(settled_run_id) = 16),
     revision INTEGER NOT NULL CHECK (revision >= 1),
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
     updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
     FOREIGN KEY (task_id, project_id, task_incarnation_id) REFERENCES tasks(id, project_id, incarnation_id),
-    CHECK ((object_format IS NULL AND selected_commit IS NULL) OR (object_format = 'sha1' AND length(selected_commit) = 20) OR (object_format = 'sha256' AND length(selected_commit) = 32)),
+	FOREIGN KEY (settled_run_id, id, project_id, task_id, task_incarnation_id) REFERENCES runs(id, change_id, project_id, task_id, task_incarnation_id),
+	CHECK ((object_format IS NULL AND base_commit IS NULL) OR (object_format = 'sha1' AND length(base_commit) = 20) OR (object_format = 'sha256' AND length(base_commit) = 32)),
 	CHECK (
-		(phase = 'reserved' AND object_format IS NULL AND selected_commit IS NULL AND repository_root IS NULL AND repository_dev IS NULL AND repository_inode IS NULL AND selected_at_ms IS NULL AND stage_dev IS NULL AND stage_inode IS NULL AND prepared_at_ms IS NULL AND tree_digest IS NULL AND entry_count IS NULL AND total_bytes IS NULL AND source_dev IS NULL AND source_inode IS NULL AND available_at_ms IS NULL AND created_at_ms = updated_at_ms) OR
-		(phase = 'selected' AND object_format IS NOT NULL AND selected_commit IS NOT NULL AND repository_root IS NOT NULL AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL AND selected_at_ms IS NOT NULL AND selected_at_ms = updated_at_ms AND stage_dev IS NULL AND stage_inode IS NULL AND prepared_at_ms IS NULL AND tree_digest IS NOT NULL AND entry_count IS NOT NULL AND total_bytes IS NOT NULL AND source_dev IS NULL AND source_inode IS NULL AND available_at_ms IS NULL) OR
-		(phase = 'prepared' AND object_format IS NOT NULL AND selected_commit IS NOT NULL AND repository_root IS NOT NULL AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL AND selected_at_ms IS NOT NULL AND stage_dev IS NOT NULL AND stage_inode IS NOT NULL AND prepared_at_ms IS NOT NULL AND prepared_at_ms = updated_at_ms AND tree_digest IS NOT NULL AND entry_count IS NOT NULL AND total_bytes IS NOT NULL AND source_dev IS NULL AND source_inode IS NULL AND available_at_ms IS NULL) OR
-		(phase = 'available' AND object_format IS NOT NULL AND selected_commit IS NOT NULL AND repository_root IS NOT NULL AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL AND selected_at_ms IS NOT NULL AND stage_dev IS NOT NULL AND stage_inode IS NOT NULL AND prepared_at_ms IS NOT NULL AND tree_digest IS NOT NULL AND entry_count IS NOT NULL AND total_bytes IS NOT NULL AND source_dev IS NOT NULL AND source_inode IS NOT NULL AND source_dev = stage_dev AND source_inode = stage_inode AND available_at_ms IS NOT NULL AND available_at_ms = updated_at_ms)
+		(phase = 'reserved' AND object_format IS NULL AND base_commit IS NULL AND prepared_at_ms IS NULL AND tree_digest IS NULL AND entry_count IS NULL AND total_bytes IS NULL AND tree_dev IS NULL AND tree_inode IS NULL AND available_at_ms IS NULL AND settled_run_id IS NULL) OR
+		(phase = 'prepared' AND object_format IS NOT NULL AND base_commit IS NOT NULL AND prepared_at_ms IS NOT NULL AND tree_digest IS NOT NULL AND entry_count IS NOT NULL AND total_bytes IS NOT NULL AND tree_dev IS NOT NULL AND tree_inode IS NOT NULL AND available_at_ms IS NULL AND settled_run_id IS NULL) OR
+		(phase = 'available' AND object_format IS NOT NULL AND base_commit IS NOT NULL AND prepared_at_ms IS NOT NULL AND tree_digest IS NOT NULL AND entry_count IS NOT NULL AND total_bytes IS NOT NULL AND tree_dev IS NOT NULL AND tree_inode IS NOT NULL AND available_at_ms IS NOT NULL AND settled_run_id IS NULL) OR
+		(phase = 'retained' AND object_format IS NOT NULL AND base_commit IS NOT NULL AND prepared_at_ms IS NOT NULL AND tree_digest IS NOT NULL AND entry_count IS NOT NULL AND total_bytes IS NOT NULL AND tree_dev IS NOT NULL AND tree_inode IS NOT NULL AND available_at_ms IS NOT NULL AND settled_run_id IS NOT NULL) OR
+		(phase = 'abandoned' AND object_format IS NULL AND base_commit IS NULL AND prepared_at_ms IS NULL AND tree_digest IS NULL AND entry_count IS NULL AND total_bytes IS NULL AND tree_dev IS NULL AND tree_inode IS NULL AND available_at_ms IS NULL AND settled_run_id IS NOT NULL)
 	)
 ) STRICT, WITHOUT ROWID`,
 	`CREATE UNIQUE INDEX changes_id_project_task_incarnation_unique ON changes(id, project_id, task_id, task_incarnation_id)`,
 	`CREATE UNIQUE INDEX changes_task_incarnation_unique ON changes(project_id, task_id, task_incarnation_id)`,
-	`CREATE UNIQUE INDEX changes_source_root_unique ON changes(source_root)`,
-	`CREATE UNIQUE INDEX changes_staging_root_unique ON changes(staging_root)`,
 	`CREATE TABLE runs (
     id BLOB PRIMARY KEY CHECK (length(id) = 16),
     project_id BLOB NOT NULL CHECK (length(project_id) = 16),
@@ -133,6 +126,7 @@ var schemaStatements = []string{
     task_incarnation_id BLOB NOT NULL CHECK (length(task_incarnation_id) = 16),
     admitted_task_work_revision INTEGER NOT NULL CHECK (admitted_task_work_revision >= 1),
     change_id BLOB CHECK (change_id IS NULL OR length(change_id) = 16),
+	admitted_change_revision INTEGER CHECK (admitted_change_revision IS NULL OR admitted_change_revision >= 1),
     role TEXT NOT NULL CHECK (role IN ('orchestrator', 'worker')),
     provider TEXT NOT NULL CHECK (provider IN ('claude_code', 'codex', 'shell')),
     model TEXT CHECK (model IS NULL OR length(CAST(model AS BLOB)) BETWEEN 1 AND 128),
@@ -168,7 +162,7 @@ var schemaStatements = []string{
     FOREIGN KEY (agent_id, project_id) REFERENCES agents(id, project_id),
     FOREIGN KEY (task_id, project_id, task_incarnation_id) REFERENCES tasks(id, project_id, incarnation_id),
     FOREIGN KEY (change_id, project_id, task_id, task_incarnation_id) REFERENCES changes(id, project_id, task_id, task_incarnation_id),
-    CHECK ((role = 'worker' AND change_id IS NOT NULL) OR (role = 'orchestrator' AND change_id IS NULL)),
+	    CHECK ((role = 'worker' AND change_id IS NOT NULL AND admitted_change_revision IS NOT NULL) OR (role = 'orchestrator' AND change_id IS NULL AND admitted_change_revision IS NULL)),
     CHECK (provider <> 'shell' OR (model IS NULL AND reasoning_effort IS NULL)),
     CHECK ((proposal_kind IS NULL AND proposal_code IS NULL AND proposal_detail IS NULL AND proposal_result IS NULL) OR (proposal_kind = 'succeeded' AND proposal_code IS NULL AND proposal_detail IS NULL AND proposal_result IS NOT NULL) OR (proposal_kind = 'blocked' AND proposal_code IS NULL AND proposal_detail IS NOT NULL AND proposal_result IS NULL) OR (proposal_kind = 'failed' AND proposal_code IS NOT NULL AND proposal_result IS NULL) OR (proposal_kind = 'cancelled' AND proposal_code IS NULL AND proposal_detail IS NOT NULL AND proposal_result IS NULL)),
     CHECK ((terminal_kind IS NULL AND terminal_code IS NULL AND terminal_detail IS NULL AND terminal_result IS NULL) OR (terminal_kind = 'succeeded' AND terminal_code IS NULL AND terminal_detail IS NULL AND terminal_result IS NOT NULL) OR (terminal_kind = 'blocked' AND terminal_code IS NULL AND terminal_detail IS NOT NULL AND terminal_result IS NULL) OR (terminal_kind = 'failed' AND terminal_code IS NOT NULL AND terminal_result IS NULL) OR (terminal_kind = 'cancelled' AND terminal_code IS NULL AND terminal_detail IS NOT NULL AND terminal_result IS NULL)),
@@ -190,6 +184,7 @@ var schemaStatements = []string{
 	`CREATE UNIQUE INDEX runs_one_open_per_task_incarnation ON runs(task_id, task_incarnation_id) WHERE phase <> 'terminal'`,
 	`CREATE UNIQUE INDEX runs_one_open_per_change ON runs(change_id) WHERE change_id IS NOT NULL AND phase <> 'terminal'`,
 	`CREATE UNIQUE INDEX runs_one_per_task_work_revision ON runs(task_id, task_incarnation_id, admitted_task_work_revision)`,
+	`CREATE UNIQUE INDEX runs_change_settlement_target ON runs(id, change_id, project_id, task_id, task_incarnation_id)`,
 	`CREATE INDEX runs_recoverable ON runs(phase, admitted_at_ms, id) WHERE phase <> 'terminal'`,
 	`CREATE TABLE resources (
     id BLOB PRIMARY KEY CHECK (length(id) = 16),

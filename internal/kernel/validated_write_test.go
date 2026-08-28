@@ -15,10 +15,10 @@ func TestNullableDurableBlobsPreservePresenceAndFailClosed(t *testing.T) {
 		directRead func(*testing.T, *Store) error
 	}{
 		{
-			name: "Change selected commit",
+			name: "Change base commit",
 			corrupt: func(t *testing.T, store *Store) {
 				change := seedReservedChange(t, store)
-				corruptSQL(t, store, `UPDATE changes SET selected_commit = zeroblob(0) WHERE id = ?`, change.ID.Bytes())
+				corruptSQL(t, store, `UPDATE changes SET base_commit = zeroblob(0) WHERE id = ?`, change.ID.Bytes())
 			},
 			directRead: func(t *testing.T, store *Store) error {
 				_, _, err := store.Change(context.Background(), changeID(t, 35))
@@ -151,12 +151,8 @@ func TestEveryPublicMutationValidatesDurableGraphBeforeDecision(t *testing.T) {
 			_, err := store.AdmitNext(context.Background(), agentID(t, 2), admissionKeys(t, 224, nil), at)
 			return err
 		}},
-		{name: "RecordChangeSelection", invoke: func(store *Store) error {
-			_, err := store.RecordChangeSelection(context.Background(), changeID(t, 225), mustRevision(t, 1), selection, at)
-			return err
-		}},
 		{name: "RecordChangePrepared", invoke: func(store *Store) error {
-			_, err := store.RecordChangePrepared(context.Background(), changeID(t, 225), mustRevision(t, 1), stage, at)
+			_, err := store.RecordChangePrepared(context.Background(), changeID(t, 225), mustRevision(t, 1), selection, stage, at)
 			return err
 		}},
 		{name: "MarkChangeAvailable", invoke: func(store *Store) error {
@@ -277,7 +273,7 @@ func TestResourceActivationAndReplayRefusePreexistingGraphCorruption(t *testing.
 	}
 }
 
-func TestChangeSelectionAndReplayRefusePreexistingOwnershipCorruption(t *testing.T) {
+func TestChangePreparedAndReplayRefusePreexistingOwnershipCorruption(t *testing.T) {
 	for _, replay := range []bool{false, true} {
 		t.Run(map[bool]string{false: "first checkpoint", true: "idempotent replay"}[replay], func(t *testing.T) {
 			store, _, project, agent := newAdmissionStore(t, RoleWorker, 2)
@@ -286,22 +282,24 @@ func TestChangeSelectionAndReplayRefusePreexistingOwnershipCorruption(t *testing
 			if err != nil {
 				t.Fatal(err)
 			}
-			reservation := &ChangeReservation{ID: changeID(t, 232), SourceRoot: "/checkpoint/source", StagingRoot: "/checkpoint/staging"}
-			keys := admissionKeys(t, 233, reservation)
+			candidate := changeID(t, 232)
+			keys := admissionKeys(t, 233, &candidate)
 			keys.RuntimeRoot = "/checkpoint/runtime"
 			if admission, err := store.AdmitNext(context.Background(), agent.ID, keys, mustTime(t, 10)); err != nil || !admission.Admitted() {
 				t.Fatalf("admission = %+v, %v", admission, err)
 			}
 			selection := testChangeSelection(t)
 			if replay {
-				if _, err := store.RecordChangeSelection(context.Background(), reservation.ID, mustRevision(t, 1), selection, mustTime(t, 11)); err != nil {
+				tree, _ := NewFileIdentity(70, 80)
+				if _, err := store.RecordChangePrepared(context.Background(), candidate, mustRevision(t, 1), selection, tree, mustTime(t, 11)); err != nil {
 					t.Fatal(err)
 				}
 			}
-			corruptSQL(t, store, `UPDATE resources SET path = '/checkpoint/source/nested' WHERE kind = 'runtime_root'`)
+			corruptSQL(t, store, `UPDATE resources SET path = '/' WHERE kind = 'runtime_root'`)
 			before := captureWriteFootprint(t, store)
-			if _, err := store.RecordChangeSelection(context.Background(), reservation.ID, mustRevision(t, 1), selection, mustTime(t, 20)); !errors.Is(err, ErrCorruptState) {
-				t.Fatalf("RecordChangeSelection = %v", err)
+			tree, _ := NewFileIdentity(70, 80)
+			if _, err := store.RecordChangePrepared(context.Background(), candidate, mustRevision(t, 1), selection, tree, mustTime(t, 20)); !errors.Is(err, ErrCorruptState) {
+				t.Fatalf("RecordChangePrepared = %v", err)
 			}
 			if after := captureWriteFootprint(t, store); after != before {
 				t.Fatalf("checkpoint changed corrupt graph: before=%+v after=%+v", before, after)
@@ -350,8 +348,7 @@ func testChangeSelection(t *testing.T) ChangeSelection {
 	t.Helper()
 	format, _ := NewObjectFormat("sha1")
 	commit, _ := NewCommitID(format, bytes.Repeat([]byte{0x71}, format.oidLength()))
-	repository, _ := NewFileIdentity(50, 60)
-	selection, err := NewChangeSelection(format, commit, changeTreeDigest(t, 0x81), 1, 1, "/repository", repository)
+	selection, err := NewChangeSelection(format, commit, changeTreeDigest(t, 0x81), 1, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -413,8 +410,8 @@ func benchmarkValidationStore(b *testing.B) *Store {
 	attempt, _ := AttemptDigestFromBytes(bytes.Repeat([]byte{7}, DigestBytes))
 	keys := AdmissionKeys{
 		RunID: runID, TerminalSessionID: func() TerminalSessionID { value, _ := TerminalSessionIDFromBytes(id(12)); return value }(), AttemptDigest: attempt,
-		Change:      &ChangeReservation{ID: changeID, SourceRoot: "/change/source", StagingRoot: "/change/staging"},
-		RuntimeRoot: "/runtime/run",
+		CandidateChangeID: changeID,
+		RuntimeRoot:       "/runtime/run",
 		Resources: AdmissionResourceIDs{
 			RuntimeRoot: resourceID(8), RunnerProcess: resourceID(9),
 			ProviderProcess: resourceID(10), ProviderGroup: resourceID(11),

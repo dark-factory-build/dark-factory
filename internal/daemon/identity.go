@@ -145,15 +145,7 @@ func attemptDigest(value api.AttemptDigest) (kernel.AttemptDigest, error) {
 	return result, nil
 }
 
-func kernelSelection(repositoryRoot string, selection change.Selection) (kernel.ChangeSelection, error) {
-	checkpoint := changeworker.SelectionReport{
-		Format: selection.ObjectFormat(), Base: selection.Base(), Commitment: selection.Commitment(),
-		EntryCount: selection.EntryCount(), BlobBytes: selection.BlobBytes(), Repository: selection.RepositoryIdentity(),
-	}
-	return kernelSelectionCheckpoint(repositoryRoot, checkpoint)
-}
-
-func kernelSelectionCheckpoint(repositoryRoot string, selection changeworker.SelectionReport) (kernel.ChangeSelection, error) {
+func kernelSelectionCheckpoint(selection changeworker.SelectionReport) (kernel.ChangeSelection, error) {
 	if err := changeworker.ValidateSelectionReport(selection); err != nil || selection.EntryCount > math.MaxUint32 {
 		return kernel.ChangeSelection{}, errInvalidContract
 	}
@@ -169,11 +161,7 @@ func kernelSelectionCheckpoint(repositoryRoot string, selection changeworker.Sel
 	if err != nil {
 		return kernel.ChangeSelection{}, errInvalidContract
 	}
-	repository, err := changeFileIdentity(selection.Repository.Device(), selection.Repository.Inode())
-	if err != nil {
-		return kernel.ChangeSelection{}, err
-	}
-	result, err := kernel.NewChangeSelection(format, commit, digest, uint32(selection.EntryCount), selection.BlobBytes, repositoryRoot, repository)
+	result, err := kernel.NewChangeSelection(format, commit, digest, uint32(selection.EntryCount), selection.BlobBytes)
 	if err != nil {
 		return kernel.ChangeSelection{}, errInvalidContract
 	}

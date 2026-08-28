@@ -90,70 +90,17 @@ func TestInjectedConfiguredWorkerSuccessTerminalFailsClosed(t *testing.T) {
 	}
 }
 
-func TestAdmissionRejectsAllOwnershipLocatorOverlap(t *testing.T) {
-	for name, mutate := range map[string]func(*AdmissionKeys){
-		"source contains staging": func(keys *AdmissionKeys) { keys.Change.StagingRoot = keys.Change.SourceRoot + "/stage" },
-		"runtime equals source":   func(keys *AdmissionKeys) { keys.RuntimeRoot = keys.Change.SourceRoot },
-		"runtime contains staging": func(keys *AdmissionKeys) {
-			keys.RuntimeRoot = "/owned"
-			keys.Change.StagingRoot = "/owned/stage"
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			store, _, project, agent := newAdmissionStore(t, RoleWorker, 4)
-			defer store.Close()
-			_, _ = store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 180), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 181), Title: "overlap"}, mustTime(t, 5))
-			keys := admissionKeys(t, 182, &ChangeReservation{ID: changeID(t, 183), SourceRoot: "/owned/source", StagingRoot: "/owned/staging"})
-			mutate(&keys)
-			before := admissionFootprint(t, store)
-			if _, err := store.AdmitNext(context.Background(), agent.ID, keys, mustTime(t, 10)); !errors.Is(err, ErrInvalidValue) {
-				t.Fatalf("AdmitNext = %v", err)
-			}
-			if after := admissionFootprint(t, store); after != before {
-				t.Fatalf("footprint before=%+v after=%+v", before, after)
-			}
-		})
-	}
-}
-
-func TestAdmissionRejectsOverlapWithDurableRuntimeAndRetainedChange(t *testing.T) {
-	store, _, project, firstAgent := newAdmissionStore(t, RoleWorker, 4)
+func TestAdmissionRejectsOverlapWithDurableRuntime(t *testing.T) {
+	store, _, project, firstAgent := newAdmissionStore(t, RoleOrchestrator, 4)
 	defer store.Close()
 	_, _ = store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 190), ProjectID: project.ID, AssignedAgentID: firstAgent.ID, IncarnationID: incarnationID(t, 191), Title: "first"}, mustTime(t, 5))
-	firstKeys := admissionKeys(t, 192, &ChangeReservation{ID: changeID(t, 193), SourceRoot: "/retained/source", StagingRoot: "/retained/staging"})
+	firstKeys := admissionKeys(t, 192, nil)
 	firstKeys.RuntimeRoot = "/runtime/retained"
 	first, err := store.AdmitNext(context.Background(), firstAgent.ID, firstKeys, mustTime(t, 10))
 	if err != nil || !first.Admitted() {
 		t.Fatalf("first admission = %+v, %v", first, err)
 	}
-	failure, _ := NewFailureProposal(FailureSpawn, "startup failed")
-	runner := resourceOfKind(t, resourcesForRunTest(t, store, first.Run.ID), ResourceRunnerProcess)
-	runner, err = store.ActivateResource(context.Background(), first.Run.ID, runner.ID, runner.Revision, processIdentity(t, 302), mustTime(t, 10))
-	if err != nil {
-		t.Fatal(err)
-	}
-	finalizing, err := store.FailRun(context.Background(), first.Run.ID, first.Run.Revision, failure, mustTime(t, 11))
-	if err != nil {
-		t.Fatal(err)
-	}
-	runnerExit, err := NewProcessExitCode(1, 0, mustTime(t, 12))
-	if err != nil {
-		t.Fatal(err)
-	}
-	finalizing, err = store.ObserveRunnerExit(context.Background(), first.Run.ID, finalizing.Revision, runner.Identity, runnerExit, mustTime(t, 12))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, resource := range resourcesForRunTest(t, store, first.Run.ID) {
-		if _, err := store.ReleaseResource(context.Background(), first.Run.ID, resource.ID, resource.Revision, resource.Identity, mustTime(t, 12)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	finalizing = closeTerminalSessionAtCurrent(t, store, first.Run.ID, 13)
-	if _, err := store.FinalizeRun(context.Background(), first.Run.ID, finalizing.Revision, mustTime(t, 13)); err != nil {
-		t.Fatal(err)
-	}
-	secondAgent, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 194), ProjectID: project.ID, Name: "second", Role: RoleWorker, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 14))
+	secondAgent, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 194), ProjectID: project.ID, Name: "second", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 14))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,15 +109,9 @@ func TestAdmissionRejectsOverlapWithDurableRuntimeAndRetainedChange(t *testing.T
 	for name, mutate := range map[string]func(*AdmissionKeys){
 		"duplicate runtime": func(keys *AdmissionKeys) { keys.RuntimeRoot = firstKeys.RuntimeRoot },
 		"nested runtime":    func(keys *AdmissionKeys) { keys.RuntimeRoot = firstKeys.RuntimeRoot + "/child" },
-		"nested retained source": func(keys *AdmissionKeys) {
-			keys.Change.SourceRoot = firstKeys.Change.SourceRoot + "/child"
-		},
-		"ancestor retained staging": func(keys *AdmissionKeys) {
-			keys.Change.StagingRoot = "/retained"
-		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			keys := admissionKeys(t, 197, &ChangeReservation{ID: changeID(t, 198), SourceRoot: "/second/source", StagingRoot: "/second/staging"})
+			keys := admissionKeys(t, 197, nil)
 			mutate(&keys)
 			before := admissionFootprint(t, store)
 			if _, err := store.AdmitNext(context.Background(), secondAgent.ID, keys, mustTime(t, 20)); !errors.Is(err, ErrConflict) {
@@ -181,7 +122,7 @@ func TestAdmissionRejectsOverlapWithDurableRuntimeAndRetainedChange(t *testing.T
 			}
 		})
 	}
-	secondKeys := admissionKeys(t, 199, &ChangeReservation{ID: changeID(t, 200), SourceRoot: "/second/source", StagingRoot: "/second/staging"})
+	secondKeys := admissionKeys(t, 199, nil)
 	secondKeys.RuntimeRoot = "/runtime/second"
 	second, err := store.AdmitNext(context.Background(), secondAgent.ID, secondKeys, mustTime(t, 21))
 	if err != nil || !second.Admitted() {
@@ -194,15 +135,34 @@ func TestAdmissionRejectsOverlapWithDurableRuntimeAndRetainedChange(t *testing.T
 	}
 }
 
-func TestInjectedOwnershipOverlapFailsReadsAndReadOnlyOpen(t *testing.T) {
-	store, run, _ := runningWorkerRun(t)
+func TestInjectedRuntimeOwnershipOverlapFailsReadsAndOpen(t *testing.T) {
+	store, _, project, firstAgent := newAdmissionStore(t, RoleOrchestrator, 4)
 	path := storePath(t, store)
-	corruptSQL(t, store, `UPDATE resources SET path = '/worker/source/nested' WHERE run_id = ? AND kind = 'runtime_root'`, run.ID.Bytes())
-	if _, _, err := store.Run(context.Background(), run.ID); !errors.Is(err, ErrCorruptState) {
-		t.Fatalf("Run = %v", err)
+	if _, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 201), ProjectID: project.ID, AssignedAgentID: firstAgent.ID, IncarnationID: incarnationID(t, 202), Title: "first"}, mustTime(t, 5)); err != nil {
+		t.Fatal(err)
 	}
-	if _, _, err := store.Change(context.Background(), *run.ChangeID); !errors.Is(err, ErrCorruptState) {
-		t.Fatalf("Change = %v", err)
+	firstKeys := admissionKeys(t, 203, nil)
+	firstKeys.RuntimeRoot = "/runtime/first"
+	first, err := store.AdmitNext(context.Background(), firstAgent.ID, firstKeys, mustTime(t, 10))
+	if err != nil || !first.Admitted() {
+		t.Fatalf("first admission = %+v, %v", first, err)
+	}
+	secondAgent, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 204), ProjectID: project.ID, Name: "second", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 11))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 205), ProjectID: project.ID, AssignedAgentID: secondAgent.ID, IncarnationID: incarnationID(t, 206), Title: "second"}, mustTime(t, 12)); err != nil {
+		t.Fatal(err)
+	}
+	secondKeys := admissionKeys(t, 207, nil)
+	secondKeys.RuntimeRoot = "/runtime/second"
+	second, err := store.AdmitNext(context.Background(), secondAgent.ID, secondKeys, mustTime(t, 13))
+	if err != nil || !second.Admitted() {
+		t.Fatalf("second admission = %+v, %v", second, err)
+	}
+	corruptSQL(t, store, `UPDATE resources SET path = ? WHERE run_id = ? AND kind = 'runtime_root'`, firstKeys.RuntimeRoot+"/nested", second.Run.ID.Bytes())
+	if _, _, err := store.Run(context.Background(), first.Run.ID); !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("Run = %v", err)
 	}
 	if _, err := store.Snapshot(context.Background()); !errors.Is(err, ErrCorruptState) {
 		t.Fatalf("Snapshot = %v", err)
@@ -245,8 +205,8 @@ func runningWorkerRun(t *testing.T) (*Store, Run, AdmissionKeys) {
 		store.Close()
 		t.Fatal(err)
 	}
-	reservation := &ChangeReservation{ID: changeID(t, 212), SourceRoot: "/worker/source", StagingRoot: "/worker/staging"}
-	keys := admissionKeys(t, 213, reservation)
+	candidate := changeID(t, 212)
+	keys := admissionKeys(t, 213, &candidate)
 	keys.RuntimeRoot = "/worker/runtime"
 	admission, err := store.AdmitNext(context.Background(), agent.ID, keys, mustTime(t, 10))
 	if err != nil {
@@ -255,22 +215,16 @@ func runningWorkerRun(t *testing.T) (*Store, Run, AdmissionKeys) {
 	}
 	format, _ := NewObjectFormat("sha1")
 	commit, _ := NewCommitID(format, bytes.Repeat([]byte{1}, format.oidLength()))
-	repository, _ := NewFileIdentity(50, 60)
 	digest := changeTreeDigest(t, 2)
-	selection, _ := NewChangeSelection(format, commit, digest, 1, 1, "/repository", repository)
-	selected, err := store.RecordChangeSelection(context.Background(), reservation.ID, mustRevision(t, 1), selection, mustTime(t, 11))
-	if err != nil {
-		store.Close()
-		t.Fatal(err)
-	}
+	selection, _ := NewChangeSelection(format, commit, digest, 1, 1)
 	stage, _ := NewFileIdentity(70, 80)
-	prepared, err := store.RecordChangePrepared(context.Background(), reservation.ID, selected.Revision, stage, mustTime(t, 12))
+	prepared, err := store.RecordChangePrepared(context.Background(), candidate, mustRevision(t, 1), selection, stage, mustTime(t, 12))
 	if err != nil {
 		store.Close()
 		t.Fatal(err)
 	}
 	availability, _ := NewChangeAvailability(digest, 1, 1, stage)
-	if _, err := store.MarkChangeAvailable(context.Background(), reservation.ID, prepared.Revision, availability, mustTime(t, 13)); err != nil {
+	if _, err := store.MarkChangeAvailable(context.Background(), candidate, prepared.Revision, availability, mustTime(t, 13)); err != nil {
 		store.Close()
 		t.Fatal(err)
 	}

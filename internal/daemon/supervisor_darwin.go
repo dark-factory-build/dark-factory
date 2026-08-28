@@ -161,12 +161,6 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	if err != nil {
 		return kernel.Run{}, err
 	}
-	finalName := keys.change.String()
-	stagingName := "." + finalName + ".stage"
-	changeReservation := kernel.ChangeReservation{
-		ID: keys.change, SourceRoot: filepath.Join(spec.ChangeParent, finalName),
-		StagingRoot: filepath.Join(spec.ChangeParent, stagingName),
-	}
 	digestBytes := sha256.Sum256(keys.token[:])
 	digest, err := kernel.AttemptDigestFromBytes(digestBytes[:])
 	if err != nil {
@@ -177,7 +171,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		return kernel.Run{}, err
 	}
 	admissionKeys := kernel.AdmissionKeys{
-		RunID: keys.run, TerminalSessionID: keys.session, AttemptDigest: digest, Change: &changeReservation,
+		RunID: keys.run, TerminalSessionID: keys.session, AttemptDigest: digest, CandidateChangeID: keys.change,
 		Resources: keys.resources, RuntimeRoot: runtimeRoot,
 	}
 	admission, err := daemon.store.AdmitNext(ctx, spec.AgentID, admissionKeys, at)
@@ -215,6 +209,12 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		return kernel.Run{}, fmt.Errorf("%w: no admission (%s)", kernel.ErrConflict, admission.Reason.String())
 	}
 	run := *admission.Run
+	if run.ChangeID == nil || run.AdmittedChangeRevision == nil {
+		return daemon.failRun(run, kernel.FailureInternal, kernel.ErrCorruptState)
+	}
+	changeID := *run.ChangeID
+	finalName := changeID.String()
+	stagingName := "." + finalName + ".stage"
 	task, found, err := daemon.store.Task(ctx, run.TaskID)
 	if err != nil || !found {
 		if err == nil {
@@ -368,11 +368,11 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	if err != nil {
 		return daemon.failRun(run, kernel.FailureSource, err)
 	}
-	selection, err := kernelSelectionCheckpoint(project.Root, selectionReport)
+	selection, err := kernelSelectionCheckpoint(selectionReport)
 	if err != nil {
 		return daemon.failRun(run, kernel.FailureSource, err)
 	}
-	changeState, found, err := daemon.store.Change(ctx, keys.change)
+	changeState, found, err := daemon.store.Change(ctx, changeID)
 	if err != nil || !found {
 		if err == nil {
 			err = kernel.ErrCorruptState
@@ -383,11 +383,6 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	if err != nil {
 		return daemon.failRun(run, kernel.FailureInternal, err)
 	}
-	changeState, err = daemon.store.RecordChangeSelection(ctx, keys.change, changeState.Revision, selection, at)
-	if err != nil {
-		return daemon.failRun(run, kernel.FailureSource, err)
-	}
-
 	preparationEvent, err := releaseCheckpoint(controller, runner.StagePreparation)
 	if err != nil {
 		return daemon.failRun(run, kernel.FailureSource, err)
@@ -404,7 +399,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	if err != nil {
 		return daemon.failRun(run, kernel.FailureInternal, err)
 	}
-	changeState, err = daemon.store.RecordChangePrepared(ctx, keys.change, changeState.Revision, stage, at)
+	changeState, err = daemon.store.RecordChangePrepared(ctx, changeID, changeState.Revision, selection, stage, at)
 	if err != nil {
 		return daemon.failRun(run, kernel.FailureSource, err)
 	}
@@ -429,7 +424,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	if err != nil {
 		return daemon.failRun(run, kernel.FailureInternal, err)
 	}
-	changeState, err = daemon.store.MarkChangeAvailable(ctx, keys.change, changeState.Revision, availability, at)
+	changeState, err = daemon.store.MarkChangeAvailable(ctx, changeID, changeState.Revision, availability, at)
 	if err != nil {
 		return daemon.failRun(run, kernel.FailureSource, err)
 	}
@@ -614,7 +609,26 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	if err != nil {
 		return run, errors.Join(waitErr, err)
 	}
-	final, err := daemon.store.FinalizeRun(context.Background(), run.ID, current.Revision, at)
+	settledFacts, settleErr := change.InspectPublished(context.Background(), spec.ChangeParent, finalName, preparation.Stage, selectionReport.Format, selectionReport.Base)
+	if settleErr != nil {
+		return current, errors.Join(waitErr, settleErr, ctx.Err())
+	}
+	settledAvailability, settleErr := kernelAvailability(settledFacts)
+	if settleErr != nil {
+		return current, errors.Join(waitErr, settleErr, ctx.Err())
+	}
+	changeState, found, settleErr = daemon.store.Change(context.Background(), changeID)
+	if settleErr != nil || !found {
+		if settleErr == nil {
+			settleErr = kernel.ErrCorruptState
+		}
+		return current, errors.Join(waitErr, settleErr, ctx.Err())
+	}
+	settlement, settleErr := kernel.NewRetainedChangeSettlement(changeState.Revision, settledAvailability)
+	if settleErr != nil {
+		return current, errors.Join(waitErr, settleErr, ctx.Err())
+	}
+	final, err := daemon.store.FinalizeWorkerRun(context.Background(), run.ID, current.Revision, settlement, at)
 	return final, errors.Join(waitErr, err, ctx.Err())
 }
 

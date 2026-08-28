@@ -9,7 +9,7 @@ import (
 )
 
 const runColumns = `id, project_id, agent_id, task_id, task_incarnation_id,
-	    admitted_task_work_revision, change_id, role, provider, model, reasoning_effort, verification_policy, phase,
+	    admitted_task_work_revision, change_id, admitted_change_revision, role, provider, model, reasoning_effort, verification_policy, phase,
     proposal_kind, proposal_code, proposal_detail, proposal_result,
     terminal_kind, terminal_code, terminal_detail, terminal_result,
 	credential_digest, credential_revoked_at_ms,
@@ -34,6 +34,7 @@ func runByDigest(ctx context.Context, connection *sql.Conn, digest AttemptDigest
 func scanRun(scanner rowScanner) (Run, bool, error) {
 	var rawID, rawProjectID, rawAgentID, rawTaskID, rawIncarnationID, rawDigest []byte
 	var rawChangeID nullableBlob
+	var admittedChangeRevision sql.NullInt64
 	var roleValue, providerValue, verificationValue, phaseValue string
 	var model, effort sql.NullString
 	var proposalKind, proposalCode, proposalDetail, proposalResult sql.NullString
@@ -45,7 +46,7 @@ func scanRun(scanner rowScanner) (Run, bool, error) {
 	var admittedWorkRevision, revision, admittedAt, updatedAt int64
 	var runningAt, finalizingAt, terminalAt sql.NullInt64
 	if err := scanner.Scan(
-		&rawID, &rawProjectID, &rawAgentID, &rawTaskID, &rawIncarnationID, &admittedWorkRevision, &rawChangeID,
+		&rawID, &rawProjectID, &rawAgentID, &rawTaskID, &rawIncarnationID, &admittedWorkRevision, &rawChangeID, &admittedChangeRevision,
 		&roleValue, &providerValue, &model, &effort, &verificationValue, &phaseValue,
 		&proposalKind, &proposalCode, &proposalDetail, &proposalResult,
 		&terminalKind, &terminalCode, &terminalDetail, &terminalResult,
@@ -89,7 +90,14 @@ func scanRun(scanner rowScanner) (Run, bool, error) {
 		}
 		result.ChangeID = &changeID
 	}
-	if role == RoleWorker && result.ChangeID == nil || role == RoleOrchestrator && result.ChangeID != nil {
+	if admittedChangeRevision.Valid {
+		value, err := NewRevision(admittedChangeRevision.Int64)
+		if err != nil {
+			return Run{}, false, fmt.Errorf("%w: invalid admitted Change revision", ErrCorruptState)
+		}
+		result.AdmittedChangeRevision = &value
+	}
+	if role == RoleWorker && (result.ChangeID == nil || result.AdmittedChangeRevision == nil) || role == RoleOrchestrator && (result.ChangeID != nil || result.AdmittedChangeRevision != nil) {
 		return Run{}, false, fmt.Errorf("%w: invalid run Change binding", ErrCorruptState)
 	}
 	proposal, proposalPresent, proposalErr := decodeProposal(proposalKind, proposalCode, proposalDetail, proposalResult)

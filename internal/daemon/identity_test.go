@@ -95,11 +95,11 @@ func TestIdentityConversionsRejectOverflowsAndWrongKinds(t *testing.T) {
 
 func TestCheckpointConversionsBindExactStoreFacts(t *testing.T) {
 	selection := selectionReportFixture(t)
-	durable, err := kernelSelectionCheckpoint("/private/repository", selection)
+	durable, err := kernelSelectionCheckpoint(selection)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if durable.RepositoryRoot() != "/private/repository" || durable.ObjectFormat().String() != selection.Format.Name() ||
+	if durable.ObjectFormat().String() != selection.Format.Name() ||
 		string(durable.Commit().Bytes()) != string(selection.Base.Bytes()) || string(durable.Commitment().Bytes()) != string(selection.Commitment.Bytes()) ||
 		durable.EntryCount() != uint32(selection.EntryCount) || durable.TotalBytes() != selection.BlobBytes {
 		t.Fatalf("selection facts were rebound: %+v", durable)
@@ -114,7 +114,7 @@ func TestCheckpointConversionsBindExactStoreFacts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if available.EntryCount() != 7 || available.TotalBytes() != 99 || string(available.Commitment().Bytes()) != string(selection.Commitment.Bytes()) || available.SourceIdentity().Device() != 21 || available.SourceIdentity().Inode() != 22 {
+	if available.EntryCount() != 7 || available.TotalBytes() != 99 || string(available.Commitment().Bytes()) != string(selection.Commitment.Bytes()) || available.TreeIdentity().Device() != 21 || available.TreeIdentity().Inode() != 22 {
 		t.Fatalf("population facts were rebound: %+v", available)
 	}
 }

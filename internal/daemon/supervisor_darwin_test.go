@@ -351,8 +351,12 @@ func TestFailRunSharesOperationGateWithTerminalEffects(t *testing.T) {
 		}
 		return id
 	}
+	candidateChange, err := kernel.ChangeIDFromBytes(supervisorIDBytes(220))
+	if err != nil {
+		t.Fatal(err)
+	}
 	admission, err := store.AdmitNext(ctx, agentID, kernel.AdmissionKeys{
-		RunID: runID, TerminalSessionID: sessionID, AttemptDigest: digest,
+		RunID: runID, TerminalSessionID: sessionID, AttemptDigest: digest, CandidateChangeID: candidateChange,
 		Resources:   kernel.AdmissionResourceIDs{RuntimeRoot: resource(216), RunnerProcess: resource(217), ProviderProcess: resource(218), ProviderGroup: resource(219)},
 		RuntimeRoot: filepath.Join(root, "runtime"),
 	}, supervisorTime())

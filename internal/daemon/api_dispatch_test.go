@@ -396,8 +396,16 @@ func prepareActiveAttempt(t *testing.T, fixture *dispatchFixture, seed byte) act
 	if err != nil {
 		t.Fatal(err)
 	}
+	rawCandidate, err := hex.DecodeString(testID(seed + 9))
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidateChange, err := kernel.ChangeIDFromBytes(rawCandidate)
+	if err != nil {
+		t.Fatal(err)
+	}
 	keys := kernel.AdmissionKeys{
-		RunID: mustRunID(t, testID(seed+4)), TerminalSessionID: mustTerminalSessionID(t, testID(seed+14)), AttemptDigest: digest,
+		RunID: mustRunID(t, testID(seed+4)), TerminalSessionID: mustTerminalSessionID(t, testID(seed+14)), AttemptDigest: digest, CandidateChangeID: candidateChange,
 		RuntimeRoot: filepath.Join(filepath.Dir(fixture.socket), "runtime"),
 		Resources: kernel.AdmissionResourceIDs{
 			RuntimeRoot: mustResourceID(t, testID(seed+5)), RunnerProcess: mustResourceID(t, testID(seed+6)),

@@ -1078,12 +1078,13 @@ func adapterRunningRun(t *testing.T, store *kernel.Store, seed byte) kernel.Run 
 	runID, _ := kernel.RunIDFromBytes(adapterID(t, seed+4))
 	sessionID, _ := kernel.TerminalSessionIDFromBytes(adapterID(t, seed+5))
 	attemptDigest, _ := kernel.AttemptDigestFromBytes(bytes.Repeat([]byte{seed + 6}, kernel.DigestBytes))
+	candidateChange, _ := kernel.ChangeIDFromBytes(adapterID(t, seed+11))
 	resourceID := func(value byte) kernel.ResourceID {
 		id, _ := kernel.ResourceIDFromBytes(adapterID(t, value))
 		return id
 	}
 	keys := kernel.AdmissionKeys{
-		RunID: runID, TerminalSessionID: sessionID, AttemptDigest: attemptDigest, RuntimeRoot: fmt.Sprintf("/runtime/adapter-%d", seed),
+		RunID: runID, TerminalSessionID: sessionID, AttemptDigest: attemptDigest, CandidateChangeID: candidateChange, RuntimeRoot: fmt.Sprintf("/runtime/adapter-%d", seed),
 		Resources: kernel.AdmissionResourceIDs{RuntimeRoot: resourceID(seed + 7), RunnerProcess: resourceID(seed + 8), ProviderProcess: resourceID(seed + 9), ProviderGroup: resourceID(seed + 10)},
 	}
 	admission, err := store.AdmitNext(ctx, agent.ID, keys, adapterTime(t, 300))

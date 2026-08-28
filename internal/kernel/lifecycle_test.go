@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 )
@@ -252,7 +253,7 @@ func TestOnlyConfiguredWorkerSuccessRequiresLaterVerifier(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			store, finalizing := finalizingReleasedRun(t, test.role, test.policy, test.proposal)
 			defer store.Close()
-			terminal, err := store.FinalizeRun(context.Background(), finalizing.ID, finalizing.Revision, mustTime(t, 81))
+			terminal, err := finalizeTestRun(t, store, finalizing, 81)
 			if err != nil || terminal.Phase != RunTerminal || terminal.Terminal == nil || !terminal.Terminal.equal(test.proposal) {
 				t.Fatalf("terminal = %+v, %v", terminal, err)
 			}
@@ -307,7 +308,7 @@ func TestVerificationAndTerminalCorruptionFailClosed(t *testing.T) {
 			proposal, _ := NewFailureProposal(FailureInternal, "failed")
 			store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationGoWorkspaceTest, proposal)
 			path := storePath(t, store)
-			if _, err := store.FinalizeRun(context.Background(), finalizing.ID, finalizing.Revision, mustTime(t, 80)); err != nil {
+			if _, err := finalizeTestRun(t, store, finalizing, 80); err != nil {
 				t.Fatal(err)
 			}
 			corruptSQL(t, store, test.mutate)
@@ -592,8 +593,8 @@ func TestWorkerRunCannotActivateBeforeExactChangeIsAvailable(t *testing.T) {
 	store, _, project, agent := newAdmissionStore(t, RoleWorker, 2)
 	defer store.Close()
 	_, _ = store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 130), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 131), Title: "worker"}, mustTime(t, 5))
-	reservation := &ChangeReservation{ID: changeID(t, 132), SourceRoot: "/change/source", StagingRoot: "/change/stage"}
-	keys := admissionKeys(t, 133, reservation)
+	candidate := changeID(t, 132)
+	keys := admissionKeys(t, 133, &candidate)
 	admission, err := store.AdmitNext(context.Background(), agent.ID, keys, mustTime(t, 10))
 	if err != nil {
 		t.Fatal(err)
@@ -605,20 +606,15 @@ func TestWorkerRunCannotActivateBeforeExactChangeIsAvailable(t *testing.T) {
 	}
 	format, _ := NewObjectFormat("sha1")
 	commit, _ := NewCommitID(format, bytes.Repeat([]byte{1}, 20))
-	repository, _ := NewFileIdentity(1, 2)
 	digest := changeTreeDigest(t, 2)
-	selection, _ := NewChangeSelection(format, commit, digest, 1, 1, "/repository", repository)
-	selected, err := store.RecordChangeSelection(context.Background(), reservation.ID, mustRevision(t, 1), selection, mustTime(t, 31))
-	if err != nil {
-		t.Fatal(err)
-	}
+	selection, _ := NewChangeSelection(format, commit, digest, 1, 1)
 	stage, _ := NewFileIdentity(3, 4)
-	prepared, err := store.RecordChangePrepared(context.Background(), reservation.ID, selected.Revision, stage, mustTime(t, 32))
+	prepared, err := store.RecordChangePrepared(context.Background(), candidate, mustRevision(t, 1), selection, stage, mustTime(t, 32))
 	if err != nil {
 		t.Fatal(err)
 	}
 	availability, _ := NewChangeAvailability(digest, 1, 1, stage)
-	if _, err := store.MarkChangeAvailable(context.Background(), reservation.ID, prepared.Revision, availability, mustTime(t, 33)); err != nil {
+	if _, err := store.MarkChangeAvailable(context.Background(), candidate, prepared.Revision, availability, mustTime(t, 33)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.ActivateRun(context.Background(), admission.Run.ID, session.ID, admission.Run.Revision, session.Revision, mustTime(t, 34)); err != nil {
@@ -861,35 +857,30 @@ func finalizingReleasedRun(t *testing.T, role AgentRole, policy VerificationPoli
 		store.Close()
 		t.Fatal(err)
 	}
-	var reservation *ChangeReservation
+	var candidate *ChangeID
 	if role == RoleWorker {
-		reservation = &ChangeReservation{ID: changeID(t, 244), SourceRoot: "/verified/change", StagingRoot: "/verified/stage"}
+		value := changeID(t, 244)
+		candidate = &value
 	}
-	keys := admissionKeys(t, 245, reservation)
+	keys := admissionKeys(t, 245, candidate)
 	admission, err := store.AdmitNext(context.Background(), agent.ID, keys, mustTime(t, 10))
 	if err != nil {
 		store.Close()
 		t.Fatal(err)
 	}
-	if reservation != nil {
+	if candidate != nil {
 		format, _ := NewObjectFormat("sha1")
 		commit, _ := NewCommitID(format, bytes.Repeat([]byte{1}, 20))
-		repository, _ := NewFileIdentity(1, 2)
 		digest := changeTreeDigest(t, 2)
-		selection, _ := NewChangeSelection(format, commit, digest, 1, 1, "/verified/repository", repository)
-		selected, err := store.RecordChangeSelection(context.Background(), reservation.ID, mustRevision(t, 1), selection, mustTime(t, 11))
-		if err != nil {
-			store.Close()
-			t.Fatal(err)
-		}
+		selection, _ := NewChangeSelection(format, commit, digest, 1, 1)
 		stage, _ := NewFileIdentity(3, 4)
-		prepared, err := store.RecordChangePrepared(context.Background(), reservation.ID, selected.Revision, stage, mustTime(t, 12))
+		prepared, err := store.RecordChangePrepared(context.Background(), *candidate, mustRevision(t, 1), selection, stage, mustTime(t, 12))
 		if err != nil {
 			store.Close()
 			t.Fatal(err)
 		}
 		availability, _ := NewChangeAvailability(digest, 1, 1, stage)
-		if _, err := store.MarkChangeAvailable(context.Background(), reservation.ID, prepared.Revision, availability, mustTime(t, 13)); err != nil {
+		if _, err := store.MarkChangeAvailable(context.Background(), *candidate, prepared.Revision, availability, mustTime(t, 13)); err != nil {
 			store.Close()
 			t.Fatal(err)
 		}
@@ -930,6 +921,47 @@ func finalizingReleasedRun(t *testing.T, role AgentRole, policy VerificationPoli
 	}
 	_ = task
 	return store, finalizing
+}
+
+func finalizeTestRun(t *testing.T, store *Store, run Run, at int64) (Run, error) {
+	t.Helper()
+	if run.Role != RoleWorker {
+		return store.FinalizeRun(context.Background(), run.ID, run.Revision, mustTime(t, at))
+	}
+	change, found, err := store.Change(context.Background(), *run.ChangeID)
+	if err != nil || !found {
+		if err == nil {
+			err = ErrCorruptState
+		}
+		return Run{}, fmt.Errorf("read worker Change for settlement: %w", err)
+	}
+	if change.Phase == ChangeReserved || change.Phase == ChangePrepared {
+		settlement, err := NewAbandonedChangeSettlement(change.Revision)
+		if err != nil {
+			return Run{}, err
+		}
+		result, err := store.FinalizeWorkerRun(context.Background(), run.ID, run.Revision, settlement, mustTime(t, at))
+		if err != nil {
+			return Run{}, fmt.Errorf("finalize abandoned worker Change: %w", err)
+		}
+		return result, nil
+	}
+	if change.Selection == nil || change.TreeIdentity == nil {
+		return Run{}, fmt.Errorf("read worker Change for settlement: %w", ErrCorruptState)
+	}
+	availability, err := NewChangeAvailability(change.Selection.commitment, change.Selection.entries, change.Selection.bytes, *change.TreeIdentity)
+	if err != nil {
+		return Run{}, err
+	}
+	settlement, err := NewRetainedChangeSettlement(change.Revision, availability)
+	if err != nil {
+		return Run{}, err
+	}
+	result, err := store.FinalizeWorkerRun(context.Background(), run.ID, run.Revision, settlement, mustTime(t, at))
+	if err != nil {
+		return Run{}, fmt.Errorf("finalize worker Change settlement: %w", err)
+	}
+	return result, nil
 }
 
 func activateAllResources(t *testing.T, store *Store, run Run, keys AdmissionKeys, at int64) map[ResourceKind]Resource {

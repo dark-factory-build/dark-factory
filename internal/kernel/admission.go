@@ -93,21 +93,15 @@ func (store *Store) AdmitNext(ctx context.Context, agentID AgentID, keys Admissi
 	}
 
 	var change *Change
-	changeCreated := false
+	changeRevision := int64(0)
 	switch agent.Role {
 	case RoleWorker:
-		if keys.Change == nil {
-			return AdmissionResult{}, tx.Rollback(fmt.Errorf("%w: worker admission requires Change reservation", ErrInvalidValue))
-		}
-		value, created, err := reserveAdmissionChange(ctx, tx.connection, task, *keys.Change, at)
+		value, err := bindAdmissionChange(ctx, tx.connection, task, keys.CandidateChangeID, at)
 		if err != nil {
 			return AdmissionResult{}, tx.Rollback(err)
 		}
-		change, changeCreated = &value, created
+		change, changeRevision = &value, value.Revision.Int64()
 	case RoleOrchestrator:
-		if keys.Change != nil {
-			return AdmissionResult{}, tx.Rollback(fmt.Errorf("%w: orchestrator admission forbids Change reservation", ErrInvalidValue))
-		}
 	default:
 		return AdmissionResult{}, tx.Rollback(ErrCorruptState)
 	}
@@ -119,21 +113,23 @@ func (store *Store) AdmitNext(ctx context.Context, agentID AgentID, keys Admissi
 		return AdmissionResult{}, tx.Rollback(err)
 	}
 	var changeID any
+	var admittedChangeRevision any
 	if change != nil {
 		changeID = change.ID.Bytes()
+		admittedChangeRevision = change.Revision.Int64()
 	}
 	_, err = tx.connection.ExecContext(ctx, `INSERT INTO runs(
 		id, project_id, agent_id, task_id, task_incarnation_id, admitted_task_work_revision,
-		change_id, role, provider, model, reasoning_effort, verification_policy, phase,
+		change_id, admitted_change_revision, role, provider, model, reasoning_effort, verification_policy, phase,
 		proposal_kind, proposal_code, proposal_detail, proposal_result,
 		terminal_kind, terminal_code, terminal_detail, terminal_result,
 		credential_digest, credential_revoked_at_ms,
 		provider_exit_kind, provider_exit_sequence, provider_exit_code, provider_exit_signal, provider_exit_at_ms,
 		runner_exit_kind, runner_exit_sequence, runner_exit_code, runner_exit_signal, runner_exit_at_ms,
 		revision, admitted_at_ms, running_at_ms, finalizing_at_ms, terminal_at_ms, updated_at_ms
-		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'admitted', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 1, ?, NULL, NULL, NULL, ?)`,
+		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'admitted', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 1, ?, NULL, NULL, NULL, ?)`,
 		keys.RunID.Bytes(), task.ProjectID.Bytes(), agent.ID.Bytes(), task.ID.Bytes(), task.IncarnationID.Bytes(), task.WorkRevision.Int64(),
-		changeID, agent.Role.String(), agent.Provider.String(), nullableString(agent.Model), nullableString(agent.ReasoningEffort), project.VerificationPolicy.String(),
+		changeID, admittedChangeRevision, agent.Role.String(), agent.Provider.String(), nullableString(agent.Model), nullableString(agent.ReasoningEffort), project.VerificationPolicy.String(),
 		keys.AttemptDigest.Bytes(), at.Int64(), at.Int64())
 	if err != nil {
 		return AdmissionResult{}, tx.Rollback(classifyAdmissionConflict(ctx, tx.connection, keys, err))
@@ -167,8 +163,8 @@ func (store *Store) AdmitNext(ctx context.Context, agentID AgentID, keys Admissi
 		{kind: EntityFactory, id: factoryEntityID[:], revision: factoryRevision},
 		{kind: EntityTask, id: task.ID.Bytes(), revision: updatedTaskRevision},
 	}
-	if changeCreated {
-		pending = append(pending, pendingInvalidation{kind: EntityChange, id: change.ID.Bytes(), revision: 1})
+	if change != nil {
+		pending = append(pending, pendingInvalidation{kind: EntityChange, id: change.ID.Bytes(), revision: changeRevision})
 	}
 	pending = append(pending, pendingInvalidation{kind: EntityRun, id: keys.RunID.Bytes(), revision: 1})
 	if err := appendInvalidations(ctx, tx.connection, at, pending); err != nil {
@@ -194,32 +190,64 @@ func rollbackNoAdmission(tx *writeTx, reason NoAdmissionReason) (AdmissionResult
 	return AdmissionResult{Reason: reason}, nil
 }
 
-func reserveAdmissionChange(ctx context.Context, connection *sql.Conn, task Task, reservation ChangeReservation, at UnixMillis) (Change, bool, error) {
-	existing, found, err := changeByID(ctx, connection, reservation.ID)
+func bindAdmissionChange(ctx context.Context, connection *sql.Conn, task Task, candidate ChangeID, at UnixMillis) (Change, error) {
+	existing, found, err := changeForTask(ctx, connection, task)
 	if err != nil {
-		return Change{}, false, err
+		return Change{}, err
 	}
 	if found {
-		if reservation.ExpectedReuseRevision == nil || existing.ProjectID != task.ProjectID || existing.TaskID != task.ID || existing.TaskIncarnationID != task.IncarnationID || existing.SourceRoot != reservation.SourceRoot || existing.StagingRoot != reservation.StagingRoot || existing.Revision != *reservation.ExpectedReuseRevision {
-			return Change{}, false, ErrConflict
+		if at.Int64() < existing.UpdatedAt.Int64() {
+			return Change{}, ErrRevisionConflict
 		}
-		return existing, false, nil
+		if task.WorkRevision.Int64() <= 1 || existing.SettledRunID == nil || existing.Phase != ChangeRetained && existing.Phase != ChangeAbandoned {
+			return Change{}, ErrCorruptState
+		}
+		predecessor, found, err := runByID(ctx, connection, *existing.SettledRunID)
+		if err != nil || !found {
+			if err == nil {
+				err = ErrCorruptState
+			}
+			return Change{}, err
+		}
+		if predecessor.Phase != RunTerminal || predecessor.Role != RoleWorker || predecessor.ChangeID == nil || *predecessor.ChangeID != existing.ID || predecessor.ProjectID != task.ProjectID || predecessor.TaskID != task.ID || predecessor.TaskIncarnationID != task.IncarnationID || predecessor.AdmittedTaskWorkRevision.Int64()+1 != task.WorkRevision.Int64() {
+			return Change{}, ErrCorruptState
+		}
+		next := existing.Revision.Int64() + 1
+		if existing.Phase == ChangeRetained {
+			result, err := connection.ExecContext(ctx, `UPDATE changes SET phase = 'available', settled_run_id = NULL, revision = ?, updated_at_ms = ? WHERE id = ? AND phase = 'retained' AND revision = ? AND settled_run_id = ?`, next, at.Int64(), existing.ID.Bytes(), existing.Revision.Int64(), predecessor.ID.Bytes())
+			if err := requireOneRow(result, err); err != nil {
+				return Change{}, err
+			}
+		} else {
+			result, err := connection.ExecContext(ctx, `UPDATE changes SET phase = 'reserved', settled_run_id = NULL, revision = ?, updated_at_ms = ? WHERE id = ? AND phase = 'abandoned' AND revision = ? AND settled_run_id = ?`, next, at.Int64(), existing.ID.Bytes(), existing.Revision.Int64(), predecessor.ID.Bytes())
+			if err := requireOneRow(result, err); err != nil {
+				return Change{}, err
+			}
+		}
+		updated, found, err := changeByID(ctx, connection, existing.ID)
+		if err != nil || !found {
+			if err == nil {
+				err = ErrCorruptState
+			}
+			return Change{}, err
+		}
+		return updated, nil
 	}
-	if reservation.ExpectedReuseRevision != nil {
-		return Change{}, false, ErrConflict
+	if task.WorkRevision.Int64() != 1 {
+		return Change{}, ErrCorruptState
 	}
-	_, err = connection.ExecContext(ctx, `INSERT INTO changes(id, project_id, task_id, task_incarnation_id, phase, source_root, staging_root, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, 'reserved', ?, ?, 1, ?, ?)`, reservation.ID.Bytes(), task.ProjectID.Bytes(), task.ID.Bytes(), task.IncarnationID.Bytes(), reservation.SourceRoot, reservation.StagingRoot, at.Int64(), at.Int64())
+	_, err = connection.ExecContext(ctx, `INSERT INTO changes(id, project_id, task_id, task_incarnation_id, phase, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, 'reserved', 1, ?, ?)`, candidate.Bytes(), task.ProjectID.Bytes(), task.ID.Bytes(), task.IncarnationID.Bytes(), at.Int64(), at.Int64())
 	if err != nil {
-		return Change{}, false, err
+		return Change{}, err
 	}
-	created, found, err := changeByID(ctx, connection, reservation.ID)
+	created, found, err := changeByID(ctx, connection, candidate)
 	if err != nil || !found {
 		if err == nil {
 			err = ErrCorruptState
 		}
-		return Change{}, false, err
+		return Change{}, err
 	}
-	return created, true, nil
+	return created, nil
 }
 
 func classifyAdmissionConflict(ctx context.Context, connection *sql.Conn, keys AdmissionKeys, cause error) error {
@@ -263,24 +291,26 @@ func reconcileAdmissionOnConnection(ctx context.Context, connection *sql.Conn, k
 	if err := validateAdmissionLocatorOwnership(ctx, connection, keys); err != nil {
 		return AdmissionResult{}, true, err
 	}
-	if keys.Change == nil {
-		if run.ChangeID != nil || run.Role != RoleOrchestrator {
+	if run.Role == RoleOrchestrator {
+		if run.ChangeID != nil || run.AdmittedChangeRevision != nil {
 			return AdmissionResult{}, true, ErrConflict
 		}
-	} else {
-		if run.ChangeID == nil || *run.ChangeID != keys.Change.ID || run.Role != RoleWorker {
+	} else if run.Role == RoleWorker {
+		if run.ChangeID == nil || run.AdmittedChangeRevision == nil {
 			return AdmissionResult{}, true, ErrConflict
 		}
 		change := relationships.change
 		if change == nil {
 			return AdmissionResult{}, true, ErrCorruptState
 		}
-		if change.ProjectID != run.ProjectID || change.TaskID != run.TaskID || change.TaskIncarnationID != run.TaskIncarnationID || change.SourceRoot != keys.Change.SourceRoot || change.StagingRoot != keys.Change.StagingRoot {
+		if change.ProjectID != run.ProjectID || change.TaskID != run.TaskID || change.TaskIncarnationID != run.TaskIncarnationID {
 			return AdmissionResult{}, true, ErrConflict
 		}
-		if keys.Change.ExpectedReuseRevision != nil && change.Revision.Int64() < keys.Change.ExpectedReuseRevision.Int64() {
+		if run.AdmittedChangeRevision.Int64() == 1 && *run.ChangeID != keys.CandidateChangeID || change.Revision.Int64() < run.AdmittedChangeRevision.Int64() {
 			return AdmissionResult{}, true, ErrConflict
 		}
+	} else {
+		return AdmissionResult{}, true, ErrCorruptState
 	}
 	resources := relationships.resources
 	expected := map[ResourceKind]ResourceID{

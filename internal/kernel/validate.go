@@ -25,28 +25,28 @@ func validateDurableEntityControls(ctx context.Context, connection *sql.Conn) (F
 		return FactoryState{}, err
 	}
 	if err := validateProjects(ctx, connection); err != nil {
-		return FactoryState{}, err
+		return FactoryState{}, fmt.Errorf("validate projects: %w", err)
 	}
 	if err := validateAgents(ctx, connection); err != nil {
-		return FactoryState{}, err
+		return FactoryState{}, fmt.Errorf("validate agents: %w", err)
 	}
 	if err := validateTasks(ctx, connection); err != nil {
-		return FactoryState{}, err
+		return FactoryState{}, fmt.Errorf("validate tasks: %w", err)
 	}
 	if err := validateChanges(ctx, connection); err != nil {
-		return FactoryState{}, err
+		return FactoryState{}, fmt.Errorf("validate Changes: %w", err)
 	}
 	if err := validateRuns(ctx, connection); err != nil {
-		return FactoryState{}, err
+		return FactoryState{}, fmt.Errorf("validate runs: %w", err)
 	}
 	if err := validateResources(ctx, connection); err != nil {
-		return FactoryState{}, err
+		return FactoryState{}, fmt.Errorf("validate resources: %w", err)
 	}
 	if err := validateOwnershipLocators(ctx, connection); err != nil {
-		return FactoryState{}, err
+		return FactoryState{}, fmt.Errorf("validate ownership locators: %w", err)
 	}
 	if err := validateRunRelationships(ctx, connection); err != nil {
-		return FactoryState{}, err
+		return FactoryState{}, fmt.Errorf("validate run relationships: %w", err)
 	}
 	if err := validateBrowserAuthority(ctx, connection); err != nil {
 		return FactoryState{}, err
@@ -365,11 +365,22 @@ func loadRunRelationships(ctx context.Context, connection *sql.Conn, run Run) (r
 			}
 			return runRelationships{}, err
 		}
-		if run.Role != RoleWorker || value.ProjectID != run.ProjectID || value.TaskID != run.TaskID || value.TaskIncarnationID != run.TaskIncarnationID || run.RunningAt != nil && (value.Phase != ChangeAvailable || value.AvailableAt == nil || value.AvailableAt.Int64() > run.RunningAt.Int64()) {
+		if run.Role != RoleWorker || run.AdmittedChangeRevision == nil || value.Revision.Int64() < run.AdmittedChangeRevision.Int64() || value.ProjectID != run.ProjectID || value.TaskID != run.TaskID || value.TaskIncarnationID != run.TaskIncarnationID || run.Phase != RunTerminal && run.RunningAt != nil && (value.Phase != ChangeAvailable || value.AvailableAt == nil || value.AvailableAt.Int64() > run.RunningAt.Int64()) {
 			return runRelationships{}, fmt.Errorf("%w: Change does not match run", ErrCorruptState)
 		}
-		if run.Phase == RunTerminal && task.WorkRevision == run.AdmittedTaskWorkRevision && run.TerminalAt != nil && value.UpdatedAt.Int64() > run.TerminalAt.Int64() {
-			return runRelationships{}, fmt.Errorf("%w: terminal run predates Change checkpoint", ErrCorruptState)
+		if run.Phase == RunTerminal {
+			var later int64
+			if err := connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs WHERE task_id = ? AND task_incarnation_id = ? AND admitted_task_work_revision > ?`, run.TaskID.Bytes(), run.TaskIncarnationID.Bytes(), run.AdmittedTaskWorkRevision.Int64()).Scan(&later); err != nil {
+				return runRelationships{}, err
+			}
+			if later == 0 {
+				if value.SettledRunID == nil || *value.SettledRunID != run.ID || value.Phase != ChangeRetained && value.Phase != ChangeAbandoned {
+					return runRelationships{}, fmt.Errorf("%w: terminal worker did not settle Change", ErrCorruptState)
+				}
+				if run.TerminalAt == nil || value.UpdatedAt.Int64() > run.TerminalAt.Int64() {
+					return runRelationships{}, fmt.Errorf("%w: terminal run predates Change settlement", ErrCorruptState)
+				}
+			}
 		}
 		change = &value
 	} else if run.Role != RoleOrchestrator {
@@ -662,36 +673,12 @@ func retryableTerminal(run Run) bool {
 }
 
 type ownershipLocator struct {
-	path     string
-	changeID *ChangeID
-	runID    *RunID
+	path  string
+	runID *RunID
 }
 
 func ownershipLocators(ctx context.Context, connection *sql.Conn) ([]ownershipLocator, error) {
-	changeRows, err := connection.QueryContext(ctx, `SELECT id, source_root, staging_root FROM changes`)
-	if err != nil {
-		return nil, err
-	}
 	var locators []ownershipLocator
-	for changeRows.Next() {
-		var rawID []byte
-		var source, staging string
-		if err := changeRows.Scan(&rawID, &source, &staging); err != nil {
-			changeRows.Close()
-			return nil, err
-		}
-		id, err := ChangeIDFromBytes(rawID)
-		if err != nil || !validOwnedLocator(source) || !validOwnedLocator(staging) {
-			changeRows.Close()
-			return nil, fmt.Errorf("%w: invalid Change ownership locator", ErrCorruptState)
-		}
-		changeID := id
-		locators = append(locators, ownershipLocator{path: source, changeID: &changeID}, ownershipLocator{path: staging, changeID: &changeID})
-	}
-	if err := changeRows.Close(); err != nil {
-		return nil, err
-	}
-
 	resourceRows, err := connection.QueryContext(ctx, `SELECT run_id, path FROM resources WHERE kind = 'runtime_root'`)
 	if err != nil {
 		return nil, err
@@ -732,18 +719,12 @@ func validateAdmissionLocatorOwnership(ctx context.Context, connection *sql.Conn
 	if err := validateDistinctOwnershipLocators(locators); err != nil {
 		return err
 	}
-	candidates := []string{keys.RuntimeRoot}
-	if keys.Change != nil {
-		candidates = append(candidates, keys.Change.SourceRoot, keys.Change.StagingRoot)
-	}
 	for _, locator := range locators {
-		if locator.runID != nil && *locator.runID == keys.RunID || locator.changeID != nil && keys.Change != nil && *locator.changeID == keys.Change.ID {
+		if locator.runID != nil && *locator.runID == keys.RunID {
 			continue
 		}
-		for _, candidate := range candidates {
-			if pathsOverlap(locator.path, candidate) {
-				return ErrConflict
-			}
+		if pathsOverlap(locator.path, keys.RuntimeRoot) {
+			return ErrConflict
 		}
 	}
 	return nil
@@ -866,13 +847,42 @@ func validateChanges(ctx context.Context, connection *sql.Conn) error {
 	if err != nil {
 		return err
 	}
+	var changes []Change
 	for rows.Next() {
-		if _, _, err := scanChange(rows); err != nil {
+		change, found, err := scanChange(rows)
+		if err != nil || !found {
 			rows.Close()
+			if err == nil {
+				err = ErrCorruptState
+			}
 			return err
 		}
+		changes = append(changes, change)
 	}
-	return rows.Close()
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return err
+	}
+	for _, change := range changes {
+		if change.SettledRunID == nil {
+			continue
+		}
+		run, found, err := runByID(ctx, connection, *change.SettledRunID)
+		if err != nil || !found {
+			if err == nil {
+				err = ErrCorruptState
+			}
+			return err
+		}
+		validDelta := false
+		if run.AdmittedChangeRevision != nil {
+			delta := change.Revision.Int64() - run.AdmittedChangeRevision.Int64()
+			validDelta = change.Phase == ChangeRetained && (delta == 1 || delta == 3) || change.Phase == ChangeAbandoned && (delta == 1 || delta == 2)
+		}
+		if run.Phase != RunTerminal || run.Role != RoleWorker || run.ChangeID == nil || run.AdmittedChangeRevision == nil || *run.ChangeID != change.ID || run.ProjectID != change.ProjectID || run.TaskID != change.TaskID || run.TaskIncarnationID != change.TaskIncarnationID || !validDelta || run.TerminalAt == nil || change.UpdatedAt.Int64() > run.TerminalAt.Int64() {
+			return fmt.Errorf("%w: invalid Change settlement authority", ErrCorruptState)
+		}
+	}
+	return nil
 }
 
 func validateRuns(ctx context.Context, connection *sql.Conn) error {
