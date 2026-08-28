@@ -27,6 +27,13 @@ type SupervisorSpec struct {
 	FactoryctlExecutable string
 	ToolPath             string
 
+	// UnsettledCompletion reports a scheduled attempt whose durable
+	// convergence could not be settled to a terminal record: the run stays
+	// finalizing and discoverable while the scheduler keeps serving every
+	// other attempt. A nil reporter drops nothing durable — the run and its
+	// task remain visibly nonterminal in the public state.
+	UnsettledCompletion func(kernel.RunID, error)
+
 	// These unexported hooks are package-test-only ambiguity seams. Production
 	// callers outside daemon cannot set them. afterProviderRelease runs only
 	// after the real provider release frame has been written; it can report a

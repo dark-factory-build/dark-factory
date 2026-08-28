@@ -6515,3 +6515,57 @@ Public UI lifecycle and HumanRequest candidate on 2026-08-27:
   drafts are retained only within the exact daemon-minted UTF-8 byte bound.
   Interactive xterm lifecycle remains the next separate reviewed UI commit; no
   terminal abstraction enters this slice.
+
+Factoryd activation: boot recovery sweep, scheduler, and the black-box
+daemon lifecycle on branch s1-finish:
+
+- factoryd now runs the finite recovery sweep after the daemon opens and
+  before any listener exists, so no client ever observes pre-sweep durable
+  state; each disposition is reported on stderr and unresolved residue never
+  refuses boot. The reviewed dormant `RunScheduler` starts after the
+  listeners with the boot-proven supervisor specification and is joined
+  before the daemon closes, because it owns synchronous RunNext children
+  holding daemon resources. Causal tests pin the sweep-before-socket
+  ordering with seeded residue, the scheduler driving a queued task through
+  a real attempt to a terminal task record, the join-before-daemon-close
+  ordering, SIGTERM convergence and double-boot refusal.
+- Settlement is composed from the reviewed edges at the scheduler
+  completion seam and the sweep's converging arms. A finalizing run with a
+  fully released footprint settles to its terminal record: abandoned when
+  the candidate change was never published, retained when the published
+  tree re-reads and verifies against the durable selection (finalName is
+  the change ID; format, base and stage identity come from the stored
+  selection and tree identity — no new durable state). A refusal is
+  surfaced, never fatal and never silent: the sweep's
+  `result-consumed-unsettled` disposition and the SupervisorSpec's
+  UnsettledCompletion reporter carry it while the scheduler keeps serving.
+  The proven limit: the runner is the sole exit-observation authority for
+  its provider, so a runner death mid-attempt leaves releasing residue no
+  edge can honestly settle — the run stays deliberately nonterminal (live
+  cell D), consuming a capacity slot and blocking its agent until an
+  operator resolution surface exists; at the default capacity of one this
+  idles the factory rather than inventing an outcome. Sweep tests migrated
+  to the settled terminal endpoint, and direct unit tests pin the
+  abandoned, retained-refusal, orchestrator, replay and surfaced-unsettled
+  arms.
+- `scripts/go-daemon-e2e.sh` is the installed-shape black-box proof, wired
+  into `go-ci-owned.sh`: freshly built factoryd/factoryctl/factory-runner
+  siblings, a factoryctl-initialized temporary home, operator subcommands
+  over the real socket, one shell task to a succeeded terminal record with
+  a published change, a pre-admission SIGKILL whose queued task survives
+  and runs on reboot, a mid-attempt SIGKILL landed only while a sentinel
+  proves the provider live post-publish whose orphan publishes a result
+  the next boot consumes and settles — retained published change, terminal
+  failed task — before the socket opens, a post-recovery task that
+  succeeds, a live runner SIGKILL the daemon survives with the wedge
+  surfaced and capacity honestly accounted, double-boot refusal against
+  the live home, and a SIGTERM teardown census: socket and lock released,
+  exactly the wedged run's runtime child retained, and a process census
+  proving nothing carrying the fixture root survives. The provider task
+  must declare its own outcome exactly as a real provider session does; a
+  provider that exits silently fails honestly with "provider exited
+  before an attempt outcome".
+- Gates on the branch: gofmt/vet clean, `go build ./...`, the full serial
+  module suite green twice consecutively, `go test -race` for
+  internal/daemon (167s) and cmd/factoryd (26s), the browser PTY E2E and
+  the new daemon E2E green in repeated runs, `git diff --check` clean.

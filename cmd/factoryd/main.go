@@ -22,6 +22,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/daemon"
 	"github.com/dark-factory-build/dark-factory/internal/install"
+	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/provider"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
@@ -55,6 +56,7 @@ var (
 	closeDaemon              = func(value *daemon.Daemon) error { return value.Close() }
 	closeRuntimeParent       = func(value *daemon.RuntimeParent) error { return value.Close() }
 	selfExecutable           = os.Executable
+	recoveryLog              = io.Writer(os.Stderr)
 )
 
 type config struct {
@@ -95,6 +97,13 @@ type process struct {
 	apiStart bool
 	handlers sync.WaitGroup
 	slots    chan struct{}
+
+	// schedulerDone closes after RunScheduler returns; shutdown joins it
+	// before closing the daemon because the scheduler owns synchronous
+	// RunNext children that hold daemon resources.
+	schedulerDone  chan struct{}
+	schedulerErr   error
+	schedulerStart bool
 }
 
 func main() {
@@ -295,6 +304,21 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 		return nil, err
 	}
 	startupPhase("daemon")
+	// The sweep runs to a quiet state before any listener opens so no client
+	// can act on unrecovered durable state. A run the sweep leaves unresolved
+	// is durable fail-closed residue, reported but never a boot refusal.
+	dispositions, err := owner.daemon.RecoverAbandonedRuns(ownedContext, owner.runtimeParent, owner.supervisorSpec.ChangeParent)
+	if err != nil {
+		return nil, err
+	}
+	for _, disposition := range dispositions {
+		if disposition.Err != nil {
+			_, _ = fmt.Fprintf(recoveryLog, "factoryd: recovered run %s: %s: %v\n", disposition.RunID.String(), disposition.Action, disposition.Err)
+			continue
+		}
+		_, _ = fmt.Fprintf(recoveryLog, "factoryd: recovered run %s: %s\n", disposition.RunID.String(), disposition.Action)
+	}
+	startupPhase("recovery sweep")
 	owner.apiAuthority, err = owner.home.OpenLocalAPI(ownedContext)
 	if err != nil {
 		return nil, err
@@ -312,6 +336,16 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 	startupPhase("browser")
 	owner.apiStart = true
 	go owner.accept(ownedContext, owner.listener)
+	owner.supervisorSpec.UnsettledCompletion = func(id kernel.RunID, err error) {
+		_, _ = fmt.Fprintf(recoveryLog, "factoryd: unsettled run %s: %v\n", id.String(), err)
+	}
+	owner.schedulerDone = make(chan struct{})
+	owner.schedulerStart = true
+	go func() {
+		defer close(owner.schedulerDone)
+		owner.schedulerErr = owner.daemon.RunScheduler(ownedContext, owner.supervisorSpec)
+	}()
+	startupPhase("scheduler")
 	keep = true
 	return owner, nil
 }
@@ -365,13 +399,13 @@ func (owner *process) wait(ctx context.Context) error {
 		owner.lifecycleMu.Unlock()
 		return err
 	}
-	if owner.browser == nil || owner.apiDone == nil {
+	if owner.browser == nil || owner.apiDone == nil || owner.schedulerDone == nil {
 		owner.lifecycleMu.Unlock()
 		return errors.New("invalid factoryd owner")
 	}
 	waitDone := make(chan struct{})
 	owner.waitDone = waitDone
-	apiDone, browser := owner.apiDone, owner.browser
+	apiDone, browser, schedulerDone := owner.apiDone, owner.browser, owner.schedulerDone
 	owner.lifecycleMu.Unlock()
 	var cause error
 	select {
@@ -392,6 +426,17 @@ func (owner *process) wait(ctx context.Context) error {
 				cause = err
 			} else {
 				cause = errors.New("browser owner stopped")
+			}
+		}
+	case <-schedulerDone:
+		owner.lifecycleMu.Lock()
+		closing := owner.closeDone != nil
+		owner.lifecycleMu.Unlock()
+		if ctx.Err() == nil && !closing && !errors.Is(owner.schedulerErr, context.Canceled) {
+			if err := owner.schedulerErr; err != nil {
+				cause = fmt.Errorf("scheduler stopped: %w", err)
+			} else {
+				cause = errors.New("scheduler stopped")
 			}
 		}
 	}
@@ -448,6 +493,17 @@ func (owner *process) shutdown() error {
 		<-owner.apiDone
 	}
 	owner.handlers.Wait()
+	if owner.schedulerStart {
+		// The scheduler joins before the daemon closes: it owns synchronous
+		// RunNext children whose convergence holds daemon resources.
+		<-owner.schedulerDone
+		owner.lifecycleMu.Lock()
+		reported := owner.waitDone != nil
+		owner.lifecycleMu.Unlock()
+		if !reported && owner.schedulerErr != nil && !errors.Is(owner.schedulerErr, context.Canceled) {
+			result = errors.Join(result, owner.schedulerErr)
+		}
+	}
 	if owner.daemon != nil {
 		if err := closeDaemon(owner.daemon); err != nil {
 			result = errors.Join(result, err)

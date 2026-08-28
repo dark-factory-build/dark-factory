@@ -167,6 +167,30 @@ state.
   load-bearing for kernel tests of no-result histories; their deletion
   drags a multi-file kernel test migration and is left for the simplicity
   audit with the wedge no longer reachable from production code.
-  Worker-run terminalization in recovery (settlement reconstruction) and
-  wiring the sweep into daemon boot belong to the scheduler/factoryd
-  activation phase.
+
+## Built in the activation phase (factoryd)
+
+- The sweep is wired into factoryd boot after the daemon opens and before
+  any listener exists; every disposition is reported, and unresolved
+  residue never refuses boot.
+- Settlement is composed from the reviewed FinalizeRun/FinalizeWorkerRun
+  edges at the scheduler completion seam and the sweep's converging arms:
+  an unpublished candidate change settles abandoned; a published change
+  settles retained after the published tree is re-read and verified
+  against the durable selection (finalName is the change ID, format/base/
+  stage come from the stored selection and tree identity). The black-box
+  daemon E2E proves the consumed-on-boot crash cut ends at a terminal
+  failed task with its published change retained, before the socket opens.
+- A settlement refusal is surfaced, never fatal and never silent: the
+  sweep reports `result-consumed-unsettled` as its own disposition, and a
+  live scheduled completion that cannot settle reports the run through
+  the SupervisorSpec's UnsettledCompletion while the scheduler keeps
+  serving every other attempt.
+- The honest limit, proven live: the runner is the sole exit-observation
+  authority for its provider, so a runner death mid-attempt leaves
+  releasing residue no edge can settle — the run stays deliberately
+  nonterminal (live cell D), its task visibly running, and it consumes a
+  capacity slot and blocks its agent until an operator resolution surface
+  exists. At the default capacity of one this idles the factory; that is
+  honest accounting, not a fabricated outcome, and the black-box E2E pins
+  the whole shape (daemon survives, wedge surfaced, capacity accounted).

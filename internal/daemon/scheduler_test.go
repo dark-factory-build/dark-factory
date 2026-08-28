@@ -200,11 +200,11 @@ func TestSchedulerHasOneProcessOwner(t *testing.T) {
 
 func TestScheduledCompletionReloadsDurableRun(t *testing.T) {
 	daemon := newSchedulerTestDaemon(t)
-	if err := daemon.validateScheduledCompletion(kernel.Run{}); !schedulerOutcomeUnknown(err) {
+	if err := daemon.validateScheduledCompletion("/nonexistent-change-parent", nil, kernel.Run{}); !schedulerOutcomeUnknown(err) {
 		t.Fatalf("zero result = %v", err)
 	}
 	missing := kernel.Run{ID: schedulerRunID(t, 99)}
-	if err := daemon.validateScheduledCompletion(missing); !schedulerOutcomeUnknown(err) {
+	if err := daemon.validateScheduledCompletion("/nonexistent-change-parent", nil, missing); !schedulerOutcomeUnknown(err) {
 		t.Fatalf("missing result = %v", err)
 	}
 
@@ -228,7 +228,7 @@ func TestScheduledCompletionReloadsDurableRun(t *testing.T) {
 	if err != nil || !admission.Admitted() {
 		t.Fatalf("admission = %+v, %v", admission, err)
 	}
-	if err := daemon.validateScheduledCompletion(*admission.Run); !schedulerOutcomeUnknown(err) {
+	if err := daemon.validateScheduledCompletion("/nonexistent-change-parent", nil, *admission.Run); !schedulerOutcomeUnknown(err) {
 		t.Fatalf("admitted result accepted = %v", err)
 	}
 }

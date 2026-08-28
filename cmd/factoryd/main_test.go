@@ -17,6 +17,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/daemon"
 	"github.com/dark-factory-build/dark-factory/internal/install"
+	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
 const testOrigin = "https://factoryd.test.invalid"
@@ -222,7 +223,7 @@ func TestRunRedactsStartupFailureAndReportsUsage(t *testing.T) {
 }
 
 func TestStartupCancellationIsCleanAtEveryStartupPhase(t *testing.T) {
-	for _, phase := range []string{"home", "store", "runtime parent", "supervisor spec", "daemon", "local API", "listener", "browser"} {
+	for _, phase := range []string{"home", "store", "runtime parent", "supervisor spec", "daemon", "recovery sweep", "local API", "listener", "browser", "scheduler"} {
 		t.Run(phase, func(t *testing.T) {
 			home := initializedHome(t)
 			ctx, cancel := context.WithCancel(context.Background())
@@ -558,4 +559,270 @@ func TestBootGitTrustMatchesTheExactPerAttemptAuthority(t *testing.T) {
 			t.Fatalf("refusal does not name the trust requirement: %v", err)
 		}
 	}
+}
+
+func seedOperatorState(t *testing.T, home string, admitAbandonedRun bool) (taskID kernel.TaskID, runID kernel.RunID) {
+	t.Helper()
+	ctx := context.Background()
+	opened, err := install.OpenOperationalHome(ctx, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := opened.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}()
+	store, err := opened.OpenStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}()
+	// Seed times stay monotonic without running ahead of the daemon's own
+	// wall clock; any residual skew is drained before the seed returns.
+	clock := int64(0)
+	tick := func() kernel.UnixMillis {
+		t.Helper()
+		if now := time.Now().UnixMilli(); now > clock {
+			clock = now
+		} else {
+			clock++
+		}
+		at, err := kernel.NewUnixMillis(clock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return at
+	}
+	defer func() {
+		for time.Now().UnixMilli() <= clock {
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	identifier := func(seed byte, from func([]byte) error) {
+		t.Helper()
+		if err := from(bytes.Repeat([]byte{seed}, kernel.IDBytes)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var projectID kernel.ProjectID
+	identifier(0x31, func(value []byte) error { var err error; projectID, err = kernel.ProjectIDFromBytes(value); return err })
+	repo := filepath.Join(filepath.Dir(home), "repo")
+	if _, err := store.CreateProject(ctx, kernel.NewProject{ID: projectID, Name: "boot-project", Root: repo}, tick()); err != nil {
+		t.Fatal(err)
+	}
+	var agentID kernel.AgentID
+	identifier(0x32, func(value []byte) error { var err error; agentID, err = kernel.AgentIDFromBytes(value); return err })
+	if _, err := store.CreateAgent(ctx, kernel.NewAgent{ID: agentID, ProjectID: projectID, Name: "boot-agent", Role: kernel.RoleWorker, Provider: kernel.ProviderShell, ToolBudgetLimit: 1}, tick()); err != nil {
+		t.Fatal(err)
+	}
+	identifier(0x33, func(value []byte) error { var err error; taskID, err = kernel.TaskIDFromBytes(value); return err })
+	var incarnation kernel.IncarnationID
+	identifier(0x34, func(value []byte) error {
+		var err error
+		incarnation, err = kernel.IncarnationIDFromBytes(value)
+		return err
+	})
+	if _, err := store.EnqueueTask(ctx, kernel.NewTask{ID: taskID, ProjectID: projectID, AssignedAgentID: agentID, IncarnationID: incarnation, Title: "boot-task", Body: "true"}, tick()); err != nil {
+		t.Fatal(err)
+	}
+	factory, err := store.Factory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetDispatch(ctx, factory.Revision, true, tick()); err != nil {
+		t.Fatal(err)
+	}
+	if !admitAbandonedRun {
+		return taskID, kernel.RunID{}
+	}
+	identifier(0x35, func(value []byte) error { var err error; runID, err = kernel.RunIDFromBytes(value); return err })
+	var sessionID kernel.TerminalSessionID
+	identifier(0x36, func(value []byte) error {
+		var err error
+		sessionID, err = kernel.TerminalSessionIDFromBytes(value)
+		return err
+	})
+	var attemptDigest kernel.AttemptDigest
+	if attemptDigest, err = kernel.AttemptDigestFromBytes(bytes.Repeat([]byte{0x37}, kernel.DigestBytes)); err != nil {
+		t.Fatal(err)
+	}
+	var proofDigest kernel.ResultProofDigest
+	if proofDigest, err = kernel.ResultProofDigestFromBytes(bytes.Repeat([]byte{0x38}, kernel.DigestBytes)); err != nil {
+		t.Fatal(err)
+	}
+	var changeID kernel.ChangeID
+	identifier(0x39, func(value []byte) error { var err error; changeID, err = kernel.ChangeIDFromBytes(value); return err })
+	resource := func(seed byte) kernel.ResourceID {
+		t.Helper()
+		value, err := kernel.ResourceIDFromBytes(bytes.Repeat([]byte{seed}, kernel.IDBytes))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	keys := kernel.AdmissionKeys{
+		RunID: runID, TerminalSessionID: sessionID,
+		AttemptDigest: attemptDigest, ResultProofDigest: proofDigest, CandidateChangeID: changeID,
+		RuntimeRoot: filepath.Join(install.RuntimesPath(home), runID.String()),
+		Resources: kernel.AdmissionResourceIDs{
+			RuntimeRoot: resource(0x3a), RunnerProcess: resource(0x3b),
+			ProviderProcess: resource(0x3c), ProviderGroup: resource(0x3d),
+		},
+	}
+	admission, err := store.AdmitNext(ctx, keys, tick())
+	if err != nil || !admission.Admitted() {
+		t.Fatalf("admission = %+v, %v", admission, err)
+	}
+	return taskID, runID
+}
+
+// TestBootRecoverySweepConvergesResidueBeforeAnyListener seeds an admitted
+// run whose runtime was never created, then proves the boot sweep converges
+// it while no listener exists and reports the disposition.
+func TestBootRecoverySweepConvergesResidueBeforeAnyListener(t *testing.T) {
+	home := initializedHome(t)
+	_, runID := seedOperatorState(t, home, true)
+
+	var log bytes.Buffer
+	recoveryLog = &log
+	defer func() { recoveryLog = os.Stderr }()
+	socketAtSweep := errors.New("unobserved")
+	phases := make([]string, 0, 16)
+	startupPhaseHook = func(observed string) {
+		phases = append(phases, observed)
+		if observed == "recovery sweep" {
+			_, socketAtSweep = os.Lstat(install.LocalAPISocketPath(home))
+		}
+	}
+	defer func() { startupPhaseHook = nil }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	owner, err := openProcess(ctx, testConfig(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- owner.wait(ctx) }()
+	address := owner.browser.Addr()
+
+	if !errors.Is(socketAtSweep, os.ErrNotExist) {
+		t.Fatalf("local API socket existed when the sweep completed: %v", socketAtSweep)
+	}
+	sweepIndex, listenerIndex := -1, -1
+	for index, phase := range phases {
+		switch phase {
+		case "recovery sweep":
+			sweepIndex = index
+		case "local API":
+			listenerIndex = index
+		}
+	}
+	if sweepIndex == -1 || listenerIndex == -1 || sweepIndex > listenerIndex {
+		t.Fatalf("phase order = %v", phases)
+	}
+	line := log.String()
+	if !strings.Contains(line, runID.String()) || !strings.Contains(line, string(daemon.RecoveredRuntimeAbsent)) {
+		t.Fatalf("recovery log = %q", line)
+	}
+
+	// The recovered run is durably settled to a terminal failed task; the
+	// factory serves clients only after that conversion was in the log.
+	client := waitOperatorClient(t, home)
+	callContext, callCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	snapshot, err := client.Snapshot(callContext)
+	callCancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered := ""
+	for _, task := range snapshot.Tasks {
+		recovered = task.Status
+	}
+	if recovered != "failed" {
+		t.Fatalf("recovered task status = %q", recovered)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("shutdown = %v", err)
+	}
+	assertReleased(t, home, address)
+}
+
+// TestSchedulerDrivesQueuedTaskAndJoinsBeforeDaemonClose proves the wired
+// scheduler admits a queued task at boot, drives it through a real attempt to
+// a terminal task status, and is joined before the daemon closes.
+func TestSchedulerDrivesQueuedTaskAndJoinsBeforeDaemonClose(t *testing.T) {
+	home := initializedHome(t)
+	taskID, _ := seedOperatorState(t, home, false)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	owner, err := openProcess(ctx, testConfig(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	joinedBeforeDaemonClose := errors.New("daemon close was never observed")
+	previousCloseDaemon := closeDaemon
+	closeDaemon = func(value *daemon.Daemon) error {
+		select {
+		case <-owner.schedulerDone:
+			joinedBeforeDaemonClose = nil
+		default:
+			joinedBeforeDaemonClose = errors.New("daemon closed before the scheduler joined")
+		}
+		return previousCloseDaemon(value)
+	}
+	defer func() { closeDaemon = previousCloseDaemon }()
+	done := make(chan error, 1)
+	go func() { done <- owner.wait(ctx) }()
+	address := owner.browser.Addr()
+
+	client := waitOperatorClient(t, home)
+	deadline := time.Now().Add(30 * time.Second)
+	status := ""
+	for time.Now().Before(deadline) {
+		callContext, callCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		snapshot, err := client.Snapshot(callContext)
+		callCancel()
+		if err != nil {
+			select {
+			case shutdown := <-done:
+				t.Fatalf("factoryd stopped while the task was scheduled: %v", shutdown)
+			default:
+				t.Fatal(err)
+			}
+		}
+		for _, task := range snapshot.Tasks {
+			if task.ID == taskID.String() {
+				status = task.Status
+			}
+		}
+		if status != "queued" && status != "running" {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if status != "failed" {
+		t.Fatalf("scheduled task status = %q", status)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("shutdown = %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("factoryd did not join the scheduler on cancellation")
+	}
+	if joinedBeforeDaemonClose != nil {
+		t.Fatal(joinedBeforeDaemonClose)
+	}
+	assertReleased(t, home, address)
 }
