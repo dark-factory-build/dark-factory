@@ -271,7 +271,7 @@ func TestRecoverySweepFailsRunWhoseRuntimeIsPositivelyAbsent(t *testing.T) {
 		t.Fatalf("disposition = %+v", disposition)
 	}
 	run := fixture.currentRun(t)
-	if run.Phase != kernel.RunFinalizing || run.Proposal == nil || run.Proposal.Code() != kernel.FailureSpawn {
+	if run.Phase != kernel.RunTerminal || run.Proposal == nil || run.Proposal.Code() != kernel.FailureSpawn || run.Terminal == nil || run.Terminal.Code() != kernel.FailureSpawn {
 		t.Fatalf("recovered run = %+v", run)
 	}
 	for kind, resource := range fixture.resourceStates(t) {
@@ -290,7 +290,7 @@ func TestRecoverySweepConvergesStartingRunnerWithoutResidue(t *testing.T) {
 		t.Fatalf("disposition = %+v", disposition)
 	}
 	run := fixture.currentRun(t)
-	if run.Phase != kernel.RunFinalizing || run.Proposal == nil || run.Proposal.Code() != kernel.FailureSpawn {
+	if run.Phase != kernel.RunTerminal || run.Proposal == nil || run.Proposal.Code() != kernel.FailureSpawn || run.Terminal == nil || run.Terminal.Code() != kernel.FailureSpawn {
 		t.Fatalf("recovered run = %+v", run)
 	}
 	states := fixture.resourceStates(t)
@@ -304,8 +304,10 @@ func TestRecoverySweepConvergesStartingRunnerWithoutResidue(t *testing.T) {
 	if err != nil || !found || session.State != kernel.TerminalSessionClosed {
 		t.Fatalf("recovered session = %+v found=%v err=%v", session, found, err)
 	}
+	// The settled terminal run is no longer recoverable; a second sweep
+	// leaves it untouched with no disposition at all.
 	again := fixture.sweep(t)
-	if again.Action != RecoveredConverged || again.Err != nil {
+	if again.Action != RecoveredRunAction("") || again.Err != nil {
 		t.Fatalf("second sweep = %+v", again)
 	}
 }
@@ -329,7 +331,7 @@ func TestRecoverySweepConvergesActivatedRunnerAbsenceBeforeExecRelease(t *testin
 				t.Fatalf("disposition = %+v", disposition)
 			}
 			run := fixture.currentRun(t)
-			if run.Phase != kernel.RunFinalizing || run.Proposal == nil || run.Proposal.Code() != kernel.FailureActivation || run.RunnerExit == nil || !run.RunnerExit.RecoveredAbsence() {
+			if run.Phase != kernel.RunTerminal || run.Proposal == nil || run.Proposal.Code() != kernel.FailureActivation || run.Terminal == nil || run.RunnerExit == nil || !run.RunnerExit.RecoveredAbsence() {
 				t.Fatalf("recovered run = %+v", run)
 			}
 			states := fixture.resourceStates(t)
@@ -361,7 +363,7 @@ func TestRecoverySweepConsumesAuthenticResultBeforeAnyAbsenceEdge(t *testing.T) 
 		t.Fatalf("disposition = %+v", disposition)
 	}
 	run := fixture.currentRun(t)
-	if run.Phase != kernel.RunFinalizing || run.Proposal == nil || run.Proposal.Code() != kernel.FailureSpawn || run.RunnerExit == nil || !run.RunnerExit.RecoveredAbsence() {
+	if run.Phase != kernel.RunTerminal || run.Proposal == nil || run.Proposal.Code() != kernel.FailureSpawn || run.Terminal == nil || run.RunnerExit == nil || !run.RunnerExit.RecoveredAbsence() {
 		t.Fatalf("recovered run = %+v", run)
 	}
 	states := fixture.resourceStates(t)
@@ -377,8 +379,10 @@ func TestRecoverySweepConsumesAuthenticResultBeforeAnyAbsenceEdge(t *testing.T) 
 	if _, err := os.Stat(filepath.Join(fixture.parentPath, fixture.run.ID.String())); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("recovered runtime directory persists: %v", err)
 	}
+	// The settled terminal run is no longer recoverable; a second sweep
+	// leaves it untouched with no disposition at all.
 	again := fixture.sweep(t)
-	if again.Action != RecoveredConverged || again.Err != nil {
+	if again.Action != RecoveredRunAction("") || again.Err != nil {
 		t.Fatalf("second sweep = %+v", again)
 	}
 }

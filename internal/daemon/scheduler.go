@@ -191,6 +191,16 @@ func (daemon *Daemon) validateScheduledCompletion(observed kernel.Run) error {
 		}
 		return kernel.NewOutcomeUnknownError(err)
 	}
+	if current.Phase == kernel.RunFinalizing && current.Proposal != nil {
+		// A failed attempt converges to finalizing with its whole footprint
+		// released and its candidate change unpublished; the scheduler owns
+		// the abandoned settlement to the terminal record.
+		settled, settleErr := daemon.settleAbandonedRun(current.ID)
+		if settleErr != nil {
+			return kernel.NewOutcomeUnknownError(errors.Join(errUnsettledCompletion, settleErr))
+		}
+		current = settled
+	}
 	if current.Phase != kernel.RunTerminal {
 		return kernel.NewOutcomeUnknownError(fmt.Errorf("%w: scheduled run remained %s", kernel.ErrConflict, current.Phase.String()))
 	}

@@ -140,7 +140,11 @@ func (daemon *Daemon) recoverRun(ctx context.Context, parent *RuntimeParent, rec
 			return RecoveredUncertain, convergeErr
 		}
 		_ = converged
-		return RecoveredUnregistered, daemon.removeRecoveredRuntime(ctx, parent, run.ID, recovered, fileIdentity)
+		if removeErr := daemon.removeRecoveredRuntime(ctx, parent, run.ID, recovered, fileIdentity); removeErr != nil {
+			return RecoveredUnregistered, removeErr
+		}
+		_, settleErr := daemon.settleAbandonedRun(run.ID)
+		return RecoveredUnregistered, settleErr
 	case runnerProcess.State == kernel.ResourceActive && providerProcess.State == kernel.ResourceDeclared && run.Phase == kernel.RunAdmitted:
 		if !daemon.recoveredRunnerAbsent(runnerProcess) {
 			return RecoveredUncertain, errInvalidContract
@@ -148,7 +152,11 @@ func (daemon *Daemon) recoverRun(ctx context.Context, parent *RuntimeParent, rec
 		if _, absenceErr := daemon.recordPreExecRunnerAbsence(run.ID, runnerProcess.ID, runnerProcess.Identity); absenceErr != nil {
 			return RecoveredUncertain, absenceErr
 		}
-		return RecoveredPreExecAbsence, daemon.removeRecoveredRuntime(ctx, parent, run.ID, recovered, fileIdentity)
+		if removeErr := daemon.removeRecoveredRuntime(ctx, parent, run.ID, recovered, fileIdentity); removeErr != nil {
+			return RecoveredPreExecAbsence, removeErr
+		}
+		_, settleErr := daemon.settleAbandonedRun(run.ID)
+		return RecoveredPreExecAbsence, settleErr
 	default:
 		return daemon.recoverWithoutResult(ctx, run, runnerProcess, providerProcess, providerGroup)
 	}
@@ -175,7 +183,8 @@ func (daemon *Daemon) recoverBeforeRuntime(ctx context.Context, parent *RuntimeP
 	if failErr != nil && failed.Phase != kernel.RunFinalizing {
 		return RecoveredUncertain, failErr
 	}
-	return RecoveredRuntimeAbsent, nil
+	_, settleErr := daemon.settleAbandonedRun(run.ID)
+	return RecoveredRuntimeAbsent, settleErr
 }
 
 func (daemon *Daemon) recoverAuthenticatedResult(ctx context.Context, parent *RuntimeParent, run kernel.Run, recovered *RecoveredRuntime, record *runner.AttemptResultRecord, runtimeRoot, runnerProcess kernel.Resource, fileIdentity runner.FileIdentity) (RecoveredRunAction, error) {
@@ -210,7 +219,17 @@ func (daemon *Daemon) recoverAuthenticatedResult(ctx context.Context, parent *Ru
 	if err := recovered.RemoveResult(record); err != nil {
 		return RecoveredUncertain, err
 	}
-	return RecoveredResultConsumed, daemon.removeRecoveredRuntime(ctx, parent, run.ID, recovered, fileIdentity)
+	if removeErr := daemon.removeRecoveredRuntime(ctx, parent, run.ID, recovered, fileIdentity); removeErr != nil {
+		return RecoveredResultConsumed, removeErr
+	}
+	// A consumed failure result leaves an unpublished change: settle it
+	// abandoned. A published change refuses with a conflict — the retained
+	// settlement reconstruction is deliberately deferred, and the run stays
+	// discoverable rather than guessing availability evidence.
+	if _, settleErr := daemon.settleAbandonedRun(run.ID); settleErr != nil && !errors.Is(settleErr, kernel.ErrConflict) {
+		return RecoveredResultConsumed, settleErr
+	}
+	return RecoveredResultConsumed, nil
 }
 
 // recoverWithoutResult converges what an activated attempt with no trusted
