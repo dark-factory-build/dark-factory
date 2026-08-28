@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
+	"github.com/dark-factory-build/dark-factory/internal/daemon"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 )
 
@@ -27,15 +28,14 @@ func TestParseOwnsOneFreshHomeAndExactLoopbackBrowserPolicy(t *testing.T) {
 		ok   bool
 	}{
 		{name: "default", args: []string{"--home", home}, ok: true},
-		{name: "configured", args: []string{"--home", home, "--browser-address", "127.0.0.1:43124", "--development-browser-origin", testOrigin}, ok: true},
+		{name: "development origin", args: []string{"--home", home, "--development-browser-origin", testOrigin}, ok: true},
 		{name: "missing home", args: nil},
 		{name: "relative home", args: []string{"--home", "relative"}},
 		{name: "root home", args: []string{"--home", "/"}},
 		{name: "duplicate home", args: []string{"--home", home, "--home", home}},
 		{name: "nonloopback", args: []string{"--home", home, "--browser-address", "0.0.0.0:43123"}},
 		{name: "localhost", args: []string{"--home", home, "--browser-address", "localhost:43123"}},
-		{name: "random production port", args: []string{"--home", home, "--browser-address", "127.0.0.1:0"}},
-		{name: "duplicate address", args: []string{"--home", home, "--browser-address", defaultBrowserAddress, "--browser-address", "127.0.0.1:43124"}},
+		{name: "browser address is fixed", args: []string{"--home", home, "--browser-address", "127.0.0.1:43124"}},
 		{name: "wildcard origin", args: []string{"--home", home, "--development-browser-origin", "https://*.invalid"}},
 		{name: "origin path", args: []string{"--home", home, "--development-browser-origin", testOrigin + "/path"}},
 		{name: "duplicate origin", args: []string{"--home", home, "--development-browser-origin", testOrigin, "--development-browser-origin", testOrigin}},
@@ -48,7 +48,7 @@ func TestParseOwnsOneFreshHomeAndExactLoopbackBrowserPolicy(t *testing.T) {
 			if help || ok != test.ok {
 				t.Fatalf("parse = %+v, help=%v, ok=%v", configuration, help, ok)
 			}
-			if test.ok && (configuration.home != home || configuration.browserAddress == "" || len(configuration.browserOrigins) == 0) {
+			if test.ok && (configuration.home != home || configuration.browserAddress != defaultBrowserAddress || len(configuration.browserOrigins) == 0) {
 				t.Fatalf("valid configuration = %+v", configuration)
 			}
 		})
@@ -201,9 +201,121 @@ func TestRunRedactsStartupFailureAndReportsUsage(t *testing.T) {
 	stdout.Reset()
 	stderr.Reset()
 	home := filepath.Join(t.TempDir(), "missing")
-	if exit := run(context.Background(), []string{"--home", home, "--browser-address", "127.0.0.1:43124"}, &stdout, &stderr); exit != exitFailure || stdout.Len() != 0 || stderr.String() != "factoryd: runtime unavailable\n" || strings.Contains(stderr.String(), home) {
+	if exit := run(context.Background(), []string{"--home", home}, &stdout, &stderr); exit != exitFailure || stdout.Len() != 0 || stderr.String() != "factoryd: runtime unavailable\n" || strings.Contains(stderr.String(), home) {
 		t.Fatalf("failure = exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
 	}
+}
+
+func TestStartupCancellationIsCleanAtEveryStartupPhase(t *testing.T) {
+	for _, phase := range []string{"home", "store", "runtime parent", "daemon", "local API", "listener", "browser"} {
+		t.Run(phase, func(t *testing.T) {
+			home := initializedHome(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			startupPhaseHook = func(observed string) {
+				if observed == phase {
+					cancel()
+				}
+			}
+			defer func() { startupPhaseHook = nil }()
+			err := serve(ctx, testConfig(home))
+			if err != nil {
+				t.Fatalf("startup cancellation = %v", err)
+			}
+			reopened, err := install.OpenOperationalHome(context.Background(), home)
+			if err != nil {
+				t.Fatalf("home was not released after clean cancellation: %v", err)
+			}
+			if err := reopened.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestCleanupFailureRetainsDependentAuthorityAndStableCloseResult(t *testing.T) {
+	failure := errors.New("injected cleanup failure")
+	for _, test := range []struct {
+		name string
+		set  func()
+	}{
+		{name: "daemon", set: func() {
+			closeDaemon = func(value *daemon.Daemon) error {
+				_ = value
+				return failure
+			}
+		}},
+		{name: "runtime parent", set: func() {
+			calls := 0
+			closeRuntimeParent = func(value *daemon.RuntimeParent) error {
+				calls++
+				if calls == 1 {
+					_ = value.Close()
+				}
+				return failure
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			closeDaemon = func(value *daemon.Daemon) error { return value.Close() }
+			closeRuntimeParent = func(value *daemon.RuntimeParent) error { return value.Close() }
+			defer func() {
+				closeDaemon = func(value *daemon.Daemon) error { return value.Close() }
+				closeRuntimeParent = func(value *daemon.RuntimeParent) error { return value.Close() }
+			}()
+			home := initializedHome(t)
+			owner, err := openProcess(context.Background(), testConfig(home))
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.set()
+			first := owner.close()
+			if !errors.Is(first, failure) {
+				t.Fatalf("cleanup = %v", first)
+			}
+			if reopened, openErr := install.OpenOperationalHome(context.Background(), home); openErr == nil {
+				_ = reopened.Close()
+				t.Fatal("failed cleanup released home authority")
+			}
+			if second := owner.close(); !errors.Is(second, failure) {
+				t.Fatalf("duplicate cleanup = %v", second)
+			}
+			closeDaemon = func(value *daemon.Daemon) error { return value.Close() }
+			closeRuntimeParent = func(value *daemon.RuntimeParent) error { return value.Close() }
+			if err := owner.shutdown(); err != nil {
+				t.Fatalf("test cleanup = %v", err)
+			}
+			if reopened, openErr := install.OpenOperationalHome(context.Background(), home); openErr != nil {
+				t.Fatalf("cleanup retained home authority: %v", openErr)
+			} else if err := reopened.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestConcurrentCloseAndWaitReturnOneStableResult(t *testing.T) {
+	home := initializedHome(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	owner, err := openProcess(ctx, testConfig(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := owner.browser.Addr()
+	results := make(chan error, 3)
+	go func() { results <- owner.wait(ctx) }()
+	go func() { results <- owner.close() }()
+	go func() { results <- owner.close() }()
+	for index := 0; index < cap(results); index++ {
+		if err := <-results; err != nil {
+			t.Fatalf("lifecycle result = %v", err)
+		}
+	}
+	if err := owner.wait(ctx); err != nil {
+		t.Fatalf("repeated wait = %v", err)
+	}
+	assertReleased(t, home, address)
 }
 
 func initializedHome(t *testing.T) string {

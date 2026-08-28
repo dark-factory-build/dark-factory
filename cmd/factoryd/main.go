@@ -32,8 +32,15 @@ const (
 	exitUsage             = 64
 
 	usage = `usage:
-  factoryd --home ABSOLUTE [--browser-address 127.0.0.1:PORT] [--development-browser-origin EXACT_ORIGIN ...]
+  factoryd --home ABSOLUTE [--development-browser-origin EXACT_ORIGIN ...]
 `
+)
+
+var (
+	cleanStartupCancellation = errors.New("factoryd: clean startup cancellation")
+	startupPhaseHook         func(string)
+	closeDaemon              = func(value *daemon.Daemon) error { return value.Close() }
+	closeRuntimeParent       = func(value *daemon.RuntimeParent) error { return value.Close() }
 )
 
 type config struct {
@@ -43,6 +50,12 @@ type config struct {
 }
 
 type process struct {
+	lifecycleMu sync.Mutex
+	closeDone   chan struct{}
+	closeErr    error
+	waitDone    chan struct{}
+	waitErr     error
+
 	cancel context.CancelFunc
 
 	home          *install.OperationalHome
@@ -87,7 +100,6 @@ func parse(args []string) (config, bool, bool) {
 		return config{}, true, true
 	}
 	result := config{browserAddress: defaultBrowserAddress, browserOrigins: []string{defaultBrowserOrigin}}
-	seenAddress := false
 	for index := 0; index < len(args); {
 		if index+1 >= len(args) {
 			return config{}, false, false
@@ -99,12 +111,6 @@ func parse(args []string) (config, bool, bool) {
 				return config{}, false, false
 			}
 			result.home = value
-		case "--browser-address":
-			if seenAddress || !validBrowserAddress(value, false) {
-				return config{}, false, false
-			}
-			seenAddress = true
-			result.browserAddress = value
 		case "--development-browser-origin":
 			if !validBrowserOrigin(value) || len(result.browserOrigins) == 8 {
 				return config{}, false, false
@@ -159,6 +165,9 @@ func serve(ctx context.Context, configuration config) error {
 	}
 	owner, err := openProcess(ctx, configuration)
 	if err != nil {
+		if errors.Is(err, cleanStartupCancellation) {
+			return nil
+		}
 		return err
 	}
 	return owner.wait(ctx)
@@ -170,7 +179,11 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 	keep := false
 	defer func() {
 		if !keep {
-			resultErr = errors.Join(resultErr, owner.close())
+			cleanupErr := owner.close()
+			resultErr = errors.Join(resultErr, cleanupErr)
+			if cleanupErr == nil && errors.Is(resultErr, context.Canceled) {
+				resultErr = errors.Join(resultErr, cleanStartupCancellation)
+			}
 		}
 	}()
 
@@ -179,10 +192,12 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 	if err != nil {
 		return nil, err
 	}
+	startupPhase("home")
 	store, err := owner.home.OpenStore(ownedContext)
 	if err != nil {
 		return nil, err
 	}
+	startupPhase("store")
 	runtimes, err := owner.home.Runtimes()
 	if err != nil {
 		return nil, err
@@ -191,22 +206,27 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 	if err != nil {
 		return nil, err
 	}
+	startupPhase("runtime parent")
 	owner.daemon, err = daemon.NewDaemon(store)
 	if err != nil {
 		return nil, err
 	}
+	startupPhase("daemon")
 	owner.apiAuthority, err = owner.home.OpenLocalAPI(ownedContext)
 	if err != nil {
 		return nil, err
 	}
+	startupPhase("local API")
 	owner.listener, err = api.Listen(owner.apiAuthority)
 	if err != nil {
 		return nil, err
 	}
+	startupPhase("listener")
 	owner.browser, err = owner.daemon.ListenBrowser(configuration.browserAddress, configuration.browserOrigins)
 	if err != nil {
 		return nil, err
 	}
+	startupPhase("browser")
 	owner.apiStart = true
 	go owner.accept(ownedContext, owner.listener)
 	keep = true
@@ -240,30 +260,91 @@ func (owner *process) accept(ctx context.Context, listener *api.Listener) {
 }
 
 func (owner *process) wait(ctx context.Context) error {
-	if owner == nil || owner.browser == nil || owner.apiDone == nil {
+	if owner == nil || ctx == nil {
 		return errors.New("invalid factoryd owner")
 	}
+	owner.lifecycleMu.Lock()
+	if owner.waitDone != nil {
+		done := owner.waitDone
+		owner.lifecycleMu.Unlock()
+		<-done
+		owner.lifecycleMu.Lock()
+		err := owner.waitErr
+		owner.lifecycleMu.Unlock()
+		return err
+	}
+	if owner.closeDone != nil {
+		done := owner.closeDone
+		owner.lifecycleMu.Unlock()
+		<-done
+		owner.lifecycleMu.Lock()
+		err := owner.closeErr
+		owner.lifecycleMu.Unlock()
+		return err
+	}
+	if owner.browser == nil || owner.apiDone == nil {
+		owner.lifecycleMu.Unlock()
+		return errors.New("invalid factoryd owner")
+	}
+	waitDone := make(chan struct{})
+	owner.waitDone = waitDone
+	apiDone, browser := owner.apiDone, owner.browser
+	owner.lifecycleMu.Unlock()
 	var cause error
 	select {
 	case <-ctx.Done():
-	case <-owner.apiDone:
-		if ctx.Err() == nil && !errors.Is(owner.apiErr, context.Canceled) {
+	case <-apiDone:
+		owner.lifecycleMu.Lock()
+		closing := owner.closeDone != nil
+		owner.lifecycleMu.Unlock()
+		if ctx.Err() == nil && !closing && !errors.Is(owner.apiErr, context.Canceled) {
 			cause = fmt.Errorf("local API owner stopped: %w", owner.apiErr)
 		}
-	case <-owner.browser.Done():
-		if err := owner.browser.Err(); err != nil {
-			cause = err
-		} else {
-			cause = errors.New("browser owner stopped")
+	case <-browser.Done():
+		owner.lifecycleMu.Lock()
+		closing := owner.closeDone != nil
+		owner.lifecycleMu.Unlock()
+		if ctx.Err() == nil && !closing {
+			if err := browser.Err(); err != nil {
+				cause = err
+			} else {
+				cause = errors.New("browser owner stopped")
+			}
 		}
 	}
-	return errors.Join(cause, owner.close())
+	result := errors.Join(cause, owner.close())
+	owner.lifecycleMu.Lock()
+	owner.waitErr = result
+	close(owner.waitDone)
+	owner.lifecycleMu.Unlock()
+	return result
 }
 
 func (owner *process) close() error {
 	if owner == nil {
 		return nil
 	}
+	owner.lifecycleMu.Lock()
+	if owner.closeDone != nil {
+		done := owner.closeDone
+		owner.lifecycleMu.Unlock()
+		<-done
+		owner.lifecycleMu.Lock()
+		err := owner.closeErr
+		owner.lifecycleMu.Unlock()
+		return err
+	}
+	owner.closeDone = make(chan struct{})
+	owner.lifecycleMu.Unlock()
+	result := owner.shutdown()
+	owner.lifecycleMu.Lock()
+	owner.closeErr = result
+	close(owner.closeDone)
+	owner.lifecycleMu.Unlock()
+	return result
+}
+
+func (owner *process) shutdown() error {
 	if owner.cancel != nil {
 		owner.cancel()
 	}
@@ -274,24 +355,54 @@ func (owner *process) close() error {
 	} else if owner.apiAuthority != nil {
 		result = errors.Join(result, owner.apiAuthority.Close())
 	}
-	owner.apiAuthority = nil
+	if result == nil {
+		owner.lifecycleMu.Lock()
+		owner.listener = nil
+		owner.apiAuthority = nil
+		owner.lifecycleMu.Unlock()
+	}
 	if owner.apiStart {
 		<-owner.apiDone
 	}
-	owner.listener = nil
 	owner.handlers.Wait()
 	if owner.daemon != nil {
-		result = errors.Join(result, owner.daemon.Close())
-		owner.daemon = nil
+		if err := closeDaemon(owner.daemon); err != nil {
+			result = errors.Join(result, err)
+		} else {
+			owner.lifecycleMu.Lock()
+			owner.daemon = nil
+			owner.browser = nil
+			owner.lifecycleMu.Unlock()
+		}
 	}
-	owner.browser = nil
+	if result != nil {
+		return result
+	}
 	if owner.runtimeParent != nil {
-		result = errors.Join(result, owner.runtimeParent.Close())
-		owner.runtimeParent = nil
+		if err := closeRuntimeParent(owner.runtimeParent); err != nil {
+			result = errors.Join(result, err)
+		} else {
+			owner.lifecycleMu.Lock()
+			owner.runtimeParent = nil
+			owner.lifecycleMu.Unlock()
+		}
+	}
+	if result != nil {
+		return result
 	}
 	if owner.home != nil {
 		result = errors.Join(result, owner.home.Close())
-		owner.home = nil
+		if result == nil {
+			owner.lifecycleMu.Lock()
+			owner.home = nil
+			owner.lifecycleMu.Unlock()
+		}
 	}
 	return result
+}
+
+func startupPhase(name string) {
+	if startupPhaseHook != nil {
+		startupPhaseHook(name)
+	}
 }
