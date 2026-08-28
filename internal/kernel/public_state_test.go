@@ -579,10 +579,78 @@ func TestPublicStateEntityProjectionOmitsPrivateRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	encoded := string(projectJSON) + string(agentJSON) + string(taskJSON)
-	for _, private := range []string{"PRIVATE_ROOT_SENTINEL", "PRIVATE_MODEL_SENTINEL", "PRIVATE_BODY_SENTINEL", "xhigh", "987654321", "codex"} {
+	// The agent's provider is deliberately a served public fact (the console's
+	// C/X glyphs derive from it); model, reasoning effort, tool budgets,
+	// roots and bodies remain private.
+	for _, private := range []string{"PRIVATE_ROOT_SENTINEL", "PRIVATE_MODEL_SENTINEL", "PRIVATE_BODY_SENTINEL", "xhigh", "987654321"} {
 		if strings.Contains(encoded, private) {
 			t.Fatalf("entity projections exposed %q: %s", private, encoded)
 		}
+	}
+	if !strings.Contains(string(agentJSON), "codex") {
+		t.Fatalf("agent entity projection dropped the served provider: %s", agentJSON)
+	}
+}
+
+func TestAgentSummariesServeTheExactProviderOnEveryReadPath(t *testing.T) {
+	store, _ := newTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	project, err := store.CreateProject(ctx, NewProject{ID: publicProjectID(t, 1), Name: "workshop", Root: "/tmp/workshop"}, mustTime(t, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	providers := map[byte]Provider{1: ProviderClaudeCode, 2: ProviderCodex, 3: ProviderShell}
+	want := map[string]string{}
+	for seed, provider := range providers {
+		agent := NewAgent{ID: publicAgentID(t, int(seed)), ProjectID: project.ID, Name: fmt.Sprintf("agent %d", seed), Role: RoleWorker, Provider: provider, ToolBudgetLimit: 5}
+		if provider != ProviderShell {
+			agent.Model = "model"
+			agent.ReasoningEffort = "medium"
+		}
+		created, err := store.CreateAgent(ctx, agent, mustTime(t, 3+int64(seed)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		want[created.ID.String()] = provider.String()
+	}
+	state, err := store.Factory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := store.ReadPublicStatePage(ctx, &PublicStateCursor{Head: state.Head, Kind: PublicStateAgent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pageProviders := map[string]string{}
+	for _, item := range page.Items {
+		summary, ok := item.Agent()
+		if !ok {
+			t.Fatalf("agent page item was not an agent: %+v", item)
+		}
+		pageProviders[summary.ID.String()] = summary.Provider
+		entity, err := store.ReadPublicStateEntity(ctx, PublicStateAgent, mustPublicStateID(t, summary.ID.bytes()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		entitySummary, ok := entity.Item.Agent()
+		if !ok || entitySummary.Provider != summary.Provider {
+			t.Fatalf("entity provider mismatch for %s: %+v", summary.ID, entity.Item)
+		}
+	}
+	if !reflect.DeepEqual(pageProviders, want) {
+		t.Fatalf("page providers = %v, want %v", pageProviders, want)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotProviders := map[string]string{}
+	for _, summary := range snapshot.Agents {
+		snapshotProviders[summary.ID.String()] = summary.Provider
+	}
+	if !reflect.DeepEqual(snapshotProviders, want) {
+		t.Fatalf("dashboard providers = %v, want %v", snapshotProviders, want)
 	}
 }
 

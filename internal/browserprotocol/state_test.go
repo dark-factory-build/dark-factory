@@ -25,7 +25,7 @@ func factoryItem() FactoryItem {
 }
 func projectItem() ProjectItem { return ProjectItem{ID: projectID, Name: "Factory", Revision: 1} }
 func agentItem() AgentItem {
-	return AgentItem{ID: agentID, ProjectID: projectID, Name: "Worker", Role: "worker", Revision: 1}
+	return AgentItem{ID: agentID, ProjectID: projectID, Name: "Worker", Role: "worker", Provider: "claude_code", Revision: 1}
 }
 func taskItem() TaskItem {
 	return TaskItem{ID: taskID, ProjectID: projectID, AssignedAgentID: agentID, Title: "Ship", Status: "queued", Priority: 1, Revision: 1}
@@ -248,6 +248,13 @@ func TestStateExactFieldAndEnumBounds(t *testing.T) {
 	if _, err := EncodeStateSnapshot("x", StateSnapshot{Head: 1, Kind: StateAgent, Items: AgentItems([]AgentItem{badAgent})}); err == nil {
 		t.Fatal("unknown agent role accepted")
 	}
+	for _, provider := range []string{"", "claude", "CODEX", "bash"} {
+		item := agentItem()
+		item.Provider = provider
+		if _, err := EncodeStateSnapshot("x", StateSnapshot{Head: 1, Kind: StateAgent, Items: AgentItems([]AgentItem{item})}); err == nil {
+			t.Fatalf("agent provider %q accepted", provider)
+		}
+	}
 	for _, status := range []string{"", "ready", "OPEN"} {
 		item := taskItem()
 		item.Status = status
@@ -435,6 +442,37 @@ func mustEncodeError(t *testing.T, value Error) []byte {
 		t.Fatal(err)
 	}
 	return wire
+}
+
+func TestAgentItemServesExactlyThePublicFields(t *testing.T) {
+	fields := reflect.VisibleFields(reflect.TypeOf(AgentItem{}))
+	actual := make([]string, 0, len(fields))
+	for _, field := range fields {
+		actual = append(actual, field.Tag.Get("json"))
+	}
+	want := []string{"id", "project_id", "name", "role", "provider", "paused", "revision"}
+	if !reflect.DeepEqual(actual, want) {
+		t.Fatalf("public AgentItem fields drifted: got %v want %v", actual, want)
+	}
+	for _, provider := range []string{"claude_code", "codex", "shell"} {
+		item := agentItem()
+		item.Provider = provider
+		wire := mustEncodeStateSnapshot(t, StateSnapshot{Head: 1, Kind: StateAgent, Items: AgentItems([]AgentItem{item}), NextCursor: pointer("next")})
+		frame, err := DecodeServerControl(wire)
+		if err != nil {
+			t.Fatalf("provider %q round-trip: %v", provider, err)
+		}
+		agents, ok := frame.Body.(StateSnapshot).Items.Agents()
+		if !ok || len(agents) != 1 || agents[0].Provider != provider {
+			t.Fatalf("provider %q decoded as %+v", provider, agents)
+		}
+		// Private launch controls never ride the public agent item.
+		for _, private := range []string{`"model":`, `"reasoning_effort":`, `"tool_budget`, `"tool_calls`} {
+			if bytes.Contains(wire, []byte(private)) {
+				t.Fatalf("public agent item exposed %q: %s", private, wire)
+			}
+		}
+	}
 }
 
 func TestHumanRequestPublicPrivacyAndDetailBounds(t *testing.T) {

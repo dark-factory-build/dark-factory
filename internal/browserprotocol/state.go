@@ -115,12 +115,18 @@ type ProjectItem struct {
 }
 
 type AgentItem struct {
-	ID        string  `json:"id"`
-	ProjectID string  `json:"project_id"`
-	Name      string  `json:"name"`
-	Role      string  `json:"role"`
-	Paused    Bool    `json:"paused"`
-	Revision  Decimal `json:"revision"`
+	ID        string `json:"id"`
+	ProjectID string `json:"project_id"`
+	Name      string `json:"name"`
+	Role      string `json:"role"`
+	// Provider is immutable after creation, so it stays fresh under
+	// revision-keyed invalidation. Live activity facts are deliberately
+	// not item fields: they change without bumping the agent revision and
+	// a served copy would go stale; clients derive them from task and
+	// human-request state.
+	Provider string  `json:"provider"`
+	Paused   Bool    `json:"paused"`
+	Revision Decimal `json:"revision"`
 }
 
 type TaskItem struct {
@@ -640,6 +646,9 @@ func validateProjectItem(value ProjectItem) error {
 func validateAgentItem(value AgentItem) error {
 	if validateEntityID(StateAgent, value.ID) != nil || validateEntityID(StateProject, value.ProjectID) != nil || validateBoundedText(value.Name, 1, MaxAgentNameBytes) != nil || value.Revision == 0 || value.Role != "orchestrator" && value.Role != "worker" {
 		return fmt.Errorf("%w: agent item", ErrMalformed)
+	}
+	if value.Provider != "claude_code" && value.Provider != "codex" && value.Provider != "shell" {
+		return fmt.Errorf("%w: agent provider", ErrMalformed)
 	}
 	return nil
 }

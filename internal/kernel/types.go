@@ -529,8 +529,16 @@ type AgentSummary struct {
 	ProjectID ProjectID
 	Name      string
 	Role      string
-	Paused    bool
-	Revision  Revision
+	// Provider is a served public fact (the console's C/X glyphs derive
+	// from it) and never changes after creation, so it is always fresh
+	// under revision-keyed invalidation. Live activity facts (busy,
+	// needs-you) are deliberately NOT summary fields: they change without
+	// bumping the agent revision, so a served copy would go stale on the
+	// wire; clients derive them from task and human-request state, which
+	// invalidates correctly.
+	Provider string
+	Paused   bool
+	Revision Revision
 }
 
 type TaskSummary struct {

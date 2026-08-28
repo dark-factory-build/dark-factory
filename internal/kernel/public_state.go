@@ -398,9 +398,9 @@ func queryPublicStateRows(ctx context.Context, connection *sql.Conn, kind Public
 		return connection.QueryContext(ctx, `SELECT id, name, root, verification_policy, revision, created_at_ms, updated_at_ms FROM projects WHERE id > ? ORDER BY id LIMIT ?`, after.Bytes(), PublicStatePageSize+1)
 	case PublicStateAgent:
 		if after == nil {
-			return connection.QueryContext(ctx, `SELECT id, project_id, name, role, provider, model, reasoning_effort, paused, tool_budget_limit, tool_calls_used, revision, created_at_ms, updated_at_ms FROM agents ORDER BY id LIMIT ?`, PublicStatePageSize+1)
+			return connection.QueryContext(ctx, agentSummarySelect+` ORDER BY a.id LIMIT ?`, PublicStatePageSize+1)
 		}
-		return connection.QueryContext(ctx, `SELECT id, project_id, name, role, provider, model, reasoning_effort, paused, tool_budget_limit, tool_calls_used, revision, created_at_ms, updated_at_ms FROM agents WHERE id > ? ORDER BY id LIMIT ?`, after.Bytes(), PublicStatePageSize+1)
+		return connection.QueryContext(ctx, agentSummarySelect+` WHERE a.id > ? ORDER BY a.id LIMIT ?`, after.Bytes(), PublicStatePageSize+1)
 	case PublicStateTask:
 		if after == nil {
 			return connection.QueryContext(ctx, `SELECT id, project_id, assigned_agent_id, incarnation_id, work_revision, title, body, status, priority, blocked_reason, result, completed_at_ms, revision, created_at_ms, updated_at_ms FROM tasks ORDER BY id LIMIT ?`, PublicStatePageSize+1)
@@ -426,11 +426,10 @@ func scanPublicStateItem(scanner rowScanner, kind PublicStateKind) (PublicStateI
 		summary := ProjectSummary{ID: project.ID, Name: project.Name, Revision: project.Revision}
 		return PublicStateItem{project: &summary}, nil
 	case PublicStateAgent:
-		agent, found, err := scanAgent(scanner)
-		if err != nil || !found {
-			return PublicStateItem{}, publicScanError(err)
+		summary, err := scanAgentSummary(scanner)
+		if err != nil {
+			return PublicStateItem{}, err
 		}
-		summary := AgentSummary{ID: agent.ID, ProjectID: agent.ProjectID, Name: agent.Name, Role: agent.Role.String(), Paused: agent.Paused, Revision: agent.Revision}
 		return PublicStateItem{agent: &summary}, nil
 	case PublicStateTask:
 		task, found, err := scanTask(scanner)
@@ -449,6 +448,30 @@ func publicScanError(err error) error {
 		return err
 	}
 	return fmt.Errorf("%w: public state row disappeared", ErrCorruptState)
+}
+
+// agentSummarySelect is the one derivation of the served agent summary.
+// Provider is included as a public fact; live activity is deliberately
+// absent (see AgentSummary).
+const agentSummarySelect = `SELECT a.id, a.project_id, a.name, a.role, a.provider, a.paused, a.revision FROM agents a`
+
+func scanAgentSummary(scanner rowScanner) (AgentSummary, error) {
+	var rawID, rawProjectID []byte
+	var name, rawRole, rawProvider string
+	var paused, rawRevision int64
+	if err := scanner.Scan(&rawID, &rawProjectID, &name, &rawRole, &rawProvider, &paused, &rawRevision); err != nil {
+		return AgentSummary{}, err
+	}
+	id, idErr := AgentIDFromBytes(rawID)
+	projectID, projectErr := ProjectIDFromBytes(rawProjectID)
+	role, roleErr := parseAgentRole(rawRole)
+	provider, providerErr := parseProvider(rawProvider)
+	revision, revisionErr := NewRevision(rawRevision)
+	if idErr != nil || projectErr != nil || roleErr != nil || providerErr != nil || revisionErr != nil ||
+		byteLen(name) < 1 || byteLen(name) > 128 || paused != 0 && paused != 1 {
+		return AgentSummary{}, fmt.Errorf("%w: invalid agent summary", ErrCorruptState)
+	}
+	return AgentSummary{ID: id, ProjectID: projectID, Name: name, Role: role.String(), Provider: provider.String(), Paused: paused == 1, Revision: revision}, nil
 }
 
 func publicFactorySummary(ctx context.Context, connection *sql.Conn) (FactorySummary, error) {
@@ -547,11 +570,14 @@ func readPublicStateEntityItem(ctx context.Context, connection *sql.Conn, kind P
 		summary := ProjectSummary{ID: project.ID, Name: project.Name, Revision: project.Revision}
 		return PublicStateItem{project: &summary}, true, nil
 	case PublicStateAgent:
-		agent, found, err := agentByID(ctx, connection, AgentID{id.dynamic})
-		if err != nil || !found {
-			return PublicStateItem{}, found, err
+		row := connection.QueryRowContext(ctx, agentSummarySelect+` WHERE a.id = ?`, AgentID{id.dynamic}.bytes())
+		summary, err := scanAgentSummary(row)
+		if errors.Is(err, sql.ErrNoRows) {
+			return PublicStateItem{}, false, nil
 		}
-		summary := AgentSummary{ID: agent.ID, ProjectID: agent.ProjectID, Name: agent.Name, Role: agent.Role.String(), Paused: agent.Paused, Revision: agent.Revision}
+		if err != nil {
+			return PublicStateItem{}, false, err
+		}
 		return PublicStateItem{agent: &summary}, true, nil
 	case PublicStateTask:
 		task, found, err := taskByID(ctx, connection, TaskID{id.dynamic})
