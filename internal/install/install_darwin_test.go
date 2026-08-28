@@ -43,13 +43,13 @@ func TestInitPublishesExactHomeAndReplaysReadOnly(t *testing.T) {
 	if first.State != Published {
 		t.Fatalf("first state = %d, want published", first.State)
 	}
-	for _, name := range []string{formatName, databaseName, tokenName, lockName, runtimesName, changesName} {
+	for _, name := range []string{formatName, databaseName, tokenName, lockName, lockAnchorName, runtimesName, changesName} {
 		if _, err := os.Lstat(filepath.Join(home, name)); err != nil {
 			t.Fatalf("missing %s: %v", name, err)
 		}
 	}
 	assertInstallMode(t, home, 0o700, true)
-	for _, name := range []string{formatName, databaseName, tokenName, lockName} {
+	for _, name := range []string{formatName, databaseName, tokenName, lockName, lockAnchorName} {
 		assertInstallMode(t, filepath.Join(home, name), 0o600, false)
 	}
 	for _, name := range []string{runtimesName, changesName} {
@@ -564,6 +564,22 @@ func assertStageEntries(t *testing.T, stage string, expected []string) {
 	entries, err := os.ReadDir(stage)
 	if err != nil {
 		t.Fatal(err)
+	}
+	anchorPresent := false
+	if _, err := os.Lstat(filepath.Join(stage, lockAnchorName)); err == nil {
+		anchorPresent = true
+	}
+	if anchorPresent {
+		found := false
+		for _, name := range expected {
+			if name == lockAnchorName {
+				found = true
+				break
+			}
+		}
+		if !found {
+			expected = append(append([]string(nil), expected...), lockAnchorName)
+		}
 	}
 	if len(entries) != len(expected) {
 		t.Fatalf("stage entries = %d, want %d", len(entries), len(expected))
@@ -1304,6 +1320,7 @@ func TestInitAndDoctorRejectSpecialModeBitsUnchanged(t *testing.T) {
 		{name: databaseName, path: databaseName, mode: 0o600 | os.ModeSetuid},
 		{name: tokenName, path: tokenName, mode: 0o600 | os.ModeSticky},
 		{name: lockName, path: lockName, mode: 0o600 | os.ModeSetuid},
+		{name: lockAnchorName, path: lockAnchorName, mode: 0o600 | os.ModeSetuid},
 		{name: runtimesName, path: runtimesName, mode: 0o700 | os.ModeSticky},
 		{name: changesName, path: changesName, mode: 0o700 | os.ModeSticky},
 	}
@@ -1809,8 +1826,14 @@ func assertInstallMode(t *testing.T, path string, mode os.FileMode, directory bo
 	if rawMode&0o7777 != uint32(mode) || info.IsDir() != directory {
 		t.Fatalf("%s mode/type = %o/%t, want %o/%t", path, rawMode&0o7777, info.IsDir(), mode, directory)
 	}
-	if info.Sys().(*syscall.Stat_t).Nlink != 1 && !directory {
-		t.Fatalf("%s has hard links", path)
+	if !directory {
+		expectedLinks := uint64(1)
+		if filepath.Base(path) == lockName || filepath.Base(path) == lockAnchorName {
+			expectedLinks = 2
+		}
+		if uint64(info.Sys().(*syscall.Stat_t).Nlink) != expectedLinks {
+			t.Fatalf("%s has %d links, want %d", path, info.Sys().(*syscall.Stat_t).Nlink, expectedLinks)
+		}
 	}
 }
 

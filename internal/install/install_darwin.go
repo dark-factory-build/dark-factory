@@ -24,11 +24,12 @@ const (
 	databaseName     = "factory.sqlite3"
 	tokenName        = "operator.token"
 	lockName         = "home.lock"
+	lockAnchorName   = "home.lock.anchor"
 	runtimesName     = "runtimes"
 	changesName      = "changes"
 	formatBytes      = "dark-factory-go-home-v1\n"
 	stageSuffix      = ".dark-factory-go-v1.stage"
-	memberCount      = 6
+	memberCount      = 7
 	maxNameSize      = 255
 	maxHomeBytes     = 4096
 	maxPathDepth     = 128
@@ -55,6 +56,7 @@ const (
 	phaseBeforeDatabaseCreate phase = "before database create"
 	phaseBeforeTokenCreate    phase = "before token create"
 	phaseBeforeLockCreate     phase = "before lock create"
+	phaseBeforeLockAnchor     phase = "before lock anchor create"
 	phaseBeforeRuntimesMkdir  phase = "before runtimes mkdir"
 	phaseBeforeChangesMkdir   phase = "before changes mkdir"
 	phaseBeforeStageInspect   phase = "before stage inspect"
@@ -208,6 +210,15 @@ func initHome(ctx context.Context, home string) (result Result, resultErr error)
 		return Result{}, err
 	}
 	if err := writeMember(stageFile, lockName, nil, phaseBeforeLockCreate); err != nil {
+		return Result{}, err
+	}
+	if err := atPhase(phaseBeforeLockAnchor); err != nil {
+		return Result{}, err
+	}
+	if err := unix.Linkat(int(stageFile.Fd()), lockName, int(stageFile.Fd()), lockAnchorName, 0); err != nil {
+		return Result{}, fmt.Errorf("create home lock anchor: %w", err)
+	}
+	if err := verifyLockPair(stageFile); err != nil {
 		return Result{}, err
 	}
 	for _, name := range []string{runtimesName, changesName} {
@@ -696,10 +707,13 @@ func inspectFD(ctx context.Context, home *os.File) (treeSnapshot, error) {
 		}
 		seen[name] = true
 	}
-	for _, name := range []string{formatName, databaseName, tokenName, lockName} {
+	for _, name := range []string{formatName, databaseName, tokenName} {
 		if !seen[name] {
 			return treeSnapshot{}, fmt.Errorf("%w: missing home member", ErrInvalidHome)
 		}
+	}
+	if !seen[lockName] || !seen[lockAnchorName] {
+		return treeSnapshot{}, fmt.Errorf("%w: missing home lock pair", ErrInvalidHome)
 	}
 	for _, name := range []string{runtimesName, changesName} {
 		if !seen[name] {
@@ -715,7 +729,7 @@ func inspectFD(ctx context.Context, home *os.File) (treeSnapshot, error) {
 	if err := inspectToken(home); err != nil {
 		return treeSnapshot{}, err
 	}
-	if err := inspectFile(ctx, home, lockName, nil); err != nil {
+	if err := inspectLockPair(home); err != nil {
 		return treeSnapshot{}, err
 	}
 	for _, name := range []string{runtimesName, changesName} {
@@ -900,13 +914,31 @@ func snapshotFD(ctx context.Context, home *os.File) (treeSnapshot, error) {
 		files:       make(map[string]memberSnapshot, 4),
 		directories: make(map[string]identity, 2),
 	}
-	for _, name := range []string{formatName, databaseName, tokenName, lockName} {
+	for _, name := range []string{formatName, databaseName, tokenName} {
 		file, stat, err := openMember(home, name)
 		if err != nil {
 			return treeSnapshot{}, fmt.Errorf("snapshot home member %s: %w", name, err)
 		}
 		minimum, maximum := memberSizeBounds(name)
 		digest, digestErr := digestMember(ctx, file, stat.Size, minimum, maximum)
+		closeErr := file.Close()
+		if digestErr != nil {
+			return treeSnapshot{}, digestErr
+		}
+		if closeErr != nil {
+			return treeSnapshot{}, closeErr
+		}
+		if err := recheckBinding(home, name, stat); err != nil {
+			return treeSnapshot{}, err
+		}
+		snapshot.files[name] = memberSnapshot{identity: toIdentity(stat), digest: digest}
+	}
+	for _, name := range []string{lockName, lockAnchorName} {
+		file, stat, err := openLockMember(home, name)
+		if err != nil {
+			return treeSnapshot{}, fmt.Errorf("snapshot home lock member %s: %w", name, err)
+		}
+		digest, digestErr := digestMember(ctx, file, stat.Size, 0, 0)
 		closeErr := file.Close()
 		if digestErr != nil {
 			return treeSnapshot{}, digestErr
@@ -952,6 +984,8 @@ func memberSizeBounds(name string) (int64, int64) {
 	case tokenName:
 		return 32, 32
 	case lockName:
+		return 0, 0
+	case lockAnchorName:
 		return 0, 0
 	default:
 		return 0, 0
@@ -1038,7 +1072,7 @@ func sameSnapshot(left, right treeSnapshot) error {
 			return fmt.Errorf("%w: home ancestry changed between inspections", ErrInvalidHome)
 		}
 	}
-	for _, name := range []string{formatName, databaseName, tokenName, lockName} {
+	for _, name := range []string{formatName, databaseName, tokenName, lockName, lockAnchorName} {
 		if left.files[name] != right.files[name] {
 			return fmt.Errorf("%w: home member %s changed between inspections", ErrInvalidHome, name)
 		}
