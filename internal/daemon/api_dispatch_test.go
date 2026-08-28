@@ -137,6 +137,7 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitDispatch(t, done)
+	assertNoSchedulerWake(t, fixture.daemon)
 	if initialSnapshot.Head != 0 || initialSnapshot.Projects == nil || initialSnapshot.Agents == nil || initialSnapshot.Tasks == nil || len(initialSnapshot.Projects) != 0 || len(initialSnapshot.Agents) != 0 || len(initialSnapshot.Tasks) != 0 {
 		t.Fatalf("fresh snapshot = %+v", initialSnapshot)
 	}
@@ -146,6 +147,7 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 		t.Fatalf("head-zero no-op mutation = %+v, %v", noOp, err)
 	}
 	waitDispatch(t, done)
+	assertNoSchedulerWake(t, fixture.daemon)
 
 	done = fixture.serve(t)
 	health, err := client.Health(ctx)
@@ -153,6 +155,7 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 		t.Fatalf("health = %+v, %v", health, err)
 	}
 	waitDispatch(t, done)
+	assertNoSchedulerWake(t, fixture.daemon)
 
 	projectInput := api.CreateProjectInput{ID: testID(1), Name: "project", Root: filepath.Join(t.TempDir(), "source-root")}
 	done = fixture.serve(t)
@@ -161,6 +164,7 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 		t.Fatalf("create project = %+v, %v", projectResult, err)
 	}
 	waitDispatch(t, done)
+	assertNoSchedulerWake(t, fixture.daemon)
 
 	done = fixture.serve(t)
 	agentResult, err := client.CreateShellAgent(ctx, api.CreateShellAgentInput{
@@ -170,6 +174,7 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 		t.Fatalf("create shell agent = %+v, %v", agentResult, err)
 	}
 	waitDispatch(t, done)
+	assertNoSchedulerWake(t, fixture.daemon)
 
 	done = fixture.serve(t)
 	taskResult, err := client.EnqueueTask(ctx, api.EnqueueTaskInput{
@@ -180,6 +185,7 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 		t.Fatalf("enqueue task = %+v, %v", taskResult, err)
 	}
 	waitDispatch(t, done)
+	assertSchedulerWake(t, fixture.daemon)
 
 	done = fixture.serve(t)
 	dispatchResult, err := client.SetDispatch(ctx, 1, true)
@@ -187,6 +193,7 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 		t.Fatalf("set dispatch = %+v, %v", dispatchResult, err)
 	}
 	waitDispatch(t, done)
+	assertSchedulerWake(t, fixture.daemon)
 
 	done = fixture.serve(t)
 	snapshot, err := client.Snapshot(ctx)
@@ -215,6 +222,24 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 	task, found, err := fixture.store.Task(ctx, mustTaskID(t, testID(3)))
 	if err != nil || !found || task.Body != "private task body sentinel" {
 		t.Fatalf("durable task = %+v, found=%v, err=%v", task, found, err)
+	}
+}
+
+func assertSchedulerWake(t *testing.T, daemon *Daemon) {
+	t.Helper()
+	select {
+	case <-daemon.schedulerWake:
+	default:
+		t.Fatal("durable runnable mutation did not wake scheduler")
+	}
+}
+
+func assertNoSchedulerWake(t *testing.T, daemon *Daemon) {
+	t.Helper()
+	select {
+	case <-daemon.schedulerWake:
+		t.Fatal("non-runnable mutation woke scheduler")
+	default:
 	}
 }
 
