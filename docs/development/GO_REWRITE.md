@@ -182,6 +182,127 @@ absolute bind locator is never ownership authority. There is no compatibility
 socket, alternate token, hot rotation, listener factory or server-side path
 fallback. No part of this Local API contract is implemented at `497ecfe4`.
 
+#### Corrected Change disposition and descriptor contract (planned)
+
+A cold read-only audit **BLOCKED** implementation of the literal `c732f103`
+transition table: it preserved a stale row revision across retry and allowed
+abandonment while a registered child could still create or publish the Change.
+The corrected architecture in this section received **ALLOW** for later
+implementation. No Change/schema/runner/worker production code has implemented
+it yet.
+
+The fresh `changes` row contains only:
+
+```text
+id
+project_id
+task_id
+task_incarnation_id
+phase
+object_format
+base_commit
+repository_dev
+repository_inode
+tree_digest
+entry_count
+total_bytes
+tree_dev
+tree_inode
+prepared_at_ms
+available_at_ms
+settled_run_id
+revision
+created_at_ms
+updated_at_ms
+```
+
+Phases are exactly `reserved`, `prepared`, `available`, `retained` and
+`abandoned`. There is no `selected` or durable `unresolved` Change phase, no
+source/staging/repository pathname, no selected timestamp, and no separate
+stage/source identity. Deterministic names come only from `ChangeID` below the
+retained `OperationalHome.Changes` descriptor. One `tree_dev/tree_inode`
+identity survives the staging-to-final no-replace rename.
+
+| Phase | Selection/tree facts | Phase timestamps | Settlement |
+|---|---|---|---|
+| `reserved` | all null | prepared and available null | null |
+| `prepared` | all present | prepared present; available null | null |
+| `available` | all present | prepared and available present | null |
+| `retained` | all present | prepared and available present | exact settling run |
+| `abandoned` | all null | prepared and available null | exact settling run |
+
+Every Change mutation advances `changes.revision` exactly once and appends its
+matching Change invalidation with that new revision in the same immediate
+transaction. Exact replay returns the already-committed value without another
+increment or invalidation. There is no rule equating a phase timestamp with
+`updated_at_ms`: retry legitimately updates the row while preserving original
+preparation/publication timestamps.
+
+The corrected transitions are:
+
+| Transition | Exact committed proof and mutation |
+|---|---|
+| none -> `reserved` revision 1 | admission inserts one path-free Change, appends its invalidation and records revision 1 in the new run |
+| `reserved` N -> `prepared` N+1 | exact Git selection and exact empty staging identity commit together before any blob read |
+| `prepared` N -> `available` N+1 | atomic no-replace publication plus independent exact plain-tree scan; settlement remains null |
+| `available` N -> `retained` N+1 | current run is finalizing, provider process/group release and exact exit/reap are durable, the daemon rescans the exact current tree, replaces digest/count/bytes with those stable facts, and sets `settled_run_id` to this run |
+| `reserved` N -> `abandoned` N+1 | every Change-mutating child authority is positively gone, both deterministic names are absent through parent fsync/recheck, and `settled_run_id` is set to this run |
+| `prepared` N -> `abandoned` N+1 | every Change-mutating child authority is positively gone, final is absent, the exact stage is removed, both names are absent through parent fsync/recheck, obsolete selection/tree/timestamp facts are cleared, and `settled_run_id` is set to this run |
+| `retained` N -> `available` N+1 | only inside retry admission; preserve content/tree/repository facts and timestamps, clear settlement, append the N+1 invalidation and bind the new run to current revision N+1 atomically |
+| `abandoned` N -> `reserved` N+1 | only inside retry admission; retain no old materialization facts, clear settlement, append the N+1 invalidation and bind the new run to current revision N+1 atomically |
+
+“Preserve retained facts” never means preserve the row revision. Both retry
+transitions increment it. `runs.admitted_change_revision` stores the
+post-transition/current revision: N+1 for either retry, or revision 1 for a new
+reservation. A retained retry reaches activation with `available` revision
+equal to its admitted revision and performs no Git selection/materialization.
+A fresh materialization reaches `available` at a revision greater than its
+admitted reservation revision. Both require null settlement.
+
+Abandonment requires provider-process and provider-group resources released,
+exact provider exit evidence, and the registered worker/direct child positively
+reaped or absent before filesystem absence/removal can settle. It also requires
+the runner-process resource released unless the FD 11 slice causally proves the
+outer runner closes its Change-parent duplicate immediately after preparing
+the one-shot inner child and has no respawn path. Until that proof lands,
+runner release is mandatory. Runtime-root release is not a Change-settlement
+precondition. `EPERM`, weak identity, live children, fsync failure or uncertain
+absence leaves the factual Change phase unchanged and the run finalizing.
+
+`FinalizeRun` requires exact `retained` or `abandoned` settlement by the
+current run for its first `finalizing -> terminal` write. A replay of an
+already-terminal historical run remains valid after a later retry clears
+settlement and reopens the same Change; validation must not require every
+historical terminal run to match the Change's latest phase/revision or to
+postdate its latest `updated_at_ms`.
+
+The settlement relationship uses one composite foreign key from
+`changes(settled_run_id, id)` to the corresponding unique
+`runs(id, change_id)` key. The schema test must prove this circular fresh-schema
+relationship with foreign keys enabled. Worker runs have nonnull `change_id`
+and `admitted_change_revision`; orchestrator runs have neither.
+
+Materialization authority remains descriptor-only. The registered Change
+worker receives the retained Change parent as fixed FD 11; the outer runner
+closes its duplicate after one-shot child preparation, the worker sets CLOEXEC
+on receipt and explicitly closes FD 11 before provider exec, and Git/provider
+descriptor censuses exclude it. Retained retry descriptor-opens the
+deterministic final name and performs one full scan immediately before exec;
+it does not add a scan/copy/scan sequence merely for retry.
+
+Required causal mutations include skipped retry revision/invalidation,
+recording N rather than N+1 in the new run, stale settlement, abandonment with
+a live worker/group, missing runner-release/FD11 proof, uncertain absence
+claimed as abandoned, and historical terminal replay rejected after retry.
+Each must fail its focused effect/state test before this contract is accepted.
+
+Open implementation risks are the real filesystem-proof/Store-commit crash
+gaps, the circular settlement foreign key under actual SQLite enforcement, FD
+11's current collision with the gate's optional-control staging descriptor,
+and historical-run validation after later retries. A retained-tree rescan may
+also find provider-created unsafe content; that remains visible and nonterminal
+rather than being silently abandoned.
+
 #### Exact dependency order from this checkpoint
 
 1. Implement and independently review the corrected install-owned Local API
@@ -253,7 +374,7 @@ and dependency order no longer describe the current head.
 | operational Store binding | candidate only; exact-head re-review pending | retain every partially opened pool/file owner and classify hidden close uncertainty |
 | `LocalAPIAuthority` | reviewed contract frozen below; no implementation | capability-bound server listener and stale-socket causal matrix |
 | `RuntimeParent` | reviewed contract frozen below; no implementation | lifetime parent capability, child-operation join and recovery matrix |
-| Change disposition/descriptor handoff | corrected reviewed transition contract frozen below; no implementation | schema/Store transition proof, then worker FD 11 and retry proof |
+| Change disposition/descriptor handoff | then-proposed literal table; later audit BLOCKED its revision and abandonment rules | superseded by the corrected architecture in the current `497ecfe4` checkpoint |
 | standalone daemon, recovery and scheduling | not implemented | concrete `cmd/factoryd`, restart/crash cuts, then one scheduler |
 | service/release/private host | not cut over | isolated install/service proof and exact public-artifact site integration |
 | final elegance and deletion | deliberately not started | whole-runtime DRY/YAGNI audit, mutations, exact-head reviews, then Rust deletion |
@@ -327,9 +448,16 @@ diagnostics but never authorize create/adopt/observe/remove. Do not add a
 platform interface, a second parent type or a lock framework for this one
 Darwin implementation.
 
-#### Frozen Change disposition and descriptor contract (planned)
+#### Superseded Change disposition table (historical; do not implement)
 
-The corrected reviewed design uses deterministic names derived from `ChangeID`
+The later read-only audit **BLOCKED** this literal table. In particular,
+“preserving the retained revision” is unsafe, retry transitions need new
+revisions and same-transaction invalidations, and abandonment cannot commit
+while a registered child may still create or publish. The corrected current
+contract above supersedes every conflicting statement in this historical
+subsection; Git history retains the original planning record.
+
+The then-proposed design uses deterministic names derived from `ChangeID`
 under `OperationalHome.Changes`. It deletes durable `source_root` and
 `staging_root` path columns, their uniqueness/overlap validation and the
 intermediate `selected` phase. Materialization authority is descriptor-only.
@@ -348,17 +476,18 @@ applicable. The factual transitions are:
 | none -> `reserved` | admission binds the deterministic Change identity and exact run/task facts |
 | `reserved` -> `prepared` | exact Git selection and exact empty staging identity commit before any blob read |
 | `prepared` -> `available` | atomic no-replace publication followed by an independent exact plain-tree scan |
-| `available` -> `retained` | current run is finalizing, its provider process/group are positively released, the exact current plain tree is rescanned, and `settled_run_id` binds that run |
-| `reserved` -> `abandoned` | final target and stage are positively absent, followed by parent fsync and absence recheck |
-| `prepared` -> `abandoned` | final target is absent, the exact stage is removed, then both absences are fsynced and rechecked |
-| `retained` -> `available` | only inside retry admission, preserving the retained revision and exact facts |
-| `abandoned` -> `reserved` | only inside retry admission for the same exact Change identity |
+| `available` -> `retained` | superseded: also requires exact exit/reap evidence before rescan and settlement |
+| `reserved` -> `abandoned` | superseded: requires child-release/exit/reap proof, absence fsync/recheck and exact current-run settlement |
+| `prepared` -> `abandoned` | superseded: requires the same child proof, exact removal/absence and clearing obsolete facts before exact current-run settlement |
+| `retained` -> `available` | superseded: retry preserves content facts, clears settlement and advances N to N+1 |
+| `abandoned` -> `reserved` | superseded: retry clears settlement and advances N to N+1 |
 
 `FinalizeRun` requires that the run's Change is `retained` or `abandoned` and
 that `settled_run_id` equals that exact current run. Each run records
 `admitted_change_revision`. A retry of retained work performs no Git selection
-or materialization: admission binds the exact retained revision/facts, then the
-worker descriptor-opens and fully rescans the tree immediately before exec.
+or materialization: admission binds the exact current post-transition revision
+and retained facts, then the worker descriptor-opens and fully rescans the tree
+immediately before exec.
 There is no scan/copy/scan solely for retry; a copy remains verification work,
 not Change admission bookkeeping.
 
@@ -385,8 +514,8 @@ loop or hard cutover exists at `c732f103`.
 ### Historical exact-head checkpoint (earlier 2026-08-28, `25eb8ea`)
 
 This checkpoint superseded the earlier branch-inventory table when it was
-written. It remains historical evidence only; the later `c732f103` checkpoint
-above is the current status and dependency order.
+written. It remains historical evidence only; the `497ecfe4` checkpoint above
+contains the current status, corrected Change contract and dependency order.
 
 - Source head: `25eb8ea47a63ab0e68ad41bc1bf35a71aa233db8`
   on branch `go-hard-cutover`, unpublished and 378 local commits ahead of the
