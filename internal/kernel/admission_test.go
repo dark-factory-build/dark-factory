@@ -468,6 +468,83 @@ func TestIndependentStoresCannotAdmitSameAgentOrTask(t *testing.T) {
 	}
 }
 
+func TestIndependentStoresSerializeDifferentAgentsAtGlobalCapacity(t *testing.T) {
+	store, path, project, firstAgent := newAdmissionStore(t, RoleOrchestrator, 1)
+	secondAgent, err := store.CreateAgent(context.Background(), NewAgent{
+		ID: agentID(t, 101), ProjectID: project.ID, Name: "second capacity contender",
+		Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 5,
+	}, mustTime(t, 4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstTask, err := store.EnqueueTask(context.Background(), NewTask{
+		ID: taskID(t, 102), ProjectID: project.ID, AssignedAgentID: firstAgent.ID,
+		IncarnationID: incarnationID(t, 103), Title: "canonical last slot", Priority: 2,
+	}, mustTime(t, 5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondTask, err := store.EnqueueTask(context.Background(), NewTask{
+		ID: taskID(t, 104), ProjectID: project.ID, AssignedAgentID: secondAgent.ID,
+		IncarnationID: incarnationID(t, 105), Title: "other agent", Priority: 1,
+	}, mustTime(t, 6))
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	defer store.Close()
+
+	type outcome struct {
+		result AdmissionResult
+		err    error
+	}
+	start := make(chan struct{})
+	outcomes := make(chan outcome, 2)
+	var wait sync.WaitGroup
+	for index, candidate := range []*Store{store, other} {
+		wait.Add(1)
+		go func(index int, candidate *Store) {
+			defer wait.Done()
+			<-start
+			result, err := candidate.AdmitNext(context.Background(), admissionKeys(t, byte(106+index*10), nil), mustTime(t, 20))
+			outcomes <- outcome{result: result, err: err}
+		}(index, candidate)
+	}
+	close(start)
+	wait.Wait()
+	close(outcomes)
+	winners := 0
+	for outcome := range outcomes {
+		if outcome.err != nil {
+			t.Fatalf("concurrent global admission: %v", outcome.err)
+		}
+		if outcome.result.Admitted() {
+			winners++
+			if outcome.result.Run.TaskID != firstTask.ID || outcome.result.Run.AgentID != firstAgent.ID {
+				t.Fatalf("noncanonical winner = %+v", outcome.result)
+			}
+		} else if outcome.result.Reason != NoAdmissionAtCapacity {
+			t.Fatalf("loser reason = %s", outcome.result.Reason)
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("global last-slot winners = %d", winners)
+	}
+	freshFirst, _, _ := store.Task(context.Background(), firstTask.ID)
+	freshSecond, _, _ := store.Task(context.Background(), secondTask.ID)
+	var runs int
+	if err := store.readers.QueryRow(`SELECT COUNT(*) FROM runs`).Scan(&runs); err != nil {
+		t.Fatal(err)
+	}
+	if freshFirst.Status != TaskRunning || freshSecond.Status != TaskQueued || runs != 1 {
+		t.Fatalf("durable capacity result first=%+v second=%+v runs=%d", freshFirst, freshSecond, runs)
+	}
+}
+
 func TestAdmissionTaskGuardFailureRollsBackEntireFootprint(t *testing.T) {
 	store, _, project, agent := newAdmissionStore(t, RoleWorker, 2)
 	defer store.Close()

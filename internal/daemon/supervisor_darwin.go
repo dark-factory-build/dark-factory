@@ -183,16 +183,6 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	if run.Role != kernel.RoleWorker || run.Provider != kernel.ProviderShell {
 		return daemon.failRun(run, kernel.FailureSpawn, fmt.Errorf("%w: supervisor spike supports shell workers only", kernel.ErrInvalidValue))
 	}
-	agent, found, err := daemon.store.Agent(ctx, run.AgentID)
-	if err != nil || !found {
-		if err == nil {
-			err = kernel.ErrCorruptState
-		}
-		return daemon.failRun(run, kernel.FailureInternal, err)
-	}
-	if agent.ID != run.AgentID || agent.ProjectID != run.ProjectID || agent.Role != run.Role {
-		return daemon.failRun(run, kernel.FailureInternal, kernel.ErrCorruptState)
-	}
 	project, found, err := daemon.store.Project(ctx, run.ProjectID)
 	if err != nil || !found {
 		if err == nil {
