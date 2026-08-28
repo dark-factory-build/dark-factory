@@ -152,26 +152,39 @@ func TestOpenRecoveredRuntimeAcceptsConsumedConfigAtActivatedAndTerminalCuts(t *
 }
 
 func TestOpenRecoveredRuntimeRejectsConsumedConfigDuringGateScratch(t *testing.T) {
-	beforeFDs := openFDCensus(t)
-	parent, path, identity, _, _, terminal := populatedRecoveredRuntime(t, runtimeTestName)
-	if err := os.Remove(filepath.Join(path, changeworker.ConfigName)); err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name    string
+		residue []string
+	}{
+		{name: "gate scratch", residue: []string{runner.OuterActivationMarkerName, runner.GateConfigScratchName}},
+		{name: "outer only", residue: []string{runner.OuterActivationMarkerName}},
+		{name: "terminal scratch before inner", residue: []string{runner.OuterActivationMarkerName, runner.TerminalScratchName}},
+		{name: "terminal before inner", residue: []string{runner.OuterActivationMarkerName, runner.TerminalSpoolName}},
 	}
-	configureRecoveredResidue(t, path, []string{runner.OuterActivationMarkerName, runner.GateConfigScratchName}, terminal)
-	before := snapshotRuntimeGraph(t, path)
-	if recovered, err := OpenRecoveredRuntime(context.Background(), parent, runtimeTestName, identity); !errors.Is(err, errInvalidContract) || recovered != nil {
-		t.Fatalf("config-free gate scratch accepted: recovered=%+v err=%v", recovered, err)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			beforeFDs := openFDCensus(t)
+			parent, path, identity, _, _, terminal := populatedRecoveredRuntime(t, runtimeTestName)
+			if err := os.Remove(filepath.Join(path, changeworker.ConfigName)); err != nil {
+				t.Fatal(err)
+			}
+			configureRecoveredResidue(t, path, test.residue, terminal)
+			before := snapshotRuntimeGraph(t, path)
+			if recovered, err := OpenRecoveredRuntime(context.Background(), parent, runtimeTestName, identity); !errors.Is(err, errInvalidContract) || recovered != nil {
+				t.Fatalf("config-free pre-consumption residue accepted: recovered=%+v err=%v", recovered, err)
+			}
+			if after := snapshotRuntimeGraph(t, path); after != before {
+				t.Fatalf("rejected config-free residue mutated graph\nbefore:\n%s\nafter:\n%s", before, after)
+			}
+			if _, err := os.Lstat(filepath.Join(path, changeworker.ConfigName)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("rejected recovery recreated worker config: %v", err)
+			}
+			if err := parent.Close(); err != nil {
+				t.Fatal(err)
+			}
+			assertFDCensus(t, beforeFDs)
+		})
 	}
-	if after := snapshotRuntimeGraph(t, path); after != before {
-		t.Fatalf("rejected config-free gate scratch mutated graph\nbefore:\n%s\nafter:\n%s", before, after)
-	}
-	if _, err := os.Lstat(filepath.Join(path, changeworker.ConfigName)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("rejected recovery recreated worker config: %v", err)
-	}
-	if err := parent.Close(); err != nil {
-		t.Fatal(err)
-	}
-	assertFDCensus(t, beforeFDs)
 }
 
 func TestRecoveredRuntimeRejectsReplacedWorkerConfig(t *testing.T) {
