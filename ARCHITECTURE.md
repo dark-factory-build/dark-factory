@@ -12,6 +12,30 @@ Live use remains frozen until an independent exact-main boot review passes.
 The complete design and causal proof matrix live in
 [`docs/development/SAFE_KERNEL_REFACTOR.md`](docs/development/SAFE_KERNEL_REFACTOR.md).
 
+### Go hard-cutover planning authority
+
+The implemented Rust kernel remains the historical evidence described by this
+file until cutover. It is not a compatibility or implementation contract for
+the replacement. The canonical planned Go contract is
+[`docs/development/GO_REWRITE.md`](docs/development/GO_REWRITE.md); when this
+file's retained-Rust queue/provider/TUI wording conflicts with that record, the
+Go rewrite record wins and the old wording must not guide implementation.
+
+In particular, planned Go admission is one cursor-free global
+`Store.AdmitNext(ctx, keys, at)` `BEGIN IMMEDIATE`. No caller nominates an agent,
+task or queue observation. The Store applies durable eligibility and exact
+reason precedence, then orders all eligible task+agent rows by priority
+descending, creation time ascending and exact 16-byte task-ID `BLOB` bytes
+ascending. It validates the selected row's one canonical Change and never skips
+a corrupt, unsettled, hard-invalid or retained-Change-cap-blocked higher-ranked
+row for lower work. Fresh no-admission precedence is `dispatch_disabled`,
+`at_capacity`, `queue_empty`, `no_eligible_work`; retained-Change refusal is
+`change_capacity` with zero footprint, and unknown durable control is
+corruption. Repository and provider executable/configuration
+availability are post-admission typed failures, not stale eligibility filters.
+The exact contract and its pending review status live only in the rewrite
+record; this paragraph does not claim the Go daemon implements it yet.
+
 ## Durable model
 
 `RunId` is the attempt identity. A task can be queued without a run; a run
@@ -67,13 +91,16 @@ pretends the resource disappeared or rewrites the outcome.
    inside the same immediate Store transaction as the mutation. Task and run
    ancestry never grant agent authority. Operator authority cannot be used as
    an attempt identity for completion, blocking, or hooks.
-5. Admission is the only transition from queued work to an attempt. One Store
-   transaction checks dispatch and capacity, selects the current canonical
-   queue head, derives its agent role, provider, and typed execution mode, and
-   binds the immutable task incarnation and work revision before external
-   effects. The factory-wide dispatch switch controls only whether this
-   transaction may admit new work; changing an agent profile or disabling
-   dispatch cannot rewrite an admitted run's launch authority.
+5. Admission is the only transition from queued work to an attempt. For planned
+   Go, one global immediate Store transaction accepts no caller-selected agent,
+   task or cursor; it checks dispatch/capacity/eligibility, selects the canonical
+   task+agent by global priority/time/16-byte-BLOB-ID order, validates its one
+   Change, derives typed launch controls, and binds the immutable task
+   incarnation/work revision before external effects. The retained Rust
+   per-agent queue-head implementation is historical only. The factory-wide
+   dispatch switch controls only whether this transaction may admit new work;
+   changing an agent profile or disabling dispatch cannot rewrite an admitted
+   run's launch authority.
 6. No admitted attempt means no provider process, tool hook, outcome request,
    or writable source lease.
 7. A retry creates a new run and new bearer. It never revives an old process
@@ -191,9 +218,13 @@ retains only its per-launch ephemeral temp scratch in addition to the Change.
 That scratch is provider-owned runtime state, not product source or publication
 authority.
 
-Factoryd validates one exact Claude executable and the finite generated
-settings shapes before Store admission begins. Claude `WorkspaceWrite` is
-macOS-only because its exact AF_UNIX sandbox policy is ignored elsewhere.
+The retained Rust runtime validates one exact Claude executable and the finite
+generated settings shapes before its Store admission begins. That ordering is
+historical, not planned Go eligibility: Go durably admits canonical work first,
+then missing source or provider executable/configuration converges through
+typed `FailureSource` or `FailureSpawn` without falling through to lower work.
+Claude `WorkspaceWrite` is macOS-only because its exact AF_UNIX sandbox policy
+is ignored elsewhere.
 Claude `PlanOnly` has no sandbox stanza, but is conservatively restricted to
 the supported macOS product runtime rather than asserting a second platform
 claim. `Unrestricted` remains available elsewhere. A missing or rejected
@@ -289,7 +320,9 @@ so the architecture does not claim one.
 
 God/orchestrators schedule and prioritize through ordinary authenticated
 requests. Factoryd independently checks project scope, task state, capacity,
-budget, source availability, and admission. An orchestrator cannot create
+budget, durable Change policy, and admission. Planned Go treats external
+repository/provider availability as a typed post-admission failure, not a
+scheduler filter. An orchestrator cannot create
 Changes, launch processes directly, mutate capacity or agents, choose an
 outcome for another attempt, or finalize a run. Its death cannot prevent the
 daemon finalizer from converging.

@@ -6,6 +6,16 @@ This document records the enduring kernel contract and the causal proof needed
 for that review. It is not a merge diary. GitHub owns issue and pull-request
 history; [the roadmap](../../ROADMAP.md) owns work after the boot decision.
 
+## Go hard-cutover planning authority
+
+The implemented Rust kernel remains evidence, and Rust-specific process/crate/
+queue wording below is historical where it conflicts with the replacement.
+The canonical planned Go contract is
+[`GO_REWRITE.md`](GO_REWRITE.md); it currently requires fresh exact-head review
+and does not claim a finished Go daemon. Go implementation must not copy the
+retained Rust per-agent admission loop, non-interactive stdin contract, cache
+selection or crate graph merely because it appears here.
+
 ## Kernel model
 
 `RunId` is the attempt identity. Queued work has no run and no provider
@@ -41,22 +51,32 @@ its next durable owner. Cleanup uncertainty leaves the run visibly
 
 ## Admission and principals
 
-Admission is one immediate Store transaction. It:
+Planned Go admission is one global cursor-free
+`Store.AdmitNext(ctx, keys, at)` immediate transaction. It accepts no AgentID,
+task, queue observation or fairness cursor. Every call supplies fresh daemon
+IDs, including one unconditional candidate Change ID that is used only for a
+selected worker incarnation with no existing canonical Change.
 
-1. checks the durable dispatch switch and capacity;
-2. loads the current agent and profile;
-3. selects the canonical assigned queue head using the shared ordering;
-4. derives role, provider, task incarnation, work revision, and typed execution
-   mode;
-5. reserves or reuses the exact Change where the role requires one;
-6. writes the running task projection, admitted run, bearer digest, resources,
-   messages, and events; and
-7. returns the immutable launch target.
+After RunID reconciliation, exact fresh-decision precedence is
+`dispatch_disabled`, `at_capacity`, `queue_empty`, then `no_eligible_work`.
+Eligibility means queued task, valid same-project assigned agent, not paused,
+durable budget remaining, no conflicting open run, and valid role/provider/
+mode/profile/project/verification controls. Unknown durable control is
+`ErrCorruptState`, never ineligibility. The Store selects globally by priority
+descending, creation time ascending and exact 16-byte task-ID SQLite `BLOB`
+bytes ascending. It then validates that row's canonical Change: corrupt,
+unsettled or hard-invalid state fails closed without skipping to lower work;
+the retained-Change hard cap returns `change_capacity` with zero footprint and
+also does not fall through. A successful transaction writes the full task/run/
+bearer/resource/session/Change/invalidation footprint and returns only the
+committed launch target. Reconcile-only failure is `not_reconciled`.
 
-Execution cannot select an arbitrary queued task or provider. A reorder or new
-higher-priority assignment before the transaction changes what is admitted;
-the caller's stale observation does not win. Process-local locks may serialize
-effects but never prove durable assignment or authority.
+Repository availability and provider executable/configuration availability are
+deliberate post-admission `FailureSource` and `FailureSpawn` outcomes
+respectively, never scheduler filters.
+A reorder or higher-priority insertion before the transaction changes what is
+admitted; a caller's stale observation cannot nominate work. Process-local
+locks may serialize effects but never prove durable assignment or authority.
 
 The bearer resolves to one exact project, agent, task, run, role, provider, and
 Change. It authorizes effects only while that run is `running`. Attempt calls
@@ -87,9 +107,11 @@ an old credential, conversation, or process.
 
 ## Process and resource ownership
 
-One admitted run launches one fresh non-interactive provider process. Startup
-input is written once to stdin and stdin closes. There is no resident provider,
-PTY attach/input, prompt replay, delivery journal, or provider-process resume.
+The retained Rust runtime launches one fresh non-interactive provider process;
+startup input is written once and stdin closes. Planned Go instead launches one
+fresh runner-owned PTY provider with explicit browser attach/input lease. Neither
+runtime has a taskless resident provider, prompt replay, delivery journal or
+provider-process resume.
 
 Launch uses register-before-exec gates:
 
@@ -181,9 +203,10 @@ then cross an explicit quarantine and acceptance boundary before it can create
 or message work. External payloads must never materialize executable tasks
 directly.
 
-## Ownership boundaries
+## Retained Rust ownership boundaries (historical for Go)
 
-Keep the five crates that reflect real dependency and process boundaries:
+The following five crates describe the retained Rust implementation and must
+not guide the Go package graph or preserve its TUI:
 
 - `factory-core`: current domain and bounded wire types;
 - `factory-runner`: provider-blind process host and blocked-exec handshake;
@@ -208,7 +231,7 @@ callback or row:
 | --- | --- |
 | Crash and restart | Inject failure after admission, resource declaration, each blocked-exec release, provider exit, external cleanup, and before acknowledgement. Restart yields at most one provider execution, no input replay, exact identity, and idempotent convergence. |
 | Taskless refusal | With no admitted run, no provider exists. Old, forged, taskless, finalizing, and terminal credentials cannot mutate task, budget, source, or outcome state. |
-| Queue race | Reorder or insert higher-priority assigned work between observation and admission. The Store admits only the canonical queue head selected inside its transaction. |
+| Queue race | Race multiple agents, insert higher-priority work after stale observation, and exercise exact reason precedence, SQL eligibility and priority/time/16-byte-BLOB ties. Corrupt/unsettled or `change_capacity` canonical work never falls through; caller AgentID/task/cursor and external-availability filters cannot affect selection. |
 | Hierarchy scope | Construct alternate durable agent hierarchies and attempt cross-agent messaging, creation, and assignment. The same mutation transaction uses the stored hierarchy and refuses siblings, ancestors outside the worker allowance, and non-descendants. |
 | Outcome and exit race | Exercise request-before-exit and exit-before-request. The first `finalizing` request wins; only failed configured verification may refine proposed success. |
 | Completion ordering | After a success proposal, further attempt mutation and successor admission are refused until provider reap, exact snapshot and configured verification, release of every resource, and terminalization. |
@@ -216,9 +239,9 @@ callback or row:
 | External finalization | Kill provider, runner, verifier, and daemon at separate cuts. Recovery touches only exact resources. Leader loss with live descendants remains nonterminal past restart and converges only after exact group absence. The operator launchd service is outside attempt ownership, is not a `KernelResource`, and is proven separately by a release fixture. |
 | Source boundary | Materialize one exact commit; repository discovery and ordinary worktree creation fail in the provider view. Removal refuses a replacement identity. |
 | Immutable source and launch | Concurrent Change mutation yields one canonical snapshot or fails before compilation. Replacing or tampering with prepared test output cannot change what launches. |
-| Cache reuse and bounds | Two revisions reuse one project/toolchain cache while producing distinct source-bound manifests. Cache count and measured-byte pressure refuse or reclaim only regenerable entries. Separately, exceeding the hard factory-wide retained-Change count cap refuses new admission without deleting retained work. |
+| Cache reuse and bounds | Two revisions reuse one project/toolchain cache while producing distinct source-bound manifests. Cache count and measured-byte pressure refuse or reclaim only regenerable entries. Separately, exceeding the hard factory-wide retained-Change count cap returns exact `change_capacity`, commits zero footprint, does not delete retained work and never skips to lower-ranked work. |
 | Orchestrator policy only | Orchestrators remain subject to hierarchy scope and cannot direct-launch, publish repositories, submit another attempt's outcome, mutate capacity or budgets, or invoke operator control. |
-| Dispatch and execution mode | Disabled dispatch admits nothing. An admitted run retains its frozen typed mode across profile and dispatch changes, and every provider maps each supported mode to exact non-interactive native flags. |
+| Dispatch and execution mode | Disabled dispatch admits nothing. An admitted run retains its frozen typed mode across profile and dispatch changes. Retained Rust maps each mode to exact non-interactive flags; planned Go proves its separate PTY adapter mapping without changing admission authority. |
 
 Process tests use a temporary `DARK_FACTORY_HOME`, explicit private socket,
 unique disposable paths and labels, deterministic providers, and two
@@ -236,7 +259,9 @@ The independent reviewer must inspect one exact `main` commit and confirm:
 - the run phase/outcome contract is the only work and terminalization
   authority;
 - no provider exists or mutates without one exact running attempt;
-- queue selection and hierarchy authorization occur transactionally;
+- planned Go queue selection is one global cursor-free immediate transaction
+  with exact eligibility/reason/BLOB ordering and no caller nomination, while
+  hierarchy authorization remains transactional;
 - typed execution mode is separate from dispatch and frozen at admission;
 - crashes, identity reuse, and verifier leader loss cannot cause replay,
   unsafe cleanup, or premature terminalization;

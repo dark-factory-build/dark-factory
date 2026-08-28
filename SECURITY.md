@@ -14,6 +14,28 @@ security fixes.
 
 Live use remains frozen until an independent exact-main boot review passes.
 
+### Go hard-cutover planning authority
+
+This file describes security properties of the implemented Rust kernel unless
+a passage explicitly names planned Go. Retained Rust queue selection,
+non-interactive providers and pre-admission executable probing are historical
+evidence, not compatibility requirements. The authoritative planned Go
+contract is [`docs/development/GO_REWRITE.md`](docs/development/GO_REWRITE.md),
+which currently requires fresh exact-head review and does not claim a finished
+daemon.
+
+Planned Go admission is one global cursor-free immediate Store transaction with
+no caller AgentID/task/observation. It validates durable eligibility and reason
+precedence, orders by priority descending, creation time ascending and exact
+16-byte task-ID `BLOB` bytes ascending, then validates the selected canonical
+Change without skipping corrupt/cap-blocked higher work. Unknown durable
+control is corruption. Exact fresh no-admission precedence is
+`dispatch_disabled`, `at_capacity`, `queue_empty`, `no_eligible_work`, with
+selected retained-Change refusal reported separately as `change_capacity` and
+zero footprint. External repository and provider executable/config
+availability becomes typed post-admission failure rather than a stale
+scheduler filter.
+
 ## Threat model
 
 Dark Factory is a local, single-operator application. Provider processes run as
@@ -120,9 +142,12 @@ labels are reported as unresolved rather than touched. A run remains visibly
 
 ## Provider and tool boundary
 
-Each admitted run gets one fresh non-interactive provider process and one
-startup input. There are no taskless resident processes, PTY attach/input,
-delivery replay, provider resume, or session outboxes.
+The retained Rust runtime gives each admitted run one fresh non-interactive
+provider process and one startup input. There are no taskless resident
+processes, delivery replay, provider resume, or session outboxes. Planned Go
+replaces the closed-stdin portion with one fresh runner-owned PTY process and
+explicit authenticated attach/input/lease authority as frozen in the rewrite
+record; this is not authority to reuse a process across runs.
 
 Provider hooks are authenticated observations and bounded requests.
 `PreToolUse` applies the durable tool-call budget and a conservative command
@@ -141,19 +166,21 @@ Factory dispatch and provider authority are separate durable controls.
 it off cannot weaken or rewrite an already-admitted attempt. Every agent instead
 has one typed execution mode, frozen onto the run at admission:
 
-- `PlanOnly` is non-interactive and source-read-only; the two exact attempt
-  outcome requests remain available;
-- `WorkspaceWrite` is non-interactive and bounds durable writes to the admitted
-  source with the provider's native sandbox. Codex also denies both system temp
-  aliases. Claude requires its own per-launch temporary scratch directory;
-  that provider-owned ephemeral directory is the one explicit write exception;
-  and
+- In retained Rust, `PlanOnly` is non-interactive and source-read-only; the two
+  exact attempt outcome requests remain available;
+- in retained Rust, `WorkspaceWrite` is non-interactive and bounds durable
+  writes to the admitted source with the provider's native sandbox. Codex also
+  denies both system temp aliases. Claude requires its own per-launch temporary
+  scratch directory; that provider-owned ephemeral directory is the one
+  explicit write exception; and
 - `Unrestricted` uses the provider's explicit approval/sandbox bypass.
 
-The same admission transaction checks capacity, selects the canonical assigned
-queue head, and derives the task revision, role, provider, Change lease, and
-execution mode. A stale dispatcher read cannot choose different work or
-authority.
+For planned Go, the same global `BEGIN IMMEDIATE` checks dispatch, factory
+capacity and durable eligibility, then selects the canonical task+agent across
+the factory; no caller or per-agent loop chooses a queue head. It validates the
+selected Change and derives task revision, role, provider and execution mode in
+that transaction. A stale dispatcher read cannot choose work or authority.
+The per-agent assigned-queue wording in retained Rust is historical only.
 
 Codex and Claude agents default to `WorkspaceWrite`. The shell test adapter has
 no native restriction mechanism and therefore supports only `Unrestricted`
@@ -167,9 +194,12 @@ depend on that policy, but is conservatively restricted to the supported macOS
 product runtime rather than asserting a second platform claim. `Unrestricted`
 remains available elsewhere. Factoryd resolves and validates one exact
 reviewed Claude executable and every generated settings shape before opening
-the Store for admission. Missing or invalid Claude makes that provider
-unavailable without stopping Codex or Shell; a Claude launch, changed
-executable, or unreviewed version fails closed. Codex launch configuration is
+the retained Rust Store for admission. Planned Go deliberately does not use
+that availability as eligibility: canonical work admits first and missing or
+invalid external repository state becomes typed `FailureSource`, while missing
+or invalid provider executable/configuration becomes typed `FailureSpawn`,
+without selecting lower work. A Claude launch, changed executable, or
+unreviewed version fails closed. Codex launch configuration is
 parsed under `--strict-config` in every mode so a future CLI cannot silently
 ignore the daemon-authored hooks or typed permission profile.
 
