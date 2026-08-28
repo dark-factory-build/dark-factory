@@ -154,15 +154,6 @@ func initHome(ctx context.Context, home string) (result Result, resultErr error)
 	if err := unix.Mkdirat(int(parent.file.Fd()), stage, 0o700); err != nil {
 		return Result{}, fmt.Errorf("create staging home: %w", err)
 	}
-	if err := atPhase(phaseAfterStageMkdir); err != nil {
-		return Result{}, err
-	}
-	if err := syncDirectory(int(parent.file.Fd())); err != nil {
-		return Result{}, fmt.Errorf("sync home parent after staging mkdir: %w", err)
-	}
-	if err := atPhase(phaseAfterStageParentSync); err != nil {
-		return Result{}, err
-	}
 	stageFile, err := openDirectoryAt(parent.file, stage)
 	if err != nil {
 		return Result{}, fmt.Errorf("open staging home: %w", err)
@@ -171,6 +162,27 @@ func initHome(ctx context.Context, home string) (result Result, resultErr error)
 	var stageStat unix.Stat_t
 	if err := unix.Fstat(int(stageFile.Fd()), &stageStat); err != nil {
 		return Result{}, fmt.Errorf("inspect staging home: %w", err)
+	}
+	if err := atPhase(phaseAfterStageMkdir); err != nil {
+		return Result{}, err
+	}
+	if err := parent.recheck(); err != nil {
+		return Result{}, err
+	}
+	if err := recheckBinding(parent.file, stage, stageStat); err != nil {
+		return Result{}, err
+	}
+	if err := syncDirectory(int(parent.file.Fd())); err != nil {
+		return Result{}, fmt.Errorf("sync home parent after staging mkdir: %w", err)
+	}
+	if err := atPhase(phaseAfterStageParentSync); err != nil {
+		return Result{}, err
+	}
+	if err := parent.recheck(); err != nil {
+		return Result{}, err
+	}
+	if err := recheckBinding(parent.file, stage, stageStat); err != nil {
+		return Result{}, err
 	}
 
 	// Everything after mkdir is deliberately left in the stage on failure.

@@ -24,6 +24,15 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+type earlyStageEvidence struct {
+	detached          string
+	detachedBefore    [32]byte
+	replacement       string
+	replacementBefore [32]byte
+	target            string
+	targetBefore      [32]byte
+}
+
 func TestInitPublishesExactHomeAndReplaysReadOnly(t *testing.T) {
 	parent := installTempDir(t)
 	home := filepath.Join(parent, "home")
@@ -844,6 +853,136 @@ func TestPublishBoundaryStageRemovalOrReplacementCannotPublish(t *testing.T) {
 				t.Fatalf("removed stage was recreated: %v", err)
 			}
 		})
+	}
+}
+
+func TestEarlyStageBindingRefusesForeignReplacementBeforePopulation(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(t *testing.T, stage string) (earlyStageEvidence, error)
+	}{
+		{name: "remove", mutate: func(t *testing.T, stage string) (earlyStageEvidence, error) {
+			return earlyStageEvidence{}, os.Remove(stage)
+		}},
+		{name: "directory replacement", mutate: func(t *testing.T, stage string) (earlyStageEvidence, error) {
+			return replaceEarlyStage(t, stage, func(path string) (string, error) {
+				return "", os.Mkdir(path, 0o700)
+			})
+		}},
+		{name: "file replacement", mutate: func(t *testing.T, stage string) (earlyStageEvidence, error) {
+			return replaceEarlyStage(t, stage, func(path string) (string, error) {
+				return "", os.WriteFile(path, []byte("foreign stage"), 0o600)
+			})
+		}},
+		{name: "symlink replacement", mutate: func(t *testing.T, stage string) (earlyStageEvidence, error) {
+			return replaceEarlyStage(t, stage, func(path string) (string, error) {
+				target := path + ".target"
+				if err := os.Mkdir(target, 0o700); err != nil {
+					return "", err
+				}
+				return target, os.Symlink(target, path)
+			})
+		}},
+	}
+	for _, point := range []struct {
+		name  string
+		phase phase
+	}{
+		{name: "after stage mkdir", phase: phaseAfterStageMkdir},
+		{name: "after stage parent sync", phase: phaseAfterStageParentSync},
+	} {
+		for _, test := range cases {
+			t.Run(point.name+"/"+test.name, func(t *testing.T) {
+				parent := installTempDir(t)
+				home := filepath.Join(parent, "home")
+				stage := filepath.Join(parent, ".home"+stageSuffix)
+				var got earlyStageEvidence
+				var hit bool
+				phaseHook = func(current phase) error {
+					if current != point.phase {
+						return nil
+					}
+					hit = true
+					var err error
+					got, err = test.mutate(t, stage)
+					return err
+				}
+				defer func() { phaseHook = nil }()
+				_, err := Init(context.Background(), home)
+				if !hit {
+					t.Fatal("early stage phase was not reached")
+				}
+				if err == nil {
+					t.Fatal("init accepted a replaced or removed stage")
+				}
+				if errors.Is(err, ErrUncertain) {
+					t.Fatalf("early stage replacement became uncertain: %v", err)
+				}
+				if _, statErr := os.Lstat(home); !errors.Is(statErr, os.ErrNotExist) {
+					t.Fatalf("final home after early stage replacement: %v", statErr)
+				}
+				if got.detached != "" {
+					if after := installDigest(t, got.detached); after != got.detachedBefore {
+						t.Fatal("detached original stage changed")
+					}
+					assertStageStillEmpty(t, got.detached)
+				}
+				if got.replacement != "" {
+					if after := installDigest(t, got.replacement); after != got.replacementBefore {
+						t.Fatal("foreign stage replacement changed")
+					}
+				}
+				if got.target != "" {
+					if after := installDigest(t, got.target); after != got.targetBefore {
+						t.Fatal("foreign stage symlink target changed")
+					}
+				}
+				if test.name == "remove" {
+					if _, statErr := os.Lstat(stage); !errors.Is(statErr, os.ErrNotExist) {
+						t.Fatalf("removed stage was recreated: %v", statErr)
+					}
+				} else {
+					assertStageStillEmpty(t, stage)
+				}
+			})
+		}
+	}
+}
+
+func replaceEarlyStage(t *testing.T, stage string, create func(string) (string, error)) (earlyStageEvidence, error) {
+	t.Helper()
+	old := stage + ".original"
+	if err := os.Rename(stage, old); err != nil {
+		return earlyStageEvidence{}, err
+	}
+	target, err := create(stage)
+	if err != nil {
+		return earlyStageEvidence{}, err
+	}
+	result := earlyStageEvidence{detached: old, replacement: stage, target: target}
+	result.detachedBefore = installDigest(t, old)
+	result.replacementBefore = installDigest(t, stage)
+	if target != "" {
+		result.targetBefore = installDigest(t, target)
+	}
+	return result, nil
+}
+
+func assertStageStillEmpty(t *testing.T, path string) {
+	t.Helper()
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatalf("stage evidence %s: %v", path, err)
+	}
+	if !info.IsDir() {
+		return
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		t.Fatalf("read stage evidence %s: %v", path, err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("stage evidence %s was populated: %v", path, entries)
 	}
 }
 
