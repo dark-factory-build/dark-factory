@@ -349,7 +349,7 @@ func TestFinalizingConsumesFactoryCapacity(t *testing.T) {
 	if _, err := store.FailRun(context.Background(), first.Run.ID, first.Run.Revision, failure, mustTime(t, 11)); err != nil {
 		t.Fatal(err)
 	}
-	secondAgent, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 123), ProjectID: project.ID, Name: "second", Role: RoleOrchestrator, Provider: ProviderCodex, ExecutionMode: ExecutionWorkspaceWrite, ToolBudgetLimit: 2}, mustTime(t, 12))
+	secondAgent, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 123), ProjectID: project.ID, Name: "second", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 2}, mustTime(t, 12))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -467,7 +467,7 @@ func TestFailRunRacesAttemptSuccessAndCancellationWithoutOverwrite(t *testing.T)
 func TestResourceIdentityCannotBeReusedAcrossRuns(t *testing.T) {
 	store, _, project, firstAgent := newAdmissionStore(t, RoleOrchestrator, 4)
 	defer store.Close()
-	secondAgent, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 211), ProjectID: project.ID, Name: "second", Role: RoleOrchestrator, Provider: ProviderCodex, ExecutionMode: ExecutionWorkspaceWrite, ToolBudgetLimit: 2}, mustTime(t, 4))
+	secondAgent, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 211), ProjectID: project.ID, Name: "second", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 2}, mustTime(t, 4))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -754,7 +754,7 @@ func TestConcurrentCompletionAndExitHaveOneImmutableWinner(t *testing.T) {
 func TestRecoverableRunsAreCanonicalOrderedAndPrivateStateStaysOutOfPublicProjection(t *testing.T) {
 	store, _, project, firstAgent := newAdmissionStore(t, RoleOrchestrator, 4)
 	defer store.Close()
-	secondAgent, _ := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 141), ProjectID: project.ID, Name: "second", Role: RoleOrchestrator, Provider: ProviderCodex, ExecutionMode: ExecutionWorkspaceWrite, Model: "MODEL_SENTINEL", ToolBudgetLimit: 2}, mustTime(t, 4))
+	secondAgent, _ := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 141), ProjectID: project.ID, Name: "second", Role: RoleOrchestrator, Provider: ProviderCodex, Model: "MODEL_SENTINEL", ToolBudgetLimit: 2}, mustTime(t, 4))
 	_, _ = store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 142), ProjectID: project.ID, AssignedAgentID: secondAgent.ID, IncarnationID: incarnationID(t, 143), Title: "second", Body: "BODY_SENTINEL"}, mustTime(t, 5))
 	_, _ = store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 144), ProjectID: project.ID, AssignedAgentID: firstAgent.ID, IncarnationID: incarnationID(t, 145), Title: "first"}, mustTime(t, 5))
 	first, err := store.AdmitNext(context.Background(), firstAgent.ID, admissionKeys(t, 170, nil), mustTime(t, 10))
@@ -851,7 +851,7 @@ func finalizingReleasedRun(t *testing.T, role AgentRole, policy VerificationPoli
 		store.Close()
 		t.Fatal(err)
 	}
-	agent, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 241), ProjectID: project.ID, Name: "agent", Role: role, Provider: ProviderCodex, ExecutionMode: ExecutionWorkspaceWrite, ToolBudgetLimit: 2}, mustTime(t, 3))
+	agent, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 241), ProjectID: project.ID, Name: "agent", Role: role, Provider: ProviderCodex, ToolBudgetLimit: 2}, mustTime(t, 3))
 	if err != nil {
 		store.Close()
 		t.Fatal(err)

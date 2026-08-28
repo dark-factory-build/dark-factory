@@ -66,6 +66,21 @@ func TestDatabaseImageOpenExactSchemaAndIdentity(t *testing.T) {
 	}
 }
 
+func TestFreshSchemaHasNoSelectableLaunchPolicy(t *testing.T) {
+	store, _ := newTestStore(t)
+	defer store.Close()
+	removedColumn := "execution" + "_mode"
+	for _, table := range []string{"agents", "runs"} {
+		var count int
+		if err := store.readers.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, table, removedColumn).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("%s retained a selectable launch-policy column", table)
+		}
+	}
+}
+
 func TestOpenRejectsForeignPathsWithoutModification(t *testing.T) {
 	ctx := context.Background()
 	at := mustTime(t, 1)

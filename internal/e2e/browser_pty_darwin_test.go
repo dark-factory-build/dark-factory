@@ -233,7 +233,7 @@ func newFixture(t *testing.T, seed byte, test scenario, factoryctl, runnerExecut
 	}
 	if _, err := result.store.CreateAgent(context.Background(), kernel.NewAgent{
 		ID: result.agentID, ProjectID: project.ID, Name: "e2e-worker", Role: kernel.RoleWorker,
-		Provider: kernel.ProviderShell, ExecutionMode: kernel.ExecutionUnrestricted, ToolBudgetLimit: 20,
+		Provider: kernel.ProviderShell, ToolBudgetLimit: 20,
 	}, now); err != nil {
 		t.Fatal(err)
 	}

@@ -248,7 +248,7 @@ func TestBrowserAdapterPairsAuthenticatesPagesAndReloadsRevocation(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent, err := fixture.store.CreateAgent(ctx, kernel.NewAgent{ID: agentID, ProjectID: project.ID, Name: "public agent", Role: kernel.RoleOrchestrator, Provider: kernel.ProviderCodex, ExecutionMode: kernel.ExecutionWorkspaceWrite, Model: "PRIVATE_MODEL_SENTINEL", ToolBudgetLimit: 4}, adapterTime(t, 11))
+	agent, err := fixture.store.CreateAgent(ctx, kernel.NewAgent{ID: agentID, ProjectID: project.ID, Name: "public agent", Role: kernel.RoleOrchestrator, Provider: kernel.ProviderCodex, Model: "PRIVATE_MODEL_SENTINEL", ToolBudgetLimit: 4}, adapterTime(t, 11))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -445,7 +445,7 @@ func TestBrowserAdapterTerminalTargetProjectsExactActiveAndNoTarget(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	noRunAgent, err := fixture.store.CreateAgent(context.Background(), kernel.NewAgent{ID: agentID, ProjectID: project.ID, Name: "no-target-agent", Role: kernel.RoleWorker, Provider: kernel.ProviderShell, ExecutionMode: kernel.ExecutionUnrestricted, ToolBudgetLimit: 1}, adapterTime(t, 701))
+	noRunAgent, err := fixture.store.CreateAgent(context.Background(), kernel.NewAgent{ID: agentID, ProjectID: project.ID, Name: "no-target-agent", Role: kernel.RoleWorker, Provider: kernel.ProviderShell, ToolBudgetLimit: 1}, adapterTime(t, 701))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1068,7 +1068,7 @@ func adapterRunningRun(t *testing.T, store *kernel.Store, seed byte) kernel.Run 
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent, err := store.CreateAgent(ctx, kernel.NewAgent{ID: agentID, ProjectID: project.ID, Name: fmt.Sprintf("run-agent-%d", seed), Role: kernel.RoleOrchestrator, Provider: kernel.ProviderCodex, ExecutionMode: kernel.ExecutionWorkspaceWrite, ToolBudgetLimit: 4}, adapterTime(t, 201))
+	agent, err := store.CreateAgent(ctx, kernel.NewAgent{ID: agentID, ProjectID: project.ID, Name: fmt.Sprintf("run-agent-%d", seed), Role: kernel.RoleOrchestrator, Provider: kernel.ProviderCodex, ToolBudgetLimit: 4}, adapterTime(t, 201))
 	if err != nil {
 		t.Fatal(err)
 	}

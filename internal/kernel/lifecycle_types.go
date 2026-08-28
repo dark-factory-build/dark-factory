@@ -732,7 +732,6 @@ type Run struct {
 	ChangeID                 *ChangeID
 	Role                     AgentRole
 	Provider                 Provider
-	ExecutionMode            ExecutionMode
 	Model                    string
 	ReasoningEffort          string
 	VerificationPolicy       VerificationPolicy
@@ -849,7 +848,6 @@ type AttemptAuthority struct {
 	TaskIncarnation IncarnationID
 	Role            AgentRole
 	Provider        Provider
-	ExecutionMode   ExecutionMode
 	ChangeID        *ChangeID
 }
 

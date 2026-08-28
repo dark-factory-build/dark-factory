@@ -235,7 +235,7 @@ func TestResolveAgentTerminalTargetNoCrossAgentSelection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 252), ProjectID: otherProject.ID, Name: "other-agent", Role: RoleOrchestrator, Provider: ProviderCodex, ExecutionMode: ExecutionWorkspaceWrite, ToolBudgetLimit: 2}, mustTime(t, 5))
+	_, err = store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 252), ProjectID: otherProject.ID, Name: "other-agent", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 2}, mustTime(t, 5))
 	if err != nil {
 		t.Fatal(err)
 	}

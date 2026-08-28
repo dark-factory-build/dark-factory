@@ -75,7 +75,7 @@ func TestPublicStateTraversalKeepsEveryKindAndNoRowsAreLost(t *testing.T) {
 	}
 	for index := 9; index >= 1; index-- {
 		id := publicAgentID(t, index)
-		if _, err := store.CreateAgent(ctx, NewAgent{ID: id, ProjectID: project.ID, Name: fmt.Sprintf("agent-%d", index), Role: RoleOrchestrator, Provider: ProviderCodex, ExecutionMode: ExecutionWorkspaceWrite, ToolBudgetLimit: 1}, mustTime(t, int64(500+index))); err != nil {
+		if _, err := store.CreateAgent(ctx, NewAgent{ID: id, ProjectID: project.ID, Name: fmt.Sprintf("agent-%d", index), Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 1}, mustTime(t, int64(500+index))); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -543,7 +543,7 @@ func TestPublicStateEntityProjectionOmitsPrivateRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent, err := store.CreateAgent(ctx, NewAgent{ID: publicAgentID(t, 1), ProjectID: project.ID, Name: "public agent", Role: RoleWorker, Provider: ProviderCodex, ExecutionMode: ExecutionWorkspaceWrite, Model: "PRIVATE_MODEL_SENTINEL", ReasoningEffort: "xhigh", ToolBudgetLimit: 987654321}, mustTime(t, 3))
+	agent, err := store.CreateAgent(ctx, NewAgent{ID: publicAgentID(t, 1), ProjectID: project.ID, Name: "public agent", Role: RoleWorker, Provider: ProviderCodex, Model: "PRIVATE_MODEL_SENTINEL", ReasoningEffort: "xhigh", ToolBudgetLimit: 987654321}, mustTime(t, 3))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -579,7 +579,7 @@ func TestPublicStateEntityProjectionOmitsPrivateRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	encoded := string(projectJSON) + string(agentJSON) + string(taskJSON)
-	for _, private := range []string{"PRIVATE_ROOT_SENTINEL", "PRIVATE_MODEL_SENTINEL", "PRIVATE_BODY_SENTINEL", "xhigh", "987654321", "workspace_write", "codex"} {
+	for _, private := range []string{"PRIVATE_ROOT_SENTINEL", "PRIVATE_MODEL_SENTINEL", "PRIVATE_BODY_SENTINEL", "xhigh", "987654321", "codex"} {
 		if strings.Contains(encoded, private) {
 			t.Fatalf("entity projections exposed %q: %s", private, encoded)
 		}

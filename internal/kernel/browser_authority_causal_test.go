@@ -1000,7 +1000,7 @@ func addRunningRunOnStore(t *testing.T, store *Store, seed byte) Run {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	agent, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, seed+1), ProjectID: project.ID, Name: fmt.Sprintf("browser-agent-%d", seed), Role: RoleOrchestrator, Provider: ProviderCodex, ExecutionMode: ExecutionWorkspaceWrite, ToolBudgetLimit: 5}, mustTime(t, 101+int64(seed)))
+	agent, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, seed+1), ProjectID: project.ID, Name: fmt.Sprintf("browser-agent-%d", seed), Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 101+int64(seed)))
 	if err != nil {
 		t.Fatalf("create agent: %v", err)
 	}

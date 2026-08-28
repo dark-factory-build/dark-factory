@@ -318,7 +318,7 @@ func TestFailRunSharesOperationGateWithTerminalEffects(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.CreateAgent(ctx, kernel.NewAgent{ID: agentID, ProjectID: project.ID, Name: "gate-agent", Role: kernel.RoleOrchestrator, Provider: kernel.ProviderShell, ExecutionMode: kernel.ExecutionUnrestricted, ToolBudgetLimit: 1}, supervisorTime()); err != nil {
+	if _, err := store.CreateAgent(ctx, kernel.NewAgent{ID: agentID, ProjectID: project.ID, Name: "gate-agent", Role: kernel.RoleOrchestrator, Provider: kernel.ProviderShell, ToolBudgetLimit: 1}, supervisorTime()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.EnqueueTask(ctx, kernel.NewTask{ID: taskID, ProjectID: project.ID, AssignedAgentID: agentID, IncarnationID: supervisorIncarnationID(t, 213), Title: "gate-task"}, supervisorTime()); err != nil {
@@ -1234,7 +1234,7 @@ func newSupervisorFixture(t *testing.T, program string) *supervisorFixture {
 	}
 	if _, err := store.CreateAgent(context.Background(), kernel.NewAgent{
 		ID: agentID, ProjectID: project.ID, Name: "worker", Role: kernel.RoleWorker,
-		Provider: kernel.ProviderShell, ExecutionMode: kernel.ExecutionUnrestricted, ToolBudgetLimit: 20,
+		Provider: kernel.ProviderShell, ToolBudgetLimit: 20,
 	}, supervisorTime()); err != nil {
 		t.Fatal(err)
 	}

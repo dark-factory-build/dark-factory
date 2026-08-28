@@ -24,7 +24,7 @@ func TestEntityCreationReconciliationAndRelationships(t *testing.T) {
 	}
 	agentSpec := NewAgent{
 		ID: agentID(t, 2), ProjectID: project.ID, Name: "worker", Role: RoleWorker,
-		Provider: ProviderCodex, ExecutionMode: ExecutionWorkspaceWrite, Model: "private-model",
+		Provider: ProviderCodex, Model: "private-model",
 		ReasoningEffort: "high", ToolBudgetLimit: 987654321,
 	}
 	agent, err := store.CreateAgent(ctx, agentSpec, mustTime(t, 11))
@@ -101,13 +101,6 @@ func TestEntityCreationReconciliationAndRelationships(t *testing.T) {
 	if _, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 5), Name: "other", Root: projectSpec.Root}, mustTime(t, 10)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("duplicate root error = %v", err)
 	}
-	invalidShell := agentSpec
-	invalidShell.ID = agentID(t, 6)
-	invalidShell.Provider = ProviderShell
-	invalidShell.ExecutionMode = ExecutionWorkspaceWrite
-	if _, err := store.CreateAgent(ctx, invalidShell, mustTime(t, 13)); !errors.Is(err, ErrInvalidValue) {
-		t.Fatalf("invalid shell controls error = %v", err)
-	}
 	missingProject := agentSpec
 	missingProject.ID = agentID(t, 7)
 	missingProject.ProjectID = projectID(t, 8)
@@ -136,7 +129,7 @@ func TestStateAndInvalidationRollbackTogether(t *testing.T) {
 	t.Run("state failure has no invalidation", func(t *testing.T) {
 		store, _ := newTestStore(t)
 		defer store.Close()
-		spec := NewAgent{ID: agentID(t, 1), ProjectID: projectID(t, 2), Name: "orphan", Role: RoleWorker, Provider: ProviderCodex, ExecutionMode: ExecutionWorkspaceWrite, ToolBudgetLimit: 1}
+		spec := NewAgent{ID: agentID(t, 1), ProjectID: projectID(t, 2), Name: "orphan", Role: RoleWorker, Provider: ProviderCodex, ToolBudgetLimit: 1}
 		if _, err := store.CreateAgent(context.Background(), spec, mustTime(t, 2)); err == nil {
 			t.Fatal("orphan agent succeeded")
 		}
@@ -443,7 +436,7 @@ func TestSnapshotWatchAgreementAndPrivateStateBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	privateModel := "MODEL_SENTINEL_748af8"
-	agent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 2), ProjectID: project.ID, Name: "public agent", Role: RoleWorker, Provider: ProviderCodex, ExecutionMode: ExecutionWorkspaceWrite, Model: privateModel, ReasoningEffort: "xhigh", ToolBudgetLimit: 9}, mustTime(t, 3))
+	agent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 2), ProjectID: project.ID, Name: "public agent", Role: RoleWorker, Provider: ProviderCodex, Model: privateModel, ReasoningEffort: "xhigh", ToolBudgetLimit: 9}, mustTime(t, 3))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -487,7 +480,7 @@ func TestSnapshotWatchAgreementAndPrivateStateBoundary(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, private := range []string{privateRoot, privateModel, privateBody, "xhigh", "987654321", "workspace_write", "codex", "incarnation"} {
+		for _, private := range []string{privateRoot, privateModel, privateBody, "xhigh", "987654321", "codex", "incarnation"} {
 			if strings.Contains(string(encoded), private) {
 				t.Fatalf("%s exposed private sentinel %q: %s", name, private, encoded)
 			}
@@ -533,7 +526,7 @@ func TestCorruptControlsFailClosedOnReadAndReopen(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			agent, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 2), ProjectID: project.ID, Name: "a", Role: RoleWorker, Provider: ProviderCodex, ExecutionMode: ExecutionWorkspaceWrite, ToolBudgetLimit: 1}, mustTime(t, 3))
+			agent, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 2), ProjectID: project.ID, Name: "a", Role: RoleWorker, Provider: ProviderCodex, ToolBudgetLimit: 1}, mustTime(t, 3))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -572,7 +565,6 @@ func TestCorruptControlsFailClosedOnReadAndReopen(t *testing.T) {
 func TestOpenRefusesHiddenCorruptionWithoutFilesystemMutation(t *testing.T) {
 	tests := map[string]string{
 		"agent provider":     `UPDATE agents SET provider = 'unknown'`,
-		"agent mode":         `UPDATE agents SET execution_mode = 'unknown'`,
 		"task incarnation":   `UPDATE tasks SET incarnation_id = zeroblob(15)`,
 		"task status":        `UPDATE tasks SET status = 'unknown'`,
 		"task private state": `UPDATE tasks SET blocked_reason = 'hidden'`,
@@ -673,7 +665,6 @@ func TestSnapshotAndWatchRejectHiddenControlsInPinnedSnapshot(t *testing.T) {
 		secret  string
 	}{
 		"provider": {corrupt: `UPDATE agents SET provider = 'PROVIDER_SECRET_78c2'`, repair: `UPDATE agents SET provider = 'codex'`, secret: "PROVIDER_SECRET_78c2"},
-		"mode":     {corrupt: `UPDATE agents SET execution_mode = 'MODE_SECRET_91f4'`, repair: `UPDATE agents SET execution_mode = 'workspace_write'`, secret: "MODE_SECRET_91f4"},
 		"task incarnation": {
 			corrupt: `UPDATE tasks SET incarnation_id = zeroblob(15)`,
 			repair:  `UPDATE tasks SET incarnation_id = ?`,
@@ -777,7 +768,7 @@ func TestChangeCommitmentSchemaUsesFrozenBounds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 2), ProjectID: project.ID, Name: "a", Role: RoleWorker, Provider: ProviderCodex, ExecutionMode: ExecutionWorkspaceWrite, ToolBudgetLimit: 1}, mustTime(t, 3))
+	agent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 2), ProjectID: project.ID, Name: "a", Role: RoleWorker, Provider: ProviderCodex, ToolBudgetLimit: 1}, mustTime(t, 3))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -828,7 +819,7 @@ func seedDurableAuthority(t *testing.T, store *Store) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 2), ProjectID: project.ID, Name: "a", Role: RoleOrchestrator, Provider: ProviderCodex, ExecutionMode: ExecutionWorkspaceWrite, ToolBudgetLimit: 1}, mustTime(t, 3))
+	agent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 2), ProjectID: project.ID, Name: "a", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 1}, mustTime(t, 3))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -841,13 +832,13 @@ func seedDurableAuthority(t *testing.T, store *Store) {
 	}
 	if _, err := store.writer.Exec(`INSERT INTO runs(
             id, project_id, agent_id, task_id, task_incarnation_id, admitted_task_work_revision,
-	            change_id, role, provider, execution_mode, model, reasoning_effort, verification_policy, phase,
+	            change_id, role, provider, model, reasoning_effort, verification_policy, phase,
             proposal_kind, proposal_code, proposal_detail, proposal_result,
             terminal_kind, terminal_code, terminal_detail, terminal_result,
             credential_digest, credential_revoked_at_ms,
 	            runner_exit_kind, runner_exit_sequence, runner_exit_code, runner_exit_signal, runner_exit_at_ms,
             revision, admitted_at_ms, running_at_ms, finalizing_at_ms, terminal_at_ms, updated_at_ms
-	        ) VALUES(?, ?, ?, ?, ?, 1, NULL, 'orchestrator', 'codex', 'workspace_write', NULL, NULL, 'none', 'admitted',
+	        ) VALUES(?, ?, ?, ?, ?, 1, NULL, 'orchestrator', 'codex', NULL, NULL, 'none', 'admitted',
 	            NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, NULL, NULL, NULL, NULL, NULL, NULL, 1, 5, NULL, NULL, NULL, 5)`,
 		runID(t, 5).Bytes(), project.ID.Bytes(), agent.ID.Bytes(), task.ID.Bytes(), task.IncarnationID.Bytes(), bytes.Repeat([]byte{0x5a}, DigestBytes)); err != nil {
 		t.Fatal(err)

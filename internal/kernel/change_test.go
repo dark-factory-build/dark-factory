@@ -361,7 +361,7 @@ func seedReservedChange(t *testing.T, store *Store) Change {
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 32), ProjectID: project.ID, Name: "a", Role: RoleWorker, Provider: ProviderCodex, ExecutionMode: ExecutionWorkspaceWrite, ToolBudgetLimit: 2}, mustTime(t, 2))
+	agent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 32), ProjectID: project.ID, Name: "a", Role: RoleWorker, Provider: ProviderCodex, ToolBudgetLimit: 2}, mustTime(t, 2))
 	if err != nil {
 		t.Fatal(err)
 	}

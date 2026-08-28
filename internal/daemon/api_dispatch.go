@@ -239,7 +239,7 @@ func (daemon *Daemon) createShellAgent(ctx context.Context, call api.Call) api.R
 	}
 	agent, err := daemon.store.CreateAgent(ctx, kernel.NewAgent{
 		ID: id, ProjectID: projectID, Name: input.Name, Role: role,
-		Provider: kernel.ProviderShell, ExecutionMode: kernel.ExecutionUnrestricted,
+		Provider:        kernel.ProviderShell,
 		ToolBudgetLimit: input.ToolBudgetLimit,
 	}, at)
 	if err != nil {

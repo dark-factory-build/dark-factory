@@ -153,7 +153,7 @@ func TestAdmissionRejectsOverlapWithDurableRuntimeAndRetainedChange(t *testing.T
 	if _, err := store.FinalizeRun(context.Background(), first.Run.ID, finalizing.Revision, mustTime(t, 13)); err != nil {
 		t.Fatal(err)
 	}
-	secondAgent, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 194), ProjectID: project.ID, Name: "second", Role: RoleWorker, Provider: ProviderCodex, ExecutionMode: ExecutionWorkspaceWrite, ToolBudgetLimit: 5}, mustTime(t, 14))
+	secondAgent, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 194), ProjectID: project.ID, Name: "second", Role: RoleWorker, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 14))
 	if err != nil {
 		t.Fatal(err)
 	}

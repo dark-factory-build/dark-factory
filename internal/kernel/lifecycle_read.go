@@ -9,7 +9,7 @@ import (
 )
 
 const runColumns = `id, project_id, agent_id, task_id, task_incarnation_id,
-	    admitted_task_work_revision, change_id, role, provider, execution_mode, model, reasoning_effort, verification_policy, phase,
+	    admitted_task_work_revision, change_id, role, provider, model, reasoning_effort, verification_policy, phase,
     proposal_kind, proposal_code, proposal_detail, proposal_result,
     terminal_kind, terminal_code, terminal_detail, terminal_result,
 	credential_digest, credential_revoked_at_ms,
@@ -34,7 +34,7 @@ func runByDigest(ctx context.Context, connection *sql.Conn, digest AttemptDigest
 func scanRun(scanner rowScanner) (Run, bool, error) {
 	var rawID, rawProjectID, rawAgentID, rawTaskID, rawIncarnationID, rawDigest []byte
 	var rawChangeID nullableBlob
-	var roleValue, providerValue, modeValue, verificationValue, phaseValue string
+	var roleValue, providerValue, verificationValue, phaseValue string
 	var model, effort sql.NullString
 	var proposalKind, proposalCode, proposalDetail, proposalResult sql.NullString
 	var terminalKind, terminalCode, terminalDetail, terminalResult sql.NullString
@@ -46,7 +46,7 @@ func scanRun(scanner rowScanner) (Run, bool, error) {
 	var runningAt, finalizingAt, terminalAt sql.NullInt64
 	if err := scanner.Scan(
 		&rawID, &rawProjectID, &rawAgentID, &rawTaskID, &rawIncarnationID, &admittedWorkRevision, &rawChangeID,
-		&roleValue, &providerValue, &modeValue, &model, &effort, &verificationValue, &phaseValue,
+		&roleValue, &providerValue, &model, &effort, &verificationValue, &phaseValue,
 		&proposalKind, &proposalCode, &proposalDetail, &proposalResult,
 		&terminalKind, &terminalCode, &terminalDetail, &terminalResult,
 		&rawDigest, &revokedAt,
@@ -67,19 +67,18 @@ func scanRun(scanner rowScanner) (Run, bool, error) {
 	workRevision, workErr := NewRevision(admittedWorkRevision)
 	role, roleErr := parseAgentRole(roleValue)
 	provider, providerErr := parseProvider(providerValue)
-	mode, modeErr := parseExecutionMode(modeValue)
 	verification, verificationErr := parseVerificationPolicy(verificationValue)
 	phase, phaseErr := parseRunPhase(phaseValue)
 	digest, digestErr := AttemptDigestFromBytes(rawDigest)
 	rev, revisionErr := NewRevision(revision)
 	admittedTime, admittedErr := NewUnixMillis(admittedAt)
 	updatedTime, updatedErr := NewUnixMillis(updatedAt)
-	if idErr != nil || projectErr != nil || agentErr != nil || taskErr != nil || incarnationErr != nil || workErr != nil || roleErr != nil || providerErr != nil || modeErr != nil || verificationErr != nil || phaseErr != nil || digestErr != nil || revisionErr != nil || admittedErr != nil || updatedErr != nil || updatedAt < admittedAt || model.Valid && (byteLen(model.String) < 1 || byteLen(model.String) > 128) || effort.Valid && (effort.String == "" || !validReasoningEffort(effort.String)) || provider == ProviderShell && mode != ExecutionUnrestricted {
+	if idErr != nil || projectErr != nil || agentErr != nil || taskErr != nil || incarnationErr != nil || workErr != nil || roleErr != nil || providerErr != nil || verificationErr != nil || phaseErr != nil || digestErr != nil || revisionErr != nil || admittedErr != nil || updatedErr != nil || updatedAt < admittedAt || model.Valid && (byteLen(model.String) < 1 || byteLen(model.String) > 128) || effort.Valid && (effort.String == "" || !validReasoningEffort(effort.String)) {
 		return Run{}, false, fmt.Errorf("%w: invalid run controls", ErrCorruptState)
 	}
 	result := Run{
 		ID: id, ProjectID: projectID, AgentID: agentID, TaskID: taskID, TaskIncarnationID: incarnationID,
-		AdmittedTaskWorkRevision: workRevision, Role: role, Provider: provider, ExecutionMode: mode,
+		AdmittedTaskWorkRevision: workRevision, Role: role, Provider: provider,
 		Model: nullStringValue(model), ReasoningEffort: nullStringValue(effort), VerificationPolicy: verification, Phase: phase,
 		CredentialDigest: digest, Revision: rev, AdmittedAt: admittedTime, UpdatedAt: updatedTime,
 	}
@@ -563,5 +562,5 @@ func (store *Store) AuthenticateAttempt(ctx context.Context, digest AttemptDiges
 	if _, err := loadRunRelationships(ctx, tx.connection, run); err != nil {
 		return AttemptAuthority{}, err
 	}
-	return AttemptAuthority{RunID: run.ID, ProjectID: run.ProjectID, AgentID: run.AgentID, TaskID: run.TaskID, TaskIncarnation: run.TaskIncarnationID, Role: run.Role, Provider: run.Provider, ExecutionMode: run.ExecutionMode, ChangeID: run.ChangeID}, nil
+	return AttemptAuthority{RunID: run.ID, ProjectID: run.ProjectID, AgentID: run.AgentID, TaskID: run.TaskID, TaskIncarnation: run.TaskIncarnationID, Role: run.Role, Provider: run.Provider, ChangeID: run.ChangeID}, nil
 }

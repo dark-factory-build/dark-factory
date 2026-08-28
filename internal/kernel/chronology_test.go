@@ -723,7 +723,7 @@ func queueRetryForTerminalSeed(t *testing.T, store *Store, terminal Run, taskUpd
 		store.Close()
 		t.Fatalf("project = %+v, %v", project, err)
 	}
-	secondAgent, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 214), ProjectID: project.ID, Name: "retry", Role: RoleWorker, Provider: ProviderCodex, ExecutionMode: ExecutionWorkspaceWrite, ToolBudgetLimit: 4}, mustTime(t, taskUpdatedAt))
+	secondAgent, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 214), ProjectID: project.ID, Name: "retry", Role: RoleWorker, Provider: ProviderCodex, ToolBudgetLimit: 4}, mustTime(t, taskUpdatedAt))
 	if err != nil {
 		store.Close()
 		t.Fatal(err)
@@ -848,7 +848,7 @@ func TestRunsRejectDuplicateAdmittedTaskWorkRevision(t *testing.T) {
 	defer store.Close()
 	_, err := store.writer.Exec(`INSERT INTO runs(
 		id, project_id, agent_id, task_id, task_incarnation_id, admitted_task_work_revision,
-		change_id, role, provider, execution_mode, model, reasoning_effort, verification_policy, phase,
+		change_id, role, provider, model, reasoning_effort, verification_policy, phase,
 		proposal_kind, proposal_code, proposal_detail, proposal_result,
 		terminal_kind, terminal_code, terminal_detail, terminal_result,
 		credential_digest, credential_revoked_at_ms,
@@ -856,7 +856,7 @@ func TestRunsRejectDuplicateAdmittedTaskWorkRevision(t *testing.T) {
 		runner_exit_kind, runner_exit_sequence, runner_exit_code, runner_exit_signal, runner_exit_at_ms,
 		revision, admitted_at_ms, running_at_ms, finalizing_at_ms, terminal_at_ms, updated_at_ms
 	) SELECT ?, project_id, agent_id, task_id, task_incarnation_id, admitted_task_work_revision,
-		change_id, role, provider, execution_mode, model, reasoning_effort, verification_policy, phase,
+		change_id, role, provider, model, reasoning_effort, verification_policy, phase,
 		proposal_kind, proposal_code, proposal_detail, proposal_result,
 		terminal_kind, terminal_code, terminal_detail, terminal_result,
 		zeroblob(32), credential_revoked_at_ms,

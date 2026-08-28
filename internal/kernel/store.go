@@ -91,10 +91,10 @@ func (store *Store) CreateAgent(ctx context.Context, spec NewAgent, at UnixMilli
 		return Agent{}, tx.Rollback(ErrConflict)
 	}
 	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO agents(
-        id, project_id, name, role, provider, execution_mode, model, reasoning_effort,
-        paused, tool_budget_limit, tool_calls_used, revision, created_at_ms, updated_at_ms
-    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 0, 1, ?, ?)`,
-		spec.ID.Bytes(), spec.ProjectID.Bytes(), spec.Name, spec.Role.String(), spec.Provider.String(), spec.ExecutionMode.String(), nullableString(spec.Model), nullableString(spec.ReasoningEffort), int64(spec.ToolBudgetLimit), at.Int64(), at.Int64()); err != nil {
+		id, project_id, name, role, provider, model, reasoning_effort,
+		paused, tool_budget_limit, tool_calls_used, revision, created_at_ms, updated_at_ms
+	) VALUES(?, ?, ?, ?, ?, ?, ?, 0, ?, 0, 1, ?, ?)`,
+		spec.ID.Bytes(), spec.ProjectID.Bytes(), spec.Name, spec.Role.String(), spec.Provider.String(), nullableString(spec.Model), nullableString(spec.ReasoningEffort), int64(spec.ToolBudgetLimit), at.Int64(), at.Int64()); err != nil {
 		return Agent{}, tx.Rollback(err)
 	}
 	if err := appendInvalidations(ctx, tx.connection, at, []pendingInvalidation{{kind: EntityAgent, id: spec.ID.Bytes(), revision: 1}}); err != nil {
@@ -287,11 +287,8 @@ func validateNewProject(spec NewProject) error {
 }
 
 func validateNewAgent(spec NewAgent) error {
-	if spec.ID.zero() || spec.ProjectID.zero() || byteLen(spec.Name) < 1 || byteLen(spec.Name) > 128 || !spec.Role.valid() || !spec.Provider.valid() || !spec.ExecutionMode.valid() {
+	if spec.ID.zero() || spec.ProjectID.zero() || byteLen(spec.Name) < 1 || byteLen(spec.Name) > 128 || !spec.Role.valid() || !spec.Provider.valid() {
 		return fmt.Errorf("%w: invalid agent", ErrInvalidValue)
-	}
-	if spec.Provider == ProviderShell && spec.ExecutionMode != ExecutionUnrestricted {
-		return fmt.Errorf("%w: shell requires unrestricted execution", ErrInvalidValue)
 	}
 	if byteLen(spec.Model) > 128 || (spec.Model != "" && byteLen(spec.Model) < 1) {
 		return fmt.Errorf("%w: invalid model", ErrInvalidValue)
@@ -333,7 +330,7 @@ func projectMatchesCreation(existing Project, spec NewProject) bool {
 }
 
 func agentMatchesCreation(existing Agent, spec NewAgent) bool {
-	return existing.ProjectID == spec.ProjectID && existing.Name == spec.Name && existing.Role == spec.Role && existing.Provider == spec.Provider && existing.ExecutionMode == spec.ExecutionMode && existing.Model == spec.Model && existing.ReasoningEffort == spec.ReasoningEffort && existing.ToolBudgetLimit == spec.ToolBudgetLimit && existing.ToolCallsUsed == 0 && !existing.Paused && existing.Revision.Int64() == 1 && existing.UpdatedAt == existing.CreatedAt
+	return existing.ProjectID == spec.ProjectID && existing.Name == spec.Name && existing.Role == spec.Role && existing.Provider == spec.Provider && existing.Model == spec.Model && existing.ReasoningEffort == spec.ReasoningEffort && existing.ToolBudgetLimit == spec.ToolBudgetLimit && existing.ToolCallsUsed == 0 && !existing.Paused && existing.Revision.Int64() == 1 && existing.UpdatedAt == existing.CreatedAt
 }
 
 func taskMatchesCreation(existing Task, spec NewTask) bool {

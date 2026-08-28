@@ -398,9 +398,9 @@ func queryPublicStateRows(ctx context.Context, connection *sql.Conn, kind Public
 		return connection.QueryContext(ctx, `SELECT id, name, root, verification_policy, revision, created_at_ms, updated_at_ms FROM projects WHERE id > ? ORDER BY id LIMIT ?`, after.Bytes(), PublicStatePageSize+1)
 	case PublicStateAgent:
 		if after == nil {
-			return connection.QueryContext(ctx, `SELECT id, project_id, name, role, provider, execution_mode, model, reasoning_effort, paused, tool_budget_limit, tool_calls_used, revision, created_at_ms, updated_at_ms FROM agents ORDER BY id LIMIT ?`, PublicStatePageSize+1)
+			return connection.QueryContext(ctx, `SELECT id, project_id, name, role, provider, model, reasoning_effort, paused, tool_budget_limit, tool_calls_used, revision, created_at_ms, updated_at_ms FROM agents ORDER BY id LIMIT ?`, PublicStatePageSize+1)
 		}
-		return connection.QueryContext(ctx, `SELECT id, project_id, name, role, provider, execution_mode, model, reasoning_effort, paused, tool_budget_limit, tool_calls_used, revision, created_at_ms, updated_at_ms FROM agents WHERE id > ? ORDER BY id LIMIT ?`, after.Bytes(), PublicStatePageSize+1)
+		return connection.QueryContext(ctx, `SELECT id, project_id, name, role, provider, model, reasoning_effort, paused, tool_budget_limit, tool_calls_used, revision, created_at_ms, updated_at_ms FROM agents WHERE id > ? ORDER BY id LIMIT ?`, after.Bytes(), PublicStatePageSize+1)
 	case PublicStateTask:
 		if after == nil {
 			return connection.QueryContext(ctx, `SELECT id, project_id, assigned_agent_id, incarnation_id, work_revision, title, body, status, priority, blocked_reason, result, completed_at_ms, revision, created_at_ms, updated_at_ms FROM tasks ORDER BY id LIMIT ?`, PublicStatePageSize+1)

@@ -136,7 +136,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	if !found {
 		return kernel.Run{}, kernel.ErrNotFound
 	}
-	if agent.Role != kernel.RoleWorker || agent.Provider != kernel.ProviderShell || agent.ExecutionMode != kernel.ExecutionUnrestricted {
+	if agent.Role != kernel.RoleWorker || agent.Provider != kernel.ProviderShell {
 		return kernel.Run{}, fmt.Errorf("%w: supervisor spike supports shell workers only", kernel.ErrInvalidValue)
 	}
 	project, found, err := daemon.store.Project(ctx, agent.ProjectID)

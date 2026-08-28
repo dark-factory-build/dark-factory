@@ -106,7 +106,7 @@ func TestHumanRequestDetailRejectsCorruptActiveRunRelationships(t *testing.T) {
 		{
 			name: "task assigned agent differs from run",
 			prepare: func(t *testing.T, store *Store, run Run) {
-				if _, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 253), ProjectID: run.ProjectID, Name: "different", Role: RoleOrchestrator, Provider: ProviderCodex, ExecutionMode: ExecutionWorkspaceWrite, ToolBudgetLimit: 2}, mustTime(t, 399)); err != nil {
+				if _, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 253), ProjectID: run.ProjectID, Name: "different", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 2}, mustTime(t, 399)); err != nil {
 					t.Fatal(err)
 				}
 			},

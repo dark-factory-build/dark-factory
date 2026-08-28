@@ -307,43 +307,6 @@ func (value Provider) valid() bool {
 	return value == ProviderClaudeCode || value == ProviderCodex || value == ProviderShell
 }
 
-type ExecutionMode uint8
-
-const (
-	ExecutionPlanOnly ExecutionMode = iota + 1
-	ExecutionWorkspaceWrite
-	ExecutionUnrestricted
-)
-
-func parseExecutionMode(value string) (ExecutionMode, error) {
-	switch value {
-	case "plan_only":
-		return ExecutionPlanOnly, nil
-	case "workspace_write":
-		return ExecutionWorkspaceWrite, nil
-	case "unrestricted":
-		return ExecutionUnrestricted, nil
-	default:
-		return 0, corruptControl("execution mode", value)
-	}
-}
-
-func (value ExecutionMode) String() string {
-	switch value {
-	case ExecutionPlanOnly:
-		return "plan_only"
-	case ExecutionWorkspaceWrite:
-		return "workspace_write"
-	case ExecutionUnrestricted:
-		return "unrestricted"
-	default:
-		return ""
-	}
-}
-func (value ExecutionMode) valid() bool {
-	return value == ExecutionPlanOnly || value == ExecutionWorkspaceWrite || value == ExecutionUnrestricted
-}
-
 type TaskStatus uint8
 
 const (
@@ -479,7 +442,6 @@ type NewAgent struct {
 	Name            string
 	Role            AgentRole
 	Provider        Provider
-	ExecutionMode   ExecutionMode
 	Model           string
 	ReasoningEffort string
 	ToolBudgetLimit uint64
@@ -521,7 +483,6 @@ type Agent struct {
 	Name            string
 	Role            AgentRole
 	Provider        Provider
-	ExecutionMode   ExecutionMode
 	Model           string
 	ReasoningEffort string
 	Paused          bool

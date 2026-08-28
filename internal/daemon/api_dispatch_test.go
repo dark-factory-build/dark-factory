@@ -209,7 +209,7 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 		t.Fatalf("durable project = %+v, found=%v, err=%v", project, found, err)
 	}
 	agent, found, err := fixture.store.Agent(ctx, mustAgentID(t, testID(2)))
-	if err != nil || !found || agent.Provider != kernel.ProviderShell || agent.ExecutionMode != kernel.ExecutionUnrestricted || agent.Model != "" || agent.ReasoningEffort != "" {
+	if err != nil || !found || agent.Provider != kernel.ProviderShell || agent.Model != "" || agent.ReasoningEffort != "" {
 		t.Fatalf("durable shell agent = %+v, found=%v, err=%v", agent, found, err)
 	}
 	task, found, err := fixture.store.Task(ctx, mustTaskID(t, testID(3)))

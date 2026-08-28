@@ -132,7 +132,7 @@ func TestEveryPublicMutationValidatesDurableGraphBeforeDecision(t *testing.T) {
 			return err
 		}},
 		{name: "CreateAgent", invoke: func(store *Store) error {
-			_, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 221), ProjectID: projectID(t, 1), Name: "new", Role: RoleOrchestrator, Provider: ProviderCodex, ExecutionMode: ExecutionWorkspaceWrite, ToolBudgetLimit: 1}, at)
+			_, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 221), ProjectID: projectID(t, 1), Name: "new", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 1}, at)
 			return err
 		}},
 		{name: "EnqueueTask", invoke: func(store *Store) error {
@@ -403,7 +403,7 @@ func benchmarkValidationStore(b *testing.B) *Store {
 	if err != nil {
 		b.Fatal(err)
 	}
-	agent, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID, ProjectID: project.ID, Name: "a", Role: RoleWorker, Provider: ProviderCodex, ExecutionMode: ExecutionWorkspaceWrite, ToolBudgetLimit: 1}, at)
+	agent, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID, ProjectID: project.ID, Name: "a", Role: RoleWorker, Provider: ProviderCodex, ToolBudgetLimit: 1}, at)
 	if err != nil {
 		b.Fatal(err)
 	}

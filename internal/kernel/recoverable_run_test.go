@@ -68,7 +68,7 @@ func TestRecoverableRunExactLookupRejectsUnrelatedOwnershipCorruption(t *testing
 	if err != nil || !first.Admitted() {
 		t.Fatalf("first admission = %+v, %v", first, err)
 	}
-	secondAgent, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 183), ProjectID: project.ID, Name: "second", Role: RoleOrchestrator, Provider: ProviderCodex, ExecutionMode: ExecutionWorkspaceWrite, ToolBudgetLimit: 5}, mustTime(t, 11))
+	secondAgent, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 183), ProjectID: project.ID, Name: "second", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 11))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +98,7 @@ func TestRecoverableRunExactLookupRejectsUnrelatedIdentityCollision(t *testing.T
 	if err != nil || !first.Admitted() {
 		t.Fatalf("first admission = %+v, %v", first, err)
 	}
-	secondAgent, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 193), ProjectID: project.ID, Name: "second", Role: RoleOrchestrator, Provider: ProviderCodex, ExecutionMode: ExecutionWorkspaceWrite, ToolBudgetLimit: 5}, mustTime(t, 11))
+	secondAgent, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 193), ProjectID: project.ID, Name: "second", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 11))
 	if err != nil {
 		t.Fatal(err)
 	}

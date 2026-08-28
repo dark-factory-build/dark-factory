@@ -37,6 +37,61 @@ func TestAdmitNextSelectsCanonicalCurrentQueueInsideTransaction(t *testing.T) {
 	})
 }
 
+func TestAdmissionFreezesProviderModelAndEffort(t *testing.T) {
+	store, _ := newTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 230), Name: "p", Root: "/provider-freeze"}, mustTime(t, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := store.CreateAgent(ctx, NewAgent{
+		ID: agentID(t, 231), ProjectID: project.ID, Name: "a", Role: RoleOrchestrator,
+		Provider: ProviderCodex, Model: "admitted-model", ReasoningEffort: "high", ToolBudgetLimit: 5,
+	}, mustTime(t, 3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 232), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 233), Title: "freeze"}, mustTime(t, 4)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetDispatch(ctx, mustRevision(t, 1), true, mustTime(t, 5)); err != nil {
+		t.Fatal(err)
+	}
+	admitted, err := store.AdmitNext(ctx, agent.ID, admissionKeys(t, 234, nil), mustTime(t, 6))
+	if err != nil || !admitted.Admitted() {
+		t.Fatalf("admission = %+v, %v", admitted, err)
+	}
+	if admitted.Run.Provider != ProviderCodex || admitted.Run.Model != "admitted-model" || admitted.Run.ReasoningEffort != "high" {
+		t.Fatalf("admitted controls = %+v", admitted.Run)
+	}
+
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Close()
+	updated, err := tx.connection.ExecContext(ctx, `UPDATE agents SET provider = 'claude_code', model = 'later-model', reasoning_effort = 'low', revision = 2, updated_at_ms = 7 WHERE id = ? AND revision = 1`, agent.ID.Bytes())
+	if err := requireOneRow(updated, err); err != nil {
+		t.Fatal(tx.Rollback(err))
+	}
+	if err := appendInvalidations(ctx, tx.connection, mustTime(t, 7), []pendingInvalidation{{kind: EntityAgent, id: agent.ID.Bytes(), revision: 2}}); err != nil {
+		t.Fatal(tx.Rollback(err))
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	changedAgent, found, err := store.Agent(ctx, agent.ID)
+	if err != nil || !found || changedAgent.Provider != ProviderClaudeCode || changedAgent.Model != "later-model" || changedAgent.ReasoningEffort != "low" {
+		t.Fatalf("changed agent = %+v, found=%t, err=%v", changedAgent, found, err)
+	}
+	frozen, found, err := store.Run(ctx, admitted.Run.ID)
+	if err != nil || !found || frozen.Provider != ProviderCodex || frozen.Model != "admitted-model" || frozen.ReasoningEffort != "high" {
+		t.Fatalf("frozen run = %+v, found=%t, err=%v", frozen, found, err)
+	}
+}
+
 func TestAdmissionCreatesExactDeclaredTerminalSession(t *testing.T) {
 	store, _, _, agent := newAdmissionStore(t, RoleOrchestrator, 4)
 	defer store.Close()
@@ -353,7 +408,7 @@ func newAdmissionStore(t *testing.T, role AgentRole, capacity uint16) (*Store, s
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 2), ProjectID: project.ID, Name: "a", Role: role, Provider: ProviderCodex, ExecutionMode: ExecutionWorkspaceWrite, ToolBudgetLimit: 5}, mustTime(t, 3))
+	agent, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 2), ProjectID: project.ID, Name: "a", Role: role, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 3))
 	if err != nil {
 		t.Fatal(err)
 	}

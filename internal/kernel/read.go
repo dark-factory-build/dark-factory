@@ -77,15 +77,15 @@ func agentByID(ctx context.Context, connection *sql.Conn, id AgentID) (Agent, bo
 	if id.zero() {
 		return Agent{}, false, fmt.Errorf("%w: zero agent identifier", ErrInvalidValue)
 	}
-	return scanAgent(connection.QueryRowContext(ctx, `SELECT id, project_id, name, role, provider, execution_mode, model, reasoning_effort, paused, tool_budget_limit, tool_calls_used, revision, created_at_ms, updated_at_ms FROM agents WHERE id = ?`, id.Bytes()))
+	return scanAgent(connection.QueryRowContext(ctx, `SELECT id, project_id, name, role, provider, model, reasoning_effort, paused, tool_budget_limit, tool_calls_used, revision, created_at_ms, updated_at_ms FROM agents WHERE id = ?`, id.Bytes()))
 }
 
 func scanAgent(scanner rowScanner) (Agent, bool, error) {
 	var rawID, rawProjectID []byte
-	var name, rawRole, rawProvider, rawMode string
+	var name, rawRole, rawProvider string
 	var model, effort sql.NullString
 	var paused, budget, used, revision, createdAt, updatedAt int64
-	if err := scanner.Scan(&rawID, &rawProjectID, &name, &rawRole, &rawProvider, &rawMode, &model, &effort, &paused, &budget, &used, &revision, &createdAt, &updatedAt); err != nil {
+	if err := scanner.Scan(&rawID, &rawProjectID, &name, &rawRole, &rawProvider, &model, &effort, &paused, &budget, &used, &revision, &createdAt, &updatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Agent{}, false, nil
 		}
@@ -95,11 +95,10 @@ func scanAgent(scanner rowScanner) (Agent, bool, error) {
 	projectID, projectErr := ProjectIDFromBytes(rawProjectID)
 	role, roleErr := parseAgentRole(rawRole)
 	provider, providerErr := parseProvider(rawProvider)
-	mode, modeErr := parseExecutionMode(rawMode)
-	if idErr != nil || projectErr != nil || roleErr != nil || providerErr != nil || modeErr != nil || byteLen(name) < 1 || byteLen(name) > 128 || (paused != 0 && paused != 1) || budget < 1 || budget > 1_000_000_000 || used < 0 || used > budget || updatedAt < createdAt {
+	if idErr != nil || projectErr != nil || roleErr != nil || providerErr != nil || byteLen(name) < 1 || byteLen(name) > 128 || (paused != 0 && paused != 1) || budget < 1 || budget > 1_000_000_000 || used < 0 || used > budget || updatedAt < createdAt {
 		return Agent{}, false, fmt.Errorf("%w: invalid agent row", ErrCorruptState)
 	}
-	if model.Valid && (byteLen(model.String) < 1 || byteLen(model.String) > 128) || effort.Valid && (effort.String == "" || !validReasoningEffort(effort.String)) || provider == ProviderShell && mode != ExecutionUnrestricted {
+	if model.Valid && (byteLen(model.String) < 1 || byteLen(model.String) > 128) || effort.Valid && (effort.String == "" || !validReasoningEffort(effort.String)) {
 		return Agent{}, false, fmt.Errorf("%w: invalid agent controls", ErrCorruptState)
 	}
 	rev, revisionErr := NewRevision(revision)
@@ -110,7 +109,7 @@ func scanAgent(scanner rowScanner) (Agent, bool, error) {
 	}
 	return Agent{
 		ID: id, ProjectID: projectID, Name: name, Role: role, Provider: provider,
-		ExecutionMode: mode, Model: nullStringValue(model), ReasoningEffort: nullStringValue(effort),
+		Model: nullStringValue(model), ReasoningEffort: nullStringValue(effort),
 		Paused: paused == 1, ToolBudgetLimit: uint64(budget), ToolCallsUsed: uint64(used),
 		Revision: rev, CreatedAt: created, UpdatedAt: updated,
 	}, true, nil
