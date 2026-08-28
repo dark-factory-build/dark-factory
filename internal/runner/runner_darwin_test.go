@@ -70,6 +70,13 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
+	if len(os.Args) == 3 && os.Args[1] == "--proof-provider" {
+		if err := runProofProviderHelper(os.Args[2]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(95)
+		}
+		os.Exit(0)
+	}
 	if len(os.Args) == 3 && os.Args[1] == "--cwd-provider" {
 		if err := runCwdProviderHelper(os.Args[2]); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -137,6 +144,41 @@ func TestMain(m *testing.M) {
 		code = 1
 	}
 	os.Exit(code)
+}
+
+func runProofProviderHelper(root string) error {
+	proof := testResultProof()
+	needles := [][]byte{proof.value[:], []byte(testResultProofHex())}
+	for _, value := range append(append([]string{}, os.Args...), os.Environ()...) {
+		for _, needle := range needles {
+			if bytes.Contains([]byte(value), needle) {
+				return errors.New("result proof leaked through provider argv or environment")
+			}
+		}
+	}
+	for fd := 3; fd < 256; fd++ {
+		var stat unix.Stat_t
+		if err := unix.Fstat(fd, &stat); err != nil {
+			if errors.Is(err, unix.EBADF) {
+				continue
+			}
+			return err
+		}
+		if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Size <= 0 || stat.Size > maxConfigBytes {
+			continue
+		}
+		body := make([]byte, int(stat.Size))
+		n, err := unix.Pread(fd, body, 0)
+		if err != nil || n != len(body) {
+			return errors.Join(err, io.ErrUnexpectedEOF)
+		}
+		for _, needle := range needles {
+			if bytes.Contains(body, needle) {
+				return fmt.Errorf("result proof leaked through provider fd %d", fd)
+			}
+		}
+	}
+	return os.WriteFile(filepath.Join(root, "proof-census.safe"), nil, 0o600)
 }
 
 func runLeaderExitDescendantHelper(root string) error {

@@ -431,7 +431,7 @@ func TestLaunchAttemptDistinguishesStartFailureAndPreRegistrationConvergence(t *
 					return file.Close()
 				}
 			}
-			child, record, launchErr := prepared.LaunchAttempt(f.dir, "pre-registration")
+			child, record, launchErr := prepared.LaunchAttempt(f.dir, "pre-registration", testResultProof())
 			if child != nil || record == nil || launchErr == nil {
 				t.Fatalf("LaunchAttempt child=%v record=%+v err=%v", child, record, launchErr)
 			}

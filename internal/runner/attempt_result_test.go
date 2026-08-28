@@ -3,7 +3,9 @@
 package runner
 
 import (
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -12,6 +14,25 @@ import (
 
 	"golang.org/x/sys/unix"
 )
+
+func testResultProof() ResultProof {
+	var value [resultProofBytes]byte
+	for index := range value {
+		value[index] = byte(index + 1)
+	}
+	proof, _ := NewResultProof(value)
+	return proof
+}
+
+func publicAttemptResult(result AttemptResult) AttemptResult {
+	result.proof = ResultProof{}
+	return result
+}
+
+func testResultProofHex() string {
+	value, _ := encodeResultProof(testResultProof())
+	return value
+}
 
 func openAttemptResultTestDir(t *testing.T, inner bool) (string, *os.File) {
 	t.Helper()
@@ -37,7 +58,7 @@ func openAttemptResultTestDir(t *testing.T, inner bool) (string, *os.File) {
 
 func testConvergedAttemptResult(t *testing.T, attemptID string) AttemptResult {
 	t.Helper()
-	result, err := innerConvergedResult(attemptID, Identity{PID: 22, PGID: 22, Birth: Birth{Seconds: 3, Microseconds: 4}}, Exit{Code: 0})
+	result, err := innerConvergedResult(attemptID, testResultProof(), Identity{PID: 22, PGID: 22, Birth: Birth{Seconds: 3, Microseconds: 4}}, Exit{Code: 0})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +67,7 @@ func testConvergedAttemptResult(t *testing.T, attemptID string) AttemptResult {
 
 func TestAttemptResultNoReplaceCanonicalRoundTrip(t *testing.T) {
 	root, dir := openAttemptResultTestDir(t, false)
-	result, err := innerUnregisteredConvergedResult("attempt-1")
+	result, err := innerUnregisteredConvergedResult("attempt-1", testResultProof())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,18 +76,49 @@ func TestAttemptResultNoReplaceCanonicalRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	body, err := os.ReadFile(filepath.Join(root, AttemptResultSpoolName))
-	if err != nil || string(body) != `{"version":1,"attempt_id":"attempt-1","kind":"inner_unregistered_converged"}` {
+	if err != nil || string(body) != `{"version":1,"attempt_id":"attempt-1","kind":"inner_unregistered_converged","proof":"0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"}` {
 		t.Fatalf("canonical result = %q, %v", body, err)
 	}
 	if _, err := publishAttemptResult(dir, result); !errors.Is(err, ErrConflict) {
 		t.Fatalf("replacement publication = %v", err)
 	}
 	loaded, err := AuthenticateAttemptResult(dir, "attempt-1", nil)
-	if err != nil || loaded.Result() != result || loaded.Notice() != record.Notice() || loaded.InnerActivated() {
+	if err != nil || loaded.Result() != publicAttemptResult(result) || loaded.Notice() != record.Notice() || loaded.InnerActivated() {
 		t.Fatalf("authenticated result = %+v, %v", loaded, err)
 	}
-	if loaded, err = AuthenticateAttemptResult(dir, "attempt-1", ptrNotice(record.Notice())); err != nil || loaded.Result() != result {
+	if loaded, err = AuthenticateAttemptResult(dir, "attempt-1", ptrNotice(record.Notice())); err != nil || loaded.Result() != publicAttemptResult(result) {
 		t.Fatalf("notice-bound result = %+v, %v", loaded, err)
+	}
+}
+
+func TestAttemptResultForgedProofOnlyCreatesFailClosedConflict(t *testing.T) {
+	root, dir := openAttemptResultTestDir(t, false)
+	correctProof := testResultProof()
+	wrongProof := correctProof
+	wrongProof.value[0] ^= 0xff
+	forgedResult, err := innerUnregisteredConvergedResult("forged", wrongProof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forgedBody, err := canonicalAttemptResult(forgedResult)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, AttemptResultSpoolName), forgedBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	forged, err := AuthenticateAttemptResult(dir, "forged", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotDigest := forged.ProofDigest()
+	wantDigest := sha256.Sum256(correctProof.value[:])
+	if gotDigest == wantDigest {
+		t.Fatal("forged proof matched the Store-bound digest")
+	}
+	correctResult, _ := innerUnregisteredConvergedResult("forged", correctProof)
+	if _, err := publishAttemptResult(dir, correctResult); !errors.Is(err, ErrConflict) {
+		t.Fatalf("forged residue did not fail closed: %v", err)
 	}
 }
 
@@ -76,7 +128,7 @@ func TestAttemptResultConvergedCodeAndSignalAreClosed(t *testing.T) {
 	for _, exit := range []Exit{{Code: 0}, {Code: -1, Signal: int(unix.SIGTERM)}} {
 		t.Run(exitName(exit), func(t *testing.T) {
 			_, dir := openAttemptResultTestDir(t, true)
-			result, err := innerConvergedResult("attempt-converged", Identity{PID: 23, PGID: 23, Birth: Birth{Seconds: 4, Microseconds: 5}}, exit)
+			result, err := innerConvergedResult("attempt-converged", testResultProof(), Identity{PID: 23, PGID: 23, Birth: Birth{Seconds: 4, Microseconds: 5}}, exit)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -85,7 +137,7 @@ func TestAttemptResultConvergedCodeAndSignalAreClosed(t *testing.T) {
 				t.Fatal(err)
 			}
 			loaded, err := AuthenticateAttemptResult(dir, "attempt-converged", ptrNotice(record.Notice()))
-			if err != nil || loaded.Result() != result || !loaded.InnerActivated() {
+			if err != nil || loaded.Result() != publicAttemptResult(result) || !loaded.InnerActivated() {
 				t.Fatalf("converged result = %+v, %v", loaded, err)
 			}
 		})
@@ -100,12 +152,17 @@ func exitName(exit Exit) string {
 }
 
 func TestAttemptResultRejectsMalformedOversizeAndAmbiguousJSON(t *testing.T) {
+	proof := testResultProofHex()
 	values := map[string]string{
-		"unknown field":   `{"version":1,"attempt_id":"attempt","kind":"inner_unregistered_converged","message":"x"}`,
-		"duplicate field": `{"version":1,"version":1,"attempt_id":"attempt","kind":"inner_unregistered_converged"}`,
-		"trailing bytes":  `{"version":1,"attempt_id":"attempt","kind":"inner_unregistered_converged"}\n`,
-		"both exits":      `{"version":1,"attempt_id":"attempt","kind":"inner_converged","process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":{"code":0,"signal":9}}`,
-		"missing process": `{"version":1,"attempt_id":"attempt","kind":"inner_converged","exit":{"code":0}}`,
+		"unknown field":   fmt.Sprintf(`{"version":1,"attempt_id":"attempt","kind":"inner_unregistered_converged","proof":%q,"message":"x"}`, proof),
+		"duplicate field": fmt.Sprintf(`{"version":1,"version":1,"attempt_id":"attempt","kind":"inner_unregistered_converged","proof":%q}`, proof),
+		"trailing bytes":  fmt.Sprintf(`{"version":1,"attempt_id":"attempt","kind":"inner_unregistered_converged","proof":%q}\n`, proof),
+		"both exits":      fmt.Sprintf(`{"version":1,"attempt_id":"attempt","kind":"inner_converged","proof":%q,"process":{"pid":22,"pgid":22,"birth":{"seconds":3,"microseconds":4}},"exit":{"code":0,"signal":9}}`, proof),
+		"missing process": fmt.Sprintf(`{"version":1,"attempt_id":"attempt","kind":"inner_converged","proof":%q,"exit":{"code":0}}`, proof),
+		"missing proof":   `{"version":1,"attempt_id":"attempt","kind":"inner_unregistered_converged"}`,
+		"short proof":     `{"version":1,"attempt_id":"attempt","kind":"inner_unregistered_converged","proof":"00"}`,
+		"uppercase proof": fmt.Sprintf(`{"version":1,"attempt_id":"attempt","kind":"inner_unregistered_converged","proof":%q}`, strings.ToUpper(proof)),
+		"zero proof":      fmt.Sprintf(`{"version":1,"attempt_id":"attempt","kind":"inner_unregistered_converged","proof":%q}`, strings.Repeat("0", 64)),
 	}
 	for name, value := range values {
 		t.Run(name, func(t *testing.T) {
@@ -131,7 +188,7 @@ func TestAttemptResultRejectsMalformedOversizeAndAmbiguousJSON(t *testing.T) {
 
 func TestAttemptResultPartialWriteIsRetainedAndNeverRepaired(t *testing.T) {
 	root, dir := openAttemptResultTestDir(t, false)
-	result, _ := innerUnregisteredConvergedResult("partial")
+	result, _ := innerUnregisteredConvergedResult("partial", testResultProof())
 	_, err := publishAttemptResultWithWrite(dir, result, func(fd int, body []byte) error {
 		if _, writeErr := unix.Write(fd, body[:len(body)/2]); writeErr != nil {
 			return writeErr
@@ -168,7 +225,7 @@ func TestAttemptResultRejectsSymlinkHardlinkAndReplacement(t *testing.T) {
 	})
 	t.Run("hardlink", func(t *testing.T) {
 		root, dir := openAttemptResultTestDir(t, false)
-		result, _ := innerUnregisteredConvergedResult("hardlink")
+		result, _ := innerUnregisteredConvergedResult("hardlink", testResultProof())
 		if _, err := publishAttemptResult(dir, result); err != nil {
 			t.Fatal(err)
 		}
@@ -188,7 +245,7 @@ func TestAttemptResultRejectsSymlinkHardlinkAndReplacement(t *testing.T) {
 		if err := os.Rename(filepath.Join(root, AttemptResultSpoolName), filepath.Join(root, "moved")); err != nil {
 			t.Fatal(err)
 		}
-		replacementResult, _ := innerConvergedResult("replace", Identity{PID: 24, PGID: 24, Birth: Birth{Seconds: 4, Microseconds: 5}}, Exit{Code: 1})
+		replacementResult, _ := innerConvergedResult("replace", testResultProof(), Identity{PID: 24, PGID: 24, Birth: Birth{Seconds: 4, Microseconds: 5}}, Exit{Code: 1})
 		if _, err := publishAttemptResult(dir, replacementResult); err != nil {
 			t.Fatal(err)
 		}
@@ -265,7 +322,7 @@ func TestAttemptResultRejectsImpossibleMarkerCensus(t *testing.T) {
 	})
 	t.Run("unregistered with inner", func(t *testing.T) {
 		root, dir := openAttemptResultTestDir(t, false)
-		result, _ := innerUnregisteredConvergedResult("unregistered-inner")
+		result, _ := innerUnregisteredConvergedResult("unregistered-inner", testResultProof())
 		record, err := publishAttemptResult(dir, result)
 		if err != nil {
 			t.Fatal(err)

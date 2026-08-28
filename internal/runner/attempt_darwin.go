@@ -104,10 +104,14 @@ func (c *AttemptController) Configure(spec AttemptSpec) error {
 	if spec.MarkerName != InnerActivationMarkerName || spec.ResultName != AttemptResultSpoolName {
 		return ErrIdentity
 	}
+	proof, err := encodeResultProof(spec.ResultProof)
+	if err != nil {
+		return err
+	}
 	if spec.Wrapper.control != nil || spec.Wrapper.controlID != nil || len(spec.Wrapper.stdin) != 0 || spec.Wrapper.stdout != nil || spec.Wrapper.stderr != nil || spec.Wrapper.testFinal != nil || spec.Wrapper.testCurrentFinal {
 		return fmt.Errorf("runner: wrapper launch contains unsupported capabilities")
 	}
-	cfg := attemptConfig{Version: 1, AttemptID: spec.AttemptID, Wrapper: spec.Wrapper.commit, MarkerName: spec.MarkerName, ResultName: spec.ResultName}
+	cfg := attemptConfig{Version: 1, AttemptID: spec.AttemptID, Wrapper: spec.Wrapper.commit, MarkerName: spec.MarkerName, ResultName: spec.ResultName, ResultProof: proof}
 	if err := c.writeFrame(cfg, maxConfigBytes); err != nil {
 		return err
 	}
@@ -800,6 +804,9 @@ func validateAttemptConfig(cfg attemptConfig) error {
 	if cfg.Wrapper.Executable.Path == "" || cfg.Wrapper.Cwd.Path == "" {
 		return ErrIdentity
 	}
+	if _, err := decodeResultProof(cfg.ResultProof); err != nil {
+		return err
+	}
 	if err := validateArgv(cfg.Wrapper.Argv, cfg.Wrapper.Executable.Path); err != nil {
 		return ErrIdentity
 	}
@@ -827,6 +834,10 @@ func validateBasename(value string) error {
 }
 
 func runAttempt(daemon, dir, lifetime *os.File, cfg attemptConfig) (result error) {
+	proof, err := decodeResultProof(cfg.ResultProof)
+	if err != nil {
+		return err
+	}
 	lease, _, err := CreateGateLease(dir, lifetime, cfg.MarkerName)
 	if err != nil {
 		return err
@@ -853,7 +864,7 @@ func runAttempt(daemon, dir, lifetime *os.File, cfg attemptConfig) (result error
 	if err != nil {
 		return err
 	}
-	child, record, startErr := prepared.LaunchAttempt(dir, cfg.AttemptID)
+	child, record, startErr := prepared.LaunchAttempt(dir, cfg.AttemptID, proof)
 	if record != nil {
 		notifyAttemptResult(daemon, record)
 		return startErr
@@ -1176,7 +1187,11 @@ func finishAttemptWithExit(child *OwnedChild, dir *os.File, cfg attemptConfig, r
 	if err := drainAndCloseAttemptPTY(child, reads, daemon, daemonOpen); err != nil {
 		return errors.Join(cause, fmt.Errorf("runner: drain inner PTY: %w", err))
 	}
-	result, err := innerConvergedResult(cfg.AttemptID, child.Identity(), exit)
+	proof, err := decodeResultProof(cfg.ResultProof)
+	if err != nil {
+		return errors.Join(cause, err)
+	}
+	result, err := innerConvergedResult(cfg.AttemptID, proof, child.Identity(), exit)
 	if err != nil {
 		return errors.Join(cause, err)
 	}

@@ -557,7 +557,7 @@ func (prepared *PreparedChild) Start() (*StartedChild, error) {
 // and successful Start followed by Bind uncertainty have different local
 // histories, but after positive convergence share one external fact: no inner
 // identity was durably registered and no inner process remains.
-func (prepared *PreparedChild) LaunchAttempt(dir *os.File, attemptID string) (*OwnedChild, *AttemptResultRecord, error) {
+func (prepared *PreparedChild) LaunchAttempt(dir *os.File, attemptID string, proof ResultProof) (*OwnedChild, *AttemptResultRecord, error) {
 	started, startErr := prepared.Start()
 	if started != nil {
 		child, bindErr := started.Bind()
@@ -568,18 +568,18 @@ func (prepared *PreparedChild) LaunchAttempt(dir *os.File, attemptID string) (*O
 		if started.child != nil {
 			return nil, nil, errors.Join(bindErr, convergeErr, ErrUnresolved)
 		}
-		record, publishErr := publishInnerUnregisteredConverged(dir, attemptID)
+		record, publishErr := publishInnerUnregisteredConverged(dir, attemptID, proof)
 		return nil, record, errors.Join(bindErr, convergeErr, publishErr)
 	}
 	if startErr == nil {
 		return nil, nil, ErrState
 	}
-	record, publishErr := publishInnerUnregisteredConverged(dir, attemptID)
+	record, publishErr := publishInnerUnregisteredConverged(dir, attemptID, proof)
 	return nil, record, errors.Join(startErr, publishErr)
 }
 
-func publishInnerUnregisteredConverged(dir *os.File, attemptID string) (*AttemptResultRecord, error) {
-	result, resultErr := innerUnregisteredConvergedResult(attemptID)
+func publishInnerUnregisteredConverged(dir *os.File, attemptID string, proof ResultProof) (*AttemptResultRecord, error) {
+	result, resultErr := innerUnregisteredConvergedResult(attemptID, proof)
 	if resultErr != nil {
 		return nil, resultErr
 	}

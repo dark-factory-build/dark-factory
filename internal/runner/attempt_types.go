@@ -21,10 +21,11 @@ const (
 // released. Wrapper must not contain a caller-supplied control descriptor: the
 // attempt runner creates and owns that one fixed capability itself.
 type AttemptSpec struct {
-	AttemptID  string
-	Wrapper    *LaunchSpec
-	MarkerName string
-	ResultName string
+	AttemptID   string
+	Wrapper     *LaunchSpec
+	MarkerName  string
+	ResultName  string
+	ResultProof ResultProof
 }
 
 type AttemptEventKind string

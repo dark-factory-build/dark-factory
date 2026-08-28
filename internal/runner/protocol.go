@@ -29,11 +29,12 @@ type gateFrame struct {
 }
 
 type attemptConfig struct {
-	Version    int              `json:"version"`
-	AttemptID  string           `json:"attempt_id"`
-	Wrapper    launchCommitment `json:"wrapper"`
-	MarkerName string           `json:"marker_name"`
-	ResultName string           `json:"result_name"`
+	Version     int              `json:"version"`
+	AttemptID   string           `json:"attempt_id"`
+	Wrapper     launchCommitment `json:"wrapper"`
+	MarkerName  string           `json:"marker_name"`
+	ResultName  string           `json:"result_name"`
+	ResultProof string           `json:"result_proof"`
 }
 
 type attemptFrame struct {

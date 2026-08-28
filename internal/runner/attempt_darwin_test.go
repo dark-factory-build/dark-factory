@@ -101,13 +101,16 @@ func runAttemptWorkerHelper(args []string) error {
 			providerTask = []byte("one-startup\n")
 		}
 		provider = ExecSpec{Target: "/bin/sh", Args: []string{"-c", script}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: providerCwd}
-	case "binary", "seam", "lifetime", "lease-seam", "cwd", "cwd-seam", "cwd-unrelated", "cwd-file", "cwd-closed", "cwd-reused", "cwd-mode", "cwd-inherited", "cwd-inherited-11", "cwd-inherited-19", "cwd-inherited-20", "cwd-inherited-30":
+	case "binary", "seam", "lifetime", "lease-seam", "proof-census", "cwd", "cwd-seam", "cwd-unrelated", "cwd-file", "cwd-closed", "cwd-reused", "cwd-mode", "cwd-inherited", "cwd-inherited-11", "cwd-inherited-19", "cwd-inherited-20", "cwd-inherited-30":
 		if len(args) != 3 {
 			return errors.New("attempt worker: missing binary target")
 		}
 		providerArgs := []string{"--attempt-provider", filepath.Join(root, "provider.effect")}
 		if mode == "lifetime" {
 			providerArgs = []string{"--lifetime-provider", root}
+		}
+		if mode == "proof-census" {
+			providerArgs = []string{"--proof-provider", root}
 		}
 		if strings.HasPrefix(mode, "cwd") {
 			providerCwd = filepath.Join(root, "change", "work")
@@ -321,7 +324,7 @@ func newAttemptFixture(t *testing.T, mode string, target string) *attemptFixture
 	if err != nil {
 		t.Fatal(err)
 	}
-	attemptSpec := AttemptSpec{AttemptID: "attempt-1", Wrapper: wrapper, MarkerName: InnerActivationMarkerName, ResultName: AttemptResultSpoolName}
+	attemptSpec := AttemptSpec{AttemptID: "attempt-1", Wrapper: wrapper, MarkerName: InnerActivationMarkerName, ResultName: AttemptResultSpoolName, ResultProof: testResultProof()}
 	diagnostic := outputFile(t, filepath.Join(root, "runner.output"))
 	outerSpec, err := PrepareExecSpec(ExecSpec{Target: executable, Args: []string{"--attempt-runner"}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: filepath.Join(root, "work"), Stdout: diagnostic, Stderr: diagnostic, Control: childCap})
 	if err != nil {
@@ -1434,6 +1437,26 @@ func TestCurrentExecRejectsExactInheritedDescriptor(t *testing.T) {
 				test.check(t, f.root)
 			}
 		})
+	}
+}
+
+func TestProviderCannotInheritOuterResultProof(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newAttemptFixture(t, "proof-census", executable)
+	f.activateOuter()
+	f.advanceToProvider()
+	if err := f.controller.Release(StageProvider); err != nil {
+		t.Fatal(err)
+	}
+	record := f.finishAndAck()
+	if record.Terminal.Exit.Code != 0 {
+		t.Fatalf("proof census result=%+v output=%q", record.Terminal, f.output())
+	}
+	if _, err := os.Stat(filepath.Join(f.root, "proof-census.safe")); err != nil {
+		t.Fatalf("provider proof census did not complete: %v", err)
 	}
 }
 

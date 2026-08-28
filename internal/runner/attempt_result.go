@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"golang.org/x/sys/unix"
 )
@@ -16,7 +17,50 @@ import (
 const (
 	AttemptResultSpoolName = "attempt-result.json"
 	maxAttemptResultBytes  = 1024
+	resultProofBytes       = 32
 )
+
+// ResultProof is a per-run capability known only to the daemon and trusted
+// outer attempt runner. Store persists SHA-256(ResultProof), never this secret.
+type ResultProof struct {
+	value [resultProofBytes]byte
+}
+
+func NewResultProof(value [resultProofBytes]byte) (ResultProof, error) {
+	proof := ResultProof{value: value}
+	if !validResultProof(proof) {
+		return ResultProof{}, ErrIdentity
+	}
+	return proof, nil
+}
+
+func (ResultProof) String() string   { return "runner.ResultProof([redacted])" }
+func (ResultProof) GoString() string { return "runner.ResultProof([redacted])" }
+
+func validResultProof(proof ResultProof) bool { return proof.value != ([resultProofBytes]byte{}) }
+
+func decodeResultProof(value string) (ResultProof, error) {
+	var proof ResultProof
+	if len(value) != hex.EncodedLen(len(proof.value)) || value != strings.ToLower(value) {
+		return proof, ErrIdentity
+	}
+	decoded, err := hex.DecodeString(value)
+	if err != nil || len(decoded) != len(proof.value) {
+		return proof, errors.Join(ErrIdentity, err)
+	}
+	copy(proof.value[:], decoded)
+	if !validResultProof(proof) {
+		return ResultProof{}, ErrIdentity
+	}
+	return proof, nil
+}
+
+func encodeResultProof(proof ResultProof) (string, error) {
+	if !validResultProof(proof) {
+		return "", ErrIdentity
+	}
+	return hex.EncodeToString(proof.value[:]), nil
+}
 
 type AttemptResultKind string
 
@@ -30,6 +74,7 @@ const (
 type AttemptResult struct {
 	attemptID string
 	kind      AttemptResultKind
+	proof     ResultProof
 	process   Identity
 	code      int
 	signal    int
@@ -66,7 +111,9 @@ func (record *AttemptResultRecord) Result() AttemptResult {
 	if record == nil {
 		return AttemptResult{}
 	}
-	return record.result
+	result := record.result
+	result.proof = ResultProof{}
+	return result
 }
 func (record *AttemptResultRecord) Notice() AttemptResultNotice {
 	if record == nil {
@@ -77,11 +124,27 @@ func (record *AttemptResultRecord) Notice() AttemptResultNotice {
 func (record *AttemptResultRecord) InnerActivated() bool {
 	return record != nil && record.innerActivated
 }
+func (record *AttemptResultRecord) ProofDigest() [sha256.Size]byte {
+	if record == nil {
+		return [sha256.Size]byte{}
+	}
+	return sha256.Sum256(record.result.proof.value[:])
+}
+
+func (record *AttemptResultRecord) String() string {
+	if record == nil {
+		return "runner.AttemptResultRecord(<nil>)"
+	}
+	return fmt.Sprintf("runner.AttemptResultRecord{attempt_id:%q kind:%q file:%d:%d digest:%q proof_digest:%x}", record.result.attemptID, record.result.kind, record.notice.Identity.Device, record.notice.Identity.Inode, record.notice.Digest, record.ProofDigest())
+}
+
+func (record *AttemptResultRecord) GoString() string { return record.String() }
 
 type attemptResultWire struct {
 	Version   int                    `json:"version"`
 	AttemptID string                 `json:"attempt_id"`
 	Kind      AttemptResultKind      `json:"kind"`
+	Proof     string                 `json:"proof"`
 	Process   *Identity              `json:"process,omitempty"`
 	Exit      *attemptResultExitWire `json:"exit,omitempty"`
 }
@@ -91,16 +154,16 @@ type attemptResultExitWire struct {
 	Signal *int `json:"signal,omitempty"`
 }
 
-func innerUnregisteredConvergedResult(attemptID string) (AttemptResult, error) {
-	result := AttemptResult{attemptID: attemptID, kind: AttemptResultInnerUnregisteredConverged, code: -1}
+func innerUnregisteredConvergedResult(attemptID string, proof ResultProof) (AttemptResult, error) {
+	result := AttemptResult{attemptID: attemptID, kind: AttemptResultInnerUnregisteredConverged, proof: proof, code: -1}
 	if !validAttemptResult(result) {
 		return AttemptResult{}, ErrIdentity
 	}
 	return result, nil
 }
 
-func innerConvergedResult(attemptID string, process Identity, exit Exit) (AttemptResult, error) {
-	result := AttemptResult{attemptID: attemptID, kind: AttemptResultInnerConverged, process: process, code: exit.Code, signal: exit.Signal}
+func innerConvergedResult(attemptID string, proof ResultProof, process Identity, exit Exit) (AttemptResult, error) {
+	result := AttemptResult{attemptID: attemptID, kind: AttemptResultInnerConverged, proof: proof, process: process, code: exit.Code, signal: exit.Signal}
 	if !validAttemptResult(result) {
 		return AttemptResult{}, ErrIdentity
 	}
@@ -108,7 +171,7 @@ func innerConvergedResult(attemptID string, process Identity, exit Exit) (Attemp
 }
 
 func validAttemptResult(result AttemptResult) bool {
-	if validateAttemptName(result.attemptID, 256) != nil {
+	if validateAttemptName(result.attemptID, 256) != nil || !validResultProof(result.proof) {
 		return false
 	}
 	switch result.kind {
@@ -125,7 +188,11 @@ func canonicalAttemptResult(result AttemptResult) ([]byte, error) {
 	if !validAttemptResult(result) {
 		return nil, ErrIdentity
 	}
-	wire := attemptResultWire{Version: 1, AttemptID: result.attemptID, Kind: result.kind}
+	proof, err := encodeResultProof(result.proof)
+	if err != nil {
+		return nil, err
+	}
+	wire := attemptResultWire{Version: 1, AttemptID: result.attemptID, Kind: result.kind, Proof: proof}
 	if result.kind == AttemptResultInnerConverged {
 		wire.Process = &result.process
 		wire.Exit = &attemptResultExitWire{}
@@ -164,7 +231,11 @@ func decodeCanonicalAttemptResult(body []byte) (AttemptResult, error) {
 	if wire.Version != 1 {
 		return AttemptResult{}, ErrIdentity
 	}
-	result := AttemptResult{attemptID: wire.AttemptID, kind: wire.Kind, code: -1}
+	proof, err := decodeResultProof(wire.Proof)
+	if err != nil {
+		return AttemptResult{}, err
+	}
+	result := AttemptResult{attemptID: wire.AttemptID, kind: wire.Kind, proof: proof, code: -1}
 	switch wire.Kind {
 	case AttemptResultInnerUnregisteredConverged:
 		if wire.Process != nil || wire.Exit != nil {
