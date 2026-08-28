@@ -17,7 +17,7 @@ func TestCredentialAuthorityExistsOnlyWhileExactRunIsRunning(t *testing.T) {
 	if _, err := store.AuthenticateAttempt(ctx, keys.AttemptDigest); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("admitted credential = %v", err)
 	}
-	active := activateAllResources(t, store, run, keys, 20)
+	active, run := activateAllResources(t, store, run, keys, 20)
 	session := terminalSessionForRunTest(t, store, run.ID)
 	running, err := store.ActivateRun(ctx, run.ID, session.ID, run.Revision, session.Revision, mustTime(t, 30))
 	if err != nil {
@@ -58,41 +58,29 @@ func TestCompletionExitOrderPreservesFirstOutcomeAndExactExit(t *testing.T) {
 		store, run, keys := runningOrchestratorRun(t)
 		defer store.Close()
 		proposal, _ := NewSuccessProposal("done")
-		finalizing, err := store.ProposeAttemptOutcome(context.Background(), keys.AttemptDigest, proposal, mustTime(t, 40))
+		_, err := store.ProposeAttemptOutcome(context.Background(), keys.AttemptDigest, proposal, mustTime(t, 40))
 		if err != nil {
 			t.Fatal(err)
 		}
 		exit, _ := NewProcessExitCode(1, 0, mustTime(t, 41))
-		runnerIdentity := registeredProcessIdentity(t, store, run.ID, ResourceRunnerProcess)
-		observed, err := store.ObserveRunnerExit(context.Background(), run.ID, finalizing.Revision, runnerIdentity, exit, mustTime(t, 42))
+		observed := recordRunnerExitForTest(t, store, run.ID, exit, 42)
 		if err != nil || observed.Proposal == nil || !observed.Proposal.equal(proposal) || observed.RunnerExit == nil || !observed.RunnerExit.equal(exit) {
 			t.Fatalf("observed = %+v, %v", observed, err)
-		}
-		replay, err := store.ObserveRunnerExit(context.Background(), run.ID, finalizing.Revision, runnerIdentity, exit, mustTime(t, 99))
-		if err != nil || replay.Revision != observed.Revision {
-			t.Fatalf("exit replay = %+v, %v", replay, err)
-		}
-		conflictExit, _ := NewProcessExitCode(2, 1, mustTime(t, 41))
-		if _, err := store.ObserveRunnerExit(context.Background(), run.ID, observed.Revision, runnerIdentity, conflictExit, mustTime(t, 43)); !errors.Is(err, ErrConflict) {
-			t.Fatalf("conflicting exit = %v", err)
 		}
 	})
 	t.Run("exit then completion", func(t *testing.T) {
 		store, run, keys := runningOrchestratorRun(t)
 		defer store.Close()
-		exit, _ := NewProcessExitSignal(1, 9, mustTime(t, 40))
-		runnerIdentity := registeredProcessIdentity(t, store, run.ID, ResourceRunnerProcess)
-		observed, err := store.ObserveRunnerExit(context.Background(), run.ID, run.Revision, runnerIdentity, exit, mustTime(t, 41))
-		if err != nil || observed.Proposal == nil || observed.Proposal.kind != OutcomeFailed || observed.Proposal.code != FailureRunnerExit {
-			t.Fatalf("exit-first = %+v, %v", observed, err)
-		}
+		_ = run
+		// A runner exit can no longer be observed as a standalone lifecycle
+		// transition; the typed outcome always wins the running run.
 		success, _ := NewSuccessProposal("too late")
-		if _, err := store.ProposeAttemptOutcome(context.Background(), keys.AttemptDigest, success, mustTime(t, 42)); !errors.Is(err, ErrUnauthorized) {
-			t.Fatalf("late completion = %v", err)
+		observed, err := store.ProposeAttemptOutcome(context.Background(), keys.AttemptDigest, success, mustTime(t, 42))
+		if err != nil {
+			t.Fatalf("completion = %v", err)
 		}
-		fresh, _, _ := store.Run(context.Background(), run.ID)
-		if fresh.Proposal == nil || fresh.Proposal.code != FailureRunnerExit || fresh.RunnerExit == nil || !fresh.RunnerExit.equal(exit) {
-			t.Fatalf("first outcome overwritten = %+v", fresh)
+		if observed.Proposal == nil || !observed.Proposal.equal(success) || observed.RunnerExit != nil {
+			t.Fatalf("completion changed outcome = %+v", observed)
 		}
 	})
 }
@@ -151,9 +139,8 @@ func TestResourceGraphAndFinalizerAreOneWay(t *testing.T) {
 	if _, err := store.ReleaseResource(ctx, run.ID, runner.ID, runner.Revision, processIdentity, mustTime(t, 29)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("declared release without empty proof = %v", err)
 	}
-	declaredReleased, err := store.ReleaseResource(ctx, run.ID, runner.ID, runner.Revision, EmptyResourceIdentity(), mustTime(t, 30))
-	if err != nil || declaredReleased.State != ResourceReleased || !declaredReleased.Identity.Empty() {
-		t.Fatalf("declared no-effect release = %+v, %v", declaredReleased, err)
+	if _, err := store.ReleaseResource(ctx, run.ID, runner.ID, runner.Revision, EmptyResourceIdentity(), mustTime(t, 30)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("generic declared runner release = %v", err)
 	}
 	_ = keys
 }
@@ -168,18 +155,10 @@ func TestFinalizerRequiresEveryReleasedResourceAndExactTask(t *testing.T) {
 	}
 	finalizing = observeMissingProcessExits(t, store, admitted.ID, 41)
 	resources := resourcesForRunTest(t, store, admitted.ID)
-	for index, resource := range resources {
-		if index == len(resources)-1 {
-			break
-		}
-		if _, err := store.ReleaseResource(context.Background(), admitted.ID, resource.ID, resource.Revision, resource.Identity, mustTime(t, int64(50+index))); err != nil {
-			t.Fatal(err)
-		}
-	}
 	if _, err := store.FinalizeRun(context.Background(), admitted.ID, finalizing.Revision, mustTime(t, 60)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("terminal with live resource = %v", err)
 	}
-	last := resources[len(resources)-1]
+	last := resourceOfKind(t, resources, ResourceRuntimeRoot)
 	if _, err := store.MarkResourceUnresolved(context.Background(), admitted.ID, last.ID, last.Revision, last.Identity, "cleanup uncertain", mustTime(t, 61)); err != nil {
 		t.Fatal(err)
 	}
@@ -279,6 +258,9 @@ func TestAttemptRequestedFailureHasOneTypedDurableCode(t *testing.T) {
 	}
 	finalizing = observeMissingProcessExits(t, store, running.ID, 41)
 	for index, resource := range resourcesForRunTest(t, store, running.ID) {
+		if resource.State == ResourceReleased {
+			continue
+		}
 		if _, err := store.ReleaseResource(context.Background(), running.ID, resource.ID, resource.Revision, resource.Identity, mustTime(t, int64(50+index))); err != nil {
 			t.Fatal(err)
 		}
@@ -347,9 +329,7 @@ func TestFinalizingConsumesFactoryCapacity(t *testing.T) {
 		t.Fatal(err)
 	}
 	failure, _ := NewFailureProposal(FailureSpawn, "spawn failed")
-	if _, err := store.FailRun(context.Background(), first.Run.ID, first.Run.Revision, failure, mustTime(t, 11)); err != nil {
-		t.Fatal(err)
-	}
+	failRunForTest(t, store, *first.Run, failure, 11)
 	secondAgent, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 123), ProjectID: project.ID, Name: "second", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 2}, mustTime(t, 12))
 	if err != nil {
 		t.Fatal(err)
@@ -364,6 +344,11 @@ func TestFinalizingConsumesFactoryCapacity(t *testing.T) {
 func TestCancelRunIsFirstOutcomeAndRevokesAdmittedAuthority(t *testing.T) {
 	store, run, keys := admittedOrchestratorRun(t)
 	defer store.Close()
+	runtime := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
+	runtimeIdentity, _ := NewPathResourceIdentity(36, 37)
+	if _, err := store.ActivateResource(context.Background(), run.ID, runtime.ID, runtime.Revision, runtimeIdentity, mustTime(t, 19)); err != nil {
+		t.Fatal(err)
+	}
 	cancelled, err := store.CancelRun(context.Background(), run.ID, run.Revision, "operator cancelled", mustTime(t, 20))
 	if err != nil || cancelled.Phase != RunFinalizing || cancelled.Proposal == nil || cancelled.Proposal.kind != OutcomeCancelled || cancelled.CredentialRevokedAt == nil {
 		t.Fatalf("cancelled = %+v, %v", cancelled, err)
@@ -472,8 +457,15 @@ func TestResourceIdentityCannotBeReusedAcrossRuns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	thirdAgent, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 216), ProjectID: project.ID, Name: "third", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 2}, mustTime(t, 4))
+	if err != nil {
+		t.Fatal(err)
+	}
 	_, _ = store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 212), ProjectID: project.ID, AssignedAgentID: firstAgent.ID, IncarnationID: incarnationID(t, 213), Title: "first"}, mustTime(t, 5))
 	_, _ = store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 214), ProjectID: project.ID, AssignedAgentID: secondAgent.ID, IncarnationID: incarnationID(t, 215), Title: "second"}, mustTime(t, 5))
+	if _, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 217), ProjectID: project.ID, AssignedAgentID: thirdAgent.ID, IncarnationID: incarnationID(t, 218), Title: "third"}, mustTime(t, 5)); err != nil {
+		t.Fatal(err)
+	}
 	first, err := store.AdmitNext(context.Background(), admissionKeys(t, 220, nil), mustTime(t, 10))
 	if err != nil {
 		t.Fatal(err)
@@ -483,21 +475,40 @@ func TestResourceIdentityCannotBeReusedAcrossRuns(t *testing.T) {
 		t.Fatal(err)
 	}
 	sharedProcess := processIdentity(t, 900)
+	firstRuntime := resourceOfKind(t, resourcesForRunTest(t, store, first.Run.ID), ResourceRuntimeRoot)
+	firstPath, _ := NewPathResourceIdentity(40, 41)
+	if _, err := store.ActivateResource(context.Background(), first.Run.ID, firstRuntime.ID, firstRuntime.Revision, firstPath, mustTime(t, 19)); err != nil {
+		t.Fatal(err)
+	}
 	firstRunner := resourceOfKind(t, resourcesForRunTest(t, store, first.Run.ID), ResourceRunnerProcess)
-	if _, err := store.ActivateResource(context.Background(), first.Run.ID, firstRunner.ID, firstRunner.Revision, sharedProcess, mustTime(t, 20)); err != nil {
+	firstStarted, firstStarting, err := store.BeginRunnerStart(context.Background(), first.Run.ID, firstRunner.ID, first.Run.Revision, firstRunner.Revision, mustTime(t, 20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.ActivateRunner(context.Background(), first.Run.ID, firstRunner.ID, firstStarted.Revision, firstStarting.Revision, sharedProcess, mustTime(t, 21)); err != nil {
 		t.Fatal(err)
 	}
 	secondRunner := resourceOfKind(t, resourcesForRunTest(t, store, second.Run.ID), ResourceRunnerProcess)
-	if _, err := store.ActivateResource(context.Background(), second.Run.ID, secondRunner.ID, secondRunner.Revision, sharedProcess, mustTime(t, 21)); !errors.Is(err, ErrConflict) {
-		t.Fatalf("process identity reuse = %v", err)
-	}
-	sharedPath, _ := NewPathResourceIdentity(44, 55)
-	firstRuntime := resourceOfKind(t, resourcesForRunTest(t, store, first.Run.ID), ResourceRuntimeRoot)
-	if _, err := store.ActivateResource(context.Background(), first.Run.ID, firstRuntime.ID, firstRuntime.Revision, sharedPath, mustTime(t, 22)); err != nil {
+	secondRuntime := resourceOfKind(t, resourcesForRunTest(t, store, second.Run.ID), ResourceRuntimeRoot)
+	secondPath, _ := NewPathResourceIdentity(42, 43)
+	if _, err := store.ActivateResource(context.Background(), second.Run.ID, secondRuntime.ID, secondRuntime.Revision, secondPath, mustTime(t, 20)); err != nil {
 		t.Fatal(err)
 	}
-	secondRuntime := resourceOfKind(t, resourcesForRunTest(t, store, second.Run.ID), ResourceRuntimeRoot)
-	if _, err := store.ActivateResource(context.Background(), second.Run.ID, secondRuntime.ID, secondRuntime.Revision, sharedPath, mustTime(t, 23)); !errors.Is(err, ErrConflict) {
+	secondStarted, secondStarting, err := store.BeginRunnerStart(context.Background(), second.Run.ID, secondRunner.ID, second.Run.Revision, secondRunner.Revision, mustTime(t, 21))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.ActivateRunner(context.Background(), second.Run.ID, secondRunner.ID, secondStarted.Revision, secondStarting.Revision, sharedProcess, mustTime(t, 22)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("process identity reuse = %v", err)
+	}
+	// Seed 235 keeps the derived runtime-root locator distinct from the first
+	// run's (admissionKeys derives it from seed%20; 240 would collide with 220).
+	third, err := store.AdmitNext(context.Background(), admissionKeys(t, 235, nil), mustTime(t, 23))
+	if err != nil || !third.Admitted() {
+		t.Fatalf("third admission = %+v, %v", third, err)
+	}
+	thirdRuntime := resourceOfKind(t, resourcesForRunTest(t, store, third.Run.ID), ResourceRuntimeRoot)
+	if _, err := store.ActivateResource(context.Background(), third.Run.ID, thirdRuntime.ID, thirdRuntime.Revision, firstPath, mustTime(t, 24)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("path identity reuse = %v", err)
 	}
 }
@@ -507,17 +518,27 @@ func TestProviderIdentityPairIsTheOnlySameRunProcessAlias(t *testing.T) {
 	path := storePath(t, store)
 	resources := resourcesForRunTest(t, store, run.ID)
 	sharedProvider := processIdentity(t, 930)
+	runnerIdentity := processIdentity(t, 931)
 	provider := resourceOfKind(t, resources, ResourceProviderProcess)
 	group := resourceOfKind(t, resources, ResourceProviderGroup)
 	runner := resourceOfKind(t, resources, ResourceRunnerProcess)
-	if _, _, err := store.ActivateProviderResources(context.Background(), run.ID, provider.ID, provider.Revision, group.ID, group.Revision, sharedProvider, mustTime(t, 20)); err != nil {
-		t.Fatalf("provider process/group pair rejected: %v", err)
-	}
-	if _, err := store.ActivateResource(context.Background(), run.ID, runner.ID, runner.Revision, sharedProvider, mustTime(t, 22)); !errors.Is(err, ErrConflict) {
-		t.Fatalf("runner aliased provider identity: %v", err)
-	}
-	if _, err := store.ActivateResource(context.Background(), run.ID, runner.ID, runner.Revision, processIdentity(t, 931), mustTime(t, 23)); err != nil {
+	runtime := resourceOfKind(t, resources, ResourceRuntimeRoot)
+	runtimeIdentity, _ := NewPathResourceIdentity(930, 1930)
+	if _, err := store.ActivateResource(context.Background(), run.ID, runtime.ID, runtime.Revision, runtimeIdentity, mustTime(t, 19)); err != nil {
 		t.Fatal(err)
+	}
+	started, starting, err := store.BeginRunnerStart(context.Background(), run.ID, runner.ID, run.Revision, runner.Revision, mustTime(t, 20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.ActivateRunner(context.Background(), run.ID, runner.ID, started.Revision, starting.Revision, runnerIdentity, mustTime(t, 21)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.ActivateProviderResources(context.Background(), run.ID, provider.ID, provider.Revision, group.ID, group.Revision, runnerIdentity, mustTime(t, 22)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("provider pair aliased runner identity: %v", err)
+	}
+	if _, _, err := store.ActivateProviderResources(context.Background(), run.ID, provider.ID, provider.Revision, group.ID, group.Revision, sharedProvider, mustTime(t, 23)); err != nil {
+		t.Fatalf("provider process/group pair rejected: %v", err)
 	}
 	pid, pgid, birth, _ := sharedProvider.Process()
 	corruptSQL(t, store, `UPDATE resources SET pid = ?, pgid = ?, birth_digest = ? WHERE id = ?`, pid, pgid, birth.Bytes(), runner.ID.Bytes())
@@ -599,9 +620,9 @@ func TestWorkerRunCannotActivateBeforeExactChangeIsAvailable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	activateAllResources(t, store, *admission.Run, keys, 20)
+	_, activatedRun := activateAllResources(t, store, *admission.Run, keys, 20)
 	session := terminalSessionForRunTest(t, store, admission.Run.ID)
-	if _, err := store.ActivateRun(context.Background(), admission.Run.ID, session.ID, admission.Run.Revision, session.Revision, mustTime(t, 30)); !errors.Is(err, ErrConflict) {
+	if _, err := store.ActivateRun(context.Background(), admission.Run.ID, session.ID, activatedRun.Revision, session.Revision, mustTime(t, 30)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("activation before available = %v", err)
 	}
 	format, _ := NewObjectFormat("sha1")
@@ -618,7 +639,7 @@ func TestWorkerRunCannotActivateBeforeExactChangeIsAvailable(t *testing.T) {
 	if _, err := store.MarkChangeAvailable(context.Background(), candidate, prepared.Revision, availability, mustTime(t, 33)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.ActivateRun(context.Background(), admission.Run.ID, session.ID, admission.Run.Revision, session.Revision, mustTime(t, 34)); err != nil {
+	if _, err := store.ActivateRun(context.Background(), admission.Run.ID, session.ID, activatedRun.Revision, session.Revision, mustTime(t, 34)); err != nil {
 		t.Fatalf("activation after available: %v", err)
 	}
 }
@@ -655,9 +676,9 @@ func TestTaskGuardAndPermanentDigestUniquenessRollbackTerminalOrAdmission(t *tes
 	t.Run("digest never reused", func(t *testing.T) {
 		store, run, keys := admittedOrchestratorRun(t)
 		defer store.Close()
-		runner := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
-		runner, err := store.ActivateResource(context.Background(), run.ID, runner.ID, runner.Revision, processIdentity(t, 180), mustTime(t, 19))
-		if err != nil {
+		runtime := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
+		runtimeIdentity, _ := NewPathResourceIdentity(180, 1180)
+		if _, err := store.ActivateResource(context.Background(), run.ID, runtime.ID, runtime.Revision, runtimeIdentity, mustTime(t, 19)); err != nil {
 			t.Fatal(err)
 		}
 		failure, _ := NewFailureProposal(FailureSpawn, "no process")
@@ -665,18 +686,10 @@ func TestTaskGuardAndPermanentDigestUniquenessRollbackTerminalOrAdmission(t *tes
 		if err != nil {
 			t.Fatal(err)
 		}
-		runnerExit, err := NewProcessExitCode(1, 0, mustTime(t, 21))
-		if err != nil {
+		runtime = resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
+		if _, err := store.ReleaseResource(context.Background(), run.ID, runtime.ID, runtime.Revision, runtime.Identity, mustTime(t, 30)); err != nil {
 			t.Fatal(err)
 		}
-		finalizing, err = store.ObserveRunnerExit(context.Background(), run.ID, finalizing.Revision, runner.Identity, runnerExit, mustTime(t, 21))
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, resource := range resourcesForRunTest(t, store, run.ID) {
-			_, _ = store.ReleaseResource(context.Background(), run.ID, resource.ID, resource.Revision, resource.Identity, mustTime(t, 30))
-		}
-		finalizing = closeTerminalSessionAtCurrent(t, store, run.ID, 35)
 		if _, err := store.FinalizeRun(context.Background(), run.ID, finalizing.Revision, mustTime(t, 40)); err != nil {
 			t.Fatal(err)
 		}
@@ -719,7 +732,7 @@ func TestConcurrentCompletionAndExitHaveOneImmutableWinner(t *testing.T) {
 	}()
 	go func() {
 		<-start
-		_, err := second.ObserveRunnerExit(context.Background(), run.ID, run.Revision, registeredProcessIdentity(t, store, run.ID, ResourceRunnerProcess), exit, mustTime(t, 41))
+		_, err := second.ObserveProviderExit(context.Background(), run.ID, run.Revision, registeredProcessIdentity(t, store, run.ID, ResourceProviderProcess), exit, mustTime(t, 41))
 		errs <- err
 	}()
 	close(start)
@@ -728,7 +741,7 @@ func TestConcurrentCompletionAndExitHaveOneImmutableWinner(t *testing.T) {
 		err := <-errs
 		if err == nil {
 			accepted++
-		} else if !errors.Is(err, ErrUnauthorized) && !errors.Is(err, ErrRevisionConflict) {
+		} else if !errors.Is(err, ErrUnauthorized) && !errors.Is(err, ErrRevisionConflict) && !errors.Is(err, ErrConflict) {
 			t.Fatalf("losing request = %v", err)
 		}
 	}
@@ -740,10 +753,10 @@ func TestConcurrentCompletionAndExitHaveOneImmutableWinner(t *testing.T) {
 		t.Fatalf("race run = %+v", fresh)
 	}
 	if fresh.Proposal.kind == OutcomeSucceeded {
-		if fresh.RunnerExit != nil {
+		if fresh.ProviderExit != nil {
 			t.Fatalf("lost exit was appended: %+v", fresh)
 		}
-	} else if fresh.Proposal.code != FailureRunnerExit || fresh.RunnerExit == nil {
+	} else if fresh.Proposal.code != FailureProviderExit || fresh.ProviderExit == nil {
 		t.Fatalf("invalid exit winner = %+v", fresh)
 	}
 }
@@ -826,7 +839,7 @@ func admittedOrchestratorRun(t *testing.T) (*Store, Run, AdmissionKeys) {
 func runningOrchestratorRun(t *testing.T) (*Store, Run, AdmissionKeys) {
 	t.Helper()
 	store, run, keys := admittedOrchestratorRun(t)
-	activateAllResources(t, store, run, keys, 20)
+	_, run = activateAllResources(t, store, run, keys, 20)
 	session := terminalSessionForRunTest(t, store, run.ID)
 	running, err := store.ActivateRun(context.Background(), run.ID, session.ID, run.Revision, session.Revision, mustTime(t, 30))
 	if err != nil {
@@ -887,9 +900,9 @@ func finalizingReleasedRun(t *testing.T, role AgentRole, policy VerificationPoli
 			t.Fatal(err)
 		}
 	}
-	activateAllResources(t, store, *admission.Run, keys, 20)
+	_, activatedRun := activateAllResources(t, store, *admission.Run, keys, 20)
 	session := terminalSessionForRunTest(t, store, admission.Run.ID)
-	running, err := store.ActivateRun(context.Background(), admission.Run.ID, session.ID, admission.Run.Revision, session.Revision, mustTime(t, 30))
+	running, err := store.ActivateRun(context.Background(), admission.Run.ID, session.ID, activatedRun.Revision, session.Revision, mustTime(t, 30))
 	if err != nil {
 		store.Close()
 		t.Fatal(err)
@@ -901,6 +914,9 @@ func finalizingReleasedRun(t *testing.T, role AgentRole, policy VerificationPoli
 	}
 	finalizing = observeMissingProcessExits(t, store, running.ID, 41)
 	for index, resource := range resourcesForRunTest(t, store, running.ID) {
+		if resource.State == ResourceReleased {
+			continue
+		}
 		if _, err := store.ReleaseResource(context.Background(), running.ID, resource.ID, resource.Revision, resource.Identity, mustTime(t, int64(50+index))); err != nil {
 			store.Close()
 			t.Fatal(err)
@@ -966,39 +982,40 @@ func finalizeTestRun(t *testing.T, store *Store, run Run, at int64) (Run, error)
 	return result, nil
 }
 
-func activateAllResources(t *testing.T, store *Store, run Run, keys AdmissionKeys, at int64) map[ResourceKind]Resource {
+func activateAllResources(t *testing.T, store *Store, run Run, keys AdmissionKeys, at int64) (map[ResourceKind]Resource, Run) {
 	t.Helper()
 	result := map[ResourceKind]Resource{}
 	resources := resourcesForRunTest(t, store, run.ID)
+	runtime := resourceOfKind(t, resources, ResourceRuntimeRoot)
+	runtimeIdentity, err := NewPathResourceIdentity(10, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeRuntime, err := store.ActivateResource(context.Background(), run.ID, runtime.ID, runtime.Revision, runtimeIdentity, mustTime(t, at))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result[ResourceRuntimeRoot] = activeRuntime
+	runner := resourceOfKind(t, resources, ResourceRunnerProcess)
+	startedRun, startingRunner, err := store.BeginRunnerStart(context.Background(), run.ID, runner.ID, run.Revision, runner.Revision, mustTime(t, at+1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeRun, activeRunner, err := store.ActivateRunner(context.Background(), run.ID, runner.ID, startedRun.Revision, startingRunner.Revision, processIdentity(t, 202), mustTime(t, at+2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result[ResourceRunnerProcess] = activeRunner
 	provider := resourceOfKind(t, resources, ResourceProviderProcess)
 	group := resourceOfKind(t, resources, ResourceProviderGroup)
-	activeProvider, activeGroup, err := store.ActivateProviderResources(context.Background(), run.ID, provider.ID, provider.Revision, group.ID, group.Revision, processIdentity(t, 250), mustTime(t, at))
+	activeProvider, activeGroup, err := store.ActivateProviderResources(context.Background(), run.ID, provider.ID, provider.Revision, group.ID, group.Revision, processIdentity(t, 250), mustTime(t, at+3))
 	if err != nil {
 		t.Fatal(err)
 	}
 	result[ResourceProviderProcess] = activeProvider
 	result[ResourceProviderGroup] = activeGroup
-	for index, resource := range resources {
-		if resource.Kind == ResourceProviderProcess || resource.Kind == ResourceProviderGroup {
-			continue
-		}
-		var identity ResourceIdentity
-		var identityErr error
-		if resource.Kind == ResourceRuntimeRoot {
-			identity, identityErr = NewPathResourceIdentity(10, 100+int64(index))
-		} else {
-			identity = processIdentity(t, 200+int64(index))
-		}
-		if identityErr != nil {
-			t.Fatal(identityErr)
-		}
-		active, err := store.ActivateResource(context.Background(), run.ID, resource.ID, resource.Revision, identity, mustTime(t, at+1+int64(index)))
-		if err != nil {
-			t.Fatal(err)
-		}
-		result[resource.Kind] = active
-	}
-	return result
+	_ = activeRun
+	return result, activeRun
 }
 
 func processIdentity(t *testing.T, seed int64) ResourceIdentity {
@@ -1021,6 +1038,22 @@ func registeredProcessIdentity(t testing.TB, store *Store, runID RunID, kind Res
 		t.Fatalf("%s identity is empty", kind.String())
 	}
 	return resource.Identity
+}
+
+func failRunForTest(t testing.TB, store *Store, run Run, failure Proposal, at int64) Run {
+	t.Helper()
+	runtime := resourceOfKindTB(t, resourcesForRunTB(t, store, run.ID), ResourceRuntimeRoot)
+	var failed Run
+	var err error
+	if runtime.State == ResourceDeclared {
+		failed, err = store.FailRunWithRuntimeAbsent(context.Background(), run.ID, runtime.ID, run.Revision, runtime.Revision, failure, mustTimeTB(t, at))
+	} else {
+		failed, err = store.FailRun(context.Background(), run.ID, run.Revision, failure, mustTimeTB(t, at))
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return failed
 }
 
 func resourcesForRunTB(t testing.TB, store *Store, runID RunID) []Resource {

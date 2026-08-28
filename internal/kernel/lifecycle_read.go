@@ -12,7 +12,7 @@ const runColumns = `id, project_id, agent_id, task_id, task_incarnation_id,
 	    admitted_task_work_revision, change_id, admitted_change_revision, role, provider, model, reasoning_effort, verification_policy, phase,
     proposal_kind, proposal_code, proposal_detail, proposal_result,
     terminal_kind, terminal_code, terminal_detail, terminal_result,
-	credential_digest, credential_revoked_at_ms,
+	credential_digest, result_proof_digest, credential_revoked_at_ms,
 	    provider_exit_kind, provider_exit_sequence, provider_exit_code, provider_exit_signal, provider_exit_at_ms,
 	    runner_exit_kind, runner_exit_sequence, runner_exit_code, runner_exit_signal, runner_exit_at_ms,
     revision, admitted_at_ms, running_at_ms, finalizing_at_ms, terminal_at_ms, updated_at_ms`
@@ -32,7 +32,7 @@ func runByDigest(ctx context.Context, connection *sql.Conn, digest AttemptDigest
 }
 
 func scanRun(scanner rowScanner) (Run, bool, error) {
-	var rawID, rawProjectID, rawAgentID, rawTaskID, rawIncarnationID, rawDigest []byte
+	var rawID, rawProjectID, rawAgentID, rawTaskID, rawIncarnationID, rawDigest, rawResultProofDigest []byte
 	var rawChangeID nullableBlob
 	var admittedChangeRevision sql.NullInt64
 	var roleValue, providerValue, verificationValue, phaseValue string
@@ -50,7 +50,7 @@ func scanRun(scanner rowScanner) (Run, bool, error) {
 		&roleValue, &providerValue, &model, &effort, &verificationValue, &phaseValue,
 		&proposalKind, &proposalCode, &proposalDetail, &proposalResult,
 		&terminalKind, &terminalCode, &terminalDetail, &terminalResult,
-		&rawDigest, &revokedAt,
+		&rawDigest, &rawResultProofDigest, &revokedAt,
 		&providerExitKind, &providerExitSequence, &providerExitCode, &providerExitSignal, &providerExitAt,
 		&runnerExitKind, &runnerExitSequence, &runnerExitCode, &runnerExitSignal, &runnerExitAt,
 		&revision, &admittedAt, &runningAt, &finalizingAt, &terminalAt, &updatedAt,
@@ -71,17 +71,18 @@ func scanRun(scanner rowScanner) (Run, bool, error) {
 	verification, verificationErr := parseVerificationPolicy(verificationValue)
 	phase, phaseErr := parseRunPhase(phaseValue)
 	digest, digestErr := AttemptDigestFromBytes(rawDigest)
+	resultProofDigest, resultProofDigestErr := ResultProofDigestFromBytes(rawResultProofDigest)
 	rev, revisionErr := NewRevision(revision)
 	admittedTime, admittedErr := NewUnixMillis(admittedAt)
 	updatedTime, updatedErr := NewUnixMillis(updatedAt)
-	if idErr != nil || projectErr != nil || agentErr != nil || taskErr != nil || incarnationErr != nil || workErr != nil || roleErr != nil || providerErr != nil || verificationErr != nil || phaseErr != nil || digestErr != nil || revisionErr != nil || admittedErr != nil || updatedErr != nil || updatedAt < admittedAt || model.Valid && model.String == "" || effort.Valid && effort.String == "" || ValidateProviderLaunchControls(provider, nullStringValue(model), nullStringValue(effort)) != nil {
+	if idErr != nil || projectErr != nil || agentErr != nil || taskErr != nil || incarnationErr != nil || workErr != nil || roleErr != nil || providerErr != nil || verificationErr != nil || phaseErr != nil || digestErr != nil || resultProofDigestErr != nil || revisionErr != nil || admittedErr != nil || updatedErr != nil || updatedAt < admittedAt || model.Valid && model.String == "" || effort.Valid && effort.String == "" || ValidateProviderLaunchControls(provider, nullStringValue(model), nullStringValue(effort)) != nil {
 		return Run{}, false, fmt.Errorf("%w: invalid run controls", ErrCorruptState)
 	}
 	result := Run{
 		ID: id, ProjectID: projectID, AgentID: agentID, TaskID: taskID, TaskIncarnationID: incarnationID,
 		AdmittedTaskWorkRevision: workRevision, Role: role, Provider: provider,
 		Model: nullStringValue(model), ReasoningEffort: nullStringValue(effort), VerificationPolicy: verification, Phase: phase,
-		CredentialDigest: digest, Revision: rev, AdmittedAt: admittedTime, UpdatedAt: updatedTime,
+		CredentialDigest: digest, resultProofDigest: resultProofDigest, Revision: rev, AdmittedAt: admittedTime, UpdatedAt: updatedTime,
 	}
 	if rawChangeID.valid {
 		changeID, err := ChangeIDFromBytes(rawChangeID.bytes)
@@ -177,9 +178,6 @@ func scanRun(scanner rowScanner) (Run, bool, error) {
 func validateRunChronology(run Run) error {
 	admitted := run.AdmittedAt.Int64()
 	updated := run.UpdatedAt.Int64()
-	if run.Phase == RunAdmitted && updated != admitted {
-		return fmt.Errorf("%w: admitted run update time changed", ErrCorruptState)
-	}
 	if run.RunningAt != nil && (run.RunningAt.Int64() < admitted || run.RunningAt.Int64() > updated) {
 		return fmt.Errorf("%w: invalid running time", ErrCorruptState)
 	}
@@ -358,6 +356,10 @@ func scanResource(scanner rowScanner) (Resource, bool, error) {
 	case ResourceDeclared:
 		if resource.UpdatedAt.Int64() != resource.DeclaredAt.Int64() || resource.ReleasedAt != nil || resource.ActivatedAt != nil || reason.Valid || !resource.Identity.Empty() {
 			return Resource{}, false, fmt.Errorf("%w: inconsistent declared resource", ErrCorruptState)
+		}
+	case ResourceStarting:
+		if kind != ResourceRunnerProcess || resource.ReleasedAt != nil || resource.ActivatedAt != nil || reason.Valid || !resource.Identity.Empty() {
+			return Resource{}, false, fmt.Errorf("%w: inconsistent starting resource", ErrCorruptState)
 		}
 	case ResourceReleasing:
 		if resource.ReleasedAt != nil || reason.Valid || (resource.ActivatedAt == nil) != resource.Identity.Empty() {

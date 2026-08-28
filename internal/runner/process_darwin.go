@@ -139,12 +139,16 @@ type OwnedChild struct {
 	exitRegistered bool
 	keepDirectory  bool
 	ptyMaster      *os.File
+	ptyDrained     bool
 	// testSignal injects a package-test-only owned-group signal result.
 	// Production children always leave it nil and call signalOwnedGroup.
 	testSignal func(unix.Signal) error
 	// testConvergence injects a package-test-only failure immediately before
 	// activated group convergence. Production children always leave it nil.
 	testConvergence func() error
+	// testHardCleanup injects a package-test-only pre-cleanup uncertainty.
+	// Production children always leave it nil.
+	testHardCleanup func() error
 }
 
 // These seams exist only for package tests to force post-spawn cleanup paths;
@@ -319,7 +323,19 @@ func (c *OwnedChild) refreshExit() error {
 }
 
 func StartBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, keepDirectoryAcrossExec bool) (child *OwnedChild, err error) {
-	return startBlocked(lease, gateExecutable, spec, keepDirectoryAcrossExec, false)
+	prepared, err := PrepareBlocked(lease, gateExecutable, spec, keepDirectoryAcrossExec)
+	if err != nil {
+		return nil, err
+	}
+	started, err := prepared.Start()
+	if err != nil {
+		return nil, err
+	}
+	child, err = started.Bind()
+	if err != nil {
+		return nil, errors.Join(err, convergeStartedChild(started))
+	}
+	return child, nil
 }
 
 // StartBlockedPTY is the Darwin-only concrete PTY launch seam. It retains the
@@ -328,16 +344,70 @@ func StartBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, kee
 // The returned child owns the master; callers must use the child methods for
 // synchronous I/O and must not close the master independently.
 func StartBlockedPTY(lease *GateLease, gateExecutable string, spec *LaunchSpec, keepDirectoryAcrossExec bool) (child *OwnedChild, err error) {
+	prepared, err := PrepareBlockedPTY(lease, gateExecutable, spec, keepDirectoryAcrossExec)
+	if err != nil {
+		return nil, err
+	}
+	started, err := prepared.Start()
+	if err != nil {
+		return nil, err
+	}
+	child, err = started.Bind()
+	if err != nil {
+		return nil, errors.Join(err, convergeStartedChild(started))
+	}
+	return child, nil
+}
+
+// PreparedChild owns a completely prepared fork/exec attempt before its sole
+// Start call. Callers may place a durable transaction immediately between
+// PrepareBlocked and Start without hiding further setup inside that cut.
+type PreparedChild struct {
+	lease         *GateLease
+	cmd           *exec.Cmd
+	kq            int
+	leashW        *os.File
+	statusR       *os.File
+	ptyMaster     *os.File
+	ptySlave      *os.File
+	startFiles    []*os.File
+	keepDirectory bool
+	usePTY        bool
+	started       bool
+	closed        bool
+}
+
+// StartedChild is the exact post-Start, pre-birth-binding owner. A non-nil
+// value proves cmd.Start returned nil even if Bind later cannot establish a
+// safe durable identity.
+type StartedChild struct {
+	child      *OwnedChild
+	ptySlave   *os.File
+	cleanupErr error
+}
+
+func PrepareBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, keepDirectoryAcrossExec bool) (*PreparedChild, error) {
+	return prepareBlocked(lease, gateExecutable, spec, keepDirectoryAcrossExec, false)
+}
+
+func PrepareBlockedPTY(lease *GateLease, gateExecutable string, spec *LaunchSpec, keepDirectoryAcrossExec bool) (*PreparedChild, error) {
 	if spec == nil || len(spec.stdin) != 0 || spec.stdout != nil || spec.stderr != nil {
 		return nil, ErrState
 	}
-	return startBlocked(lease, gateExecutable, spec, keepDirectoryAcrossExec, true)
+	return prepareBlocked(lease, gateExecutable, spec, keepDirectoryAcrossExec, true)
 }
 
-func startBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, keepDirectoryAcrossExec, usePTY bool) (child *OwnedChild, err error) {
+func prepareBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, keepDirectoryAcrossExec, usePTY bool) (_ *PreparedChild, resultErr error) {
 	if lease == nil || lease.closed || lease.marker != nil || lease.lifetime == nil || spec == nil {
 		return nil, ErrState
 	}
+	prepared := &PreparedChild{lease: lease, kq: -1, keepDirectory: keepDirectoryAcrossExec, usePTY: usePTY}
+	keep := false
+	defer func() {
+		if !keep {
+			resultErr = errors.Join(resultErr, prepared.Close())
+		}
+	}()
 	gate, err := canonical(gateExecutable)
 	if err != nil {
 		return nil, err
@@ -349,7 +419,7 @@ func startBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, kee
 	if err != nil {
 		return nil, err
 	}
-	defer config.Close()
+	prepared.startFiles = append(prepared.startFiles, config)
 	if err := writeFrame(config, gateConfig{Version: 1, Target: spec.commit, LeaseDirectory: lease.dirIdentity, Lifetime: lease.lifetimeID, MarkerName: lease.basename, KeepDirectory: keepDirectoryAcrossExec, Control: spec.controlID, TestFinalCheck: spec.testFinal != nil, PTY: usePTY}, maxConfigBytes); err != nil {
 		return nil, err
 	}
@@ -362,14 +432,8 @@ func startBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, kee
 		if err != nil {
 			return nil, err
 		}
-		defer func() {
-			if ptySlave != nil {
-				_ = ptySlave.Close()
-			}
-			if err != nil && ptyMaster != nil {
-				_ = ptyMaster.Close()
-			}
-		}()
+		prepared.ptyMaster = ptyMaster
+		prepared.ptySlave = ptySlave
 	}
 	var stdin, stdout, stderr *os.File
 	if usePTY {
@@ -381,7 +445,7 @@ func startBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, kee
 		if err != nil {
 			return nil, err
 		}
-		defer stdin.Close()
+		prepared.startFiles = append(prepared.startFiles, stdin)
 		stdout = spec.stdout
 		stderr = spec.stderr
 		var closeOut, closeErr *os.File
@@ -391,7 +455,7 @@ func startBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, kee
 				return nil, err
 			}
 			stdout = closeOut
-			defer closeOut.Close()
+			prepared.startFiles = append(prepared.startFiles, closeOut)
 		}
 		if stderr == nil {
 			closeErr, err = os.OpenFile("/dev/null", os.O_WRONLY, 0)
@@ -399,37 +463,40 @@ func startBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, kee
 				return nil, err
 			}
 			stderr = closeErr
-			defer closeErr.Close()
+			prepared.startFiles = append(prepared.startFiles, closeErr)
 		}
 	}
 	leashR, leashW, err := os.Pipe()
 	if err != nil {
 		return nil, err
 	}
-	defer leashR.Close()
+	prepared.startFiles = append(prepared.startFiles, leashR)
 	statusR, statusW, err := os.Pipe()
 	if err != nil {
-		leashW.Close()
+		_ = leashW.Close()
 		return nil, err
 	}
-	defer statusW.Close()
+	prepared.leashW = leashW
+	prepared.statusR = statusR
+	prepared.startFiles = append(prepared.startFiles, statusW)
 	leaseDup, err := unix.FcntlInt(lease.dir.Fd(), unix.F_DUPFD_CLOEXEC, 0)
 	if err != nil {
 		return nil, err
 	}
 	leaseFile := os.NewFile(uintptr(leaseDup), "lease-dir")
-	defer leaseFile.Close()
+	prepared.startFiles = append(prepared.startFiles, leaseFile)
 	lifetimeDup, err := unix.FcntlInt(lease.lifetime.Fd(), unix.F_DUPFD_CLOEXEC, 0)
 	if err != nil {
 		return nil, err
 	}
 	lifetimeFile := os.NewFile(uintptr(lifetimeDup), "runtime-lifetime")
-	defer lifetimeFile.Close()
+	prepared.startFiles = append(prepared.startFiles, lifetimeFile)
 	kq, err := unix.Kqueue()
 	if err != nil {
 		return nil, err
 	}
 	unix.CloseOnExec(kq)
+	prepared.kq = kq
 	cmd := exec.Command(gate, "--exec-gate")
 	cmd.Env = []string{}
 	if usePTY {
@@ -449,67 +516,216 @@ func startBlocked(lease *GateLease, gateExecutable string, spec *LaunchSpec, kee
 	} else {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	}
-	if err := cmd.Start(); err != nil {
-		unix.Close(kq)
-		leashW.Close()
-		statusR.Close()
-		return nil, err
+	prepared.cmd = cmd
+	keep = true
+	return prepared, nil
+}
+
+// Start performs the sole OS Start call. A nil StartedChild means Start itself
+// returned a non-nil error; every post-Start problem is retained by the
+// non-nil StartedChild and resolved by Bind or Close.
+func (prepared *PreparedChild) Start() (*StartedChild, error) {
+	if prepared == nil || prepared.closed || prepared.started || prepared.cmd == nil {
+		return nil, ErrState
 	}
-	c := &OwnedChild{cmd: cmd, identity: Identity{PID: cmd.Process.Pid, PGID: cmd.Process.Pid}, kq: kq, activation: leashW, status: statusR, lease: lease, state: stateBlocked, keepDirectory: keepDirectoryAcrossExec, ptyMaster: ptyMaster}
-	ptyMaster = nil
+	prepared.started = true
+	if err := prepared.cmd.Start(); err != nil {
+		return nil, errors.Join(err, prepared.Close())
+	}
+	c := &OwnedChild{
+		cmd: prepared.cmd, identity: Identity{PID: prepared.cmd.Process.Pid, PGID: prepared.cmd.Process.Pid},
+		kq: prepared.kq, activation: prepared.leashW, status: prepared.statusR, lease: prepared.lease,
+		state: stateBlocked, keepDirectory: prepared.keepDirectory, ptyMaster: prepared.ptyMaster,
+	}
+	prepared.cmd = nil
+	prepared.kq = -1
+	prepared.leashW = nil
+	prepared.statusR = nil
+	prepared.ptyMaster = nil
+	closeErr := closePreparedFiles(prepared.startFiles)
+	prepared.startFiles = nil
+	ptySlave := prepared.ptySlave
+	prepared.ptySlave = nil
+	prepared.closed = true
+	if testPTYAfterStart != nil && prepared.usePTY {
+		testPTYAfterStart(c)
+	}
+	return &StartedChild{child: c, ptySlave: ptySlave, cleanupErr: closeErr}, nil
+}
+
+// LaunchAttempt owns the complete pre-registration cut. Exact Start failure
+// and successful Start followed by Bind uncertainty have different local
+// histories, but after positive convergence share one external fact: no inner
+// identity was durably registered and no inner process remains.
+func (prepared *PreparedChild) LaunchAttempt(dir *os.File, attemptID string, proof ResultProof) (*OwnedChild, *AttemptResultRecord, error) {
+	started, startErr := prepared.Start()
+	if started != nil {
+		child, bindErr := started.Bind()
+		if bindErr == nil {
+			return child, nil, nil
+		}
+		convergeErr := convergeStartedChild(started)
+		if started.child != nil {
+			return nil, nil, errors.Join(bindErr, convergeErr, ErrUnresolved)
+		}
+		record, publishErr := publishInnerUnregisteredConverged(dir, attemptID, proof)
+		return nil, record, errors.Join(bindErr, convergeErr, publishErr)
+	}
+	if startErr == nil {
+		return nil, nil, ErrState
+	}
+	record, publishErr := publishInnerUnregisteredConverged(dir, attemptID, proof)
+	return nil, record, errors.Join(startErr, publishErr)
+}
+
+func publishInnerUnregisteredConverged(dir *os.File, attemptID string, proof ResultProof) (*AttemptResultRecord, error) {
+	result, resultErr := innerUnregisteredConvergedResult(attemptID, proof)
+	if resultErr != nil {
+		return nil, resultErr
+	}
+	return publishAttemptResult(dir, result)
+}
+
+// Bind acquires exact birth identity and readiness after a successful Start.
+// Any uncertainty synchronously converges and reaps the direct child but never
+// changes the historical fact that Start returned nil.
+func (started *StartedChild) Bind() (_ *OwnedChild, resultErr error) {
+	if started == nil || started.child == nil {
+		return nil, ErrState
+	}
+	c := started.child
 	defer func() {
-		if err != nil {
-			if cleanupErr := c.hardCleanup(); cleanupErr != nil {
-				err = errors.Join(err, fmt.Errorf("runner: failed launch cleanup: %w", cleanupErr))
+		if resultErr != nil && started.child != nil {
+			if err := started.releaseSlave(); err != nil {
+				resultErr = errors.Join(resultErr, err)
+			}
+			cleanupErr := c.hardCleanup()
+			if cleanupErr != nil {
+				resultErr = errors.Join(resultErr, fmt.Errorf("runner: failed launch cleanup: %w", cleanupErr))
+			}
+			if cleanupErr == nil && started.ptySlave == nil && c.state == stateWaited && c.ptyMaster == nil {
+				started.child = nil
 			}
 		}
 	}()
-	if testPTYAfterStart != nil && usePTY {
-		testPTYAfterStart(c)
-	}
-	_ = leashR.Close()
-	_ = statusW.Close()
 	first, e := readIdentity(c.identity.PID)
 	if e != nil {
-		err = fmt.Errorf("runner: first identity: %w", e)
-		return nil, err
+		return nil, fmt.Errorf("runner: first identity: %w", e)
 	}
 	if first.PGID != first.PID {
-		err = ErrIdentity
-		return nil, err
+		return nil, ErrIdentity
 	}
 	c.identity = first
-	if e = registerExit(kq, c.identity.PID); e != nil {
-		err = fmt.Errorf("runner: register exit: %w", e)
-		return nil, err
+	if e = registerExit(c.kq, c.identity.PID); e != nil {
+		return nil, fmt.Errorf("runner: register exit: %w", e)
 	}
 	c.exitRegistered = true
-	if ptySlave != nil {
-		if closeErr := closePTYSlave(ptySlave); closeErr != nil {
-			return nil, closeErr
-		}
-		ptySlave = nil
-	}
-	if e = statusR.SetReadDeadline(time.Now().Add(4 * time.Second)); e != nil {
-		err = fmt.Errorf("runner: ready deadline: %w", e)
+	if err := started.releaseSlave(); err != nil {
 		return nil, err
+	}
+	if started.cleanupErr != nil {
+		return nil, errors.Join(ErrUnresolved, started.cleanupErr)
+	}
+	if e = c.status.SetReadDeadline(time.Now().Add(4 * time.Second)); e != nil {
+		return nil, fmt.Errorf("runner: ready deadline: %w", e)
 	}
 	var ready gateFrame
-	if e = readFrame(statusR, &ready, maxFrameBytes); e != nil {
-		err = fmt.Errorf("runner: ready frame: %w", e)
-		return nil, err
+	if e = readFrame(c.status, &ready, maxFrameBytes); e != nil {
+		return nil, fmt.Errorf("runner: ready frame: %w", e)
 	}
 	second, e := readIdentity(c.identity.PID)
 	if e != nil {
-		err = fmt.Errorf("runner: second identity: %w", e)
-		return nil, err
+		return nil, fmt.Errorf("runner: second identity: %w", e)
 	}
 	if ready.Kind != "ready" || !ready.Identity.Valid() || ready.Identity != first || second != first {
-		err = ErrIdentity
-		return nil, err
+		return nil, ErrIdentity
 	}
 	c.identity = first
+	started.child = nil
 	return c, nil
+}
+
+// releaseSlave converges the started PTY slave. os.File.Close invalidates the
+// descriptor even when it reports an error, so the slave never survives one
+// close attempt; os.ErrClosed from a repeated attempt is residue, not failure.
+func (started *StartedChild) releaseSlave() error {
+	if started.ptySlave == nil {
+		return nil
+	}
+	err := closePTYSlave(started.ptySlave)
+	started.ptySlave = nil
+	if errors.Is(err, os.ErrClosed) {
+		return nil
+	}
+	return err
+}
+
+func (started *StartedChild) Close() error {
+	if started == nil || started.child == nil {
+		return nil
+	}
+	slaveErr := started.releaseSlave()
+	cleanupErr := started.child.hardCleanup()
+	err := errors.Join(started.cleanupErr, slaveErr, cleanupErr)
+	if cleanupErr == nil && started.ptySlave == nil && started.child.state == stateWaited && started.child.ptyMaster == nil {
+		started.child = nil
+		started.cleanupErr = nil
+	}
+	return err
+}
+
+// convergeStartedChild makes exactly three cleanup attempts. Cleanup still
+// failing afterwards is permanent uncertainty that the caller must surface as
+// its typed outcome; unbounded retry here made that arm unreachable.
+func convergeStartedChild(started *StartedChild) error {
+	var result error
+	for attempt := 0; started != nil && started.child != nil && attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(25 * time.Millisecond)
+		}
+		result = errors.Join(result, started.Close())
+	}
+	return result
+}
+
+func (prepared *PreparedChild) Close() error {
+	if prepared == nil || prepared.closed {
+		return nil
+	}
+	prepared.closed = true
+	err := closePreparedFiles(prepared.startFiles)
+	prepared.startFiles = nil
+	if prepared.leashW != nil {
+		err = errors.Join(err, prepared.leashW.Close())
+		prepared.leashW = nil
+	}
+	if prepared.statusR != nil {
+		err = errors.Join(err, prepared.statusR.Close())
+		prepared.statusR = nil
+	}
+	if prepared.kq >= 0 {
+		err = errors.Join(err, unix.Close(prepared.kq))
+		prepared.kq = -1
+	}
+	if prepared.ptyMaster != nil {
+		err = errors.Join(err, prepared.ptyMaster.Close())
+		prepared.ptyMaster = nil
+	}
+	if prepared.ptySlave != nil {
+		err = errors.Join(err, prepared.ptySlave.Close())
+		prepared.ptySlave = nil
+	}
+	return err
+}
+
+func closePreparedFiles(files []*os.File) error {
+	var result error
+	for _, file := range files {
+		if file != nil {
+			result = errors.Join(result, file.Close())
+		}
+	}
+	return result
 }
 
 func anonymousFile(dir *os.File, prefix string, body []byte) (*os.File, error) {
@@ -971,11 +1187,18 @@ func (c *OwnedChild) hardCleanup() error {
 	if c == nil || c.cmd == nil {
 		return nil
 	}
+	if c.testHardCleanup != nil {
+		if err := c.testHardCleanup(); err != nil {
+			return err
+		}
+	}
 	var cleanupErr error
 	if err := c.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		cleanupErr = errors.Join(cleanupErr, err)
 	}
-	if c.exitRegistered {
+	// An observed or reaped exit is already proven; re-waiting would consume
+	// nothing and doom every retry once the one-shot event is gone.
+	if c.exitRegistered && !c.exitObserved && c.state != stateWaited && c.kq >= 0 {
 		if _, err := c.waitForExit(4 * time.Second); err != nil {
 			cleanupErr = errors.Join(cleanupErr, err)
 		}
@@ -987,16 +1210,23 @@ func (c *OwnedChild) hardCleanup() error {
 	}
 	if c.activation != nil {
 		_ = c.activation.Close()
+		c.activation = nil
 	}
 	if c.status != nil {
 		_ = c.status.Close()
+		c.status = nil
+	}
+	cleanupErr = errors.Join(cleanupErr, c.closePTY())
+	// The kqueue is the only remaining exit-observation capability; a failed
+	// pass keeps it so retry can still converge instead of losing the child.
+	if cleanupErr != nil {
+		return cleanupErr
 	}
 	if c.kq >= 0 {
 		_ = unix.Close(c.kq)
 		c.kq = -1
 	}
-	cleanupErr = errors.Join(cleanupErr, c.closePTY())
-	return cleanupErr
+	return nil
 }
 
 func (c *OwnedChild) closePTY() error {

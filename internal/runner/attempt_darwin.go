@@ -5,6 +5,7 @@ package runner
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -30,8 +31,7 @@ const (
 	controllerPopulationReleased
 	controllerPopulationReported
 	controllerProviderReleased
-	controllerTerminal
-	controllerAcknowledged
+	controllerResult
 	controllerPoisoned
 )
 
@@ -43,7 +43,6 @@ type AttemptController struct {
 	attemptID     string
 	inner         Identity
 	terminalReady bool
-	last          *TerminalRecord
 }
 
 // writeFrame is the controller's only authoritative write path. A failed
@@ -102,13 +101,17 @@ func (c *AttemptController) Configure(spec AttemptSpec) error {
 	if err := validateAttemptName(spec.AttemptID, 256); err != nil {
 		return err
 	}
-	if spec.MarkerName != InnerActivationMarkerName || spec.TerminalName != TerminalSpoolName {
+	if spec.MarkerName != InnerActivationMarkerName || spec.ResultName != AttemptResultSpoolName {
 		return ErrIdentity
+	}
+	proof, err := encodeResultProof(spec.ResultProof)
+	if err != nil {
+		return err
 	}
 	if spec.Wrapper.control != nil || spec.Wrapper.controlID != nil || len(spec.Wrapper.stdin) != 0 || spec.Wrapper.stdout != nil || spec.Wrapper.stderr != nil || spec.Wrapper.testFinal != nil || spec.Wrapper.testCurrentFinal {
 		return fmt.Errorf("runner: wrapper launch contains unsupported capabilities")
 	}
-	cfg := attemptConfig{Version: 1, AttemptID: spec.AttemptID, Wrapper: spec.Wrapper.commit, MarkerName: spec.MarkerName, TerminalName: spec.TerminalName}
+	cfg := attemptConfig{Version: 1, AttemptID: spec.AttemptID, Wrapper: spec.Wrapper.commit, MarkerName: spec.MarkerName, ResultName: spec.ResultName, ResultProof: proof}
 	if err := c.writeFrame(cfg, maxConfigBytes); err != nil {
 		return err
 	}
@@ -135,9 +138,12 @@ func (c *AttemptController) Next(timeout time.Duration) (AttemptEvent, error) {
 	if frame.Version != 1 {
 		return AttemptEvent{}, ErrIdentity
 	}
+	if frame.Kind == string(AttemptResultReady) {
+		return c.acceptAttemptResult(frame)
+	}
 	switch c.state {
 	case controllerConfigured:
-		if frame.Kind != "inner-ready" || !frame.Identity.Valid() || frame.Identity.PID != frame.Identity.PGID || frame.Stage != "" || len(frame.Payload) != 0 || frame.Terminal != nil || frame.FileIdentity != nil || frame.Digest != "" || frame.StoreCommitted || !noTerminalFields(frame) {
+		if frame.Kind != "inner-ready" || !frame.Identity.Valid() || frame.Identity.PID != frame.Identity.PGID || frame.Stage != "" || len(frame.Payload) != 0 || frame.FileIdentity != nil || frame.Digest != "" || !noTerminalFields(frame) {
 			return AttemptEvent{}, ErrState
 		}
 		c.state = controllerInnerReady
@@ -169,19 +175,22 @@ func (c *AttemptController) Next(timeout time.Duration) (AttemptEvent, error) {
 		if frame.Kind == "current-exec-check" && noLegacyFields(frame) && noTerminalFields(frame) && len(frame.Payload) == 0 {
 			return AttemptEvent{Kind: AttemptCheckpoint, Stage: StageProvider}, nil
 		}
-		if frame.Kind != "terminal" || frame.Stage != "" || frame.Identity != (Identity{}) || len(frame.Payload) != 0 || frame.Terminal == nil || frame.FileIdentity == nil || len(frame.Digest) != 64 || frame.StoreCommitted || !noTerminalFields(frame) {
-			return AttemptEvent{}, ErrState
-		}
-		record := &TerminalRecord{Terminal: *frame.Terminal, Identity: *frame.FileIdentity, Digest: frame.Digest}
-		if err := validateTerminal(record.Terminal); err != nil || record.Terminal.AttemptID != c.attemptID || record.Terminal.Process != c.inner || record.Identity.Device == 0 || record.Identity.Inode == 0 {
-			return AttemptEvent{}, ErrIdentity
-		}
-		c.last = record
-		c.state = controllerTerminal
-		return AttemptEvent{Kind: AttemptTerminal, Terminal: record, Identity: record.Terminal.Process}, nil
+		return AttemptEvent{}, ErrState
 	default:
 		return AttemptEvent{}, ErrState
 	}
+}
+
+func (c *AttemptController) acceptAttemptResult(frame attemptFrame) (AttemptEvent, error) {
+	if c.state < controllerConfigured || c.state >= controllerResult || frame.Stage != "" || frame.Identity != (Identity{}) || len(frame.Payload) != 0 || frame.FileIdentity == nil || frame.FileIdentity.Device == 0 || frame.FileIdentity.Inode == 0 || len(frame.Digest) != 64 || !noTerminalFields(frame) {
+		return AttemptEvent{}, ErrState
+	}
+	if _, err := hex.DecodeString(frame.Digest); err != nil || frame.Digest != strings.ToLower(frame.Digest) {
+		return AttemptEvent{}, ErrIdentity
+	}
+	notice := AttemptResultNotice{Identity: *frame.FileIdentity, Digest: frame.Digest}
+	c.state = controllerResult
+	return AttemptEvent{Kind: AttemptResultReady, Result: &notice}, nil
 }
 
 func isTerminalEventKind(kind string) bool {
@@ -228,7 +237,7 @@ func (c *AttemptController) NextReady(timeout time.Duration) (bool, error) {
 }
 
 func (c *AttemptController) acceptCheckpoint(frame attemptFrame, stage AttemptStage, next attemptControllerState) (AttemptEvent, error) {
-	if frame.Kind != "checkpoint" || frame.Stage != stage || frame.Identity != (Identity{}) || len(frame.Payload) > maxAttemptReportBytes || frame.Terminal != nil || frame.FileIdentity != nil || frame.Digest != "" || frame.StoreCommitted || !noTerminalFields(frame) {
+	if frame.Kind != "checkpoint" || frame.Stage != stage || frame.Identity != (Identity{}) || len(frame.Payload) > maxAttemptReportBytes || frame.FileIdentity != nil || frame.Digest != "" || !noTerminalFields(frame) {
 		return AttemptEvent{}, ErrState
 	}
 	c.state = next
@@ -278,24 +287,10 @@ func (c *AttemptController) SendTerminalCommand(command TerminalCommand) error {
 }
 
 func (c *AttemptController) Terminate() error {
-	if c == nil || c.file == nil || c.state < controllerInnerReady || c.state >= controllerTerminal {
+	if c == nil || c.file == nil || c.state < controllerInnerReady || c.state >= controllerResult {
 		return ErrState
 	}
 	return c.writeFrame(attemptFrame{Version: 1, Kind: "terminate"}, maxFrameBytes)
-}
-
-func (c *AttemptController) AcknowledgeTerminal(want *TerminalRecord, storeCommitted bool) error {
-	if c == nil || c.file == nil || c.state != controllerTerminal || !storeCommitted || want == nil || c.last == nil {
-		return ErrState
-	}
-	if want.Digest != c.last.Digest || want.Identity != c.last.Identity || want.Terminal != c.last.Terminal {
-		return ErrIdentity
-	}
-	if err := c.writeFrame(attemptFrame{Version: 1, Kind: "terminal-ack", Terminal: &want.Terminal, FileIdentity: &want.Identity, Digest: want.Digest, StoreCommitted: true}, maxFrameBytes); err != nil {
-		return err
-	}
-	c.state = controllerAcknowledged
-	return nil
 }
 
 // acknowledgeCurrentExecCheck exists only for the deterministic package test
@@ -509,7 +504,7 @@ func (w *WorkerControl) await(stage AttemptStage, before, after workerState) err
 	if err := readFrame(w.file, &frame, maxFrameBytes); err != nil {
 		return err
 	}
-	if frame.Version != 1 || frame.Kind != "release" || frame.Stage != stage || frame.Identity != (Identity{}) || len(frame.Payload) != 0 || frame.Terminal != nil || frame.FileIdentity != nil || frame.Digest != "" || frame.StoreCommitted || !noTerminalFields(frame) {
+	if frame.Version != 1 || frame.Kind != "release" || frame.Stage != stage || frame.Identity != (Identity{}) || len(frame.Payload) != 0 || frame.FileIdentity != nil || frame.Digest != "" || !noTerminalFields(frame) {
 		return ErrState
 	}
 	w.state = after
@@ -803,11 +798,14 @@ func RunAttemptRunner() error {
 }
 
 func validateAttemptConfig(cfg attemptConfig) error {
-	if cfg.Version != 1 || validateAttemptName(cfg.AttemptID, 256) != nil || cfg.MarkerName != InnerActivationMarkerName || cfg.TerminalName != TerminalSpoolName {
+	if cfg.Version != 1 || validateAttemptName(cfg.AttemptID, 256) != nil || cfg.MarkerName != InnerActivationMarkerName || cfg.ResultName != AttemptResultSpoolName {
 		return ErrIdentity
 	}
 	if cfg.Wrapper.Executable.Path == "" || cfg.Wrapper.Cwd.Path == "" {
 		return ErrIdentity
+	}
+	if _, err := decodeResultProof(cfg.ResultProof); err != nil {
+		return err
 	}
 	if err := validateArgv(cfg.Wrapper.Argv, cfg.Wrapper.Executable.Path); err != nil {
 		return ErrIdentity
@@ -825,6 +823,16 @@ func validateAttemptName(value string, limit int) error {
 	if value == "" || len(value) > limit {
 		return ErrIdentity
 	}
+	// encoding/json must emit the name byte-for-byte. Control bytes, quotes,
+	// backslashes and the HTML-escaped <, >, & all inflate to escape
+	// sequences that could push the canonical attempt result past its fixed
+	// byte bound, turning a length-valid name into a publish-time failure.
+	for index := 0; index < len(value); index++ {
+		b := value[index]
+		if b < 0x20 || b > 0x7e || b == '"' || b == '\\' || b == '<' || b == '>' || b == '&' {
+			return ErrIdentity
+		}
+	}
 	return nil
 }
 
@@ -836,6 +844,10 @@ func validateBasename(value string) error {
 }
 
 func runAttempt(daemon, dir, lifetime *os.File, cfg attemptConfig) (result error) {
+	proof, err := decodeResultProof(cfg.ResultProof)
+	if err != nil {
+		return err
+	}
 	lease, _, err := CreateGateLease(dir, lifetime, cfg.MarkerName)
 	if err != nil {
 		return err
@@ -858,9 +870,17 @@ func runAttempt(daemon, dir, lifetime *os.File, cfg attemptConfig) (result error
 	if err != nil {
 		return err
 	}
-	child, err := StartBlockedPTY(lease, gate, wrapper, true)
+	prepared, err := PrepareBlockedPTY(lease, gate, wrapper, true)
 	if err != nil {
 		return err
+	}
+	child, record, startErr := prepared.LaunchAttempt(dir, cfg.AttemptID, proof)
+	if record != nil {
+		notifyAttemptResult(daemon, record)
+		return startErr
+	}
+	if startErr != nil {
+		return startErr
 	}
 	defer func() { result = errors.Join(result, child.Close()) }()
 	_ = workerChild.Close()
@@ -1147,11 +1167,11 @@ func protocolError(want string, got attemptSource, err error) error {
 }
 
 func validReleaseFrame(frame attemptFrame, stage AttemptStage) bool {
-	return frame.Version == 1 && frame.Kind == "release" && frame.Stage == stage && frame.Identity == (Identity{}) && len(frame.Payload) == 0 && frame.Terminal == nil && frame.FileIdentity == nil && frame.Digest == "" && !frame.StoreCommitted && noTerminalFields(frame)
+	return frame.Version == 1 && frame.Kind == "release" && frame.Stage == stage && frame.Identity == (Identity{}) && len(frame.Payload) == 0 && frame.FileIdentity == nil && frame.Digest == "" && noTerminalFields(frame)
 }
 
 func validCheckpointFrame(frame attemptFrame, stage AttemptStage) bool {
-	return frame.Version == 1 && frame.Kind == "checkpoint" && frame.Stage == stage && frame.Identity == (Identity{}) && len(frame.Payload) <= maxAttemptReportBytes && frame.Terminal == nil && frame.FileIdentity == nil && frame.Digest == "" && !frame.StoreCommitted && noTerminalFields(frame)
+	return frame.Version == 1 && frame.Kind == "checkpoint" && frame.Stage == stage && frame.Identity == (Identity{}) && len(frame.Payload) <= maxAttemptReportBytes && frame.FileIdentity == nil && frame.Digest == "" && noTerminalFields(frame)
 }
 
 func finishAttemptFailure(child *OwnedChild, dir *os.File, cfg attemptConfig, reads *attemptReadSet, cause error) error {
@@ -1166,18 +1186,33 @@ func finishAttemptWithExit(child *OwnedChild, dir *os.File, cfg attemptConfig, r
 	cause = errors.Join(cause, filterErr)
 	exit, cleanupErr := waitForAttemptChild(child)
 	if cleanupErr != nil {
-		return errors.Join(cause, cleanupErr)
+		return errors.Join(cause, fmt.Errorf("runner: converge inner: %w", cleanupErr))
 	}
-	// A terminal spool is evidence that the complete owner cleanup path was
+	// An AttemptResult is evidence that the complete owner cleanup path was
 	// observed. Protocol or kill errors marked unresolved must never be turned
-	// into durable terminal evidence merely because Wait eventually returned.
+	// into durable convergence evidence merely because Wait eventually returned.
 	if errors.Is(cause, ErrUnresolved) {
 		return cause
 	}
-	if cause != nil {
-		exit.Aborted = true
+	if err := drainAndCloseAttemptPTY(child, reads, daemon, daemonOpen); err != nil {
+		return errors.Join(cause, fmt.Errorf("runner: drain inner PTY: %w", err))
 	}
-	return errors.Join(cause, publishAttemptTerminal(child, dir, cfg, exit, daemon, daemonOpen, cause))
+	proof, err := decodeResultProof(cfg.ResultProof)
+	if err != nil {
+		return errors.Join(cause, err)
+	}
+	result, err := innerConvergedResult(cfg.AttemptID, proof, child.Identity(), exit)
+	if err != nil {
+		return errors.Join(cause, err)
+	}
+	record, err := publishAttemptResult(dir, result)
+	if err != nil {
+		return errors.Join(cause, fmt.Errorf("runner: publish attempt result: %w", err))
+	}
+	if daemonOpen {
+		notifyAttemptResult(daemon, record)
+	}
+	return cause
 }
 
 // waitForAttemptChild is intentionally synchronous and has no terminal error
@@ -1242,52 +1277,42 @@ func interruptedCleanup(err error) bool {
 	return errors.Is(err, unix.EINTR) || strings.Contains(err.Error(), "interrupted system call")
 }
 
-func publishAttemptTerminal(child *OwnedChild, dir *os.File, cfg attemptConfig, exit Exit, daemon *os.File, daemonOpen bool, cause error) error {
-	if _, err := child.waitedExit(); err != nil {
-		return err
+func drainAndCloseAttemptPTY(child *OwnedChild, reads *attemptReadSet, daemon *os.File, daemonOpen bool) error {
+	if child == nil {
+		return ErrState
 	}
-	message := ""
-	if cause != nil {
-		message = cause.Error()
-		if len(message) > 8192 {
-			message = message[:8192]
-		}
-	}
-	record, err := PublishTerminal(dir, cfg.TerminalName, Terminal{AttemptID: cfg.AttemptID, Process: child.Identity(), Exit: exit, Message: message})
-	if err != nil {
-		return err
-	}
-	if !daemonOpen || daemon == nil {
+	if child.ptyMaster == nil {
+		child.ptyDrained = true
 		return nil
 	}
-	frame := attemptFrame{Version: 1, Kind: "terminal", Terminal: &record.Terminal, FileIdentity: &record.Identity, Digest: record.Digest}
-	if err := writeControlFrame(daemon, frame, maxConfigBytes); err != nil {
-		return nil // durable spool is the recovery contract after control loss
-	}
-	if err := daemon.SetReadDeadline(time.Now().Add(attemptControlTimeout)); err != nil {
-		return err
-	}
-	defer daemon.SetReadDeadline(time.Time{})
-	for {
-		var ack attemptFrame
-		if err := readFrame(daemon, &ack, maxConfigBytes); err != nil {
-			if errors.Is(err, io.EOF) || errors.Is(err, os.ErrDeadlineExceeded) {
-				return nil
-			}
-			return err
+	var drainErr error
+	if !child.ptyDrained {
+		owner := terminalOwner{
+			child: child, daemon: daemon, reads: reads, daemonOpen: daemonOpen,
+			ptyOpen: true,
 		}
-		// A terminate sent just before natural provider exit can remain queued
-		// while the owner publishes its terminal evidence. It is already
-		// satisfied by the exact child wait above; consume this one idempotent
-		// stale command and continue waiting for the authenticated acknowledgement.
-		if ack.Kind == "terminate" && validBareAttemptFrame(ack) {
-			continue
-		}
-		if !validTerminalAck(ack, record) {
-			return ErrIdentity
-		}
-		return AcknowledgeTerminal(dir, cfg.TerminalName, record, true)
+		drainErr = owner.drainPTY()
 	}
+	// Once actual EOF/EIO has been observed, a failed best-effort PTY EOF
+	// notice cannot revoke the descriptor-local drain proof.
+	if drainErr != nil && !child.ptyDrained {
+		return drainErr
+	}
+	if !child.ptyDrained {
+		return ErrUnresolved
+	}
+	return child.closePTY()
+}
+
+func notifyAttemptResult(daemon *os.File, record *AttemptResultRecord) {
+	if daemon == nil || record == nil {
+		return
+	}
+	notice := record.Notice()
+	_ = writeControlFrame(daemon, attemptFrame{
+		Version: 1, Kind: string(AttemptResultReady),
+		FileIdentity: &notice.Identity, Digest: notice.Digest,
+	}, maxFrameBytes)
 }
 
 func writeControlFrame(file *os.File, value any, limit int) error {

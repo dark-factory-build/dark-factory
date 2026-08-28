@@ -9,7 +9,7 @@ import (
 func TestActivateRunRejectsCausallyEarlyResources(t *testing.T) {
 	store, run, _ := admittedOrchestratorRun(t)
 	defer store.Close()
-	activateResourcesAt(t, store, run, 20)
+	run = activateResourcesAt(t, store, run, 20)
 	before := captureWriteFootprint(t, store)
 	session := terminalSessionForRunTest(t, store, run.ID)
 	if _, err := store.ActivateRun(context.Background(), run.ID, session.ID, run.Revision, session.Revision, mustTime(t, 11)); !errors.Is(err, ErrRevisionConflict) {
@@ -104,8 +104,9 @@ func TestFinalizeRunRejectsBeforeFactoryTimestamp(t *testing.T) {
 func TestFinalizingRejectsCausallyEarlyResourceUpdate(t *testing.T) {
 	store, run, _ := admittedOrchestratorRun(t)
 	defer store.Close()
-	runner := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
-	if _, err := store.ActivateResource(context.Background(), run.ID, runner.ID, runner.Revision, processIdentity(t, 699), mustTime(t, 20)); err != nil {
+	runtime := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
+	runtimeIdentity, _ := NewPathResourceIdentity(699, 1699)
+	if _, err := store.ActivateResource(context.Background(), run.ID, runtime.ID, runtime.Revision, runtimeIdentity, mustTime(t, 20)); err != nil {
 		t.Fatal(err)
 	}
 	failure, _ := NewFailureProposal(FailureActivation, "cleanup")
@@ -122,18 +123,9 @@ func TestExitDrivenFinalizingRejectsCausallyEarlyResourceUpdate(t *testing.T) {
 	store, run, _ := admittedOrchestratorRun(t)
 	defer store.Close()
 	runner := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
-	active, err := store.ActivateResource(context.Background(), run.ID, runner.ID, runner.Revision, processIdentity(t, 701), mustTime(t, 10))
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtime := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
-	runtimeIdentity, _ := NewPathResourceIdentity(701, 1701)
-	if _, err := store.ActivateResource(context.Background(), run.ID, runtime.ID, runtime.Revision, runtimeIdentity, mustTime(t, 20)); err != nil {
-		t.Fatal(err)
-	}
 	exit, _ := NewProcessExitCode(1, 1, mustTime(t, 10))
 	before := captureWriteFootprint(t, store)
-	if _, err := store.ObserveRunnerExit(context.Background(), run.ID, run.Revision, active.Identity, exit, mustTime(t, 11)); !errors.Is(err, ErrRevisionConflict) {
+	if _, _, err := store.RecordLiveRunnerExitAndRelease(context.Background(), run.ID, runner.ID, run.Revision, runner.Revision, processIdentity(t, 701), exit, mustTime(t, 11)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("early exit-driven finalizing = %v", err)
 	}
 	if after := captureWriteFootprint(t, store); after != before {
@@ -150,6 +142,7 @@ func TestReleaseProviderRejectsBeforeExit(t *testing.T) {
 		t.Fatal(err)
 	}
 	provider := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceProviderProcess)
+	group := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceProviderGroup)
 	runtime := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
 	if _, err := store.MarkResourceUnresolved(context.Background(), run.ID, runtime.ID, runtime.Revision, runtime.Identity, "later cleanup", mustTime(t, 50)); err != nil {
 		t.Fatalf("advance independent resource cleanup = %v", err)
@@ -161,18 +154,19 @@ func TestReleaseProviderRejectsBeforeExit(t *testing.T) {
 	}
 	provider = resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceProviderProcess)
 	before := captureWriteFootprint(t, store)
-	if _, err := store.ReleaseResource(context.Background(), run.ID, provider.ID, provider.Revision, provider.Identity, mustTime(t, 41)); !errors.Is(err, ErrRevisionConflict) {
+	if _, _, _, err := store.ReleaseProviderResources(context.Background(), run.ID, provider.ID, group.ID, observed.Revision, provider.Revision, group.Revision, provider.Identity, mustTime(t, 41)); !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("release before exit = %v", err)
 	}
 	if after := captureWriteFootprint(t, store); after != before {
 		t.Fatalf("release-before-exit footprint before=%+v after=%+v", before, after)
 	}
-	if _, err := store.ReleaseResource(context.Background(), run.ID, provider.ID, provider.Revision, provider.Identity, mustTime(t, 42)); err != nil {
+	releasedRun, releasedProvider, releasedGroup, err := store.ReleaseProviderResources(context.Background(), run.ID, provider.ID, group.ID, observed.Revision, provider.Revision, group.Revision, provider.Identity, mustTime(t, 50))
+	if err != nil {
 		t.Fatalf("release at exit = %v", err)
 	}
-	replay, err := store.ReleaseResource(context.Background(), run.ID, provider.ID, provider.Revision, provider.Identity, mustTime(t, 40))
-	if err != nil || replay.State != ResourceReleased {
-		t.Fatalf("older release replay = %+v, %v", replay, err)
+	_, replay, replayGroup, err := store.ReleaseProviderResources(context.Background(), run.ID, provider.ID, group.ID, observed.Revision, provider.Revision, group.Revision, provider.Identity, mustTime(t, 40))
+	if err != nil || replay.State != ResourceReleased || replayGroup.State != ResourceReleased || releasedRun.Revision.Int64() != observed.Revision.Int64()+1 || releasedProvider.Revision != replay.Revision || releasedGroup.Revision != replayGroup.Revision {
+		t.Fatalf("older release replay = %+v/%+v, %v", replay, replayGroup, err)
 	}
 	_ = observed
 }
@@ -338,12 +332,14 @@ func TestRetryHistoryAllowsMultipleNonSuccessRuns(t *testing.T) {
 	if err != nil || !second.Admitted() {
 		t.Fatalf("first retry admission = %+v, %v", second, err)
 	}
-	runner := resourceOfKind(t, resourcesForRunTest(t, store, second.Run.ID), ResourceRunnerProcess)
-	runner, err = store.ActivateResource(context.Background(), second.Run.ID, runner.ID, runner.Revision, processIdentity(t, 302), mustTime(t, 39))
+	materializeAdmittedWorkerChange(t, store, *second.Run, 34)
+	_, activated := activateAllResources(t, store, *second.Run, keys, 36)
+	session := terminalSessionForRunTest(t, store, second.Run.ID)
+	running, err := store.ActivateRun(context.Background(), second.Run.ID, session.ID, activated.Revision, session.Revision, mustTime(t, 39))
 	if err != nil {
 		t.Fatal(err)
 	}
-	finalizing, err := store.CancelRun(context.Background(), second.Run.ID, second.Run.Revision, "retry again", mustTime(t, 40))
+	finalizing, err := store.CancelRun(context.Background(), second.Run.ID, running.Revision, "retry again", mustTime(t, 40))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -351,10 +347,7 @@ func TestRetryHistoryAllowsMultipleNonSuccessRuns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	finalizing, err = store.ObserveRunnerExit(context.Background(), second.Run.ID, finalizing.Revision, runner.Identity, runnerExit, mustTime(t, 41))
-	if err != nil {
-		t.Fatal(err)
-	}
+	finalizing = recordRunnerExitForTest(t, store, second.Run.ID, runnerExit, 41)
 	releaseAllRunResources(t, store, second.Run.ID, 42)
 	finalizing = closeTerminalSessionAtCurrent(t, store, second.Run.ID, 45)
 	secondTerminal, err := finalizeTestRun(t, store, finalizing, 45)
@@ -415,11 +408,16 @@ func TestFinalizingResourceActivationMustNotFollowFinalizing(t *testing.T) {
 		store, run, _ := admittedOrchestratorRun(t)
 		path := storePath(t, store)
 		failure, _ := NewFailureProposal(FailureInternal, "cleanup")
+		runtime := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
+		runtimeIdentity, _ := NewPathResourceIdentity(1, 2)
+		if _, err := store.ActivateResource(context.Background(), run.ID, runtime.ID, runtime.Revision, runtimeIdentity, mustTime(t, 19)); err != nil {
+			t.Fatal(err)
+		}
 		finalizing, err := store.FailRun(context.Background(), run.ID, run.Revision, failure, mustTime(t, 20))
 		if err != nil {
 			t.Fatal(err)
 		}
-		runtime := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
+		runtime = resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
 		corruptSQL(t, store, `UPDATE resources SET state = 'released', path_dev = 1, path_inode = 2, activated_at_ms = 21, released_at_ms = 22, updated_at_ms = 22, revision = revision + 1 WHERE id = ?`, runtime.ID.Bytes())
 		before := captureWriteFootprint(t, store)
 		if _, _, err := store.Run(context.Background(), finalizing.ID); !errors.Is(err, ErrCorruptState) {
@@ -451,11 +449,16 @@ func TestFinalizingResourceActivationMustNotFollowFinalizing(t *testing.T) {
 		store, run, _ := admittedOrchestratorRun(t)
 		defer store.Close()
 		failure, _ := NewFailureProposal(FailureInternal, "cleanup")
+		runtime := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
+		runtimeIdentity, _ := NewPathResourceIdentity(1, 2)
+		if _, err := store.ActivateResource(context.Background(), run.ID, runtime.ID, runtime.Revision, runtimeIdentity, mustTime(t, 19)); err != nil {
+			t.Fatal(err)
+		}
 		finalizing, err := store.FailRun(context.Background(), run.ID, run.Revision, failure, mustTime(t, 20))
 		if err != nil {
 			t.Fatal(err)
 		}
-		runtime := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
+		runtime = resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
 		corruptSQL(t, store, `UPDATE resources SET state = 'released', path_dev = 1, path_inode = 2, activated_at_ms = 20, released_at_ms = 22, updated_at_ms = 22, revision = revision + 1 WHERE id = ?`, runtime.ID.Bytes())
 		if _, _, err := store.Run(context.Background(), finalizing.ID); err != nil {
 			t.Fatalf("boundary activation Run = %v", err)
@@ -469,6 +472,11 @@ func TestFinalizingResourceActivationMustNotFollowFinalizing(t *testing.T) {
 		store, run, _ := admittedOrchestratorRun(t)
 		defer store.Close()
 		failure, _ := NewFailureProposal(FailureInternal, "cleanup")
+		runtime := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
+		runtimeIdentity, _ := NewPathResourceIdentity(1, 2)
+		if _, err := store.ActivateResource(context.Background(), run.ID, runtime.ID, runtime.Revision, runtimeIdentity, mustTime(t, 19)); err != nil {
+			t.Fatal(err)
+		}
 		finalizing, err := store.FailRun(context.Background(), run.ID, run.Revision, failure, mustTime(t, 20))
 		if err != nil {
 			t.Fatal(err)
@@ -668,7 +676,7 @@ func TestRunsRejectDuplicateAdmittedTaskWorkRevision(t *testing.T) {
 		change_id, role, provider, model, reasoning_effort, verification_policy, phase,
 		proposal_kind, proposal_code, proposal_detail, proposal_result,
 		terminal_kind, terminal_code, terminal_detail, terminal_result,
-		credential_digest, credential_revoked_at_ms,
+		credential_digest, result_proof_digest, credential_revoked_at_ms,
 		provider_exit_kind, provider_exit_sequence, provider_exit_code, provider_exit_signal, provider_exit_at_ms,
 		runner_exit_kind, runner_exit_sequence, runner_exit_code, runner_exit_signal, runner_exit_at_ms,
 		revision, admitted_at_ms, running_at_ms, finalizing_at_ms, terminal_at_ms, updated_at_ms
@@ -676,7 +684,7 @@ func TestRunsRejectDuplicateAdmittedTaskWorkRevision(t *testing.T) {
 		change_id, role, provider, model, reasoning_effort, verification_policy, phase,
 		proposal_kind, proposal_code, proposal_detail, proposal_result,
 		terminal_kind, terminal_code, terminal_detail, terminal_result,
-		zeroblob(32), credential_revoked_at_ms,
+		zeroblob(32), randomblob(32), credential_revoked_at_ms,
 		provider_exit_kind, provider_exit_sequence, provider_exit_code, provider_exit_signal, provider_exit_at_ms,
 		runner_exit_kind, runner_exit_sequence, runner_exit_code, runner_exit_signal, runner_exit_at_ms,
 		revision, admitted_at_ms, running_at_ms, finalizing_at_ms, terminal_at_ms, updated_at_ms
@@ -698,8 +706,9 @@ func TestTerminalRunRejectsSameRevisionLateChangeCheckpoint(t *testing.T) {
 func terminalPreRunningAvailableWorker(t *testing.T) (*Store, Run) {
 	t.Helper()
 	store, run, _ := admittedWorkerRun(t)
-	runner := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
-	runner, err := store.ActivateResource(context.Background(), run.ID, runner.ID, runner.Revision, processIdentity(t, 305), mustTime(t, 10))
+	runtime := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
+	runtimeIdentity, _ := NewPathResourceIdentity(305, 306)
+	_, err := store.ActivateResource(context.Background(), run.ID, runtime.ID, runtime.Revision, runtimeIdentity, mustTime(t, 10))
 	if err != nil {
 		store.Close()
 		t.Fatal(err)
@@ -722,23 +731,11 @@ func terminalPreRunningAvailableWorker(t *testing.T) (*Store, Run) {
 		store.Close()
 		t.Fatal(err)
 	}
-	runnerExit, err := NewProcessExitCode(1, 0, mustTime(t, 21))
-	if err != nil {
+	runtime = resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
+	if _, err := store.ReleaseResource(context.Background(), run.ID, runtime.ID, runtime.Revision, runtime.Identity, mustTime(t, 30)); err != nil {
 		store.Close()
 		t.Fatal(err)
 	}
-	finalizing, err = store.ObserveRunnerExit(context.Background(), run.ID, finalizing.Revision, runner.Identity, runnerExit, mustTime(t, 21))
-	if err != nil {
-		store.Close()
-		t.Fatal(err)
-	}
-	for index, resource := range resourcesForRunTest(t, store, run.ID) {
-		if _, err := store.ReleaseResource(context.Background(), run.ID, resource.ID, resource.Revision, resource.Identity, mustTime(t, int64(30+index))); err != nil {
-			store.Close()
-			t.Fatal(err)
-		}
-	}
-	finalizing = closeTerminalSessionAtCurrent(t, store, run.ID, 33)
 	settlement, _ := NewRetainedChangeSettlement(mustRevision(t, 3), availability)
 	terminal, err := store.FinalizeWorkerRun(context.Background(), run.ID, finalizing.Revision, settlement, mustTime(t, 33))
 	if err != nil {
@@ -752,9 +749,9 @@ func terminalPreRunningWorker(t *testing.T) (*Store, Run, AdmissionKeys) {
 	t.Helper()
 	failure, _ := NewFailureProposal(FailureInternal, "cleanup")
 	store, run, keys := admittedWorkerRun(t)
-	runner := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
-	var err error
-	runner, err = store.ActivateResource(context.Background(), run.ID, runner.ID, runner.Revision, processIdentity(t, 301), mustTime(t, 19))
+	runtime := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
+	runtimeIdentity, _ := NewPathResourceIdentity(301, 302)
+	_, err := store.ActivateResource(context.Background(), run.ID, runtime.ID, runtime.Revision, runtimeIdentity, mustTime(t, 19))
 	if err != nil {
 		store.Close()
 		t.Fatal(err)
@@ -764,23 +761,11 @@ func terminalPreRunningWorker(t *testing.T) (*Store, Run, AdmissionKeys) {
 		store.Close()
 		t.Fatal(err)
 	}
-	runnerExit, err := NewProcessExitCode(1, 0, mustTime(t, 21))
-	if err != nil {
+	runtime = resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
+	if _, err := store.ReleaseResource(context.Background(), run.ID, runtime.ID, runtime.Revision, runtime.Identity, mustTime(t, 30)); err != nil {
 		store.Close()
 		t.Fatal(err)
 	}
-	finalizing, err = store.ObserveRunnerExit(context.Background(), run.ID, finalizing.Revision, runner.Identity, runnerExit, mustTime(t, 21))
-	if err != nil {
-		store.Close()
-		t.Fatal(err)
-	}
-	for index, resource := range resourcesForRunTest(t, store, run.ID) {
-		if _, err := store.ReleaseResource(context.Background(), run.ID, resource.ID, resource.Revision, resource.Identity, mustTime(t, int64(30+index))); err != nil {
-			store.Close()
-			t.Fatal(err)
-		}
-	}
-	finalizing = closeTerminalSessionAtCurrent(t, store, run.ID, 33)
 	settlement, _ := NewAbandonedChangeSettlement(*run.AdmittedChangeRevision)
 	terminal, err := store.FinalizeWorkerRun(context.Background(), run.ID, finalizing.Revision, settlement, mustTime(t, 33))
 	if err != nil {
@@ -929,26 +914,27 @@ func TestChronologyScannersRejectImpossibleRows(t *testing.T) {
 	})
 }
 
-func activateResourcesAt(t *testing.T, store *Store, run Run, at int64) {
+func activateResourcesAt(t *testing.T, store *Store, run Run, at int64) Run {
 	t.Helper()
 	resources := resourcesForRunTest(t, store, run.ID)
+	runtime := resourceOfKind(t, resources, ResourceRuntimeRoot)
+	runtimeIdentity, _ := NewPathResourceIdentity(700, 1700)
+	if _, err := store.ActivateResource(context.Background(), run.ID, runtime.ID, runtime.Revision, runtimeIdentity, mustTime(t, at)); err != nil {
+		t.Fatal(err)
+	}
+	runner := resourceOfKind(t, resources, ResourceRunnerProcess)
+	startedRun, startingRunner, err := store.BeginRunnerStart(context.Background(), run.ID, runner.ID, run.Revision, runner.Revision, mustTime(t, at))
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeRun, _, err := store.ActivateRunner(context.Background(), run.ID, runner.ID, startedRun.Revision, startingRunner.Revision, processIdentity(t, 702), mustTime(t, at))
+	if err != nil {
+		t.Fatal(err)
+	}
 	provider := resourceOfKind(t, resources, ResourceProviderProcess)
 	group := resourceOfKind(t, resources, ResourceProviderGroup)
 	if _, _, err := store.ActivateProviderResources(context.Background(), run.ID, provider.ID, provider.Revision, group.ID, group.Revision, processIdentity(t, 700), mustTime(t, at)); err != nil {
 		t.Fatal(err)
 	}
-	for _, resource := range resources {
-		if resource.Kind == ResourceProviderProcess || resource.Kind == ResourceProviderGroup {
-			continue
-		}
-		var identity ResourceIdentity
-		if resource.Kind == ResourceRuntimeRoot {
-			identity, _ = NewPathResourceIdentity(700, 1700)
-		} else {
-			identity = processIdentity(t, 702)
-		}
-		if _, err := store.ActivateResource(context.Background(), run.ID, resource.ID, resource.Revision, identity, mustTime(t, at)); err != nil {
-			t.Fatal(err)
-		}
-	}
+	return activeRun
 }

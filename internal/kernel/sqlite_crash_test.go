@@ -286,6 +286,9 @@ func TestConcreteStoreCrashBeforeAndAfterFinalizationCommit(t *testing.T) {
 			}
 			finalizing = observeMissingProcessExits(t, store, run.ID, 41)
 			for index, resource := range resourcesForRunTest(t, store, run.ID) {
+				if resource.State == ResourceReleased {
+					continue
+				}
 				if _, err := store.ReleaseResource(context.Background(), run.ID, resource.ID, resource.Revision, resource.Identity, mustTime(t, 50+int64(index))); err != nil {
 					t.Fatal(err)
 				}

@@ -727,7 +727,11 @@ func TestHumanQuestionProcessExitConvergesRequestsAtomically(t *testing.T) {
 			if test.provider {
 				observed, err = store.ObserveProviderExit(ctx, run.ID, run.Revision, registeredProcessIdentity(t, store, run.ID, ResourceProviderProcess), exit, mustTime(t, 403))
 			} else {
-				observed, err = store.ObserveRunnerExit(ctx, run.ID, run.Revision, registeredProcessIdentity(t, store, run.ID, ResourceRunnerProcess), exit, mustTime(t, 403))
+				// Runner disappearance from a running attempt finalizes through
+				// the daemon failure edge; the owned absence edge then releases
+				// the runner below.
+				failure, _ := NewFailureProposal(FailureInternal, "runner exited before an attempt outcome")
+				observed, err = store.FailRun(ctx, run.ID, run.Revision, failure, mustTime(t, 403))
 			}
 			if err != nil || observed.Phase != RunFinalizing {
 				t.Fatalf("process exit = %+v, %v", observed, err)
@@ -760,15 +764,15 @@ func TestHumanQuestionProcessExitConvergesRequestsAtomically(t *testing.T) {
 			}
 
 			// The other owner may report later; the request transition must not
-			// wedge finalization or route anything to a future retry.
-			otherExit, _ := NewProcessExitCode(2, 0, mustTime(t, 404))
-			if test.provider {
-				observed, err = store.ObserveRunnerExit(ctx, run.ID, observed.Revision, registeredProcessIdentity(t, store, run.ID, ResourceRunnerProcess), otherExit, mustTime(t, 405))
-			} else {
+			// wedge finalization or route anything to a future retry. When the
+			// provider exited first, the runner reports through its owned live
+			// exit/release edge inside releaseAllRunResources.
+			if !test.provider {
+				otherExit, _ := NewProcessExitCode(2, 0, mustTime(t, 404))
 				observed, err = store.ObserveProviderExit(ctx, run.ID, observed.Revision, registeredProcessIdentity(t, store, run.ID, ResourceProviderProcess), otherExit, mustTime(t, 405))
-			}
-			if err != nil {
-				t.Fatal(err)
+				if err != nil {
+					t.Fatal(err)
+				}
 			}
 			releaseAllRunResources(t, store, run.ID, 410)
 			closed := closeTerminalSessionAtCurrent(t, store, run.ID, 420)
@@ -803,11 +807,8 @@ func assertHumanRequestInvalidation(t *testing.T, store *Store, after EventSeque
 
 func TestHumanQuestionProcessExitInvalidationFailureRollsBackBothTransitions(t *testing.T) {
 	ctx := context.Background()
-	for _, provider := range []bool{true, false} {
-		name := "runner"
-		if provider {
-			name = "provider"
-		}
+	// The provider exit is the only remaining direct process-exit edge.
+	for _, name := range []string{"provider"} {
 		t.Run(name, func(t *testing.T) {
 			store, run, _ := runningOrchestratorRun(t)
 			defer store.Close()
@@ -823,12 +824,7 @@ func TestHumanQuestionProcessExitInvalidationFailureRollsBackBothTransitions(t *
 				t.Fatal(err)
 			}
 			exit, _ := NewProcessExitCode(1, 7, mustTime(t, 402))
-			var observeErr error
-			if provider {
-				_, observeErr = store.ObserveProviderExit(ctx, run.ID, run.Revision, registeredProcessIdentity(t, store, run.ID, ResourceProviderProcess), exit, mustTime(t, 403))
-			} else {
-				_, observeErr = store.ObserveRunnerExit(ctx, run.ID, run.Revision, registeredProcessIdentity(t, store, run.ID, ResourceRunnerProcess), exit, mustTime(t, 403))
-			}
+			_, observeErr := store.ObserveProviderExit(ctx, run.ID, run.Revision, registeredProcessIdentity(t, store, run.ID, ResourceProviderProcess), exit, mustTime(t, 403))
 			if observeErr == nil {
 				t.Fatal("process exit accepted failed request invalidation")
 			}

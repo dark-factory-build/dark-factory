@@ -6,11 +6,14 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"syscall"
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
+	"golang.org/x/sys/unix"
 )
 
 const liveAttemptPoll = 100 * time.Millisecond
@@ -31,14 +34,14 @@ func (attempt *liveAttempt) run(ctx context.Context) {
 	// error is not evidence that the child disappeared.
 	cleanupErr := attempt.shutdownController()
 	err = errors.Join(err, cleanupErr)
-	if !attempt.terminalSeen {
+	if !attempt.resultSeen {
 		if err == nil {
 			err = ErrTerminalClosed
 		}
 	}
 	attempt.finalErr = err
-	if !attempt.terminalSeen {
-		attempt.terminal <- liveAttemptResult{err: err}
+	if !attempt.resultSeen {
+		attempt.result <- liveAttemptResult{err: err}
 	}
 	attempt.finishSubscribers(err)
 	close(attempt.done)
@@ -78,10 +81,11 @@ func (attempt *liveAttempt) loop(ctx context.Context) error {
 		} else if stop {
 			return nil
 		}
-		// AttemptTerminal is positive provider-exit evidence. Once observed, the
-		// controller remains owned exclusively for the supervisor's exact ACK;
-		// do not consume late effect frames or close it on caller cancellation.
-		if attempt.terminalSeen {
+		// The result notice is positive convergence evidence. Once observed, the
+		// controller remains owned exclusively for the supervisor's exact exit
+		// broadcast; do not consume late effect frames or close it on caller
+		// cancellation.
+		if attempt.resultSeen {
 			select {
 			case command := <-attempt.commands:
 				stop, err := attempt.handleRunningCommand(command)
@@ -193,7 +197,7 @@ func (attempt *liveAttempt) handleBeforeRelease(ctx context.Context, command liv
 }
 
 func (attempt *liveAttempt) processLifecycle(ctx context.Context) (bool, error) {
-	if attempt.terminationSent || attempt.terminalSeen {
+	if attempt.terminationSent || attempt.resultSeen {
 		return false, nil
 	}
 	if ctx.Err() != nil {
@@ -240,9 +244,17 @@ func (attempt *liveAttempt) terminateController() error {
 		return nil
 	}
 	if err != nil {
+		// A dead peer means the runner already converged on its own; its
+		// published result is still pending on the socket and termination is
+		// moot rather than failed. Only a delivered terminate is abort state.
+		if peerClosedWrite(err) {
+			attempt.terminationSent = true
+			return nil
+		}
 		return err
 	}
 	attempt.terminationSent = true
+	attempt.terminationDelivered = true
 	return nil
 }
 
@@ -266,17 +278,20 @@ func (attempt *liveAttempt) handleRunningCommand(command liveAttemptCommand) (bo
 		result, fatal := attempt.handleTerminalEffect(*command.effect)
 		command.effectDone <- result
 		return false, fatal
-	case liveCommandAcknowledge:
-		if !attempt.terminalSeen || attempt.terminalEvent == nil || command.terminal == nil || *command.terminal != *attempt.terminalEvent.Terminal {
+	case liveCommandFinishExit:
+		if !attempt.resultSeen || command.exit == nil || command.exit.Kind != TerminalEventExit {
 			err := runner.ErrIdentity
 			command.result <- err
 			return false, nil
 		}
-		err := attempt.controller.AcknowledgeTerminal(command.terminal, true)
-		command.result <- err
-		if err != nil {
-			return false, err
-		}
+		exit := *command.exit
+		// The daemon's own delivered termination is the only abort authority;
+		// the artifact deliberately carries no abort context, and a moot
+		// terminate against an already-converged runner is not an abort.
+		exit.Aborted = exit.Aborted || attempt.terminationDelivered
+		attempt.broadcast(exit)
+		attempt.closeSubscribers(ErrTerminalClosed)
+		command.result <- nil
 		return true, nil
 	case liveCommandShutdown:
 		err := attempt.shutdownController()
@@ -292,10 +307,10 @@ func (attempt *liveAttempt) handleTerminalEffect(effect terminalEffect) (termina
 	if !attempt.readySeen || attempt.controller == nil {
 		return terminalEffectResult{status: runner.TerminalResultRejected, err: ErrTerminalNotReady}, nil
 	}
-	if attempt.terminalSeen {
-		// Provider exit is already a stronger runner-input fence than a
+	if attempt.resultSeen {
+		// A published result is already a stronger runner-input fence than a
 		// generation revoke. Cleanup may therefore converge durable state without
-		// replacing the controller before the supervisor acknowledges this exit.
+		// replacing the controller before the supervisor broadcasts the exit.
 		if effect.kind == terminalEffectRevoke || effect.kind == terminalEffectRevokeClient || effect.kind == terminalEffectRevokeCurrentBinding {
 			return terminalEffectResult{status: runner.TerminalResultOK, terminalFence: true}, nil
 		}
@@ -462,8 +477,8 @@ func (attempt *liveAttempt) runTerminalEffect(command runner.TerminalCommand) (t
 		if err != nil {
 			return uncertainTerminalEffect(err), err
 		}
-		if stop || attempt.terminalSeen {
-			return terminalEffectResult{status: runner.TerminalResultUncertain, terminalFence: attempt.terminalSeen, err: ErrTerminalClosed}, nil
+		if stop || attempt.resultSeen {
+			return terminalEffectResult{status: runner.TerminalResultUncertain, terminalFence: attempt.resultSeen, err: ErrTerminalClosed}, nil
 		}
 	}
 }
@@ -498,7 +513,7 @@ func (attempt *liveAttempt) shutdownController() error {
 	}
 	var result error
 	attempt.binding = terminalBinding{}
-	if !attempt.terminalSeen {
+	if !attempt.resultSeen {
 		result = attempt.terminateController()
 	}
 	closeErr := attempt.controller.Close()
@@ -517,34 +532,20 @@ func (attempt *liveAttempt) handleRunnerEvent(event runner.AttemptEvent) (bool, 
 			return false, runner.ErrState
 		}
 		return false, attempt.routeFrame(*event.Frame)
-	case runner.AttemptTerminal:
-		if event.Terminal == nil {
+	case runner.AttemptResultReady:
+		if event.Result == nil {
 			return false, runner.ErrState
 		}
-		exit, err := browserTerminalExit(event.Terminal.Terminal.Exit)
-		if err != nil {
-			return false, err
-		}
-		attempt.terminalSeen = true
+		// The notice is shape-only. Observers stay attached until the
+		// supervisor has authenticated the artifact and consumed it durably;
+		// only the finishExit command carries the committed exit to them.
+		attempt.resultSeen = true
 		attempt.binding = terminalBinding{}
-		attempt.terminalEvent = &event
-		attempt.broadcast(exit)
-		attempt.closeSubscribers(ErrTerminalClosed)
-		attempt.terminal <- liveAttemptResult{event: event}
+		attempt.resultNotice = event.Result
+		attempt.result <- liveAttemptResult{notice: event.Result}
 		return false, nil
 	default:
 		return false, runner.ErrState
-	}
-}
-
-func browserTerminalExit(exit runner.Exit) (TerminalEvent, error) {
-	switch {
-	case exit.Code >= 0 && exit.Signal == 0:
-		return TerminalEvent{Kind: TerminalEventExit, ExitCode: exit.Code, Aborted: exit.Aborted}, nil
-	case exit.Code == -1 && exit.Signal > 0:
-		return TerminalEvent{Kind: TerminalEventExit, ExitSignal: exit.Signal, Aborted: exit.Aborted}, nil
-	default:
-		return TerminalEvent{}, runner.ErrState
 	}
 }
 
@@ -716,7 +717,7 @@ func (attempt *liveAttempt) handleAttach(attachment *TerminalAttachment, session
 	// AttachTerminal holds the operation gate before this command enters the
 	// owner mailbox. An attach accepted before finalizing wins; one queued after
 	// the durable boundary reloads that state and is refused.
-	if !attempt.readySeen || attempt.terminalSeen {
+	if !attempt.readySeen || attempt.resultSeen {
 		return ErrTerminalNotReady
 	}
 	if sessionID == (kernel.TerminalSessionID{}) || sessionID != attempt.sessionID {
@@ -797,14 +798,29 @@ func (attempt *liveAttempt) nextCorrelation() (uint64, error) {
 }
 
 func (attempt *liveAttempt) addCredit(credit uint64) error {
+	if attempt.creditDead {
+		return nil
+	}
 	if credit == 0 || credit > liveAttemptCredit || attempt.creditOutstanding+credit > liveAttemptCredit {
 		return runner.ErrState
 	}
 	if err := attempt.controller.SendTerminalCommand(runner.TerminalCommand{Kind: runner.TerminalCredit, Credit: uint32(credit)}); err != nil {
+		// The ACK-free outer runner exits as soon as its result is published,
+		// so a credit write can race already-queued output frames against the
+		// closed peer. The credit protocol is over, but the socket must keep
+		// draining: the result frame is still pending behind this output.
+		if peerClosedWrite(err) {
+			attempt.creditDead = true
+			return nil
+		}
 		return err
 	}
 	attempt.creditOutstanding += credit
 	return nil
+}
+
+func peerClosedWrite(err error) bool {
+	return errors.Is(err, unix.EPIPE) || errors.Is(err, syscall.EPIPE) || errors.Is(err, os.ErrClosed) || errors.Is(err, io.ErrClosedPipe)
 }
 
 func (attempt *liveAttempt) replenishCredit(consumed uint64) error {

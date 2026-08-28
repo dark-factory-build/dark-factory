@@ -3,7 +3,6 @@ package kernel
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 )
 
@@ -118,7 +117,7 @@ func (store *Store) transitionResource(ctx context.Context, runID RunID, resourc
 	if resource.RunID != runID {
 		return Resource{}, tx.Rollback(ErrConflict)
 	}
-	if target == ResourceActive && (resource.Kind == ResourceProviderProcess || resource.Kind == ResourceProviderGroup) {
+	if resource.Kind == ResourceProviderProcess || resource.Kind == ResourceProviderGroup || resource.Kind == ResourceRunnerProcess && (target == ResourceActive || target == ResourceReleased) {
 		return Resource{}, tx.Rollback(ErrConflict)
 	}
 	run, found, err := runByID(ctx, tx.connection, runID)
@@ -346,9 +345,9 @@ func (store *Store) ActivateRun(ctx context.Context, runID RunID, sessionID Term
 	return run, nil
 }
 
-// CloseDeclaredTerminalSession closes a pre-exec session only after the
-// provider identities remained unactivated and their declared resources have
-// been released by finalization.
+// CloseDeclaredTerminalSession is retained only until callers migrate to the
+// exact pre-start or AttemptResult transitions. Generic close authority is
+// intentionally unavailable.
 func (store *Store) CloseDeclaredTerminalSession(ctx context.Context, runID RunID, sessionID TerminalSessionID, expectedRun Revision, expectedSession Revision, at UnixMillis) (TerminalSession, error) {
 	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
@@ -359,10 +358,13 @@ func (store *Store) CloseDeclaredTerminalSession(ctx context.Context, runID RunI
 	if err != nil {
 		return TerminalSession{}, tx.Rollback(err)
 	}
+	if resultDerivedTerminalClose(run, relationships.resources, session) {
+		return TerminalSession{}, tx.Rollback(ErrConflict)
+	}
 	if closedTerminalSessionReplay(run, session, expectedRun, expectedSession, false) {
 		return session, tx.Rollback(nil)
 	}
-	if run.Revision != expectedRun || session.Revision != expectedSession || at.Int64() < run.UpdatedAt.Int64() || at.Int64() < session.UpdatedAt.Int64() || session.State != TerminalSessionDeclared {
+	if run.Revision != expectedRun || session.Revision != expectedSession || at.Int64() < run.UpdatedAt.Int64() || at.Int64() < session.UpdatedAt.Int64() || (session.State != TerminalSessionDeclared && session.State != TerminalSessionReleasing) || session.ActivatedAt != nil {
 		return TerminalSession{}, tx.Rollback(ErrRevisionConflict)
 	}
 	if err := terminalSessionCloseEvidence(run, relationships.resources, session); err != nil {
@@ -371,8 +373,8 @@ func (store *Store) CloseDeclaredTerminalSession(ctx context.Context, runID RunI
 	return commitClosedTerminalSession(ctx, tx, run, session, expectedRun, expectedSession, at)
 }
 
-// CloseActiveTerminalSession closes a live session only after the durable
-// provider exit and released provider process/group resources are present.
+// CloseActiveTerminalSession is retained only until callers migrate to
+// CloseTerminalAfterRunner. It never authorizes a terminal effect.
 func (store *Store) CloseActiveTerminalSession(ctx context.Context, runID RunID, sessionID TerminalSessionID, expectedRun Revision, expectedSession Revision, at UnixMillis) (TerminalSession, error) {
 	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
@@ -383,10 +385,13 @@ func (store *Store) CloseActiveTerminalSession(ctx context.Context, runID RunID,
 	if err != nil {
 		return TerminalSession{}, tx.Rollback(err)
 	}
+	if resultDerivedTerminalClose(run, relationships.resources, session) {
+		return TerminalSession{}, tx.Rollback(ErrConflict)
+	}
 	if closedTerminalSessionReplay(run, session, expectedRun, expectedSession, true) {
 		return session, tx.Rollback(nil)
 	}
-	if run.Revision != expectedRun || session.Revision != expectedSession || at.Int64() < run.UpdatedAt.Int64() || at.Int64() < session.UpdatedAt.Int64() || session.State != TerminalSessionActive {
+	if run.Revision != expectedRun || session.Revision != expectedSession || at.Int64() < run.UpdatedAt.Int64() || at.Int64() < session.UpdatedAt.Int64() || (session.State != TerminalSessionActive && session.State != TerminalSessionReleasing) || session.ActivatedAt == nil {
 		return TerminalSession{}, tx.Rollback(ErrRevisionConflict)
 	}
 	if err := terminalSessionCloseEvidence(run, relationships.resources, session); err != nil {
@@ -416,19 +421,18 @@ func (store *Store) MarkTerminalSessionUnresolved(ctx context.Context, runID Run
 	if run.Revision != expectedRun || session.Revision != expectedSession || at.Int64() < run.UpdatedAt.Int64() || at.Int64() < session.UpdatedAt.Int64() {
 		return TerminalSession{}, tx.Rollback(ErrRevisionConflict)
 	}
-	if session.State != TerminalSessionDeclared && session.State != TerminalSessionActive {
+	if session.State != TerminalSessionDeclared && session.State != TerminalSessionActive && session.State != TerminalSessionReleasing {
 		return TerminalSession{}, tx.Rollback(ErrConflict)
 	}
-	updated, err := tx.connection.ExecContext(ctx, `UPDATE terminal_sessions SET state = 'unresolved', unresolved_reason = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND run_id = ? AND state IN ('declared', 'active') AND revision = ?`, reason, at.Int64(), session.ID.Bytes(), run.ID.Bytes(), expectedSession.Int64())
+	updated, err := tx.connection.ExecContext(ctx, `UPDATE terminal_sessions SET state = 'unresolved', unresolved_reason = ?, lease_client_id = NULL, lease_expires_at_ms = NULL, last_input_sequence = 0, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND run_id = ? AND state IN ('declared', 'active', 'releasing') AND revision = ?`, reason, at.Int64(), session.ID.Bytes(), run.ID.Bytes(), expectedSession.Int64())
 	if err := requireOneRow(updated, err); err != nil {
 		return TerminalSession{}, tx.Rollback(err)
 	}
 	return commitTerminalSessionMutation(ctx, tx, run, session, expectedRun, at)
 }
 
-// CloseRecoveredTerminalSession closes only a pre-activation unresolved
-// session. Activated recovery uses CloseRecoveredActiveTerminalSession so the
-// live-owner close rules cannot be widened accidentally.
+// CloseRecoveredTerminalSession is retained for caller migration only. Exact
+// AttemptResult reauthorization is required after any permitted runner start.
 func (store *Store) CloseRecoveredTerminalSession(ctx context.Context, runID RunID, sessionID TerminalSessionID, expectedRun Revision, expectedSession Revision, at UnixMillis) (TerminalSession, error) {
 	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
@@ -438,6 +442,9 @@ func (store *Store) CloseRecoveredTerminalSession(ctx context.Context, runID Run
 	run, session, relationships, err := loadTerminalSessionMutation(ctx, tx, runID, sessionID)
 	if err != nil {
 		return TerminalSession{}, tx.Rollback(err)
+	}
+	if resultDerivedTerminalClose(run, relationships.resources, session) {
+		return TerminalSession{}, tx.Rollback(ErrConflict)
 	}
 	if closedTerminalSessionReplay(run, session, expectedRun, expectedSession, false) {
 		return session, tx.Rollback(nil)
@@ -451,10 +458,8 @@ func (store *Store) CloseRecoveredTerminalSession(ctx context.Context, runID Run
 	return commitClosedTerminalSession(ctx, tx, run, session, expectedRun, expectedSession, at)
 }
 
-// CloseRecoveredActiveTerminalSession closes an activated session after a
-// restart only when Store already proves the exact process owners released.
-// Persisted exit rows alone are not absence evidence: all three process
-// resources must have crossed their guarded ReleaseResource transitions.
+// CloseRecoveredActiveTerminalSession is retained for caller migration only.
+// Recovery uses the same exact-result close as the live path.
 func (store *Store) CloseRecoveredActiveTerminalSession(ctx context.Context, runID RunID, sessionID TerminalSessionID, expectedRun Revision, expectedSession Revision, at UnixMillis) (TerminalSession, error) {
 	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
@@ -464,6 +469,9 @@ func (store *Store) CloseRecoveredActiveTerminalSession(ctx context.Context, run
 	run, session, relationships, err := loadTerminalSessionMutation(ctx, tx, runID, sessionID)
 	if err != nil {
 		return TerminalSession{}, tx.Rollback(err)
+	}
+	if resultDerivedTerminalClose(run, relationships.resources, session) {
+		return TerminalSession{}, tx.Rollback(ErrConflict)
 	}
 	if closedTerminalSessionReplay(run, session, expectedRun, expectedSession, true) {
 		return session, tx.Rollback(nil)
@@ -475,6 +483,41 @@ func (store *Store) CloseRecoveredActiveTerminalSession(ctx context.Context, run
 		return TerminalSession{}, tx.Rollback(err)
 	}
 	return commitClosedTerminalSession(ctx, tx, run, session, expectedRun, expectedSession, at)
+}
+
+func recoveredActiveTerminalSessionCloseEvidence(run Run, resources []Resource, session TerminalSession) error {
+	if run.Phase != RunFinalizing || run.CredentialRevokedAt == nil || run.FinalizingAt == nil || session.RunID != run.ID || session.State != TerminalSessionUnresolved || session.ActivatedAt == nil || session.LeaseClientID != nil || session.LeaseExpiresAt != nil || session.LastInputSequence != 0 || !exactResourceSet(resources, false) {
+		return ErrConflict
+	}
+	var runtimeRoot, providerProcess, providerGroup, runnerProcess *Resource
+	for index := range resources {
+		resource := &resources[index]
+		if resource.RunID != run.ID {
+			return ErrConflict
+		}
+		switch resource.Kind {
+		case ResourceRuntimeRoot:
+			runtimeRoot = resource
+		case ResourceProviderProcess:
+			providerProcess = resource
+		case ResourceProviderGroup:
+			providerGroup = resource
+		case ResourceRunnerProcess:
+			runnerProcess = resource
+		}
+	}
+	if runtimeRoot == nil || runtimeRoot.Identity.Empty() || runtimeRoot.Path == "" || runtimeRoot.ActivatedAt == nil || (runtimeRoot.State != ResourceReleasing && runtimeRoot.State != ResourceUnresolved && runtimeRoot.State != ResourceReleased) || providerProcess == nil || providerGroup == nil || runnerProcess == nil || run.ProviderExit == nil || run.RunnerExit == nil {
+		return ErrConflict
+	}
+	for _, resource := range []*Resource{providerProcess, providerGroup, runnerProcess} {
+		if resource.State != ResourceReleased || resource.Identity.Empty() || resource.ActivatedAt == nil || resource.ReleasedAt == nil {
+			return ErrConflict
+		}
+	}
+	if !resourceIdentityEqual(providerProcess.Identity, providerGroup.Identity) || *providerProcess.ActivatedAt != *providerGroup.ActivatedAt || run.ProviderExit.At().Int64() < providerProcess.ActivatedAt.Int64() || run.RunnerExit.At().Int64() < runnerProcess.ActivatedAt.Int64() || providerProcess.ReleasedAt.Int64() < run.ProviderExit.At().Int64() || providerGroup.ReleasedAt.Int64() < run.ProviderExit.At().Int64() || runnerProcess.ReleasedAt.Int64() < run.RunnerExit.At().Int64() || !run.ProviderExit.valid() || !run.RunnerExit.valid() {
+		return ErrConflict
+	}
+	return nil
 }
 
 func closedTerminalSessionReplay(run Run, session TerminalSession, expectedRun, expectedSession Revision, activated bool) bool {
@@ -541,6 +584,35 @@ func commitClosedTerminalSession(ctx context.Context, tx *writeTx, run Run, sess
 	return commitTerminalSessionMutation(ctx, tx, run, session, expectedRun, at)
 }
 
+// resultDerivedTerminalClose fingerprints result-derived histories with
+// released_at_ms == provider_exit_at_ms so the legacy close methods refuse
+// them. A legacy (observe-then-release) history whose two timestamps happen
+// to land in the same millisecond matches the fingerprint too and is then
+// permanently refused by every legacy close — a fail-closed hazard accepted
+// only for this migration window: the legacy close path is deleted when the
+// daemon migrates to CloseTerminalAfterRunner.
+func resultDerivedTerminalClose(run Run, resources []Resource, session TerminalSession) bool {
+	if session.State != TerminalSessionReleasing && session.State != TerminalSessionUnresolved && session.State != TerminalSessionClosed {
+		return false
+	}
+	var process, group *Resource
+	for index := range resources {
+		switch resources[index].Kind {
+		case ResourceProviderProcess:
+			process = &resources[index]
+		case ResourceProviderGroup:
+			group = &resources[index]
+		}
+	}
+	if process == nil || group == nil || process.State != ResourceReleased || group.State != ResourceReleased || process.ReleasedAt == nil || group.ReleasedAt == nil {
+		return false
+	}
+	if process.Identity.Empty() {
+		return group.Identity.Empty() && run.ProviderExit == nil
+	}
+	return run.ProviderExit != nil && process.ReleasedAt.Int64() == run.ProviderExit.At().Int64() && group.ReleasedAt.Int64() == run.ProviderExit.At().Int64()
+}
+
 func terminalSessionCloseEvidence(run Run, resources []Resource, session TerminalSession) error {
 	var providerProcess, providerGroup, runner *Resource
 	for index := range resources {
@@ -556,7 +628,7 @@ func terminalSessionCloseEvidence(run Run, resources []Resource, session Termina
 	if providerProcess == nil || providerGroup == nil || runner == nil || providerProcess.State != ResourceReleased || providerGroup.State != ResourceReleased || runner.State != ResourceReleased {
 		return ErrConflict
 	}
-	if session.State == TerminalSessionDeclared {
+	if session.State == TerminalSessionDeclared || session.State == TerminalSessionReleasing && session.ActivatedAt == nil {
 		if !providerProcess.Identity.Empty() || !providerGroup.Identity.Empty() || run.ProviderExit != nil {
 			return ErrConflict
 		}
@@ -585,42 +657,7 @@ func terminalSessionCloseEvidence(run Run, resources []Resource, session Termina
 		}
 		return ErrConflict
 	}
-	if session.State == TerminalSessionActive && (run.ProviderExit == nil || run.ProviderExit.RecoveredAbsence() || run.RunnerExit == nil || run.RunnerExit.RecoveredAbsence() || providerProcess.Identity.Empty() || !resourceIdentityEqual(providerProcess.Identity, providerGroup.Identity) || runner.Identity.Empty()) {
-		return ErrConflict
-	}
-	return nil
-}
-
-func recoveredActiveTerminalSessionCloseEvidence(run Run, resources []Resource, session TerminalSession) error {
-	if run.Phase != RunFinalizing || run.CredentialRevokedAt == nil || run.FinalizingAt == nil || session.RunID != run.ID || session.State != TerminalSessionUnresolved || session.ActivatedAt == nil || session.LeaseClientID != nil || session.LeaseExpiresAt != nil || session.LastInputSequence != 0 || !exactResourceSet(resources, false) {
-		return ErrConflict
-	}
-	var runtimeRoot, providerProcess, providerGroup, runnerProcess *Resource
-	for index := range resources {
-		resource := &resources[index]
-		if resource.RunID != run.ID {
-			return ErrConflict
-		}
-		switch resource.Kind {
-		case ResourceRuntimeRoot:
-			runtimeRoot = resource
-		case ResourceProviderProcess:
-			providerProcess = resource
-		case ResourceProviderGroup:
-			providerGroup = resource
-		case ResourceRunnerProcess:
-			runnerProcess = resource
-		}
-	}
-	if runtimeRoot == nil || runtimeRoot.Identity.Empty() || runtimeRoot.Path == "" || runtimeRoot.ActivatedAt == nil || (runtimeRoot.State != ResourceReleasing && runtimeRoot.State != ResourceUnresolved && runtimeRoot.State != ResourceReleased) || providerProcess == nil || providerGroup == nil || runnerProcess == nil || run.ProviderExit == nil || run.RunnerExit == nil {
-		return ErrConflict
-	}
-	for _, resource := range []*Resource{providerProcess, providerGroup, runnerProcess} {
-		if resource.State != ResourceReleased || resource.Identity.Empty() || resource.ActivatedAt == nil || resource.ReleasedAt == nil {
-			return ErrConflict
-		}
-	}
-	if !resourceIdentityEqual(providerProcess.Identity, providerGroup.Identity) || *providerProcess.ActivatedAt != *providerGroup.ActivatedAt || run.ProviderExit.At().Int64() < providerProcess.ActivatedAt.Int64() || run.RunnerExit.At().Int64() < runnerProcess.ActivatedAt.Int64() || providerProcess.ReleasedAt.Int64() < run.ProviderExit.At().Int64() || providerGroup.ReleasedAt.Int64() < run.ProviderExit.At().Int64() || runnerProcess.ReleasedAt.Int64() < run.RunnerExit.At().Int64() || !run.ProviderExit.valid() || !run.RunnerExit.valid() {
+	if (session.State == TerminalSessionActive || session.State == TerminalSessionReleasing && session.ActivatedAt != nil) && (run.ProviderExit == nil || run.ProviderExit.RecoveredAbsence() || run.RunnerExit == nil || run.RunnerExit.RecoveredAbsence() || providerProcess.Identity.Empty() || !resourceIdentityEqual(providerProcess.Identity, providerGroup.Identity) || runner.Identity.Empty()) {
 		return ErrConflict
 	}
 	return nil
@@ -681,6 +718,99 @@ func (store *Store) FailRun(ctx context.Context, runID RunID, expected Revision,
 	return store.enterFinalizing(ctx, tx, run, expected, failure, at, nil)
 }
 
+// FailRunWithRuntimeAbsent is the sole no-runtime-effect failure edge. Its
+// caller must have trusted evidence that the exact run root is absent, whether
+// before the sole CreateRuntime call or after positively verified cleanup. A
+// declared runtime after an uncertain CreateRuntime is not absence evidence.
+func (store *Store) FailRunWithRuntimeAbsent(ctx context.Context, runID RunID, runtimeID ResourceID, expectedRun, expectedRuntime Revision, failure Proposal, at UnixMillis) (Run, error) {
+	if runID.zero() || runtimeID.zero() || !failure.valid() || failure.kind != OutcomeFailed {
+		return Run{}, fmt.Errorf("%w: invalid pre-runtime failure", ErrInvalidValue)
+	}
+	switch failure.code {
+	case FailureSpawn, FailureActivation, FailureSource, FailureProtocol, FailureInternal:
+	default:
+		return Run{}, fmt.Errorf("%w: failure code is not daemon infrastructure authority", ErrInvalidValue)
+	}
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return Run{}, err
+	}
+	defer tx.Close()
+	run, found, err := runByID(ctx, tx.connection, runID)
+	if err != nil || !found {
+		if err == nil {
+			err = ErrNotFound
+		}
+		return Run{}, tx.Rollback(err)
+	}
+	footprint, err := loadLifecycleFootprint(ctx, tx.connection, run)
+	if err != nil {
+		return Run{}, tx.Rollback(err)
+	}
+	if footprint.runtime.ID != runtimeID {
+		return Run{}, tx.Rollback(ErrConflict)
+	}
+	if preRuntimeFailurePostcondition(run, footprint, expectedRun, expectedRuntime, failure) {
+		return run, tx.Rollback(nil)
+	}
+	if run.Phase != RunAdmitted || run.Revision != expectedRun || footprint.runtime.Revision != expectedRuntime ||
+		footprint.runtime.State != ResourceDeclared || !footprint.runtime.Identity.Empty() ||
+		footprint.runner.State != ResourceDeclared || !footprint.runner.Identity.Empty() || footprint.runner.Revision != expectedRuntime ||
+		footprint.providerProcess.State != ResourceDeclared || !footprint.providerProcess.Identity.Empty() || footprint.providerProcess.Revision != expectedRuntime ||
+		footprint.providerGroup.State != ResourceDeclared || !footprint.providerGroup.Identity.Empty() || footprint.providerGroup.Revision != expectedRuntime ||
+		footprint.session.State != TerminalSessionDeclared || footprint.session.ActivatedAt != nil ||
+		at.Int64() < run.UpdatedAt.Int64() || !lifecycleTimesValid(run, footprint, at) {
+		return Run{}, tx.Rollback(ErrConflict)
+	}
+	if err := requireFinalizingTime(ctx, tx.connection, run, at); err != nil {
+		return Run{}, tx.Rollback(err)
+	}
+	kind, code, detail, result := proposalSQL(failure)
+	updated, err := tx.connection.ExecContext(ctx, `UPDATE runs SET phase = 'finalizing', proposal_kind = ?, proposal_code = ?, proposal_detail = ?, proposal_result = ?, credential_revoked_at_ms = ?, finalizing_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase = 'admitted' AND proposal_kind IS NULL AND credential_revoked_at_ms IS NULL AND revision = ?`, kind, code, detail, result, at.Int64(), at.Int64(), at.Int64(), runID.Bytes(), expectedRun.Int64())
+	if err := requireOneRow(updated, err); err != nil {
+		return Run{}, tx.Rollback(err)
+	}
+	updated, err = tx.connection.ExecContext(ctx, `UPDATE resources SET state = 'released', released_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE run_id = ? AND state = 'declared' AND path_dev IS NULL AND path_inode IS NULL AND pid IS NULL AND pgid IS NULL AND birth_digest IS NULL AND revision = ?`, at.Int64(), at.Int64(), runID.Bytes(), expectedRuntime.Int64())
+	if err := requireRows(updated, err, 4); err != nil {
+		return Run{}, tx.Rollback(err)
+	}
+	updated, err = tx.connection.ExecContext(ctx, `UPDATE terminal_sessions SET state = 'closed', closed_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND run_id = ? AND state = 'declared' AND activated_at_ms IS NULL AND closed_at_ms IS NULL`, at.Int64(), at.Int64(), footprint.session.ID.Bytes(), runID.Bytes())
+	if err := requireOneRow(updated, err); err != nil {
+		return Run{}, tx.Rollback(err)
+	}
+	requestInvalidations, err := transitionHumanRequestsForRun(ctx, tx.connection, runID, at, false, nil)
+	if err != nil {
+		return Run{}, tx.Rollback(err)
+	}
+	pending := append([]pendingInvalidation{{kind: EntityRun, id: runID.Bytes(), revision: expectedRun.Int64() + 1}}, requestInvalidations...)
+	if err := appendInvalidations(ctx, tx.connection, at, pending); err != nil {
+		return Run{}, tx.Rollback(err)
+	}
+	run, found, err = runByID(ctx, tx.connection, runID)
+	if err != nil || !found {
+		if err == nil {
+			err = ErrCorruptState
+		}
+		return Run{}, tx.Rollback(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Run{}, err
+	}
+	return run, nil
+}
+
+func preRuntimeFailurePostcondition(run Run, footprint lifecycleFootprint, expectedRun, expectedRuntime Revision, failure Proposal) bool {
+	if run.Phase != RunFinalizing || run.Revision.Int64() != expectedRun.Int64()+1 || run.Proposal == nil || !run.Proposal.equal(failure) || footprint.runtime.ID.zero() {
+		return false
+	}
+	for _, resource := range []Resource{footprint.runtime, footprint.runner, footprint.providerProcess, footprint.providerGroup} {
+		if resource.State != ResourceReleased || !resource.Identity.Empty() || resource.Revision.Int64() != expectedRuntime.Int64()+1 {
+			return false
+		}
+	}
+	return footprint.session.State == TerminalSessionClosed && footprint.session.ActivatedAt == nil
+}
+
 func (store *Store) CancelRun(ctx context.Context, runID RunID, expected Revision, detail string, at UnixMillis) (Run, error) {
 	proposal, err := NewCancelledProposal(detail)
 	if err != nil {
@@ -717,31 +847,48 @@ func (store *Store) enterFinalizing(ctx context.Context, tx *writeTx, run Run, e
 	if err := requireFinalizingTime(ctx, tx.connection, run, at); err != nil {
 		return Run{}, tx.Rollback(err)
 	}
+	footprint, err := loadLifecycleFootprint(ctx, tx.connection, run)
+	if err != nil {
+		return Run{}, tx.Rollback(err)
+	}
+	preRunnerStart := run.Phase == RunAdmitted && footprint.runtime.State == ResourceActive && !footprint.runtime.Identity.Empty() &&
+		footprint.runner.State == ResourceDeclared && footprint.runner.Identity.Empty() &&
+		footprint.providerProcess.State == ResourceDeclared && footprint.providerProcess.Identity.Empty() &&
+		footprint.session.State == TerminalSessionDeclared && footprint.session.ActivatedAt == nil
+	wantSession := TerminalSessionDeclared
+	if run.Phase == RunRunning {
+		wantSession = TerminalSessionActive
+	}
+	activeAttempt := footprint.runtime.State == ResourceActive && footprint.runner.State == ResourceActive && !footprint.runner.Identity.Empty() &&
+		footprint.providerProcess.State == ResourceActive && !footprint.providerProcess.Identity.Empty() && footprint.session.State == wantSession
+	if !preRunnerStart && !activeAttempt {
+		return Run{}, tx.Rollback(ErrConflict)
+	}
 	kind, code, detail, result := proposalSQL(proposal)
 	updated, err := tx.connection.ExecContext(ctx, `UPDATE runs SET phase = 'finalizing', proposal_kind = ?, proposal_code = ?, proposal_detail = ?, proposal_result = ?, credential_revoked_at_ms = ?, finalizing_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase IN ('admitted', 'running') AND proposal_kind IS NULL AND credential_revoked_at_ms IS NULL AND revision = ?`,
 		kind, code, detail, result, at.Int64(), at.Int64(), at.Int64(), run.ID.Bytes(), expected.Int64())
 	if err := requireOneRow(updated, err); err != nil {
 		return Run{}, tx.Rollback(err)
 	}
-	releasing, err := tx.connection.ExecContext(ctx, `UPDATE resources SET state = 'releasing', revision = revision + 1, updated_at_ms = ? WHERE run_id = ? AND state IN ('declared', 'active')`, at.Int64(), run.ID.Bytes())
-	if err := requireRows(releasing, err, 4); err != nil {
-		return Run{}, tx.Rollback(err)
-	}
-	// Finalizing revokes terminal input in this same transaction. It does not
-	// emit another run invalidation: the finalizing run update above is the one
-	// aggregate revision visible to clients.
-	var generation int64
-	leaseErr := tx.connection.QueryRowContext(ctx, `SELECT lease_generation FROM terminal_sessions WHERE run_id = ? AND lease_client_id IS NOT NULL`, run.ID.Bytes()).Scan(&generation)
-	if leaseErr != nil && !errors.Is(leaseErr, sql.ErrNoRows) {
-		return Run{}, tx.Rollback(leaseErr)
-	}
-	if leaseErr == nil {
-		next, overflowErr := leaseGenerationNext(generation)
-		if overflowErr != nil {
-			return Run{}, tx.Rollback(overflowErr)
+	if preRunnerStart {
+		releasing, releaseErr := tx.connection.ExecContext(ctx, `UPDATE resources SET state = 'releasing', revision = revision + 1, updated_at_ms = ? WHERE id = ? AND run_id = ? AND kind = 'runtime_root' AND state = 'active'`, at.Int64(), footprint.runtime.ID.Bytes(), run.ID.Bytes())
+		if err := requireOneRow(releasing, releaseErr); err != nil {
+			return Run{}, tx.Rollback(err)
 		}
-		updatedSession, updateErr := tx.connection.ExecContext(ctx, `UPDATE terminal_sessions SET lease_client_id = NULL, lease_expires_at_ms = NULL, lease_generation = ?, last_input_sequence = 0 WHERE run_id = ? AND lease_client_id IS NOT NULL AND lease_generation = ?`, next, run.ID.Bytes(), generation)
-		if err := requireOneRow(updatedSession, updateErr); err != nil {
+		released, releaseErr := tx.connection.ExecContext(ctx, `UPDATE resources SET state = 'released', released_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE run_id = ? AND state = 'declared' AND pid IS NULL AND pgid IS NULL AND birth_digest IS NULL AND kind IN ('runner_process', 'provider_process', 'provider_group')`, at.Int64(), at.Int64(), run.ID.Bytes())
+		if err := requireRows(released, releaseErr, 3); err != nil {
+			return Run{}, tx.Rollback(err)
+		}
+		closed, closeErr := tx.connection.ExecContext(ctx, `UPDATE terminal_sessions SET state = 'closed', closed_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND run_id = ? AND state = 'declared' AND activated_at_ms IS NULL AND closed_at_ms IS NULL`, at.Int64(), at.Int64(), footprint.session.ID.Bytes(), run.ID.Bytes())
+		if err := requireOneRow(closed, closeErr); err != nil {
+			return Run{}, tx.Rollback(err)
+		}
+	} else {
+		releasing, releaseErr := tx.connection.ExecContext(ctx, `UPDATE resources SET state = 'releasing', revision = revision + 1, updated_at_ms = ? WHERE run_id = ? AND state = 'active'`, at.Int64(), run.ID.Bytes())
+		if err := requireRows(releasing, releaseErr, 4); err != nil {
+			return Run{}, tx.Rollback(err)
+		}
+		if err := moveTerminalToReleasing(ctx, tx.connection, footprint.session, at); err != nil {
 			return Run{}, tx.Rollback(err)
 		}
 	}
@@ -767,27 +914,10 @@ func (store *Store) enterFinalizing(ctx context.Context, tx *writeTx, run Run, e
 	return run, nil
 }
 
-type processExitOwner uint8
-
-const (
-	providerExitOwner processExitOwner = iota + 1
-	runnerExitOwner
-)
-
+// ObserveProviderExit consumes the live owner's exact provider Wait result.
+// Runner exits flow only through the atomic result/absence release edges.
 func (store *Store) ObserveProviderExit(ctx context.Context, runID RunID, expected Revision, identity ResourceIdentity, exit ProcessExit, at UnixMillis) (Run, error) {
-	return store.observeProcessExit(ctx, runID, expected, identity, exit, at, providerExitOwner)
-}
-
-func (store *Store) ObserveRunnerExit(ctx context.Context, runID RunID, expected Revision, identity ResourceIdentity, exit ProcessExit, at UnixMillis) (Run, error) {
-	return store.observeProcessExit(ctx, runID, expected, identity, exit, at, runnerExitOwner)
-}
-
-func (store *Store) observeProcessExit(ctx context.Context, runID RunID, expected Revision, identity ResourceIdentity, exit ProcessExit, at UnixMillis, owner processExitOwner) (Run, error) {
-	wantKind := ResourceRunnerProcess
-	if owner == providerExitOwner {
-		wantKind = ResourceProviderProcess
-	}
-	if runID.zero() || !identity.validFor(wantKind) || !exit.valid() || at.Int64() < exit.at.Int64() {
+	if runID.zero() || !identity.validFor(ResourceProviderProcess) || !exit.valid() || at.Int64() < exit.at.Int64() {
 		return Run{}, fmt.Errorf("%w: invalid process exit observation", ErrInvalidValue)
 	}
 	tx, err := store.beginValidatedWrite(ctx)
@@ -809,17 +939,14 @@ func (store *Store) observeProcessExit(ctx context.Context, runID RunID, expecte
 	if err != nil {
 		return Run{}, tx.Rollback(err)
 	}
-	activatedAt, matched := exitIdentityMatches(resources, owner, identity)
+	activatedAt, matched := exitIdentityMatches(resources, identity)
 	if !matched {
 		return Run{}, tx.Rollback(ErrConflict)
 	}
 	if exit.at.Int64() < activatedAt.Int64() {
 		return Run{}, tx.Rollback(ErrConflict)
 	}
-	existing := run.RunnerExit
-	if owner == providerExitOwner {
-		existing = run.ProviderExit
-	}
+	existing := run.ProviderExit
 	if existing != nil {
 		if !existing.equal(exit) {
 			return Run{}, tx.Rollback(ErrConflict)
@@ -839,25 +966,25 @@ func (store *Store) observeProcessExit(ctx context.Context, runID RunID, expecte
 		if err := requireFinalizingTime(ctx, tx.connection, run, at); err != nil {
 			return Run{}, tx.Rollback(err)
 		}
-		failureCode, detail := FailureRunnerExit, "runner exited before an attempt outcome"
-		if owner == providerExitOwner {
-			failureCode, detail = FailureProviderExit, "provider exited before an attempt outcome"
-		}
-		proposal, _ := NewFailureProposal(failureCode, detail)
+		proposal, _ := NewFailureProposal(FailureProviderExit, "provider exited before an attempt outcome")
 		kind, proposalCode, proposalDetail, result := proposalSQL(proposal)
-		var updated sql.Result
-		if owner == providerExitOwner {
-			updated, err = tx.connection.ExecContext(ctx, `UPDATE runs SET phase = 'finalizing', proposal_kind = ?, proposal_code = ?, proposal_detail = ?, proposal_result = ?, credential_revoked_at_ms = ?, finalizing_at_ms = ?, provider_exit_kind = ?, provider_exit_sequence = ?, provider_exit_code = ?, provider_exit_signal = ?, provider_exit_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase IN ('admitted', 'running') AND proposal_kind IS NULL AND provider_exit_kind IS NULL AND revision = ?`,
-				kind, proposalCode, proposalDetail, result, at.Int64(), at.Int64(), exitKind, exit.sequence, code, signal, exit.at.Int64(), at.Int64(), run.ID.Bytes(), expected.Int64())
-		} else {
-			updated, err = tx.connection.ExecContext(ctx, `UPDATE runs SET phase = 'finalizing', proposal_kind = ?, proposal_code = ?, proposal_detail = ?, proposal_result = ?, credential_revoked_at_ms = ?, finalizing_at_ms = ?, runner_exit_kind = ?, runner_exit_sequence = ?, runner_exit_code = ?, runner_exit_signal = ?, runner_exit_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase IN ('admitted', 'running') AND proposal_kind IS NULL AND runner_exit_kind IS NULL AND revision = ?`,
-				kind, proposalCode, proposalDetail, result, at.Int64(), at.Int64(), exitKind, exit.sequence, code, signal, exit.at.Int64(), at.Int64(), run.ID.Bytes(), expected.Int64())
-		}
+		updated, err := tx.connection.ExecContext(ctx, `UPDATE runs SET phase = 'finalizing', proposal_kind = ?, proposal_code = ?, proposal_detail = ?, proposal_result = ?, credential_revoked_at_ms = ?, finalizing_at_ms = ?, provider_exit_kind = ?, provider_exit_sequence = ?, provider_exit_code = ?, provider_exit_signal = ?, provider_exit_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase IN ('admitted', 'running') AND proposal_kind IS NULL AND provider_exit_kind IS NULL AND revision = ?`,
+			kind, proposalCode, proposalDetail, result, at.Int64(), at.Int64(), exitKind, exit.sequence, code, signal, exit.at.Int64(), at.Int64(), run.ID.Bytes(), expected.Int64())
 		if err := requireOneRow(updated, err); err != nil {
 			return Run{}, tx.Rollback(err)
 		}
 		releasing, err := tx.connection.ExecContext(ctx, `UPDATE resources SET state = 'releasing', revision = revision + 1, updated_at_ms = ? WHERE run_id = ? AND state IN ('declared', 'active')`, at.Int64(), run.ID.Bytes())
 		if err := requireRows(releasing, err, 4); err != nil {
+			return Run{}, tx.Rollback(err)
+		}
+		session, found, sessionErr := terminalSessionByRunID(ctx, tx.connection, run.ID)
+		if sessionErr != nil || !found {
+			if sessionErr == nil {
+				sessionErr = ErrCorruptState
+			}
+			return Run{}, tx.Rollback(sessionErr)
+		}
+		if err := moveTerminalToReleasing(ctx, tx.connection, session, at); err != nil {
 			return Run{}, tx.Rollback(err)
 		}
 		requestInvalidations, transitionErr := transitionHumanRequestsForRun(ctx, tx.connection, run.ID, at, false, nil)
@@ -866,12 +993,7 @@ func (store *Store) observeProcessExit(ctx context.Context, runID RunID, expecte
 		}
 		pending = append(pending, requestInvalidations...)
 	} else if run.Phase == RunFinalizing {
-		var updated sql.Result
-		if owner == providerExitOwner {
-			updated, err = tx.connection.ExecContext(ctx, `UPDATE runs SET provider_exit_kind = ?, provider_exit_sequence = ?, provider_exit_code = ?, provider_exit_signal = ?, provider_exit_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase = 'finalizing' AND provider_exit_kind IS NULL AND revision = ?`, exitKind, exit.sequence, code, signal, exit.at.Int64(), at.Int64(), run.ID.Bytes(), expected.Int64())
-		} else {
-			updated, err = tx.connection.ExecContext(ctx, `UPDATE runs SET runner_exit_kind = ?, runner_exit_sequence = ?, runner_exit_code = ?, runner_exit_signal = ?, runner_exit_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase = 'finalizing' AND runner_exit_kind IS NULL AND revision = ?`, exitKind, exit.sequence, code, signal, exit.at.Int64(), at.Int64(), run.ID.Bytes(), expected.Int64())
-		}
+		updated, err := tx.connection.ExecContext(ctx, `UPDATE runs SET provider_exit_kind = ?, provider_exit_sequence = ?, provider_exit_code = ?, provider_exit_signal = ?, provider_exit_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase = 'finalizing' AND provider_exit_kind IS NULL AND revision = ?`, exitKind, exit.sequence, code, signal, exit.at.Int64(), at.Int64(), run.ID.Bytes(), expected.Int64())
 		if err := requireOneRow(updated, err); err != nil {
 			return Run{}, tx.Rollback(err)
 		}
@@ -894,8 +1016,7 @@ func (store *Store) observeProcessExit(ctx context.Context, runID RunID, expecte
 	return run, nil
 }
 
-func exitIdentityMatches(resources []Resource, owner processExitOwner, identity ResourceIdentity) (UnixMillis, bool) {
-	runnerMatched := false
+func exitIdentityMatches(resources []Resource, identity ResourceIdentity) (UnixMillis, bool) {
 	providerProcessMatched := false
 	providerGroupMatched := false
 	var activatedAt UnixMillis
@@ -904,30 +1025,21 @@ func exitIdentityMatches(resources []Resource, owner processExitOwner, identity 
 		if resource.State == ResourceDeclared || !resourceIdentityEqual(resource.Identity, identity) {
 			continue
 		}
-		matched := false
 		switch resource.Kind {
-		case ResourceRunnerProcess:
-			runnerMatched = true
-			matched = owner == runnerExitOwner
 		case ResourceProviderProcess:
 			providerProcessMatched = true
-			matched = owner == providerExitOwner
 		case ResourceProviderGroup:
 			providerGroupMatched = true
-			matched = owner == providerExitOwner
+		default:
+			continue
 		}
-		if matched {
-			if resource.ActivatedAt == nil || activationFound && *resource.ActivatedAt != activatedAt {
-				return UnixMillis{}, false
-			}
-			activatedAt = *resource.ActivatedAt
-			activationFound = true
+		if resource.ActivatedAt == nil || activationFound && *resource.ActivatedAt != activatedAt {
+			return UnixMillis{}, false
 		}
+		activatedAt = *resource.ActivatedAt
+		activationFound = true
 	}
-	if owner == providerExitOwner {
-		return activatedAt, providerProcessMatched && providerGroupMatched && activationFound
-	}
-	return activatedAt, runnerMatched && activationFound
+	return activatedAt, providerProcessMatched && providerGroupMatched && activationFound
 }
 
 func (store *Store) FinalizeRun(ctx context.Context, runID RunID, expected Revision, at UnixMillis) (Run, error) {

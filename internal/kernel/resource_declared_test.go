@@ -12,6 +12,7 @@ func TestDeclaredResourcesRejectHiddenIdentityAndRecoveredAbsenceAuthority(t *te
 			store, run, _ := admittedOrchestratorRun(t)
 			path := storePath(t, store)
 			resource := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), kind)
+			runnerID := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess).ID
 			factory, err := store.Factory(context.Background())
 			if err != nil {
 				store.Close()
@@ -39,8 +40,7 @@ func TestDeclaredResourcesRejectHiddenIdentityAndRecoveredAbsenceAuthority(t *te
 				t.Fatalf("run with corrupt declared resource = %v", err)
 			}
 			before := captureWriteFootprint(t, store)
-			exit, _ := NewProcessExitRecoveredAbsence(1, mustTime(t, 20))
-			if _, err := store.ObserveRunnerExit(context.Background(), run.ID, run.Revision, processIdentity(t, 91), exit, mustTime(t, 21)); !errors.Is(err, ErrCorruptState) {
+			if _, err := store.RecordRecoveredPreExecRunnerAbsence(context.Background(), run.ID, runnerID, run.Revision, mustRevision(t, 1), processIdentity(t, 91), mustTime(t, 21)); !errors.Is(err, ErrCorruptState) {
 				store.Close()
 				t.Fatalf("recovered absence over corrupt declared resource = %v", err)
 			}

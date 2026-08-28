@@ -592,7 +592,7 @@ func TestFailRunSharesOperationGateWithTerminalEffects(t *testing.T) {
 	var failed kernel.Run
 	var failErr error
 	go func() {
-		failed, failErr = daemon.failRun(*admission.Run, kernel.FailureInternal, failureCause)
+		failed, failErr = daemon.failRunBeforeRuntime(*admission.Run, resource(216), kernel.FailureInternal, failureCause)
 		close(finished)
 	}()
 	select {
@@ -670,7 +670,7 @@ func TestDaemonCloseActivelyCancelsPreReleaseSupervisor(t *testing.T) {
 	case <-time.After(12 * time.Second):
 		t.Fatal("Close did not join canceled supervisor")
 	}
-	fixture.assertInterruptedFinalizing(t, result.run, kernel.TerminalSessionActive)
+	fixture.assertInterruptedFinalizing(t, result.run, kernel.TerminalSessionReleasing)
 	if _, err := os.Stat(fixture.witness); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("provider executed before release: stat err=%v", err)
 	}
@@ -729,7 +729,7 @@ func TestDaemonCloseActivelyCancelsBeforeLiveRegistration(t *testing.T) {
 	case <-time.After(8 * time.Second):
 		t.Fatal("Close did not join canceled pre-live supervisor")
 	}
-	fixture.assertInterruptedFinalizing(t, result.run, kernel.TerminalSessionDeclared)
+	fixture.assertInterruptedFinalizing(t, result.run, kernel.TerminalSessionClosed)
 	if _, err := os.Stat(fixture.witness); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("provider executed after pre-live cancellation: stat err=%v", err)
 	}
@@ -1121,27 +1121,36 @@ func TestSupervisorActivationErrorAfterDurableMarkerJoinsInnerOwner(t *testing.T
 	if _, err := fixture.store.AuthenticateAttempt(context.Background(), run.CredentialDigest); !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Fatalf("activation ambiguity credential = %v", err)
 	}
+	// The converged evidence is the consumed result, not a terminal spool: the
+	// run carries the exact provider exit, the released pair carries the exact
+	// inner identity, and the consumed artifact has been removed.
+	if run.Proposal.Code() != kernel.FailureActivation || run.ProviderExit == nil {
+		t.Fatalf("activation ambiguity evidence = proposal %+v exit %+v", run.Proposal, run.ProviderExit)
+	}
 	runtimePath := filepath.Join(fixture.runtimeParentPath, run.ID.String())
-	runtimeDirectory, err := os.Open(runtimePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	terminal, loadErr := runner.LoadTerminal(runtimeDirectory, runner.TerminalSpoolName)
-	closeErr := runtimeDirectory.Close()
-	if loadErr != nil || closeErr != nil {
-		t.Fatalf("activation terminal spool = %+v, load=%v close=%v", terminal, loadErr, closeErr)
-	}
-	if terminal.Terminal.Process != observedInner {
-		t.Fatalf("terminal inner = %+v, observed %+v", terminal.Terminal.Process, observedInner)
+	if _, statErr := os.Stat(filepath.Join(runtimePath, runner.AttemptResultSpoolName)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("consumed attempt result was not removed: %v", statErr)
 	}
 	if observation := runner.ObserveProcess(observedInner); observation.Presence != runner.Absent {
 		t.Fatalf("activation ambiguity left inner owner alive: %+v", observation)
 	}
 	for _, resource := range fixture.resources(t, run.ID) {
-		if resource.Kind == kernel.ResourceRunnerProcess {
+		switch resource.Kind {
+		case kernel.ResourceProviderProcess:
 			identity, identityErr := runnerIdentity(resource.Identity)
 			if identityErr != nil {
 				t.Fatal(identityErr)
+			}
+			if resource.State != kernel.ResourceReleased || identity != observedInner {
+				t.Fatalf("released provider = %+v, observed inner %+v", resource, observedInner)
+			}
+		case kernel.ResourceRunnerProcess:
+			identity, identityErr := runnerIdentity(resource.Identity)
+			if identityErr != nil {
+				t.Fatal(identityErr)
+			}
+			if resource.State != kernel.ResourceReleased {
+				t.Fatalf("released runner = %+v", resource)
 			}
 			if observation := runner.ObserveProcess(identity); observation.Presence != runner.Absent {
 				t.Fatalf("activation ambiguity left outer alive: %+v", observation)
@@ -1175,8 +1184,10 @@ func TestSupervisorReconcilesAmbiguousAdmissionAndRevokesBearer(t *testing.T) {
 	if _, statErr := os.Stat(fixture.witness); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("ambiguous admission executed provider: %v", statErr)
 	}
+	// The runtime was never created, so the pre-runtime failure edge releases
+	// every declared resource atomically instead of leaving releasing residue.
 	for _, resource := range fixture.resources(t, run.ID) {
-		if resource.State != kernel.ResourceReleasing || !resource.Identity.Empty() {
+		if resource.State != kernel.ResourceReleased || !resource.Identity.Empty() {
 			t.Fatalf("ambiguous admission resource = %+v", resource)
 		}
 	}
@@ -1694,16 +1705,32 @@ func (fixture *supervisorFixture) assertInterruptedFinalizing(t *testing.T, run 
 	if err != nil || !found {
 		t.Fatalf("durable interrupted session: found=%v err=%v", found, err)
 	}
-	if session.State != sessionState || session.ClosedAt != nil {
+	// A pre-start interruption converges atomically: the never-activated
+	// session is closed and every declared resource is released empty. An
+	// interrupted active attempt instead leaves releasing residue for
+	// recovery to prove absent.
+	wantResource := kernel.ResourceReleasing
+	if sessionState == kernel.TerminalSessionClosed {
+		wantResource = kernel.ResourceReleased
+		if session.ClosedAt == nil || session.ActivatedAt != nil {
+			t.Fatalf("interrupted session = %+v, want atomically closed pre-activation session", session)
+		}
+	} else if session.ClosedAt != nil {
 		t.Fatalf("interrupted session = %+v, want state %s and not closed", session, sessionState)
+	}
+	if session.State != sessionState {
+		t.Fatalf("interrupted session = %+v, want state %s", session, sessionState)
 	}
 	resources := fixture.resources(t, run.ID)
 	if len(resources) != 4 {
 		t.Fatalf("interrupted resource count = %d, want 4", len(resources))
 	}
 	for _, resource := range resources {
-		if resource.State != kernel.ResourceReleasing {
-			t.Fatalf("interrupted resource %s = %s, want releasing", resource.Kind, resource.State)
+		if resource.State != wantResource {
+			t.Fatalf("interrupted resource %s = %s, want %s", resource.Kind, resource.State, wantResource)
+		}
+		if wantResource == kernel.ResourceReleased && !resource.Identity.Empty() {
+			t.Fatalf("interrupted resource %s retained identity", resource.Kind)
 		}
 	}
 }

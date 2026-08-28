@@ -93,9 +93,9 @@ func TestPublicStateTraversalKeepsEveryKindAndNoRowsAreLost(t *testing.T) {
 		if err != nil || !admission.Admitted() || admission.Run == nil {
 			t.Fatalf("admit run %d = %+v, %v", index, admission, err)
 		}
-		activateAllResourcesUnique(t, store, *admission.Run, int64(900+index*10), int64(5000+index*100))
+		activatedRun := activateAllResourcesUnique(t, store, *admission.Run, int64(900+index*10), int64(5000+index*100))
 		session := terminalSessionForRunTest(t, store, admission.Run.ID)
-		running, err := store.ActivateRun(ctx, admission.Run.ID, session.ID, admission.Run.Revision, session.Revision, mustTime(t, int64(909+index*10)))
+		running, err := store.ActivateRun(ctx, admission.Run.ID, session.ID, activatedRun.Revision, session.Revision, mustTime(t, int64(909+index*10)))
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -166,12 +166,18 @@ func (d digest) Bytes() []byte {
 }
 
 type AttemptDigest struct{ digest }
+type ResultProofDigest struct{ digest }
 type TreeDigest struct{ digest }
 type BirthDigest struct{ digest }
 
 func AttemptDigestFromBytes(value []byte) (AttemptDigest, error) {
 	d, err := digestFromBytes(value)
 	return AttemptDigest{d}, err
+}
+
+func ResultProofDigestFromBytes(value []byte) (ResultProofDigest, error) {
+	d, err := digestFromBytes(value)
+	return ResultProofDigest{d}, err
 }
 
 func TreeDigestFromBytes(value []byte) (TreeDigest, error) {
@@ -184,9 +190,10 @@ func BirthDigestFromBytes(value []byte) (BirthDigest, error) {
 	return BirthDigest{d}, err
 }
 
-func (d AttemptDigest) Bytes() []byte { return d.digest.Bytes() }
-func (d TreeDigest) Bytes() []byte    { return d.digest.Bytes() }
-func (d BirthDigest) Bytes() []byte   { return d.digest.Bytes() }
+func (d AttemptDigest) Bytes() []byte     { return d.digest.Bytes() }
+func (d ResultProofDigest) bytes() []byte { return d.digest.Bytes() }
+func (d TreeDigest) Bytes() []byte        { return d.digest.Bytes() }
+func (d BirthDigest) Bytes() []byte       { return d.digest.Bytes() }
 
 type BrowserChallengeDigest struct{ digest }
 
