@@ -21,10 +21,10 @@ const (
 // released. Wrapper must not contain a caller-supplied control descriptor: the
 // attempt runner creates and owns that one fixed capability itself.
 type AttemptSpec struct {
-	AttemptID    string
-	Wrapper      *LaunchSpec
-	MarkerName   string
-	TerminalName string
+	AttemptID  string
+	Wrapper    *LaunchSpec
+	MarkerName string
+	ResultName string
 }
 
 type AttemptEventKind string
@@ -32,7 +32,7 @@ type AttemptEventKind string
 const (
 	AttemptInnerReady    AttemptEventKind = "inner-ready"
 	AttemptCheckpoint    AttemptEventKind = "checkpoint"
-	AttemptTerminal      AttemptEventKind = "terminal"
+	AttemptResultReady   AttemptEventKind = "attempt-result-ready"
 	AttemptTerminalFrame AttemptEventKind = "terminal-frame"
 )
 
@@ -232,7 +232,7 @@ type AttemptEvent struct {
 	Stage    AttemptStage
 	Identity Identity
 	Payload  []byte
-	Terminal *TerminalRecord
+	Result   *AttemptResultNotice
 	Frame    *TerminalFrame
 }
 

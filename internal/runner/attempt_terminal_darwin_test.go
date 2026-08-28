@@ -156,12 +156,11 @@ func TestAttemptControllerTerminalEventsInterleaveWithoutLifecycleMutation(t *te
 	}
 
 	identity := FileIdentity{Device: 1, Inode: 2}
-	terminal := Terminal{AttemptID: controller.attemptID, Process: controller.inner, Exit: Exit{Code: 0}}
-	if err := writeControlFrame(peer, attemptFrame{Version: 1, Kind: "terminal", Terminal: &terminal, FileIdentity: &identity, Digest: strings.Repeat("0", 64)}, maxFrameBytes); err != nil {
+	if err := writeControlFrame(peer, attemptFrame{Version: 1, Kind: string(AttemptResultReady), FileIdentity: &identity, Digest: strings.Repeat("0", 64)}, maxFrameBytes); err != nil {
 		t.Fatal(err)
 	}
 	event, err = controller.Next(time.Second)
-	if err != nil || event.Kind != AttemptTerminal || event.Terminal == nil {
+	if err != nil || event.Kind != AttemptResultReady || event.Result == nil {
 		t.Fatalf("final event = %+v, %v", event, err)
 	}
 }

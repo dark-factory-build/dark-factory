@@ -29,35 +29,33 @@ type gateFrame struct {
 }
 
 type attemptConfig struct {
-	Version      int              `json:"version"`
-	AttemptID    string           `json:"attempt_id"`
-	Wrapper      launchCommitment `json:"wrapper"`
-	MarkerName   string           `json:"marker_name"`
-	TerminalName string           `json:"terminal_name"`
+	Version    int              `json:"version"`
+	AttemptID  string           `json:"attempt_id"`
+	Wrapper    launchCommitment `json:"wrapper"`
+	MarkerName string           `json:"marker_name"`
+	ResultName string           `json:"result_name"`
 }
 
 type attemptFrame struct {
-	Version        int           `json:"version"`
-	Kind           string        `json:"kind"`
-	Stage          AttemptStage  `json:"stage,omitempty"`
-	Identity       Identity      `json:"identity,omitempty"`
-	Payload        []byte        `json:"payload,omitempty"`
-	Terminal       *Terminal     `json:"terminal,omitempty"`
-	FileIdentity   *FileIdentity `json:"file_identity,omitempty"`
-	Digest         string        `json:"digest,omitempty"`
-	StoreCommitted bool          `json:"store_committed,omitempty"`
-	Correlation    uint64        `json:"correlation,omitempty"`
-	Generation     uint64        `json:"generation,omitempty"`
-	Sequence       uint64        `json:"sequence,omitempty"`
-	Start          uint64        `json:"start,omitempty"`
-	End            uint64        `json:"end,omitempty"`
-	Floor          uint64        `json:"floor,omitempty"`
-	Head           uint64        `json:"head,omitempty"`
-	Count          uint32        `json:"count,omitempty"`
-	Rows           uint16        `json:"rows,omitempty"`
-	Cols           uint16        `json:"cols,omitempty"`
-	Credit         uint32        `json:"credit,omitempty"`
-	Status         string        `json:"status,omitempty"`
+	Version      int           `json:"version"`
+	Kind         string        `json:"kind"`
+	Stage        AttemptStage  `json:"stage,omitempty"`
+	Identity     Identity      `json:"identity,omitempty"`
+	Payload      []byte        `json:"payload,omitempty"`
+	FileIdentity *FileIdentity `json:"file_identity,omitempty"`
+	Digest       string        `json:"digest,omitempty"`
+	Correlation  uint64        `json:"correlation,omitempty"`
+	Generation   uint64        `json:"generation,omitempty"`
+	Sequence     uint64        `json:"sequence,omitempty"`
+	Start        uint64        `json:"start,omitempty"`
+	End          uint64        `json:"end,omitempty"`
+	Floor        uint64        `json:"floor,omitempty"`
+	Head         uint64        `json:"head,omitempty"`
+	Count        uint32        `json:"count,omitempty"`
+	Rows         uint16        `json:"rows,omitempty"`
+	Cols         uint16        `json:"cols,omitempty"`
+	Credit       uint32        `json:"credit,omitempty"`
+	Status       string        `json:"status,omitempty"`
 }
 
 func terminalCommandFrame(command TerminalCommand) attemptFrame {
@@ -124,8 +122,7 @@ func noTerminalFields(frame attemptFrame) bool {
 }
 
 func noLegacyFields(frame attemptFrame) bool {
-	return frame.Stage == "" && frame.Identity == (Identity{}) && frame.Terminal == nil &&
-		frame.FileIdentity == nil && frame.Digest == "" && !frame.StoreCommitted
+	return frame.Stage == "" && frame.Identity == (Identity{}) && frame.FileIdentity == nil && frame.Digest == ""
 }
 
 // validTerminalEnvelope is the single shared boundary between the legacy
@@ -145,13 +142,6 @@ func validTerminalEnvelope(frame attemptFrame, command bool) bool {
 func validCurrentExecCheckAck(frame attemptFrame) bool {
 	return frame.Version == commandVersion && frame.Kind == "current-exec-check-ack" &&
 		noLegacyFields(frame) && noTerminalFields(frame) && len(frame.Payload) == 0
-}
-
-func validTerminalAck(frame attemptFrame, record *TerminalRecord) bool {
-	return record != nil && frame.Version == commandVersion && frame.Kind == "terminal-ack" &&
-		frame.Stage == "" && frame.Identity == (Identity{}) && noTerminalFields(frame) && len(frame.Payload) == 0 && frame.StoreCommitted &&
-		frame.Terminal != nil && frame.FileIdentity != nil && frame.Digest == record.Digest &&
-		*frame.FileIdentity == record.Identity && *frame.Terminal == record.Terminal
 }
 
 func writeFrame(w io.Writer, value any, limit int) error {

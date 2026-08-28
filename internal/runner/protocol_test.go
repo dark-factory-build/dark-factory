@@ -276,10 +276,8 @@ func TestTerminalConversionsRejectLifecycleAndCrossUnionFields(t *testing.T) {
 	}{
 		{"stage", func(f *attemptFrame) { f.Stage = StageProvider }},
 		{"identity", func(f *attemptFrame) { f.Identity = Identity{PID: 2, PGID: 2, Birth: Birth{Seconds: 1}} }},
-		{"terminal", func(f *attemptFrame) { f.Terminal = &Terminal{} }},
 		{"file_identity", func(f *attemptFrame) { f.FileIdentity = &FileIdentity{Device: 1, Inode: 1} }},
 		{"digest", func(f *attemptFrame) { f.Digest = "digest" }},
-		{"store_committed", func(f *attemptFrame) { f.StoreCommitted = true }},
 		{"generation", func(f *attemptFrame) { f.Generation = 1 }},
 		{"sequence", func(f *attemptFrame) { f.Sequence = 1 }},
 		{"start", func(f *attemptFrame) { f.Start = 1 }},
@@ -309,10 +307,8 @@ func TestTerminalConversionsRejectLifecycleAndCrossUnionFields(t *testing.T) {
 	}{
 		{"stage", func(f *attemptFrame) { f.Stage = StageProvider }},
 		{"identity", func(f *attemptFrame) { f.Identity = Identity{PID: 2, PGID: 2, Birth: Birth{Seconds: 1}} }},
-		{"terminal", func(f *attemptFrame) { f.Terminal = &Terminal{} }},
 		{"file_identity", func(f *attemptFrame) { f.FileIdentity = &FileIdentity{Device: 1, Inode: 1} }},
 		{"digest", func(f *attemptFrame) { f.Digest = "digest" }},
-		{"store_committed", func(f *attemptFrame) { f.StoreCommitted = true }},
 		{"correlation", func(f *attemptFrame) { f.Correlation = 1 }},
 		{"sequence", func(f *attemptFrame) { f.Sequence = 1 }},
 		{"start", func(f *attemptFrame) { f.Start = 1 }},
@@ -337,20 +333,16 @@ func TestTerminalConversionsRejectLifecycleAndCrossUnionFields(t *testing.T) {
 	}
 }
 
-func TestTerminalAcknowledgementsRejectEveryTerminalField(t *testing.T) {
-	record := &TerminalRecord{Terminal: Terminal{AttemptID: "attempt", Process: Identity{PID: 2, PGID: 2, Birth: Birth{Seconds: 1}}}, Identity: FileIdentity{Device: 1, Inode: 2}, Digest: "digest"}
+func TestCurrentExecAcknowledgementRejectsEveryForeignField(t *testing.T) {
 	current := attemptFrame{Version: commandVersion, Kind: "current-exec-check-ack"}
-	terminal := attemptFrame{Version: commandVersion, Kind: "terminal-ack", Terminal: &record.Terminal, FileIdentity: &record.Identity, Digest: record.Digest, StoreCommitted: true}
 	mutations := []struct {
 		name   string
 		mutate func(*attemptFrame)
 	}{
 		{"stage", func(f *attemptFrame) { f.Stage = StageProvider }},
 		{"identity", func(f *attemptFrame) { f.Identity = Identity{PID: 2, PGID: 2, Birth: Birth{Seconds: 1}} }},
-		{"terminal", func(f *attemptFrame) { f.Terminal = &Terminal{} }},
 		{"file_identity", func(f *attemptFrame) { f.FileIdentity = &FileIdentity{Device: 1, Inode: 1} }},
 		{"digest", func(f *attemptFrame) { f.Digest = "other" }},
-		{"store_committed", func(f *attemptFrame) { f.StoreCommitted = !f.StoreCommitted }},
 		{"correlation", func(f *attemptFrame) { f.Correlation = 1 }},
 		{"generation", func(f *attemptFrame) { f.Generation = 1 }},
 		{"sequence", func(f *attemptFrame) { f.Sequence = 1 }},
@@ -372,15 +364,8 @@ func TestTerminalAcknowledgementsRejectEveryTerminalField(t *testing.T) {
 				t.Fatalf("accepted contaminated current-exec ACK %+v", frame)
 			}
 		})
-		t.Run("terminal/"+test.name, func(t *testing.T) {
-			frame := terminal
-			test.mutate(&frame)
-			if validTerminalAck(frame, record) {
-				t.Fatalf("accepted contaminated terminal ACK %+v", frame)
-			}
-		})
 	}
-	if !validCurrentExecCheckAck(current) || !validTerminalAck(terminal, record) {
+	if !validCurrentExecCheckAck(current) {
 		t.Fatal("valid ACK baseline rejected")
 	}
 }

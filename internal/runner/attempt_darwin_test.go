@@ -321,7 +321,7 @@ func newAttemptFixture(t *testing.T, mode string, target string) *attemptFixture
 	if err != nil {
 		t.Fatal(err)
 	}
-	attemptSpec := AttemptSpec{AttemptID: "attempt-1", Wrapper: wrapper, MarkerName: InnerActivationMarkerName, TerminalName: TerminalSpoolName}
+	attemptSpec := AttemptSpec{AttemptID: "attempt-1", Wrapper: wrapper, MarkerName: InnerActivationMarkerName, ResultName: AttemptResultSpoolName}
 	diagnostic := outputFile(t, filepath.Join(root, "runner.output"))
 	outerSpec, err := PrepareExecSpec(ExecSpec{Target: executable, Args: []string{"--attempt-runner"}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: filepath.Join(root, "work"), Stdout: diagnostic, Stderr: diagnostic, Control: childCap})
 	if err != nil {
@@ -409,34 +409,44 @@ func (f *attemptFixture) finishAndAck(expectOuterSuccess ...bool) *TerminalRecor
 			break
 		}
 	}
-	if err != nil || event.Kind != AttemptTerminal || event.Terminal == nil {
-		f.t.Fatalf("terminal event=%+v err=%v output=%q", event, err, f.output())
+	if err != nil || event.Kind != AttemptResultReady || event.Result == nil {
+		f.t.Fatalf("result event=%+v err=%v output=%q", event, err, f.output())
 	}
-	record := event.Terminal
-	loaded, err := LoadTerminal(f.dir, "terminal.json")
-	if err != nil || loaded.Digest != record.Digest || loaded.Identity != record.Identity {
-		f.t.Fatalf("durable terminal loaded=%+v event=%+v err=%v", loaded, record, err)
+	record := loadAttemptResultForTest(f.t, f.dir, f.spec.AttemptID, event.Result)
+	if record.Digest != event.Result.Digest || record.Identity != event.Result.Identity {
+		f.t.Fatalf("durable result=%+v event=%+v", record, event.Result)
 	}
 	if got := ObserveProcess(f.inner); got.Presence != Absent {
-		f.t.Fatalf("terminal published before sole Wait: %+v", got)
-	}
-	if err := f.controller.AcknowledgeTerminal(record, false); !errors.Is(err, ErrState) {
-		f.t.Fatalf("terminal acknowledged before Store commit: %v", err)
-	}
-	if retained, err := LoadTerminal(f.dir, "terminal.json"); err != nil || retained.Digest != record.Digest {
-		f.t.Fatalf("uncommitted ack removed spool: record=%+v err=%v", retained, err)
-	}
-	if err := f.controller.AcknowledgeTerminal(record, true); err != nil {
-		f.t.Fatal(err)
+		f.t.Fatalf("result published before sole Wait: %+v", got)
 	}
 	exit, err := f.outer.FinishAfterExit(6 * time.Second)
 	if err != nil || wantOuterSuccess && exit.Code != 0 {
 		f.t.Fatalf("outer exit=%+v err=%v output=%q", exit, err, f.output())
 	}
-	if _, err := os.Stat(filepath.Join(f.root, "terminal.json")); !errors.Is(err, os.ErrNotExist) {
-		f.t.Fatalf("terminal remains after exact ack: %v", err)
+	if _, err := os.Stat(filepath.Join(f.root, AttemptResultSpoolName)); err != nil {
+		f.t.Fatalf("runner removed result without Store authority: %v", err)
 	}
 	return record
+}
+
+func loadAttemptResultForTest(t *testing.T, dir *os.File, attemptID string, notice *AttemptResultNotice) *TerminalRecord {
+	t.Helper()
+	record, err := AuthenticateAttemptResult(dir, attemptID, notice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := record.Result()
+	process, ok := result.Process()
+	if !ok {
+		return &TerminalRecord{Terminal: Terminal{AttemptID: result.AttemptID()}, Identity: record.Notice().Identity, Digest: record.Notice().Digest}
+	}
+	exit := Exit{Code: -1}
+	if code, ok := result.Code(); ok {
+		exit.Code = code
+	} else if signal, ok := result.Signal(); ok {
+		exit.Signal = signal
+	}
+	return &TerminalRecord{Terminal: Terminal{AttemptID: result.AttemptID(), Process: process, Exit: exit}, Identity: record.Notice().Identity, Digest: record.Notice().Digest}
 }
 
 func (f *attemptFixture) output() string {
@@ -607,7 +617,7 @@ func TestAttemptRunnerPTYTerminalOwnerCommandsAndReplay(t *testing.T) {
 		if err != nil {
 			t.Fatalf("terminal stream event=%+v err=%v output=%t diagnostic=%q", event, err, outputSeen, f.output())
 		}
-		if event.Kind == AttemptTerminal {
+		if event.Kind == AttemptResultReady {
 			break
 		}
 		if event.Kind != AttemptTerminalFrame || event.Frame == nil {
@@ -629,11 +639,9 @@ func TestAttemptRunnerPTYTerminalOwnerCommandsAndReplay(t *testing.T) {
 			eofSeen = true
 		}
 	}
-	if !outputSeen || !eofSeen || event.Terminal == nil || event.Terminal.Terminal.Process != inner {
+	record := loadAttemptResultForTest(t, f.dir, f.spec.AttemptID, event.Result)
+	if !outputSeen || !eofSeen || record.Terminal.Process != inner {
 		t.Fatalf("terminal evidence output=%t eof=%t event=%+v", outputSeen, eofSeen, event)
-	}
-	if err := f.controller.AcknowledgeTerminal(event.Terminal, true); err != nil {
-		t.Fatal(err)
 	}
 	if _, err := f.outer.FinishAfterExit(6 * time.Second); err != nil {
 		t.Fatal(err)
@@ -717,7 +725,7 @@ func TestAttemptRunnerPTYEOFFollowsQueuedTailOutput(t *testing.T) {
 		if err != nil {
 			t.Fatalf("tail stream event=%+v err=%v output=%t eof=%t diagnostic=%q", event, err, outputSeen, eofSeen, f.output())
 		}
-		if event.Kind == AttemptTerminal {
+		if event.Kind == AttemptResultReady {
 			break
 		}
 		if event.Kind != AttemptTerminalFrame || event.Frame == nil {
@@ -733,11 +741,9 @@ func TestAttemptRunnerPTYEOFFollowsQueuedTailOutput(t *testing.T) {
 			eofSeen = true
 		}
 	}
-	if !outputSeen || !eofSeen || event.Terminal == nil || event.Terminal.Terminal.Process != inner {
-		t.Fatalf("tail evidence output=%t eof=%t terminal=%+v", outputSeen, eofSeen, event.Terminal)
-	}
-	if err := f.controller.AcknowledgeTerminal(event.Terminal, true); err != nil {
-		t.Fatal(err)
+	record := loadAttemptResultForTest(t, f.dir, f.spec.AttemptID, event.Result)
+	if !outputSeen || !eofSeen || record.Terminal.Process != inner {
+		t.Fatalf("tail evidence output=%t eof=%t result=%+v", outputSeen, eofSeen, record)
 	}
 	if _, err := f.outer.FinishAfterExit(6 * time.Second); err != nil {
 		t.Fatal(err)
@@ -782,11 +788,8 @@ func TestRuntimeLifetimeRemainsHeldAcrossOuterAndInnerOwnership(t *testing.T) {
 			break
 		}
 	}
-	if err != nil || event.Kind != AttemptTerminal || event.Terminal == nil {
+	if err != nil || event.Kind != AttemptResultReady || event.Result == nil {
 		t.Fatalf("terminal=%+v err=%v output=%q", event, err, f.output())
-	}
-	if err := f.controller.AcknowledgeTerminal(event.Terminal, true); err != nil {
-		t.Fatal(err)
 	}
 	if exit, err := f.outer.FinishAfterExit(6 * time.Second); err != nil || exit.Code != 0 {
 		t.Fatalf("outer exit=%+v err=%v", exit, err)
@@ -823,11 +826,11 @@ func TestProviderRetainsLeastPrivilegeLifetimeAfterOuterSIGKILL(t *testing.T) {
 				if event.Frame != nil {
 					detail += fmt.Sprintf(" frame=%+v", *event.Frame)
 				}
-				if event.Terminal != nil {
-					detail += fmt.Sprintf(" terminal=%+v", event.Terminal.Terminal)
+				if event.Result != nil {
+					detail += fmt.Sprintf(" result=%+v", event.Result)
 				}
 				observed = append(observed, detail)
-				if eventErr != nil || event.Kind == AttemptTerminal {
+				if eventErr != nil || event.Kind == AttemptResultReady {
 					break
 				}
 			}
@@ -903,9 +906,15 @@ func TestAttemptRunnerDaemonEOFCuts(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(f.root, "selection")); !errors.Is(err, os.ErrNotExist) {
 			t.Fatal("wrapper ran after daemon EOF before selection release")
 		}
-		record, err := LoadTerminal(f.dir, "terminal.json")
-		if err != nil || record.Terminal.Process != inner || !record.Terminal.Exit.Aborted {
-			t.Fatalf("terminal=%+v err=%v", record, err)
+		authenticated, authErr := AuthenticateAttemptResult(f.dir, f.spec.AttemptID, nil)
+		if authErr != nil {
+			t.Fatalf("authenticate result: %v output=%q", authErr, f.output())
+		}
+		result := authenticated.Result()
+		process, _ := result.Process()
+		record := &TerminalRecord{Terminal: Terminal{Process: process}}
+		if record.Terminal.Process != inner {
+			t.Fatalf("result=%+v", record)
 		}
 	})
 
@@ -923,9 +932,15 @@ func TestAttemptRunnerDaemonEOFCuts(t *testing.T) {
 		if err != nil || exit.Code == 0 && exit.Signal == 0 {
 			t.Fatalf("outer exit=%+v err=%v output=%q", exit, err, f.output())
 		}
-		record, err := LoadTerminal(f.dir, "terminal.json")
-		if err != nil || record.Terminal.Process != inner || !record.Terminal.Exit.Aborted {
-			t.Fatalf("replay terminal=%+v err=%v", record, err)
+		authenticated, authErr := AuthenticateAttemptResult(f.dir, f.spec.AttemptID, nil)
+		if authErr != nil {
+			t.Fatalf("authenticate result: %v output=%q", authErr, f.output())
+		}
+		result := authenticated.Result()
+		process, _ := result.Process()
+		record := &TerminalRecord{Terminal: Terminal{Process: process}}
+		if record.Terminal.Process != inner {
+			t.Fatalf("replay result=%+v", record)
 		}
 		if _, err := os.Stat(filepath.Join(f.root, "provider.pid")); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("provider ran after daemon EOF before input handoff: %v", err)
@@ -947,9 +962,9 @@ func TestAttemptRunnerDaemonEOFCuts(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(f.root, "provider.effect")); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("provider ran after daemon EOF before provider release: %v", err)
 		}
-		record, err := LoadTerminal(f.dir, "terminal.json")
-		if err != nil || record.Terminal.Process != inner {
-			t.Fatalf("terminal=%+v err=%v", record, err)
+		record := loadAttemptResultForTest(t, f.dir, f.spec.AttemptID, nil)
+		if record.Terminal.Process != inner {
+			t.Fatalf("result=%+v", record)
 		}
 	})
 }
@@ -964,9 +979,9 @@ func TestAttemptRunnerReapsInertInnerExitBeforeSelection(t *testing.T) {
 	if err != nil || exit.Code == 0 {
 		t.Fatalf("outer exit=%+v err=%v output=%q", exit, err, f.output())
 	}
-	record, err := LoadTerminal(f.dir, "terminal.json")
-	if err != nil || record.Terminal.Process != inner || !record.Terminal.Exit.Aborted || record.Terminal.Exit.Signal != int(unix.SIGKILL) || record.Terminal.Message == "" {
-		t.Fatalf("inert-exit terminal=%+v err=%v", record, err)
+	record := loadAttemptResultForTest(t, f.dir, f.spec.AttemptID, nil)
+	if record.Terminal.Process != inner || record.Terminal.Exit.Signal != int(unix.SIGKILL) {
+		t.Fatalf("inert-exit result=%+v", record)
 	}
 	for _, witness := range []string{"selection", "preparation", "population", "provider.effect"} {
 		if _, err := os.Stat(filepath.Join(f.root, witness)); !errors.Is(err, os.ErrNotExist) {
@@ -1010,15 +1025,15 @@ func TestAttemptCleanupReapsObservedInertExit(t *testing.T) {
 	if err != nil || source != sourceChild || child.state != stateExited || !child.exitObserved {
 		t.Fatalf("observed inert exit source=%d err=%v state=%d observed=%t", source, err, child.state, child.exitObserved)
 	}
-	cfg := attemptConfig{AttemptID: "attempt-inert-exit", TerminalName: "terminal.json"}
+	cfg := attemptConfig{AttemptID: "attempt-inert-exit", ResultName: AttemptResultSpoolName}
 	done := make(chan error, 1)
 	go func() {
 		done <- finishAttemptWithExit(child, f.dir, cfg, reads, nil, false, nil)
 	}()
 	select {
 	case finishErr := <-done:
-		if finishErr != nil {
-			t.Fatal(finishErr)
+		if !errors.Is(finishErr, ErrIdentity) {
+			t.Fatalf("invalid outer marker census = %v", finishErr)
 		}
 	case <-time.After(2 * time.Second):
 		reads.processOnly()
@@ -1032,9 +1047,8 @@ func TestAttemptCleanupReapsObservedInertExit(t *testing.T) {
 	if child.state != stateWaited || reads.daemonRegistered || reads.workerRegistered {
 		t.Fatalf("inert exit did not converge: state=%d reads=%+v", child.state, reads)
 	}
-	record, err := LoadTerminal(f.dir, cfg.TerminalName)
-	if err != nil || record.Terminal.Process != identity || !record.Terminal.Exit.Aborted || record.Terminal.Exit.Signal != int(unix.SIGKILL) {
-		t.Fatalf("observed inert terminal=%+v err=%v", record, err)
+	if _, err := os.Stat(filepath.Join(f.root, AttemptResultSpoolName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid marker census published result: %v", err)
 	}
 	if _, err := os.Stat(effect); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("observed inert exit executed target: %v", err)
@@ -1081,7 +1095,7 @@ func TestAttemptCleanupRetiresProtocolReadinessBeforeProcessWait(t *testing.T) {
 			if cause == nil || source != sourceDaemon || child.state != stateBlocked || child.exitObserved {
 				t.Fatalf("delayed process setup source=%d cause=%v state=%d observed=%t", source, cause, child.state, child.exitObserved)
 			}
-			cfg := attemptConfig{AttemptID: "attempt-" + mode, TerminalName: "terminal.json"}
+			cfg := attemptConfig{AttemptID: "attempt-" + mode, ResultName: AttemptResultSpoolName}
 			done := make(chan error, 1)
 			started := time.Now()
 			go func() {
@@ -1106,9 +1120,8 @@ func TestAttemptCleanupRetiresProtocolReadinessBeforeProcessWait(t *testing.T) {
 			if time.Since(started) >= 2*time.Second || reads.daemonRegistered || reads.workerRegistered || child.state != stateWaited {
 				t.Fatalf("process-only transition did not converge: elapsed=%v reads=%+v state=%d", time.Since(started), reads, child.state)
 			}
-			record, err := LoadTerminal(f.dir, cfg.TerminalName)
-			if err != nil || record.Terminal.Process != child.Identity() || !record.Terminal.Exit.Aborted {
-				t.Fatalf("protocol-failure terminal=%+v err=%v", record, err)
+			if _, err := os.Stat(filepath.Join(f.root, AttemptResultSpoolName)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("invalid marker census published result: %v", err)
 			}
 			if _, err := os.Stat(effect); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("inert protocol failure executed target: %v", err)
@@ -1984,12 +1997,6 @@ func TestAttemptProtocolSurfaceIsClosed(t *testing.T) {
 	if err := controller.Release(StageSelection); !errors.Is(err, ErrState) {
 		t.Fatalf("release before configuration=%v", err)
 	}
-	if err := controller.AcknowledgeTerminal(nil, true); !errors.Is(err, ErrState) {
-		t.Fatalf("ack without terminal=%v", err)
-	}
-	if err := controller.AcknowledgeTerminal(&TerminalRecord{}, false); !errors.Is(err, ErrState) {
-		t.Fatalf("ack before Store=%v", err)
-	}
 	source, err := os.ReadFile("process_darwin.go")
 	if err != nil {
 		t.Fatal(err)
@@ -2006,11 +2013,13 @@ func TestAttemptProtocolSurfaceIsClosed(t *testing.T) {
 			t.Fatalf("attempt runner bypasses OwnedChild with %q", forbidden)
 		}
 	}
-	if got := strings.Count(string(attemptSource), "publishAttemptTerminal("); got != 2 {
-		t.Fatalf("terminal publication must have one guarded call site, got %d occurrences", got)
+	if strings.Contains(string(attemptSource), "terminal-ack") || strings.Contains(string(attemptSource), "AcknowledgeTerminal") {
+		t.Fatal("attempt runner retained terminal acknowledgement choreography")
 	}
-	if !strings.Contains(string(attemptSource), "if _, err := child.waitedExit(); err != nil") {
-		t.Fatal("terminal publication lost waited-child proof")
+	for _, ordered := range []string{"waitForAttemptChild(child)", "drainAndCloseAttemptPTY(child", "publishAttemptResult(dir, result)"} {
+		if !strings.Contains(string(attemptSource), ordered) {
+			t.Fatalf("attempt result path missing %q", ordered)
+		}
 	}
 	finishStart := strings.Index(string(attemptSource), "func finishAttemptWithExit(")
 	waitStart := strings.Index(string(attemptSource), "func waitForAttemptChild(")
@@ -2036,28 +2045,13 @@ func TestAttemptProtocolSurfaceIsClosed(t *testing.T) {
 	}
 }
 
-func TestPublishAttemptTerminalRequiresWaitedChild(t *testing.T) {
-	f := newFixture(t)
-	child := f.start("/bin/sh", []string{"-c", "exit 0"}, nil, nil)
-	cfg := attemptConfig{AttemptID: "attempt-guard", TerminalName: "terminal.json"}
-	if err := publishAttemptTerminal(child, f.dir, cfg, Exit{Code: 0}, nil, false, nil); !errors.Is(err, ErrState) {
-		t.Fatalf("unwaited terminal publication=%v", err)
-	}
-	if _, err := os.Stat(filepath.Join(f.root, cfg.TerminalName)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("unwaited terminal left an effect: %v", err)
-	}
-	if err := child.Abort(); err != nil && child.state != stateWaited {
-		t.Fatalf("abort guarded child: %v", err)
-	}
-}
-
 func TestAttemptCleanupUncertaintyRetainsOwnerBeforeTerminal(t *testing.T) {
 	f := newFixture(t)
 	child := f.start("/bin/sh", []string{"-c", "exit 0"}, nil, nil)
 	if _, err := child.Activate(); err != nil {
 		t.Fatal(err)
 	}
-	cfg := attemptConfig{AttemptID: "attempt-retry", TerminalName: "terminal.json"}
+	cfg := attemptConfig{AttemptID: "attempt-retry", ResultName: "terminal.json"}
 	identity := child.Identity()
 	entered := make(chan int, 4)
 	release := make(chan struct{})
@@ -2089,7 +2083,7 @@ func TestAttemptCleanupUncertaintyRetainsOwnerBeforeTerminal(t *testing.T) {
 	case <-time.After(4 * time.Second):
 		t.Fatal("cleanup did not reach injected uncertainty")
 	}
-	if _, err := os.Stat(filepath.Join(f.root, cfg.TerminalName)); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(f.root, cfg.ResultName)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("uncertain cleanup published terminal: %v", err)
 	}
 	if got := ObserveProcess(identity); got.Presence != Present {
@@ -2116,7 +2110,7 @@ func TestAttemptCleanupUncertaintyRetainsOwnerBeforeTerminal(t *testing.T) {
 	if child.state != stateWaited {
 		t.Fatalf("terminal returned without sole Wait: state=%d", child.state)
 	}
-	if _, err := LoadTerminal(f.dir, cfg.TerminalName); !errors.Is(err, os.ErrNotExist) {
+	if _, err := LoadTerminal(f.dir, cfg.ResultName); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("uncertain cleanup published terminal: %v", err)
 	}
 	waitExactAbsence(t, identity)
@@ -2131,7 +2125,7 @@ func TestAttemptPermanentCleanupUncertaintyPublishesNothing(t *testing.T) {
 	if _, err := child.Activate(); err != nil {
 		t.Fatal(err)
 	}
-	cfg := attemptConfig{AttemptID: "attempt-unresolved", TerminalName: "terminal.json"}
+	cfg := attemptConfig{AttemptID: "attempt-unresolved", ResultName: "terminal.json"}
 	identity := child.Identity()
 	entered := make(chan struct{}, 16)
 	var restored atomic.Bool
@@ -2168,7 +2162,7 @@ func TestAttemptPermanentCleanupUncertaintyPublishesNothing(t *testing.T) {
 			t.Fatal("cleanup stopped retrying permanent uncertainty")
 		}
 	}
-	if _, err := os.Stat(filepath.Join(f.root, cfg.TerminalName)); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(f.root, cfg.ResultName)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("permanent uncertainty published terminal: %v", err)
 	}
 	if got := ObserveProcess(identity); got.Presence != Present {
@@ -2192,34 +2186,27 @@ func TestAttemptPermanentCleanupUncertaintyPublishesNothing(t *testing.T) {
 	if child.state != stateWaited {
 		t.Fatalf("restored cleanup returned before Wait: state=%d", child.state)
 	}
-	if _, err := LoadTerminal(f.dir, cfg.TerminalName); !errors.Is(err, os.ErrNotExist) {
+	if _, err := LoadTerminal(f.dir, cfg.ResultName); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("restored cleanup published terminal after uncertainty: %v", err)
 	}
 	waitExactAbsence(t, identity)
 }
 
-func TestAttemptControllerRejectsForeignTerminalAuthority(t *testing.T) {
-	want := Identity{PID: 22, PGID: 22, Birth: Birth{Seconds: 3, Microseconds: 4}}
-	for _, terminal := range []Terminal{
-		{AttemptID: "other", Process: want, Exit: Exit{Code: 0}},
-		{AttemptID: "attempt-1", Process: Identity{PID: 23, PGID: 23, Birth: Birth{Seconds: 3, Microseconds: 4}}, Exit: Exit{Code: 0}},
-	} {
-		controller, peer, err := NewAttemptController()
-		if err != nil {
-			t.Fatal(err)
-		}
-		controller.state = controllerProviderReleased
-		controller.attemptID = "attempt-1"
-		controller.inner = want
-		identity := FileIdentity{Device: 1, Inode: 2}
-		if err := writeControlFrame(peer, attemptFrame{Version: 1, Kind: "terminal", Terminal: &terminal, FileIdentity: &identity, Digest: strings.Repeat("0", 64)}, maxConfigBytes); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := controller.Next(time.Second); !errors.Is(err, ErrIdentity) {
-			t.Fatalf("foreign terminal accepted: terminal=%+v err=%v", terminal, err)
-		}
-		_ = peer.Close()
-		_ = controller.Close()
+func TestAttemptControllerRejectsResultNoticeWithContentAuthority(t *testing.T) {
+	controller, peer, err := NewAttemptController()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controller.Close()
+	defer peer.Close()
+	controller.state = controllerProviderReleased
+	identity := FileIdentity{Device: 1, Inode: 2}
+	process := Identity{PID: 22, PGID: 22, Birth: Birth{Seconds: 3, Microseconds: 4}}
+	if err := writeControlFrame(peer, attemptFrame{Version: 1, Kind: string(AttemptResultReady), Identity: process, FileIdentity: &identity, Digest: strings.Repeat("0", 64)}, maxConfigBytes); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Next(time.Second); !errors.Is(err, ErrState) {
+		t.Fatalf("result notice carried process authority: %v", err)
 	}
 }
 

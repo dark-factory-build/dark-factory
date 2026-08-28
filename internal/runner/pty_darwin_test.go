@@ -306,7 +306,14 @@ func TestPTYSlaveCloseFailureCleansExactStartedChild(t *testing.T) {
 		testPTYSlaveClose = oldSlaveClose
 	})
 	testPTYAfterStart = func(child *OwnedChild) { started = child }
-	testPTYSlaveClose = func(*os.File) error { return errors.New("injected slave close failure") }
+	closeCalls := 0
+	testPTYSlaveClose = func(file *os.File) error {
+		closeCalls++
+		if closeCalls == 1 {
+			return errors.New("injected slave close failure")
+		}
+		return file.Close()
+	}
 	child, err := StartBlockedPTY(f.lease, gate, spec, false)
 	if child != nil || err == nil {
 		t.Fatalf("slave-close failure returned child=%v err=%v", child, err)
@@ -320,5 +327,130 @@ func TestPTYSlaveCloseFailureCleansExactStartedChild(t *testing.T) {
 	}
 	if started.ptyMaster != nil {
 		t.Fatal("started child retained PTY master after failed slave close")
+	}
+}
+
+func TestStartedChildBindUncertaintyRetainsExactOwner(t *testing.T) {
+	f := newFixture(t)
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := PrepareExecSpec(ExecSpec{Target: executable, Args: []string{"--pty-provider", f.root}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C", "TERM=xterm"}, Cwd: f.cwd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := PrepareBlockedPTY(f.lease, executable, spec, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := prepared.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := errors.New("injected hard-cleanup uncertainty")
+	oldSlaveClose := testPTYSlaveClose
+	t.Cleanup(func() { testPTYSlaveClose = oldSlaveClose })
+	testPTYSlaveClose = func(*os.File) error { return errors.New("injected bind failure") }
+	started.child.testHardCleanup = func() error { return want }
+	if child, err := started.Bind(); child != nil || !errors.Is(err, want) {
+		t.Fatalf("Bind child=%v err=%v", child, err)
+	}
+	if started.child == nil {
+		t.Fatal("Bind uncertainty discarded the exact started owner")
+	}
+	identity := started.child.Identity()
+	if got := ObserveProcess(identity); got.Presence != Present {
+		t.Fatalf("retained started owner=%+v", got)
+	}
+	testPTYSlaveClose = oldSlaveClose
+	started.child.testHardCleanup = nil
+	if err := started.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if started.child != nil {
+		t.Fatal("converged started owner remained retained")
+	}
+	waitExactAbsence(t, identity)
+}
+
+func TestLaunchAttemptDistinguishesStartFailureAndPreRegistrationConvergence(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		mutateStart  bool
+		wantStarted  bool
+		wantInjected bool
+	}{
+		{name: "exact Start error", mutateStart: true},
+		{name: "successful Start then Bind uncertainty", wantStarted: true, wantInjected: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newFixture(t)
+			if err := os.WriteFile(filepath.Join(f.root, OuterActivationMarkerName), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			executable, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			spec, err := PrepareExecSpec(ExecSpec{Target: executable, Args: []string{"--pty-provider", f.root}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C", "TERM=xterm"}, Cwd: f.cwd})
+			if err != nil {
+				t.Fatal(err)
+			}
+			prepared, err := PrepareBlockedPTY(f.lease, executable, spec, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			started := false
+			injected := errors.New("injected pre-registration cleanup uncertainty")
+			oldAfterStart, oldSlaveClose := testPTYAfterStart, testPTYSlaveClose
+			t.Cleanup(func() {
+				testPTYAfterStart = oldAfterStart
+				testPTYSlaveClose = oldSlaveClose
+			})
+			if test.mutateStart {
+				prepared.cmd.Path = filepath.Join(f.root, "missing-gate")
+			} else {
+				hardCleanupCalls := 0
+				testPTYAfterStart = func(child *OwnedChild) {
+					started = true
+					child.testHardCleanup = func() error {
+						hardCleanupCalls++
+						if hardCleanupCalls == 1 {
+							return injected
+						}
+						return nil
+					}
+				}
+				closeCalls := 0
+				testPTYSlaveClose = func(file *os.File) error {
+					closeCalls++
+					if closeCalls == 1 {
+						return errors.New("injected Bind failure")
+					}
+					return file.Close()
+				}
+			}
+			child, record, launchErr := prepared.LaunchAttempt(f.dir, "pre-registration")
+			if child != nil || record == nil || launchErr == nil {
+				t.Fatalf("LaunchAttempt child=%v record=%+v err=%v", child, record, launchErr)
+			}
+			if started != test.wantStarted {
+				t.Fatalf("Start history=%t want=%t", started, test.wantStarted)
+			}
+			if errors.Is(launchErr, injected) != test.wantInjected {
+				t.Fatalf("cleanup mutation err=%v", launchErr)
+			}
+			result := record.Result()
+			if result.Kind() != AttemptResultInnerUnregisteredConverged {
+				t.Fatalf("result kind=%s", result.Kind())
+			}
+			if _, ok := result.Process(); ok {
+				t.Fatal("unregistered result carried process authority")
+			}
+			if _, err := AuthenticateAttemptResult(f.dir, "pre-registration", ptrNotice(record.Notice())); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }

@@ -126,7 +126,7 @@ func TestAttemptConfigRejectsInvalidEnvironment(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			commitment := prepared.commit
 			commitment.Env = test.env
-			cfg := attemptConfig{Version: 1, AttemptID: "attempt", MarkerName: "marker", TerminalName: "terminal", Wrapper: commitment}
+			cfg := attemptConfig{Version: 1, AttemptID: "attempt", MarkerName: "marker", ResultName: "terminal", Wrapper: commitment}
 			if err := validateAttemptConfig(cfg); err != ErrIdentity {
 				t.Fatalf("invalid recovered environment = %v, want ErrIdentity", err)
 			}

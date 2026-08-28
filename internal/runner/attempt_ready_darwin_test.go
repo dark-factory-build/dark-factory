@@ -27,7 +27,7 @@ func TestAttemptControllerNextReadyDoesNotConsumePartialFrame(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := controller.Configure(AttemptSpec{AttemptID: "readiness", Wrapper: wrapper, MarkerName: InnerActivationMarkerName, TerminalName: TerminalSpoolName}); err != nil {
+	if err := controller.Configure(AttemptSpec{AttemptID: "readiness", Wrapper: wrapper, MarkerName: InnerActivationMarkerName, ResultName: AttemptResultSpoolName}); err != nil {
 		t.Fatal(err)
 	}
 	if ready, err := controller.NextReady(10 * time.Millisecond); err != nil || ready {

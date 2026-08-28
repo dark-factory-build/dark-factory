@@ -447,7 +447,7 @@ func (o *terminalOwner) drainPTY() error {
 			}
 			continue
 		}
-		if errors.Is(err, unix.EIO) || errors.Is(err, io.EOF) {
+		if n == 0 && err == nil || errors.Is(err, unix.EIO) || errors.Is(err, io.EOF) {
 			var retireErr error
 			if o.reads != nil && o.ptyOpen {
 				retireErr = retireReadableFilter(o.reads.removePTY)
@@ -606,6 +606,9 @@ func (o *terminalOwner) emitPTYEOF() error {
 	if o == nil || !o.ptyDrained {
 		return ErrState
 	}
+	if o.child != nil {
+		o.child.ptyDrained = true
+	}
 	if o.ptyEOF {
 		return nil
 	}
@@ -641,7 +644,7 @@ func (o *terminalOwner) daemonLost() error {
 }
 
 func validBareAttemptFrame(frame attemptFrame) bool {
-	return frame.Version == 1 && frame.Stage == "" && frame.Identity == (Identity{}) && len(frame.Payload) == 0 && frame.Terminal == nil && frame.FileIdentity == nil && frame.Digest == "" && !frame.StoreCommitted && noTerminalFields(frame)
+	return frame.Version == 1 && frame.Stage == "" && frame.Identity == (Identity{}) && len(frame.Payload) == 0 && frame.FileIdentity == nil && frame.Digest == "" && noTerminalFields(frame)
 }
 
 func validCurrentExecCheck(frame attemptFrame) bool {
