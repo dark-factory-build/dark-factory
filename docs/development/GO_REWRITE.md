@@ -90,12 +90,19 @@ result is repeated here.
   and `git diff --check`. This is pre-edit evidence and must be rerun after the
   plan commit before it is called current-head proof.
 - The exact reviewed fresh-home slice is integrated through `6c22139`. It
-  atomically publishes the six-entry Go home, retains descriptor/ancestry
+  atomically publishes the Go home, retains descriptor/ancestry
   authority across every construction boundary, refuses adoption or repair,
   and includes real subprocess SIGKILL cuts. Before this edit, focused
   `go test ./internal/install ./cmd/factoryctl -count=1` and
   `go test -race ./internal/install ./cmd/factoryctl -count=1` passed after
   integration; the result is explicitly pre-edit evidence.
+- The independently reviewed operational-home authority is integrated through
+  `13167f98`. The fresh format now has seven fixed names: `home.lock` and
+  `home.lock.anchor` are two names for one exact two-link inode. A live handle
+  holds the exclusive lock through its complete close boundary, retains every
+  fixed member and ancestry identity, exposes descriptor capabilities rather
+  than path strings, accepts only paired exact SQLite WAL/SHM sidecars and
+  populated `runtimes/`/`changes/`, and never repairs or traverses descendants.
 - Exact reviewed SQLite image construction/inspection is integrated through
   `2bf7004`; recovered runtime/spool evidence is integrated through `c642fb9`;
   the fixed local public artifact provenance gate is integrated through
@@ -2498,10 +2505,17 @@ directory with this exact bounded census:
 format             regular 0600, "dark-factory-go-home-v1\n"
 factory.sqlite3    regular 0600, one link, complete rollback-header image
 operator.token     regular 0600, one link, exactly 32 nonzero random bytes
-home.lock          regular 0600, one link, empty and reserved for daemon use
+home.lock          regular 0600, two links, empty and reserved for daemon use
+home.lock.anchor   second name for the same exact lock inode
 runtimes/          directory 0700, empty
 changes/           directory 0700, empty
 ```
+
+Both lock names have link count two and resolve to the same empty owner-only
+regular inode. The anchor prevents replacement of only the public lock name
+from admitting a second cooperative daemon. Deliberate same-EUID replacement
+of both names is outside the local trust boundary; no pathname lock can defend
+against an owner intentionally replacing the entire namespace.
 
 The database uses SQLite `application_id=0x4446474f` (`DFGO`) and
 `user_version=1`. Initialization never creates or completes a prefix inside the
@@ -2528,19 +2542,26 @@ identities, enumerates an exact bounded census, and passes the already-open
 sidecar-free database descriptor to `kernel.InspectImmutable`. It performs no
 write-capable SQLite open, flock, creation, chmod, rename, unlink, repair, or
 cleanup. SQLite journals/WAL/SHM, a socket, populated runtime/change
-directories, a nonempty or malformed reserved lock, arbitrary entries,
+directories, a nonempty, malformed or nonidentical reserved lock pair,
+arbitrary entries,
 symlinks, hard links, wrong owners/modes, and schema or byte disagreement are
-refused without mutation. `home.lock` is an exact reserved member, not
-bootstrap authority. The initial `factoryctl doctor --home ABSOLUTE` is this
-strict stopped/fresh-home inspector; later live-service diagnostics must use
-the owner API rather than weakening this filesystem contract.
+refused without mutation. The lock pair is exact reserved lifetime authority,
+not permission to adopt or repair a home. The initial
+`factoryctl doctor --home ABSOLUTE` is this strict stopped/fresh-home
+inspector; later live-service diagnostics must use the owner API rather than
+weakening this filesystem contract.
 
-After the daemon starts, this same private root additionally owns its socket,
-daemon-owned Changes, per-run runtime roots/token files/runner sockets and
-terminal spool, and verification scratch. Those operational objects are not
-accepted by the strict fresh-home inspector. Exact names are frozen once by
-kernel/install tests and shared by daemon/install; no binary reads an ambient
-default during tests.
+After the daemon starts, the same private root owns daemon Changes, per-run
+runtime roots/token files/runner sockets and terminal spool, verification
+scratch, and paired SQLite WAL/SHM sidecars. `OpenOperationalHome` allows only
+those populated child directories and the two exact sidecar names while
+retaining the seven fixed root members; it does not traverse child contents.
+It returns descriptor-bound database/runtime/change capabilities and no token
+bytes or unchecked member paths. The private API socket remains a separately
+owned filesystem object whose exact placement and stale-socket recovery must
+be frozen by the production `factoryd` composition slice; it is not silently
+added to the home census. Exact names are shared by kernel/install tests and no
+binary reads an ambient default during tests.
 
 The fresh schema contains only current product authority:
 
