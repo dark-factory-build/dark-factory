@@ -599,18 +599,18 @@ while /bin/kill -0 "$signal_fixture_pid" 2>/dev/null; do
     /bin/sleep 0.01
 done
 if wait "$signal_fixture_pid"; then signal_status=0; else signal_status=$?; fi
-[ "$signal_status" -eq 143 ] || fail "TERM fixture returned $signal_status"
-[ -f "$signal_joined_file" ] || fail "TERM fixture did not join its supervisor"
-[ -f "$signal_cleaned_file" ] || fail "TERM fixture did not finish cleanup"
 signal_survivor=0
 if /bin/kill -0 "$signal_child_pid" 2>/dev/null; then
-    /bin/kill -KILL "$signal_child_pid" 2>/dev/null || true
     signal_survivor=1
+    /bin/kill -KILL "$signal_child_pid" 2>/dev/null || true
 fi
 if /bin/kill -0 -"$signal_child_pgid" 2>/dev/null; then
-    /bin/kill -KILL -"$signal_child_pgid" 2>/dev/null || true
     signal_survivor=1
+    /bin/kill -KILL -"$signal_child_pgid" 2>/dev/null || true
 fi
+[ "$signal_status" -eq 143 ] || fail "TERM fixture returned $signal_status (survivor=$signal_survivor)"
+[ -f "$signal_joined_file" ] || fail "TERM fixture did not join its supervisor (survivor=$signal_survivor)"
+[ -f "$signal_cleaned_file" ] || fail "TERM fixture did not finish cleanup (survivor=$signal_survivor)"
 [ "$signal_survivor" -eq 0 ] || fail "TERM fixture left an exact child or process-group survivor"
 [ ! -e "$(/bin/cat "$signal_root_file")" ] || fail "TERM fixture cleaned up before joining supervisor"
 
