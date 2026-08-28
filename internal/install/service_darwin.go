@@ -153,6 +153,11 @@ func inspectServiceAtHome(ctx context.Context, home, userHome string, launchctl 
 	if err != nil {
 		return ServiceStatus{State: ServiceAmbiguous}, err
 	}
+	// launchctl is an external observation boundary: the exact staging name
+	// must be censused again before its result can influence status.
+	if err := inspectServiceStageAbsence(home); err != nil {
+		return ServiceStatus{State: ServiceAmbiguous}, errors.Join(ErrServiceAmbiguous, err)
+	}
 	secondPlist, err := inspectServicePlist(userDirectory, home)
 	if err != nil || secondPlist != plist {
 		return ServiceStatus{State: ServiceAmbiguous}, errors.Join(ErrServiceAmbiguous, err)
@@ -161,9 +166,27 @@ func inspectServiceAtHome(ctx context.Context, home, userHome string, launchctl 
 		return ServiceStatus{State: ServiceAmbiguous}, errors.Join(ErrServiceAmbiguous, err)
 	}
 	if !plist.present && !observation.present {
+		// Keep this check adjacent to the only absent projection. A stage that
+		// appears during the second plist census must not be reported as absent.
+		if err := inspectServiceStageAbsence(home); err != nil {
+			return ServiceStatus{State: ServiceAmbiguous}, errors.Join(ErrServiceAmbiguous, err)
+		}
 		return ServiceStatus{State: ServiceAbsent}, nil
 	}
 	return ServiceStatus{State: ServiceAmbiguous, PID: observation.pid}, ErrServiceAmbiguous
+}
+
+func inspectServiceStageAbsence(path string) (resultErr error) {
+	parentPath, base, err := splitHome(path)
+	if err != nil {
+		return err
+	}
+	parent, err := openParent(parentPath)
+	if err != nil {
+		return err
+	}
+	defer func() { resultErr = errors.Join(resultErr, parent.close()) }()
+	return rejectIfPresent(parent.file, "."+base+stageSuffix, "staging path")
 }
 
 func accountHome() (string, error) {
@@ -394,27 +417,45 @@ func parseLaunchctlPrint(output []byte, service, plistPath, programPath string) 
 		return 0, fmt.Errorf("%w: malformed print output", ErrServiceLaunchctl)
 	}
 	lines := strings.Split(strings.TrimSuffix(string(output), "\n"), "\n")
-	if len(lines) < 3 || strings.TrimSpace(lines[0]) != service+" = {" || strings.TrimSpace(lines[len(lines)-1]) != "}" {
+	if len(lines) < 3 || len(lines) > 4096 || strings.TrimSpace(lines[0]) != service+" = {" || strings.TrimSpace(lines[len(lines)-1]) != "}" {
 		return 0, fmt.Errorf("%w: malformed service envelope", ErrServiceLaunchctl)
 	}
 	fields := make(map[string]string, 4)
+	nesting := []byte{'{'}
 	for _, line := range lines[1 : len(lines)-1] {
 		trimmed := strings.TrimSpace(line)
-		recognized := false
-		for _, key := range []string{"path", "state", "program", "pid"} {
-			prefix := key + " = "
-			if !strings.HasPrefix(trimmed, prefix) {
-				continue
-			}
-			recognized = true
-			if _, duplicate := fields[key]; duplicate {
-				return 0, fmt.Errorf("%w: duplicate %s", ErrServiceLaunchctl, key)
-			}
-			fields[key] = strings.TrimPrefix(trimmed, prefix)
+		if trimmed == "" {
+			return 0, fmt.Errorf("%w: blank service field", ErrServiceLaunchctl)
 		}
-		if !recognized {
-			return 0, fmt.Errorf("%w: unknown service field", ErrServiceLaunchctl)
+		if len(nesting) == 1 {
+			recognized := false
+			for _, key := range []string{"path", "state", "program", "pid"} {
+				prefix := key + " = "
+				if !strings.HasPrefix(trimmed, prefix) {
+					continue
+				}
+				recognized = true
+				if _, duplicate := fields[key]; duplicate {
+					return 0, fmt.Errorf("%w: duplicate %s", ErrServiceLaunchctl, key)
+				}
+				fields[key] = strings.TrimPrefix(trimmed, prefix)
+			}
+			if !recognized {
+				key, value, found := strings.Cut(trimmed, " = ")
+				if !found || !validLaunchctlFieldName(key) || value == "" {
+					return 0, fmt.Errorf("%w: unknown service field", ErrServiceLaunchctl)
+				}
+			}
 		}
+		if err := updateLaunchctlNesting(&nesting, trimmed); err != nil {
+			return 0, err
+		}
+		if len(nesting) > 32 {
+			return 0, fmt.Errorf("%w: service nesting exceeded bound", ErrServiceLaunchctl)
+		}
+	}
+	if len(nesting) != 1 {
+		return 0, fmt.Errorf("%w: unclosed service value", ErrServiceLaunchctl)
 	}
 	if fields["path"] != plistPath || fields["program"] != programPath {
 		return 0, fmt.Errorf("%w: foreign launchd ownership", ErrServiceLaunchctl)
@@ -433,6 +474,60 @@ func parseLaunchctlPrint(output []byte, service, plistPath, programPath string) 
 		return 0, nil
 	default:
 		return 0, fmt.Errorf("%w: unknown launchd state", ErrServiceLaunchctl)
+	}
+}
+
+func validLaunchctlFieldName(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range value {
+		if character != ' ' && character != '-' && character != '_' && (character < '0' || character > '9') && (character < 'A' || character > 'Z') && (character < 'a' || character > 'z') {
+			return false
+		}
+	}
+	return true
+}
+
+func updateLaunchctlNesting(nesting *[]byte, line string) error {
+	trimmed := strings.TrimSpace(line)
+	if len(trimmed) == 1 {
+		switch trimmed[0] {
+		case '(', '[', '{':
+			*nesting = append(*nesting, trimmed[0])
+			return nil
+		case ')', ']', '}':
+			return closeLaunchctlNesting(nesting, trimmed[0])
+		}
+	}
+	_, value, found := strings.Cut(trimmed, " = ")
+	if found {
+		switch strings.TrimSpace(value) {
+		case "(", "[", "{":
+			*nesting = append(*nesting, strings.TrimSpace(value)[0])
+		case ")", "]", "}":
+			return closeLaunchctlNesting(nesting, strings.TrimSpace(value)[0])
+		}
+	}
+	return nil
+}
+
+func closeLaunchctlNesting(nesting *[]byte, close byte) error {
+	if len(*nesting) <= 1 || (*nesting)[len(*nesting)-1] != matchingLaunchctlDelimiter(close) {
+		return fmt.Errorf("%w: mismatched service delimiter", ErrServiceLaunchctl)
+	}
+	*nesting = (*nesting)[:len(*nesting)-1]
+	return nil
+}
+
+func matchingLaunchctlDelimiter(close byte) byte {
+	switch close {
+	case ')':
+		return '('
+	case ']':
+		return '['
+	default:
+		return '{'
 	}
 }
 

@@ -227,6 +227,43 @@ func TestLaunchctlPrintRequiresExactOwnedFields(t *testing.T) {
 	if pid, err := parseLaunchctlPrint(valid("not running", ""), service, plist, program); err != nil || pid != 0 {
 		t.Fatalf("stopped parse = %d, %v", pid, err)
 	}
+	documented := []byte(service + " = {\n" +
+		"\tactive count = 1\n" +
+		"\tpath = " + plist + "\n" +
+		"\ttype = LaunchAgent\n" +
+		"\tstate = running\n" +
+		"\tprogram = " + program + "\n" +
+		"\targuments = (\n" +
+		"\t\t" + program + "\n" +
+		"\t\t--home\n" +
+		"\t\t/private/tmp/factory\n" +
+		"\t)\n" +
+		"\tworking directory = /private/tmp/factory\n" +
+		"\tstdout path = /dev/null\n" +
+		"\tstderr path = /dev/null\n" +
+		"\tproperties = {\n" +
+		"\t\tAbandonProcessGroup = true\n" +
+		"\t}\n" +
+		"\tpid = 731\n" +
+		"}\n")
+	if pid, err := parseLaunchctlPrint(documented, service, plist, program); err != nil || pid != 731 {
+		t.Fatalf("documented print = %d, %v", pid, err)
+	}
+	nestedForeign := bytes.Replace(documented, []byte("AbandonProcessGroup = true"), []byte("path = /private/foreign"), 1)
+	if pid, err := parseLaunchctlPrint(nestedForeign, service, plist, program); err != nil || pid != 731 {
+		t.Fatalf("nested foreign field = %d, %v", pid, err)
+	}
+	for name, mutation := range map[string][]byte{
+		"documented duplicate path":        bytes.Replace(documented, []byte("\tpid = 731\n"), []byte("\tpath = "+plist+"\n\tpid = 731\n"), 1),
+		"documented unclosed arguments":    bytes.Replace(documented, []byte("\t)\n"), []byte("\t\t--unclosed\n"), 1),
+		"documented mismatched properties": bytes.Replace(documented, []byte("\t}\n\tpid = 731"), []byte("\t)\n\tpid = 731"), 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := parseLaunchctlPrint(mutation, service, plist, program); !errors.Is(err, ErrServiceLaunchctl) {
+				t.Fatalf("documented mutation accepted: %v", err)
+			}
+		})
+	}
 	fake := &recordedLaunchctl{results: []launchctlResult{{status: 0, stdout: valid("running", "731"), stderr: []byte("warning")}}}
 	if _, err := observeLaunchctl(context.Background(), fake.run, service, plist, program); !errors.Is(err, ErrServiceLaunchctl) {
 		t.Fatalf("successful print stderr accepted: %v", err)
@@ -241,7 +278,7 @@ func TestLaunchctlPrintRequiresExactOwnedFields(t *testing.T) {
 		"unknown state":   valid("waiting", ""),
 		"stopped pid":     valid("not running", "731"),
 		"duplicate pid":   bytes.Replace(valid("running", "731"), []byte("\n}"), []byte("\n\tpid = 732\n}"), 1),
-		"unknown field":   bytes.Replace(valid("running", "731"), []byte("\n}"), []byte("\n\tunknown = value\n}"), 1),
+		"malformed field": bytes.Replace(valid("running", "731"), []byte("\n}"), []byte("\n\tunknown value\n}"), 1),
 		"nul":             append(valid("running", "731"), 0),
 	}
 	for name, mutation := range mutations {
@@ -340,6 +377,32 @@ func TestServiceStatusLaunchctlFailureIsReadOnly(t *testing.T) {
 	}
 	if after := snapshotServiceTrees(t, home, userHome); !reflect.DeepEqual(before, after) {
 		t.Fatal("launchctl failure changed filesystem")
+	}
+}
+
+func TestServiceStatusRejectsStageCreatedAfterHomeCensus(t *testing.T) {
+	root := serviceTestRoot(t)
+	home := filepath.Join(root, "factory")
+	userHome := filepath.Join(root, "user")
+	if err := os.Mkdir(userHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Init(context.Background(), home); err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Dir(home)
+	stage := filepath.Join(parent, "."+filepath.Base(home)+stageSuffix)
+	results := &recordedLaunchctl{results: []launchctlResult{{status: launchctlNotFound}, {status: 0, stdout: []byte(launchctlNotFoundText + "\n")}}}
+	status, err := inspectService(context.Background(), home, userHome, func(ctx context.Context, args ...string) launchctlResult {
+		if len(results.calls) == 0 {
+			if err := os.Mkdir(stage, 0o700); err != nil {
+				t.Fatalf("create stage: %v", err)
+			}
+		}
+		return results.run(ctx, args...)
+	})
+	if status.State != ServiceAmbiguous || !errors.Is(err, ErrServiceAmbiguous) || !errors.Is(err, ErrInvalidHome) {
+		t.Fatalf("stage created after census accepted: %+v, %v", status, err)
 	}
 }
 
