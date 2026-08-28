@@ -13,7 +13,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -351,15 +351,17 @@ function externalDependencies(packageValue, packageName) {
 }
 
 function outputDestination(requested, requireAbsent) {
-  const output = resolve(requested);
+  const lexicalOutput = resolve(requested);
   const repositoryReal = realpathSync(repositoryRoot);
-  const parent = dirname(output);
+  const parent = dirname(lexicalOutput);
   let parentReal;
   try { parentReal = realpathSync(parent); } catch (error) { fail(`output parent is unavailable: ${error.message}`); }
-  if (parentReal !== parent) fail("output parent is an alias");
+  const output = join(parentReal, basename(lexicalOutput));
   if (output === repositoryReal || output.startsWith(`${repositoryReal}${sep}`)) fail("output must be outside the source tree");
-  if (existsSync(output)) {
-    if (lstatSync(output).isSymbolicLink()) fail("output must not be a symlink");
+  let existing;
+  try { existing = lstatSync(output); } catch (error) { if (error.code !== "ENOENT") fail(`could not inspect output: ${error.message}`); }
+  if (existing) {
+    if (existing.isSymbolicLink()) fail("output must not be a symlink");
     if (requireAbsent) fail("output already exists");
   }
   return output;
