@@ -33,12 +33,14 @@ type Store struct {
 	closeErr    error
 }
 
-func openFixedPools(path string, recheck func() error) (*Store, error) {
-	writer, err := openFixedPool(path, "writer", 1, recheck)
+func openFixedPools(ctx context.Context, path string, recheck func() error) (*Store, error) {
+	activationCtx, cancel := context.WithTimeout(ctx, 2*time.Duration(busyMilliseconds)*time.Millisecond)
+	defer cancel()
+	writer, err := openFixedPool(activationCtx, path, "writer", 1, recheck)
 	if err != nil {
 		return nil, err
 	}
-	readers, err := openFixedPool(path, "reader", maxReaders, recheck)
+	readers, err := openFixedPool(activationCtx, path, "reader", maxReaders, recheck)
 	if err != nil {
 		return nil, errors.Join(err, writer.Close())
 	}
@@ -100,17 +102,28 @@ var errConnectionSetExhausted = fmt.Errorf("%w: retained sqlite connection set i
 // connection can be returned to database/sql.
 var sqliteConnectHook func(string, int) error
 
-type finiteConnector struct {
-	sqldriver.Connector
-	mu        sync.Mutex
-	kind      string
-	remaining int
-	opened    int
-	sealed    bool
-	recheck   func() error
+// sqliteConnectorConnect is package-local deterministic fault instrumentation
+// around the physical driver open. Production always calls Connector.Connect.
+var sqliteConnectorConnect = func(ctx context.Context, connector sqldriver.Connector) (sqldriver.Conn, error) {
+	return connector.Connect(ctx)
 }
 
-func (connector *finiteConnector) Connect(ctx context.Context) (sqldriver.Conn, error) {
+// sqlitePoolCloseHook is package-local deterministic fault instrumentation at
+// the point where database/sql owns physical connection shutdown.
+var sqlitePoolCloseHook func(string) error
+
+type finiteConnector struct {
+	sqldriver.Connector
+	mu            sync.Mutex
+	kind          string
+	remaining     int
+	opened        int
+	sealed        bool
+	recheck       func() error
+	activationCtx context.Context
+}
+
+func (connector *finiteConnector) Connect(context.Context) (sqldriver.Conn, error) {
 	connector.mu.Lock()
 	if connector.sealed || connector.remaining == 0 {
 		connector.mu.Unlock()
@@ -124,7 +137,7 @@ func (connector *finiteConnector) Connect(ctx context.Context) (sqldriver.Conn, 
 	if err := connector.recheck(); err != nil {
 		return nil, err
 	}
-	connection, err := connector.Connector.Connect(ctx)
+	connection, err := sqliteConnectorConnect(connector.activationCtx, connector.Connector)
 	if err != nil {
 		return nil, err
 	}
@@ -156,12 +169,12 @@ func (connector *finiteConnector) seal() {
 	connector.mu.Unlock()
 }
 
-func openFixedPool(path, kind string, limit int, recheck func() error) (_ *sql.DB, resultErr error) {
+func openFixedPool(ctx context.Context, path, kind string, limit int, recheck func() error) (_ *sql.DB, resultErr error) {
 	base, err := (&sqliteDriver.SQLite{}).OpenConnector(configuredDataSource(path))
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite pool: %w", err)
 	}
-	connector := &finiteConnector{Connector: base, kind: kind, remaining: limit, recheck: recheck}
+	connector := &finiteConnector{Connector: base, kind: kind, remaining: limit, recheck: recheck, activationCtx: ctx}
 	pool := sql.OpenDB(connector)
 	pool.SetMaxOpenConns(limit)
 	pool.SetMaxIdleConns(limit)
@@ -176,8 +189,6 @@ func openFixedPool(path, kind string, limit int, recheck func() error) (_ *sql.D
 		}
 		resultErr = errors.Join(resultErr, pool.Close())
 	}()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Duration(busyMilliseconds)*time.Millisecond)
-	defer cancel()
 	for len(connections) < limit {
 		connection, err := pool.Conn(ctx)
 		if err != nil {
@@ -348,13 +359,28 @@ func (store *Store) Close() error {
 		store.bindingMu.Lock()
 		defer store.bindingMu.Unlock()
 		store.waitForCheckedOutConnections()
-		store.closeErr = errors.Join(store.readers.Close(), store.writer.Close())
+		poolErr := errors.Join(store.closePool("reader", store.readers), store.closePool("writer", store.writer))
+		if poolErr != nil {
+			store.closeErr = fmt.Errorf("%w: close retained sqlite pools: %w", ErrCorruptState, poolErr)
+			return
+		}
 		if store.pathBinding != nil {
-			store.closeErr = errors.Join(store.closeErr, store.pathBinding.Close())
-			store.pathBinding = nil
+			store.closeErr = store.pathBinding.Close()
+			if store.closeErr == nil {
+				store.pathBinding = nil
+			}
 		}
 	})
 	return store.closeErr
+}
+
+func (store *Store) closePool(kind string, pool *sql.DB) error {
+	if sqlitePoolCloseHook != nil {
+		if err := sqlitePoolCloseHook(kind); err != nil {
+			return err
+		}
+	}
+	return pool.Close()
 }
 
 func (store *Store) waitForCheckedOutConnections() {

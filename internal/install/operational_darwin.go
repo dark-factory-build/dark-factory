@@ -36,6 +36,7 @@ type operationalHomeState struct {
 	members      map[string]retainedMember
 	store        *kernel.Store
 	closed       bool
+	closeErr     error
 }
 
 type retainedMember struct {
@@ -51,6 +52,12 @@ var operationalCloseHook func(string)
 // operationalStoreHook is package-local deterministic fault instrumentation.
 // Production activation has no hook.
 var operationalStoreHook func(string) error
+
+var openOperationalStore = kernel.OpenOperational
+
+// closeOperationalStore is package-local deterministic fault instrumentation
+// at the child lifetime boundary. Production always calls Store.Close.
+var closeOperationalStore = func(store *kernel.Store) error { return store.Close() }
 
 type operationalSource struct {
 	name string
@@ -197,8 +204,11 @@ func (state *operationalHomeState) openStore(ctx context.Context) (*kernel.Store
 			return nil, errors.Join(err, boundDatabase.Close(), boundHome.Close())
 		}
 	}
-	store, err := kernel.OpenOperational(ctx, state.databasePath, boundHome, boundDatabase)
+	store, err := openOperationalStore(ctx, state.databasePath, boundHome, boundDatabase)
 	if err != nil {
+		if store != nil {
+			state.store = store
+		}
 		if bindingErr := recheckOperationalIdentityByState(state); bindingErr != nil {
 			return nil, errors.Join(err, ErrUncertain, bindingErr)
 		}
@@ -206,17 +216,25 @@ func (state *operationalHomeState) openStore(ctx context.Context) (*kernel.Store
 	}
 	if operationalStoreHook != nil {
 		if err := operationalStoreHook("after activation"); err != nil {
-			return nil, errors.Join(err, store.Close())
+			return nil, state.rejectActivatedStore(store, err)
 		}
 	}
 	if err := bindActivatedSidecars(state); err != nil {
-		return nil, errors.Join(ErrUncertain, err, store.Close())
+		return nil, state.rejectActivatedStore(store, errors.Join(ErrUncertain, err))
 	}
 	if err := recheckOperationalIdentityByState(state); err != nil {
-		return nil, errors.Join(ErrUncertain, err, store.Close())
+		return nil, state.rejectActivatedStore(store, errors.Join(ErrUncertain, err))
 	}
 	state.store = store
 	return store, nil
+}
+
+func (state *operationalHomeState) rejectActivatedStore(store *kernel.Store, cause error) error {
+	closeErr := store.Close()
+	if closeErr != nil {
+		state.store = store
+	}
+	return errors.Join(cause, closeErr)
 }
 
 func duplicateOperationalFile(source *os.File, label string) (*os.File, error) {
@@ -242,7 +260,7 @@ func (state *operationalHomeState) close() error {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	if state.closed {
-		return nil
+		return state.closeErr
 	}
 	state.closed = true
 	var result error
@@ -250,7 +268,10 @@ func (state *operationalHomeState) close() error {
 	// every outstanding Store reference fail closed before any retained home
 	// descriptor or the flock is released.
 	if state.store != nil {
-		result = errors.Join(result, state.store.Close())
+		if err := closeOperationalStore(state.store); err != nil {
+			state.closeErr = errors.Join(ErrUncertain, fmt.Errorf("close operational Store: %w", err))
+			return state.closeErr
+		}
 		state.store = nil
 	}
 	identityErr := recheckOperationalIdentityByState(state)
@@ -297,7 +318,8 @@ func (state *operationalHomeState) close() error {
 		}
 		state.lock = nil
 	}
-	return result
+	state.closeErr = result
+	return state.closeErr
 }
 
 func (state *operationalHomeState) memberCapability(name string) (MemberCapability, error) {

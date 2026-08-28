@@ -39,7 +39,9 @@ func Open(ctx context.Context, absolutePath string) (*Store, error) {
 // path bound to the supplied retained home and main-database descriptors. It
 // takes ownership of both descriptors and retains the exact path/file
 // authority plus a finite physical connection set through Store.Close.
-// install.OperationalHome is the sole production caller.
+// A non-nil Store accompanying an error means its attempted shutdown was
+// uncertain and its authority must remain retained. install.OperationalHome
+// is the sole production caller and keeps that Store as its child lease.
 func OpenOperational(ctx context.Context, absolutePath string, home, database *os.File) (*Store, error) {
 	files, err := openBoundDatabaseFiles(absolutePath, home, database)
 	if err != nil {
@@ -78,7 +80,7 @@ func openExistingFiles(ctx context.Context, absolutePath string, files *database
 	}
 	var store *Store
 	if retainBinding {
-		store, err = openFixedPools(absolutePath, files.recheckActivationBindings)
+		store, err = openFixedPools(ctx, absolutePath, files.recheckActivationBindings)
 	} else {
 		store, err = openPools(absolutePath)
 	}
@@ -92,27 +94,27 @@ func openExistingFiles(ctx context.Context, absolutePath string, files *database
 		if files.wal == nil {
 			files.wal, err = files.openDatabaseFile(files.main.name+"-wal", "WAL", 0, maxSQLiteWALSize)
 			if err != nil {
-				return nil, closeRejectedOpen(store, files, err)
+				return closeRejectedOpen(store, files, err)
 			}
 		}
 		files.shm.minimum = walIndexRegionSize
 	}
 	if err := files.refreshPinnedInfo(); err != nil {
-		return nil, closeRejectedOpen(store, files, err)
+		return closeRejectedOpen(store, files, err)
 	}
 	if retainBinding {
 		store.pathBinding = files
 	}
 	if err := store.validateOpen(ctx); err != nil {
-		return nil, closeRejectedOpen(store, files, err)
+		return closeRejectedOpen(store, files, err)
 	}
 	if sqliteActivationHook != nil {
 		if err := sqliteActivationHook("after validation"); err != nil {
-			return nil, closeRejectedOpen(store, files, err)
+			return closeRejectedOpen(store, files, err)
 		}
 	}
 	if err := files.recheckPaths(); err != nil {
-		return nil, closeRejectedOpen(store, files, err)
+		return closeRejectedOpen(store, files, err)
 	}
 	if !retainBinding {
 		if err := files.Close(); err != nil {
@@ -126,8 +128,17 @@ func closeFailedActivation(files *databaseFiles, cause error) error {
 	return errors.Join(cause, files.Close())
 }
 
-func closeRejectedOpen(store *Store, files *databaseFiles, cause error) error {
-	return errors.Join(cause, store.Close(), files.Close())
+func closeRejectedOpen(store *Store, files *databaseFiles, cause error) (*Store, error) {
+	storeOwnsFiles := files != nil && store.pathBinding == files
+	closeErr := store.Close()
+	if storeOwnsFiles {
+		result := errors.Join(cause, closeErr)
+		if closeErr != nil && store.pathBinding == files {
+			return store, result
+		}
+		return nil, result
+	}
+	return nil, errors.Join(cause, closeErr, files.Close())
 }
 
 func validateDatabasePath(path string) error {
@@ -181,12 +192,11 @@ type databaseFile struct {
 }
 
 type databaseFiles struct {
-	authority        *databasePathAuthority
-	handoffDirectory *os.File
-	directory        *os.File
-	main             *databaseFile
-	wal              *databaseFile
-	shm              *databaseFile
+	authority *databasePathAuthority
+	directory *os.File
+	main      *databaseFile
+	wal       *databaseFile
+	shm       *databaseFile
 }
 
 type databasePathComponent struct {
@@ -364,12 +374,14 @@ func openBoundDatabaseFiles(path string, retainedHome, retainedMain *os.File) (_
 		return nil, errors.Join(err, retainedMain.Close(), retainedHome.Close())
 	}
 	files := &databaseFiles{
-		authority:        authority,
-		handoffDirectory: retainedHome,
-		directory:        authority.directory(),
+		authority: authority,
+		directory: authority.directory(),
 	}
 	defer func() {
 		if resultErr != nil {
+			if retainedHome != nil {
+				resultErr = errors.Join(resultErr, retainedHome.Close())
+			}
 			if files.main == nil {
 				resultErr = errors.Join(resultErr, retainedMain.Close())
 			}
@@ -391,6 +403,11 @@ func openBoundDatabaseFiles(path string, retainedHome, retainedMain *os.File) (_
 	if !os.SameFile(homeInfo, pathInfo) {
 		return nil, fmt.Errorf("%w: sqlite path home differs from retained authority", ErrCorruptState)
 	}
+	if err := retainedHome.Close(); err != nil {
+		retainedHome = nil
+		return nil, fmt.Errorf("close redundant sqlite home handoff: %w", err)
+	}
+	retainedHome = nil
 
 	if err := populateDatabaseFiles(files, path, retainedMain); err != nil {
 		return nil, err
@@ -776,10 +793,6 @@ func (files *databaseFiles) Close() error {
 		result = errors.Join(result, files.authority.Close())
 		files.authority = nil
 		files.directory = nil
-	}
-	if files.handoffDirectory != nil {
-		result = errors.Join(result, files.handoffDirectory.Close())
-		files.handoffDirectory = nil
 	}
 	return result
 }

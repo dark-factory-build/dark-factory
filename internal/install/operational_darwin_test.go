@@ -358,6 +358,152 @@ func TestOperationalHomeCloseClosesStoreBeforeLeaseRelease(t *testing.T) {
 	}
 }
 
+func TestOperationalHomeCloseUncertaintyRetainsLeaseAndStableError(t *testing.T) {
+	parent := installTempDir(t)
+	homePath := filepath.Join(parent, "home")
+	if _, err := Init(context.Background(), homePath); err != nil {
+		t.Fatal(err)
+	}
+	home, err := OpenOperationalHome(context.Background(), homePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := home.OpenStore(context.Background())
+	if err != nil {
+		_ = home.Close()
+		t.Fatal(err)
+	}
+	originalClose := closeOperationalStore
+	defer func() {
+		closeOperationalStore = originalClose
+		home.state.mu.Lock()
+		if home.state.lock != nil && home.state.closeErr != nil {
+			home.state.closed = false
+			home.state.closeErr = nil
+		}
+		home.state.mu.Unlock()
+		_ = home.Close()
+	}()
+
+	target := filepath.Join(homePath, databaseName) + "-wal"
+	if err := os.Rename(target, filepath.Join(parent, "original-wal")); err != nil {
+		t.Fatal(err)
+	}
+	replacement := []byte("replacement WAL must survive uncertain close")
+	if err := os.WriteFile(target, replacement, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	injected := errors.New("injected child Store close BUSY")
+	closeOperationalStore = func(*kernel.Store) error { return injected }
+	first := home.Close()
+	if !errors.Is(first, injected) || !errors.Is(first, ErrUncertain) {
+		t.Fatalf("OperationalHome.Close uncertainty = %v", first)
+	}
+	if home.state.store != store || home.state.home == nil || home.state.parent == nil || home.state.lock == nil {
+		t.Fatal("OperationalHome.Close released retained child/home authority after uncertainty")
+	}
+	if second := home.Close(); second != first {
+		t.Fatalf("repeated OperationalHome.Close = %v, want stable %v", second, first)
+	}
+	if candidate, err := OpenOperationalHome(context.Background(), homePath); candidate != nil || !errors.Is(err, ErrBusy) {
+		if candidate != nil {
+			_ = candidate.Close()
+		}
+		t.Fatalf("second opener after uncertain close = %v, %v; want busy", candidate, err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil || !bytes.Equal(got, replacement) {
+		t.Fatalf("replacement WAL changed after uncertain close: %q, %v", got, err)
+	}
+}
+
+func TestOperationalHomeCancellationJoinsBlockedActivation(t *testing.T) {
+	parent := installTempDir(t)
+	homePath := filepath.Join(parent, "home")
+	if _, err := Init(context.Background(), homePath); err != nil {
+		t.Fatal(err)
+	}
+	baseline, ok := descriptorCount()
+	if !ok {
+		t.Skip("/dev/fd is unavailable")
+	}
+	home, err := OpenOperationalHome(context.Background(), homePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalOpen := openOperationalStore
+	started := make(chan struct{})
+	contextCanceled := make(chan struct{})
+	release := make(chan struct{})
+	released := false
+	activationCalls := 0
+	openOperationalStore = func(ctx context.Context, _ string, boundHome, boundDatabase *os.File) (*kernel.Store, error) {
+		activationCalls++
+		close(started)
+		<-ctx.Done()
+		close(contextCanceled)
+		<-release
+		return nil, errors.Join(ctx.Err(), boundDatabase.Close(), boundHome.Close())
+	}
+	defer func() {
+		openOperationalStore = originalOpen
+		if !released {
+			close(release)
+		}
+		_ = home.Close()
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	openResult := make(chan error, 1)
+	go func() {
+		store, openErr := home.OpenStore(ctx)
+		if store != nil {
+			_ = store.Close()
+			openErr = errors.Join(openErr, errors.New("canceled activation returned a Store"))
+		}
+		openResult <- openErr
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("operational Store activation did not start")
+	}
+	cancel()
+	select {
+	case <-contextCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("operational Store activation did not receive caller cancellation")
+	}
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- home.Close() }()
+	select {
+	case err := <-closeResult:
+		t.Fatalf("OperationalHome.Close returned while activation was blocked: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(release)
+	released = true
+	if err := <-openResult; !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled OpenStore = %v", err)
+	}
+	if err := <-closeResult; err != nil {
+		t.Fatalf("OperationalHome.Close after canceled activation = %v", err)
+	}
+	if activationCalls != 1 {
+		t.Fatalf("operational activation calls = %d, want exactly one", activationCalls)
+	}
+	reopened, err := OpenOperationalHome(context.Background(), homePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if current, _ := descriptorCount(); current != baseline {
+		t.Fatalf("descriptor count after canceled activation = %d, baseline %d", current, baseline)
+	}
+}
+
 func TestOperationalHomeStoreRejectsLaterSidecarReplacement(t *testing.T) {
 	for _, suffix := range []string{"-wal", "-shm"} {
 		t.Run(suffix[1:], func(t *testing.T) {

@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	sqldriver "database/sql/driver"
 	"errors"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 )
 
 func openOperationalTestStore(path string) (*Store, error) {
@@ -21,6 +23,81 @@ func openOperationalTestStore(path string) (*Store, error) {
 		return nil, errors.Join(err, home.Close())
 	}
 	return OpenOperational(context.Background(), path, home, database)
+}
+
+func TestOperationalOpenCancellationOwnsPhysicalConnectContext(t *testing.T) {
+	path, _ := walSnapshotFixture(t, "")
+	before := captureSQLiteSet(t, path)
+	baselineEntries, descriptorErr := os.ReadDir("/dev/fd")
+	if descriptorErr != nil {
+		t.Skip("/dev/fd is unavailable")
+	}
+
+	started := make(chan struct{})
+	contextCanceled := make(chan struct{})
+	release := make(chan struct{})
+	physicalCalls := 0
+	originalConnect := sqliteConnectorConnect
+	sqliteConnectorConnect = func(ctx context.Context, _ sqldriver.Connector) (sqldriver.Conn, error) {
+		physicalCalls++
+		close(started)
+		<-ctx.Done()
+		close(contextCanceled)
+		<-release
+		return nil, ctx.Err()
+	}
+	defer func() { sqliteConnectorConnect = originalConnect }()
+
+	home, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := os.Open(path)
+	if err != nil {
+		_ = home.Close()
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan struct {
+		store *Store
+		err   error
+	}, 1)
+	go func() {
+		store, openErr := OpenOperational(ctx, path, home, database)
+		result <- struct {
+			store *Store
+			err   error
+		}{store: store, err: openErr}
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("physical sqlite Connect did not start")
+	}
+	cancel()
+	select {
+	case <-contextCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("physical sqlite Connect did not receive caller cancellation")
+	}
+	select {
+	case got := <-result:
+		t.Fatalf("OpenOperational returned before blocked Connect was released: %v, %v", got.store, got.err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(release)
+	got := <-result
+	if got.store != nil || !errors.Is(got.err, context.Canceled) {
+		t.Fatalf("canceled operational open = %v, %v", got.store, got.err)
+	}
+	if physicalCalls != 1 {
+		t.Fatalf("physical sqlite Connect calls = %d, want exactly one", physicalCalls)
+	}
+	assertSQLiteSetUnchanged(t, path, before)
+	afterEntries, err := os.ReadDir("/dev/fd")
+	if err != nil || len(afterEntries) != len(baselineEntries) {
+		t.Fatalf("descriptor count after canceled physical Connect = %d, %v; baseline %d", len(afterEntries), err, len(baselineEntries))
+	}
 }
 
 func TestOpenRequiresCanonicalOwnerOnlyDatabaseParent(t *testing.T) {

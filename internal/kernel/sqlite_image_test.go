@@ -647,7 +647,10 @@ func TestRejectedOpenPreservesStoreCloseError(t *testing.T) {
 	closeFailure := errors.New("store close failure")
 	store := &Store{}
 	store.close.Do(func() { store.closeErr = closeFailure })
-	err := closeRejectedOpen(store, nil, cause)
+	retained, err := closeRejectedOpen(store, nil, cause)
+	if retained != nil {
+		t.Fatal("pathless rejected open retained a Store")
+	}
 	if !errors.Is(err, cause) || !errors.Is(err, closeFailure) {
 		t.Fatalf("rejected Open error = %v", err)
 	}
