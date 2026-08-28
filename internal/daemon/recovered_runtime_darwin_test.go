@@ -193,6 +193,96 @@ func TestOpenRecoveredRuntimeRejectsMalformedCensusAndReplacement(t *testing.T) 
 	})
 }
 
+func TestRecoveredRuntimeCensusGrammar(t *testing.T) {
+	tests := []struct {
+		name    string
+		residue []string
+		open    bool
+	}{
+		{name: "no residue", open: true},
+		{name: "outer-start gate config", residue: []string{runner.GateConfigScratchName}, open: true},
+		{name: "outer-start gate stdin", residue: []string{runner.GateStdinScratchName}, open: true},
+		{name: "outer only", residue: []string{runner.OuterActivationMarkerName}, open: true},
+		{name: "outer plus inner-start gate config", residue: []string{runner.OuterActivationMarkerName, runner.GateConfigScratchName}, open: true},
+		{name: "outer plus inner", residue: []string{runner.OuterActivationMarkerName, runner.InnerActivationMarkerName}, open: true},
+		{name: "outer plus terminal scratch", residue: []string{runner.OuterActivationMarkerName, runner.TerminalScratchName}, open: true},
+		{name: "outer plus inner plus terminal scratch", residue: []string{runner.OuterActivationMarkerName, runner.InnerActivationMarkerName, runner.TerminalScratchName}, open: true},
+		{name: "outer plus terminal spool", residue: []string{runner.OuterActivationMarkerName, runner.TerminalSpoolName}, open: true},
+		{name: "outer plus inner plus terminal spool", residue: []string{runner.OuterActivationMarkerName, runner.InnerActivationMarkerName, runner.TerminalSpoolName}, open: true},
+		{name: "inner without outer", residue: []string{runner.InnerActivationMarkerName}},
+		{name: "terminal scratch without outer", residue: []string{runner.TerminalScratchName}},
+		{name: "terminal spool without outer", residue: []string{runner.TerminalSpoolName}},
+		{name: "gate config and stdin", residue: []string{runner.GateConfigScratchName, runner.GateStdinScratchName}},
+		{name: "gate config with inner", residue: []string{runner.OuterActivationMarkerName, runner.InnerActivationMarkerName, runner.GateConfigScratchName}},
+		{name: "gate stdin with inner", residue: []string{runner.OuterActivationMarkerName, runner.InnerActivationMarkerName, runner.GateStdinScratchName}},
+		{name: "gate config with terminal scratch", residue: []string{runner.OuterActivationMarkerName, runner.GateConfigScratchName, runner.TerminalScratchName}},
+		{name: "gate config with terminal spool", residue: []string{runner.OuterActivationMarkerName, runner.GateConfigScratchName, runner.TerminalSpoolName}},
+		{name: "gate stdin with terminal scratch", residue: []string{runner.OuterActivationMarkerName, runner.GateStdinScratchName, runner.TerminalScratchName}},
+		{name: "gate stdin with terminal spool", residue: []string{runner.OuterActivationMarkerName, runner.GateStdinScratchName, runner.TerminalSpoolName}},
+		{name: "gate stdin with outer", residue: []string{runner.OuterActivationMarkerName, runner.GateStdinScratchName}},
+		{name: "terminal scratch and spool", residue: []string{runner.OuterActivationMarkerName, runner.TerminalScratchName, runner.TerminalSpoolName}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			parent, path, identity, _, _, terminal := populatedRecoveredRuntime(t, "run")
+			defer parent.Close()
+			configureRecoveredResidue(t, path, test.residue, terminal)
+			before := snapshotRuntimeGraph(t, path)
+			recovered, err := OpenRecoveredRuntime(context.Background(), parent, "run", identity)
+			if test.open {
+				if err != nil || recovered == nil {
+					t.Fatalf("reachable residue rejected: recovered=%+v err=%v", recovered, err)
+				}
+				if err := recovered.Close(); err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if !errors.Is(err, errInvalidContract) || recovered != nil {
+				t.Fatalf("malformed residue accepted: recovered=%+v err=%v", recovered, err)
+			}
+			if after := snapshotRuntimeGraph(t, path); after != before {
+				t.Fatalf("rejected residue mutated graph\nbefore:\n%s\nafter:\n%s", before, after)
+			}
+		})
+	}
+}
+
+func configureRecoveredResidue(t *testing.T, path string, residue []string, terminal runner.Terminal) {
+	t.Helper()
+	all := []string{
+		runner.OuterActivationMarkerName, runner.InnerActivationMarkerName,
+		runner.GateConfigScratchName, runner.GateStdinScratchName,
+		runner.TerminalScratchName, runner.TerminalSpoolName,
+	}
+	for _, name := range all {
+		if err := os.Remove(filepath.Join(path, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range residue {
+		if name == runner.TerminalSpoolName {
+			dir, err := os.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, publishErr := runner.PublishTerminal(dir, name, terminal)
+			closeErr := dir.Close()
+			if publishErr != nil || closeErr != nil {
+				t.Fatalf("publish terminal residue: %v; close: %v", publishErr, closeErr)
+			}
+		}
+	}
+	for _, name := range residue {
+		if name == runner.TerminalSpoolName {
+			continue
+		}
+		if err := os.WriteFile(filepath.Join(path, name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestRecoveredRuntimeTokenOnlyCutAndSnapshotReplacement(t *testing.T) {
 	parentPath := filepath.Join(runtimeTempDir(t), "private")
 	if err := os.Mkdir(parentPath, 0o700); err != nil {

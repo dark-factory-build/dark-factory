@@ -289,9 +289,29 @@ func inspectRecoveredRuntimeCensus(rootFD int, device uint64) (map[string]unix.S
 	// These are the fixed crash cuts emitted by the producer. The outer gate
 	// precedes the inner gate, but the terminal may outlive the inner marker
 	// after pre-activation cleanup. Each named scratch is created and removed
-	// synchronously, so both gate scratch names cannot be a reachable cut.
-	residue := outer || inner || terminal || terminalScratch || gateConfig || gateStdin
-	if config && !token || residue && (!token || !config) || inner && !outer || terminal && !outer || terminalScratch && terminal || gateConfig && gateStdin {
+	// synchronously, so each gate scratch is an outer/inner prefix by itself.
+	gateScratch := gateConfig || gateStdin
+	terminalResidue := terminalScratch || terminal
+	residue := outer || inner || gateScratch || terminalResidue
+	if config && !token || residue && (!token || !config) {
+		return nil, invalidContract(nil)
+	}
+	if inner && !outer || terminalResidue && !outer {
+		return nil, invalidContract(nil)
+	}
+	if terminalScratch && terminal {
+		return nil, invalidContract(nil)
+	}
+	if gateConfig && gateStdin {
+		return nil, invalidContract(nil)
+	}
+	if gateScratch && inner {
+		return nil, invalidContract(nil)
+	}
+	if gateScratch && terminalResidue {
+		return nil, invalidContract(nil)
+	}
+	if gateStdin && outer {
 		return nil, invalidContract(nil)
 	}
 	return files, nil
