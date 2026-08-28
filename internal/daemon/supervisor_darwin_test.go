@@ -159,6 +159,9 @@ func TestSupervisorRetainedRetrySkipsGitAndPreservesPublishedTree(t *testing.T) 
 	// A retained retry must not resolve a selector or invoke Git again.
 	fixture.spec.GitExecutable = "/private/retained-retry-must-not-run-git"
 	fixture.spec.BaseRevision = "refs/heads/retained-retry-must-not-resolve"
+	if err := os.Rename(filepath.Join(fixture.root, "repository", ".git"), filepath.Join(fixture.root, "repository", ".git.retained")); err != nil {
+		t.Fatal(err)
+	}
 	second, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
 	if err != nil {
 		t.Fatalf("retained RunNext: %v", err)

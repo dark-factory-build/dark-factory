@@ -154,6 +154,23 @@ func TestSelectGitRepositoryShapesAndReplacement(t *testing.T) {
 	}
 }
 
+func TestVerifyRepositoryRootIgnoresGitAdministration(t *testing.T) {
+	fixture := newLocalGitFixture(t, "sha1")
+	gitDirectory := filepath.Join(fixture.repository, ".git")
+	if err := os.Rename(gitDirectory, gitDirectory+".retained"); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyRepositoryRoot(fixture.repository, fixture.identity); err != nil {
+		t.Fatalf("root-only verification required Git administration: %v", err)
+	}
+	if err := os.Chmod(fixture.repository, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyRepositoryRoot(fixture.repository, fixture.identity); err == nil {
+		t.Fatal("unsafe repository root mode accepted")
+	}
+}
+
 func TestSelectGitRejectsPartialCloneAlternatesAndNonCommitRevision(t *testing.T) {
 	fixture := newLocalGitFixture(t, "sha1")
 	runFixtureGit(t, fixture.git, fixture.repository, "config", "core.repositoryformatversion", "1")

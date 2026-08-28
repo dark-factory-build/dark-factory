@@ -67,7 +67,10 @@ func SelectGit(ctx context.Context, gitExecutable, repositoryRoot, revision stri
 // VerifyRepositoryRoot rechecks the exact repository-root identity without
 // resolving a revision or selecting source content.
 func VerifyRepositoryRoot(repositoryRoot string, expected RepositoryIdentity) error {
-	_, err := checkpointRepository(repositoryRoot, expected)
+	rootFD, _, err := openRepositoryRoot(repositoryRoot, expected)
+	if err == nil {
+		err = unix.Close(rootFD)
+	}
 	return err
 }
 
@@ -234,26 +237,12 @@ func parseGitOID(format ObjectFormat, encoded []byte) (ObjectID, error) {
 }
 
 func checkpointRepository(path string, expected RepositoryIdentity) (repositoryCheckpoint, error) {
-	if !expected.valid() || !filepath.IsAbs(path) || filepath.Clean(path) != path {
-		return repositoryCheckpoint{}, &ValidationError{Reason: "repository root and identity must be canonical"}
-	}
-	resolved, err := filepath.EvalSymlinks(path)
-	if err != nil || resolved != path {
-		return repositoryCheckpoint{}, &ValidationError{Reason: "repository root contains a symlink or alias"}
-	}
-	rootFD, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	rootFD, rootStat, err := openRepositoryRoot(path, expected)
 	if err != nil {
-		return repositoryCheckpoint{}, newGitError(gitFailurePrivateIO)
+		return repositoryCheckpoint{}, err
 	}
 	defer unix.Close(rootFD)
-	rootStat, err := fstatGit(rootFD)
-	if err != nil || !safeGitMode(rootStat.Mode, gitModeDirectory) {
-		return repositoryCheckpoint{}, &ValidationError{Reason: "repository root is not an exact directory"}
-	}
-	root, err := NewRepositoryIdentity(uint64(rootStat.Dev), rootStat.Ino)
-	if err != nil || root != expected {
-		return repositoryCheckpoint{}, &ValidationError{Reason: "repository root identity differs"}
-	}
+	root := expected
 	gitFD, gitIdentity, err := openGitAdminDirectory(rootFD, ".git")
 	if err != nil {
 		return repositoryCheckpoint{}, &ValidationError{Reason: "only a primary non-bare Git worktree is supported"}
@@ -296,6 +285,34 @@ func checkpointRepository(path string, expected RepositoryIdentity) (repositoryC
 	return repositoryCheckpoint{
 		root: root, git: gitIdentity, config: configIdentity, objects: objectsIdentity, objectStore: objectStore,
 	}, nil
+}
+
+// openRepositoryRoot verifies only the durable repository-root authority. It
+// deliberately does not inspect Git administration, so retained Change retry
+// can proceed when the live .git tree or Git executable is unavailable.
+func openRepositoryRoot(path string, expected RepositoryIdentity) (int, unix.Stat_t, error) {
+	if !expected.valid() || !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return -1, unix.Stat_t{}, &ValidationError{Reason: "repository root and identity must be canonical"}
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil || resolved != path {
+		return -1, unix.Stat_t{}, &ValidationError{Reason: "repository root contains a symlink or alias"}
+	}
+	rootFD, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return -1, unix.Stat_t{}, newGitError(gitFailurePrivateIO)
+	}
+	rootStat, err := fstatGit(rootFD)
+	if err != nil || rootStat.Uid != uint32(unix.Geteuid()) || !safeGitMode(rootStat.Mode, gitModeDirectory) {
+		_ = unix.Close(rootFD)
+		return -1, unix.Stat_t{}, &ValidationError{Reason: "repository root must be an owned safe directory"}
+	}
+	root, err := NewRepositoryIdentity(uint64(rootStat.Dev), rootStat.Ino)
+	if err != nil || root != expected {
+		_ = unix.Close(rootFD)
+		return -1, unix.Stat_t{}, &ValidationError{Reason: "repository root identity differs"}
+	}
+	return rootFD, rootStat, nil
 }
 
 func verifyRepository(path string, expected repositoryCheckpoint) error {
