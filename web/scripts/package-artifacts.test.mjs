@@ -9,14 +9,51 @@ import { inspectExecutable, toolTreeDigest } from "./package-artifacts.mjs";
 
 const webRoot = new URL("..", import.meta.url).pathname.slice(0, -1);
 const script = join(webRoot, "scripts", "package-artifacts.mjs");
+const launcher = join(webRoot, "scripts", "package-artifacts");
 const clientName = "@dark-factory/client";
 const uiName = "@dark-factory/ui";
 
+test("the launcher is the only direct artifact entry and strips Node startup hooks", () => {
+  const { tempRoot, output } = fixture();
+  const preload = join(tempRoot, "preload.cjs");
+  const witness = join(tempRoot, "preload-ran");
+  writeFileSync(preload, `
+const fs = require("node:fs");
+const child = require("node:child_process");
+fs.writeFileSync(${JSON.stringify(witness)}, "startup hook ran");
+const copyFileSync = fs.copyFileSync;
+fs.copyFileSync = (source, destination) => destination.endsWith("factory-console.css")
+  ? fs.writeFileSync(destination, "forged css")
+  : copyFileSync(source, destination);
+const execFileSync = child.execFileSync;
+child.execFileSync = (file, args, options) => args?.[0] === "rev-parse"
+  ? Buffer.from("0".repeat(40))
+  : execFileSync(file, args, options);
+`);
+  try {
+    run("pack", output);
+    runWithEnv("verify", output, {
+      NODE_OPTIONS: `--require=${preload}`,
+      NODE_PATH: tempRoot,
+      NODE_EXTRA_CA_CERTS: preload,
+      NODE_V8_COVERAGE: join(tempRoot, "coverage"),
+    });
+    assert.equal(existsSync(witness), false);
+    expectFailure(() => execFileSync(process.execPath, [script, "verify", "--output", output], {
+      cwd: webRoot,
+      env: { ...process.env, NODE_OPTIONS: undefined },
+      stdio: "pipe",
+    }), "use the package-artifacts launcher");
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
 function runWithEnv(command, output, envOverrides, ...extra) {
-  return execFileSync(process.execPath, [script, command, "--output", output, ...extra], {
+  return execFileSync(launcher, [command, "--output", output, ...extra], {
     cwd: webRoot,
     encoding: "utf8",
-    env: { ...process.env, COREPACK_ENABLE_NETWORK: "0", npm_config_registry: "http://127.0.0.1:9/", ...envOverrides },
+    env: { ...process.env, DARK_FACTORY_ARTIFACT_NODE: process.execPath, COREPACK_ENABLE_NETWORK: "0", npm_config_registry: "http://127.0.0.1:9/", ...envOverrides },
     stdio: "pipe",
   });
 }
@@ -73,6 +110,7 @@ test("public artifacts bind clean HEAD, protocol, exact dependencies, and bytes"
     assert.match(packed.source.commit, /^[0-9a-f]{40}$/);
     assert.equal(packed.source.clean, true);
     assert.deepEqual(packed.protocol, { name: "dark-factory/browser/v1", version: 1 });
+    assert.equal(packed.buildTools.toolTreeVersion, "dark-factory/tool-tree/v2");
     assert.deepEqual(packed.buildTools.pnpm, "11.19.0");
     assert.deepEqual(packed.buildTools.typescript, "5.8.3");
     assert.deepEqual(packed.buildTools.node, {
@@ -294,6 +332,12 @@ test("tool tree commitment has framed content and rejects unsafe copied trees", 
     cpSync(pnpmRoot, copy, { recursive: true });
     const expected = toolTreeDigest(pnpmRoot);
     assert.equal(toolTreeDigest(copy), expected);
+    mkdirSync(join(copy, "empty-directory"));
+    assert.notEqual(toolTreeDigest(copy), expected);
+    const modeCopy = join(tempRoot, "mode");
+    cpSync(pnpmRoot, modeCopy, { recursive: true });
+    chmodSync(join(modeCopy, "package.json"), 0o600);
+    assert.notEqual(toolTreeDigest(modeCopy), expected);
     const existingName = readdirSync(copy)[0];
     writeFileSync(join(copy, existingName), `${readFileSync(join(copy, existingName), "utf8")}mutation`);
     assert.notEqual(toolTreeDigest(copy), expected);

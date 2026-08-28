@@ -23,7 +23,7 @@ const manifestName = "dark-factory-public-artifacts.json";
 const gitPath = "/usr/bin/git";
 const tarPath = "/usr/bin/tar";
 const toolchainIntegrityPath = join(webRoot, "toolchain-integrity.json");
-const toolTreeVersion = "dark-factory/tool-tree/v1";
+const toolTreeVersion = "dark-factory/tool-tree/v2";
 const maxToolTreeFiles = 4096;
 const maxToolTreeBytes = 128 * 1024 * 1024;
 const maxToolTreePathBytes = 4096;
@@ -170,9 +170,18 @@ function toolTreeDigest(root) {
   let rootStat;
   try { rootStat = lstatSync(root); } catch (error) { fail(`could not inspect tool tree ${root}: ${error.message}`); }
   if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) fail(`tool tree ${root} must be a regular directory`);
-  const files = [];
+  const records = [];
   const foldedPaths = new Set();
   let totalBytes = 0;
+  const addRecord = (record) => {
+    if (records.length >= maxToolTreeFiles) fail("tool tree contains too many files or directories");
+    if (record.relative) {
+      const foldedPath = record.relative.normalize("NFC").toLocaleLowerCase("en-US");
+      if (foldedPaths.has(foldedPath)) fail(`tool tree contains case-confusable path ${record.relative}`);
+      foldedPaths.add(foldedPath);
+    }
+    records.push(record);
+  };
   const walk = (directory, prefix) => {
     let entries;
     try { entries = readdirSync(directory).sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b))); } catch (error) { fail(`could not read tool tree ${directory}: ${error.message}`); }
@@ -190,36 +199,39 @@ function toolTreeDigest(root) {
       try { stat = lstatSync(path); } catch (error) { fail(`could not inspect tool tree entry ${relative}: ${error.message}`); }
       if (stat.isSymbolicLink()) fail(`tool tree contains symlink ${relative}`);
       if (stat.isDirectory()) {
+        addRecord({ relative, relativeBytes, type: "directory", mode: stat.mode & 0o7777 });
         walk(path, relative);
       } else if (stat.isFile()) {
-        const foldedPath = relative.normalize("NFC").toLocaleLowerCase("en-US");
-        if (foldedPaths.has(foldedPath)) fail(`tool tree contains case-confusable path ${relative}`);
-        foldedPaths.add(foldedPath);
-        if (files.length >= maxToolTreeFiles) fail("tool tree contains too many files");
         if (!Number.isSafeInteger(stat.size) || stat.size > maxToolTreeBytes || totalBytes > maxToolTreeBytes - stat.size) fail("tool tree is too large");
         totalBytes += stat.size;
-        files.push({ path, relative, relativeBytes, size: stat.size });
+        addRecord({ path, relative, relativeBytes, type: "file", mode: stat.mode & 0o7777, size: stat.size });
       } else {
         fail(`tool tree contains non-regular entry ${relative}`);
       }
     }
   };
+  addRecord({ relative: "", relativeBytes: Buffer.alloc(0), type: "directory", mode: rootStat.mode & 0o7777 });
   walk(root, "");
-  files.sort((a, b) => Buffer.compare(a.relativeBytes, b.relativeBytes));
+  records.sort((a, b) => Buffer.compare(a.relativeBytes, b.relativeBytes) || a.type.localeCompare(b.type));
   const hash = createHash("sha512");
   hash.update(Buffer.from(`${toolTreeVersion}\0`));
   const count = Buffer.alloc(4);
-  count.writeUInt32BE(files.length);
+  count.writeUInt32BE(records.length);
   hash.update(count);
-  for (const file of files) {
+  for (const record of records) {
     const length = Buffer.alloc(4);
-    length.writeUInt32BE(file.relativeBytes.length);
+    length.writeUInt32BE(record.relativeBytes.length);
     hash.update(length);
-    hash.update(file.relativeBytes);
-    const bytes = readFileSync(file.path);
-    if (bytes.length !== file.size) fail(`tool tree file changed while hashing ${file.relative}`);
+    hash.update(record.relativeBytes);
+    hash.update(Buffer.from(record.type === "directory" ? "d" : "f"));
+    const mode = Buffer.alloc(4);
+    mode.writeUInt32BE(record.mode);
+    hash.update(mode);
+    if (record.type === "directory") continue;
+    const bytes = readFileSync(record.path);
+    if (bytes.length !== record.size) fail(`tool tree file changed while hashing ${record.relative}`);
     const size = Buffer.alloc(8);
-    size.writeBigUInt64BE(BigInt(file.size));
+    size.writeBigUInt64BE(BigInt(record.size));
     hash.update(size);
     hash.update(bytes);
   }
@@ -228,8 +240,9 @@ function toolTreeDigest(root) {
 
 function reviewedToolchain() {
   const value = strictJsonFile(toolchainIntegrityPath, "toolchain integrity");
-  exactKeys(value, ["schemaVersion", "node", "pnpm", "typescript", "tar"], "toolchain integrity");
+  exactKeys(value, ["schemaVersion", "toolTreeVersion", "node", "pnpm", "typescript", "tar"], "toolchain integrity");
   if (value.schemaVersion !== 1) fail("toolchain integrity schema version is unsupported");
+  if (value.toolTreeVersion !== toolTreeVersion) fail("toolchain integrity tree framing version is unsupported");
   exactKeys(value.node, ["version", "sha512", "bytes", "mode"], "toolchain integrity.node");
   exactKeys(value.pnpm, ["version", "treeSha512"], "toolchain integrity.pnpm");
   exactKeys(value.typescript, ["version", "treeSha512", "lockfileIntegrity"], "toolchain integrity.typescript");
@@ -329,6 +342,7 @@ function sourceIdentity(sourceCommit, tools) {
   if (!Number.isSafeInteger(protocol.version)) fail("protocol/browser/v1/manifest.json has an invalid version");
   return {
     schemaVersion: 1,
+    toolTreeVersion,
     source: { commit: sourceCommit, clean: true },
     protocol: { name: "dark-factory/browser/v1", version: protocol.version },
     buildTools: tools.versions,
@@ -544,13 +558,14 @@ function validateManifestShape(manifest) {
   if (!/^[0-9a-f]{40}$/.test(stringField(manifest.source, "commit", "manifest.source")) || manifest.source.clean !== true) fail("manifest source is invalid");
   exactKeys(manifest.protocol, ["name", "version"], "manifest.protocol");
   if (stringField(manifest.protocol, "name", "manifest.protocol") !== "dark-factory/browser/v1" || integerField(manifest.protocol, "version", "manifest.protocol") !== 1) fail("manifest protocol is invalid");
-  exactKeys(manifest.buildTools, ["node", "pnpm", "pnpmTreeSha512", "typescript", "typescriptTreeSha512", "typescriptIntegrity", "tar"], "manifest.buildTools");
+  exactKeys(manifest.buildTools, ["toolTreeVersion", "node", "pnpm", "pnpmTreeSha512", "typescript", "typescriptTreeSha512", "typescriptIntegrity", "tar"], "manifest.buildTools");
   exactKeys(manifest.buildTools.node, ["version", "bytes", "mode", "sha512"], "manifest.buildTools.node");
   exactKeys(manifest.buildTools.tar, ["version", "bytes", "mode", "sha512"], "manifest.buildTools.tar");
   for (const key of ["version", "mode", "sha512"]) stringField(manifest.buildTools.node, key, "manifest.buildTools.node");
   for (const key of ["version", "mode", "sha512"]) stringField(manifest.buildTools.tar, key, "manifest.buildTools.tar");
   integerField(manifest.buildTools.node, "bytes", "manifest.buildTools.node");
   integerField(manifest.buildTools.tar, "bytes", "manifest.buildTools.tar");
+  if (stringField(manifest.buildTools, "toolTreeVersion", "manifest.buildTools") !== toolTreeVersion) fail("manifest build tool tree framing version is invalid");
   stringField(manifest.buildTools, "pnpm", "manifest.buildTools");
   stringField(manifest.buildTools, "pnpmTreeSha512", "manifest.buildTools");
   stringField(manifest.buildTools, "typescript", "manifest.buildTools");
@@ -731,7 +746,10 @@ function parseArgs(argv) {
   return { command, output: rest[1] };
 }
 
-if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)) && process.env.DARK_FACTORY_ARTIFACT_LAUNCHER !== "posix-v1") {
+  process.stderr.write("package artifacts: use the package-artifacts launcher\n");
+  process.exitCode = 1;
+} else if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
   try {
     const { command, output } = parseArgs(process.argv.slice(2));
     const manifest = command === "pack" ? await pack(output) : await verify(output);

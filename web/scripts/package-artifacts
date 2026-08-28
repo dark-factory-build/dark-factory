@@ -1,0 +1,51 @@
+#!/bin/sh
+set -eu
+
+fail() {
+  /bin/echo "package artifacts launcher: $*" >&2
+  exit 1
+}
+
+self=$(/bin/realpath "$0") || fail "could not resolve launcher"
+script_dir=$(/usr/bin/dirname "$self") || fail "could not resolve launcher directory"
+script=$script_dir/package-artifacts.mjs
+[ -f "$script" ] || fail "implementation is missing"
+
+node=${DARK_FACTORY_ARTIFACT_NODE-}
+if [ -z "$node" ]; then
+  node=$(command -v node || true)
+  [ -n "$node" ] || fail "Node was not found; set DARK_FACTORY_ARTIFACT_NODE to an absolute reviewed interpreter"
+fi
+case "$node" in
+  /*) ;;
+  *) fail "DARK_FACTORY_ARTIFACT_NODE must be an absolute path" ;;
+esac
+node=$(/bin/realpath "$node") || fail "could not resolve Node"
+[ -f "$node" ] || fail "Node is not a regular file"
+node_dir=$(/usr/bin/dirname "$node") || fail "could not resolve Node directory"
+
+command=${1-}
+case "$command" in
+  pack|verify)
+    ;;
+  test)
+    shift
+    [ "$#" -gt 0 ] || fail "usage: package-artifacts test <test file>"
+    exec /usr/bin/env -i \
+      CI=true HOME=/var/tmp LANG=C LC_ALL=C TMPDIR=/var/tmp \
+      PATH="$node_dir:/usr/bin:/bin" DARK_FACTORY_ARTIFACT_LAUNCHER=posix-v1 \
+      "$node" --test "$@"
+    ;;
+  *)
+    fail "usage: package-artifacts <pack|verify> --output <directory>"
+    ;;
+esac
+
+# The empty environment is intentional: in particular, no NODE_OPTIONS,
+# NODE_PATH, preload/import, config, debug, coverage, or CA injection variable
+# can reach Node startup. The marker identifies the supported entry route; it
+# is not a secret and the implementation still validates all tool bytes.
+exec /usr/bin/env -i \
+  CI=true HOME=/var/tmp LANG=C LC_ALL=C TMPDIR=/var/tmp \
+  PATH="$node_dir:/usr/bin:/bin" DARK_FACTORY_ARTIFACT_LAUNCHER=posix-v1 \
+  "$node" "$script" "$@"

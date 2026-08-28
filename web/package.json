@@ -7,7 +7,7 @@
     "typecheck": "corepack pnpm --filter @dark-factory/client build && corepack pnpm --filter @dark-factory/ui build && corepack pnpm --filter dark-factory-dev typecheck",
     "build": "corepack pnpm --filter @dark-factory/client build && corepack pnpm --filter @dark-factory/ui build && corepack pnpm --filter dark-factory-dev build",
     "test": "corepack pnpm --filter @dark-factory/client build && corepack pnpm --filter @dark-factory/ui build && node --test packages/client/test/*.test.mjs packages/ui/test/*.test.mjs",
-    "artifact:test": "node --test scripts/package-artifacts.test.mjs"
+    "artifact:test": "./scripts/package-artifacts test scripts/package-artifacts.test.mjs"
   },
   "devDependencies": {
     "typescript": "5.8.3",
