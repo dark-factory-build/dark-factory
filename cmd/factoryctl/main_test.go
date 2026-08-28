@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
+	"github.com/dark-factory-build/dark-factory/internal/install"
 )
 
 type serverResult struct {
@@ -29,6 +30,7 @@ type apiFixture struct {
 	attemptPath string
 	bearer      [32]byte
 	listener    *api.Listener
+	home        *install.OperationalHome
 }
 
 func newAPIFixture(t testing.TB) *apiFixture {
@@ -43,17 +45,34 @@ func newAPIFixture(t testing.TB) *apiFixture {
 			_ = os.RemoveAll(directory)
 		}
 	}()
-	operatorPath := filepath.Join(directory, "operator.token")
+	homePath := filepath.Join(directory, "home")
+	if _, err := install.Init(context.Background(), homePath); err != nil {
+		if errors.Is(err, install.ErrUnsupported) {
+			t.Skip("operational local API is unsupported on this platform")
+		}
+		t.Fatal(err)
+	}
+	operatorPath := filepath.Join(homePath, "operator.token")
 	attemptPath := filepath.Join(directory, "attempt.token")
 	writeToken(t, operatorPath, bytes.Repeat([]byte{'O'}, 32))
 	attempt := bytes.Repeat([]byte{'A'}, 32)
 	writeToken(t, attemptPath, attempt)
-	socket := filepath.Join(directory, "factory.sock")
-	listener, err := api.Listen(socket, operatorPath)
+	home, err := install.OpenOperationalHome(context.Background(), homePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixture := &apiFixture{directory: directory, socket: socket, attemptPath: attemptPath, listener: listener}
+	authority, err := home.OpenLocalAPI(context.Background())
+	if err != nil {
+		_ = home.Close()
+		t.Fatal(err)
+	}
+	listener, err := api.Listen(authority)
+	if err != nil {
+		_ = home.Close()
+		t.Fatal(err)
+	}
+	socket := filepath.Join(homePath, "runtimes", "factory.sock")
+	fixture := &apiFixture{directory: directory, socket: socket, attemptPath: attemptPath, listener: listener, home: home}
 	copy(fixture.bearer[:], attempt)
 	cleanup = false
 	return fixture
@@ -76,6 +95,12 @@ func (fixture *apiFixture) close(t testing.TB) {
 			t.Errorf("close listener: %v", err)
 		}
 		fixture.listener = nil
+	}
+	if fixture.home != nil {
+		if err := fixture.home.Close(); err != nil {
+			t.Errorf("close operational home: %v", err)
+		}
+		fixture.home = nil
 	}
 	if _, err := os.Lstat(fixture.socket); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("socket remains after close: %v", err)
@@ -441,7 +466,7 @@ func TestMissingSocketOrAttemptTokenCannotFallBack(t *testing.T) {
 			} else if err := os.Unsetenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE"); err != nil {
 				t.Fatal(err)
 			}
-			t.Setenv("DARK_FACTORY_OPERATOR_TOKEN_FILE", filepath.Join(fixture.directory, "operator.token"))
+			t.Setenv("DARK_FACTORY_OPERATOR_TOKEN_FILE", filepath.Join(fixture.directory, "home", "operator.token"))
 			accepted := make(chan bool, 1)
 			listener := fixture.listener
 			go func() {

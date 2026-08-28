@@ -13,11 +13,15 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/dark-factory-build/dark-factory/internal/install"
 )
 
 type serverReceiveResult struct {
@@ -25,18 +29,52 @@ type serverReceiveResult struct {
 	err  error
 }
 
+var apiTestHomes sync.Map
+
 func newAPITestListener(t testing.TB, bearer credential) (*Listener, string) {
 	t.Helper()
 	directory := privateTestDirectory(t)
-	tokenPath := filepath.Join(directory, "operator.token")
+	homePath := filepath.Join(directory, "home")
+	if _, err := install.Init(context.Background(), homePath); err != nil {
+		if errors.Is(err, install.ErrUnsupported) {
+			t.Skip("operational local API is unsupported on this platform")
+		}
+		t.Fatal(err)
+	}
+	tokenPath := filepath.Join(homePath, "operator.token")
 	writeTestToken(t, tokenPath, bearer)
-	socketPath := filepath.Join(directory, "api.sock")
-	listener, err := Listen(socketPath, tokenPath)
+	home, err := install.OpenOperationalHome(context.Background(), homePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = listener.Close() })
+	authority, err := home.OpenLocalAPI(context.Background())
+	if err != nil {
+		_ = home.Close()
+		t.Fatal(err)
+	}
+	listener, err := Listen(authority)
+	if err != nil {
+		_ = home.Close()
+		t.Fatal(err)
+	}
+	apiTestHomes.Store(listener, home)
+	t.Cleanup(func() {
+		closeAPITestListener(t, listener)
+	})
+	socketPath := filepath.Join(homePath, "runtimes", "factory.sock")
 	return listener, socketPath
+}
+
+func closeAPITestListener(t testing.TB, listener *Listener) {
+	t.Helper()
+	if err := listener.Close(); err != nil {
+		t.Errorf("close local API listener: %v", err)
+	}
+	if value, ok := apiTestHomes.LoadAndDelete(listener); ok {
+		if err := value.(*install.OperationalHome).Close(); err != nil {
+			t.Errorf("close operational API home: %v", err)
+		}
+	}
 }
 
 func startServerReceive(listener *Listener, reply func(Call) Reply) <-chan serverReceiveResult {
@@ -120,15 +158,7 @@ func replyForCall(call Call) Reply {
 
 func TestListenerCreatesExactOwnerSocketAndGuardsRemoval(t *testing.T) {
 	bearer := testCredential('L')
-	directory := privateTestDirectory(t)
-	tokenPath := filepath.Join(directory, "operator.token")
-	writeTestToken(t, tokenPath, bearer)
-	socketPath := filepath.Join(directory, "api.sock")
-
-	listener, err := Listen(socketPath, tokenPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	listener, socketPath := newAPITestListener(t, bearer)
 	info, err := os.Lstat(socketPath)
 	if err != nil {
 		t.Fatal(err)
@@ -137,46 +167,12 @@ func TestListenerCreatesExactOwnerSocketAndGuardsRemoval(t *testing.T) {
 	if !ok || !validSocketInfo(info) || identity.uid != uint32(os.Geteuid()) {
 		t.Fatalf("listener socket metadata = %#v", info)
 	}
-	if err := listener.Close(); err != nil {
-		t.Fatal(err)
-	}
+	closeAPITestListener(t, listener)
 	if _, err := os.Lstat(socketPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("closed listener socket remains: %v", err)
 	}
-
-	preexisting := []byte("preserve")
-	if err := os.WriteFile(socketPath, preexisting, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := Listen(socketPath, tokenPath); got != nil || !errors.Is(err, ErrInvalidListener) {
-		t.Fatalf("preexisting target listener = %+v, %v", got, err)
-	}
-	if contents, err := os.ReadFile(socketPath); err != nil || !bytes.Equal(contents, preexisting) {
-		t.Fatalf("preexisting target changed: %q, %v", contents, err)
-	}
-	if err := os.Remove(socketPath); err != nil {
-		t.Fatal(err)
-	}
-
-	listener, err = Listen(socketPath, tokenPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	moved := filepath.Join(directory, "owned-moved.sock")
-	if err := os.Rename(socketPath, moved); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(socketPath, preexisting, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := listener.Close(); !errors.Is(err, ErrInvalidListener) {
-		t.Fatalf("replacement close = %v", err)
-	}
-	if contents, err := os.ReadFile(socketPath); err != nil || !bytes.Equal(contents, preexisting) {
-		t.Fatalf("replacement target changed: %q, %v", contents, err)
-	}
-	if _, err := os.Lstat(moved); err != nil {
-		t.Fatalf("owned moved socket was guessed away: %v", err)
+	if got, err := Listen(nil); got != nil || !errors.Is(err, ErrInvalidListener) {
+		t.Fatalf("nil authority listener = %+v, %v", got, err)
 	}
 }
 
@@ -606,9 +602,7 @@ func TestServerReceiveCancellationCutsJoinWatcher(t *testing.T) {
 				if err := client.Close(); err != nil {
 					t.Fatal(err)
 				}
-				if err := listener.Close(); err != nil {
-					t.Fatal(err)
-				}
+				closeAPITestListener(t, listener)
 			}
 			deadline := time.Now().Add(500 * time.Millisecond)
 			for runtime.NumGoroutine() != baselineGoroutines && time.Now().Before(deadline) {
@@ -625,15 +619,59 @@ func TestServerReceiveCancellationCutsJoinWatcher(t *testing.T) {
 }
 
 func TestServerRechecksOperatorTokenAndKeepsPublicValuesPrivate(t *testing.T) {
+	if os.Getenv("DARK_FACTORY_API_POISON_CHILD") != "1" {
+		command := exec.Command(os.Args[0], "-test.run=^TestServerRechecksOperatorTokenAndKeepsPublicValuesPrivate$")
+		command.Env = append(os.Environ(), "DARK_FACTORY_API_POISON_CHILD=1")
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("isolated poison proof failed: %v\n%s", err, output)
+		}
+		return
+	}
 	bearer := testCredential('S')
 	listener, socketPath := newAPITestListener(t, bearer)
-	replacement := filepath.Join(filepath.Dir(listener.tokenPath), "replacement.token")
-	writeTestToken(t, replacement, bearer)
-	if err := os.Rename(replacement, listener.tokenPath); err != nil {
+	tokenPath := filepath.Join(filepath.Dir(filepath.Dir(socketPath)), "operator.token")
+	acceptOne := func() (*net.UnixConn, <-chan serverReceiveResult) {
+		accepted := make(chan struct{})
+		done := make(chan serverReceiveResult, 1)
+		go func() {
+			connection, err := listener.Accept()
+			if err != nil {
+				done <- serverReceiveResult{err: err}
+				return
+			}
+			defer connection.Close()
+			close(accepted)
+			call, err := connection.Receive(context.Background())
+			done <- serverReceiveResult{call: call, err: err}
+		}()
+		client, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: socketPath, Net: "unix"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		<-accepted
+		return client, done
+	}
+	client, done := acceptOne()
+	attemptClient, attemptDone := acceptOne()
+	defer attemptClient.Close()
+	defer client.Close()
+	saved := tokenPath + ".saved"
+	if err := os.Rename(tokenPath, saved); err != nil {
 		t.Fatal(err)
 	}
-	done := startServerReceive(listener, nil)
-	response, err := exchangeRaw(socketPath, rawRequest(1, operatorDomain, bearer, []byte(`{"method":"health","params":{}}`)), true)
+	replacement := filepath.Join(filepath.Dir(tokenPath), "replacement.token")
+	writeTestToken(t, replacement, bearer)
+	if err := os.Rename(replacement, tokenPath); err != nil {
+		t.Fatal(err)
+	}
+	request := rawRequest(1, operatorDomain, bearer, []byte(`{"method":"health","params":{}}`))
+	if _, err := client.Write(request); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	response, err := readTestFrame(client)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -646,18 +684,60 @@ func TestServerRechecksOperatorTokenAndKeepsPublicValuesPrivate(t *testing.T) {
 	if result := <-done; !errors.Is(result.err, ErrProtocol) {
 		t.Fatalf("replaced token dispatched: %+v, %v", result.call, result.err)
 	}
-	values := []any{listener, *listener, listener.token.bearer, AttemptDigest{value: sha256.Sum256(bearer[:])}, Call{text: "private-result-sentinel"}, Reply{code: RemoteInternal}}
+	if err := os.Remove(tokenPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(saved, tokenPath); err != nil {
+		t.Fatal(err)
+	}
+	attemptRequest := rawRequest(1, attemptDomain, testCredential('T'), []byte(`{"method":"succeed","params":{"result":"restored-must-not-dispatch"}}`))
+	if _, err := attemptClient.Write(attemptRequest); err != nil {
+		t.Fatal(err)
+	}
+	if err := attemptClient.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	attemptResponse, err := readTestFrame(attemptClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = decodeTestResponse(t, attemptResponse, attemptDomain, &struct{}{})
+	if !errors.As(err, &remote) || remote.Code() != RemoteUnauthorized {
+		t.Fatalf("restored poisoned attempt authority = %v", err)
+	}
+	if result := <-attemptDone; !errors.Is(result.err, ErrProtocol) {
+		t.Fatalf("restored poisoned attempt dispatched: %+v, %v", result.call, result.err)
+	}
+	if listener.authority.CheckOperator(bearer[:]) || !errors.Is(listener.authority.Verify(), install.ErrUncertain) {
+		t.Fatal("restored namespace revived local API authority")
+	}
+	values := []any{listener, *listener, AttemptDigest{value: sha256.Sum256(bearer[:])}, Call{text: "private-result-sentinel"}, Reply{code: RemoteInternal}}
 	for _, value := range values {
 		encoded, marshalErr := json.Marshal(value)
 		if marshalErr != nil {
 			t.Fatal(marshalErr)
 		}
 		formatted := fmt.Sprintf("%v %+v %#v %s", value, value, value, encoded)
-		for _, private := range []string{string(bearer[:]), socketPath, listener.tokenPath, "private-result-sentinel"} {
+		for _, private := range []string{string(bearer[:]), socketPath, tokenPath, "private-result-sentinel"} {
 			if strings.Contains(formatted, private) {
 				t.Fatalf("public formatting exposed private value: %s", formatted)
 			}
 		}
+	}
+	// The poisoned authority deliberately retains descriptors and its home
+	// lease. Isolate this causal proof so process exit, not a test-only repair
+	// path, releases the retained uncertain resources.
+	os.Exit(0)
+}
+
+func TestListenerClaimsAuthorityExactlyOnce(t *testing.T) {
+	listener, _ := newAPITestListener(t, testCredential('Q'))
+	if second, err := Listen(listener.authority); second != nil || !errors.Is(err, ErrInvalidListener) {
+		t.Fatalf("second protocol claim = %v, %v", second, err)
+	}
+	closeAPITestListener(t, listener)
+	if second, err := Listen(listener.authority); second != nil || !errors.Is(err, ErrInvalidListener) {
+		t.Fatalf("claim after close = %v, %v", second, err)
 	}
 }
 
@@ -679,9 +759,7 @@ func TestServerConnectionsLeaveExactResourceCensus(t *testing.T) {
 		if result := <-done; result.err != nil {
 			t.Fatal(result.err)
 		}
-		if err := listener.Close(); err != nil {
-			t.Fatal(err)
-		}
+		closeAPITestListener(t, listener)
 		if _, err := os.Lstat(socketPath); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("socket retained: %v", err)
 		}
@@ -692,6 +770,79 @@ func TestServerConnectionsLeaveExactResourceCensus(t *testing.T) {
 	}
 	if after := countTestFDs(t); after != baselineFDs {
 		t.Fatalf("server calls changed FD census: before=%d after=%d", baselineFDs, after)
+	}
+}
+
+func TestServerHomeCloseJoinsReceivedCallBeforeAuthorityRelease(t *testing.T) {
+	bearer := testCredential('J')
+	listener, socketPath := newAPITestListener(t, bearer)
+	homeValue, ok := apiTestHomes.Load(listener)
+	if !ok {
+		t.Fatal("test listener lost its operational home owner")
+	}
+	home := homeValue.(*install.OperationalHome)
+	received := make(chan Call, 1)
+	release := make(chan struct{})
+	handlerDone := make(chan error, 1)
+	go func() {
+		connection, err := listener.Accept()
+		if err != nil {
+			handlerDone <- err
+			return
+		}
+		defer connection.Close()
+		call, err := connection.Receive(context.Background())
+		if err != nil {
+			handlerDone <- err
+			return
+		}
+		received <- call
+		<-release
+		handlerDone <- nil
+	}()
+	client, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: socketPath, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := rawRequest(1, operatorDomain, bearer, []byte(`{"method":"health","params":{}}`))
+	if _, err := client.Write(request); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case call := <-received:
+		if call.Kind() != CallHealth {
+			t.Fatalf("received call = %v", call.Kind())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("server did not receive the exact call")
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- home.Close() }()
+	select {
+	case err := <-closed:
+		t.Fatalf("home close returned before received-call owner joined: %v", err)
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(release)
+	if err := <-handlerDone; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("home close deadlocked after connection owner joined")
+	}
+	apiTestHomes.Delete(listener)
+	_ = client.Close()
+	if connection, err := net.DialTimeout("unix", socketPath, 50*time.Millisecond); err == nil {
+		_ = connection.Close()
+		t.Fatal("post-close connection succeeded")
 	}
 }
 

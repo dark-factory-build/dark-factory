@@ -21,6 +21,7 @@ import (
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/changeworker"
+	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 	"golang.org/x/sys/unix"
@@ -1137,6 +1138,7 @@ type supervisorFixture struct {
 	runtimeParent                                *RuntimeParent
 	spec                                         SupervisorSpec
 	listener                                     *api.Listener
+	apiHome                                      *install.OperationalHome
 	serverDone                                   chan error
 	serverOnce                                   sync.Once
 	runMu                                        sync.Mutex
@@ -1244,23 +1246,28 @@ func newSupervisorFixture(t *testing.T, program string) *supervisorFixture {
 		t.Fatal(err)
 	}
 	fixture.daemon = daemon
-	operatorToken := filepath.Join(root, "operator.token")
+	apiHomePath := filepath.Join(root, "api-home")
+	if _, err := install.Init(context.Background(), apiHomePath); err != nil {
+		t.Fatal(err)
+	}
+	operatorToken := filepath.Join(apiHomePath, "operator.token")
 	if err := os.WriteFile(operatorToken, bytes.Repeat([]byte{'o'}, 32), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	socket := filepath.Join(root, "api.sock")
-	parentInfo, err := os.Stat(filepath.Dir(socket))
+	apiHome, err := install.OpenOperationalHome(context.Background(), apiHomePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if parentInfo.Mode().Perm() != 0o700 || filepath.Dir(socket) != root {
-		t.Fatalf("attempt API parent is not exact private fixture root: path=%q mode=%v", filepath.Dir(socket), parentInfo.Mode().Perm())
-	}
-	t.Logf("attempt API fixture parent is exact mode %04o", parentInfo.Mode().Perm())
-	listener, err := api.Listen(socket, operatorToken)
+	fixture.apiHome = apiHome
+	authority, err := apiHome.OpenLocalAPI(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
+	listener, err := api.Listen(authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	socket := filepath.Join(apiHomePath, "runtimes", "factory.sock")
 	fixture.listener = listener
 	fixture.serverDone = make(chan error, 1)
 	go func() {
@@ -1303,6 +1310,12 @@ func (fixture *supervisorFixture) close() {
 			case <-time.After(3 * time.Second):
 				fixture.t.Errorf("API accept owner did not join")
 			}
+		}
+		if fixture.apiHome != nil {
+			if err := fixture.apiHome.Close(); err != nil {
+				fixture.t.Errorf("API home close: %v", err)
+			}
+			fixture.apiHome = nil
 		}
 		fixture.hardSafetyCleanup()
 		if fixture.runtimeParent != nil {

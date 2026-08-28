@@ -23,6 +23,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/daemon"
+	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 	"golang.org/x/sys/unix"
@@ -138,6 +139,7 @@ type fixture struct {
 	daemon                *daemon.Daemon
 	runtimeParent         *daemon.RuntimeParent
 	listener              *api.Listener
+	apiHome               *install.OperationalHome
 	apiDone               chan error
 	agentID               kernel.AgentID
 	spec                  daemon.SupervisorSpec
@@ -242,15 +244,27 @@ func newFixture(t *testing.T, seed byte, test scenario, factoryctl, runnerExecut
 	if err != nil {
 		t.Fatal(err)
 	}
-	operatorToken := filepath.Join(root, "operator.token")
+	apiHomePath := filepath.Join(root, "api-home")
+	if _, err := install.Init(context.Background(), apiHomePath); err != nil {
+		t.Fatal(err)
+	}
+	operatorToken := filepath.Join(apiHomePath, "operator.token")
 	if err := os.WriteFile(operatorToken, bytes.Repeat([]byte{'o'}, 32), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	socket := filepath.Join(root, "factory.sock")
-	result.listener, err = api.Listen(socket, operatorToken)
+	result.apiHome, err = install.OpenOperationalHome(context.Background(), apiHomePath)
 	if err != nil {
 		t.Fatal(err)
 	}
+	authority, err := result.apiHome.OpenLocalAPI(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	result.listener, err = api.Listen(authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	socket := filepath.Join(apiHomePath, "runtimes", "factory.sock")
 	result.apiDone = make(chan error, 1)
 	go func() {
 		for {
@@ -671,6 +685,13 @@ func (fixture *fixture) closeOwned() {
 		} else {
 			return
 		}
+	}
+	if fixture.apiHome != nil {
+		if err := fixture.apiHome.Close(); err != nil {
+			fixture.t.Errorf("API home close: %v", err)
+			return
+		}
+		fixture.apiHome = nil
 	}
 	if fixture.runtimeParent != nil {
 		if err := fixture.runtimeParent.Close(); err != nil {

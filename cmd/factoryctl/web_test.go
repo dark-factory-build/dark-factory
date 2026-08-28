@@ -537,7 +537,7 @@ func webEnvironment(fixture *apiFixture) func(string) string {
 		case "DARK_FACTORY_SOCKET":
 			return fixture.socket
 		case "DARK_FACTORY_OPERATOR_TOKEN_FILE":
-			return fixture.directory + "/operator.token"
+			return fixture.directory + "/home/operator.token"
 		default:
 			return ""
 		}

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
+	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
@@ -59,16 +60,36 @@ func newDispatchFixture(t *testing.T) *dispatchFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	operatorToken := filepath.Join(directory, "operator.token")
+	authHomePath := filepath.Join(directory, "home")
+	if _, err := install.Init(context.Background(), authHomePath); err != nil {
+		if errors.Is(err, install.ErrUnsupported) {
+			t.Skip("operational local API is unsupported on this platform")
+		}
+		t.Fatal(err)
+	}
+	operatorToken := filepath.Join(authHomePath, "operator.token")
 	if err := os.WriteFile(operatorToken, bytes.Repeat([]byte{'o'}, 32), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	socket := filepath.Join(directory, "api.sock")
-	listener, err := api.Listen(socket, operatorToken)
+	home, err := install.OpenOperationalHome(context.Background(), authHomePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = listener.Close() })
+	authority, err := home.OpenLocalAPI(context.Background())
+	if err != nil {
+		_ = home.Close()
+		t.Fatal(err)
+	}
+	listener, err := api.Listen(authority)
+	if err != nil {
+		_ = home.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = listener.Close()
+		_ = home.Close()
+	})
+	socket := filepath.Join(authHomePath, "runtimes", "factory.sock")
 	return &dispatchFixture{daemon: daemon, store: store, listener: listener, socket: socket, operator: operatorToken}
 }
 

@@ -35,6 +35,7 @@ type operationalHomeState struct {
 	anchorID     identity
 	members      map[string]retainedMember
 	store        *kernel.Store
+	localAPI     *LocalAPIAuthority
 	closed       bool
 	closeErr     error
 }
@@ -266,15 +267,28 @@ func (state *operationalHomeState) close() error {
 	}
 	state.closed = true
 	var result error
+	// The local API is the externally reachable child and must stop and join
+	// before the Store or any retained home descriptor can be released.
+	if state.localAPI != nil {
+		if err := state.localAPI.Close(); err != nil {
+			result = errors.Join(result, fmt.Errorf("close local API authority: %w", err))
+		} else {
+			state.localAPI = nil
+		}
+	}
 	// The Store is a child of this lifetime lease. Closing the home makes
 	// every outstanding Store reference fail closed before any retained home
 	// descriptor or the flock is released.
 	if state.store != nil {
 		if err := closeOperationalStore(state.store); err != nil {
-			state.closeErr = errors.Join(ErrUncertain, fmt.Errorf("close operational Store: %w", err))
-			return state.closeErr
+			result = errors.Join(result, fmt.Errorf("close operational Store: %w", err))
+		} else {
+			state.store = nil
 		}
-		state.store = nil
+	}
+	if result != nil {
+		state.closeErr = errors.Join(ErrUncertain, result)
+		return state.closeErr
 	}
 	identityErr := recheckOperationalIdentityByState(state)
 	if identityErr != nil {

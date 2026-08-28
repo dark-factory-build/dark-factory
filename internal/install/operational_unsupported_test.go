@@ -22,3 +22,14 @@ func TestOperationalHomeOpenStoreUnsupportedHasNoEffect(t *testing.T) {
 		t.Fatalf("unsupported operational Store open = %v, %v", store, err)
 	}
 }
+
+func TestOperationalHomeOpenLocalAPIUnsupportedHasNoEffect(t *testing.T) {
+	home := &OperationalHome{state: &operationalHomeState{}}
+	authority, err := home.OpenLocalAPI(context.Background())
+	if authority != nil || !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("unsupported local API open = %v, %v", authority, err)
+	}
+	if authority.CheckOperator(make([]byte, 32)) {
+		t.Fatal("nil unsupported authority accepted operator")
+	}
+}

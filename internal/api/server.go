@@ -9,12 +9,10 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
-	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
-	"golang.org/x/sys/unix"
+	"github.com/dark-factory-build/dark-factory/internal/install"
 )
 
 // CallKind is the closed set of requests accepted by the local API.
@@ -225,16 +223,10 @@ func NewErrorReply(code RemoteErrorCode) (Reply, error) {
 	return Reply{kind: replyError, code: code}, nil
 }
 
-// Listener owns one exact filesystem socket and the operator token loaded at
-// creation. It creates no goroutines; the caller owns the accept loop.
+// Listener owns local API framing over one install-retained endpoint. It
+// creates no goroutines; the caller owns the accept loop.
 type Listener struct {
-	path      string
-	name      string
-	tokenPath string
-	token     tokenRecord
-	record    socketRecord
-	root      *privateRoot
-	listener  *net.UnixListener
+	authority *install.LocalAPIAuthority
 	closer    *listenerClose
 }
 
@@ -246,90 +238,14 @@ type listenerClose struct {
 func (Listener) String() string   { return "Listener(<redacted>)" }
 func (Listener) GoString() string { return "Listener(<redacted>)" }
 
-// Listen creates one EUID-owned mode-0600 Unix socket in an already-private
-// parent. A pre-existing target is never removed or replaced.
-func Listen(socketPath, operatorTokenPath string) (*Listener, error) {
-	if !validCanonicalPath(socketPath, maxSocketPathBytes) {
+// Listen consumes an already-bound install authority. Socket creation, stale
+// recovery, operator-principal loading, and filesystem ownership never occur
+// in this protocol package.
+func Listen(authority *install.LocalAPIAuthority) (*Listener, error) {
+	if authority == nil || authority.ClaimProtocol() != nil {
 		return nil, ErrInvalidListener
 	}
-	token, err := loadToken(operatorTokenPath)
-	if err != nil {
-		return nil, ErrInvalidListener
-	}
-	root, _, err := openPrivateParent(socketPath)
-	if err != nil {
-		return nil, ErrInvalidListener
-	}
-	name := filepath.Base(socketPath)
-	if _, err := root.Lstat(name); !errors.Is(err, os.ErrNotExist) {
-		root.Close()
-		return nil, ErrInvalidListener
-	}
-
-	unixListener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
-	if err != nil {
-		root.Close()
-		return nil, ErrInvalidListener
-	}
-	unixListener.SetUnlinkOnClose(false)
-	listener := &Listener{
-		path: socketPath, name: name, tokenPath: operatorTokenPath, token: token,
-		root: root, listener: unixListener, closer: &listenerClose{},
-	}
-
-	created, ok := listener.currentSocket(false)
-	if !ok {
-		_ = unixListener.Close()
-		_ = root.Close()
-		return nil, ErrInvalidListener
-	}
-	listener.record = socketRecord{socket: created}
-	if err := unix.Fchmodat(int(root.directory.Fd()), name, 0o600, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-		listener.abortCreate()
-		return nil, ErrInvalidListener
-	}
-	strict, ok := listener.currentSocket(true)
-	if !ok || !strict.sameObject(created) {
-		listener.abortCreate()
-		return nil, ErrInvalidListener
-	}
-	listener.record.socket = strict
-	parentInfo, err := root.directory.Stat()
-	parent, ok := identityOf(parentInfo)
-	if err != nil || !ok || !validPrivateParent(parentInfo) {
-		listener.abortCreate()
-		return nil, ErrInvalidListener
-	}
-	listener.record.parent = parent
-	absolute, err := inspectSocket(socketPath)
-	if err != nil || !absolute.same(listener.record) {
-		listener.abortCreate()
-		return nil, ErrInvalidListener
-	}
-	return listener, nil
-}
-
-func (listener *Listener) currentSocket(strict bool) (fileIdentity, bool) {
-	info, err := listener.root.Lstat(listener.name)
-	if err != nil {
-		return fileIdentity{}, false
-	}
-	identity, ok := identityOf(info)
-	if !ok || info.Mode()&os.ModeSocket == 0 || identity.uid != uint32(os.Geteuid()) || identity.links != 1 || identity.size != 0 {
-		return fileIdentity{}, false
-	}
-	if strict && !validSocketInfo(info) {
-		return fileIdentity{}, false
-	}
-	return identity, true
-}
-
-func (listener *Listener) abortCreate() {
-	_ = listener.listener.Close()
-	if current, ok := listener.currentSocket(false); ok && current.sameObject(listener.record.socket) {
-		_ = unix.Unlinkat(int(listener.root.directory.Fd()), listener.name, 0)
-	}
-	_ = listener.root.Close()
+	return &Listener{authority: authority, closer: &listenerClose{}}, nil
 }
 
 // Accept synchronously accepts one connection and verifies both the socket
@@ -339,41 +255,32 @@ func (listener *Listener) Accept() (*Connection, error) {
 }
 
 func (listener *Listener) accept(peerCheck func(net.Conn) error) (*Connection, error) {
-	before, err := inspectSocket(listener.path)
-	if err != nil || !before.same(listener.record) {
+	if listener == nil || listener.authority == nil {
 		return nil, ErrInvalidListener
 	}
-	connection, err := listener.listener.AcceptUnix()
+	connection, err := listener.authority.Accept()
 	if err != nil {
 		return nil, ErrTransport
 	}
-	after, inspectErr := inspectSocket(listener.path)
-	if inspectErr != nil || !after.same(listener.record) || peerCheck(connection) != nil {
-		_ = connection.Close()
+	if peerCheck(connection) != nil {
+		_ = listener.authority.ReleaseConnection(connection)
 		return nil, ErrInvalidListener
 	}
-	return &Connection{
-		connection: connection, operatorTokenPath: listener.tokenPath,
-		operatorToken: listener.token,
-	}, nil
+	return &Connection{connection: connection, authority: listener.authority}, nil
 }
 
-// Close closes the listener and removes only the exact socket created by
-// Listen. A replacement at the recorded name is left untouched.
+// Close closes the retained authority. A replacement at the recorded name is
+// left untouched and makes the authority's stable result uncertain.
 func (listener *Listener) Close() error {
+	if listener == nil {
+		return nil
+	}
 	listener.closer.once.Do(func() {
-		closeErr := listener.listener.Close()
-		current, ok := listener.currentSocket(false)
-		if !ok || !current.same(listener.record.socket) {
-			listener.closer.err = ErrInvalidListener
-		} else if err := unix.Unlinkat(int(listener.root.directory.Fd()), listener.name, 0); err != nil {
-			listener.closer.err = ErrInvalidListener
+		if listener.authority == nil {
+			return
 		}
-		if err := listener.root.Close(); err != nil && listener.closer.err == nil {
+		if err := listener.authority.Close(); err != nil {
 			listener.closer.err = ErrInvalidListener
-		}
-		if closeErr != nil && !errors.Is(closeErr, net.ErrClosed) && listener.closer.err == nil {
-			listener.closer.err = ErrTransport
 		}
 	})
 	return listener.closer.err
@@ -392,22 +299,23 @@ const (
 // Connection owns one accepted socket and permits exactly one Receive and one
 // Respond. Receive owns and joins its cancellation watcher before returning.
 type Connection struct {
-	connection        *net.UnixConn
-	operatorTokenPath string
-	operatorToken     tokenRecord
-	domain            byte
-	kind              CallKind
-	state             connectionState
+	connection *net.UnixConn
+	authority  *install.LocalAPIAuthority
+	domain     byte
+	kind       CallKind
+	state      connectionState
+	closeOnce  sync.Once
+	closeErr   error
 }
 
-func (Connection) String() string   { return "Connection(<redacted>)" }
-func (Connection) GoString() string { return "Connection(<redacted>)" }
+func (*Connection) String() string   { return "Connection(<redacted>)" }
+func (*Connection) GoString() string { return "Connection(<redacted>)" }
 
 // Receive reads one complete request and requires client EOF before returning
 // a dispatchable Call. Invalid requests are answered, when a valid response
 // domain is available, with a fixed error code.
 func (connection *Connection) Receive(ctx context.Context) (Call, error) {
-	if connection == nil || connection.connection == nil || connection.state != connectionNew {
+	if connection == nil || connection.connection == nil || connection.authority == nil || connection.state != connectionNew {
 		return Call{}, ErrProtocol
 	}
 	connection.state = connectionReading
@@ -446,18 +354,15 @@ func (connection *Connection) Receive(ctx context.Context) (Call, error) {
 	var bearer credential
 	copy(bearer[:], payload[2:requestPrelude])
 	defer clear(bearer[:])
-	if domain == operatorDomain {
-		current, tokenErr := loadToken(connection.operatorTokenPath)
-		if tokenErr != nil || !current.same(connection.operatorToken) || !bearer.equal(current.bearer) {
-			return Call{}, connection.reject(RemoteUnauthorized)
-		}
-	}
 	call, code := decodeCall(domain, bearer, payload[requestPrelude:])
 	if err := ctx.Err(); err != nil {
 		return Call{}, err
 	}
 	if code != "" {
 		return Call{}, connection.reject(code)
+	}
+	if domain == operatorDomain && !connection.authority.CheckOperator(bearer[:]) || domain == attemptDomain && connection.authority.Verify() != nil {
+		return Call{}, connection.reject(RemoteUnauthorized)
 	}
 	connection.kind = call.kind
 	connection.state = connectionReceived
@@ -731,12 +636,20 @@ func (connection *Connection) writeReply(reply Reply) error {
 }
 
 func (connection *Connection) Close() error {
-	if connection == nil || connection.connection == nil || connection.state == connectionClosed {
+	if connection == nil {
 		return nil
 	}
-	connection.state = connectionClosed
-	if err := connection.connection.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-		return ErrTransport
-	}
-	return nil
+	connection.closeOnce.Do(func() {
+		connection.state = connectionClosed
+		if connection.authority != nil && connection.connection != nil {
+			if err := connection.authority.ReleaseConnection(connection.connection); err != nil {
+				connection.closeErr = ErrTransport
+			}
+		} else if connection.connection != nil {
+			if err := connection.connection.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+				connection.closeErr = ErrTransport
+			}
+		}
+	})
+	return connection.closeErr
 }
