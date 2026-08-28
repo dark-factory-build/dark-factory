@@ -185,13 +185,14 @@ fallback. No part of this Local API contract is implemented at `497ecfe4`.
 #### Corrected Change disposition and descriptor contract (planned)
 
 Successive cold reviews **BLOCKED** the literal `c732f103`, `f05eff86`,
-`88a8ab22`, `884d63c3` and `7dc2e83b` plans. They found stale retry revision,
-child-live abandonment, caller-selected reuse, incomplete crash recovery, a
-leaked staging namespace, contradictory worker executables and finally a
-transient no-start receipt that became unrecoverable on frame loss. The latest cold review also
-found unreachable run/resource combinations, pair-splitting mutation paths,
-terminal closure before outer-runner release, incomplete post-unlink recovery
-and unused durable repository identity. The contract below
+`88a8ab22`, `884d63c3`, `7dc2e83b` and `a8d3c395` plans. They found stale retry
+revision, child-live abandonment, caller-selected reuse, incomplete crash
+recovery, a leaked staging namespace, contradictory worker executables and
+finally a transient no-start receipt that became unrecoverable on frame loss.
+The latest cold review also
+found result durability promotion, live group-reap order, the four-resource
+first-outcome matrix, write-authority-aware Change settlement, deterministic
+stage absence and exact provider-exit reconciliation still underspecified. The contract below
 incorporates every required correction and supersedes those literal tables. It
 still requires a fresh independent exact-contract **ALLOW** before
 implementation begins. No production Change schema, runner or worker code has
@@ -285,8 +286,8 @@ deltas are:
 | abandoned retry N -> `reserved` | `N+1` and `A=N+1`; preserve no obsolete materialization facts, clear settlement, bind the new run atomically |
 | fresh/abandoned `reserved` -> `prepared` | `A+1`; exact Git selection, commitment and empty stage identity commit together before any materialized blob read |
 | fresh/abandoned `prepared` -> `available` | `A+2`; atomic no-replace publication, exact persisted tree identity and independent bounded plain-tree scan all agree; settlement remains null |
-| retained retry `available` -> `retained` | `A+1`; stable retained identity and facts are revalidated and settlement binds this run |
-| fresh/abandoned `available` -> `retained` | `A+3`; stable published identity and facts are revalidated and settlement binds this run |
+| retained retry `available` -> `retained` | `A+1`; the exact settlement arm below revalidates stable identity, content facts and stage absence, then binds this run |
+| fresh/abandoned `available` -> `retained` | `A+3`; the exact settlement arm below revalidates stable identity, content facts and stage absence, then binds this run |
 | direct `reserved` -> `abandoned` | `A+1`; absence/removal proof below succeeds and settlement binds this run |
 | `prepared` -> `abandoned` | `A+2`; stable prior stage absence or exact recorded-identity removal plus the absence proof below succeeds, obsolete selection/tree/timestamp facts are cleared, and settlement binds this run |
 
@@ -296,10 +297,20 @@ row revision. A retained retry reaches provider activation at exact revision
 `A`, performs no Git selection or materialization, and immediately before exec
 requires the final name's identity, digest, entry count and total bytes to
 equal the retained facts literally. At `prepared -> available`, the final
-name's device/inode must equal the identity persisted at `prepared`; at
-`available -> retained`, that identity must remain unchanged and only the
-rescanned digest/count/bytes may replace the prior content facts. A mismatch
-never adopts a replacement or rewrites facts to bless it.
+name's device/inode must equal the identity persisted at `prepared`.
+
+Every `available -> retained` arm binds the Change parent, proves the final
+name still has that exact identity and proves the deterministic stage name
+stably absent before and after the parent-binding recheck. A present,
+reappeared or replaced stage remains finalizing and is never deleted by this
+transition. When `runs.running_at_ms` (`Run.RunningAt`) is null, the final
+tree's digest, entry count and total bytes must equal the available facts
+literally and the transition may not rewrite them. When it is nonnull, the
+provider had durable write authority; one exact safe bounded rescan may replace
+digest/count/bytes while the tree identity remains fixed. The presence or
+absence of `inner.activate` does not choose these arms: that marker proves only
+that the selection gate crossed, never that provider exec or a write occurred.
+A mismatch never adopts a replacement or rewrites facts to bless it.
 
 One durable canonical `AttemptResult` spool is the only inner-process result
 authority and replaces both the old `TerminalRecord` and the transient no-start
@@ -326,23 +337,31 @@ before `AttemptInnerReady`: it first validates the gate and fresh result name,
 then the sole `cmd.Start` call returns a non-nil error. A caller cannot infer or
 assert this kind. Once `cmd.Start` returns nil, the exact owner is retained
 through every outcome. It must positively acquire the exact PID/PGID/birth
-identity, prove process-group convergence and sole-`Wait` the child before it
-may emit `inner_converged`. If birth identity cannot be acquired after a
-successful start, the owner still converges and waits what it owns but emits no
-result; that pre-identity uncertainty remains nonterminal rather than writing a
-weak identity.
+identity. While the direct leader remains unreaped, the owner observes its exit,
+retains the birth-pinned process-group identity, converges or kills descendants
+under that live ownership and positively proves group absence. Only then does
+it sole-`Wait` the leader. It never signals or probes the numeric process group
+after `Wait`, when leader identity could be reused. If birth identity cannot be
+acquired after a successful start, the owner still converges and waits what it
+owns but emits no result; that pre-identity uncertainty remains nonterminal
+rather than writing a weak identity.
 
 The same outer controller owns the PTY master and bounded output reader. Its
 result-publication primitive is reachable only after terminal input is frozen,
-the output reader is synchronously joined and the PTY master is closed; it does
-not accept a caller-supplied “output closed” flag. Thus the authenticated spool
-also proves that controller ordering without adding terminal bytes, an output
-receipt or a second durable artifact.
+the group-absence proof and sole `Wait` complete in that order, the bounded
+final output is drained serially, the output reader is synchronously joined and
+the PTY master is closed. It does not accept a caller-supplied “output closed”
+flag. Thus the authenticated spool also proves that controller ordering without
+adding terminal bytes, an output receipt or a second durable artifact.
 
-A short write, crash before either fsync, malformed value or identity change
-leaves a corrupt no-replace artifact. The runner never deletes, repairs or
-replaces it and never respawns; the run remains finalizing for operator-visible
-recovery rather than manufacturing a result.
+A short write, malformed value or identity/name change leaves a corrupt
+no-replace artifact. The runner never deletes, repairs or replaces it and never
+respawns; the run remains finalizing for operator-visible recovery rather than
+manufacturing a result. A complete canonical residue from a crash before the
+publisher's fsync is different: the common consumer can promote those exact
+bytes durably as described below. There is no durable or observable
+“previously fsynced” bit, so the contract never guesses whether a complete
+residue reached storage before recovery.
 
 `inner_converged` is valid before `AttemptInnerReady` after a spawned child's
 readiness failure and in every post-`AttemptInnerReady`, pre-result controller
@@ -360,7 +379,14 @@ result opener. It binds the fixed leaf to the exact retained runtime and
 daemon-configured attempt ID, verifies no-follow owner, mode, link count and
 size bound, parses the closed union, and derives the same inode/device and
 SHA-256. A live frame must match those facts; recovery derives them from the
-same spool. Neither path trusts socket payload as the result.
+same spool. Neither path trusts socket payload as the result or trusts that a
+prior fsync occurred. Before any `ConsumeAttemptResult` call, the common
+consumer opens and validates the exact file grammar/inode/digest, fsyncs that
+exact open file, revalidates its descriptor, fixed name and complete contents,
+fsyncs the retained runtime directory, then revalidates descriptor/name/content
+once more. This promotes a complete canonical no-replace residue to durable
+evidence without changing a byte. A partial, malformed or replaced artifact,
+or any failed/changed revalidation, remains finalizing and is never repaired.
 
 The provider process and provider group are one pair-atomic Store unit from
 declaration onward. Every pair transition requires exactly two affected rows;
@@ -368,29 +394,52 @@ their phases are equal, their identities are either both empty or the same
 exact PID/PGID/birth tuple, and any split update rolls back. Concrete pair
 operations exclusively declare, activate, begin release, mark unresolved and
 consume/release the pair. Generic per-row activation, releasing, unresolved or
-release operations reject both provider kinds. A run entering finalizing moves
-its declared or active pair to releasing (or both to unresolved when positive
-convergence is unavailable) in the same transaction as first-outcome and
-credential revocation, so `finalizing + declared/active` is not a reachable
-post-commit state.
+release operations reject both provider kinds.
+
+The initial resource set is exactly `runtime_root`, `runner_process`,
+`provider_process` and `provider_group`. An ordinary first outcome from
+`admitted` or `running` atomically records the immutable proposal, enters
+`finalizing`, revokes attempt/input authority, moves all four resource rows
+from their legal declared/active phases to `releasing`, and moves the terminal
+session from declared/active to `releasing`. The concrete DML must affect the
+exact runtime/runner count two, provider-pair count two and terminal count one;
+any count, phase or identity mismatch rolls the whole transaction back.
+Consequently a finalizing run cannot durably retain a declared/active resource
+or terminal session.
 
 One concrete Store `ConsumeAttemptResult` transaction accepts only this matrix:
 
-| Run phase | Provider-pair phase and result | One atomic consequence |
+| Run phase | Exact resource/session precondition and result | One atomic consequence |
 |---|---|---|
-| `admitted` | both `declared` with empty identity; `inner_not_created`, or pre-activation `inner_converged` with exact result identity | install deterministic provider-launch or provider-exit failure as the first proposal if none exists, never overwrite an existing proposal, enter `finalizing`, revoke attempt authority, release both provider rows and move the declared terminal session to `releasing`; empty rows never gain an invented `ProviderExit` |
-| `running` | both `active` with one exact identity and matching `inner_converged` | install deterministic provider-exit failure if there is no proposal (never infer success), preserve an existing proposal, enter `finalizing`, revoke attempt/input authority, record exact typed `ProviderExit`, release both provider rows and move the active terminal session to `releasing` |
-| `finalizing` | both `releasing`; result kind and empty/exact identity match the pair's pre-activation or activated ownership | preserve the first proposal, record exact `ProviderExit` only for a nonempty matching converged pair, release both rows and keep/move the terminal session `releasing` |
-| `finalizing` | both `unresolved`; a later positive result matches the empty/exact ownership facts | preserve the first proposal, record exact `ProviderExit` only for a nonempty matching converged pair, release both rows and leave an unresolved terminal session unresolved until the terminal-close proof |
+| `admitted` | runtime root and runner both `active`; provider pair both `declared` with empty identity; terminal `declared`; `inner_not_created` or pre-ready `inner_converged` | install `FailureSpawn` or `FailureActivation` respectively if no proposal exists; preserve any existing proposal; enter `finalizing`; revoke authority; move the exact runtime/runner two rows to `releasing`, terminal to `releasing`, and deliberately release the provider pair directly without an invented `ProviderExit` |
+| `running` | runtime root and runner both `active`; provider pair both `active` with the exact result identity; terminal `active`; matching `inner_converged` | install `FailureProviderExit` if no proposal exists, never success; preserve any existing proposal; enter `finalizing`; revoke authority; move the exact runtime/runner two rows and terminal to `releasing`; record exact `ProviderExit`; deliberately release the provider pair directly |
+| `finalizing` | runtime root and runner are each `releasing` or `unresolved`; provider pair are both `releasing` or both `unresolved` with matching empty/exact ownership; terminal is `releasing` or `unresolved`; matching result | preserve the required existing proposal and all non-provider phases; record exact `ProviderExit` only for a nonempty converged pair; release exactly the provider pair's two rows |
 
 Every state, proposal, credential, pair, terminal lifecycle and bounded
 invalidation/event consequence named by one row commits in that same immediate
-transaction. `inner_not_created` is valid only for an empty-identity pair.
+transaction. The admitted/running result rows are the only deliberate direct
+provider-pair release exception: the authenticated result supplies positive
+terminal process evidence while the same transaction establishes finalizing
+and moves the other two resources/session to cleanup. Their exact DML counts
+are runtime/runner two, provider pair two and terminal one; the finalizing row
+changes exactly the provider pair two. Any partial count rolls back.
+
+`inner_not_created` is valid only for an empty-identity pair and deterministically
+maps to `FailureSpawn`. An admitted pre-ready `inner_converged` maps to
+`FailureActivation`. A running active `inner_converged` with no proposal maps
+to `FailureProviderExit`, regardless of exit zero; provider output never creates
+success. An existing first proposal is never overwritten.
 `inner_converged` is valid for an exact-identity active/releasing/unresolved pair
 or for the declared/empty pre-activation child case. The latter releases empty
 rows without inventing `ProviderExit`. A split phase, one-sided identity,
 result/row identity mismatch, other run/pair phase or generic provider-resource
 mutation fails without state change.
+
+Every result-derived `ProviderExit` has sequence exactly 1 and preserves the
+closed union literally: exactly one of code or signal and the exact value from
+`inner_converged`. `provider_exit_at_ms` is Store commit metadata, not runner
+input. Exact lost-response replay accepts and preserves the already-stored
+valid timestamp; it neither recomputes nor compares a caller timestamp.
 
 For every empty-identity pair, either result kind is usable only while the
 exact durable `inner.activate` marker is positively absent in the result's
@@ -403,12 +452,13 @@ corrupt/unresolved. An active matching pair may validly have the marker absent
 when the identity commit won but provider release did not; recovery must not
 require the marker for that case.
 
-`ConsumeAttemptResult` never closes a terminal session. It records the result
-and provider-pair consequences and keeps or moves the session to `releasing` or
-`unresolved`. Lost Store responses reconcile only through those natural
-postconditions: exact released pair, immutable first proposal, matching typed
-`ProviderExit` only for a nonempty pair, and the exact nonclosed session phase.
-There is no result receipt/history row or blind second transition.
+`ConsumeAttemptResult` never closes a terminal session. Admitted/running
+consumption moves it to `releasing`; finalizing consumption requires it already
+`releasing` or `unresolved` and preserves that phase. Lost Store responses
+reconcile only through those natural postconditions: exact released pair,
+immutable first proposal, matching typed `ProviderExit` only for a nonempty
+pair, and the exact nonclosed session phase. There is no result receipt/history
+row or blind second transition.
 
 The daemon next either sole-waits its still-owned exact outer runner and records
 its real code/signal, or recovery never signals and requires the persisted
@@ -418,9 +468,10 @@ runner PID/birth to observe `Absent` or `Reused` before recording
 nonterminal. Only after the provider pair and runner resource are released may
 one concrete `CloseTerminalAfterRunner` transition reauthenticate the exact
 AttemptResult spool, validate the controller's bounded final-output/PTY-close
-ordering, and close that run's `declared`, `active`, `releasing` or `unresolved`
-session idempotently. It validates exact run/result/runner postconditions on a
-closed replay. No browser call, generic session helper or result consumption
+ordering, and close that run's `releasing` or `unresolved` session idempotently.
+A declared/active session attached to a finalizing run is corruption, never a
+close arm. The transition validates exact run/result/runner postconditions on
+a closed replay. No browser call, generic session helper or result consumption
 can bypass this order: the live PTY owner is gone first.
 
 Change settlement always waits for runner release and terminal closure;
@@ -472,8 +523,13 @@ persisted device/inode and bounded commitment and require the deterministic
 stage name positively absent both before and after the parent-binding recheck.
 A simultaneous, reappeared or replaced stage leaves the Change `prepared` and
 the run finalizing. Recovery then settles `available -> retained` without
-activating or replaying a provider. Uncertainty leaves the factual phase
-unchanged and the run finalizing; no durable `unresolved` Change phase is
+activating or replaying a provider only through the null-`RunningAt` arm: exact
+identity and digest/count/bytes must still match and the stage-absence proof is
+repeated. A run with nonnull `RunningAt` instead uses the safe bounded rescan
+arm because provider write authority existed; it may replace only those three
+content facts, never identity, and still proves stage absence around the parent
+binding. `inner.activate` selects neither arm. Uncertainty leaves the factual
+phase unchanged and the run finalizing; no durable `unresolved` Change phase is
 added.
 
 `FinalizeRun` requires exact `retained` or `abandoned` settlement by the
@@ -509,23 +565,33 @@ selection, a loose `>` revision comparison, wrong exact delta or missing
 same-transaction invalidation/run binding, and accepting an intermediate replay
 after later progress. The exact schema allowlist also kills reintroduction of
 unused `repository_dev`/`repository_inode` Change columns. Attempt-result
-mutations publish before sole Wait/group absence, mint `inner_not_created`
-outside the launch primitive or after
+mutations sole-Wait the leader before positive birth-pinned group absence,
+signal/probe the numeric group after Wait, publish before serial final drain/
+PTY close, mint `inner_not_created` outside the launch primitive or after
 `cmd.Start` returned nil, reject a valid pre-ready `inner_converged`, accept a
 post-ready identity mismatch, publish without positively acquired birth
 identity, emit on uncertainty, overwrite the fixed spool,
 trust frame payload, wait for an ACK, respawn, or ignore attempt/runtime/
-inode/digest disagreement. Store mutations permit any generic per-row provider
-activate/release/releasing/unresolved update, commit a split pair, accept an
-active `inner_not_created` or mismatched identity, accept declared rows plus a
+inode/digest disagreement. Consumer mutations trust the publisher's prior
+fsync, omit file/directory promotion or one revalidation, reject a complete
+canonical pre-fsync residue, or repair partial/malformed/replaced bytes. Store
+mutations permit any generic per-row provider activate/release/releasing/
+unresolved update, commit a split pair, move fewer than all four resources or
+the terminal on ordinary first outcome, omit the exact runtime/runner two-row
+move during admitted/running result consumption, accept an active
+`inner_not_created` or mismatched identity, accept declared rows plus a
 present `inner.activate` marker, require that marker for a valid active pair,
 invent `ProviderExit` for an empty pair, overwrite the first proposal, treat a
-running provider exit as success, reject a matching result in finalizing/
-releasing or finalizing/unresolved, close a terminal during result consumption,
-or settle Change before runner release and terminal closure. Recovery mutations
-signal, consume absent or corrupt result evidence, reconstruct no-start from
-outer PID absence/EOF/flock/empty rows, close a terminal before runner release
-or without exact result/output proof, accept spool absence before exact Store
+running provider exit as success, choose the wrong `FailureSpawn`/
+`FailureActivation`/`FailureProviderExit` mapping, write ProviderExit sequence
+other than 1, collapse code/signal, replace its Store timestamp on replay,
+reject a matching result in finalizing/releasing or finalizing/unresolved,
+accept declared/active runtime, runner or terminal facts while finalizing,
+close a terminal during result consumption, or settle Change before runner
+release and terminal closure. Recovery mutations signal, consume absent or
+corrupt result evidence, reconstruct no-start from outer PID absence/EOF/flock/
+empty rows, close a declared/active terminal, close before runner release or
+without exact result/output proof, accept spool absence before exact Store
 postconditions, or refuse stable post-unlink absence after those postconditions.
 
 Filesystem/process mutations include a crash after stage mkdir before
@@ -533,8 +599,11 @@ Filesystem/process mutations include a crash after stage mkdir before
 to accept stable prior prepared-stage absence, skipped parent fsync/recheck,
 `available` with a simultaneous/reappeared/replaced stage, abandonment with a
 live identified child/group or runner-held descriptor, publish recovery that
-replays activation, adopting a different final inode, rewriting retained facts
-from a replacement, retained retry exec after digest/count/bytes mismatch, FD
+replays activation, adopting a different final inode, rewriting content facts
+when `Run.RunningAt` is null, refusing the safe content rescan when it is
+nonnull, using `inner.activate` as exec/write proof, accepting a present/
+reappeared/replaced stage during any available-to-retained arm, rewriting
+retained facts from a replacement, retained retry exec after digest/count/bytes mismatch, FD
 11 inherited by Git/provider, an outer runner retaining FD 11, or a second
 daemon-hosted worker mode. Historical terminal replay rejected after one or
 multiple retries is also a required killed mutation. Each temporary
@@ -542,11 +611,12 @@ mutation must fail its focused effect/state test before this contract is
 accepted.
 
 Open implementation risks are the real filesystem-proof/Store-commit crash
-gaps, the exact pair-atomic run/result matrix, terminal close after runner
-release, `AttemptResult` publication/consumption/post-unlink removal cuts, exact
-descriptor-remap behavior through both gates, the circular settlement foreign
-key under actual SQLite enforcement, and historical-run validation after later
-retries. A retained-tree rescan may also find
+gaps, common-consumer AttemptResult durability promotion, unreaped-leader/group/
+Wait order, the exact four-resource pair-atomic run/result matrix, terminal close
+after runner release, publication/consumption/post-unlink removal cuts, null/
+nonnull-RunningAt Change settlement, exact descriptor-remap behavior through
+both gates, the circular settlement foreign key under actual SQLite enforcement,
+and historical-run validation after later retries. A retained-tree rescan may also find
 provider-created unsafe content; that remains visible and nonterminal rather
 than being silently abandoned.
 
@@ -1401,7 +1471,10 @@ admit run
 → release provider exec
 → read PTY output, assign sequences and fan out without blocking the provider
 → accept leased input and bounded resize while that exact run remains running
-→ revoke input, terminate/reap, prove group absence and close the PTY
+→ revoke input and observe the exact leader exit while it remains unreaped
+→ converge/kill owned descendants and positively prove birth-pinned group absence
+→ sole-Wait the leader; never signal or probe that numeric group again
+→ serially drain final output, join the reader and close the PTY master
 → publish and fsync the canonical AttemptResult
 → consume the provider pair and leave the terminal releasing/unresolved
 → release the exact outer runner
@@ -1451,9 +1524,10 @@ and checks the same run's unique `runner_process` resource on every lifecycle
 read/write; the schema continues to forbid duplicate `(run_id, kind)` resources.
 
 The legal lifecycle is `declared → active`, then `declared/active → releasing`
-or `declared/active/releasing → unresolved`, followed by the single
-post-runner transition from `declared`, `active`, `releasing` or `unresolved`
-to `closed`. `closed` is absorbing and `unresolved` is never treated as closed.
+and, on uncertainty, `releasing → unresolved`. Only the single post-runner
+transition from `releasing` or `unresolved` may reach `closed`. A finalizing run
+with a declared/active session is corrupt. `closed` is absorbing and
+`unresolved` is never treated as closed.
 Admission inserts the declared row in
 the same immediate transaction as the run, Change reservation, four existing
 resources, task transition and invalidation. Activation requires the exact
@@ -1513,13 +1587,17 @@ to commit revocation takes the existing fail-closed owner-death/finalizing
 path. Sequence or generation increment at SQLite's signed-integer maximum
 fails without state change.
 
-The running-to-finalizing transaction clears the holder, advances the
-generation, revokes the attempt credential, moves the provider pair to
-releasing/unresolved and moves the session to releasing/unresolved together.
-Close requires the provider pair released, outer runner released and exact
-authenticated AttemptResult/output-close proof. Otherwise it remains or
-becomes unresolved and terminalization stays blocked. None of these mutexes or
-rows creates process/signal authority by itself.
+An ordinary admitted/running-to-finalizing transaction clears the holder,
+advances the generation, revokes the attempt credential, moves all four exact
+initial resources to `releasing` and moves the declared/active session to
+`releasing` together. The admitted/running AttemptResult consumer is the sole
+direct provider-pair-release exception and still moves runtime root, runner and
+terminal to `releasing` in that same transaction. Later uncertainty may move
+only releasing resources/session to unresolved. Close requires provider pair
+released, outer runner released and exact authenticated AttemptResult/
+output-close proof. Otherwise it remains or becomes unresolved and
+terminalization stays blocked. None of these mutexes or rows creates process/
+signal authority by itself.
 
 Session `revision` changes on lifecycle transitions only. Lease generation and
 input sequence are the private concurrency guards for lease/input mutations;
@@ -1538,11 +1616,11 @@ releasing or unresolved. The exact outer runner is then sole-waited live or
 observed absent/reused without signaling during recovery and its exit/resource
 transition commits. Only `CloseTerminalAfterRunner` may then reauthenticate the
 same canonical AttemptResult, validate the trusted controller's bounded output
-drain/master-close sequence and close a declared, active, releasing or
-unresolved session. Exact replay is idempotent; a browser call, generic close,
-split provider pair, missing runner release, arbitrary boolean, frame loss,
-EOF, outer PID absence, lifetime flock or empty rows without the exact spool
-cannot close it.
+drain/master-close sequence and close only a releasing or unresolved session.
+A declared/active terminal on a finalizing run is corruption. Exact replay is
+idempotent; a browser call, generic close, split provider pair, missing runner
+release, arbitrary boolean, frame loss, EOF, outer PID absence, lifetime flock
+or empty rows without the exact spool cannot close it.
 
 Admission declares the session before allocation; activation binds the
 already-active exact runner identity. The live runner supplies process, PTY and
@@ -1568,9 +1646,11 @@ Darwin helper rather than a portability or process framework.
 
 V1 does not invent interactive authority after daemon/runner loss. A runner
 owns an exact daemon-lifetime channel. Daemon death closes it; the still-live
-runner synchronously freezes input, kill-and-waits its owned provider group,
-closes the PTY master, publishes `inner_converged` only after sole Wait/group
-absence and exits without an ACK. Uncertainty publishes nothing. The
+runner synchronously freezes input, retains the unreaped birth-pinned leader,
+converges/kills descendants and proves group absence, sole-waits the leader,
+then drains output and closes the PTY master. Only after that order may it
+publish `inner_converged` and exit without an ACK. It never signals or probes
+the numeric group after Wait. Uncertainty publishes nothing. The
 restarted daemon never reattaches to that terminal and returns an explicit
 terminal reset plus canonical run state.
 
@@ -2894,8 +2974,12 @@ not a compatibility target.
   materialization, or other unrecoverable pre-exec failure take the guarded
   exceptional edge `admitted -> finalizing`; no state goes directly terminal.
   Finalizing represents real external uncertainty. The first durable outcome
-  request wins; only the finalizer writes terminal; cleanup uncertainty stays
-  visible and nonterminal.
+  request wins. Its ordinary transaction moves the exact four initial
+  resources and declared/active terminal session to releasing; authenticated
+  admitted/running AttemptResult consumption is the one direct provider-pair
+  release exception and still moves runtime, runner and terminal to releasing.
+  Only the finalizer writes terminal; cleanup uncertainty stays visible and
+  nonterminal.
 - Resources follow one monotonic graph. `declared` may become `active` when
   exact external identity is bound, recording one immutable activation time.
   Declared or active resources enter `releasing`; declared/active/releasing may
@@ -2908,7 +2992,9 @@ not a compatibility target.
   provider-group rows are the deliberate concrete exception to generic
   per-resource mutation: every transition after their joint declaration is a
   pair-only update with equal phases and consistent empty/exact identities;
-  every generic single-resource mutator rejects those two kinds.
+  every generic single-resource mutator rejects those two kinds. The exact
+  first-outcome/result matrices validate affected counts two plus two and roll
+  back before any split durable state.
 - One admitted run owns one fresh PTY-backed provider process and one exact live
   terminal session. Attach/detach/input/resize are explicit authenticated
   operations; terminal bytes and provider prose never become lifecycle
@@ -3393,8 +3479,11 @@ or separate selection checkpoint:
    closes its Change-parent duplicate after this one-shot preparation.
    If the launch primitive proves `cmd.Start` never succeeded it publishes
    `inner_not_created`; any successfully created child instead remains owned
-   through group convergence and sole Wait and publishes `inner_converged`.
-   Uncertainty publishes nothing. All cases use the one durable result spool.
+   while its leader is unreaped, through descendant convergence and positive
+   group absence, and only then sole-Waits before serial PTY drain/close and
+   `inner_converged` publication. It never signals or probes the numeric group
+   after Wait. Uncertainty publishes nothing. All cases use the one durable
+   result spool.
 6. Daemon binds those identities and releases preparation once. The wrapper
    selects an exact local commit without lazy fetch, computes a canonical
    Git-tree commitment, descriptor-creates the deterministic empty stage and
@@ -3430,8 +3519,10 @@ or separate selection checkpoint:
    provider pair and leaves the session nonclosed; exact outer-runner release
    precedes the one terminal-close transition. The spool is removed only after
    provider-pair, runner and closed-session Store postconditions are durable.
-10. Completion/blocked/failure/exit requests first outcome, enters finalizing,
-   and revokes the credential.
+10. Completion/blocked/failure requests first outcome, enters finalizing,
+    revokes the credential and atomically moves all four initial resources plus
+    the terminal to releasing. AttemptResult-first admitted/running failure uses
+    the exact direct provider-pair-release matrix instead.
 11. Live runner owns stop/signal/reap. Recovery holding only persisted numeric
     identities observes absence and otherwise persists unresolved.
 12. For worker proposed success with a configured verifier only: stable source
@@ -3732,17 +3823,17 @@ contracts.
 | Commit ambiguity | Cut/interrupt begin, commit response, and rollback; discard handle, reopen, reconcile by domain ID/revision, return outcome-unknown where not provable, and perform no second transition | retry blindly; reuse ambiguous connection; generic receipt fallback |
 | Fresh schema allowlist | Query schema objects and columns after init and assert the exact allowlist excludes operations, mutation receipts, decisions, quarantine, intake, compatibility, migration residue and unused durable Change repository identity | add speculative authority table; retain Rust compatibility object; add `repository_dev`/`repository_inode` |
 | Exact attempt authority | Exercise forged, old, admitted, wrong-run/project, operator, finalizing and terminal credentials against every attempt mutation | drop phase join; accept caller IDs; operator fallback; reuse credential on retry |
-| First outcome/finalizing | Run completion-before-exit and exit-before-completion; assert immutable proposal and revoked credential | overwrite first proposal; mutate during finalizing; direct running->terminal |
+| First outcome/finalizing | Run completion-before-exit and exit-before-completion from admitted/running; assert immutable proposal, revoked credential, exact runtime/runner two plus provider-pair two all releasing, terminal releasing and one transaction rollback on any count mismatch | overwrite first proposal; leave one resource/session declared or active; split cleanup transaction; direct running->terminal |
 | Finalizer only/one-way | With all resources released, repeated/concurrent finalizers create one terminal transition/invalidation; with any unresolved resource, they create none; later positive absence permits only unresolved->released->one terminal | terminalize unresolved; released->active/unresolved; duplicate terminal event |
 | Register-before-exec | External provider witness remains absent until run/resource identities are committed running; replacement before activation, version-symlink swap, target removal, byte/mode mutation, final-check failure, and lost activation acknowledgement preserve the frozen launch or fail without execution; a controlled post-check replacement records the explicitly out-of-scope same-UID pathname seam | release either gate early; omit preparation leash; persist identity after exec; re-resolve installation symlink; omit final metadata/digest comparison; retarget on mismatch; claim inode-atomic execution |
-| Owned process authority | Force `cmd.Start` failure, successful Start with birth-identity acquisition failure, pre-ready convergence, every post-ready pre-result state, live-frame loss and restart; authenticate the same no-replace/fsynced `AttemptResult` by attempt/runtime/inode/digest, consume the exact provider pair, then wait or recover the runner without signaling | transient receipt; mint `inner_not_created` after successful Start; publish without exact birth or before Wait/group absence; trust frame; respawn; release on EOF/PID/flock/empty rows |
+| Owned process authority | Force `cmd.Start` failure, successful Start with birth-identity acquisition failure, leader exit with live descendant, every pre/post-ready result state, frame loss and restart; while leader remains unreaped prove birth-pinned group absence before sole Wait, then serially drain/close; authenticate and promote the exact no-replace AttemptResult by file fsync, revalidation, directory fsync and revalidation before consumption | transient receipt; mint `inner_not_created` after successful Start; Wait before group absence; numeric group use after Wait; publish before drain/close; omit consumer durability promotion; trust frame; respawn; release on EOF/PID/flock/empty rows |
 | Liveness fails closed | Real ESRCH, EPERM where feasible, malformed/overflow IDs, weak/mismatched/reused identity and leader-with-descendant | EPERM as absent; malformed as released; leader exit equals group absence |
 | Crash/restart at-most-once | SIGKILL daemon/runner at every launch, exit, cleanup and acknowledgement cut; count external witness/input; reopen same home | relaunch admitted run; ack before Store commit; remove runtime before absence |
-| Change exactness | Materialize a real commit and verify manifest/blob/mode/path/base/inode; deny Git discovery/worktree and replacements | resolve moving ref; `git archive`; allow symlink/gitlink/.git; wrong base; delete replacement |
+| Change exactness | Materialize a real commit and verify manifest/blob/mode/path/base/inode; for every available-to-retained arm prove stage absence around parent binding, null RunningAt literal content equality/no rewrite, nonnull RunningAt safe rescan with fixed identity, and no reliance on `inner.activate`; deny Git discovery/worktree and replacements | resolve moving ref; `git archive`; allow symlink/gitlink/.git; wrong base; delete replacement; rescan null-RunningAt; skip stage check; treat marker as exec proof |
 | Change crash recovery | Kill after stage mkdir before `prepared`, after exact stage removal before fsync/Store commit, and after publish before `available`; prove stable prior absence or exact removal can abandon, while publication requires all mutators gone, exact final identity/commitment and deterministic stage absence around parent recheck | require present stage; skip fsync; delete replacement; accept simultaneous/reappeared stage; trust inode alone; replay provider |
 | Provider pair atomicity | Inject failure between every provider process/group DML and race activation, finalizing, result and recovery; assert exactly two rows move with equal phases and consistent empty/exact identities or the whole transaction rolls back | generic per-row provider mutation; affected-row count one; commit split phase or identity |
-| Attempt-result run matrix | Exercise `admitted+declared`, `running+active`, `finalizing+releasing` and `finalizing+unresolved`, each matching result shape, existing first proposal and every other run/pair/result combination; require deterministic failure rather than success when needed and exact same-transaction proposal/run/pair/event consequences | overwrite first proposal; infer success from exit; invent empty-pair ProviderExit; ignore declared marker; require active marker; reject later positive unresolved proof |
-| Terminal close and Change settlement | Cut after result consumption, runner Wait/absence, runner release, terminal close, result unlink and directory fsync; prove result consumption never closes, close waits for exact provider/runner/result/output proof, and Change settlement waits for close | close during result consumption; close before runner release; generic close; settle before terminal close; accept precondition-free missing spool |
+| Attempt-result run matrix | Exercise admitted with active runtime/runner, declared provider pair and declared terminal; running with all active; and finalizing with runtime/runner/provider/session releasing or unresolved. Require exact two+two+one admitted/running effects or exact pair-two finalizing effect, direct provider release only in the first two rows, immutable proposal, exact FailureSpawn/FailureActivation/FailureProviderExit mapping, and ProviderExit sequence/code-or-signal/Store-timestamp replay | omit runtime/runner/session move; overwrite proposal; infer success; wrong failure; split count; invent empty-pair exit; sequence != 1; collapse code/signal; replace replay timestamp; accept declared/active finalizing fact |
+| Terminal close and Change settlement | Cut after result consumption, runner Wait/absence, runner release, terminal close, result unlink and directory fsync; prove result consumption never closes, close accepts only releasing/unresolved after exact provider/runner/result/output proof, and Change settlement waits for close | close during result consumption; close declared/active; close before runner release; generic close; settle before terminal close; accept precondition-free missing spool |
 | Private Change worker | Invoke the private mode without inherited owner-only descriptors/parent gate and prove no Git read/path/child effect; exercise the registered mode normally | accept direct argv invocation; perform effect before capability check |
 | Stable verification | Provider attempts concurrent write while finalizing; provider must be reaped; scan/copy/scan either yields one digest or refuses; verifier launches controlled snapshot | verify live Change; inherit GOENV/cache/temp/network; launch mutable build output |
 | Verifier bundle identity | Copy two executable fixtures, mutate the second after the first runs, and prove the second never executes | validate a verifier bundle only once; omit immediate pre-launch recheck |
@@ -3766,14 +3857,19 @@ contracts.
 - before and after outer spawn/PID binding/activation;
 - after inner child preparation and identity persistence;
 - before result-name/gate validation, before/after `cmd.Start`, child readiness,
-  exact birth acquisition, group convergence and sole Wait for each result kind;
-- after no-replace result creation, partial/full write, file fsync, runtime
-  fsync, reopen/hash, best-effort frame, frame loss and outer exit;
+  exact birth acquisition, unreaped-leader exit observation, descendant
+  convergence, positive birth-pinned group absence, sole Wait, serial final
+  output drain and PTY close for each result kind;
+- after no-replace result creation, partial/full write and each publisher file/
+  runtime fsync, reopen/hash, best-effort frame, frame loss and outer exit;
+- after the common consumer's initial result validation, exact open-file fsync,
+  descriptor/name/content revalidation, retained-runtime-directory fsync and
+  final revalidation, including a complete publisher-pre-fsync residue;
 - before/after live/recovery result authentication; every
-  admitted/declared, running/active, finalizing/releasing and
-  finalizing/unresolved matrix transaction; an injected failure between the two
-  provider-row updates; existing first-proposal preservation; and each rejected
-  run/pair/result combination;
+  admitted, running and finalizing matrix transaction; injected failures between
+  runtime/runner, provider-pair and terminal updates; existing first-proposal
+  preservation; exact failure/ProviderExit projection; and each rejected run/
+  resource/session/result combination;
 - after provider-pair result consumption but before exact outer Wait/recovered
   absence; after runner exit/release but before terminal close; after terminal
   close but before spool unlink; after unlink but before runtime fsync; and after
@@ -3784,6 +3880,8 @@ contracts.
   stage mkdir but before the combined prepared report/commit; before/after the
   population release, staging publication, publication report, plain-tree
   rehash, and Change-available commit;
+- before/after every available-to-retained parent binding, deterministic stage
+  absence/recheck and null/non-null `Run.RunningAt` content decision;
 - after exact prepared-stage removal but before parent fsync, and after parent
   fsync/absence recheck but before the abandonment Store commit;
 - immediately before/after provider release and lost release acknowledgement;
@@ -3795,16 +3893,20 @@ contracts.
 - after verifier leader exit/group absence, cache measurement/handoff, and
   temporary-root cleanup.
 
-At every `AttemptResult` cut, a fully fsynced exact spool converges through the
-same live/recovery consumer even when the frame is lost. An absent, partial,
-malformed, replaced or un-fsynced result never releases an empty provider pair,
-is never repaired or overwritten, and leaves the run finalizing. If pair
-consumption committed before the crash, recovery reconciles its exact nonclosed
-session and immutable-proposal postconditions, finishes runner release, closes
-the terminal from the same exact spool/output proof, and only then removes the
-same inode. A crash after unlink may reconcile stable descriptor-relative
-absence only when pair release, runner release and session close were already
-durable; the same absence before those facts proves nothing.
+At every `AttemptResult` cut, the same live/recovery consumer promotes any
+complete canonical no-replace residue by fsyncing the exact open file,
+revalidating descriptor/name/content, fsyncing the retained runtime directory
+and revalidating again before Store consumption. A complete write from before
+the publisher fsync can therefore converge; the system does not and cannot
+classify whether those bytes were previously durable. An absent, partial,
+malformed or replaced result is never repaired or overwritten and leaves the
+run finalizing. If pair consumption committed before the crash, recovery
+reconciles its exact nonclosed session and immutable-proposal postconditions,
+finishes runner release, closes the terminal from the same exact spool/output
+proof, and only then removes the same inode. A crash after unlink may reconcile
+stable descriptor-relative absence only when pair release, runner release and
+session close were already durable; the same absence before those facts proves
+nothing.
 
 Outer spawn, PID binding, activation, source selection/materialization, and
 provider-exec failure are also direct causal cases: they execute no provider
@@ -3875,37 +3977,50 @@ At minimum record the killing test for:
   settlement predecessor and lost-response reconciliation after later revision;
 - exact admitted-relative Change revision deltas and same-transaction
   invalidations;
-- exact `admitted+declared`, `running+active`, `finalizing+releasing` and
-  `finalizing+unresolved` AttemptResult matrix, including immutable first
-  proposal and deterministic failure rather than inferred success;
+- exact admitted/running/finalizing AttemptResult matrix across runtime root,
+  runner, provider pair and terminal, including two+two+one counts, immutable
+  first proposal and deterministic failure rather than inferred success;
 - provider process/group pair atomicity for activation, releasing, unresolved
   and release, with every generic single-row mutation refused;
-- exact prepared/final/retained identity and content-fact checks;
+- exact prepared/final/retained identity, stage-absence and content-fact checks,
+  with null `Run.RunningAt` forbidding rewrite, nonnull allowing one safe rescan
+  and `inner.activate` never standing in for provider write authority;
 - stable prior prepared-stage absence, parent fsync and both-name recheck;
 - prepared-to-available refusal while the deterministic stage is present,
   reappears or is replaced around the parent-binding check;
 - Change-parent FD 11 exclusion from Git/provider and outer-runner duplicate
   closure after one-shot child preparation;
-- canonical no-replace/fsynced `AttemptResult` creation, closed union and
-  attempt/runtime/inode/digest authentication in both live and recovery paths;
-- partial/malformed/replaced result retained as nonterminal, never repaired or
-  overwritten, and exact spool removal only after durable Store postconditions;
+- canonical no-replace `AttemptResult` creation, closed union and attempt/
+  runtime/inode/digest authentication in both live and recovery paths, followed
+  by common-consumer open-file fsync, revalidation, directory fsync and final
+  revalidation before Store consumption;
+- complete publisher-pre-fsync residue promoted to durable evidence; partial/
+  malformed/replaced result retained as nonterminal and never repaired or
+  overwritten; exact spool removal only after durable Store postconditions;
 - `inner_not_created` only when the launch primitive proves `cmd.Start` failed,
-  and `inner_converged` after every successful spawn, sole Wait and group
-  convergence, including readiness failure and each post-ready state;
+  and `inner_converged` after every successful spawn has positive group absence
+  while the leader is unreaped, then sole Wait, including readiness failure and
+  each post-ready state;
 - exact positive birth acquisition and process identity equality after
-  `AttemptInnerReady`, no publication on pre-identity/other uncertainty, no
-  respawn, best-effort frame and no acknowledgement wait;
+  `AttemptInnerReady`; leader retained unreaped through descendant convergence
+  and positive group absence before sole Wait; no numeric group signal/probe
+  after Wait; serial final drain/PTY close before publication; no publication on
+  pre-identity/other uncertainty, no respawn, best-effort frame and no ACK wait;
 - concrete atomic provider-pair consumption for active matching and declared
-  empty rows, with split/mismatch and generic release refusal and no terminal
-  closure by result consumption;
+  empty rows, exact runtime/runner/session transitions, split/mismatch and
+  generic release refusal, and no terminal closure by result consumption;
+- exact `FailureSpawn`, `FailureActivation` and `FailureProviderExit` mapping;
+  ProviderExit sequence 1 with exact code-or-signal and replay-preserved Store
+  commit timestamp;
 - declared-pair `inner.activate` absence, refusal when it is present, and no
   marker requirement for an active matching child that was never released;
 - refusal to reconstruct result authority from outer PID absence, control EOF,
   lifetime flock or still-empty resource rows when the spool is absent/corrupt;
 - exact outer Wait/recovered absence without signal, runner release before one
-  concrete terminal close, exact spool/output validation, terminal close before
-  Change settlement, and pair/runner/session postconditions before spool removal;
+  concrete terminal close from releasing/unresolved only, exact spool/output
+  validation, declared/active-finalizing corruption refusal, terminal close
+  before Change settlement, and pair/runner/session postconditions before spool
+  removal;
 - stable post-unlink spool absence accepted only after those durable
   postconditions and runtime-directory fsync/recheck, never before them;
 - exact `factory-runner --change-worker-shell` worker executable with no
