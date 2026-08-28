@@ -69,6 +69,26 @@ func (runtime *BrowserRuntime) Addr() string {
 	return runtime.server.Addr()
 }
 
+// Done closes when the owned browser server's listener stops. A nil or
+// invalid runtime is already done, matching the server's nil semantics.
+func (runtime *BrowserRuntime) Done() <-chan struct{} {
+	if runtime == nil || runtime.server == nil {
+		done := make(chan struct{})
+		close(done)
+		return done
+	}
+	return runtime.server.ServeDone()
+}
+
+// Err reports an unexpected owned browser server failure, or nil after a
+// normal close. Invalid runtimes have no server failure to report.
+func (runtime *BrowserRuntime) Err() error {
+	if runtime == nil || runtime.server == nil {
+		return nil
+	}
+	return runtime.server.Err()
+}
+
 func (runtime *BrowserRuntime) Close() error {
 	if runtime == nil {
 		return nil
