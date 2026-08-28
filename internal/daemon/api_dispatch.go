@@ -35,6 +35,14 @@ type Daemon struct {
 	closing   bool
 	closeDone chan struct{}
 	closeErr  error
+
+	// schedulerWake is a bounded hint channel. SQLite remains the only
+	// admission and capacity authority; losing or coalescing a hint is safe
+	// because the scheduler also polls. schedulerRunning prevents two process
+	// owners from creating competing unobserved admission probes.
+	schedulerMu      sync.Mutex
+	schedulerWake    chan struct{}
+	schedulerRunning bool
 	// supervisors contains every synchronous RunNext owner, including the
 	// phase before a live attempt can register. Registration and closing share
 	// attemptMu, so Close can cancel a real owner rather than passively waiting
@@ -57,14 +65,14 @@ func NewDaemon(store *kernel.Store) (*Daemon, error) {
 	if store == nil {
 		return nil, fmt.Errorf("%w: nil kernel store", kernel.ErrInvalidValue)
 	}
-	return &Daemon{store: store, now: time.Now, browsers: make(map[*BrowserRuntime]struct{}), browserClientGates: &browserClientGates{}, attempts: make(map[kernel.RunID]*liveAttempt), supervisors: make(map[*supervisorRegistration]struct{})}, nil
+	return &Daemon{store: store, now: time.Now, browsers: make(map[*BrowserRuntime]struct{}), browserClientGates: &browserClientGates{}, attempts: make(map[kernel.RunID]*liveAttempt), supervisors: make(map[*supervisorRegistration]struct{}), schedulerWake: make(chan struct{}, 1)}, nil
 }
 
 func newDaemon(store *kernel.Store, now func() time.Time) (*Daemon, error) {
 	if store == nil || now == nil {
 		return nil, fmt.Errorf("%w: invalid daemon", kernel.ErrInvalidValue)
 	}
-	return &Daemon{store: store, now: now, browsers: make(map[*BrowserRuntime]struct{}), browserClientGates: &browserClientGates{}, attempts: make(map[kernel.RunID]*liveAttempt), supervisors: make(map[*supervisorRegistration]struct{})}, nil
+	return &Daemon{store: store, now: now, browsers: make(map[*BrowserRuntime]struct{}), browserClientGates: &browserClientGates{}, attempts: make(map[kernel.RunID]*liveAttempt), supervisors: make(map[*supervisorRegistration]struct{}), schedulerWake: make(chan struct{}, 1)}, nil
 }
 
 // HandleConnection synchronously consumes exactly one authenticated request,
@@ -280,6 +288,7 @@ func (daemon *Daemon) enqueueTask(ctx context.Context, call api.Call) api.Reply 
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
+	daemon.notifyScheduler()
 	return daemon.mutation(ctx, task.Revision)
 }
 
@@ -299,6 +308,9 @@ func (daemon *Daemon) setDispatch(ctx context.Context, call api.Call) api.Reply 
 	state, err := daemon.store.SetDispatch(ctx, revision, enabled, at)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
+	}
+	if enabled {
+		daemon.notifyScheduler()
 	}
 	return mutationReply(state.Head, state.Revision)
 }

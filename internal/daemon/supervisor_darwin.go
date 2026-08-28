@@ -20,11 +20,6 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
-const (
-	supervisorReconcileAttempts  = 3
-	supervisorStoreAttemptWindow = 250 * time.Millisecond
-)
-
 type supervisorKeys struct {
 	run       kernel.RunID
 	session   kernel.TerminalSessionID
@@ -147,6 +142,9 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		Resources: keys.resources, RuntimeRoot: runtimeRoot,
 	}
 	admission, err := daemon.store.AdmitNext(ctx, admissionKeys, at)
+	if err == nil && spec.admissionObserved != nil {
+		spec.admissionObserved(admission.Admitted())
+	}
 	if err == nil && spec.afterAdmission != nil {
 		err = spec.afterAdmission()
 	}

@@ -2,9 +2,15 @@ package daemon
 
 import (
 	"context"
+	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
+)
+
+const (
+	supervisorReconcileAttempts  = 3
+	supervisorStoreAttemptWindow = 250 * time.Millisecond
 )
 
 // SupervisorSpec supplies the external installation and filesystem
@@ -30,6 +36,18 @@ type SupervisorSpec struct {
 	afterProviderRelease  func() error
 	reconcileAdmission    func(context.Context, kernel.AdmissionKeys) (kernel.AdmissionResult, error)
 	beforeProviderRelease func()
+
+	// admissionObserved is a package-private scheduling hint. The Darwin
+	// supervisor invokes it exactly once after AdmitNext commits successfully;
+	// it carries no selected identity or transition authority.
+	admissionObserved func(bool)
+
+	// scheduledAttempt is a package-test-only seam for the joined coordinator.
+	// Production always calls the concrete synchronous RunNext method.
+	scheduledAttempt func(context.Context, SupervisorSpec) (kernel.Run, error)
+	// scheduledCompletion is the matching package-test-only durable-read seam.
+	// Production always reloads the returned run from the concrete Store.
+	scheduledCompletion func(kernel.Run) error
 }
 
 // RunNext admits and synchronously owns one complete shell-worker attempt.
