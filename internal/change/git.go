@@ -3,7 +3,26 @@ package change
 import (
 	"context"
 	"errors"
+	"path/filepath"
+	"strings"
 )
+
+// TrustedDeveloperGitPath is the one Git-trust path predicate: only the
+// CommandLineTools or an Xcode-app Developer git may run attempts. SelectGit
+// enforces it per attempt; boot-time callers reuse it so a configuration
+// that would fail every attempt refuses the process instead.
+func TrustedDeveloperGitPath(path string) bool {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path || filepath.Base(path) != "git" {
+		return false
+	}
+	components := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	if len(components) == 6 && components[0] == "Library" && components[1] == "Developer" && components[2] == "CommandLineTools" &&
+		components[3] == "usr" && components[4] == "bin" && components[5] == "git" {
+		return true
+	}
+	return len(components) == 7 && components[0] == "Applications" && strings.HasSuffix(components[1], ".app") &&
+		components[2] == "Contents" && components[3] == "Developer" && components[4] == "usr" && components[5] == "bin" && components[6] == "git"
+}
 
 // RepositoryIdentity is one immutable repository-root device/inode identity.
 type RepositoryIdentity struct {

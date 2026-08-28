@@ -19,6 +19,7 @@ import (
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/buildinfo"
+	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/daemon"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/provider"
@@ -28,7 +29,7 @@ import (
 const (
 	defaultBrowserAddress = "127.0.0.1:43123"
 	defaultBrowserOrigin  = "https://app.darkfactory.build"
-	defaultGitExecutable  = "/usr/bin/git"
+	defaultGitExecutable  = "/Library/Developer/CommandLineTools/usr/bin/git"
 	defaultToolPath       = "/usr/bin:/bin"
 	defaultBaseRevision   = "HEAD"
 	runnerSiblingName     = "factory-runner"
@@ -279,7 +280,7 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 	if err != nil {
 		return nil, err
 	}
-	owner.runtimeParent, err = daemon.OpenRuntimeParent(ownedContext, runtimes, filepath.Join(configuration.home, "runtimes"))
+	owner.runtimeParent, err = daemon.OpenRuntimeParent(ownedContext, runtimes, install.RuntimesPath(configuration.home))
 	if err != nil {
 		return nil, err
 	}
@@ -516,6 +517,9 @@ func deriveSupervisorSpec(configuration config, parent *daemon.RuntimeParent) (d
 	if err != nil {
 		return daemon.SupervisorSpec{}, err
 	}
+	if !change.TrustedDeveloperGitPath(gitExecutable) {
+		return daemon.SupervisorSpec{}, fmt.Errorf("factoryd: git executable %q is outside the trusted Developer toolchain; attempts accept only the CommandLineTools or Xcode git", gitExecutable)
+	}
 	runnerExecutable, err := commitBootExecutable(runnerPath)
 	if err != nil {
 		return daemon.SupervisorSpec{}, err
@@ -532,7 +536,7 @@ func deriveSupervisorSpec(configuration config, parent *daemon.RuntimeParent) (d
 	}
 	return daemon.SupervisorSpec{
 		RuntimeParent:        parent,
-		ChangeParent:         filepath.Join(configuration.home, "changes"),
+		ChangeParent:         install.ChangesPath(configuration.home),
 		GitExecutable:        gitExecutable,
 		BaseRevision:         configuration.baseRevision,
 		AttemptSocket:        install.LocalAPISocketPath(configuration.home),

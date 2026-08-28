@@ -17,7 +17,6 @@ import (
 
 const (
 	runtimeParentLockName = ".runtime.lock"
-	runtimeSocketName     = "factory.sock"
 )
 
 var errRuntimeBusy = errors.New("daemon: runtime ownership busy")
@@ -511,5 +510,5 @@ func validRuntimeName(name string) bool {
 			return false
 		}
 	}
-	return name != runtimeParentLockName && name != runtimeSocketName
+	return name != runtimeParentLockName && name != install.LocalAPISocketName
 }

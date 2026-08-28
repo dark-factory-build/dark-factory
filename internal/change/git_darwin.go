@@ -717,7 +717,7 @@ func checkpointGitExecutable(path string) (gitFileIdentity, error) {
 }
 
 func checkpointTrustedGitExecutable(path string) (gitFileIdentity, error) {
-	if !validDeveloperGitPath(path) {
+	if !TrustedDeveloperGitPath(path) {
 		return gitFileIdentity{}, &ValidationError{Reason: "Git executable is outside the trusted Developer toolchain"}
 	}
 	components := strings.Split(strings.TrimPrefix(path, "/"), "/")
@@ -750,19 +750,6 @@ func checkpointTrustedGitExecutable(path string) (gitFileIdentity, error) {
 	file := os.NewFile(uintptr(fd), "")
 	defer file.Close()
 	return inspectGitExecutable(file, true)
-}
-
-func validDeveloperGitPath(path string) bool {
-	if !filepath.IsAbs(path) || filepath.Clean(path) != path || filepath.Base(path) != "git" {
-		return false
-	}
-	components := strings.Split(strings.TrimPrefix(path, "/"), "/")
-	if len(components) == 6 && components[0] == "Library" && components[1] == "Developer" && components[2] == "CommandLineTools" &&
-		components[3] == "usr" && components[4] == "bin" && components[5] == "git" {
-		return true
-	}
-	return len(components) == 7 && components[0] == "Applications" && strings.HasSuffix(components[1], ".app") &&
-		components[2] == "Contents" && components[3] == "Developer" && components[4] == "usr" && components[5] == "bin" && components[6] == "git"
 }
 
 func inspectGitExecutable(file *os.File, trusted bool) (gitFileIdentity, error) {

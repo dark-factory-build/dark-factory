@@ -185,7 +185,7 @@ func TestRuntimeRejectsExistingAndUnsafeAuthoritiesWithoutMutation(t *testing.T)
 func TestRuntimeParentMissingLockRejectsPopulatedParentUnchanged(t *testing.T) {
 	home, _, capability, parentPath := newOperationalRuntimeCapability(t)
 	defer home.Close()
-	sentinel := filepath.Join(parentPath, runtimeSocketName)
+	sentinel := filepath.Join(parentPath, install.LocalAPISocketName)
 	contents := []byte("foreign")
 	if err := os.WriteFile(sentinel, contents, 0o600); err != nil {
 		t.Fatal(err)
@@ -555,7 +555,7 @@ func TestRuntimeNamesAreExactAndSocketIsReserved(t *testing.T) {
 	}
 	parent := createManagedParent(t, parentPath)
 	defer parent.Close()
-	socketPath := filepath.Join(parentPath, runtimeSocketName)
+	socketPath := filepath.Join(parentPath, install.LocalAPISocketName)
 	if err := os.WriteFile(socketPath, []byte("socket authority"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -569,7 +569,7 @@ func TestRuntimeNamesAreExactAndSocketIsReserved(t *testing.T) {
 		"0123456789abcdef0123456789abcdeF",
 		"0123456789abcdef0123456789abcdeg",
 		"../0123456789abcdef0123456789a",
-		runtimeParentLockName, runtimeSocketName,
+		runtimeParentLockName, install.LocalAPISocketName,
 	}
 	expected := runner.FileIdentity{Device: 1, Inode: 1}
 	for _, name := range invalid {

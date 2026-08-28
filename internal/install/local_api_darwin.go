@@ -233,7 +233,7 @@ func (state *localAPIState) activate(ctx context.Context) error {
 	if err := atLocalAPIPhase("before chmod"); err != nil {
 		return err
 	}
-	if err := localAPIChmod(int(state.runtimes.Fd()), localAPISocketName, 0o600); err != nil {
+	if err := localAPIChmod(int(state.runtimes.Fd()), LocalAPISocketName, 0o600); err != nil {
 		return fmt.Errorf("secure local API socket: %w", err)
 	}
 	if err := atLocalAPIPhase("after chmod"); err != nil {
@@ -823,7 +823,7 @@ func unlinkExactLocalAPISocket(parent *os.File, expected identity, exactMetadata
 	if identityErr != nil {
 		return errors.New("local API socket changed before removal")
 	}
-	if err := localAPIUnlinkAt(int(parent.Fd()), localAPISocketName, 0); err != nil {
+	if err := localAPIUnlinkAt(int(parent.Fd()), LocalAPISocketName, 0); err != nil {
 		// Darwin unlinkat does not report whether an interrupted or failed call
 		// removed the directory entry. Every syscall error is therefore an
 		// ambiguous ownership result, not authority to retry or rebind.
@@ -971,7 +971,7 @@ func (state *localAPIState) closeUnusedDescriptors() error {
 
 func localAPISocketAt(parent *os.File, strict bool) (bool, identity, error) {
 	var stat unix.Stat_t
-	err := unix.Fstatat(int(parent.Fd()), localAPISocketName, &stat, unix.AT_SYMLINK_NOFOLLOW)
+	err := unix.Fstatat(int(parent.Fd()), LocalAPISocketName, &stat, unix.AT_SYMLINK_NOFOLLOW)
 	if errors.Is(err, unix.ENOENT) {
 		return false, identity{}, nil
 	}

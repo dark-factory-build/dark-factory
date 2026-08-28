@@ -391,7 +391,7 @@ func TestLocalAPIAuthorityRecoversOnlyExactRefusedStaleSocket(t *testing.T) {
 	if _, err := Init(context.Background(), homePath); err != nil {
 		t.Fatal(err)
 	}
-	socketPath := filepath.Join(homePath, runtimesName, localAPISocketName)
+	socketPath := filepath.Join(homePath, runtimesName, LocalAPISocketName)
 	stale, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
 	if err != nil {
 		t.Fatal(err)
@@ -452,7 +452,7 @@ func TestLocalAPIAuthorityRefusesLiveSocketAndCancelledActivationUntouched(t *te
 	if _, err := Init(context.Background(), homePath); err != nil {
 		t.Fatal(err)
 	}
-	socketPath := filepath.Join(homePath, runtimesName, localAPISocketName)
+	socketPath := filepath.Join(homePath, runtimesName, LocalAPISocketName)
 	live, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
 	if err != nil {
 		t.Fatal(err)
@@ -508,7 +508,7 @@ func TestLocalAPIAuthorityRefusesAmbiguousStaleSocketWithoutMutation(t *testing.
 			if _, err := Init(context.Background(), homePath); err != nil {
 				t.Fatal(err)
 			}
-			socketPath := filepath.Join(homePath, runtimesName, localAPISocketName)
+			socketPath := filepath.Join(homePath, runtimesName, LocalAPISocketName)
 			stale, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
 			if err != nil {
 				t.Fatal(err)
@@ -550,7 +550,7 @@ func TestLocalAPIAuthorityChangedStaleIdentityAndMalformedLeafRemain(t *testing.
 		if _, err := Init(context.Background(), homePath); err != nil {
 			t.Fatal(err)
 		}
-		socketPath := filepath.Join(homePath, runtimesName, localAPISocketName)
+		socketPath := filepath.Join(homePath, runtimesName, LocalAPISocketName)
 		makeStale := func() {
 			listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
 			if err != nil {
@@ -594,7 +594,7 @@ func TestLocalAPIAuthorityChangedStaleIdentityAndMalformedLeafRemain(t *testing.
 			if _, err := Init(context.Background(), homePath); err != nil {
 				t.Fatal(err)
 			}
-			socketPath := filepath.Join(homePath, runtimesName, localAPISocketName)
+			socketPath := filepath.Join(homePath, runtimesName, LocalAPISocketName)
 			switch kind {
 			case "regular":
 				if err := os.WriteFile(socketPath, []byte("preserve"), 0o600); err != nil {
@@ -650,7 +650,7 @@ func TestLocalAPIAuthorityActivationFaultsCleanExactSocketAndPermitRetry(t *test
 				t.Fatalf("faulted activation = %v, %v", got, err)
 			}
 			localAPIPhaseHook = original
-			socketPath := filepath.Join(homePath, runtimesName, localAPISocketName)
+			socketPath := filepath.Join(homePath, runtimesName, LocalAPISocketName)
 			if _, err := os.Lstat(socketPath); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("faulted activation retained socket: %v", err)
 			}
@@ -715,7 +715,7 @@ func TestLocalAPIAuthorityObservesChmodAndSyncFailuresAtRealEffects(t *testing.T
 				t.Fatalf("effect failure activation = %v, %v", authority, err)
 			}
 			restore()
-			socketPath := filepath.Join(homePath, runtimesName, localAPISocketName)
+			socketPath := filepath.Join(homePath, runtimesName, LocalAPISocketName)
 			if _, err := os.Lstat(socketPath); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("effect failure retained socket: %v", err)
 			}
@@ -833,7 +833,7 @@ func TestLocalAPIAuthorityStaleProbeCloseUncertaintyRetainsExactOwner(t *testing
 	if _, err := Init(context.Background(), homePath); err != nil {
 		t.Fatal(err)
 	}
-	socketPath := filepath.Join(homePath, runtimesName, localAPISocketName)
+	socketPath := filepath.Join(homePath, runtimesName, LocalAPISocketName)
 	live, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
 	if err != nil {
 		t.Fatal(err)
@@ -888,7 +888,7 @@ func TestLocalAPIAuthorityStaleProbeConnectionOverridesDialError(t *testing.T) {
 	if _, err := Init(context.Background(), homePath); err != nil {
 		t.Fatal(err)
 	}
-	socketPath := filepath.Join(homePath, runtimesName, localAPISocketName)
+	socketPath := filepath.Join(homePath, runtimesName, LocalAPISocketName)
 	stale, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
 	if err != nil {
 		t.Fatal(err)
@@ -948,7 +948,7 @@ func TestLocalAPIAuthorityBindRaceAndRecordReplacementFailClosed(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		socketPath := filepath.Join(homePath, runtimesName, localAPISocketName)
+		socketPath := filepath.Join(homePath, runtimesName, LocalAPISocketName)
 		var intruder *net.UnixListener
 		original := localAPIPhaseHook
 		localAPIPhaseHook = func(phase string) error {
@@ -992,7 +992,7 @@ func TestLocalAPIAuthorityBindRaceAndRecordReplacementFailClosed(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		socketPath := filepath.Join(homePath, runtimesName, localAPISocketName)
+		socketPath := filepath.Join(homePath, runtimesName, LocalAPISocketName)
 		owned := socketPath + ".owned"
 		var intruder *net.UnixListener
 		original := localAPIPhaseHook
@@ -1384,7 +1384,7 @@ func TestLocalAPIAuthorityWholeHomeReplacementCloseUsesRetainedParent(t *testing
 	if err := os.Mkdir(replacementRuntimes, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	intruderPath := filepath.Join(replacementRuntimes, localAPISocketName)
+	intruderPath := filepath.Join(replacementRuntimes, LocalAPISocketName)
 	intruder, err := net.ListenUnix("unix", &net.UnixAddr{Name: intruderPath, Net: "unix"})
 	if err != nil {
 		t.Fatal(err)
@@ -1396,7 +1396,7 @@ func TestLocalAPIAuthorityWholeHomeReplacementCloseUsesRetainedParent(t *testing
 	if _, err := os.Lstat(intruderPath); err != nil {
 		t.Fatalf("replacement-home intruder was removed: %v", err)
 	}
-	ownedSocket := filepath.Join(movedHome, runtimesName, localAPISocketName)
+	ownedSocket := filepath.Join(movedHome, runtimesName, LocalAPISocketName)
 	if _, err := os.Lstat(ownedSocket); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("retained-parent owned socket remains: %v", err)
 	}
@@ -1431,7 +1431,7 @@ func TestLocalAPIAuthorityStaleRemovalDurabilityUncertaintyRetainsLease(t *testi
 	if _, err := Init(context.Background(), homePath); err != nil {
 		t.Fatal(err)
 	}
-	socketPath := filepath.Join(homePath, runtimesName, localAPISocketName)
+	socketPath := filepath.Join(homePath, runtimesName, LocalAPISocketName)
 	stale, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
 	if err != nil {
 		t.Fatal(err)
@@ -1488,7 +1488,7 @@ func TestLocalAPIAuthorityStaleUnlinkErrorsRetainAmbiguousOwner(t *testing.T) {
 			if _, err := Init(context.Background(), homePath); err != nil {
 				t.Fatal(err)
 			}
-			socketPath := filepath.Join(homePath, runtimesName, localAPISocketName)
+			socketPath := filepath.Join(homePath, runtimesName, LocalAPISocketName)
 			stale, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
 			if err != nil {
 				t.Fatal(err)

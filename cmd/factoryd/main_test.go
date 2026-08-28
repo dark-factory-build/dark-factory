@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
+	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/daemon"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 )
@@ -352,7 +353,7 @@ func initializedHome(t *testing.T) string {
 func testConfig(home string) config {
 	return config{
 		home: home, browserAddress: "127.0.0.1:0", browserOrigins: []string{testOrigin},
-		gitExecutable: "/bin/sh", toolPath: defaultToolPath, baseRevision: defaultBaseRevision,
+		gitExecutable: defaultGitExecutable, toolPath: defaultToolPath, baseRevision: defaultBaseRevision,
 		runnerExecutable: "/bin/sh", factoryctlExecutable: "/bin/sh",
 	}
 }
@@ -453,7 +454,7 @@ func TestDeriveSupervisorSpecResolvesSymlinkedSelfToCommittedSiblings(t *testing
 	defer func() { selfExecutable = os.Executable }()
 
 	home := filepath.Join(base, "home")
-	configuration := config{home: home, gitExecutable: "/bin/sh", toolPath: defaultToolPath, baseRevision: "refs/heads/main"}
+	configuration := config{home: home, gitExecutable: defaultGitExecutable, toolPath: defaultToolPath, baseRevision: "refs/heads/main"}
 	spec, err := deriveSupervisorSpec(configuration, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -461,7 +462,7 @@ func TestDeriveSupervisorSpecResolvesSymlinkedSelfToCommittedSiblings(t *testing
 	if spec.RunnerExecutable != filepath.Join(base, "factory-runner") || spec.FactoryctlExecutable != filepath.Join(base, "factoryctl") {
 		t.Fatalf("sibling derivation = %+v", spec)
 	}
-	if spec.GitExecutable != "/bin/sh" || spec.BaseRevision != "refs/heads/main" || spec.ToolPath != defaultToolPath {
+	if spec.GitExecutable != defaultGitExecutable || spec.BaseRevision != "refs/heads/main" || spec.ToolPath != defaultToolPath {
 		t.Fatalf("boot inputs = %+v", spec)
 	}
 	if spec.ChangeParent != filepath.Join(home, "changes") || spec.AttemptSocket != install.LocalAPISocketPath(home) {
@@ -479,7 +480,7 @@ func TestDeriveSupervisorSpecRefusesMissingAndUnsafeExecutables(t *testing.T) {
 	selfExecutable = func() (string, error) { return filepath.Join(base, "factoryd"), nil }
 	defer func() { selfExecutable = os.Executable }()
 	home := filepath.Join(base, "home")
-	valid := config{home: home, gitExecutable: "/bin/sh", toolPath: defaultToolPath, baseRevision: defaultBaseRevision}
+	valid := config{home: home, gitExecutable: defaultGitExecutable, toolPath: defaultToolPath, baseRevision: defaultBaseRevision}
 
 	if _, err := deriveSupervisorSpec(valid, nil); err == nil {
 		t.Fatal("missing sibling factory-runner was accepted")
@@ -522,5 +523,39 @@ func TestOpenProcessRefusesUnprovableSupervisorSpecAndReleasesHome(t *testing.T)
 	}
 	if err := reopened.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestBootGitTrustMatchesTheExactPerAttemptAuthority(t *testing.T) {
+	if !change.TrustedDeveloperGitPath(defaultGitExecutable) {
+		t.Fatalf("default git %q would be refused by the per-attempt trust predicate", defaultGitExecutable)
+	}
+	if _, err := os.Stat(defaultGitExecutable); err != nil {
+		t.Skipf("CommandLineTools git is unavailable: %v", err)
+	}
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	selfExecutable = func() (string, error) { return filepath.Join(base, "factoryd"), nil }
+	defer func() { selfExecutable = os.Executable }()
+	copyExecutable(t, filepath.Join(base, "factoryd"))
+	copyExecutable(t, filepath.Join(base, "factory-runner"))
+	copyExecutable(t, filepath.Join(base, "factoryctl"))
+	home := filepath.Join(base, "home")
+	valid := config{home: home, gitExecutable: defaultGitExecutable, toolPath: defaultToolPath, baseRevision: defaultBaseRevision}
+	if _, err := deriveSupervisorSpec(valid, nil); err != nil {
+		t.Fatalf("toolchain default git was refused at boot: %v", err)
+	}
+	for _, untrusted := range []string{"/usr/bin/git", "/bin/sh"} {
+		broken := valid
+		broken.gitExecutable = untrusted
+		_, err := deriveSupervisorSpec(broken, nil)
+		if err == nil {
+			t.Fatalf("untrusted git %q was accepted at boot", untrusted)
+		}
+		if untrusted == "/usr/bin/git" && !strings.Contains(err.Error(), "trusted Developer toolchain") {
+			t.Fatalf("refusal does not name the trust requirement: %v", err)
+		}
 	}
 }
