@@ -18,8 +18,8 @@ The implemented Rust kernel remains the historical evidence described by this
 file until cutover. It is not a compatibility or implementation contract for
 the replacement. The canonical planned Go contract is
 [`docs/development/GO_REWRITE.md`](docs/development/GO_REWRITE.md); when this
-file's retained-Rust queue/provider/TUI wording conflicts with that record, the
-Go rewrite record wins and the old wording must not guide implementation.
+file's retained-Rust historical wording conflicts with that record, the Go
+rewrite record wins and the old wording must not guide implementation.
 
 In particular, planned Go admission is one cursor-free global
 `Store.AdmitNext(ctx, keys, at)` `BEGIN IMMEDIATE`. No caller nominates an agent,
@@ -27,19 +27,20 @@ task or queue observation. The Store applies durable eligibility and exact
 reason precedence. Before selection it validates global settings and runs one
 concrete SQL integrity predicate over every row/relation/control that can
 occupy capacity or bind active authority, plus every structurally queued rank,
-payload, assignment and exact task/agent/project fields. Unknown phases, missing
+payload, assignment and exact task/agent/project fields. This proof runs before
+either RunID reconciliation or a fresh decision. Unknown phases, missing
 relations, split resource pairs, invalid IDs/revisions/enums, malformed rank or
 payload, and other damaged facts anywhere block all admission rather than
 becoming ineligibility. Only after that proof may capacity count the single set
 of all nonterminal runs: admitted, running and finalizing.
-The rewrite record's Global transactional admission contract defines the one
-exact field/domain table used by the fresh-schema `CHECK`s and this predicate:
-it includes exact Boolean storage, budget arithmetic, provider/model fields,
-task `updated_at_ms`, every relevant monotonic timestamp, and the Change and
-invalidation fields that admission writes. The fresh schema has no profile row,
-agent or project status field; agent `paused` is the availability control.
+`internal/kernel/schema.go` and its exact schema allowlist/constraint tests are
+the only field/domain authority for the fresh schema; this document does not
+duplicate their columns. The cross-row predicate covers the relations and
+phase facts needed by admission, including bounded invalidation continuity.
+The fresh schema has no profile row, agent or project status field; agent
+`paused` is the availability control.
 Provider choice inherently means unrestricted interactive authority in V1;
-there is no `execution_mode` field, type, column, or wire value.
+there is no permission-profile field, type, column, or wire value.
 This file does not define a second or extensible control validator.
 Configured capacity is one integer `C` in `[1, 1024]`; a reserved Change residue
 belongs to one nonterminal worker run, so its count is at most `C`. Terminal
@@ -56,8 +57,8 @@ known role remains eligible and determines the footprint, while a known
 nonqueued task is outside the queue. Unknown or malformed durable control is
 corruption. Repository and provider executable/configuration/auth availability
 are post-admission typed failures, not stale eligibility filters.
-The exact contract and its pending review status live only in the rewrite
-record; this paragraph does not claim the Go daemon implements it yet.
+The exact contract lives in the rewrite record; this paragraph does not claim
+the Go daemon implements it yet.
 
 Planned Go process setup has one additional literal barrier: after the outer
 runner is active and while its provider process/group pair remains declared
@@ -194,12 +195,10 @@ without rollback or retry against another run.
 
 ## Process and resource ownership
 
-The retained Rust runtime launches one fresh non-interactive provider process.
-Providers receive one `startup_input` on stdin; stdin then closes. There is no
-resident process, PTY attach surface, terminal input, delivery replay, or
-provider-process resume in that retained runtime. The pre-release Go runtime's
-runner-owned PTY and browser authority are constrained by the section above and
-the implementation record in `docs/development/GO_REWRITE.md`.
+The retained Rust process model is historical evidence only and is deleted at
+the Go cutover. Planned Go launches one fresh runner-owned interactive PTY with
+explicit authenticated attach/input authority; no provider process is reused
+across runs.
 
 Launch is one nested register-before-exec handshake:
 
@@ -235,30 +234,32 @@ terminalization.
 
 ## Provider boundary
 
-The `Provider` trait answers only:
+The planned Go boundary is one concrete
+`internal/provider.Build(Request) (Launch, error)` function. It returns only
+one absolute committed executable, ordered argv and complete ordered
+environment. The runner owns the descriptor-bound Change cwd, fresh PTY, input,
+process group, wait/reap, output and cleanup. The provider cannot select a
+source path, authority, credential, lifecycle result or fallback. See [the
+fresh provider contract](docs/providers.md).
 
-- which executable, arguments, environment additions, and generated private
-  configuration launch this run.
+V1 provider choice is inherently unrestricted interactive authority. Shell is
+exactly `/bin/sh -s`; Claude Code and Codex use only their exact reviewed
+version-sealed native launch facts. The schema and wire contract contain no
+permission profile or bounded-authority field. Optional model and reasoning
+effort are frozen independently at admission; an unsupported native mapping
+is a typed post-admission `FailureSpawn`. Missing provider executable,
+configuration or auth is likewise post-admission failure, never queue
+ineligibility. Executable identity/digest/version and final Change/config
+identity are revalidated immediately before release.
 
-It receives a daemon-derived `SpawnContext` with an exact `RunId`, source path,
-single `startup_input`, hook-token path, trusted `factoryctl` path, and resolved
-provider and optional model selected at admission. V1 provider choice
-inherently means unrestricted interactive authority; adapters cannot claim an
-unproved OS write boundary. An adapter cannot choose a source path, keep a
-process alive for later work, or extend authority. See [the provider guide](docs/providers.md).
-
-The retained Rust runtime validates one exact Claude executable and the finite
-generated settings shapes before its Store admission begins. That ordering is
-historical, not planned Go eligibility: Go durably admits canonical work first,
-then missing source or provider executable/configuration/auth converges through
-typed `FailureSource` or `FailureSpawn` without falling through to lower work.
-A missing or rejected install disables only that provider, while a provider
-version or executable identity change fails its launch closed. Codex parses
-every actual launch under `--strict-config` and inherits no ambient provider
-configuration. Installed-version/model compatibility is checked by provider
-Build/start after admission; incompatibility becomes typed `FailureSpawn` and
-finalizing, never durable corruption or queue ineligibility. Bounded
-Claude/Codex authority is deferred until causal OS-effect proof exists.
+The runner starts with `env_clear` and one closed ordered environment builder,
+private per-run roots, a daemon-sealed `PATH`, and no ambient provider/API,
+proxy, Git/GitHub, SSH, loader or plugin variables. It writes the canonical
+task body exactly once to the PTY after both gates, with one provider-specific
+terminator; the body is never in argv, env or replay. Auth is a copy-only
+sealed file or metadata-only Keychain reference. Provider output is opaque and
+never lifecycle authority. Whole-provider API/model network access is not
+claimed to be constrained by this command contract.
 
 The generic runner exports `DARK_FACTORY_ATTEMPT_TOKEN_FILE` as the path to the
 private bearer file. It does not export the bearer value. When that variable is

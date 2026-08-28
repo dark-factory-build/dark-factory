@@ -8,14 +8,15 @@ only product order and architectural boundaries.
 
 The attempt kernel and its immediate architecture hygiene are on `main`:
 
-- one fresh provider process belongs to one admitted run;
+- one fresh runner-owned interactive PTY provider process belongs to one
+  admitted run;
 - admission transactionally checks dispatch and capacity, selects the current
-  canonical queue head, and freezes the derived role, provider, task revision,
-  Change lease, and typed execution mode;
+  canonical queue head, and freezes the derived role, provider, optional model
+  and effort, task revision, and Change lease;
 - worker and orchestrator mutations are restricted by the durable agent
   hierarchy inside the same transaction as the mutation;
-- dispatch enablement is independent from `PlanOnly`, `WorkspaceWrite`, and
-  `Unrestricted` provider authority;
+- provider choice is unrestricted interactive authority in V1; bounded
+  provider authority is deferred until causal OS-effect proof;
 - executable HTTP webhook intake and repository publication are absent; and
 - daemon finalization owns provider, verifier, runtime, and storage recovery,
   including process-group leader loss.

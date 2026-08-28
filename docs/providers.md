@@ -1,217 +1,134 @@
-# Adding a provider
+# Provider contract
 
-A provider is a small adapter that describes how to launch one supported
-coding-agent CLI for one admitted run. Claude Code, Codex, and the deterministic
-shell adapter implement the same boundary.
+This is the fresh Go provider contract. The old Rust launch guide, profile
+catalogue, and compatibility matrix are deleted; they are not implementation
+instructions for the cutover. V1 has one concrete provider boundary:
 
-> Live use remains frozen until an independent exact-main boot review passes.
-> Provider tests use temporary directories and fake/shell processes; do not
-> send a real paid prompt while developing an adapter.
-
-## Contract
-
-The complete trait is in `crates/factoryd/src/providers/mod.rs`:
-
-```rust
-pub trait Provider {
-    fn spawn_spec(&self, ctx: &SpawnContext)
-        -> Result<ProviderLaunch, ProviderError>;
-}
+```go
+func Build(Request) (Launch, error)
 ```
 
-`SpawnContext` is created by `factoryd`. It contains:
+`Build` is a pure constructor over facts frozen by daemon admission. `Launch`
+contains only one absolute, daemon-committed executable, one ordered argv, and
+one complete ordered environment. It cannot choose a provider, source path,
+working directory, authority, credential, or lifecycle result. The runner owns
+the already-open descriptor-bound Change cwd, fresh interactive PTY, input,
+process group, wait/reap, output, and cleanup. There is no provider interface,
+registry, plugin, profile, fallback, or adapter-owned supervision framework.
 
-- the exact `RunId` that owns this process;
-- the daemon-selected source directory;
-- one `startup_input` byte string;
-- resolved model and reasoning settings plus one typed execution mode frozen by
-  admission;
-- private paths for the attempt bearer and generated configuration; and
-- the trusted absolute `factoryctl` path and exact daemon socket.
+## V1 matrix
 
-`ProviderLaunch` returns one executable, argv, provider-specific environment
-additions, and the same startup input. Any required configuration is written
-under the daemon-provided runtime directory before that description returns.
-
-The runner writes `startup_input` once to the process stdin and closes stdin.
-The provider process exits when that one run ends. There is no interactive PTY
-contract, later `send_input`, terminal attach, delivery acknowledgement,
-message-only turn, resident process, or provider-process resume.
-
-Provider adapters never:
-
-- create, choose, infer, or delete source paths;
-- spawn or reap their own process;
-- parse output to infer lifecycle or success;
-- grant capabilities or make a run terminal;
-- copy attempt bearer values into argv or environment; or
-- add a provider-specific local API or repository path.
-
-## Shipped launch shapes
-
-The launch is always fresh and non-interactive:
-
-- Claude Code: `claude -p --session-id <RunId>`, with the startup input on
-  stdin. The run UUID is a fresh Claude conversation identity; `--resume` is
-  never used.
-- Codex: `codex exec ... -`, with the startup input on stdin. `CODEX_HOME`
-  points at daemon-generated bounded configuration; no `codex resume` path
-  exists.
-- Shell: `sh -s`, or `sh -lc <configured-fixture-command>`, receiving the same
-  startup input. This is the deterministic reference adapter.
-
-Dispatch is not a provider input. It controls only whether the Store may admit
-another attempt. Each admitted run instead freezes one `ExecutionMode`:
-
-| Mode | Codex | Claude Code | Shell |
+| Provider | V1 authority | Model/effort | Launch status |
 |---|---|---|---|
-| `PlanOnly` | named profile extending `:read-only`, `approval_policy="never"`, and command network limited to the exact daemon socket | conservatively restricted to the supported macOS product runtime; `--permission-mode dontAsk`, read tools plus only the two `factoryctl task` outcome commands, with all write tools denied | unsupported |
-| `WorkspaceWrite` | named profile extending `:workspace`, both system-temp roots denied, `approval_policy="never"`, and command network limited to the exact daemon socket | macOS-only because exact AF_UNIX sandbox policy is required; `--permission-mode dontAsk`, exact `Edit(./**)` rule anchored by the Change working directory, and native sandboxing that fails if unavailable or asked to retry unsandboxed | unsupported |
-| `Unrestricted` | `--dangerously-bypass-approvals-and-sandbox` | `--permission-mode bypassPermissions` | the only honest shell mode |
+| `shell` | unrestricted interactive | neither value is present | shipped first; exact `/bin/sh -s` |
+| `claude_code` | unrestricted interactive | each optional independently | shipped only for the exact reviewed executable/version |
+| `codex` | unrestricted interactive | each optional independently | shipped only for the exact reviewed executable/version |
 
-Codex and Claude profiles default to `WorkspaceWrite`; shell defaults to its
-only supported mode. Claude always uses `-p`, ignores user/project setting
-sources, and uses strict MCP configuration. Codex always uses `exec
---strict-config`, disables interactive approvals for bounded modes, and reads
-the one task from stdin.
-No advertised mode can wait for an unanswered native approval prompt.
+No bounded provider authority is shipped in V1. The schema and wire contract
+have no permission-mode/profile field. A later bounded provider contract must
+prove its actual filesystem, process, socket, and network effects with a real
+OS witness before it can be added. Unsupported combinations fail typed
+`FailureSpawn` after admission; they never make work ineligible and never
+fall through to another provider.
 
-Bounded Codex modes require Codex CLI 0.138.0 or later. They pass
-`--enable network_proxy`, so a client that does not recognize the required
-enforcement feature exits before `exec` rather than silently ignoring the
-socket-only policy. Adapter tests validate the complete generated profile with
-an installed Codex metadata command and never send a prompt.
+The current metadata-only review recorded Claude Code `2.1.245` and Codex CLI
+`0.149.0`. Those versions are evidence for the launch tests, not a permanent
+compatibility promise. A provider version, executable digest, or native flag
+semantic change fails closed until a new exact review updates the committed
+launch table. No paid session is part of this proof.
 
-Claude `WorkspaceWrite` uses a native Bash sandbox that writes to the Change
-and one provider-created per-launch temp directory; the latter is ephemeral
-runtime scratch, not durable product source. Its exact AF_UNIX allowlist is
-enforced by Claude only on macOS, so `WorkspaceWrite` fails before launch on
-other platforms. `PlanOnly` has no sandbox stanza and technically does not
-depend on that allowlist, but is conservatively restricted to the supported
-macOS product runtime to avoid a second platform claim. The explicit
-`Unrestricted` mode remains available elsewhere. Linux remains a source/test
-lane rather than an advertised daemon runtime.
+## Launch facts
 
-At daemon startup, Dark Factory resolves one canonical Claude executable,
-requires the reviewed exact `2.1.236 (Claude Code)` version, and passes every
-generated settings shape through the metadata-only `doctor` command with a
-fixed non-colour `C` locale. Claude reports invalid settings while still
-exiting zero, so the daemon also rejects its `Invalid settings` diagnostic. No
-prompt is submitted. Missing, unreviewed, or invalid Claude is marked
-unavailable: the daemon can still serve Codex and Shell, but a Claude attempt
-fails explicitly. Attempts reuse the validated executable identity and fail
-before launch if an auto-update or replacement changed it; the next Claude
-version must be reviewed and allow-listed deliberately.
+Admission freezes provider, optional model and optional reasoning effort in the
+Run. It also commits the executable absolute path, digest, and reviewed version
+identity. Immediately before provider release, the daemon/runner revalidates
+that identity and the final Change descriptor identity, generated-config path,
+and config digest. A changed, missing, non-regular, or ambiguous object fails
+closed. PATH lookup is never executable authority.
 
-Model and reasoning flags are explicit when configured. Missing runtime
-metadata remains `None`; never invent a plausible provider default.
+The shell launch is exactly:
 
-## Hooks and attempt authority
+```text
+executable: /bin/sh
+argv:      ["/bin/sh", "-s"]
+```
 
-Generated hook commands use the absolute `factoryctl` path and
-`--token-file <private path>`. The bearer is read from its `0600` file when the
-hook runs, never embedded in generated text, argv, or environment.
+The provider-specific Claude and Codex argv are ordered, version-sealed launch
+facts. In the metadata-only review of Claude Code `2.1.245`, the explicit
+unrestricted bypass is `--dangerously-skip-permissions`; in Codex CLI
+`0.149.0`, it is `--dangerously-bypass-approvals-and-sandbox`. These flags are
+part of the sealed launch witness, not caller input. The argv contains only
+the admitted optional model/effort settings supported by that reviewed
+version.
 
-The generic runner also sets `DARK_FACTORY_ATTEMPT_TOKEN_FILE` to that private
-file path. The path is not a secret substitute for the bearer; its file remains
-owner-only. While this variable is present, `factoryctl` authenticates every
-request with the ambient attempt credential. This includes operator-shaped
-commands: the daemon evaluates them against the exact attempt allowlist and
-refuses them instead of loading the operator credential.
+For those reviewed versions, the deterministic templates are:
 
-The daemon resolves the bearer to one exact attempt principal and accepts
-attempt operations only while that run is `running`. It derives project,
-agent, task, run, role, provider, and source scope from durable state. A stale,
-forged, taskless, finalizing, or terminal credential fails closed.
+```text
+Claude 2.1.245:
+  [ABS_CLAUDE, "--dangerously-skip-permissions",
+   ("--model", MODEL)?, ("--effort", EFFORT)?]
 
-Provider hook names come from the upstream CLIs and may contain the word
-“Session”; they are observations within one run, not Dark Factory session
-lifecycle states. `PreToolUse` enforces the daemon policy and budget before a
-tool call. It also refuses direct `cargo`, `rustc`, and `rustup` invocation and
-direct execution from a recognized mutable Cargo
-`target/.../{debug,release}` path: providers do not own Rust build paths or
-mutable Cargo outputs. Completion and blocking use the same bearer and derive
-the current task from it. On a project configured for `RustWorkspaceTest`,
-`factoryctl task done` first causes the transition to `finalizing`; factoryd
-reaps the provider and owns the fixed verification before it can terminalize.
-There is no generic provider build API, Cargo shim, or provider-selected build
-configuration. The fixed verifier excludes doctests and launches only copied
-top-level Cargo test executables; it is not an OS sandbox for test code. No
-hook can directly terminalize a run.
+Codex 0.149.0:
+  [ABS_CODEX, "--dangerously-bypass-approvals-and-sandbox",
+   ("--model", MODEL)?, ("-c", "model_reasoning_effort=\"EFFORT\"")?]
+```
 
-Hook policy is a tripwire, not an OS sandbox. A provider runs as the operator's
-user and can bypass string-level policy through other execution paths. See
-[`SECURITY.md`](../SECURITY.md).
+Optional pairs are emitted in the shown order and are omitted independently.
+There is no trailing prompt argument: the interactive PTY is the only task
+input. A future reviewed version may replace a template only after its
+metadata/help and fake-witness tests prove the same properties.
+They never contain the task body, prompt text, Change path, auth secret,
+resume/session selector, remote/cloud selector, browser/plugin selector, or
+operator control. The launch tests assert the exact bytes and reject Claude
+`-p`/`--print`, Codex `exec`, resume/continue, remote/cloud/app-server paths,
+browser/plugin loading, and any unreviewed flag. If a reviewed version cannot
+represent one admitted optional setting without a hidden fallback, `Build`
+returns typed `FailureSpawn`.
 
-Provider startup guidance directs workers to edit their Change and finish with
-`factoryctl task done --result <summary>`. It must not tell them to run a Rust
-toolchain first: the configured completion policy is the authoritative
-verification and runs only after their process has been reaped. Non-Rust
-projects configured with `None` keep the ordinary completion path;
-orchestrators are not workspace-test subjects.
+The body is canonical bounded UTF-8. After both durable launch gates have
+passed, the runner writes it exactly once to the PTY and appends exactly one
+provider-specific terminator. It does not put the body in argv or environment,
+and it never reconstructs or replays it after an uncertain write. Output is
+opaque observation and never lifecycle authority.
 
-## Generated configuration
+## Environment, roots, and auth
 
-Keep generated files private and limited to what the provider needs for this
-launch.
+The runner starts from `env_clear` and one closed, ordered environment builder.
+Only daemon-approved identity, locale, temporary-root, provider-state,
+generated-config, auth-reference, and daemon-control values are included. A
+single daemon-sealed validated `PATH` is allowed for non-authoritative child
+behavior; `/bin/sh` and all authority helpers are absolute. Inherited API,
+proxy, Git/GitHub, SSH, credential-helper, dynamic-loader, plugin, and user
+configuration variables are absent. No caller or adapter can merge additions.
 
-- Claude receives a per-run settings file containing daemon-authored hooks and
-  the exact permissions/sandbox settings for the frozen execution mode.
-  Dark Factory does not edit the operator's `~/.claude.json`.
-- Codex uses one fresh isolated home per attempt. Factoryd resolves the source
-  home once at daemon startup, links only its `auth.json` when present, and
-  writes a complete daemon-owned config containing the authenticated hook and
-  exact source trust. Ambient rules, profiles, MCP servers, provider commands,
-  hooks, permissions, network features, project trust, and sandbox settings
-  never enter the attempt. Model, reasoning, and the frozen typed execution
-  mode come only from the admitted profile and explicit launch arguments.
-- Provider environment additions must not duplicate the runner's generic
-  sanitized environment or expose repository credentials.
+Every run receives private owner-only `HOME`, `TMP`, provider-state, config,
+and runtime roots below the daemon-owned runtime capability. The Change cwd is
+descriptor-bound and `.git`-free. The provider cannot substitute a pathname or
+escape those roots through a provider-side default. Unrestricted Claude/Codex
+API/model network access is not constrained by this command contract; V1 makes
+no contrary network-sandbox claim.
 
-Generated configuration lives under the registered run runtime root. Rust
-`Drop` or a test temporary-directory destructor is not its cleanup authority;
-the daemon finalizer must release and acknowledge that root durably.
+An `AuthRef` is either a copied, sealed owner-only regular file or a
+metadata-only Keychain reference. Copying is no-fallback and no-secret-read
+outside the selected source. The secret value never occurs in argv, the
+environment, PTY input, generated logs/configuration, errors, events, or
+replay. Auth cannot widen provider, filesystem, process, or network authority.
+Replacing the source, changing its identity, or losing access is a typed
+post-admission spawn failure; another source is never tried.
 
-## Adding an adapter
+## Required causal proof
 
-1. Add `crates/factoryd/src/providers/<name>.rs` and register the provider in
-   `providers/mod.rs` and the shared provider enum.
-2. Implement `spawn_spec` as a pure launch description plus the smallest
-   necessary private configuration writes.
-3. Add the provider's model/reasoning policy to the shared model-policy module
-   and define which typed execution modes it can truthfully enforce. Validation
-   happens before a future launch.
-4. Add focused tests proving the exact executable/argv for every supported
-   execution mode, one unchanged startup
-   input, private generated files, sanitized environment additions, and no
-   resume or caller-selected source path.
-5. Exercise lifecycle behavior through the generic prepare/activate runner
-   tests. Do not add provider-specific supervision.
-6. Update this guide and run the authoritative local gate.
+Provider tests use fake executables and witnesses, never a real provider
+session. They inspect exact argv, ordered environment, descriptor cwd, PTY
+task bytes, terminator, private-root census, auth privacy, Change/config
+identity and digest, and executable replacement immediately before release.
+They mutate ambient environment, auth source and replacement, provider state,
+config, Change identity, and output/exit timing. They assert no prompt appears
+in argv/env/replay, no forbidden print/resume/remote/browser/plugin path is
+accepted, and output cannot terminalize a run. Runner/Store tests separately
+prove both gates, register-before-exec, typed post-admission availability
+failure, cleanup uncertainty remaining finalizing, and exact reap.
 
-If a provider needs a second lifecycle, output decoder, interactive terminal,
-or custom authority path, it does not fit this interface. Challenge the
-requirement instead of widening the kernel.
-
-## Source and repository boundary
-
-Before worker execution, the daemon materializes one exact committed tree into
-the attempt's leased Change. The provider receives that plain writable source
-view with no Git administrative locator. Status, diff, commit, push,
-pull-request, and publication operations do not exist in the product. A
-provider adapter must not run `git worktree`, accept a caller-selected source
-argument, or add another credential route.
-
-## Testing
-
-`ShellProvider` is the deterministic provider for driving a real daemon end to
-end without a subscription; `scripts/macos-contributor-smoke.sh` is its
-consumer, and no Rust test launches it. Rust tests cover lower-level process
-behavior with `fake-agent`. All fixtures use a temporary `DARK_FACTORY_HOME`,
-explicit socket, disposable paths, and an independent post-test verifier. A
-crash test must prove the resource ledger/finalizer converges after restart; a
-passing destructor is not evidence.
-
-Run focused tests through the repository CI lease, then `./scripts/local-ci.sh`.
-Real Claude and Codex runs are reserved for an explicit provider-validation
-task after the independent exact-main boot review.
+There are no V1 tests for bounded authority beyond the typed deferred result.
+Any future bounded mode requires real filesystem/socket/network witnesses that
+prove the claimed OS effects causally.

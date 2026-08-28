@@ -17,29 +17,39 @@ Live use remains frozen until an independent exact-main boot review passes.
 ### Go hard-cutover planning authority
 
 This file describes security properties of the implemented Rust kernel unless
-a passage explicitly names planned Go. Retained Rust queue selection,
-non-interactive providers and pre-admission executable probing are historical
-evidence, not compatibility requirements. The authoritative planned Go
+a passage explicitly names planned Go. Retained Rust queue selection and
+pre-admission executable probing are historical evidence, not compatibility
+requirements. The authoritative planned Go
 contract is [`docs/development/GO_REWRITE.md`](docs/development/GO_REWRITE.md),
 which currently requires fresh exact-head review and does not claim a finished
 daemon.
 
 Planned Go admission is one global cursor-free immediate Store transaction with
-no caller AgentID/task/observation. It validates global settings and uses one
-concrete SQL integrity predicate over every row/relation/control that can occupy
-capacity or bind active authority and every structurally queued rank, payload,
-assignment and exact task/agent/project fields. Unknown phases, missing
-relations, split pairs, invalid IDs/revisions/enums and malformed queued
-ranking/payload facts block all admission. Only after that proof may its one
-capacity set count admitted, running and finalizing runs. The rewrite record's
-single exact field/domain table covers Boolean storage classes, budget
-arithmetic, provider/model fields, task `updated_at_ms`, every relevant
-monotonic timestamp, Change fields, and invalidation counters. The fresh schema
-has no profile row, agent or project status field; agent `paused` is the
-availability control. Provider choice inherently means unrestricted
-interactive authority in V1: no `execution_mode` field, type, column, or wire
-value exists. Bounded Claude/Codex authority is deferred until
-causal OS-effect proof exists.
+no caller AgentID/task/observation. It first validates the complete fresh
+schema image before either RunID reconciliation or a new decision. The exact
+column names, SQLite storage classes, scalar bounds, enum sets, nullability,
+`CHECK`s, foreign keys and unique indexes are owned only by
+`internal/kernel/schema.go` and its exact schema allowlist/constraint tests;
+this document does not duplicate those columns. Shared Go create/read/wire
+validation owns UTF-8 and NUL rules. A concrete SQL integrity
+predicate then covers every row/relation/control that can occupy capacity or
+bind active authority and every structurally queued rank, payload, assignment
+and exact task/agent/project relationship. Unknown phases, missing relations,
+split pairs, invalid IDs/revisions/enums, reversed timestamps and malformed
+queued ranking/payload facts block all admission. After global checks select
+the canonical task, shared value validation rejects malformed UTF-8/NUL text in
+that task/control; lower-ranked queued prose is not globally scanned merely to
+decide capacity. Only after that proof may capacity count admitted, running and
+finalizing runs.
+
+The same predicate proves invalidation continuity: `head =
+next_invalidation_sequence - 1`; the empty log has zero rows, `head = 0` and
+`invalidation_floor = 1`; otherwise rows are contiguous from floor through
+head, have exact count/minimum/maximum and stay within the retention bound.
+The fresh schema has no profile row, agent or project status field, and no
+permission-profile field. Agent `paused` is the availability control. Provider
+choice inherently means unrestricted interactive authority in V1; bounded
+authority is deferred until causal OS-effect proof exists.
 This is the same SQL predicate, not a second security validator. It then
 validates durable eligibility and reason precedence, orders by priority descending,
 creation time ascending and exact 16-byte task-ID `BLOB` bytes ascending, then validates the
@@ -173,12 +183,27 @@ labels are reported as unresolved rather than touched. A run remains visibly
 
 ## Provider and tool boundary
 
-The retained Rust runtime gives each admitted run one fresh non-interactive
-provider process and one startup input. There are no taskless resident
-processes, delivery replay, provider resume, or session outboxes. Planned Go
-replaces the closed-stdin portion with one fresh runner-owned PTY process and
-explicit authenticated attach/input/lease authority as frozen in the rewrite
-record; this is not authority to reuse a process across runs.
+Planned Go uses one concrete `internal/provider.Build(Request) (Launch, error)`
+boundary. It returns only an absolute committed executable, ordered argv and
+complete ordered environment. The runner owns the descriptor-bound Change cwd,
+fresh interactive PTY, input, process group, wait/reap, output and cleanup.
+Provider choice is unrestricted interactive authority in V1; no bounded
+permission profile is persisted or interpreted. Shell is exactly `/bin/sh -s`.
+Claude Code and Codex use only exact reviewed, version-sealed native launch
+facts. Optional model and reasoning effort are frozen independently at
+admission; unsupported native mappings become typed post-admission
+`FailureSpawn`.
+
+The runner starts from `env_clear` and one closed ordered environment builder,
+with private per-run roots, a daemon-sealed `PATH`, and no ambient provider/API,
+proxy, Git/GitHub, SSH, loader or plugin configuration. The final executable,
+Change descriptor and generated-config identity/digest are revalidated
+immediately before release. The canonical task body is written exactly once to
+the PTY after both launch gates, with one provider-specific terminator; it is
+never in argv, environment or replay. Auth is a copy-only sealed file or
+metadata-only Keychain reference, with no fallback or secret leakage. Whole
+provider API/model network access is not claimed to be constrained by this
+command contract.
 
 Provider hooks are authenticated observations and bounded requests.
 `PreToolUse` applies the durable tool-call budget and a conservative command
@@ -196,7 +221,7 @@ Factory dispatch and provider authority are separate durable controls.
 `dispatch_enabled` decides only whether another attempt may be admitted; turning
 it off cannot weaken or rewrite an already-admitted attempt. Provider choice
 inherently gives the fresh V1 runner unrestricted interactive authority. No
-execution-mode field or value is persisted, serialized, or interpreted.
+permission-profile field or value is persisted, serialized, or interpreted.
 
 For planned Go, the same global `BEGIN IMMEDIATE` validates global settings,
 runs the one capacity/authority/queued-rank-and-payload integrity predicate,

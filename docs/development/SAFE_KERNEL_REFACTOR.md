@@ -13,7 +13,7 @@ queue wording below is historical where it conflicts with the replacement.
 The canonical planned Go contract is
 [`GO_REWRITE.md`](GO_REWRITE.md); it currently requires fresh exact-head review
 and does not claim a finished Go daemon. Go implementation must not copy the
-retained Rust per-agent admission loop, non-interactive stdin contract, cache
+retained Rust per-agent admission loop, obsolete closed-stdin provider contract, cache
 selection or crate graph merely because it appears here.
 
 ## Kernel model
@@ -57,31 +57,32 @@ task, queue observation or fairness cursor. Every call supplies fresh daemon
 IDs, including one unconditional candidate Change ID that is used only for a
 selected worker incarnation with no existing canonical Change.
 
-After RunID reconciliation, the transaction first validates global settings
-and runs one concrete SQL integrity predicate over every row/relation/control
-that can occupy capacity or bind active run/credential/resource/session/Change
-authority and every structurally queued assignment/rank/payload and required
-task/agent/project field. Unknown phases; missing relations; split pairs;
-invalid IDs, revisions, enums, models or efforts; and malformed queued priority,
-created time, title, body or lifecycle payload are `ErrCorruptState` wherever
-they rank. Queued rank/payload is exactly integer priority `[-1000000,1000000]`,
-nonnegative signed-64-bit integer creation time, nonzero 16-byte IDs, positive
-revisions, TEXT title 1–1024 bytes, TEXT body 0–131072 bytes and no queued
-blocked/proposal/terminal/completion/result payload. Fresh schema constraints
-prevent ordinary invalid writes; this single query proves damaged state before
-capacity and is neither an application row scan nor eligibility. The exact
-field/domain table is defined once in the rewrite record's Global transactional
-admission contract and used literally here: task `updated_at_ms` and every
-relevant timestamp are bounded and monotonic; dispatch/pause are exact Boolean
-integers; budgets are bounded and internally ordered; every role, provider,
-model, reasoning effort, task status and verification policy is in its stated
-domain; shell requires model and reasoning effort to be absent, while
-Claude/Codex permit each independently. The fresh schema has no profile row or
-profile status, agent status or project status; agent `paused` is the
-availability switch. Provider choice inherently means unrestricted interactive
-authority in V1. There is no `execution_mode` field, type, column, or wire
-value; bounded Claude/Codex authority is deferred until causal OS-effect proof
-exists. This is not a second validation layer. Exact fresh
+Before either RunID reconciliation or a new decision, the transaction validates
+the complete fresh schema image. `internal/kernel/schema.go` and its exact
+schema allowlist/constraint tests are the only authority for column names,
+SQLite storage classes, scalar bounds, enum sets, nullability, `CHECK`s,
+foreign keys and unique indexes; this document does not duplicate those
+columns. Shared Go create/read/wire validation owns UTF-8 and NUL rules. One
+concrete SQL integrity predicate then covers every
+row/relation/control that can occupy capacity or bind active
+run/credential/resource/session/Change authority and every structurally queued
+assignment/rank/payload and required task/agent/project relationship. Unknown
+phases, missing relations, split pairs, invalid IDs/revisions/enums, reversed
+timestamps, or malformed queued facts are `ErrCorruptState` before capacity.
+After canonical selection, shared value validation rejects malformed UTF-8/NUL
+text in the selected task/control; lower-ranked queued prose is not globally
+scanned merely to decide capacity. This is not an application admission row
+scan or second SQL validation layer.
+
+The same predicate proves invalidation continuity: `head =
+next_invalidation_sequence - 1`; an empty log has zero rows, `head = 0` and
+`invalidation_floor = 1`; otherwise rows are contiguous from floor through
+head, with exact count/minimum/maximum and no more than the retention limit.
+Project source roots are clean absolute paths beginning with `/` but not equal
+to `/`, with no NUL, empty, `.` or `..` component, repeated separator, or
+trailing separator. Provider choice inherently means unrestricted interactive
+authority in V1; no permission-profile field exists, and bounded authority is
+deferred until causal OS-effect proof. Exact fresh
 decision precedence after those checks is `dispatch_disabled`, `at_capacity`,
 `queue_empty`, then `no_eligible_work`. Only after every run phase is known may
 capacity count exactly the one nonterminal set: admitted, running and finalizing.
@@ -93,8 +94,8 @@ Eligibility means task status exactly queued, valid same-project assigned
 agent, either known role (`worker` or `orchestrator`), not paused, durable
 budget remaining and no conflicting open run. Role determines the footprint,
 not external availability; known nonqueued status is outside the queue.
-Provider/model/effort/project-verification controls must be in those exact
-field domains, but external availability
+Provider/model/effort/project-verification controls must satisfy the executable
+schema allowlist, but external availability
 is not eligibility. Installed-version/model compatibility is checked by
 provider Build/start after admission and becomes typed `FailureSpawn`/finalizing,
 never durable corruption or queue ineligibility. Known-valid paused,
@@ -154,11 +155,10 @@ an old credential, conversation, or process.
 
 ## Process and resource ownership
 
-The retained Rust runtime launches one fresh non-interactive provider process;
-startup input is written once and stdin closes. Planned Go instead launches one
-fresh runner-owned PTY provider with explicit browser attach/input lease. Neither
-runtime has a taskless resident provider, prompt replay, delivery journal or
-provider-process resume.
+The retained Rust process model is historical evidence only and is deleted at
+the Go cutover. Planned Go launches one fresh runner-owned interactive PTY
+provider with explicit authenticated attach/input lease. No provider process is
+reused across runs, and no task body is replayed after an uncertain write.
 
 Launch uses register-before-exec gates:
 
@@ -288,7 +288,7 @@ callback or row:
 | Immutable source and launch | Concurrent Change mutation yields one canonical snapshot or fails before compilation. Replacing or tampering with prepared test output cannot change what launches. |
 | Cache reuse and Change storage | Two revisions reuse one project/toolchain cache while producing distinct source-bound manifests. Cache count and measured-byte pressure refuse or reclaim only regenerable entries. Nonterminal capacity bounds the count of reserved residues; accepted trees meet entry/byte/depth limits. Terminal retained-Change aggregate retention and a same-UID-replaced reserved stage's bytes remain explicit cutover gates, not invented admission authority. |
 | Orchestrator policy only | Orchestrators remain subject to hierarchy scope and cannot direct-launch, publish repositories, submit another attempt's outcome, mutate capacity or budgets, or invoke operator control. |
-| Dispatch and provider authority | Disabled dispatch admits nothing. An admitted run retains its frozen provider/model/effort across agent edits and dispatch changes. No execution-mode field or value may appear in the fresh schema, Store model, or wire contract; bounded provider authority is deferred until its causal OS-effect proof. |
+| Dispatch and provider authority | Disabled dispatch admits nothing. An admitted run retains its frozen provider/model/effort across agent edits and dispatch changes. No permission-profile field or value may appear in the fresh schema, Store model, or wire contract; bounded provider authority is deferred until its causal OS-effect proof. |
 
 Process tests use a temporary `DARK_FACTORY_HOME`, explicit private socket,
 unique disposable paths and labels, deterministic providers, and two
