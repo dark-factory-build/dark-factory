@@ -104,7 +104,10 @@ if [ "\${1-}" = pnpm ] && [ "\${2-}" = install ]; then
     /bin/ln -s .pnpm/typescript@5.8.3/node_modules/typescript node_modules/typescript
     : >node_modules/.modules.yaml
 fi
-case "\$(/bin/cat "$fast_mode" 2>/dev/null)" in corepack-fail) exit 45 ;; esac
+case "\$(/bin/cat "$fast_mode" 2>/dev/null)" in
+    bad-tree) /bin/chmod 600 node_modules/.pnpm/typescript@5.8.3/node_modules/typescript/package.json ;;
+    corepack-fail) exit 45 ;;
+esac
 EOF
 for fast_tool in "$fast_go" "$fast_gofmt" "$fast_git" "$fast_xargs" "$fast_corepack"; do /bin/chmod 700 "$fast_tool"; done
 . "$repository_root/scripts/go-fast-stage.sh"
@@ -135,6 +138,9 @@ repository_root=$fast_real_repository_root
 /usr/bin/grep -F 'corepack pnpm install --frozen-lockfile --ignore-scripts NETWORK=1' "$fast_log" >/dev/null || fail "install was not the sole package network stage"
 /usr/bin/grep -F 'corepack pnpm run test NETWORK=0' "$fast_log" >/dev/null || fail "package tests were not offline"
 /usr/bin/grep -F 'INTEGRITY=unset' "$fast_log" >/dev/null || fail "Corepack signature verification was disabled"
+printf '%s\n' bad-tree >"$fast_mode"
+if go_gate_fast_stage; then fail "fast stage accepted a changed TypeScript tree"; fi
+: >"$fast_mode"
 
 # The web install deliberately uses a process-local umask. This fixture
 # exercises the helper directly so nested calls and interrupted package
