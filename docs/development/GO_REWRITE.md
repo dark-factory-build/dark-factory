@@ -6515,3 +6515,43 @@ Public UI lifecycle and HumanRequest candidate on 2026-08-27:
   drafts are retained only within the exact daemon-minted UTF-8 byte bound.
   Interactive xterm lifecycle remains the next separate reviewed UI commit; no
   terminal abstraction enters this slice.
+
+Factoryd activation: boot recovery sweep, scheduler, and the black-box
+daemon lifecycle on branch s1-finish:
+
+- factoryd now runs the finite recovery sweep after the daemon opens and
+  before any listener exists, so no client ever observes pre-sweep durable
+  state; each disposition is reported on stderr and unresolved residue never
+  refuses boot. The reviewed dormant `RunScheduler` starts after the
+  listeners with the boot-proven supervisor specification and is joined
+  before the daemon closes, because it owns synchronous RunNext children
+  holding daemon resources. Causal tests pin the sweep-before-socket
+  ordering with seeded residue, the scheduler driving a queued task through
+  a real attempt to a terminal task record, the join-before-daemon-close
+  ordering, SIGTERM convergence and double-boot refusal.
+- Abandoned settlement is composed from the reviewed edges: a failed
+  attempt converges to finalizing with its footprint released and its
+  candidate change unpublished, and nothing terminalized it. The scheduler
+  completion validation and the sweep's failure arms now settle that state
+  through FinalizeRun/FinalizeWorkerRun with the abandoned change
+  settlement; a published change refuses with a conflict and the run stays
+  discoverable — retained settlement reconstruction in recovery remains the
+  one documented deferral. Sweep tests migrated to the settled terminal
+  endpoint, including the no-longer-recoverable second sweep.
+- `scripts/go-daemon-e2e.sh` is the installed-shape black-box proof, wired
+  into `go-ci-owned.sh`: freshly built factoryd/factoryctl/factory-runner
+  siblings, a factoryctl-initialized temporary home, operator subcommands
+  over the real socket, one shell task to a succeeded terminal record with
+  a published change, a pre-admission SIGKILL whose queued task survives
+  and runs on reboot, a mid-attempt SIGKILL landed only after the durable
+  inner activation marker proves the provider live whose orphan publishes
+  a result the next boot consumes and settles to a terminal failed task
+  before the socket opens, double-boot refusal against the live home, and
+  a SIGTERM teardown census (socket, lock, and runtime children released).
+  The provider task must declare its own outcome exactly as a real
+  provider session does; a provider that exits silently fails honestly
+  with "provider exited before an attempt outcome".
+- Gates on the branch: gofmt/vet clean, `go build ./...`, the full serial
+  module suite green twice consecutively, `go test -race` for
+  internal/daemon (167s) and cmd/factoryd (26s), the browser PTY E2E and
+  the new daemon E2E green in repeated runs, `git diff --check` clean.

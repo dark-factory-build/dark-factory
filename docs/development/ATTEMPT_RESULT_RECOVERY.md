@@ -167,6 +167,22 @@ state.
   load-bearing for kernel tests of no-result histories; their deletion
   drags a multi-file kernel test migration and is left for the simplicity
   audit with the wedge no longer reachable from production code.
-  Worker-run terminalization in recovery (settlement reconstruction) and
-  wiring the sweep into daemon boot belong to the scheduler/factoryd
-  activation phase.
+
+## Built in the activation phase (factoryd)
+
+- The sweep is wired into factoryd boot after the daemon opens and before
+  any listener exists; every disposition is reported, and unresolved
+  residue never refuses boot.
+- Abandoned settlement is composed: the scheduler completion validation
+  and the sweep's failure arms (runtime-absent, unregistered, pre-exec
+  absence, and a consumed failure result) settle a finalizing run whose
+  candidate change was never published through the reviewed
+  FinalizeRun/FinalizeWorkerRun edges, landing the task at its terminal
+  status. The black-box daemon E2E proves the consumed-on-boot cut ends
+  at a terminal failed task before the socket opens.
+- Still deferred: retained settlement reconstruction in recovery. A
+  consumed SUCCEEDED result whose change was published refuses the
+  abandoned arm with a conflict and the run deliberately stays
+  finalizing/discoverable rather than guessing availability evidence;
+  the reconstruction needs the published-tree inspection bound to the
+  recovered change facts.
