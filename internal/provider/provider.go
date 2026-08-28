@@ -47,17 +47,18 @@ func (Installation) String() string   { return "provider installation (private)"
 func (Installation) GoString() string { return "provider.Installation{private}" }
 
 // RuntimePaths is the complete set of external strings permitted to enter the
-// provider environment. Construction is lexical only; it is not a durable
-// authority seal. Integration must replace these strings with daemon-sealed
-// identities before this value can authorize a production launch.
+// provider environment. Construction is lexical only; the daemon-owned Change
+// worker must retain and revalidate the exact filesystem/executable
+// capabilities that make these paths true immediately around Build and exec.
+// This value is never authority by itself.
 type RuntimePaths struct {
-	home, temp, socket, token, factoryctl, gitCeiling, toolPath, account string
+	home, temp, socket, token, factoryctl, gitCeiling, toolPath string
 }
 
-func NewRuntimePaths(home, temp, socket, token, factoryctl, gitCeiling, toolPath, account string) (RuntimePaths, error) {
+func NewRuntimePaths(home, temp, socket, token, factoryctl, gitCeiling, toolPath string) (RuntimePaths, error) {
 	runtime := RuntimePaths{
 		home: home, temp: temp, socket: socket, token: token,
-		factoryctl: factoryctl, gitCeiling: gitCeiling, toolPath: toolPath, account: account,
+		factoryctl: factoryctl, gitCeiling: gitCeiling, toolPath: toolPath,
 	}
 	if !runtime.valid() {
 		return RuntimePaths{}, ErrInvalid
@@ -71,18 +72,17 @@ func (RuntimePaths) GoString() string { return "provider.RuntimePaths{private}" 
 type Request struct {
 	provider        kernel.Provider
 	installation    Installation
-	runID           kernel.RunID
 	model           string
 	reasoningEffort string
 	runtime         RuntimePaths
 }
 
-func NewRequest(kind kernel.Provider, installation Installation, runID kernel.RunID, model, reasoningEffort string, runtime RuntimePaths) (Request, error) {
-	if !validProvider(kind) || !validRunID(runID) || !validOptional(model, 128) || !validOptional(reasoningEffort, 32) || !runtime.valid() {
+func NewRequest(kind kernel.Provider, installation Installation, model, reasoningEffort string, runtime RuntimePaths) (Request, error) {
+	if !validProvider(kind) || !validOptional(model, 128) || !validOptional(reasoningEffort, 32) || !runtime.valid() {
 		return Request{}, ErrInvalid
 	}
 	return Request{
-		provider: kind, installation: installation, runID: runID,
+		provider: kind, installation: installation,
 		model: model, reasoningEffort: reasoningEffort, runtime: runtime,
 	}, nil
 }
@@ -175,7 +175,7 @@ func (runtime RuntimePaths) valid() bool {
 		}
 	}
 	return len(runtime.socket) <= maxSocketBytes && runtime.home != runtime.temp &&
-		validGitCeiling(runtime.gitCeiling) && validToolPath(runtime.toolPath) && validValue(runtime.account, 256)
+		validGitCeiling(runtime.gitCeiling) && validToolPath(runtime.toolPath)
 }
 
 func (runtime RuntimePaths) environment() []string {
@@ -190,8 +190,7 @@ func (runtime RuntimePaths) environment() []string {
 		"LC_ALL=C",
 		"TERM=xterm-256color",
 		"SHELL=/bin/sh",
-		"USER=" + runtime.account,
-		"LOGNAME=" + runtime.account,
+		"NO_COLOR=1",
 		"GIT_CEILING_DIRECTORIES=" + runtime.gitCeiling,
 		"GIT_DISCOVERY_ACROSS_FILESYSTEM=0",
 		"GIT_CONFIG_NOSYSTEM=1",
@@ -210,11 +209,6 @@ func validProvider(kind kernel.Provider) bool {
 	default:
 		return false
 	}
-}
-
-func validRunID(id kernel.RunID) bool {
-	value := id.String()
-	return len(value) == 32 && value != strings.Repeat("0", 32)
 }
 
 func validAbsolute(value string, limit int) bool {

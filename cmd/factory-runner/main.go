@@ -35,8 +35,8 @@ func run(args []string) error {
 		if err := runner.RunAttemptRunner(); err != nil {
 			return fmt.Errorf("factory-runner: attempt runner failed: %w", err)
 		}
-	case "--change-worker-shell":
-		if err := changeworker.RunShell(context.Background()); err != nil {
+	case "--change-worker":
+		if err := changeworker.Run(context.Background()); err != nil {
 			return fmt.Errorf("factory-runner: Change worker failed: %w", err)
 		}
 	default:

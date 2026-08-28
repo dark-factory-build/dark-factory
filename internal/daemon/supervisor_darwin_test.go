@@ -35,8 +35,8 @@ func TestMain(m *testing.M) {
 			err = runner.RunExecGate()
 		case "--attempt-runner":
 			err = runner.RunAttemptRunner()
-		case "--change-worker-shell":
-			err = changeworker.RunShell(context.Background())
+		case "--change-worker":
+			err = changeworker.Run(context.Background())
 		case "--supervisor-attempt-succeed":
 			if len(os.Args) != 3 {
 				err = errors.New("invalid attempt helper invocation")

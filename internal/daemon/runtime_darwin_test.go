@@ -17,6 +17,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/changeworker"
 	"github.com/dark-factory-build/dark-factory/internal/install"
+	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 	"golang.org/x/sys/unix"
 )
@@ -1765,6 +1766,7 @@ func workerConfigForRuntime(t testing.TB, runtime *Runtime) changeworker.Config 
 		t.Fatal(err)
 	}
 	return changeworker.Config{
+		Provider:    kernel.ProviderShell,
 		RuntimePath: path, RuntimeIdentity: identity, GitExecutable: "/usr/local/bin/git",
 		FactoryctlExecutable: factoryctl,
 		RepositoryRoot:       "/private/repository", RepositoryIdentity: repository, Revision: "main",

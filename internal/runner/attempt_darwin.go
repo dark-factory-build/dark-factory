@@ -475,7 +475,7 @@ func (w *WorkerControl) RegisterProviderInput(input []byte) error {
 	if w == nil || w.file == nil || w.state != workerProvider || w.providerInputRegistered || ValidateProviderInput(input) != nil {
 		return ErrState
 	}
-	if err := writeControlFrame(w.file, attemptFrame{Version: 1, Kind: "provider-input", Payload: append([]byte(nil), input...)}, maxFrameBytes); err != nil {
+	if err := writeControlFrame(w.file, attemptFrame{Version: 1, Kind: "provider-input", Payload: append([]byte(nil), input...)}, maxProviderFrameBytes); err != nil {
 		return err
 	}
 	if err := w.file.SetReadDeadline(time.Now().Add(attemptControlTimeout)); err != nil {

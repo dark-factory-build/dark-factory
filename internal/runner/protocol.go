@@ -20,7 +20,7 @@ func ValidateProviderInput(input []byte) error {
 		return ErrState
 	}
 	body, err := json.Marshal(attemptFrame{Version: 1, Kind: "provider-input", Payload: input})
-	if err != nil || len(body) == 0 || len(body) > maxFrameBytes {
+	if err != nil || len(body) == 0 || len(body) > maxProviderFrameBytes {
 		return ErrState
 	}
 	return nil

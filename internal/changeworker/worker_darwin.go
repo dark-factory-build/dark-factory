@@ -3,7 +3,6 @@
 package changeworker
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -14,11 +13,11 @@ import (
 	"strings"
 
 	"github.com/dark-factory-build/dark-factory/internal/change"
+	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/provider"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 	"golang.org/x/sys/unix"
 )
-
-const shellPath = "/bin/sh"
 
 type runtimeAuthority struct {
 	root, namedRoot, config, home, temp, token *os.File
@@ -29,7 +28,7 @@ type runtimeAuthority struct {
 	configDigest                               [32]byte
 }
 
-func runShell(ctx context.Context) (resultErr error) {
+func runProvider(ctx context.Context) (resultErr error) {
 	control, err := runner.OpenWorkerControl()
 	if err != nil {
 		return err
@@ -162,17 +161,37 @@ func runShell(ctx context.Context) (resultErr error) {
 	home := filepath.Join(config.RuntimePath, HomeName)
 	temp := filepath.Join(config.RuntimePath, TempName)
 	token := filepath.Join(config.RuntimePath, AttemptTokenName)
-	environment := []string{
-		"DARK_FACTORY_SOCKET=" + config.AttemptSocket,
-		"DARK_FACTORY_ATTEMPT_TOKEN_FILE=" + token,
-		"DARK_FACTORY_FACTORYCTL=" + factoryctl.Path(),
-		"HOME=" + home, "TMPDIR=" + temp, "PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", "TERM=dumb", "NO_COLOR=1",
-		"GIT_CEILING_DIRECTORIES=" + filepath.Dir(published.Path()), "GIT_DISCOVERY_ACROSS_FILESYSTEM=0",
-		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0",
-		"GIT_ASKPASS=/usr/bin/false", "GIT_SSH_COMMAND=/usr/bin/false", "GH_CONFIG_DIR=/dev/null",
+	runtimePaths, err := provider.NewRuntimePaths(
+		home, temp, config.AttemptSocket, token, factoryctl.Path(), filepath.Dir(published.Path()), "/usr/bin:/bin",
+	)
+	if err != nil {
+		_ = cwd.Close()
+		return err
 	}
-	initialInput := bytes.Clone(config.InitialTerminalInput)
-	spec, err := runner.PrepareExecSpec(runner.ExecSpec{Target: shellPath, Args: []string{"-s"}, Env: environment, Cwd: published.Path()})
+	var installation provider.Installation
+	if config.Provider == kernel.ProviderShell {
+		executable, commitErr := runner.CommitExecutableLocator("/bin/sh")
+		if commitErr != nil {
+			_ = cwd.Close()
+			return commitErr
+		}
+		installation, err = provider.NewShellInstallation(executable)
+		if err != nil {
+			_ = cwd.Close()
+			return err
+		}
+	}
+	request, err := provider.NewRequest(config.Provider, installation, config.Model, config.ReasoningEffort, runtimePaths)
+	if err != nil {
+		_ = cwd.Close()
+		return err
+	}
+	launch, err := provider.Build(request)
+	if err != nil {
+		_ = cwd.Close()
+		return err
+	}
+	spec, err := runner.PrepareCommittedExecSpec(launch.Executable(), launch.Argv(), launch.Environment(), published.Path())
 	if err != nil {
 		_ = cwd.Close()
 		return err
@@ -181,17 +200,25 @@ func runShell(ctx context.Context) (resultErr error) {
 		_ = cwd.Close()
 		return fmt.Errorf("runtime authority verification: %w", err)
 	}
-	if err := authority.close(); err != nil {
-		_ = cwd.Close()
-		return err
-	}
 	if err := factoryctl.Verify(); err != nil {
 		_ = cwd.Close()
 		return err
 	}
-	if err := control.RegisterProviderInput(initialInput); err != nil {
+	if err := launch.Executable().Verify(); err != nil {
 		_ = cwd.Close()
 		return err
+	}
+	if err := control.RegisterProviderInput(config.InitialTerminalInput); err != nil {
+		_ = cwd.Close()
+		return err
+	}
+	// Retain the descriptor-bound runtime authority until exec. Its members are
+	// CLOEXEC, so a successful provider image receives none of them; a failed
+	// exec returns through the ordinary defer and closes them. This avoids a
+	// path-only gap between the final proof and the provider effect.
+	if err := authority.verify(ctx); err != nil {
+		_ = cwd.Close()
+		return fmt.Errorf("runtime authority verification: %w", err)
 	}
 	return control.ExecProvider(spec, cwd)
 }

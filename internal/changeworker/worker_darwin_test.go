@@ -22,6 +22,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/changeworker"
 	"github.com/dark-factory-build/dark-factory/internal/daemon"
 	"github.com/dark-factory-build/dark-factory/internal/install"
+	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 	"golang.org/x/sys/unix"
 )
@@ -34,8 +35,8 @@ func TestMain(m *testing.M) {
 			err = runner.RunExecGate()
 		case "--attempt-runner":
 			err = runner.RunAttemptRunner()
-		case "--change-worker-shell":
-			err = changeworker.RunShell(context.Background())
+		case "--change-worker":
+			err = changeworker.Run(context.Background())
 		default:
 			os.Exit(m.Run())
 		}
@@ -108,6 +109,16 @@ func TestRegisteredShellWorkerCompletesExactFourReleaseSequence(t *testing.T) {
 	}
 	if strings.Count(string(environment), "DARK_FACTORY_FACTORYCTL="+fixture.factoryctl+"\n") != 1 || strings.Count(string(environment), "PATH=/usr/bin:/bin\n") != 1 {
 		t.Fatalf("provider helper/PATH environment is not exact: %q", environment)
+	}
+	for _, exact := range []string{"TERM=xterm-256color\n", "SHELL=/bin/sh\n", "NO_COLOR=1\n"} {
+		if strings.Count(string(environment), exact) != 1 {
+			t.Fatalf("provider Build environment omitted %q: %q", exact, environment)
+		}
+	}
+	for _, deleted := range []string{"TERM=dumb\n", "USER=", "LOGNAME="} {
+		if strings.Contains(string(environment), deleted) {
+			t.Fatalf("provider Build retained duplicate/ambient field %q: %q", deleted, environment)
+		}
 	}
 	if diagnostic := fixture.output(); strings.Contains(diagnostic, fixture.repositoryRoot) || strings.Contains(diagnostic, "printf x") {
 		t.Fatalf("private source/input leaked: %q", diagnostic)
@@ -468,7 +479,7 @@ func newWorkerFixtureWithFactoryctl(t *testing.T, factoryctl string) *workerFixt
 	// the complete byte sequence explicitly, including exit, rather than
 	// relying on the worker to mutate it with a hidden newline or close.
 	program := fmt.Sprintf("set -eu\nfor n in 3 9; do test ! -e /dev/fd/$n; done\ntest -e /dev/fd/10\ngit rev-parse --is-inside-work-tree >/dev/null 2>&1 && exit 81 || :\nprintf x > %s\npwd > %s\nenv | sort > %s\nexit\n", quote(witness), quote(cwdWitness), quote(envWitness))
-	config := changeworker.Config{RuntimePath: runtimePath, RuntimeIdentity: runtimeID, GitExecutable: git, FactoryctlExecutable: factoryctl, RepositoryRoot: repository, RepositoryIdentity: repositoryID, Revision: "HEAD", ChangeParent: changeParent, FinalName: "published", StagingName: ".stage", AttemptSocket: "/private/tmp/dark-factory-worker-api.sock", InitialTerminalInput: []byte(program)}
+	config := changeworker.Config{Provider: kernel.ProviderShell, RuntimePath: runtimePath, RuntimeIdentity: runtimeID, GitExecutable: git, FactoryctlExecutable: factoryctl, RepositoryRoot: repository, RepositoryIdentity: repositoryID, Revision: "HEAD", ChangeParent: changeParent, FinalName: "published", StagingName: ".stage", AttemptSocket: "/private/tmp/dark-factory-worker-api.sock", InitialTerminalInput: []byte(program)}
 	if _, err := runtimeValue.PublishWorkerConfig(context.Background(), config); err != nil {
 		t.Fatal(err)
 	}
@@ -492,7 +503,7 @@ func newWorkerFixtureWithFactoryctl(t *testing.T, factoryctl string) *workerFixt
 	if err != nil {
 		t.Fatal(err)
 	}
-	wrapper, err := runner.PrepareExecSpec(runner.ExecSpec{Target: executable, Args: []string{"--change-worker-shell"}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: home})
+	wrapper, err := runner.PrepareExecSpec(runner.ExecSpec{Target: executable, Args: []string{"--change-worker"}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: home})
 	if err != nil {
 		t.Fatal(err)
 	}

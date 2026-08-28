@@ -7,17 +7,18 @@ import (
 )
 
 const (
-	maxConfigBytes = 256 << 10
-	maxInputBytes  = 1 << 20
-	maxTargetBytes = 512 << 20
-	maxFrameBytes  = 16 << 10
+	maxConfigBytes        = 256 << 10
+	maxInputBytes         = 1 << 20
+	maxTargetBytes        = 512 << 20
+	maxFrameBytes         = 16 << 10
+	maxProviderFrameBytes = maxConfigBytes
 
 	// MaxProviderTaskBytes is the largest task body accepted before the
 	// provider's one-line-feed normalization. MaxProviderInputBytes includes
-	// that possible trailing line feed and is deliberately kept at 8 KiB plus
-	// one byte: JSON base64 framing of this payload remains below maxFrameBytes,
-	// including the fixed provider-input envelope.
-	MaxProviderTaskBytes  = 8 << 10
+	// that possible trailing line feed. The private control frame is sized so
+	// the complete bounded task survives JSON base64 framing without silently
+	// narrowing the Store's accepted task contract.
+	MaxProviderTaskBytes  = 128 << 10
 	MaxProviderInputBytes = MaxProviderTaskBytes + 1
 )
 

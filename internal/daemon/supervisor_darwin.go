@@ -16,6 +16,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/changeworker"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/provider"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
@@ -222,6 +223,10 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		}
 		return daemon.failRun(run, kernel.FailureInternal, err)
 	}
+	initialInput, err := provider.InitialInput(run.Provider, []byte(task.Body))
+	if err != nil {
+		return daemon.failRun(run, kernel.FailureSpawn, err)
+	}
 
 	runtimeValue, err := CreateRuntime(spec.RuntimeParent, keys.run.String())
 	if err != nil {
@@ -252,10 +257,11 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		return daemon.failRun(run, kernel.FailureSpawn, err)
 	}
 	config := changeworker.Config{
+		Provider: run.Provider, Model: agent.Model, ReasoningEffort: agent.ReasoningEffort,
 		RuntimePath: gotRuntimePath, RuntimeIdentity: runtimeFileIdentity,
 		GitExecutable: spec.GitExecutable, FactoryctlExecutable: factoryctl.Path(), RepositoryRoot: project.Root, RepositoryIdentity: repositoryIdentity,
 		Revision: spec.BaseRevision, ChangeParent: spec.ChangeParent, FinalName: finalName, StagingName: stagingName,
-		AttemptSocket: spec.AttemptSocket, InitialTerminalInput: []byte(task.Body),
+		AttemptSocket: spec.AttemptSocket, InitialTerminalInput: initialInput,
 	}
 	if _, err := runtimeValue.PublishWorkerConfig(ctx, config); err != nil {
 		return daemon.failRun(run, kernel.FailureSource, err)
@@ -297,7 +303,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		return daemon.failRun(run, kernel.FailureSpawn, err)
 	}
 	wrapper, err := runner.PrepareExecSpec(runner.ExecSpec{
-		Target: spec.RunnerExecutable, Args: []string{"--change-worker-shell"},
+		Target: spec.RunnerExecutable, Args: []string{"--change-worker"},
 		Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: home,
 	})
 	if err != nil {

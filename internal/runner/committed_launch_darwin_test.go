@@ -54,29 +54,36 @@ func TestPrepareCommittedExecSpecCopiesArgvAndEnvironment(t *testing.T) {
 	}
 }
 
-func TestPrepareExecSpecsRejectInvalidUTF8AndEmptyArgvBeforeCommitment(t *testing.T) {
+func TestPrepareExecSpecsRejectInvalidUTF8BeforeCommitment(t *testing.T) {
 	invalid := string([]byte{0xff})
-	for _, test := range []struct {
-		name string
-		argv []string
-	}{
-		{name: "invalid UTF-8", argv: []string{"/bin/sh", invalid}},
-		{name: "empty argument", argv: []string{"/bin/sh", ""}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			_, err := PrepareExecSpec(ExecSpec{Target: test.argv[0], Args: test.argv[1:], Cwd: t.TempDir()})
-			if err == nil || !strings.Contains(err.Error(), "invalid argv") {
-				t.Fatalf("PrepareExecSpec error=%v, want invalid argv before commitment", err)
-			}
-			executable, err := CommitExecutableLocator("/bin/sh")
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, err = PrepareCommittedExecSpec(executable, test.argv, []string{"PATH=/usr/bin:/bin"}, t.TempDir())
-			if err == nil || !strings.Contains(err.Error(), "invalid argv") {
-				t.Fatalf("PrepareCommittedExecSpec error=%v, want invalid argv before commitment", err)
-			}
-		})
+	argv := []string{"/bin/sh", invalid}
+	_, err := PrepareExecSpec(ExecSpec{Target: argv[0], Args: argv[1:], Cwd: t.TempDir()})
+	if err == nil || !strings.Contains(err.Error(), "invalid argv") {
+		t.Fatalf("PrepareExecSpec error=%v, want invalid argv before commitment", err)
+	}
+	executable, err := CommitExecutableLocator("/bin/sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = PrepareCommittedExecSpec(executable, argv, []string{"PATH=/usr/bin:/bin"}, t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "invalid argv") {
+		t.Fatalf("PrepareCommittedExecSpec error=%v, want invalid argv before commitment", err)
+	}
+}
+
+func TestPrepareExecSpecsPreserveEmptyNonExecutableArgument(t *testing.T) {
+	want := []string{"/bin/sh", ""}
+	ordinary, err := PrepareExecSpec(ExecSpec{Target: want[0], Args: want[1:], Cwd: t.TempDir()})
+	if err != nil || !slices.Equal(ordinary.commit.Argv, want) {
+		t.Fatalf("ordinary empty argument changed: argv=%q err=%v", ordinary.commit.Argv, err)
+	}
+	executable, err := CommitExecutableLocator("/bin/sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	committed, err := PrepareCommittedExecSpec(executable, want, []string{"PATH=/usr/bin:/bin"}, t.TempDir())
+	if err != nil || !slices.Equal(committed.commit.Argv, want) {
+		t.Fatalf("committed empty argument changed: argv=%q err=%v", committed.commit.Argv, err)
 	}
 }
 

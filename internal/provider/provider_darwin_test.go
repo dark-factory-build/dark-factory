@@ -13,7 +13,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
-func providerFixture(t *testing.T) (Installation, RuntimePaths, kernel.RunID) {
+func providerFixture(t *testing.T) (Installation, RuntimePaths) {
 	t.Helper()
 	executable, err := runner.CommitExecutableLocator(shellPath)
 	if err != nil {
@@ -26,21 +26,17 @@ func providerFixture(t *testing.T) (Installation, RuntimePaths, kernel.RunID) {
 	root := t.TempDir()
 	runtime, err := NewRuntimePaths(
 		root+"/home", root+"/tmp", "/private/tmp/df-provider-test.sock", root+"/attempt.token",
-		"/usr/local/bin/factoryctl", root+"/changes", "/opt/homebrew/bin:/usr/bin:/bin", "factory-user",
+		"/usr/local/bin/factoryctl", root+"/changes", "/opt/homebrew/bin:/usr/bin:/bin",
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	runID, err := kernel.RunIDFromBytes(bytes.Repeat([]byte{0x41}, kernel.IDBytes))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return installation, runtime, runID
+	return installation, runtime
 }
 
-func requestFor(t *testing.T, kind kernel.Provider, installation Installation, runtime RuntimePaths, runID kernel.RunID, model, effort string) Request {
+func requestFor(t *testing.T, kind kernel.Provider, installation Installation, runtime RuntimePaths, model, effort string) Request {
 	t.Helper()
-	request, err := NewRequest(kind, installation, runID, model, effort, runtime)
+	request, err := NewRequest(kind, installation, model, effort, runtime)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,10 +44,10 @@ func requestFor(t *testing.T, kind kernel.Provider, installation Installation, r
 }
 
 func TestBuildShellReturnsExactImmutableLaunch(t *testing.T) {
-	installation, runtime, runID := providerFixture(t)
+	installation, runtime := providerFixture(t)
 	t.Setenv("ANTHROPIC_API_KEY", "AMBIENT_SENTINEL")
 	t.Setenv("HTTP_PROXY", "AMBIENT_SENTINEL")
-	launch, err := Build(requestFor(t, kernel.ProviderShell, installation, runtime, runID, "", ""))
+	launch, err := Build(requestFor(t, kernel.ProviderShell, installation, runtime, "", ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,8 +65,7 @@ func TestBuildShellReturnsExactImmutableLaunch(t *testing.T) {
 		"HOME=" + runtime.home,
 		"TMPDIR=" + runtime.temp,
 		"PATH=" + runtime.toolPath,
-		"LANG=C", "LC_ALL=C", "TERM=xterm-256color", "SHELL=/bin/sh",
-		"USER=factory-user", "LOGNAME=factory-user",
+		"LANG=C", "LC_ALL=C", "TERM=xterm-256color", "SHELL=/bin/sh", "NO_COLOR=1",
 		"GIT_CEILING_DIRECTORIES=" + runtime.gitCeiling,
 		"GIT_DISCOVERY_ACROSS_FILESYSTEM=0", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=/usr/bin/false", "GIT_SSH_COMMAND=/usr/bin/false", "GH_CONFIG_DIR=/dev/null",
@@ -97,23 +92,23 @@ func TestBuildShellReturnsExactImmutableLaunch(t *testing.T) {
 }
 
 func TestBuildRejectsProviderInstallationMismatch(t *testing.T) {
-	installation, runtime, runID := providerFixture(t)
+	installation, runtime := providerFixture(t)
 	installation.provider = kernel.ProviderCodex
-	request := requestFor(t, kernel.ProviderShell, installation, runtime, runID, "", "")
+	request := requestFor(t, kernel.ProviderShell, installation, runtime, "", "")
 	if _, err := Build(request); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("mismatched provider error=%v, want ErrInvalid", err)
 	}
 }
 
 func TestBuildShellRejectsModelAndReasoningEffortIndependently(t *testing.T) {
-	installation, runtime, runID := providerFixture(t)
+	installation, runtime := providerFixture(t)
 	for _, test := range []struct{ name, model, effort string }{
 		{name: "model", model: "model-sentinel"},
 		{name: "effort", effort: "high"},
 		{name: "both", model: "model-sentinel", effort: "high"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			request := requestFor(t, kernel.ProviderShell, installation, runtime, runID, test.model, test.effort)
+			request := requestFor(t, kernel.ProviderShell, installation, runtime, test.model, test.effort)
 			if _, err := Build(request); !errors.Is(err, ErrInvalid) {
 				t.Fatalf("Build error=%v, want ErrInvalid", err)
 			}
@@ -122,13 +117,13 @@ func TestBuildShellRejectsModelAndReasoningEffortIndependently(t *testing.T) {
 }
 
 func TestBuildFailsClosedForUnknownAndUnimplementedProviders(t *testing.T) {
-	installation, runtime, runID := providerFixture(t)
-	if _, err := NewRequest(kernel.Provider(255), installation, runID, "", "", runtime); !errors.Is(err, ErrInvalid) {
+	installation, runtime := providerFixture(t)
+	if _, err := NewRequest(kernel.Provider(255), installation, "", "", runtime); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("unknown provider error=%v, want ErrInvalid", err)
 	}
 	for _, kind := range []kernel.Provider{kernel.ProviderClaudeCode, kernel.ProviderCodex} {
 		t.Run(kind.String(), func(t *testing.T) {
-			request := requestFor(t, kind, Installation{}, runtime, runID, "", "")
+			request := requestFor(t, kind, Installation{}, runtime, "", "")
 			if _, err := Build(request); !errors.Is(err, ErrUnavailable) {
 				t.Fatalf("Build error=%v, want ErrUnavailable", err)
 			}
@@ -141,34 +136,34 @@ func TestBuildFailsClosedForUnknownAndUnimplementedProviders(t *testing.T) {
 
 func TestNewRuntimePathsRejectsMissingAndMalformedSealedValues(t *testing.T) {
 	root := t.TempDir()
-	valid := []string{root + "/home", root + "/tmp", "/private/tmp/df-provider-path-test.sock", root + "/token", "/usr/local/bin/factoryctl", root + "/changes", "/usr/bin:/bin", "factory-user"}
+	valid := []string{root + "/home", root + "/tmp", "/private/tmp/df-provider-path-test.sock", root + "/token", "/usr/local/bin/factoryctl", root + "/changes", "/usr/bin:/bin"}
 	for index := range valid {
 		t.Run(string(rune('a'+index)), func(t *testing.T) {
 			values := append([]string(nil), valid...)
 			values[index] = ""
-			if _, err := NewRuntimePaths(values[0], values[1], values[2], values[3], values[4], values[5], values[6], values[7]); !errors.Is(err, ErrInvalid) {
+			if _, err := NewRuntimePaths(values[0], values[1], values[2], values[3], values[4], values[5], values[6]); !errors.Is(err, ErrInvalid) {
 				t.Fatalf("missing index %d error=%v, want ErrInvalid", index, err)
 			}
 		})
 	}
 	for _, toolPath := range []string{"relative:/bin", "/usr/bin::/bin", "/usr/bin:/usr/bin"} {
-		if _, err := NewRuntimePaths(valid[0], valid[1], valid[2], valid[3], valid[4], valid[5], toolPath, valid[7]); !errors.Is(err, ErrInvalid) {
+		if _, err := NewRuntimePaths(valid[0], valid[1], valid[2], valid[3], valid[4], valid[5], toolPath); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("tool path %q error=%v, want ErrInvalid", toolPath, err)
 		}
 	}
 	invalid := append([]string(nil), valid...)
 	invalid[0] = "relative/home"
-	if _, err := NewRuntimePaths(invalid[0], invalid[1], invalid[2], invalid[3], invalid[4], invalid[5], invalid[6], invalid[7]); !errors.Is(err, ErrInvalid) {
+	if _, err := NewRuntimePaths(invalid[0], invalid[1], invalid[2], invalid[3], invalid[4], invalid[5], invalid[6]); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("relative home error=%v, want ErrInvalid", err)
 	}
 	invalid = append([]string(nil), valid...)
 	invalid[2] = "/" + strings.Repeat("s", maxSocketBytes)
-	if _, err := NewRuntimePaths(invalid[0], invalid[1], invalid[2], invalid[3], invalid[4], invalid[5], invalid[6], invalid[7]); !errors.Is(err, ErrInvalid) {
+	if _, err := NewRuntimePaths(invalid[0], invalid[1], invalid[2], invalid[3], invalid[4], invalid[5], invalid[6]); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("oversized socket error=%v, want ErrInvalid", err)
 	}
 	invalid = append([]string(nil), valid...)
 	invalid[5] = valid[5] + ":/private/other-ceiling"
-	if _, err := NewRuntimePaths(invalid[0], invalid[1], invalid[2], invalid[3], invalid[4], invalid[5], invalid[6], invalid[7]); !errors.Is(err, ErrInvalid) {
+	if _, err := NewRuntimePaths(invalid[0], invalid[1], invalid[2], invalid[3], invalid[4], invalid[5], invalid[6]); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("multi-ceiling git path error=%v, want ErrInvalid", err)
 	}
 }
@@ -239,8 +234,8 @@ func TestInitialInputAcceptsMaximumTaskBodyWithOneNormalizationLineFeed(t *testi
 }
 
 func TestLaunchFormattingDoesNotRevealRuntimeOrExecutable(t *testing.T) {
-	installation, runtime, runID := providerFixture(t)
-	launch, err := Build(requestFor(t, kernel.ProviderShell, installation, runtime, runID, "", ""))
+	installation, runtime := providerFixture(t)
+	launch, err := Build(requestFor(t, kernel.ProviderShell, installation, runtime, "", ""))
 	if err != nil {
 		t.Fatal(err)
 	}

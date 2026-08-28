@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/dark-factory-build/dark-factory/internal/change"
+	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
@@ -22,7 +23,7 @@ const (
 	TempName             = "tmp"
 	CheckpointLimit      = 32 << 10
 	ConfigLimit          = 256 << 10
-	InputLimit           = 128 << 10
+	InputLimit           = runner.MaxProviderInputBytes
 	maximumLocatorBytes  = 4096
 	maximumRevisionBytes = 4096
 	maximumSocketBytes   = 103
@@ -42,6 +43,9 @@ const (
 )
 
 type Config struct {
+	Provider             kernel.Provider
+	Model                string
+	ReasoningEffort      string
 	RuntimePath          string
 	RuntimeIdentity      runner.FileIdentity
 	GitExecutable        string
@@ -98,8 +102,9 @@ func EncodeConfig(config Config) ([]byte, error) {
 	encoded = binary.BigEndian.AppendUint64(encoded, config.RuntimeIdentity.Inode)
 	encoded = binary.BigEndian.AppendUint64(encoded, config.RepositoryIdentity.Device())
 	encoded = binary.BigEndian.AppendUint64(encoded, config.RepositoryIdentity.Inode())
+	encoded = append(encoded, encodeProvider(config.Provider))
 	for _, value := range []string{
-		config.RuntimePath, config.GitExecutable, config.FactoryctlExecutable, config.RepositoryRoot, config.Revision,
+		config.Model, config.ReasoningEffort, config.RuntimePath, config.GitExecutable, config.FactoryctlExecutable, config.RepositoryRoot, config.Revision,
 		config.ChangeParent, config.FinalName, config.StagingName, config.AttemptSocket,
 	} {
 		encoded = appendString(encoded, value)
@@ -137,7 +142,15 @@ func DecodeConfig(encoded []byte) (Config, error) {
 	if err != nil {
 		return Config{}, invalidContract(err)
 	}
-	values := make([]string, 9)
+	providerByte, err := reader.byte()
+	if err != nil {
+		return Config{}, err
+	}
+	providerKind, err := decodeProvider(providerByte)
+	if err != nil {
+		return Config{}, err
+	}
+	values := make([]string, 11)
 	for index := range values {
 		values[index], err = reader.string()
 		if err != nil {
@@ -149,10 +162,11 @@ func DecodeConfig(encoded []byte) (Config, error) {
 		return Config{}, invalidContract(err)
 	}
 	config := Config{
-		RuntimePath: values[0], RuntimeIdentity: runner.FileIdentity{Device: device, Inode: inode},
-		GitExecutable: values[1], FactoryctlExecutable: values[2], RepositoryRoot: values[3], RepositoryIdentity: repositoryIdentity, Revision: values[4],
-		ChangeParent: values[5], FinalName: values[6], StagingName: values[7],
-		AttemptSocket: values[8], InitialTerminalInput: input,
+		Provider: providerKind, Model: values[0], ReasoningEffort: values[1],
+		RuntimePath: values[2], RuntimeIdentity: runner.FileIdentity{Device: device, Inode: inode},
+		GitExecutable: values[3], FactoryctlExecutable: values[4], RepositoryRoot: values[5], RepositoryIdentity: repositoryIdentity, Revision: values[6],
+		ChangeParent: values[7], FinalName: values[8], StagingName: values[9],
+		AttemptSocket: values[10], InitialTerminalInput: input,
 	}
 	if err := validateConfig(config); err != nil {
 		return Config{}, err
@@ -168,14 +182,42 @@ func validateConfig(config Config) error {
 		}
 	}
 	if len(config.AttemptSocket) > maximumSocketBytes || config.RuntimeIdentity.Device == 0 || config.RuntimeIdentity.Inode == 0 ||
+		encodeProvider(config.Provider) == 0 ||
+		!validOptionalText(config.Model, 128) || !validOptionalText(config.ReasoningEffort, 32) ||
 		!validText(config.Revision, maximumRevisionBytes) || !validChangeName(config.FinalName) || !validChangeName(config.StagingName) ||
-		config.FinalName == config.StagingName || len(config.InitialTerminalInput) > InputLimit || !utf8.Valid(config.InitialTerminalInput) || bytes.IndexByte(config.InitialTerminalInput, 0) >= 0 {
+		config.FinalName == config.StagingName || len(config.InitialTerminalInput) == 0 || runner.ValidateProviderInput(config.InitialTerminalInput) != nil {
 		return invalidContract(nil)
 	}
 	if _, err := change.NewRepositoryIdentity(config.RepositoryIdentity.Device(), config.RepositoryIdentity.Inode()); err != nil {
 		return invalidContract(err)
 	}
 	return nil
+}
+
+func encodeProvider(value kernel.Provider) byte {
+	switch value {
+	case kernel.ProviderShell:
+		return 1
+	case kernel.ProviderClaudeCode:
+		return 2
+	case kernel.ProviderCodex:
+		return 3
+	default:
+		return 0
+	}
+}
+
+func decodeProvider(value byte) (kernel.Provider, error) {
+	switch value {
+	case 1:
+		return kernel.ProviderShell, nil
+	case 2:
+		return kernel.ProviderClaudeCode, nil
+	case 3:
+		return kernel.ProviderCodex, nil
+	default:
+		return 0, invalidContract(nil)
+	}
 }
 
 func EncodeSelectionReport(checkpoint SelectionReport) ([]byte, error) {
@@ -402,6 +444,10 @@ func decodeFormat(value byte) (change.ObjectFormat, error) {
 
 func validText(value string, maximum int) bool {
 	return value != "" && len(value) <= maximum && utf8.ValidString(value) && !strings.ContainsRune(value, 0)
+}
+
+func validOptionalText(value string, maximum int) bool {
+	return value == "" || validText(value, maximum)
 }
 
 func validAbsolute(value string, maximum int) bool {

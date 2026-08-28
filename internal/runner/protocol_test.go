@@ -19,15 +19,15 @@ func TestProviderInputBoundaryFitsFrameAndPreservesBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(body) > maxFrameBytes {
-		t.Fatalf("maximum provider input body is %d bytes, exceeds %d-byte frame", len(body), maxFrameBytes)
+	if len(body) > maxProviderFrameBytes {
+		t.Fatalf("maximum provider input body is %d bytes, exceeds %d-byte provider frame", len(body), maxProviderFrameBytes)
 	}
 	var wire bytes.Buffer
-	if err := writeFrame(&wire, attemptFrame{Version: 1, Kind: "provider-input", Payload: want}, maxFrameBytes); err != nil {
+	if err := writeFrame(&wire, attemptFrame{Version: 1, Kind: "provider-input", Payload: want}, maxProviderFrameBytes); err != nil {
 		t.Fatalf("maximum normalized input did not encode: %v", err)
 	}
 	var got attemptFrame
-	if err := readFrame(&wire, &got, maxFrameBytes); err != nil {
+	if err := readFrame(&wire, &got, maxProviderFrameBytes); err != nil {
 		t.Fatal(err)
 	}
 	if got.Version != 1 || got.Kind != "provider-input" || !bytes.Equal(got.Payload, want) {
