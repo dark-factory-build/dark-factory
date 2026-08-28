@@ -152,7 +152,7 @@ test("verification rejects archive inventory, runtime protocol, and strict manif
     writeFileSync(path, originalText);
 
     writeFileSync(path, originalText.replace('"schemaVersion": 1', '"schemaVersion": 1,\n  "schemaVersion": 1'));
-    expectFailure(() => run("verify", output), "duplicate key");
+    expectFailure(() => run("verify", output), "not canonical JSON");
     writeFileSync(path, originalText);
 
     writeFileSync(path, originalText.replace("{\n", "{\n\n"));

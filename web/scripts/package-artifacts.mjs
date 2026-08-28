@@ -113,77 +113,18 @@ function packageJson(packageInfo) {
   return readJson(join(packageInfo.root, "package.json"));
 }
 
-function parseStrictJson(text, label) {
+function strictJsonText(text, label) {
   if (text.length > 65536) fail(`${label} is too large`);
-  let offset = 0;
-  const whitespace = () => { while (/[\t\n\r ]/.test(text[offset] ?? "")) offset += 1; };
-  const string = () => {
-    const start = offset;
-    if (text[offset++] !== '"') fail(`${label} has an invalid string`);
-    while (offset < text.length) {
-      const char = text[offset++];
-      if (char === "\\") offset += 1;
-      else if (char === '"') {
-        try { return JSON.parse(text.slice(start, offset)); } catch { fail(`${label} has an invalid string`); }
-      } else if (char < " ") fail(`${label} has an invalid string`);
-    }
-    fail(`${label} has an unterminated string`);
-  };
-  const value = () => {
-    whitespace();
-    const char = text[offset];
-    if (char === '"') return string();
-    if (char === "{") {
-      offset += 1;
-      const object = Object.create(null);
-      const keys = new Set();
-      whitespace();
-      if (text[offset] === "}") { offset += 1; return object; }
-      while (true) {
-        whitespace();
-        const key = string();
-        if (keys.has(key)) fail(`${label} has a duplicate key ${key}`);
-        keys.add(key);
-        whitespace();
-        if (text[offset++] !== ":") fail(`${label} is missing a colon`);
-        object[key] = value();
-        whitespace();
-        const separator = text[offset++];
-        if (separator === "}") return object;
-        if (separator !== ",") fail(`${label} has an invalid object separator`);
-      }
-    }
-    if (char === "[") {
-      offset += 1;
-      const array = [];
-      whitespace();
-      if (text[offset] === "]") { offset += 1; return array; }
-      while (true) {
-        array.push(value());
-        whitespace();
-        const separator = text[offset++];
-        if (separator === "]") return array;
-        if (separator !== ",") fail(`${label} has an invalid array separator`);
-      }
-    }
-    for (const literal of ["true", "false", "null"]) {
-      if (text.startsWith(literal, offset)) { offset += literal.length; return JSON.parse(literal); }
-    }
-    const number = text.slice(offset).match(/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/);
-    if (number) { offset += number[0].length; return JSON.parse(number[0]); }
-    fail(`${label} has an invalid value`);
-  };
-  const parsed = value();
-  whitespace();
-  if (offset !== text.length) fail(`${label} has trailing data`);
-  return parsed;
+  let value;
+  try { value = JSON.parse(text); } catch (error) { fail(`${label} is invalid JSON: ${error.message}`); }
+  // Canonical re-serialization also rejects duplicate keys: JSON.parse drops
+  // the duplicate, making the original bytes differ from the canonical form.
+  if (stableJson(value) !== text) fail(`${label} is not canonical JSON`);
+  return value;
 }
 
 function strictJsonFile(path, label) {
-  const text = readFileSync(path, "utf8");
-  const value = parseStrictJson(text, label);
-  if (JSON.stringify(value, null, 2) + "\n" !== text) fail(`${label} is not canonical JSON`);
-  return value;
+  return strictJsonText(readFileSync(path, "utf8"), label);
 }
 
 function exactKeys(value, keys, label) {
@@ -441,8 +382,8 @@ async function verify(requested, tools = trustedTools()) {
     if (JSON.stringify(canonicalValue(packedPackage)) !== JSON.stringify(canonicalValue(expectedPackage))) fail(`${info.name} tarball package metadata is stale or forged`);
     externalDependencies(packedPackage, info.name);
     const embeddedText = tarMember(tools.paths.tar, archive, "package/dist/src/provenance.json");
-    const embedded = parseStrictJson(embeddedText, `${info.name} embedded provenance`);
-    if (stableJson(embedded) !== embeddedText || JSON.stringify(embedded) !== JSON.stringify(provenance(info, identity, info === packages.ui ? entry.dependency : undefined))) fail(`${info.name} embedded provenance failed`);
+    const embedded = strictJsonText(embeddedText, `${info.name} embedded provenance`);
+    if (JSON.stringify(embedded) !== JSON.stringify(provenance(info, identity, info === packages.ui ? entry.dependency : undefined))) fail(`${info.name} embedded provenance failed`);
   }
   const packedUi = JSON.parse(tarMember(tools.paths.tar, join(output, manifest.packages[packages.ui.name].artifact.filename), "package/package.json"));
   if (packedUi.dependencies?.[packages.client.name] !== manifest.packages[packages.client.name].package.version) fail("UI tarball has a floating or mismatched client dependency");
