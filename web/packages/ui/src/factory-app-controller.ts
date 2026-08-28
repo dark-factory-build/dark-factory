@@ -12,7 +12,8 @@ import {
   type SessionStatus,
   type StateView,
 } from "@dark-factory/client";
-import { TerminalController, type TerminalControllerSnapshot, type TerminalSurface } from "./terminal-controller.js";
+import { TerminalController, type TerminalControllerSnapshot, type TerminalLeaseOperation, type TerminalSurface } from "./terminal-controller.js";
+import { unavailableQueueActions, type QueueActions } from "./console-view.js";
 
 const BROWSER_ENDPOINT = new URL("ws://127.0.0.1:43123/browser/v1");
 const BROWSER_URL = BROWSER_ENDPOINT.toString();
@@ -40,6 +41,7 @@ export type FactoryTerminalView = Readonly<{
   agentRevision: bigint;
   phase: "idle" | "resolving" | "attaching" | "acquiring" | "ready" | "closing" | "closed";
   writable: boolean;
+  leaseOperation: TerminalLeaseOperation;
   error?: SessionError | ProtocolError;
   surfaceVersion: number;
 }>;
@@ -101,11 +103,30 @@ export class FactoryAppController {
   #started = false;
   #closed = false;
 
+  /**
+   * Queue mutations the daemon has no API for yet. Every method returns a
+   * typed unavailable result and mutates nothing; the console renders the
+   * reason instead of pretending success.
+   */
+  readonly queueActions: QueueActions = unavailableQueueActions();
+
   constructor(options: FactoryAppControllerOptions) {
     this.#options = options;
   }
 
   get snapshot(): FactoryAppSnapshot { return this.#snapshot(); }
+
+  /** Take control of the open terminal's input. Read-only observer on failure. */
+  takeTerminalControl(): boolean {
+    if (this.#closed) return false;
+    return this.#terminal?.takeControl() ?? false;
+  }
+
+  /** Hand the open terminal's input back; the display stays attached. */
+  handBackTerminalControl(): boolean {
+    if (this.#closed) return false;
+    return this.#terminal?.handBack() ?? false;
+  }
 
   start(): void {
     if (this.#started || this.#closed) return;
@@ -509,6 +530,7 @@ export class FactoryAppController {
         agentRevision: this.#selectedAgent.agent.revision,
         phase: this.#terminal?.snapshot.phase ?? "idle",
         writable: this.#terminal?.snapshot.writable ?? false,
+        leaseOperation: this.#terminal?.snapshot.leaseOperation ?? "none",
         error: this.#terminal?.snapshot.error,
         surfaceVersion: this.#terminalSurfaceVersion,
       },

@@ -1,9 +1,15 @@
 import type { FormEvent, ReactNode } from "react";
 import type { AgentItem } from "@dark-factory/client";
 import type { FactoryAgentSelection, FactoryAppSnapshot, FactoryHumanRequestView } from "./factory-app-controller.js";
+import { AgentStrip, HomeScreen, QueueScreen, TaskScreen, Ticker } from "./console-screens.js";
+import { unavailableQueueActions, type ConsoleExtras, type ConsoleScreen, type QueueActions } from "./console-view.js";
 
 export type FactoryConsoleProps = FactoryAppSnapshot & {
+  screen?: ConsoleScreen;
+  extras?: ConsoleExtras;
+  queueActions?: QueueActions;
   selectedAgent?: FactoryAgentSelection;
+  onNavigate?: (screen: ConsoleScreen) => void;
   onSelectAgent?: (agent: AgentItem) => void;
   onOpenTerminalForHumanRequest?: (request: FactoryHumanRequestView["request"]) => void;
   onSelectHumanRequest?: (request: FactoryHumanRequestView["request"]) => void;
@@ -43,12 +49,18 @@ const ERROR_LABELS = new Map<string, string>([
   ["internal", "The server could not complete the request."],
 ]);
 
+const DEFAULT_SCREEN: ConsoleScreen = { kind: "home" };
+
 export function FactoryConsole({
   status,
   state,
   error,
+  screen = DEFAULT_SCREEN,
+  extras,
+  queueActions,
   selectedHumanRequest,
   selectedAgent,
+  onNavigate,
   onSelectAgent,
   onOpenTerminalForHumanRequest,
   onSelectHumanRequest,
@@ -58,132 +70,145 @@ export function FactoryConsole({
   onCloseHumanRequest,
   terminalContent,
 }: FactoryConsoleProps) {
-  const projects = state?.projects;
+  const ready = status === "ready";
+  const actions = queueActions ?? unavailableQueueActions();
+  const openTask = onNavigate === undefined ? undefined : (taskId: string) => onNavigate({ kind: "task", taskId });
 
   return (
-    <main className="dfFactoryConsole" aria-label="Factory operator console">
-      <header className="dfFactoryConsole__header">
-        <div>
-          <p className="dfFactoryConsole__eyebrow">OPERATOR VIEW</p>
-          <h1>FACTORY</h1>
-        </div>
-        <div className="dfFactoryConsole__connection" aria-label={`Connection status: ${STATUS_LABELS[status]}`}>
-          <p className="dfFactoryConsole__status" role="status" aria-live="polite" aria-atomic="true">
-            <span className={`dfFactoryConsole__statusDot dfFactoryConsole__statusDot--${status}`} aria-hidden="true" />
-            {STATUS_LABELS[status]}
+    <div className="dfConsoleShell">
+      <main className="dfFactoryConsole" aria-label="Factory operator console">
+        <header className="dfFactoryConsole__header">
+          <div>
+            <p className="dfFactoryConsole__eyebrow">OPERATOR VIEW</p>
+            <h1>
+              {screen.kind === "home" || onNavigate === undefined ? "FACTORY" : (
+                <button type="button" className="dfFactoryConsole__homeLink" onClick={() => onNavigate({ kind: "home" })}>FACTORY</button>
+              )}
+              {screen.kind === "queue" ? " · QUEUE" : screen.kind === "needs-you" ? " · NEEDS YOU" : ""}
+            </h1>
+          </div>
+          <div className="dfFactoryConsole__connection" aria-label={`Connection status: ${STATUS_LABELS[status]}`}>
+            <p className="dfFactoryConsole__status" role="status" aria-live="polite" aria-atomic="true">
+              <span className={`dfFactoryConsole__statusDot dfFactoryConsole__statusDot--${status}`} aria-hidden="true" />
+              {STATUS_LABELS[status]}
+            </p>
+          </div>
+        </header>
+
+        <AgentStrip
+          state={state}
+          extras={extras}
+          selectedAgentId={selectedAgent?.id}
+          ready={ready}
+          onSelectAgent={onSelectAgent}
+          onNavigate={onNavigate}
+        />
+
+        {error === undefined ? null : (
+          <p className="dfFactoryConsole__error" role="alert">
+            {ERROR_LABELS.get(error.code) ?? "The connection could not continue."}
           </p>
-        </div>
-      </header>
+        )}
 
-      {error === undefined ? null : (
-        <p className="dfFactoryConsole__error" role="alert">
-          {ERROR_LABELS.get(error.code) ?? "The connection could not continue."}
-        </p>
-      )}
-
-      <section className="dfFactoryConsole__section" aria-label="BUILDING">
-        <div className="dfFactoryConsole__sectionHeading">
-          <h2>BUILDING</h2>
-          <span>{state === undefined ? "NO SNAPSHOT" : `HEAD ${state.head.toString()}`}</span>
-        </div>
-        {state?.factory[0] === undefined ? (
-          <p className="dfFactoryConsole__empty">BUILDING STATE UNAVAILABLE</p>
+        {screen.kind === "home" ? (
+          <>
+            <section className="dfFactoryConsole__section" aria-label="BUILDING">
+              <div className="dfFactoryConsole__sectionHeading">
+                <h2>BUILDING</h2>
+                <span>{state === undefined ? "NO SNAPSHOT" : `HEAD ${state.head.toString()}`}</span>
+              </div>
+              {state?.factory[0] === undefined ? (
+                <p className="dfFactoryConsole__empty">BUILDING STATE UNAVAILABLE</p>
+              ) : (
+                <dl className="dfFactoryConsole__metrics">
+                  <Metric label="DISPATCH" value={state.factory[0].dispatch_enabled ? "ENABLED" : "PAUSED"} />
+                  <Metric label="CAPACITY" value={String(state.factory[0].capacity)} />
+                  <Metric label="ACTIVE RUNS" value={String(state.factory[0].active_runs)} />
+                  <Metric label="REVISION" value={state.factory[0].revision.toString()} />
+                </dl>
+              )}
+            </section>
+            <HomeScreen state={state} extras={extras} ready={ready} onOpenTask={openTask} />
+          </>
+        ) : screen.kind === "queue" ? (
+          <QueueScreen state={state} extras={extras} actions={actions} ready={ready} onOpenTask={openTask} />
+        ) : screen.kind === "task" ? (
+          <TaskScreen state={state} extras={extras} taskId={screen.taskId} onBack={onNavigate === undefined ? undefined : () => onNavigate({ kind: "home" })} />
         ) : (
-          <dl className="dfFactoryConsole__metrics">
-            <Metric label="DISPATCH" value={state.factory[0].dispatch_enabled ? "ENABLED" : "PAUSED"} />
-            <Metric label="CAPACITY" value={String(state.factory[0].capacity)} />
-            <Metric label="ACTIVE RUNS" value={String(state.factory[0].active_runs)} />
-            <Metric label="REVISION" value={state.factory[0].revision.toString()} />
-          </dl>
-        )}
-      </section>
-
-      <div className="dfFactoryConsole__columns">
-        <CollectionSection title="AGENTS" count={state?.agents.size ?? 0}>
-          {state === undefined ? <EmptyItem label="WAITING FOR SNAPSHOT" /> : state.agents.size === 0 ? <EmptyItem label="NO AGENTS" /> : (
-            <ul className="dfFactoryConsole__list">
-              {[...state.agents.values()].map((agent) => (
-                <li className="dfFactoryConsole__card" key={agent.id}>
-                  <div className="dfFactoryConsole__cardTitle">
-                    <strong>{agent.name}</strong>
-                    <span>{agent.paused ? "PAUSED" : "ACTIVE"}</span>
-                  </div>
-                  <p>{agent.role.toUpperCase()} · {projectLabel(projects, agent.project_id)}</p>
-                  <small>ID {shortID(agent.id)}</small>
-                  {onSelectAgent === undefined ? null : (
-                    <button
-                      type="button"
-                      aria-pressed={selectedAgent?.id === agent.id && selectedAgent.revision === agent.revision}
-                      disabled={status !== "ready"}
-                      onClick={() => onSelectAgent(agent)}
-                    >
-                      {selectedAgent?.id === agent.id && selectedAgent.revision === agent.revision ? "TERMINAL OPEN" : "OPEN TERMINAL"}
-                    </button>
-                  )}
-                </li>
-              ))}
-            </ul>
-          )}
-        </CollectionSection>
-
-        <CollectionSection title="TASK QUEUE" count={state?.tasks.size ?? 0}>
-          {state === undefined ? <EmptyItem label="WAITING FOR SNAPSHOT" /> : state.tasks.size === 0 ? <EmptyItem label="NO TASKS" /> : (
-            <ul className="dfFactoryConsole__list">
-              {[...state.tasks.values()].map((task) => (
-                <li className="dfFactoryConsole__card" key={task.id}>
-                  <div className="dfFactoryConsole__cardTitle">
-                    <strong>{task.title}</strong>
-                    <span>{task.status.toUpperCase()}</span>
-                  </div>
-                  <p>PRIORITY {String(task.priority)} · {projectLabel(projects, task.project_id)}</p>
-                  <small>AGENT {shortID(task.assigned_agent_id)} · ID {shortID(task.id)}</small>
-                </li>
-              ))}
-            </ul>
-          )}
-        </CollectionSection>
-      </div>
-
-      <CollectionSection title="NEEDS YOU" count={state?.humanRequests.size ?? 0}>
-        {state === undefined ? <EmptyItem label="WAITING FOR SNAPSHOT" /> : state.humanRequests.size === 0 ? <EmptyItem label="NO OPEN REQUESTS" /> : (
-          <ul className="dfFactoryConsole__list dfFactoryConsole__list--requests">
-            {[...state.humanRequests.values()].map((request) => {
-              const selected = selectedHumanRequest?.request.id === request.id;
-              return (
-                <li className="dfFactoryConsole__card" key={request.id}>
-                  <div className="dfFactoryConsole__cardTitle">
-                    <strong>REQUEST {shortID(request.id)}</strong>
-                    <span>{request.status.toUpperCase()}</span>
-                  </div>
-                  <p>{projectLabel(projects, request.project_id)} · TASK {shortID(request.task_id)}</p>
-                  <small>Awaiting operator response</small>
-                  {onSelectHumanRequest === undefined ? null : (
-                    <button type="button" aria-pressed={selected} disabled={selected || status !== "ready"} onClick={() => onSelectHumanRequest(request)}>
-                      {selected ? "REQUEST OPEN" : "VIEW REQUEST"}
-                    </button>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
-        )}
-        {selectedHumanRequest === undefined ? null : (
-          <HumanRequestPanel
-            selected={selectedHumanRequest}
-            project={projectLabel(projects, selectedHumanRequest.request.project_id)}
-            agent={entityLabel(state?.agents, selectedHumanRequest.request.agent_id, "AGENT")}
-            task={entityLabel(state?.tasks, selectedHumanRequest.request.task_id, "TASK")}
-            onReplyChange={onHumanReplyChange}
-            onReply={onReplyHumanRequest}
-            onCancel={onCancelHumanRequest}
-            onClose={onCloseHumanRequest}
-            onOpenTerminal={onOpenTerminalForHumanRequest}
-            terminalReady={status === "ready"}
+          <NeedsYouScreen
+            state={state}
+            status={status}
+            selectedHumanRequest={selectedHumanRequest}
+            onSelectHumanRequest={onSelectHumanRequest}
+            onHumanReplyChange={onHumanReplyChange}
+            onReplyHumanRequest={onReplyHumanRequest}
+            onCancelHumanRequest={onCancelHumanRequest}
+            onCloseHumanRequest={onCloseHumanRequest}
+            onOpenTerminalForHumanRequest={onOpenTerminalForHumanRequest}
           />
         )}
-      </CollectionSection>
+
+        <Ticker extras={extras} />
+      </main>
       {terminalContent}
-    </main>
+    </div>
+  );
+}
+
+function NeedsYouScreen({
+  state,
+  status,
+  selectedHumanRequest,
+  onSelectHumanRequest,
+  onHumanReplyChange,
+  onReplyHumanRequest,
+  onCancelHumanRequest,
+  onCloseHumanRequest,
+  onOpenTerminalForHumanRequest,
+}: Pick<FactoryConsoleProps,
+  "state" | "status" | "selectedHumanRequest" | "onSelectHumanRequest" | "onHumanReplyChange" |
+  "onReplyHumanRequest" | "onCancelHumanRequest" | "onCloseHumanRequest" | "onOpenTerminalForHumanRequest"
+>) {
+  const projects = state?.projects;
+  return (
+    <CollectionSection title="NEEDS YOU" count={state?.humanRequests.size ?? 0}>
+      {state === undefined ? <EmptyItem label="WAITING FOR SNAPSHOT" /> : state.humanRequests.size === 0 ? <EmptyItem label="all quiet — nothing needs you" /> : (
+        <ul className="dfFactoryConsole__list dfFactoryConsole__list--requests">
+          {[...state.humanRequests.values()].map((request) => {
+            const selected = selectedHumanRequest?.request.id === request.id;
+            return (
+              <li className="dfFactoryConsole__card" key={request.id}>
+                <div className="dfFactoryConsole__cardTitle">
+                  <strong>{entityLabel(state.agents, request.agent_id, "AGENT")} asks</strong>
+                  <span>{request.status === "open" ? "OPEN" : "DELIVERING"}</span>
+                </div>
+                <p>{projectLabel(projects, request.project_id)} · TASK {shortID(request.task_id)}</p>
+                <small>Awaiting your answer</small>
+                {onSelectHumanRequest === undefined ? null : (
+                  <button type="button" aria-pressed={selected} disabled={selected || status !== "ready"} onClick={() => onSelectHumanRequest(request)}>
+                    {selected ? "OPEN" : "VIEW"}
+                  </button>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {selectedHumanRequest === undefined ? null : (
+        <HumanRequestPanel
+          selected={selectedHumanRequest}
+          project={projectLabel(projects, selectedHumanRequest.request.project_id)}
+          agent={entityLabel(state?.agents, selectedHumanRequest.request.agent_id, "AGENT")}
+          task={entityLabel(state?.tasks, selectedHumanRequest.request.task_id, "TASK")}
+          onReplyChange={onHumanReplyChange}
+          onReply={onReplyHumanRequest}
+          onCancel={onCancelHumanRequest}
+          onClose={onCloseHumanRequest}
+          onOpenTerminal={onOpenTerminalForHumanRequest}
+          terminalReady={status === "ready"}
+        />
+      )}
+    </CollectionSection>
   );
 }
 
@@ -213,18 +238,18 @@ function HumanRequestPanel({
   const busy = selected.phase === "replying" || selected.phase === "cancelling";
   const submit = (event: FormEvent) => { event.preventDefault(); onReply?.(); };
   return (
-    <article className="dfFactoryConsole__humanRequest" aria-label="Selected human request" aria-live="polite">
+    <article className="dfFactoryConsole__humanRequest" aria-label="Selected question" aria-live="polite">
       <div className="dfFactoryConsole__cardTitle">
         <strong>{agent} needs you</strong>
-        <span>{selected.phase.toUpperCase()}</span>
+        <span>{selected.phase === "replying" ? "ANSWERING" : selected.phase.toUpperCase()}</span>
       </div>
       <p>{project} · {task}</p>
-      {selected.phase === "loading" ? <p className="dfFactoryConsole__empty">LOADING PRIVATE REQUEST…</p> : (
+      {selected.phase === "loading" ? <p className="dfFactoryConsole__empty">LOADING THE QUESTION…</p> : (
         <>
           <p className="dfFactoryConsole__question">{selected.question}</p>
           {selected.canReply ? (
-            <form className="dfFactoryConsole__reply" aria-label="Reply to human request" onSubmit={submit}>
-              <label htmlFor="dfHumanRequestReply">WRITE A REPLY</label>
+            <form className="dfFactoryConsole__reply" aria-label="Answer this question" onSubmit={submit}>
+              <label htmlFor="dfHumanRequestReply">YOUR ANSWER</label>
               <textarea
                 id="dfHumanRequestReply"
                 value={selected.reply}
@@ -232,7 +257,7 @@ function HumanRequestPanel({
                 disabled={busy || onReplyChange === undefined}
                 onChange={(event) => onReplyChange?.(event.currentTarget.value)}
               />
-              <button type="submit" disabled={busy || onReply === undefined}>{selected.phase === "replying" ? "SENDING…" : "SEND REPLY"}</button>
+              <button type="submit" disabled={busy || onReply === undefined}>{selected.phase === "replying" ? "ANSWERING…" : "ANSWER"}</button>
             </form>
           ) : null}
           <div className="dfFactoryConsole__humanActions">
