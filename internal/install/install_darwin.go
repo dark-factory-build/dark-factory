@@ -30,6 +30,8 @@ const (
 	stageSuffix  = ".dark-factory-go-v1.stage"
 	memberCount  = 6
 	maxNameSize  = 255
+	maxHomeBytes = 4096
+	maxPathDepth = 128
 )
 
 type retainedDir struct {
@@ -47,7 +49,6 @@ type phase string
 
 const (
 	phaseAfterStageMkdir      phase = "after stage mkdir"
-	phaseBeforeParentFsync    phase = "before parent fsync"
 	phaseBeforeFormatCreate   phase = "before format create"
 	phaseBeforeDatabaseCreate phase = "before database create"
 	phaseBeforeTokenCreate    phase = "before token create"
@@ -57,15 +58,22 @@ const (
 	phaseBeforeStageInspect   phase = "before stage inspect"
 	phaseAfterStageInspect    phase = "after stage inspect"
 	phaseBeforeStageSync      phase = "before stage sync"
+	phaseBeforeFinalStage     phase = "before final stage inspection"
 	phaseBeforeRename         phase = "before rename"
 	phaseAfterRename          phase = "after rename"
 	phaseBeforeFinalProof     phase = "before final proof"
+	phaseBeforeExistingSecond phase = "before existing home second scan"
 	phaseBeforeDoctorSecond   phase = "before doctor second scan"
 )
 
 // phaseHook is only used by package-local Darwin tests to schedule faults and
 // replacements at filesystem boundaries. Normal production calls leave it nil.
 var phaseHook func(phase) error
+
+// syncDirectory is a deliberately tiny syscall seam. Package-local Darwin
+// tests replace it to prove that directory fsync errors are observed; normal
+// code always uses unix.Fsync.
+var syncDirectory = unix.Fsync
 
 func atPhase(point phase) error {
 	if phaseHook == nil {
@@ -88,8 +96,24 @@ type memberSnapshot struct {
 	digest [sha256.Size]byte
 }
 
+type ancestryIdentity struct {
+	dev   uint64
+	ino   uint64
+	mode  uint32
+	uid   uint32
+	nlink uint64
+}
+
+type ancestryCommitment struct {
+	name   string
+	parent ancestryIdentity
+	object ancestryIdentity
+}
+
 type treeSnapshot struct {
 	root        identity
+	rootBinding ancestryCommitment
+	ancestors   []ancestryCommitment
 	files       map[string]memberSnapshot
 	directories map[string]identity
 }
@@ -111,20 +135,10 @@ func initHome(ctx context.Context, home string) (result Result, resultErr error)
 		return Result{}, err
 	}
 	if present {
-		if err := parent.recheck(); err != nil {
+		if _, err := inspectStable(ctx, home, phaseBeforeExistingSecond); err != nil {
 			return Result{}, err
 		}
-		if _, err := inspectBinding(ctx, parent.file, base); err == nil {
-			if err := parent.recheck(); err != nil {
-				return Result{}, err
-			}
-			if err := rejectIfPresent(parent.file, stage, "staging path"); err != nil {
-				return Result{}, err
-			}
-			return Result{State: Ready}, nil
-		} else {
-			return Result{}, fmt.Errorf("existing home is not an exact stopped Go home: %w", err)
-		}
+		return Result{State: Ready}, nil
 	}
 	if err := unix.Mkdirat(int(parent.file.Fd()), stage, 0o700); err != nil {
 		return Result{}, fmt.Errorf("create staging home: %w", err)
@@ -132,10 +146,7 @@ func initHome(ctx context.Context, home string) (result Result, resultErr error)
 	if err := atPhase(phaseAfterStageMkdir); err != nil {
 		return Result{}, err
 	}
-	if err := atPhase(phaseBeforeParentFsync); err != nil {
-		return Result{}, err
-	}
-	if err := unix.Fsync(int(parent.file.Fd())); err != nil {
+	if err := syncDirectory(int(parent.file.Fd())); err != nil {
 		return Result{}, fmt.Errorf("sync home parent after staging mkdir: %w", err)
 	}
 	stageFile, err := openDirectoryAt(parent.file, stage)
@@ -188,7 +199,7 @@ func initHome(ctx context.Context, home string) (result Result, resultErr error)
 		if openErr != nil {
 			return Result{}, fmt.Errorf("open staging %s directory: %w", name, openErr)
 		}
-		if syncErr := unix.Fsync(int(child.Fd())); syncErr != nil {
+		if syncErr := syncDirectory(int(child.Fd())); syncErr != nil {
 			_ = child.Close()
 			return Result{}, fmt.Errorf("sync staging %s directory: %w", name, syncErr)
 		}
@@ -199,7 +210,8 @@ func initHome(ctx context.Context, home string) (result Result, resultErr error)
 	if err := atPhase(phaseBeforeStageInspect); err != nil {
 		return Result{}, err
 	}
-	if _, err := inspectFD(ctx, stageFile); err != nil {
+	firstSnapshot, err := inspectFD(ctx, stageFile)
+	if err != nil {
 		return Result{}, fmt.Errorf("validate staging home: %w", err)
 	}
 	if err := atPhase(phaseAfterStageInspect); err != nil {
@@ -208,8 +220,14 @@ func initHome(ctx context.Context, home string) (result Result, resultErr error)
 	if err := atPhase(phaseBeforeStageSync); err != nil {
 		return Result{}, err
 	}
-	if err := unix.Fsync(int(stageFile.Fd())); err != nil {
+	if err := syncDirectory(int(stageFile.Fd())); err != nil {
 		return Result{}, fmt.Errorf("sync staging home: %w", err)
+	}
+	if err := atPhase(phaseBeforeFinalStage); err != nil {
+		return Result{}, err
+	}
+	if err := atPhase(phaseBeforeRename); err != nil {
+		return Result{}, err
 	}
 	// Reopen the stage so the immediately preceding inspection starts at a
 	// fresh directory offset and is not satisfied by an old descriptor view.
@@ -228,8 +246,17 @@ func initHome(ctx context.Context, home string) (result Result, resultErr error)
 	if err := sameObjectIdentity(toIdentity(stageStat), toIdentity(secondStat)); err != nil {
 		return Result{}, fmt.Errorf("staging home identity changed: %w", err)
 	}
-	if err := atPhase(phaseBeforeRename); err != nil {
+	if err := sameSnapshot(firstSnapshot, secondSnapshot); err != nil {
+		return Result{}, fmt.Errorf("staging home changed between inspections: %w", err)
+	}
+	secondSnapshot.ancestors, err = parent.commitments()
+	if err != nil {
 		return Result{}, err
+	}
+	secondSnapshot.rootBinding = ancestryCommitment{
+		name:   base,
+		parent: secondSnapshot.ancestors[len(secondSnapshot.ancestors)-1].object,
+		object: ancestryFromIdentity(secondSnapshot.root),
 	}
 	if err := parent.recheck(); err != nil {
 		return Result{}, err
@@ -243,7 +270,7 @@ func initHome(ctx context.Context, home string) (result Result, resultErr error)
 	if err := atPhase(phaseAfterRename); err != nil {
 		return Result{}, fmt.Errorf("%w: %v", ErrUncertain, err)
 	}
-	if err := unix.Fsync(int(parent.file.Fd())); err != nil {
+	if err := syncDirectory(int(parent.file.Fd())); err != nil {
 		return Result{}, fmt.Errorf("%w: publish rename succeeded but parent sync failed", errors.Join(ErrUncertain, err))
 	}
 	if err := atPhase(phaseBeforeFinalProof); err != nil {
@@ -260,25 +287,32 @@ func initHome(ctx context.Context, home string) (result Result, resultErr error)
 }
 
 func inspectHome(ctx context.Context, home string) (result Result, resultErr error) {
-	first, err := inspectFreshPath(ctx, home)
-	if err != nil {
+	if _, err := inspectStable(ctx, home, phaseBeforeDoctorSecond); err != nil {
 		return Result{}, err
-	}
-	if err := atPhase(phaseBeforeDoctorSecond); err != nil {
-		return Result{}, errors.Join(ErrUncertain, err)
-	}
-	second, err := inspectFreshPath(ctx, home)
-	if err != nil {
-		return Result{}, errors.Join(ErrUncertain, err)
-	}
-	if err := sameSnapshot(first, second); err != nil {
-		return Result{}, errors.Join(ErrUncertain, err)
 	}
 	return Result{State: Ready}, nil
 }
 
+func inspectStable(ctx context.Context, home string, secondPhase phase) (treeSnapshot, error) {
+	first, err := inspectFreshPath(ctx, home)
+	if err != nil {
+		return treeSnapshot{}, err
+	}
+	if err := atPhase(secondPhase); err != nil {
+		return treeSnapshot{}, errors.Join(ErrUncertain, err)
+	}
+	second, err := inspectFreshPath(ctx, home)
+	if err != nil {
+		return treeSnapshot{}, errors.Join(ErrUncertain, err)
+	}
+	if err := sameSnapshot(first, second); err != nil {
+		return treeSnapshot{}, errors.Join(ErrUncertain, err)
+	}
+	return second, nil
+}
+
 func splitHome(home string) (string, string, error) {
-	if home == "" || !filepath.IsAbs(home) || filepath.Clean(home) != home {
+	if home == "" || len(home) > maxHomeBytes || !filepath.IsAbs(home) || filepath.Clean(home) != home {
 		return "", "", fmt.Errorf("%w: --home must be an absolute canonical path", ErrInvalidHome)
 	}
 	base := filepath.Base(home)
@@ -289,7 +323,7 @@ func splitHome(home string) (string, string, error) {
 }
 
 func openParent(path string) (*homeParent, error) {
-	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+	if len(path) > maxHomeBytes || !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return nil, fmt.Errorf("%w: parent path is not canonical", ErrInvalidHome)
 	}
 	rootFD, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
@@ -310,6 +344,10 @@ func openParent(path string) (*homeParent, error) {
 	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
 	if path == "/" {
 		parts = nil
+	}
+	if len(parts) > maxPathDepth {
+		_ = p.close()
+		return nil, fmt.Errorf("%w: home path is too deep", ErrInvalidHome)
 	}
 	for _, name := range parts {
 		if name == "" || name == "." || name == ".." || len(name) > maxNameSize {
@@ -365,6 +403,43 @@ func (p *homeParent) recheck() error {
 	return exactDirectory(p.file, true)
 }
 
+func (p *homeParent) commitments() ([]ancestryCommitment, error) {
+	if err := p.recheck(); err != nil {
+		return nil, err
+	}
+	commitments := make([]ancestryCommitment, 0, len(p.parts))
+	for i := range p.parts {
+		var object unix.Stat_t
+		if err := unix.Fstat(int(p.parts[i].file.Fd()), &object); err != nil {
+			return nil, fmt.Errorf("snapshot home parent: %w", err)
+		}
+		commitment := ancestryCommitment{name: "/", object: toAncestryIdentity(object)}
+		if i > 0 {
+			var parent unix.Stat_t
+			if err := unix.Fstat(int(p.parts[i-1].file.Fd()), &parent); err != nil {
+				return nil, fmt.Errorf("snapshot home parent: %w", err)
+			}
+			var binding unix.Stat_t
+			if err := unix.Fstatat(int(p.parts[i-1].file.Fd()), p.parts[i].name, &binding, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+				return nil, fmt.Errorf("snapshot home parent binding: %w", err)
+			}
+			if binding.Dev != object.Dev || binding.Ino != object.Ino {
+				return nil, fmt.Errorf("%w: home parent binding changed", ErrInvalidHome)
+			}
+			commitment = ancestryCommitment{
+				name:   p.parts[i].name,
+				parent: toAncestryIdentity(parent),
+				object: toAncestryIdentity(object),
+			}
+		}
+		commitments = append(commitments, commitment)
+	}
+	if err := p.recheck(); err != nil {
+		return nil, err
+	}
+	return commitments, nil
+}
+
 func (p *homeParent) close() error {
 	var err error
 	for i := len(p.parts) - 1; i >= 0; i-- {
@@ -418,11 +493,11 @@ func exactDirectory(file *os.File, parent bool) error {
 	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
 		return err
 	}
-	if stat.Mode&unix.S_IFMT != unix.S_IFDIR || stat.Mode&0o777 != 0o700 || stat.Uid != uint32(os.Geteuid()) {
-		return errors.New("directory must be owner-only 0700")
+	if stat.Mode&unix.S_IFMT != unix.S_IFDIR || !exactMode(uint32(stat.Mode), 0o700) || stat.Uid != uint32(os.Geteuid()) {
+		return fmt.Errorf("%w: directory must be owner-only 0700", ErrInvalidHome)
 	}
 	if parent && stat.Nlink < 2 {
-		return errors.New("directory link count is invalid")
+		return fmt.Errorf("%w: directory link count is invalid", ErrInvalidHome)
 	}
 	return nil
 }
@@ -492,6 +567,15 @@ func inspectFreshPath(ctx context.Context, path string) (treeSnapshot, error) {
 	if err := parent.recheck(); err != nil {
 		return treeSnapshot{}, err
 	}
+	snapshot.ancestors, err = parent.commitments()
+	if err != nil {
+		return treeSnapshot{}, err
+	}
+	snapshot.rootBinding = ancestryCommitment{
+		name:   base,
+		parent: snapshot.ancestors[len(snapshot.ancestors)-1].object,
+		object: ancestryFromIdentity(snapshot.root),
+	}
 	return snapshot, nil
 }
 
@@ -533,10 +617,17 @@ func inspectBinding(ctx context.Context, parent *os.File, name string) (treeSnap
 	if stat.Dev != binding.Dev || stat.Ino != binding.Ino {
 		return treeSnapshot{}, fmt.Errorf("%w: home identity changed", ErrInvalidHome)
 	}
+	var finalStat unix.Stat_t
+	if err := unix.Fstat(int(file.Fd()), &finalStat); err != nil {
+		return treeSnapshot{}, err
+	}
+	if finalStat.Dev != stat.Dev || finalStat.Ino != stat.Ino {
+		return treeSnapshot{}, fmt.Errorf("%w: home identity changed", ErrInvalidHome)
+	}
 	if err := recheckBinding(parent, name, stat); err != nil {
 		return treeSnapshot{}, err
 	}
-	snapshot.root = toIdentity(stat)
+	snapshot.root = toIdentity(finalStat)
 	return snapshot, nil
 }
 
@@ -631,7 +722,7 @@ func openMember(parent *os.File, name string) (*os.File, unix.Stat_t, error) {
 		_ = file.Close()
 		return nil, unix.Stat_t{}, fmt.Errorf("%w: member identity changed", ErrInvalidHome)
 	}
-	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Mode&0o777 != 0o600 || stat.Uid != uint32(os.Geteuid()) || stat.Nlink != 1 {
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG || !exactMode(uint32(stat.Mode), 0o600) || stat.Uid != uint32(os.Geteuid()) || stat.Nlink != 1 {
 		_ = file.Close()
 		return nil, unix.Stat_t{}, fmt.Errorf("%w: member %s is not exact owner-only regular 0600", ErrInvalidHome, name)
 	}
@@ -673,7 +764,10 @@ func inspectDatabase(ctx context.Context, parent *os.File) error {
 		return fmt.Errorf("%w: database image size is outside bounds", ErrInvalidHome)
 	}
 	if err := kernel.InspectPristine(ctx, file, stat.Size); err != nil {
-		return fmt.Errorf("inspect pristine database image: %w", err)
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("inspect pristine database image: %w", err)
+		}
+		return errors.Join(ErrInvalidHome, fmt.Errorf("inspect pristine database image: %w", err))
 	}
 	if err := recheckBinding(parent, databaseName, stat); err != nil {
 		return err
@@ -712,6 +806,10 @@ func recheckBinding(parent *os.File, name string, expected unix.Stat_t) error {
 		return fmt.Errorf("%w: home member %s identity changed", ErrInvalidHome, name)
 	}
 	return nil
+}
+
+func exactMode(mode, expected uint32) bool {
+	return mode&0o7777 == expected
 }
 
 func openDirectoryMember(parent *os.File, name string) (*os.File, unix.Stat_t, error) {
@@ -833,6 +931,19 @@ func sameSnapshot(left, right treeSnapshot) error {
 	if err := sameIdentities(left.root, right.root); err != nil {
 		return err
 	}
+	if left.rootBinding.name != right.rootBinding.name || !sameAncestryIdentity(left.rootBinding.parent, right.rootBinding.parent, true) || !sameAncestryIdentity(left.rootBinding.object, right.rootBinding.object, true) {
+		return fmt.Errorf("%w: home path binding changed between inspections", ErrInvalidHome)
+	}
+	if len(left.ancestors) != len(right.ancestors) {
+		return fmt.Errorf("%w: home ancestry changed between inspections", ErrInvalidHome)
+	}
+	for index := range left.ancestors {
+		leftAncestor, rightAncestor := left.ancestors[index], right.ancestors[index]
+		strictNlink := index == 0 || index == len(left.ancestors)-1
+		if leftAncestor.name != rightAncestor.name || !sameAncestryIdentity(leftAncestor.parent, rightAncestor.parent, false) || !sameAncestryIdentity(leftAncestor.object, rightAncestor.object, strictNlink) {
+			return fmt.Errorf("%w: home ancestry changed between inspections", ErrInvalidHome)
+		}
+	}
 	for _, name := range []string{formatName, databaseName, tokenName, lockName} {
 		if left.files[name] != right.files[name] {
 			return fmt.Errorf("%w: home member %s changed between inspections", ErrInvalidHome, name)
@@ -844,4 +955,19 @@ func sameSnapshot(left, right treeSnapshot) error {
 		}
 	}
 	return nil
+}
+
+func toAncestryIdentity(stat unix.Stat_t) ancestryIdentity {
+	return ancestryIdentity{dev: uint64(stat.Dev), ino: uint64(stat.Ino), mode: uint32(stat.Mode), uid: uint32(stat.Uid), nlink: uint64(stat.Nlink)}
+}
+
+func ancestryFromIdentity(value identity) ancestryIdentity {
+	return ancestryIdentity{dev: value.dev, ino: value.ino, mode: value.mode, uid: value.uid, nlink: value.nlink}
+}
+
+func sameAncestryIdentity(left, right ancestryIdentity, strictNlink bool) bool {
+	if left.dev != right.dev || left.ino != right.ino || left.mode != right.mode || left.uid != right.uid {
+		return false
+	}
+	return !strictNlink || left.nlink == right.nlink
 }
