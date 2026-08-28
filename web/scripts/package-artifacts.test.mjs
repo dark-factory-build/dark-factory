@@ -338,6 +338,10 @@ test("tool tree commitment has framed content and rejects unsafe copied trees", 
     cpSync(pnpmRoot, modeCopy, { recursive: true });
     chmodSync(join(modeCopy, "package.json"), 0o600);
     assert.notEqual(toolTreeDigest(modeCopy), expected);
+    const modeDirectory = readdirSync(modeCopy).find((name) => lstatSync(join(modeCopy, name)).isDirectory());
+    assert.ok(modeDirectory);
+    chmodSync(join(modeCopy, modeDirectory), 0o700);
+    assert.notEqual(toolTreeDigest(modeCopy), expected);
     const existingName = readdirSync(copy)[0];
     writeFileSync(join(copy, existingName), `${readFileSync(join(copy, existingName), "utf8")}mutation`);
     assert.notEqual(toolTreeDigest(copy), expected);
