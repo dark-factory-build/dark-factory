@@ -14,6 +14,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, resolve, sep } from "node:path";
+import { homedir, tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -45,9 +46,19 @@ const inventory = {
 };
 
 const commandEnvironment = {
-  ...process.env,
+  CI: "true",
   COREPACK_DEFAULT_TO_LATEST: "0",
   COREPACK_ENABLE_NETWORK: "0",
+  COREPACK_HOME: process.env.COREPACK_HOME ?? join(homedir(), ".cache", "node", "corepack"),
+  HOME: tmpdir(),
+  LANG: "C",
+  LC_ALL: "C",
+  TMPDIR: tmpdir(),
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_CONFIG_SYSTEM: "/dev/null",
+  GIT_CONFIG_NOSYSTEM: "1",
+  GIT_TERMINAL_PROMPT: "0",
+  GIT_PAGER: "cat",
   npm_config_ignore_scripts: "true",
   npm_config_offline: "true",
   npm_config_registry: "http://127.0.0.1:9/",
