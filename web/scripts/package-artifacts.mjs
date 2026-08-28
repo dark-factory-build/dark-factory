@@ -79,7 +79,10 @@ function fail(message) {
 
 function readJson(path) {
   try {
-    return JSON.parse(readFileSync(path, "utf8"));
+    const bytes = boundedFile(path, maxJsonBytes, `JSON ${path}`);
+    const text = bytes.toString("utf8");
+    if (!Buffer.from(text, "utf8").equals(bytes)) fail(`JSON ${path} is not valid UTF-8`);
+    return JSON.parse(text);
   } catch (error) {
     fail(`could not read JSON ${path}: ${error.message}`);
   }
@@ -143,7 +146,7 @@ function strictJsonText(text, label, allowMissingFinalNewline = false) {
 }
 
 function strictJsonFile(path, label) {
-  return strictJsonText(readFileSync(path, "utf8"), label);
+  return strictJsonBuffer(boundedFile(path, maxJsonBytes, label), label);
 }
 
 function exactKeys(value, keys, label) {
@@ -230,12 +233,12 @@ function reviewedToolchain() {
   exactKeys(value.node, ["version", "sha512", "bytes", "mode"], "toolchain integrity.node");
   exactKeys(value.pnpm, ["version", "treeSha512"], "toolchain integrity.pnpm");
   exactKeys(value.typescript, ["version", "treeSha512", "lockfileIntegrity"], "toolchain integrity.typescript");
-  exactKeys(value.tar, ["sha512", "bytes", "mode"], "toolchain integrity.tar");
+  exactKeys(value.tar, ["version", "sha512", "bytes", "mode"], "toolchain integrity.tar");
   for (const key of ["version", "sha512", "mode"]) stringField(value.node, key, "toolchain integrity.node");
   integerField(value.node, "bytes", "toolchain integrity.node");
   for (const key of ["version", "treeSha512"]) stringField(value.pnpm, key, "toolchain integrity.pnpm");
   for (const key of ["version", "treeSha512", "lockfileIntegrity"]) stringField(value.typescript, key, "toolchain integrity.typescript");
-  for (const key of ["sha512", "mode"]) stringField(value.tar, key, "toolchain integrity.tar");
+  for (const key of ["version", "sha512", "mode"]) stringField(value.tar, key, "toolchain integrity.tar");
   integerField(value.tar, "bytes", "toolchain integrity.tar");
   if (!/^\d+\.\d+\.\d+$/.test(value.node.version) || !/^[0-9a-f]{128}$/.test(value.node.sha512) || value.node.bytes <= 0 || value.node.mode !== "0755") fail("toolchain integrity.node is invalid");
   if (!/^\d+\.\d+\.\d+$/.test(value.pnpm.version) || !/^[0-9a-f]{128}$/.test(value.pnpm.treeSha512)) fail("toolchain integrity.pnpm is invalid");
@@ -296,6 +299,7 @@ function trustedTools() {
   const tscVersion = execFileSync(node, [tsc, "--version"], { cwd: webRoot, env: safeEnv, encoding: "utf8" }).trim();
   const tarInfo = inspectExecutable(tarPath, "tar", reviewed.tar);
   const tarVersion = execFileSync(tarInfo.path, ["--version"], { env: safeEnv, encoding: "utf8" }).trim().split("\n")[0];
+  if (tarVersion !== reviewed.tar.version) fail("tar version differs from reviewed toolchain");
   if (pnpmVersion !== packageManager[1] || tscVersion !== `Version ${typescript}`) fail("tool executable versions do not match pinned versions");
   return {
     paths: { node, pnpm, pnpmRoot: pnpmRootPath, tsc, typescriptRoot: tscRoot, tar: tarInfo.path },
@@ -645,6 +649,7 @@ async function constructArtifacts(destination, tools, identity) {
       },
     };
     writeStableJson(join(destination, manifestName), manifest);
+    assertToolsUnchanged(tools);
     validateArtifactSet(destination, manifest, tools, identity);
     assertToolsUnchanged(tools);
     return manifest;

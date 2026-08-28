@@ -16,6 +16,7 @@
     "lockfileIntegrity": "sha512-p1diW6TqL9L07nNxvRMM7hMMw4c5XOo/1ibL4aAIGmSAt9slTE1Xgw5KWuof2uTOvCg9BY7ZRi+GaF+7sfgPeQ=="
   },
   "tar": {
+    "version": "bsdtar 3.5.3 - libarchive 3.7.4 zlib/1.2.12 liblzma/5.4.3 bz2lib/1.0.8",
     "sha512": "f7c721e9624aad59ec244739017b1354cf21a90cc86e32314419c57271d90d95af574885d3c36e2da34ff928032eb9e5954cf2044422d022b4239b845b06c323",
     "bytes": 275184,
     "mode": "0755"
