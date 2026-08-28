@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -75,6 +76,46 @@ func TestSchedulerWaitsAfterNoAdmissionAndWakesOnce(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if got := calls.Load(); got != 2 {
 		t.Fatalf("single wake created extra probes: calls=%d", got)
+	}
+	cancel()
+	if err := waitSchedulerDone(t, done); err != nil {
+		t.Fatalf("scheduler shutdown = %v", err)
+	}
+}
+
+func TestSchedulerWakeAndPollCannotRaceHeldUnobservedProbe(t *testing.T) {
+	daemon := newSchedulerTestDaemon(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	polls := make(chan time.Time, 16)
+	started := make(chan struct{})
+	var once sync.Once
+	var calls, unobserved, maxUnobserved atomic.Int64
+	spec := SupervisorSpec{
+		schedulerPoll: polls,
+		scheduledAttempt: func(ctx context.Context, _ SupervisorSpec) (kernel.Run, error) {
+			calls.Add(1)
+			present := unobserved.Add(1)
+			for maximum := maxUnobserved.Load(); present > maximum && !maxUnobserved.CompareAndSwap(maximum, present); maximum = maxUnobserved.Load() {
+			}
+			once.Do(func() { close(started) })
+			<-ctx.Done()
+			unobserved.Add(-1)
+			return kernel.Run{}, ctx.Err()
+		},
+	}
+	go func() { done <- daemon.RunScheduler(ctx, spec) }()
+	<-started
+	for index := 0; index < cap(polls); index++ {
+		daemon.notifyScheduler()
+		polls <- time.Now()
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("wake/poll raced held probe: calls=%d", got)
+	}
+	if got := maxUnobserved.Load(); got != 1 {
+		t.Fatalf("concurrent unobserved probes=%d", got)
 	}
 	cancel()
 	if err := waitSchedulerDone(t, done); err != nil {

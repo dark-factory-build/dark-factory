@@ -66,6 +66,7 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 		attemptSpec := spec
 		attemptSpec.scheduledAttempt = nil
 		attemptSpec.scheduledCompletion = nil
+		attemptSpec.schedulerPoll = nil
 		go func() {
 			observations := 0
 			attemptSpec.admissionObserved = func(admitted bool) {
@@ -77,8 +78,13 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 		}()
 	}
 
-	poll := time.NewTicker(schedulerPollInterval)
-	defer poll.Stop()
+	pollEvents := spec.schedulerPoll
+	var poll *time.Ticker
+	if pollEvents == nil {
+		poll = time.NewTicker(schedulerPollInterval)
+		pollEvents = poll.C
+		defer poll.Stop()
+	}
 	stopping := false
 	var resultErr error
 	ctxDone := ctx.Done()
@@ -100,7 +106,7 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 			if !stopping && resultErr == nil && probeID == 0 {
 				startProbe()
 			}
-		case <-poll.C:
+		case <-pollEvents:
 			if !stopping && resultErr == nil && probeID == 0 {
 				startProbe()
 			}

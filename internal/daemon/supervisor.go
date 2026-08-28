@@ -48,6 +48,8 @@ type SupervisorSpec struct {
 	// scheduledCompletion is the matching package-test-only durable-read seam.
 	// Production always reloads the returned run from the concrete Store.
 	scheduledCompletion func(kernel.Run) error
+	// schedulerPoll replaces the wall-clock ticker only in package tests.
+	schedulerPoll <-chan time.Time
 }
 
 // RunNext admits and synchronously owns one complete shell-worker attempt.
