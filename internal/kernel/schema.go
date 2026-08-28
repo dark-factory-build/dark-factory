@@ -54,7 +54,8 @@ var schemaStatements = []string{
     tool_calls_used INTEGER NOT NULL CHECK (tool_calls_used >= 0 AND tool_calls_used <= tool_budget_limit),
     revision INTEGER NOT NULL CHECK (revision >= 1),
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
-    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms)
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
+    CHECK (provider <> 'shell' OR (model IS NULL AND reasoning_effort IS NULL))
 ) STRICT, WITHOUT ROWID`,
 	`CREATE UNIQUE INDEX agents_id_project_unique ON agents(id, project_id)`,
 	`CREATE TABLE tasks (
@@ -168,6 +169,7 @@ var schemaStatements = []string{
     FOREIGN KEY (task_id, project_id, task_incarnation_id) REFERENCES tasks(id, project_id, incarnation_id),
     FOREIGN KEY (change_id, project_id, task_id, task_incarnation_id) REFERENCES changes(id, project_id, task_id, task_incarnation_id),
     CHECK ((role = 'worker' AND change_id IS NOT NULL) OR (role = 'orchestrator' AND change_id IS NULL)),
+    CHECK (provider <> 'shell' OR (model IS NULL AND reasoning_effort IS NULL)),
     CHECK ((proposal_kind IS NULL AND proposal_code IS NULL AND proposal_detail IS NULL AND proposal_result IS NULL) OR (proposal_kind = 'succeeded' AND proposal_code IS NULL AND proposal_detail IS NULL AND proposal_result IS NOT NULL) OR (proposal_kind = 'blocked' AND proposal_code IS NULL AND proposal_detail IS NOT NULL AND proposal_result IS NULL) OR (proposal_kind = 'failed' AND proposal_code IS NOT NULL AND proposal_result IS NULL) OR (proposal_kind = 'cancelled' AND proposal_code IS NULL AND proposal_detail IS NOT NULL AND proposal_result IS NULL)),
     CHECK ((terminal_kind IS NULL AND terminal_code IS NULL AND terminal_detail IS NULL AND terminal_result IS NULL) OR (terminal_kind = 'succeeded' AND terminal_code IS NULL AND terminal_detail IS NULL AND terminal_result IS NOT NULL) OR (terminal_kind = 'blocked' AND terminal_code IS NULL AND terminal_detail IS NOT NULL AND terminal_result IS NULL) OR (terminal_kind = 'failed' AND terminal_code IS NOT NULL AND terminal_result IS NULL) OR (terminal_kind = 'cancelled' AND terminal_code IS NULL AND terminal_detail IS NOT NULL AND terminal_result IS NULL)),
 	    CHECK ((phase = 'admitted' AND running_at_ms IS NULL AND finalizing_at_ms IS NULL AND terminal_at_ms IS NULL AND proposal_kind IS NULL AND terminal_kind IS NULL AND credential_revoked_at_ms IS NULL AND provider_exit_kind IS NULL AND runner_exit_kind IS NULL AND admitted_at_ms = updated_at_ms) OR (phase = 'running' AND running_at_ms IS NOT NULL AND running_at_ms = updated_at_ms AND finalizing_at_ms IS NULL AND terminal_at_ms IS NULL AND proposal_kind IS NULL AND terminal_kind IS NULL AND credential_revoked_at_ms IS NULL AND provider_exit_kind IS NULL AND runner_exit_kind IS NULL) OR (phase = 'finalizing' AND finalizing_at_ms IS NOT NULL AND terminal_at_ms IS NULL AND proposal_kind IS NOT NULL AND terminal_kind IS NULL AND credential_revoked_at_ms IS NOT NULL) OR (phase = 'terminal' AND finalizing_at_ms IS NOT NULL AND terminal_at_ms IS NOT NULL AND proposal_kind IS NOT NULL AND terminal_kind IS NOT NULL AND credential_revoked_at_ms IS NOT NULL)),

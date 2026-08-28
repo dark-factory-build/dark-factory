@@ -296,6 +296,9 @@ func validateNewAgent(spec NewAgent) error {
 	if !validReasoningEffort(spec.ReasoningEffort) {
 		return fmt.Errorf("%w: invalid reasoning effort", ErrInvalidValue)
 	}
+	if !providerLaunchControlsValid(spec.Provider, spec.Model, spec.ReasoningEffort) {
+		return fmt.Errorf("%w: invalid provider launch controls", ErrInvalidValue)
+	}
 	if spec.ToolBudgetLimit < 1 || spec.ToolBudgetLimit > 1_000_000_000 {
 		return fmt.Errorf("%w: invalid tool budget", ErrInvalidValue)
 	}
@@ -316,6 +319,10 @@ func validReasoningEffort(value string) bool {
 	default:
 		return false
 	}
+}
+
+func providerLaunchControlsValid(provider Provider, model, effort string) bool {
+	return provider != ProviderShell || (model == "" && effort == "")
 }
 
 func nullableString(value string) any {

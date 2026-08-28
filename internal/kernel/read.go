@@ -98,7 +98,7 @@ func scanAgent(scanner rowScanner) (Agent, bool, error) {
 	if idErr != nil || projectErr != nil || roleErr != nil || providerErr != nil || byteLen(name) < 1 || byteLen(name) > 128 || (paused != 0 && paused != 1) || budget < 1 || budget > 1_000_000_000 || used < 0 || used > budget || updatedAt < createdAt {
 		return Agent{}, false, fmt.Errorf("%w: invalid agent row", ErrCorruptState)
 	}
-	if model.Valid && (byteLen(model.String) < 1 || byteLen(model.String) > 128) || effort.Valid && (effort.String == "" || !validReasoningEffort(effort.String)) {
+	if model.Valid && (byteLen(model.String) < 1 || byteLen(model.String) > 128) || effort.Valid && (effort.String == "" || !validReasoningEffort(effort.String)) || !providerLaunchControlsValid(provider, nullStringValue(model), nullStringValue(effort)) {
 		return Agent{}, false, fmt.Errorf("%w: invalid agent controls", ErrCorruptState)
 	}
 	rev, revisionErr := NewRevision(revision)

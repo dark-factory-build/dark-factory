@@ -92,6 +92,78 @@ func TestAdmissionFreezesProviderModelAndEffort(t *testing.T) {
 	}
 }
 
+func TestShellLaunchControlCorruptionFailsClosed(t *testing.T) {
+	tests := []struct {
+		name      string
+		statement string
+		run       bool
+	}{
+		{name: "agent model", statement: `UPDATE agents SET model = 'ignored' WHERE id = ?`},
+		{name: "agent effort", statement: `UPDATE agents SET reasoning_effort = 'high' WHERE id = ?`},
+		{name: "run model", statement: `UPDATE runs SET model = 'ignored' WHERE id = ?`, run: true},
+		{name: "run effort", statement: `UPDATE runs SET reasoning_effort = 'high' WHERE id = ?`, run: true},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := mustCanonicalTestDatabasePath(t, filepath.Join(t.TempDir(), "kernel.db"))
+			store, err := createTestStore(context.Background(), path, FactoryConfig{DispatchEnabled: true, Capacity: 2}, mustTime(t, 1))
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			seed := byte(180 + index*10)
+			project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, seed), Name: "p", Root: "/shell-corruption/" + fmt.Sprint(index)}, mustTime(t, 2))
+			if err != nil {
+				t.Fatal(err)
+			}
+			agent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, seed+1), ProjectID: project.ID, Name: "shell", Role: RoleOrchestrator, Provider: ProviderShell, ToolBudgetLimit: 1}, mustTime(t, 3))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, seed+2), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, seed+3), Title: "task"}, mustTime(t, 4)); err != nil {
+				t.Fatal(err)
+			}
+			keys := admissionKeys(t, seed+4, nil)
+			var target []byte
+			if test.run {
+				admitted, err := store.AdmitNext(ctx, agent.ID, keys, mustTime(t, 5))
+				if err != nil || !admitted.Admitted() {
+					t.Fatalf("admission = %+v, %v", admitted, err)
+				}
+				target = admitted.Run.ID.Bytes()
+			} else {
+				target = agent.ID.Bytes()
+			}
+			if _, err := store.writer.ExecContext(ctx, test.statement, target); err == nil {
+				t.Fatal("SQLite accepted ignored shell launch controls")
+			}
+			corruptSQL(t, store, test.statement, target)
+			if test.run {
+				if _, _, err := store.Run(ctx, keys.RunID); !errors.Is(err, ErrCorruptState) {
+					t.Fatalf("Run error = %v", err)
+				}
+			} else {
+				if _, _, err := store.Agent(ctx, agent.ID); !errors.Is(err, ErrCorruptState) {
+					t.Fatalf("Agent error = %v", err)
+				}
+				before := admissionFootprint(t, store)
+				if result, err := store.AdmitNext(ctx, agent.ID, keys, mustTime(t, 5)); !errors.Is(err, ErrCorruptState) || result.Admitted() {
+					t.Fatalf("corrupt admission = %+v, %v", result, err)
+				}
+				if after := admissionFootprint(t, store); after != before {
+					t.Fatalf("corrupt admission footprint before=%+v after=%+v", before, after)
+				}
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Open(ctx, path); !errors.Is(err, ErrCorruptState) {
+				t.Fatalf("reopen error = %v", err)
+			}
+		})
+	}
+}
+
 func TestAdmissionCreatesExactDeclaredTerminalSession(t *testing.T) {
 	store, _, _, agent := newAdmissionStore(t, RoleOrchestrator, 4)
 	defer store.Close()

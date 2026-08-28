@@ -125,6 +125,47 @@ func TestEntityCreationReconciliationAndRelationships(t *testing.T) {
 	}
 }
 
+func TestProviderLaunchControlsAtAgentCreation(t *testing.T) {
+	store, _ := newTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 210), Name: "p", Root: "/provider-controls"}, mustTime(t, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, controls := range []struct {
+		model  string
+		effort string
+	}{
+		{model: "model"},
+		{effort: "high"},
+		{model: "model", effort: "high"},
+	} {
+		spec := NewAgent{
+			ID: agentID(t, byte(211+index)), ProjectID: project.ID, Name: "invalid-shell", Role: RoleOrchestrator,
+			Provider: ProviderShell, Model: controls.model, ReasoningEffort: controls.effort, ToolBudgetLimit: 1,
+		}
+		if _, err := store.CreateAgent(ctx, spec, mustTime(t, int64(3+index))); !errors.Is(err, ErrInvalidValue) {
+			t.Fatalf("shell controls %+v error = %v", controls, err)
+		}
+	}
+	seed := byte(220)
+	for _, provider := range []Provider{ProviderClaudeCode, ProviderCodex} {
+		for _, controls := range []struct {
+			model  string
+			effort string
+		}{{model: "model"}, {effort: "high"}} {
+			if _, err := store.CreateAgent(ctx, NewAgent{
+				ID: agentID(t, seed), ProjectID: project.ID, Name: "valid-provider", Role: RoleOrchestrator,
+				Provider: provider, Model: controls.model, ReasoningEffort: controls.effort, ToolBudgetLimit: 1,
+			}, mustTime(t, int64(seed))); err != nil {
+				t.Fatalf("provider %s controls %+v: %v", provider, controls, err)
+			}
+			seed++
+		}
+	}
+}
+
 func TestStateAndInvalidationRollbackTogether(t *testing.T) {
 	t.Run("state failure has no invalidation", func(t *testing.T) {
 		store, _ := newTestStore(t)
