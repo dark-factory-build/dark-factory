@@ -97,7 +97,7 @@ func runAttemptWorkerHelper(args []string) error {
 			initialInput = []byte("one-startup\n")
 		}
 		provider = ExecSpec{Target: "/bin/sh", Args: []string{"-c", script}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: providerCwd}
-	case "binary", "seam", "lifetime", "lease-seam", "cwd", "cwd-seam", "cwd-unrelated", "cwd-file", "cwd-closed", "cwd-reused", "cwd-mode":
+	case "binary", "seam", "lifetime", "lease-seam", "cwd", "cwd-seam", "cwd-unrelated", "cwd-file", "cwd-closed", "cwd-reused", "cwd-mode", "cwd-inherited":
 		if len(args) != 3 {
 			return errors.New("attempt worker: missing binary target")
 		}
@@ -108,7 +108,7 @@ func runAttemptWorkerHelper(args []string) error {
 		if strings.HasPrefix(mode, "cwd") {
 			providerCwd = filepath.Join(root, "change", "work")
 		}
-		if mode == "cwd" || mode == "cwd-seam" {
+		if mode == "cwd" || mode == "cwd-seam" || mode == "cwd-inherited" {
 			providerArgs = []string{"--cwd-provider", root}
 		}
 		provider = ExecSpec{Target: args[2], Args: providerArgs, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: providerCwd}
@@ -132,6 +132,18 @@ func runAttemptWorkerHelper(args []string) error {
 	cwd, err := os.Open(cwdPath)
 	if err != nil {
 		return err
+	}
+	if mode == "cwd-inherited" {
+		inherited, err := unix.FcntlInt(cwd.Fd(), unix.F_DUPFD, 20)
+		if err != nil {
+			cwd.Close()
+			return err
+		}
+		if _, err := unix.FcntlInt(uintptr(inherited), unix.F_SETFD, 0); err != nil {
+			unix.Close(inherited)
+			cwd.Close()
+			return err
+		}
 	}
 	if mode == "cwd-closed" {
 		if err := cwd.Close(); err != nil {
@@ -1184,6 +1196,105 @@ func TestCurrentExecUsesTransferredCwdAfterParentPathReplacement(t *testing.T) {
 	}
 	if got, err := os.ReadFile(filepath.Join(f.root, "provider.effect")); err != nil || string(got) != "provider" {
 		t.Fatalf("provider witness=%q err=%v", got, err)
+	}
+}
+
+func TestCurrentExecRejectsExactInheritedDescriptor(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, root string)
+		check func(t *testing.T, root string)
+	}{
+		{
+			name: "none",
+			check: func(t *testing.T, root string) {
+				diagnostic, err := os.ReadFile(filepath.Join(root, "cwd.error"))
+				if err != nil || !strings.Contains(string(diagnostic), "cwd provider inherited fd 20") {
+					t.Fatalf("inherited descriptor diagnostic=%q err=%v", diagnostic, err)
+				}
+			},
+		},
+		{
+			name: "regular",
+			setup: func(t *testing.T, root string) {
+				if err := os.WriteFile(filepath.Join(root, "cwd.error"), []byte("preserve this diagnostic"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			check: func(t *testing.T, root string) {
+				info, err := os.Lstat(filepath.Join(root, "cwd.error"))
+				if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o644 {
+					t.Fatalf("diagnostic identity=%v err=%v", info, err)
+				}
+				if got, err := os.ReadFile(filepath.Join(root, "cwd.error")); err != nil || string(got) != "preserve this diagnostic" {
+					t.Fatalf("diagnostic=%q err=%v", got, err)
+				}
+			},
+		},
+		{
+			name: "symlink",
+			setup: func(t *testing.T, root string) {
+				outside := filepath.Join(root, "outside")
+				if err := os.WriteFile(outside, []byte("preserve this diagnostic"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outside, filepath.Join(root, "cwd.error")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			check: func(t *testing.T, root string) {
+				path := filepath.Join(root, "cwd.error")
+				info, err := os.Lstat(path)
+				if err != nil || info.Mode()&os.ModeSymlink == 0 {
+					t.Fatalf("diagnostic identity=%v err=%v", info, err)
+				}
+				target, err := os.Readlink(path)
+				if err != nil || target != filepath.Join(root, "outside") {
+					t.Fatalf("diagnostic target=%q err=%v", target, err)
+				}
+				if got, err := os.ReadFile(path); err != nil || string(got) != "preserve this diagnostic" {
+					t.Fatalf("target diagnostic=%q err=%v", got, err)
+				}
+			},
+		},
+		{
+			name: "directory",
+			setup: func(t *testing.T, root string) {
+				if err := os.Mkdir(filepath.Join(root, "cwd.error"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+			check: func(t *testing.T, root string) {
+				info, err := os.Lstat(filepath.Join(root, "cwd.error"))
+				if err != nil || !info.IsDir() {
+					t.Fatalf("diagnostic identity=%v err=%v", info, err)
+				}
+			},
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			f := newAttemptFixture(t, "cwd-inherited", executable)
+			if test.setup != nil {
+				test.setup(t, f.root)
+			}
+			f.activateOuter()
+			f.advanceToProvider()
+			if err := f.controller.Release(StageProvider); err != nil {
+				t.Fatal(err)
+			}
+			record := f.finishAndAck(false)
+			if record.Terminal.Exit.Code != 94 {
+				t.Fatalf("inherited descriptor terminal=%+v output=%q", record.Terminal, f.output())
+			}
+			if test.check != nil {
+				test.check(t, f.root)
+			}
+		})
 	}
 }
 

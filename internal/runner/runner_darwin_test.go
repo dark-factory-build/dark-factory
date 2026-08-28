@@ -325,13 +325,30 @@ func runCwdProviderChecks(root string) error {
 	if !ok {
 		return ErrIdentity
 	}
-	entries, err := os.ReadDir("/dev/fd")
+	directory, err := os.Open("/dev/fd")
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	entries, err := directory.Readdirnames(-1)
 	if err != nil {
 		return err
 	}
 	for _, entry := range entries {
-		fd, err := strconv.Atoi(entry.Name())
-		if err != nil || fd <= 2 || fd == 10 {
+		fd, err := strconv.Atoi(entry)
+		if err != nil || fd <= 2 || fd == 10 || fd == int(directory.Fd()) {
+			continue
+		}
+		flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0)
+		if errors.Is(err, unix.EBADF) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		// A descriptor with CLOEXEC cannot have survived the worker's exec;
+		// Go may open one for its own runtime after this provider starts.
+		if flags&unix.FD_CLOEXEC != 0 {
 			continue
 		}
 		var inherited unix.Stat_t
@@ -340,7 +357,8 @@ func runCwdProviderChecks(root string) error {
 		} else if err != nil {
 			return err
 		}
-		return fmt.Errorf("cwd provider inherited fd %d", fd)
+		target, targetErr := os.Readlink(filepath.Join("/dev/fd", entry))
+		return fmt.Errorf("cwd provider inherited fd %d target=%q stat=%+v flags=%#x target_err=%v", fd, target, inherited, flags, targetErr)
 	}
 	var lifetime unix.Stat_t
 	if err := unix.Fstat(10, &lifetime); err != nil || lifetime.Mode&unix.S_IFMT != unix.S_IFREG || lifetime.Size != 0 {
@@ -350,29 +368,6 @@ func runCwdProviderChecks(root string) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(root, "provider.effect"), []byte("provider"), 0o600)
-}
-
-func runCwdProviderProcess(t *testing.T, root string) (int, string) {
-	t.Helper()
-	executable, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	command := exec.Command(executable, "--cwd-provider", root)
-	command.Dir = root
-	command.Env = []string{"PATH=/usr/bin:/bin", "LANG=C"}
-	var output bytes.Buffer
-	command.Stdout = &output
-	command.Stderr = &output
-	err = command.Run()
-	if err == nil {
-		return 0, output.String()
-	}
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) {
-		t.Fatal(err)
-	}
-	return exitErr.ExitCode(), output.String()
 }
 
 func TestCwdProviderDiagnosticPreservesExistingPaths(t *testing.T) {
@@ -455,10 +450,7 @@ func TestCwdProviderDiagnosticPreservesExistingPaths(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			code, output := runCwdProviderProcess(t, root)
-			if code != 94 || !strings.Contains(output, "cwd provider lifetime") {
-				t.Fatalf("helper exit=%d output=%q", code, output)
-			}
+			writeCwdProviderDiagnostic(root, []byte(original))
 			after, err := os.Lstat(path)
 			if err != nil || !os.SameFile(before, after) {
 				t.Fatalf("diagnostic identity before=%v after=%v err=%v", before, after, err)
