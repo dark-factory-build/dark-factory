@@ -27,21 +27,28 @@ task or queue observation. The Store applies durable eligibility and exact
 reason precedence. Before selection it validates global settings and runs one
 concrete SQL integrity predicate over every row/relation/control that can
 occupy capacity or bind active authority, plus every structurally queued rank,
-payload, assignment and agent/profile/project control. Unknown phases, missing
+payload, assignment and exact task/agent/project fields. Unknown phases, missing
 relations, split resource pairs, invalid IDs/revisions/enums, malformed rank or
 payload, and other damaged facts anywhere block all admission rather than
 becoming ineligibility. Only after that proof may capacity count the single set
 of all nonterminal runs: admitted, running and finalizing.
+The rewrite record's Global transactional admission contract defines the one
+exact field/domain table used by the fresh-schema `CHECK`s and this predicate:
+it includes exact Boolean storage, budget arithmetic, model/effort and
+provider/mode compatibility, task `updated_at_ms` and every relevant monotonic
+timestamp. The fresh schema has no profile, agent or project status field;
+agent `paused` is the availability control. This file does not define a second
+or extensible control validator.
 Configured capacity is one integer `C` in `[1, 1024]`; a reserved Change residue
 belongs to one nonterminal worker run, so its count is at most `C`. Terminal
 retained-Change aggregate retention and adversarial residue bytes remain
-explicit cutover gates, not a second admission cap.
+explicit cutover gates, not admission policy.
 The Store then orders all eligible task+agent rows by priority
 descending, creation time ascending and exact 16-byte task-ID `BLOB` bytes
 ascending. It validates the selected row's one canonical Change and never skips
 a corrupt, unsettled or hard-invalid higher-ranked row for lower work. Fresh
 no-admission precedence is `dispatch_disabled`, `at_capacity`, `queue_empty`,
-`no_eligible_work`; there is no separate Change-cap reason. Known-valid paused,
+`no_eligible_work`. Known-valid paused,
 budget-exhausted or open-run-conflicting queued work is ineligible; either
 known role remains eligible and determines the footprint, while a known
 nonqueued task is outside the queue. Unknown or malformed durable control is

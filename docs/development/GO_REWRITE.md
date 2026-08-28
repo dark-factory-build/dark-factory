@@ -45,7 +45,7 @@ branch/worktree and obeys that repository's `AGENTS.md`.
 
 | State | Exact work retained or stopped |
 |---|---|
-| Complete and retained | Fresh SQLite contract; typed kernel; atomic admission; exact attempt credentials; run/finalizing/resource state; bounded invalidations; Change ownership/materialization groundwork; owner-only Unix control API; typed `factoryctl` client; Darwin process identity; two blocked-exec gates; gated Darwin PTY primitive; durable terminal-session admission, activation, recovery uncertainty and finalization guards; durable browser clients/challenges/revocation/input leases; exact PAIR/AUTH transcripts; strict browser-v1 handshake/binary codecs; strict runner terminal union, complete-write poisoning, incremental frame decoder and one fixed replay ring through `f1f72aa`; reviewed framework-neutral `@dark-factory/client` handshake/transcript/binary core and exact package gate through `d03491f`; independently reviewed question-only durable HumanRequest creation, private detail, reply reservation/acknowledgement/uncertainty, restart recovery, lifecycle convergence and bounded public projection through `40f5873`; the single-owner PTY execution loop, exact ready/input handoff, correlated retained replay, bounded filter retirement, poisoned writes, actual-EOF ordering and daemon-loss convergence through `ebcfd24`; exact two-field `AUTH_PROVE` through `4b18c38`; runner-owned exact HumanRequest PTY reply through `0f313a9`; daemon live-attempt registry, mailbox, bounded observers, finalization gate, active supervisor cancellation and joined shutdown through `d9709b9`; the closed attempt-only `request_human` API plus direct durable dispatch through `c29d154`; exact 8 KiB browser/Go/TypeScript terminal payload bound through `9ab44c3`; read-only exact lease authorization and one-shot failed-install/input-reservation revocation through `8853acb`; finalization/release linearization, natural-exit acknowledgement convergence, cancellation visibility and real descendant reaping through `ea1ee4b`; canonical Darwin runtime, Change and Change-worker fixtures through `699515d`; exact committed provider access to the attempt-only `request-human` command through `d4ce713`; independently reviewed fixed-page browser canonical state and private-detail separation through `1a562e4`; strict Go/TypeScript browser state/detail wire and causal reducer through `9b7689d`; exact-run HumanRequest terminal projection, fail-closed loopback browser state transport, guarded framework-neutral TypeScript Session client, direct daemon Store adapter and daemon-owned durable browser revocation through `b61fca8`; private transport-minted per-WebSocket connection identity through `53d68dd`; independently reviewed public MIT `@dark-factory/ui` package and contributor fixture through `18b5b0e`; exact daemon terminal acquire/renew/release/input/resize and HumanRequest reply effects through `ae28dc8`; exact browser-v1 terminal/HumanRequest manifest, Go codecs, golden fixtures and TypeScript mirror through `a10b9f0`; independently reviewed `factoryctl web status/open/list-clients/revoke`, exact launch ambiguity and bounded browser-runtime cleanup through `2f883c1`; reviewed framework-neutral TypeScript terminal Session authority through `b2eef51`; reviewed Go browser terminal/HumanRequest effect transport and cleanup through `7f449ce`; the exact agent terminal-target wire/Store/browser-daemon route and four-capability production pairing mask through `219d036`; high-level TypeScript target discovery, opaque terminal authority and automatic lease lifecycle |
+| Complete and retained | Fresh SQLite contract; typed kernel; atomic admission; exact attempt credentials; run/finalizing/resource state; bounded invalidations; Change ownership/materialization groundwork; owner-only Unix control API; typed `factoryctl` client; Darwin process identity; two blocked-exec gates; gated Darwin PTY primitive; durable terminal-session admission, activation, recovery uncertainty and finalization guards; durable browser clients/challenges/revocation/input leases; exact PAIR/AUTH transcripts; strict browser-v1 handshake/binary codecs; strict runner terminal union, complete-write poisoning, incremental frame decoder and one fixed replay ring through `f1f72aa`; reviewed framework-neutral `@dark-factory/client` handshake/transcript/binary core and exact package gate through `d03491f`; independently reviewed question-only durable HumanRequest creation, private detail, reply reservation/acknowledgement/uncertainty, restart recovery, lifecycle convergence and bounded public projection through `40f5873`; the single-owner PTY execution loop, exact ready/input handoff, correlated retained replay, bounded filter retirement, poisoned writes, actual-EOF ordering and daemon-loss convergence through `ebcfd24`; exact two-field `AUTH_PROVE` through `4b18c38`; runner-owned exact HumanRequest PTY reply through `0f313a9`; daemon live-attempt registry, mailbox, bounded observers, finalization gate, active supervisor cancellation and joined shutdown through `d9709b9`; the closed attempt-only `request_human` API plus direct durable dispatch through `c29d154`; exact 8 KiB browser/Go/TypeScript terminal payload bound through `9ab44c3`; read-only exact lease authorization and one-shot failed-install/input-reservation revocation through `8853acb`; finalization/release linearization, natural-exit acknowledgement convergence, cancellation visibility and real descendant reaping through `ea1ee4b`; canonical Darwin runtime, Change and Change-worker fixtures through `699515d`; exact committed provider access to the attempt-only `request-human` command through `d4ce713`; independently reviewed fixed-page browser canonical state and private-detail separation through `1a562e4`; strict Go/TypeScript browser state/detail wire and causal reducer through `9b7689d`; exact-run HumanRequest terminal projection, fail-closed loopback browser state transport, guarded framework-neutral TypeScript Session client, direct daemon Store adapter and daemon-owned durable browser revocation through `b61fca8`; private transport-minted per-WebSocket connection identity through `53d68dd`; independently reviewed public MIT `@dark-factory/ui` package and contributor fixture through `18b5b0e`; exact daemon terminal acquire/renew/release/input/resize and HumanRequest reply effects through `ae28dc8`; exact browser-v1 terminal/HumanRequest manifest, Go codecs, golden fixtures and TypeScript mirror through `a10b9f0`; independently reviewed `factoryctl web status/open/list-clients/revoke`, exact launch ambiguity and bounded browser-runtime cleanup through `2f883c1`; reviewed framework-neutral TypeScript terminal Session authority through `b2eef51`; reviewed Go browser terminal/HumanRequest effect transport and cleanup through `7f449ce`; the exact agent terminal-target wire/Store/browser-daemon route and four-capability production pairing mask through `219d036`; high-level TypeScript target discovery, opaque terminal authority and automatic lease lifecycle; implemented, causally tested and independently allowed `RuntimeParent` lifetime/child-operation ownership through `7464e02a` and `15879fe2` |
 | Reusable with adaptation | `internal/runner` live-child/process-group ownership and old result-spool identity/removal mechanics; daemon supervisor choreography; bounded API framing/auth separation; dashboard projection/client reducer direction; rebased recovery branch `go-recovery-reserved-fix` at `185cd5f`; fail-closed runtime/spool/Change close branches at `f239815`, `347c977`, and `4183205` |
 | In progress but held | Recovery still needs replay onto the PTY design. The development/Go sub-gates are integrated and green. A real Go/TypeScript/browser PTY lifecycle candidate now passes serially with a stable post-test census; independent review and integration remain before that proof becomes canonical. |
 | Obsolete | Startup-input-only/closed-stdin provider contract; separate stdin/stdout/stderr provider pipes as the product transport; TUI/Bubble Tea packages, lanes and parity tests; generic attention projection; message-on-next-run as the live-question answer |
@@ -104,17 +104,22 @@ older candidate or test result current.
   raw connection remained live and owned without a reconnect or retry. The
   test also proved exact identity and one close/one connect. No mutation code
   remains.
+- The canonical branch now also integrates the exact `RuntimeParent` range
+  `7464e02a` and `15879fe2`. The implementation and its causal lifetime,
+  child-operation join and recovery matrix were independently reviewed at
+  exact source head `0c435705`; the reviewer returned **ALLOW**. This is
+  package/composition authority evidence, not a claim that `factoryd` exists.
 - The public-artifact gate and its exact `c732f103` proof remain integrated and
-  are preserved in the historical checkpoint immediately below. Store-only
-  commits did not change those files, but no new 13/13 artifact or full
-  `go-check` run is claimed at `497ecfe4`.
+  are preserved in the historical checkpoint immediately below. Store and
+  RuntimeParent commits did not change those artifact files, but no new 13/13
+  artifact or full `go-check` run is claimed here.
 
 | Contract or gate | Current state | Next proof boundary |
 |---|---|---|
 | operational home and Store | integrated, causally tested and independently reviewed | composition must call `OpenStore` once and close child owners in the frozen order |
 | public artifact gate | integrated; exact proof remains at `c732f103` | rerun after the next clean record/integration milestone |
 | local API authority | corrected reviewed contract frozen below; no implementation | install-owned endpoint/socket lifecycle plus API framing/auth matrix |
-| `RuntimeParent` | reviewed contract frozen below; no implementation | lifetime parent capability, child-operation join and recovery matrix |
+| `RuntimeParent` | integrated, causally tested and independently reviewed through `7464e02a` and `15879fe2`; exact review source `0c435705` **ALLOW** | composition must own it once, join every child operation and close it before Store/home ancestry |
 | Change disposition/descriptor handoff | latest cold-review corrections frozen below; no implementation and exact-contract re-review pending | schema/Store transition proof, then worker FD 11 and retry proof |
 | standalone daemon, recovery and scheduling | corrected global transactional `AdmitNext` contract frozen; exact multi-document re-review pending and daemon/recovery/scheduler not implemented | concrete `cmd/factoryd`, restart/crash cuts, then one cursor-free scheduler loop |
 | service/release/private host | not cut over | isolated install/service proof and exact public-artifact site integration |
@@ -186,9 +191,9 @@ fallback. No part of this Local API contract is implemented at `497ecfe4`.
 
 The independently audited V1 decision remains one concrete
 `Store.AdmitNext(ctx, keys, at)` call, but the exact four-document contract is
-pending fresh review after `d856dc7b` was **BLOCKED** on incomplete integrity
-across authority rows, an undefined eligibility term, incomplete queued payload/rank
-validation and an unproved retained-Change cap. The call accepts
+pending fresh review after `debac058` was **BLOCKED** because its queued-control
+integrity language was still not field-exact and it retained a stale Change
+corruption decision in the causal matrix. The call accepts
 no caller `AgentID`, task ID, queue observation, pagination token, round-robin
 position or fairness cursor. `keys` contains a complete fresh daemon-minted
 candidate footprint for every call,
@@ -209,8 +214,8 @@ concrete SQL integrity predicate then covers both:
 - every row/relation/control that can occupy capacity or bind active authority,
   including all run, attempt-credential, resource, terminal-session and Change
   phase/control facts; and
-- every structurally queued task assignment plus its required agent, profile
-  and project controls and complete rank/payload facts.
+- every structurally queued task assignment plus its required agent row,
+  project row and complete rank/payload facts.
 
 The first arm rejects an unknown run/resource/session/Change phase, invalid
 ID/revision/enum, missing required relation, phase/fact mismatch, incomplete or
@@ -222,17 +227,68 @@ uniqueness constraints prevent ordinary invalid writes; this SQL predicate is
 the causal proof against constraint-bypassed or damaged durable state, not a
 second validation framework.
 
-The queued arm requires nonzero 16-byte IDs; positive work/task revisions;
-`priority` stored as an integer in `[-1000000, 1000000]`; `created_at_ms`
-stored as an integer in `[0, 9223372036854775807]`; a TEXT title of 1–1024
-encoded bytes; a TEXT body of 0–131072 encoded bytes; valid same-project
-assignment and
-durable role/provider/mode/profile/verification controls; and all queued-row
-blocked/proposal/terminal/completion/result payload columns absent. An assigned
-task with an unknown status is included rather than silently classified as not
-queued. Any malformed higher- or lower-ranked row returns `ErrCorruptState`.
-This is one direct Store SQL predicate, not an application row scan,
-validation framework or eligibility filter.
+The integrity predicate and the fresh-schema `CHECK`s share this one literal
+queued-assignment control domain. Later references to a known control mean
+membership in this table; they do not invoke another validator:
+
+| Fresh-schema field | Exact durable domain |
+|---|---|
+| factory `dispatch_enabled` | SQLite `INTEGER` exactly `0` or `1` |
+| factory `capacity` | SQLite `INTEGER` in `[1, 1024]` |
+| factory `revision`, `updated_at_ms` | revision is SQLite `INTEGER >= 1`; timestamp is SQLite `INTEGER` in `[0, 9223372036854775807]` |
+| project `name`, `root` | name is SQLite `TEXT` of 1–128 encoded bytes; root is clean absolute SQLite `TEXT` of 1–4096 encoded bytes with no NUL |
+| project `verification_policy` | `none`, `rust_workspace_test` or `go_workspace_test` |
+| project `revision`, `created_at_ms`, `updated_at_ms` | revision is SQLite `INTEGER >= 1`; both timestamps are SQLite `INTEGER` in `[0, 9223372036854775807]` and `updated_at_ms >= created_at_ms` |
+| agent `name` | SQLite `TEXT` of 1–128 encoded bytes |
+| agent `role` | `orchestrator` or `worker` |
+| agent `provider` | `claude_code`, `codex` or `shell` |
+| agent `execution_mode` | `plan_only`, `workspace_write` or `unrestricted`; `shell` requires `unrestricted`, while either other provider permits any listed mode |
+| agent `model` | `NULL`, or SQLite `TEXT` containing 1–128 encoded bytes; V1 deliberately has no model-name enum or additional syntax |
+| agent `reasoning_effort` | `NULL`, `low`, `medium`, `high`, `xhigh`, `max` or `ultra` |
+| agent `paused` | SQLite `INTEGER` exactly `0` or `1` |
+| agent `tool_budget_limit` | SQLite `INTEGER` in `[1, 1000000000]` |
+| agent `tool_calls_used` | SQLite `INTEGER` in `[0, tool_budget_limit]` |
+| agent `revision`, `created_at_ms`, `updated_at_ms` | revision is SQLite `INTEGER >= 1`; both timestamps are SQLite `INTEGER` in `[0, 9223372036854775807]` and `updated_at_ms >= created_at_ms` |
+| task `status` | `queued`, `running`, `blocked`, `succeeded`, `failed` or `cancelled` |
+| task `priority` | SQLite `INTEGER` in `[-1000000, 1000000]` |
+| task `revision`, `work_revision`, `created_at_ms`, `updated_at_ms` | both revisions are SQLite `INTEGER >= 1`; both timestamps are SQLite `INTEGER` in `[0, 9223372036854775807]` and `updated_at_ms >= created_at_ms` |
+
+The fresh schema has no separate profile row or profile status, no agent status
+and no project status. The agent row is the launch profile; `paused` is its
+only durable availability switch. The predicate therefore does not invent or
+vaguely validate any absent control.
+
+Every structurally queued assignment must have nonzero 16-byte task, task-
+incarnation, agent and project IDs; positive task work revision and row
+revision; exact same-project task/agent binding; the literal control domains
+above; `created_at_ms` stored as an `INTEGER` in
+`[0, 9223372036854775807]`; `updated_at_ms` stored as an `INTEGER` in
+`[created_at_ms, 9223372036854775807]`; a SQLite `TEXT` title of 1–1024
+encoded bytes; a SQLite `TEXT` body of 0–131072 encoded bytes; and all queued
+blocked-reason, proposal, terminal, completion and result facts absent.
+
+All timestamps relevant to this integrity decision are exact SQLite integers
+in `[0, 9223372036854775807]`. Project, agent and task `updated_at_ms` must not
+precede their `created_at_ms`; task `completed_at_ms` is absent for queued,
+running and blocked rows and equals `updated_at_ms` only for the terminal task
+statuses required by their phase constraints. Run admission/running/
+finalizing/terminal timestamps, resource declaration/activation/release
+timestamps and terminal-session declaration/activation/closure timestamps are
+ordered exactly as their known phases require. Change timestamps are likewise
+monotonic under the five-phase transition table below, but no Change phase
+timestamp is required to equal `updated_at_ms`. A wrong SQLite storage class,
+out-of-range timestamp or reversed ordering is corruption.
+
+An assigned task with an unknown status is included rather than silently
+classified as not queued. Any malformed control or payload above or below a
+valid ranked row returns `ErrCorruptState`. Literal `dispatch_enabled = 0` is
+valid and produces the exact `dispatch_disabled` result. A literal
+`paused = 1`, exhausted but internally consistent budget, or known nonqueued
+task status is valid state and may be ineligible; an unknown enum, non-Boolean
+switch, negative or over-limit budget, empty/oversized model, incompatible
+provider/mode or broken timestamp is corruption. This is one direct Store SQL
+predicate, not an application row scan, duplicate validation framework or
+eligibility filter.
 
 Only after global-settings validation and the integrity predicate pass
 does the transaction apply this exact no-admission precedence:
@@ -252,8 +308,8 @@ two valid values (`worker` or `orchestrator`); and there is no conflicting open
 run. Both valid roles are eligible—role determines the admitted footprint,
 including whether a Change is required, not whether an external tool is
 currently available. Global dispatch-disabled is the earlier exact reason.
-Provider, execution-mode, profile, project and verification controls must be
-structurally valid under the integrity predicate, but valid external provider
+Provider, execution-mode, model/effort, project verification and timestamp
+controls must be in the literal domains above, but external provider
 executable/configuration/auth availability is deliberately not eligibility.
 Known-valid paused, budget-exhausted or conflicting-open-run assignments are
 ordinary ineligibility and may produce `no_eligible_work`; known nonqueued task
@@ -274,8 +330,8 @@ These are SQL predicates/order inside the transaction, not a scheduler census
 or memory filter. After selection, the Store validates the selected task
 incarnation's one canonical Change. A corrupt, unsettled or hard-invalid Change
 fails `ErrCorruptState` and is never skipped in favour of lower-priority work.
-There is no separate Change-cap reason or unproved retained-Change count cap in
-V1.
+Canonical Change corruption is the only Change-specific pre-admission
+decision in V1.
 
 Only then does the transaction derive launch facts, select/reuse or reserve the
 Change, create the complete run/credential/resource/terminal/task/Change
@@ -320,7 +376,7 @@ and external-effect tests.
 
 Successive cold reviews **BLOCKED** the literal `c732f103`, `f05eff86`,
 `88a8ab22`, `884d63c3`, `7dc2e83b`, `a8d3c395`, `c38ce8a6`, `4a9b7672`,
-`7e6d00c4` and `d856dc7b`
+`7e6d00c4`, `d856dc7b` and `debac058`
 plans. They found stale retry revision, child-live abandonment, caller-selected
 reuse, incomplete crash recovery, a leaked staging namespace, contradictory
 worker executables and finally a transient no-start receipt that became
@@ -332,7 +388,9 @@ undercount, an outcome race that could strand a declared empty provider pair,
 and incomplete queued-corruption coverage. The `d856dc7b` review found that
 unknown authority phases could escape capacity, queued rank/payload facts were
 still underspecified, eligibility contained an undefined label and the
-retained-Change cap was not real. The contract below incorporates
+claimed retention bound was unsupported. The `debac058` review then found a
+stale Change-specific no-admission decision and queued-control domains that
+still were not field-exact. The contract below incorporates
 every required correction and supersedes those literal tables. It still
 requires a fresh independent exact-contract **ALLOW** before implementation
 begins. No production Change schema, runner or worker code has implemented it
@@ -751,8 +809,8 @@ finalizing worker run. For configured capacity `C`, its count is therefore:
 reserved residue count <= nonterminal worker runs
                        <= all nonterminal runs <= C <= 1024
 ```
-There is no separate retained-Change count cap. Terminal retained Changes need
-an explicit retention/count/byte policy before cutover; until that policy is
+Terminal retained Changes need an explicit retention/count/byte policy before
+cutover; until that policy is
 chosen, their aggregate storage is an acknowledged cutover blocker rather than
 an admission reason. The intended residue is empty because population is not
 released before the `prepared` commitment; accepted materialized trees are
@@ -920,17 +978,14 @@ silently abandoned.
 
 1. Implement and independently review the corrected install-owned Local API
    endpoint and authority contract.
-2. Implement and independently review `RuntimeParent`; reserve
-   `factory.sock` and remove path/F_GETPATH authority before shared runner
-   changes.
-3. Obtain independent exact-contract `ALLOW`, implement the corrected Change
+2. Obtain independent exact-contract `ALLOW`, implement the corrected Change
    disposition/schema contract, then FD 11 worker handoff and retry
    reinspection in that order.
-4. Add one concrete `cmd/factoryd` root and recovery coordinator; only after
+3. Add one concrete `cmd/factoryd` root and recovery coordinator; only after
    recovery converges add one scheduler. Prove isolated restart/crash cuts.
-5. Complete `factoryctl` service/recovery, release packaging and the exact-
+4. Complete `factoryctl` service/recovery, release packaging and the exact-
    artifact private-site integration.
-6. Run the dedicated whole-runtime elegance/DRY/YAGNI audit, mutation matrix
+5. Run the dedicated whole-runtime elegance/DRY/YAGNI audit, mutation matrix
    and five independent final reviews. Delete the Rust local runtime only after
    every hard-cutover gate is green on one exact head.
 
@@ -3278,7 +3333,8 @@ not a compatibility target.
   16-byte BLOB task ID ascending, validates rather than skips its one Change,
   derives launch policy, binds exact task incarnation/revision, and creates the
   complete run/credential/resource/session footprint and invalidations before
-  any external effect. There is no separate Change-cap reason. External
+  any external effect. Canonical Change corruption is the only Change-specific
+  pre-admission decision. External
   repository/provider executable/configuration/auth availability is post-
   admission typed failure. `RunNext` launches only from that committed Run.
 - One random credential belongs to one exact admitted/running attempt, but it
@@ -4180,7 +4236,7 @@ contracts.
 | Invariant | Causal Go proof | Required mutation killed |
 | --- | --- | --- |
 | SQLite configuration | On native macOS and Linux, open fresh/reopen/concurrent connections; assert foreign keys on every pooled connection, WAL readers during an immediate writer, bounded busy behavior, literal immediate exclusion, rollback after SIGKILL, and acknowledged state/event survival | deferred `BEGIN`; connection without PRAGMAs; swallowed/unbounded busy error; split transaction |
-| Atomic canonical admission | Call `AdmitNext` without AgentID/task/cursor while racing multi-agent priority and stale insertion; exercise exact integrity/dispatch/all-nonterminal-capacity/queue/eligibility/Change precedence, 16-byte BLOB ties, corrupt canonical work ahead of valid work, post-admission source/provider failure, and two admits at the last factory slot; prove an admitted setup-stalled run occupies that slot, fresh IDs, RunID-only reconciliation, exact zero/full footprints and unchanged restart order. Corrupt global settings; every run/credential/resource/session/Change phase/relation/pair/ID/revision/enum authority class; and every queued priority/time/title/body/lifecycle-payload/control class above and below valid work. Direct settings validation and the one concrete SQL integrity predicate must block all admission before capacity | caller AgentID/task/cursor; per-agent/cache selection; integrity/eligibility/capacity outside `BEGIN IMMEDIATE`; count before integrity; omit admitted from capacity; application validation scan; filter malformed authority or higher/lower queued work; invalid ranking/payload accepted; text-ID tie; wrong reason precedence; skip corrupt canonical work; external-availability filter; optional/reused candidate; process-local fairness; launch from observed Run |
+| Atomic canonical admission | Call `AdmitNext` without AgentID/task/cursor while racing multi-agent priority and stale insertion; exercise exact integrity/dispatch/all-nonterminal-capacity/queue/eligibility/canonical-Change precedence, 16-byte BLOB ties, corrupt canonical work ahead of valid work, post-admission source/provider failure, and two admits at the last factory slot; prove an admitted setup-stalled run occupies that slot, fresh IDs, RunID-only reconciliation, exact zero/full footprints and unchanged restart order. Corrupt global settings; every run/credential/resource/session/Change phase/relation/pair/ID/revision/enum authority class; and, both above and below valid work, every queued ID/revision/storage-class/rank/title/body/lifecycle-payload field plus task `updated_at_ms`, project/agent/task timestamp ordering, role/provider/mode/model/effort/verification domains, provider-mode compatibility, exact Boolean switches and budget bounds. Direct settings validation and the one concrete SQL integrity predicate must block all admission before capacity | caller AgentID/task/cursor; per-agent/cache selection; integrity/eligibility/capacity outside `BEGIN IMMEDIATE`; count before integrity; omit admitted from capacity; application validation scan; filter malformed authority or higher/lower queued work; invalid ranking/payload/control accepted; tolerate unknown status or absent status columns invented for profiles/projects/agents; text-ID tie; wrong reason precedence; skip corrupt canonical work; external-availability filter; optional/reused candidate; process-local fairness; launch from observed Run |
 | Canonical Change admission/revision | In that same write transaction, insert work ahead of a stale caller, select the Change by canonical task incarnation, ignore the always-fresh candidate when a row exists, and require its unique settling predecessor to have `admitted_task_work_revision == task.work_revision-1`; prove fresh/retained/abandoned runs bind their actual ID and exact admitted-relative deltas, then reconcile a lost reply after later Change progress | optional/reused candidate; compare candidate on reuse; timestamp/latest-run predecessor; caller phase/revision/path; `>` revision check; require current revision during reconciliation |
 | Commit ambiguity | Cut/interrupt begin, commit response, and rollback; discard handle, reopen, reconcile by domain ID/revision, return outcome-unknown where not provable, and perform no second transition | retry blindly; reuse ambiguous connection; generic receipt fallback |
 | Fresh schema allowlist | Query schema objects and columns after init and assert the exact allowlist excludes operations, mutation receipts, decisions, quarantine, intake, compatibility, migration residue and unused durable Change repository identity | add speculative authority table; retain Rust compatibility object; add `repository_dev`/`repository_inode` |
@@ -4221,7 +4277,7 @@ contracts.
   dispatch/all-nonterminal-capacity checks (including an admitted setup-stalled
   last-slot run), global eligible task/agent selection, BLOB tie comparison,
   every reason-precedence boundary,
-  canonical Change corruption/cap decision and every full-footprint/invalidation
+  canonical Change corruption decision and every full-footprint/invalidation
   write in `AdmitNext`; restart must reconcile only the fresh RunID and preserve
   the exact global order without a scheduler cursor or lower-work fallback;
 - after runtime/resource declaration and after exact path binding;
@@ -4653,8 +4709,8 @@ a digest alone cannot close dirty-page or rename/parent-fsync cuts.
 Cross-filesystem rename and crash ambiguity must fail visibly.
 
 The all-nonterminal run capacity bounds the count of ambiguous `reserved`
-residues because each belongs to one such run; no separate retained-Change cap
-exists. The intended pre-`prepared` residue is empty,
+residues because each belongs to one such run. The intended pre-`prepared`
+residue is empty,
 and every accepted tree is entry/byte/depth bounded. A same-UID-replaced present
 reserved stage is deliberately neither traversed nor deleted, however, so those
 scanner limits do not bound its bytes. A concrete storage bound for that

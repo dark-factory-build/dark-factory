@@ -61,7 +61,7 @@ After RunID reconciliation, the transaction first validates global settings
 and runs one concrete SQL integrity predicate over every row/relation/control
 that can occupy capacity or bind active run/credential/resource/session/Change
 authority and every structurally queued assignment/rank/payload and required
-agent/profile/project control. Unknown phases; missing relations; split pairs;
+task/agent/project field. Unknown phases; missing relations; split pairs;
 invalid IDs, revisions, enums, models or efforts; and malformed queued priority,
 created time, title, body or lifecycle payload are `ErrCorruptState` wherever
 they rank. Queued rank/payload is exactly integer priority `[-1000000,1000000]`,
@@ -69,7 +69,16 @@ nonnegative signed-64-bit integer creation time, nonzero 16-byte IDs, positive
 revisions, TEXT title 1–1024 bytes, TEXT body 0–131072 bytes and no queued
 blocked/proposal/terminal/completion/result payload. Fresh schema constraints
 prevent ordinary invalid writes; this single query proves damaged state before
-capacity and is neither an application row scan nor eligibility. Exact fresh
+capacity and is neither an application row scan nor eligibility. The exact
+field/domain table is defined once in the rewrite record's Global transactional
+admission contract and used literally here: task `updated_at_ms` and every
+relevant timestamp are bounded and monotonic; dispatch/pause are exact Boolean
+integers; budgets are bounded and internally ordered; every role, provider,
+execution mode, model, reasoning effort, task status and verification policy is
+in its stated domain; and provider/mode combinations are compatible. The fresh
+schema has no profile row or profile status, agent status or project status;
+agent `paused` is the availability switch. This is not a second validation
+layer. Exact fresh
 decision precedence after those checks is `dispatch_disabled`, `at_capacity`,
 `queue_empty`, then `no_eligible_work`. Only after every run phase is known may
 capacity count exactly the one nonterminal set: admitted, running and finalizing.
@@ -81,16 +90,17 @@ Eligibility means task status exactly queued, valid same-project assigned
 agent, either known role (`worker` or `orchestrator`), not paused, durable
 budget remaining and no conflicting open run. Role determines the footprint,
 not external availability; known nonqueued status is outside the queue.
-Provider/mode/profile/project/verification controls must
-be structurally valid under the integrity predicate, but external availability
+Provider/mode/model/effort/project-verification controls must be in those exact
+field domains, but external availability
 is not eligibility. Known-valid paused, budget-exhausted or open-run-conflicting
 queued rows are ineligible; corrupt facts are never ineligibility. The
 Store selects globally by priority
 descending, creation time ascending and exact 16-byte task-ID SQLite `BLOB`
 bytes ascending. It then validates that row's canonical Change: corrupt,
 unsettled or hard-invalid state fails closed without skipping to lower work.
-There is no separate Change-cap reason. A successful transaction writes the
-full task/run/bearer/resource/session/Change/invalidation footprint and returns only the
+Canonical Change corruption is the only Change-specific pre-admission
+decision. A successful transaction writes the full task/run/bearer/resource/
+session/Change/invalidation footprint and returns only the
 committed launch target. Reconcile-only failure is `not_reconciled`.
 
 Repository availability and provider executable/configuration/auth availability

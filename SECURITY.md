@@ -28,11 +28,16 @@ Planned Go admission is one global cursor-free immediate Store transaction with
 no caller AgentID/task/observation. It validates global settings and uses one
 concrete SQL integrity predicate over every row/relation/control that can occupy
 capacity or bind active authority and every structurally queued rank, payload,
-assignment and agent/profile/project control. Unknown phases, missing
+assignment and exact task/agent/project fields. Unknown phases, missing
 relations, split pairs, invalid IDs/revisions/enums and malformed queued
 ranking/payload facts block all admission. Only after that proof may its one
-capacity set count admitted, running and finalizing runs. It then validates
-durable eligibility and reason precedence, orders by priority descending,
+capacity set count admitted, running and finalizing runs. The rewrite record's
+single exact field/domain table covers Boolean storage classes, budget
+arithmetic, model/effort and provider/mode compatibility, task
+`updated_at_ms` and monotonic timestamps. The fresh schema has no profile,
+agent or project status field; agent `paused` is the availability control.
+This is the same SQL predicate, not a second security validator. It then
+validates durable eligibility and reason precedence, orders by priority descending,
 creation time ascending and exact 16-byte task-ID `BLOB` bytes ascending, then validates the
 selected canonical Change without skipping corrupt higher work. Known-valid
 paused, budget-exhausted or open-run-conflicting queued work is ineligible;
@@ -40,10 +45,9 @@ both known roles remain eligible and determine the footprint; known nonqueued
 statuses are outside the queue. Unknown/malformed durable control is
 corruption. Exact fresh no-admission
 precedence is
-`dispatch_disabled`, `at_capacity`, `queue_empty`, `no_eligible_work`; there is
-no separate Change-cap reason. External repository and provider executable/
-configuration/auth availability becomes typed post-admission failure rather
-than a stale scheduler filter.
+`dispatch_disabled`, `at_capacity`, `queue_empty`, `no_eligible_work`.
+External repository and provider executable/configuration/auth availability
+becomes typed post-admission failure rather than a stale scheduler filter.
 
 Configured capacity is an integer `C` in `[1, 1024]`; because each reserved
 residue belongs to one nonterminal worker run, its count is at most `C`.
