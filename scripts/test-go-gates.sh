@@ -263,7 +263,7 @@ EOF
 web_install_log="$temporary/web-install.log"
 web_install_root="$temporary/web-install-root"
 web_install_gate_root="$temporary/web-install-gate"
-/bin/mkdir -p "$web_install_root" "$web_install_gate_root"
+/bin/mkdir -p "$web_install_root/web" "$web_install_gate_root"
 export PATH="$go_gate_node_bin_dir:/usr/bin:/bin"
 if ! /bin/sh "$web_install_fixture" "$repository_root/scripts/go-fast-stage.sh" "$repository_root/scripts/go-gate-environment.sh" "$web_install_log" "$web_install_root" "$web_install_gate_root"; then
     fail "web install umask fixture failed"
