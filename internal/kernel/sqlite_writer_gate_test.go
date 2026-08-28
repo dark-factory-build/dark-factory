@@ -273,3 +273,228 @@ func TestRejectedOperationalOpenReturnsRetainedStoreOnCloseUncertainty(t *testin
 		t.Fatalf("retained rejected Store.Close = %v", closeErr)
 	}
 }
+
+func TestPartialReaderActivationRetainsWriterAndExactAuthorityOnCloseUncertainty(t *testing.T) {
+	path, _ := walSnapshotFixture(t, "")
+	home, database := openOperationalDescriptors(t, path)
+	activationFailure := errors.New("injected reader activation failure")
+	closeBusy := errors.New("injected partial writer close BUSY")
+	var replacements map[string][]byte
+	sqliteConnectHook = func(kind string, opened int) error {
+		if kind == "reader verified" && opened == 1 {
+			replacements = replaceSQLiteHomeForActivationTest(t, path, "partial-reader")
+			return activationFailure
+		}
+		return nil
+	}
+	sqlitePoolCloseHook = func(kind string) error {
+		if kind == "writer" {
+			return closeBusy
+		}
+		return nil
+	}
+	var store *Store
+	t.Cleanup(func() {
+		sqliteConnectHook = nil
+		sqlitePoolCloseHook = nil
+		releaseRetainedStoreForTest(store)
+	})
+
+	store, err := OpenOperational(context.Background(), path, home, database)
+	if store == nil || !errors.Is(err, activationFailure) || !errors.Is(err, closeBusy) || !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("partial reader activation = %v, %v; want retained uncertain Store", store, err)
+	}
+	if store.writer == nil || store.readers != nil || store.pathBinding == nil || store.pathBinding.main.file == nil {
+		t.Fatal("partial reader activation discarded its writer or retained file authority")
+	}
+	assertRetainedDatabaseFilesLive(t, store.pathBinding)
+	first := store.Close()
+	if !errors.Is(first, closeBusy) {
+		t.Fatalf("partial Store.Close = %v, want injected BUSY", first)
+	}
+	if second := store.Close(); second != first {
+		t.Fatalf("repeated partial Store.Close = %v, want stable %v", second, first)
+	}
+	assertReplacementSQLiteHomeUnchanged(t, path, replacements)
+}
+
+func TestPhysicalPoolActivationFailureRetainsOwnerWhenPoolCloseIsUncertain(t *testing.T) {
+	path, _ := walSnapshotFixture(t, "")
+	home, database := openOperationalDescriptors(t, path)
+	activationFailure := errors.New("injected physical writer activation failure")
+	closeBusy := errors.New("injected physical writer pool close BUSY")
+	var replacements map[string][]byte
+	sqliteConnectHook = func(kind string, opened int) error {
+		if kind == "writer" && opened == 1 {
+			replacements = replaceSQLiteHomeForActivationTest(t, path, "physical-writer")
+			return activationFailure
+		}
+		return nil
+	}
+	sqlitePoolCloseHook = func(kind string) error {
+		if kind == "writer" {
+			return closeBusy
+		}
+		return nil
+	}
+	var store *Store
+	t.Cleanup(func() {
+		sqliteConnectHook = nil
+		sqlitePoolCloseHook = nil
+		releaseRetainedStoreForTest(store)
+	})
+
+	store, err := OpenOperational(context.Background(), path, home, database)
+	if store == nil || !errors.Is(err, activationFailure) || !errors.Is(err, closeBusy) || !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("physical writer activation = %v, %v; want retained uncertain Store", store, err)
+	}
+	if store.writer == nil || store.pathBinding == nil || store.pathBinding.authority == nil {
+		t.Fatal("physical pool close uncertainty discarded its concrete pool/files owner")
+	}
+	assertRetainedDatabaseFilesLive(t, store.pathBinding)
+	first := store.Close()
+	if !errors.Is(first, closeBusy) {
+		t.Fatalf("retained physical pool Close = %v, want injected BUSY", first)
+	}
+	if second := store.Close(); second != first {
+		t.Fatalf("repeated physical pool Close = %v, want stable %v", second, first)
+	}
+	assertReplacementSQLiteHomeUnchanged(t, path, replacements)
+}
+
+func TestPostPoolRejectionRetainsFilesWhenPoolCloseIsUncertain(t *testing.T) {
+	path, _ := walSnapshotFixture(t, "")
+	home, database := openOperationalDescriptors(t, path)
+	rejected := errors.New("injected post-pool rejection")
+	closeBusy := errors.New("injected post-pool reader close BUSY")
+	var replacements map[string][]byte
+	sqlitePostPoolHook = func(point string) error {
+		if point != "before sidecar refresh" {
+			t.Fatalf("post-pool hook point = %q", point)
+		}
+		replacements = replaceSQLiteHomeForActivationTest(t, path, "post-pool")
+		return rejected
+	}
+	sqlitePoolCloseHook = func(kind string) error {
+		if kind == "reader" {
+			return closeBusy
+		}
+		return nil
+	}
+	var store *Store
+	t.Cleanup(func() {
+		sqlitePostPoolHook = nil
+		sqlitePoolCloseHook = nil
+		releaseRetainedStoreForTest(store)
+	})
+
+	store, err := OpenOperational(context.Background(), path, home, database)
+	if store == nil || !errors.Is(err, rejected) || !errors.Is(err, closeBusy) || !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("post-pool rejection = %v, %v; want retained uncertain Store", store, err)
+	}
+	if store.pathBinding == nil || store.pathBinding.main.file == nil || store.pathBinding.wal == nil || store.pathBinding.shm == nil {
+		t.Fatal("post-pool rejection released the exact main/WAL/SHM authority")
+	}
+	assertRetainedDatabaseFilesLive(t, store.pathBinding)
+	first := store.Close()
+	if !errors.Is(first, closeBusy) {
+		t.Fatalf("post-pool retained Store.Close = %v, want injected BUSY", first)
+	}
+	if second := store.Close(); second != first {
+		t.Fatalf("repeated post-pool Store.Close = %v, want stable %v", second, first)
+	}
+	assertReplacementSQLiteHomeUnchanged(t, path, replacements)
+}
+
+func openOperationalDescriptors(t *testing.T, path string) (*os.File, *os.File) {
+	t.Helper()
+	home, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := os.Open(path)
+	if err != nil {
+		_ = home.Close()
+		t.Fatal(err)
+	}
+	return home, database
+}
+
+func replaceSQLiteHomeForActivationTest(t *testing.T, path, label string) map[string][]byte {
+	t.Helper()
+	home := filepath.Dir(path)
+	if err := os.Rename(home, home+"."+label+".original"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	replacements := map[string][]byte{
+		"":     []byte("replacement-main-" + label),
+		"-wal": []byte("replacement-wal-" + label),
+		"-shm": bytes.Repeat([]byte{byte(len(label) + 1)}, walIndexRegionSize),
+	}
+	for suffix, contents := range replacements {
+		if err := os.WriteFile(path+suffix, contents, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return replacements
+}
+
+func assertReplacementSQLiteHomeUnchanged(t *testing.T, path string, replacements map[string][]byte) {
+	t.Helper()
+	if len(replacements) != 3 {
+		t.Fatalf("replacement set has %d members, want main/WAL/SHM", len(replacements))
+	}
+	for suffix, want := range replacements {
+		got, err := os.ReadFile(path + suffix)
+		if err != nil || !bytes.Equal(got, want) {
+			t.Fatalf("replacement %q changed during refused activation: %x, %v", suffix, got, err)
+		}
+	}
+}
+
+func assertRetainedDatabaseFilesLive(t *testing.T, files *databaseFiles) {
+	t.Helper()
+	if files == nil || files.authority == nil || files.directory == nil || files.main == nil || files.wal == nil || files.shm == nil {
+		t.Fatal("retained database file set is incomplete")
+	}
+	for label, file := range map[string]*os.File{
+		"directory": files.directory,
+		"main":      files.main.file,
+		"WAL":       files.wal.file,
+		"SHM":       files.shm.file,
+	} {
+		if file == nil {
+			t.Fatalf("retained %s descriptor is nil", label)
+		}
+		if _, err := file.Stat(); err != nil {
+			t.Fatalf("retained %s descriptor is not live: %v", label, err)
+		}
+	}
+	for index := range files.authority.components {
+		if _, err := files.authority.components[index].file.Stat(); err != nil {
+			t.Fatalf("retained path component %d is not live: %v", index, err)
+		}
+	}
+}
+
+func releaseRetainedStoreForTest(store *Store) {
+	if store == nil {
+		return
+	}
+	for _, connection := range store.connections {
+		_ = connection.Close()
+	}
+	if store.readers != nil {
+		_ = store.readers.Close()
+	}
+	if store.writer != nil {
+		_ = store.writer.Close()
+	}
+	if store.pathBinding != nil {
+		_ = store.pathBinding.Close()
+		store.pathBinding = nil
+	}
+}

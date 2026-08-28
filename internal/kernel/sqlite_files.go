@@ -29,6 +29,11 @@ const (
 // Production activation has no hook.
 var sqliteActivationHook func(string) error
 
+// sqlitePostPoolHook is package-local deterministic fault instrumentation at
+// the boundary after physical pools exist but before sidecars are refreshed.
+// Production activation has no hook.
+var sqlitePostPoolHook func(string) error
+
 // Open validates and activates one canonical absolute database path for fresh
 // construction, tests, and other callers that do not retain a home lease.
 func Open(ctx context.Context, absolutePath string) (*Store, error) {
@@ -80,7 +85,9 @@ func openExistingFiles(ctx context.Context, absolutePath string, files *database
 	}
 	var store *Store
 	if retainBinding {
-		store, err = openFixedPools(ctx, absolutePath, files.recheckActivationBindings)
+		store = newStore()
+		store.pathBinding = files
+		err = openFixedPools(ctx, store, absolutePath, files.recheckActivationBindings)
 	} else {
 		store, err = openPools(absolutePath)
 	}
@@ -88,7 +95,18 @@ func openExistingFiles(ctx context.Context, absolutePath string, files *database
 		// SQLite activation may have created or changed sidecars. Without an
 		// exact live creation descriptor they remain visible evidence; cleanup
 		// must never guess ownership from a pathname.
+		if retainBinding {
+			if store.pathBinding != nil {
+				return store, err
+			}
+			return nil, err
+		}
 		return nil, closeFailedActivation(files, err)
+	}
+	if sqlitePostPoolHook != nil {
+		if err := sqlitePostPoolHook("before sidecar refresh"); err != nil {
+			return closeRejectedOpen(store, files, err)
+		}
 	}
 	if !hadWAL {
 		if files.wal == nil {
@@ -101,9 +119,6 @@ func openExistingFiles(ctx context.Context, absolutePath string, files *database
 	}
 	if err := files.refreshPinnedInfo(); err != nil {
 		return closeRejectedOpen(store, files, err)
-	}
-	if retainBinding {
-		store.pathBinding = files
 	}
 	if err := store.validateOpen(ctx); err != nil {
 		return closeRejectedOpen(store, files, err)

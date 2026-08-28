@@ -208,6 +208,7 @@ func (state *operationalHomeState) openStore(ctx context.Context) (*kernel.Store
 	if err != nil {
 		if store != nil {
 			state.store = store
+			err = errors.Join(err, ErrUncertain)
 		}
 		if bindingErr := recheckOperationalIdentityByState(state); bindingErr != nil {
 			return nil, errors.Join(err, ErrUncertain, bindingErr)
@@ -233,8 +234,9 @@ func (state *operationalHomeState) rejectActivatedStore(store *kernel.Store, cau
 	closeErr := store.Close()
 	if closeErr != nil {
 		state.store = store
+		return errors.Join(ErrUncertain, cause, closeErr)
 	}
-	return errors.Join(cause, closeErr)
+	return cause
 }
 
 func duplicateOperationalFile(source *os.File, label string) (*os.File, error) {

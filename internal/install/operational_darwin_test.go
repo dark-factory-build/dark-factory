@@ -417,6 +417,75 @@ func TestOperationalHomeCloseUncertaintyRetainsLeaseAndStableError(t *testing.T)
 	}
 }
 
+func TestOperationalHomeMarksReturnedHiddenStoreUncertainAndRetainsLease(t *testing.T) {
+	parent := installTempDir(t)
+	homePath := filepath.Join(parent, "home")
+	if _, err := Init(context.Background(), homePath); err != nil {
+		t.Fatal(err)
+	}
+	databasePath := filepath.Join(homePath, databaseName)
+	raw, err := sql.Open("sqlite3", "file:"+databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if _, err := raw.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec("UPDATE factory SET updated_at_ms = updated_at_ms"); err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if err := os.Chmod(databasePath+suffix, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	home, err := OpenOperationalHome(context.Background(), homePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalOpen := openOperationalStore
+	injected := errors.New("injected activation error with retained Store")
+	openOperationalStore = func(ctx context.Context, path string, boundHome, boundDatabase *os.File) (*kernel.Store, error) {
+		store, openErr := originalOpen(ctx, path, boundHome, boundDatabase)
+		if openErr != nil {
+			return store, openErr
+		}
+		return store, injected
+	}
+	t.Cleanup(func() {
+		openOperationalStore = originalOpen
+		_ = home.Close()
+	})
+
+	store, openErr := home.OpenStore(context.Background())
+	if store != nil || !errors.Is(openErr, injected) || !errors.Is(openErr, ErrUncertain) {
+		t.Fatalf("OpenStore hidden retained child = %v, %v; want uncertain refusal", store, openErr)
+	}
+	if home.state.store == nil || home.state.home == nil || home.state.lock == nil {
+		t.Fatal("OpenStore discarded its hidden Store or home lease")
+	}
+	if candidate, err := home.OpenStore(context.Background()); candidate != nil || !errors.Is(err, ErrBusy) {
+		t.Fatalf("second Store activation with hidden child = %v, %v; want busy", candidate, err)
+	}
+	if candidate, err := OpenOperationalHome(context.Background(), homePath); candidate != nil || !errors.Is(err, ErrBusy) {
+		if candidate != nil {
+			_ = candidate.Close()
+		}
+		t.Fatalf("second home opener with hidden child = %v, %v; want busy", candidate, err)
+	}
+	if closeErr := home.Close(); closeErr != nil {
+		t.Fatalf("close after hidden activation = %v", closeErr)
+	}
+	reopened, err := OpenOperationalHome(context.Background(), homePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestOperationalHomeCancellationJoinsBlockedActivation(t *testing.T) {
 	parent := installTempDir(t)
 	homePath := filepath.Join(parent, "home")
