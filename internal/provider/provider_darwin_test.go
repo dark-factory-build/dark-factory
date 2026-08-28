@@ -166,6 +166,11 @@ func TestNewRuntimePathsRejectsMissingAndMalformedSealedValues(t *testing.T) {
 	if _, err := NewRuntimePaths(invalid[0], invalid[1], invalid[2], invalid[3], invalid[4], invalid[5], invalid[6], invalid[7]); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("oversized socket error=%v, want ErrInvalid", err)
 	}
+	invalid = append([]string(nil), valid...)
+	invalid[5] = valid[5] + ":/private/other-ceiling"
+	if _, err := NewRuntimePaths(invalid[0], invalid[1], invalid[2], invalid[3], invalid[4], invalid[5], invalid[6], invalid[7]); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("multi-ceiling git path error=%v, want ErrInvalid", err)
+	}
 }
 
 func TestInitialInputCopiesTaskAndAppendsExactlyOneLineFeed(t *testing.T) {
@@ -205,6 +210,31 @@ func TestInitialInputRejectsInvalidTaskBytes(t *testing.T) {
 	}
 	if _, err := InitialInput(kernel.Provider(255), []byte("task")); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("unknown provider error=%v, want ErrInvalid", err)
+	}
+}
+
+func TestInitialInputRejectsEmptyShellTask(t *testing.T) {
+	for _, task := range [][]byte{nil, {}} {
+		if _, err := InitialInput(kernel.ProviderShell, task); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("empty shell task error=%v, want ErrInvalid", err)
+		}
+	}
+}
+
+func TestInitialInputAcceptsMaximumTaskBodyWithOneNormalizationLineFeed(t *testing.T) {
+	task := bytes.Repeat([]byte{'x'}, maxInitialInputBytes)
+	input, err := InitialInput(kernel.ProviderShell, task)
+	if err != nil {
+		t.Fatalf("maximum task body rejected: %v", err)
+	}
+	if len(input) != runner.MaxProviderInputBytes || input[len(input)-1] != '\n' || !bytes.Equal(input[:len(task)], task) {
+		t.Fatalf("normalized maximum input length or bytes changed: len=%d last=%q", len(input), input[len(input)-1])
+	}
+	if err := runner.ValidateProviderInput(input); err != nil {
+		t.Fatalf("normalized maximum input fails runner boundary: %v", err)
+	}
+	if _, err := InitialInput(kernel.ProviderShell, bytes.Repeat([]byte{'x'}, maxInitialInputBytes+1)); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("one-byte-over task body error=%v, want ErrInvalid", err)
 	}
 }
 

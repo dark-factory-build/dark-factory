@@ -107,7 +107,7 @@ func (o *terminalOwner) awaitInitialInput() error {
 		if err != nil {
 			return err
 		}
-		if frame.Version != 1 || frame.Kind != "provider-input" || !noLegacyFields(frame) || !noTerminalFields(frame) || len(frame.Payload) > maxInputBytes {
+		if frame.Version != 1 || frame.Kind != "provider-input" || !noLegacyFields(frame) || !noTerminalFields(frame) || ValidateProviderInput(frame.Payload) != nil {
 			return ErrState
 		}
 		o.initialInput = append([]byte(nil), frame.Payload...)

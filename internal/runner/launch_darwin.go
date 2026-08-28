@@ -21,13 +21,11 @@ func PrepareExecSpec(spec ExecSpec) (*LaunchSpec, error) {
 	if len(spec.Stdin) > maxInputBytes {
 		return nil, fmt.Errorf("runner: stdin too large")
 	}
-	if len(spec.Args) > 128 || len(spec.Env) > 128 {
-		return nil, fmt.Errorf("runner: argv/env too large")
+	if err := validateArgv(append([]string{spec.Target}, spec.Args...), ""); err != nil {
+		return nil, err
 	}
-	for _, s := range spec.Args {
-		if len(s) > 8192 || strings.IndexByte(s, 0) >= 0 {
-			return nil, fmt.Errorf("runner: invalid argv/env")
-		}
+	if len(spec.Env) > 128 {
+		return nil, fmt.Errorf("runner: argv/env too large")
 	}
 	if err := validateEnvironment(spec.Env); err != nil {
 		return nil, err
@@ -49,6 +47,9 @@ func PrepareExecSpec(spec ExecSpec) (*LaunchSpec, error) {
 		controlID = &committed
 	}
 	argv := append([]string{target.Path}, spec.Args...)
+	if err := validateArgv(argv, target.Path); err != nil {
+		return nil, err
+	}
 	return &LaunchSpec{commit: launchCommitment{Executable: target, Cwd: cwd, Argv: argv, Env: append([]string{}, spec.Env...)}, stdin: append([]byte{}, spec.Stdin...), stdout: spec.Stdout, stderr: spec.Stderr, control: spec.Control, controlID: controlID}, nil
 }
 
@@ -57,13 +58,8 @@ func PrepareExecSpec(spec ExecSpec) (*LaunchSpec, error) {
 // already selected and committed by provider construction; the exact argv[0]
 // binding prevents a caller from describing a different process identity.
 func PrepareCommittedExecSpec(executable ExecutableCommitment, argv, environment []string, cwd string) (*LaunchSpec, error) {
-	if len(argv) == 0 || len(argv) > 129 || argv[0] != executable.Path() {
-		return nil, fmt.Errorf("runner: argv does not name committed executable: %w", ErrIdentity)
-	}
-	for _, value := range argv {
-		if len(value) > 8192 || strings.IndexByte(value, 0) >= 0 {
-			return nil, fmt.Errorf("runner: invalid argv/env")
-		}
+	if err := validateArgv(argv, executable.Path()); err != nil {
+		return nil, err
 	}
 	if len(environment) > 128 {
 		return nil, fmt.Errorf("runner: argv/env too large")
@@ -84,6 +80,21 @@ func PrepareCommittedExecSpec(executable ExecutableCommitment, argv, environment
 		Argv:       append([]string(nil), argv...),
 		Env:        append([]string(nil), environment...),
 	}}, nil
+}
+
+func validateArgv(argv []string, executable string) error {
+	if len(argv) == 0 || len(argv) > 129 {
+		return fmt.Errorf("runner: argv does not name committed executable: %w", ErrIdentity)
+	}
+	if executable != "" && argv[0] != executable {
+		return fmt.Errorf("runner: argv does not name committed executable: %w", ErrIdentity)
+	}
+	for _, value := range argv {
+		if value == "" || len(value) > 8192 || strings.IndexByte(value, 0) >= 0 || !utf8.ValidString(value) {
+			return fmt.Errorf("runner: invalid argv")
+		}
+	}
+	return nil
 }
 
 func commitControl(f *os.File) (descriptorCommitment, error) {

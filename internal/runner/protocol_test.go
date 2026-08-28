@@ -2,12 +2,53 @@ package runner
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"reflect"
 	"syscall"
 	"testing"
 )
+
+func TestProviderInputBoundaryFitsFrameAndPreservesBytes(t *testing.T) {
+	want := bytes.Repeat([]byte{'x'}, MaxProviderInputBytes)
+	if err := ValidateProviderInput(want); err != nil {
+		t.Fatalf("maximum normalized input rejected: %v", err)
+	}
+	body, err := json.Marshal(attemptFrame{Version: 1, Kind: "provider-input", Payload: want})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) > maxFrameBytes {
+		t.Fatalf("maximum provider input body is %d bytes, exceeds %d-byte frame", len(body), maxFrameBytes)
+	}
+	var wire bytes.Buffer
+	if err := writeFrame(&wire, attemptFrame{Version: 1, Kind: "provider-input", Payload: want}, maxFrameBytes); err != nil {
+		t.Fatalf("maximum normalized input did not encode: %v", err)
+	}
+	var got attemptFrame
+	if err := readFrame(&wire, &got, maxFrameBytes); err != nil {
+		t.Fatal(err)
+	}
+	if got.Version != 1 || got.Kind != "provider-input" || !bytes.Equal(got.Payload, want) {
+		t.Fatalf("provider input changed across frame: version=%d kind=%q payload length=%d", got.Version, got.Kind, len(got.Payload))
+	}
+	if err := ValidateProviderInput(append(want, 'x')); !errors.Is(err, ErrState) {
+		t.Fatalf("one-byte-over normalized input error=%v, want ErrState", err)
+	}
+	if err := ValidateProviderInput(nil); err != nil {
+		t.Fatalf("empty normalized input rejected: %v", err)
+	}
+	unicode := []byte("工場\n")
+	if err := ValidateProviderInput(unicode); err != nil {
+		t.Fatalf("valid Unicode input rejected: %v", err)
+	}
+	for _, invalid := range [][]byte{{0xff}, {'x', 0}} {
+		if err := ValidateProviderInput(invalid); !errors.Is(err, ErrState) {
+			t.Fatalf("invalid provider input %q error=%v, want ErrState", invalid, err)
+		}
+	}
+}
 
 type shortWriter struct {
 	buf bytes.Buffer

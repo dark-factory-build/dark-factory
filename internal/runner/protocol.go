@@ -1,13 +1,30 @@
 package runner
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
+	"unicode/utf8"
 )
 
 const maxAttemptReportBytes = 32 << 10
+
+// ValidateProviderInput is the one boundary for the normalized startup input
+// transferred through the provider-input frame. It validates the bytes before
+// the frame is written and again when the frame is received, so the provider
+// and runner cannot silently drift on size or byte validity.
+func ValidateProviderInput(input []byte) error {
+	if len(input) > MaxProviderInputBytes || !utf8.Valid(input) || bytes.IndexByte(input, 0) >= 0 {
+		return ErrState
+	}
+	body, err := json.Marshal(attemptFrame{Version: 1, Kind: "provider-input", Payload: input})
+	if err != nil || len(body) == 0 || len(body) > maxFrameBytes {
+		return ErrState
+	}
+	return nil
+}
 
 type gateConfig struct {
 	Version        int                   `json:"version"`

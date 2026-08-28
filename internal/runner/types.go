@@ -11,6 +11,14 @@ const (
 	maxInputBytes  = 1 << 20
 	maxTargetBytes = 512 << 20
 	maxFrameBytes  = 16 << 10
+
+	// MaxProviderTaskBytes is the largest task body accepted before the
+	// provider's one-line-feed normalization. MaxProviderInputBytes includes
+	// that possible trailing line feed and is deliberately kept at 8 KiB plus
+	// one byte: JSON base64 framing of this payload remains below maxFrameBytes,
+	// including the fixed provider-input envelope.
+	MaxProviderTaskBytes  = 8 << 10
+	MaxProviderInputBytes = MaxProviderTaskBytes + 1
 )
 
 // These are the complete fixed top-level runtime names emitted by the runner.

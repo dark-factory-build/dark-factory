@@ -472,7 +472,7 @@ func (w *WorkerControl) AwaitProvider() error {
 // point: the worker never falls back to anonymous stdin or retries this
 // transfer.
 func (w *WorkerControl) RegisterProviderInput(input []byte) error {
-	if w == nil || w.file == nil || w.state != workerProvider || w.providerInputRegistered || len(input) > maxInputBytes {
+	if w == nil || w.file == nil || w.state != workerProvider || w.providerInputRegistered || ValidateProviderInput(input) != nil {
 		return ErrState
 	}
 	if err := writeControlFrame(w.file, attemptFrame{Version: 1, Kind: "provider-input", Payload: append([]byte(nil), input...)}, maxFrameBytes); err != nil {
@@ -713,16 +713,14 @@ func validateAttemptConfig(cfg attemptConfig) error {
 	if cfg.Version != 1 || validateAttemptName(cfg.AttemptID, 256) != nil || cfg.MarkerName != InnerActivationMarkerName || cfg.TerminalName != TerminalSpoolName {
 		return ErrIdentity
 	}
-	if cfg.Wrapper.Executable.Path == "" || cfg.Wrapper.Cwd.Path == "" || len(cfg.Wrapper.Argv) == 0 || cfg.Wrapper.Argv[0] != cfg.Wrapper.Executable.Path {
+	if cfg.Wrapper.Executable.Path == "" || cfg.Wrapper.Cwd.Path == "" {
 		return ErrIdentity
 	}
-	if len(cfg.Wrapper.Argv) > 129 || len(cfg.Wrapper.Env) > 128 {
+	if err := validateArgv(cfg.Wrapper.Argv, cfg.Wrapper.Executable.Path); err != nil {
 		return ErrIdentity
 	}
-	for _, value := range cfg.Wrapper.Argv {
-		if len(value) > 8192 || strings.IndexByte(value, 0) >= 0 {
-			return ErrIdentity
-		}
+	if len(cfg.Wrapper.Env) > 128 {
+		return ErrIdentity
 	}
 	if err := validateEnvironment(cfg.Wrapper.Env); err != nil {
 		return ErrIdentity

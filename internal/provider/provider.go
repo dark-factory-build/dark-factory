@@ -1,7 +1,6 @@
 package provider
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -15,7 +14,7 @@ import (
 const (
 	shellPath            = "/bin/sh"
 	shellVersion         = "darwin-system-sh-v1"
-	maxInitialInputBytes = 128 << 10
+	maxInitialInputBytes = runner.MaxProviderTaskBytes
 	maxPathBytes         = 4096
 	maxSocketBytes       = 103
 )
@@ -47,27 +46,23 @@ func (installation Installation) Version() string           { return installatio
 func (Installation) String() string   { return "provider installation (private)" }
 func (Installation) GoString() string { return "provider.Installation{private}" }
 
-// RuntimePaths is the complete sealed set of external strings permitted to
-// enter the provider environment. Construction is lexical: filesystem and
-// executable authority remains with the owners that committed these paths.
+// RuntimePaths is the complete set of external strings permitted to enter the
+// provider environment. Construction is lexical only; it is not a durable
+// authority seal. Integration must replace these strings with daemon-sealed
+// identities before this value can authorize a production launch.
 type RuntimePaths struct {
 	home, temp, socket, token, factoryctl, gitCeiling, toolPath, account string
 }
 
 func NewRuntimePaths(home, temp, socket, token, factoryctl, gitCeiling, toolPath, account string) (RuntimePaths, error) {
-	paths := []string{home, temp, socket, token, factoryctl, gitCeiling}
-	for _, path := range paths {
-		if !validAbsolute(path, maxPathBytes) {
-			return RuntimePaths{}, ErrInvalid
-		}
-	}
-	if len(socket) > maxSocketBytes || home == temp || !validToolPath(toolPath) || !validValue(account, 256) {
-		return RuntimePaths{}, ErrInvalid
-	}
-	return RuntimePaths{
+	runtime := RuntimePaths{
 		home: home, temp: temp, socket: socket, token: token,
 		factoryctl: factoryctl, gitCeiling: gitCeiling, toolPath: toolPath, account: account,
-	}, nil
+	}
+	if !runtime.valid() {
+		return RuntimePaths{}, ErrInvalid
+	}
+	return runtime, nil
 }
 
 func (RuntimePaths) String() string   { return "provider runtime paths (private)" }
@@ -147,12 +142,15 @@ func Build(request Request) (Launch, error) {
 func InitialInput(kind kernel.Provider, task []byte) ([]byte, error) {
 	switch kind {
 	case kernel.ProviderShell:
-		if len(task) == 0 || len(task) > maxInitialInputBytes || !utf8.Valid(task) || bytes.IndexByte(task, 0) >= 0 {
+		if len(task) == 0 || len(task) > maxInitialInputBytes {
 			return nil, ErrInvalid
 		}
 		input := append([]byte(nil), task...)
 		if input[len(input)-1] != '\n' {
 			input = append(input, '\n')
+		}
+		if err := runner.ValidateProviderInput(input); err != nil {
+			return nil, ErrInvalid
 		}
 		return input, nil
 	case kernel.ProviderClaudeCode, kernel.ProviderCodex:
@@ -170,15 +168,14 @@ func (err unavailableError) Error() string {
 func (unavailableError) Unwrap() error { return ErrUnavailable }
 
 func (runtime RuntimePaths) valid() bool {
-	if len(runtime.socket) > maxSocketBytes || runtime.home == runtime.temp || !validToolPath(runtime.toolPath) || !validValue(runtime.account, 256) {
-		return false
-	}
-	for _, path := range []string{runtime.home, runtime.temp, runtime.socket, runtime.token, runtime.factoryctl, runtime.gitCeiling} {
+	paths := []string{runtime.home, runtime.temp, runtime.socket, runtime.token, runtime.factoryctl}
+	for _, path := range paths {
 		if !validAbsolute(path, maxPathBytes) {
 			return false
 		}
 	}
-	return true
+	return len(runtime.socket) <= maxSocketBytes && runtime.home != runtime.temp &&
+		validGitCeiling(runtime.gitCeiling) && validToolPath(runtime.toolPath) && validValue(runtime.account, 256)
 }
 
 func (runtime RuntimePaths) environment() []string {
@@ -239,6 +236,10 @@ func validToolPath(value string) bool {
 		seen[component] = struct{}{}
 	}
 	return len(seen) > 0
+}
+
+func validGitCeiling(value string) bool {
+	return validAbsolute(value, maxPathBytes) && !strings.ContainsRune(value, rune(filepath.ListSeparator))
 }
 
 func validOptional(value string, limit int) bool {
