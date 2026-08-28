@@ -25,11 +25,9 @@ func TestFinalizingRequiresExactResourceFootprint(t *testing.T) {
 			_, err := store.CancelRun(context.Background(), run.ID, run.Revision, "cancel", mustTime(t, 40))
 			return err
 		}},
-		{name: "runner exit", invoke: func(store *Store, run Run, _ AdmissionKeys) error {
-			exit, _ := NewProcessExitCode(1, 0, mustTime(t, 39))
-			_, err := store.ObserveRunnerExit(context.Background(), run.ID, run.Revision, registeredProcessIdentity(t, store, run.ID, ResourceRunnerProcess), exit, mustTime(t, 40))
-			return err
-		}},
+		// Runner exit observation no longer enters finalizing: the runner
+		// converges only through its owned exit/absence release edges, which
+		// never move the provider footprint.
 		{name: "provider exit", invoke: func(store *Store, run Run, _ AdmissionKeys) error {
 			exit, _ := NewProcessExitCode(1, 0, mustTime(t, 39))
 			_, err := store.ObserveProviderExit(context.Background(), run.ID, run.Revision, registeredProcessIdentity(t, store, run.ID, ResourceProviderProcess), exit, mustTime(t, 40))

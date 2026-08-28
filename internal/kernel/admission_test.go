@@ -668,12 +668,16 @@ func admissionKeys(t *testing.T, seed byte, candidate *ChangeID) AdmissionKeys {
 	if err != nil {
 		t.Fatal(err)
 	}
+	proofDigest, err := ResultProofDigestFromBytes(bytes.Repeat([]byte{seed + 1}, DigestBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
 	changeID := changeID(t, seed+5)
 	if candidate != nil {
 		changeID = *candidate
 	}
 	return AdmissionKeys{
-		RunID: runID(t, seed), TerminalSessionID: terminalSessionID(t, seed+20), AttemptDigest: digest, CandidateChangeID: changeID, RuntimeRoot: "/runtime/" + string([]byte{'a' + seed%20}),
+		RunID: runID(t, seed), TerminalSessionID: terminalSessionID(t, seed+20), AttemptDigest: digest, ResultProofDigest: proofDigest, CandidateChangeID: changeID, RuntimeRoot: "/runtime/" + string([]byte{'a' + seed%20}),
 		Resources: AdmissionResourceIDs{RuntimeRoot: resourceID(t, seed+1), RunnerProcess: resourceID(t, seed+2), ProviderProcess: resourceID(t, seed+3), ProviderGroup: resourceID(t, seed+4)},
 	}
 }

@@ -600,7 +600,7 @@ at most 1,024 bytes. The value is the following closed union and has no other
 fields:
 
 ```text
-{ version: 1, attempt_id: DAEMON_CONFIGURED_ID, kind: inner_not_created }
+{ version: 1, attempt_id: DAEMON_CONFIGURED_ID, kind: inner_unregistered_converged }
 
 { version: 1, attempt_id: DAEMON_CONFIGURED_ID, kind: inner_converged,
   process: { pid, pgid, birth }, exit: { code | signal } }
@@ -608,7 +608,7 @@ fields:
 
 There are no caller IDs, booleans, messages, launch errors, flags, timestamps,
 payloads, history rows or second receipts. `inner_converged` has exactly one of
-code or signal; unknown/duplicate fields and trailing bytes fail. `inner_not_created` can be minted
+code or signal; unknown/duplicate fields and trailing bytes fail. `inner_unregistered_converged` can be minted
 only by the launch primitive while the exact controller is configured but
 before `AttemptInnerReady`: it first validates the gate and fresh result name,
 then the sole `cmd.Start` call returns a non-nil error. A caller cannot infer or
@@ -722,7 +722,7 @@ a declared provider pair.
 
 The already-prepared one-shot outer runner must perform its sole inner
 `cmd.Start` attempt even when cancellation or daemon control EOF races. An
-exact Start error publishes the existing `inner_not_created` AttemptResult. A
+exact Start error publishes the existing `inner_unregistered_converged` AttemptResult. A
 successful Start keeps the child inert behind `inner.activate`, acquires exact
 birth identity and drives the ready/activation binding. A pending outcome can
 then win against the active exact pair and cause its live owner to converge and
@@ -749,7 +749,7 @@ One concrete Store `ConsumeAttemptResult` transaction accepts only this matrix:
 
 | Run phase | Exact resource/session precondition and result | One atomic consequence |
 |---|---|---|
-| `admitted`, inner child never created | runtime root and runner both `active`; provider pair both `declared` with empty identity; terminal `declared`; exact `inner.activate` absence; `inner_not_created` | install `FailureSpawn` if no proposal exists; preserve any existing proposal; enter `finalizing`; revoke authority; move the exact runtime/runner two rows and terminal to `releasing`; deliberately release the empty provider pair directly with no `ProviderExit` |
+| `admitted`, inner child never created | runtime root and runner both `active`; provider pair both `declared` with empty identity; terminal `declared`; exact `inner.activate` absence; `inner_unregistered_converged` | install `FailureSpawn` if no proposal exists; preserve any existing proposal; enter `finalizing`; revoke authority; move the exact runtime/runner two rows and terminal to `releasing`; deliberately release the empty provider pair directly with no `ProviderExit` |
 | `admitted` after `AttemptInnerReady`, activation committed | runtime root and runner both `active`; provider pair both `active` with exact stored identities matching `inner_converged`; terminal `declared`; exact marker census is known, not uncertain | install `FailureActivation` if no proposal exists; preserve any existing proposal; enter `finalizing`; revoke authority; move the exact runtime/runner two rows and terminal to `releasing`; record exact `ProviderExit`; deliberately release the provider pair directly |
 | `admitted`, spawned child never durably activated | runtime root and runner both `active`; provider pair both `declared` with empty identities; terminal `declared`; exact `inner.activate` absence; a runtime/attempt-bound valid `inner_converged` supplies identities because the ready frame never arrived or activation DML never committed | install `FailureActivation` if no proposal exists; preserve any existing proposal; enter `finalizing`; revoke authority; atomically bind the result identities only while recording exact `ProviderExit` sequence 1 and directly releasing the provider pair's two rows; move runtime/runner two and terminal one to `releasing` |
 | `running` | runtime root and runner both `active`; provider pair both `active` with the exact result identity; terminal `active`; matching `inner_converged`; exact marker census is known, not uncertain | install `FailureProviderExit` if no proposal exists, never success; preserve any existing proposal; enter `finalizing`; revoke authority; move the exact runtime/runner two rows and terminal to `releasing`; record exact `ProviderExit`; deliberately release the provider pair directly |
@@ -764,14 +764,14 @@ and moves the other two resources/session to cleanup. The two outer-runner
 pre-start transactions above separately direct-release the empty pair only
 because their exact declared/Start-error facts prove no outer runner or
 provider child exists. After outer-runner activation, only authenticated
-`inner_not_created` or exact converged AttemptResult consumption may direct-
+`inner_unregistered_converged` or exact converged AttemptResult consumption may direct-
 release the provider pair; generic outcome paths are barred while it is
 declared/empty.
 Admitted/running result DML counts are runtime/runner two, provider pair two and
 terminal one; the finalizing row changes exactly the provider pair two. Any
 partial count rolls back.
 
-`inner_not_created` is valid only for an empty-identity pair and deterministically
+`inner_unregistered_converged` is valid only for an empty-identity pair and deterministically
 maps to `FailureSpawn` without `ProviderExit`. Every admitted
 `inner_converged`, whether activation committed or the bound result supplies
 the identities after missing readiness/activation durability, maps to
@@ -957,7 +957,7 @@ after later progress. The exact schema allowlist also kills reintroduction of
 unused `repository_dev`/`repository_inode` Change columns. Attempt-result
 mutations sole-Wait the leader before positive birth-pinned group absence,
 signal/probe the numeric group after Wait, publish before serial final drain/
-PTY close, mint `inner_not_created` outside the launch primitive or after
+PTY close, mint `inner_unregistered_converged` outside the launch primitive or after
 `cmd.Start` returned nil, reject a valid pre-ready or post-ready
 `inner_converged`, pretend a nondurable readiness frame distinguishes the
 declared spawned-child arm, accept a post-ready identity mismatch, publish
@@ -976,7 +976,7 @@ two-row move during admitted/running result consumption. The matrix tests also
 kill rejection of either admitted `inner_converged` arm, failure to bind the
 result identities while releasing a declared spawned-child pair, omission of
 `ProviderExit` from either converged arm, acceptance of an active
-`inner_not_created` or mismatched identity, acceptance of declared rows plus a
+`inner_unregistered_converged` or mismatched identity, acceptance of declared rows plus a
 present `inner.activate` marker, requiring that marker for a valid active pair,
 inventing `ProviderExit` for an empty pair, overwriting the first proposal,
 treating a running provider exit as success, choosing the wrong `FailureSpawn`/
@@ -4103,7 +4103,7 @@ or separate selection checkpoint:
    already-prepared one-shot Start: while the provider pair remains declared/
    empty, generic outcomes retry and the runner resolves the sole Start. If the
    launch primitive proves `cmd.Start` never succeeded it publishes
-   `inner_not_created`; any successfully created child stays inert behind
+   `inner_unregistered_converged`; any successfully created child stays inert behind
    `inner.activate`, binds the exact pair through ready/activation and remains
    owned while its leader is unreaped, through descendant convergence and positive
    group absence, and only then sole-Waits before serial PTY drain/close and
@@ -4502,7 +4502,7 @@ contracts.
 | First outcome/finalizing | With an active exact runner and provider pair, run completion-before-exit and exit-before-completion from admitted/running; assert immutable proposal, revoked credential, exact runtime/runner two plus provider-pair two all releasing, terminal releasing and one transaction rollback on any count mismatch; runner starting and active-runner/declared-provider states use only their serialization rows below | overwrite first proposal; leave one resource/session declared or active; accept runner starting or declared empty provider pair; split cleanup transaction; direct running->terminal |
 | Finalizer only/one-way | With all resources released, repeated/concurrent finalizers create one terminal transition/invalidation; with any unresolved resource, they create none; later positive absence permits only unresolved->released->one terminal | terminalize unresolved; released->active/unresolved; duplicate terminal event |
 | Register-before-exec | External provider witness remains absent until run/resource identities are committed running; replacement before activation, version-symlink swap, target removal, byte/mode mutation, final-check failure, and lost activation acknowledgement preserve the frozen launch or fail without execution; a controlled post-check replacement records the explicitly out-of-scope same-UID pathname seam | release either gate early; omit preparation leash; persist identity after exec; re-resolve installation symlink; omit final metadata/digest comparison; retarget on mismatch; claim inode-atomic execution |
-| Owned process authority | Force `cmd.Start` failure, successful Start with birth-identity acquisition failure, leader exit with live descendant, every pre/post-ready result state, frame loss and restart; while leader remains unreaped prove birth-pinned group absence before sole Wait, then serially drain/close; authenticate and promote the exact no-replace AttemptResult by file fsync, revalidation, directory fsync and revalidation before consumption | transient receipt; mint `inner_not_created` after successful Start; Wait before group absence; numeric group use after Wait; publish before drain/close; omit consumer durability promotion; trust frame; respawn; release on EOF/PID/flock/empty rows |
+| Owned process authority | Force `cmd.Start` failure, successful Start with birth-identity acquisition failure, leader exit with live descendant, every pre/post-ready result state, frame loss and restart; while leader remains unreaped prove birth-pinned group absence before sole Wait, then serially drain/close; authenticate and promote the exact no-replace AttemptResult by file fsync, revalidation, directory fsync and revalidation before consumption | transient receipt; mint `inner_unregistered_converged` after successful Start; Wait before group absence; numeric group use after Wait; publish before drain/close; omit consumer durability promotion; trust frame; respawn; release on EOF/PID/flock/empty rows |
 | Liveness fails closed | Real ESRCH, EPERM where feasible, malformed/overflow IDs, weak/mismatched/reused identity and leader-with-descendant | EPERM as absent; malformed as released; leader exit equals group absence |
 | Crash/restart at-most-once | SIGKILL daemon/runner at every launch, exit, cleanup and acknowledgement cut; count external witness/input; reopen same home | relaunch admitted run; ack before Store commit; remove runtime before absence |
 | Change exactness | Materialize a real commit and verify manifest/blob/mode/path/base/inode; prove the one central scanner fsyncs every accepted regular file/directory/root for normal stage, recovered final and nonnull-RunningAt settlement, with parent fsync and a full stable identity/content/final-binding/stage recheck; null RunningAt requires literal equality/no rewrite; deny Git discovery/worktree and replacements | resolve moving ref; `git archive`; allow symlink/gitlink/.git; wrong base; delete replacement; digest without fsync; omit any file/directory/root/parent fsync or recheck; rescan null-RunningAt; treat marker as exec proof |
@@ -4510,7 +4510,7 @@ contracts.
 | Provider pair atomicity | Inject failure between every provider process/group DML and race activation, finalizing, result and recovery; assert exactly two rows move with equal phases and consistent empty/exact identities or the whole transaction rolls back | generic per-row provider mutation; affected-row count one; commit split phase or identity |
 | Attempt-result run matrix | Exercise admitted inner-not-created; admitted active/exact after durable activation; admitted declared/empty after a spawned child whose ready frame never arrived or activation DML never committed; running active; and finalizing releasing/unresolved. Require exact marker/runtime/attempt binding, direct pair-two release, declared identity binding, deterministic failure and ProviderExit sequence/code-or-signal/timestamp replay | distinguish missing nondurable ready frame; reject declared spawned-child or active arm; omit identity binding/ProviderExit; accept present marker with declared rows or uncertain active census; overwrite proposal; infer success; wrong count/failure; invent empty-pair exit; replace replay timestamp |
 | Runner-start serialization | Race `BeginRunnerStart` against cancellation and every outcome in both orders; before permit, the exact proposal wins and closes three never-created process rows plus terminal while moving runtime releasing; after permit, generic outcome refuses, exact Start error uses `RecordRunnerNeverStarted`, exact success binds PID/birth `starting -> active`, and crash/ambiguity remains `starting` and is reported unresolved with no signal/replay | Start without permit; permit with proposal; allow starting on another resource/with identity; mutate starting generically; lose winning cancellation; use guessed/inexact Start error; wrong 1+3+1 counts; bind success without identity; infer no-child, signal or relaunch after starting crash |
-| Provider-start serialization | With an active outer runner and declared empty provider pair, race cancellation, every generic/infrastructure outcome and daemon EOF against inner Start. An early outcome refuses then commits only after ready/activation; ready first permits that same outcome; exact Start error publishes/consumes `inner_not_created`; EOF still performs the sole prepared Start, never creates `inner.activate` without daemon release and converges with no live child | move declared pair to releasing; create finalizing declared pair; skip or duplicate Start on cancellation/EOF; cross provider gate; lose retried outcome; add another result/state/receipt; leave child live |
+| Provider-start serialization | With an active outer runner and declared empty provider pair, race cancellation, every generic/infrastructure outcome and daemon EOF against inner Start. An early outcome refuses then commits only after ready/activation; ready first permits that same outcome; exact Start error publishes/consumes `inner_unregistered_converged`; EOF still performs the sole prepared Start, never creates `inner.activate` without daemon release and converges with no live child | move declared pair to releasing; create finalizing declared pair; skip or duplicate Start on cancellation/EOF; cross provider gate; lose retried outcome; add another result/state/receipt; leave child live |
 | Terminal close and Change settlement | Cut after result consumption, runner Wait/absence, runner release, terminal close, result unlink and directory fsync; prove result consumption never closes, close accepts only releasing/unresolved after exact provider/runner/result/output proof, and Change settlement waits for close | close during result consumption; close declared/active; close before runner release; generic close; settle before terminal close; accept precondition-free missing spool |
 | Private Change worker | Invoke the private mode without inherited owner-only descriptors/parent gate and prove no Git read/path/child effect; exercise the registered mode normally | accept direct argv invocation; perform effect before capability check |
 | Stable verification | Provider attempts concurrent write while finalizing; provider must be reaped; scan/copy/scan either yields one digest or refuses; verifier launches controlled snapshot | verify live Change; inherit GOENV/cache/temp/network; launch mutable build output |
@@ -4547,7 +4547,7 @@ contracts.
   every generic/infrastructure outcome and daemon EOF in both orders around
   ready/activation; the early transaction must refuse and retry, the runner
   must perform exactly one Start, exact Start failure must publish
-  `inner_not_created`, and successful Start must remain inert without an
+  `inner_unregistered_converged`, and successful Start must remain inert without an
   `inner.activate` release and leave no child after owned EOF convergence;
 - after inner child preparation and identity persistence;
 - before result-name/gate validation, before/after `cmd.Start`, child readiness,
@@ -4717,7 +4717,7 @@ At minimum record the killing test for:
   unresolved with no signal, relaunch or no-child arm;
 - active-runner/declared-empty-provider serialization against generic outcome,
   cancellation, infrastructure failure and daemon EOF; mandatory one-shot inner
-  Start, retry after ready/activation, exact `inner_not_created` Start failure,
+  Start, retry after ready/activation, exact `inner_unregistered_converged` Start failure,
   no marker before daemon release and no child after EOF convergence;
 - provider process/group pair atomicity for activation, releasing, unresolved
   and release, with every generic single-row mutation refused;
@@ -4745,7 +4745,7 @@ At minimum record the killing test for:
 - complete publisher-pre-fsync residue promoted to durable evidence; partial/
   malformed/replaced result retained as nonterminal and never repaired or
   overwritten; exact spool removal only after durable Store postconditions;
-- `inner_not_created` only when the launch primitive proves `cmd.Start` failed,
+- `inner_unregistered_converged` only when the launch primitive proves `cmd.Start` failed,
   and `inner_converged` after every successful spawn has positive group absence
   while the leader is unreaped, then sole Wait, including readiness failure and
   each post-ready state;

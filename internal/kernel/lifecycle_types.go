@@ -763,6 +763,7 @@ type Run struct {
 	Proposal                 *Proposal
 	Terminal                 *Proposal
 	CredentialDigest         AttemptDigest
+	resultProofDigest        ResultProofDigest
 	CredentialRevokedAt      *UnixMillis
 	ProviderExit             *ProcessExit
 	RunnerExit               *ProcessExit
@@ -793,25 +794,26 @@ type Resource struct {
 // no-replace result artifact. It deliberately carries no message, timestamp,
 // caller-selected outcome, or filesystem pathname.
 type AttemptResult struct {
-	runID           RunID
-	attemptDigest   AttemptDigest
-	runtimeIdentity ResourceIdentity
-	kind            AttemptResultKind
-	processIdentity ResourceIdentity
-	exit            AttemptResultExit
+	runID             RunID
+	attemptDigest     AttemptDigest
+	resultProofDigest ResultProofDigest
+	runtimeIdentity   ResourceIdentity
+	kind              AttemptResultKind
+	processIdentity   ResourceIdentity
+	exit              AttemptResultExit
 }
 
 type AttemptResultKind uint8
 
 const (
-	AttemptInnerNotCreated AttemptResultKind = iota + 1
+	AttemptInnerUnregisteredConverged AttemptResultKind = iota + 1
 	AttemptInnerConverged
 )
 
 func (kind AttemptResultKind) String() string {
 	switch kind {
-	case AttemptInnerNotCreated:
-		return "inner_not_created"
+	case AttemptInnerUnregisteredConverged:
+		return "inner_unregistered_converged"
 	case AttemptInnerConverged:
 		return "inner_converged"
 	default:
@@ -859,16 +861,16 @@ func (exit AttemptResultExit) valid() bool {
 	return exit.kind == attemptResultExitCode && exit.value >= 0 || exit.kind == attemptResultExitSignal && exit.value > 0
 }
 
-func NewInnerNotCreatedAttemptResult(runID RunID, attemptDigest AttemptDigest, runtimeIdentity ResourceIdentity) (AttemptResult, error) {
-	result := AttemptResult{runID: runID, attemptDigest: attemptDigest, runtimeIdentity: runtimeIdentity, kind: AttemptInnerNotCreated, processIdentity: EmptyResourceIdentity()}
+func NewInnerUnregisteredConvergedAttemptResult(runID RunID, attemptDigest AttemptDigest, resultProofDigest ResultProofDigest, runtimeIdentity ResourceIdentity) (AttemptResult, error) {
+	result := AttemptResult{runID: runID, attemptDigest: attemptDigest, resultProofDigest: resultProofDigest, runtimeIdentity: runtimeIdentity, kind: AttemptInnerUnregisteredConverged, processIdentity: EmptyResourceIdentity()}
 	if !result.valid() {
-		return AttemptResult{}, fmt.Errorf("%w: invalid inner-not-created result", ErrInvalidValue)
+		return AttemptResult{}, fmt.Errorf("%w: invalid inner-unregistered-converged result", ErrInvalidValue)
 	}
 	return result, nil
 }
 
-func NewInnerConvergedAttemptResult(runID RunID, attemptDigest AttemptDigest, runtimeIdentity, processIdentity ResourceIdentity, exit AttemptResultExit) (AttemptResult, error) {
-	result := AttemptResult{runID: runID, attemptDigest: attemptDigest, runtimeIdentity: runtimeIdentity, kind: AttemptInnerConverged, processIdentity: processIdentity, exit: exit}
+func NewInnerConvergedAttemptResult(runID RunID, attemptDigest AttemptDigest, resultProofDigest ResultProofDigest, runtimeIdentity, processIdentity ResourceIdentity, exit AttemptResultExit) (AttemptResult, error) {
+	result := AttemptResult{runID: runID, attemptDigest: attemptDigest, resultProofDigest: resultProofDigest, runtimeIdentity: runtimeIdentity, kind: AttemptInnerConverged, processIdentity: processIdentity, exit: exit}
 	if !result.valid() {
 		return AttemptResult{}, fmt.Errorf("%w: invalid inner-converged result", ErrInvalidValue)
 	}
@@ -889,7 +891,7 @@ func (result AttemptResult) valid() bool {
 		return false
 	}
 	switch result.kind {
-	case AttemptInnerNotCreated:
+	case AttemptInnerUnregisteredConverged:
 		return result.processIdentity.Empty() && !result.exit.valid()
 	case AttemptInnerConverged:
 		return result.processIdentity.validFor(ResourceProviderProcess) && result.exit.valid()
@@ -921,6 +923,7 @@ type AdmissionKeys struct {
 	RunID             RunID
 	TerminalSessionID TerminalSessionID
 	AttemptDigest     AttemptDigest
+	ResultProofDigest ResultProofDigest
 	CandidateChangeID ChangeID
 	Resources         AdmissionResourceIDs
 	RuntimeRoot       string

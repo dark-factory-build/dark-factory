@@ -200,8 +200,60 @@ func TestEveryPublicMutationValidatesDurableGraphBeforeDecision(t *testing.T) {
 			_, err := store.CancelRun(context.Background(), runID(t, 5), mustRevision(t, 1), "cancel", at)
 			return err
 		}},
-		{name: "ObserveRunnerExit", invoke: func(store *Store) error {
-			_, err := store.ObserveRunnerExit(context.Background(), runID(t, 5), mustRevision(t, 1), processIdentity, exit, at)
+		{name: "BeginRunnerStart", invoke: func(store *Store) error {
+			_, _, err := store.BeginRunnerStart(context.Background(), runID(t, 5), resourceID(t, 6), mustRevision(t, 1), mustRevision(t, 1), at)
+			return err
+		}},
+		{name: "ActivateRunner", invoke: func(store *Store) error {
+			_, _, err := store.ActivateRunner(context.Background(), runID(t, 5), resourceID(t, 6), mustRevision(t, 1), mustRevision(t, 1), processIdentity, at)
+			return err
+		}},
+		{name: "RecordUnregisteredRunnerConverged", invoke: func(store *Store) error {
+			_, err := store.RecordUnregisteredRunnerConverged(context.Background(), runID(t, 5), resourceID(t, 6), mustRevision(t, 1), mustRevision(t, 1), at)
+			return err
+		}},
+		{name: "RecordRecoveredPreExecRunnerAbsence", invoke: func(store *Store) error {
+			_, err := store.RecordRecoveredPreExecRunnerAbsence(context.Background(), runID(t, 5), resourceID(t, 6), mustRevision(t, 1), mustRevision(t, 1), processIdentity, at)
+			return err
+		}},
+		{name: "RecordRecoveredRunnerAbsence", invoke: func(store *Store) error {
+			_, _, err := store.RecordRecoveredRunnerAbsence(context.Background(), runID(t, 5), resourceID(t, 6), mustRevision(t, 1), mustRevision(t, 1), processIdentity, at)
+			return err
+		}},
+		{name: "RecordLiveRunnerExitAndRelease", invoke: func(store *Store) error {
+			_, _, err := store.RecordLiveRunnerExitAndRelease(context.Background(), runID(t, 5), resourceID(t, 6), mustRevision(t, 1), mustRevision(t, 1), processIdentity, exit, at)
+			return err
+		}},
+		{name: "ConsumeAttemptResult", invoke: func(store *Store) error {
+			attempt, _ := AttemptDigestFromBytes(bytes.Repeat([]byte{0x5b}, DigestBytes))
+			proof, _ := ResultProofDigestFromBytes(bytes.Repeat([]byte{0x5c}, DigestBytes))
+			result, err := NewInnerUnregisteredConvergedAttemptResult(runID(t, 5), attempt, proof, pathIdentity)
+			if err != nil {
+				return err
+			}
+			_, err = store.ConsumeAttemptResult(context.Background(), result, mustRevision(t, 1), at)
+			return err
+		}},
+		{name: "CloseTerminalAfterRunner", invoke: func(store *Store) error {
+			attempt, _ := AttemptDigestFromBytes(bytes.Repeat([]byte{0x5b}, DigestBytes))
+			proof, _ := ResultProofDigestFromBytes(bytes.Repeat([]byte{0x5c}, DigestBytes))
+			result, err := NewInnerUnregisteredConvergedAttemptResult(runID(t, 5), attempt, proof, pathIdentity)
+			if err != nil {
+				return err
+			}
+			_, _, err = store.CloseTerminalAfterRunner(context.Background(), result, mustRevision(t, 1), mustRevision(t, 1), at)
+			return err
+		}},
+		{name: "MarkProviderResourcesUnresolved", invoke: func(store *Store) error {
+			_, _, _, err := store.MarkProviderResourcesUnresolved(context.Background(), runID(t, 5), resourceID(t, 6), resourceID(t, 7), mustRevision(t, 1), mustRevision(t, 1), mustRevision(t, 1), processIdentity, "reason", at)
+			return err
+		}},
+		{name: "ReleaseProviderResources", invoke: func(store *Store) error {
+			_, _, _, err := store.ReleaseProviderResources(context.Background(), runID(t, 5), resourceID(t, 6), resourceID(t, 7), mustRevision(t, 1), mustRevision(t, 1), mustRevision(t, 1), ResourceIdentity{}, at)
+			return err
+		}},
+		{name: "FailRunWithRuntimeAbsent", invoke: func(store *Store) error {
+			_, err := store.FailRunWithRuntimeAbsent(context.Background(), runID(t, 5), resourceID(t, 6), mustRevision(t, 1), mustRevision(t, 1), failure, at)
 			return err
 		}},
 		{name: "FinalizeRun", invoke: func(store *Store) error {

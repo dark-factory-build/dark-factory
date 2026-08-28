@@ -1019,41 +1019,41 @@ func addRunningRunOnStore(t *testing.T, store *Store, seed byte) Run {
 	if result.Run.TaskID != task.ID {
 		t.Fatalf("admitted wrong task = %+v", result.Run)
 	}
-	activateAllResourcesUnique(t, store, *result.Run, 300+int64(seed), int64(seed)*10)
+	activatedRun := activateAllResourcesUnique(t, store, *result.Run, 300+int64(seed), int64(seed)*10)
 	session := terminalSessionForRunTest(t, store, result.Run.ID)
-	running, err := store.ActivateRun(context.Background(), result.Run.ID, session.ID, result.Run.Revision, session.Revision, mustTime(t, 310+int64(seed)))
+	running, err := store.ActivateRun(context.Background(), result.Run.ID, session.ID, activatedRun.Revision, session.Revision, mustTime(t, 310+int64(seed)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return running
 }
 
-func activateAllResourcesUnique(t *testing.T, store *Store, run Run, at, identitySeed int64) {
+func activateAllResourcesUnique(t *testing.T, store *Store, run Run, at, identitySeed int64) Run {
 	t.Helper()
 	resources := resourcesForRunTest(t, store, run.ID)
-	provider := resourceOfKind(t, resources, ResourceProviderProcess)
-	group := resourceOfKind(t, resources, ResourceProviderGroup)
-	if _, _, err := store.ActivateProviderResources(context.Background(), run.ID, provider.ID, provider.Revision, group.ID, group.Revision, processIdentity(t, identitySeed+1), mustTime(t, at)); err != nil {
+	runtime := resourceOfKind(t, resources, ResourceRuntimeRoot)
+	runtimeIdentity, err := NewPathResourceIdentity(10, 10000+identitySeed)
+	if err != nil {
 		t.Fatal(err)
 	}
-	for index, resource := range resources {
-		if resource.Kind == ResourceProviderProcess || resource.Kind == ResourceProviderGroup {
-			continue
-		}
-		var identity ResourceIdentity
-		var identityErr error
-		if resource.Kind == ResourceRuntimeRoot {
-			identity, identityErr = NewPathResourceIdentity(10, 10000+identitySeed+int64(index))
-		} else {
-			identity = processIdentity(t, identitySeed+10+int64(index))
-		}
-		if identityErr != nil {
-			t.Fatal(identityErr)
-		}
-		if _, err := store.ActivateResource(context.Background(), run.ID, resource.ID, resource.Revision, identity, mustTime(t, at+1+int64(index))); err != nil {
-			t.Fatal(err)
-		}
+	if _, err := store.ActivateResource(context.Background(), run.ID, runtime.ID, runtime.Revision, runtimeIdentity, mustTime(t, at)); err != nil {
+		t.Fatal(err)
 	}
+	runner := resourceOfKind(t, resources, ResourceRunnerProcess)
+	startedRun, startingRunner, err := store.BeginRunnerStart(context.Background(), run.ID, runner.ID, run.Revision, runner.Revision, mustTime(t, at+1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeRun, _, err := store.ActivateRunner(context.Background(), run.ID, runner.ID, startedRun.Revision, startingRunner.Revision, processIdentity(t, identitySeed+12), mustTime(t, at+2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := resourceOfKind(t, resources, ResourceProviderProcess)
+	group := resourceOfKind(t, resources, ResourceProviderGroup)
+	if _, _, err := store.ActivateProviderResources(context.Background(), run.ID, provider.ID, provider.Revision, group.ID, group.Revision, processIdentity(t, identitySeed+1), mustTime(t, at+3)); err != nil {
+		t.Fatal(err)
+	}
+	return activeRun
 }
 
 func TestTerminalLeaseCapabilityCompetitionExpiryAndRenewal(t *testing.T) {
