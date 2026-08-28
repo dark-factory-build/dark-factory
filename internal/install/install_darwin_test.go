@@ -8,12 +8,17 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"golang.org/x/sys/unix"
@@ -434,6 +439,275 @@ func TestRegularMemberSyncFailureCutsKeepStageEvidence(t *testing.T) {
 	}
 }
 
+func TestConstructionPhaseCutsRetainReachableStagePrefix(t *testing.T) {
+	memberNames := []string{formatName, databaseName, tokenName, lockName}
+	cases := []struct {
+		name  string
+		point phase
+		check func(*testing.T, string)
+	}{
+		{name: "after stage parent sync", point: phaseAfterStageParentSync, check: func(t *testing.T, stage string) {
+			assertStageEntries(t, stage, nil)
+		}},
+		{name: "after runtimes directory sync", point: phase("after " + runtimesName + " directory sync"), check: func(t *testing.T, stage string) {
+			assertStageEntries(t, stage, []string{formatName, databaseName, tokenName, lockName, runtimesName})
+		}},
+		{name: "after changes directory sync", point: phase("after " + changesName + " directory sync"), check: func(t *testing.T, stage string) {
+			assertStageEntries(t, stage, []string{formatName, databaseName, tokenName, lockName, runtimesName, changesName})
+		}},
+		{name: "after database pristine proof", point: phase("after database pristine proof"), check: func(t *testing.T, stage string) {
+			assertStageEntries(t, stage, []string{formatName, databaseName, tokenName, lockName, runtimesName, changesName})
+		}},
+		{name: "after stage sync", point: phaseAfterStageSync, check: func(t *testing.T, stage string) {
+			assertStageEntries(t, stage, []string{formatName, databaseName, tokenName, lockName, runtimesName, changesName})
+		}},
+		{name: "immediately before publish rename", point: phaseBeforePublishRename, check: func(t *testing.T, stage string) {
+			assertStageEntries(t, stage, []string{formatName, databaseName, tokenName, lockName, runtimesName, changesName})
+		}},
+	}
+	for memberIndex, memberName := range memberNames {
+		name := memberName
+		expectedEntries := append([]string(nil), memberNames[:memberIndex+1]...)
+		cases = append(cases,
+			struct {
+				name  string
+				point phase
+				check func(*testing.T, string)
+			}{name: "after " + name + " create", point: phase("after " + name + " create"), check: func(t *testing.T, stage string) {
+				assertStageEntries(t, stage, expectedEntries)
+				assertStageMemberExists(t, filepath.Join(stage, name))
+			}},
+			struct {
+				name  string
+				point phase
+				check func(*testing.T, string)
+			}{name: "after " + name + " write", point: phase("after " + name + " write"), check: func(t *testing.T, stage string) {
+				assertStageEntries(t, stage, expectedEntries)
+				assertStageMemberExists(t, filepath.Join(stage, name))
+			}},
+			struct {
+				name  string
+				point phase
+				check func(*testing.T, string)
+			}{name: "after " + name + " fsync", point: phase("after " + name + " fsync"), check: func(t *testing.T, stage string) {
+				assertStageEntries(t, stage, expectedEntries)
+				assertStageMemberExists(t, filepath.Join(stage, name))
+			}},
+		)
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			parent := installTempDir(t)
+			home := filepath.Join(parent, "home")
+			stage := filepath.Join(parent, ".home"+stageSuffix)
+			hit := false
+			phaseHook = func(point phase) error {
+				if point == test.point {
+					hit = true
+					return errors.New("injected construction phase failure")
+				}
+				return nil
+			}
+			defer func() { phaseHook = nil }()
+			if _, err := Init(context.Background(), home); err == nil {
+				t.Fatal("init accepted an injected construction phase failure")
+			} else if errors.Is(err, ErrUncertain) {
+				t.Fatalf("pre-publication construction failure became uncertain: %v", err)
+			}
+			if !hit {
+				t.Fatalf("phase %q was not invoked", test.point)
+			}
+			if _, err := os.Stat(home); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("final home after construction failure: %v", err)
+			}
+			if info, err := os.Stat(stage); err != nil || !info.IsDir() {
+				t.Fatalf("stage evidence after construction failure: info=%v err=%v", info, err)
+			}
+			test.check(t, stage)
+		})
+	}
+}
+
+func TestAfterParentSyncFailureIsExplicitlyUncertain(t *testing.T) {
+	parent := installTempDir(t)
+	home := filepath.Join(parent, "home")
+	stage := filepath.Join(parent, ".home"+stageSuffix)
+	phaseHook = func(point phase) error {
+		if point == phaseAfterParentSync {
+			return errors.New("injected post-sync proof failure")
+		}
+		return nil
+	}
+	defer func() { phaseHook = nil }()
+	if _, err := Init(context.Background(), home); !errors.Is(err, ErrUncertain) {
+		t.Fatalf("post-parent-sync failure = %v, want uncertain", err)
+	}
+	if _, err := os.Stat(home); err != nil {
+		t.Fatalf("final home after post-parent-sync failure: %v", err)
+	}
+	if _, err := os.Lstat(stage); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stage after post-parent-sync failure: %v", err)
+	}
+}
+
+func assertStageEntries(t *testing.T, stage string, expected []string) {
+	t.Helper()
+	entries, err := os.ReadDir(stage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != len(expected) {
+		t.Fatalf("stage entries = %d, want %d", len(entries), len(expected))
+	}
+	for _, name := range expected {
+		if _, err := os.Lstat(filepath.Join(stage, name)); err != nil {
+			t.Fatalf("missing reachable stage member %s: %v", name, err)
+		}
+	}
+}
+
+func assertStageMemberExists(t *testing.T, path string) {
+	t.Helper()
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.Mode().IsRegular() {
+		t.Fatalf("stage member %s is %v, want regular", path, info.Mode())
+	}
+}
+
+const (
+	crashHelperEnv = "DARK_FACTORY_INSTALL_CRASH_HELPER"
+	crashHomeEnv   = "DARK_FACTORY_INSTALL_CRASH_HOME"
+	crashPhaseEnv  = "DARK_FACTORY_INSTALL_CRASH_PHASE"
+	crashSignalEnv = "DARK_FACTORY_INSTALL_CRASH_SIGNAL_FD"
+)
+
+func TestInstallCrashHelper(t *testing.T) {
+	if os.Getenv(crashHelperEnv) != "1" {
+		return
+	}
+	home := os.Getenv(crashHomeEnv)
+	target := phase(os.Getenv(crashPhaseEnv))
+	fd, err := strconv.Atoi(os.Getenv(crashSignalEnv))
+	if err != nil || fd < 0 || home == "" || target == "" {
+		t.Fatalf("invalid crash helper configuration")
+	}
+	phaseHook = func(point phase) error {
+		if point == target {
+			_, _ = unix.Write(fd, []byte{1})
+			_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
+			for {
+				runtime.Gosched()
+			}
+		}
+		return nil
+	}
+	defer func() { phaseHook = nil }()
+	_, _ = Init(context.Background(), home)
+	t.Fatal("crash helper reached Init return")
+}
+
+func TestInitCrashCutsLeaveReopenableEvidence(t *testing.T) {
+	cases := []struct {
+		name  string
+		point phase
+		post  bool
+	}{
+		{name: "after stage parent fsync", point: phaseAfterStageParentSync},
+		{name: "after format fsync", point: phase("after " + formatName + " fsync")},
+		{name: "after database fsync", point: phase("after " + databaseName + " fsync")},
+		{name: "after token fsync", point: phase("after " + tokenName + " fsync")},
+		{name: "after lock fsync", point: phase("after " + lockName + " fsync")},
+		{name: "after runtimes fsync", point: phase("after " + runtimesName + " directory sync")},
+		{name: "after changes fsync", point: phase("after " + changesName + " directory sync")},
+		{name: "after stage fsync", point: phaseAfterStageSync},
+		{name: "pre-publish rename", point: phaseBeforePublishRename},
+		{name: "after rename before parent fsync", point: phaseAfterRename, post: true},
+		{name: "after parent fsync before final proof", point: phaseAfterParentSync, post: true},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			parent := installTempDir(t)
+			home := filepath.Join(parent, "home")
+			stage := filepath.Join(parent, ".home"+stageSuffix)
+			readPipe, writePipe, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(os.Args[0], "-test.run", "^TestInstallCrashHelper$", "-test.v")
+			cmd.Env = append(os.Environ(),
+				crashHelperEnv+"=1",
+				crashHomeEnv+"="+home,
+				crashPhaseEnv+"="+string(test.point),
+				crashSignalEnv+"=3",
+			)
+			cmd.ExtraFiles = []*os.File{writePipe}
+			if err := cmd.Start(); err != nil {
+				_ = readPipe.Close()
+				_ = writePipe.Close()
+				t.Fatal(err)
+			}
+			_ = writePipe.Close()
+			signalReceived := make(chan error, 1)
+			go func() {
+				var signal [1]byte
+				_, readErr := io.ReadFull(readPipe, signal[:])
+				signalReceived <- readErr
+			}()
+			select {
+			case readErr := <-signalReceived:
+				_ = readPipe.Close()
+				if readErr != nil {
+					_ = cmd.Process.Kill()
+					_ = cmd.Wait()
+					t.Fatalf("crash helper did not signal at %q: %v", test.point, readErr)
+				}
+			case <-time.After(10 * time.Second):
+				_ = readPipe.Close()
+				_ = cmd.Process.Kill()
+				_ = cmd.Wait()
+				t.Fatalf("crash helper did not reach %q", test.point)
+			}
+			waitErr := cmd.Wait()
+			exitErr, ok := waitErr.(*exec.ExitError)
+			if !ok || exitErr.ProcessState == nil {
+				t.Fatalf("crash helper wait error = %v, want SIGKILL", waitErr)
+			}
+			status, ok := exitErr.ProcessState.Sys().(syscall.WaitStatus)
+			if !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
+				t.Fatalf("crash helper status = %v, want SIGKILL", exitErr.ProcessState.Sys())
+			}
+			if test.post {
+				if info, err := os.Stat(home); err != nil || !info.IsDir() {
+					t.Fatalf("post-publication final home: info=%v err=%v", info, err)
+				}
+				if _, err := os.Lstat(stage); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("post-publication stage = %v, want absent", err)
+				}
+				result, doctorErr := Doctor(context.Background(), home)
+				if doctorErr != nil && !errors.Is(doctorErr, ErrUncertain) {
+					t.Fatalf("post-publication doctor = %+v, err=%v", result, doctorErr)
+				}
+				if doctorErr == nil && result.State != Ready {
+					t.Fatalf("post-publication doctor state = %d, want ready", result.State)
+				}
+				return
+			}
+			if _, err := os.Lstat(home); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("pre-publication final home = %v, want absent", err)
+			}
+			if info, err := os.Stat(stage); err != nil || !info.IsDir() {
+				t.Fatalf("pre-publication stage: info=%v err=%v", info, err)
+			}
+			if _, err := os.ReadDir(stage); err != nil {
+				t.Fatalf("reopen retained stage: %v", err)
+			}
+		})
+	}
+}
+
 func TestBoundedSnapshotRejectsOversizedMemberBeforeRead(t *testing.T) {
 	parent := installTempDir(t)
 	file, err := os.CreateTemp(parent, "member-")
@@ -479,9 +753,15 @@ func TestInitNoReplaceConflictLeavesStageAndFinalUnchanged(t *testing.T) {
 	parent := installTempDir(t)
 	home := filepath.Join(parent, "home")
 	stage := filepath.Join(parent, ".home"+stageSuffix)
+	var stageBefore, finalBefore [32]byte
 	phaseHook = func(point phase) error {
 		if point == phaseBeforeRename {
-			return os.Mkdir(home, 0o700)
+			stageBefore = installDigest(t, stage)
+			if err := os.Mkdir(home, 0o700); err != nil {
+				return err
+			}
+			finalBefore = installDigest(t, home)
+			return nil
 		}
 		return nil
 	}
@@ -492,8 +772,78 @@ func TestInitNoReplaceConflictLeavesStageAndFinalUnchanged(t *testing.T) {
 	if info, err := os.Stat(home); err != nil || !info.IsDir() {
 		t.Fatalf("no-replace conflict changed the final path: info=%v err=%v", info, err)
 	}
+	if after := installDigest(t, stage); after != stageBefore {
+		t.Fatal("no-replace conflict changed staged evidence")
+	}
+	if after := installDigest(t, home); after != finalBefore {
+		t.Fatal("no-replace conflict changed final evidence")
+	}
 	if _, err := os.Stat(stage); err != nil {
 		t.Fatalf("stage evidence after no-replace conflict: %v", err)
+	}
+}
+
+func TestPublishBoundaryStageRemovalOrReplacementCannotPublish(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(t *testing.T, stage string) (string, [32]byte, error)
+	}{
+		{name: "removal", mutate: func(t *testing.T, stage string) (string, [32]byte, error) {
+			if err := os.RemoveAll(stage); err != nil {
+				return "", [32]byte{}, err
+			}
+			return "", [32]byte{}, nil
+		}},
+		{name: "replacement", mutate: func(t *testing.T, stage string) (string, [32]byte, error) {
+			old := stage + ".old"
+			if err := os.Rename(stage, old); err != nil {
+				return "", [32]byte{}, err
+			}
+			if err := os.Mkdir(stage, 0o700); err != nil {
+				return "", [32]byte{}, err
+			}
+			return old, installDigest(t, stage), nil
+		}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			parent := installTempDir(t)
+			home := filepath.Join(parent, "home")
+			stage := filepath.Join(parent, ".home"+stageSuffix)
+			var detached string
+			var detachedBefore [32]byte
+			var replacementBefore [32]byte
+			phaseHook = func(point phase) error {
+				if point != phaseBeforePublishRename {
+					return nil
+				}
+				var err error
+				detached, replacementBefore, err = test.mutate(t, stage)
+				if err == nil && detached != "" {
+					detachedBefore = installDigest(t, detached)
+				}
+				return err
+			}
+			defer func() { phaseHook = nil }()
+			if _, err := Init(context.Background(), home); err == nil {
+				t.Fatal("init published a removed or replaced stage")
+			} else if errors.Is(err, ErrUncertain) {
+				t.Fatalf("pre-publication stage replacement became uncertain: %v", err)
+			}
+			if _, err := os.Lstat(home); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("final home after stage replacement: %v", err)
+			}
+			if test.name == "replacement" {
+				if after := installDigest(t, detached); after != detachedBefore {
+					t.Fatal("detached original stage changed")
+				}
+				if after := installDigest(t, stage); after != replacementBefore {
+					t.Fatal("foreign replacement stage changed")
+				}
+			} else if _, err := os.Lstat(stage); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("removed stage was recreated: %v", err)
+			}
+		})
 	}
 }
 
@@ -893,6 +1243,50 @@ func TestExactDirectoryLinkCountRejectsInvalidMetadata(t *testing.T) {
 	}
 }
 
+func TestForeignOwnerCorruptionIsRefusedWhenPermitted(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("foreign-owner filesystem mutation requires an effective root test process")
+	}
+	cases := []struct {
+		name string
+		path func(parent, home string) string
+	}{
+		{name: "member", path: func(parent, home string) string { return filepath.Join(home, formatName) }},
+		{name: "home", path: func(parent, home string) string { return home }},
+		{name: "parent", path: func(parent, home string) string { return parent }},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			parent := installTempDir(t)
+			home := filepath.Join(parent, "home")
+			if _, err := Init(context.Background(), home); err != nil {
+				t.Fatal(err)
+			}
+			path := test.path(parent, home)
+			if err := os.Chown(path, 1, -1); err != nil {
+				t.Fatal(err)
+			}
+			before := installDigest(t, parent)
+			for _, operation := range []struct {
+				name string
+				call func() error
+			}{
+				{name: "doctor", call: func() error { _, err := Doctor(context.Background(), home); return err }},
+				{name: "init", call: func() error { _, err := Init(context.Background(), home); return err }},
+			} {
+				t.Run(operation.name, func(t *testing.T) {
+					if err := operation.call(); err == nil {
+						t.Fatal("accepted foreign owner metadata")
+					}
+					if after := installDigest(t, parent); after != before {
+						t.Fatal("foreign owner metadata changed after refusal")
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestHomePathBoundsRefuseBeforeFilesystemTraversal(t *testing.T) {
 	tooLong := "/" + strings.Repeat("a", maxHomeBytes)
 	if _, err := Init(context.Background(), tooLong); !errors.Is(err, ErrInvalidHome) {
@@ -939,6 +1333,108 @@ func TestConcurrentInitializersPublishAtMostOnce(t *testing.T) {
 	}
 	if result, err := Doctor(context.Background(), home); err != nil || result.State != Ready {
 		t.Fatalf("concurrent final home = %+v, err=%v", result, err)
+	}
+}
+
+func TestConcurrentExactReadyInitializersDoNotMutate(t *testing.T) {
+	parent := installTempDir(t)
+	home := filepath.Join(parent, "home")
+	if _, err := Init(context.Background(), home); err != nil {
+		t.Fatal(err)
+	}
+	before := installDigest(t, home)
+	results := make(chan Result, 2)
+	errorsSeen := make(chan error, 2)
+	var wait sync.WaitGroup
+	wait.Add(2)
+	for range 2 {
+		go func() {
+			defer wait.Done()
+			result, err := Init(context.Background(), home)
+			results <- result
+			errorsSeen <- err
+		}()
+	}
+	wait.Wait()
+	close(results)
+	close(errorsSeen)
+	for result := range results {
+		if result.State != Ready {
+			t.Fatalf("concurrent exact init state = %d, want ready", result.State)
+		}
+	}
+	for err := range errorsSeen {
+		if err != nil {
+			t.Fatalf("concurrent exact init error = %v", err)
+		}
+	}
+	if after := installDigest(t, home); after != before {
+		t.Fatal("concurrent exact init mutated home")
+	}
+}
+
+func TestConcurrentPartialAndForeignStageRefusalsAreUnchanged(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, parent, home, stage string)
+	}{
+		{name: "partial final", setup: func(t *testing.T, parent, home, stage string) {
+			if err := os.Mkdir(home, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(home, "legacy.db"), []byte("legacy"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "foreign stage", setup: func(t *testing.T, parent, home, stage string) {
+			if err := os.WriteFile(stage, []byte("foreign stage"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "exact final and foreign stage", setup: func(t *testing.T, parent, home, stage string) {
+			if _, err := Init(context.Background(), home); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(stage, []byte("foreign stage"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			parent := installTempDir(t)
+			home := filepath.Join(parent, "home")
+			stage := filepath.Join(parent, ".home"+stageSuffix)
+			test.setup(t, parent, home, stage)
+			before := installDigest(t, parent)
+			results := make(chan Result, 2)
+			errorsSeen := make(chan error, 2)
+			var wait sync.WaitGroup
+			wait.Add(2)
+			for range 2 {
+				go func() {
+					defer wait.Done()
+					result, err := Init(context.Background(), home)
+					results <- result
+					errorsSeen <- err
+				}()
+			}
+			wait.Wait()
+			close(results)
+			close(errorsSeen)
+			for range results {
+				// Every result is expected to be a refusal; the error channel below
+				// carries the definitive assertion without relying on zero State.
+			}
+			for err := range errorsSeen {
+				if err == nil {
+					t.Fatal("concurrent invalid-home init succeeded")
+				}
+			}
+			if after := installDigest(t, parent); after != before {
+				t.Fatal("concurrent invalid-home init changed evidence")
+			}
+		})
 	}
 }
 

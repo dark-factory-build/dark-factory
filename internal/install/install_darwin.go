@@ -50,6 +50,7 @@ type phase string
 
 const (
 	phaseAfterStageMkdir      phase = "after stage mkdir"
+	phaseAfterStageParentSync phase = "after stage mkdir and parent sync"
 	phaseBeforeFormatCreate   phase = "before format create"
 	phaseBeforeDatabaseCreate phase = "before database create"
 	phaseBeforeTokenCreate    phase = "before token create"
@@ -59,9 +60,12 @@ const (
 	phaseBeforeStageInspect   phase = "before stage inspect"
 	phaseAfterStageInspect    phase = "after stage inspect"
 	phaseBeforeStageSync      phase = "before stage sync"
+	phaseAfterStageSync       phase = "after stage sync"
 	phaseBeforeFinalStage     phase = "before final stage inspection"
+	phaseBeforePublishRename  phase = "immediately before publish rename"
 	phaseBeforeRename         phase = "before rename"
 	phaseAfterRename          phase = "after rename"
+	phaseAfterParentSync      phase = "after publish parent sync"
 	phaseBeforeFinalProof     phase = "before final proof"
 	phaseBeforeExistingSecond phase = "before existing home second scan"
 	phaseBeforeDoctorSecond   phase = "before doctor second scan"
@@ -156,6 +160,9 @@ func initHome(ctx context.Context, home string) (result Result, resultErr error)
 	if err := syncDirectory(int(parent.file.Fd())); err != nil {
 		return Result{}, fmt.Errorf("sync home parent after staging mkdir: %w", err)
 	}
+	if err := atPhase(phaseAfterStageParentSync); err != nil {
+		return Result{}, err
+	}
 	stageFile, err := openDirectoryAt(parent.file, stage)
 	if err != nil {
 		return Result{}, fmt.Errorf("open staging home: %w", err)
@@ -213,6 +220,9 @@ func initHome(ctx context.Context, home string) (result Result, resultErr error)
 		if closeErr := child.Close(); closeErr != nil {
 			return Result{}, fmt.Errorf("close staging %s directory: %w", name, closeErr)
 		}
+		if err := atPhase(phase("after " + name + " directory sync")); err != nil {
+			return Result{}, err
+		}
 	}
 	if err := atPhase(phaseBeforeStageInspect); err != nil {
 		return Result{}, err
@@ -229,6 +239,9 @@ func initHome(ctx context.Context, home string) (result Result, resultErr error)
 	}
 	if err := syncDirectory(int(stageFile.Fd())); err != nil {
 		return Result{}, fmt.Errorf("sync staging home: %w", err)
+	}
+	if err := atPhase(phaseAfterStageSync); err != nil {
+		return Result{}, err
 	}
 	if err := atPhase(phaseBeforeFinalStage); err != nil {
 		return Result{}, err
@@ -271,6 +284,15 @@ func initHome(ctx context.Context, home string) (result Result, resultErr error)
 	if err := recheckBinding(parent.file, stage, stageStat); err != nil {
 		return Result{}, err
 	}
+	if err := atPhase(phaseBeforePublishRename); err != nil {
+		return Result{}, err
+	}
+	if err := parent.recheck(); err != nil {
+		return Result{}, err
+	}
+	if err := recheckBinding(parent.file, stage, stageStat); err != nil {
+		return Result{}, err
+	}
 	if err := unix.RenameatxNp(int(parent.file.Fd()), stage, int(parent.file.Fd()), base, unix.RENAME_EXCL); err != nil {
 		return Result{}, fmt.Errorf("publish home: %w", err)
 	}
@@ -279,6 +301,9 @@ func initHome(ctx context.Context, home string) (result Result, resultErr error)
 	}
 	if err := syncDirectory(int(parent.file.Fd())); err != nil {
 		return Result{}, fmt.Errorf("%w: publish rename succeeded but parent sync failed", errors.Join(ErrUncertain, err))
+	}
+	if err := atPhase(phaseAfterParentSync); err != nil {
+		return Result{}, fmt.Errorf("%w: %v", ErrUncertain, err)
 	}
 	if err := atPhase(phaseBeforeFinalProof); err != nil {
 		return Result{}, fmt.Errorf("%w: %v", ErrUncertain, err)
@@ -523,6 +548,9 @@ func writeMember(parent *os.File, name string, contents []byte, createPhase phas
 		return errors.New("create home member: invalid descriptor")
 	}
 	defer file.Close()
+	if err := atPhase(phase("after " + name + " create")); err != nil {
+		return err
+	}
 	if err := unix.Fchmod(fd, 0o600); err != nil {
 		return fmt.Errorf("secure home member %s: %w", name, err)
 	}
@@ -778,6 +806,9 @@ func inspectDatabase(ctx context.Context, parent *os.File) error {
 			return fmt.Errorf("inspect pristine database image: %w", err)
 		}
 		return errors.Join(ErrInvalidHome, fmt.Errorf("inspect pristine database image: %w", err))
+	}
+	if err := atPhase(phase("after database pristine proof")); err != nil {
+		return err
 	}
 	if err := recheckBinding(parent, databaseName, stat); err != nil {
 		return err
