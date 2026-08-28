@@ -3,25 +3,41 @@ package kernel
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
+	"os"
+	"path/filepath"
+	"syscall"
 
-	sqliteDriver "github.com/ncruces/go-sqlite3/driver"
-	"github.com/ncruces/go-sqlite3/ext/serdes"
+	"golang.org/x/sys/unix"
 )
 
 const (
 	maxFreshDatabaseImageSize     = 8 << 20
 	maxImmutableDatabaseImageSize = 256 << 20
+	immutableImageReadChunkSize   = 128 << 10
 )
 
-// NewDatabaseImage creates one complete fresh database without touching the
-// filesystem. The returned main-database image uses SQLite's rollback header;
-// Open validates the complete image before promoting it to persistent WAL.
-func NewDatabaseImage(ctx context.Context, config FactoryConfig, at UnixMillis) (image []byte, resultErr error) {
+type databaseImageScratch struct {
+	directory string
+	path      string
+}
+
+type bootstrapIdentity struct {
+	config   FactoryConfig
+	at       UnixMillis
+	daemonID DaemonID
+}
+
+// NewDatabaseImage creates one complete fresh database in a private owner-only
+// scratch directory. The returned sidecar-free main file uses SQLite's
+// rollback header; Open validates it before promoting it to persistent WAL.
+func NewDatabaseImage(ctx context.Context, config FactoryConfig, at UnixMillis) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -29,88 +45,122 @@ func NewDatabaseImage(ctx context.Context, config FactoryConfig, at UnixMillis) 
 	if err != nil {
 		return nil, err
 	}
-	pool, err := sql.Open(driverName, ":memory:")
+	var raw [IDBytes]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return nil, fmt.Errorf("generate daemon identifier: %w", err)
+	}
+	daemonID, err := DaemonIDFromBytes(raw[:])
 	if err != nil {
-		return nil, fmt.Errorf("open in-memory sqlite database: %w", err)
-	}
-	pool.SetMaxOpenConns(1)
-	pool.SetMaxIdleConns(1)
-	defer func() {
-		if err := pool.Close(); err != nil {
-			image = nil
-			resultErr = errors.Join(resultErr, fmt.Errorf("close in-memory sqlite database: %w", err))
-		}
-	}()
-
-	connection, err := pool.Conn(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("checkout in-memory sqlite connection: %w", err)
-	}
-	defer func() {
-		if err := connection.Close(); err != nil {
-			image = nil
-			resultErr = errors.Join(resultErr, fmt.Errorf("return in-memory sqlite connection: %w", err))
-		}
-	}()
-	if _, err := connection.ExecContext(ctx, "PRAGMA foreign_keys = ON"); err != nil {
-		return nil, fmt.Errorf("configure in-memory sqlite database: %w", err)
-	}
-	if _, err := connection.ExecContext(ctx, "PRAGMA temp_store = MEMORY"); err != nil {
-		return nil, fmt.Errorf("configure in-memory sqlite temporary storage: %w", err)
-	}
-	if _, err := connection.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return nil, fmt.Errorf("begin in-memory sqlite initialization: %w", err)
-	}
-	if err := initializeFresh(ctx, connection, config, at); err != nil {
-		_, rollbackErr := connection.ExecContext(context.Background(), "ROLLBACK")
-		return nil, errors.Join(err, rollbackErr)
-	}
-	if _, err := connection.ExecContext(ctx, "COMMIT"); err != nil {
-		return nil, fmt.Errorf("commit in-memory sqlite initialization: %w", err)
-	}
-	if err := validateDatabaseSnapshot(ctx, connection); err != nil {
 		return nil, err
 	}
-	if err := connection.Raw(func(raw any) error {
-		driverConnection, ok := raw.(sqliteDriver.Conn)
-		if !ok {
-			return errors.New("sqlite driver does not expose its raw connection")
-		}
-		rawConnection := driverConnection.Raw()
-		previousInterrupt := rawConnection.SetInterrupt(ctx)
-		defer rawConnection.SetInterrupt(previousInterrupt)
-		var serializeErr error
-		image, serializeErr = serdes.Serialize(rawConnection, "main")
-		return errors.Join(serializeErr, ctx.Err())
-	}); err != nil {
-		return nil, fmt.Errorf("serialize fresh sqlite database: %w", err)
-	}
-	if len(image) == 0 || len(image) > maxFreshDatabaseImageSize {
-		return nil, fmt.Errorf("%w: fresh sqlite image size %d outside 1..%d", ErrCorruptState, len(image), maxFreshDatabaseImageSize)
+	image, err := buildDatabaseImage(ctx, bootstrapIdentity{config: config, at: at, daemonID: daemonID})
+	if err != nil {
+		return nil, err
 	}
 	if err := InspectPristine(ctx, bytes.NewReader(image), int64(len(image))); err != nil {
-		return nil, fmt.Errorf("validate serialized sqlite database: %w", err)
+		return nil, fmt.Errorf("validate fresh sqlite image: %w", err)
 	}
 	return image, nil
 }
 
 // InspectImmutable validates an already-open, sidecar-free SQLite main file
-// without taking ownership of reader or opening a filesystem path. The caller
-// must hold the database lifetime lock, prove that no sidecar exists, and keep
-// the declared bytes stable until this call returns.
+// without taking ownership of reader. The caller must hold the database
+// lifetime lock, prove that no sidecar exists, and keep the declared bytes
+// stable until this call returns.
 func InspectImmutable(ctx context.Context, reader io.ReaderAt, size int64) error {
 	return inspectImmutable(ctx, reader, size, false)
 }
 
 // InspectPristine validates the exact sidecar-free rollback image produced by
-// NewDatabaseImage. In addition to InspectImmutable's caller obligations, it
-// rejects retained product rows, sequence/free-page state, and noncanonical
-// SQLite internal objects.
+// NewDatabaseImage. It rebuilds the canonical image from the validated dynamic
+// factory identity and requires byte-for-byte equality, so deleted or vacuumed
+// history cannot masquerade as a fresh home.
 func InspectPristine(ctx context.Context, reader io.ReaderAt, size int64) error {
 	return inspectImmutable(ctx, reader, size, true)
 }
 
-func inspectImmutable(ctx context.Context, reader io.ReaderAt, size int64, requirePristine bool) (resultErr error) {
+func buildDatabaseImage(ctx context.Context, identity bootstrapIdentity) (image []byte, resultErr error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	scratch, err := newDatabaseImageScratch(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err := finishDatabaseImageScratch(scratch.directory, nil, os.RemoveAll); err != nil {
+			image = nil
+			resultErr = errors.Join(resultErr, err)
+		}
+	}()
+
+	pool, err := sql.Open(driverName, databaseImageBuildDataSource(scratch.path))
+	if err != nil {
+		return nil, fmt.Errorf("open private sqlite image: %w", err)
+	}
+	pool.SetMaxOpenConns(1)
+	pool.SetMaxIdleConns(1)
+	defer func() {
+		if pool != nil {
+			if err := pool.Close(); err != nil {
+				image = nil
+				resultErr = errors.Join(resultErr, fmt.Errorf("close private sqlite image pool: %w", err))
+			}
+		}
+	}()
+	connection, err := pool.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("checkout private sqlite image connection: %w", err)
+	}
+	defer func() {
+		if connection != nil {
+			if err := connection.Close(); err != nil {
+				image = nil
+				resultErr = errors.Join(resultErr, fmt.Errorf("return private sqlite image connection: %w", err))
+			}
+		}
+	}()
+	if _, err := connection.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return nil, fmt.Errorf("begin private sqlite image initialization: %w", err)
+	}
+	if err := initializeFresh(ctx, connection, identity.config, identity.at, identity.daemonID); err != nil {
+		_, rollbackErr := connection.ExecContext(context.Background(), "ROLLBACK")
+		return nil, errors.Join(err, rollbackErr)
+	}
+	if _, err := connection.ExecContext(ctx, "COMMIT"); err != nil {
+		return nil, fmt.Errorf("commit private sqlite image initialization: %w", err)
+	}
+	if err := validateDatabaseSnapshot(ctx, connection); err != nil {
+		return nil, err
+	}
+	if err := connection.Close(); err != nil {
+		connection = nil
+		return nil, fmt.Errorf("return private sqlite image connection: %w", err)
+	}
+	connection = nil
+	if err := pool.Close(); err != nil {
+		pool = nil
+		return nil, fmt.Errorf("close private sqlite image pool: %w", err)
+	}
+	pool = nil
+
+	image, err = readScratchImage(ctx, scratch)
+	if err != nil {
+		return nil, err
+	}
+	if len(image) == 0 || len(image) > maxFreshDatabaseImageSize {
+		return nil, fmt.Errorf("%w: fresh sqlite image size %d outside 1..%d", ErrCorruptState, len(image), maxFreshDatabaseImageSize)
+	}
+	if err := validateDatabaseHeader(bytes.NewReader(image), int64(len(image)), false); err != nil {
+		return nil, err
+	}
+	if image[18] != 1 || image[19] != 1 {
+		return nil, fmt.Errorf("%w: fresh sqlite image must use rollback header 1/1", ErrCorruptState)
+	}
+	return image, nil
+}
+
+func inspectImmutable(ctx context.Context, reader io.ReaderAt, size int64, pristine bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -127,57 +177,203 @@ func inspectImmutable(ctx context.Context, reader io.ReaderAt, size int64, requi
 	if err := validateDatabaseHeader(bytes.NewReader(image), size, false); err != nil {
 		return err
 	}
-	if requirePristine && (image[18] != 1 || image[19] != 1) {
+	if pristine && (image[18] != 1 || image[19] != 1) {
 		return fmt.Errorf("%w: pristine sqlite image must use rollback header 1/1", ErrForeignDatabase)
 	}
-	pool, err := sql.Open(driverName, ":memory:")
+	identity, err := validateScratchImage(ctx, image, pristine)
+	if err != nil || !pristine {
+		return err
+	}
+	canonical, err := buildDatabaseImage(ctx, identity)
 	if err != nil {
-		return fmt.Errorf("open private immutable sqlite database: %w", err)
+		return fmt.Errorf("rebuild canonical sqlite image: %w", err)
+	}
+	if !bytes.Equal(image, canonical) {
+		return fmt.Errorf("%w: rollback database is not byte-exact fresh state", ErrForeignDatabase)
+	}
+	return nil
+}
+
+func validateScratchImage(ctx context.Context, image []byte, pristine bool) (identity bootstrapIdentity, resultErr error) {
+	scratch, err := newDatabaseImageScratch(ctx, image)
+	if err != nil {
+		return bootstrapIdentity{}, err
+	}
+	defer func() {
+		resultErr = finishDatabaseImageScratch(scratch.directory, resultErr, os.RemoveAll)
+	}()
+	pool, err := sql.Open(driverName, databaseImageInspectDataSource(scratch.path))
+	if err != nil {
+		return bootstrapIdentity{}, fmt.Errorf("open private immutable sqlite database: %w", err)
 	}
 	pool.SetMaxOpenConns(1)
 	pool.SetMaxIdleConns(1)
 	defer func() {
-		if err := pool.Close(); err != nil {
-			resultErr = errors.Join(resultErr, fmt.Errorf("close private immutable sqlite database: %w", err))
+		if pool != nil {
+			if err := pool.Close(); err != nil {
+				resultErr = errors.Join(resultErr, fmt.Errorf("close private immutable sqlite pool: %w", err))
+			}
 		}
 	}()
 	connection, err := pool.Conn(ctx)
 	if err != nil {
-		return fmt.Errorf("checkout private immutable sqlite connection: %w", err)
+		return bootstrapIdentity{}, fmt.Errorf("checkout private immutable sqlite connection: %w", err)
 	}
-	if err := connection.Raw(func(raw any) error {
-		driverConnection, ok := raw.(sqliteDriver.Conn)
-		if !ok {
-			return errors.New("sqlite driver does not expose its raw connection")
+	defer func() {
+		if connection != nil {
+			if err := connection.Close(); err != nil {
+				resultErr = errors.Join(resultErr, fmt.Errorf("return private immutable sqlite connection: %w", err))
+			}
 		}
-		rawConnection := driverConnection.Raw()
-		previousInterrupt := rawConnection.SetInterrupt(ctx)
-		defer rawConnection.SetInterrupt(previousInterrupt)
-		return errors.Join(serdes.Deserialize(rawConnection, "main", image), ctx.Err())
-	}); err != nil {
-		return errors.Join(fmt.Errorf("restore immutable sqlite image: %w", err), connection.Close())
+	}()
+	if err := validateDatabaseSnapshot(ctx, connection); err != nil {
+		return bootstrapIdentity{}, err
 	}
-	if _, err := connection.ExecContext(ctx, "PRAGMA query_only = ON"); err != nil {
-		return errors.Join(fmt.Errorf("make immutable sqlite connection read-only: %w", err), connection.Close())
+	if pristine {
+		identity, err = readBootstrapIdentity(ctx, connection)
+		if err != nil {
+			return bootstrapIdentity{}, err
+		}
 	}
-	if _, err := connection.ExecContext(ctx, "PRAGMA temp_store = MEMORY"); err != nil {
-		return errors.Join(fmt.Errorf("configure immutable sqlite temporary storage: %w", err), connection.Close())
+	if err := connection.Close(); err != nil {
+		connection = nil
+		return bootstrapIdentity{}, fmt.Errorf("return private immutable sqlite connection: %w", err)
 	}
-	err = validateDatabaseSnapshot(ctx, connection)
-	if err == nil && requirePristine {
-		err = validatePristineBootstrap(ctx, connection)
+	connection = nil
+	if err := pool.Close(); err != nil {
+		pool = nil
+		return bootstrapIdentity{}, fmt.Errorf("close private immutable sqlite pool: %w", err)
 	}
-	return errors.Join(err, connection.Close())
+	pool = nil
+	return identity, nil
+}
+
+func newDatabaseImageScratch(ctx context.Context, contents []byte) (_ databaseImageScratch, resultErr error) {
+	if err := ctx.Err(); err != nil {
+		return databaseImageScratch{}, err
+	}
+	directory, err := os.MkdirTemp("", "dark-factory-sqlite-image-")
+	if err != nil {
+		return databaseImageScratch{}, fmt.Errorf("create private sqlite image scratch: %w", err)
+	}
+	scratch := databaseImageScratch{directory: directory, path: filepath.Join(directory, "image.sqlite3")}
+	defer func() {
+		if resultErr != nil {
+			resultErr = finishDatabaseImageScratch(directory, resultErr, os.RemoveAll)
+		}
+	}()
+	if err := os.Chmod(directory, 0o700); err != nil {
+		return databaseImageScratch{}, fmt.Errorf("secure private sqlite image scratch: %w", err)
+	}
+	if err := validatePrivateDirectory(directory); err != nil {
+		return databaseImageScratch{}, err
+	}
+	file, err := os.OpenFile(scratch.path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return databaseImageScratch{}, fmt.Errorf("create private sqlite image file: %w", err)
+	}
+	if err := file.Chmod(0o600); err != nil {
+		return databaseImageScratch{}, errors.Join(fmt.Errorf("secure private sqlite image file: %w", err), file.Close())
+	}
+	for offset := 0; offset < len(contents); {
+		if err := ctx.Err(); err != nil {
+			return databaseImageScratch{}, errors.Join(err, file.Close())
+		}
+		end := offset + immutableImageReadChunkSize
+		if end > len(contents) {
+			end = len(contents)
+		}
+		written, writeErr := file.Write(contents[offset:end])
+		if writeErr == nil && written != end-offset {
+			writeErr = io.ErrShortWrite
+		}
+		if writeErr != nil {
+			return databaseImageScratch{}, errors.Join(fmt.Errorf("write private sqlite image: %w", writeErr), file.Close())
+		}
+		offset = end
+	}
+	if err := file.Close(); err != nil {
+		return databaseImageScratch{}, fmt.Errorf("close private sqlite image file: %w", err)
+	}
+	if err := validateScratchMain(scratch.path, int64(len(contents))); err != nil {
+		return databaseImageScratch{}, err
+	}
+	return scratch, nil
+}
+
+func finishDatabaseImageScratch(directory string, cause error, remove func(string) error) error {
+	if err := remove(directory); err != nil {
+		return errors.Join(cause, fmt.Errorf("remove private sqlite image scratch: %w", err))
+	}
+	return cause
+}
+
+func validateScratchMain(path string, size int64) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("inspect private sqlite image file: %w", err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if info.Mode() != 0o600 || !ok || stat.Uid != uint32(os.Geteuid()) || stat.Nlink != 1 || info.Size() != size {
+		return fmt.Errorf("%w: private sqlite image file is not exact owner-only regular 0600", ErrForeignDatabase)
+	}
+	return nil
+}
+
+func readScratchImage(ctx context.Context, scratch databaseImageScratch) ([]byte, error) {
+	entries, err := os.ReadDir(scratch.directory)
+	if err != nil {
+		return nil, fmt.Errorf("inspect private sqlite image scratch: %w", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != filepath.Base(scratch.path) {
+		return nil, fmt.Errorf("%w: private sqlite image retained unexpected sidecars", ErrCorruptState)
+	}
+	fd, err := unix.Open(scratch.path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open private sqlite image result: %w", err)
+	}
+	file := os.NewFile(uintptr(fd), scratch.path)
+	if file == nil {
+		_ = unix.Close(fd)
+		return nil, errors.New("open private sqlite image result: invalid file descriptor")
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("inspect private sqlite image result: %w", err), file.Close())
+	}
+	if err := validateScratchMain(scratch.path, info.Size()); err != nil {
+		return nil, errors.Join(err, file.Close())
+	}
+	bound, err := os.Lstat(scratch.path)
+	if err != nil || !os.SameFile(info, bound) {
+		return nil, errors.Join(fmt.Errorf("%w: private sqlite image path binding changed", ErrCorruptState), err, file.Close())
+	}
+	if info.Size() <= 0 || info.Size() > maxFreshDatabaseImageSize {
+		return nil, errors.Join(fmt.Errorf("%w: private sqlite image size %d outside 1..%d", ErrCorruptState, info.Size(), maxFreshDatabaseImageSize), file.Close())
+	}
+	image, readErr := readImmutableImage(ctx, file, info.Size())
+	return image, errors.Join(readErr, file.Close())
+}
+
+func databaseImageBuildDataSource(path string) string {
+	query := url.Values{"mode": {"rw"}}
+	query["_pragma"] = []string{"foreign_keys(ON)", "journal_mode(DELETE)", "synchronous(FULL)", "temp_store(MEMORY)"}
+	return (&url.URL{Scheme: "file", Path: path, RawQuery: query.Encode()}).String()
+}
+
+func databaseImageInspectDataSource(path string) string {
+	query := url.Values{"mode": {"ro"}, "immutable": {"1"}}
+	query["_pragma"] = []string{"foreign_keys(ON)", "query_only(ON)", "temp_store(MEMORY)"}
+	return (&url.URL{Scheme: "file", Path: path, RawQuery: query.Encode()}).String()
 }
 
 func readImmutableImage(ctx context.Context, reader io.ReaderAt, size int64) ([]byte, error) {
 	image := make([]byte, int(size))
-	const chunkSize = 128 << 10
 	for offset := int64(0); offset < size; {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		end := offset + chunkSize
+		end := offset + immutableImageReadChunkSize
 		if end > size {
 			end = size
 		}
@@ -197,76 +393,27 @@ func readImmutableImage(ctx context.Context, reader io.ReaderAt, size int64) ([]
 	return image, nil
 }
 
-func validatePristineBootstrap(ctx context.Context, connection *sql.Conn) error {
-	var rows int
-	if err := connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM factory WHERE singleton = 1 AND revision = 1 AND next_invalidation_sequence = 1 AND invalidation_floor = 1`).Scan(&rows); err != nil {
-		return fmt.Errorf("inspect bootstrap factory state: %w", err)
+func readBootstrapIdentity(ctx context.Context, connection *sql.Conn) (bootstrapIdentity, error) {
+	var daemonBytes []byte
+	var dispatch int
+	var capacity int64
+	var updatedAt int64
+	if err := connection.QueryRowContext(ctx, `SELECT daemon_id, dispatch_enabled, capacity, updated_at_ms FROM factory WHERE singleton = 1`).Scan(&daemonBytes, &dispatch, &capacity, &updatedAt); err != nil {
+		return bootstrapIdentity{}, fmt.Errorf("read bootstrap identity: %w", err)
 	}
-	if rows != 1 {
-		return fmt.Errorf("%w: rollback database is not an exact fresh bootstrap", ErrForeignDatabase)
-	}
-	for name, object := range expectedSchema() {
-		if object.kind != "table" || name == "factory" {
-			continue
-		}
-		if err := connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM "`+name+`" LIMIT 1)`).Scan(&rows); err != nil {
-			return fmt.Errorf("inspect bootstrap table %s: %w", name, err)
-		}
-		if rows != 0 {
-			return fmt.Errorf("%w: rollback database contains retained %s state", ErrForeignDatabase, name)
-		}
-	}
-	if err := connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_sequence LIMIT 1)`).Scan(&rows); err != nil {
-		return fmt.Errorf("inspect bootstrap sqlite sequence: %w", err)
-	}
-	if rows != 0 {
-		return fmt.Errorf("%w: rollback database contains retained sequence state", ErrForeignDatabase)
-	}
-	internal, err := connection.QueryContext(ctx, `SELECT type, name, tbl_name, sql FROM sqlite_schema WHERE name LIKE 'sqlite_%' ORDER BY type, name`)
+	daemonID, err := DaemonIDFromBytes(daemonBytes)
 	if err != nil {
-		return fmt.Errorf("inspect bootstrap internal schema: %w", err)
+		return bootstrapIdentity{}, err
 	}
-	defer internal.Close()
-	type internalObject struct {
-		kind       string
-		table      string
-		definition sql.NullString
+	at, err := NewUnixMillis(updatedAt)
+	if err != nil {
+		return bootstrapIdentity{}, err
 	}
-	expectedInternal := map[string]internalObject{
-		"sqlite_autoindex_browser_clients_2": {kind: "index", table: "browser_clients"},
-		"sqlite_autoindex_human_requests_2":  {kind: "index", table: "human_requests"},
-		"sqlite_autoindex_human_requests_3":  {kind: "index", table: "human_requests"},
-		"sqlite_sequence": {kind: "table", table: "sqlite_sequence", definition: sql.NullString{
-			String: "CREATE TABLE sqlite_sequence(name,seq)", Valid: true,
-		}},
+	config, err := (FactoryConfig{DispatchEnabled: dispatch == 1, Capacity: uint16(capacity)}).normalized()
+	if err != nil {
+		return bootstrapIdentity{}, err
 	}
-	seenInternal := make(map[string]bool, len(expectedInternal))
-	for internal.Next() {
-		var kind, name, table string
-		var definition sql.NullString
-		if err := internal.Scan(&kind, &name, &table, &definition); err != nil {
-			return fmt.Errorf("scan bootstrap internal schema: %w", err)
-		}
-		expected, ok := expectedInternal[name]
-		if !ok || kind != expected.kind || table != expected.table || definition != expected.definition {
-			return fmt.Errorf("%w: rollback database contains unexpected internal object %s %s", ErrForeignDatabase, kind, name)
-		}
-		seenInternal[name] = true
-	}
-	if err := internal.Err(); err != nil {
-		return fmt.Errorf("iterate bootstrap internal schema: %w", err)
-	}
-	if len(seenInternal) != len(expectedInternal) {
-		return fmt.Errorf("%w: rollback database has %d canonical internal objects, want %d", ErrForeignDatabase, len(seenInternal), len(expectedInternal))
-	}
-	var freePages int64
-	if err := connection.QueryRowContext(ctx, `PRAGMA freelist_count`).Scan(&freePages); err != nil {
-		return fmt.Errorf("inspect bootstrap free pages: %w", err)
-	}
-	if freePages != 0 {
-		return fmt.Errorf("%w: rollback database contains %d free pages", ErrForeignDatabase, freePages)
-	}
-	return nil
+	return bootstrapIdentity{config: config, at: at, daemonID: daemonID}, nil
 }
 
 func validateDatabaseHeader(reader io.ReaderAt, size int64, walRequired bool) error {

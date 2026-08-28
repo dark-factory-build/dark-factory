@@ -6,12 +6,18 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"testing"
 )
 
 // createTestStore composes the same two production seams the installer will
 // own: build a complete image, publish it create-only, then open it. It is a
 // test fixture, not a filesystem publication contract.
 func createTestStore(ctx context.Context, path string, config FactoryConfig, at UnixMillis) (*Store, error) {
+	path, err := canonicalTestDatabasePath(path)
+	if err != nil {
+		return nil, err
+	}
 	image, err := NewDatabaseImage(ctx, config, at)
 	if err != nil {
 		return nil, err
@@ -34,4 +40,24 @@ func createTestStore(ctx context.Context, path string, config FactoryConfig, at 
 		return nil, io.ErrShortWrite
 	}
 	return Open(ctx, path)
+}
+
+func canonicalTestDatabasePath(path string) (string, error) {
+	parent, err := filepath.EvalSymlinks(filepath.Dir(path))
+	if err != nil {
+		return "", err
+	}
+	if err := os.Chmod(parent, 0o700); err != nil {
+		return "", err
+	}
+	return filepath.Join(parent, filepath.Base(path)), nil
+}
+
+func mustCanonicalTestDatabasePath(t testing.TB, path string) string {
+	t.Helper()
+	canonical, err := canonicalTestDatabasePath(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return canonical
 }

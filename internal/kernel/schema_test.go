@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -17,7 +18,7 @@ import (
 
 func TestDatabaseImageOpenExactSchemaAndIdentity(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "kernel.db")
+	path := mustCanonicalTestDatabasePath(t, filepath.Join(t.TempDir(), "kernel.db"))
 	at := mustTime(t, 42)
 	store, err := createTestStore(ctx, path, FactoryConfig{}, at)
 	if err != nil {
@@ -39,7 +40,7 @@ func TestDatabaseImageOpenExactSchemaAndIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	var objects int
-	if err := connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'`).Scan(&objects); err != nil {
+	if err := connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema WHERE NOT (`+internalSchemaNamePredicate+`)`).Scan(&objects); err != nil {
 		t.Fatal(err)
 	}
 	connection.Close()
@@ -70,7 +71,7 @@ func TestOpenRejectsForeignPathsWithoutModification(t *testing.T) {
 	at := mustTime(t, 1)
 
 	t.Run("empty", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), "empty.db")
+		path := mustCanonicalTestDatabasePath(t, filepath.Join(t.TempDir(), "empty.db"))
 		if err := os.WriteFile(path, nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -82,7 +83,7 @@ func TestOpenRejectsForeignPathsWithoutModification(t *testing.T) {
 	})
 
 	t.Run("foreign application", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), "rust.db")
+		path := mustCanonicalTestDatabasePath(t, filepath.Join(t.TempDir(), "rust.db"))
 		raw := openRaw(t, path)
 		if _, err := raw.Exec(`PRAGMA application_id = 1146242898`); err != nil {
 			t.Fatal(err)
@@ -108,7 +109,7 @@ func TestOpenRejectsForeignPathsWithoutModification(t *testing.T) {
 	})
 
 	t.Run("wrong mode", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), "mode.db")
+		path := mustCanonicalTestDatabasePath(t, filepath.Join(t.TempDir(), "mode.db"))
 		store, err := createTestStore(ctx, path, FactoryConfig{}, at)
 		if err != nil {
 			t.Fatal(err)
@@ -125,7 +126,7 @@ func TestOpenRejectsForeignPathsWithoutModification(t *testing.T) {
 	})
 
 	t.Run("symlink", func(t *testing.T) {
-		directory := t.TempDir()
+		directory := filepath.Dir(mustCanonicalTestDatabasePath(t, filepath.Join(t.TempDir(), "placeholder")))
 		target := filepath.Join(directory, "target.db")
 		store, err := createTestStore(ctx, target, FactoryConfig{}, at)
 		if err != nil {
@@ -156,7 +157,7 @@ func TestOpenRejectsUnknownVersionAndPartialIdentity(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "kernel.db")
+			path := mustCanonicalTestDatabasePath(t, filepath.Join(t.TempDir(), "kernel.db"))
 			store, err := createTestStore(context.Background(), path, FactoryConfig{}, mustTime(t, 1))
 			if err != nil {
 				t.Fatal(err)
@@ -182,7 +183,7 @@ func TestOpenRejectsEverySchemaDrift(t *testing.T) {
 	}
 	for name, mutation := range tests {
 		t.Run(name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "kernel.db")
+			path := mustCanonicalTestDatabasePath(t, filepath.Join(t.TempDir(), "kernel.db"))
 			store, err := createTestStore(context.Background(), path, FactoryConfig{}, mustTime(t, 1))
 			if err != nil {
 				t.Fatal(err)
@@ -199,6 +200,84 @@ func TestOpenRejectsEverySchemaDrift(t *testing.T) {
 			}
 			assertDatabaseEvidenceUnchanged(t, path, before)
 		})
+	}
+}
+
+func TestLiteralSQLiteInternalPrefixNeverHidesForeignSchema(t *testing.T) {
+	statements := map[string]string{
+		"table":             `CREATE TABLE sqliteXtable(value INTEGER)`,
+		"index":             `CREATE INDEX sqliteXindex ON factory(updated_at_ms)`,
+		"view":              `CREATE VIEW sqliteXview AS SELECT singleton FROM factory`,
+		"trigger":           `CREATE TRIGGER sqliteXtrigger AFTER UPDATE ON factory BEGIN SELECT 1; END`,
+		"upper-case prefix": `CREATE TABLE SQLITEXcase(value INTEGER)`,
+		"percent character": `CREATE TABLE "sqlite%wild"(value INTEGER)`,
+	}
+	for name, statement := range statements {
+		t.Run(name, func(t *testing.T) {
+			store, _ := newTestStore(t)
+			defer store.Close()
+			if _, err := store.writer.ExecContext(context.Background(), statement); err != nil {
+				t.Fatal(err)
+			}
+			connection, err := store.readerConnection(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			validationErr := validateExactSchema(context.Background(), connection)
+			if err := connection.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if !errors.Is(validationErr, ErrForeignDatabase) {
+				t.Fatalf("near-prefix %s schema error = %v", name, validationErr)
+			}
+		})
+	}
+
+	blank, err := sql.Open(driverName, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := blank.Exec(`CREATE TABLE sqliteXempty(value INTEGER)`); err != nil {
+		blank.Close()
+		t.Fatal(err)
+	}
+	connection, err := blank.Conn(context.Background())
+	if err != nil {
+		blank.Close()
+		t.Fatal(err)
+	}
+	empty, emptyErr := schemaIsEmpty(context.Background(), connection)
+	if err := errors.Join(emptyErr, connection.Close(), blank.Close()); err != nil {
+		t.Fatal(err)
+	}
+	if empty {
+		t.Fatal("near-prefix schema was hidden from empty-database classification")
+	}
+}
+
+func TestLiteralSQLiteInternalPrefixCoversEveryInspectionPath(t *testing.T) {
+	path := mutatedRollbackPath(t, `CREATE TABLE sqliteXrollback(value INTEGER)`)
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, inspect := range map[string]func(context.Context, io.ReaderAt, int64) error{
+		"immutable": InspectImmutable,
+		"pristine":  InspectPristine,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := inspect(context.Background(), bytes.NewReader(contents), int64(len(contents))); !errors.Is(err, ErrForeignDatabase) {
+				t.Fatalf("%s near-prefix error = %v", name, err)
+			}
+		})
+	}
+	if _, err := Open(context.Background(), path); !errors.Is(err, ErrForeignDatabase) {
+		t.Fatalf("rollback near-prefix Open error = %v", err)
+	}
+
+	walPath, _ := walSnapshotFixture(t, `CREATE TABLE sqliteXwal(value INTEGER)`)
+	if _, err := Open(context.Background(), walPath); !errors.Is(err, ErrForeignDatabase) {
+		t.Fatalf("WAL near-prefix Open error = %v", err)
 	}
 }
 
@@ -297,6 +376,11 @@ func TestLiteralImmediateExclusionAndCancelledWait(t *testing.T) {
 func newTestStore(t *testing.T) (*Store, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "kernel.db")
+	var err error
+	path, err = canonicalTestDatabasePath(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	store, err := createTestStore(context.Background(), path, FactoryConfig{}, mustTime(t, 1))
 	if err != nil {
 		t.Fatalf("Create: %v", err)

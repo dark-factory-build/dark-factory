@@ -340,6 +340,11 @@ func admissionFootprint(t *testing.T, store *Store) admissionCounts {
 func newAdmissionStore(t *testing.T, role AgentRole, capacity uint16) (*Store, string, Project, Agent) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "kernel.db")
+	var err error
+	path, err = canonicalTestDatabasePath(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	store, err := createTestStore(context.Background(), path, FactoryConfig{DispatchEnabled: true, Capacity: capacity}, mustTime(t, 1))
 	if err != nil {
 		t.Fatal(err)

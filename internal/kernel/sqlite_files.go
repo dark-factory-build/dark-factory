@@ -25,47 +25,47 @@ const (
 	walIndexRegionSize = 32768
 )
 
+// Open validates and activates one canonical absolute database path. The
+// caller must hold exclusive home lifetime authority for the entire call;
+// descriptor checks detect replacement but cannot make SQLite's path open
+// relative to the retained parent descriptors.
 func Open(ctx context.Context, absolutePath string) (*Store, error) {
-	if err := validateDatabasePath(absolutePath); err != nil {
-		return nil, err
-	}
 	files, err := openDatabaseFiles(absolutePath)
 	if err != nil {
 		return nil, err
 	}
-	for {
-		if err := files.refreshPinnedInfo(); err != nil {
-			return nil, errors.Join(err, files.Close())
-		}
-		snapshot, err := preflightExisting(ctx, files)
-		if errors.Is(err, errDatabaseSnapshotChanged) {
-			continue
-		}
-		if err != nil {
-			return nil, errors.Join(err, files.Close())
-		}
-		if err := files.verifySnapshot(ctx, snapshot); errors.Is(err, errDatabaseSnapshotChanged) && files.wal != nil {
-			continue
-		} else if err != nil {
-			return nil, errors.Join(err, files.Close())
-		}
-		if err := files.recheckPaths(); err != nil {
-			return nil, errors.Join(err, files.Close())
-		}
-		break
+	if err := files.refreshPinnedInfo(); err != nil {
+		return nil, errors.Join(err, files.Close())
 	}
-	if files.wal == nil {
+	snapshot, err := preflightExisting(ctx, files)
+	if err != nil {
+		return nil, errors.Join(err, files.Close())
+	}
+	if err := files.verifySnapshot(ctx, snapshot); err != nil {
+		return nil, errors.Join(err, files.Close())
+	}
+	if err := files.recheckPaths(); err != nil {
+		return nil, errors.Join(err, files.Close())
+	}
+	hadWAL := files.wal != nil
+	if !hadWAL {
 		if err := files.reservePrivateSHM(); err != nil {
 			return nil, errors.Join(err, files.Close())
 		}
 	}
 	store, err := openPools(absolutePath)
 	if err != nil {
-		return nil, errors.Join(err, files.removeEmptyCreatedSidecars(), files.Close())
+		// SQLite activation may have created or changed sidecars. Without an
+		// exact live creation descriptor they remain visible evidence; cleanup
+		// must never guess ownership from a pathname.
+		return nil, closeFailedActivation(files, err)
 	}
-	if files.wal == nil {
+	if !hadWAL {
 		files.wal, err = files.openDatabaseFile(files.main.name+"-wal", "WAL", 0, maxSQLiteWALSize)
 		if err != nil {
+			return nil, closeRejectedOpen(store, files, err)
+		}
+		if err := files.refreshPinnedInfo(); err != nil {
 			return nil, closeRejectedOpen(store, files, err)
 		}
 	}
@@ -81,6 +81,10 @@ func Open(ctx context.Context, absolutePath string) (*Store, error) {
 	return store, nil
 }
 
+func closeFailedActivation(files *databaseFiles, cause error) error {
+	return errors.Join(cause, files.Close())
+}
+
 func closeRejectedOpen(store *Store, files *databaseFiles, cause error) error {
 	return errors.Join(cause, store.Close(), files.Close())
 }
@@ -88,6 +92,9 @@ func closeRejectedOpen(store *Store, files *databaseFiles, cause error) error {
 func validateDatabasePath(path string) error {
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("%w: sqlite path must be absolute: %q", ErrInvalidValue, path)
+	}
+	if filepath.Clean(path) != path || filepath.Base(path) == "." || filepath.Base(path) == string(filepath.Separator) {
+		return fmt.Errorf("%w: sqlite path must be canonical: %q", ErrInvalidValue, path)
 	}
 	return nil
 }
@@ -110,7 +117,7 @@ func preflightExisting(ctx context.Context, files *databaseFiles) (databaseSnaps
 	return validateWALSnapshotCopy(ctx, files)
 }
 
-var errDatabaseSnapshotChanged = errors.New("sqlite database changed during preflight")
+var errDatabaseSnapshotChanged = fmt.Errorf("%w: sqlite database changed during preflight", ErrCorruptState)
 
 type databaseDigest struct {
 	size int64
@@ -133,32 +140,162 @@ type databaseFile struct {
 }
 
 type databaseFiles struct {
-	directoryPath string
-	directory     *os.File
-	directoryStat unix.Stat_t
-	main          *databaseFile
-	wal           *databaseFile
-	shm           *databaseFile
-	reservedSHM   *databaseFile
+	authority *databasePathAuthority
+	directory *os.File
+	main      *databaseFile
+	wal       *databaseFile
+	shm       *databaseFile
+}
+
+type databasePathComponent struct {
+	name string
+	file *os.File
+	info os.FileInfo
+	stat unix.Stat_t
+}
+
+type databasePathAuthority struct {
+	path       string
+	components []databasePathComponent
+}
+
+func openDatabasePathAuthority(path string) (_ *databasePathAuthority, resultErr error) {
+	if err := validateDatabasePath(path); err != nil {
+		return nil, err
+	}
+	parent := filepath.Dir(path)
+	parts := strings.Split(strings.TrimPrefix(parent, string(filepath.Separator)), string(filepath.Separator))
+	if parent == string(filepath.Separator) {
+		parts = nil
+	}
+	authority := &databasePathAuthority{path: parent}
+	defer func() {
+		if resultErr != nil {
+			resultErr = errors.Join(resultErr, authority.Close())
+		}
+	}()
+	rootFD, err := unix.Open(string(filepath.Separator), unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_DIRECTORY, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite path root: %w", err)
+	}
+	root := os.NewFile(uintptr(rootFD), string(filepath.Separator))
+	if root == nil {
+		_ = unix.Close(rootFD)
+		return nil, errors.New("open sqlite path root: invalid file descriptor")
+	}
+	component, err := inspectPathComponent("", root)
+	if err != nil {
+		return nil, err
+	}
+	authority.components = append(authority.components, component)
+	for index, name := range parts {
+		if name == "" || name == "." || name == ".." {
+			return nil, fmt.Errorf("%w: sqlite path contains a noncanonical component", ErrInvalidValue)
+		}
+		parentFile := authority.components[len(authority.components)-1].file
+		fd, err := unix.Openat(int(parentFile.Fd()), name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_DIRECTORY, 0)
+		if err != nil {
+			return nil, fmt.Errorf("%w: open sqlite parent component %q: %v", ErrForeignDatabase, name, err)
+		}
+		file := os.NewFile(uintptr(fd), filepath.Join(string(filepath.Separator), filepath.Join(parts[:index+1]...)))
+		if file == nil {
+			_ = unix.Close(fd)
+			return nil, fmt.Errorf("open sqlite parent component %q: invalid file descriptor", name)
+		}
+		component, err := inspectPathComponent(name, file)
+		if err != nil {
+			return nil, err
+		}
+		authority.components = append(authority.components, component)
+	}
+	if err := validateDatabaseParentInfo(authority.components[len(authority.components)-1].info); err != nil {
+		return nil, err
+	}
+	return authority, nil
+}
+
+func inspectPathComponent(name string, file *os.File) (databasePathComponent, error) {
+	info, err := file.Stat()
+	if err != nil {
+		return databasePathComponent{}, errors.Join(fmt.Errorf("inspect sqlite path component %q: %w", name, err), file.Close())
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
+		return databasePathComponent{}, errors.Join(fmt.Errorf("inspect sqlite path component %q identity: %w", name, err), file.Close())
+	}
+	if !info.IsDir() {
+		return databasePathComponent{}, errors.Join(fmt.Errorf("%w: sqlite path component %q is not a directory", ErrForeignDatabase, name), file.Close())
+	}
+	return databasePathComponent{name: name, file: file, info: info, stat: stat}, nil
+}
+
+func validateDatabaseParentInfo(info os.FileInfo) error {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if info.Mode() != os.ModeDir|0o700 || !ok || stat.Uid != uint32(os.Geteuid()) {
+		return fmt.Errorf("%w: sqlite parent directory must be exact current-user 0700", ErrForeignDatabase)
+	}
+	return nil
+}
+
+func (authority *databasePathAuthority) directory() *os.File {
+	return authority.components[len(authority.components)-1].file
+}
+
+func (authority *databasePathAuthority) recheck() error {
+	for index := range authority.components {
+		component := &authority.components[index]
+		current, err := component.file.Stat()
+		if err != nil {
+			return fmt.Errorf("recheck sqlite path component %q: %w", component.name, err)
+		}
+		var stat unix.Stat_t
+		if err := unix.Fstat(int(component.file.Fd()), &stat); err != nil {
+			return fmt.Errorf("recheck sqlite path component %q identity: %w", component.name, err)
+		}
+		if stat.Dev != component.stat.Dev || stat.Ino != component.stat.Ino || !os.SameFile(component.info, current) {
+			return fmt.Errorf("%w: sqlite path component %q identity changed", ErrCorruptState, component.name)
+		}
+		if index == len(authority.components)-1 {
+			if err := validateDatabaseParentInfo(current); err != nil {
+				return err
+			}
+		}
+		if index == 0 {
+			continue
+		}
+		parent := authority.components[index-1].file
+		var binding unix.Stat_t
+		if err := unix.Fstatat(int(parent.Fd()), component.name, &binding, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			return fmt.Errorf("recheck sqlite path component %q binding: %w", component.name, err)
+		}
+		if binding.Dev != component.stat.Dev || binding.Ino != component.stat.Ino {
+			return fmt.Errorf("%w: sqlite path component %q binding changed", ErrCorruptState, component.name)
+		}
+	}
+	return nil
+}
+
+func (authority *databasePathAuthority) Close() error {
+	if authority == nil {
+		return nil
+	}
+	var result error
+	for index := len(authority.components) - 1; index >= 0; index-- {
+		if file := authority.components[index].file; file != nil {
+			result = errors.Join(result, file.Close())
+			authority.components[index].file = nil
+		}
+	}
+	return result
 }
 
 func openDatabaseFiles(path string) (_ *databaseFiles, resultErr error) {
-	directoryPath := filepath.Dir(path)
 	base := filepath.Base(path)
-	fd, err := unix.Open(directoryPath, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_DIRECTORY, 0)
+	authority, err := openDatabasePathAuthority(path)
 	if err != nil {
-		return nil, fmt.Errorf("open sqlite parent directory: %w", err)
+		return nil, err
 	}
-	directory := os.NewFile(uintptr(fd), directoryPath)
-	if directory == nil {
-		_ = unix.Close(fd)
-		return nil, errors.New("open sqlite parent directory: invalid file descriptor")
-	}
-	files := &databaseFiles{directoryPath: directoryPath, directory: directory}
-	if err := unix.Fstat(fd, &files.directoryStat); err != nil {
-		_ = directory.Close()
-		return nil, fmt.Errorf("inspect sqlite parent directory: %w", err)
-	}
+	files := &databaseFiles{authority: authority, directory: authority.directory()}
 	defer func() {
 		if resultErr != nil {
 			resultErr = errors.Join(resultErr, files.Close())
@@ -219,7 +356,7 @@ func (files *databaseFiles) openDatabaseFile(name, kind string, minimum, maximum
 	if err != nil {
 		return nil, fmt.Errorf("%w: open sqlite %s: %v", ErrForeignDatabase, kind, err)
 	}
-	file := os.NewFile(uintptr(fd), filepath.Join(files.directoryPath, name))
+	file := os.NewFile(uintptr(fd), filepath.Join(files.authority.path, name))
 	if file == nil {
 		_ = unix.Close(fd)
 		return nil, fmt.Errorf("open sqlite %s: invalid file descriptor", kind)
@@ -395,7 +532,7 @@ func (files *databaseFiles) recheckPaths() error {
 	} else if present {
 		return fmt.Errorf("%w: rollback journal appeared during sqlite preflight", ErrCorruptState)
 	}
-	for _, source := range []*databaseFile{files.main, files.wal, files.shm, files.reservedSHM} {
+	for _, source := range []*databaseFile{files.main, files.wal, files.shm} {
 		if source == nil {
 			continue
 		}
@@ -417,7 +554,7 @@ func (files *databaseFiles) recheckPaths() error {
 			return fmt.Errorf("%w: sqlite path binding changed during preflight", ErrCorruptState)
 		}
 	}
-	for name, expected := range map[string]bool{files.main.name + "-wal": files.wal != nil, files.main.name + "-shm": files.shm != nil || files.reservedSHM != nil} {
+	for name, expected := range map[string]bool{files.main.name + "-wal": files.wal != nil, files.main.name + "-shm": files.shm != nil} {
 		present, err := files.pathPresent(name)
 		if err != nil {
 			return err
@@ -430,19 +567,7 @@ func (files *databaseFiles) recheckPaths() error {
 }
 
 func (files *databaseFiles) recheckDirectory() error {
-	fd, err := unix.Open(files.directoryPath, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_DIRECTORY, 0)
-	if err != nil {
-		return fmt.Errorf("reopen sqlite parent directory: %w", err)
-	}
-	defer unix.Close(fd)
-	var current unix.Stat_t
-	if err := unix.Fstat(fd, &current); err != nil {
-		return fmt.Errorf("recheck sqlite parent directory: %w", err)
-	}
-	if current.Dev != files.directoryStat.Dev || current.Ino != files.directoryStat.Ino {
-		return fmt.Errorf("%w: sqlite parent directory identity changed during preflight", ErrCorruptState)
-	}
-	return nil
+	return files.authority.recheck()
 }
 
 func (files *databaseFiles) Close() error {
@@ -450,59 +575,16 @@ func (files *databaseFiles) Close() error {
 		return nil
 	}
 	var result error
-	for _, source := range []*databaseFile{files.reservedSHM, files.shm, files.wal, files.main} {
+	for _, source := range []*databaseFile{files.shm, files.wal, files.main} {
 		if source != nil && source.file != nil {
 			result = errors.Join(result, source.file.Close())
 			source.file = nil
 		}
 	}
-	if files.directory != nil {
-		result = errors.Join(result, files.directory.Close())
+	if files.authority != nil {
+		result = errors.Join(result, files.authority.Close())
+		files.authority = nil
 		files.directory = nil
-	}
-	return result
-}
-
-func openDatabaseParent(path string) (*databaseFiles, error) {
-	directoryPath := filepath.Dir(path)
-	fd, err := unix.Open(directoryPath, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_DIRECTORY, 0)
-	if err != nil {
-		return nil, fmt.Errorf("open sqlite parent directory: %w", err)
-	}
-	directory := os.NewFile(uintptr(fd), directoryPath)
-	if directory == nil {
-		_ = unix.Close(fd)
-		return nil, errors.New("open sqlite parent directory: invalid file descriptor")
-	}
-	files := &databaseFiles{directoryPath: directoryPath, directory: directory, main: &databaseFile{name: filepath.Base(path)}}
-	if err := unix.Fstat(fd, &files.directoryStat); err != nil {
-		_ = directory.Close()
-		return nil, fmt.Errorf("inspect sqlite parent directory: %w", err)
-	}
-	return files, nil
-}
-
-func (files *databaseFiles) removeEmptyCreatedSidecars() error {
-	if files == nil || files.wal != nil {
-		return nil
-	}
-	var result error
-	for _, name := range []string{files.main.name + "-wal", files.main.name + "-shm"} {
-		fd, err := unix.Openat(int(files.directory.Fd()), name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
-		if errors.Is(err, unix.ENOENT) {
-			continue
-		}
-		if err != nil {
-			result = errors.Join(result, fmt.Errorf("open failed sqlite sidecar cleanup target: %w", err))
-			continue
-		}
-		var pinned, binding unix.Stat_t
-		statErr := unix.Fstat(fd, &pinned)
-		bindErr := unix.Fstatat(int(files.directory.Fd()), name, &binding, unix.AT_SYMLINK_NOFOLLOW)
-		if statErr == nil && bindErr == nil && pinned.Dev == binding.Dev && pinned.Ino == binding.Ino && pinned.Size == 0 {
-			bindErr = unix.Unlinkat(int(files.directory.Fd()), name, 0)
-		}
-		result = errors.Join(result, statErr, bindErr, unix.Close(fd))
 	}
 	return result
 }
@@ -513,7 +595,7 @@ func (files *databaseFiles) reservePrivateSHM() error {
 	if err != nil {
 		return fmt.Errorf("reserve private sqlite SHM: %w", err)
 	}
-	file := os.NewFile(uintptr(fd), filepath.Join(files.directoryPath, name))
+	file := os.NewFile(uintptr(fd), filepath.Join(files.authority.path, name))
 	if file == nil {
 		_ = unix.Close(fd)
 		return errors.New("reserve private sqlite SHM: invalid file descriptor")
@@ -522,11 +604,14 @@ func (files *databaseFiles) reservePrivateSHM() error {
 	if err != nil {
 		return errors.Join(fmt.Errorf("inspect private sqlite SHM reservation: %w", err), file.Close())
 	}
+	if err := validateDatabaseFileInfo(info, "SHM reservation", 0, maxSQLiteSHMSize); err != nil {
+		return errors.Join(err, file.Close())
+	}
 	var stat unix.Stat_t
 	if err := unix.Fstat(fd, &stat); err != nil {
 		return errors.Join(fmt.Errorf("inspect private sqlite SHM identity: %w", err), file.Close())
 	}
-	files.reservedSHM = &databaseFile{name: name, file: file, info: info, stat: stat, minimum: 0, maximum: maxSQLiteSHMSize}
+	files.shm = &databaseFile{name: name, file: file, info: info, stat: stat, minimum: walIndexRegionSize, maximum: maxSQLiteSHMSize}
 	return nil
 }
 
@@ -631,20 +716,17 @@ func validateWALSnapshotCopy(ctx context.Context, sources *databaseFiles) (snaps
 		err = validateDatabaseSnapshot(ctx, tx.connection)
 	}
 	validationErr := errors.Join(err, tx.Close())
-	if err := sources.verifySnapshot(ctx, snapshot); err != nil {
-		return databaseSnapshot{}, err
-	}
 	return snapshot, validationErr
 }
 
 func validatePrivateDirectory(path string) error {
 	info, err := os.Lstat(path)
 	if err != nil {
-		return fmt.Errorf("inspect private WAL preflight directory: %w", err)
+		return fmt.Errorf("inspect private sqlite scratch directory: %w", err)
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if info.Mode() != os.ModeDir|0o700 || !ok || stat.Uid != uint32(os.Geteuid()) {
-		return fmt.Errorf("%w: WAL preflight directory is not exact owner-only 0700", ErrForeignDatabase)
+		return fmt.Errorf("%w: sqlite scratch directory is not exact owner-only 0700", ErrForeignDatabase)
 	}
 	return nil
 }

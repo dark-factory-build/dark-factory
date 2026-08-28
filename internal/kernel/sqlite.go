@@ -2,7 +2,6 @@ package kernel
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
 	sqldriver "database/sql/driver"
 	"errors"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ncruces/go-sqlite3"
+	_ "github.com/ncruces/go-sqlite3/driver"
 )
 
 const (
@@ -139,46 +139,7 @@ func verifyConnection(ctx context.Context, connection *sql.Conn) error {
 	return nil
 }
 
-func (store *Store) initialize(ctx context.Context, config FactoryConfig, at UnixMillis) error {
-	for attempt := 0; attempt < 2; attempt++ {
-		tx, err := store.beginUncheckedWrite(ctx)
-		if err != nil {
-			return err
-		}
-		err = initializeFresh(ctx, tx.connection, config, at)
-		if err != nil {
-			result := tx.Rollback(err)
-			tx.Close()
-			return result
-		}
-		err = tx.Commit(ctx)
-		tx.Close()
-		if err == nil {
-			return nil
-		}
-		var unknown *OutcomeUnknownError
-		if !errors.As(err, &unknown) {
-			return err
-		}
-		connection, checkoutErr := store.readerConnection(ctx)
-		if checkoutErr != nil {
-			return errors.Join(err, checkoutErr)
-		}
-		exactErr := validateExactSchema(ctx, connection)
-		if exactErr == nil {
-			_ = connection.Close()
-			return nil
-		}
-		empty, emptyErr := schemaIsEmpty(ctx, connection)
-		_ = connection.Close()
-		if emptyErr != nil || !empty || attempt == 1 {
-			return errors.Join(err, exactErr, emptyErr)
-		}
-	}
-	return errors.New("unreachable sqlite initialization state")
-}
-
-func initializeFresh(ctx context.Context, connection *sql.Conn, config FactoryConfig, at UnixMillis) error {
+func initializeFresh(ctx context.Context, connection *sql.Conn, config FactoryConfig, at UnixMillis, daemonID DaemonID) error {
 	empty, err := schemaIsEmpty(ctx, connection)
 	if err == nil && !empty {
 		err = fmt.Errorf("%w: fresh database is not empty", ErrForeignDatabase)
@@ -196,16 +157,10 @@ func initializeFresh(ctx context.Context, connection *sql.Conn, config FactoryCo
 		_, err = connection.ExecContext(ctx, statement)
 	}
 	if err == nil {
-		var rawDaemonID [IDBytes]byte
-		if _, err = rand.Read(rawDaemonID[:]); err == nil && rawDaemonID == [IDBytes]byte{} {
-			err = fmt.Errorf("%w: generated zero daemon identifier", ErrCorruptState)
-		}
-		if err == nil {
-			inserted, insertErr := connection.ExecContext(ctx,
-				`INSERT INTO factory(singleton, daemon_id, dispatch_enabled, capacity, revision, next_invalidation_sequence, invalidation_floor, updated_at_ms) VALUES(1, ?, ?, ?, 1, 1, 1, ?)`,
-				rawDaemonID[:], boolInt(config.DispatchEnabled), int64(config.Capacity), at.Int64())
-			err = requireOneRow(inserted, insertErr)
-		}
+		inserted, insertErr := connection.ExecContext(ctx,
+			`INSERT INTO factory(singleton, daemon_id, dispatch_enabled, capacity, revision, next_invalidation_sequence, invalidation_floor, updated_at_ms) VALUES(1, ?, ?, ?, 1, 1, 1, ?)`,
+			daemonID.Bytes(), boolInt(config.DispatchEnabled), int64(config.Capacity), at.Int64())
+		err = requireOneRow(inserted, insertErr)
 	}
 	return err
 }

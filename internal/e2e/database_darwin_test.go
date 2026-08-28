@@ -7,11 +7,20 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
 func createTestStore(ctx context.Context, path string, config kernel.FactoryConfig, at kernel.UnixMillis) (*kernel.Store, error) {
+	parent, err := filepath.EvalSymlinks(filepath.Dir(path))
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(parent, 0o700); err != nil {
+		return nil, err
+	}
+	path = filepath.Join(parent, filepath.Base(path))
 	image, err := kernel.NewDatabaseImage(ctx, config, at)
 	if err != nil {
 		return nil, err

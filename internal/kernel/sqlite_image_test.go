@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/binary"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -31,7 +33,7 @@ func TestNewDatabaseImageIsExactAndOpens(t *testing.T) {
 	}
 	after := directoryEntryNames(t, ".")
 	if !equalStrings(before, after) {
-		t.Fatalf("in-memory image creation changed cwd: before=%v after=%v", before, after)
+		t.Fatalf("scratch image creation changed cwd: before=%v after=%v", before, after)
 	}
 	for index, image := range [][]byte{first, second} {
 		if len(image) == 0 || len(image) > maxFreshDatabaseImageSize {
@@ -118,6 +120,70 @@ func TestNewDatabaseImageConcurrentConfigurationsDoNotCrossWire(t *testing.T) {
 	}
 }
 
+func TestDatabaseImageBuilderIsDeterministicAndScratchIsPrivate(t *testing.T) {
+	temporaryRoot := t.TempDir()
+	t.Setenv("TMPDIR", temporaryRoot)
+	daemonID, err := DaemonIDFromBytes(bytes.Repeat([]byte{0x5a}, IDBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := bootstrapIdentity{config: FactoryConfig{DispatchEnabled: true, Capacity: 7}, at: mustTime(t, 42), daemonID: daemonID}
+	first, err := buildDatabaseImage(context.Background(), identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const builders = 8
+	results := make(chan []byte, builders)
+	errorsSeen := make(chan error, builders)
+	var wait sync.WaitGroup
+	for range builders {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			image, err := buildDatabaseImage(context.Background(), identity)
+			results <- image
+			errorsSeen <- err
+		}()
+	}
+	wait.Wait()
+	close(results)
+	close(errorsSeen)
+	for err := range errorsSeen {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for image := range results {
+		if !bytes.Equal(image, first) {
+			t.Fatal("fixed bootstrap identity produced path-dependent sqlite bytes")
+		}
+	}
+	assertDirectoryEmpty(t, temporaryRoot)
+
+	scratch, err := newDatabaseImageScratch(context.Background(), first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directoryInfo, err := os.Lstat(scratch.directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileInfo, err := os.Lstat(scratch.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if directoryInfo.Mode() != os.ModeDir|0o700 || fileInfo.Mode() != 0o600 {
+		t.Fatalf("scratch modes directory=%v file=%v", directoryInfo.Mode(), fileInfo.Mode())
+	}
+	if stat, ok := fileInfo.Sys().(*syscall.Stat_t); !ok || stat.Uid != uint32(os.Geteuid()) || stat.Nlink != 1 {
+		t.Fatalf("scratch file identity = %#v", fileInfo.Sys())
+	}
+	if err := os.RemoveAll(scratch.directory); err != nil {
+		t.Fatal(err)
+	}
+	assertDirectoryEmpty(t, temporaryRoot)
+}
+
 func TestNewDatabaseImageRejectsInvalidInput(t *testing.T) {
 	if image, err := NewDatabaseImage(context.Background(), FactoryConfig{Capacity: MaxFactoryCapacity + 1}, UnixMillis{}); !errors.Is(err, ErrInvalidValue) || image != nil {
 		t.Fatalf("invalid config image=%d error=%v", len(image), err)
@@ -134,8 +200,7 @@ func TestOpenRefusesRollbackImageWithHotJournalWithoutMutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	directory := t.TempDir()
-	path := filepath.Join(directory, "factory.sqlite3")
+	path := mustCanonicalTestDatabasePath(t, filepath.Join(t.TempDir(), "factory.sqlite3"))
 	if err := os.WriteFile(path, image, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -359,7 +424,7 @@ func TestOpenRejectsUnsafeWALSidecarsWithoutMutation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			path := filepath.Join(t.TempDir(), "kernel.db")
+			path := mustCanonicalTestDatabasePath(t, filepath.Join(t.TempDir(), "kernel.db"))
 			if err := os.WriteFile(path, image, 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -392,6 +457,17 @@ func TestWALPreflightAlwaysRemovesPrivateCopy(t *testing.T) {
 		t.Fatalf("invalid WAL Open error = %v", err)
 	}
 	assertDirectoryEmpty(t, temporaryRoot)
+}
+
+func TestWALPreflightCancellationIsBoundedAndReadOnly(t *testing.T) {
+	path, _ := walSnapshotFixture(t, "")
+	before := captureSQLiteSet(t, path)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := Open(ctx, path); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled WAL Open error = %v", err)
+	}
+	assertSQLiteSetUnchanged(t, path, before)
 }
 
 func TestValidateWALHeaderFailsClosed(t *testing.T) {
@@ -432,7 +508,7 @@ func TestDatabaseFileBindingsAreRecheckedAfterPreflight(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		path := filepath.Join(t.TempDir(), "kernel.db")
+		path := mustCanonicalTestDatabasePath(t, filepath.Join(t.TempDir(), "kernel.db"))
 		writeSidecar(t, path, image, 0o600)
 		return path
 	}
@@ -682,6 +758,120 @@ func TestInspectPristineRequiresExactFreshRollbackState(t *testing.T) {
 	}
 }
 
+func TestInspectPristineRejectsReversibleHistory(t *testing.T) {
+	for name, mutate := range map[string]func(*testing.T, *sql.DB){
+		"factory changed and restored": func(t *testing.T, raw *sql.DB) {
+			if _, err := raw.Exec(`UPDATE factory SET capacity = 2`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := raw.Exec(`UPDATE factory SET capacity = 1`); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"row inserted and deleted": func(t *testing.T, raw *sql.DB) {
+			if _, err := raw.Exec(`INSERT INTO projects(id, name, root, verification_policy, revision, created_at_ms, updated_at_ms) VALUES(zeroblob(16), 'used', '/used', 'none', 1, 1, 1)`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := raw.Exec(`DELETE FROM projects`); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"row deleted then vacuumed": func(t *testing.T, raw *sql.DB) {
+			if _, err := raw.Exec(`INSERT INTO projects(id, name, root, verification_policy, revision, created_at_ms, updated_at_ms) VALUES(zeroblob(16), 'used', '/used', 'none', 1, 1, 1)`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := raw.Exec(`DELETE FROM projects`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := raw.Exec(`VACUUM`); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			image, err := NewDatabaseImage(context.Background(), FactoryConfig{}, mustTime(t, 1))
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := mustCanonicalTestDatabasePath(t, filepath.Join(t.TempDir(), "history.db"))
+			writeSidecar(t, path, image, 0o600)
+			raw := openRaw(t, path)
+			mutate(t, raw)
+			if err := raw.Close(); err != nil {
+				t.Fatal(err)
+			}
+			changed, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := InspectImmutable(context.Background(), bytes.NewReader(changed), int64(len(changed))); err != nil {
+				t.Fatalf("historically used but currently valid image: %v", err)
+			}
+			if err := InspectPristine(context.Background(), bytes.NewReader(changed), int64(len(changed))); !errors.Is(err, ErrForeignDatabase) {
+				t.Fatalf("historically used image pristine error = %v", err)
+			}
+			before := captureDatabaseEvidence(t, path)
+			if _, err := Open(context.Background(), path); !errors.Is(err, ErrForeignDatabase) {
+				t.Fatalf("historically used rollback Open error = %v", err)
+			}
+			assertDatabaseEvidenceUnchanged(t, path, before)
+		})
+	}
+}
+
+func TestDatabaseImageScratchAlwaysCleansControlledTMPDIR(t *testing.T) {
+	temporaryRoot := t.TempDir()
+	t.Setenv("TMPDIR", temporaryRoot)
+	image, err := NewDatabaseImage(context.Background(), FactoryConfig{}, mustTime(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDirectoryEmpty(t, temporaryRoot)
+	corrupt := append([]byte(nil), image...)
+	clear(corrupt[68:72])
+	if err := InspectImmutable(context.Background(), bytes.NewReader(corrupt), int64(len(corrupt))); !errors.Is(err, ErrForeignDatabase) {
+		t.Fatalf("corrupt inspection error = %v", err)
+	}
+	assertDirectoryEmpty(t, temporaryRoot)
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := InspectImmutable(cancelled, bytes.NewReader(image), int64(len(image))); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled inspection error = %v", err)
+	}
+	assertDirectoryEmpty(t, temporaryRoot)
+}
+
+func TestDatabaseImageInspectionRequiresPrivateScratch(t *testing.T) {
+	image, err := NewDatabaseImage(context.Background(), FactoryConfig{}, mustTime(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blocked, []byte("sentinel"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", blocked)
+	if err := InspectImmutable(context.Background(), bytes.NewReader(image), int64(len(image))); err == nil {
+		t.Fatal("immutable inspection bypassed its required private scratch")
+	}
+}
+
+func TestDatabaseImageScratchCleanupPreservesEveryError(t *testing.T) {
+	primary := errors.New("primary sqlite image failure")
+	cleanup := errors.New("sqlite image cleanup failure")
+	called := false
+	err := finishDatabaseImageScratch("exact-scratch", primary, func(path string) error {
+		called = true
+		if path != "exact-scratch" {
+			t.Fatalf("cleanup path = %q", path)
+		}
+		return cleanup
+	})
+	if !called || !errors.Is(err, primary) || !errors.Is(err, cleanup) {
+		t.Fatalf("joined scratch cleanup error = %v", err)
+	}
+}
+
 func TestInspectImmutableRejectsForeignTruncatedAndCorruptState(t *testing.T) {
 	ctx := context.Background()
 	image, err := NewDatabaseImage(ctx, FactoryConfig{}, mustTime(t, 1))
@@ -796,7 +986,7 @@ func TestInspectImmutableExactSizeBoundReachesReader(t *testing.T) {
 	}
 }
 
-func TestCreateUsesPrivateSQLiteSidecars(t *testing.T) {
+func TestOpenUsesPrivateSQLiteSidecars(t *testing.T) {
 	store, path := newTestStore(t)
 	defer store.Close()
 	for _, suffix := range []string{"-wal", "-shm"} {
@@ -807,6 +997,46 @@ func TestCreateUsesPrivateSQLiteSidecars(t *testing.T) {
 		if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
 			t.Fatalf("sqlite sidecar %s mode = %v", suffix, info.Mode())
 		}
+	}
+}
+
+func TestFailedActivationLeavesExactReservedSidecarEvidence(t *testing.T) {
+	image, err := NewDatabaseImage(context.Background(), FactoryConfig{}, mustTime(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := mustCanonicalTestDatabasePath(t, filepath.Join(t.TempDir(), "kernel.db"))
+	writeSidecar(t, path, image, 0o600)
+	files, err := openDatabaseFiles(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := preflightExisting(context.Background(), files)
+	if err != nil {
+		files.Close()
+		t.Fatal(err)
+	}
+	if err := files.verifySnapshot(context.Background(), snapshot); err != nil {
+		files.Close()
+		t.Fatal(err)
+	}
+	if err := files.reservePrivateSHM(); err != nil {
+		files.Close()
+		t.Fatal(err)
+	}
+	reserved, err := os.Lstat(path + "-shm")
+	if err != nil {
+		files.Close()
+		t.Fatal(err)
+	}
+	activationErr := errors.New("injected post-reservation activation failure")
+	closeErr := closeFailedActivation(files, activationErr)
+	if !errors.Is(closeErr, activationErr) {
+		t.Fatalf("failed activation lost cause: %v", closeErr)
+	}
+	retained, err := os.Lstat(path + "-shm")
+	if err != nil || !os.SameFile(reserved, retained) || retained.Mode() != 0o600 {
+		t.Fatalf("failed activation lost exact reserved SHM evidence: info=%v err=%v", retained, err)
 	}
 }
 
@@ -890,6 +1120,11 @@ func TestInspectImmutableConcurrentImagesDoNotCrossWire(t *testing.T) {
 func openImageStore(t *testing.T, image []byte) (FactoryState, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "factory.sqlite3")
+	var err error
+	path, err = canonicalTestDatabasePath(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(path, image, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -937,6 +1172,14 @@ func walSnapshotFixture(t *testing.T, mutation string) (string, Project) {
 
 func walSnapshotFixtureAt(t *testing.T, directory, name, mutation string) (string, Project) {
 	t.Helper()
+	var err error
+	directory, err = filepath.EvalSymlinks(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	store, sourcePath := newTestStore(t)
 	project, err := store.CreateProject(context.Background(), NewProject{ID: projectID(t, 81), Name: "wal-only", Root: filepath.Join(t.TempDir(), "project")}, mustTime(t, 2))
 	if err != nil {
@@ -988,6 +1231,10 @@ func mutatedRollbackPath(t *testing.T, statement string) string {
 		t.Fatal(err)
 	}
 	path := filepath.Join(t.TempDir(), "kernel.db")
+	path, err = canonicalTestDatabasePath(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	writeSidecar(t, path, image, 0o600)
 	raw := openRaw(t, path)
 	if _, err := raw.Exec(statement); err != nil {

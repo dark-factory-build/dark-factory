@@ -10,6 +10,11 @@ import (
 const (
 	applicationID = 0x4446474f
 	userVersion   = 1
+
+	// SQLite reserves the exact lower-case "sqlite_" prefix. Use a literal,
+	// binary prefix test: LIKE would treat '_' as a wildcard and hide names
+	// such as sqliteXforeign from exact schema validation.
+	internalSchemaNamePredicate = "substr(name, 1, 7) = 'sqlite_' COLLATE BINARY"
 )
 
 var schemaStatements = []string{
@@ -353,7 +358,7 @@ func validateExactSchema(ctx context.Context, connection *sql.Conn) error {
 	}
 
 	expected := expectedSchema()
-	rows, err := connection.QueryContext(ctx, `SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name`)
+	rows, err := connection.QueryContext(ctx, `SELECT type, name, sql FROM sqlite_schema WHERE NOT (`+internalSchemaNamePredicate+`) ORDER BY type, name`)
 	if err != nil {
 		return fmt.Errorf("read sqlite schema: %w", err)
 	}
@@ -400,7 +405,7 @@ func schemaIsEmpty(ctx context.Context, connection *sql.Conn) (bool, error) {
 		return false, err
 	}
 	var objects int
-	if err := connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'`).Scan(&objects); err != nil {
+	if err := connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema WHERE NOT (`+internalSchemaNamePredicate+`)`).Scan(&objects); err != nil {
 		return false, fmt.Errorf("count sqlite schema objects: %w", err)
 	}
 	return appID == 0 && version == 0 && objects == 0, nil

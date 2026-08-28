@@ -3365,10 +3365,13 @@ Store foundation on integrated head `6272a8d`:
   exact busy proofs exercise concrete domain methods and natural reconciliation
   without replay.
 
-Fresh-home SQLite publication uses one filesystem-free kernel seam rather than
-a path-based partial-home recovery protocol. `NewDatabaseImage` builds the one
-canonical schema and initial control row in SQLite memory, serializes an at-most
-8 MiB rollback-header image, and self-validates it. The unused path-publishing
+Fresh-home SQLite publication uses one bounded kernel seam rather than a
+path-based partial-home recovery protocol. `NewDatabaseImage` builds the one
+canonical schema and initial control row through the normal pinned SQLite VFS
+in an unpredictable current-user 0700 scratch directory with one create-only,
+one-link, exact 0600 main file. It returns an at-most 8 MiB rollback-header
+image only after every SQLite handle closes and the scratch contains no
+sidecar. The unused path-publishing
 `kernel.Create` API was deleted: production publication belongs to the install
 layer's descriptor-owned staging directory, while tests compose
 `NewDatabaseImage`, one create-only 0600 write, and `Open` in test-only helpers.
@@ -3376,20 +3379,34 @@ This removes a sidecar-ownership lifecycle from the kernel instead of teaching
 it to adopt SQLite-recreated pathnames.
 
 `InspectImmutable` bounds the declared image at 256 MiB before allocation,
-copies it from the caller's stable `ReaderAt` in exact 128 KiB chunks, restores
-the owned bytes into one private in-memory SQLite connection, and runs the
-canonical schema/control/integrity validators with no filesystem or global VFS
-registration. Any caller error is preserved even when a full read also returns
-or wraps EOF; short nil-error reads fail. `InspectPristine` adds an exact 1/1
-rollback-header and pristine-bootstrap proof for stopped-home initialization:
-factory revision 1, head 0, floor 1; every product and sequence table empty;
-zero free pages; and only the exact SQLite autoindexes plus empty
-`sqlite_sequence` present. `ANALYZE` state, retained rows, free pages and a
-mature WAL header all fail. Both APIs leave reader ownership with the caller;
-the caller owns the home lifetime lock, stable-descriptor and no-sidecar proof.
+copies it from the caller's stable `ReaderAt` in exact 128 KiB chunks, writes
+those owned bytes into a second private scratch, and opens it read-only and
+immutable through the normal SQLite VFS. The image path has no custom VFS,
+registry, shared name, channel, counter or mutex; the only global registration
+is the ordinary pinned `database/sql` driver. Any caller error is preserved even
+when a full read also returns or wraps EOF; short nil-error reads fail.
+`InspectPristine` reads the already-validated dynamic daemon ID, configuration
+and timestamp, rebuilds the canonical image by the same fixed transaction, and
+requires byte-for-byte equality including SQLite history headers and free page
+contents. Thus insert/delete, change/restore, `VACUUM`, `ANALYZE`, retained rows,
+schema history and a mature WAL header fail even when current rows and free-page
+counts look fresh. Both APIs leave reader ownership with the caller; the caller
+owns the home lifetime lock, stable-descriptor and no-sidecar proof.
 
-Mature WAL reopen pins exact owner-only regular main/WAL/SHM files through one
-parent directory descriptor, bounds main at 256 MiB, WAL at 272 MiB and SHM at
+Scratch is disposable validation data, never durable authority. Its threat
+contract is same-EUID process-local use: an unpredictable name beneath the
+process-selected temporary root, a revalidated current-user 0700 directory and
+exact regular 0600 one-link file are sufficient because no identifier or bytes
+escape before cleanup and no scratch artifact is adopted after restart. All
+close and removal errors are joined and image creation returns no bytes on
+cleanup uncertainty. This does not claim hostile same-EUID containment; the
+authoritative home uses retained descriptors and a lifetime lock instead.
+
+Mature WAL reopen requires one clean canonical absolute path, walks every
+parent component descriptor-relatively from root without following links,
+retains every component binding through `Open`, and requires the final database
+parent to be an exact current-user 0700 directory. It pins exact owner-only
+regular main/WAL/SHM files, bounds main at 256 MiB, WAL at 272 MiB and SHM at
 4 MiB, and validates a nonempty WAL header before SQLite sees it. The complete
 main plus WAL is streamed into a private 0700 disposable directory; SHM is not
 copied because it is a rebuildable cache. The pinned SQLite build reconstructs
@@ -3402,13 +3419,23 @@ does not duplicate its WAL frame parser. All runtime sidecars are exact regular
 over-bound files fail before authoritative SQLite open.
 
 SHA-256 digests and exact lengths bind disposable validation to the pinned
-main, WAL and SHM bytes immediately before the real path open; any same-inode
-content or length change retries a live WAL snapshot or rejects a standalone
-image. A final binding/identity/mode recheck follows. The remaining
-recheck-to-path-open gap is deliberately an external home lifetime-lock
-obligation rather than a second kernel locking abstraction.
+main, WAL and SHM bytes immediately before the real path open. Any same-inode
+content or length change is one visible fail-closed error; `Open` never retries
+or spins behind a concurrent writer. A final component, binding, identity and
+mode recheck follows. The caller's external home lifetime lock spans the entire
+`Open` call, including SQLite's unavoidable final path open; the kernel does
+not add a second locking abstraction. Fresh rollback activation reserves the
+SHM with an exact create-only descriptor so SQLite cannot widen its mode.
+Failed activation leaves bounded sidecar evidence visible and never unlinks a
+pathname whose creation identity it cannot prove.
 
 The focused mutation pass removed each guard temporarily and then restored it.
+The scratch-required test killed substituting the old `ext/serdes` global VFS
+and channel; the literal-prefix matrix killed the former wildcard predicate;
+the reversible-history matrix killed removal of canonical byte comparison; the
+concurrent-writer test killed retrying a changed WAL snapshot; the failed-
+activation evidence test killed pathname unlink; and the path-authority matrix
+killed omitted ancestor binding and final-parent mode checks.
 `TestOpenRefusesRetainedRollbackDatabaseWithoutMutation` killed removal of the
 fresh-only rollback guard; `TestInspectPristineRequiresExactFreshRollbackState`
 killed permitting `sqlite_stat`/`ANALYZE` state; the immutable corruption test
@@ -3417,32 +3444,34 @@ pre-read oversize test killed removal of the 256 MiB bound;
 `TestDatabaseFileBindingsAreRecheckedAfterPreflight` killed omitted main/WAL/SHM
 digest comparison; `TestRejectedOpenPreservesStoreCloseError` killed discarding
 the failed Store close; and `TestValidateWALHeaderFailsClosed` killed a disabled
-malformed-WAL validator. The global readervfs registration, counter, allocation
-and deletion paths and path-based `Create` sidecar ownership were deleted
-structurally, so their former mutations no longer exist. No mutation remains in
-the tree.
+malformed-WAL validator. `Store.initialize`, `openDatabaseParent`, the global
+readervfs/serdes image path, retry-only control flow, guessed sidecar removal,
+the manual pristine table/internal-object walk and path-based `Create`
+ownership were deleted. No mutation remains in the tree.
 
-The repaired pre-rebase candidate passed the focused image/pristine/WAL/live
-writer matrix three times (`24.407s`), the same focused matrix twice under race
-(`370.165s`), the full kernel suite (`24.048s`; `24.79s` wall), and the full
-kernel race suite (`536.071s`; `536.65s` wall). `go vet`, the complete
-`scripts/go-check.sh` gate (`49.92s`), daemon/E2E compile-only checks, Linux
-amd64 CGO-free kernel compilation and diff checks passed. The race cost is
-reported honestly: cryptographic snapshot continuity makes the 300-open/2,000-
-write stress more expensive, while ordinary focused and full non-race time
-remain about 24 seconds.
+The repaired pre-rebase candidate passed the focused
+image/pristine/WAL/path/live-writer matrix three times (`14.532s`), the focused
+race matrix (`68.203s`; `70.50s` wall), the full kernel suite (`26.310s`;
+`26.62s` wall), and the full kernel race suite (`484.259s`; `484.84s` wall).
+`go vet`, the complete `scripts/go-check.sh` gate, daemon/E2E compile-only
+checks, Linux amd64 CGO-free kernel compilation and diff checks passed. The
+race cost is reported honestly: cryptographic snapshot continuity makes the
+300-open/2,000-write stress more expensive, while ordinary focused and full
+non-race time remains under 27 seconds.
 
-The database capability now occupies 1,410 production lines across the 396-line
-Store/transaction core, 310-line image/immutable file and 704-line existing-
-file/WAL file. That is 116 production lines more than the independently blocked
-1,294-line candidate and 862 more than the 548-line pre-capability kernel. The
-increase is the concrete descriptor/identity/mode/bound/digest/crash-tail proof,
-not compatibility or a framework. In exchange, the repair deletes the exported
-path-creation lifecycle, global VFS registration/counter/error recorder and
-boolean ownership phases, and separates the two reasons to change. The focused
-image test file is 1,174 lines; three explicit 37-line package-local test
-bootstrap helpers replace production `Create` use without exporting test or
-publication policy.
+The database capability now occupies 1,594 production lines across the
+351-line Store/transaction core, 457-line image/immutable file and 786-line
+existing-file/WAL file; exact schema validation is another 438 lines. Against
+the independently blocked `b42e418` candidate, those four files grow from
+1,843 to 2,032 lines (+189). That increase is the concrete private-scratch,
+canonical-history, descriptor-walk, identity/mode/bound/digest and crash-tail
+proof, not compatibility or a framework. In exchange, the repair deletes the
+exported path-creation lifecycle, `Store.initialize`, `openDatabaseParent`,
+the custom global VFS registration/channel/counter/error recorder, retry-only
+control flow, guessed sidecar removal and the manual pristine-state walk. The
+focused image/path/schema tests occupy 2,118 lines, up from 1,649 in the blocked
+candidate; explicit package-local test bootstrap helpers replace production
+`Create` without exporting test or publication policy.
 
 Admission, attempt authority and finalization Store proof on integrated head
 `3f2c255`:

@@ -18,6 +18,11 @@ import (
 func newBrowserStore(t *testing.T) (*Store, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "kernel.db")
+	var err error
+	path, err = canonicalTestDatabasePath(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	store, err := createTestStore(context.Background(), path, FactoryConfig{}, mustTime(t, 1))
 	if err != nil {
 		t.Fatal(err)

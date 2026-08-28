@@ -604,7 +604,7 @@ func TestOpenPromotesOnlyExactFreshRollbackDatabaseToWAL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(t.TempDir(), "kernel.db")
+	path := mustCanonicalTestDatabasePath(t, filepath.Join(t.TempDir(), "kernel.db"))
 	if err := os.WriteFile(path, image, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -719,7 +719,7 @@ func TestSnapshotAndWatchRejectHiddenControlsInPinnedSnapshot(t *testing.T) {
 	}
 }
 
-func TestConcurrentOpenAndValidWriterNeverMixSnapshots(t *testing.T) {
+func TestConcurrentOpenAndValidWriterReturnsBoundedSnapshotFailure(t *testing.T) {
 	writer, path := newTestStore(t)
 	defer writer.Close()
 	ctx := context.Background()
@@ -734,10 +734,15 @@ func TestConcurrentOpenAndValidWriterNeverMixSnapshots(t *testing.T) {
 		writerResult <- err
 	}()
 	close(start)
+	changed := 0
 	for index := 0; index < 300; index++ {
 		opened, err := Open(ctx, path)
+		if errors.Is(err, errDatabaseSnapshotChanged) {
+			changed++
+			continue
+		}
 		if err != nil {
-			t.Fatalf("Open %d returned a false failure: %v", index, err)
+			t.Fatalf("Open %d returned an unexpected failure: %v", index, err)
 		}
 		if err := opened.Close(); err != nil {
 			t.Fatalf("Close %d: %v", index, err)
@@ -745,6 +750,9 @@ func TestConcurrentOpenAndValidWriterNeverMixSnapshots(t *testing.T) {
 	}
 	if err := <-writerResult; err != nil {
 		t.Fatalf("writer: %v", err)
+	}
+	if changed == 0 {
+		t.Fatal("concurrent writer never produced the required visible snapshot-change refusal")
 	}
 	state, err := writer.Factory(ctx)
 	if err != nil {
