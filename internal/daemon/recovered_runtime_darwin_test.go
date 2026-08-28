@@ -19,12 +19,12 @@ import (
 
 func TestOpenRecoveredRuntimeValidatesPopulatedEvidenceWithoutMutation(t *testing.T) {
 	before := openFDCensus(t)
-	parent, path, identity, token, config, terminal := populatedRecoveredRuntime(t, "run")
+	parent, path, identity, token, config, terminal := populatedRecoveredRuntime(t, runtimeTestName)
 	t.Cleanup(func() { _ = parent.Close() })
 	if _, err := os.Lstat(filepath.Join(path, runner.InnerActivationMarkerName)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("fixture unexpectedly retained inner marker: %v", err)
 	}
-	recovered, err := OpenRecoveredRuntime(context.Background(), parent, "run", identity)
+	recovered, err := OpenRecoveredRuntime(context.Background(), parent, runtimeTestName, identity)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +33,7 @@ func TestOpenRecoveredRuntimeValidatesPopulatedEvidenceWithoutMutation(t *testin
 	if err != nil || !evidence.AttemptToken || !evidence.WorkerConfig || evidence.Terminal == nil || evidence.Terminal.Terminal != terminal {
 		t.Fatalf("evidence = %+v, %v", evidence, err)
 	}
-	if second, err := OpenRecoveredRuntime(context.Background(), parent, "run", identity); !errors.Is(err, errRuntimeBusy) || second != nil {
+	if second, err := OpenRecoveredRuntime(context.Background(), parent, runtimeTestName, identity); !errors.Is(err, errRuntimeBusy) || second != nil {
 		t.Fatalf("concurrent recovery = %+v, %v", second, err)
 	}
 	wrongDigest, _ := kernel.AttemptDigestFromBytes(bytes.Repeat([]byte{0xee}, kernel.DigestBytes))
@@ -51,7 +51,7 @@ func TestOpenRecoveredRuntimeValidatesPopulatedEvidenceWithoutMutation(t *testin
 	if err := recovered.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reopened, err := OpenRecoveredRuntime(context.Background(), parent, "run", identity)
+	reopened, err := OpenRecoveredRuntime(context.Background(), parent, runtimeTestName, identity)
 	if err != nil {
 		t.Fatalf("repeat open = %v", err)
 	}
@@ -71,7 +71,7 @@ func TestOpenRecoveredRuntimeAcceptsRootBeforeTokenPublicationWithoutMutation(t 
 		t.Fatal(err)
 	}
 	parent := createManagedParent(t, parentPath)
-	runtime, err := CreateRuntime(parent, "run")
+	runtime, err := CreateRuntime(parent, runtimeTestName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ func TestOpenRecoveredRuntimeAcceptsRootBeforeTokenPublicationWithoutMutation(t 
 		t.Fatal(err)
 	}
 	before := snapshotRuntimeGraph(t, path)
-	recovered, err := OpenRecoveredRuntime(context.Background(), parent, "run", identity)
+	recovered, err := OpenRecoveredRuntime(context.Background(), parent, runtimeTestName, identity)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,11 +182,11 @@ func TestOpenRecoveredRuntimeRejectsMalformedCensusAndReplacement(t *testing.T) 
 	}
 	for name, mutate := range mutations {
 		t.Run(name, func(t *testing.T) {
-			parent, path, identity, _, _, _ := populatedRecoveredRuntime(t, "run")
+			parent, path, identity, _, _, _ := populatedRecoveredRuntime(t, runtimeTestName)
 			defer parent.Close()
 			mutate(t, path)
 			before := snapshotRuntimeGraph(t, path)
-			if recovered, err := OpenRecoveredRuntime(context.Background(), parent, "run", identity); !errors.Is(err, errInvalidContract) || recovered != nil {
+			if recovered, err := OpenRecoveredRuntime(context.Background(), parent, runtimeTestName, identity); !errors.Is(err, errInvalidContract) || recovered != nil {
 				t.Fatalf("malformed open = %+v, %v", recovered, err)
 			}
 			if after := snapshotRuntimeGraph(t, path); after != before {
@@ -196,11 +196,11 @@ func TestOpenRecoveredRuntimeRejectsMalformedCensusAndReplacement(t *testing.T) 
 	}
 
 	t.Run("wrong root identity", func(t *testing.T) {
-		parent, path, identity, _, _, _ := populatedRecoveredRuntime(t, "run")
+		parent, path, identity, _, _, _ := populatedRecoveredRuntime(t, runtimeTestName)
 		defer parent.Close()
 		identity.Inode++
 		before := snapshotRuntimeGraph(t, path)
-		if recovered, err := OpenRecoveredRuntime(context.Background(), parent, "run", identity); !errors.Is(err, errInvalidContract) || recovered != nil {
+		if recovered, err := OpenRecoveredRuntime(context.Background(), parent, runtimeTestName, identity); !errors.Is(err, errInvalidContract) || recovered != nil {
 			t.Fatalf("wrong identity open = %+v, %v", recovered, err)
 		}
 		if after := snapshotRuntimeGraph(t, path); after != before {
@@ -209,10 +209,10 @@ func TestOpenRecoveredRuntimeRejectsMalformedCensusAndReplacement(t *testing.T) 
 	})
 
 	t.Run("root replacement after descriptor open", func(t *testing.T) {
-		parent, path, identity, _, _, _ := populatedRecoveredRuntime(t, "run")
+		parent, path, identity, _, _, _ := populatedRecoveredRuntime(t, runtimeTestName)
 		defer parent.Close()
 		moved := path + ".old"
-		recovered, err := openRecoveredRuntime(context.Background(), parent, "run", identity, func() {
+		recovered, err := openRecoveredRuntime(context.Background(), parent, runtimeTestName, identity, func() {
 			if err := os.Rename(path, moved); err != nil {
 				t.Fatal(err)
 			}
@@ -263,11 +263,11 @@ func TestRecoveredRuntimeCensusGrammar(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			parent, path, identity, _, _, terminal := populatedRecoveredRuntime(t, "run")
+			parent, path, identity, _, _, terminal := populatedRecoveredRuntime(t, runtimeTestName)
 			defer parent.Close()
 			configureRecoveredResidue(t, path, test.residue, terminal)
 			before := snapshotRuntimeGraph(t, path)
-			recovered, err := OpenRecoveredRuntime(context.Background(), parent, "run", identity)
+			recovered, err := OpenRecoveredRuntime(context.Background(), parent, runtimeTestName, identity)
 			if test.open {
 				if err != nil || recovered == nil {
 					t.Fatalf("reachable residue rejected: recovered=%+v err=%v", recovered, err)
@@ -329,7 +329,7 @@ func TestRecoveredRuntimeTokenOnlyCutAndSnapshotReplacement(t *testing.T) {
 	}
 	parent := createManagedParent(t, parentPath)
 	defer parent.Close()
-	runtime, err := CreateRuntime(parent, "run")
+	runtime, err := CreateRuntime(parent, runtimeTestName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -342,7 +342,7 @@ func TestRecoveredRuntimeTokenOnlyCutAndSnapshotReplacement(t *testing.T) {
 	if err := runtime.Close(); err != nil {
 		t.Fatal(err)
 	}
-	recovered, err := OpenRecoveredRuntime(context.Background(), parent, "run", identity)
+	recovered, err := OpenRecoveredRuntime(context.Background(), parent, runtimeTestName, identity)
 	if err != nil {
 		t.Fatal(err)
 	}

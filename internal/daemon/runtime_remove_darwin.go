@@ -29,7 +29,7 @@ func removeRecordedRuntime(ctx context.Context, parent *RuntimeParent, basename 
 }
 
 func removeRecordedRuntimeWithHook(ctx context.Context, parent *RuntimeParent, basename string, expected runner.FileIdentity, limit int, syncDirectory func(int) error, afterParentSync func()) (bool, error) {
-	if ctx == nil || parent == nil || !validBasename(basename) || expected.Device == 0 || expected.Inode == 0 || limit <= 0 {
+	if ctx == nil || parent == nil || !validRuntimeName(basename) || expected.Device == 0 || expected.Inode == 0 || limit <= 0 {
 		return false, invalidContract(nil)
 	}
 	if err := ctx.Err(); err != nil {
@@ -46,7 +46,11 @@ func removeRecordedRuntimeWithHook(ctx context.Context, parent *RuntimeParent, b
 		return false, err
 	}
 	defer operation.Close()
-	parentFD := int(operation.dir.Fd())
+	ownedParent, err := operation.directory()
+	if err != nil {
+		return false, err
+	}
+	parentFD := int(ownedParent.Fd())
 	var named unix.Stat_t
 	if err := unix.Fstatat(parentFD, basename, &named, unix.AT_SYMLINK_NOFOLLOW); errors.Is(err, unix.ENOENT) {
 		if err := syncDirectory(parentFD); err != nil {

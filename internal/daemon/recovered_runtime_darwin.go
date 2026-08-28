@@ -44,7 +44,7 @@ func OpenRecoveredRuntime(ctx context.Context, parent *RuntimeParent, basename s
 }
 
 func openRecoveredRuntime(ctx context.Context, parent *RuntimeParent, basename string, expected runner.FileIdentity, afterOpen func()) (result *RecoveredRuntime, resultErr error) {
-	if ctx == nil || parent == nil || !validBasename(basename) || expected.Device == 0 || expected.Inode == 0 {
+	if ctx == nil || parent == nil || !validRuntimeName(basename) || expected.Device == 0 || expected.Inode == 0 {
 		return nil, invalidContract(nil)
 	}
 	if err := ctx.Err(); err != nil {
@@ -54,16 +54,17 @@ func openRecoveredRuntime(ctx context.Context, parent *RuntimeParent, basename s
 	if err != nil {
 		return nil, err
 	}
+	keepOwner := false
 	defer func() {
-		if closeErr := operation.Close(); closeErr != nil {
-			if result != nil {
-				closeErr = errors.Join(closeErr, result.Close())
-				result = nil
-			}
-			resultErr = errors.Join(resultErr, closeErr)
+		if !keepOwner {
+			resultErr = errors.Join(resultErr, operation.Close())
 		}
 	}()
-	parentFD := int(operation.dir.Fd())
+	ownedParent, err := operation.directory()
+	if err != nil {
+		return nil, err
+	}
+	parentFD := int(ownedParent.Fd())
 	named, err := inspectNamedPrivateDirectory(parentFD, basename)
 	if err != nil || named.fileIdentity() != expected {
 		return nil, invalidContract(err)
@@ -107,10 +108,13 @@ func openRecoveredRuntime(ctx context.Context, parent *RuntimeParent, basename s
 	if err != nil {
 		return nil, err
 	}
+	locator, err := operation.locator(basename)
+	if err != nil {
+		return nil, err
+	}
 	runtime := &Runtime{
-		path: filepath.Join(parent.path, basename), basename: basename, dir: dir, directory: opened,
-		parent: operation.dir, parentPath: parent.path, parentIdentity: parent.identity,
-		parentLock: parent.lockIdentity, identity: expected, home: home, temp: temp,
+		locator: locator, basename: basename, dir: dir, directory: opened,
+		owner: operation, identity: expected, home: home, temp: temp,
 		lifetime: lifetime, lifetimeID: lifetimeID,
 	}
 	recovered := &RecoveredRuntime{runtime: runtime, files: files}
@@ -119,7 +123,7 @@ func openRecoveredRuntime(ctx context.Context, parent *RuntimeParent, basename s
 	}
 	keepDir = true
 	keepLifetime = true
-	operation.takeDirectory()
+	keepOwner = true
 	return recovered, nil
 }
 
@@ -159,7 +163,7 @@ func (recovered *RecoveredRuntime) InspectEvidence(ctx context.Context, credenti
 			return RecoveredRuntimeEvidence{}, err
 		}
 		decoded, err := changeworker.DecodeConfig(body)
-		if err != nil || decoded.RuntimePath != recovered.runtime.path || decoded.RuntimeIdentity != recovered.runtime.identity {
+		if err != nil || decoded.RuntimePath != recovered.runtime.locator || decoded.RuntimeIdentity != recovered.runtime.identity {
 			return RecoveredRuntimeEvidence{}, invalidContract(err)
 		}
 		expected, err := changeworker.EncodeConfig(*expectedConfig)
@@ -189,7 +193,7 @@ func (recovered *RecoveredRuntime) InspectEvidence(ctx context.Context, credenti
 // released provider process/group. Exit time is deliberately not compared:
 // a restart may observe the same committed exit with a new proposed time.
 func (recovered *RecoveredRuntime) AcknowledgeTerminal(record *runner.TerminalRecord, run kernel.Run, runtimeRoot, providerProcess, providerGroup kernel.Resource) error {
-	if recovered == nil || recovered.runtime == nil || record == nil || !terminalCommitProven(recovered.runtime.path, recovered.runtime.identity, record.Terminal, run, runtimeRoot, providerProcess, providerGroup) {
+	if recovered == nil || recovered.runtime == nil || record == nil || !terminalCommitProven(recovered.runtime.locator, recovered.runtime.identity, record.Terminal, run, runtimeRoot, providerProcess, providerGroup) {
 		return invalidContract(nil)
 	}
 	recovered.runtime.mu.Lock()

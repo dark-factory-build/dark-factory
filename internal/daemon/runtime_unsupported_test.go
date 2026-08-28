@@ -10,18 +10,14 @@ import (
 	"testing"
 
 	"github.com/dark-factory-build/dark-factory/internal/changeworker"
+	"github.com/dark-factory-build/dark-factory/internal/install"
 )
 
 func TestUnsupportedRuntimeFailsBeforeEffect(t *testing.T) {
 	root := t.TempDir()
-	parent, err := os.Open(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer parent.Close()
-	managed, err := CreateRuntimeParent(parent)
+	managed, err := OpenRuntimeParent(context.Background(), install.MemberCapability{}, root)
 	if !errors.Is(err, errUnsupported) || managed != nil {
-		t.Fatalf("CreateRuntimeParent error = %v", err)
+		t.Fatalf("OpenRuntimeParent error = %v", err)
 	}
 	if _, err := CreateRuntime(managed, "run"); !errors.Is(err, errUnsupported) {
 		t.Fatalf("CreateRuntime error = %v", err)

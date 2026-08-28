@@ -9,8 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"syscall"
-	"unsafe"
 
 	"github.com/dark-factory-build/dark-factory/internal/changeworker"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
@@ -34,20 +32,17 @@ const (
 )
 
 type Runtime struct {
-	mu             sync.Mutex
-	path           string
-	basename       string
-	dir            *os.File
-	directory      directoryIdentity
-	parent         *os.File
-	parentPath     string
-	parentIdentity directoryIdentity
-	parentLock     runner.FileIdentity
-	identity       runner.FileIdentity
-	home           directoryIdentity
-	temp           directoryIdentity
-	lifetime       *os.File
-	lifetimeID     runner.FileIdentity
+	mu         sync.Mutex
+	locator    string
+	basename   string
+	dir        *os.File
+	directory  directoryIdentity
+	owner      *runtimeParentOperation
+	identity   runner.FileIdentity
+	home       directoryIdentity
+	temp       directoryIdentity
+	lifetime   *os.File
+	lifetimeID runner.FileIdentity
 }
 
 // RuntimeBinding is the non-forgeable per-run filesystem capability. Every
@@ -74,7 +69,10 @@ func (file PrivateFile) Path() (string, error) {
 	if err := verifyPrivateFileAuthority(file.runtime, file.name, file.identity, file.size); err != nil {
 		return "", invalidContract(err)
 	}
-	return filepath.Join(file.runtime.path, file.name), nil
+	if err := file.runtime.verifyDiagnosticBinding(); err != nil {
+		return "", invalidContract(err)
+	}
+	return filepath.Join(file.runtime.locator, file.name), nil
 }
 
 func (file PrivateFile) Identity() runner.FileIdentity { return file.identity }
@@ -89,15 +87,24 @@ func CreateRuntime(parent *RuntimeParent, basename string) (*Runtime, error) {
 // Binding could be durably registered. The named root may be empty or contain
 // empty, exact home/tmp children; any later-phase effect is not adoptable.
 func AdoptRuntime(parent *RuntimeParent, basename string) (*Runtime, error) {
-	if parent == nil || !validBasename(basename) {
+	if parent == nil || !validRuntimeName(basename) {
 		return nil, invalidContract(nil)
 	}
 	operation, err := parent.begin()
 	if err != nil {
 		return nil, err
 	}
-	defer operation.Close()
-	parentFD := int(operation.dir.Fd())
+	keepOwner := false
+	defer func() {
+		if !keepOwner {
+			_ = operation.Close()
+		}
+	}()
+	ownedParent, err := operation.directory()
+	if err != nil {
+		return nil, err
+	}
+	parentFD := int(ownedParent.Fd())
 	created, err := inspectNamedPrivateDirectory(parentFD, basename)
 	if err != nil {
 		return nil, invalidContract(err)
@@ -136,10 +143,13 @@ func AdoptRuntime(parent *RuntimeParent, basename string) (*Runtime, error) {
 	if err := unix.Fsync(parentFD); err != nil {
 		return nil, invalidContract(err)
 	}
+	locator, err := operation.locator(basename)
+	if err != nil {
+		return nil, err
+	}
 	runtime := &Runtime{
-		path: filepath.Join(parent.path, basename), basename: basename, dir: dir, directory: created,
-		parent: operation.dir, parentPath: parent.path, parentIdentity: parent.identity,
-		parentLock: parent.lockIdentity, identity: created.fileIdentity(), home: home, temp: temp,
+		locator: locator, basename: basename, dir: dir, directory: created,
+		owner: operation, identity: created.fileIdentity(), home: home, temp: temp,
 		lifetime: lifetime, lifetimeID: lifetimeID,
 	}
 	if err := runtime.verifyAuthority(); err != nil {
@@ -147,12 +157,12 @@ func AdoptRuntime(parent *RuntimeParent, basename string) (*Runtime, error) {
 	}
 	keepDir = true
 	keepLifetime = true
-	operation.takeDirectory()
+	keepOwner = true
 	return runtime, nil
 }
 
 func createRuntime(parent *RuntimeParent, basename string, beforeCreate, afterOpen func(), syncDirectory func(int) error) (_ *Runtime, resultErr error) {
-	if parent == nil || !validBasename(basename) {
+	if parent == nil || !validRuntimeName(basename) {
 		return nil, invalidContract(nil)
 	}
 	if syncDirectory == nil {
@@ -162,13 +172,17 @@ func createRuntime(parent *RuntimeParent, basename string, beforeCreate, afterOp
 	if err != nil {
 		return nil, err
 	}
-	defer operation.Close()
-	ownedParent := operation.dir
-	parentFD := int(ownedParent.Fd())
-	parentPath, wantParent, lockIdentity := parent.path, parent.identity, parent.lockIdentity
-	if err := verifyDirectoryDescriptor(ownedParent, parentPath, wantParent); err != nil {
-		return nil, invalidContract(err)
+	keepOwner := false
+	defer func() {
+		if !keepOwner {
+			_ = operation.Close()
+		}
+	}()
+	ownedParent, err := operation.directory()
+	if err != nil {
+		return nil, err
 	}
+	parentFD := int(ownedParent.Fd())
 	var present unix.Stat_t
 	err = unix.Fstatat(parentFD, basename, &present, unix.AT_SYMLINK_NOFOLLOW)
 	if err == nil || !errors.Is(err, unix.ENOENT) {
@@ -177,8 +191,8 @@ func createRuntime(parent *RuntimeParent, basename string, beforeCreate, afterOp
 	if beforeCreate != nil {
 		beforeCreate()
 	}
-	if err := verifyDirectoryDescriptor(ownedParent, parentPath, wantParent); err != nil {
-		return nil, invalidContract(err)
+	if _, err := operation.directory(); err != nil {
+		return nil, err
 	}
 	if err := unix.Mkdirat(parentFD, basename, 0o700); err != nil {
 		return nil, invalidContract(err)
@@ -215,7 +229,7 @@ func createRuntime(parent *RuntimeParent, basename string, beforeCreate, afterOp
 	}
 	opened, openedErr := inspectPrivateDirectory(fd)
 	namedErr := verifyNamedChild(parentFD, basename, created)
-	parentErr := verifyDirectoryDescriptor(ownedParent, parentPath, wantParent)
+	_, parentErr := operation.directory()
 	if openedErr != nil || opened != created || namedErr != nil || parentErr != nil {
 		return nil, invalidContract(errors.Join(openedErr, namedErr, parentErr))
 	}
@@ -243,10 +257,14 @@ func createRuntime(parent *RuntimeParent, basename string, beforeCreate, afterOp
 	if err := syncDirectory(parentFD); err != nil {
 		return nil, invalidContract(err)
 	}
+	locator, err := operation.locator(basename)
+	if err != nil {
+		return nil, err
+	}
 	runtime := &Runtime{
-		path: filepath.Join(parentPath, basename), basename: basename, dir: dir, directory: created,
-		parent: ownedParent, parentPath: parentPath, parentIdentity: wantParent, parentLock: lockIdentity,
-		identity: created.fileIdentity(), home: home, temp: temp, lifetime: lifetime, lifetimeID: lifetimeID,
+		locator: locator, basename: basename, dir: dir, directory: created,
+		owner: operation, identity: created.fileIdentity(), home: home, temp: temp,
+		lifetime: lifetime, lifetimeID: lifetimeID,
 	}
 	if err := runtime.verifyAuthority(); err != nil {
 		return nil, invalidContract(err)
@@ -254,7 +272,7 @@ func createRuntime(parent *RuntimeParent, basename string, beforeCreate, afterOp
 	cleanupCreated = false
 	keepDir = true
 	keepLifetime = true
-	operation.takeDirectory()
+	keepOwner = true
 	return runtime, nil
 }
 
@@ -279,7 +297,10 @@ func (binding *RuntimeBinding) Values() (string, runner.FileIdentity, error) {
 	if err := binding.runtime.verifyAuthority(); err != nil {
 		return "", runner.FileIdentity{}, invalidContract(err)
 	}
-	return binding.runtime.path, binding.runtime.identity, nil
+	if err := binding.runtime.verifyDiagnosticBinding(); err != nil {
+		return "", runner.FileIdentity{}, invalidContract(err)
+	}
+	return binding.runtime.locator, binding.runtime.identity, nil
 }
 
 func (binding *RuntimeBinding) ProviderHome() (string, error) {
@@ -310,7 +331,10 @@ func (binding *RuntimeBinding) fixedDirectory(name string) (string, error) {
 	if name != changeworker.HomeName && name != changeworker.TempName {
 		return "", invalidContract(nil)
 	}
-	return filepath.Join(binding.runtime.path, name), nil
+	if err := binding.runtime.verifyDiagnosticBinding(); err != nil {
+		return "", invalidContract(err)
+	}
+	return filepath.Join(binding.runtime.locator, name), nil
 }
 
 func (binding *RuntimeBinding) fixedFile(name string) (string, error) {
@@ -322,7 +346,10 @@ func (binding *RuntimeBinding) fixedFile(name string) (string, error) {
 	if err := binding.runtime.verifyAuthority(); err != nil {
 		return "", invalidContract(err)
 	}
-	return filepath.Join(binding.runtime.path, name), nil
+	if err := binding.runtime.verifyDiagnosticBinding(); err != nil {
+		return "", invalidContract(err)
+	}
+	return filepath.Join(binding.runtime.locator, name), nil
 }
 
 // DuplicateRunnerFiles transfers the exact private directory needed by the
@@ -365,7 +392,7 @@ func (runtime *Runtime) DuplicateRunnerFiles() (*os.File, *os.File, error) {
 // inherited lifetime lease. Available is positive evidence that no such owner
 // does. Errors, replacement, and missing authorities are never absence.
 func ObserveRuntimeLifetime(parent *RuntimeParent, basename string, expected runner.FileIdentity) (RuntimeLeasePresence, error) {
-	if parent == nil || !validBasename(basename) || expected.Device == 0 || expected.Inode == 0 {
+	if parent == nil || !validRuntimeName(basename) || expected.Device == 0 || expected.Inode == 0 {
 		return 0, invalidContract(nil)
 	}
 	operation, err := parent.begin()
@@ -373,14 +400,18 @@ func ObserveRuntimeLifetime(parent *RuntimeParent, basename string, expected run
 		return 0, err
 	}
 	defer operation.Close()
-	fd, err := unix.Openat(int(operation.dir.Fd()), basename, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
+	ownedParent, err := operation.directory()
+	if err != nil {
+		return 0, err
+	}
+	fd, err := unix.Openat(int(ownedParent.Fd()), basename, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
 	if err != nil {
 		return 0, invalidContract(err)
 	}
 	root := os.NewFile(uintptr(fd), "runtime-lifetime-observation")
 	defer root.Close()
 	identity, err := inspectExpectedDirectory(fd, expected)
-	if err != nil || verifyNamedChild(int(operation.dir.Fd()), basename, identity) != nil {
+	if err != nil || verifyNamedChild(int(ownedParent.Fd()), basename, identity) != nil {
 		return 0, invalidContract(err)
 	}
 	lease, _, err := openRuntimeLifetime(fd, identity.device, nil)
@@ -398,7 +429,7 @@ func ObserveRuntimeLifetime(parent *RuntimeParent, basename string, expected run
 		return 0, invalidContract(err)
 	}
 	defer unix.Flock(int(lease.Fd()), unix.LOCK_UN)
-	if _, err := inspectExpectedDirectory(fd, expected); err != nil || verifyNamedChild(int(operation.dir.Fd()), basename, identity) != nil {
+	if _, err := inspectExpectedDirectory(fd, expected); err != nil || verifyNamedChild(int(ownedParent.Fd()), basename, identity) != nil {
 		return 0, invalidContract(err)
 	}
 	return RuntimeLeaseAvailable, nil
@@ -413,7 +444,7 @@ func (runtime *Runtime) PublishWorkerConfig(ctx context.Context, config changewo
 		return PrivateFile{}, invalidContract(nil)
 	}
 	runtime.mu.Lock()
-	bound := runtime.dir != nil && config.RuntimePath == runtime.path && config.RuntimeIdentity == runtime.identity
+	bound := runtime.dir != nil && config.RuntimePath == runtime.locator && config.RuntimeIdentity == runtime.identity
 	runtime.mu.Unlock()
 	if !bound {
 		return PrivateFile{}, invalidContract(nil)
@@ -502,21 +533,19 @@ func (runtime *Runtime) publish(ctx context.Context, name string, value []byte, 
 }
 
 func (runtime *Runtime) verifyAuthority() error {
-	if runtime == nil || runtime.dir == nil || runtime.lifetime == nil || runtime.parent == nil || !validBasename(runtime.basename) || runtime.path != filepath.Join(runtime.parentPath, runtime.basename) {
+	if runtime == nil || runtime.dir == nil || runtime.lifetime == nil || runtime.owner == nil || !validRuntimeName(runtime.basename) {
 		return errInvalidContract
 	}
 	opened, err := inspectPrivateDirectory(int(runtime.dir.Fd()))
 	if err != nil || opened != runtime.directory || opened.fileIdentity() != runtime.identity {
 		return errInvalidContract
 	}
-	if err := verifyDirectoryDescriptor(runtime.parent, runtime.parentPath, runtime.parentIdentity); err != nil {
+	parent, err := runtime.owner.directory()
+	if err != nil {
 		return errInvalidContract
 	}
-	if err := verifyNamedChild(int(runtime.parent.Fd()), runtime.basename, runtime.directory); err != nil {
+	if err := verifyNamedChild(int(parent.Fd()), runtime.basename, runtime.directory); err != nil {
 		return errInvalidContract
-	}
-	if err := verifyNamedDirectory(runtime.path, runtime.directory); err != nil {
-		return err
 	}
 	if err := verifyRuntimeLayoutDirectory(runtime, runtimeHomeName, runtime.home); err != nil {
 		return err
@@ -534,11 +563,24 @@ func (runtime *Runtime) verifyAuthority() error {
 	if err := unix.Flock(int(runtime.lifetime.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		return errInvalidContract
 	}
-	lock, err := inspectNamedRuntimeLock(int(runtime.parent.Fd()))
-	if err != nil || lock != runtime.parentLock {
+	return nil
+}
+
+// verifyDiagnosticBinding protects pathname consumers without promoting the
+// locator into filesystem authority. Descriptor-relative operations do not
+// depend on this check and therefore cannot be retargeted by parent rename or
+// replacement.
+func (runtime *Runtime) verifyDiagnosticBinding() error {
+	if runtime == nil || runtime.locator == "" {
 		return errInvalidContract
 	}
-	return nil
+	if err := verifyNamedDirectory(runtime.locator, runtime.directory); err != nil {
+		return err
+	}
+	if err := verifyNamedDirectory(filepath.Join(runtime.locator, runtimeHomeName), runtime.home); err != nil {
+		return err
+	}
+	return verifyNamedDirectory(filepath.Join(runtime.locator, runtimeTempName), runtime.temp)
 }
 
 func verifyRuntimeLayoutDirectory(runtime *Runtime, name string, expected directoryIdentity) error {
@@ -557,16 +599,12 @@ func verifyRuntimeLayoutDirectory(runtime *Runtime, name string, expected direct
 	if err := verifyNamedChild(int(runtime.dir.Fd()), name, expected); err != nil {
 		return err
 	}
-	return verifyNamedDirectory(filepath.Join(runtime.path, name), expected)
+	return nil
 }
 
 func verifyPrivateFileAuthority(runtime *Runtime, name string, identity runner.FileIdentity, size int64) error {
 	var named unix.Stat_t
 	if err := unix.Fstatat(int(runtime.dir.Fd()), name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil || !validPrivateFile(named, size) || uint64(named.Dev) != identity.Device || named.Ino != identity.Inode {
-		return errInvalidContract
-	}
-	var absolute unix.Stat_t
-	if err := unix.Lstat(filepath.Join(runtime.path, name), &absolute); err != nil || !samePrivateFile(named, absolute) {
 		return errInvalidContract
 	}
 	return nil
@@ -578,10 +616,10 @@ func (runtime *Runtime) Close() error {
 	}
 	runtime.mu.Lock()
 	defer runtime.mu.Unlock()
-	if runtime.dir == nil && runtime.lifetime == nil && runtime.parent == nil {
+	if runtime.dir == nil && runtime.lifetime == nil && runtime.owner == nil {
 		return nil
 	}
-	var dirErr, lifetimeErr, parentErr error
+	var dirErr, lifetimeErr, ownerErr error
 	if runtime.lifetime != nil {
 		lifetimeErr = runtime.lifetime.Close()
 		runtime.lifetime = nil
@@ -590,11 +628,11 @@ func (runtime *Runtime) Close() error {
 		dirErr = runtime.dir.Close()
 		runtime.dir = nil
 	}
-	if runtime.parent != nil {
-		parentErr = runtime.parent.Close()
-		runtime.parent = nil
+	if runtime.owner != nil {
+		ownerErr = runtime.owner.Close()
+		runtime.owner = nil
 	}
-	return errors.Join(dirErr, lifetimeErr, parentErr)
+	return errors.Join(dirErr, lifetimeErr, ownerErr)
 }
 
 type privateWrite func(int, []byte) (int, error)
@@ -1026,14 +1064,6 @@ func inspectExpectedDirectory(fd int, expected runner.FileIdentity) (directoryId
 	return identity, nil
 }
 
-func verifyDirectoryDescriptor(parent *os.File, path string, expected directoryIdentity) error {
-	actual, err := inspectPrivateDirectory(int(parent.Fd()))
-	if err != nil || actual != expected {
-		return errInvalidContract
-	}
-	return verifyNamedDirectory(path, expected)
-}
-
 func verifyNamedDirectory(path string, expected directoryIdentity) error {
 	var stat unix.Stat_t
 	if err := unix.Lstat(path, &stat); err != nil {
@@ -1080,20 +1110,4 @@ func samePrivateFile(opened, named unix.Stat_t) bool {
 
 func validBasename(name string) bool {
 	return name != "" && name != "." && name != ".." && filepath.Base(name) == name && len(name) <= 255
-}
-
-func descriptorPath(file *os.File) (string, error) {
-	buffer := make([]byte, 1024)
-	_, _, errno := syscall.Syscall(syscall.SYS_FCNTL, file.Fd(), unix.F_GETPATH, uintptr(unsafe.Pointer(&buffer[0])))
-	if errno != 0 {
-		return "", errno
-	}
-	length := 0
-	for length < len(buffer) && buffer[length] != 0 {
-		length++
-	}
-	if length == 0 {
-		return "", errInvalidContract
-	}
-	return string(buffer[:length]), nil
 }

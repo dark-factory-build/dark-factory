@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/dark-factory-build/dark-factory/internal/changeworker"
+	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
@@ -42,9 +43,10 @@ func (PrivateFile) Identity() runner.FileIdentity { return runner.FileIdentity{}
 func (PrivateFile) String() string                { return "private runtime file" }
 func (PrivateFile) GoString() string              { return "daemon.PrivateFile{private}" }
 
-func CreateRuntimeParent(*os.File) (*RuntimeParent, error) { return nil, errUnsupported }
-func OpenRuntimeParent(*os.File) (*RuntimeParent, error)   { return nil, errUnsupported }
-func (*RuntimeParent) Close() error                        { return nil }
+func OpenRuntimeParent(context.Context, install.MemberCapability, string) (*RuntimeParent, error) {
+	return nil, errUnsupported
+}
+func (*RuntimeParent) Close() error { return nil }
 func CreateRuntime(*RuntimeParent, string) (*Runtime, error) {
 	return nil, errUnsupported
 }
