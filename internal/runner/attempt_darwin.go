@@ -823,11 +823,13 @@ func validateAttemptName(value string, limit int) error {
 	if value == "" || len(value) > limit {
 		return ErrIdentity
 	}
-	// JSON must encode the name byte-for-byte. A character needing an escape
-	// could inflate the canonical attempt result past its fixed byte bound,
-	// turning a length-valid name into a publish-time failure.
+	// encoding/json must emit the name byte-for-byte. Control bytes, quotes,
+	// backslashes and the HTML-escaped <, >, & all inflate to escape
+	// sequences that could push the canonical attempt result past its fixed
+	// byte bound, turning a length-valid name into a publish-time failure.
 	for index := 0; index < len(value); index++ {
-		if b := value[index]; b < 0x20 || b > 0x7e || b == '"' || b == '\\' {
+		b := value[index]
+		if b < 0x20 || b > 0x7e || b == '"' || b == '\\' || b == '<' || b == '>' || b == '&' {
 			return ErrIdentity
 		}
 	}

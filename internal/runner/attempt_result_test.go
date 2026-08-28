@@ -338,15 +338,19 @@ func TestAttemptResultRejectsImpossibleMarkerCensus(t *testing.T) {
 }
 
 // TestAttemptNameCannotInflateCanonicalResultPastItsBound proves name
-// validation guarantees byte-for-byte JSON encoding, so a length-valid name
-// can never turn into a publish-time canonical-bound failure.
+// validation rejects every byte encoding/json would escape — including the
+// HTML-escaped <, > and & — so a length-valid name can never turn into a
+// publish-time canonical-bound failure.
 func TestAttemptNameCannotInflateCanonicalResultPastItsBound(t *testing.T) {
 	for name, id := range map[string]string{
-		"control": strings.Repeat("\x01", 200),
-		"quote":   strings.Repeat(`"`, 200),
-		"escape":  strings.Repeat(`\`, 200),
-		"utf8":    strings.Repeat("é", 100),
-		"delete":  "attempt\x7f",
+		"control":   strings.Repeat("\x01", 200),
+		"quote":     strings.Repeat(`"`, 200),
+		"escape":    strings.Repeat(`\`, 200),
+		"utf8":      strings.Repeat("é", 100),
+		"delete":    "attempt\x7f",
+		"less":      strings.Repeat("<", 200),
+		"greater":   strings.Repeat(">", 200),
+		"ampersand": strings.Repeat("&", 200),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := innerUnregisteredConvergedResult(id, testResultProof()); !errors.Is(err, ErrIdentity) {
