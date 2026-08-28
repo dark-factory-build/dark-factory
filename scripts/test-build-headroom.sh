@@ -150,11 +150,5 @@ if grep -Fq 'name: Check build headroom' "$linux_job"; then
     fail "Linux CI duplicates the source gate's build-headroom preflight"
 fi
 
-release=$repository_root/.github/workflows/release.yml
-release_preflight_line=$(line_of 'name: Check build headroom' "$release")
-release_build_line=$(line_of 'name: Build release binaries' "$release")
-[ "$release_preflight_line" -lt "$release_build_line" ] \
-    || fail "release CI does not preflight before its build"
-
 sh -n "$preflight" "$repository_root/scripts/local-ci.sh"
 echo "build headroom tests passed"

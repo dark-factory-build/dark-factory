@@ -73,9 +73,26 @@ done
 }
 
 for bin_dir in "$arm_dir" "$intel_dir"; do
-    for binary in factoryd factory-runner factoryctl factory-tui; do
-        [ -x "$bin_dir/$binary" ] || {
-            echo "missing executable: $bin_dir/$binary" >&2
+    for binary in factoryd factory-runner factoryctl; do
+        binary_path="$bin_dir/$binary"
+        [ ! -L "$binary_path" ] && [ -f "$binary_path" ] && [ -x "$binary_path" ] || {
+            echo "missing regular executable: $binary_path" >&2
+            exit 1
+        }
+        binary_facts=$(/usr/bin/stat -f '%HT:%Lp:%l:%z' "$binary_path") || {
+            echo "cannot inspect executable: $binary_path" >&2
+            exit 1
+        }
+        case "$binary_facts" in
+            'Regular File:755:1:'[1-9]* ) ;;
+            *) echo "executable must be one regular mode-0755 single-link file: $binary_path" >&2; exit 1 ;;
+        esac
+        binary_size=${binary_facts##*:}
+        case "$binary_size" in
+            '' | *[!0-9]*) echo "invalid executable size: $binary_path" >&2; exit 1 ;;
+        esac
+        [ "$binary_size" -le 536870912 ] || {
+            echo "executable is too large: $binary_path" >&2
             exit 1
         }
     done
@@ -99,14 +116,14 @@ package_target() {
     mkdir "$package_payload"
     # `ustar` plus a copied payload prevents source mtimes, permissions, IDs,
     # ACLs, xattrs, or file flags from changing the published bytes.
-    for binary in factoryd factory-runner factoryctl factory-tui; do
+    for binary in factoryd factory-runner factoryctl; do
         install -m 0755 "$package_bin_dir/$binary" "$package_payload/$binary"
         TZ=UTC0 touch -t 200001010000.00 "$package_payload/$binary"
     done
     COPYFILE_DISABLE=1 tar --format ustar --uid 0 --gid 0 --uname root --gname wheel \
         --no-acls --no-xattrs --no-fflags --options gzip:!timestamp \
         -czf "$staging/$package_archive" -C "$package_payload" \
-        factoryd factory-runner factoryctl factory-tui
+        factoryd factory-runner factoryctl
     rm -r "$package_payload"
     package_sha=$(shasum -a 256 "$staging/$package_archive" | cut -d' ' -f1)
     printf '%s  %s\n' "$package_sha" "$package_archive" >>"$staging/SHA256SUMS"

@@ -16,7 +16,7 @@ make_binaries() {
     target=$1
     directory=$2
     mkdir -p "$directory"
-    for binary in factoryd factory-runner factoryctl factory-tui; do
+    for binary in factoryd factory-runner factoryctl; do
         printf '#!/bin/sh\nprintf "%%s\\n" "%s %s 1.2.3"\n' "$binary" "$target" >"$directory/$binary"
         chmod +x "$directory/$binary"
     done
@@ -27,8 +27,41 @@ intel_dir="$temporary/intel"
 make_binaries arm "$arm_dir"
 make_binaries intel "$intel_dir"
 chmod 0700 "$arm_dir/factoryd"
-chmod 0711 "$intel_dir/factory-tui"
+chmod 0711 "$intel_dir/factoryctl"
 output="$temporary/dist"
+if "$packager" v1.2.3 "$output" example/project \
+    x86_64-apple-darwin "$intel_dir" \
+    aarch64-apple-darwin "$arm_dir" >"$temporary/mode.out" 2>"$temporary/mode.err"
+then
+    fail "non-0755 input binaries were packaged"
+fi
+[ ! -e "$output" ] || fail "invalid source modes exposed a partial output"
+chmod 0755 "$arm_dir/factoryd" "$intel_dir/factoryctl"
+
+hardlink="$temporary/factory-runner-hardlink"
+ln "$arm_dir/factory-runner" "$hardlink"
+if "$packager" v1.2.3 "$output" example/project \
+    aarch64-apple-darwin "$arm_dir" \
+    x86_64-apple-darwin "$intel_dir" >"$temporary/hardlink.out" 2>"$temporary/hardlink.err"
+then
+    fail "multiply linked input binary was packaged"
+fi
+[ ! -e "$output" ] || fail "multiply linked source exposed a partial output"
+rm "$hardlink"
+
+saved_factoryd="$temporary/intel-factoryd"
+mv "$intel_dir/factoryd" "$saved_factoryd"
+ln -s "$saved_factoryd" "$intel_dir/factoryd"
+if "$packager" v1.2.3 "$output" example/project \
+    aarch64-apple-darwin "$arm_dir" \
+    x86_64-apple-darwin "$intel_dir" >"$temporary/symlink.out" 2>"$temporary/symlink.err"
+then
+    fail "symbolic-link input binary was packaged"
+fi
+[ ! -e "$output" ] || fail "symbolic-link source exposed a partial output"
+rm "$intel_dir/factoryd"
+mv "$saved_factoryd" "$intel_dir/factoryd"
+
 "$packager" v1.2.3 "$output" example/project \
     x86_64-apple-darwin "$intel_dir" \
     aarch64-apple-darwin "$arm_dir"
@@ -38,7 +71,6 @@ for target in aarch64-apple-darwin x86_64-apple-darwin; do
     [ -f "$archive" ] || fail "missing $target archive"
     listing=$(tar -tzf "$archive" | LC_ALL=C sort)
     [ "$listing" = "factory-runner
-factory-tui
 factoryctl
 factoryd" ] || fail "$target archive has unexpected contents: $listing"
     gzip_mtime=$(od -An -tu1 -j4 -N4 "$archive" | tr -d '[:space:]')
@@ -46,7 +78,7 @@ factoryd" ] || fail "$target archive has unexpected contents: $listing"
     LC_ALL=C tar -tvzf "$archive" | awk '
       $1 != "-rwxr-xr-x" || $2 != 0 || $3 != "root" || $4 != "wheel" ||
         $6 != "Jan" || $7 != 1 || $8 != 2000 { exit 1 }
-      END { exit NR == 4 ? 0 : 1 }
+      END { exit NR == 3 ? 0 : 1 }
     ' || fail "$target archive metadata is not normalized"
 done
 (cd "$output" && shasum -a 256 -c SHA256SUMS >/dev/null) || fail "release checksums failed"
@@ -70,7 +102,7 @@ for target in aarch64-apple-darwin x86_64-apple-darwin; do
     grep -Fq "dark-factory-v1.2.3-$target.tar.gz" "$formula" \
         || fail "formula omitted $target"
 done
-for binary in factoryd factory-runner factoryctl factory-tui; do
+for binary in factoryd factory-runner factoryctl; do
     grep -Fq "$binary" "$formula" || fail "formula omitted $binary"
 done
 grep -Fq 'on_arm do' "$formula" || fail "formula omitted the arm architecture block"
@@ -87,13 +119,13 @@ grep -Fq 'assert_equal "#{name} #{version}", shell_output("#{bin}/#{name} --vers
 if grep -Fq 'Hardware::CPU' "$formula"; then
     fail "formula bypasses Homebrew architecture blocks"
 fi
-grep -Fq 'factoryctl update --install' "$formula" || fail "formula omitted runtime updater"
+if grep -Eq 'factory-tui|factoryctl update|rollback binaries' "$formula"; then
+    fail "formula retained deleted TUI/updater behavior"
+fi
 grep -Fq 'Do not use `brew services`' "$formula" || fail "formula permits competing service ownership"
-grep -Fq '`brew uninstall dark-factory` removes only the bootstrap commands' "$formula" \
-    || fail "formula hides bootstrap-only uninstall behavior"
-grep -Fq 'launchd job, active runtime, and state under ~/.dark-factory remain' "$formula" \
-    || fail "formula hides state retained by brew uninstall"
-grep -Fq 'launchd/README.md#uninstall' "$formula" || fail "formula omits safe removal guidance"
+grep -Fq '`brew uninstall dark-factory` removes only the commands' "$formula" \
+    || fail "formula hides command-only uninstall behavior"
+grep -Fq 'service uninstall operation' "$formula" || fail "formula omits safe service removal guidance"
 if grep -Eq '^[[:space:]]*service do' "$formula"; then
     fail "formula defines a Homebrew service"
 fi
@@ -131,7 +163,7 @@ done
 
 # Validation finishes before the output transaction begins. A missing binary
 # in either architecture leaves no partial output or staging directory.
-rm "$intel_dir/factory-tui"
+rm "$intel_dir/factoryctl"
 failed_output="$temporary/failed-dist"
 if "$packager" v1.2.3 "$failed_output" example/project \
     aarch64-apple-darwin "$arm_dir" \

@@ -102,8 +102,8 @@ grep -F 'if [ -x ./scripts/github-step-summary.sh ]; then' .github/workflows/rel
 grep -F 'unavailable before checkout' .github/workflows/ci.yml >/dev/null
 grep -F 'unavailable before checkout' .github/workflows/release.yml >/dev/null
 grep -F 'run: ./scripts/local-ci.sh' .github/workflows/ci.yml >/dev/null
-grep -F 'cargo +1.88.0 build --locked --release --workspace --target "$ARM_TARGET"' .github/workflows/release.yml >/dev/null
-grep -F 'cargo +1.88.0 build --locked --release --workspace --target "$INTEL_TARGET"' .github/workflows/release.yml >/dev/null
+grep -F 'CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 GOENV=off GOTOOLCHAIN=local' .github/workflows/release.yml >/dev/null
+grep -F 'CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 GOENV=off GOTOOLCHAIN=local' .github/workflows/release.yml >/dev/null
 grep -F '"$PUBLISHER" "$TAG" "$SOURCE_SHA" "$GITHUB_REPOSITORY" dist/*' .github/workflows/release.yml >/dev/null
 grep -F 'if: always()' .github/workflows/ci.yml >/dev/null
 grep -F 'if: always()' .github/workflows/release.yml >/dev/null

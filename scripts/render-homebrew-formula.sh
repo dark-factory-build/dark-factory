@@ -74,7 +74,7 @@ cat <<RUBY
 
 # Homebrew bootstrap for the Dark Factory runtime.
 class DarkFactory < Formula
-  desc "Terminal-first runtime for persistent coding-agent teams"
+  desc "Web-first local runtime for persistent coding-agent teams"
   homepage "https://github.com/$repository"
   url "https://github.com/$repository/releases/download/$tag/$manifest"
 ${version_stanza}  sha256 "$manifest_sha"
@@ -95,29 +95,27 @@ ${version_stanza}  sha256 "$manifest_sha"
 
   def install
     resource("binaries").stage do
-      bin.install "factoryd", "factory-runner", "factoryctl", "factory-tui"
+      bin.install "factoryd", "factory-runner", "factoryctl"
     end
   end
 
   def caveats
     <<~EOS
-      Homebrew installs the bootstrap commands; it does not own the running factory.
-      Run \`factoryctl init\` to install the active runtime and optional launchd job
-      under ~/.dark-factory. Do not use \`brew services\` for Dark Factory.
+      Homebrew installs the three Dark Factory commands; it does not own the
+      running factory. Run \`factoryctl init --home ABSOLUTE\`, then use the
+      explicit \`factoryctl service\` commands to manage the launchd job.
+      Do not use \`brew services\` for Dark Factory.
 
-      \`brew upgrade\` updates this bootstrap copy. Use
-      \`factoryctl update --install\` to atomically update the active runtime while
-      preserving live sessions and rollback binaries.
+      \`brew upgrade\` replaces these commands but never mutates a running home.
+      There is no in-runtime updater or rollback-version store.
 
-      \`brew uninstall dark-factory\` removes only the bootstrap commands. The
-      launchd job, active runtime, and state under ~/.dark-factory remain. Follow
-      https://github.com/$repository/blob/$tag/launchd/README.md#uninstall to stop
-      sessions and unload the service safely before removing anything else.
+      \`brew uninstall dark-factory\` removes only the commands. Use the explicit
+      service uninstall operation before removing a retained factory home.
     EOS
   end
 
   test do
-    %w[factoryd factory-runner factoryctl factory-tui].each do |name|
+    %w[factoryd factory-runner factoryctl].each do |name|
       assert_equal "#{name} #{version}", shell_output("#{bin}/#{name} --version").strip
     end
   end
