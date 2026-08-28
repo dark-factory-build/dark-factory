@@ -29,12 +29,13 @@ case "$command" in
   pack|verify)
     ;;
   test)
-    shift
-    [ "$#" -gt 0 ] || fail "usage: package-artifacts test <test file>"
+    [ "$#" -eq 0 ] || fail "the artifact test file is fixed"
+    test_script=$script_dir/package-artifacts.test.mjs
+    [ -f "$test_script" ] || fail "artifact tests are missing"
     exec /usr/bin/env -i \
       CI=true HOME=/var/tmp LANG=C LC_ALL=C TMPDIR=/var/tmp \
       PATH="$node_dir:/usr/bin:/bin" DARK_FACTORY_ARTIFACT_LAUNCHER=posix-v1 \
-      "$node" --test "$@"
+      "$node" --test "$test_script"
     ;;
   *)
     fail "usage: package-artifacts <pack|verify> --output <directory>"
