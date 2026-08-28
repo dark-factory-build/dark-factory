@@ -7,12 +7,13 @@ hosted browser use the same local API for day-to-day observation. The retained
 Rust TUI is historical evidence, not a current product surface. Dark Factory
 is not a coding model, hosted service, or general agent framework.
 
-This repository is pre-cutover. Integration-target evidence at `359d46a3`
-includes production `factoryd` composition and `OperationalHome`, `Store`,
-`RuntimeParent`, Local API, and browser ownership. The corrected Change/global
-admission/provider integration is not claimed shipped by this docs candidate;
-the shell package at `1ff2e2e6` is a separate unintegrated candidate, and
-Claude/Codex remain blocked.
+This repository is pre-cutover. Canonical evidence through `359d46a3` includes
+production `factoryd` composition and `OperationalHome`, `Store`,
+`RuntimeParent`, Local API, and browser ownership; the corrected documentation
+contract was merged at `bc48df7f` and still needs an exact-head review. Change
+settlement candidate `c675f96e` is under exact review, global admission remains
+unintegrated, and shell candidate `1ff2e2e6` is review-BLOCKED. Claude and Codex
+remain blocked.
 
 ## Model
 

@@ -9,14 +9,14 @@ catalogue.
 
 Live use remains frozen until an independent exact-head boot review passes.
 
-The integration target at `359d46a3` contains production `factoryd`
+The canonical implementation through `359d46a3` contains production `factoryd`
 composition and ownership of `OperationalHome`, `Store`, `RuntimeParent`, the
-Local API, and browser services. This documentation candidate is not that
-shipped integration: corrected Change/global-admission/provider integration
-remains pending. The shell package at `1ff2e2e6` is a separate unintegrated
-candidate, not canonical or shipped; Claude and Codex remain blocked.
-Manual integration into that target is required, followed by a separate
-exact-head review; this document does not authorize a merge.
+Local API, and browser services. The documentation contract was manually
+merged at `bc48df7f`; a fresh exact-head review remains required. Corrected
+Change settlement at `c675f96e` is under exact review, while global admission
+remains dependent and unintegrated. Shell package `1ff2e2e6` is review-BLOCKED
+on framing, UTF-8, authority sealing and removal of duplicate production
+policy; Claude and Codex remain blocked.
 
 The complete design and causal proof matrix live in
 [`docs/development/SAFE_KERNEL_REFACTOR.md`](docs/development/SAFE_KERNEL_REFACTOR.md).

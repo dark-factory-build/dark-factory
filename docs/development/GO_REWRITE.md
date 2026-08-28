@@ -30,22 +30,27 @@ no Rust migration, event upcasting, mixed runtime, or compatibility period.
 The existing Rust TUI and other replaced Rust local-runtime crates are deleted
 only after the revised web/PTY gate passes.
 
-### Candidate and integration status
+### Canonical integration status
 
-This document is based on the old Go source. The reviewed predecessor history
-contains `05d3bef7` and `cac06b60`; this record intentionally does not embed a
-current commit SHA, because that would become stale when this repair is
-committed. The exact current candidate is identified by external Git review,
-and the final SHA is recorded after integration. The corrected Change, global
-admission, and provider integration are not claimed implemented or shipped.
-Integration-target evidence at `359d46a3` includes production `factoryd`
-composition and ownership of `OperationalHome`, `Store`, `RuntimeParent`, the
-Local API, and browser services; that evidence is not retroactively an
-implementation claim for this old-base candidate. The shell package at
-`1ff2e2e6` is a separate unintegrated candidate, not canonical or shipped.
-Claude and Codex remain blocked pending exact provider integration and witness
-review. This worktree is not a three-way merge target: manual integration is
-required, followed by a separate exact-head review.
+The reviewed documentation contract through `276f9468` was manually merged
+with the canonical implementation at `359d46a3`; `bc48df7f` is the resulting
+integration commit. A fresh exact-head documentation review remains required,
+so this status is evidence, not cutover authorization.
+
+The canonical implementation includes production `factoryd` composition and
+ownership of `OperationalHome`, `Store`, `RuntimeParent`, the Local API, and
+browser services. `RuntimeParent` was independently allowed through
+`7464e02a` and `15879fe2`; the composition fixes at `9ffc13e3` and `bcfdb44b`
+were independently allowed; and the obsolete `ExecutionMode` dimension was
+deleted through `24aaccd1` and `359d46a3`, also with independent ALLOW.
+
+Corrected Change settlement is a separate candidate at `c675f96e` under exact
+high-risk review; global admission depends on it and is not canonical. The
+shell boundary at `1ff2e2e6` is review-BLOCKED: its accepted input exceeds the
+runner frame, committed argv lacks UTF-8 closure, runtime paths are not yet
+authority-sealed, and the old production shell path still duplicates policy.
+Claude and Codex remain blocked pending exact provider integration and native
+fake-witness review.
 
 ### Redirection starting point and branch inventory
 
@@ -66,10 +71,10 @@ branch/worktree and obeys that repository's `AGENTS.md`.
 |---|---|
 | Complete and retained | Fresh SQLite contract; typed kernel; atomic admission; exact attempt credentials; run/finalizing/resource state; bounded invalidations; Change ownership/materialization groundwork; owner-only Unix control API; typed `factoryctl` client; Darwin process identity; two blocked-exec gates; gated Darwin PTY primitive; durable terminal-session admission, activation, recovery uncertainty and finalization guards; durable browser clients/challenges/revocation/input leases; exact PAIR/AUTH transcripts; strict browser-v1 handshake/binary codecs; strict runner terminal union, complete-write poisoning, incremental frame decoder and one fixed replay ring through `f1f72aa`; reviewed framework-neutral `@dark-factory/client` handshake/transcript/binary core and exact package gate through `d03491f`; independently reviewed question-only durable HumanRequest creation, private detail, reply reservation/acknowledgement/uncertainty, restart recovery, lifecycle convergence and bounded public projection through `40f5873`; the single-owner PTY execution loop, exact ready/input handoff, correlated retained replay, bounded filter retirement, poisoned writes, actual-EOF ordering and daemon-loss convergence through `ebcfd24`; exact two-field `AUTH_PROVE` through `4b18c38`; runner-owned exact HumanRequest PTY reply through `0f313a9`; daemon live-attempt registry, mailbox, bounded observers, finalization gate, active supervisor cancellation and joined shutdown through `d9709b9`; the closed attempt-only `request_human` API plus direct durable dispatch through `c29d154`; exact 8 KiB browser/Go/TypeScript terminal payload bound through `9ab44c3`; read-only exact lease authorization and one-shot failed-install/input-reservation revocation through `8853acb`; finalization/release linearization, natural-exit acknowledgement convergence, cancellation visibility and real descendant reaping through `ea1ee4b`; canonical Darwin runtime, Change and Change-worker fixtures through `699515d`; exact committed provider access to the attempt-only `request-human` command through `d4ce713`; independently reviewed fixed-page browser canonical state and private-detail separation through `1a562e4`; strict Go/TypeScript browser state/detail wire and causal reducer through `9b7689d`; exact-run HumanRequest terminal projection, fail-closed loopback browser state transport, guarded framework-neutral TypeScript Session client, direct daemon Store adapter and daemon-owned durable browser revocation through `b61fca8`; private transport-minted per-WebSocket connection identity through `53d68dd`; independently reviewed public MIT `@dark-factory/ui` package and contributor fixture through `18b5b0e`; exact daemon terminal acquire/renew/release/input/resize and HumanRequest reply effects through `ae28dc8`; exact browser-v1 terminal/HumanRequest manifest, Go codecs, golden fixtures and TypeScript mirror through `a10b9f0`; independently reviewed `factoryctl web status/open/list-clients/revoke`, exact launch ambiguity and bounded browser-runtime cleanup through `2f883c1`; reviewed framework-neutral TypeScript terminal Session authority through `b2eef51`; reviewed Go browser terminal/HumanRequest effect transport and cleanup through `7f449ce`; the exact agent terminal-target wire/Store/browser-daemon route and four-capability production pairing mask through `219d036`; high-level TypeScript target discovery, opaque terminal authority and automatic lease lifecycle; implemented, causally tested and independently allowed `RuntimeParent` lifetime/child-operation ownership through `7464e02a` and `15879fe2` |
 | Reusable with adaptation | `internal/runner` live-child/process-group ownership and old result-spool identity/removal mechanics; daemon supervisor choreography; bounded API framing/auth separation; dashboard projection/client reducer direction; rebased recovery branch `go-recovery-reserved-fix` at `185cd5f`; fail-closed runtime/spool/Change close branches at `f239815`, `347c977`, and `4183205` |
-| In progress but held | Recovery still needs replay onto the PTY design. The development/Go sub-gates are integrated and green. A real Go/TypeScript/browser PTY lifecycle candidate now passes serially with a stable post-test census; independent review and integration remain before that proof becomes canonical. |
+| In progress but held | Corrected Change settlement at `c675f96e` is under exact high-risk review. Global admission is being built as its dependent child. Shell boundary `1ff2e2e6` is blocked on frame-size, UTF-8, authority-sealing, production-integration and causal-effect repairs. Recovery still needs replay onto the PTY design. The development/Go sub-gates are integrated and green. |
 | Obsolete | Startup-input-only/closed-stdin provider contract; separate stdin/stdout/stderr provider pipes as the product transport; TUI/Bubble Tea packages, lanes and parity tests; generic attention projection; message-on-next-run as the live-question answer |
 | Proved for revised architecture | Current Chrome on macOS can connect from the protected hosted HTTPS preview to exact `ws://127.0.0.1:43123` with the dedicated loopback permission; strict Origin/Host checks, binary traffic, reconnect, denial, no-daemon, port-collision and cross-site refusal are causal. A fresh Darwin PTY child remains inert until release, owns a controlling terminal/process group and is reaped without orphaning. SQLite owns exactly one terminal session per admitted run and refuses terminalization until its exact close is proved. The outer runner owns the live PTY loop without goroutines, transfers initial input exactly once, gates terminal commands on readiness, bounds and correlates replay before and after actual EOF, and writes one HumanRequest reply byte-for-byte without borrowing browser lease authority. The daemon registers one joined owner before release, rejects wrong sessions, routes bounded replay to multiple observers, actively cancels pre-live supervisors on shutdown and serializes infrastructure failure with terminal effects. Its exact effect bridge binds the durable client to one private WebSocket identity and generation, commits Store authority before runner effects, never replays ambiguous input/replies, and preserves positive terminal evidence until exact supervisor acknowledgement. The loopback server now enforces exact Host/Origin, pairing and per-operation durable client authority, serves bounded canonical state, joins subscriptions/connections, and couples exact-revision durable revocation to all-runtime socket close. The TypeScript Session client signs exact transcripts, publishes only complete fixed-head state, fences stale generations and ambiguous pairing, rate-bounds reconnect, and consumes the same pagination/empty-chronology contract. Each authenticated socket receives a private transport-minted identity that cannot be selected by a backend, serialized or exposed by formatting. The public React package renders bounded BUILDING, AGENT, task and read-only NEEDS YOU state without private detail or policy, installs and builds under the stripped Corepack gate, and remains consumable as an exact packed artifact. |
-| Blocked until proved | Independent review and integration of the real Go-server TypeScript terminal/HumanRequest proof; interactive terminal/reply/cancel expansion of the public UI; complete private host integration; remaining factoryctl service/recovery cutover plumbing; revised crash-cut vertical slice |
+| Blocked until proved | Corrected global admission and production provider integration; independent review and integration of the real Go-server TypeScript terminal/HumanRequest proof; interactive terminal/reply/cancel expansion of the public UI; complete private host integration; remaining factoryctl service/recovery cutover plumbing; revised crash-cut vertical slice |
 
 The final HumanRequest authority slice landed through `bd674b0`: one pinned
 private detail with canonical active-run relationship validation, Store-derived
@@ -102,9 +107,10 @@ older candidate or test result current.
   supplied by external exact Git review rather than embedded here.
 - Integration-target evidence is `359d46a3`: it contains production `factoryd`
   composition and `OperationalHome`/`Store`/`RuntimeParent`/Local API/browser
-  ownership. That evidence is a separate target, not code shipped by this
-  candidate. The shell package at `1ff2e2e6` is likewise a separate
-  unintegrated candidate; Claude and Codex remain blocked.
+  ownership. It was manually merged with this reviewed documentation contract
+  at `bc48df7f`; the merged exact head still needs independent review. The shell
+  package at `1ff2e2e6` remains separate and review-BLOCKED; Claude and Codex
+  remain blocked.
   `main`, remotes, the private site, the operator installation, live service,
   socket/home and real providers remain untouched.
 - The operational Store is now integrated through `495ba3f5`, `5be1a76d`,
@@ -131,8 +137,8 @@ older candidate or test result current.
 - The integration-target branch also contains the exact `RuntimeParent` range
   `7464e02a` and `15879fe2`, plus production factoryd composition and the
   OperationalHome/Store/Local API/browser owners. This is package/composition
-  evidence only; it does not make the corrected Change/global-admission or
-  provider contract implemented in this old-base docs candidate.
+  evidence only; after the manual merge it still does not make corrected
+  Change/global-admission or provider integration canonical.
 - The public-artifact gate and its exact `c732f103` proof remain integrated and
   are preserved in the historical checkpoint immediately below. Store and
   RuntimeParent commits did not change those artifact files, but no new 13/13
@@ -142,10 +148,10 @@ older candidate or test result current.
 |---|---|---|
 | operational home and Store | integrated, causally tested and independently reviewed | composition must call `OpenStore` once and close child owners in the frozen order |
 | public artifact gate | integrated; exact proof remains at `c732f103` | rerun after the next clean record/integration milestone |
-| local API/browser authority | integrated on the `359d46a3` composition target; not claimed shipped by this old-base docs candidate | exact composition and browser/Local API ownership review on the integrated head |
-| `RuntimeParent` | integrated on the `359d46a3` target through `7464e02a` and `15879fe2` | exact composition must own it once, join every child operation and close it before Store/home ancestry |
-| Change disposition/descriptor handoff | corrected contract frozen below; implementation and integration remain pending | schema/Store transition proof, then worker FD 11 and retry proof |
-| global admission/recovery/provider integration | corrected contracts frozen below; not implemented or shipped by this candidate | exact kernel, factoryd, provider Build, restart/crash and fake-witness proofs |
+| local API/browser authority | integrated through the canonical `359d46a3` composition and retained by `bc48df7f` | merged exact-head documentation/composition review |
+| `RuntimeParent` | integrated through `7464e02a` and `15879fe2`; production composition allowed through `bcfdb44b` | continue proving exact child ownership in crash/restart E2E |
+| Change disposition/descriptor handoff | candidate `c675f96e` implements the corrected contract and is under exact review; not canonical | reviewer ALLOW, integration, then retained-retry provider proof |
+| global admission/recovery/provider integration | global admission is a dependent implementation lane; shell `1ff2e2e6` is review-BLOCKED | exact kernel transaction, sealed provider Build, restart/crash and fake-witness proofs |
 | service/release/private host | not cut over | isolated install/service proof and exact public-artifact site integration |
 | final elegance and deletion | deliberately not started | whole-runtime DRY/YAGNI audit, mutations, exact-head reviews, then Rust deletion |
 
@@ -153,6 +159,20 @@ The weighted estimate remains approximately 42 percent. Operational Store is a
 real authority proof inside an already-credited kernel/install gate; it does
 not yet complete a black-box daemon, recovery, service, private-host or cutover
 gate. The estimate is therefore not inflated for integration activity.
+
+#### Current canonical composition evidence
+
+- `RuntimeParent` lifetime, exact child capability and close/join semantics are
+  integrated through `7464e02a` and `15879fe2`, with independent ALLOW.
+- Production `factoryd` composition, startup ordering and joined shutdown are
+  integrated through `9ffc13e3` and `bcfdb44b`, with independent ALLOW.
+- The unused `ExecutionMode` policy dimension and its duplicate validation were
+  deleted through `24aaccd1` and `359d46a3`, with independent ALLOW.
+- `./scripts/go-check.sh` passed at `359d46a3`: vet, focused Go tests, 188
+  TypeScript/UI tests, packed-consumer proof and diff check.
+
+This evidence does not prove corrected global admission, provider integration,
+service cutover or the installed browser product loop.
 
 #### Integrated operational Store boundary
 
@@ -179,13 +199,13 @@ or database reference; the raw connector owner is the smaller effective
 authority. There is no repository layer, reconnect fallback, generic pool
 framework or second transaction pattern.
 
-#### Corrected local API authority boundary (historical at `497ecfe4`; superseded by `359d46a3`)
+#### Corrected local API authority boundary (historical at `497ecfe4`; superseded by canonical `359d46a3`)
 
 This subsection records the planned/no-implementation status at old head
 `497ecfe4`. The later integration target `359d46a3` contains production
-`factoryd` composition with Local API and `RuntimeParent` ownership; that target
-status is recorded above and is not retroactively attributed to this old-base
-docs candidate. The earlier `c732f103` proposal to let `internal/api` bind the Unix socket from
+`factoryd` composition with Local API and `RuntimeParent` ownership; that
+composition is now canonical and its status is recorded above. The earlier
+`c732f103` proposal to let `internal/api` bind the Unix socket from
 a capability is superseded. `OpenLocalAPI` lives in `internal/install` and owns
 the fixed endpoint lifecycle, including create/bind, exact socket identity,
 mode, stale-socket decision and removal. `internal/api` owns only the bounded
@@ -3711,11 +3731,12 @@ do not add interfaces to preserve the sketch.
 ### Concrete V1 provider boundary
 
 The V1 contract defines only unrestricted interactive launches. No provider is
-claimed shipped by this old-base candidate: the shell implementation at
-`1ff2e2e6` is a separate unintegrated candidate, and Claude Code/Codex remain
-blocked pending exact integration and fake-witness review. The schema and wire
-contract have no permission-mode/profile field, and no bounded provider
-authority is enabled. A later bounded contract must prove its actual
+yet claimed shipped. The shell implementation at `1ff2e2e6` is separate and
+review-BLOCKED on exact input framing, argv UTF-8 closure, authority-sealed
+runtime paths, production-path deletion and causal PTY effect proof. Claude
+Code and Codex remain blocked pending exact integration and fake-witness
+review. The schema and wire contract have no permission-mode/profile field,
+and no bounded provider authority is enabled. A later bounded contract must prove its actual
 filesystem, process, socket and network effects with a real OS witness.
 
 `Build` cannot select authority, a source path, a working directory, a
@@ -3728,7 +3749,9 @@ revalidates it plus the final Change descriptor/config identity and digest. No
 executable, version, or digest is an admission schema field. Missing or
 changed executable, configuration or auth is typed `FailureSpawn` after
 admission. In shell candidate `1ff2e2e6`, `Installation` construction precedes
-`Build`; both are post-admission and integration may refine that ordering.
+`Build`; both are post-admission. Its repair must preserve the semantic order:
+the daemon seals installation and launch facts, then `Build` only consumes and
+revalidates them without performing locator discovery.
 
 Shell is exactly `/bin/sh` with argv `["/bin/sh", "-s"]`. Claude Code and
 Codex use an ordered, version-sealed argv containing only the reviewed native

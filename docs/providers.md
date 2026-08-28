@@ -24,7 +24,7 @@ provider-owned supervision framework.
 
 | Provider | V1 authority | Model/effort | Launch status |
 |---|---|---|---|
-| `shell` | unrestricted interactive | neither value is present | contract only; package `1ff2e2e6` is unintegrated and not shipped |
+| `shell` | unrestricted interactive | neither value is present | candidate `1ff2e2e6` is review-BLOCKED and not shipped |
 | `claude_code` | unrestricted interactive | each optional independently | blocked pending exact provider integration and witness review |
 | `codex` | unrestricted interactive | each optional independently | blocked pending exact provider integration and witness review |
 
@@ -82,8 +82,11 @@ Codex 0.149.0:
 
 Optional pairs are emitted in the shown order and are omitted independently.
 In shell candidate `1ff2e2e6`, `Installation` construction precedes `Build`,
-but both occur post-admission; integration may refine that internal ordering
-without moving either operation before admission.
+but both occur post-admission. Review blocks integration until the accepted
+input fits the runner frame, committed argv is exact UTF-8, runtime facts are
+authority-sealed, duplicate production shell policy is deleted, and a causal
+Build-to-PTY test proves the effect. Repair may refine internal ordering but
+must keep daemon sealing before `Build` consumption and both after admission.
 There is no trailing prompt argument: the interactive PTY is the only task
 input. A future reviewed version may replace a template only after its
 metadata/help and fake-witness tests prove the same properties.

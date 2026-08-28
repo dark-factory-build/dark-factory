@@ -24,12 +24,13 @@ contract is [`docs/development/GO_REWRITE.md`](docs/development/GO_REWRITE.md),
 which currently requires fresh exact-head review and does not claim a finished
 daemon.
 
-Integration-target evidence at `359d46a3` includes production `factoryd`
+Canonical evidence through `359d46a3` includes production `factoryd`
 composition and OperationalHome/Store/RuntimeParent/Local API/browser
-ownership. Corrected Change/global-admission/provider integration remains
-pending in this docs candidate. The shell package at `1ff2e2e6` is a separate
-unintegrated candidate, not canonical or shipped; Claude and Codex remain
-blocked.
+ownership; the documentation contract was manually merged at `bc48df7f` and
+still needs an exact-head review. Corrected Change settlement at `c675f96e` is
+under exact review and global admission is not integrated. Shell package
+`1ff2e2e6` is review-BLOCKED on framing, UTF-8, authority sealing and duplicate
+production policy; Claude and Codex remain blocked.
 
 Planned Go admission is one global cursor-free immediate Store transaction with
 no caller AgentID/task/observation. It first validates the complete fresh
