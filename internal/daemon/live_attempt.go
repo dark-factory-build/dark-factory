@@ -202,7 +202,7 @@ const (
 	liveCommandAttach
 	liveCommandDetach
 	liveCommandEffect
-	liveCommandAcknowledge
+	liveCommandFinishExit
 	liveCommandShutdown
 )
 
@@ -212,15 +212,15 @@ type liveAttemptCommand struct {
 	session                      kernel.TerminalSessionID
 	expectedRun, expectedSession kernel.Revision
 	sequence                     uint64
-	terminal                     *runner.TerminalRecord
+	exit                         *TerminalEvent
 	result                       chan error
 	effect                       *terminalEffect
 	effectDone                   chan terminalEffectResult
 }
 
 type liveAttemptResult struct {
-	event runner.AttemptEvent
-	err   error
+	notice *runner.AttemptResultNotice
+	err    error
 }
 
 // liveAttempt is intentionally concrete. All mutable fields below belong to
@@ -235,7 +235,7 @@ type liveAttempt struct {
 	commands chan liveAttemptCommand
 	wake     chan struct{}
 	done     chan struct{}
-	terminal chan liveAttemptResult
+	result   chan liveAttemptResult
 
 	subs            map[*TerminalAttachment]struct{}
 	correlations    map[uint64]*TerminalAttachment
@@ -244,8 +244,8 @@ type liveAttempt struct {
 	readySeen         bool
 	releaseSent       bool
 	terminationSent   bool
-	terminalSeen      bool
-	terminalEvent     *runner.AttemptEvent
+	resultSeen        bool
+	resultNotice      *runner.AttemptResultNotice
 	creditOutstanding uint64
 	controllerClosed  bool
 	finalErr          error
@@ -263,7 +263,7 @@ func newLiveAttempt(daemon *Daemon, runID kernel.RunID, sessionID kernel.Termina
 	attempt := &liveAttempt{
 		daemon: daemon, runID: runID, sessionID: sessionID, controller: controller,
 		commands: make(chan liveAttemptCommand, liveAttemptMailboxCap),
-		wake:     make(chan struct{}, 1), done: make(chan struct{}), terminal: make(chan liveAttemptResult, 1),
+		wake:     make(chan struct{}, 1), done: make(chan struct{}), result: make(chan liveAttemptResult, 1),
 		subs: make(map[*TerminalAttachment]struct{}), correlations: make(map[uint64]*TerminalAttachment),
 		effectLimit: liveAttemptEffectLimit,
 	}
@@ -461,8 +461,11 @@ func (attempt *liveAttempt) detach(ctx context.Context, attachment *TerminalAtta
 	return attempt.submit(ctx, liveAttemptCommand{kind: liveCommandDetach, attachment: attachment})
 }
 
-func (attempt *liveAttempt) acknowledge(ctx context.Context, terminal *runner.TerminalRecord) error {
-	return attempt.submit(ctx, liveAttemptCommand{kind: liveCommandAcknowledge, terminal: terminal})
+// finishExit broadcasts the store-committed wire exit to every observer and
+// stops the owner loop. The exit value comes from the authenticated result
+// after ConsumeAttemptResult, never from browser or runner prose.
+func (attempt *liveAttempt) finishExit(ctx context.Context, exit TerminalEvent) error {
+	return attempt.submit(ctx, liveAttemptCommand{kind: liveCommandFinishExit, exit: &exit})
 }
 
 func (attempt *liveAttempt) close() error {
@@ -486,9 +489,9 @@ func (attempt *liveAttempt) join() error {
 	return attempt.finalErr
 }
 
-func (attempt *liveAttempt) waitTerminal() liveAttemptResult {
+func (attempt *liveAttempt) waitResult() liveAttemptResult {
 	if attempt == nil {
 		return liveAttemptResult{err: ErrTerminalClosed}
 	}
-	return <-attempt.terminal
+	return <-attempt.result
 }
