@@ -251,7 +251,7 @@ func (state *operationalHomeState) openCapability(name string) (*os.File, error)
 	if err != nil {
 		return nil, fmt.Errorf("open operational member capability %s: %w", name, err)
 	}
-	if err := sameMemberIdentity(member.identity, toIdentity(stat)); err != nil {
+	if err := sameMemberIdentity(member.identity, toIdentity(stat), member.directory); err != nil {
 		_ = file.Close()
 		return nil, errors.Join(ErrUncertain, fmt.Errorf("%w: operational member %s changed: %v", ErrInvalidHome, name, err))
 	}
@@ -337,7 +337,7 @@ func sameFileIdentity(expected identity, file *os.File) error {
 	return sameIdentities(expected, toIdentity(stat))
 }
 
-func sameMemberFileIdentity(expected identity, file *os.File) error {
+func sameMemberFileIdentity(expected identity, file *os.File, directory bool) error {
 	var stat unix.Stat_t
 	if file == nil {
 		return fmt.Errorf("operational home descriptor is unavailable")
@@ -345,11 +345,11 @@ func sameMemberFileIdentity(expected identity, file *os.File) error {
 	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
 		return err
 	}
-	return sameMemberIdentity(expected, toIdentity(stat))
+	return sameMemberIdentity(expected, toIdentity(stat), directory)
 }
 
-func sameMemberIdentity(expected, actual identity) error {
-	if expected.dev != actual.dev || expected.ino != actual.ino || expected.mode != actual.mode || expected.uid != actual.uid || expected.nlink != actual.nlink {
+func sameMemberIdentity(expected, actual identity, directory bool) error {
+	if expected.dev != actual.dev || expected.ino != actual.ino || expected.mode != actual.mode || expected.uid != actual.uid || expected.gid != actual.gid || (!directory && expected.nlink != actual.nlink) {
 		return fmt.Errorf("%w: filesystem identity or metadata changed", ErrInvalidHome)
 	}
 	return nil
@@ -371,8 +371,18 @@ func recheckIdentityBinding(parent *os.File, name string, expected identity) err
 	if err := unix.Fstatat(int(parent.Fd()), name, &current, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		return fmt.Errorf("recheck operational home member %s: %w", name, err)
 	}
-	if uint64(current.Dev) != expected.dev || uint64(current.Ino) != expected.ino {
-		return fmt.Errorf("%w: operational home member %s identity changed", ErrInvalidHome, name)
+	if err := sameIdentityBinding(expected, toIdentity(current)); err != nil {
+		return fmt.Errorf("%w: operational home member %s identity changed: %v", ErrInvalidHome, name, err)
+	}
+	return nil
+}
+
+func sameIdentityBinding(expected, actual identity) error {
+	if expected.dev != actual.dev || expected.ino != actual.ino || expected.mode != actual.mode || expected.uid != actual.uid || expected.gid != actual.gid {
+		return errors.New("retained filesystem binding changed")
+	}
+	if expected.mode&unix.S_IFMT == unix.S_IFREG && expected.nlink != actual.nlink {
+		return errors.New("retained filesystem binding link count changed")
 	}
 	return nil
 }
@@ -598,7 +608,7 @@ func (state *operationalHomeState) recheckMembers() error {
 				return err
 			}
 		}
-		if err := sameMemberFileIdentity(member.identity, member.file); err != nil {
+		if err := sameMemberFileIdentity(member.identity, member.file, member.directory); err != nil {
 			return err
 		}
 		if err := recheckIdentityBinding(state.home, name, member.identity); err != nil {
@@ -641,7 +651,7 @@ func recheckOperationalCensus(parent *homeParent, name string, expected identity
 				return errors.Join(fmt.Errorf("%w: operational SQLite sidecar %s size is outside bounds", ErrInvalidHome, name), root.Close())
 			}
 			if member, retained := members[name]; retained {
-				if err := sameMemberIdentity(member.identity, toIdentity(sidecarStat)); err != nil {
+				if err := sameMemberIdentity(member.identity, toIdentity(sidecarStat), false); err != nil {
 					_ = file.Close()
 					return errors.Join(fmt.Errorf("%w: operational SQLite sidecar %s changed: %v", ErrInvalidHome, name, err), root.Close())
 				}

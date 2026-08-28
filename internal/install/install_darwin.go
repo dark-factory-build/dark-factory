@@ -100,6 +100,7 @@ type identity struct {
 	ino   uint64
 	mode  uint32
 	uid   uint32
+	gid   uint32
 	nlink uint64
 	size  int64
 }
@@ -114,6 +115,7 @@ type ancestryIdentity struct {
 	ino   uint64
 	mode  uint32
 	uid   uint32
+	gid   uint32
 	nlink uint64
 }
 
@@ -442,15 +444,15 @@ func (p *homeParent) recheck() error {
 		if err := unix.Fstat(int(p.parts[i].file.Fd()), &current); err != nil {
 			return fmt.Errorf("recheck home parent: %w", err)
 		}
-		if current.Dev != p.parts[i].stat.Dev || current.Ino != p.parts[i].stat.Ino {
-			return fmt.Errorf("%w: home parent identity changed", ErrInvalidHome)
+		if err := sameRetainedDirectory(p.parts[i].stat, current, false); err != nil {
+			return fmt.Errorf("%w: home parent descriptor changed", err)
 		}
 		if i > 0 {
 			var binding unix.Stat_t
 			if err := unix.Fstatat(int(p.parts[i-1].file.Fd()), p.parts[i].name, &binding, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 				return fmt.Errorf("recheck home parent binding: %w", err)
 			}
-			if binding.Dev != p.parts[i].stat.Dev || binding.Ino != p.parts[i].stat.Ino {
+			if err := sameRetainedDirectory(p.parts[i].stat, binding, false); err != nil {
 				return fmt.Errorf("%w: home parent binding changed", ErrInvalidHome)
 			}
 		}
@@ -478,8 +480,8 @@ func (p *homeParent) commitments() ([]ancestryCommitment, error) {
 			if err := unix.Fstatat(int(p.parts[i-1].file.Fd()), p.parts[i].name, &binding, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 				return nil, fmt.Errorf("snapshot home parent binding: %w", err)
 			}
-			if binding.Dev != object.Dev || binding.Ino != object.Ino {
-				return nil, fmt.Errorf("%w: home parent binding changed", ErrInvalidHome)
+			if err := sameRetainedDirectory(object, binding, false); err != nil {
+				return nil, fmt.Errorf("%w: home parent binding changed: %v", ErrInvalidHome, err)
 			}
 			commitment = ancestryCommitment{
 				name:   p.parts[i].name,
@@ -555,6 +557,29 @@ func exactDirectory(file *os.File, parent bool) error {
 		return fmt.Errorf("%w: directory link count is invalid", ErrInvalidHome)
 	}
 	return nil
+}
+
+// sameRetainedMetadata binds a pathname lookup to the descriptor metadata
+// accepted when it was opened. Directory link counts are deliberately
+// volatile: adding a child changes nlink without changing directory authority.
+func sameRetainedMetadata(expected, actual unix.Stat_t, strictNlink bool) error {
+	if expected.Dev != actual.Dev || expected.Ino != actual.Ino || expected.Mode != actual.Mode || expected.Uid != actual.Uid || expected.Gid != actual.Gid {
+		return fmt.Errorf("%w: retained filesystem metadata changed", ErrInvalidHome)
+	}
+	if strictNlink && expected.Nlink != actual.Nlink {
+		return fmt.Errorf("%w: retained filesystem link count changed", ErrInvalidHome)
+	}
+	return nil
+}
+
+func sameRetainedDirectory(expected, actual unix.Stat_t, strictNlink bool) error {
+	if expected.Mode&unix.S_IFMT != unix.S_IFDIR || actual.Mode&unix.S_IFMT != unix.S_IFDIR {
+		return errors.New("retained filesystem object is not a directory")
+	}
+	if !exactDirectoryLinkCount(uint64(actual.Nlink)) {
+		return fmt.Errorf("%w: retained directory link count is invalid", ErrInvalidHome)
+	}
+	return sameRetainedMetadata(expected, actual, strictNlink)
 }
 
 func writeMember(parent *os.File, name string, contents []byte, createPhase phase) error {
@@ -869,8 +894,8 @@ func recheckBinding(parent *os.File, name string, expected unix.Stat_t) error {
 	if err := unix.Fstatat(int(parent.Fd()), name, &current, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		return fmt.Errorf("recheck home member %s: %w", name, err)
 	}
-	if current.Dev != expected.Dev || current.Ino != expected.Ino {
-		return fmt.Errorf("%w: home member %s identity changed", ErrInvalidHome, name)
+	if err := sameRetainedMetadata(expected, current, expected.Mode&unix.S_IFMT == unix.S_IFREG); err != nil {
+		return fmt.Errorf("%w: home member %s identity changed: %v", ErrInvalidHome, name, err)
 	}
 	return nil
 }
@@ -1038,7 +1063,7 @@ func digestMember(ctx context.Context, file *os.File, size, minimum, maximum int
 }
 
 func toIdentity(stat unix.Stat_t) identity {
-	return identity{dev: uint64(stat.Dev), ino: uint64(stat.Ino), mode: uint32(stat.Mode), uid: uint32(stat.Uid), nlink: uint64(stat.Nlink), size: stat.Size}
+	return identity{dev: uint64(stat.Dev), ino: uint64(stat.Ino), mode: uint32(stat.Mode), uid: uint32(stat.Uid), gid: uint32(stat.Gid), nlink: uint64(stat.Nlink), size: stat.Size}
 }
 
 func sameIdentities(left, right identity) error {
@@ -1086,15 +1111,15 @@ func sameSnapshot(left, right treeSnapshot) error {
 }
 
 func toAncestryIdentity(stat unix.Stat_t) ancestryIdentity {
-	return ancestryIdentity{dev: uint64(stat.Dev), ino: uint64(stat.Ino), mode: uint32(stat.Mode), uid: uint32(stat.Uid), nlink: uint64(stat.Nlink)}
+	return ancestryIdentity{dev: uint64(stat.Dev), ino: uint64(stat.Ino), mode: uint32(stat.Mode), uid: uint32(stat.Uid), gid: uint32(stat.Gid), nlink: uint64(stat.Nlink)}
 }
 
 func ancestryFromIdentity(value identity) ancestryIdentity {
-	return ancestryIdentity{dev: value.dev, ino: value.ino, mode: value.mode, uid: value.uid, nlink: value.nlink}
+	return ancestryIdentity{dev: value.dev, ino: value.ino, mode: value.mode, uid: value.uid, gid: value.gid, nlink: value.nlink}
 }
 
 func sameAncestryIdentity(left, right ancestryIdentity, strictNlink bool) bool {
-	if left.dev != right.dev || left.ino != right.ino || left.mode != right.mode || left.uid != right.uid {
+	if left.dev != right.dev || left.ino != right.ino || left.mode != right.mode || left.uid != right.uid || left.gid != right.gid {
 		return false
 	}
 	return !strictNlink || left.nlink == right.nlink

@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -405,6 +406,147 @@ func TestOperationalHomeRetainedAncestryRejectsReplacement(t *testing.T) {
 	}
 	if err := os.RemoveAll(moved); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestOperationalHomeRetainedAncestryRejectsMetadataChanges(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		mode os.FileMode
+	}{
+		{name: "mode widening", mode: 0o755},
+		{name: "special mode bit", mode: 0o700 | os.ModeSticky},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := installTempDir(t)
+			outer := filepath.Join(root, "outer")
+			inner := filepath.Join(outer, "inner")
+			homePath := filepath.Join(inner, "home")
+			if err := os.MkdirAll(inner, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Init(context.Background(), homePath); err != nil {
+				t.Fatal(err)
+			}
+			home, err := OpenOperationalHome(context.Background(), homePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			database, err := home.Database()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(outer, test.mode); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := database.Open(); !errors.Is(err, ErrUncertain) {
+				t.Fatalf("capability after ancestry %s = %v, want uncertain", test.name, err)
+			}
+			if err := home.Close(); !errors.Is(err, ErrUncertain) {
+				t.Fatalf("close after ancestry %s = %v, want uncertain", test.name, err)
+			}
+		})
+	}
+}
+
+func TestOperationalHomeRetainedAncestryRejectsOwnerChangeWhenPrivileged(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires privilege to change an ancestry owner")
+	}
+	root := installTempDir(t)
+	outer := filepath.Join(root, "outer")
+	inner := filepath.Join(outer, "inner")
+	homePath := filepath.Join(inner, "home")
+	if err := os.MkdirAll(inner, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Init(context.Background(), homePath); err != nil {
+		t.Fatal(err)
+	}
+	home, err := OpenOperationalHome(context.Background(), homePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := home.Database()
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(outer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat := info.Sys().(*syscall.Stat_t)
+	if stat.Uid == ^uint32(0) {
+		t.Skip("ancestry owner uid cannot be incremented")
+	}
+	if err := os.Chown(outer, int(stat.Uid+1), int(stat.Gid)); err != nil {
+		t.Skipf("cannot change ancestry owner: %v", err)
+	}
+	if _, err := database.Open(); !errors.Is(err, ErrUncertain) {
+		t.Fatalf("capability after ancestry owner change = %v, want uncertain", err)
+	}
+	if err := home.Close(); !errors.Is(err, ErrUncertain) {
+		t.Fatalf("close after ancestry owner change = %v, want uncertain", err)
+	}
+}
+
+func TestOperationalHomeAllowsSharedAncestorLinkCountIncrease(t *testing.T) {
+	root := installTempDir(t)
+	outer := filepath.Join(root, "outer")
+	inner := filepath.Join(outer, "inner")
+	homePath := filepath.Join(inner, "home")
+	if err := os.MkdirAll(inner, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Init(context.Background(), homePath); err != nil {
+		t.Fatal(err)
+	}
+	home, err := OpenOperationalHome(context.Background(), homePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = home.Close() }()
+	for _, sibling := range []string{
+		filepath.Join(root, "root-sibling"),
+		filepath.Join(outer, "outer-sibling"),
+		filepath.Join(inner, "inner-sibling"),
+	} {
+		if err := os.Mkdir(sibling, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	database, err := home.Database()
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := database.Open()
+	if err != nil {
+		t.Fatalf("capability after benign ancestry nlink increases = %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOperationalHomeRejectsWrongFinalParentPolicy(t *testing.T) {
+	root := installTempDir(t)
+	inner := filepath.Join(root, "inner")
+	homePath := filepath.Join(inner, "home")
+	if err := os.Mkdir(inner, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Init(context.Background(), homePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(inner, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	before := installDigest(t, root)
+	if _, err := OpenOperationalHome(context.Background(), homePath); err == nil {
+		t.Fatal("operational home accepted a non-private final parent")
+	}
+	if after := installDigest(t, root); after != before {
+		t.Fatal("final-parent refusal changed filesystem evidence")
 	}
 }
 
