@@ -2898,8 +2898,10 @@ items above are candidates until that evidence exists.
 - Historical database/home/protocol/event migration.
 - Linux stable runtime, systemd, Linux packaging/provider proof, and portable
   process abstraction beyond compile-time seams genuinely required by tests.
-- Automatic update, updater UI/re-exec polish, new release machinery, and
-  GoReleaser.
+- Runtime update/upgrade, manifest consumption, rollback/version activation,
+  updater UI/re-exec polish, and GoReleaser. V1 installs one fresh exact build;
+  a later replacement design starts from evidence rather than retained Rust
+  machinery.
 - New GitHub intake, workflows, personas, review features, public integration
   surfaces, quarantine/intake storage, storage-management features, and
   unrelated product work.
@@ -2913,8 +2915,8 @@ items above are candidates until that evidence exists.
 The existing release freeze remains in force while the Go runtime is being
 proved. The cutover must retain the current Darwin ARM64 and AMD64 artifact
 contract unless support is deliberately narrowed in a separately reviewed
-product decision. Manual verified update/rollback and explicit service
-lifecycle are cutover work; background automatic update is not.
+product decision. Fresh installation and explicit service lifecycle are
+cutover work; runtime update/rollback is not.
 
 ## 3. Target architecture
 
@@ -3267,9 +3269,21 @@ not generic shebang scripts.
 
 ### Platform transaction
 
-Platform work begins only after the kernel and clients are stable. `init`,
-manual update, and `factoryctl service install|start|restart|stop|uninstall`
-use one concrete install library and shared mutator prelude:
+An external read-only platform/hard-cutover audit inspected `88a8ab22` and
+returned **BLOCK**, as expected: no production `cmd/factoryd`, recovery
+composition, install-owned Local API, fixed production browser bind, service
+transaction or Go release bundle existed at that head. Its useful dependency,
+deletion, isolation and mutation findings are consolidated here; the scratch
+audit document is not retained as a second status record. The audit's proposal
+to delete this rewrite record is rejected because the mission requires this
+document to become the permanent cutover evidence record.
+
+Platform work begins only after the kernel and clients are stable. V1 is
+fresh-install only. `init` and `factoryctl service
+install|start|status|recover|restart|stop|uninstall` use one concrete install
+library and shared mutator prelude. There is no Go `update`/`upgrade` command,
+download cache, manifest consumer, second installed version, Rust migration or
+version rollback framework:
 
 1. Canonicalize and verify exact home/job ownership and format before any
    write. An unknown/Rust home receives no Go marker, database, `bin/`, link,
@@ -3278,22 +3292,21 @@ use one concrete install library and shared mutator prelude:
    exact home device/inode/uid, socket, current receipt/link, plist digest,
    launchd label/domain, and operation authority.
 
-Init/manual update then parse gzip/tar in-process and require exactly
-three root regular executable members with bounded individual/aggregate bytes,
-expected names/modes, Darwin architecture, version/build identity, and hashes.
-They write/sync private staging and receipt, atomically publish one immutable
-version directory without replacement, durably record old/new activation and
-plist/service phases before effects, swap the relative `bin/current`, render
-and reload one allowlisted plist with `AbandonProcessGroup=true`, and prove
-launchd PID, actual daemon executable/build identity, and all three
-receipt-bound siblings. Exact new health commits/removes pending state. Every
-known pre-health
-crash rolls back link then plist/service; unknown ownership/control state fails
-closed and preserves evidence.
+Fresh service installation resolves and validates the invoking `factoryctl`
+and its exact sibling `factoryd` and `factory-runner`: three regular Darwin
+executables, mode `0755`, one version/source/build/target identity, bounded
+sizes and exact digests. It copies/syncs them into one immutable private
+`bin/<build-id>/` directory, publishes the one-component relative
+`bin/current` link and exact receipt, renders one allowlisted plist with
+`AbandonProcessGroup=true`, and proves launchd PID, actual daemon executable,
+health build identity and both receipt-bound siblings. A bounded pending record
+makes every fresh-install cut recover to exact completion, exact cleanup, or
+visible retained uncertainty; it never activates an older/newer runtime.
+Unknown filesystem or launchd ownership fails closed and preserves evidence.
 
-Service install validates an already-active exact receipt/current runtime,
-installs only its allowlisted job, and never stages an archive or changes the
-version link. Start validates the exact installed receipt/current/job,
+Repeated service install validates the already-active exact
+receipt/current/job and is an idempotent no-op; it never stages another build
+or changes the version link. Start validates the exact installed receipt/current/job,
 bootstraps it, and proves health. Restart validates the same authority, reloads
 only the daemon, proves health, and preserves exact admitted runner/provider
 identities. Stop
@@ -3303,8 +3316,8 @@ socket absent; through `AbandonProcessGroup` it does not invent ownership of
 admitted child groups. Uninstall requires stopped exact ownership and no
 nonterminal work/resources, removes only the allowed job/link/receipts/runtime
 metadata, and preserves SQLite and retained Changes by default. These verbs do
-not enter archive staging or activation paths unless their definition above
-requires it.
+not enter another-build or fresh-bundle staging paths unless fresh service
+installation explicitly requires it.
 
 `service status` is a read-only validator/projection. It validates the exact
 home marker, receipt/current link, plist and label/domain, launchd result/PID,
@@ -3318,10 +3331,37 @@ explicit mutating command.
 Release adaptation retains two deterministic Darwin archives, `SHA256SUMS`,
 `latest.json`, and `dark-factory.rb`, all bound to one immutable source tag,
 commit, receipt/build identity, and exact publisher reconciliation. Live tap
-publication, signing/notarization, and automatic update remain explicitly
-deferred; no stronger distribution claim is made. Release/non-PR gates require
+publication, signing/notarization and any runtime updater remain explicitly
+deferred. `latest.json` is inert release metadata retained only for the
+independent control-plane five-asset validator; no Go command fetches or
+consumes it. Each archive contains exactly the three root regular mode-`0755`
+binaries and no directories, links, xattrs or extra members. The formula
+installs only those binaries and contains no TUI/update behavior. No stronger
+distribution claim is made. Release/non-PR gates require
 hosted ephemeral execution or a separately proven isolated runner rather than
 silently retaining the current persistent-runner credential exposure (#54).
+
+The platform implementation graph is deliberately serial where authority
+overlaps:
+
+1. production `factoryd`, recovery/scheduler ownership, install-owned Local
+   API, fixed `127.0.0.1:43123` bind and versioned health;
+2. one `VERSION`/`internal/buildinfo` identity and fresh-only bundle/receipt;
+3. concrete Darwin service code plus `factoryctl` verbs and fake/real isolated
+   launchctl fixtures;
+4. direct-Go release/package/formula scripts and independent control-plane
+   compatibility proof; then
+5. top-level gates, documentation and final deletion.
+
+At hard cutover delete every tracked file under
+`crates/factory-core`, `crates/factory-runner`, `crates/factory-tui`,
+`crates/factoryctl` and `crates/factoryd`; root `Cargo.toml`/`Cargo.lock`; the
+old launchd template/proof; Rust/Linux contributor-smoke paths; and obsolete
+Rust build-headroom machinery. Retain the local-CI lease/environment isolation,
+the standalone `control-plane/` Rust workspace and the permanent evidence in
+this document. Update `AGENTS.md`, `README.md`, architecture/security,
+contributor/install/provider/workflow guidance and CI atomically so no retained
+text presents the Rust TUI/updater as current product authority.
 
 ## 4. Kernel proof
 
@@ -3564,17 +3604,19 @@ exact process/path census.
 - marker-only, database-only, exact recoverable Go partial init, Rust home,
   unknown application ID/version, symlinked components, and proof that every
   refused home receives no write;
-- archive traversal, absolute path, link/hardlink, duplicate, extra, mixed
-  build, wrong architecture/mode, compression/aggregate bound, tampering, and
-  exact three-member success;
-- cuts after every staging file/receipt/directory sync, version publication,
-  pending-record phase, current-link swap, plist write, bootout/bootstrap, and
-  health proof, followed by exact commit/rollback/refusal;
+- release-archive traversal, absolute path, link/hardlink, duplicate, extra,
+  mixed build, wrong architecture/mode, compression/aggregate bound, tampering,
+  and exact three-member success; installed input independently proves three
+  exact same-build sibling regular executables before copying any of them;
+- cuts after every installed-binary/file/directory sync, receipt/pending-record
+  phase, current-link publication, plist write, bootout/bootstrap and health
+  proof, followed by exact fresh-install completion, exact cleanup or retained
+  visible uncertainty; no cut can activate a second version;
 - random-label isolated service install/start/status/restart/stop/uninstall,
   operational launchctl error classification, exact daemon executable/PID and
   socket absence, runner/provider survival across restart, nonterminal uninstall
   refusal, database/Change preservation, and proof that start/stop/uninstall do
-  not enter archive staging/version-activation paths;
+  not enter fresh-bundle staging or install another build;
 - with every pending-record and launchd outcome class, status reports exact
   typed state/error while marker, database, pending record, current link, plist,
   job/PID, and socket remain byte-for-byte/identity unchanged;
@@ -3620,7 +3662,20 @@ At minimum record the killing test for:
 - exact prepared/final/retained identity and content-fact checks;
 - Change-parent FD 11 exclusion from Git/provider and outer-runner duplicate
   closure after one-shot child preparation;
-- historical terminal replay after one and multiple Change retries.
+- historical terminal replay after one and multiple Change retries;
+- fresh-install refusal for Rust/mixed/partial homes without a write;
+- exact three-sibling build identity, inventory, digest and mode checks;
+- plist label/home/socket isolation and `AbandonProcessGroup` retention;
+- launchctl absence versus permission/timeout/parse/lost-response classes;
+- read-only service status and strict service-verb separation;
+- daemon-only restart preserving exact runner/provider identities;
+- stop waiting for exact old daemon/socket absence;
+- uninstall refusal with nonterminal work and preservation of SQLite/Changes;
+- fixed loopback/Origin/Host browser production binding;
+- the top-level gate invoking Go and standalone control-plane gates exactly
+  once; and
+- the no-updater contract: no manifest fetch, cache, second version,
+  activation/rollback state or TUI command.
 
 Mutation changes are temporary, one at a time, and never retained. A flaky or
 unrelated failure is not a kill; the focused expected assertion must fail and
@@ -3860,7 +3915,7 @@ following evidence:
   green without observing or changing the live installation;
 - exact three-member, traversal/link/duplicate/extra-resistant archive tests;
   deterministic Darwin ARM64/AMD64 artifacts; one receipt/build identity; and
-  crash-safe activate/reload/rollback tests green;
+  crash-safe fresh-install/reload/recovery tests green;
 - packaging hashes/binary set and standalone `control-plane/` Rust gate green;
 - required mutations killed by the intended focused tests and mutation code
   absent;
