@@ -458,6 +458,12 @@ test("verify rejects archive members with unsafe shape, mode, JSON, count, and s
       symlinkSync("index.js", target);
     }, "mode 0644");
     mutateAndCheck((root) => {
+      const target = join(root, "package/dist/src/control.js");
+      rmSync(target);
+      mkdirSync(target);
+      writeFileSync(join(target, "nested"), "x");
+    }, "inventory mismatch");
+    mutateAndCheck((root) => {
       const packagePath = join(root, "package/package.json");
       const text = readFileSync(packagePath, "utf8");
       writeFileSync(packagePath, text.replace('"name": "@dark-factory/client",', '"name": "@dark-factory/client",\n  "name": "@dark-factory/client",'));
@@ -466,6 +472,11 @@ test("verify rejects archive members with unsafe shape, mode, JSON, count, and s
     mutateAndCheck((root) => {
       for (let index = 0; index < 50; index += 1) writeFileSync(join(root, `extra-${index}`), "x");
     }, "too many members");
+    mutateAndCheck((root) => {
+      for (const name of ["control.js", "errors.js", "index.js", "manifest.js", "session.js", "state.js", "terminal.js", "terminal_session.js", "transcript.js", "control.d.ts", "errors.d.ts"]) {
+        writeFileSync(join(root, "package/dist/src", name), Buffer.alloc(200 * 1024, 7));
+      }
+    }, "members are too large in total");
     const oversized = Buffer.concat([original, Buffer.alloc(2 * 1024 * 1024, 7)]);
     writeFileSync(archive, oversized);
     expectFailure(() => run("verify", output), "archive is too large");
