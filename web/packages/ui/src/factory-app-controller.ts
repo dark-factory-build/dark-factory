@@ -43,6 +43,8 @@ export type FactoryTerminalView = Readonly<{
   writable: boolean;
   leaseOperation: TerminalLeaseOperation;
   error?: SessionError | ProtocolError;
+  /** Server replay resets survived by this sidebar view; > 0 shows the banner. */
+  resets: number;
   surfaceVersion: number;
 }>;
 
@@ -80,6 +82,8 @@ type Selection = {
 type AgentTerminalSelection = {
   agent: AgentItem;
   head: bigint;
+  /** Server replay resets survived by this sidebar view (banner state). */
+  resets: number;
 };
 
 /** Owns one mounted FactoryApp lifecycle and its exact HumanRequest authority. */
@@ -98,6 +102,7 @@ export class FactoryAppController {
   #terminalSurfaceToken: object | undefined;
   #terminalSurfaceVersion = 0;
   #terminalGeneration = 0;
+  #terminalResetBurst = 0;
   #pendingTerminalResize: { rows: number; cols: number } | undefined;
   #generation = 0;
   #started = false;
@@ -189,7 +194,7 @@ export class FactoryAppController {
     const selected = this.#selectedAgent;
     if (selected?.agent.id === current.id && selected.agent.revision === current.revision && (selected.head === this.#state?.head || this.#terminal !== undefined)) return;
     this.#dropTerminal(true);
-    this.#selectedAgent = { agent: { ...current }, head: this.#state?.head ?? 0n };
+    this.#selectedAgent = { agent: { ...current }, head: this.#state?.head ?? 0n, resets: 0 };
     this.#error = undefined;
     this.#publish();
   }
@@ -462,6 +467,7 @@ export class FactoryAppController {
   #receiveTerminalSnapshot(generation: number, controller: TerminalController, snapshot: TerminalControllerSnapshot): void {
     if (this.#closed || generation !== this.#terminalGeneration || controller !== this.#terminal) return;
     if (snapshot.phase === "closed") {
+      if (snapshot.reset && this.#recoverFromTerminalReset()) return;
       this.#dropTerminal(false);
       this.#selectedAgent = undefined;
       this.#error = snapshot.error?.code === "stale" || snapshot.error?.code === "internal" ? snapshot.error : undefined;
@@ -469,11 +475,39 @@ export class FactoryAppController {
       return;
     }
     if (snapshot.phase === "closing") {
-      if (snapshot.error !== undefined) this.#disarmTerminal(snapshot.error);
+      if (snapshot.error !== undefined && !snapshot.reset) this.#disarmTerminal(snapshot.error);
       return;
     }
+    if (snapshot.phase === "ready") this.#terminalResetBurst = 0;
     this.#publish();
     if (snapshot.writable) this.#flushTerminalResize();
+  }
+
+  /**
+   * A server replay reset ends the protocol handle by design. Recover in
+   * place: keep the sidebar selection, remount the display (a fresh empty
+   * surface — the retained output the old scrollback showed is gone), and
+   * reconcile a new controller against current state. Bounded so a reset
+   * storm cannot loop; past the bound the ordinary stale teardown stands.
+   */
+  #recoverFromTerminalReset(): boolean {
+    const selected = this.#selectedAgent;
+    if (selected === undefined || this.#status !== "ready" || this.#terminalResetBurst >= 3) return false;
+    const current = this.#state?.agents.get(selected.agent.id);
+    if (current === undefined) return false;
+    this.#terminalResetBurst += 1;
+    selected.resets += 1;
+    selected.agent = { ...current };
+    selected.head = this.#state?.head ?? selected.head;
+    this.#terminal = undefined;
+    ++this.#terminalGeneration;
+    this.#terminalSurface = undefined;
+    this.#terminalSurfaceToken = undefined;
+    this.#pendingTerminalResize = undefined;
+    ++this.#terminalSurfaceVersion;
+    this.#error = undefined;
+    this.#publish();
+    return true;
   }
 
   #flushTerminalResize(): void {
@@ -487,6 +521,7 @@ export class FactoryAppController {
   #dropTerminal(closeSession: boolean): void {
     const terminal = this.#terminal;
     this.#terminal = undefined;
+    this.#terminalResetBurst = 0;
     ++this.#terminalGeneration;
     this.#terminalSurface = undefined;
     this.#terminalSurfaceToken = undefined;
@@ -532,6 +567,7 @@ export class FactoryAppController {
         writable: this.#terminal?.snapshot.writable ?? false,
         leaseOperation: this.#terminal?.snapshot.leaseOperation ?? "none",
         error: this.#terminal?.snapshot.error,
+        resets: this.#selectedAgent.resets,
         surfaceVersion: this.#terminalSurfaceVersion,
       },
     };

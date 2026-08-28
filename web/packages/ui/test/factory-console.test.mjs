@@ -118,6 +118,7 @@ test("the console never shows a kernel-grammar or retired vocabulary word", () =
     ["sidebar", renderToStaticMarkup(sidebarView())],
     ["sidebar-writable", renderToStaticMarkup(sidebarView({ terminal: { writable: true } }))],
     ["sidebar-collapsed", renderToStaticMarkup(sidebarView({ collapsed: true }))],
+    ["sidebar-reset", renderToStaticMarkup(sidebarView({ terminal: { resets: 1 } }))],
   ];
   for (const [name, markup] of surfaces) {
     for (const forbidden of [/attempt/i, /converge/i, /admission/i, /finalize/i, /unresolved/i, /proposal/i, /verdict/i, /\bALLOW\b/, /\bBLOCK\b/, /lease/i, /intake/i, /quarantine/i, /overseer/i, /work item/i, /cancel run/i]) {
