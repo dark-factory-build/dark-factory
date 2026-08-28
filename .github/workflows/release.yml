@@ -91,25 +91,26 @@ jobs:
         run: |
           set -eu
           version=$(cat VERSION)
-          ldflags="-s -w -X github.com/dark-factory-build/dark-factory/internal/buildinfo.version=$version -X github.com/dark-factory-build/dark-factory/internal/buildinfo.source=$SOURCE_SHA"
+          GOTOOLCHAIN=go1.27.0 GOENV=off GOAUTH=off go build -trimpath -buildvcs=false \
+            -o release-artifact ./internal/buildinfo/cmd/release-artifact
+          arm_receipt=$(./release-artifact receipt "$version" "$SOURCE_SHA" darwin/arm64)
+          intel_receipt=$(./release-artifact receipt "$version" "$SOURCE_SHA" darwin/amd64)
           mkdir -p release/aarch64-apple-darwin release/x86_64-apple-darwin
           for binary in factoryd factory-runner factoryctl; do
             CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 GOENV=off GOTOOLCHAIN=go1.27.0 GOAUTH=off \
-              go build -trimpath -buildvcs=false -ldflags "$ldflags" \
+              go build -trimpath -buildvcs=false \
+              -ldflags "-s -w -X github.com/dark-factory-build/dark-factory/internal/buildinfo.receipt=$arm_receipt" \
               -o "release/aarch64-apple-darwin/$binary" "./cmd/$binary"
             CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 GOENV=off GOTOOLCHAIN=go1.27.0 GOAUTH=off \
-              go build -trimpath -buildvcs=false -ldflags "$ldflags" \
+              go build -trimpath -buildvcs=false \
+              -ldflags "-s -w -X github.com/dark-factory-build/dark-factory/internal/buildinfo.receipt=$intel_receipt" \
               -o "release/x86_64-apple-darwin/$binary" "./cmd/$binary"
           done
-          for binary in factoryd factory-runner factoryctl; do
-            test "$("release/aarch64-apple-darwin/$binary" --version)" = "$binary $version"
-            GOTOOLCHAIN=go1.27.0 go version -m "release/x86_64-apple-darwin/$binary" | grep -F 'GOARCH=amd64'
-            GOTOOLCHAIN=go1.27.0 go version -m "release/x86_64-apple-darwin/$binary" | grep -F 'GOOS=darwin'
-          done
+          rm release-artifact
 
       - name: Package
         run: |
-          ./scripts/package-release.sh "$TAG" dist "$GITHUB_REPOSITORY" \
+          GOTOOLCHAIN=go1.27.0 ./scripts/package-release.sh "$TAG" "$SOURCE_SHA" dist "$GITHUB_REPOSITORY" \
             aarch64-apple-darwin release/aarch64-apple-darwin \
             x86_64-apple-darwin release/x86_64-apple-darwin
 

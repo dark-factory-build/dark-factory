@@ -35,6 +35,7 @@ const (
 	usage = `usage:
   factoryd --home ABSOLUTE [--development-browser-origin EXACT_ORIGIN ...]
   factoryd --version
+  factoryd --build-identity
 `
 )
 
@@ -83,6 +84,12 @@ func main() {
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 1 && args[0] == "--version" {
 		_, _ = fmt.Fprintf(stdout, "factoryd %s\n", buildinfo.Current().Version())
+		return 0
+	}
+	if len(args) == 1 && args[0] == "--build-identity" {
+		if err := buildinfo.Current().WriteJSON(stdout); err != nil {
+			return exitFailure
+		}
 		return 0
 	}
 	configuration, help, ok := parse(args)

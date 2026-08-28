@@ -27,6 +27,13 @@ func TestVersionDoesNotOpenRuntime(t *testing.T) {
 	}
 }
 
+func TestBuildIdentityDoesNotOpenRuntime(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if exit := run(context.Background(), []string{"--build-identity"}, &stdout, &stderr); exit != 0 || !strings.Contains(stdout.String(), `"release":false`) || stderr.Len() != 0 {
+		t.Fatalf("build identity exit=%d stdout=%q stderr=%q", exit, stdout.String(), stderr.String())
+	}
+}
+
 func TestParseOwnsOneFreshHomeAndExactLoopbackBrowserPolicy(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "factory")
 	tests := []struct {

@@ -32,6 +32,8 @@ func run(args []string, stdout io.Writer) error {
 	case "--version":
 		_, err := fmt.Fprintf(stdout, "factory-runner %s\n", buildinfo.Current().Version())
 		return err
+	case "--build-identity":
+		return buildinfo.Current().WriteJSON(stdout)
 	case "--exec-gate":
 		if err := runner.RunExecGate(); err != nil {
 			return fmt.Errorf("factory-runner: exec gate failed: %w", err)

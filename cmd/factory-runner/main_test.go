@@ -17,10 +17,14 @@ func TestDirectInvocationRequiresExactPrivateMode(t *testing.T) {
 	}
 }
 
-func TestVersionIsTheOnlyPublicRunnerInvocation(t *testing.T) {
+func TestRunnerBuildDiagnosticsRequireNoPrivateCapability(t *testing.T) {
 	var output bytes.Buffer
 	if err := run([]string{"--version"}, &output); err != nil || output.String() != "factory-runner development\n" {
 		t.Fatalf("version = %q, %v", output.String(), err)
+	}
+	output.Reset()
+	if err := run([]string{"--build-identity"}, &output); err != nil || !strings.Contains(output.String(), `"release":false`) {
+		t.Fatalf("build identity = %q, %v", output.String(), err)
 	}
 }
 

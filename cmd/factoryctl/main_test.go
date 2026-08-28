@@ -32,6 +32,14 @@ func TestVersionRequiresNoHomeOrCredential(t *testing.T) {
 	}
 }
 
+func TestBuildIdentityRequiresNoHomeOrCredential(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	exit := run(context.Background(), []string{"--build-identity"}, func(string) string { return "private" }, &stdout, &stderr)
+	if exit != 0 || !strings.Contains(stdout.String(), `"release":false`) || stderr.Len() != 0 {
+		t.Fatalf("build identity exit=%d stdout=%q stderr=%q", exit, stdout.String(), stderr.String())
+	}
+}
+
 type apiFixture struct {
 	directory   string
 	socket      string

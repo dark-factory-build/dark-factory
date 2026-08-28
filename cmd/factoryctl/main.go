@@ -40,6 +40,7 @@ const (
   factoryctl init --home ABSOLUTE
   factoryctl doctor --home ABSOLUTE
   factoryctl --version
+  factoryctl --build-identity
 `
 )
 
@@ -81,6 +82,12 @@ type browserOpener func(context.Context, string) error
 func runWithOpener(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer, opener browserOpener) int {
 	if len(args) == 1 && args[0] == "--version" {
 		_, _ = fmt.Fprintf(stdout, "factoryctl %s\n", buildinfo.Current().Version())
+		return 0
+	}
+	if len(args) == 1 && args[0] == "--build-identity" {
+		if err := buildinfo.Current().WriteJSON(stdout); err != nil {
+			return exitFailure
+		}
 		return 0
 	}
 	command, help, ok := parse(args)
