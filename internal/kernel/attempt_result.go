@@ -461,11 +461,26 @@ func attemptResultConsumedPostcondition(run Run, footprint lifecycleFootprint, r
 	if !resourceIdentityEqual(footprint.providerProcess.Identity, result.processIdentity) || run.ProviderExit == nil || run.ProviderExit.Sequence() != 1 {
 		return false
 	}
-	code, hasCode := result.exit.Code()
-	storedCode, storedHasCode := run.ProviderExit.Code()
-	signal, hasSignal := result.exit.Signal()
-	storedSignal, storedHasSignal := run.ProviderExit.Signal()
-	return code == storedCode && hasCode == storedHasCode && signal == storedSignal && hasSignal == storedHasSignal
+	return attemptResultExitEqual(result.exit, run.ProviderExit)
+}
+
+// attemptResultExitEqual compares only the significant exit arm. The raw
+// first return of Code/Signal is the union value for both arms on
+// AttemptResultExit but a nil-guarded zero on ProcessExit, so comparing
+// insignificant values would wrongly reject every nonzero exit.
+func attemptResultExitEqual(exit AttemptResultExit, stored *ProcessExit) bool {
+	if stored == nil {
+		return false
+	}
+	if code, ok := exit.Code(); ok {
+		storedCode, storedOK := stored.Code()
+		return storedOK && code == storedCode
+	}
+	if signal, ok := exit.Signal(); ok {
+		storedSignal, storedOK := stored.Signal()
+		return storedOK && signal == storedSignal
+	}
+	return false
 }
 
 func moveTerminalToReleasing(ctx context.Context, connection *sql.Conn, session TerminalSession, at UnixMillis) error {
@@ -866,11 +881,7 @@ func terminalResultPostcondition(run Run, footprint lifecycleFootprint, result A
 	if run.ProviderExit == nil || !resourceIdentityEqual(footprint.providerProcess.Identity, result.processIdentity) {
 		return false
 	}
-	code, hasCode := result.exit.Code()
-	storedCode, storedHasCode := run.ProviderExit.Code()
-	signal, hasSignal := result.exit.Signal()
-	storedSignal, storedHasSignal := run.ProviderExit.Signal()
-	return code == storedCode && hasCode == storedHasCode && signal == storedSignal && hasSignal == storedHasSignal
+	return attemptResultExitEqual(result.exit, run.ProviderExit)
 }
 
 // AuthorizeAttemptResultRemoval recognizes the exact natural postcondition

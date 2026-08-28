@@ -863,3 +863,69 @@ func storeTestPath(t *testing.T, store *Store) string {
 	}
 	return filepath.Clean(path)
 }
+
+func TestNonzeroExitResultsConvergeThroughEveryResultSeam(t *testing.T) {
+	// The insignificant arm of the exit union differs between
+	// AttemptResultExit (raw value, false) and ProcessExit (nil-guarded zero),
+	// so a comparison of insignificant values wrongly rejects every nonzero
+	// exit at the replay, close, and removal seams. Exit code 0 alone cannot
+	// prove these seams.
+	for index, test := range []struct {
+		name string
+		exit func(t *testing.T) AttemptResultExit
+	}{
+		{name: "signal", exit: func(t *testing.T) AttemptResultExit {
+			exit, err := NewAttemptResultExitSignal(15)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return exit
+		}},
+		{name: "nonzero code", exit: func(t *testing.T) AttemptResultExit {
+			exit, err := NewAttemptResultExitCode(7)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return exit
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, run, keys := runningStartedOrchestratorRun(t, 1930+int64(index))
+			defer store.Close()
+			ctx := context.Background()
+			resources := resourcesForRunTest(t, store, run.ID)
+			runtimeIdentity := resourceOfKind(t, resources, ResourceRuntimeRoot).Identity
+			runner := resourceOfKind(t, resources, ResourceRunnerProcess)
+			providerIdentity := resourceOfKind(t, resources, ResourceProviderProcess).Identity
+			result, err := NewInnerConvergedAttemptResult(run.ID, keys.AttemptDigest, keys.ResultProofDigest, runtimeIdentity, providerIdentity, test.exit(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			consumed, err := store.ConsumeAttemptResult(ctx, result, run.Revision, mustTime(t, 30))
+			if err != nil {
+				t.Fatal(err)
+			}
+			replay, err := store.ConsumeAttemptResult(ctx, result, run.Revision, mustTime(t, 99))
+			if err != nil || replay.Revision != consumed.Revision {
+				t.Fatalf("nonzero exit consume replay = %+v err=%v", replay, err)
+			}
+			runner = resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
+			session := terminalSessionForRunTest(t, store, run.ID)
+			outerExit, err := NewProcessExitCode(1, 0, mustTime(t, 31))
+			if err != nil {
+				t.Fatal(err)
+			}
+			afterExit, _, err := store.RecordLiveRunnerExitAndRelease(ctx, run.ID, runner.ID, consumed.Revision, runner.Revision, runner.Identity, outerExit, mustTime(t, 31))
+			if err != nil {
+				t.Fatal(err)
+			}
+			closedRun, closed, err := store.CloseTerminalAfterRunner(ctx, result, afterExit.Revision, session.Revision, mustTime(t, 32))
+			if err != nil || closed.State != TerminalSessionClosed {
+				t.Fatalf("nonzero exit close = run %+v session %+v err=%v", closedRun, closed, err)
+			}
+			if _, err := store.AuthorizeAttemptResultRemoval(ctx, result); err != nil {
+				t.Fatalf("nonzero exit removal authority = %v", err)
+			}
+		})
+	}
+}
