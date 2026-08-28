@@ -4,6 +4,7 @@ package runner
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -334,6 +335,46 @@ func TestAttemptResultRejectsImpossibleMarkerCensus(t *testing.T) {
 			t.Fatalf("unregistered inner census authenticated: %v", err)
 		}
 	})
+}
+
+// TestResultProofNeverEscapesDiagnosticFormatting proves no fmt verb, on any
+// proof-carrying value or enclosing struct, can reproduce the raw or hex proof
+// bytes. Stringer alone is not enough: %d bypasses it, and fmt cannot invoke
+// methods on unexported fields at all.
+func TestResultProofNeverEscapesDiagnosticFormatting(t *testing.T) {
+	proof := testResultProof()
+	raw := string(proof.value[:])
+	hexProof := testResultProofHex()
+	_, dir := openAttemptResultTestDir(t, true)
+	record, err := publishAttemptResult(dir, testConvergedAttemptResult(t, "opacity"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := testConvergedAttemptResult(t, "opacity")
+	cfg := attemptConfig{Version: 1, AttemptID: "opacity", MarkerName: InnerActivationMarkerName, ResultName: AttemptResultSpoolName, ResultProof: hexProof}
+	spec := AttemptSpec{AttemptID: "opacity", MarkerName: InnerActivationMarkerName, ResultName: AttemptResultSpoolName, ResultProof: proof}
+	values := map[string]any{
+		"proof":          proof,
+		"result":         live,
+		"record pointer": record,
+		"record value":   *record,
+		"config":         cfg,
+		"spec":           spec,
+	}
+	for name, value := range values {
+		for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q", "%d", "%x", "%X"} {
+			rendered := fmt.Sprintf(verb, value)
+			decoded := rendered
+			if bytes, err := hex.DecodeString(strings.TrimSpace(rendered)); err == nil {
+				decoded += string(bytes)
+			}
+			for _, needle := range []string{raw, hexProof, strings.ToUpper(hexProof)} {
+				if strings.Contains(decoded, needle) {
+					t.Fatalf("%s leaked the result proof through %s: %q", name, verb, rendered)
+				}
+			}
+		}
+	}
 }
 
 // TestAttemptResultMarkerMatrixIsClosed pins the complete kind × outer ×

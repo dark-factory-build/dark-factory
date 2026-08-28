@@ -34,8 +34,16 @@ func NewResultProof(value [resultProofBytes]byte) (ResultProof, error) {
 	return proof, nil
 }
 
-func (ResultProof) String() string   { return "runner.ResultProof([redacted])" }
-func (ResultProof) GoString() string { return "runner.ResultProof([redacted])" }
+const resultProofRedaction = "runner.ResultProof([redacted])"
+
+func (ResultProof) String() string   { return resultProofRedaction }
+func (ResultProof) GoString() string { return resultProofRedaction }
+
+// Format ignores every verb, flag, width and precision so no diagnostic form
+// can fall through to the private proof byte representation.
+func (ResultProof) Format(state fmt.State, _ rune) {
+	_, _ = io.WriteString(state, resultProofRedaction)
+}
 
 func validResultProof(proof ResultProof) bool { return proof.value != ([resultProofBytes]byte{}) }
 
@@ -82,6 +90,17 @@ type AttemptResult struct {
 
 func (result AttemptResult) AttemptID() string       { return result.attemptID }
 func (result AttemptResult) Kind() AttemptResultKind { return result.kind }
+
+// String, GoString and Format render every public field and never the proof.
+// fmt cannot invoke methods on unexported fields, so the enclosing value must
+// redact rather than rely on the ResultProof methods.
+func (result AttemptResult) String() string {
+	return fmt.Sprintf("runner.AttemptResult{attempt_id:%q kind:%q process:%d:%d code:%d signal:%d}", result.attemptID, result.kind, result.process.PID, result.process.PGID, result.code, result.signal)
+}
+func (result AttemptResult) GoString() string { return result.String() }
+func (result AttemptResult) Format(state fmt.State, _ rune) {
+	_, _ = io.WriteString(state, result.String())
+}
 func (result AttemptResult) Process() (Identity, bool) {
 	return result.process, result.kind == AttemptResultInnerConverged
 }
@@ -139,6 +158,12 @@ func (record *AttemptResultRecord) String() string {
 }
 
 func (record *AttemptResultRecord) GoString() string { return record.String() }
+
+// Format on the value receiver covers dereferenced records, whose unexported
+// fields fmt would otherwise print raw.
+func (record AttemptResultRecord) Format(state fmt.State, _ rune) {
+	_, _ = io.WriteString(state, (&record).String())
+}
 
 type attemptResultWire struct {
 	Version   int                    `json:"version"`

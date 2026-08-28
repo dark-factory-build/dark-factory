@@ -37,6 +37,16 @@ type attemptConfig struct {
 	ResultProof string           `json:"result_proof"`
 }
 
+// String, GoString and Format keep the hex result proof out of every
+// diagnostic rendering; only the JSON control frame may carry it.
+func (cfg attemptConfig) String() string {
+	return fmt.Sprintf("runner.attemptConfig{version:%d attempt_id:%q marker_name:%q result_name:%q result_proof:[redacted]}", cfg.Version, cfg.AttemptID, cfg.MarkerName, cfg.ResultName)
+}
+func (cfg attemptConfig) GoString() string { return cfg.String() }
+func (cfg attemptConfig) Format(state fmt.State, _ rune) {
+	_, _ = io.WriteString(state, cfg.String())
+}
+
 type attemptFrame struct {
 	Version      int           `json:"version"`
 	Kind         string        `json:"kind"`
