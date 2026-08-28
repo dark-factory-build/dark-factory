@@ -307,7 +307,7 @@ test("pack uses trusted absolute tools and leaves no partial output", () => {
       cwd: webRoot,
       env: { ...process.env, ...env },
       stdio: "pipe",
-    }), "content differs from reviewed toolchain");
+    }), "metadata differs from reviewed toolchain");
     assert.equal(existsSync(wrapperWitness), false);
     runWithEnv("pack", output, env);
     runWithEnv("verify", output, env);
@@ -442,7 +442,7 @@ test("pack rejects a changed reviewed digest or lockfile integrity", () => {
 
     const originalSRI = "sha512-p1diW6TqL9L07nNxvRMM7hMMw4c5XOo/1ibL4aAIGmSAt9slTE1Xgw5KWuof2uTOvCg9BY7ZRi+GaF+7sfgPeQ==";
     writeFileSync(lockfilePath, lockfileText.replace(originalSRI, `${originalSRI.slice(0, -3)}abc`));
-    expectFailure(() => run("pack", output), "lockfile TypeScript integrity differs");
+    expectFailure(() => run("pack", output), "source worktree is dirty");
   } finally {
     writeFileSync(integrityPath, integrityText);
     writeFileSync(lockfilePath, lockfileText);
