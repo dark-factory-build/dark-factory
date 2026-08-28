@@ -10,10 +10,11 @@ is not a coding model, hosted service, or general agent framework.
 This repository is pre-cutover. Canonical evidence through `359d46a3` includes
 production `factoryd` composition and `OperationalHome`, `Store`,
 `RuntimeParent`, Local API, and browser ownership; the corrected documentation
-contract was merged at `bc48df7f` and still needs an exact-head review. Change
-settlement candidate `c675f96e` is under exact review, global admission remains
-unintegrated, and shell candidate `1ff2e2e6` is review-BLOCKED. Claude and Codex
-remain blocked.
+contract was merged at `bc48df7f` and independently allowed at `51fae159`.
+Exact review blocked Change candidate `c675f96e`; its narrow repair and the
+dependent global-admission candidate remain unintegrated. Repaired provider
+candidate `e1b0759e` is under exact review. Shell, Claude and Codex remain
+unshipped.
 
 ## Model
 
@@ -46,8 +47,8 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the detailed lifecycle and
 
 ## Availability
 
-Dark Factory is pre-1.0. This docs candidate is not approved for installation
-or live provider work. There is no supported install command for this revision:
+Dark Factory is pre-1.0. This pre-cutover revision is not approved for
+installation or live provider work. There is no supported install command for this revision:
 do not run `factoryctl init`, enable `factoryctl dispatch on`, update a live
 installation, or point a source build at `~/.dark-factory`.
 

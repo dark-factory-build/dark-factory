@@ -12,11 +12,10 @@ Live use remains frozen until an independent exact-head boot review passes.
 The canonical implementation through `359d46a3` contains production `factoryd`
 composition and ownership of `OperationalHome`, `Store`, `RuntimeParent`, the
 Local API, and browser services. The documentation contract was manually
-merged at `bc48df7f`; a fresh exact-head review remains required. Corrected
-Change settlement at `c675f96e` is under exact review, while global admission
-remains dependent and unintegrated. Shell package `1ff2e2e6` is review-BLOCKED
-on framing, UTF-8, authority sealing and removal of duplicate production
-policy; Claude and Codex remain blocked.
+merged at `bc48df7f` and independently allowed at `51fae159`. Exact review
+blocked Change candidate `c675f96e`; its narrow repair and dependent
+global-admission candidate remain unintegrated. Repaired provider candidate
+`e1b0759e` is under exact review. Shell, Claude and Codex remain unshipped.
 
 The complete design and causal proof matrix live in
 [`docs/development/SAFE_KERNEL_REFACTOR.md`](docs/development/SAFE_KERNEL_REFACTOR.md).
@@ -68,7 +67,7 @@ corruption. Repository and provider executable/configuration/auth availability
 are post-admission typed failures, not stale eligibility filters.
 The exact contract lives in the rewrite record; this paragraph does not claim
 the corrected Change/global-admission/provider contract is implemented in this
-docs candidate.
+pre-cutover revision.
 
 Planned Go process setup has one additional literal barrier: after the outer
 runner is active and while its provider process/group pair remains declared
@@ -253,8 +252,9 @@ source path, authority, credential, lifecycle result or fallback. See [the
 fresh provider contract](docs/providers.md).
 
 The V1 contract allows only unrestricted interactive authority. Shell is
-exactly `/bin/sh -s`; Claude Code and Codex are blocked in this candidate
-pending exact integration and fake-witness review. The schema and wire contract
+exactly `/bin/sh -s`, but the provider candidate is not shipped; Claude Code
+and Codex are also blocked pending exact integration and fake-witness review.
+The schema and wire contract
 contain no permission profile or bounded-authority field. Admission freezes
 provider, optional model, and optional reasoning effort only. After admission,
 the daemon resolves and seals the exact `Installation` and native

@@ -21,16 +21,16 @@ a passage explicitly names planned Go. Retained Rust queue selection and
 pre-admission executable probing are historical evidence, not compatibility
 requirements. The authoritative planned Go
 contract is [`docs/development/GO_REWRITE.md`](docs/development/GO_REWRITE.md),
-which currently requires fresh exact-head review and does not claim a finished
+which records an independently reviewed contract and does not claim a finished
 daemon.
 
 Canonical evidence through `359d46a3` includes production `factoryd`
 composition and OperationalHome/Store/RuntimeParent/Local API/browser
 ownership; the documentation contract was manually merged at `bc48df7f` and
-still needs an exact-head review. Corrected Change settlement at `c675f96e` is
-under exact review and global admission is not integrated. Shell package
-`1ff2e2e6` is review-BLOCKED on framing, UTF-8, authority sealing and duplicate
-production policy; Claude and Codex remain blocked.
+independently allowed at `51fae159`. Exact review blocked Change candidate
+`c675f96e`; its narrow repair and dependent global-admission candidate remain
+unintegrated. Repaired provider candidate `e1b0759e` is under exact review.
+Shell, Claude and Codex remain unshipped.
 
 Planned Go admission is one global cursor-free immediate Store transaction with
 no caller AgentID/task/observation. It first validates the complete fresh
@@ -200,8 +200,9 @@ executable, ordered argv, and complete ordered environment. The
 runner owns the descriptor-bound Change cwd, fresh interactive PTY, input,
 process group, wait/reap, output and cleanup. Provider choice is unrestricted
 interactive authority in V1; no bounded permission profile is persisted or
-interpreted. Shell is exactly `/bin/sh -s`. Claude Code and Codex remain blocked
-pending exact integration and fake-witness review. Unsupported native mappings
+interpreted. Shell is exactly `/bin/sh -s`, but the provider candidate is not
+shipped. Claude Code and Codex also remain blocked pending exact integration
+and fake-witness review. Unsupported native mappings
 become typed post-admission `FailureSpawn`; executable/configuration/auth
 identity is revalidated immediately before release and is not a durable
 admission field.
