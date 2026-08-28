@@ -90,8 +90,11 @@ func TestRegisteredShellWorkerCompletesExactFourReleaseSequence(t *testing.T) {
 		t.Fatal(err)
 	}
 	record := fixture.finish(t)
-	if record.Terminal.Process != inner || record.Terminal.Exit.Code != 0 || record.Terminal.Exit.Signal != 0 {
-		t.Fatalf("terminal=%+v inner=%+v", record.Terminal, inner)
+	if process, ok := record.Result().Process(); !ok || process != inner {
+		t.Fatalf("result=%+v inner=%+v", record.Result(), inner)
+	}
+	if code, ok := record.Result().Code(); !ok || code != 0 {
+		t.Fatalf("result exit=%+v", record.Result())
 	}
 	if body, err := os.ReadFile(fixture.witness); err != nil || string(body) != "x" {
 		t.Fatalf("startup witness=%q err=%v", body, err)
@@ -140,8 +143,11 @@ func TestRegisteredShellWorkerCannotReadLinkedWorkerConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	record := fixture.finish(t)
-	if record.Terminal.Process != inner || record.Terminal.Exit.Code != 0 || record.Terminal.Exit.Signal != 0 {
-		t.Fatalf("terminal=%+v inner=%+v", record.Terminal, inner)
+	if process, ok := record.Result().Process(); !ok || process != inner {
+		t.Fatalf("result=%+v inner=%+v", record.Result(), inner)
+	}
+	if code, ok := record.Result().Code(); !ok || code != 0 {
+		t.Fatalf("result exit=%+v", record.Result())
 	}
 	if body, err := os.ReadFile(fixture.witness); err != nil || string(body) != "x" {
 		t.Fatalf("provider witness=%q err=%v", body, err)
@@ -177,8 +183,11 @@ func TestRegisteredShellWorkerExecutesMaximumTaskWithoutPTYStartupTraffic(t *tes
 		t.Fatal(err)
 	}
 	record := fixture.finish(t)
-	if record.Terminal.Process != inner || record.Terminal.Exit.Code != 0 || record.Terminal.Exit.Signal != 0 {
-		t.Fatalf("terminal=%+v inner=%+v", record.Terminal, inner)
+	if process, ok := record.Result().Process(); !ok || process != inner {
+		t.Fatalf("result=%+v inner=%+v", record.Result(), inner)
+	}
+	if code, ok := record.Result().Code(); !ok || code != 0 {
+		t.Fatalf("result exit=%+v", record.Result())
 	}
 	if body, err := os.ReadFile(fixture.witness); err != nil || string(body) != "x" {
 		t.Fatalf("maximum-input witness=%q err=%v", body, err)
@@ -214,8 +223,11 @@ func TestRegisteredShellWorkerKeepsPTYExclusiveForPostReadyInput(t *testing.T) {
 		t.Fatalf("terminal input=%+v", frame)
 	}
 	record := fixture.finish(t)
-	if record.Terminal.Process != inner || record.Terminal.Exit.Code != 0 || record.Terminal.Exit.Signal != 0 {
-		t.Fatalf("terminal=%+v inner=%+v", record.Terminal, inner)
+	if process, ok := record.Result().Process(); !ok || process != inner {
+		t.Fatalf("result=%+v inner=%+v", record.Result(), inner)
+	}
+	if code, ok := record.Result().Code(); !ok || code != 0 {
+		t.Fatalf("result exit=%+v", record.Result())
 	}
 	if body, err := os.ReadFile(fixture.cwdWitness); err != nil || string(body) != "interactive-after-ready" {
 		t.Fatalf("interactive reply=%q err=%v", body, err)
@@ -375,7 +387,7 @@ func TestInitialRuntimeChildValidationPrecedesSelectionEffects(t *testing.T) {
 				t.Fatal(err)
 			}
 			event, err := fixture.controller.Next(8 * time.Second)
-			if !errors.Is(err, io.EOF) || event.Kind != "" || event.Stage != "" || event.Identity.Valid() || len(event.Payload) != 0 || event.Terminal != nil {
+			if !errors.Is(err, io.EOF) || event.Kind != "" || event.Stage != "" || event.Identity.Valid() || len(event.Payload) != 0 || event.Result != nil {
 				t.Fatalf("event=%+v err=%v diag=%q", event, err, fixture.output())
 			}
 			if exit, err := fixture.child.FinishAfterExit(8 * time.Second); err != nil || exit.Code == 0 && exit.Signal == 0 {
@@ -411,8 +423,8 @@ func TestFinalReinspectionRejectsLateGitMetadata(t *testing.T) {
 	if diagnostic := fixture.output(); !strings.Contains(diagnostic, "invalid Change input: .git path components are forbidden") {
 		t.Fatalf("missing exact late-metadata rejection: %q", diagnostic)
 	}
-	if record.Terminal.Exit.Code == 0 && record.Terminal.Exit.Signal == 0 {
-		t.Fatalf("late forbidden metadata reached provider: %+v", record.Terminal)
+	if code, ok := record.Result().Code(); ok && code == 0 {
+		t.Fatalf("late forbidden metadata reached provider: %+v", record.Result())
 	}
 	if _, err := os.Stat(fixture.witness); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("provider witness exists after failed final scan")
@@ -436,8 +448,8 @@ func TestFinalReinspectionRejectsSameSizeContentMutation(t *testing.T) {
 	if diagnostic := fixture.output(); !strings.Contains(diagnostic, "invalid Change input: published Change facts changed") {
 		t.Fatalf("missing exact content rejection: %q", diagnostic)
 	}
-	if record.Terminal.Exit.Code == 0 && record.Terminal.Exit.Signal == 0 {
-		t.Fatalf("mutated content reached provider: %+v", record.Terminal)
+	if code, ok := record.Result().Code(); ok && code == 0 {
+		t.Fatalf("mutated content reached provider: %+v", record.Result())
 	}
 	if _, err := os.Stat(fixture.witness); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("provider witness exists after changed content")
@@ -471,8 +483,8 @@ func TestFinalRuntimeRecheckRejectsFixedChildReplacement(t *testing.T) {
 	if diagnostic := fixture.output(); !strings.Contains(diagnostic, "runtime authority verification: Change worker failed") {
 		t.Fatalf("missing exact runtime rejection: %q", diagnostic)
 	}
-	if record.Terminal.Exit.Code == 0 && record.Terminal.Exit.Signal == 0 {
-		t.Fatalf("replacement HOME reached provider: %+v", record.Terminal)
+	if code, ok := record.Result().Code(); ok && code == 0 {
+		t.Fatalf("replacement HOME reached provider: %+v", record.Result())
 	}
 	if _, err := os.Stat(fixture.witness); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("provider witness exists after HOME replacement")
@@ -628,7 +640,7 @@ func newWorkerFixtureWithFactoryctlAndInput(t *testing.T, factoryctl string, inp
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := controller.Configure(runner.AttemptSpec{AttemptID: "attempt", Wrapper: wrapper, MarkerName: runner.InnerActivationMarkerName, TerminalName: runner.TerminalSpoolName}); err != nil {
+	if err := controller.Configure(runner.AttemptSpec{AttemptID: "attempt", Wrapper: wrapper, MarkerName: runner.InnerActivationMarkerName, ResultName: runner.AttemptResultSpoolName, ResultProof: workerResultProof(t)}); err != nil {
 		t.Fatal(err)
 	}
 	diagnostic, err := os.OpenFile(filepath.Join(root, "diagnostic"), os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
@@ -743,7 +755,20 @@ func (f *workerFixture) nextTerminal(t *testing.T, kind runner.TerminalEventKind
 		}
 	}
 }
-func (f *workerFixture) finish(t *testing.T, expectedSuccess ...bool) *runner.TerminalRecord {
+func workerResultProof(t testing.TB) runner.ResultProof {
+	t.Helper()
+	var value [32]byte
+	for index := range value {
+		value[index] = byte(index + 9)
+	}
+	proof, err := runner.NewResultProof(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return proof
+}
+
+func (f *workerFixture) finish(t *testing.T, expectedSuccess ...bool) *runner.AttemptResultRecord {
 	t.Helper()
 	wantSuccess := true
 	if len(expectedSuccess) != 0 {
@@ -757,17 +782,18 @@ func (f *workerFixture) finish(t *testing.T, expectedSuccess ...bool) *runner.Te
 			break
 		}
 	}
-	if err != nil || event.Kind != runner.AttemptTerminal || event.Terminal == nil {
-		t.Fatalf("terminal=%+v err=%v diag=%q", event, err, f.output())
+	if err != nil || event.Kind != runner.AttemptResultReady || event.Result == nil {
+		t.Fatalf("result=%+v err=%v diag=%q", event, err, f.output())
 	}
-	if err := f.controller.AcknowledgeTerminal(event.Terminal, true); err != nil {
-		t.Fatal(err)
+	record, err := runner.AuthenticateAttemptResult(f.dir, "attempt", event.Result)
+	if err != nil {
+		t.Fatalf("authenticate result: %v diag=%q", err, f.output())
 	}
 	exit, err := f.child.FinishAfterExit(8 * time.Second)
 	if err != nil || wantSuccess && exit.Code != 0 || !wantSuccess && exit.Code == 0 && exit.Signal == 0 {
 		t.Fatalf("outer exit=%+v err=%v diag=%q", exit, err, f.output())
 	}
-	return event.Terminal
+	return record
 }
 func (f *workerFixture) output() string {
 	_ = f.diagnostic.Sync()
