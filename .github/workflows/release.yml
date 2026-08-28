@@ -37,13 +37,10 @@ jobs:
   release:
     name: release
     if: github.event_name == 'push' || (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && github.sha == inputs.expected_workflow_sha)
-    # Only maintainers can push tags, so this is a trusted ref (same boundary
-    # as CI's `push` to `main`, the only other trigger that reaches the
-    # persistent Mac — every pull request, same-repository or a fork, runs
-    # on a hosted runner instead; see ci.yml): the persistent Mac, warm
-    # cache, real macOS arm64. The same trusted job cross-compiles Intel; a
-    # matrix would allow two jobs to race one release and shared manifest.
-    runs-on: dark-factory-mac
+    # Publication authority runs on a fresh GitHub-hosted arm64 macOS worker,
+    # never the owner's persistent machine or its provider credentials. One
+    # job cross-compiles Intel so two publishers cannot race one manifest.
+    runs-on: macos-15
     timeout-minutes: 60
     steps:
       # No actions/checkout: codeload.github.com (which serves an action's
@@ -52,17 +49,9 @@ jobs:
       # GitHub's git server instead. See ci.yml for the full rationale;
       # this is the same step.
       #
-      # This runner's workspace persists between jobs (it is shared with
-      # ci.yml's `checks` job), and a prior job can leave more than stray
-      # files behind if it was ever killed mid-checkout: a
-      # `.git/index.lock`, a half-written pack, a stale shallow boundary.
-      # `rm -rf .git && git init` before every fetch throws all of that
-      # away in one move instead of trying to detect and repair each kind
-      # of leftover state, then `git checkout --force --detach` lands on
-      # the target commit and `git clean -ffdx` removes anything else a
-      # prior job left in the working tree. That clean never touches the
-      # shared Go caches, which live outside this workspace (see
-      # docs/development/WORKFLOW.md, "The self-hosted runner").
+      # The hosted workspace starts empty. Reinitializing explicitly keeps the
+      # checkout independent of action tarball availability and leaves no
+      # credential in repository configuration.
       #
       # $GITHUB_SHA is the tag commit for a push and the protected default-
       # branch commit for a recovery dispatch. GitHub serves `git fetch` by
@@ -87,7 +76,8 @@ jobs:
 
       - name: Install the pinned toolchain
         run: |
-          test "$(go env GOVERSION)" = go1.27.0
+          GOTOOLCHAIN=go1.27.0 go version
+          test "$(GOTOOLCHAIN=go1.27.0 go env GOVERSION)" = go1.27.0
 
       - name: Check that the tag matches the runtime version
         run: |
@@ -104,17 +94,17 @@ jobs:
           ldflags="-s -w -X github.com/dark-factory-build/dark-factory/internal/buildinfo.version=$version -X github.com/dark-factory-build/dark-factory/internal/buildinfo.source=$SOURCE_SHA"
           mkdir -p release/aarch64-apple-darwin release/x86_64-apple-darwin
           for binary in factoryd factory-runner factoryctl; do
-            CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 GOENV=off GOTOOLCHAIN=local \
+            CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 GOENV=off GOTOOLCHAIN=go1.27.0 GOAUTH=off \
               go build -trimpath -buildvcs=false -ldflags "$ldflags" \
               -o "release/aarch64-apple-darwin/$binary" "./cmd/$binary"
-            CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 GOENV=off GOTOOLCHAIN=local \
+            CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 GOENV=off GOTOOLCHAIN=go1.27.0 GOAUTH=off \
               go build -trimpath -buildvcs=false -ldflags "$ldflags" \
               -o "release/x86_64-apple-darwin/$binary" "./cmd/$binary"
           done
           for binary in factoryd factory-runner factoryctl; do
             test "$("release/aarch64-apple-darwin/$binary" --version)" = "$binary $version"
-            go version -m "release/x86_64-apple-darwin/$binary" | grep -F 'GOARCH=amd64'
-            go version -m "release/x86_64-apple-darwin/$binary" | grep -F 'GOOS=darwin'
+            GOTOOLCHAIN=go1.27.0 go version -m "release/x86_64-apple-darwin/$binary" | grep -F 'GOARCH=amd64'
+            GOTOOLCHAIN=go1.27.0 go version -m "release/x86_64-apple-darwin/$binary" | grep -F 'GOOS=darwin'
           done
 
       - name: Package
