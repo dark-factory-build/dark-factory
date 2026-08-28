@@ -48,8 +48,8 @@ func TestWorkerActivationRequiresExactChangeOwnershipRevision(t *testing.T) {
 	t.Run("proven retained available A", func(t *testing.T) {
 		store, predecessor := terminalPreRunningAvailableWorker(t)
 		defer store.Close()
-		agentID, keys := queueRetryForTerminal(t, store, predecessor, 40)
-		admission, err := store.AdmitNext(context.Background(), agentID, keys, mustTime(t, 40))
+		_, keys := queueRetryForTerminal(t, store, predecessor, 40)
+		admission, err := store.AdmitNext(context.Background(), keys, mustTime(t, 40))
 		if err != nil || !admission.Admitted() {
 			t.Fatalf("retained retry admission = %+v, %v", admission, err)
 		}
@@ -78,14 +78,14 @@ func TestRetainedRetryProvenanceRejectsSecondFreshJumpBeforeResourceMutation(t *
 		t.Run(test.name, func(t *testing.T) {
 			store, terminal := terminalPreRunningAvailableWorker(t)
 			defer store.Close()
-			secondAgent, secondKeys := queueRetryForTerminalSeed(t, store, terminal, 40, 230)
-			secondAdmission, err := store.AdmitNext(context.Background(), secondAgent, secondKeys, mustTime(t, 40))
+			_, secondKeys := queueRetryForTerminalSeed(t, store, terminal, 40, 230)
+			secondAdmission, err := store.AdmitNext(context.Background(), secondKeys, mustTime(t, 40))
 			if err != nil || !secondAdmission.Admitted() {
 				t.Fatalf("second admission = %+v, %v", secondAdmission, err)
 			}
 			terminal = settleRunningRetainedRetry(t, store, *secondAdmission.Run, secondKeys, 50)
-			thirdAgent, thirdKeys := queueRetryForTerminalSeed(t, store, terminal, 90, 240)
-			thirdAdmission, err := store.AdmitNext(context.Background(), thirdAgent, thirdKeys, mustTime(t, 90))
+			_, thirdKeys := queueRetryForTerminalSeed(t, store, terminal, 90, 240)
+			thirdAdmission, err := store.AdmitNext(context.Background(), thirdKeys, mustTime(t, 90))
 			if err != nil || !thirdAdmission.Admitted() {
 				t.Fatalf("third admission = %+v, %v", thirdAdmission, err)
 			}
@@ -94,8 +94,8 @@ func TestRetainedRetryProvenanceRejectsSecondFreshJumpBeforeResourceMutation(t *
 				terminal = settleRunningRetainedRetry(t, store, forged, keys, at)
 				queueAt := at + 40
 				seed := []byte{249, 218}[retry]
-				agentID, nextKeys := queueRetryForTerminalSeed(t, store, terminal, queueAt, seed)
-				admission, err := store.AdmitNext(context.Background(), agentID, nextKeys, mustTime(t, queueAt))
+				_, nextKeys := queueRetryForTerminalSeed(t, store, terminal, queueAt, seed)
+				admission, err := store.AdmitNext(context.Background(), nextKeys, mustTime(t, queueAt))
 				if err != nil || !admission.Admitted() {
 					t.Fatalf("long retry %d admission = %+v, %v", retry+1, admission, err)
 				}
@@ -104,8 +104,8 @@ func TestRetainedRetryProvenanceRejectsSecondFreshJumpBeforeResourceMutation(t *
 			if test.earlier {
 				earlierRun := forged
 				terminal = settleRunningRetainedRetry(t, store, forged, keys, 100)
-				agentID, nextKeys := queueRetryForTerminalSeed(t, store, terminal, 140, 249)
-				admission, err := store.AdmitNext(context.Background(), agentID, nextKeys, mustTime(t, 140))
+				_, nextKeys := queueRetryForTerminalSeed(t, store, terminal, 140, 249)
+				admission, err := store.AdmitNext(context.Background(), nextKeys, mustTime(t, 140))
 				if err != nil || !admission.Admitted() {
 					t.Fatalf("fourth admission = %+v, %v", admission, err)
 				}
@@ -275,8 +275,8 @@ func TestRunningWorkerSettlementMayUpdateContentOnStableTree(t *testing.T) {
 func TestRetainedRetryHistoryLoadsAndHistoricalFinalizationReplays(t *testing.T) {
 	store, first := terminalPreRunningAvailableWorker(t)
 	defer store.Close()
-	agentID, secondKeys := queueRetryForTerminal(t, store, first, 40)
-	secondAdmission, err := store.AdmitNext(context.Background(), agentID, secondKeys, mustTime(t, 40))
+	_, secondKeys := queueRetryForTerminal(t, store, first, 40)
+	secondAdmission, err := store.AdmitNext(context.Background(), secondKeys, mustTime(t, 40))
 	if err != nil || !secondAdmission.Admitted() {
 		t.Fatalf("second admission = %+v, %v", secondAdmission, err)
 	}
@@ -303,8 +303,8 @@ func TestRetainedRetryHistoryLoadsAndHistoricalFinalizationReplays(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	thirdAgent, thirdKeys := queueRetryForTerminalSeed(t, store, second, 81, 230)
-	third, err := store.AdmitNext(context.Background(), thirdAgent, thirdKeys, mustTime(t, 81))
+	_, thirdKeys := queueRetryForTerminalSeed(t, store, second, 81, 230)
+	third, err := store.AdmitNext(context.Background(), thirdKeys, mustTime(t, 81))
 	if err != nil || !third.Admitted() {
 		t.Fatalf("third admission = %+v, %v", third, err)
 	}
@@ -345,8 +345,8 @@ func finalizingPreRunningAvailableWorker(t *testing.T, retained bool) (*Store, R
 	if retained {
 		var predecessor Run
 		store, predecessor = terminalPreRunningAvailableWorker(t)
-		agentID, keys := queueRetryForTerminal(t, store, predecessor, 40)
-		admission, err := store.AdmitNext(context.Background(), agentID, keys, mustTime(t, 40))
+		_, keys := queueRetryForTerminal(t, store, predecessor, 40)
+		admission, err := store.AdmitNext(context.Background(), keys, mustTime(t, 40))
 		if err != nil || !admission.Admitted() {
 			store.Close()
 			t.Fatalf("retained retry admission = %+v, %v", admission, err)
