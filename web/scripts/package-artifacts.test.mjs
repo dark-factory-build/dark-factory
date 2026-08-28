@@ -389,7 +389,8 @@ test("reviewed executable bytes reject same-version Node and tar mutations", () 
     assert.throws(() => inspectExecutable(nodeCopy, "Node copy", reviewed.node), /content differs/);
 
     const tarCopy = join(tempRoot, "tar");
-    cpSync("/usr/bin/tar", tarCopy);
+    writeFileSync(tarCopy, readFileSync(realpathSync("/usr/bin/tar")));
+    chmodSync(tarCopy, 0o755);
     assert.doesNotThrow(() => inspectExecutable(tarCopy, "tar copy", reviewed.tar));
     writeFileSync(tarCopy, Buffer.concat([readFileSync(tarCopy), Buffer.from("mutation")]));
     assert.throws(() => inspectExecutable(tarCopy, "tar copy", reviewed.tar), /content differs/);
