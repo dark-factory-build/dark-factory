@@ -1,10 +1,20 @@
 # Safe kernel contract and boot proof
 
-Live use remains frozen until an independent exact-main boot review passes.
+Live use remains frozen until an independent exact-head boot review passes.
 
 This document records the enduring kernel contract and the causal proof needed
 for that review. It is not a merge diary. GitHub owns issue and pull-request
 history; [the roadmap](../../ROADMAP.md) owns work after the boot decision.
+
+## Go hard-cutover planning authority
+
+The implemented Rust kernel remains evidence, and Rust-specific process/crate/
+queue wording below is historical where it conflicts with the replacement.
+The canonical planned Go contract is
+[`GO_REWRITE.md`](GO_REWRITE.md); it currently requires fresh exact-head review
+and does not claim a finished Go daemon. Go implementation must not copy the
+retained Rust per-agent admission loop, obsolete closed-stdin provider contract, cache
+selection or crate graph merely because it appears here.
 
 ## Kernel model
 
@@ -41,22 +51,80 @@ its next durable owner. Cleanup uncertainty leaves the run visibly
 
 ## Admission and principals
 
-Admission is one immediate Store transaction. It:
+Planned Go admission is one global cursor-free
+`Store.AdmitNext(ctx, keys, at)` immediate transaction. It accepts no AgentID,
+task, queue observation or fairness cursor. Every call supplies fresh daemon
+IDs, including one unconditional candidate Change ID that is used only for a
+selected worker incarnation with no existing canonical Change.
 
-1. checks the durable dispatch switch and capacity;
-2. loads the current agent and profile;
-3. selects the canonical assigned queue head using the shared ordering;
-4. derives role, provider, task incarnation, work revision, and typed execution
-   mode;
-5. reserves or reuses the exact Change where the role requires one;
-6. writes the running task projection, admitted run, bearer digest, resources,
-   messages, and events; and
-7. returns the immutable launch target.
+Before either RunID reconciliation or a new decision, the transaction validates
+the complete fresh schema image. `internal/kernel/schema.go` and its exact
+schema allowlist/constraint tests are the only authority for column names,
+SQLite storage classes, scalar bounds, enum sets, nullability, `CHECK`s,
+foreign keys and unique indexes; this document does not duplicate those
+columns. Shared Go create/read/wire validation owns UTF-8 and NUL rules. One
+concrete SQL integrity predicate then covers every
+row/relation/control that can occupy capacity or bind active
+run/credential/resource/session/Change authority and every structurally queued
+assignment/rank/payload and required task/agent/project relationship. Unknown
+phases, missing relations, split pairs, invalid IDs/revisions/enums, reversed
+timestamps, or malformed queued facts are `ErrCorruptState` before capacity.
+After canonical selection, shared value validation rejects malformed UTF-8/NUL
+text in the selected task/control; lower-ranked queued prose is not globally
+scanned merely to decide capacity. This is not an application admission row
+scan or second SQL validation layer.
 
-Execution cannot select an arbitrary queued task or provider. A reorder or new
-higher-priority assignment before the transaction changes what is admitted;
-the caller's stale observation does not win. Process-local locks may serialize
-effects but never prove durable assignment or authority.
+The same predicate proves invalidation continuity: `head =
+next_invalidation_sequence - 1`; an empty log has zero rows, `head = 0` and
+`invalidation_floor = 1`; otherwise rows are contiguous from floor through
+head, with exact count/minimum/maximum and no more than the retention limit.
+**Implementation gate (not yet landed):** shared Go path validation and schema
+tests must reject project root `/`; accepted roots are clean absolute paths
+with no NUL, empty, `.` or `..` component, repeated separator, or trailing
+separator. Provider choice inherently means unrestricted interactive
+authority in V1; no permission-profile field exists, and bounded authority is
+deferred until causal OS-effect proof. Exact fresh
+decision precedence after those checks is `dispatch_disabled`, `at_capacity`,
+`queue_empty`, then `no_eligible_work`. Only after every run phase is known may
+capacity count exactly the one nonterminal set: admitted, running and finalizing.
+Configured capacity is one integer `C` in `[1, 1024]`. One reserved residue
+belongs to one nonterminal worker run, so its count is at most `C`; this does
+not bound terminal retained-Change aggregate storage or an adversarially
+replaced residue's bytes.
+Eligibility means task status exactly queued, valid same-project assigned
+agent, either known role (`worker` or `orchestrator`), not paused, durable
+budget remaining and no conflicting open run. Role determines the footprint,
+not external availability; known nonqueued status is outside the queue.
+Provider/model/effort/project-verification controls must satisfy the executable
+schema allowlist, but external availability
+is not eligibility. Installed-version/model compatibility is checked by
+provider Build/start after admission and becomes typed `FailureSpawn`/finalizing,
+never durable corruption or queue ineligibility. Known-valid paused,
+budget-exhausted or open-run-conflicting queued rows are ineligible; corrupt
+facts are never ineligibility. The
+Store selects globally by priority
+descending, creation time ascending and exact 16-byte task-ID SQLite `BLOB`
+bytes ascending. It then validates that row's canonical Change: corrupt,
+unsettled or hard-invalid state fails closed without skipping to lower work.
+Canonical Change corruption is the only Change-specific pre-admission
+decision. A successful transaction writes the full task/run/bearer/resource/
+session/Change/invalidation footprint and returns only the
+committed launch target. Reconcile-only failure is `not_reconciled`.
+
+Repository availability and provider executable/configuration/auth availability
+are deliberate post-admission `FailureSource` and `FailureSpawn` outcomes
+respectively, never scheduler filters.
+A reorder or higher-priority insertion before the transaction changes what is
+admitted; a caller's stale observation cannot nominate work. Process-local
+locks may serialize effects but never prove durable assignment or authority.
+
+After the outer runner is active, its declared empty provider process/group
+pair is a serialization barrier. Generic outcome, cancellation and
+infrastructure-failure transactions refuse while the already-prepared runner
+performs its sole inner Start even across daemon EOF. Exact Start failure uses
+the existing no-child AttemptResult; successful Start binds an inert exact pair
+before a pending outcome may reap it. No generic transition produces a
+finalizing declared pair, and this rule adds no receipt or lifecycle state.
 
 The bearer resolves to one exact project, agent, task, run, role, provider, and
 Change. It authorizes effects only while that run is `running`. Attempt calls
@@ -76,10 +144,11 @@ Relationship checks occur in the same Store transaction as the mutation:
 
 Task and run ancestry never substitute for the durable agent hierarchy.
 
-Dispatch and execution authority are separate. `dispatch_enabled` controls
-only new admission. Every admitted run freezes one `PlanOnly`,
-`WorkspaceWrite`, or `Unrestricted` mode derived from the agent profile;
-changing the profile or dispatch later does not rewrite that run.
+Dispatch and provider authority are separate. `dispatch_enabled` controls only
+new admission. Every admitted run freezes its provider and optional model and
+effort; provider choice inherently means unrestricted interactive authority in
+V1. Changing the provider/model/effort or dispatch later does not rewrite that
+run.
 
 A retry creates a new run, bearer, runtime, and provider process. It may reuse
 the retained Change only after the preceding run is terminal. It never revives
@@ -87,9 +156,10 @@ an old credential, conversation, or process.
 
 ## Process and resource ownership
 
-One admitted run launches one fresh non-interactive provider process. Startup
-input is written once to stdin and stdin closes. There is no resident provider,
-PTY attach/input, prompt replay, delivery journal, or provider-process resume.
+The retained Rust process model is historical evidence only and is deleted at
+the Go cutover. Planned Go launches one fresh runner-owned interactive PTY
+provider with explicit authenticated attach/input lease. No provider process is
+reused across runs, and no task body is replayed after an uncertain write.
 
 Launch uses register-before-exec gates:
 
@@ -181,23 +251,16 @@ then cross an explicit quarantine and acceptance boundary before it can create
 or message work. External payloads must never materialize executable tasks
 directly.
 
-## Ownership boundaries
+## Retained Rust evidence (historical for Go)
 
-Keep the five crates that reflect real dependency and process boundaries:
-
-- `factory-core`: current domain and bounded wire types;
-- `factory-runner`: provider-blind process host and blocked-exec handshake;
-- `factoryd`: Store, admission, principals, resources, finalization, Changes,
-  and verification;
-- `factoryctl`: operator and attempt-scoped requests with no lifecycle logic;
-  and
-- `factory-tui`: operator projections through the same API as `factoryctl`.
-
-Keep one SQLite Store and one ordered migration chain. Do not add an ORM, actor
-framework, generic saga, event-sourcing framework, micro-crates, or repository
-and service traits with one implementation. Split a large module only when
-surviving code has distinct owners; prefer deletion over relocating obsolete
-authority.
+The old Rust package/crate graph and TUI are historical implementation evidence
+only. They do not define a five-crate Go target and must not be preserved by
+compatibility code. The Go target uses one fresh schema and protocol with no
+migration chain, upcaster, or compatibility layer. Do not add an ORM, actor
+framework, generic saga, event-sourcing framework, micro-packages, or
+repository/service traits with one implementation. Split a large module only
+when surviving code has distinct owners; prefer deletion over relocating
+obsolete authority.
 
 ## Causal proof matrix
 
@@ -208,7 +271,7 @@ callback or row:
 | --- | --- |
 | Crash and restart | Inject failure after admission, resource declaration, each blocked-exec release, provider exit, external cleanup, and before acknowledgement. Restart yields at most one provider execution, no input replay, exact identity, and idempotent convergence. |
 | Taskless refusal | With no admitted run, no provider exists. Old, forged, taskless, finalizing, and terminal credentials cannot mutate task, budget, source, or outcome state. |
-| Queue race | Reorder or insert higher-priority assigned work between observation and admission. The Store admits only the canonical queue head selected inside its transaction. |
+| Queue race | Race multiple agents, insert higher-priority work after stale observation, and exercise exact reason precedence, SQL eligibility and priority/time/16-byte-BLOB ties. Put an admitted setup-stalled run in the last slot and prove admitted/running/finalizing are the one capacity set. Corrupt each run/credential/resource/session/Change authority class and each queued rank/payload/relation/control above and below valid work; the concrete integrity predicate blocks all admission before capacity. Corrupt/unsettled canonical work never falls through; caller AgentID/task/cursor and external-availability filters cannot affect selection. |
 | Hierarchy scope | Construct alternate durable agent hierarchies and attempt cross-agent messaging, creation, and assignment. The same mutation transaction uses the stored hierarchy and refuses siblings, ancestors outside the worker allowance, and non-descendants. |
 | Outcome and exit race | Exercise request-before-exit and exit-before-request. The first `finalizing` request wins; only failed configured verification may refine proposed success. |
 | Completion ordering | After a success proposal, further attempt mutation and successor admission are refused until provider reap, exact snapshot and configured verification, release of every resource, and terminalization. |
@@ -216,9 +279,9 @@ callback or row:
 | External finalization | Kill provider, runner, verifier, and daemon at separate cuts. Recovery touches only exact resources. Leader loss with live descendants remains nonterminal past restart and converges only after exact group absence. The operator launchd service is outside attempt ownership, is not a `KernelResource`, and is proven separately by a release fixture. |
 | Source boundary | Materialize one exact commit; repository discovery and ordinary worktree creation fail in the provider view. Removal refuses a replacement identity. |
 | Immutable source and launch | Concurrent Change mutation yields one canonical snapshot or fails before compilation. Replacing or tampering with prepared test output cannot change what launches. |
-| Cache reuse and bounds | Two revisions reuse one project/toolchain cache while producing distinct source-bound manifests. Cache count and measured-byte pressure refuse or reclaim only regenerable entries. Separately, exceeding the hard factory-wide retained-Change count cap refuses new admission without deleting retained work. |
+| Cache reuse and Change storage | Two revisions reuse one project/toolchain cache while producing distinct source-bound manifests. Cache count and measured-byte pressure refuse or reclaim only regenerable entries. Nonterminal capacity bounds the count of reserved residues; accepted trees meet entry/byte/depth limits. Terminal retained-Change aggregate retention and a same-UID-replaced reserved stage's bytes remain explicit cutover gates, not invented admission authority. |
 | Orchestrator policy only | Orchestrators remain subject to hierarchy scope and cannot direct-launch, publish repositories, submit another attempt's outcome, mutate capacity or budgets, or invoke operator control. |
-| Dispatch and execution mode | Disabled dispatch admits nothing. An admitted run retains its frozen typed mode across profile and dispatch changes, and every provider maps each supported mode to exact non-interactive native flags. |
+| Dispatch and provider authority | Disabled dispatch admits nothing. An admitted run retains its frozen provider/model/effort across agent edits and dispatch changes. No permission-profile field or value may appear in the fresh schema, Store model, or wire contract; bounded provider authority is deferred until its causal OS-effect proof. |
 
 Process tests use a temporary `DARK_FACTORY_HOME`, explicit private socket,
 unique disposable paths and labels, deterministic providers, and two
@@ -229,15 +292,18 @@ reclaims the descendant on its own even if the test process is killed
 outright. They never address the operator home, socket, job, credentials, or
 paid provider subscription.
 
-## Exact-main boot gate
+## Exact-head boot gate
 
-The independent reviewer must inspect one exact `main` commit and confirm:
+The independent reviewer must inspect one exact integration-target commit and
+confirm:
 
 - the run phase/outcome contract is the only work and terminalization
   authority;
 - no provider exists or mutates without one exact running attempt;
-- queue selection and hierarchy authorization occur transactionally;
-- typed execution mode is separate from dispatch and frozen at admission;
+- planned Go queue selection is one global cursor-free immediate transaction
+  with exact eligibility/reason/BLOB ordering and no caller nomination, while
+  hierarchy authorization remains transactional;
+- provider choice is separate from dispatch and frozen at admission; V1 provider authority is unrestricted interactive authority;
 - crashes, identity reuse, and verifier leader loss cannot cause replay,
   unsafe cleanup, or premature terminalization;
 - factoryd alone creates and removes Changes, and provider views expose no Git

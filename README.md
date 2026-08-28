@@ -1,10 +1,18 @@
 # Dark Factory
 
 Dark Factory turns a software backlog into supervised coding-agent work on
-your own machine. `factoryd` owns the durable queue and provider processes;
-`factoryctl` controls it, and `factory-tui` is a detachable terminal view over
-the same local API. It is not a coding model, hosted service, or general agent
-framework.
+your own machine. The Go target has `factoryd` own the durable queue and
+provider processes, `factoryctl` provide bootstrap/control operations, and a
+hosted browser use the same local API for day-to-day observation. The retained
+Rust TUI is historical evidence, not a current product surface. Dark Factory
+is not a coding model, hosted service, or general agent framework.
+
+This repository is pre-cutover. Integration-target evidence at `359d46a3`
+includes production `factoryd` composition and `OperationalHome`, `Store`,
+`RuntimeParent`, Local API, and browser ownership. The corrected Change/global
+admission/provider integration is not claimed shipped by this docs candidate;
+the shell package at `1ff2e2e6` is a separate unintegrated candidate, and
+Claude/Codex remain blocked.
 
 ## Model
 
@@ -17,28 +25,28 @@ framework.
 - An **input envelope** is one immutable, bounded, explicitly untrusted
   observation; a **work candidate** is its source revision held in quarantine.
 
-Each admitted attempt gets a fresh, non-interactive provider process. Its
-credential resolves only while that run is running, and the daemon derives the
-caller's stored attempt identity instead of accepting a caller-selected one.
-Attempt authority is revoked before cleanup and configured completion checks.
-Dark Factory supplies no commit, push, or pull-request surface. Closing the CLI
-or TUI does not stop active work.
+Each admitted attempt gets a fresh runner-owned interactive PTY and provider
+process. Its credential resolves only while that run is running, and the daemon
+derives the caller's stored attempt identity instead of accepting a
+caller-selected one. Attempt authority is revoked before cleanup and configured
+completion checks. Dark Factory supplies no commit, push, or pull-request
+surface. Closing `factoryctl` or the browser does not stop active work.
 
 The current provider-neutral quarantine is inert. Operator-only
 `factoryctl input` and `factoryctl candidate` actions store, list, inspect, and
 reject untrusted observations; there is deliberately no accept or materialize
 command. Receipt cannot create a task, message, run, Change, prompt, or
 scheduling event. Candidate inspection identifies the exact current source
-revision needed for a later causal observation. There is still no HTTP listener
-or GitHub adapter.
+revision needed for a later causal observation. There is still no external HTTP
+webhook or GitHub intake adapter.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the detailed lifecycle and
 [SECURITY.md](SECURITY.md) for threat boundaries.
 
 ## Availability
 
-Dark Factory is pre-1.0. Current `main` is not approved for installation or
-live provider work. There is no supported install command for this revision:
+Dark Factory is pre-1.0. This docs candidate is not approved for installation
+or live provider work. There is no supported install command for this revision:
 do not run `factoryctl init`, enable `factoryctl dispatch on`, update a live
 installation, or point a source build at `~/.dark-factory`.
 
@@ -47,57 +55,34 @@ live operation.
 
 ## Safe source preview
 
-Rust 1.88 or later is required. This preview starts an empty daemon in a
-throwaway home, checks its local API, and stops that exact daemon. It does not
-submit provider work or use a Claude or Codex subscription.
-
-```sh
-cargo +1.88.0 build --locked --workspace
-
-DF_DEV_HOME="$(mktemp -d /tmp/dark-factory.XXXXXX)"
-chmod 700 "$DF_DEV_HOME"
-DARK_FACTORY_HOME="$DF_DEV_HOME" \
-  target/debug/factoryd --socket "$DF_DEV_HOME/factory.sock" &
-DF_DAEMON_PID=$!
-
-for _ in 1 2 3 4 5; do
-  DARK_FACTORY_HOME="$DF_DEV_HOME" \
-    target/debug/factoryctl --socket "$DF_DEV_HOME/factory.sock" health \
-    >/dev/null 2>&1 && break
-  sleep 1
-done
-DARK_FACTORY_HOME="$DF_DEV_HOME" \
-  target/debug/factoryctl --socket "$DF_DEV_HOME/factory.sock" health
-DARK_FACTORY_HOME="$DF_DEV_HOME" \
-  target/debug/factoryctl --socket "$DF_DEV_HOME/factory.sock" status
-
-kill "$DF_DAEMON_PID"
-wait "$DF_DAEMON_PID"
-```
+The old Rust source preview is historical evidence only and is not a current
+build or installation instruction. The Go target has no supported live-use
+command in this revision. Do not submit provider work, use a Claude or Codex
+subscription, or point a source build at the operator's home.
 
 For development work, use an isolated branch/worktree and the fuller
 [development workflow](docs/development/WORKFLOW.md). It includes the
-authoritative local gate and deterministic shell-provider fixtures.
+authoritative local gate and deterministic provider fixtures.
 
 ## Operator surface
 
-These are the main day-to-day entry points once live operation is supported:
+These are the planned day-to-day entry points once live operation is supported:
 
 ```sh
 factoryctl status
-factory-tui
+factoryctl web status
 
 factoryctl run list --project PROJECT_ID
 factoryctl run stop --project PROJECT_ID --run RUN_ID
 ```
 
-Run `factoryctl --help` or `factoryctl <command> --help` for the exact project,
-agent, task, input, and candidate operations. The CLI remains the canonical
-control path; the TUI does not have a separate mutation API.
+Run `factoryctl --help` or `factoryctl <command> --help` for the exact
+bootstrap, service, project, agent, task, input, candidate, and browser-pairing
+operations. The CLI and browser are clients of one daemon API; neither owns
+policy or lifecycle state.
 
 ## Learn more
 
-- [TUI guide](crates/factory-tui/README.md)
 - [Provider contract](docs/providers.md)
 - [Architecture](ARCHITECTURE.md)
 - [Security](SECURITY.md)
