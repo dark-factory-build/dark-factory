@@ -285,7 +285,7 @@ func newFixture(t *testing.T, seed byte, test scenario, factoryctl, runnerExecut
 	}
 	result.browserAddress = browserRuntime.Addr()
 	result.spec = daemon.SupervisorSpec{
-		AgentID: result.agentID, RuntimeParent: result.runtimeParent, ChangeParent: changeParent,
+		RuntimeParent: result.runtimeParent, ChangeParent: changeParent,
 		GitExecutable: git, BaseRevision: base, AttemptSocket: socket,
 		RunnerExecutable: runnerExecutable, FactoryctlExecutable: factoryctl,
 	}

@@ -1087,7 +1087,7 @@ func adapterRunningRun(t *testing.T, store *kernel.Store, seed byte) kernel.Run 
 		RunID: runID, TerminalSessionID: sessionID, AttemptDigest: attemptDigest, CandidateChangeID: candidateChange, RuntimeRoot: fmt.Sprintf("/runtime/adapter-%d", seed),
 		Resources: kernel.AdmissionResourceIDs{RuntimeRoot: resourceID(seed + 7), RunnerProcess: resourceID(seed + 8), ProviderProcess: resourceID(seed + 9), ProviderGroup: resourceID(seed + 10)},
 	}
-	admission, err := store.AdmitNext(ctx, agent.ID, keys, adapterTime(t, 300))
+	admission, err := store.AdmitNext(ctx, keys, adapterTime(t, 300))
 	if err != nil || admission.Run == nil {
 		t.Fatalf("admission = %+v, %v", admission, err)
 	}

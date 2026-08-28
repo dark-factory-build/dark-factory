@@ -1012,7 +1012,7 @@ func addRunningRunOnStore(t *testing.T, store *Store, seed byte) Run {
 	if keys.RunID == (RunID{}) {
 		t.Fatal("zero run fixture")
 	}
-	result, err := store.AdmitNext(context.Background(), agent.ID, keys, mustTime(t, 200+int64(seed)))
+	result, err := store.AdmitNext(context.Background(), keys, mustTime(t, 200+int64(seed)))
 	if err != nil || !result.Admitted() || result.Run == nil {
 		t.Fatalf("admit second run = %+v, %v", result, err)
 	}

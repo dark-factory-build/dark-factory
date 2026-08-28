@@ -85,7 +85,7 @@ var schemaStatements = []string{
 ) STRICT, WITHOUT ROWID`,
 	`CREATE UNIQUE INDEX tasks_id_project_incarnation_unique ON tasks(id, project_id, incarnation_id)`,
 	`CREATE UNIQUE INDEX tasks_incarnation_unique ON tasks(incarnation_id)`,
-	`CREATE INDEX tasks_canonical_queue ON tasks(assigned_agent_id, status, priority DESC, created_at_ms ASC, id ASC)`,
+	`CREATE INDEX tasks_canonical_queue ON tasks(status, priority DESC, created_at_ms ASC, id ASC)`,
 	`CREATE TABLE changes (
     id BLOB PRIMARY KEY CHECK (length(id) = 16),
     project_id BLOB NOT NULL CHECK (length(project_id) = 16),

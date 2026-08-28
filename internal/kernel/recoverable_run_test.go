@@ -64,7 +64,7 @@ func TestRecoverableRunExactLookupRejectsUnrelatedOwnershipCorruption(t *testing
 	if _, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 180), ProjectID: project.ID, AssignedAgentID: firstAgent.ID, IncarnationID: incarnationID(t, 181), Title: "first"}, mustTime(t, 5)); err != nil {
 		t.Fatal(err)
 	}
-	first, err := store.AdmitNext(context.Background(), firstAgent.ID, admissionKeys(t, 182, nil), mustTime(t, 10))
+	first, err := store.AdmitNext(context.Background(), admissionKeys(t, 182, nil), mustTime(t, 10))
 	if err != nil || !first.Admitted() {
 		t.Fatalf("first admission = %+v, %v", first, err)
 	}
@@ -75,7 +75,7 @@ func TestRecoverableRunExactLookupRejectsUnrelatedOwnershipCorruption(t *testing
 	if _, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 184), ProjectID: project.ID, AssignedAgentID: secondAgent.ID, IncarnationID: incarnationID(t, 185), Title: "second"}, mustTime(t, 12)); err != nil {
 		t.Fatal(err)
 	}
-	second, err := store.AdmitNext(context.Background(), secondAgent.ID, admissionKeys(t, 186, nil), mustTime(t, 13))
+	second, err := store.AdmitNext(context.Background(), admissionKeys(t, 186, nil), mustTime(t, 13))
 	if err != nil || !second.Admitted() {
 		t.Fatalf("second admission = %+v, %v", second, err)
 	}
@@ -94,7 +94,7 @@ func TestRecoverableRunExactLookupRejectsUnrelatedIdentityCollision(t *testing.T
 	if _, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 190), ProjectID: project.ID, AssignedAgentID: firstAgent.ID, IncarnationID: incarnationID(t, 191), Title: "first"}, mustTime(t, 5)); err != nil {
 		t.Fatal(err)
 	}
-	first, err := store.AdmitNext(context.Background(), firstAgent.ID, admissionKeys(t, 192, nil), mustTime(t, 10))
+	first, err := store.AdmitNext(context.Background(), admissionKeys(t, 192, nil), mustTime(t, 10))
 	if err != nil || !first.Admitted() {
 		t.Fatalf("first admission = %+v, %v", first, err)
 	}
@@ -105,7 +105,7 @@ func TestRecoverableRunExactLookupRejectsUnrelatedIdentityCollision(t *testing.T
 	if _, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 194), ProjectID: project.ID, AssignedAgentID: secondAgent.ID, IncarnationID: incarnationID(t, 195), Title: "second"}, mustTime(t, 12)); err != nil {
 		t.Fatal(err)
 	}
-	second, err := store.AdmitNext(context.Background(), secondAgent.ID, admissionKeys(t, 196, nil), mustTime(t, 13))
+	second, err := store.AdmitNext(context.Background(), admissionKeys(t, 196, nil), mustTime(t, 13))
 	if err != nil || !second.Admitted() {
 		t.Fatalf("second admission = %+v, %v", second, err)
 	}

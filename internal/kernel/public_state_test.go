@@ -89,7 +89,7 @@ func TestPublicStateTraversalKeepsEveryKindAndNoRowsAreLost(t *testing.T) {
 	seeds := []byte{17, 24, 31, 38, 45, 53, 60, 67}
 	for index := 1; index <= 8; index++ {
 		keys := admissionKeys(t, seeds[index-1], nil)
-		admission, err := store.AdmitNext(ctx, publicAgentID(t, index), keys, mustTime(t, int64(800+index)))
+		admission, err := store.AdmitNext(ctx, keys, mustTime(t, int64(800+index)))
 		if err != nil || !admission.Admitted() || admission.Run == nil {
 			t.Fatalf("admit run %d = %+v, %v", index, admission, err)
 		}

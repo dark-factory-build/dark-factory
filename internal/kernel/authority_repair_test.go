@@ -96,7 +96,7 @@ func TestAdmissionRejectsOverlapWithDurableRuntime(t *testing.T) {
 	_, _ = store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 190), ProjectID: project.ID, AssignedAgentID: firstAgent.ID, IncarnationID: incarnationID(t, 191), Title: "first"}, mustTime(t, 5))
 	firstKeys := admissionKeys(t, 192, nil)
 	firstKeys.RuntimeRoot = "/runtime/retained"
-	first, err := store.AdmitNext(context.Background(), firstAgent.ID, firstKeys, mustTime(t, 10))
+	first, err := store.AdmitNext(context.Background(), firstKeys, mustTime(t, 10))
 	if err != nil || !first.Admitted() {
 		t.Fatalf("first admission = %+v, %v", first, err)
 	}
@@ -114,7 +114,7 @@ func TestAdmissionRejectsOverlapWithDurableRuntime(t *testing.T) {
 			keys := admissionKeys(t, 197, nil)
 			mutate(&keys)
 			before := admissionFootprint(t, store)
-			if _, err := store.AdmitNext(context.Background(), secondAgent.ID, keys, mustTime(t, 20)); !errors.Is(err, ErrConflict) {
+			if _, err := store.AdmitNext(context.Background(), keys, mustTime(t, 20)); !errors.Is(err, ErrConflict) {
 				t.Fatalf("AdmitNext = %v", err)
 			}
 			if after := admissionFootprint(t, store); after != before {
@@ -124,7 +124,7 @@ func TestAdmissionRejectsOverlapWithDurableRuntime(t *testing.T) {
 	}
 	secondKeys := admissionKeys(t, 199, nil)
 	secondKeys.RuntimeRoot = "/runtime/second"
-	second, err := store.AdmitNext(context.Background(), secondAgent.ID, secondKeys, mustTime(t, 21))
+	second, err := store.AdmitNext(context.Background(), secondKeys, mustTime(t, 21))
 	if err != nil || !second.Admitted() {
 		t.Fatalf("disjoint second admission = %+v, %v", second, err)
 	}
@@ -143,7 +143,7 @@ func TestInjectedRuntimeOwnershipOverlapFailsReadsAndOpen(t *testing.T) {
 	}
 	firstKeys := admissionKeys(t, 203, nil)
 	firstKeys.RuntimeRoot = "/runtime/first"
-	first, err := store.AdmitNext(context.Background(), firstAgent.ID, firstKeys, mustTime(t, 10))
+	first, err := store.AdmitNext(context.Background(), firstKeys, mustTime(t, 10))
 	if err != nil || !first.Admitted() {
 		t.Fatalf("first admission = %+v, %v", first, err)
 	}
@@ -156,7 +156,7 @@ func TestInjectedRuntimeOwnershipOverlapFailsReadsAndOpen(t *testing.T) {
 	}
 	secondKeys := admissionKeys(t, 207, nil)
 	secondKeys.RuntimeRoot = "/runtime/second"
-	second, err := store.AdmitNext(context.Background(), secondAgent.ID, secondKeys, mustTime(t, 13))
+	second, err := store.AdmitNext(context.Background(), secondKeys, mustTime(t, 13))
 	if err != nil || !second.Admitted() {
 		t.Fatalf("second admission = %+v, %v", second, err)
 	}
@@ -208,7 +208,7 @@ func runningWorkerRun(t *testing.T) (*Store, Run, AdmissionKeys) {
 	candidate := changeID(t, 212)
 	keys := admissionKeys(t, 213, &candidate)
 	keys.RuntimeRoot = "/worker/runtime"
-	admission, err := store.AdmitNext(context.Background(), agent.ID, keys, mustTime(t, 10))
+	admission, err := store.AdmitNext(context.Background(), keys, mustTime(t, 10))
 	if err != nil {
 		store.Close()
 		t.Fatal(err)

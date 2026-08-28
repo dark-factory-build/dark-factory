@@ -17,7 +17,7 @@ func TestAdmitNextSelectsCanonicalCurrentQueueInsideTransaction(t *testing.T) {
 		ctx := context.Background()
 		stale, _ := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 20), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 21), Title: "stale", Priority: 1}, mustTime(t, 10))
 		high, _ := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 22), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 23), Title: "high", Priority: 2}, mustTime(t, 20))
-		result, err := store.AdmitNext(ctx, agent.ID, admissionKeys(t, 30, nil), mustTime(t, 30))
+		result, err := store.AdmitNext(ctx, admissionKeys(t, 30, nil), mustTime(t, 30))
 		if err != nil || !result.Admitted() || result.Run.TaskID != high.ID || result.Run.TaskID == stale.ID {
 			t.Fatalf("admission = %+v, %v", result, err)
 		}
@@ -30,9 +30,111 @@ func TestAdmitNextSelectsCanonicalCurrentQueueInsideTransaction(t *testing.T) {
 		lowID := taskID(t, 41)
 		_, _ = store.EnqueueTask(ctx, NewTask{ID: highID, ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 43), Title: "higher bytes", Priority: 7}, mustTime(t, 10))
 		low, _ := store.EnqueueTask(ctx, NewTask{ID: lowID, ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 44), Title: "lower bytes", Priority: 7}, mustTime(t, 10))
-		result, err := store.AdmitNext(ctx, agent.ID, admissionKeys(t, 50, nil), mustTime(t, 20))
+		result, err := store.AdmitNext(ctx, admissionKeys(t, 50, nil), mustTime(t, 20))
 		if err != nil || !result.Admitted() || result.Run.TaskID != low.ID {
 			t.Fatalf("binary-order admission = %+v, %v", result, err)
+		}
+	})
+}
+
+func TestAdmitNextSelectsGlobalPriorityWithoutCallerNomination(t *testing.T) {
+	store, _, project, firstAgent := newAdmissionStore(t, RoleOrchestrator, 4)
+	defer store.Close()
+	ctx := context.Background()
+	secondAgent, err := store.CreateAgent(ctx, NewAgent{
+		ID: agentID(t, 24), ProjectID: project.ID, Name: "second", Role: RoleOrchestrator,
+		Provider: ProviderCodex, ToolBudgetLimit: 5,
+	}, mustTime(t, 4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	low, err := store.EnqueueTask(ctx, NewTask{
+		ID: taskID(t, 25), ProjectID: project.ID, AssignedAgentID: firstAgent.ID,
+		IncarnationID: incarnationID(t, 26), Title: "observed first", Priority: 1,
+	}, mustTime(t, 5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	high, err := store.EnqueueTask(ctx, NewTask{
+		ID: taskID(t, 27), ProjectID: project.ID, AssignedAgentID: secondAgent.ID,
+		IncarnationID: incarnationID(t, 28), Title: "inserted later", Priority: 9,
+	}, mustTime(t, 6))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := store.AdmitNext(ctx, admissionKeys(t, 29, nil), mustTime(t, 7))
+	if err != nil || !result.Admitted() || result.Run.TaskID != high.ID || result.Run.AgentID != secondAgent.ID || result.Run.TaskID == low.ID {
+		t.Fatalf("global admission = %+v, %v", result, err)
+	}
+}
+
+func TestAdmitNextSkipsIneligibleGlobalHead(t *testing.T) {
+	store, _, project, busyAgent := newAdmissionStore(t, RoleOrchestrator, 4)
+	defer store.Close()
+	ctx := context.Background()
+	eligibleAgent, err := store.CreateAgent(ctx, NewAgent{
+		ID: agentID(t, 32), ProjectID: project.ID, Name: "eligible", Role: RoleOrchestrator,
+		Provider: ProviderCodex, ToolBudgetLimit: 5,
+	}, mustTime(t, 4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.EnqueueTask(ctx, NewTask{
+		ID: taskID(t, 33), ProjectID: project.ID, AssignedAgentID: busyAgent.ID,
+		IncarnationID: incarnationID(t, 34), Title: "make busy", Priority: 20,
+	}, mustTime(t, 5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	admitted, err := store.AdmitNext(ctx, admissionKeys(t, 35, nil), mustTime(t, 6))
+	if err != nil || !admitted.Admitted() || admitted.Run.TaskID != first.ID {
+		t.Fatalf("first admission = %+v, %v", admitted, err)
+	}
+	if _, err := store.EnqueueTask(ctx, NewTask{
+		ID: taskID(t, 36), ProjectID: project.ID, AssignedAgentID: busyAgent.ID,
+		IncarnationID: incarnationID(t, 37), Title: "ineligible head", Priority: 100,
+	}, mustTime(t, 7)); err != nil {
+		t.Fatal(err)
+	}
+	eligible, err := store.EnqueueTask(ctx, NewTask{
+		ID: taskID(t, 38), ProjectID: project.ID, AssignedAgentID: eligibleAgent.ID,
+		IncarnationID: incarnationID(t, 39), Title: "eligible", Priority: 1,
+	}, mustTime(t, 8))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := store.AdmitNext(ctx, admissionKeys(t, 40, nil), mustTime(t, 9))
+	if err != nil || !result.Admitted() || result.Run.TaskID != eligible.ID || result.Run.AgentID != eligibleAgent.ID {
+		t.Fatalf("eligible admission = %+v, %v", result, err)
+	}
+}
+
+func TestAdmitNextDistinguishesEmptyFromIneligibleQueue(t *testing.T) {
+	t.Run("empty", func(t *testing.T) {
+		store, _, _, _ := newAdmissionStore(t, RoleOrchestrator, 2)
+		defer store.Close()
+		result, err := store.AdmitNext(context.Background(), admissionKeys(t, 44, nil), mustTime(t, 5))
+		if err != nil || result.Admitted() || result.Reason != NoAdmissionQueueEmpty {
+			t.Fatalf("empty admission = %+v, %v", result, err)
+		}
+	})
+	t.Run("ineligible", func(t *testing.T) {
+		store, _, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
+		defer store.Close()
+		if _, err := store.EnqueueTask(context.Background(), NewTask{
+			ID: taskID(t, 45), ProjectID: project.ID, AssignedAgentID: agent.ID,
+			IncarnationID: incarnationID(t, 46), Title: "paused",
+		}, mustTime(t, 5)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.writer.Exec(`UPDATE agents SET paused = 1, revision = revision + 1 WHERE id = ?`, agent.ID.Bytes()); err != nil {
+			t.Fatal(err)
+		}
+		result, err := store.AdmitNext(context.Background(), admissionKeys(t, 47, nil), mustTime(t, 6))
+		if err != nil || result.Admitted() || result.Reason != NoAdmissionNoEligibleWork {
+			t.Fatalf("ineligible admission = %+v, %v", result, err)
 		}
 	})
 }
@@ -58,7 +160,7 @@ func TestAdmissionFreezesProviderModelAndEffort(t *testing.T) {
 	if _, err := store.SetDispatch(ctx, mustRevision(t, 1), true, mustTime(t, 5)); err != nil {
 		t.Fatal(err)
 	}
-	admitted, err := store.AdmitNext(ctx, agent.ID, admissionKeys(t, 234, nil), mustTime(t, 6))
+	admitted, err := store.AdmitNext(ctx, admissionKeys(t, 234, nil), mustTime(t, 6))
 	if err != nil || !admitted.Admitted() {
 		t.Fatalf("admission = %+v, %v", admitted, err)
 	}
@@ -126,7 +228,7 @@ func TestShellLaunchControlCorruptionFailsClosed(t *testing.T) {
 			keys := admissionKeys(t, seed+4, nil)
 			var target []byte
 			if test.run {
-				admitted, err := store.AdmitNext(ctx, agent.ID, keys, mustTime(t, 5))
+				admitted, err := store.AdmitNext(ctx, keys, mustTime(t, 5))
 				if err != nil || !admitted.Admitted() {
 					t.Fatalf("admission = %+v, %v", admitted, err)
 				}
@@ -147,7 +249,7 @@ func TestShellLaunchControlCorruptionFailsClosed(t *testing.T) {
 					t.Fatalf("Agent error = %v", err)
 				}
 				before := admissionFootprint(t, store)
-				if result, err := store.AdmitNext(ctx, agent.ID, keys, mustTime(t, 5)); !errors.Is(err, ErrCorruptState) || result.Admitted() {
+				if result, err := store.AdmitNext(ctx, keys, mustTime(t, 5)); !errors.Is(err, ErrCorruptState) || result.Admitted() {
 					t.Fatalf("corrupt admission = %+v, %v", result, err)
 				}
 				if after := admissionFootprint(t, store); after != before {
@@ -171,7 +273,7 @@ func TestAdmissionCreatesExactDeclaredTerminalSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	keys := admissionKeys(t, 220, nil)
-	result, err := store.AdmitNext(context.Background(), agent.ID, keys, mustTime(t, 10))
+	result, err := store.AdmitNext(context.Background(), keys, mustTime(t, 10))
 	if err != nil || !result.Admitted() {
 		t.Fatalf("admission = %+v, %v", result, err)
 	}
@@ -204,12 +306,12 @@ func TestAdmissionGatesHaveZeroFootprint(t *testing.T) {
 			if _, err := store.writer.Exec(`UPDATE agents SET paused = 1, revision = revision + 1 WHERE id = ?`, agent.ID.Bytes()); err != nil {
 				t.Fatal(err)
 			}
-		}, want: NoAdmissionAgentPaused},
+		}, want: NoAdmissionNoEligibleWork},
 		{name: "budget", mutate: func(t *testing.T, store *Store, agent Agent) {
 			if _, err := store.writer.Exec(`UPDATE agents SET tool_calls_used = tool_budget_limit, revision = revision + 1 WHERE id = ?`, agent.ID.Bytes()); err != nil {
 				t.Fatal(err)
 			}
-		}, want: NoAdmissionBudgetExhausted},
+		}, want: NoAdmissionNoEligibleWork},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -221,7 +323,7 @@ func TestAdmissionGatesHaveZeroFootprint(t *testing.T) {
 			}
 			test.mutate(t, store, agent)
 			before := admissionFootprint(t, store)
-			result, err := store.AdmitNext(context.Background(), agent.ID, admissionKeys(t, 62, nil), mustTime(t, 20))
+			result, err := store.AdmitNext(context.Background(), admissionKeys(t, 62, nil), mustTime(t, 20))
 			if err != nil || result.Admitted() || result.Reason != test.want {
 				t.Fatalf("result = %+v, %v", result, err)
 			}
@@ -246,7 +348,7 @@ func TestAdmissionCreatesExactWorkerFootprintAndReconciles(t *testing.T) {
 	}
 	candidate := changeID(t, 72)
 	keys := admissionKeys(t, 73, &candidate)
-	result, err := store.AdmitNext(context.Background(), agent.ID, keys, mustTime(t, 10))
+	result, err := store.AdmitNext(context.Background(), keys, mustTime(t, 10))
 	if err != nil || !result.Admitted() {
 		t.Fatalf("admit = %+v, %v", result, err)
 	}
@@ -271,7 +373,7 @@ func TestAdmissionCreatesExactWorkerFootprintAndReconciles(t *testing.T) {
 	if err != nil || !reconciled.Admitted() || reconciled.Run.ID != result.Run.ID {
 		t.Fatalf("reconcile = %+v, %v", reconciled, err)
 	}
-	retried, err := store.AdmitNext(context.Background(), agent.ID, keys, mustTime(t, 99))
+	retried, err := store.AdmitNext(context.Background(), keys, mustTime(t, 99))
 	if err != nil || !retried.Admitted() || retried.Run.AdmittedAt != result.Run.AdmittedAt || retried.Run.Revision != result.Run.Revision {
 		t.Fatalf("retry = %+v, %v", retried, err)
 	}
@@ -302,7 +404,7 @@ func TestAdmissionRejectsNonCanonicalOwnershipLocators(t *testing.T) {
 			keys := admissionKeys(t, 78, nil)
 			mutate(&keys)
 			before := admissionFootprint(t, store)
-			if _, err := store.AdmitNext(context.Background(), agent.ID, keys, mustTime(t, 10)); !errors.Is(err, ErrInvalidValue) {
+			if _, err := store.AdmitNext(context.Background(), keys, mustTime(t, 10)); !errors.Is(err, ErrInvalidValue) {
 				t.Fatalf("admission error = %v", err)
 			}
 			if after := admissionFootprint(t, store); after != before {
@@ -333,7 +435,7 @@ func TestIndependentStoresCannotAdmitSameAgentOrTask(t *testing.T) {
 		go func(index int, candidate *Store) {
 			defer wait.Done()
 			<-start
-			result, err := candidate.AdmitNext(context.Background(), agent.ID, admissionKeys(t, byte(90+index*10), nil), mustTime(t, 20))
+			result, err := candidate.AdmitNext(context.Background(), admissionKeys(t, byte(90+index*10), nil), mustTime(t, 20))
 			results <- result
 			errorsSeen <- err
 		}(index, candidate)
@@ -377,7 +479,7 @@ func TestAdmissionTaskGuardFailureRollsBackEntireFootprint(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := admissionFootprint(t, store)
-	result, err := store.AdmitNext(context.Background(), agent.ID, admissionKeys(t, 108, nil), mustTime(t, 10))
+	result, err := store.AdmitNext(context.Background(), admissionKeys(t, 108, nil), mustTime(t, 10))
 	if !errors.Is(err, ErrRevisionConflict) || result.Admitted() {
 		t.Fatalf("guarded admission = %+v, %v", result, err)
 	}
@@ -408,7 +510,7 @@ func TestAdmissionRequiresEveryDeclaredResourceInsert(t *testing.T) {
 				t.Fatal(err)
 			}
 			before := admissionFootprint(t, store)
-			result, err := store.AdmitNext(context.Background(), agent.ID, admissionKeys(t, 112, nil), mustTime(t, 10))
+			result, err := store.AdmitNext(context.Background(), admissionKeys(t, 112, nil), mustTime(t, 10))
 			if !errors.Is(err, ErrRevisionConflict) || result.Admitted() {
 				t.Fatalf("suppressed %s admission = %+v, %v", kind.String(), result, err)
 			}
@@ -434,7 +536,7 @@ func TestAdmissionRequiresTerminalSessionInsert(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := admissionFootprint(t, store)
-	result, err := store.AdmitNext(context.Background(), agent.ID, admissionKeys(t, 121, nil), mustTime(t, 10))
+	result, err := store.AdmitNext(context.Background(), admissionKeys(t, 121, nil), mustTime(t, 10))
 	if !errors.Is(err, ErrRevisionConflict) || result.Admitted() {
 		t.Fatalf("suppressed terminal session admission = %+v, %v", result, err)
 	}

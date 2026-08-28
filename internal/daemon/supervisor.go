@@ -12,7 +12,6 @@ import (
 // task, provider, source root, startup input, run identity and credential from
 // durable state or fresh daemon-generated values.
 type SupervisorSpec struct {
-	AgentID              kernel.AgentID
 	RuntimeParent        *RuntimeParent
 	ChangeParent         string
 	GitExecutable        string

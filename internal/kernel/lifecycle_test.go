@@ -342,7 +342,7 @@ func TestFinalizingConsumesFactoryCapacity(t *testing.T) {
 	firstTask, _ := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 120), ProjectID: project.ID, AssignedAgentID: firstAgent.ID, IncarnationID: incarnationID(t, 121), Title: "first"}, mustTime(t, 5))
 	_ = firstTask
 	firstKeys := admissionKeys(t, 122, nil)
-	first, err := store.AdmitNext(context.Background(), firstAgent.ID, firstKeys, mustTime(t, 10))
+	first, err := store.AdmitNext(context.Background(), firstKeys, mustTime(t, 10))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -355,7 +355,7 @@ func TestFinalizingConsumesFactoryCapacity(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _ = store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 124), ProjectID: project.ID, AssignedAgentID: secondAgent.ID, IncarnationID: incarnationID(t, 125), Title: "second"}, mustTime(t, 13))
-	result, err := store.AdmitNext(context.Background(), secondAgent.ID, admissionKeys(t, 126, nil), mustTime(t, 14))
+	result, err := store.AdmitNext(context.Background(), admissionKeys(t, 126, nil), mustTime(t, 14))
 	if err != nil || result.Admitted() || result.Reason != NoAdmissionAtCapacity {
 		t.Fatalf("capacity result = %+v, %v", result, err)
 	}
@@ -474,11 +474,11 @@ func TestResourceIdentityCannotBeReusedAcrossRuns(t *testing.T) {
 	}
 	_, _ = store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 212), ProjectID: project.ID, AssignedAgentID: firstAgent.ID, IncarnationID: incarnationID(t, 213), Title: "first"}, mustTime(t, 5))
 	_, _ = store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 214), ProjectID: project.ID, AssignedAgentID: secondAgent.ID, IncarnationID: incarnationID(t, 215), Title: "second"}, mustTime(t, 5))
-	first, err := store.AdmitNext(context.Background(), firstAgent.ID, admissionKeys(t, 220, nil), mustTime(t, 10))
+	first, err := store.AdmitNext(context.Background(), admissionKeys(t, 220, nil), mustTime(t, 10))
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := store.AdmitNext(context.Background(), secondAgent.ID, admissionKeys(t, 230, nil), mustTime(t, 11))
+	second, err := store.AdmitNext(context.Background(), admissionKeys(t, 230, nil), mustTime(t, 11))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -595,7 +595,7 @@ func TestWorkerRunCannotActivateBeforeExactChangeIsAvailable(t *testing.T) {
 	_, _ = store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 130), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 131), Title: "worker"}, mustTime(t, 5))
 	candidate := changeID(t, 132)
 	keys := admissionKeys(t, 133, &candidate)
-	admission, err := store.AdmitNext(context.Background(), agent.ID, keys, mustTime(t, 10))
+	admission, err := store.AdmitNext(context.Background(), keys, mustTime(t, 10))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -688,7 +688,7 @@ func TestTaskGuardAndPermanentDigestUniquenessRollbackTerminalOrAdmission(t *tes
 		reuse := admissionKeys(t, 182, nil)
 		reuse.AttemptDigest = keys.AttemptDigest
 		before := admissionFootprint(t, store)
-		if _, err := store.AdmitNext(context.Background(), agent.ID, reuse, mustTime(t, 42)); !errors.Is(err, ErrConflict) {
+		if _, err := store.AdmitNext(context.Background(), reuse, mustTime(t, 42)); !errors.Is(err, ErrConflict) {
 			t.Fatalf("digest reuse = %v", err)
 		}
 		after := admissionFootprint(t, store)
@@ -754,11 +754,11 @@ func TestRecoverableRunsAreCanonicalOrderedAndPrivateStateStaysOutOfPublicProjec
 	secondAgent, _ := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 141), ProjectID: project.ID, Name: "second", Role: RoleOrchestrator, Provider: ProviderCodex, Model: "MODEL_SENTINEL", ToolBudgetLimit: 2}, mustTime(t, 4))
 	_, _ = store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 142), ProjectID: project.ID, AssignedAgentID: secondAgent.ID, IncarnationID: incarnationID(t, 143), Title: "second", Body: "BODY_SENTINEL"}, mustTime(t, 5))
 	_, _ = store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 144), ProjectID: project.ID, AssignedAgentID: firstAgent.ID, IncarnationID: incarnationID(t, 145), Title: "first"}, mustTime(t, 5))
-	first, err := store.AdmitNext(context.Background(), firstAgent.ID, admissionKeys(t, 170, nil), mustTime(t, 10))
+	first, err := store.AdmitNext(context.Background(), admissionKeys(t, 170, nil), mustTime(t, 10))
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := store.AdmitNext(context.Background(), secondAgent.ID, admissionKeys(t, 160, nil), mustTime(t, 20))
+	second, err := store.AdmitNext(context.Background(), admissionKeys(t, 160, nil), mustTime(t, 20))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -815,7 +815,7 @@ func admittedOrchestratorRun(t *testing.T) (*Store, Run, AdmissionKeys) {
 		t.Fatal(err)
 	}
 	keys := admissionKeys(t, 152, nil)
-	result, err := store.AdmitNext(context.Background(), agent.ID, keys, mustTime(t, 10))
+	result, err := store.AdmitNext(context.Background(), keys, mustTime(t, 10))
 	if err != nil || !result.Admitted() {
 		store.Close()
 		t.Fatalf("admit = %+v, %v", result, err)
@@ -864,7 +864,7 @@ func finalizingReleasedRun(t *testing.T, role AgentRole, policy VerificationPoli
 		candidate = &value
 	}
 	keys := admissionKeys(t, 245, candidate)
-	admission, err := store.AdmitNext(context.Background(), agent.ID, keys, mustTime(t, 10))
+	admission, err := store.AdmitNext(context.Background(), keys, mustTime(t, 10))
 	if err != nil {
 		store.Close()
 		t.Fatal(err)

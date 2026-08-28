@@ -67,13 +67,13 @@ func TestAdmitNextRejectsBeforeFactoryTimestamp(t *testing.T) {
 	}
 	keys := admissionKeys(t, 222, nil)
 	before := captureWriteFootprint(t, store)
-	if result, err := store.AdmitNext(context.Background(), agent.ID, keys, mustTime(t, 9)); !errors.Is(err, ErrRevisionConflict) || result.Admitted() {
+	if result, err := store.AdmitNext(context.Background(), keys, mustTime(t, 9)); !errors.Is(err, ErrRevisionConflict) || result.Admitted() {
 		t.Fatalf("stale admission = %+v, %v", result, err)
 	}
 	if after := captureWriteFootprint(t, store); after != before {
 		t.Fatalf("stale admission footprint before=%+v after=%+v", before, after)
 	}
-	if result, err := store.AdmitNext(context.Background(), agent.ID, keys, mustTime(t, 10)); err != nil || !result.Admitted() {
+	if result, err := store.AdmitNext(context.Background(), keys, mustTime(t, 10)); err != nil || !result.Admitted() {
 		t.Fatalf("admission boundary = %+v, %v", result, err)
 	}
 }
@@ -194,16 +194,16 @@ func TestFinalizeRunRejectsBeforeResourceCleanupTime(t *testing.T) {
 }
 
 func TestRetryAdmissionCannotPrecedeQueuedTaskUpdate(t *testing.T) {
-	store, terminal, agentID, keys := retryQueuedWorker(t, 50)
+	store, terminal, _, keys := retryQueuedWorker(t, 50)
 	defer store.Close()
 	before := captureWriteFootprint(t, store)
-	if result, err := store.AdmitNext(context.Background(), agentID, keys, mustTime(t, 40)); !errors.Is(err, ErrRevisionConflict) || result.Admitted() {
+	if result, err := store.AdmitNext(context.Background(), keys, mustTime(t, 40)); !errors.Is(err, ErrRevisionConflict) || result.Admitted() {
 		t.Fatalf("admission before queued task update = %+v, %v", result, err)
 	}
 	if after := captureWriteFootprint(t, store); after != before {
 		t.Fatalf("admission before queued task update footprint before=%+v after=%+v", before, after)
 	}
-	if result, err := store.AdmitNext(context.Background(), agentID, keys, mustTime(t, 50)); err != nil || !result.Admitted() {
+	if result, err := store.AdmitNext(context.Background(), keys, mustTime(t, 50)); err != nil || !result.Admitted() {
 		t.Fatalf("admission at queued task update = %+v, %v", result, err)
 	}
 	_ = terminal
@@ -217,7 +217,7 @@ func TestSuccessfulTerminalCannotBeRetried(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	agentID, keys := queueRetryForTerminal(t, store, terminal, 80)
+	_, keys := queueRetryForTerminal(t, store, terminal, 80)
 	before := captureWriteFootprint(t, store)
 	if _, _, err := store.Run(context.Background(), terminal.ID); !errors.Is(err, ErrCorruptState) {
 		t.Fatalf("successful terminal retry Run = %v", err)
@@ -228,7 +228,7 @@ func TestSuccessfulTerminalCannotBeRetried(t *testing.T) {
 	if _, err := store.RecoverableRuns(context.Background()); !errors.Is(err, ErrCorruptState) {
 		t.Fatalf("successful terminal retry RecoverableRuns = %v", err)
 	}
-	if result, err := store.AdmitNext(context.Background(), agentID, keys, mustTime(t, 80)); !errors.Is(err, ErrCorruptState) || result.Admitted() {
+	if result, err := store.AdmitNext(context.Background(), keys, mustTime(t, 80)); !errors.Is(err, ErrCorruptState) || result.Admitted() {
 		t.Fatalf("successful terminal retry admission = %+v, %v", result, err)
 	}
 	if after := captureWriteFootprint(t, store); after != before {
@@ -264,11 +264,11 @@ func TestNonSuccessTerminalAllowsQueuedRetry(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			agentID, keys := queueRetryForTerminal(t, store, terminal, 80)
+			_, keys := queueRetryForTerminal(t, store, terminal, 80)
 			if _, _, err := store.Run(context.Background(), terminal.ID); err != nil {
 				t.Fatalf("historical %s terminal Run = %v", test.name, err)
 			}
-			if result, err := store.AdmitNext(context.Background(), agentID, keys, mustTime(t, 80)); err != nil || !result.Admitted() {
+			if result, err := store.AdmitNext(context.Background(), keys, mustTime(t, 80)); err != nil || !result.Admitted() {
 				t.Fatalf("%s retry admission = %+v, %v", test.name, result, err)
 			}
 		})
@@ -277,7 +277,7 @@ func TestNonSuccessTerminalAllowsQueuedRetry(t *testing.T) {
 
 func TestQueuedRetryMustFollowPredecessorTerminal(t *testing.T) {
 	t.Run("before", func(t *testing.T) {
-		store, terminal, agentID, keys := retryQueuedWorker(t, 32)
+		store, terminal, _, keys := retryQueuedWorker(t, 32)
 		path := storePath(t, store)
 		before := captureWriteFootprint(t, store)
 		if _, _, err := store.Run(context.Background(), terminal.ID); !errors.Is(err, ErrCorruptState) {
@@ -289,7 +289,7 @@ func TestQueuedRetryMustFollowPredecessorTerminal(t *testing.T) {
 		if _, err := store.RecoverableRuns(context.Background()); !errors.Is(err, ErrCorruptState) {
 			t.Fatalf("early queued retry RecoverableRuns = %v", err)
 		}
-		if result, err := store.AdmitNext(context.Background(), agentID, keys, mustTime(t, 33)); !errors.Is(err, ErrCorruptState) || result.Admitted() {
+		if result, err := store.AdmitNext(context.Background(), keys, mustTime(t, 33)); !errors.Is(err, ErrCorruptState) || result.Admitted() {
 			t.Fatalf("early queued retry admission = %+v, %v", result, err)
 		}
 		if after := captureWriteFootprint(t, store); after != before {
@@ -306,12 +306,12 @@ func TestQueuedRetryMustFollowPredecessorTerminal(t *testing.T) {
 	})
 
 	t.Run("boundary", func(t *testing.T) {
-		store, terminal, agentID, keys := retryQueuedWorker(t, 33)
+		store, terminal, _, keys := retryQueuedWorker(t, 33)
 		defer store.Close()
 		if _, _, err := store.Run(context.Background(), terminal.ID); err != nil {
 			t.Fatalf("boundary queued retry Run = %v", err)
 		}
-		if result, err := store.AdmitNext(context.Background(), agentID, keys, mustTime(t, 33)); err != nil || !result.Admitted() {
+		if result, err := store.AdmitNext(context.Background(), keys, mustTime(t, 33)); err != nil || !result.Admitted() {
 			t.Fatalf("boundary queued retry admission = %+v, %v", result, err)
 		}
 	})
@@ -332,9 +332,9 @@ func TestEarlierSuccessfulRunForbidsLaterHistory(t *testing.T) {
 }
 
 func TestRetryHistoryAllowsMultipleNonSuccessRuns(t *testing.T) {
-	store, predecessor, agentID, keys := retryQueuedWorker(t, 33)
+	store, predecessor, _, keys := retryQueuedWorker(t, 33)
 	defer store.Close()
-	second, err := store.AdmitNext(context.Background(), agentID, keys, mustTime(t, 33))
+	second, err := store.AdmitNext(context.Background(), keys, mustTime(t, 33))
 	if err != nil || !second.Admitted() {
 		t.Fatalf("first retry admission = %+v, %v", second, err)
 	}
@@ -361,8 +361,8 @@ func TestRetryHistoryAllowsMultipleNonSuccessRuns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	thirdAgent, thirdKeys := queueRetryForTerminalSeed(t, store, secondTerminal, 45, 230)
-	third, err := store.AdmitNext(context.Background(), thirdAgent, thirdKeys, mustTime(t, 45))
+	_, thirdKeys := queueRetryForTerminalSeed(t, store, secondTerminal, 45, 230)
+	third, err := store.AdmitNext(context.Background(), thirdKeys, mustTime(t, 45))
 	if err != nil || !third.Admitted() {
 		t.Fatalf("second retry admission = %+v, %v", third, err)
 	}
@@ -519,8 +519,8 @@ func TestRunningWorkerChangeCausalitySurvivesLaterPhases(t *testing.T) {
 
 func retryAdmittedWorker(t *testing.T, taskUpdatedAt, admissionAt int64) (*Store, Run, Run) {
 	t.Helper()
-	store, terminal, agentID, keys := retryQueuedWorker(t, taskUpdatedAt)
-	admission, err := store.AdmitNext(context.Background(), agentID, keys, mustTime(t, admissionAt))
+	store, terminal, _, keys := retryQueuedWorker(t, taskUpdatedAt)
+	admission, err := store.AdmitNext(context.Background(), keys, mustTime(t, admissionAt))
 	if err != nil || !admission.Admitted() {
 		store.Close()
 		t.Fatalf("retry admission = %+v, %v", admission, err)
@@ -587,7 +587,7 @@ func TestOrphanTaskRevisionRejectedEveryBoundary(t *testing.T) {
 	if _, err := store.RecoverableRuns(context.Background()); !errors.Is(err, ErrCorruptState) {
 		t.Fatalf("orphan RecoverableRuns = %v", err)
 	}
-	if result, err := store.AdmitNext(context.Background(), agent.ID, admissionKeys(t, 242, nil), mustTime(t, 10)); !errors.Is(err, ErrCorruptState) || result.Admitted() {
+	if result, err := store.AdmitNext(context.Background(), admissionKeys(t, 242, nil), mustTime(t, 10)); !errors.Is(err, ErrCorruptState) || result.Admitted() {
 		t.Fatalf("orphan admission = %+v, %v", result, err)
 	}
 	if after := captureWriteFootprint(t, store); after != before {
@@ -627,7 +627,7 @@ func TestFreshQueuedTaskWithoutRunRemainsValidAndAdmissible(t *testing.T) {
 	if fresh, found, err := opened.Task(context.Background(), task.ID); err != nil || !found || fresh.WorkRevision.Int64() != 1 || fresh.Status != TaskQueued {
 		t.Fatalf("fresh Task = %+v, found=%v, err=%v", fresh, found, err)
 	}
-	result, err := opened.AdmitNext(context.Background(), agent.ID, admissionKeys(t, 245, nil), mustTime(t, 10))
+	result, err := opened.AdmitNext(context.Background(), admissionKeys(t, 245, nil), mustTime(t, 10))
 	if err != nil || !result.Admitted() || result.Run.AdmittedTaskWorkRevision.Int64() != 1 {
 		t.Fatalf("fresh admission = %+v, %v", result, err)
 	}
@@ -801,7 +801,7 @@ func admittedWorkerRun(t *testing.T) (*Store, Run, AdmissionKeys) {
 	candidate := changeID(t, 212)
 	keys := admissionKeys(t, 213, &candidate)
 	keys.RuntimeRoot = "/worker/runtime"
-	admission, err := store.AdmitNext(context.Background(), agent.ID, keys, mustTime(t, 10))
+	admission, err := store.AdmitNext(context.Background(), keys, mustTime(t, 10))
 	if err != nil {
 		store.Close()
 		t.Fatal(err)

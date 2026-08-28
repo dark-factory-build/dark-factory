@@ -8,8 +8,8 @@ import (
 	"fmt"
 )
 
-func (store *Store) AdmitNext(ctx context.Context, agentID AgentID, keys AdmissionKeys, at UnixMillis) (AdmissionResult, error) {
-	if agentID.zero() || !keys.valid() {
+func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMillis) (AdmissionResult, error) {
+	if !keys.valid() {
 		return AdmissionResult{}, fmt.Errorf("%w: invalid admission request", ErrInvalidValue)
 	}
 	tx, err := store.beginValidatedWrite(ctx)
@@ -37,7 +37,7 @@ func (store *Store) AdmitNext(ctx context.Context, agentID AgentID, keys Admissi
 		return rollbackNoAdmission(tx, NoAdmissionDispatchDisabled)
 	}
 	var active int64
-	if err := tx.connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs WHERE phase IN ('admitted', 'running', 'finalizing')`).Scan(&active); err != nil {
+	if err := tx.connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs WHERE phase <> 'terminal'`).Scan(&active); err != nil {
 		return AdmissionResult{}, tx.Rollback(err)
 	}
 	if active < 0 {
@@ -47,33 +47,34 @@ func (store *Store) AdmitNext(ctx context.Context, agentID AgentID, keys Admissi
 		return rollbackNoAdmission(tx, NoAdmissionAtCapacity)
 	}
 
-	agent, found, err := agentByID(ctx, tx.connection, agentID)
+	task, found, err := scanTask(tx.connection.QueryRowContext(ctx, `SELECT t.id, t.project_id, t.assigned_agent_id, t.incarnation_id, t.work_revision, t.title, t.body, t.status, t.priority, t.blocked_reason, t.result, t.completed_at_ms, t.revision, t.created_at_ms, t.updated_at_ms
+		FROM tasks AS t
+		JOIN agents AS a ON a.id = t.assigned_agent_id AND a.project_id = t.project_id
+		WHERE t.status = 'queued'
+		  AND a.paused = 0
+		  AND a.tool_calls_used < a.tool_budget_limit
+		  AND NOT EXISTS (SELECT 1 FROM runs AS r WHERE r.agent_id = a.id AND r.phase <> 'terminal')
+		ORDER BY t.priority DESC, t.created_at_ms ASC, t.id ASC
+		LIMIT 1`))
 	if err != nil {
 		return AdmissionResult{}, tx.Rollback(err)
 	}
 	if !found {
-		return AdmissionResult{}, tx.Rollback(ErrNotFound)
+		var queued int64
+		if err := tx.connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE status = 'queued'`).Scan(&queued); err != nil {
+			return AdmissionResult{}, tx.Rollback(err)
+		}
+		if queued == 0 {
+			return rollbackNoAdmission(tx, NoAdmissionQueueEmpty)
+		}
+		return rollbackNoAdmission(tx, NoAdmissionNoEligibleWork)
 	}
-	if agent.Paused {
-		return rollbackNoAdmission(tx, NoAdmissionAgentPaused)
-	}
-	if agent.ToolCallsUsed >= agent.ToolBudgetLimit {
-		return rollbackNoAdmission(tx, NoAdmissionBudgetExhausted)
-	}
-	var agentOpen int64
-	if err := tx.connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs WHERE agent_id = ? AND phase <> 'terminal'`, agentID.Bytes()).Scan(&agentOpen); err != nil {
+	agent, found, err := agentByID(ctx, tx.connection, task.AssignedAgentID)
+	if err != nil || !found {
+		if err == nil {
+			err = ErrCorruptState
+		}
 		return AdmissionResult{}, tx.Rollback(err)
-	}
-	if agentOpen != 0 {
-		return rollbackNoAdmission(tx, NoAdmissionAgentBusy)
-	}
-
-	task, found, err := scanTask(tx.connection.QueryRowContext(ctx, `SELECT id, project_id, assigned_agent_id, incarnation_id, work_revision, title, body, status, priority, blocked_reason, result, completed_at_ms, revision, created_at_ms, updated_at_ms FROM tasks WHERE assigned_agent_id = ? AND status = 'queued' ORDER BY priority DESC, created_at_ms ASC, id ASC LIMIT 1`, agentID.Bytes()))
-	if err != nil {
-		return AdmissionResult{}, tx.Rollback(err)
-	}
-	if !found {
-		return rollbackNoAdmission(tx, NoAdmissionQueueEmpty)
 	}
 	if task.ProjectID != agent.ProjectID {
 		return AdmissionResult{}, tx.Rollback(ErrCorruptState)

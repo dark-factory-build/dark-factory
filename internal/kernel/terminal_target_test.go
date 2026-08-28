@@ -119,7 +119,7 @@ func TestResolveAgentTerminalTargetOldHeadCannotSelectReplacementRun(t *testing.
 		t.Fatal(err)
 	}
 	secondKeys := admissionKeys(t, 206, nil)
-	second, err := store.AdmitNext(context.Background(), agent.ID, secondKeys, mustTime(t, 62))
+	second, err := store.AdmitNext(context.Background(), secondKeys, mustTime(t, 62))
 	if err != nil || !second.Admitted() || second.Run.ID == first.ID {
 		t.Fatalf("replacement admission = %+v, err=%v", second, err)
 	}

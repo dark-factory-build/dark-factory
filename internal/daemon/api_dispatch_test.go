@@ -413,7 +413,7 @@ func prepareActiveAttempt(t *testing.T, fixture *dispatchFixture, seed byte) act
 		},
 	}
 	at := mustKernelTime(t, 1000)
-	admission, err := fixture.store.AdmitNext(ctx, mustAgentID(t, agentID), keys, at)
+	admission, err := fixture.store.AdmitNext(ctx, keys, at)
 	if err != nil || !admission.Admitted() {
 		t.Fatalf("admission = %+v, %v", admission, err)
 	}

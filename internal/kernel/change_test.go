@@ -195,7 +195,7 @@ func TestRepositoryIdentitySchemaRequiresExactPairedStoreIntegers(t *testing.T) 
 }
 
 func TestRetryAdmissionUsesCanonicalChangeAndIgnoresFreshCandidate(t *testing.T) {
-	store, terminal, agentID, keys := retryQueuedWorker(t, 40)
+	store, terminal, _, keys := retryQueuedWorker(t, 40)
 	defer store.Close()
 	before, found, err := store.Change(context.Background(), *terminal.ChangeID)
 	if err != nil || !found || before.Phase != ChangeAbandoned || before.SettledRunID == nil || *before.SettledRunID != terminal.ID {
@@ -204,7 +204,7 @@ func TestRetryAdmissionUsesCanonicalChangeAndIgnoresFreshCandidate(t *testing.T)
 	if keys.CandidateChangeID == before.ID {
 		t.Fatal("test candidate unexpectedly equals canonical Change")
 	}
-	admission, err := store.AdmitNext(context.Background(), agentID, keys, mustTime(t, 40))
+	admission, err := store.AdmitNext(context.Background(), keys, mustTime(t, 40))
 	if err != nil || !admission.Admitted() || admission.Run.ChangeID == nil || admission.Run.AdmittedChangeRevision == nil {
 		t.Fatalf("retry admission = %+v, %v", admission, err)
 	}
@@ -227,7 +227,7 @@ func TestOrchestratorAdmissionIgnoresCandidateWithoutCreatingChange(t *testing.T
 		t.Fatal(err)
 	}
 	keys := admissionKeys(t, 182, nil)
-	admission, err := store.AdmitNext(context.Background(), agent.ID, keys, mustTime(t, 10))
+	admission, err := store.AdmitNext(context.Background(), keys, mustTime(t, 10))
 	if err != nil || !admission.Admitted() || admission.Run.ChangeID != nil || admission.Run.AdmittedChangeRevision != nil {
 		t.Fatalf("orchestrator admission = %+v, %v", admission, err)
 	}
@@ -258,8 +258,8 @@ func TestWorkerSettlementIsExactAndHistoricalFinalizationReplaySurvivesRetry(t *
 	if err != nil || terminal.Phase != RunTerminal {
 		t.Fatalf("terminal settlement = %+v, %v", terminal, err)
 	}
-	agentID, retryKeys := queueRetryForTerminal(t, store, terminal, 81)
-	retry, err := store.AdmitNext(context.Background(), agentID, retryKeys, mustTime(t, 81))
+	_, retryKeys := queueRetryForTerminal(t, store, terminal, 81)
+	retry, err := store.AdmitNext(context.Background(), retryKeys, mustTime(t, 81))
 	if err != nil || !retry.Admitted() {
 		t.Fatalf("retry admission = %+v, %v", retry, err)
 	}

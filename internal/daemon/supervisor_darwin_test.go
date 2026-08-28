@@ -401,7 +401,7 @@ func TestSupervisorRevalidatesFactoryctlImmediatelyBeforeProviderRelease(t *test
 	}
 }
 
-func TestSupervisorRejectsInvalidFactoryctlBeforeAdmissionOrProviderEffect(t *testing.T) {
+func TestSupervisorRejectsInvalidFactoryctlAfterAdmissionBeforeProviderEffect(t *testing.T) {
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -441,14 +441,18 @@ func TestSupervisorRejectsInvalidFactoryctlBeforeAdmissionOrProviderEffect(t *te
 			fixture := newSupervisorFixture(t, supervisorHumanRequestProgram(t, "0123456789abcdef0123456789abcdef", "private-invalid-question"))
 			locator := test.locator(t, fixture)
 			fixture.spec.FactoryctlExecutable = locator
-			if _, err := fixture.daemon.RunNext(context.Background(), fixture.spec); !errors.Is(err, kernel.ErrInvalidValue) || strings.Contains(err.Error(), locator) {
+			run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+			if err == nil || strings.Contains(err.Error(), locator) {
 				t.Fatalf("invalid factoryctl result=%v", err)
+			}
+			if run.Phase != kernel.RunFinalizing || run.Proposal == nil || run.Proposal.Kind() != kernel.OutcomeFailed || run.Proposal.Code() != kernel.FailureSpawn || run.CredentialRevokedAt == nil {
+				t.Fatalf("invalid factoryctl run=%+v", run)
 			}
 			if _, err := os.Stat(fixture.witness); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("provider witness exists: %v", err)
 			}
 			snapshot, err := fixture.store.Snapshot(context.Background())
-			if err != nil || snapshot.Factory.ActiveRuns != 0 || len(snapshot.HumanRequests) != 0 {
+			if err != nil || snapshot.Factory.ActiveRuns != 1 || len(snapshot.HumanRequests) != 0 {
 				t.Fatalf("invalid factoryctl admitted state: active=%d requests=%+v err=%v", snapshot.Factory.ActiveRuns, snapshot.HumanRequests, err)
 			}
 		})
@@ -507,7 +511,7 @@ func TestFailRunSharesOperationGateWithTerminalEffects(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	admission, err := store.AdmitNext(ctx, agentID, kernel.AdmissionKeys{
+	admission, err := store.AdmitNext(ctx, kernel.AdmissionKeys{
 		RunID: runID, TerminalSessionID: sessionID, AttemptDigest: digest, CandidateChangeID: candidateChange,
 		Resources:   kernel.AdmissionResourceIDs{RuntimeRoot: resource(216), RunnerProcess: resource(217), ProviderProcess: resource(218), ProviderGroup: resource(219)},
 		RuntimeRoot: filepath.Join(root, "runtime"),
@@ -1447,7 +1451,7 @@ func newSupervisorFixture(t *testing.T, program string) *supervisorFixture {
 		t.Fatal(err)
 	}
 	fixture.spec = SupervisorSpec{
-		AgentID: agentID, RuntimeParent: runtimeParent, ChangeParent: changeParent,
+		RuntimeParent: runtimeParent, ChangeParent: changeParent,
 		GitExecutable: git, BaseRevision: base, AttemptSocket: socket, RunnerExecutable: executable, FactoryctlExecutable: factoryctl,
 	}
 	return fixture

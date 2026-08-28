@@ -124,35 +124,6 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		spec.GitExecutable == "" || spec.BaseRevision == "" || spec.AttemptSocket == "" || spec.RunnerExecutable == "" || spec.FactoryctlExecutable == "" {
 		return kernel.Run{}, fmt.Errorf("%w: invalid supervisor specification", kernel.ErrInvalidValue)
 	}
-	factoryctl, err := runner.CommitExecutableLocator(spec.FactoryctlExecutable)
-	if err != nil {
-		return kernel.Run{}, fmt.Errorf("%w: invalid supervisor specification", kernel.ErrInvalidValue)
-	}
-
-	agent, found, err := daemon.store.Agent(ctx, spec.AgentID)
-	if err != nil {
-		return kernel.Run{}, err
-	}
-	if !found {
-		return kernel.Run{}, kernel.ErrNotFound
-	}
-	if agent.Role != kernel.RoleWorker || agent.Provider != kernel.ProviderShell {
-		return kernel.Run{}, fmt.Errorf("%w: supervisor spike supports shell workers only", kernel.ErrInvalidValue)
-	}
-	project, found, err := daemon.store.Project(ctx, agent.ProjectID)
-	if err != nil {
-		return kernel.Run{}, err
-	}
-	if !found {
-		return kernel.Run{}, kernel.ErrCorruptState
-	}
-	if project.VerificationPolicy != kernel.VerificationNone {
-		return kernel.Run{}, fmt.Errorf("%w: verification is not part of the kernel spike", kernel.ErrInvalidValue)
-	}
-	repositoryIdentity, err := inspectRepositoryIdentity(project.Root)
-	if err != nil {
-		return kernel.Run{}, err
-	}
 	keys, err := newSupervisorKeys(rand.Reader)
 	if err != nil {
 		return kernel.Run{}, err
@@ -174,7 +145,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		RunID: keys.run, TerminalSessionID: keys.session, AttemptDigest: digest, CandidateChangeID: keys.change,
 		Resources: keys.resources, RuntimeRoot: runtimeRoot,
 	}
-	admission, err := daemon.store.AdmitNext(ctx, spec.AgentID, admissionKeys, at)
+	admission, err := daemon.store.AdmitNext(ctx, admissionKeys, at)
 	if err == nil && spec.afterAdmission != nil {
 		err = spec.afterAdmission()
 	}
@@ -209,6 +180,37 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		return kernel.Run{}, fmt.Errorf("%w: no admission (%s)", kernel.ErrConflict, admission.Reason.String())
 	}
 	run := *admission.Run
+	if run.Role != kernel.RoleWorker || run.Provider != kernel.ProviderShell {
+		return daemon.failRun(run, kernel.FailureSpawn, fmt.Errorf("%w: supervisor spike supports shell workers only", kernel.ErrInvalidValue))
+	}
+	agent, found, err := daemon.store.Agent(ctx, run.AgentID)
+	if err != nil || !found {
+		if err == nil {
+			err = kernel.ErrCorruptState
+		}
+		return daemon.failRun(run, kernel.FailureInternal, err)
+	}
+	if agent.ID != run.AgentID || agent.ProjectID != run.ProjectID || agent.Role != run.Role {
+		return daemon.failRun(run, kernel.FailureInternal, kernel.ErrCorruptState)
+	}
+	project, found, err := daemon.store.Project(ctx, run.ProjectID)
+	if err != nil || !found {
+		if err == nil {
+			err = kernel.ErrCorruptState
+		}
+		return daemon.failRun(run, kernel.FailureInternal, err)
+	}
+	if project.VerificationPolicy != run.VerificationPolicy || project.VerificationPolicy != kernel.VerificationNone {
+		return daemon.failRun(run, kernel.FailureSpawn, fmt.Errorf("%w: verification is not part of the kernel spike", kernel.ErrInvalidValue))
+	}
+	factoryctl, err := runner.CommitExecutableLocator(spec.FactoryctlExecutable)
+	if err != nil {
+		return daemon.failRun(run, kernel.FailureSpawn, err)
+	}
+	repositoryIdentity, err := inspectRepositoryIdentity(project.Root)
+	if err != nil {
+		return daemon.failRun(run, kernel.FailureSource, err)
+	}
 	if run.ChangeID == nil || run.AdmittedChangeRevision == nil {
 		return daemon.failRun(run, kernel.FailureInternal, kernel.ErrCorruptState)
 	}

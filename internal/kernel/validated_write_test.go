@@ -148,7 +148,7 @@ func TestEveryPublicMutationValidatesDurableGraphBeforeDecision(t *testing.T) {
 			return err
 		}},
 		{name: "AdmitNext", invoke: func(store *Store) error {
-			_, err := store.AdmitNext(context.Background(), agentID(t, 2), admissionKeys(t, 224, nil), at)
+			_, err := store.AdmitNext(context.Background(), admissionKeys(t, 224, nil), at)
 			return err
 		}},
 		{name: "RecordChangePrepared", invoke: func(store *Store) error {
@@ -285,7 +285,7 @@ func TestChangePreparedAndReplayRefusePreexistingOwnershipCorruption(t *testing.
 			candidate := changeID(t, 232)
 			keys := admissionKeys(t, 233, &candidate)
 			keys.RuntimeRoot = "/checkpoint/runtime"
-			if admission, err := store.AdmitNext(context.Background(), agent.ID, keys, mustTime(t, 10)); err != nil || !admission.Admitted() {
+			if admission, err := store.AdmitNext(context.Background(), keys, mustTime(t, 10)); err != nil || !admission.Admitted() {
 				t.Fatalf("admission = %+v, %v", admission, err)
 			}
 			selection := testChangeSelection(t)
@@ -418,7 +418,7 @@ func benchmarkValidationStore(b *testing.B) *Store {
 			ProviderProcess: resourceID(10), ProviderGroup: resourceID(11),
 		},
 	}
-	if result, err := store.AdmitNext(context.Background(), agent.ID, keys, at); err != nil || !result.Admitted() {
+	if result, err := store.AdmitNext(context.Background(), keys, at); err != nil || !result.Admitted() {
 		b.Fatalf("admission = %+v, %v", result, err)
 	}
 	return store

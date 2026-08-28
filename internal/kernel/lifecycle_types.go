@@ -819,10 +819,8 @@ type NoAdmissionReason uint8
 const (
 	NoAdmissionDispatchDisabled NoAdmissionReason = iota + 1
 	NoAdmissionAtCapacity
-	NoAdmissionAgentPaused
-	NoAdmissionBudgetExhausted
-	NoAdmissionAgentBusy
 	NoAdmissionQueueEmpty
+	NoAdmissionNoEligibleWork
 	NoAdmissionNotReconciled
 )
 
@@ -832,14 +830,10 @@ func (reason NoAdmissionReason) String() string {
 		return "dispatch_disabled"
 	case NoAdmissionAtCapacity:
 		return "at_capacity"
-	case NoAdmissionAgentPaused:
-		return "agent_paused"
-	case NoAdmissionBudgetExhausted:
-		return "budget_exhausted"
-	case NoAdmissionAgentBusy:
-		return "agent_busy"
 	case NoAdmissionQueueEmpty:
 		return "queue_empty"
+	case NoAdmissionNoEligibleWork:
+		return "no_eligible_work"
 	case NoAdmissionNotReconciled:
 		return "not_reconciled"
 	default:

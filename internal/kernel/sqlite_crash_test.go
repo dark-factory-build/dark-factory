@@ -22,7 +22,6 @@ import (
 const (
 	kernelCrashModeEnv     = "DARK_FACTORY_KERNEL_CRASH_MODE"
 	kernelCrashPathEnv     = "DARK_FACTORY_KERNEL_CRASH_PATH"
-	kernelCrashAgentEnv    = "DARK_FACTORY_KERNEL_CRASH_AGENT"
 	kernelCrashRunEnv      = "DARK_FACTORY_KERNEL_CRASH_RUN"
 	kernelCrashRevisionEnv = "DARK_FACTORY_KERNEL_CRASH_REVISION"
 )
@@ -118,17 +117,7 @@ func TestKernelConcreteCrashHelper(t *testing.T) {
 	}
 	switch {
 	case strings.HasPrefix(mode, "admit-"):
-		raw, decodeErr := hex.DecodeString(os.Getenv(kernelCrashAgentEnv))
-		if decodeErr != nil {
-			err = decodeErr
-			break
-		}
-		agentID, decodeErr := AgentIDFromBytes(raw)
-		if decodeErr != nil {
-			err = decodeErr
-			break
-		}
-		_, err = store.AdmitNext(context.Background(), agentID, admissionKeys(t, 230, nil), mustTime(t, 10))
+		_, err = store.AdmitNext(context.Background(), admissionKeys(t, 230, nil), mustTime(t, 10))
 	case strings.HasPrefix(mode, "finalize-"):
 		raw, decodeErr := hex.DecodeString(os.Getenv(kernelCrashRunEnv))
 		if decodeErr != nil {
@@ -163,7 +152,7 @@ type kernelCrashHelper struct {
 	stderr  bytes.Buffer
 }
 
-func startKernelCrashHelper(t *testing.T, mode, path string, agentID AgentID, runID RunID, revision Revision) *kernelCrashHelper {
+func startKernelCrashHelper(t *testing.T, mode, path string, runID RunID, revision Revision) *kernelCrashHelper {
 	t.Helper()
 	readyR, readyW, err := os.Pipe()
 	if err != nil {
@@ -179,7 +168,6 @@ func startKernelCrashHelper(t *testing.T, mode, path string, agentID AgentID, ru
 	command.Env = append(os.Environ(),
 		kernelCrashModeEnv+"="+mode,
 		kernelCrashPathEnv+"="+path,
-		kernelCrashAgentEnv+"="+hex.EncodeToString(agentID.Bytes()),
 		kernelCrashRunEnv+"="+hex.EncodeToString(runID.Bytes()),
 		kernelCrashRevisionEnv+"="+strconv.FormatInt(revision.Int64(), 10),
 	)
@@ -250,7 +238,7 @@ func TestConcreteStoreCrashBeforeAndAfterAdmissionCommit(t *testing.T) {
 			if err := store.Close(); err != nil {
 				t.Fatal(err)
 			}
-			helper := startKernelCrashHelper(t, test.mode, path, agent.ID, RunID{}, Revision{})
+			helper := startKernelCrashHelper(t, test.mode, path, RunID{}, Revision{})
 			helper.waitReady(t)
 			helper.killAndWait(t)
 			reopened, err := Open(context.Background(), path)
@@ -306,7 +294,7 @@ func TestConcreteStoreCrashBeforeAndAfterFinalizationCommit(t *testing.T) {
 			if err := store.Close(); err != nil {
 				t.Fatal(err)
 			}
-			helper := startKernelCrashHelper(t, test.mode, path, AgentID{}, run.ID, finalizing.Revision)
+			helper := startKernelCrashHelper(t, test.mode, path, run.ID, finalizing.Revision)
 			helper.waitReady(t)
 			helper.killAndWait(t)
 			reopened, err := Open(context.Background(), path)
