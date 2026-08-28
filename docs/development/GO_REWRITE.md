@@ -113,7 +113,7 @@ older candidate or test result current.
 |---|---|---|
 | operational home and Store | integrated, causally tested and independently reviewed | composition must call `OpenStore` once and close child owners in the frozen order |
 | public artifact gate | integrated; exact proof remains at `c732f103` | rerun after the next clean record/integration milestone |
-| local API authority | corrected reviewed contract frozen below; no implementation | install-owned endpoint/socket lifecycle plus API framing/auth matrix |
+| local API authority | integrated, causally tested and independently reviewed through `cb1bdebd` | production composition must open it after RuntimeParent and fence/join it before Store/home release |
 | `RuntimeParent` | reviewed contract frozen below; no implementation | lifetime parent capability, child-operation join and recovery matrix |
 | Change disposition/descriptor handoff | corrected reviewed transition contract frozen below; no implementation | schema/Store transition proof, then worker FD 11 and retry proof |
 | standalone daemon, recovery and scheduling | not implemented | concrete `cmd/factoryd`, restart/crash cuts, then one scheduler |
@@ -150,7 +150,7 @@ or database reference; the raw connector owner is the smaller effective
 authority. There is no repository layer, reconnect fallback, generic pool
 framework or second transaction pattern.
 
-#### Corrected local API authority boundary (planned)
+#### Integrated local API authority boundary
 
 The earlier `c732f103` proposal to let `internal/api` bind the Unix socket from
 a capability is superseded. `OpenLocalAPI` lives in `internal/install` and owns
@@ -180,7 +180,36 @@ across the probe and exact `ECONNREFUSED`. A live peer, `EPERM`, changed
 identity, malformed object or any ambiguous response is retained. Darwin's
 absolute bind locator is never ownership authority. There is no compatibility
 socket, alternate token, hot rotation, listener factory or server-side path
-fallback. No part of this Local API contract is implemented at `497ecfe4`.
+fallback.
+
+The six-commit candidate through source SHA `57c22f39` received a fresh
+independent **ALLOW** after two earlier review/repair rounds and is integrated
+through canonical `cb1bdebd`. Accepted connections and entered dispatch are
+joined before Store close; any accepted-transport close uncertainty removes
+that connection from the active join census but quarantines the exact owner,
+keeps a sticky error and retains both Local API and home authority. The exact
+owner may retry transport close, but neither retry nor restored token/socket
+bytes can change the stable home-close result or authorize reuse. This may
+retain authority indefinitely after an irrecoverable same-process close error;
+that is the deliberate fail-closed liveness trade, causally covered by the
+quarantine/Store-close/second-opener test rather than disguised as release.
+
+Darwin has no inode-conditional `unlinkat`. Cleanup therefore performs the
+last descriptor-relative exact identity check immediately before unlink, and
+every unlink syscall error becomes sticky `ErrUncertain`; it never retries or
+rebinds. The held home flock excludes a cooperating second daemon. The narrow
+same-EUID final-stat-to-unlink race is documented threat-model residue, not a
+claimed compare-and-unlink primitive.
+
+On canonical `cb1bdebd`, all five affected normal packages passed
+(`install 8.030s`, `api 8.153s`, `factoryctl 3.072s`, `daemon 26.968s`, `e2e
+0.959s`); focused vet passed; Linux compile-only passed for the four packages
+that have Linux files; and all five race packages passed (`install 92.881s`,
+`api 93.017s`, `factoryctl 30.563s`, `daemon 120.806s`, `e2e 1.849s`). The
+first Linux command also named Darwin-only `internal/e2e` and failed only with
+“build constraints exclude all Go files”; the corrected compile-only command
+excluded that package and passed. No live home/socket/service/provider was
+used.
 
 #### Corrected Change disposition and descriptor contract (planned)
 
@@ -361,8 +390,8 @@ than being silently abandoned.
 
 #### Exact dependency order from this checkpoint
 
-1. Implement and independently review the corrected install-owned Local API
-   endpoint and authority contract.
+1. The corrected install-owned Local API endpoint and authority contract is
+   integrated and independently reviewed through `cb1bdebd`.
 2. Implement and independently review `RuntimeParent`; reserve
    `factory.sock` and remove path/F_GETPATH authority before shared runner
    changes.
