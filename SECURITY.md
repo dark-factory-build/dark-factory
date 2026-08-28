@@ -12,7 +12,7 @@ security fixes.
 
 ## Current freeze
 
-Live use remains frozen until an independent exact-main boot review passes.
+Live use remains frozen until an independent exact-head boot review passes.
 
 ### Go hard-cutover planning authority
 
@@ -192,9 +192,10 @@ labels are reported as unresolved rather than touched. A run remains visibly
 
 Planned Go uses one concrete `internal/provider.Build(Request) (Launch, error)`
 boundary. Admission freezes provider, optional model, and optional reasoning
-effort only. After admission, `Build` resolves and commits one exact native
-executable/configuration/auth launch from daemon-sealed sources, returning only
-that absolute executable, ordered argv, and complete ordered environment. The
+effort only. After admission, the daemon resolves and seals the exact
+`Installation` and native executable/configuration/auth launch facts. `Build`
+consumes and revalidates that sealed input, returning only that absolute
+executable, ordered argv, and complete ordered environment. The
 runner owns the descriptor-bound Change cwd, fresh interactive PTY, input,
 process group, wait/reap, output and cleanup. Provider choice is unrestricted
 interactive authority in V1; no bounded permission profile is persisted or

@@ -1,6 +1,6 @@
 # Safe kernel contract and boot proof
 
-Live use remains frozen until an independent exact-main boot review passes.
+Live use remains frozen until an independent exact-head boot review passes.
 
 This document records the enduring kernel contract and the causal proof needed
 for that review. It is not a merge diary. GitHub owns issue and pull-request
@@ -292,9 +292,10 @@ reclaims the descendant on its own even if the test process is killed
 outright. They never address the operator home, socket, job, credentials, or
 paid provider subscription.
 
-## Exact-main boot gate
+## Exact-head boot gate
 
-The independent reviewer must inspect one exact `main` commit and confirm:
+The independent reviewer must inspect one exact integration-target commit and
+confirm:
 
 - the run phase/outcome contract is the only work and terminalization
   authority;

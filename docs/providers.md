@@ -8,11 +8,13 @@ instructions for the cutover. V1 has one concrete provider boundary:
 func Build(Request) (Launch, error)
 ```
 
-`Build` constructs one launch from provider/model/effort frozen by admission and
-from daemon-sealed executable/configuration/auth sources resolved after
-admission. `Launch` contains only one exact absolute executable, one ordered
-argv, and one complete ordered environment. It cannot choose a provider,
-source path, working directory, authority, credential, or lifecycle result.
+Admission freezes provider/model/effort. After admission the daemon resolves and
+seals one `Installation` and the other executable/configuration/auth launch
+facts. `Build` consumes and revalidates that sealed input; it need not perform
+locator discovery itself. `Launch` contains only one exact absolute executable,
+one ordered argv, and one complete ordered environment. It cannot choose a
+provider, source path, working directory, authority, credential, or lifecycle
+result.
 The runner owns the already-open descriptor-bound Change cwd, fresh interactive
 PTY, input, process group, wait/reap, output, and cleanup. `Build` is the only
 provider boundary; there is no registry, plugin, profile, fallback, or
@@ -43,12 +45,13 @@ launch table. No paid session is part of this proof.
 
 Admission freezes provider, optional model and optional reasoning effort in the
 Run. It does not commit executable, version, or digest fields. After admission,
-`Build` resolves and commits the exact native executable/configuration/auth
-launch facts from daemon-sealed sources. Immediately before provider release,
-the daemon/runner revalidates those facts and the final Change descriptor
-identity, generated-config path, and config digest. A changed, missing,
-non-regular, or ambiguous object fails closed. PATH lookup is never executable
-authority; unavailable resolution maps to typed `FailureSpawn`.
+the daemon resolves and seals the exact `Installation` and native
+executable/configuration/auth launch facts. `Build` consumes and revalidates
+that sealed input; immediately before provider release, the daemon/runner
+revalidates it and the final Change descriptor identity, generated-config path,
+and config digest. A changed, missing, non-regular, or ambiguous object fails
+closed. PATH lookup is never executable authority; unavailable resolution maps
+to typed `FailureSpawn`.
 
 The shell launch is exactly:
 
@@ -78,6 +81,9 @@ Codex 0.149.0:
 ```
 
 Optional pairs are emitted in the shown order and are omitted independently.
+In shell candidate `1ff2e2e6`, `Installation` construction precedes `Build`,
+but both occur post-admission; integration may refine that internal ordering
+without moving either operation before admission.
 There is no trailing prompt argument: the interactive PTY is the only task
 input. A future reviewed version may replace a template only after its
 metadata/help and fake-witness tests prove the same properties.

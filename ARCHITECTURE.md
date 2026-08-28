@@ -15,6 +15,8 @@ Local API, and browser services. This documentation candidate is not that
 shipped integration: corrected Change/global-admission/provider integration
 remains pending. The shell package at `1ff2e2e6` is a separate unintegrated
 candidate, not canonical or shipped; Claude and Codex remain blocked.
+Manual integration into that target is required, followed by a separate
+exact-head review; this document does not authorize a merge.
 
 The complete design and causal proof matrix live in
 [`docs/development/SAFE_KERNEL_REFACTOR.md`](docs/development/SAFE_KERNEL_REFACTOR.md).
@@ -255,10 +257,11 @@ exactly `/bin/sh -s`; Claude Code and Codex are blocked in this candidate
 pending exact integration and fake-witness review. The schema and wire contract
 contain no permission profile or bounded-authority field. Admission freezes
 provider, optional model, and optional reasoning effort only. After admission,
-`Build` resolves and commits the exact native executable/configuration/auth
-facts from daemon-sealed sources, then immediately before release revalidates
-those facts and the final Change/config identity; these are not admission
-schema fields. An unsupported mapping or missing, changed, or inaccessible
+the daemon resolves and seals the exact `Installation` and native
+executable/configuration/auth facts. `Build` consumes and revalidates that
+sealed input; immediately before release the daemon/runner revalidates those
+facts and the final Change/config identity. These are not admission schema
+fields. An unsupported mapping or missing, changed, or inaccessible
 executable/configuration/auth is typed post-admission `FailureSpawn`, never
 queue ineligibility. Whole-provider API/model network access is not claimed to
 be constrained by this command contract.

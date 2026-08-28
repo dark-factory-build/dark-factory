@@ -32,15 +32,20 @@ only after the revised web/PTY gate passes.
 
 ### Candidate and integration status
 
-This document is the docs candidate at `05d3bef7`, based on the old Go source
-base. It does not claim that the corrected Change, global admission, or
-provider integration is implemented or shipped. Integration-target evidence at
-`359d46a3` includes production `factoryd` composition and ownership of
-`OperationalHome`, `Store`, `RuntimeParent`, the Local API, and browser
-services; that evidence is not retroactively an implementation claim for this
-candidate. The shell package at `1ff2e2e6` is a separate unintegrated
-candidate, not canonical or shipped. Claude and Codex remain blocked pending
-the exact provider integration and witness review.
+This document is based on the old Go source. The reviewed predecessor history
+contains `05d3bef7` and `cac06b60`; this record intentionally does not embed a
+current commit SHA, because that would become stale when this repair is
+committed. The exact current candidate is identified by external Git review,
+and the final SHA is recorded after integration. The corrected Change, global
+admission, and provider integration are not claimed implemented or shipped.
+Integration-target evidence at `359d46a3` includes production `factoryd`
+composition and ownership of `OperationalHome`, `Store`, `RuntimeParent`, the
+Local API, and browser services; that evidence is not retroactively an
+implementation claim for this old-base candidate. The shell package at
+`1ff2e2e6` is a separate unintegrated candidate, not canonical or shipped.
+Claude and Codex remain blocked pending exact provider integration and witness
+review. This worktree is not a three-way merge target: manual integration is
+required, followed by a separate exact-head review.
 
 ### Redirection starting point and branch inventory
 
@@ -85,16 +90,16 @@ Read-only redirection audits were assigned without overlapping writes:
 Their concrete conclusions are incorporated below. The revised plan gate is
 complete; the exact current-head work graph below now governs production work.
 
-### Exact docs-candidate checkpoint (2026-08-28, `05d3bef7`)
+### Docs-candidate checkpoint (2026-08-28; predecessor history)
 
 This is the docs-candidate status checkpoint. Later sections retain the exact
 evidence and decisions available at their named heads, but cannot make an
 older candidate or test result current.
 
-- This docs candidate is `05d3bef7059c9c1347c9cee52d128cc4c85bb42d` on the
-  unpublished `go-change-contract-recovery-docs` branch. It is based on an old
-  Go source head and does not claim corrected Change, global-admission, or
-  provider integration.
+- This docs candidate is based on an old Go source head in the unpublished
+  `go-change-contract-recovery-docs` worktree. Reviewed predecessor commits
+  are `05d3bef7` and `cac06b60`; the current candidate SHA is intentionally
+  supplied by external exact Git review rather than embedded here.
 - Integration-target evidence is `359d46a3`: it contains production `factoryd`
   composition and `OperationalHome`/`Store`/`RuntimeParent`/Local API/browser
   ownership. That evidence is a separate target, not code shipped by this
@@ -174,9 +179,13 @@ or database reference; the raw connector owner is the smaller effective
 authority. There is no repository layer, reconnect fallback, generic pool
 framework or second transaction pattern.
 
-#### Corrected local API authority boundary (planned)
+#### Corrected local API authority boundary (historical at `497ecfe4`; superseded by `359d46a3`)
 
-The earlier `c732f103` proposal to let `internal/api` bind the Unix socket from
+This subsection records the planned/no-implementation status at old head
+`497ecfe4`. The later integration target `359d46a3` contains production
+`factoryd` composition with Local API and `RuntimeParent` ownership; that target
+status is recorded above and is not retroactively attributed to this old-base
+docs candidate. The earlier `c732f103` proposal to let `internal/api` bind the Unix socket from
 a capability is superseded. `OpenLocalAPI` lives in `internal/install` and owns
 the fixed endpoint lifecycle, including create/bind, exact socket identity,
 mode, stale-socket decision and removal. `internal/api` owns only the bounded
@@ -204,7 +213,7 @@ across the probe and exact `ECONNREFUSED`. A live peer, `EPERM`, changed
 identity, malformed object or any ambiguous response is retained. Darwin's
 absolute bind locator is never ownership authority. There is no compatibility
 socket, alternate token, hot rotation, listener factory or server-side path
-fallback. No part of this Local API contract is implemented at `497ecfe4`.
+fallback. No part of this Local API contract was implemented at `497ecfe4`.
 
 #### Global transactional admission contract (planned; implementation gate)
 
@@ -1182,7 +1191,8 @@ loop or hard cutover exists at `c732f103`.
 
 This checkpoint superseded the earlier branch-inventory table when it was
 written. It remains historical evidence only; the `497ecfe4` checkpoint above
-contains the current status, corrected Change contract and dependency order.
+contains the then-current historical status, corrected Change contract and
+dependency order.
 
 - Source head: `25eb8ea47a63ab0e68ad41bc1bf35a71aa233db8`
   on branch `go-hard-cutover`, unpublished and 378 local commits ahead of the
@@ -3708,13 +3718,15 @@ filesystem, process, socket and network effects with a real OS witness.
 
 `Build` cannot select authority, a source path, a working directory, a
 credential, a lifecycle result or a fallback. Admission freezes only provider,
-optional model and optional reasoning effort. After admission, `Build` resolves
-and commits the exact native executable/configuration/auth launch facts from
-daemon-sealed sources, and revalidates those facts plus the final Change
-descriptor/config identity and digest immediately before provider release. No
+optional model and optional reasoning effort. After admission, the daemon
+resolves and seals the exact `Installation` and native
+executable/configuration/auth launch facts. `Build` consumes and revalidates
+that sealed input; immediately before provider release, the daemon/runner
+revalidates it plus the final Change descriptor/config identity and digest. No
 executable, version, or digest is an admission schema field. Missing or
 changed executable, configuration or auth is typed `FailureSpawn` after
-admission.
+admission. In shell candidate `1ff2e2e6`, `Installation` construction precedes
+`Build`; both are post-admission and integration may refine that ordering.
 
 Shell is exactly `/bin/sh` with argv `["/bin/sh", "-s"]`. Claude Code and
 Codex use an ordered, version-sealed argv containing only the reviewed native
@@ -3998,8 +4010,9 @@ No `exec.CommandContext` call, context cancellation, or goroutine completion
 is accepted as proof of process absence.
 
 On Darwin, provider activation uses identity-checked pathname `execve` from
-the already registered gate. After admission, `provider.Build` resolves the
-operator-facing executable to one canonical native Mach-O target and freezes
+the already registered gate. After admission, the daemon resolves and seals
+the `Installation`; `provider.Build` consumes and revalidates that exact input
+and freezes the
 its absolute path, device/inode, owner, complete mode, bounded size, nanosecond
 timestamps, SHA-256, running-architecture support, argv, environment, working
 directory identity, and exact PTY/control descriptor setup before readiness.
@@ -5511,9 +5524,10 @@ Exact provider `request-human` proof on integrated head `d4ce713`:
 - Historical evidence from that old integrated slice recorded the exact
   absolute native `factoryctl` helper before provider execution. The current
   V1 rule supersedes its timing: admission freezes provider/model/effort only;
-  post-admission `provider.Build` resolves, commits, and revalidates the helper
-  launch facts immediately before release. The provider receives only that
-  locator; its cleared `PATH` remains `/usr/bin:/bin`.
+  post-admission the daemon resolves/seals the helper `Installation`, and
+  `provider.Build` consumes and revalidates those launch facts immediately
+  before release. The provider receives only that locator; its cleared `PATH`
+  remains `/usr/bin:/bin`.
 - A deterministic shell-provider test invokes the exact helper twice with one
   idempotency identity and observes exactly one durable HumanRequest, with no
   provider effect before the final release stage. Independent review returned
