@@ -89,7 +89,7 @@ test("verification rejects stale protocol identity and changed tarball bytes", (
     const staleProtocol = structuredClone(original);
     staleProtocol.protocol.version = 2;
     writeFileSync(path, `${JSON.stringify(staleProtocol, null, 2)}\n`);
-    expectFailure(() => run("verify", output), "protocol provenance is stale or forged");
+    expectFailure(() => run("verify", output), "manifest protocol is invalid");
     writeFileSync(path, `${JSON.stringify(original, null, 2)}\n`);
 
     const stalePackage = structuredClone(original);
