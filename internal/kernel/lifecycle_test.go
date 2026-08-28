@@ -67,26 +67,20 @@ func TestCompletionExitOrderPreservesFirstOutcomeAndExactExit(t *testing.T) {
 		if err != nil || observed.Proposal == nil || !observed.Proposal.equal(proposal) || observed.RunnerExit == nil || !observed.RunnerExit.equal(exit) {
 			t.Fatalf("observed = %+v, %v", observed, err)
 		}
-		conflictExit, _ := NewProcessExitCode(2, 1, mustTime(t, 41))
-		if _, err := store.ObserveRunnerExit(context.Background(), run.ID, observed.Revision, registeredProcessIdentity(t, store, run.ID, ResourceRunnerProcess), conflictExit, mustTime(t, 43)); !errors.Is(err, ErrConflict) {
-			t.Fatalf("conflicting exit = %v", err)
-		}
 	})
 	t.Run("exit then completion", func(t *testing.T) {
 		store, run, keys := runningOrchestratorRun(t)
 		defer store.Close()
-		exit, _ := NewProcessExitSignal(1, 9, mustTime(t, 40))
-		runnerIdentity := registeredProcessIdentity(t, store, run.ID, ResourceRunnerProcess)
-		if _, err := store.ObserveRunnerExit(context.Background(), run.ID, run.Revision, runnerIdentity, exit, mustTime(t, 41)); !errors.Is(err, ErrConflict) {
-			t.Fatalf("split exit-first transition = %v", err)
-		}
+		_ = run
+		// A runner exit can no longer be observed as a standalone lifecycle
+		// transition; the typed outcome always wins the running run.
 		success, _ := NewSuccessProposal("too late")
 		observed, err := store.ProposeAttemptOutcome(context.Background(), keys.AttemptDigest, success, mustTime(t, 42))
 		if err != nil {
-			t.Fatalf("completion after rejected split exit = %v", err)
+			t.Fatalf("completion = %v", err)
 		}
 		if observed.Proposal == nil || !observed.Proposal.equal(success) || observed.RunnerExit != nil {
-			t.Fatalf("rejected split exit changed first outcome = %+v", observed)
+			t.Fatalf("completion changed outcome = %+v", observed)
 		}
 	})
 }
@@ -738,7 +732,7 @@ func TestConcurrentCompletionAndExitHaveOneImmutableWinner(t *testing.T) {
 	}()
 	go func() {
 		<-start
-		_, err := second.ObserveRunnerExit(context.Background(), run.ID, run.Revision, registeredProcessIdentity(t, store, run.ID, ResourceRunnerProcess), exit, mustTime(t, 41))
+		_, err := second.ObserveProviderExit(context.Background(), run.ID, run.Revision, registeredProcessIdentity(t, store, run.ID, ResourceProviderProcess), exit, mustTime(t, 41))
 		errs <- err
 	}()
 	close(start)
@@ -759,10 +753,10 @@ func TestConcurrentCompletionAndExitHaveOneImmutableWinner(t *testing.T) {
 		t.Fatalf("race run = %+v", fresh)
 	}
 	if fresh.Proposal.kind == OutcomeSucceeded {
-		if fresh.RunnerExit != nil {
+		if fresh.ProviderExit != nil {
 			t.Fatalf("lost exit was appended: %+v", fresh)
 		}
-	} else if fresh.Proposal.code != FailureRunnerExit || fresh.RunnerExit == nil {
+	} else if fresh.Proposal.code != FailureProviderExit || fresh.ProviderExit == nil {
 		t.Fatalf("invalid exit winner = %+v", fresh)
 	}
 }

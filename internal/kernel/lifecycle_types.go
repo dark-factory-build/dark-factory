@@ -370,7 +370,6 @@ const (
 	FailureActivation
 	FailureSource
 	FailureProviderExit
-	FailureRunnerExit
 	FailureProtocol
 	FailureInternal
 	FailureAttempt
@@ -386,8 +385,6 @@ func parseFailureCode(value string) (FailureCode, error) {
 		return FailureSource, nil
 	case "provider_exit":
 		return FailureProviderExit, nil
-	case "runner_exit":
-		return FailureRunnerExit, nil
 	case "protocol":
 		return FailureProtocol, nil
 	case "internal":
@@ -409,8 +406,6 @@ func (value FailureCode) String() string {
 		return "source"
 	case FailureProviderExit:
 		return "provider_exit"
-	case FailureRunnerExit:
-		return "runner_exit"
 	case FailureProtocol:
 		return "protocol"
 	case FailureInternal:

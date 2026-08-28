@@ -827,12 +827,8 @@ func TestHumanQuestionProcessExitInvalidationFailureRollsBackBothTransitions(t *
 				t.Fatal(err)
 			}
 			exit, _ := NewProcessExitCode(1, 7, mustTime(t, 402))
-			var observeErr error
-			if provider {
-				_, observeErr = store.ObserveProviderExit(ctx, run.ID, run.Revision, registeredProcessIdentity(t, store, run.ID, ResourceProviderProcess), exit, mustTime(t, 403))
-			} else {
-				_, observeErr = store.ObserveRunnerExit(ctx, run.ID, run.Revision, registeredProcessIdentity(t, store, run.ID, ResourceRunnerProcess), exit, mustTime(t, 403))
-			}
+			_ = provider
+			_, observeErr := store.ObserveProviderExit(ctx, run.ID, run.Revision, registeredProcessIdentity(t, store, run.ID, ResourceProviderProcess), exit, mustTime(t, 403))
 			if observeErr == nil {
 				t.Fatal("process exit accepted failed request invalidation")
 			}

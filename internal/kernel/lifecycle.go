@@ -914,30 +914,10 @@ func (store *Store) enterFinalizing(ctx context.Context, tx *writeTx, run Run, e
 	return run, nil
 }
 
-type processExitOwner uint8
-
-const (
-	providerExitOwner processExitOwner = iota + 1
-	runnerExitOwner
-)
-
+// ObserveProviderExit consumes the live owner's exact provider Wait result.
+// Runner exits flow only through the atomic result/absence release edges.
 func (store *Store) ObserveProviderExit(ctx context.Context, runID RunID, expected Revision, identity ResourceIdentity, exit ProcessExit, at UnixMillis) (Run, error) {
-	return store.observeProcessExit(ctx, runID, expected, identity, exit, at, providerExitOwner)
-}
-
-func (store *Store) ObserveRunnerExit(ctx context.Context, runID RunID, expected Revision, identity ResourceIdentity, exit ProcessExit, at UnixMillis) (Run, error) {
-	if runID.zero() || !identity.validFor(ResourceRunnerProcess) || !exit.valid() || at.Int64() < exit.at.Int64() {
-		return Run{}, fmt.Errorf("%w: invalid process exit observation", ErrInvalidValue)
-	}
-	return Run{}, ErrConflict
-}
-
-func (store *Store) observeProcessExit(ctx context.Context, runID RunID, expected Revision, identity ResourceIdentity, exit ProcessExit, at UnixMillis, owner processExitOwner) (Run, error) {
-	wantKind := ResourceRunnerProcess
-	if owner == providerExitOwner {
-		wantKind = ResourceProviderProcess
-	}
-	if runID.zero() || !identity.validFor(wantKind) || !exit.valid() || at.Int64() < exit.at.Int64() {
+	if runID.zero() || !identity.validFor(ResourceProviderProcess) || !exit.valid() || at.Int64() < exit.at.Int64() {
 		return Run{}, fmt.Errorf("%w: invalid process exit observation", ErrInvalidValue)
 	}
 	tx, err := store.beginValidatedWrite(ctx)
@@ -959,17 +939,14 @@ func (store *Store) observeProcessExit(ctx context.Context, runID RunID, expecte
 	if err != nil {
 		return Run{}, tx.Rollback(err)
 	}
-	activatedAt, matched := exitIdentityMatches(resources, owner, identity)
+	activatedAt, matched := exitIdentityMatches(resources, identity)
 	if !matched {
 		return Run{}, tx.Rollback(ErrConflict)
 	}
 	if exit.at.Int64() < activatedAt.Int64() {
 		return Run{}, tx.Rollback(ErrConflict)
 	}
-	existing := run.RunnerExit
-	if owner == providerExitOwner {
-		existing = run.ProviderExit
-	}
+	existing := run.ProviderExit
 	if existing != nil {
 		if !existing.equal(exit) {
 			return Run{}, tx.Rollback(ErrConflict)
@@ -989,20 +966,10 @@ func (store *Store) observeProcessExit(ctx context.Context, runID RunID, expecte
 		if err := requireFinalizingTime(ctx, tx.connection, run, at); err != nil {
 			return Run{}, tx.Rollback(err)
 		}
-		failureCode, detail := FailureRunnerExit, "runner exited before an attempt outcome"
-		if owner == providerExitOwner {
-			failureCode, detail = FailureProviderExit, "provider exited before an attempt outcome"
-		}
-		proposal, _ := NewFailureProposal(failureCode, detail)
+		proposal, _ := NewFailureProposal(FailureProviderExit, "provider exited before an attempt outcome")
 		kind, proposalCode, proposalDetail, result := proposalSQL(proposal)
-		var updated sql.Result
-		if owner == providerExitOwner {
-			updated, err = tx.connection.ExecContext(ctx, `UPDATE runs SET phase = 'finalizing', proposal_kind = ?, proposal_code = ?, proposal_detail = ?, proposal_result = ?, credential_revoked_at_ms = ?, finalizing_at_ms = ?, provider_exit_kind = ?, provider_exit_sequence = ?, provider_exit_code = ?, provider_exit_signal = ?, provider_exit_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase IN ('admitted', 'running') AND proposal_kind IS NULL AND provider_exit_kind IS NULL AND revision = ?`,
-				kind, proposalCode, proposalDetail, result, at.Int64(), at.Int64(), exitKind, exit.sequence, code, signal, exit.at.Int64(), at.Int64(), run.ID.Bytes(), expected.Int64())
-		} else {
-			updated, err = tx.connection.ExecContext(ctx, `UPDATE runs SET phase = 'finalizing', proposal_kind = ?, proposal_code = ?, proposal_detail = ?, proposal_result = ?, credential_revoked_at_ms = ?, finalizing_at_ms = ?, runner_exit_kind = ?, runner_exit_sequence = ?, runner_exit_code = ?, runner_exit_signal = ?, runner_exit_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase IN ('admitted', 'running') AND proposal_kind IS NULL AND runner_exit_kind IS NULL AND revision = ?`,
-				kind, proposalCode, proposalDetail, result, at.Int64(), at.Int64(), exitKind, exit.sequence, code, signal, exit.at.Int64(), at.Int64(), run.ID.Bytes(), expected.Int64())
-		}
+		updated, err := tx.connection.ExecContext(ctx, `UPDATE runs SET phase = 'finalizing', proposal_kind = ?, proposal_code = ?, proposal_detail = ?, proposal_result = ?, credential_revoked_at_ms = ?, finalizing_at_ms = ?, provider_exit_kind = ?, provider_exit_sequence = ?, provider_exit_code = ?, provider_exit_signal = ?, provider_exit_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase IN ('admitted', 'running') AND proposal_kind IS NULL AND provider_exit_kind IS NULL AND revision = ?`,
+			kind, proposalCode, proposalDetail, result, at.Int64(), at.Int64(), exitKind, exit.sequence, code, signal, exit.at.Int64(), at.Int64(), run.ID.Bytes(), expected.Int64())
 		if err := requireOneRow(updated, err); err != nil {
 			return Run{}, tx.Rollback(err)
 		}
@@ -1026,12 +993,7 @@ func (store *Store) observeProcessExit(ctx context.Context, runID RunID, expecte
 		}
 		pending = append(pending, requestInvalidations...)
 	} else if run.Phase == RunFinalizing {
-		var updated sql.Result
-		if owner == providerExitOwner {
-			updated, err = tx.connection.ExecContext(ctx, `UPDATE runs SET provider_exit_kind = ?, provider_exit_sequence = ?, provider_exit_code = ?, provider_exit_signal = ?, provider_exit_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase = 'finalizing' AND provider_exit_kind IS NULL AND revision = ?`, exitKind, exit.sequence, code, signal, exit.at.Int64(), at.Int64(), run.ID.Bytes(), expected.Int64())
-		} else {
-			updated, err = tx.connection.ExecContext(ctx, `UPDATE runs SET runner_exit_kind = ?, runner_exit_sequence = ?, runner_exit_code = ?, runner_exit_signal = ?, runner_exit_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase = 'finalizing' AND runner_exit_kind IS NULL AND revision = ?`, exitKind, exit.sequence, code, signal, exit.at.Int64(), at.Int64(), run.ID.Bytes(), expected.Int64())
-		}
+		updated, err := tx.connection.ExecContext(ctx, `UPDATE runs SET provider_exit_kind = ?, provider_exit_sequence = ?, provider_exit_code = ?, provider_exit_signal = ?, provider_exit_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase = 'finalizing' AND provider_exit_kind IS NULL AND revision = ?`, exitKind, exit.sequence, code, signal, exit.at.Int64(), at.Int64(), run.ID.Bytes(), expected.Int64())
 		if err := requireOneRow(updated, err); err != nil {
 			return Run{}, tx.Rollback(err)
 		}
@@ -1054,8 +1016,7 @@ func (store *Store) observeProcessExit(ctx context.Context, runID RunID, expecte
 	return run, nil
 }
 
-func exitIdentityMatches(resources []Resource, owner processExitOwner, identity ResourceIdentity) (UnixMillis, bool) {
-	runnerMatched := false
+func exitIdentityMatches(resources []Resource, identity ResourceIdentity) (UnixMillis, bool) {
 	providerProcessMatched := false
 	providerGroupMatched := false
 	var activatedAt UnixMillis
@@ -1064,30 +1025,21 @@ func exitIdentityMatches(resources []Resource, owner processExitOwner, identity 
 		if resource.State == ResourceDeclared || !resourceIdentityEqual(resource.Identity, identity) {
 			continue
 		}
-		matched := false
 		switch resource.Kind {
-		case ResourceRunnerProcess:
-			runnerMatched = true
-			matched = owner == runnerExitOwner
 		case ResourceProviderProcess:
 			providerProcessMatched = true
-			matched = owner == providerExitOwner
 		case ResourceProviderGroup:
 			providerGroupMatched = true
-			matched = owner == providerExitOwner
+		default:
+			continue
 		}
-		if matched {
-			if resource.ActivatedAt == nil || activationFound && *resource.ActivatedAt != activatedAt {
-				return UnixMillis{}, false
-			}
-			activatedAt = *resource.ActivatedAt
-			activationFound = true
+		if resource.ActivatedAt == nil || activationFound && *resource.ActivatedAt != activatedAt {
+			return UnixMillis{}, false
 		}
+		activatedAt = *resource.ActivatedAt
+		activationFound = true
 	}
-	if owner == providerExitOwner {
-		return activatedAt, providerProcessMatched && providerGroupMatched && activationFound
-	}
-	return activatedAt, runnerMatched && activationFound
+	return activatedAt, providerProcessMatched && providerGroupMatched && activationFound
 }
 
 func (store *Store) FinalizeRun(ctx context.Context, runID RunID, expected Revision, at UnixMillis) (Run, error) {

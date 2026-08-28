@@ -22,9 +22,9 @@ func TestRecoveredRunnerAbsenceRequiresRegisteredRunner(t *testing.T) {
 	if _, err := NewProcessExitRecoveredAbsence(0, mustTime(t, 20)); !errors.Is(err, ErrInvalidValue) {
 		t.Fatalf("zero sequence = %v", err)
 	}
-	if _, err := store.ObserveRunnerExit(context.Background(), run.ID, run.Revision, processIdentity(t, 91), exit, mustTime(t, 21)); !errors.Is(err, ErrConflict) {
-		t.Fatalf("unregistered recovered absence = %v", err)
-	}
+	// No generic runner-exit observation exists: recovered absence can only
+	// enter through the atomic release edges, so an unregistered absence has
+	// no seam to probe and the run is asserted unchanged below.
 	fresh, found, err := store.Run(context.Background(), run.ID)
 	if err != nil || !found || fresh.Phase != RunAdmitted || fresh.Revision != run.Revision || fresh.RunnerExit != nil {
 		t.Fatalf("rejected observation footprint = %+v, found=%v, err=%v", fresh, found, err)
