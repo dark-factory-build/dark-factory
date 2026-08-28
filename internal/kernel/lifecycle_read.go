@@ -177,9 +177,6 @@ func scanRun(scanner rowScanner) (Run, bool, error) {
 func validateRunChronology(run Run) error {
 	admitted := run.AdmittedAt.Int64()
 	updated := run.UpdatedAt.Int64()
-	if run.Phase == RunAdmitted && updated != admitted {
-		return fmt.Errorf("%w: admitted run update time changed", ErrCorruptState)
-	}
 	if run.RunningAt != nil && (run.RunningAt.Int64() < admitted || run.RunningAt.Int64() > updated) {
 		return fmt.Errorf("%w: invalid running time", ErrCorruptState)
 	}
@@ -358,6 +355,10 @@ func scanResource(scanner rowScanner) (Resource, bool, error) {
 	case ResourceDeclared:
 		if resource.UpdatedAt.Int64() != resource.DeclaredAt.Int64() || resource.ReleasedAt != nil || resource.ActivatedAt != nil || reason.Valid || !resource.Identity.Empty() {
 			return Resource{}, false, fmt.Errorf("%w: inconsistent declared resource", ErrCorruptState)
+		}
+	case ResourceStarting:
+		if kind != ResourceRunnerProcess || resource.ReleasedAt != nil || resource.ActivatedAt != nil || reason.Valid || !resource.Identity.Empty() {
+			return Resource{}, false, fmt.Errorf("%w: inconsistent starting resource", ErrCorruptState)
 		}
 	case ResourceReleasing:
 		if resource.ReleasedAt != nil || reason.Valid || (resource.ActivatedAt == nil) != resource.Identity.Empty() {

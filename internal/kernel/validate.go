@@ -574,15 +574,25 @@ func loadRunRelationships(ctx context.Context, connection *sql.Conn, run Run) (r
 		return runRelationships{}, fmt.Errorf("%w: resources do not match run phase", ErrCorruptState)
 	}
 	var providerProcessIdentity, providerGroupIdentity ResourceIdentity
+	var providerProcessState, providerGroupState ResourceState
+	var providerProcessReason, providerGroupReason string
+	var providerProcessReleased, providerGroupReleased *UnixMillis
 	for _, resource := range resources {
 		switch resource.Kind {
 		case ResourceProviderProcess:
 			providerProcessIdentity = resource.Identity
+			providerProcessState = resource.State
+			providerProcessReason = resource.UnresolvedReason
+			providerProcessReleased = resource.ReleasedAt
 		case ResourceProviderGroup:
 			providerGroupIdentity = resource.Identity
+			providerGroupState = resource.State
+			providerGroupReason = resource.UnresolvedReason
+			providerGroupReleased = resource.ReleasedAt
 		}
 	}
-	if !resourceIdentityEqual(providerProcessIdentity, providerGroupIdentity) {
+	if !resourceIdentityEqual(providerProcessIdentity, providerGroupIdentity) || providerProcessState != providerGroupState || providerProcessReason != providerGroupReason ||
+		(providerProcessReleased == nil) != (providerGroupReleased == nil) || providerProcessReleased != nil && *providerProcessReleased != *providerGroupReleased {
 		return runRelationships{}, fmt.Errorf("%w: provider process/group identity is not atomic", ErrCorruptState)
 	}
 	var providerProcessActivation, providerGroupActivation *UnixMillis
@@ -655,6 +665,10 @@ func validateRunTerminalSession(ctx context.Context, connection *sql.Conn, run R
 		if session.State != TerminalSessionActive {
 			return TerminalSession{}, fmt.Errorf("%w: running run terminal session is not active", ErrCorruptState)
 		}
+	case RunFinalizing:
+		if session.State != TerminalSessionReleasing && session.State != TerminalSessionUnresolved && session.State != TerminalSessionClosed {
+			return TerminalSession{}, fmt.Errorf("%w: finalizing run terminal session has invalid phase", ErrCorruptState)
+		}
 	case RunTerminal:
 		if session.State != TerminalSessionClosed {
 			return TerminalSession{}, fmt.Errorf("%w: terminal run terminal session is not closed", ErrCorruptState)
@@ -664,6 +678,18 @@ func validateRunTerminalSession(ctx context.Context, connection *sql.Conn, run R
 }
 
 func validateRunResourceChronology(run Run, change *Change, resources []Resource) error {
+	if run.Phase == RunAdmitted && run.UpdatedAt != run.AdmittedAt {
+		var runner *Resource
+		for index := range resources {
+			if resources[index].Kind == ResourceRunnerProcess {
+				runner = &resources[index]
+				break
+			}
+		}
+		if runner == nil || (runner.State != ResourceStarting && runner.State != ResourceActive) || runner.Revision != run.Revision || runner.UpdatedAt != run.UpdatedAt {
+			return fmt.Errorf("%w: admitted run update lacks exact runner-start transition", ErrCorruptState)
+		}
+	}
 	if run.Phase == RunRunning {
 		if run.RunningAt == nil {
 			return fmt.Errorf("%w: running run lacks running time", ErrCorruptState)
@@ -934,7 +960,7 @@ func resourcesMatchRunPhase(phase RunPhase, resources []Resource) bool {
 	for _, resource := range resources {
 		switch phase {
 		case RunAdmitted:
-			if resource.State != ResourceDeclared && resource.State != ResourceActive {
+			if resource.State != ResourceDeclared && resource.State != ResourceActive && (resource.Kind != ResourceRunnerProcess || resource.State != ResourceStarting) {
 				return false
 			}
 		case RunRunning:

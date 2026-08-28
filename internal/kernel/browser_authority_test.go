@@ -191,8 +191,8 @@ func TestTerminalLeaseGuardsAndPrivateChronology(t *testing.T) {
 	if cleared.LeaseClientID != nil || cleared.LeaseExpiresAt != nil || cleared.LastInputSequence != 0 || cleared.LeaseGeneration != lease.Generation+1 {
 		t.Fatalf("finalization did not revoke lease: %+v", cleared)
 	}
-	if cleared.Revision != session.Revision || cleared.UpdatedAt != session.UpdatedAt {
-		t.Fatalf("finalization lease cleanup changed session lifecycle: before=%v/%v after=%v/%v", session.Revision, session.UpdatedAt, cleared.Revision, cleared.UpdatedAt)
+	if cleared.Revision.Int64() != session.Revision.Int64()+1 || cleared.UpdatedAt.Int64() != 40 || cleared.State != TerminalSessionReleasing {
+		t.Fatalf("finalization did not enter terminal cleanup: before=%v/%v after=%v/%v", session.Revision, session.UpdatedAt, cleared.Revision, cleared.UpdatedAt)
 	}
 	if finalizing.Revision.Int64() != run.Revision.Int64()+1 || finalizing.UpdatedAt.Int64() != 40 {
 		t.Fatalf("finalization run lifecycle = %+v", finalizing)

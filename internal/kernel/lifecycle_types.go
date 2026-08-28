@@ -269,6 +269,7 @@ type TerminalSessionState uint8
 const (
 	TerminalSessionDeclared TerminalSessionState = iota + 1
 	TerminalSessionActive
+	TerminalSessionReleasing
 	TerminalSessionClosed
 	TerminalSessionUnresolved
 )
@@ -279,6 +280,8 @@ func parseTerminalSessionState(value string) (TerminalSessionState, error) {
 		return TerminalSessionDeclared, nil
 	case "active":
 		return TerminalSessionActive, nil
+	case "releasing":
+		return TerminalSessionReleasing, nil
 	case "closed":
 		return TerminalSessionClosed, nil
 	case "unresolved":
@@ -294,6 +297,8 @@ func (value TerminalSessionState) String() string {
 		return "declared"
 	case TerminalSessionActive:
 		return "active"
+	case TerminalSessionReleasing:
+		return "releasing"
 	case TerminalSessionClosed:
 		return "closed"
 	case TerminalSessionUnresolved:
@@ -654,6 +659,7 @@ type ResourceState uint8
 
 const (
 	ResourceDeclared ResourceState = iota + 1
+	ResourceStarting
 	ResourceActive
 	ResourceReleasing
 	ResourceUnresolved
@@ -664,6 +670,8 @@ func parseResourceState(value string) (ResourceState, error) {
 	switch value {
 	case "declared":
 		return ResourceDeclared, nil
+	case "starting":
+		return ResourceStarting, nil
 	case "active":
 		return ResourceActive, nil
 	case "releasing":
@@ -681,6 +689,8 @@ func (value ResourceState) String() string {
 	switch value {
 	case ResourceDeclared:
 		return "declared"
+	case ResourceStarting:
+		return "starting"
 	case ResourceActive:
 		return "active"
 	case ResourceReleasing:
@@ -777,6 +787,115 @@ type Resource struct {
 	ActivatedAt      *UnixMillis
 	UpdatedAt        UnixMillis
 	ReleasedAt       *UnixMillis
+}
+
+// AttemptResult is the bounded, single-use fact authenticated from the exact
+// no-replace result artifact. It deliberately carries no message, timestamp,
+// caller-selected outcome, or filesystem pathname.
+type AttemptResult struct {
+	runID           RunID
+	attemptDigest   AttemptDigest
+	runtimeIdentity ResourceIdentity
+	kind            AttemptResultKind
+	processIdentity ResourceIdentity
+	exit            AttemptResultExit
+}
+
+type AttemptResultKind uint8
+
+const (
+	AttemptInnerNotCreated AttemptResultKind = iota + 1
+	AttemptInnerConverged
+)
+
+func (kind AttemptResultKind) String() string {
+	switch kind {
+	case AttemptInnerNotCreated:
+		return "inner_not_created"
+	case AttemptInnerConverged:
+		return "inner_converged"
+	default:
+		return ""
+	}
+}
+
+type attemptResultExitKind uint8
+
+const (
+	attemptResultExitCode attemptResultExitKind = iota + 1
+	attemptResultExitSignal
+)
+
+// AttemptResultExit is the closed code-or-signal union from the result. Its
+// durable observation time is Store commit metadata and is not runner input.
+type AttemptResultExit struct {
+	kind  attemptResultExitKind
+	value int64
+}
+
+func NewAttemptResultExitCode(code int64) (AttemptResultExit, error) {
+	if code < 0 {
+		return AttemptResultExit{}, fmt.Errorf("%w: invalid attempt result exit code", ErrInvalidValue)
+	}
+	return AttemptResultExit{kind: attemptResultExitCode, value: code}, nil
+}
+
+func NewAttemptResultExitSignal(signal int64) (AttemptResultExit, error) {
+	if signal < 1 {
+		return AttemptResultExit{}, fmt.Errorf("%w: invalid attempt result signal", ErrInvalidValue)
+	}
+	return AttemptResultExit{kind: attemptResultExitSignal, value: signal}, nil
+}
+
+func (exit AttemptResultExit) Code() (int64, bool) {
+	return exit.value, exit.kind == attemptResultExitCode
+}
+
+func (exit AttemptResultExit) Signal() (int64, bool) {
+	return exit.value, exit.kind == attemptResultExitSignal
+}
+
+func (exit AttemptResultExit) valid() bool {
+	return exit.kind == attemptResultExitCode && exit.value >= 0 || exit.kind == attemptResultExitSignal && exit.value > 0
+}
+
+func NewInnerNotCreatedAttemptResult(runID RunID, attemptDigest AttemptDigest, runtimeIdentity ResourceIdentity) (AttemptResult, error) {
+	result := AttemptResult{runID: runID, attemptDigest: attemptDigest, runtimeIdentity: runtimeIdentity, kind: AttemptInnerNotCreated, processIdentity: EmptyResourceIdentity()}
+	if !result.valid() {
+		return AttemptResult{}, fmt.Errorf("%w: invalid inner-not-created result", ErrInvalidValue)
+	}
+	return result, nil
+}
+
+func NewInnerConvergedAttemptResult(runID RunID, attemptDigest AttemptDigest, runtimeIdentity, processIdentity ResourceIdentity, exit AttemptResultExit) (AttemptResult, error) {
+	result := AttemptResult{runID: runID, attemptDigest: attemptDigest, runtimeIdentity: runtimeIdentity, kind: AttemptInnerConverged, processIdentity: processIdentity, exit: exit}
+	if !result.valid() {
+		return AttemptResult{}, fmt.Errorf("%w: invalid inner-converged result", ErrInvalidValue)
+	}
+	return result, nil
+}
+
+func (result AttemptResult) RunID() RunID                      { return result.runID }
+func (result AttemptResult) AttemptDigest() AttemptDigest      { return result.attemptDigest }
+func (result AttemptResult) RuntimeIdentity() ResourceIdentity { return result.runtimeIdentity }
+func (result AttemptResult) Kind() AttemptResultKind           { return result.kind }
+func (result AttemptResult) ProcessIdentity() ResourceIdentity { return result.processIdentity }
+func (result AttemptResult) Exit() (AttemptResultExit, bool) {
+	return result.exit, result.kind == AttemptInnerConverged
+}
+
+func (result AttemptResult) valid() bool {
+	if result.runID.zero() || !result.runtimeIdentity.validFor(ResourceRuntimeRoot) {
+		return false
+	}
+	switch result.kind {
+	case AttemptInnerNotCreated:
+		return result.processIdentity.Empty() && !result.exit.valid()
+	case AttemptInnerConverged:
+		return result.processIdentity.validFor(ResourceProviderProcess) && result.exit.valid()
+	default:
+		return false
+	}
 }
 
 type AdmissionResourceIDs struct {
