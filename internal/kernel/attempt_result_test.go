@@ -564,6 +564,42 @@ func TestAttemptResultPhaseGuardRejectsUnknownAndTerminal(t *testing.T) {
 	}
 }
 
+func TestConsumeAttemptResultRefusesEveryKindWhileRunnerStarting(t *testing.T) {
+	store, run, keys := admittedOrchestratorRun(t)
+	defer store.Close()
+	ctx := context.Background()
+	runtime := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
+	runtimeIdentity, _ := NewPathResourceIdentity(2100, 2101)
+	if _, err := store.ActivateResource(ctx, run.ID, runtime.ID, runtime.Revision, runtimeIdentity, mustTime(t, 20)); err != nil {
+		t.Fatal(err)
+	}
+	runner := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
+	started, _, err := store.BeginRunnerStart(ctx, run.ID, runner.ID, run.Revision, runner.Revision, mustTime(t, 21))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The attempt-runner target cannot execute before ActivateRunner commits,
+	// so no trusted result of any kind can exist while the runner row is
+	// starting; consumption must fail closed without touching state.
+	unregistered, _ := NewInnerUnregisteredConvergedAttemptResult(run.ID, keys.AttemptDigest, keys.ResultProofDigest, runtimeIdentity)
+	exit, _ := NewAttemptResultExitCode(0)
+	converged, _ := NewInnerConvergedAttemptResult(run.ID, keys.AttemptDigest, keys.ResultProofDigest, runtimeIdentity, processIdentity(t, 2102), exit)
+	before, _ := store.Factory(ctx)
+	for name, result := range map[string]AttemptResult{"inner_unregistered_converged": unregistered, "inner_converged": converged} {
+		if _, err := store.ConsumeAttemptResult(ctx, result, started.Revision, mustTime(t, 22)); !errors.Is(err, ErrConflict) {
+			t.Fatalf("%s consumed while runner starting = %v", name, err)
+		}
+	}
+	after, _ := store.Factory(ctx)
+	fresh, found, err := store.Run(ctx, run.ID)
+	if err != nil || !found || before.Head != after.Head || fresh.Phase != RunAdmitted || fresh.Proposal != nil || fresh.Revision != started.Revision {
+		t.Fatalf("starting-state consume mutated durable state: run=%+v head=%d/%d err=%v", fresh, before.Head.Int64(), after.Head.Int64(), err)
+	}
+	if resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess).State != ResourceStarting {
+		t.Fatal("runner left starting state without activation")
+	}
+}
+
 func activateStartedRunner(t *testing.T, store *Store, run Run, seed int64) (Run, ResourceIdentity, ResourceIdentity) {
 	return activateStartedRunnerAt(t, store, run, seed, 20)
 }
