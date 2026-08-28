@@ -128,7 +128,7 @@ function currentSource() {
 }
 
 function packageJson(packageInfo) {
-  return strictJsonFile(join(packageInfo.root, "package.json"), `${packageInfo.name} package.json`);
+  return readJson(join(packageInfo.root, "package.json"));
 }
 
 function strictJsonText(text, label) {
