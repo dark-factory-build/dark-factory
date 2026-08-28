@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/install"
+	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
 type serverReceiveResult struct {
@@ -90,7 +91,11 @@ func startServerReceive(listener *Listener, reply func(Call) Reply) <-chan serve
 		defer cancel()
 		call, err := connection.Receive(ctx)
 		if err == nil && reply != nil {
-			err = connection.Respond(reply(call))
+			var response Reply
+			response, err = connection.Dispatch(reply)
+			if err == nil {
+				err = connection.Respond(response)
+			}
 		}
 		done <- serverReceiveResult{call: call, err: err}
 	}()
@@ -485,22 +490,6 @@ func TestServerFramingDeadlinePeerAndResponseBounds(t *testing.T) {
 		}
 	})
 
-	t.Run("peer prerequisite seam", func(t *testing.T) {
-		listener, socketPath := newAPITestListener(t, bearer)
-		dialed := make(chan *net.UnixConn, 1)
-		go func() {
-			connection, _ := net.DialUnix("unix", nil, &net.UnixAddr{Name: socketPath, Net: "unix"})
-			dialed <- connection
-		}()
-		connection, err := listener.accept(func(net.Conn) error { return ErrInvalidListener })
-		if connection != nil || !errors.Is(err, ErrInvalidListener) {
-			t.Fatalf("foreign peer = %+v, %v", connection, err)
-		}
-		if client := <-dialed; client != nil {
-			_ = client.Close()
-		}
-	})
-
 	t.Run("oversized snapshot becomes fixed too large", func(t *testing.T) {
 		listener, socketPath := newAPITestListener(t, bearer)
 		tasks := make([]TaskSummary, maxSnapshotEntries)
@@ -708,7 +697,7 @@ func TestServerRechecksOperatorTokenAndKeepsPublicValuesPrivate(t *testing.T) {
 	if result := <-attemptDone; !errors.Is(result.err, ErrProtocol) {
 		t.Fatalf("restored poisoned attempt dispatched: %+v, %v", result.call, result.err)
 	}
-	if listener.authority.CheckOperator(bearer[:]) || !errors.Is(listener.authority.Verify(), install.ErrUncertain) {
+	if listener.protocol.CheckOperator(bearer[:]) || !errors.Is(listener.protocol.Verify(), install.ErrUncertain) {
 		t.Fatal("restored namespace revived local API authority")
 	}
 	values := []any{listener, *listener, AttemptDigest{value: sha256.Sum256(bearer[:])}, Call{text: "private-result-sentinel"}, Reply{code: RemoteInternal}}
@@ -844,6 +833,184 @@ func TestServerHomeCloseJoinsReceivedCallBeforeAuthorityRelease(t *testing.T) {
 		_ = connection.Close()
 		t.Fatal("post-close connection succeeded")
 	}
+}
+
+func TestConnectionDispatchLeaseLinearizesHomeClose(t *testing.T) {
+	newReceived := func(t *testing.T, listener *Listener, socketPath string, bearer credential, root string) (*Connection, *net.UnixConn) {
+		t.Helper()
+		accepted := make(chan *Connection, 1)
+		acceptErr := make(chan error, 1)
+		go func() {
+			connection, err := listener.Accept()
+			if err != nil {
+				acceptErr <- err
+				return
+			}
+			accepted <- connection
+		}()
+		client, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: socketPath, Net: "unix"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var connection *Connection
+		select {
+		case connection = <-accepted:
+		case err := <-acceptErr:
+			t.Fatal(err)
+		case <-time.After(time.Second):
+			t.Fatal("dispatch fixture was not accepted")
+		}
+		body := fmt.Sprintf(`{"method":"create_project","params":{"id":"%s","name":"dispatch-project","root":%q}}`, id('4'), root)
+		if _, err := client.Write(rawRequest(1, operatorDomain, bearer, []byte(body))); err != nil {
+			t.Fatal(err)
+		}
+		if err := client.CloseWrite(); err != nil {
+			t.Fatal(err)
+		}
+		if call, err := connection.Receive(context.Background()); err != nil || call.Kind() != CallCreateProject {
+			_ = connection.Close()
+			_ = client.Close()
+			t.Fatalf("received dispatch call = %v, %v", call.Kind(), err)
+		}
+		return connection, client
+	}
+	projectID, err := kernel.ProjectIDFromBytes(bytes.Repeat([]byte{'D'}, kernel.IDBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	at, err := kernel.NewUnixMillis(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("shutdown begun refuses paused call", func(t *testing.T) {
+		bearer := testCredential('D')
+		listener, socketPath := newAPITestListener(t, bearer)
+		homeValue, _ := apiTestHomes.Load(listener)
+		home := homeValue.(*install.OperationalHome)
+		store, err := home.OpenStore(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		root := filepath.Join(t.TempDir(), "refused-root")
+		connection, client := newReceived(t, listener, socketPath, bearer, root)
+		closed := make(chan error, 1)
+		go func() { closed <- home.Close() }()
+		if err := client.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		if count, err := client.Read(make([]byte, 1)); count != 0 || err == nil {
+			t.Fatalf("shutdown did not interrupt paused call: count=%d err=%v", count, err)
+		}
+		entered := false
+		if _, err := connection.Dispatch(func(Call) Reply {
+			entered = true
+			_, _ = store.CreateProject(context.Background(), kernel.NewProject{ID: projectID, Name: "must-not-commit", Root: root}, at)
+			return Reply{}
+		}); !errors.Is(err, ErrTransport) {
+			t.Fatalf("dispatch after shutdown began = %v", err)
+		}
+		if entered {
+			t.Fatal("paused call entered dispatch after shutdown began")
+		}
+		if err := connection.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-closed; err != nil {
+			t.Fatal(err)
+		}
+		apiTestHomes.Delete(listener)
+		_ = client.Close()
+		freshHome, err := install.OpenOperationalHome(context.Background(), filepath.Dir(filepath.Dir(socketPath)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		freshStore, err := freshHome.OpenStore(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, found, err := freshStore.Project(context.Background(), projectID); err != nil || found {
+			t.Fatalf("paused call durable mutation = found %t, err %v", found, err)
+		}
+		if err := freshHome.Close(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("entered dispatch finishes before close", func(t *testing.T) {
+		bearer := testCredential('E')
+		listener, socketPath := newAPITestListener(t, bearer)
+		homeValue, _ := apiTestHomes.Load(listener)
+		home := homeValue.(*install.OperationalHome)
+		store, err := home.OpenStore(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		root := filepath.Join(t.TempDir(), "entered-root")
+		connection, client := newReceived(t, listener, socketPath, bearer, root)
+		alias := *connection
+		aliasEntered := false
+		if _, err := alias.Dispatch(func(Call) Reply { aliasEntered = true; return Reply{} }); !errors.Is(err, ErrProtocol) || aliasEntered {
+			t.Fatalf("copied API connection dispatch = %v, entered=%t", err, aliasEntered)
+		}
+		if err := alias.Close(); !errors.Is(err, ErrProtocol) {
+			t.Fatalf("copied API connection close = %v", err)
+		}
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		dispatched := make(chan error, 1)
+		go func() {
+			var effectErr error
+			_, err := connection.Dispatch(func(Call) Reply {
+				close(entered)
+				<-release
+				_, effectErr = store.CreateProject(context.Background(), kernel.NewProject{ID: projectID, Name: "entered", Root: root}, at)
+				reply, _ := NewErrorReply(RemoteInternal)
+				return reply
+			})
+			dispatched <- errors.Join(err, effectErr)
+		}()
+		<-entered
+		closed := make(chan error, 1)
+		go func() { closed <- home.Close() }()
+		if err := client.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		if count, err := client.Read(make([]byte, 1)); count != 0 || err == nil {
+			t.Fatalf("shutdown did not interrupt entered call transport: count=%d err=%v", count, err)
+		}
+		select {
+		case err := <-closed:
+			t.Fatalf("home close passed an entered dispatch: %v", err)
+		case <-time.After(30 * time.Millisecond):
+		}
+		close(release)
+		if err := <-dispatched; err != nil {
+			t.Fatal(err)
+		}
+		if err := connection.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-closed; err != nil {
+			t.Fatal(err)
+		}
+		apiTestHomes.Delete(listener)
+		_ = client.Close()
+		freshHome, err := install.OpenOperationalHome(context.Background(), filepath.Dir(filepath.Dir(socketPath)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		freshStore, err := freshHome.OpenStore(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, found, err := freshStore.Project(context.Background(), projectID); err != nil || !found {
+			t.Fatalf("entered dispatch durable mutation = found %t, err %v", found, err)
+		}
+		if err := freshHome.Close(); err != nil {
+			t.Fatal(err)
+		}
+	})
 }
 
 func TestReplyConstructorsAndConnectionOrderAreClosed(t *testing.T) {

@@ -558,7 +558,11 @@ func serveMany(listener *api.Listener, replies ...func(api.Call) api.Reply) <-ch
 			call, receiveErr := connection.Receive(ctx)
 			cancel()
 			if receiveErr == nil {
-				receiveErr = connection.Respond(reply(call))
+				var response api.Reply
+				response, receiveErr = connection.Dispatch(reply)
+				if receiveErr == nil {
+					receiveErr = connection.Respond(response)
+				}
 			}
 			_ = connection.Close()
 			results = append(results, serverResult{call: call, err: receiveErr})
@@ -585,7 +589,11 @@ func serveOneThenWatchExtra(listener *api.Listener, reply func(api.Call) api.Rep
 			call, receiveErr := connection.Receive(ctx)
 			cancel()
 			if receiveErr == nil {
-				receiveErr = connection.Respond(reply(call))
+				var response api.Reply
+				response, receiveErr = connection.Dispatch(reply)
+				if receiveErr == nil {
+					receiveErr = connection.Respond(response)
+				}
 			}
 			_ = connection.Close()
 			results = append(results, serverResult{call: call, err: receiveErr})

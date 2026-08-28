@@ -76,11 +76,15 @@ func (daemon *Daemon) HandleConnection(ctx context.Context, connection *api.Conn
 		return fmt.Errorf("%w: invalid daemon connection", kernel.ErrInvalidValue)
 	}
 	defer connection.Close()
-	call, err := connection.Receive(ctx)
+	_, err := connection.Receive(ctx)
 	if err != nil {
 		return err
 	}
-	return connection.Respond(daemon.dispatch(ctx, call))
+	reply, err := connection.Dispatch(func(call api.Call) api.Reply { return daemon.dispatch(ctx, call) })
+	if err != nil {
+		return err
+	}
+	return connection.Respond(reply)
 }
 
 // dispatch is intentionally one closed switch. API validation belongs to the

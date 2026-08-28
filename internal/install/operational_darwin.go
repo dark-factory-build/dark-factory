@@ -265,6 +265,12 @@ func (state *operationalHomeState) close() error {
 	if state.closed {
 		return state.closeErr
 	}
+	// Fence new authenticated dispatch before publishing home shutdown. A
+	// dispatch already holding its scoped lease may finish and is joined by the
+	// Local API close below.
+	if state.localAPI != nil && state.localAPI.state != nil {
+		state.localAPI.state.fenceClose()
+	}
 	state.closed = true
 	var result error
 	// The local API is the externally reachable child and must stop and join

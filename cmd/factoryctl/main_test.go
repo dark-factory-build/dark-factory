@@ -123,7 +123,11 @@ func serveOne(listener *api.Listener, reply func(api.Call) api.Reply) <-chan ser
 		defer cancel()
 		call, err := connection.Receive(ctx)
 		if err == nil {
-			err = connection.Respond(reply(call))
+			var response api.Reply
+			response, err = connection.Dispatch(reply)
+			if err == nil {
+				err = connection.Respond(response)
+			}
 		}
 		done <- serverResult{call: call, err: err}
 	}()

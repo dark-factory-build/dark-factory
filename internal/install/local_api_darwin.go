@@ -13,8 +13,11 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
+	"syscall"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -24,6 +27,7 @@ const (
 	localAPITokenBytes = 32
 	localAPIMaxPath    = 103
 	localAPIProbeLimit = 250 * time.Millisecond
+	localAPIAcceptPoll = 50 * time.Millisecond
 )
 
 type localAPIState struct {
@@ -40,16 +44,33 @@ type localAPIState struct {
 
 	listener            *net.UnixListener
 	socketID            identity
-	connections         map[*net.UnixConn]struct{}
+	connections         map[*LocalAPIConnection]struct{}
+	retainedConnections []*LocalAPIConnection
+	probeConnections    []net.Conn
 	accepting           int
 	verifying           int
-	claimed             bool
+	dispatching         int
+	protocol            *LocalAPIProtocol
 	closing             bool
+	closeRunning        bool
 	closed              bool
 	poisonErr           error
 	cleanupErr          error
-	retainedConnections []*net.UnixConn
 	closeErr            error
+}
+
+type localAPIConnectionState struct {
+	owner    *localAPIState
+	self     *LocalAPIConnection
+	raw      *net.UnixConn
+	once     sync.Once
+	closeErr error
+}
+
+type localAPIDispatchState struct {
+	owner *localAPIState
+	self  *LocalAPIDispatch
+	once  sync.Once
 }
 
 // These narrow seams sit at external effects. Production leaves the phase
@@ -57,13 +78,19 @@ type localAPIState struct {
 var localAPIPhaseHook func(string) error
 var localAPISyncDirectory = unix.Fsync
 var localAPIUnlinkAt = unix.Unlinkat
-var localAPIBeforeUnlink func(string)
 var localAPIChmod = func(parent int, name string, mode uint32) error {
 	return unix.Fchmodat(parent, name, mode, unix.AT_SYMLINK_NOFOLLOW)
 }
-var localAPIProbe = probeLocalAPISocket
+var localAPIDial = func(ctx context.Context, locator string) (net.Conn, error) {
+	return (&net.Dialer{}).DialContext(ctx, "unix", locator)
+}
 var localAPICloseFile = func(file *os.File) error { return file.Close() }
 var localAPICloseListener = func(listener *net.UnixListener) error { return listener.Close() }
+var localAPICloseConnection = func(connection *net.UnixConn) error { return connection.Close() }
+var localAPICloseProbeConnection = func(connection net.Conn) error { return connection.Close() }
+var localAPISetListenerDeadline = func(listener *net.UnixListener, deadline time.Time) error {
+	return listener.SetDeadline(deadline)
+}
 
 func (state *operationalHomeState) openLocalAPI(ctx context.Context) (*LocalAPIAuthority, error) {
 	state.mu.Lock()
@@ -98,7 +125,7 @@ func (state *operationalHomeState) openLocalAPI(ctx context.Context) (*LocalAPIA
 	authorityState := &localAPIState{
 		home: state, token: token, tokenID: tokenMember.identity,
 		locator:     filepath.Join(filepath.Dir(state.databasePath), runtimesName, localAPISocketName),
-		connections: make(map[*net.UnixConn]struct{}),
+		connections: make(map[*LocalAPIConnection]struct{}),
 	}
 	authorityState.cond = sync.NewCond(&authorityState.mu)
 	authority := &LocalAPIAuthority{state: authorityState}
@@ -191,10 +218,9 @@ func (state *localAPIState) activate(ctx context.Context) error {
 	if err != nil || !present {
 		return errors.Join(fmt.Errorf("record local API socket: %w", ErrUncertain), err)
 	}
-	if err := state.proveListenerBinding(ctx); err != nil {
+	if err := state.proveListenerBinding(ctx, created); err != nil {
 		return errors.Join(ErrUncertain, err)
 	}
-	state.socketID = created
 	if err := atLocalAPIPhase("after bind"); err != nil {
 		return err
 	}
@@ -227,26 +253,39 @@ func (state *localAPIState) activate(ctx context.Context) error {
 	return ctx.Err()
 }
 
-func (state *localAPIState) proveListenerBinding(ctx context.Context) error {
+func (state *localAPIState) proveListenerBinding(ctx context.Context, created identity) (result error) {
 	probeCtx, cancel := context.WithTimeout(ctx, localAPIProbeLimit)
 	defer cancel()
 	deadline, ok := probeCtx.Deadline()
 	if !ok {
 		return errors.New("local API binding proof has no deadline")
 	}
-	if err := state.listener.SetDeadline(deadline); err != nil {
+	if err := localAPISetListenerDeadline(state.listener, deadline); err != nil {
 		return errors.New("local API binding proof could not bound accept")
 	}
-	defer state.listener.SetDeadline(time.Time{})
+	var probes []net.Conn
+	defer func() {
+		if err := localAPISetListenerDeadline(state.listener, time.Time{}); err != nil {
+			result = errors.Join(ErrUncertain, result, errors.New("local API binding proof could not reset accept deadline"))
+		}
+		if err := state.closeProbeConnections(probes...); err != nil {
+			result = errors.Join(ErrUncertain, result, err)
+		}
+	}()
 	var nonce [32]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return errors.New("local API binding proof could not create nonce")
 	}
-	client, err := (&net.Dialer{}).DialContext(probeCtx, "unix", state.locator)
+	client, err := localAPIDial(probeCtx, state.locator)
+	if client != nil {
+		probes = append(probes, client)
+	}
 	if err != nil {
 		return errors.New("local API binding proof could not connect")
 	}
-	defer client.Close()
+	if client == nil {
+		return errors.Join(ErrUncertain, errors.New("local API binding proof returned no connection"))
+	}
 	if err := client.SetDeadline(deadline); err != nil {
 		return errors.New("local API binding proof could not bound client")
 	}
@@ -254,10 +293,15 @@ func (state *localAPIState) proveListenerBinding(ctx context.Context) error {
 		return errors.New("local API binding proof could not write nonce")
 	}
 	server, err := state.listener.AcceptUnix()
+	if server != nil {
+		probes = append(probes, server)
+	}
 	if err != nil {
 		return errors.New("local API binding proof reached another listener")
 	}
-	defer server.Close()
+	if server == nil {
+		return errors.Join(ErrUncertain, errors.New("local API binding proof accepted no connection"))
+	}
 	if err := server.SetDeadline(deadline); err != nil {
 		return errors.New("local API binding proof could not bound server")
 	}
@@ -265,7 +309,28 @@ func (state *localAPIState) proveListenerBinding(ctx context.Context) error {
 	if _, err := io.ReadFull(server, received[:]); err != nil || subtle.ConstantTimeCompare(received[:], nonce[:]) != 1 {
 		return errors.New("local API binding proof nonce differed")
 	}
+	// Only the listener that received this unpredictable nonce may claim the
+	// descriptor-relative record inspected immediately after bind. Recording
+	// here lets later deadline/connection cleanup uncertainty remove that exact
+	// proven leaf without adopting an unrelated socket.
+	state.socketID = created
 	return nil
+}
+
+func (state *localAPIState) closeProbeConnections(connections ...net.Conn) error {
+	var result error
+	for _, connection := range connections {
+		if connection == nil {
+			continue
+		}
+		if err := localAPICloseProbeConnection(connection); err != nil && !errors.Is(err, net.ErrClosed) {
+			state.mu.Lock()
+			state.probeConnections = append(state.probeConnections, connection)
+			state.mu.Unlock()
+			result = errors.Join(result, errors.New("close local API probe connection failed"))
+		}
+	}
+	return result
 }
 
 func (state *localAPIState) removeExactStaleSocket(ctx context.Context, expected identity) error {
@@ -274,8 +339,10 @@ func (state *localAPIState) removeExactStaleSocket(ctx context.Context, expected
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, localAPIProbeLimit)
 	defer cancel()
-	if err := localAPIProbe(probeCtx, state.locator); err == nil {
+	if err := state.probeExistingSocket(probeCtx); err == nil {
 		return ErrBusy
+	} else if errors.Is(err, ErrUncertain) {
+		return err
 	} else if ctxErr := probeCtx.Err(); ctxErr != nil {
 		return ctxErr
 	} else if !errors.Is(err, unix.ECONNREFUSED) {
@@ -291,7 +358,7 @@ func (state *localAPIState) removeExactStaleSocket(ctx context.Context, expected
 	if err := atLocalAPIPhase("before stale unlink"); err != nil {
 		return err
 	}
-	if err := unlinkExactLocalAPISocket(state.runtimes, expected, true, "stale"); err != nil {
+	if err := unlinkExactLocalAPISocket(state.runtimes, expected, true); err != nil {
 		return fmt.Errorf("remove exact stale local API socket: %w", err)
 	}
 	if err := localAPISyncDirectory(int(state.runtimes.Fd())); err != nil {
@@ -304,13 +371,21 @@ func (state *localAPIState) removeExactStaleSocket(ctx context.Context, expected
 	return state.verifyWithoutSocket()
 }
 
-func probeLocalAPISocket(ctx context.Context, locator string) error {
-	connection, err := (&net.Dialer{}).DialContext(ctx, "unix", locator)
-	if err != nil {
-		return err
+func (state *localAPIState) probeExistingSocket(ctx context.Context) error {
+	connection, dialErr := localAPIDial(ctx, state.locator)
+	if connection == nil && dialErr == nil {
+		return errors.Join(ErrUncertain, errors.New("local API stale probe returned no connection"))
 	}
-	_ = connection.Close()
-	return nil
+	if connection != nil {
+		if closeErr := state.closeProbeConnections(connection); closeErr != nil {
+			return errors.Join(ErrUncertain, closeErr)
+		}
+		// A returned transport is positive evidence of a live peer even when a
+		// dialer also reports an error. Never reinterpret that owned connection
+		// as ECONNREFUSED and delete the socket it reached.
+		return nil
+	}
+	return dialErr
 }
 
 func (state *localAPIState) readBoundToken() ([localAPITokenBytes]byte, error) {
@@ -318,9 +393,19 @@ func (state *localAPIState) readBoundToken() ([localAPITokenBytes]byte, error) {
 	if err := sameMemberFileIdentity(state.tokenID, state.token, false); err != nil {
 		return contents, err
 	}
+	if err := recheckIdentityBinding(state.home.home, tokenName, state.tokenID); err != nil {
+		return contents, err
+	}
 	read, err := state.token.ReadAt(contents[:], 0)
-	if read != len(contents) || err != nil && !errors.Is(err, io.EOF) {
+	if read != len(contents) || err != nil {
 		return contents, errors.Join(io.ErrUnexpectedEOF, err)
+	}
+	var extra [1]byte
+	if read, err := state.token.ReadAt(extra[:], localAPITokenBytes); read != 0 || !errors.Is(err, io.EOF) {
+		return contents, fmt.Errorf("%w: operator principal size changed", ErrInvalidHome)
+	}
+	if err := sameMemberFileIdentity(state.tokenID, state.token, false); err != nil {
+		return contents, err
 	}
 	if err := recheckIdentityBinding(state.home.home, tokenName, state.tokenID); err != nil {
 		return contents, err
@@ -330,12 +415,6 @@ func (state *localAPIState) readBoundToken() ([localAPITokenBytes]byte, error) {
 
 func (state *localAPIState) verifyWithoutSocket() error {
 	if err := recheckOperationalCoreIdentityByState(state.home); err != nil {
-		return err
-	}
-	if err := sameMemberFileIdentity(state.tokenID, state.token, false); err != nil {
-		return err
-	}
-	if err := recheckIdentityBinding(state.home.home, tokenName, state.tokenID); err != nil {
 		return err
 	}
 	if err := exactDirectory(state.runtimes, false); err != nil {
@@ -425,72 +504,128 @@ func (state *localAPIState) checkOperator(bearer []byte) bool {
 	return subtle.ConstantTimeCompare(presented[:], state.digest[:]) == 1
 }
 
-func (state *localAPIState) claimProtocol() error {
+func (state *localAPIState) claimProtocol() (*LocalAPIProtocol, error) {
 	if err := state.beginVerify(); err != nil {
-		return err
+		return nil, err
 	}
 	defer state.endVerify()
 	if err := state.verifyBindings(); err != nil {
-		return state.poison(err)
+		return nil, state.poison(err)
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	if state.poisonErr != nil {
-		return state.poisonErr
+		return nil, state.poisonErr
 	}
 	if state.closing || state.closed {
-		return ErrClosed
+		return nil, ErrClosed
 	}
-	if state.claimed {
-		return ErrBusy
+	if state.protocol != nil {
+		return nil, ErrBusy
 	}
-	state.claimed = true
-	return nil
+	protocol := &LocalAPIProtocol{state: state}
+	state.protocol = protocol
+	return protocol, nil
 }
 
-func (state *localAPIState) accept() (*net.UnixConn, error) {
+func (state *localAPIState) ownsProtocol(protocol *LocalAPIProtocol) bool {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return protocol != nil && state.protocol == protocol
+}
+
+func (state *localAPIState) verifyProtocol(protocol *LocalAPIProtocol) error {
+	if !state.ownsProtocol(protocol) {
+		return ErrClosed
+	}
+	return state.verify()
+}
+
+func (state *localAPIState) checkProtocolOperator(protocol *LocalAPIProtocol, bearer []byte) bool {
+	return state.ownsProtocol(protocol) && state.checkOperator(bearer)
+}
+
+func (state *localAPIState) accept(protocol *LocalAPIProtocol) (*LocalAPIConnection, error) {
+	if !state.ownsProtocol(protocol) {
+		return nil, ErrClosed
+	}
 	if err := state.verify(); err != nil {
 		return nil, err
 	}
 	state.mu.Lock()
-	if state.closing || state.closed || state.listener == nil {
+	if state.closing || state.closed || state.listener == nil || state.protocol != protocol {
 		state.mu.Unlock()
 		return nil, ErrClosed
 	}
 	listener := state.listener
 	state.accepting++
 	state.mu.Unlock()
+	defer func() {
+		state.mu.Lock()
+		state.accepting--
+		state.cond.Broadcast()
+		state.mu.Unlock()
+	}()
 
-	connection, err := listener.AcceptUnix()
-	state.mu.Lock()
-	state.accepting--
-	stopped := state.closing || state.closed
-	if err == nil && !stopped {
-		state.connections[connection] = struct{}{}
-	} else if connection != nil {
-		_ = connection.Close()
-		connection = nil
-	}
-	state.cond.Broadcast()
-	state.mu.Unlock()
-	if err != nil {
+	for {
+		state.mu.Lock()
+		stopped := state.closing || state.closed
+		state.mu.Unlock()
 		if stopped {
 			return nil, ErrClosed
 		}
-		return nil, errors.New("local API accept failed")
+		if err := localAPISetListenerDeadline(listener, time.Now().Add(localAPIAcceptPoll)); err != nil {
+			return nil, state.poison(errors.New("local API accept deadline failed"))
+		}
+		raw, err := listener.AcceptUnix()
+		if err != nil {
+			state.mu.Lock()
+			stopped = state.closing || state.closed
+			state.mu.Unlock()
+			var networkError net.Error
+			if errors.As(err, &networkError) && networkError.Timeout() && !stopped {
+				continue
+			}
+			if stopped {
+				return nil, ErrClosed
+			}
+			return nil, errors.New("local API accept failed")
+		}
+		if raw == nil {
+			return nil, state.poison(errors.New("local API accept returned no connection"))
+		}
+		connection := &LocalAPIConnection{state: &localAPIConnectionState{owner: state, raw: raw}}
+		connection.state.self = connection
+		state.mu.Lock()
+		state.connections[connection] = struct{}{}
+		stopped = state.closing || state.closed
+		state.mu.Unlock()
+		if stopped {
+			_ = connection.Close()
+			return nil, ErrClosed
+		}
+		if err := verifyLocalAPIPeer(raw); err != nil {
+			closeErr := connection.Close()
+			return nil, errors.Join(err, closeErr)
+		}
+		if err := state.verify(); err != nil {
+			closeErr := connection.Close()
+			return nil, errors.Join(err, closeErr)
+		}
+		return connection, nil
 	}
-	if connection == nil {
-		return nil, ErrClosed
-	}
-	if err := state.verify(); err != nil {
-		_ = state.releaseConnection(connection)
-		return nil, err
-	}
-	return connection, nil
 }
 
-func (state *localAPIState) releaseConnection(connection *net.UnixConn) error {
-	closeErr := connection.Close()
+func (state *localAPIState) closeConnection(connection *LocalAPIConnection) error {
+	state.mu.Lock()
+	if _, owned := state.connections[connection]; !owned || connection == nil || connection.state == nil || connection.state.self != connection || connection.state.owner != state || connection.state.raw == nil {
+		state.mu.Unlock()
+		return ErrClosed
+	}
+	raw := connection.state.raw
+	state.mu.Unlock()
+
+	closeErr := localAPICloseConnection(raw)
 	state.mu.Lock()
 	delete(state.connections, connection)
 	if closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
@@ -505,6 +640,51 @@ func (state *localAPIState) releaseConnection(connection *net.UnixConn) error {
 	return nil
 }
 
+func (state *localAPIState) interruptConnection(connection *LocalAPIConnection) error {
+	state.mu.Lock()
+	if _, owned := state.connections[connection]; !owned || connection == nil || connection.state == nil || connection.state.self != connection || connection.state.owner != state || connection.state.raw == nil {
+		state.mu.Unlock()
+		return ErrClosed
+	}
+	raw := connection.state.raw
+	state.mu.Unlock()
+	if err := localAPICloseConnection(raw); err != nil && !errors.Is(err, net.ErrClosed) {
+		state.mu.Lock()
+		state.retainedConnections = append(state.retainedConnections, connection)
+		state.mu.Unlock()
+		return errors.New("interrupt local API connection failed")
+	}
+	return nil
+}
+
+func (state *localAPIState) beginProtocolDispatch(protocol *LocalAPIProtocol) (*LocalAPIDispatch, error) {
+	if !state.ownsProtocol(protocol) {
+		return nil, ErrClosed
+	}
+	if err := state.verify(); err != nil {
+		return nil, err
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.poisonErr != nil {
+		return nil, state.poisonErr
+	}
+	if state.closing || state.closed || state.protocol != protocol {
+		return nil, ErrClosed
+	}
+	state.dispatching++
+	dispatch := &LocalAPIDispatch{state: &localAPIDispatchState{owner: state}}
+	dispatch.state.self = dispatch
+	return dispatch, nil
+}
+
+func (state *localAPIState) endDispatch() {
+	state.mu.Lock()
+	state.dispatching--
+	state.cond.Broadcast()
+	state.mu.Unlock()
+}
+
 func (state *localAPIState) close() error {
 	if state == nil {
 		return nil
@@ -515,7 +695,7 @@ func (state *localAPIState) close() error {
 		state.mu.Unlock()
 		return err
 	}
-	if state.closing {
+	if state.closeRunning {
 		for !state.closed {
 			state.cond.Wait()
 		}
@@ -524,8 +704,9 @@ func (state *localAPIState) close() error {
 		return err
 	}
 	state.closing = true
+	state.closeRunning = true
 	listener := state.listener
-	connections := make([]*net.UnixConn, 0, len(state.connections))
+	connections := make([]*LocalAPIConnection, 0, len(state.connections))
 	for connection := range state.connections {
 		connections = append(connections, connection)
 	}
@@ -533,18 +714,21 @@ func (state *localAPIState) close() error {
 
 	var result error
 	if listener != nil {
+		if err := localAPISetListenerDeadline(listener, time.Now()); err != nil && !errors.Is(err, net.ErrClosed) {
+			result = errors.Join(result, errors.New("stop local API accept failed"))
+		}
 		if err := localAPICloseListener(listener); err != nil && !errors.Is(err, net.ErrClosed) {
 			result = errors.Join(result, errors.New("close local API listener failed"))
 		}
 	}
 	for _, connection := range connections {
-		if err := connection.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		if err := state.interruptConnection(connection); err != nil && !errors.Is(err, ErrClosed) {
 			result = errors.Join(result, errors.New("close local API connection failed"))
 		}
 	}
 
 	state.mu.Lock()
-	for state.accepting != 0 || state.verifying != 0 || len(state.connections) != 0 {
+	for state.accepting != 0 || state.verifying != 0 || state.dispatching != 0 || len(state.connections) != 0 {
 		state.cond.Wait()
 	}
 	poisonErr := state.poisonErr
@@ -575,6 +759,13 @@ func (state *localAPIState) close() error {
 	return result
 }
 
+func (state *localAPIState) fenceClose() {
+	state.mu.Lock()
+	state.closing = true
+	state.cond.Broadcast()
+	state.mu.Unlock()
+}
+
 func (state *localAPIState) removeOwnedSocket() error {
 	if state.socketID == (identity{}) {
 		if state.listener != nil {
@@ -586,7 +777,7 @@ func (state *localAPIState) removeOwnedSocket() error {
 	if err != nil || !present || sameObjectIdentity(state.socketID, current) != nil {
 		return errors.Join(fmt.Errorf("local API socket ownership is unresolved"), err)
 	}
-	if err := unlinkExactLocalAPISocket(state.runtimes, state.socketID, false, "owned"); err != nil {
+	if err := unlinkExactLocalAPISocket(state.runtimes, state.socketID, false); err != nil {
 		return fmt.Errorf("remove local API socket: %w", err)
 	}
 	if err := localAPISyncDirectory(int(state.runtimes.Fd())); err != nil {
@@ -599,10 +790,7 @@ func (state *localAPIState) removeOwnedSocket() error {
 	return nil
 }
 
-func unlinkExactLocalAPISocket(parent *os.File, expected identity, exactMetadata bool, phase string) error {
-	if localAPIBeforeUnlink != nil {
-		localAPIBeforeUnlink(phase)
-	}
+func unlinkExactLocalAPISocket(parent *os.File, expected identity, exactMetadata bool) error {
 	present, current, err := localAPISocketAt(parent, false)
 	if err != nil || !present {
 		return errors.Join(errors.New("local API socket changed before removal"), err)
@@ -618,6 +806,94 @@ func unlinkExactLocalAPISocket(parent *os.File, expected identity, exactMetadata
 		return err
 	}
 	return nil
+}
+
+func (connection *LocalAPIConnection) Read(buffer []byte) (int, error) {
+	if connection == nil || connection.state == nil || connection.state.self != connection || connection.state.raw == nil {
+		return 0, ErrClosed
+	}
+	return connection.state.raw.Read(buffer)
+}
+
+func (connection *LocalAPIConnection) Write(buffer []byte) (int, error) {
+	if connection == nil || connection.state == nil || connection.state.self != connection || connection.state.raw == nil {
+		return 0, ErrClosed
+	}
+	return connection.state.raw.Write(buffer)
+}
+
+func (connection *LocalAPIConnection) SetDeadline(deadline time.Time) error {
+	if connection == nil || connection.state == nil || connection.state.self != connection || connection.state.raw == nil {
+		return ErrClosed
+	}
+	return connection.state.raw.SetDeadline(deadline)
+}
+
+func (connection *LocalAPIConnection) CloseWrite() error {
+	if connection == nil || connection.state == nil || connection.state.self != connection || connection.state.raw == nil {
+		return ErrClosed
+	}
+	return connection.state.raw.CloseWrite()
+}
+
+func (connection *LocalAPIConnection) Close() error {
+	if connection == nil || connection.state == nil || connection.state.self != connection || connection.state.owner == nil {
+		if connection != nil && connection.state != nil && connection.state.self != connection {
+			return ErrClosed
+		}
+		return nil
+	}
+	connection.state.once.Do(func() {
+		connection.state.closeErr = connection.state.owner.closeConnection(connection)
+	})
+	return connection.state.closeErr
+}
+
+func (dispatch *LocalAPIDispatch) Close() error {
+	if dispatch == nil || dispatch.state == nil || dispatch.state.owner == nil {
+		return nil
+	}
+	if dispatch.state.self != dispatch {
+		return ErrClosed
+	}
+	dispatch.state.once.Do(func() { dispatch.state.owner.endDispatch() })
+	return nil
+}
+
+func verifyLocalAPIPeer(connection *net.UnixConn) error {
+	if connection == nil {
+		return ErrInvalidHome
+	}
+	raw, err := connection.SyscallConn()
+	if err != nil {
+		return ErrInvalidHome
+	}
+	var peer localAPIPeerCredential
+	var socketErr syscall.Errno
+	if err := raw.Control(func(fd uintptr) {
+		length := uint32(unsafe.Sizeof(peer))
+		_, _, socketErr = syscall.Syscall6(syscall.SYS_GETSOCKOPT, fd, localAPISOLLocal, localAPILocalPeerCred, uintptr(unsafe.Pointer(&peer)), uintptr(unsafe.Pointer(&length)), 0)
+		if socketErr == 0 && length != uint32(unsafe.Sizeof(peer)) {
+			socketErr = syscall.EINVAL
+		}
+		runtime.KeepAlive(&peer)
+	}); err != nil || socketErr != 0 || peer.version != 0 || peer.uid != uint32(os.Geteuid()) || peer.groupCount < 0 || int(peer.groupCount) > len(peer.groups) {
+		return ErrInvalidHome
+	}
+	return nil
+}
+
+const (
+	localAPISOLLocal      = 0
+	localAPILocalPeerCred = 1
+)
+
+type localAPIPeerCredential struct {
+	version    uint32
+	uid        uint32
+	groupCount int16
+	_          [2]byte
+	groups     [16]uint32
 }
 
 func (state *localAPIState) rejectActivation(cause error, retain bool) error {

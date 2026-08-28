@@ -29,7 +29,8 @@ func TestOperationalHomeOpenLocalAPIUnsupportedHasNoEffect(t *testing.T) {
 	if authority != nil || !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("unsupported local API open = %v, %v", authority, err)
 	}
-	if authority.CheckOperator(make([]byte, 32)) {
+	var protocol *LocalAPIProtocol
+	if protocol.CheckOperator(make([]byte, 32)) {
 		t.Fatal("nil unsupported authority accepted operator")
 	}
 }

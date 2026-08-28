@@ -4,7 +4,6 @@ package install
 import (
 	"context"
 	"errors"
-	"net"
 	"os"
 
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
@@ -53,6 +52,31 @@ type LocalAPIAuthority struct {
 
 func (LocalAPIAuthority) String() string   { return "LocalAPIAuthority(<redacted>)" }
 func (LocalAPIAuthority) GoString() string { return "LocalAPIAuthority(<redacted>)" }
+
+// LocalAPIProtocol is the sole framing/dispatch capability minted from one
+// LocalAPIAuthority. Its fields and transport remain opaque outside install.
+type LocalAPIProtocol struct {
+	state *localAPIState
+}
+
+func (LocalAPIProtocol) String() string   { return "LocalAPIProtocol(<redacted>)" }
+func (LocalAPIProtocol) GoString() string { return "LocalAPIProtocol(<redacted>)" }
+
+// LocalAPIConnection is one connection accepted and retained by its exact
+// LocalAPIProtocol. Close is once-owned and cannot target a caller-supplied
+// transport.
+type LocalAPIConnection struct {
+	state *localAPIConnectionState
+}
+
+func (*LocalAPIConnection) String() string   { return "LocalAPIConnection(<redacted>)" }
+func (*LocalAPIConnection) GoString() string { return "LocalAPIConnection(<redacted>)" }
+
+// LocalAPIDispatch is one scoped permission for an authenticated call to
+// enter daemon dispatch before OperationalHome shutdown begins.
+type LocalAPIDispatch struct {
+	state *localAPIDispatchState
+}
 
 // OpenOperationalHome validates and leases an existing Go-v1 home for daemon
 // use. It accepts operational database sidecars and populated runtime/change
@@ -115,47 +139,44 @@ func (home *OperationalHome) OpenLocalAPI(ctx context.Context) (*LocalAPIAuthori
 	return home.state.openLocalAPI(ctx)
 }
 
-// Verify proves that the retained home, operator principal, runtime parent,
-// and exact socket binding are still the objects accepted at activation.
-func (authority *LocalAPIAuthority) Verify() error {
-	if authority == nil || authority.state == nil {
-		return ErrClosed
-	}
-	return authority.state.verify()
-}
-
-// CheckOperator compares a presented bearer with the immutable operator
-// commitment after revalidating the complete local-API authority boundary.
-// It never returns or formats either value.
-func (authority *LocalAPIAuthority) CheckOperator(bearer []byte) bool {
-	return authority != nil && authority.state != nil && authority.state.checkOperator(bearer)
-}
-
 // ClaimProtocol transfers the single protocol-listener role to its caller.
-// A LocalAPIAuthority cannot be boxed into competing accept owners.
-func (authority *LocalAPIAuthority) ClaimProtocol() error {
+// The original authority retains only lifetime/Close authority after this.
+func (authority *LocalAPIAuthority) ClaimProtocol() (*LocalAPIProtocol, error) {
 	if authority == nil || authority.state == nil {
-		return ErrClosed
+		return nil, ErrClosed
 	}
 	return authority.state.claimProtocol()
 }
 
-// Accept accepts and retains one raw local connection. The API package owns
-// framing and must pair every successful call with ReleaseConnection.
-func (authority *LocalAPIAuthority) Accept() (*net.UnixConn, error) {
-	if authority == nil || authority.state == nil {
-		return nil, ErrClosed
+// Verify proves that the retained home, operator principal, runtime parent,
+// and exact socket binding are still the objects accepted at activation.
+func (protocol *LocalAPIProtocol) Verify() error {
+	if protocol == nil || protocol.state == nil {
+		return ErrClosed
 	}
-	return authority.state.accept()
+	return protocol.state.verifyProtocol(protocol)
 }
 
-// ReleaseConnection releases one connection previously returned by Accept.
-// It is idempotent and also closes the raw transport.
-func (authority *LocalAPIAuthority) ReleaseConnection(connection *net.UnixConn) error {
-	if authority == nil || authority.state == nil || connection == nil {
-		return nil
+// CheckOperator compares a presented bearer with the immutable operator
+// commitment after revalidating the complete local-API authority boundary.
+func (protocol *LocalAPIProtocol) CheckOperator(bearer []byte) bool {
+	return protocol != nil && protocol.state != nil && protocol.state.checkProtocolOperator(protocol, bearer)
+}
+
+// Accept returns one opaque, exact connection owned by this protocol.
+func (protocol *LocalAPIProtocol) Accept() (*LocalAPIConnection, error) {
+	if protocol == nil || protocol.state == nil {
+		return nil, ErrClosed
 	}
-	return authority.state.releaseConnection(connection)
+	return protocol.state.accept(protocol)
+}
+
+// BeginDispatch linearizes one authenticated call against home shutdown.
+func (protocol *LocalAPIProtocol) BeginDispatch() (*LocalAPIDispatch, error) {
+	if protocol == nil || protocol.state == nil {
+		return nil, ErrClosed
+	}
+	return protocol.state.beginProtocolDispatch(protocol)
 }
 
 // Close joins accepted connections, removes only the exact owned socket, and

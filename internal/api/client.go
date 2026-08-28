@@ -725,7 +725,11 @@ func setConnectionDeadline(connection net.Conn, ctx context.Context) error {
 	return connection.SetDeadline(deadline)
 }
 
-func watchCancellation(ctx context.Context, connection net.Conn) func() {
+type deadlineConnection interface {
+	SetDeadline(time.Time) error
+}
+
+func watchCancellation(ctx context.Context, connection deadlineConnection) func() {
 	finished := make(chan struct{})
 	var wait sync.WaitGroup
 	wait.Add(1)

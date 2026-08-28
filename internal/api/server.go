@@ -8,7 +8,6 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
-	"net"
 	"sync"
 	"time"
 
@@ -227,6 +226,7 @@ func NewErrorReply(code RemoteErrorCode) (Reply, error) {
 // creates no goroutines; the caller owns the accept loop.
 type Listener struct {
 	authority *install.LocalAPIAuthority
+	protocol  *install.LocalAPIProtocol
 	closer    *listenerClose
 }
 
@@ -242,31 +242,29 @@ func (Listener) GoString() string { return "Listener(<redacted>)" }
 // recovery, operator-principal loading, and filesystem ownership never occur
 // in this protocol package.
 func Listen(authority *install.LocalAPIAuthority) (*Listener, error) {
-	if authority == nil || authority.ClaimProtocol() != nil {
+	if authority == nil {
 		return nil, ErrInvalidListener
 	}
-	return &Listener{authority: authority, closer: &listenerClose{}}, nil
+	protocol, err := authority.ClaimProtocol()
+	if err != nil {
+		return nil, ErrInvalidListener
+	}
+	return &Listener{authority: authority, protocol: protocol, closer: &listenerClose{}}, nil
 }
 
 // Accept synchronously accepts one connection and verifies both the socket
 // identity and peer EUID. The caller must close the returned Connection.
 func (listener *Listener) Accept() (*Connection, error) {
-	return listener.accept(verifyPeerEUID)
-}
-
-func (listener *Listener) accept(peerCheck func(net.Conn) error) (*Connection, error) {
-	if listener == nil || listener.authority == nil {
+	if listener == nil || listener.protocol == nil {
 		return nil, ErrInvalidListener
 	}
-	connection, err := listener.authority.Accept()
+	connection, err := listener.protocol.Accept()
 	if err != nil {
 		return nil, ErrTransport
 	}
-	if peerCheck(connection) != nil {
-		_ = listener.authority.ReleaseConnection(connection)
-		return nil, ErrInvalidListener
-	}
-	return &Connection{connection: connection, authority: listener.authority}, nil
+	result := &Connection{connection: connection, protocol: listener.protocol}
+	result.self = result
+	return result, nil
 }
 
 // Close closes the retained authority. A replacement at the recorded name is
@@ -292,6 +290,8 @@ const (
 	connectionNew connectionState = iota
 	connectionReading
 	connectionReceived
+	connectionDispatching
+	connectionDispatched
 	connectionResponded
 	connectionClosed
 )
@@ -299,10 +299,12 @@ const (
 // Connection owns one accepted socket and permits exactly one Receive and one
 // Respond. Receive owns and joins its cancellation watcher before returning.
 type Connection struct {
-	connection *net.UnixConn
-	authority  *install.LocalAPIAuthority
+	self       *Connection
+	connection *install.LocalAPIConnection
+	protocol   *install.LocalAPIProtocol
 	domain     byte
 	kind       CallKind
+	call       Call
 	state      connectionState
 	closeOnce  sync.Once
 	closeErr   error
@@ -315,7 +317,7 @@ func (*Connection) GoString() string { return "Connection(<redacted>)" }
 // a dispatchable Call. Invalid requests are answered, when a valid response
 // domain is available, with a fixed error code.
 func (connection *Connection) Receive(ctx context.Context) (Call, error) {
-	if connection == nil || connection.connection == nil || connection.authority == nil || connection.state != connectionNew {
+	if connection == nil || connection.self != connection || connection.connection == nil || connection.protocol == nil || connection.state != connectionNew {
 		return Call{}, ErrProtocol
 	}
 	connection.state = connectionReading
@@ -361,12 +363,38 @@ func (connection *Connection) Receive(ctx context.Context) (Call, error) {
 	if code != "" {
 		return Call{}, connection.reject(code)
 	}
-	if domain == operatorDomain && !connection.authority.CheckOperator(bearer[:]) || domain == attemptDomain && connection.authority.Verify() != nil {
+	if domain == operatorDomain && !connection.protocol.CheckOperator(bearer[:]) || domain == attemptDomain && connection.protocol.Verify() != nil {
 		return Call{}, connection.reject(RemoteUnauthorized)
 	}
 	connection.kind = call.kind
+	connection.call = call
 	connection.state = connectionReceived
 	return call, nil
+}
+
+// Dispatch enters the one scoped authority lease for the exact call returned
+// by Receive. Shutdown begun before this method is called refuses the callback;
+// an already-entered callback is joined by OperationalHome.Close.
+func (connection *Connection) Dispatch(dispatch func(Call) Reply) (Reply, error) {
+	if connection == nil || connection.self != connection || connection.protocol == nil || connection.state != connectionReceived || dispatch == nil {
+		return Reply{}, ErrProtocol
+	}
+	lease, err := connection.protocol.BeginDispatch()
+	if err != nil {
+		return Reply{}, ErrTransport
+	}
+	connection.state = connectionDispatching
+	var reply Reply
+	var closeErr error
+	func() {
+		defer func() { closeErr = lease.Close() }()
+		reply = dispatch(connection.call)
+	}()
+	if closeErr != nil {
+		return Reply{}, ErrTransport
+	}
+	connection.state = connectionDispatched
+	return reply, nil
 }
 
 func (connection *Connection) setDeadline(ctx context.Context) error {
@@ -529,7 +557,7 @@ func methodKind(method string) (CallKind, byte) {
 // Respond writes exactly one response for the previously received Call. The
 // response domain is taken from that request and cannot be supplied by callers.
 func (connection *Connection) Respond(reply Reply) error {
-	if connection == nil || connection.connection == nil || connection.state != connectionReceived || !replyMatches(connection.kind, reply.kind) {
+	if connection == nil || connection.self != connection || connection.connection == nil || connection.state != connectionDispatched || !replyMatches(connection.kind, reply.kind) {
 		return ErrProtocol
 	}
 	connection.state = connectionResponded
@@ -639,14 +667,13 @@ func (connection *Connection) Close() error {
 	if connection == nil {
 		return nil
 	}
+	if connection.self != connection {
+		return ErrProtocol
+	}
 	connection.closeOnce.Do(func() {
 		connection.state = connectionClosed
-		if connection.authority != nil && connection.connection != nil {
-			if err := connection.authority.ReleaseConnection(connection.connection); err != nil {
-				connection.closeErr = ErrTransport
-			}
-		} else if connection.connection != nil {
-			if err := connection.connection.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		if connection.connection != nil {
+			if err := connection.connection.Close(); err != nil {
 				connection.closeErr = ErrTransport
 			}
 		}
