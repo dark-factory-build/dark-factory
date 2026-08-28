@@ -441,6 +441,62 @@ func TestOperationalHomeConcurrentCloseIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestOperationalHomeCloseKeepsLeaseUntilReturn(t *testing.T) {
+	parent := installTempDir(t)
+	homePath := filepath.Join(parent, "home")
+	if _, err := Init(context.Background(), homePath); err != nil {
+		t.Fatal(err)
+	}
+	home, err := OpenOperationalHome(context.Background(), homePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeStarted := make(chan struct{})
+	allowUnlock := make(chan struct{})
+	var hookOnce sync.Once
+	operationalCloseHook = func(point string) {
+		if point != "before lock release" {
+			t.Errorf("close hook point = %q", point)
+		}
+		hookOnce.Do(func() {
+			close(closeStarted)
+			<-allowUnlock
+		})
+	}
+	defer func() { operationalCloseHook = nil }()
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- home.Close() }()
+	select {
+	case <-closeStarted:
+	case <-time.After(10 * time.Second):
+		close(allowUnlock)
+		<-closeResult
+		t.Fatal("Close did not reach its final lock-release boundary")
+	}
+	candidate, openErr := OpenOperationalHome(context.Background(), homePath)
+	acquiredDuringClose := openErr == nil
+	if !acquiredDuringClose && !errors.Is(openErr, ErrBusy) {
+		close(allowUnlock)
+		<-closeResult
+		t.Fatalf("second opener during pre-unlock close = %v, want busy", openErr)
+	}
+	close(allowUnlock)
+	if err := <-closeResult; err != nil {
+		t.Fatalf("close = %v", err)
+	}
+	if acquiredDuringClose {
+		_ = candidate.Close()
+		t.Fatal("second opener acquired lease before Close returned")
+	}
+	reopened, err := OpenOperationalHome(context.Background(), homePath)
+	if err != nil {
+		t.Fatalf("open after Close return = %v", err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 const operationalLeaseHelperEnv = "DARK_FACTORY_OPERATIONAL_LEASE_HELPER"
 
 func TestOperationalHomeLeaseHelper(t *testing.T) {

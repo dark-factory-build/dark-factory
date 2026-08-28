@@ -42,6 +42,10 @@ type retainedMember struct {
 	directory bool
 }
 
+// operationalCloseHook is package-local test instrumentation. Production
+// close has no hook and keeps the lease until all other descriptors are gone.
+var operationalCloseHook func(string)
+
 type operationalSource struct {
 	name string
 	file *os.File
@@ -181,6 +185,24 @@ func (state *operationalHomeState) close() error {
 		result = errors.Join(result, state.home.Close())
 		state.home = nil
 	}
+	if state.anchor != nil {
+		if err := state.anchor.Close(); err != nil {
+			result = errors.Join(result, errors.Join(ErrUncertain, fmt.Errorf("close operational home lock anchor: %w", err)))
+		}
+		state.anchor = nil
+	}
+	if state.parent != nil {
+		if err := state.parent.close(); err != nil {
+			result = errors.Join(result, errors.Join(ErrUncertain, fmt.Errorf("close operational home ancestry: %w", err)))
+		}
+		state.parent = nil
+	}
+	if operationalCloseHook != nil {
+		operationalCloseHook("before lock release")
+	}
+	// Unlocking and closing the lifetime descriptor are the final owned
+	// effects. The anchor is only an identity binding; closing it above does
+	// not release this descriptor's flock.
 	if state.lock != nil {
 		if err := unix.Flock(int(state.lock.Fd()), unix.LOCK_UN); err != nil {
 			result = errors.Join(result, errors.Join(ErrUncertain, fmt.Errorf("release operational home lock: %w", err)))
@@ -189,16 +211,6 @@ func (state *operationalHomeState) close() error {
 			result = errors.Join(result, errors.Join(ErrUncertain, fmt.Errorf("close operational home lock: %w", err)))
 		}
 		state.lock = nil
-	}
-	if state.anchor != nil {
-		if err := state.anchor.Close(); err != nil {
-			result = errors.Join(result, errors.Join(ErrUncertain, fmt.Errorf("close operational home lock anchor: %w", err)))
-		}
-		state.anchor = nil
-	}
-	if state.parent != nil {
-		result = errors.Join(result, state.parent.close())
-		state.parent = nil
 	}
 	return result
 }
