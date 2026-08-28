@@ -447,9 +447,23 @@ func writeCwdDescriptorManifest(root string) error {
 }
 
 func readCwdDescriptorManifest(root string) (map[int]cwdDescriptorProof, error) {
-	file, err := os.Open(filepath.Join(root, cwdDescriptorManifestName))
+	fd, err := unix.Open(filepath.Join(root, cwdDescriptorManifestName), unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
+	}
+	file := os.NewFile(uintptr(fd), "cwd-descriptor-manifest")
+	if file == nil {
+		_ = unix.Close(fd)
+		return nil, ErrIdentity
+	}
+	var manifestStat unix.Stat_t
+	if err := unix.Fstat(fd, &manifestStat); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	if manifestStat.Mode&unix.S_IFMT != unix.S_IFREG || manifestStat.Mode&0o7777 != 0o600 || manifestStat.Nlink != 1 || manifestStat.Uid != uint32(os.Geteuid()) {
+		_ = file.Close()
+		return nil, ErrIdentity
 	}
 	body, err := io.ReadAll(io.LimitReader(file, maxCwdDescriptorManifestBytes+1))
 	closeErr := file.Close()
@@ -492,24 +506,57 @@ func readCwdDescriptorManifest(root string) (map[int]cwdDescriptorProof, error) 
 		if err != nil || inode == 0 {
 			return nil, ErrIdentity
 		}
-		values := make([]uint64, 10)
-		for valueIndex := range values {
-			value, parseErr := strconv.ParseUint(fields[valueIndex+3], 10, 64)
-			if parseErr != nil {
-				return nil, ErrIdentity
-			}
-			values[valueIndex] = value
+		mode, err := strconv.ParseUint(fields[3], 10, 16)
+		if err != nil {
+			return nil, ErrIdentity
 		}
-		if (device == 0 || inode == 0) && uint16(values[0])&unix.S_IFMT != unix.S_IFSOCK {
+		nlink, err := strconv.ParseUint(fields[4], 10, 16)
+		if err != nil {
+			return nil, ErrIdentity
+		}
+		uid, err := strconv.ParseUint(fields[5], 10, 32)
+		if err != nil {
+			return nil, ErrIdentity
+		}
+		gid, err := strconv.ParseUint(fields[6], 10, 32)
+		if err != nil {
+			return nil, ErrIdentity
+		}
+		// The remaining fields mirror signed Darwin stat members.
+		rdev, err := strconv.ParseInt(fields[7], 10, 32)
+		if err != nil {
+			return nil, ErrIdentity
+		}
+		size, err := strconv.ParseInt(fields[8], 10, 64)
+		if err != nil {
+			return nil, ErrIdentity
+		}
+		blocks, err := strconv.ParseInt(fields[9], 10, 64)
+		if err != nil {
+			return nil, ErrIdentity
+		}
+		blksize, err := strconv.ParseInt(fields[10], 10, 32)
+		if err != nil {
+			return nil, ErrIdentity
+		}
+		flags, err := strconv.ParseUint(fields[11], 10, 32)
+		if err != nil {
+			return nil, ErrIdentity
+		}
+		gen, err := strconv.ParseUint(fields[12], 10, 32)
+		if err != nil {
+			return nil, ErrIdentity
+		}
+		if (device == 0 || inode == 0) && uint16(mode)&unix.S_IFMT != unix.S_IFSOCK {
 			return nil, ErrIdentity
 		}
 		if _, exists := manifest[fd]; exists {
 			return nil, ErrIdentity
 		}
 		manifest[fd] = cwdDescriptorProof{
-			Device: device, Inode: inode, Mode: uint16(values[0]), Nlink: uint16(values[1]),
-			UID: uint32(values[2]), GID: uint32(values[3]), Rdev: int32(values[4]), Size: int64(values[5]),
-			Blocks: int64(values[6]), Blksize: int32(values[7]), Flags: uint32(values[8]), Gen: uint32(values[9]),
+			Device: device, Inode: inode, Mode: uint16(mode), Nlink: uint16(nlink),
+			UID: uint32(uid), GID: uint32(gid), Rdev: int32(rdev), Size: size,
+			Blocks: blocks, Blksize: int32(blksize), Flags: uint32(flags), Gen: uint32(gen),
 		}
 	}
 	if _, ok := manifest[10]; !ok {
@@ -541,15 +588,22 @@ func TestCwdDescriptorManifestRejectsIncompleteEvidence(t *testing.T) {
 			}
 		})
 	}
+	root := t.TempDir()
+	target := filepath.Join(root, "manifest-target")
+	if err := os.WriteFile(target, []byte(valid), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(root, cwdDescriptorManifestName)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readCwdDescriptorManifest(root); !errors.Is(err, unix.ELOOP) && !errors.Is(err, ErrIdentity) {
+		t.Fatalf("manifest symlink error=%v", err)
+	}
 }
 
 func TestCwdDescriptorSnapshotExcludesItsScanner(t *testing.T) {
 	root := t.TempDir()
-	file, err := os.Open(filepath.Join(root, "scanner-proof"))
-	if err == nil {
-		file.Close()
-	}
-	file, err = os.OpenFile(filepath.Join(root, "scanner-proof"), os.O_CREATE|os.O_RDWR, 0o600)
+	file, err := os.OpenFile(filepath.Join(root, "scanner-proof"), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}
