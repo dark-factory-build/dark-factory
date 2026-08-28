@@ -691,7 +691,22 @@ real_rebuilt_digest=$(/bin/cat "$temporary/real-rebuilt-digest")
 # Run the same helper against the checked-out web tree before the offline
 # artifact proof. This covers an absent or already-correct candidate without
 # using the disposable perturbation as a substitute for public bytes.
-/bin/sh "$real_web_install_fixture" "$repository_root" "$repository_root"
+real_web_install_once_fixture="$temporary/real-web-install-once-fixture"
+/bin/cat >"$real_web_install_once_fixture" <<'EOF'
+#!/bin/sh
+set -eu
+repository_root=$1
+script_root=$2
+. "$script_root/scripts/go-gate-environment.sh"
+. "$script_root/scripts/go-fast-stage.sh"
+go_gate_environment_setup
+trap 'go_gate_environment_cleanup || true' EXIT
+CDPATH= cd -- "$repository_root/web"
+export COREPACK_ENABLE_NETWORK=1 npm_config_offline=false NPM_CONFIG_OFFLINE=false
+go_gate_web_install
+EOF
+/bin/chmod 700 "$real_web_install_once_fixture"
+/bin/sh "$real_web_install_once_fixture" "$repository_root" "$repository_root"
 real_artifact_output="$temporary/real-artifacts"
 COREPACK_ENABLE_NETWORK=0 "$repository_root/web/scripts/package-artifacts" pack --output "$real_artifact_output" >/dev/null
 COREPACK_ENABLE_NETWORK=0 "$repository_root/web/scripts/package-artifacts" verify --output "$real_artifact_output" >/dev/null
