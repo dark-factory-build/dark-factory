@@ -430,7 +430,11 @@ test("verify rejects archive members with unsafe shape, mode, JSON, count, and s
       writeFileSync(archive, original);
     };
     mutateAndCheck((root) => chmodSync(join(root, "package/dist/src/control.js"), 0o777), "mode 0644");
-    mutateAndCheck((root) => symlinkSync("index.js", join(root, "package/dist/src/control.js")), "mode 0644");
+    mutateAndCheck((root) => {
+      const target = join(root, "package/dist/src/control.js");
+      rmSync(target);
+      symlinkSync("index.js", target);
+    }, "mode 0644");
     mutateAndCheck((root) => {
       const packagePath = join(root, "package/package.json");
       const text = readFileSync(packagePath, "utf8");
