@@ -165,18 +165,43 @@ sub group_state {
     return "unknown";
 }
 sub stop_group {
-    my $state;
-    for (1..10) {
-        $state = group_state();
-        return 1 if $state eq "gone";
-        last if $state eq "live";
-        usleep(100_000);
+    # After the leader is reaped, an unknown census loses numeric PGID
+    # authority: the identifier may already belong to an unrelated group.
+    # Observe only until ESRCH proves absence; never signal after uncertainty.
+    my $state = group_state();
+    if ($state eq "unknown") {
+        for (1..10) {
+            usleep(100_000);
+            $state = group_state();
+            return 1 if $state eq "gone";
+            return 0 if $state eq "live";
+        }
+        return 0;
     }
+    return 1 if $state eq "gone";
     return 0 if $state eq "unknown";
-    return 0 unless kill "TERM", -$pid;
-    for (1..10) { usleep(100_000); return 2 if group_state() eq "gone"; }
-    return 0 unless kill "KILL", -$pid;
-    for (1..10) { usleep(100_000); return 2 if group_state() eq "gone"; }
+    # A positive live census is the signal-authority linearization point.
+    # Signals are allowed only until a later census becomes uncertain.
+    unless (kill "TERM", -$pid) {
+        return 1 if $!{ESRCH};
+        return 0;
+    }
+    for (1..10) {
+        usleep(100_000);
+        $state = group_state();
+        return 2 if $state eq "gone";
+        return 0 if $state eq "unknown";
+    }
+    unless (kill "KILL", -$pid) {
+        return 1 if $!{ESRCH};
+        return 0;
+    }
+    for (1..10) {
+        usleep(100_000);
+        $state = group_state();
+        return 2 if $state eq "gone";
+        return 0 if $state eq "unknown";
+    }
     return 0;
 }
 my $group_clean = stop_group();

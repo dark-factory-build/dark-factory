@@ -285,6 +285,68 @@ fi
 natural_child=$(/bin/cat "$natural_pid")
 if /bin/kill -0 "$natural_child" 2>/dev/null; then fail "natural descendant survived"; fi
 
+# Model the post-reap process-group state machine. Once a census is unknown,
+# only ESRCH can prove absence; a reused/live PGID must not regain signal
+# authority, and live-owned cleanup must stop at a later unknown census.
+if ! /usr/bin/perl - <<'EOF'
+use strict;
+use warnings;
+
+sub stop_model {
+    my @states = @_;
+    my @signals;
+    my $state = shift @states // "unknown";
+    if ($state eq "unknown") {
+        for (1..10) {
+            $state = shift @states // "unknown";
+            return (1, \@signals) if $state eq "gone";
+            return (0, \@signals) if $state eq "live";
+        }
+        return (0, \@signals);
+    }
+    return (1, \@signals) if $state eq "gone";
+    return (0, \@signals) if $state eq "unknown";
+    push @signals, "TERM";
+    for (1..10) {
+        $state = shift @states // "unknown";
+        return (2, \@signals) if $state eq "gone";
+        return (0, \@signals) if $state eq "unknown";
+    }
+    push @signals, "KILL";
+    for (1..10) {
+        $state = shift @states // "unknown";
+        return (2, \@signals) if $state eq "gone";
+        return (0, \@signals) if $state eq "unknown";
+    }
+    return (0, \@signals);
+}
+
+sub check {
+    my ($name, $want_result, $want_signals, @states) = @_;
+    my ($result, $signals) = stop_model(@states);
+    my $actual_signals = join ",", @$signals;
+    my $expected_signals = join ",", @$want_signals;
+    die "$name: result=$result expected=$want_result\n"
+        unless $result == $want_result;
+    die "$name: signals=$actual_signals expected=$expected_signals\n"
+        unless $actual_signals eq $expected_signals;
+}
+
+check("persistent EPERM", 0, [], "unknown");
+check("EPERM to ESRCH", 1, [], "unknown", "gone");
+check("EPERM to live reused PGID", 0, [], "unknown", "live");
+check("malformed/reused PGID", 0, [], "unknown", "unknown", "live");
+check("leader exit first", 1, [], "unknown", "gone");
+check("live-owned cleanup to ESRCH", 2, ["TERM"], "live", "gone");
+check("live-owned TERM then KILL to ESRCH", 2, ["TERM", "KILL"],
+    "live", ("live") x 10, "gone");
+check("live to unknown", 0, ["TERM"], "live", "unknown");
+print "group state models passed\n";
+EOF
+then
+    fail "group state model failed"
+fi
+
 : >"$go_gate_test_log"
 if go_gate_stage 5 "$fake" "$go_gate_test_log" swap; then fail "root replacement passed"; fi
 if go_gate_validate_identity; then fail "replacement retained original identity"; fi
