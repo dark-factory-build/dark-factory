@@ -337,6 +337,8 @@ type runRelationships struct {
 
 type workerChangeOwnership uint8
 
+type workerChangeProvenance uint8
+
 const (
 	workerChangeReserved workerChangeOwnership = iota + 1
 	workerChangePrepared
@@ -346,6 +348,11 @@ const (
 	workerChangeSettledRetainedFresh
 	workerChangeSettledAbandonedReserved
 	workerChangeSettledAbandonedPrepared
+)
+
+const (
+	workerChangeFresh workerChangeProvenance = iota + 1
+	workerChangeRetained
 )
 
 func (ownership workerChangeOwnership) available() bool {
@@ -382,27 +389,27 @@ func classifyWorkerChangeOwnership(ctx context.Context, connection *sql.Conn, ru
 		return 0, fmt.Errorf("%w: Change predates worker admission", ErrCorruptState)
 	}
 	delta := change.Revision.Int64() - admitted
-	retainedRetry, err := retainedRetryProvenance(ctx, connection, run)
+	provenance, err := workerChangeProvenanceForRun(ctx, connection, run)
 	if err != nil {
 		return 0, err
 	}
 	var ownership workerChangeOwnership
 	switch {
-	case change.Phase == ChangeReserved && delta == 0 && !retainedRetry:
+	case change.Phase == ChangeReserved && delta == 0 && provenance == workerChangeFresh:
 		ownership = workerChangeReserved
-	case change.Phase == ChangePrepared && delta == 1 && !retainedRetry:
+	case change.Phase == ChangePrepared && delta == 1 && provenance == workerChangeFresh:
 		ownership = workerChangePrepared
-	case change.Phase == ChangeAvailable && delta == 0 && retainedRetry:
+	case change.Phase == ChangeAvailable && delta == 0 && provenance == workerChangeRetained:
 		ownership = workerChangeAvailableRetained
-	case change.Phase == ChangeAvailable && delta == 2 && !retainedRetry:
+	case change.Phase == ChangeAvailable && delta == 2 && provenance == workerChangeFresh:
 		ownership = workerChangeAvailableFresh
-	case change.Phase == ChangeRetained && delta == 1 && retainedRetry && change.SettledRunID != nil && *change.SettledRunID == run.ID:
+	case change.Phase == ChangeRetained && delta == 1 && provenance == workerChangeRetained && change.SettledRunID != nil && *change.SettledRunID == run.ID:
 		ownership = workerChangeSettledRetainedRetry
-	case change.Phase == ChangeRetained && delta == 3 && !retainedRetry && change.SettledRunID != nil && *change.SettledRunID == run.ID:
+	case change.Phase == ChangeRetained && delta == 3 && provenance == workerChangeFresh && change.SettledRunID != nil && *change.SettledRunID == run.ID:
 		ownership = workerChangeSettledRetainedFresh
-	case change.Phase == ChangeAbandoned && delta == 1 && !retainedRetry && change.SettledRunID != nil && *change.SettledRunID == run.ID:
+	case change.Phase == ChangeAbandoned && delta == 1 && provenance == workerChangeFresh && change.SettledRunID != nil && *change.SettledRunID == run.ID:
 		ownership = workerChangeSettledAbandonedReserved
-	case change.Phase == ChangeAbandoned && delta == 2 && !retainedRetry && change.SettledRunID != nil && *change.SettledRunID == run.ID:
+	case change.Phase == ChangeAbandoned && delta == 2 && provenance == workerChangeFresh && change.SettledRunID != nil && *change.SettledRunID == run.ID:
 		ownership = workerChangeSettledAbandonedPrepared
 	default:
 		return 0, fmt.Errorf("%w: impossible worker Change revision", ErrCorruptState)
@@ -424,33 +431,73 @@ func classifyWorkerChangeOwnership(ctx context.Context, connection *sql.Conn, ru
 	return ownership, nil
 }
 
-// retainedRetryProvenance proves an available-at-A admission by walking the
-// contiguous terminal worker history back to a fresh retained settlement.
-// A +4 gap is the fresh retained base; each later retained retry contributes
-// the exact +2 settle-and-reopen gap.
-func retainedRetryProvenance(ctx context.Context, connection *sql.Conn, run Run) (bool, error) {
-	current := run
-	for current.AdmittedTaskWorkRevision.Int64() > 1 {
-		previous, found, err := scanRun(connection.QueryRowContext(ctx, `SELECT `+runColumns+` FROM runs WHERE task_id = ? AND task_incarnation_id = ? AND admitted_task_work_revision = ?`,
-			current.TaskID.Bytes(), current.TaskIncarnationID.Bytes(), current.AdmittedTaskWorkRevision.Int64()-1))
-		if err != nil {
-			return false, err
+// workerChangeProvenanceForRun proves an available-at-A admission with one forward
+// automaton over the complete contiguous worker history. A fresh predecessor
+// may introduce retained provenance with the exact +4 settle-and-reopen gap.
+// Once retained, every later admission must use the exact +2 retained retry
+// gap; another +4 can never reset or reintroduce that provenance.
+func workerChangeProvenanceForRun(ctx context.Context, connection *sql.Conn, run Run) (workerChangeProvenance, error) {
+	if run.AdmittedTaskWorkRevision.Int64() < 1 || run.AdmittedChangeRevision == nil || run.ChangeID == nil {
+		return 0, fmt.Errorf("%w: incomplete worker Change history", ErrCorruptState)
+	}
+	rows, err := connection.QueryContext(ctx, `SELECT `+runColumns+` FROM runs WHERE task_id = ? AND task_incarnation_id = ? AND admitted_task_work_revision <= ? ORDER BY admitted_task_work_revision`,
+		run.TaskID.Bytes(), run.TaskIncarnationID.Bytes(), run.AdmittedTaskWorkRevision.Int64())
+	if err != nil {
+		return 0, err
+	}
+	var history []Run
+	for rows.Next() {
+		value, found, scanErr := scanRun(rows)
+		if scanErr != nil || !found {
+			rows.Close()
+			if scanErr == nil {
+				scanErr = ErrCorruptState
+			}
+			return 0, scanErr
 		}
-		if !found || previous.Phase != RunTerminal || previous.Role != RoleWorker || previous.ChangeID == nil || previous.AdmittedChangeRevision == nil ||
-			current.ChangeID == nil || *previous.ChangeID != *current.ChangeID || previous.ProjectID != current.ProjectID || previous.TaskID != current.TaskID || previous.TaskIncarnationID != current.TaskIncarnationID ||
-			previous.TerminalAt == nil || previous.TerminalAt.Int64() > current.AdmittedAt.Int64() || current.AdmittedChangeRevision == nil || current.AdmittedChangeRevision.Int64() <= previous.AdmittedChangeRevision.Int64() {
-			return false, nil
+		history = append(history, value)
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return 0, err
+	}
+	if int64(len(history)) != run.AdmittedTaskWorkRevision.Int64() || history[len(history)-1].ID != run.ID || history[len(history)-1].AdmittedChangeRevision == nil || *history[len(history)-1].AdmittedChangeRevision != *run.AdmittedChangeRevision {
+		return 0, fmt.Errorf("%w: noncontiguous worker Change history", ErrCorruptState)
+	}
+	provenance := workerChangeFresh
+	for index, current := range history {
+		workRevision := int64(index + 1)
+		if current.Role != RoleWorker || current.ChangeID == nil || current.AdmittedChangeRevision == nil || *current.ChangeID != *run.ChangeID ||
+			current.ProjectID != run.ProjectID || current.TaskID != run.TaskID || current.TaskIncarnationID != run.TaskIncarnationID || current.AdmittedTaskWorkRevision.Int64() != workRevision {
+			return 0, fmt.Errorf("%w: inconsistent worker Change history", ErrCorruptState)
 		}
-		switch current.AdmittedChangeRevision.Int64() - previous.AdmittedChangeRevision.Int64() {
+		if workRevision == 1 {
+			if current.AdmittedChangeRevision.Int64() != 1 {
+				return 0, fmt.Errorf("%w: worker Change history does not start fresh", ErrCorruptState)
+			}
+			continue
+		}
+		previous := history[index-1]
+		if previous.Phase != RunTerminal || previous.Role != RoleWorker || previous.ChangeID == nil || previous.AdmittedChangeRevision == nil || *previous.ChangeID != *run.ChangeID ||
+			previous.ProjectID != run.ProjectID || previous.TaskID != run.TaskID || previous.TaskIncarnationID != run.TaskIncarnationID || previous.TerminalAt == nil || previous.TerminalAt.Int64() > current.AdmittedAt.Int64() {
+			return 0, fmt.Errorf("%w: invalid worker Change predecessor", ErrCorruptState)
+		}
+		delta := current.AdmittedChangeRevision.Int64() - previous.AdmittedChangeRevision.Int64()
+		if provenance == workerChangeRetained {
+			if delta != 2 {
+				return 0, fmt.Errorf("%w: invalid retained Change retry gap", ErrCorruptState)
+			}
+			continue
+		}
+		switch delta {
+		case 2, 3:
+			// A fresh abandoned predecessor stays on the fresh path.
 		case 4:
-			return true, nil
-		case 2:
-			current = previous
+			provenance = workerChangeRetained
 		default:
-			return false, nil
+			return 0, fmt.Errorf("%w: invalid fresh Change retry gap", ErrCorruptState)
 		}
 	}
-	return false, nil
+	return provenance, nil
 }
 
 func loadRunRelationships(ctx context.Context, connection *sql.Conn, run Run) (runRelationships, error) {
@@ -995,8 +1042,25 @@ func validateChanges(ctx context.Context, connection *sql.Conn) error {
 		return err
 	}
 	for _, change := range changes {
+		owner, ownerFound, err := scanRun(connection.QueryRowContext(ctx, `SELECT `+runColumns+` FROM runs WHERE change_id = ? AND phase <> 'terminal'`, change.ID.Bytes()))
+		if err != nil {
+			return err
+		}
 		if change.SettledRunID == nil {
+			if !ownerFound {
+				return fmt.Errorf("%w: unsettled Change has no current owner", ErrCorruptState)
+			}
+			ownership, ownershipErr := classifyWorkerChangeOwnership(ctx, connection, owner, change)
+			if ownershipErr != nil {
+				return fmt.Errorf("invalid unsettled Change authority: %w", ownershipErr)
+			}
+			if ownership.settled() {
+				return fmt.Errorf("%w: invalid unsettled Change authority", ErrCorruptState)
+			}
 			continue
+		}
+		if ownerFound {
+			return fmt.Errorf("%w: settled Change still has a current owner", ErrCorruptState)
 		}
 		run, found, err := runByID(ctx, connection, *change.SettledRunID)
 		if err != nil || !found {

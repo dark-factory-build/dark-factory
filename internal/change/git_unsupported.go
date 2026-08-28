@@ -14,6 +14,10 @@ func SelectGit(context.Context, string, string, string, RepositoryIdentity) (Sel
 	return Selection{}, &UnsupportedError{Platform: runtime.GOOS}
 }
 
+func VerifyRepositoryRoot(string, RepositoryIdentity) error {
+	return &UnsupportedError{Platform: runtime.GOOS}
+}
+
 func OpenGitBlobs(context.Context, string, string, Selection) (*GitBlobs, error) {
 	return nil, &UnsupportedError{Platform: runtime.GOOS}
 }

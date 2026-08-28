@@ -17,7 +17,7 @@ import (
 const (
 	ConfigName           = "change-worker.config"
 	AttemptTokenName     = "attempt.token"
-	contractVersion      = 1
+	contractVersion      = 2
 	HomeName             = "home"
 	TempName             = "tmp"
 	CheckpointLimit      = 32 << 10
@@ -53,6 +53,7 @@ type Config struct {
 	FinalName            string
 	StagingName          string
 	AttemptSocket        string
+	Retained             *RetainedChange
 	// InitialTerminalInput is delivered once to the runner-owned PTY after the
 	// provider has crossed the release gate. It is not provider stdin: the PTY
 	// remains interactive for the lifetime of the run.
@@ -61,6 +62,21 @@ type Config struct {
 
 func (Config) String() string   { return "Change worker config (private)" }
 func (Config) GoString() string { return "changeworker.Config{private}" }
+
+// RetainedChange is the exact durable publication authority supplied for a
+// retained-at-A retry. It contains no source or staging locator and selects no
+// new Git content.
+type RetainedChange struct {
+	Format     change.ObjectFormat
+	Base       change.ObjectID
+	Commitment change.Commitment
+	EntryCount uint64
+	BlobBytes  uint64
+	Tree       change.StageIdentity
+}
+
+func (RetainedChange) String() string   { return "Retained Change authority (private)" }
+func (RetainedChange) GoString() string { return "changeworker.RetainedChange{private}" }
 
 type SelectionReport struct {
 	Format     change.ObjectFormat
@@ -98,6 +114,17 @@ func EncodeConfig(config Config) ([]byte, error) {
 	encoded = binary.BigEndian.AppendUint64(encoded, config.RuntimeIdentity.Inode)
 	encoded = binary.BigEndian.AppendUint64(encoded, config.RepositoryIdentity.Device())
 	encoded = binary.BigEndian.AppendUint64(encoded, config.RepositoryIdentity.Inode())
+	if config.Retained == nil {
+		encoded = append(encoded, 0)
+	} else {
+		encoded = append(encoded, 1, formatByte(config.Retained.Format))
+		encoded = append(encoded, config.Retained.Base.Bytes()...)
+		encoded = append(encoded, config.Retained.Commitment.Bytes()...)
+		encoded = binary.BigEndian.AppendUint64(encoded, config.Retained.EntryCount)
+		encoded = binary.BigEndian.AppendUint64(encoded, config.Retained.BlobBytes)
+		encoded = binary.BigEndian.AppendUint64(encoded, config.Retained.Tree.Device())
+		encoded = binary.BigEndian.AppendUint64(encoded, config.Retained.Tree.Inode())
+	}
 	for _, value := range []string{
 		config.RuntimePath, config.GitExecutable, config.FactoryctlExecutable, config.RepositoryRoot, config.Revision,
 		config.ChangeParent, config.FinalName, config.StagingName, config.AttemptSocket,
@@ -137,6 +164,58 @@ func DecodeConfig(encoded []byte) (Config, error) {
 	if err != nil {
 		return Config{}, invalidContract(err)
 	}
+	retainedMode, err := reader.byte()
+	if err != nil || retainedMode > 1 {
+		return Config{}, invalidContract(err)
+	}
+	var retained *RetainedChange
+	if retainedMode == 1 {
+		formatCode, readErr := reader.byte()
+		if readErr != nil {
+			return Config{}, readErr
+		}
+		format, readErr := decodeFormat(formatCode)
+		if readErr != nil {
+			return Config{}, readErr
+		}
+		baseBytes, readErr := reader.fixed(format.OIDLength())
+		if readErr != nil {
+			return Config{}, readErr
+		}
+		base, readErr := change.NewObjectID(format, baseBytes)
+		if readErr != nil {
+			return Config{}, invalidContract(readErr)
+		}
+		commitmentBytes, readErr := reader.fixed(32)
+		if readErr != nil {
+			return Config{}, readErr
+		}
+		commitment, readErr := change.ParseCommitment(commitmentBytes)
+		if readErr != nil {
+			return Config{}, invalidContract(readErr)
+		}
+		entries, readErr := reader.uint64()
+		if readErr != nil {
+			return Config{}, readErr
+		}
+		blobs, readErr := reader.uint64()
+		if readErr != nil {
+			return Config{}, readErr
+		}
+		treeDevice, readErr := reader.uint64()
+		if readErr != nil {
+			return Config{}, readErr
+		}
+		treeInode, readErr := reader.uint64()
+		if readErr != nil {
+			return Config{}, readErr
+		}
+		tree, readErr := change.NewStageIdentity(treeDevice, treeInode)
+		if readErr != nil {
+			return Config{}, invalidContract(readErr)
+		}
+		retained = &RetainedChange{Format: format, Base: base, Commitment: commitment, EntryCount: entries, BlobBytes: blobs, Tree: tree}
+	}
 	values := make([]string, 9)
 	for index := range values {
 		values[index], err = reader.string()
@@ -152,7 +231,7 @@ func DecodeConfig(encoded []byte) (Config, error) {
 		RuntimePath: values[0], RuntimeIdentity: runner.FileIdentity{Device: device, Inode: inode},
 		GitExecutable: values[1], FactoryctlExecutable: values[2], RepositoryRoot: values[3], RepositoryIdentity: repositoryIdentity, Revision: values[4],
 		ChangeParent: values[5], FinalName: values[6], StagingName: values[7],
-		AttemptSocket: values[8], InitialTerminalInput: input,
+		AttemptSocket: values[8], Retained: retained, InitialTerminalInput: input,
 	}
 	if err := validateConfig(config); err != nil {
 		return Config{}, err
@@ -174,6 +253,19 @@ func validateConfig(config Config) error {
 	}
 	if _, err := change.NewRepositoryIdentity(config.RepositoryIdentity.Device(), config.RepositoryIdentity.Inode()); err != nil {
 		return invalidContract(err)
+	}
+	if config.Retained != nil {
+		selection := SelectionReport{
+			Format: config.Retained.Format, Base: config.Retained.Base, Commitment: config.Retained.Commitment,
+			EntryCount: config.Retained.EntryCount, BlobBytes: config.Retained.BlobBytes, Repository: config.RepositoryIdentity,
+		}
+		population := PopulationReport{
+			Identity: config.Retained.Tree, Commitment: config.Retained.Commitment,
+			EntryCount: config.Retained.EntryCount, BlobBytes: config.Retained.BlobBytes,
+		}
+		if ValidateSelectionReport(selection) != nil || ValidatePopulationReport(population) != nil {
+			return invalidContract(nil)
+		}
 	}
 	return nil
 }

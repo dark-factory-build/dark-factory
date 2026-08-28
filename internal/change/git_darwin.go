@@ -64,6 +64,13 @@ func SelectGit(ctx context.Context, gitExecutable, repositoryRoot, revision stri
 	return selectGitWithTrust(ctx, gitExecutable, repositoryRoot, revision, expected, nil, true)
 }
 
+// VerifyRepositoryRoot rechecks the exact repository-root identity without
+// resolving a revision or selecting source content.
+func VerifyRepositoryRoot(repositoryRoot string, expected RepositoryIdentity) error {
+	_, err := checkpointRepository(repositoryRoot, expected)
+	return err
+}
+
 // selectGit is the package-private native-process fixture seam. Public callers
 // can enter only through SelectGit's root-owned Developer-toolchain check.
 func selectGit(ctx context.Context, gitExecutable, repositoryRoot, revision string, expected RepositoryIdentity, hook gitProcessHook) (Selection, error) {

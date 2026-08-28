@@ -830,10 +830,10 @@ func TestChangeCommitmentSchemaUsesFrozenBounds(t *testing.T) {
 	change := changeID(t, 5)
 	if _, err := store.writer.Exec(`INSERT INTO changes(
 	            id, project_id, task_id, task_incarnation_id, phase,
-	            object_format, base_commit, prepared_at_ms,
+	            object_format, base_commit, repository_dev, repository_inode, prepared_at_ms,
 	            tree_digest, entry_count, total_bytes, tree_dev, tree_inode, available_at_ms,
 	            revision, created_at_ms, updated_at_ms
-	        ) VALUES(?, ?, ?, ?, 'available', 'sha1', ?, 6, ?, ?, ?, 0, 2, 7, 3, 4, 7)`,
+	        ) VALUES(?, ?, ?, ?, 'available', 'sha1', ?, 0, 1, 6, ?, ?, ?, 0, 2, 7, 3, 4, 7)`,
 		change.Bytes(), project.ID.Bytes(), task.ID.Bytes(), task.IncarnationID.Bytes(), bytes.Repeat([]byte{0x11}, 20), bytes.Repeat([]byte{0x22}, DigestBytes), MaxChangeTreeEntries, MaxChangeTreeBlobBytes); err != nil {
 		t.Fatalf("insert exact cap: %v", err)
 	}

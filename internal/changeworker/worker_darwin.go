@@ -59,79 +59,13 @@ func runShell(ctx context.Context) (resultErr error) {
 		return err
 	}
 
-	selection, err := change.SelectGit(ctx, config.GitExecutable, config.RepositoryRoot, config.Revision, config.RepositoryIdentity)
-	if err != nil {
-		return err
+	var verified *change.VerifiedPublished
+	publishedPath := filepath.Join(config.ChangeParent, config.FinalName)
+	if config.Retained == nil {
+		verified, err = prepareFreshChange(ctx, control, config)
+	} else {
+		verified, err = openRetainedChange(ctx, control, config)
 	}
-	selectionBytes, err := EncodeSelectionReport(SelectionReport{
-		Format: selection.ObjectFormat(), Base: selection.Base(), Commitment: selection.Commitment(),
-		EntryCount: selection.EntryCount(), BlobBytes: selection.BlobBytes(), Repository: selection.RepositoryIdentity(),
-	})
-	if err != nil || control.ReportSelection(selectionBytes) != nil {
-		return ErrWorker
-	}
-	if err := control.AwaitPreparation(); err != nil {
-		return err
-	}
-
-	prepared, err := change.Prepare(ctx, config.ChangeParent, config.FinalName, config.StagingName)
-	if err != nil {
-		return err
-	}
-	preparedOpen := true
-	defer func() {
-		if preparedOpen {
-			resultErr = errors.Join(resultErr, prepared.Close())
-		}
-	}()
-	preparationBytes, err := EncodePreparationReport(PreparationReport{Stage: prepared.Identity()})
-	if err != nil || control.ReportPreparation(preparationBytes) != nil {
-		return ErrWorker
-	}
-	if err := control.AwaitPopulation(); err != nil {
-		return err
-	}
-
-	blobs, err := change.OpenGitBlobs(ctx, config.GitExecutable, config.RepositoryRoot, selection)
-	if err != nil {
-		return err
-	}
-	blobsOpen := true
-	defer func() {
-		if blobsOpen {
-			resultErr = errors.Join(resultErr, blobs.Abort())
-		}
-	}()
-	published, err := prepared.PopulateAndPublish(ctx, selection.Manifest(), blobs.Read)
-	if err != nil {
-		return err
-	}
-	if err := blobs.Close(); err != nil {
-		blobsOpen = false
-		return err
-	}
-	blobsOpen = false
-	if err := prepared.Close(); err != nil {
-		preparedOpen = false
-		return err
-	}
-	preparedOpen = false
-	facts := published.Facts()
-	populationBytes, err := EncodePopulationReport(PopulationReport{
-		Identity: facts.Identity(), Commitment: facts.Commitment(), EntryCount: facts.EntryCount(), BlobBytes: facts.BlobBytes(),
-	})
-	group := runner.ObserveProcessGroup(control.Identity())
-	if group.Presence != runner.Present || len(group.Members) != 1 || group.Members[0] != control.Identity() {
-		return ErrWorker
-	}
-	if err != nil || control.ReportPopulation(populationBytes) != nil {
-		return ErrWorker
-	}
-	if err := control.AwaitProvider(); err != nil {
-		return err
-	}
-
-	verified, err := published.Reinspect(ctx)
 	if err != nil {
 		return err
 	}
@@ -167,12 +101,12 @@ func runShell(ctx context.Context) (resultErr error) {
 		"DARK_FACTORY_ATTEMPT_TOKEN_FILE=" + token,
 		"DARK_FACTORY_FACTORYCTL=" + factoryctl.Path(),
 		"HOME=" + home, "TMPDIR=" + temp, "PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", "TERM=dumb", "NO_COLOR=1",
-		"GIT_CEILING_DIRECTORIES=" + filepath.Dir(published.Path()), "GIT_DISCOVERY_ACROSS_FILESYSTEM=0",
+		"GIT_CEILING_DIRECTORIES=" + filepath.Dir(publishedPath), "GIT_DISCOVERY_ACROSS_FILESYSTEM=0",
 		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0",
 		"GIT_ASKPASS=/usr/bin/false", "GIT_SSH_COMMAND=/usr/bin/false", "GH_CONFIG_DIR=/dev/null",
 	}
 	initialInput := bytes.Clone(config.InitialTerminalInput)
-	spec, err := runner.PrepareExecSpec(runner.ExecSpec{Target: shellPath, Args: []string{"-s"}, Env: environment, Cwd: published.Path()})
+	spec, err := runner.PrepareExecSpec(runner.ExecSpec{Target: shellPath, Args: []string{"-s"}, Env: environment, Cwd: publishedPath})
 	if err != nil {
 		_ = cwd.Close()
 		return err
@@ -194,6 +128,137 @@ func runShell(ctx context.Context) (resultErr error) {
 		return err
 	}
 	return control.ExecProvider(spec, cwd)
+}
+
+func prepareFreshChange(ctx context.Context, control *runner.WorkerControl, config Config) (_ *change.VerifiedPublished, resultErr error) {
+	selection, err := change.SelectGit(ctx, config.GitExecutable, config.RepositoryRoot, config.Revision, config.RepositoryIdentity)
+	if err != nil {
+		return nil, err
+	}
+	selectionBytes, err := EncodeSelectionReport(SelectionReport{
+		Format: selection.ObjectFormat(), Base: selection.Base(), Commitment: selection.Commitment(),
+		EntryCount: selection.EntryCount(), BlobBytes: selection.BlobBytes(), Repository: selection.RepositoryIdentity(),
+	})
+	if err != nil || control.ReportSelection(selectionBytes) != nil {
+		return nil, ErrWorker
+	}
+	if err := control.AwaitPreparation(); err != nil {
+		return nil, err
+	}
+	prepared, err := change.Prepare(ctx, config.ChangeParent, config.FinalName, config.StagingName)
+	if err != nil {
+		return nil, err
+	}
+	preparedOpen := true
+	defer func() {
+		if preparedOpen {
+			resultErr = errors.Join(resultErr, prepared.Close())
+		}
+	}()
+	preparationBytes, err := EncodePreparationReport(PreparationReport{Stage: prepared.Identity()})
+	if err != nil || control.ReportPreparation(preparationBytes) != nil {
+		return nil, ErrWorker
+	}
+	if err := control.AwaitPopulation(); err != nil {
+		return nil, err
+	}
+	blobs, err := change.OpenGitBlobs(ctx, config.GitExecutable, config.RepositoryRoot, selection)
+	if err != nil {
+		return nil, err
+	}
+	blobsOpen := true
+	defer func() {
+		if blobsOpen {
+			resultErr = errors.Join(resultErr, blobs.Abort())
+		}
+	}()
+	published, err := prepared.PopulateAndPublish(ctx, selection.Manifest(), blobs.Read)
+	if err != nil {
+		return nil, err
+	}
+	if err := blobs.Close(); err != nil {
+		blobsOpen = false
+		return nil, err
+	}
+	blobsOpen = false
+	if err := prepared.Close(); err != nil {
+		preparedOpen = false
+		return nil, err
+	}
+	preparedOpen = false
+	facts := published.Facts()
+	if err := reportPopulation(control, facts); err != nil {
+		return nil, err
+	}
+	if err := control.AwaitProvider(); err != nil {
+		return nil, err
+	}
+	return published.Reinspect(ctx)
+}
+
+func openRetainedChange(ctx context.Context, control *runner.WorkerControl, config Config) (*change.VerifiedPublished, error) {
+	retained := config.Retained
+	if retained == nil || change.VerifyRepositoryRoot(config.RepositoryRoot, config.RepositoryIdentity) != nil {
+		return nil, ErrWorker
+	}
+	selectionBytes, err := EncodeSelectionReport(SelectionReport{
+		Format: retained.Format, Base: retained.Base, Commitment: retained.Commitment,
+		EntryCount: retained.EntryCount, BlobBytes: retained.BlobBytes, Repository: config.RepositoryIdentity,
+	})
+	if err != nil || control.ReportSelection(selectionBytes) != nil {
+		return nil, ErrWorker
+	}
+	if err := control.AwaitPreparation(); err != nil {
+		return nil, err
+	}
+	preparationBytes, err := EncodePreparationReport(PreparationReport{Stage: retained.Tree})
+	if err != nil || control.ReportPreparation(preparationBytes) != nil {
+		return nil, ErrWorker
+	}
+	if err := control.AwaitPopulation(); err != nil {
+		return nil, err
+	}
+	facts, err := change.InspectPublished(ctx, config.ChangeParent, config.FinalName, retained.Tree, retained.Format, retained.Base)
+	if err != nil || !retainedFactsEqual(*retained, facts) {
+		return nil, errors.Join(err, ErrWorker)
+	}
+	if err := reportPopulation(control, facts); err != nil {
+		return nil, err
+	}
+	if err := control.AwaitProvider(); err != nil {
+		return nil, err
+	}
+	if err := change.VerifyRepositoryRoot(config.RepositoryRoot, config.RepositoryIdentity); err != nil {
+		return nil, err
+	}
+	verified, err := change.OpenPublished(ctx, config.ChangeParent, config.FinalName, retained.Tree, retained.Format, retained.Base)
+	if err != nil {
+		return nil, err
+	}
+	verifiedFacts, err := verified.Facts()
+	if err != nil || !retainedFactsEqual(*retained, verifiedFacts) {
+		_ = verified.Close()
+		return nil, errors.Join(err, ErrWorker)
+	}
+	return verified, nil
+}
+
+func reportPopulation(control *runner.WorkerControl, facts change.TreeFacts) error {
+	populationBytes, err := EncodePopulationReport(PopulationReport{
+		Identity: facts.Identity(), Commitment: facts.Commitment(), EntryCount: facts.EntryCount(), BlobBytes: facts.BlobBytes(),
+	})
+	group := runner.ObserveProcessGroup(control.Identity())
+	if group.Presence != runner.Present || len(group.Members) != 1 || group.Members[0] != control.Identity() {
+		return ErrWorker
+	}
+	if err != nil || control.ReportPopulation(populationBytes) != nil {
+		return ErrWorker
+	}
+	return nil
+}
+
+func retainedFactsEqual(retained RetainedChange, facts change.TreeFacts) bool {
+	return facts.Identity().Equal(retained.Tree) && facts.Commitment().Equal(retained.Commitment) && facts.EntryCount() == retained.EntryCount && facts.BlobBytes() == retained.BlobBytes
 }
 
 func openRuntimeAuthority(ctx context.Context, runtimeDir *os.File) (*runtimeAuthority, Config, error) {

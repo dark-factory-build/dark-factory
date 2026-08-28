@@ -607,7 +607,8 @@ func TestWorkerRunCannotActivateBeforeExactChangeIsAvailable(t *testing.T) {
 	format, _ := NewObjectFormat("sha1")
 	commit, _ := NewCommitID(format, bytes.Repeat([]byte{1}, 20))
 	digest := changeTreeDigest(t, 2)
-	selection, _ := NewChangeSelection(format, commit, digest, 1, 1)
+	repository, _ := NewFileIdentity(61, 62)
+	selection, _ := NewChangeSelection(format, commit, digest, 1, 1, repository)
 	stage, _ := NewFileIdentity(3, 4)
 	prepared, err := store.RecordChangePrepared(context.Background(), candidate, mustRevision(t, 1), selection, stage, mustTime(t, 32))
 	if err != nil {
@@ -872,7 +873,8 @@ func finalizingReleasedRun(t *testing.T, role AgentRole, policy VerificationPoli
 		format, _ := NewObjectFormat("sha1")
 		commit, _ := NewCommitID(format, bytes.Repeat([]byte{1}, 20))
 		digest := changeTreeDigest(t, 2)
-		selection, _ := NewChangeSelection(format, commit, digest, 1, 1)
+		repository, _ := NewFileIdentity(61, 62)
+		selection, _ := NewChangeSelection(format, commit, digest, 1, 1, repository)
 		stage, _ := NewFileIdentity(3, 4)
 		prepared, err := store.RecordChangePrepared(context.Background(), *candidate, mustRevision(t, 1), selection, stage, mustTime(t, 12))
 		if err != nil {

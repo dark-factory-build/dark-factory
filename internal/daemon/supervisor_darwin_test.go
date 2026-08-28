@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -133,6 +135,153 @@ func TestSupervisorRunsRegisteredShellWorkerToTypedSuccess(t *testing.T) {
 	changeState, found, err := fixture.store.Change(context.Background(), *run.ChangeID)
 	if err != nil || !found || changeState.Selection == nil || fmt.Sprintf("%x", changeState.Selection.Commit().Bytes()) != fixture.base {
 		t.Fatalf("Change exact base = %+v, found=%v, err=%v", changeState.Selection, found, err)
+	}
+}
+
+func TestSupervisorRetainedRetrySkipsGitAndPreservesPublishedTree(t *testing.T) {
+	fixture := newSupervisorFixture(t, providerExitWithoutOutcomeProgram(t))
+	first, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("first RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, first, kernel.OutcomeFailed)
+	changePath := filepath.Join(fixture.changeParent, fixture.changeName(t, first))
+	before, err := os.Lstat(changePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstChange, found, err := fixture.store.Change(context.Background(), *first.ChangeID)
+	if err != nil || !found || firstChange.Selection == nil {
+		t.Fatalf("first retained Change = %+v, found=%v, err=%v", firstChange, found, err)
+	}
+	repositoryIdentity := firstChange.Selection.RepositoryIdentity()
+	queueSupervisorRetry(t, fixture, first)
+	// A retained retry must not resolve a selector or invoke Git again.
+	fixture.spec.GitExecutable = "/private/retained-retry-must-not-run-git"
+	fixture.spec.BaseRevision = "refs/heads/retained-retry-must-not-resolve"
+	second, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("retained RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, second, kernel.OutcomeFailed)
+	after, err := os.Lstat(changePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeStat, beforeOK := before.Sys().(*syscall.Stat_t)
+	afterStat, afterOK := after.Sys().(*syscall.Stat_t)
+	if !beforeOK || !afterOK || beforeStat.Dev != afterStat.Dev || beforeStat.Ino != afterStat.Ino {
+		t.Fatalf("retained tree identity changed: before=%+v after=%+v", beforeStat, afterStat)
+	}
+	if body, err := os.ReadFile(filepath.Join(changePath, "payload.txt")); err != nil || string(body) != "exact source\n" {
+		t.Fatalf("retained payload = %q, %v", body, err)
+	}
+	if _, err := os.Lstat(filepath.Join(fixture.changeParent, "."+fixture.changeName(t, first)+".stage")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("retained retry created staging tree: %v", err)
+	}
+	if witness, err := os.ReadFile(fixture.witness); err != nil || string(witness) != "xx" {
+		t.Fatalf("retained provider witness = %q, %v", witness, err)
+	}
+	if first.ChangeID == nil || second.ChangeID == nil || *first.ChangeID != *second.ChangeID || second.AdmittedChangeRevision == nil {
+		t.Fatalf("retained retry changed canonical Change: first=%+v second=%+v", first.ChangeID, second.ChangeID)
+	}
+	secondChange, found, err := fixture.store.Change(context.Background(), *second.ChangeID)
+	if err != nil || !found || secondChange.Selection == nil || secondChange.Selection.RepositoryIdentity() != repositoryIdentity {
+		t.Fatalf("retained retry changed repository identity: Change=%+v found=%v err=%v", secondChange, found, err)
+	}
+}
+
+func TestSupervisorRetainedRetryFailsClosedOnDurableAuthorityMismatch(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		terminalFailure bool
+		mutate          func(*testing.T, *supervisorFixture, kernel.Run)
+	}{
+		{
+			name: "repository identity",
+			mutate: func(t *testing.T, fixture *supervisorFixture, _ kernel.Run) {
+				repository := filepath.Join(fixture.root, "repository")
+				if err := os.Rename(repository, repository+".replaced"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(repository, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name:            "repository replacement at provider release",
+			terminalFailure: true,
+			mutate: func(t *testing.T, fixture *supervisorFixture, _ kernel.Run) {
+				fixture.spec.beforeProviderRelease = func() {
+					repository := filepath.Join(fixture.root, "repository")
+					if err := os.Rename(repository, repository+".release-replaced"); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Mkdir(repository, 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+		},
+		{
+			name: "base commit",
+			mutate: func(t *testing.T, fixture *supervisorFixture, first kernel.Run) {
+				execSupervisorSQL(t, fixture.storePath, `UPDATE changes SET base_commit = zeroblob(length(base_commit)) WHERE id = ?`, first.ChangeID.Bytes())
+			},
+		},
+		{
+			name: "tree identity",
+			mutate: func(t *testing.T, fixture *supervisorFixture, first kernel.Run) {
+				name := fixture.changeName(t, first)
+				tree := filepath.Join(fixture.changeParent, name)
+				if err := os.Rename(tree, tree+".replaced"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(tree, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(tree, "payload.txt"), []byte("exact source\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newSupervisorFixture(t, providerExitWithoutOutcomeProgram(t))
+			first, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+			if err != nil {
+				t.Fatalf("first RunNext: %v", err)
+			}
+			fixture.assertTerminal(t, first, kernel.OutcomeFailed)
+			retainedPath := filepath.Join(fixture.changeParent, fixture.changeName(t, first))
+			before, err := os.Lstat(retainedPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			queueSupervisorRetry(t, fixture, first)
+			test.mutate(t, fixture, first)
+			second, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+			if test.terminalFailure {
+				if err != nil {
+					t.Fatalf("post-release retained verification = %v", err)
+				}
+				fixture.assertTerminal(t, second, kernel.OutcomeFailed)
+			} else if err == nil {
+				t.Fatal("mismatched retained authority reached provider")
+			}
+			if witness, err := os.ReadFile(fixture.witness); err != nil || string(witness) != "x" {
+				t.Fatalf("mismatched authority provider witness = %q, %v", witness, err)
+			}
+			preservedPath := retainedPath
+			if test.name == "tree identity" {
+				preservedPath += ".replaced"
+			}
+			after, err := os.Lstat(preservedPath)
+			if err != nil || !os.SameFile(before, after) {
+				t.Fatalf("mismatched authority changed retained source: before=%+v after=%+v err=%v", before, after, err)
+			}
+		})
 	}
 }
 
@@ -1542,6 +1691,26 @@ func (fixture *supervisorFixture) changeName(t *testing.T, run kernel.Run) strin
 		t.Fatal("worker run has no Change")
 	}
 	return run.ChangeID.String()
+}
+
+func queueSupervisorRetry(t *testing.T, fixture *supervisorFixture, terminal kernel.Run) {
+	t.Helper()
+	if terminal.TerminalAt == nil {
+		t.Fatal("terminal retry predecessor has no terminal time")
+	}
+	execSupervisorSQL(t, fixture.storePath, `UPDATE tasks SET work_revision = work_revision + 1, status = 'queued', blocked_reason = NULL, result = NULL, completed_at_ms = NULL, revision = revision + 1, updated_at_ms = ? WHERE id = ?`, terminal.TerminalAt.Int64()+1, terminal.TaskID.Bytes())
+}
+
+func execSupervisorSQL(t *testing.T, path, statement string, arguments ...any) {
+	t.Helper()
+	database, err := sql.Open("sqlite3", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.Exec(statement, arguments...); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func supervisorProgram(t *testing.T, waitAfterRequest, noRequest bool) string {

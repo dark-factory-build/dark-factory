@@ -101,7 +101,8 @@ func TestCheckpointConversionsBindExactStoreFacts(t *testing.T) {
 	}
 	if durable.ObjectFormat().String() != selection.Format.Name() ||
 		string(durable.Commit().Bytes()) != string(selection.Base.Bytes()) || string(durable.Commitment().Bytes()) != string(selection.Commitment.Bytes()) ||
-		durable.EntryCount() != uint32(selection.EntryCount) || durable.TotalBytes() != selection.BlobBytes {
+		durable.EntryCount() != uint32(selection.EntryCount) || durable.TotalBytes() != selection.BlobBytes ||
+		durable.RepositoryIdentity().Device() != int64(selection.Repository.Device()) || durable.RepositoryIdentity().Inode() != int64(selection.Repository.Inode()) {
 		t.Fatalf("selection facts were rebound: %+v", durable)
 	}
 	format, base, stage, err := inspectPublishedArguments(durable, mustKernelFileIdentity(t, 13, 14))

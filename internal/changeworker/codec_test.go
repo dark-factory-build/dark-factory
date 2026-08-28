@@ -40,7 +40,29 @@ func TestConfigRoundTripIsExactBoundedAndPrivate(t *testing.T) {
 	}
 }
 
-func TestConfigV1HardCutoverRejectsOldUnknownTrailingAndDuplicateLocator(t *testing.T) {
+func TestRetainedConfigRoundTripPreservesExactPublicationAuthority(t *testing.T) {
+	want := configFixture(t)
+	selection := selectionFixture(t)
+	want.Retained = &RetainedChange{
+		Format: selection.Format, Base: selection.Base, Commitment: selection.Commitment,
+		EntryCount: selection.EntryCount, BlobBytes: selection.BlobBytes, Tree: mustStage(t, 21, 22),
+	}
+	encoded, err := EncodeConfig(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := DecodeConfig(encoded)
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("retained config round trip changed authority: %v", err)
+	}
+	bad := want
+	bad.Retained = &RetainedChange{}
+	if _, err := EncodeConfig(bad); !errors.Is(err, ErrInvalidContract) {
+		t.Fatalf("invalid retained authority encoded: %v", err)
+	}
+}
+
+func TestConfigV2HardCutoverRejectsOldUnknownTrailingAndDuplicateLocator(t *testing.T) {
 	want := configFixture(t)
 	encoded, err := EncodeConfig(want)
 	if err != nil {
@@ -56,7 +78,7 @@ func TestConfigV1HardCutoverRejectsOldUnknownTrailingAndDuplicateLocator(t *test
 	for name, value := range map[string][]byte{"old": old, "unknown": unknown, "trailing": trailing, "duplicate locator": duplicate} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := DecodeConfig(value); !errors.Is(err, ErrInvalidContract) {
-				t.Fatalf("foreign v1 config accepted: %v", err)
+				t.Fatalf("foreign v2 config accepted: %v", err)
 			}
 		})
 	}
@@ -144,7 +166,7 @@ func configFixture(t testing.TB) Config {
 
 func configStringBounds(t testing.TB, encoded []byte, want int) (int, int) {
 	t.Helper()
-	offset := 8 + 4*8
+	offset := 8 + 4*8 + 1
 	for index := 0; index <= want; index++ {
 		if offset+2 > len(encoded) {
 			t.Fatal("short encoded config")

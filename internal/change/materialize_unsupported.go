@@ -46,6 +46,10 @@ func InspectPublished(context.Context, string, string, StageIdentity, ObjectForm
 	return TreeFacts{}, &UnsupportedError{Platform: runtime.GOOS}
 }
 
+func OpenPublished(context.Context, string, string, StageIdentity, ObjectFormat, ObjectID) (*VerifiedPublished, error) {
+	return nil, &UnsupportedError{Platform: runtime.GOOS}
+}
+
 func RemoveRecordedTree(context.Context, string, string, StageIdentity) error {
 	return &UnsupportedError{Platform: runtime.GOOS}
 }

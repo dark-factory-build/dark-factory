@@ -480,6 +480,17 @@ func InspectPublished(ctx context.Context, parent, target string, expected Stage
 	return inspectPublished(ctx, parent, target, expected, format, base, nil)
 }
 
+// OpenPublished reconstructs one exact recorded target and retains the
+// verified directory descriptor for immediate execution. It does not create,
+// replace, rename, or remove either the recorded tree or a staging path.
+func OpenPublished(ctx context.Context, parent, target string, expected StageIdentity, format ObjectFormat, base ObjectID) (*VerifiedPublished, error) {
+	facts, directory, err := inspectPublishedDirectory(ctx, parent, target, expected, format, base, nil)
+	if err != nil {
+		return nil, err
+	}
+	return &VerifiedPublished{state: &verifiedPublishedState{directory: directory, facts: facts}}, nil
+}
+
 func inspectPublished(ctx context.Context, parent, target string, expected StageIdentity, format ObjectFormat, base ObjectID, hook materializeHook) (TreeFacts, error) {
 	facts, directory, err := inspectPublishedDirectory(ctx, parent, target, expected, format, base, hook)
 	if directory != nil {

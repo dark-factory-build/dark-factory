@@ -8,7 +8,7 @@ import (
 )
 
 const changeColumns = `id, project_id, task_id, task_incarnation_id, phase,
-    object_format, base_commit, tree_digest, entry_count, total_bytes, tree_dev, tree_inode,
+    object_format, base_commit, repository_dev, repository_inode, tree_digest, entry_count, total_bytes, tree_dev, tree_inode,
     prepared_at_ms, available_at_ms, settled_run_id, revision, created_at_ms, updated_at_ms`
 
 func changeByID(ctx context.Context, connection *sql.Conn, id ChangeID) (Change, bool, error) {
@@ -50,13 +50,13 @@ func scanChange(scanner rowScanner) (Change, bool, error) {
 	var phase string
 	var objectFormat sql.NullString
 	var baseCommit, treeDigest nullableBlob
-	var entryCount, totalBytes, treeDev, treeInode sql.NullInt64
+	var repositoryDev, repositoryInode, entryCount, totalBytes, treeDev, treeInode sql.NullInt64
 	var preparedAt, availableAt sql.NullInt64
 	var rawSettledRunID nullableBlob
 	var revision, createdAt, updatedAt int64
 	if err := scanner.Scan(
 		&rawID, &rawProjectID, &rawTaskID, &rawIncarnationID, &phase,
-		&objectFormat, &baseCommit, &treeDigest, &entryCount, &totalBytes, &treeDev, &treeInode,
+		&objectFormat, &baseCommit, &repositoryDev, &repositoryInode, &treeDigest, &entryCount, &totalBytes, &treeDev, &treeInode,
 		&preparedAt, &availableAt, &rawSettledRunID, &revision, &createdAt, &updatedAt,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -79,18 +79,19 @@ func scanChange(scanner rowScanner) (Change, bool, error) {
 		ID: id, ProjectID: projectID, TaskID: taskID, TaskIncarnationID: incarnationID,
 		Phase: parsedPhase, Revision: rev, CreatedAt: created, UpdatedAt: updated,
 	}
-	preparedFields := objectFormat.Valid || baseCommit.valid || treeDigest.valid || entryCount.Valid || totalBytes.Valid || treeDev.Valid || treeInode.Valid || preparedAt.Valid
+	preparedFields := objectFormat.Valid || baseCommit.valid || repositoryDev.Valid || repositoryInode.Valid || treeDigest.valid || entryCount.Valid || totalBytes.Valid || treeDev.Valid || treeInode.Valid || preparedAt.Valid
 	if preparedFields {
-		if !objectFormat.Valid || !baseCommit.valid || !treeDigest.valid || len(treeDigest.bytes) != DigestBytes || !entryCount.Valid || !totalBytes.Valid || !treeDev.Valid || !treeInode.Valid || !preparedAt.Valid || entryCount.Int64 < 0 || entryCount.Int64 > MaxChangeTreeEntries || totalBytes.Int64 < 0 || totalBytes.Int64 > MaxChangeTreeBlobBytes {
+		if !objectFormat.Valid || !baseCommit.valid || !repositoryDev.Valid || !repositoryInode.Valid || !treeDigest.valid || len(treeDigest.bytes) != DigestBytes || !entryCount.Valid || !totalBytes.Valid || !treeDev.Valid || !treeInode.Valid || !preparedAt.Valid || entryCount.Int64 < 0 || entryCount.Int64 > MaxChangeTreeEntries || totalBytes.Int64 < 0 || totalBytes.Int64 > MaxChangeTreeBlobBytes {
 			return Change{}, false, fmt.Errorf("%w: partial prepared Change", ErrCorruptState)
 		}
 		format, formatErr := parseObjectFormat(objectFormat.String)
 		commit, commitErr := NewCommitID(format, baseCommit.bytes)
 		commitment, commitmentErr := TreeDigestFromBytes(treeDigest.bytes)
-		selection, selectionErr := NewChangeSelection(format, commit, commitment, uint32(entryCount.Int64), uint64(totalBytes.Int64))
+		repository, repositoryErr := NewFileIdentity(repositoryDev.Int64, repositoryInode.Int64)
+		selection, selectionErr := NewChangeSelection(format, commit, commitment, uint32(entryCount.Int64), uint64(totalBytes.Int64), repository)
 		tree, treeErr := NewFileIdentity(treeDev.Int64, treeInode.Int64)
 		prepared, preparedErr := NewUnixMillis(preparedAt.Int64)
-		if formatErr != nil || commitErr != nil || commitmentErr != nil || selectionErr != nil || treeErr != nil || preparedErr != nil || preparedAt.Int64 < createdAt || preparedAt.Int64 > updatedAt {
+		if formatErr != nil || commitErr != nil || commitmentErr != nil || repositoryErr != nil || selectionErr != nil || treeErr != nil || preparedErr != nil || preparedAt.Int64 < createdAt || preparedAt.Int64 > updatedAt {
 			return Change{}, false, fmt.Errorf("%w: invalid prepared Change", ErrCorruptState)
 		}
 		result.Selection = &selection
@@ -159,8 +160,8 @@ func (store *Store) RecordChangePrepared(ctx context.Context, id ChangeID, expec
 		if err := requireChangeMutationOwner(ctx, connection, change, expected, at); err != nil {
 			return false, err
 		}
-		result, err := connection.ExecContext(ctx, `UPDATE changes SET phase = 'prepared', object_format = ?, base_commit = ?, tree_digest = ?, entry_count = ?, total_bytes = ?, tree_dev = ?, tree_inode = ?, prepared_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase = 'reserved' AND revision = ?`,
-			selection.format.String(), selection.commit.Bytes(), selection.commitment.Bytes(), int64(selection.entries), int64(selection.bytes), tree.device, tree.inode, at.Int64(), at.Int64(), id.Bytes(), expected.Int64())
+		result, err := connection.ExecContext(ctx, `UPDATE changes SET phase = 'prepared', object_format = ?, base_commit = ?, repository_dev = ?, repository_inode = ?, tree_digest = ?, entry_count = ?, total_bytes = ?, tree_dev = ?, tree_inode = ?, prepared_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase = 'reserved' AND revision = ?`,
+			selection.format.String(), selection.commit.Bytes(), selection.repository.device, selection.repository.inode, selection.commitment.Bytes(), int64(selection.entries), int64(selection.bytes), tree.device, tree.inode, at.Int64(), at.Int64(), id.Bytes(), expected.Int64())
 		return false, requireOneRow(result, err)
 	})
 }
@@ -243,7 +244,7 @@ func requireChangeMutationOwner(ctx context.Context, connection *sql.Conn, chang
 }
 
 func changeSelectionEqual(left, right ChangeSelection) bool {
-	return left.format == right.format && left.commit.equal(right.commit) && left.commitment == right.commitment && left.entries == right.entries && left.bytes == right.bytes
+	return left.format == right.format && left.commit.equal(right.commit) && left.commitment == right.commitment && left.entries == right.entries && left.bytes == right.bytes && left.repository == right.repository
 }
 
 func changeAvailabilityMatches(change Change, available ChangeAvailability) bool {

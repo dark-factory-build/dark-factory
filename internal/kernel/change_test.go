@@ -25,6 +25,11 @@ func TestChangePreparedAndAvailableAreExactReplayableCheckpoints(t *testing.T) {
 	if _, err := store.RecordChangePrepared(context.Background(), change.ID, change.Revision, wrong, tree, mustTime(t, 11)); !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("conflicting prepared replay = %v", err)
 	}
+	wrong = selection
+	wrong.repository, _ = NewFileIdentity(91, 92)
+	if _, err := store.RecordChangePrepared(context.Background(), change.ID, change.Revision, wrong, tree, mustTime(t, 11)); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("conflicting repository replay = %v", err)
+	}
 	availableFacts := mustChangeAvailability(t, selection.commitment, selection.entries, selection.bytes, tree)
 	available, err := store.MarkChangeAvailable(context.Background(), change.ID, prepared.Revision, availableFacts, mustTime(t, 12))
 	if err != nil || available.Phase != ChangeAvailable || available.Revision.Int64() != 3 || available.AvailableAt == nil {
@@ -93,12 +98,12 @@ func TestChangeSchemaIsPathFreeCanonicalAndCircularlyBound(t *testing.T) {
 		}
 		columns[name] = true
 	}
-	for _, forbidden := range []string{"source_root", "staging_root", "selected_commit", "repository_root", "repository_dev", "repository_inode", "selected_at_ms", "stage_dev", "source_dev"} {
+	for _, forbidden := range []string{"source_root", "staging_root", "selected_commit", "repository_root", "selected_at_ms", "stage_dev", "source_dev"} {
 		if columns[forbidden] {
 			t.Fatalf("obsolete Change column survived: %s", forbidden)
 		}
 	}
-	for _, required := range []string{"base_commit", "tree_dev", "tree_inode", "settled_run_id"} {
+	for _, required := range []string{"base_commit", "repository_dev", "repository_inode", "tree_dev", "tree_inode", "settled_run_id"} {
 		if !columns[required] {
 			t.Fatalf("missing Change column: %s", required)
 		}
@@ -136,10 +141,12 @@ func TestChangeSchemaIsPathFreeCanonicalAndCircularlyBound(t *testing.T) {
 
 func TestPartialPreparedFactsFailClosed(t *testing.T) {
 	for name, mutation := range map[string]string{
-		"missing digest":   `UPDATE changes SET tree_digest = NULL WHERE id = ?`,
-		"short digest":     `UPDATE changes SET tree_digest = zeroblob(31) WHERE id = ?`,
-		"missing identity": `UPDATE changes SET tree_inode = NULL WHERE id = ?`,
-		"negative entries": `UPDATE changes SET entry_count = -1 WHERE id = ?`,
+		"missing digest":              `UPDATE changes SET tree_digest = NULL WHERE id = ?`,
+		"short digest":                `UPDATE changes SET tree_digest = zeroblob(31) WHERE id = ?`,
+		"missing tree identity":       `UPDATE changes SET tree_inode = NULL WHERE id = ?`,
+		"missing repository identity": `UPDATE changes SET repository_inode = NULL WHERE id = ?`,
+		"invalid repository identity": `UPDATE changes SET repository_dev = -1 WHERE id = ?`,
+		"negative entries":            `UPDATE changes SET entry_count = -1 WHERE id = ?`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			store, change := ownedReservedChange(t)
@@ -161,6 +168,29 @@ func TestPartialPreparedFactsFailClosed(t *testing.T) {
 			}
 			assertDatabaseEvidenceUnchanged(t, path, before)
 		})
+	}
+}
+
+func TestRepositoryIdentitySchemaRequiresExactPairedStoreIntegers(t *testing.T) {
+	store, change := ownedReservedChange(t)
+	defer store.Close()
+	tree, _ := NewFileIdentity(50, 51)
+	prepared, err := store.RecordChangePrepared(context.Background(), change.ID, change.Revision, testChangeSelection(t), tree, mustTime(t, 10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, mutation := range map[string]string{
+		"missing inode":   `UPDATE changes SET repository_inode = NULL WHERE id = ?`,
+		"negative device": `UPDATE changes SET repository_dev = -1 WHERE id = ?`,
+		"zero inode":      `UPDATE changes SET repository_inode = 0 WHERE id = ?`,
+	} {
+		if _, err := store.writer.Exec(mutation, change.ID.Bytes()); err == nil {
+			t.Fatalf("%s repository identity passed schema", name)
+		}
+	}
+	unchanged, found, err := store.Change(context.Background(), change.ID)
+	if err != nil || !found || unchanged.Selection == nil || prepared.Selection == nil || !changeSelectionEqual(*unchanged.Selection, *prepared.Selection) {
+		t.Fatalf("rejected repository corruption changed Change: %+v found=%v err=%v", unchanged, found, err)
 	}
 }
 

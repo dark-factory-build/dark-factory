@@ -161,11 +161,48 @@ func kernelSelectionCheckpoint(selection changeworker.SelectionReport) (kernel.C
 	if err != nil {
 		return kernel.ChangeSelection{}, errInvalidContract
 	}
-	result, err := kernel.NewChangeSelection(format, commit, digest, uint32(selection.EntryCount), selection.BlobBytes)
+	repository, err := changeFileIdentity(selection.Repository.Device(), selection.Repository.Inode())
+	if err != nil {
+		return kernel.ChangeSelection{}, errInvalidContract
+	}
+	result, err := kernel.NewChangeSelection(format, commit, digest, uint32(selection.EntryCount), selection.BlobBytes, repository)
 	if err != nil {
 		return kernel.ChangeSelection{}, errInvalidContract
 	}
 	return result, nil
+}
+
+func retainedWorkerCheckpoint(value kernel.Change) (*changeworker.RetainedChange, change.RepositoryIdentity, error) {
+	if value.Phase != kernel.ChangeAvailable || value.Selection == nil || value.TreeIdentity == nil {
+		return nil, change.RepositoryIdentity{}, errInvalidContract
+	}
+	format, base, tree, err := inspectPublishedArguments(*value.Selection, *value.TreeIdentity)
+	if err != nil {
+		return nil, change.RepositoryIdentity{}, err
+	}
+	commitment, err := change.ParseCommitment(value.Selection.Commitment().Bytes())
+	if err != nil {
+		return nil, change.RepositoryIdentity{}, errInvalidContract
+	}
+	repositoryIdentity := value.Selection.RepositoryIdentity()
+	repository, err := change.NewRepositoryIdentity(uint64(repositoryIdentity.Device()), uint64(repositoryIdentity.Inode()))
+	if err != nil {
+		return nil, change.RepositoryIdentity{}, errInvalidContract
+	}
+	return &changeworker.RetainedChange{
+		Format: format, Base: base, Commitment: commitment,
+		EntryCount: uint64(value.Selection.EntryCount()), BlobBytes: value.Selection.TotalBytes(), Tree: tree,
+	}, repository, nil
+}
+
+func retainedWorkerCheckpointsMatch(value kernel.Change, selection kernel.ChangeSelection, tree kernel.FileIdentity, availability kernel.ChangeAvailability) bool {
+	if value.Selection == nil || value.TreeIdentity == nil {
+		return false
+	}
+	stored := *value.Selection
+	return stored.ObjectFormat() == selection.ObjectFormat() && bytes.Equal(stored.Commit().Bytes(), selection.Commit().Bytes()) && stored.Commitment() == selection.Commitment() &&
+		stored.EntryCount() == selection.EntryCount() && stored.TotalBytes() == selection.TotalBytes() && stored.RepositoryIdentity() == selection.RepositoryIdentity() &&
+		*value.TreeIdentity == tree && stored.Commitment() == availability.Commitment() && stored.EntryCount() == availability.EntryCount() && stored.TotalBytes() == availability.TotalBytes() && tree == availability.TreeIdentity()
 }
 
 func kernelStageIdentity(identity change.StageIdentity) (kernel.FileIdentity, error) {

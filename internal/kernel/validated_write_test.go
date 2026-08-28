@@ -348,7 +348,8 @@ func testChangeSelection(t *testing.T) ChangeSelection {
 	t.Helper()
 	format, _ := NewObjectFormat("sha1")
 	commit, _ := NewCommitID(format, bytes.Repeat([]byte{0x71}, format.oidLength()))
-	selection, err := NewChangeSelection(format, commit, changeTreeDigest(t, 0x81), 1, 1)
+	repository, _ := NewFileIdentity(61, 62)
+	selection, err := NewChangeSelection(format, commit, changeTreeDigest(t, 0x81), 1, 1, repository)
 	if err != nil {
 		t.Fatal(err)
 	}
