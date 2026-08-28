@@ -41,7 +41,7 @@ child.execFileSync = (file, args, options) => args?.[0] === "rev-parse"
     assert.equal(existsSync(witness), false);
     expectFailure(() => execFileSync(process.execPath, [script, "verify", "--output", output], {
       cwd: webRoot,
-      env: { ...process.env, NODE_OPTIONS: undefined },
+      env: { ...process.env, DARK_FACTORY_ARTIFACT_LAUNCHER: undefined, NODE_OPTIONS: undefined },
       stdio: "pipe",
     }), "use the package-artifacts launcher");
   } finally {
