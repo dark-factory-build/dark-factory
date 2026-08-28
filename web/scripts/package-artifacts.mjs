@@ -22,8 +22,8 @@ const manifestName = "dark-factory-public-artifacts.json";
 const gitPath = "/usr/bin/git";
 const tarPath = "/usr/bin/tar";
 const packages = {
-  client: { name: "@dark-factory/client", root: join(webRoot, "packages", "client") },
-  ui: { name: "@dark-factory/ui", root: join(webRoot, "packages", "ui") },
+  client: { key: "client", name: "@dark-factory/client", root: join(webRoot, "packages", "client") },
+  ui: { key: "ui", name: "@dark-factory/ui", root: join(webRoot, "packages", "ui") },
 };
 
 // This is the deliberate public artifact surface. Adding a source export or
@@ -442,12 +442,10 @@ async function pack(requested) {
     build(tools);
     const identity = sourceIdentity(sourceCommit, tools, await compiledProtocolVersion());
     writeStableJson(join(distRoot(packages.client), "provenance.json"), provenance(packages.client, identity));
-    const clientInfo = { ...packages.client, key: "client" };
-    const clientArtifact = stageAndPack(tools, clientInfo, artifactDir, stageRoot);
+    const clientArtifact = stageAndPack(tools, packages.client, artifactDir, stageRoot);
     const clientDependency = { name: packages.client.name, version: clientArtifact.version, tarball: clientArtifact.filename, integrity: clientArtifact.integrity };
     writeStableJson(join(distRoot(packages.ui), "provenance.json"), provenance(packages.ui, identity, clientDependency));
-    const uiInfo = { ...packages.ui, key: "ui" };
-    const uiArtifact = stageAndPack(tools, uiInfo, artifactDir, stageRoot, clientDependency);
+    const uiArtifact = stageAndPack(tools, packages.ui, artifactDir, stageRoot, clientDependency);
     const manifest = {
       ...identity,
       packages: {
