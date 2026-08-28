@@ -51,6 +51,8 @@ echo "go-ci: serial real Go/TypeScript browser PTY E2E"
 go_gate_stage 600 "$script_dir/go-browser-e2e.sh"
 echo "go-ci: serial real Go/TypeScript browser PTY race E2E"
 go_gate_stage 600 "$script_dir/go-browser-e2e.sh" --race
+echo "go-ci: serial black-box daemon lifecycle E2E"
+go_gate_stage 900 "$script_dir/go-daemon-e2e.sh"
 echo "go-ci: git diff --check"
 go_gate_stage 120 "$go_gate_git" diff --check
 echo "go-ci: NOTE: final system census remains a cutover-only gate"
