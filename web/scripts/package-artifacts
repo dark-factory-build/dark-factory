@@ -134,8 +134,9 @@ def candidate_paths(reviewed_version, explicit):
 
 def hash_node(candidate, reviewed):
     candidate = os.path.abspath(candidate)
-    if os.path.realpath(candidate) != candidate:
+    if os.path.islink(candidate):
         fail("candidate Node must not be a symlink")
+    canonical = os.path.realpath(candidate)
     try:
         before = os.lstat(candidate)
     except OSError as error:
@@ -158,11 +159,11 @@ def hash_node(candidate, reviewed):
     except OSError as error:
         fail(f"could not hash candidate Node: {error}")
     fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_size", "st_mtime_ns", "st_ctime_ns")
-    if any(getattr(before, field) != getattr(after, field) for field in fields) or os.path.realpath(candidate) != candidate:
+    if any(getattr(before, field) != getattr(after, field) for field in fields) or os.path.islink(candidate) or os.path.realpath(candidate) != canonical:
         fail("candidate Node changed while hashing")
     if digest.hexdigest() != reviewed["sha512"]:
         fail("candidate Node content differs from reviewed toolchain")
-    return candidate
+    return canonical
 
 
 def parse_launcher_args(argv):

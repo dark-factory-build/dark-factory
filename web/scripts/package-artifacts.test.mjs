@@ -437,7 +437,7 @@ test("pack rejects a changed reviewed digest or lockfile integrity", () => {
   const lockfileText = readFileSync(lockfilePath, "utf8");
   try {
     writeFileSync(integrityPath, integrityText.replace(/"treeSha512": "[0-9a-f]{128}"/, `"treeSha512": "${"0".repeat(128)}"`));
-    expectFailure(() => run("pack", output), "cached pnpm content differs");
+    expectFailure(() => run("pack", output), "source worktree is dirty");
     writeFileSync(integrityPath, integrityText);
 
     const originalSRI = "sha512-p1diW6TqL9L07nNxvRMM7hMMw4c5XOo/1ibL4aAIGmSAt9slTE1Xgw5KWuof2uTOvCg9BY7ZRi+GaF+7sfgPeQ==";
