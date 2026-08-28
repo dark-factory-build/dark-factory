@@ -249,6 +249,7 @@ assert_umask 0077
 
 umask 0077
 mode=rm-fail
+go_gate_web_remove "$tree"
 go_gate_web_remove() { return 37; }
 if go_gate_web_install; then exit 59; else result=$?; fi
 [ "$result" -eq 1 ] || exit 60
