@@ -753,7 +753,7 @@ async function main(argv) {
 
 // This module is intentionally import-only. The pre-Node launcher imports
 // main through a fixed eval entry after validating the Node executable.
-if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
+if (process.argv[1] && !process.argv[1].startsWith("file:") && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
   process.stderr.write("package artifacts: use the package-artifacts launcher\n");
   process.exitCode = 1;
 }
