@@ -246,6 +246,60 @@ func terminalCommitProven(runtimePath string, runtimeIdentity runner.FileIdentit
 	return present && terminal.Exit.Code == -1 && terminal.Exit.Signal > 0 && signal == int64(terminal.Exit.Signal)
 }
 
+// OuterActivated, InnerActivated and HasAttemptResult expose the recovered
+// census facts the recovery sweep classifies on.
+func (recovered *RecoveredRuntime) OuterActivated() bool {
+	return recovered != nil && hasRecoveredFile(recovered.files, runner.OuterActivationMarkerName)
+}
+
+func (recovered *RecoveredRuntime) InnerActivated() bool {
+	return recovered != nil && hasRecoveredFile(recovered.files, runner.InnerActivationMarkerName)
+}
+
+func (recovered *RecoveredRuntime) HasAttemptResult() bool {
+	return recovered != nil && hasRecoveredFile(recovered.files, runner.AttemptResultSpoolName)
+}
+
+// AuthenticateResult promotes the recovered artifact to durable evidence.
+// There is no notice on the recovery path; the exact canonical bytes and the
+// recovered census are the only authority.
+func (recovered *RecoveredRuntime) AuthenticateResult(attemptID string) (*runner.AttemptResultRecord, error) {
+	if recovered == nil || recovered.runtime == nil {
+		return nil, invalidContract(nil)
+	}
+	recovered.runtime.mu.Lock()
+	defer recovered.runtime.mu.Unlock()
+	if err := recovered.verifyAuthority(); err != nil {
+		return nil, err
+	}
+	record, err := runner.AuthenticateAttemptResult(recovered.runtime.dir, attemptID, nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := recovered.verifyAuthority(); err != nil {
+		return nil, err
+	}
+	return record, nil
+}
+
+// RemoveResult removes exactly the authenticated artifact after the caller
+// holds the durable removal authorization for the same result.
+func (recovered *RecoveredRuntime) RemoveResult(record *runner.AttemptResultRecord) error {
+	if recovered == nil || recovered.runtime == nil || record == nil {
+		return invalidContract(nil)
+	}
+	recovered.runtime.mu.Lock()
+	defer recovered.runtime.mu.Unlock()
+	if err := recovered.verifyAuthority(); err != nil {
+		return err
+	}
+	if err := runner.RemoveAttemptResult(recovered.runtime.dir, record); err != nil {
+		return invalidContract(err)
+	}
+	delete(recovered.files, runner.AttemptResultSpoolName)
+	return recovered.verifyAuthority()
+}
+
 func (recovered *RecoveredRuntime) verifyAuthority() error {
 	if recovered == nil || recovered.runtime == nil {
 		return invalidContract(nil)
@@ -292,6 +346,7 @@ func inspectRecoveredRuntimeCensus(rootFD int, device uint64) (map[string]unix.S
 	config := hasRecoveredFile(files, workerConfigName)
 	outer := hasRecoveredFile(files, runner.OuterActivationMarkerName)
 	inner := hasRecoveredFile(files, runner.InnerActivationMarkerName)
+	result := hasRecoveredFile(files, runner.AttemptResultSpoolName)
 	terminal := hasRecoveredFile(files, runner.TerminalSpoolName)
 	terminalScratch := hasRecoveredFile(files, runner.TerminalScratchName)
 	gateConfig := hasRecoveredFile(files, runner.GateConfigScratchName)
@@ -328,6 +383,15 @@ func inspectRecoveredRuntimeCensus(rootFD int, device uint64) (map[string]unix.S
 	if gateStdin && outer {
 		return nil, invalidContract(nil)
 	}
+	// The artifact writer is the outer attempt-runner target, which executes
+	// only after the durable outer marker and always after the token publish.
+	// Content rules stay in authentication; the census only pins provenance.
+	if result && (!outer || !token) {
+		return nil, invalidContract(nil)
+	}
+	if result && gateScratch {
+		return nil, invalidContract(nil)
+	}
 	return files, nil
 }
 
@@ -348,6 +412,10 @@ func validRecoveredRuntimeFile(name string, stat unix.Stat_t, device uint64) boo
 	case runner.OuterActivationMarkerName, runner.InnerActivationMarkerName,
 		runner.GateConfigScratchName, runner.GateStdinScratchName:
 		return stat.Size == 0
+	case runner.AttemptResultSpoolName:
+		// The publish contract bounds the canonical result body at 1 KiB. A
+		// torn publish may be smaller; authentication rules the content.
+		return stat.Size >= 0 && stat.Size <= 1024
 	case runner.TerminalSpoolName:
 		return stat.Size > 0 && stat.Size <= recoveredTerminalLimit
 	case runner.TerminalScratchName:
