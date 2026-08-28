@@ -85,7 +85,13 @@ const TERMINAL_PHASE_LABELS: Record<FactoryTerminalView["phase"], string> = {
   closed: "CLOSED",
 };
 
-function TerminalSidebar({
+/**
+ * The persistent terminal sidebar. Collapse is purely visual: the body is
+ * clipped by CSS while the terminal, its session, and any held control
+ * survive — unmounting on collapse would tear the surface down and forfeit
+ * the control lease for a presentation gesture.
+ */
+export function TerminalSidebar({
   terminal,
   snapshot,
   collapsed,
@@ -113,51 +119,49 @@ function TerminalSidebar({
     snapshot.selectedHumanRequest.request.agent_id === terminal.agentId &&
     snapshot.selectedHumanRequest.canCancel &&
     snapshot.selectedHumanRequest.phase === "ready";
-  if (collapsed) {
-    return (
-      <aside className="dfConsoleSidebar dfConsoleSidebar--collapsed" aria-label="Terminal (collapsed)">
+  return (
+    <aside className={`dfConsoleSidebar${collapsed ? " dfConsoleSidebar--collapsed" : ""}`} aria-label={collapsed ? "Terminal (collapsed)" : "Terminal"}>
+      {!collapsed ? null : (
         <button type="button" className="dfConsoleSidebar__tab" onClick={onToggleCollapsed} title={`open the terminal for ${terminal.agentName}`}>
           {terminal.agentName}
         </button>
-      </aside>
-    );
-  }
-  return (
-    <aside className="dfConsoleSidebar" aria-label="Terminal">
-      <div className="dfConsoleSidebar__header">
-        <strong>{terminal.agentName}</strong>
-        <span className="dfConsoleSidebar__phase">{TERMINAL_PHASE_LABELS[terminal.phase]}</span>
-        <span className={`dfConsoleSidebar__control${terminal.writable ? " dfConsoleSidebar__control--held" : ""}`}>
-          {terminal.writable ? "you have control" : "watching"}
-        </span>
+      )}
+      <div className="dfConsoleSidebar__body" aria-hidden={collapsed ? "true" : undefined}>
+        <div className="dfConsoleSidebar__header">
+          <strong>{terminal.agentName}</strong>
+          <span className="dfConsoleSidebar__phase">{TERMINAL_PHASE_LABELS[terminal.phase]}</span>
+          <span className={`dfConsoleSidebar__control${terminal.writable ? " dfConsoleSidebar__control--held" : ""}`}>
+            {terminal.writable ? "you have control" : "watching"}
+          </span>
+        </div>
+        <div className="dfConsoleSidebar__actions">
+          {terminal.writable ? (
+            <button type="button" disabled={busyLease} onClick={onHandBack}>hand back</button>
+          ) : (
+            <button type="button" disabled={busyLease || terminal.phase !== "ready"} onClick={onTakeControl}>take control</button>
+          )}
+          <button
+            type="button"
+            disabled={busyLease || terminal.writable || terminal.phase !== "ready"}
+            title={terminal.writable ? "you have control — type in the terminal" : "takes control so you can type"}
+            onClick={() => { if (!terminal.writable) onTakeControl(); }}
+          >
+            Steer
+          </button>
+          <button
+            type="button"
+            disabled={!stopReady}
+            title={stopReady ? "stop this run" : `needs: ${stopUnavailable}`}
+            onClick={() => { if (stopReady) onStop(); }}
+          >
+            Stop
+          </button>
+          <button type="button" onClick={onToggleCollapsed} title="collapse the terminal">»</button>
+          <button type="button" onClick={onClose} title="close the terminal">×</button>
+        </div>
+        {terminal.error === undefined ? null : <p className="dfFactoryConsole__terminalError" role="alert">TERMINAL UNAVAILABLE</p>}
+        {children}
       </div>
-      <div className="dfConsoleSidebar__actions">
-        {terminal.writable ? (
-          <button type="button" disabled={busyLease} onClick={onHandBack}>hand back</button>
-        ) : (
-          <button type="button" disabled={busyLease || terminal.phase !== "ready"} onClick={onTakeControl}>take control</button>
-        )}
-        <button
-          type="button"
-          disabled={busyLease || (terminal.writable ? false : terminal.phase !== "ready")}
-          title={terminal.writable ? "you have control — type in the terminal" : "takes control so you can type"}
-          onClick={() => { if (!terminal.writable) onTakeControl(); }}
-        >
-          steer
-        </button>
-        <button
-          type="button"
-          disabled={!stopReady}
-          title={stopReady ? "cancel this run" : `needs: ${stopUnavailable}`}
-          onClick={() => { if (stopReady) onStop(); }}
-        >
-          stop
-        </button>
-        <button type="button" onClick={onToggleCollapsed} title="collapse the terminal">»</button>
-        <button type="button" onClick={onClose} title="close the terminal">×</button>
-      </div>
-      {terminal.error === undefined ? null : <p className="dfFactoryConsole__terminalError" role="alert">TERMINAL UNAVAILABLE</p>}
-      {children}
     </aside>
   );
 }

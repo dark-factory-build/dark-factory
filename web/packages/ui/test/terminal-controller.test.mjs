@@ -27,6 +27,7 @@ function harness({
   onSessionClose = () => {},
   closeOnOpen = false,
   closeOnAcquire = false,
+  releaseBusy = 0,
 } = {}) {
   const snapshots = [];
   const writes = [];
@@ -45,6 +46,7 @@ function harness({
   let releasePending = false;
   let acquireCalls = 0;
   let releaseCalls = 0;
+  let releaseBusyRemaining = releaseBusy;
   const surfaceGate = deferred();
   let surfacePending = false;
   let surfaceAborts = 0;
@@ -58,8 +60,12 @@ function harness({
       return acquireGate.promise;
     },
     releaseInput: () => {
-      releasePending = true;
       releaseCalls += 1;
+      if (releaseBusyRemaining > 0) {
+        releaseBusyRemaining -= 1;
+        return Promise.reject(new SessionError("invalid_request"));
+      }
+      releasePending = true;
       return releaseGate.promise;
     },
     sendInput: (bytes) => {
@@ -583,6 +589,7 @@ test("hand back stops input before releasing and stays an attached observer", as
   assert.equal(context.controller.snapshot.leaseOperation, "releasing");
   assert.equal(context.controller.sendText("blocked\n"), false);
   assert.equal(context.controller.handBack(), false, "one lease operation at a time");
+  assert.equal(context.releaseCalls(), 0, "release is not sent while input is still draining");
   context.inputCalls[0].result.resolve({ status: "accepted", acceptedBytes: 3n });
   await tick();
   await tick();
@@ -602,11 +609,15 @@ test("a failed hand-back release is authority uncertainty and closes", async () 
   const context = harness();
   await ready(context);
   assert.equal(context.controller.handBack(), true);
+  // A sent release that errors fatals the real client handle
+  // (terminal_session.ts settleError: kind "release" -> #fatal), so the
+  // rejection always arrives with a dead handle. Model both effects.
+  context.callbacks().onClose(new SessionError("connection"));
   context.releaseGate().reject(new SessionError("connection"));
   await tick();
   assert.equal(context.controller.snapshot.phase, "closed");
   assert.equal(context.controller.snapshot.writable, false);
-  assert.equal(context.sessionCloses(), 1);
+  assert.equal(context.controller.snapshot.error.code, "connection");
 });
 
 test("stale generations fence late lease results after close", async () => {
@@ -628,4 +639,33 @@ test("stale generations fence late lease results after close", async () => {
   assert.deepEqual(context.controller.snapshot, before, "a late lease result cannot mutate a closed controller");
   assert.equal(context.controller.snapshot.phase, "closed");
   assert.equal(context.controller.snapshot.writable, false);
+});
+
+test("a busy pre-send release rejection is retryable and keeps control, not uncertainty", async () => {
+  const context = harness({ releaseBusy: 1 });
+  await ready(context);
+  assert.equal(context.controller.handBack(), true);
+  await tick();
+  await tick();
+  assert.equal(context.releaseCalls(), 1);
+  assert.equal(context.controller.snapshot.phase, "ready", "a never-sent release cannot close the terminal");
+  assert.equal(context.controller.snapshot.writable, true, "the lease is still ours, so control returns");
+  assert.equal(context.controller.snapshot.leaseOperation, "none");
+  assert.equal(context.controller.snapshot.error, undefined);
+  assert.equal(context.sessionCloses(), 0);
+  assert.equal(context.controller.sendText("still mine\n"), true, "input continues after the busy rejection");
+  await tick();
+  context.inputCalls[0].result.resolve({ status: "accepted", acceptedBytes: 10n });
+  await tick();
+  assert.equal(context.controller.handBack(), true, "the release retries once the client is free");
+  await tick();
+  await tick();
+  assert.equal(context.releaseCalls(), 2);
+  context.releaseGate().resolve({ released: true });
+  await tick();
+  assert.equal(context.controller.snapshot.phase, "ready");
+  assert.equal(context.controller.snapshot.writable, false);
+  assert.equal(context.controller.snapshot.leaseOperation, "none");
+  assert.equal(context.sessionCloses(), 0);
+  await context.controller.close();
 });

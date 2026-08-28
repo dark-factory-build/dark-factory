@@ -463,7 +463,13 @@
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
+/* Collapse clips; it never unmounts. The body keeps its laid-out width so
+   the live terminal (and any held control) survives with exact dimensions
+   and needs no refit on expand. */
+.dfConsoleSidebar { position: relative; overflow: hidden; }
 .dfConsoleSidebar--collapsed { flex: 0 0 2.2rem; padding: 0.5rem 0.2rem; border-left-color: var(--df-console-rule); }
+.dfConsoleSidebar__body { display: flex; flex: 1 1 auto; flex-direction: column; gap: 0.6rem; min-height: 0; width: 30.5rem; }
+.dfConsoleSidebar--collapsed .dfConsoleSidebar__body { position: absolute; visibility: hidden; pointer-events: none; }
 .dfConsoleSidebar__tab { border: 0; background: transparent; color: var(--df-console-muted); writing-mode: vertical-rl; font-size: 0.75rem; cursor: pointer; }
 .dfConsoleSidebar__header { display: flex; align-items: baseline; gap: 0.75rem; }
 .dfConsoleSidebar__header strong { font-size: 0.95rem; }

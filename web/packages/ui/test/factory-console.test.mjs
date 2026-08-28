@@ -4,6 +4,7 @@ import { createElement, isValidElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ProtocolError, SessionError } from "@dark-factory/client";
 import { FactoryApp, FactoryConsole } from "../dist/src/index.js";
+import { TerminalSidebar } from "../dist/src/factory-app.js";
 import { fixtureState } from "../../../fixtures/state.mjs";
 import { fixtureConsoleExtras } from "../../../fixtures/console.mjs";
 
@@ -101,10 +102,26 @@ test("the console never shows a kernel-grammar or retired vocabulary word", () =
     onNavigate: () => {},
     onSelectAgent: () => {},
   };
-  for (const screen of SCREENS) {
-    const markup = render({ ...withDetail, extras: fixtureConsoleExtras, screen });
-    for (const forbidden of [/attempt/i, /converge/i, /admission/i, /finalize/i, /unresolved/i, /proposal/i, /verdict/i, /\bALLOW\b/, /\bBLOCK\b/, /lease/i, /intake/i, /quarantine/i, /overseer/i, /work item/i]) {
-      assert.equal(forbidden.test(markup), false, `${screen.kind}: ${forbidden}`);
+  const sidebarView = (overrides = {}) => createElement(TerminalSidebar, {
+    terminal: { agentId: "21".repeat(16), agentName: "Builder One", agentRevision: 10n, phase: "ready", writable: false, leaseOperation: "none", surfaceVersion: 0, ...overrides.terminal },
+    snapshot: { status: "ready" },
+    collapsed: overrides.collapsed ?? false,
+    onToggleCollapsed: () => {},
+    onClose: () => {},
+    onTakeControl: () => {},
+    onHandBack: () => {},
+    onStop: () => {},
+    stopUnavailable: "daemon per-run stop authority outside NEEDS YOU",
+  }, createElement("div"));
+  const surfaces = [
+    ...SCREENS.map((screen) => [screen.kind, render({ ...withDetail, extras: fixtureConsoleExtras, screen })]),
+    ["sidebar", renderToStaticMarkup(sidebarView())],
+    ["sidebar-writable", renderToStaticMarkup(sidebarView({ terminal: { writable: true } }))],
+    ["sidebar-collapsed", renderToStaticMarkup(sidebarView({ collapsed: true }))],
+  ];
+  for (const [name, markup] of surfaces) {
+    for (const forbidden of [/attempt/i, /converge/i, /admission/i, /finalize/i, /unresolved/i, /proposal/i, /verdict/i, /\bALLOW\b/, /\bBLOCK\b/, /lease/i, /intake/i, /quarantine/i, /overseer/i, /work item/i, /cancel run/i]) {
+      assert.equal(forbidden.test(markup), false, `${name}: ${forbidden}`);
     }
   }
 });
@@ -272,7 +289,7 @@ test("selected hostile private detail is escaped and actions remain semantic", (
   assert.equal(markup.includes("<script>"), false);
   assert.match(markup, /<textarea[^>]*>&lt;reply&gt;<\/textarea>/);
   assert.match(markup, />ANSWER</);
-  assert.match(markup, /CANCEL RUN/);
+  assert.match(markup, />Stop</);
   assert.equal(markup.includes("expectedRunRevision"), false);
 });
 
@@ -302,7 +319,7 @@ test("request, reply, cancel, and close controls forward only presentation inten
   selectedElements.find((element) => element.type === "textarea").props.onChange({ currentTarget: { value: "Proceed." } });
   let prevented = false;
   selectedElements.find((element) => element.type === "form").props.onSubmit({ preventDefault: () => { prevented = true; } });
-  selectedElements.find((element) => element.type === "button" && element.props.children === "CANCEL RUN").props.onClick();
+  selectedElements.find((element) => element.type === "button" && element.props.children === "Stop").props.onClick();
   selectedElements.find((element) => element.type === "button" && element.props.children === "CLOSE").props.onClick();
   assert.equal(prevented, true);
   assert.deepEqual(calls.slice(1), [["change", "Proceed."], ["reply"], ["cancel"], ["close"]]);

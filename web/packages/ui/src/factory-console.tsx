@@ -261,7 +261,7 @@ function HumanRequestPanel({
             </form>
           ) : null}
           <div className="dfFactoryConsole__humanActions">
-            {selected.canCancel ? <button type="button" disabled={busy || onCancel === undefined} onClick={onCancel}>CANCEL RUN</button> : null}
+            {selected.canCancel ? <button type="button" disabled={busy || onCancel === undefined} onClick={onCancel}>Stop</button> : null}
             {onOpenTerminal === undefined ? null : <button type="button" disabled={busy || !terminalReady} onClick={() => onOpenTerminal(selected.request)}>OPEN TERMINAL</button>}
             <button type="button" disabled={busy || onClose === undefined} onClick={onClose}>CLOSE</button>
           </div>

@@ -193,6 +193,23 @@ class TerminalController {
         this.#publish();
       } catch (error) {
         if (!this.#current(generation)) return;
+        // A concurrent client operation (a lease renewal, a pending output
+        // callback) rejects the release before anything is sent, and the
+        // lease is still ours: that is retryable busyness, not authority
+        // uncertainty. Only a release that may have reached the daemon
+        // fails closed.
+        let leaseStillHeld = false;
+        try {
+          leaseStillHeld = this.#liveHandle(handle) && handle.writable;
+        } catch {
+          leaseStillHeld = false;
+        }
+        if (leaseStillHeld) {
+          this.#leaseOperation = "none";
+          this.#writable = true;
+          this.#publish();
+          return;
+        }
         this.#leaseOperation = "none";
         this.#fail(finiteError(error));
       }
