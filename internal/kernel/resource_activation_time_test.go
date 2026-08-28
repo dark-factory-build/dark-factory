@@ -10,21 +10,20 @@ func TestResourceActivationTimeIsAtomicAndDurable(t *testing.T) {
 	store, run, _ := admittedOrchestratorRun(t)
 	path := storePath(t, store)
 	resources := resourcesForRunTest(t, store, run.ID)
-	provider := resourceOfKind(t, resources, ResourceProviderProcess)
-	group := resourceOfKind(t, resources, ResourceProviderGroup)
-	providerAt := mustTime(t, 20)
-	activeProvider, activeGroup, err := store.ActivateProviderResources(context.Background(), run.ID, provider.ID, provider.Revision, group.ID, group.Revision, processIdentity(t, 960), providerAt)
+	runtime := resourceOfKind(t, resources, ResourceRuntimeRoot)
+	runtimeIdentity, _ := NewPathResourceIdentity(960, 961)
+	if _, err := store.ActivateResource(context.Background(), run.ID, runtime.ID, runtime.Revision, runtimeIdentity, mustTime(t, 19)); err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	runner := resourceOfKind(t, resources, ResourceRunnerProcess)
+	started, starting, err := store.BeginRunnerStart(context.Background(), run.ID, runner.ID, run.Revision, runner.Revision, mustTime(t, 20))
 	if err != nil {
 		store.Close()
 		t.Fatal(err)
 	}
-	if activeProvider.ActivatedAt == nil || activeGroup.ActivatedAt == nil || activeProvider.ActivatedAt.Int64() != providerAt.Int64() || activeGroup.ActivatedAt.Int64() != providerAt.Int64() {
-		store.Close()
-		t.Fatalf("provider activation times = %+v, %+v", activeProvider, activeGroup)
-	}
-	runner := resourceOfKind(t, resources, ResourceRunnerProcess)
 	runnerAt := mustTime(t, 21)
-	activeRunner, err := store.ActivateResource(context.Background(), run.ID, runner.ID, runner.Revision, processIdentity(t, 961), runnerAt)
+	activatedRun, activeRunner, err := store.ActivateRunner(context.Background(), run.ID, runner.ID, started.Revision, starting.Revision, processIdentity(t, 962), runnerAt)
 	if err != nil {
 		store.Close()
 		t.Fatal(err)
@@ -33,6 +32,19 @@ func TestResourceActivationTimeIsAtomicAndDurable(t *testing.T) {
 		store.Close()
 		t.Fatalf("runner activation time = %+v", activeRunner)
 	}
+	provider := resourceOfKind(t, resources, ResourceProviderProcess)
+	group := resourceOfKind(t, resources, ResourceProviderGroup)
+	providerAt := mustTime(t, 22)
+	activeProvider, activeGroup, err := store.ActivateProviderResources(context.Background(), run.ID, provider.ID, provider.Revision, group.ID, group.Revision, processIdentity(t, 963), providerAt)
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	if activeProvider.ActivatedAt == nil || activeGroup.ActivatedAt == nil || activeProvider.ActivatedAt.Int64() != providerAt.Int64() || activeGroup.ActivatedAt.Int64() != providerAt.Int64() {
+		store.Close()
+		t.Fatalf("provider activation times = %+v, %+v", activeProvider, activeGroup)
+	}
+	_ = activatedRun
 
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
@@ -52,6 +64,9 @@ func TestResourceActivationTimeIsAtomicAndDurable(t *testing.T) {
 }
 
 func TestProcessExitBeforeResourceActivationIsRejectedWithoutFootprint(t *testing.T) {
+	// The runner boundary lives on RecordLiveRunnerExitAndRelease and is
+	// covered by TestProcessExitTimeIsBoundedByRunLifetime/runner/input;
+	// generic runner exit observation no longer exists.
 	for _, test := range []struct {
 		name    string
 		kind    ResourceKind
@@ -59,10 +74,6 @@ func TestProcessExitBeforeResourceActivationIsRejectedWithoutFootprint(t *testin
 	}{
 		{name: "provider", kind: ResourceProviderProcess, observe: func(store *Store, run Run, identity ResourceIdentity, exit ProcessExit) error {
 			_, err := store.ObserveProviderExit(context.Background(), run.ID, run.Revision, identity, exit, mustTime(t, 40))
-			return err
-		}},
-		{name: "runner", kind: ResourceRunnerProcess, observe: func(store *Store, run Run, identity ResourceIdentity, exit ProcessExit) error {
-			_, err := store.ObserveRunnerExit(context.Background(), run.ID, run.Revision, identity, exit, mustTime(t, 40))
 			return err
 		}},
 	} {
@@ -93,68 +104,77 @@ func TestProcessExitBeforeResourceActivationIsRejectedWithoutFootprint(t *testin
 }
 
 func TestProcessExitAtResourceActivationIsAccepted(t *testing.T) {
-	for _, test := range []struct {
-		name    string
-		kind    ResourceKind
-		observe func(*Store, Run, ResourceIdentity, ProcessExit) (Run, error)
-	}{
-		{name: "provider", kind: ResourceProviderProcess, observe: func(store *Store, run Run, identity ResourceIdentity, exit ProcessExit) (Run, error) {
-			return store.ObserveProviderExit(context.Background(), run.ID, run.Revision, identity, exit, mustTime(t, 40))
-		}},
-		{name: "runner", kind: ResourceRunnerProcess, observe: func(store *Store, run Run, identity ResourceIdentity, exit ProcessExit) (Run, error) {
-			return store.ObserveRunnerExit(context.Background(), run.ID, run.Revision, identity, exit, mustTime(t, 40))
-		}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			store, run, _ := runningOrchestratorRun(t)
-			defer store.Close()
-			resource := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), test.kind)
-			if resource.ActivatedAt == nil {
-				t.Fatalf("resource has no activation time = %+v", resource)
-			}
-			exit, err := NewProcessExitCode(1, 0, *resource.ActivatedAt)
-			if err != nil {
-				t.Fatal(err)
-			}
-			observed, err := test.observe(store, run, resource.Identity, exit)
-			if err != nil || observed.Phase != RunFinalizing {
-				t.Fatalf("boundary exit = %+v, %v", observed, err)
-			}
-		})
-	}
+	t.Run("provider", func(t *testing.T) {
+		store, run, _ := runningOrchestratorRun(t)
+		defer store.Close()
+		resource := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceProviderProcess)
+		if resource.ActivatedAt == nil {
+			t.Fatalf("resource has no activation time = %+v", resource)
+		}
+		exit, err := NewProcessExitCode(1, 0, *resource.ActivatedAt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		observed, err := store.ObserveProviderExit(context.Background(), run.ID, run.Revision, resource.Identity, exit, mustTime(t, 40))
+		if err != nil || observed.Phase != RunFinalizing {
+			t.Fatalf("boundary exit = %+v, %v", observed, err)
+		}
+	})
+
+	t.Run("runner", func(t *testing.T) {
+		store, current, runner := prepareRunnerRelease(t)
+		defer store.Close()
+		if runner.ActivatedAt == nil {
+			t.Fatalf("runner has no activation time = %+v", runner)
+		}
+		exit, err := NewProcessExitCode(1, 0, *runner.ActivatedAt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		observed, _, err := store.RecordLiveRunnerExitAndRelease(context.Background(), current.ID, runner.ID, current.Revision, runner.Revision, runner.Identity, exit, mustTime(t, 43))
+		if err != nil || observed.Phase != RunFinalizing || observed.RunnerExit == nil || !observed.RunnerExit.equal(exit) {
+			t.Fatalf("boundary runner exit = %+v, %v", observed, err)
+		}
+	})
 }
 
 func TestPersistedProcessExitBeforeResourceActivationFailsEveryBoundary(t *testing.T) {
 	for _, test := range []struct {
 		name    string
 		column  string
-		kind    ResourceKind
-		observe func(*Store, Run, ResourceIdentity, ProcessExit) (Run, error)
+		prepare func(*testing.T) (*Store, Run, Resource)
+		observe func(*Store, Run, Resource, ProcessExit) (Run, error)
 	}{
-		{name: "provider", column: "provider_exit_at_ms", kind: ResourceProviderProcess, observe: func(store *Store, run Run, identity ResourceIdentity, exit ProcessExit) (Run, error) {
-			return store.ObserveProviderExit(context.Background(), run.ID, run.Revision, identity, exit, mustTime(t, 40))
+		{name: "provider", column: "provider_exit_at_ms", prepare: func(t *testing.T) (*Store, Run, Resource) {
+			store, run, _ := runningOrchestratorRun(t)
+			return store, run, resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceProviderProcess)
+		}, observe: func(store *Store, run Run, resource Resource, exit ProcessExit) (Run, error) {
+			return store.ObserveProviderExit(context.Background(), run.ID, run.Revision, resource.Identity, exit, mustTime(t, 44))
 		}},
-		{name: "runner", column: "runner_exit_at_ms", kind: ResourceRunnerProcess, observe: func(store *Store, run Run, identity ResourceIdentity, exit ProcessExit) (Run, error) {
-			return store.ObserveRunnerExit(context.Background(), run.ID, run.Revision, identity, exit, mustTime(t, 40))
+		{name: "runner", column: "runner_exit_at_ms", prepare: func(t *testing.T) (*Store, Run, Resource) {
+			return prepareRunnerRelease(t)
+		}, observe: func(store *Store, run Run, resource Resource, exit ProcessExit) (Run, error) {
+			observed, _, err := store.RecordLiveRunnerExitAndRelease(context.Background(), run.ID, resource.ID, run.Revision, resource.Revision, resource.Identity, exit, mustTime(t, 44))
+			return observed, err
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Run("Run", func(t *testing.T) {
-				store, run := corruptPersistedExitBeforeActivation(t, test.column, test.kind, test.observe)
+				store, run := corruptPersistedExitBeforeActivation(t, test.column, test.prepare, test.observe)
 				defer store.Close()
 				if _, _, err := store.Run(context.Background(), run.ID); !errors.Is(err, ErrCorruptState) {
 					t.Fatalf("corrupt persisted %s exit read = %v", test.name, err)
 				}
 			})
 			t.Run("RecoverableRuns", func(t *testing.T) {
-				store, _ := corruptPersistedExitBeforeActivation(t, test.column, test.kind, test.observe)
+				store, _ := corruptPersistedExitBeforeActivation(t, test.column, test.prepare, test.observe)
 				defer store.Close()
 				if _, err := store.RecoverableRuns(context.Background()); !errors.Is(err, ErrCorruptState) {
 					t.Fatalf("corrupt persisted %s exit recovery = %v", test.name, err)
 				}
 			})
 			t.Run("Open", func(t *testing.T) {
-				store, run := corruptPersistedExitBeforeActivation(t, test.column, test.kind, test.observe)
+				store, run := corruptPersistedExitBeforeActivation(t, test.column, test.prepare, test.observe)
 				path := storePath(t, store)
 				if err := store.Close(); err != nil {
 					t.Fatal(err)
@@ -168,7 +188,7 @@ func TestPersistedProcessExitBeforeResourceActivationFailsEveryBoundary(t *testi
 				_ = run
 			})
 			t.Run("FinalizeRun", func(t *testing.T) {
-				store, run := corruptPersistedExitBeforeActivation(t, test.column, test.kind, test.observe)
+				store, run := corruptPersistedExitBeforeActivation(t, test.column, test.prepare, test.observe)
 				defer store.Close()
 				before := captureWriteFootprint(t, store)
 				if _, err := store.FinalizeRun(context.Background(), run.ID, run.Revision, mustTime(t, 60)); !errors.Is(err, ErrCorruptState) {
@@ -182,16 +202,15 @@ func TestPersistedProcessExitBeforeResourceActivationFailsEveryBoundary(t *testi
 	}
 }
 
-func corruptPersistedExitBeforeActivation(t *testing.T, column string, kind ResourceKind, observe func(*Store, Run, ResourceIdentity, ProcessExit) (Run, error)) (*Store, Run) {
+func corruptPersistedExitBeforeActivation(t *testing.T, column string, prepare func(*testing.T) (*Store, Run, Resource), observe func(*Store, Run, Resource, ProcessExit) (Run, error)) (*Store, Run) {
 	t.Helper()
-	store, run, _ := runningOrchestratorRun(t)
-	resource := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), kind)
-	exit, err := NewProcessExitCode(1, 0, mustTime(t, 40))
+	store, run, resource := prepare(t)
+	exit, err := NewProcessExitCode(1, 0, mustTime(t, 43))
 	if err != nil {
 		store.Close()
 		t.Fatal(err)
 	}
-	observed, err := observe(store, run, resource.Identity, exit)
+	observed, err := observe(store, run, resource, exit)
 	if err != nil {
 		store.Close()
 		t.Fatal(err)
@@ -204,16 +223,16 @@ func TestDirectReleaseRetainsNilActivationTime(t *testing.T) {
 	store, run, _ := admittedOrchestratorRun(t)
 	defer store.Close()
 	failure, _ := NewFailureProposal(FailureActivation, "pre-exec cleanup")
-	if _, err := store.FailRun(context.Background(), run.ID, run.Revision, failure, mustTime(t, 20)); err != nil {
+	runtime := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
+	if _, err := store.FailRunWithRuntimeAbsent(context.Background(), run.ID, runtime.ID, run.Revision, runtime.Revision, failure, mustTime(t, 20)); err != nil {
 		t.Fatal(err)
 	}
 	for _, resource := range resourcesForRunTest(t, store, run.ID) {
-		released, err := store.ReleaseResource(context.Background(), run.ID, resource.ID, resource.Revision, resource.Identity, mustTime(t, 21))
-		if err != nil {
-			t.Fatalf("release %s = %v", resource.Kind, err)
+		if resource.State != ResourceReleased {
+			t.Fatalf("no-start failure left resource unreleased = %+v", resource)
 		}
-		if released.ActivatedAt != nil {
-			t.Fatalf("directly released resource acquired activation time = %+v", released)
+		if resource.ActivatedAt != nil {
+			t.Fatalf("directly released resource acquired activation time = %+v", resource)
 		}
 	}
 }

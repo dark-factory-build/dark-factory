@@ -207,11 +207,6 @@ func TestRecoveredActiveTerminalCloseRequiresReleasedExactOwners(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			runnerExit := recoveredCloseExit(t, test.runnerExit, 2, 42)
-			current, err = store.ObserveRunnerExit(context.Background(), run.ID, current.Revision, registeredProcessIdentity(t, store, run.ID, ResourceRunnerProcess), runnerExit, mustTime(t, 42))
-			if err != nil {
-				t.Fatal(err)
-			}
 			session := terminalSessionForRunTest(t, store, run.ID)
 			if _, err := store.CloseRecoveredActiveTerminalSession(context.Background(), run.ID, session.ID, current.Revision, session.Revision, mustTime(t, 43)); !errors.Is(err, ErrRevisionConflict) {
 				t.Fatalf("active session recovered close = %v", err)
@@ -227,7 +222,26 @@ func TestRecoveredActiveTerminalCloseRequiresReleasedExactOwners(t *testing.T) {
 			if _, err := store.CloseRecoveredActiveTerminalSession(context.Background(), run.ID, session.ID, current.Revision, unresolved.Revision, mustTime(t, 44)); !errors.Is(err, ErrConflict) {
 				t.Fatalf("exit rows without released resources = %v", err)
 			}
-			releaseAllRunResources(t, store, run.ID, 50)
+			resources := resourcesForRunTest(t, store, run.ID)
+			process := resourceOfKind(t, resources, ResourceProviderProcess)
+			group := resourceOfKind(t, resources, ResourceProviderGroup)
+			current, _, _, err = store.ReleaseProviderResources(context.Background(), run.ID, process.ID, group.ID, current.Revision, process.Revision, group.Revision, process.Identity, mustTime(t, 50))
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
+			if test.runnerExit == "absence" {
+				current, _, err = store.RecordRecoveredRunnerAbsence(context.Background(), run.ID, runner.ID, current.Revision, runner.Revision, runner.Identity, mustTime(t, 51))
+			} else {
+				current, _, err = store.RecordLiveRunnerExitAndRelease(context.Background(), run.ID, runner.ID, current.Revision, runner.Revision, runner.Identity, recoveredCloseExit(t, test.runnerExit, 1, 51), mustTime(t, 51))
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtime := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
+			if _, err := store.ReleaseResource(context.Background(), run.ID, runtime.ID, runtime.Revision, runtime.Identity, mustTime(t, 52)); err != nil {
+				t.Fatal(err)
+			}
 			current, _, err = store.Run(context.Background(), run.ID)
 			if err != nil {
 				t.Fatal(err)
@@ -282,8 +296,8 @@ func TestRecoveredActiveTerminalCloseRequiresResetLeaseAndInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runnerExit := recoveredCloseExit(t, "absence", 2, 42)
-	current, err = store.ObserveRunnerExit(context.Background(), run.ID, current.Revision, registeredProcessIdentity(t, store, run.ID, ResourceRunnerProcess), runnerExit, mustTime(t, 42))
+	absentRunner := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
+	current, _, err = store.RecordRecoveredRunnerAbsence(context.Background(), run.ID, absentRunner.ID, current.Revision, absentRunner.Revision, absentRunner.Identity, mustTime(t, 42))
 	if err != nil {
 		t.Fatal(err)
 	}
