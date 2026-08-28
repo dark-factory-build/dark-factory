@@ -57,6 +57,6 @@ echo "go-ci: NOTE: final system census remains a cutover-only gate"
 echo "go-ci: PASS"
 }
 
-if [ "${GO_GATE_CI_LIBRARY-0}" -ne 1 ]; then
-    go_gate_ci_main "$@"
-fi
+case "$0" in
+    */go-ci-owned.sh) go_gate_ci_main "$@" ;;
+esac

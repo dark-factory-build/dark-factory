@@ -560,8 +560,6 @@ signal_fake_corepack=${11}
 repository_root=${12}
 . "$environment_script"
 . "$fast_stage_script"
-GO_GATE_CI_LIBRARY=1
-export GO_GATE_CI_LIBRARY
 . "$ci_script"
 go_gate_environment_setup
 go_gate_package_manager_direct=1
