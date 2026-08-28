@@ -3006,21 +3006,126 @@ internal/install is added only after client/kernel cutover readiness.
   and policy-specific refinement. It consumes a stable snapshot; it does not
   know Git, mutate the live Change, start/reap a process, or update Store.
 - `internal/provider`: concrete shell, Claude, and Codex launch-spec builders.
-  It receives frozen daemon facts and returns only executable/argv/env/private
-  config. Shell is implemented first.
+  It receives frozen daemon facts plus daemon-owned external launch
+  configuration and returns only one complete executable/argv/environment.
+  Shell is implemented first; there is no provider interface or registry.
 - `internal/api`: bounded private protocol, framing, typed wire values, and the
   three narrow clients (`HealthClient`, `OperatorClient`, `AttemptClient`). It
   has no Store or lifecycle logic.
 - `internal/browser`: loopback-only WebSocket, Host/Origin checks, pairing,
   client credentials, terminal multiplexing and bounded browser DTOs. Public
   TypeScript client/UI code lives under `web/`, never in daemon packages.
-- `internal/install`: private home/bootstrap, safe three-member archive,
-  receipt/version activation, and macOS launchd/install/update transaction,
+- `internal/install`: private home/bootstrap, one fresh three-binary install,
+  receipt, and concrete macOS launchd/service transaction,
   added late. It is concrete Darwin code, not a speculative service-manager
   interface, and is not part of kernel authority.
 
 If this graph needs forwarding packages or import cycles, collapse packages;
 do not add interfaces to preserve the sketch.
+
+### Corrected provider launch contract (pending exact cold review)
+
+An external read-only launch audit inspected `88a8ab22` and correctly found
+that the reusable PTY/process boundary already supplies the hard part: one
+registered Change worker becomes the provider in place, exact process/group/
+birth/terminal authority is registered before exec, the runner owns the live
+PTY, initial bytes are delivered once after release, and output is never
+lifecycle authority. Its proposed closed three-provider switch and deletion
+list are retained. Its implementation verdict is not adopted unchanged: the
+proposal also made external executable availability a pre-admission filter,
+gave Claude an isolated HOME while assuming ambient file authentication,
+allowed PlanOnly Bash without proving a read-only sandbox, returned mergeable
+environment additions, and used a system-only PATH that would exclude ordinary
+Go/Homebrew toolchains. Those would respectively violate global admission,
+make authentication unreliable, weaken execution mode, create duplicate
+environment policy and make the product needlessly unusable.
+
+The corrected V1 shape is one concrete `internal/provider.Build(Request)
+(Launch, error)` with an exhaustive switch over shell, Claude Code and Codex.
+`Launch` contains only the exact committed executable, ordered argv and the
+complete ordered environment; it contains no cwd, task bytes, descriptors,
+callbacks, output parser, process controls or mergeable additions. The Change
+worker always supplies the independently re-inspected final Change descriptor
+as cwd, and the runner owns process/PTY/input/reap. The adapter cannot select a
+source, run, credential, Change, terminal, completion destination or
+publication policy. Unknown provider/mode/model/effort is an error; there is
+no default arm, plugin, registry, trait-shaped interface or generic command
+builder.
+
+All provider executables are daemon-sealed absolute native commitments and
+`argv[0]` is that exact path; final exec performs no PATH lookup for the
+provider itself. Capability/version metadata probing uses null stdin, an empty
+private cwd and the same closed metadata environment, and never starts a
+session. Probe results may inform a typed post-admission launch failure but
+never enter global SQL eligibility or cause a higher canonical task to be
+skipped. A missing/changed/unsupported provider therefore follows the exact
+admitted-to-finalizing `FailureSpawn`/provider-unavailable path with no provider
+exec, rather than becoming an in-memory scheduler filter.
+
+Provider shapes are fresh interactive sessions only:
+
+- Shell is the exact committed `/bin/sh` target with `-s`, empty model/effort
+  and `Unrestricted` only. Task bytes are the shell program; model-as-command
+  behavior is deleted.
+- Claude uses the interactive root command with strict empty MCP/setting-source
+  isolation, no browser launch, the exact run UUID as fresh session ID,
+  validated optional model/effort and one explicit execution-mode policy. It
+  never uses print/prompt, resume/continue, background/cloud/remote-control,
+  prompt text or a source path in argv. `PlanOnly` must be causally proven
+  read-only even when Bash is exposed; a tool allowlist or `dontAsk` alone is
+  insufficient. `WorkspaceWrite` requires the provider's reviewed native
+  Change-bounded sandbox and fails rather than retrying unsandboxed.
+  `Unrestricted` alone may select the explicit bypass mode.
+- Codex uses the interactive root command with strict configuration, exact
+  project trust for the revalidated Change, validated optional model/effort
+  and an explicit native mode. It never uses `exec -`, prompt arguments,
+  resume, agents, app-server/remote-control or hook-trust bypass. `PlanOnly`
+  is a proven read-only profile with only the exact attempt socket permitted;
+  `WorkspaceWrite` is Change-bounded and denies ambient temporary-root escape;
+  `Unrestricted` alone uses the explicit approvals/sandbox bypass.
+
+Exact Claude/Codex flag/config spellings freeze only after deterministic native
+fake witnesses plus metadata-only checks against the supported binaries prove
+them. No real prompt/session or credential read is needed for the gate.
+Provider-aware model/effort validation has one kernel owner shared by durable
+profile reads/writes and launch validation; adapters do not duplicate model
+policy, role policy, default selection or Sol/escalation policy.
+
+The provider environment is constructed once after `env_clear`. It contains
+only the exact daemon socket, attempt-token-file path, committed `factoryctl`,
+private runtime HOME/TMPDIR, a bounded daemon-owned tool PATH whose components
+are absolute/nonempty and never task/browser supplied, controlled locale and
+`TERM=xterm-256color`, and fixed Git/GitHub/SSH prompting/discovery/config
+denials. Codex may additionally receive only its private runtime home variable.
+No proxy, API key, GitHub token, SSH agent, loader injection, operator token,
+entity ID, ambient provider home or arbitrary inherited variable survives.
+The attempt secret remains solely in its exact owner-only file; only the path
+is environmental. Interactive color is not disabled globally.
+
+Provider authentication is a separate startup-owned external boundary, never
+an adapter argument. No credential bytes appear in argv, environment, browser,
+wire/config fixtures, logs, diagnostics or errors. A file-backed provider may
+receive one exact identity-checked private runtime link/copy from a
+daemon-committed source with replacement/refusal/removal tests; a keychain-
+backed provider receives no fabricated file. Isolated HOME plus metadata-only
+health must prove the supported provider can actually locate its auth method.
+This prevents accidental exposure but does not claim hostile same-UID
+isolation.
+
+Implementation deletes `RunShell`/`runShell`, shell-path hardcoding,
+`--change-worker-shell` and the supervisor shell-only spike condition in the
+same slice that adds the closed switch; no compatibility alias remains.
+Provider-facing `ExecSpec.Stdin`/stdout/stderr fields are deleted once their
+remaining non-provider fixtures are converted to the PTY path. The causal
+matrix uses native fake executables to prove exact argv/environment/cwd for all
+provider/mode combinations, invalid/NUL/overlong controls, no ambient
+sentinels, exact descriptor cwd across path replacement, no marker before both
+registration gates/Change availability/release, input once, terminal prose not
+completing a run, auth privacy and clean process/PTY census. Required mutations
+restore `os.Environ`, Claude print/Codex exec, task bytes in argv/env,
+unsandboxed PlanOnly, default unknown-provider acceptance, exec before release,
+terminal-output completion, changed executable/capability acceptance and the
+old compatibility alias; each must be killed by its focused causal test.
 
 ### Fresh home and schema
 
