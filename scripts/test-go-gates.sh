@@ -188,6 +188,7 @@ go_gate_package_manager_stage() {
         hup) /usr/bin/perl -e 'kill "HUP", $$' ;;
         int) /usr/bin/perl -e 'kill "INT", $$' ;;
         term) /usr/bin/perl -e 'kill "TERM", $$' ;;
+        term-blocking) while :; do :; done ;;
         *) return 44 ;;
     esac
 }
@@ -260,6 +261,16 @@ for signal in hup int term; do
     esac
     assert_umask 0077
 done
+
+umask 0077
+mode=term-blocking
+go_gate_web_install &
+web_install_pid=$!
+/bin/sleep 1
+/bin/kill -TERM "$web_install_pid"
+if wait "$web_install_pid"; then exit 57; else result=$?; fi
+[ "$result" -eq 143 ] || exit 58
+assert_umask 0077
 EOF
 /bin/chmod 700 "$web_install_fixture"
 web_install_log="$temporary/web-install.log"
@@ -569,6 +580,10 @@ real_wrong_digest=$("$go_gate_node" --input-type=module --eval 'const { toolTree
 /bin/sh "$real_web_install_fixture" "$temporary/real-web-install-root" "$repository_root"
 real_rebuilt_digest=$("$go_gate_node" --input-type=module --eval 'const { toolTreeDigest } = await import(process.argv[2]); process.stdout.write(`${toolTreeDigest(process.argv[3])}\n`);' /dev/null "$repository_root/web/scripts/package-artifacts.mjs" "$real_tsc_root")
 [ "$real_rebuilt_digest" = "$real_reviewed_digest" ] || fail "real cached pnpm reconstruction did not restore reviewed TypeScript tree"
+[ "$(/usr/bin/stat -f '%Lp' "$real_tsc_root")" = 755 ] || fail "reconstructed TypeScript root mode is not 0755"
+[ "$(/usr/bin/stat -f '%Lp' "$real_tsc_root/package.json")" = 644 ] || fail "reconstructed TypeScript package mode is not 0644"
+[ "$(/usr/bin/stat -f '%Lp' "$real_tsc_root/bin/tsc")" = 755 ] || fail "reconstructed TypeScript compiler mode is not 0755"
+[ "$(/usr/bin/stat -f '%Lp' "$real_tsc_root/lib/typescript.js")" = 644 ] || fail "reconstructed TypeScript library mode is not 0644"
 
 # Run the same helper against the checked-out web tree before the offline
 # artifact proof. This covers an absent or already-correct candidate without
