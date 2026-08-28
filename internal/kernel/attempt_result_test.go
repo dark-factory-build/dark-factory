@@ -565,7 +565,7 @@ func TestAttemptResultPhaseGuardRejectsUnknownAndTerminal(t *testing.T) {
 }
 
 func TestRecoveredPreExecRunnerAbsenceFinalizesExactly(t *testing.T) {
-	store, run, _ := admittedOrchestratorRun(t)
+	store, run, keys := admittedOrchestratorRun(t)
 	defer func() { _ = store.Close() }()
 	path := storeTestPath(t, store)
 	ctx := context.Background()
@@ -608,6 +608,21 @@ func TestRecoveredPreExecRunnerAbsenceFinalizesExactly(t *testing.T) {
 	durable, found, err := store.Run(ctx, run.ID)
 	if err != nil || !found || durable.Phase != RunFinalizing || durable.RunnerExit == nil || !durable.RunnerExit.RecoveredAbsence() || durable.Proposal == nil || durable.Proposal.code != FailureActivation {
 		t.Fatalf("reopened pre-exec absence = %+v found=%v err=%v", durable, found, err)
+	}
+	if _, err := store.AuthenticateAttempt(ctx, keys.AttemptDigest); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("pre-exec absence retained attempt credential = %v", err)
+	}
+	runtime := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
+	if _, err := store.ReleaseResource(ctx, run.ID, runtime.ID, runtime.Revision, runtime.Identity, mustTime(t, 95)); err != nil {
+		t.Fatal(err)
+	}
+	durable, _, err = store.Run(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminal, err := store.FinalizeRun(ctx, run.ID, durable.Revision, mustTime(t, 96))
+	if err != nil || terminal.Phase != RunTerminal || terminal.Terminal == nil || terminal.Terminal.code != FailureActivation {
+		t.Fatalf("pre-exec absence terminalization = %+v err=%v", terminal, err)
 	}
 }
 

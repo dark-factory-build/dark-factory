@@ -31,71 +31,6 @@ func TestRecoveredRunnerAbsenceRequiresRegisteredRunner(t *testing.T) {
 	}
 }
 
-func TestRecoveredRunnerAbsenceFromAdmittedRunConvergesExactly(t *testing.T) {
-	store, run, keys := admittedOrchestratorRun(t)
-	defer store.Close()
-	runner := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
-	registered, err := store.ActivateResource(context.Background(), run.ID, runner.ID, runner.Revision, processIdentity(t, 91), mustTime(t, 20))
-	if err != nil {
-		t.Fatal(err)
-	}
-	exit, _ := NewProcessExitRecoveredAbsence(1, mustTime(t, 21))
-	observed, err := store.ObserveRunnerExit(context.Background(), run.ID, run.Revision, registered.Identity, exit, mustTime(t, 22))
-	if err != nil || observed.Phase != RunFinalizing || observed.Proposal == nil || observed.Proposal.code != FailureRunnerExit || observed.RunnerExit == nil || !observed.RunnerExit.equal(exit) || observed.CredentialRevokedAt == nil {
-		t.Fatalf("observed admitted disappearance = %+v, %v", observed, err)
-	}
-	if _, err := store.AuthenticateAttempt(context.Background(), keys.AttemptDigest); !errors.Is(err, ErrUnauthorized) {
-		t.Fatalf("recovered admitted credential = %v", err)
-	}
-	currentRunner, _, _ := store.Resource(context.Background(), registered.ID)
-	if currentRunner.State != ResourceReleasing || currentRunner.Revision.Int64() != registered.Revision.Int64()+1 {
-		t.Fatalf("runner release transition = %+v", currentRunner)
-	}
-	beforeReplay, _ := store.Factory(context.Background())
-	replay, err := store.ObserveRunnerExit(context.Background(), run.ID, run.Revision, registered.Identity, exit, mustTime(t, 21))
-	afterReplay, _ := store.Factory(context.Background())
-	if err != nil || replay.Revision != observed.Revision || afterReplay.Head != beforeReplay.Head {
-		t.Fatalf("replay = %+v, %v; heads %v -> %v", replay, err, beforeReplay.Head, afterReplay.Head)
-	}
-	code, _ := NewProcessExitCode(1, 0, mustTime(t, 21))
-	if _, err := store.ObserveRunnerExit(context.Background(), run.ID, observed.Revision, registered.Identity, code, mustTime(t, 23)); !errors.Is(err, ErrConflict) {
-		t.Fatalf("conflicting code after recovered absence = %v", err)
-	}
-	signal, _ := NewProcessExitSignal(1, 9, mustTime(t, 21))
-	if _, err := store.ObserveRunnerExit(context.Background(), run.ID, observed.Revision, registered.Identity, signal, mustTime(t, 23)); !errors.Is(err, ErrConflict) {
-		t.Fatalf("conflicting signal after recovered absence = %v", err)
-	}
-	if _, err := store.FinalizeRun(context.Background(), run.ID, observed.Revision, mustTime(t, 24)); !errors.Is(err, ErrConflict) {
-		t.Fatalf("finalize with unreleased resources = %v", err)
-	}
-	releaseAllRunResources(t, store, run.ID, 30)
-	fresh, found, err := store.Run(context.Background(), run.ID)
-	if err != nil || !found {
-		t.Fatalf("recovered run reload = %+v, found=%v, err=%v", fresh, found, err)
-	}
-	session := terminalSessionForRunTest(t, store, run.ID)
-	unresolved, err := store.MarkTerminalSessionUnresolved(context.Background(), run.ID, session.ID, fresh.Revision, session.Revision, "runner recovered", mustTime(t, 40))
-	if err != nil || unresolved.State != TerminalSessionUnresolved {
-		t.Fatalf("mark recovered admitted session = %+v, err=%v", unresolved, err)
-	}
-	fresh, found, err = store.Run(context.Background(), run.ID)
-	if err != nil || !found {
-		t.Fatalf("closed recovered run reload = %+v, found=%v, err=%v", fresh, found, err)
-	}
-	session = terminalSessionForRunTest(t, store, run.ID)
-	if _, err := store.CloseRecoveredTerminalSession(context.Background(), run.ID, session.ID, fresh.Revision, session.Revision, mustTime(t, 41)); err != nil {
-		t.Fatal(err)
-	}
-	fresh, found, err = store.Run(context.Background(), run.ID)
-	if err != nil || !found {
-		t.Fatalf("closed recovered run reload = %+v, found=%v, err=%v", fresh, found, err)
-	}
-	terminal, err := store.FinalizeRun(context.Background(), run.ID, fresh.Revision, mustTime(t, 42))
-	if err != nil || terminal.Phase != RunTerminal || terminal.Terminal == nil || terminal.Terminal.code != FailureRunnerExit {
-		t.Fatalf("terminal after recovered absence = %+v, %v", terminal, err)
-	}
-}
-
 func TestRecoveredAbsenceCannotUseLiveTerminalClose(t *testing.T) {
 	store, run, keys := runningOrchestratorRun(t)
 	defer store.Close()
@@ -110,13 +45,18 @@ func TestRecoveredAbsenceCannotUseLiveTerminalClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runnerIdentity := registeredProcessIdentity(t, store, run.ID, ResourceRunnerProcess)
-	runnerExit, _ := NewProcessExitRecoveredAbsence(2, mustTime(t, 42))
-	finalizing, err = store.ObserveRunnerExit(context.Background(), run.ID, finalizing.Revision, runnerIdentity, runnerExit, mustTime(t, 42))
+	resources := resourcesForRunTest(t, store, run.ID)
+	process := resourceOfKind(t, resources, ResourceProviderProcess)
+	group := resourceOfKind(t, resources, ResourceProviderGroup)
+	finalizing, _, _, err = store.ReleaseProviderResources(context.Background(), run.ID, process.ID, group.ID, finalizing.Revision, process.Revision, group.Revision, process.Identity, mustTime(t, 42))
 	if err != nil {
 		t.Fatal(err)
 	}
-	releaseAllRunResources(t, store, run.ID, 50)
+	runner := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
+	finalizing, _, err = store.RecordRecoveredRunnerAbsence(context.Background(), run.ID, runner.ID, finalizing.Revision, runner.Revision, runner.Identity, mustTime(t, 43))
+	if err != nil {
+		t.Fatal(err)
+	}
 	fresh, found, err := store.Run(context.Background(), run.ID)
 	if err != nil || !found {
 		t.Fatal(err)
@@ -142,110 +82,30 @@ func TestRecoveredAbsenceCannotUseLiveTerminalClose(t *testing.T) {
 	}
 }
 
-func TestDeclaredNoStartCloseRequiresNoInventedExit(t *testing.T) {
+func TestDeclaredNoStartFailureClosesWithoutInventedExit(t *testing.T) {
 	store, run, _ := admittedOrchestratorRun(t)
 	defer store.Close()
 	failure, _ := NewFailureProposal(FailureSpawn, "did not start")
-	_, err := store.FailRun(context.Background(), run.ID, run.Revision, failure, mustTime(t, 20))
+	if _, err := store.FailRun(context.Background(), run.ID, run.Revision, failure, mustTime(t, 20)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("generic failure without runtime evidence = %v", err)
+	}
+	runtime := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
+	fresh, err := store.FailRunWithRuntimeAbsent(context.Background(), run.ID, runtime.ID, run.Revision, runtime.Revision, failure, mustTime(t, 20))
 	if err != nil {
 		t.Fatal(err)
 	}
-	releaseAllRunResources(t, store, run.ID, 30)
-	fresh, found, err := store.Run(context.Background(), run.ID)
-	if err != nil || !found {
-		t.Fatal(err)
-	}
 	session := terminalSessionForRunTest(t, store, run.ID)
-	closed, err := store.CloseDeclaredTerminalSession(context.Background(), run.ID, session.ID, fresh.Revision, session.Revision, mustTime(t, 40))
-	if err != nil || closed.State != TerminalSessionClosed {
-		t.Fatalf("no-start declared close = %+v, err=%v", closed, err)
+	if session.State != TerminalSessionClosed || session.ActivatedAt != nil {
+		t.Fatalf("no-start failure left session open = %+v", session)
 	}
-	if _, err := store.CloseActiveTerminalSession(context.Background(), run.ID, session.ID, fresh.Revision, session.Revision, mustTime(t, 40)); !errors.Is(err, ErrRevisionConflict) {
-		t.Fatalf("declared close replayed through active method = %v", err)
-	}
-	fresh, found, err = store.Run(context.Background(), run.ID)
-	if err != nil || !found {
-		t.Fatal(err)
+	if _, err := store.CloseActiveTerminalSession(context.Background(), run.ID, session.ID, fresh.Revision, session.Revision, mustTime(t, 40)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("closed no-start session accepted active close = %v", err)
 	}
 	if fresh.ProviderExit != nil || fresh.RunnerExit != nil {
-		t.Fatalf("no-start close invented exits: provider=%+v runner=%+v", fresh.ProviderExit, fresh.RunnerExit)
+		t.Fatalf("no-start failure invented exits: provider=%+v runner=%+v", fresh.ProviderExit, fresh.RunnerExit)
 	}
 	if _, err := store.FinalizeRun(context.Background(), run.ID, fresh.Revision, mustTime(t, 41)); err != nil {
 		t.Fatalf("no-start finalization = %v", err)
-	}
-}
-
-func TestRecoveredNoStartUnresolvedConvergesWithoutExitEvidence(t *testing.T) {
-	store, run, _ := admittedOrchestratorRun(t)
-	defer store.Close()
-	failure, _ := NewFailureProposal(FailureSpawn, "ambiguous before start")
-	finalizing, err := store.FailRun(context.Background(), run.ID, run.Revision, failure, mustTime(t, 20))
-	if err != nil {
-		t.Fatal(err)
-	}
-	session := terminalSessionForRunTest(t, store, run.ID)
-	unresolved, err := store.MarkTerminalSessionUnresolved(context.Background(), run.ID, session.ID, finalizing.Revision, session.Revision, "recovered before start", mustTime(t, 21))
-	if err != nil || unresolved.State != TerminalSessionUnresolved {
-		t.Fatalf("no-start unresolved = %+v, err=%v", unresolved, err)
-	}
-	releaseAllRunResources(t, store, run.ID, 30)
-	fresh, found, err := store.Run(context.Background(), run.ID)
-	if err != nil || !found {
-		t.Fatal(err)
-	}
-	session = terminalSessionForRunTest(t, store, run.ID)
-	closed, err := store.CloseRecoveredTerminalSession(context.Background(), run.ID, session.ID, fresh.Revision, session.Revision, mustTime(t, 40))
-	if err != nil {
-		t.Fatalf("no-start recovered close = %v", err)
-	}
-	if _, err := store.CloseRecoveredActiveTerminalSession(context.Background(), run.ID, session.ID, fresh.Revision, session.Revision, mustTime(t, 40)); !errors.Is(err, ErrRevisionConflict) {
-		t.Fatalf("preactivation close replayed through active-recovery method = %v", err)
-	}
-	if replay, err := store.CloseRecoveredTerminalSession(context.Background(), run.ID, session.ID, fresh.Revision, session.Revision, mustTime(t, 40)); err != nil || replay.Revision != closed.Revision {
-		t.Fatalf("preactivation close replay = %+v, %v", replay, err)
-	}
-	fresh, found, err = store.Run(context.Background(), run.ID)
-	if err != nil || !found || fresh.ProviderExit != nil || fresh.RunnerExit != nil {
-		t.Fatalf("no-start recovered run = %+v, found=%v, err=%v", fresh, found, err)
-	}
-	if _, err := store.FinalizeRun(context.Background(), run.ID, fresh.Revision, mustTime(t, 41)); err != nil {
-		t.Fatalf("no-start recovered finalization = %v", err)
-	}
-}
-
-func TestRecoveredPreExecUnresolvedConvergesWithAbsenceEvidence(t *testing.T) {
-	store, run, _ := admittedOrchestratorRun(t)
-	defer store.Close()
-	runner := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
-	runner, err := store.ActivateResource(context.Background(), run.ID, runner.ID, runner.Revision, processIdentity(t, 191), mustTime(t, 20))
-	if err != nil {
-		t.Fatal(err)
-	}
-	exit, _ := NewProcessExitRecoveredAbsence(1, mustTime(t, 21))
-	finalizing, err := store.ObserveRunnerExit(context.Background(), run.ID, run.Revision, runner.Identity, exit, mustTime(t, 22))
-	if err != nil {
-		t.Fatal(err)
-	}
-	session := terminalSessionForRunTest(t, store, run.ID)
-	unresolved, err := store.MarkTerminalSessionUnresolved(context.Background(), run.ID, session.ID, finalizing.Revision, session.Revision, "pre-exec owner recovered", mustTime(t, 23))
-	if err != nil || unresolved.State != TerminalSessionUnresolved {
-		t.Fatalf("pre-exec unresolved = %+v, err=%v", unresolved, err)
-	}
-	releaseAllRunResources(t, store, run.ID, 30)
-	fresh, found, err := store.Run(context.Background(), run.ID)
-	if err != nil || !found {
-		t.Fatal(err)
-	}
-	session = terminalSessionForRunTest(t, store, run.ID)
-	if _, err := store.CloseRecoveredTerminalSession(context.Background(), run.ID, session.ID, fresh.Revision, session.Revision, mustTime(t, 40)); err != nil {
-		t.Fatalf("pre-exec recovered close = %v", err)
-	}
-	fresh, found, err = store.Run(context.Background(), run.ID)
-	if err != nil || !found {
-		t.Fatal(err)
-	}
-	if _, err := store.FinalizeRun(context.Background(), run.ID, fresh.Revision, mustTime(t, 41)); err != nil {
-		t.Fatalf("pre-exec recovered terminalization = %v", err)
 	}
 }
 
@@ -255,10 +115,15 @@ func TestRecoveredRunnerAbsenceFromRunningRunRevokesAuthorityAndRoundTrips(t *te
 	if _, err := store.AuthenticateAttempt(context.Background(), keys.AttemptDigest); err != nil {
 		t.Fatal(err)
 	}
-	exit, _ := NewProcessExitRecoveredAbsence(7, mustTime(t, 40))
-	runnerIdentity := registeredProcessIdentity(t, store, run.ID, ResourceRunnerProcess)
-	observed, err := store.ObserveRunnerExit(context.Background(), run.ID, run.Revision, runnerIdentity, exit, mustTime(t, 41))
-	if err != nil || observed.Phase != RunFinalizing || observed.Revision.Int64() != run.Revision.Int64()+1 || observed.Proposal == nil || observed.Proposal.code != FailureRunnerExit || observed.RunnerExit == nil || !observed.RunnerExit.equal(exit) {
+	failure, _ := NewFailureProposal(FailureInternal, "runner absent in recovery")
+	finalizing, err := store.FailRun(context.Background(), run.ID, run.Revision, failure, mustTime(t, 40))
+	if err != nil || finalizing.Phase != RunFinalizing || finalizing.CredentialRevokedAt == nil {
+		store.Close()
+		t.Fatalf("finalize running disappearance = %+v, %v", finalizing, err)
+	}
+	runner := resourceOfKindTB(t, resourcesForRunTB(t, store, run.ID), ResourceRunnerProcess)
+	observed, _, err := store.RecordRecoveredRunnerAbsence(context.Background(), run.ID, runner.ID, finalizing.Revision, runner.Revision, runner.Identity, mustTime(t, 41))
+	if err != nil || observed.RunnerExit == nil || !observed.RunnerExit.RecoveredAbsence() {
 		store.Close()
 		t.Fatalf("observed running disappearance = %+v, %v", observed, err)
 	}
@@ -280,7 +145,7 @@ func TestRecoveredRunnerAbsenceFromRunningRunRevokesAuthorityAndRoundTrips(t *te
 	}
 	defer reopened.Close()
 	fresh, found, err := reopened.Run(context.Background(), run.ID)
-	if err != nil || !found || fresh.RunnerExit == nil || !fresh.RunnerExit.equal(exit) || !fresh.RunnerExit.RecoveredAbsence() {
+	if err != nil || !found || fresh.RunnerExit == nil || !fresh.RunnerExit.RecoveredAbsence() {
 		t.Fatalf("reopened recovered absence = %+v, found=%v, err=%v", fresh, found, err)
 	}
 	providerIdentity := registeredProcessIdentity(t, reopened, run.ID, ResourceProviderProcess)
@@ -315,7 +180,7 @@ func TestRecoveredRunnerAbsenceFromRunningRunRevokesAuthorityAndRoundTrips(t *te
 		t.Fatalf("closed running reload = %+v, found=%v, err=%v", fresh, found, err)
 	}
 	terminal, err := reopened.FinalizeRun(context.Background(), run.ID, fresh.Revision, mustTime(t, 60))
-	if err != nil || terminal.Phase != RunTerminal || terminal.Terminal == nil || terminal.Terminal.code != FailureRunnerExit {
+	if err != nil || terminal.Phase != RunTerminal || terminal.Terminal == nil || terminal.Terminal.code != FailureInternal {
 		t.Fatalf("running disappearance terminal = %+v, %v", terminal, err)
 	}
 }
@@ -328,9 +193,9 @@ func TestTypedOutcomeRemainsFirstWhenRecoveredAbsenceArrives(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	exit, _ := NewProcessExitRecoveredAbsence(1, mustTime(t, 41))
-	observed, err := store.ObserveRunnerExit(context.Background(), run.ID, finalizing.Revision, registeredProcessIdentity(t, store, run.ID, ResourceRunnerProcess), exit, mustTime(t, 42))
-	if err != nil || observed.Proposal == nil || !observed.Proposal.equal(proposal) || observed.RunnerExit == nil || !observed.RunnerExit.equal(exit) {
+	runner := resourceOfKindTB(t, resourcesForRunTB(t, store, run.ID), ResourceRunnerProcess)
+	observed, _, err := store.RecordRecoveredRunnerAbsence(context.Background(), run.ID, runner.ID, finalizing.Revision, runner.Revision, runner.Identity, mustTime(t, 42))
+	if err != nil || observed.Proposal == nil || !observed.Proposal.equal(proposal) || observed.RunnerExit == nil || !observed.RunnerExit.RecoveredAbsence() {
 		t.Fatalf("completion then recovered absence = %+v, %v", observed, err)
 	}
 }
@@ -351,10 +216,7 @@ func TestRunnerExitKindSchemaAndScannerFailClosed(t *testing.T) {
 		t.Run("schema/"+test.name, func(t *testing.T) {
 			store, run, _ := runningOrchestratorRun(t)
 			defer store.Close()
-			exit, _ := NewProcessExitRecoveredAbsence(1, mustTime(t, 40))
-			if _, err := store.ObserveRunnerExit(context.Background(), run.ID, run.Revision, registeredProcessIdentity(t, store, run.ID, ResourceRunnerProcess), exit, mustTime(t, 41)); err != nil {
-				t.Fatal(err)
-			}
+			exit := recordRecoveredRunnerAbsenceForTest(t, store, run, 40)
 			if _, err := store.writer.Exec(test.statement, run.ID.Bytes()); err == nil {
 				t.Fatal("illegal runner exit update succeeded")
 			}
@@ -378,11 +240,7 @@ func TestRunnerExitKindSchemaAndScannerFailClosed(t *testing.T) {
 		t.Run("scanner/"+test.name, func(t *testing.T) {
 			store, run, _ := runningOrchestratorRun(t)
 			path := storePath(t, store)
-			exit, _ := NewProcessExitRecoveredAbsence(1, mustTime(t, 40))
-			if _, err := store.ObserveRunnerExit(context.Background(), run.ID, run.Revision, registeredProcessIdentity(t, store, run.ID, ResourceRunnerProcess), exit, mustTime(t, 41)); err != nil {
-				store.Close()
-				t.Fatal(err)
-			}
+			recordRecoveredRunnerAbsenceForTest(t, store, run, 40)
 			factory, _ := store.Factory(context.Background())
 			corruptSQL(t, store, test.statement, run.ID.Bytes())
 			if _, _, err := store.Run(context.Background(), run.ID); !errors.Is(err, ErrCorruptState) {
@@ -413,6 +271,30 @@ func TestRunnerExitKindSchemaAndScannerFailClosed(t *testing.T) {
 	}
 }
 
+// recordRecoveredRunnerAbsenceForTest finalizes a running run and records the
+// exact recovered-absence runner exit through the owned absence edge,
+// returning the ProcessExit value the durable row must round-trip.
+func recordRecoveredRunnerAbsenceForTest(t testing.TB, store *Store, run Run, at int64) ProcessExit {
+	t.Helper()
+	failure, err := NewFailureProposal(FailureInternal, "runner absent in recovery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalizing, err := store.FailRun(context.Background(), run.ID, run.Revision, failure, mustTimeTB(t, at))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := resourceOfKindTB(t, resourcesForRunTB(t, store, run.ID), ResourceRunnerProcess)
+	if _, _, err := store.RecordRecoveredRunnerAbsence(context.Background(), run.ID, runner.ID, finalizing.Revision, runner.Revision, runner.Identity, mustTimeTB(t, at+1)); err != nil {
+		t.Fatal(err)
+	}
+	exit, err := NewProcessExitRecoveredAbsence(1, mustTimeTB(t, at+1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return exit
+}
+
 func releaseAllRunResources(t *testing.T, store *Store, runID RunID, at int64) {
 	t.Helper()
 	resources := resourcesForRunTest(t, store, runID)
@@ -439,16 +321,13 @@ func releaseAllRunResources(t *testing.T, store *Store, runID RunID, at int64) {
 			t.Fatal(err)
 		}
 	}
-	index := int64(1)
-	for _, kind := range []ResourceKind{ResourceRuntimeRoot, ResourceRunnerProcess} {
-		resource := resourceOfKind(t, resourcesForRunTest(t, store, runID), kind)
-		if resource.State == ResourceReleased {
-			continue
-		}
-		if _, err := store.ReleaseResource(context.Background(), runID, resource.ID, resource.Revision, resource.Identity, mustTime(t, at+index)); err != nil {
+	// The runner is released only through its exact exit/absence edges above
+	// or by the caller; generic release authority no longer exists for it.
+	runtime := resourceOfKind(t, resourcesForRunTest(t, store, runID), ResourceRuntimeRoot)
+	if runtime.State != ResourceReleased {
+		if _, err := store.ReleaseResource(context.Background(), runID, runtime.ID, runtime.Revision, runtime.Identity, mustTime(t, at+2)); err != nil {
 			t.Fatal(err)
 		}
-		index++
 	}
 }
 
