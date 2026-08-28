@@ -3757,6 +3757,84 @@ internal/install is added only after client/kernel cutover readiness.
 If this graph needs forwarding packages or import cycles, collapse packages;
 do not add interfaces to preserve the sketch.
 
+### Preserved provider-launch audit (2026-08-28)
+
+The external read-only launch audit inspected `88a8ab22`. Its reusable finding
+is retained: the PTY/process boundary already supplies the hard part. One
+registered Change worker becomes the provider in place; exact process, group,
+birth and terminal identity is registered before exec; the runner owns the
+live PTY; initial bytes are delivered once after release; and output is never
+lifecycle authority. Its proposed closed three-provider switch and deletion
+list remain the intended simplification, but its implementation proposal was
+not adopted unchanged. It made executable availability a pre-admission
+filter, gave Claude an isolated HOME while assuming ambient file
+authentication, allowed PlanOnly Bash without proving a read-only sandbox,
+returned mergeable environment additions, and used a system-only PATH that
+would exclude ordinary Go/Homebrew toolchains. Those choices would violate
+global admission, make authentication unreliable, weaken execution-mode
+authority, duplicate environment policy, or make the product needlessly
+unusable.
+
+The corrected boundary is one concrete exhaustive `Build(Request) (Launch,
+error)` switch over shell, Claude Code and Codex. `Launch` contains only the
+exact committed executable, ordered argv and complete ordered environment; it
+contains no cwd, task bytes, descriptors, callbacks, output parser, process
+controls or mergeable additions. The Change worker supplies the independently
+re-inspected final Change descriptor as cwd, while the runner owns process,
+PTY, input, reap and cleanup. The adapter cannot select a source, run,
+credential, Change, terminal, completion destination or publication policy.
+Unknown provider/mode/model/effort is an error: there is no default arm,
+plugin, registry, trait-shaped interface or generic command builder.
+
+Provider executables are daemon-sealed absolute native commitments and
+`argv[0]` is that exact path. Metadata/version probing uses null stdin, an
+empty private cwd and the same closed metadata environment; it never starts a
+session. Probe failure is a typed post-admission launch failure, never global
+SQL eligibility or a reason to skip a higher canonical task. A missing,
+changed or unsupported provider therefore follows the admitted-to-finalizing
+`FailureSpawn`/provider-unavailable path with no provider exec. Shell is
+exactly `/bin/sh -s`; Claude and Codex use only their reviewed interactive
+native roots and admitted optional settings. Neither accepts print/prompt,
+resume, remote/cloud, app-server, browser or plugin authority. Claude
+PlanOnly and Codex PlanOnly must each be causally read-only, and WorkspaceWrite
+must be Change-bounded; neither may silently retry unsandboxed.
+
+Exact Claude/Codex flag and config spellings freeze only after deterministic
+native fake witnesses plus metadata-only checks against supported binaries.
+No real prompt/session or credential read is needed for this gate. Provider-
+aware model/effort validation has one kernel owner shared by durable profile
+reads/writes and launch validation; adapters do not duplicate model, role,
+default or Sol/escalation policy.
+
+The environment is built once after `env_clear`. It contains only the exact
+daemon socket, attempt-token-file path, committed `factoryctl`, private
+runtime HOME/TMPDIR, a bounded daemon-owned absolute-component tool PATH,
+controlled locale, `TERM=xterm-256color`, and fixed Git/GitHub/SSH
+prompting/discovery/config denials. No proxy, API key, GitHub token, SSH
+agent, loader injection, operator token, entity ID, ambient provider home or
+arbitrary inherited variable survives. Authentication is a separate
+startup-owned boundary: file-backed credentials use one exact
+identity-checked copy/link from a daemon-committed source, while keychain-
+backed credentials receive no fabricated file. No credential bytes appear in
+argv, environment, browser, wire/config fixtures, logs, diagnostics or
+errors.
+
+The implementation cleanup is part of this same slice: delete `RunShell`,
+`runShell`, shell-path hardcoding, `--change-worker-shell`, the shell-only
+supervisor condition and provider-facing stdin/stdout/stderr fields once
+their non-provider fixtures use the PTY path. The causal matrix uses native
+fake executables to prove exact argv/environment/cwd for every provider/mode,
+invalid/NUL/overlong controls, no ambient sentinels, descriptor cwd across
+path replacement, no marker before both registration gates/Change
+availability/release, input once, terminal prose not completing a run, auth
+privacy and a clean process/PTY census. Required mutations restore
+`os.Environ`, Claude print/Codex exec, task bytes in argv/env, unsandboxed
+PlanOnly, unknown-provider acceptance, exec before release, terminal-output
+completion, changed executable/capability acceptance and the compatibility
+alias; each must be killed by a focused causal test. This is deterministic
+fake-witness evidence, not a paid Claude/Codex session or a claim that any
+provider is shipped.
+
 ### Concrete V1 provider boundary
 
 The V1 contract defines only unrestricted interactive launches. No provider is
