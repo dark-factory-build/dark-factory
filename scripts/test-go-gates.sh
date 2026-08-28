@@ -527,9 +527,20 @@ signal_repository_root="$temporary/signal-repository"
 /bin/mkdir -p "$signal_fake_bin" "$signal_repository_root/web"
 /bin/cat >"$signal_fake_corepack" <<EOF
 #!/bin/sh
-printf '%s %s\n' "\$\$" "\$(/bin/ps -o pgid= -p \$\$ | /usr/bin/tr -d ' ')" >"$signal_child_file"
-printf active >"$signal_marker"
-exec /usr/bin/perl -e 'select undef, undef, undef, 30 while 1'
+signal_child_supervisor=\$(/bin/ps -o ppid= -p \$\$ | /usr/bin/tr -d ' ')
+signal_nested_wrapper=\$(/bin/ps -o ppid= -p \$signal_child_supervisor | /usr/bin/tr -d ' ')
+signal_nested_parent=\$(/bin/ps -o ppid= -p \$signal_nested_wrapper | /usr/bin/tr -d ' ')
+exec /usr/bin/perl -e '
+\$SIG{TERM} = "IGNORE";
+\$SIG{HUP} = "IGNORE";
+open(my \$record, ">", \$ARGV[0]) or exit 125;
+printf \$record "%s %s %s %s %s\n", \$\$, getpgrp(0), \$ARGV[2], \$ARGV[3], \$ARGV[4];
+close \$record;
+open(my \$marker, ">", \$ARGV[1]) or exit 125;
+print \$marker "active";
+close \$marker;
+select undef, undef, undef, 30 while 1
+' "$signal_child_file" "$signal_marker" "\$signal_child_supervisor" "\$signal_nested_wrapper" "\$signal_nested_parent"
 EOF
 /bin/chmod 700 "$signal_fake_corepack"
 /bin/cat >"$signal_fixture" <<'EOF'
@@ -573,7 +584,7 @@ go_gate_signal() {
     exit $((128 + signal))
 }
 trap 'go_gate_signal 15' TERM
-go_gate_web_install
+go_gate_ci_web_proof
 EOF
 /bin/chmod 700 "$signal_fixture"
 
@@ -608,24 +619,74 @@ EOF
 $signal_child_record
 EOF
 )
+    signal_supervisor_pid=$(/usr/bin/awk '{print $3}' <<EOF
+$signal_child_record
+EOF
+)
+    signal_nested_pid=$(/usr/bin/awk '{print $4}' <<EOF
+$signal_child_record
+EOF
+)
+    signal_nested_parent_pid=$(/usr/bin/awk '{print $5}' <<EOF
+$signal_child_record
+EOF
+)
+    signal_child_snapshot=$(/bin/ps -o pid=,ppid=,pgid=,lstart=,comm= -p "$signal_child_pid" \
+        | /usr/bin/awk '{$1=$1; print}') || return 1
+    signal_supervisor_snapshot=$(/bin/ps -o pid=,ppid=,pgid=,lstart=,comm= -p "$signal_supervisor_pid" \
+        | /usr/bin/awk '{$1=$1; print}') || return 1
+    signal_nested_snapshot=$(/bin/ps -o pid=,ppid=,pgid=,lstart=,comm= -p "$signal_nested_pid" \
+        | /usr/bin/awk '{$1=$1; print}') || return 1
     [ "$signal_wrapper_pid" = "$signal_fixture_pid" ] || return 1
     [ -n "$signal_child_pid" ] && [ "$signal_child_pid" = "$signal_child_pgid" ] || return 1
+    [ "$signal_nested_pid" = "$signal_fixture_pid" ] || \
+        [ "$signal_nested_parent_pid" = "$signal_fixture_pid" ] || return 1
     /bin/kill -TERM "$signal_fixture_pid"
     signal_join_attempts=0
     while /bin/kill -0 "$signal_fixture_pid" 2>/dev/null; do
         signal_join_attempts=$((signal_join_attempts + 1))
-        if [ "$signal_join_attempts" -ge 100 ]; then
+        if [ "$signal_join_attempts" -ge 300 ]; then
             /bin/kill -KILL "$signal_fixture_pid" 2>/dev/null || true
             break
         fi
         /bin/sleep 0.01
     done
     if wait "$signal_fixture_pid"; then signal_status=0; else signal_status=$?; fi
-    signal_survivor=0
-    if /bin/kill -0 "$signal_child_pid" 2>/dev/null; then
-        signal_survivor=1
-        /bin/kill -KILL "$signal_child_pid" 2>/dev/null || true
+    signal_root_left_before_cleanup=0
+    if [ -e "$(/bin/cat "$signal_root_file")" ] || [ -L "$(/bin/cat "$signal_root_file")" ]; then
+        signal_root_left_before_cleanup=1
     fi
+    signal_survivor=0
+    for signal_pid in "$signal_child_pid" "$signal_supervisor_pid" "$signal_nested_pid"; do
+        case "$signal_pid" in
+            ''|*[!0-9]*) return 1 ;;
+        esac
+        if [ "$signal_pid" != "$signal_fixture_pid" ] && /bin/kill -0 "$signal_pid" 2>/dev/null; then
+            signal_survivor=1
+        fi
+    done
+    if [ "$signal_survivor" -eq 1 ]; then
+        signal_current_child_snapshot=$(/bin/ps -o pid=,ppid=,pgid=,lstart=,comm= -p "$signal_child_pid" \
+            | /usr/bin/awk '{$1=$1; print}') || return 1
+        [ "$signal_current_child_snapshot" = "$signal_child_snapshot" ] || return 1
+        signal_current_supervisor_snapshot=$(/bin/ps -o pid=,ppid=,pgid=,lstart=,comm= -p "$signal_supervisor_pid" \
+            | /usr/bin/awk '{$1=$1; print}') || return 1
+        [ "$signal_current_supervisor_snapshot" = "$signal_supervisor_snapshot" ] || return 1
+        signal_current_nested_snapshot=$(/bin/ps -o pid=,ppid=,pgid=,lstart=,comm= -p "$signal_nested_pid" \
+            | /usr/bin/awk '{$1=$1; print}') || return 1
+        signal_current_nested_identity=$(/usr/bin/printf '%s\n' "$signal_current_nested_snapshot" \
+            | /usr/bin/awk '{$2=0; print}')
+        signal_expected_nested_identity=$(/usr/bin/printf '%s\n' "$signal_nested_snapshot" \
+            | /usr/bin/awk '{$2=0; print}')
+        [ "$signal_current_nested_identity" = "$signal_expected_nested_identity" ] || return 1
+        signal_current_nested_parent=$(/bin/ps -o ppid= -p "$signal_nested_pid" | /usr/bin/tr -d ' ')
+        [ "$signal_current_nested_parent" = "$signal_fixture_pid" ] || [ "$signal_current_nested_parent" = 1 ] || return 1
+    fi
+    for signal_pid in "$signal_nested_pid" "$signal_supervisor_pid" "$signal_child_pid"; do
+        if [ "$signal_pid" != "$signal_fixture_pid" ] && /bin/kill -0 "$signal_pid" 2>/dev/null; then
+            /bin/kill -KILL "$signal_pid" 2>/dev/null || true
+        fi
+    done
     if /bin/kill -0 -"$signal_child_pgid" 2>/dev/null; then
         signal_survivor=1
         /bin/kill -KILL -"$signal_child_pgid" 2>/dev/null || true
@@ -646,7 +707,7 @@ run_signal_fixture "$repository_root/scripts/go-ci-owned.sh" || fail "signal fix
 # Reintroduce the former process-owning go-ci wrapper. The same readiness and
 # exact-PID cleanup must detect the hidden supervisor rather than accepting it.
 signal_mutated_ci="$temporary/go-ci-owned-nested-mutation.sh"
-/usr/bin/sed 's/^    go_gate_web_test_stage$/    ( go_gate_web_test_stage )/' \
+/usr/bin/sed 's/^    go_gate_web_test_stage$/    ( trap "" TERM HUP; go_gate_web_test_stage; : )/' \
     "$repository_root/scripts/go-ci-owned.sh" >"$signal_mutated_ci"
 /bin/chmod 700 "$signal_mutated_ci"
 run_signal_fixture "$signal_mutated_ci" || fail "nested mutation fixture did not start"
@@ -657,9 +718,11 @@ case "$signal_mutation_root" in
     /private/tmp/dark-factory-go.*) ;;
     *) fail "nested mutation root escaped the exact scratch prefix" ;;
 esac
-[ ! -L "$signal_mutation_root" ] && [ -d "$signal_mutation_root" ] || fail "nested mutation root was replaced"
-[ "$(go_gate_stat "$signal_mutation_root")" = "$signal_mutation_identity" ] || fail "nested mutation root identity changed"
-/bin/rm -rf -- "$signal_mutation_root"
+[ ! -e "$signal_mutation_root" ] && [ ! -L "$signal_mutation_root" ] || {
+    [ ! -L "$signal_mutation_root" ] && [ -d "$signal_mutation_root" ] || fail "nested mutation root was replaced"
+    [ "$(go_gate_stat "$signal_mutation_root")" = "$signal_mutation_identity" ] || fail "nested mutation root identity changed"
+    /bin/rm -rf -- "$signal_mutation_root"
+}
 [ ! -e "$signal_mutation_root" ] || fail "nested mutation safety cleanup retained scratch"
 
 # Exercise the supported helper with the real cached pnpm in a disposable web
