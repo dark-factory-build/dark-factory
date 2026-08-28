@@ -303,7 +303,11 @@ func inspectRecoveredRuntimeCensus(rootFD int, device uint64) (map[string]unix.S
 	gateScratch := gateConfig || gateStdin
 	terminalResidue := terminalScratch || terminal
 	residue := outer || inner || gateScratch || terminalResidue
-	if config && !token || residue && (!token || !config) {
+	// The provider consumes change-worker.config after the inner gate and before
+	// exec. A crash after that irreversible cut can therefore leave exact
+	// activation or terminal evidence without the config pathname. Token remains
+	// mandatory, while a gate scratch still proves the cut was pre-consumption.
+	if config && !token || residue && !token || gateScratch && !config {
 		return nil, invalidContract(nil)
 	}
 	if inner && !outer || terminalResidue && !outer {
