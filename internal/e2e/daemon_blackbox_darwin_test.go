@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -93,25 +94,53 @@ func TestBlackBoxDaemonLifecycle(t *testing.T) {
 		t.Fatalf("published changes after success = %v, %v", changes, err)
 	}
 
-	// Crash cut b: SIGKILL factoryd while the second task's attempt is live.
-	// The orphaned attempt loses the factory API, so its worker fails and
-	// the runner publishes a failure result nobody consumes.
-	secondTask := fixture.operatorID(t, fixture.runFactoryctl(t, 0, "task", "add", "--project", projectID, "--agent", agentID, "--title", "prove the crash cut", "--body", "sleep 6"))
-	fixture.awaitTaskStatus(t, client, secondTask, "running", 30*time.Second)
-	// The running status flips at admission; the kill must land while the
-	// provider is genuinely live, which the durable inner activation marker
-	// proves black-box.
-	fixture.awaitRuntimeFile(t, "inner.activate", 30*time.Second)
+	// Crash cut b: SIGKILL factoryd while the second sentinel task's provider
+	// is live post-publish. The orphaned attempt loses the factory API, so
+	// its worker fails and the runner publishes a result nobody consumes.
+	secondTask := fixture.operatorID(t, fixture.runFactoryctl(t, 0, "task", "add", "--project", projectID, "--agent", agentID, "--title", "prove the crash cut", "--body", fixture.sentinelBody(t, "crash-cut", 30)))
+	fixture.awaitSentinel(t, "crash-cut", 30*time.Second)
 	fixture.sigkill(t, daemonB)
 	fixture.awaitOrphanArtifact(t, 60*time.Second)
 
 	// Boot C: the sweep consumes the published result before any listener
-	// opens and settles the abandoned run to a terminal failed task.
+	// opens and settles the run — retained published change, terminal failed
+	// task — rather than leaving it wedged or reporting it unsettled.
 	daemonC, outputC := fixture.startFactoryd(t)
 	client = fixture.waitClient(t)
 	fixture.awaitTaskStatus(t, client, secondTask, "failed", 30*time.Second)
-	if sweep := outputC.String(); !strings.Contains(sweep, "result-consumed") {
-		t.Fatalf("boot after mid-attempt kill did not consume the result: %q", sweep)
+	sweep := outputC.String()
+	if !strings.Contains(sweep, "result-consumed") || strings.Contains(sweep, "result-consumed-unsettled") {
+		t.Fatalf("boot after mid-attempt kill did not consume and settle the result: %q", sweep)
+	}
+	// The recovered factory keeps serving: a fresh task runs to its
+	// succeeded terminal record after the crash-cut convergence.
+	afterCrash := fixture.operatorID(t, fixture.runFactoryctl(t, 0, "task", "add", "--project", projectID, "--agent", agentID, "--title", "prove the factory kept serving", "--body", happyPathBody))
+	fixture.awaitTaskStatus(t, client, afterCrash, "succeeded", 90*time.Second)
+
+	// Runner death mid-post-publish attempt: the daemon must SURVIVE. The
+	// runner is the sole exit-observation authority for its provider, so its
+	// death wedges the run deliberately nonterminal (live cell D), surfaced
+	// as an unsettled completion; the wedge consumes the capacity slot and
+	// blocks its agent until an operator resolution — honest accounting at
+	// the default capacity of one, never an invented outcome.
+	runnerVictim := fixture.operatorID(t, fixture.runFactoryctl(t, 0, "task", "add", "--project", projectID, "--agent", agentID, "--title", "prove runner death survival", "--body", fixture.sentinelBody(t, "runner-death", 8)))
+	fixture.awaitSentinel(t, "runner-death", 30*time.Second)
+	fixture.killRunnerProcesses(t)
+	fixture.awaitOutput(t, outputC, "unsettled run", 60*time.Second)
+	callContext, callCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	health, err := client.Health(callContext)
+	callCancel()
+	if err != nil || !health.Ready {
+		t.Fatalf("daemon after runner death = %+v, %v", health, err)
+	}
+	if status := fixture.taskStatus(t, client, runnerVictim); status != "running" {
+		t.Fatalf("wedged task after runner death = %q (must stay honestly nonterminal)", status)
+	}
+	callContext, callCancel = context.WithTimeout(context.Background(), 3*time.Second)
+	snapshot, err := client.Snapshot(callContext)
+	callCancel()
+	if err != nil || snapshot.Factory.ActiveRuns != 1 || snapshot.Factory.Capacity != 1 {
+		t.Fatalf("wedged capacity accounting = %+v, %v", snapshot.Factory, err)
 	}
 
 	// A second factoryd against the live home refuses without disturbing it.
@@ -145,14 +174,20 @@ func TestBlackBoxDaemonLifecycle(t *testing.T) {
 	if _, err := os.Lstat(install.LocalAPISocketPath(fixture.home)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("socket remains after shutdown: %v", err)
 	}
+	// Exactly one runtime child survives: the runner-death run's retained
+	// runtime, the durable residue of the deliberately nonterminal cell.
 	entries, err := os.ReadDir(install.RuntimesPath(fixture.home))
 	if err != nil {
 		t.Fatal(err)
 	}
+	survivors := 0
 	for _, entry := range entries {
 		if entry.IsDir() {
-			t.Fatalf("runtime child %q survived the lifecycle", entry.Name())
+			survivors++
 		}
+	}
+	if survivors != 1 {
+		t.Fatalf("runtime children after the lifecycle = %d, want exactly the wedged run's", survivors)
 	}
 	reopened, err := install.OpenOperationalHome(context.Background(), fixture.home)
 	if err != nil {
@@ -160,6 +195,20 @@ func TestBlackBoxDaemonLifecycle(t *testing.T) {
 	}
 	if err := reopened.Close(); err != nil {
 		t.Fatal(err)
+	}
+	// Process census: nothing carrying this fixture's root in its argv —
+	// factoryd, runner, worker, or provider — may survive the lifecycle.
+	// The runner-death provider orphan owns its own bounded exit first.
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		output, err := exec.Command("/usr/bin/pgrep", "-f", fixture.root).CombinedOutput()
+		if err != nil {
+			break
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("processes survived the lifecycle: %s", output)
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
@@ -343,6 +392,57 @@ func (fixture *blackBoxFixture) awaitRuntimeFilePresence(t *testing.T, name stri
 		time.Sleep(50 * time.Millisecond)
 	}
 	return false
+}
+
+// sentinelBody is a provider task whose FIRST action writes a sentinel file.
+// The provider is released only after the candidate change was published and
+// the run marked running, so an observed sentinel proves the attempt is in
+// its post-publish window with a live provider.
+func (fixture *blackBoxFixture) sentinelBody(t *testing.T, name string, sleepSeconds int) string {
+	t.Helper()
+	return fmt.Sprintf("set -eu\n: > '%s'\nsleep %d\n", filepath.Join(fixture.root, "sentinel-"+name), sleepSeconds)
+}
+
+func (fixture *blackBoxFixture) awaitOutput(t *testing.T, output *syncBuffer, needle string, patience time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(patience)
+	for time.Now().Before(deadline) {
+		if strings.Contains(output.String(), needle) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("factoryd output never contained %q: %q", needle, output.String())
+}
+
+func (fixture *blackBoxFixture) awaitSentinel(t *testing.T, name string, patience time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(patience)
+	sentinel := filepath.Join(fixture.root, "sentinel-"+name)
+	for time.Now().Before(deadline) {
+		if _, err := os.Lstat(sentinel); err == nil {
+			// The ordering guarantees the change is already published; the
+			// on-disk change entry is the corroborating black-box observable.
+			entries, err := os.ReadDir(install.ChangesPath(fixture.home))
+			if err != nil || len(entries) == 0 {
+				t.Fatalf("sentinel %q without a published change: %v, %v", name, entries, err)
+			}
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("sentinel %q never appeared", name)
+}
+
+// killRunnerProcesses SIGKILLs every live factory-runner process of this
+// fixture — the catastrophic mid-attempt runner death.
+func (fixture *blackBoxFixture) killRunnerProcesses(t *testing.T) {
+	t.Helper()
+	runnerPath := os.Getenv("DARK_FACTORY_E2E_RUNNER")
+	output, err := exec.Command("/usr/bin/pkill", "-9", "-f", runnerPath).CombinedOutput()
+	if err != nil {
+		t.Fatalf("no live runner process to kill: %v (%s)", err, output)
+	}
 }
 
 func (fixture *blackBoxFixture) sigkill(t *testing.T, command *exec.Cmd) {
