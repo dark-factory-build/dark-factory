@@ -70,6 +70,8 @@ func scanTerminalSession(scanner rowScanner) (TerminalSession, bool, error) {
 		valid = !reason.Valid && !activatedAt.Valid && !closedAt.Valid && updatedAt == declaredAt
 	case TerminalSessionActive:
 		valid = !reason.Valid && activatedAt.Valid && !closedAt.Valid
+	case TerminalSessionReleasing:
+		valid = !reason.Valid && !closedAt.Valid
 	case TerminalSessionUnresolved:
 		valid = reason.Valid && !closedAt.Valid
 	case TerminalSessionClosed:

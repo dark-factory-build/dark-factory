@@ -168,7 +168,7 @@ var schemaStatements = []string{
     CHECK (provider <> 'shell' OR (model IS NULL AND reasoning_effort IS NULL)),
     CHECK ((proposal_kind IS NULL AND proposal_code IS NULL AND proposal_detail IS NULL AND proposal_result IS NULL) OR (proposal_kind = 'succeeded' AND proposal_code IS NULL AND proposal_detail IS NULL AND proposal_result IS NOT NULL) OR (proposal_kind = 'blocked' AND proposal_code IS NULL AND proposal_detail IS NOT NULL AND proposal_result IS NULL) OR (proposal_kind = 'failed' AND proposal_code IS NOT NULL AND proposal_result IS NULL) OR (proposal_kind = 'cancelled' AND proposal_code IS NULL AND proposal_detail IS NOT NULL AND proposal_result IS NULL)),
     CHECK ((terminal_kind IS NULL AND terminal_code IS NULL AND terminal_detail IS NULL AND terminal_result IS NULL) OR (terminal_kind = 'succeeded' AND terminal_code IS NULL AND terminal_detail IS NULL AND terminal_result IS NOT NULL) OR (terminal_kind = 'blocked' AND terminal_code IS NULL AND terminal_detail IS NOT NULL AND terminal_result IS NULL) OR (terminal_kind = 'failed' AND terminal_code IS NOT NULL AND terminal_result IS NULL) OR (terminal_kind = 'cancelled' AND terminal_code IS NULL AND terminal_detail IS NOT NULL AND terminal_result IS NULL)),
-	    CHECK ((phase = 'admitted' AND running_at_ms IS NULL AND finalizing_at_ms IS NULL AND terminal_at_ms IS NULL AND proposal_kind IS NULL AND terminal_kind IS NULL AND credential_revoked_at_ms IS NULL AND provider_exit_kind IS NULL AND runner_exit_kind IS NULL AND admitted_at_ms = updated_at_ms) OR (phase = 'running' AND running_at_ms IS NOT NULL AND running_at_ms = updated_at_ms AND finalizing_at_ms IS NULL AND terminal_at_ms IS NULL AND proposal_kind IS NULL AND terminal_kind IS NULL AND credential_revoked_at_ms IS NULL AND provider_exit_kind IS NULL AND runner_exit_kind IS NULL) OR (phase = 'finalizing' AND finalizing_at_ms IS NOT NULL AND terminal_at_ms IS NULL AND proposal_kind IS NOT NULL AND terminal_kind IS NULL AND credential_revoked_at_ms IS NOT NULL) OR (phase = 'terminal' AND finalizing_at_ms IS NOT NULL AND terminal_at_ms IS NOT NULL AND proposal_kind IS NOT NULL AND terminal_kind IS NOT NULL AND credential_revoked_at_ms IS NOT NULL)),
+	    CHECK ((phase = 'admitted' AND running_at_ms IS NULL AND finalizing_at_ms IS NULL AND terminal_at_ms IS NULL AND proposal_kind IS NULL AND terminal_kind IS NULL AND credential_revoked_at_ms IS NULL AND provider_exit_kind IS NULL AND runner_exit_kind IS NULL) OR (phase = 'running' AND running_at_ms IS NOT NULL AND running_at_ms = updated_at_ms AND finalizing_at_ms IS NULL AND terminal_at_ms IS NULL AND proposal_kind IS NULL AND terminal_kind IS NULL AND credential_revoked_at_ms IS NULL AND provider_exit_kind IS NULL AND runner_exit_kind IS NULL) OR (phase = 'finalizing' AND finalizing_at_ms IS NOT NULL AND terminal_at_ms IS NULL AND proposal_kind IS NOT NULL AND terminal_kind IS NULL AND credential_revoked_at_ms IS NOT NULL) OR (phase = 'terminal' AND finalizing_at_ms IS NOT NULL AND terminal_at_ms IS NOT NULL AND proposal_kind IS NOT NULL AND terminal_kind IS NOT NULL AND credential_revoked_at_ms IS NOT NULL)),
 	    CHECK (running_at_ms IS NULL OR running_at_ms <= updated_at_ms),
 	    CHECK (finalizing_at_ms IS NULL OR finalizing_at_ms <= updated_at_ms),
 	    CHECK (terminal_at_ms IS NULL OR terminal_at_ms = updated_at_ms),
@@ -192,7 +192,7 @@ var schemaStatements = []string{
     id BLOB PRIMARY KEY CHECK (length(id) = 16),
     run_id BLOB NOT NULL CHECK (length(run_id) = 16) REFERENCES runs(id),
     kind TEXT NOT NULL CHECK (kind IN ('runtime_root', 'runner_process', 'provider_process', 'provider_group')),
-    state TEXT NOT NULL CHECK (state IN ('declared', 'active', 'releasing', 'unresolved', 'released')),
+    state TEXT NOT NULL CHECK (state IN ('declared', 'starting', 'active', 'releasing', 'unresolved', 'released')),
     path TEXT CHECK (path IS NULL OR (length(CAST(path AS BLOB)) BETWEEN 1 AND 4096 AND substr(path, 1, 1) = '/')),
     path_dev INTEGER CHECK (path_dev IS NULL OR path_dev >= 0),
     path_inode INTEGER CHECK (path_inode IS NULL OR path_inode > 0),
@@ -208,6 +208,7 @@ var schemaStatements = []string{
     CHECK ((kind = 'runtime_root' AND path IS NOT NULL AND pid IS NULL AND pgid IS NULL AND birth_digest IS NULL) OR (kind IN ('runner_process', 'provider_process', 'provider_group') AND path IS NULL AND path_dev IS NULL AND path_inode IS NULL)),
 	    CHECK ((path_dev IS NULL AND path_inode IS NULL) OR (path_dev IS NOT NULL AND path_inode IS NOT NULL)),
 	    CHECK ((pid IS NULL AND pgid IS NULL AND birth_digest IS NULL) OR (pid IS NOT NULL AND pgid IS NOT NULL AND birth_digest IS NOT NULL)),
+	    CHECK (state <> 'starting' OR (kind = 'runner_process' AND path_dev IS NULL AND path_inode IS NULL AND pid IS NULL AND pgid IS NULL AND birth_digest IS NULL AND activated_at_ms IS NULL AND released_at_ms IS NULL AND unresolved_reason IS NULL)),
 	    CHECK (state <> 'declared' OR (path_dev IS NULL AND path_inode IS NULL AND pid IS NULL AND pgid IS NULL AND birth_digest IS NULL)),
     CHECK (state <> 'active' OR activated_at_ms IS NOT NULL),
 	    CHECK (state <> 'active' OR (kind = 'runtime_root' AND path_dev IS NOT NULL) OR (kind IN ('runner_process', 'provider_process', 'provider_group') AND pid IS NOT NULL)),
@@ -221,7 +222,7 @@ var schemaStatements = []string{
 	`CREATE TABLE terminal_sessions (
     id BLOB PRIMARY KEY CHECK (length(id) = 16),
     run_id BLOB NOT NULL CHECK (length(run_id) = 16) REFERENCES runs(id),
-    state TEXT NOT NULL CHECK (state IN ('declared', 'active', 'closed', 'unresolved')),
+    state TEXT NOT NULL CHECK (state IN ('declared', 'active', 'releasing', 'closed', 'unresolved')),
     unresolved_reason TEXT CHECK (unresolved_reason IS NULL OR length(CAST(unresolved_reason AS BLOB)) BETWEEN 1 AND 4096),
     revision INTEGER NOT NULL CHECK (revision >= 1),
     declared_at_ms INTEGER NOT NULL CHECK (declared_at_ms >= 0),
@@ -235,6 +236,7 @@ var schemaStatements = []string{
     CHECK ((state = 'unresolved') = (unresolved_reason IS NOT NULL)),
     CHECK (state <> 'declared' OR (activated_at_ms IS NULL AND closed_at_ms IS NULL AND updated_at_ms = declared_at_ms)),
     CHECK (state <> 'active' OR (activated_at_ms IS NOT NULL AND closed_at_ms IS NULL AND unresolved_reason IS NULL)),
+	CHECK (state <> 'releasing' OR (closed_at_ms IS NULL AND unresolved_reason IS NULL)),
     CHECK (state <> 'unresolved' OR closed_at_ms IS NULL),
     CHECK (state <> 'closed' OR (closed_at_ms IS NOT NULL AND unresolved_reason IS NULL))
     ,CHECK ((lease_client_id IS NULL) = (lease_expires_at_ms IS NULL))

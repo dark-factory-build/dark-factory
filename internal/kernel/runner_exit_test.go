@@ -415,10 +415,30 @@ func TestRunnerExitKindSchemaAndScannerFailClosed(t *testing.T) {
 
 func releaseAllRunResources(t *testing.T, store *Store, runID RunID, at int64) {
 	t.Helper()
-	for index, resource := range resourcesForRunTest(t, store, runID) {
-		if _, err := store.ReleaseResource(context.Background(), runID, resource.ID, resource.Revision, resource.Identity, mustTime(t, at+int64(index))); err != nil {
+	resources := resourcesForRunTest(t, store, runID)
+	process := resourceOfKind(t, resources, ResourceProviderProcess)
+	group := resourceOfKind(t, resources, ResourceProviderGroup)
+	run, found, err := store.Run(context.Background(), runID)
+	if err != nil || !found {
+		t.Fatalf("read run for provider release: found=%v err=%v", found, err)
+	}
+	if process.State != ResourceReleased {
+		run, _, _, err = store.ReleaseProviderResources(context.Background(), runID, process.ID, group.ID, run.Revision, process.Revision, group.Revision, process.Identity, mustTime(t, at))
+		if err != nil {
 			t.Fatal(err)
 		}
+	}
+	_ = run
+	index := int64(1)
+	for _, kind := range []ResourceKind{ResourceRuntimeRoot, ResourceRunnerProcess} {
+		resource := resourceOfKind(t, resourcesForRunTest(t, store, runID), kind)
+		if resource.State == ResourceReleased {
+			continue
+		}
+		if _, err := store.ReleaseResource(context.Background(), runID, resource.ID, resource.Revision, resource.Identity, mustTime(t, at+index)); err != nil {
+			t.Fatal(err)
+		}
+		index++
 	}
 }
 
@@ -434,6 +454,12 @@ func closeTerminalSessionAtCurrent(t testing.TB, store *Store, runID RunID, at i
 		_, err = store.CloseDeclaredTerminalSession(context.Background(), runID, session.ID, run.Revision, session.Revision, mustTimeTB(t, at))
 	case TerminalSessionActive:
 		_, err = store.CloseActiveTerminalSession(context.Background(), runID, session.ID, run.Revision, session.Revision, mustTimeTB(t, at))
+	case TerminalSessionReleasing:
+		if session.ActivatedAt == nil {
+			_, err = store.CloseDeclaredTerminalSession(context.Background(), runID, session.ID, run.Revision, session.Revision, mustTimeTB(t, at))
+		} else {
+			_, err = store.CloseActiveTerminalSession(context.Background(), runID, session.ID, run.Revision, session.Revision, mustTimeTB(t, at))
+		}
 	case TerminalSessionUnresolved:
 		if session.ActivatedAt == nil {
 			_, err = store.CloseRecoveredTerminalSession(context.Background(), runID, session.ID, run.Revision, session.Revision, mustTimeTB(t, at))
