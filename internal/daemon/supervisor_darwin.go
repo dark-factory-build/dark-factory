@@ -541,15 +541,32 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	}
 
 	resultOutcome := live.waitResult()
-	if resultOutcome.notice == nil {
-		return daemon.failRun(run, kernel.FailureProtocol, resultOutcome.err)
-	}
-	// The notice is shape-only. Authority is the exact no-replace artifact in
+	// The notice is shape-only and its socket is best-effort: a late credit or
+	// terminate write racing the runner's own exit poisons the control socket
+	// and loses queued frames. Authority is the exact no-replace artifact in
 	// the runtime directory; ConsumeAttemptResult binds it to the durable run,
-	// including the equality of the stored result-proof digest.
-	record, err := runner.AuthenticateAttemptResult(runtimeDirectory, run.ID.String(), resultOutcome.notice)
-	if err != nil {
-		return daemon.failRun(run, kernel.FailureProtocol, errors.Join(resultOutcome.err, err))
+	// including the equality of the stored result-proof digest. With no notice,
+	// wait the owned outer child and authenticate from disk alone.
+	var record *runner.AttemptResultRecord
+	var outerExit runner.Exit
+	if resultOutcome.notice != nil {
+		authenticated, authErr := runner.AuthenticateAttemptResult(runtimeDirectory, run.ID.String(), resultOutcome.notice)
+		if authErr != nil {
+			return daemon.failRun(run, kernel.FailureProtocol, errors.Join(resultOutcome.err, authErr))
+		}
+		record = authenticated
+	} else {
+		fallbackExit, waitErr := child.FinishAfterExit(8 * time.Second)
+		if waitErr != nil {
+			return daemon.failRun(run, kernel.FailureProtocol, errors.Join(resultOutcome.err, waitErr))
+		}
+		outerExit = fallbackExit
+		owner.reaped = true
+		authenticated, authErr := runner.AuthenticateAttemptResult(runtimeDirectory, run.ID.String(), nil)
+		if authErr != nil {
+			return daemon.failRun(run, kernel.FailureProtocol, errors.Join(resultOutcome.err, authErr))
+		}
+		record = authenticated
 	}
 	result, err := kernelAttemptResult(record, run.ID, run.CredentialDigest, runtimeIdentity)
 	if err != nil {
@@ -563,14 +580,19 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	if err != nil {
 		return run, err
 	}
-	if err := live.finishExit(context.Background(), exitEvent); err != nil {
-		return run, err
+	if resultOutcome.err == nil {
+		if err := live.finishExit(context.Background(), exitEvent); err != nil {
+			return run, fmt.Errorf("daemon: broadcast committed exit: %w", err)
+		}
 	}
-	outerExit, err := child.FinishAfterExit(8 * time.Second)
-	if err != nil {
-		return run, err
+	if !owner.reaped {
+		waitedExit, waitErr := child.FinishAfterExit(8 * time.Second)
+		if waitErr != nil {
+			return run, fmt.Errorf("daemon: wait outer runner: %w", waitErr)
+		}
+		outerExit = waitedExit
+		owner.reaped = true
 	}
-	owner.reaped = true
 	exitAt, err := daemon.timestamp()
 	if err != nil {
 		return run, err
@@ -594,10 +616,13 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		return run, err
 	}
 	owner.child = nil
-	if err := live.join(); err != nil {
+	if err := live.join(); err != nil && resultOutcome.err == nil {
 		return run, err
 	}
+	// A dead owner loop whose result was recovered from disk is already
+	// consumed evidence; its controller was closed by its own shutdown.
 	owner.live = nil
+	owner.controller = nil
 	if err := lease.Close(); err != nil {
 		return run, err
 	}
@@ -927,7 +952,7 @@ func (daemon *Daemon) failRunBeforeRuntime(run kernel.Run, runtimeID kernel.Reso
 		}
 		lastErr = failErr
 	}
-	return kernel.Run{}, kernel.NewOutcomeUnknownError(errors.Join(cause, lastErr))
+	return kernel.Run{}, kernel.NewOutcomeUnknownError(fmt.Errorf("daemon: fail run before runtime: %w", errors.Join(cause, lastErr)))
 }
 
 // convergeUnstartedRunner converges a failure between BeginRunnerStart and
@@ -971,7 +996,7 @@ func (daemon *Daemon) convergeUnstartedRunner(run kernel.Run, owner *supervisorA
 		}
 		lastErr = convergeErr
 	}
-	return kernel.Run{}, kernel.NewOutcomeUnknownError(errors.Join(cause, lastErr))
+	return kernel.Run{}, kernel.NewOutcomeUnknownError(fmt.Errorf("daemon: converge unstarted runner: %w", errors.Join(cause, lastErr)))
 }
 
 // convergeActivatedRunner converges a failure after ActivateRunner while the
@@ -984,9 +1009,22 @@ func (daemon *Daemon) convergeActivatedRunner(run kernel.Run, owner *supervisorA
 	reaped := false
 	if owner.activated {
 		if owner.controller != nil {
-			if err := owner.controller.Terminate(); err != nil && !errors.Is(err, runner.ErrState) {
-				cause = errors.Join(cause, err)
+			// Terminate is valid only once the controller has consumed the
+			// inner-ready registration; drain events and retry so a failure
+			// before that frame still converges the released outer runner.
+			terminated := false
+			tryTerminate := func() {
+				if terminated {
+					return
+				}
+				if err := owner.controller.Terminate(); err == nil {
+					terminated = true
+				} else if !errors.Is(err, runner.ErrState) {
+					cause = errors.Join(cause, err)
+					terminated = true
+				}
 			}
+			tryTerminate()
 			deadline := time.Now().Add(8 * time.Second)
 			for notice == nil && time.Now().Before(deadline) {
 				ready, readyErr := owner.controller.NextReady(liveAttemptPoll)
@@ -994,6 +1032,7 @@ func (daemon *Daemon) convergeActivatedRunner(run kernel.Run, owner *supervisorA
 					break
 				}
 				if !ready {
+					tryTerminate()
 					continue
 				}
 				event, eventErr := owner.controller.Next(4 * time.Second)
@@ -1002,6 +1041,8 @@ func (daemon *Daemon) convergeActivatedRunner(run kernel.Run, owner *supervisorA
 				}
 				if event.Kind == runner.AttemptResultReady && event.Result != nil {
 					notice = event.Result
+				} else {
+					tryTerminate()
 				}
 			}
 		}
@@ -1094,7 +1135,7 @@ func (daemon *Daemon) convergeActivatedRunner(run kernel.Run, owner *supervisorA
 		}
 		lastErr = absenceErr
 	}
-	return kernel.Run{}, kernel.NewOutcomeUnknownError(errors.Join(cause, lastErr))
+	return kernel.Run{}, kernel.NewOutcomeUnknownError(fmt.Errorf("daemon: pre-exec runner absence: %w", errors.Join(cause, lastErr)))
 }
 
 func attemptResultPresent(dir *os.File) (bool, error) {
@@ -1195,7 +1236,7 @@ func (daemon *Daemon) consumeAttemptResult(result kernel.AttemptResult) (kernel.
 		}
 		lastErr = consumeErr
 	}
-	return kernel.Run{}, kernel.NewOutcomeUnknownError(lastErr)
+	return kernel.Run{}, kernel.NewOutcomeUnknownError(fmt.Errorf("daemon: consume attempt result: %w", lastErr))
 }
 
 func (daemon *Daemon) recordLiveRunnerExit(runID kernel.RunID, resourceID kernel.ResourceID, identity kernel.ResourceIdentity, exit kernel.ProcessExit) (kernel.Run, error) {
@@ -1233,7 +1274,7 @@ func (daemon *Daemon) recordLiveRunnerExit(runID kernel.RunID, resourceID kernel
 		}
 		lastErr = recordErr
 	}
-	return kernel.Run{}, kernel.NewOutcomeUnknownError(lastErr)
+	return kernel.Run{}, kernel.NewOutcomeUnknownError(fmt.Errorf("daemon: record live runner exit: %w", lastErr))
 }
 
 func (daemon *Daemon) closeTerminalAfterRunner(result kernel.AttemptResult) (kernel.Run, error) {
@@ -1271,7 +1312,7 @@ func (daemon *Daemon) closeTerminalAfterRunner(result kernel.AttemptResult) (ker
 		}
 		lastErr = closeErr
 	}
-	return kernel.Run{}, kernel.NewOutcomeUnknownError(lastErr)
+	return kernel.Run{}, kernel.NewOutcomeUnknownError(fmt.Errorf("daemon: close terminal after runner: %w", lastErr))
 }
 
 func (daemon *Daemon) removeAttemptResult(runtimeDirectory *os.File, result kernel.AttemptResult, record *runner.AttemptResultRecord) error {

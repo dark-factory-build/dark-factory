@@ -241,16 +241,18 @@ type liveAttempt struct {
 	correlations    map[uint64]*TerminalAttachment
 	lastCorrelation uint64
 
-	readySeen         bool
-	releaseSent       bool
-	terminationSent   bool
-	resultSeen        bool
-	resultNotice      *runner.AttemptResultNotice
-	creditOutstanding uint64
-	controllerClosed  bool
-	finalErr          error
-	binding           terminalBinding
-	effectLimit       time.Duration
+	readySeen            bool
+	releaseSent          bool
+	terminationSent      bool
+	terminationDelivered bool
+	resultSeen           bool
+	resultNotice         *runner.AttemptResultNotice
+	creditOutstanding    uint64
+	creditDead           bool
+	controllerClosed     bool
+	finalErr             error
+	binding              terminalBinding
+	effectLimit          time.Duration
 	// These exact seams are fixed before the owner starts. Production uses the
 	// concrete Store renewal below; daemon tests replace it or pause one phase
 	// to prove ambiguous Store and operation-gate schedules causally.

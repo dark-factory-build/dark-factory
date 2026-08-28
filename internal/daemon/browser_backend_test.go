@@ -1095,25 +1095,24 @@ func adapterRunningRun(t *testing.T, store *kernel.Store, seed byte) kernel.Run 
 	if err != nil {
 		t.Fatal(err)
 	}
-	var provider, group kernel.Resource
-	for index, resource := range resources {
+	var provider, group, runnerProcess kernel.Resource
+	for _, resource := range resources {
 		switch resource.Kind {
 		case kernel.ResourceProviderProcess:
 			provider = resource
 		case kernel.ResourceProviderGroup:
 			group = resource
+		case kernel.ResourceRunnerProcess:
+			runnerProcess = resource
 		case kernel.ResourceRuntimeRoot:
 			identity, _ := kernel.NewPathResourceIdentity(10, int64(10_000+int(seed)))
-			if _, err := store.ActivateResource(ctx, runID, resource.ID, resource.Revision, identity, adapterTime(t, int64(310+index))); err != nil {
-				t.Fatal(err)
-			}
-		default:
-			identity := adapterProcessIdentity(t, int64(20_000+int(seed)*100+index))
-			if _, err := store.ActivateResource(ctx, runID, resource.ID, resource.Revision, identity, adapterTime(t, int64(310+index))); err != nil {
+			if _, err := store.ActivateResource(ctx, runID, resource.ID, resource.Revision, identity, adapterTime(t, 310)); err != nil {
 				t.Fatal(err)
 			}
 		}
 	}
+	runnerIdentity := adapterProcessIdentity(t, int64(20_000+int(seed)*100))
+	updated := startAndActivateRunner(t, store, runID, runnerProcess.ID, runnerIdentity, adapterTime(t, 315))
 	providerIdentity := adapterProcessIdentity(t, int64(30_000+int(seed)))
 	if _, _, err := store.ActivateProviderResources(ctx, runID, provider.ID, provider.Revision, group.ID, group.Revision, providerIdentity, adapterTime(t, 320)); err != nil {
 		t.Fatal(err)
@@ -1122,7 +1121,7 @@ func adapterRunningRun(t *testing.T, store *kernel.Store, seed byte) kernel.Run 
 	if err != nil || !found {
 		t.Fatalf("terminal session = %+v, found=%v, err=%v", session, found, err)
 	}
-	running, err := store.ActivateRun(ctx, runID, session.ID, admission.Run.Revision, session.Revision, adapterTime(t, 330))
+	running, err := store.ActivateRun(ctx, runID, session.ID, updated.Revision, session.Revision, adapterTime(t, 330))
 	if err != nil {
 		t.Fatal(err)
 	}

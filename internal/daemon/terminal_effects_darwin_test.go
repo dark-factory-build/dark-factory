@@ -25,22 +25,20 @@ import (
 )
 
 type terminalEffectWireFrame struct {
-	Version        int                  `json:"version"`
-	Kind           string               `json:"kind"`
-	Stage          runner.AttemptStage  `json:"stage,omitempty"`
-	Identity       runner.Identity      `json:"identity,omitempty"`
-	Correlation    uint64               `json:"correlation,omitempty"`
-	Generation     uint64               `json:"generation,omitempty"`
-	Sequence       uint64               `json:"sequence,omitempty"`
-	Count          uint32               `json:"count,omitempty"`
-	Rows           uint16               `json:"rows,omitempty"`
-	Cols           uint16               `json:"cols,omitempty"`
-	Status         string               `json:"status,omitempty"`
-	Payload        []byte               `json:"payload,omitempty"`
-	Terminal       *runner.Terminal     `json:"terminal,omitempty"`
-	FileIdentity   *runner.FileIdentity `json:"file_identity,omitempty"`
-	Digest         string               `json:"digest,omitempty"`
-	StoreCommitted bool                 `json:"store_committed,omitempty"`
+	Version      int                  `json:"version"`
+	Kind         string               `json:"kind"`
+	Stage        runner.AttemptStage  `json:"stage,omitempty"`
+	Identity     runner.Identity      `json:"identity,omitempty"`
+	Correlation  uint64               `json:"correlation,omitempty"`
+	Generation   uint64               `json:"generation,omitempty"`
+	Sequence     uint64               `json:"sequence,omitempty"`
+	Count        uint32               `json:"count,omitempty"`
+	Rows         uint16               `json:"rows,omitempty"`
+	Cols         uint16               `json:"cols,omitempty"`
+	Status       string               `json:"status,omitempty"`
+	Payload      []byte               `json:"payload,omitempty"`
+	FileIdentity *runner.FileIdentity `json:"file_identity,omitempty"`
+	Digest       string               `json:"digest,omitempty"`
 }
 
 type terminalEffectFixture struct {
@@ -104,7 +102,7 @@ func readyTerminalEffectController(t *testing.T) (*runner.AttemptController, *os
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := controller.Configure(runner.AttemptSpec{AttemptID: "daemon-terminal-effect", Wrapper: wrapper, MarkerName: runner.InnerActivationMarkerName, TerminalName: runner.TerminalSpoolName}); err != nil {
+	if err := controller.Configure(runner.AttemptSpec{AttemptID: "daemon-terminal-effect", Wrapper: wrapper, MarkerName: runner.InnerActivationMarkerName, ResultName: runner.AttemptResultSpoolName, ResultProof: testResultProof(t)}); err != nil {
 		t.Fatal(err)
 	}
 	_ = readTerminalEffectWire(t, peer)
@@ -241,47 +239,58 @@ func replyTerminalEffect(t *testing.T, peer *os.File, command terminalEffectWire
 	writeTerminalEffectWire(t, peer, result)
 }
 
+func testResultProof(t *testing.T) runner.ResultProof {
+	t.Helper()
+	var value [32]byte
+	for index := range value {
+		value[index] = byte(index + 1)
+	}
+	proof, err := runner.NewResultProof(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return proof
+}
+
 func sendTerminalEffectExit(t *testing.T, fixture *terminalEffectFixture) {
 	t.Helper()
-	terminal := runner.Terminal{AttemptID: "daemon-terminal-effect", Process: fixture.identity, Exit: runner.Exit{Code: 0}}
 	identity := runner.FileIdentity{Device: 7, Inode: 9}
 	writeTerminalEffectWire(t, fixture.peer, terminalEffectWireFrame{
-		Version: 1, Kind: "terminal", Terminal: &terminal, FileIdentity: &identity, Digest: strings.Repeat("0", 64),
+		Version: 1, Kind: "attempt-result-ready", FileIdentity: &identity, Digest: strings.Repeat("0", 64),
 	})
 }
 
-func awaitTerminalEffectExit(t *testing.T, attempt *liveAttempt) *runner.TerminalRecord {
+func awaitTerminalEffectExit(t *testing.T, attempt *liveAttempt) *runner.AttemptResultNotice {
 	t.Helper()
 	select {
-	case result := <-attempt.terminal:
-		if result.err != nil || result.event.Kind != runner.AttemptTerminal || result.event.Terminal == nil {
-			t.Fatalf("provider terminal = %+v", result)
+	case result := <-attempt.result:
+		if result.err != nil || result.notice == nil {
+			t.Fatalf("provider result = %+v", result)
 		}
-		return result.event.Terminal
+		return result.notice
 	case <-time.After(time.Second):
-		t.Fatal("provider terminal was not routed")
+		t.Fatal("provider result was not routed")
 		return nil
 	}
 }
 
-func acknowledgeTerminalEffectExit(t *testing.T, fixture *terminalEffectFixture, terminal *runner.TerminalRecord) {
+func acknowledgeTerminalEffectExit(t *testing.T, fixture *terminalEffectFixture, notice *runner.AttemptResultNotice) {
 	t.Helper()
-	done := make(chan error, 1)
-	go func() { done <- fixture.attempt.acknowledge(context.Background(), terminal) }()
-	ack := readTerminalEffectWire(t, fixture.peer)
-	if ack.Kind != "terminal-ack" || !ack.StoreCommitted || ack.Terminal == nil || *ack.Terminal != terminal.Terminal || ack.FileIdentity == nil || *ack.FileIdentity != terminal.Identity || ack.Digest != terminal.Digest {
-		t.Fatalf("terminal acknowledgement = %+v, want exact persisted terminal", ack)
+	if notice == nil {
+		t.Fatal("missing result notice")
 	}
-	if err := <-done; err != nil {
-		t.Fatalf("terminal acknowledgement: %v", err)
+	// The ACK-free contract broadcasts only the store-committed exit; no wire
+	// frame reaches the runner for a consumed result.
+	if err := fixture.attempt.finishExit(context.Background(), TerminalEvent{Kind: TerminalEventExit}); err != nil {
+		t.Fatalf("exit broadcast: %v", err)
 	}
 	select {
 	case <-fixture.attempt.done:
 	case <-time.After(time.Second):
-		t.Fatal("terminal owner did not join after acknowledgement")
+		t.Fatal("terminal owner did not join after the exit broadcast")
 	}
 	if !fixture.attempt.controllerClosed || fixture.attempt.binding != (terminalBinding{}) {
-		t.Fatalf("acknowledged owner census: closed=%v binding=%+v", fixture.attempt.controllerClosed, fixture.attempt.binding)
+		t.Fatalf("converged owner census: closed=%v binding=%+v", fixture.attempt.controllerClosed, fixture.attempt.binding)
 	}
 }
 
@@ -422,8 +431,8 @@ func TestTerminalRenewalIsSerializedWithOwnerEvidence(t *testing.T) {
 		}
 		sendTerminalEffectExit(t, fixture)
 		select {
-		case terminal := <-fixture.attempt.terminal:
-			t.Fatalf("terminal crossed owner-serialized renewal: %+v", terminal)
+		case result := <-fixture.attempt.result:
+			t.Fatalf("result crossed owner-serialized renewal: %+v", result)
 		case <-time.After(25 * time.Millisecond):
 		}
 		close(resume)
@@ -1350,18 +1359,14 @@ func TestProviderExitAndOwnerDeathFencePrivateBinding(t *testing.T) {
 	t.Run("provider exit", func(t *testing.T) {
 		fixture := newTerminalEffectFixture(t)
 		lease := fixture.acquire(t, fixture.principal)
-		terminal := runner.Terminal{AttemptID: "daemon-terminal-effect", Process: fixture.identity, Exit: runner.Exit{Code: 0}}
-		identity := runner.FileIdentity{Device: 7, Inode: 9}
-		writeTerminalEffectWire(t, fixture.peer, terminalEffectWireFrame{
-			Version: 1, Kind: "terminal", Terminal: &terminal, FileIdentity: &identity, Digest: strings.Repeat("0", 64),
-		})
+		sendTerminalEffectExit(t, fixture)
 		select {
-		case result := <-fixture.attempt.terminal:
-			if result.err != nil || result.event.Kind != runner.AttemptTerminal {
-				t.Fatalf("provider terminal = %+v", result)
+		case result := <-fixture.attempt.result:
+			if result.err != nil || result.notice == nil {
+				t.Fatalf("provider result = %+v", result)
 			}
 		case <-time.After(time.Second):
-			t.Fatal("provider terminal was not routed")
+			t.Fatal("provider result was not routed")
 		}
 		if _, err := fixture.adapter.daemon.terminalInput(context.Background(), fixture.principal, fixture.run.ID, fixture.session.ID, lease.Generation, 1, fixture.run.Revision, fixture.session.Revision, []byte("after exit")); !errors.Is(err, ErrTerminalEffectRejected) {
 			t.Fatalf("input after provider exit = %v", err)

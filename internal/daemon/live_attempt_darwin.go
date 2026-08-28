@@ -6,11 +6,14 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"syscall"
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
+	"golang.org/x/sys/unix"
 )
 
 const liveAttemptPoll = 100 * time.Millisecond
@@ -241,9 +244,17 @@ func (attempt *liveAttempt) terminateController() error {
 		return nil
 	}
 	if err != nil {
+		// A dead peer means the runner already converged on its own; its
+		// published result is still pending on the socket and termination is
+		// moot rather than failed. Only a delivered terminate is abort state.
+		if peerClosedWrite(err) {
+			attempt.terminationSent = true
+			return nil
+		}
 		return err
 	}
 	attempt.terminationSent = true
+	attempt.terminationDelivered = true
 	return nil
 }
 
@@ -274,9 +285,10 @@ func (attempt *liveAttempt) handleRunningCommand(command liveAttemptCommand) (bo
 			return false, nil
 		}
 		exit := *command.exit
-		// The daemon's own termination is the only abort authority; the
-		// artifact deliberately carries no abort context.
-		exit.Aborted = exit.Aborted || attempt.terminationSent
+		// The daemon's own delivered termination is the only abort authority;
+		// the artifact deliberately carries no abort context, and a moot
+		// terminate against an already-converged runner is not an abort.
+		exit.Aborted = exit.Aborted || attempt.terminationDelivered
 		attempt.broadcast(exit)
 		attempt.closeSubscribers(ErrTerminalClosed)
 		command.result <- nil
@@ -786,14 +798,29 @@ func (attempt *liveAttempt) nextCorrelation() (uint64, error) {
 }
 
 func (attempt *liveAttempt) addCredit(credit uint64) error {
+	if attempt.creditDead {
+		return nil
+	}
 	if credit == 0 || credit > liveAttemptCredit || attempt.creditOutstanding+credit > liveAttemptCredit {
 		return runner.ErrState
 	}
 	if err := attempt.controller.SendTerminalCommand(runner.TerminalCommand{Kind: runner.TerminalCredit, Credit: uint32(credit)}); err != nil {
+		// The ACK-free outer runner exits as soon as its result is published,
+		// so a credit write can race already-queued output frames against the
+		// closed peer. The credit protocol is over, but the socket must keep
+		// draining: the result frame is still pending behind this output.
+		if peerClosedWrite(err) {
+			attempt.creditDead = true
+			return nil
+		}
 		return err
 	}
 	attempt.creditOutstanding += credit
 	return nil
+}
+
+func peerClosedWrite(err error) bool {
+	return errors.Is(err, unix.EPIPE) || errors.Is(err, syscall.EPIPE) || errors.Is(err, os.ErrClosed) || errors.Is(err, io.ErrClosedPipe)
 }
 
 func (attempt *liveAttempt) replenishCredit(consumed uint64) error {

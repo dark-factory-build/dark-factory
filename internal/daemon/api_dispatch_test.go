@@ -249,7 +249,7 @@ func TestDaemonDispatchesAttemptOutcomeAfterCommit(t *testing.T) {
 	ctx := context.Background()
 	done := fixture.serve(t)
 	result, err := active.client.Succeed(ctx, "private result sentinel")
-	if err != nil || result.Revision != uint64(active.run.Revision.Int64()+1) || result.Head != 9 {
+	if err != nil || result.Revision != uint64(active.run.Revision.Int64()+1) || result.Head != 11 {
 		t.Fatalf("attempt succeed = %+v, %v", result, err)
 	}
 	waitDispatch(t, done)
@@ -461,7 +461,7 @@ func prepareActiveAttempt(t *testing.T, fixture *dispatchFixture, seed byte) act
 	processOne, _ := kernel.NewProcessResourceIdentity(int64(seed)+10, int64(seed)+11, birthOne)
 	processTwo, _ := kernel.NewProcessResourceIdentity(int64(seed)+12, int64(seed)+13, birthTwo)
 	activate(keys.Resources.RuntimeRoot, pathIdentity)
-	activate(keys.Resources.RunnerProcess, processOne)
+	run2 := startAndActivateRunner(t, fixture.store, run.ID, keys.Resources.RunnerProcess, processOne, at)
 	providerProcess, found, err := fixture.store.Resource(ctx, keys.Resources.ProviderProcess)
 	if err != nil || !found {
 		t.Fatalf("provider process = %+v, found=%v, err=%v", providerProcess, found, err)
@@ -477,7 +477,7 @@ func prepareActiveAttempt(t *testing.T, fixture *dispatchFixture, seed byte) act
 	if err != nil || !found {
 		t.Fatalf("terminal session = %+v, found=%v, err=%v", session, found, err)
 	}
-	active, err := fixture.store.ActivateRun(ctx, run.ID, session.ID, run.Revision, session.Revision, at)
+	active, err := fixture.store.ActivateRun(ctx, run.ID, session.ID, run2.Revision, session.Revision, at)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -515,7 +515,7 @@ func TestDaemonDispatchesBlockAndFailCalls(t *testing.T) {
 			active := prepareActiveAttempt(t, fixture, byte(21+len(test.name)))
 			done := fixture.serve(t)
 			result, err := test.call(context.Background(), active.client)
-			if err != nil || result.Revision != uint64(active.run.Revision.Int64()+1) || result.Head != 9 {
+			if err != nil || result.Revision != uint64(active.run.Revision.Int64()+1) || result.Head != 11 {
 				t.Fatalf("outcome = %+v, %v", result, err)
 			}
 			waitDispatch(t, done)
