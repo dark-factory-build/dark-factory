@@ -210,7 +210,11 @@ func runHome(ctx context.Context, command attemptCommand, stdout, stderr io.Writ
 	if err != nil {
 		switch {
 		case errors.Is(err, install.ErrUncertain):
-			_, _ = io.WriteString(stderr, "factoryctl: home publication outcome is uncertain; inspect the explicit home path before retrying\n")
+			message := "factoryctl: home publication outcome is uncertain; inspect the explicit home path before retrying\n"
+			if command.kind == commandDoctor {
+				message = "factoryctl: home inspection outcome is uncertain; inspect the explicit home path again\n"
+			}
+			_, _ = io.WriteString(stderr, message)
 		case errors.Is(err, install.ErrUnsupported):
 			_, _ = io.WriteString(stderr, "factoryctl: Go home operations are unsupported on this platform\n")
 		case errors.Is(err, install.ErrInvalidHome):
