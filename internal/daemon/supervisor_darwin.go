@@ -225,7 +225,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		}
 		return daemon.failRun(run, kernel.FailureInternal, err)
 	}
-	initialInput, err := provider.InitialInput(run.Provider, []byte(task.Body))
+	providerTask, err := provider.Task(run.Provider, []byte(task.Body))
 	if err != nil {
 		return daemon.failRun(run, kernel.FailureSpawn, err)
 	}
@@ -263,7 +263,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		RuntimePath: gotRuntimePath, RuntimeIdentity: runtimeFileIdentity,
 		GitExecutable: spec.GitExecutable, FactoryctlExecutable: factoryctl.Path(), ToolPath: spec.ToolPath, RepositoryRoot: project.Root, RepositoryIdentity: repositoryIdentity,
 		Revision: spec.BaseRevision, ChangeParent: spec.ChangeParent, FinalName: finalName, StagingName: stagingName,
-		AttemptSocket: spec.AttemptSocket, InitialTerminalInput: initialInput,
+		AttemptSocket: spec.AttemptSocket, ProviderTask: providerTask,
 	}
 	if _, err := runtimeValue.PublishWorkerConfig(ctx, config); err != nil {
 		return daemon.failRun(run, kernel.FailureSource, err)

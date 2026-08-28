@@ -58,10 +58,9 @@ type Config struct {
 	FinalName            string
 	StagingName          string
 	AttemptSocket        string
-	// InitialTerminalInput is delivered once to the runner-owned PTY after the
-	// provider has crossed the release gate. It is not provider stdin: the PTY
-	// remains interactive for the lifetime of the run.
-	InitialTerminalInput []byte
+	// ProviderTask is sealed in one unlinked descriptor before provider exec.
+	// It never shares the interactive PTY input stream.
+	ProviderTask []byte
 }
 
 func (Config) String() string   { return "Change worker config (private)" }
@@ -110,8 +109,8 @@ func EncodeConfig(config Config) ([]byte, error) {
 	} {
 		encoded = appendString(encoded, value)
 	}
-	encoded = binary.BigEndian.AppendUint32(encoded, uint32(len(config.InitialTerminalInput)))
-	encoded = append(encoded, config.InitialTerminalInput...)
+	encoded = binary.BigEndian.AppendUint32(encoded, uint32(len(config.ProviderTask)))
+	encoded = append(encoded, config.ProviderTask...)
 	if len(encoded) > ConfigLimit {
 		return nil, invalidContract(nil)
 	}
@@ -158,7 +157,7 @@ func DecodeConfig(encoded []byte) (Config, error) {
 			return Config{}, err
 		}
 	}
-	input, err := reader.bytes(runner.MaxProviderInputBytes)
+	task, err := reader.bytes(runner.MaxProviderTaskBytes)
 	if err != nil || !reader.done() {
 		return Config{}, invalidContract(err)
 	}
@@ -167,7 +166,7 @@ func DecodeConfig(encoded []byte) (Config, error) {
 		RuntimePath: values[2], RuntimeIdentity: runner.FileIdentity{Device: device, Inode: inode},
 		GitExecutable: values[3], FactoryctlExecutable: values[4], ToolPath: values[5], RepositoryRoot: values[6], RepositoryIdentity: repositoryIdentity, Revision: values[7],
 		ChangeParent: values[8], FinalName: values[9], StagingName: values[10],
-		AttemptSocket: values[11], InitialTerminalInput: input,
+		AttemptSocket: values[11], ProviderTask: task,
 	}
 	if err := validateConfig(config); err != nil {
 		return Config{}, err
@@ -186,7 +185,7 @@ func validateConfig(config Config) error {
 		encodeProvider(config.Provider) == 0 ||
 		kernel.ValidateProviderLaunchControls(config.Provider, config.Model, config.ReasoningEffort) != nil || provider.ValidateToolPath(config.ToolPath) != nil ||
 		!validText(config.Revision, maximumRevisionBytes) || !validChangeName(config.FinalName) || !validChangeName(config.StagingName) ||
-		config.FinalName == config.StagingName || len(config.InitialTerminalInput) == 0 || runner.ValidateProviderInput(config.InitialTerminalInput) != nil {
+		config.FinalName == config.StagingName || provider.ValidateTask(config.Provider, config.ProviderTask) != nil {
 		return invalidContract(nil)
 	}
 	if _, err := change.NewRepositoryIdentity(config.RepositoryIdentity.Device(), config.RepositoryIdentity.Inode()); err != nil {

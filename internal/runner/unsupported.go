@@ -4,7 +4,6 @@ package runner
 
 import (
 	"context"
-	"errors"
 	"os"
 	"time"
 )
@@ -65,9 +64,12 @@ func (w *WorkerControl) ReportPreparation([]byte) error { return ErrUnsupported 
 func (w *WorkerControl) AwaitPopulation() error         { return ErrUnsupported }
 func (w *WorkerControl) ReportPopulation([]byte) error  { return ErrUnsupported }
 func (w *WorkerControl) AwaitProvider() error           { return ErrUnsupported }
-func (w *WorkerControl) ExecProvider(_ *LaunchSpec, cwd *os.File) error {
+func (w *WorkerControl) ExecProvider(_ *LaunchSpec, cwd, task *os.File) error {
 	if cwd != nil {
-		return errors.Join(ErrUnsupported, cwd.Close())
+		_ = cwd.Close()
+	}
+	if task != nil {
+		_ = task.Close()
 	}
 	return ErrUnsupported
 }

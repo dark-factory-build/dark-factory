@@ -9,7 +9,7 @@ import (
 
 // SupervisorSpec supplies the external installation and filesystem
 // capabilities that do not belong in SQLite. RunNext derives the project,
-// task, provider, source root, startup input, run identity and credential from
+// task, provider, source root, provider task, run identity and credential from
 // durable state or fresh daemon-generated values.
 type SupervisorSpec struct {
 	AgentID              kernel.AgentID

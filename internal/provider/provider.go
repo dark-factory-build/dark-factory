@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -14,13 +13,10 @@ import (
 )
 
 const (
-	shellPath            = "/bin/sh"
-	shellVersion         = "darwin-system-sh-v1"
-	maxInitialInputBytes = runner.MaxProviderTaskBytes
-	maxPathBytes         = 4096
-	maxSocketBytes       = 103
-	shellDelimiterPrefix = "DARK_FACTORY_INPUT_END_"
-	shellInputName       = ".dark-factory-input.sh"
+	shellPath      = "/bin/sh"
+	shellVersion   = "darwin-system-sh-v1"
+	maxPathBytes   = 4096
+	maxSocketBytes = 103
 )
 
 var (
@@ -128,7 +124,7 @@ func Build(request Request) (Launch, error) {
 		}
 		return Launch{
 			executable:  request.installation.executable,
-			argv:        []string{shellPath, "-s"},
+			argv:        []string{shellPath, runner.ProviderTaskPath},
 			environment: request.runtime.environment(),
 		}, nil
 	case kernel.ProviderClaudeCode, kernel.ProviderCodex:
@@ -138,52 +134,27 @@ func Build(request Request) (Launch, error) {
 	}
 }
 
-// InitialInput applies only the provider's fixed terminal submission framing.
-// It never interprets, normalizes, or duplicates the task body.
-func InitialInput(kind kernel.Provider, task []byte) ([]byte, error) {
-	switch kind {
-	case kernel.ProviderShell:
-		if len(task) == 0 || len(task) > maxInitialInputBytes {
-			return nil, ErrInvalid
-		}
-		if !utf8.Valid(task) || bytes.IndexByte(task, 0) >= 0 {
-			return nil, ErrInvalid
-		}
-		delimiter := shellInputDelimiter(task)
-		input := []byte("umask 077\nset -C\nif /bin/cat >\"$TMPDIR/" + shellInputName + "\" <<'" + delimiter + "'\n")
-		input = append(input, task...)
-		if task[len(task)-1] != '\n' {
-			input = append(input, '\n')
-		}
-		input = append(input, delimiter...)
-		input = append(input, []byte("\nthen\n  set +C\n  . \"$TMPDIR/"+shellInputName+"\"\n  exit\nfi\nexit 70\n")...)
-		if err := runner.ValidateProviderInput(input); err != nil {
-			return nil, ErrInvalid
-		}
-		return input, nil
-	case kernel.ProviderClaudeCode, kernel.ProviderCodex:
-		return nil, unavailableError{provider: kind}
-	default:
-		return nil, ErrInvalid
+// Task validates and copies the exact provider task selected at admission.
+// The Change worker seals these bytes in an unlinked descriptor; the PTY is
+// reserved exclusively for later interactive terminal traffic.
+func Task(kind kernel.Provider, task []byte) ([]byte, error) {
+	if err := ValidateTask(kind, task); err != nil {
+		return nil, err
 	}
+	return bytes.Clone(task), nil
 }
 
-// shellInputDelimiter selects a line that cannot terminate the task's own
-// here-document. Only candidate lines are retained, so memory remains bounded
-// by the already-bounded task. Among n occupied candidates, one of 0..n must
-// be absent.
-func shellInputDelimiter(task []byte) string {
-	occupied := make(map[string]struct{})
-	for _, line := range bytes.Split(task, []byte{'\n'}) {
-		if bytes.HasPrefix(line, []byte(shellDelimiterPrefix)) {
-			occupied[string(line)] = struct{}{}
+func ValidateTask(kind kernel.Provider, task []byte) error {
+	switch kind {
+	case kernel.ProviderShell:
+		if len(task) == 0 || len(task) > runner.MaxProviderTaskBytes || !utf8.Valid(task) || bytes.IndexByte(task, 0) >= 0 {
+			return ErrInvalid
 		}
-	}
-	for counter := 0; ; counter++ {
-		candidate := shellDelimiterPrefix + strconv.Itoa(counter)
-		if _, found := occupied[candidate]; !found {
-			return candidate
-		}
+		return nil
+	case kernel.ProviderClaudeCode, kernel.ProviderCodex:
+		return unavailableError{provider: kind}
+	default:
+		return ErrInvalid
 	}
 }
 

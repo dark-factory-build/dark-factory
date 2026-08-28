@@ -77,8 +77,8 @@ const (
 const (
 	// Terminal frames are JSON control messages on the private socket. Payload
 	// bytes are base64 encoded by encoding/json, so keep the decoded byte bound
-	// below its independent 8 KiB browser/terminal contract even though the
-	// private frame also carries the larger one-shot provider startup input.
+	// below its independent 8 KiB browser/terminal contract. Provider task bytes
+	// never enter this framed control path.
 	maxTerminalFramePayload = 8 << 10
 	maxTerminalCredit       = 1 << 20
 	maxTerminalDimension    = 4096

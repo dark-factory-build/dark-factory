@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"errors"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -55,7 +54,7 @@ func TestBuildShellReturnsExactImmutableLaunch(t *testing.T) {
 	if launch.Executable().Path() != shellPath || launch.Executable() != installation.executable {
 		t.Fatal("launch did not retain the exact Shell executable commitment")
 	}
-	wantArgv := []string{"/bin/sh", "-s"}
+	wantArgv := []string{"/bin/sh", runner.ProviderTaskPath}
 	if got := launch.Argv(); !slices.Equal(got, wantArgv) {
 		t.Fatalf("argv=%q, want %q", got, wantArgv)
 	}
@@ -143,8 +142,8 @@ func TestBuildFailsClosedForUnknownAndUnimplementedProviders(t *testing.T) {
 			if _, err := Build(request); !errors.Is(err, ErrUnavailable) {
 				t.Fatalf("Build error=%v, want ErrUnavailable", err)
 			}
-			if _, err := InitialInput(kind, []byte("task")); !errors.Is(err, ErrUnavailable) {
-				t.Fatalf("InitialInput error=%v, want ErrUnavailable", err)
+			if _, err := Task(kind, []byte("task")); !errors.Is(err, ErrUnavailable) {
+				t.Fatalf("Task error=%v, want ErrUnavailable", err)
 			}
 		})
 	}
@@ -195,7 +194,7 @@ func TestNewRuntimePathsRejectsMissingAndMalformedSealedValues(t *testing.T) {
 	}
 }
 
-func TestInitialInputCapturesOneExactTaskBeforeEvaluation(t *testing.T) {
+func TestTaskCapturesOneExactProgram(t *testing.T) {
 	for _, test := range []struct {
 		name string
 		task []byte
@@ -205,87 +204,46 @@ func TestInitialInputCapturesOneExactTaskBeforeEvaluation(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			want := bytes.Clone(test.task)
-			input, err := InitialInput(kernel.ProviderShell, test.task)
+			program, err := Task(kernel.ProviderShell, test.task)
 			if err != nil {
 				t.Fatal(err)
 			}
 			test.task[0] = 'X'
-			if bytes.Count(input, want) != 1 || bytes.Count(input, []byte("TASK_SENTINEL")) != 1 || !bytes.HasPrefix(input, []byte("umask 077\nset -C\nif /bin/cat")) || !bytes.HasSuffix(input, []byte("\nthen\n  set +C\n  . \"$TMPDIR/.dark-factory-input.sh\"\n  exit\nfi\nexit 70\n")) {
-				t.Fatalf("input=%q, want one exact captured task", input)
+			if !bytes.Equal(program, want) {
+				t.Fatalf("program=%q, want exact task %q", program, want)
 			}
 		})
 	}
 }
 
-func TestInitialInputSelectsDelimiterAbsentFromTaskLines(t *testing.T) {
-	task := []byte("printf before\n" + shellDelimiterPrefix + "0\nprintf after\n")
-	input, err := InitialInput(kernel.ProviderShell, task)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Contains(input, []byte("<<'"+shellDelimiterPrefix+"1'\n")) || bytes.Count(input, task) != 1 {
-		t.Fatalf("collision-safe framed input = %q", input)
-	}
-}
-
-func TestInitialInputMaximumDelimiterCollisionsFitRunnerFrame(t *testing.T) {
-	var task bytes.Buffer
-	for counter := 0; ; counter++ {
-		line := shellDelimiterPrefix + strconv.Itoa(counter) + "\n"
-		if task.Len()+len(line) > maxInitialInputBytes {
-			task.Write(bytes.Repeat([]byte{'x'}, maxInitialInputBytes-task.Len()))
-			break
-		}
-		task.WriteString(line)
-	}
-	input, err := InitialInput(kernel.ProviderShell, task.Bytes())
-	if err != nil {
-		t.Fatalf("maximum collision task rejected: %v", err)
-	}
-	if len(input) > runner.MaxProviderInputBytes {
-		t.Fatalf("maximum collision frame=%d, runner limit=%d", len(input), runner.MaxProviderInputBytes)
-	}
-}
-
-func TestInitialInputRejectsInvalidTaskBytes(t *testing.T) {
+func TestTaskRejectsInvalidBytes(t *testing.T) {
 	invalid := [][]byte{
 		nil,
 		{},
 		[]byte("bad\x00task"),
 		{0xff},
-		bytes.Repeat([]byte{'x'}, maxInitialInputBytes+1),
+		bytes.Repeat([]byte{'x'}, runner.MaxProviderTaskBytes+1),
 	}
 	for _, task := range invalid {
-		if _, err := InitialInput(kernel.ProviderShell, task); !errors.Is(err, ErrInvalid) {
+		if _, err := Task(kernel.ProviderShell, task); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("invalid task len=%d error=%v, want ErrInvalid", len(task), err)
 		}
 	}
-	if _, err := InitialInput(kernel.Provider(255), []byte("task")); !errors.Is(err, ErrInvalid) {
+	if _, err := Task(kernel.Provider(255), []byte("task")); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("unknown provider error=%v, want ErrInvalid", err)
 	}
 }
 
-func TestInitialInputRejectsEmptyShellTask(t *testing.T) {
-	for _, task := range [][]byte{nil, {}} {
-		if _, err := InitialInput(kernel.ProviderShell, task); !errors.Is(err, ErrInvalid) {
-			t.Fatalf("empty shell task error=%v, want ErrInvalid", err)
-		}
-	}
-}
-
-func TestInitialInputAcceptsMaximumTaskBodyWithinRunnerFrame(t *testing.T) {
-	task := bytes.Repeat([]byte{'x'}, maxInitialInputBytes)
-	input, err := InitialInput(kernel.ProviderShell, task)
+func TestTaskAcceptsExactMaximumAndRejectsOneByteOver(t *testing.T) {
+	task := bytes.Repeat([]byte{'x'}, runner.MaxProviderTaskBytes)
+	program, err := Task(kernel.ProviderShell, task)
 	if err != nil {
 		t.Fatalf("maximum task body rejected: %v", err)
 	}
-	if len(input) <= len(task) || len(input) > runner.MaxProviderInputBytes || input[len(input)-1] != '\n' || bytes.Count(input, task) != 1 {
-		t.Fatalf("captured maximum input length or bytes changed: len=%d last=%q", len(input), input[len(input)-1])
+	if !bytes.Equal(program, task) {
+		t.Fatal("maximum task bytes changed")
 	}
-	if err := runner.ValidateProviderInput(input); err != nil {
-		t.Fatalf("normalized maximum input fails runner boundary: %v", err)
-	}
-	if _, err := InitialInput(kernel.ProviderShell, bytes.Repeat([]byte{'x'}, maxInitialInputBytes+1)); !errors.Is(err, ErrInvalid) {
+	if _, err := Task(kernel.ProviderShell, bytes.Repeat([]byte{'x'}, runner.MaxProviderTaskBytes+1)); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("one-byte-over task body error=%v, want ErrInvalid", err)
 	}
 }

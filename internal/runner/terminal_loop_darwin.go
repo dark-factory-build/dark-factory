@@ -20,7 +20,7 @@ func runReleasedProvider(child *OwnedChild, daemon, worker *os.File, reads *atte
 		return false, ErrState
 	}
 	loop := terminalOwner{child: child, daemon: daemon, worker: worker, reads: reads, daemonOpen: true, workerOpen: true}
-	if err := loop.awaitInitialInput(); err != nil {
+	if err := loop.awaitProviderExec(); err != nil {
 		return loop.daemonOpen, err
 	}
 	if err := reads.removeWorker(); err != nil {
@@ -31,12 +31,9 @@ func runReleasedProvider(child *OwnedChild, daemon, worker *os.File, reads *atte
 		return true, err
 	}
 	loop.ptyOpen = true
-	if err := loop.writeInitialInput(); err != nil {
-		return true, err
-	}
-	// This is the bounded handoff barrier. The daemon may not send terminal
-	// commands until the owner has registered the PTY and performed the one
-	// initial write exactly once.
+	// The worker's CLOEXEC capability has closed, proving provider exec, and the
+	// PTY is now registered. Provider task bytes arrived on their own unlinked
+	// descriptor, so every subsequent PTY byte is interactive input.
 	if err := loop.send(TerminalFrame{Kind: TerminalReady}); err != nil {
 		return false, err
 	}
@@ -52,18 +49,13 @@ type terminalOwner struct {
 	workerOpen bool
 	ptyOpen    bool
 
-	daemonDecoder  *attemptFrameDecoder
-	generation     uint64
-	inputActive    bool
-	nextInput      uint64
-	initialInput   []byte
-	initialWritten bool
-	initialMode    bool
-	initialBefore  unix.Termios
-	initialRaw     unix.Termios
-	ptyEOF         bool
-	ptyDrained     bool
-	stopRequested  bool
+	daemonDecoder *attemptFrameDecoder
+	generation    uint64
+	inputActive   bool
+	nextInput     uint64
+	ptyEOF        bool
+	ptyDrained    bool
+	stopRequested bool
 
 	ring             terminalByteRing
 	credit           uint64
@@ -78,219 +70,53 @@ type terminalReplay struct {
 	head        uint64
 }
 
-func (o *terminalOwner) awaitInitialInput() error {
+func (o *terminalOwner) awaitProviderExec() error {
 	for {
 		frame, source, err := nextAttemptFrame(o.child, o.daemon, o.worker, o.daemonOpen, o.workerOpen, 0)
-		if source == sourceChild && err == nil {
-			return ErrState
-		}
-		if source == sourceDaemon {
+		switch source {
+		case sourceChild:
+			if err == nil {
+				return ErrState
+			}
+			return err
+		case sourceDaemon:
 			if errors.Is(err, io.EOF) {
-				return errors.New("runner: daemon closed before provider input registration")
+				return errors.New("runner: daemon closed before provider exec")
 			}
 			if err != nil {
 				return err
 			}
-			// No browser terminal operation is accepted until provider input is
-			// registered and the worker has handed off its control fd.
 			if frame.Kind == "terminate" && validBareAttemptFrame(frame) {
 				return errors.New("runner: daemon terminated before provider exec")
 			}
 			return ErrState
-		}
-		if source != sourceWorker {
-			return protocolError("provider input registration", source, err)
-		}
-		if err == nil && frame.Version == 1 && frame.Kind == "provider-exec-error" && noLegacyFields(frame) && noTerminalFields(frame) && len(frame.Payload) > 0 && len(frame.Payload) <= maxAttemptReportBytes {
-			return fmt.Errorf("runner: provider exec: %s", frame.Payload)
-		}
-		if errors.Is(err, io.EOF) {
-			return errors.New("runner: worker closed before provider input registration")
-		}
-		if err != nil {
-			return err
-		}
-		if frame.Version != 1 || frame.Kind != "provider-input" || !noLegacyFields(frame) || !noTerminalFields(frame) || ValidateProviderInput(frame.Payload) != nil {
-			return ErrState
-		}
-		o.initialInput = append([]byte(nil), frame.Payload...)
-		if err := o.prepareInitialInputMode(); err != nil {
-			return err
-		}
-		if err := o.writeWorkerFrame(attemptFrame{Version: 1, Kind: "provider-input-registered"}); err != nil {
-			return err
-		}
-		for {
-			frame, source, err := nextAttemptFrame(o.child, o.daemon, o.worker, o.daemonOpen, o.workerOpen, 0)
-			if source == sourceWorker && errors.Is(err, io.EOF) {
+		case sourceWorker:
+			if errors.Is(err, io.EOF) {
 				return nil
-			}
-			if source == sourceWorker && err == nil && frame.Version == 1 && frame.Kind == "provider-exec-error" && noLegacyFields(frame) && noTerminalFields(frame) && len(frame.Payload) > 0 && len(frame.Payload) <= maxAttemptReportBytes {
-				return fmt.Errorf("runner: provider exec: %s", frame.Payload)
-			}
-			if source == sourceWorker && err == nil && validCurrentExecCheck(frame) {
-				if err := o.writeDaemonFrame(frame); err != nil {
-					return err
-				}
-				ack, ackSource, ackErr := nextAttemptFrame(o.child, o.daemon, o.worker, o.daemonOpen, o.workerOpen, 0)
-				if ackErr != nil || ackSource != sourceDaemon || !validCurrentExecCheckAck(ack) {
-					return protocolError("current exec check ack", ackSource, ackErr)
-				}
-				if err := o.writeWorkerFrame(ack); err != nil {
-					return err
-				}
-				continue
-			}
-			if source == sourceDaemon {
-				if errors.Is(err, io.EOF) {
-					return errors.New("runner: daemon closed before provider exec")
-				}
-				if err != nil {
-					return err
-				}
-				if frame.Kind == "terminate" && validBareAttemptFrame(frame) {
-					return errors.New("runner: daemon terminated before provider exec")
-				}
-			}
-			if source == sourceChild && err == nil {
-				return ErrState
 			}
 			if err != nil {
 				return err
 			}
-			return ErrState
-		}
-	}
-}
-
-func (o *terminalOwner) writeInitialInput() error {
-	if o == nil || o.initialWritten || o.child == nil || o.child.ptyMaster == nil || !o.initialMode {
-		return ErrState
-	}
-	o.initialWritten = true // reservation happens before the effect; never retry.
-	if len(o.initialInput) == 0 {
-		return o.restoreInitialInputMode()
-	}
-	if o.child.state != stateActivated || o.child.exitObserved {
-		return ErrState
-	}
-	deadline := time.Now().Add(attemptControlTimeout)
-	written := 0
-	for written < len(o.initialInput) {
-		if err := o.drainInitialOutput(); err != nil {
-			return fmt.Errorf("runner: initial terminal output: %w", errors.Join(err, ErrUnresolved))
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("runner: initial terminal input: %w", errors.Join(os.ErrDeadlineExceeded, ErrUnresolved))
-		}
-		end := min(written+terminalReplayChunk, len(o.initialInput))
-		n, err := unix.Write(int(o.child.ptyMaster.Fd()), o.initialInput[written:end])
-		if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
-			remaining := time.Until(deadline)
-			if remaining <= 0 {
-				continue
+			if frame.Version == 1 && frame.Kind == "provider-exec-error" && noLegacyFields(frame) && noTerminalFields(frame) && len(frame.Payload) > 0 && len(frame.Payload) <= maxProviderErrorBytes {
+				return fmt.Errorf("runner: provider exec: %s", frame.Payload)
 			}
-			milliseconds := int(min(remaining, 10*time.Millisecond) / time.Millisecond)
-			if milliseconds < 1 {
-				milliseconds = 1
+			if !validCurrentExecCheck(frame) {
+				return ErrState
 			}
-			fds := []unix.PollFd{{Fd: int32(o.child.ptyMaster.Fd()), Events: unix.POLLIN | unix.POLLOUT}}
-			if _, pollErr := unix.Poll(fds, milliseconds); pollErr != nil && !errors.Is(pollErr, unix.EINTR) {
-				return fmt.Errorf("runner: initial terminal input: %w", errors.Join(pollErr, ErrUnresolved))
+			if err := o.writeDaemonFrame(frame); err != nil {
+				return err
 			}
-			if fds[0].Revents&(unix.POLLERR|unix.POLLHUP|unix.POLLNVAL) != 0 {
-				return fmt.Errorf("runner: initial terminal input: %w", ErrUnresolved)
+			ack, ackSource, ackErr := nextAttemptFrame(o.child, o.daemon, o.worker, o.daemonOpen, o.workerOpen, 0)
+			if ackErr != nil || ackSource != sourceDaemon || !validCurrentExecCheckAck(ack) {
+				return protocolError("current exec check ack", ackSource, ackErr)
 			}
-			continue
+			if err := o.writeWorkerFrame(ack); err != nil {
+				return err
+			}
+		default:
+			return protocolError("provider exec", source, err)
 		}
-		if err != nil || n <= 0 {
-			if err == nil {
-				err = io.ErrNoProgress
-			}
-			return fmt.Errorf("runner: initial terminal input: %w", errors.Join(err, ErrUnresolved))
-		}
-		written += n
 	}
-	if err := o.restoreInitialInputMode(); err != nil {
-		return fmt.Errorf("runner: initial terminal mode: %w", errors.Join(err, ErrUnresolved))
-	}
-	return nil
-}
-
-// prepareInitialInputMode runs before the wrapper receives its input
-// registration acknowledgement and therefore before provider exec. The raw
-// handoff is required for exact bounded input: a canonical PTY can truncate a
-// line before the one provider terminator, and echo can fill the output queue
-// while the same synchronous owner is writing. Shell is the only enabled V1
-// provider; a future native adapter must separately prove any terminal-mode
-// changes it performs during startup.
-func (o *terminalOwner) prepareInitialInputMode() error {
-	if o == nil || o.initialMode || o.child == nil || o.child.ptyMaster == nil {
-		return ErrState
-	}
-	before, err := unix.IoctlGetTermios(int(o.child.ptyMaster.Fd()), unix.TIOCGETA)
-	if err != nil {
-		return err
-	}
-	raw := *before
-	raw.Iflag &^= unix.IGNBRK | unix.BRKINT | unix.PARMRK | unix.ISTRIP | unix.INLCR | unix.IGNCR | unix.ICRNL | unix.IXON | unix.IXOFF | unix.IXANY
-	raw.Oflag &^= unix.OPOST
-	raw.Cflag &^= unix.CSIZE | unix.PARENB
-	raw.Cflag |= unix.CS8
-	raw.Lflag &^= unix.ECHO | unix.ECHONL | unix.ICANON | unix.ISIG | unix.IEXTEN
-	raw.Cc[unix.VMIN] = 1
-	raw.Cc[unix.VTIME] = 0
-	if err := unix.IoctlSetTermios(int(o.child.ptyMaster.Fd()), unix.TIOCSETA, &raw); err != nil {
-		return err
-	}
-	got, err := unix.IoctlGetTermios(int(o.child.ptyMaster.Fd()), unix.TIOCGETA)
-	if err != nil || *got != raw {
-		return errors.Join(err, ErrIdentity)
-	}
-	o.initialBefore, o.initialRaw, o.initialMode = *before, raw, true
-	return nil
-}
-
-func (o *terminalOwner) restoreInitialInputMode() error {
-	if o == nil || !o.initialMode || o.child == nil || o.child.ptyMaster == nil {
-		return ErrState
-	}
-	current, err := unix.IoctlGetTermios(int(o.child.ptyMaster.Fd()), unix.TIOCGETA)
-	if err != nil {
-		return err
-	}
-	// A provider that deliberately changed the terminal after exec owns its
-	// new mode. Do not overwrite that change with the pre-exec snapshot.
-	if *current != o.initialRaw {
-		o.initialMode = false
-		return nil
-	}
-	if err := unix.IoctlSetTermios(int(o.child.ptyMaster.Fd()), unix.TIOCSETA, &o.initialBefore); err != nil {
-		return err
-	}
-	o.initialMode = false
-	return nil
-}
-
-func (o *terminalOwner) drainInitialOutput() error {
-	buf := make([]byte, terminalReplayChunk)
-	n, err := unix.Read(int(o.child.ptyMaster.Fd()), buf)
-	if n > 0 {
-		if appendErr := o.ring.Append(buf[:n]); appendErr != nil {
-			return appendErr
-		}
-		return nil
-	}
-	if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
-		return nil
-	}
-	if errors.Is(err, unix.EIO) || errors.Is(err, io.EOF) {
-		return io.EOF
-	}
-	if err == nil {
-		return io.ErrNoProgress
-	}
-	return err
 }
 
 func (o *terminalOwner) serve() (bool, error) {

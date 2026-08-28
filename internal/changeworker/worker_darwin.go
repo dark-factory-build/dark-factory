@@ -3,6 +3,7 @@
 package changeworker
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -28,6 +29,8 @@ type runtimeAuthority struct {
 	configDigest                               [32]byte
 }
 
+const providerTaskName = ".provider-task"
+
 func runProvider(ctx context.Context) (resultErr error) {
 	control, err := runner.OpenWorkerControl()
 	if err != nil {
@@ -35,9 +38,9 @@ func runProvider(ctx context.Context) (resultErr error) {
 	}
 	defer func() {
 		if resultErr != nil {
-			// The worker may fail during the final source/authority scan, before
-			// the one-shot input registration. Preserve that exact bounded cause
-			// for the outer owner instead of reducing it to an unexplained EOF.
+			// The worker may fail during the final source/authority scan or task
+			// sealing. Preserve that exact bounded cause for the outer owner
+			// instead of reducing it to an unexplained EOF.
 			_ = control.ReportProviderError(resultErr)
 		}
 		resultErr = errors.Join(resultErr, control.Close())
@@ -191,6 +194,11 @@ func runProvider(ctx context.Context) (resultErr error) {
 		_ = cwd.Close()
 		return err
 	}
+	program, err := provider.Task(config.Provider, config.ProviderTask)
+	if err != nil {
+		_ = cwd.Close()
+		return err
+	}
 	spec, err := runner.PrepareCommittedExecSpec(launch.Executable(), launch.Argv(), launch.Environment(), published.Path())
 	if err != nil {
 		_ = cwd.Close()
@@ -208,19 +216,119 @@ func runProvider(ctx context.Context) (resultErr error) {
 		_ = cwd.Close()
 		return err
 	}
-	if err := control.RegisterProviderInput(config.InitialTerminalInput); err != nil {
+	task, err := authority.sealProviderTask(config.Provider, program)
+	if err != nil {
 		_ = cwd.Close()
 		return err
 	}
+	taskOpen := true
+	defer func() {
+		if taskOpen {
+			resultErr = errors.Join(resultErr, task.Close())
+		}
+	}()
 	// Retain the descriptor-bound runtime authority until exec. Its members are
 	// CLOEXEC, so a successful provider image receives none of them; a failed
-	// exec returns through the ordinary defer and closes them. This avoids a
-	// path-only gap between the final proof and the provider effect.
+	// exec returns through the ordinary defer and closes them. The exact task is
+	// already unlinked and read-only, and the PTY has received no startup bytes.
 	if err := authority.verify(ctx); err != nil {
 		_ = cwd.Close()
 		return fmt.Errorf("runtime authority verification: %w", err)
 	}
-	return control.ExecProvider(spec, cwd)
+	taskOpen = false
+	return control.ExecProvider(spec, cwd, task)
+}
+
+// sealProviderTask turns the admission-owned bytes into one exact, unlinked,
+// read-only descriptor. The temporary name exists only inside the already
+// registered private runtime and is removed before the descriptor crosses the
+// runner boundary. No pathname is carried into provider exec.
+func (a *runtimeAuthority) sealProviderTask(kind kernel.Provider, task []byte) (_ *os.File, resultErr error) {
+	if a == nil || a.temp == nil || provider.ValidateTask(kind, task) != nil {
+		return nil, ErrWorker
+	}
+	tempID, err := privateDirectory(a.temp)
+	if err != nil || tempID != a.tempID {
+		return nil, ErrWorker
+	}
+	fd, err := unix.Openat(int(a.temp.Fd()), providerTaskName, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0o600)
+	if err != nil {
+		return nil, ErrWorker
+	}
+	writer := os.NewFile(uintptr(fd), "provider-task-writer")
+	var created runner.FileIdentity
+	named := false
+	var reader *os.File
+	defer func() {
+		if writer != nil {
+			resultErr = errors.Join(resultErr, writer.Close())
+		}
+		if resultErr != nil && reader != nil {
+			resultErr = errors.Join(resultErr, reader.Close())
+		}
+		if named && created.Device != 0 && created.Inode != 0 {
+			var current unix.Stat_t
+			if unix.Fstatat(int(a.temp.Fd()), providerTaskName, &current, unix.AT_SYMLINK_NOFOLLOW) == nil && uint64(current.Dev) == created.Device && current.Ino == created.Inode {
+				resultErr = errors.Join(resultErr, unix.Unlinkat(int(a.temp.Fd()), providerTaskName, 0))
+				resultErr = errors.Join(resultErr, unix.Fsync(int(a.temp.Fd())))
+			}
+		}
+	}()
+	var empty unix.Stat_t
+	if err := unix.Fstat(fd, &empty); err != nil || empty.Mode&unix.S_IFMT != unix.S_IFREG || empty.Uid != uint32(os.Geteuid()) || empty.Mode&0o7777 != 0o600 || empty.Nlink != 1 || empty.Size != 0 || empty.Dev == 0 || empty.Ino == 0 || uint64(empty.Dev) != a.tempID.Device {
+		return nil, ErrWorker
+	}
+	created = runner.FileIdentity{Device: uint64(empty.Dev), Inode: empty.Ino}
+	named = true
+	n, err := writer.Write(task)
+	if err != nil || n != len(task) || writer.Sync() != nil {
+		return nil, ErrWorker
+	}
+	readFD, err := unix.Openat(int(a.temp.Fd()), providerTaskName, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
+	if err != nil {
+		return nil, ErrWorker
+	}
+	reader = os.NewFile(uintptr(readFD), "provider-task")
+	var sealed unix.Stat_t
+	if err := unix.Fstat(readFD, &sealed); err != nil || sealed.Mode&unix.S_IFMT != unix.S_IFREG || sealed.Uid != uint32(os.Geteuid()) || sealed.Mode&0o7777 != 0o600 || sealed.Nlink != 1 || sealed.Size != int64(len(task)) || uint64(sealed.Dev) != created.Device || sealed.Ino != created.Inode {
+		return nil, ErrWorker
+	}
+	flags, err := unix.FcntlInt(reader.Fd(), unix.F_GETFL, 0)
+	if err != nil || flags&unix.O_ACCMODE != unix.O_RDONLY {
+		return nil, ErrWorker
+	}
+	body, err := io.ReadAll(io.LimitReader(reader, int64(runner.MaxProviderTaskBytes)+1))
+	if err != nil || !bytes.Equal(body, task) {
+		return nil, ErrWorker
+	}
+	if _, err := reader.Seek(0, io.SeekStart); err != nil {
+		return nil, ErrWorker
+	}
+	var namedStat unix.Stat_t
+	if err := unix.Fstatat(int(a.temp.Fd()), providerTaskName, &namedStat, unix.AT_SYMLINK_NOFOLLOW); err != nil || uint64(namedStat.Dev) != created.Device || namedStat.Ino != created.Inode {
+		return nil, ErrWorker
+	}
+	if err := unix.Unlinkat(int(a.temp.Fd()), providerTaskName, 0); err != nil {
+		return nil, ErrWorker
+	}
+	named = false
+	if err := unix.Fsync(int(a.temp.Fd())); err != nil {
+		return nil, ErrWorker
+	}
+	if err := writer.Close(); err != nil {
+		writer = nil
+		return nil, ErrWorker
+	}
+	writer = nil
+	var unlinked unix.Stat_t
+	if err := unix.Fstat(readFD, &unlinked); err != nil || unlinked.Nlink != 0 || unlinked.Size != int64(len(task)) || uint64(unlinked.Dev) != created.Device || unlinked.Ino != created.Inode {
+		return nil, ErrWorker
+	}
+	tempID, err = privateDirectory(a.temp)
+	if err != nil || tempID != a.tempID {
+		return nil, ErrWorker
+	}
+	return reader, nil
 }
 
 func openRuntimeAuthority(ctx context.Context, runtimeDir *os.File) (*runtimeAuthority, Config, error) {

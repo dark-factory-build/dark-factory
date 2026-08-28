@@ -7,18 +7,19 @@ import (
 )
 
 const (
-	maxConfigBytes        = 256 << 10
-	maxInputBytes         = 1 << 20
-	maxTargetBytes        = 512 << 20
-	maxFrameBytes         = 16 << 10
-	maxProviderFrameBytes = maxConfigBytes
+	maxConfigBytes = 256 << 10
+	maxInputBytes  = 1 << 20
+	maxTargetBytes = 512 << 20
+	maxFrameBytes  = 16 << 10
+	// Provider errors are JSON/base64 framed inside maxFrameBytes. Keeping this
+	// private diagnostic at 8 KiB leaves deterministic envelope headroom.
+	maxProviderErrorBytes = 8 << 10
 
-	// MaxProviderTaskBytes is the largest task body accepted before the fixed
-	// shell capture framing. MaxProviderInputBytes includes that bounded
-	// framing. The private control frame is sized so the complete task survives
-	// JSON base64 framing without silently narrowing the Store contract.
-	MaxProviderTaskBytes  = 128 << 10
-	MaxProviderInputBytes = MaxProviderTaskBytes + 256
+	// MaxProviderTaskBytes is the largest exact task sealed in the provider's
+	// unlinked, read-only-at-exec descriptor.
+	MaxProviderTaskBytes = 128 << 10
+	ProviderTaskPath     = "/dev/fd/11"
+	providerTaskFD       = 11
 
 	// MaxEnvironmentEntryBytes is shared with producers of exact environment
 	// entries so a value accepted before admission cannot fail only after a

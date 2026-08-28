@@ -28,16 +28,23 @@ func TestUnsupportedFailsBeforeEffect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fd := int(cwd.Fd())
+	task, err := os.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwdFD, taskFD := int(cwd.Fd()), int(task.Fd())
 	var worker *WorkerControl
 	if duplicate, err := worker.DuplicateRuntimeDirectory(context.Background()); !errors.Is(err, ErrUnsupported) || duplicate != nil {
 		t.Fatalf("runtime duplicate=%v err=%v", duplicate, err)
 	}
-	if err := worker.ExecProvider(nil, cwd); !errors.Is(err, ErrUnsupported) {
+	if err := worker.ExecProvider(nil, cwd, task); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("provider=%v", err)
 	}
 	var stat unix.Stat_t
-	if err := unix.Fstat(fd, &stat); !errors.Is(err, unix.EBADF) {
+	if err := unix.Fstat(cwdFD, &stat); !errors.Is(err, unix.EBADF) {
 		t.Fatalf("unsupported cwd remained open: %v", err)
+	}
+	if err := unix.Fstat(taskFD, &stat); !errors.Is(err, unix.EBADF) {
+		t.Fatalf("unsupported task remained open: %v", err)
 	}
 }

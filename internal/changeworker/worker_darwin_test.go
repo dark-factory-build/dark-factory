@@ -127,7 +127,7 @@ func TestRegisteredShellWorkerCompletesExactFourReleaseSequence(t *testing.T) {
 	}
 }
 
-func TestRegisteredShellWorkerDeliversMaximumInputThroughRealPTY(t *testing.T) {
+func TestRegisteredShellWorkerExecutesMaximumTaskWithoutPTYStartupTraffic(t *testing.T) {
 	fixture := newWorkerFixtureWithInput(t, func(witness, _, _ string) []byte {
 		quote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
 		prefix := []byte("set -eu\n/bin/stty sane\ncount=$(/usr/bin/wc -c <<'DF_MAX_INPUT'\n")
@@ -158,6 +158,43 @@ func TestRegisteredShellWorkerDeliversMaximumInputThroughRealPTY(t *testing.T) {
 	}
 	if body, err := os.ReadFile(fixture.witness); err != nil || string(body) != "x" {
 		t.Fatalf("maximum-input witness=%q err=%v", body, err)
+	}
+}
+
+func TestRegisteredShellWorkerKeepsPTYExclusiveForPostReadyInput(t *testing.T) {
+	fixture := newWorkerFixtureWithInput(t, func(witness, reply, _ string) []byte {
+		quote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
+		return []byte("set -eu\nprintf ready > " + quote(witness) + "\nIFS= read -r line\nprintf '%s' \"$line\" > " + quote(reply) + "\nexit\n")
+	})
+	inner := fixture.start(t)
+	for _, stage := range []runner.AttemptStage{runner.StageSelection, runner.StagePreparation, runner.StagePopulation} {
+		fixture.release(t, stage, stage)
+	}
+	if err := fixture.controller.Release(runner.StageProvider); err != nil {
+		t.Fatal(err)
+	}
+	if frame := fixture.nextTerminal(t, runner.TerminalReady, 0); frame.Kind != runner.TerminalReady {
+		t.Fatalf("terminal ready=%+v", frame)
+	}
+	if err := fixture.controller.SendTerminalCommand(runner.TerminalCommand{Kind: runner.TerminalGenerationInstall, Correlation: 1, Generation: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if frame := fixture.nextTerminal(t, runner.TerminalGenerationResult, 1); frame.Status != runner.TerminalResultOK {
+		t.Fatalf("generation install=%+v", frame)
+	}
+	payload := []byte("interactive-after-ready\n")
+	if err := fixture.controller.SendTerminalCommand(runner.TerminalCommand{Kind: runner.TerminalInput, Correlation: 2, Generation: 1, Sequence: 1, Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	if frame := fixture.nextTerminal(t, runner.TerminalInputResult, 2); frame.Status != runner.TerminalResultOK || frame.Count != uint32(len(payload)) {
+		t.Fatalf("terminal input=%+v", frame)
+	}
+	record := fixture.finish(t)
+	if record.Terminal.Process != inner || record.Terminal.Exit.Code != 0 || record.Terminal.Exit.Signal != 0 {
+		t.Fatalf("terminal=%+v inner=%+v", record.Terminal, inner)
+	}
+	if body, err := os.ReadFile(fixture.cwdWitness); err != nil || string(body) != "interactive-after-ready" {
+		t.Fatalf("interactive reply=%q err=%v", body, err)
 	}
 }
 
@@ -529,18 +566,17 @@ func newWorkerFixtureWithFactoryctlAndInput(t *testing.T, factoryctl string, inp
 	witness, cwdWitness, envWitness := filepath.Join(root, "provider.witness"), filepath.Join(root, "provider.cwd"), filepath.Join(root, "provider.env")
 	toolPath := workerToolPath(t)
 	quote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
-	// A PTY has no implicit EOF after the initial handoff. The fixture selects
-	// the complete byte sequence explicitly, including exit, rather than
-	// relying on the worker to mutate it with a hidden newline or close.
-	program := []byte(fmt.Sprintf("set -eu\nfor n in 3 9; do test ! -e /dev/fd/$n; done\ntest -e /dev/fd/10\ngit rev-parse --is-inside-work-tree >/dev/null 2>&1 && exit 81 || :\nprintf x > %s\npwd > %s\nenv | sort > %s\nexit\n", quote(witness), quote(cwdWitness), quote(envWitness)))
+	// The exact program arrives on the deliberate fd 11 capability. The PTY is
+	// untouched until an authenticated terminal command writes interactive data.
+	program := []byte(fmt.Sprintf("set -eu\nfor n in 3 9; do test ! -e /dev/fd/$n; done\ntest -e /dev/fd/10\ntest -e /dev/fd/11\ntest ! -e \"$TMPDIR/.provider-task\"\ngit rev-parse --is-inside-work-tree >/dev/null 2>&1 && exit 81 || :\nprintf x > %s\npwd > %s\nenv | sort > %s\nexit\n", quote(witness), quote(cwdWitness), quote(envWitness)))
 	if input != nil {
 		program = input(witness, cwdWitness, envWitness)
 	}
-	initialInput, err := provider.InitialInput(kernel.ProviderShell, program)
+	providerTask, err := provider.Task(kernel.ProviderShell, program)
 	if err != nil {
 		t.Fatal(err)
 	}
-	config := changeworker.Config{Provider: kernel.ProviderShell, RuntimePath: runtimePath, RuntimeIdentity: runtimeID, GitExecutable: git, FactoryctlExecutable: factoryctl, ToolPath: toolPath, RepositoryRoot: repository, RepositoryIdentity: repositoryID, Revision: "HEAD", ChangeParent: changeParent, FinalName: "published", StagingName: ".stage", AttemptSocket: "/private/tmp/dark-factory-worker-api.sock", InitialTerminalInput: initialInput}
+	config := changeworker.Config{Provider: kernel.ProviderShell, RuntimePath: runtimePath, RuntimeIdentity: runtimeID, GitExecutable: git, FactoryctlExecutable: factoryctl, ToolPath: toolPath, RepositoryRoot: repository, RepositoryIdentity: repositoryID, Revision: "HEAD", ChangeParent: changeParent, FinalName: "published", StagingName: ".stage", AttemptSocket: "/private/tmp/dark-factory-worker-api.sock", ProviderTask: providerTask}
 	if _, err := runtimeValue.PublishWorkerConfig(context.Background(), config); err != nil {
 		t.Fatal(err)
 	}
@@ -669,6 +705,19 @@ func (f *workerFixture) release(t *testing.T, release, report runner.AttemptStag
 		t.Fatalf("event=%+v err=%v diag=%q", event, err, f.output())
 	}
 	return event
+}
+
+func (f *workerFixture) nextTerminal(t *testing.T, kind runner.TerminalEventKind, correlation uint64) runner.TerminalFrame {
+	t.Helper()
+	for {
+		event, err := f.controller.Next(8 * time.Second)
+		if err != nil || event.Kind != runner.AttemptTerminalFrame || event.Frame == nil {
+			t.Fatalf("terminal %s event=%+v err=%v diag=%q", kind, event, err, f.output())
+		}
+		if event.Frame.Kind == kind && event.Frame.Correlation == correlation {
+			return *event.Frame
+		}
+	}
 }
 func (f *workerFixture) finish(t *testing.T, expectedSuccess ...bool) *runner.TerminalRecord {
 	t.Helper()

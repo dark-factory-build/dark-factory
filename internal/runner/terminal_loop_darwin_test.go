@@ -228,38 +228,6 @@ func TestTerminalOwnerWriteFailurePoisonsDaemonCapability(t *testing.T) {
 	}
 }
 
-func TestInitialOutputDrainConsumesAtMostOneChunk(t *testing.T) {
-	sockets, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	master := os.NewFile(uintptr(sockets[0]), "bounded-drain-master")
-	peer := os.NewFile(uintptr(sockets[1]), "bounded-drain-peer")
-	defer master.Close()
-	defer peer.Close()
-	if err := unix.SetNonblock(int(master.Fd()), true); err != nil {
-		t.Fatal(err)
-	}
-	if err := unix.SetsockoptInt(int(peer.Fd()), unix.SOL_SOCKET, unix.SO_SNDBUF, 4*terminalReplayChunk); err != nil {
-		t.Fatal(err)
-	}
-	payload := bytes.Repeat([]byte{'x'}, 2*terminalReplayChunk)
-	if n, err := peer.Write(payload); err != nil || n != len(payload) {
-		t.Fatalf("seed output = %d, %v", n, err)
-	}
-	owner := &terminalOwner{child: &OwnedChild{ptyMaster: master}}
-	if err := owner.drainInitialOutput(); err != nil {
-		t.Fatal(err)
-	}
-	if owner.ring.Head() != terminalReplayChunk {
-		t.Fatalf("one drain consumed %d bytes, want %d", owner.ring.Head(), terminalReplayChunk)
-	}
-	remaining := make([]byte, terminalReplayChunk)
-	if n, err := unix.Read(int(master.Fd()), remaining); err != nil || n != len(remaining) {
-		t.Fatalf("remaining output = %d, %v", n, err)
-	}
-}
-
 func TestRetireReadableFilterReturnsVisibleUnresolvedWithinBound(t *testing.T) {
 	reads := &attemptReadSet{
 		daemonRegistered: true,

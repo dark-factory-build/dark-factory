@@ -33,7 +33,7 @@ func TestConfigRoundTripIsExactBoundedAndPrivate(t *testing.T) {
 	}
 	for _, value := range []any{want, SelectionReport{}, PreparationReport{}, PopulationReport{}} {
 		formatted := fmt.Sprintf("%v %+v %#v", value, value, value)
-		for _, sentinel := range []string{want.RuntimePath, want.FactoryctlExecutable, want.RepositoryRoot, string(want.InitialTerminalInput)} {
+		for _, sentinel := range []string{want.RuntimePath, want.FactoryctlExecutable, want.RepositoryRoot, string(want.ProviderTask)} {
 			if strings.Contains(formatted, sentinel) {
 				t.Fatalf("private value leaked: %q", formatted)
 			}
@@ -118,14 +118,14 @@ func TestConfigRejectsRawAuthorityAndInputCorruption(t *testing.T) {
 		func(v *Config) { v.FinalName = ".GiT" },
 		func(v *Config) { v.StagingName = v.FinalName },
 		func(v *Config) { v.AttemptSocket = "/" + strings.Repeat("s", maximumSocketBytes) },
-		func(v *Config) { v.InitialTerminalInput = []byte{0xff} },
-		func(v *Config) { v.InitialTerminalInput = []byte{'x', 0} },
-		func(v *Config) { v.InitialTerminalInput = nil },
-		func(v *Config) { v.InitialTerminalInput = make([]byte, runner.MaxProviderInputBytes+1) },
+		func(v *Config) { v.ProviderTask = []byte{0xff} },
+		func(v *Config) { v.ProviderTask = []byte{'x', 0} },
+		func(v *Config) { v.ProviderTask = nil },
+		func(v *Config) { v.ProviderTask = make([]byte, runner.MaxProviderTaskBytes+1) },
 	}
 	for i, mutate := range mutations {
 		bad := want
-		bad.InitialTerminalInput = bytes.Clone(want.InitialTerminalInput)
+		bad.ProviderTask = bytes.Clone(want.ProviderTask)
 		mutate(&bad)
 		if _, err := EncodeConfig(bad); !errors.Is(err, ErrInvalidContract) {
 			t.Fatalf("mutation %d accepted: %v", i, err)
@@ -147,7 +147,7 @@ func configFixture(t testing.TB) Config {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return Config{Provider: kernel.ProviderShell, RuntimePath: "/private/runtime", RuntimeIdentity: runner.FileIdentity{Device: 1, Inode: 2}, GitExecutable: "/Library/Developer/CommandLineTools/usr/bin/git", FactoryctlExecutable: "/private/release/factoryctl", ToolPath: "/opt/homebrew/bin:/usr/bin:/bin", RepositoryRoot: "/private/repository", RepositoryIdentity: repository, Revision: "main", ChangeParent: "/private/changes", FinalName: "change", StagingName: ".change.stage", AttemptSocket: "/private/api.sock", InitialTerminalInput: []byte("printf exact")}
+	return Config{Provider: kernel.ProviderShell, RuntimePath: "/private/runtime", RuntimeIdentity: runner.FileIdentity{Device: 1, Inode: 2}, GitExecutable: "/Library/Developer/CommandLineTools/usr/bin/git", FactoryctlExecutable: "/private/release/factoryctl", ToolPath: "/opt/homebrew/bin:/usr/bin:/bin", RepositoryRoot: "/private/repository", RepositoryIdentity: repository, Revision: "main", ChangeParent: "/private/changes", FinalName: "change", StagingName: ".change.stage", AttemptSocket: "/private/api.sock", ProviderTask: []byte("printf exact")}
 }
 
 func configStringBounds(t testing.TB, encoded []byte, want int) (int, int) {
