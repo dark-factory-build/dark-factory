@@ -30,6 +30,10 @@ const (
 	// released the runner by positive absence, closed the terminal and removed
 	// the artifact and runtime.
 	RecoveredResultConsumed RecoveredRunAction = "result-consumed"
+	// RecoveredResultConsumedUnsettled marks a consumed result whose run
+	// could not be settled to a terminal record; the run stays finalizing
+	// and discoverable, and the refusal rides the disposition.
+	RecoveredResultConsumedUnsettled RecoveredRunAction = "result-consumed-unsettled"
 	// RecoveredNoResultUnresolved converged what could be proven for an
 	// activated attempt with no trusted result: failure proposal, unresolved
 	// provider pair, released-by-absence runner. Deliberately not terminal.
@@ -58,8 +62,8 @@ type RecoveredRunDisposition struct {
 // with runtime-lifetime-lease availability; a held lease concludes nothing.
 // The sweep is idempotent: every durable edge it uses recognizes its own
 // exact replay.
-func (daemon *Daemon) RecoverAbandonedRuns(ctx context.Context, parent *RuntimeParent) ([]RecoveredRunDisposition, error) {
-	if daemon == nil || daemon.store == nil || ctx == nil || parent == nil {
+func (daemon *Daemon) RecoverAbandonedRuns(ctx context.Context, parent *RuntimeParent, changeParent string) ([]RecoveredRunDisposition, error) {
+	if daemon == nil || daemon.store == nil || ctx == nil || parent == nil || changeParent == "" {
 		return nil, fmt.Errorf("%w: invalid recovery sweep", kernel.ErrInvalidValue)
 	}
 	runs, err := daemon.store.RecoverableRuns(ctx)
@@ -75,13 +79,13 @@ func (daemon *Daemon) RecoverAbandonedRuns(ctx context.Context, parent *RuntimeP
 			// A registered live owner is not abandoned; recovery never races it.
 			continue
 		}
-		action, runErr := daemon.recoverRun(ctx, parent, recoverable)
+		action, runErr := daemon.recoverRun(ctx, parent, changeParent, recoverable)
 		dispositions = append(dispositions, RecoveredRunDisposition{RunID: recoverable.Run.ID, Action: action, Err: runErr})
 	}
 	return dispositions, nil
 }
 
-func (daemon *Daemon) recoverRun(ctx context.Context, parent *RuntimeParent, recoverable kernel.RecoverableRun) (RecoveredRunAction, error) {
+func (daemon *Daemon) recoverRun(ctx context.Context, parent *RuntimeParent, changeParent string, recoverable kernel.RecoverableRun) (RecoveredRunAction, error) {
 	run := recoverable.Run
 	var runtimeRoot, runnerProcess, providerProcess, providerGroup kernel.Resource
 	for _, resource := range recoverable.Resources {
@@ -100,7 +104,7 @@ func (daemon *Daemon) recoverRun(ctx context.Context, parent *RuntimeParent, rec
 		return RecoveredUncertain, errInvalidContract
 	}
 	if runtimeRoot.Identity.Empty() {
-		return daemon.recoverBeforeRuntime(ctx, parent, run, runtimeRoot)
+		return daemon.recoverBeforeRuntime(ctx, parent, changeParent, run, runtimeRoot)
 	}
 	fileIdentity, err := runtimeFileIdentity(runtimeRoot.Identity)
 	if err != nil {
@@ -126,7 +130,7 @@ func (daemon *Daemon) recoverRun(ctx context.Context, parent *RuntimeParent, rec
 			// Torn publish or tampering: retain the file, conclude nothing.
 			return RecoveredUncertain, authErr
 		}
-		return daemon.recoverAuthenticatedResult(ctx, parent, run, recovered, record, runtimeRoot, runnerProcess, fileIdentity)
+		return daemon.recoverAuthenticatedResult(ctx, parent, changeParent, run, recovered, record, runtimeRoot, runnerProcess, fileIdentity)
 	}
 	switch {
 	case runnerProcess.State == kernel.ResourceStarting:
@@ -143,7 +147,7 @@ func (daemon *Daemon) recoverRun(ctx context.Context, parent *RuntimeParent, rec
 		if removeErr := daemon.removeRecoveredRuntime(ctx, parent, run.ID, recovered, fileIdentity); removeErr != nil {
 			return RecoveredUnregistered, removeErr
 		}
-		_, settleErr := daemon.settleAbandonedRun(run.ID)
+		_, settleErr := daemon.settleRun(changeParent, run.ID)
 		return RecoveredUnregistered, settleErr
 	case runnerProcess.State == kernel.ResourceActive && providerProcess.State == kernel.ResourceDeclared && run.Phase == kernel.RunAdmitted:
 		if !daemon.recoveredRunnerAbsent(runnerProcess) {
@@ -155,7 +159,7 @@ func (daemon *Daemon) recoverRun(ctx context.Context, parent *RuntimeParent, rec
 		if removeErr := daemon.removeRecoveredRuntime(ctx, parent, run.ID, recovered, fileIdentity); removeErr != nil {
 			return RecoveredPreExecAbsence, removeErr
 		}
-		_, settleErr := daemon.settleAbandonedRun(run.ID)
+		_, settleErr := daemon.settleRun(changeParent, run.ID)
 		return RecoveredPreExecAbsence, settleErr
 	default:
 		return daemon.recoverWithoutResult(ctx, run, runnerProcess, providerProcess, providerGroup)
@@ -165,7 +169,7 @@ func (daemon *Daemon) recoverRun(ctx context.Context, parent *RuntimeParent, rec
 // recoverBeforeRuntime handles an admitted run whose runtime resource never
 // acquired an identity: either CreateRuntime never ran (positively absent by
 // name) or its outcome is unknown and the run stays discoverable.
-func (daemon *Daemon) recoverBeforeRuntime(ctx context.Context, parent *RuntimeParent, run kernel.Run, runtimeRoot kernel.Resource) (RecoveredRunAction, error) {
+func (daemon *Daemon) recoverBeforeRuntime(ctx context.Context, parent *RuntimeParent, changeParent string, run kernel.Run, runtimeRoot kernel.Resource) (RecoveredRunAction, error) {
 	if run.Phase != kernel.RunAdmitted || runtimeRoot.State != kernel.ResourceDeclared {
 		return RecoveredUncertain, errInvalidContract
 	}
@@ -183,11 +187,11 @@ func (daemon *Daemon) recoverBeforeRuntime(ctx context.Context, parent *RuntimeP
 	if failErr != nil && failed.Phase != kernel.RunFinalizing {
 		return RecoveredUncertain, failErr
 	}
-	_, settleErr := daemon.settleAbandonedRun(run.ID)
+	_, settleErr := daemon.settleRun(changeParent, run.ID)
 	return RecoveredRuntimeAbsent, settleErr
 }
 
-func (daemon *Daemon) recoverAuthenticatedResult(ctx context.Context, parent *RuntimeParent, run kernel.Run, recovered *RecoveredRuntime, record *runner.AttemptResultRecord, runtimeRoot, runnerProcess kernel.Resource, fileIdentity runner.FileIdentity) (RecoveredRunAction, error) {
+func (daemon *Daemon) recoverAuthenticatedResult(ctx context.Context, parent *RuntimeParent, changeParent string, run kernel.Run, recovered *RecoveredRuntime, record *runner.AttemptResultRecord, runtimeRoot, runnerProcess kernel.Resource, fileIdentity runner.FileIdentity) (RecoveredRunAction, error) {
 	result, err := kernelAttemptResult(record, run.ID, run.CredentialDigest, runtimeRoot.Identity)
 	if err != nil {
 		return RecoveredUncertain, err
@@ -222,12 +226,12 @@ func (daemon *Daemon) recoverAuthenticatedResult(ctx context.Context, parent *Ru
 	if removeErr := daemon.removeRecoveredRuntime(ctx, parent, run.ID, recovered, fileIdentity); removeErr != nil {
 		return RecoveredResultConsumed, removeErr
 	}
-	// A consumed failure result leaves an unpublished change: settle it
-	// abandoned. A published change refuses with a conflict — the retained
-	// settlement reconstruction is deliberately deferred, and the run stays
-	// discoverable rather than guessing availability evidence.
-	if _, settleErr := daemon.settleAbandonedRun(run.ID); settleErr != nil && !errors.Is(settleErr, kernel.ErrConflict) {
-		return RecoveredResultConsumed, settleErr
+	// The consumed result's run settles to its terminal record: abandoned
+	// for an unpublished change, retained for a verified published tree. A
+	// refusal keeps the run finalizing and discoverable and is surfaced as
+	// its own disposition rather than logged indistinguishably from success.
+	if _, settleErr := daemon.settleRun(changeParent, run.ID); settleErr != nil {
+		return RecoveredResultConsumedUnsettled, settleErr
 	}
 	return RecoveredResultConsumed, nil
 }

@@ -52,7 +52,9 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 	}
 	validateCompletion := spec.scheduledCompletion
 	if validateCompletion == nil {
-		validateCompletion = daemon.validateScheduledCompletion
+		validateCompletion = func(observed kernel.Run) error {
+			return daemon.validateScheduledCompletion(spec.ChangeParent, spec.UnsettledCompletion, observed)
+		}
 	}
 	events := make(chan schedulerEvent, (kernel.MaxFactoryCapacity+1)*2)
 	owners := make(map[uint64]*scheduledOwner, kernel.MaxFactoryCapacity+1)
@@ -178,7 +180,7 @@ func duplicateAdmissionObservation(count int) error {
 	return fmt.Errorf("%w: repeated scheduler observation", kernel.ErrCorruptState)
 }
 
-func (daemon *Daemon) validateScheduledCompletion(observed kernel.Run) error {
+func (daemon *Daemon) validateScheduledCompletion(changeParent string, unsettled func(kernel.RunID, error), observed kernel.Run) error {
 	if observed.ID == (kernel.RunID{}) {
 		return kernel.NewOutcomeUnknownError(fmt.Errorf("%w: admitted attempt returned no run", kernel.ErrCorruptState))
 	}
@@ -192,11 +194,22 @@ func (daemon *Daemon) validateScheduledCompletion(observed kernel.Run) error {
 		return kernel.NewOutcomeUnknownError(err)
 	}
 	if current.Phase == kernel.RunFinalizing && current.Proposal != nil {
-		// A failed attempt converges to finalizing with its whole footprint
-		// released and its candidate change unpublished; the scheduler owns
-		// the abandoned settlement to the terminal record.
-		settled, settleErr := daemon.settleAbandonedRun(current.ID)
+		// An attempt that failed after conversion converges to finalizing
+		// with its footprint released; the scheduler owns settling it to the
+		// terminal record — abandoned for an unpublished change, retained
+		// for a verified published tree. A conflict refusal means durable
+		// convergence is genuinely incomplete (unresolved residue, an
+		// unverifiable published tree): the run stays finalizing and
+		// discoverable, the refusal is surfaced, and the scheduler keeps
+		// serving every other attempt rather than killing the process.
+		settled, settleErr := daemon.settleRun(changeParent, current.ID)
 		if settleErr != nil {
+			if errors.Is(settleErr, kernel.ErrConflict) {
+				if unsettled != nil {
+					unsettled(current.ID, settleErr)
+				}
+				return nil
+			}
 			return kernel.NewOutcomeUnknownError(errors.Join(errUnsettledCompletion, settleErr))
 		}
 		current = settled

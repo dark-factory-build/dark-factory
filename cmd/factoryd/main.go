@@ -22,6 +22,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/daemon"
 	"github.com/dark-factory-build/dark-factory/internal/install"
+	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/provider"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
@@ -306,7 +307,7 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 	// The sweep runs to a quiet state before any listener opens so no client
 	// can act on unrecovered durable state. A run the sweep leaves unresolved
 	// is durable fail-closed residue, reported but never a boot refusal.
-	dispositions, err := owner.daemon.RecoverAbandonedRuns(ownedContext, owner.runtimeParent)
+	dispositions, err := owner.daemon.RecoverAbandonedRuns(ownedContext, owner.runtimeParent, owner.supervisorSpec.ChangeParent)
 	if err != nil {
 		return nil, err
 	}
@@ -335,6 +336,9 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 	startupPhase("browser")
 	owner.apiStart = true
 	go owner.accept(ownedContext, owner.listener)
+	owner.supervisorSpec.UnsettledCompletion = func(id kernel.RunID, err error) {
+		_, _ = fmt.Fprintf(recoveryLog, "factoryd: unsettled run %s: %v\n", id.String(), err)
+	}
 	owner.schedulerDone = make(chan struct{})
 	owner.schedulerStart = true
 	go func() {

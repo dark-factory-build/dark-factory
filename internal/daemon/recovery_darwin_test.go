@@ -21,16 +21,22 @@ import (
 )
 
 type recoveryFixture struct {
-	daemon     *Daemon
-	store      *kernel.Store
-	parent     *RuntimeParent
-	parentPath string
-	keys       kernel.AdmissionKeys
-	run        kernel.Run
-	proof      [32]byte
+	daemon       *Daemon
+	store        *kernel.Store
+	parent       *RuntimeParent
+	parentPath   string
+	changeParent string
+	keys         kernel.AdmissionKeys
+	run          kernel.Run
+	proof        [32]byte
 }
 
 func newRecoveryFixture(t *testing.T, seed byte) *recoveryFixture {
+	t.Helper()
+	return newRecoveryFixtureWithRole(t, seed, kernel.RoleOrchestrator)
+}
+
+func newRecoveryFixtureWithRole(t *testing.T, seed byte, role kernel.AgentRole) *recoveryFixture {
 	t.Helper()
 	ctx := context.Background()
 	root, err := os.MkdirTemp("/private/tmp", "dark-factory-recovery-")
@@ -79,7 +85,7 @@ func newRecoveryFixture(t *testing.T, seed byte) *recoveryFixture {
 		t.Fatal(err)
 	}
 	agentID := mustAgentID(t, testID(seed+1))
-	if _, err := store.CreateAgent(ctx, kernel.NewAgent{ID: agentID, ProjectID: projectID, Name: "recovery-agent", Role: kernel.RoleOrchestrator, Provider: kernel.ProviderShell, ToolBudgetLimit: 1}, at); err != nil {
+	if _, err := store.CreateAgent(ctx, kernel.NewAgent{ID: agentID, ProjectID: projectID, Name: "recovery-agent", Role: role, Provider: kernel.ProviderShell, ToolBudgetLimit: 1}, at); err != nil {
 		t.Fatal(err)
 	}
 	taskID := mustTaskID(t, testID(seed+2))
@@ -97,7 +103,7 @@ func newRecoveryFixture(t *testing.T, seed byte) *recoveryFixture {
 	if _, err := store.SetDispatch(ctx, factory.Revision, true, at); err != nil {
 		t.Fatal(err)
 	}
-	fixture := &recoveryFixture{daemon: daemon, store: store, parent: parent, parentPath: parentPath}
+	fixture := &recoveryFixture{daemon: daemon, store: store, parent: parent, parentPath: parentPath, changeParent: filepath.Join(homePath, "changes")}
 	copy(fixture.proof[:], bytes.Repeat([]byte{seed + 4}, 32))
 	proofDigest := sha256.Sum256(fixture.proof[:])
 	storedProof, err := kernel.ResultProofDigestFromBytes(proofDigest[:])
@@ -239,7 +245,7 @@ func (fixture *recoveryFixture) writeArtifact(t *testing.T, body []byte) {
 
 func (fixture *recoveryFixture) sweep(t *testing.T) RecoveredRunDisposition {
 	t.Helper()
-	dispositions, err := fixture.daemon.RecoverAbandonedRuns(context.Background(), fixture.parent)
+	dispositions, err := fixture.daemon.RecoverAbandonedRuns(context.Background(), fixture.parent, fixture.changeParent)
 	if err != nil {
 		t.Fatal(err)
 	}
