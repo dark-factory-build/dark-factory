@@ -903,21 +903,22 @@ func TestConnectionDispatchLeaseLinearizesHomeClose(t *testing.T) {
 			t.Fatalf("shutdown did not interrupt paused call: count=%d err=%v", count, err)
 		}
 		entered := false
-		if _, err := connection.Dispatch(func(Call) Reply {
+		_, dispatchErr := connection.Dispatch(func(Call) Reply {
 			entered = true
 			_, _ = store.CreateProject(context.Background(), kernel.NewProject{ID: projectID, Name: "must-not-commit", Root: root}, at)
 			return Reply{}
-		}); !errors.Is(err, ErrTransport) {
-			t.Fatalf("dispatch after shutdown began = %v", err)
-		}
-		if entered {
-			t.Fatal("paused call entered dispatch after shutdown began")
-		}
+		})
 		if err := connection.Close(); err != nil {
 			t.Fatal(err)
 		}
 		if err := <-closed; err != nil {
 			t.Fatal(err)
+		}
+		if !errors.Is(dispatchErr, ErrTransport) {
+			t.Errorf("dispatch after shutdown began = %v", dispatchErr)
+		}
+		if entered {
+			t.Error("paused call entered dispatch after shutdown began")
 		}
 		apiTestHomes.Delete(listener)
 		_ = client.Close()
