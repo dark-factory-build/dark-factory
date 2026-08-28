@@ -406,6 +406,117 @@ The local socket, credential files, runtime roots, and generated provider
 configuration are private daemon-owned files. The live operator home and
 launchd job are never test fixtures.
 
+## Invariants carried from the retired Rust reviews
+
+The 2026-08 review waves found recurring defect classes in the retired Rust
+code: guards that failed open, cleanup that presumed absence instead of
+proving it, declarations no observation backed, and unbounded public
+surfaces. Those findings close with the cutover, but their invariants do not.
+Each is restated here as a requirement on the Go system, with one
+representative issue for provenance and the enforcement that exists today —
+or an explicit note that enforcement is still owed. Closing the stale
+Rust-era issues is gated on this capture; the full mapping lives in the
+internal backlog reconciliation record (28 Aug 2026). An entry naming
+enforcement claims only what the cited code and tests do at this revision.
+
+1. **A failed launch reaps its provider.** Every failure path that runs after
+   a child exists must converge that exact child and group before reporting;
+   no launch failure may orphan a provider process (untested reap path,
+   #326). Enforced: `internal/runner/attempt_darwin.go`
+   (`waitForAttemptChild` retries synchronously until the sole `Wait`
+   succeeds and never publishes terminal evidence past uncertainty) and
+   `internal/daemon/supervisor_darwin.go` (`supervisorAttemptOwner.close`
+   converges the inner group before dropping ownership); tested by
+   `TestSupervisorReapsProviderDescendant` in
+   `internal/daemon/supervisor_darwin_test.go`.
+
+2. **Absence is proved, never presumed.** A process check that cannot decide
+   reports failure; only an exact PID+group+birth identity census proves a
+   recorded effect gone, and uncertainty stays durably unresolved (fail-open
+   liveness probe, #334). Enforced: `internal/runner/process_darwin.go`
+   (birth-stamped identity census), `internal/kernel/lifecycle.go`
+   (`ReleaseResource` refuses a non-empty identity without a recorded exit;
+   `MarkResourceUnresolved` keeps uncertainty non-terminal); tested by the
+   census-rejection cases in
+   `internal/daemon/recovered_runtime_darwin_test.go`.
+
+3. **Guards fail closed.** An authorization or integrity guard that errors
+   denies; no guard failure may pass as success or as mere ineligibility
+   (fail-open stream guards, #341). Enforced: every public mutation begins
+   with `beginValidatedWrite` in `internal/kernel/sqlite.go`, whose graph
+   predicate blocks the decision on any damaged fact (tested by
+   `TestEveryPublicMutationValidatesDurableGraphBeforeDecision` in
+   `internal/kernel/validated_write_test.go`); `SubscribeState` in
+   `internal/daemon/browser_subscription.go` authorizes before subscribing
+   and denies on any error, invalid cursor, or shutdown.
+
+4. **Terminalization is one-way.** No transition leaves `released` or
+   `terminal`; release requires a recorded exit observation, and a terminal
+   replay is idempotent or a conflict, never a rewrite (untested one-way
+   release, #335). Enforced: `internal/kernel/lifecycle.go` —
+   `transitionResource`'s SQL state-set guards admit no edge out of
+   `released`, and `finalizeRun` writes `terminal` only from `finalizing`
+   with every resource released and required exits recorded.
+
+5. **Public state is bounded, and the bound is observed.** Every publicly
+   readable surface has a hard limit that code checks, not prose that
+   asserts it (boundedness declared but enforced by nothing, #340).
+   Enforced: `EventRetentionLimit` in `internal/kernel/types.go` is checked
+   inside the validated-write predicate (`internal/kernel/validate.go`),
+   where excess is `ErrCorruptState`; the factory row's
+   `invalidation_floor`/`next_invalidation_sequence` CHECK constraints and
+   pruning in `internal/kernel/store.go` bound the invalidation feed;
+   `PublicStateEntityLimit` and paging bound snapshots
+   (`internal/kernel/public_state.go`).
+
+6. **Projections never serve stale authority.** A client view derives from
+   durable state at a pinned head; a resume cursor behind the retained floor
+   restarts the snapshot rather than presenting old rows as current (stale
+   event projection, #344). Enforced: `internal/kernel/public_state.go`
+   (head-pinned snapshot, floor-checked restart),
+   `internal/daemon/browser_subscription.go` (stale cursors refuse), and
+   field-exact wire projection in `internal/daemon/api_projection.go`;
+   tested by `internal/kernel/human_request_terminal_projection_test.go` and
+   `internal/api/web_contract_test.go`.
+
+7. **Every guard is tested against its threat.** A security or integrity
+   guard needs a causal test that exercises the exact threat it exists to
+   stop, not only its happy path (bundle guards untested against their
+   threat, #353). This binds review of every change rather than one
+   enforcement point; current examples include
+   `TestRecoveredRuntimeFilePolicyRejectsEveryAuthorityMutation`
+   (`internal/daemon/recovered_runtime_darwin_test.go`) and the
+   hostile-input cases in `web/packages/ui/test/factory-console.test.mjs`.
+
+8. **One sanitizer per untrusted display surface.** Each surface that renders
+   untrusted bytes has exactly one escaping authority; duplicated predicates
+   diverge silently (duplicate display-control predicates, #320). The
+   console's text escaping is tested in
+   `web/packages/ui/test/factory-console.test.mjs`; for terminal byte
+   rendering the invariant must hold; enforcement to be verified.
+
+9. **Recovery from an unclean kill is proven, not assumed.** The daemon must
+   converge after SIGKILL at any point, and the proof is a test that kills
+   it there (SIGKILL recovery unproven, #313). Enforced at the store and
+   runner cuts: crash injection before and after the admission and
+   finalization commits (`internal/kernel/sqlite_crash_test.go`) and
+   parent-SIGKILL gate abort (`internal/runner/runner_darwin_test.go`). A
+   whole-daemon arbitrary-point kill proof must hold; enforcement to be
+   verified.
+
+10. **Lists return bounded summaries.** A list request returns paged
+    summary rows, never unbounded full bodies or private detail (unbounded
+    list responses, #39). Enforced: `internal/kernel/public_state.go` pages
+    with a hard limit and `internal/daemon/api_projection.go` projects
+    summaries without task bodies or private fields.
+
+11. **Hierarchy derives from durable parent facts.** Agent authority
+    topology is a rooted tree with bounded depth, derived only from durable
+    parent relationships — never from presentation state (hierarchy held up
+    by rendering, #363). The fresh schema has no parent field yet, so the
+    invariant binds that design when it lands: must hold; enforcement to be
+    verified.
+
 ## Deliberate non-goals
 
 - No new crate, ORM, actor framework, repository/service trait with one
