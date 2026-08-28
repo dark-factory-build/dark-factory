@@ -74,11 +74,14 @@ field/domain table is defined once in the rewrite record's Global transactional
 admission contract and used literally here: task `updated_at_ms` and every
 relevant timestamp are bounded and monotonic; dispatch/pause are exact Boolean
 integers; budgets are bounded and internally ordered; every role, provider,
-execution mode, model, reasoning effort, task status and verification policy is
-in its stated domain; and provider/mode combinations are compatible. The fresh
-schema has no profile row or profile status, agent status or project status;
-agent `paused` is the availability switch. This is not a second validation
-layer. Exact fresh
+model, reasoning effort, task status and verification policy is in its stated
+domain; shell requires model and reasoning effort to be absent, while
+Claude/Codex permit each independently. The fresh schema has no profile row or
+profile status, agent status or project status; agent `paused` is the
+availability switch. Provider choice inherently means unrestricted interactive
+authority in V1. There is no `execution_mode` field, type, column, or wire
+value; bounded Claude/Codex authority is deferred until causal OS-effect proof
+exists. This is not a second validation layer. Exact fresh
 decision precedence after those checks is `dispatch_disabled`, `at_capacity`,
 `queue_empty`, then `no_eligible_work`. Only after every run phase is known may
 capacity count exactly the one nonterminal set: admitted, running and finalizing.
@@ -90,10 +93,13 @@ Eligibility means task status exactly queued, valid same-project assigned
 agent, either known role (`worker` or `orchestrator`), not paused, durable
 budget remaining and no conflicting open run. Role determines the footprint,
 not external availability; known nonqueued status is outside the queue.
-Provider/mode/model/effort/project-verification controls must be in those exact
+Provider/model/effort/project-verification controls must be in those exact
 field domains, but external availability
-is not eligibility. Known-valid paused, budget-exhausted or open-run-conflicting
-queued rows are ineligible; corrupt facts are never ineligibility. The
+is not eligibility. Installed-version/model compatibility is checked by
+provider Build/start after admission and becomes typed `FailureSpawn`/finalizing,
+never durable corruption or queue ineligibility. Known-valid paused,
+budget-exhausted or open-run-conflicting queued rows are ineligible; corrupt
+facts are never ineligibility. The
 Store selects globally by priority
 descending, creation time ascending and exact 16-byte task-ID SQLite `BLOB`
 bytes ascending. It then validates that row's canonical Change: corrupt,
@@ -136,10 +142,11 @@ Relationship checks occur in the same Store transaction as the mutation:
 
 Task and run ancestry never substitute for the durable agent hierarchy.
 
-Dispatch and execution authority are separate. `dispatch_enabled` controls
-only new admission. Every admitted run freezes one `PlanOnly`,
-`WorkspaceWrite`, or `Unrestricted` mode derived from the agent profile;
-changing the profile or dispatch later does not rewrite that run.
+Dispatch and provider authority are separate. `dispatch_enabled` controls only
+new admission. Every admitted run freezes its provider and optional model and
+effort; provider choice inherently means unrestricted interactive authority in
+V1. Changing the provider/model/effort or dispatch later does not rewrite that
+run.
 
 A retry creates a new run, bearer, runtime, and provider process. It may reuse
 the retained Change only after the preceding run is terminal. It never revives
@@ -281,7 +288,7 @@ callback or row:
 | Immutable source and launch | Concurrent Change mutation yields one canonical snapshot or fails before compilation. Replacing or tampering with prepared test output cannot change what launches. |
 | Cache reuse and Change storage | Two revisions reuse one project/toolchain cache while producing distinct source-bound manifests. Cache count and measured-byte pressure refuse or reclaim only regenerable entries. Nonterminal capacity bounds the count of reserved residues; accepted trees meet entry/byte/depth limits. Terminal retained-Change aggregate retention and a same-UID-replaced reserved stage's bytes remain explicit cutover gates, not invented admission authority. |
 | Orchestrator policy only | Orchestrators remain subject to hierarchy scope and cannot direct-launch, publish repositories, submit another attempt's outcome, mutate capacity or budgets, or invoke operator control. |
-| Dispatch and execution mode | Disabled dispatch admits nothing. An admitted run retains its frozen typed mode across profile and dispatch changes. Retained Rust maps each mode to exact non-interactive flags; planned Go proves its separate PTY adapter mapping without changing admission authority. |
+| Dispatch and provider authority | Disabled dispatch admits nothing. An admitted run retains its frozen provider/model/effort across agent edits and dispatch changes. No execution-mode field or value may appear in the fresh schema, Store model, or wire contract; bounded provider authority is deferred until its causal OS-effect proof. |
 
 Process tests use a temporary `DARK_FACTORY_HOME`, explicit private socket,
 unique disposable paths and labels, deterministic providers, and two
@@ -302,7 +309,7 @@ The independent reviewer must inspect one exact `main` commit and confirm:
 - planned Go queue selection is one global cursor-free immediate transaction
   with exact eligibility/reason/BLOB ordering and no caller nomination, while
   hierarchy authorization remains transactional;
-- typed execution mode is separate from dispatch and frozen at admission;
+- provider choice is separate from dispatch and frozen at admission; V1 provider authority is unrestricted interactive authority;
 - crashes, identity reuse, and verifier leader loss cannot cause replay,
   unsafe cleanup, or premature terminalization;
 - factoryd alone creates and removes Changes, and provider views expose no Git

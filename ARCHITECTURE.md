@@ -34,11 +34,13 @@ becoming ineligibility. Only after that proof may capacity count the single set
 of all nonterminal runs: admitted, running and finalizing.
 The rewrite record's Global transactional admission contract defines the one
 exact field/domain table used by the fresh-schema `CHECK`s and this predicate:
-it includes exact Boolean storage, budget arithmetic, model/effort and
-provider/mode compatibility, task `updated_at_ms` and every relevant monotonic
-timestamp. The fresh schema has no profile, agent or project status field;
-agent `paused` is the availability control. This file does not define a second
-or extensible control validator.
+it includes exact Boolean storage, budget arithmetic, provider/model fields,
+task `updated_at_ms`, every relevant monotonic timestamp, and the Change and
+invalidation fields that admission writes. The fresh schema has no profile row,
+agent or project status field; agent `paused` is the availability control.
+Provider choice inherently means unrestricted interactive authority in V1;
+there is no `execution_mode` field, type, column, or wire value.
+This file does not define a second or extensible control validator.
 Configured capacity is one integer `C` in `[1, 1024]`; a reserved Change residue
 belongs to one nonterminal worker run, so its count is at most `C`. Terminal
 retained-Change aggregate retention and adversarial residue bytes remain
@@ -129,12 +131,12 @@ pretends the resource disappeared or rewrites the outcome.
    and checks dispatch/eligibility,
    selects the canonical task+agent by global priority/time/16-byte-BLOB-ID
    order, validates its one
-   Change, derives typed launch controls, and binds the immutable task
+   Change, derives the provider launch target, and binds the immutable task
    incarnation/work revision before external effects. The retained Rust
    per-agent queue-head implementation is historical only. The factory-wide
    dispatch switch controls only whether this transaction may admit new work;
-   changing an agent profile or disabling dispatch cannot rewrite an admitted
-   run's launch authority.
+   changing an agent's provider/model or disabling dispatch cannot rewrite an
+   admitted run's launch authority.
 6. No admitted attempt means no provider process, tool hook, outcome request,
    or writable source lease.
 7. A retry creates a new run and new bearer. It never revives an old process
@@ -240,31 +242,23 @@ The `Provider` trait answers only:
 
 It receives a daemon-derived `SpawnContext` with an exact `RunId`, source path,
 single `startup_input`, hook-token path, trusted `factoryctl` path, and resolved
-profile including one typed `PlanOnly`, `WorkspaceWrite`, or `Unrestricted`
-mode frozen by admission. Provider adapters exhaustively translate that value
-to non-interactive native flags; free-form permission strings are not part of
-the domain. An adapter cannot choose a source path, keep a process alive for
-later work, or extend authority. See [the provider guide](docs/providers.md).
-
-`WorkspaceWrite` means durable provider writes belong to the admitted Change.
-Codex denies its inherited system-temp write roots; Claude's native sandbox
-retains only its per-launch ephemeral temp scratch in addition to the Change.
-That scratch is provider-owned runtime state, not product source or publication
-authority.
+provider and optional model selected at admission. V1 provider choice
+inherently means unrestricted interactive authority; adapters cannot claim an
+unproved OS write boundary. An adapter cannot choose a source path, keep a
+process alive for later work, or extend authority. See [the provider guide](docs/providers.md).
 
 The retained Rust runtime validates one exact Claude executable and the finite
 generated settings shapes before its Store admission begins. That ordering is
 historical, not planned Go eligibility: Go durably admits canonical work first,
 then missing source or provider executable/configuration/auth converges through
 typed `FailureSource` or `FailureSpawn` without falling through to lower work.
-Claude `WorkspaceWrite` is macOS-only because its exact AF_UNIX sandbox policy
-is ignored elsewhere.
-Claude `PlanOnly` has no sandbox stanza, but is conservatively restricted to
-the supported macOS product runtime rather than asserting a second platform
-claim. `Unrestricted` remains available elsewhere. A missing or rejected
-install disables only that provider, while a provider version or executable
-identity change fails its launch closed. Codex parses every actual launch
-under `--strict-config` and inherits no ambient provider configuration.
+A missing or rejected install disables only that provider, while a provider
+version or executable identity change fails its launch closed. Codex parses
+every actual launch under `--strict-config` and inherits no ambient provider
+configuration. Installed-version/model compatibility is checked by provider
+Build/start after admission; incompatibility becomes typed `FailureSpawn` and
+finalizing, never durable corruption or queue ineligibility. Bounded
+Claude/Codex authority is deferred until causal OS-effect proof exists.
 
 The generic runner exports `DARK_FACTORY_ATTEMPT_TOKEN_FILE` as the path to the
 private bearer file. It does not export the bearer value. When that variable is

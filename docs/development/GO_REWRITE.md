@@ -206,10 +206,14 @@ Inside one literal `BEGIN IMMEDIATE`, the Store first reconciles the fresh run
 ID. A successful RunID reconciliation returns its already-committed canonical
 footprint. The reconcile-only outcome when no such commit can be proved is
 `not_reconciled`; it is never a fresh scheduling reason. Before any fresh
-no-admission reason, the Store reads and validates the singleton global
-settings row; a missing row, unknown enum/status or invalid control value is
-`ErrCorruptState`; configured capacity is an integer in `[1, 1024]`. One
-concrete SQL integrity predicate then covers both:
+no-admission reason, the Store reads the singleton global settings row, and
+the one concrete SQL integrity predicate validates its `daemon_id`, dispatch
+switch, capacity, revision, timestamps and invalidation counters
+(`next_invalidation_sequence` and `invalidation_floor`) against the exact table
+below, including their cross-field ordering. A missing row, unknown
+enum/status or invalid control value is `ErrCorruptState`; these counters are
+admission authority, not schema-only checks. Configured capacity is an integer
+in `[1, 1024]`. The predicate then covers both:
 
 - every row/relation/control that can occupy capacity or bind active authority,
   including all run, attempt-credential, resource, terminal-session and Change
@@ -228,23 +232,27 @@ the causal proof against constraint-bypassed or damaged durable state, not a
 second validation framework.
 
 The integrity predicate and the fresh-schema `CHECK`s share this one literal
-queued-assignment control domain. Later references to a known control mean
-membership in this table; they do not invoke another validator:
+field/domain table. Later references to a known control mean membership in this
+table; they do not invoke another validator:
 
 | Fresh-schema field | Exact durable domain |
 |---|---|
+| factory `singleton` | SQLite `INTEGER` exactly `1` |
 | factory `dispatch_enabled` | SQLite `INTEGER` exactly `0` or `1` |
 | factory `capacity` | SQLite `INTEGER` in `[1, 1024]` |
+| factory `daemon_id` | SQLite `BLOB` exactly 16 bytes and not `zeroblob(16)` |
 | factory `revision`, `updated_at_ms` | revision is SQLite `INTEGER >= 1`; timestamp is SQLite `INTEGER` in `[0, 9223372036854775807]` |
+| factory `next_invalidation_sequence` | SQLite `INTEGER` in `[1, 9223372036854775807]` |
+| factory `invalidation_floor` | SQLite `INTEGER` in `[1, next_invalidation_sequence]` |
+| project/agent/task/task-incarnation identifiers | SQLite `BLOB` exactly 16 bytes and not zeroblob(16) |
 | project `name`, `root` | name is SQLite `TEXT` of 1–128 encoded bytes; root is clean absolute SQLite `TEXT` of 1–4096 encoded bytes with no NUL |
 | project `verification_policy` | `none`, `rust_workspace_test` or `go_workspace_test` |
 | project `revision`, `created_at_ms`, `updated_at_ms` | revision is SQLite `INTEGER >= 1`; both timestamps are SQLite `INTEGER` in `[0, 9223372036854775807]` and `updated_at_ms >= created_at_ms` |
 | agent `name` | SQLite `TEXT` of 1–128 encoded bytes |
 | agent `role` | `orchestrator` or `worker` |
 | agent `provider` | `claude_code`, `codex` or `shell` |
-| agent `execution_mode` | `plan_only`, `workspace_write` or `unrestricted`; `shell` requires `unrestricted`, while either other provider permits any listed mode |
 | agent `model` | `NULL`, or SQLite `TEXT` containing 1–128 encoded bytes; V1 deliberately has no model-name enum or additional syntax |
-| agent `reasoning_effort` | `NULL`, `low`, `medium`, `high`, `xhigh`, `max` or `ultra` |
+| agent `reasoning_effort` | `NULL`, `low`, `medium`, `high`, `xhigh`, `max` or `ultra`; shell requires both `model` and `reasoning_effort` to be `NULL`, while Claude/Codex permit either field independently |
 | agent `paused` | SQLite `INTEGER` exactly `0` or `1` |
 | agent `tool_budget_limit` | SQLite `INTEGER` in `[1, 1000000000]` |
 | agent `tool_calls_used` | SQLite `INTEGER` in `[0, tool_budget_limit]` |
@@ -252,11 +260,33 @@ membership in this table; they do not invoke another validator:
 | task `status` | `queued`, `running`, `blocked`, `succeeded`, `failed` or `cancelled` |
 | task `priority` | SQLite `INTEGER` in `[-1000000, 1000000]` |
 | task `revision`, `work_revision`, `created_at_ms`, `updated_at_ms` | both revisions are SQLite `INTEGER >= 1`; both timestamps are SQLite `INTEGER` in `[0, 9223372036854775807]` and `updated_at_ms >= created_at_ms` |
+| Change IDs `id`, `project_id`, `task_id`, `task_incarnation_id` | SQLite `BLOB`s exactly 16 bytes and nonzero |
+| Change `phase` | SQLite `TEXT` exactly `reserved`, `prepared`, `available`, `retained` or `abandoned` |
+| Change `object_format` | `NULL` in `reserved`/`abandoned`, otherwise SQLite `TEXT` exactly `sha1` or `sha256` |
+| Change `base_commit` | `NULL` in `reserved`/`abandoned`; otherwise SQLite `BLOB` of exactly 20 bytes for `sha1` or 32 bytes for `sha256` |
+| Change `tree_digest` | `NULL` in `reserved`/`abandoned`; otherwise SQLite `BLOB` exactly 32 bytes |
+| Change `entry_count` | `NULL` in `reserved`/`abandoned`; otherwise SQLite `INTEGER` in `[0, 10000]` |
+| Change `total_bytes` | `NULL` in `reserved`/`abandoned`; otherwise SQLite `INTEGER` in `[0, 1073741824]` |
+| Change `tree_dev` | `NULL` in `reserved`/`abandoned`; otherwise SQLite `INTEGER` in `[0, 9223372036854775807]` |
+| Change `tree_inode` | `NULL` in `reserved`/`abandoned`; otherwise SQLite `INTEGER` in `[1, 9223372036854775807]` |
+| Change `revision` | SQLite `INTEGER >= 1`; every transition advances it exactly once, and a fresh row starts at 1 |
+| Change `prepared_at_ms`, `available_at_ms`, `created_at_ms`, `updated_at_ms` | SQLite `INTEGER` in `[0, 9223372036854775807]`; `created_at_ms` is always present, `prepared_at_ms` is present exactly in `prepared`/`available`/`retained`, `available_at_ms` exactly in `available`/`retained`, and `updated_at_ms >= created_at_ms`; when both phase timestamps are present, `available_at_ms >= prepared_at_ms` |
+| Change `settled_run_id` by phase | `NULL` in `reserved`, `prepared`, `available`; a nonzero 16-byte `BLOB` in `retained`/`abandoned`, referencing the exact settling run through the composite foreign key |
+
+Here “clean absolute” means a root whose encoded bytes start with `/`, contain
+no NUL, empty, `.` or `..` path component, repeated separator, or trailing
+separator except for `/` itself. Any path outside that grammar is corruption;
+the implementation does not normalize it into validity.
 
 The fresh schema has no separate profile row or profile status, no agent status
-and no project status. The agent row is the launch profile; `paused` is its
-only durable availability switch. The predicate therefore does not invent or
-vaguely validate any absent control.
+and no project status. The agent row owns its provider, optional model, pause,
+and budget fields; `paused` is its only durable availability switch. Provider
+choice inherently means unrestricted interactive authority in V1. Shell
+requires both model and reasoning effort to be absent; Claude and Codex permit
+each independently within the domains above. There is no
+`execution_mode` field, type, column, or wire value. Bounded Claude/Codex
+authority is deferred until causal OS-effect proof exists. The predicate
+therefore does not invent or vaguely validate any absent control.
 
 Every structurally queued assignment must have nonzero 16-byte task, task-
 incarnation, agent and project IDs; positive task work revision and row
@@ -285,8 +315,9 @@ valid ranked row returns `ErrCorruptState`. Literal `dispatch_enabled = 0` is
 valid and produces the exact `dispatch_disabled` result. A literal
 `paused = 1`, exhausted but internally consistent budget, or known nonqueued
 task status is valid state and may be ineligible; an unknown enum, non-Boolean
-switch, negative or over-limit budget, empty/oversized model, incompatible
-provider/mode or broken timestamp is corruption. This is one direct Store SQL
+switch, negative or over-limit budget, empty/oversized model, or unknown effort
+is corruption.
+This is one direct Store SQL
 predicate, not an application row scan, duplicate validation framework or
 eligibility filter.
 
@@ -308,9 +339,12 @@ two valid values (`worker` or `orchestrator`); and there is no conflicting open
 run. Both valid roles are eligible—role determines the admitted footprint,
 including whether a Change is required, not whether an external tool is
 currently available. Global dispatch-disabled is the earlier exact reason.
-Provider, execution-mode, model/effort, project verification and timestamp
-controls must be in the literal domains above, but external provider
+Provider, model, effort, project verification and timestamp controls must be in the
+literal domains above, but external provider
 executable/configuration/auth availability is deliberately not eligibility.
+Installed-version/model compatibility is checked by provider `Build`/start
+after admission; incompatibility is typed `FailureSpawn`/finalizing, never
+durable corruption or queue ineligibility.
 Known-valid paused, budget-exhausted or conflicting-open-run assignments are
 ordinary ineligibility and may produce `no_eligible_work`; known nonqueued task
 statuses are outside the queue.
@@ -440,6 +474,15 @@ published tree/content facts remain durable.
 | `available` | all present | prepared and available present | null |
 | `retained` | all present | prepared and available present | exact settling run |
 | `abandoned` | all null | prepared and available null | exact settling run |
+
+For `prepared`, `available`, and `retained`, all materialization facts are
+present together. `updated_at_ms` is at least every present Change timestamp;
+each transition and retry supplies an `at` no earlier than the current
+`updated_at_ms`, and stores that `at` as the new `updated_at_ms`. A reversed or
+out-of-range timestamp, wrong SQLite storage class, null/non-null mismatch,
+wrong commit/digest length, invalid count/byte/device/inode, or broken
+settlement relation is `ErrCorruptState` before capacity and before any fresh
+no-admission result.
 
 Every Change mutation advances `changes.revision` exactly once and appends its
 matching Change invalidation with that new revision in the same immediate
@@ -3331,7 +3374,7 @@ not a compatibility target.
   selecting the
   canonical eligible task+agent by priority descending then creation time/exact
   16-byte BLOB task ID ascending, validates rather than skips its one Change,
-  derives launch policy, binds exact task incarnation/revision, and creates the
+  derives the provider launch target, binds exact task incarnation/revision, and creates the
   complete run/credential/resource/session footprint and invalidations before
   any external effect. Canonical Change corruption is the only Change-specific
   pre-admission decision. External
@@ -3488,7 +3531,7 @@ not a compatibility target.
 - Return task summaries from list/watch and fetch selected private detail by
   revision (#39). Add empty-state project and agent creation through the same
   API used by the CLI (#30).
-- Replace display-string control flow and whole-profile read/modify/write with
+- Replace display-string control flow and combined-agent read/modify/write with
   typed actions and revision-checked granular updates.
 - Replace the old generic NEEDS YOU/attention projection with the question-first
   durable `HumanRequest` contract above. A request exists only for one exact
@@ -3762,7 +3805,7 @@ binary reads an ambient default during tests.
 The fresh schema contains only current product authority:
 
 - factory settings;
-- projects, agents, private profiles/budgets;
+- projects and agents with embedded provider/model, pause, and budget fields;
 - tasks with incarnation and work revision;
 - Changes and exact filesystem/base identity;
 - runs with immutable admission binding, phase, proposed outcome, terminal
@@ -4076,7 +4119,7 @@ The deterministic witness is:
 ```text
 fresh Go-marked home and SQLite schema
   -> create project with tiny local Git fixture and exact base commit
-  -> create agent with shell/unrestricted profile
+  -> create agent with shell provider and embedded provider/model/budget fields
   -> create assigned task
   -> atomic canonical admission inside BEGIN IMMEDIATE
   -> reserve daemon-owned Change and exact source/base authority
@@ -4236,7 +4279,7 @@ contracts.
 | Invariant | Causal Go proof | Required mutation killed |
 | --- | --- | --- |
 | SQLite configuration | On native macOS and Linux, open fresh/reopen/concurrent connections; assert foreign keys on every pooled connection, WAL readers during an immediate writer, bounded busy behavior, literal immediate exclusion, rollback after SIGKILL, and acknowledged state/event survival | deferred `BEGIN`; connection without PRAGMAs; swallowed/unbounded busy error; split transaction |
-| Atomic canonical admission | Call `AdmitNext` without AgentID/task/cursor while racing multi-agent priority and stale insertion; exercise exact integrity/dispatch/all-nonterminal-capacity/queue/eligibility/canonical-Change precedence, 16-byte BLOB ties, corrupt canonical work ahead of valid work, post-admission source/provider failure, and two admits at the last factory slot; prove an admitted setup-stalled run occupies that slot, fresh IDs, RunID-only reconciliation, exact zero/full footprints and unchanged restart order. Corrupt global settings; every run/credential/resource/session/Change phase/relation/pair/ID/revision/enum authority class; and, both above and below valid work, every queued ID/revision/storage-class/rank/title/body/lifecycle-payload field plus task `updated_at_ms`, project/agent/task timestamp ordering, role/provider/mode/model/effort/verification domains, provider-mode compatibility, exact Boolean switches and budget bounds. Direct settings validation and the one concrete SQL integrity predicate must block all admission before capacity | caller AgentID/task/cursor; per-agent/cache selection; integrity/eligibility/capacity outside `BEGIN IMMEDIATE`; count before integrity; omit admitted from capacity; application validation scan; filter malformed authority or higher/lower queued work; invalid ranking/payload/control accepted; tolerate unknown status or absent status columns invented for profiles/projects/agents; text-ID tie; wrong reason precedence; skip corrupt canonical work; external-availability filter; optional/reused candidate; process-local fairness; launch from observed Run |
+| Atomic canonical admission | Call `AdmitNext` without AgentID/task/cursor while racing multi-agent priority and stale insertion; exercise exact integrity/dispatch/all-nonterminal-capacity/queue/eligibility/canonical-Change precedence, 16-byte BLOB ties, corrupt canonical work ahead of valid work, post-admission source/provider failure, and two admits at the last factory slot; prove an admitted setup-stalled run occupies that slot, fresh IDs, RunID-only reconciliation, exact zero/full footprints and unchanged restart order. Corrupt global settings and invalidation counters; every run/credential/resource/session/Change phase/relation/pair/ID/revision/enum authority class; and, both above and below valid work, every queued ID/revision/storage-class/rank/title/body/lifecycle-payload field plus task `updated_at_ms`, project/agent/task timestamp ordering, role/provider/model/effort/verification domains, shell model/effort absence, exact Boolean switches and budget bounds. Prove no `execution_mode` column/type/value is accepted in persistence or wire models: query the exact schema allowlist, mutate a fixture with that column/value, and submit a wire field/value, asserting each is rejected before admission or decoding. Direct settings validation and the one concrete SQL integrity predicate must block all admission before capacity | caller AgentID/task/cursor; per-agent/cache selection; integrity/eligibility/capacity outside `BEGIN IMMEDIATE`; count before integrity; omit admitted from capacity; application validation scan; filter malformed authority or higher/lower queued work; invalid ranking/payload/control accepted; tolerate unknown status or absent status columns invented for profiles/projects/agents; add an `execution_mode` field/type/value; text-ID tie; wrong reason precedence; skip corrupt canonical work; external-availability filter; optional/reused candidate; process-local fairness; launch from observed Run |
 | Canonical Change admission/revision | In that same write transaction, insert work ahead of a stale caller, select the Change by canonical task incarnation, ignore the always-fresh candidate when a row exists, and require its unique settling predecessor to have `admitted_task_work_revision == task.work_revision-1`; prove fresh/retained/abandoned runs bind their actual ID and exact admitted-relative deltas, then reconcile a lost reply after later Change progress | optional/reused candidate; compare candidate on reuse; timestamp/latest-run predecessor; caller phase/revision/path; `>` revision check; require current revision during reconciliation |
 | Commit ambiguity | Cut/interrupt begin, commit response, and rollback; discard handle, reopen, reconcile by domain ID/revision, return outcome-unknown where not provable, and perform no second transition | retry blindly; reuse ambiguous connection; generic receipt fallback |
 | Fresh schema allowlist | Query schema objects and columns after init and assert the exact allowlist excludes operations, mutation receipts, decisions, quarantine, intake, compatibility, migration residue and unused durable Change repository identity | add speculative authority table; retain Rust compatibility object; add `repository_dev`/`repository_inode` |
@@ -4617,7 +4660,7 @@ and proof.
 | Dead run/observer/control fields and failure variants | No authoritative producer/reachable state | constructor/writer search plus exhaustive typed Go transitions |
 | Announcements/theme/four-view TUI residue | Superseded by the public BUILDING/AGENT/NEEDS YOU web application | browser behavior/authority tests for retained views/actions |
 | CLI aliases/usage/read-only storage status | Duplicate/no-action surface; no scheduling consumer | one-command-per-operation CLI tests and operator-action inventory |
-| Whole-profile update and display-string actions | Duplicate validation and lost-update/control risk | granular revision-conflict and typed-action tests |
+| Combined-agent update and display-string actions | Duplicate validation and lost-update/control risk | granular revision-conflict and typed-action tests |
 | Latest-sequence/bootstrap/status polling machinery | Compensates for non-atomic client projection | snapshot-at-N/watch-from-N gap/resync tests |
 | Three-state Rust cache lifecycle and public status | Regenerable bookkeeping, not external uncertainty; no operator action | verification benchmark and cache lease/reclaim tests |
 | Repeated toolchain hashes/bundle wrappers/full sync policy | Duplicate cost/identity work may not buy a distinct guarantee | adversarial replacement tests and measured durability/performance |

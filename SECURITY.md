@@ -33,9 +33,13 @@ relations, split pairs, invalid IDs/revisions/enums and malformed queued
 ranking/payload facts block all admission. Only after that proof may its one
 capacity set count admitted, running and finalizing runs. The rewrite record's
 single exact field/domain table covers Boolean storage classes, budget
-arithmetic, model/effort and provider/mode compatibility, task
-`updated_at_ms` and monotonic timestamps. The fresh schema has no profile,
-agent or project status field; agent `paused` is the availability control.
+arithmetic, provider/model fields, task `updated_at_ms`, every relevant
+monotonic timestamp, Change fields, and invalidation counters. The fresh schema
+has no profile row, agent or project status field; agent `paused` is the
+availability control. Provider choice inherently means unrestricted
+interactive authority in V1: no `execution_mode` field, type, column, or wire
+value exists. Bounded Claude/Codex authority is deferred until
+causal OS-effect proof exists.
 This is the same SQL predicate, not a second security validator. It then
 validates durable eligibility and reason precedence, orders by priority descending,
 creation time ascending and exact 16-byte task-ID `BLOB` bytes ascending, then validates the
@@ -190,47 +194,31 @@ inspection.
 
 Factory dispatch and provider authority are separate durable controls.
 `dispatch_enabled` decides only whether another attempt may be admitted; turning
-it off cannot weaken or rewrite an already-admitted attempt. Every agent instead
-has one typed execution mode, frozen onto the run at admission:
-
-- In retained Rust, `PlanOnly` is non-interactive and source-read-only; the two
-  exact attempt outcome requests remain available;
-- in retained Rust, `WorkspaceWrite` is non-interactive and bounds durable
-  writes to the admitted source with the provider's native sandbox. Codex also
-  denies both system temp aliases. Claude requires its own per-launch temporary
-  scratch directory; that provider-owned ephemeral directory is the one
-  explicit write exception; and
-- `Unrestricted` uses the provider's explicit approval/sandbox bypass.
+it off cannot weaken or rewrite an already-admitted attempt. Provider choice
+inherently gives the fresh V1 runner unrestricted interactive authority. No
+execution-mode field or value is persisted, serialized, or interpreted.
 
 For planned Go, the same global `BEGIN IMMEDIATE` validates global settings,
 runs the one capacity/authority/queued-rank-and-payload integrity predicate,
 then checks dispatch, the single admitted-plus-running-plus-finalizing capacity
 set and durable eligibility, then selects the canonical task+agent across
 the factory; no caller or per-agent loop chooses a queue head. It validates the
-selected Change and derives task revision, role, provider and execution mode in
-that transaction. A stale dispatcher read cannot choose work or authority.
+selected Change and derives task revision, role, and provider in that
+transaction. A stale dispatcher read cannot choose work or authority.
 The per-agent assigned-queue wording in retained Rust is historical only.
 
-Codex and Claude agents default to `WorkspaceWrite`. The shell test adapter has
-no native restriction mechanism and therefore supports only `Unrestricted`
-instead of claiming a boundary it cannot enforce. These provider controls never
-bypass daemon authentication, attempt scope, run phase, or finalization rules,
-and they remain cooperative same-user controls rather than OS isolation.
-
-Claude `WorkspaceWrite` is macOS-only because its exact AF_UNIX sandbox policy
-is ignored elsewhere. `PlanOnly` has no sandbox stanza and does not technically
-depend on that policy, but is conservatively restricted to the supported macOS
-product runtime rather than asserting a second platform claim. `Unrestricted`
-remains available elsewhere. Factoryd resolves and validates one exact
-reviewed Claude executable and every generated settings shape before opening
-the retained Rust Store for admission. Planned Go deliberately does not use
-that availability as eligibility: canonical work admits first and missing or
-invalid external repository state becomes typed `FailureSource`, while missing
-or invalid provider executable/configuration/auth becomes typed `FailureSpawn`,
-without selecting lower work. A Claude launch, changed executable, or
-unreviewed version fails closed. Codex launch configuration is
-parsed under `--strict-config` in every mode so a future CLI cannot silently
-ignore the daemon-authored hooks or typed permission profile.
+These provider controls never bypass daemon authentication, attempt scope, run
+phase, or finalization rules, and remain cooperative same-user controls rather
+than OS isolation. Factoryd resolves and validates one exact reviewed provider
+executable and configuration before external launch, but planned Go does not
+use that availability as eligibility: canonical work admits first and missing
+or invalid external repository state becomes typed `FailureSource`, while
+missing or invalid provider executable/configuration/auth becomes typed
+`FailureSpawn`, without selecting lower work. Installed-version/model
+compatibility is a provider Build/start check after admission; it becomes typed
+`FailureSpawn` and finalizing, never durable corruption or queue ineligibility.
+Provider launch configuration is parsed under its exact provider rules and never
+inherits ambient configuration.
 
 Provider output remains opaque and bounded. It never becomes lifecycle
 authority and does not enter public events, local-API responses, or tracing.
