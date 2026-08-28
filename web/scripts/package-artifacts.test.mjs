@@ -268,8 +268,8 @@ test("tool tree commitment has framed content and rejects unsafe copied trees", 
 
     const caseTree = join(tempRoot, "case");
     mkdirSync(caseTree);
-    writeFileSync(join(caseTree, "file"), "x");
-    writeFileSync(join(caseTree, "FILE"), "x");
+    writeFileSync(join(caseTree, "Ʃ"), "x");
+    writeFileSync(join(caseTree, "ʃ"), "x");
     assert.throws(() => toolTreeDigest(caseTree), /case-confusable/);
 
     const countTree = join(tempRoot, "count");
