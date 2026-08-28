@@ -71,12 +71,191 @@ Read-only redirection audits were assigned without overlapping writes:
 Their concrete conclusions are incorporated below. The revised plan gate is
 complete; the exact current-head work graph below now governs production work.
 
-### Exact current-head checkpoint (2026-08-28)
+### Exact current-head checkpoint (later 2026-08-28, `c732f103`)
 
-This checkpoint supersedes the earlier branch-inventory table for current
-status. The table and later dated sections remain useful history, but their
-older heads and test results are not evidence for this exact head unless a
-result is repeated here.
+This is the one current status checkpoint. Later sections retain the evidence
+available at their named heads, but do not make an older candidate or test run
+current.
+
+- Canonical source head is
+  `c732f103cf8870e559aafe74ed0765f9a87745a8` on unpublished branch
+  `go-hard-cutover`. It includes the reviewed operational-home authority,
+  browser-runtime termination observation and public-artifact gate repairs.
+  This documentation update is being prepared in its own worktree; it does not
+  claim a newer production head until that commit is integrated and its gates
+  are rerun. `main`, remotes, the private site, the operator installation,
+  live service/socket/home and real providers remain untouched.
+- The exact clean source head passed `./scripts/go-check.sh` in `51.63s`:
+  kernel `24.813s`, browser protocol `0.536s`, SQLite contract `10.985s`,
+  TypeScript typecheck and all `188/188` web tests. The separate frozen-offline
+  public-artifact proof passed `13/13` in `109.84s`.
+- The installed TypeScript 5.8.3 tree matched the reviewed SHA-512
+  `d981b85faf14b893ded04d707227b9b85620cd649f092192cc7e4ff9b0bf648938615058b256400a0479b318639dda19e89e75d02a1d3b7f5a55825be7c59c6f`.
+  Its tree root was mode `0755`, `package.json` was `0644`, and `bin/tsc`
+  was `0755`. The gate causally reconstructs an absent or stale dependency
+  tree, verifies exact content and modes, and proves a second reconstruction
+  uses the pinned package-manager cache with network disabled.
+- The artifact gate keeps the fast and authoritative web stages owned by their
+  direct callers. TERM joins the exact stage supervisor/process group before
+  scratch cleanup; restoring the former process-owning wrapper is killed by
+  the signal fixture. Scratch and dependency-tree identities are fenced around
+  move, digest and discard, failed discard/removal propagates, and the
+  production `go-ci` path cannot select an ambient replacement library. The
+  independent exact-head reviewer returned **ALLOW** before these commits were
+  integrated.
+- The seven-member operational Go home remains integrated through `8a0e53a7`.
+  `home.lock` and `.anchor` are the same exact two-link inode; the lifetime
+  lease and retained database/runtime/Change capabilities preserve ancestry
+  authority and release the lease last. `46850bca` adds the narrow observation
+  needed for a composition root to detect browser-runtime termination. Neither
+  commit creates a production `cmd/factoryd`.
+- The operational Store binding is a separate candidate, currently through
+  `82e03a8d`, and is **not integrated or shipped**. It is waiting for a fresh
+  independent exact-head `ALLOW` after earlier reviews correctly blocked
+  partial-pool activation and shutdown-uncertainty authority loss. No Store
+  evidence from that worktree is counted as canonical until review,
+  cherry-pick and canonical focused/race gates all pass.
+
+| Contract or gate | Current state | Next proof boundary |
+|---|---|---|
+| operational home and public artifact gate | integrated and independently reviewed | rerun after this record lands; retain exact offline artifact bytes/modes |
+| operational Store binding | candidate only; exact-head re-review pending | retain every partially opened pool/file owner and classify hidden close uncertainty |
+| `LocalAPIAuthority` | reviewed contract frozen below; no implementation | capability-bound server listener and stale-socket causal matrix |
+| `RuntimeParent` | reviewed contract frozen below; no implementation | lifetime parent capability, child-operation join and recovery matrix |
+| Change disposition/descriptor handoff | corrected reviewed transition contract frozen below; no implementation | schema/Store transition proof, then worker FD 11 and retry proof |
+| standalone daemon, recovery and scheduling | not implemented | concrete `cmd/factoryd`, restart/crash cuts, then one scheduler |
+| service/release/private host | not cut over | isolated install/service proof and exact public-artifact site integration |
+| final elegance and deletion | deliberately not started | whole-runtime DRY/YAGNI audit, mutations, exact-head reviews, then Rust deletion |
+
+The earlier weighted estimate remains approximately 42 percent. The work since
+that estimate strengthens already-credited operational-home and gate evidence;
+it does not yet complete a new black-box daemon, recovery, service, private-host
+or cutover gate, so inflating the number would be superficial progress.
+
+#### Frozen operational Store boundary (candidate, not shipped)
+
+`OperationalHome.OpenStore(ctx)` is the only intended activation entry. It
+hands the retained database capability to one concrete Store, eagerly opens a
+finite one-writer/four-reader physical pool with no lazy reconnect, proves
+`PERSIST_WAL`, and retains the exact main/WAL/SHM and ancestry identities until
+`Store.Close`. Checked-out connections are fenced. The home closes the Store
+before any other member and releases its lifetime lease last.
+
+Activation derives one bounded ten-second context from the caller. As soon as
+the first physical pool exists, an owning Store exists; partial fields close
+safely. File authority is installed before any post-pool validation. If any
+pool/file shutdown is uncertain, the call returns the still-owning Store with
+an error satisfying `install.ErrUncertain`; installation retains it and the
+home lease rather than discarding authority. Repeated close returns one stable
+uncertainty. No independent writer may invent another transaction/pool pattern,
+path reopen or repository layer.
+
+#### Frozen `LocalAPIAuthority` boundary (planned)
+
+`install.OperationalHome.LocalAPI` mints one `install.LocalAPIAuthority` by
+duplicating the already-retained operator-token and socket-parent descriptors.
+The capability is immutable and owns their lifetime. `Verify` rechecks the
+home/root ancestry, both retained objects, exact token identity and content,
+and the socket-parent binding immediately before each authority effect.
+Mutation poisons the local API; V1 has no hot token rotation or fallback token
+path.
+
+The server entry is one concrete call:
+`api.Listen(authority *install.LocalAPIAuthority)`. It never reloads server
+authority from an operator-token pathname. `factoryctl` remains a
+path-validating client because it cannot possess the daemon's retained home
+capability. The one socket is the fixed reserved leaf
+`runtimes/factory.sock`; the runtime-parent grammar must exclude that leaf from
+runtime IDs. Inspection, mode checks and removal are descriptor-relative.
+Darwin still requires an absolute pathname for `bind(2)`, so that path is a
+non-authoritative locator followed by exact binding rechecks, not proof of
+ownership.
+
+Stale-socket cleanup is intentionally narrow: current EUID, exact socket type
+and stable identity across the probe, plus exact `ECONNREFUSED`. A live peer,
+permission error, changed identity, malformed object or any ambiguous result is
+retained. There is no compatibility socket, second server token, generic
+listener factory or server-side path reopen.
+
+#### Frozen `RuntimeParent` boundary (planned)
+
+One `OpenRuntimeParent(ctx, install.MemberCapability, locator)` consumes the
+retained operational-home capability; the locator is diagnostic only. Every
+filesystem authority effect begins from `MemberCapability.Open`. One
+lifetime-held `.runtime.lock` protects the parent, replacing separate Create
+and Open paths and all per-operation reopen/flock choreography. A missing lock
+may be created only in an otherwise empty parent; a populated parent without
+it fails unchanged.
+
+Beginning an operation holds the parent gate until that exact operation closes.
+The parent maintains concrete child ownership/refcounts so `RuntimeParent.Close`
+cannot race or abandon a begun operation. A `Runtime` retains only its parent
+owner plus its exact child capability; it does not copy a parent pathname,
+identity or lock. Darwin `F_GETPATH` and an absolute reopen may remain useful
+diagnostics but never authorize create/adopt/observe/remove. Do not add a
+platform interface, a second parent type or a lock framework for this one
+Darwin implementation.
+
+#### Frozen Change disposition and descriptor contract (planned)
+
+The corrected reviewed design uses deterministic names derived from `ChangeID`
+under `OperationalHome.Changes`. It deletes durable `source_root` and
+`staging_root` path columns, their uniqueness/overlap validation and the
+intermediate `selected` phase. Materialization authority is descriptor-only.
+The registered Change worker receives the exact retained Change directory as
+fixed FD 11; provider and Git descendants inherit no Change descriptor. A
+pathname may exist only as a non-authoritative diagnostic label or
+`GIT_CEILING_DIRECTORIES` value.
+
+There is deliberately no durable `unresolved` Change phase. Filesystem/process
+uncertainty leaves the last positively established Change phase unchanged,
+keeps the run `finalizing`, and uses the existing resource uncertainty where
+applicable. The factual transitions are:
+
+| Transition | Exact committed proof |
+|---|---|
+| none -> `reserved` | admission binds the deterministic Change identity and exact run/task facts |
+| `reserved` -> `prepared` | exact Git selection and exact empty staging identity commit before any blob read |
+| `prepared` -> `available` | atomic no-replace publication followed by an independent exact plain-tree scan |
+| `available` -> `retained` | current run is finalizing, its provider process/group are positively released, the exact current plain tree is rescanned, and `settled_run_id` binds that run |
+| `reserved` -> `abandoned` | final target and stage are positively absent, followed by parent fsync and absence recheck |
+| `prepared` -> `abandoned` | final target is absent, the exact stage is removed, then both absences are fsynced and rechecked |
+| `retained` -> `available` | only inside retry admission, preserving the retained revision and exact facts |
+| `abandoned` -> `reserved` | only inside retry admission for the same exact Change identity |
+
+`FinalizeRun` requires that the run's Change is `retained` or `abandoned` and
+that `settled_run_id` equals that exact current run. Each run records
+`admitted_change_revision`. A retry of retained work performs no Git selection
+or materialization: admission binds the exact retained revision/facts, then the
+worker descriptor-opens and fully rescans the tree immediately before exec.
+There is no scan/copy/scan solely for retry; a copy remains verification work,
+not Change admission bookkeeping.
+
+#### Exact dependency order from this checkpoint
+
+1. Obtain independent exact-head `ALLOW` for the operational Store candidate,
+   integrate it, and rerun canonical focused normal/race tests.
+2. Implement and independently review `LocalAPIAuthority`.
+3. Implement and independently review `RuntimeParent`; reserve the API socket
+   leaf and remove path/F_GETPATH authority before changing shared runner code.
+4. Implement the corrected Change disposition/schema contract, then FD 11
+   worker handoff and retry reinspection in that order.
+5. Add one concrete `cmd/factoryd` root and recovery coordinator; only after
+   recovery converges add one scheduler. Prove isolated restart/crash cuts.
+6. Complete `factoryctl` service/recovery, release packaging and the exact-
+   artifact private-site integration.
+7. Run the dedicated whole-runtime elegance/DRY/YAGNI audit, mutation matrix
+   and five independent final reviews. Delete the Rust local runtime only after
+   every hard-cutover gate is green on one exact head.
+
+No production `cmd/factoryd`, installed service, final private-host product
+loop or hard cutover exists at `c732f103`.
+
+### Historical exact-head checkpoint (earlier 2026-08-28, `25eb8ea`)
+
+This checkpoint superseded the earlier branch-inventory table when it was
+written. It remains historical evidence only; the later `c732f103` checkpoint
+above is the current status and dependency order.
 
 - Source head: `25eb8ea47a63ab0e68ad41bc1bf35a71aa233db8`
   on branch `go-hard-cutover`, unpublished and 378 local commits ahead of the
@@ -127,7 +306,7 @@ result is repeated here.
   fail-closed while a focused causal repair is independently reviewed. A green
   full/race gate is not claimed at this source head.
 
-Current cutover readiness is approximately 42 percent, expressed as a 35–45
+At this checkpoint, cutover readiness was approximately 42 percent, expressed as a 35–45
 percent range because several remaining gates contain unknown crash/platform
 work. This is a weighted product-gate estimate, never a commit or test-count
 estimate. “Package” means causal unit/package proof, “in-process” means the
@@ -149,7 +328,7 @@ gate.
 | final reviews, elegance and cutover | 8 | 0 | deliberately last and not started |
 | **Total** | **100** | **41.5** | **rounded to about 42 percent** |
 
-The next work graph is deliberately narrow:
+At this checkpoint, the next work graph was deliberately narrow:
 
 1. Stabilize the causal runner descriptor gate without ignoring real inherited
    descriptors, then rerun the integrated runner/daemon proof.
