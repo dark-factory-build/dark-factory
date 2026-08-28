@@ -129,8 +129,10 @@ pretends the resource disappeared or rewrites the outcome.
    a strict descendant, create a child of its current task only when assigning
    it to a strict descendant, and assign queued work only to a strict
    descendant; attempt authority cannot edit or unassign tasks. These
-   relationship checks rederive the exact running run and `agents.parent_agent_id`
-   inside the same immediate Store transaction as the mutation. Task and run
+   relationship checks rederive the exact running run and the durable parent
+   relationship inside the same immediate Store transaction as the mutation.
+   The fresh schema has no parent field yet; this messaging contract is
+   planned design, not current enforcement (carried invariant 11). Task and run
    ancestry never grant agent authority. Operator authority cannot be used as
    an attempt identity for completion, blocking, or hooks.
 5. Admission is the only transition from queued work to an attempt. For planned
@@ -428,7 +430,10 @@ enforcement claims only what the cited code and tests do at this revision.
    `internal/daemon/supervisor_darwin.go` (`supervisorAttemptOwner.close`
    converges the inner group before dropping ownership); tested by
    `TestSupervisorReapsProviderDescendant` in
-   `internal/daemon/supervisor_darwin_test.go`.
+   `internal/daemon/supervisor_darwin_test.go` and the failure-path reaps
+   `TestAttemptCleanupReapsObservedInertExit` and
+   `TestAttemptRunnerTerminatesOwnedProviderGroup` in
+   `internal/runner/attempt_darwin_test.go`.
 
 2. **Absence is proved, never presumed.** A process check that cannot decide
    reports failure; only an exact PID+group+birth identity census proves a
@@ -436,9 +441,11 @@ enforcement claims only what the cited code and tests do at this revision.
    liveness probe, #334). Enforced: `internal/runner/process_darwin.go`
    (birth-stamped identity census), `internal/kernel/lifecycle.go`
    (`ReleaseResource` refuses a non-empty identity without a recorded exit;
-   `MarkResourceUnresolved` keeps uncertainty non-terminal); tested by the
-   census-rejection cases in
-   `internal/daemon/recovered_runtime_darwin_test.go`.
+   `MarkResourceUnresolved` keeps uncertainty non-terminal); tested by
+   `TestObservationFailsClosed` and
+   `TestUnavailableProcessClassifierFailsClosed` in
+   `internal/runner/runner_darwin_test.go` (undecidable observations stay
+   `Unknown`; a birth mismatch is `Reused`, never absence).
 
 3. **Guards fail closed.** An authorization or integrity guard that errors
    denies; no guard failure may pass as success or as mere ineligibility
@@ -476,8 +483,7 @@ enforcement claims only what the cited code and tests do at this revision.
    (head-pinned snapshot, floor-checked restart),
    `internal/daemon/browser_subscription.go` (stale cursors refuse), and
    field-exact wire projection in `internal/daemon/api_projection.go`;
-   tested by `internal/kernel/human_request_terminal_projection_test.go` and
-   `internal/api/web_contract_test.go`.
+   tested by `internal/kernel/human_request_terminal_projection_test.go`.
 
 7. **Every guard is tested against its threat.** A security or integrity
    guard needs a causal test that exercises the exact threat it exists to
