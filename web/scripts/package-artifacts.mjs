@@ -97,7 +97,7 @@ function inspectExecutable(path, label, expected) {
     if (!stat.isFile() || (stat.mode & 0o111) === 0 || (uid !== -1 && stat.uid !== uid && stat.uid !== 0)) {
       fail(`${label} is not a trusted executable`);
     }
-    const mode = (stat.mode & 0o777).toString(8).padStart(4, "0");
+    const mode = (stat.mode & 0o7777).toString(8).padStart(4, "0");
     const bytes = readFileSync(target);
     const sha512 = createHash("sha512").update(bytes).digest("hex");
     if (expected && (bytes.length !== expected.bytes || mode !== expected.mode || sha512 !== expected.sha512)) {
