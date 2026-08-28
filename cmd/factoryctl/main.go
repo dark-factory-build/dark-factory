@@ -39,6 +39,7 @@ const (
   factoryctl web revoke CLIENT_ID --revision REVISION
   factoryctl init --home ABSOLUTE
   factoryctl doctor --home ABSOLUTE
+  factoryctl service status --home ABSOLUTE
   factoryctl --version
   factoryctl --build-identity
 `
@@ -57,6 +58,7 @@ const (
 	commandWebRevoke
 	commandInit
 	commandDoctor
+	commandServiceStatus
 )
 
 type attemptCommand struct {
@@ -80,6 +82,12 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 type browserOpener func(context.Context, string) error
 
 func runWithOpener(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer, opener browserOpener) int {
+	return runWithDependencies(ctx, args, getenv, stdout, stderr, opener, install.InspectService)
+}
+
+type serviceInspector func(context.Context, string, string) (install.ServiceStatus, error)
+
+func runWithDependencies(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer, opener browserOpener, inspect serviceInspector) int {
 	if len(args) == 1 && args[0] == "--version" {
 		_, _ = fmt.Fprintf(stdout, "factoryctl %s\n", buildinfo.Current().Version())
 		return 0
@@ -102,7 +110,10 @@ func runWithOpener(ctx context.Context, args []string, getenv func(string) strin
 	if command.kind == commandInit || command.kind == commandDoctor {
 		return runHome(ctx, command, stdout, stderr)
 	}
-	if command.kind >= commandWebStatus {
+	if command.kind == commandServiceStatus {
+		return runService(ctx, command, getenv, stdout, stderr, inspect)
+	}
+	if command.kind == commandWebStatus || command.kind == commandWebOpen || command.kind == commandWebListClients || command.kind == commandWebRevoke {
 		return runWeb(ctx, command, getenv, stdout, stderr, opener)
 	}
 
@@ -160,6 +171,12 @@ func parse(args []string) (attemptCommand, bool, bool) {
 	if len(args) == 2 && (args[0] == "init" || args[0] == "doctor") && helpFlag(args[1]) {
 		return attemptCommand{}, true, true
 	}
+	if len(args) == 4 && args[0] == "service" && args[1] == "status" && args[2] == "--home" && validHomeArg(args[3]) {
+		return attemptCommand{kind: commandServiceStatus, home: args[3]}, false, true
+	}
+	if (len(args) == 2 && args[0] == "service" && helpFlag(args[1])) || (len(args) == 3 && args[0] == "service" && args[1] == "status" && helpFlag(args[2])) {
+		return attemptCommand{}, true, true
+	}
 	if len(args) < 2 || args[0] != "attempt" && args[0] != "web" {
 		return attemptCommand{}, false, false
 	}
@@ -207,6 +224,37 @@ func parse(args []string) (attemptCommand, bool, bool) {
 		}
 	}
 	return attemptCommand{}, false, false
+}
+
+func runService(ctx context.Context, command attemptCommand, getenv func(string) string, stdout, stderr io.Writer, inspect serviceInspector) int {
+	userHome := getenv("HOME")
+	if inspect == nil || !validHomeArg(userHome) {
+		_, _ = io.WriteString(stderr, "factoryctl: service status configuration is invalid\n")
+		return exitFailure
+	}
+	callContext, cancel := context.WithTimeout(ctx, attemptRequestTimeout)
+	defer cancel()
+	status, err := inspect(callContext, command.home, userHome)
+	if err != nil {
+		message := "factoryctl: service status is ambiguous\n"
+		switch {
+		case errors.Is(err, context.Canceled):
+			message = "factoryctl: service status canceled\n"
+		case errors.Is(err, context.DeadlineExceeded):
+			message = "factoryctl: service status timed out\n"
+		case errors.Is(err, install.ErrUnsupported):
+			message = "factoryctl: service status is unsupported on this platform\n"
+		case errors.Is(err, install.ErrInvalidHome):
+			message = "factoryctl: service status requires an exact fresh Go home\n"
+		}
+		_, _ = io.WriteString(stderr, message)
+		return exitFailure
+	}
+	if status.State != install.ServiceAbsent || status.PID != 0 {
+		_, _ = io.WriteString(stderr, "factoryctl: service status is ambiguous\n")
+		return exitFailure
+	}
+	return writeJSON(stdout, status)
 }
 
 func validHomeArg(value string) bool {
