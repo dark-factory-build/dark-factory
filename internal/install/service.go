@@ -6,11 +6,9 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/dark-factory-build/dark-factory/internal/buildinfo"
+	"unicode/utf8"
 )
 
 const serviceLabel = "com.dark-factory.factoryd"
@@ -19,7 +17,6 @@ const serviceMaxPathBytes = 4096
 
 var (
 	ErrServiceAmbiguous = errors.New("service ownership is ambiguous")
-	ErrServiceBundle    = errors.New("service bundle is invalid")
 	ErrServiceLaunchctl = errors.New("launchctl result is not authoritative")
 	ErrServicePlist     = errors.New("service plist is invalid")
 )
@@ -42,44 +39,11 @@ type ServiceStatus struct {
 	PID   int          `json:"pid,omitempty"`
 }
 
-// ServiceBundle retains the exact three sibling release executables accepted
-// from factoryctl's own directory. Future installation code snapshots these
-// descriptors; it never re-resolves an ambient PATH or a changed source name.
-type ServiceBundle struct {
-	state *serviceBundleState
-}
-
-// OpenServiceBundle validates and retains factoryctl, factoryd and
-// factory-runner under one immutable release identity.
-func OpenServiceBundle(factoryctlPath string, expected buildinfo.Identity) (*ServiceBundle, error) {
-	return openServiceBundle(factoryctlPath, expected)
-}
-
-// Snapshot writes one validated bundle member into an already-opened private
-// staging directory. The fixed component name is both source and destination.
-func (bundle *ServiceBundle) Snapshot(parent *os.File, component string) error {
-	if bundle == nil || bundle.state == nil {
-		return ErrClosed
-	}
-	return bundle.state.snapshot(parent, component)
-}
-
-// Close releases the retained source authority. It is idempotent.
-func (bundle *ServiceBundle) Close() error {
-	if bundle == nil || bundle.state == nil {
-		return nil
-	}
-	return bundle.state.close()
-}
-
-func (bundle ServiceBundle) String() string   { return "ServiceBundle(<redacted>)" }
-func (bundle ServiceBundle) GoString() string { return "ServiceBundle(<redacted>)" }
-
 // InspectService is a strictly read-only service projection. It never opens a
 // mutation lock, recovers pending state, writes installation metadata, or
 // invokes a mutating launchctl verb.
-func InspectService(ctx context.Context, home, userHome string) (ServiceStatus, error) {
-	return inspectService(ctx, home, userHome, runLaunchctl)
+func InspectService(ctx context.Context, home string) (ServiceStatus, error) {
+	return inspectServiceForAccount(ctx, home, runLaunchctl)
 }
 
 // ServicePlist renders the one Go-v1 launchd job. Exact byte comparison is the
@@ -121,7 +85,16 @@ func ServicePlist(home string) ([]byte, [sha256.Size]byte, error) {
 }
 
 func validServicePath(value string) bool {
-	return value != "" && len(value) <= serviceMaxPathBytes && filepath.IsAbs(value) && filepath.Clean(value) == value && !strings.ContainsRune(value, 0)
+	return value != "" && len(value) <= serviceMaxPathBytes && utf8.ValidString(value) && filepath.IsAbs(value) && filepath.Clean(value) == value && validXMLText(value) && !strings.ContainsRune(value, 0)
+}
+
+func validXMLText(value string) bool {
+	for _, character := range value {
+		if character < 0x20 && character != '\t' && character != '\n' && character != '\r' {
+			return false
+		}
+	}
+	return true
 }
 
 func escapeXML(destination *bytes.Buffer, value string) {

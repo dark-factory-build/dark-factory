@@ -42,12 +42,11 @@ func TestParseServiceStatusIsOneExplicitCommand(t *testing.T) {
 
 func TestServiceStatusCLIUsesExactReadOnlyInspectorAndBoundedOutput(t *testing.T) {
 	home := "/private/tmp/factory-private-sentinel"
-	userHome := "/private/tmp/user-private-sentinel"
 	calls := 0
-	inspector := func(ctx context.Context, gotHome, gotUserHome string) (install.ServiceStatus, error) {
+	inspector := func(ctx context.Context, gotHome string) (install.ServiceStatus, error) {
 		calls++
-		if ctx == nil || gotHome != home || gotUserHome != userHome {
-			t.Fatalf("inspector = ctx %v, home %q, user home %q", ctx, gotHome, gotUserHome)
+		if ctx == nil || gotHome != home {
+			t.Fatalf("inspector = ctx %v, home %q", ctx, gotHome)
 		}
 		return install.ServiceStatus{State: install.ServiceAbsent}, nil
 	}
@@ -55,15 +54,12 @@ func TestServiceStatusCLIUsesExactReadOnlyInspectorAndBoundedOutput(t *testing.T
 	var stdout, stderr bytes.Buffer
 	exit := runWithDependencies(context.Background(), []string{"service", "status", "--home", home}, func(name string) string {
 		lookups = append(lookups, name)
-		if name == "HOME" {
-			return userHome
-		}
-		return "private-credential"
+		return "/private/tmp/user-private-sentinel"
 	}, &stdout, &stderr, nil, inspector)
 	if exit != 0 || calls != 1 || stdout.String() != "{\"state\":\"absent\"}\n" || stderr.Len() != 0 {
 		t.Fatalf("status = exit %d calls %d stdout %q stderr %q", exit, calls, stdout.String(), stderr.String())
 	}
-	if len(lookups) != 1 || lookups[0] != "HOME" {
+	if len(lookups) != 0 {
 		t.Fatalf("environment lookups = %q", lookups)
 	}
 	if strings.Contains(stdout.String()+stderr.String(), "private-sentinel") || strings.Contains(stdout.String()+stderr.String(), "credential") {
@@ -90,7 +86,7 @@ func TestServiceStatusCLIMapsFailuresWithoutPrivateDiagnostics(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			exit := runWithDependencies(context.Background(), []string{"service", "status", "--home", "/private/tmp/factory"}, func(string) string {
 				return "/private/tmp/user"
-			}, &stdout, &stderr, nil, func(context.Context, string, string) (install.ServiceStatus, error) {
+			}, &stdout, &stderr, nil, func(context.Context, string) (install.ServiceStatus, error) {
 				return install.ServiceStatus{State: install.ServiceAmbiguous, PID: 731}, test.err
 			})
 			if exit != exitFailure || stdout.Len() != 0 || stderr.String() != test.want || strings.Contains(stderr.String(), private) || strings.Contains(stderr.String(), "731") {
@@ -106,11 +102,10 @@ func TestServiceStatusCLIRefusesMissingHomeOrNonAbsentProjection(t *testing.T) {
 		userHome  string
 		inspector serviceInspector
 	}{
-		{name: "missing HOME", inspector: func(context.Context, string, string) (install.ServiceStatus, error) {
-			t.Fatal("inspector called without HOME")
-			return install.ServiceStatus{}, nil
+		{name: "alternate HOME ignored", userHome: "/private/tmp/user", inspector: func(context.Context, string) (install.ServiceStatus, error) {
+			return install.ServiceStatus{State: install.ServiceAbsent}, nil
 		}},
-		{name: "ambiguous success", userHome: "/private/tmp/user", inspector: func(context.Context, string, string) (install.ServiceStatus, error) {
+		{name: "ambiguous success", userHome: "/private/tmp/user", inspector: func(context.Context, string) (install.ServiceStatus, error) {
 			return install.ServiceStatus{State: install.ServiceAmbiguous, PID: 731}, nil
 		}},
 	} {
@@ -119,7 +114,11 @@ func TestServiceStatusCLIRefusesMissingHomeOrNonAbsentProjection(t *testing.T) {
 			exit := runWithDependencies(context.Background(), []string{"service", "status", "--home", "/private/tmp/factory"}, func(string) string {
 				return test.userHome
 			}, &stdout, &stderr, nil, test.inspector)
-			if exit != exitFailure || stdout.Len() != 0 || stderr.Len() == 0 {
+			if test.name == "alternate HOME ignored" {
+				if exit != 0 || stdout.String() != "{\"state\":\"absent\"}\n" || stderr.Len() != 0 {
+					t.Fatalf("alternate HOME affected status: exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
+				}
+			} else if exit != exitFailure || stdout.Len() != 0 || stderr.Len() == 0 {
 				t.Fatalf("refusal = exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
 			}
 		})

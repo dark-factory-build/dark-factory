@@ -126,6 +126,7 @@ func TestLaunchctlAbsenceClassificationIsExact(t *testing.T) {
 		want    bool
 	}{
 		{name: "documented", results: []launchctlResult{{status: 113}, {status: 0, stdout: []byte(launchctlNotFoundText + "\n")}}, want: true},
+		{name: "contradictory print stderr", results: []launchctlResult{{status: 113, stderr: []byte("Operation not permitted\n")}}, want: false},
 		{name: "permission", results: []launchctlResult{{status: 1, stderr: []byte("Operation not permitted\n")}}},
 		{name: "wrong status same text", results: []launchctlResult{{status: 3}, {status: 0, stdout: []byte(launchctlNotFoundText + "\n")}}},
 		{name: "wrong text", results: []launchctlResult{{status: 113}, {status: 0, stdout: []byte("113: other\n")}}},
@@ -240,6 +241,7 @@ func TestLaunchctlPrintRequiresExactOwnedFields(t *testing.T) {
 		"unknown state":   valid("waiting", ""),
 		"stopped pid":     valid("not running", "731"),
 		"duplicate pid":   bytes.Replace(valid("running", "731"), []byte("\n}"), []byte("\n\tpid = 732\n}"), 1),
+		"unknown field":   bytes.Replace(valid("running", "731"), []byte("\n}"), []byte("\n\tunknown = value\n}"), 1),
 		"nul":             append(valid("running", "731"), 0),
 	}
 	for name, mutation := range mutations {
@@ -272,6 +274,72 @@ func TestServicePlistIsOneFiniteAllowlist(t *testing.T) {
 	}
 	if _, _, err := ServicePlist("relative"); !errors.Is(err, ErrServicePlist) {
 		t.Fatalf("relative home = %v", err)
+	}
+	for _, home := range []string{"/private/tmp/invalid-\x00", "/private/tmp/invalid-\x01", "/private/tmp/invalid-\xff"} {
+		if _, _, err := ServicePlist(home); !errors.Is(err, ErrServicePlist) {
+			t.Fatalf("invalid plist path %q accepted: %v", home, err)
+		}
+	}
+}
+
+func TestServiceStatusRejectsDetachedLaunchAgentsDuringRead(t *testing.T) {
+	root := serviceTestRoot(t)
+	home := filepath.Join(root, "factory")
+	userHome := filepath.Join(root, "user")
+	launchAgents := filepath.Join(userHome, "Library", "LaunchAgents")
+	if err := os.MkdirAll(launchAgents, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Init(context.Background(), home); err != nil {
+		t.Fatal(err)
+	}
+	plistBody, _, err := ServicePlist(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(launchAgents, servicePlistName), plistBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	detached := launchAgents + ".detached"
+	fake := &recordedLaunchctl{}
+	fake.results = []launchctlResult{{status: launchctlNotFound}, {status: 0, stdout: []byte(launchctlNotFoundText + "\n")}}
+	mutated := false
+	status, err := inspectService(context.Background(), home, userHome, func(ctx context.Context, args ...string) launchctlResult {
+		if !mutated {
+			mutated = true
+			if err := os.Rename(launchAgents, detached); err != nil {
+				t.Fatalf("detach LaunchAgents: %v", err)
+			}
+			if err := os.Mkdir(launchAgents, 0o700); err != nil {
+				t.Fatalf("replace LaunchAgents: %v", err)
+			}
+		}
+		return fake.run(ctx, args...)
+	})
+	if status.State != ServiceAmbiguous || !errors.Is(err, ErrServiceAmbiguous) {
+		t.Fatalf("detached parent accepted: %+v, %v", status, err)
+	}
+}
+
+func TestServiceStatusLaunchctlFailureIsReadOnly(t *testing.T) {
+	root := serviceTestRoot(t)
+	home := filepath.Join(root, "factory")
+	userHome := filepath.Join(root, "user")
+	if err := os.Mkdir(userHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Init(context.Background(), home); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotServiceTrees(t, home, userHome)
+	status, err := inspectService(context.Background(), home, userHome, func(context.Context, ...string) launchctlResult {
+		return launchctlResult{status: 1, stderr: []byte("permission denied")}
+	})
+	if status.State != ServiceAmbiguous || !errors.Is(err, ErrServiceLaunchctl) {
+		t.Fatalf("launchctl failure = %+v, %v", status, err)
+	}
+	if after := snapshotServiceTrees(t, home, userHome); !reflect.DeepEqual(before, after) {
+		t.Fatal("launchctl failure changed filesystem")
 	}
 }
 

@@ -85,7 +85,7 @@ func runWithOpener(ctx context.Context, args []string, getenv func(string) strin
 	return runWithDependencies(ctx, args, getenv, stdout, stderr, opener, install.InspectService)
 }
 
-type serviceInspector func(context.Context, string, string) (install.ServiceStatus, error)
+type serviceInspector func(context.Context, string) (install.ServiceStatus, error)
 
 func runWithDependencies(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer, opener browserOpener, inspect serviceInspector) int {
 	if len(args) == 1 && args[0] == "--version" {
@@ -111,7 +111,7 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 		return runHome(ctx, command, stdout, stderr)
 	}
 	if command.kind == commandServiceStatus {
-		return runService(ctx, command, getenv, stdout, stderr, inspect)
+		return runService(ctx, command, stdout, stderr, inspect)
 	}
 	if command.kind == commandWebStatus || command.kind == commandWebOpen || command.kind == commandWebListClients || command.kind == commandWebRevoke {
 		return runWeb(ctx, command, getenv, stdout, stderr, opener)
@@ -226,15 +226,14 @@ func parse(args []string) (attemptCommand, bool, bool) {
 	return attemptCommand{}, false, false
 }
 
-func runService(ctx context.Context, command attemptCommand, getenv func(string) string, stdout, stderr io.Writer, inspect serviceInspector) int {
-	userHome := getenv("HOME")
-	if inspect == nil || !validHomeArg(userHome) {
+func runService(ctx context.Context, command attemptCommand, stdout, stderr io.Writer, inspect serviceInspector) int {
+	if inspect == nil {
 		_, _ = io.WriteString(stderr, "factoryctl: service status configuration is invalid\n")
 		return exitFailure
 	}
 	callContext, cancel := context.WithTimeout(ctx, attemptRequestTimeout)
 	defer cancel()
-	status, err := inspect(callContext, command.home, userHome)
+	status, err := inspect(callContext, command.home)
 	if err != nil {
 		message := "factoryctl: service status is ambiguous\n"
 		switch {
