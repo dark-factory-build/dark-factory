@@ -71,11 +71,142 @@ Read-only redirection audits were assigned without overlapping writes:
 Their concrete conclusions are incorporated below. The revised plan gate is
 complete; the exact current-head work graph below now governs production work.
 
-### Exact current-head checkpoint (later 2026-08-28, `c732f103`)
+### Exact current-head checkpoint (2026-08-28, `497ecfe4`)
 
-This is the one current status checkpoint. Later sections retain the evidence
-available at their named heads, but do not make an older candidate or test run
-current.
+This is the one current status checkpoint. Later sections retain the exact
+evidence and decisions available at their named heads, but cannot make an
+older candidate or test result current.
+
+- Canonical source head is
+  `497ecfe4fa34c22af89e6942f7f9d5c65e0050b3` on unpublished branch
+  `go-hard-cutover`. This documentation update is being prepared in its own
+  worktree and does not claim a newer production head until integrated.
+  `main`, remotes, the private site, the operator installation, live service,
+  socket/home and real providers remain untouched.
+- The operational Store is now integrated through `495ba3f5`, `5be1a76d`,
+  `9d775b84` and `497ecfe4`. `OperationalHome.OpenStore(ctx)` activates it
+  exactly once from retained home/database descriptors. One sealed finite
+  connector eagerly opens one writer and four readers, proves every physical
+  connection and `PERSIST_WAL`, permits no lazy replacement, and retains exact
+  main/WAL/SHM plus ancestry authority until Store close is positively complete.
+- Exact candidate head `e2925edbd14ebbb6a64fb920eed756a046b117d1`
+  received independent **ALLOW** with no finding after earlier reviews blocked
+  loss of partial-pool and close-uncertain authority. The unchanged stack was
+  then integrated as the four canonical commits above.
+- Canonical normal tests passed for the complete affected packages:
+  `internal/kernel` in `26.316s` and `internal/install` in `4.263s`. The focused
+  race matrices passed: kernel `11.026s`, install `9.082s`. Affected-package
+  vet passed in `0.19s`; diff check and source status were clean.
+- The final raw-retention mutation removed the finite connector's saved raw
+  connection. `TestFiniteConnectorRetainsRawConnectionForgottenByDatabaseSQLClose`
+  killed it causally: a real ncruces SQLite connection returned a close error,
+  `database/sql` forgot it and reported zero open connections, while the exact
+  raw connection remained live and owned without a reconnect or retry. The
+  test also proved exact identity and one close/one connect. No mutation code
+  remains.
+- The public-artifact gate and its exact `c732f103` proof remain integrated and
+  are preserved in the historical checkpoint immediately below. Store-only
+  commits did not change those files, but no new 13/13 artifact or full
+  `go-check` run is claimed at `497ecfe4`.
+
+| Contract or gate | Current state | Next proof boundary |
+|---|---|---|
+| operational home and Store | integrated, causally tested and independently reviewed | composition must call `OpenStore` once and close child owners in the frozen order |
+| public artifact gate | integrated; exact proof remains at `c732f103` | rerun after the next clean record/integration milestone |
+| local API authority | corrected reviewed contract frozen below; no implementation | install-owned endpoint/socket lifecycle plus API framing/auth matrix |
+| `RuntimeParent` | reviewed contract frozen below; no implementation | lifetime parent capability, child-operation join and recovery matrix |
+| Change disposition/descriptor handoff | corrected reviewed transition contract frozen below; no implementation | schema/Store transition proof, then worker FD 11 and retry proof |
+| standalone daemon, recovery and scheduling | not implemented | concrete `cmd/factoryd`, restart/crash cuts, then one scheduler |
+| service/release/private host | not cut over | isolated install/service proof and exact public-artifact site integration |
+| final elegance and deletion | deliberately not started | whole-runtime DRY/YAGNI audit, mutations, exact-head reviews, then Rust deletion |
+
+The weighted estimate remains approximately 42 percent. Operational Store is a
+real authority proof inside an already-credited kernel/install gate; it does
+not yet complete a black-box daemon, recovery, service, private-host or cutover
+gate. The estimate is therefore not inflated for integration activity.
+
+#### Integrated operational Store boundary
+
+The finite physical set is authority, not a pooling optimization. Activation
+uses a caller-derived context with the existing bounded ten-second ceiling,
+installs the file binding before post-pool validation and creates a Store owner
+as soon as any physical pool exists. Partial fields close safely. Path binding
+and exact main/WAL/SHM identities are rechecked around every checkout; a
+replacement poisons subsequent Store use rather than retargeting it.
+
+`Store.Close` first rejects new work, joins the already-admitted writer and
+every checked-out connection, closes both finite pools, then releases the exact
+file binding. `OperationalHome.Close` closes the Store before its retained
+members and releases the lifetime home lease last. If connection, pool or file
+shutdown is uncertain, the owning Store and home lease remain retained,
+`install.ErrUncertain` is visible and repeat close returns one stable result.
+Another opener remains `ErrBusy` rather than inventing ownership.
+
+The finite connector retains each raw driver connection from physical open.
+This is necessary because `database/sql` may call a driver's failing `Close`,
+drop the connection from its own accounting and never call it again. Retaining
+closed `*sql.Conn` wrappers was deleted because they no longer own the driver
+or database reference; the raw connector owner is the smaller effective
+authority. There is no repository layer, reconnect fallback, generic pool
+framework or second transaction pattern.
+
+#### Corrected local API authority boundary (planned)
+
+The earlier `c732f103` proposal to let `internal/api` bind the Unix socket from
+a capability is superseded. `OpenLocalAPI` lives in `internal/install` and owns
+the fixed endpoint lifecycle, including create/bind, exact socket identity,
+mode, stale-socket decision and removal. `internal/api` owns only the bounded
+framing, credential-domain parsing and typed calls over that already-owned
+endpoint.
+
+`LocalAPIAuthority` is structurally a child of its `OperationalHome`, not a
+detached duplicated capability. The home close order is local API first, then
+Store, then retained members/ancestry, with the home lease released last. The
+composition root must stop and join API framing/connection users before this
+child is released; the authority cannot outlive or independently reopen the
+home.
+
+Authentication `Verify` rechecks only the retained immutable core home
+binding, exact operator token, `runtimes/` parent and exact socket binding. It
+does not rescan the complete operational-home census and does not bind mutable
+SQLite WAL/SHM contents: the Store already owns those files and legitimate
+database activity changes them. Token mutation, core/runtimes replacement or
+socket replacement poisons authentication without widening the check into a
+second Store/home validator.
+
+The socket leaf is exactly `runtimes/factory.sock` and is reserved from runtime
+identifiers. Stale removal requires an EUID-owned exact socket, stable identity
+across the probe and exact `ECONNREFUSED`. A live peer, `EPERM`, changed
+identity, malformed object or any ambiguous response is retained. Darwin's
+absolute bind locator is never ownership authority. There is no compatibility
+socket, alternate token, hot rotation, listener factory or server-side path
+fallback. No part of this Local API contract is implemented at `497ecfe4`.
+
+#### Exact dependency order from this checkpoint
+
+1. Implement and independently review the corrected install-owned Local API
+   endpoint and authority contract.
+2. Implement and independently review `RuntimeParent`; reserve
+   `factory.sock` and remove path/F_GETPATH authority before shared runner
+   changes.
+3. Implement the corrected Change disposition/schema contract, then FD 11
+   worker handoff and retry reinspection in that order.
+4. Add one concrete `cmd/factoryd` root and recovery coordinator; only after
+   recovery converges add one scheduler. Prove isolated restart/crash cuts.
+5. Complete `factoryctl` service/recovery, release packaging and the exact-
+   artifact private-site integration.
+6. Run the dedicated whole-runtime elegance/DRY/YAGNI audit, mutation matrix
+   and five independent final reviews. Delete the Rust local runtime only after
+   every hard-cutover gate is green on one exact head.
+
+No production `cmd/factoryd`, installed service, final private-host product
+loop or hard cutover exists at `497ecfe4`.
+
+### Historical exact-head checkpoint (later 2026-08-28, `c732f103`)
+
+This was the current status before Operational Store integration. Its artifact
+evidence and then-frozen contracts remain useful history; its candidate labels
+and dependency order no longer describe the current head.
 
 - Canonical source head is
   `c732f103cf8870e559aafe74ed0765f9a87745a8` on unpublished branch
@@ -116,7 +247,7 @@ current.
   evidence from that worktree is counted as canonical until review,
   cherry-pick and canonical focused/race gates all pass.
 
-| Contract or gate | Current state | Next proof boundary |
+| Contract or gate | State at `c732f103` | Next proof boundary at that head |
 |---|---|---|
 | operational home and public artifact gate | integrated and independently reviewed | rerun after this record lands; retain exact offline artifact bytes/modes |
 | operational Store binding | candidate only; exact-head re-review pending | retain every partially opened pool/file owner and classify hidden close uncertainty |
@@ -127,10 +258,10 @@ current.
 | service/release/private host | not cut over | isolated install/service proof and exact public-artifact site integration |
 | final elegance and deletion | deliberately not started | whole-runtime DRY/YAGNI audit, mutations, exact-head reviews, then Rust deletion |
 
-The earlier weighted estimate remains approximately 42 percent. The work since
-that estimate strengthens already-credited operational-home and gate evidence;
-it does not yet complete a new black-box daemon, recovery, service, private-host
-or cutover gate, so inflating the number would be superficial progress.
+At `c732f103` the weighted estimate remained approximately 42 percent. That
+work strengthened already-credited operational-home and gate evidence without
+completing a new black-box daemon, recovery, service, private-host or cutover
+gate.
 
 #### Frozen operational Store boundary (candidate, not shipped)
 
@@ -231,7 +362,7 @@ worker descriptor-opens and fully rescans the tree immediately before exec.
 There is no scan/copy/scan solely for retry; a copy remains verification work,
 not Change admission bookkeeping.
 
-#### Exact dependency order from this checkpoint
+#### Historical dependency order from this checkpoint
 
 1. Obtain independent exact-head `ALLOW` for the operational Store candidate,
    integrate it, and rerun canonical focused normal/race tests.
