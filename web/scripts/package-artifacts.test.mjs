@@ -315,7 +315,7 @@ test("pack uses trusted absolute tools and leaves no partial output", () => {
     const pathOutput = join(tempRoot, "path-output");
     execFileSync(launcher, ["pack", "--output", pathOutput], {
       cwd: webRoot,
-      env: { ...process.env, ...env },
+      env: { ...process.env, ...env, DARK_FACTORY_ARTIFACT_NODE: wrapper },
       stdio: "pipe",
     });
     assert.equal(existsSync(wrapperWitness), false);
