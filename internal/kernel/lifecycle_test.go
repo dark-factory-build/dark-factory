@@ -463,8 +463,15 @@ func TestResourceIdentityCannotBeReusedAcrossRuns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	thirdAgent, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 216), ProjectID: project.ID, Name: "third", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 2}, mustTime(t, 4))
+	if err != nil {
+		t.Fatal(err)
+	}
 	_, _ = store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 212), ProjectID: project.ID, AssignedAgentID: firstAgent.ID, IncarnationID: incarnationID(t, 213), Title: "first"}, mustTime(t, 5))
 	_, _ = store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 214), ProjectID: project.ID, AssignedAgentID: secondAgent.ID, IncarnationID: incarnationID(t, 215), Title: "second"}, mustTime(t, 5))
+	if _, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 217), ProjectID: project.ID, AssignedAgentID: thirdAgent.ID, IncarnationID: incarnationID(t, 218), Title: "third"}, mustTime(t, 5)); err != nil {
+		t.Fatal(err)
+	}
 	first, err := store.AdmitNext(context.Background(), admissionKeys(t, 220, nil), mustTime(t, 10))
 	if err != nil {
 		t.Fatal(err)
@@ -500,15 +507,14 @@ func TestResourceIdentityCannotBeReusedAcrossRuns(t *testing.T) {
 	if _, _, err := store.ActivateRunner(context.Background(), second.Run.ID, secondRunner.ID, secondStarted.Revision, secondStarting.Revision, sharedProcess, mustTime(t, 22)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("process identity reuse = %v", err)
 	}
-	sharedPath, _ := NewPathResourceIdentity(44, 55)
-	third, err := store.AdmitNext(context.Background(), admissionKeys(t, 240, nil), mustTime(t, 23))
-	if err == nil && third.Admitted() {
-		thirdRuntime := resourceOfKind(t, resourcesForRunTest(t, store, third.Run.ID), ResourceRuntimeRoot)
-		if _, err := store.ActivateResource(context.Background(), third.Run.ID, thirdRuntime.ID, thirdRuntime.Revision, sharedPath, mustTime(t, 24)); err != nil {
-			t.Fatal(err)
-		}
+	// Seed 235 keeps the derived runtime-root locator distinct from the first
+	// run's (admissionKeys derives it from seed%20; 240 would collide with 220).
+	third, err := store.AdmitNext(context.Background(), admissionKeys(t, 235, nil), mustTime(t, 23))
+	if err != nil || !third.Admitted() {
+		t.Fatalf("third admission = %+v, %v", third, err)
 	}
-	if _, err := store.ActivateResource(context.Background(), second.Run.ID, secondRuntime.ID, secondRuntime.Revision, sharedPath, mustTime(t, 23)); !errors.Is(err, ErrConflict) {
+	thirdRuntime := resourceOfKind(t, resourcesForRunTest(t, store, third.Run.ID), ResourceRuntimeRoot)
+	if _, err := store.ActivateResource(context.Background(), third.Run.ID, thirdRuntime.ID, thirdRuntime.Revision, firstPath, mustTime(t, 24)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("path identity reuse = %v", err)
 	}
 }
@@ -518,26 +524,27 @@ func TestProviderIdentityPairIsTheOnlySameRunProcessAlias(t *testing.T) {
 	path := storePath(t, store)
 	resources := resourcesForRunTest(t, store, run.ID)
 	sharedProvider := processIdentity(t, 930)
+	runnerIdentity := processIdentity(t, 931)
 	provider := resourceOfKind(t, resources, ResourceProviderProcess)
 	group := resourceOfKind(t, resources, ResourceProviderGroup)
 	runner := resourceOfKind(t, resources, ResourceRunnerProcess)
-	if _, _, err := store.ActivateProviderResources(context.Background(), run.ID, provider.ID, provider.Revision, group.ID, group.Revision, sharedProvider, mustTime(t, 20)); err != nil {
-		t.Fatalf("provider process/group pair rejected: %v", err)
-	}
 	runtime := resourceOfKind(t, resources, ResourceRuntimeRoot)
 	runtimeIdentity, _ := NewPathResourceIdentity(930, 1930)
 	if _, err := store.ActivateResource(context.Background(), run.ID, runtime.ID, runtime.Revision, runtimeIdentity, mustTime(t, 19)); err != nil {
 		t.Fatal(err)
 	}
-	started, starting, err := store.BeginRunnerStart(context.Background(), run.ID, runner.ID, run.Revision, runner.Revision, mustTime(t, 21))
+	started, starting, err := store.BeginRunnerStart(context.Background(), run.ID, runner.ID, run.Revision, runner.Revision, mustTime(t, 20))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := store.ActivateRunner(context.Background(), run.ID, runner.ID, started.Revision, starting.Revision, sharedProvider, mustTime(t, 22)); !errors.Is(err, ErrConflict) {
-		t.Fatalf("runner aliased provider identity: %v", err)
-	}
-	if _, _, err := store.ActivateRunner(context.Background(), run.ID, runner.ID, started.Revision, starting.Revision, processIdentity(t, 931), mustTime(t, 23)); err != nil {
+	if _, _, err := store.ActivateRunner(context.Background(), run.ID, runner.ID, started.Revision, starting.Revision, runnerIdentity, mustTime(t, 21)); err != nil {
 		t.Fatal(err)
+	}
+	if _, _, err := store.ActivateProviderResources(context.Background(), run.ID, provider.ID, provider.Revision, group.ID, group.Revision, runnerIdentity, mustTime(t, 22)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("provider pair aliased runner identity: %v", err)
+	}
+	if _, _, err := store.ActivateProviderResources(context.Background(), run.ID, provider.ID, provider.Revision, group.ID, group.Revision, sharedProvider, mustTime(t, 23)); err != nil {
+		t.Fatalf("provider process/group pair rejected: %v", err)
 	}
 	pid, pgid, birth, _ := sharedProvider.Process()
 	corruptSQL(t, store, `UPDATE resources SET pid = ?, pgid = ?, birth_digest = ? WHERE id = ?`, pid, pgid, birth.Bytes(), runner.ID.Bytes())

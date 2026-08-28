@@ -332,6 +332,7 @@ func TestRetryHistoryAllowsMultipleNonSuccessRuns(t *testing.T) {
 	if err != nil || !second.Admitted() {
 		t.Fatalf("first retry admission = %+v, %v", second, err)
 	}
+	materializeAdmittedWorkerChange(t, store, *second.Run, 34)
 	_, activated := activateAllResources(t, store, *second.Run, keys, 36)
 	session := terminalSessionForRunTest(t, store, second.Run.ID)
 	running, err := store.ActivateRun(context.Background(), second.Run.ID, session.ID, activated.Revision, session.Revision, mustTime(t, 39))

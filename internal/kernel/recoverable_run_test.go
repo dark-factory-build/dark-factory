@@ -109,16 +109,26 @@ func TestRecoverableRunExactLookupRejectsUnrelatedIdentityCollision(t *testing.T
 	if err != nil || !second.Admitted() {
 		t.Fatalf("second admission = %+v, %v", second, err)
 	}
-	firstRunner := resourceOfKind(t, resourcesForRunTest(t, store, first.Run.ID), ResourceRunnerProcess)
-	firstRunner, err = store.ActivateResource(context.Background(), first.Run.ID, firstRunner.ID, firstRunner.Revision, processIdentity(t, 300), mustTime(t, 20))
-	if err != nil {
-		t.Fatal(err)
+	activateRunnerForRun := func(run Run, pathSeed, identitySeed, at int64) Resource {
+		t.Helper()
+		runtime := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
+		runtimeIdentity, _ := NewPathResourceIdentity(pathSeed, pathSeed+1)
+		if _, err := store.ActivateResource(context.Background(), run.ID, runtime.ID, runtime.Revision, runtimeIdentity, mustTime(t, at)); err != nil {
+			t.Fatal(err)
+		}
+		runner := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
+		started, starting, err := store.BeginRunnerStart(context.Background(), run.ID, runner.ID, run.Revision, runner.Revision, mustTime(t, at+1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, active, err := store.ActivateRunner(context.Background(), run.ID, runner.ID, started.Revision, starting.Revision, processIdentity(t, identitySeed), mustTime(t, at+2))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return active
 	}
-	secondRunner := resourceOfKind(t, resourcesForRunTest(t, store, second.Run.ID), ResourceRunnerProcess)
-	secondRunner, err = store.ActivateResource(context.Background(), second.Run.ID, secondRunner.ID, secondRunner.Revision, processIdentity(t, 301), mustTime(t, 21))
-	if err != nil {
-		t.Fatal(err)
-	}
+	firstRunner := activateRunnerForRun(*first.Run, 400, 300, 20)
+	secondRunner := activateRunnerForRun(*second.Run, 402, 301, 23)
 	pid, pgid, birth, ok := firstRunner.Identity.Process()
 	if !ok {
 		t.Fatal("first runner identity is not a process identity")
