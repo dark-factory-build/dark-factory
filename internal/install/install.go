@@ -112,7 +112,7 @@ func (home *OperationalHome) Database() (MemberCapability, error) {
 
 // Runtimes returns the bound runtimes-parent capability.
 func (home *OperationalHome) Runtimes() (MemberCapability, error) {
-	return home.memberCapability("runtimes")
+	return home.memberCapability(runtimesName)
 }
 
 // Changes returns the bound Changes-parent capability.

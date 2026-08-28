@@ -1507,7 +1507,7 @@ func newSupervisorFixture(t *testing.T, program string) *supervisorFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	socket := filepath.Join(apiHomePath, "runtimes", "factory.sock")
+	socket := install.LocalAPISocketPath(apiHomePath)
 	fixture.listener = listener
 	fixture.serverDone = make(chan error, 1)
 	go func() {

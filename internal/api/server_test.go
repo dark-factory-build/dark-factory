@@ -62,7 +62,7 @@ func newAPITestListener(t testing.TB, bearer credential) (*Listener, string) {
 	t.Cleanup(func() {
 		closeAPITestListener(t, listener)
 	})
-	socketPath := filepath.Join(homePath, "runtimes", "factory.sock")
+	socketPath := install.LocalAPISocketPath(homePath)
 	return listener, socketPath
 }
 

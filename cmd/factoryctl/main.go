@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -33,6 +34,10 @@ const (
   factoryctl attempt block --detail TEXT
   factoryctl attempt fail [--detail TEXT]
   factoryctl attempt request-human --idempotency-key HEX32 --question TEXT
+  factoryctl project create --name TEXT --root ABSOLUTE
+  factoryctl agent create --project ID --name TEXT --tool-budget N [--role worker|orchestrator]
+  factoryctl task add --project ID --agent ID --title TEXT [--body TEXT] [--priority N]
+  factoryctl dispatch on|off
   factoryctl web status
   factoryctl web open
   factoryctl web list-clients [--after CLIENT_ID]
@@ -59,6 +64,10 @@ const (
 	commandInit
 	commandDoctor
 	commandServiceStatus
+	commandProjectCreate
+	commandAgentCreate
+	commandTaskAdd
+	commandDispatch
 )
 
 type attemptCommand struct {
@@ -69,6 +78,17 @@ type attemptCommand struct {
 	id               string
 	after            string
 	expectedRevision uint64
+
+	name       string
+	root       string
+	project    string
+	agent      string
+	role       string
+	title      string
+	body       string
+	toolBudget uint64
+	priority   int64
+	enabled    bool
 }
 
 func main() {
@@ -115,6 +135,9 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	}
 	if command.kind == commandWebStatus || command.kind == commandWebOpen || command.kind == commandWebListClients || command.kind == commandWebRevoke {
 		return runWeb(ctx, command, getenv, stdout, stderr, opener)
+	}
+	if command.kind == commandProjectCreate || command.kind == commandAgentCreate || command.kind == commandTaskAdd || command.kind == commandDispatch {
+		return runOperator(ctx, command, getenv, stdout, stderr)
 	}
 
 	socket := getenv("DARK_FACTORY_SOCKET")
@@ -176,6 +199,9 @@ func parse(args []string) (attemptCommand, bool, bool) {
 	}
 	if (len(args) == 2 && args[0] == "service" && helpFlag(args[1])) || (len(args) == 3 && args[0] == "service" && args[1] == "status" && helpFlag(args[2])) {
 		return attemptCommand{}, true, true
+	}
+	if len(args) >= 1 && (args[0] == "project" || args[0] == "agent" || args[0] == "task" || args[0] == "dispatch") {
+		return parseOperator(args)
 	}
 	if len(args) < 2 || args[0] != "attempt" && args[0] != "web" {
 		return attemptCommand{}, false, false
@@ -321,6 +347,98 @@ func parseWeb(args []string) (attemptCommand, bool, bool) {
 	return attemptCommand{}, false, false
 }
 
+func parseOperator(args []string) (attemptCommand, bool, bool) {
+	if len(args) == 2 && helpFlag(args[1]) {
+		return attemptCommand{}, true, true
+	}
+	if len(args) >= 3 && helpFlag(args[2]) {
+		switch args[0] + " " + args[1] {
+		case "project create", "agent create", "task add":
+			return attemptCommand{}, true, true
+		}
+	}
+	if args[0] == "dispatch" {
+		if len(args) == 2 && (args[1] == "on" || args[1] == "off") {
+			return attemptCommand{kind: commandDispatch, enabled: args[1] == "on"}, false, true
+		}
+		return attemptCommand{}, false, false
+	}
+	if len(args) < 2 {
+		return attemptCommand{}, false, false
+	}
+	command := attemptCommand{role: "worker"}
+	switch args[0] + " " + args[1] {
+	case "project create":
+		command.kind = commandProjectCreate
+	case "agent create":
+		command.kind = commandAgentCreate
+	case "task add":
+		command.kind = commandTaskAdd
+	default:
+		return attemptCommand{}, false, false
+	}
+	seen := map[string]bool{}
+	for index := 2; index < len(args); index += 2 {
+		if index+1 >= len(args) {
+			return attemptCommand{}, false, false
+		}
+		name, value := args[index], args[index+1]
+		if seen[name] {
+			return attemptCommand{}, false, false
+		}
+		seen[name] = true
+		switch {
+		case name == "--name" && command.kind != commandTaskAdd && validOperatorText(value, 1, 128):
+			command.name = value
+		case name == "--root" && command.kind == commandProjectCreate && validHomeArg(value) && validOperatorText(value, 1, 4096):
+			command.root = value
+		case name == "--project" && command.kind != commandProjectCreate && validHumanRequestKey(value):
+			command.project = value
+		case name == "--agent" && command.kind == commandTaskAdd && validHumanRequestKey(value):
+			command.agent = value
+		case name == "--role" && command.kind == commandAgentCreate && (value == "worker" || value == "orchestrator"):
+			command.role = value
+		case name == "--tool-budget" && command.kind == commandAgentCreate:
+			budget, err := strconv.ParseUint(value, 10, 64)
+			if err != nil || value != strconv.FormatUint(budget, 10) || budget < 1 || budget > 1_000_000_000 {
+				return attemptCommand{}, false, false
+			}
+			command.toolBudget = budget
+		case name == "--title" && command.kind == commandTaskAdd && validOperatorText(value, 1, 1024):
+			command.title = value
+		case name == "--body" && command.kind == commandTaskAdd && validOperatorText(value, 0, 131072):
+			command.body = value
+		case name == "--priority" && command.kind == commandTaskAdd:
+			priority, err := strconv.ParseInt(value, 10, 64)
+			if err != nil || value != strconv.FormatInt(priority, 10) || priority < -1_000_000 || priority > 1_000_000 {
+				return attemptCommand{}, false, false
+			}
+			command.priority = priority
+		default:
+			return attemptCommand{}, false, false
+		}
+	}
+	switch command.kind {
+	case commandProjectCreate:
+		if command.name == "" || command.root == "" {
+			return attemptCommand{}, false, false
+		}
+	case commandAgentCreate:
+		if command.project == "" || command.name == "" || command.toolBudget == 0 {
+			return attemptCommand{}, false, false
+		}
+	case commandTaskAdd:
+		if command.project == "" || command.agent == "" || command.title == "" {
+			return attemptCommand{}, false, false
+		}
+	}
+	return command, false, true
+}
+
+func validOperatorText(value string, minimum, maximum int) bool {
+	return len(value) >= minimum && len(value) <= maximum && utf8.ValidString(value) && !strings.ContainsRune(value, 0)
+}
+
 func validBrowserClientID(value string) bool { return validHumanRequestKey(value) }
 
 func parseRevision(value string) (uint64, bool) {
@@ -378,6 +496,102 @@ func writeFailure(stderr io.Writer, kind commandKind, err error) {
 		message = "factoryctl: " + subject + " was not accepted\n"
 	}
 	_, _ = io.WriteString(stderr, message)
+}
+
+// newOperatorID mints one fresh lowercase 16-byte hex identity client-side,
+// exactly the shape the operator API validates. Identities are never derived
+// from user text.
+func newOperatorID() (string, error) {
+	value := make([]byte, 16)
+	if _, err := rand.Read(value); err != nil {
+		return "", err
+	}
+	encoded := hex.EncodeToString(value)
+	if !validHumanRequestKey(encoded) {
+		return "", errors.New("factoryctl: minted identity is invalid")
+	}
+	return encoded, nil
+}
+
+func runOperator(ctx context.Context, command attemptCommand, getenv func(string) string, stdout, stderr io.Writer) int {
+	socket := getenv("DARK_FACTORY_SOCKET")
+	token := getenv("DARK_FACTORY_OPERATOR_TOKEN_FILE")
+	if socket == "" || token == "" {
+		_, _ = io.WriteString(stderr, "factoryctl: operator client configuration is invalid\n")
+		return exitFailure
+	}
+	client, err := api.NewOperatorClient(socket, token)
+	if err != nil {
+		_, _ = io.WriteString(stderr, "factoryctl: operator client configuration is invalid\n")
+		return exitFailure
+	}
+	callContext, cancel := context.WithTimeout(ctx, attemptRequestTimeout)
+	defer cancel()
+	switch command.kind {
+	case commandProjectCreate:
+		id, err := newOperatorID()
+		if err != nil {
+			return writeWebFailure(stderr, "project create", err)
+		}
+		result, callErr := client.CreateProject(callContext, api.CreateProjectInput{ID: id, Name: command.name, Root: command.root})
+		if callErr != nil {
+			return writeWebFailure(stderr, "project create", callErr)
+		}
+		return writeJSON(stdout, struct {
+			ID       string `json:"id"`
+			Head     uint64 `json:"head"`
+			Revision uint64 `json:"revision"`
+		}{ID: id, Head: result.Head, Revision: result.Revision})
+	case commandAgentCreate:
+		id, err := newOperatorID()
+		if err != nil {
+			return writeWebFailure(stderr, "agent create", err)
+		}
+		result, callErr := client.CreateShellAgent(callContext, api.CreateShellAgentInput{ID: id, ProjectID: command.project, Name: command.name, Role: command.role, ToolBudgetLimit: command.toolBudget})
+		if callErr != nil {
+			return writeWebFailure(stderr, "agent create", callErr)
+		}
+		return writeJSON(stdout, struct {
+			ID       string `json:"id"`
+			Head     uint64 `json:"head"`
+			Revision uint64 `json:"revision"`
+		}{ID: id, Head: result.Head, Revision: result.Revision})
+	case commandTaskAdd:
+		id, err := newOperatorID()
+		if err != nil {
+			return writeWebFailure(stderr, "task add", err)
+		}
+		incarnation, err := newOperatorID()
+		if err != nil {
+			return writeWebFailure(stderr, "task add", err)
+		}
+		result, callErr := client.EnqueueTask(callContext, api.EnqueueTaskInput{ID: id, ProjectID: command.project, AssignedAgentID: command.agent, IncarnationID: incarnation, Title: command.title, Body: command.body, Priority: command.priority})
+		if callErr != nil {
+			return writeWebFailure(stderr, "task add", callErr)
+		}
+		return writeJSON(stdout, struct {
+			ID            string `json:"id"`
+			IncarnationID string `json:"incarnation_id"`
+			Head          uint64 `json:"head"`
+			Revision      uint64 `json:"revision"`
+		}{ID: id, IncarnationID: incarnation, Head: result.Head, Revision: result.Revision})
+	case commandDispatch:
+		snapshot, callErr := client.Snapshot(callContext)
+		if callErr != nil {
+			return writeWebFailure(stderr, "dispatch", callErr)
+		}
+		result, callErr := client.SetDispatch(callContext, snapshot.Factory.Revision, command.enabled)
+		if callErr != nil {
+			return writeWebFailure(stderr, "dispatch", callErr)
+		}
+		return writeJSON(stdout, struct {
+			Enabled  bool   `json:"enabled"`
+			Head     uint64 `json:"head"`
+			Revision uint64 `json:"revision"`
+		}{Enabled: command.enabled, Head: result.Head, Revision: result.Revision})
+	default:
+		return exitUsage
+	}
 }
 
 func runWeb(ctx context.Context, command attemptCommand, getenv func(string) string, stdout, stderr io.Writer, opener browserOpener) int {

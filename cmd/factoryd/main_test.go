@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
+	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/daemon"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 )
@@ -97,7 +98,7 @@ func TestProcessServesAPIAndBrowserThenReleasesExactHome(t *testing.T) {
 	}
 
 	address := owner.browser.Addr()
-	idle, err := net.Dial("unix", filepath.Join(home, "runtimes", "factory.sock"))
+	idle, err := net.Dial("unix", install.LocalAPISocketPath(home))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +130,7 @@ func TestProcessPortCollisionCleansLocalAPIAndHomeAuthority(t *testing.T) {
 		}
 		t.Fatalf("colliding browser start = %v, %v", owner, err)
 	}
-	if _, err := os.Lstat(filepath.Join(home, "runtimes", "factory.sock")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Lstat(install.LocalAPISocketPath(home)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("failed startup retained socket: %v", err)
 	}
 	reopened, err := install.OpenOperationalHome(context.Background(), home)
@@ -221,7 +222,7 @@ func TestRunRedactsStartupFailureAndReportsUsage(t *testing.T) {
 }
 
 func TestStartupCancellationIsCleanAtEveryStartupPhase(t *testing.T) {
-	for _, phase := range []string{"home", "store", "runtime parent", "daemon", "local API", "listener", "browser"} {
+	for _, phase := range []string{"home", "store", "runtime parent", "supervisor spec", "daemon", "local API", "listener", "browser"} {
 		t.Run(phase, func(t *testing.T) {
 			home := initializedHome(t)
 			ctx, cancel := context.WithCancel(context.Background())
@@ -350,13 +351,17 @@ func initializedHome(t *testing.T) string {
 }
 
 func testConfig(home string) config {
-	return config{home: home, browserAddress: "127.0.0.1:0", browserOrigins: []string{testOrigin}}
+	return config{
+		home: home, browserAddress: "127.0.0.1:0", browserOrigins: []string{testOrigin},
+		gitExecutable: defaultGitExecutable, toolPath: defaultToolPath, baseRevision: defaultBaseRevision,
+		runnerExecutable: "/bin/sh", factoryctlExecutable: "/bin/sh",
+	}
 }
 
 func waitOperatorClient(t *testing.T, home string) *api.OperatorClient {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
-	socket := filepath.Join(home, "runtimes", "factory.sock")
+	socket := install.LocalAPISocketPath(home)
 	token := filepath.Join(home, "operator.token")
 	for time.Now().Before(deadline) {
 		client, err := api.NewOperatorClient(socket, token)
@@ -371,7 +376,7 @@ func waitOperatorClient(t *testing.T, home string) *api.OperatorClient {
 
 func assertReleased(t *testing.T, home, browserAddress string) {
 	t.Helper()
-	if _, err := os.Lstat(filepath.Join(home, "runtimes", "factory.sock")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Lstat(install.LocalAPISocketPath(home)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("socket remains: %v", err)
 	}
 	listener, err := net.Listen("tcp4", browserAddress)
@@ -385,5 +390,172 @@ func assertReleased(t *testing.T, home, browserAddress string) {
 	}
 	if err := reopened.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestParseSupervisorFlagsAndDefaults(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "factory")
+	configuration, help, ok := parse([]string{"--home", home})
+	if help || !ok || configuration.gitExecutable != defaultGitExecutable || configuration.toolPath != defaultToolPath || configuration.baseRevision != defaultBaseRevision || configuration.runnerExecutable != "" || configuration.factoryctlExecutable != "" {
+		t.Fatalf("default supervisor configuration = %+v, help=%v, ok=%v", configuration, help, ok)
+	}
+	configuration, help, ok = parse([]string{"--home", home, "--git", "/opt/git/bin/git", "--tool-path", "/opt/tools:/usr/bin", "--base-revision", "refs/heads/main", "--runner", "/opt/df/factory-runner", "--factoryctl", "/opt/df/factoryctl"})
+	if help || !ok || configuration.gitExecutable != "/opt/git/bin/git" || configuration.toolPath != "/opt/tools:/usr/bin" || configuration.baseRevision != "refs/heads/main" || configuration.runnerExecutable != "/opt/df/factory-runner" || configuration.factoryctlExecutable != "/opt/df/factoryctl" {
+		t.Fatalf("explicit supervisor configuration = %+v, help=%v, ok=%v", configuration, help, ok)
+	}
+	for _, test := range []struct {
+		name string
+		args []string
+	}{
+		{name: "relative git", args: []string{"--home", home, "--git", "git"}},
+		{name: "duplicate git", args: []string{"--home", home, "--git", "/usr/bin/git", "--git", "/usr/bin/git"}},
+		{name: "relative tool path entry", args: []string{"--home", home, "--tool-path", "/usr/bin:relative"}},
+		{name: "empty tool path", args: []string{"--home", home, "--tool-path", ""}},
+		{name: "duplicate tool path", args: []string{"--home", home, "--tool-path", "/usr/bin", "--tool-path", "/usr/bin"}},
+		{name: "empty base revision", args: []string{"--home", home, "--base-revision", ""}},
+		{name: "option-shaped base revision", args: []string{"--home", home, "--base-revision", "--exec=evil"}},
+		{name: "nul base revision", args: []string{"--home", home, "--base-revision", "HEAD\x00"}},
+		{name: "duplicate base revision", args: []string{"--home", home, "--base-revision", "HEAD", "--base-revision", "HEAD"}},
+		{name: "relative runner", args: []string{"--home", home, "--runner", "factory-runner"}},
+		{name: "relative factoryctl", args: []string{"--home", home, "--factoryctl", "factoryctl"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if configuration, help, ok := parse(test.args); help || ok {
+				t.Fatalf("invalid supervisor flag accepted: %+v", configuration)
+			}
+		})
+	}
+}
+
+func copyExecutable(t *testing.T, destination string) {
+	t.Helper()
+	content, err := os.ReadFile("/bin/sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(destination, content, 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDeriveSupervisorSpecResolvesSymlinkedSelfToCommittedSiblings(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	copyExecutable(t, filepath.Join(base, "factoryd"))
+	copyExecutable(t, filepath.Join(base, "factory-runner"))
+	copyExecutable(t, filepath.Join(base, "factoryctl"))
+	link := filepath.Join(base, "factoryd-link")
+	if err := os.Symlink(filepath.Join(base, "factoryd"), link); err != nil {
+		t.Fatal(err)
+	}
+	selfExecutable = func() (string, error) { return link, nil }
+	defer func() { selfExecutable = os.Executable }()
+
+	home := filepath.Join(base, "home")
+	configuration := config{home: home, gitExecutable: defaultGitExecutable, toolPath: defaultToolPath, baseRevision: "refs/heads/main"}
+	spec, err := deriveSupervisorSpec(configuration, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.RunnerExecutable != filepath.Join(base, "factory-runner") || spec.FactoryctlExecutable != filepath.Join(base, "factoryctl") {
+		t.Fatalf("sibling derivation = %+v", spec)
+	}
+	if spec.GitExecutable != defaultGitExecutable || spec.BaseRevision != "refs/heads/main" || spec.ToolPath != defaultToolPath {
+		t.Fatalf("boot inputs = %+v", spec)
+	}
+	if spec.ChangeParent != filepath.Join(home, "changes") || spec.AttemptSocket != install.LocalAPISocketPath(home) {
+		t.Fatalf("home-derived paths = %+v", spec)
+	}
+}
+
+func TestDeriveSupervisorSpecRefusesMissingAndUnsafeExecutables(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	copyExecutable(t, filepath.Join(base, "factoryd"))
+	copyExecutable(t, filepath.Join(base, "factoryctl"))
+	selfExecutable = func() (string, error) { return filepath.Join(base, "factoryd"), nil }
+	defer func() { selfExecutable = os.Executable }()
+	home := filepath.Join(base, "home")
+	valid := config{home: home, gitExecutable: defaultGitExecutable, toolPath: defaultToolPath, baseRevision: defaultBaseRevision}
+
+	if _, err := deriveSupervisorSpec(valid, nil); err == nil {
+		t.Fatal("missing sibling factory-runner was accepted")
+	}
+	copyExecutable(t, filepath.Join(base, "factory-runner"))
+	if _, err := deriveSupervisorSpec(valid, nil); err != nil {
+		t.Fatalf("complete siblings were refused: %v", err)
+	}
+	if err := os.Chmod(filepath.Join(base, "factory-runner"), 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deriveSupervisorSpec(valid, nil); err == nil {
+		t.Fatal("group and world writable runner was accepted")
+	}
+	if err := os.Chmod(filepath.Join(base, "factory-runner"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	broken := valid
+	broken.gitExecutable = filepath.Join(base, "missing-git")
+	if _, err := deriveSupervisorSpec(broken, nil); err == nil {
+		t.Fatal("missing git executable was accepted")
+	}
+	broken = valid
+	broken.baseRevision = ""
+	if _, err := deriveSupervisorSpec(broken, nil); err == nil {
+		t.Fatal("empty base revision policy was accepted")
+	}
+}
+
+func TestOpenProcessRefusesUnprovableSupervisorSpecAndReleasesHome(t *testing.T) {
+	home := initializedHome(t)
+	configuration := testConfig(home)
+	configuration.gitExecutable = filepath.Join(home, "missing-git")
+	if owner, err := openProcess(context.Background(), configuration); err == nil || owner != nil {
+		t.Fatalf("unprovable supervisor specification started a process: %v, %v", owner, err)
+	}
+	reopened, err := install.OpenOperationalHome(context.Background(), home)
+	if err != nil {
+		t.Fatalf("home was not released after boot refusal: %v", err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBootGitTrustMatchesTheExactPerAttemptAuthority(t *testing.T) {
+	if !change.TrustedDeveloperGitPath(defaultGitExecutable) {
+		t.Fatalf("default git %q would be refused by the per-attempt trust predicate", defaultGitExecutable)
+	}
+	if _, err := os.Stat(defaultGitExecutable); err != nil {
+		t.Skipf("CommandLineTools git is unavailable: %v", err)
+	}
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	selfExecutable = func() (string, error) { return filepath.Join(base, "factoryd"), nil }
+	defer func() { selfExecutable = os.Executable }()
+	copyExecutable(t, filepath.Join(base, "factoryd"))
+	copyExecutable(t, filepath.Join(base, "factory-runner"))
+	copyExecutable(t, filepath.Join(base, "factoryctl"))
+	home := filepath.Join(base, "home")
+	valid := config{home: home, gitExecutable: defaultGitExecutable, toolPath: defaultToolPath, baseRevision: defaultBaseRevision}
+	if _, err := deriveSupervisorSpec(valid, nil); err != nil {
+		t.Fatalf("toolchain default git was refused at boot: %v", err)
+	}
+	for _, untrusted := range []string{"/usr/bin/git", "/bin/sh"} {
+		broken := valid
+		broken.gitExecutable = untrusted
+		_, err := deriveSupervisorSpec(broken, nil)
+		if err == nil {
+			t.Fatalf("untrusted git %q was accepted at boot", untrusted)
+		}
+		if untrusted == "/usr/bin/git" && !strings.Contains(err.Error(), "trusted Developer toolchain") {
+			t.Fatalf("refusal does not name the trust requirement: %v", err)
+		}
 	}
 }

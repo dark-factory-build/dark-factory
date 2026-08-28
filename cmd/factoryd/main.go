@@ -19,13 +19,21 @@ import (
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/buildinfo"
+	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/daemon"
 	"github.com/dark-factory-build/dark-factory/internal/install"
+	"github.com/dark-factory-build/dark-factory/internal/provider"
+	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 const (
 	defaultBrowserAddress = "127.0.0.1:43123"
 	defaultBrowserOrigin  = "https://app.darkfactory.build"
+	defaultGitExecutable  = "/Library/Developer/CommandLineTools/usr/bin/git"
+	defaultToolPath       = "/usr/bin:/bin"
+	defaultBaseRevision   = "HEAD"
+	runnerSiblingName     = "factory-runner"
+	factoryctlSiblingName = "factoryctl"
 	maxHomeArgumentBytes  = 4096
 	maxAPIHandlers        = 32
 	apiHandlerTimeout     = 10 * time.Second
@@ -33,7 +41,9 @@ const (
 	exitUsage             = 64
 
 	usage = `usage:
-  factoryd --home ABSOLUTE [--development-browser-origin EXACT_ORIGIN ...]
+  factoryd --home ABSOLUTE [--git PATH] [--tool-path PATH] [--base-revision REVISION]
+           [--runner PATH] [--factoryctl PATH]
+           [--development-browser-origin EXACT_ORIGIN ...]
   factoryd --version
   factoryd --build-identity
 `
@@ -44,12 +54,20 @@ var (
 	startupPhaseHook         func(string)
 	closeDaemon              = func(value *daemon.Daemon) error { return value.Close() }
 	closeRuntimeParent       = func(value *daemon.RuntimeParent) error { return value.Close() }
+	selfExecutable           = os.Executable
 )
 
 type config struct {
 	home           string
 	browserAddress string
 	browserOrigins []string
+	// Supervisor inputs. Empty runner/factoryctl select sibling self-location
+	// at boot; every executable is committed before the process serves.
+	gitExecutable        string
+	toolPath             string
+	baseRevision         string
+	runnerExecutable     string
+	factoryctlExecutable string
 }
 
 type process struct {
@@ -67,6 +85,10 @@ type process struct {
 	apiAuthority  *install.LocalAPIAuthority
 	listener      *api.Listener
 	browser       *daemon.BrowserRuntime
+	// supervisorSpec is derived and committed at boot; the scheduler
+	// activation consumes it. A specification that cannot be proven at boot
+	// refuses the whole process rather than failing the first attempt.
+	supervisorSpec daemon.SupervisorSpec
 
 	apiDone  chan struct{}
 	apiErr   error
@@ -124,6 +146,31 @@ func parse(args []string) (config, bool, bool) {
 				return config{}, false, false
 			}
 			result.home = value
+		case "--git":
+			if result.gitExecutable != "" || !validHome(value) {
+				return config{}, false, false
+			}
+			result.gitExecutable = value
+		case "--tool-path":
+			if result.toolPath != "" || provider.ValidateToolPath(value) != nil {
+				return config{}, false, false
+			}
+			result.toolPath = value
+		case "--base-revision":
+			if result.baseRevision != "" || !validBaseRevision(value) {
+				return config{}, false, false
+			}
+			result.baseRevision = value
+		case "--runner":
+			if result.runnerExecutable != "" || !validHome(value) {
+				return config{}, false, false
+			}
+			result.runnerExecutable = value
+		case "--factoryctl":
+			if result.factoryctlExecutable != "" || !validHome(value) {
+				return config{}, false, false
+			}
+			result.factoryctlExecutable = value
 		case "--development-browser-origin":
 			if !validBrowserOrigin(value) || len(result.browserOrigins) == 8 {
 				return config{}, false, false
@@ -142,7 +189,23 @@ func parse(args []string) (config, bool, bool) {
 	if result.home == "" {
 		return config{}, false, false
 	}
+	if result.gitExecutable == "" {
+		result.gitExecutable = defaultGitExecutable
+	}
+	if result.toolPath == "" {
+		result.toolPath = defaultToolPath
+	}
+	if result.baseRevision == "" {
+		result.baseRevision = defaultBaseRevision
+	}
 	return result, false, true
+}
+
+// validBaseRevision bounds the boot-owned revision policy string. Each
+// attempt still resolves and validates it against the exact project
+// repository; an unresolvable policy fails that run closed.
+func validBaseRevision(value string) bool {
+	return value != "" && len(value) <= maxHomeArgumentBytes && utf8.ValidString(value) && !strings.ContainsRune(value, 0) && !strings.HasPrefix(value, "-")
 }
 
 func validHome(value string) bool {
@@ -168,7 +231,9 @@ func validBrowserOrigin(value string) bool {
 }
 
 func serve(ctx context.Context, configuration config) error {
-	if ctx == nil || !validHome(configuration.home) || !validBrowserAddress(configuration.browserAddress, true) || len(configuration.browserOrigins) == 0 {
+	if ctx == nil || !validHome(configuration.home) || !validBrowserAddress(configuration.browserAddress, true) || len(configuration.browserOrigins) == 0 ||
+		!validHome(configuration.gitExecutable) || provider.ValidateToolPath(configuration.toolPath) != nil || !validBaseRevision(configuration.baseRevision) ||
+		(configuration.runnerExecutable != "" && !validHome(configuration.runnerExecutable)) || (configuration.factoryctlExecutable != "" && !validHome(configuration.factoryctlExecutable)) {
 		return errors.New("invalid factoryd configuration")
 	}
 	for _, origin := range configuration.browserOrigins {
@@ -215,11 +280,16 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 	if err != nil {
 		return nil, err
 	}
-	owner.runtimeParent, err = daemon.OpenRuntimeParent(ownedContext, runtimes, filepath.Join(configuration.home, "runtimes"))
+	owner.runtimeParent, err = daemon.OpenRuntimeParent(ownedContext, runtimes, install.RuntimesPath(configuration.home))
 	if err != nil {
 		return nil, err
 	}
 	startupPhase("runtime parent")
+	owner.supervisorSpec, err = deriveSupervisorSpec(configuration, owner.runtimeParent)
+	if err != nil {
+		return nil, err
+	}
+	startupPhase("supervisor spec")
 	owner.daemon, err = daemon.NewDaemon(store)
 	if err != nil {
 		return nil, err
@@ -418,4 +488,71 @@ func startupPhase(name string) {
 	if startupPhaseHook != nil {
 		startupPhaseHook(name)
 	}
+}
+
+// deriveSupervisorSpec composes and proves the production supervisor
+// specification at boot. Executables are symlink-resolved before commitment
+// because the per-attempt locator rejects any path that is not its own
+// resolution; missing or unsafe inputs refuse the process.
+func deriveSupervisorSpec(configuration config, parent *daemon.RuntimeParent) (daemon.SupervisorSpec, error) {
+	runnerPath, factoryctlPath := configuration.runnerExecutable, configuration.factoryctlExecutable
+	if runnerPath == "" || factoryctlPath == "" {
+		self, err := selfExecutable()
+		if err != nil {
+			return daemon.SupervisorSpec{}, err
+		}
+		resolvedSelf, err := filepath.EvalSymlinks(self)
+		if err != nil || !filepath.IsAbs(resolvedSelf) {
+			return daemon.SupervisorSpec{}, errors.Join(errors.New("factoryd: self location is unresolvable"), err)
+		}
+		siblings := filepath.Dir(resolvedSelf)
+		if runnerPath == "" {
+			runnerPath = filepath.Join(siblings, runnerSiblingName)
+		}
+		if factoryctlPath == "" {
+			factoryctlPath = filepath.Join(siblings, factoryctlSiblingName)
+		}
+	}
+	gitExecutable, err := commitBootExecutable(configuration.gitExecutable)
+	if err != nil {
+		return daemon.SupervisorSpec{}, err
+	}
+	if !change.TrustedDeveloperGitPath(gitExecutable) {
+		return daemon.SupervisorSpec{}, fmt.Errorf("factoryd: git executable %q is outside the trusted Developer toolchain; attempts accept only the CommandLineTools or Xcode git", gitExecutable)
+	}
+	runnerExecutable, err := commitBootExecutable(runnerPath)
+	if err != nil {
+		return daemon.SupervisorSpec{}, err
+	}
+	factoryctlExecutable, err := commitBootExecutable(factoryctlPath)
+	if err != nil {
+		return daemon.SupervisorSpec{}, err
+	}
+	if err := provider.ValidateToolPath(configuration.toolPath); err != nil {
+		return daemon.SupervisorSpec{}, err
+	}
+	if !validBaseRevision(configuration.baseRevision) {
+		return daemon.SupervisorSpec{}, errors.New("factoryd: invalid base revision policy")
+	}
+	return daemon.SupervisorSpec{
+		RuntimeParent:        parent,
+		ChangeParent:         install.ChangesPath(configuration.home),
+		GitExecutable:        gitExecutable,
+		BaseRevision:         configuration.baseRevision,
+		AttemptSocket:        install.LocalAPISocketPath(configuration.home),
+		RunnerExecutable:     runnerExecutable,
+		FactoryctlExecutable: factoryctlExecutable,
+		ToolPath:             configuration.toolPath,
+	}, nil
+}
+
+func commitBootExecutable(path string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", errors.Join(fmt.Errorf("factoryd: executable %q is unresolvable", path), err)
+	}
+	if _, err := runner.CommitExecutableLocator(resolved); err != nil {
+		return "", errors.Join(fmt.Errorf("factoryd: executable %q was refused", path), err)
+	}
+	return resolved, nil
 }
