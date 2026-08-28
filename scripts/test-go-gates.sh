@@ -168,6 +168,8 @@ go_gate_package_manager_stage() {
             /bin/mkdir -p "$tree/.pnpm"
             : >"$tree/.modules.yaml"
             : >"$tree/file"
+            /bin/chmod 755 "$tree" "$tree/.pnpm"
+            /bin/chmod 644 "$tree/.modules.yaml" "$tree/file"
             return 0
             ;;
         fail) return 43 ;;
@@ -178,17 +180,23 @@ go_gate_package_manager_stage() {
                 depth=1
                 ( go_gate_environment_setup; go_gate_web_install )
             fi
+            /bin/chmod 755 "$tree" "$tree/.pnpm"
+            /bin/chmod 644 "$tree/.modules.yaml"
             return 0
             ;;
         normalize)
             /bin/rm -rf -- "$tree"
             /bin/mkdir -p "$tree/.pnpm"
             : >"$tree/.modules.yaml"
+            /bin/chmod 755 "$tree" "$tree/.pnpm"
+            /bin/chmod 644 "$tree/.modules.yaml"
             return 0
             ;;
         rm-fail)
             /bin/mkdir -p "$tree/.pnpm"
             : >"$tree/.modules.yaml"
+            /bin/chmod 755 "$tree" "$tree/.pnpm"
+            /bin/chmod 644 "$tree/.modules.yaml"
             return 43
             ;;
         hup) /usr/bin/perl -e 'kill "HUP", $$' ;;
