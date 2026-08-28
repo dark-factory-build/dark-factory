@@ -49,6 +49,18 @@ test("public artifacts bind clean HEAD, protocol, exact dependencies, and bytes"
     assert.deepEqual(packed.protocol, { name: "dark-factory/browser/v1", version: 1 });
     assert.deepEqual(packed.buildTools.pnpm, "11.19.0");
     assert.deepEqual(packed.buildTools.typescript, "5.8.3");
+    assert.deepEqual(packed.buildTools.node, {
+      version: "22.20.0",
+      bytes: 111332720,
+      mode: "0755",
+      sha512: "1476738e01ca6e0a7c4468e30645c91b59c56a2d0eda60510a20a28a72be790954694e06f6074da784cb17f4ea61cac1a1c349326d1eb2e378ba2000548d3599",
+    });
+    assert.deepEqual(packed.buildTools.tar, {
+      version: "bsdtar 3.5.3 - libarchive 3.7.4 zlib/1.2.12 liblzma/5.4.3 bz2lib/1.0.8",
+      bytes: 275184,
+      mode: "0755",
+      sha512: "f7c721e9624aad59ec244739017b1354cf21a90cc86e32314419c57271d90d95af574885d3c36e2da34ff928032eb9e5954cf2044422d022b4239b845b06c323",
+    });
     const reviewed = JSON.parse(readFileSync(join(webRoot, "toolchain-integrity.json")));
     assert.equal(packed.buildTools.pnpmTreeSha512, reviewed.pnpm.treeSha512);
     assert.equal(packed.buildTools.typescriptTreeSha512, reviewed.typescript.treeSha512);
@@ -123,19 +135,19 @@ test("verification rejects stale protocol identity and changed tarball bytes", (
     const stalePackage = structuredClone(original);
     stalePackage.packages[clientName].package.version = "9.9.9";
     writeFileSync(path, `${JSON.stringify(stalePackage, null, 2)}\n`);
-    expectFailure(() => run("verify", output), "package identity is stale or forged");
+    expectFailure(() => run("verify", output), "differs from clean reconstruction");
     writeFileSync(path, `${JSON.stringify(original, null, 2)}\n`);
 
     const staleBinding = structuredClone(original);
     staleBinding.packages[uiName].dependency.integrity = "sha512-forged";
     writeFileSync(path, `${JSON.stringify(staleBinding, null, 2)}\n`);
-    expectFailure(() => run("verify", output), "exact client artifact and version");
+    expectFailure(() => run("verify", output), "differs from clean reconstruction");
     writeFileSync(path, `${JSON.stringify(original, null, 2)}\n`);
 
     const tarball = join(output, original.packages[clientName].artifact.filename);
     const bytes = readFileSync(tarball);
     writeFileSync(tarball, Buffer.concat([bytes, Buffer.from("mutation\n")]));
-    expectFailure(() => run("verify", output), "tarball integrity failed");
+    expectFailure(() => run("verify", output), "differs from clean reconstruction");
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });
   }
@@ -173,13 +185,13 @@ test("verification rejects archive inventory, runtime protocol, and strict manif
     const traversal = structuredClone(original);
     traversal.packages[clientName].artifact.filename = "../client.tgz";
     writeManifest(traversal);
-    expectFailure(() => run("verify", output), "package identity is stale or forged");
+    expectFailure(() => run("verify", output), "differs from clean reconstruction");
     writeFileSync(path, originalText);
 
     const floating = structuredClone(original);
     floating.packages[uiName].dependency.version = "workspace:*";
     writeManifest(floating);
-    expectFailure(() => run("verify", output), "exact client artifact and version");
+    expectFailure(() => run("verify", output), "differs from clean reconstruction");
     writeFileSync(path, originalText);
 
     const extra = join(output, "stale.txt");
@@ -191,16 +203,15 @@ test("verification rejects archive inventory, runtime protocol, and strict manif
     const backup = join(tempRoot, "client-backup.tgz");
     renameSync(clientArchive, backup);
     symlinkSync(backup, clientArchive);
-    expectFailure(() => run("verify", output), "output contains a symlink");
+    expectFailure(() => run("verify", output), "artifact output contains a symlink");
     rmSync(clientArchive);
     renameSync(backup, clientArchive);
 
-    const compiledManifest = join(webRoot, "packages", "client", "dist", "src", "manifest.js");
-    const compiledText = readFileSync(compiledManifest, "utf8");
-    assert.match(compiledText, /PROTOCOL_VERSION = 1/);
-    writeFileSync(compiledManifest, compiledText.replace("PROTOCOL_VERSION = 1", "PROTOCOL_VERSION = 2"));
-    expectFailure(() => run("verify", output), "compiled client protocol version");
-    writeFileSync(compiledManifest, compiledText);
+    const sourceManifest = join(webRoot, "packages", "client", "src", "manifest.ts");
+    const sourceText = readFileSync(sourceManifest, "utf8");
+    writeFileSync(sourceManifest, sourceText.replace("PROTOCOL_VERSION = 1", "PROTOCOL_VERSION = 2"));
+    expectFailure(() => run("verify", output), "worktree is dirty");
+    writeFileSync(sourceManifest, sourceText);
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });
   }
@@ -243,7 +254,6 @@ test("pack uses trusted absolute tools and leaves no partial output", () => {
 test("tool tree commitment has framed content and rejects unsafe copied trees", () => {
   const tempRoot = mkdtempSync(join(tmpdir(), "dark-factory-tool-tree-"));
   const pnpmRoot = join(userInfo().homedir, ".cache", "node", "corepack", "v1", "pnpm", "11.19.0");
-  const typescriptRoot = realpathSync(join(webRoot, "node_modules", "typescript"));
   try {
     const first = join(tempRoot, "first");
     const second = join(tempRoot, "second");

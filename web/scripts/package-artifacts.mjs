@@ -27,6 +27,12 @@ const toolTreeVersion = "dark-factory/tool-tree/v1";
 const maxToolTreeFiles = 4096;
 const maxToolTreeBytes = 128 * 1024 * 1024;
 const maxToolTreePathBytes = 4096;
+const maxArchiveBytes = 2 * 1024 * 1024;
+const maxArchiveMemberBytes = 512 * 1024;
+const maxArchiveTotalBytes = 2 * 1024 * 1024;
+const maxArchiveMembers = 64;
+const maxArchiveListingBytes = 64 * 1024;
+const maxJsonBytes = 64 * 1024;
 const packages = {
   client: { key: "client", name: "@dark-factory/client", root: join(webRoot, "packages", "client") },
   ui: { key: "ui", name: "@dark-factory/ui", root: join(webRoot, "packages", "ui") },
@@ -52,8 +58,6 @@ const inventory = {
 
 const commandEnvironment = {
   CI: "true",
-  COREPACK_DEFAULT_TO_LATEST: "0",
-  COREPACK_ENABLE_NETWORK: "0",
   HOME: tmpdir(),
   LANG: "C",
   LC_ALL: "C",
@@ -81,7 +85,7 @@ function readJson(path) {
   }
 }
 
-function executable(path, label) {
+function inspectExecutable(path, label, expected) {
   let target;
   try {
     target = realpathSync(path);
@@ -90,11 +94,21 @@ function executable(path, label) {
     if (!stat.isFile() || (stat.mode & 0o111) === 0 || (uid !== -1 && stat.uid !== uid && stat.uid !== 0)) {
       fail(`${label} is not a trusted executable`);
     }
+    const mode = (stat.mode & 0o777).toString(8).padStart(4, "0");
+    const bytes = readFileSync(target);
+    const sha512 = createHash("sha512").update(bytes).digest("hex");
+    if (expected && (bytes.length !== expected.bytes || mode !== expected.mode || sha512 !== expected.sha512)) {
+      fail(`${label} content differs from reviewed toolchain`);
+    }
+    return { path: target, bytes: bytes.length, mode, sha512 };
   } catch (error) {
     if (error.message.startsWith("package artifacts:")) throw error;
     fail(`could not resolve ${label}: ${error.message}`);
   }
-  return target;
+}
+
+function executable(path, label) {
+  return inspectExecutable(path, label).path;
 }
 
 function git(...args) {
@@ -114,11 +128,11 @@ function currentSource() {
 }
 
 function packageJson(packageInfo) {
-  return readJson(join(packageInfo.root, "package.json"));
+  return strictJsonFile(join(packageInfo.root, "package.json"), `${packageInfo.name} package.json`);
 }
 
 function strictJsonText(text, label) {
-  if (text.length > 65536) fail(`${label} is too large`);
+  if (Buffer.byteLength(text, "utf8") > maxJsonBytes) fail(`${label} is too large`);
   let value;
   try { value = JSON.parse(text); } catch (error) { fail(`${label} is invalid JSON: ${error.message}`); }
   // Canonical re-serialization also rejects duplicate keys: JSON.parse drops
@@ -210,14 +224,22 @@ function toolTreeDigest(root) {
 
 function reviewedToolchain() {
   const value = strictJsonFile(toolchainIntegrityPath, "toolchain integrity");
-  exactKeys(value, ["schemaVersion", "pnpm", "typescript"], "toolchain integrity");
+  exactKeys(value, ["schemaVersion", "node", "pnpm", "typescript", "tar"], "toolchain integrity");
   if (value.schemaVersion !== 1) fail("toolchain integrity schema version is unsupported");
+  exactKeys(value.node, ["version", "sha512", "bytes", "mode"], "toolchain integrity.node");
   exactKeys(value.pnpm, ["version", "treeSha512"], "toolchain integrity.pnpm");
   exactKeys(value.typescript, ["version", "treeSha512", "lockfileIntegrity"], "toolchain integrity.typescript");
+  exactKeys(value.tar, ["sha512", "bytes", "mode"], "toolchain integrity.tar");
+  for (const key of ["version", "sha512", "mode"]) stringField(value.node, key, "toolchain integrity.node");
+  integerField(value.node, "bytes", "toolchain integrity.node");
   for (const key of ["version", "treeSha512"]) stringField(value.pnpm, key, "toolchain integrity.pnpm");
   for (const key of ["version", "treeSha512", "lockfileIntegrity"]) stringField(value.typescript, key, "toolchain integrity.typescript");
+  for (const key of ["sha512", "mode"]) stringField(value.tar, key, "toolchain integrity.tar");
+  integerField(value.tar, "bytes", "toolchain integrity.tar");
+  if (!/^\d+\.\d+\.\d+$/.test(value.node.version) || !/^[0-9a-f]{128}$/.test(value.node.sha512) || value.node.bytes <= 0 || value.node.mode !== "0755") fail("toolchain integrity.node is invalid");
   if (!/^\d+\.\d+\.\d+$/.test(value.pnpm.version) || !/^[0-9a-f]{128}$/.test(value.pnpm.treeSha512)) fail("toolchain integrity.pnpm is invalid");
   if (!/^\d+\.\d+\.\d+$/.test(value.typescript.version) || !/^[0-9a-f]{128}$/.test(value.typescript.treeSha512) || !/^sha512-[A-Za-z0-9+/]{86}={0,2}$/.test(value.typescript.lockfileIntegrity)) fail("toolchain integrity.typescript is invalid");
+  if (!/^[0-9a-f]{128}$/.test(value.tar.sha512) || value.tar.bytes <= 0 || value.tar.mode !== "0755") fail("toolchain integrity.tar is invalid");
   return value;
 }
 
@@ -241,9 +263,10 @@ function pnpmRoot(version) {
 }
 
 function trustedTools() {
-  const node = executable(process.execPath, "Node");
-  const corepack = executable(join(dirname(node), "corepack"), "Corepack");
   const reviewed = reviewedToolchain();
+  const nodeInfo = inspectExecutable(process.execPath, "Node", reviewed.node);
+  const node = nodeInfo.path;
+  if (process.version !== `v${reviewed.node.version}`) fail("Node version differs from reviewed toolchain");
   const webPackage = readJson(join(webRoot, "package.json"));
   const packageManager = webPackage.packageManager?.match(/^pnpm@(\d+\.\d+\.\d+)$/);
   const typescript = webPackage.devDependencies?.typescript;
@@ -267,31 +290,38 @@ function trustedTools() {
   const typescriptTreeSha512 = toolTreeDigest(tscRoot);
   if (typescriptTreeSha512 !== reviewed.typescript.treeSha512) fail("installed TypeScript content differs from reviewed toolchain");
   const safeEnv = { ...commandEnvironment, PATH: `${dirname(node)}:/usr/bin:/bin` };
-  const runCorepack = (args) => execFileSync(node, [corepack, ...args], { env: safeEnv, encoding: "utf8" }).trim();
-  const corepackVersion = runCorepack(["--version"]);
   const pnpm = executable(join(pnpmRootPath, "bin", "pnpm.mjs"), "pnpm");
   const pnpmVersion = execFileSync(node, [pnpm, "--version"], { env: safeEnv, encoding: "utf8" }).trim();
   const tscVersion = execFileSync(node, [tsc, "--version"], { cwd: webRoot, env: safeEnv, encoding: "utf8" }).trim();
+  const tarInfo = inspectExecutable(tarPath, "tar", reviewed.tar);
+  const tarVersion = execFileSync(tarInfo.path, ["--version"], { env: safeEnv, encoding: "utf8" }).trim().split("\n")[0];
   if (pnpmVersion !== packageManager[1] || tscVersion !== `Version ${typescript}`) fail("tool executable versions do not match pinned versions");
   return {
-    paths: { node, corepack, pnpm, tsc, tar: executable(tarPath, "tar") },
+    paths: { node, pnpm, pnpmRoot: pnpmRootPath, tsc, typescriptRoot: tscRoot, tar: tarInfo.path },
+    expected: { node: reviewed.node, pnpm: reviewed.pnpm, typescript: reviewed.typescript, tar: reviewed.tar },
     versions: {
-      node: process.version,
-      corepack: corepackVersion,
+      node: { version: reviewed.node.version, bytes: nodeInfo.bytes, mode: nodeInfo.mode, sha512: nodeInfo.sha512 },
       pnpm: pnpmVersion,
       pnpmTreeSha512,
       typescript,
       typescriptTreeSha512,
       typescriptIntegrity: reviewed.typescript.lockfileIntegrity,
+      tar: { version: tarVersion, bytes: tarInfo.bytes, mode: tarInfo.mode, sha512: tarInfo.sha512 },
     },
   };
 }
 
-function sourceIdentity(sourceCommit, tools, runtimeProtocolVersion) {
+function assertToolsUnchanged(tools) {
+  const node = inspectExecutable(tools.paths.node, "Node", tools.expected.node);
+  const tar = inspectExecutable(tools.paths.tar, "tar", tools.expected.tar);
+  if (realpathSync(process.execPath) !== tools.paths.node || node.path !== tools.paths.node || tar.path !== tools.paths.tar) fail("trusted tool path changed");
+  if (toolTreeDigest(tools.paths.pnpmRoot) !== tools.expected.pnpm.treeSha512) fail("cached pnpm content changed while building");
+  if (toolTreeDigest(tools.paths.typescriptRoot) !== tools.expected.typescript.treeSha512) fail("installed TypeScript content changed while building");
+}
+
+function sourceIdentity(sourceCommit, tools) {
   const protocol = readJson(join(repositoryRoot, "protocol", "browser", "v1", "manifest.json"));
-  if (!Number.isSafeInteger(protocol.version) || runtimeProtocolVersion !== protocol.version) {
-    fail("compiled client protocol version differs from protocol/browser/v1/manifest.json");
-  }
+  if (!Number.isSafeInteger(protocol.version)) fail("protocol/browser/v1/manifest.json has an invalid version");
   return {
     schemaVersion: 1,
     source: { commit: sourceCommit, clean: true },
@@ -318,8 +348,18 @@ function packageFilename(packageValue) {
   return `${packageValue.name.replace(/^@/, "").replace("/", "-")}-${packageValue.version}.tgz`;
 }
 
-function digest(path) {
+function boundedFile(path, limit, label) {
+  let stat;
+  try { stat = lstatSync(path); } catch (error) { fail(`could not inspect ${label}: ${error.message}`); }
+  if (stat.isSymbolicLink() || !stat.isFile()) fail(`${label} is not a regular file`);
+  if (!Number.isSafeInteger(stat.size) || stat.size > limit) fail(`${label} is too large`);
   const bytes = readFileSync(path);
+  if (bytes.length !== stat.size) fail(`${label} changed while reading`);
+  return bytes;
+}
+
+function digest(path) {
+  const bytes = boundedFile(path, maxArchiveBytes, "archive");
   const hash = createHash("sha512").update(bytes).digest();
   return { bytes: bytes.length, sha512: hash.toString("hex"), integrity: `sha512-${hash.toString("base64")}` };
 }
@@ -378,11 +418,13 @@ async function compiledProtocolVersion() {
 }
 
 function runTypeScript(tools, packageInfo, config) {
+  assertToolsUnchanged(tools);
   execFileSync(tools.paths.node, [tools.paths.tsc, "-p", config], {
     cwd: packageInfo.root,
     env: { ...commandEnvironment, PATH: `${dirname(tools.paths.node)}:/usr/bin:/bin` },
     stdio: "inherit",
   });
+  assertToolsUnchanged(tools);
 }
 
 function build(tools) {
@@ -396,28 +438,73 @@ function build(tools) {
 }
 
 function archiveExpected(info) {
-  const files = ["package/package.json", ...inventory[info.key].map((name) => `package/dist/src/${name}`)];
-  return new Set(files);
+  return new Set(["package/package.json", ...inventory[info.key].map((name) => `package/dist/src/${name}`)]);
+}
+
+function canonicalArchivePath(entry) {
+  return entry && !entry.endsWith("/") && !entry.startsWith("/") && !entry.includes("\\") && entry.normalize("NFC") === entry && entry.split("/").every((part) => part && part !== "." && part !== "..");
 }
 
 function tarEntries(tarPathValue, archive, info) {
-  const listing = execFileSync(tarPathValue, ["-tf", archive], { encoding: "utf8", env: commandEnvironment });
-  const entries = listing.split("\n").filter(Boolean).map((entry) => entry.replace(/\/$/, ""));
-  if (new Set(entries).size !== entries.length) fail(`${info.name} archive contains duplicate entries`);
-  for (const entry of entries) {
-    if (entry.startsWith("/") || entry.includes("..") || entry.includes("\\")) fail(`${info.name} archive contains unsafe path`);
+  const archiveBytes = boundedFile(archive, maxArchiveBytes, `${info.name} archive`);
+  if (archiveBytes.length === 0) fail(`${info.name} archive is empty`);
+  let listing;
+  try {
+    listing = execFileSync(tarPathValue, ["-tf", archive], { encoding: "utf8", env: commandEnvironment, maxBuffer: maxArchiveListingBytes });
+  } catch (error) {
+    fail(`${info.name} archive listing failed: ${error.message}`);
   }
+  const entries = listing.split("\n").filter(Boolean);
+  if (entries.length > maxArchiveMembers) fail(`${info.name} archive has too many members`);
   const expected = archiveExpected(info);
-  if (entries.length !== expected.size || entries.some((entry) => !expected.has(entry))) fail(`${info.name} archive inventory mismatch`);
-  const details = execFileSync(tarPathValue, ["-tvf", archive], { encoding: "utf8", env: commandEnvironment });
-  for (const line of details.split("\n").filter(Boolean)) {
-    const mode = line.trimStart()[0];
-    if (mode !== "-" && mode !== "d") fail(`${info.name} archive contains a non-regular member`);
+  const folded = new Set();
+  for (const entry of entries) {
+    if (!canonicalArchivePath(entry)) fail(`${info.name} archive contains unsafe path or directory`);
+    const foldedPath = entry.toLocaleLowerCase("en-US");
+    if (folded.has(foldedPath) || expected.has(entry) && entries.filter((candidate) => candidate === entry).length > 1) fail(`${info.name} archive contains duplicate entries`);
+    folded.add(foldedPath);
   }
+  if (entries.length !== expected.size || entries.some((entry) => !expected.has(entry))) fail(`${info.name} archive inventory mismatch`);
+  let details;
+  try {
+    details = execFileSync(tarPathValue, ["-tvf", archive], { encoding: "utf8", env: commandEnvironment, maxBuffer: maxArchiveListingBytes });
+  } catch (error) {
+    fail(`${info.name} archive details failed: ${error.message}`);
+  }
+  const members = new Map();
+  let totalBytes = 0;
+  for (const line of details.split("\n").filter(Boolean)) {
+    const fields = line.trim().split(/\s+/);
+    if (fields.length < 8 || fields[0] !== "-rw-r--r--") fail(`${info.name} archive member is not mode 0644 regular file`);
+    const size = Number(fields[3]);
+    const entry = fields.slice(7).join(" ");
+    if (!expected.has(entry) || members.has(entry) || !Number.isSafeInteger(size)) fail(`${info.name} archive details are invalid`);
+    if (size > maxArchiveMemberBytes) fail(`${info.name} archive member is too large`);
+    totalBytes += size;
+    if (totalBytes > maxArchiveTotalBytes) fail(`${info.name} archive members are too large in total`);
+    members.set(entry, size);
+  }
+  if (members.size !== expected.size) fail(`${info.name} archive details do not match inventory`);
+  return members;
 }
 
-function tarMember(tarPathValue, archive, member) {
-  return execFileSync(tarPathValue, ["-xOf", archive, member], { encoding: "utf8", env: commandEnvironment });
+function tarMember(tarPathValue, archive, member, members) {
+  const expectedBytes = members.get(member);
+  if (expectedBytes === undefined || expectedBytes > maxArchiveMemberBytes) fail(`archive member ${member} is unavailable or too large`);
+  let bytes;
+  try {
+    bytes = execFileSync(tarPathValue, ["-xOf", archive, member], { env: commandEnvironment, maxBuffer: maxArchiveMemberBytes });
+  } catch (error) {
+    fail(`could not read archive member ${member}: ${error.message}`);
+  }
+  if (bytes.length !== expectedBytes) fail(`archive member ${member} changed while reading`);
+  return bytes;
+}
+
+function strictJsonBuffer(bytes, label) {
+  const text = bytes.toString("utf8");
+  if (!Buffer.from(text, "utf8").equals(bytes)) fail(`${label} is not valid UTF-8`);
+  return strictJsonText(text, label);
 }
 
 function externalDependencies(packageValue, packageName) {
@@ -452,9 +539,19 @@ function validateManifestShape(manifest) {
   if (!/^[0-9a-f]{40}$/.test(stringField(manifest.source, "commit", "manifest.source")) || manifest.source.clean !== true) fail("manifest source is invalid");
   exactKeys(manifest.protocol, ["name", "version"], "manifest.protocol");
   if (stringField(manifest.protocol, "name", "manifest.protocol") !== "dark-factory/browser/v1" || integerField(manifest.protocol, "version", "manifest.protocol") !== 1) fail("manifest protocol is invalid");
-  exactKeys(manifest.buildTools, ["node", "corepack", "pnpm", "pnpmTreeSha512", "typescript", "typescriptTreeSha512", "typescriptIntegrity"], "manifest.buildTools");
-  for (const key of ["node", "corepack", "pnpm", "pnpmTreeSha512", "typescript", "typescriptTreeSha512", "typescriptIntegrity"]) stringField(manifest.buildTools, key, "manifest.buildTools");
-  if (!/^[0-9a-f]{128}$/.test(manifest.buildTools.pnpmTreeSha512) || !/^[0-9a-f]{128}$/.test(manifest.buildTools.typescriptTreeSha512) || !/^sha512-[A-Za-z0-9+/]{86}={0,2}$/.test(manifest.buildTools.typescriptIntegrity)) fail("manifest build tool content digests are invalid");
+  exactKeys(manifest.buildTools, ["node", "pnpm", "pnpmTreeSha512", "typescript", "typescriptTreeSha512", "typescriptIntegrity", "tar"], "manifest.buildTools");
+  exactKeys(manifest.buildTools.node, ["version", "bytes", "mode", "sha512"], "manifest.buildTools.node");
+  exactKeys(manifest.buildTools.tar, ["version", "bytes", "mode", "sha512"], "manifest.buildTools.tar");
+  for (const key of ["version", "mode", "sha512"]) stringField(manifest.buildTools.node, key, "manifest.buildTools.node");
+  for (const key of ["version", "mode", "sha512"]) stringField(manifest.buildTools.tar, key, "manifest.buildTools.tar");
+  integerField(manifest.buildTools.node, "bytes", "manifest.buildTools.node");
+  integerField(manifest.buildTools.tar, "bytes", "manifest.buildTools.tar");
+  stringField(manifest.buildTools, "pnpm", "manifest.buildTools");
+  stringField(manifest.buildTools, "pnpmTreeSha512", "manifest.buildTools");
+  stringField(manifest.buildTools, "typescript", "manifest.buildTools");
+  stringField(manifest.buildTools, "typescriptTreeSha512", "manifest.buildTools");
+  stringField(manifest.buildTools, "typescriptIntegrity", "manifest.buildTools");
+  if (!/^[0-9a-f]{128}$/.test(manifest.buildTools.node.sha512) || manifest.buildTools.node.bytes <= 0 || manifest.buildTools.node.mode !== "0755" || !/^[0-9a-f]{128}$/.test(manifest.buildTools.tar.sha512) || manifest.buildTools.tar.bytes <= 0 || manifest.buildTools.tar.mode !== "0755" || !/^[0-9a-f]{128}$/.test(manifest.buildTools.pnpmTreeSha512) || !/^[0-9a-f]{128}$/.test(manifest.buildTools.typescriptTreeSha512) || !/^sha512-[A-Za-z0-9+/]{86}={0,2}$/.test(manifest.buildTools.typescriptIntegrity)) fail("manifest build tool content digests are invalid");
   exactKeys(manifest.packages, [packages.client.name, packages.ui.name], "manifest.packages");
   for (const info of Object.values(packages)) {
     const entry = manifest.packages[info.name];
@@ -471,62 +568,74 @@ function validateManifestShape(manifest) {
   }
 }
 
-async function verify(requested, tools = trustedTools()) {
-  const output = outputDestination(requested, false);
-  if (!existsSync(output) || !lstatSync(output).isDirectory() || lstatSync(output).isSymbolicLink() || realpathSync(output) !== output) fail("output must be an exact non-symlink directory");
-  const expectedFilenames = new Set([packageFilename(packageJson(packages.client)), packageFilename(packageJson(packages.ui)), manifestName]);
-  const outputFiles = readdirSync(output);
-  if (outputFiles.length !== expectedFilenames.size || outputFiles.some((name) => !expectedFilenames.has(name))) fail("output contains stale or unexpected files");
-  for (const filename of outputFiles) {
-    if (!lstatSync(join(output, filename)).isFile()) fail("output contains a symlink or non-regular file");
-  }
-  const manifest = strictJsonFile(join(output, manifestName), "artifact manifest");
-  validateManifestShape(manifest);
-  const sourceCommit = currentSource();
-  const runtimeVersion = await compiledProtocolVersion();
-  const identity = sourceIdentity(sourceCommit, tools, runtimeVersion);
-  if (JSON.stringify(manifest.source) !== JSON.stringify(identity.source) || JSON.stringify(manifest.protocol) !== JSON.stringify(identity.protocol) || JSON.stringify(manifest.buildTools) !== JSON.stringify(identity.buildTools)) fail("manifest provenance is stale or forged");
-  for (const info of Object.values(packages)) {
-    const entry = manifest.packages[info.name];
-    if (entry.schemaVersion !== identity.schemaVersion || JSON.stringify(entry.source) !== JSON.stringify(identity.source) || JSON.stringify(entry.protocol) !== JSON.stringify(identity.protocol) || JSON.stringify(entry.buildTools) !== JSON.stringify(identity.buildTools)) fail(`${info.name} provenance identity is stale or forged`);
-    const sourcePackage = packageJson(info);
-    const expectedFilename = packageFilename(sourcePackage);
-    if (entry.package.name !== info.name || entry.package.version !== sourcePackage.version || entry.artifact.filename !== expectedFilename || entry.artifact.version !== sourcePackage.version) fail(`${info.name} package identity is stale or forged`);
-    if (info === packages.ui && (entry.dependency.name !== packages.client.name || entry.dependency.version !== manifest.packages[packages.client.name].package.version || entry.dependency.tarball !== manifest.packages[packages.client.name].artifact.filename || entry.dependency.integrity !== manifest.packages[packages.client.name].artifact.integrity)) fail("UI does not bind the exact client artifact and version");
-    const archive = join(output, entry.artifact.filename);
-    const actual = digest(archive);
-    if (actual.bytes !== entry.artifact.bytes || actual.sha512 !== entry.artifact.sha512 || actual.integrity !== entry.artifact.integrity) fail(`${info.name} tarball integrity failed`);
-    tarEntries(tools.paths.tar, archive, info);
-    const packedPackage = JSON.parse(tarMember(tools.paths.tar, archive, "package/package.json"));
-    const expectedPackage = expectedPackageJson(info, info === packages.ui ? entry.dependency : undefined);
-    if (JSON.stringify(canonicalValue(packedPackage)) !== JSON.stringify(canonicalValue(expectedPackage))) fail(`${info.name} tarball package metadata is stale or forged`);
-    externalDependencies(packedPackage, info.name);
-    const embeddedText = tarMember(tools.paths.tar, archive, "package/dist/src/provenance.json");
-    const embedded = strictJsonText(embeddedText, `${info.name} embedded provenance`);
-    if (JSON.stringify(embedded) !== JSON.stringify(provenance(info, identity, info === packages.ui ? entry.dependency : undefined))) fail(`${info.name} embedded provenance failed`);
-  }
-  const packedUi = JSON.parse(tarMember(tools.paths.tar, join(output, manifest.packages[packages.ui.name].artifact.filename), "package/package.json"));
-  if (packedUi.dependencies?.[packages.client.name] !== manifest.packages[packages.client.name].package.version) fail("UI tarball has a floating or mismatched client dependency");
-  return manifest;
+function outputFilenames() {
+  return new Set([packageFilename(packageJson(packages.client)), packageFilename(packageJson(packages.ui)), manifestName]);
 }
 
-async function pack(requested) {
-  const output = outputDestination(requested, true);
-  const tools = trustedTools();
-  const sourceCommit = currentSource();
-  const transaction = mkdtempSync(join(dirname(output), ".dark-factory-public-artifacts-"));
-  const artifactDir = join(transaction, "output");
-  const stageRoot = join(transaction, "packages");
-  mkdirSync(artifactDir);
-  mkdirSync(stageRoot);
+function assertExactOutputDirectory(output, expectedFilenames, label) {
+  if (!existsSync(output) || lstatSync(output).isSymbolicLink() || !lstatSync(output).isDirectory() || realpathSync(output) !== output) fail(`${label} must be an exact non-symlink directory`);
+  const names = readdirSync(output);
+  if (names.length !== expectedFilenames.size || names.some((name) => !expectedFilenames.has(name))) fail(`${label} contains stale or unexpected files`);
+  for (const name of names) if (!lstatSync(join(output, name)).isFile()) fail(`${label} contains a symlink or non-regular file`);
+}
+
+function compareArtifactDirectories(actual, expected, expectedFilenames) {
+  assertExactOutputDirectory(actual, expectedFilenames, "artifact output");
+  assertExactOutputDirectory(expected, expectedFilenames, "constructed output");
+  for (const name of expectedFilenames) {
+    const actualBytes = boundedFile(join(actual, name), maxArchiveBytes, `artifact ${name}`);
+    const expectedBytes = boundedFile(join(expected, name), maxArchiveBytes, `constructed artifact ${name}`);
+    if (!actualBytes.equals(expectedBytes)) fail(`artifact ${name} differs from clean reconstruction`);
+  }
+}
+
+function validateArtifactSet(output, manifest, tools, identity) {
+  validateManifestShape(manifest);
+  if (JSON.stringify(manifest.source) !== JSON.stringify(identity.source) || JSON.stringify(manifest.protocol) !== JSON.stringify(identity.protocol) || JSON.stringify(manifest.buildTools) !== JSON.stringify(identity.buildTools)) fail("constructed manifest identity is stale");
+  for (const info of Object.values(packages)) {
+    const entry = manifest.packages[info.name];
+    if (entry.schemaVersion !== identity.schemaVersion || JSON.stringify(entry.source) !== JSON.stringify(identity.source) || JSON.stringify(entry.protocol) !== JSON.stringify(identity.protocol) || JSON.stringify(entry.buildTools) !== JSON.stringify(identity.buildTools)) fail(`${info.name} constructed provenance identity is stale`);
+    const sourcePackage = packageJson(info);
+    if (entry.package.name !== info.name || entry.package.version !== sourcePackage.version || entry.artifact.filename !== packageFilename(sourcePackage) || entry.artifact.version !== sourcePackage.version) fail(`${info.name} constructed package identity is stale`);
+    if (info === packages.ui && (entry.dependency.name !== packages.client.name || entry.dependency.version !== manifest.packages[packages.client.name].package.version || entry.dependency.tarball !== manifest.packages[packages.client.name].artifact.filename || entry.dependency.integrity !== manifest.packages[packages.client.name].artifact.integrity)) fail("constructed UI does not bind the exact client artifact and version");
+    const archive = join(output, entry.artifact.filename);
+    const actual = digest(archive);
+    if (actual.bytes !== entry.artifact.bytes || actual.sha512 !== entry.artifact.sha512 || actual.integrity !== entry.artifact.integrity) fail(`${info.name} constructed tarball integrity failed`);
+    const members = tarEntries(tools.paths.tar, archive, info);
+    const packedPackage = strictJsonBuffer(tarMember(tools.paths.tar, archive, "package/package.json", members), `${info.name} packed package.json`);
+    const expectedPackage = expectedPackageJson(info, info === packages.ui ? entry.dependency : undefined);
+    if (JSON.stringify(canonicalValue(packedPackage)) !== JSON.stringify(canonicalValue(expectedPackage))) fail(`${info.name} constructed package metadata is stale`);
+    externalDependencies(packedPackage, info.name);
+    const embedded = strictJsonBuffer(tarMember(tools.paths.tar, archive, "package/dist/src/provenance.json", members), `${info.name} embedded provenance`);
+    if (JSON.stringify(embedded) !== JSON.stringify(provenance(info, identity, info === packages.ui ? entry.dependency : undefined))) fail(`${info.name} constructed provenance failed`);
+  }
+}
+
+function validateCandidateArchives(output, tools) {
+  for (const info of Object.values(packages)) {
+    const archive = join(output, packageFilename(packageJson(info)));
+    const members = tarEntries(tools.paths.tar, archive, info);
+    strictJsonBuffer(tarMember(tools.paths.tar, archive, "package/package.json", members), `${info.name} packed package.json`);
+    strictJsonBuffer(tarMember(tools.paths.tar, archive, "package/dist/src/provenance.json", members), `${info.name} embedded provenance`);
+  }
+  const uiArchive = join(output, packageFilename(packageJson(packages.ui)));
+  const uiMembers = tarEntries(tools.paths.tar, uiArchive, packages.ui);
+  strictJsonBuffer(tarMember(tools.paths.tar, uiArchive, "package/package.json", uiMembers), "UI final packed package.json");
+}
+
+async function constructArtifacts(destination, tools, identity) {
+  if (existsSync(destination)) fail("private artifact destination already exists");
+  mkdirSync(destination);
+  const stageRoot = mkdtempSync(join(dirname(destination), ".dark-factory-public-stage-"));
   try {
     build(tools);
-    const identity = sourceIdentity(sourceCommit, tools, await compiledProtocolVersion());
+    if (await compiledProtocolVersion() !== identity.protocol.version) fail("compiled client protocol version differs from protocol/browser/v1/manifest.json");
+    if (currentSource() !== identity.source.commit) fail("source changed while constructing artifacts");
     writeStableJson(join(distRoot(packages.client), "provenance.json"), provenance(packages.client, identity));
-    const clientArtifact = stageAndPack(tools, packages.client, artifactDir, stageRoot);
+    const clientArtifact = stageAndPack(tools, packages.client, destination, stageRoot);
     const clientDependency = { name: packages.client.name, version: clientArtifact.version, tarball: clientArtifact.filename, integrity: clientArtifact.integrity };
     writeStableJson(join(distRoot(packages.ui), "provenance.json"), provenance(packages.ui, identity, clientDependency));
-    const uiArtifact = stageAndPack(tools, packages.ui, artifactDir, stageRoot, clientDependency);
+    const uiArtifact = stageAndPack(tools, packages.ui, destination, stageRoot, clientDependency);
     const manifest = {
       ...identity,
       packages: {
@@ -534,11 +643,53 @@ async function pack(requested) {
         [packages.ui.name]: { ...provenance(packages.ui, identity, clientDependency), artifact: uiArtifact },
       },
     };
-    writeStableJson(join(artifactDir, manifestName), manifest);
-    await verify(artifactDir, tools);
-    if (existsSync(output)) fail("output appeared before atomic publish");
-    renameSync(artifactDir, output);
+    writeStableJson(join(destination, manifestName), manifest);
+    validateArtifactSet(destination, manifest, tools, identity);
+    assertToolsUnchanged(tools);
     return manifest;
+  } finally {
+    rmSync(stageRoot, { recursive: true, force: true });
+  }
+}
+
+async function verify(requested) {
+  const output = outputDestination(requested, false);
+  assertExactOutputDirectory(output, outputFilenames(), "artifact output");
+  const supplied = strictJsonFile(join(output, manifestName), "artifact manifest");
+  validateManifestShape(supplied);
+  const tools = trustedTools();
+  assertToolsUnchanged(tools);
+  validateCandidateArchives(output, tools);
+  assertToolsUnchanged(tools);
+  const sourceCommit = currentSource();
+  const identity = sourceIdentity(sourceCommit, tools);
+  const transaction = mkdtempSync(join(dirname(output), ".dark-factory-public-verify-"));
+  const expected = join(transaction, "expected");
+  try {
+    await constructArtifacts(expected, tools, identity);
+    compareArtifactDirectories(output, expected, outputFilenames());
+    return supplied;
+  } finally {
+    rmSync(transaction, { recursive: true, force: true });
+  }
+}
+
+async function pack(requested) {
+  const output = outputDestination(requested, true);
+  const tools = trustedTools();
+  const sourceCommit = currentSource();
+  const identity = sourceIdentity(sourceCommit, tools);
+  const transaction = mkdtempSync(join(dirname(output), ".dark-factory-public-artifacts-"));
+  const first = join(transaction, "first");
+  const second = join(transaction, "second");
+  try {
+    const firstManifest = await constructArtifacts(first, tools, identity);
+    assertToolsUnchanged(tools);
+    await constructArtifacts(second, tools, identity);
+    compareArtifactDirectories(first, second, outputFilenames());
+    if (existsSync(output)) fail("output appeared before atomic publish");
+    renameSync(first, output);
+    return firstManifest;
   } finally {
     rmSync(transaction, { recursive: true, force: true });
   }
@@ -555,11 +706,13 @@ function stageAndPack(tools, info, artifactDir, stageRoot, dependency) {
   const archive = join(artifactDir, filename);
   if (existsSync(archive)) fail(`stale ${filename} already exists`);
   // npm_config_ignore_scripts is the lifecycle policy boundary for packing.
+  assertToolsUnchanged(tools);
   execFileSync(tools.paths.node, [tools.paths.pnpm, "pack", "--pack-destination", artifactDir], {
     cwd: stage,
     env: { ...commandEnvironment, PATH: `${dirname(tools.paths.node)}:/usr/bin:/bin` },
     stdio: "pipe",
   });
+  assertToolsUnchanged(tools);
   if (!existsSync(archive) || lstatSync(archive).isSymbolicLink()) fail(`${filename} was not produced as a regular file`);
   return { ...digest(archive), filename, version: sourcePackage.version };
 }

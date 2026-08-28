@@ -1,5 +1,11 @@
 {
   "schemaVersion": 1,
+  "node": {
+    "version": "22.20.0",
+    "sha512": "1476738e01ca6e0a7c4468e30645c91b59c56a2d0eda60510a20a28a72be790954694e06f6074da784cb17f4ea61cac1a1c349326d1eb2e378ba2000548d3599",
+    "bytes": 111332720,
+    "mode": "0755"
+  },
   "pnpm": {
     "version": "11.19.0",
     "treeSha512": "c2426c11044b38a20a259d155660046c54253edf856693084c9d70d09966c62d4f54c08653988a524b71201737b7d52786b564ecdd19ddc941deb5b9efeaee3f"
@@ -8,5 +14,10 @@
     "version": "5.8.3",
     "treeSha512": "d735db307389a4e6879aca8d85eb7ba16f2518c5fc31d81f6e4d0bd4aad6f6d2e4d9cb18347b2cf6e17e9a5af5e335a41542192458dd3f05819dc06347d9311b",
     "lockfileIntegrity": "sha512-p1diW6TqL9L07nNxvRMM7hMMw4c5XOo/1ibL4aAIGmSAt9slTE1Xgw5KWuof2uTOvCg9BY7ZRi+GaF+7sfgPeQ=="
+  },
+  "tar": {
+    "sha512": "f7c721e9624aad59ec244739017b1354cf21a90cc86e32314419c57271d90d95af574885d3c36e2da34ff928032eb9e5954cf2044422d022b4239b845b06c323",
+    "bytes": 275184,
+    "mode": "0755"
   }
 }
