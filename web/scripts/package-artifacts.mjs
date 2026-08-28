@@ -318,6 +318,7 @@ function trustedTools() {
     paths: { node, pnpm, pnpmRoot: pnpmRootPath, tsc, typescriptRoot: tscRoot, tar: tarInfo.path },
     expected: { node: reviewed.node, pnpm: reviewed.pnpm, typescript: reviewed.typescript, tar: reviewed.tar },
     versions: {
+      toolTreeVersion,
       node: { version: reviewed.node.version, bytes: nodeInfo.bytes, mode: nodeInfo.mode, sha512: nodeInfo.sha512 },
       pnpm: pnpmVersion,
       pnpmTreeSha512,
@@ -342,7 +343,6 @@ function sourceIdentity(sourceCommit, tools) {
   if (!Number.isSafeInteger(protocol.version)) fail("protocol/browser/v1/manifest.json has an invalid version");
   return {
     schemaVersion: 1,
-    toolTreeVersion,
     source: { commit: sourceCommit, clean: true },
     protocol: { name: "dark-factory/browser/v1", version: protocol.version },
     buildTools: tools.versions,
