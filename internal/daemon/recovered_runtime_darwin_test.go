@@ -28,12 +28,14 @@ func TestOpenRecoveredRuntimeValidatesPopulatedEvidenceWithoutMutation(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer recovered.Close()
 	digest := attemptDigestForToken(t, token)
 	evidence, err := recovered.InspectEvidence(context.Background(), digest, &config, true)
 	if err != nil || !evidence.AttemptToken || !evidence.WorkerConfig || evidence.Terminal == nil || evidence.Terminal.Terminal != terminal {
 		t.Fatalf("evidence = %+v, %v", evidence, err)
 	}
 	if second, err := OpenRecoveredRuntime(context.Background(), parent, runtimeTestName, identity); !errors.Is(err, errRuntimeBusy) || second != nil {
+		releaseUnexpectedRecovered(second)
 		t.Fatalf("concurrent recovery = %+v, %v", second, err)
 	}
 	wrongDigest, _ := kernel.AttemptDigestFromBytes(bytes.Repeat([]byte{0xee}, kernel.DigestBytes))
