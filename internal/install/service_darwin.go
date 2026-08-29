@@ -104,7 +104,7 @@ type launchctlObservation struct {
 	pid     int
 }
 
-func inspectServiceForAccount(ctx context.Context, home string, launchctl launchctlRun) (status ServiceStatus, resultErr error) {
+func inspectServiceForAccount(ctx context.Context, home string, config ServiceConfig, launchctl launchctlRun) (status ServiceStatus, resultErr error) {
 	if ctx == nil || launchctl == nil {
 		return ServiceStatus{}, fmt.Errorf("%w: invalid status request", ErrServiceAmbiguous)
 	}
@@ -112,17 +112,17 @@ func inspectServiceForAccount(ctx context.Context, home string, launchctl launch
 	if err != nil {
 		return ServiceStatus{}, errors.Join(ErrServiceAmbiguous, err)
 	}
-	return inspectServiceAtHome(ctx, home, userHome, launchctl)
+	return inspectServiceAtHome(ctx, home, userHome, config, launchctl)
 }
 
 func inspectService(ctx context.Context, home, userHome string, launchctl launchctlRun) (ServiceStatus, error) {
-	return inspectServiceAtHome(ctx, home, userHome, launchctl)
+	return inspectServiceAtHome(ctx, home, userHome, DefaultServiceConfig(), launchctl)
 }
 
 // inspectServiceAtHome is a package-private test seam. Production status uses
 // accountHome, never a caller-provided HOME value.
-func inspectServiceAtHome(ctx context.Context, home, userHome string, launchctl launchctlRun) (status ServiceStatus, resultErr error) {
-	if ctx == nil || launchctl == nil {
+func inspectServiceAtHome(ctx context.Context, home, userHome string, config ServiceConfig, launchctl launchctlRun) (status ServiceStatus, resultErr error) {
+	if ctx == nil || launchctl == nil || !config.valid() {
 		return ServiceStatus{}, fmt.Errorf("%w: invalid status request", ErrServiceAmbiguous)
 	}
 	homeCapability, err := openServiceHomeCapability(ctx, home)
@@ -134,7 +134,15 @@ func inspectServiceAtHome(ctx context.Context, home, userHome string, launchctl 
 			resultErr = errors.Join(resultErr, ErrServiceAmbiguous, closeErr)
 		}
 	}()
-	userDirectory, err := openServiceDirectory(userHome)
+	plistDirectory := config.PlistDirectory
+	if plistDirectory == "" {
+		plistDirectory = filepath.Join(userHome, "Library", "LaunchAgents")
+	}
+	walkRoot := userHome
+	if config.PlistDirectory != "" {
+		walkRoot = config.PlistDirectory
+	}
+	userDirectory, err := openServiceDirectory(walkRoot)
 	if err != nil {
 		return ServiceStatus{State: ServiceAmbiguous}, fmt.Errorf("%w: user home", ErrServiceAmbiguous)
 	}
@@ -143,7 +151,7 @@ func inspectServiceAtHome(ctx context.Context, home, userHome string, launchctl 
 			resultErr = errors.Join(resultErr, ErrServiceAmbiguous, closeErr)
 		}
 	}()
-	plist, err := inspectServicePlist(userDirectory, home)
+	plist, err := inspectServicePlist(userDirectory, home, config)
 	if err != nil {
 		return ServiceStatus{State: ServiceAmbiguous}, errors.Join(ErrServiceAmbiguous, err)
 	}
@@ -152,9 +160,9 @@ func inspectServiceAtHome(ctx context.Context, home, userHome string, launchctl 
 	}
 
 	uid := os.Geteuid()
-	service := "gui/" + strconv.Itoa(uid) + "/" + serviceLabel
-	plistPath := filepath.Join(userHome, "Library", "LaunchAgents", servicePlistName)
-	programPath := filepath.Join(home, "bin", "current", "factoryd")
+	service := "gui/" + strconv.Itoa(uid) + "/" + config.Label
+	plistPath := filepath.Join(plistDirectory, config.plistName())
+	programPath := serviceProgramPath(home)
 	observation, err := observeLaunchctl(ctx, launchctl, service, plistPath, programPath)
 	if err != nil {
 		return ServiceStatus{State: ServiceAmbiguous}, err
@@ -167,14 +175,22 @@ func inspectServiceAtHome(ctx context.Context, home, userHome string, launchctl 
 	if err := homeCapability.stageAbsent(); err != nil {
 		return ServiceStatus{State: ServiceAmbiguous}, errors.Join(ErrServiceAmbiguous, err)
 	}
-	secondPlist, err := inspectServicePlist(userDirectory, home)
+	secondPlist, err := inspectServicePlist(userDirectory, home, config)
 	if err != nil || secondPlist != plist {
 		return ServiceStatus{State: ServiceAmbiguous}, errors.Join(ErrServiceAmbiguous, err)
 	}
 	if err := userDirectory.recheck(); err != nil {
 		return ServiceStatus{State: ServiceAmbiguous}, errors.Join(ErrServiceAmbiguous, err)
 	}
+	receipt, receiptPresent, err := readServiceReceipt(home)
 	if !plist.present && !observation.present {
+		if err != nil || receiptPresent {
+			// Install residue without a live job is not provable absence.
+			return ServiceStatus{State: ServiceAmbiguous}, errors.Join(ErrServiceAmbiguous, ErrServiceResidue, err)
+		}
+		if residueErr := rejectServiceDirectoryResidue(home); residueErr != nil {
+			return ServiceStatus{State: ServiceAmbiguous}, errors.Join(ErrServiceAmbiguous, residueErr)
+		}
 		// Keep this check adjacent to the only absent projection. A stage that
 		// appears during the second plist census must not be reported as absent.
 		if err := homeCapability.recheck(ctx); err != nil {
@@ -185,7 +201,19 @@ func inspectServiceAtHome(ctx context.Context, home, userHome string, launchctl 
 		}
 		return ServiceStatus{State: ServiceAbsent}, nil
 	}
-	return ServiceStatus{State: ServiceAmbiguous, PID: observation.pid}, ErrServiceAmbiguous
+	if err == nil && receiptPresent && plist.present {
+		if matchErr := receiptMatchesInstallation(receipt, home, config, plistPath); matchErr == nil {
+			if observation.present && observation.pid > 0 {
+				return ServiceStatus{State: ServiceRunning, PID: observation.pid}, nil
+			}
+			// A loaded-but-idle job and an unloaded plist are both restartable
+			// installations; neither grants process authority.
+			return ServiceStatus{State: ServiceInstalled}, nil
+		} else {
+			return ServiceStatus{State: ServiceAmbiguous}, errors.Join(ErrServiceAmbiguous, matchErr)
+		}
+	}
+	return ServiceStatus{State: ServiceAmbiguous, PID: observation.pid}, errors.Join(ErrServiceAmbiguous, err)
 }
 
 type serviceHomeCapability struct {
@@ -226,7 +254,7 @@ func openServiceHomeCapability(ctx context.Context, path string) (_ *serviceHome
 		}
 		if pass == 0 {
 			expected = stat
-		} else if !sameServiceStat(expected, stat) {
+		} else if !sameServiceRootStat(expected, stat) {
 			_ = home.Close()
 			return nil, fmt.Errorf("%w: service home identity changed", ErrInvalidHome)
 		}
@@ -335,6 +363,30 @@ func toServiceIdentity(stat unix.Stat_t) serviceIdentity {
 	return serviceIdentity{identity: toIdentity(stat), ctime: stat.Ctim}
 }
 
+// volatileServiceMember names the members a LIVE daemon legitimately rewrites
+// while a status observation runs. Their bytes and times are not part of the
+// service-status invariant; their filesystem identity and bounds are.
+func volatileServiceMember(name string) bool {
+	return name == databaseName || name == databaseName+"-wal" || name == databaseName+"-shm"
+}
+
+// reducedServiceIdentity strips the volatile stat dimensions (size, times,
+// link count driven by SQLite checkpointing) while keeping the identity that
+// detects replacement and authority changes.
+func reducedServiceIdentity(stat unix.Stat_t) serviceIdentity {
+	reduced := toServiceIdentity(stat)
+	reduced.identity.size = 0
+	reduced.identity.nlink = 0
+	reduced.ctime = unix.Timespec{}
+	return reduced
+}
+
+// sameServiceRootStat compares the home directory itself without the
+// dimensions its live members churn (size, mtime, ctime as entries change).
+func sameServiceRootStat(left, right unix.Stat_t) bool {
+	return left.Dev == right.Dev && left.Ino == right.Ino && left.Mode == right.Mode && left.Uid == right.Uid && left.Gid == right.Gid
+}
+
 func sameServiceIdentity(left, right serviceIdentity) bool {
 	return left == right
 }
@@ -366,7 +418,7 @@ func snapshotServiceHome(ctx context.Context, home *os.File) (serviceHomeImage, 
 	if err := inspectLockPair(home); err != nil {
 		return serviceHomeImage{}, err
 	}
-	image := serviceHomeImage{root: toServiceIdentity(rootBefore), files: make(map[string]serviceMemberSnapshot, len(names)-2), directories: make(map[string]serviceIdentity, 2)}
+	image := serviceHomeImage{root: reducedServiceIdentity(rootBefore), files: make(map[string]serviceMemberSnapshot, len(names)-2), directories: make(map[string]serviceIdentity, 2)}
 	for _, name := range []string{formatName, databaseName, tokenName, lockName, lockAnchorName, databaseName + "-wal", databaseName + "-shm"} {
 		if !names[name] {
 			continue
@@ -395,6 +447,14 @@ func snapshotServiceHome(ctx context.Context, home *os.File) (serviceHomeImage, 
 		default:
 			minimum, maximum = operationalSidecarBounds(name)
 		}
+		if volatileServiceMember(name) {
+			closeErr := file.Close()
+			if stat.Size < minimum || stat.Size > maximum || closeErr != nil {
+				return serviceHomeImage{}, fmt.Errorf("%w: live member %s bounds", ErrInvalidHome, name)
+			}
+			image.files[name] = serviceMemberSnapshot{serviceIdentity: reducedServiceIdentity(stat)}
+			continue
+		}
 		digest, digestErr := digestMember(ctx, file, stat.Size, minimum, maximum)
 		bindingErr := recheckBinding(home, name, stat)
 		closeErr := file.Close()
@@ -418,7 +478,7 @@ func snapshotServiceHome(ctx context.Context, home *os.File) (serviceHomeImage, 
 	if err := unix.Fstat(int(home.Fd()), &rootAfter); err != nil {
 		return serviceHomeImage{}, err
 	}
-	if !sameServiceIdentity(toServiceIdentity(rootBefore), toServiceIdentity(rootAfter)) {
+	if !sameServiceIdentity(reducedServiceIdentity(rootBefore), reducedServiceIdentity(rootAfter)) {
 		return serviceHomeImage{}, fmt.Errorf("%w: service home identity changed", ErrInvalidHome)
 	}
 	if err := ctx.Err(); err != nil {
@@ -431,11 +491,28 @@ func sameServiceHomeImage(left, right serviceHomeImage) error {
 	if !sameServiceIdentity(left.root, right.root) {
 		return fmt.Errorf("%w: service home identity changed", ErrInvalidHome)
 	}
-	if len(left.files) != len(right.files) || len(left.directories) != len(right.directories) {
+	if len(left.directories) != len(right.directories) {
 		return fmt.Errorf("%w: service home census changed", ErrInvalidHome)
 	}
-	for name, expected := range left.files {
-		if right.files[name] != expected {
+	names := map[string]bool{}
+	for name := range left.files {
+		names[name] = true
+	}
+	for name := range right.files {
+		names[name] = true
+	}
+	for name := range names {
+		expected, inLeft := left.files[name]
+		actual, inRight := right.files[name]
+		if !inLeft || !inRight {
+			// A live daemon creates and removes the SQLite sidecars between
+			// passes; every durable member must hold its census position.
+			if name == databaseName+"-wal" || name == databaseName+"-shm" {
+				continue
+			}
+			return fmt.Errorf("%w: service home census changed", ErrInvalidHome)
+		}
+		if actual != expected {
 			return fmt.Errorf("%w: service home member changed", ErrInvalidHome)
 		}
 	}
@@ -468,8 +545,8 @@ func observeLaunchctl(ctx context.Context, launchctl launchctlRun, service, plis
 	if result.status != launchctlNotFound {
 		return launchctlObservation{}, fmt.Errorf("%w: print status %d", ErrServiceLaunchctl, result.status)
 	}
-	if len(bytes.TrimSpace(result.stderr)) != 0 {
-		return launchctlObservation{}, fmt.Errorf("%w: not-found print carried stderr", ErrServiceLaunchctl)
+	if !validNotFoundStderr(result.stderr, service) {
+		return launchctlObservation{}, fmt.Errorf("%w: not-found print carried unexpected stderr", ErrServiceLaunchctl)
 	}
 	classification := launchctl(ctx, "error", strconv.Itoa(result.status))
 	if classification.overflow || classification.err != nil || classification.status != 0 || strings.TrimSpace(string(classification.stdout)) != launchctlNotFoundText || len(bytes.TrimSpace(classification.stderr)) != 0 {
@@ -479,6 +556,24 @@ func observeLaunchctl(ctx context.Context, launchctl launchctlRun, service, plis
 		return launchctlObservation{}, fmt.Errorf("%w: not-found classification mismatch", ErrServiceLaunchctl)
 	}
 	return launchctlObservation{}, nil
+}
+
+// validNotFoundStderr accepts exactly the two not-found stderr shapes real
+// launchd produces: nothing, or the fixed two-line diagnostic naming this
+// exact query's label and uid. Anything else is not authoritative.
+func validNotFoundStderr(stderr []byte, service string) bool {
+	trimmed := strings.TrimSpace(string(stderr))
+	if trimmed == "" {
+		return true
+	}
+	slash := strings.LastIndexByte(service, '/')
+	if slash < 0 {
+		return false
+	}
+	label := service[slash+1:]
+	uid := strconv.Itoa(os.Geteuid())
+	want := "Bad request.\nCould not find service \"" + label + "\" in domain for user gui: " + uid
+	return trimmed == want
 }
 
 func parseLaunchctlPrint(output []byte, service, plistPath, programPath string) (int, error) {
@@ -494,7 +589,8 @@ func parseLaunchctlPrint(output []byte, service, plistPath, programPath string) 
 	for _, line := range lines[1 : len(lines)-1] {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
-			return 0, fmt.Errorf("%w: blank service field", ErrServiceLaunchctl)
+			// Real launchd separates sections with blank lines.
+			continue
 		}
 		if len(nesting) == 1 {
 			rawKey, rawValue, found := strings.Cut(trimmed, "=")
@@ -552,7 +648,7 @@ func validLaunchctlFieldName(value string) bool {
 		return false
 	}
 	for _, character := range value {
-		if character != ' ' && character != '-' && character != '_' && (character < '0' || character > '9') && (character < 'A' || character > 'Z') && (character < 'a' || character > 'z') {
+		if character != ' ' && character != '-' && character != '_' && character != '(' && character != ')' && (character < '0' || character > '9') && (character < 'A' || character > 'Z') && (character < 'a' || character > 'z') {
 			return false
 		}
 	}
@@ -712,7 +808,7 @@ type servicePlistBinding struct {
 	stat   unix.Stat_t
 }
 
-func inspectServicePlist(userHome *serviceDirectory, home string) (observation servicePlistObservation, resultErr error) {
+func inspectServicePlist(userHome *serviceDirectory, home string, config ServiceConfig) (observation servicePlistObservation, resultErr error) {
 	parent := userHome.files[len(userHome.files)-1]
 	var children []*os.File
 	var bindings []servicePlistBinding
@@ -723,7 +819,12 @@ func inspectServicePlist(userHome *serviceDirectory, home string) (observation s
 			}
 		}
 	}()
-	for index, name := range []string{"Library", "LaunchAgents"} {
+	descent := []string{"Library", "LaunchAgents"}
+	if config.PlistDirectory != "" {
+		// The isolation override IS the plist directory; there is no descent.
+		descent = nil
+	}
+	for index, name := range descent {
 		fd, err := unix.Openat(int(parent.Fd()), name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 		if errors.Is(err, unix.ENOENT) {
 			if checkErr := recheckServicePlistParents(userHome, bindings); checkErr != nil {
@@ -754,7 +855,7 @@ func inspectServicePlist(userHome *serviceDirectory, home string) (observation s
 		}
 		parent = child
 	}
-	fd, err := unix.Openat(int(parent.Fd()), servicePlistName, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	fd, err := unix.Openat(int(parent.Fd()), config.plistName(), unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if errors.Is(err, unix.ENOENT) {
 		if checkErr := recheckServicePlistParents(userHome, bindings); checkErr != nil {
 			return servicePlistObservation{}, checkErr
@@ -764,7 +865,7 @@ func inspectServicePlist(userHome *serviceDirectory, home string) (observation s
 	if err != nil {
 		return servicePlistObservation{}, fmt.Errorf("%w: open plist", ErrServicePlist)
 	}
-	file := os.NewFile(uintptr(fd), servicePlistName)
+	file := os.NewFile(uintptr(fd), config.plistName())
 	if file == nil {
 		_ = unix.Close(fd)
 		return servicePlistObservation{}, fmt.Errorf("%w: invalid plist descriptor", ErrServicePlist)
@@ -774,7 +875,7 @@ func inspectServicePlist(userHome *serviceDirectory, home string) (observation s
 	if err := unix.Fstat(fd, &before); err != nil || before.Mode&unix.S_IFMT != unix.S_IFREG || before.Mode&0o7777 != 0o600 || before.Uid != uint32(os.Geteuid()) || before.Nlink != 1 || before.Size <= 0 || before.Size > launchctlOutputLimit {
 		return servicePlistObservation{}, fmt.Errorf("%w: plist metadata", ErrServicePlist)
 	}
-	expected, _, err := ServicePlist(home)
+	expected, _, err := ServicePlist(home, config.Label)
 	if err != nil || int64(len(expected)) != before.Size {
 		return servicePlistObservation{}, fmt.Errorf("%w: plist size", ErrServicePlist)
 	}
@@ -786,7 +887,7 @@ func inspectServicePlist(userHome *serviceDirectory, home string) (observation s
 	if err := unix.Fstat(fd, &after); err != nil || !sameServiceStat(before, after) {
 		return servicePlistObservation{}, fmt.Errorf("%w: plist identity changed", ErrServicePlist)
 	}
-	if err := unix.Fstatat(int(parent.Fd()), servicePlistName, &binding, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameServiceStat(before, binding) {
+	if err := unix.Fstatat(int(parent.Fd()), config.plistName(), &binding, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameServiceStat(before, binding) {
 		return servicePlistObservation{}, fmt.Errorf("%w: plist binding changed", ErrServicePlist)
 	}
 	if err := recheckServicePlistParents(userHome, bindings); err != nil {
