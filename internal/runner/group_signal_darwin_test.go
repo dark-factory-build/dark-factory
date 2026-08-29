@@ -42,6 +42,7 @@ func TestSignalOwnedGroupForgivesEPERMOnlyWithConvergedCensus(t *testing.T) {
 	defer func() { testGroupSignalResult = nil }()
 	// The SIGKILL below genuinely converges the real group; only the errno
 	// the kernel is taken to have reported is injected.
+	var observed error
 	testGroupSignalResult = func(error) error {
 		_ = unix.Kill(-leader.PGID, unix.SIGKILL)
 		deadline := time.Now().Add(4 * time.Second)
@@ -52,10 +53,18 @@ func TestSignalOwnedGroupForgivesEPERMOnlyWithConvergedCensus(t *testing.T) {
 			}
 			time.Sleep(5 * time.Millisecond)
 		}
-		return unix.EPERM
+		// Ask the kernel what it genuinely reports for this exact state —
+		// our own unreaped zombie leader alone in its group — rather than
+		// asserting a remembered errno. The seam controls only when the
+		// question is asked; the answer is the kernel's.
+		observed = unix.Kill(-leader.PGID, unix.Signal(0))
+		return observed
 	}
 	if err := signalOwnedGroup(leader, unix.SIGTERM); err != nil {
-		t.Fatalf("EPERM with converged census = %v", err)
+		t.Fatalf("converged zombie-leader group = %v (kernel reported %v)", err, observed)
+	}
+	if !errors.Is(observed, unix.EPERM) {
+		t.Fatalf("kernel vocabulary changed: zombie-leader group signal = %v, want EPERM", observed)
 	}
 
 	// A live member behind the same errno stays fail-closed unresolved: the
