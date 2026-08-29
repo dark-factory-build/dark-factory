@@ -383,6 +383,45 @@ or another credential into an agent process. Supported operations go through
 the Maintainer MCP; unsupported operations require a separately reviewed human
 action.
 
+### Local Cloudflare API credentials
+
+Cloudflare authentication is separate from GitHub authority. For an explicitly
+owner-authorized DNS operation, use the ignored `.env.txt` at the common
+worktree root through the repository helper:
+
+```sh
+./scripts/with-cloudflare-env.sh dns status
+# Only with separate authorization to create this one record:
+./scripts/with-cloudflare-env.sh dns publish-app
+```
+
+The file must be a regular mode-`0600` file containing exactly one usable
+`CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`. The compiled helper does not
+source the file: it opens it atomically without following a symlink, extracts
+only those two assignments, and clears the ambient environment. It first
+captures one exact Git commit, refuses mutable helper source or a moving
+`HEAD`, re-verifies that binding, and builds the captured export offline with
+an isolated home and Go cache. Run it only from an independently reviewed
+commit. The link-time receipt blocks accidental direct invocation but is public
+and is not authentication. Any process already running as the operator can
+read the operator's mode-`0600` files; use a separate OS identity or credential
+broker when same-UID code is not trusted. Authenticated Wrangler is deliberately
+not part of the agent surface: the finite API client keeps the token in one
+process and admits only the two commands above. The token never enters process
+arguments, while Maintainer, GitHub, provider, and Cloudflare Access credentials
+cannot cross the boundary. `publish-app` holds a stable local lock, refuses
+every conflicting record, creates only a DNS-only A record for
+`app.darkfactory.build` to `76.76.21.21`, and verifies the exact settled state.
+Agents must not print the file, copy the token into a worktree or site
+`.env.local`, or export it into an agent-wide shell. The token must be scoped
+to the named account/zone operation, and authentication never supplies mutation
+authority that the owner did not separately grant.
+
+This exception does not change the contributor GitHub boundary above or the
+normal control-plane deployment transaction below. Routine control-plane
+production deployment still uses the fixed Maintainer-App-dispatched workflow
+and its protected GitHub environment secret.
+
 Deployment remains narrow: the Maintainer MCP can dispatch only the fixed
 default-branch workflow at an exact commit and reviewed tree. For headless
 steady-state operation, the protected `production` environment keeps its

@@ -36,6 +36,7 @@ fi
 ./scripts/test-verify-adversarial-review.sh
 ./scripts/test-inline-chokepoint.sh
 ./scripts/test-go-e2e-tools.sh
+./scripts/test-cloudflare-env.sh
 # The deleted Linux job was the only caller of both fixtures below. One
 # asserts the `required` aggregate's shape against the publisher; the other is
 # the primary guard for the Rust deletion itself — that the retired scripts

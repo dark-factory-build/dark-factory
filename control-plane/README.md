@@ -200,11 +200,26 @@ than an array; all three are accepted shapes, and `aud` is still compared for
 exact equality, never containment. An unprotected route still cannot forge any
 of those claims.
 
-Never put values in a checked-in file, `.env*`, `.dev.vars*`, a provider
-process, Dark Factory state, shell history, or the macOS Keychain. Cloudflare
-secret values belong only in the platform secret binding. The Durable Object
-binding embeds resource authority without exposing a resource credential to
-the Worker. See Cloudflare's [binding] and [secret] documentation.
+Never put Worker binding values in a checked-in file, `control-plane/.env*`,
+`control-plane/.dev.vars*`, a provider process, Dark Factory state, shell
+history, or the macOS Keychain. Cloudflare secret values belong only in the
+platform secret binding. The sole local CLI exception is the account/zone-
+scoped `CLOUDFLARE_API_TOKEN` plus `CLOUDFLARE_ACCOUNT_ID` in the ignored,
+mode-`0600` root `.env.txt`, used only through
+`../scripts/with-cloudflare-env.sh dns status`, or
+`../scripts/with-cloudflare-env.sh dns publish-app` for an explicitly
+authorized command. The compiled helper ignores every other assignment,
+rejects symlinks and broad file modes, clears the ambient environment, and
+never passes the token to Wrangler or another child process. It captures and
+re-verifies one exact commit, refuses mutable helper source or a moving `HEAD`,
+and compiles only an offline Git export of that commit. Its link-time direct-
+invocation check is an accidental-misuse guardrail, not authentication: a
+process already running as the operator can read the operator's mode-`0600`
+files. Run untrusted same-UID code under a separate OS identity or keep the
+credential behind a broker.
+The Durable Object binding embeds resource authority without exposing a
+resource credential to the Worker. See Cloudflare's [binding] and [secret]
+documentation.
 
 [binding]: https://developers.cloudflare.com/workers/runtime-apis/bindings/
 [secret]: https://developers.cloudflare.com/workers/configuration/secrets/

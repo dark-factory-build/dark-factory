@@ -168,11 +168,36 @@ Read-only context unless a task explicitly asks you to edit them:
    Never substitute `gh`, `gh auth`, authenticated `git fetch`/`pull`/`clone`/
    `push`, a PAT, `GH_TOKEN`/`GITHUB_TOKEN`, SSH-agent state or keys, credential
    helpers, browser sessions, the user's keychain, or any model-provider GitHub
-   connector. Do not read or source `.env.txt` or another secret-bearing file,
-   inspect or expose the Cloudflare Access service-token values, or put any
-   credential in a worktree, prompt, command output, or log. Host registration
-   must isolate transport credentials from provider, tool, and shell process
-   environments; never export the Access pair into an agent-wide environment.
+   connector. Do not read or source `.env.txt` directly or inspect or expose
+   the Cloudflare Access service-token values. Never put a GitHub, Maintainer,
+   provider, or Access credential in a worktree, prompt, command output, or log.
+   Host registration must isolate transport credentials from provider, tool,
+   and shell process environments; never export the Access pair into a
+   coordinator-wide environment.
+
+   The one local credential-file path agents may use is an explicitly
+   owner-authorized Cloudflare DNS operation. Run only
+   `./scripts/with-cloudflare-env.sh dns status` or
+   `./scripts/with-cloudflare-env.sh dns publish-app`; the helper reads
+   only `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` from the ignored,
+   mode-`0600` `.env.txt` at the common worktree root through an atomic,
+   no-symlink file open. Its finite implementation admits no other Cloudflare
+   operation, inherits no ambient credential environment, and never hands the
+   token to Wrangler, another child process, or process arguments. The token
+   path may be used only from an independently reviewed commit: the wrapper
+   captures one exact commit, refuses mutable helper source or a moving `HEAD`,
+   and builds an offline Git export of that commit in an isolated home/cache
+   before it reads the credential file. Its link-time wrapper receipt prevents
+   accidental direct invocation; it is deliberately not authentication. A
+   process already running as the operator can read any mode-`0600` file owned
+   by that operator, so this policy and helper are not a same-UID security
+   boundary. Isolating a hostile same-UID process requires a separate OS
+   identity or credential broker. The token must be scoped to the named
+   Cloudflare account/zone operation. Never copy it into another env file or
+   export it to tests, providers, GitHub tools, or an agent-wide shell. This
+   narrow exception grants no GitHub, Maintainer-App, Cloudflare-Access,
+   deployment, or live install authority; each named remote mutation still
+   requires its own task authorization.
    Human operators may perform a separately reviewed GitHub action through
    their normal workflow. A deployment the operator explicitly requests
    remains limited to that named operation and should use the repository's
