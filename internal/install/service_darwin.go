@@ -386,6 +386,14 @@ func reducedServiceIdentity(stat unix.Stat_t) serviceIdentity {
 // activity legitimately churns (timestamps, size, link count as entries
 // come and go). Every directory recheck uses it; regular files keep the
 // full sameServiceStat comparison, where byte-stability is meaningful.
+//
+// Dropping Ctim costs one canary: a transient tamper that renames the
+// directory away, swaps a decoy in and renames the original back leaves a
+// later recheck clean, where the old comparison would have caught the
+// changed ctime afterwards. Detection inside the window is unaffected — the
+// swapped inode still fails the identity and binding probes — and ctime was
+// unusable as a tamper signal here precisely because it churns for the
+// legitimate reason this relaxation exists.
 func sameServiceRootStat(left, right unix.Stat_t) bool {
 	return left.Dev == right.Dev && left.Ino == right.Ino && left.Mode == right.Mode && left.Uid == right.Uid && left.Gid == right.Gid
 }

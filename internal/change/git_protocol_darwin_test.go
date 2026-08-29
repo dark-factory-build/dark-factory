@@ -344,7 +344,9 @@ func TestGitSignalsOnlyWhileExactLeaderIsUnreaped(t *testing.T) {
 			// so a pgid probe races the kernel. The invariant is narrower:
 			// the pid must not have been REAPED yet, and an unreaped pid
 			// (live or zombie) answers signal 0 until Wait releases it.
-			if err := unix.Kill(child.pid, 0); errors.Is(err, unix.ESRCH) {
+			// Any error, not only ESRCH: a pid reaped and recycled to a
+			// foreign owner answers EPERM, which must fail the witness too.
+			if err := unix.Kill(child.pid, 0); err != nil {
 				t.Fatalf("signal %s targeted a reaped/reusable pid %d: %v", event, child.pid, err)
 			}
 		case gitProcessWaited:
