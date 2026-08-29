@@ -176,9 +176,176 @@ async function assertNoAutomaticRestart(context) {
   assert.equal(context.latest().selectedAgent, undefined);
 }
 
+test("active-task target absence waits for the next public head before retrying", async () => {
+  const context = terminalHarness();
+  context.controller.start();
+  context.ready();
+  context.controller.selectAgent(agent);
+  const token = {};
+  context.controller.beginTerminalSurface(token);
+  context.controller.setTerminalSurface(token, { write: async () => {}, abort: () => {} });
+  await flush();
+  context.targetGates[0].resolve(null);
+  await flush();
+  assert.equal(context.latest().selectedAgent.id, agent.id);
+  assert.equal(context.latest().terminal.phase, "idle");
+  assert.equal(context.latest().error, undefined);
+  assert.equal(context.sessionCloses(), 0);
+
+  await remountSurface(context);
+  assert.equal(context.targetGates.length, 1, "same public head must not spin discovery");
+  context.clientOptions().onState(stateAt(43));
+  await flush();
+  assert.equal(context.targetGates.length, 2);
+  assert.equal(context.calls.at(-1).value.expectedHead, 43n);
+  context.targetGates[1].resolve(target);
+  await flush();
+  assert.equal(context.latest().terminal.phase, "ready");
+});
+
+test("stale active-task discovery retries the newer state already received", async () => {
+  const context = terminalHarness();
+  context.controller.start();
+  context.ready();
+  context.controller.selectAgent(agent);
+  const token = {};
+  context.controller.beginTerminalSurface(token);
+  context.controller.setTerminalSurface(token, { write: async () => {}, abort: () => {} });
+  await flush();
+  context.clientOptions().onState(stateAt(43));
+  context.targetGates[0].reject(new SessionError("stale"));
+  await flush();
+  assert.equal(context.latest().selectedAgent.id, agent.id);
+  assert.equal(context.sessionCloses(), 0);
+  await remountSurface(context);
+  assert.equal(context.targetGates.length, 2);
+  assert.equal(context.calls.at(-1).value.expectedHead, 43n);
+});
+
+test("same-socket state resync preserves pending terminal discovery", async () => {
+  const context = terminalHarness();
+  context.controller.start();
+  context.ready();
+  context.controller.selectAgent(agent);
+  const token = {};
+  context.controller.beginTerminalSurface(token);
+  context.controller.setTerminalSurface(token, { write: async () => {}, abort: () => {} });
+  await flush();
+
+  context.clientOptions().onStatus("syncing");
+  assert.equal(context.latest().selectedAgent.id, agent.id);
+  assert.equal(context.latest().terminal.phase, "resolving");
+  assert.equal(context.sessionCloses(), 0);
+  context.targetGates[0].reject(new SessionError("stale"));
+  await flush();
+  assert.equal(context.latest().selectedAgent.id, agent.id);
+  assert.equal(context.sessionCloses(), 0);
+
+  await remountSurface(context);
+  context.clientOptions().onState(stateAt(43));
+  await flush();
+  assert.equal(context.targetGates.length, 1, "syncing cannot start target discovery");
+  context.clientOptions().onStatus("ready");
+  await flush();
+  assert.equal(context.targetGates.length, 2);
+  assert.equal(context.calls.at(-1).value.expectedHead, 43n);
+});
+
+test("same-socket state resync preserves one live writable terminal", async () => {
+  const context = terminalHarness();
+  context.controller.start();
+  context.ready();
+  const live = await openTerminal(context);
+  const resolves = context.targetGates.length;
+
+  context.clientOptions().onStatus("syncing");
+  assert.equal(context.latest().terminal.phase, "ready");
+  assert.equal(context.latest().terminal.writable, true);
+  assert.equal(context.sessionCloses(), 0);
+  context.controller.sendTerminalText(live.token, "during resync");
+  await flush();
+  assert.equal(context.calls.at(-1).kind, "input");
+  assert.equal(new TextDecoder().decode(context.calls.at(-1).bytes), "during resync");
+
+  context.clientOptions().onState(stateAt(43));
+  context.clientOptions().onStatus("ready");
+  await flush();
+  assert.equal(context.targetGates.length, resolves);
+  assert.equal(context.latest().terminal.phase, "ready");
+  assert.equal(context.latest().terminal.writable, true);
+  context.controller.sendTerminalText(live.token, "after resync");
+  await flush();
+  assert.equal(new TextDecoder().decode(context.calls.at(-1).bytes), "after resync");
+});
+
+test("target absence for an agent without active work closes only the sidebar", async () => {
+  const context = terminalHarness();
+  context.controller.start();
+  context.ready();
+  context.controller.selectAgent(secondAgent);
+  const token = {};
+  context.controller.beginTerminalSurface(token);
+  context.controller.setTerminalSurface(token, { write: async () => {}, abort: () => {} });
+  await flush();
+  context.targetGates[0].resolve(null);
+  await flush();
+  assert.equal(context.latest().selectedAgent, undefined);
+  assert.equal(context.latest().terminal, undefined);
+  assert.equal(context.sessionCloses(), 0);
+});
+
+test("target absence for a blocked task does not wait for an impossible activation", async () => {
+  const context = terminalHarness();
+  const tasks = new Map(fixtureState.tasks);
+  const running = [...tasks.values()].find((task) => task.assigned_agent_id === agent.id && task.status === "running");
+  assert.notEqual(running, undefined);
+  tasks.set(running.id, { ...running, status: "blocked" });
+  context.controller.start();
+  context.clientOptions().onState(stateAt(43, { tasks }));
+  context.clientOptions().onStatus("ready");
+  context.controller.selectAgent(agent);
+  const token = {};
+  context.controller.beginTerminalSurface(token);
+  context.controller.setTerminalSurface(token, { write: async () => {}, abort: () => {} });
+  await flush();
+  context.targetGates[0].resolve(null);
+  await flush();
+  assert.equal(context.latest().selectedAgent, undefined);
+  assert.equal(context.latest().terminal, undefined);
+  assert.equal(context.sessionCloses(), 0);
+  context.clientOptions().onState(stateAt(44, { tasks }));
+  await flush();
+  assert.equal(context.targetGates.length, 1, "unrelated heads must not retry a terminal outcome");
+});
+
+test("same-head task refresh closes discovery waiting after the run becomes terminal", async () => {
+  const context = terminalHarness();
+  context.controller.start();
+  context.ready();
+  context.controller.selectAgent(agent);
+  const token = {};
+  context.controller.beginTerminalSurface(token);
+  context.controller.setTerminalSurface(token, { write: async () => {}, abort: () => {} });
+  await flush();
+  context.targetGates[0].resolve(null);
+  await flush();
+  assert.equal(context.latest().selectedAgent.id, agent.id);
+
+  const tasks = new Map(fixtureState.tasks);
+  const running = [...tasks.values()].find((task) => task.assigned_agent_id === agent.id && task.status === "running");
+  assert.notEqual(running, undefined);
+  tasks.set(running.id, { ...running, status: "blocked", revision: running.revision + 1n });
+  context.clientOptions().onState(stateAt(fixtureState.head, { tasks }));
+  await flush();
+  assert.equal(context.latest().selectedAgent, undefined);
+  assert.equal(context.latest().terminal, undefined);
+  assert.equal(context.sessionCloses(), 0);
+  assert.equal(context.targetGates.length, 1);
+});
+
 test("fatal discovery and terminal failures disarm selection before reconnect can rediscover", async () => {
-  for (const failure of ["null", "throw", "open", "attach", "input", "resize", "surface"]) {
-    const context = terminalHarness({ closeStatus: true, fail: failure === "null" || failure === "throw" ? undefined : failure });
+  for (const failure of ["throw", "open", "attach", "input", "resize", "surface"]) {
+    const context = terminalHarness({ closeStatus: true, fail: failure === "throw" ? undefined : failure });
     context.controller.start();
     context.ready();
     context.controller.selectAgent(agent);
@@ -190,8 +357,7 @@ test("fatal discovery and terminal failures disarm selection before reconnect ca
     });
     await flush();
     assert.equal(context.targetGates.length, 1, failure);
-    if (failure === "null") context.targetGates[0].resolve(null);
-    else if (failure === "throw") context.targetGates[0].reject(new SessionError("connection"));
+    if (failure === "throw") context.targetGates[0].reject(new SessionError("connection"));
     else context.targetGates[0].resolve(target);
     await flush();
     if (failure === "input") {
@@ -252,7 +418,7 @@ test("a fresh explicit selection can start one new terminal attempt after a fata
   context.controller.beginTerminalSurface(token);
   context.controller.setTerminalSurface(token, { write: async () => {}, abort: () => {} });
   await flush();
-  context.targetGates[0].resolve(null);
+  context.targetGates[0].reject(new SessionError("connection"));
   await flush();
   assert.equal(context.latest().selectedAgent, undefined);
   assert.equal(context.sessionCloses(), 1);
@@ -349,6 +515,21 @@ test("terminal failure is finite and never exposes protocol authority or output 
   assert.equal(snapshotText.includes("lease"), false);
   assert.equal(snapshotText.includes("same session"), false);
   assert.equal(context.latest().terminal, undefined);
+});
+
+test("post-target stale closure cannot re-enter discovery retry", async () => {
+  const context = terminalHarness();
+  context.controller.start();
+  context.ready();
+  await openTerminal(context);
+  context.handleOptions().onClose(new SessionError("stale"));
+  await flush();
+  assert.equal(context.latest().selectedAgent, undefined);
+  assert.equal(context.latest().error.code, "stale");
+  assert.equal(context.sessionCloses(), 0);
+  context.clientOptions().onState(stateAt(43));
+  await flush();
+  assert.equal(context.targetGates.length, 1);
 });
 
 async function remountSurface(context) {

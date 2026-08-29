@@ -371,6 +371,12 @@ daemon finalizer from converging.
 `factoryctl` and the hosted browser are disposable clients of one local API.
 They do not own runtime state. Both use the operator credential for operator
 requests.
+Task admission is public before the admitted run and terminal session become
+active, so a terminal target may truthfully be absent at that pinned state
+head. The browser keeps the selection and its authenticated session, then
+retries discovery only after the canonical state head advances; it never polls
+or sleeps across that lifecycle boundary. A missing target for an agent with no
+running task still closes the selection normally.
 Generated provider hooks and attempt commands read the private credential file
 for their exact run through `DARK_FACTORY_ATTEMPT_TOKEN_FILE` (or an explicit
 hook `--token-file`). A provider-invoked `factoryctl` process cannot cross into

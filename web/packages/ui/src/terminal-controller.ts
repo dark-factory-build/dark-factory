@@ -33,6 +33,8 @@ export type TerminalControllerSnapshot = Readonly<{
    * a fresh controller against current state instead of surfacing an error.
    */
   reset: boolean;
+  /** This controller ended before minting a target and may retry on new state. */
+  retryDiscovery: boolean;
 }>;
 
 type TerminalControllerSession = Pick<BrowserSession, "resolveAgentTerminal" | "openTerminal" | "close">;
@@ -75,6 +77,7 @@ class TerminalController {
   #closing = false;
   #generation = 0;
   #reset = false;
+  #retryDiscovery = false;
   #surfaceAborted = false;
   #inputBuffer: Input = new Uint8Array(0);
   #inputInFlightBytes = 0;
@@ -260,14 +263,32 @@ class TerminalController {
 
   async #bootstrap(generation: number): Promise<void> {
     try {
-      const target = await this.#options.session.resolveAgentTerminal({
-        agentId: this.#options.agentId,
-        expectedAgentRevision: this.#options.expectedAgentRevision,
-        expectedHead: this.#options.expectedHead,
-      });
+      let target: TerminalTarget | null;
+      try {
+        target = await this.#options.session.resolveAgentTerminal({
+          agentId: this.#options.agentId,
+          expectedAgentRevision: this.#options.expectedAgentRevision,
+          expectedHead: this.#options.expectedHead,
+        });
+      } catch (error) {
+        if (!this.#current(generation)) return;
+        const finite = finiteError(error);
+        if (finite instanceof SessionError && (finite.code === "not_found" || finite.code === "stale")) {
+          // Discovery can race the durable transition from an admitted run to
+          // an active terminal. End only this controller so its owner can
+          // retry against a newer public-state head; no terminal authority was
+          // minted, so closing the authenticated browser session is needless.
+          this.#handleEnded(finite, true);
+          return;
+        }
+        throw error;
+      }
       if (!this.#current(generation)) return;
       if (target === null) {
-        this.#fail(new SessionError("not_found"));
+        // A public running task may precede its attachable terminal target.
+        // The owner decides from public state whether to wait for the next
+        // head or treat this as an ordinary agent with no live terminal.
+        this.#handleEnded(new SessionError("not_found"), true);
         return;
       }
       const handle = this.#options.session.openTerminal(target as TerminalTarget, {
@@ -404,7 +425,7 @@ class TerminalController {
     if (this.#effectTask === task) this.#effectTask = undefined;
   }
 
-  #handleEnded(error: SessionError | ProtocolError): void {
+  #handleEnded(error: SessionError | ProtocolError, retryDiscovery = false): void {
     if (this.#handleClosed) return;
     this.#handleClosed = true;
     this.#writable = false;
@@ -412,6 +433,7 @@ class TerminalController {
     this.#inputBuffer = new Uint8Array(0);
     this.#inputInFlightBytes = 0;
     this.#pendingResize = undefined;
+    this.#retryDiscovery = retryDiscovery;
     ++this.#generation;
     this.#abortSurface();
     if (!this.#closing && this.#phase !== "closed") {
@@ -459,7 +481,7 @@ class TerminalController {
   }
 
   #snapshot(): TerminalControllerSnapshot {
-    return { phase: this.#phase, writable: this.#writable, leaseOperation: this.#leaseOperation, error: this.#error, reset: this.#reset };
+    return { phase: this.#phase, writable: this.#writable, leaseOperation: this.#leaseOperation, error: this.#error, reset: this.#reset, retryDiscovery: this.#retryDiscovery };
   }
 
   #publish(): void {

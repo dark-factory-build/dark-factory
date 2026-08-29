@@ -451,11 +451,18 @@ test("synchronous handle close and onChange close cannot launch or restore autho
   assert.equal(attaching.sessionCloses(), 1);
 });
 
-test("null or stale discovery cannot open a handle", async () => {
-  for (const resolvedTarget of [null, () => Promise.reject(new SessionError("stale"))]) {
+test("null or stale discovery ends only the unopened controller", async () => {
+  for (const [resolvedTarget, expectedCode] of [
+    [() => Promise.resolve(null), "not_found"],
+    [() => Promise.reject(new SessionError("stale")), "stale"],
+  ]) {
     const context = harness({ resolvedTarget });
     context.controller.start();
     await tick();
+    assert.equal(context.controller.snapshot.phase, "closed");
+    assert.equal(context.controller.snapshot.error.code, expectedCode);
+    assert.equal(context.controller.snapshot.retryDiscovery, true);
+    assert.equal(context.sessionCloses(), 0);
     await context.controller.close();
     assert.equal(context.controller.snapshot.phase, "closed");
     assert.equal(context.sessionCloses(), 1);
@@ -482,7 +489,7 @@ test("fatal closing state is published before synchronous session close reentry"
   });
   context.controller.start();
   await tick();
-  context.targetGate.resolve(null);
+  context.targetGate.reject(new SessionError("connection"));
   await tick();
   const closing = events.findIndex((event) => event.phase === "closing");
   const sessionClose = events.findIndex((event) => event.event === "session-close");
