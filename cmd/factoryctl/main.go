@@ -44,7 +44,11 @@ const (
   factoryctl web revoke CLIENT_ID --revision REVISION
   factoryctl init --home ABSOLUTE
   factoryctl doctor --home ABSOLUTE
-  factoryctl service status --home ABSOLUTE
+  factoryctl service status --home ABSOLUTE [--label LABEL] [--plist-dir ABSOLUTE]
+  factoryctl service install --home ABSOLUTE [--label LABEL] [--plist-dir ABSOLUTE]
+  factoryctl service start --home ABSOLUTE [--label LABEL] [--plist-dir ABSOLUTE]
+  factoryctl service stop --home ABSOLUTE [--label LABEL] [--plist-dir ABSOLUTE]
+  factoryctl service uninstall --home ABSOLUTE [--label LABEL] [--plist-dir ABSOLUTE]
   factoryctl --version
   factoryctl --build-identity
 `
@@ -64,6 +68,10 @@ const (
 	commandInit
 	commandDoctor
 	commandServiceStatus
+	commandServiceInstall
+	commandServiceStart
+	commandServiceStop
+	commandServiceUninstall
 	commandProjectCreate
 	commandAgentCreate
 	commandTaskAdd
@@ -79,6 +87,8 @@ type attemptCommand struct {
 	after            string
 	expectedRevision uint64
 
+	label      string
+	plistDir   string
 	name       string
 	root       string
 	project    string
@@ -130,7 +140,7 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	if command.kind == commandInit || command.kind == commandDoctor {
 		return runHome(ctx, command, stdout, stderr)
 	}
-	if command.kind == commandServiceStatus {
+	if command.kind == commandServiceStatus || command.kind == commandServiceInstall || command.kind == commandServiceStart || command.kind == commandServiceStop || command.kind == commandServiceUninstall {
 		return runService(ctx, command, stdout, stderr, inspect)
 	}
 	if command.kind == commandWebStatus || command.kind == commandWebOpen || command.kind == commandWebListClients || command.kind == commandWebRevoke {
@@ -194,11 +204,8 @@ func parse(args []string) (attemptCommand, bool, bool) {
 	if len(args) == 2 && (args[0] == "init" || args[0] == "doctor") && helpFlag(args[1]) {
 		return attemptCommand{}, true, true
 	}
-	if len(args) == 4 && args[0] == "service" && args[1] == "status" && args[2] == "--home" && validHomeArg(args[3]) {
-		return attemptCommand{kind: commandServiceStatus, home: args[3]}, false, true
-	}
-	if (len(args) == 2 && args[0] == "service" && helpFlag(args[1])) || (len(args) == 3 && args[0] == "service" && args[1] == "status" && helpFlag(args[2])) {
-		return attemptCommand{}, true, true
+	if len(args) >= 1 && args[0] == "service" {
+		return parseServiceCommand(args)
 	}
 	if len(args) >= 1 && (args[0] == "project" || args[0] == "agent" || args[0] == "task" || args[0] == "dispatch") {
 		return parseOperator(args)
@@ -252,34 +259,161 @@ func parse(args []string) (attemptCommand, bool, bool) {
 	return attemptCommand{}, false, false
 }
 
-func runService(ctx context.Context, command attemptCommand, stdout, stderr io.Writer, inspect serviceInspector) int {
-	if inspect == nil {
-		_, _ = io.WriteString(stderr, "factoryctl: service status configuration is invalid\n")
-		return exitFailure
+func parseServiceCommand(args []string) (attemptCommand, bool, bool) {
+	if len(args) == 2 && helpFlag(args[1]) {
+		return attemptCommand{}, true, true
 	}
+	if len(args) >= 3 && helpFlag(args[2]) {
+		switch args[1] {
+		case "status", "install", "start", "stop", "uninstall":
+			return attemptCommand{}, true, true
+		}
+	}
+	if len(args) < 2 {
+		return attemptCommand{}, false, false
+	}
+	command := attemptCommand{}
+	switch args[1] {
+	case "status":
+		command.kind = commandServiceStatus
+	case "install":
+		command.kind = commandServiceInstall
+	case "start":
+		command.kind = commandServiceStart
+	case "stop":
+		command.kind = commandServiceStop
+	case "uninstall":
+		command.kind = commandServiceUninstall
+	default:
+		return attemptCommand{}, false, false
+	}
+	seen := map[string]bool{}
+	for index := 2; index < len(args); index += 2 {
+		if index+1 >= len(args) {
+			return attemptCommand{}, false, false
+		}
+		name, value := args[index], args[index+1]
+		if seen[name] {
+			return attemptCommand{}, false, false
+		}
+		seen[name] = true
+		switch name {
+		case "--home":
+			if !validHomeArg(value) {
+				return attemptCommand{}, false, false
+			}
+			command.home = value
+		case "--label":
+			if value == "" || len(value) > 127 {
+				return attemptCommand{}, false, false
+			}
+			command.label = value
+		case "--plist-dir":
+			if !validHomeArg(value) {
+				return attemptCommand{}, false, false
+			}
+			command.plistDir = value
+		default:
+			return attemptCommand{}, false, false
+		}
+	}
+	if command.home == "" {
+		return attemptCommand{}, false, false
+	}
+	return command, false, true
+}
+
+func serviceConfigFor(command attemptCommand) install.ServiceConfig {
+	config := install.DefaultServiceConfig()
+	if command.label != "" {
+		config.Label = command.label
+	}
+	config.PlistDirectory = command.plistDir
+	return config
+}
+
+func runService(ctx context.Context, command attemptCommand, stdout, stderr io.Writer, inspect serviceInspector) int {
 	callContext, cancel := context.WithTimeout(ctx, attemptRequestTimeout)
 	defer cancel()
-	status, err := inspect(callContext, command.home)
+	config := serviceConfigFor(command)
+	var status install.ServiceStatus
+	var err error
+	switch command.kind {
+	case commandServiceStatus:
+		if command.label == "" && command.plistDir == "" {
+			if inspect == nil {
+				_, _ = io.WriteString(stderr, "factoryctl: service status configuration is invalid\n")
+				return exitFailure
+			}
+			status, err = inspect(callContext, command.home)
+		} else {
+			status, err = install.InspectServiceWithConfig(callContext, command.home, config)
+		}
+	case commandServiceInstall:
+		var self string
+		self, err = serviceSourceDirectory()
+		if err == nil {
+			status, err = install.ServiceInstall(callContext, command.home, config, self)
+		}
+	case commandServiceStart:
+		status, err = install.ServiceStart(callContext, command.home, config)
+	case commandServiceStop:
+		status, err = install.ServiceStop(callContext, command.home, config)
+	case commandServiceUninstall:
+		status, err = install.ServiceUninstall(callContext, command.home, config)
+	}
 	if err != nil {
-		message := "factoryctl: service status is ambiguous\n"
+		message := "factoryctl: the service operation is ambiguous; inspect the home and launchd state\n"
 		switch {
 		case errors.Is(err, context.Canceled):
-			message = "factoryctl: service status canceled\n"
+			message = "factoryctl: service operation canceled\n"
 		case errors.Is(err, context.DeadlineExceeded):
-			message = "factoryctl: service status timed out\n"
+			message = "factoryctl: service operation timed out\n"
 		case errors.Is(err, install.ErrUnsupported):
-			message = "factoryctl: service status is unsupported on this platform\n"
+			message = "factoryctl: service operations are unsupported on this platform\n"
 		case errors.Is(err, install.ErrInvalidHome):
-			message = "factoryctl: service status requires an exact fresh Go home\n"
+			message = "factoryctl: service operations require an exact Go home\n"
+		case errors.Is(err, install.ErrServiceForeign):
+			message = "factoryctl: a service artifact is not this installation's property; refusing\n"
+		case errors.Is(err, install.ErrServiceResidue):
+			message = "factoryctl: service residue found; run factoryctl service uninstall first\n"
 		}
 		_, _ = io.WriteString(stderr, message)
 		return exitFailure
 	}
-	if status.State != install.ServiceAbsent || status.PID != 0 {
-		_, _ = io.WriteString(stderr, "factoryctl: service status is ambiguous\n")
+	// The projection is exact or refused: states outside the finite set, or a
+	// pid that disagrees with its state, never print as success.
+	switch status.State {
+	case install.ServiceAbsent, install.ServiceInstalled:
+		if status.PID != 0 {
+			_, _ = io.WriteString(stderr, "factoryctl: the service projection is ambiguous\n")
+			return exitFailure
+		}
+	case install.ServiceRunning:
+		if status.PID <= 0 {
+			_, _ = io.WriteString(stderr, "factoryctl: the service projection is ambiguous\n")
+			return exitFailure
+		}
+	default:
+		_, _ = io.WriteString(stderr, "factoryctl: the service projection is ambiguous\n")
 		return exitFailure
 	}
 	return writeJSON(stdout, status)
+}
+
+// serviceSourceDirectory is the invoking factoryctl's own resolved directory:
+// the managed installation installs exactly the sibling binaries it shipped
+// with, never a path the operator did not run.
+func serviceSourceDirectory() (string, error) {
+	self, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(self)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Dir(resolved), nil
 }
 
 func validHomeArg(value string) bool {

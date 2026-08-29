@@ -18,15 +18,27 @@ func TestParseServiceStatusIsOneExplicitCommand(t *testing.T) {
 	if !ok || help || command != (attemptCommand{kind: commandServiceStatus, home: home}) {
 		t.Fatalf("parse = %+v, help=%t, ok=%t", command, help, ok)
 	}
+	for verb, kind := range map[string]commandKind{
+		"install": commandServiceInstall, "start": commandServiceStart,
+		"stop": commandServiceStop, "uninstall": commandServiceUninstall,
+	} {
+		command, help, ok := parse([]string{"service", verb, "--home", home, "--label", "com.dark-factory.e2e.x", "--plist-dir", "/private/tmp/plists"})
+		want := attemptCommand{kind: kind, home: home, label: "com.dark-factory.e2e.x", plistDir: "/private/tmp/plists"}
+		if !ok || help || command != want {
+			t.Fatalf("parse service %s = %+v, help=%t, ok=%t", verb, command, help, ok)
+		}
+	}
 	for _, args := range [][]string{
 		{"service"},
-		{"service", "install", "--home", home},
-		{"service", "start", "--home", home},
-		{"service", "stop", "--home", home},
 		{"service", "status"},
+		{"service", "install"},
+		{"service", "reload", "--home", home},
 		{"service", "status", "--home", "relative"},
 		{"service", "status", "--home", "/"},
 		{"service", "status", "--home", home, "extra"},
+		{"service", "install", "--home", home, "--home", home},
+		{"service", "install", "--home", home, "--label", ""},
+		{"service", "install", "--home", home, "--plist-dir", "relative"},
 		{"service_status", "--home", home},
 	} {
 		if _, _, ok := parse(args); ok {
@@ -74,12 +86,14 @@ func TestServiceStatusCLIMapsFailuresWithoutPrivateDiagnostics(t *testing.T) {
 		err  error
 		want string
 	}{
-		{name: "ambiguous", err: errors.Join(install.ErrServiceAmbiguous, errors.New(private)), want: "factoryctl: service status is ambiguous\n"},
-		{name: "launchctl", err: errors.Join(install.ErrServiceLaunchctl, errors.New(private)), want: "factoryctl: service status is ambiguous\n"},
-		{name: "home", err: errors.Join(install.ErrInvalidHome, errors.New(private)), want: "factoryctl: service status requires an exact fresh Go home\n"},
-		{name: "unsupported", err: install.ErrUnsupported, want: "factoryctl: service status is unsupported on this platform\n"},
-		{name: "canceled", err: context.Canceled, want: "factoryctl: service status canceled\n"},
-		{name: "deadline", err: context.DeadlineExceeded, want: "factoryctl: service status timed out\n"},
+		{name: "ambiguous", err: errors.Join(install.ErrServiceAmbiguous, errors.New(private)), want: "factoryctl: the service operation is ambiguous; inspect the home and launchd state\n"},
+		{name: "launchctl", err: errors.Join(install.ErrServiceLaunchctl, errors.New(private)), want: "factoryctl: the service operation is ambiguous; inspect the home and launchd state\n"},
+		{name: "home", err: errors.Join(install.ErrInvalidHome, errors.New(private)), want: "factoryctl: service operations require an exact Go home\n"},
+		{name: "foreign", err: errors.Join(install.ErrServiceForeign, errors.New(private)), want: "factoryctl: a service artifact is not this installation's property; refusing\n"},
+		{name: "residue", err: errors.Join(install.ErrServiceResidue, errors.New(private)), want: "factoryctl: service residue found; run factoryctl service uninstall first\n"},
+		{name: "unsupported", err: install.ErrUnsupported, want: "factoryctl: service operations are unsupported on this platform\n"},
+		{name: "canceled", err: context.Canceled, want: "factoryctl: service operation canceled\n"},
+		{name: "deadline", err: context.DeadlineExceeded, want: "factoryctl: service operation timed out\n"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
