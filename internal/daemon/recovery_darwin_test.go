@@ -482,4 +482,10 @@ func TestRecoverySweepFailsClosedForActiveAttemptWithoutResult(t *testing.T) {
 	if states[kernel.ResourceRuntimeRoot].State == kernel.ResourceReleased {
 		t.Fatalf("runtime released without teardown proof: %+v", states[kernel.ResourceRuntimeRoot])
 	}
+	// A re-sweep fires no edge and must say so rather than re-reporting the
+	// converging disposition.
+	resweep := fixture.sweep(t)
+	if resweep.Action != RecoveredConverged || resweep.Err != nil {
+		t.Fatalf("re-sweep disposition = %+v", resweep)
+	}
 }

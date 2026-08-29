@@ -241,6 +241,7 @@ func (daemon *Daemon) recoverAuthenticatedResult(ctx context.Context, parent *Ru
 // durably unresolved, and the absent runner is released by observation. It is
 // deliberately not terminal.
 func (daemon *Daemon) recoverWithoutResult(ctx context.Context, run kernel.Run, runnerProcess, providerProcess, providerGroup kernel.Resource) (RecoveredRunAction, error) {
+	acted := false
 	if run.Phase == kernel.RunAdmitted || run.Phase == kernel.RunRunning {
 		failure, err := kernel.NewFailureProposal(kernel.FailureInternal, "recovered active attempt without an attempt result")
 		if err != nil {
@@ -257,6 +258,7 @@ func (daemon *Daemon) recoverWithoutResult(ctx context.Context, run kernel.Run, 
 			return RecoveredUncertain, failErr
 		}
 		run = failed
+		acted = true
 	}
 	current := func(id kernel.ResourceID) (kernel.Resource, error) {
 		resource, found, err := daemon.store.Resource(context.Background(), id)
@@ -291,6 +293,7 @@ func (daemon *Daemon) recoverWithoutResult(ctx context.Context, run kernel.Run, 
 		if markErr != nil {
 			return RecoveredUncertain, markErr
 		}
+		acted = true
 	}
 	runnerCurrent, err := current(runnerProcess.ID)
 	if err != nil {
@@ -303,6 +306,10 @@ func (daemon *Daemon) recoverWithoutResult(ctx context.Context, run kernel.Run, 
 		if _, absenceErr := daemon.recordRecoveredRunnerAbsence(run.ID, runnerCurrent.ID, runnerCurrent.Identity); absenceErr != nil {
 			return RecoveredUncertain, absenceErr
 		}
+		acted = true
+	}
+	if !acted {
+		return RecoveredConverged, nil
 	}
 	return RecoveredNoResultUnresolved, nil
 }
