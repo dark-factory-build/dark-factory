@@ -743,6 +743,44 @@ trap 'go_gate_environment_cleanup || true' EXIT
 CDPATH= cd -- "$repository_root/web"
 export COREPACK_ENABLE_NETWORK=1 npm_config_offline=false NPM_CONFIG_OFFLINE=false
 go_gate_web_install
+non_ci_bin="$go_gate_root/non-ci-bin"
+/bin/mkdir "$non_ci_bin"
+/bin/chmod 700 "$non_ci_bin"
+run_non_ci_pnpm() {
+    "$go_gate_env" -i \
+        "PATH=$non_ci_bin" \
+        "HOME=$go_gate_root/home" \
+        "TMPDIR=$go_gate_root/tmp" \
+        "COREPACK_HOME=$go_gate_root/corepack" \
+        "COREPACK_ENABLE_NETWORK=0" \
+        "COREPACK_DEFAULT_TO_LATEST=0" \
+        "npm_config_cache=$go_gate_root/npm-cache" \
+        "NPM_CONFIG_CACHE=$go_gate_root/npm-cache" \
+        "npm_config_userconfig=$go_gate_root/home/npm-user-config" \
+        "NPM_CONFIG_USERCONFIG=$go_gate_root/home/npm-user-config" \
+        "npm_config_globalconfig=/dev/null" \
+        "NPM_CONFIG_GLOBALCONFIG=/dev/null" \
+        "LC_ALL=C" "LANG=C" \
+        "$go_gate_node" "$go_gate_corepack" pnpm "$@"
+}
+non_ci_log="$go_gate_root/non-ci-pnpm.log"
+if ! run_non_ci_pnpm exec /usr/bin/true >"$non_ci_log" 2>&1; then
+    /bin/cat "$non_ci_log" >&2
+    exit 62
+fi
+stale_log="$go_gate_root/stale-pnpm.log"
+if run_non_ci_pnpm --config.enable-global-virtual-store=true exec /usr/bin/true >"$stale_log" 2>&1; then
+    echo "stale non-CI dependency layout was accepted" >&2
+    exit 63
+fi
+/usr/bin/grep -F '[ERR_PNPM_VERIFY_DEPS_BEFORE_RUN] The value of the enableGlobalVirtualStore setting has changed' "$stale_log" >/dev/null || {
+    /bin/cat "$stale_log" >&2
+    exit 64
+}
+if /usr/bin/grep -F 'spawnSync pnpm' "$stale_log" >/dev/null; then
+    /bin/cat "$stale_log" >&2
+    exit 65
+fi
 real_tsc_package=$(/bin/realpath "$repository_root/web/node_modules/typescript/package.json")
 real_tsc_root=$(/usr/bin/dirname "$real_tsc_package")
 real_initial_digest=$("$go_gate_node" --input-type=module --eval 'const { toolTreeDigest } = await import(process.argv[2]); process.stdout.write(`${toolTreeDigest(process.argv[3])}\n`);' /dev/null "$script_root/web/scripts/package-artifacts.mjs" "$real_tsc_root")
@@ -837,6 +875,10 @@ if /usr/bin/grep -F 'DARK_FACTORY_LOCAL_CI_LEASE_HELD' "$repository_root/scripts
 [ -x "$repository_root/scripts/go-ci-owned.sh" ] || fail "owned go-ci body lost executable mode"
 if /usr/bin/grep -F 'internal/processcontract' "$repository_root/scripts/go-ci.sh" >/dev/null; then fail "go-ci duplicated full package proof"; fi
 /usr/bin/grep -F 'final system census remains a cutover-only gate' "$repository_root/scripts/go-ci-owned.sh" >/dev/null || fail "pending cutover evidence is not explicit"
+/usr/bin/grep -Fx 'enableGlobalVirtualStore: false' "$repository_root/web/pnpm-workspace.yaml" >/dev/null \
+    || fail "web dependency layout differs between CI and developer commands"
+/usr/bin/grep -Fx 'verifyDepsBeforeRun: error' "$repository_root/web/pnpm-workspace.yaml" >/dev/null \
+    || fail "web scripts may trigger an implicit dependency install"
 
 for web_script in typecheck build test; do
     /usr/bin/grep -F "\"$web_script\": \"corepack pnpm " "$repository_root/web/package.json" >/dev/null \
