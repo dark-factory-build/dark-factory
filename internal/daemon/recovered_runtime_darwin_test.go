@@ -385,6 +385,12 @@ func TestRecoveredRuntimeCensusGrammar(t *testing.T) {
 		{name: "gate stdin with terminal spool", residue: []string{runner.OuterActivationMarkerName, runner.GateStdinScratchName, runner.TerminalSpoolName}},
 		{name: "gate stdin with outer", residue: []string{runner.OuterActivationMarkerName, runner.GateStdinScratchName}},
 		{name: "terminal scratch and spool", residue: []string{runner.OuterActivationMarkerName, runner.TerminalScratchName, runner.TerminalSpoolName}},
+		// The artifact writer is the outer attempt-runner target, so a result
+		// implies the outer marker and excludes any pre-exec gate scratch.
+		{name: "outer plus result", residue: []string{runner.OuterActivationMarkerName, runner.AttemptResultSpoolName}, open: true},
+		{name: "outer plus inner plus result", residue: []string{runner.OuterActivationMarkerName, runner.InnerActivationMarkerName, runner.AttemptResultSpoolName}, open: true},
+		{name: "result without outer", residue: []string{runner.AttemptResultSpoolName}},
+		{name: "result with gate config", residue: []string{runner.OuterActivationMarkerName, runner.GateConfigScratchName, runner.AttemptResultSpoolName}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -418,6 +424,7 @@ func configureRecoveredResidue(t *testing.T, path string, residue []string, term
 		runner.OuterActivationMarkerName, runner.InnerActivationMarkerName,
 		runner.GateConfigScratchName, runner.GateStdinScratchName,
 		runner.TerminalScratchName, runner.TerminalSpoolName,
+		runner.AttemptResultSpoolName,
 	}
 	for _, name := range all {
 		if err := os.Remove(filepath.Join(path, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -444,6 +451,49 @@ func configureRecoveredResidue(t *testing.T, path string, residue []string, term
 		if err := os.WriteFile(filepath.Join(path, name), nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestRecoveredResultArtifactSizeBound(t *testing.T) {
+	// The publish contract bounds the canonical body at 1 KiB. A torn publish
+	// may be shorter; anything past the bound is not a result this producer
+	// could have written, so the census refuses it before authentication.
+	tests := []struct {
+		name string
+		size int
+		open bool
+	}{
+		{name: "torn empty", size: 0, open: true},
+		{name: "at bound", size: 1024, open: true},
+		{name: "past bound", size: 1025},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			parent, path, identity, _, _, terminal := populatedRecoveredRuntime(t, runtimeTestName)
+			defer parent.Close()
+			configureRecoveredResidue(t, path, []string{runner.OuterActivationMarkerName}, terminal)
+			artifact := filepath.Join(path, runner.AttemptResultSpoolName)
+			if err := os.WriteFile(artifact, bytes.Repeat([]byte{'r'}, test.size), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			before := snapshotRuntimeGraph(t, path)
+			recovered, err := OpenRecoveredRuntime(context.Background(), parent, runtimeTestName, identity)
+			if test.open {
+				if err != nil || recovered == nil {
+					t.Fatalf("bounded artifact rejected: recovered=%+v err=%v", recovered, err)
+				}
+				if err := recovered.Close(); err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if !errors.Is(err, errInvalidContract) || recovered != nil {
+				t.Fatalf("oversized artifact accepted: recovered=%+v err=%v", recovered, err)
+			}
+			if after := snapshotRuntimeGraph(t, path); after != before {
+				t.Fatalf("rejected artifact mutated graph\nbefore:\n%s\nafter:\n%s", before, after)
+			}
+		})
 	}
 }
 

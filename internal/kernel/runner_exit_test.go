@@ -31,7 +31,7 @@ func TestRecoveredRunnerAbsenceRequiresRegisteredRunner(t *testing.T) {
 	}
 }
 
-func TestRecoveredAbsenceCannotUseLiveTerminalClose(t *testing.T) {
+func TestRecoveredAbsenceExitCannotBeEqualledByAnyForgedResult(t *testing.T) {
 	store, run, keys := runningOrchestratorRun(t)
 	defer store.Close()
 	proposal, _ := NewFailureProposal(FailureInternal, "owner disappeared")
@@ -57,11 +57,34 @@ func TestRecoveredAbsenceCannotUseLiveTerminalClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The generic live-close authority that once had to refuse recovered
-	// evidence no longer exists; the only close is the exact result edge,
-	// which is exercised elsewhere. Nothing remains to attack here.
-	if _, _, err := store.Run(context.Background(), run.ID); err != nil {
+	// The only surviving close is the exact result edge, so the safety of a
+	// recovered-absence history rests on one property: a recovered absence
+	// records neither code nor signal, while every constructible
+	// AttemptResultExit carries exactly one, so no forged result can equal the
+	// stored exit. Attack it with results built from this run's own correct
+	// digests and identities — the only thing wrong is the exit itself.
+	runtimeIdentity := resourceOfKind(t, resources, ResourceRuntimeRoot).Identity
+	session := terminalSessionForRunTest(t, store, run.ID)
+	before, _, err := store.Run(context.Background(), run.ID)
+	if err != nil {
 		t.Fatal(err)
+	}
+	exitCode, _ := NewAttemptResultExitCode(0)
+	exitSignal, _ := NewAttemptResultExitSignal(9)
+	codeResult, _ := NewInnerConvergedAttemptResult(run.ID, keys.AttemptDigest, keys.ResultProofDigest, runtimeIdentity, providerIdentity, exitCode)
+	signalResult, _ := NewInnerConvergedAttemptResult(run.ID, keys.AttemptDigest, keys.ResultProofDigest, runtimeIdentity, providerIdentity, exitSignal)
+	unregistered, _ := NewInnerUnregisteredConvergedAttemptResult(run.ID, keys.AttemptDigest, keys.ResultProofDigest, runtimeIdentity)
+	for name, forged := range map[string]AttemptResult{"code": codeResult, "signal": signalResult, "unregistered": unregistered} {
+		if _, _, err := store.CloseTerminalAfterRunner(context.Background(), forged, before.Revision, session.Revision, mustTime(t, 44)); !errors.Is(err, ErrConflict) {
+			t.Fatalf("forged %s result closed a recovered-absence history = %v", name, err)
+		}
+	}
+	after, _, err := store.Run(context.Background(), run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Revision != before.Revision || after.Phase != before.Phase {
+		t.Fatalf("refused close mutated the run: before=%+v after=%+v", before, after)
 	}
 }
 
