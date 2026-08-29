@@ -11,7 +11,11 @@ directory, writes a durable receipt, renders the plist from the one Go
 authority (`install.ServicePlist`), and bootstraps the job. Present
 service states are provable only through an exact receipt, plist, and
 program-digest agreement; anything else reports ambiguous, and
-`factoryctl service uninstall` is the resolution path for residue.
+`factoryctl service uninstall` is the resolution path for residue,
+including the engine's own staged-write crash residue. Uninstall is
+evidence-first: it issues no launchctl verb until a matching receipt or
+an exactly rendered plist proves the label maps to the named home, so a
+wrong `--home` or a foreign plist refuses without touching launchd.
 
 The `com.dark-factory.factoryd.plist.template` file is the historical
 Rust-era template. The Go plist is rendered in code, never from this

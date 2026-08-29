@@ -6594,6 +6594,17 @@ Managed launchd service installation on 2026-08-29:
   status census also no longer demands byte-stability of the SQLite
   members a live daemon legitimately rewrites; identity, bounds, member
   census, and every durable member remain exact.
+- Review hardened the mutation ordering: uninstall is evidence-first — no
+  mutating launchctl verb until a matching receipt or an exactly rendered
+  plist proves the label maps to the named home (a wrong --home against
+  the default label previously reached bootout before refusing, which
+  could have unloaded the live daemon). Uninstall now also resolves the
+  engine's own staged-write crash residue by exact stage name, staged
+  writers refuse a pre-existing stage instead of silently deleting it,
+  and the bootout absence probe applies the same stderr strictness as
+  status observation. Install bootstraps last (binaries, plist, receipt,
+  then bootstrap), so a loaded job can never be receipt-less crash
+  residue of this engine.
 - `scripts/go-service-e2e.sh` is in the authoritative gate: real binaries,
   real launchd, one disposable unique label in the user gui domain, all
   files under a temporary root, guaranteed bootout on exit. It proves

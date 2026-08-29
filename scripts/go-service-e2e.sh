@@ -15,16 +15,16 @@ if [ ! -x "$trusted_git" ]; then
 fi
 
 e2e_root=$(/usr/bin/mktemp -d /private/tmp/dark-factory-go-service-e2e.XXXXXX)
+# The script mints the run's one disposable label so the exit trap can boot
+# out exactly this run's job — never a concurrently running sibling gate's.
+service_label="com.dark-factory.e2e.$$.$(/bin/date +%s)"
 
 cleanup() {
     status=$?
     trap - EXIT HUP INT TERM
-    # The Go test boots its disposable label out itself; the sweep below is
-    # the last-resort guarantee for a killed test process. Only labels this
-    # script's own test run could have minted are touched.
-    for label in $(/bin/launchctl list 2>/dev/null | /usr/bin/awk '{print $3}' | /usr/bin/grep "^com\.dark-factory\.e2e\." 2>/dev/null || true); do
-        /bin/launchctl bootout "gui/$(/usr/bin/id -u)/$label" 2>/dev/null || true
-    done
+    # The Go test boots the label out itself; this is the last-resort
+    # guarantee for a killed test process, scoped to this run's own label.
+    /bin/launchctl bootout "gui/$(/usr/bin/id -u)/$service_label" 2>/dev/null || true
     /bin/rm -rf -- "$e2e_root"
     exit "$status"
 }
@@ -39,6 +39,7 @@ go build -o "$e2e_root/factoryctl" ./cmd/factoryctl
 go build -o "$e2e_root/factory-runner" ./cmd/factory-runner
 
 export DARK_FACTORY_SERVICE_E2E=1
+export DARK_FACTORY_E2E_SERVICE_LABEL="$service_label"
 export DARK_FACTORY_E2E_FACTORYD="$e2e_root/factoryd"
 export DARK_FACTORY_E2E_FACTORYCTL="$e2e_root/factoryctl"
 export DARK_FACTORY_E2E_RUNNER="$e2e_root/factory-runner"

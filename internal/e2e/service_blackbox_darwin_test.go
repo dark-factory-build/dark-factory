@@ -27,7 +27,10 @@ func TestBlackBoxServiceLifecycle(t *testing.T) {
 		t.Skip("service E2E runs only under scripts/go-service-e2e.sh")
 	}
 	fixture := newBlackBoxFixture(t)
-	label := fmt.Sprintf("com.dark-factory.e2e.%d.%d", os.Getpid(), time.Now().UnixNano()%1_000_000)
+	label := os.Getenv("DARK_FACTORY_E2E_SERVICE_LABEL")
+	if !strings.HasPrefix(label, "com.dark-factory.e2e.") {
+		t.Fatalf("the harness must mint the disposable label; got %q", label)
+	}
 	plistDir := filepath.Join(fixture.root, "plists")
 	if err := os.Mkdir(plistDir, 0o700); err != nil {
 		t.Fatal(err)

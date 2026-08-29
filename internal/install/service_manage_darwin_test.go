@@ -314,3 +314,133 @@ func TestServiceMutationsValidateRequestsBeforeTouchingAnything(t *testing.T) {
 		t.Fatalf("receipt written despite refused source: present=%t err=%v", present, err)
 	}
 }
+
+func TestServiceUninstallIsEvidenceFirst(t *testing.T) {
+	fixture := newManageFixture(t)
+	deny := func(context.Context, ...string) launchctlResult {
+		t.Fatal("a mutating launchctl verb ran without ownership evidence")
+		return launchctlResult{}
+	}
+
+	// A foreign plist under the requested label refuses the whole uninstall
+	// before any mutation: no bootout, no deletion, bytes retained.
+	if err := os.WriteFile(fixture.plistPath(), []byte("operator property"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	status, err := serviceUninstallAt(context.Background(), fixture.home, fixture.userHome, fixture.config, deny)
+	if status.State != ServiceAmbiguous || !errors.Is(err, ErrServiceForeign) {
+		t.Fatalf("foreign plist uninstall = %+v, %v", status, err)
+	}
+	body, readErr := os.ReadFile(fixture.plistPath())
+	if readErr != nil || string(body) != "operator property" {
+		t.Fatalf("foreign plist mutated: %q, %v", body, readErr)
+	}
+	if err := os.Remove(fixture.plistPath()); err != nil {
+		t.Fatal(err)
+	}
+
+	// No receipt, no plist: nothing proves the label, so no launchctl verb
+	// runs at all; the empty result is provable absence.
+	status, err = serviceUninstallAt(context.Background(), fixture.home, fixture.userHome, fixture.config, deny)
+	if err != nil || status.State != ServiceAbsent {
+		t.Fatalf("no-evidence uninstall = %+v, %v", status, err)
+	}
+
+	// A valid receipt for a DIFFERENT label refuses: deleting this home's
+	// service directory would break that label's installation.
+	full := &recordedLaunchctl{results: append(fixture.printAbsent(), launchctlResult{status: 0}, fixture.printRunning(91))}
+	fixture.install(t, full.run)
+	otherConfig := fixture.config
+	otherConfig.Label = manageTestLabel + ".other"
+	status, err = serviceUninstallAt(context.Background(), fixture.home, fixture.userHome, otherConfig, deny)
+	if status.State != ServiceAmbiguous || !errors.Is(err, ErrServiceForeign) {
+		t.Fatalf("label-mismatch uninstall = %+v, %v", status, err)
+	}
+
+	// With the matching receipt the bootout is the FIRST verb, and removal
+	// completes as before.
+	proven := &recordedLaunchctl{results: []launchctlResult{{status: 0}, {status: launchctlNotFound}}}
+	status, err = serviceUninstallAt(context.Background(), fixture.home, fixture.userHome, fixture.config, proven.run)
+	if err != nil || status.State != ServiceAbsent {
+		t.Fatalf("proven uninstall = %+v, %v", status, err)
+	}
+	if len(proven.calls) == 0 || proven.calls[0][0] != "bootout" {
+		t.Fatalf("proven uninstall verbs = %q", proven.calls)
+	}
+}
+
+func TestServiceStageResidueRefusesInstallAndResolvesThroughUninstall(t *testing.T) {
+	fixture := newManageFixture(t)
+	serviceDir := ServiceDirectoryPath(fixture.home)
+	current := filepath.Join(serviceDir, "bin", "current")
+	if err := os.MkdirAll(current, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stages := []string{
+		filepath.Join(current, ".factoryd.stage"),
+		filepath.Join(serviceDir, "."+serviceReceiptName+".stage"),
+		filepath.Join(fixture.plistDir, "."+fixture.config.plistName()+".stage"),
+	}
+	for _, stage := range stages {
+		if err := os.WriteFile(stage, []byte("crash residue"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Install refuses the collision instead of silently deleting it.
+	absent := &recordedLaunchctl{results: fixture.printAbsent()}
+	if _, err := serviceInstallAt(context.Background(), fixture.home, fixture.userHome, fixture.config, fixture.sourceDir, absent.run); !errors.Is(err, ErrServiceResidue) {
+		t.Fatalf("install over stage residue = %v", err)
+	}
+
+	// Uninstall resolves exactly its own stage names without launchd contact
+	// (no receipt and no plist means no evidence, and none is needed for the
+	// name-scoped residue).
+	deny := func(context.Context, ...string) launchctlResult {
+		t.Fatal("launchctl ran during stage-residue resolution")
+		return launchctlResult{}
+	}
+	status, err := serviceUninstallAt(context.Background(), fixture.home, fixture.userHome, fixture.config, deny)
+	if err != nil || status.State != ServiceAbsent {
+		t.Fatalf("stage-residue uninstall = %+v, %v", status, err)
+	}
+	for _, stage := range stages {
+		if _, err := os.Lstat(stage); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("stage survived uninstall: %s", stage)
+		}
+	}
+	if _, err := os.Lstat(serviceDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("service directory survived stage-residue uninstall")
+	}
+
+	// The cleaned home installs normally afterwards.
+	full := &recordedLaunchctl{results: append(fixture.printAbsent(), launchctlResult{status: 0}, fixture.printRunning(92))}
+	if status := fixture.install(t, full.run); status.State != ServiceRunning {
+		t.Fatalf("install after resolution = %+v", status)
+	}
+}
+
+func TestStagedWritersRefuseCollisionsInsteadOfDeleting(t *testing.T) {
+	fixture := newManageFixture(t)
+	destination := filepath.Join(fixture.root, "dest")
+	if err := os.Mkdir(destination, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, stage := range []string{".factoryd.stage", ".note.stage"} {
+		if err := os.WriteFile(filepath.Join(destination, stage), []byte("someone else's bytes"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := copyServiceBinary(filepath.Join(fixture.sourceDir, "factoryd"), destination, "factoryd"); !errors.Is(err, ErrServiceResidue) {
+		t.Fatalf("binary stage collision = %v", err)
+	}
+	if err := writeExactFile(destination, "note", []byte("payload"), 0o600); !errors.Is(err, ErrServiceResidue) {
+		t.Fatalf("file stage collision = %v", err)
+	}
+	for _, stage := range []string{".factoryd.stage", ".note.stage"} {
+		body, err := os.ReadFile(filepath.Join(destination, stage))
+		if err != nil || string(body) != "someone else's bytes" {
+			t.Fatalf("stage %s mutated: %q, %v", stage, body, err)
+		}
+	}
+}

@@ -136,7 +136,10 @@ func ServiceStop(ctx context.Context, home string, config ServiceConfig) (Servic
 }
 
 // ServiceUninstall removes exactly this installation's artifacts and is the
-// resolution path for crash residue. It never deletes foreign bytes.
+// resolution path for crash residue, including this engine's own stage
+// files. It is evidence-first: no mutating launchctl verb runs until a
+// matching receipt or an exactly rendered plist proves the label maps to
+// this home. It never deletes foreign bytes.
 func ServiceUninstall(ctx context.Context, home string, config ServiceConfig) (ServiceStatus, error) {
 	return serviceUninstall(ctx, home, config)
 }

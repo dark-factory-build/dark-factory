@@ -287,17 +287,37 @@ func serviceUninstall(ctx context.Context, home string, config ServiceConfig) (S
 	return serviceUninstallAt(ctx, home, userHome, config, runLaunchctl)
 }
 
-// serviceUninstallAt removes exactly this installation's artifacts. It is the
-// resolution path for crash residue, so it does not demand a coherent state
-// first — but it never deletes bytes it cannot prove are its own property.
+// serviceUninstallAt removes exactly this installation's artifacts and is the
+// resolution path for crash residue, including its own stage files. It is
+// evidence-first: no mutating launchctl verb runs until a matching receipt or
+// an exactly rendered plist proves the label maps to this home, and it never
+// deletes bytes it cannot prove are its own property.
 func serviceUninstallAt(ctx context.Context, home, userHome string, config ServiceConfig, launchctl launchctlRun) (ServiceStatus, error) {
 	if ctx == nil || launchctl == nil || !config.valid() || !validServicePath(home) {
 		return ServiceStatus{}, fmt.Errorf("%w: invalid uninstall request", ErrServiceAmbiguous)
 	}
-	if err := bootoutService(ctx, config, launchctl); err != nil {
-		return ServiceStatus{State: ServiceAmbiguous}, err
+	plistDirectory, _ := servicePlistLocation(userHome, config)
+	receipt, receiptPresent, receiptErr := readServiceReceipt(home)
+	if receiptErr == nil && receiptPresent && receipt.Label != config.Label {
+		// The service directory belongs to a different label's installation;
+		// removing it here would break that installation, and booting THIS
+		// label out has no evidence behind it.
+		return ServiceStatus{State: ServiceAmbiguous}, fmt.Errorf("%w: the receipt names label %q", ErrServiceForeign, receipt.Label)
 	}
-	plistDirectory, plistPath := servicePlistLocation(userHome, config)
+	evidence := receiptErr == nil && receiptPresent
+	if !evidence {
+		plistEvidence, err := uninstallPlistEvidence(home, config, plistDirectory)
+		if err != nil {
+			// A foreign plist refuses before any mutation, launchctl included.
+			return ServiceStatus{State: ServiceAmbiguous}, err
+		}
+		evidence = plistEvidence
+	}
+	if evidence {
+		if err := bootoutService(ctx, config, launchctl); err != nil {
+			return ServiceStatus{State: ServiceAmbiguous}, err
+		}
+	}
 	expected, _, err := ServicePlist(home, config.Label)
 	if err != nil {
 		return ServiceStatus{}, err
@@ -305,7 +325,9 @@ func serviceUninstallAt(ctx context.Context, home, userHome string, config Servi
 	if err := removeExactFile(plistDirectory, config.plistName(), expected); err != nil {
 		return ServiceStatus{State: ServiceAmbiguous}, err
 	}
-	_ = plistPath
+	if err := removeOwnedFile(plistDirectory, "."+config.plistName()+".stage"); err != nil {
+		return ServiceStatus{State: ServiceAmbiguous}, err
+	}
 	directory, present, err := openServiceArtifacts(home)
 	if err != nil {
 		return ServiceStatus{State: ServiceAmbiguous}, err
@@ -317,14 +339,21 @@ func serviceUninstallAt(ctx context.Context, home, userHome string, config Servi
 			if err := removeOwnedFile(current, name); err != nil {
 				return ServiceStatus{State: ServiceAmbiguous}, err
 			}
+			// Exactly this engine's own stage names are crash residue it must
+			// resolve; nothing else in the tree is deletable without proof.
+			if err := removeOwnedFile(current, "."+name+".stage"); err != nil {
+				return ServiceStatus{State: ServiceAmbiguous}, err
+			}
 		}
 		for _, path := range []string{current, filepath.Join(ServiceDirectoryPath(home), "bin")} {
 			if err := removeEmptyOwnedDirectory(path); err != nil {
 				return ServiceStatus{State: ServiceAmbiguous}, err
 			}
 		}
-		if err := removeOwnedFile(ServiceDirectoryPath(home), serviceReceiptName); err != nil {
-			return ServiceStatus{State: ServiceAmbiguous}, err
+		for _, name := range []string{serviceReceiptName, "." + serviceReceiptName + ".stage"} {
+			if err := removeOwnedFile(ServiceDirectoryPath(home), name); err != nil {
+				return ServiceStatus{State: ServiceAmbiguous}, err
+			}
 		}
 		if err := directory.Close(); err != nil {
 			return ServiceStatus{State: ServiceAmbiguous}, err
@@ -334,6 +363,34 @@ func serviceUninstallAt(ctx context.Context, home, userHome string, config Servi
 		}
 	}
 	return ServiceStatus{State: ServiceAbsent}, nil
+}
+
+// uninstallPlistEvidence proves label-to-home ownership from the plist alone:
+// exact rendered bytes are evidence, absence is no evidence, and any other
+// bytes refuse the whole uninstall before a single mutation.
+func uninstallPlistEvidence(home string, config ServiceConfig, plistDirectory string) (bool, error) {
+	expected, _, err := ServicePlist(home, config.Label)
+	if err != nil {
+		return false, err
+	}
+	path := filepath.Join(plistDirectory, config.plistName())
+	fd, openErr := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if errors.Is(openErr, unix.ENOENT) {
+		return false, nil
+	}
+	if openErr != nil {
+		return false, fmt.Errorf("%w: probe plist", ErrServiceAmbiguous)
+	}
+	file := os.NewFile(uintptr(fd), config.plistName())
+	body, readErr := io.ReadAll(io.LimitReader(file, int64(len(expected))+1))
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil {
+		return false, fmt.Errorf("%w: read plist", ErrServiceAmbiguous)
+	}
+	if bytes.Equal(body, expected) {
+		return true, nil
+	}
+	return false, fmt.Errorf("%w: the plist at %s is not this installation's property", ErrServiceForeign, config.plistName())
 }
 
 func servicePlistLocation(userHome string, config ServiceConfig) (directory, path string) {
@@ -384,7 +441,7 @@ func bootoutService(ctx context.Context, config ServiceConfig, launchctl launchc
 	deadline := time.Now().Add(serviceBootoutPatience)
 	for {
 		probe := launchctl(ctx, "print", service)
-		if probe.err == nil && probe.status == launchctlNotFound {
+		if probe.err == nil && probe.status == launchctlNotFound && validNotFoundStderr(probe.stderr, service) {
 			return nil
 		}
 		if time.Now().After(deadline) {
@@ -422,8 +479,10 @@ func copyServiceBinary(sourcePath, destinationDir, name string) (string, error) 
 	}
 	stageName := "." + name + ".stage"
 	stagePath := filepath.Join(destinationDir, stageName)
-	_ = os.Remove(stagePath)
 	destination, err := os.OpenFile(stagePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o700)
+	if errors.Is(err, os.ErrExist) {
+		return "", fmt.Errorf("%w: stale %s stage; run factoryctl service uninstall", ErrServiceResidue, name)
+	}
 	if err != nil {
 		return "", fmt.Errorf("%w: stage %s: %v", ErrServiceAmbiguous, name, err)
 	}
@@ -469,8 +528,10 @@ func writeExactFile(directory, name string, contents []byte, mode os.FileMode) e
 		return fmt.Errorf("%w: probe %s", ErrServiceAmbiguous, name)
 	}
 	stagePath := filepath.Join(directory, "."+name+".stage")
-	_ = os.Remove(stagePath)
 	file, err := os.OpenFile(stagePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+	if errors.Is(err, os.ErrExist) {
+		return fmt.Errorf("%w: stale %s stage; run factoryctl service uninstall", ErrServiceResidue, name)
+	}
 	if err != nil {
 		return fmt.Errorf("%w: stage %s: %v", ErrServiceAmbiguous, name, err)
 	}
