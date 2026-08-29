@@ -34,7 +34,8 @@ for fixture in test-local-ci-lease.sh test-local-ci-lease-mutations.sh \
     test-publish-release.sh test-package-release.sh \
     test-local-ci-environment.sh test-new-worktree.sh \
     test-github-step-summary.sh test-verify-adversarial-review.sh \
-    test-inline-chokepoint.sh test-repository-settings.sh; do
+    test-inline-chokepoint.sh test-repository-settings.sh \
+    test-local-ci-mode.sh; do
     grep -Fq "./scripts/$fixture" "$gate" || fail "gate lost fixture $fixture"
 done
 

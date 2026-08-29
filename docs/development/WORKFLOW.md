@@ -70,13 +70,33 @@ because the supervisor admits only the `none` verification policy.
 Use a second, throwaway home and explicit socket. Never rely on the default:
 
 ```sh
-export DARK_FACTORY_HOME="$(mktemp -d /tmp/df-dev.XXXXXX)"
-chmod 700 "$DARK_FACTORY_HOME"
-go run ./cmd/factoryctl init --home "$DARK_FACTORY_HOME"
-go run ./cmd/factoryd --home "$DARK_FACTORY_HOME" &
-DARK_FACTORY_SOCKET="$DARK_FACTORY_HOME/runtimes/factory.sock" \
-    go run ./cmd/factoryctl doctor --home "$DARK_FACTORY_HOME"
+root="$(mktemp -d /private/tmp/df-dev.XXXXXX)"; chmod 700 "$root"
+# factoryd locates its runner and factoryctl as siblings of its own
+# executable, so build all three into one directory; `go run` cannot satisfy
+# that and fails with "runtime unavailable".
+go build -o "$root/factoryd" ./cmd/factoryd
+go build -o "$root/factoryctl" ./cmd/factoryctl
+go build -o "$root/factory-runner" ./cmd/factory-runner
+
+# `init` creates the home, so hand it a path that does not exist yet.
+home="$root/factory"
+"$root/factoryctl" init --home "$home"
+"$root/factoryctl" doctor --home "$home"   # doctor validates a *stopped* home
+"$root/factoryd" --home "$home" &
+
+# Wait for the daemon to bind; the operator client refuses a missing socket.
+until [ -S "$home/runtimes/factory.sock" ]; do sleep 0.2; done
+
+export DARK_FACTORY_SOCKET="$home/runtimes/factory.sock"
+export DARK_FACTORY_OPERATOR_TOKEN_FILE="$home/operator.token"
+"$root/factoryctl" project create --name dev --root "$PWD"
 ```
+
+Three constraints that block the obvious shorter version: the root must be
+under `/private/tmp`, because `/tmp` is a symlink and the home walk opens every
+component with `O_NOFOLLOW`; `doctor` reports a running daemon's home as not an
+exact stopped home, so run it before starting `factoryd`; and every operator
+command needs both environment variables above, not the socket alone.
 
 Worker lifecycle checks must use the deterministic shell provider and a tiny
 temporary Git repository. They must prove the provider receives one
