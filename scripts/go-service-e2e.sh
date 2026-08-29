@@ -15,7 +15,7 @@ if [ ! -x "$trusted_git" ]; then
     exit 1
 fi
 
-e2e_root=$(/usr/bin/mktemp -d /private/tmp/dark-factory-go-service-e2e.XXXXXX)
+e2e_root=$(go_e2e_temporary_directory dark-factory-go-service-e2e)
 # The script mints the run's one disposable label so the exit trap can boot
 # out exactly this run's job — never a concurrently running sibling gate's.
 service_label="com.dark-factory.e2e.$$.$(/bin/date +%s)"

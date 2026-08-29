@@ -6454,7 +6454,9 @@ Real Go/TypeScript browser PTY lifecycle candidate on 2026-08-27:
   absolute executable validation; no E2E build, test or package-manager step
   depends on the bounded PATH. The browser wrapper also fixes `CI=true` for its
   offline package step, so direct noninteractive proof cannot fall into a pnpm
-  purge prompt.
+  purge prompt. All three wrappers allocate beneath the gate-owned `TMPDIR`
+  when present rather than assuming Darwin's `/private/tmp`, keeping the fast
+  fake-tool fixture valid in the Linux source-preview mode as well.
 - Each subtest creates a private temporary Git repository, Go home, Store,
   owner-only API socket, runtime parent and loopback browser listener. It uses
   real `Daemon.RunNext`, one-time pairing, Host/Origin validation, the real

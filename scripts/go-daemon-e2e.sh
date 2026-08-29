@@ -15,7 +15,7 @@ if [ ! -x "$trusted_git" ]; then
     exit 1
 fi
 
-e2e_root=$(/usr/bin/mktemp -d /private/tmp/dark-factory-go-daemon-e2e.XXXXXX)
+e2e_root=$(go_e2e_temporary_directory dark-factory-go-daemon-e2e)
 
 cleanup() {
     status=$?

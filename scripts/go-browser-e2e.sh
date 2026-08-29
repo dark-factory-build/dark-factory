@@ -10,7 +10,7 @@ case "$#:${1-}" in
     1:--race) race=1 ;;
     *) echo "usage: $0 [--race]" >&2; exit 2 ;;
 esac
-e2e_root=$(/usr/bin/mktemp -d /private/tmp/dark-factory-go-browser-e2e.XXXXXX)
+e2e_root=$(go_e2e_temporary_directory dark-factory-go-browser-e2e)
 
 cleanup() {
     status=$?
@@ -37,8 +37,8 @@ fi
 (
     CDPATH= cd -- "$repository_root/web"
     export COREPACK_ENABLE_NETWORK=0 CI=true
-    "$corepack" pnpm install --offline --frozen-lockfile --ignore-scripts
-    "$corepack" pnpm --filter @dark-factory/client run build
+    "$node" "$corepack" pnpm install --offline --frozen-lockfile --ignore-scripts
+    "$node" "$corepack" pnpm --filter @dark-factory/client run build
 )
 
 export DARK_FACTORY_BROWSER_E2E=1

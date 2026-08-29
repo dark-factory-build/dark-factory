@@ -26,7 +26,12 @@ EOF
 }
 
 make_fake_tool "$fake_go" go-used
-make_fake_tool "$fake_node" node-used
+/bin/cat >"$fake_node" <<EOF
+#!/bin/sh
+printf '%s\n' node-used >>"$log"
+[ "\$#" -eq 0 ] || exec "\$@"
+EOF
+/bin/chmod 700 "$fake_node"
 /bin/cat >"$fake_corepack" <<EOF
 #!/bin/sh
 printf 'corepack-used:%s\n' "\${CI-unset}" >>"$log"
@@ -35,6 +40,9 @@ EOF
 . "$repository_root/scripts/go-e2e-tools.sh"
 if go_e2e_resolve_tool go relative-go >/dev/null 2>&1; then
     fail "relative tool path was accepted"
+fi
+if TMPDIR=relative go_e2e_temporary_directory invalid-parent >/dev/null 2>&1; then
+    fail "relative TMPDIR was accepted"
 fi
 
 # Exercise the real browser wrapper in both arms with no tool available from
@@ -48,7 +56,7 @@ for browser_mode in serial race; do
         set -- --race
     fi
     /usr/bin/env -i \
-        PATH=/usr/bin:/bin HOME="$temporary" TMPDIR="$temporary" \
+        PATH=/usr/bin:/bin HOME="$temporary" TMPDIR="$temporary/" \
         DARK_FACTORY_E2E_GO="$fake_go" \
         DARK_FACTORY_E2E_NODE="$fake_node" \
         DARK_FACTORY_E2E_COREPACK="$fake_corepack" \
@@ -58,9 +66,8 @@ for browser_mode in serial race; do
         || fail "browser $browser_mode mode did not use injected Go exactly three times"
     [ "$(/usr/bin/grep -c -F -x corepack-used:true "$log")" -eq 2 ] \
         || fail "browser $browser_mode mode did not use injected Corepack exactly twice"
-    if /usr/bin/grep -F -x node-used "$log" >/dev/null; then
-        fail "browser $browser_mode mode executed Node outside the Go test"
-    fi
+    [ "$(/usr/bin/grep -c -F -x node-used "$log")" -eq 2 ] \
+        || fail "browser $browser_mode mode did not use injected Node exactly twice"
     /usr/bin/grep -F "go-browser-e2e: PASS" "$temporary/browser-$browser_mode.log" >/dev/null \
         || fail "browser $browser_mode mode did not complete"
 done
@@ -121,6 +128,9 @@ if /usr/bin/grep -Eq '(^|[[:space:]])corepack[[:space:]]+pnpm' \
     "$repository_root/scripts/go-browser-e2e.sh"; then
     fail "go-browser-e2e.sh regressed to a bare Corepack command"
 fi
+/usr/bin/grep -F '"$node" "$corepack" pnpm install' \
+    "$repository_root/scripts/go-browser-e2e.sh" >/dev/null \
+    || fail "browser wrapper does not invoke Corepack through injected Node"
 for expected in \
     'go=$(go_e2e_resolve_tool go "${DARK_FACTORY_E2E_GO-}")' \
     'node=$(go_e2e_resolve_tool node "${DARK_FACTORY_E2E_NODE-}")' \
