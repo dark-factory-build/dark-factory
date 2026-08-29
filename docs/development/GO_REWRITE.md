@@ -6613,3 +6613,62 @@ Managed launchd service installation on 2026-08-29:
   artifacts, and an empty process census for the home. The operator's
   ~/.dark-factory and the production label are never touched; migrating
   the live install remains an owner-only action.
+
+Rust deletion completing the hard cutover on `s6-rust-deletion`:
+
+- The Rust runtime workspace is deleted: `crates/factory-core`,
+  `factory-runner`, `factory-tui`, `factoryctl` and `factoryd`, plus the
+  root `Cargo.toml` and `Cargo.lock`. What proved it safe: a grep over
+  every `.go`, `.ts`, `.tsx`, `.mjs` and `.json` file in the tree returns
+  zero matches for `crates/`, `cargo` or `Cargo`, so no Go or web code
+  ever referenced the workspace. `target/` was already gitignored and
+  untracked. `control-plane/` is untouched — it was never a member of
+  that workspace, it keeps its own `Cargo.toml`, `Cargo.lock` and gate,
+  and it remains the deployed maintainer Worker, so its CI job keeps
+  `rustup` and both new Rust-absence guards are scoped to exclude it.
+- `scripts/local-ci.sh` is single-mode: the `--legacy-rust` and
+  `--linux-source` arms are gone, the gate takes no argument, and the
+  authoritative stage is `go-ci-owned.sh` as before.
+  `check-toolchain-pins.sh` no longer reads `rust-version` from the
+  deleted `Cargo.toml` — it was broken the moment that file went — and
+  now pins Go, the release targets, and the continued absence of both the
+  Rust toolchain and the workspace itself.
+- Retired with the workspace, each because its subject no longer exists:
+  the macOS and Linux contributor smokes and their fixtures (they ran
+  `target/debug` binaries), the Rust launchd release proof and its
+  fixture, and the build-headroom preflight and its fixture (they
+  measured `CARGO_TARGET_DIR`; the Go gate provisions its own `GOCACHE`
+  and `GOMODCACHE` under an isolated stage root). Two coverage
+  consequences are recorded rather than papered over: the gate no longer
+  has a disk-headroom preflight, and the release replacement-and-rollback
+  dimension of the Rust launchd proof has no Go successor —
+  `go-service-e2e.sh` covers the install/start/stop/start/uninstall
+  lifecycle against a real disposable label, not a version replacement.
+- CI loses the `legacy-rust` job and the `linux` job, and the `required`
+  aggregate drops both from `needs` and its failure condition, since a
+  required context naming a deleted job would block every pull request.
+  The `linux` job goes rather than converts: `GOOS=linux go build ./...`
+  fails on this tree, so the daemon is Darwin-only and there is nothing
+  Go for that job to run. Linux support remains #120/#141-144.
+- The identity documents now say what is true. AGENTS.md's overview drops
+  "pure-Rust, terminal-first" and the Ratatui board for the Go runtime
+  and the loopback web console, and states the limits in the same breath:
+  Darwin-only, console daemon gaps recorded, and no real Claude or Codex
+  attempt proven — the proven loop runs the shell provider. Rule 5 points
+  at `internal/install` instead of "shared Rust library code"; rule 7
+  describes the single-mode gate. CONTRIBUTING's extension paths pointed
+  into deleted crates and now name `internal/provider/provider.go` and
+  the web console; the Ratatui theme contribution path is removed rather
+  than replaced, because no console theme system exists to claim.
+- Deliberately kept: the `RustWorkspaceTest` verification policy and
+  every passage describing it. That is a product capability for verifying
+  Rust projects the factory works on — the schema still declares
+  `rust_workspace_test` and `go_workspace_test` — not the factory's own
+  implementation language. Today the supervisor admits only `none`, which
+  is a pre-existing gap between those documents and the code, untouched
+  by this deletion.
+- The mutation kit and abandoned-worktree patches live in the gitignored
+  `docs/internal/` working notes, so nothing tracked retires with them.
+  Their durable lessons are already captured in ARCHITECTURE.md,
+  "Invariants carried from the retired Rust reviews", which is what gated
+  the stale-issue closure.
