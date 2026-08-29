@@ -167,6 +167,33 @@ test("every JSON boolean rejects null exactly", () => {
   for (const [wire, field] of samples) expectMalformed(() => decodeServerControl(wire.replace(field, field.replace(/(true|false)$/, "null"))));
 });
 
+test("the agent provider is exact on the wire in both roles", () => {
+  // Go pins this with a field census and an enum loop; without the same
+  // negatives here a one-line loosening of agentItem would ship green.
+  const wire = encodeStateSnapshot("provider", { head: 1n, kind: "agent", items: [agentItem()], next_cursor: "tasks" });
+  assert.equal(wire.includes('"provider":"claude_code"'), true);
+  for (const provider of ["claude_code", "codex", "shell"]) {
+    const encoded = encodeStateSnapshot("provider", { head: 1n, kind: "agent", items: [{ ...agentItem(), provider }], next_cursor: "tasks" });
+    assert.equal(decodeServerControl(encoded).body.items[0].provider, provider);
+    expectMalformed(() => decodeClientControl(encoded));
+  }
+  for (const bad of ["gemini", "Claude_Code", "CODEX", "", "claude code"]) {
+    expectMalformed(() => encodeStateSnapshot("provider", { head: 1n, kind: "agent", items: [{ ...agentItem(), provider: bad }], next_cursor: "tasks" }));
+    expectMalformed(() => decodeServerControl(wire.replace('"provider":"claude_code"', `"provider":${JSON.stringify(bad)}`)));
+  }
+  for (const bad of [null, undefined, 7, true, ["shell"], { provider: "shell" }]) {
+    expectMalformed(() => encodeStateSnapshot("provider", { head: 1n, kind: "agent", items: [{ ...agentItem(), provider: bad }], next_cursor: "tasks" }));
+  }
+  for (const raw of ["null", "7", "true", '["shell"]']) {
+    expectMalformed(() => decodeServerControl(wire.replace('"provider":"claude_code"', `"provider":${raw}`)));
+  }
+  const { provider: _dropped, ...without } = agentItem();
+  expectMalformed(() => encodeStateSnapshot("provider", { head: 1n, kind: "agent", items: [without], next_cursor: "tasks" }));
+  expectMalformed(() => decodeServerControl(wire.replace('"provider":"claude_code",', "")));
+  expectMalformed(() => encodeStateSnapshot("provider", { head: 1n, kind: "agent", items: [{ ...agentItem(), model: "sonnet" }], next_cursor: "tasks" }));
+  expectMalformed(() => decodeServerControl(wire.replace('"provider":"claude_code"', '"provider":"claude_code","model":"sonnet"')));
+});
+
 test("public HumanRequest state cannot carry private fields and detail is separately bounded", () => {
   const wire = encodeStateSnapshot("page", { head: 1n, kind: "human_request", items: [requestItem()], next_cursor: null });
   for (const field of ["run_id", "question", "reply", "terminal_target", "cancel_run", "action", "project_name", "agent_name", "task_title", "summary", "why_human_needed"]) assert.equal(wire.includes(`"${field}":`), false, field);
