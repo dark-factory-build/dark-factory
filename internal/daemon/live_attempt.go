@@ -256,9 +256,10 @@ type liveAttempt struct {
 	// These exact seams are fixed before the owner starts. Production uses the
 	// concrete Store renewal below; daemon tests replace it or pause one phase
 	// to prove ambiguous Store and operation-gate schedules causally.
-	renewLease         terminalLeaseRenewal
-	beforeRenewCommit  func()
-	beforeAttachEffect func()
+	renewLease               terminalLeaseRenewal
+	beforeRenewCommit        func()
+	beforeAttachEffect       func()
+	beforeProviderStateCheck func() error
 }
 
 func newLiveAttempt(daemon *Daemon, runID kernel.RunID, sessionID kernel.TerminalSessionID, controller *runner.AttemptController) *liveAttempt {

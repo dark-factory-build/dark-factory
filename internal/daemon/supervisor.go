@@ -35,14 +35,18 @@ type SupervisorSpec struct {
 	UnsettledCompletion func(kernel.RunID, error)
 
 	// These unexported hooks are package-test-only ambiguity seams. Production
-	// callers outside daemon cannot set them. afterProviderRelease runs only
-	// after the real provider release frame has been written; it can report a
-	// lost acknowledgement without replacing that irreversible write.
-	activateOuter         func(*runner.OwnedChild) (runner.FileIdentity, error)
-	afterAdmission        func() error
-	afterProviderRelease  func() error
-	reconcileAdmission    func(context.Context, kernel.AdmissionKeys) (kernel.AdmissionResult, error)
-	beforeProviderRelease func()
+	// callers outside daemon cannot set them. beforeProviderStateCheck runs
+	// inside the accepted release command immediately before the durable state
+	// reread; it can arrange a competing finalization without changing the
+	// production release path. afterProviderRelease runs only after the real
+	// provider release frame has been written; it can report a lost
+	// acknowledgement without replacing that irreversible write.
+	activateOuter            func(*runner.OwnedChild) (runner.FileIdentity, error)
+	afterAdmission           func() error
+	beforeProviderStateCheck func() error
+	afterProviderRelease     func() error
+	reconcileAdmission       func(context.Context, kernel.AdmissionKeys) (kernel.AdmissionResult, error)
+	beforeProviderRelease    func()
 
 	// admissionObserved is a package-private scheduling hint. The Darwin
 	// supervisor invokes it exactly once after AdmitNext commits successfully;

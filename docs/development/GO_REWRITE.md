@@ -1501,8 +1501,11 @@ the exact terminal acknowledgement. Cancellation remains observable even when
 durable cleanup reaches terminal, and terminal observation prevents a second
 termination. The descendant fixture now proves one exact live TERM-ignoring
 child in the provider group before cleanup and exact absence afterward instead
-of relying on interactive-shell `$!` behavior. Independent review returned
-**ALLOW**; the integrated six-test lifecycle matrix passed in `4.407s`.
+of relying on interactive-shell `$!` behavior. The finalization-before-release
+fixture now commits its competing outcome inside the accepted release-command
+state check, making the load-only test boundary causal without changing
+production behavior. Independent review returned **ALLOW**; the integrated
+six-test lifecycle matrix passed in `4.407s`.
 
 The remaining daemon setup failures were fixture defects, not waived product
 guards. Darwin's lexical `/var` alias violated the production canonical-path

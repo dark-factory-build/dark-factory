@@ -750,28 +750,22 @@ func TestSupervisorCompletionBeforeProviderExitKeepsFirstOutcome(t *testing.T) {
 
 func TestSupervisorDoesNotReleaseAfterFinalizationWinsBeforeProviderRelease(t *testing.T) {
 	fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
-	var hookErr error
-	fixture.spec.beforeProviderRelease = func() {
+	fixture.spec.beforeProviderStateCheck = func() error {
 		recoverable, err := fixture.store.RecoverableRuns(context.Background())
 		if err != nil {
-			hookErr = err
-			return
+			return err
 		}
 		if len(recoverable) != 1 {
-			hookErr = fmt.Errorf("recoverable run count = %d, want one", len(recoverable))
-			return
+			return fmt.Errorf("recoverable run count = %d, want one", len(recoverable))
 		}
 		proposal, err := kernel.NewSuccessProposal("outcome-before-release")
 		if err != nil {
-			hookErr = err
-			return
+			return err
 		}
-		_, hookErr = fixture.store.ProposeAttemptOutcome(context.Background(), recoverable[0].Run.CredentialDigest, proposal, supervisorTime())
+		_, err = fixture.store.ProposeAttemptOutcome(context.Background(), recoverable[0].Run.CredentialDigest, proposal, supervisorTime())
+		return err
 	}
 	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
-	if hookErr != nil {
-		t.Fatal(hookErr)
-	}
 	if err == nil || !errors.Is(err, kernel.ErrConflict) {
 		t.Fatalf("release after finalization error = %v, want conflict", err)
 	}

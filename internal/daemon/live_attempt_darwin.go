@@ -155,6 +155,13 @@ func (attempt *liveAttempt) handleBeforeRelease(ctx context.Context, command liv
 		// it; a stale supervisor observation can never release a run that has
 		// already entered finalizing.
 		attempt.daemon.operationMu.Lock()
+		if attempt.beforeProviderStateCheck != nil {
+			if hookErr := attempt.beforeProviderStateCheck(); hookErr != nil {
+				attempt.daemon.operationMu.Unlock()
+				command.result <- hookErr
+				return false, hookErr
+			}
+		}
 		storeCtx, cancel := context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
 		run, found, err := attempt.daemon.store.Run(storeCtx, attempt.runID)
 		cancel()
