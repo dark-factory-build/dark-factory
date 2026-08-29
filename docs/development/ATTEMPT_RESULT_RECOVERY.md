@@ -162,11 +162,11 @@ state.
   resultDerivedTerminalClose (same-millisecond fingerprint wedge).
 - Checkpoint ALLOW conditions resolved here: `go build ./...` restored;
   full `go test ./...` green.
-- Deferred with reasons: the legacy terminal-close methods and
-  resultDerivedTerminalClose now have zero production callers but remain
-  load-bearing for kernel tests of no-result histories; their deletion
-  drags a multi-file kernel test migration and is left for the simplicity
-  audit with the wedge no longer reachable from production code.
+- Done in the simplicity audit (ff0ca005): the legacy terminal-close
+  methods and resultDerivedTerminalClose are deleted; kernel test
+  fixtures now close sessions by reconstructing the run's exact
+  AttemptResult through CloseTerminalAfterRunner, and no-result histories
+  are pinned as deliberately non-terminal.
 
 ## Built in the activation phase (factoryd)
 
