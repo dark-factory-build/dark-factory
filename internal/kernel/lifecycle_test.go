@@ -927,11 +927,7 @@ func finalizingReleasedRun(t *testing.T, role AgentRole, policy VerificationPoli
 		store.Close()
 		t.Fatalf("read finalizing run: %+v, found=%v, err=%v", current, found, err)
 	}
-	session = terminalSessionForRunTest(t, store, running.ID)
-	if _, err := store.CloseActiveTerminalSession(context.Background(), running.ID, session.ID, current.Revision, session.Revision, mustTime(t, 53)); err != nil {
-		store.Close()
-		t.Fatal(err)
-	}
+	closeTerminalSessionAtCurrent(t, store, running.ID, 53)
 	finalizing, found, err = store.Run(context.Background(), running.ID)
 	if err != nil || !found {
 		store.Close()

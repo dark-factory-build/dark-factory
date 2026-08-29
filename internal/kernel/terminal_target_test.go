@@ -104,10 +104,7 @@ func TestResolveAgentTerminalTargetOldHeadCannotSelectReplacementRun(t *testing.
 	if err != nil || !found {
 		t.Fatalf("finalizing run = %+v, found=%v, err=%v", current, found, err)
 	}
-	session := terminalSessionForRunTest(t, store, current.ID)
-	if _, err := store.CloseActiveTerminalSession(context.Background(), current.ID, session.ID, current.Revision, session.Revision, mustTime(t, 55)); err != nil {
-		t.Fatal(err)
-	}
+	closeTerminalSessionAtCurrent(t, store, current.ID, 55)
 	current, found, err = store.Run(context.Background(), first.ID)
 	if err != nil {
 		t.Fatal(err)

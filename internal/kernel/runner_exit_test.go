@@ -57,28 +57,11 @@ func TestRecoveredAbsenceCannotUseLiveTerminalClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fresh, found, err := store.Run(context.Background(), run.ID)
-	if err != nil || !found {
+	// The generic live-close authority that once had to refuse recovered
+	// evidence no longer exists; the only close is the exact result edge,
+	// which is exercised elsewhere. Nothing remains to attack here.
+	if _, _, err := store.Run(context.Background(), run.ID); err != nil {
 		t.Fatal(err)
-	}
-	session := terminalSessionForRunTest(t, store, run.ID)
-	beforeFactory, err := store.Factory(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.CloseActiveTerminalSession(context.Background(), run.ID, session.ID, fresh.Revision, session.Revision, mustTime(t, 60)); !errors.Is(err, ErrConflict) {
-		t.Fatalf("recovered evidence through live close = %v", err)
-	}
-	after, _, err := store.Run(context.Background(), run.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	afterFactory, err := store.Factory(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if after.Revision != fresh.Revision || afterFactory.Head != beforeFactory.Head {
-		t.Fatalf("rejected live close changed authority: run %d -> %d, head %d -> %d", fresh.Revision.Int64(), after.Revision.Int64(), beforeFactory.Head.Int64(), afterFactory.Head.Int64())
 	}
 }
 
@@ -97,9 +80,6 @@ func TestDeclaredNoStartFailureClosesWithoutInventedExit(t *testing.T) {
 	session := terminalSessionForRunTest(t, store, run.ID)
 	if session.State != TerminalSessionClosed || session.ActivatedAt != nil {
 		t.Fatalf("no-start failure left session open = %+v", session)
-	}
-	if _, err := store.CloseActiveTerminalSession(context.Background(), run.ID, session.ID, fresh.Revision, session.Revision, mustTime(t, 40)); !errors.Is(err, ErrConflict) {
-		t.Fatalf("closed no-start session accepted active close = %v", err)
 	}
 	if fresh.ProviderExit != nil || fresh.RunnerExit != nil {
 		t.Fatalf("no-start failure invented exits: provider=%+v runner=%+v", fresh.ProviderExit, fresh.RunnerExit)
@@ -171,17 +151,17 @@ func TestRecoveredRunnerAbsenceFromRunningRunRevokesAuthorityAndRoundTrips(t *te
 	if err != nil || !found {
 		t.Fatalf("unresolved recovered reload = %+v, found=%v, err=%v", fresh, found, err)
 	}
-	session = terminalSessionForRunTest(t, reopened, run.ID)
-	if _, err := reopened.CloseRecoveredActiveTerminalSession(context.Background(), run.ID, session.ID, fresh.Revision, session.Revision, mustTime(t, 60)); err != nil {
-		t.Fatal(err)
+	// A no-result history deliberately cannot terminalize: the recovered
+	// close authority is gone, the exact result edge cannot authenticate a
+	// recovered-absence provider exit, and the finalizer refuses the open
+	// session. The run stays finalizing and discoverable — the wedge is the
+	// design, not a gap.
+	if _, err := reopened.FinalizeRun(context.Background(), run.ID, fresh.Revision, mustTime(t, 60)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("no-result history terminalized without result authority = %v", err)
 	}
 	fresh, found, err = reopened.Run(context.Background(), run.ID)
-	if err != nil || !found {
-		t.Fatalf("closed running reload = %+v, found=%v, err=%v", fresh, found, err)
-	}
-	terminal, err := reopened.FinalizeRun(context.Background(), run.ID, fresh.Revision, mustTime(t, 60))
-	if err != nil || terminal.Phase != RunTerminal || terminal.Terminal == nil || terminal.Terminal.code != FailureInternal {
-		t.Fatalf("running disappearance terminal = %+v, %v", terminal, err)
+	if err != nil || !found || fresh.Phase != RunFinalizing {
+		t.Fatalf("wedged no-result run = %+v, found=%v, err=%v", fresh, found, err)
 	}
 }
 
@@ -331,6 +311,12 @@ func releaseAllRunResources(t *testing.T, store *Store, runID RunID, at int64) {
 	}
 }
 
+// closeTerminalSessionAtCurrent closes the fixture's session through the one
+// close authority production retains: reauthenticating the run's exact
+// attempt result. The result is reconstructed from the fixture's own durable
+// facts (digests, runtime and provider identities, the recorded provider
+// exit), so any fixture history the production grammar cannot close fails
+// loudly here instead of borrowing deleted generic authority.
 func closeTerminalSessionAtCurrent(t testing.TB, store *Store, runID RunID, at int64) Run {
 	t.Helper()
 	run, found, err := store.Run(context.Background(), runID)
@@ -338,28 +324,31 @@ func closeTerminalSessionAtCurrent(t testing.TB, store *Store, runID RunID, at i
 		t.Fatalf("read run for terminal close: %+v, found=%v, err=%v", run, found, err)
 	}
 	session := terminalSessionForRunTest(t, store, runID)
-	switch session.State {
-	case TerminalSessionDeclared:
-		_, err = store.CloseDeclaredTerminalSession(context.Background(), runID, session.ID, run.Revision, session.Revision, mustTimeTB(t, at))
-	case TerminalSessionActive:
-		_, err = store.CloseActiveTerminalSession(context.Background(), runID, session.ID, run.Revision, session.Revision, mustTimeTB(t, at))
-	case TerminalSessionReleasing:
-		if session.ActivatedAt == nil {
-			_, err = store.CloseDeclaredTerminalSession(context.Background(), runID, session.ID, run.Revision, session.Revision, mustTimeTB(t, at))
-		} else {
-			_, err = store.CloseActiveTerminalSession(context.Background(), runID, session.ID, run.Revision, session.Revision, mustTimeTB(t, at))
-		}
-	case TerminalSessionUnresolved:
-		if session.ActivatedAt == nil {
-			_, err = store.CloseRecoveredTerminalSession(context.Background(), runID, session.ID, run.Revision, session.Revision, mustTimeTB(t, at))
-		} else {
-			_, err = store.CloseRecoveredActiveTerminalSession(context.Background(), runID, session.ID, run.Revision, session.Revision, mustTimeTB(t, at))
-		}
-	case TerminalSessionClosed:
+	if session.State == TerminalSessionClosed {
 		return run
 	}
+	resources := resourcesForRunTB(t, store, runID)
+	runtime := resourceOfKindTB(t, resources, ResourceRuntimeRoot)
+	provider := resourceOfKindTB(t, resources, ResourceProviderProcess)
+	if run.ProviderExit == nil {
+		t.Fatalf("fixture history has no provider exit; the result close cannot authenticate: run=%+v", run)
+	}
+	var exit AttemptResultExit
+	if code, hasCode := run.ProviderExit.Code(); hasCode {
+		exit, err = NewAttemptResultExitCode(code)
+	} else {
+		signal, _ := run.ProviderExit.Signal()
+		exit, err = NewAttemptResultExitSignal(signal)
+	}
 	if err != nil {
-		t.Fatalf("close terminal session: %v; run=%+v session=%+v resources=%+v", err, run, session, resourcesForRunTB(t, store, runID))
+		t.Fatalf("fixture provider exit is not result-representable: %+v err=%v", run.ProviderExit, err)
+	}
+	result, err := NewInnerConvergedAttemptResult(runID, run.CredentialDigest, run.resultProofDigest, runtime.Identity, provider.Identity, exit)
+	if err != nil {
+		t.Fatalf("reconstruct fixture attempt result: %v", err)
+	}
+	if _, _, err := store.CloseTerminalAfterRunner(context.Background(), result, run.Revision, session.Revision, mustTimeTB(t, at)); err != nil {
+		t.Fatalf("result close: %v; run=%+v session=%+v resources=%+v", err, run, session, resources)
 	}
 	closed, found, err := store.Run(context.Background(), runID)
 	if err != nil || !found {

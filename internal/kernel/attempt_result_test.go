@@ -516,15 +516,11 @@ func TestLiveRunnerExitReleaseAndResultCloseAreExact(t *testing.T) {
 	if err != nil || replay.Revision != afterExit.Revision || replayedRunner.Revision != released.Revision || afterReplay.Head != after.Head {
 		t.Fatalf("live exit replay = run %+v runner %+v head=%d/%d err=%v", replay, replayedRunner, after.Head.Int64(), afterReplay.Head.Int64(), err)
 	}
-	if _, err := store.CloseActiveTerminalSession(ctx, run.ID, session.ID, afterExit.Revision, session.Revision, mustTime(t, 32)); !errors.Is(err, ErrConflict) {
-		t.Fatalf("legacy close bypassed result authority = %v", err)
-	}
+	// The legacy generic close authority no longer exists to attack: the
+	// exact result reauthentication below is the only close edge.
 	closedRun, closed, err := store.CloseTerminalAfterRunner(ctx, result, afterExit.Revision, session.Revision, mustTime(t, 32))
 	if err != nil || closed.State != TerminalSessionClosed {
 		t.Fatalf("exact result close = run %+v session %+v err=%v", closedRun, closed, err)
-	}
-	if _, err := store.CloseActiveTerminalSession(ctx, run.ID, session.ID, afterExit.Revision, session.Revision, mustTime(t, 99)); !errors.Is(err, ErrConflict) {
-		t.Fatalf("legacy close replay bypassed result authority = %v", err)
 	}
 }
 
