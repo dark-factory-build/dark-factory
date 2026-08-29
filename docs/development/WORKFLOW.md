@@ -160,8 +160,10 @@ explicit backup and rollback decision. Migration never implies boot approval.
 
 ## CI and GitHub
 
-The pull-request workflow runs the shared source gate on hosted macOS and the
-Linux source-only lane. The aggregate `required` context is the merge gate.
+The pull-request workflow runs the Darwin-only Go runtime gate on hosted
+macOS, the separate maintainer control-plane gate on hosted Ubuntu, and the
+exact-head review check in the merge queue. Their aggregate `required` context
+is the merge gate; there is no Linux runtime lane yet.
 
 Merges go through a **merge queue**, not straight to `main`. An approved,
 green pull request is enqueued; GitHub then builds `main` + every entry ahead

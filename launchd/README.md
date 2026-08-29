@@ -17,11 +17,6 @@ evidence-first: it issues no launchctl verb until a matching receipt or
 an exactly rendered plist proves the label maps to the named home, so a
 wrong `--home` or a foreign plist refuses without touching launchd.
 
-The `com.dark-factory.factoryd.plist.template` file is the historical
-Rust-era template. The Go plist is rendered in code, never from this
-template; the file remains only until the Rust deletion removes the
-release chain that references it.
-
 Development daemons still run directly with a temporary
 `DARK_FACTORY_HOME` and an explicit private socket — see the
 [development workflow](../docs/development/WORKFLOW.md). Tests and the

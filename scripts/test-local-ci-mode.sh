@@ -4,6 +4,7 @@ set -eu
 repository_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 gate="$repository_root/scripts/local-ci.sh"
 contributing="$repository_root/CONTRIBUTING.md"
+workflow_doc="$repository_root/docs/development/WORKFLOW.md"
 ci="$repository_root/.github/workflows/ci.yml"
 stale_control_plane_workflow="$repository_root/control-plane/.github/workflows/ci.yml"
 
@@ -15,6 +16,13 @@ fail() {
 # The gate is single-mode: the Rust workspace it once branched for is deleted,
 # so a mode argument must be refused rather than silently ignored.
 grep -Fq 'usage: scripts/local-ci.sh' "$gate" || fail "gate lost its usage guard"
+set +e
+usage_output=$("$gate" obsolete-mode 2>&1)
+usage_status=$?
+set -e
+[ "$usage_status" -eq 2 ] || fail "gate accepted an obsolete mode argument"
+[ "$usage_output" = "usage: scripts/local-ci.sh" ] \
+    || fail "gate did not reject an argument with the exact usage error"
 if grep -Eq 'legacy-rust|linux-source' "$gate"; then
     fail "gate still branches on a retired Rust mode"
 fi
@@ -50,8 +58,18 @@ for retired in macos-contributor-smoke.sh test-macos-contributor-smoke.sh \
     [ ! -e "$repository_root/scripts/$retired" ] \
         || fail "retired Rust-era script survives: $retired"
 done
+[ ! -e "$repository_root/launchd/com.dark-factory.factoryd.plist.template" ] \
+    || fail "retired Rust launchd template survives"
+if grep -Eq 'TUI|shared Rust operation|factory-tui|area:tui' \
+    "$repository_root/.github/ISSUE_TEMPLATE/bug_report.yml" \
+    "$repository_root/.github/ISSUE_TEMPLATE/feature_request.yml"; then
+    fail "issue templates still direct contributors to the retired Rust/TUI product"
+fi
 
-e2e_tool_fixture_line=$(grep -n -F './scripts/test-go-e2e-tools.sh' "$gate" \
+e2e_tool_fixture_count=$(grep -Ec '^[[:space:]]*\./scripts/test-go-e2e-tools\.sh[[:space:]]*$' "$gate" || true)
+[ "$e2e_tool_fixture_count" -eq 1 ] \
+    || fail "gate must run the Go E2E tool fixture exactly once"
+e2e_tool_fixture_line=$(grep -n -E '^[[:space:]]*\./scripts/test-go-e2e-tools\.sh[[:space:]]*$' "$gate" \
     | head -1 | cut -d: -f1)
 owned_gate_line=$(grep -n -F '/bin/sh "$script_dir/go-ci-owned.sh"' "$gate" \
     | head -1 | cut -d: -f1)
@@ -88,6 +106,11 @@ grep -Fxq './scripts/local-ci.sh' "$contributing" \
     || fail "CONTRIBUTING lost the gate command"
 if grep -Eq 'linux-source|linux-contributor-smoke' "$contributing"; then
     fail "CONTRIBUTING still documents a retired Rust gate mode"
+fi
+grep -Fq 'there is no Linux runtime lane yet' "$workflow_doc" \
+    || fail "workflow does not state the current Darwin-only CI boundary"
+if grep -Fq 'Linux source-only lane' "$workflow_doc"; then
+    fail "workflow still claims the retired Linux source lane"
 fi
 
 sh -n "$gate"

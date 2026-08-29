@@ -1,5 +1,5 @@
 name: Bug report
-description: Something the daemon, CLI, TUI, or a provider attempt does wrong
+description: Something the daemon, CLI, web console, or a provider attempt does wrong
 labels: ["bug"]
 body:
   - type: textarea
@@ -13,7 +13,7 @@ body:
     id: repro
     attributes:
       label: How to reproduce
-      description: The smallest `factoryctl` sequence (or TUI keys) that shows it. Use a throwaway `$DARK_FACTORY_HOME`, never your live one.
+      description: The smallest `factoryctl` sequence or web-console actions that show it. Use a throwaway `$DARK_FACTORY_HOME`, never your live one.
       render: sh
     validations:
       required: true

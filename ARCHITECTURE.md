@@ -519,7 +519,7 @@ enforcement claims only what the cited code and tests do at this revision.
 
 ## Deliberate non-goals
 
-- No new crate, ORM, actor framework, repository/service trait with one
+- No new package, ORM, actor framework, repository/service interface with one
   implementation, generic saga, or event-sourcing framework.
 - No protection from a hostile process running as the operator. Bearer scoping
   prevents confused/cooperative cross-attempt behavior; real isolation needs a

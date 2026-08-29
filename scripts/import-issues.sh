@@ -41,7 +41,7 @@ awk -v dir="$work" '
 area_label() {
     case "$1" in
         "Sessions and hooks"|"Startup and webhooks") echo "area:daemon" ;;
-        "TUI") echo "area:tui" ;;
+        "TUI") echo "area:console" ;;
         "Security and state files") echo "area:providers" ;;
         "Toolchain") echo "area:ci" ;;
         "Stale documentation"*) echo "area:docs" ;;

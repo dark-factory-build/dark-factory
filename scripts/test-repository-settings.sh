@@ -12,6 +12,7 @@ set -eu
 repository_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 workflow="$repository_root/.github/workflows/ci.yml"
 publisher="$repository_root/scripts/github-repo-settings.sh"
+issue_importer="$repository_root/scripts/import-issues.sh"
 
 grep -Fq '  required:' "$workflow"
 # Extracted, not grepped. The free-floating `grep -Fq '    if: always()'` this
@@ -139,6 +140,12 @@ grep -Fq '"context": "required"' "$publisher"
 # installed integration could post a green `required` status and satisfy the
 # ruleset.
 grep -Fq '"integration_id": 15368' "$publisher"
+grep -Fq 'area:console|1D76DB|loopback web console, browser protocol, client, and UI' "$publisher"
+grep -Fq '"TUI") echo "area:console"' "$issue_importer"
+if grep -Eq 'area:tui|factory-tui' "$publisher" "$issue_importer"; then
+    echo "repository label surfaces still name the retired TUI" >&2
+    exit 1
+fi
 # The review gate runs only on `merge_group`, so these two are load-bearing for
 # rule 2's enforcement and not merely for CI cost: without the queue the gate
 # never runs, and under `HEADGREEN` only the last entry of a group is required,
