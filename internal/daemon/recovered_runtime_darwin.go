@@ -384,9 +384,11 @@ func inspectRecoveredRuntimeCensus(rootFD int, device uint64) (map[string]unix.S
 		return nil, invalidContract(nil)
 	}
 	// The artifact writer is the outer attempt-runner target, which executes
-	// only after the durable outer marker and always after the token publish.
-	// Content rules stay in authentication; the census only pins provenance.
-	if result && (!outer || !token) {
+	// only after the durable outer marker. Content rules stay in authentication;
+	// the census only pins provenance. A missing token needs no arm here: the
+	// outer marker this rule demands is itself residue, so `residue && !token`
+	// above already refuses every tokenless artifact.
+	if result && !outer {
 		return nil, invalidContract(nil)
 	}
 	if result && gateScratch {
