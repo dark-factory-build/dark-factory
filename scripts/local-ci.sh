@@ -35,6 +35,10 @@ fi
 ./scripts/test-github-step-summary.sh
 ./scripts/test-verify-adversarial-review.sh
 ./scripts/test-inline-chokepoint.sh
+# The deleted Linux job was this fixture's only caller. It asserts the
+# `required` aggregate's shape against the publisher, which is exactly what a
+# job deletion can silently invalidate, so the gate runs it now.
+./scripts/test-repository-settings.sh
 
 # The authoritative source gate is the Go gate: gofmt, go vet, the full serial
 # and race suites, the TypeScript client proof, and the browser, daemon and
