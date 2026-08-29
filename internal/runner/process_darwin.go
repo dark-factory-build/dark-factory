@@ -1078,6 +1078,10 @@ func killRemainingGroup(leader Identity) error {
 // exactly where the per-member-signal AST guard can see it.
 var testGroupSignalResult func(error) error
 
+// groupSignalSettle bounds how long a failed group signal re-samples the
+// census before deciding. It absorbs snapshot lag, never real liveness.
+const groupSignalSettle = 250 * time.Millisecond
+
 func signalOwnedGroup(leader Identity, signal unix.Signal) error {
 	census, err := censusOwnedGroup(leader)
 	if err != nil {
@@ -1093,14 +1097,27 @@ func signalOwnedGroup(leader Identity, signal unix.Signal) error {
 	if signalErr == nil {
 		return nil
 	}
-	// Re-census after ANY signal error. The census, not the errno, is the
+	// Re-census after ANY signal error: the census, not the errno, is the
 	// absence authority, and Darwin reports more than one errno for a group
 	// that has already converged.
-	census, err = censusOwnedGroup(leader)
-	if err != nil {
-		return err
+	//
+	// One sample is not proof. censusOwnedGroup reads a kern.proc.pgrp
+	// snapshot, which can still list a member the kernel's own killpg walk
+	// has already passed over — observed as EPERM answered by a census that
+	// still claims life. Re-sample within a bounded settle window; a group
+	// that is genuinely alive simply exhausts it and stays unresolved, and
+	// the caller re-signals.
+	deadline := time.Now().Add(groupSignalSettle)
+	for {
+		census, err = censusOwnedGroup(leader)
+		if err != nil {
+			return err
+		}
+		if !census.hasLiveMember || !time.Now().Before(deadline) {
+			return classifyGroupSignal(signalErr, !census.hasLiveMember)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	return classifyGroupSignal(signalErr, !census.hasLiveMember)
 }
 
 // classifyGroupSignal forgives a failed group signal only when the exact
