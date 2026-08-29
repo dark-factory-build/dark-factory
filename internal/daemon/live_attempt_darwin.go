@@ -717,7 +717,17 @@ func (attempt *liveAttempt) handleAttach(attachment *TerminalAttachment, session
 	// AttachTerminal holds the operation gate before this command enters the
 	// owner mailbox. An attach accepted before finalizing wins; one queued after
 	// the durable boundary reloads that state and is refused.
-	if !attempt.readySeen || attempt.resultSeen {
+	if attempt.resultSeen {
+		// The result is already in flight to the Store: the attach window is
+		// over and the durable world has moved past the client's pinned target.
+		// Conflict maps to the typed stale arm so the client re-resolves.
+		return kernel.ErrConflict
+	}
+	if !attempt.readySeen {
+		// The supervisor commits session activation from its own thread, so a
+		// client can observe an active session and attach before this owner has
+		// consumed the runner's ready frame. That attach is early, not wrong:
+		// it maps to the typed retryable arm, never to an internal error.
 		return ErrTerminalNotReady
 	}
 	if sessionID == (kernel.TerminalSessionID{}) || sessionID != attempt.sessionID {

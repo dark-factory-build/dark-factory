@@ -652,6 +652,11 @@ func mapBrowserError(err error) error {
 		return browser.ErrTooLarge
 	case errors.Is(err, kernel.ErrBusy):
 		return browser.ErrRateLimited
+	case errors.Is(err, ErrTerminalNotReady):
+		// The owner has not yet consumed the runner's ready frame for a session
+		// the Store already shows active. Retryable busyness, not an internal
+		// failure: the client retries the same target and converges.
+		return browser.ErrRateLimited
 	default:
 		return err
 	}

@@ -7,9 +7,43 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
+
+func TestLiveAttemptAttachBeforeReadyIsTypedRetryable(t *testing.T) {
+	runID, sessionID := liveTestIDs(t, 11101)
+	attempt := newLiveAttempt(nil, runID, sessionID, nil)
+	attachment := &TerminalAttachment{queue: make(chan TerminalEvent, terminalSubscriberCap)}
+	revision, err := kernel.NewRevision(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The supervisor can commit session activation before this owner consumes
+	// the runner's ready frame. An attach in that window is early, not wrong:
+	// it must classify as retryable busyness on the wire, never internal.
+	if err := attempt.handleAttach(attachment, sessionID, revision, revision, 0); !errors.Is(err, ErrTerminalNotReady) {
+		t.Fatalf("attach before ready = %v", err)
+	}
+	if mapped := mapBrowserError(ErrTerminalNotReady); !errors.Is(mapped, browser.ErrRateLimited) {
+		t.Fatalf("not-ready wire mapping = %v", mapped)
+	}
+	// After the result is seen the attach window is over: the durable world
+	// moved past the pinned target, so the client re-resolves via the typed
+	// stale arm instead of retrying in place.
+	attempt.readySeen = true
+	attempt.resultSeen = true
+	if err := attempt.handleAttach(attachment, sessionID, revision, revision, 0); !errors.Is(err, kernel.ErrConflict) {
+		t.Fatalf("attach after result = %v", err)
+	}
+	if mapped := mapBrowserError(kernel.ErrConflict); !errors.Is(mapped, browser.ErrStale) {
+		t.Fatalf("post-result wire mapping = %v", mapped)
+	}
+	if len(attempt.subs) != 0 || len(attempt.correlations) != 0 {
+		t.Fatal("refused attaches changed subscribers")
+	}
+}
 
 func TestLiveAttemptGlobalResetAdvancesEveryObserverCursor(t *testing.T) {
 	runID, sessionID := liveTestIDs(t, 10006)
