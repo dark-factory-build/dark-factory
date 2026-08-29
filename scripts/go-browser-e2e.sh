@@ -3,6 +3,7 @@ set -eu
 
 script_dir=$(CDPATH= cd -- "$(/usr/bin/dirname "$0")" && pwd -P)
 repository_root=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
+. "$script_dir/go-e2e-tools.sh"
 race=0
 case "$#:${1-}" in
     0:) ;;
@@ -19,27 +20,25 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-node=$(/usr/bin/which node)
-case "$node" in
-    /*) ;;
-    *) echo "go-browser-e2e: Node executable is not absolute" >&2; exit 1 ;;
-esac
+go=$(go_e2e_resolve_tool go "${DARK_FACTORY_E2E_GO-}")
+node=$(go_e2e_resolve_tool node "${DARK_FACTORY_E2E_NODE-}")
+corepack=$(go_e2e_resolve_tool corepack "${DARK_FACTORY_E2E_COREPACK-}")
 
 CDPATH= cd -- "$repository_root"
 export GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off
 if [ "$race" -eq 1 ]; then
-    go build -race -o "$e2e_root/factory-runner" ./cmd/factory-runner
-    go build -race -o "$e2e_root/factoryctl" ./cmd/factoryctl
+    "$go" build -race -o "$e2e_root/factory-runner" ./cmd/factory-runner
+    "$go" build -race -o "$e2e_root/factoryctl" ./cmd/factoryctl
 else
-    go build -o "$e2e_root/factory-runner" ./cmd/factory-runner
-    go build -o "$e2e_root/factoryctl" ./cmd/factoryctl
+    "$go" build -o "$e2e_root/factory-runner" ./cmd/factory-runner
+    "$go" build -o "$e2e_root/factoryctl" ./cmd/factoryctl
 fi
 
 (
     CDPATH= cd -- "$repository_root/web"
-    export COREPACK_ENABLE_NETWORK=0
-    corepack pnpm install --offline --frozen-lockfile --ignore-scripts
-    corepack pnpm --filter @dark-factory/client run build
+    export COREPACK_ENABLE_NETWORK=0 CI=true
+    "$corepack" pnpm install --offline --frozen-lockfile --ignore-scripts
+    "$corepack" pnpm --filter @dark-factory/client run build
 )
 
 export DARK_FACTORY_BROWSER_E2E=1
@@ -54,9 +53,9 @@ case "$count" in
 esac
 
 if [ "$race" -eq 1 ]; then
-    go test -race -timeout=2m -count="$count" -p 1 ./internal/e2e
+    "$go" test -race -timeout=2m -count="$count" -p 1 ./internal/e2e
     echo "go-browser-e2e: PASS ($count serial race run(s))"
 else
-    go test -timeout=2m -count="$count" -p 1 ./internal/e2e
+    "$go" test -timeout=2m -count="$count" -p 1 ./internal/e2e
     echo "go-browser-e2e: PASS ($count serial run(s))"
 fi

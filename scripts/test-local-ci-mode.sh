@@ -88,6 +88,15 @@ for mac_fixture in test-prepare-release-source.sh test-publish-release.sh \
         || fail "macOS mode lost fixture $mac_fixture"
 done
 shared_gate=$(sed -n '/^# Measure after/,$p' "$gate")
+e2e_tool_fixture_line=$(printf '%s\n' "$shared_gate" \
+    | grep -n -F './scripts/test-go-e2e-tools.sh' \
+    | head -1 | cut -d: -f1)
+owned_gate_line=$(printf '%s\n' "$shared_gate" \
+    | grep -n -F '/bin/sh "$script_dir/go-ci-owned.sh"' \
+    | head -1 | cut -d: -f1)
+[ -n "$e2e_tool_fixture_line" ] || fail "shared source gate lost the Go E2E tool fixture"
+[ -n "$owned_gate_line" ] && [ "$e2e_tool_fixture_line" -lt "$owned_gate_line" ] \
+    || fail "Go E2E tool fixture does not run before the heavy Go gate"
 if printf '%s\n' "$shared_gate" \
     | grep -Fq './scripts/test-macos-launchd-release-proof.sh'; then
     fail "shared source gate invokes the macOS launchd fixture"

@@ -67,6 +67,7 @@ esac
 ./scripts/test-github-step-summary.sh
 ./scripts/test-verify-adversarial-review.sh
 ./scripts/test-inline-chokepoint.sh
+./scripts/test-go-e2e-tools.sh
 
 case "$mode" in
     macos)

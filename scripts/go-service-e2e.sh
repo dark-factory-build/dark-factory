@@ -3,6 +3,7 @@ set -eu
 
 script_dir=$(CDPATH= cd -- "$(/usr/bin/dirname "$0")" && pwd -P)
 repository_root=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
+. "$script_dir/go-e2e-tools.sh"
 case "$#" in
     0) ;;
     *) echo "usage: $0" >&2; exit 2 ;;
@@ -34,9 +35,10 @@ CDPATH= cd -- "$repository_root"
 export GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off
 # All three binaries share one directory: the installed service is exactly
 # the sibling set the invoking factoryctl shipped with.
-go build -o "$e2e_root/factoryd" ./cmd/factoryd
-go build -o "$e2e_root/factoryctl" ./cmd/factoryctl
-go build -o "$e2e_root/factory-runner" ./cmd/factory-runner
+go=$(go_e2e_resolve_tool go "${DARK_FACTORY_E2E_GO-}")
+"$go" build -o "$e2e_root/factoryd" ./cmd/factoryd
+"$go" build -o "$e2e_root/factoryctl" ./cmd/factoryctl
+"$go" build -o "$e2e_root/factory-runner" ./cmd/factory-runner
 
 export DARK_FACTORY_SERVICE_E2E=1
 export DARK_FACTORY_E2E_SERVICE_LABEL="$service_label"
@@ -44,5 +46,5 @@ export DARK_FACTORY_E2E_FACTORYD="$e2e_root/factoryd"
 export DARK_FACTORY_E2E_FACTORYCTL="$e2e_root/factoryctl"
 export DARK_FACTORY_E2E_RUNNER="$e2e_root/factory-runner"
 
-go test -timeout=8m -count=1 -p 1 -run TestBlackBoxServiceLifecycle ./internal/e2e
+"$go" test -timeout=8m -count=1 -p 1 -run TestBlackBoxServiceLifecycle ./internal/e2e
 echo "go-service-e2e: PASS"

@@ -6448,6 +6448,13 @@ Real Go/TypeScript browser PTY lifecycle candidate on 2026-08-27:
   modes. The Node harness uses only the built client. Its sole test dependency
   is `ws@8.18.3`, needed to set the exact production Origin header; no browser
   protocol or lifecycle behavior is reimplemented in the harness.
+- The authoritative gate passes its identity-checked absolute Go, Node and
+  Corepack paths explicitly into every E2E stage. The wrappers use those paths
+  under the bounded environment and retain direct-script fallback only through
+  absolute executable validation; no E2E build, test or package-manager step
+  depends on the bounded PATH. The browser wrapper also fixes `CI=true` for its
+  offline package step, so direct noninteractive proof cannot fall into a pnpm
+  purge prompt.
 - Each subtest creates a private temporary Git repository, Go home, Store,
   owner-only API socket, runtime parent and loopback browser listener. It uses
   real `Daemon.RunNext`, one-time pairing, Host/Origin validation, the real
@@ -6575,6 +6582,9 @@ daemon lifecycle on branch s1-finish:
   must declare its own outcome exactly as a real provider session does; a
   provider that exits silently fails honestly with "provider exited
   before an attempt outcome".
+- `scripts/go-service-e2e.sh` uses the same explicit-tool stage boundary for
+  its freshly built sibling binaries and lifecycle proof; the pre-gate shell
+  fixture verifies the handoff without starting a daemon or managed service.
 - Gates on the branch: gofmt/vet clean, `go build ./...`, the full serial
   module suite green twice consecutively, `go test -race` for
   internal/daemon (167s) and cmd/factoryd (26s), the browser PTY E2E and

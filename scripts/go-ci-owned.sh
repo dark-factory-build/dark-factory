@@ -13,6 +13,7 @@ CDPATH= cd -- "$repository_root"
 . "$script_dir/local-ci-environment.sh"
 . "$script_dir/go-gate-environment.sh"
 . "$script_dir/go-fast-stage.sh"
+. "$script_dir/go-e2e-tools.sh"
 if ! go_gate_environment_setup; then go_gate_environment_cleanup || true; exit 1; fi
 
 go_gate_status=0
@@ -48,13 +49,13 @@ go_gate_stage 1800 "$go_gate_go" test -race -timeout=30m -count=1 -p 1 ./...
 
 go_gate_ci_web_proof || exit $?
 echo "go-ci: serial real Go/TypeScript browser PTY E2E"
-go_gate_stage 600 "$script_dir/go-browser-e2e.sh"
+go_gate_e2e_stage 600 "$script_dir/go-browser-e2e.sh"
 echo "go-ci: serial real Go/TypeScript browser PTY race E2E"
-go_gate_stage 600 "$script_dir/go-browser-e2e.sh" --race
+go_gate_e2e_stage 600 "$script_dir/go-browser-e2e.sh" --race
 echo "go-ci: serial black-box daemon lifecycle E2E"
-go_gate_stage 900 "$script_dir/go-daemon-e2e.sh"
+go_gate_e2e_stage 900 "$script_dir/go-daemon-e2e.sh"
 echo "go-ci: serial black-box managed service lifecycle E2E"
-go_gate_stage 900 "$script_dir/go-service-e2e.sh"
+go_gate_e2e_stage 900 "$script_dir/go-service-e2e.sh"
 echo "go-ci: git diff --check"
 go_gate_stage 120 "$go_gate_git" diff --check
 echo "go-ci: NOTE: final system census remains a cutover-only gate"
