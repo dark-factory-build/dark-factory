@@ -265,3 +265,41 @@ func TestLiveAttemptReplayPendingBytesAreBounded(t *testing.T) {
 		t.Fatal("subscriber survived pending byte overflow")
 	}
 }
+
+func TestLiveAttemptEffectTypingSeparatesNotReadyFromPublishedResult(t *testing.T) {
+	runID, sessionID := liveTestIDs(t, 11102)
+	controller, peer := readyTerminalEffectController(t)
+	attempt := newLiveAttempt(nil, runID, sessionID, controller)
+	t.Cleanup(func() {
+		_ = controller.Close()
+		_ = peer.Close()
+	})
+	effect := terminalEffect{kind: terminalEffectCheck}
+
+	// Before the runner's ready frame the window opens by itself, so the wire
+	// must type the refusal retryable — the same condition attach reports.
+	result, err := attempt.handleTerminalEffect(effect)
+	if err != nil || !errors.Is(result.err, ErrTerminalNotReady) {
+		t.Fatalf("pre-ready effect = %+v err=%v", result, err)
+	}
+	if mapped := mapBrowserError(result.err); !errors.Is(mapped, browser.ErrRateLimited) {
+		t.Fatalf("pre-ready wire mapping = %v", mapped)
+	}
+
+	// Once the result is published this effect can never succeed. Typing it
+	// retryable would invite a client to spin on a permanent condition, so it
+	// must reach the wire as stale and keep its terminal fence.
+	attempt.readySeen = true
+	attempt.resultSeen = true
+	result, err = attempt.handleTerminalEffect(effect)
+	if err != nil || !errors.Is(result.err, kernel.ErrConflict) {
+		t.Fatalf("post-result effect = %+v err=%v", result, err)
+	}
+	if !result.terminalFence || result.status != runner.TerminalResultRejected {
+		t.Fatalf("post-result effect lost its fence or status: %+v", result)
+	}
+	mapped := mapBrowserError(result.err)
+	if !errors.Is(mapped, browser.ErrStale) || errors.Is(mapped, browser.ErrRateLimited) {
+		t.Fatalf("post-result wire mapping = %v", mapped)
+	}
+}

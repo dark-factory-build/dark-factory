@@ -189,6 +189,14 @@ func (attempt *liveAttempt) handleBeforeRelease(ctx context.Context, command liv
 		err := attempt.shutdownController()
 		command.result <- err
 		return true, err
+	case liveCommandEffect:
+		// Effects answer on effectDone; the result channel is nil for them, so
+		// the shared arm below would block this owner forever. Before release
+		// the terminal is genuinely not serving yet — the retryable window.
+		if command.effectDone != nil {
+			command.effectDone <- terminalEffectResult{status: runner.TerminalResultRejected, err: ErrTerminalNotReady}
+		}
+		return false, nil
 	default:
 		err := ErrTerminalNotReady
 		command.result <- err
@@ -314,7 +322,10 @@ func (attempt *liveAttempt) handleTerminalEffect(effect terminalEffect) (termina
 		if effect.kind == terminalEffectRevoke || effect.kind == terminalEffectRevokeClient || effect.kind == terminalEffectRevokeCurrentBinding {
 			return terminalEffectResult{status: runner.TerminalResultOK, terminalFence: true}, nil
 		}
-		return terminalEffectResult{status: runner.TerminalResultRejected, terminalFence: true, err: ErrTerminalNotReady}, nil
+		// The result is published: this effect can never succeed. Conflict, so
+		// the wire types it stale — ErrTerminalNotReady means "not ready yet"
+		// everywhere, and only that condition is retryable.
+		return terminalEffectResult{status: runner.TerminalResultRejected, terminalFence: true, err: kernel.ErrConflict}, nil
 	}
 	switch effect.kind {
 	case terminalEffectCheck:
