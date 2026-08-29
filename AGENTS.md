@@ -107,7 +107,7 @@ Read-only context unless a task explicitly asks you to edit them:
    suites, the TypeScript client proof, the browser and daemon E2Es,
    `git diff --check`; the retired Rust workspace stays behind
    `--legacy-rust` until its deletion). CI runs the same script on every
-   pull request as the `checks` status the `main` ruleset requires; a PR
+   pull request as part of the `required` status the `main` ruleset demands; a PR
    that isn't green locally won't be green there either.
 8. **Small, coherent commits.** One logical change per commit; don't bundle
    unrelated cleanup into a feature commit.
