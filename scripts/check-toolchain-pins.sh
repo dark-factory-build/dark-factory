@@ -21,6 +21,7 @@ check_pin() {
 check_pin scripts/local-ci.sh "cargo +$toolchain_version fmt" "workspace Rust $toolchain_version"
 check_pin scripts/local-ci.sh "cargo +$toolchain_version clippy" "workspace Rust $toolchain_version"
 check_pin scripts/local-ci.sh "cargo +$toolchain_version test" "workspace Rust $toolchain_version"
+check_pin scripts/local-ci.sh "go-ci-owned.sh" "the authoritative Go gate stage"
 check_pin .github/workflows/ci.yml "rustup toolchain install $toolchain_version" "workspace Rust $toolchain_version"
 
 go_version=$(sed -n 's/^go \([0-9][0-9.]*\)$/\1/p' go.mod)

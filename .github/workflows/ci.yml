@@ -38,7 +38,10 @@ jobs:
     # on the ephemeral hosted runner; letting it fall through would quietly
     # route every gating run onto the persistent shared runner (#54).
     runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'macos-latest' || 'dark-factory-mac' }}
-    timeout-minutes: 45
+    # The Go gate runs the full serial suite, the full race suite, the
+    # TypeScript client proof, and both E2Es back to back; 45 minutes was
+    # sized for the cargo gate and would turn slow-but-green runs red.
+    timeout-minutes: 90
     steps:
       # No actions/checkout: codeload.github.com (which serves an action's
       # tarball) can 429 independently of git itself and has, for over an
@@ -76,20 +79,22 @@ jobs:
           git checkout --force --detach FETCH_HEAD
           git clean -ffdx
 
-      - name: Install the pinned toolchain
-        run: rustup toolchain install 1.88.0 --profile minimal --component clippy,rustfmt --no-self-update
+      # The Go gate pins /opt/homebrew/bin/go and /opt/homebrew/bin/gofmt by
+      # identity, and its web stage needs Node 22+ with Corepack. The owned
+      # runner already satisfies both, so this step is a no-op there; the
+      # hosted runner installs them through Homebrew. GOTOOLCHAIN=local inside
+      # the gate then refuses any Go older than go.mod instead of silently
+      # downloading a different toolchain.
+      - name: Provide the Homebrew Go and Node toolchains
+        run: |
+          set -euxo pipefail
+          [ -x /opt/homebrew/bin/go ] || brew install go
+          node_major=$(node -e 'console.log(process.versions.node.split(".")[0])' 2>/dev/null || echo 0)
+          [ "$node_major" -ge 22 ] || brew install node
+          /opt/homebrew/bin/go version
 
       - name: Run the macOS source gate
         run: ./scripts/local-ci.sh
-
-      - name: Run the macOS causal source smoke
-        run: |
-          cargo +1.88.0 build --locked --workspace
-          ./scripts/macos-contributor-smoke.sh
-          ./scripts/test-macos-contributor-smoke.sh
-
-      - name: Run the disposable launchd release proof
-        run: ./scripts/macos-launchd-release-proof.sh
 
       - name: Publish bounded workflow summary
         if: always()
@@ -117,23 +122,57 @@ jobs:
             } >>"$GITHUB_STEP_SUMMARY"
           fi
 
+  # The retired Rust runtime keeps its exact pre-cutover coverage — the cargo
+  # gate stages, the workspace build, the macOS contributor smoke, and the
+  # disposable launchd release proof — in one clearly named job until the
+  # Rust deletion lands. Every step here ran inside `checks` before the Go
+  # gate became authoritative; nothing was dropped, only relocated.
+  legacy-rust:
+    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'macos-latest' || 'dark-factory-mac' }}
+    timeout-minutes: 45
+    steps:
+      - name: Check out $GITHUB_SHA
+        run: |
+          set -euxo pipefail
+          rm -rf .git
+          git init
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --depth=1 origin "$GITHUB_SHA"
+          git checkout --force --detach FETCH_HEAD
+          git clean -ffdx
+
+      - name: Install the pinned toolchain
+        run: rustup toolchain install 1.88.0 --profile minimal --component clippy,rustfmt --no-self-update
+
+      - name: Run the legacy Rust source gate
+        run: ./scripts/local-ci.sh --legacy-rust
+
+      - name: Run the macOS causal source smoke
+        run: |
+          cargo +1.88.0 build --locked --workspace
+          ./scripts/macos-contributor-smoke.sh
+          ./scripts/test-macos-contributor-smoke.sh
+
+      - name: Run the disposable launchd release proof
+        run: ./scripts/macos-launchd-release-proof.sh
+
   # The repository's single required context is deliberately an aggregate:
   # GitHub must require both hosted runtime source gates and the separately
   # deployed control-plane gate, not just whichever job name happened to be
   # selected when the ruleset was first configured.
   required:
     if: always()
-    needs: [checks, linux, control-plane, review]
+    needs: [checks, legacy-rust, linux, control-plane, review]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Require both hosted source gates
-        if: needs.checks.result != 'success' || needs.linux.result != 'success' || needs.control-plane.result != 'success'
+      - name: Require every hosted source gate
+        if: needs.checks.result != 'success' || needs.legacy-rust.result != 'success' || needs.linux.result != 'success' || needs.control-plane.result != 'success'
         run: |
-          echo "required source gates failed: macOS=${{ needs.checks.result }}, Linux=${{ needs.linux.result }}, control-plane=${{ needs.control-plane.result }}" >&2
+          echo "required source gates failed: macOS=${{ needs.checks.result }}, legacy-rust=${{ needs.legacy-rust.result }}, Linux=${{ needs.linux.result }}, control-plane=${{ needs.control-plane.result }}" >&2
           exit 1
       - name: Confirm all hosted source gates passed
-        run: echo "macOS, Linux, and control-plane source gates passed"
+        run: echo "macOS Go, legacy Rust, Linux, and control-plane source gates passed"
 
       # AGENTS.md rule 2, made a merge condition rather than a convention.
       #

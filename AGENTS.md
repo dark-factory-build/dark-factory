@@ -103,10 +103,12 @@ Read-only context unless a task explicitly asks you to edit them:
    recovery. A change to any of these needs a causal test that would have
    caught the bug it fixes.
 7. **Run `./scripts/local-ci.sh` before finishing.** It is the
-   authoritative gate (fmt, clippy at `-D warnings`, the full test suite,
-   `git diff --check`). CI runs the same script on every pull request as
-   the `checks` status the `main` ruleset requires; a PR that isn't green
-   locally won't be green there either.
+   authoritative gate (gofmt, `go vet`, the full serial and race Go
+   suites, the TypeScript client proof, the browser and daemon E2Es,
+   `git diff --check`; the retired Rust workspace stays behind
+   `--legacy-rust` until its deletion). CI runs the same script on every
+   pull request as the `checks` status the `main` ruleset requires; a PR
+   that isn't green locally won't be green there either.
 8. **Small, coherent commits.** One logical change per commit; don't bundle
    unrelated cleanup into a feature commit.
 9. **Docs and issue state are load-bearing.** A change that alters behavior updates
