@@ -11,23 +11,19 @@ Live use remains frozen until an independent exact-head boot review passes.
 
 The canonical implementation through `359d46a3` contains production `factoryd`
 composition and ownership of `OperationalHome`, `Store`, `RuntimeParent`, the
-Local API, and browser services. The documentation contract was manually
-merged at `bc48df7f` and independently allowed at `51fae159`. Exact review
-blocked Change candidate `c675f96e`; its narrow repair and dependent
-global-admission candidate remain unintegrated. Repaired provider candidate
-`e1b0759e` is under exact review. Shell, Claude and Codex remain unshipped.
+Local API, and browser services. The shell provider is proved end to end;
+the Claude and Codex providers remain fail-closed and unreviewed.
 
 The complete design and causal proof matrix live in
 [`docs/development/SAFE_KERNEL_REFACTOR.md`](docs/development/SAFE_KERNEL_REFACTOR.md).
 
 ### Go hard-cutover planning authority
 
-The retained Rust kernel is historical evidence only. It is not a migration,
-compatibility, or implementation contract for the replacement. The canonical
-planned Go contract is
+The Rust kernel that preceded this one is deleted; its history is the git
+record, and it is not a migration, compatibility, or implementation contract.
+The canonical Go contract is
 [`docs/development/GO_REWRITE.md`](docs/development/GO_REWRITE.md); when this
-file's retained-Rust historical wording conflicts with that record, the Go
-rewrite record wins and the old wording must not guide implementation.
+file's older wording conflicts with that record, the Go rewrite record wins.
 
 In particular, planned Go admission is one cursor-free global
 `Store.AdmitNext(ctx, keys, at)` `BEGIN IMMEDIATE`. No caller nominates an agent,
@@ -67,7 +63,7 @@ corruption. Repository and provider executable/configuration/auth availability
 are post-admission typed failures, not stale eligibility filters.
 The exact contract lives in the rewrite record; this paragraph does not claim
 the corrected Change/global-admission/provider contract is implemented in this
-pre-cutover revision.
+revision.
 
 Planned Go process setup has one additional literal barrier: after the outer
 runner is active and while its provider process/group pair remains declared
@@ -144,8 +140,7 @@ pretends the resource disappeared or rewrites the outcome.
    selects the canonical task+agent by global priority/time/16-byte-BLOB-ID
    order, validates its one
    Change, derives the provider launch target, and binds the immutable task
-   incarnation/work revision before external effects. The retained Rust
-   per-agent queue-head implementation is historical only. The factory-wide
+   incarnation/work revision before external effects. The factory-wide
    dispatch switch controls only whether this transaction may admit new work;
    changing an agent's provider/model or disabling dispatch cannot rewrite an
    admitted run's launch authority.
@@ -206,10 +201,9 @@ without rollback or retry against another run.
 
 ## Process and resource ownership
 
-The retained Rust process model is historical evidence only and is deleted at
-the Go cutover. Planned Go launches one fresh runner-owned interactive PTY with
-explicit authenticated attach/input authority; no provider process is reused
-across runs.
+The Rust process model is deleted. Go launches one fresh runner-owned
+interactive PTY per run with explicit authenticated attach/input authority; no
+provider process is reused across runs.
 
 Launch is one nested register-before-exec handshake:
 
@@ -531,6 +525,6 @@ enforcement claims only what the cited code and tests do at this revision.
   prevents confused/cooperative cross-attempt behavior; real isolation needs a
   separate OS user, container, or sandbox.
 - No migration, upcaster, or compatibility layer; the Go home/schema and
-  protocol are fresh, and retained Rust history is an archive only.
+  protocol are fresh, and the deleted Rust implementation is git history only.
 - No live installation, release, or external intake before the independent
   exact-head boot review and a separate operator decision.

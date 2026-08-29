@@ -303,8 +303,8 @@ fi
 (cd "$output" && shasum -a 256 -c SHA256SUMS >/dev/null) \
     || fail "refused rerun changed the existing output"
 
-# The local Rust workspace remains gated until deletion, but the Go-only local
-# release must not depend on the obsolete Rust release workflow.
+# The Rust workspace is deleted; these guards keep the Go release from
+# reacquiring a dependency on its retired toolchain.
 "$repository_root/scripts/check-toolchain-pins.sh" \
     || fail "toolchain pins rejected the Go release"
 if grep -Eq 'check_pin \.github/workflows/release\.yml .*rustup|check_pin \.github/workflows/release\.yml .*cargo' \

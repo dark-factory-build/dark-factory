@@ -22,11 +22,11 @@ socket, exact resource identities, and an independent reaper.
 
 2. Make one coherent change. Preserve unrelated dirty work and prefer deletion
    over compatibility machinery.
-3. Run focused checks through the shared lease when they invoke Cargo or
+3. Run focused checks through the shared lease when they invoke
    process-sensitive fixtures:
 
    ```sh
-   ./scripts/with-local-ci-lease.sh cargo +1.88.0 test -p factoryd --lib
+   ./scripts/with-local-ci-lease.sh go test ./internal/daemon/
    ```
 
 4. Run the authoritative gate on the exact head:
@@ -35,7 +35,8 @@ socket, exact resource identities, and an independent reaper.
    ./scripts/local-ci.sh
    ```
 
-   Ubuntu x86-64 contributors use `./scripts/local-ci.sh --linux-source`.
+   The gate takes no arguments and runs on macOS only: the daemon is
+   Darwin-only, and Linux support is #120/#141-144.
 5. Publish the branch and open a PR through the remote-access boundary below,
    describing behavior, deleted authority paths, exact base/head, focused
    proof, and unverified lanes.
@@ -52,38 +53,50 @@ socket, exact resource identities, and an independent reaper.
 The macOS gate serializes compiler, release-probe, and process-sensitive work
 across linked worktrees using a repository-common-directory lease. Its owner
 record is diagnostic; the held kernel lock is authoritative. Do not bypass the
-wrapper for a load-bearing Cargo or process fixture. Set
+wrapper for a load-bearing process fixture. Set
 `DARK_FACTORY_LOCAL_CI_WAIT=0` to refuse instead of waiting.
 
 The gate clears inherited live-factory home, socket, and attempt identity
-variables. Tests set their own isolated values. The build-headroom preflight
-reports and refuses low space but does not reclaim anything; inspect only
-inactive regenerable Cargo targets manually. Product Rust verification uses
-its own bounded daemon cache. It does not replace this daemon-independent
-development lease.
+variables, and provisions its own `GOCACHE` and `GOMODCACHE` under an isolated
+stage root. Tests set their own isolated values.
 
-`crates/factoryd/tests/rust_completion.rs` drives the product's Rust
-completion lane through the production manager, so the gate compiles a
-generated one-crate workspace with the exact toolchain running the suite. It
-needs `CARGO` to name a real toolchain directory holding both `cargo` and
-`rustc` — `cargo +<version> test` provides that — and it needs the workspace
-binaries, so run it as part of the whole-workspace gate rather than with
-`-p factoryd` alone. Everything it compiles lives under its own temporary
-root. It costs roughly twenty seconds: the daemon wakes its Rust maintenance
-queue at the transitions it observes rather than only on the reconcile tick,
-so what is left is Cargo plus that interval's bounded polling for exact
-process absence.
+The Rust-policy completion lane described in
+[SECURITY.md](../../SECURITY.md) is a product capability for verifying Rust
+projects the factory works on; it is not exercised by any gate stage today,
+because the supervisor admits only the `none` verification policy.
 
 ## Isolated daemon checks
 
 Use a second, throwaway home and explicit socket. Never rely on the default:
 
 ```sh
-export DARK_FACTORY_HOME="$(mktemp -d /tmp/df-dev.XXXXXX)"
-chmod 700 "$DARK_FACTORY_HOME"
-target/debug/factoryd --socket "$DARK_FACTORY_HOME/f.sock" &
-target/debug/factoryctl --socket "$DARK_FACTORY_HOME/f.sock" health
+root="$(mktemp -d /private/tmp/df-dev.XXXXXX)"; chmod 700 "$root"
+# factoryd locates its runner and factoryctl as siblings of its own
+# executable, so build all three into one directory; `go run` cannot satisfy
+# that and fails with "runtime unavailable".
+go build -o "$root/factoryd" ./cmd/factoryd
+go build -o "$root/factoryctl" ./cmd/factoryctl
+go build -o "$root/factory-runner" ./cmd/factory-runner
+
+# `init` creates the home, so hand it a path that does not exist yet.
+home="$root/factory"
+"$root/factoryctl" init --home "$home"
+"$root/factoryctl" doctor --home "$home"   # doctor validates a *stopped* home
+"$root/factoryd" --home "$home" &
+
+# Wait for the daemon to bind; the operator client refuses a missing socket.
+until [ -S "$home/runtimes/factory.sock" ]; do sleep 0.2; done
+
+export DARK_FACTORY_SOCKET="$home/runtimes/factory.sock"
+export DARK_FACTORY_OPERATOR_TOKEN_FILE="$home/operator.token"
+"$root/factoryctl" project create --name dev --root "$PWD"
 ```
+
+Three constraints that block the obvious shorter version: the root must be
+under `/private/tmp`, because `/tmp` is a symlink and the home walk opens every
+component with `O_NOFOLLOW`; `doctor` reports a running daemon's home as not an
+exact stopped home, so run it before starting `factoryd`; and every operator
+command needs both environment variables above, not the socket alone.
 
 Worker lifecycle checks must use the deterministic shell provider and a tiny
 temporary Git repository. They must prove the provider receives one
@@ -96,41 +109,22 @@ must restart the daemon and let its durable finalizer converge. `Drop`, shell
 traps, sleeps, broad process scans, and cleanup owned only by the killed fixture
 are insufficient proof.
 
-The scratch-only macOS smoke covers these cuts through external causal proofs;
-it makes no claim about launchd or the operator's installed job.
+The macOS contributor smoke and the opt-in launchd release proof that used to
+cover these cuts were deleted with the Rust workspace: both drove
+`target/debug` binaries that no build produces. Their durable-receipt ledger
+(`DARK_FACTORY_LAUNCHD_GATE_LEDGER`) went with them; nothing writes it now, so
+there is no ledger to resume or recover.
 
-The separate opt-in `./scripts/macos-launchd-release-proof.sh` uses a randomized
-scratch-only launchd label to prove release replacement and rollback. The
-fixture job is not an attempt `KernelResource`; the installed
-`com.dark-factory.factoryd` label and plist are observed before and after and
-must be unchanged.
+Release replacement and rollback against a real launchd job is the one lane
+that lost coverage in that deletion and has no Go successor yet — it is
+recorded in GO_REWRITE.md as follow-up, not offered here as something an
+operator can run.
 
-That job is contained by a durable receipt, not by the script. Before
-`launchctl bootstrap`, the fixture records the domain, label, private root
-identity, and staged digest under a ledger that outlives one run
-(`DARK_FACTORY_LAUNCHD_GATE_LEDGER`, `$TMPDIR/dark-factory-launchd-gate` by
-default). The coordinator resumes that ledger before and after the fixture, so
-a run killed at any point — target, fixture, or coordinator — is finalized by
-the next one rather than by a trap or a background verifier that dies with its
-parent. Ownership is an advisory lock the kernel releases on death, so a
-resume never tears down a job another live coordinator is using.
-
-Finalization boots out the exact label, proves absence only from launchctl's
-documented not-found classification, waits for every recorded PID, revalidates
-the root's device, inode, owner, and claim marker, and only then removes it.
-Anything unproven keeps the root and fails visibly; recover by fixing the
-cause and re-running, which resumes the same receipt. A receipt that cannot be
-finalized makes every later run fail at startup on purpose, since it may
-describe a job that is still loaded. That is deliberately conservative: it also
-fires when the receipt merely cannot be acted on, such as an unreadable file or
-a recorded PID whose number has been reused. If the service the receipt names
-is provably absent, remove that file from the ledger to unblock later runs.
-
-Containment itself is proved on every platform, including Linux, by
-`cargo test -p factoryctl --test launchd_gate` against a fake `launchctl` —
-including a coordinator that is `SIGKILL`ed after bootstrapping. Hosted macOS
-runners get a fresh `TMPDIR` per job, so cross-run resume is exercised by those
-tests and by local dogfooding rather than by CI.
+Containment is proved by `internal/install`'s service tests against a
+recorded `launchctl`, and end to end by `scripts/go-service-e2e.sh`, which
+drives a real disposable launchd label through install, start, stop, start and
+uninstall. Hosted macOS runners get a fresh `TMPDIR` per job, so cross-run
+resume is exercised by those tests and by local dogfooding rather than by CI.
 
 ## Review discipline
 
@@ -149,12 +143,14 @@ release, installation, and live verification remain separate decisions.
 
 ## Migration rules
 
-SQLite migrations are sequential numbered files under
-`crates/factoryd/migrations/`. Never edit a shipped migration. Historical
-fixtures must apply the real ordered chain to version N rather than creating a
-new schema and manually deleting objects.
+The Go kernel has one fresh schema in `internal/kernel/schema.go` and
+deliberately no migration chain, upcaster, or compatibility layer: the Go home
+and schema are new. A schema change edits that set together with the causal
+tests that pin it.
 
-Kernel cutover migrations refuse databases containing live legacy authority or
+The rules below describe the retired Rust kernel's cutover migrations and are
+kept as the record of what a future migration boundary must honour if one is
+ever introduced. Kernel cutover migrations refuse databases containing live legacy authority or
 other external effects whose completion cannot be proven. Preserved source
 paths migrate into metadata-only `legacy_sources` quarantine, including
 separate records when agents or projects shared a path. Factoryd never inspects
@@ -190,7 +186,7 @@ the authority surface: `.github/`, the agent rule and boundary documents
 named scripts that publish the ruleset, verify the recorded review verdict,
 or causally test those two. A change touching any of them stops for one owner
 approval, re-earned after every push because stale reviews are dismissed.
-Everything else -- `crates/`, `control-plane/`, the rest of `scripts/`, and
+Everything else -- the Go runtime, `control-plane/`, the rest of `scripts/`, and
 docs -- merges on the `required` aggregate in the queue, whose `review` check
 demands an adversarial-review verdict at the exact head, with no human
 approval at any point.
@@ -230,7 +226,7 @@ kept anyway — a backstop the merge gate should not have to assume away.
 merge condition rather than a convention:
 
 ```yaml
-needs: [checks, linux, control-plane, review]
+needs: [checks, control-plane, review]
 # In the queue only `success` passes. Elsewhere `skipped` passes too, since
 # `review` runs on merge_group alone and there is no verdict to read. Treating
 # that as a failure would block every pull request.

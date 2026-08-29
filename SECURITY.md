@@ -16,10 +16,10 @@ Live use remains frozen until an independent exact-head boot review passes.
 
 ### Go hard-cutover planning authority
 
-This file describes security properties of the implemented Rust kernel unless
-a passage explicitly names planned Go. Retained Rust queue selection and
-pre-admission executable probing are historical evidence, not compatibility
-requirements. The authoritative planned Go
+The Rust kernel this file was first written against is deleted. Passages that
+still describe its queue selection or pre-admission executable probing are the
+historical record, not compatibility requirements, and the Go implementation
+governs wherever the two differ. The authoritative Go
 contract is [`docs/development/GO_REWRITE.md`](docs/development/GO_REWRITE.md),
 which records an independently reviewed contract and does not claim a finished
 daemon.
@@ -243,7 +243,8 @@ set and durable eligibility, then selects the canonical task+agent across
 the factory; no caller or per-agent loop chooses a queue head. It validates the
 selected Change and derives task revision, role, and provider in that
 transaction. A stale dispatcher read cannot choose work or authority.
-The per-agent assigned-queue wording in retained Rust is historical only.
+The per-agent assigned-queue wording from the deleted Rust kernel is
+historical only.
 
 These provider controls never bypass daemon authentication, attempt scope, run
 phase, or finalization rules, and remain cooperative same-user controls rather

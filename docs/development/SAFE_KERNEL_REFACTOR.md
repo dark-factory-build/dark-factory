@@ -8,13 +8,12 @@ history; [the roadmap](../../ROADMAP.md) owns work after the boot decision.
 
 ## Go hard-cutover planning authority
 
-The implemented Rust kernel remains evidence, and Rust-specific process/crate/
-queue wording below is historical where it conflicts with the replacement.
-The canonical planned Go contract is
-[`GO_REWRITE.md`](GO_REWRITE.md); it currently requires fresh exact-head review
-and does not claim a finished Go daemon. Go implementation must not copy the
-retained Rust per-agent admission loop, obsolete closed-stdin provider contract, cache
-selection or crate graph merely because it appears here.
+The Rust kernel is deleted; Rust-specific process, crate and queue wording
+below is the historical record where it conflicts with the implementation. The
+canonical Go contract is [`GO_REWRITE.md`](GO_REWRITE.md). Go implementation
+must not copy the deleted per-agent admission loop, the obsolete closed-stdin
+provider contract, cache selection or crate graph merely because it appears
+here.
 
 ## Kernel model
 
@@ -156,10 +155,10 @@ an old credential, conversation, or process.
 
 ## Process and resource ownership
 
-The retained Rust process model is historical evidence only and is deleted at
-the Go cutover. Planned Go launches one fresh runner-owned interactive PTY
-provider with explicit authenticated attach/input lease. No provider process is
-reused across runs, and no task body is replayed after an uncertain write.
+The Rust process model is deleted. Go launches one fresh runner-owned
+interactive PTY provider per run with explicit authenticated attach/input
+lease. No provider process is reused across runs, and no task body is replayed
+after an uncertain write.
 
 Launch uses register-before-exec gates:
 
@@ -251,10 +250,10 @@ then cross an explicit quarantine and acceptance boundary before it can create
 or message work. External payloads must never materialize executable tasks
 directly.
 
-## Retained Rust evidence (historical for Go)
+## Deleted Rust evidence (historical for Go)
 
-The old Rust package/crate graph and TUI are historical implementation evidence
-only. They do not define a five-crate Go target and must not be preserved by
+The old Rust package/crate graph and TUI are deleted; they survive only in git
+history. They do not define a five-crate Go target and must not be preserved by
 compatibility code. The Go target uses one fresh schema and protocol with no
 migration chain, upcaster, or compatibility layer. Do not add an ORM, actor
 framework, generic saga, event-sourcing framework, micro-packages, or
