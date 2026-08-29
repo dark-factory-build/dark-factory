@@ -339,7 +339,12 @@ func TestGitSignalsOnlyWhileExactLeaderIsUnreaped(t *testing.T) {
 			if child == nil {
 				t.Fatal("signal hook ran before child ownership was returned")
 			}
-			if _, err := unix.Getpgid(child.pid); err != nil {
+			// The hook runs after the signal syscall, and a child killed by
+			// that very signal leaves its process group the moment it exits —
+			// so a pgid probe races the kernel. The invariant is narrower:
+			// the pid must not have been REAPED yet, and an unreaped pid
+			// (live or zombie) answers signal 0 until Wait releases it.
+			if err := unix.Kill(child.pid, 0); errors.Is(err, unix.ESRCH) {
 				t.Fatalf("signal %s targeted a reaped/reusable pid %d: %v", event, child.pid, err)
 			}
 		case gitProcessWaited:
@@ -721,4 +726,37 @@ func mustReadFile(t testing.TB, path string) []byte {
 		t.Fatal(err)
 	}
 	return data
+}
+
+func TestUnreapedZombieAnswersSignalZeroProbe(t *testing.T) {
+	// Pins the Darwin semantics the unreaped-signal hook above relies on:
+	// an exited, unreaped child still occupies its pid (signal 0 succeeds)
+	// even though it left its process group at exit — so a pgid probe is
+	// the wrong witness for "unreaped" while signal 0 is exact until Wait.
+	command := exec.Command("/bin/sh", "-c", "exit 0")
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := command.Process.Pid
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		proc, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
+		if err == nil && proc.Proc.P_stat == 5 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("child never became an unreaped zombie")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if err := unix.Kill(pid, 0); err != nil {
+		t.Fatalf("unreaped zombie refused signal 0: %v", err)
+	}
+	if err := command.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Kill(pid, 0); !errors.Is(err, unix.ESRCH) {
+		t.Fatalf("reaped pid still answered signal 0: %v", err)
+	}
 }
