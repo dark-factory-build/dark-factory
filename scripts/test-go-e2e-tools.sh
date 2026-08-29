@@ -44,6 +44,17 @@ fi
 if TMPDIR=relative go_e2e_temporary_directory invalid-parent >/dev/null 2>&1; then
     fail "relative TMPDIR was accepted"
 fi
+default_temporary_parent=$(CDPATH= cd -P -- /tmp && pwd -P)
+unset TMPDIR
+default_temporary=$(go_e2e_temporary_directory dark-factory-go-e2e-default)
+case "$default_temporary" in
+    "$default_temporary_parent"/dark-factory-go-e2e-default.*) ;;
+    *) fail "unset TMPDIR did not use the portable /tmp default" ;;
+esac
+/bin/rmdir "$default_temporary"
+/usr/bin/grep -F 'go_e2e_temporary_parent=${TMPDIR:-/tmp}' \
+    "$repository_root/scripts/go-e2e-tools.sh" >/dev/null \
+    || fail "temporary-directory helper lost the portable default"
 
 # Exercise the real browser wrapper in both arms with no tool available from
 # PATH. The fakes make build, package-manager and test commands observable

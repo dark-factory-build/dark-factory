@@ -22,7 +22,7 @@ go_e2e_temporary_directory() {
     case "$go_e2e_temporary_prefix" in
         ''|*/*) echo "go-e2e: invalid temporary-directory prefix" >&2; return 1 ;;
     esac
-    go_e2e_temporary_parent=${TMPDIR:-/private/tmp}
+    go_e2e_temporary_parent=${TMPDIR:-/tmp}
     case "$go_e2e_temporary_parent" in
         /*) ;;
         *) echo "go-e2e: TMPDIR is not absolute" >&2; return 1 ;;
