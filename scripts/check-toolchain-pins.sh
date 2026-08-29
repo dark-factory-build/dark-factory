@@ -1,13 +1,6 @@
 #!/bin/sh
 set -eu
 
-workspace_version=$(sed -n 's/^rust-version = "\([^"]*\)"/\1/p' Cargo.toml)
-case "$workspace_version" in
-    *.*.*) toolchain_version=$workspace_version ;;
-    *.*) toolchain_version="$workspace_version.0" ;;
-    *) echo "could not read workspace rust-version from Cargo.toml" >&2; exit 1 ;;
-esac
-
 check_pin() {
     file=$1
     expected=$2
@@ -18,11 +11,7 @@ check_pin() {
     fi
 }
 
-check_pin scripts/local-ci.sh "cargo +$toolchain_version fmt" "workspace Rust $toolchain_version"
-check_pin scripts/local-ci.sh "cargo +$toolchain_version clippy" "workspace Rust $toolchain_version"
-check_pin scripts/local-ci.sh "cargo +$toolchain_version test" "workspace Rust $toolchain_version"
 check_pin scripts/local-ci.sh "go-ci-owned.sh" "the authoritative Go gate stage"
-check_pin .github/workflows/ci.yml "rustup toolchain install $toolchain_version" "workspace Rust $toolchain_version"
 
 go_version=$(sed -n 's/^go \([0-9][0-9.]*\)$/\1/p' go.mod)
 case "$go_version" in
@@ -32,7 +21,16 @@ esac
 check_pin .github/workflows/release.yml "GOTOOLCHAIN=go$go_version" "runtime Go $go_version"
 check_pin .github/workflows/release.yml "GOOS=darwin GOARCH=arm64" "the exact Darwin arm64 release target"
 check_pin .github/workflows/release.yml "GOOS=darwin GOARCH=amd64" "the exact Darwin amd64 release target"
-if grep -Eq 'rustup|cargo[[:space:]]+\+' .github/workflows/release.yml; then
-    echo ".github/workflows/release.yml retains the replaced Rust local-runtime build" >&2
+
+# The Rust workspace is deleted. These guards keep its toolchain from
+# reappearing in the release or gate paths through an unreviewed edit.
+for workflow in .github/workflows/release.yml .github/workflows/ci.yml; do
+    if grep -Eq 'rustup|cargo[[:space:]]+\+' "$workflow"; then
+        echo "$workflow retains the deleted Rust toolchain" >&2
+        exit 1
+    fi
+done
+if [ -e Cargo.toml ] || [ -e Cargo.lock ] || [ -d crates ]; then
+    echo "the deleted Rust runtime workspace has reappeared" >&2
     exit 1
 fi

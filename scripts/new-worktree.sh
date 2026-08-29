@@ -55,7 +55,7 @@ Created $target on branch $branch (from $base).
 
 Next steps:
   cd $target
-  cargo build --workspace
+  go build ./...
   ./scripts/local-ci.sh
   Publish $branch and open a PR through an authorized host credential broker
   or App-backed tool surface.

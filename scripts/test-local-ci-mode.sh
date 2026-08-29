@@ -5,100 +5,63 @@ repository_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 gate="$repository_root/scripts/local-ci.sh"
 contributing="$repository_root/CONTRIBUTING.md"
 ci="$repository_root/.github/workflows/ci.yml"
-runner_manifest="$repository_root/crates/factory-runner/Cargo.toml"
-runner_library="$repository_root/crates/factory-runner/src/lib.rs"
 stale_control_plane_workflow="$repository_root/control-plane/.github/workflows/ci.yml"
 
 fail() {
-    echo "local-ci mode test failed: $*" >&2
+    echo "local-ci shape test failed: $*" >&2
     exit 1
 }
 
-grep -Fq 'cargo +1.88.0 fmt --all -- --check' "$gate" \
-    || fail "legacy/Linux source mode lost rustfmt"
-grep -Fq 'cargo +1.88.0 clippy --locked --workspace --all-targets --all-features -- -D warnings' "$gate" \
-    || fail "legacy/Linux source mode lost clippy"
-grep -Fq 'cargo +1.88.0 test --locked --workspace -- --test-threads=1' "$gate" \
-    || fail "legacy/Linux source mode lost workspace tests"
-grep -Fq 'git diff --check' "$gate" || fail "source gate lost diff check"
-
-# The authoritative macOS gate is the Go gate; the retired Rust stages live
-# only behind the explicit legacy flag and the Linux source preview.
-final_gate=$(sed -n '/^# The shared shell-fixture gate/,$p' "$gate")
-printf '%s\n' "$final_gate" \
-    | sed -n '/^[[:space:]]*macos)/,/^[[:space:]]*;;/p' \
-    | grep -Fq 'go-ci-owned.sh' \
-    || fail "macOS mode lost the authoritative Go gate stage"
-if printf '%s\n' "$final_gate" \
-    | sed -n '/^[[:space:]]*macos)/,/^[[:space:]]*;;/p' | grep -Fq 'cargo '; then
-    fail "macOS default mode still runs cargo outside the legacy flag"
+# The gate is single-mode: the Rust workspace it once branched for is deleted,
+# so a mode argument must be refused rather than silently ignored.
+grep -Fq 'usage: scripts/local-ci.sh' "$gate" || fail "gate lost its usage guard"
+if grep -Eq 'legacy-rust|linux-source' "$gate"; then
+    fail "gate still branches on a retired Rust mode"
 fi
-printf '%s\n' "$final_gate" \
-    | sed -n '/--legacy-rust | --linux-source)/,/^[[:space:]]*;;/p' \
-    | grep -Fq 'cargo +1.88.0 test' \
-    || fail "legacy flag lost the retired Rust stages"
-legacy_fixture_mode=$(sed -n '/^[[:space:]]*--legacy-rust)/,/^[[:space:]]*;;/p' "$gate")
-for mac_fixture in test-prepare-release-source.sh test-publish-release.sh \
-    test-package-release.sh test-macos-launchd-release-proof.sh; do
-    printf '%s\n' "$legacy_fixture_mode" | grep -Fq "$mac_fixture" \
-        || fail "legacy Rust mode lost fixture $mac_fixture"
+if grep -Fq 'cargo ' "$gate"; then
+    fail "gate still runs cargo"
+fi
+
+# This is a text-shape guard, not an execution guard: it catches a deleted or
+# commented-out invocation, but an `if false; then ... fi` wrapper would still
+# match. Tightened to the invocation form so a bare mention cannot satisfy it.
+grep -Fq '/bin/sh "$script_dir/go-ci-owned.sh"' "$gate" \
+    || fail "gate lost the authoritative Go gate invocation line"
+grep -Fq 'git diff --check' "$gate" || fail "gate lost its diff check"
+
+for fixture in test-local-ci-lease.sh test-local-ci-lease-mutations.sh \
+    check-toolchain-pins.sh test-prepare-release-source.sh \
+    test-publish-release.sh test-package-release.sh \
+    test-local-ci-environment.sh test-new-worktree.sh \
+    test-github-step-summary.sh test-verify-adversarial-review.sh \
+    test-inline-chokepoint.sh; do
+    grep -Fq "./scripts/$fixture" "$gate" || fail "gate lost fixture $fixture"
 done
 
-runner_lib_section=$(awk '
-    $0 == "[lib]" { in_lib = 1; next }
-    /^\[/ { if (in_lib) exit }
-    in_lib { print }
-' "$runner_manifest")
-if printf '%s\n' "$runner_lib_section" \
-    | grep -Eq '^[[:space:]]*test[[:space:]]*=[[:space:]]*false'; then
-    fail "factory-runner library unit tests are disabled"
-fi
-grep -Fq '#[cfg(test)]' "$runner_library" \
-    || fail "factory-runner lost its substantive library unit tests"
-
-linux_mode=$(sed -n '/^[[:space:]]*--linux-source)/,/^[[:space:]]*;;/p' "$gate")
-printf '%s\n' "$linux_mode" | grep -Fq './scripts/check-toolchain-pins.sh' \
-    || fail "Linux source mode lost toolchain pin validation"
-for mac_fixture in test-prepare-release-source.sh test-publish-release.sh \
-    test-package-release.sh test-macos-launchd-release-proof.sh; do
-    if printf '%s\n' "$linux_mode" | grep -Fq "$mac_fixture"; then
-        fail "Linux source mode invokes macOS fixture $mac_fixture"
-    fi
+# Every retired Rust script must be gone, not merely unreferenced, so a future
+# edit cannot resurrect a stage whose subject no longer exists.
+for retired in macos-contributor-smoke.sh test-macos-contributor-smoke.sh \
+    macos-smoke-daemon-owner.pl linux-contributor-smoke.sh \
+    test-linux-contributor-smoke.sh macos-launchd-release-proof.sh \
+    test-macos-launchd-release-proof.sh check-build-headroom.sh \
+    test-build-headroom.sh; do
+    [ ! -e "$repository_root/scripts/$retired" ] \
+        || fail "retired Rust-era script survives: $retired"
 done
 
-macos_mode=$(sed -n '/^[[:space:]]*macos)/,/^[[:space:]]*;;/p' "$gate")
-for mac_fixture in test-prepare-release-source.sh test-publish-release.sh \
-    test-package-release.sh test-macos-launchd-release-proof.sh; do
-    printf '%s\n' "$macos_mode" | grep -Fq "$mac_fixture" \
-        || fail "macOS mode lost fixture $mac_fixture"
-done
-shared_gate=$(sed -n '/^# Measure after/,$p' "$gate")
-if printf '%s\n' "$shared_gate" \
-    | grep -Fq './scripts/test-macos-launchd-release-proof.sh'; then
-    fail "shared source gate invokes the macOS launchd fixture"
+# CI must not keep a job whose only subject was the deleted workspace, and the
+# required aggregate must not name one: a dangling dependency blocks every PR.
+if grep -Eq '^  (legacy-rust|linux):' "$ci"; then
+    fail "CI still defines a job for the deleted Rust workspace"
+fi
+if grep -Eq 'needs\.(legacy-rust|linux)\.result|needs: \[.*(legacy-rust|linux)' "$ci"; then
+    fail "the required aggregate still depends on a deleted job"
+fi
+if grep -Eq 'rustup|cargo ' "$ci"; then
+    fail "CI still installs or invokes the Rust toolchain"
 fi
 
-linux_job=$(sed -n '/^  linux:/,$p' "$ci")
-line_of() {
-    printf '%s\n' "$linux_job" | grep -n -F "$1" | head -1 | cut -d: -f1
-}
-linux_gate_line=$(line_of 'name: Run the Linux authoritative gate')
-linux_build_line=$(line_of 'name: Build the workspace binaries')
-linux_smoke_line=$(line_of 'name: Run the source contributor smoke')
-[ -n "$linux_gate_line" ] && [ -n "$linux_build_line" ] && [ -n "$linux_smoke_line" ] \
-    || fail "Linux CI lost its gate, binary build, or smoke step"
-[ "$linux_gate_line" -lt "$linux_build_line" ] \
-    || fail "Linux CI rebuilds source-gate inputs after building smoke binaries"
-[ "$linux_build_line" -lt "$linux_smoke_line" ] \
-    || fail "Linux CI does not build its smoke binaries before using them"
-printf '%s\n' "$linux_job" \
-    | grep -Fq 'cargo +1.88.0 build --locked --workspace --bins' \
-    || fail "Linux CI does not limit its post-gate build to smoke binaries"
-if printf '%s\n' "$linux_job" | grep -Fq 'name: Check build headroom'; then
-    fail "Linux CI duplicates the authoritative gate's build-headroom check"
-fi
-
-control_plane_job=$(sed -n '/^  control-plane:/,/^  linux:/p' "$ci")
+control_plane_job=$(sed -n '/^  control-plane:/,/^  [a-z]/p' "$ci")
 control_line_of() {
     printf '%s\n' "$control_plane_job" | grep -n -F "$1" | head -1 | cut -d: -f1
 }
@@ -112,11 +75,10 @@ control_gate_line=$(control_line_of 'run: ./control-plane/scripts/local-ci.sh')
     || fail "control-plane gate remains hidden in an undiscovered nested workflow"
 
 grep -Fxq './scripts/local-ci.sh' "$contributing" \
-    || fail "CONTRIBUTING lost the macOS gate command"
-grep -Fxq './scripts/local-ci.sh --linux-source' "$contributing" \
-    || fail "CONTRIBUTING does not use the Linux source gate"
-grep -Fxq './scripts/linux-contributor-smoke.sh' "$contributing" \
-    || fail "CONTRIBUTING lost the Linux source smoke"
+    || fail "CONTRIBUTING lost the gate command"
+if grep -Eq 'linux-source|linux-contributor-smoke' "$contributing"; then
+    fail "CONTRIBUTING still documents a retired Rust gate mode"
+fi
 
 sh -n "$gate"
-echo "local-ci mode tests passed"
+echo "local-ci shape tests passed"
