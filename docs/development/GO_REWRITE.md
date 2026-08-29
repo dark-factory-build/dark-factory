@@ -1940,8 +1940,8 @@ is a foreign key to `browser_clients`, and a lease may exist only while the
 session is active. `unresolved_reason` is
 present only in `unresolved` and is 1–4096 bytes. `activated_at_ms` is absent
 in declared, required in active, and optional in releasing/closed/unresolved
-because a pre-exec session can converge without activation; it never precedes
-declaration.
+because a pre-session convergence closes a session that never activated; it
+never precedes declaration.
 `closed_at_ms` is present only in closed and never precedes declaration or
 activation. Every timestamp is nonnegative and no later timestamp precedes an
 earlier present one. Generation and input sequence are nonnegative SQLite
