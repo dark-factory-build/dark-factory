@@ -249,7 +249,7 @@ func newUnreadTerminalOwner(t *testing.T, child *OwnedChild) *unreadTerminalOwne
 	}
 	assertLevelTriggeredReadiness(t, child.kq, int(daemon.Fd()))
 	return &unreadTerminalOwner{
-		owner:         terminalOwner{child: child, daemon: daemon, reads: reads, daemonOpen: true, ptyOpen: true},
+		owner:         terminalOwner{child: child, daemon: daemon, reads: reads, daemonOpen: true, ptyOpen: true, ring: &terminalByteRing{}},
 		reads:         reads,
 		peer:          peer,
 		cancelRelease: releaseUnreadReadinessAfter(t, daemon, 1200*time.Millisecond),

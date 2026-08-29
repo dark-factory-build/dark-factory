@@ -54,7 +54,7 @@ func TestTerminalOwnerReplayUsesCorrelationWithoutMovingLiveCursor(t *testing.T)
 	}
 	defer peer.Close()
 	defer daemon.Close()
-	owner := &terminalOwner{daemon: daemon, daemonOpen: true, credit: 1024}
+	owner := &terminalOwner{daemon: daemon, daemonOpen: true, credit: 1024, ring: &terminalByteRing{}}
 	if err := owner.ring.Append([]byte("old")); err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func TestTerminalOwnerReplaysRetainedOutputAfterPTYEOF(t *testing.T) {
 	}
 	defer peer.Close()
 	defer daemon.Close()
-	owner := &terminalOwner{daemon: daemon, daemonOpen: true, credit: 0, ptyDrained: true}
+	owner := &terminalOwner{daemon: daemon, daemonOpen: true, credit: 0, ptyDrained: true, ring: &terminalByteRing{}}
 	if err := owner.ring.Append([]byte("retained")); err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +145,7 @@ func TestTerminalOwnerPostEOFStaleAttachResets(t *testing.T) {
 	}
 	defer peer.Close()
 	defer daemon.Close()
-	owner := &terminalOwner{daemon: daemon, daemonOpen: true, ptyDrained: true}
+	owner := &terminalOwner{daemon: daemon, daemonOpen: true, ptyDrained: true, ring: &terminalByteRing{}}
 	if err := owner.ring.Append(bytes.Repeat([]byte{'x'}, terminalReplayCapacity+1)); err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +171,7 @@ func TestTerminalOwnerHumanReplyIsRejectedAfterEOFWithoutPTYEffect(t *testing.T)
 	}
 	defer peer.Close()
 	defer daemon.Close()
-	owner := &terminalOwner{daemon: daemon, daemonOpen: true, ptyDrained: true}
+	owner := &terminalOwner{daemon: daemon, daemonOpen: true, ptyDrained: true, ring: &terminalByteRing{}}
 	if err := owner.emitPTYEOF(); err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +214,7 @@ func TestTerminalOwnerWriteFailurePoisonsDaemonCapability(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer peer.Close()
-	owner := &terminalOwner{daemon: daemon, daemonOpen: true}
+	owner := &terminalOwner{daemon: daemon, daemonOpen: true, ring: &terminalByteRing{}}
 	fillOwnerSocket(t, daemon)
 	err = owner.send(TerminalFrame{Kind: TerminalReady})
 	if err == nil {
@@ -247,7 +247,7 @@ func TestRetireReadableFilterReturnsVisibleUnresolvedWithinBound(t *testing.T) {
 }
 
 func TestTerminalOwnerCannotEmitEOFBeforePTYDrain(t *testing.T) {
-	owner := &terminalOwner{daemonOpen: false}
+	owner := &terminalOwner{daemonOpen: false, ring: &terminalByteRing{}}
 	if err := owner.emitPTYEOF(); !errors.Is(err, ErrState) {
 		t.Fatalf("EOF before PTY drain = %v, want ErrState", err)
 	}

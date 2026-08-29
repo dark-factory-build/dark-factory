@@ -1345,7 +1345,7 @@ func drainAndCloseAttemptPTY(child *OwnedChild, reads *attemptReadSet, daemon *o
 	if !child.ptyDrained {
 		owner := terminalOwner{
 			child: child, daemon: daemon, reads: reads, daemonOpen: daemonOpen,
-			ptyOpen: true,
+			ptyOpen: true, ring: &terminalByteRing{},
 		}
 		drainErr = owner.drainPTY()
 	}

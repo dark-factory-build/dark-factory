@@ -19,11 +19,11 @@ func runReleasedProvider(child *OwnedChild, daemon, worker *os.File, reads *atte
 	if child == nil || daemon == nil || worker == nil || reads == nil || child.ptyMaster == nil || retained == nil {
 		return false, ErrState
 	}
-	loop := terminalOwner{child: child, daemon: daemon, worker: worker, reads: reads, daemonOpen: true, workerOpen: true}
 	// The PTY was registered and drained from inner activation, so pre-provider
-	// worker output is already retained in exact order; adopt it rather than
-	// starting an empty stream.
-	loop.ring = *retained
+	// worker output is already retained in exact order. The stage sink and this
+	// loop share that one ring by pointer: any copy here would silently drop
+	// every byte the worker writes between adoption and provider exec.
+	loop := terminalOwner{child: child, daemon: daemon, worker: worker, reads: reads, daemonOpen: true, workerOpen: true, ring: retained}
 	if err := loop.awaitProviderExec(stagePTY); err != nil {
 		return loop.daemonOpen, err
 	}
@@ -63,7 +63,7 @@ type terminalOwner struct {
 	ptyDrained    bool
 	stopRequested bool
 
-	ring             terminalByteRing
+	ring             *terminalByteRing
 	credit           uint64
 	sent             uint64
 	observerAttached bool

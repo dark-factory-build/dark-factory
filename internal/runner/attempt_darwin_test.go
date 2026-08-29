@@ -88,7 +88,7 @@ func runAttemptWorkerHelper(args []string) error {
 	var provider ExecSpec
 	var providerTask []byte
 	switch mode {
-	case "shell", "shell-input", "term", "leader", "tail", "reply":
+	case "shell", "shell-input", "term", "leader", "tail", "reply", "loud-adoption":
 		script := fmt.Sprintf("test -z \"${HOME+x}\" || exit 90; test -z \"${DARK_FACTORY_ATTEMPT_TOKEN+x}\" || exit 91; for n in 3 4 5 6 7 8 9; do test ! -e /dev/fd/$n || exit 92; done; test -f /dev/fd/10 || exit 93; test ! -s /dev/fd/10 || exit 94; test -f /dev/fd/11 || exit 97; IFS= read -r task < /dev/fd/11; test \"$task\" = one-startup || exit 98; cat /dev/fd/10/change-worker.config >/dev/null 2>&1 && exit 95; cd /dev/fd/10 >/dev/null 2>&1 && exit 96; printf '%%s' $$ > %q; printf 'pre-output\\n'; while test ! -f %q; do sleep 0.01; done; printf 'post-output\\n'; printf x >> %q; while test ! -f %q; do sleep 0.01; done", filepath.Join(root, "provider.pid"), filepath.Join(root, "continue"), filepath.Join(root, "provider.effect"), filepath.Join(root, "finish"))
 		if mode == "shell-input" {
 			script += fmt.Sprintf("; IFS= read -r line; printf '%%s' \"$line\" > %q", filepath.Join(root, "provider.stdin"))
@@ -209,6 +209,14 @@ func runAttemptWorkerHelper(args []string) error {
 	if err := control.AwaitProvider(); err != nil {
 		cwd.Close()
 		return err
+	}
+	if mode == "loud-adoption" {
+		// Exactly the window where the stage sink hands its retained ring to
+		// the terminal owner. These bytes must survive that adoption.
+		if _, err := os.Stderr.Write(adoptionWindowPayload()); err != nil {
+			cwd.Close()
+			return err
+		}
 	}
 	if strings.HasPrefix(mode, "cwd") {
 		if err := writeCwdDescriptorManifest(root); err != nil {
@@ -2302,4 +2310,64 @@ func TestInnerWorkerOutputBeforeStageReportCannotDeadlockTheAttempt(t *testing.T
 	if _, err := os.Stat(filepath.Join(f.root, "selection")); err != nil {
 		t.Fatalf("missing selection witness: %v", err)
 	}
+}
+
+// adoptionWindowPayload is 214 bytes carrying two markers, written by the
+// worker between AwaitProvider returning and ExecProvider.
+func adoptionWindowPayload() []byte {
+	return []byte(adoptionMarker + strings.Repeat("a", 214-2*len(adoptionMarker)) + adoptionMarker)
+}
+
+const adoptionMarker = "MK"
+
+// Bytes the worker writes between AwaitProvider returning and ExecProvider
+// cross the boundary where the stage sink's retained ring is adopted by the
+// terminal owner. They must arrive in the delivered stream, in order: a
+// snapshot rather than a shared ring drops them silently, with dense
+// sequence numbers so no reset or gap ever tells a client.
+func TestWorkerOutputInTheAdoptionWindowStaysInTheTerminalStream(t *testing.T) {
+	f := newAttemptFixture(t, "loud-adoption", "")
+	f.activateOuter()
+	f.advanceToProvider()
+	if err := f.controller.Release(StageProvider); err != nil {
+		t.Fatal(err)
+	}
+	waitFile(t, filepath.Join(f.root, "provider.pid"))
+	event, err := f.controller.Next(8 * time.Second)
+	if err != nil || event.Kind != AttemptTerminalFrame || event.Frame == nil || event.Frame.Kind != TerminalReady {
+		t.Fatalf("terminal ready=%+v err=%v output=%q", event, err, f.output())
+	}
+	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalAttach, Correlation: 1, Sequence: 0}); err != nil {
+		t.Fatal(err)
+	}
+	event, err = f.controller.Next(8 * time.Second)
+	if err != nil || event.Kind != AttemptTerminalFrame || event.Frame == nil || event.Frame.Kind != TerminalAttached || event.Frame.Status != TerminalResultOK {
+		t.Fatalf("attach=%+v err=%v", event, err)
+	}
+	if event.Frame.Sequence != 0 || event.Frame.Floor != 0 {
+		t.Fatalf("attach did not start at the stream floor: %+v", event.Frame)
+	}
+	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalCredit, Credit: 8192}); err != nil {
+		t.Fatal(err)
+	}
+	want := adoptionWindowPayload()
+	var stream []byte
+	deadline := time.Now().Add(10 * time.Second)
+	for !bytes.Contains(stream, want) && time.Now().Before(deadline) {
+		event, err = f.controller.Next(4 * time.Second)
+		if err != nil {
+			break
+		}
+		if event.Kind == AttemptTerminalFrame && event.Frame != nil && event.Frame.Kind == TerminalOutput {
+			stream = append(stream, event.Frame.Payload...)
+		}
+	}
+	markers := bytes.Count(stream, []byte(adoptionMarker))
+	if !bytes.Contains(stream, want) {
+		t.Fatalf("adoption-window bytes dropped: delivered=%d markers=%d want=%d err=%v output=%q", len(stream), markers, len(want), err, f.output())
+	}
+	if markers != 2 {
+		t.Fatalf("adoption-window payload not delivered intact: delivered=%d markers=%d", len(stream), markers)
+	}
+	t.Logf("adoption window retained: delivered=%d markers=%d", len(stream), markers)
 }
