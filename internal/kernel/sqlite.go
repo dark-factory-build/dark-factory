@@ -550,19 +550,12 @@ func (tx *writeTx) discard() {
 }
 
 // resolveConnection reports whether the connection is provably free of a
-// transaction of ours. SQLite answers exactly through autocommit mode: an
-// interrupted or failed lifecycle statement that never took the reservation
-// leaves autocommit on, and a transaction that did open is rolled back on a
-// context the caller cannot cancel before autocommit is confirmed again.
+// transaction of ours. SQLite answers exactly through autocommit mode: a
+// lifecycle statement interrupted before it took the write reservation leaves
+// autocommit on, which is the shutdown case, and a connection whose statement
+// did open a transaction has already failed to close it, so it is destroyed
+// rather than asked again.
 func resolveConnection(connection *sql.Conn) bool {
-	if connectionInAutocommit(connection) {
-		return true
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Duration(busyMilliseconds)*time.Millisecond)
-	defer cancel()
-	if _, err := connection.ExecContext(ctx, "ROLLBACK"); err != nil {
-		return false
-	}
 	return connectionInAutocommit(connection)
 }
 
