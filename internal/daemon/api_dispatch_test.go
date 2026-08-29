@@ -61,6 +61,9 @@ func newDispatchFixture(t *testing.T) *dispatchFixture {
 		t.Fatal(err)
 	}
 	authHomePath := filepath.Join(directory, "home")
+	if socket := install.LocalAPISocketPath(authHomePath); len(socket) > install.MaxSocketPathBytes {
+		t.Fatalf("api socket path is %d bytes, over the %d-byte budget: %q", len(socket), install.MaxSocketPathBytes, socket)
+	}
 	if _, err := install.Init(context.Background(), authHomePath); err != nil {
 		if errors.Is(err, install.ErrUnsupported) {
 			t.Skip("operational local API is unsupported on this platform")

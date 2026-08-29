@@ -25,10 +25,25 @@ grep -Fq 'git diff --check' "$gate" || fail "source gate lost diff check"
 # The authoritative macOS gate is the Go gate; the retired Rust stages live
 # only behind the explicit legacy flag and the Linux source preview.
 final_gate=$(sed -n '/^# The shared shell-fixture gate/,$p' "$gate")
+# This is a TEXT-SHAPE guard, not an execution guard: it establishes that the
+# macOS arm still contains the invocation line, and nothing more. It rejects a
+# bare mention of the name (the line commented out) but cannot detect the line
+# being neutralized by surrounding control flow — `if false; then ... fi` still
+# matches. Proving the stage actually runs needs local-ci executed against a
+# recording stub, which this fixture-level test deliberately does not do.
 printf '%s\n' "$final_gate" \
     | sed -n '/^[[:space:]]*macos)/,/^[[:space:]]*;;/p' \
-    | grep -Fq 'go-ci-owned.sh' \
-    || fail "macOS mode lost the authoritative Go gate stage"
+    | grep -Eq '^[[:space:]]*/bin/sh "\$script_dir/go-ci-owned\.sh"' \
+    || fail "macOS mode lost the authoritative Go gate invocation line"
+# Self-test for the one mutation this shape guard does catch: the invocation
+# neutralized behind a comment while the name survives.
+mutated_gate=$(printf '%s\n' "$final_gate" \
+    | sed 's|^\([[:space:]]*\)/bin/sh "\$script_dir/go-ci-owned\.sh"|\1: # /bin/sh "$script_dir/go-ci-owned.sh" disabled today|')
+if printf '%s\n' "$mutated_gate" \
+    | sed -n '/^[[:space:]]*macos)/,/^[[:space:]]*;;/p' \
+    | grep -Eq '^[[:space:]]*/bin/sh "\$script_dir/go-ci-owned\.sh"'; then
+    fail "the go-ci-owned invocation guard failed its own mutation self-test"
+fi
 if printf '%s\n' "$final_gate" \
     | sed -n '/^[[:space:]]*macos)/,/^[[:space:]]*;;/p' | grep -Fq 'cargo '; then
     fail "macOS default mode still runs cargo outside the legacy flag"

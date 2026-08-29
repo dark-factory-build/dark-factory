@@ -24,7 +24,6 @@ import (
 
 const (
 	localAPITokenBytes = operatorTokenBytes
-	localAPIMaxPath    = 103
 	localAPIProbeLimit = 250 * time.Millisecond
 	localAPIAcceptPoll = 50 * time.Millisecond
 )
@@ -138,7 +137,7 @@ func (state *operationalHomeState) openLocalAPI(ctx context.Context) (*LocalAPIA
 	}
 	authorityState.runtimes = runtimes
 	authorityState.runtimesID = runtimesMember.identity
-	if len(authorityState.locator) > localAPIMaxPath || !filepath.IsAbs(authorityState.locator) {
+	if len(authorityState.locator) > MaxSocketPathBytes || !filepath.IsAbs(authorityState.locator) {
 		return state.rejectLocalAPIConstruction(authority, fmt.Errorf("%w: local API socket locator is invalid", ErrInvalidHome))
 	}
 	contents, err := authorityState.readBoundToken()

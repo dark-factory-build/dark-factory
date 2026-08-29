@@ -1435,6 +1435,9 @@ func newSupervisorFixture(t *testing.T, program string) *supervisorFixture {
 		t.Fatal(err)
 	}
 	apiHomePath := filepath.Join(root, "api-home")
+	if socket := install.LocalAPISocketPath(apiHomePath); len(socket) > install.MaxSocketPathBytes {
+		t.Fatalf("api socket path is %d bytes, over the %d-byte budget: %q", len(socket), install.MaxSocketPathBytes, socket)
+	}
 	if _, err := install.Init(context.Background(), apiHomePath); err != nil {
 		t.Fatal(err)
 	}

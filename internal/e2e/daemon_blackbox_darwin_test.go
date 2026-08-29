@@ -236,6 +236,9 @@ func newBlackBoxFixture(t *testing.T) *blackBoxFixture {
 		t.Fatal(err)
 	}
 	fixture := &blackBoxFixture{root: root, home: filepath.Join(root, "factory"), repo: filepath.Join(root, "repo"), factoryd: factoryd, factoryctl: factoryctl}
+	if socket := install.LocalAPISocketPath(fixture.home); len(socket) > install.MaxSocketPathBytes {
+		t.Fatalf("api socket path is %d bytes, over the %d-byte budget: %q", len(socket), install.MaxSocketPathBytes, socket)
+	}
 	if err := os.Mkdir(fixture.repo, 0o700); err != nil {
 		t.Fatal(err)
 	}

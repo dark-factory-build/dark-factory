@@ -29,6 +29,18 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// workerEventPatience bounds each wait on the spawned worker chain, which
+// re-execs this race-instrumented test binary through two gates before the
+// worker can report. These waits have been observed to expire with no event
+// and an empty diagnostic: once in 16 sustained race-instrumented package
+// runs, and once more in a full authoritative gate run after this bound was
+// raised to 30s (that gate evidence is recorded in the socket-fix section of
+// docs/internal/cutover-completion-plan.md). Never reproduced in isolation;
+// cause not isolated. The bound exists to catch a hang, not to assert latency;
+// it is set well past any observed healthy wait so that an expiry is evidence
+// of a real stall rather than of a slow machine.
+const workerEventPatience = 30 * time.Second
+
 func TestMain(m *testing.M) {
 	if len(os.Args) == 2 {
 		var err error
@@ -267,10 +279,10 @@ func TestFactoryctlLocatorValidationPrecedesSelectionAndProviderEffects(t *testi
 			if err := fixture.controller.Release(runner.StageSelection); err != nil {
 				t.Fatal(err)
 			}
-			if event, err := fixture.controller.Next(8 * time.Second); !errors.Is(err, io.EOF) || event.Kind != "" {
+			if event, err := fixture.controller.Next(workerEventPatience); !errors.Is(err, io.EOF) || event.Kind != "" {
 				t.Fatalf("event=%+v err=%v diagnostic=%q", event, err, fixture.output())
 			}
-			if exit, err := fixture.child.FinishAfterExit(8 * time.Second); err != nil || exit.Code == 0 && exit.Signal == 0 {
+			if exit, err := fixture.child.FinishAfterExit(workerEventPatience); err != nil || exit.Code == 0 && exit.Signal == 0 {
 				t.Fatalf("outer=%+v err=%v", exit, err)
 			}
 			for _, path := range []string{filepath.Join(fixture.changeParent, fixture.finalName), filepath.Join(fixture.changeParent, ".stage"), fixture.witness} {
@@ -321,7 +333,7 @@ func TestControllerEOFAfterSelectionLeavesNoLaterEffect(t *testing.T) {
 	if err := fixture.controller.Close(); err != nil {
 		t.Fatal(err)
 	}
-	exit, err := fixture.child.FinishAfterExit(8 * time.Second)
+	exit, err := fixture.child.FinishAfterExit(workerEventPatience)
 	if err != nil {
 		t.Fatalf("outer did not join after controller EOF: %v diag=%q", err, fixture.output())
 	}
@@ -386,11 +398,11 @@ func TestInitialRuntimeChildValidationPrecedesSelectionEffects(t *testing.T) {
 			if err := fixture.controller.Release(runner.StageSelection); err != nil {
 				t.Fatal(err)
 			}
-			event, err := fixture.controller.Next(8 * time.Second)
+			event, err := fixture.controller.Next(workerEventPatience)
 			if !errors.Is(err, io.EOF) || event.Kind != "" || event.Stage != "" || event.Identity.Valid() || len(event.Payload) != 0 || event.Result != nil {
 				t.Fatalf("event=%+v err=%v diag=%q", event, err, fixture.output())
 			}
-			if exit, err := fixture.child.FinishAfterExit(8 * time.Second); err != nil || exit.Code == 0 && exit.Signal == 0 {
+			if exit, err := fixture.child.FinishAfterExit(workerEventPatience); err != nil || exit.Code == 0 && exit.Signal == 0 {
 				t.Fatalf("outer=%+v err=%v", exit, err)
 			}
 			for _, effect := range []string{filepath.Join(fixture.changeParent, fixture.finalName), filepath.Join(fixture.changeParent, ".stage"), fixture.witness} {
@@ -725,7 +737,7 @@ func (f *workerFixture) start(t *testing.T) runner.Identity {
 	if _, err := f.child.Activate(); err != nil {
 		t.Fatal(err)
 	}
-	event, err := f.controller.Next(6 * time.Second)
+	event, err := f.controller.Next(workerEventPatience)
 	if err != nil || event.Kind != runner.AttemptInnerReady {
 		t.Fatalf("ready=%+v err=%v diag=%q", event, err, f.output())
 	}
@@ -736,7 +748,7 @@ func (f *workerFixture) release(t *testing.T, release, report runner.AttemptStag
 	if err := f.controller.Release(release); err != nil {
 		t.Fatal(err)
 	}
-	event, err := f.controller.Next(8 * time.Second)
+	event, err := f.controller.Next(workerEventPatience)
 	if err != nil || event.Kind != runner.AttemptCheckpoint || event.Stage != report {
 		t.Fatalf("event=%+v err=%v diag=%q", event, err, f.output())
 	}
@@ -746,7 +758,7 @@ func (f *workerFixture) release(t *testing.T, release, report runner.AttemptStag
 func (f *workerFixture) nextTerminal(t *testing.T, kind runner.TerminalEventKind, correlation uint64) runner.TerminalFrame {
 	t.Helper()
 	for {
-		event, err := f.controller.Next(8 * time.Second)
+		event, err := f.controller.Next(workerEventPatience)
 		if err != nil || event.Kind != runner.AttemptTerminalFrame || event.Frame == nil {
 			t.Fatalf("terminal %s event=%+v err=%v diag=%q", kind, event, err, f.output())
 		}
@@ -777,7 +789,7 @@ func (f *workerFixture) finish(t *testing.T, expectedSuccess ...bool) *runner.At
 	var event runner.AttemptEvent
 	var err error
 	for {
-		event, err = f.controller.Next(8 * time.Second)
+		event, err = f.controller.Next(workerEventPatience)
 		if err != nil || event.Kind != runner.AttemptTerminalFrame {
 			break
 		}
@@ -789,7 +801,7 @@ func (f *workerFixture) finish(t *testing.T, expectedSuccess ...bool) *runner.At
 	if err != nil {
 		t.Fatalf("authenticate result: %v diag=%q", err, f.output())
 	}
-	exit, err := f.child.FinishAfterExit(8 * time.Second)
+	exit, err := f.child.FinishAfterExit(workerEventPatience)
 	if err != nil || wantSuccess && exit.Code != 0 || !wantSuccess && exit.Code == 0 && exit.Signal == 0 {
 		t.Fatalf("outer exit=%+v err=%v diag=%q", exit, err, f.output())
 	}

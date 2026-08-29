@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/dark-factory-build/dark-factory/internal/change"
+	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
@@ -139,7 +140,7 @@ func TestConfigRejectsRawAuthorityAndInputCorruption(t *testing.T) {
 		func(v *Config) { v.Provider, v.ReasoningEffort = kernel.ProviderCodex, "speculative" },
 		func(v *Config) { v.FinalName = ".GiT" },
 		func(v *Config) { v.StagingName = v.FinalName },
-		func(v *Config) { v.AttemptSocket = "/" + strings.Repeat("s", maximumSocketBytes) },
+		func(v *Config) { v.AttemptSocket = "/" + strings.Repeat("s", install.MaxSocketPathBytes) },
 		func(v *Config) { v.ProviderTask = []byte{0xff} },
 		func(v *Config) { v.ProviderTask = []byte{'x', 0} },
 		func(v *Config) { v.ProviderTask = nil },

@@ -8,15 +8,15 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 const (
-	shellPath      = "/bin/sh"
-	shellVersion   = "darwin-system-sh-v1"
-	maxPathBytes   = 4096
-	maxSocketBytes = 103
+	shellPath    = "/bin/sh"
+	shellVersion = "darwin-system-sh-v1"
+	maxPathBytes = 4096
 )
 
 var (
@@ -172,7 +172,7 @@ func (runtime RuntimePaths) valid() bool {
 			return false
 		}
 	}
-	return len(runtime.socket) <= maxSocketBytes && runtime.home != runtime.temp &&
+	return len(runtime.socket) <= install.MaxSocketPathBytes && runtime.home != runtime.temp &&
 		validGitCeiling(runtime.gitCeiling) && validToolPath(runtime.toolPath)
 }
 

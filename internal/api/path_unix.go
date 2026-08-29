@@ -11,9 +11,9 @@ import (
 	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
-)
 
-const maxSocketPathBytes = 103
+	"github.com/dark-factory-build/dark-factory/internal/install"
+)
 
 type fileIdentity struct {
 	device, inode uint64
@@ -158,7 +158,7 @@ func loadTokenAtOpen(path string, beforeOpen func()) (tokenRecord, error) {
 }
 
 func inspectSocket(path string) (socketRecord, error) {
-	if !validCanonicalPath(path, maxSocketPathBytes) {
+	if !validCanonicalPath(path, install.MaxSocketPathBytes) {
 		return socketRecord{}, ErrInvalidClient
 	}
 	root, parent, err := openPrivateParent(path)
