@@ -254,7 +254,7 @@ func openServiceHomeCapability(ctx context.Context, path string) (_ *serviceHome
 		}
 		if pass == 0 {
 			expected = stat
-		} else if !sameServiceStat(expected, stat) {
+		} else if !sameServiceRootStat(expected, stat) {
 			_ = home.Close()
 			return nil, fmt.Errorf("%w: service home identity changed", ErrInvalidHome)
 		}
@@ -363,6 +363,30 @@ func toServiceIdentity(stat unix.Stat_t) serviceIdentity {
 	return serviceIdentity{identity: toIdentity(stat), ctime: stat.Ctim}
 }
 
+// volatileServiceMember names the members a LIVE daemon legitimately rewrites
+// while a status observation runs. Their bytes and times are not part of the
+// service-status invariant; their filesystem identity and bounds are.
+func volatileServiceMember(name string) bool {
+	return name == databaseName || name == databaseName+"-wal" || name == databaseName+"-shm"
+}
+
+// reducedServiceIdentity strips the volatile stat dimensions (size, times,
+// link count driven by SQLite checkpointing) while keeping the identity that
+// detects replacement and authority changes.
+func reducedServiceIdentity(stat unix.Stat_t) serviceIdentity {
+	reduced := toServiceIdentity(stat)
+	reduced.identity.size = 0
+	reduced.identity.nlink = 0
+	reduced.ctime = unix.Timespec{}
+	return reduced
+}
+
+// sameServiceRootStat compares the home directory itself without the
+// dimensions its live members churn (size, mtime, ctime as entries change).
+func sameServiceRootStat(left, right unix.Stat_t) bool {
+	return left.Dev == right.Dev && left.Ino == right.Ino && left.Mode == right.Mode && left.Uid == right.Uid && left.Gid == right.Gid
+}
+
 func sameServiceIdentity(left, right serviceIdentity) bool {
 	return left == right
 }
@@ -394,7 +418,7 @@ func snapshotServiceHome(ctx context.Context, home *os.File) (serviceHomeImage, 
 	if err := inspectLockPair(home); err != nil {
 		return serviceHomeImage{}, err
 	}
-	image := serviceHomeImage{root: toServiceIdentity(rootBefore), files: make(map[string]serviceMemberSnapshot, len(names)-2), directories: make(map[string]serviceIdentity, 2)}
+	image := serviceHomeImage{root: reducedServiceIdentity(rootBefore), files: make(map[string]serviceMemberSnapshot, len(names)-2), directories: make(map[string]serviceIdentity, 2)}
 	for _, name := range []string{formatName, databaseName, tokenName, lockName, lockAnchorName, databaseName + "-wal", databaseName + "-shm"} {
 		if !names[name] {
 			continue
@@ -423,6 +447,14 @@ func snapshotServiceHome(ctx context.Context, home *os.File) (serviceHomeImage, 
 		default:
 			minimum, maximum = operationalSidecarBounds(name)
 		}
+		if volatileServiceMember(name) {
+			closeErr := file.Close()
+			if stat.Size < minimum || stat.Size > maximum || closeErr != nil {
+				return serviceHomeImage{}, fmt.Errorf("%w: live member %s bounds", ErrInvalidHome, name)
+			}
+			image.files[name] = serviceMemberSnapshot{serviceIdentity: reducedServiceIdentity(stat)}
+			continue
+		}
 		digest, digestErr := digestMember(ctx, file, stat.Size, minimum, maximum)
 		bindingErr := recheckBinding(home, name, stat)
 		closeErr := file.Close()
@@ -446,7 +478,7 @@ func snapshotServiceHome(ctx context.Context, home *os.File) (serviceHomeImage, 
 	if err := unix.Fstat(int(home.Fd()), &rootAfter); err != nil {
 		return serviceHomeImage{}, err
 	}
-	if !sameServiceIdentity(toServiceIdentity(rootBefore), toServiceIdentity(rootAfter)) {
+	if !sameServiceIdentity(reducedServiceIdentity(rootBefore), reducedServiceIdentity(rootAfter)) {
 		return serviceHomeImage{}, fmt.Errorf("%w: service home identity changed", ErrInvalidHome)
 	}
 	if err := ctx.Err(); err != nil {
@@ -459,11 +491,28 @@ func sameServiceHomeImage(left, right serviceHomeImage) error {
 	if !sameServiceIdentity(left.root, right.root) {
 		return fmt.Errorf("%w: service home identity changed", ErrInvalidHome)
 	}
-	if len(left.files) != len(right.files) || len(left.directories) != len(right.directories) {
+	if len(left.directories) != len(right.directories) {
 		return fmt.Errorf("%w: service home census changed", ErrInvalidHome)
 	}
-	for name, expected := range left.files {
-		if right.files[name] != expected {
+	names := map[string]bool{}
+	for name := range left.files {
+		names[name] = true
+	}
+	for name := range right.files {
+		names[name] = true
+	}
+	for name := range names {
+		expected, inLeft := left.files[name]
+		actual, inRight := right.files[name]
+		if !inLeft || !inRight {
+			// A live daemon creates and removes the SQLite sidecars between
+			// passes; every durable member must hold its census position.
+			if name == databaseName+"-wal" || name == databaseName+"-shm" {
+				continue
+			}
+			return fmt.Errorf("%w: service home census changed", ErrInvalidHome)
+		}
+		if actual != expected {
 			return fmt.Errorf("%w: service home member changed", ErrInvalidHome)
 		}
 	}
@@ -496,8 +545,8 @@ func observeLaunchctl(ctx context.Context, launchctl launchctlRun, service, plis
 	if result.status != launchctlNotFound {
 		return launchctlObservation{}, fmt.Errorf("%w: print status %d", ErrServiceLaunchctl, result.status)
 	}
-	if len(bytes.TrimSpace(result.stderr)) != 0 {
-		return launchctlObservation{}, fmt.Errorf("%w: not-found print carried stderr", ErrServiceLaunchctl)
+	if !validNotFoundStderr(result.stderr, service) {
+		return launchctlObservation{}, fmt.Errorf("%w: not-found print carried unexpected stderr", ErrServiceLaunchctl)
 	}
 	classification := launchctl(ctx, "error", strconv.Itoa(result.status))
 	if classification.overflow || classification.err != nil || classification.status != 0 || strings.TrimSpace(string(classification.stdout)) != launchctlNotFoundText || len(bytes.TrimSpace(classification.stderr)) != 0 {
@@ -507,6 +556,24 @@ func observeLaunchctl(ctx context.Context, launchctl launchctlRun, service, plis
 		return launchctlObservation{}, fmt.Errorf("%w: not-found classification mismatch", ErrServiceLaunchctl)
 	}
 	return launchctlObservation{}, nil
+}
+
+// validNotFoundStderr accepts exactly the two not-found stderr shapes real
+// launchd produces: nothing, or the fixed two-line diagnostic naming this
+// exact query's label and uid. Anything else is not authoritative.
+func validNotFoundStderr(stderr []byte, service string) bool {
+	trimmed := strings.TrimSpace(string(stderr))
+	if trimmed == "" {
+		return true
+	}
+	slash := strings.LastIndexByte(service, '/')
+	if slash < 0 {
+		return false
+	}
+	label := service[slash+1:]
+	uid := strconv.Itoa(os.Geteuid())
+	want := "Bad request.\nCould not find service \"" + label + "\" in domain for user gui: " + uid
+	return trimmed == want
 }
 
 func parseLaunchctlPrint(output []byte, service, plistPath, programPath string) (int, error) {
@@ -522,7 +589,8 @@ func parseLaunchctlPrint(output []byte, service, plistPath, programPath string) 
 	for _, line := range lines[1 : len(lines)-1] {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
-			return 0, fmt.Errorf("%w: blank service field", ErrServiceLaunchctl)
+			// Real launchd separates sections with blank lines.
+			continue
 		}
 		if len(nesting) == 1 {
 			rawKey, rawValue, found := strings.Cut(trimmed, "=")
@@ -580,7 +648,7 @@ func validLaunchctlFieldName(value string) bool {
 		return false
 	}
 	for _, character := range value {
-		if character != ' ' && character != '-' && character != '_' && (character < '0' || character > '9') && (character < 'A' || character > 'Z') && (character < 'a' || character > 'z') {
+		if character != ' ' && character != '-' && character != '_' && character != '(' && character != ')' && (character < '0' || character > '9') && (character < 'A' || character > 'Z') && (character < 'a' || character > 'z') {
 			return false
 		}
 	}

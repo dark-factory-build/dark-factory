@@ -25,6 +25,7 @@ import (
 
 const (
 	attemptRequestTimeout = 5 * time.Second
+	serviceRequestTimeout = 30 * time.Second
 	exitUsage             = 64
 	exitFailure           = 1
 	maxHomeArgumentBytes  = 4096
@@ -333,7 +334,7 @@ func serviceConfigFor(command attemptCommand) install.ServiceConfig {
 }
 
 func runService(ctx context.Context, command attemptCommand, stdout, stderr io.Writer, inspect serviceInspector) int {
-	callContext, cancel := context.WithTimeout(ctx, attemptRequestTimeout)
+	callContext, cancel := context.WithTimeout(ctx, serviceRequestTimeout)
 	defer cancel()
 	config := serviceConfigFor(command)
 	var status install.ServiceStatus

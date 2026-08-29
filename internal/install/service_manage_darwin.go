@@ -346,17 +346,30 @@ func servicePlistLocation(userHome string, config ServiceConfig) (directory, pat
 
 func confirmServiceLoaded(ctx context.Context, home string, config ServiceConfig, plistPath string, launchctl launchctlRun) (ServiceStatus, error) {
 	service := "gui/" + strconv.Itoa(os.Geteuid()) + "/" + config.Label
-	observation, err := observeLaunchctl(ctx, launchctl, service, plistPath, serviceProgramPath(home))
-	if err != nil {
-		return ServiceStatus{State: ServiceAmbiguous}, err
+	deadline := time.Now().Add(serviceBootoutPatience)
+	for {
+		observation, err := observeLaunchctl(ctx, launchctl, service, plistPath, serviceProgramPath(home))
+		if err == nil {
+			if !observation.present {
+				return ServiceStatus{State: ServiceInstalled}, fmt.Errorf("%w: job absent after bootstrap", ErrServiceLaunchctl)
+			}
+			if observation.pid > 0 {
+				return ServiceStatus{State: ServiceRunning, PID: observation.pid}, nil
+			}
+			return ServiceStatus{State: ServiceInstalled}, nil
+		}
+		// launchd passes through transient spawn states whose print shapes the
+		// strict parser refuses; each observation stays exact, the confirmation
+		// merely waits out the transient within one bound.
+		if time.Now().After(deadline) {
+			return ServiceStatus{State: ServiceAmbiguous}, err
+		}
+		select {
+		case <-ctx.Done():
+			return ServiceStatus{State: ServiceAmbiguous}, ctx.Err()
+		case <-time.After(150 * time.Millisecond):
+		}
 	}
-	if !observation.present {
-		return ServiceStatus{State: ServiceInstalled}, fmt.Errorf("%w: job absent after bootstrap", ErrServiceLaunchctl)
-	}
-	if observation.pid > 0 {
-		return ServiceStatus{State: ServiceRunning, PID: observation.pid}, nil
-	}
-	return ServiceStatus{State: ServiceInstalled}, nil
 }
 
 func bootoutService(ctx context.Context, config ServiceConfig, launchctl launchctlRun) error {
