@@ -30,7 +30,14 @@ if grep -Eq 'rustup|cargo[[:space:]]+\+' .github/workflows/release.yml; then
     echo ".github/workflows/release.yml retains the deleted Rust toolchain" >&2
     exit 1
 fi
-runtime_jobs=$(sed -n '/^  checks:/,/^  control-plane:/p' .github/workflows/ci.yml)
+# Scan the WHOLE workflow with only the control-plane job's own block removed:
+# a window ending at that job would let anything appended after it — the
+# natural place a new job lands — escape the guard entirely.
+runtime_jobs=$(awk '
+    /^  control-plane:$/ { skip = 1; next }
+    skip && /^  [^ #]/  { skip = 0 }
+    !skip               { print }
+' .github/workflows/ci.yml)
 if printf '%s\n' "$runtime_jobs" | grep -Eq 'rustup|cargo[[:space:]]+\+'; then
     echo ".github/workflows/ci.yml runs the deleted Rust toolchain outside control-plane" >&2
     exit 1

@@ -6647,9 +6647,19 @@ Rust deletion completing the hard cutover on `s6-rust-deletion`:
 - CI loses the `legacy-rust` job and the `linux` job, and the `required`
   aggregate drops both from `needs` and its failure condition, since a
   required context naming a deleted job would block every pull request.
-  The `linux` job goes rather than converts: `GOOS=linux go build ./...`
-  fails on this tree, so the daemon is Darwin-only and there is nothing
-  Go for that job to run. Linux support remains #120/#141-144.
+  The `linux` job goes rather than converts, and the precise reason is
+  worth recording because the first wording overstated it. That job never
+  built Go for Linux at all: its `--linux-source` arm ran
+  `check-toolchain-pins.sh` plus the three cargo stages, so every line of
+  it was about the deleted workspace. The tree is Darwin-only at the
+  runtime level rather than uncompilable — `GOOS=linux go build ./...`
+  fails with exactly two errors on one symbol (`validateAttemptName`,
+  Darwin-only, called from the untagged `attempt_result.go:199,357`), and
+  with a `!darwin` copy supplied the tree compiles except for
+  `daemon.RecoverAbandonedRuns` at `cmd/factoryd/main.go:310`; 17
+  `_unsupported.go` stubs exist for exactly this purpose. Retiring the job
+  is still correct, because what it actually ran is deleted. Linux support
+  remains #120/#141-144.
 - The identity documents now say what is true. AGENTS.md's overview drops
   "pure-Rust, terminal-first" and the Ratatui board for the Go runtime
   and the loopback web console, and states the limits in the same breath:

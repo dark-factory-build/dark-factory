@@ -35,10 +35,14 @@ fi
 ./scripts/test-github-step-summary.sh
 ./scripts/test-verify-adversarial-review.sh
 ./scripts/test-inline-chokepoint.sh
-# The deleted Linux job was this fixture's only caller. It asserts the
-# `required` aggregate's shape against the publisher, which is exactly what a
-# job deletion can silently invalidate, so the gate runs it now.
+# The deleted Linux job was the only caller of both fixtures below. One
+# asserts the `required` aggregate's shape against the publisher; the other is
+# the primary guard for the Rust deletion itself — that the retired scripts
+# stay deleted, that no CI job or aggregate dependency comes back, and that
+# this gate keeps every fixture. A job deletion is exactly what silently
+# orphans them, so the gate runs both.
 ./scripts/test-repository-settings.sh
+./scripts/test-local-ci-mode.sh
 
 # The authoritative source gate is the Go gate: gofmt, go vet, the full serial
 # and race suites, the TypeScript client proof, and the browser, daemon and

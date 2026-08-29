@@ -57,12 +57,9 @@ fi
 if grep -Eq 'needs\.(legacy-rust|linux)\.result|needs: \[.*(legacy-rust|linux)' "$ci"; then
     fail "the required aggregate still depends on a deleted job"
 fi
-# The control-plane Worker is still Rust, still deployed, and keeps its own
-# gate — its rustup step is correct. Only the runtime jobs must be Rust-free.
-runtime_jobs=$(sed -n '/^  checks:/,/^  control-plane:/p' "$ci")
-if printf '%s\n' "$runtime_jobs" | grep -Eq 'rustup|cargo[[:space:]]+\+'; then
-    fail "CI runs the Rust toolchain for the deleted runtime workspace"
-fi
+# The Rust-toolchain-absence scan lives in check-toolchain-pins.sh, which the
+# gate runs, so it is not duplicated here: two copies of one guard drift, and
+# the pins script is the toolchain authority.
 
 control_plane_job=$(sed -n '/^  control-plane:/,/^  [a-z]/p' "$ci")
 control_line_of() {
