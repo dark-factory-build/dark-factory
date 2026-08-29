@@ -535,8 +535,53 @@ func (tx *writeTx) discard() {
 	if tx.discarded || tx.connection == nil {
 		return
 	}
+	// Destroying a connection is fail-closed but permanent: the retained
+	// physical set is sealed at activation and cannot mint a replacement, and
+	// the writer set holds exactly one connection, so one destroyed connection
+	// ends every later write with errConnectionSetExhausted. A statement that
+	// was interrupted before it took the write reservation leaves the
+	// connection in autocommit and is provably clean, so resolve first and
+	// destroy only what cannot be resolved.
+	if resolveConnection(tx.connection) {
+		return
+	}
 	discardConnection(tx.connection)
 	tx.discarded = true
+}
+
+// resolveConnection reports whether the connection is provably free of a
+// transaction of ours. SQLite answers exactly through autocommit mode: a
+// lifecycle statement interrupted before it took the write reservation leaves
+// autocommit on, which is the shutdown case, and a connection whose statement
+// did open a transaction has already failed to close it, so it is destroyed
+// rather than asked again.
+func resolveConnection(connection *sql.Conn) bool {
+	return connectionInAutocommit(connection)
+}
+
+func connectionInAutocommit(connection *sql.Conn) bool {
+	autocommit := false
+	if err := connection.Raw(func(driverConnection any) error {
+		sqliteConnection, ok := driverConnection.(sqliteDriver.Conn)
+		if !ok {
+			return nil
+		}
+		autocommit = sqliteConnection.Raw().GetAutocommit()
+		return nil
+	}); err != nil {
+		return false
+	}
+	return autocommit
+}
+
+// releaseUncertainConnection returns a connection to its retained pool when its
+// state is provably clean and destroys it otherwise.
+func releaseUncertainConnection(connection *sql.Conn) {
+	if resolveConnection(connection) {
+		_ = connection.Close()
+		return
+	}
+	discardConnection(connection)
 }
 
 func (tx *writeTx) Close() {
