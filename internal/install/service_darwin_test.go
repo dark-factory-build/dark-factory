@@ -295,7 +295,7 @@ func TestLaunchctlPrintRequiresExactOwnedFields(t *testing.T) {
 
 func TestServicePlistIsOneFiniteAllowlist(t *testing.T) {
 	home := "/private/tmp/factory & <operator>"
-	body, digest, err := ServicePlist(home)
+	body, digest, err := ServicePlist(home, DefaultServiceLabel)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,11 +312,11 @@ func TestServicePlistIsOneFiniteAllowlist(t *testing.T) {
 			t.Fatalf("plist omitted %q", expected)
 		}
 	}
-	if _, _, err := ServicePlist("relative"); !errors.Is(err, ErrServicePlist) {
+	if _, _, err := ServicePlist("relative", DefaultServiceLabel); !errors.Is(err, ErrServicePlist) {
 		t.Fatalf("relative home = %v", err)
 	}
 	for _, home := range []string{"/private/tmp/invalid-\x00", "/private/tmp/invalid-\x01", "/private/tmp/invalid-\xff"} {
-		if _, _, err := ServicePlist(home); !errors.Is(err, ErrServicePlist) {
+		if _, _, err := ServicePlist(home, DefaultServiceLabel); !errors.Is(err, ErrServicePlist) {
 			t.Fatalf("invalid plist path %q accepted: %v", home, err)
 		}
 	}
@@ -333,7 +333,7 @@ func TestServiceStatusRejectsDetachedLaunchAgentsDuringRead(t *testing.T) {
 	if _, err := Init(context.Background(), home); err != nil {
 		t.Fatal(err)
 	}
-	plistBody, _, err := ServicePlist(home)
+	plistBody, _, err := ServicePlist(home, DefaultServiceLabel)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -490,7 +490,7 @@ func TestServiceStatusRefusesPlistMutationsAndPresentJobs(t *testing.T) {
 	if _, err := Init(context.Background(), home); err != nil {
 		t.Fatal(err)
 	}
-	plistBody, _, err := ServicePlist(home)
+	plistBody, _, err := ServicePlist(home, DefaultServiceLabel)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -518,7 +518,7 @@ func TestServiceStatusRefusesPlistMutationsAndPresentJobs(t *testing.T) {
 		t.Fatal(err)
 	}
 	service := fmt.Sprintf("gui/%d/%s", os.Geteuid(), serviceLabel)
-	program := filepath.Join(home, "bin", "current", "factoryd")
+	program := serviceProgramPath(home)
 	presentOutput := []byte(service + " = {\n\tpath = " + plistPath + "\n\tstate = running\n\tprogram = " + program + "\n\tpid = 731\n}\n")
 	present := &recordedLaunchctl{results: []launchctlResult{{status: 0, stdout: presentOutput}}}
 	if status, err := inspectService(context.Background(), home, userHome, present.run); status != (ServiceStatus{State: ServiceAmbiguous, PID: 731}) || !errors.Is(err, ErrServiceAmbiguous) {
@@ -532,7 +532,7 @@ func TestServiceStatusRejectsPlistMetadataWithoutLaunchctl(t *testing.T) {
 	if _, err := Init(context.Background(), home); err != nil {
 		t.Fatal(err)
 	}
-	body, _, err := ServicePlist(home)
+	body, _, err := ServicePlist(home, DefaultServiceLabel)
 	if err != nil {
 		t.Fatal(err)
 	}
