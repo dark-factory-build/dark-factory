@@ -6569,3 +6569,36 @@ daemon lifecycle on branch s1-finish:
   module suite green twice consecutively, `go test -race` for
   internal/daemon (167s) and cmd/factoryd (26s), the browser PTY E2E and
   the new daemon E2E green in repeated runs, `git diff --check` clean.
+
+Managed launchd service installation on 2026-08-29:
+
+- The paused managed installation is live for the Go daemon. One
+  `internal/install` service engine owns install/start/stop/uninstall and
+  the receipt-proven status projection; `factoryctl service` verbs are thin
+  wrappers with an explicit `--label`/`--plist-dir` isolation surface whose
+  production defaults are unchanged. Install copies the invoking
+  factoryctl's own resolved sibling binaries into the sibling
+  `<home>.service` directory — the home census contract is untouched — and
+  a canonical durable receipt makes installed/running provable states:
+  status reports them only when receipt, plist bytes, and the installed
+  program digest agree exactly, and every other present fact stays
+  ambiguous. Foreign bytes are never deleted; crash residue resolves only
+  through uninstall, which removes exactly this installation's property.
+- Reality corrected three reviewed launchctl assumptions that fakes had
+  never exercised: a not-found print carries a fixed two-line stderr naming
+  the queried label and uid (now accepted in exactly that shape), real
+  print output holds blank lines and parenthesised field names (now
+  parsed), and jobs pass through transient spawn states whose print the
+  strict parser refuses (each observation stays exact; bootstrap
+  confirmation waits out the transient within one bound). The service
+  status census also no longer demands byte-stability of the SQLite
+  members a live daemon legitimately rewrites; identity, bounds, member
+  census, and every durable member remain exact.
+- `scripts/go-service-e2e.sh` is in the authoritative gate: real binaries,
+  real launchd, one disposable unique label in the user gui domain, all
+  files under a temporary root, guaranteed bootout on exit. It proves
+  install → running, a real task through the managed daemon, stop → the
+  socket dies, start → a second task, uninstall → launchctl 113, no
+  artifacts, and an empty process census for the home. The operator's
+  ~/.dark-factory and the production label are never touched; migrating
+  the live install remains an owner-only action.

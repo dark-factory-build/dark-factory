@@ -1,15 +1,26 @@
 # macOS service
 
-This directory contains the LaunchAgent template used by Dark Factory's
-managed macOS installation. The service keeps `factoryd` running independently
-of `factoryctl` and `factory-tui`.
+This directory documents Dark Factory's managed macOS installation. The
+LaunchAgent keeps `factoryd` running independently of any client.
 
-Managed installation and service changes are currently paused. Do not render,
-install, reload, or remove the LaunchAgent from current `main`, and do not use
-the operator's `~/.dark-factory` as a development fixture. Supported service
-and uninstall steps will return here when managed installation resumes.
+Managed installation is implemented by the Go `internal/install` service
+engine and operated through `factoryctl service install / start / stop /
+uninstall / status --home <ABSOLUTE>`. Install places the invoking
+factoryctl's own sibling binaries into the sibling `<home>.service`
+directory, writes a durable receipt, renders the plist from the one Go
+authority (`install.ServicePlist`), and bootstraps the job. Present
+service states are provable only through an exact receipt, plist, and
+program-digest agreement; anything else reports ambiguous, and
+`factoryctl service uninstall` is the resolution path for residue.
 
-Development daemons run directly with a temporary `DARK_FACTORY_HOME` and an
-explicit private socket. See the
-[development workflow](../docs/development/WORKFLOW.md) for the safe command
-sequence.
+The `com.dark-factory.factoryd.plist.template` file is the historical
+Rust-era template. The Go plist is rendered in code, never from this
+template; the file remains only until the Rust deletion removes the
+release chain that references it.
+
+Development daemons still run directly with a temporary
+`DARK_FACTORY_HOME` and an explicit private socket — see the
+[development workflow](../docs/development/WORKFLOW.md). Tests and the
+`scripts/go-service-e2e.sh` gate never touch `~/.dark-factory` or the
+production label: they use disposable unique labels and temporary
+`--plist-dir` roots, and boot their labels out on exit.
