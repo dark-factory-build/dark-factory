@@ -1925,7 +1925,11 @@ func TestGroupSignalErrorClassificationFailsClosed(t *testing.T) {
 		{name: "success", err: nil, wantOK: true},
 		{name: "corroborated ESRCH", err: unix.ESRCH, noLive: true, wantOK: true},
 		{name: "uncorroborated ESRCH", err: unix.ESRCH},
-		{name: "EPERM", err: unix.EPERM, noLive: true},
+		// Darwin reports EPERM once our unreaped zombie leader is the only
+		// member left, so a converged census must forgive it; a census still
+		// reporting life must not, whatever the errno claims.
+		{name: "corroborated EPERM", err: unix.EPERM, noLive: true, wantOK: true},
+		{name: "uncorroborated EPERM", err: unix.EPERM},
 		{name: "EIO", err: unix.EIO, noLive: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
