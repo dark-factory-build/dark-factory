@@ -698,3 +698,59 @@ func serviceFDCount(t *testing.T) int {
 	}
 	return len(entries)
 }
+
+func TestServiceDirectoryRecheckToleratesAncestorChurnAndStaysFailClosed(t *testing.T) {
+	root := serviceTestRoot(t)
+	middle := filepath.Join(root, "middle")
+	leaf := filepath.Join(middle, "leaf")
+	if err := os.MkdirAll(leaf, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	directory, err := openServiceDirectory(leaf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = directory.close() }()
+	// Unrelated sibling activity in ancestor directories (every parallel
+	// test's mktemp; anything written into the user's home in production)
+	// legitimately changes their timestamps, sizes and link counts. The
+	// chain's identity — device, inode, mode, owner — is what recheck
+	// guards, so churn must not read as an identity change.
+	if err := os.WriteFile(filepath.Join(root, "churn"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(middle, "sibling"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := directory.recheck(); err != nil {
+		t.Fatalf("ancestor churn read as identity change: %v", err)
+	}
+	// Fail-closed retention: a mode change on a chain member is an identity
+	// change and must still refuse.
+	if err := os.Chmod(leaf, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := directory.recheck(); err == nil {
+		t.Fatal("mode change passed recheck")
+	}
+	if err := os.Chmod(leaf, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := directory.recheck(); err != nil {
+		t.Fatalf("restored chain refused: %v", err)
+	}
+	// A swapped directory of the same name is a different inode: the
+	// parent-binding probe must refuse it.
+	if err := os.Remove(filepath.Join(middle, "sibling")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(leaf); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(leaf, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := directory.recheck(); err == nil {
+		t.Fatal("swapped leaf passed recheck")
+	}
+}

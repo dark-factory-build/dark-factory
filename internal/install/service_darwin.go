@@ -306,10 +306,10 @@ func (capability *serviceHomeCapability) recheck(ctx context.Context) error {
 		return err
 	}
 	var current, binding unix.Stat_t
-	if err := unix.Fstat(int(capability.home.Fd()), &current); err != nil || !sameServiceStat(capability.stat, current) {
+	if err := unix.Fstat(int(capability.home.Fd()), &current); err != nil || !sameServiceRootStat(capability.stat, current) {
 		return fmt.Errorf("%w: service home descriptor changed", ErrInvalidHome)
 	}
-	if err := unix.Fstatat(int(capability.parent.file.Fd()), capability.base, &binding, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameServiceStat(capability.stat, binding) {
+	if err := unix.Fstatat(int(capability.parent.file.Fd()), capability.base, &binding, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameServiceRootStat(capability.stat, binding) {
 		return fmt.Errorf("%w: service home binding changed", ErrInvalidHome)
 	}
 	image, err := snapshotServiceHome(ctx, capability.home)
@@ -381,8 +381,11 @@ func reducedServiceIdentity(stat unix.Stat_t) serviceIdentity {
 	return reduced
 }
 
-// sameServiceRootStat compares the home directory itself without the
-// dimensions its live members churn (size, mtime, ctime as entries change).
+// sameServiceRootStat compares a directory's identity and authority —
+// device, inode, mode, owner — without the fields unrelated sibling
+// activity legitimately churns (timestamps, size, link count as entries
+// come and go). Every directory recheck uses it; regular files keep the
+// full sameServiceStat comparison, where byte-stability is meaningful.
 func sameServiceRootStat(left, right unix.Stat_t) bool {
 	return left.Dev == right.Dev && left.Ino == right.Ino && left.Mode == right.Mode && left.Uid == right.Uid && left.Gid == right.Gid
 }
@@ -767,14 +770,14 @@ func (directory *serviceDirectory) recheck() error {
 		if err := unix.Fstat(int(file.Fd()), &current); err != nil {
 			return err
 		}
-		if !sameServiceStat(directory.stats[index], current) {
+		if !sameServiceRootStat(directory.stats[index], current) {
 			return errors.New("service directory identity changed")
 		}
 		if index == 0 {
 			continue
 		}
 		var binding unix.Stat_t
-		if err := unix.Fstatat(int(directory.files[index-1].Fd()), directory.names[index], &binding, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameServiceStat(directory.stats[index], binding) {
+		if err := unix.Fstatat(int(directory.files[index-1].Fd()), directory.names[index], &binding, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameServiceRootStat(directory.stats[index], binding) {
 			return errors.New("service directory binding changed")
 		}
 	}
@@ -909,7 +912,7 @@ func recheckServicePlistParents(userHome *serviceDirectory, bindings []servicePl
 		if err := unix.Fstatat(int(binding.parent.Fd()), binding.name, &bound, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 			return fmt.Errorf("%w: plist parent binding changed", ErrServicePlist)
 		}
-		if !sameServiceStat(binding.stat, current) || !sameServiceStat(binding.stat, bound) {
+		if !sameServiceRootStat(binding.stat, current) || !sameServiceRootStat(binding.stat, bound) {
 			return fmt.Errorf("%w: plist parent %s binding changed", ErrServicePlist, binding.name)
 		}
 	}
