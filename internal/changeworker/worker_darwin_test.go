@@ -31,12 +31,14 @@ import (
 
 // workerEventPatience bounds each wait on the spawned worker chain, which
 // re-execs this race-instrumented test binary through two gates before the
-// worker can report. Under whole-module load these waits have been observed to
-// expire with no event and an empty diagnostic — roughly once per full gate
-// run, never reproduced in isolation, cause not isolated. The bound exists to
-// catch a hang, not to assert latency; it is set well past any observed
-// healthy wait so that an expiry is evidence of a real stall rather than of a
-// slow machine.
+// worker can report. These waits have been observed to expire with no event
+// and an empty diagnostic: once in 16 sustained race-instrumented package
+// runs, and once more in a full authoritative gate run after this bound was
+// raised to 30s (that gate evidence is recorded in the socket-fix section of
+// docs/internal/cutover-completion-plan.md). Never reproduced in isolation;
+// cause not isolated. The bound exists to catch a hang, not to assert latency;
+// it is set well past any observed healthy wait so that an expiry is evidence
+// of a real stall rather than of a slow machine.
 const workerEventPatience = 30 * time.Second
 
 func TestMain(m *testing.M) {
