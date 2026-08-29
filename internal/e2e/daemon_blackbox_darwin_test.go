@@ -19,7 +19,6 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/install"
-	"github.com/dark-factory-build/dark-factory/internal/provider"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
@@ -237,8 +236,8 @@ func newBlackBoxFixture(t *testing.T) *blackBoxFixture {
 		t.Fatal(err)
 	}
 	fixture := &blackBoxFixture{root: root, home: filepath.Join(root, "factory"), repo: filepath.Join(root, "repo"), factoryd: factoryd, factoryctl: factoryctl}
-	if socket := install.LocalAPISocketPath(fixture.home); len(socket) > provider.MaxSocketPathBytes {
-		t.Fatalf("api socket path is %d bytes, over the %d-byte sun_path budget: %q", len(socket), provider.MaxSocketPathBytes, socket)
+	if socket := install.LocalAPISocketPath(fixture.home); len(socket) > install.MaxSocketPathBytes {
+		t.Fatalf("api socket path is %d bytes, over the %d-byte budget: %q", len(socket), install.MaxSocketPathBytes, socket)
 	}
 	if err := os.Mkdir(fixture.repo, 0o700); err != nil {
 		t.Fatal(err)

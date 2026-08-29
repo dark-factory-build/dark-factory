@@ -20,7 +20,6 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
-	"github.com/dark-factory-build/dark-factory/internal/provider"
 )
 
 type dispatchFixture struct {
@@ -62,6 +61,9 @@ func newDispatchFixture(t *testing.T) *dispatchFixture {
 		t.Fatal(err)
 	}
 	authHomePath := filepath.Join(directory, "home")
+	if socket := install.LocalAPISocketPath(authHomePath); len(socket) > install.MaxSocketPathBytes {
+		t.Fatalf("api socket path is %d bytes, over the %d-byte budget: %q", len(socket), install.MaxSocketPathBytes, socket)
+	}
 	if _, err := install.Init(context.Background(), authHomePath); err != nil {
 		if errors.Is(err, install.ErrUnsupported) {
 			t.Skip("operational local API is unsupported on this platform")
@@ -91,9 +93,6 @@ func newDispatchFixture(t *testing.T) *dispatchFixture {
 		_ = home.Close()
 	})
 	socket := install.LocalAPISocketPath(authHomePath)
-	if len(socket) > provider.MaxSocketPathBytes {
-		t.Fatalf("api socket path is %d bytes, over the %d-byte sun_path budget: %q", len(socket), provider.MaxSocketPathBytes, socket)
-	}
 	return &dispatchFixture{daemon: daemon, store: store, listener: listener, socket: socket, operator: operatorToken}
 }
 

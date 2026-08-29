@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/dark-factory-build/dark-factory/internal/change"
+	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/provider"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
@@ -26,7 +27,6 @@ const (
 	ConfigLimit          = 256 << 10
 	maximumLocatorBytes  = 4096
 	maximumRevisionBytes = 4096
-	maximumSocketBytes   = provider.MaxSocketPathBytes
 )
 
 var ErrInvalidContract = errors.New("Change worker: invalid private contract")
@@ -260,7 +260,7 @@ func validateConfig(config Config) error {
 			return invalidContract(nil)
 		}
 	}
-	if len(config.AttemptSocket) > maximumSocketBytes || config.RuntimeIdentity.Device == 0 || config.RuntimeIdentity.Inode == 0 ||
+	if len(config.AttemptSocket) > install.MaxSocketPathBytes || config.RuntimeIdentity.Device == 0 || config.RuntimeIdentity.Inode == 0 ||
 		encodeProvider(config.Provider) == 0 ||
 		kernel.ValidateProviderLaunchControls(config.Provider, config.Model, config.ReasoningEffort) != nil || provider.ValidateToolPath(config.ToolPath) != nil ||
 		!validText(config.Revision, maximumRevisionBytes) || !validChangeName(config.FinalName) || !validChangeName(config.StagingName) ||

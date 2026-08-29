@@ -345,6 +345,9 @@ func initializedHome(t *testing.T) string {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	home := filepath.Join(root, "factory")
+	if socket := install.LocalAPISocketPath(home); len(socket) > install.MaxSocketPathBytes {
+		t.Fatalf("api socket path is %d bytes, over the %d-byte budget: %q", len(socket), install.MaxSocketPathBytes, socket)
+	}
 	if _, err := install.Init(context.Background(), home); err != nil {
 		t.Fatal(err)
 	}

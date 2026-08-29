@@ -17,7 +17,6 @@ import (
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/install"
-	"github.com/dark-factory-build/dark-factory/internal/provider"
 )
 
 type serverResult struct {
@@ -63,6 +62,9 @@ func newAPIFixture(t testing.TB) *apiFixture {
 		}
 	}()
 	homePath := filepath.Join(directory, "home")
+	if socket := install.LocalAPISocketPath(homePath); len(socket) > install.MaxSocketPathBytes {
+		t.Fatalf("api socket path is %d bytes, over the %d-byte budget: %q", len(socket), install.MaxSocketPathBytes, socket)
+	}
 	if _, err := install.Init(context.Background(), homePath); err != nil {
 		if errors.Is(err, install.ErrUnsupported) {
 			t.Skip("operational local API is unsupported on this platform")
@@ -89,9 +91,6 @@ func newAPIFixture(t testing.TB) *apiFixture {
 		t.Fatal(err)
 	}
 	socket := install.LocalAPISocketPath(homePath)
-	if len(socket) > provider.MaxSocketPathBytes {
-		t.Fatalf("api socket path is %d bytes, over the %d-byte sun_path budget: %q", len(socket), provider.MaxSocketPathBytes, socket)
-	}
 	fixture := &apiFixture{directory: directory, socket: socket, attemptPath: attemptPath, listener: listener, home: home}
 	copy(fixture.bearer[:], attempt)
 	cleanup = false

@@ -15,6 +15,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/dark-factory-build/dark-factory/internal/install"
 )
 
 const (
@@ -72,7 +74,7 @@ func NewAttemptClientFromEnvironment(socketPath string) (*AttemptClient, error) 
 }
 
 func newClient(socketPath, tokenPath string, domain byte) (client, error) {
-	if domain != operatorDomain && domain != attemptDomain || !validCanonicalPath(socketPath, maxSocketPathBytes) {
+	if domain != operatorDomain && domain != attemptDomain || !validCanonicalPath(socketPath, install.MaxSocketPathBytes) {
 		return client{}, ErrInvalidClient
 	}
 	token, err := loadToken(tokenPath)

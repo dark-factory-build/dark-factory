@@ -29,11 +29,14 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// workerEventPatience bounds each wait on the spawned worker chain. The chain
+// workerEventPatience bounds each wait on the spawned worker chain, which
 // re-execs this race-instrumented test binary through two gates before the
-// worker can report, and a cold build cache or saturated gate machine has been
-// observed to stretch that past eight seconds. The bound exists to catch
-// hangs, not to assert latency; a genuine hang still fails, just later.
+// worker can report. Under whole-module load these waits have been observed to
+// expire with no event and an empty diagnostic — roughly once per full gate
+// run, never reproduced in isolation, cause not isolated. The bound exists to
+// catch a hang, not to assert latency; it is set well past any observed
+// healthy wait so that an expiry is evidence of a real stall rather than of a
+// slow machine.
 const workerEventPatience = 30 * time.Second
 
 func TestMain(m *testing.M) {

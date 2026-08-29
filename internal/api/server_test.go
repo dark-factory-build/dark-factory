@@ -36,6 +36,9 @@ func newAPITestListener(t testing.TB, bearer credential) (*Listener, string) {
 	t.Helper()
 	directory := privateTestDirectory(t)
 	homePath := filepath.Join(directory, "home")
+	if socket := install.LocalAPISocketPath(homePath); len(socket) > install.MaxSocketPathBytes {
+		t.Fatalf("api socket path is %d bytes, over the %d-byte budget: %q", len(socket), install.MaxSocketPathBytes, socket)
+	}
 	if _, err := install.Init(context.Background(), homePath); err != nil {
 		if errors.Is(err, install.ErrUnsupported) {
 			t.Skip("operational local API is unsupported on this platform")

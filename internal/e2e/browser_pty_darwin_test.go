@@ -25,7 +25,6 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/daemon"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
-	"github.com/dark-factory-build/dark-factory/internal/provider"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 	"golang.org/x/sys/unix"
 )
@@ -201,6 +200,9 @@ func newFixture(t *testing.T, seed byte, test scenario, factoryctl, runnerExecut
 	base := strings.TrimSpace(gitOutput(t, git, gitHome, "-C", repository, "rev-parse", "HEAD"))
 
 	apiHomePath := filepath.Join(root, "api-home")
+	if socket := install.LocalAPISocketPath(apiHomePath); len(socket) > install.MaxSocketPathBytes {
+		t.Fatalf("api socket path is %d bytes, over the %d-byte budget: %q", len(socket), install.MaxSocketPathBytes, socket)
+	}
 	if _, err := install.Init(context.Background(), apiHomePath); err != nil {
 		t.Fatal(err)
 	}
@@ -265,9 +267,6 @@ func newFixture(t *testing.T, seed byte, test scenario, factoryctl, runnerExecut
 		t.Fatal(err)
 	}
 	socket := install.LocalAPISocketPath(apiHomePath)
-	if len(socket) > provider.MaxSocketPathBytes {
-		t.Fatalf("api socket path is %d bytes, over the %d-byte sun_path budget: %q", len(socket), provider.MaxSocketPathBytes, socket)
-	}
 	result.apiDone = make(chan error, 1)
 	go func() {
 		for {

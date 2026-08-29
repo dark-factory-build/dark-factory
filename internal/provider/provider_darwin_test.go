@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
@@ -183,7 +184,7 @@ func TestNewRuntimePathsRejectsMissingAndMalformedSealedValues(t *testing.T) {
 		t.Fatalf("relative home error=%v, want ErrInvalid", err)
 	}
 	invalid = append([]string(nil), valid...)
-	invalid[2] = "/" + strings.Repeat("s", MaxSocketPathBytes)
+	invalid[2] = "/" + strings.Repeat("s", install.MaxSocketPathBytes)
 	if _, err := NewRuntimePaths(invalid[0], invalid[1], invalid[2], invalid[3], invalid[4], invalid[5], invalid[6]); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("oversized socket error=%v, want ErrInvalid", err)
 	}
