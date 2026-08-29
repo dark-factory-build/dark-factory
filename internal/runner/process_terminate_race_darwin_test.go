@@ -67,7 +67,10 @@ func TestTerminateDischargesEPERMOnlyAfterExactNaturalExit(t *testing.T) {
 func TestTerminateRetainsLiveOwnerAfterEPERMWithoutExit(t *testing.T) {
 	f := newFixture(t)
 	ready := filepath.Join(f.root, "ready")
-	child := f.start("/bin/sh", []string{"-c", fmt.Sprintf("trap '' TERM; printf ready > %q; while :; do sleep 1; done", ready)}, nil, outputFile(t, filepath.Join(f.root, "out")))
+	// Bounded by the fixture root (t.TempDir removes it on every exit path,
+	// panic included) rather than by cleanup code that a failing path could
+	// skip. It stays alive across the EPERM termination it witnesses.
+	child := f.start("/bin/sh", []string{"-c", fmt.Sprintf("trap '' TERM; printf ready > %q; while test -d %q; do sleep 0.1; done", ready, f.root)}, nil, outputFile(t, filepath.Join(f.root, "out")))
 	if _, err := child.Activate(); err != nil {
 		t.Fatal(err)
 	}

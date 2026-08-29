@@ -1757,7 +1757,11 @@ func TestTerminateOwnsTERMKillAndWait(t *testing.T) {
 	f := newFixture(t)
 	ready := filepath.Join(f.root, "ready")
 	out := outputFile(t, filepath.Join(f.root, "out"))
-	child := f.start("/bin/sh", []string{"-c", "trap '' TERM; echo ready > " + ready + "; while :; do sleep 1; done"}, nil, out)
+	// The loop is bounded by the fixture root, which t.TempDir removes on
+	// every exit path including a panic — so no cleanup code has to run for
+	// this child to die, and no failing path can leak it. It stays alive
+	// across the Terminate this test witnesses, which is what it proves.
+	child := f.start("/bin/sh", []string{"-c", "trap '' TERM; echo ready > " + ready + "; while test -d " + f.root + "; do sleep 0.1; done"}, nil, out)
 	if _, err := child.Activate(); err != nil {
 		t.Fatal(err)
 	}
