@@ -26,7 +26,7 @@ const (
 	ConfigLimit          = 256 << 10
 	maximumLocatorBytes  = 4096
 	maximumRevisionBytes = 4096
-	maximumSocketBytes   = 103
+	maximumSocketBytes   = provider.MaxSocketPathBytes
 )
 
 var ErrInvalidContract = errors.New("Change worker: invalid private contract")

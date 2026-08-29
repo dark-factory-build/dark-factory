@@ -25,6 +25,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/daemon"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/provider"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 	"golang.org/x/sys/unix"
 )
@@ -264,6 +265,9 @@ func newFixture(t *testing.T, seed byte, test scenario, factoryctl, runnerExecut
 		t.Fatal(err)
 	}
 	socket := install.LocalAPISocketPath(apiHomePath)
+	if len(socket) > provider.MaxSocketPathBytes {
+		t.Fatalf("api socket path is %d bytes, over the %d-byte sun_path budget: %q", len(socket), provider.MaxSocketPathBytes, socket)
+	}
 	result.apiDone = make(chan error, 1)
 	go func() {
 		for {

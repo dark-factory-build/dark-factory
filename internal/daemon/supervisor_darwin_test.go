@@ -1508,6 +1508,9 @@ func newSupervisorFixture(t *testing.T, program string) *supervisorFixture {
 		t.Fatal(err)
 	}
 	socket := install.LocalAPISocketPath(apiHomePath)
+	if len(socket) > provider.MaxSocketPathBytes {
+		t.Fatalf("api socket path is %d bytes, over the %d-byte sun_path budget: %q", len(socket), provider.MaxSocketPathBytes, socket)
+	}
 	fixture.listener = listener
 	fixture.serverDone = make(chan error, 1)
 	go func() {

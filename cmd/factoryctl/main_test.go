@@ -17,6 +17,7 @@ import (
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/install"
+	"github.com/dark-factory-build/dark-factory/internal/provider"
 )
 
 type serverResult struct {
@@ -88,6 +89,9 @@ func newAPIFixture(t testing.TB) *apiFixture {
 		t.Fatal(err)
 	}
 	socket := install.LocalAPISocketPath(homePath)
+	if len(socket) > provider.MaxSocketPathBytes {
+		t.Fatalf("api socket path is %d bytes, over the %d-byte sun_path budget: %q", len(socket), provider.MaxSocketPathBytes, socket)
+	}
 	fixture := &apiFixture{directory: directory, socket: socket, attemptPath: attemptPath, listener: listener, home: home}
 	copy(fixture.bearer[:], attempt)
 	cleanup = false

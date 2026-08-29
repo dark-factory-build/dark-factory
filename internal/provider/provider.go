@@ -13,10 +13,12 @@ import (
 )
 
 const (
-	shellPath      = "/bin/sh"
-	shellVersion   = "darwin-system-sh-v1"
-	maxPathBytes   = 4096
-	maxSocketBytes = 103
+	shellPath    = "/bin/sh"
+	shellVersion = "darwin-system-sh-v1"
+	maxPathBytes = 4096
+	// MaxSocketPathBytes is the longest sun_path this platform accepts. Every
+	// socket-path producer and validator shares this one authority.
+	MaxSocketPathBytes = 103
 )
 
 var (
@@ -172,7 +174,7 @@ func (runtime RuntimePaths) valid() bool {
 			return false
 		}
 	}
-	return len(runtime.socket) <= maxSocketBytes && runtime.home != runtime.temp &&
+	return len(runtime.socket) <= MaxSocketPathBytes && runtime.home != runtime.temp &&
 		validGitCeiling(runtime.gitCeiling) && validToolPath(runtime.toolPath)
 }
 

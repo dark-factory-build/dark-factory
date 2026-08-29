@@ -20,6 +20,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/provider"
 )
 
 type dispatchFixture struct {
@@ -90,6 +91,9 @@ func newDispatchFixture(t *testing.T) *dispatchFixture {
 		_ = home.Close()
 	})
 	socket := install.LocalAPISocketPath(authHomePath)
+	if len(socket) > provider.MaxSocketPathBytes {
+		t.Fatalf("api socket path is %d bytes, over the %d-byte sun_path budget: %q", len(socket), provider.MaxSocketPathBytes, socket)
+	}
 	return &dispatchFixture{daemon: daemon, store: store, listener: listener, socket: socket, operator: operatorToken}
 }
 
