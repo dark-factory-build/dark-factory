@@ -8,14 +8,13 @@ runtime is Go; the Rust implementation it replaced is deleted, and the Ratatui
 TUI is gone with it. Dark Factory is not a coding model, hosted service, or
 general agent framework.
 
-This repository is pre-cutover. Canonical evidence through `359d46a3` includes
-production `factoryd` composition and `OperationalHome`, `Store`,
-`RuntimeParent`, Local API, and browser ownership; the corrected documentation
-contract was merged at `bc48df7f` and independently allowed at `51fae159`.
-Exact review blocked Change candidate `c675f96e`; its narrow repair and the
-dependent global-admission candidate remain unintegrated. Repaired provider
-candidate `e1b0759e` is under exact review. Shell, Claude and Codex remain
-unshipped.
+The Go runtime is the implementation: kernel, daemon, runner, local API, web
+console, and the managed launchd service lifecycle. `factoryd` runs a task end
+to end — enqueue, schedule, attempt, result, terminal record — proved
+black-box against real binaries including SIGKILL crash cuts, using the
+deterministic shell provider. The Claude and Codex providers are deliberately
+fail-closed and unproven, the console's remaining daemon gaps are recorded
+rather than hidden, and the daemon is Darwin-only.
 
 ## Model
 
@@ -48,8 +47,10 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the detailed lifecycle and
 
 ## Availability
 
-Dark Factory is pre-1.0. This pre-cutover revision is not approved for
-installation or live provider work. There is no supported install command for this revision:
+Dark Factory is pre-1.0. This revision is not approved for installation or
+live provider work: no real Claude or Codex attempt has been reviewed, and the
+operator's own installation has not been migrated. There is no supported
+install command for this revision:
 do not run `factoryctl init`, enable `factoryctl dispatch on`, update a live
 installation, or point a source build at `~/.dark-factory`.
 

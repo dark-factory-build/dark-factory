@@ -11,11 +11,8 @@ Live use remains frozen until an independent exact-head boot review passes.
 
 The canonical implementation through `359d46a3` contains production `factoryd`
 composition and ownership of `OperationalHome`, `Store`, `RuntimeParent`, the
-Local API, and browser services. The documentation contract was manually
-merged at `bc48df7f` and independently allowed at `51fae159`. Exact review
-blocked Change candidate `c675f96e`; its narrow repair and dependent
-global-admission candidate remain unintegrated. Repaired provider candidate
-`e1b0759e` is under exact review. Shell, Claude and Codex remain unshipped.
+Local API, and browser services. The shell provider is proved end to end;
+the Claude and Codex providers remain fail-closed and unreviewed.
 
 The complete design and causal proof matrix live in
 [`docs/development/SAFE_KERNEL_REFACTOR.md`](docs/development/SAFE_KERNEL_REFACTOR.md).
@@ -66,7 +63,7 @@ corruption. Repository and provider executable/configuration/auth availability
 are post-admission typed failures, not stale eligibility filters.
 The exact contract lives in the rewrite record; this paragraph does not claim
 the corrected Change/global-admission/provider contract is implemented in this
-pre-cutover revision.
+revision.
 
 Planned Go process setup has one additional literal barrier: after the outer
 runner is active and while its provider process/group pair remains declared

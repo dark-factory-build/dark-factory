@@ -35,7 +35,8 @@ socket, exact resource identities, and an independent reaper.
    ./scripts/local-ci.sh
    ```
 
-   Ubuntu x86-64 contributors use `./scripts/local-ci.sh --linux-source`.
+   The gate takes no arguments and runs on macOS only: the daemon is
+   Darwin-only, and Linux support is #120/#141-144.
 5. Publish the branch and open a PR through the remote-access boundary below,
    describing behavior, deleted authority paths, exact base/head, focused
    proof, and unverified lanes.
@@ -71,8 +72,10 @@ Use a second, throwaway home and explicit socket. Never rely on the default:
 ```sh
 export DARK_FACTORY_HOME="$(mktemp -d /tmp/df-dev.XXXXXX)"
 chmod 700 "$DARK_FACTORY_HOME"
-target/debug/factoryd --socket "$DARK_FACTORY_HOME/f.sock" &
-target/debug/factoryctl --socket "$DARK_FACTORY_HOME/f.sock" health
+go run ./cmd/factoryctl init --home "$DARK_FACTORY_HOME"
+go run ./cmd/factoryd --home "$DARK_FACTORY_HOME" &
+DARK_FACTORY_SOCKET="$DARK_FACTORY_HOME/runtimes/factory.sock" \
+    go run ./cmd/factoryctl doctor --home "$DARK_FACTORY_HOME"
 ```
 
 Worker lifecycle checks must use the deterministic shell provider and a tiny
@@ -86,35 +89,16 @@ must restart the daemon and let its durable finalizer converge. `Drop`, shell
 traps, sleeps, broad process scans, and cleanup owned only by the killed fixture
 are insufficient proof.
 
-The scratch-only macOS smoke covers these cuts through external causal proofs;
-it makes no claim about launchd or the operator's installed job.
+The macOS contributor smoke and the opt-in launchd release proof that used to
+cover these cuts were deleted with the Rust workspace: both drove
+`target/debug` binaries that no build produces. Their durable-receipt ledger
+(`DARK_FACTORY_LAUNCHD_GATE_LEDGER`) went with them; nothing writes it now, so
+there is no ledger to resume or recover.
 
-The separate opt-in `./scripts/macos-launchd-release-proof.sh` uses a randomized
-scratch-only launchd label to prove release replacement and rollback. The
-fixture job is not an attempt `KernelResource`; the installed
-`com.dark-factory.factoryd` label and plist are observed before and after and
-must be unchanged.
-
-That job is contained by a durable receipt, not by the script. Before
-`launchctl bootstrap`, the fixture records the domain, label, private root
-identity, and staged digest under a ledger that outlives one run
-(`DARK_FACTORY_LAUNCHD_GATE_LEDGER`, `$TMPDIR/dark-factory-launchd-gate` by
-default). The coordinator resumes that ledger before and after the fixture, so
-a run killed at any point — target, fixture, or coordinator — is finalized by
-the next one rather than by a trap or a background verifier that dies with its
-parent. Ownership is an advisory lock the kernel releases on death, so a
-resume never tears down a job another live coordinator is using.
-
-Finalization boots out the exact label, proves absence only from launchctl's
-documented not-found classification, waits for every recorded PID, revalidates
-the root's device, inode, owner, and claim marker, and only then removes it.
-Anything unproven keeps the root and fails visibly; recover by fixing the
-cause and re-running, which resumes the same receipt. A receipt that cannot be
-finalized makes every later run fail at startup on purpose, since it may
-describe a job that is still loaded. That is deliberately conservative: it also
-fires when the receipt merely cannot be acted on, such as an unreadable file or
-a recorded PID whose number has been reused. If the service the receipt names
-is provably absent, remove that file from the ledger to unblock later runs.
+Release replacement and rollback against a real launchd job is the one lane
+that lost coverage in that deletion and has no Go successor yet — it is
+recorded in GO_REWRITE.md as follow-up, not offered here as something an
+operator can run.
 
 Containment is proved by `internal/install`'s service tests against a
 recorded `launchctl`, and end to end by `scripts/go-service-e2e.sh`, which
@@ -222,7 +206,7 @@ kept anyway — a backstop the merge gate should not have to assume away.
 merge condition rather than a convention:
 
 ```yaml
-needs: [checks, linux, control-plane, review]
+needs: [checks, control-plane, review]
 # In the queue only `success` passes. Elsewhere `skipped` passes too, since
 # `review` runs on merge_group alone and there is no verdict to read. Treating
 # that as a failure would block every pull request.
