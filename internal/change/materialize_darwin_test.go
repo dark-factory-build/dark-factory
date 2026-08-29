@@ -176,6 +176,12 @@ func TestAdoptPreparedRequiresAbsentTargetAndEmptyPrivateStageWithoutMutation(t 
 				if err := os.Mkdir(path, 0o755); err != nil {
 					t.Fatal(err)
 				}
+				// Mkdir is umask-masked; under a restrictive umask the stage
+				// would land 0700 — the accepted mode — and the wrong-mode
+				// refusal this case exists to prove would never be exercised.
+				if err := os.Chmod(path, 0o755); err != nil {
+					t.Fatal(err)
+				}
 			},
 			check: func(t testing.TB, path string) {
 				t.Helper()

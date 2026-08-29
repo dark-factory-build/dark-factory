@@ -15,12 +15,34 @@ fail() {
 }
 
 grep -Fq 'cargo +1.88.0 fmt --all -- --check' "$gate" \
-    || fail "Linux source mode lost rustfmt"
+    || fail "legacy/Linux source mode lost rustfmt"
 grep -Fq 'cargo +1.88.0 clippy --locked --workspace --all-targets --all-features -- -D warnings' "$gate" \
-    || fail "Linux source mode lost clippy"
+    || fail "legacy/Linux source mode lost clippy"
 grep -Fq 'cargo +1.88.0 test --locked --workspace -- --test-threads=1' "$gate" \
-    || fail "Linux source mode lost workspace tests"
-grep -Fq 'git diff --check' "$gate" || fail "Linux source mode lost diff check"
+    || fail "legacy/Linux source mode lost workspace tests"
+grep -Fq 'git diff --check' "$gate" || fail "source gate lost diff check"
+
+# The authoritative macOS gate is the Go gate; the retired Rust stages live
+# only behind the explicit legacy flag and the Linux source preview.
+final_gate=$(sed -n '/^# The shared shell-fixture gate/,$p' "$gate")
+printf '%s\n' "$final_gate" \
+    | sed -n '/^[[:space:]]*macos)/,/^[[:space:]]*;;/p' \
+    | grep -Fq 'go-ci-owned.sh' \
+    || fail "macOS mode lost the authoritative Go gate stage"
+if printf '%s\n' "$final_gate" \
+    | sed -n '/^[[:space:]]*macos)/,/^[[:space:]]*;;/p' | grep -Fq 'cargo '; then
+    fail "macOS default mode still runs cargo outside the legacy flag"
+fi
+printf '%s\n' "$final_gate" \
+    | sed -n '/--legacy-rust | --linux-source)/,/^[[:space:]]*;;/p' \
+    | grep -Fq 'cargo +1.88.0 test' \
+    || fail "legacy flag lost the retired Rust stages"
+legacy_fixture_mode=$(sed -n '/^[[:space:]]*--legacy-rust)/,/^[[:space:]]*;;/p' "$gate")
+for mac_fixture in test-prepare-release-source.sh test-publish-release.sh \
+    test-package-release.sh test-macos-launchd-release-proof.sh; do
+    printf '%s\n' "$legacy_fixture_mode" | grep -Fq "$mac_fixture" \
+        || fail "legacy Rust mode lost fixture $mac_fixture"
+done
 
 runner_lib_section=$(awk '
     $0 == "[lib]" { in_lib = 1; next }

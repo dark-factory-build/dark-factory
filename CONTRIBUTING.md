@@ -13,14 +13,13 @@ deterministic providers; never use the operator's installation.
 ```sh
 ./scripts/new-worktree.sh <slug>
 cd .worktrees/<slug>
-cargo build --workspace
+go build ./...
 ```
 
 On macOS, run the complete release-compatible gate:
 
 ```sh
 ./scripts/local-ci.sh
-./scripts/macos-contributor-smoke.sh
 ```
 
 On Ubuntu x86-64, run the source-only gate and contributor smoke instead:
@@ -30,15 +29,16 @@ On Ubuntu x86-64, run the source-only gate and contributor smoke instead:
 ./scripts/linux-contributor-smoke.sh
 ```
 
-The source gate runs `cargo +1.88.0 fmt --check`,
-`clippy --all-targets --all-features -D warnings` across the whole
-workspace, every test with `--test-threads=1`, and `git diff --check`.
-The test command uses Cargo's default workspace test targets; helper-only
-targets opt out instead of producing empty test harnesses.
-The macOS path additionally checks release-source, publisher, and package
-fixtures. CI requires both platform jobs through the aggregate `required`
-context, so contributors should run the command for their platform before
-opening a PR.
+The macOS source gate is the Go gate: `gofmt`, `go vet`, the full serial
+Go test suite, the full race suite, the TypeScript client proof, and the
+real browser and daemon end-to-end lifecycles, followed by
+`git diff --check`. It additionally checks release-source, publisher, and
+package fixtures. The retired Rust workspace keeps its exact pre-cutover
+gate behind `./scripts/local-ci.sh --legacy-rust` until its deletion
+lands, and the Linux mode remains a Rust source preview until the Go
+daemon reaches Linux (#142/#143). CI requires every platform job through
+the aggregate `required` context, so contributors should run the command
+for their platform before opening a PR.
 
 A few workspace-wide rules the gate enforces, worth knowing up front:
 
