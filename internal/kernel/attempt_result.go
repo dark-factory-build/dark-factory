@@ -645,7 +645,7 @@ func (store *Store) RecordRecoveredRunnerAbsence(ctx context.Context, runID RunI
 	return run, runner, nil
 }
 
-// RecordRecoveredPreExecRunnerAbsence finalizes the stranded pre-registration
+// RecordRecoveredPreSessionRunnerAbsence finalizes the stranded pre-registration
 // state: the runner row is active with a bound identity while the provider
 // pair is still declared and the session never activated. The kernel cannot
 // distinguish whether the outer exec was never released or the runner died
@@ -654,9 +654,9 @@ func (store *Store) RecordRecoveredRunnerAbsence(ctx context.Context, runID RunI
 // exact-identity absence proof plus stable absence of activation/result
 // residue; this edge then finalizes the run, records the recovered-absence
 // runner exit and releases every runner-side resource in one transaction.
-func (store *Store) RecordRecoveredPreExecRunnerAbsence(ctx context.Context, runID RunID, runnerID ResourceID, expectedRun, expectedRunner Revision, identity ResourceIdentity, at UnixMillis) (Run, error) {
+func (store *Store) RecordRecoveredPreSessionRunnerAbsence(ctx context.Context, runID RunID, runnerID ResourceID, expectedRun, expectedRunner Revision, identity ResourceIdentity, at UnixMillis) (Run, error) {
 	if runID.zero() || runnerID.zero() || !identity.validFor(ResourceRunnerProcess) {
-		return Run{}, fmt.Errorf("%w: invalid recovered pre-exec runner absence", ErrInvalidValue)
+		return Run{}, fmt.Errorf("%w: invalid recovered pre-session runner absence", ErrInvalidValue)
 	}
 	failure, _ := NewFailureProposal(FailureActivation, "runner absent without provider registration, attempt result, or session activation")
 	tx, err := store.beginValidatedWrite(ctx)
@@ -678,7 +678,7 @@ func (store *Store) RecordRecoveredPreExecRunnerAbsence(ctx context.Context, run
 	if footprint.runner.ID != runnerID || !resourceIdentityEqual(footprint.runner.Identity, identity) {
 		return Run{}, tx.Rollback(ErrConflict)
 	}
-	if preExecRunnerAbsencePostcondition(run, footprint, failure, expectedRun, expectedRunner) {
+	if preSessionRunnerAbsencePostcondition(run, footprint, failure, expectedRun, expectedRunner) {
 		return run, tx.Rollback(nil)
 	}
 	if run.Phase != RunAdmitted || run.Proposal != nil || run.ProviderExit != nil || run.RunnerExit != nil || run.Revision != expectedRun ||
@@ -714,7 +714,7 @@ func (store *Store) RecordRecoveredPreExecRunnerAbsence(ctx context.Context, run
 	}
 	// The exact predecessor is admitted with a never-activated terminal. Human
 	// requests require running attempt authority, so validated state proves
-	// there is no request to converge on this pre-exec edge.
+	// there is no request to converge on this pre-session edge.
 	if err := appendInvalidations(ctx, tx.connection, at, []pendingInvalidation{{kind: EntityRun, id: runID.Bytes(), revision: expectedRun.Int64() + 1}}); err != nil {
 		return Run{}, tx.Rollback(err)
 	}
@@ -728,7 +728,7 @@ func (store *Store) RecordRecoveredPreExecRunnerAbsence(ctx context.Context, run
 	return run, nil
 }
 
-func preExecRunnerAbsencePostcondition(run Run, footprint lifecycleFootprint, failure Proposal, expectedRun, expectedRunner Revision) bool {
+func preSessionRunnerAbsencePostcondition(run Run, footprint lifecycleFootprint, failure Proposal, expectedRun, expectedRunner Revision) bool {
 	return run.Phase == RunFinalizing && run.Revision.Int64() == expectedRun.Int64()+1 && run.Proposal != nil && run.Proposal.equal(failure) &&
 		run.ProviderExit == nil && run.RunnerExit != nil && run.RunnerExit.RecoveredAbsence() &&
 		footprint.runtime.State == ResourceReleasing && footprint.runner.State == ResourceReleased && footprint.runner.Revision.Int64() == expectedRunner.Int64()+1 && !footprint.runner.Identity.Empty() &&

@@ -333,7 +333,7 @@ func TestRecoverySweepConvergesActivatedRunnerAbsenceBeforeExecRelease(t *testin
 				fixture.writeMarker(t, runner.OuterActivationMarkerName)
 			}
 			disposition := fixture.sweep(t)
-			if disposition.Action != RecoveredPreExecAbsence || disposition.Err != nil {
+			if disposition.Action != RecoveredPreSessionAbsence || disposition.Err != nil {
 				t.Fatalf("disposition = %+v", disposition)
 			}
 			run := fixture.currentRun(t)
@@ -362,7 +362,7 @@ func TestRecoverySweepConsumesAuthenticResultBeforeAnyAbsenceEdge(t *testing.T) 
 		t.Fatal(err)
 	}
 	fixture.writeArtifact(t, body)
-	// The durable state alone also matches the pre-exec absence cell; the
+	// The durable state alone also matches the pre-session absence cell; the
 	// ordering rule requires the artifact to win, or removal wedges forever.
 	disposition := fixture.sweep(t)
 	if disposition.Action != RecoveredResultConsumed || disposition.Err != nil {

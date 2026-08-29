@@ -55,7 +55,7 @@ marker, A=artifact, L=lease available.
   through pre-ActivateRunner death, including a blocked gate child that
   died un-exec'd.
 - **B. R=active(bound), P=declared, no O, no A, L, positive runner
-  absence** → `RecordRecoveredPreExecRunnerAbsence`. Cut: ActivateRunner
+  absence** → `RecordRecoveredPreSessionRunnerAbsence`. Cut: ActivateRunner
   committed, daemon died before marker creation; the orphaned blocked
   child exits when the activation pipe closes.
 - **C1. R=active, P=declared, O present, I absent, no A, L, positive
@@ -90,7 +90,7 @@ marker, A=artifact, L=lease available.
   invented absence, not a timeout that fabricates failure.
 
 **Sweep ordering rule (binding):** always attempt result authentication
-BEFORE any absence edge. Firing `RecordRecoveredPreExecRunnerAbsence`
+BEFORE any absence edge. Firing `RecordRecoveredPreSessionRunnerAbsence`
 while a result artifact exists finalizes FailureActivation and then
 `AuthorizeAttemptResultRemoval` refuses forever (orphan file, no false
 exit) — fail-closed but stuck; the ordering rule prevents entering that
@@ -154,7 +154,7 @@ state.
   ObserveRunnerExit) migrate to the exact edges: BeginRunnerStart →
   ActivateRunner → ActivateProviderResources; failures via FailRun /
   FailRunWithRuntimeAbsent; runner exits via RecordLiveRunnerExitAndRelease
-  / RecordRecoveredRunnerAbsence; the unregistered/pre-exec edges where
+  / RecordRecoveredRunnerAbsence; the unregistered/pre-session edges where
   the old paths conflated them.
 - After migration, per review conditions: delete the ObserveRunnerExit
   stub and the dead runner arm of observeProcessExit, the now-unproducible

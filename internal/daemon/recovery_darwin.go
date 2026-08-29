@@ -23,9 +23,9 @@ const (
 	// RecoveredUnregistered converged a starting runner with no activation or
 	// result residue.
 	RecoveredUnregistered RecoveredRunAction = "unregistered-converged"
-	// RecoveredPreExecAbsence converged an activated runner that is positively
+	// RecoveredPreSessionAbsence converged an activated runner that is positively
 	// absent with the provider pair still declared and no artifact.
-	RecoveredPreExecAbsence RecoveredRunAction = "pre-exec-absence"
+	RecoveredPreSessionAbsence RecoveredRunAction = "pre-session-absence"
 	// RecoveredResultConsumed authenticated and consumed the on-disk result,
 	// released the runner by positive absence, closed the terminal and removed
 	// the artifact and runtime.
@@ -153,14 +153,14 @@ func (daemon *Daemon) recoverRun(ctx context.Context, parent *RuntimeParent, cha
 		if !daemon.recoveredRunnerAbsent(runnerProcess) {
 			return RecoveredUncertain, errInvalidContract
 		}
-		if _, absenceErr := daemon.recordPreExecRunnerAbsence(run.ID, runnerProcess.ID, runnerProcess.Identity); absenceErr != nil {
+		if _, absenceErr := daemon.recordPreSessionRunnerAbsence(run.ID, runnerProcess.ID, runnerProcess.Identity); absenceErr != nil {
 			return RecoveredUncertain, absenceErr
 		}
 		if removeErr := daemon.removeRecoveredRuntime(ctx, parent, run.ID, recovered, fileIdentity); removeErr != nil {
-			return RecoveredPreExecAbsence, removeErr
+			return RecoveredPreSessionAbsence, removeErr
 		}
 		_, settleErr := daemon.settleRun(changeParent, run.ID)
-		return RecoveredPreExecAbsence, settleErr
+		return RecoveredPreSessionAbsence, settleErr
 	default:
 		return daemon.recoverWithoutResult(ctx, run, runnerProcess, providerProcess, providerGroup)
 	}
@@ -448,9 +448,9 @@ func runtimeFileIdentity(identity kernel.ResourceIdentity) (runner.FileIdentity,
 	return runner.FileIdentity{Device: uint64(path.Device()), Inode: uint64(path.Inode())}, nil
 }
 
-// recordPreExecRunnerAbsence commits the atomic pre-exec finalization for an
+// recordPreSessionRunnerAbsence commits the atomic pre-session finalization for an
 // activated runner that is positively absent with the provider pair declared.
-func (daemon *Daemon) recordPreExecRunnerAbsence(runID kernel.RunID, resourceID kernel.ResourceID, identity kernel.ResourceIdentity) (kernel.Run, error) {
+func (daemon *Daemon) recordPreSessionRunnerAbsence(runID kernel.RunID, resourceID kernel.ResourceID, identity kernel.ResourceIdentity) (kernel.Run, error) {
 	var lastErr error
 	for attempt := 0; attempt < supervisorReconcileAttempts; attempt++ {
 		storeCtx, cancel := context.WithTimeout(context.Background(), supervisorStoreAttemptWindow)
@@ -472,14 +472,14 @@ func (daemon *Daemon) recordPreExecRunnerAbsence(runID kernel.RunID, resourceID 
 			lastErr = clockErr
 			continue
 		}
-		converged, absenceErr := daemon.store.RecordRecoveredPreExecRunnerAbsence(storeCtx, runID, resourceID, current.Revision, resource.Revision, identity, at)
+		converged, absenceErr := daemon.store.RecordRecoveredPreSessionRunnerAbsence(storeCtx, runID, resourceID, current.Revision, resource.Revision, identity, at)
 		cancel()
 		if absenceErr == nil {
 			return converged, nil
 		}
 		lastErr = absenceErr
 	}
-	return kernel.Run{}, kernel.NewOutcomeUnknownError(fmt.Errorf("daemon: pre-exec runner absence: %w", lastErr))
+	return kernel.Run{}, kernel.NewOutcomeUnknownError(fmt.Errorf("daemon: pre-session runner absence: %w", lastErr))
 }
 
 // runtimeChildPresent is the by-name presence probe for a runtime that never
