@@ -31,13 +31,14 @@ Linux support is #120/#141-144. CI requires the runtime gate and the
 control-plane gate through the aggregate `required` context, so run the gate
 before opening a PR.
 
-A few workspace-wide rules the gate enforces, worth knowing up front:
+A few repository-wide rules the gate enforces, worth knowing up front:
 
-- `unsafe_code = "forbid"` and `clippy::all = "warn"` at the workspace level;
-  CI runs clippy at `-D warnings`, so zero warnings, not just zero errors.
-- SQLite migrations are sequential numbered files under
-  `crates/factoryd/migrations/`. Never edit or delete one that has already
-  shipped — add a new one instead, even for a one-line fix.
+- `gofmt` and `go vet` are clean, and the full suite runs under `-race`. The
+  gate treats a race report as a failure, not a warning.
+- The SQLite schema is one fresh set of statements in
+  `internal/kernel/schema.go`. There is deliberately no migration directory
+  and no upcaster: the Go home and schema are new, so a schema change is an
+  edit to that set plus the causal tests that pin it.
 - Never touch a real `$DARK_FACTORY_HOME` (default `~/.dark-factory`) or
   `launchd` from a test or a manual check — see
   [docs/development/WORKFLOW.md](docs/development/WORKFLOW.md) for a
@@ -52,18 +53,16 @@ A few workspace-wide rules the gate enforces, worth knowing up front:
   maintainer has to choose, not code) — anything `size:S` is a reasonable
   first change. Found a new one? Open an issue with the bug template and
   label it `known-issue`; a fix closes it in the same PR (`Closes #N`).
-- **A new provider**: see [docs/providers.md](docs/providers.md) — the
-  whole contract is one `Provider` trait (`spawn_spec`)
-  in `crates/factoryd/src/providers/mod.rs`. `shell.rs` is the minimal
-  reference implementation to copy from.
-- **A new theme**: `crates/factory-tui/src/theme.rs` is one `Theme` struct
-  and two consts (`FORTRESS`, `PLAIN`) — every glyph the board draws for
-  every concept (agent roles, queue/capacity, attention badges, workshop
-  routes) lives there, nowhere else. Define a new `pub const` (see `PLAIN`
-  for the minimal ASCII-only shape), add it to `Theme::parse`'s match, and
-  wire its name into `factory-tui`'s `--theme` flag parsing in `main.rs`.
-  The `glyph_tables_are_complete` test in `theme.rs` catches a theme
-  missing a glyph the board can actually draw.
+- **A new provider**: see [docs/providers.md](docs/providers.md) — the whole
+  contract is `internal/provider/provider.go`, whose `NewShellInstallation`
+  is the minimal reference implementation to copy from. Only the shell
+  provider is proven end to end today; the Claude and Codex constructors are
+  deliberately fail-closed until a real attempt is reviewed.
+- **The web console**: `web/packages/ui/src` is the operator surface, built on
+  the framework-neutral client in `web/packages/client`. It renders only
+  bounded canonical state and finite errors, never constructs run or session
+  coordinates, and its remaining daemon gaps are recorded rather than filled
+  with invented state.
 - **A kernel causal test**: use the proof matrix in
   `docs/development/SAFE_KERNEL_REFACTOR.md`. Process fixtures must register
   exact resources before use and include an independent post-test verifier;

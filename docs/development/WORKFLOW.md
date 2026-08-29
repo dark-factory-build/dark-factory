@@ -22,11 +22,11 @@ socket, exact resource identities, and an independent reaper.
 
 2. Make one coherent change. Preserve unrelated dirty work and prefer deletion
    over compatibility machinery.
-3. Run focused checks through the shared lease when they invoke Cargo or
+3. Run focused checks through the shared lease when they invoke
    process-sensitive fixtures:
 
    ```sh
-   ./scripts/with-local-ci-lease.sh cargo +1.88.0 test -p factoryd --lib
+   ./scripts/with-local-ci-lease.sh go test ./internal/daemon/
    ```
 
 4. Run the authoritative gate on the exact head:
@@ -52,27 +52,17 @@ socket, exact resource identities, and an independent reaper.
 The macOS gate serializes compiler, release-probe, and process-sensitive work
 across linked worktrees using a repository-common-directory lease. Its owner
 record is diagnostic; the held kernel lock is authoritative. Do not bypass the
-wrapper for a load-bearing Cargo or process fixture. Set
+wrapper for a load-bearing process fixture. Set
 `DARK_FACTORY_LOCAL_CI_WAIT=0` to refuse instead of waiting.
 
 The gate clears inherited live-factory home, socket, and attempt identity
-variables. Tests set their own isolated values. The build-headroom preflight
-reports and refuses low space but does not reclaim anything; inspect only
-inactive regenerable Cargo targets manually. Product Rust verification uses
-its own bounded daemon cache. It does not replace this daemon-independent
-development lease.
+variables, and provisions its own `GOCACHE` and `GOMODCACHE` under an isolated
+stage root. Tests set their own isolated values.
 
-`crates/factoryd/tests/rust_completion.rs` drives the product's Rust
-completion lane through the production manager, so the gate compiles a
-generated one-crate workspace with the exact toolchain running the suite. It
-needs `CARGO` to name a real toolchain directory holding both `cargo` and
-`rustc` — `cargo +<version> test` provides that — and it needs the workspace
-binaries, so run it as part of the whole-workspace gate rather than with
-`-p factoryd` alone. Everything it compiles lives under its own temporary
-root. It costs roughly twenty seconds: the daemon wakes its Rust maintenance
-queue at the transitions it observes rather than only on the reconcile tick,
-so what is left is Cargo plus that interval's bounded polling for exact
-process absence.
+The Rust-policy completion lane described in
+[SECURITY.md](../../SECURITY.md) is a product capability for verifying Rust
+projects the factory works on; it is not exercised by any gate stage today,
+because the supervisor admits only the `none` verification policy.
 
 ## Isolated daemon checks
 
@@ -126,11 +116,11 @@ fires when the receipt merely cannot be acted on, such as an unreadable file or
 a recorded PID whose number has been reused. If the service the receipt names
 is provably absent, remove that file from the ledger to unblock later runs.
 
-Containment itself is proved on every platform, including Linux, by
-`cargo test -p factoryctl --test launchd_gate` against a fake `launchctl` —
-including a coordinator that is `SIGKILL`ed after bootstrapping. Hosted macOS
-runners get a fresh `TMPDIR` per job, so cross-run resume is exercised by those
-tests and by local dogfooding rather than by CI.
+Containment is proved by `internal/install`'s service tests against a
+recorded `launchctl`, and end to end by `scripts/go-service-e2e.sh`, which
+drives a real disposable launchd label through install, start, stop, start and
+uninstall. Hosted macOS runners get a fresh `TMPDIR` per job, so cross-run
+resume is exercised by those tests and by local dogfooding rather than by CI.
 
 ## Review discipline
 
@@ -149,12 +139,14 @@ release, installation, and live verification remain separate decisions.
 
 ## Migration rules
 
-SQLite migrations are sequential numbered files under
-`crates/factoryd/migrations/`. Never edit a shipped migration. Historical
-fixtures must apply the real ordered chain to version N rather than creating a
-new schema and manually deleting objects.
+The Go kernel has one fresh schema in `internal/kernel/schema.go` and
+deliberately no migration chain, upcaster, or compatibility layer: the Go home
+and schema are new. A schema change edits that set together with the causal
+tests that pin it.
 
-Kernel cutover migrations refuse databases containing live legacy authority or
+The rules below describe the retired Rust kernel's cutover migrations and are
+kept as the record of what a future migration boundary must honour if one is
+ever introduced. Kernel cutover migrations refuse databases containing live legacy authority or
 other external effects whose completion cannot be proven. Preserved source
 paths migrate into metadata-only `legacy_sources` quarantine, including
 separate records when agents or projects shared a path. Factoryd never inspects
@@ -190,7 +182,7 @@ the authority surface: `.github/`, the agent rule and boundary documents
 named scripts that publish the ruleset, verify the recorded review verdict,
 or causally test those two. A change touching any of them stops for one owner
 approval, re-earned after every push because stale reviews are dismissed.
-Everything else -- `crates/`, `control-plane/`, the rest of `scripts/`, and
+Everything else -- the Go runtime, `control-plane/`, the rest of `scripts/`, and
 docs -- merges on the `required` aggregate in the queue, whose `review` check
 demands an adversarial-review verdict at the exact head, with no human
 approval at any point.

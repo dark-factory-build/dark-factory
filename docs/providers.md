@@ -1,8 +1,8 @@
 # Provider contract
 
-This is the fresh Go provider contract. The old Rust launch guide, profile
-catalogue, and compatibility matrix are deleted; they are not implementation
-instructions for the cutover. V1 has one concrete provider boundary:
+This is the Go provider contract. The old Rust launch guide, profile
+catalogue, and compatibility matrix are deleted along with that runtime.
+V1 has one concrete provider boundary:
 
 ```go
 func Build(Request) (Launch, error)

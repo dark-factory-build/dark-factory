@@ -5,15 +5,20 @@ just points here; if anything else conflicts, this file wins.
 
 ## Project overview
 
-Dark Factory is a pure-Rust, terminal-first runtime that turns a software
-backlog into continuous agent progress: a durable queue, orchestrator, and
-process supervisor for fresh Claude Code and Codex CLI attempts, watched and
-directed through `factory-tui`, a Ratatui board. One operator runs many agents
-from one machine; `factoryd` owns every admitted attempt and external resource
-through finalization, so closing a client never stops admitted work.
+Dark Factory is a Go runtime that turns a software backlog into continuous
+agent progress: a durable queue, orchestrator, and process supervisor for
+fresh Claude Code and Codex CLI attempts, watched and directed through a web
+console served over loopback. One operator runs many agents from one machine;
+`factoryd` owns every admitted attempt and external resource through
+finalization, so closing a client never stops admitted work. The daemon is
+Darwin-only today (Linux is #120/#141-144), the console's remaining daemon
+gaps are recorded rather than hidden, and no real Claude or Codex attempt has
+been proven end to end yet — the proven loop runs the shell provider.
 
-It is not an Electron/Tauri/browser app, not a coding model, not an agent
-pretending to be an employee, and not a general agent framework. See
+It is not a hosted web application, not an Electron/Tauri app, not a coding
+model, not an agent pretending to be an employee, and not a general agent
+framework: the console is a local surface for a local daemon, and every
+operator action it takes is the same local-API request `factoryctl` makes. See
 [README.md](README.md) for how it works and [ARCHITECTURE.md](ARCHITECTURE.md)
 for the invariants that constrain every change.
 
@@ -93,10 +98,11 @@ Read-only context unless a task explicitly asks you to edit them:
    fallbacks that hide a real failure behind a plausible-looking success.
 4. **Simplest implementation over cleverness.** Prefer the boring, obvious
    fix. Maintainability beats a clever one-liner.
-5. **CLI first.** Every operator action is a `factoryctl` request;
-   `factory-tui` calls the exact same local-API request path, never a shortcut
-   only the TUI can take. Bootstrap, service-lifecycle, and update actions that
-   must work while the daemon is absent live in shared Rust library code.
+5. **CLI first.** Every operator action is a `factoryctl` request; the web
+   console calls the exact same local-API request path, never a shortcut only
+   the console can take. Bootstrap, service-lifecycle, and update actions that
+   must work while the daemon is absent live in shared Go library code under
+   `internal/install`.
 6. **Tests around the load-bearing paths**: queue and attempt durability,
    event projection (durable state → wire events → client model), exact
    resource registration/finalization, Change ownership, and crash/restart
@@ -104,11 +110,11 @@ Read-only context unless a task explicitly asks you to edit them:
    caught the bug it fixes.
 7. **Run `./scripts/local-ci.sh` before finishing.** It is the
    authoritative gate (gofmt, `go vet`, the full serial and race Go
-   suites, the TypeScript client proof, the browser and daemon E2Es,
-   `git diff --check`; the retired Rust workspace stays behind
-   `--legacy-rust` until its deletion). CI runs the same script on every
-   pull request as the `checks` status the `main` ruleset requires; a PR
-   that isn't green locally won't be green there either.
+   suites, the TypeScript client proof, the browser, daemon and service
+   E2Es, `git diff --check`). It takes no arguments. CI runs the same
+   script on every pull request, and the `main` ruleset requires the
+   aggregate `required` context that job feeds; a PR that isn't green
+   locally won't be green there either.
 8. **Small, coherent commits.** One logical change per commit; don't bundle
    unrelated cleanup into a feature commit.
 9. **Docs and issue state are load-bearing.** A change that alters behavior updates

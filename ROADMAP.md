@@ -2,8 +2,8 @@
 
 Live use remains frozen until an independent exact-head boot review passes.
 GitHub issues and pull requests are the execution record; this file records
-only Go product order and architectural boundaries. The retained Rust runtime
-and TUI are historical evidence, not a current target.
+only Go product order and architectural boundaries. The Rust runtime and its
+Ratatui TUI are deleted; their history is the git record.
 
 ## Phase A — exact-head boot proof
 

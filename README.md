@@ -1,11 +1,12 @@
 # Dark Factory
 
 Dark Factory turns a software backlog into supervised coding-agent work on
-your own machine. The Go target has `factoryd` own the durable queue and
-provider processes, `factoryctl` provide bootstrap/control operations, and a
-hosted browser use the same local API for day-to-day observation. The retained
-Rust TUI is historical evidence, not a current product surface. Dark Factory
-is not a coding model, hosted service, or general agent framework.
+your own machine. `factoryd` owns the durable queue and provider processes,
+`factoryctl` provides bootstrap and control operations, and a web console
+served over loopback uses the same local API for day-to-day observation. The
+runtime is Go; the Rust implementation it replaced is deleted, and the Ratatui
+TUI is gone with it. Dark Factory is not a coding model, hosted service, or
+general agent framework.
 
 This repository is pre-cutover. Canonical evidence through `359d46a3` includes
 production `factoryd` composition and `OperationalHome`, `Store`,
@@ -57,9 +58,9 @@ live operation.
 
 ## Safe source preview
 
-The old Rust source preview is historical evidence only and is not a current
-build or installation instruction. The Go target has no supported live-use
-command in this revision. Do not submit provider work, use a Claude or Codex
+There is no supported live-use command in this revision: the Go runtime runs
+end to end under the shell provider, and no real Claude or Codex attempt has
+been proven yet. Do not submit provider work, use a Claude or Codex
 subscription, or point a source build at the operator's home.
 
 For development work, use an isolated branch/worktree and the fuller
