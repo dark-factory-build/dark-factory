@@ -42,9 +42,6 @@ func EncodeTerminalLeaseRelease(id string, v TerminalLeaseRelease) ([]byte, erro
 func EncodeTerminalLeaseResult(id string, v TerminalLeaseResult) ([]byte, error) {
 	return encodeControl(TypeTerminalLeaseResult, id, v)
 }
-func EncodeTerminalResize(id string, v TerminalResize) ([]byte, error) {
-	return encodeControl(TypeTerminalResize, id, v)
-}
 func EncodeTerminalResized(id string, v TerminalResized) ([]byte, error) {
 	return encodeControl(TypeTerminalResized, id, v)
 }
