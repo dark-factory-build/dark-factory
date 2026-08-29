@@ -50,6 +50,9 @@ func TestSnapshotUsesOpenedObjectWhenSourcePathIsReplaced(t *testing.T) {
 	if err := os.WriteFile(replacement, []byte("not a release binary\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(replacement, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Rename(original, source); err != nil {
 		t.Fatal(err)
 	}
@@ -123,6 +126,11 @@ func buildFixture(t *testing.T, directory, output, component, version, source, t
 	command.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=darwin", "GOARCH="+architecture, "GOENV=off", "GOAUTH=off", "GOTOOLCHAIN=local")
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("build fixture: %v\n%s", err, output)
+	}
+	// The linker honors the caller's umask; the artifact contract demands
+	// exactly 0755, so pin it instead of assuming an 022 environment.
+	if err := os.Chmod(path, 0o755); err != nil {
+		t.Fatal(err)
 	}
 	return path, identity
 }

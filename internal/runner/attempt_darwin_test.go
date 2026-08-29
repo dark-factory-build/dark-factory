@@ -1362,6 +1362,11 @@ func TestCurrentExecRejectsExactInheritedDescriptor(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(root, "cwd.error"), []byte("preserve this diagnostic"), 0o644); err != nil {
 					t.Fatal(err)
 				}
+				// WriteFile is umask-masked; the check below asserts the
+				// exact pre-existing mode survives, so pin it explicitly.
+				if err := os.Chmod(filepath.Join(root, "cwd.error"), 0o644); err != nil {
+					t.Fatal(err)
+				}
 			},
 			check: func(t *testing.T, root string) {
 				info, err := os.Lstat(filepath.Join(root, "cwd.error"))
