@@ -754,3 +754,81 @@ func TestServiceDirectoryRecheckToleratesAncestorChurnAndStaysFailClosed(t *test
 		t.Fatal("swapped leaf passed recheck")
 	}
 }
+
+func TestServiceHomeSnapshotsTolerateLiveDirectoryChurnButRejectReplacement(t *testing.T) {
+	root := serviceTestRoot(t)
+	home := filepath.Join(root, "factory")
+	if _, err := Init(context.Background(), home); err != nil {
+		t.Fatal(err)
+	}
+	capability, err := openServiceHomeCapability(context.Background(), home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = capability.close() })
+	baseline := capability.image
+
+	for _, name := range []string{runtimesName, changesName} {
+		entry := filepath.Join(home, name, "live-entry")
+		if err := os.WriteFile(entry, []byte("churn"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		image, err := snapshotServiceHome(context.Background(), capability.home)
+		if err != nil {
+			t.Fatalf("snapshot after %s child churn: %v", name, err)
+		}
+		if err := sameServiceHomeImage(baseline, image); err != nil {
+			t.Fatalf("%s child churn changed service image: %v", name, err)
+		}
+		if err := os.Remove(entry); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	tokenPath := filepath.Join(home, tokenName)
+	token, err := os.ReadFile(tokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutated := append([]byte(nil), token...)
+	mutated[0] ^= 0xff
+	if err := os.WriteFile(tokenPath, mutated, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	image, err := snapshotServiceHome(context.Background(), capability.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sameServiceHomeImage(baseline, image); err == nil {
+		t.Fatal("durable token replacement passed service image comparison")
+	}
+	if err := os.WriteFile(tokenPath, token, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	baseline, err = snapshotServiceHome(context.Background(), capability.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	original := filepath.Join(home, runtimesName)
+	moved := filepath.Join(root, "runtimes.original")
+	if err := os.Rename(original, moved); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if _, statErr := os.Stat(moved); statErr == nil {
+			_ = os.RemoveAll(original)
+			_ = os.Rename(moved, original)
+		}
+	})
+	if err := os.Mkdir(original, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := snapshotServiceHome(context.Background(), capability.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sameServiceHomeImage(baseline, replacement); err == nil {
+		t.Fatal("same-name directory replacement passed service image comparison")
+	}
+}

@@ -370,9 +370,9 @@ func volatileServiceMember(name string) bool {
 	return name == databaseName || name == databaseName+"-wal" || name == databaseName+"-shm"
 }
 
-// reducedServiceIdentity strips the volatile stat dimensions (size, times,
-// link count driven by SQLite checkpointing) while keeping the identity that
-// detects replacement and authority changes.
+// reducedServiceIdentity strips volatile stat dimensions (size, times, and
+// link count driven by SQLite checkpointing or child entry churn) while
+// keeping the identity that detects replacement and authority changes.
 func reducedServiceIdentity(stat unix.Stat_t) serviceIdentity {
 	reduced := toServiceIdentity(stat)
 	reduced.identity.size = 0
@@ -483,7 +483,7 @@ func snapshotServiceHome(ctx context.Context, home *os.File) (serviceHomeImage, 
 		if closeErr != nil {
 			return serviceHomeImage{}, closeErr
 		}
-		image.directories[name] = toServiceIdentity(stat)
+		image.directories[name] = reducedServiceIdentity(stat)
 	}
 	var rootAfter unix.Stat_t
 	if err := unix.Fstat(int(home.Fd()), &rootAfter); err != nil {
