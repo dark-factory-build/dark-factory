@@ -39,7 +39,10 @@ func TestSignalOwnedGroupForgivesEPERMOnlyWithConvergedCensus(t *testing.T) {
 	// zombie leader is the only member left. The exact leader-anchored
 	// census, not the errno, decides whether that means converged.
 	leader := startGroupLeader(t)
-	defer func() { testGroupSignalResult = nil }()
+	defer func() {
+		testGroupSignalResult = nil
+		testGroupCensus = nil
+	}()
 	// The SIGKILL below genuinely converges the real group; only the errno
 	// the kernel is taken to have reported is injected.
 	var observed error
@@ -74,12 +77,46 @@ func TestSignalOwnedGroupForgivesEPERMOnlyWithConvergedCensus(t *testing.T) {
 	// unix.Kill — while leaving the group deterministically alive, so the
 	// refusal is pinned by the census, not by signal timing.
 	live := startGroupLeader(t)
+	censusCalls := 0
+	testGroupCensus = func(identity Identity) (ownedGroupCensus, error) {
+		censusCalls++
+		if censusCalls == 2 {
+			return ownedGroupCensus{}, unix.EINTR
+		}
+		return censusOwnedGroup(identity)
+	}
 	testGroupSignalResult = func(error) error { return unix.EPERM }
+	started := time.Now()
 	err := signalOwnedGroup(live, unix.Signal(0))
 	if !errors.Is(err, ErrUnresolved) {
 		t.Fatalf("EPERM with live members = %v", err)
 	}
+	if censusCalls < 3 || time.Since(started) < 200*time.Millisecond {
+		t.Fatalf("live census did not retry EINTR through settle window: calls=%d elapsed=%s", censusCalls, time.Since(started))
+	}
 	if census, censusErr := censusOwnedGroup(live); censusErr != nil || !census.hasLiveMember {
 		t.Fatalf("live fixture did not stay alive: census=%+v err=%v", census, censusErr)
+	}
+}
+
+func TestSignalOwnedGroupCensusFailureStaysFailClosed(t *testing.T) {
+	leader := startGroupLeader(t)
+	t.Cleanup(func() {
+		testGroupSignalResult = nil
+		testGroupCensus = nil
+	})
+	injected := errors.New("injected census failure")
+	censusCalls := 0
+	testGroupCensus = func(identity Identity) (ownedGroupCensus, error) {
+		censusCalls++
+		if censusCalls == 2 {
+			return ownedGroupCensus{}, errors.Join(ErrUnresolved, injected)
+		}
+		return censusOwnedGroup(identity)
+	}
+	testGroupSignalResult = func(error) error { return unix.EPERM }
+	err := signalOwnedGroup(leader, unix.Signal(0))
+	if !errors.Is(err, ErrUnresolved) || !errors.Is(err, injected) {
+		t.Fatalf("non-EINTR census error was not preserved: %v", err)
 	}
 }

@@ -312,9 +312,6 @@ func (attempt *liveAttempt) handleRunningCommand(command liveAttemptCommand) (bo
 }
 
 func (attempt *liveAttempt) handleTerminalEffect(effect terminalEffect) (terminalEffectResult, error) {
-	if !attempt.readySeen || attempt.controller == nil {
-		return terminalEffectResult{status: runner.TerminalResultRejected, err: ErrTerminalNotReady}, nil
-	}
 	if attempt.resultSeen {
 		// A published result is already a stronger runner-input fence than a
 		// generation revoke. Cleanup may therefore converge durable state without
@@ -326,6 +323,9 @@ func (attempt *liveAttempt) handleTerminalEffect(effect terminalEffect) (termina
 		// the wire types it stale — ErrTerminalNotReady means "not ready yet"
 		// everywhere, and only that condition is retryable.
 		return terminalEffectResult{status: runner.TerminalResultRejected, terminalFence: true, err: kernel.ErrConflict}, nil
+	}
+	if !attempt.readySeen || attempt.controller == nil {
+		return terminalEffectResult{status: runner.TerminalResultRejected, err: ErrTerminalNotReady}, nil
 	}
 	switch effect.kind {
 	case terminalEffectCheck:

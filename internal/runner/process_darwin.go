@@ -1078,12 +1078,17 @@ func killRemainingGroup(leader Identity) error {
 // exactly where the per-member-signal AST guard can see it.
 var testGroupSignalResult func(error) error
 
+// testGroupCensus can inject a package-test-only census result while retaining
+// the real census as the default. It lets tests exercise transient syscall
+// errors without replacing the process-group authority they are proving.
+var testGroupCensus func(Identity) (ownedGroupCensus, error)
+
 // groupSignalSettle bounds how long a failed group signal re-samples the
 // census before deciding. It absorbs snapshot lag, never real liveness.
 const groupSignalSettle = 250 * time.Millisecond
 
 func signalOwnedGroup(leader Identity, signal unix.Signal) error {
-	census, err := censusOwnedGroup(leader)
+	census, err := censusForGroupSignal(leader)
 	if err != nil {
 		return err
 	}
@@ -1109,8 +1114,15 @@ func signalOwnedGroup(leader Identity, signal unix.Signal) error {
 	// the caller re-signals.
 	deadline := time.Now().Add(groupSignalSettle)
 	for {
-		census, err = censusOwnedGroup(leader)
+		census, err = censusForGroupSignal(leader)
 		if err != nil {
+			if errors.Is(err, unix.EINTR) {
+				if !time.Now().Before(deadline) {
+					return classifyGroupSignal(signalErr, false)
+				}
+				time.Sleep(5 * time.Millisecond)
+				continue
+			}
 			return err
 		}
 		if !census.hasLiveMember || !time.Now().Before(deadline) {
@@ -1118,6 +1130,13 @@ func signalOwnedGroup(leader Identity, signal unix.Signal) error {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+}
+
+func censusForGroupSignal(leader Identity) (ownedGroupCensus, error) {
+	if testGroupCensus != nil {
+		return testGroupCensus(leader)
+	}
+	return censusOwnedGroup(leader)
 }
 
 // classifyGroupSignal forgives a failed group signal only when the exact
