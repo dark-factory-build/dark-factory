@@ -577,9 +577,13 @@ func TestRuntimeNamesAreExactAndSocketIsReserved(t *testing.T) {
 			t.Fatalf("CreateRuntime(%q) = %v, %v", name, runtime, err)
 		}
 		if runtime, err := AdoptRuntime(parent, name); !errors.Is(err, errInvalidContract) || runtime != nil {
+			if runtime != nil {
+				_ = runtime.Close()
+			}
 			t.Fatalf("AdoptRuntime(%q) = %v, %v", name, runtime, err)
 		}
 		if recovered, err := OpenRecoveredRuntime(context.Background(), parent, name, expected); !errors.Is(err, errInvalidContract) || recovered != nil {
+			releaseUnexpectedRecovered(recovered)
 			t.Fatalf("OpenRecoveredRuntime(%q) = %v, %v", name, recovered, err)
 		}
 		if _, err := ObserveRuntimeLifetime(parent, name, expected); !errors.Is(err, errInvalidContract) {
