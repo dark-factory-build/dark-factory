@@ -12,7 +12,10 @@ security fixes.
 
 ## Current freeze
 
-Live use remains frozen until an independent exact-head boot review passes.
+Repository-local cutover status and evidence live in
+[`docs/development/GO_REWRITE.md`](docs/development/GO_REWRITE.md); this file
+does not widen that claim. Release and live use remain frozen until an
+independent exact-main boot review passes.
 
 ### Go hard-cutover planning authority
 
@@ -21,18 +24,11 @@ still describe its queue selection or pre-admission executable probing are the
 historical record, not compatibility requirements, and the Go implementation
 governs wherever the two differ. The authoritative Go
 contract is [`docs/development/GO_REWRITE.md`](docs/development/GO_REWRITE.md),
-which records an independently reviewed contract and does not claim a finished
-daemon.
+which contains the permanent completion and gate evidence. The implemented
+end-to-end provider proof uses shell; Claude and Codex remain fail-closed and
+unproven.
 
-Canonical evidence through `359d46a3` includes production `factoryd`
-composition and OperationalHome/Store/RuntimeParent/Local API/browser
-ownership; the documentation contract was manually merged at `bc48df7f` and
-independently allowed at `51fae159`. Exact review blocked Change candidate
-`c675f96e`; its narrow repair and dependent global-admission candidate remain
-unintegrated. Repaired provider candidate `e1b0759e` is under exact review.
-Shell, Claude and Codex remain unshipped.
-
-Planned Go admission is one global cursor-free immediate Store transaction with
+Go admission is one global cursor-free immediate Store transaction with
 no caller AgentID/task/observation. It first validates the complete fresh
 schema image before either RunID reconciliation or a new decision. The exact
 column names, SQLite storage classes, scalar bounds, enum sets, nullability,
@@ -76,8 +72,8 @@ residue belongs to one nonterminal worker run, its count is at most `C`.
 Terminal retained-Change aggregate retention and a same-UID-replaced residue's
 bytes are still explicit cutover gates rather than claimed current authority.
 
-After a planned Go outer runner becomes active, a declared empty provider pair
-is a serialization barrier, not absence proof. Generic outcomes, operator
+After the Go outer runner becomes active, a declared empty provider pair is a
+serialization barrier, not absence proof. Generic outcomes, operator
 cancellation and infrastructure failure refuse until the runner performs its
 one already-prepared inner Start. Cancellation or daemon EOF cannot skip that
 attempt: exact Start failure publishes the canonical no-child result, while a
@@ -99,6 +95,18 @@ directory/socket modes. The pre-release browser boundary is a loopback-only
 WebSocket with exact Host/Origin checks and proof-of-possession client keys; it
 is not a webhook or generic connector listener. Exposing either local surface
 beyond the machine is external deployment work and is unsupported.
+
+### Hosted-origin compromise response
+
+A compromised hosted origin or same-origin dependency can exercise every
+capability granted to a paired browser client. Stop trusting the hosted page,
+revoke every paired browser client through the owner-authenticated local API,
+and prove that no browser connection remains. If revocation cannot prove
+connection cleanup, quiesce the browser runtime or stop the service and keep it
+stopped until cleanup is resolved. Only then remediate and republish the exact
+reviewed hosted artifact. Re-pair clients only after that artifact is live.
+Origin allowlisting, CSP, and non-exportable browser keys reduce risk but do
+not replace this response.
 
 The operator-only quarantine API is not a network ingress or trust decision.
 It stores bounded external observations as untrusted `InputEnvelope` and
@@ -191,7 +199,7 @@ labels are reported as unresolved rather than touched. A run remains visibly
 
 ## Provider and tool boundary
 
-Planned Go uses one concrete `internal/provider.Build(Request) (Launch, error)`
+Go uses one concrete `internal/provider.Build(Request) (Launch, error)`
 boundary. Admission freezes provider, optional model, and optional reasoning
 effort only. After admission, the daemon resolves and seals the exact
 `Installation` and native executable/configuration/auth launch facts. `Build`
@@ -200,9 +208,10 @@ executable, ordered argv, and complete ordered environment. The
 runner owns the descriptor-bound Change cwd, fresh interactive PTY, input,
 process group, wait/reap, output and cleanup. Provider choice is unrestricted
 interactive authority in V1; no bounded permission profile is persisted or
-interpreted. Shell is exactly `/bin/sh -s`, but the provider candidate is not
-shipped. Claude Code and Codex also remain blocked pending exact integration
-and fake-witness review. Unsupported native mappings
+interpreted. Shell is the only implemented provider and runs the sealed task
+descriptor through `/bin/sh`; its isolated end-to-end path is proved. Claude
+Code and Codex remain fail-closed pending exact integration and witness review.
+Unsupported native mappings
 become typed post-admission `FailureSpawn`; executable/configuration/auth
 identity is revalidated immediately before release and is not a durable
 admission field.
@@ -236,7 +245,7 @@ it off cannot weaken or rewrite an already-admitted attempt. Provider choice
 inherently gives the fresh V1 runner unrestricted interactive authority. No
 permission-profile field or value is persisted, serialized, or interpreted.
 
-For planned Go, the same global `BEGIN IMMEDIATE` validates global settings,
+The same global `BEGIN IMMEDIATE` validates global settings,
 runs the one capacity/authority/queued-rank-and-payload integrity predicate,
 then checks dispatch, the single admitted-plus-running-plus-finalizing capacity
 set and durable eligibility, then selects the canonical task+agent across
@@ -249,7 +258,7 @@ historical only.
 These provider controls never bypass daemon authentication, attempt scope, run
 phase, or finalization rules, and remain cooperative same-user controls rather
 than OS isolation. Factoryd resolves and validates one exact reviewed provider
-executable and configuration before external launch, but planned Go does not
+executable and configuration before external launch, but Go does not
 use that availability as eligibility: canonical work admits first and missing
 or invalid external repository state becomes typed `FailureSource`, while
 missing or invalid provider executable/configuration/auth becomes typed
