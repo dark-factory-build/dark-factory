@@ -23,10 +23,12 @@ Codex nor Claude owns its credentials or its durable journal.
    The local Cloudflare API token is separate from those runtime bindings. For
    an explicitly owner-authorized DNS operation, invoke the exact command
    through the parent repository's
-   `scripts/with-cloudflare-env.sh dns status` or
-   `scripts/with-cloudflare-env.sh dns publish-app`. Its compiled boundary
-   selects only `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` from the
-   ignored, mode-`0600` root `.env.txt`. Its launcher replaces itself with an
+   `../scripts/with-cloudflare-env.sh dns status` or
+   `../scripts/with-cloudflare-env.sh dns publish-app`. Run these from the
+   `control-plane/` directory; from the repository root, omit `../`. Its
+   compiled boundary selects only `CLOUDFLARE_API_TOKEN` and
+   `CLOUDFLARE_ACCOUNT_ID` from the ignored, mode-`0600` root `.env.txt`. Its
+   launcher replaces itself with an
    explicit empty environment before any setup child, and the operation does
    not pass the selected values to Wrangler or another child process. It
    captures and re-verifies one exact commit, refuses mutable helper source,
