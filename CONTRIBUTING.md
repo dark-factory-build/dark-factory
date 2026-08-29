@@ -16,29 +16,20 @@ cd .worktrees/<slug>
 go build ./...
 ```
 
-On macOS, run the complete release-compatible gate:
+Run the complete gate:
 
 ```sh
 ./scripts/local-ci.sh
 ```
 
-On Ubuntu x86-64, run the source-only gate and contributor smoke instead:
-
-```sh
-./scripts/local-ci.sh --linux-source
-./scripts/linux-contributor-smoke.sh
-```
-
-The macOS source gate is the Go gate: `gofmt`, `go vet`, the full serial
-Go test suite, the full race suite, the TypeScript client proof, and the
-real browser and daemon end-to-end lifecycles, followed by
+The source gate is the Go gate: `gofmt`, `go vet`, the full serial Go test
+suite, the full race suite, the TypeScript client proof, and the real
+browser, daemon and service end-to-end lifecycles, followed by
 `git diff --check`. It additionally checks release-source, publisher, and
-package fixtures. The retired Rust workspace keeps its exact pre-cutover
-gate behind `./scripts/local-ci.sh --legacy-rust` until its deletion
-lands, and the Linux mode remains a Rust source preview until the Go
-daemon reaches Linux (#142/#143). CI requires every platform job through
-the aggregate `required` context, so contributors should run the command
-for their platform before opening a PR.
+package fixtures. The daemon is Darwin-only today, so the gate is macOS-only;
+Linux support is #120/#141-144. CI requires the runtime gate and the
+control-plane gate through the aggregate `required` context, so run the gate
+before opening a PR.
 
 A few workspace-wide rules the gate enforces, worth knowing up front:
 

@@ -22,14 +22,19 @@ check_pin .github/workflows/release.yml "GOTOOLCHAIN=go$go_version" "runtime Go 
 check_pin .github/workflows/release.yml "GOOS=darwin GOARCH=arm64" "the exact Darwin arm64 release target"
 check_pin .github/workflows/release.yml "GOOS=darwin GOARCH=amd64" "the exact Darwin amd64 release target"
 
-# The Rust workspace is deleted. These guards keep its toolchain from
-# reappearing in the release or gate paths through an unreviewed edit.
-for workflow in .github/workflows/release.yml .github/workflows/ci.yml; do
-    if grep -Eq 'rustup|cargo[[:space:]]+\+' "$workflow"; then
-        echo "$workflow retains the deleted Rust toolchain" >&2
-        exit 1
-    fi
-done
+# The Rust runtime workspace is deleted. These guards keep its toolchain from
+# reappearing through an unreviewed edit. The control-plane job is deliberately
+# out of scope: that Worker is a separate, still-Rust, still-deployed package
+# with its own gate, so its rustup step is correct and must survive.
+if grep -Eq 'rustup|cargo[[:space:]]+\+' .github/workflows/release.yml; then
+    echo ".github/workflows/release.yml retains the deleted Rust toolchain" >&2
+    exit 1
+fi
+runtime_jobs=$(sed -n '/^  checks:/,/^  control-plane:/p' .github/workflows/ci.yml)
+if printf '%s\n' "$runtime_jobs" | grep -Eq 'rustup|cargo[[:space:]]+\+'; then
+    echo ".github/workflows/ci.yml runs the deleted Rust toolchain outside control-plane" >&2
+    exit 1
+fi
 if [ -e Cargo.toml ] || [ -e Cargo.lock ] || [ -d crates ]; then
     echo "the deleted Rust runtime workspace has reappeared" >&2
     exit 1

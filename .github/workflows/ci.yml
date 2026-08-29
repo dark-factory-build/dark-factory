@@ -21,9 +21,10 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 
 jobs:
-  # The macOS job is the release-compatible source gate. Linux uses the same
-  # shared Rust source-gate seam with an explicit source-only mode; macOS
-  # release/publisher/package fixtures stay macOS-only until #142/#143.
+  # The macOS job is the runtime source gate. The Go daemon is Darwin-only
+  # today, so there is no Linux runtime job to pair with it; Linux support is
+  # #120/#141-144, and the release/publisher/package fixtures stay macOS-only
+  # until #142/#143.
   #
   # `runs-on` below is a policy, not a mechanism: a pull request runs the
   # workflow file it carries, so this expression only governs a PR that
@@ -39,8 +40,9 @@ jobs:
     # route every gating run onto the persistent shared runner (#54).
     runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'macos-latest' || 'dark-factory-mac' }}
     # The Go gate runs the full serial suite, the full race suite, the
-    # TypeScript client proof, and both E2Es back to back; 45 minutes was
-    # sized for the cargo gate and would turn slow-but-green runs red.
+    # TypeScript client proof, and the browser, daemon and service E2Es back
+    # to back; the old 45-minute bound was sized for the retired cargo gate
+    # and would turn slow-but-green runs red.
     timeout-minutes: 90
     steps:
       # No actions/checkout: codeload.github.com (which serves an action's
@@ -59,9 +61,9 @@ jobs:
       # detect and repair each kind of leftover state, then `git checkout
       # --force --detach` lands on the target commit and `git clean -ffdx`
       # removes anything else a prior job left in the working tree. That
-      # clean never touches the cargo cache: CARGO_TARGET_DIR lives outside
-      # this workspace (see docs/development/WORKFLOW.md, "The self-hosted
-      # runner").
+      # clean never touches the Go build cache: the gate provisions its own
+      # GOCACHE and GOMODCACHE under an isolated stage root (see
+      # docs/development/WORKFLOW.md, "The self-hosted runner").
       #
       # $GITHUB_SHA is the PR's merge commit for `pull_request` events and
       # the pushed commit for `push`/`workflow_dispatch`; GitHub serves
@@ -122,57 +124,23 @@ jobs:
             } >>"$GITHUB_STEP_SUMMARY"
           fi
 
-  # The retired Rust runtime keeps its exact pre-cutover coverage — the cargo
-  # gate stages, the workspace build, the macOS contributor smoke, and the
-  # disposable launchd release proof — in one clearly named job until the
-  # Rust deletion lands. Every step here ran inside `checks` before the Go
-  # gate became authoritative; nothing was dropped, only relocated.
-  legacy-rust:
-    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'macos-latest' || 'dark-factory-mac' }}
-    timeout-minutes: 45
-    steps:
-      - name: Check out $GITHUB_SHA
-        run: |
-          set -euxo pipefail
-          rm -rf .git
-          git init
-          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
-          git fetch --depth=1 origin "$GITHUB_SHA"
-          git checkout --force --detach FETCH_HEAD
-          git clean -ffdx
-
-      - name: Install the pinned toolchain
-        run: rustup toolchain install 1.88.0 --profile minimal --component clippy,rustfmt --no-self-update
-
-      - name: Run the legacy Rust source gate
-        run: ./scripts/local-ci.sh --legacy-rust
-
-      - name: Run the macOS causal source smoke
-        run: |
-          cargo +1.88.0 build --locked --workspace
-          ./scripts/macos-contributor-smoke.sh
-          ./scripts/test-macos-contributor-smoke.sh
-
-      - name: Run the disposable launchd release proof
-        run: ./scripts/macos-launchd-release-proof.sh
-
   # The repository's single required context is deliberately an aggregate:
-  # GitHub must require both hosted runtime source gates and the separately
+  # GitHub must require the hosted runtime source gate and the separately
   # deployed control-plane gate, not just whichever job name happened to be
   # selected when the ruleset was first configured.
   required:
     if: always()
-    needs: [checks, legacy-rust, linux, control-plane, review]
+    needs: [checks, control-plane, review]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require every hosted source gate
-        if: needs.checks.result != 'success' || needs.legacy-rust.result != 'success' || needs.linux.result != 'success' || needs.control-plane.result != 'success'
+        if: needs.checks.result != 'success' || needs.control-plane.result != 'success'
         run: |
-          echo "required source gates failed: macOS=${{ needs.checks.result }}, legacy-rust=${{ needs.legacy-rust.result }}, Linux=${{ needs.linux.result }}, control-plane=${{ needs.control-plane.result }}" >&2
+          echo "required source gates failed: macOS=${{ needs.checks.result }}, control-plane=${{ needs.control-plane.result }}" >&2
           exit 1
       - name: Confirm all hosted source gates passed
-        run: echo "macOS Go, legacy Rust, Linux, and control-plane source gates passed"
+        run: echo "macOS Go and control-plane source gates passed"
 
       # AGENTS.md rule 2, made a merge condition rather than a convention.
       #
@@ -300,8 +268,8 @@ jobs:
       # default branch, never the copy carried by the change under review: the
       # maintainer App may publish under `scripts/`, so a pull request running
       # its own copy could weaken the reviewer about to judge it. A change to
-      # the gate is still tested by `checks` and `linux`, which do run the
-      # pull request's copy against test-verify-adversarial-review.sh.
+      # the gate is still tested by `checks`, which does run the pull
+      # request's copy against test-verify-adversarial-review.sh.
       #
       # This hoists the decision, not the plumbing. Everything else on this
       # path -- the projection below, the head lookup, this job's existence --
@@ -362,50 +330,3 @@ jobs:
       - name: Run the control-plane authoritative gate
         run: ./control-plane/scripts/local-ci.sh
 
-  # Ubuntu is the source-contributor preview gate. It keeps the macOS
-  # compatibility gate above intact while making the Linux claim explicit:
-  # x86-64 source builds, the shared deterministic Rust suite, and the public
-  # factoryd/factoryctl/factory-tui shell smoke all run on Ubuntu.
-  linux:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    steps:
-      - name: Check out $GITHUB_SHA
-        run: |
-          set -euxo pipefail
-          rm -rf .git
-          git init
-          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
-          git fetch --depth=1 origin "$GITHUB_SHA"
-          git checkout --force --detach FETCH_HEAD
-          git clean -ffdx
-
-      - name: Verify Ubuntu x86-64 runner
-        run: |
-          set -euxo pipefail
-          test "$(uname -s)" = Linux
-          test "$(uname -m)" = x86_64
-
-      - name: Install the pinned toolchain
-        run: rustup toolchain install 1.88.0 --profile minimal --component clippy,rustfmt --no-self-update
-
-      - name: Run the Linux authoritative gate
-        run: ./scripts/local-ci.sh --linux-source
-
-      # The gate has already compiled every target. Build only the normal
-      # binaries that the following shell smoke executes, after clippy/tests
-      # so the gate cannot invalidate and rebuild an up-front cargo build.
-      - name: Build the workspace binaries
-        run: cargo +1.88.0 build --locked --workspace --bins
-
-      - name: Verify source-gate mode boundary
-        run: ./scripts/test-local-ci-mode.sh
-
-      - name: Verify repository settings publisher and gate
-        run: ./scripts/test-repository-settings.sh
-
-      - name: Run the source contributor smoke
-        run: ./scripts/linux-contributor-smoke.sh
-
-      - name: Verify interrupted smoke teardown
-        run: ./scripts/test-linux-contributor-smoke.sh
