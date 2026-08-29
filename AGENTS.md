@@ -182,8 +182,10 @@ Read-only context unless a task explicitly asks you to edit them:
    only `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` from the ignored,
    mode-`0600` `.env.txt` at the common worktree root through an atomic,
    no-symlink file open. Its finite implementation admits no other Cloudflare
-   operation, inherits no ambient credential environment, and never hands the
-   token to Wrangler, another child process, or process arguments. The token
+   operation. Its public launcher replaces itself with an explicit empty
+   environment before starting any setup child, and the compiled operation
+   never hands the token to Wrangler, another child process, or process
+   arguments. The token
    path may be used only from an independently reviewed commit: the wrapper
    captures one exact commit, refuses mutable helper source or a moving `HEAD`,
    and builds an offline Git export of that commit in an isolated home/cache

@@ -208,15 +208,15 @@ scoped `CLOUDFLARE_API_TOKEN` plus `CLOUDFLARE_ACCOUNT_ID` in the ignored,
 mode-`0600` root `.env.txt`, used only through
 `../scripts/with-cloudflare-env.sh dns status`, or
 `../scripts/with-cloudflare-env.sh dns publish-app` for an explicitly
-authorized command. The compiled helper ignores every other assignment,
-rejects symlinks and broad file modes, clears the ambient environment, and
-never passes the token to Wrangler or another child process. It captures and
-re-verifies one exact commit, refuses mutable helper source or a moving `HEAD`,
-and compiles only an offline Git export of that commit. Its link-time direct-
-invocation check is an accidental-misuse guardrail, not authentication: a
-process already running as the operator can read the operator's mode-`0600`
-files. Run untrusted same-UID code under a separate OS identity or keep the
-credential behind a broker.
+authorized command. The public launcher replaces itself with an explicit empty
+environment before any setup child. The compiled helper ignores every other
+assignment, rejects symlinks and broad file modes, and never passes the token to
+Wrangler or another child process. It captures and re-verifies one exact
+commit, refuses mutable helper source or a moving `HEAD`, and compiles only an
+offline Git export of that commit. Its link-time direct-invocation check is an
+accidental-misuse guardrail, not authentication: a process already running as
+the operator can read the operator's mode-`0600` files. Run untrusted same-UID
+code under a separate OS identity or keep the credential behind a broker.
 The Durable Object binding embeds resource authority without exposing a
 resource credential to the Worker. See Cloudflare's [binding] and [secret]
 documentation.

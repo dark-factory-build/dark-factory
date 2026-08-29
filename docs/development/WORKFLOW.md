@@ -396,16 +396,17 @@ worktree root through the repository helper:
 ```
 
 The file must be a regular mode-`0600` file containing exactly one usable
-`CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`. The compiled helper does not
-source the file: it opens it atomically without following a symlink, extracts
-only those two assignments, and clears the ambient environment. It first
-captures one exact Git commit, refuses mutable helper source or a moving
-`HEAD`, re-verifies that binding, and builds the captured export offline with
-an isolated home and Go cache. Run it only from an independently reviewed
-commit. The link-time receipt blocks accidental direct invocation but is public
-and is not authentication. Any process already running as the operator can
-read the operator's mode-`0600` files; use a separate OS identity or credential
-broker when same-UID code is not trusted. Authenticated Wrangler is deliberately
+`CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`. The public launcher replaces
+itself with an explicit empty environment before starting any setup child. The
+compiled helper does not source the file: it opens it atomically without
+following a symlink and extracts only those two assignments. It first captures
+one exact Git commit, refuses mutable helper source or a moving `HEAD`,
+re-verifies that binding, and builds the captured export offline with an
+isolated home and Go cache. Run it only from an independently reviewed commit.
+The link-time receipt blocks accidental direct invocation but is public and is
+not authentication. Any process already running as the operator can read the
+operator's mode-`0600` files; use a separate OS identity or credential broker
+when same-UID code is not trusted. Authenticated Wrangler is deliberately
 not part of the agent surface: the finite API client keeps the token in one
 process and admits only the two commands above. The token never enters process
 arguments, while Maintainer, GitHub, provider, and Cloudflare Access credentials

@@ -26,13 +26,14 @@ Codex nor Claude owns its credentials or its durable journal.
    `scripts/with-cloudflare-env.sh dns status` or
    `scripts/with-cloudflare-env.sh dns publish-app`. Its compiled boundary
    selects only `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` from the
-   ignored, mode-`0600` root `.env.txt` and does not pass them to Wrangler or
-   another child process. It captures and re-verifies one exact commit, refuses
-   mutable helper source, and builds the implementation from an offline Git
-   export. Its direct-invocation check is a guardrail, not authentication or a
-   same-UID security boundary. Run untrusted same-UID code under a separate OS
-   identity or keep the credential behind a broker; never copy the file or
-   token into this tree.
+   ignored, mode-`0600` root `.env.txt`. Its launcher replaces itself with an
+   explicit empty environment before any setup child, and the operation does
+   not pass the selected values to Wrangler or another child process. It
+   captures and re-verifies one exact commit, refuses mutable helper source,
+   and builds the implementation from an offline Git export. Its direct-
+   invocation check is a guardrail, not authentication or a same-UID security
+   boundary. Run untrusted same-UID code under a separate OS identity or keep
+   the credential behind a broker; never copy the file or token into this tree.
    Diagnosing the running service does not justify holding any of them: run the
    Worker locally with `wrangler dev --env-file` and a throwaway key, outside
    this tree, and read the console directly. A production deployment cycle is
