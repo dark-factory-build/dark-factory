@@ -6708,3 +6708,65 @@ Rust deletion completing the hard cutover on `s6-rust-deletion`:
   Their durable lessons are already captured in ARCHITECTURE.md,
   "Invariants carried from the retired Rust reviews", which is what gated
   the stale-issue closure.
+
+### Repository-local hard cutover complete (2026-08-29)
+
+The Go local-runtime hard cutover is complete in the canonical
+`go-hard-cutover` worktree. This is a source, review and isolated-runtime
+result; it is not a release, site deployment, live-install migration or real
+Claude/Codex provider proof.
+
+- The three cold reviews lost to the earlier rate limit were repeated by fresh
+  reviewers. Their repaired exact heads received **ALLOW**:
+  `251c788c050fec775f70149afaff3d7ac307f301` (runner group census and
+  nil-channel safety), `36bb419da39ef5b3dbdedf9021b265bffa4fcd25`
+  (SQLite autocommit connection resolution), and
+  `ddf646a837e54423f816c0b176ac54489e68d5c6` (unexpected recovered-runtime
+  handle closure). They were merged locally as `71220dc6`, `8fa61516` and
+  `586698f6`.
+- Integration found and fixed three further causal defects before deletion:
+  clean connections in a sealed SQLite set could still be discarded
+  (`3b37056f`); a daemon finalization fixture did not causally prove release
+  ordering (`855491c3`); and the bounded E2E environment hid Go and Corepack
+  behind its stripped `PATH`. The final tool handoff uses captured absolute
+  Go, Node and Corepack paths, an explicit portable `/tmp` default, and a
+  pre-heavy-gate fixture (`28652de9`, `72c052d4`, `f305ed56`). Each final
+  repair received independent exact-head **ALLOW**.
+- The complete pre-deletion `./scripts/local-ci.sh` gate passed on exact head
+  `f305ed5663fb7978e46a7115762affe29aaa7f28`. This discharged the S4
+  condition before the already-allowed S6 source head
+  `af6c0a370b71928eafc92378ba8c5487ff5a8fc6` was merged as `e29963fb`.
+- Cold review of that integrated merge blocked remaining cutover residue: the
+  dead Rust launchd template, Rust/TUI issue-template and label language, stale
+  Linux-lane workflow prose, a non-exact E2E-fixture count, and an unexercised
+  no-argument gate contract. The smaller repair deletes or rewrites those
+  surfaces and adds causal static guards. Three focused reviewers returned
+  exact-head **ALLOW** on
+  `a82dbf61849a0e2cb5f99ed9f9501a061e1d14f2`.
+- The required post-deletion `./scripts/local-ci.sh` gate passed on that exact
+  head. It passed every retained shell/release/repository fixture; the focused
+  Go packages (`kernel` 28.189s, `browserprotocol` 0.272s,
+  `sqlitecontract` 10.971s); both 221-test TypeScript proofs; the complete
+  serial Go suite; and the complete race suite with its explicit 30-minute
+  bound (`api` 87.860s, `daemon` 214.887s, `install` 149.314s, `kernel`
+  849.035s, `runner` 66.697s, `sqlitecontract` 13.993s). The real browser E2E
+  passed normally (4.121s) and under race instrumentation (14.167s); the
+  daemon lifecycle E2E passed (2.990s); the disposable launchd service E2E
+  passed (2.594s); and the final diff check passed. No documented flake fired.
+- The external cutover census then passed: the exact gate root
+  `/private/tmp/dark-factory-go.QSG74hUM` was absent; no process or open file
+  descriptor remained bound to it; no disposable `com.dark-factory.e2e.*`
+  launchd label survived; and the canonical worktree was clean. The first
+  census draft was rejected because it matched its own command line; the
+  corrected check excluded only its own process group before returning PASS.
+
+The duration audit is also closed for this cutover rather than left implicit.
+S6 removed the obsolete Rust and Linux-source lanes. The retained gate still
+repeats roughly 39 seconds of focused Go tests before the full suites and runs
+the TypeScript proof twice; those are safe optimization candidates only after
+an execution-shape fixture proves exactly-once coverage. The 849.035-second
+kernel race package remains real cryptographic snapshot and concurrency stress,
+not deletion evidence. A post-cutover #238 performance slice should measure
+per-test cost and separate complete serial coverage from an explicit
+race-sensitive inventory before narrowing it. No gate is weakened as part of
+the cutover record.
