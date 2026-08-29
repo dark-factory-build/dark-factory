@@ -15,20 +15,26 @@ import (
 // runReleasedProvider is the single owner loop for a released PTY provider.
 // It deliberately has no goroutines: the outer attempt runner owns the PTY,
 // child group, two capability sockets and every terminal cursor.
-func runReleasedProvider(child *OwnedChild, daemon, worker *os.File, reads *attemptReadSet) (bool, error) {
-	if child == nil || daemon == nil || worker == nil || reads == nil || child.ptyMaster == nil {
+func runReleasedProvider(child *OwnedChild, daemon, worker *os.File, reads *attemptReadSet, stagePTY *ptyStageSink, retained *terminalByteRing) (bool, error) {
+	if child == nil || daemon == nil || worker == nil || reads == nil || child.ptyMaster == nil || retained == nil {
 		return false, ErrState
 	}
 	loop := terminalOwner{child: child, daemon: daemon, worker: worker, reads: reads, daemonOpen: true, workerOpen: true}
-	if err := loop.awaitProviderExec(); err != nil {
+	// The PTY was registered and drained from inner activation, so pre-provider
+	// worker output is already retained in exact order; adopt it rather than
+	// starting an empty stream.
+	loop.ring = *retained
+	if err := loop.awaitProviderExec(stagePTY); err != nil {
 		return loop.daemonOpen, err
 	}
 	if err := reads.removeWorker(); err != nil {
 		return true, err
 	}
 	loop.workerOpen = false
-	if err := reads.registerPTY(); err != nil {
-		return true, err
+	if !reads.ptyRegistered {
+		if err := reads.registerPTY(); err != nil {
+			return true, err
+		}
 	}
 	loop.ptyOpen = true
 	// The worker's CLOEXEC capability has closed, proving provider exec, and the
@@ -70,9 +76,9 @@ type terminalReplay struct {
 	head        uint64
 }
 
-func (o *terminalOwner) awaitProviderExec() error {
+func (o *terminalOwner) awaitProviderExec(stagePTY *ptyStageSink) error {
 	for {
-		frame, source, err := nextAttemptFrame(o.child, o.daemon, o.worker, o.daemonOpen, o.workerOpen, 0)
+		frame, source, err := nextAttemptFrame(o.child, o.daemon, o.worker, o.daemonOpen, o.workerOpen, stagePTY, 0)
 		switch source {
 		case sourceChild:
 			if err == nil {
@@ -106,7 +112,7 @@ func (o *terminalOwner) awaitProviderExec() error {
 			if err := o.writeDaemonFrame(frame); err != nil {
 				return err
 			}
-			ack, ackSource, ackErr := nextAttemptFrame(o.child, o.daemon, o.worker, o.daemonOpen, o.workerOpen, 0)
+			ack, ackSource, ackErr := nextAttemptFrame(o.child, o.daemon, o.worker, o.daemonOpen, o.workerOpen, stagePTY, 0)
 			if ackErr != nil || ackSource != sourceDaemon || !validCurrentExecCheckAck(ack) {
 				return protocolError("current exec check ack", ackSource, ackErr)
 			}

@@ -58,6 +58,14 @@ func runAttemptWorkerHelper(args []string) error {
 	if err := write("selection", fmt.Sprintf("%d", control.Identity().PID)); err != nil {
 		return err
 	}
+	if mode == "loud-selection" {
+		// The macOS PTY output buffer is 1024 bytes. A worker that says more
+		// than that before its stage report blocks in write(2) unless the
+		// outer runner is already draining the master.
+		if _, err := os.Stderr.Write([]byte(strings.Repeat("d", 8192))); err != nil {
+			return err
+		}
+	}
 	if err := control.ReportSelection([]byte("selected")); err != nil {
 		return err
 	}
@@ -1024,7 +1032,7 @@ func TestAttemptCleanupReapsObservedInertExit(t *testing.T) {
 	if err := unix.Kill(-identity.PGID, unix.SIGKILL); err != nil {
 		t.Fatal(err)
 	}
-	_, source, err := nextAttemptFrame(child, daemon, worker, true, true, time.Second)
+	_, source, err := nextAttemptFrame(child, daemon, worker, true, true, nil, time.Second)
 	if err != nil || source != sourceChild || child.state != stateExited || !child.exitObserved {
 		t.Fatalf("observed inert exit source=%d err=%v state=%d observed=%t", source, err, child.state, child.exitObserved)
 	}
@@ -1094,7 +1102,7 @@ func TestAttemptCleanupRetiresProtocolReadinessBeforeProcessWait(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			_, source, cause := nextAttemptFrame(child, daemon, worker, true, true, time.Second)
+			_, source, cause := nextAttemptFrame(child, daemon, worker, true, true, nil, time.Second)
 			if cause == nil || source != sourceDaemon || child.state != stateBlocked || child.exitObserved {
 				t.Fatalf("delayed process setup source=%d cause=%v state=%d observed=%t", source, cause, child.state, child.exitObserved)
 			}
@@ -2275,4 +2283,23 @@ func execCommand(name string, args ...string) *exec.Cmd {
 	cmd := exec.Command(name, args...)
 	cmd.Env = []string{}
 	return cmd
+}
+
+// A worker that writes more than the 1024-byte macOS PTY output buffer before
+// its stage report must not deadlock the attempt. The outer runner owns the
+// PTY master from inner activation, so the worker never blocks in write(2),
+// still reports its checkpoint, and the retained bytes stay in the stream.
+func TestInnerWorkerOutputBeforeStageReportCannotDeadlockTheAttempt(t *testing.T) {
+	f := newAttemptFixture(t, "loud-selection", "")
+	f.activateOuter()
+	if err := f.controller.Release(StageSelection); err != nil {
+		t.Fatal(err)
+	}
+	event, err := f.controller.Next(8 * time.Second)
+	if err != nil || event.Kind != AttemptCheckpoint || event.Stage != StageSelection {
+		t.Fatalf("selection checkpoint event=%+v err=%v output=%q", event, err, f.output())
+	}
+	if _, err := os.Stat(filepath.Join(f.root, "selection")); err != nil {
+		t.Fatalf("missing selection witness: %v", err)
+	}
 }
