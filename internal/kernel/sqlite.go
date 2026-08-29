@@ -535,8 +535,60 @@ func (tx *writeTx) discard() {
 	if tx.discarded || tx.connection == nil {
 		return
 	}
+	// Destroying a connection is fail-closed but permanent: the retained
+	// physical set is sealed at activation and cannot mint a replacement, and
+	// the writer set holds exactly one connection, so one destroyed connection
+	// ends every later write with errConnectionSetExhausted. A statement that
+	// was interrupted before it took the write reservation leaves the
+	// connection in autocommit and is provably clean, so resolve first and
+	// destroy only what cannot be resolved.
+	if resolveConnection(tx.connection) {
+		return
+	}
 	discardConnection(tx.connection)
 	tx.discarded = true
+}
+
+// resolveConnection reports whether the connection is provably free of a
+// transaction of ours. SQLite answers exactly through autocommit mode: an
+// interrupted or failed lifecycle statement that never took the reservation
+// leaves autocommit on, and a transaction that did open is rolled back on a
+// context the caller cannot cancel before autocommit is confirmed again.
+func resolveConnection(connection *sql.Conn) bool {
+	if connectionInAutocommit(connection) {
+		return true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Duration(busyMilliseconds)*time.Millisecond)
+	defer cancel()
+	if _, err := connection.ExecContext(ctx, "ROLLBACK"); err != nil {
+		return false
+	}
+	return connectionInAutocommit(connection)
+}
+
+func connectionInAutocommit(connection *sql.Conn) bool {
+	autocommit := false
+	if err := connection.Raw(func(driverConnection any) error {
+		sqliteConnection, ok := driverConnection.(sqliteDriver.Conn)
+		if !ok {
+			return nil
+		}
+		autocommit = sqliteConnection.Raw().GetAutocommit()
+		return nil
+	}); err != nil {
+		return false
+	}
+	return autocommit
+}
+
+// releaseUncertainConnection returns a connection to its retained pool when its
+// state is provably clean and destroys it otherwise.
+func releaseUncertainConnection(connection *sql.Conn) {
+	if resolveConnection(connection) {
+		_ = connection.Close()
+		return
+	}
+	discardConnection(connection)
 }
 
 func (tx *writeTx) Close() {

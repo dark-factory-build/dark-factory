@@ -257,7 +257,7 @@ func (store *Store) beginRead(ctx context.Context) (*readTx, error) {
 
 func beginPinnedRead(ctx context.Context, connection *sql.Conn) (*readTx, error) {
 	if _, err := connection.ExecContext(ctx, "BEGIN"); err != nil {
-		discardConnection(connection)
+		releaseUncertainConnection(connection)
 		return nil, fmt.Errorf("begin sqlite read: %w", err)
 	}
 	return &readTx{connection: connection, active: true}, nil
@@ -271,7 +271,7 @@ func (tx *readTx) Close() error {
 	defer cancel()
 	_, rollbackErr := tx.connection.ExecContext(ctx, "ROLLBACK")
 	if rollbackErr != nil {
-		discardConnection(tx.connection)
+		releaseUncertainConnection(tx.connection)
 	} else {
 		rollbackErr = tx.connection.Close()
 	}
