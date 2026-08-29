@@ -36,10 +36,13 @@ Codex nor Claude owns its credentials or its durable journal.
    invocation check is a guardrail, not authentication or a same-UID security
    boundary. Run untrusted same-UID code under a separate OS identity or keep
    the credential behind a broker; never copy the file or token into this tree.
-   Diagnosing the running service does not justify holding any of them: run the
-   Worker locally with `wrangler dev --env-file` and a throwaway key, outside
-   this tree, and read the console directly. A production deployment cycle is
-   never the right debugging loop.
+   Diagnosing the running service does not justify holding any of them. For
+   local diagnostics, use the existing non-production `--var` fixtures only
+   through `scripts/with-clean-wrangler-env.sh`; the integration suite is the
+   canonical invocation. Read the console directly. Do not run bare
+   `wrangler dev`, use `wrangler dev --env-file`, the root `.env.txt`, a
+   production token, Wrangler OAuth, or keychain state for local debugging. A
+   production deployment cycle is never the right debugging loop.
 3. Expose typed, policy-checked operations only. Do not add a generic GitHub
    REST or GraphQL proxy, a shell-command surface, or a fallback to personal
    GitHub credentials. Contributor agents reach the deployed service only as

@@ -423,6 +423,19 @@ normal control-plane deployment transaction below. Routine control-plane
 production deployment still uses the fixed Maintainer-App-dispatched workflow
 and its protected GitHub environment secret.
 
+Local control-plane Wrangler dry-runs and workerd fixtures are deliberately
+unauthenticated. `control-plane/scripts/with-clean-wrangler-env.sh` gives those
+children an isolated home/temp directory, fixed system PATH, an absolute
+Node/script pair, and only the finite non-secret build environment. Local CI
+builds the Worker once before that boundary; Wrangler verifies and consumes
+that exact prebuilt output rather than rebuilding it with operator Cargo state.
+The wrapper disables
+Wrangler dotenv loading and refuses local env/dev-vars files; local CI uses it
+automatically. Do not pass root `.env.txt`, exported `CLOUDFLARE_*`, Wrangler
+OAuth/keychain state, or an arbitrary env file to local control-plane tooling.
+The protected GitHub environment secret above is only for the fixed hosted
+production workflow.
+
 Deployment remains narrow: the Maintainer MCP can dispatch only the fixed
 default-branch workflow at an exact commit and reviewed tree. For headless
 steady-state operation, the protected `production` environment keeps its

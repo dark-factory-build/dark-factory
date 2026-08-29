@@ -31,15 +31,23 @@ PATH="$repo_root/.tools/bin:$PATH"
 export PATH
 
 node -e "if (Number(process.versions.node.split('.')[0]) < 22) process.exit(1)"
+node_executable=$(node -p 'process.execPath')
+case "$node_executable" in
+    /*) ;;
+    *) echo "Node did not report an absolute executable path" >&2; exit 1 ;;
+esac
 npm ci --ignore-scripts
 worker-build --release
 
+clean_wrangler="$repo_root/scripts/with-clean-wrangler-env.sh"
+./scripts/test-clean-wrangler-env.sh
 dry_run_dir=$(mktemp -d "${TMPDIR:-/tmp}/df-wrangler-dry-run.XXXXXX")
 cleanup() {
     rm -rf -- "$dry_run_dir"
 }
 trap cleanup EXIT HUP INT TERM
-npx wrangler deploy --dry-run --outdir "$dry_run_dir"
+"$clean_wrangler" "$node_executable" "$repo_root/node_modules/wrangler/bin/wrangler.js" \
+    deploy --dry-run --outdir "$dry_run_dir"
 npm run test:worker
 
 for ignore_file in ../.gitignore .gitignore; do

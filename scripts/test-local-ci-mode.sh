@@ -7,6 +7,9 @@ contributing="$repository_root/CONTRIBUTING.md"
 workflow_doc="$repository_root/docs/development/WORKFLOW.md"
 ci="$repository_root/.github/workflows/ci.yml"
 stale_control_plane_workflow="$repository_root/control-plane/.github/workflows/ci.yml"
+control_plane_gate="$repository_root/control-plane/scripts/local-ci.sh"
+control_plane_build="$repository_root/control-plane/scripts/build-worker.sh"
+control_plane_wrangler="$repository_root/control-plane/wrangler.toml"
 
 fail() {
     echo "local-ci shape test failed: $*" >&2
@@ -101,6 +104,22 @@ control_gate_line=$(control_line_of 'run: ./control-plane/scripts/local-ci.sh')
     || fail "hosted control-plane CI runs its gate before checking Node"
 [ ! -e "$stale_control_plane_workflow" ] \
     || fail "control-plane gate remains hidden in an undiscovered nested workflow"
+
+clean_wrangler_environment="$repository_root/control-plane/scripts/with-clean-wrangler-env.sh"
+[ -x "$clean_wrangler_environment" ] \
+    || fail "control-plane Wrangler environment boundary is missing or not executable"
+grep -Fq 'with-clean-wrangler-env.sh' "$repository_root/control-plane/scripts/local-ci.sh" \
+    || fail "control-plane local CI does not use the clean Wrangler environment boundary"
+[ -x "$control_plane_build" ] \
+    || fail "control-plane Wrangler build boundary is missing or not executable"
+grep -Fqx 'command = "./scripts/build-worker.sh"' "$control_plane_wrangler" \
+    || fail "Wrangler no longer uses the reviewed build boundary"
+direct_build_line=$(grep -n -F 'worker-build --release' "$control_plane_gate" | head -1 | cut -d: -f1)
+clean_wrangler_line=$(grep -n -F '"$clean_wrangler"' "$control_plane_gate" | head -1 | cut -d: -f1)
+[ -n "$direct_build_line" ] && [ -n "$clean_wrangler_line" ] \
+    || fail "control-plane gate lost its direct build or clean Wrangler proof"
+[ "$direct_build_line" -lt "$clean_wrangler_line" ] \
+    || fail "control-plane gate invokes Wrangler before producing the verified build"
 
 grep -Fxq './scripts/local-ci.sh' "$contributing" \
     || fail "CONTRIBUTING lost the gate command"

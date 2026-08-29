@@ -126,7 +126,8 @@ test('the built Worker enforces the journal contract in workerd', async () => {
 
 async function startWorker(persistence, configured) {
   const port = await freePort();
-  const wrangler = join(process.cwd(), 'node_modules', '.bin', 'wrangler');
+  const wrangler = join(process.cwd(), 'node_modules', 'wrangler', 'bin', 'wrangler.js');
+  const cleanEnvironment = join(process.cwd(), 'scripts', 'with-clean-wrangler-env.sh');
   const args = [
     'dev',
     '--local',
@@ -149,9 +150,18 @@ async function startWorker(persistence, configured) {
       `DARK_FACTORY_MAINTAINER_APP_ID:${APP_ID}`,
     );
   }
-  const child = spawn(wrangler, args, {
+  const child = spawn(cleanEnvironment, [process.execPath, wrangler, ...args], {
     cwd: process.cwd(),
-    env: { ...process.env, NO_COLOR: '1' },
+    env: {
+      PATH: process.env.PATH ?? '/usr/bin:/bin',
+      HOME: '/operator-home',
+      TMPDIR: '/operator-tmp',
+      CLOUDFLARE_API_TOKEN: 'ambient-token-must-not-cross',
+      CLOUDFLARE_ACCOUNT_ID: 'ambient-account-must-not-cross',
+      WRANGLER_AUTH_TOKEN: 'ambient-oauth-must-not-cross',
+      XDG_CONFIG_HOME: '/operator-config',
+      SSH_AUTH_SOCK: '/operator-keychain-socket',
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let logs = '';

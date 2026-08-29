@@ -229,12 +229,22 @@ therefore not an acceptable staging command for this bootstrap. The reviewed
 live runbook must use the versions API or another no-traffic staging mechanism,
 prove the exact draft, and add a route only after the independent deployment
 gate. Do not improvise the first live sequence from generic Wrangler examples.
+Routine production deployment is the deliberate non-local exception: the fixed
+Maintainer-App workflow receives its Cloudflare API token only from the
+environment-scoped GitHub Actions secret. It does not use the local `.env.txt`,
+Wrangler OAuth, keychain, or ambient credentials.
 
 ## Local proof
 
 Rust is pinned to 1.88 and Node 22 or newer is required. Wrangler, `worker`,
 `worker-build`, and `wasm-bindgen` are pinned because their generated
-interfaces must agree. Run:
+interfaces must agree. Local CI launches Wrangler only through the repository's
+clean-environment wrapper, with an isolated home/temp directory and no
+Cloudflare, OAuth, keychain, loader, arbitrary PATH, dotenv/dev-vars, or config
+state. The release Worker is built once before that boundary; the wrapped
+Wrangler dry-run and workerd fixture verify and consume the prebuilt output,
+while the direct hosted deployment build wrapper still invokes the pinned
+`worker-build`. Local Wrangler telemetry is disabled at the same boundary. Run:
 
 ```sh
 ./scripts/local-ci.sh

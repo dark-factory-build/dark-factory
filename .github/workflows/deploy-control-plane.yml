@@ -132,17 +132,17 @@ jobs:
       - name: Verify the supported Node runtime
         run: node -e "if (Number(process.versions.node.split('.')[0]) < 22) process.exit(1)"
 
-      # Deploy only what the authoritative gate accepts. This also installs
-      # worker-build into control-plane/.tools and produces the wasm the upload
-      # step ships. The credential is deliberately NOT in scope here: this step
+      # Deploy only what the authoritative gate accepts. This installs the
+      # pinned worker-build and proves the same build contract the upload step
+      # repeats. The credential is deliberately NOT in scope here: this step
       # runs every build script, unit test, and `npm ci` in the dependency
       # graph.
       - name: Run the control-plane authoritative gate
         run: ./control-plane/scripts/local-ci.sh
 
-      # local-ci.sh puts .tools/bin on PATH only inside its own process, and
-      # wrangler.toml's `[build] command = worker-build --release` runs in this
-      # one. Without this the upload dies with `worker-build: command not
+      # local-ci.sh puts .tools/bin on PATH only inside its own process, while
+      # wrangler.toml's build wrapper invokes worker-build for a real hosted
+      # upload. Without this the upload dies with `worker-build: command not
       # found`.
       - name: Put the pinned wasm toolchain on PATH
         run: |

@@ -200,6 +200,17 @@ Read-only context unless a task explicitly asks you to edit them:
    narrow exception grants no GitHub, Maintainer-App, Cloudflare-Access,
    deployment, or live install authority; each named remote mutation still
    requires its own task authorization.
+   Local control-plane Wrangler proofs never authenticate. They must run only
+   through `control-plane/scripts/with-clean-wrangler-env.sh`, which supplies an
+   isolated home/temp directory, fixed system PATH, an absolute Node/script
+   pair, and a finite non-secret environment while refusing local env/dev-vars
+   files. Local CI builds the Worker once before that boundary; Wrangler may
+   only verify and consume that exact prebuilt output rather than rebuilding it
+   with access to operator Cargo state.
+   Never run local Wrangler with the root `.env.txt`, an exported
+   `CLOUDFLARE_*` value, OAuth/keychain state, or an arbitrary env file. The fixed hosted deployment
+   workflow's protected GitHub environment secret is the deliberate non-local
+   production exception; it is not a local-agent credential path.
    Human operators may perform a separately reviewed GitHub action through
    their normal workflow. A deployment the operator explicitly requests
    remains limited to that named operation and should use the repository's
