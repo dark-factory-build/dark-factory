@@ -208,11 +208,15 @@ func TestRuntimeParentRetainsOneDurableLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer created.Close()
 	wantLock, err := os.Lstat(filepath.Join(parentPath, runtimeParentLockName))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if second, err := OpenRuntimeParent(context.Background(), capability, parentPath); !errors.Is(err, errRuntimeBusy) || second != nil {
+		if second != nil {
+			_ = second.Close()
+		}
 		t.Fatalf("second lifetime owner = %v, %v", second, err)
 	}
 	if err := created.Close(); err != nil {
@@ -264,9 +268,13 @@ func TestRuntimeParentLosingCreatorNeverUnlinksWinningLock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("racing opener did not win created lock: %v", err)
 	}
+	defer winner.Close()
 	close(releaseCreator)
 	result := <-creatorResult
 	if !errors.Is(result.err, errRuntimeBusy) || result.parent != nil {
+		if result.parent != nil {
+			_ = result.parent.Close()
+		}
 		t.Fatalf("losing creator = %v, %v", result.parent, result.err)
 	}
 	lockBefore, err := os.Lstat(filepath.Join(parentPath, runtimeParentLockName))
@@ -274,6 +282,9 @@ func TestRuntimeParentLosingCreatorNeverUnlinksWinningLock(t *testing.T) {
 		t.Fatalf("losing creator unlinked winner's lock: %v", err)
 	}
 	if third, err := OpenRuntimeParent(context.Background(), capability, parentPath); !errors.Is(err, errRuntimeBusy) || third != nil {
+		if third != nil {
+			_ = third.Close()
+		}
 		t.Fatalf("third owner split lifetime lock = %v, %v", third, err)
 	}
 	if err := winner.Close(); err != nil {
@@ -336,7 +347,11 @@ func TestRuntimeParentSerializesNamespaceOperationsAndRevokesClosedHandles(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer first.Close()
 	if second, err := parent.begin(); !errors.Is(err, errRuntimeBusy) || second != nil {
+		if second != nil {
+			_ = second.Close()
+		}
 		t.Fatalf("concurrent namespace operation = %v, %v", second, err)
 	}
 	if err := first.Close(); err != nil {
@@ -574,12 +589,19 @@ func TestRuntimeNamesAreExactAndSocketIsReserved(t *testing.T) {
 	expected := runner.FileIdentity{Device: 1, Inode: 1}
 	for _, name := range invalid {
 		if runtime, err := CreateRuntime(parent, name); !errors.Is(err, errInvalidContract) || runtime != nil {
+			if runtime != nil {
+				_ = runtime.Close()
+			}
 			t.Fatalf("CreateRuntime(%q) = %v, %v", name, runtime, err)
 		}
 		if runtime, err := AdoptRuntime(parent, name); !errors.Is(err, errInvalidContract) || runtime != nil {
+			if runtime != nil {
+				_ = runtime.Close()
+			}
 			t.Fatalf("AdoptRuntime(%q) = %v, %v", name, runtime, err)
 		}
 		if recovered, err := OpenRecoveredRuntime(context.Background(), parent, name, expected); !errors.Is(err, errInvalidContract) || recovered != nil {
+			releaseUnexpectedRecovered(recovered)
 			t.Fatalf("OpenRecoveredRuntime(%q) = %v, %v", name, recovered, err)
 		}
 		if _, err := ObserveRuntimeLifetime(parent, name, expected); !errors.Is(err, errInvalidContract) {
@@ -709,6 +731,9 @@ func TestAdoptRuntimeClosesPreBindingCreationCrash(t *testing.T) {
 			t.Fatal(err)
 		}
 		if adopted, err := AdoptRuntime(parent, runtimeTestName); !errors.Is(err, errInvalidContract) || adopted != nil {
+			if adopted != nil {
+				_ = adopted.Close()
+			}
 			t.Fatalf("later phase adoption = %v, %v", adopted, err)
 		}
 		if _, err := os.Stat(filepath.Join(path, attemptTokenName)); err != nil {
@@ -733,6 +758,9 @@ func TestAdoptRuntimeAcquiresLifetimeBeforeRepair(t *testing.T) {
 		defer lifetime.Close()
 		before := snapshotRuntimeGraph(t, root)
 		if runtime, err := AdoptRuntime(parent, runtimeTestName); !errors.Is(err, errRuntimeBusy) || runtime != nil {
+			if runtime != nil {
+				_ = runtime.Close()
+			}
 			t.Fatalf("held lifetime adoption = %v, %v", runtime, err)
 		}
 		if after := snapshotRuntimeGraph(t, root); after != before {
@@ -758,6 +786,9 @@ func TestAdoptRuntimeAcquiresLifetimeBeforeRepair(t *testing.T) {
 		}
 		before := snapshotRuntimeGraph(t, root)
 		if runtime, err := AdoptRuntime(parent, runtimeTestName); !errors.Is(err, errInvalidContract) || runtime != nil {
+			if runtime != nil {
+				_ = runtime.Close()
+			}
 			t.Fatalf("malformed held lifetime adoption = %v, %v", runtime, err)
 		}
 		if after := snapshotRuntimeGraph(t, root); after != before {
@@ -970,6 +1001,9 @@ func TestRuntimeParentReplacementFailsClosedAndLeafSwapFailsClosed(t *testing.T)
 			}
 		}, nil, nil)
 		if !errors.Is(err, errInvalidContract) || runtime != nil {
+			if runtime != nil {
+				_ = runtime.Close()
+			}
 			t.Fatalf("parent replacement create = %v, %v", runtime, err)
 		}
 		if _, err := os.Lstat(filepath.Join(parentPath, runtimeTestName)); !errors.Is(err, os.ErrNotExist) {

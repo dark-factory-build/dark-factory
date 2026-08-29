@@ -28,12 +28,14 @@ func TestOpenRecoveredRuntimeValidatesPopulatedEvidenceWithoutMutation(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer recovered.Close()
 	digest := attemptDigestForToken(t, token)
 	evidence, err := recovered.InspectEvidence(context.Background(), digest, &config, true)
 	if err != nil || !evidence.AttemptToken || !evidence.WorkerConfig || evidence.Terminal == nil || evidence.Terminal.Terminal != terminal {
 		t.Fatalf("evidence = %+v, %v", evidence, err)
 	}
 	if second, err := OpenRecoveredRuntime(context.Background(), parent, runtimeTestName, identity); !errors.Is(err, errRuntimeBusy) || second != nil {
+		releaseUnexpectedRecovered(second)
 		t.Fatalf("concurrent recovery = %+v, %v", second, err)
 	}
 	wrongDigest, _ := kernel.AttemptDigestFromBytes(bytes.Repeat([]byte{0xee}, kernel.DigestBytes))
@@ -171,6 +173,7 @@ func TestOpenRecoveredRuntimeRejectsConsumedConfigDuringGateScratch(t *testing.T
 			configureRecoveredResidue(t, path, test.residue, terminal)
 			before := snapshotRuntimeGraph(t, path)
 			if recovered, err := OpenRecoveredRuntime(context.Background(), parent, runtimeTestName, identity); !errors.Is(err, errInvalidContract) || recovered != nil {
+				releaseUnexpectedRecovered(recovered)
 				t.Fatalf("config-free pre-consumption residue accepted: recovered=%+v err=%v", recovered, err)
 			}
 			if after := snapshotRuntimeGraph(t, path); after != before {
@@ -312,6 +315,7 @@ func TestOpenRecoveredRuntimeRejectsMalformedCensusAndReplacement(t *testing.T) 
 			mutate(t, path)
 			before := snapshotRuntimeGraph(t, path)
 			if recovered, err := OpenRecoveredRuntime(context.Background(), parent, runtimeTestName, identity); !errors.Is(err, errInvalidContract) || recovered != nil {
+				releaseUnexpectedRecovered(recovered)
 				t.Fatalf("malformed open = %+v, %v", recovered, err)
 			}
 			if after := snapshotRuntimeGraph(t, path); after != before {
@@ -326,6 +330,7 @@ func TestOpenRecoveredRuntimeRejectsMalformedCensusAndReplacement(t *testing.T) 
 		identity.Inode++
 		before := snapshotRuntimeGraph(t, path)
 		if recovered, err := OpenRecoveredRuntime(context.Background(), parent, runtimeTestName, identity); !errors.Is(err, errInvalidContract) || recovered != nil {
+			releaseUnexpectedRecovered(recovered)
 			t.Fatalf("wrong identity open = %+v, %v", recovered, err)
 		}
 		if after := snapshotRuntimeGraph(t, path); after != before {
@@ -346,6 +351,7 @@ func TestOpenRecoveredRuntimeRejectsMalformedCensusAndReplacement(t *testing.T) 
 			}
 		})
 		if !errors.Is(err, errInvalidContract) || recovered != nil {
+			releaseUnexpectedRecovered(recovered)
 			t.Fatalf("root replacement open = %+v, %v", recovered, err)
 		}
 		if info, statErr := os.Lstat(path); statErr != nil || !info.IsDir() {
@@ -355,6 +361,16 @@ func TestOpenRecoveredRuntimeRejectsMalformedCensusAndReplacement(t *testing.T) 
 			t.Fatalf("opened evidence changed: %v", statErr)
 		}
 	})
+}
+
+// releaseUnexpectedRecovered closes a handle a reject-path assertion did not
+// expect to receive. RuntimeParent.Close blocks while any child is open, so
+// leaving one behind turns a named assertion failure into a package timeout —
+// the regression is still caught, but the signal naming it is destroyed.
+func releaseUnexpectedRecovered(recovered *RecoveredRuntime) {
+	if recovered != nil {
+		_ = recovered.Close()
+	}
 }
 
 func TestRecoveredRuntimeCensusGrammar(t *testing.T) {
@@ -401,6 +417,7 @@ func TestRecoveredRuntimeCensusGrammar(t *testing.T) {
 			recovered, err := OpenRecoveredRuntime(context.Background(), parent, runtimeTestName, identity)
 			if test.open {
 				if err != nil || recovered == nil {
+					releaseUnexpectedRecovered(recovered)
 					t.Fatalf("reachable residue rejected: recovered=%+v err=%v", recovered, err)
 				}
 				if err := recovered.Close(); err != nil {
@@ -409,6 +426,7 @@ func TestRecoveredRuntimeCensusGrammar(t *testing.T) {
 				return
 			}
 			if !errors.Is(err, errInvalidContract) || recovered != nil {
+				releaseUnexpectedRecovered(recovered)
 				t.Fatalf("malformed residue accepted: recovered=%+v err=%v", recovered, err)
 			}
 			if after := snapshotRuntimeGraph(t, path); after != before {
@@ -480,6 +498,7 @@ func TestRecoveredResultArtifactSizeBound(t *testing.T) {
 			recovered, err := OpenRecoveredRuntime(context.Background(), parent, runtimeTestName, identity)
 			if test.open {
 				if err != nil || recovered == nil {
+					releaseUnexpectedRecovered(recovered)
 					t.Fatalf("bounded artifact rejected: recovered=%+v err=%v", recovered, err)
 				}
 				if err := recovered.Close(); err != nil {
@@ -488,6 +507,7 @@ func TestRecoveredResultArtifactSizeBound(t *testing.T) {
 				return
 			}
 			if !errors.Is(err, errInvalidContract) || recovered != nil {
+				releaseUnexpectedRecovered(recovered)
 				t.Fatalf("oversized artifact accepted: recovered=%+v err=%v", recovered, err)
 			}
 			if after := snapshotRuntimeGraph(t, path); after != before {
