@@ -47,7 +47,23 @@ func TestTerminalSessionActivationAndLiveCloseAreDurableTransitions(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.CloseActiveTerminalSession(context.Background(), finalizing.ID, keys.TerminalSessionID, finalizing.Revision, terminalSessionForRunTest(t, store, finalizing.ID).Revision, mustTime(t, 40)); !errors.Is(err, ErrConflict) {
+	buildResult := func(run Run) AttemptResult {
+		t.Helper()
+		resources := resourcesForRunTB(t, store, run.ID)
+		runtime := resourceOfKindTB(t, resources, ResourceRuntimeRoot)
+		provider := resourceOfKindTB(t, resources, ResourceProviderProcess)
+		exit, exitErr := NewAttemptResultExitCode(0)
+		if exitErr != nil {
+			t.Fatal(exitErr)
+		}
+		result, resultErr := NewInnerConvergedAttemptResult(run.ID, run.CredentialDigest, run.resultProofDigest, runtime.Identity, provider.Identity, exit)
+		if resultErr != nil {
+			t.Fatal(resultErr)
+		}
+		return result
+	}
+	early := buildResult(finalizing)
+	if _, _, err := store.CloseTerminalAfterRunner(context.Background(), early, finalizing.Revision, terminalSessionForRunTest(t, store, finalizing.ID).Revision, mustTime(t, 40)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("close before provider evidence = %v", err)
 	}
 	observeMissingProcessExits(t, store, finalizing.ID, 45)
@@ -57,6 +73,7 @@ func TestTerminalSessionActivationAndLiveCloseAreDurableTransitions(t *testing.T
 		t.Fatalf("finalizing run = %+v, found=%v, err=%v", fresh, found, err)
 	}
 	session := terminalSessionForRunTest(t, store, fresh.ID)
+	result := buildResult(fresh)
 	beforeRun := fresh
 	beforeFactory, err := store.Factory(context.Background())
 	if err != nil {
@@ -65,7 +82,7 @@ func TestTerminalSessionActivationAndLiveCloseAreDurableTransitions(t *testing.T
 	if _, err := store.writer.Exec(`CREATE TRIGGER suppress_terminal_invalidation_insert BEFORE INSERT ON invalidations BEGIN SELECT RAISE(IGNORE); END`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.CloseActiveTerminalSession(context.Background(), fresh.ID, session.ID, fresh.Revision, session.Revision, mustTime(t, 58)); !errors.Is(err, ErrRevisionConflict) {
+	if _, _, err := store.CloseTerminalAfterRunner(context.Background(), result, fresh.Revision, session.Revision, mustTime(t, 58)); !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("suppressed terminal invalidation = %v", err)
 	}
 	if _, err := store.writer.Exec(`DROP TRIGGER suppress_terminal_invalidation_insert`); err != nil {
@@ -85,7 +102,7 @@ func TestTerminalSessionActivationAndLiveCloseAreDurableTransitions(t *testing.T
 	if _, err := store.writer.Exec(`CREATE TRIGGER suppress_terminal_session_update BEFORE UPDATE ON terminal_sessions BEGIN SELECT RAISE(IGNORE); END`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.CloseActiveTerminalSession(context.Background(), fresh.ID, session.ID, fresh.Revision, session.Revision, mustTime(t, 59)); !errors.Is(err, ErrRevisionConflict) {
+	if _, _, err := store.CloseTerminalAfterRunner(context.Background(), result, fresh.Revision, session.Revision, mustTime(t, 59)); !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("suppressed terminal close update = %v", err)
 	}
 	if _, err := store.writer.Exec(`DROP TRIGGER suppress_terminal_session_update`); err != nil {
@@ -102,7 +119,7 @@ func TestTerminalSessionActivationAndLiveCloseAreDurableTransitions(t *testing.T
 	if unchanged.Revision != beforeRun.Revision || unchangedFactory.Head != beforeFactory.Head {
 		t.Fatalf("suppressed terminal close changed authority: run %d -> %d, head %d -> %d", beforeRun.Revision.Int64(), unchanged.Revision.Int64(), beforeFactory.Head.Int64(), unchangedFactory.Head.Int64())
 	}
-	closed, err := store.CloseActiveTerminalSession(context.Background(), fresh.ID, session.ID, fresh.Revision, session.Revision, mustTime(t, 60))
+	_, closed, err := store.CloseTerminalAfterRunner(context.Background(), result, fresh.Revision, session.Revision, mustTime(t, 60))
 	if err != nil || closed.State != TerminalSessionClosed || closed.Revision.Int64() != session.Revision.Int64()+1 {
 		t.Fatalf("closed session = %+v, err=%v", closed, err)
 	}
@@ -114,12 +131,9 @@ func TestTerminalSessionActivationAndLiveCloseAreDurableTransitions(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	replay, err := store.CloseActiveTerminalSession(context.Background(), fresh.ID, session.ID, fresh.Revision, session.Revision, mustTime(t, 60))
-	if err != nil || replay.ID != closed.ID || replay.Revision != closed.Revision || replay.State != closed.State {
+	replayRun, replay, err := store.CloseTerminalAfterRunner(context.Background(), result, fresh.Revision, session.Revision, mustTime(t, 60))
+	if err != nil || replayRun.Revision != before.Revision || replay.ID != closed.ID || replay.Revision != closed.Revision || replay.State != closed.State {
 		t.Fatalf("duplicate close replay = %+v, err=%v", replay, err)
-	}
-	if _, err := store.CloseDeclaredTerminalSession(context.Background(), fresh.ID, session.ID, fresh.Revision, session.Revision, mustTime(t, 60)); !errors.Is(err, ErrRevisionConflict) {
-		t.Fatalf("active close replayed through declared method = %v", err)
 	}
 	after, _, err := store.Run(context.Background(), fresh.ID)
 	if err != nil {
@@ -137,8 +151,8 @@ func TestTerminalSessionActivationAndLiveCloseAreDurableTransitions(t *testing.T
 	if err != nil || terminal.Phase != RunTerminal {
 		t.Fatalf("terminal run = %+v, err=%v", terminal, err)
 	}
-	if _, err := store.CloseActiveTerminalSession(context.Background(), fresh.ID, session.ID, current.Revision, closed.Revision, mustTime(t, 71)); !errors.Is(err, ErrRevisionConflict) {
-		t.Fatalf("duplicate close = %v", err)
+	if _, _, err := store.CloseTerminalAfterRunner(context.Background(), result, current.Revision, closed.Revision, mustTime(t, 71)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("duplicate close after terminal = %v", err)
 	}
 }
 
@@ -178,157 +192,6 @@ func TestTerminalSessionUnresolvedCannotTerminalize(t *testing.T) {
 	}
 	if _, err := reopenedStore.FinalizeRun(context.Background(), run.ID, current.Revision, mustTime(t, 50)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("unresolved terminalization = %v", err)
-	}
-}
-
-func TestRecoveredActiveTerminalCloseRequiresReleasedExactOwners(t *testing.T) {
-	tests := []struct {
-		name         string
-		providerExit string
-		runnerExit   string
-	}{
-		{name: "provider code runner absence", providerExit: "code", runnerExit: "absence"},
-		{name: "provider absence runner code", providerExit: "absence", runnerExit: "code"},
-		{name: "both absence", providerExit: "absence", runnerExit: "absence"},
-		{name: "both code", providerExit: "code", runnerExit: "code"},
-		{name: "provider signal runner absence", providerExit: "signal", runnerExit: "absence"},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			store, run, keys := runningOrchestratorRun(t)
-			defer store.Close()
-			proposal, _ := NewFailureProposal(FailureInternal, "restart")
-			current, err := store.ProposeAttemptOutcome(context.Background(), keys.AttemptDigest, proposal, mustTime(t, 40))
-			if err != nil {
-				t.Fatal(err)
-			}
-			providerExit := recoveredCloseExit(t, test.providerExit, 1, 41)
-			current, err = store.ObserveProviderExit(context.Background(), run.ID, current.Revision, registeredProcessIdentity(t, store, run.ID, ResourceProviderProcess), providerExit, mustTime(t, 41))
-			if err != nil {
-				t.Fatal(err)
-			}
-			session := terminalSessionForRunTest(t, store, run.ID)
-			if _, err := store.CloseRecoveredActiveTerminalSession(context.Background(), run.ID, session.ID, current.Revision, session.Revision, mustTime(t, 43)); !errors.Is(err, ErrRevisionConflict) {
-				t.Fatalf("active session recovered close = %v", err)
-			}
-			unresolved, err := store.MarkTerminalSessionUnresolved(context.Background(), run.ID, session.ID, current.Revision, session.Revision, "restart", mustTime(t, 43))
-			if err != nil {
-				t.Fatal(err)
-			}
-			current, _, err = store.Run(context.Background(), run.ID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := store.CloseRecoveredActiveTerminalSession(context.Background(), run.ID, session.ID, current.Revision, unresolved.Revision, mustTime(t, 44)); !errors.Is(err, ErrConflict) {
-				t.Fatalf("exit rows without released resources = %v", err)
-			}
-			resources := resourcesForRunTest(t, store, run.ID)
-			process := resourceOfKind(t, resources, ResourceProviderProcess)
-			group := resourceOfKind(t, resources, ResourceProviderGroup)
-			current, _, _, err = store.ReleaseProviderResources(context.Background(), run.ID, process.ID, group.ID, current.Revision, process.Revision, group.Revision, process.Identity, mustTime(t, 50))
-			if err != nil {
-				t.Fatal(err)
-			}
-			runner := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
-			if test.runnerExit == "absence" {
-				current, _, err = store.RecordRecoveredRunnerAbsence(context.Background(), run.ID, runner.ID, current.Revision, runner.Revision, runner.Identity, mustTime(t, 51))
-			} else {
-				current, _, err = store.RecordLiveRunnerExitAndRelease(context.Background(), run.ID, runner.ID, current.Revision, runner.Revision, runner.Identity, recoveredCloseExit(t, test.runnerExit, 1, 51), mustTime(t, 51))
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			runtime := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
-			if _, err := store.ReleaseResource(context.Background(), run.ID, runtime.ID, runtime.Revision, runtime.Identity, mustTime(t, 52)); err != nil {
-				t.Fatal(err)
-			}
-			current, _, err = store.Run(context.Background(), run.ID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			session = terminalSessionForRunTest(t, store, run.ID)
-			if _, err := store.CloseRecoveredTerminalSession(context.Background(), run.ID, session.ID, current.Revision, session.Revision, mustTime(t, 59)); !errors.Is(err, ErrRevisionConflict) {
-				t.Fatalf("activated recovery used pre-activation close = %v", err)
-			}
-			closed, err := store.CloseRecoveredActiveTerminalSession(context.Background(), run.ID, session.ID, current.Revision, session.Revision, mustTime(t, 60))
-			if err != nil || closed.State != TerminalSessionClosed {
-				t.Fatalf("mixed recovered close = %+v, %v", closed, err)
-			}
-			replayed, err := store.CloseRecoveredActiveTerminalSession(context.Background(), run.ID, session.ID, current.Revision, session.Revision, mustTime(t, 60))
-			if err != nil || replayed.Revision != closed.Revision {
-				t.Fatalf("mixed recovered close replay = %+v, %v", replayed, err)
-			}
-			if _, err := store.CloseRecoveredTerminalSession(context.Background(), run.ID, session.ID, current.Revision, session.Revision, mustTime(t, 60)); !errors.Is(err, ErrRevisionConflict) {
-				t.Fatalf("active recovery close replayed through preactivation method = %v", err)
-			}
-			current, _, err = store.Run(context.Background(), run.ID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			terminal, err := store.FinalizeRun(context.Background(), run.ID, current.Revision, mustTime(t, 70))
-			if err != nil || terminal.Phase != RunTerminal {
-				t.Fatalf("mixed recovered finalization = %+v, %v", terminal, err)
-			}
-		})
-	}
-}
-
-func TestRecoveredActiveTerminalCloseRequiresResetLeaseAndInput(t *testing.T) {
-	store, run, keys := runningOrchestratorRun(t)
-	defer store.Close()
-	session := terminalSessionForRunTest(t, store, run.ID)
-	boot := browserTestBoot(t, 241)
-	client := pairBrowserClient(t, store, mintBrowserChallenge(t, store, 241, boot, 30, 100, BrowserCapabilityObserve|BrowserCapabilityTerminalInput), boot, browserTestID(t, 241), browserKey(t), 31)
-	lease, err := store.AcquireTerminalLease(context.Background(), run.ID, session.ID, client.ID, run.Revision, session.Revision, mustTime(t, 31))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.ReserveTerminalInputSequence(context.Background(), run.ID, session.ID, client.ID, lease.Generation, 1, run.Revision, session.Revision, mustTime(t, 32)); err != nil {
-		t.Fatal(err)
-	}
-	proposal, _ := NewFailureProposal(FailureInternal, "restart")
-	current, err := store.ProposeAttemptOutcome(context.Background(), keys.AttemptDigest, proposal, mustTime(t, 40))
-	if err != nil {
-		t.Fatal(err)
-	}
-	providerExit := recoveredCloseExit(t, "code", 1, 41)
-	current, err = store.ObserveProviderExit(context.Background(), run.ID, current.Revision, registeredProcessIdentity(t, store, run.ID, ResourceProviderProcess), providerExit, mustTime(t, 41))
-	if err != nil {
-		t.Fatal(err)
-	}
-	absentRunner := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
-	current, _, err = store.RecordRecoveredRunnerAbsence(context.Background(), run.ID, absentRunner.ID, current.Revision, absentRunner.Revision, absentRunner.Identity, mustTime(t, 42))
-	if err != nil {
-		t.Fatal(err)
-	}
-	session = terminalSessionForRunTest(t, store, run.ID)
-	if _, err := store.MarkTerminalSessionUnresolved(context.Background(), run.ID, session.ID, current.Revision, session.Revision, "restart", mustTime(t, 43)); err != nil {
-		t.Fatal(err)
-	}
-	releaseAllRunResources(t, store, run.ID, 50)
-	current, _, err = store.Run(context.Background(), run.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	session = terminalSessionForRunTest(t, store, run.ID)
-	if session.LeaseClientID != nil || session.LeaseExpiresAt != nil || session.LastInputSequence != 0 {
-		t.Fatalf("finalizing retained terminal authority: %+v", session)
-	}
-	resources := resourcesForRunTest(t, store, run.ID)
-	leased := session
-	leased.LeaseClientID = &client.ID
-	expires := mustTime(t, 80)
-	leased.LeaseExpiresAt = &expires
-	if err := recoveredActiveTerminalSessionCloseEvidence(current, resources, leased); !errors.Is(err, ErrConflict) {
-		t.Fatalf("lease survived evidence guard = %v", err)
-	}
-	input := session
-	input.LastInputSequence = 1
-	if err := recoveredActiveTerminalSessionCloseEvidence(current, resources, input); !errors.Is(err, ErrConflict) {
-		t.Fatalf("input survived evidence guard = %v", err)
-	}
-	if _, err := store.CloseRecoveredActiveTerminalSession(context.Background(), run.ID, session.ID, current.Revision, session.Revision, mustTime(t, 61)); err != nil {
-		t.Fatalf("close after finalizing authority reset = %v", err)
 	}
 }
 

@@ -40,7 +40,7 @@ func TestDeclaredResourcesRejectHiddenIdentityAndRecoveredAbsenceAuthority(t *te
 				t.Fatalf("run with corrupt declared resource = %v", err)
 			}
 			before := captureWriteFootprint(t, store)
-			if _, err := store.RecordRecoveredPreExecRunnerAbsence(context.Background(), run.ID, runnerID, run.Revision, mustRevision(t, 1), processIdentity(t, 91), mustTime(t, 21)); !errors.Is(err, ErrCorruptState) {
+			if _, err := store.RecordRecoveredPreSessionRunnerAbsence(context.Background(), run.ID, runnerID, run.Revision, mustRevision(t, 1), processIdentity(t, 91), mustTime(t, 21)); !errors.Is(err, ErrCorruptState) {
 				store.Close()
 				t.Fatalf("recovered absence over corrupt declared resource = %v", err)
 			}

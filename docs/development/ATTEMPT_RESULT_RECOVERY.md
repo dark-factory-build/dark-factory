@@ -55,7 +55,7 @@ marker, A=artifact, L=lease available.
   through pre-ActivateRunner death, including a blocked gate child that
   died un-exec'd.
 - **B. R=active(bound), P=declared, no O, no A, L, positive runner
-  absence** → `RecordRecoveredPreExecRunnerAbsence`. Cut: ActivateRunner
+  absence** → `RecordRecoveredPreSessionRunnerAbsence`. Cut: ActivateRunner
   committed, daemon died before marker creation; the orphaned blocked
   child exits when the activation pipe closes.
 - **C1. R=active, P=declared, O present, I absent, no A, L, positive
@@ -90,7 +90,7 @@ marker, A=artifact, L=lease available.
   invented absence, not a timeout that fabricates failure.
 
 **Sweep ordering rule (binding):** always attempt result authentication
-BEFORE any absence edge. Firing `RecordRecoveredPreExecRunnerAbsence`
+BEFORE any absence edge. Firing `RecordRecoveredPreSessionRunnerAbsence`
 while a result artifact exists finalizes FailureActivation and then
 `AuthorizeAttemptResultRemoval` refuses forever (orphan file, no false
 exit) — fail-closed but stuck; the ordering rule prevents entering that
@@ -154,7 +154,7 @@ state.
   ObserveRunnerExit) migrate to the exact edges: BeginRunnerStart →
   ActivateRunner → ActivateProviderResources; failures via FailRun /
   FailRunWithRuntimeAbsent; runner exits via RecordLiveRunnerExitAndRelease
-  / RecordRecoveredRunnerAbsence; the unregistered/pre-exec edges where
+  / RecordRecoveredRunnerAbsence; the unregistered/pre-session edges where
   the old paths conflated them.
 - After migration, per review conditions: delete the ObserveRunnerExit
   stub and the dead runner arm of observeProcessExit, the now-unproducible
@@ -162,11 +162,11 @@ state.
   resultDerivedTerminalClose (same-millisecond fingerprint wedge).
 - Checkpoint ALLOW conditions resolved here: `go build ./...` restored;
   full `go test ./...` green.
-- Deferred with reasons: the legacy terminal-close methods and
-  resultDerivedTerminalClose now have zero production callers but remain
-  load-bearing for kernel tests of no-result histories; their deletion
-  drags a multi-file kernel test migration and is left for the simplicity
-  audit with the wedge no longer reachable from production code.
+- Done in the simplicity audit (ff0ca005): the legacy terminal-close
+  methods and resultDerivedTerminalClose are deleted; kernel test
+  fixtures now close sessions by reconstructing the run's exact
+  AttemptResult through CloseTerminalAfterRunner, and no-result histories
+  are pinned as deliberately non-terminal.
 
 ## Built in the activation phase (factoryd)
 

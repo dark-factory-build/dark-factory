@@ -516,15 +516,11 @@ func TestLiveRunnerExitReleaseAndResultCloseAreExact(t *testing.T) {
 	if err != nil || replay.Revision != afterExit.Revision || replayedRunner.Revision != released.Revision || afterReplay.Head != after.Head {
 		t.Fatalf("live exit replay = run %+v runner %+v head=%d/%d err=%v", replay, replayedRunner, after.Head.Int64(), afterReplay.Head.Int64(), err)
 	}
-	if _, err := store.CloseActiveTerminalSession(ctx, run.ID, session.ID, afterExit.Revision, session.Revision, mustTime(t, 32)); !errors.Is(err, ErrConflict) {
-		t.Fatalf("legacy close bypassed result authority = %v", err)
-	}
+	// The legacy generic close authority no longer exists to attack: the
+	// exact result reauthentication below is the only close edge.
 	closedRun, closed, err := store.CloseTerminalAfterRunner(ctx, result, afterExit.Revision, session.Revision, mustTime(t, 32))
 	if err != nil || closed.State != TerminalSessionClosed {
 		t.Fatalf("exact result close = run %+v session %+v err=%v", closedRun, closed, err)
-	}
-	if _, err := store.CloseActiveTerminalSession(ctx, run.ID, session.ID, afterExit.Revision, session.Revision, mustTime(t, 99)); !errors.Is(err, ErrConflict) {
-		t.Fatalf("legacy close replay bypassed result authority = %v", err)
 	}
 }
 
@@ -564,7 +560,7 @@ func TestAttemptResultPhaseGuardRejectsUnknownAndTerminal(t *testing.T) {
 	}
 }
 
-func TestRecoveredPreExecRunnerAbsenceFinalizesExactly(t *testing.T) {
+func TestRecoveredPreSessionRunnerAbsenceFinalizesExactly(t *testing.T) {
 	store, run, keys := admittedOrchestratorRun(t)
 	defer func() { _ = store.Close() }()
 	path := storeTestPath(t, store)
@@ -572,10 +568,10 @@ func TestRecoveredPreExecRunnerAbsenceFinalizesExactly(t *testing.T) {
 	run, _, runnerIdentity := activateStartedRunner(t, store, run, 2200)
 	runner := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
 	before, _ := store.Factory(ctx)
-	settled, err := store.RecordRecoveredPreExecRunnerAbsence(ctx, run.ID, runner.ID, run.Revision, runner.Revision, runnerIdentity, mustTime(t, 30))
+	settled, err := store.RecordRecoveredPreSessionRunnerAbsence(ctx, run.ID, runner.ID, run.Revision, runner.Revision, runnerIdentity, mustTime(t, 30))
 	if err != nil || settled.Phase != RunFinalizing || settled.Proposal == nil || settled.Proposal.code != FailureActivation ||
 		settled.ProviderExit != nil || settled.RunnerExit == nil || !settled.RunnerExit.RecoveredAbsence() || settled.CredentialRevokedAt == nil {
-		t.Fatalf("pre-exec absence settlement = %+v err=%v", settled, err)
+		t.Fatalf("pre-session absence settlement = %+v err=%v", settled, err)
 	}
 	resources := resourcesForRunTest(t, store, run.ID)
 	released := resourceOfKind(t, resources, ResourceRunnerProcess)
@@ -583,19 +579,19 @@ func TestRecoveredPreExecRunnerAbsenceFinalizesExactly(t *testing.T) {
 		released.State != ResourceReleased || !resourceIdentityEqual(released.Identity, runnerIdentity) ||
 		resourceOfKind(t, resources, ResourceProviderProcess).State != ResourceReleased || !resourceOfKind(t, resources, ResourceProviderProcess).Identity.Empty() ||
 		resourceOfKind(t, resources, ResourceProviderGroup).State != ResourceReleased || !resourceOfKind(t, resources, ResourceProviderGroup).Identity.Empty() {
-		t.Fatalf("pre-exec absence footprint = %+v", resources)
+		t.Fatalf("pre-session absence footprint = %+v", resources)
 	}
 	if session := terminalSessionForRunTest(t, store, run.ID); session.State != TerminalSessionClosed || session.ActivatedAt != nil {
-		t.Fatalf("pre-exec absence terminal = %+v", session)
+		t.Fatalf("pre-session absence terminal = %+v", session)
 	}
 	after, _ := store.Factory(ctx)
 	if after.Head.Int64() != before.Head.Int64()+1 {
-		t.Fatalf("pre-exec absence invalidation head = %d -> %d", before.Head.Int64(), after.Head.Int64())
+		t.Fatalf("pre-session absence invalidation head = %d -> %d", before.Head.Int64(), after.Head.Int64())
 	}
-	replay, err := store.RecordRecoveredPreExecRunnerAbsence(ctx, run.ID, runner.ID, run.Revision, runner.Revision, runnerIdentity, mustTime(t, 90))
+	replay, err := store.RecordRecoveredPreSessionRunnerAbsence(ctx, run.ID, runner.ID, run.Revision, runner.Revision, runnerIdentity, mustTime(t, 90))
 	afterReplay, _ := store.Factory(ctx)
 	if err != nil || replay.Revision != settled.Revision || afterReplay.Head != after.Head {
-		t.Fatalf("pre-exec absence replay = %+v head=%d/%d err=%v", replay, after.Head.Int64(), afterReplay.Head.Int64(), err)
+		t.Fatalf("pre-session absence replay = %+v head=%d/%d err=%v", replay, after.Head.Int64(), afterReplay.Head.Int64(), err)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
@@ -607,10 +603,10 @@ func TestRecoveredPreExecRunnerAbsenceFinalizesExactly(t *testing.T) {
 	store = reopened
 	durable, found, err := store.Run(ctx, run.ID)
 	if err != nil || !found || durable.Phase != RunFinalizing || durable.RunnerExit == nil || !durable.RunnerExit.RecoveredAbsence() || durable.Proposal == nil || durable.Proposal.code != FailureActivation {
-		t.Fatalf("reopened pre-exec absence = %+v found=%v err=%v", durable, found, err)
+		t.Fatalf("reopened pre-session absence = %+v found=%v err=%v", durable, found, err)
 	}
 	if _, err := store.AuthenticateAttempt(ctx, keys.AttemptDigest); !errors.Is(err, ErrUnauthorized) {
-		t.Fatalf("pre-exec absence retained attempt credential = %v", err)
+		t.Fatalf("pre-session absence retained attempt credential = %v", err)
 	}
 	runtime := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
 	if _, err := store.ReleaseResource(ctx, run.ID, runtime.ID, runtime.Revision, runtime.Identity, mustTime(t, 95)); err != nil {
@@ -622,11 +618,11 @@ func TestRecoveredPreExecRunnerAbsenceFinalizesExactly(t *testing.T) {
 	}
 	terminal, err := store.FinalizeRun(ctx, run.ID, durable.Revision, mustTime(t, 96))
 	if err != nil || terminal.Phase != RunTerminal || terminal.Terminal == nil || terminal.Terminal.code != FailureActivation {
-		t.Fatalf("pre-exec absence terminalization = %+v err=%v", terminal, err)
+		t.Fatalf("pre-session absence terminalization = %+v err=%v", terminal, err)
 	}
 }
 
-func TestRecoveredPreExecRunnerAbsenceFailsClosed(t *testing.T) {
+func TestRecoveredPreSessionRunnerAbsenceFailsClosed(t *testing.T) {
 	t.Run("identity and phase guards", func(t *testing.T) {
 		store, run, keys := admittedOrchestratorRun(t)
 		defer store.Close()
@@ -634,16 +630,16 @@ func TestRecoveredPreExecRunnerAbsenceFailsClosed(t *testing.T) {
 		run, runtimeIdentity, runnerIdentity := activateStartedRunner(t, store, run, 2300)
 		runner := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
 		before, _ := store.Factory(ctx)
-		if _, err := store.RecordRecoveredPreExecRunnerAbsence(ctx, run.ID, runner.ID, run.Revision, runner.Revision, processIdentity(t, 2399), mustTime(t, 30)); !errors.Is(err, ErrConflict) {
+		if _, err := store.RecordRecoveredPreSessionRunnerAbsence(ctx, run.ID, runner.ID, run.Revision, runner.Revision, processIdentity(t, 2399), mustTime(t, 30)); !errors.Is(err, ErrConflict) {
 			t.Fatalf("wrong identity = %v", err)
 		}
-		if _, err := store.RecordRecoveredPreExecRunnerAbsence(ctx, run.ID, runner.ID, mustRevision(t, run.Revision.Int64()+5), runner.Revision, runnerIdentity, mustTime(t, 30)); !errors.Is(err, ErrConflict) {
+		if _, err := store.RecordRecoveredPreSessionRunnerAbsence(ctx, run.ID, runner.ID, mustRevision(t, run.Revision.Int64()+5), runner.Revision, runnerIdentity, mustTime(t, 30)); !errors.Is(err, ErrConflict) {
 			t.Fatalf("wrong run revision = %v", err)
 		}
-		if _, err := store.RecordRecoveredPreExecRunnerAbsence(ctx, run.ID, runner.ID, run.Revision, mustRevision(t, runner.Revision.Int64()+5), runnerIdentity, mustTime(t, 30)); !errors.Is(err, ErrConflict) {
+		if _, err := store.RecordRecoveredPreSessionRunnerAbsence(ctx, run.ID, runner.ID, run.Revision, mustRevision(t, runner.Revision.Int64()+5), runnerIdentity, mustTime(t, 30)); !errors.Is(err, ErrConflict) {
 			t.Fatalf("wrong runner revision = %v", err)
 		}
-		if _, err := store.RecordRecoveredPreExecRunnerAbsence(ctx, run.ID, runner.ID, run.Revision, runner.Revision, runnerIdentity, mustTime(t, 1)); !errors.Is(err, ErrConflict) {
+		if _, err := store.RecordRecoveredPreSessionRunnerAbsence(ctx, run.ID, runner.ID, run.Revision, runner.Revision, runnerIdentity, mustTime(t, 1)); !errors.Is(err, ErrConflict) {
 			t.Fatalf("time regression = %v", err)
 		}
 		result, _ := NewInnerUnregisteredConvergedAttemptResult(run.ID, keys.AttemptDigest, keys.ResultProofDigest, runtimeIdentity)
@@ -651,8 +647,8 @@ func TestRecoveredPreExecRunnerAbsenceFailsClosed(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := store.RecordRecoveredPreExecRunnerAbsence(ctx, run.ID, runner.ID, consumed.Revision, runner.Revision, runnerIdentity, mustTime(t, 32)); !errors.Is(err, ErrConflict) {
-			t.Fatalf("finalizing run accepted pre-exec absence = %v", err)
+		if _, err := store.RecordRecoveredPreSessionRunnerAbsence(ctx, run.ID, runner.ID, consumed.Revision, runner.Revision, runnerIdentity, mustTime(t, 32)); !errors.Is(err, ErrConflict) {
+			t.Fatalf("finalizing run accepted pre-session absence = %v", err)
 		}
 		after, _ := store.Factory(ctx)
 		if after.Head.Int64() != before.Head.Int64()+1 {
@@ -674,7 +670,7 @@ func TestRecoveredPreExecRunnerAbsenceFailsClosed(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := store.RecordRecoveredPreExecRunnerAbsence(ctx, run.ID, runner.ID, started.Revision, starting.Revision, processIdentity(t, 2402), mustTime(t, 22)); !errors.Is(err, ErrConflict) {
+		if _, err := store.RecordRecoveredPreSessionRunnerAbsence(ctx, run.ID, runner.ID, started.Revision, starting.Revision, processIdentity(t, 2402), mustTime(t, 22)); !errors.Is(err, ErrConflict) {
 			t.Fatalf("starting runner accepted absence = %v", err)
 		}
 	})
@@ -684,7 +680,7 @@ func TestRecoveredPreExecRunnerAbsenceFailsClosed(t *testing.T) {
 		defer store.Close()
 		ctx := context.Background()
 		runner := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
-		if _, err := store.RecordRecoveredPreExecRunnerAbsence(ctx, run.ID, runner.ID, run.Revision, runner.Revision, runner.Identity, mustTime(t, 30)); !errors.Is(err, ErrConflict) {
+		if _, err := store.RecordRecoveredPreSessionRunnerAbsence(ctx, run.ID, runner.ID, run.Revision, runner.Revision, runner.Identity, mustTime(t, 30)); !errors.Is(err, ErrConflict) {
 			t.Fatalf("activated provider pair accepted = %v", err)
 		}
 	})
@@ -697,7 +693,7 @@ func TestRecoveredPreExecRunnerAbsenceFailsClosed(t *testing.T) {
 		process := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceProviderProcess)
 		corruptSQL(t, store, `UPDATE resources SET state = 'released', released_at_ms = updated_at_ms WHERE id = ?`, process.ID.Bytes())
 		runner := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRunnerProcess)
-		if _, err := store.RecordRecoveredPreExecRunnerAbsence(ctx, run.ID, runner.ID, run.Revision, runner.Revision, runnerIdentity, mustTime(t, 30)); err == nil {
+		if _, err := store.RecordRecoveredPreSessionRunnerAbsence(ctx, run.ID, runner.ID, run.Revision, runner.Revision, runnerIdentity, mustTime(t, 30)); err == nil {
 			t.Fatal("split provider pair accepted")
 		}
 		var phase, runnerState string

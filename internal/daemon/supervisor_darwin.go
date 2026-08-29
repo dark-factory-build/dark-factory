@@ -1128,14 +1128,14 @@ func (daemon *Daemon) convergeActivatedRunner(run kernel.Run, owner *supervisorA
 			lastErr = clockErr
 			continue
 		}
-		converged, absenceErr := daemon.store.RecordRecoveredPreExecRunnerAbsence(storeCtx, run.ID, runnerID, current.Revision, resource.Revision, runnerIdentity, at)
+		converged, absenceErr := daemon.store.RecordRecoveredPreSessionRunnerAbsence(storeCtx, run.ID, runnerID, current.Revision, resource.Revision, runnerIdentity, at)
 		cancel()
 		if absenceErr == nil {
 			return converged, cause
 		}
 		lastErr = absenceErr
 	}
-	return kernel.Run{}, kernel.NewOutcomeUnknownError(fmt.Errorf("daemon: pre-exec runner absence: %w", errors.Join(cause, lastErr)))
+	return kernel.Run{}, kernel.NewOutcomeUnknownError(fmt.Errorf("daemon: pre-session runner absence: %w", errors.Join(cause, lastErr)))
 }
 
 func attemptResultPresent(dir *os.File) (bool, error) {

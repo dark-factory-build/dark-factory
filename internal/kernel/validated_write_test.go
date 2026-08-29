@@ -212,8 +212,8 @@ func TestEveryPublicMutationValidatesDurableGraphBeforeDecision(t *testing.T) {
 			_, err := store.RecordUnregisteredRunnerConverged(context.Background(), runID(t, 5), resourceID(t, 6), mustRevision(t, 1), mustRevision(t, 1), at)
 			return err
 		}},
-		{name: "RecordRecoveredPreExecRunnerAbsence", invoke: func(store *Store) error {
-			_, err := store.RecordRecoveredPreExecRunnerAbsence(context.Background(), runID(t, 5), resourceID(t, 6), mustRevision(t, 1), mustRevision(t, 1), processIdentity, at)
+		{name: "RecordRecoveredPreSessionRunnerAbsence", invoke: func(store *Store) error {
+			_, err := store.RecordRecoveredPreSessionRunnerAbsence(context.Background(), runID(t, 5), resourceID(t, 6), mustRevision(t, 1), mustRevision(t, 1), processIdentity, at)
 			return err
 		}},
 		{name: "RecordRecoveredRunnerAbsence", invoke: func(store *Store) error {

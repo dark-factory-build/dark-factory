@@ -117,7 +117,7 @@ func (home *OperationalHome) Runtimes() (MemberCapability, error) {
 
 // Changes returns the bound Changes-parent capability.
 func (home *OperationalHome) Changes() (MemberCapability, error) {
-	return home.memberCapability("changes")
+	return home.memberCapability(changesName)
 }
 
 // OpenStore activates the retained database authority exactly once. The
