@@ -1072,8 +1072,23 @@ func killRemainingGroup(leader Identity) error {
 	}
 }
 
+// testGroupSignalResult rewrites the exact group kill's reported errno for
+// package tests. The kill itself is never faked — only what the kernel is
+// taken to have reported — so the sole negated-PGID unix.Kill call stays
+// exactly where the per-member-signal AST guard can see it.
+var testGroupSignalResult func(error) error
+
+// testGroupCensus can inject a package-test-only census result while retaining
+// the real census as the default. It lets tests exercise transient syscall
+// errors without replacing the process-group authority they are proving.
+var testGroupCensus func(Identity) (ownedGroupCensus, error)
+
+// groupSignalSettle bounds how long a failed group signal re-samples the
+// census before deciding. It absorbs snapshot lag, never real liveness.
+const groupSignalSettle = 250 * time.Millisecond
+
 func signalOwnedGroup(leader Identity, signal unix.Signal) error {
-	census, err := censusOwnedGroup(leader)
+	census, err := censusForGroupSignal(leader)
 	if err != nil {
 		return err
 	}
@@ -1081,22 +1096,74 @@ func signalOwnedGroup(leader Identity, signal unix.Signal) error {
 		return nil
 	}
 	signalErr := unix.Kill(-leader.PGID, signal)
+	if testGroupSignalResult != nil {
+		signalErr = testGroupSignalResult(signalErr)
+	}
 	if signalErr == nil {
 		return nil
 	}
-	noLiveMembers := false
-	if errors.Is(signalErr, unix.ESRCH) {
-		census, err = censusOwnedGroup(leader)
+	// Re-census after ANY signal error: the census, not the errno, is the
+	// absence authority, and Darwin reports more than one errno for a group
+	// that has already converged.
+	//
+	// One sample is not proof. censusOwnedGroup reads a kern.proc.pgrp
+	// snapshot, which can still list a member the kernel's own killpg walk
+	// has already passed over — observed as EPERM answered by a census that
+	// still claims life. Re-sample within a bounded settle window; a group
+	// that is genuinely alive simply exhausts it and stays unresolved, and
+	// the caller re-signals.
+	deadline := time.Now().Add(groupSignalSettle)
+	for {
+		census, err = censusForGroupSignal(leader)
 		if err != nil {
+			if errors.Is(err, unix.EINTR) {
+				if !time.Now().Before(deadline) {
+					return classifyGroupSignal(signalErr, false)
+				}
+				time.Sleep(5 * time.Millisecond)
+				continue
+			}
 			return err
 		}
-		noLiveMembers = !census.hasLiveMember
+		if !census.hasLiveMember || !time.Now().Before(deadline) {
+			return classifyGroupSignal(signalErr, !census.hasLiveMember)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	return classifyGroupSignal(signalErr, noLiveMembers)
 }
 
+func censusForGroupSignal(leader Identity) (ownedGroupCensus, error) {
+	if testGroupCensus != nil {
+		return testGroupCensus(leader)
+	}
+	return censusOwnedGroup(leader)
+}
+
+// classifyGroupSignal forgives a failed group signal only when the exact
+// leader-anchored census proves no live member remains.
+//
+// signalOwnedGroup reaches the kill only after censusOwnedGroup proved this
+// exact leader (PID, PGID and birth) present and unreaped, and an unreaped
+// leader holds the pid that IS the process-group id — so on this path the
+// group provably exists and its id cannot have been recycled. Darwin's
+// observed vocabulary for that kill is: success while any live owned member
+// remains, and EPERM once our unreaped zombie leader is the only member
+// left. ESRCH is unreachable here, so refusing EPERM outright would refuse
+// the one errno the kernel actually uses for a converged group.
+//
+// The safety asymmetry that makes this sound: the census enumerates the
+// group through kern.proc.pgrp, which lists every member regardless of
+// whether we may signal it, and marks any non-zombie live. A live member we
+// merely lack permission to signal therefore leaves hasLiveMember true and
+// is never forgiven — the census is a strict superset of what the kernel's
+// killpg walk considers. Residual risk, unreproduced: a kill reporting EPERM
+// while the census still reports a live member stays fail-closed unresolved,
+// which is the safe direction.
 func classifyGroupSignal(signalErr error, exactCensusHasNoLiveMembers bool) error {
-	if signalErr == nil || errors.Is(signalErr, unix.ESRCH) && exactCensusHasNoLiveMembers {
+	if signalErr == nil {
+		return nil
+	}
+	if (errors.Is(signalErr, unix.ESRCH) || errors.Is(signalErr, unix.EPERM)) && exactCensusHasNoLiveMembers {
 		return nil
 	}
 	return fmt.Errorf("%w: group signal: %v", ErrUnresolved, signalErr)

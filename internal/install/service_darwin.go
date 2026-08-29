@@ -306,10 +306,10 @@ func (capability *serviceHomeCapability) recheck(ctx context.Context) error {
 		return err
 	}
 	var current, binding unix.Stat_t
-	if err := unix.Fstat(int(capability.home.Fd()), &current); err != nil || !sameServiceStat(capability.stat, current) {
+	if err := unix.Fstat(int(capability.home.Fd()), &current); err != nil || !sameServiceRootStat(capability.stat, current) {
 		return fmt.Errorf("%w: service home descriptor changed", ErrInvalidHome)
 	}
-	if err := unix.Fstatat(int(capability.parent.file.Fd()), capability.base, &binding, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameServiceStat(capability.stat, binding) {
+	if err := unix.Fstatat(int(capability.parent.file.Fd()), capability.base, &binding, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameServiceRootStat(capability.stat, binding) {
 		return fmt.Errorf("%w: service home binding changed", ErrInvalidHome)
 	}
 	image, err := snapshotServiceHome(ctx, capability.home)
@@ -370,9 +370,9 @@ func volatileServiceMember(name string) bool {
 	return name == databaseName || name == databaseName+"-wal" || name == databaseName+"-shm"
 }
 
-// reducedServiceIdentity strips the volatile stat dimensions (size, times,
-// link count driven by SQLite checkpointing) while keeping the identity that
-// detects replacement and authority changes.
+// reducedServiceIdentity strips volatile stat dimensions (size, times, and
+// link count driven by SQLite checkpointing or child entry churn) while
+// keeping the identity that detects replacement and authority changes.
 func reducedServiceIdentity(stat unix.Stat_t) serviceIdentity {
 	reduced := toServiceIdentity(stat)
 	reduced.identity.size = 0
@@ -381,8 +381,19 @@ func reducedServiceIdentity(stat unix.Stat_t) serviceIdentity {
 	return reduced
 }
 
-// sameServiceRootStat compares the home directory itself without the
-// dimensions its live members churn (size, mtime, ctime as entries change).
+// sameServiceRootStat compares a directory's identity and authority —
+// device, inode, mode, owner — without the fields unrelated sibling
+// activity legitimately churns (timestamps, size, link count as entries
+// come and go). Every directory recheck uses it; regular files keep the
+// full sameServiceStat comparison, where byte-stability is meaningful.
+//
+// Dropping Ctim costs one canary: a transient tamper that renames the
+// directory away, swaps a decoy in and renames the original back leaves a
+// later recheck clean, where the old comparison would have caught the
+// changed ctime afterwards. Detection inside the window is unaffected — the
+// swapped inode still fails the identity and binding probes — and ctime was
+// unusable as a tamper signal here precisely because it churns for the
+// legitimate reason this relaxation exists.
 func sameServiceRootStat(left, right unix.Stat_t) bool {
 	return left.Dev == right.Dev && left.Ino == right.Ino && left.Mode == right.Mode && left.Uid == right.Uid && left.Gid == right.Gid
 }
@@ -472,7 +483,7 @@ func snapshotServiceHome(ctx context.Context, home *os.File) (serviceHomeImage, 
 		if closeErr != nil {
 			return serviceHomeImage{}, closeErr
 		}
-		image.directories[name] = toServiceIdentity(stat)
+		image.directories[name] = reducedServiceIdentity(stat)
 	}
 	var rootAfter unix.Stat_t
 	if err := unix.Fstat(int(home.Fd()), &rootAfter); err != nil {
@@ -767,14 +778,14 @@ func (directory *serviceDirectory) recheck() error {
 		if err := unix.Fstat(int(file.Fd()), &current); err != nil {
 			return err
 		}
-		if !sameServiceStat(directory.stats[index], current) {
+		if !sameServiceRootStat(directory.stats[index], current) {
 			return errors.New("service directory identity changed")
 		}
 		if index == 0 {
 			continue
 		}
 		var binding unix.Stat_t
-		if err := unix.Fstatat(int(directory.files[index-1].Fd()), directory.names[index], &binding, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameServiceStat(directory.stats[index], binding) {
+		if err := unix.Fstatat(int(directory.files[index-1].Fd()), directory.names[index], &binding, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameServiceRootStat(directory.stats[index], binding) {
 			return errors.New("service directory binding changed")
 		}
 	}
@@ -909,7 +920,7 @@ func recheckServicePlistParents(userHome *serviceDirectory, bindings []servicePl
 		if err := unix.Fstatat(int(binding.parent.Fd()), binding.name, &bound, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 			return fmt.Errorf("%w: plist parent binding changed", ErrServicePlist)
 		}
-		if !sameServiceStat(binding.stat, current) || !sameServiceStat(binding.stat, bound) {
+		if !sameServiceRootStat(binding.stat, current) || !sameServiceRootStat(binding.stat, bound) {
 			return fmt.Errorf("%w: plist parent %s binding changed", ErrServicePlist, binding.name)
 		}
 	}

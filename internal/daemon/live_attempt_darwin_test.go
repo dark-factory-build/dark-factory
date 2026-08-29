@@ -6,10 +6,47 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
+	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
+
+func TestLiveAttemptAttachBeforeReadyIsTypedRetryable(t *testing.T) {
+	runID, sessionID := liveTestIDs(t, 11101)
+	attempt := newLiveAttempt(nil, runID, sessionID, nil)
+	attachment := &TerminalAttachment{queue: make(chan TerminalEvent, terminalSubscriberCap)}
+	revision, err := kernel.NewRevision(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The supervisor can commit session activation before this owner consumes
+	// the runner's ready frame. An attach in that window is early, not wrong:
+	// it must classify as retryable busyness on the wire, never internal.
+	if err := attempt.handleAttach(attachment, sessionID, revision, revision, 0); !errors.Is(err, ErrTerminalNotReady) {
+		t.Fatalf("attach before ready = %v", err)
+	}
+	if mapped := mapBrowserError(ErrTerminalNotReady); !errors.Is(mapped, browser.ErrRateLimited) {
+		t.Fatalf("not-ready wire mapping = %v", mapped)
+	}
+	// After the result is seen the attach window is over: the durable world
+	// moved past the pinned target, so the client re-resolves via the typed
+	// stale arm instead of retrying in place.
+	for _, readySeen := range []bool{false, true} {
+		attempt.readySeen = readySeen
+		attempt.resultSeen = true
+		if err := attempt.handleAttach(attachment, sessionID, revision, revision, 0); !errors.Is(err, kernel.ErrConflict) {
+			t.Fatalf("attach after result ready=%t = %v", readySeen, err)
+		}
+		if mapped := mapBrowserError(kernel.ErrConflict); !errors.Is(mapped, browser.ErrStale) {
+			t.Fatalf("post-result ready=%t wire mapping = %v", readySeen, mapped)
+		}
+	}
+	if len(attempt.subs) != 0 || len(attempt.correlations) != 0 {
+		t.Fatal("refused attaches changed subscribers")
+	}
+}
 
 func TestLiveAttemptGlobalResetAdvancesEveryObserverCursor(t *testing.T) {
 	runID, sessionID := liveTestIDs(t, 10006)
@@ -229,5 +266,79 @@ func TestLiveAttemptReplayPendingBytesAreBounded(t *testing.T) {
 	})
 	if _, present := attempt.subs[attachment]; present || !attachment.finished {
 		t.Fatal("subscriber survived pending byte overflow")
+	}
+}
+
+func TestLiveAttemptEffectTypingSeparatesNotReadyFromPublishedResult(t *testing.T) {
+	runID, sessionID := liveTestIDs(t, 11102)
+	controller, peer := readyTerminalEffectController(t)
+	attempt := newLiveAttempt(nil, runID, sessionID, controller)
+	t.Cleanup(func() {
+		_ = controller.Close()
+		_ = peer.Close()
+	})
+	effect := terminalEffect{kind: terminalEffectCheck}
+
+	// Before the runner's ready frame the window opens by itself, so the wire
+	// must type the refusal retryable — the same condition attach reports.
+	result, err := attempt.handleTerminalEffect(effect)
+	if err != nil || !errors.Is(result.err, ErrTerminalNotReady) {
+		t.Fatalf("pre-ready effect = %+v err=%v", result, err)
+	}
+	if mapped := mapBrowserError(result.err); !errors.Is(mapped, browser.ErrRateLimited) {
+		t.Fatalf("pre-ready wire mapping = %v", mapped)
+	}
+
+	// Once the result is published this effect can never succeed. Typing it
+	// retryable would invite a client to spin on a permanent condition, so it
+	// must reach the wire as stale and keep its terminal fence regardless of
+	// whether the runner's ready frame was consumed first.
+	for _, readySeen := range []bool{false, true} {
+		attempt.readySeen = readySeen
+		attempt.resultSeen = true
+		result, err = attempt.handleTerminalEffect(effect)
+		if err != nil || !errors.Is(result.err, kernel.ErrConflict) {
+			t.Fatalf("post-result ready=%t effect = %+v err=%v", readySeen, result, err)
+		}
+		if !result.terminalFence || result.status != runner.TerminalResultRejected {
+			t.Fatalf("post-result ready=%t effect lost its fence or status: %+v", readySeen, result)
+		}
+		mapped := mapBrowserError(result.err)
+		if !errors.Is(mapped, browser.ErrStale) || errors.Is(mapped, browser.ErrRateLimited) {
+			t.Fatalf("post-result ready=%t wire mapping = %v", readySeen, mapped)
+		}
+	}
+}
+
+func TestLiveAttemptPreReleaseEffectCompletesThroughOwnerMailbox(t *testing.T) {
+	runID, sessionID := liveTestIDs(t, 11103)
+	attempt := newLiveAttempt(nil, runID, sessionID, nil)
+	ownerContext, cancelOwner := context.WithCancel(context.Background())
+	ownerClosed := false
+	t.Cleanup(func() {
+		cancelOwner()
+		if ownerClosed {
+			return
+		}
+		select {
+		case <-attempt.done:
+		case <-time.After(100 * time.Millisecond):
+		}
+	})
+	startLiveAttempt(attempt, ownerContext)
+
+	done := make(chan terminalEffectResult, 1)
+	go func() {
+		done <- attempt.submitEffect(context.Background(), terminalEffect{kind: terminalEffectCheck})
+	}()
+	select {
+	case result := <-done:
+		if result.status != runner.TerminalResultRejected || !errors.Is(result.err, ErrTerminalNotReady) {
+			t.Fatalf("pre-release owner effect = %+v", result)
+		}
+		_ = attempt.close()
+		ownerClosed = true
+	case <-time.After(time.Second):
+		t.Fatal("pre-release owner effect remained blocked in the mailbox")
 	}
 }

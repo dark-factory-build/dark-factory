@@ -124,12 +124,24 @@ function terminalObserver(signals) {
 }
 
 async function openTerminal(client, agentId, signals, observer) {
-  const { session, target } = await resolveTarget(client, agentId, signals);
-  const handle = session.openTerminal(target, observer.options(observer.cursor));
-  const attached = await handle.attach();
-  assert.equal("kind" in attached, false, "retained cursor unexpectedly required a terminal reset");
-  assert.equal(attached.acknowledgedSequence, observer.cursor);
-  return { session, handle };
+  // A fresh run's terminal is durably active moments before the daemon's
+  // live owner is ready to serve attachments; the server types that window
+  // as retryable. Re-resolve and retry briefly; anything non-retryable
+  // still fails immediately.
+  for (let attempt = 0; ; attempt += 1) {
+    const { session, target } = await resolveTarget(client, agentId, signals);
+    const handle = session.openTerminal(target, observer.options(observer.cursor));
+    try {
+      const attached = await handle.attach();
+      assert.equal("kind" in attached, false, "retained cursor unexpectedly required a terminal reset");
+      assert.equal(attached.acknowledgedSequence, observer.cursor);
+      return { session, handle };
+    } catch (error) {
+      if (!(error instanceof SessionError) || error.retryable !== true || attempt >= 20) throw error;
+      await handle.detach().catch(() => {});
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
 }
 
 async function waitForHumanRequest(client, signals) {

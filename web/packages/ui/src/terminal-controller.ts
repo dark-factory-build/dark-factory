@@ -44,7 +44,21 @@ type TerminalControllerOptions = Readonly<{
   expectedHead: bigint;
   surface: TerminalSurface;
   onChange: (snapshot: TerminalControllerSnapshot) => void;
+  /** Test seam: awaited between retryable attach attempts. */
+  attachRetryDelay?: (attempt: number) => Promise<void>;
 }>;
+
+/**
+ * A fresh run's terminal can be observed active in durable state moments
+ * before the daemon's live owner is ready to serve attachments; the server
+ * types that window as retryable. Bounded, short: the window is
+ * milliseconds, and a non-retryable error still fails immediately.
+ */
+const ATTACH_RETRY_LIMIT = 5;
+
+function defaultAttachRetryDelay(attempt: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+}
 
 type Input = Uint8Array;
 type Resize = { rows: number; cols: number };
@@ -267,7 +281,20 @@ class TerminalController {
       this.#phase = "attaching";
       this.#publish();
       if (!this.#current(generation)) return;
-      const attached = await handle.attach();
+      let attached;
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          attached = await handle.attach();
+          break;
+        } catch (error: unknown) {
+          if (!this.#current(generation)) return;
+          const finite = finiteError(error);
+          const retryable = finite instanceof SessionError && finite.retryable === true;
+          if (!retryable || attempt >= ATTACH_RETRY_LIMIT) throw error;
+          await (this.#options.attachRetryDelay ?? defaultAttachRetryDelay)(attempt);
+          if (!this.#current(generation) || this.#handleClosed) return;
+        }
+      }
       if (!this.#current(generation)) return;
       if ("kind" in attached) {
         this.#reset = true;

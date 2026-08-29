@@ -28,6 +28,8 @@ function harness({
   closeOnOpen = false,
   closeOnAcquire = false,
   releaseBusy = 0,
+  attachImpl = undefined,
+  attachRetryDelay = undefined,
 } = {}) {
   const snapshots = [];
   const writes = [];
@@ -52,7 +54,11 @@ function harness({
   let surfaceAborts = 0;
   const closePending = (gate) => gate.reject(new SessionError("closed"));
   const handle = {
-    attach: () => { attachPending = true; return attachGate.promise; },
+    attach: () => {
+      if (attachImpl !== undefined) return attachImpl();
+      attachPending = true;
+      return attachGate.promise;
+    },
     acquireInput: () => {
       acquirePending = true;
       acquireCalls += 1;
@@ -124,6 +130,7 @@ function harness({
       },
     },
     onChange: (snapshot) => { snapshots.push(snapshot); onChange(snapshot); },
+    ...(attachRetryDelay === undefined ? {} : { attachRetryDelay }),
   });
   return {
     controller,
@@ -668,4 +675,61 @@ test("a busy pre-send release rejection is retryable and keeps control, not unce
   assert.equal(context.controller.snapshot.leaseOperation, "none");
   assert.equal(context.sessionCloses(), 0);
   await context.controller.close();
+});
+
+test("a retryable attach refusal is retried in place and converges", async () => {
+  // A fresh run's terminal can be durably active before the daemon's live
+  // owner is ready; the server types that window rate_limited/retryable.
+  let attachAttempts = 0;
+  const delays = [];
+  const context = harness({
+    attachRetryDelay: (attempt) => { delays.push(attempt); return Promise.resolve(); },
+    attachImpl: () => {
+      attachAttempts += 1;
+      if (attachAttempts === 1) return Promise.reject(new SessionError("rate_limited", true));
+      return Promise.resolve({ sessionId: "22".repeat(16), floor: 0n, head: 0n, acknowledgedSequence: 0n, maxUnackedBytes: 65536n });
+    },
+  });
+  context.controller.start();
+  await tick();
+  context.targetGate.resolve(target);
+  await tick();
+  await tick();
+  assert.equal(attachAttempts, 2, "one retryable refusal earns exactly one retry");
+  assert.deepEqual(delays, [0], "the delay seam is awaited between attempts");
+  assert.equal(context.snapshots.at(-1).phase, "acquiring");
+  context.acquireGate().resolve({ generation: 1n });
+  await tick();
+  assert.equal(context.controller.snapshot.phase, "ready");
+  assert.equal(context.controller.snapshot.error, undefined);
+  await context.controller.close();
+});
+
+test("attach retries are bounded and non-retryable attach errors fail immediately", async () => {
+  let boundedAttempts = 0;
+  const bounded = harness({
+    attachRetryDelay: () => Promise.resolve(),
+    attachImpl: () => { boundedAttempts += 1; return Promise.reject(new SessionError("rate_limited", true)); },
+  });
+  bounded.controller.start();
+  await tick();
+  bounded.targetGate.resolve(target);
+  for (let i = 0; i < 16; i += 1) await tick();
+  assert.equal(bounded.controller.snapshot.phase, "closed");
+  assert.equal(bounded.controller.snapshot.error.code, "rate_limited", "the bound surfaces the typed error, not a fabricated one");
+  assert.equal(boundedAttempts, 6, "initial attempt plus the bounded retries, then stop");
+
+  let fatalAttempts = 0;
+  const fatal = harness({
+    attachRetryDelay: () => Promise.resolve(),
+    attachImpl: () => { fatalAttempts += 1; return Promise.reject(new SessionError("internal")); },
+  });
+  fatal.controller.start();
+  await tick();
+  fatal.targetGate.resolve(target);
+  await tick();
+  await tick();
+  assert.equal(fatal.controller.snapshot.phase, "closed");
+  assert.equal(fatal.controller.snapshot.error.code, "internal");
+  assert.equal(fatalAttempts, 1, "a non-retryable refusal is never retried");
 });

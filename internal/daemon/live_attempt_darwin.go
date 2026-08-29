@@ -189,6 +189,14 @@ func (attempt *liveAttempt) handleBeforeRelease(ctx context.Context, command liv
 		err := attempt.shutdownController()
 		command.result <- err
 		return true, err
+	case liveCommandEffect:
+		// Effects answer on effectDone; the result channel is nil for them, so
+		// the shared arm below would block this owner forever. Before release
+		// the terminal is genuinely not serving yet — the retryable window.
+		if command.effectDone != nil {
+			command.effectDone <- terminalEffectResult{status: runner.TerminalResultRejected, err: ErrTerminalNotReady}
+		}
+		return false, nil
 	default:
 		err := ErrTerminalNotReady
 		command.result <- err
@@ -304,9 +312,6 @@ func (attempt *liveAttempt) handleRunningCommand(command liveAttemptCommand) (bo
 }
 
 func (attempt *liveAttempt) handleTerminalEffect(effect terminalEffect) (terminalEffectResult, error) {
-	if !attempt.readySeen || attempt.controller == nil {
-		return terminalEffectResult{status: runner.TerminalResultRejected, err: ErrTerminalNotReady}, nil
-	}
 	if attempt.resultSeen {
 		// A published result is already a stronger runner-input fence than a
 		// generation revoke. Cleanup may therefore converge durable state without
@@ -314,7 +319,13 @@ func (attempt *liveAttempt) handleTerminalEffect(effect terminalEffect) (termina
 		if effect.kind == terminalEffectRevoke || effect.kind == terminalEffectRevokeClient || effect.kind == terminalEffectRevokeCurrentBinding {
 			return terminalEffectResult{status: runner.TerminalResultOK, terminalFence: true}, nil
 		}
-		return terminalEffectResult{status: runner.TerminalResultRejected, terminalFence: true, err: ErrTerminalNotReady}, nil
+		// The result is published: this effect can never succeed. Conflict, so
+		// the wire types it stale — ErrTerminalNotReady means "not ready yet"
+		// everywhere, and only that condition is retryable.
+		return terminalEffectResult{status: runner.TerminalResultRejected, terminalFence: true, err: kernel.ErrConflict}, nil
+	}
+	if !attempt.readySeen || attempt.controller == nil {
+		return terminalEffectResult{status: runner.TerminalResultRejected, err: ErrTerminalNotReady}, nil
 	}
 	switch effect.kind {
 	case terminalEffectCheck:
@@ -717,7 +728,17 @@ func (attempt *liveAttempt) handleAttach(attachment *TerminalAttachment, session
 	// AttachTerminal holds the operation gate before this command enters the
 	// owner mailbox. An attach accepted before finalizing wins; one queued after
 	// the durable boundary reloads that state and is refused.
-	if !attempt.readySeen || attempt.resultSeen {
+	if attempt.resultSeen {
+		// The result is already in flight to the Store: the attach window is
+		// over and the durable world has moved past the client's pinned target.
+		// Conflict maps to the typed stale arm so the client re-resolves.
+		return kernel.ErrConflict
+	}
+	if !attempt.readySeen {
+		// The supervisor commits session activation from its own thread, so a
+		// client can observe an active session and attach before this owner has
+		// consumed the runner's ready frame. That attach is early, not wrong:
+		// it maps to the typed retryable arm, never to an internal error.
 		return ErrTerminalNotReady
 	}
 	if sessionID == (kernel.TerminalSessionID{}) || sessionID != attempt.sessionID {

@@ -6593,7 +6593,11 @@ Managed launchd service installation on 2026-08-29:
   confirmation waits out the transient within one bound). The service
   status census also no longer demands byte-stability of the SQLite
   members a live daemon legitimately rewrites; identity, bounds, member
-  census, and every durable member remain exact.
+  census, and every durable member remain exact. Service-root and live
+  `runtimes`/`changes` directory identities intentionally exclude ctime, size,
+  and link count because legitimate entry churn updates them; a transient
+  rename-away/decoy/rename-back after the recheck remains a residual blind
+  window, while in-window identity and binding checks still fail closed.
 - Review hardened the mutation ordering: uninstall is evidence-first — no
   mutating launchctl verb until a matching receipt or an exactly rendered
   plist proves the label maps to the named home (a wrong --home against
