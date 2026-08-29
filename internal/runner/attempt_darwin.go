@@ -895,13 +895,22 @@ func runAttempt(daemon, dir, lifetime *os.File, cfg attemptConfig) (result error
 	if err := writeControlFrame(daemon, attemptFrame{Version: 1, Kind: "inner-ready", Identity: child.Identity()}, maxFrameBytes); err != nil {
 		return finishAttemptFailure(child, dir, cfg, &reads, err)
 	}
-	frame, source, err := nextAttemptFrame(child, daemon, workerParent, true, true, 0)
+	frame, source, err := nextAttemptFrame(child, daemon, workerParent, true, true, nil, 0)
 	if err != nil || source != sourceDaemon || !validReleaseFrame(frame, StageSelection) {
 		return finishAttemptFailure(child, dir, cfg, &reads, protocolError("selection release", source, err))
 	}
 	if _, err := child.Activate(); err != nil {
 		return finishAttemptFailure(child, dir, cfg, &reads, err)
 	}
+	// The activated worker owns the PTY slave as stdin/stdout/stderr. Its
+	// output buffer is 1024 bytes, so the master must be read from this point
+	// on or a talkative worker blocks in write(2) and never exits.
+	retained := &terminalByteRing{}
+	reads.ptyFD = int(child.ptyMaster.Fd())
+	if err := reads.registerPTY(); err != nil {
+		return finishAttemptFailure(child, dir, cfg, &reads, err)
+	}
+	stagePTY := &ptyStageSink{fd: reads.ptyFD, ring: retained}
 	sequence := []struct {
 		report  AttemptStage
 		release AttemptStage
@@ -911,14 +920,14 @@ func runAttempt(daemon, dir, lifetime *os.File, cfg attemptConfig) (result error
 		{StagePopulation, StageProvider},
 	}
 	for _, step := range sequence {
-		frame, source, err = nextAttemptFrame(child, daemon, workerParent, true, true, 0)
+		frame, source, err = nextAttemptFrame(child, daemon, workerParent, true, true, stagePTY, 0)
 		if err != nil || source != sourceWorker || !validCheckpointFrame(frame, step.report) {
 			return finishAttemptFailure(child, dir, cfg, &reads, protocolError(string(step.report)+" report", source, err))
 		}
 		if err := writeControlFrame(daemon, frame, maxConfigBytes); err != nil {
 			return finishAttemptFailure(child, dir, cfg, &reads, err)
 		}
-		frame, source, err = nextAttemptFrame(child, daemon, workerParent, true, true, 0)
+		frame, source, err = nextAttemptFrame(child, daemon, workerParent, true, true, stagePTY, 0)
 		if err != nil || source != sourceDaemon || !validReleaseFrame(frame, step.release) {
 			return finishAttemptFailure(child, dir, cfg, &reads, protocolError(string(step.release)+" release", source, err))
 		}
@@ -926,8 +935,7 @@ func runAttempt(daemon, dir, lifetime *os.File, cfg attemptConfig) (result error
 			return finishAttemptFailure(child, dir, cfg, &reads, err)
 		}
 	}
-	reads.ptyFD = int(child.ptyMaster.Fd())
-	daemonOpen, err := runReleasedProvider(child, daemon, workerParent, &reads)
+	daemonOpen, err := runReleasedProvider(child, daemon, workerParent, &reads, stagePTY, retained)
 	return finishAttemptWithExit(child, dir, cfg, &reads, daemon, daemonOpen, err)
 }
 
@@ -1111,7 +1119,50 @@ func (reads *attemptReadSet) processOnly() error {
 	)
 }
 
-func nextAttemptFrame(child *OwnedChild, daemon, worker *os.File, daemonOpen, workerOpen bool, timeout time.Duration) (attemptFrame, attemptSource, error) {
+// ptyStageSink drains the runner-owned PTY master while the inner worker is
+// running but before the provider terminal loop owns it. The macOS PTY output
+// buffer is 1024 bytes: an inner worker that writes more than that to its
+// stdout/stderr blocks in write(2) forever unless the master is read, so it
+// would never exit and its NOTE_EXIT would never arrive. Retaining the bytes
+// here keeps them in the same order for the terminal stream that later
+// replays them.
+type ptyStageSink struct {
+	fd   int
+	ring *terminalByteRing
+}
+
+func (s *ptyStageSink) drain() error {
+	if s == nil || s.fd < 0 || s.ring == nil {
+		return ErrState
+	}
+	buf := make([]byte, 4096)
+	for {
+		n, err := unix.Read(s.fd, buf)
+		if n > 0 {
+			if appendErr := s.ring.Append(buf[:n]); appendErr != nil {
+				return appendErr
+			}
+		}
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if errors.Is(err, unix.EAGAIN) {
+			return nil
+		}
+		if err != nil {
+			// EIO is the ordinary macOS master read after every slave closed.
+			if errors.Is(err, unix.EIO) {
+				return nil
+			}
+			return err
+		}
+		if n == 0 {
+			return nil
+		}
+	}
+}
+
+func nextAttemptFrame(child *OwnedChild, daemon, worker *os.File, daemonOpen, workerOpen bool, pty *ptyStageSink, timeout time.Duration) (attemptFrame, attemptSource, error) {
 	for {
 		events := make([]unix.Kevent_t, 1)
 		var ts *unix.Timespec
@@ -1146,6 +1197,11 @@ func nextAttemptFrame(child *OwnedChild, daemon, worker *os.File, daemonOpen, wo
 			file, source = daemon, sourceDaemon
 		case workerOpen && ev.Ident == uint64(worker.Fd()):
 			file, source = worker, sourceWorker
+		case pty != nil && pty.fd >= 0 && ev.Ident == uint64(pty.fd):
+			if err := pty.drain(); err != nil {
+				return attemptFrame{}, 0, err
+			}
+			continue
 		default:
 			return attemptFrame{}, 0, ErrIdentity
 		}
@@ -1289,7 +1345,7 @@ func drainAndCloseAttemptPTY(child *OwnedChild, reads *attemptReadSet, daemon *o
 	if !child.ptyDrained {
 		owner := terminalOwner{
 			child: child, daemon: daemon, reads: reads, daemonOpen: daemonOpen,
-			ptyOpen: true,
+			ptyOpen: true, ring: &terminalByteRing{},
 		}
 		drainErr = owner.drainPTY()
 	}
