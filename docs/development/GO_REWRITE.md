@@ -4021,15 +4021,17 @@ control values make open, read, authentication, and mutation fail closed.
   and one pinned `*sql.Conn` for each whole begin/body/commit-or-rollback. The
   bounded reader handle permits at most four physical connections and uses
   explicit pinned read transactions for multi-query snapshots.
-- Every physical writer/reader connection, including replacements, sets and
+- Every physical writer/reader connection in the finite retained set sets and
   reads back `foreign_keys=ON`, `busy_timeout=5000`, and
   `synchronous=FULL`; it verifies persistent WAL before use. There is no
   unbounded application retry. Initialization must be implemented through a
   driver connector/DSN or per-checkout hook that is causally proven to cover
   new pooled connections, not a one-time `sql.DB` bootstrap call.
-- If begin/commit/rollback or connection state is ambiguous, the entire writer
-  handle is discarded and reopened. The operation returns outcome-unknown and
-  is never blindly replayed. Before any later write, its domain method
+- If begin/commit/rollback or connection state is ambiguous, SQLite's real
+  autocommit bit decides whether the affected connection is clean: a connection
+  still holding a transaction is discarded, while one with autocommit on is
+  returned to the finite sealed pool. The operation returns outcome-unknown
+  and is never blindly replayed. Before any later write, its domain method
   reconciles through the already-existing run/entity ID, expected revision,
   immutable first outcome, terminal-observation identity, or other natural
   unique key. If canonical state cannot distinguish the result, the daemon

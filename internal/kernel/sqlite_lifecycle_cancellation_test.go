@@ -25,6 +25,8 @@ func TestCallerCancellationDuringBeginKeepsTheRetainedWriterSet(t *testing.T) {
 		t.Fatalf("open operational store: %v", err)
 	}
 	defer store.Close()
+	plan := installFaultWriter(t, store, path)
+	writerID := faultWriterConnectionID(t, store)
 
 	if open := store.writer.Stats().OpenConnections; open != 1 {
 		t.Fatalf("retained writer set = %d physical connections, want 1", open)
@@ -39,32 +41,61 @@ func TestCallerCancellationDuringBeginKeepsTheRetainedWriterSet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hold the write lock: %v", err)
 	}
+	released := false
+	defer func() {
+		if !released {
+			_ = held.Rollback(nil)
+			held.Close()
+		}
+	}()
 
 	callerCtx, cancelCaller := context.WithCancel(context.Background())
 	defer cancelCaller()
-	released := make(chan struct{})
+	beginEntered := plan.watchBegin()
+	beginResult := make(chan error, 1)
 	go func() {
-		// Cancel the caller while BEGIN IMMEDIATE is blocked on the lock, then
-		// release the lock so a lifecycle-bounded BEGIN can still converge.
-		time.Sleep(50 * time.Millisecond)
-		cancelCaller()
-		time.Sleep(50 * time.Millisecond)
-		_ = held.Rollback(nil)
-		held.Close()
-		close(released)
+		tx, err := store.beginUncheckedWrite(callerCtx)
+		if tx != nil {
+			_ = tx.Rollback(nil)
+			tx.Close()
+		}
+		beginResult <- err
 	}()
 
-	tx, beginErr := store.beginUncheckedWrite(callerCtx)
-	if beginErr == nil {
-		_ = tx.Rollback(nil)
-		tx.Close()
-	} else if errors.Is(beginErr, errConnectionSetExhausted) {
-		t.Fatalf("cancelled BEGIN exhausted the retained writer set: %v", beginErr)
+	select {
+	case <-beginEntered:
+	case <-time.After(time.Second):
+		t.Fatal("BEGIN IMMEDIATE did not enter the real driver")
 	}
-	<-released
+	select {
+	case beginErr := <-beginResult:
+		t.Fatalf("BEGIN IMMEDIATE returned before cancellation: %v", beginErr)
+	default:
+	}
+	cancelCaller()
+	select {
+	case beginErr := <-beginResult:
+		if beginErr == nil || !errors.Is(beginErr, context.Canceled) {
+			t.Fatalf("cancelled BEGIN error = %v, want context.Canceled", beginErr)
+		}
+		var unknown *OutcomeUnknownError
+		if !errors.As(beginErr, &unknown) {
+			t.Fatalf("cancelled BEGIN error = %v, want OutcomeUnknownError", beginErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled BEGIN did not return while the write lock was held")
+	}
+	if err := held.Rollback(nil); err != nil {
+		t.Fatalf("release the blocking write lock: %v", err)
+	}
+	held.Close()
+	released = true
 
 	if open := store.writer.Stats().OpenConnections; open != 1 {
 		t.Fatalf("retained writer set = %d physical connections after a cancelled BEGIN, want 1", open)
+	}
+	if currentID := faultWriterConnectionID(t, store); currentID != writerID || plan.wasClosed(currentID) {
+		t.Fatalf("cancelled BEGIN did not retain clean writer connection: id=%d closed=%v", currentID, plan.wasClosed(currentID))
 	}
 
 	// The Store must still serve writes: this is what the shutdown signature broke.
