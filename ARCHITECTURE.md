@@ -375,8 +375,12 @@ Task admission is public before the admitted run and terminal session become
 active, so a terminal target may truthfully be absent at that pinned state
 head. The browser keeps the selection and its authenticated session, then
 retries discovery only after the canonical state head advances; it never polls
-or sleeps across that lifecycle boundary. A missing target for an agent with no
-running task still closes the selection normally.
+or sleeps across that lifecycle boundary. A stale discovery response is itself
+proof that the server observation advanced: selection survives the browser's
+older idle projection until the newer head decides whether to retry. A target
+reply overtaken by a newer public head is treated as stale rather than minting
+old authority or accepting old absence. A missing target at the exact current
+head for an agent with no running task still closes the selection normally.
 Generated provider hooks and attempt commands read the private credential file
 for their exact run through `DARK_FACTORY_ATTEMPT_TOKEN_FILE` (or an explicit
 hook `--token-file`). A provider-invoked `factoryctl` process cannot cross into

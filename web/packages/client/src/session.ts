@@ -632,6 +632,14 @@ export class BrowserSession {
     const pending = this.#targetPending.get(frame.id);
     if (pending === undefined || frame.body.agent_id !== pending.agentId || frame.body.agent_revision !== pending.expectedAgentRevision || frame.body.head !== pending.expectedHead) throw new ProtocolError("malformed");
     this.#targetPending.delete(frame.id);
+    // State events and restart snapshots share this socket with private target
+    // replies. A reply computed at N may arrive after canonical state has
+    // already advanced to N+1; never mint or accept absence from that
+    // overtaken observation.
+    if (frame.body.head < this.#stateHeadFloor) {
+      pending.reject(new SessionError("stale"));
+      return;
+    }
     if (frame.body.target === null) {
       pending.resolve(null);
       return;

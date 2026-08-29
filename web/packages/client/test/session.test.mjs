@@ -1016,6 +1016,84 @@ test("agent terminal discovery mints an opaque generation-bound target for openT
   assert.throws(() => session.openTerminal(target), (error) => error instanceof SessionError && error.code === "closed");
 });
 
+test("a newer public head makes an overtaken terminal target response stale", async () => {
+  const { session, socket } = await openControlledStateSession();
+  const agentId = "77".repeat(16);
+  const terminalSessionId = "88".repeat(16);
+  const pending = session.resolveAgentTerminal({
+    agentId,
+    expectedAgentRevision: 1n,
+    expectedHead: 1n,
+  });
+  const targetGet = lastFrame(socket, "TERMINAL_TARGET_GET");
+  const watch = lastFrame(socket, "STATE_SUBSCRIBE");
+
+  socket.reply(
+    encodeStateEvent(watch.id, {
+      event: "hidden_advance",
+      sequence: 2n,
+      head: 2n,
+    }),
+  );
+  await tick();
+  assert.equal(session.state.head, 2n);
+
+  const rejected = assert.rejects(
+    pending,
+    (error) => error instanceof SessionError && error.code === "stale",
+  );
+  socket.reply(
+    encodeTerminalTarget(targetGet.id, {
+      agent_id: agentId,
+      agent_revision: 1n,
+      head: 1n,
+      target: {
+        run_id: runID,
+        session_id: terminalSessionId,
+        run_revision: 3n,
+        session_revision: 4n,
+      },
+    }),
+  );
+  await rejected;
+  assert.equal(session.status, "ready");
+  session.close();
+});
+
+test("a restart preserves pending discovery but rejects its old-head target", async () => {
+  const { session, socket } = await openControlledStateSession();
+  const agentId = "78".repeat(16);
+  const pending = session.resolveAgentTerminal({
+    agentId,
+    expectedAgentRevision: 1n,
+    expectedHead: 1n,
+  });
+  const targetGet = lastFrame(socket, "TERMINAL_TARGET_GET");
+  const watch = lastFrame(socket, "STATE_SUBSCRIBE");
+
+  socket.reply(encodeStateRestart(watch.id, { head: 2n, floor: 1n, reason: "gap" }));
+  await tick();
+  assert.equal(session.status, "syncing");
+
+  const rejected = assert.rejects(
+    pending,
+    (error) => error instanceof SessionError && error.code === "stale",
+  );
+  socket.reply(
+    encodeTerminalTarget(targetGet.id, {
+      agent_id: agentId,
+      agent_revision: 1n,
+      head: 1n,
+      target: null,
+    }),
+  );
+  await rejected;
+  assert.equal(session.status, "syncing");
+  await completePendingSnapshot(socket, 2n);
+  assert.equal(session.status, "ready");
+  session.close();
+});
+
 test("terminal target discovery is bounded, exact-correlated, and null is explicit", async () => {
   const store = new MemoryKeys();
   const agentId = "79".repeat(16);

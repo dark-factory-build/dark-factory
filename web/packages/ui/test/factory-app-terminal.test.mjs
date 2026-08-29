@@ -222,6 +222,43 @@ test("stale active-task discovery retries the newer state already received", asy
   assert.equal(context.calls.at(-1).value.expectedHead, 43n);
 });
 
+test("stale discovery preserves an idle observation until newer running state arrives", async () => {
+  const context = terminalHarness();
+  const idleTasks = new Map(fixtureState.tasks);
+  const running = [...idleTasks.values()].find(
+    (task) => task.assigned_agent_id === agent.id && task.status === "running",
+  );
+  assert.notEqual(running, undefined);
+  idleTasks.set(running.id, { ...running, status: "queued" });
+
+  context.controller.start();
+  context.clientOptions().onState(stateAt(42, { tasks: idleTasks }));
+  context.clientOptions().onStatus("ready");
+  context.controller.selectAgent(agent);
+  const token = {};
+  context.controller.beginTerminalSurface(token);
+  context.controller.setTerminalSurface(token, { write: async () => {}, abort: () => {} });
+  await flush();
+
+  context.targetGates[0].reject(new SessionError("stale"));
+  await flush();
+  assert.equal(context.latest().selectedAgent.id, agent.id);
+  assert.equal(context.latest().terminal.phase, "idle");
+  assert.equal(context.sessionCloses(), 0);
+
+  await remountSurface(context);
+  assert.equal(context.targetGates.length, 1, "same stale head must not spin discovery");
+  context.clientOptions().onState(stateAt(42, { tasks: idleTasks }));
+  await flush();
+  assert.equal(context.latest().selectedAgent.id, agent.id);
+  assert.equal(context.targetGates.length, 1, "same-head entity refresh must preserve stale waiting");
+
+  context.clientOptions().onState(stateAt(43, { tasks: idleTasks }));
+  await flush();
+  assert.equal(context.targetGates.length, 2);
+  assert.equal(context.calls.at(-1).value.expectedHead, 43n);
+});
+
 test("same-socket state resync preserves pending terminal discovery", async () => {
   const context = terminalHarness();
   context.controller.start();

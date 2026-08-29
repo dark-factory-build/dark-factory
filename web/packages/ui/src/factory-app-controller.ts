@@ -110,7 +110,7 @@ export class FactoryAppController {
   #terminalSurfaceVersion = 0;
   #terminalGeneration = 0;
   #terminalResetBurst = 0;
-  #terminalRetryHead: bigint | undefined;
+  #terminalRetry: { head: bigint; stale: boolean } | undefined;
   #pendingTerminalResize: { rows: number; cols: number } | undefined;
   #generation = 0;
   #started = false;
@@ -422,12 +422,12 @@ export class FactoryAppController {
       } else {
         selectedAgent.agent = { ...currentAgent };
         if (this.#terminal === undefined) {
-          if (this.#terminalRetryHead !== undefined && !agentHasRunningTask(selectedAgent.agent, state)) {
+          if (selectedAgent.head !== state.head) {
+            selectedAgent.head = state.head;
+            this.#terminalRetry = undefined;
+          } else if (this.#terminalRetry !== undefined && !this.#terminalRetry.stale && !agentHasRunningTask(selectedAgent.agent, state)) {
             this.#selectedAgent = undefined;
             this.#dropTerminal(false);
-          } else if (selectedAgent.head !== state.head) {
-            selectedAgent.head = state.head;
-            this.#terminalRetryHead = undefined;
           }
         }
       }
@@ -466,7 +466,7 @@ export class FactoryAppController {
     const surface = this.#terminalSurface;
     const session = this.#client?.session;
     const stateAgent = selected === undefined ? undefined : this.#state?.agents.get(selected.agent.id);
-    if (this.#closed || this.#status !== "ready" || selected === undefined || surface === undefined || session === undefined || stateAgent === undefined || stateAgent.revision !== selected.agent.revision || this.#state?.head !== selected.head || this.#terminalRetryHead === selected.head || this.#terminal !== undefined) return;
+    if (this.#closed || this.#status !== "ready" || selected === undefined || surface === undefined || session === undefined || stateAgent === undefined || stateAgent.revision !== selected.agent.revision || this.#state?.head !== selected.head || this.#terminalRetry?.head === selected.head || this.#terminal !== undefined) return;
     const generation = ++this.#terminalGeneration;
     const controller = new TerminalController({
       session,
@@ -486,14 +486,17 @@ export class FactoryAppController {
       if (snapshot.reset && this.#recoverFromTerminalReset()) return;
       const selected = this.#selectedAgent;
       const state = this.#state;
+      const staleDiscovery = snapshot.error?.code === "stale";
       const retryDiscovery =
         snapshot.retryDiscovery &&
         selected !== undefined &&
         state !== undefined &&
-        agentHasRunningTask(selected.agent, state);
+        (staleDiscovery || agentHasRunningTask(selected.agent, state));
       this.#dropTerminal(false);
       if (retryDiscovery && selected !== undefined && state !== undefined) {
-        if (selected.head === state.head) this.#terminalRetryHead = selected.head;
+        if (selected.head === state.head) {
+          this.#terminalRetry = { head: selected.head, stale: staleDiscovery };
+        }
         else selected.head = state.head;
         this.#error = undefined;
         this.#publish();
@@ -531,7 +534,7 @@ export class FactoryAppController {
     selected.head = this.#state?.head ?? selected.head;
     this.#terminal = undefined;
     ++this.#terminalGeneration;
-    this.#terminalRetryHead = undefined;
+    this.#terminalRetry = undefined;
     this.#terminalSurface = undefined;
     this.#terminalSurfaceToken = undefined;
     this.#pendingTerminalResize = undefined;
@@ -553,7 +556,7 @@ export class FactoryAppController {
     const terminal = this.#terminal;
     this.#terminal = undefined;
     this.#terminalResetBurst = 0;
-    this.#terminalRetryHead = undefined;
+    this.#terminalRetry = undefined;
     ++this.#terminalGeneration;
     this.#terminalSurface = undefined;
     this.#terminalSurfaceToken = undefined;
