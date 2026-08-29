@@ -56,12 +56,13 @@ func TestProviderResourceActivationSuppressedRowRollsBackPair(t *testing.T) {
 
 func TestProviderResourceCommitAmbiguityIsBothOrNeither(t *testing.T) {
 	for _, test := range []struct {
-		name       string
-		fault      storeFaultKind
-		wantActive bool
+		name         string
+		fault        storeFaultKind
+		wantActive   bool
+		wantRetained bool
 	}{
 		{name: "before apply", fault: storeFaultCommitBefore},
-		{name: "after apply", fault: storeFaultCommitAfter, wantActive: true},
+		{name: "after apply", fault: storeFaultCommitAfter, wantActive: true, wantRetained: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			store, run, _ := admittedOrchestratorRun(t)
@@ -74,7 +75,7 @@ func TestProviderResourceCommitAmbiguityIsBothOrNeither(t *testing.T) {
 			plan.arm(test.fault)
 			_, _, err := store.ActivateProviderResources(context.Background(), run.ID, process.ID, process.Revision, group.ID, group.Revision, processIdentity(t, 962), mustTime(t, 20))
 			requireStoreOutcomeUnknown(t, err)
-			assertFaultWriterEvicted(t, store, plan)
+			assertFaultWriterDisposition(t, store, plan, test.wantRetained)
 			fresh := resourcesForRunTest(t, store, run.ID)
 			freshProcess := resourceOfKind(t, fresh, ResourceProviderProcess)
 			freshGroup := resourceOfKind(t, fresh, ResourceProviderGroup)

@@ -50,13 +50,14 @@ func mintBrowserChallenge(t *testing.T, store *Store, seed byte, boot BootID, cr
 
 func TestBrowserChallengeCommitOutcomeReconcilesExactIdentity(t *testing.T) {
 	for _, test := range []struct {
-		name       string
-		fault      storeFaultKind
-		wantDigest bool
-		wantRows   int64
+		name         string
+		fault        storeFaultKind
+		wantDigest   bool
+		wantRows     int64
+		wantRetained bool
 	}{
 		{name: "commit before apply", fault: storeFaultCommitBefore, wantRows: 0},
-		{name: "commit after apply", fault: storeFaultCommitAfter, wantDigest: true, wantRows: 1},
+		{name: "commit after apply", fault: storeFaultCommitAfter, wantDigest: true, wantRows: 1, wantRetained: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			store, path := newBrowserStore(t)
@@ -67,7 +68,7 @@ func TestBrowserChallengeCommitOutcomeReconcilesExactIdentity(t *testing.T) {
 			plan.arm(test.fault)
 			challenge, err := store.CreateBrowserPairingChallenge(context.Background(), digest, boot, "https://app.example", BrowserCapabilityObserve, mustTime(t, 10), mustTime(t, 100))
 			requireStoreOutcomeUnknown(t, err)
-			assertFaultWriterEvicted(t, store, plan)
+			assertFaultWriterDisposition(t, store, plan, test.wantRetained)
 			got := !bytes.Equal(challenge.Digest.Bytes(), make([]byte, DigestBytes))
 			if got != test.wantDigest {
 				t.Fatalf("returned cleanup identity known = %t, want %t", got, test.wantDigest)
@@ -84,12 +85,13 @@ func TestBrowserChallengeCommitOutcomeReconcilesExactIdentity(t *testing.T) {
 
 func TestInvalidateBrowserPairingChallengesSurfacesAmbiguousCommit(t *testing.T) {
 	for _, test := range []struct {
-		name     string
-		fault    storeFaultKind
-		wantRows int64
+		name         string
+		fault        storeFaultKind
+		wantRows     int64
+		wantRetained bool
 	}{
 		{name: "commit before apply", fault: storeFaultCommitBefore, wantRows: 1},
-		{name: "commit after apply", fault: storeFaultCommitAfter, wantRows: 0},
+		{name: "commit after apply", fault: storeFaultCommitAfter, wantRows: 0, wantRetained: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			store, path := newBrowserStore(t)
@@ -100,7 +102,7 @@ func TestInvalidateBrowserPairingChallengesSurfacesAmbiguousCommit(t *testing.T)
 			plan.arm(test.fault)
 			err := store.InvalidateBrowserPairingChallenges(context.Background(), boot)
 			requireStoreOutcomeUnknown(t, err)
-			assertFaultWriterEvicted(t, store, plan)
+			assertFaultWriterDisposition(t, store, plan, test.wantRetained)
 			if got := browserTableCount(t, store, "browser_pairing_challenges"); got != test.wantRows {
 				t.Fatalf("remaining challenge rows = %d, want %d", got, test.wantRows)
 			}

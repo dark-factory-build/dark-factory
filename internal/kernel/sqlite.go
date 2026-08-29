@@ -300,7 +300,12 @@ func (store *Store) verifiedConnection(ctx context.Context, pool *sql.DB, kind s
 		return nil, fmt.Errorf("checkout %s connection: %w", kind, err)
 	}
 	if err := verifyConnection(ctx, connection); err != nil {
-		discardConnection(connection)
+		cancellation := ctx.Err()
+		if cancellation != nil && (errors.Is(err, cancellation) || errors.Is(err, sqlite3.INTERRUPT)) {
+			releaseUncertainConnection(connection)
+		} else {
+			discardConnection(connection)
+		}
 		return nil, fmt.Errorf("verify %s connection: %w", kind, err)
 	}
 	if store.pathBinding != nil {

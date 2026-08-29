@@ -4027,6 +4027,11 @@ control values make open, read, authentication, and mutation fail closed.
   unbounded application retry. Initialization must be implemented through a
   driver connector/DSN or per-checkout hook that is causally proven to cover
   new pooled connections, not a one-time `sql.DB` bootstrap call.
+- If that per-checkout verification is interrupted by its cancelled caller, an
+  autocommit-clean connection is returned to the sealed set and the operation
+  still fails. A live-context interrupt, configuration mismatch, other driver
+  failure, or non-autocommit connection is discarded instead; cancellation
+  never forgives an unverified configuration or a live transaction.
 - If begin/commit/rollback or connection state is ambiguous, SQLite's real
   autocommit bit decides whether the affected connection is clean: a connection
   still holding a transaction is discarded, while one with autocommit on is
