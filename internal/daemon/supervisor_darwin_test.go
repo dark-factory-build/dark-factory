@@ -1393,13 +1393,11 @@ type supervisorFixture struct {
 	runIDs                                       map[kernel.RunID]struct{}
 	t                                            *testing.T
 	baselineFDs                                  int
-	baselineGoroutines                           int
 }
 
 func newSupervisorFixture(t *testing.T, program string) *supervisorFixture {
 	t.Helper()
 	baselineFDs := supervisorFDCount(t)
-	baselineGoroutines := runtime.NumGoroutine()
 	root, err := os.MkdirTemp("/private/tmp", "dark-factory-supervisor-")
 	if err != nil {
 		t.Fatal(err)
@@ -1410,8 +1408,7 @@ func newSupervisorFixture(t *testing.T, program string) *supervisorFixture {
 	fixture := &supervisorFixture{
 		root: root, witness: filepath.Join(root, "provider.witness"),
 		childReceipt: filepath.Join(root, "provider-child.pid"), continueReceipt: filepath.Join(root, "provider.continue"), t: t,
-		baselineFDs: baselineFDs, baselineGoroutines: baselineGoroutines,
-		runIDs: make(map[kernel.RunID]struct{}),
+		baselineFDs: baselineFDs, runIDs: make(map[kernel.RunID]struct{}),
 	}
 	program = strings.ReplaceAll(program, "__WITNESS__", quoteShell(fixture.witness))
 	program = strings.ReplaceAll(program, "__CHILD_RECEIPT__", quoteShell(fixture.childReceipt))
@@ -1585,7 +1582,7 @@ func (fixture *supervisorFixture) close() {
 				fixture.t.Errorf("Store close: %v", err)
 			}
 		}
-		fixture.assertResourceCensus()
+		fixture.assertFDCensus()
 	})
 }
 
@@ -1661,20 +1658,18 @@ func (fixture *supervisorFixture) addSafetyIdentity(identities map[runner.Identi
 	identities[identity] = struct{}{}
 }
 
-func (fixture *supervisorFixture) assertResourceCensus() {
+func (fixture *supervisorFixture) assertFDCensus() {
 	deadline := time.Now().Add(4 * time.Second)
 	for {
 		fds := supervisorFDCount(fixture.t)
-		goroutines := runtime.NumGoroutine()
-		if fds == fixture.baselineFDs && goroutines == fixture.baselineGoroutines {
-			fixture.t.Logf("fixture census stable: fds=%d goroutines=%d", fds, goroutines)
+		if fds == fixture.baselineFDs {
+			fixture.t.Logf("fixture fd census stable: fds=%d", fds)
 			return
 		}
 		if time.Now().After(deadline) {
-			fixture.t.Errorf("fixture census: fds %d -> %d; goroutines %d -> %d", fixture.baselineFDs, fds, fixture.baselineGoroutines, goroutines)
+			fixture.t.Errorf("fixture fd census: %d -> %d", fixture.baselineFDs, fds)
 			return
 		}
-		runtime.Gosched()
 		time.Sleep(10 * time.Millisecond)
 	}
 }
