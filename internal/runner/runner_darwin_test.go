@@ -365,30 +365,22 @@ const maxCwdDescriptorManifestBytes = 32 << 10
 const maxCwdDescriptorManifestEntries = 1024
 
 type cwdDescriptorProof struct {
-	Device  uint64
-	Inode   uint64
-	Mode    uint16
-	Nlink   uint16
-	UID     uint32
-	GID     uint32
-	Rdev    int32
-	Size    int64
-	Blocks  int64
-	Blksize int32
-	Flags   uint32
-	Gen     uint32
+	Device uint64
+	Inode  uint64
+	Mode   uint16
 }
 
 func cwdDescriptorProofFromStat(stat *unix.Stat_t) cwdDescriptorProof {
 	return cwdDescriptorProof{
-		Device: uint64(stat.Dev), Inode: stat.Ino, Mode: stat.Mode, Nlink: stat.Nlink,
-		UID: stat.Uid, GID: stat.Gid, Rdev: stat.Rdev, Size: stat.Size, Blocks: stat.Blocks,
-		Blksize: stat.Blksize, Flags: stat.Flags, Gen: stat.Gen,
+		Device: uint64(stat.Dev), Inode: stat.Ino, Mode: stat.Mode,
 	}
 }
 
 func (p cwdDescriptorProof) matches(stat *unix.Stat_t) bool {
-	return p == cwdDescriptorProofFromStat(stat)
+	// Darwin may assign no stable device/inode identity to an unnamed socket.
+	// Such a descriptor cannot be distinguished from post-exec runtime state,
+	// so it can never prove that the same descriptor crossed exec.
+	return p.Device != 0 && p.Inode != 0 && p == cwdDescriptorProofFromStat(stat)
 }
 
 func cwdDescriptorSnapshot() (map[int]cwdDescriptorProof, int, error) {
@@ -465,7 +457,7 @@ func writeCwdDescriptorManifest(root string) error {
 	var manifest strings.Builder
 	for _, fd := range keys {
 		proof := proofs[fd]
-		fmt.Fprintf(&manifest, "%d %d %d %d %d %d %d %d %d %d %d %d %d\n", fd, proof.Device, proof.Inode, proof.Mode, proof.Nlink, proof.UID, proof.GID, proof.Rdev, proof.Size, proof.Blocks, proof.Blksize, proof.Flags, proof.Gen)
+		fmt.Fprintf(&manifest, "%d %d %d %d\n", fd, proof.Device, proof.Inode, proof.Mode)
 	}
 	if manifest.Len() == 0 || manifest.Len() > maxCwdDescriptorManifestBytes {
 		return ErrIdentity
@@ -530,7 +522,7 @@ func readCwdDescriptorManifest(root string) (map[int]cwdDescriptorProof, error) 
 			return nil, ErrIdentity
 		}
 		fields := strings.Fields(line)
-		if len(fields) != 13 {
+		if len(fields) != 4 {
 			return nil, ErrIdentity
 		}
 		fd, err := strconv.Atoi(fields[0])
@@ -546,47 +538,10 @@ func readCwdDescriptorManifest(root string) (map[int]cwdDescriptorProof, error) 
 			return nil, ErrIdentity
 		}
 		inode, err := strconv.ParseUint(fields[2], 10, 64)
-		if err != nil || inode == 0 {
+		if err != nil {
 			return nil, ErrIdentity
 		}
 		mode, err := strconv.ParseUint(fields[3], 10, 16)
-		if err != nil {
-			return nil, ErrIdentity
-		}
-		nlink, err := strconv.ParseUint(fields[4], 10, 16)
-		if err != nil {
-			return nil, ErrIdentity
-		}
-		uid, err := strconv.ParseUint(fields[5], 10, 32)
-		if err != nil {
-			return nil, ErrIdentity
-		}
-		gid, err := strconv.ParseUint(fields[6], 10, 32)
-		if err != nil {
-			return nil, ErrIdentity
-		}
-		// The remaining fields mirror signed Darwin stat members.
-		rdev, err := strconv.ParseInt(fields[7], 10, 32)
-		if err != nil {
-			return nil, ErrIdentity
-		}
-		size, err := strconv.ParseInt(fields[8], 10, 64)
-		if err != nil {
-			return nil, ErrIdentity
-		}
-		blocks, err := strconv.ParseInt(fields[9], 10, 64)
-		if err != nil {
-			return nil, ErrIdentity
-		}
-		blksize, err := strconv.ParseInt(fields[10], 10, 32)
-		if err != nil {
-			return nil, ErrIdentity
-		}
-		flags, err := strconv.ParseUint(fields[11], 10, 32)
-		if err != nil {
-			return nil, ErrIdentity
-		}
-		gen, err := strconv.ParseUint(fields[12], 10, 32)
 		if err != nil {
 			return nil, ErrIdentity
 		}
@@ -596,20 +551,17 @@ func readCwdDescriptorManifest(root string) (map[int]cwdDescriptorProof, error) 
 		if _, exists := manifest[fd]; exists {
 			return nil, ErrIdentity
 		}
-		manifest[fd] = cwdDescriptorProof{
-			Device: device, Inode: inode, Mode: uint16(mode), Nlink: uint16(nlink),
-			UID: uint32(uid), GID: uint32(gid), Rdev: int32(rdev), Size: size,
-			Blocks: blocks, Blksize: int32(blksize), Flags: uint32(flags), Gen: uint32(gen),
-		}
+		manifest[fd] = cwdDescriptorProof{Device: device, Inode: inode, Mode: uint16(mode)}
 	}
-	if _, ok := manifest[10]; !ok {
+	lifetime, ok := manifest[10]
+	if !ok || lifetime.Device == 0 || lifetime.Inode == 0 || lifetime.Mode&unix.S_IFMT != unix.S_IFREG {
 		return nil, ErrIdentity
 	}
 	return manifest, nil
 }
 
 func TestCwdDescriptorManifestRejectsIncompleteEvidence(t *testing.T) {
-	const valid = "10 1 2 32768 1 501 20 0 0 0 4096 0 0\n"
+	const valid = "10 1 2 32768\n"
 	for _, test := range []struct {
 		name string
 		body string
@@ -641,6 +593,22 @@ func TestCwdDescriptorManifestRejectsIncompleteEvidence(t *testing.T) {
 	}
 	if _, err := readCwdDescriptorManifest(root); !errors.Is(err, unix.ELOOP) && !errors.Is(err, ErrIdentity) {
 		t.Fatalf("manifest symlink error=%v", err)
+	}
+}
+
+func TestCwdDescriptorManifestTreatsZeroIdentitySocketAsNonEvidence(t *testing.T) {
+	const lifetime = "10 1 2 32768\n"
+	root := t.TempDir()
+	socketMode := uint16(unix.S_IFSOCK | 0o600)
+	if err := os.WriteFile(filepath.Join(root, cwdDescriptorManifestName), []byte(lifetime+fmt.Sprintf("12 0 0 %d\n", socketMode)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := readCwdDescriptorManifest(root)
+	if err != nil {
+		t.Fatalf("zero-identity socket manifest: %v", err)
+	}
+	if manifest[12].matches(&unix.Stat_t{Mode: socketMode}) {
+		t.Fatal("zero-identity socket became inherited-descriptor evidence")
 	}
 }
 

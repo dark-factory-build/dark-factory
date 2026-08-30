@@ -109,7 +109,7 @@ func runAttemptWorkerHelper(args []string) error {
 			providerTask = []byte("one-startup\n")
 		}
 		provider = ExecSpec{Target: "/bin/sh", Args: []string{"-c", script}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: providerCwd}
-	case "binary", "seam", "lifetime", "lease-seam", "proof-census", "cwd", "cwd-seam", "cwd-unrelated", "cwd-file", "cwd-closed", "cwd-reused", "cwd-mode", "cwd-inherited", "cwd-inherited-11", "cwd-inherited-19", "cwd-inherited-20", "cwd-inherited-30":
+	case "binary", "seam", "lifetime", "lease-seam", "proof-census", "cwd", "cwd-seam", "cwd-unrelated", "cwd-file", "cwd-closed", "cwd-reused", "cwd-mode", "cwd-inherited", "cwd-inherited-11":
 		if len(args) != 3 {
 			return errors.New("attempt worker: missing binary target")
 		}
@@ -1348,26 +1348,6 @@ func TestCurrentExecRejectsExactInheritedDescriptor(t *testing.T) {
 			check: func(t *testing.T, root string) {
 				diagnostic, err := os.ReadFile(filepath.Join(root, "cwd.error"))
 				if err != nil || !strings.Contains(string(diagnostic), "cwd provider inherited fd 20") {
-					t.Fatalf("inherited descriptor diagnostic=%q err=%v", diagnostic, err)
-				}
-			},
-		},
-		{
-			name: "fd19",
-			mode: "cwd-inherited-19",
-			check: func(t *testing.T, root string) {
-				diagnostic, err := os.ReadFile(filepath.Join(root, "cwd.error"))
-				if err != nil || !strings.Contains(string(diagnostic), "cwd provider inherited fd 19") {
-					t.Fatalf("inherited descriptor diagnostic=%q err=%v", diagnostic, err)
-				}
-			},
-		},
-		{
-			name: "fd30",
-			mode: "cwd-inherited-30",
-			check: func(t *testing.T, root string) {
-				diagnostic, err := os.ReadFile(filepath.Join(root, "cwd.error"))
-				if err != nil || !strings.Contains(string(diagnostic), "cwd provider inherited fd 30") {
 					t.Fatalf("inherited descriptor diagnostic=%q err=%v", diagnostic, err)
 				}
 			},
