@@ -218,10 +218,12 @@ repository, prompt, worktree, log, or SQLite state.
 Existing refs are never force-updated or replaced. Publication may adopt only
 the exact expected generated ref/commit and refuses the live default branch;
 any different target is a conflict.
-GitHub's required `delete_branch_on_merge` setting removes the source ref as
-part of merge processing. Publication, PR creation, enqueue, and merge
-observation each re-read that setting before acting. The broker exposes no
-read-then-delete ref mutation.
+GitHub's `delete_branch_on_merge` setting removes the source ref as part of
+merge processing. The broker does not read that setting: GitHub returns it only
+to a caller holding Administration access, which this broker deliberately never
+requests, so every read of it was an assertion about a value the App cannot
+observe. Source-branch cleanup is the repository owner's setting, and the broker
+exposes no read-then-delete ref mutation either way.
 This maintainer surface is permanent official coordinator infrastructure, not
 executable intake and not the future runtime broker.
 

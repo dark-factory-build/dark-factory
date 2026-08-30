@@ -116,8 +116,6 @@ pub(crate) enum RefusalReason {
     RunNotFailed,
     #[error("the workflow job is not a completed failure")]
     JobNotFailed,
-    #[error("repository delete-on-merge is disabled")]
-    BranchCleanupDisabled,
     #[error("the pull request was already queued before this operation claimed it")]
     AlreadyQueued,
 }
@@ -277,7 +275,6 @@ pub(crate) struct RepositoryResult {
     pub(crate) repository_id: i64,
     pub(crate) default_branch: String,
     pub(crate) default_sha: String,
-    pub(crate) delete_branch_on_merge: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -964,7 +961,6 @@ impl AppAuthority {
         if request.base != repository.default_branch {
             return Err(OperationError::InvalidInput);
         }
-        require_branch_cleanup(&repository)?;
         if let Some(result) = self.0.reconcile_pull_request(&token, &request).await? {
             return complete(journal, &operation, result).await;
         }
@@ -1123,7 +1119,6 @@ impl AppAuthority {
         if request.branch == repository.default_branch {
             return Err(OperationError::InvalidInput);
         }
-        require_branch_cleanup(&repository)?;
         if let Some(result) = self
             .0
             .reconcile_commit(&token, &request)
@@ -1804,7 +1799,6 @@ impl AppAuthority {
         if request.base != repository.default_branch {
             return Err(OperationError::Conflict);
         }
-        require_branch_cleanup(&repository)?;
         let existing = self.0.reconcile_enqueue(&token, &request).await?;
         if matches!(
             state,
@@ -2149,7 +2143,6 @@ impl AppAuthority {
         if request.base != repository.default_branch {
             return Err(OperationError::Conflict);
         }
-        require_branch_cleanup(&repository)?;
         let pull = self
             .0
             .verify_pull_request_head(&token, request.pull_number, &request.head_sha)
@@ -2997,9 +2990,6 @@ impl Authority {
         token: &Credential,
     ) -> Result<RepositoryResult, OperationError> {
         let metadata = self.repository_metadata(token).await?;
-        if !metadata.delete_branch_on_merge {
-            return Err(OperationError::Unavailable);
-        }
         let reference = self.read_ref(token, &metadata.default_branch).await?;
         if reference.object.kind != "commit" {
             return Err(OperationError::Unavailable);
@@ -3010,7 +3000,6 @@ impl Authority {
             repository_id: self.repository_id,
             default_branch: metadata.default_branch,
             default_sha: reference.object.sha,
-            delete_branch_on_merge: metadata.delete_branch_on_merge,
         })
     }
 
@@ -4220,16 +4209,28 @@ struct InstallationToken {
     repositories: Vec<RepositoryIdentity>,
 }
 
-#[cfg(target_arch = "wasm32")]
+/// The repository observation every operation binds itself to.
+///
+/// Every field here must be one GitHub returns to *this* App's installation
+/// token. `delete_branch_on_merge` was not: GitHub returns it only to a caller
+/// with Administration access, which `docs/development/GITHUB_APP.md` says
+/// this broker deliberately never requests. A required field GitHub omits
+/// makes the whole 200 fail to deserialize, which reached the caller as an
+/// opaque "authority is unavailable" and disabled all nine operations that
+/// observe the repository -- `maintainer_status` and the entire publication
+/// and merge path included.
+///
+/// Host-testable, unlike the `wasm32`-only transport around it, so the shape
+/// contract can be proven against a real GitHub body instead of asserted.
+#[cfg(any(target_arch = "wasm32", test))]
 #[derive(Deserialize)]
 struct RepositoryMetadata {
     id: i64,
     full_name: String,
     default_branch: String,
-    delete_branch_on_merge: bool,
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 impl RepositoryMetadata {
     fn validate(self, authority: &Authority) -> Result<Self, OperationError> {
         valid_exact_integer(self.id)?;
@@ -4239,16 +4240,6 @@ impl RepositoryMetadata {
         valid_ref(&self.default_branch)?;
         Ok(self)
     }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn require_branch_cleanup(metadata: &RepositoryMetadata) -> Result<(), OperationError> {
-    metadata
-        .delete_branch_on_merge
-        .then_some(())
-        .ok_or(OperationError::Refused(
-            RefusalReason::BranchCleanupDisabled,
-        ))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -5649,6 +5640,56 @@ mod tests {
             general_purpose::URL_SAFE_NO_PAD.decode(claims).unwrap(),
             br#"{"iat":1799999940,"exp":1800000540,"iss":"4673420"}"#
         );
+    }
+
+    /// The exact defect this repair fixes, proven at the boundary it happened
+    /// on rather than asserted about the source.
+    ///
+    /// `GET /repos/{owner}/{repo}` answers **200** with the body below for a
+    /// caller without Administration access -- which is every token this App
+    /// can mint, because the App never requests that permission (see the
+    /// installation permissions in the test below, and
+    /// `docs/development/GITHUB_APP.md`). While `RepositoryMetadata` required
+    /// `delete_branch_on_merge`, this exact 200 failed to deserialize, and all
+    /// nine operations that observe the repository -- `maintainer_status`,
+    /// publication, PR creation, enqueue, merge observation, workflow
+    /// observation, release publication/recovery, and the control-plane deploy
+    /// dispatch -- returned an opaque "authority is unavailable".
+    #[test]
+    fn repository_metadata_parses_a_real_body_without_administration_access() {
+        const BODY: &str = include_str!("../tests/fixtures/repository-without-administration.json");
+
+        // The premise under test: GitHub really does omit the
+        // Administration-gated group. Without this the test would still pass
+        // against a body that happened to carry the field, and would stop
+        // being a regression test for the defect.
+        let raw: serde_json::Value = serde_json::from_str(BODY).unwrap();
+        for gated in [
+            "delete_branch_on_merge",
+            "allow_squash_merge",
+            "allow_merge_commit",
+            "allow_rebase_merge",
+        ] {
+            assert!(
+                raw.get(gated).is_none(),
+                "fixture carries {gated}, so it is not a non-Administration body"
+            );
+        }
+
+        let metadata: RepositoryMetadata = serde_json::from_str(BODY).unwrap();
+        let authority = AppAuthority::new(
+            4_673_420,
+            general_purpose::STANDARD.encode([0_u8; 1024]),
+            PERMISSION_REVISION.into(),
+            "dark-factory-build/dark-factory".into(),
+            "320309345".into(),
+            "1335380107".into(),
+        )
+        .unwrap();
+        let metadata = metadata.validate(&authority.0).unwrap();
+        assert_eq!(metadata.id, 1_335_380_107);
+        assert_eq!(metadata.full_name, "dark-factory-build/dark-factory");
+        assert_eq!(metadata.default_branch, "main");
     }
 
     #[test]
