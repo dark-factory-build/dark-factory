@@ -9,6 +9,7 @@ import {
   type AgentItem,
   type HumanRequestDetail,
   type HumanRequestItem,
+  type SessionErrorCode,
   type SessionStatus,
   type StateView,
 } from "@dark-factory/client";
@@ -57,6 +58,10 @@ export type FactoryAppSnapshot = Readonly<{
   terminal?: FactoryTerminalView;
 }>;
 
+export type FactoryAppStatus =
+  | Readonly<{ status: Exclude<SessionStatus, "closed"> }>
+  | Readonly<{ status: "closed"; reason: SessionErrorCode }>;
+
 type HumanSession = Pick<BrowserSession, "getHumanRequestDetail" | "replyHumanRequest" | "cancelHumanRequest">;
 type TerminalSession = Pick<BrowserSession, "resolveAgentTerminal" | "openTerminal" | "close">;
 type ControlledClient = Pick<BrowserClient, "connect" | "close"> & { readonly session?: HumanSession & TerminalSession };
@@ -67,6 +72,7 @@ export type FactoryAppControllerOptions = {
   location: Pick<Location, "hash" | "pathname" | "search">;
   history: Pick<History, "replaceState" | "state">;
   onChange: (snapshot: FactoryAppSnapshot) => void;
+  onStatusChange?: (status: FactoryAppStatus) => void;
   /** Package-internal construction boundary used by DOM-free causal tests. */
   clientFactory?: ClientFactory;
 };
@@ -98,6 +104,8 @@ export class FactoryAppController {
   readonly #options: FactoryAppControllerOptions;
   #client: ControlledClient | undefined;
   #status: SessionStatus = "idle";
+  #statusReason: SessionErrorCode | undefined;
+  #lastStatus: FactoryAppStatus | undefined;
   #state: StateView | undefined;
   #error: SessionError | ProtocolError | undefined;
   #selection: Selection | undefined;
@@ -151,6 +159,7 @@ export class FactoryAppController {
     } catch {
       this.#status = "closed";
       this.#error = new SessionError("connection");
+      this.#statusReason = this.#error.code;
       this.#publish();
       return;
     }
@@ -170,6 +179,7 @@ export class FactoryAppController {
     } catch {
       this.#status = "closed";
       this.#error = new SessionError("connection");
+      this.#statusReason = this.#error.code;
       this.#publish();
       return;
     }
@@ -391,6 +401,7 @@ export class FactoryAppController {
       if (!this.#current(generation) || this.#status === "closed") return;
       this.#status = "closed";
       this.#error = finiteError(error);
+      this.#statusReason = this.#error.code;
       this.#clearSelection();
       if (this.#terminal !== undefined) this.#dropTerminal(true);
       this.#publish();
@@ -400,6 +411,7 @@ export class FactoryAppController {
   #receiveStatus(generation: number, status: SessionStatus): void {
     if (!this.#current(generation)) return;
     this.#status = status;
+    this.#statusReason = status === "closed" ? this.#error?.code ?? "closed" : undefined;
     if (status !== "ready") this.#clearSelection();
     // A wire-level state restart resnapshots on the same authenticated socket;
     // exact terminal discovery and handles remain owned by that session.
@@ -445,6 +457,7 @@ export class FactoryAppController {
   #receiveError(generation: number, error: SessionError | ProtocolError): void {
     if (!this.#current(generation)) return;
     this.#error = error;
+    if (this.#status === "closed") this.#statusReason = error.code;
     this.#publish();
   }
 
@@ -610,9 +623,21 @@ export class FactoryAppController {
 
   #publish(): void {
     if (!this.#closed) this.#options.onChange(this.#snapshot());
+    if (this.#closed) return;
+    const status: FactoryAppStatus = this.#status === "closed"
+      ? { status: "closed", reason: this.#statusReason ?? "closed" }
+      : { status: this.#status };
+    if (sameStatus(this.#lastStatus, status)) return;
+    this.#lastStatus = status;
+    try { this.#options.onStatusChange?.(status); } catch { /* host callbacks cannot break controller ownership */ }
   }
 }
 
 function finiteError(error: unknown): SessionError | ProtocolError {
   return error instanceof SessionError || error instanceof ProtocolError ? error : new SessionError("connection");
+}
+
+function sameStatus(left: FactoryAppStatus | undefined, right: FactoryAppStatus): boolean {
+  if (left === undefined || left.status !== right.status) return false;
+  return left.status !== "closed" || (right.status === "closed" && left.reason === right.reason);
 }

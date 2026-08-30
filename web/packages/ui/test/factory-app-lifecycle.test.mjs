@@ -28,6 +28,7 @@ test("StrictMode mounts the public FactoryApp and closes each owned BrowserClien
   const previousAct = globalThis.IS_REACT_ACT_ENVIRONMENT;
   const historyState = { route: "factory" };
   const sockets = [];
+  const statuses = [];
   class FakeWebSocket {
     constructor(url) {
       this.url = url;
@@ -52,13 +53,14 @@ test("StrictMode mounts the public FactoryApp and closes each owned BrowserClien
   let renderer;
   try {
     await act(async () => {
-      renderer = create(createElement(StrictMode, null, createElement(FactoryApp)));
+      renderer = create(createElement(StrictMode, null, createElement(FactoryApp, { onStatusChange: (status) => statuses.push(status) })));
     });
     assert.equal(sockets.length, 2);
     assert.deepEqual(sockets.map((socket) => ({ url: socket.url, closeCount: socket.closeCount })), [
       { url: "ws://127.0.0.1:43123/browser/v1", closeCount: 1 },
       { url: "ws://127.0.0.1:43123/browser/v1", closeCount: 0 },
     ]);
+    assert.deepEqual(statuses, [{ status: "connecting" }, { status: "connecting" }]);
 
     await act(async () => { renderer.unmount(); });
     assert.deepEqual(sockets.map((socket) => socket.closeCount), [1, 1]);

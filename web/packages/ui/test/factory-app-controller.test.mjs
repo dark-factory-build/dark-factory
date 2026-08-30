@@ -32,6 +32,7 @@ function stateWithRequests(items) {
 
 function harness(overrides = {}) {
   const snapshots = [];
+  const statusChanges = [];
   const calls = { connect: 0, close: 0 };
   const session = {
     getHumanRequestDetail: overrides.getDetail ?? (async () => detailFor()),
@@ -56,6 +57,7 @@ function harness(overrides = {}) {
       },
     },
     onChange: (snapshot) => snapshots.push(snapshot),
+    onStatusChange: (status) => statusChanges.push(status),
     clientFactory: (options) => {
       overrides.order?.push("create");
       clientOptions = options;
@@ -68,6 +70,7 @@ function harness(overrides = {}) {
     client,
     clientOptions: () => clientOptions,
     snapshots,
+    statusChanges,
     calls,
     emitStatus: (status) => clientOptions.onStatus(status),
     emitState: (state) => clientOptions.onState(state),
@@ -92,6 +95,27 @@ test("pairing is scrubbed before exact client construction and connection", () =
   assert.equal(context.clientOptions().host, "127.0.0.1:43123");
   assert.equal(context.clientOptions().origin, "https://app.darkfactory.build");
   assert.equal(context.clientOptions().challenge, challenge);
+});
+
+test("status changes reach the host with finite closed reasons", () => {
+  const context = harness();
+  context.controller.start();
+  context.emitStatus("ready");
+  assert.deepEqual(context.statusChanges, [{ status: "ready" }]);
+
+  context.emitError(new SessionError("pairing_required"));
+  context.emitStatus("closed");
+  assert.deepEqual(context.statusChanges, [{ status: "ready" }, { status: "closed", reason: "pairing_required" }]);
+});
+
+test("status changes are deduplicated without affecting snapshot updates", () => {
+  const context = harness();
+  context.controller.start();
+  context.emitStatus("connecting");
+  context.emitStatus("connecting");
+  context.emitState(fixtureState);
+  assert.deepEqual(context.statusChanges, [{ status: "connecting" }]);
+  assert.equal(context.snapshots.length, 3);
 });
 
 test("a failed fragment scrub creates no client or browser effect", () => {
@@ -215,10 +239,12 @@ test("current callbacks publish while close is once-only and fences synchronous 
   const beforeClose = context.snapshots.length;
   context.controller.close();
   context.controller.close();
+  const beforeStatusChange = context.statusChanges.length;
   context.emitStatus("closed");
   context.emitState(fixtureState);
   assert.equal(context.calls.close, 1);
   assert.equal(context.snapshots.length, beforeClose);
+  assert.equal(context.statusChanges.length, beforeStatusChange);
 });
 
 test("detail selection is exact, unique, view-only, and reconnect clears private state", async () => {

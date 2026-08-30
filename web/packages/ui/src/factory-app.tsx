@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { FactoryAppController, type FactoryAppSnapshot, type FactoryTerminalView } from "./factory-app-controller.js";
+import { FactoryAppController, type FactoryAppSnapshot, type FactoryAppStatus, type FactoryTerminalView } from "./factory-app-controller.js";
 import { FactoryConsole } from "./factory-console.js";
 import { XtermTerminal } from "./xterm-terminal.js";
 import type { ConsoleExtras, ConsoleScreen } from "./console-view.js";
@@ -15,14 +15,18 @@ export type FactoryAppProps = {
    * wiring replaces it field by field as the daemon gaps close.
    */
   extras?: ConsoleExtras;
+  /** Receives the finite connection lifecycle exposed by the owned controller. */
+  onStatusChange?: (status: FactoryAppStatus) => void;
 };
 
 /** Complete browser application lifecycle; hosts only render this component. */
-export function FactoryApp({ extras }: FactoryAppProps = {}) {
+export function FactoryApp({ extras, onStatusChange }: FactoryAppProps = {}) {
   const [snapshot, setSnapshot] = useState<FactoryAppSnapshot>(INITIAL_SNAPSHOT);
   const [screen, setScreen] = useState<ConsoleScreen>({ kind: "home" });
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const owner = useRef<FactoryAppController | undefined>(undefined);
+  const statusChange = useRef(onStatusChange);
+  statusChange.current = onStatusChange;
 
   useEffect(() => {
     const controller = new FactoryAppController({
@@ -30,6 +34,7 @@ export function FactoryApp({ extras }: FactoryAppProps = {}) {
       location: window.location,
       history: window.history,
       onChange: setSnapshot,
+      onStatusChange: (status) => statusChange.current?.(status),
     });
     owner.current = controller;
     controller.start();
