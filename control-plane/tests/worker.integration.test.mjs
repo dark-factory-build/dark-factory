@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import { once } from 'node:events';
 import { request as httpRequest } from 'node:http';
-import { createServer } from 'node:net';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -125,7 +124,6 @@ test('the built Worker enforces the journal contract in workerd', async () => {
 });
 
 async function startWorker(persistence, configured) {
-  const port = await freePort();
   const wrangler = join(process.cwd(), 'node_modules', 'wrangler', 'bin', 'wrangler.js');
   const cleanEnvironment = join(process.cwd(), 'scripts', 'with-clean-wrangler-env.sh');
   const args = [
@@ -134,11 +132,11 @@ async function startWorker(persistence, configured) {
     '--ip',
     '127.0.0.1',
     '--port',
-    String(port),
+    '0',
     '--persist-to',
     persistence,
     '--log-level',
-    'error',
+    'log',
   ];
   if (configured) {
     args.push(
@@ -171,10 +169,15 @@ async function startWorker(persistence, configured) {
   child.stderr.on('data', (chunk) => {
     logs = `${logs}${chunk}`.slice(-16_384);
   });
-  const origin = `http://127.0.0.1:${port}`;
   for (let attempt = 0; attempt < 120; attempt += 1) {
     if (child.exitCode !== null) {
       throw new Error(`wrangler exited before readiness:\n${logs}`);
+    }
+    const ready = logs.match(/Ready on (http:\/\/127\.0\.0\.1:\d+)/);
+    const origin = ready?.[1];
+    if (!origin) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      continue;
     }
     try {
       const response = await fetch(`${origin}/healthz`);
@@ -199,16 +202,6 @@ async function stop(child) {
     child.kill('SIGKILL');
     await exited;
   }
-}
-
-async function freePort() {
-  const server = createServer();
-  server.listen(0, '127.0.0.1');
-  await once(server, 'listening');
-  const { port } = server.address();
-  server.close();
-  await once(server, 'close');
-  return port;
 }
 
 async function json(origin, path) {
