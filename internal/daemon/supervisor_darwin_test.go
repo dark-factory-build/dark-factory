@@ -817,8 +817,11 @@ func TestSupervisorRereadsStoreAfterDirectOutcome(t *testing.T) {
 	fixture := newSupervisorFixture(t, supervisorProgram(t, true, true))
 	// Keep the provider alive without an API request. This goroutine owns only
 	// the test observation and is joined before the assertion returns.
+	watchCtx, cancelWatch := context.WithCancel(context.Background())
 	done := make(chan error, 1)
+	finished := make(chan struct{})
 	go func() {
+		defer close(finished)
 		deadline := time.Now().Add(12 * time.Second)
 		for {
 			if _, err := os.Stat(fixture.witness); err == nil {
@@ -836,9 +839,18 @@ func TestSupervisorRereadsStoreAfterDirectOutcome(t *testing.T) {
 				done <- errors.New("provider witness timeout")
 				return
 			}
-			time.Sleep(10 * time.Millisecond)
+			select {
+			case <-watchCtx.Done():
+				done <- watchCtx.Err()
+				return
+			case <-time.After(10 * time.Millisecond):
+			}
 		}
 	}()
+	t.Cleanup(func() {
+		cancelWatch()
+		<-finished
+	})
 	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
 	if err != nil {
 		t.Fatalf("RunNext: %v", err)
