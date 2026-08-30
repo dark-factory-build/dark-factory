@@ -6,6 +6,22 @@ authority and external effects, not around the existing Rust crates. Git
 history remains the archive; the Go runtime will not migrate a Rust home,
 schema, event log, protocol, or serialized state.
 
+## Current status (authoritative from 2026-08-30)
+
+The hard cutover is shipped. Repository main
+`552889365fe434b74ee619e51f298012c3aa127c` contains the Darwin-first Go
+runtime and no retired Rust local-runtime workspace. Stable `v0.3.1` was
+published from that exact source by release run `33334514022`. The exact
+reviewed site tree at `a6820192f93153b0ba919c83ee27c42fa45d51c8` was promoted
+after site PR #7 merged as `f8b7e869ec0eafa67a05bada423f101a3858be31` and is served
+anonymously at `https://app.darkfactory.build`.
+
+A downloaded `v0.3.1` artifact was paired with that production site from a
+disposable home and completed one real shell-provider task through the daemon.
+The operator's live `~/.dark-factory` install was not touched, and real Claude
+and Codex attempts remain unproved. The rest of this document is chronological
+design and evidence; historical “not shipped” status is not current authority.
+
 ## Web-first redirection (authoritative from 2026-08-26)
 
 This section supersedes every later statement that requires a Go TUI, Bubble
@@ -19,18 +35,19 @@ are green.
 
 The target product is a local Go daemon with durable authority and PTY-backed
 agents, controlled primarily by a hosted responsive web application. The
-production Go daemon is not yet shipped: this document distinguishes package
-proof, in-process composition proof, and installed-runtime proof throughout.
+production Go daemon shipped as stable `v0.3.1`; this document preserves the
+earlier distinction between package proof, in-process composition proof, and
+installed-runtime proof.
 There is no Go `factory-tui`. `factoryctl` remains the bootstrap, service,
 recovery, diagnostic, automation, and browser-pairing client; it is not a
 second primary operator interface and does not owe visual feature parity.
 
 The hard-cutover decision is unchanged: fresh Go home, schema and protocols;
 no Rust migration, event upcasting, mixed runtime, or compatibility period.
-The existing Rust TUI and other replaced Rust local-runtime crates are deleted
-only after the revised web/PTY gate passes.
+The existing Rust TUI and other replaced Rust local-runtime crates were deleted
+after the revised web/PTY gate passed.
 
-### Canonical integration status
+### Historical integration status before cutover
 
 The reviewed documentation contract through `276f9468` was manually merged
 with the canonical implementation at `359d46a3`; `bc48df7f` is the resulting
@@ -6773,3 +6790,30 @@ concurrency or ownership changes; the exact
 `TestConcurrentOpenAndValidWriterReturnsBoundedSnapshotFailure` stress runs
 only for SQLite open/snapshot/file-binding, SQLite dependency, or Go toolchain
 changes.
+
+### External release and hosted-console completion (2026-08-30)
+
+- Runtime PR #397 merged the reviewed version head through the protected merge
+  queue as canonical main `552889365fe434b74ee619e51f298012c3aa127c`. Every
+  required merge-group check passed. Release run `33334514022` then published
+  stable `v0.3.1` with exactly the two Darwin archives, Homebrew formula,
+  `latest.json`, and `SHA256SUMS`.
+- An independent download verified every published digest, the fixed archive
+  inventory and metadata, the formula syntax, and all three native arm64
+  binaries reporting version `0.3.1`, exact source
+  `552889365fe434b74ee619e51f298012c3aa127c`, and a release build identity.
+- Site PR #7 merged the independently allowed onboarding and pinned-install
+  tree as `f8b7e869ec0eafa67a05bada423f101a3858be31`. Vercel production deployment
+  `dpl_3fvjnv5oT2dsjRAXNagPFDygtk4k` promotes the exact reviewed preview tree and
+  serves the anonymous factory console at `https://app.darkfactory.build`.
+- A clean disposable home initialized and passed `factoryctl doctor`; the
+  downloaded release daemon accepted the production site's exact Origin, the
+  browser paired as one active client, and a disposable project, agent, and
+  task completed through the shell provider with a durable Change. Shutdown
+  then left no socket, listener, or fixture process. No operator install or real
+  model subscription was involved.
+- Release verification exposed one Maintainer observability defect rather than
+  a permission failure: Actions endpoints used a full workflow path where
+  GitHub requires a filename. The adjacent source commit separates those API
+  identifiers from the full returned-run paths and adds causal tests for both
+  release and deployment workflows.

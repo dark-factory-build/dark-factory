@@ -34,8 +34,24 @@ const MAX_WORKFLOW_JOBS: usize = 100;
 const MAX_WORKFLOW_STEPS: usize = 100;
 const MAX_JOB_LOG_BYTES: usize = 64 * 1024;
 const MAX_LOG_REDIRECT_BYTES: usize = 4_096;
-const RELEASE_WORKFLOW_PATH: &str = ".github/workflows/release.yml";
-const DEPLOY_WORKFLOW_PATH: &str = ".github/workflows/deploy-control-plane.yml";
+#[derive(Clone, Copy)]
+struct WorkflowRef {
+    api_id: &'static str,
+    response_path: &'static str,
+}
+
+const RELEASE_WORKFLOW: WorkflowRef = WorkflowRef {
+    api_id: "release.yml",
+    response_path: ".github/workflows/release.yml",
+};
+const DEPLOY_WORKFLOW: WorkflowRef = WorkflowRef {
+    api_id: "deploy-control-plane.yml",
+    response_path: ".github/workflows/deploy-control-plane.yml",
+};
+const CI_WORKFLOW: WorkflowRef = WorkflowRef {
+    api_id: "ci.yml",
+    response_path: ".github/workflows/ci.yml",
+};
 
 #[derive(Clone)]
 pub(crate) struct AppAuthority(Arc<Authority>);
@@ -1337,12 +1353,7 @@ impl AppAuthority {
         );
         if let Some(run) = self
             .0
-            .workflow_run_by_title(
-                &token,
-                RELEASE_WORKFLOW_PATH,
-                &marker,
-                &request.workflow_sha,
-            )
+            .workflow_run_by_title(&token, RELEASE_WORKFLOW, &marker, &request.workflow_sha)
             .await?
         {
             return complete(
@@ -1350,7 +1361,7 @@ impl AppAuthority {
                 &operation,
                 WorkflowDispatchResult {
                     operation_id: request.operation_id,
-                    workflow: RELEASE_WORKFLOW_PATH.into(),
+                    workflow: RELEASE_WORKFLOW.response_path.into(),
                     commit_sha: request.workflow_sha,
                     run_id: run.id,
                     run_attempt: run.run_attempt,
@@ -1389,7 +1400,7 @@ impl AppAuthority {
             .0
             .dispatch_workflow(
                 &token,
-                RELEASE_WORKFLOW_PATH,
+                RELEASE_WORKFLOW,
                 &repository.default_branch,
                 serde_json::json!({
                     "operation_id": request.operation_id,
@@ -1405,7 +1416,7 @@ impl AppAuthority {
                 .read_dispatched_workflow(
                     &token,
                     dispatch.workflow_run_id,
-                    RELEASE_WORKFLOW_PATH,
+                    RELEASE_WORKFLOW,
                     &request.workflow_sha,
                     &marker,
                 )
@@ -1417,7 +1428,7 @@ impl AppAuthority {
                         &operation,
                         WorkflowDispatchResult {
                             operation_id: operation.operation_id.clone(),
-                            workflow: RELEASE_WORKFLOW_PATH.into(),
+                            workflow: RELEASE_WORKFLOW.response_path.into(),
                             commit_sha: request.workflow_sha.clone(),
                             run_id: run.id,
                             run_attempt: run.run_attempt,
@@ -1436,12 +1447,7 @@ impl AppAuthority {
             Err(_) => {
                 if let Some(run) = self
                     .0
-                    .workflow_run_by_title(
-                        &token,
-                        RELEASE_WORKFLOW_PATH,
-                        &marker,
-                        &request.workflow_sha,
-                    )
+                    .workflow_run_by_title(&token, RELEASE_WORKFLOW, &marker, &request.workflow_sha)
                     .await?
                 {
                     return complete(
@@ -1449,7 +1455,7 @@ impl AppAuthority {
                         &operation,
                         WorkflowDispatchResult {
                             operation_id: operation.operation_id.clone(),
-                            workflow: RELEASE_WORKFLOW_PATH.into(),
+                            workflow: RELEASE_WORKFLOW.response_path.into(),
                             commit_sha: request.workflow_sha.clone(),
                             run_id: run.id,
                             run_attempt: run.run_attempt,
@@ -1510,7 +1516,7 @@ impl AppAuthority {
         );
         if let Some(run) = self
             .0
-            .workflow_run_by_title(&token, DEPLOY_WORKFLOW_PATH, &marker, &request.commit_sha)
+            .workflow_run_by_title(&token, DEPLOY_WORKFLOW, &marker, &request.commit_sha)
             .await?
         {
             return complete(
@@ -1518,7 +1524,7 @@ impl AppAuthority {
                 &operation,
                 WorkflowDispatchResult {
                     operation_id: request.operation_id,
-                    workflow: DEPLOY_WORKFLOW_PATH.into(),
+                    workflow: DEPLOY_WORKFLOW.response_path.into(),
                     commit_sha: request.commit_sha,
                     run_id: run.id,
                     run_attempt: run.run_attempt,
@@ -1557,7 +1563,7 @@ impl AppAuthority {
             .0
             .dispatch_workflow(
                 &token,
-                DEPLOY_WORKFLOW_PATH,
+                DEPLOY_WORKFLOW,
                 &repository.default_branch,
                 serde_json::json!({
                     "operation_id": request.operation_id,
@@ -1574,7 +1580,7 @@ impl AppAuthority {
                 .read_dispatched_workflow(
                     &token,
                     dispatch.workflow_run_id,
-                    DEPLOY_WORKFLOW_PATH,
+                    DEPLOY_WORKFLOW,
                     &request.commit_sha,
                     &marker,
                 )
@@ -1586,7 +1592,7 @@ impl AppAuthority {
                         &operation,
                         WorkflowDispatchResult {
                             operation_id: operation.operation_id.clone(),
-                            workflow: DEPLOY_WORKFLOW_PATH.into(),
+                            workflow: DEPLOY_WORKFLOW.response_path.into(),
                             commit_sha: request.commit_sha.clone(),
                             run_id: run.id,
                             run_attempt: run.run_attempt,
@@ -1605,12 +1611,7 @@ impl AppAuthority {
             Err(_) => {
                 if let Some(run) = self
                     .0
-                    .workflow_run_by_title(
-                        &token,
-                        DEPLOY_WORKFLOW_PATH,
-                        &marker,
-                        &request.commit_sha,
-                    )
+                    .workflow_run_by_title(&token, DEPLOY_WORKFLOW, &marker, &request.commit_sha)
                     .await?
                 {
                     return complete(
@@ -1618,7 +1619,7 @@ impl AppAuthority {
                         &operation,
                         WorkflowDispatchResult {
                             operation_id: operation.operation_id.clone(),
-                            workflow: DEPLOY_WORKFLOW_PATH.into(),
+                            workflow: DEPLOY_WORKFLOW.response_path.into(),
                             commit_sha: request.commit_sha.clone(),
                             run_id: run.id,
                             run_attempt: run.run_attempt,
@@ -1704,7 +1705,7 @@ impl AppAuthority {
             operation.operation_id, operation.request_digest
         );
         let workflow_run = self.0.workflow_run(&token, request.run_id).await?;
-        workflow_run.verify_dispatch(RELEASE_WORKFLOW_PATH, &request.workflow_sha, &title)?;
+        workflow_run.verify_dispatch(RELEASE_WORKFLOW, &request.workflow_sha, &title)?;
         Ok(ReleaseWorkflowObservationResult {
             operation_id: request.operation_id,
             tag: request.tag,
@@ -1738,7 +1739,7 @@ impl AppAuthority {
         let operation = dispatch.operation("dispatch_control_plane_deploy")?;
         let workflow_run = self.0.workflow_run(&token, request.run_id).await?;
         workflow_run.verify_dispatch(
-            DEPLOY_WORKFLOW_PATH,
+            DEPLOY_WORKFLOW,
             &request.commit_sha,
             &format!(
                 "Deploy control-plane {} {}",
@@ -4002,7 +4003,7 @@ impl Authority {
     async fn dispatch_workflow(
         &self,
         token: &Credential,
-        workflow: &str,
+        workflow: WorkflowRef,
         branch: &str,
         inputs: serde_json::Value,
     ) -> Result<WorkflowDispatchResponse, OperationError> {
@@ -4013,9 +4014,11 @@ impl Authority {
         }
         let response: WorkflowDispatchResponse = github_json_request(
             worker::Method::Post,
-            &format!(
-                "https://api.github.com/repos/{}/{}/actions/workflows/{workflow}/dispatches",
-                self.repository.owner, self.repository.name
+            &workflow_api_url(
+                &self.repository.owner,
+                &self.repository.name,
+                workflow,
+                "dispatches",
             ),
             token.as_str(),
             Some(&Body {
@@ -4031,7 +4034,7 @@ impl Authority {
     async fn workflow_run_by_title(
         &self,
         token: &Credential,
-        workflow: &str,
+        workflow: WorkflowRef,
         title: &str,
         head_sha: &str,
     ) -> Result<Option<WorkflowRun>, OperationError> {
@@ -4056,7 +4059,7 @@ impl Authority {
         &self,
         token: &Credential,
         run_id: i64,
-        workflow: &str,
+        workflow: WorkflowRef,
         head_sha: &str,
         title: &str,
     ) -> Result<WorkflowRun, OperationError> {
@@ -4103,7 +4106,7 @@ impl Authority {
         commit_sha: &str,
     ) -> Result<WorkflowRunResult, OperationError> {
         let runs = self
-            .read_workflow_runs(token, RELEASE_WORKFLOW_PATH, commit_sha)
+            .read_workflow_runs(token, RELEASE_WORKFLOW, commit_sha)
             .await?;
         select_release_workflow_run(runs, tag, commit_sha)?.into_result(Vec::new())
     }
@@ -4111,13 +4114,18 @@ impl Authority {
     async fn read_workflow_runs(
         &self,
         token: &Credential,
-        workflow: &str,
+        workflow: WorkflowRef,
         head_sha: &str,
     ) -> Result<Vec<WorkflowRun>, OperationError> {
         let response: WorkflowRuns = github_json(
             &format!(
-                "https://api.github.com/repos/{}/{}/actions/workflows/{workflow}/runs?head_sha={head_sha}&per_page={MAX_WORKFLOW_RUNS}",
-                self.repository.owner, self.repository.name
+                "{}?head_sha={head_sha}&per_page={MAX_WORKFLOW_RUNS}",
+                workflow_api_url(
+                    &self.repository.owner,
+                    &self.repository.name,
+                    workflow,
+                    "runs",
+                )
             ),
             token.as_str(),
         )
@@ -4816,7 +4824,7 @@ fn select_release_workflow_run(
     let mut matches = runs
         .into_iter()
         .filter(|run| {
-            run.path == RELEASE_WORKFLOW_PATH
+            run.path == RELEASE_WORKFLOW.response_path
                 && run.head_sha == commit_sha
                 && run.head_branch == tag
                 && run.event == "push"
@@ -4829,13 +4837,14 @@ fn select_release_workflow_run(
     matches.pop().ok_or(OperationError::Indeterminate)
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 impl WorkflowRun {
+    #[cfg(target_arch = "wasm32")]
     fn verify(&self, pull_number: i64, head_sha: &str) -> Result<(), OperationError> {
         valid_exact_integer(self.id)?;
         valid_exact_integer(self.run_attempt)?;
         valid_text(&self.name, 1, 256, false)?;
-        self.verify_identity(".github/workflows/ci.yml", head_sha)?;
+        self.verify_identity(CI_WORKFLOW, head_sha)?;
         if self.event != "pull_request"
             || self.pull_requests.len() != 1
             || self.pull_requests[0].number != pull_number
@@ -4845,11 +4854,11 @@ impl WorkflowRun {
         Ok(())
     }
 
-    fn verify_identity(&self, path: &str, head_sha: &str) -> Result<(), OperationError> {
+    fn verify_identity(&self, workflow: WorkflowRef, head_sha: &str) -> Result<(), OperationError> {
         valid_exact_integer(self.id)?;
         valid_exact_integer(self.run_attempt)?;
         valid_text(&self.name, 1, 256, false)?;
-        if self.path != path
+        if self.path != workflow.response_path
             || self.head_sha != head_sha
             || !valid_workflow_status(&self.status)
             || !self
@@ -4864,17 +4873,18 @@ impl WorkflowRun {
 
     fn verify_dispatch(
         &self,
-        path: &str,
+        workflow: WorkflowRef,
         head_sha: &str,
         title: &str,
     ) -> Result<(), OperationError> {
-        self.verify_identity(path, head_sha)?;
+        self.verify_identity(workflow, head_sha)?;
         if self.event != "workflow_dispatch" || self.display_title.as_deref() != Some(title) {
             return Err(OperationError::Conflict);
         }
         Ok(())
     }
 
+    #[cfg(target_arch = "wasm32")]
     fn into_result(self, jobs: Vec<WorkflowJob>) -> Result<WorkflowRunResult, OperationError> {
         let mut jobs = jobs
             .into_iter()
@@ -5106,6 +5116,19 @@ fn permission_at_least(permissions: &BTreeMap<String, String>, name: &str, requi
         (Some("read" | "write" | "admin"), "read")
             | (Some("write" | "admin"), "write")
             | (Some("admin"), "admin")
+    )
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn workflow_api_url(
+    owner: &str,
+    repository: &str,
+    workflow: WorkflowRef,
+    endpoint: &str,
+) -> String {
+    format!(
+        "https://api.github.com/repos/{owner}/{repository}/actions/workflows/{}/{endpoint}",
+        workflow.api_id
     )
 }
 
@@ -6343,7 +6366,7 @@ mod tests {
             id,
             run_attempt: 1,
             name: "Release".into(),
-            path: RELEASE_WORKFLOW_PATH.into(),
+            path: RELEASE_WORKFLOW.response_path.into(),
             event: event.into(),
             status: "completed".into(),
             conclusion: Some("success".into()),
@@ -6355,6 +6378,55 @@ mod tests {
             ),
             pull_requests: Vec::new(),
         }
+    }
+
+    #[test]
+    fn fixed_workflow_urls_use_api_ids_and_keep_full_response_paths() {
+        let owner = "dark-factory-build";
+        let repository = "dark-factory";
+        assert_eq!(
+            workflow_api_url(owner, repository, RELEASE_WORKFLOW, "runs"),
+            "https://api.github.com/repos/dark-factory-build/dark-factory/actions/workflows/release.yml/runs"
+        );
+        assert_eq!(
+            workflow_api_url(owner, repository, RELEASE_WORKFLOW, "dispatches"),
+            "https://api.github.com/repos/dark-factory-build/dark-factory/actions/workflows/release.yml/dispatches"
+        );
+        assert_eq!(
+            workflow_api_url(owner, repository, DEPLOY_WORKFLOW, "runs"),
+            "https://api.github.com/repos/dark-factory-build/dark-factory/actions/workflows/deploy-control-plane.yml/runs"
+        );
+        assert_eq!(
+            workflow_api_url(owner, repository, DEPLOY_WORKFLOW, "dispatches"),
+            "https://api.github.com/repos/dark-factory-build/dark-factory/actions/workflows/deploy-control-plane.yml/dispatches"
+        );
+
+        let sha = "a".repeat(40);
+        let mut run = release_run(1, "push", &sha, "v1.2.3");
+        assert!(run.verify_identity(RELEASE_WORKFLOW, &sha).is_ok());
+        assert!(select_release_workflow_run(vec![run], "v1.2.3", &sha).is_ok());
+        run = release_run(1, "push", &sha, "v1.2.3");
+        run.path = RELEASE_WORKFLOW.api_id.into();
+        assert!(matches!(
+            run.verify_identity(RELEASE_WORKFLOW, &sha),
+            Err(OperationError::Conflict)
+        ));
+        assert!(matches!(
+            select_release_workflow_run(vec![run], "v1.2.3", &sha),
+            Err(OperationError::Indeterminate)
+        ));
+
+        let title = "Deploy control-plane operation digest";
+        let mut deploy = release_run(2, "workflow_dispatch", &sha, "main");
+        deploy.name = "Deploy control-plane".into();
+        deploy.path = DEPLOY_WORKFLOW.response_path.into();
+        deploy.display_title = Some(title.into());
+        assert!(deploy.verify_dispatch(DEPLOY_WORKFLOW, &sha, title).is_ok());
+        deploy.path = DEPLOY_WORKFLOW.api_id.into();
+        assert!(matches!(
+            deploy.verify_dispatch(DEPLOY_WORKFLOW, &sha, title),
+            Err(OperationError::Conflict)
+        ));
     }
 
     #[test]
