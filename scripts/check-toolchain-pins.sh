@@ -19,8 +19,24 @@ case "$go_version" in
     *) echo "could not read the exact Go version from go.mod" >&2; exit 1 ;;
 esac
 check_pin .github/workflows/release.yml "GOTOOLCHAIN=go$go_version" "runtime Go $go_version"
+check_pin .github/workflows/release.yml 'installed_go=$(/opt/homebrew/bin/go env GOVERSION 2>/dev/null || true)' "a Go probe that tolerates a fresh hosted image"
+check_pin .github/workflows/release.yml 'brew install go' "fresh hosted macOS Go provisioning"
+check_pin .github/workflows/release.yml 'echo "/opt/homebrew/bin" >> "$GITHUB_PATH"' "the bootstrapped Go path for later release steps"
 check_pin .github/workflows/release.yml "GOOS=darwin GOARCH=arm64" "the exact Darwin arm64 release target"
 check_pin .github/workflows/release.yml "GOOS=darwin GOARCH=amd64" "the exact Darwin amd64 release target"
+
+release_workflow=.github/workflows/release.yml
+bootstrap_line=$(grep -n -F \
+    '      - name: Provide the Homebrew Go toolchain' "$release_workflow" \
+    | head -1 | cut -d: -f1)
+first_go_line=$(grep -n -E \
+    '^[[:space:]]+([A-Z_][A-Z0-9_]*=[^[:space:]]+[[:space:]]+)*(/opt/homebrew/bin/)?go[[:space:]]+(version|env|build|test|mod)' \
+    "$release_workflow" | head -1 | cut -d: -f1)
+if [ -z "$bootstrap_line" ] || [ -z "$first_go_line" ] \
+    || [ "$bootstrap_line" -ge "$first_go_line" ]; then
+    echo "release workflow invokes Go before Homebrew Go bootstrap" >&2
+    exit 1
+fi
 
 # The Rust runtime workspace is deleted. These guards keep its toolchain from
 # reappearing through an unreviewed edit. The control-plane job is deliberately

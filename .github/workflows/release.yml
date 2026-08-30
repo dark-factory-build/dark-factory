@@ -74,10 +74,24 @@ jobs:
           RELEASE_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: ./scripts/prepare-release-source.sh "$REQUESTED_TAG"
 
-      - name: Install the pinned toolchain
+      # Fresh arm64 images do not carry Go. Bootstrap it through the same
+      # Homebrew boundary as CI, then expose that exact binary to later steps.
+      - name: Provide the Homebrew Go toolchain
         run: |
-          GOTOOLCHAIN=go1.27.0 go version
-          test "$(GOTOOLCHAIN=go1.27.0 go env GOVERSION)" = go1.27.0
+          set -euxo pipefail
+          required_go=$(awk '$1 == "go" { print "go" $2 }' go.mod)
+          installed_go=$(/opt/homebrew/bin/go env GOVERSION 2>/dev/null || true)
+          if [ "$installed_go" != "$required_go" ]; then
+            brew update
+            if [ -x /opt/homebrew/bin/go ]; then
+              brew upgrade go
+            else
+              brew install go
+            fi
+          fi
+          test "$(/opt/homebrew/bin/go env GOVERSION)" = "$required_go"
+          echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
+          /opt/homebrew/bin/go version
 
       - name: Check that the tag matches the runtime version
         run: |
