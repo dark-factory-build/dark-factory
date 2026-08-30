@@ -39,11 +39,12 @@ framework. The shell-provider loop is proven; real Claude/Codex work is not.
    First require `maintainer_status` = repository
    `dark-factory-build/dark-factory`, ID `1335380107`, revision
    `maintainer-operations-v2`. Fail closed if the required typed operation is
-   unavailable. For an explicitly owner-authorized repository/release task,
-   an agent may instead run the exact required `git`/`gh` operation outside the
-   sandbox through existing host credentials until that named task completes.
-   Never inspect/export credentials, request a reusable token, broaden the
-   operation, force-push, delete refs, or change repository/organization access.
+   unavailable. An owner-authorized fallback must name the exact repository and
+   finite command/target set (refs, PR head/base, tags, or fixed workflows).
+   Run only those `git`/`gh` operations outside the sandbox through existing
+   host credentials, and re-read the exact remote state after each effect. No
+   other remote effect is permitted: never inspect/export credentials, request
+   a token, force-push, delete refs, or change repository/organization access.
 10. Never read/source `.env.txt` directly. Its only agent use is an explicitly
     authorized, independently reviewed fixed command:
     `./scripts/with-cloudflare-env.sh dns status`, `dns publish-app`, or the
