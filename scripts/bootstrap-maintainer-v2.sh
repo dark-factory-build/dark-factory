@@ -9,6 +9,9 @@ set -eu
 # fails with `fatal: bad object`, so the object is checked separately below to
 # keep that diagnosis honest.
 #
+# Repoint this whenever a commit touches any gated path above -- a doc comment
+# inside control-plane/src counts, because the gate compares file content.
+#
 # Moved off the original v1-to-v2 activation commit because that runtime
 # required `delete_branch_on_merge`, a field GitHub returns only to a caller
 # with Administration access -- which this App never requests. Every repository
@@ -16,7 +19,7 @@ set -eu
 # with it, `dispatch_control_plane_deploy`: the App could not deploy its own
 # repair, so this owner-run path is the only way back. Once this version is
 # live the fixed Maintainer workflow resumes owning deployments.
-target_commit=9cfb13af0b44bc6ab94de8764a393caa4ece12e0
+target_commit=55461b8d8f9eb47222b8fa0a9e41827ffb9478f5
 worker=dark-factory-control-plane
 hostname=maintainer.darkfactory.build
 revision=maintainer-operations-v2
