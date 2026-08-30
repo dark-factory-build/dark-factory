@@ -541,8 +541,8 @@ fn table_exists(sql: &SqlStorage, name: &str) -> Result<bool, Error> {
 }
 
 /// The statement the rebuild uses to drain one legacy table into the current
-/// one. Shared with the test lane, because the rebuild itself is `wasm32`-only
-/// and this statement shipped unparseable once already.
+/// one. Shared with the test lane because this statement shipped unparseable
+/// once already.
 ///
 /// `WHERE true` is required, not stylistic. SQLite cannot parse an UPSERT
 /// attached to an `INSERT .. SELECT` without one: the parser cannot tell
@@ -557,6 +557,26 @@ fn operations_copy_sql(source: &str) -> String {
          FROM {source}
          WHERE true
          ON CONFLICT(operation_id) DO NOTHING"
+    )
+}
+
+/// Find rows that would collide by ID but differ in any persisted field. The
+/// copy is allowed to use `DO NOTHING` only after this check: equal duplicates
+/// are already present in the rebuilt table, while divergent duplicates must
+/// leave both tables intact for manual recovery.
+#[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+fn operations_conflicts_sql(source: &str) -> String {
+    format!(
+        "SELECT count(*) AS conflicts
+         FROM {source} AS legacy
+         JOIN maintainer_operations AS current
+           ON current.operation_id = legacy.operation_id
+         WHERE current.kind IS NOT legacy.kind
+            OR current.request_digest IS NOT legacy.request_digest
+            OR current.state IS NOT legacy.state
+            OR current.result_json IS NOT legacy.result_json
+            OR current.created_at IS NOT legacy.created_at
+            OR current.updated_at IS NOT legacy.updated_at"
     )
 }
 
@@ -644,6 +664,19 @@ fn migrate_operations(sql: &SqlStorage) -> Result<(), Error> {
     sql.exec(OPERATION_MIGRATION_SQL, None)?;
     for name in OPERATION_LEGACY_TABLES {
         if table_exists(sql, name)? {
+            #[derive(Deserialize)]
+            struct Conflicts {
+                conflicts: i64,
+            }
+            let rows = sql
+                .exec(&operations_conflicts_sql(name), None)?
+                .to_array::<Conflicts>()?;
+            if matches!(rows.as_slice(), [row] if row.conflicts > 0) {
+                worker::console_error!(
+                    "journal: divergent duplicate in maintainer operations rebuild"
+                );
+                return Err(Error::InvalidSchema);
+            }
             sql.exec(&operations_copy_sql(name), None)?;
             sql.exec(&format!("DROP TABLE {name}"), None)?;
         }
@@ -676,7 +709,8 @@ fn initialize_cloudflare_schema(sql: &SqlStorage) -> Result<(), Error> {
     )?;
     sql.exec(
         "INSERT INTO control_plane_migrations (component, revision, digest)
-         VALUES (?, ?, ?) ON CONFLICT(component) DO NOTHING",
+         VALUES (?, ?, ?) ON CONFLICT(component) DO UPDATE SET
+             revision = excluded.revision, digest = excluded.digest",
         vec![
             OPERATION_MIGRATION_COMPONENT.into(),
             OPERATION_MIGRATION_REVISION.into(),
@@ -928,7 +962,8 @@ impl SqliteJournal {
         )?;
         connection.execute(
             "INSERT INTO control_plane_migrations (component, revision, digest)
-             VALUES (?1, ?2, ?3) ON CONFLICT(component) DO NOTHING",
+             VALUES (?1, ?2, ?3) ON CONFLICT(component) DO UPDATE SET
+                 revision = excluded.revision, digest = excluded.digest",
             params![
                 OPERATION_MIGRATION_COMPONENT,
                 OPERATION_MIGRATION_REVISION,
@@ -1091,6 +1126,16 @@ fn operations_have_legacy_tables_sqlite(connection: &Connection) -> Result<bool,
 }
 
 #[cfg(feature = "development-sqlite")]
+fn sqlite_operations_have_conflicts(connection: &Connection, source: &str) -> Result<bool, Error> {
+    connection
+        .query_row(&operations_conflicts_sql(source), [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map(|count| count > 0)
+        .map_err(Error::from)
+}
+
+#[cfg(feature = "development-sqlite")]
 fn migrate_operations_sqlite(connection: &Connection) -> Result<(), Error> {
     if operations_table_is_current_sqlite(connection)?
         && !operations_have_legacy_tables_sqlite(connection)?
@@ -1119,6 +1164,9 @@ fn migrate_operations_sqlite(connection: &Connection) -> Result<(), Error> {
     connection.execute_batch(OPERATION_MIGRATION_SQL)?;
     for name in OPERATION_LEGACY_TABLES {
         if sqlite_table_exists(connection, name)? {
+            if sqlite_operations_have_conflicts(connection, name)? {
+                return Err(Error::InvalidSchema);
+            }
             connection.execute_batch(&operations_copy_sql(name))?;
             connection.execute_batch(&format!("DROP TABLE {name}"))?;
         }
@@ -1530,6 +1578,94 @@ mod migration_tests {
             .unwrap();
     }
 
+    fn current_operations_table(connection: &Connection) {
+        connection.execute_batch(OPERATION_MIGRATION_SQL).unwrap();
+        connection
+            .execute(
+                "INSERT INTO maintainer_operations
+                     (operation_id, kind, request_digest, state, result_json,
+                      created_at, updated_at)
+                 VALUES (?1, ?2, ?3, 'completed', ?4, 1, 1)",
+                rusqlite::params![
+                    OPERATION_ID,
+                    "merge_pull_request_at_head",
+                    "a".repeat(64),
+                    r#"{"merged":true}"#,
+                ],
+            )
+            .unwrap();
+    }
+
+    fn current_schema_with_marker(connection: &Connection, revision: Option<&str>) {
+        database_without_operation_marker(connection);
+        connection.execute_batch(OPERATION_MIGRATION_SQL).unwrap();
+        if let Some(revision) = revision {
+            connection
+                .execute(
+                    "INSERT INTO control_plane_migrations (component, revision, digest)
+                     VALUES (?1, ?2, ?3)",
+                    rusqlite::params![OPERATION_MIGRATION_COMPONENT, revision, "b".repeat(64),],
+                )
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn current_schema_repairs_a_missing_marker_after_interrupted_finalization() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("journal.db");
+        let connection = Connection::open(&database).unwrap();
+        current_schema_with_marker(&connection, None);
+        drop(connection);
+
+        DeliveryJournal::open_development(&database)
+            .expect("a missing finalization marker must be recreated");
+        let connection = Connection::open(&database).unwrap();
+        let marker: (String, String) = connection
+            .query_row(
+                "SELECT revision, digest FROM control_plane_migrations
+                 WHERE component = ?1",
+                [OPERATION_MIGRATION_COMPONENT],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            marker,
+            (
+                OPERATION_MIGRATION_REVISION.into(),
+                migration_digest(OPERATION_MIGRATION_SQL),
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn current_schema_repairs_a_stale_marker_after_interrupted_finalization() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("journal.db");
+        let connection = Connection::open(&database).unwrap();
+        current_schema_with_marker(&connection, Some("0003"));
+        drop(connection);
+
+        DeliveryJournal::open_development(&database)
+            .expect("a stale finalization marker must be overwritten");
+        let connection = Connection::open(&database).unwrap();
+        let marker: (String, String) = connection
+            .query_row(
+                "SELECT revision, digest FROM control_plane_migrations
+                 WHERE component = ?1",
+                [OPERATION_MIGRATION_COMPONENT],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            marker,
+            (
+                OPERATION_MIGRATION_REVISION.into(),
+                migration_digest(OPERATION_MIGRATION_SQL),
+            )
+        );
+    }
+
     #[tokio::test]
     async fn missing_marker_repairs_an_old_live_table_before_create_if_not_exists() {
         let directory = tempfile::tempdir().unwrap();
@@ -1611,6 +1747,72 @@ mod migration_tests {
                 })
                 .unwrap();
             assert_eq!(count, 1, "migration must preserve {table}");
+        }
+    }
+
+    #[test]
+    fn identical_duplicate_rows_are_safe_to_drain() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("journal.db");
+        let connection = Connection::open(&database).unwrap();
+        database_without_operation_marker(&connection);
+        current_operations_table(&connection);
+        legacy_0003_table(&connection, "maintainer_operations_legacy");
+        drop(connection);
+
+        DeliveryJournal::open_development(&database)
+            .expect("identical duplicate rows may be drained");
+        let connection = Connection::open(&database).unwrap();
+        assert!(!sqlite_table_exists(&connection, "maintainer_operations_legacy").unwrap());
+        let count: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM maintainer_operations
+                 WHERE operation_id = ?1",
+                [OPERATION_ID],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn divergent_duplicate_rows_fail_closed_and_keep_both_tables() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("journal.db");
+        let connection = Connection::open(&database).unwrap();
+        database_without_operation_marker(&connection);
+        current_operations_table(&connection);
+        legacy_0003_table(&connection, "maintainer_operations_legacy");
+        connection
+            .execute(
+                "UPDATE maintainer_operations_legacy SET kind = 'different_kind'",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        assert!(matches!(
+            DeliveryJournal::open_development(&database),
+            Err(Error::InvalidSchema)
+        ));
+
+        let connection = Connection::open(&database).unwrap();
+        for table in ["maintainer_operations", "maintainer_operations_legacy"] {
+            let kind: String = connection
+                .query_row(
+                    &format!("SELECT kind FROM {table} WHERE operation_id = ?1"),
+                    [OPERATION_ID],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                kind,
+                if table == "maintainer_operations" {
+                    "merge_pull_request_at_head"
+                } else {
+                    "different_kind"
+                }
+            );
         }
     }
 
