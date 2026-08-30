@@ -19,7 +19,19 @@ fail() {
 }
 
 fixture="$temporary/repository"
-/bin/mkdir -p "$fixture/scripts" "$fixture/control-plane/scripts"
+/bin/mkdir -p "$fixture/scripts" "$fixture/control-plane/scripts" \
+    "$fixture/control-plane/src"
+
+# The activation derives the permission revision from this constant, inside the
+# tree it just proved. The fixture carries it so the cases below exercise the
+# script's own parse rather than a copy of it restated in this test.
+revision_line='pub(crate) const PERMISSION_REVISION: &str = "maintainer-operations-v2";'
+# The neighbouring constant must not match. It shares the prefix and differs
+# only after it, which is the whole risk in the pattern.
+{
+    echo 'pub(crate) const PERMISSION_REVISION_BINDING: &str = "DARK_FACTORY_MAINTAINER_PERMISSION_REVISION";'
+    echo "$revision_line"
+} >"$fixture/control-plane/src/github_app.rs"
 /bin/cp "$repository_root/scripts/bootstrap-maintainer-v2.sh" "$fixture/scripts/"
 /bin/chmod 755 "$fixture/scripts/bootstrap-maintainer-v2.sh"
 
@@ -84,10 +96,12 @@ expect_refusal "activation script or control-plane is dirty" "$tree"
 # to a blob, and the bytes that would ship then sit outside the proven object.
 symlinked="$temporary/symlinked"
 /bin/cp -R "$fixture" "$symlinked"
+test -d "$symlinked/.git" || fail "the symlink fixture is not its own repository"
 ( cd "$symlinked" && /bin/rm -rf control-plane && /bin/mkdir -p real/scripts \
     && /bin/cp "$fixture/control-plane/scripts/local-ci.sh" real/scripts/ \
-    && /bin/ln -s real control-plane \
-    && "$git" add -A && "$git" -c commit.gpgsign=false commit -qm symlink )
+    && /bin/ln -s real control-plane )
+"$git" -C "$symlinked" add -A
+"$git" -C "$symlinked" -c commit.gpgsign=false commit -qm symlink
 blob=$("$git" -C "$symlinked" rev-parse HEAD:control-plane)
 if ( cd "$symlinked" && ./scripts/bootstrap-maintainer-v2.sh "$blob" >"$temporary/out" 2>&1 ); then
     fail "a symlinked control-plane reached the gate"
@@ -109,19 +123,28 @@ test "$status" = 3 || fail "expected the stubbed gate's exit 3, got $status"
 /usr/bin/grep -Fq STUB-GATE-REACHED "$temporary/out" \
     || fail "the exact reviewed tree did not reach the authoritative gate"
 
-# The activation reads the permission revision out of the proven tree with the
-# expression below. Its later stages need Node and Wrangler, so the fixture
-# cannot reach that read; assert the parse against the real source instead,
-# because a reformatted constant would yield an empty revision and strand the
-# activation at readiness rather than here.
-revision=$("$git" -C "$repository_root" show "HEAD:control-plane/src/github_app.rs" \
-    | /usr/bin/sed -n 's/^pub(crate) const PERMISSION_REVISION: &str = "\([a-z0-9-]*\)";$/\1/p')
-# A newline is not in the permitted set, so this one case rejects an empty
-# parse, a multi-line parse, and a malformed value alike.
-case "$revision" in
-    ''|*[!a-z0-9-]*)
-        fail "PERMISSION_REVISION parse yielded [$revision]; the constant's format changed"
-        ;;
-esac
+# A constant the activation cannot parse must stop the run before the gate,
+# not surface as a Worker whose own authority check rejects it. Each shape is
+# committed into the fixture so the script's real expression decides.
+reject_revision() {
+    /bin/cp "$fixture/control-plane/src/github_app.rs" "$temporary/github_app.rs.bak"
+    printf '%s\n' "$1" >"$fixture/control-plane/src/github_app.rs"
+    "$git" -C "$fixture" -c commit.gpgsign=false commit -qam "revision case"
+    broken=$("$git" -C "$fixture" rev-parse HEAD:control-plane)
+    status=0
+    run "$broken" || status=$?
+    test "$status" = 1 || fail "expected exit 1 for revision case [$2], got $status"
+    /usr/bin/grep -Fq "exactly one PERMISSION_REVISION" "$temporary/out" \
+        || fail "revision case [$2] gave: $(cat "$temporary/out")"
+    /bin/cp "$temporary/github_app.rs.bak" "$fixture/control-plane/src/github_app.rs"
+    "$git" -C "$fixture" -c commit.gpgsign=false commit -qam "restore revision"
+}
+
+reject_revision 'pub(crate) const PERMISSION_REVISION_BINDING: &str = "X";' absent
+reject_revision 'pub(crate) const PERMISSION_REVISION: &str =
+    "maintainer-operations-v2";' rustfmt-wrapped
+reject_revision 'pub(crate) const PERMISSION_REVISION: &str = "";' empty
+reject_revision 'pub(crate) const PERMISSION_REVISION: &str = "a";
+pub(crate) const PERMISSION_REVISION: &str = "b";' duplicated
 
 echo "bootstrap activation test passed"

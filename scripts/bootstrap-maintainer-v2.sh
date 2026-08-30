@@ -65,6 +65,21 @@ test "$actual_tree" = "$reviewed_tree" || {
     echo "bootstrap: check out the reviewed head, or pass the tree that head carries" >&2
     exit 1
 }
+# Derived from the tree just proven, never restated here. While one pinned
+# commit was the only admissible source this could not drift; now that any
+# reviewed tree is admissible, a restated constant would silently disagree with
+# `PERMISSION_REVISION` the moment a tree bumped it, and the activation would
+# promote a Worker its own authority check rejects.
+revision=$("$git" show "HEAD:control-plane/src/github_app.rs" | /usr/bin/sed -n \
+    's/^pub(crate) const PERMISSION_REVISION: &str = "\([a-z0-9-]*\)";$/\1/p')
+case "$revision" in
+    ''|*[!a-z0-9-]*)
+        echo "bootstrap: could not read exactly one PERMISSION_REVISION from the proven tree" >&2
+        exit 1
+        ;;
+esac
+echo "bootstrap: permission revision $revision"
+
 ./control-plane/scripts/local-ci.sh
 
 node=$(node -p 'process.execPath')
@@ -90,20 +105,6 @@ test "$(stat -f '%Lp' "$env_file")" = 600 || {
 
 temporary=$(mktemp -d /tmp/dark-factory-maintainer-v2.XXXXXX)
 mkdir -m 700 "$temporary/home" "$temporary/tmp"
-# Derived from the tree just proven, never restated here. While one pinned
-# commit was the only admissible source this could not drift; now that any
-# reviewed tree is admissible, a restated constant would silently disagree with
-# `PERMISSION_REVISION` the moment a tree bumped it, and the activation would
-# promote a Worker its own authority check rejects.
-revision=$("$git" show "HEAD:control-plane/src/github_app.rs" | /usr/bin/sed -n \
-    's/^pub(crate) const PERMISSION_REVISION: &str = "\([a-z0-9-]*\)";$/\1/p')
-case "$revision" in
-    ''|*[!a-z0-9-]*)
-        echo "bootstrap: could not read exactly one PERMISSION_REVISION from the proven tree" >&2
-        exit 1
-        ;;
-esac
-echo "bootstrap: permission revision $revision"
 
 secret_file="$temporary/revision.env"
 printf '%s=%s\n' DARK_FACTORY_MAINTAINER_PERMISSION_REVISION "$revision" >"$secret_file"
