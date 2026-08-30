@@ -47,8 +47,8 @@ configuration is live.
   `ALLOW`, `COMMENT`, or `REQUEST_CHANGES` verdict, diagnose and rerun exact CI,
   observe eventual merge state, enqueue through the merge queue, publish and
   observe immutable releases, and dispatch only the two fixed reviewed recovery
-  and deployment workflows. GitHub's required `delete_branch_on_merge` setting
-  performs atomic source-branch cleanup. All three verdicts are the repository's own words,
+  and deployment workflows. GitHub's `delete_branch_on_merge` repository setting
+  performs atomic source-branch cleanup; the broker never deletes a ref itself. All three verdicts are the repository's own words,
   not GitHub review states -- the App opens the pull requests it
   reviews, and GitHub refuses a self-review that takes a side, `APPROVE` and
   `REQUEST_CHANGES` alike -- so every one of them is posted as `COMMENT`
@@ -200,11 +200,26 @@ than an array; all three are accepted shapes, and `aud` is still compared for
 exact equality, never containment. An unprotected route still cannot forge any
 of those claims.
 
-Never put values in a checked-in file, `.env*`, `.dev.vars*`, a provider
-process, Dark Factory state, shell history, or the macOS Keychain. Cloudflare
-secret values belong only in the platform secret binding. The Durable Object
-binding embeds resource authority without exposing a resource credential to
-the Worker. See Cloudflare's [binding] and [secret] documentation.
+Never put Worker binding values in a checked-in file, `control-plane/.env*`,
+`control-plane/.dev.vars*`, a provider process, Dark Factory state, shell
+history, or the macOS Keychain. Cloudflare secret values belong only in the
+platform secret binding. The sole local CLI exception is the account/zone-
+scoped `CLOUDFLARE_API_TOKEN` plus `CLOUDFLARE_ACCOUNT_ID` in the ignored,
+mode-`0600` root `.env.txt`, used only through
+`../scripts/with-cloudflare-env.sh dns status`, or
+`../scripts/with-cloudflare-env.sh dns publish-app` for an explicitly
+authorized command. The public launcher replaces itself with an explicit empty
+environment before any setup child. The compiled helper ignores every other
+assignment, rejects symlinks and broad file modes, and never passes the token to
+Wrangler or another child process. It captures and re-verifies one exact
+commit, refuses mutable helper source or a moving `HEAD`, and compiles only an
+offline Git export of that commit. Its link-time direct-invocation check is an
+accidental-misuse guardrail, not authentication: a process already running as
+the operator can read the operator's mode-`0600` files. Run untrusted same-UID
+code under a separate OS identity or keep the credential behind a broker.
+The Durable Object binding embeds resource authority without exposing a
+resource credential to the Worker. See Cloudflare's [binding] and [secret]
+documentation.
 
 [binding]: https://developers.cloudflare.com/workers/runtime-apis/bindings/
 [secret]: https://developers.cloudflare.com/workers/configuration/secrets/
@@ -214,12 +229,22 @@ therefore not an acceptable staging command for this bootstrap. The reviewed
 live runbook must use the versions API or another no-traffic staging mechanism,
 prove the exact draft, and add a route only after the independent deployment
 gate. Do not improvise the first live sequence from generic Wrangler examples.
+Routine production deployment is the deliberate non-local exception: the fixed
+Maintainer-App workflow receives its Cloudflare API token only from the
+environment-scoped GitHub Actions secret. It does not use the local `.env.txt`,
+Wrangler OAuth, keychain, or ambient credentials.
 
 ## Local proof
 
 Rust is pinned to 1.88 and Node 22 or newer is required. Wrangler, `worker`,
 `worker-build`, and `wasm-bindgen` are pinned because their generated
-interfaces must agree. Run:
+interfaces must agree. Local CI launches Wrangler only through the repository's
+clean-environment wrapper, with an isolated home/temp directory and no
+Cloudflare, OAuth, keychain, loader, arbitrary PATH, dotenv/dev-vars, or config
+state. The release Worker is built once before that boundary; the wrapped
+Wrangler dry-run and workerd fixture verify and consume the prebuilt output,
+while the direct hosted deployment build wrapper still invokes the pinned
+`worker-build`. Local Wrangler telemetry is disabled at the same boundary. Run:
 
 ```sh
 ./scripts/local-ci.sh

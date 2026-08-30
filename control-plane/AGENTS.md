@@ -20,10 +20,37 @@ Codex nor Claude owns its credentials or its durable journal.
    version with only the Cloudflare API token and never handles the App private
    key or the webhook secret; those are needed for first activation and
    rotation alone.
-   Diagnosing the running service does not justify holding any of them: run the
-   Worker locally with `wrangler dev --env-file` and a throwaway key, outside
-   this tree, and read the console directly. A production deployment cycle is
-   never the right debugging loop.
+   The local Cloudflare API token is separate from those runtime bindings. For
+   an explicitly owner-authorized DNS operation, invoke the exact command
+   through the parent repository's
+   `../scripts/with-cloudflare-env.sh dns status` or
+   `../scripts/with-cloudflare-env.sh dns publish-app`. Run these from the
+   `control-plane/` directory; from the repository root, omit `../`. Its
+   compiled boundary selects only `CLOUDFLARE_API_TOKEN` and
+   `CLOUDFLARE_ACCOUNT_ID` from the ignored, mode-`0600` root `.env.txt`. Its
+   launcher replaces itself with an
+   explicit empty environment before any setup child, and the operation does
+   not pass the selected values to Wrangler or another child process. It
+   captures and re-verifies one exact commit, refuses mutable helper source,
+   and builds the implementation from an offline Git export. Its direct-
+   invocation check is a guardrail, not authentication or a same-UID security
+   boundary. Run untrusted same-UID code under a separate OS identity or keep
+   the credential behind a broker; never copy the file or token into this tree.
+   Diagnosing the running service does not justify holding any of them. For
+   local diagnostics, use the existing non-production `--var` fixtures only
+   through `scripts/with-clean-wrangler-env.sh`; the integration suite is the
+   canonical invocation. Read the console directly. Do not run bare
+   `wrangler dev`, use `wrangler dev --env-file`, the root `.env.txt`, a
+   production token, Wrangler OAuth, or keychain state for local debugging. A
+   production deployment cycle is never the right debugging loop.
+   Owner-authorized activation may run only through the independently reviewed
+   parent command `../scripts/bootstrap-maintainer-v2.sh <reviewed-tree>`,
+   which ships the working tree and so proves `HEAD:control-plane` is the exact
+   tree the operator names. Routine deployments use the fixed Maintainer-App
+   workflow; this path is for when that workflow cannot run, which
+   `dispatch_control_plane_deploy` observing the repository makes possible --
+   a defect there disables the App's ability to deploy its own repair, and the
+   workflow admits no human dispatch in its place.
 3. Expose typed, policy-checked operations only. Do not add a generic GitHub
    REST or GraphQL proxy, a shell-command surface, or a fallback to personal
    GitHub credentials. Contributor agents reach the deployed service only as
@@ -34,8 +61,10 @@ Codex nor Claude owns its credentials or its durable journal.
    unless it binds `dark-factory-build/dark-factory` with numeric repository
    ID `1335380107` and permission revision `maintainer-operations-v2`. A
    credential-isolating host transport authenticates the connection; provider,
-   tool, and shell processes never inherit the Access pair, and agents never
-   read or source `.env.txt` or handle either value.
+   tool, and shell processes never inherit the Access pair. Agents never read
+   or source `.env.txt` directly or handle either Access value; the parent
+   Cloudflare helper's two-variable CLI boundary is the only exception and
+   never exposes the Access pair.
    The deployed surface is finite: authority and default-head observation,
    durable operation observation, bounded issue lifecycle, exact commit and
    pull-request publication, exact-head review and CI diagnosis/recovery,

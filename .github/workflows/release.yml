@@ -1,14 +1,13 @@
 name: Release
 run-name: ${{ github.event_name == 'workflow_dispatch' && format('Release recovery {0} {1}', inputs.operation_id, inputs.request_digest) || format('Release {0}', github.ref_name) }}
 
-# A semver tag (`v0.2.6`) pushed by a maintainer builds the macOS arm64
+# A semver tag (`vX.Y.Z`) pushed by a maintainer builds the macOS arm64
 # and Intel binaries serially and publishes them, a SHA256SUMS file, a tap
 # formula candidate, and the `latest.json` manifest as a GitHub Release. A
 # default-branch dispatch safely resumes an existing immutable tag after a
-# workflow defect is fixed.
-# `factoryctl update` reads that manifest at
-# https://github.com/dark-factory-build/dark-factory/releases/latest/download/latest.json;
-# see docs/development/WORKFLOW.md, "Release and update".
+# workflow defect is fixed. `latest.json` is inert release metadata retained
+# for the independent control-plane asset validator; no local command consumes
+# it as an updater manifest.
 on:
   push:
     tags: ["v*"]
@@ -38,17 +37,11 @@ jobs:
   release:
     name: release
     if: github.event_name == 'push' || (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && github.sha == inputs.expected_workflow_sha)
-    # Only maintainers can push tags, so this is a trusted ref (same boundary
-    # as CI's `push` to `main`, the only other trigger that reaches the
-    # persistent Mac — every pull request, same-repository or a fork, runs
-    # on a hosted runner instead; see ci.yml): the persistent Mac, warm
-    # cache, real macOS arm64. The same trusted job cross-compiles Intel; a
-    # matrix would allow two jobs to race one release and shared manifest.
-    runs-on: dark-factory-mac
+    # Publication authority runs on a fresh GitHub-hosted arm64 macOS worker,
+    # never the owner's persistent machine or its provider credentials. One
+    # job cross-compiles Intel so two publishers cannot race one manifest.
+    runs-on: macos-15
     timeout-minutes: 60
-    env:
-      ARM_TARGET: aarch64-apple-darwin
-      INTEL_TARGET: x86_64-apple-darwin
     steps:
       # No actions/checkout: codeload.github.com (which serves an action's
       # tarball) can 429 independently of git itself, so this job never
@@ -56,17 +49,9 @@ jobs:
       # GitHub's git server instead. See ci.yml for the full rationale;
       # this is the same step.
       #
-      # This runner's workspace persists between jobs (it is shared with
-      # ci.yml's `checks` job), and a prior job can leave more than stray
-      # files behind if it was ever killed mid-checkout: a
-      # `.git/index.lock`, a half-written pack, a stale shallow boundary.
-      # `rm -rf .git && git init` before every fetch throws all of that
-      # away in one move instead of trying to detect and repair each kind
-      # of leftover state, then `git checkout --force --detach` lands on
-      # the target commit and `git clean -ffdx` removes anything else a
-      # prior job left in the working tree. That clean never touches the
-      # cargo cache: CARGO_TARGET_DIR lives outside this workspace (see
-      # docs/development/WORKFLOW.md, "The self-hosted runner").
+      # The hosted workspace starts empty. Reinitializing explicitly keeps the
+      # checkout independent of action tarball availability and leaves no
+      # credential in repository configuration.
       #
       # $GITHUB_SHA is the tag commit for a push and the protected default-
       # branch commit for a recovery dispatch. GitHub serves `git fetch` by
@@ -91,31 +76,43 @@ jobs:
 
       - name: Install the pinned toolchain
         run: |
-          rustup toolchain install 1.88.0 --profile minimal --no-self-update
-          rustup target add --toolchain 1.88.0 "$ARM_TARGET" "$INTEL_TARGET"
+          GOTOOLCHAIN=go1.27.0 go version
+          test "$(GOTOOLCHAIN=go1.27.0 go env GOVERSION)" = go1.27.0
 
-      - name: Check build headroom
-        run: ./scripts/check-build-headroom.sh
-
-      - name: Check that the tag matches the workspace version
+      - name: Check that the tag matches the runtime version
         run: |
-          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          version=$(cat VERSION)
           if [ "v$version" != "$TAG" ]; then
-            echo "tag $TAG does not match Cargo.toml workspace version $version" >&2
+            echo "tag $TAG does not match VERSION $version" >&2
             exit 1
           fi
 
       - name: Build release binaries
         run: |
-          cargo +1.88.0 build --locked --release --workspace --target "$ARM_TARGET"
-          cargo +1.88.0 build --locked --release --workspace --target "$INTEL_TARGET"
+          set -eu
+          version=$(cat VERSION)
+          GOTOOLCHAIN=go1.27.0 GOENV=off GOAUTH=off go build -trimpath -buildvcs=false \
+            -o release-artifact ./internal/buildinfo/cmd/release-artifact
+          arm_receipt=$(./release-artifact receipt "$version" "$SOURCE_SHA" darwin/arm64)
+          intel_receipt=$(./release-artifact receipt "$version" "$SOURCE_SHA" darwin/amd64)
+          mkdir -p release/aarch64-apple-darwin release/x86_64-apple-darwin
+          for binary in factoryd factory-runner factoryctl; do
+            CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 GOENV=off GOTOOLCHAIN=go1.27.0 GOAUTH=off \
+              go build -trimpath -buildvcs=false \
+              -ldflags "-s -w -X github.com/dark-factory-build/dark-factory/internal/buildinfo.receipt=$arm_receipt" \
+              -o "release/aarch64-apple-darwin/$binary" "./cmd/$binary"
+            CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 GOENV=off GOTOOLCHAIN=go1.27.0 GOAUTH=off \
+              go build -trimpath -buildvcs=false \
+              -ldflags "-s -w -X github.com/dark-factory-build/dark-factory/internal/buildinfo.receipt=$intel_receipt" \
+              -o "release/x86_64-apple-darwin/$binary" "./cmd/$binary"
+          done
+          rm release-artifact
 
       - name: Package
         run: |
-          target_dir="${CARGO_TARGET_DIR:-target}"
-          ./scripts/package-release.sh "$TAG" dist "$GITHUB_REPOSITORY" \
-            "$ARM_TARGET" "$target_dir/$ARM_TARGET/release" \
-            "$INTEL_TARGET" "$target_dir/$INTEL_TARGET/release"
+          GOTOOLCHAIN=go1.27.0 ./scripts/package-release.sh "$TAG" "$SOURCE_SHA" dist "$GITHUB_REPOSITORY" \
+            aarch64-apple-darwin release/aarch64-apple-darwin \
+            x86_64-apple-darwin release/x86_64-apple-darwin
 
       - name: Publish the GitHub release
         env:

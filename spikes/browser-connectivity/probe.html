@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Dark Factory loopback connectivity probe</title>
+  <style>
+    :root { color-scheme: light dark; font: 16px/1.4 system-ui, sans-serif; }
+    body { max-width: 42rem; margin: 2rem auto; padding: 0 1rem; }
+    button { margin: .25rem .5rem .25rem 0; padding: .45rem .7rem; }
+    #state { font-weight: 700; }
+    #events { min-height: 12rem; padding: .75rem; white-space: pre-wrap; border: 1px solid; }
+  </style>
+</head>
+<body>
+  <h1>Loopback WebSocket probe</h1>
+  <p>This fixture has no application credentials, query parameters, or third-party resources.</p>
+  <p>State: <span id="state">idle</span></p>
+  <button id="connect">connect</button>
+  <button id="reconnect">reconnect</button>
+  <button id="send" disabled>send binary echo</button>
+  <button id="close" disabled>close</button>
+  <pre id="events" aria-live="polite"></pre>
+  <script>
+    // Keep this URL free of query/fragment credentials. Change only the port
+    // when using the readiness JSON from a server started with -port 0.
+    const LOOPBACK_WS_URL = "ws://127.0.0.1:43123/browser/v1";
+    const state = document.getElementById("state");
+    const events = document.getElementById("events");
+    const connectButton = document.getElementById("connect");
+    const reconnectButton = document.getElementById("reconnect");
+    const sendButton = document.getElementById("send");
+    const closeButton = document.getElementById("close");
+    let socket;
+    let opened = false;
+    let generation = 0;
+    let successfulGeneration = false;
+
+    function report(next, detail) {
+      state.textContent = next;
+      events.textContent += `${new Date().toISOString()} ${next}${detail ? `: ${detail}` : ""}\n`;
+    }
+    function setButtons() {
+      sendButton.disabled = !opened;
+      closeButton.disabled = !socket || socket.readyState > WebSocket.OPEN;
+    }
+    function connectSocket(isReconnect) {
+      const previous = socket;
+      const thisGeneration = ++generation;
+      const reconnecting = isReconnect && successfulGeneration;
+      socket = undefined;
+      opened = false;
+      setButtons();
+      if (previous && previous.readyState < WebSocket.CLOSING) previous.close();
+      report(reconnecting ? "reconnecting" : "connecting");
+      let connection;
+      try {
+        connection = new WebSocket(LOOPBACK_WS_URL);
+      } catch (error) {
+        if (thisGeneration === generation) report("error", "WebSocket constructor failed");
+        return;
+      }
+      socket = connection;
+      connection.binaryType = "arraybuffer";
+      connection.onopen = () => {
+        if (thisGeneration !== generation) return;
+        opened = true;
+        successfulGeneration = true;
+        report(reconnecting ? "reconnected" : "open");
+        setButtons();
+      };
+      connection.onmessage = (event) => {
+        if (thisGeneration !== generation) return;
+        const bytes = event.data instanceof ArrayBuffer ? new Uint8Array(event.data) : null;
+        report(bytes ? "binary echo" : "error", bytes ? `${bytes.byteLength} bytes` : "non-binary frame");
+      };
+      connection.onerror = () => {
+        if (thisGeneration === generation) report("error", "WebSocket connection failed");
+      };
+      connection.onclose = (event) => {
+        if (thisGeneration !== generation) return;
+        report("closed", `code ${event.code}`);
+        opened = false;
+        socket = undefined;
+        setButtons();
+      };
+      setButtons();
+    }
+    connectButton.onclick = () => connectSocket(false);
+    reconnectButton.onclick = () => connectSocket(true);
+    sendButton.onclick = () => {
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        report("error", "binary send requested while closed");
+        setButtons();
+        return;
+      }
+      try {
+        socket.send(new TextEncoder().encode("browser-connectivity"));
+      } catch (error) {
+        report("error", "binary send failed");
+      }
+    };
+    closeButton.onclick = () => {
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        report("error", "close requested while closed");
+        setButtons();
+        return;
+      }
+      try {
+        socket.close(1000, "probe complete");
+      } catch (error) {
+        report("error", "close failed");
+      }
+    };
+    report("ready", "press connect");
+  </script>
+</body>
+</html>

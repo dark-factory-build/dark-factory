@@ -276,6 +276,90 @@ fi
 grep -Fq 'unsafe lock object path' "$temporary/initial-symlink.stderr" || fail "initial symlink refusal was unexplained"
 rm -f "$lock_path"
 
+# A retiring owner may remove its lock object after this contender's mkdir
+# loses but before the contender validates the existing path. Force both
+# directions: the object existed at precheck, or another contender created it
+# only after precheck. Both completed handoffs retry once; the symlink case
+# above still fails closed.
+exercise_disappearing_lock() {
+    disappearing_case=$1
+    disappearing_marker="$temporary/disappearing-$disappearing_case-observed"
+    if [ "$disappearing_case" = existing ]; then
+        mkdir "$lock_path"
+        : >"$lock_path/descriptor"
+    fi
+    (
+        cd "$second"
+        LOCAL_CI_LEASE_HELPER=$PWD/scripts/local-ci-lease.sh
+        . "$LOCAL_CI_LEASE_HELPER"
+        mkdir() {
+            if [ "${1-}" = "$lock_path" ] && [ ! -f "$disappearing_marker" ]; then
+                if [ ! -d "$1" ]; then
+                    /bin/mkdir "$1"
+                    : >"$1/descriptor"
+                fi
+                : >"$disappearing_marker"
+                /bin/rm -f "$1/descriptor"
+                /bin/rmdir "$1"
+                return 1
+            fi
+            /bin/mkdir "$@"
+        }
+        local_ci_lease_setup_paths
+        local_ci_lease_reported_wait=0
+        local_ci_lease_acquire_lock_object
+    ) || fail "$disappearing_case disappearing lock-object handoff was refused"
+    [ -f "$disappearing_marker" ] || fail "$disappearing_case disappearing lock-object seam was not exercised"
+    [ -f "$lock_path/descriptor" ] || fail "$disappearing_case disappearing lock-object contender did not reacquire"
+    /bin/rm -f "$lock_path/descriptor"
+    /bin/rmdir "$lock_path"
+}
+exercise_disappearing_lock existing
+exercise_disappearing_lock absent
+
+# A persistent absent-path failure and alternating absent/present churn each
+# get one disappearance retry for the entire acquisition, not one per cycle.
+exercise_bounded_mkdir_failure() {
+    mkdir_failure_mode=$1
+    mkdir_failure_expected=$2
+    mkdir_failure_attempts="$temporary/mkdir-failure-$mkdir_failure_mode-attempts"
+    mkdir_failure_stderr="$temporary/mkdir-failure-$mkdir_failure_mode.stderr"
+    (
+        cd "$second"
+        LOCAL_CI_LEASE_HELPER=$PWD/scripts/local-ci-lease.sh
+        . "$LOCAL_CI_LEASE_HELPER"
+        mkdir() {
+            if [ "${1-}" != "$lock_path" ]; then
+                /bin/mkdir "$@"
+                return
+            fi
+            printf 'attempt\n' >>"$mkdir_failure_attempts"
+            mkdir_failure_attempt=$(wc -l <"$mkdir_failure_attempts" | tr -d ' ')
+            if [ "$mkdir_failure_mode" = alternating ]; then
+                /bin/mkdir "$1"
+                : >"$1/descriptor"
+                if [ "$mkdir_failure_attempt" -ne 2 ]; then
+                    /bin/rm -f "$1/descriptor"
+                    /bin/rmdir "$1"
+                fi
+            fi
+            return 1
+        }
+        local_ci_lease_setup_paths
+        local_ci_lease_reported_wait=0
+        if local_ci_lease_acquire_lock_object 2>"$mkdir_failure_stderr"; then
+            exit 1
+        fi
+    ) || fail "$mkdir_failure_mode mkdir failure was not bounded"
+    [ "$(wc -l <"$mkdir_failure_attempts" | tr -d ' ')" -eq "$mkdir_failure_expected" ] \
+        || fail "$mkdir_failure_mode mkdir failure retry count changed"
+    grep -Fq 'after a completed handoff retry' "$mkdir_failure_stderr" \
+        || fail "$mkdir_failure_mode mkdir failure was unexplained"
+    assert_absent "$lock_path"
+}
+exercise_bounded_mkdir_failure persistent 2
+exercise_bounded_mkdir_failure alternating 3
+
 # The wrapper owns its detached session leader before the command is released.
 # Interrupt that exact PID-published/pre-trap seam and prove the direct child,
 # handshake paths, and empty lock object cannot strand the next contender.

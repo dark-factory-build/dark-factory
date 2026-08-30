@@ -12,6 +12,7 @@ set -eu
 repository_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 workflow="$repository_root/.github/workflows/ci.yml"
 publisher="$repository_root/scripts/github-repo-settings.sh"
+issue_importer="$repository_root/scripts/import-issues.sh"
 
 grep -Fq '  required:' "$workflow"
 # Extracted, not grepped. The free-floating `grep -Fq '    if: always()'` this
@@ -33,7 +34,7 @@ if [ "$job_if" != "always()" ]; then
     echo "the required job does not run on every event" >&2
     exit 1
 fi
-grep -Fq '    needs: [checks, linux, control-plane, review]' "$workflow"
+grep -Fq '    needs: [checks, control-plane, review]' "$workflow"
 # The condition is extracted from the step, not grepped from the file. A
 # free-floating `grep` is satisfied by the string appearing in a comment, so it
 # passes while the step's real `if:` has been changed to `false` -- a gate that
@@ -133,12 +134,18 @@ if [ "$verdict_step_keys" != "$(printf '%s\n' if run)" ]; then
     echo "  found: $(printf '%s' "${verdict_step_keys:-(none)}" | tr '\n' ' ')" >&2
     exit 1
 fi
-grep -Fq "if: needs.checks.result != 'success' || needs.linux.result != 'success' || needs.control-plane.result != 'success'" "$workflow"
+grep -Fq "if: needs.checks.result != 'success' || needs.control-plane.result != 'success'" "$workflow"
 grep -Fq '"context": "required"' "$publisher"
 # Bound to GitHub Actions (integration 15368): without the binding, any
 # installed integration could post a green `required` status and satisfy the
 # ruleset.
 grep -Fq '"integration_id": 15368' "$publisher"
+grep -Fq 'area:console|1D76DB|loopback web console, browser protocol, client, and UI' "$publisher"
+grep -Fq '"TUI") echo "area:console"' "$issue_importer"
+if grep -Eq 'area:tui|factory-tui' "$publisher" "$issue_importer"; then
+    echo "repository label surfaces still name the retired TUI" >&2
+    exit 1
+fi
 # The review gate runs only on `merge_group`, so these two are load-bearing for
 # rule 2's enforcement and not merely for CI cost: without the queue the gate
 # never runs, and under `HEADGREEN` only the last entry of a group is required,

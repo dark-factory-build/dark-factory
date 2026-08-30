@@ -2,60 +2,51 @@
 set -eu
 
 script_dir=$(CDPATH='' cd -- "$(dirname "$0")" && pwd)
-mode=${1:-macos}
-test "$#" -le 1 || {
-    echo "usage: scripts/local-ci.sh [macos|--linux-source]" >&2
+test "$#" -eq 0 || {
+    echo "usage: scripts/local-ci.sh" >&2
     exit 2
 }
-case "$mode" in
-    macos)
-        if [ "${DARK_FACTORY_LOCAL_CI_LEASE_HELD-}" != 1 ]; then
-            exec "$script_dir/with-local-ci-lease.sh" "$script_dir/local-ci.sh"
-        fi
-        ;;
-    --linux-source) ;;
-    *)
-        echo "unknown local-ci mode: $mode" >&2
-        exit 2
-        ;;
-esac
+if [ "${DARK_FACTORY_LOCAL_CI_LEASE_HELD-}" != 1 ]; then
+    exec "$script_dir/with-local-ci-lease.sh" "$script_dir/local-ci.sh"
+fi
 
 # Keep lease diagnostics attributable to the invoking live task, then make
 # every gate child independent of that task's runtime and identity overrides.
 # shellcheck source=scripts/local-ci-environment.sh
 . "$script_dir/local-ci-environment.sh"
 
-case "$mode" in
-    macos)
-        ./scripts/test-local-ci-lease.sh
-        ./scripts/test-local-ci-lease-mutations.sh
-        ./scripts/check-toolchain-pins.sh
-        # These fixtures exercise the macOS release/publisher contract. They
-        # are intentionally outside the Linux source-preview gate: Linux
-        # archive and installer support belongs to #142/#143.
-        ./scripts/test-prepare-release-source.sh
-        ./scripts/test-publish-release.sh
-        ./scripts/test-package-release.sh
-        ./scripts/test-macos-launchd-release-proof.sh
-        ;;
-    --linux-source)
-        ./scripts/check-toolchain-pins.sh
-        ;;
-esac
+./scripts/test-local-ci-lease.sh
+./scripts/test-local-ci-lease-mutations.sh
+./scripts/check-toolchain-pins.sh
+# These fixtures exercise the macOS release/publisher contract. Linux archive
+# and installer support belongs to #142/#143, after the Go daemon reaches
+# Linux at all.
+./scripts/test-prepare-release-source.sh
+./scripts/test-publish-release.sh
+./scripts/test-package-release.sh
 
-# Measure after the macOS repository lease is held, so another linked worktree
+# Measure after the repository lease is held, so another linked worktree
 # cannot begin a broad gate between this read-only preflight and our compile.
 ./scripts/test-local-ci-environment.sh
 ./scripts/test-new-worktree.sh
-./scripts/check-build-headroom.sh
-./scripts/test-build-headroom.sh
 
-# The authoritative source gate is shared by macOS and Linux. Keep this
-# seam explicit so a platform mode cannot silently omit a core check.
+# The shared shell-fixture gate is platform-neutral. Keep this seam explicit
+# so a future platform split cannot silently omit a core check.
 ./scripts/test-github-step-summary.sh
 ./scripts/test-verify-adversarial-review.sh
 ./scripts/test-inline-chokepoint.sh
-cargo +1.88.0 fmt --all -- --check
-cargo +1.88.0 clippy --locked --workspace --all-targets --all-features -- -D warnings
-cargo +1.88.0 test --locked --workspace -- --test-threads=1
+./scripts/test-go-e2e-tools.sh
+./scripts/test-cloudflare-env.sh
+./scripts/test-bootstrap-maintainer-v2.sh
+# Keep repository-policy and source-shape assertions in the authoritative
+# gate. They prevent an edited job graph from silently orphaning either proof.
+./scripts/test-repository-settings.sh
+./scripts/test-local-ci-mode.sh
+
+# The authoritative source gate is the Go gate: gofmt, vet, the short serial
+# suite, one TypeScript client proof, and the normal browser, daemon and
+# service E2Es, all inside the isolated stage environment. The lease held above
+# covers the whole gate, so the owned stage runs directly instead of
+# re-entering scripts/go-ci.sh.
+/bin/sh "$script_dir/go-ci-owned.sh"
 git diff --check

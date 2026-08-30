@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import { once } from 'node:events';
 import { request as httpRequest } from 'node:http';
-import { createServer } from 'node:net';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -125,19 +124,19 @@ test('the built Worker enforces the journal contract in workerd', async () => {
 });
 
 async function startWorker(persistence, configured) {
-  const port = await freePort();
-  const wrangler = join(process.cwd(), 'node_modules', '.bin', 'wrangler');
+  const wrangler = join(process.cwd(), 'node_modules', 'wrangler', 'bin', 'wrangler.js');
+  const cleanEnvironment = join(process.cwd(), 'scripts', 'with-clean-wrangler-env.sh');
   const args = [
     'dev',
     '--local',
     '--ip',
     '127.0.0.1',
     '--port',
-    String(port),
+    '0',
     '--persist-to',
     persistence,
     '--log-level',
-    'error',
+    'log',
   ];
   if (configured) {
     args.push(
@@ -149,9 +148,18 @@ async function startWorker(persistence, configured) {
       `DARK_FACTORY_MAINTAINER_APP_ID:${APP_ID}`,
     );
   }
-  const child = spawn(wrangler, args, {
+  const child = spawn(cleanEnvironment, [process.execPath, wrangler, ...args], {
     cwd: process.cwd(),
-    env: { ...process.env, NO_COLOR: '1' },
+    env: {
+      PATH: process.env.PATH ?? '/usr/bin:/bin',
+      HOME: '/operator-home',
+      TMPDIR: '/operator-tmp',
+      CLOUDFLARE_API_TOKEN: 'ambient-token-must-not-cross',
+      CLOUDFLARE_ACCOUNT_ID: 'ambient-account-must-not-cross',
+      WRANGLER_AUTH_TOKEN: 'ambient-oauth-must-not-cross',
+      XDG_CONFIG_HOME: '/operator-config',
+      SSH_AUTH_SOCK: '/operator-keychain-socket',
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let logs = '';
@@ -161,10 +169,15 @@ async function startWorker(persistence, configured) {
   child.stderr.on('data', (chunk) => {
     logs = `${logs}${chunk}`.slice(-16_384);
   });
-  const origin = `http://127.0.0.1:${port}`;
   for (let attempt = 0; attempt < 120; attempt += 1) {
     if (child.exitCode !== null) {
       throw new Error(`wrangler exited before readiness:\n${logs}`);
+    }
+    const ready = logs.match(/Ready on (http:\/\/127\.0\.0\.1:\d+)/);
+    const origin = ready?.[1];
+    if (!origin) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      continue;
     }
     try {
       const response = await fetch(`${origin}/healthz`);
@@ -182,23 +195,13 @@ async function startWorker(persistence, configured) {
 
 async function stop(child) {
   if (child.exitCode !== null) return;
-  child.kill('SIGTERM');
   const exited = once(child, 'exit');
+  child.kill('SIGTERM');
   const timeout = new Promise((resolve) => setTimeout(resolve, 5_000, 'timeout'));
   if ((await Promise.race([exited, timeout])) === 'timeout') {
     child.kill('SIGKILL');
-    await once(child, 'exit');
+    await exited;
   }
-}
-
-async function freePort() {
-  const server = createServer();
-  server.listen(0, '127.0.0.1');
-  await once(server, 'listening');
-  const { port } = server.address();
-  server.close();
-  await once(server, 'close');
-  return port;
 }
 
 async function json(origin, path) {

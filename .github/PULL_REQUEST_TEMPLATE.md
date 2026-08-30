@@ -12,7 +12,8 @@
 - [ ] Load-bearing paths touched (queue/attempt durability, event projection,
       resource finalization, Change ownership, crash/restart) have a causal test
       that would have caught the bug
-- [ ] `README.md` / `ARCHITECTURE.md` / `docs/` updated in this PR, not later
+- [ ] Relevant `README.md` / `ARCHITECTURE.md` / `docs/` behavior updated in
+      this PR, not later
 - [ ] The codebase is smaller or simpler than before, not just working
       (dead paths deleted, duplicates collapsed, no speculative abstractions,
       no silent fallbacks)
@@ -34,7 +35,7 @@ Reviewer, tick as you go:
 - [ ] **Simplification**: looked for a smaller change that does the same
       thing; nothing added that one implementation doesn't need
 - [ ] **Security**: nothing widens what an admitted attempt, a local caller, or
-      an untrusted PR can reach (socket/file modes, hook token, sandbox, CI
-      runner)
+      an untrusted PR can reach (credentials, socket/file modes, process
+      authority, browser capabilities, CI runner)
 - [ ] **Docs**: what the docs now say matches what the code now does
 - [ ] Findings posted as comments; author responses re-checked

@@ -102,8 +102,13 @@ grep -F 'if [ -x ./scripts/github-step-summary.sh ]; then' .github/workflows/rel
 grep -F 'unavailable before checkout' .github/workflows/ci.yml >/dev/null
 grep -F 'unavailable before checkout' .github/workflows/release.yml >/dev/null
 grep -F 'run: ./scripts/local-ci.sh' .github/workflows/ci.yml >/dev/null
-grep -F 'cargo +1.88.0 build --locked --release --workspace --target "$ARM_TARGET"' .github/workflows/release.yml >/dev/null
-grep -F 'cargo +1.88.0 build --locked --release --workspace --target "$INTEL_TARGET"' .github/workflows/release.yml >/dev/null
+grep -F 'runs-on: macos-15' .github/workflows/release.yml >/dev/null
+grep -F 'CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 GOENV=off GOTOOLCHAIN=go1.27.0 GOAUTH=off' .github/workflows/release.yml >/dev/null
+grep -F 'CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 GOENV=off GOTOOLCHAIN=go1.27.0 GOAUTH=off' .github/workflows/release.yml >/dev/null
+if grep -Fq 'runs-on: dark-factory-mac' .github/workflows/release.yml; then
+    echo 'release workflow retained the persistent credential-bearing runner' >&2
+    exit 1
+fi
 grep -F '"$PUBLISHER" "$TAG" "$SOURCE_SHA" "$GITHUB_REPOSITORY" dist/*' .github/workflows/release.yml >/dev/null
 grep -F 'if: always()' .github/workflows/ci.yml >/dev/null
 grep -F 'if: always()' .github/workflows/release.yml >/dev/null

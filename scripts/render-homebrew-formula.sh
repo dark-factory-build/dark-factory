@@ -4,10 +4,13 @@
 set -eu
 
 tag="${1:-}"
-checksums="${2:-}"
-repository="${3:-dark-factory-build/dark-factory}"
-if [ -z "$tag" ] || [ -z "$checksums" ] || [ "$#" -gt 3 ]; then
-    echo "usage: scripts/render-homebrew-formula.sh <tag> <SHA256SUMS> [<owner/repo>]" >&2
+source_sha="${2:-}"
+arm_build_id="${3:-}"
+intel_build_id="${4:-}"
+checksums="${5:-}"
+repository="${6:-dark-factory-build/dark-factory}"
+if [ -z "$tag" ] || [ -z "$source_sha" ] || [ -z "$arm_build_id" ] || [ -z "$intel_build_id" ] || [ -z "$checksums" ] || [ "$#" -gt 6 ]; then
+    echo "usage: scripts/render-homebrew-formula.sh <tag> <source-sha> <arm-build-id> <intel-build-id> <SHA256SUMS> [<owner/repo>]" >&2
     exit 1
 fi
 [ -f "$checksums" ] || { echo "checksum file not found: $checksums" >&2; exit 1; }
@@ -18,6 +21,15 @@ esac
 case "$tag" in
     *[!A-Za-z0-9._-]*) echo "release tag has unsupported characters: $tag" >&2; exit 1 ;;
 esac
+valid_lower_hex() {
+    value=$1
+    length=$2
+    case "$value" in *[!0-9a-f]*) return 1 ;; esac
+    [ "${#value}" -eq "$length" ] && [ "$value" != "$(printf '%*s' "$length" '' | tr ' ' 0)" ]
+}
+valid_lower_hex "$source_sha" 40 || { echo "invalid release source" >&2; exit 1; }
+valid_lower_hex "$arm_build_id" 64 || { echo "invalid arm64 build ID" >&2; exit 1; }
+valid_lower_hex "$intel_build_id" 64 || { echo "invalid Intel build ID" >&2; exit 1; }
 case "$repository" in
     */*) ;;
     *) echo "repository must be owner/repo" >&2; exit 1 ;;
@@ -72,9 +84,17 @@ cat <<RUBY
 # typed: strict
 # frozen_string_literal: true
 
+require "json"
+
 # Homebrew bootstrap for the Dark Factory runtime.
 class DarkFactory < Formula
-  desc "Terminal-first runtime for persistent coding-agent teams"
+  SOURCE_SHA = "$source_sha"
+  BUILD_IDS = {
+    "darwin/arm64" => "$arm_build_id",
+    "darwin/amd64" => "$intel_build_id",
+  }.freeze
+
+  desc "Web-first local runtime for persistent coding-agent teams"
   homepage "https://github.com/$repository"
   url "https://github.com/$repository/releases/download/$tag/$manifest"
 ${version_stanza}  sha256 "$manifest_sha"
@@ -95,30 +115,33 @@ ${version_stanza}  sha256 "$manifest_sha"
 
   def install
     resource("binaries").stage do
-      bin.install "factoryd", "factory-runner", "factoryctl", "factory-tui"
+      bin.install "factoryd", "factory-runner", "factoryctl"
     end
   end
 
   def caveats
     <<~EOS
-      Homebrew installs the bootstrap commands; it does not own the running factory.
-      Run \`factoryctl init\` to install the active runtime and optional launchd job
-      under ~/.dark-factory. Do not use \`brew services\` for Dark Factory.
+      Homebrew installs the three Dark Factory commands; it does not own the
+      running factory. Run \`factoryctl init --home ABSOLUTE\` to create a fresh
+      home. This formula does not install or remove a launchd job; do not use
+      \`brew services\` for Dark Factory.
 
-      \`brew upgrade\` updates this bootstrap copy. Use
-      \`factoryctl update --install\` to atomically update the active runtime while
-      preserving live sessions and rollback binaries.
+      \`brew upgrade\` replaces these commands but never mutates a running home.
+      There is no in-runtime updater or rollback-version store.
 
-      \`brew uninstall dark-factory\` removes only the bootstrap commands. The
-      launchd job, active runtime, and state under ~/.dark-factory remain. Follow
-      https://github.com/$repository/blob/$tag/launchd/README.md#uninstall to stop
-      sessions and unload the service safely before removing anything else.
+      \`brew uninstall dark-factory\` removes only the commands. Stop any daemon
+      started outside Homebrew before removing a retained factory home.
     EOS
   end
 
   test do
-    %w[factoryd factory-runner factoryctl factory-tui].each do |name|
+    %w[factoryd factory-runner factoryctl].each do |name|
       assert_equal "#{name} #{version}", shell_output("#{bin}/#{name} --version").strip
+      identity = JSON.parse(shell_output("#{bin}/#{name} --build-identity"))
+      assert_equal version.to_s, identity.fetch("version")
+      assert_equal SOURCE_SHA, identity.fetch("source")
+      assert_equal BUILD_IDS.fetch(identity.fetch("target")), identity.fetch("build_id")
+      assert_equal true, identity.fetch("release")
     end
   end
 end

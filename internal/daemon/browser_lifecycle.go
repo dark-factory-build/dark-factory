@@ -1,0 +1,164 @@
+package daemon
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/dark-factory-build/dark-factory/internal/browser"
+	"github.com/dark-factory-build/dark-factory/internal/kernel"
+)
+
+const browserCleanupTimeout = 5 * time.Second
+
+var ErrBrowserRuntimeCleanup = errors.New("daemon: browser runtime cleanup unresolved")
+
+// BrowserRuntime owns the loopback listener, every accepted WebSocket and
+// every Store-watch subscription created through its backend. Close marks the
+// runtime unavailable, then performs the only safe order: stop and join the
+// transport, cancel and join backend subscriptions, and invalidate unredeemed
+// challenges. It unregisters only after every cleanup succeeds; unresolved
+// cleanup stays registered and visible to later daemon shutdown calls. The
+// caller may close the Store only after Close returns.
+type BrowserRuntime struct {
+	daemon  *Daemon
+	server  *browser.Server
+	backend *browserBackend
+	origins []string
+	closing bool
+
+	closeOnce sync.Once
+	closeErr  error
+}
+
+// ListenBrowser starts the state-only browser-v1 surface. Address is still
+// validated by internal/browser and therefore accepts only exact IPv4
+// loopback. Terminal and HumanRequest effects are not part of this slice.
+func (daemon *Daemon) ListenBrowser(address string, allowedOrigins []string) (*BrowserRuntime, error) {
+	if daemon == nil || daemon.store == nil {
+		return nil, fmt.Errorf("%w: invalid browser daemon", kernel.ErrInvalidValue)
+	}
+	daemon.browserMu.Lock()
+	defer daemon.browserMu.Unlock()
+	if daemon.browserClosing {
+		return nil, browser.ErrUnauthorized
+	}
+	backend, err := newProductionBrowserBackend(daemon)
+	if err != nil {
+		return nil, err
+	}
+	server, err := browser.Listen(browser.Config{Address: address, AllowedOrigins: allowedOrigins, Backend: backend})
+	if err != nil {
+		_ = backend.close()
+		return nil, err
+	}
+	runtime := &BrowserRuntime{daemon: daemon, server: server, backend: backend, origins: append([]string(nil), allowedOrigins...)}
+	if daemon.browsers == nil {
+		daemon.browsers = make(map[*BrowserRuntime]struct{})
+	}
+	daemon.browsers[runtime] = struct{}{}
+	return runtime, nil
+}
+
+func (runtime *BrowserRuntime) Addr() string {
+	if runtime == nil || runtime.server == nil {
+		return ""
+	}
+	return runtime.server.Addr()
+}
+
+// Done closes when the owned browser server's listener stops. A nil or
+// invalid runtime is already done, matching the server's nil semantics.
+func (runtime *BrowserRuntime) Done() <-chan struct{} {
+	if runtime == nil || runtime.server == nil {
+		done := make(chan struct{})
+		close(done)
+		return done
+	}
+	return runtime.server.ServeDone()
+}
+
+// Err reports an unexpected owned browser server failure, or nil after a
+// normal close. Invalid runtimes have no server failure to report.
+func (runtime *BrowserRuntime) Err() error {
+	if runtime == nil || runtime.server == nil {
+		return nil
+	}
+	return runtime.server.Err()
+}
+
+func (runtime *BrowserRuntime) Close() error {
+	if runtime == nil {
+		return nil
+	}
+	if runtime.daemon != nil {
+		// Mark the runtime unavailable under the same gate OpenBrowser uses, but
+		// retain registry ownership until the once-owned cleanup is complete.
+		runtime.daemon.browserLifecycleMu.Lock()
+		runtime.daemon.browserMu.Lock()
+		runtime.closing = true
+		runtime.daemon.browserMu.Unlock()
+		runtime.daemon.browserLifecycleMu.Unlock()
+	}
+	runtime.closeOnce.Do(func() {
+		var closeErrors []error
+		if runtime.server != nil {
+			closeErrors = append(closeErrors, runtime.server.Close())
+		}
+		if runtime.backend != nil {
+			closeErrors = append(closeErrors, runtime.backend.close())
+		}
+		if runtime.daemon != nil && runtime.daemon.store != nil && runtime.backend != nil {
+			cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), browserCleanupTimeout)
+			cleanupErr := runtime.daemon.store.InvalidateBrowserPairingChallenges(cleanupContext, runtime.backend.boot)
+			cleanupCancel()
+			if cleanupErr != nil {
+				closeErrors = append(closeErrors, errors.Join(ErrBrowserRuntimeCleanup, cleanupErr))
+			}
+		}
+		runtime.closeErr = errors.Join(closeErrors...)
+		if runtime.daemon != nil && runtime.closeErr == nil {
+			runtime.daemon.browserMu.Lock()
+			delete(runtime.daemon.browsers, runtime)
+			runtime.daemon.browserMu.Unlock()
+		}
+	})
+	return runtime.closeErr
+}
+
+func (daemon *Daemon) closeBrowsers() error {
+	if daemon == nil {
+		return nil
+	}
+	// This gate is the linearization point shared with OpenBrowser. It is held
+	// only through the readiness/close decision, never across transport
+	// callbacks that may re-enter daemon code.
+	daemon.browserLifecycleMu.Lock()
+	daemon.browserMu.Lock()
+	daemon.browserClosing = true
+	runtimes := make([]*BrowserRuntime, 0, len(daemon.browsers))
+	for runtime := range daemon.browsers {
+		runtimes = append(runtimes, runtime)
+	}
+	daemon.browserMu.Unlock()
+	daemon.browserLifecycleMu.Unlock()
+	var closeErrors []error
+	for _, runtime := range runtimes {
+		closeErrors = append(closeErrors, runtime.Close())
+	}
+	return errors.Join(closeErrors...)
+}
+
+// closeClient terminates all existing sockets for a client after a durable
+// revocation has committed. The owner-only revocation lane must use the same
+// backend client gate before calling this non-reentrant transport callback.
+func (runtime *BrowserRuntime) closeClient(id kernel.BrowserClientID) error {
+	if runtime == nil || runtime.server == nil {
+		return nil
+	}
+	var raw [16]byte
+	copy(raw[:], id.Bytes())
+	return runtime.server.CloseClient(raw)
+}

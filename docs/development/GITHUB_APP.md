@@ -54,7 +54,7 @@ but never keys, installation mappings, permission revisions, operation journal
 namespaces, or audit identities.
 
 The broker implementation lives in the standalone `control-plane/` crate, not
-in the pure-Rust local-runtime workspace or `factoryd`. Its webhook remains a
+in the local-runtime workspace or `factoryd`. Its webhook remains a
 versioned, signed, inert maintainer `ping` boundary. With the App-authority
 group configured, readiness and every ping also prove that the broker can sign
 an App JWT and find the exact selected-repository installation with the
@@ -106,7 +106,8 @@ required Cloudflare secrets. There is no database URL, owner integration,
 runtime role, provider API key, or ambient authentication fallback.
 
 `wrangler secret put` deploys immediately and is not an acceptable staging
-step. The separate live runbook must stage an exact version and its secrets
+step. The [deployment and local-credential runbook](WORKFLOW.md#cloudflare-credentials)
+must stage an exact version and its secrets
 without traffic, verify names and bindings without reading values, and add the
 route only after independent adversarial `ALLOW`. This is operator deployment
 authority, not provider or task authority. Product webhook intake and
@@ -122,6 +123,18 @@ sessions, credential helpers, or the macOS keychain. An unavailable or denied
 broker, including a `403`, fails closed. An effect with an uncertain result is
 indeterminate until the typed reconciliation operation proves its outcome; it
 is never retried through personal authority.
+
+Every deserialized GitHub response models only fields GitHub returns to *this*
+App's permission set. That is a contract about live responses, not a style
+preference: a required field GitHub omits makes an otherwise successful 200
+fail to deserialize, and the caller sees an opaque "authority is unavailable"
+naming no endpoint. `delete_branch_on_merge` was exactly this and disabled all
+eleven repository-observing operations until it was removed -- three of them
+through `verify_workflow_pr` rather than directly. A source-level assertion
+that such a read exists proves nothing about whether it works, so the shape
+contract is proven by deserializing a captured real body instead. The tree
+carries that proof for `RepositoryMetadata` only; the other response types have
+no such fixture, so treat them as unproven rather than as checked.
 
 The live maintainer broker exposes only these repository-scoped operations:
 
@@ -217,10 +230,12 @@ repository, prompt, worktree, log, or SQLite state.
 Existing refs are never force-updated or replaced. Publication may adopt only
 the exact expected generated ref/commit and refuses the live default branch;
 any different target is a conflict.
-GitHub's required `delete_branch_on_merge` setting removes the source ref as
-part of merge processing. Publication, PR creation, enqueue, and merge
-observation each re-read that setting before acting. The broker exposes no
-read-then-delete ref mutation.
+GitHub's `delete_branch_on_merge` setting removes the source ref as part of
+merge processing. The broker does not read that setting: GitHub returns it only
+to a caller holding Administration access, which this broker deliberately never
+requests, so every read of it was an assertion about a value the App cannot
+observe. Source-branch cleanup is the repository owner's setting, and the broker
+exposes no read-then-delete ref mutation either way.
 This maintainer surface is permanent official coordinator infrastructure, not
 executable intake and not the future runtime broker.
 

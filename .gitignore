@@ -17,3 +17,6 @@ docs/internal/
 .wrangler/
 node_modules/
 .tools/
+/factoryd
+/factoryctl
+/factory-runner

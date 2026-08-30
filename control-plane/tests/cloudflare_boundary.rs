@@ -396,10 +396,16 @@ fn github_refusals_stay_determinate() {
     // A branch with no queue fails closed instead of falling back to a merge.
     assert!(!github_app.contains("/merge\""));
     assert!(!mcp.contains("merge_pull_request_at_head"));
-    // GitHub owns atomic post-merge cleanup. There is no unsafe read-then-delete
-    // ref mutation in this surface.
-    assert!(github_app.contains("delete_branch_on_merge"));
-    assert!(github_app.contains("require_branch_cleanup(&repository)?;"));
+    // GitHub owns atomic post-merge cleanup, through a repository setting this
+    // App cannot read and never acts on. The absence of a ref mutation is a
+    // real property of this surface and is asserted here. That the App does not
+    // *require* the setting is not: it is proven by
+    // `repository_metadata_parses_a_real_body_without_administration_access`,
+    // which fails the moment the field is required again. The two greps that
+    // used to stand here asserted the presence of that read for months while it
+    // was disabling every repository observation -- a grep over the source
+    // cannot tell a working contract from a broken one, and cannot tell code
+    // from a comment explaining why the code is gone.
     assert!(!github_app.contains("delete_generated_branch"));
     // Publication, PR creation, and enqueue derive the default branch from
     // GitHub rather than trusting a caller-supplied branch name.

@@ -207,10 +207,9 @@ fn tools() -> Value {
                 "repository_id": {"type": "integer"},
                 "permission_revision": {"type": "string"},
                 "default_branch": {"type": "string"},
-                "default_sha": {"type": "string"},
-                "delete_branch_on_merge": {"type": "boolean", "const": true}
+                "default_sha": {"type": "string"}
             },
-            "required": ["repository", "repository_id", "permission_revision", "default_branch", "default_sha", "delete_branch_on_merge"],
+            "required": ["repository", "repository_id", "permission_revision", "default_branch", "default_sha"],
             "additionalProperties": false
         },
         "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
@@ -685,8 +684,7 @@ async fn call_tool(id: Value, request: &Map<String, Value>, mcp: &McpState) -> R
                         "repository_id": result.repository_id,
                         "permission_revision": mcp.app.permission_revision(),
                         "default_branch": result.default_branch,
-                        "default_sha": result.default_sha,
-                        "delete_branch_on_merge": result.delete_branch_on_merge
+                        "default_sha": result.default_sha
                     }),
                     "Dark Factory Maintainer authority and default head are ready.",
                 ),
