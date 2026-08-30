@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ncruces/go-sqlite3"
 	sqliteDriver "github.com/ncruces/go-sqlite3/driver"
@@ -628,4 +629,49 @@ func TestConcreteStoreAmbiguousReadLifecycleResolvesByAutocommit(t *testing.T) {
 			assertFaultReaderDisposition(t, store, plan, test.wantRetained)
 		})
 	}
+}
+
+func TestConcreteStoresReturnBusyAfterBoundedWait(t *testing.T) {
+	first, path := newTestStore(t)
+	defer first.Close()
+	second, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+
+	owner, err := first.beginValidatedWrite(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+
+	started := time.Now()
+	contender, err := second.beginValidatedWrite(context.Background())
+	elapsed := time.Since(started)
+	if contender != nil {
+		contender.Close()
+		t.Fatal("second store acquired the write reservation")
+	}
+	if !errors.Is(err, ErrBusy) {
+		t.Fatalf("second store error = %v, want ErrBusy", err)
+	}
+	lower := time.Duration(busyMilliseconds-500) * time.Millisecond
+	upper := time.Duration(busyMilliseconds+750) * time.Millisecond
+	if elapsed < lower || elapsed > upper {
+		t.Fatalf("busy wait = %s, want %s..%s", elapsed, lower, upper)
+	}
+
+	if err := owner.Rollback(nil); err != nil {
+		t.Fatal(err)
+	}
+	owner.Close()
+	retry, err := second.beginValidatedWrite(context.Background())
+	if err != nil {
+		t.Fatalf("second store after release: %v", err)
+	}
+	if err := retry.Rollback(nil); err != nil {
+		t.Fatal(err)
+	}
+	retry.Close()
 }
