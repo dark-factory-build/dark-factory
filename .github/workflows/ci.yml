@@ -81,14 +81,24 @@ jobs:
 
       # The Go gate pins /opt/homebrew/bin/go and /opt/homebrew/bin/gofmt by
       # identity, and its web stage needs Node 22+ with Corepack. The owned
-      # runner already satisfies both, so this step is a no-op there; the
-      # hosted runner installs them through Homebrew. GOTOOLCHAIN=local inside
-      # the gate then refuses any Go older than go.mod instead of silently
-      # downloading a different toolchain.
+      # runner already satisfies both, so this step is a no-op there; a hosted
+      # image with a stale preinstalled Go refreshes it through Homebrew.
+      # GOTOOLCHAIN=local inside the gate then refuses any version other than
+      # the exact go.mod pin instead of silently downloading a toolchain.
       - name: Provide the Homebrew Go and Node toolchains
         run: |
           set -euxo pipefail
-          [ -x /opt/homebrew/bin/go ] || brew install go
+          required_go=$(awk '$1 == "go" { print "go" $2 }' go.mod)
+          installed_go=$(/opt/homebrew/bin/go env GOVERSION 2>/dev/null || true)
+          if [ "$installed_go" != "$required_go" ]; then
+            brew update
+            if [ -x /opt/homebrew/bin/go ]; then
+              brew upgrade go
+            else
+              brew install go
+            fi
+          fi
+          test "$(/opt/homebrew/bin/go env GOVERSION)" = "$required_go"
           node_major=$(node -e 'console.log(process.versions.node.split(".")[0])' 2>/dev/null || echo 0)
           [ "$node_major" -ge 22 ] || brew install node
           /opt/homebrew/bin/go version
