@@ -213,9 +213,6 @@ jobs:
             DARK_FACTORY_MAINTAINER_APP_ID \
             DARK_FACTORY_MAINTAINER_PRIVATE_KEY_PKCS8 \
             DARK_FACTORY_MAINTAINER_PERMISSION_REVISION \
-            DARK_FACTORY_MAINTAINER_REPOSITORY \
-            DARK_FACTORY_MAINTAINER_REPOSITORY_OWNER_ID \
-            DARK_FACTORY_MAINTAINER_REPOSITORY_ID \
             DARK_FACTORY_MAINTAINER_OPERATOR_EMAIL_SHA256 \
             DARK_FACTORY_CLOUDFLARE_ACCESS_TEAM_DOMAIN \
             DARK_FACTORY_CLOUDFLARE_ACCESS_AUD
@@ -226,7 +223,7 @@ jobs:
             fi
           done
           [ "${missing}" -eq 0 ] || exit 1
-          echo "all eleven authority secrets are present on ${VERSION_ID}"
+          echo "all eight authority secrets are present on ${VERSION_ID}"
 
       - name: Promote the version to production traffic
         if: ${{ inputs.promote }}

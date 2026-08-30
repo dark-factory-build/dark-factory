@@ -119,9 +119,6 @@ fn optional_operation_authority(
         [
             optional_secret(env, github_app::PRIVATE_KEY_BINDING),
             optional_secret(env, github_app::PERMISSION_REVISION_BINDING),
-            optional_secret(env, github_app::REPOSITORY_BINDING),
-            optional_secret(env, github_app::REPOSITORY_OWNER_ID_BINDING),
-            optional_secret(env, github_app::REPOSITORY_ID_BINDING),
             optional_secret(env, access::OPERATOR_EMAIL_DIGEST_BINDING),
             optional_secret(env, access::TEAM_DOMAIN_BINDING),
             optional_secret(env, access::AUDIENCE_BINDING),
@@ -133,7 +130,7 @@ fn optional_operation_authority(
 #[cfg(any(target_arch = "wasm32", test))]
 fn operation_authority_from_values(
     app_id: i64,
-    values: [Option<String>; 8],
+    values: [Option<String>; 5],
     // Separate from the all-or-nothing group above: headless access is opt-in,
     // so its absence must leave the rest of the authority group configured
     // rather than tipping the whole surface inactive.
@@ -145,9 +142,6 @@ fn operation_authority_from_values(
     let [
         Some(private_key),
         Some(permission_revision),
-        Some(repository),
-        Some(owner_id),
-        Some(repository_id),
         Some(operator_email_digest),
         Some(team_domain),
         Some(audience),
@@ -155,15 +149,8 @@ fn operation_authority_from_values(
     else {
         return Err(AuthorityError::AppAuthority);
     };
-    let app = github_app::AppAuthority::new(
-        app_id,
-        private_key,
-        permission_revision,
-        repository,
-        owner_id,
-        repository_id,
-    )
-    .map_err(|_| AuthorityError::AppAuthority)?;
+    let app = github_app::AppAuthority::new(app_id, private_key, permission_revision)
+        .map_err(|_| AuthorityError::AppAuthority)?;
     let access = access::AccessAuthority::new(
         operator_email_digest,
         team_domain,
@@ -393,26 +380,13 @@ mod tests {
     #[test]
     fn operation_authority_group_is_absent_complete_or_inactive() {
         assert!(
-            operation_authority_from_values(
-                4_673_420,
-                [None, None, None, None, None, None, None, None],
-                None,
-            )
-            .is_ok_and(|value| value.is_none())
+            operation_authority_from_values(4_673_420, [None, None, None, None, None], None,)
+                .is_ok_and(|value| value.is_none())
         );
         assert_eq!(
             operation_authority_from_values(
                 4_673_420,
-                [
-                    Some("partial".into()),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                ],
+                [Some("partial".into()), None, None, None, None],
                 None,
             )
             .err(),
@@ -428,9 +402,6 @@ mod tests {
                 [
                     Some(private_key),
                     Some("maintainer-operations-v2".into()),
-                    Some("dark-factory-build/dark-factory".into()),
-                    Some("109233175".into()),
-                    Some("1335380107".into()),
                     Some(hex::encode(sha2::Sha256::digest(b"operator@example.com"))),
                     Some("https://dark-factory.cloudflareaccess.com".into()),
                     Some("a".repeat(64)),

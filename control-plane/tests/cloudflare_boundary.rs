@@ -99,9 +99,6 @@ fn wrangler_keeps_the_unconfigured_worker_private_and_inert() {
         "DARK_FACTORY_MAINTAINER_APP_ID",
         "DARK_FACTORY_MAINTAINER_PRIVATE_KEY_PKCS8",
         "DARK_FACTORY_MAINTAINER_PERMISSION_REVISION",
-        "DARK_FACTORY_MAINTAINER_REPOSITORY",
-        "DARK_FACTORY_MAINTAINER_REPOSITORY_OWNER_ID",
-        "DARK_FACTORY_MAINTAINER_REPOSITORY_ID",
         "DARK_FACTORY_MAINTAINER_OPERATOR_EMAIL_SHA256",
         "DARK_FACTORY_CLOUDFLARE_ACCESS_TEAM_DOMAIN",
         "DARK_FACTORY_CLOUDFLARE_ACCESS_AUD",
@@ -247,6 +244,92 @@ fn declared_output_schemas_name_the_fields_the_results_carry() {
             "observe_operation's outputSchema does not declare {field}"
         );
     }
+}
+
+/// Which repository an operation acts on is now caller-supplied, so the tool
+/// schema is the only thing that makes a caller send it. A tool whose handler
+/// reads `request.repository` while its `inputSchema` does not require one
+/// fails at deserialization for every caller that trusts the schema -- the
+/// declaration would assert a contract it never observes.
+#[test]
+fn every_repository_tool_requires_the_repository_it_acts_on() {
+    let mcp = project_file("src/mcp.rs");
+    let tool_input = |name: &str| -> String {
+        let start = mcp
+            .find(&format!(r#""name": "{name}""#))
+            .unwrap_or_else(|| panic!("missing tool: {name}"));
+        let rest = &mcp[start..];
+        let end = rest[1..]
+            .find(r#""name": ""#)
+            .map_or(rest.len(), |offset| offset + 1);
+        let block = &rest[..end];
+        let input = block
+            .find(r#""inputSchema""#)
+            .unwrap_or_else(|| panic!("{name} declares no inputSchema"));
+        let output = block.find(r#""outputSchema""#).unwrap_or(block.len());
+        block[input..output].to_string()
+    };
+
+    // Every tool that reaches GitHub. `observe_operation` is deliberately
+    // absent: it reads the durable journal by operation UUID, which is
+    // repository-independent, and requiring a repository there would be a
+    // field its request type does not accept.
+    for tool in [
+        "maintainer_status",
+        "create_issue",
+        "observe_issue",
+        "resolve_issue",
+        "publish_release_tag",
+        "recover_release",
+        "observe_release",
+        "observe_release_workflow",
+        "dispatch_control_plane_deploy",
+        "observe_control_plane_deploy",
+        "create_pull_request",
+        "submit_pull_request_review",
+        "observe_pull_request_checks",
+        "observe_pull_request_workflows",
+        "read_pull_request_job_log",
+        "rerun_failed_pull_request_jobs",
+        "observe_pull_request_merge",
+        "publish_commit",
+        "enqueue_pull_request",
+    ] {
+        let input = tool_input(tool);
+        assert!(
+            input.contains(r#""repository": {"type": "string""#),
+            "{tool} declares no repository property"
+        );
+        assert!(
+            input.contains(r#""required": ["repository""#),
+            "{tool} does not require a repository"
+        );
+    }
+
+    assert!(
+        !tool_input("observe_operation").contains(r#""repository""#),
+        "observe_operation is a journal lookup and takes no repository"
+    );
+
+    // The workflow the run-observing tools watch is the caller's to name; a
+    // hard-coded path silently means "this tool works on one repository".
+    for tool in [
+        "observe_pull_request_workflows",
+        "read_pull_request_job_log",
+        "rerun_failed_pull_request_jobs",
+    ] {
+        assert!(
+            tool_input(tool).contains(r#""workflow_path""#),
+            "{tool} does not take a workflow path"
+        );
+    }
+    // The release and deploy workflows are this control plane's own and stay
+    // constants. A CI constant would be the hard-coding this removes: it is the
+    // one workflow whose name belongs to whichever repository is being watched.
+    assert!(
+        !project_file("src/github_app.rs").contains("CI_WORKFLOW"),
+        "the CI workflow is named by a constant again, so it works on one repository"
+    );
 }
 
 #[test]

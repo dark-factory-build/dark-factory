@@ -35,10 +35,11 @@ framework. The shell-provider loop is proven; real Claude/Codex work is not.
    the shell provider.
 8. Use the shared model policy: Luna for routine workers/reviewers; Sol/xhigh
    only for an explicit high-risk escalation. Do not silently rewrite profiles.
-9. Contributor agents use only the repository-bound Maintainer App for GitHub.
-   First require `maintainer_status` = repository
-   `dark-factory-build/dark-factory`, ID `1335380107`, revision
-   `maintainer-operations-v2`. Fail closed if the required typed operation is
+9. Contributor agents use only the Maintainer App for GitHub. Every tool names
+   its `owner/name` repository. First require `maintainer_status` for the exact
+   repository you intend to act on to return that same repository, a positive
+   numeric ID, and revision `maintainer-operations-v2`. Fail closed if the
+   required typed operation is
    unavailable. An owner-authorized fallback must name the exact repository and
    finite command/target set (refs, PR head/base, tags, or fixed workflows).
    Run only those `git`/`gh` operations outside the sandbox through existing

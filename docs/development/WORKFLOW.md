@@ -115,11 +115,13 @@ when install or service ownership changes; it is not a routine extra gate.
 
 ## GitHub boundary
 
-The normal automation surface is the repository-bound Maintainer App. Before a
-write, require `maintainer_status` to report:
+The normal automation surface is the Maintainer App. Every tool names the
+`owner/name` repository it acts on, and the App reaches only repositories it is
+installed on. Before a write, require `maintainer_status` for that exact
+repository to report:
 
-- repository `dark-factory-build/dark-factory`;
-- repository ID `1335380107`; and
+- the same `owner/name` you asked for;
+- a positive numeric repository ID; and
 - permission revision `maintainer-operations-v2`.
 
 Use only its typed, exact-head operations. Retain a write's operation UUID and

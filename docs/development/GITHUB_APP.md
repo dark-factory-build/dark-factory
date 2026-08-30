@@ -1,6 +1,7 @@
 # GitHub App authority decision
 
-Status: the maintainer broker has one finite repository-bound MCP surface. Its
+Status: the maintainer broker has one finite typed MCP surface whose every
+operation names the repository it acts on, bounded by the App's installation. Its
 only merge mutation is merge-queue enqueue; the direct-merge operation that
 briefly stood in for it has been removed. This document does not itself
 authorize App registration, installation, repository publication, merge,
@@ -57,10 +58,11 @@ The broker implementation lives in the standalone `control-plane/` crate, not
 in the local-runtime workspace or `factoryd`. Its webhook remains a
 versioned, signed, inert maintainer `ping` boundary. With the App-authority
 group configured, readiness and every ping also prove that the broker can sign
-an App JWT and find the exact selected-repository installation with the
-revision's bounded permissions for the bound `owner/repository` and numeric
-owner. This proof creates no installation token and exposes no repository
-operation through webhook intake. Every non-ping event is policy-rejected.
+an App JWT and that the key belongs to the configured App. It names no
+repository: the installation, its bounded permissions, and the repository
+identity are established per operation, when a token is minted for the
+repository the caller named. This proof creates no installation token and
+exposes no repository operation through webhook intake. Every non-ping event is policy-rejected.
 The hosted adapter is a Rust Cloudflare Worker; repository operations are
 available only through the separately authenticated finite MCP surface.
 Its production journal uses strongly consistent SQLite Durable Objects;
@@ -138,8 +140,8 @@ no such fixture, so treat them as unproven rather than as checked.
 
 The live maintainer broker exposes only these repository-scoped operations:
 
-- verify the exact repository, numeric repository ID, permission revision, and
-  live default branch head;
+- verify one named repository's installation, numeric repository ID, permission
+  revision, and live default branch head;
 - observe one durable operation UUID without mutating it;
 - create, observe, and resolve one bounded issue with an evidence comment;
 - publish one exact independently reviewed tree as an App-authored commit to a
@@ -238,6 +240,43 @@ observe. Source-branch cleanup is the repository owner's setting, and the broker
 exposes no read-then-delete ref mutation either way.
 This maintainer surface is permanent official coordinator infrastructure, not
 executable intake and not the future runtime broker.
+
+## Repository selection
+
+Which repositories the Maintainer may act on is the App installation's answer,
+not this service's configuration. There is no configured repository: the caller
+names an `owner/name` on every operation, and the grant is what binds it.
+
+The mechanism is the installation token itself. The broker looks the
+installation up by the named repository, checks it is this App, still
+selected-repository, unsuspended, and carries the revision's permissions, then
+mints a token naming that repository. GitHub answers with the exact repository
+the token covers, and the broker accepts the token only if it covers exactly
+one repository, exactly the one named, owned by the installation's own account,
+with exactly the permissions requested. The numeric repository ID is read out
+of that answer rather than asserted from configuration, so identity comes from
+the grant that authorizes the access rather than from a value a caller or an
+operator could restate wrongly. Token and repository are then held together for
+the operation's lifetime, so no request can be spelled for a repository other
+than the one its credential was minted for.
+
+Three consequences are deliberate:
+
+- Adding a repository is an installation change, not a deployment. Removing one
+  likewise revokes reach the moment GitHub stops minting tokens for it.
+- The repository is part of every operation's replay identity, so one operation
+  UUID cannot address two repositories as though they were one request. Names
+  are lower-cased before the digest is taken, because GitHub resolves them
+  case-insensitively and two spellings of one repository must not become two
+  operations.
+- A single Access identity can act on every repository the App is installed on.
+  Narrowing that — mapping a caller identity to the installations it may use —
+  is the tenancy question, and it is a filter in front of repository
+  resolution, not a change to this mechanism.
+
+Operations that name a workflow take its path as an argument for the same
+reason. A hard-coded `.github/workflows/ci.yml` silently meant "this tool works
+on one repository".
 
 ## Authority boundary
 

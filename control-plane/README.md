@@ -6,7 +6,8 @@ member and never links to or runs inside `factoryd`.
 
 The service is a Rust Cloudflare Worker backed by SQLite Durable Objects. It
 keeps GitHub App credentials outside agent processes and exposes only reviewed,
-repository-bound operations over MCP. Deployment state is verified separately;
+typed operations over MCP. Every operation names the `owner/name` repository it
+acts on, and can reach only repositories this App is installed on. Deployment state is verified separately;
 source control is not evidence that a route, Access policy, or App
 configuration is live.
 
@@ -16,17 +17,19 @@ configuration is live.
 - `GET /readyz` returns 200 only when the three webhook authority bindings are
   valid and the Durable Object binding, SQLite schema, and migration marker
   pass their audit. When App authority is configured, readiness also imports
-  the private key, signs an App JWT, and verifies the exact live installation.
-  A partial or syntactically invalid App-authority group makes the whole Worker
-  inactive.
+  the private key, signs an App JWT, and verifies that the key belongs to the
+  configured App. Readiness names no repository: which repositories the App may
+  act on is the installation's answer, established per operation when a token is
+  minted, not a deployment setting. A partial or syntactically invalid
+  App-authority group makes the whole Worker inactive.
 - `POST /v1/github/maintainer/webhook` accepts only a bounded GitHub webhook.
   It verifies `X-Hub-Signature-256` over the exact body with HMAC-SHA-256,
   limits the body to 64 KiB, requires one value for every security header,
   requires an `integration` target, and binds the configured App ID.
 - A valid `ping` is the only acknowledged event. When all operation-authority
   bindings are present, acknowledgement also requires an RS256 App JWT, one
-  exact selected-repository installation for the configured repository name,
-  numeric repository ID, and numeric owner. Every other authenticated event is
+  App identity proving the private key belongs to the configured App. Every
+  other authenticated event is
   journalled as `policy_rejected`
   and returns 422. No payload can create a task, message, prompt, provider run,
   or GitHub mutation.
@@ -152,12 +155,6 @@ The exact required bindings are:
   App's unencrypted PKCS#8 DER private key;
 - `DARK_FACTORY_MAINTAINER_PERMISSION_REVISION`: exactly
   `maintainer-operations-v2` for this authority revision;
-- `DARK_FACTORY_MAINTAINER_REPOSITORY`: the exact safe `owner/repository`
-  name;
-- `DARK_FACTORY_MAINTAINER_REPOSITORY_OWNER_ID`: the exact positive numeric
-  owner ID;
-- `DARK_FACTORY_MAINTAINER_REPOSITORY_ID`: the exact positive numeric repository
-  ID; and
 - `DARK_FACTORY_MAINTAINER_OPERATOR_EMAIL_SHA256`: lowercase SHA-256 of the one
   Cloudflare Access operator email after ASCII lowercasing;
 - `DARK_FACTORY_CLOUDFLARE_ACCESS_TEAM_DOMAIN`: the exact lowercase

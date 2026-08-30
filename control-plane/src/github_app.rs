@@ -14,9 +14,6 @@ use crate::maintainer::MAX_EXACT_INTEGER;
 
 pub(crate) const PRIVATE_KEY_BINDING: &str = "DARK_FACTORY_MAINTAINER_PRIVATE_KEY_PKCS8";
 pub(crate) const PERMISSION_REVISION_BINDING: &str = "DARK_FACTORY_MAINTAINER_PERMISSION_REVISION";
-pub(crate) const REPOSITORY_BINDING: &str = "DARK_FACTORY_MAINTAINER_REPOSITORY";
-pub(crate) const REPOSITORY_OWNER_ID_BINDING: &str = "DARK_FACTORY_MAINTAINER_REPOSITORY_OWNER_ID";
-pub(crate) const REPOSITORY_ID_BINDING: &str = "DARK_FACTORY_MAINTAINER_REPOSITORY_ID";
 pub(crate) const PERMISSION_REVISION: &str = "maintainer-operations-v2";
 const GITHUB_API_VERSION: &str = "2026-03-10";
 // GitHub list endpoints below request at most 100 records. Issue comments and
@@ -35,22 +32,33 @@ const MAX_WORKFLOW_STEPS: usize = 100;
 const MAX_JOB_LOG_BYTES: usize = 64 * 1024;
 const MAX_LOG_REDIRECT_BYTES: usize = 4_096;
 #[derive(Clone, Copy)]
-struct WorkflowRef {
-    api_id: &'static str,
-    response_path: &'static str,
+struct WorkflowRef<'a> {
+    api_id: &'a str,
+    response_path: &'a str,
 }
 
-const RELEASE_WORKFLOW: WorkflowRef = WorkflowRef {
+impl<'a> WorkflowRef<'a> {
+    /// A caller-named workflow. `valid_workflow_path` has already proven the
+    /// shape, so the API id is exactly the file name the path ends with, and
+    /// the two halves cannot disagree because both are read from one string.
+    fn requested(path: &'a str) -> Result<Self, OperationError> {
+        let api_id = path
+            .strip_prefix(".github/workflows/")
+            .ok_or(OperationError::InvalidInput)?;
+        Ok(Self {
+            api_id,
+            response_path: path,
+        })
+    }
+}
+
+const RELEASE_WORKFLOW: WorkflowRef<'static> = WorkflowRef {
     api_id: "release.yml",
     response_path: ".github/workflows/release.yml",
 };
-const DEPLOY_WORKFLOW: WorkflowRef = WorkflowRef {
+const DEPLOY_WORKFLOW: WorkflowRef<'static> = WorkflowRef {
     api_id: "deploy-control-plane.yml",
     response_path: ".github/workflows/deploy-control-plane.yml",
-};
-const CI_WORKFLOW: WorkflowRef = WorkflowRef {
-    api_id: "ci.yml",
-    response_path: ".github/workflows/ci.yml",
 };
 
 #[derive(Clone)]
@@ -59,9 +67,6 @@ pub(crate) struct AppAuthority(Arc<Authority>);
 struct Authority {
     app_id: i64,
     private_key: PrivateKey,
-    repository: RepositoryName,
-    repository_owner_id: i64,
-    repository_id: i64,
 }
 
 struct PrivateKey(Vec<u8>);
@@ -203,6 +208,7 @@ fn rejection_for_status(status: u16) -> Option<RejectionKinds> {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CreatePullRequest {
+    pub(crate) repository: String,
     pub(crate) operation_id: String,
     pub(crate) issue_number: i64,
     pub(crate) head: String,
@@ -217,6 +223,7 @@ pub(crate) struct CreatePullRequest {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SubmitPullRequestReview {
+    pub(crate) repository: String,
     pub(crate) operation_id: String,
     pub(crate) pull_number: i64,
     pub(crate) head_sha: String,
@@ -280,7 +287,14 @@ impl ReviewEvent {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct ObserveRepository {
+    pub(crate) repository: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ObservePullRequestChecks {
+    pub(crate) repository: String,
     pub(crate) pull_number: i64,
     pub(crate) head_sha: String,
 }
@@ -296,6 +310,7 @@ pub(crate) struct RepositoryResult {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CreateIssue {
+    pub(crate) repository: String,
     pub(crate) operation_id: String,
     pub(crate) title: String,
     pub(crate) body: String,
@@ -310,6 +325,7 @@ pub(crate) struct IssueResult {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ObserveIssue {
+    pub(crate) repository: String,
     pub(crate) issue_number: i64,
 }
 
@@ -340,6 +356,7 @@ impl IssueResolutionReason {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ResolveIssue {
+    pub(crate) repository: String,
     pub(crate) operation_id: String,
     pub(crate) issue_number: i64,
     pub(crate) body: String,
@@ -358,6 +375,7 @@ pub(crate) struct ResolveIssueResult {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ObservePullRequestMerge {
+    pub(crate) repository: String,
     pub(crate) enqueue_operation_id: String,
     pub(crate) pull_number: i64,
     pub(crate) head_sha: String,
@@ -396,6 +414,7 @@ pub(crate) struct FileChange {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PublishCommit {
+    pub(crate) repository: String,
     pub(crate) operation_id: String,
     pub(crate) branch: String,
     /// The commit the branch must currently point at. Two agents racing the
@@ -420,6 +439,7 @@ pub(crate) struct PublishCommit {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct EnqueuePullRequest {
+    pub(crate) repository: String,
     pub(crate) operation_id: String,
     pub(crate) pull_number: i64,
     /// `enqueuePullRequest` takes `expectedHeadOid`, so exact-head binding is
@@ -497,6 +517,8 @@ pub(crate) struct CheckResult {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ObservePullRequestWorkflows {
+    pub(crate) repository: String,
+    pub(crate) workflow_path: String,
     pub(crate) pull_number: i64,
     pub(crate) head_sha: String,
     pub(crate) base: String,
@@ -543,6 +565,8 @@ pub(crate) struct WorkflowStepResult {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReadPullRequestJobLog {
+    pub(crate) repository: String,
+    pub(crate) workflow_path: String,
     pub(crate) pull_number: i64,
     pub(crate) head_sha: String,
     pub(crate) base: String,
@@ -565,6 +589,8 @@ pub(crate) struct JobLogResult {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RerunFailedPullRequestJobs {
+    pub(crate) repository: String,
+    pub(crate) workflow_path: String,
     pub(crate) operation_id: String,
     pub(crate) pull_number: i64,
     pub(crate) head_sha: String,
@@ -585,6 +611,7 @@ pub(crate) struct RerunFailedPullRequestJobsResult {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PublishReleaseTag {
+    pub(crate) repository: String,
     pub(crate) operation_id: String,
     pub(crate) tag: String,
     pub(crate) commit_sha: String,
@@ -599,6 +626,7 @@ pub(crate) struct ReleaseTagResult {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RecoverRelease {
+    pub(crate) repository: String,
     pub(crate) operation_id: String,
     pub(crate) tag: String,
     pub(crate) commit_sha: String,
@@ -608,6 +636,7 @@ pub(crate) struct RecoverRelease {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct DispatchControlPlaneDeploy {
+    pub(crate) repository: String,
     pub(crate) operation_id: String,
     pub(crate) commit_sha: String,
     pub(crate) reviewed_tree: String,
@@ -626,6 +655,7 @@ pub(crate) struct WorkflowDispatchResult {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ObserveRelease {
+    pub(crate) repository: String,
     pub(crate) tag: String,
     pub(crate) commit_sha: String,
 }
@@ -633,6 +663,7 @@ pub(crate) struct ObserveRelease {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ObserveReleaseWorkflow {
+    pub(crate) repository: String,
     pub(crate) operation_id: String,
     pub(crate) tag: String,
     pub(crate) tag_sha: String,
@@ -677,6 +708,7 @@ pub(crate) struct ReleaseAssetResult {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ObserveControlPlaneDeploy {
+    pub(crate) repository: String,
     pub(crate) operation_id: String,
     pub(crate) commit_sha: String,
     pub(crate) reviewed_tree: String,
@@ -698,9 +730,6 @@ impl AppAuthority {
         app_id: i64,
         private_key: String,
         permission_revision: String,
-        repository: String,
-        repository_owner_id: String,
-        repository_id: String,
     ) -> Result<Self, Error> {
         if permission_revision != PERMISSION_REVISION {
             return Err(Error::Configuration);
@@ -712,15 +741,9 @@ impl AppAuthority {
         if !(1_000..=16_384).contains(&private_key.len()) {
             return Err(Error::Configuration);
         }
-        let repository = RepositoryName::new(repository)?;
-        let repository_owner_id = exact_integer(&repository_owner_id)?;
-        let repository_id = exact_integer(&repository_id)?;
         Ok(Self(Arc::new(Authority {
             app_id,
             private_key: PrivateKey(private_key),
-            repository,
-            repository_owner_id,
-            repository_id,
         })))
     }
 
@@ -734,10 +757,17 @@ impl AppAuthority {
     }
 
     #[cfg(target_arch = "wasm32")]
-    pub(crate) async fn observe_repository(&self) -> Result<RepositoryResult, OperationError> {
+    pub(crate) async fn observe_repository(
+        &self,
+        mut request: ObserveRepository,
+    ) -> Result<RepositoryResult, OperationError> {
+        let repository = RepositoryName::requested(&mut request.repository)?;
         let token = self
             .0
-            .installation_token(BTreeMap::from([("contents", "read"), ("metadata", "read")]))
+            .installation_token(
+                repository,
+                BTreeMap::from([("contents", "read"), ("metadata", "read")]),
+            )
             .await?;
         self.0.repository_snapshot(&token).await
     }
@@ -749,6 +779,7 @@ impl AppAuthority {
         mut request: CreateIssue,
     ) -> Result<IssueResult, OperationError> {
         request.validate()?;
+        let repository = RepositoryName::requested(&mut request.repository)?;
         let operation = request.operation("create_issue")?;
         let state = journal
             .begin_operation(&operation)
@@ -759,7 +790,10 @@ impl AppAuthority {
         }
         let token = self
             .0
-            .installation_token(BTreeMap::from([("issues", "write"), ("metadata", "read")]))
+            .installation_token(
+                repository,
+                BTreeMap::from([("issues", "write"), ("metadata", "read")]),
+            )
             .await?;
         if let Some(result) = self.0.reconcile_issue(&token, &request).await? {
             return complete(journal, &operation, result).await;
@@ -812,12 +846,16 @@ impl AppAuthority {
     #[cfg(target_arch = "wasm32")]
     pub(crate) async fn observe_issue(
         &self,
-        request: ObserveIssue,
+        mut request: ObserveIssue,
     ) -> Result<IssueObservationResult, OperationError> {
         request.validate()?;
+        let repository = RepositoryName::requested(&mut request.repository)?;
         let token = self
             .0
-            .installation_token(BTreeMap::from([("issues", "read"), ("metadata", "read")]))
+            .installation_token(
+                repository,
+                BTreeMap::from([("issues", "read"), ("metadata", "read")]),
+            )
             .await?;
         self.0
             .read_issue(&token, request.issue_number)
@@ -832,6 +870,7 @@ impl AppAuthority {
         mut request: ResolveIssue,
     ) -> Result<ResolveIssueResult, OperationError> {
         request.validate()?;
+        let repository = RepositoryName::requested(&mut request.repository)?;
         let operation = request.operation("resolve_issue")?;
         let state = journal
             .begin_operation(&operation)
@@ -842,7 +881,10 @@ impl AppAuthority {
         }
         let token = self
             .0
-            .installation_token(BTreeMap::from([("issues", "write"), ("metadata", "read")]))
+            .installation_token(
+                repository,
+                BTreeMap::from([("issues", "write"), ("metadata", "read")]),
+            )
             .await?;
         let progress = self.0.reconcile_issue_resolution(&token, &request).await?;
         if let Some(result) = progress.completed(&request) {
@@ -956,6 +998,7 @@ impl AppAuthority {
         mut request: CreatePullRequest,
     ) -> Result<PullRequestResult, OperationError> {
         request.validate()?;
+        let repository = RepositoryName::requested(&mut request.repository)?;
         let operation = request.operation("create_pull_request")?;
         let state = journal
             .begin_operation(&operation)
@@ -966,12 +1009,15 @@ impl AppAuthority {
         }
         let token = self
             .0
-            .installation_token(BTreeMap::from([
-                ("contents", "read"),
-                ("issues", "read"),
-                ("metadata", "read"),
-                ("pull_requests", "write"),
-            ]))
+            .installation_token(
+                repository,
+                BTreeMap::from([
+                    ("contents", "read"),
+                    ("issues", "read"),
+                    ("metadata", "read"),
+                    ("pull_requests", "write"),
+                ]),
+            )
             .await?;
         let repository = self.0.repository_metadata(&token).await?;
         if request.base != repository.default_branch {
@@ -1042,6 +1088,7 @@ impl AppAuthority {
         mut request: SubmitPullRequestReview,
     ) -> Result<ReviewResult, OperationError> {
         request.validate()?;
+        let repository = RepositoryName::requested(&mut request.repository)?;
         let operation = request.operation("submit_pull_request_review")?;
         let state = journal
             .begin_operation(&operation)
@@ -1052,11 +1099,14 @@ impl AppAuthority {
         }
         let token = self
             .0
-            .installation_token(BTreeMap::from([
-                ("contents", "read"),
-                ("metadata", "read"),
-                ("pull_requests", "write"),
-            ]))
+            .installation_token(
+                repository,
+                BTreeMap::from([
+                    ("contents", "read"),
+                    ("metadata", "read"),
+                    ("pull_requests", "write"),
+                ]),
+            )
             .await?;
         self.0
             .verify_pull_request_head(&token, request.pull_number, &request.head_sha)
@@ -1116,6 +1166,7 @@ impl AppAuthority {
         mut request: PublishCommit,
     ) -> Result<CommitResult, OperationError> {
         request.validate()?;
+        let repository = RepositoryName::requested(&mut request.repository)?;
         let operation = request.operation("publish_commit")?;
         let state = journal
             .begin_operation(&operation)
@@ -1126,10 +1177,10 @@ impl AppAuthority {
         }
         let token = self
             .0
-            .installation_token(BTreeMap::from([
-                ("contents", "write"),
-                ("metadata", "read"),
-            ]))
+            .installation_token(
+                repository,
+                BTreeMap::from([("contents", "write"), ("metadata", "read")]),
+            )
             .await?;
         let repository = self.0.repository_metadata(&token).await?;
         if request.branch == repository.default_branch {
@@ -1199,6 +1250,7 @@ impl AppAuthority {
         mut request: PublishReleaseTag,
     ) -> Result<ReleaseTagResult, OperationError> {
         request.validate()?;
+        let repository = RepositoryName::requested(&mut request.repository)?;
         let operation = request.operation("publish_release_tag")?;
         let state = journal
             .begin_operation(&operation)
@@ -1209,10 +1261,10 @@ impl AppAuthority {
         }
         let token = self
             .0
-            .installation_token(BTreeMap::from([
-                ("contents", "write"),
-                ("metadata", "read"),
-            ]))
+            .installation_token(
+                repository,
+                BTreeMap::from([("contents", "write"), ("metadata", "read")]),
+            )
             .await?;
         let repository = self.0.repository_metadata(&token).await?;
         let default = self.0.read_ref(&token, &repository.default_branch).await?;
@@ -1318,6 +1370,7 @@ impl AppAuthority {
         mut request: RecoverRelease,
     ) -> Result<WorkflowDispatchResult, OperationError> {
         request.validate()?;
+        let repository = RepositoryName::requested(&mut request.repository)?;
         let operation = request.operation("recover_release")?;
         let state = journal
             .begin_operation(&operation)
@@ -1328,11 +1381,14 @@ impl AppAuthority {
         }
         let token = self
             .0
-            .installation_token(BTreeMap::from([
-                ("actions", "write"),
-                ("contents", "read"),
-                ("metadata", "read"),
-            ]))
+            .installation_token(
+                repository,
+                BTreeMap::from([
+                    ("actions", "write"),
+                    ("contents", "read"),
+                    ("metadata", "read"),
+                ]),
+            )
             .await?;
         let repository = self.0.repository_metadata(&token).await?;
         let default = self.0.read_ref(&token, &repository.default_branch).await?;
@@ -1478,6 +1534,7 @@ impl AppAuthority {
         mut request: DispatchControlPlaneDeploy,
     ) -> Result<WorkflowDispatchResult, OperationError> {
         request.validate()?;
+        let repository = RepositoryName::requested(&mut request.repository)?;
         let operation = request.operation("dispatch_control_plane_deploy")?;
         let state = journal
             .begin_operation(&operation)
@@ -1488,11 +1545,14 @@ impl AppAuthority {
         }
         let token = self
             .0
-            .installation_token(BTreeMap::from([
-                ("actions", "write"),
-                ("contents", "read"),
-                ("metadata", "read"),
-            ]))
+            .installation_token(
+                repository,
+                BTreeMap::from([
+                    ("actions", "write"),
+                    ("contents", "read"),
+                    ("metadata", "read"),
+                ]),
+            )
             .await?;
         let repository = self.0.repository_metadata(&token).await?;
         let default = self.0.read_ref(&token, &repository.default_branch).await?;
@@ -1502,7 +1562,7 @@ impl AppAuthority {
         let default_commit: GitCommit = github_json(
             &format!(
                 "https://api.github.com/repos/{}/{}/git/commits/{}",
-                self.0.repository.owner, self.0.repository.name, request.commit_sha
+                token.repository.owner, token.repository.name, request.commit_sha
             ),
             token.as_str(),
         )
@@ -1638,16 +1698,20 @@ impl AppAuthority {
     #[cfg(target_arch = "wasm32")]
     pub(crate) async fn observe_release(
         &self,
-        request: ObserveRelease,
+        mut request: ObserveRelease,
     ) -> Result<ReleaseObservationResult, OperationError> {
         request.validate()?;
+        let repository = RepositoryName::requested(&mut request.repository)?;
         let token = self
             .0
-            .installation_token(BTreeMap::from([
-                ("actions", "read"),
-                ("contents", "read"),
-                ("metadata", "read"),
-            ]))
+            .installation_token(
+                repository,
+                BTreeMap::from([
+                    ("actions", "read"),
+                    ("contents", "read"),
+                    ("metadata", "read"),
+                ]),
+            )
             .await?;
         let actual = self
             .0
@@ -1676,13 +1740,17 @@ impl AppAuthority {
         mut request: ObserveReleaseWorkflow,
     ) -> Result<ReleaseWorkflowObservationResult, OperationError> {
         request.validate()?;
+        let repository = RepositoryName::requested(&mut request.repository)?;
         let token = self
             .0
-            .installation_token(BTreeMap::from([
-                ("actions", "read"),
-                ("contents", "read"),
-                ("metadata", "read"),
-            ]))
+            .installation_token(
+                repository,
+                BTreeMap::from([
+                    ("actions", "read"),
+                    ("contents", "read"),
+                    ("metadata", "read"),
+                ]),
+            )
             .await?;
         let tag_sha = self
             .0
@@ -1693,6 +1761,7 @@ impl AppAuthority {
             return Err(OperationError::Conflict);
         }
         let mut recovery = RecoverRelease {
+            repository: request.repository.clone(),
             operation_id: request.operation_id.clone(),
             tag: request.tag.clone(),
             commit_sha: request.tag_sha.clone(),
@@ -1721,15 +1790,20 @@ impl AppAuthority {
         mut request: ObserveControlPlaneDeploy,
     ) -> Result<ControlPlaneDeployObservationResult, OperationError> {
         request.validate()?;
+        let repository = RepositoryName::requested(&mut request.repository)?;
         let token = self
             .0
-            .installation_token(BTreeMap::from([
-                ("actions", "read"),
-                ("contents", "read"),
-                ("metadata", "read"),
-            ]))
+            .installation_token(
+                repository,
+                BTreeMap::from([
+                    ("actions", "read"),
+                    ("contents", "read"),
+                    ("metadata", "read"),
+                ]),
+            )
             .await?;
         let mut dispatch = DispatchControlPlaneDeploy {
+            repository: request.repository.clone(),
             operation_id: request.operation_id.clone(),
             commit_sha: request.commit_sha.clone(),
             reviewed_tree: request.reviewed_tree.clone(),
@@ -1762,6 +1836,7 @@ impl AppAuthority {
         mut request: EnqueuePullRequest,
     ) -> Result<EnqueueResult, OperationError> {
         request.validate()?;
+        let repository = RepositoryName::requested(&mut request.repository)?;
         let operation = request.operation("enqueue_pull_request")?;
         let state = journal
             .begin_operation(&operation)
@@ -1772,29 +1847,32 @@ impl AppAuthority {
         }
         let token = self
             .0
-            .installation_token(BTreeMap::from([
-                // A queued entry ends with GitHub pushing the squash commit
-                // to the default branch, and push capability for an
-                // installation token derives from `contents: write` -- the
-                // scope `publish_commit` already mints and the reviewed
-                // revision already grants. Whether it is what the live
-                // enqueue is missing is the hypothesis under test (#371):
-                // the first live enqueue was refused wholesale with
-                // `pull_requests: read` minted, and the retry after #373 was
-                // refused `rejected before execution as FORBIDDEN` with
-                // `pull_requests: write` minted, so this is the next
-                // narrowest scope consistent with what enqueueing causes.
-                // The proof either way is a live enqueue after deploy.
-                ("contents", "write"),
-                ("merge_queues", "write"),
-                ("metadata", "read"),
-                // Enqueueing mutates the pull request's queue state. This
-                // minted `read` once, and the first live enqueue was refused
-                // wholesale (#371); every sibling operation that mutates a
-                // pull request mints `write`, and the reviewed permission
-                // revision already grants it.
-                ("pull_requests", "write"),
-            ]))
+            .installation_token(
+                repository,
+                BTreeMap::from([
+                    // A queued entry ends with GitHub pushing the squash commit
+                    // to the default branch, and push capability for an
+                    // installation token derives from `contents: write` -- the
+                    // scope `publish_commit` already mints and the reviewed
+                    // revision already grants. Whether it is what the live
+                    // enqueue is missing is the hypothesis under test (#371):
+                    // the first live enqueue was refused wholesale with
+                    // `pull_requests: read` minted, and the retry after #373 was
+                    // refused `rejected before execution as FORBIDDEN` with
+                    // `pull_requests: write` minted, so this is the next
+                    // narrowest scope consistent with what enqueueing causes.
+                    // The proof either way is a live enqueue after deploy.
+                    ("contents", "write"),
+                    ("merge_queues", "write"),
+                    ("metadata", "read"),
+                    // Enqueueing mutates the pull request's queue state. This
+                    // minted `read` once, and the first live enqueue was refused
+                    // wholesale (#371); every sibling operation that mutates a
+                    // pull request mints `write`, and the reviewed permission
+                    // revision already grants it.
+                    ("pull_requests", "write"),
+                ]),
+            )
             .await?;
         let repository = self.0.repository_metadata(&token).await?;
         if request.base != repository.default_branch {
@@ -1875,17 +1953,21 @@ impl AppAuthority {
     #[cfg(target_arch = "wasm32")]
     pub(crate) async fn observe_pull_request_checks(
         &self,
-        request: ObservePullRequestChecks,
+        mut request: ObservePullRequestChecks,
     ) -> Result<ChecksResult, OperationError> {
         request.validate()?;
+        let repository = RepositoryName::requested(&mut request.repository)?;
         let token = self
             .0
-            .installation_token(BTreeMap::from([
-                ("checks", "read"),
-                ("contents", "read"),
-                ("metadata", "read"),
-                ("pull_requests", "read"),
-            ]))
+            .installation_token(
+                repository,
+                BTreeMap::from([
+                    ("checks", "read"),
+                    ("contents", "read"),
+                    ("metadata", "read"),
+                    ("pull_requests", "read"),
+                ]),
+            )
             .await?;
         self.0
             .verify_pull_request_head(&token, request.pull_number, &request.head_sha)
@@ -1896,16 +1978,20 @@ impl AppAuthority {
     #[cfg(target_arch = "wasm32")]
     pub(crate) async fn observe_pull_request_workflows(
         &self,
-        request: ObservePullRequestWorkflows,
+        mut request: ObservePullRequestWorkflows,
     ) -> Result<PullRequestWorkflowsResult, OperationError> {
         request.validate()?;
+        let repository = RepositoryName::requested(&mut request.repository)?;
         let token = self
             .0
-            .installation_token(BTreeMap::from([
-                ("actions", "read"),
-                ("metadata", "read"),
-                ("pull_requests", "read"),
-            ]))
+            .installation_token(
+                repository,
+                BTreeMap::from([
+                    ("actions", "read"),
+                    ("metadata", "read"),
+                    ("pull_requests", "read"),
+                ]),
+            )
             .await?;
         self.0
             .verify_workflow_pr(
@@ -1921,16 +2007,20 @@ impl AppAuthority {
     #[cfg(target_arch = "wasm32")]
     pub(crate) async fn read_pull_request_job_log(
         &self,
-        request: ReadPullRequestJobLog,
+        mut request: ReadPullRequestJobLog,
     ) -> Result<JobLogResult, OperationError> {
         request.validate()?;
+        let repository = RepositoryName::requested(&mut request.repository)?;
         let token = self
             .0
-            .installation_token(BTreeMap::from([
-                ("actions", "read"),
-                ("metadata", "read"),
-                ("pull_requests", "read"),
-            ]))
+            .installation_token(
+                repository,
+                BTreeMap::from([
+                    ("actions", "read"),
+                    ("metadata", "read"),
+                    ("pull_requests", "read"),
+                ]),
+            )
             .await?;
         self.0
             .verify_workflow_pr(
@@ -1941,7 +2031,11 @@ impl AppAuthority {
             )
             .await?;
         let run = self.0.read_workflow_run(&token, request.run_id).await?;
-        run.verify(request.pull_number, &request.head_sha)?;
+        run.verify(
+            WorkflowRef::requested(&request.workflow_path)?,
+            request.pull_number,
+            &request.head_sha,
+        )?;
         if run.run_attempt != request.run_attempt
             || run.status != "completed"
             || !run.conclusion.as_deref().is_some_and(failed_conclusion)
@@ -1976,6 +2070,7 @@ impl AppAuthority {
         mut request: RerunFailedPullRequestJobs,
     ) -> Result<RerunFailedPullRequestJobsResult, OperationError> {
         request.validate()?;
+        let repository = RepositoryName::requested(&mut request.repository)?;
         let operation = request.operation("rerun_failed_pull_request_jobs")?;
         let state = journal
             .begin_operation(&operation)
@@ -1986,11 +2081,14 @@ impl AppAuthority {
         }
         let token = self
             .0
-            .installation_token(BTreeMap::from([
-                ("actions", "write"),
-                ("metadata", "read"),
-                ("pull_requests", "read"),
-            ]))
+            .installation_token(
+                repository,
+                BTreeMap::from([
+                    ("actions", "write"),
+                    ("metadata", "read"),
+                    ("pull_requests", "read"),
+                ]),
+            )
             .await?;
         self.0
             .verify_workflow_pr(
@@ -2001,7 +2099,11 @@ impl AppAuthority {
             )
             .await?;
         let run = self.0.read_workflow_run(&token, request.run_id).await?;
-        run.verify(request.pull_number, &request.head_sha)?;
+        run.verify(
+            WorkflowRef::requested(&request.workflow_path)?,
+            request.pull_number,
+            &request.head_sha,
+        )?;
         if run.run_attempt < request.run_attempt {
             return Err(OperationError::Conflict);
         }
@@ -2062,7 +2164,13 @@ impl AppAuthority {
         }
         for attempt in 0..4 {
             if let Ok(after) = self.0.read_workflow_run(&token, request.run_id).await
-                && after.verify(request.pull_number, &request.head_sha).is_ok()
+                && after
+                    .verify(
+                        WorkflowRef::requested(&request.workflow_path)?,
+                        request.pull_number,
+                        &request.head_sha,
+                    )
+                    .is_ok()
                 && after.run_attempt > request.run_attempt
             {
                 return complete(
@@ -2098,7 +2206,9 @@ impl AppAuthority {
         mut request: ObservePullRequestMerge,
     ) -> Result<PullRequestMergeResult, OperationError> {
         request.validate()?;
+        let repository = RepositoryName::requested(&mut request.repository)?;
         let mut enqueue_request = EnqueuePullRequest {
+            repository: request.repository.clone(),
             operation_id: request.enqueue_operation_id.clone(),
             pull_number: request.pull_number,
             head_sha: request.head_sha.clone(),
@@ -2133,12 +2243,15 @@ impl AppAuthority {
         }
         let token = self
             .0
-            .installation_token(BTreeMap::from([
-                ("contents", "read"),
-                ("merge_queues", "read"),
-                ("metadata", "read"),
-                ("pull_requests", "read"),
-            ]))
+            .installation_token(
+                repository,
+                BTreeMap::from([
+                    ("contents", "read"),
+                    ("merge_queues", "read"),
+                    ("metadata", "read"),
+                    ("pull_requests", "read"),
+                ]),
+            )
             .await?;
         let repository = self.0.repository_metadata(&token).await?;
         if request.base != repository.default_branch {
@@ -2372,7 +2485,9 @@ fn validate_pull_workflow(
     pull_number: i64,
     head_sha: &str,
     base: &str,
+    workflow_path: &str,
 ) -> Result<(), OperationError> {
+    valid_workflow_path(workflow_path)?;
     valid_exact_integer(pull_number)?;
     valid_sha(head_sha)?;
     valid_ref(base)
@@ -2380,13 +2495,23 @@ fn validate_pull_workflow(
 
 impl ObservePullRequestWorkflows {
     fn validate(&self) -> Result<(), OperationError> {
-        validate_pull_workflow(self.pull_number, &self.head_sha, &self.base)
+        validate_pull_workflow(
+            self.pull_number,
+            &self.head_sha,
+            &self.base,
+            &self.workflow_path,
+        )
     }
 }
 
 impl ReadPullRequestJobLog {
     fn validate(&self) -> Result<(), OperationError> {
-        validate_pull_workflow(self.pull_number, &self.head_sha, &self.base)?;
+        validate_pull_workflow(
+            self.pull_number,
+            &self.head_sha,
+            &self.base,
+            &self.workflow_path,
+        )?;
         valid_exact_integer(self.run_id)?;
         valid_exact_integer(self.run_attempt)?;
         valid_exact_integer(self.job_id)
@@ -2396,7 +2521,12 @@ impl ReadPullRequestJobLog {
 impl RerunFailedPullRequestJobs {
     fn validate(&mut self) -> Result<(), OperationError> {
         canonical_operation_id(&mut self.operation_id)?;
-        validate_pull_workflow(self.pull_number, &self.head_sha, &self.base)?;
+        validate_pull_workflow(
+            self.pull_number,
+            &self.head_sha,
+            &self.base,
+            &self.workflow_path,
+        )?;
         valid_exact_integer(self.run_id)?;
         valid_exact_integer(self.run_attempt)
     }
@@ -2819,14 +2949,6 @@ async fn refuse<T>(
     Err(OperationError::Refused(reason))
 }
 
-fn exact_integer(value: &str) -> Result<i64, Error> {
-    value
-        .parse::<i64>()
-        .ok()
-        .filter(|value| (1..=MAX_EXACT_INTEGER).contains(value))
-        .ok_or(Error::Configuration)
-}
-
 struct RepositoryName {
     full_name: String,
     owner: String,
@@ -2834,6 +2956,24 @@ struct RepositoryName {
 }
 
 impl RepositoryName {
+    /// Caller-supplied `owner/name`, lower-cased in place before it is read.
+    ///
+    /// Shape is rejected here so a malformed name never reaches a URL, and the
+    /// error is `InvalidInput` — the caller's mistake — rather than the
+    /// `Configuration` a deployment secret would be.
+    ///
+    /// The normalization is not cosmetic. GitHub resolves repository names
+    /// case-insensitively, but a replay identity is a digest over the exact
+    /// request, so `Owner/Repo` and `owner/repo` would name one repository and
+    /// two operations: a retry differing only in case would conflict with
+    /// itself forever. This runs before the digest is taken, which makes the
+    /// two spellings one request. Every comparison against a name GitHub
+    /// returns is therefore case-insensitive.
+    fn requested(value: &mut str) -> Result<Self, OperationError> {
+        value.make_ascii_lowercase();
+        Self::new(value.to_owned()).map_err(|_| OperationError::InvalidInput)
+    }
+
     fn new(value: String) -> Result<Self, Error> {
         let Some((owner, name)) = value.split_once('/') else {
             return Err(Error::Configuration);
@@ -2859,6 +2999,32 @@ impl RepositoryName {
             self.owner, self.name
         )
     }
+}
+
+/// An installation token together with the repository it was minted for.
+/// Held apart, a token for one repository could address another; held together,
+/// every request is spelled from the same grant that authenticates it. The
+/// numeric id is GitHub's answer to the name, not the caller's claim about it.
+#[cfg(any(target_arch = "wasm32", test))]
+struct RepositoryToken {
+    token: Credential,
+    repository: RepositoryName,
+    repository_id: i64,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+impl RepositoryToken {
+    fn as_str(&self) -> &str {
+        self.token.as_str()
+    }
+}
+
+/// The App the private key belongs to, which is all readiness can prove without
+/// naming a repository.
+#[cfg(target_arch = "wasm32")]
+#[derive(Deserialize)]
+struct AppIdentity {
+    id: i64,
 }
 
 fn valid_path_segment(value: &str, max: usize, allow_dot_underscore: bool) -> bool {
@@ -2890,18 +3056,22 @@ fn jwt_unsigned(app_id: i64, now: i64) -> String {
 #[cfg(target_arch = "wasm32")]
 impl Authority {
     async fn verify(&self) -> Result<(), Error> {
-        // An App JWT authenticates only App-level endpoints, so repository identity
-        // cannot be read here. Prove the key signs, the App and owner match, and the
-        // installation is the exact selected-repository one — and mint nothing. This
-        // endpoint is reachable unauthenticated through /readyz, so issuing a
-        // credential here would let a stranger exhaust the App's rate limit and
-        // disable every real operation. The repository_id <-> full_name <-> owner_id
-        // binding is enforced by `installation_token` on each actual operation, which
-        // is the correct enforcement point.
+        // Readiness is an App fact, not a repository fact. There is no configured
+        // repository to look an installation up by, and inventing one would make
+        // readiness answer a narrower question than the App can serve. Prove the
+        // key signs and that the App this key belongs to is the App we claim to
+        // be — and mint nothing. This endpoint is reachable unauthenticated
+        // through /readyz, so issuing a credential here would let a stranger
+        // exhaust the App's rate limit and disable every real operation. The
+        // installation, its permissions, and the repository identity are all
+        // established per operation by `installation_token`, which is the
+        // correct enforcement point because it is the one that grants access.
         let jwt = self.jwt().await?;
-        let installation: Installation =
-            github_json_as_app(&self.repository.installation_url(), jwt.as_str()).await?;
-        validate_installation(&installation, self.app_id, self.repository_owner_id)
+        let app: AppIdentity =
+            github_json_as_app("https://api.github.com/app", jwt.as_str()).await?;
+        (app.id == self.app_id)
+            .then_some(())
+            .ok_or(Error::Unavailable)
     }
 
     async fn jwt(&self) -> Result<Credential, Error> {
@@ -2918,15 +3088,20 @@ impl Authority {
 
     async fn installation_token(
         &self,
+        repository: RepositoryName,
         permissions: BTreeMap<&'static str, &'static str>,
-    ) -> Result<Credential, OperationError> {
+    ) -> Result<RepositoryToken, OperationError> {
         let jwt = self.jwt().await?;
         let installation: Installation =
-            github_json_as_app(&self.repository.installation_url(), jwt.as_str()).await?;
-        validate_installation(&installation, self.app_id, self.repository_owner_id)?;
+            github_json_as_app(&repository.installation_url(), jwt.as_str()).await?;
+        validate_installation(&installation, self.app_id)?;
+        // Named, not numbered: the caller supplies `owner/name`, and the numeric
+        // id is what GitHub hands back for it. Requesting by id would need an id
+        // the caller cannot be trusted to supply and this service no longer
+        // stores.
         #[derive(Serialize)]
-        struct TokenRequest {
-            repository_ids: [i64; 1],
+        struct TokenRequest<'a> {
+            repositories: [&'a str; 1],
             permissions: BTreeMap<&'static str, &'static str>,
         }
         let expected_permissions = permissions
@@ -2946,49 +3121,60 @@ impl Authority {
             &token_url,
             jwt.as_str(),
             Some(&TokenRequest {
-                repository_ids: [self.repository_id],
+                repositories: [repository.name.as_str()],
                 permissions,
             }),
         )
         .await?;
-        if response.permissions != expected_permissions
-            || response.repositories.as_slice()
-                != [RepositoryIdentity {
-                    id: self.repository_id,
-                    full_name: self.repository.full_name.clone(),
-                    owner: NumericIdentity {
-                        id: self.repository_owner_id,
-                    },
-                }]
-        {
+        // Exactly one repository, exactly the one asked for, owned by the
+        // installation the grant came from, and exactly the permissions
+        // requested. A token that covers anything else is not the token this
+        // operation was authorized to hold.
+        let [granted] = response.repositories.as_slice() else {
             worker::console_error!(
-                "installation token contract mismatch: {} permission(s), {} repository(ies)",
-                response.permissions.len(),
+                "installation token covers {} repositories, expected 1",
                 response.repositories.len()
             );
             return Err(OperationError::Unavailable);
+        };
+        if response.permissions != expected_permissions
+            || !granted
+                .full_name
+                .eq_ignore_ascii_case(&repository.full_name)
+            || granted.owner.id != installation.account.id
+        {
+            worker::console_error!(
+                "installation token contract mismatch: {} permission(s)",
+                response.permissions.len()
+            );
+            return Err(OperationError::Unavailable);
         }
-        Credential::new(response.token).map_err(Into::into)
+        valid_exact_integer(granted.id)?;
+        Ok(RepositoryToken {
+            repository_id: granted.id,
+            repository,
+            token: Credential::new(response.token)?,
+        })
     }
 
     async fn repository_metadata(
         &self,
-        token: &Credential,
+        token: &RepositoryToken,
     ) -> Result<RepositoryMetadata, OperationError> {
         let metadata: RepositoryMetadata = github_json(
             &format!(
                 "https://api.github.com/repos/{}/{}",
-                self.repository.owner, self.repository.name
+                token.repository.owner, token.repository.name
             ),
             token.as_str(),
         )
         .await?;
-        metadata.validate(self)
+        metadata.validate(token)
     }
 
     async fn repository_snapshot(
         &self,
-        token: &Credential,
+        token: &RepositoryToken,
     ) -> Result<RepositoryResult, OperationError> {
         let metadata = self.repository_metadata(token).await?;
         let reference = self.read_ref(token, &metadata.default_branch).await?;
@@ -2997,8 +3183,8 @@ impl Authority {
         }
         valid_sha(&reference.object.sha)?;
         Ok(RepositoryResult {
-            repository: self.repository.full_name.clone(),
-            repository_id: self.repository_id,
+            repository: token.repository.full_name.clone(),
+            repository_id: token.repository_id,
             default_branch: metadata.default_branch,
             default_sha: reference.object.sha,
         })
@@ -3006,7 +3192,7 @@ impl Authority {
 
     async fn read_ref(
         &self,
-        token: &Credential,
+        token: &RepositoryToken,
         branch: &str,
     ) -> Result<GitReference, OperationError> {
         self.read_ref_optional(token, branch)
@@ -3016,14 +3202,14 @@ impl Authority {
 
     async fn read_ref_optional(
         &self,
-        token: &Credential,
+        token: &RepositoryToken,
         branch: &str,
     ) -> Result<Option<GitReference>, OperationError> {
         let reference: GitReference = match github_json(
             &format!(
                 "https://api.github.com/repos/{}/{}/git/ref/heads/{}",
-                self.repository.owner,
-                self.repository.name,
+                token.repository.owner,
+                token.repository.name,
                 percent_encode(branch)
             ),
             token.as_str(),
@@ -3045,7 +3231,7 @@ impl Authority {
 
     async fn post_issue(
         &self,
-        token: &Credential,
+        token: &RepositoryToken,
         request: &CreateIssue,
     ) -> Result<IssueResult, OperationError> {
         #[derive(Serialize)]
@@ -3057,7 +3243,7 @@ impl Authority {
             worker::Method::Post,
             &format!(
                 "https://api.github.com/repos/{}/{}/issues",
-                self.repository.owner, self.repository.name
+                token.repository.owner, token.repository.name
             ),
             token.as_str(),
             Some(&Body {
@@ -3074,7 +3260,7 @@ impl Authority {
 
     async fn reconcile_issue(
         &self,
-        token: &Credential,
+        token: &RepositoryToken,
         request: &CreateIssue,
     ) -> Result<Option<IssueResult>, OperationError> {
         #[derive(Deserialize)]
@@ -3084,7 +3270,7 @@ impl Authority {
         }
         let query = format!(
             "repo:{} \"{}\"",
-            self.repository.full_name,
+            token.repository.full_name,
             request.marker()?
         );
         let response: SearchResult = github_json(
@@ -3118,13 +3304,13 @@ impl Authority {
 
     async fn read_issue(
         &self,
-        token: &Credential,
+        token: &RepositoryToken,
         issue_number: i64,
     ) -> Result<Issue, OperationError> {
         let issue: Issue = github_json(
             &format!(
                 "https://api.github.com/repos/{}/{}/issues/{issue_number}",
-                self.repository.owner, self.repository.name
+                token.repository.owner, token.repository.name
             ),
             token.as_str(),
         )
@@ -3141,7 +3327,7 @@ impl Authority {
 
     async fn read_issue_resolution_comment(
         &self,
-        token: &Credential,
+        token: &RepositoryToken,
         request: &ResolveIssue,
     ) -> Result<Option<IssueComment>, OperationError> {
         let mut found = None;
@@ -3149,7 +3335,7 @@ impl Authority {
             let comments: Vec<IssueComment> = github_json(
                 &format!(
                     "https://api.github.com/repos/{}/{}/issues/{}/comments?per_page={MAX_ISSUE_COMMENTS_PER_PAGE}&page={page}",
-                    self.repository.owner, self.repository.name, request.issue_number
+                    token.repository.owner, token.repository.name, request.issue_number
                 ),
                 token.as_str(),
             )
@@ -3178,7 +3364,7 @@ impl Authority {
 
     async fn reconcile_issue_resolution(
         &self,
-        token: &Credential,
+        token: &RepositoryToken,
         request: &ResolveIssue,
     ) -> Result<IssueResolutionProgress, OperationError> {
         let issue = self.read_issue(token, request.issue_number).await?;
@@ -3191,7 +3377,7 @@ impl Authority {
 
     async fn post_issue_comment(
         &self,
-        token: &Credential,
+        token: &RepositoryToken,
         request: &ResolveIssue,
     ) -> Result<IssueComment, OperationError> {
         #[derive(Serialize)]
@@ -3202,7 +3388,7 @@ impl Authority {
             worker::Method::Post,
             &format!(
                 "https://api.github.com/repos/{}/{}/issues/{}/comments",
-                self.repository.owner, self.repository.name, request.issue_number
+                token.repository.owner, token.repository.name, request.issue_number
             ),
             token.as_str(),
             Some(&Body {
@@ -3219,7 +3405,7 @@ impl Authority {
 
     async fn close_issue(
         &self,
-        token: &Credential,
+        token: &RepositoryToken,
         request: &ResolveIssue,
     ) -> Result<Issue, OperationError> {
         #[derive(Serialize)]
@@ -3231,7 +3417,7 @@ impl Authority {
             worker::Method::Patch,
             &format!(
                 "https://api.github.com/repos/{}/{}/issues/{}",
-                self.repository.owner, self.repository.name, request.issue_number
+                token.repository.owner, token.repository.name, request.issue_number
             ),
             token.as_str(),
             Some(&Body {
@@ -3253,7 +3439,7 @@ impl Authority {
     /// response can be reconciled without guessing.
     async fn verify_publish_precondition(
         &self,
-        token: &Credential,
+        token: &RepositoryToken,
         request: &PublishCommit,
     ) -> Result<bool, OperationError> {
         match self.read_ref_optional(token, &request.branch).await? {
@@ -3271,7 +3457,7 @@ impl Authority {
                 let _: GitCommit = github_json(
                     &format!(
                         "https://api.github.com/repos/{}/{}/git/commits/{}",
-                        self.repository.owner, self.repository.name, request.expected_head_sha
+                        token.repository.owner, token.repository.name, request.expected_head_sha
                     ),
                     token.as_str(),
                 )
@@ -3283,7 +3469,7 @@ impl Authority {
 
     async fn push_commit(
         &self,
-        token: &Credential,
+        token: &RepositoryToken,
         request: &PublishCommit,
         branch_exists: bool,
     ) -> Result<CommitResult, OperationError> {
@@ -3292,7 +3478,7 @@ impl Authority {
             worker::Method::Post,
             &format!(
                 "https://api.github.com/repos/{}/{}/git/commits",
-                self.repository.owner, self.repository.name
+                token.repository.owner, token.repository.name
             ),
             token.as_str(),
             Some(&CommitRequest {
@@ -3311,8 +3497,8 @@ impl Authority {
                 worker::Method::Patch,
                 &format!(
                     "https://api.github.com/repos/{}/{}/git/refs/heads/{}",
-                    self.repository.owner,
-                    self.repository.name,
+                    token.repository.owner,
+                    token.repository.name,
                     percent_encode(&request.branch)
                 ),
                 token.as_str(),
@@ -3327,7 +3513,7 @@ impl Authority {
                 worker::Method::Post,
                 &format!(
                     "https://api.github.com/repos/{}/{}/git/refs",
-                    self.repository.owner, self.repository.name
+                    token.repository.owner, token.repository.name
                 ),
                 token.as_str(),
                 Some(&RefCreate {
@@ -3352,13 +3538,13 @@ impl Authority {
     /// matching message and parent cannot smuggle different file contents.
     async fn materialize_tree(
         &self,
-        token: &Credential,
+        token: &RepositoryToken,
         request: &PublishCommit,
     ) -> Result<String, OperationError> {
         let base: GitCommit = github_json(
             &format!(
                 "https://api.github.com/repos/{}/{}/git/commits/{}",
-                self.repository.owner, self.repository.name, request.expected_head_sha
+                token.repository.owner, token.repository.name, request.expected_head_sha
             ),
             token.as_str(),
         )
@@ -3372,7 +3558,7 @@ impl Authority {
                         worker::Method::Post,
                         &format!(
                             "https://api.github.com/repos/{}/{}/git/blobs",
-                            self.repository.owner, self.repository.name
+                            token.repository.owner, token.repository.name
                         ),
                         token.as_str(),
                         Some(&BlobRequest {
@@ -3397,7 +3583,7 @@ impl Authority {
             worker::Method::Post,
             &format!(
                 "https://api.github.com/repos/{}/{}/git/trees",
-                self.repository.owner, self.repository.name
+                token.repository.owner, token.repository.name
             ),
             token.as_str(),
             Some(&TreeRequest {
@@ -3415,7 +3601,7 @@ impl Authority {
     /// branch instead of guessing.
     async fn reconcile_commit(
         &self,
-        token: &Credential,
+        token: &RepositoryToken,
         request: &PublishCommit,
     ) -> Result<Option<CommitResult>, OperationError> {
         let Some(reference) = self.read_ref_optional(token, &request.branch).await? else {
@@ -3427,7 +3613,7 @@ impl Authority {
         let head: GitCommit = github_json(
             &format!(
                 "https://api.github.com/repos/{}/{}/git/commits/{}",
-                self.repository.owner, self.repository.name, reference.object.sha
+                token.repository.owner, token.repository.name, reference.object.sha
             ),
             token.as_str(),
         )
@@ -3463,7 +3649,7 @@ impl Authority {
     /// guarantee than sending `false`.
     async fn enqueue_entry(
         &self,
-        token: &Credential,
+        token: &RepositoryToken,
         pull_node_id: &str,
         request: &EnqueuePullRequest,
     ) -> Result<EnqueueResult, OperationError> {
@@ -3484,7 +3670,7 @@ impl Authority {
         }
 
         let (data, failure): (Option<Data>, Option<GraphQlFailure>) = github_graphql(
-            token,
+            &token.token,
             "mutation($pull:ID!,$head:GitObjectID!){\
              enqueuePullRequest(input:{pullRequestId:$pull,expectedHeadOid:$head}){\
              mergeQueueEntry{id state pullRequest{number headRefOid}}}}",
@@ -3514,7 +3700,7 @@ impl Authority {
     /// was necessarily the proximate cause.
     async fn reconcile_enqueue(
         &self,
-        token: &Credential,
+        token: &RepositoryToken,
         request: &EnqueuePullRequest,
     ) -> Result<Option<EnqueueResult>, OperationError> {
         self.read_queue_entry(token, &request.base, request.pull_number, &request.head_sha)
@@ -3525,7 +3711,7 @@ impl Authority {
 
     async fn read_queue_entry(
         &self,
-        token: &Credential,
+        token: &RepositoryToken,
         base: &str,
         pull_number: i64,
         head_sha: &str,
@@ -3557,14 +3743,14 @@ impl Authority {
         }
 
         let (data, failure): (Option<Data>, Option<GraphQlFailure>) = github_graphql(
-            token,
+            &token.token,
             "query($owner:String!,$name:String!,$base:String!){\
              repository(owner:$owner,name:$name){\
              mergeQueue(branch:$base){entries(first:100){totalCount \
              nodes{id state pullRequest{number headRefOid}}}}}}",
             &Variables {
-                owner: &self.repository.owner,
-                name: &self.repository.name,
+                owner: &token.repository.owner,
+                name: &token.repository.name,
                 base,
             },
         )
@@ -3608,7 +3794,7 @@ impl Authority {
 
     async fn verify_ref(
         &self,
-        token: &Credential,
+        token: &RepositoryToken,
         name: &str,
         expected_sha: &str,
     ) -> Result<(), OperationError> {
@@ -3620,14 +3806,14 @@ impl Authority {
 
     async fn verify_pull_request_head(
         &self,
-        token: &Credential,
+        token: &RepositoryToken,
         pull_number: i64,
         expected_sha: &str,
     ) -> Result<PullRequest, OperationError> {
         let pull: PullRequest = github_json(
             &format!(
                 "https://api.github.com/repos/{}/{}/pulls/{pull_number}",
-                self.repository.owner, self.repository.name
+                token.repository.owner, token.repository.name
             ),
             token.as_str(),
         )
@@ -3640,15 +3826,15 @@ impl Authority {
 
     async fn reconcile_pull_request(
         &self,
-        token: &Credential,
+        token: &RepositoryToken,
         request: &CreatePullRequest,
     ) -> Result<Option<PullRequestResult>, OperationError> {
         let pulls: Vec<PullRequest> = github_json(
             &format!(
                 "https://api.github.com/repos/{}/{}/pulls?state=all&head={}%3A{}&base={}&per_page=100",
-                self.repository.owner,
-                self.repository.name,
-                percent_encode(&self.repository.owner),
+                token.repository.owner,
+                token.repository.name,
+                percent_encode(&token.repository.owner),
                 percent_encode(&request.head),
                 percent_encode(&request.base)
             ),
@@ -3674,7 +3860,7 @@ impl Authority {
 
     async fn post_pull_request(
         &self,
-        token: &Credential,
+        token: &RepositoryToken,
         request: &CreatePullRequest,
     ) -> Result<PullRequestResult, OperationError> {
         #[derive(Serialize)]
@@ -3689,7 +3875,7 @@ impl Authority {
             worker::Method::Post,
             &format!(
                 "https://api.github.com/repos/{}/{}/pulls",
-                self.repository.owner, self.repository.name
+                token.repository.owner, token.repository.name
             ),
             token.as_str(),
             Some(&Body {
@@ -3713,13 +3899,13 @@ impl Authority {
 
     async fn reconcile_review(
         &self,
-        token: &Credential,
+        token: &RepositoryToken,
         request: &SubmitPullRequestReview,
     ) -> Result<Option<ReviewResult>, OperationError> {
         let reviews: Vec<PullRequestReview> = github_json(
             &format!(
                 "https://api.github.com/repos/{}/{}/pulls/{}/reviews?per_page=100",
-                self.repository.owner, self.repository.name, request.pull_number
+                token.repository.owner, token.repository.name, request.pull_number
             ),
             token.as_str(),
         )
@@ -3740,7 +3926,7 @@ impl Authority {
 
     async fn post_review(
         &self,
-        token: &Credential,
+        token: &RepositoryToken,
         request: &SubmitPullRequestReview,
     ) -> Result<ReviewResult, OperationError> {
         #[derive(Serialize)]
@@ -3753,7 +3939,7 @@ impl Authority {
             worker::Method::Post,
             &format!(
                 "https://api.github.com/repos/{}/{}/pulls/{}/reviews",
-                self.repository.owner, self.repository.name, request.pull_number
+                token.repository.owner, token.repository.name, request.pull_number
             ),
             token.as_str(),
             Some(&Body {
@@ -3772,13 +3958,13 @@ impl Authority {
 
     async fn checks(
         &self,
-        token: &Credential,
+        token: &RepositoryToken,
         request: ObservePullRequestChecks,
     ) -> Result<ChecksResult, OperationError> {
         let response: CheckRuns = github_json(
             &format!(
                 "https://api.github.com/repos/{}/{}/commits/{}/check-runs?per_page=100",
-                self.repository.owner, self.repository.name, request.head_sha
+                token.repository.owner, token.repository.name, request.head_sha
             ),
             token.as_str(),
         )
@@ -3803,7 +3989,7 @@ impl Authority {
 
     async fn verify_workflow_pr(
         &self,
-        token: &Credential,
+        token: &RepositoryToken,
         pull_number: i64,
         head_sha: &str,
         base: &str,
@@ -3822,13 +4008,13 @@ impl Authority {
 
     async fn workflow_runs(
         &self,
-        token: &Credential,
+        token: &RepositoryToken,
         request: &ObservePullRequestWorkflows,
     ) -> Result<PullRequestWorkflowsResult, OperationError> {
         let response: WorkflowRuns = github_json(
             &format!(
                 "https://api.github.com/repos/{}/{}/actions/runs?event=pull_request&head_sha={}&per_page={MAX_WORKFLOW_RUNS}",
-                self.repository.owner, self.repository.name, request.head_sha
+                token.repository.owner, token.repository.name, request.head_sha
             ),
             token.as_str(),
         )
@@ -3840,7 +4026,11 @@ impl Authority {
         }
         let mut runs = Vec::with_capacity(response.workflow_runs.len());
         for run in response.workflow_runs {
-            run.verify(request.pull_number, &request.head_sha)?;
+            run.verify(
+                WorkflowRef::requested(&request.workflow_path)?,
+                request.pull_number,
+                &request.head_sha,
+            )?;
             let jobs = self.workflow_jobs(token, run.id).await?;
             runs.push(run.into_result(jobs)?);
         }
@@ -3855,13 +4045,13 @@ impl Authority {
 
     async fn read_workflow_run(
         &self,
-        token: &Credential,
+        token: &RepositoryToken,
         run_id: i64,
     ) -> Result<WorkflowRun, OperationError> {
         let run: WorkflowRun = github_json(
             &format!(
                 "https://api.github.com/repos/{}/{}/actions/runs/{run_id}",
-                self.repository.owner, self.repository.name
+                token.repository.owner, token.repository.name
             ),
             token.as_str(),
         )
@@ -3873,13 +4063,13 @@ impl Authority {
 
     async fn workflow_jobs(
         &self,
-        token: &Credential,
+        token: &RepositoryToken,
         run_id: i64,
     ) -> Result<Vec<WorkflowJob>, OperationError> {
         let response: WorkflowJobs = github_json(
             &format!(
                 "https://api.github.com/repos/{}/{}/actions/runs/{run_id}/jobs?filter=latest&per_page={MAX_WORKFLOW_JOBS}",
-                self.repository.owner, self.repository.name
+                token.repository.owner, token.repository.name
             ),
             token.as_str(),
         )
@@ -3895,13 +4085,13 @@ impl Authority {
 
     async fn job_log_redirect(
         &self,
-        token: &Credential,
+        token: &RepositoryToken,
         job_id: i64,
     ) -> Result<String, OperationError> {
         github_redirect_location(
             &format!(
                 "https://api.github.com/repos/{}/{}/actions/jobs/{job_id}/logs",
-                self.repository.owner, self.repository.name
+                token.repository.owner, token.repository.name
             ),
             token.as_str(),
         )
@@ -3910,14 +4100,14 @@ impl Authority {
 
     async fn rerun_failed_jobs(
         &self,
-        token: &Credential,
+        token: &RepositoryToken,
         run_id: i64,
     ) -> Result<(), OperationError> {
         github_empty_request(
             worker::Method::Post,
             &format!(
                 "https://api.github.com/repos/{}/{}/actions/runs/{run_id}/rerun-failed-jobs",
-                self.repository.owner, self.repository.name
+                token.repository.owner, token.repository.name
             ),
             token.as_str(),
             201,
@@ -3928,13 +4118,13 @@ impl Authority {
 
     async fn read_tag_commit_optional(
         &self,
-        token: &Credential,
+        token: &RepositoryToken,
         tag: &str,
     ) -> Result<Option<String>, OperationError> {
         let url = format!(
             "https://api.github.com/repos/{}/{}/git/ref/tags/{}",
-            self.repository.owner,
-            self.repository.name,
+            token.repository.owner,
+            token.repository.name,
             percent_encode(tag)
         );
         let reference: GitReference = match github_json(&url, token.as_str()).await {
@@ -3958,7 +4148,7 @@ impl Authority {
                     let tagged: TagObject = github_json(
                         &format!(
                             "https://api.github.com/repos/{}/{}/git/tags/{sha}",
-                            self.repository.owner, self.repository.name
+                            token.repository.owner, token.repository.name
                         ),
                         token.as_str(),
                     )
@@ -3975,14 +4165,14 @@ impl Authority {
 
     async fn create_release_tag(
         &self,
-        token: &Credential,
+        token: &RepositoryToken,
         request: &PublishReleaseTag,
     ) -> Result<(), OperationError> {
         let reference: GitReference = github_json_request(
             worker::Method::Post,
             &format!(
                 "https://api.github.com/repos/{}/{}/git/refs",
-                self.repository.owner, self.repository.name
+                token.repository.owner, token.repository.name
             ),
             token.as_str(),
             Some(&RefCreate {
@@ -4002,8 +4192,8 @@ impl Authority {
 
     async fn dispatch_workflow(
         &self,
-        token: &Credential,
-        workflow: WorkflowRef,
+        token: &RepositoryToken,
+        workflow: WorkflowRef<'_>,
         branch: &str,
         inputs: serde_json::Value,
     ) -> Result<WorkflowDispatchResponse, OperationError> {
@@ -4015,8 +4205,8 @@ impl Authority {
         let response: WorkflowDispatchResponse = github_json_request(
             worker::Method::Post,
             &workflow_api_url(
-                &self.repository.owner,
-                &self.repository.name,
+                &token.repository.owner,
+                &token.repository.name,
                 workflow,
                 "dispatches",
             ),
@@ -4033,8 +4223,8 @@ impl Authority {
 
     async fn workflow_run_by_title(
         &self,
-        token: &Credential,
-        workflow: WorkflowRef,
+        token: &RepositoryToken,
+        workflow: WorkflowRef<'_>,
         title: &str,
         head_sha: &str,
     ) -> Result<Option<WorkflowRun>, OperationError> {
@@ -4057,9 +4247,9 @@ impl Authority {
 
     async fn read_dispatched_workflow(
         &self,
-        token: &Credential,
+        token: &RepositoryToken,
         run_id: i64,
-        workflow: WorkflowRef,
+        workflow: WorkflowRef<'_>,
         head_sha: &str,
         title: &str,
     ) -> Result<WorkflowRun, OperationError> {
@@ -4082,13 +4272,13 @@ impl Authority {
 
     async fn workflow_run(
         &self,
-        token: &Credential,
+        token: &RepositoryToken,
         run_id: i64,
     ) -> Result<WorkflowRun, OperationError> {
         let run: WorkflowRun = github_json(
             &format!(
                 "https://api.github.com/repos/{}/{}/actions/runs/{run_id}",
-                self.repository.owner, self.repository.name,
+                token.repository.owner, token.repository.name,
             ),
             token.as_str(),
         )
@@ -4101,7 +4291,7 @@ impl Authority {
 
     async fn release_workflow_run(
         &self,
-        token: &Credential,
+        token: &RepositoryToken,
         tag: &str,
         commit_sha: &str,
     ) -> Result<WorkflowRunResult, OperationError> {
@@ -4113,16 +4303,16 @@ impl Authority {
 
     async fn read_workflow_runs(
         &self,
-        token: &Credential,
-        workflow: WorkflowRef,
+        token: &RepositoryToken,
+        workflow: WorkflowRef<'_>,
         head_sha: &str,
     ) -> Result<Vec<WorkflowRun>, OperationError> {
         let response: WorkflowRuns = github_json(
             &format!(
                 "{}?head_sha={head_sha}&per_page={MAX_WORKFLOW_RUNS}",
                 workflow_api_url(
-                    &self.repository.owner,
-                    &self.repository.name,
+                    &token.repository.owner,
+                    &token.repository.name,
                     workflow,
                     "runs",
                 )
@@ -4145,13 +4335,13 @@ impl Authority {
 
     async fn release(
         &self,
-        token: &Credential,
+        token: &RepositoryToken,
         tag: &str,
     ) -> Result<Option<ReleaseResult>, OperationError> {
         let release: Release = match github_json(
             &format!(
                 "https://api.github.com/repos/{}/{}/releases/tags/{tag}",
-                self.repository.owner, self.repository.name
+                token.repository.owner, token.repository.name
             ),
             token.as_str(),
         )
@@ -4242,9 +4432,13 @@ struct RepositoryMetadata {
 
 #[cfg(any(target_arch = "wasm32", test))]
 impl RepositoryMetadata {
-    fn validate(self, authority: &Authority) -> Result<Self, OperationError> {
+    fn validate(self, token: &RepositoryToken) -> Result<Self, OperationError> {
         valid_exact_integer(self.id)?;
-        if self.id != authority.repository_id || self.full_name != authority.repository.full_name {
+        if self.id != token.repository_id
+            || !self
+                .full_name
+                .eq_ignore_ascii_case(&token.repository.full_name)
+        {
             return Err(OperationError::Conflict);
         }
         valid_ref(&self.default_branch)?;
@@ -4840,11 +5034,16 @@ fn select_release_workflow_run(
 #[cfg(any(target_arch = "wasm32", test))]
 impl WorkflowRun {
     #[cfg(target_arch = "wasm32")]
-    fn verify(&self, pull_number: i64, head_sha: &str) -> Result<(), OperationError> {
+    fn verify(
+        &self,
+        workflow: WorkflowRef<'_>,
+        pull_number: i64,
+        head_sha: &str,
+    ) -> Result<(), OperationError> {
         valid_exact_integer(self.id)?;
         valid_exact_integer(self.run_attempt)?;
         valid_text(&self.name, 1, 256, false)?;
-        self.verify_identity(CI_WORKFLOW, head_sha)?;
+        self.verify_identity(workflow, head_sha)?;
         if self.event != "pull_request"
             || self.pull_requests.len() != 1
             || self.pull_requests[0].number != pull_number
@@ -4854,7 +5053,11 @@ impl WorkflowRun {
         Ok(())
     }
 
-    fn verify_identity(&self, workflow: WorkflowRef, head_sha: &str) -> Result<(), OperationError> {
+    fn verify_identity(
+        &self,
+        workflow: WorkflowRef<'_>,
+        head_sha: &str,
+    ) -> Result<(), OperationError> {
         valid_exact_integer(self.id)?;
         valid_exact_integer(self.run_attempt)?;
         valid_text(&self.name, 1, 256, false)?;
@@ -4873,7 +5076,7 @@ impl WorkflowRun {
 
     fn verify_dispatch(
         &self,
-        workflow: WorkflowRef,
+        workflow: WorkflowRef<'_>,
         head_sha: &str,
         title: &str,
     ) -> Result<(), OperationError> {
@@ -4988,6 +5191,17 @@ impl WorkflowStep {
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
+/// `.github/workflows/<file>.yml`, and nothing else. GitHub reports a run's
+/// `path` in exactly this shape, so anything else can never match a real run
+/// and is the caller's error rather than an empty result.
+fn valid_workflow_path(value: &str) -> Result<(), OperationError> {
+    let file = value
+        .strip_prefix(".github/workflows/")
+        .filter(|file| file.ends_with(".yml") || file.ends_with(".yaml"))
+        .filter(|file| valid_path_segment(file, 100, true));
+    file.map(|_| ()).ok_or(OperationError::InvalidInput)
+}
+
 fn valid_workflow_status(value: &str) -> bool {
     matches!(
         value,
@@ -5065,15 +5279,10 @@ fn percent_encode(value: &str) -> String {
     encoded
 }
 
-fn validate_installation(
-    installation: &Installation,
-    app_id: i64,
-    owner_id: i64,
-) -> Result<(), Error> {
+fn validate_installation(installation: &Installation, app_id: i64) -> Result<(), Error> {
     let rejected: Vec<&str> = [
         (installation.id <= 0).then_some("id"),
         (installation.app_id != app_id).then_some("app_id"),
-        (installation.account.id != owner_id).then_some("account_id"),
         (installation.repository_selection != "selected").then_some("repository_selection"),
         (!permission_at_least(&installation.permissions, "actions", "write")).then_some("actions"),
         (!permission_at_least(&installation.permissions, "checks", "read")).then_some("checks"),
@@ -5123,7 +5332,7 @@ fn permission_at_least(permissions: &BTreeMap<String, String>, name: &str, requi
 fn workflow_api_url(
     owner: &str,
     repository: &str,
-    workflow: WorkflowRef,
+    workflow: WorkflowRef<'_>,
     endpoint: &str,
 ) -> String {
     format!(
@@ -5706,19 +5915,136 @@ mod tests {
         }
 
         let metadata: RepositoryMetadata = serde_json::from_str(BODY).unwrap();
-        let authority = AppAuthority::new(
-            4_673_420,
-            general_purpose::STANDARD.encode([0_u8; 1024]),
-            PERMISSION_REVISION.into(),
-            "dark-factory-build/dark-factory".into(),
-            "320309345".into(),
-            "1335380107".into(),
-        )
-        .unwrap();
-        let metadata = metadata.validate(&authority.0).unwrap();
+        let metadata = metadata
+            .validate(&granted("dark-factory-build/dark-factory"))
+            .unwrap();
         assert_eq!(metadata.id, 1_335_380_107);
         assert_eq!(metadata.full_name, "dark-factory-build/dark-factory");
         assert_eq!(metadata.default_branch, "main");
+    }
+
+    /// A token as `installation_token` would return it: the repository the
+    /// grant covers, with the id GitHub answered for that name.
+    fn granted(full_name: &str) -> RepositoryToken {
+        RepositoryToken {
+            token: Credential::new("ghs_0000000000000000000000000000000000".into()).unwrap(),
+            repository: RepositoryName::new(full_name.into()).unwrap(),
+            repository_id: 1_335_380_107,
+        }
+    }
+
+    #[test]
+    fn repository_metadata_is_bound_to_the_grant_not_to_its_spelling() {
+        let body = |full_name: &str| {
+            format!(r#"{{"id":1335380107,"full_name":"{full_name}","default_branch":"main"}}"#)
+        };
+        // GitHub answers with the repository's canonical case. The grant holds
+        // the lower-cased request, and the two name the same repository.
+        let canonical: RepositoryMetadata =
+            serde_json::from_str(&body("Dark-Factory-Build/Dark-Factory")).unwrap();
+        assert!(
+            canonical
+                .validate(&granted("dark-factory-build/dark-factory"))
+                .is_ok()
+        );
+        // A different repository is a conflict however it is spelled, and the
+        // numeric id alone is not enough to accept it.
+        let other: RepositoryMetadata =
+            serde_json::from_str(&body("dark-factory-build/dark-factory-site")).unwrap();
+        assert_eq!(
+            other
+                .validate(&granted("dark-factory-build/dark-factory"))
+                .err(),
+            Some(OperationError::Conflict)
+        );
+    }
+
+    #[test]
+    fn a_requested_repository_is_lower_cased_before_its_digest_is_taken() {
+        // Two spellings of one repository must be one request, or a retry that
+        // differed only in case would conflict with its own operation id.
+        let mut mixed = "Dark-Factory-Build/Dark-Factory".to_owned();
+        let mut lower = "dark-factory-build/dark-factory".to_owned();
+        assert_eq!(
+            RepositoryName::requested(&mut mixed).unwrap().full_name,
+            RepositoryName::requested(&mut lower).unwrap().full_name
+        );
+        assert_eq!(mixed, lower);
+
+        for malformed in [
+            "dark-factory",
+            "dark-factory-build/dark-factory/extra",
+            "dark-factory-build/../dark-factory",
+            "dark factory/dark-factory",
+            "/dark-factory",
+            "dark-factory-build/",
+            "dark_factory_build/dark-factory",
+        ] {
+            let mut value = malformed.to_owned();
+            assert_eq!(
+                RepositoryName::requested(&mut value).err(),
+                Some(OperationError::InvalidInput),
+                "{malformed} was accepted"
+            );
+        }
+    }
+
+    /// One operation UUID must not mean two different operations. With the
+    /// repository configured per deployment it could not, because there was one
+    /// repository; now that the caller names it, the repository has to be part
+    /// of the replay identity or the same UUID would address a write to the
+    /// site and a write to the runtime as though they were the same request.
+    #[test]
+    fn the_repository_is_part_of_a_replay_identity() {
+        let request = |repository: &str| CreateIssue {
+            repository: repository.into(),
+            operation_id: "0c8a5c44-7f1f-11f0-952e-acde48001122".into(),
+            title: "Bounded issue".into(),
+            body: "Acceptance criteria.".into(),
+        };
+        let runtime = request_digest(&request("dark-factory-build/dark-factory")).unwrap();
+        let site = request_digest(&request("dark-factory-build/dark-factory-site")).unwrap();
+        assert_ne!(
+            runtime, site,
+            "one operation id addresses two repositories as one request"
+        );
+        // And the same request is still the same request, so an honest retry
+        // replays rather than conflicting.
+        assert_eq!(
+            runtime,
+            request_digest(&request("dark-factory-build/dark-factory")).unwrap()
+        );
+        // Case is normalized before the digest is taken, so the two spellings
+        // of one repository do not become two operations.
+        let mut mixed = request("Dark-Factory-Build/Dark-Factory");
+        mixed.validate().unwrap();
+        RepositoryName::requested(&mut mixed.repository).unwrap();
+        assert_eq!(runtime, request_digest(&mixed).unwrap());
+    }
+
+    #[test]
+    fn a_workflow_path_names_a_workflow_file() {
+        for accepted in [
+            ".github/workflows/ci.yml",
+            ".github/workflows/deploy-control-plane.yml",
+            ".github/workflows/release.yaml",
+        ] {
+            assert!(valid_workflow_path(accepted).is_ok(), "{accepted}");
+        }
+        for rejected in [
+            "ci.yml",
+            ".github/workflows/",
+            ".github/workflows/ci.txt",
+            ".github/workflows/nested/ci.yml",
+            ".github/workflows/../../etc/passwd.yml",
+            "/.github/workflows/ci.yml",
+        ] {
+            assert_eq!(
+                valid_workflow_path(rejected).err(),
+                Some(OperationError::InvalidInput),
+                "{rejected} was accepted"
+            );
+        }
     }
 
     #[test]
@@ -5734,20 +6060,20 @@ mod tests {
             r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"actions":"write","checks":"read","contents":"write","issues":"write","merge_queues":"write","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
         )
         .unwrap();
-        assert!(validate_installation(&installation, 4_673_420, 109_233_175).is_ok());
+        assert!(validate_installation(&installation, 4_673_420).is_ok());
 
         let broader: Installation = serde_json::from_str(
             r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"actions":"write","administration":"write","checks":"read","contents":"write","issues":"write","merge_queues":"write","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
         )
         .unwrap();
-        assert!(validate_installation(&broader, 4_673_420, 109_233_175).is_ok());
+        assert!(validate_installation(&broader, 4_673_420).is_ok());
 
         let insufficient: Installation = serde_json::from_str(
             r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"checks":"read","contents":"write","metadata":"read","pull_requests":"read"},"events":[],"suspended_at":null}"#,
         )
         .unwrap();
         assert_eq!(
-            validate_installation(&insufficient, 4_673_420, 109_233_175).err(),
+            validate_installation(&insufficient, 4_673_420).err(),
             Some(Error::Unavailable)
         );
 
@@ -5760,7 +6086,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            validate_installation(&read_only, 4_673_420, 109_233_175).err(),
+            validate_installation(&read_only, 4_673_420).err(),
             Some(Error::Unavailable)
         );
 
@@ -5775,7 +6101,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            validate_installation(&no_queue, 4_673_420, 109_233_175).err(),
+            validate_installation(&no_queue, 4_673_420).err(),
             Some(Error::Unavailable)
         );
 
@@ -5785,7 +6111,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            validate_installation(&queue_read_only, 4_673_420, 109_233_175).err(),
+            validate_installation(&queue_read_only, 4_673_420).err(),
             Some(Error::Unavailable)
         );
 
@@ -5794,7 +6120,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            validate_installation(&no_issues, 4_673_420, 109_233_175).err(),
+            validate_installation(&no_issues, 4_673_420).err(),
             Some(Error::Unavailable)
         );
 
@@ -5803,7 +6129,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            validate_installation(&no_actions, 4_673_420, 109_233_175).err(),
+            validate_installation(&no_actions, 4_673_420).err(),
             Some(Error::Unavailable)
         );
     }
@@ -6079,6 +6405,7 @@ mod tests {
     fn a_queue_entry_is_bound_to_the_pull_request_head_not_the_queue_commit() {
         let head = "d".repeat(40);
         let mut request = EnqueuePullRequest {
+            repository: "dark-factory-build/dark-factory".into(),
             operation_id: "4c8a5c44-7f1f-11f0-952e-acde48001122".into(),
             pull_number: 329,
             head_sha: head.clone(),
@@ -6154,6 +6481,7 @@ mod tests {
         // would otherwise be enqueued onto that branch's queue.
         assert!(
             EnqueuePullRequest {
+                repository: "dark-factory-build/dark-factory".into(),
                 base: "../etc".into(),
                 ..request.clone()
             }
@@ -6162,6 +6490,7 @@ mod tests {
         );
         assert!(
             EnqueuePullRequest {
+                repository: "dark-factory-build/dark-factory".into(),
                 head_sha: "D".repeat(40),
                 ..request.clone()
             }
@@ -6170,6 +6499,7 @@ mod tests {
         );
         assert!(
             EnqueuePullRequest {
+                repository: "dark-factory-build/dark-factory".into(),
                 pull_number: 0,
                 ..request
             }
@@ -6181,6 +6511,7 @@ mod tests {
     #[test]
     fn a_published_commit_is_bounded_and_unambiguous() {
         let base = |changes: Vec<FileChange>| PublishCommit {
+            repository: "dark-factory-build/dark-factory".into(),
             operation_id: "11111111-2222-3333-4444-555555555555".into(),
             branch: "agent/work".into(),
             expected_head_sha: "a".repeat(40),
@@ -6195,6 +6526,7 @@ mod tests {
         // A caller must not be able to write the reconciler's own vocabulary.
         // A caller cannot smuggle any operation marker into the headline.
         let forged = |message: &str| PublishCommit {
+            repository: "dark-factory-build/dark-factory".into(),
             message: message.into(),
             ..base(vec![file("README.md")])
         };
@@ -6504,36 +6836,33 @@ mod tests {
     }
 
     #[test]
-    fn authority_configuration_is_exact_and_all_numeric_ids_are_safe() {
+    fn authority_configuration_is_exact_and_names_no_repository() {
         let key = general_purpose::STANDARD.encode(vec![7_u8; 1_200]);
-        assert!(
-            AppAuthority::new(
-                4_673_420,
-                key.clone(),
-                PERMISSION_REVISION.into(),
-                "dark-factory-build/dark-factory".into(),
-                "109233175".into(),
-                "1335380107".into(),
-            )
-            .is_ok()
-        );
+        assert!(AppAuthority::new(4_673_420, key.clone(), PERMISSION_REVISION.into()).is_ok());
+        // A deployment that believes it implements a different operation
+        // contract must not serve this one.
         assert_eq!(
-            AppAuthority::new(
-                4_673_420,
-                key,
-                "broader-v2".into(),
-                "dark-factory-build/dark-factory/extra".into(),
-                "109233175".into(),
-                "1335380107".into(),
-            )
-            .err(),
+            AppAuthority::new(4_673_420, key, "broader-v2".into()).err(),
             Some(Error::Configuration)
         );
+        // A key that is not a plausible PKCS#8 blob is a configuration error,
+        // not something to discover on the first operation.
+        for key in [
+            general_purpose::STANDARD.encode(vec![7_u8; 999]),
+            general_purpose::STANDARD.encode(vec![7_u8; 16_385]),
+            "not base64".to_owned(),
+        ] {
+            assert_eq!(
+                AppAuthority::new(4_673_420, key, PERMISSION_REVISION.into()).err(),
+                Some(Error::Configuration)
+            );
+        }
     }
 
     #[test]
     fn typed_operation_inputs_are_exact_head_bound_and_bounded() {
         let mut issue = CreateIssue {
+            repository: "dark-factory-build/dark-factory".into(),
             operation_id: "0c8a5c44-7f1f-11f0-952e-acde48001122".into(),
             title: "Bounded issue".into(),
             body: "Acceptance criteria.".into(),
@@ -6547,6 +6876,7 @@ mod tests {
         );
         assert!(
             CreateIssue {
+                repository: "dark-factory-build/dark-factory".into(),
                 body: "<!-- dark-factory-operation:forged -->".into(),
                 ..issue
             }
@@ -6554,10 +6884,21 @@ mod tests {
             .is_err()
         );
 
-        let observe_issue = ObserveIssue { issue_number: 349 };
+        let observe_issue = ObserveIssue {
+            repository: "dark-factory-build/dark-factory".into(),
+            issue_number: 349,
+        };
         assert!(observe_issue.validate().is_ok());
-        assert!(ObserveIssue { issue_number: 0 }.validate().is_err());
+        assert!(
+            ObserveIssue {
+                repository: "dark-factory-build/dark-factory".into(),
+                issue_number: 0
+            }
+            .validate()
+            .is_err()
+        );
         let mut resolve_issue = ResolveIssue {
+            repository: "dark-factory-build/dark-factory".into(),
             operation_id: "3c8a5c44-7f1f-11f0-952e-acde48001122".into(),
             issue_number: 349,
             body: "The exact storage proof is now merged.".into(),
@@ -6573,6 +6914,7 @@ mod tests {
         assert_eq!(IssueResolutionReason::NotPlanned.as_str(), "not_planned");
         assert!(
             ResolveIssue {
+                repository: "dark-factory-build/dark-factory".into(),
                 body: "<!-- dark-factory-operation:forged -->".into(),
                 ..resolve_issue.clone()
             }
@@ -6583,6 +6925,7 @@ mod tests {
         assert!(resolve_issue.validate().is_err());
 
         let mut merge = ObservePullRequestMerge {
+            repository: "dark-factory-build/dark-factory".into(),
             enqueue_operation_id: "4c8a5c44-7f1f-11f0-952e-acde48001122".into(),
             pull_number: 390,
             head_sha: "d".repeat(40),
@@ -6591,6 +6934,7 @@ mod tests {
         assert!(merge.validate().is_ok());
         assert!(
             ObservePullRequestMerge {
+                repository: "dark-factory-build/dark-factory".into(),
                 base: "../main".into(),
                 ..merge
             }
@@ -6599,6 +6943,7 @@ mod tests {
         );
 
         let mut create = CreatePullRequest {
+            repository: "dark-factory-build/dark-factory".into(),
             operation_id: "1c8a5c44-7f1f-11f0-952e-acde48001122".into(),
             issue_number: 390,
             head: "feature/maintainer".into(),
@@ -6619,6 +6964,7 @@ mod tests {
         );
         assert!(
             CreatePullRequest {
+                repository: "dark-factory-build/dark-factory".into(),
                 issue_number: 0,
                 ..create.clone()
             }
@@ -6627,6 +6973,7 @@ mod tests {
         );
         assert!(
             CreatePullRequest {
+                repository: "dark-factory-build/dark-factory".into(),
                 head: "../main".into(),
                 ..create.clone()
             }
@@ -6635,6 +6982,7 @@ mod tests {
         );
         assert!(
             CreatePullRequest {
+                repository: "dark-factory-build/dark-factory".into(),
                 head_sha: "A".repeat(40),
                 ..create.clone()
             }
@@ -6643,6 +6991,7 @@ mod tests {
         );
         assert!(
             CreatePullRequest {
+                repository: "dark-factory-build/dark-factory".into(),
                 base_sha: create.head_sha.clone(),
                 ..create
             }
@@ -6651,6 +7000,7 @@ mod tests {
         );
 
         let mut review: SubmitPullRequestReview = serde_json::from_value(serde_json::json!({
+            "repository": "dark-factory-build/dark-factory",
             "operation_id": "2c8a5c44-7f1f-11f0-952e-acde48001122",
             "pull_number": 297,
             "head_sha": "c".repeat(40),
@@ -6661,6 +7011,7 @@ mod tests {
         assert!(review.validate().is_ok());
         assert!(
             serde_json::from_value::<SubmitPullRequestReview>(serde_json::json!({
+                "repository": "dark-factory-build/dark-factory",
                 "operation_id": "2c8a5c44-7f1f-11f0-952e-acde48001122",
                 "pull_number": 297,
                 "head_sha": "c".repeat(40),
@@ -6699,6 +7050,7 @@ mod tests {
     #[test]
     fn an_operation_id_is_case_settled_rather_than_case_refused() {
         let lower = SubmitPullRequestReview {
+            repository: "dark-factory-build/dark-factory".into(),
             operation_id: "5c8a5c44-7f1f-11f0-952e-acde48001122".into(),
             pull_number: 377,
             head_sha: "a".repeat(40),
@@ -6708,6 +7060,7 @@ mod tests {
         // `uuidgen` on macOS emits this, and refusing it cost two callers a
         // blind retry before it was canonicalized instead.
         let mut upper = SubmitPullRequestReview {
+            repository: "dark-factory-build/dark-factory".into(),
             operation_id: "5C8A5C44-7F1F-11F0-952E-ACDE48001122".into(),
             ..lower.clone()
         };
@@ -6735,6 +7088,7 @@ mod tests {
             "",
         ] {
             let mut request = SubmitPullRequestReview {
+                repository: "dark-factory-build/dark-factory".into(),
                 operation_id: malformed.into(),
                 ..lower.clone()
             };
@@ -6750,6 +7104,7 @@ mod tests {
     #[test]
     fn review_verdict_is_app_written_and_never_reaches_the_wire() {
         let mut allow: SubmitPullRequestReview = serde_json::from_value(serde_json::json!({
+            "repository": "dark-factory-build/dark-factory",
             "operation_id": "3c8a5c44-7f1f-11f0-952e-acde48001122",
             "pull_number": 331,
             "head_sha": "d".repeat(40),
@@ -6778,6 +7133,7 @@ mod tests {
         // The other two verdicts are distinguishable in the same line, so a
         // `COMMENTED` review that decides nothing can never read as an ALLOW.
         let note = SubmitPullRequestReview {
+            repository: "dark-factory-build/dark-factory".into(),
             event: ReviewEvent::Comment,
             ..allow.clone()
         };
@@ -6793,6 +7149,7 @@ mod tests {
                 .contains("Dark-Factory-Review: allow")
         );
         let block = SubmitPullRequestReview {
+            repository: "dark-factory-build/dark-factory".into(),
             event: ReviewEvent::RequestChanges,
             ..allow.clone()
         };
@@ -6843,6 +7200,7 @@ mod tests {
         ] {
             assert!(
                 SubmitPullRequestReview {
+                    repository: "dark-factory-build/dark-factory".into(),
                     body: forged.into(),
                     ..allow.clone()
                 }
