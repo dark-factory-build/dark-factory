@@ -122,7 +122,7 @@ cleanup() {
             });')
         if test "$current_version" = "$version"; then
             echo "bootstrap: restoring $previous" >&2
-            if ! run_wrangler versions rollback "$previous" --name "$worker" --yes \
+            if ! run_wrangler rollback "$previous" --name "$worker" --yes \
                 --message 'rollback failed Maintainer v2 activation'; then
                 echo "bootstrap: rollback failed" >&2
                 rollback_failed=1
@@ -156,7 +156,7 @@ if test "$mode" = recover-v1; then
         echo "bootstrap: refusing recovery because the failed v2 version is not live" >&2
         exit 1
     }
-    run_wrangler versions rollback "$stable_v1" --name "$worker" --yes \
+    run_wrangler rollback "$stable_v1" --name "$worker" --yes \
         --message 'restore stable Maintainer v1 after failed v2 readiness'
     ready=0
     for attempt in 1 2 3 4 5 6; do
