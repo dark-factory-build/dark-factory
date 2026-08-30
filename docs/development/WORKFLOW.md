@@ -459,6 +459,13 @@ Git and GitHub CLI configuration for separately reviewed human actions.
 ## Deploying the control-plane
 
 `maintainer.darkfactory.build` runs the `dark-factory-control-plane` Worker.
+
+The one-time v1-to-v2 activation uses the reviewed
+`./scripts/bootstrap-maintainer-v2.sh`. It stages the v2 revision and reviewed
+Worker together without traffic, checks the inherited bindings, promotes, and
+restores the recorded version if readiness fails. Delete this exception after
+the live authenticated Maintainer reports `maintainer-operations-v2`; all
+subsequent deployments use the typed workflow below.
 Deploy it through the typed Maintainer operation, which dispatches the **Deploy
 control-plane** workflow from the live default branch with its exact commit,
 reviewed tree SHA-1, and complete durable-request digest. GitHub's returned run
