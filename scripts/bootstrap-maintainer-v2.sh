@@ -33,8 +33,11 @@ test -z "$("$git" status --porcelain=v1 --untracked-files=all -- scripts/bootstr
     exit 1
 }
 
-# Build and test before any process reads the credential file.
-./control-plane/scripts/local-ci.sh
+# A production activation still needs the source gate. Log diagnosis and
+# emergency recovery must remain quick and read/move no source artifact.
+if test "$mode" = bootstrap; then
+    ./control-plane/scripts/local-ci.sh
+fi
 
 node=$(node -p 'process.execPath')
 case "$node" in /*) ;; *) echo "bootstrap: Node path is not absolute" >&2; exit 1 ;; esac
@@ -63,11 +66,11 @@ secret_file="$temporary/revision.env"
 printf '%s=%s\n' DARK_FACTORY_MAINTAINER_PERMISSION_REVISION "$revision" >"$secret_file"
 chmod 600 "$secret_file"
 
-run_wrangler() {
+exec_wrangler() {
     # The single-quoted program is intentional: the isolated child, not this
     # credential-free parent shell, expands its fixed environment.
     # shellcheck disable=SC2016
-    /usr/bin/env -i \
+    exec /usr/bin/env -i \
         PATH=/usr/bin:/bin \
         HOME="$temporary/home" \
         TMPDIR="$temporary/tmp" \
@@ -107,14 +110,31 @@ run_wrangler() {
         ' wrangler "$@"
 }
 
+run_wrangler() {
+    (exec_wrangler "$@")
+}
+
 promoted=0
 verified=0
 previous=''
+tail_pid=''
+tail_log="$temporary/readiness-tail.log"
+stop_tail() {
+    if test -n "$tail_pid"; then
+        kill -TERM "$tail_pid" 2>/dev/null || true
+        wait "$tail_pid" 2>/dev/null || true
+        tail_pid=''
+    fi
+}
 cleanup() {
     status=$?
     rollback_failed=0
     trap - EXIT HUP INT TERM
+    stop_tail
     if test "$promoted" = 1 && test "$verified" = 0 && test -n "$previous"; then
+        /usr/bin/grep -E \
+            'readiness: (journal unavailable|app authority unverified)|journal: (stub unavailable|ready fetch failed|ready returned)|app jwt signing failed|github request (could not be built|failed)|github rejected|installation rejected on:' \
+            "$tail_log" >&2 || echo "bootstrap: no readiness diagnostic reached the tail" >&2
         current=$(run_wrangler deployments status --name "$worker" --json || true)
         current_version=$(printf '%s' "$current" | "$node" -e '
             let input=""; process.stdin.on("data", c => input += c).on("end", () => {
@@ -203,6 +223,27 @@ test "$before_version" = "$previous" || {
     exit 1
 }
 
+(exec_wrangler tail "$worker" --format pretty --version-id "$version" \
+    --method GET) >"$tail_log" 2>&1 &
+tail_pid=$!
+tail_ready=0
+for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    if /usr/bin/grep -Fq 'waiting for logs...' "$tail_log"; then
+        tail_ready=1
+        break
+    fi
+    if ! kill -0 "$tail_pid" 2>/dev/null; then
+        wait "$tail_pid" || true
+        tail_pid=''
+        break
+    fi
+    test "$attempt" = 20 || sleep 0.25
+done
+test "$tail_ready" = 1 || {
+    echo "bootstrap: version-specific readiness tail did not connect" >&2
+    exit 1
+}
+
 # A failed response can be ambiguous after Cloudflare accepted the promotion;
 # cleanup re-reads the live version before deciding whether rollback is safe.
 promoted=1
@@ -223,5 +264,6 @@ for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
 done
 test "$ready" = 1 || { echo "bootstrap: live v2 readiness failed" >&2; exit 1; }
 
+stop_tail
 verified=1
 printf '{"outcome":"promoted","version":"%s","previous_version":"%s"}\n' "$version" "$previous"
