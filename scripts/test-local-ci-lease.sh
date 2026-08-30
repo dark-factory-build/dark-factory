@@ -276,6 +276,35 @@ fi
 grep -Fq 'unsafe lock object path' "$temporary/initial-symlink.stderr" || fail "initial symlink refusal was unexplained"
 rm -f "$lock_path"
 
+# A retiring owner may remove its lock object after this contender's mkdir
+# loses but before the contender validates the existing path. Force that exact
+# handoff: disappearance retries mkdir, while the symlink case above still
+# fails closed.
+disappearing_marker="$temporary/disappearing-lock-observed"
+mkdir "$lock_path"
+: >"$lock_path/descriptor"
+(
+    cd "$second"
+    LOCAL_CI_LEASE_HELPER=$PWD/scripts/local-ci-lease.sh
+    . "$LOCAL_CI_LEASE_HELPER"
+    mkdir() {
+        if [ "${1-}" = "$lock_path" ] && [ ! -f "$disappearing_marker" ]; then
+            : >"$disappearing_marker"
+            /bin/rm -f "$1/descriptor"
+            /bin/rmdir "$1"
+            return 1
+        fi
+        /bin/mkdir "$@"
+    }
+    local_ci_lease_setup_paths
+    local_ci_lease_reported_wait=0
+    local_ci_lease_acquire_lock_object
+) || fail "disappearing lock-object handoff was refused"
+[ -f "$disappearing_marker" ] || fail "disappearing lock-object seam was not exercised"
+[ -f "$lock_path/descriptor" ] || fail "disappearing lock-object contender did not reacquire"
+/bin/rm -f "$lock_path/descriptor"
+/bin/rmdir "$lock_path"
+
 # The wrapper owns its detached session leader before the command is released.
 # Interrupt that exact PID-published/pre-trap seam and prove the direct child,
 # handshake paths, and empty lock object cannot strand the next contender.

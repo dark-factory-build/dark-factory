@@ -344,6 +344,10 @@ local_ci_lease_acquire_lock_object() {
             echo "local-ci: refusing owner metadata without its lock object; invalid owner metadata or lock-object replacement requires manual inspection" >&2
             return 1
         fi
+        local_ci_lease_lock_was_present=0
+        if [ -e "$LOCAL_CI_LEASE_LOCK" ] || [ -L "$LOCAL_CI_LEASE_LOCK" ]; then
+            local_ci_lease_lock_was_present=1
+        fi
         if mkdir "$LOCAL_CI_LEASE_LOCK" 2>/dev/null; then
             local_ci_lease_prepare_lock_object || {
                 rmdir "$LOCAL_CI_LEASE_LOCK" 2>/dev/null || true
@@ -351,6 +355,14 @@ local_ci_lease_acquire_lock_object() {
                 return 1
             }
             return 0
+        fi
+        # The previous holder removes this directory after releasing its
+        # descriptor. It may disappear after our mkdir loses but before the
+        # safety check below; that is ordinary handoff, so retry the atomic
+        # mkdir. A symlink still exists as a directory entry and must fail.
+        if [ "$local_ci_lease_lock_was_present" -eq 1 ] \
+            && [ ! -e "$LOCAL_CI_LEASE_LOCK" ] && [ ! -L "$LOCAL_CI_LEASE_LOCK" ]; then
+            continue
         fi
         if ! local_ci_lease_lock_object_is_safe; then
             echo "local-ci: refusing unsafe lock object path $LOCAL_CI_LEASE_LOCK; remove the symlink or replacement manually" >&2
