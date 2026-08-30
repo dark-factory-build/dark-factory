@@ -11,8 +11,10 @@ stable_v1=47c98fa9-62ef-432d-8445-e2a7f4c83e85
 mode=bootstrap
 if test "$#" = 1 && test "$1" = recover-v1; then
     mode=recover-v1
+elif test "$#" = 1 && test "$1" = logs-v2; then
+    mode=logs-v2
 elif test "$#" != 0; then
-    echo "usage: scripts/bootstrap-maintainer-v2.sh [recover-v1]" >&2
+    echo "usage: scripts/bootstrap-maintainer-v2.sh [recover-v1|logs-v2]" >&2
     exit 1
 fi
 
@@ -28,23 +30,29 @@ git=/usr/bin/git
     echo "bootstrap: control-plane runtime is not the reviewed v2 main runtime" >&2
     exit 1
 }
-test -z "$("$git" status --porcelain=v1 --untracked-files=all -- scripts/bootstrap-maintainer-v2.sh control-plane)" || {
+test -z "$("$git" status --porcelain=v1 --untracked-files=all -- \
+    scripts/bootstrap-maintainer-v2.sh scripts/query-maintainer-v2-readiness.mjs control-plane)" || {
     echo "bootstrap: reviewed bootstrap or control-plane source is dirty" >&2
     exit 1
 }
 
-# Build and test before any process reads the credential file.
-./control-plane/scripts/local-ci.sh
+# A production activation still needs the source gate. Log diagnosis and
+# emergency recovery must remain quick and read/move no source artifact.
+if test "$mode" = bootstrap; then
+    ./control-plane/scripts/local-ci.sh
+fi
 
 node=$(node -p 'process.execPath')
 case "$node" in /*) ;; *) echo "bootstrap: Node path is not absolute" >&2; exit 1 ;; esac
 "$node" -e 'if (Number(process.versions.node.split(".")[0]) < 22) process.exit(1)'
 wrangler="$repository_root/control-plane/node_modules/wrangler/bin/wrangler.js"
-test -f "$wrangler" || { echo "bootstrap: pinned Wrangler is missing" >&2; exit 1; }
-test "$("$node" "$wrangler" --version)" = '4.125.0' || {
-    echo "bootstrap: Wrangler is not 4.125.0" >&2
-    exit 1
-}
+if test "$mode" != logs-v2; then
+    test -f "$wrangler" || { echo "bootstrap: pinned Wrangler is missing" >&2; exit 1; }
+    test "$("$node" "$wrangler" --version)" = '4.125.0' || {
+        echo "bootstrap: Wrangler is not 4.125.0" >&2
+        exit 1
+    }
+fi
 
 common_directory=$("$git" rev-parse --path-format=absolute --git-common-dir)
 env_file=$(dirname "$common_directory")/.env.txt
@@ -106,6 +114,39 @@ run_wrangler() {
             exec "$DARK_FACTORY_NODE" "$DARK_FACTORY_WRANGLER" "$@"
         ' wrangler "$@"
 }
+
+query_readiness_logs() {
+    # The isolated child expands only its fixed environment and passes no
+    # credential in a process argument.
+    # shellcheck disable=SC2016
+    /usr/bin/env -i \
+        PATH=/usr/bin:/bin \
+        HOME="$temporary/home" \
+        TMPDIR="$temporary/tmp" \
+        NO_COLOR=1 \
+        CI=1 \
+        DARK_FACTORY_ENV_FILE="$env_file" \
+        DARK_FACTORY_NODE="$node" \
+        DARK_FACTORY_QUERY="$repository_root/scripts/query-maintainer-v2-readiness.mjs" \
+        /bin/sh -c '
+            set -eu
+            extract() {
+                /usr/bin/awk -v key="$1" '\''
+                    index($0, key "=") == 1 { count++; value = substr($0, length(key) + 2) }
+                    END { if (count == 1 && value != "") print value; else exit 1 }
+                '\'' "$DARK_FACTORY_ENV_FILE"
+            }
+            CLOUDFLARE_API_TOKEN=$(extract CLOUDFLARE_API_TOKEN) || exit 1
+            CLOUDFLARE_ACCOUNT_ID=$(extract CLOUDFLARE_ACCOUNT_ID) || exit 1
+            export CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID
+            exec "$DARK_FACTORY_NODE" "$DARK_FACTORY_QUERY"
+        '
+}
+
+if test "$mode" = logs-v2; then
+    query_readiness_logs
+    exit 0
+fi
 
 promoted=0
 verified=0
