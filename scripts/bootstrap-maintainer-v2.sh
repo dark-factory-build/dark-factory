@@ -41,7 +41,7 @@ git=/usr/bin/git
 
 "$git" cat-file -e "${target_commit}^{commit}" 2>/dev/null || {
     echo "bootstrap: reviewed runtime commit $target_commit is unreachable in this clone" >&2
-    echo "bootstrap: restore it (git fetch origin refs/pull/393/head) or repoint target_commit" >&2
+    echo "bootstrap: fetch the branch or PR ref that carries it, or repoint target_commit" >&2
     exit 1
 }
 
@@ -49,7 +49,17 @@ git=/usr/bin/git
     control-plane/src control-plane/migrations \
     control-plane/Cargo.toml control-plane/Cargo.lock \
     control-plane/package.json control-plane/package-lock.json || {
-    echo "bootstrap: control-plane runtime is not the reviewed v2 main runtime" >&2
+    # Nothing outside this script observes target_commit, and CI checks out
+    # shallow so a git-based test cannot, so staleness surfaces here and only
+    # here. Name the remedy: the usual cause is a commit that touched a gated
+    # path -- a doc comment in control-plane/src counts -- without repointing
+    # the pin, not a genuinely unreviewed runtime.
+    echo "bootstrap: control-plane differs from reviewed runtime $target_commit" >&2
+    echo "bootstrap: repoint target_commit at the reviewed head, or check out that head" >&2
+    "$git" diff --stat "$target_commit" HEAD -- \
+        control-plane/src control-plane/migrations \
+        control-plane/Cargo.toml control-plane/Cargo.lock \
+        control-plane/package.json control-plane/package-lock.json >&2
     exit 1
 }
 test -z "$("$git" status --porcelain=v1 --untracked-files=all -- scripts/bootstrap-maintainer-v2.sh control-plane)" || {
