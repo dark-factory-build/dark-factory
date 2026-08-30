@@ -5,6 +5,16 @@ target_commit=3631e4712068c01e25d8327318e2e1b2d8b7c16d
 worker=dark-factory-control-plane
 hostname=maintainer.darkfactory.build
 revision=maintainer-operations-v2
+failed_v2=5391280b-5840-4c9f-9ec2-55d37c4a0022
+stable_v1=47c98fa9-62ef-432d-8445-e2a7f4c83e85
+
+mode=bootstrap
+if test "$#" = 1 && test "$1" = recover-v1; then
+    mode=recover-v1
+elif test "$#" != 0; then
+    echo "usage: scripts/bootstrap-maintainer-v2.sh [recover-v1]" >&2
+    exit 1
+fi
 
 script_dir=$(CDPATH='' cd -- "$(dirname "$0")" && pwd -P)
 repository_root=$(CDPATH='' cd -- "$script_dir/.." && pwd -P)
@@ -112,8 +122,8 @@ cleanup() {
             });')
         if test "$current_version" = "$version"; then
             echo "bootstrap: restoring $previous" >&2
-            if ! run_wrangler versions deploy --name "$worker" --version-id "$previous" --yes \
-                --message 'rollback failed maintainer v2 bootstrap'; then
+            if ! run_wrangler rollback "$previous" --name "$worker" --yes \
+                --message 'rollback failed Maintainer v2 activation'; then
                 echo "bootstrap: rollback failed" >&2
                 rollback_failed=1
             elif test "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 "https://$hostname/healthz" || true)" != 200; then
@@ -140,6 +150,28 @@ previous=$(printf '%s' "$deployment" | "$node" -e '
       process.stdout.write(d[0].version_id);
     });') || { echo "bootstrap: live deployment is not one version at 100%" >&2; exit 1; }
 echo "bootstrap: rollback target $previous"
+
+if test "$mode" = recover-v1; then
+    test "$previous" = "$failed_v2" || {
+        echo "bootstrap: refusing recovery because the failed v2 version is not live" >&2
+        exit 1
+    }
+    run_wrangler rollback "$stable_v1" --name "$worker" --yes \
+        --message 'restore stable Maintainer v1 after failed v2 readiness'
+    ready=0
+    for attempt in 1 2 3 4 5 6; do
+        body=$(curl -sS --max-time 30 "https://$hostname/readyz" || true)
+        if printf '%s' "$body" | grep -Fq '"status":"ready"' \
+            && printf '%s' "$body" | grep -Fq '"maintainer_operations":"mcp_six_tools_operator_and_headless"'; then
+            ready=1
+            break
+        fi
+        test "$attempt" = 6 || sleep 5
+    done
+    test "$ready" = 1 || { echo "bootstrap: stable v1 recovery readiness failed" >&2; exit 1; }
+    printf '{"outcome":"recovered","version":"%s"}\n' "$stable_v1"
+    exit 0
+fi
 
 upload=$(run_wrangler versions upload --name "$worker" --strict \
     --secrets-file "$secret_file" \
