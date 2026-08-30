@@ -21,7 +21,7 @@ body:
     id: evidence
     attributes:
       label: Evidence
-      description: "`factoryctl health` output, the relevant `run list`/`task get`/`events` frames, and daemon log lines. Do not paste provider output, attempt credentials, source, or anything from `~/.claude.json` / `CODEX_HOME`."
+      description: "The exact command or browser action, its bounded JSON/error, `factoryctl --version`, and relevant daemon log lines. Do not paste provider output, credentials, pairing fragments, source, or private provider configuration."
   - type: input
     id: version
     attributes:
@@ -33,6 +33,6 @@ body:
     id: provider
     attributes:
       label: Provider involved
-      options: ["claude", "codex", "shell", "none / not provider-specific"]
+      options: ["shell", "Claude Code (currently unavailable)", "Codex (currently unavailable)", "none / not provider-specific"]
     validations:
       required: true
