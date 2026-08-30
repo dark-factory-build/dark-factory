@@ -22,19 +22,21 @@ Run the complete gate:
 ./scripts/local-ci.sh
 ```
 
-The source gate is the Go gate: `gofmt`, `go vet`, the full serial Go test
-suite, the full race suite, the TypeScript client proof, and the real
-browser, daemon and service end-to-end lifecycles, followed by
+The routine source gate is the Go gate: `gofmt`, `go vet`, the short serial Go
+test suite, one TypeScript client proof, and the real browser, daemon and
+service end-to-end lifecycles, followed by
 `git diff --check`. It additionally checks release-source, publisher, and
 package fixtures. The daemon is Darwin-only today, so the gate is macOS-only;
 Linux support is #120/#141-144. CI requires the runtime gate and the
 control-plane gate through the aggregate `required` context, so run the gate
-before opening a PR.
+before opening a PR. Also run affected-package tests and focused `-race`
+checks when the change touches concurrency or ownership; do not impose broad
+stress suites on unrelated changes.
 
 A few repository-wide rules the gate enforces, worth knowing up front:
 
-- `gofmt` and `go vet` are clean, and the full suite runs under `-race`. The
-  gate treats a race report as a failure, not a warning.
+- `gofmt` and `go vet` are clean. Any affected focused `-race` check treats a
+  race report as a failure, not a warning.
 - The SQLite schema is one fresh set of statements in
   `internal/kernel/schema.go`. There is deliberately no migration directory
   and no upcaster: the Go home and schema are new, so a schema change is an

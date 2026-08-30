@@ -253,7 +253,7 @@ go_gate_fast_stage() {
     echo "go-check: go vet ./..."
     go_gate_stage 600 "$go_gate_go" vet ./... || return
     echo "go-check: focused pure-package tests"
-    go_gate_stage 900 "$go_gate_go" test -timeout=5m -count=1 ./internal/kernel ./internal/browserprotocol ./internal/sqlitecontract || return
+    go_gate_stage 900 "$go_gate_go" test -short -timeout=5m -count=1 ./internal/kernel ./internal/browserprotocol ./internal/sqlitecontract || return
 
     [ -x "$go_gate_corepack" ] || { echo "go-check: fixed corepack is unavailable" >&2; return 1; }
     echo "go-check: frozen TypeScript dependency install"

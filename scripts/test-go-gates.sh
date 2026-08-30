@@ -582,15 +582,16 @@ go_gate_signal() {
     exit $((128 + signal))
 }
 trap 'go_gate_signal 15' TERM
-go_gate_ci_web_proof
+go_gate_web_test_stage
 EOF
 /bin/chmod 700 "$signal_fixture"
 
 run_signal_fixture() {
     signal_ci_script=$1
+    signal_fixture_path=${2:-$signal_fixture}
     /bin/rm -f "$signal_marker" "$signal_root_file" "$signal_root_identity_file" \
         "$signal_wrapper_file" "$signal_child_file" "$signal_joined_file" "$signal_cleaned_file"
-    PATH="$signal_fake_bin:$PATH" /bin/sh "$signal_fixture" \
+    PATH="$signal_fake_bin:$PATH" /bin/sh "$signal_fixture_path" \
         "$repository_root/scripts/go-gate-environment.sh" \
         "$repository_root/scripts/go-fast-stage.sh" "$signal_ci_script" \
         "$signal_marker" "$signal_root_file" "$signal_root_identity_file" \
@@ -702,13 +703,15 @@ run_signal_fixture "$repository_root/scripts/go-ci-owned.sh" || fail "signal fix
 [ "$signal_survivor" -eq 0 ] || fail "TERM fixture left an exact child or process-group survivor"
 [ "$signal_root_left" -eq 0 ] || fail "TERM fixture cleaned up before joining supervisor"
 
-# Reintroduce the former process-owning go-ci wrapper. The same readiness and
-# exact-PID cleanup must detect the hidden supervisor rather than accepting it.
-signal_mutated_ci="$temporary/go-ci-owned-nested-mutation.sh"
-/usr/bin/sed 's/^    go_gate_web_test_stage$/    ( trap "" TERM HUP; go_gate_web_test_stage; : )/' \
-    "$repository_root/scripts/go-ci-owned.sh" >"$signal_mutated_ci"
-/bin/chmod 700 "$signal_mutated_ci"
-run_signal_fixture "$signal_mutated_ci" || fail "nested mutation fixture did not start"
+# Reintroduce the former process-owning wrapper around the proof. The same
+# readiness and exact-PID cleanup must detect the hidden supervisor rather than
+# accepting it.
+signal_mutated_fixture="$temporary/signal-fixture-nested-mutation.sh"
+/usr/bin/sed 's/^go_gate_web_test_stage$/ ( trap "" TERM HUP; go_gate_web_test_stage; : )/' \
+    "$signal_fixture" >"$signal_mutated_fixture"
+/bin/chmod 700 "$signal_mutated_fixture"
+[ -x "$signal_mutated_fixture" ] || fail "nested mutation fixture is not executable"
+run_signal_fixture "$repository_root/scripts/go-ci-owned.sh" "$signal_mutated_fixture" || fail "nested mutation fixture did not start"
 [ "$signal_survivor" -eq 1 ] || fail "nested go-ci mutation did not leave a detectable survivor"
 signal_mutation_root=$(/bin/cat "$signal_root_file")
 signal_mutation_identity=$(/bin/cat "$signal_root_identity_file")

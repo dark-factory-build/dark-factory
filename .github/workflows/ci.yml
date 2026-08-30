@@ -39,11 +39,9 @@ jobs:
     # on the ephemeral hosted runner; letting it fall through would quietly
     # route every gating run onto the persistent shared runner (#54).
     runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'macos-latest' || 'dark-factory-mac' }}
-    # The Go gate runs the full serial suite, the full race suite, the
-    # TypeScript client proof, and the browser, daemon and service E2Es back
-    # to back; the old 45-minute bound was sized for the retired cargo gate
-    # and would turn slow-but-green runs red.
-    timeout-minutes: 90
+    # The Go gate runs the routine short serial suite, one TypeScript client
+    # proof, and the normal browser, daemon and service E2Es back to back.
+    timeout-minutes: 30
     steps:
       # No actions/checkout: codeload.github.com (which serves an action's
       # tarball) can 429 independently of git itself and has, for over an

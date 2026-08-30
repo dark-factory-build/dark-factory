@@ -36,7 +36,21 @@ socket, exact resource identities, and an independent reaper.
    ```
 
    The gate takes no arguments and runs on macOS only: the daemon is
-   Darwin-only, and Linux support is #120/#141-144.
+   Darwin-only, and Linux support is #120/#141-144. Its routine Go fast and
+   serial stages use `-short`, retaining broad ordinary regression coverage
+   without the exhaustive workspace race and browser-PTY-race stages.
+
+   Authors and reviewers must run affected-package tests and focused `-race`
+   checks for concurrency or ownership changes. Run the large SQLite stress
+   only for SQLite open/snapshot/file-binding, SQLite dependency, or Go
+   toolchain changes:
+
+   ```sh
+   GOTOOLCHAIN=go1.27.0 GOENV=off GOAUTH=off \
+     ./scripts/with-local-ci-lease.sh go test -race -timeout=30m -count=1 \
+     -run '^TestConcurrentOpenAndValidWriterReturnsBoundedSnapshotFailure$' \
+     ./internal/kernel
+   ```
 5. Publish the branch and open a PR through the remote-access boundary below,
    describing behavior, deleted authority paths, exact base/head, focused
    proof, and unverified lanes.

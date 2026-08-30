@@ -6761,12 +6761,15 @@ Claude/Codex provider proof.
   corrected check excluded only its own process group before returning PASS.
 
 The duration audit is also closed for this cutover rather than left implicit.
-S6 removed the obsolete Rust and Linux-source lanes. The retained gate still
-repeats roughly 39 seconds of focused Go tests before the full suites and runs
-the TypeScript proof twice; those are safe optimization candidates only after
-an execution-shape fixture proves exactly-once coverage. The 849.035-second
-kernel race package remains real cryptographic snapshot and concurrency stress,
-not deletion evidence. A post-cutover #238 performance slice should measure
-per-test cost and separate complete serial coverage from an explicit
-race-sensitive inventory before narrowing it. No gate is weakened as part of
-the cutover record.
+S6 removed the obsolete Rust and Linux-source lanes. The post-cutover #238
+policy keeps deterministic main/WAL/SHM validation and the short serial suite,
+one TypeScript proof, and normal browser/daemon/service E2Es in the routine
+baseline; the exhaustive workspace race and browser-PTY-race stages are
+reserved for affected-package or focused review work. The historical
+849.035-second kernel race package remains documented as intentional
+cryptographic snapshot and concurrency stress, not deletion evidence. Authors
+and reviewers run affected-package tests and focused `-race` checks for
+concurrency or ownership changes; the exact
+`TestConcurrentOpenAndValidWriterReturnsBoundedSnapshotFailure` stress runs
+only for SQLite open/snapshot/file-binding, SQLite dependency, or Go toolchain
+changes.

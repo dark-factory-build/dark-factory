@@ -10,6 +10,9 @@ stale_control_plane_workflow="$repository_root/control-plane/.github/workflows/c
 control_plane_gate="$repository_root/control-plane/scripts/local-ci.sh"
 control_plane_build="$repository_root/control-plane/scripts/build-worker.sh"
 control_plane_wrangler="$repository_root/control-plane/wrangler.toml"
+go_fast_stage="$repository_root/scripts/go-fast-stage.sh"
+go_owned_gate="$repository_root/scripts/go-ci-owned.sh"
+kernel_stress='TestConcurrentOpenAndValidWriterReturnsBoundedSnapshotFailure'
 
 fail() {
     echo "local-ci shape test failed: $*" >&2
@@ -39,6 +42,15 @@ fi
 grep -Fq '/bin/sh "$script_dir/go-ci-owned.sh"' "$gate" \
     || fail "gate lost the authoritative Go gate invocation line"
 grep -Fq 'git diff --check' "$gate" || fail "gate lost its diff check"
+
+grep -Fq 'go_gate_stage 900 "$go_gate_go" test -short -timeout=5m -count=1' "$go_fast_stage" || fail "fast Go gate does not use short mode"
+grep -Fq 'go_gate_stage 1200 "$go_gate_go" test -short -timeout=20m -count=1' "$go_owned_gate" || fail "full Go gate does not use short mode"
+if grep -Fq 'go_gate_stage 1800' "$go_owned_gate" || grep -Fq -- '-race' "$go_owned_gate"; then fail "routine Go gate retains the exhaustive race stage"; fi
+if grep -Fq 'go-browser-e2e.sh --race' "$go_owned_gate"; then fail "routine Go gate retains the browser race stage"; fi
+grep -A 8 -F "func $kernel_stress" "$repository_root/internal/kernel/store_test.go" | grep -Fq 'if testing.Short()' || fail "kernel stress is not short-gated"
+if grep -Fq 'go_gate_web_test_stage' "$go_owned_gate"; then fail "TypeScript proof is duplicated outside the fast stage"; fi
+typescript_proof_count=$(grep -Ec '^[[:space:]]+go_gate_web_test_stage \|\| return$' "$go_fast_stage" || true)
+[ "$typescript_proof_count" -eq 1 ] || fail "TypeScript proof is not run exactly once"
 
 for fixture in test-local-ci-lease.sh test-local-ci-lease-mutations.sh \
     check-toolchain-pins.sh test-prepare-release-source.sh \
