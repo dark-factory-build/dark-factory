@@ -29,8 +29,8 @@ jobs:
   #
   # `runs-on` below is a policy, not a mechanism: a pull request runs the
   # workflow file it carries, so this expression only governs a PR that
-  # leaves it unmodified — see docs/development/WORKFLOW.md, "CI and
-  # GitHub" for the trust boundary. Manual runs use the persistent runner;
+  # leaves it unmodified — see docs/development/WORKFLOW.md, "GitHub
+  # boundary". Manual runs use the persistent runner;
   # gating PR and queue runs use fresh hosted workers.
   checks:
     # `merge_group` is grouped with `pull_request`, not left to the fallback.

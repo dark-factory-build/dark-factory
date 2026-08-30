@@ -1,22 +1,23 @@
 # Installation
 
-Install the supported `v0.3.0` release rather than a source checkout. Development
+Install a published macOS release rather than a source checkout. Development
 and tests use a temporary `DARK_FACTORY_HOME` and explicit socket as described
 in the [development workflow](development/WORKFLOW.md); they never replace the
 operator's binaries or launchd job.
 
-## Install v0.3.0
+## Install a release
 
 The release provides one archive for each supported macOS target:
 
-- Apple silicon: `dark-factory-v0.3.0-aarch64-apple-darwin.tar.gz`
-- Intel: `dark-factory-v0.3.0-x86_64-apple-darwin.tar.gz`
+- Apple silicon: `dark-factory-vX.Y.Z-aarch64-apple-darwin.tar.gz`
+- Intel: `dark-factory-vX.Y.Z-x86_64-apple-darwin.tar.gz`
 
 Download the matching archive from the
-[v0.3.0 GitHub release](https://github.com/dark-factory-build/dark-factory/releases/tag/v0.3.0),
-verify its entry in `SHA256SUMS`, and put `factoryd`, `factory-runner`, and
-`factoryctl` from that archive together on `PATH`. The release's Homebrew
-formula installs the same three commands if it has been added to a tap.
+[GitHub releases](https://github.com/dark-factory-build/dark-factory/releases),
+verify its entry in that release's `SHA256SUMS`, and put `factoryd`,
+`factory-runner`, and `factoryctl` from the archive together on `PATH`. The
+release's Homebrew formula installs the same commands if it has been added to a
+tap.
 
 Create and install one managed home. Installation loads the launchd job;
 `service start` is the explicit command to use after a later stop:

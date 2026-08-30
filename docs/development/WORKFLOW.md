@@ -179,11 +179,11 @@ Observe the exact tag, source commit, workflow run, release assets, and their
 GitHub-reported digests. A failed release may be resumed only by the fixed
 recovery workflow bound to that tag and exact default-branch workflow commit.
 
-The v0.3 installer is deliberately fresh and small. `factoryctl service
+The current installer is deliberately fresh and small. `factoryctl service
 install` copies the exact sibling `factoryd`, `factory-runner`, and `factoryctl`
 binaries, writes its receipt and launchd plist, and loads that job. It does not
-download a release, update an existing different installation, migrate an old
-Rust home, maintain version pointers, or promise rollback. See
+download a release, update a different existing installation, migrate another
+home, maintain version pointers, or promise rollback. See
 [the installation guide](../install.md).
 
 ## Reporting

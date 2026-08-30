@@ -24,9 +24,9 @@ remain clients of the same local API; neither owns lifecycle or policy.
 
 ## Installation
 
-Install the supported `v0.3.0` release, not the development branch. The
-[installation guide](docs/install.md) covers the three binaries, managed
-service, and paired browser console.
+Install a published release, not the development branch. The [installation
+guide](docs/install.md) covers the three binaries, managed service, and paired
+browser console.
 
 ## Development
 
