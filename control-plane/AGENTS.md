@@ -43,10 +43,14 @@ Codex nor Claude owns its credentials or its durable journal.
    `wrangler dev`, use `wrangler dev --env-file`, the root `.env.txt`, a
    production token, Wrangler OAuth, or keychain state for local debugging. A
    production deployment cycle is never the right debugging loop.
-   The one-time owner-authorized v1-to-v2 activation may run only through the
-   independently reviewed parent command `../scripts/bootstrap-maintainer-v2.sh`.
-   It is not a reusable local deployment surface; routine v2 deployments use
-   the fixed Maintainer-App workflow.
+   Owner-authorized activation may run only through the independently reviewed
+   parent command `../scripts/bootstrap-maintainer-v2.sh <reviewed-tree>`,
+   which ships the working tree and so proves `HEAD:control-plane` is the exact
+   tree the operator names. Routine deployments use the fixed Maintainer-App
+   workflow; this path is for when that workflow cannot run, which
+   `dispatch_control_plane_deploy` observing the repository makes possible --
+   a defect there disables the App's ability to deploy its own repair, and the
+   workflow admits no human dispatch in its place.
 3. Expose typed, policy-checked operations only. Do not add a generic GitHub
    REST or GraphQL proxy, a shell-command surface, or a fallback to personal
    GitHub credentials. Contributor agents reach the deployed service only as

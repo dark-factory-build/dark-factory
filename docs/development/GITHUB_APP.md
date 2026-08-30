@@ -106,7 +106,7 @@ required Cloudflare secrets. There is no database URL, owner integration,
 runtime role, provider API key, or ambient authentication fallback.
 
 `wrangler secret put` deploys immediately and is not an acceptable staging
-step. The [deployment and local-credential runbook](WORKFLOW.md#local-cloudflare-api-credentials)
+step. The [deployment and local-credential runbook](WORKFLOW.md#cloudflare-credentials)
 must stage an exact version and its secrets
 without traffic, verify names and bindings without reading values, and add the
 route only after independent adversarial `ALLOW`. This is operator deployment
