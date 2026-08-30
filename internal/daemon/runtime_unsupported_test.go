@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/dark-factory-build/dark-factory/internal/changeworker"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 )
 
@@ -31,8 +30,5 @@ func TestUnsupportedRuntimeFailsBeforeEffect(t *testing.T) {
 	var runtime Runtime
 	if _, err := runtime.PublishAttemptToken(context.Background(), [32]byte{1}); !errors.Is(err, errUnsupported) {
 		t.Fatalf("PublishAttemptToken error = %v", err)
-	}
-	if _, err := runtime.PublishWorkerConfig(context.Background(), changeworker.Config{}); !errors.Is(err, errUnsupported) {
-		t.Fatalf("PublishWorkerConfig error = %v", err)
 	}
 }

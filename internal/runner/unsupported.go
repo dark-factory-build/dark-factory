@@ -54,6 +54,7 @@ func (c *AttemptController) Terminate() error                      { return ErrU
 func (c *AttemptController) Close() error                          { return nil }
 func OpenWorkerControl() (*WorkerControl, error)                   { return nil, ErrUnsupported }
 func (w *WorkerControl) Identity() Identity                        { return Identity{} }
+func (w *WorkerControl) ReadConfig(int) ([]byte, error)            { return nil, ErrUnsupported }
 func (w *WorkerControl) DuplicateRuntimeDirectory(context.Context) (*os.File, error) {
 	return nil, ErrUnsupported
 }

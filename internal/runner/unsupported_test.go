@@ -34,6 +34,9 @@ func TestUnsupportedFailsBeforeEffect(t *testing.T) {
 	}
 	cwdFD, taskFD := int(cwd.Fd()), int(task.Fd())
 	var worker *WorkerControl
+	if config, err := worker.ReadConfig(1); !errors.Is(err, ErrUnsupported) || config != nil {
+		t.Fatalf("worker config=%q err=%v", config, err)
+	}
 	if duplicate, err := worker.DuplicateRuntimeDirectory(context.Background()); !errors.Is(err, ErrUnsupported) || duplicate != nil {
 		t.Fatalf("runtime duplicate=%v err=%v", duplicate, err)
 	}

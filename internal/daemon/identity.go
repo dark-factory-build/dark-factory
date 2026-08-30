@@ -145,34 +145,34 @@ func attemptDigest(value api.AttemptDigest) (kernel.AttemptDigest, error) {
 	return result, nil
 }
 
-func kernelSelectionCheckpoint(selection changeworker.SelectionReport) (kernel.ChangeSelection, error) {
-	if err := changeworker.ValidateSelectionReport(selection); err != nil || selection.EntryCount > math.MaxUint32 {
+func kernelSelectionCheckpoint(result changeworker.Result, repository change.RepositoryIdentity) (kernel.ChangeSelection, error) {
+	if result.EntryCount > math.MaxUint32 {
 		return kernel.ChangeSelection{}, errInvalidContract
 	}
-	format, err := kernel.NewObjectFormat(selection.Format.Name())
+	format, err := kernel.NewObjectFormat(result.Format.Name())
 	if err != nil {
 		return kernel.ChangeSelection{}, errInvalidContract
 	}
-	commit, err := kernel.NewCommitID(format, selection.Base.Bytes())
+	commit, err := kernel.NewCommitID(format, result.Base.Bytes())
 	if err != nil {
 		return kernel.ChangeSelection{}, errInvalidContract
 	}
-	digest, err := kernel.TreeDigestFromBytes(selection.Commitment.Bytes())
+	digest, err := kernel.TreeDigestFromBytes(result.Commitment.Bytes())
 	if err != nil {
 		return kernel.ChangeSelection{}, errInvalidContract
 	}
-	repository, err := changeFileIdentity(selection.Repository.Device(), selection.Repository.Inode())
+	repositoryFile, err := changeFileIdentity(repository.Device(), repository.Inode())
 	if err != nil {
 		return kernel.ChangeSelection{}, errInvalidContract
 	}
-	result, err := kernel.NewChangeSelection(format, commit, digest, uint32(selection.EntryCount), selection.BlobBytes, repository)
+	selection, err := kernel.NewChangeSelection(format, commit, digest, uint32(result.EntryCount), result.BlobBytes, repositoryFile)
 	if err != nil {
 		return kernel.ChangeSelection{}, errInvalidContract
 	}
-	return result, nil
+	return selection, nil
 }
 
-func retainedWorkerCheckpoint(value kernel.Change) (*changeworker.RetainedChange, change.RepositoryIdentity, error) {
+func retainedWorkerCheckpoint(value kernel.Change) (*changeworker.Result, change.RepositoryIdentity, error) {
 	if value.Phase != kernel.ChangeAvailable || value.Selection == nil || value.TreeIdentity == nil {
 		return nil, change.RepositoryIdentity{}, errInvalidContract
 	}
@@ -189,7 +189,7 @@ func retainedWorkerCheckpoint(value kernel.Change) (*changeworker.RetainedChange
 	if err != nil {
 		return nil, change.RepositoryIdentity{}, errInvalidContract
 	}
-	return &changeworker.RetainedChange{
+	return &changeworker.Result{
 		Format: format, Base: base, Commitment: commitment,
 		EntryCount: uint64(value.Selection.EntryCount()), BlobBytes: value.Selection.TotalBytes(), Tree: tree,
 	}, repository, nil
@@ -210,26 +210,18 @@ func kernelStageIdentity(identity change.StageIdentity) (kernel.FileIdentity, er
 }
 
 func kernelAvailability(facts change.TreeFacts) (kernel.ChangeAvailability, error) {
-	checkpoint := changeworker.PopulationReport{
-		Identity: facts.Identity(), Commitment: facts.Commitment(),
-		EntryCount: facts.EntryCount(), BlobBytes: facts.BlobBytes(),
-	}
-	return kernelAvailabilityCheckpoint(checkpoint)
-}
-
-func kernelAvailabilityCheckpoint(facts changeworker.PopulationReport) (kernel.ChangeAvailability, error) {
-	if err := changeworker.ValidatePopulationReport(facts); err != nil || facts.EntryCount > math.MaxUint32 {
+	if facts.EntryCount() > math.MaxUint32 {
 		return kernel.ChangeAvailability{}, errInvalidContract
 	}
-	digest, err := kernel.TreeDigestFromBytes(facts.Commitment.Bytes())
+	digest, err := kernel.TreeDigestFromBytes(facts.Commitment().Bytes())
 	if err != nil {
 		return kernel.ChangeAvailability{}, errInvalidContract
 	}
-	source, err := changeFileIdentity(facts.Identity.Device(), facts.Identity.Inode())
+	source, err := changeFileIdentity(facts.Identity().Device(), facts.Identity().Inode())
 	if err != nil {
 		return kernel.ChangeAvailability{}, err
 	}
-	result, err := kernel.NewChangeAvailability(digest, uint32(facts.EntryCount), facts.BlobBytes, source)
+	result, err := kernel.NewChangeAvailability(digest, uint32(facts.EntryCount()), facts.BlobBytes(), source)
 	if err != nil {
 		return kernel.ChangeAvailability{}, errInvalidContract
 	}

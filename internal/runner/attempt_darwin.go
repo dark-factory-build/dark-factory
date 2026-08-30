@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -317,7 +318,9 @@ func (c *AttemptController) Close() error {
 type workerState uint8
 
 const (
-	workerSelection workerState = iota + 1
+	workerConfig workerState = iota + 1
+	workerConfigConsumed
+	workerSelection
 	workerSelectionReported
 	workerPreparation
 	workerPreparationReported
@@ -381,7 +384,7 @@ func OpenWorkerControl() (*WorkerControl, error) {
 		return nil, ErrIdentity
 	}
 	keep = true
-	return &WorkerControl{file: control, dir: dir, dirID: dirID, lifetime: lifetime, lifetimeID: lifetimeID, identity: id, state: workerSelection}, nil
+	return &WorkerControl{file: control, dir: dir, dirID: dirID, lifetime: lifetime, lifetimeID: lifetimeID, identity: id, state: workerConfig}, nil
 }
 
 func (w *WorkerControl) Identity() Identity {
@@ -389,6 +392,30 @@ func (w *WorkerControl) Identity() Identity {
 		return Identity{}
 	}
 	return w.identity
+}
+
+// ReadConfig receives the daemon-owned worker configuration over the already
+// inherited control capability. The read is one-shot even when the peer sends
+// a truncated or otherwise invalid frame: retrying on a partially consumed
+// stream could reinterpret the remaining bytes as a second configuration.
+func (w *WorkerControl) ReadConfig(maximum int) ([]byte, error) {
+	if w == nil || w.file == nil || w.state != workerConfig || maximum <= 0 || maximum > maxConfigBytes {
+		return nil, ErrState
+	}
+	w.state = workerConfigConsumed
+	if err := w.file.SetReadDeadline(time.Now().Add(attemptControlTimeout)); err != nil {
+		return nil, err
+	}
+	defer w.file.SetReadDeadline(time.Time{})
+	var config json.RawMessage
+	if err := readFrame(w.file, &config, maximum); err != nil {
+		return nil, err
+	}
+	if len(config) == 0 || !json.Valid(config) {
+		return nil, ErrIdentity
+	}
+	w.state = workerSelection
+	return append([]byte(nil), config...), nil
 }
 
 // DuplicateRuntimeDirectory returns the worker's one caller-owned CLOEXEC
@@ -815,6 +842,11 @@ func RunAttemptRunner() error {
 	if _, err := commitRuntimeLifetime(dir, lifetime); err != nil {
 		return fmt.Errorf("runner: runtime lifetime: %w", err)
 	}
+	workerConfig, err := readInheritedWorkerConfig(os.Stdin)
+	closeConfigErr := os.Stdin.Close()
+	if err != nil || closeConfigErr != nil {
+		return fmt.Errorf("runner: worker config: %w", errors.Join(err, closeConfigErr))
+	}
 	// The attempt runner passes only deliberate duplicates through StartBlocked;
 	// neither daemon control nor its retained directory may leak into the inner
 	// gate through ordinary fork/exec inheritance.
@@ -834,7 +866,25 @@ func RunAttemptRunner() error {
 	if err := validateAttemptConfig(cfg); err != nil {
 		return err
 	}
-	return runAttempt(control, dir, lifetime, cfg)
+	return runAttempt(control, dir, lifetime, cfg, workerConfig)
+}
+
+func readInheritedWorkerConfig(file *os.File) ([]byte, error) {
+	if file == nil {
+		return nil, ErrIdentity
+	}
+	var before, after unix.Stat_t
+	if err := unix.Fstat(int(file.Fd()), &before); err != nil || before.Mode&unix.S_IFMT != unix.S_IFREG || before.Uid != uint32(os.Geteuid()) || before.Mode&0o7777 != 0o600 || before.Nlink != 0 || before.Size <= 0 || before.Size > maxConfigBytes || before.Dev == 0 || before.Ino == 0 {
+		return nil, errors.Join(ErrIdentity, err)
+	}
+	body := make([]byte, int(before.Size))
+	if _, err := io.ReadFull(file, body); err != nil {
+		return nil, errors.Join(ErrIdentity, err)
+	}
+	if err := unix.Fstat(int(file.Fd()), &after); err != nil || before.Dev != after.Dev || before.Ino != after.Ino || before.Mode != after.Mode || before.Uid != after.Uid || before.Nlink != after.Nlink || before.Size != after.Size || !json.Valid(body) {
+		return nil, errors.Join(ErrIdentity, err)
+	}
+	return body, nil
 }
 
 func validateAttemptConfig(cfg attemptConfig) error {
@@ -883,7 +933,7 @@ func validateBasename(value string) error {
 	return nil
 }
 
-func runAttempt(daemon, dir, lifetime *os.File, cfg attemptConfig) (result error) {
+func runAttempt(daemon, dir, lifetime *os.File, cfg attemptConfig, workerConfig []byte) (result error) {
 	proof, err := decodeResultProof(cfg.ResultProof)
 	if err != nil {
 		return err
@@ -940,6 +990,9 @@ func runAttempt(daemon, dir, lifetime *os.File, cfg attemptConfig) (result error
 		return finishAttemptFailure(child, dir, cfg, &reads, protocolError("selection release", source, err))
 	}
 	if _, err := child.Activate(); err != nil {
+		return finishAttemptFailure(child, dir, cfg, &reads, err)
+	}
+	if err := writeControlFrame(workerParent, json.RawMessage(workerConfig), maxConfigBytes); err != nil {
 		return finishAttemptFailure(child, dir, cfg, &reads, err)
 	}
 	// The activated worker owns the PTY slave as stdin/stdout/stderr. Its

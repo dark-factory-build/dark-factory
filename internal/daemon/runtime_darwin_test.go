@@ -14,10 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dark-factory-build/dark-factory/internal/change"
-	"github.com/dark-factory-build/dark-factory/internal/changeworker"
 	"github.com/dark-factory-build/dark-factory/internal/install"
-	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 	"golang.org/x/sys/unix"
 )
@@ -91,22 +88,8 @@ func TestRuntimeCreatePublishClosePreservesExactPrivateEffects(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertPrivateFile(t, tokenFile, token[:])
-	config := workerConfigForRuntime(t, runtime)
-	encodedConfig, err := changeworker.EncodeConfig(config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	configFile, err := runtime.PublishWorkerConfig(context.Background(), config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertPrivateFile(t, configFile, encodedConfig)
-
 	if _, err := runtime.PublishAttemptToken(context.Background(), token); !errors.Is(err, errInvalidContract) {
 		t.Fatalf("duplicate token error = %v", err)
-	}
-	if _, err := runtime.PublishWorkerConfig(context.Background(), config); !errors.Is(err, errInvalidContract) {
-		t.Fatalf("duplicate config error = %v", err)
 	}
 	if err := runtime.Close(); err != nil {
 		t.Fatal(err)
@@ -938,9 +921,6 @@ func TestRuntimeBindingRejectsFixedChildReplacement(t *testing.T) {
 			if _, err := binding.AttemptTokenPath(); !errors.Is(err, errInvalidContract) {
 				t.Fatalf("token locator accepted replaced %s: %v", name, err)
 			}
-			if _, err := binding.WorkerConfigPath(); !errors.Is(err, errInvalidContract) {
-				t.Fatalf("config locator accepted replaced %s: %v", name, err)
-			}
 		})
 	}
 }
@@ -1045,7 +1025,6 @@ func TestRuntimeAuthorityRejectsPathReplacementAtEveryAccessor(t *testing.T) {
 	t.Run("before publication", func(t *testing.T) {
 		runtime := newTestRuntime(t)
 		defer runtime.Close()
-		config := workerConfigForRuntime(t, runtime)
 		path := mustRuntimePath(t, runtime)
 		moved := path + ".moved"
 		if err := os.Rename(path, moved); err != nil {
@@ -1063,11 +1042,8 @@ func TestRuntimeAuthorityRejectsPathReplacementAtEveryAccessor(t *testing.T) {
 		if _, err := runtime.PublishAttemptToken(context.Background(), [32]byte{1}); !errors.Is(err, errInvalidContract) {
 			t.Fatalf("token after replacement = %v", err)
 		}
-		if _, err := runtime.PublishWorkerConfig(context.Background(), config); !errors.Is(err, errInvalidContract) {
-			t.Fatalf("config after replacement = %v", err)
-		}
 		for _, root := range []string{path, moved} {
-			for _, name := range []string{attemptTokenName, workerConfigName} {
+			for _, name := range []string{attemptTokenName} {
 				if _, err := os.Lstat(filepath.Join(root, name)); !errors.Is(err, os.ErrNotExist) {
 					t.Fatalf("replaced runtime gained %s under %s: %v", name, root, err)
 				}
@@ -1269,17 +1245,6 @@ func TestFailedRuntimeCreationCleansOnlyExactEmptyIdentity(t *testing.T) {
 }
 
 func TestPrivatePublicationRejectsSpecialExistingAndCleansPartialWrite(t *testing.T) {
-	invalidRuntime := newTestRuntime(t)
-	defer invalidRuntime.Close()
-	invalidConfig := workerConfigForRuntime(t, invalidRuntime)
-	invalidConfig.RepositoryRoot = "relative-private-sentinel"
-	if _, err := invalidRuntime.PublishWorkerConfig(context.Background(), invalidConfig); !errors.Is(err, errInvalidContract) {
-		t.Fatalf("invalid config error = %v", err)
-	}
-	if _, err := os.Lstat(filepath.Join(mustRuntimePath(t, invalidRuntime), workerConfigName)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("invalid config gained file effect: %v", err)
-	}
-
 	for name, create := range map[string]func(string) error{
 		"symlink": func(path string) error { return os.Symlink("missing", path) },
 		"fifo":    func(path string) error { return unix.Mkfifo(path, 0o600) },
@@ -1288,12 +1253,12 @@ func TestPrivatePublicationRejectsSpecialExistingAndCleansPartialWrite(t *testin
 		t.Run(name, func(t *testing.T) {
 			runtime := newTestRuntime(t)
 			defer runtime.Close()
-			path := filepath.Join(mustRuntimePath(t, runtime), workerConfigName)
+			path := filepath.Join(mustRuntimePath(t, runtime), attemptTokenName)
 			if err := create(path); err != nil {
 				t.Fatal(err)
 			}
 			before, _ := os.Lstat(path)
-			if _, err := runtime.PublishWorkerConfig(context.Background(), workerConfigForRuntime(t, runtime)); !errors.Is(err, errInvalidContract) {
+			if _, err := runtime.PublishAttemptToken(context.Background(), [32]byte{1}); !errors.Is(err, errInvalidContract) {
 				t.Fatalf("publish error = %v", err)
 			}
 			after, err := os.Lstat(path)
@@ -1306,7 +1271,7 @@ func TestPrivatePublicationRejectsSpecialExistingAndCleansPartialWrite(t *testin
 	runtime := newTestRuntime(t)
 	defer runtime.Close()
 	writes := 0
-	_, err := runtime.publish(context.Background(), workerConfigName, []byte("partial-write"), workerConfigLimit, func(fd int, value []byte) (int, error) {
+	_, err := runtime.publish(context.Background(), attemptTokenName, []byte("partial-write"), 32, func(fd int, value []byte) (int, error) {
 		writes++
 		if writes == 1 {
 			return unix.Write(fd, value[:3])
@@ -1316,14 +1281,14 @@ func TestPrivatePublicationRejectsSpecialExistingAndCleansPartialWrite(t *testin
 	if !errors.Is(err, syscall.EIO) {
 		t.Fatalf("partial write error = %v", err)
 	}
-	if _, err := os.Lstat(filepath.Join(mustRuntimePath(t, runtime), workerConfigName)); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Lstat(filepath.Join(mustRuntimePath(t, runtime), attemptTokenName)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("partial file retained: %v", err)
 	}
 
 	leafRuntime := newTestRuntime(t)
 	defer leafRuntime.Close()
-	leafPath := filepath.Join(mustRuntimePath(t, leafRuntime), workerConfigName)
-	_, err = leafRuntime.publish(context.Background(), workerConfigName, []byte("private"), workerConfigLimit, func(fd int, value []byte) (int, error) {
+	leafPath := filepath.Join(mustRuntimePath(t, leafRuntime), attemptTokenName)
+	_, err = leafRuntime.publish(context.Background(), attemptTokenName, []byte("private"), 32, func(fd int, value []byte) (int, error) {
 		if err := os.Rename(leafPath, leafPath+".old"); err != nil {
 			t.Fatal(err)
 		}
@@ -1345,17 +1310,17 @@ func TestPrivatePublicationRejectsSpecialExistingAndCleansPartialWrite(t *testin
 
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := runtime.PublishWorkerConfig(canceled, workerConfigForRuntime(t, runtime)); !errors.Is(err, context.Canceled) {
+	if _, err := runtime.publish(canceled, attemptTokenName, []byte("private"), 32, nil, nil); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancellation error = %v", err)
 	}
-	if _, err := os.Lstat(filepath.Join(mustRuntimePath(t, runtime), workerConfigName)); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Lstat(filepath.Join(mustRuntimePath(t, runtime), attemptTokenName)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("canceled publish gained effect: %v", err)
 	}
 
 	midRuntime := newTestRuntime(t)
 	defer midRuntime.Close()
 	midContext, midCancel := context.WithCancel(context.Background())
-	_, err = midRuntime.publish(midContext, workerConfigName, []byte("cancel-between-writes"), workerConfigLimit, func(fd int, value []byte) (int, error) {
+	_, err = midRuntime.publish(midContext, attemptTokenName, []byte("cancel-between-writes"), 32, func(fd int, value []byte) (int, error) {
 		written, writeErr := unix.Write(fd, value[:1])
 		midCancel()
 		return written, writeErr
@@ -1363,7 +1328,7 @@ func TestPrivatePublicationRejectsSpecialExistingAndCleansPartialWrite(t *testin
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("mid-write cancellation error = %v", err)
 	}
-	if _, err := os.Lstat(filepath.Join(mustRuntimePath(t, midRuntime), workerConfigName)); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Lstat(filepath.Join(mustRuntimePath(t, midRuntime), attemptTokenName)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("mid-write cancellation retained file: %v", err)
 	}
 }
@@ -1374,7 +1339,7 @@ func TestFailedPrivatePublicationCleansThroughRetainedDirectoryAuthority(t *test
 		defer runtime.Close()
 		path := mustRuntimePath(t, runtime)
 		moved := path + ".moved"
-		_, err := runtime.publish(context.Background(), workerConfigName, []byte("private"), workerConfigLimit, func(fd int, value []byte) (int, error) {
+		_, err := runtime.publish(context.Background(), attemptTokenName, []byte("private"), 32, func(fd int, value []byte) (int, error) {
 			if err := os.Rename(path, moved); err != nil {
 				t.Fatal(err)
 			}
@@ -1386,7 +1351,7 @@ func TestFailedPrivatePublicationCleansThroughRetainedDirectoryAuthority(t *test
 		if !errors.Is(err, errInvalidContract) || errors.Is(err, errRetainedRuntime) {
 			t.Fatalf("runtime replacement publication error = %v", err)
 		}
-		if _, err := os.Lstat(filepath.Join(moved, workerConfigName)); !errors.Is(err, os.ErrNotExist) {
+		if _, err := os.Lstat(filepath.Join(moved, attemptTokenName)); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("created file was not removed through retained dirfd: %v", err)
 		}
 		if entries, readErr := os.ReadDir(path); readErr != nil || len(entries) != 0 {
@@ -1405,14 +1370,14 @@ func TestFailedPrivatePublicationCleansThroughRetainedDirectoryAuthority(t *test
 			}
 			return unix.Fsync(fd)
 		}
-		_, err := runtime.publish(context.Background(), workerConfigName, []byte("private"), workerConfigLimit, nil, syncDirectory)
+		_, err := runtime.publish(context.Background(), attemptTokenName, []byte("private"), 32, nil, syncDirectory)
 		if !errors.Is(err, syscall.EIO) || errors.Is(err, errRetainedRuntime) {
 			t.Fatalf("file fsync failure = %v", err)
 		}
 		if calls < 2 {
 			t.Fatalf("file cleanup did not fsync containing directory: calls=%d", calls)
 		}
-		if _, err := os.Lstat(filepath.Join(mustRuntimePath(t, runtime), workerConfigName)); !errors.Is(err, os.ErrNotExist) {
+		if _, err := os.Lstat(filepath.Join(mustRuntimePath(t, runtime), attemptTokenName)); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("failed private file retained after exact cleanup: %v", err)
 		}
 	})
@@ -1420,9 +1385,9 @@ func TestFailedPrivatePublicationCleansThroughRetainedDirectoryAuthority(t *test
 	t.Run("hardlink retained uncertainty", func(t *testing.T) {
 		runtime := newTestRuntime(t)
 		defer runtime.Close()
-		path := filepath.Join(mustRuntimePath(t, runtime), workerConfigName)
+		path := filepath.Join(mustRuntimePath(t, runtime), attemptTokenName)
 		link := path + ".link"
-		_, err := runtime.publish(context.Background(), workerConfigName, []byte("private"), workerConfigLimit, func(fd int, value []byte) (int, error) {
+		_, err := runtime.publish(context.Background(), attemptTokenName, []byte("private"), 32, func(fd int, value []byte) (int, error) {
 			if err := os.Link(path, link); err != nil {
 				t.Fatal(err)
 			}
@@ -1439,23 +1404,20 @@ func TestFailedPrivatePublicationCleansThroughRetainedDirectoryAuthority(t *test
 	})
 }
 
-func TestRuntimeValuesAndErrorsRedactPrivateSentinels(t *testing.T) {
+func TestRuntimeValuesAndErrorsRedactPrivatePaths(t *testing.T) {
 	runtime := newTestRuntime(t)
 	defer runtime.Close()
-	config := workerConfigForRuntime(t, runtime)
-	config.ProviderTask = []byte("PRIVATE-CONTENTS")
-	file, err := runtime.PublishWorkerConfig(context.Background(), config)
+	file, err := runtime.PublishAttemptToken(context.Background(), [32]byte{1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, formatted := range []string{fmt.Sprint(file), fmt.Sprintf("%#v", file)} {
-		if stringsContainsAny(formatted, mustRuntimePath(t, runtime), "PRIVATE-CONTENTS") {
+		if stringsContainsAny(formatted, mustRuntimePath(t, runtime)) {
 			t.Fatalf("private file formatting leaked: %q", formatted)
 		}
 	}
-	config.ProviderTask = []byte("SECOND-PRIVATE")
-	_, err = runtime.PublishWorkerConfig(context.Background(), config)
-	if err == nil || stringsContainsAny(err.Error(), mustRuntimePath(t, runtime), "SECOND-PRIVATE") {
+	_, err = runtime.PublishAttemptToken(context.Background(), [32]byte{2})
+	if err == nil || stringsContainsAny(err.Error(), mustRuntimePath(t, runtime)) {
 		t.Fatalf("private error leaked: %v", err)
 	}
 }
@@ -1775,38 +1737,6 @@ func newTestRuntime(t testing.TB) *Runtime {
 	}
 	t.Cleanup(func() { parent.Close() })
 	return runtime
-}
-
-func workerConfigForRuntime(t testing.TB, runtime *Runtime) changeworker.Config {
-	t.Helper()
-	binding, err := runtime.Binding()
-	if err != nil {
-		t.Fatal(err)
-	}
-	path, identity, err := binding.Values()
-	if err != nil {
-		t.Fatal(err)
-	}
-	repository, err := change.NewRepositoryIdentity(11, 12)
-	if err != nil {
-		t.Fatal(err)
-	}
-	factoryctl, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	factoryctl, err = filepath.EvalSymlinks(factoryctl)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return changeworker.Config{
-		Provider:    kernel.ProviderShell,
-		RuntimePath: path, RuntimeIdentity: identity, GitExecutable: "/usr/local/bin/git",
-		FactoryctlExecutable: factoryctl, ToolPath: "/opt/homebrew/bin:/usr/bin:/bin",
-		RepositoryRoot: "/private/repository", RepositoryIdentity: repository, Revision: "main",
-		ChangeParent: "/private/changes", FinalName: "change", StagingName: ".change.stage",
-		AttemptSocket: "/private/api.sock", ProviderTask: []byte("echo exact"),
-	}
 }
 
 func openDirectory(t testing.TB, path string) *os.File {

@@ -24,9 +24,6 @@ func TestCaptureHelpersRejectEveryChildOnMetadataOrDeviceFailure(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(root, ConfigName), []byte("config"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	if err := os.WriteFile(filepath.Join(root, AttemptTokenName), make([]byte, 32), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +56,7 @@ func TestCaptureHelpersRejectEveryChildOnMetadataOrDeviceFailure(t *testing.T) {
 	for _, item := range []struct {
 		name    string
 		maximum int
-	}{{ConfigName, ConfigLimit}, {AttemptTokenName, 32}} {
+	}{{AttemptTokenName, 32}} {
 		t.Run(item.name+" device", func(t *testing.T) {
 			before := authorityFDCensus(t)
 			file, _, _, _, err := openPrivateFile(int(directory.Fd()), item.name, item.maximum, wrongDevice)
@@ -79,18 +76,14 @@ func TestCaptureHelpersRejectEveryChildOnMetadataOrDeviceFailure(t *testing.T) {
 	if err := closed.Close(); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{ConfigName, HomeName, TempName, AttemptTokenName} {
+	for _, name := range []string{HomeName, TempName, AttemptTokenName} {
 		t.Run(name+" open", func(t *testing.T) {
 			if name == HomeName || name == TempName {
 				if file, _, err := openPrivateDirectoryAt(raw, name, rootID.Device); !errors.Is(err, ErrWorker) || file != nil {
 					t.Fatalf("closed-parent directory capture=%v err=%v", file, err)
 				}
 			} else {
-				maximum := ConfigLimit
-				if name == AttemptTokenName {
-					maximum = 32
-				}
-				if file, _, _, _, err := openPrivateFile(raw, name, maximum, rootID.Device); !errors.Is(err, ErrWorker) || file != nil {
+				if file, _, _, _, err := openPrivateFile(raw, name, 32, rootID.Device); !errors.Is(err, ErrWorker) || file != nil {
 					t.Fatalf("closed-parent file capture=%v err=%v", file, err)
 				}
 			}

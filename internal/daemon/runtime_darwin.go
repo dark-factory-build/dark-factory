@@ -20,8 +20,6 @@ const (
 	runtimeHomeName    = changeworker.HomeName
 	runtimeTempName    = changeworker.TempName
 	attemptTokenName   = changeworker.AttemptTokenName
-	workerConfigName   = changeworker.ConfigName
-	workerConfigLimit  = changeworker.ConfigLimit
 )
 
 type RuntimeLeasePresence uint8
@@ -327,10 +325,6 @@ func (binding *RuntimeBinding) AttemptTokenPath() (string, error) {
 	return binding.fixedFile(changeworker.AttemptTokenName)
 }
 
-func (binding *RuntimeBinding) WorkerConfigPath() (string, error) {
-	return binding.fixedFile(changeworker.ConfigName)
-}
-
 func (binding *RuntimeBinding) fixedDirectory(name string) (string, error) {
 	if binding == nil || binding.runtime == nil {
 		return "", invalidContract(nil)
@@ -350,7 +344,7 @@ func (binding *RuntimeBinding) fixedDirectory(name string) (string, error) {
 }
 
 func (binding *RuntimeBinding) fixedFile(name string) (string, error) {
-	if binding == nil || binding.runtime == nil || name != changeworker.AttemptTokenName && name != changeworker.ConfigName {
+	if binding == nil || binding.runtime == nil || name != changeworker.AttemptTokenName {
 		return "", invalidContract(nil)
 	}
 	binding.runtime.mu.Lock()
@@ -449,23 +443,6 @@ func ObserveRuntimeLifetime(parent *RuntimeParent, basename string, expected run
 
 func (runtime *Runtime) PublishAttemptToken(ctx context.Context, token [32]byte) (PrivateFile, error) {
 	return runtime.publish(ctx, changeworker.AttemptTokenName, token[:], len(token), nil, nil)
-}
-
-func (runtime *Runtime) PublishWorkerConfig(ctx context.Context, config changeworker.Config) (PrivateFile, error) {
-	if runtime == nil {
-		return PrivateFile{}, invalidContract(nil)
-	}
-	runtime.mu.Lock()
-	bound := runtime.dir != nil && config.RuntimePath == runtime.locator && config.RuntimeIdentity == runtime.identity
-	runtime.mu.Unlock()
-	if !bound {
-		return PrivateFile{}, invalidContract(nil)
-	}
-	encoded, err := changeworker.EncodeConfig(config)
-	if err != nil {
-		return PrivateFile{}, invalidContract(nil)
-	}
-	return runtime.publish(ctx, changeworker.ConfigName, encoded, changeworker.ConfigLimit, nil, nil)
 }
 
 func (runtime *Runtime) publish(ctx context.Context, name string, value []byte, limit int, write privateWrite, syncDirectory func(int) error) (_ PrivateFile, resultErr error) {

@@ -71,25 +71,20 @@ func TestRegisteredShellWorkerCompletesExactFourReleaseSequence(t *testing.T) {
 		t.Fatalf("out-of-order release: %v", err)
 	}
 	selectionEvent := fixture.release(t, runner.StageSelection, runner.StageSelection)
-	selection, err := changeworker.DecodeSelectionReport(selectionEvent.Payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !selection.Repository.Equal(fixture.repositoryIdentity) || selection.EntryCount != 1 || selection.BlobBytes == 0 {
-		t.Fatalf("selection=%+v", selection)
+	if len(selectionEvent.Payload) != 0 {
+		t.Fatal("selection acknowledgement carried data")
 	}
 	preparationEvent := fixture.release(t, runner.StagePreparation, runner.StagePreparation)
-	preparation, err := changeworker.DecodePreparationReport(preparationEvent.Payload)
+	result, err := changeworker.DecodeResult(preparationEvent.Payload)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if result.EntryCount != 1 || result.BlobBytes == 0 {
+		t.Fatalf("result=%+v", result)
 	}
 	populationEvent := fixture.release(t, runner.StagePopulation, runner.StagePopulation)
-	population, err := changeworker.DecodePopulationReport(populationEvent.Payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !population.Identity.Equal(preparation.Stage) || !population.Commitment.Equal(selection.Commitment) || population.EntryCount != selection.EntryCount || population.BlobBytes != selection.BlobBytes {
-		t.Fatal("checkpoint facts diverged")
+	if len(populationEvent.Payload) != 0 {
+		t.Fatal("population acknowledgement carried data")
 	}
 	observation := runner.ObserveProcess(inner)
 	if observation.Presence != runner.Present || len(observation.Members) != 0 {
@@ -139,33 +134,6 @@ func TestRegisteredShellWorkerCompletesExactFourReleaseSequence(t *testing.T) {
 	}
 	if diagnostic := fixture.output(); strings.Contains(diagnostic, fixture.repositoryRoot) || strings.Contains(diagnostic, "printf x") {
 		t.Fatalf("private source/input leaked: %q", diagnostic)
-	}
-}
-
-func TestRegisteredShellWorkerCannotReadLinkedWorkerConfig(t *testing.T) {
-	fixture := newWorkerFixtureWithInput(t, func(witness, _, _ string) []byte {
-		quote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
-		return []byte(fmt.Sprintf("set -eu\nconfig=\"$HOME/../change-worker.config\"\nif test -e \"$config\"; then cat \"$config\" > %s; exit 42; fi\ntest -e /dev/fd/11\nprintf x > %s\nexit\n", quote(witness+".config-copy"), quote(witness)))
-	})
-	inner := fixture.start(t)
-	for _, stage := range []runner.AttemptStage{runner.StageSelection, runner.StagePreparation, runner.StagePopulation} {
-		fixture.release(t, stage, stage)
-	}
-	if err := fixture.controller.Release(runner.StageProvider); err != nil {
-		t.Fatal(err)
-	}
-	record := fixture.finish(t)
-	if process, ok := record.Result().Process(); !ok || process != inner {
-		t.Fatalf("result=%+v inner=%+v", record.Result(), inner)
-	}
-	if code, ok := record.Result().Code(); !ok || code != 0 {
-		t.Fatalf("result exit=%+v", record.Result())
-	}
-	if body, err := os.ReadFile(fixture.witness); err != nil || string(body) != "x" {
-		t.Fatalf("provider witness=%q err=%v", body, err)
-	}
-	if _, err := os.Stat(fixture.witness + ".config-copy"); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("provider copied linked worker config: %v", err)
 	}
 }
 
@@ -369,7 +337,7 @@ func TestCompleteWorkerLeavesExactFDAndGoroutineCensus(t *testing.T) {
 }
 
 func TestInitialRuntimeChildValidationPrecedesSelectionEffects(t *testing.T) {
-	for _, name := range []string{"config", "home", "tmp", "token"} {
+	for _, name := range []string{"home", "tmp", "token"} {
 		t.Run(name, func(t *testing.T) {
 			before := fdCensus(t)
 			fixture := newWorkerFixture(t)
@@ -380,8 +348,6 @@ func TestInitialRuntimeChildValidationPrecedesSelectionEffects(t *testing.T) {
 			}
 			var path string
 			switch name {
-			case "config":
-				path, err = binding.WorkerConfigPath()
 			case "home":
 				path, err = binding.ProviderHome()
 			case "tmp":
@@ -625,7 +591,8 @@ func newWorkerFixtureWithFactoryctlAndInput(t *testing.T, factoryctl string, inp
 		t.Fatal(err)
 	}
 	config := changeworker.Config{Provider: kernel.ProviderShell, RuntimePath: runtimePath, RuntimeIdentity: runtimeID, GitExecutable: git, FactoryctlExecutable: factoryctl, ToolPath: toolPath, RepositoryRoot: repository, RepositoryIdentity: repositoryID, Revision: "HEAD", ChangeParent: changeParent, FinalName: "published", StagingName: ".stage", AttemptSocket: "/private/tmp/dark-factory-worker-api.sock", ProviderTask: providerTask}
-	if _, err := runtimeValue.PublishWorkerConfig(context.Background(), config); err != nil {
+	workerConfig, err := changeworker.EncodeConfig(config)
+	if err != nil {
 		t.Fatal(err)
 	}
 	dir, lifetime, err := runtimeValue.DuplicateRunnerFiles()
@@ -659,7 +626,7 @@ func newWorkerFixtureWithFactoryctlAndInput(t *testing.T, factoryctl string, inp
 	if err != nil {
 		t.Fatal(err)
 	}
-	outer, err := runner.PrepareExecSpec(runner.ExecSpec{Target: executable, Args: []string{"--attempt-runner"}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: home, Stdout: diagnostic, Stderr: diagnostic, Control: childCapability})
+	outer, err := runner.PrepareExecSpec(runner.ExecSpec{Target: executable, Args: []string{"--attempt-runner"}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: home, Stdin: workerConfig, Stdout: diagnostic, Stderr: diagnostic, Control: childCapability})
 	if err != nil {
 		t.Fatal(err)
 	}

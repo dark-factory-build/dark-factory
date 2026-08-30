@@ -5,7 +5,6 @@ package changeworker
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -21,12 +20,10 @@ import (
 )
 
 type runtimeAuthority struct {
-	root, namedRoot, config, home, temp, token *os.File
-	runtimePath                                string
-	rootID                                     runner.FileIdentity
-	configID, homeID, tempID, tokenID          runner.FileIdentity
-	configSize                                 int64
-	configDigest                               [32]byte
+	root, namedRoot, home, temp, token *os.File
+	runtimePath                        string
+	rootID                             runner.FileIdentity
+	homeID, tempID, tokenID            runner.FileIdentity
 }
 
 const providerTaskName = ".provider-task"
@@ -45,11 +42,19 @@ func runProvider(ctx context.Context) (resultErr error) {
 		}
 		resultErr = errors.Join(resultErr, control.Close())
 	}()
+	encodedConfig, err := control.ReadConfig(ConfigLimit)
+	if err != nil {
+		return err
+	}
+	config, err := DecodeConfig(encodedConfig)
+	if err != nil {
+		return err
+	}
 	runtimeDir, err := control.DuplicateRuntimeDirectory(ctx)
 	if err != nil {
 		return err
 	}
-	authority, config, err := openRuntimeAuthority(ctx, runtimeDir)
+	authority, err := openRuntimeAuthority(ctx, runtimeDir, config)
 	if err != nil {
 		_ = runtimeDir.Close()
 		return err
@@ -169,10 +174,6 @@ func runProvider(ctx context.Context) (resultErr error) {
 		_ = cwd.Close()
 		return fmt.Errorf("runtime authority verification: %w", err)
 	}
-	if err := authority.unlinkConfig(); err != nil {
-		_ = cwd.Close()
-		return fmt.Errorf("worker config sealing: %w", err)
-	}
 	taskOpen = false
 	return control.ExecProvider(spec, cwd, task)
 }
@@ -269,50 +270,12 @@ func (a *runtimeAuthority) sealProviderTask(kind kernel.Provider, task []byte) (
 	return reader, nil
 }
 
-// unlinkConfig consumes the final pathname that carried admission data. The
-// descriptor and name must still identify the exact validated file; an
-// unlink or directory fsync failure is fatal, so a provider can never execute
-// while this linked source-of-authority path is uncertain.
-func (a *runtimeAuthority) unlinkConfig() error {
-	if a == nil || a.root == nil || a.config == nil {
-		return ErrWorker
-	}
-	if err := verifyOpenPrivateFile(a.config, a.configID, a.configSize); err != nil {
-		return err
-	}
-	var named unix.Stat_t
-	if err := unix.Fstatat(int(a.root.Fd()), ConfigName, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil ||
-		uint64(named.Dev) != a.configID.Device || named.Ino != a.configID.Inode ||
-		named.Mode&unix.S_IFMT != unix.S_IFREG || named.Nlink != 1 {
-		return ErrWorker
-	}
-	if err := unix.Unlinkat(int(a.root.Fd()), ConfigName, 0); err != nil {
-		return err
-	}
-	if err := unix.Fsync(int(a.root.Fd())); err != nil {
-		return err
-	}
-	var unlinked unix.Stat_t
-	if err := unix.Fstat(int(a.config.Fd()), &unlinked); err != nil ||
-		uint64(unlinked.Dev) != a.configID.Device || unlinked.Ino != a.configID.Inode || unlinked.Nlink != 0 {
-		return ErrWorker
-	}
-	if err := unix.Fstatat(int(a.root.Fd()), ConfigName, &named, unix.AT_SYMLINK_NOFOLLOW); !errors.Is(err, unix.ENOENT) {
-		return ErrWorker
-	}
-	return nil
-}
-
 func prepareFreshChange(ctx context.Context, control *runner.WorkerControl, config Config) (_ *change.VerifiedPublished, resultErr error) {
 	selection, err := change.SelectGit(ctx, config.GitExecutable, config.RepositoryRoot, config.Revision, config.RepositoryIdentity)
 	if err != nil {
 		return nil, err
 	}
-	selectionBytes, err := EncodeSelectionReport(SelectionReport{
-		Format: selection.ObjectFormat(), Base: selection.Base(), Commitment: selection.Commitment(),
-		EntryCount: selection.EntryCount(), BlobBytes: selection.BlobBytes(), Repository: selection.RepositoryIdentity(),
-	})
-	if err != nil || control.ReportSelection(selectionBytes) != nil {
+	if !selection.RepositoryIdentity().Equal(config.RepositoryIdentity) || control.ReportSelection(nil) != nil {
 		return nil, ErrWorker
 	}
 	if err := control.AwaitPreparation(); err != nil {
@@ -328,7 +291,10 @@ func prepareFreshChange(ctx context.Context, control *runner.WorkerControl, conf
 			resultErr = errors.Join(resultErr, prepared.Close())
 		}
 	}()
-	preparationBytes, err := EncodePreparationReport(PreparationReport{Stage: prepared.Identity()})
+	preparationBytes, err := EncodeResult(Result{
+		Format: selection.ObjectFormat(), Base: selection.Base(), Commitment: selection.Commitment(),
+		EntryCount: selection.EntryCount(), BlobBytes: selection.BlobBytes(), Tree: prepared.Identity(),
+	})
 	if err != nil || control.ReportPreparation(preparationBytes) != nil {
 		return nil, ErrWorker
 	}
@@ -359,8 +325,7 @@ func prepareFreshChange(ctx context.Context, control *runner.WorkerControl, conf
 		return nil, err
 	}
 	preparedOpen = false
-	facts := published.Facts()
-	if err := reportPopulation(control, facts); err != nil {
+	if err := reportPopulation(control); err != nil {
 		return nil, err
 	}
 	if err := control.AwaitProvider(); err != nil {
@@ -374,17 +339,13 @@ func openRetainedChange(ctx context.Context, control *runner.WorkerControl, conf
 	if retained == nil || change.VerifyRepositoryRoot(config.RepositoryRoot, config.RepositoryIdentity) != nil {
 		return nil, ErrWorker
 	}
-	selectionBytes, err := EncodeSelectionReport(SelectionReport{
-		Format: retained.Format, Base: retained.Base, Commitment: retained.Commitment,
-		EntryCount: retained.EntryCount, BlobBytes: retained.BlobBytes, Repository: config.RepositoryIdentity,
-	})
-	if err != nil || control.ReportSelection(selectionBytes) != nil {
+	if control.ReportSelection(nil) != nil {
 		return nil, ErrWorker
 	}
 	if err := control.AwaitPreparation(); err != nil {
 		return nil, err
 	}
-	preparationBytes, err := EncodePreparationReport(PreparationReport{Stage: retained.Tree})
+	preparationBytes, err := EncodeResult(*retained)
 	if err != nil || control.ReportPreparation(preparationBytes) != nil {
 		return nil, ErrWorker
 	}
@@ -395,7 +356,7 @@ func openRetainedChange(ctx context.Context, control *runner.WorkerControl, conf
 	if err != nil || !retainedFactsEqual(*retained, facts) {
 		return nil, errors.Join(err, ErrWorker)
 	}
-	if err := reportPopulation(control, facts); err != nil {
+	if err := reportPopulation(control); err != nil {
 		return nil, err
 	}
 	if err := control.AwaitProvider(); err != nil {
@@ -416,68 +377,51 @@ func openRetainedChange(ctx context.Context, control *runner.WorkerControl, conf
 	return verified, nil
 }
 
-func reportPopulation(control *runner.WorkerControl, facts change.TreeFacts) error {
-	populationBytes, err := EncodePopulationReport(PopulationReport{
-		Identity: facts.Identity(), Commitment: facts.Commitment(), EntryCount: facts.EntryCount(), BlobBytes: facts.BlobBytes(),
-	})
+func reportPopulation(control *runner.WorkerControl) error {
 	group := runner.ObserveProcessGroup(control.Identity())
 	if group.Presence != runner.Present || len(group.Members) != 1 || group.Members[0] != control.Identity() {
 		return ErrWorker
 	}
-	if err != nil || control.ReportPopulation(populationBytes) != nil {
+	if control.ReportPopulation(nil) != nil {
 		return ErrWorker
 	}
 	return nil
 }
 
-func retainedFactsEqual(retained RetainedChange, facts change.TreeFacts) bool {
+func retainedFactsEqual(retained Result, facts change.TreeFacts) bool {
 	return facts.Identity().Equal(retained.Tree) && facts.Commitment().Equal(retained.Commitment) && facts.EntryCount() == retained.EntryCount && facts.BlobBytes() == retained.BlobBytes
 }
 
-func openRuntimeAuthority(ctx context.Context, runtimeDir *os.File) (*runtimeAuthority, Config, error) {
+func openRuntimeAuthority(ctx context.Context, runtimeDir *os.File, config Config) (*runtimeAuthority, error) {
 	if runtimeDir == nil || ctx.Err() != nil {
-		return nil, Config{}, ErrWorker
+		return nil, ErrWorker
 	}
 	rootID, err := privateDirectory(runtimeDir)
 	if err != nil {
-		return nil, Config{}, err
+		return nil, err
 	}
-	config, configID, configSize, encoded, err := openPrivateFile(int(runtimeDir.Fd()), ConfigName, ConfigLimit, rootID.Device)
+	if config.RuntimeIdentity != rootID {
+		return nil, ErrWorker
+	}
+	namedRoot, err := openCanonicalDirectory(config.RuntimePath)
 	if err != nil {
-		return nil, Config{}, err
-	}
-	decoded, err := DecodeConfig(encoded)
-	if err != nil {
-		_ = config.Close()
-		return nil, Config{}, err
-	}
-	if decoded.RuntimeIdentity != rootID {
-		_ = config.Close()
-		return nil, Config{}, ErrWorker
-	}
-	namedRoot, err := openCanonicalDirectory(decoded.RuntimePath)
-	if err != nil {
-		_ = config.Close()
-		return nil, Config{}, err
+		return nil, err
 	}
 	namedID, err := privateDirectory(namedRoot)
 	if err != nil || namedID != rootID {
 		_ = namedRoot.Close()
-		_ = config.Close()
-		return nil, Config{}, ErrWorker
+		return nil, ErrWorker
 	}
 	home, homeID, err := openPrivateDirectoryAt(int(runtimeDir.Fd()), HomeName, rootID.Device)
 	if err != nil {
 		_ = namedRoot.Close()
-		_ = config.Close()
-		return nil, Config{}, err
+		return nil, err
 	}
 	temp, tempID, err := openPrivateDirectoryAt(int(runtimeDir.Fd()), TempName, rootID.Device)
 	if err != nil {
 		_ = home.Close()
 		_ = namedRoot.Close()
-		_ = config.Close()
-		return nil, Config{}, err
+		return nil, err
 	}
 	token, tokenID, _, body, err := openPrivateFile(int(runtimeDir.Fd()), AttemptTokenName, 32, rootID.Device)
 	if err != nil || len(body) != 32 {
@@ -487,10 +431,9 @@ func openRuntimeAuthority(ctx context.Context, runtimeDir *os.File) (*runtimeAut
 		_ = temp.Close()
 		_ = home.Close()
 		_ = namedRoot.Close()
-		_ = config.Close()
-		return nil, Config{}, ErrWorker
+		return nil, ErrWorker
 	}
-	return &runtimeAuthority{runtimePath: decoded.RuntimePath, namedRoot: namedRoot, config: config, home: home, temp: temp, token: token, rootID: rootID, configID: configID, homeID: homeID, tempID: tempID, tokenID: tokenID, configSize: configSize, configDigest: sha256.Sum256(encoded)}, decoded, nil
+	return &runtimeAuthority{runtimePath: config.RuntimePath, namedRoot: namedRoot, home: home, temp: temp, token: token, rootID: rootID, homeID: homeID, tempID: tempID, tokenID: tokenID}, nil
 }
 
 func (a *runtimeAuthority) verify(ctx context.Context) error {
@@ -526,9 +469,6 @@ func (a *runtimeAuthority) verify(ctx context.Context) error {
 			return ErrWorker
 		}
 	}
-	if err := verifyOpenPrivateFile(a.config, a.configID, a.configSize); err != nil || runtimeDevice(a.configID, a.rootID.Device) != nil {
-		return ErrWorker
-	}
 	var token unix.Stat_t
 	if err := unix.Fstat(int(a.token.Fd()), &token); err != nil || token.Mode&unix.S_IFMT != unix.S_IFREG || token.Uid != uint32(os.Geteuid()) || token.Mode&0o7777 != 0o600 || token.Nlink != 1 || token.Size != 32 {
 		return ErrWorker
@@ -536,17 +476,10 @@ func (a *runtimeAuthority) verify(ctx context.Context) error {
 	if (runner.FileIdentity{Device: uint64(token.Dev), Inode: token.Ino}) != a.tokenID || runtimeDevice(a.tokenID, a.rootID.Device) != nil {
 		return ErrWorker
 	}
-	if _, err := a.config.Seek(0, io.SeekStart); err != nil {
-		return ErrWorker
-	}
-	body, err := io.ReadAll(io.LimitReader(a.config, int64(ConfigLimit)+1))
-	if err != nil || sha256.Sum256(body) != a.configDigest {
-		return ErrWorker
-	}
 	for _, item := range []struct {
 		name string
 		id   runner.FileIdentity
-	}{{ConfigName, a.configID}, {HomeName, a.homeID}, {TempName, a.tempID}, {AttemptTokenName, a.tokenID}} {
+	}{{HomeName, a.homeID}, {TempName, a.tempID}, {AttemptTokenName, a.tokenID}} {
 		var stat unix.Stat_t
 		if err := unix.Fstatat(int(a.root.Fd()), item.name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil || (runner.FileIdentity{Device: uint64(stat.Dev), Inode: stat.Ino}) != item.id {
 			return ErrWorker
@@ -560,12 +493,12 @@ func (a *runtimeAuthority) close() error {
 		return nil
 	}
 	var err error
-	for _, file := range []*os.File{a.token, a.temp, a.home, a.config, a.namedRoot, a.root} {
+	for _, file := range []*os.File{a.token, a.temp, a.home, a.namedRoot, a.root} {
 		if file != nil {
 			err = errors.Join(err, file.Close())
 		}
 	}
-	a.root, a.namedRoot, a.config, a.home, a.temp, a.token = nil, nil, nil, nil, nil, nil
+	a.root, a.namedRoot, a.home, a.temp, a.token = nil, nil, nil, nil, nil
 	return err
 }
 

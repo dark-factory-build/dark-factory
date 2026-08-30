@@ -5,6 +5,7 @@ package runner
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -23,6 +24,164 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+var runnerTestWorkerConfig = []byte(`{"kind":"runner-test"}`)
+
+func TestInheritedWorkerConfigIsExactBoundedAndUnlinked(t *testing.T) {
+	directory, err := os.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	want := []byte(`{"private":"exact"}`)
+	input, err := anonymousFile(directory, "stdin", want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer input.Close()
+	got, err := readInheritedWorkerConfig(input)
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("worker config=%q err=%v", got, err)
+	}
+
+	for name, body := range map[string][]byte{
+		"missing":   nil,
+		"invalid":   []byte(`{"unterminated":`),
+		"oversized": append(append([]byte{'"'}, bytes.Repeat([]byte{'x'}, maxConfigBytes)...), '"'),
+	} {
+		t.Run(name, func(t *testing.T) {
+			input, err := anonymousFile(directory, "stdin", body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer input.Close()
+			if got, err := readInheritedWorkerConfig(input); !errors.Is(err, ErrIdentity) || got != nil {
+				t.Fatalf("config=%q err=%v", got, err)
+			}
+		})
+	}
+
+	t.Run("linked substitution", func(t *testing.T) {
+		input, err := os.CreateTemp(t.TempDir(), "config")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer input.Close()
+		if _, err := input.Write(want); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := input.Seek(0, io.SeekStart); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := readInheritedWorkerConfig(input); !errors.Is(err, ErrIdentity) || got != nil {
+			t.Fatalf("linked config=%q err=%v", got, err)
+		}
+	})
+
+	t.Run("partial", func(t *testing.T) {
+		input, err := anonymousFile(directory, "stdin", want)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer input.Close()
+		if _, err := input.Seek(1, io.SeekStart); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := readInheritedWorkerConfig(input); !errors.Is(err, ErrIdentity) || got != nil {
+			t.Fatalf("partial config=%q err=%v", got, err)
+		}
+	})
+}
+
+func TestWorkerConfigReadIsExactOneShotAndPrecedesSelection(t *testing.T) {
+	worker, peer := newWorkerConfigFixture(t)
+	if err := worker.ReportSelection(nil); !errors.Is(err, ErrState) {
+		t.Fatalf("selection before config=%v", err)
+	}
+	want := []byte(`{"private":"exact"}`)
+	writeRawWorkerConfigFrame(t, peer, want)
+	got, err := worker.ReadConfig(maxConfigBytes)
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("worker config=%q err=%v want=%q", got, err, want)
+	}
+	if got, err := worker.ReadConfig(maxConfigBytes); !errors.Is(err, ErrState) || got != nil {
+		t.Fatalf("second config=%q err=%v", got, err)
+	}
+	if err := worker.ReportSelection(nil); err != nil {
+		t.Fatalf("selection after config=%v", err)
+	}
+	var frame attemptFrame
+	if err := readFrame(peer, &frame, maxConfigBytes); err != nil {
+		t.Fatal(err)
+	}
+	if !validCheckpointFrame(frame, StageSelection) {
+		t.Fatalf("selection frame=%+v", frame)
+	}
+}
+
+func TestWorkerConfigMalformedFrameCannotBeRetried(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		send func(*testing.T, *os.File)
+	}{
+		{name: "missing", send: func(t *testing.T, peer *os.File) {
+			if err := peer.Close(); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "oversized", send: func(t *testing.T, peer *os.File) {
+			var header [4]byte
+			binary.BigEndian.PutUint32(header[:], maxConfigBytes+1)
+			if err := writeFully(peer, header[:]); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "partial", send: func(t *testing.T, peer *os.File) {
+			var header [4]byte
+			binary.BigEndian.PutUint32(header[:], uint32(len(runnerTestWorkerConfig)))
+			if err := writeFully(peer, append(header[:], runnerTestWorkerConfig[:3]...)); err != nil {
+				t.Fatal(err)
+			}
+			if err := peer.Close(); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			worker, peer := newWorkerConfigFixture(t)
+			test.send(t, peer)
+			if config, err := worker.ReadConfig(maxConfigBytes); err == nil || config != nil {
+				t.Fatalf("malformed config=%q err=%v", config, err)
+			}
+			if config, err := worker.ReadConfig(maxConfigBytes); !errors.Is(err, ErrState) || config != nil {
+				t.Fatalf("retried config=%q err=%v", config, err)
+			}
+		})
+	}
+}
+
+func newWorkerConfigFixture(t *testing.T) (*WorkerControl, *os.File) {
+	t.Helper()
+	workerSide, peer, err := newControlPair("worker-config", "worker-config-peer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := &WorkerControl{file: workerSide, state: workerConfig}
+	t.Cleanup(func() {
+		_ = worker.Close()
+		_ = peer.Close()
+	})
+	return worker, peer
+}
+
+func writeRawWorkerConfigFrame(t *testing.T, peer *os.File, body []byte) {
+	t.Helper()
+	var header [4]byte
+	binary.BigEndian.PutUint32(header[:], uint32(len(body)))
+	if err := writeFully(peer, append(header[:], body...)); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func runAttemptWorkerHelper(args []string) error {
 	if len(args) < 2 {
 		return errors.New("attempt worker: missing mode/root")
@@ -33,6 +192,13 @@ func runAttemptWorkerHelper(args []string) error {
 		return err
 	}
 	defer control.Close()
+	config, err := control.ReadConfig(maxConfigBytes)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(config, runnerTestWorkerConfig) {
+		return fmt.Errorf("attempt worker: config mismatch")
+	}
 	runtimeDirectory, err := control.DuplicateRuntimeDirectory(context.Background())
 	if err != nil {
 		return err
@@ -342,7 +508,7 @@ func newAttemptFixture(t *testing.T, mode string, target string) *attemptFixture
 	}
 	attemptSpec := AttemptSpec{AttemptID: "attempt-1", Wrapper: wrapper, MarkerName: InnerActivationMarkerName, ResultName: AttemptResultSpoolName, ResultProof: testResultProof()}
 	diagnostic := outputFile(t, filepath.Join(root, "runner.output"))
-	outerSpec, err := PrepareExecSpec(ExecSpec{Target: executable, Args: []string{"--attempt-runner"}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: filepath.Join(root, "work"), Stdout: diagnostic, Stderr: diagnostic, Control: childCap})
+	outerSpec, err := PrepareExecSpec(ExecSpec{Target: executable, Args: []string{"--attempt-runner"}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: filepath.Join(root, "work"), Stdin: runnerTestWorkerConfig, Stdout: diagnostic, Stderr: diagnostic, Control: childCap})
 	if err != nil {
 		t.Fatal(err)
 	}
