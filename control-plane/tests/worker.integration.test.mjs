@@ -192,12 +192,12 @@ async function startWorker(persistence, configured) {
 
 async function stop(child) {
   if (child.exitCode !== null) return;
-  child.kill('SIGTERM');
   const exited = once(child, 'exit');
+  child.kill('SIGTERM');
   const timeout = new Promise((resolve) => setTimeout(resolve, 5_000, 'timeout'));
   if ((await Promise.race([exited, timeout])) === 'timeout') {
     child.kill('SIGKILL');
-    await once(child, 'exit');
+    await exited;
   }
 }
 

@@ -28,10 +28,23 @@ if /usr/bin/find . -maxdepth 1 \( -name '.env' -o -name '.env.*' -o -name '.dev.
 fi
 
 temporary=$(/usr/bin/mktemp -d "/tmp/dark-factory-wrangler-env.XXXXXX")
-trap '/bin/rm -rf -- "$temporary"' EXIT HUP INT TERM
+child_pid=
+# Invoked by the traps below.
+# shellcheck disable=SC2329
+cleanup() {
+    status=$?
+    trap - EXIT HUP INT TERM
+    if [ -n "$child_pid" ]; then
+        /bin/kill -TERM "$child_pid" 2>/dev/null || :
+        wait "$child_pid" 2>/dev/null || :
+    fi
+    /bin/rm -rf -- "$temporary"
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
 /bin/mkdir -m 700 "$temporary/home" "$temporary/tmp"
 
-status=0
 /usr/bin/env -i \
     PATH=/usr/bin:/bin \
     HOME="$temporary/home" \
@@ -41,5 +54,12 @@ status=0
     CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV=false \
     DARK_FACTORY_WRANGLER_PREBUILT=1 \
     WRANGLER_SEND_METRICS=false \
-    "$node_executable" "$wrangler_script" "$@" || status=$?
+    "$node_executable" "$wrangler_script" "$@" &
+child_pid=$!
+if wait "$child_pid"; then
+    status=0
+else
+    status=$?
+fi
+child_pid=
 exit "$status"
