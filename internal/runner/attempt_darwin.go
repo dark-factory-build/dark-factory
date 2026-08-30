@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -652,6 +653,10 @@ func execPreparedCurrent(spec *LaunchSpec, cwd, task *os.File, worker *WorkerCon
 	if _, err := unix.FcntlInt(worker.lifetime.Fd(), unix.F_SETFD, 0); err != nil {
 		return fmt.Errorf("runner: retain current runtime lifetime: %w", err)
 	}
+	// The provider owns the attempt after exec. Losing the outer runner closes
+	// its PTY master, but must not let that hangup kill the still-live provider
+	// and make recovery mistake process death for clean convergence.
+	signal.Ignore(unix.SIGHUP)
 	if err := sealProviderDescriptors(); err != nil {
 		return fmt.Errorf("runner: seal provider descriptors: %w", err)
 	}
