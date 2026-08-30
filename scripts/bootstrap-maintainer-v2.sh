@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-target_commit=3631e4712068c01e25d8327318e2e1b2d8b7c16d
+target_commit=99f395e517d67122a2e435322caf0ab4b800a7c9
 worker=dark-factory-control-plane
 hostname=maintainer.darkfactory.build
 revision=maintainer-operations-v2
@@ -175,7 +175,7 @@ fi
 
 upload=$(run_wrangler versions upload --name "$worker" --strict \
     --secrets-file "$secret_file" \
-    --message "reviewed v2 main $target_commit")
+    --message "reviewed v2 migration repair $target_commit")
 version=$(printf '%s\n' "$upload" | sed -n 's/^Worker Version ID: *//p' | tail -1)
 test -n "$version" || { echo "bootstrap: upload returned no version ID" >&2; exit 1; }
 echo "bootstrap: staged $version"
