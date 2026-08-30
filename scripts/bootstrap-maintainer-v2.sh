@@ -11,10 +11,8 @@ stable_v1=47c98fa9-62ef-432d-8445-e2a7f4c83e85
 mode=bootstrap
 if test "$#" = 1 && test "$1" = recover-v1; then
     mode=recover-v1
-elif test "$#" = 1 && test "$1" = logs-v2; then
-    mode=logs-v2
 elif test "$#" != 0; then
-    echo "usage: scripts/bootstrap-maintainer-v2.sh [recover-v1|logs-v2]" >&2
+    echo "usage: scripts/bootstrap-maintainer-v2.sh [recover-v1]" >&2
     exit 1
 fi
 
@@ -30,8 +28,7 @@ git=/usr/bin/git
     echo "bootstrap: control-plane runtime is not the reviewed v2 main runtime" >&2
     exit 1
 }
-test -z "$("$git" status --porcelain=v1 --untracked-files=all -- \
-    scripts/bootstrap-maintainer-v2.sh scripts/query-maintainer-v2-readiness.mjs control-plane)" || {
+test -z "$("$git" status --porcelain=v1 --untracked-files=all -- scripts/bootstrap-maintainer-v2.sh control-plane)" || {
     echo "bootstrap: reviewed bootstrap or control-plane source is dirty" >&2
     exit 1
 }
@@ -46,13 +43,11 @@ node=$(node -p 'process.execPath')
 case "$node" in /*) ;; *) echo "bootstrap: Node path is not absolute" >&2; exit 1 ;; esac
 "$node" -e 'if (Number(process.versions.node.split(".")[0]) < 22) process.exit(1)'
 wrangler="$repository_root/control-plane/node_modules/wrangler/bin/wrangler.js"
-if test "$mode" != logs-v2; then
-    test -f "$wrangler" || { echo "bootstrap: pinned Wrangler is missing" >&2; exit 1; }
-    test "$("$node" "$wrangler" --version)" = '4.125.0' || {
-        echo "bootstrap: Wrangler is not 4.125.0" >&2
-        exit 1
-    }
-fi
+test -f "$wrangler" || { echo "bootstrap: pinned Wrangler is missing" >&2; exit 1; }
+test "$("$node" "$wrangler" --version)" = '4.125.0' || {
+    echo "bootstrap: Wrangler is not 4.125.0" >&2
+    exit 1
+}
 
 common_directory=$("$git" rev-parse --path-format=absolute --git-common-dir)
 env_file=$(dirname "$common_directory")/.env.txt
@@ -71,11 +66,11 @@ secret_file="$temporary/revision.env"
 printf '%s=%s\n' DARK_FACTORY_MAINTAINER_PERMISSION_REVISION "$revision" >"$secret_file"
 chmod 600 "$secret_file"
 
-run_wrangler() {
+exec_wrangler() {
     # The single-quoted program is intentional: the isolated child, not this
     # credential-free parent shell, expands its fixed environment.
     # shellcheck disable=SC2016
-    /usr/bin/env -i \
+    exec /usr/bin/env -i \
         PATH=/usr/bin:/bin \
         HOME="$temporary/home" \
         TMPDIR="$temporary/tmp" \
@@ -115,47 +110,31 @@ run_wrangler() {
         ' wrangler "$@"
 }
 
-query_readiness_logs() {
-    # The isolated child expands only its fixed environment and passes no
-    # credential in a process argument.
-    # shellcheck disable=SC2016
-    /usr/bin/env -i \
-        PATH=/usr/bin:/bin \
-        HOME="$temporary/home" \
-        TMPDIR="$temporary/tmp" \
-        NO_COLOR=1 \
-        CI=1 \
-        DARK_FACTORY_ENV_FILE="$env_file" \
-        DARK_FACTORY_NODE="$node" \
-        DARK_FACTORY_QUERY="$repository_root/scripts/query-maintainer-v2-readiness.mjs" \
-        /bin/sh -c '
-            set -eu
-            extract() {
-                /usr/bin/awk -v key="$1" '\''
-                    index($0, key "=") == 1 { count++; value = substr($0, length(key) + 2) }
-                    END { if (count == 1 && value != "") print value; else exit 1 }
-                '\'' "$DARK_FACTORY_ENV_FILE"
-            }
-            CLOUDFLARE_API_TOKEN=$(extract CLOUDFLARE_API_TOKEN) || exit 1
-            CLOUDFLARE_ACCOUNT_ID=$(extract CLOUDFLARE_ACCOUNT_ID) || exit 1
-            export CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID
-            exec "$DARK_FACTORY_NODE" "$DARK_FACTORY_QUERY"
-        '
+run_wrangler() {
+    (exec_wrangler "$@")
 }
-
-if test "$mode" = logs-v2; then
-    query_readiness_logs
-    exit 0
-fi
 
 promoted=0
 verified=0
 previous=''
+tail_pid=''
+tail_log="$temporary/readiness-tail.log"
+stop_tail() {
+    if test -n "$tail_pid"; then
+        kill -TERM "$tail_pid" 2>/dev/null || true
+        wait "$tail_pid" 2>/dev/null || true
+        tail_pid=''
+    fi
+}
 cleanup() {
     status=$?
     rollback_failed=0
     trap - EXIT HUP INT TERM
+    stop_tail
     if test "$promoted" = 1 && test "$verified" = 0 && test -n "$previous"; then
+        /usr/bin/grep -E \
+            'readiness: (journal unavailable|app authority unverified)|journal: (stub unavailable|ready fetch failed|ready returned)|app jwt signing failed|github request (could not be built|failed)|github rejected|installation rejected on:' \
+            "$tail_log" >&2 || echo "bootstrap: no readiness diagnostic reached the tail" >&2
         current=$(run_wrangler deployments status --name "$worker" --json || true)
         current_version=$(printf '%s' "$current" | "$node" -e '
             let input=""; process.stdin.on("data", c => input += c).on("end", () => {
@@ -244,6 +223,27 @@ test "$before_version" = "$previous" || {
     exit 1
 }
 
+(exec_wrangler tail "$worker" --format pretty --version-id "$version" \
+    --search 'readiness:') >"$tail_log" 2>&1 &
+tail_pid=$!
+tail_ready=0
+for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    if /usr/bin/grep -Fq 'waiting for logs...' "$tail_log"; then
+        tail_ready=1
+        break
+    fi
+    if ! kill -0 "$tail_pid" 2>/dev/null; then
+        wait "$tail_pid" || true
+        tail_pid=''
+        break
+    fi
+    test "$attempt" = 20 || sleep 0.25
+done
+test "$tail_ready" = 1 || {
+    echo "bootstrap: version-specific readiness tail did not connect" >&2
+    exit 1
+}
+
 # A failed response can be ambiguous after Cloudflare accepted the promotion;
 # cleanup re-reads the live version before deciding whether rollback is safe.
 promoted=1
@@ -264,5 +264,6 @@ for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
 done
 test "$ready" = 1 || { echo "bootstrap: live v2 readiness failed" >&2; exit 1; }
 
+stop_tail
 verified=1
 printf '{"outcome":"promoted","version":"%s","previous_version":"%s"}\n' "$version" "$previous"
