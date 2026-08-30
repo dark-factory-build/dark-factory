@@ -1249,6 +1249,26 @@ func waitExactAbsence(t *testing.T, want Identity) {
 	}
 }
 
+func waitExactPresence(t *testing.T, want Identity) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		got, err := readIdentity(want.PID)
+		if err == nil {
+			if got != want {
+				t.Fatalf("exact process identity changed: got=%+v want=%+v", got, want)
+			}
+			return
+		}
+		pidProbe := unix.Kill(want.PID, 0)
+		groupProbe := unix.Kill(-want.PGID, 0)
+		if !errors.Is(err, unix.EIO) || pidProbe != nil || groupProbe != nil || time.Now().After(deadline) {
+			t.Fatalf("exact process presence unavailable: identity=%v pid=%v group=%v", err, pidProbe, groupProbe)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func TestRealParentSIGKILLAbortsInertGate(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Chmod(root, 0o700); err != nil {

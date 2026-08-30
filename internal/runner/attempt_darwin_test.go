@@ -858,9 +858,7 @@ func TestProviderRetainsLeastPrivilegeLifetimeAfterOuterSIGKILL(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if got, err := readIdentity(inner.PID); err != nil || got != inner {
-		t.Fatalf("provider identity=%+v err=%v want=%+v", got, err, inner)
-	}
+	waitExactPresence(t, inner)
 	if err := f.lease.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -884,9 +882,7 @@ func TestProviderRetainsLeastPrivilegeLifetimeAfterOuterSIGKILL(t *testing.T) {
 	if exit, err := f.outer.FinishAfterExit(6 * time.Second); err != nil || exit.Signal != int(unix.SIGKILL) {
 		t.Fatalf("outer SIGKILL exit=%+v err=%v", exit, err)
 	}
-	if got, err := readIdentity(inner.PID); err != nil || got != inner {
-		t.Fatalf("provider did not survive outer death: got=%+v err=%v", got, err)
-	}
+	waitExactPresence(t, inner)
 	if err := unix.Flock(probe, unix.LOCK_EX|unix.LOCK_NB); !errors.Is(err, unix.EWOULDBLOCK) {
 		t.Fatalf("recovery observed available while provider lived: %v", err)
 	}
