@@ -32,6 +32,9 @@ const OPERATION_MIGRATION_REVISION: &str = "0004";
 #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
 const OPERATION_MIGRATION_SQL: &str = include_str!("../migrations/0004_maintainer_operations.sql");
 #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+const OPERATION_LEGACY_TABLES: [&str; 2] =
+    ["maintainer_operations_legacy", "maintainer_operations_0002"];
+#[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
 const MIGRATION_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS control_plane_migrations (
     component TEXT PRIMARY KEY,
     revision TEXT NOT NULL,
@@ -582,21 +585,20 @@ fn operations_table_is_current(sql: &SqlStorage) -> Result<bool, Error> {
 }
 
 #[cfg(target_arch = "wasm32")]
+fn operations_have_legacy_tables(sql: &SqlStorage) -> Result<bool, Error> {
+    OPERATION_LEGACY_TABLES
+        .iter()
+        .try_fold(false, |present, name| {
+            Ok(present || table_exists(sql, name)?)
+        })
+}
+
+#[cfg(target_arch = "wasm32")]
 fn migrate_operations(sql: &SqlStorage) -> Result<(), Error> {
-    let stored = sql
-        .exec(
-            "SELECT revision, digest FROM control_plane_migrations WHERE component = ?",
-            vec![OPERATION_MIGRATION_COMPONENT.into()],
-        )?
-        .to_array::<MigrationRow>()?;
-    let [row] = stored.as_slice() else {
-        return Ok(());
-    };
-    // Any revision that is not the current one is legacy. Naming the single
-    // predecessor instead would silently skip the rebuild on a shard two
-    // revisions behind, leaving it to fail every INSERT against a CHECK it
-    // cannot satisfy.
-    if row.revision == OPERATION_MIGRATION_REVISION {
+    // The marker is only a record of completed work. The table and any
+    // leftover legacy slots are the recovery state, because a rebuild is not
+    // atomic and can fail before its marker update.
+    if operations_table_is_current(sql)? && !operations_have_legacy_tables(sql)? {
         return Ok(());
     }
     worker::console_log!(
@@ -607,8 +609,6 @@ fn migrate_operations(sql: &SqlStorage) -> Result<(), Error> {
     // function renamed to. A shard interrupted part-way through that rebuild
     // holds the only copy of its journal under it, so it is still drained
     // here rather than assuming every shard finished.
-    let legacy = ["maintainer_operations_legacy", "maintainer_operations_0002"];
-
     // Each step is driven off what the schema actually holds, because the
     // rebuild is not atomic: a failure part-way through returns a 503 and
     // leaves the completed steps in place, and the revision row still names
@@ -622,7 +622,7 @@ fn migrate_operations(sql: &SqlStorage) -> Result<(), Error> {
     // never changed -- which the schema audit then rejects forever.
     if !operations_table_is_current(sql)? && table_exists(sql, "maintainer_operations")? {
         let mut free = None;
-        for name in legacy {
+        for name in OPERATION_LEGACY_TABLES {
             // `?`, not a `matches!` that folds an error into "occupied": a
             // storage failure here is not evidence that a slot is taken.
             if !table_exists(sql, name)? {
@@ -642,7 +642,7 @@ fn migrate_operations(sql: &SqlStorage) -> Result<(), Error> {
         )?;
     }
     sql.exec(OPERATION_MIGRATION_SQL, None)?;
-    for name in legacy {
+    for name in OPERATION_LEGACY_TABLES {
         if table_exists(sql, name)? {
             sql.exec(&operations_copy_sql(name), None)?;
             sql.exec(&format!("DROP TABLE {name}"), None)?;
@@ -915,6 +915,7 @@ impl SqliteJournal {
         let connection = journal.connection()?;
         connection.execute_batch(MIGRATION_TABLE_SQL)?;
         connection.execute_batch(DELIVERY_MIGRATION_SQL)?;
+        migrate_operations_sqlite(&connection)?;
         connection.execute_batch(OPERATION_MIGRATION_SQL)?;
         connection.execute(
             "INSERT INTO control_plane_migrations (component, revision, digest)
@@ -1053,6 +1054,85 @@ impl SqliteJournal {
         connection.busy_timeout(Duration::from_secs(5))?;
         Ok(connection)
     }
+}
+
+#[cfg(feature = "development-sqlite")]
+fn sqlite_table_exists(connection: &Connection, name: &str) -> Result<bool, Error> {
+    connection
+        .query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+            [name],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|count| count > 0)
+        .map_err(Error::from)
+}
+
+#[cfg(feature = "development-sqlite")]
+fn operations_table_is_current_sqlite(connection: &Connection) -> Result<bool, Error> {
+    let schema: Option<String> = connection
+        .query_row(
+            "SELECT sql FROM sqlite_schema
+             WHERE type = 'table' AND name = 'maintainer_operations'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(schema.is_some_and(|sql| operations_schema_is_current(&sql)))
+}
+
+#[cfg(feature = "development-sqlite")]
+fn operations_have_legacy_tables_sqlite(connection: &Connection) -> Result<bool, Error> {
+    OPERATION_LEGACY_TABLES
+        .iter()
+        .try_fold(false, |present, name| {
+            Ok(present || sqlite_table_exists(connection, name)?)
+        })
+}
+
+#[cfg(feature = "development-sqlite")]
+fn migrate_operations_sqlite(connection: &Connection) -> Result<(), Error> {
+    if operations_table_is_current_sqlite(connection)?
+        && !operations_have_legacy_tables_sqlite(connection)?
+    {
+        return Ok(());
+    }
+
+    if !operations_table_is_current_sqlite(connection)?
+        && sqlite_table_exists(connection, "maintainer_operations")?
+    {
+        let mut free = None;
+        for name in OPERATION_LEGACY_TABLES {
+            if !sqlite_table_exists(connection, name)? {
+                free = Some(name);
+                break;
+            }
+        }
+        let Some(slot) = free else {
+            return Err(Error::InvalidSchema);
+        };
+        connection.execute(
+            &format!("ALTER TABLE maintainer_operations RENAME TO {slot}"),
+            [],
+        )?;
+    }
+    connection.execute_batch(OPERATION_MIGRATION_SQL)?;
+    for name in OPERATION_LEGACY_TABLES {
+        if sqlite_table_exists(connection, name)? {
+            connection.execute_batch(&operations_copy_sql(name))?;
+            connection.execute_batch(&format!("DROP TABLE {name}"))?;
+        }
+    }
+    connection.execute(
+        "UPDATE control_plane_migrations SET revision = ?1, digest = ?2
+         WHERE component = ?3",
+        params![
+            OPERATION_MIGRATION_REVISION,
+            migration_digest(OPERATION_MIGRATION_SQL),
+            OPERATION_MIGRATION_COMPONENT,
+        ],
+    )?;
+    Ok(())
 }
 
 #[cfg(feature = "development-sqlite")]
@@ -1409,18 +1489,20 @@ mod operation_tests {
     }
 }
 
-/// The operations rebuild is `wasm32`-only, so no host test reaches it and
-/// `clippy --target wasm32` type-checks its SQL strings without ever parsing
-/// them as SQL. The workerd integration test does not reach it either: it
-/// builds a fresh persistence directory each run, so the shard it exercises
-/// has no migration row and the rebuild early-returns.
-///
-/// That left the highest-blast-radius code in the component with no coverage
-/// in any environment, and it shipped a statement SQLite cannot parse. These
-/// tests drive the real statements against real SQLite.
+/// These tests drive the real rebuild statements against real SQLite. The
+/// development journal uses the same schema-driven recovery path as the
+/// Durable Object, so missing markers, interrupted rebuilds, and occupied
+/// legacy slots are covered without needing a workerd persistence directory.
 #[cfg(all(test, feature = "development-sqlite"))]
 mod migration_tests {
     use super::*;
+
+    const OPERATION_ID: &str = "2c8a5c44-7f1f-11f0-952e-acde48001122";
+
+    fn database_without_operation_marker(connection: &Connection) {
+        connection.execute_batch(MIGRATION_TABLE_SQL).unwrap();
+        connection.execute_batch(DELIVERY_MIGRATION_SQL).unwrap();
+    }
 
     fn legacy_0003_table(connection: &Connection, name: &str) {
         connection
@@ -1438,13 +1520,98 @@ mod migration_tests {
                      (operation_id, kind, request_digest, state, result_json,
                       created_at, updated_at)
                  VALUES
-                     ('2c8a5c44-7f1f-11f0-952e-acde48001122',
+                    ('{operation_id}',
                       'merge_pull_request_at_head',
                       '{digest}', 'completed', '{{\"merged\":true}}', 1, 1);",
                 name = name,
-                digest = "a".repeat(64)
+                digest = "a".repeat(64),
+                operation_id = OPERATION_ID,
             ))
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_marker_repairs_an_old_live_table_before_create_if_not_exists() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("journal.db");
+        let connection = Connection::open(&database).unwrap();
+        database_without_operation_marker(&connection);
+        legacy_0003_table(&connection, "maintainer_operations");
+        drop(connection);
+
+        let journal = DeliveryJournal::open_development(&database)
+            .expect("missing operation marker must not skip the live-table rebuild");
+        let operation = journal
+            .observe_operation(OPERATION_ID)
+            .await
+            .unwrap()
+            .expect("the old row must survive the rebuild");
+        assert_eq!(operation.kind, "merge_pull_request_at_head");
+        assert_eq!(operation.state, "completed");
+
+        let connection = Connection::open(&database).unwrap();
+        let marker: String = connection
+            .query_row(
+                "SELECT revision FROM control_plane_migrations
+                 WHERE component = ?1",
+                [OPERATION_MIGRATION_COMPONENT],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(marker, OPERATION_MIGRATION_REVISION);
+    }
+
+    #[tokio::test]
+    async fn interrupted_rebuild_drains_a_legacy_slot_without_a_marker() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("journal.db");
+        let connection = Connection::open(&database).unwrap();
+        database_without_operation_marker(&connection);
+        legacy_0003_table(&connection, "maintainer_operations_legacy");
+        drop(connection);
+
+        let journal = DeliveryJournal::open_development(&database)
+            .expect("a legacy-only interrupted rebuild must resume");
+        assert!(
+            journal
+                .observe_operation(OPERATION_ID)
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        let connection = Connection::open(&database).unwrap();
+        assert!(!sqlite_table_exists(&connection, "maintainer_operations_legacy").unwrap());
+    }
+
+    #[test]
+    fn occupied_legacy_slots_fail_closed_without_destroying_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("journal.db");
+        let connection = Connection::open(&database).unwrap();
+        database_without_operation_marker(&connection);
+        legacy_0003_table(&connection, "maintainer_operations");
+        legacy_0003_table(&connection, "maintainer_operations_legacy");
+        legacy_0003_table(&connection, "maintainer_operations_0002");
+        drop(connection);
+
+        assert!(matches!(
+            DeliveryJournal::open_development(&database),
+            Err(Error::InvalidSchema)
+        ));
+
+        let connection = Connection::open(&database).unwrap();
+        for table in OPERATION_LEGACY_TABLES
+            .into_iter()
+            .chain(std::iter::once("maintainer_operations"))
+        {
+            let count: i64 = connection
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 1, "migration must preserve {table}");
+        }
     }
 
     /// The copy statement must parse. It did not: an UPSERT attached to an
