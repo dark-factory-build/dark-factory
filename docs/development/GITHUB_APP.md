@@ -54,7 +54,7 @@ but never keys, installation mappings, permission revisions, operation journal
 namespaces, or audit identities.
 
 The broker implementation lives in the standalone `control-plane/` crate, not
-in the pure-Rust local-runtime workspace or `factoryd`. Its webhook remains a
+in the local-runtime workspace or `factoryd`. Its webhook remains a
 versioned, signed, inert maintainer `ping` boundary. With the App-authority
 group configured, readiness and every ping also prove that the broker can sign
 an App JWT and find the exact selected-repository installation with the

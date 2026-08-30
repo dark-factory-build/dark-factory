@@ -1,10 +1,9 @@
 # Contributing
 
 See [AGENTS.md](AGENTS.md) for the full workflow (one development worktree per change,
-mandatory adversarial PR review, remove-or-refactor over patch) — this
+mandatory adversarial PR review, simplification over patch) — this
 file is just the shortest path to a useful first change.
 
-Live use remains frozen until an independent exact-main boot review passes.
 Development fixtures use isolated temporary homes, explicit sockets, and
 deterministic providers; never use the operator's installation.
 
@@ -66,9 +65,9 @@ A few repository-wide rules the gate enforces, worth knowing up front:
   coordinates, and its remaining daemon gaps are recorded rather than filled
   with invented state.
 - **A kernel causal test**: use the proof matrix in
-  `docs/development/SAFE_KERNEL_REFACTOR.md`. Process fixtures must register
-  exact resources before use and include an independent post-test verifier;
-  provider/test-process cleanup is not proof.
+  [ARCHITECTURE.md](ARCHITECTURE.md) and [SECURITY.md](SECURITY.md). Process
+  fixtures must register exact resources before use and include an independent
+  post-test verifier; provider/test-process cleanup is not proof.
 
 Every change updates docs in the same PR when it changes behavior — see
 `AGENTS.md`'s "docs are load-bearing" rule.

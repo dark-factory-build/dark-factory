@@ -1,78 +1,8 @@
 # Architecture
 
 Dark Factory separates model policy from durable work authority. This file
-describes the Go target's attempt kernel, daemon-owned Change model, and
-fail-closed completion-verification boundary. It is a contract, not a component
-catalogue.
-
-## Current status
-
-Live use remains frozen until an independent exact-head boot review passes.
-
-The canonical implementation through `359d46a3` contains production `factoryd`
-composition and ownership of `OperationalHome`, `Store`, `RuntimeParent`, the
-Local API, and browser services. The shell provider is proved end to end;
-the Claude and Codex providers remain fail-closed and unreviewed.
-
-The complete design and causal proof matrix live in
-[`docs/development/SAFE_KERNEL_REFACTOR.md`](docs/development/SAFE_KERNEL_REFACTOR.md).
-
-### Go hard-cutover planning authority
-
-The Rust kernel that preceded this one is deleted; its history is the git
-record, and it is not a migration, compatibility, or implementation contract.
-The canonical Go contract is
-[`docs/development/GO_REWRITE.md`](docs/development/GO_REWRITE.md); when this
-file's older wording conflicts with that record, the Go rewrite record wins.
-
-In particular, planned Go admission is one cursor-free global
-`Store.AdmitNext(ctx, keys, at)` `BEGIN IMMEDIATE`. No caller nominates an agent,
-task or queue observation. The Store applies durable eligibility and exact
-reason precedence. Before selection it validates global settings and runs one
-concrete SQL integrity predicate over every row/relation/control that can
-occupy capacity or bind active authority, plus every structurally queued rank,
-payload, assignment and exact task/agent/project fields. This proof runs before
-either RunID reconciliation or a fresh decision. Unknown phases, missing
-relations, split resource pairs, invalid IDs/revisions/enums, malformed rank or
-payload, and other damaged facts anywhere block all admission rather than
-becoming ineligibility. Only after that proof may capacity count the single set
-of all nonterminal runs: admitted, running and finalizing.
-`internal/kernel/schema.go` and its exact schema allowlist/constraint tests are
-the only field/domain authority for the fresh schema; this document does not
-duplicate their columns. The cross-row predicate covers the relations and
-phase facts needed by admission, including bounded invalidation continuity.
-The fresh schema has no profile row, agent or project status field; agent
-`paused` is the availability control.
-Provider choice inherently means unrestricted interactive authority in V1;
-there is no permission-profile field, type, column, or wire value.
-This file does not define a second or extensible control validator.
-Configured capacity is one integer `C` in `[1, 1024]`; a reserved Change residue
-belongs to one nonterminal worker run, so its count is at most `C`. Terminal
-retained-Change aggregate retention and adversarial residue bytes remain
-explicit cutover gates, not admission policy.
-The Store then orders all eligible task+agent rows by priority
-descending, creation time ascending and exact 16-byte task-ID `BLOB` bytes
-ascending. It validates the selected row's one canonical Change and never skips
-a corrupt, unsettled or hard-invalid higher-ranked row for lower work. Fresh
-no-admission precedence is `dispatch_disabled`, `at_capacity`, `queue_empty`,
-`no_eligible_work`. Known-valid paused,
-budget-exhausted or open-run-conflicting queued work is ineligible; either
-known role remains eligible and determines the footprint, while a known
-nonqueued task is outside the queue. Unknown or malformed durable control is
-corruption. Repository and provider executable/configuration/auth availability
-are post-admission typed failures, not stale eligibility filters.
-The exact contract lives in the rewrite record; this paragraph does not claim
-the corrected Change/global-admission/provider contract is implemented in this
-revision.
-
-Planned Go process setup has one additional literal barrier: after the outer
-runner is active and while its provider process/group pair remains declared
-with empty identity, generic outcome, cancellation and infrastructure-failure
-transactions refuse. The already-prepared one-shot runner still makes exactly
-one inner Start on cancellation or daemon EOF. Exact Start failure publishes
-the existing no-child result; successful Start binds an inert child before a
-pending outcome may reap it. No generic outcome creates a finalizing run with a
-declared provider pair, and no new receipt or lifecycle state is implied here.
+describes the current Go runtime's attempt kernel, daemon-owned Change model,
+and fail-closed process boundary. It is a contract, not a component catalogue.
 
 ## Durable model
 
@@ -96,77 +26,56 @@ Resource: declared -> active -> releasing -> released
 The run outcome is distinct from its phase: succeeded, blocked with a reason,
 failed with a typed reason, or cancelled with a reason. The first durable move
 to `finalizing` freezes its requested outcome. Later completion, block, cancel,
-or exit observations are idempotent and cannot replace that request. The
-`finalizing` projection exposes that proposal; the terminal projection exposes
-the actual result, while append-only events preserve both. For a configured
-Rust check, failed verification is the one documented refinement: it converts
-proposed success into `failed(unverifiable)` rather than claiming success.
+or exit observations are idempotent and cannot replace that request.
 
 Only the finalizer writes `terminal`. It may do so only when every ephemeral
-resource is released and every retained artifact is durably transferred to
-its next owner. Cleanup failure leaves the run visibly `finalizing`; it never
-pretends the resource disappeared or rewrites the outcome.
+resource is released and every retained artifact is durably transferred to its
+next owner. Cleanup failure leaves the run visibly `finalizing`; it never
+pretends that a resource disappeared or rewrites the outcome. The current
+daemon accepts only `VerificationNone`; non-None verification policies are
+rejected as unsupported before a provider runs.
 
 ## Authority invariants
 
 1. SQLite is the sole durable authority. State mutations and their bounded
    events commit together. Process-local locks serialize work but never prove
    ownership.
-2. Every provider-mediated mutation requires one bearer credential for one
+2. Every attempt mutation requires one bearer credential for one
    exact `running` run. Authentication derives project, agent, task, run, role,
-   provider, and any Change scope from the store.
+   provider, and Change scope from the store.
 3. Anonymous local requests may ask only for health. Operator requests require
    the private operator credential. Attempt credentials are valid only while
-   the exact run is `running`; admission, `finalizing`, and `terminal` do not
-   grant effect authority.
-4. Request authorization is exhaustive and fail-closed. A worker may message
-   itself, its immediate parent, or its nearest orchestrator ancestor. An
-   orchestrator may message itself or
-   a strict descendant, create a child of its current task only when assigning
-   it to a strict descendant, and assign queued work only to a strict
-   descendant; attempt authority cannot edit or unassign tasks. These
-   relationship checks rederive the exact running run and the durable parent
-   relationship inside the same immediate Store transaction as the mutation.
-   The fresh schema has no parent field yet; this messaging contract is
-   planned design, not current enforcement (carried invariant 11). Task and run
-   ancestry never grant agent authority. Operator authority cannot be used as
-   an attempt identity for completion, blocking, or hooks.
-5. Admission is the only transition from queued work to an attempt. For planned
-   Go, one global immediate Store transaction accepts no caller-selected agent,
-   task or cursor; it validates global settings and every capacity/authority and
-   queued rank/payload/control fact through the concrete SQL integrity
-   predicate, then counts admitted plus running plus finalizing against capacity
-   and checks dispatch/eligibility,
-   selects the canonical task+agent by global priority/time/16-byte-BLOB-ID
-   order, validates its one
-   Change, derives the provider launch target, and binds the immutable task
-   incarnation/work revision before external effects. The factory-wide
-   dispatch switch controls only whether this transaction may admit new work;
-   changing an agent's provider/model or disabling dispatch cannot rewrite an
-   admitted run's launch authority.
-6. No admitted attempt means no provider process, tool hook, outcome request,
-   or writable source lease.
-7. A retry creates a new run and new bearer. It never revives an old process
-   or credential.
-8. External-input receipt is separate from work authority. An operator-only
-   transaction may create an immutable `InputEnvelope`, one quarantined
-   `WorkCandidate`, and bounded events. It cannot create a Task, Message, Run,
-   Change, provider prompt, ProposedAction, or scheduling event. A changed
-   source revision advances an exact expected-current pointer and stales an old
-   quarantined candidate atomically. A rejected predecessor keeps its durable
-   decision while losing current-source authority. Exact observation or
-   rejection replay has no second effect, even after that pointer advances.
-   Candidate snapshots derive `is_current` from that pointer so reconciliation
-   can recover exact causal authority after restart.
+   the exact run is `running`; admission, `finalizing`, and `terminal` grant no
+   effect authority. Operator authentication cannot impersonate an attempt.
+4. Admission is one global `BEGIN IMMEDIATE` Store transaction. It validates
+   the fresh schema image and one SQL integrity predicate before reconciliation,
+   capacity, or selection. No caller supplies an agent, task, observation, or
+   cursor. Corrupt durable control is corruption, never queue ineligibility.
+   Capacity counts admitted, running, and finalizing runs together; fresh
+   no-admission precedence is `dispatch_disabled`, `at_capacity`,
+   `queue_empty`, then `no_eligible_work`.
+5. The Store selects the canonical eligible task and agent globally by priority
+   descending, creation time ascending, and exact 16-byte task-ID BLOB bytes
+   ascending. It validates the selected Change and binds the task incarnation,
+   revision, provider, and launch facts before external effects. Repository or
+   provider availability becomes typed post-admission failure, never a stale
+   scheduler filter.
+6. `dispatch_enabled` controls only new admission. An admitted run retains its
+   provider, optional model, and optional reasoning effort. V1 provider choice
+   is unrestricted interactive authority; no permission-profile field is
+   persisted or interpreted.
+7. No admitted attempt means no provider process or outcome request, and no
+   writable source lease. A retry creates a new run and bearer; it never revives
+   an old process or credential.
 
 ## Browser HumanRequest authority
 
-The pre-release Go runtime keeps HumanRequest authority in SQLite and exposes
-only bounded, correlated browser operations. Public HumanRequest state contains
-the request/project/agent/task relationships, chronology, revision, kind,
-status, the fixed reply bound, and display-only `can_reply`. It contains no run
-locator, terminal locator, question, reply, cancel descriptor, process identity,
-or other private source data.
+The Go runtime keeps HumanRequest authority in SQLite and exposes only bounded,
+correlated browser operations. Public HumanRequest state contains request,
+project, agent and task relationships, chronology, revision, kind, status, the
+fixed reply bound, and display-only `can_reply`. It contains no run locator,
+terminal locator, question, reply, cancel descriptor, process identity, or
+other private source data.
 
 Private detail is one pinned SQLite read. A client with
 `private_human_request_detail` may receive the exact hostile question and, only
@@ -182,350 +91,106 @@ run revisions. Delivering, delivery-unknown, finalizing, terminal, missing, and
 non-active origins expose no reply or cancellation authority; corrupt active
 relationships fail closed rather than resembling unavailability.
 
-A reply request contains only request ID, expected request revision, and bounded
-reply text. The Store transaction reloads the client and request, derives the
-originating running run, and commits a unique delivery receipt before the daemon
-looks up that exact live owner or writes once to its PTY. Failure or uncertainty
-after reservation becomes `delivery_unknown` and is never replayed. Cancellation
-likewise contains no caller-selected run: one Store transaction derives the
-origin, checks exact request/run revisions and capability, enters finalizing,
-revokes attempt and terminal-input authority, resolves the request, and appends
-all invalidations. The concrete response may report the server-derived run and
-post-transition revisions; it is result metadata, never caller authority.
-After that durable commit, the exact live attempt synchronously inspects its
-current terminal binding under the shared operation ordering. If one exists it
-revokes that binding's actual generation regardless of which authorized client
-submitted cancellation; no binding is definitive success. A rejected, partial,
-uncertain, or controller-failed fence is returned as post-commit uncertainty
-without rollback or retry against another run.
+A reply contains only request ID, expected request revision, and bounded text.
+The Store derives the originating run and commits a unique delivery receipt
+before the daemon looks up that exact live owner or writes once to its PTY.
+Failure or uncertainty after reservation becomes `delivery_unknown` and is
+never replayed. Cancellation likewise derives the origin, checks exact
+revisions and capability, enters finalizing, revokes authority, resolves the
+request, and appends invalidations in one Store transaction. The exact live
+attempt then fences its current terminal binding; rejected, partial, uncertain,
+or controller-failed fencing is visible after commit and is never retried
+against another run.
 
 ## Process and resource ownership
 
-The Rust process model is deleted. Go launches one fresh runner-owned
-interactive PTY per run with explicit authenticated attach/input authority; no
-provider process is reused across runs.
+The Go runtime launches one fresh runner-owned interactive PTY per run with
+explicit authenticated attach/input authority. No provider process is reused
+across runs.
 
 Launch is one nested register-before-exec handshake:
 
-1. `factoryd` records the admitted run with a random runtime claim. The
+1. `factoryd` records the admitted run and a random runtime claim. The
    claim-derived path is durable before `mkdir`; its inode replaces the claim
-   before any credential, configuration, or process is created inside it.
+   before a process is created inside it.
 2. `factoryd` creates and locks a private startup file, persists its exact
    filesystem identity, then maps that lock to the inert runner gate's stdin.
-   A restart can prove that a gate spawned before PID registration is gone only
-   by acquiring the same lock; missing or replaced identities stay unresolved.
-3. `factoryd` persists the inert gate's stable PID, then activates that same
-   PID into `factory-runner`. The runner creates a second parent-bound child
-   gate before provider `exec`
-   and reports the stable provider PID and process group.
-4. `factoryd` persists those identities and moves the run to `running`.
-5. The runner releases the child to provider `exec`.
+3. `factoryd` persists the inert gate's stable PID before activating it into
+   `factory-runner`.
+4. The runner prepares a second child blocked before provider `exec` and reports
+   the stable provider PID and process group.
+5. `factoryd` persists those identities, moves the run to `running`, and only
+   then releases the child to provider `exec`.
 
 If preparation or activation fails, the run enters `finalizing`; a provider
 must never execute first and become durable later. The runner is a
 provider-blind effect host, not a second lifecycle owner.
 
 The resource ledger records process, process group, runner, runtime root, and
-other external effects before use. Each record contains enough identity to
-refuse PID, path, or job-label reuse, but stored numeric identities never grant
+other external effects before use. Stored numeric identities never grant
 signal authority. The daemon requests shutdown through the authenticated live
-runner; the runner may signal its provider group only while it still owns the
-unreaped leader child. A live-child guard preserves that authority across
-runner cancellation or unwind, then disarms immediately after a successful
-wait; it never authorizes terminalization. After leader or runner loss, the
-durable finalizer only observes exact absence. A live, reused, or weak identity
-remains unresolved and cannot authorize signalling, runtime removal, or
-terminalization.
+runner; the runner may signal its provider group only while it owns the
+unreaped leader child. After leader or runner loss, the finalizer only observes
+exact absence. Reused or weak identities remain unresolved and cannot authorize
+signalling, removal, or terminalization.
 
 ## Provider boundary
 
-The planned Go boundary is one exhaustive concrete
-`internal/provider.Build(Request) (Launch, error)` function. It returns only
-one exact absolute executable, ordered argv and complete ordered environment.
-The runner owns the descriptor-bound Change cwd, fresh interactive PTY, input,
-process group, wait/reap, output and cleanup. The provider cannot select a
-source path, authority, credential, lifecycle result or fallback. See [the
-fresh provider contract](docs/providers.md).
+`internal/provider.Build(Request) (Launch, error)` is the one closed provider
+selection boundary. It returns only one exact absolute executable, ordered argv,
+and complete ordered environment. The runner owns the descriptor-bound Change
+cwd, task delivery, PTY, process group, wait/reap, output, and cleanup. A
+provider cannot select a source path or lifecycle result.
 
-The V1 contract allows only unrestricted interactive authority. Shell is
-exactly `/bin/sh -s`, but the provider candidate is not shipped; Claude Code
-and Codex are also blocked pending exact integration and fake-witness review.
-The schema and wire contract
-contain no permission profile or bounded-authority field. Admission freezes
-provider, optional model, and optional reasoning effort only. After admission,
-the daemon resolves and seals the exact `Installation` and native
-executable/configuration/auth facts. `Build` consumes and revalidates that
-sealed input; immediately before release the daemon/runner revalidates those
-facts and the final Change/config identity. These are not admission schema
-fields. An unsupported mapping or missing, changed, or inaccessible
-executable/configuration/auth is typed post-admission `FailureSpawn`, never
-queue ineligibility. Whole-provider API/model network access is not claimed to
-be constrained by this command contract.
+Shell is the only implemented provider. Its executable is `/bin/sh` and its
+argv is `/bin/sh`, `/dev/fd/11`; bounded task bytes are written to that sealed
+descriptor after the launch gates pass. The PTY is reserved for later
+interactive terminal traffic. Claude Code and Codex are unsupported and fail
+closed. The schema and wire contract contain no permission-profile field.
 
-The runner starts with `env_clear` and one closed ordered environment builder,
-private per-run roots, a daemon-sealed `PATH`, and no ambient provider/API,
-proxy, Git/GitHub, SSH, loader or plugin variables. It writes the canonical
-task body exactly once to the PTY after both gates, with one provider-specific
-terminator; the body is never in argv, env or replay. Auth is a copy-only
-sealed file or metadata-only Keychain reference. Provider output is opaque and
-never lifecycle authority. Whole-provider API/model network access is not
-claimed to be constrained by this command contract.
+Provider output is opaque and never lifecycle authority.
 
-The generic runner exports `DARK_FACTORY_ATTEMPT_TOKEN_FILE` as the path to the
-private bearer file. It does not export the bearer value. When that variable is
-present, `factoryctl` authenticates every request with the ambient attempt
-credential, including commands whose shape is normally operator-only. The
-daemon then rejects commands outside the attempt allowlist; the client never
-falls back to the operator token.
+## Change and repository ownership
 
-Provider output is opaque. Hooks are authenticated observations and bounded
-requests, not lifecycle authority. The daemon never infers success from text.
+`factoryd` is the only product creator and administrator of Changes. Admission
+reserves one daemon-derived path for one task incarnation. A registered wrapper
+materializes one exact committed tree before the provider can execute. The
+provider sees a plain writable directory with no Git administrative locator.
+Factoryd exposes no repository status, commit, push, pull-request, or
+publication operation.
 
-## Source ownership
+Managed Change removal requires the exact typed ID, current revision, durable
+inode identity, and no live lease; replacement or ambiguity remains visibly
+pending and is never touched. Retries reuse a retained Change only after the
+preceding run is terminal.
 
-For a worker, admission atomically reserves one Change ID and one daemon-derived
-path for the exact task incarnation. A registered, parent-bound wrapper then
-selects one full local Git commit, records the repository and staging inode,
-reads its bounded manifest and exact blob OIDs through `git cat-file`, and
-atomically publishes the resulting safe tree. It does not use `git archive`,
-so repository-local export attributes cannot transform committed bytes.
-Partial clones are refused before object reads, and lazy promisor fetch is
-disabled: the selected commit must already be wholly local. The real provider
-replaces that same registered process only after SQLite records the Change as
-`available`.
+## Verification and storage
 
-The provider sees a plain writable source tree with no `.git` locator. Git
-repository discovery and linked-worktree creation are refused by construction
-and by the sanitized environment: the discovery ceiling names the Change root's
-*parent*, because Git stops the upward walk only when it would climb into a
-listed directory, so naming the Change root itself would still let an ancestor
-repository be found from that root. Retries reuse the same retained Change;
-deletion is an explicit identity- and revision-checked transition that is
-refused while an attempt leases it. Factoryd supplies no status, commit, push,
-pull-request, or publication operation.
+The current daemon has no generic build API or completion verifier. Project
+creation uses `VerificationNone`; non-None verification values are
+schema-recognized but rejected by the supervisor. No provider or client may
+treat an unimplemented verifier as proof of success.
 
-Pre-kernel source paths live only in `legacy_sources`. They are quarantine
-metadata, not Changes: factoryd never touches the recorded filesystem path and
-can only forget the metadata row by typed ID.
-
-## Build and storage boundary
-
-Each project has one operator-selected verification policy: `None` or one fixed
-`RustWorkspaceTest`. There is no provider-visible generic build operation or
-Cargo shim. For a Rust-policy worker, `factoryctl task done` is the single
-completion boundary: the daemon moves the run to `finalizing`, revokes its
-authority, asks the live runner to reap the provider process group, and only
-after exact resource absence snapshots source and starts verification. A lost
-runner leaves finalization pending; stored PIDs are not a fallback. Orchestrator
-runs are not verified this way.
-
-The source snapshot is a canonical scan/copy/scan of the plain Change;
-it is published only when the manifests agree. This deliberately replaces the
-earlier private-Git-index and in-flight-writer design: Changes contain no Git
-administration, and a hook has no trustworthy `PostToolUse` writer ledger.
-
-Rust verification uses one mutable cache per random project incarnation and
-fixed Cargo/rustc identity and configuration, not per Change or source
-revision. It compiles only the private snapshot, copies the top-level Cargo
-test executables into a content-addressed directory under the run's registered
-temporary root, verifies its manifest/identity/digest, and launches those
-copies. The stable snapshot is the test working directory and is rechecked
-before and after every top-level test; a mutation fails verification before a
-later test can launch. Fixtures are not copied into the executable directory,
-doctests are not run, and test code may still launch other same-UID processes.
-Mutable `target/debug` or
-`target/release` top-level launch is forbidden. These checks prevent confused
-or cooperative replacement; they are not a sandbox against hostile same-UID
-code.
-
-Verifier recovery retains the same ownership rule as provider recovery. If a
-process-group leader disappears while descendants remain, the run stays
-`finalizing`; a numeric process-group ID without the exact live leader identity
-is neither signal authority nor proof that the effect is gone.
-
-Regenerable cache storage has a hard entry count and a measured byte policy.
-Starting a writer makes byte status incomplete; after its exact process group
-is absent, factoryd remeasures allocated bytes and reclaims unprotected caches
-until the policy converges. Healthy verifier shutdown is cooperative: factoryd
-publishes a private finish marker and the live leader terminates its own group.
-A measured over-limit cache cannot be claimed for
-another verification. Status reports aggregate measured bytes, protected entry
-count, and recoverable failure count, not an invented protected-byte subtotal.
-An ordinary directory
-cannot promise a portable instantaneous byte ceiling while Cargo is writing,
-so the architecture does not claim one.
-
-## Policy versus correctness
-
-God/orchestrators schedule and prioritize through ordinary authenticated
-requests. Factoryd independently checks project scope, task state, capacity,
-budget, durable Change policy, and admission. Planned Go treats external
-repository/provider availability as a typed post-admission failure, not a
-scheduler filter. An orchestrator cannot create
-Changes, launch processes directly, mutate capacity or agents, choose an
-outcome for another attempt, or finalize a run. Its death cannot prevent the
-daemon finalizer from converging.
+Regenerable runtime data may be reclaimed only through exact registered,
+unleased identity. A writer makes status incomplete; after exact effect absence
+the daemon remeasures before cleanup. A live or reused process/group identity
+keeps finalization pending. Unique retained Changes are never automatic cleanup
+targets, and the daemon does not claim an instantaneous filesystem byte ceiling.
 
 ## Clients and integrations
 
-`factoryctl` and the hosted browser are disposable clients of one local API.
-They do not own runtime state. Both use the operator credential for operator
-requests.
-Task admission is public before the admitted run and terminal session become
-active, so a terminal target may truthfully be absent at that pinned state
-head. The browser keeps the selection and its authenticated session, then
-retries discovery only after the canonical state head advances; it never polls
-or sleeps across that lifecycle boundary. A stale discovery response is itself
-proof that the server observation advanced: selection survives the browser's
-older idle projection until the newer head decides whether to retry. A target
-reply overtaken by a newer public head is treated as stale rather than minting
-old authority or accepting old absence. A missing target at the exact current
-head for an agent with no running task still closes the selection normally.
-Generated provider hooks and attempt commands read the private credential file
-for their exact run through `DARK_FACTORY_ATTEMPT_TOKEN_FILE` (or an explicit
-hook `--token-file`). A provider-invoked `factoryctl` process cannot cross into
-operator authority by choosing an operator command.
-
-`factoryd` has no HTTP webhook, GitHub adapter, or generic connector intake.
-The separately deployed control plane may authenticate external deliveries,
-but it has no daemon or attempt authority. The operator may place bounded
-provider-neutral observations into inert quarantine through the authenticated
-private local API, then list, inspect, or reject them. Raw content is private
-local detail and public events carry only project, envelope, candidate, and
-status identities. There is no accept/materialize operation, so receipt cannot
-become executable work or bypass admission.
-
-The separately deployed control plane is outside this local architecture and
-has no daemon or attempt authority. Its implementation and broker choice do
-not load credentials into `factoryd`; any future integration must preserve the
-typed, metadata-only boundary. Product intake and the operator/browser API
-remain separate planes, and no external delivery can bypass local admission.
+`factoryctl` and the hosted browser are disposable clients of one local API;
+neither owns runtime state. Both use the operator credential for operator
+requests. Browser selection is pinned to canonical state heads and never polls
+or sleeps across lifecycle boundaries. Stale discovery is treated as stale, not
+as authority for a retry or an old absence. Attempt commands read the private
+credential file for their exact run; an attempt cannot cross into operator
+authority.
 
 ## State outside SQLite
 
-Bounded project guidance, rules, and memory remain files under the factory
-home. SQLite owns their identities; their prose is not authority. Cross-file
-and database operations must state their ordering and failure semantics rather
-than pretending to be one transaction.
-
-The local socket, credential files, runtime roots, and generated provider
-configuration are private daemon-owned files. The live operator home and
-launchd job are never test fixtures.
-
-## Invariants carried from the retired Rust reviews
-
-The 2026-08 review waves found recurring defect classes in the retired Rust
-code: guards that failed open, cleanup that presumed absence instead of
-proving it, declarations no observation backed, and unbounded public
-surfaces. Those findings close with the cutover, but their invariants do not.
-Each is restated here as a requirement on the Go system, with one
-representative issue for provenance and the enforcement that exists today —
-or an explicit note that enforcement is still owed. Closing the stale
-Rust-era issues is gated on this capture; the full mapping lives in the
-internal backlog reconciliation record (28 Aug 2026). An entry naming
-enforcement claims only what the cited code and tests do at this revision.
-
-1. **A failed launch reaps its provider.** Every failure path that runs after
-   a child exists must converge that exact child and group before reporting;
-   no launch failure may orphan a provider process (untested reap path,
-   #326). Enforced: `internal/runner/attempt_darwin.go`
-   (`waitForAttemptChild` retries synchronously until the sole `Wait`
-   succeeds and never publishes terminal evidence past uncertainty) and
-   `internal/daemon/supervisor_darwin.go` (`supervisorAttemptOwner.close`
-   converges the inner group before dropping ownership); tested by
-   `TestSupervisorReapsProviderDescendant` in
-   `internal/daemon/supervisor_darwin_test.go` and the failure-path reaps
-   `TestAttemptCleanupReapsObservedInertExit` and
-   `TestAttemptRunnerTerminatesOwnedProviderGroup` in
-   `internal/runner/attempt_darwin_test.go`.
-
-2. **Absence is proved, never presumed.** A process check that cannot decide
-   reports failure; only an exact PID+group+birth identity census proves a
-   recorded effect gone, and uncertainty stays durably unresolved (fail-open
-   liveness probe, #334). Enforced: `internal/runner/process_darwin.go`
-   (birth-stamped identity census), `internal/kernel/lifecycle.go`
-   (`ReleaseResource` refuses a non-empty identity without a recorded exit;
-   `MarkResourceUnresolved` keeps uncertainty non-terminal); tested by
-   `TestObservationFailsClosed` and
-   `TestUnavailableProcessClassifierFailsClosed` in
-   `internal/runner/runner_darwin_test.go` (undecidable observations stay
-   `Unknown`; a birth mismatch is `Reused`, never absence).
-
-3. **Guards fail closed.** An authorization or integrity guard that errors
-   denies; no guard failure may pass as success or as mere ineligibility
-   (fail-open stream guards, #341). Enforced: every public mutation begins
-   with `beginValidatedWrite` in `internal/kernel/sqlite.go`, whose graph
-   predicate blocks the decision on any damaged fact (tested by
-   `TestEveryPublicMutationValidatesDurableGraphBeforeDecision` in
-   `internal/kernel/validated_write_test.go`); `SubscribeState` in
-   `internal/daemon/browser_subscription.go` authorizes before subscribing
-   and denies on any error, invalid cursor, or shutdown.
-
-4. **Terminalization is one-way.** No transition leaves `released` or
-   `terminal`; release requires a recorded exit observation, and a terminal
-   replay is idempotent or a conflict, never a rewrite (untested one-way
-   release, #335). Enforced: `internal/kernel/lifecycle.go` —
-   `transitionResource`'s SQL state-set guards admit no edge out of
-   `released`, and `finalizeRun` writes `terminal` only from `finalizing`
-   with every resource released and required exits recorded.
-
-5. **Public state is bounded, and the bound is observed.** Every publicly
-   readable surface has a hard limit that code checks, not prose that
-   asserts it (boundedness declared but enforced by nothing, #340).
-   Enforced: `EventRetentionLimit` in `internal/kernel/types.go` is checked
-   inside the validated-write predicate (`internal/kernel/validate.go`),
-   where excess is `ErrCorruptState`; the factory row's
-   `invalidation_floor`/`next_invalidation_sequence` CHECK constraints and
-   pruning in `internal/kernel/store.go` bound the invalidation feed;
-   `PublicStateEntityLimit` and paging bound snapshots
-   (`internal/kernel/public_state.go`).
-
-6. **Projections never serve stale authority.** A client view derives from
-   durable state at a pinned head; a resume cursor behind the retained floor
-   restarts the snapshot rather than presenting old rows as current (stale
-   event projection, #344). Enforced: `internal/kernel/public_state.go`
-   (head-pinned snapshot, floor-checked restart),
-   `internal/daemon/browser_subscription.go` (stale cursors refuse), and
-   field-exact wire projection in `internal/daemon/api_projection.go`;
-   tested by `internal/kernel/human_request_terminal_projection_test.go`.
-
-7. **Every guard is tested against its threat.** A security or integrity
-   guard needs a causal test that exercises the exact threat it exists to
-   stop, not only its happy path (bundle guards untested against their
-   threat, #353). This binds review of every change rather than one
-   enforcement point; current examples include
-   `TestRecoveredRuntimeFilePolicyRejectsEveryAuthorityMutation`
-   (`internal/daemon/recovered_runtime_darwin_test.go`) and the
-   hostile-input cases in `web/packages/ui/test/factory-console.test.mjs`.
-
-8. **One sanitizer per untrusted display surface.** Each surface that renders
-   untrusted bytes has exactly one escaping authority; duplicated predicates
-   diverge silently (duplicate display-control predicates, #320). The
-   console's text escaping is tested in
-   `web/packages/ui/test/factory-console.test.mjs`; for terminal byte
-   rendering the invariant must hold; enforcement to be verified.
-
-9. **Recovery from an unclean kill is proven, not assumed.** The daemon must
-   converge after SIGKILL at any point, and the proof is a test that kills
-   it there (SIGKILL recovery unproven, #313). Enforced at the store and
-   runner cuts: crash injection before and after the admission and
-   finalization commits (`internal/kernel/sqlite_crash_test.go`) and
-   parent-SIGKILL gate abort (`internal/runner/runner_darwin_test.go`). A
-   whole-daemon arbitrary-point kill proof must hold; enforcement to be
-   verified.
-
-10. **Lists return bounded summaries.** A list request returns paged
-    summary rows, never unbounded full bodies or private detail (unbounded
-    list responses, #39). Enforced: `internal/kernel/public_state.go` pages
-    with a hard limit and `internal/daemon/api_projection.go` projects
-    summaries without task bodies or private fields.
-
-11. **Hierarchy derives from durable parent facts.** Agent authority
-    topology is a rooted tree with bounded depth, derived only from durable
-    parent relationships — never from presentation state (hierarchy held up
-    by rendering, #363). The fresh schema has no parent field yet, so the
-    invariant binds that design when it lands: must hold; enforcement to be
-    verified.
+The local socket and runtime roots are private daemon-owned files. The live
+operator home and launchd job are never test fixtures.
 
 ## Deliberate non-goals
 
@@ -534,7 +199,3 @@ enforcement claims only what the cited code and tests do at this revision.
 - No protection from a hostile process running as the operator. Bearer scoping
   prevents confused/cooperative cross-attempt behavior; real isolation needs a
   separate OS user, container, or sandbox.
-- No migration, upcaster, or compatibility layer; the Go home/schema and
-  protocol are fresh, and the deleted Rust implementation is git history only.
-- No live installation, release, or external intake before the independent
-  exact-head boot review and a separate operator decision.
