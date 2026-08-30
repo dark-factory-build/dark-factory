@@ -1,7 +1,18 @@
 #!/bin/sh
 set -eu
 
-target_commit=99f395e517d67122a2e435322caf0ab4b800a7c9
+# The reviewed control-plane runtime this activation may ship. The gate below
+# is a CONTENT diff over the control-plane paths, not a hash equality, so this
+# stays valid across any merge strategy while control-plane is unchanged.
+#
+# Moved off the original v1-to-v2 activation commit because that runtime
+# required `delete_branch_on_merge`, a field GitHub returns only to a caller
+# with Administration access -- which this App never requests. Every repository
+# observation failed to deserialize, which disabled `maintainer_status` and,
+# with it, `dispatch_control_plane_deploy`: the App could not deploy its own
+# repair, so this owner-run path is the only way back. Once this version is
+# live the fixed Maintainer workflow resumes owning deployments.
+target_commit=9cfb13af0b44bc6ab94de8764a393caa4ece12e0
 worker=dark-factory-control-plane
 hostname=maintainer.darkfactory.build
 revision=maintainer-operations-v2
