@@ -2,7 +2,6 @@ package changeworker
 
 import (
 	"bytes"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"reflect"
@@ -30,9 +29,9 @@ func TestConfigRoundTripIsExactBoundedAndPrivate(t *testing.T) {
 	}
 	encoded[0] ^= 1
 	if _, err := DecodeConfig(encoded); !errors.Is(err, ErrInvalidContract) {
-		t.Fatalf("corrupt magic: %v", err)
+		t.Fatalf("corrupt JSON: %v", err)
 	}
-	for _, value := range []any{want, SelectionReport{}, PreparationReport{}, PopulationReport{}} {
+	for _, value := range []any{want, Result{}} {
 		formatted := fmt.Sprintf("%v %+v %#v", value, value, value)
 		for _, sentinel := range []string{want.RuntimePath, want.FactoryctlExecutable, want.RepositoryRoot, string(want.ProviderTask)} {
 			if strings.Contains(formatted, sentinel) {
@@ -44,11 +43,8 @@ func TestConfigRoundTripIsExactBoundedAndPrivate(t *testing.T) {
 
 func TestRetainedConfigRoundTripPreservesExactPublicationAuthority(t *testing.T) {
 	want := configFixture(t)
-	selection := selectionFixture(t)
-	want.Retained = &RetainedChange{
-		Format: selection.Format, Base: selection.Base, Commitment: selection.Commitment,
-		EntryCount: selection.EntryCount, BlobBytes: selection.BlobBytes, Tree: mustStage(t, 21, 22),
-	}
+	retained := resultFixture(t)
+	want.Retained = &retained
 	encoded, err := EncodeConfig(want)
 	if err != nil {
 		t.Fatal(err)
@@ -58,67 +54,109 @@ func TestRetainedConfigRoundTripPreservesExactPublicationAuthority(t *testing.T)
 		t.Fatalf("retained config round trip changed authority: %v", err)
 	}
 	bad := want
-	bad.Retained = &RetainedChange{}
+	bad.Retained = &Result{}
 	if _, err := EncodeConfig(bad); !errors.Is(err, ErrInvalidContract) {
 		t.Fatalf("invalid retained authority encoded: %v", err)
 	}
 }
 
-func TestConfigV2HardCutoverRejectsOldUnknownTrailingAndDuplicateLocator(t *testing.T) {
+func TestConfigStrictJSONRejectsOversizeUnknownTrailingMissingAndInvalidProvider(t *testing.T) {
 	want := configFixture(t)
 	encoded, err := EncodeConfig(want)
 	if err != nil {
 		t.Fatal(err)
 	}
-	locatorStart, locatorEnd := configStringBounds(t, encoded, 2)
-	old := append(bytes.Clone(encoded[:locatorStart]), encoded[locatorEnd:]...)
-	unknown := bytes.Clone(encoded)
-	unknown[4]++
-	trailing := append(bytes.Clone(encoded), 0)
-	duplicate := append(bytes.Clone(encoded[:locatorEnd]), encoded[locatorStart:locatorEnd]...)
-	duplicate = append(duplicate, encoded[locatorEnd:]...)
-	for name, value := range map[string][]byte{"old": old, "unknown": unknown, "trailing": trailing, "duplicate locator": duplicate} {
+	unknown := bytes.Replace(encoded, []byte{'{'}, []byte(`{"unknown":true,`), 1)
+	invalidProvider := bytes.Replace(encoded, []byte(`"provider":"shell"`), []byte(`"provider":"unknown"`), 1)
+	if bytes.Equal(invalidProvider, encoded) {
+		t.Fatal("provider fixture was not replaced")
+	}
+	invalidPath := bytes.Replace(encoded, []byte(`"repository_root":"/private/repository"`), []byte(`"repository_root":"relative"`), 1)
+	if bytes.Equal(invalidPath, encoded) {
+		t.Fatal("path fixture was not replaced")
+	}
+	for name, value := range map[string][]byte{
+		"oversize":         bytes.Repeat([]byte{' '}, ConfigLimit+1),
+		"unknown field":    unknown,
+		"trailing data":    append(bytes.Clone(encoded), []byte(`{}`)...),
+		"missing required": []byte(`{}`),
+		"invalid provider": invalidProvider,
+		"invalid path":     invalidPath,
+	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := DecodeConfig(value); !errors.Is(err, ErrInvalidContract) {
-				t.Fatalf("foreign v2 config accepted: %v", err)
+				t.Fatalf("malformed config accepted: %v", err)
 			}
 		})
 	}
 }
 
-func TestReportsRoundTripAndRejectTrailingBytes(t *testing.T) {
-	selection := selectionFixture(t)
-	encoded, err := EncodeSelectionReport(selection)
+func TestResultRoundTripIsStrictBoundedAndPrivate(t *testing.T) {
+	want := resultFixture(t)
+	encoded, err := EncodeResult(want)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := DecodeSelectionReport(encoded)
+	got, err := DecodeResult(encoded)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Format != selection.Format || got.Base.Hex() != selection.Base.Hex() || !got.Commitment.Equal(selection.Commitment) || got.EntryCount != selection.EntryCount || got.BlobBytes != selection.BlobBytes || !got.Repository.Equal(selection.Repository) {
-		t.Fatal("selection report changed")
+	if got.Format != want.Format || got.Base.Hex() != want.Base.Hex() || !got.Commitment.Equal(want.Commitment) ||
+		got.EntryCount != want.EntryCount || got.BlobBytes != want.BlobBytes || !got.Tree.Equal(want.Tree) {
+		t.Fatal("round trip changed result")
 	}
-	if _, err := DecodeSelectionReport(append(encoded, 0)); !errors.Is(err, ErrInvalidContract) {
-		t.Fatalf("trailing selection accepted: %v", err)
+	formatted := fmt.Sprintf("%v %+v %#v", want, want, want)
+	for _, private := range []string{want.Base.Hex(), want.Commitment.Hex()} {
+		if strings.Contains(formatted, private) {
+			t.Fatalf("private result leaked: %q", formatted)
+		}
 	}
-	preparation := PreparationReport{Stage: mustStage(t, 13, 14)}
-	encoded, err = EncodePreparationReport(preparation)
+}
+
+func TestResultRejectsOversizeUnknownTrailingMissingInvalidAndPartialJSON(t *testing.T) {
+	encoded, err := EncodeResult(resultFixture(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	decodedPreparation, err := DecodePreparationReport(encoded)
-	if err != nil || !decodedPreparation.Stage.Equal(preparation.Stage) {
-		t.Fatalf("preparation=%+v err=%v", decodedPreparation, err)
+	unknown := bytes.Replace(encoded, []byte{'{'}, []byte(`{"unknown":true,`), 1)
+	missingEntries := bytes.Replace(encoded, []byte(`,"entry_count":7`), nil, 1)
+	if bytes.Equal(missingEntries, encoded) {
+		t.Fatal("entry-count fixture was not removed")
 	}
-	population := PopulationReport{Identity: preparation.Stage, Commitment: selection.Commitment, EntryCount: 7, BlobBytes: 99}
-	encoded, err = EncodePopulationReport(population)
+	invalidFormat := bytes.Replace(encoded, []byte(`"format":"sha1"`), []byte(`"format":"sha512"`), 1)
+	if bytes.Equal(invalidFormat, encoded) {
+		t.Fatal("format fixture was not replaced")
+	}
+	for name, value := range map[string][]byte{
+		"oversize":         bytes.Repeat([]byte{' '}, ResultLimit+1),
+		"unknown field":    unknown,
+		"trailing data":    append(bytes.Clone(encoded), []byte(`{}`)...),
+		"missing required": missingEntries,
+		"invalid format":   invalidFormat,
+		"partial":          bytes.Clone(encoded[:len(encoded)-1]),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := DecodeResult(value); !errors.Is(err, ErrInvalidContract) {
+				t.Fatalf("malformed result accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestConfigRejectsMalformedRetainedChangeJSON(t *testing.T) {
+	want := configFixture(t)
+	result := resultFixture(t)
+	want.Retained = &result
+	encoded, err := EncodeConfig(want)
 	if err != nil {
 		t.Fatal(err)
 	}
-	decodedPopulation, err := DecodePopulationReport(encoded)
-	if err != nil || !decodedPopulation.Identity.Equal(population.Identity) || !decodedPopulation.Commitment.Equal(population.Commitment) {
-		t.Fatalf("population=%+v err=%v", decodedPopulation, err)
+	malformed := bytes.Replace(encoded, []byte(`"tree":{"device":21,"inode":22}`), []byte(`"tree":{"device":21,"inode":0}`), 1)
+	if bytes.Equal(malformed, encoded) {
+		t.Fatal("retained tree fixture was not replaced")
+	}
+	if _, err := DecodeConfig(malformed); !errors.Is(err, ErrInvalidContract) {
+		t.Fatalf("malformed retained Change accepted: %v", err)
 	}
 }
 
@@ -173,28 +211,7 @@ func configFixture(t testing.TB) Config {
 	return Config{Provider: kernel.ProviderShell, RuntimePath: "/private/runtime", RuntimeIdentity: runner.FileIdentity{Device: 1, Inode: 2}, GitExecutable: "/Library/Developer/CommandLineTools/usr/bin/git", FactoryctlExecutable: "/private/release/factoryctl", ToolPath: "/opt/homebrew/bin:/usr/bin:/bin", RepositoryRoot: "/private/repository", RepositoryIdentity: repository, Revision: "main", ChangeParent: "/private/changes", FinalName: "change", StagingName: ".change.stage", AttemptSocket: "/private/api.sock", ProviderTask: []byte("printf exact")}
 }
 
-func configStringBounds(t testing.TB, encoded []byte, want int) (int, int) {
-	t.Helper()
-	// Header, four identity words, provider kind and the nil retained marker.
-	offset := 8 + 4*8 + 2
-	for index := 0; index <= want; index++ {
-		if offset+2 > len(encoded) {
-			t.Fatal("short encoded config")
-		}
-		start := offset
-		length := int(binary.BigEndian.Uint16(encoded[offset : offset+2]))
-		offset += 2 + length
-		if offset > len(encoded) {
-			t.Fatal("invalid encoded config string")
-		}
-		if index == want {
-			return start, offset
-		}
-	}
-	return 0, 0
-}
-
-func selectionFixture(t testing.TB) SelectionReport {
+func resultFixture(t testing.TB) Result {
 	t.Helper()
 	format, err := change.NewObjectFormat("sha1")
 	if err != nil {
@@ -208,11 +225,10 @@ func selectionFixture(t testing.TB) SelectionReport {
 	if err != nil {
 		t.Fatal(err)
 	}
-	repository, err := change.NewRepositoryIdentity(11, 12)
-	if err != nil {
-		t.Fatal(err)
+	return Result{
+		Format: format, Base: base, Commitment: commitment,
+		EntryCount: 7, BlobBytes: 99, Tree: mustStage(t, 21, 22),
 	}
-	return SelectionReport{Format: format, Base: base, Commitment: commitment, EntryCount: 7, BlobBytes: 99, Repository: repository}
 }
 
 func mustStage(t testing.TB, device, inode uint64) change.StageIdentity {

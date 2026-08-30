@@ -5,13 +5,11 @@ package daemon
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/dark-factory-build/dark-factory/internal/changeworker"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 	"golang.org/x/sys/unix"
@@ -19,7 +17,7 @@ import (
 
 func TestOpenRecoveredRuntimeValidatesPopulatedEvidenceWithoutMutation(t *testing.T) {
 	before := openFDCensus(t)
-	parent, path, identity, token, config, terminal := populatedRecoveredRuntime(t, runtimeTestName)
+	parent, path, identity, _ := populatedRecoveredRuntime(t, runtimeTestName)
 	t.Cleanup(func() { _ = parent.Close() })
 	if _, err := os.Lstat(filepath.Join(path, runner.InnerActivationMarkerName)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("fixture unexpectedly retained inner marker: %v", err)
@@ -29,25 +27,11 @@ func TestOpenRecoveredRuntimeValidatesPopulatedEvidenceWithoutMutation(t *testin
 		t.Fatal(err)
 	}
 	defer recovered.Close()
-	digest := attemptDigestForToken(t, token)
-	evidence, err := recovered.InspectEvidence(context.Background(), digest, &config, true)
-	if err != nil || !evidence.AttemptToken || !evidence.WorkerConfig || evidence.Terminal == nil || evidence.Terminal.Terminal != terminal {
-		t.Fatalf("evidence = %+v, %v", evidence, err)
-	}
 	if second, err := OpenRecoveredRuntime(context.Background(), parent, runtimeTestName, identity); !errors.Is(err, errRuntimeBusy) || second != nil {
 		releaseUnexpectedRecovered(second)
 		t.Fatalf("concurrent recovery = %+v, %v", second, err)
 	}
-	wrongDigest, _ := kernel.AttemptDigestFromBytes(bytes.Repeat([]byte{0xee}, kernel.DigestBytes))
-	if _, err := recovered.InspectEvidence(context.Background(), wrongDigest, &config, true); !errors.Is(err, errInvalidContract) {
-		t.Fatalf("wrong token digest = %v", err)
-	}
-	wrongConfig := config
-	wrongConfig.RepositoryRoot = "/private/not-opened"
-	if _, err := recovered.InspectEvidence(context.Background(), digest, &wrongConfig, true); !errors.Is(err, errInvalidContract) {
-		t.Fatalf("wrong config = %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(path, changeworker.AttemptTokenName)); err != nil {
+	if _, err := os.Stat(filepath.Join(path, attemptTokenName)); err != nil {
 		t.Fatalf("rejected validation changed token: %v", err)
 	}
 	if err := recovered.Close(); err != nil {
@@ -86,13 +70,6 @@ func TestOpenRecoveredRuntimeAcceptsRootBeforeTokenPublicationWithoutMutation(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	evidence, err := recovered.InspectEvidence(context.Background(), kernel.AttemptDigest{}, nil, false)
-	if err != nil {
-		t.Fatalf("root-only evidence = %+v, %v", evidence, err)
-	}
-	if evidence.AttemptToken || evidence.WorkerConfig || evidence.Terminal != nil {
-		t.Fatalf("root-only evidence was populated: %+v", evidence)
-	}
 	if err := recovered.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -105,45 +82,32 @@ func TestOpenRecoveredRuntimeAcceptsRootBeforeTokenPublicationWithoutMutation(t 
 	assertFDCensus(t, beforeFDs)
 }
 
-func TestOpenRecoveredRuntimeAcceptsConsumedConfigAtActivatedAndTerminalCuts(t *testing.T) {
+func TestOpenRecoveredRuntimeAcceptsExactCrashCutsWithoutConfigurationPath(t *testing.T) {
 	tests := []struct {
-		name         string
-		residue      []string
-		wantTerminal bool
+		name    string
+		residue []string
 	}{
+		{name: "outer", residue: []string{runner.OuterActivationMarkerName}},
+		{name: "gate scratch", residue: []string{runner.OuterActivationMarkerName, runner.GateConfigScratchName}},
 		{name: "activated", residue: []string{runner.OuterActivationMarkerName, runner.InnerActivationMarkerName}},
-		{name: "terminal", residue: []string{runner.OuterActivationMarkerName, runner.InnerActivationMarkerName, runner.TerminalSpoolName}, wantTerminal: true},
+		{name: "terminal", residue: []string{runner.OuterActivationMarkerName, runner.InnerActivationMarkerName, runner.TerminalSpoolName}},
 		{name: "terminal scratch", residue: []string{runner.OuterActivationMarkerName, runner.InnerActivationMarkerName, runner.TerminalScratchName}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			beforeFDs := openFDCensus(t)
-			parent, path, identity, token, _, terminal := populatedRecoveredRuntime(t, runtimeTestName)
-			if err := os.Remove(filepath.Join(path, changeworker.ConfigName)); err != nil {
-				t.Fatal(err)
-			}
+			parent, path, identity, terminal := populatedRecoveredRuntime(t, runtimeTestName)
 			configureRecoveredResidue(t, path, test.residue, terminal)
 			before := snapshotRuntimeGraph(t, path)
 			recovered, err := OpenRecoveredRuntime(context.Background(), parent, runtimeTestName, identity)
 			if err != nil {
 				t.Fatal(err)
 			}
-			digest := attemptDigestForToken(t, token)
-			evidence, err := recovered.InspectEvidence(context.Background(), digest, nil, false)
-			if err != nil || !evidence.AttemptToken || evidence.WorkerConfig || (evidence.Terminal != nil) != test.wantTerminal {
-				t.Fatalf("consumed-config evidence = %+v, %v", evidence, err)
-			}
-			if _, err := recovered.InspectEvidence(context.Background(), digest, nil, true); !errors.Is(err, errInvalidContract) {
-				t.Fatalf("missing config accepted as bound runner: %v", err)
-			}
 			if err := recovered.Close(); err != nil {
 				t.Fatal(err)
 			}
 			if after := snapshotRuntimeGraph(t, path); after != before {
-				t.Fatalf("recovery mutated consumed-config graph\nbefore:\n%s\nafter:\n%s", before, after)
-			}
-			if _, err := os.Lstat(filepath.Join(path, changeworker.ConfigName)); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("recovery recreated worker config: %v", err)
+				t.Fatalf("recovery mutated graph\nbefore:\n%s\nafter:\n%s", before, after)
 			}
 			if err := parent.Close(); err != nil {
 				t.Fatal(err)
@@ -151,84 +115,6 @@ func TestOpenRecoveredRuntimeAcceptsConsumedConfigAtActivatedAndTerminalCuts(t *
 			assertFDCensus(t, beforeFDs)
 		})
 	}
-}
-
-func TestOpenRecoveredRuntimeRejectsConsumedConfigDuringGateScratch(t *testing.T) {
-	tests := []struct {
-		name    string
-		residue []string
-	}{
-		{name: "gate scratch", residue: []string{runner.OuterActivationMarkerName, runner.GateConfigScratchName}},
-		{name: "outer only", residue: []string{runner.OuterActivationMarkerName}},
-		{name: "terminal scratch before inner", residue: []string{runner.OuterActivationMarkerName, runner.TerminalScratchName}},
-		{name: "terminal before inner", residue: []string{runner.OuterActivationMarkerName, runner.TerminalSpoolName}},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			beforeFDs := openFDCensus(t)
-			parent, path, identity, _, _, terminal := populatedRecoveredRuntime(t, runtimeTestName)
-			if err := os.Remove(filepath.Join(path, changeworker.ConfigName)); err != nil {
-				t.Fatal(err)
-			}
-			configureRecoveredResidue(t, path, test.residue, terminal)
-			before := snapshotRuntimeGraph(t, path)
-			if recovered, err := OpenRecoveredRuntime(context.Background(), parent, runtimeTestName, identity); !errors.Is(err, errInvalidContract) || recovered != nil {
-				releaseUnexpectedRecovered(recovered)
-				t.Fatalf("config-free pre-consumption residue accepted: recovered=%+v err=%v", recovered, err)
-			}
-			if after := snapshotRuntimeGraph(t, path); after != before {
-				t.Fatalf("rejected config-free residue mutated graph\nbefore:\n%s\nafter:\n%s", before, after)
-			}
-			if _, err := os.Lstat(filepath.Join(path, changeworker.ConfigName)); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("rejected recovery recreated worker config: %v", err)
-			}
-			if err := parent.Close(); err != nil {
-				t.Fatal(err)
-			}
-			assertFDCensus(t, beforeFDs)
-		})
-	}
-}
-
-func TestRecoveredRuntimeRejectsReplacedWorkerConfig(t *testing.T) {
-	beforeFDs := openFDCensus(t)
-	parent, path, identity, token, config, terminal := populatedRecoveredRuntime(t, runtimeTestName)
-	if err := os.Remove(filepath.Join(path, runner.TerminalSpoolName)); err != nil {
-		t.Fatal(err)
-	}
-	configureRecoveredResidue(t, path, []string{runner.OuterActivationMarkerName, runner.InnerActivationMarkerName}, terminal)
-	configPath := filepath.Join(path, changeworker.ConfigName)
-	replacementPath := path + ".config.old"
-	if err := os.Rename(configPath, replacementPath); err != nil {
-		t.Fatal(err)
-	}
-	replacement := config
-	replacement.RepositoryRoot += ".replacement"
-	encoded, err := changeworker.EncodeConfig(replacement)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(configPath, encoded, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	recovered, err := OpenRecoveredRuntime(context.Background(), parent, runtimeTestName, identity)
-	if err != nil {
-		t.Fatal(err)
-	}
-	digest := attemptDigestForToken(t, token)
-	if _, err := recovered.InspectEvidence(context.Background(), digest, &config, true); !errors.Is(err, errInvalidContract) {
-		t.Fatalf("replaced worker config accepted: %v", err)
-	}
-	if err := recovered.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(replacementPath); err != nil {
-		t.Fatalf("original worker config was not retained for inspection: %v", err)
-	}
-	if err := parent.Close(); err != nil {
-		t.Fatal(err)
-	}
-	assertFDCensus(t, beforeFDs)
 }
 
 func TestOpenRecoveredRuntimeRejectsMalformedCensusAndReplacement(t *testing.T) {
@@ -310,7 +196,7 @@ func TestOpenRecoveredRuntimeRejectsMalformedCensusAndReplacement(t *testing.T) 
 	}
 	for name, mutate := range mutations {
 		t.Run(name, func(t *testing.T) {
-			parent, path, identity, _, _, _ := populatedRecoveredRuntime(t, runtimeTestName)
+			parent, path, identity, _ := populatedRecoveredRuntime(t, runtimeTestName)
 			defer parent.Close()
 			mutate(t, path)
 			before := snapshotRuntimeGraph(t, path)
@@ -325,7 +211,7 @@ func TestOpenRecoveredRuntimeRejectsMalformedCensusAndReplacement(t *testing.T) 
 	}
 
 	t.Run("wrong root identity", func(t *testing.T) {
-		parent, path, identity, _, _, _ := populatedRecoveredRuntime(t, runtimeTestName)
+		parent, path, identity, _ := populatedRecoveredRuntime(t, runtimeTestName)
 		defer parent.Close()
 		identity.Inode++
 		before := snapshotRuntimeGraph(t, path)
@@ -339,7 +225,7 @@ func TestOpenRecoveredRuntimeRejectsMalformedCensusAndReplacement(t *testing.T) 
 	})
 
 	t.Run("root replacement after descriptor open", func(t *testing.T) {
-		parent, path, identity, _, _, _ := populatedRecoveredRuntime(t, runtimeTestName)
+		parent, path, identity, _ := populatedRecoveredRuntime(t, runtimeTestName)
 		defer parent.Close()
 		moved := path + ".old"
 		recovered, err := openRecoveredRuntime(context.Background(), parent, runtimeTestName, identity, func() {
@@ -410,7 +296,7 @@ func TestRecoveredRuntimeCensusGrammar(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			parent, path, identity, _, _, terminal := populatedRecoveredRuntime(t, runtimeTestName)
+			parent, path, identity, terminal := populatedRecoveredRuntime(t, runtimeTestName)
 			defer parent.Close()
 			configureRecoveredResidue(t, path, test.residue, terminal)
 			before := snapshotRuntimeGraph(t, path)
@@ -487,7 +373,7 @@ func TestRecoveredResultArtifactSizeBound(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			parent, path, identity, _, _, terminal := populatedRecoveredRuntime(t, runtimeTestName)
+			parent, path, identity, terminal := populatedRecoveredRuntime(t, runtimeTestName)
 			defer parent.Close()
 			configureRecoveredResidue(t, path, []string{runner.OuterActivationMarkerName}, terminal)
 			artifact := filepath.Join(path, runner.AttemptResultSpoolName)
@@ -514,49 +400,6 @@ func TestRecoveredResultArtifactSizeBound(t *testing.T) {
 				t.Fatalf("rejected artifact mutated graph\nbefore:\n%s\nafter:\n%s", before, after)
 			}
 		})
-	}
-}
-
-func TestRecoveredRuntimeTokenOnlyCutAndSnapshotReplacement(t *testing.T) {
-	parentPath := filepath.Join(runtimeTempDir(t), "private")
-	if err := os.Mkdir(parentPath, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	parent := createManagedParent(t, parentPath)
-	defer parent.Close()
-	runtime, err := CreateRuntime(parent, runtimeTestName)
-	if err != nil {
-		t.Fatal(err)
-	}
-	identity := mustRuntimeIdentity(t, runtime)
-	token := [32]byte{7}
-	if _, err := runtime.PublishAttemptToken(context.Background(), token); err != nil {
-		t.Fatal(err)
-	}
-	path := mustRuntimePath(t, runtime)
-	if err := runtime.Close(); err != nil {
-		t.Fatal(err)
-	}
-	recovered, err := OpenRecoveredRuntime(context.Background(), parent, runtimeTestName, identity)
-	if err != nil {
-		t.Fatal(err)
-	}
-	digest := attemptDigestForToken(t, token)
-	evidence, err := recovered.InspectEvidence(context.Background(), digest, nil, false)
-	if err != nil || !evidence.AttemptToken || evidence.WorkerConfig || evidence.Terminal != nil {
-		t.Fatalf("token-only evidence = %+v, %v", evidence, err)
-	}
-	if _, err := recovered.InspectEvidence(context.Background(), digest, nil, true); !errors.Is(err, errInvalidContract) {
-		t.Fatalf("bound runner accepted missing config = %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(path, runner.OuterActivationMarkerName), nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := recovered.InspectEvidence(context.Background(), digest, nil, false); !errors.Is(err, errInvalidContract) {
-		t.Fatalf("post-open census extension = %v", err)
-	}
-	if err := recovered.Close(); err != nil {
-		t.Fatal(err)
 	}
 }
 
@@ -591,19 +434,19 @@ func TestRecoveredRuntimeAcknowledgesOnlyExactDurableTerminalPostcondition(t *te
 		t.Fatal(err)
 	}
 	newFixture := func(t *testing.T) (*RuntimeParent, string, *RecoveredRuntime, *runner.TerminalRecord, kernel.Run, kernel.Resource, kernel.Resource, kernel.Resource) {
-		parent, path, identity, token, config, _ := populatedRecoveredRuntime(t, runID.String())
+		parent, path, identity, _ := populatedRecoveredRuntime(t, runID.String())
 		recovered, err := OpenRecoveredRuntime(context.Background(), parent, runID.String(), identity)
 		if err != nil {
 			t.Fatal(err)
 		}
-		evidence, err := recovered.InspectEvidence(context.Background(), attemptDigestForToken(t, token), &config, true)
-		if err != nil || evidence.Terminal == nil {
-			t.Fatalf("terminal evidence = %+v, %v", evidence, err)
+		record, err := runner.LoadTerminal(recovered.runtime.dir, runner.TerminalSpoolName)
+		if err != nil {
+			t.Fatal(err)
 		}
 		when, _ := kernel.NewUnixMillis(90)
 		exit, _ := kernel.NewProcessExitCode(1, 0, when)
 		run := kernel.Run{ID: runID, Phase: kernel.RunFinalizing, ProviderExit: &exit, CredentialRevokedAt: &when, FinalizingAt: &when}
-		processIdentity, err := processResourceIdentity(evidence.Terminal.Terminal.Process)
+		processIdentity, err := processResourceIdentity(record.Terminal.Process)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -616,7 +459,7 @@ func TestRecoveredRuntimeAcknowledgesOnlyExactDurableTerminalPostcondition(t *te
 		process := kernel.Resource{RunID: runID, Kind: kernel.ResourceProviderProcess, State: kernel.ResourceReleased, Identity: processIdentity, ActivatedAt: &activated, ReleasedAt: &released}
 		group := process
 		group.Kind = kernel.ResourceProviderGroup
-		return parent, path, recovered, evidence.Terminal, run, runtimeRoot, process, group
+		return parent, path, recovered, record, run, runtimeRoot, process, group
 	}
 
 	t.Run("same semantic exit ignores observation time", func(t *testing.T) {
@@ -735,7 +578,7 @@ func TestRecoveredRuntimeAcknowledgesOnlyExactDurableTerminalPostcondition(t *te
 	})
 }
 
-func populatedRecoveredRuntime(t *testing.T, basename string) (*RuntimeParent, string, runner.FileIdentity, [32]byte, changeworker.Config, runner.Terminal) {
+func populatedRecoveredRuntime(t *testing.T, basename string) (*RuntimeParent, string, runner.FileIdentity, runner.Terminal) {
 	t.Helper()
 	parentPath := filepath.Join(runtimeTempDir(t), "private")
 	if err := os.Mkdir(parentPath, 0o700); err != nil {
@@ -750,10 +593,6 @@ func populatedRecoveredRuntime(t *testing.T, basename string) (*RuntimeParent, s
 	path, identity := mustRuntimeValues(t, runtime)
 	token := [32]byte{1, 2, 3, 4}
 	if _, err := runtime.PublishAttemptToken(context.Background(), token); err != nil {
-		t.Fatal(err)
-	}
-	config := workerConfigForRuntime(t, runtime)
-	if _, err := runtime.PublishWorkerConfig(context.Background(), config); err != nil {
 		t.Fatal(err)
 	}
 	dir, lifetime, err := runtime.DuplicateRunnerFiles()
@@ -776,15 +615,5 @@ func populatedRecoveredRuntime(t *testing.T, basename string) (*RuntimeParent, s
 	if err := runtime.Close(); err != nil {
 		t.Fatal(err)
 	}
-	return parent, path, identity, token, config, terminal
-}
-
-func attemptDigestForToken(t *testing.T, token [32]byte) kernel.AttemptDigest {
-	t.Helper()
-	digest := sha256.Sum256(token[:])
-	result, err := kernel.AttemptDigestFromBytes(digest[:])
-	if err != nil {
-		t.Fatal(err)
-	}
-	return result
+	return parent, path, identity, terminal
 }

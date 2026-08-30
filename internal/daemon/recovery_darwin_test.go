@@ -176,11 +176,6 @@ func (fixture *recoveryFixture) stageRuntime(t *testing.T) kernel.ResourceIdenti
 	if err := runtimeValue.Close(); err != nil {
 		t.Fatal(err)
 	}
-	// Production publishes the worker config before any runner start; the
-	// recovered census treats an outer marker without it as an illegal cut.
-	if err := os.WriteFile(filepath.Join(fixture.parentPath, fixture.run.ID.String(), workerConfigName), []byte(`{"recovery":"fixture"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	return identity
 }
 

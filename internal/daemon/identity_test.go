@@ -94,33 +94,24 @@ func TestIdentityConversionsRejectOverflowsAndWrongKinds(t *testing.T) {
 }
 
 func TestCheckpointConversionsBindExactStoreFacts(t *testing.T) {
-	selection := selectionReportFixture(t)
-	durable, err := kernelSelectionCheckpoint(selection)
+	result, repository := workerResultFixture(t)
+	durable, err := kernelSelectionCheckpoint(result, repository)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if durable.ObjectFormat().String() != selection.Format.Name() ||
-		string(durable.Commit().Bytes()) != string(selection.Base.Bytes()) || string(durable.Commitment().Bytes()) != string(selection.Commitment.Bytes()) ||
-		durable.EntryCount() != uint32(selection.EntryCount) || durable.TotalBytes() != selection.BlobBytes ||
-		durable.RepositoryIdentity().Device() != int64(selection.Repository.Device()) || durable.RepositoryIdentity().Inode() != int64(selection.Repository.Inode()) {
+	if durable.ObjectFormat().String() != result.Format.Name() ||
+		string(durable.Commit().Bytes()) != string(result.Base.Bytes()) || string(durable.Commitment().Bytes()) != string(result.Commitment.Bytes()) ||
+		durable.EntryCount() != uint32(result.EntryCount) || durable.TotalBytes() != result.BlobBytes ||
+		durable.RepositoryIdentity().Device() != int64(repository.Device()) || durable.RepositoryIdentity().Inode() != int64(repository.Inode()) {
 		t.Fatalf("selection facts were rebound: %+v", durable)
 	}
 	format, base, stage, err := inspectPublishedArguments(durable, mustKernelFileIdentity(t, 13, 14))
-	if err != nil || format.Name() != selection.Format.Name() || base.Hex() != selection.Base.Hex() || stage.Device() != 13 || stage.Inode() != 14 {
+	if err != nil || format.Name() != result.Format.Name() || base.Hex() != result.Base.Hex() || stage.Device() != 13 || stage.Inode() != 14 {
 		t.Fatalf("InspectPublished arguments = %s %s %+v, %v", format.Name(), base.Hex(), stage, err)
-	}
-
-	population := changeworker.PopulationReport{Identity: mustStageIdentity(t, 21, 22), Commitment: selection.Commitment, EntryCount: 7, BlobBytes: 99}
-	available, err := kernelAvailabilityCheckpoint(population)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if available.EntryCount() != 7 || available.TotalBytes() != 99 || string(available.Commitment().Bytes()) != string(selection.Commitment.Bytes()) || available.TreeIdentity().Device() != 21 || available.TreeIdentity().Inode() != 22 {
-		t.Fatalf("population facts were rebound: %+v", available)
 	}
 }
 
-func selectionReportFixture(t testing.TB) changeworker.SelectionReport {
+func workerResultFixture(t testing.TB) (changeworker.Result, change.RepositoryIdentity) {
 	t.Helper()
 	format, err := change.NewObjectFormat("sha1")
 	if err != nil {
@@ -138,7 +129,7 @@ func selectionReportFixture(t testing.TB) changeworker.SelectionReport {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return changeworker.SelectionReport{Format: format, Base: base, Commitment: commitment, EntryCount: 7, BlobBytes: 99, Repository: repository}
+	return changeworker.Result{Format: format, Base: base, Commitment: commitment, EntryCount: 7, BlobBytes: 99, Tree: mustStageIdentity(t, 21, 22)}, repository
 }
 
 func mustKernelFileIdentity(t testing.TB, device, inode int64) kernel.FileIdentity {

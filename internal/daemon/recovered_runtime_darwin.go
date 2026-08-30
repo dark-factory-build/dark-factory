@@ -3,15 +3,11 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 
-	"github.com/dark-factory-build/dark-factory/internal/changeworker"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 	"golang.org/x/sys/unix"
@@ -26,15 +22,6 @@ type RecoveredRuntime struct {
 	runtime *Runtime
 	files   map[string]unix.Stat_t
 }
-
-type RecoveredRuntimeEvidence struct {
-	AttemptToken bool
-	WorkerConfig bool
-	Terminal     *runner.TerminalRecord
-}
-
-func (RecoveredRuntimeEvidence) String() string   { return "recovered runtime evidence (private)" }
-func (RecoveredRuntimeEvidence) GoString() string { return "daemon.RecoveredRuntimeEvidence{private}" }
 
 // OpenRecoveredRuntime opens existing evidence without creating, repairing,
 // deleting, or following any runtime entry. The exact Store root identity and
@@ -131,67 +118,6 @@ func openRecoveredRuntime(ctx context.Context, parent *RuntimeParent, basename s
 	keepLifetime = true
 	child = nil
 	return recovered, nil
-}
-
-// InspectEvidence validates retained token/config bytes against durable
-// expectations without returning token bytes or interpreting configured paths.
-// expectedConfig must be supplied whenever a config file is present.
-func (recovered *RecoveredRuntime) InspectEvidence(ctx context.Context, credential kernel.AttemptDigest, expectedConfig *changeworker.Config, requireConfig bool) (RecoveredRuntimeEvidence, error) {
-	if recovered == nil || recovered.runtime == nil || ctx == nil {
-		return RecoveredRuntimeEvidence{}, invalidContract(nil)
-	}
-	recovered.runtime.mu.Lock()
-	defer recovered.runtime.mu.Unlock()
-	if err := ctx.Err(); err != nil {
-		return RecoveredRuntimeEvidence{}, invalidContract(err)
-	}
-	if err := recovered.verifyAuthority(); err != nil {
-		return RecoveredRuntimeEvidence{}, err
-	}
-	result := RecoveredRuntimeEvidence{}
-	if _, present := recovered.files[attemptTokenName]; present {
-		body, err := recovered.readFile(ctx, attemptTokenName, 32)
-		if err != nil {
-			return RecoveredRuntimeEvidence{}, err
-		}
-		digest := sha256.Sum256(body)
-		if !bytes.Equal(digest[:], credential.Bytes()) {
-			return RecoveredRuntimeEvidence{}, invalidContract(nil)
-		}
-		result.AttemptToken = true
-	}
-	if _, present := recovered.files[workerConfigName]; present {
-		if !result.AttemptToken || expectedConfig == nil {
-			return RecoveredRuntimeEvidence{}, invalidContract(nil)
-		}
-		body, err := recovered.readFile(ctx, workerConfigName, workerConfigLimit)
-		if err != nil {
-			return RecoveredRuntimeEvidence{}, err
-		}
-		decoded, err := changeworker.DecodeConfig(body)
-		if err != nil || decoded.RuntimePath != recovered.runtime.locator || decoded.RuntimeIdentity != recovered.runtime.identity {
-			return RecoveredRuntimeEvidence{}, invalidContract(err)
-		}
-		expected, err := changeworker.EncodeConfig(*expectedConfig)
-		if err != nil || !bytes.Equal(body, expected) {
-			return RecoveredRuntimeEvidence{}, invalidContract(err)
-		}
-		result.WorkerConfig = true
-	}
-	if requireConfig && (!result.AttemptToken || !result.WorkerConfig) {
-		return RecoveredRuntimeEvidence{}, invalidContract(nil)
-	}
-	if expected, present := recovered.files[runner.TerminalSpoolName]; present {
-		record, err := runner.LoadTerminal(recovered.runtime.dir, runner.TerminalSpoolName)
-		if err != nil || record.Identity != fileIdentity(expected) {
-			return RecoveredRuntimeEvidence{}, invalidContract(err)
-		}
-		result.Terminal = record
-	}
-	if err := recovered.verifyAuthority(); err != nil {
-		return RecoveredRuntimeEvidence{}, err
-	}
-	return result, nil
 }
 
 // AcknowledgeTerminal removes exactly the inspected spool only after the
@@ -343,7 +269,6 @@ func inspectRecoveredRuntimeCensus(rootFD int, device uint64) (map[string]unix.S
 		return nil, invalidContract(nil)
 	}
 	token := hasRecoveredFile(files, attemptTokenName)
-	config := hasRecoveredFile(files, workerConfigName)
 	outer := hasRecoveredFile(files, runner.OuterActivationMarkerName)
 	inner := hasRecoveredFile(files, runner.InnerActivationMarkerName)
 	result := hasRecoveredFile(files, runner.AttemptResultSpoolName)
@@ -358,11 +283,7 @@ func inspectRecoveredRuntimeCensus(rootFD int, device uint64) (map[string]unix.S
 	gateScratch := gateConfig || gateStdin
 	terminalResidue := terminalScratch || terminal
 	residue := outer || inner || gateScratch || terminalResidue
-	// The provider consumes change-worker.config after the inner gate and before
-	// exec. A crash after that irreversible cut can therefore leave exact
-	// activation or terminal evidence without the config pathname. Token remains
-	// mandatory, while a gate scratch still proves the cut was pre-consumption.
-	if config && !token || residue && !token || gateScratch && !config || !config && residue && !inner {
+	if residue && !token {
 		return nil, invalidContract(nil)
 	}
 	if inner && !outer || terminalResidue && !outer {
@@ -409,8 +330,6 @@ func validRecoveredRuntimeFile(name string, stat unix.Stat_t, device uint64) boo
 	switch name {
 	case attemptTokenName:
 		return stat.Size == 32
-	case workerConfigName:
-		return stat.Size > 0 && stat.Size <= workerConfigLimit
 	case runner.OuterActivationMarkerName, runner.InnerActivationMarkerName,
 		runner.GateConfigScratchName, runner.GateStdinScratchName:
 		return stat.Size == 0
@@ -446,37 +365,6 @@ func sameRecoveredFileStat(left, right unix.Stat_t) bool {
 
 func fileIdentity(stat unix.Stat_t) runner.FileIdentity {
 	return runner.FileIdentity{Device: uint64(stat.Dev), Inode: stat.Ino}
-}
-
-func (recovered *RecoveredRuntime) readFile(ctx context.Context, name string, limit int) (_ []byte, resultErr error) {
-	want, present := recovered.files[name]
-	if !present || limit < 1 || want.Size < 1 || want.Size > int64(limit) {
-		return nil, invalidContract(nil)
-	}
-	fd, err := unix.Openat(int(recovered.runtime.dir.Fd()), name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-	if err != nil {
-		return nil, invalidContract(err)
-	}
-	file := os.NewFile(uintptr(fd), "recovered-runtime-evidence")
-	defer func() { resultErr = errors.Join(resultErr, file.Close()) }()
-	var before, after, named unix.Stat_t
-	if err := unix.Fstat(fd, &before); err != nil || !sameRecoveredFileStat(before, want) {
-		return nil, invalidContract(err)
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, invalidContract(err)
-	}
-	body, err := io.ReadAll(io.LimitReader(file, int64(limit)+1))
-	if err != nil || len(body) != int(want.Size) || len(body) > limit {
-		return nil, invalidContract(err)
-	}
-	if err := unix.Fstat(fd, &after); err != nil || !sameRecoveredFileStat(before, after) {
-		return nil, invalidContract(err)
-	}
-	if err := unix.Fstatat(int(recovered.runtime.dir.Fd()), name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameRecoveredFileStat(after, named) {
-		return nil, invalidContract(err)
-	}
-	return body, nil
 }
 
 func (recovered *RecoveredRuntime) Close() error {

@@ -236,7 +236,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		}
 		return daemon.failRunBeforeRuntime(run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
 	}
-	var retained *changeworker.RetainedChange
+	var retained *changeworker.Result
 	if changeState.Phase == kernel.ChangeAvailable && changeState.Revision == *run.AdmittedChangeRevision {
 		var retainedRepository change.RepositoryIdentity
 		retained, retainedRepository, err = retainedWorkerCheckpoint(changeState)
@@ -286,7 +286,8 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		Revision: spec.BaseRevision, ChangeParent: spec.ChangeParent, FinalName: finalName, StagingName: stagingName,
 		AttemptSocket: spec.AttemptSocket, Retained: retained, ProviderTask: providerTask,
 	}
-	if _, err := runtimeValue.PublishWorkerConfig(ctx, config); err != nil {
+	workerConfig, err := changeworker.EncodeConfig(config)
+	if err != nil {
 		return daemon.failRun(run, kernel.FailureSource, err)
 	}
 
@@ -342,7 +343,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	}
 	outer, err := runner.PrepareExecSpec(runner.ExecSpec{
 		Target: spec.RunnerExecutable, Args: []string{"--attempt-runner"},
-		Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: home, Control: childControl,
+		Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: home, Stdin: workerConfig, Control: childControl,
 	})
 	if err != nil {
 		_ = childControl.Close()
@@ -421,13 +422,8 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	if err != nil {
 		return daemon.failRun(run, kernel.FailureSource, err)
 	}
-	selectionReport, err := changeworker.DecodeSelectionReport(selectionEvent.Payload)
-	if err != nil {
-		return daemon.failRun(run, kernel.FailureSource, err)
-	}
-	selection, err := kernelSelectionCheckpoint(selectionReport)
-	if err != nil {
-		return daemon.failRun(run, kernel.FailureSource, err)
+	if len(selectionEvent.Payload) != 0 {
+		return daemon.failRun(run, kernel.FailureSource, errInvalidContract)
 	}
 	changeState, found, err = daemon.store.Change(ctx, changeID)
 	if err != nil || !found {
@@ -440,11 +436,15 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	if err != nil {
 		return daemon.failRun(run, kernel.FailureSource, err)
 	}
-	preparation, err := changeworker.DecodePreparationReport(preparationEvent.Payload)
+	workerResult, err := changeworker.DecodeResult(preparationEvent.Payload)
 	if err != nil {
 		return daemon.failRun(run, kernel.FailureSource, err)
 	}
-	stage, err := kernelStageIdentity(preparation.Stage)
+	selection, err := kernelSelectionCheckpoint(workerResult, repositoryIdentity)
+	if err != nil {
+		return daemon.failRun(run, kernel.FailureSource, err)
+	}
+	stage, err := kernelStageIdentity(workerResult.Tree)
 	if err != nil {
 		return daemon.failRun(run, kernel.FailureSource, err)
 	}
@@ -463,12 +463,11 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	if err != nil {
 		return daemon.failRun(run, kernel.FailureSource, err)
 	}
-	population, err := changeworker.DecodePopulationReport(populationEvent.Payload)
-	if err != nil {
-		return daemon.failRun(run, kernel.FailureSource, err)
+	if len(populationEvent.Payload) != 0 {
+		return daemon.failRun(run, kernel.FailureSource, errInvalidContract)
 	}
-	facts, err := change.InspectPublished(ctx, spec.ChangeParent, finalName, preparation.Stage, selectionReport.Format, selectionReport.Base)
-	if err != nil || !populationMatchesFacts(population, facts) {
+	facts, err := change.InspectPublished(ctx, spec.ChangeParent, finalName, workerResult.Tree, workerResult.Format, workerResult.Base)
+	if err != nil || !resultMatchesFacts(workerResult, facts) {
 		return daemon.failRun(run, kernel.FailureSource, errors.Join(err, errInvalidContract))
 	}
 	availability, err := kernelAvailability(facts)
@@ -665,7 +664,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	if err != nil {
 		return run, err
 	}
-	settledFacts, settleErr := change.InspectPublished(context.Background(), spec.ChangeParent, finalName, preparation.Stage, selectionReport.Format, selectionReport.Base)
+	settledFacts, settleErr := change.InspectPublished(context.Background(), spec.ChangeParent, finalName, workerResult.Tree, workerResult.Format, workerResult.Base)
 	if settleErr != nil {
 		return current, errors.Join(settleErr, ctx.Err())
 	}
@@ -761,9 +760,9 @@ func releaseCheckpoint(controller *runner.AttemptController, stage runner.Attemp
 	return event, nil
 }
 
-func populationMatchesFacts(report changeworker.PopulationReport, facts change.TreeFacts) bool {
-	return report.Identity.Equal(facts.Identity()) && report.Commitment.Equal(facts.Commitment()) &&
-		report.EntryCount == facts.EntryCount() && report.BlobBytes == facts.BlobBytes()
+func resultMatchesFacts(result changeworker.Result, facts change.TreeFacts) bool {
+	return result.Tree.Equal(facts.Identity()) && result.Commitment.Equal(facts.Commitment()) &&
+		result.EntryCount == facts.EntryCount() && result.BlobBytes == facts.BlobBytes()
 }
 
 func (daemon *Daemon) activateResource(ctx context.Context, runID kernel.RunID, resourceID kernel.ResourceID, identity kernel.ResourceIdentity) (kernel.Resource, error) {
