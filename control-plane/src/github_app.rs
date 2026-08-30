@@ -4216,9 +4216,11 @@ struct InstallationToken {
 /// with Administration access, which `docs/development/GITHUB_APP.md` says
 /// this broker deliberately never requests. A required field GitHub omits
 /// makes the whole 200 fail to deserialize, which reached the caller as an
-/// opaque "authority is unavailable" and disabled all nine operations that
-/// observe the repository -- `maintainer_status` and the entire publication
-/// and merge path included.
+/// opaque "authority is unavailable" and disabled all eleven operations that
+/// observe the repository -- `maintainer_status` and the entire publication,
+/// merge, and CI-diagnosis path included. Three of the eleven reach this
+/// function indirectly through `verify_workflow_pr`, which is why the first
+/// count of the blast radius was too low.
 ///
 /// Host-testable, unlike the `wasm32`-only transport around it, so the shape
 /// contract can be proven against a real GitHub body instead of asserted.
@@ -5645,16 +5647,20 @@ mod tests {
     /// The exact defect this repair fixes, proven at the boundary it happened
     /// on rather than asserted about the source.
     ///
-    /// `GET /repos/{owner}/{repo}` answers **200** with the body below for a
-    /// caller without Administration access -- which is every token this App
-    /// can mint, because the App never requests that permission (see the
-    /// installation permissions in the test below, and
-    /// `docs/development/GITHUB_APP.md`). While `RepositoryMetadata` required
+    /// `GET /repos/{owner}/{repo}` answers **200** with the body below to a
+    /// caller without Administration access. The body was captured
+    /// unauthenticated, so it is evidence about the *field*, not about this
+    /// App's token: what ties it to the App is that no `installation_token`
+    /// call site in this file requests `administration`, so no token it mints
+    /// can receive the field either. Stating that as an inference rather than
+    /// as an observation is the same discipline this repair exists to enforce.
+    /// While `RepositoryMetadata` required
     /// `delete_branch_on_merge`, this exact 200 failed to deserialize, and all
-    /// nine operations that observe the repository -- `maintainer_status`,
-    /// publication, PR creation, enqueue, merge observation, workflow
-    /// observation, release publication/recovery, and the control-plane deploy
-    /// dispatch -- returned an opaque "authority is unavailable".
+    /// eleven operations that observe the repository -- `maintainer_status`,
+    /// publication, PR creation, enqueue, merge observation, workflow and job
+    /// observation, failed-job rerun, release publication/recovery, and the
+    /// control-plane deploy dispatch -- returned an opaque "authority is
+    /// unavailable".
     #[test]
     fn repository_metadata_parses_a_real_body_without_administration_access() {
         const BODY: &str = include_str!("../tests/fixtures/repository-without-administration.json");

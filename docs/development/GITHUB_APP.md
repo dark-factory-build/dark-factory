@@ -129,12 +129,12 @@ App's permission set. That is a contract about live responses, not a style
 preference: a required field GitHub omits makes an otherwise successful 200
 fail to deserialize, and the caller sees an opaque "authority is unavailable"
 naming no endpoint. `delete_branch_on_merge` was exactly this and disabled all
-nine repository-observing operations until it was removed. A source-level
-assertion that such a read exists proves nothing about whether it works, so the
-shape contract is proven by deserializing a captured real body instead. On
-30 Aug 2026 every required field of all 30 response types was checked against
-live bodies from `dark-factory-build/dark-factory`; `RepositoryMetadata` was
-the only violation.
+eleven repository-observing operations until it was removed -- three of them
+through `verify_workflow_pr` rather than directly. A source-level assertion
+that such a read exists proves nothing about whether it works, so the shape
+contract is proven by deserializing a captured real body instead. The tree
+carries that proof for `RepositoryMetadata` only; the other response types have
+no such fixture, so treat them as unproven rather than as checked.
 
 The live maintainer broker exposes only these repository-scoped operations:
 

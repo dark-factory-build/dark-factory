@@ -2,8 +2,12 @@
 set -eu
 
 # The reviewed control-plane runtime this activation may ship. The gate below
-# is a CONTENT diff over the control-plane paths, not a hash equality, so this
-# stays valid across any merge strategy while control-plane is unchanged.
+# is a CONTENT diff over the control-plane paths rather than a hash equality,
+# so it keeps passing after this commit is merged under any strategy that
+# leaves control-plane unchanged -- but only while the commit OBJECT is still
+# reachable. A squash-merge plus branch deletion drops it, and `git diff` then
+# fails with `fatal: bad object`, so the object is checked separately below to
+# keep that diagnosis honest.
 #
 # Moved off the original v1-to-v2 activation commit because that runtime
 # required `delete_branch_on_merge`, a field GitHub returns only to a caller
@@ -31,6 +35,12 @@ script_dir=$(CDPATH='' cd -- "$(dirname "$0")" && pwd -P)
 repository_root=$(CDPATH='' cd -- "$script_dir/.." && pwd -P)
 cd "$repository_root"
 git=/usr/bin/git
+
+"$git" cat-file -e "${target_commit}^{commit}" 2>/dev/null || {
+    echo "bootstrap: reviewed runtime commit $target_commit is unreachable in this clone" >&2
+    echo "bootstrap: restore it (git fetch origin refs/pull/393/head) or repoint target_commit" >&2
+    exit 1
+}
 
 "$git" diff --quiet "$target_commit" HEAD -- \
     control-plane/src control-plane/migrations \
