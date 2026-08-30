@@ -19,7 +19,7 @@ set -eu
 # with it, `dispatch_control_plane_deploy`: the App could not deploy its own
 # repair, so this owner-run path is the only way back. Once this version is
 # live the fixed Maintainer workflow resumes owning deployments.
-target_commit=55461b8d8f9eb47222b8fa0a9e41827ffb9478f5
+target_commit=7ae8b332c6ab31f1a6f36885dfe45484200ed31e
 worker=dark-factory-control-plane
 hostname=maintainer.darkfactory.build
 revision=maintainer-operations-v2
