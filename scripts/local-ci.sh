@@ -37,12 +37,8 @@ fi
 ./scripts/test-inline-chokepoint.sh
 ./scripts/test-go-e2e-tools.sh
 ./scripts/test-cloudflare-env.sh
-# The deleted Linux job was the only caller of both fixtures below. One
-# asserts the `required` aggregate's shape against the publisher; the other is
-# the primary guard for the Rust deletion itself — that the retired scripts
-# stay deleted, that no CI job or aggregate dependency comes back, and that
-# this gate keeps every fixture. A job deletion is exactly what silently
-# orphans them, so the gate runs both.
+# Keep repository-policy and source-shape assertions in the authoritative
+# gate. They prevent an edited job graph from silently orphaning either proof.
 ./scripts/test-repository-settings.sh
 ./scripts/test-local-ci-mode.sh
 
