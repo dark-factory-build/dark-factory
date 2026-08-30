@@ -200,6 +200,13 @@ Read-only context unless a task explicitly asks you to edit them:
    narrow exception grants no GitHub, Maintainer-App, Cloudflare-Access,
    deployment, or live install authority; each named remote mutation still
    requires its own task authorization.
+
+   The sole one-time exception is an explicitly owner-authorized v1-to-v2
+   Maintainer activation through the independently reviewed exact command
+   `./scripts/bootstrap-maintainer-v2.sh`. It stages the fixed reviewed v2
+   Worker with no traffic, promotes only that version, and restores the
+   recorded live version if readiness fails. It is not a general deployment
+   or Wrangler surface. Routine v2 deployments use the Maintainer MCP workflow.
    Local control-plane Wrangler proofs never authenticate. They must run only
    through `control-plane/scripts/with-clean-wrangler-env.sh`, which supplies an
    isolated home/temp directory, fixed system PATH, an absolute Node/script
