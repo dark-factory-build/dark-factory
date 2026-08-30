@@ -558,7 +558,7 @@ func TestBootGitTrustMatchesTheExactPerAttemptAuthority(t *testing.T) {
 		if err == nil {
 			t.Fatalf("untrusted git %q was accepted at boot", untrusted)
 		}
-		if untrusted == "/usr/bin/git" && !strings.Contains(err.Error(), "trusted Developer toolchain") {
+		if untrusted == "/usr/bin/git" && !strings.Contains(err.Error(), "trusted Command Line Tools git") {
 			t.Fatalf("refusal does not name the trust requirement: %v", err)
 		}
 	}

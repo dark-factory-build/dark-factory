@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime/debug"
-	"strings"
 	"syscall"
 	"testing"
 
@@ -64,17 +63,10 @@ func externalSecureTempDir(t testing.TB) string {
 
 func externalGitExecutable(t testing.TB) string {
 	t.Helper()
-	command := exec.Command("/usr/bin/xcrun", "--find", "git")
-	command.Env = []string{"HOME=/dev/null", "TMPDIR=" + os.Getenv("TMPDIR"), "LC_ALL=C", "LANG=C"}
-	output, err := command.Output()
-	if err != nil {
-		t.Fatalf("resolve native Git fixture: %v", err)
+	if _, err := os.Stat(change.TrustedGitExecutable); err != nil {
+		t.Fatalf("Command Line Tools Git is unavailable: %v", err)
 	}
-	git := strings.TrimSpace(string(output))
-	if !filepath.IsAbs(git) || filepath.Clean(git) != git || filepath.Base(git) != "git" {
-		t.Fatal("xcrun returned invalid Git fixture path")
-	}
-	return git
+	return change.TrustedGitExecutable
 }
 
 func runExternalGit(t testing.TB, home, git, directory string, arguments ...string) {

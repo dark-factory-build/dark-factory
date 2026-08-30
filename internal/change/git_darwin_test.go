@@ -859,7 +859,10 @@ func TestGitExecutableIsContentFrozenAcrossEveryPhase(t *testing.T) {
 func TestGitExecutableMustBeActualNativeGitForHost(t *testing.T) {
 	actual := fixtureGitExecutable(t)
 	if _, err := checkpointTrustedGitExecutable(actual); err != nil {
-		t.Fatalf("xcrun-resolved native Git rejected: %v", err)
+		t.Fatalf("Command Line Tools Git rejected: %v", err)
+	}
+	if TrustedDeveloperGitPath("/Applications/Xcode.app/Contents/Developer/usr/bin/git") {
+		t.Fatal("Git below group-writable /Applications was trusted")
 	}
 	if _, err := checkpointTrustedGitExecutable("/usr/bin/git"); err == nil {
 		t.Fatal("Apple xcode-select Git shim accepted as the committed executable")
@@ -1089,20 +1092,10 @@ func newLocalGitFixture(t testing.TB, formatName string) localGitFixture {
 
 func fixtureGitExecutable(t testing.TB) string {
 	t.Helper()
-	command := exec.Command("/usr/bin/xcrun", "--find", "git")
-	command.Env = []string{
-		"HOME=/dev/null", "TMPDIR=" + os.Getenv("TMPDIR"), "LC_ALL=C", "LANG=C",
-		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0",
+	if _, err := os.Stat(TrustedGitExecutable); err != nil {
+		t.Fatalf("Command Line Tools Git is unavailable: %v", err)
 	}
-	output, err := command.Output()
-	if err != nil {
-		t.Fatalf("resolve native Git fixture: %v", err)
-	}
-	git := strings.TrimSpace(string(output))
-	if !filepath.IsAbs(git) || filepath.Clean(git) != git || filepath.Base(git) != "git" {
-		t.Fatalf("xcrun returned invalid Git fixture path")
-	}
-	return git
+	return TrustedGitExecutable
 }
 
 func mustRepositoryIdentity(t testing.TB, path string) RepositoryIdentity {

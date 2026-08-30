@@ -30,7 +30,7 @@ import (
 const (
 	defaultBrowserAddress = "127.0.0.1:43123"
 	defaultBrowserOrigin  = "https://app.darkfactory.build"
-	defaultGitExecutable  = "/Library/Developer/CommandLineTools/usr/bin/git"
+	defaultGitExecutable  = change.TrustedGitExecutable
 	defaultToolPath       = "/usr/bin:/bin"
 	defaultBaseRevision   = "HEAD"
 	runnerSiblingName     = "factory-runner"
@@ -574,7 +574,7 @@ func deriveSupervisorSpec(configuration config, parent *daemon.RuntimeParent) (d
 		return daemon.SupervisorSpec{}, err
 	}
 	if !change.TrustedDeveloperGitPath(gitExecutable) {
-		return daemon.SupervisorSpec{}, fmt.Errorf("factoryd: git executable %q is outside the trusted Developer toolchain; attempts accept only the CommandLineTools or Xcode git", gitExecutable)
+		return daemon.SupervisorSpec{}, fmt.Errorf("factoryd: git executable %q is not the trusted Command Line Tools git", gitExecutable)
 	}
 	runnerExecutable, err := commitBootExecutable(runnerPath)
 	if err != nil {

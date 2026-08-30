@@ -817,13 +817,10 @@ func (f *workerFixture) output() string {
 
 func nativeGit(t testing.TB) string {
 	t.Helper()
-	command := exec.Command("/usr/bin/xcrun", "--find", "git")
-	command.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + workerSecureTempDir(t), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null"}
-	body, err := command.Output()
-	if err != nil {
-		t.Fatal(err)
+	if _, err := os.Stat(change.TrustedGitExecutable); err != nil {
+		t.Fatalf("Command Line Tools Git is unavailable: %v", err)
 	}
-	return strings.TrimSpace(string(body))
+	return change.TrustedGitExecutable
 }
 func runGit(t testing.TB, git string, args ...string) {
 	t.Helper()

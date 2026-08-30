@@ -22,6 +22,7 @@ import (
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/browser"
+	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/daemon"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
@@ -185,7 +186,7 @@ func newFixture(t *testing.T, seed byte, test scenario, factoryctl, runnerExecut
 			t.Fatal(err)
 		}
 	}
-	git := nativeGit(t, gitHome)
+	git := nativeGit(t)
 	gitRun(t, git, gitHome, "init", repository)
 	gitRun(t, git, gitHome, "-C", repository, "config", "user.email", "e2e@example.invalid")
 	gitRun(t, git, gitHome, "-C", repository, "config", "user.name", "e2e")
@@ -818,15 +819,12 @@ func requiredFile(t testing.TB, name string) string {
 	return path
 }
 
-func nativeGit(t testing.TB, home string) string {
+func nativeGit(t testing.TB) string {
 	t.Helper()
-	command := exec.Command("/usr/bin/xcrun", "--find", "git")
-	command.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + home, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null"}
-	body, err := command.Output()
-	if err != nil {
-		t.Fatal(err)
+	if _, err := os.Stat(change.TrustedGitExecutable); err != nil {
+		t.Fatalf("Command Line Tools Git is unavailable: %v", err)
 	}
-	return strings.TrimSpace(string(body))
+	return change.TrustedGitExecutable
 }
 
 func gitRun(t testing.TB, git, home string, args ...string) {
