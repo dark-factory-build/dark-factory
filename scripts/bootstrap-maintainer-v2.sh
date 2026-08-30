@@ -159,6 +159,18 @@ printf '%s' "$view" | "$node" -e '
     if (journal?.type !== "durable_object_namespace" || journal.class_name !== "MaintainerDeliveryJournal") process.exit(1);
   });' || { echo "bootstrap: staged bindings are incomplete" >&2; exit 1; }
 
+before_promotion=$(run_wrangler deployments status --name "$worker" --json)
+before_version=$(printf '%s' "$before_promotion" | "$node" -e '
+    let input=""; process.stdin.on("data", c => input += c).on("end", () => {
+      const d=JSON.parse(input).versions;
+      if (!Array.isArray(d) || d.length !== 1 || d[0].percentage !== 100 || !d[0].version_id) process.exit(1);
+      process.stdout.write(d[0].version_id);
+    });')
+test "$before_version" = "$previous" || {
+    echo "bootstrap: live version changed while v2 was staged; refusing promotion" >&2
+    exit 1
+}
+
 # A failed response can be ambiguous after Cloudflare accepted the promotion;
 # cleanup re-reads the live version before deciding whether rollback is safe.
 promoted=1
