@@ -147,9 +147,9 @@ The Maintainer App design and operation set are documented in
 ## Cloudflare credentials
 
 Cloudflare authority is separate from GitHub authority. Never source or print
-the ignored common-root `.env.txt`. For a separately authorized DNS operation,
-use an independently reviewed clean commit and exactly one finite helper
-command:
+the ignored common-root `.env.txt`. Exactly three fixed commands may read it.
+For a separately authorized DNS operation, use an independently reviewed clean
+commit and exactly one finite helper command:
 
 ```sh
 ./scripts/with-cloudflare-env.sh dns status
@@ -166,6 +166,19 @@ the typed Maintainer operation. It runs the standalone `control-plane` gate,
 uploads one Worker version, promotes it, verifies `/healthz` and `/readyz`, and
 restores the previous version if readiness fails. The public site is a separate
 repository and deployment.
+
+The owner-run break-glass path for that deployment is
+`./scripts/bootstrap-maintainer-v2.sh <tree>`, the third authorized `.env.txt`
+use. Its one mandatory argument is the reviewed `control-plane` tree SHA-1
+from `git rev-parse <reviewed-head>:control-plane`, which names the exact
+runtime the activation may ship; from the operator machine it performs the
+same gated staging, promotion, and readiness verification as the workflow.
+The path exists because `dispatch_control_plane_deploy` is itself one of the
+repository-observing operations, so any defect in that path disables the App's
+ability to deploy its own repair, and the workflow job requires
+`github.actor == 'dark-factory-maintainer[bot]'`, so a human `gh workflow run`
+cannot substitute. It is not one-time: it shipped exactly that repair on
+30 August 2026.
 
 ## Release and installation
 

@@ -37,6 +37,7 @@ fi
 ./scripts/test-inline-chokepoint.sh
 ./scripts/test-go-e2e-tools.sh
 ./scripts/test-cloudflare-env.sh
+./scripts/test-bootstrap-maintainer-v2.sh
 # Keep repository-policy and source-shape assertions in the authoritative
 # gate. They prevent an edited job graph from silently orphaning either proof.
 ./scripts/test-repository-settings.sh

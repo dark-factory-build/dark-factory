@@ -1,77 +1,71 @@
 #!/bin/sh
 set -eu
 
-# The reviewed control-plane runtime this activation may ship. The gate below
-# is a CONTENT diff over the control-plane paths rather than a hash equality,
-# so it keeps passing after this commit is merged under any strategy that
-# leaves control-plane unchanged -- but only while the commit OBJECT is still
-# reachable. A squash-merge plus branch deletion drops it, and `git diff` then
-# fails with `fatal: bad object`, so the object is checked separately below to
-# keep that diagnosis honest.
-#
-# Repoint this whenever a commit touches any gated path above -- a doc comment
-# inside control-plane/src counts, because the gate compares file content.
-#
-# Moved off the original v1-to-v2 activation commit because that runtime
-# required `delete_branch_on_merge`, a field GitHub returns only to a caller
-# with Administration access -- which this App never requests. Every repository
-# observation failed to deserialize, which disabled `maintainer_status` and,
-# with it, `dispatch_control_plane_deploy`: the App could not deploy its own
-# repair, so this owner-run path is the only way back. Once this version is
-# live the fixed Maintainer workflow resumes owning deployments.
-target_commit=7ae8b332c6ab31f1a6f36885dfe45484200ed31e
 worker=dark-factory-control-plane
 hostname=maintainer.darkfactory.build
-revision=maintainer-operations-v2
-failed_v2=5391280b-5840-4c9f-9ec2-55d37c4a0022
-stable_v1=47c98fa9-62ef-432d-8445-e2a7f4c83e85
 
-mode=bootstrap
-if test "$#" = 1 && test "$1" = recover-v1; then
-    mode=recover-v1
-elif test "$#" != 0; then
-    echo "usage: scripts/bootstrap-maintainer-v2.sh [recover-v1]" >&2
+# The reviewed control-plane tree is stated by the operator, not pinned here.
+# A constant asserting "this is the reviewed runtime" is a declaration nothing
+# observes: it rotted three times in one pull request, and each time the first
+# thing to notice was a refused activation at the moment it was needed.
+# `deploy-control-plane.yml` takes `expected_tree` as a dispatch input and
+# proves the checkout matches it. This is the same shape of contract for the
+# same decision, but deliberately not the same value: the workflow proves
+# `HEAD^{tree}`, the whole repository, while this proves the `control-plane`
+# subtree that is all it ships. Crossing the two fails closed either way; do
+# not "unify" them.
+#
+# A subtree reference needs no reachability check -- it resolves through HEAD,
+# so no merge strategy, branch deletion, or shallow clone can put it out of
+# reach, which is what forced the old pinned commit to carry one. It is not
+# self-evidently a tree, though: `HEAD:control-plane` resolves to a blob if
+# that path is a symlink and to an absent gitlink if it is a submodule, and in
+# both cases the bytes that would ship sit outside the object being proven.
+#
+# This path exists because `dispatch_control_plane_deploy` observes the
+# repository, so a defect there disables the App's ability to deploy its own
+# repair, and the workflow requires the App as `github.actor` so no human
+# dispatch can substitute. It is not one-time: it shipped that exact repair on
+# 30 Aug 2026. Routine deployments remain the App's.
+test "$#" = 1 || {
+    echo "usage: scripts/bootstrap-maintainer-v2.sh <reviewed-control-plane-tree>" >&2
+    echo "the reviewed tree is git rev-parse <reviewed-head>:control-plane" >&2
     exit 1
-fi
+}
+reviewed_tree=$1
+case "$reviewed_tree" in
+    ????????????????????????????????????????) ;;
+    *) echo "bootstrap: reviewed tree must be a full 40-character SHA-1" >&2; exit 1 ;;
+esac
+case "$reviewed_tree" in
+    *[!0-9a-f]*) echo "bootstrap: reviewed tree must be lowercase hex" >&2; exit 1 ;;
+esac
 
 script_dir=$(CDPATH='' cd -- "$(dirname "$0")" && pwd -P)
 repository_root=$(CDPATH='' cd -- "$script_dir/.." && pwd -P)
 cd "$repository_root"
 git=/usr/bin/git
 
-"$git" cat-file -e "${target_commit}^{commit}" 2>/dev/null || {
-    echo "bootstrap: reviewed runtime commit $target_commit is unreachable in this clone" >&2
-    echo "bootstrap: fetch the branch or PR ref that carries it, or repoint target_commit" >&2
+# The script is source too: a half-applied local edit to the break-glass path
+# is exactly the honest mistake this catches, and it is the one that happens
+# under pressure. It cannot stop a hostile edit -- that edit would delete this
+# line -- but that is not the case it is here for.
+test -z "$("$git" status --porcelain=v1 --untracked-files=all \
+    -- scripts/bootstrap-maintainer-v2.sh control-plane)" || {
+    echo "bootstrap: the activation script or control-plane is dirty, so HEAD is not what would ship" >&2
     exit 1
 }
-
-"$git" diff --quiet "$target_commit" HEAD -- \
-    control-plane/src control-plane/migrations \
-    control-plane/Cargo.toml control-plane/Cargo.lock \
-    control-plane/package.json control-plane/package-lock.json || {
-    # Nothing outside this script observes target_commit, and CI checks out
-    # shallow so a git-based test cannot, so staleness surfaces here and only
-    # here. Name the remedy: the usual cause is a commit that touched a gated
-    # path -- a doc comment in control-plane/src counts -- without repointing
-    # the pin, not a genuinely unreviewed runtime.
-    echo "bootstrap: control-plane differs from reviewed runtime $target_commit" >&2
-    echo "bootstrap: repoint target_commit at the reviewed head, or check out that head" >&2
-    "$git" diff --stat "$target_commit" HEAD -- \
-        control-plane/src control-plane/migrations \
-        control-plane/Cargo.toml control-plane/Cargo.lock \
-        control-plane/package.json control-plane/package-lock.json >&2
+actual_tree=$("$git" rev-parse HEAD:control-plane)
+test "$("$git" cat-file -t "$actual_tree" 2>/dev/null)" = tree || {
+    echo "bootstrap: HEAD:control-plane is $actual_tree, which is not a tree object" >&2
     exit 1
 }
-test -z "$("$git" status --porcelain=v1 --untracked-files=all -- scripts/bootstrap-maintainer-v2.sh control-plane)" || {
-    echo "bootstrap: reviewed bootstrap or control-plane source is dirty" >&2
+test "$actual_tree" = "$reviewed_tree" || {
+    echo "bootstrap: control-plane at HEAD is $actual_tree, not the reviewed $reviewed_tree" >&2
+    echo "bootstrap: check out the reviewed head, or pass the tree that head carries" >&2
     exit 1
 }
-
-# A production activation still needs the source gate. Log diagnosis and
-# emergency recovery must remain quick and read/move no source artifact.
-if test "$mode" = bootstrap; then
-    ./control-plane/scripts/local-ci.sh
-fi
+./control-plane/scripts/local-ci.sh
 
 node=$(node -p 'process.execPath')
 case "$node" in /*) ;; *) echo "bootstrap: Node path is not absolute" >&2; exit 1 ;; esac
@@ -96,6 +90,21 @@ test "$(stat -f '%Lp' "$env_file")" = 600 || {
 
 temporary=$(mktemp -d /tmp/dark-factory-maintainer-v2.XXXXXX)
 mkdir -m 700 "$temporary/home" "$temporary/tmp"
+# Derived from the tree just proven, never restated here. While one pinned
+# commit was the only admissible source this could not drift; now that any
+# reviewed tree is admissible, a restated constant would silently disagree with
+# `PERMISSION_REVISION` the moment a tree bumped it, and the activation would
+# promote a Worker its own authority check rejects.
+revision=$("$git" show "HEAD:control-plane/src/github_app.rs" | /usr/bin/sed -n \
+    's/^pub(crate) const PERMISSION_REVISION: &str = "\([a-z0-9-]*\)";$/\1/p')
+case "$revision" in
+    ''|*[!a-z0-9-]*)
+        echo "bootstrap: could not read exactly one PERMISSION_REVISION from the proven tree" >&2
+        exit 1
+        ;;
+esac
+echo "bootstrap: permission revision $revision"
+
 secret_file="$temporary/revision.env"
 printf '%s=%s\n' DARK_FACTORY_MAINTAINER_PERMISSION_REVISION "$revision" >"$secret_file"
 chmod 600 "$secret_file"
@@ -205,31 +214,9 @@ previous=$(printf '%s' "$deployment" | "$node" -e '
     });') || { echo "bootstrap: live deployment is not one version at 100%" >&2; exit 1; }
 echo "bootstrap: rollback target $previous"
 
-if test "$mode" = recover-v1; then
-    test "$previous" = "$failed_v2" || {
-        echo "bootstrap: refusing recovery because the failed v2 version is not live" >&2
-        exit 1
-    }
-    run_wrangler rollback "$stable_v1" --name "$worker" --yes \
-        --message 'restore stable Maintainer v1 after failed v2 readiness'
-    ready=0
-    for attempt in 1 2 3 4 5 6; do
-        body=$(curl -sS --max-time 30 "https://$hostname/readyz" || true)
-        if printf '%s' "$body" | grep -Fq '"status":"ready"' \
-            && printf '%s' "$body" | grep -Fq '"maintainer_operations":"mcp_six_tools_operator_and_headless"'; then
-            ready=1
-            break
-        fi
-        test "$attempt" = 6 || sleep 5
-    done
-    test "$ready" = 1 || { echo "bootstrap: stable v1 recovery readiness failed" >&2; exit 1; }
-    printf '{"outcome":"recovered","version":"%s"}\n' "$stable_v1"
-    exit 0
-fi
-
 upload=$(run_wrangler versions upload --name "$worker" --strict \
     --secrets-file "$secret_file" \
-    --message "reviewed v2 migration repair $target_commit")
+    --message "reviewed control-plane tree $reviewed_tree")
 version=$(printf '%s\n' "$upload" | sed -n 's/^Worker Version ID: *//p' | tail -1)
 test -n "$version" || { echo "bootstrap: upload returned no version ID" >&2; exit 1; }
 echo "bootstrap: staged $version"
@@ -282,7 +269,7 @@ test "$tail_ready" = 1 || {
 # cleanup re-reads the live version before deciding whether rollback is safe.
 promoted=1
 run_wrangler versions deploy --name "$worker" --version-id "$version" --yes \
-    --message "activate reviewed maintainer v2 $target_commit"
+    --message "activate reviewed control-plane tree $reviewed_tree"
 
 ready=0
 for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do

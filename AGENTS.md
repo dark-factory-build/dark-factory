@@ -47,9 +47,9 @@ framework. The shell-provider loop is proven; real Claude/Codex work is not.
    a token, force-push, delete refs, or change repository/organization access.
 10. Never read/source `.env.txt` directly. Its only agent use is an explicitly
     authorized, independently reviewed fixed command:
-    `./scripts/with-cloudflare-env.sh dns status`, `dns publish-app`, or the
-    one-time `./scripts/bootstrap-maintainer-v2.sh`. No other Wrangler,
-    Cloudflare-token, deployment, or credential use is implied.
+    `./scripts/with-cloudflare-env.sh dns status`, `dns publish-app`, or
+    `./scripts/bootstrap-maintainer-v2.sh <reviewed-control-plane-tree>`. No
+    other Wrangler, Cloudflare-token, deployment, or credential use is implied.
 11. Preserve unrelated dirty work and report exactly what passed, failed, was
     skipped, or remains unverified.
 
