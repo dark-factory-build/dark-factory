@@ -377,9 +377,8 @@ func cwdDescriptorProofFromStat(stat *unix.Stat_t) cwdDescriptorProof {
 }
 
 func (p cwdDescriptorProof) matches(stat *unix.Stat_t) bool {
-	// Darwin may assign no stable device/inode identity to an unnamed socket.
-	// Such a descriptor cannot be distinguished from post-exec runtime state,
-	// so it can never prove that the same descriptor crossed exec.
+	// Darwin may assign no stable device/inode identity to unnamed IPC.
+	// Such a descriptor can never prove that the same descriptor crossed exec.
 	return p.Device != 0 && p.Inode != 0 && p == cwdDescriptorProofFromStat(stat)
 }
 
@@ -545,7 +544,8 @@ func readCwdDescriptorManifest(root string) (map[int]cwdDescriptorProof, error) 
 		if err != nil {
 			return nil, ErrIdentity
 		}
-		if (device == 0 || inode == 0) && uint16(mode)&unix.S_IFMT != unix.S_IFSOCK {
+		fileType := uint16(mode) & unix.S_IFMT
+		if (device == 0 || inode == 0) && fileType != unix.S_IFIFO && fileType != unix.S_IFSOCK {
 			return nil, fmt.Errorf("runner: cwd descriptor manifest fd %d has zero identity for mode %#o: %w", fd, mode, ErrIdentity)
 		}
 		if _, exists := manifest[fd]; exists {
@@ -571,6 +571,7 @@ func TestCwdDescriptorManifestRejectsIncompleteEvidence(t *testing.T) {
 		{name: "duplicate", body: valid + valid},
 		{name: "missing lifetime", body: strings.Replace(valid, "10 ", "11 ", 1)},
 		{name: "zero device", body: strings.Replace(valid, "10 1 ", "10 0 ", 1)},
+		{name: "zero regular descriptor", body: valid + "12 0 0 32768\n"},
 		{name: "wrong field count", body: "10 1 2\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -596,19 +597,19 @@ func TestCwdDescriptorManifestRejectsIncompleteEvidence(t *testing.T) {
 	}
 }
 
-func TestCwdDescriptorManifestTreatsZeroIdentitySocketAsNonEvidence(t *testing.T) {
+func TestCwdDescriptorManifestTreatsZeroIdentityAsNonEvidence(t *testing.T) {
 	const lifetime = "10 1 2 32768\n"
 	root := t.TempDir()
-	socketMode := uint16(unix.S_IFSOCK | 0o600)
-	if err := os.WriteFile(filepath.Join(root, cwdDescriptorManifestName), []byte(lifetime+fmt.Sprintf("12 0 0 %d\n", socketMode)), 0o600); err != nil {
+	pipeMode := uint16(unix.S_IFIFO | 0o600)
+	if err := os.WriteFile(filepath.Join(root, cwdDescriptorManifestName), []byte(lifetime+fmt.Sprintf("12 0 0 %d\n", pipeMode)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	manifest, err := readCwdDescriptorManifest(root)
 	if err != nil {
-		t.Fatalf("zero-identity socket manifest: %v", err)
+		t.Fatalf("zero-identity descriptor manifest: %v", err)
 	}
-	if manifest[12].matches(&unix.Stat_t{Mode: socketMode}) {
-		t.Fatal("zero-identity socket became inherited-descriptor evidence")
+	if manifest[12].matches(&unix.Stat_t{Mode: pipeMode}) {
+		t.Fatal("zero-identity descriptor became inherited-descriptor evidence")
 	}
 }
 

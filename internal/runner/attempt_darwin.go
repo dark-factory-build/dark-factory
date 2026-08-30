@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -651,10 +652,44 @@ func execPreparedCurrent(spec *LaunchSpec, cwd, task *os.File, worker *WorkerCon
 	if _, err := unix.FcntlInt(worker.lifetime.Fd(), unix.F_SETFD, 0); err != nil {
 		return fmt.Errorf("runner: retain current runtime lifetime: %w", err)
 	}
+	if err := sealProviderDescriptors(); err != nil {
+		return fmt.Errorf("runner: seal provider descriptors: %w", err)
+	}
 	if err := unix.Exec(spec.commit.Executable.Path, spec.commit.Argv, spec.commit.Env); err != nil {
 		return fmt.Errorf("runner: current exec: %w", err)
 	}
 	return nil
+}
+
+func sealProviderDescriptors() error {
+	directory, err := os.Open("/dev/fd")
+	if err != nil {
+		return err
+	}
+	scanFD := int(directory.Fd())
+	entries, err := directory.Readdirnames(-1)
+	if err != nil {
+		return errors.Join(err, directory.Close())
+	}
+	for _, entry := range entries {
+		fd, err := strconv.Atoi(entry)
+		if err != nil || fd <= 2 || fd == 10 || fd == providerTaskFD || fd == scanFD {
+			continue
+		}
+		flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0)
+		if errors.Is(err, unix.EBADF) {
+			continue
+		}
+		if err != nil {
+			return errors.Join(err, directory.Close())
+		}
+		if _, err := unix.FcntlInt(uintptr(fd), unix.F_SETFD, flags|unix.FD_CLOEXEC); errors.Is(err, unix.EBADF) {
+			continue
+		} else if err != nil {
+			return errors.Join(err, directory.Close())
+		}
+	}
+	return directory.Close()
 }
 
 func validateProviderTask(task *os.File) error {
