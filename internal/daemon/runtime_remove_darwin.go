@@ -193,7 +193,7 @@ func removeRecordedRuntimeWithHook(ctx context.Context, parent *RuntimeParent, b
 
 func isRemovableRuntimeFile(name string) bool {
 	switch name {
-	case attemptTokenName, workerConfigName,
+	case attemptTokenName,
 		runner.OuterActivationMarkerName, runner.InnerActivationMarkerName,
 		runner.GateConfigScratchName, runner.GateStdinScratchName,
 		runner.TerminalScratchName,

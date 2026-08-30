@@ -18,7 +18,6 @@ import (
 )
 
 const (
-	ConfigName           = "change-worker.config"
 	AttemptTokenName     = "attempt.token"
 	HomeName             = "home"
 	TempName             = "tmp"
