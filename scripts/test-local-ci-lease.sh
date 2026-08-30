@@ -317,25 +317,48 @@ exercise_disappearing_lock() {
 exercise_disappearing_lock existing
 exercise_disappearing_lock absent
 
-# An absent path caused by a persistent mkdir failure gets one retry, not an
-# unbounded loop.
-mkdir_failure_attempts="$temporary/mkdir-failure-attempts"
-(
-    cd "$second"
-    LOCAL_CI_LEASE_HELPER=$PWD/scripts/local-ci-lease.sh
-    . "$LOCAL_CI_LEASE_HELPER"
-    mkdir() {
-        printf 'attempt\n' >>"$mkdir_failure_attempts"
-        return 1
-    }
-    local_ci_lease_setup_paths
-    local_ci_lease_reported_wait=0
-    if local_ci_lease_acquire_lock_object 2>"$temporary/mkdir-failure.stderr"; then
-        exit 1
-    fi
-) || fail "persistent mkdir failure was not bounded"
-[ "$(wc -l <"$mkdir_failure_attempts" | tr -d ' ')" -eq 2 ] || fail "persistent mkdir failure retry count changed"
-grep -Fq 'after a completed handoff retry' "$temporary/mkdir-failure.stderr" || fail "persistent mkdir failure was unexplained"
+# A persistent absent-path failure and alternating absent/present churn each
+# get one disappearance retry for the entire acquisition, not one per cycle.
+exercise_bounded_mkdir_failure() {
+    mkdir_failure_mode=$1
+    mkdir_failure_expected=$2
+    mkdir_failure_attempts="$temporary/mkdir-failure-$mkdir_failure_mode-attempts"
+    mkdir_failure_stderr="$temporary/mkdir-failure-$mkdir_failure_mode.stderr"
+    (
+        cd "$second"
+        LOCAL_CI_LEASE_HELPER=$PWD/scripts/local-ci-lease.sh
+        . "$LOCAL_CI_LEASE_HELPER"
+        mkdir() {
+            if [ "${1-}" != "$lock_path" ]; then
+                /bin/mkdir "$@"
+                return
+            fi
+            printf 'attempt\n' >>"$mkdir_failure_attempts"
+            mkdir_failure_attempt=$(wc -l <"$mkdir_failure_attempts" | tr -d ' ')
+            if [ "$mkdir_failure_mode" = alternating ]; then
+                /bin/mkdir "$1"
+                : >"$1/descriptor"
+                if [ "$mkdir_failure_attempt" -ne 2 ]; then
+                    /bin/rm -f "$1/descriptor"
+                    /bin/rmdir "$1"
+                fi
+            fi
+            return 1
+        }
+        local_ci_lease_setup_paths
+        local_ci_lease_reported_wait=0
+        if local_ci_lease_acquire_lock_object 2>"$mkdir_failure_stderr"; then
+            exit 1
+        fi
+    ) || fail "$mkdir_failure_mode mkdir failure was not bounded"
+    [ "$(wc -l <"$mkdir_failure_attempts" | tr -d ' ')" -eq "$mkdir_failure_expected" ] \
+        || fail "$mkdir_failure_mode mkdir failure retry count changed"
+    grep -Fq 'after a completed handoff retry' "$mkdir_failure_stderr" \
+        || fail "$mkdir_failure_mode mkdir failure was unexplained"
+    assert_absent "$lock_path"
+}
+exercise_bounded_mkdir_failure persistent 2
+exercise_bounded_mkdir_failure alternating 3
 
 # The wrapper owns its detached session leader before the command is released.
 # Interrupt that exact PID-published/pre-trap seam and prove the direct child,

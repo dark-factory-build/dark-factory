@@ -365,7 +365,6 @@ local_ci_lease_acquire_lock_object() {
             echo "local-ci: cannot create lock object at $LOCAL_CI_LEASE_LOCK after a completed handoff retry" >&2
             return 1
         fi
-        local_ci_lease_disappeared_retries=0
         if ! local_ci_lease_lock_object_is_safe; then
             echo "local-ci: refusing unsafe lock object path $LOCAL_CI_LEASE_LOCK; remove the symlink or replacement manually" >&2
             return 1
