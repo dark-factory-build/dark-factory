@@ -837,6 +837,9 @@ func TestCwdProviderDiagnosticCreatesExactPrivateFile(t *testing.T) {
 }
 
 func runLifetimeProviderHelper(root string) error {
+	if !signal.Ignored(unix.SIGHUP) {
+		return errors.New("provider did not inherit ignored SIGHUP")
+	}
 	var lifetime unix.Stat_t
 	if err := unix.Fstat(10, &lifetime); err != nil || lifetime.Mode&unix.S_IFMT != unix.S_IFREG || lifetime.Mode&0o7777 != 0o600 || lifetime.Size != 0 || lifetime.Nlink != 1 {
 		return fmt.Errorf("provider lifetime descriptor: %v", err)
