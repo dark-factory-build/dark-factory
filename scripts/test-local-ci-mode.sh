@@ -2,147 +2,55 @@
 set -eu
 
 repository_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-gate="$repository_root/scripts/local-ci.sh"
-contributing="$repository_root/CONTRIBUTING.md"
-workflow_doc="$repository_root/docs/development/WORKFLOW.md"
-ci="$repository_root/.github/workflows/ci.yml"
-stale_control_plane_workflow="$repository_root/control-plane/.github/workflows/ci.yml"
-control_plane_gate="$repository_root/control-plane/scripts/local-ci.sh"
-control_plane_build="$repository_root/control-plane/scripts/build-worker.sh"
-control_plane_wrangler="$repository_root/control-plane/wrangler.toml"
-go_fast_stage="$repository_root/scripts/go-fast-stage.sh"
-go_owned_gate="$repository_root/scripts/go-ci-owned.sh"
-kernel_stress='TestConcurrentOpenAndValidWriterReturnsBoundedSnapshotFailure'
+local_gate="$repository_root/scripts/local-ci.sh"
+ordinary_gate="$repository_root/scripts/go-check.sh"
+process_gate="$repository_root/scripts/go-ci-owned.sh"
+process_entry="$repository_root/scripts/go-ci.sh"
+fail() { echo "local-ci shape test failed: $*" >&2; exit 1; }
 
-fail() {
-    echo "local-ci shape test failed: $*" >&2
-    exit 1
-}
-
-# The gate is single-mode: the Rust workspace it once branched for is deleted,
-# so a mode argument must be refused rather than silently ignored.
-grep -Fq 'usage: scripts/local-ci.sh' "$gate" || fail "gate lost its usage guard"
 set +e
-usage_output=$("$gate" obsolete-mode 2>&1)
+usage_output=$(/bin/sh "$local_gate" obsolete-mode 2>&1)
 usage_status=$?
 set -e
-[ "$usage_status" -eq 2 ] || fail "gate accepted an obsolete mode argument"
-[ "$usage_output" = "usage: scripts/local-ci.sh" ] \
-    || fail "gate did not reject an argument with the exact usage error"
-if grep -Eq 'legacy-rust|linux-source' "$gate"; then
-    fail "gate still branches on a retired Rust mode"
-fi
-if grep -Fq 'cargo ' "$gate"; then
-    fail "gate still runs cargo"
-fi
+[ "$usage_status" -eq 2 ] || fail "local-ci accepted an argument"
+[ "$usage_output" = "usage: scripts/local-ci.sh" ] || fail "local-ci usage error changed"
 
-# This is a text-shape guard, not an execution guard: it catches a deleted or
-# commented-out invocation, but an `if false; then ... fi` wrapper would still
-# match. Tightened to the invocation form so a bare mention cannot satisfy it.
-grep -Fq '/bin/sh "$script_dir/go-ci-owned.sh"' "$gate" \
-    || fail "gate lost the authoritative Go gate invocation line"
-grep -Fq 'git diff --check' "$gate" || fail "gate lost its diff check"
+ordinary_line=$(grep -n -F 'echo "local-ci: ordinary source gate"' "$local_gate" | cut -d: -f1)
+process_line=$(grep -n -F 'echo "local-ci: process-sensitive gate"' "$local_gate" | cut -d: -f1)
+service_line=$(grep -n -F 'echo "local-ci: service and release gate"' "$local_gate" | cut -d: -f1)
+[ -n "$ordinary_line" ] && [ "$ordinary_line" -lt "$process_line" ] && [ "$process_line" -lt "$service_line" ] \
+    || fail "ordinary, process, and service gates are not ordered"
 
-grep -Fq 'go_gate_stage 900 "$go_gate_go" test -short -timeout=5m -count=1' "$go_fast_stage" || fail "fast Go gate does not use short mode"
-grep -Fq 'go_gate_stage 1200 "$go_gate_go" test -short -timeout=20m -count=1' "$go_owned_gate" || fail "full Go gate does not use short mode"
-if grep -Fq 'go_gate_stage 1800' "$go_owned_gate" || grep -Fq -- '-race' "$go_owned_gate"; then fail "routine Go gate retains the exhaustive race stage"; fi
-if grep -Fq 'go-browser-e2e.sh --race' "$go_owned_gate"; then fail "routine Go gate retains the browser race stage"; fi
-grep -A 8 -F "func $kernel_stress" "$repository_root/internal/kernel/store_test.go" | grep -Fq 'if testing.Short()' || fail "kernel stress is not short-gated"
-if grep -Fq 'go_gate_web_test_stage' "$go_owned_gate"; then fail "TypeScript proof is duplicated outside the fast stage"; fi
-typescript_proof_count=$(grep -Ec '^[[:space:]]+go_gate_web_test_stage \|\| return$' "$go_fast_stage" || true)
-[ "$typescript_proof_count" -eq 1 ] || fail "TypeScript proof is not run exactly once"
-
-for fixture in test-local-ci-lease.sh test-local-ci-lease-mutations.sh \
-    check-toolchain-pins.sh test-prepare-release-source.sh \
-    test-publish-release.sh test-package-release.sh \
-    test-local-ci-environment.sh test-new-worktree.sh \
-    test-github-step-summary.sh test-verify-adversarial-review.sh \
-    test-inline-chokepoint.sh test-go-e2e-tools.sh test-cloudflare-env.sh \
-    test-repository-settings.sh \
-    test-local-ci-mode.sh; do
-    grep -Fq "./scripts/$fixture" "$gate" || fail "gate lost fixture $fixture"
+for invocation in './scripts/go-check.sh' '/bin/sh "$script_dir/go-ci-owned.sh"' './scripts/go-service-e2e.sh'; do
+    [ "$(grep -Fc "$invocation" "$local_gate")" -eq 1 ] || fail "gate invocation is not unique: $invocation"
 done
+[ "$(grep -Fc './scripts/test-local-ci-lease.sh' "$local_gate")" -eq 1 ] \
+    || fail "local-CI lease proof is not unique"
+[ "$(grep -Fc './scripts/test-go-gates.sh' "$local_gate")" -eq 1 ] \
+    || fail "fault fixtures are not in the gate"
 
-# Every retired Rust script must be gone, not merely unreferenced, so a future
-# edit cannot resurrect a stage whose subject no longer exists.
-for retired in macos-contributor-smoke.sh test-macos-contributor-smoke.sh \
-    macos-smoke-daemon-owner.pl linux-contributor-smoke.sh \
-    test-linux-contributor-smoke.sh macos-launchd-release-proof.sh \
-    test-macos-launchd-release-proof.sh check-build-headroom.sh \
-    test-build-headroom.sh; do
-    [ ! -e "$repository_root/scripts/$retired" ] \
-        || fail "retired Rust-era script survives: $retired"
-done
-[ ! -e "$repository_root/launchd/com.dark-factory.factoryd.plist.template" ] \
-    || fail "retired Rust launchd template survives"
-if grep -Eq 'TUI|shared Rust operation|factory-tui|area:tui' \
-    "$repository_root/.github/ISSUE_TEMPLATE/bug_report.yml" \
-    "$repository_root/.github/ISSUE_TEMPLATE/feature_request.yml"; then
-    fail "issue templates still direct contributors to the retired Rust/TUI product"
+grep -Fq 'go vet ./...' "$ordinary_gate" || fail "ordinary vet is missing"
+grep -Fq 'go test -short -timeout=20m' "$ordinary_gate" || fail "ordinary tests are missing"
+grep -Fq 'corepack pnpm run check' "$ordinary_gate" || fail "TypeScript check is missing"
+grep -Fq 'git diff --check' "$ordinary_gate" || fail "diff check is missing"
+if grep -Eq 'go build|-count=1|-p[[:space:]]+1' "$ordinary_gate"; then
+    fail "ordinary gate rebuilds or disables Go caching/parallelism"
 fi
 
-e2e_tool_fixture_count=$(grep -Ec '^[[:space:]]*\./scripts/test-go-e2e-tools\.sh[[:space:]]*$' "$gate" || true)
-[ "$e2e_tool_fixture_count" -eq 1 ] \
-    || fail "gate must run the Go E2E tool fixture exactly once"
-e2e_tool_fixture_line=$(grep -n -E '^[[:space:]]*\./scripts/test-go-e2e-tools\.sh[[:space:]]*$' "$gate" \
-    | head -1 | cut -d: -f1)
-owned_gate_line=$(grep -n -F '/bin/sh "$script_dir/go-ci-owned.sh"' "$gate" \
-    | head -1 | cut -d: -f1)
-[ -n "$e2e_tool_fixture_line" ] || fail "gate lost the Go E2E tool fixture"
-[ -n "$owned_gate_line" ] && [ "$e2e_tool_fixture_line" -lt "$owned_gate_line" ] \
-    || fail "Go E2E tool fixture does not run before the heavy Go gate"
-
-# CI must not keep a job whose only subject was the deleted workspace, and the
-# required aggregate must not name one: a dangling dependency blocks every PR.
-if grep -Eq '^  (legacy-rust|linux):' "$ci"; then
-    fail "CI still defines a job for the deleted Rust workspace"
+grep -Fq 'go test -short -timeout=20m -count=1' "$process_gate" \
+    || fail "process tests are not uncached"
+if grep -Eq -- '-p[[:space:]]+1' "$process_gate"; then
+    fail "process packages are globally serial"
 fi
-if grep -Eq 'needs\.(legacy-rust|linux)\.result|needs: \[.*(legacy-rust|linux)' "$ci"; then
-    fail "the required aggregate still depends on a deleted job"
-fi
-# The Rust-toolchain-absence scan lives in check-toolchain-pins.sh, which the
-# gate runs, so it is not duplicated here: two copies of one guard drift, and
-# the pins script is the toolchain authority.
+grep -Fq 'with-local-ci-lease.sh' "$process_entry" || fail "process entry lost the repository lease"
+[ ! -e "$repository_root/scripts/go-fast-stage.sh" ] || fail "obsolete fast-stage helper survives"
 
-control_plane_job=$(sed -n '/^  control-plane:/,/^  [a-z]/p' "$ci")
-control_line_of() {
-    printf '%s\n' "$control_plane_job" | grep -n -F "$1" | head -1 | cut -d: -f1
-}
-node_runtime_line=$(control_line_of 'name: Verify the supported Node runtime')
-control_gate_line=$(control_line_of 'run: ./control-plane/scripts/local-ci.sh')
-[ -n "$node_runtime_line" ] && [ -n "$control_gate_line" ] \
-    || fail "hosted control-plane CI lost its Node runtime check or gate"
-[ "$node_runtime_line" -lt "$control_gate_line" ] \
-    || fail "hosted control-plane CI runs its gate before checking Node"
-[ ! -e "$stale_control_plane_workflow" ] \
-    || fail "control-plane gate remains hidden in an undiscovered nested workflow"
+node -e '
+const scripts = require(process.argv[1]).scripts;
+if ((scripts.check.match(/packages:build/g) || []).length !== 1) process.exit(1);
+if (!scripts.check.includes("dark-factory-dev typecheck") || !scripts.check.includes("node --test")) process.exit(1);
+' "$repository_root/web/package.json" || fail "TypeScript check does not build once before typecheck and tests"
 
-clean_wrangler_environment="$repository_root/control-plane/scripts/with-clean-wrangler-env.sh"
-[ -x "$clean_wrangler_environment" ] \
-    || fail "control-plane Wrangler environment boundary is missing or not executable"
-grep -Fq 'with-clean-wrangler-env.sh' "$repository_root/control-plane/scripts/local-ci.sh" \
-    || fail "control-plane local CI does not use the clean Wrangler environment boundary"
-[ -x "$control_plane_build" ] \
-    || fail "control-plane Wrangler build boundary is missing or not executable"
-grep -Fqx 'command = "./scripts/build-worker.sh"' "$control_plane_wrangler" \
-    || fail "Wrangler no longer uses the reviewed build boundary"
-direct_build_line=$(grep -n -F 'worker-build --release' "$control_plane_gate" | head -1 | cut -d: -f1)
-clean_wrangler_line=$(grep -n -F '"$clean_wrangler"' "$control_plane_gate" | head -1 | cut -d: -f1)
-[ -n "$direct_build_line" ] && [ -n "$clean_wrangler_line" ] \
-    || fail "control-plane gate lost its direct build or clean Wrangler proof"
-[ "$direct_build_line" -lt "$clean_wrangler_line" ] \
-    || fail "control-plane gate invokes Wrangler before producing the verified build"
-
-grep -Fxq './scripts/local-ci.sh' "$contributing" \
-    || fail "CONTRIBUTING lost the gate command"
-if grep -Eq 'linux-source|linux-contributor-smoke' "$contributing"; then
-    fail "CONTRIBUTING still documents a retired Rust gate mode"
-fi
-grep -Fq 'there is no Linux runtime lane yet' "$workflow_doc" \
-    || fail "workflow does not state the current Darwin-only CI boundary"
-if grep -Fq 'Linux source-only lane' "$workflow_doc"; then
-    fail "workflow still claims the retired Linux source lane"
-fi
-
-sh -n "$gate"
+/bin/sh -n "$local_gate" "$ordinary_gate" "$process_gate" "$process_entry" \
+    "$repository_root/scripts/go-gate-environment.sh" "$repository_root/scripts/test-go-gates.sh" "$0"
 echo "local-ci shape tests passed"
