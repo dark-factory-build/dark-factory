@@ -1,7 +1,25 @@
 #!/bin/sh
 set -eu
 
-target_commit=99f395e517d67122a2e435322caf0ab4b800a7c9
+# The reviewed control-plane runtime this activation may ship. The gate below
+# is a CONTENT diff over the control-plane paths rather than a hash equality,
+# so it keeps passing after this commit is merged under any strategy that
+# leaves control-plane unchanged -- but only while the commit OBJECT is still
+# reachable. A squash-merge plus branch deletion drops it, and `git diff` then
+# fails with `fatal: bad object`, so the object is checked separately below to
+# keep that diagnosis honest.
+#
+# Repoint this whenever a commit touches any gated path above -- a doc comment
+# inside control-plane/src counts, because the gate compares file content.
+#
+# Moved off the original v1-to-v2 activation commit because that runtime
+# required `delete_branch_on_merge`, a field GitHub returns only to a caller
+# with Administration access -- which this App never requests. Every repository
+# observation failed to deserialize, which disabled `maintainer_status` and,
+# with it, `dispatch_control_plane_deploy`: the App could not deploy its own
+# repair, so this owner-run path is the only way back. Once this version is
+# live the fixed Maintainer workflow resumes owning deployments.
+target_commit=55461b8d8f9eb47222b8fa0a9e41827ffb9478f5
 worker=dark-factory-control-plane
 hostname=maintainer.darkfactory.build
 revision=maintainer-operations-v2
@@ -21,11 +39,27 @@ repository_root=$(CDPATH='' cd -- "$script_dir/.." && pwd -P)
 cd "$repository_root"
 git=/usr/bin/git
 
+"$git" cat-file -e "${target_commit}^{commit}" 2>/dev/null || {
+    echo "bootstrap: reviewed runtime commit $target_commit is unreachable in this clone" >&2
+    echo "bootstrap: fetch the branch or PR ref that carries it, or repoint target_commit" >&2
+    exit 1
+}
+
 "$git" diff --quiet "$target_commit" HEAD -- \
     control-plane/src control-plane/migrations \
     control-plane/Cargo.toml control-plane/Cargo.lock \
     control-plane/package.json control-plane/package-lock.json || {
-    echo "bootstrap: control-plane runtime is not the reviewed v2 main runtime" >&2
+    # Nothing outside this script observes target_commit, and CI checks out
+    # shallow so a git-based test cannot, so staleness surfaces here and only
+    # here. Name the remedy: the usual cause is a commit that touched a gated
+    # path -- a doc comment in control-plane/src counts -- without repointing
+    # the pin, not a genuinely unreviewed runtime.
+    echo "bootstrap: control-plane differs from reviewed runtime $target_commit" >&2
+    echo "bootstrap: repoint target_commit at the reviewed head, or check out that head" >&2
+    "$git" diff --stat "$target_commit" HEAD -- \
+        control-plane/src control-plane/migrations \
+        control-plane/Cargo.toml control-plane/Cargo.lock \
+        control-plane/package.json control-plane/package-lock.json >&2
     exit 1
 }
 test -z "$("$git" status --porcelain=v1 --untracked-files=all -- scripts/bootstrap-maintainer-v2.sh control-plane)" || {

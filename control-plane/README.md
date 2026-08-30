@@ -47,8 +47,8 @@ configuration is live.
   `ALLOW`, `COMMENT`, or `REQUEST_CHANGES` verdict, diagnose and rerun exact CI,
   observe eventual merge state, enqueue through the merge queue, publish and
   observe immutable releases, and dispatch only the two fixed reviewed recovery
-  and deployment workflows. GitHub's required `delete_branch_on_merge` setting
-  performs atomic source-branch cleanup. All three verdicts are the repository's own words,
+  and deployment workflows. GitHub's `delete_branch_on_merge` repository setting
+  performs atomic source-branch cleanup; the broker never deletes a ref itself. All three verdicts are the repository's own words,
   not GitHub review states -- the App opens the pull requests it
   reviews, and GitHub refuses a self-review that takes a side, `APPROVE` and
   `REQUEST_CHANGES` alike -- so every one of them is posted as `COMMENT`
