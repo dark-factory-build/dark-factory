@@ -546,7 +546,7 @@ func readCwdDescriptorManifest(root string) (map[int]cwdDescriptorProof, error) 
 			return nil, ErrIdentity
 		}
 		if (device == 0 || inode == 0) && uint16(mode)&unix.S_IFMT != unix.S_IFSOCK {
-			return nil, ErrIdentity
+			return nil, fmt.Errorf("runner: cwd descriptor manifest fd %d has zero identity for mode %#o: %w", fd, mode, ErrIdentity)
 		}
 		if _, exists := manifest[fd]; exists {
 			return nil, ErrIdentity
@@ -555,7 +555,7 @@ func readCwdDescriptorManifest(root string) (map[int]cwdDescriptorProof, error) 
 	}
 	lifetime, ok := manifest[10]
 	if !ok || lifetime.Device == 0 || lifetime.Inode == 0 || lifetime.Mode&unix.S_IFMT != unix.S_IFREG {
-		return nil, ErrIdentity
+		return nil, fmt.Errorf("runner: cwd descriptor manifest lifetime=%+v: %w", lifetime, ErrIdentity)
 	}
 	return manifest, nil
 }
@@ -660,7 +660,7 @@ func runCwdProviderChecks(root string) error {
 	}
 	manifest, err := readCwdDescriptorManifest(root)
 	if err != nil {
-		return err
+		return fmt.Errorf("cwd provider manifest: %w", err)
 	}
 	directory, err := os.Open("/dev/fd")
 	if err != nil {
@@ -687,7 +687,7 @@ func runCwdProviderChecks(root string) error {
 		// Go may open one for its own runtime after this provider starts.
 		if flags&unix.FD_CLOEXEC != 0 {
 			if fd == 10 {
-				return ErrIdentity
+				return fmt.Errorf("cwd provider lifetime fd 10 is close-on-exec: %w", ErrIdentity)
 			}
 			continue
 		}
@@ -700,7 +700,7 @@ func runCwdProviderChecks(root string) error {
 		if fd == 10 {
 			want, ok := manifest[fd]
 			if !ok || !want.matches(&inherited) {
-				return ErrIdentity
+				return fmt.Errorf("cwd provider lifetime identity want=%+v got=%+v: %w", want, cwdDescriptorProofFromStat(&inherited), ErrIdentity)
 			}
 			continue
 		}
