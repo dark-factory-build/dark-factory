@@ -46,8 +46,8 @@ fi
 ./scripts/test-repository-settings.sh
 ./scripts/test-local-ci-mode.sh
 
-# The authoritative source gate is the Go gate: gofmt, go vet, the full serial
-# and race suites, the TypeScript client proof, and the browser, daemon and
+# The authoritative source gate is the Go gate: gofmt, vet, the short serial
+# suite, one TypeScript client proof, and the normal browser, daemon and
 # service E2Es, all inside the isolated stage environment. The lease held above
 # covers the whole gate, so the owned stage runs directly instead of
 # re-entering scripts/go-ci.sh.

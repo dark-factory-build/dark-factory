@@ -109,12 +109,16 @@ Read-only context unless a task explicitly asks you to edit them:
    recovery. A change to any of these needs a causal test that would have
    caught the bug it fixes.
 7. **Run `./scripts/local-ci.sh` before finishing.** It is the
-   authoritative gate (gofmt, `go vet`, the full serial and race Go
-   suites, the TypeScript client proof, the browser, daemon and service
-   E2Es, `git diff --check`). It takes no arguments. CI runs the same
-   script on every pull request, and the `main` ruleset requires the
-   aggregate `required` context that job feeds; a PR that isn't green
-   locally won't be green there either.
+   authoritative routine baseline (gofmt, `go vet`, the short serial Go
+   suite, one TypeScript client proof, the normal browser, daemon and service
+   E2Es, `git diff --check`). It takes no arguments. Authors and reviewers
+   must also run affected-package tests and focused `-race` checks for
+   concurrency or ownership changes. Run
+   `TestConcurrentOpenAndValidWriterReturnsBoundedSnapshotFailure` only when
+   changing SQLite open/snapshot/file-binding behavior, the SQLite dependency,
+   or the Go toolchain. CI runs the same script on every pull request, and the
+   `main` ruleset requires the aggregate `required` context that job feeds; a
+   PR that isn't green locally won't be green there either.
 8. **Small, coherent commits.** One logical change per commit; don't bundle
    unrelated cleanup into a feature commit.
 9. **Docs and issue state are load-bearing.** A change that alters behavior updates

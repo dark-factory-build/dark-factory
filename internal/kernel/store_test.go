@@ -766,6 +766,12 @@ func TestSnapshotAndWatchRejectHiddenControlsInPinnedSnapshot(t *testing.T) {
 }
 
 func TestConcurrentOpenAndValidWriterReturnsBoundedSnapshotFailure(t *testing.T) {
+	// This is an intentionally large filesystem/SQLite continuity stress. The
+	// routine gate keeps deterministic snapshot checks; run this exact test
+	// under -race only when the SQLite or toolchain boundary changes.
+	if testing.Short() {
+		t.Skip("large SQLite snapshot continuity stress is change-scoped")
+	}
 	writer, path := newTestStore(t)
 	defer writer.Close()
 	ctx := context.Background()

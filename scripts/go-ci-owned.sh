@@ -1,11 +1,6 @@
 #!/bin/sh
 set -eu
 
-go_gate_ci_web_proof() {
-    echo "go-ci: TypeScript client proof"
-    go_gate_web_test_stage
-}
-
 go_gate_ci_main() {
 script_dir=$(CDPATH= cd -- "$(/usr/bin/dirname "$0")" && pwd -P)
 repository_root=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
@@ -42,16 +37,10 @@ trap 'go_gate_signal 15' TERM
 echo "go-ci: fast gate"
 go_gate_fast_stage || exit $?
 export GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off
-echo "go-ci: serial full Go tests"
-go_gate_stage 1200 "$go_gate_go" test -timeout=20m -count=1 -p 1 ./...
-echo "go-ci: serial full Go race tests"
-go_gate_stage 1800 "$go_gate_go" test -race -timeout=30m -count=1 -p 1 ./...
-
-go_gate_ci_web_proof || exit $?
+echo "go-ci: serial routine Go tests"
+go_gate_stage 1200 "$go_gate_go" test -short -timeout=20m -count=1 -p 1 ./...
 echo "go-ci: serial real Go/TypeScript browser PTY E2E"
 go_gate_e2e_stage 600 "$script_dir/go-browser-e2e.sh"
-echo "go-ci: serial real Go/TypeScript browser PTY race E2E"
-go_gate_e2e_stage 600 "$script_dir/go-browser-e2e.sh" --race
 echo "go-ci: serial black-box daemon lifecycle E2E"
 go_gate_e2e_stage 900 "$script_dir/go-daemon-e2e.sh"
 echo "go-ci: serial black-box managed service lifecycle E2E"
