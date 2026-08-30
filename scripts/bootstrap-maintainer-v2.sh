@@ -9,15 +9,16 @@ revision=maintainer-operations-v2
 script_dir=$(CDPATH='' cd -- "$(dirname "$0")" && pwd -P)
 repository_root=$(CDPATH='' cd -- "$script_dir/.." && pwd -P)
 cd "$repository_root"
+git=/usr/bin/git
 
-git diff --quiet "$target_commit" HEAD -- \
+"$git" diff --quiet "$target_commit" HEAD -- \
     control-plane/src control-plane/migrations \
     control-plane/Cargo.toml control-plane/Cargo.lock \
     control-plane/package.json control-plane/package-lock.json || {
     echo "bootstrap: control-plane runtime is not the reviewed v2 main runtime" >&2
     exit 1
 }
-test -z "$(git status --porcelain=v1 --untracked-files=all -- scripts/bootstrap-maintainer-v2.sh control-plane)" || {
+test -z "$("$git" status --porcelain=v1 --untracked-files=all -- scripts/bootstrap-maintainer-v2.sh control-plane)" || {
     echo "bootstrap: reviewed bootstrap or control-plane source is dirty" >&2
     exit 1
 }
@@ -35,7 +36,7 @@ test "$("$node" "$wrangler" --version)" = '4.125.0' || {
     exit 1
 }
 
-common_directory=$(git rev-parse --path-format=absolute --git-common-dir)
+common_directory=$("$git" rev-parse --path-format=absolute --git-common-dir)
 env_file=$(dirname "$common_directory")/.env.txt
 test -f "$env_file" && test ! -L "$env_file" || {
     echo "bootstrap: root .env.txt must be a regular file, not a symlink" >&2
@@ -66,6 +67,7 @@ run_wrangler() {
         CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV=false \
         DARK_FACTORY_WRANGLER_PREBUILT=1 \
         DARK_FACTORY_ENV_FILE="$env_file" \
+        DARK_FACTORY_CONTROL_PLANE="$repository_root/control-plane" \
         DARK_FACTORY_NODE="$node" \
         DARK_FACTORY_WRANGLER="$wrangler" \
         /bin/sh -c '
@@ -90,6 +92,7 @@ run_wrangler() {
             esac
             case "$CLOUDFLARE_ACCOUNT_ID" in *[!0-9a-f]*) echo "bootstrap: invalid Cloudflare account ID" >&2; exit 1 ;; esac
             export CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID
+            cd "$DARK_FACTORY_CONTROL_PLANE"
             exec "$DARK_FACTORY_NODE" "$DARK_FACTORY_WRANGLER" "$@"
         ' wrangler "$@"
 }
@@ -99,13 +102,31 @@ verified=0
 previous=''
 cleanup() {
     status=$?
+    rollback_failed=0
     trap - EXIT HUP INT TERM
     if test "$promoted" = 1 && test "$verified" = 0 && test -n "$previous"; then
-        echo "bootstrap: restoring $previous" >&2
-        run_wrangler versions deploy --name "$worker" --version-id "$previous" --yes \
-            --message 'rollback failed maintainer v2 bootstrap' || true
+        current=$(run_wrangler deployments status --name "$worker" --json || true)
+        current_version=$(printf '%s' "$current" | "$node" -e '
+            let input=""; process.stdin.on("data", c => input += c).on("end", () => {
+              try { const d=JSON.parse(input).versions; if (Array.isArray(d) && d.length === 1 && d[0].percentage === 100) process.stdout.write(d[0].version_id || ""); } catch {}
+            });')
+        if test "$current_version" = "$version"; then
+            echo "bootstrap: restoring $previous" >&2
+            if ! run_wrangler versions deploy --name "$worker" --version-id "$previous" --yes \
+                --message 'rollback failed maintainer v2 bootstrap'; then
+                echo "bootstrap: rollback failed" >&2
+                rollback_failed=1
+            elif test "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 "https://$hostname/healthz" || true)" != 200; then
+                echo "bootstrap: rollback health check failed" >&2
+                rollback_failed=1
+            fi
+        else
+            echo "bootstrap: live version changed; refusing to overwrite it with rollback" >&2
+            rollback_failed=1
+        fi
     fi
     rm -rf "$temporary"
+    test "$rollback_failed" = 0 || status=1
     exit "$status"
 }
 trap cleanup EXIT
@@ -138,6 +159,8 @@ printf '%s' "$view" | "$node" -e '
     if (journal?.type !== "durable_object_namespace" || journal.class_name !== "MaintainerDeliveryJournal") process.exit(1);
   });' || { echo "bootstrap: staged bindings are incomplete" >&2; exit 1; }
 
+# A failed response can be ambiguous after Cloudflare accepted the promotion;
+# cleanup re-reads the live version before deciding whether rollback is safe.
 promoted=1
 run_wrangler versions deploy --name "$worker" --version-id "$version" --yes \
     --message "activate reviewed maintainer v2 $target_commit"
