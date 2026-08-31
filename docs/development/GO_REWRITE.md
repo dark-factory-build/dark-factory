@@ -649,6 +649,12 @@ acquired after a successful start, the owner still converges and waits what it
 owns but emits no result; that pre-identity uncertainty remains nonterminal
 rather than writing a weak identity.
 
+After a failed group signal, the exact census has at most 250 ms to first become
+no-live. That starts a separate 250 ms continuous-absence interval: every
+sample must remain known no-live before the failed signal can be forgiven. A
+live member or interrupted/uncertain census in either interval leaves cleanup
+unresolved for a later retry; neither interval restarts or extends itself.
+
 The same outer controller owns the PTY master and bounded output reader. Its
 result-publication primitive is reachable only after terminal input is frozen,
 the group-absence proof and sole `Wait` complete in that order, the bounded

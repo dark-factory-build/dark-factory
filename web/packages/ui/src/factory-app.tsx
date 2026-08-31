@@ -4,23 +4,17 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { FactoryAppController, type FactoryAppSnapshot, type FactoryAppStatus, type FactoryTerminalView } from "./factory-app-controller.js";
 import { FactoryConsole } from "./factory-console.js";
 import { XtermTerminal } from "./xterm-terminal.js";
-import type { ConsoleExtras, ConsoleScreen } from "./console-view.js";
+import type { ConsoleScreen } from "./console-view.js";
 
 const INITIAL_SNAPSHOT: FactoryAppSnapshot = { status: "idle" };
 
 export type FactoryAppProps = {
-  /**
-   * Console data the daemon does not serve yet (ticker, suggestions,
-   * review chips, records). Fixtures feed this in the dev app; live
-   * wiring replaces it field by field as the daemon gaps close.
-   */
-  extras?: ConsoleExtras;
   /** Receives the finite connection lifecycle exposed by the owned controller. */
   onStatusChange?: (status: FactoryAppStatus) => void;
 };
 
 /** Complete browser application lifecycle; hosts only render this component. */
-export function FactoryApp({ extras, onStatusChange }: FactoryAppProps = {}) {
+export function FactoryApp({ onStatusChange }: FactoryAppProps = {}) {
   const [snapshot, setSnapshot] = useState<FactoryAppSnapshot>(INITIAL_SNAPSHOT);
   const [screen, setScreen] = useState<ConsoleScreen>({ kind: "home" });
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -54,8 +48,6 @@ export function FactoryApp({ extras, onStatusChange }: FactoryAppProps = {}) {
       onClose={() => controller.clearAgentTerminal()}
       onTakeControl={() => controller.takeTerminalControl()}
       onHandBack={() => controller.handBackTerminalControl()}
-      onStop={() => { void controller.cancelHumanRequest(); }}
-      stopUnavailable={controller.queueActions.stopRun(snapshot.selectedAgent.id).needs}
     >
       <TerminalHost key={`${snapshot.selectedAgent.id}:${snapshot.terminal.surfaceVersion}`} controller={controller} surfaceVersion={snapshot.terminal.surfaceVersion} />
     </TerminalSidebar>
@@ -65,8 +57,6 @@ export function FactoryApp({ extras, onStatusChange }: FactoryAppProps = {}) {
     <FactoryConsole
       {...snapshot}
       screen={screen}
-      extras={extras}
-      queueActions={controller?.queueActions}
       onNavigate={setScreen}
       onSelectAgent={(agent) => { setSidebarCollapsed(false); void owner.current?.selectAgent(agent); }}
       onOpenTerminalForHumanRequest={(request) => { setSidebarCollapsed(false); owner.current?.openTerminalForHumanRequest(request); }}
@@ -104,8 +94,6 @@ export function TerminalSidebar({
   onClose,
   onTakeControl,
   onHandBack,
-  onStop,
-  stopUnavailable,
   children,
 }: {
   terminal: FactoryTerminalView;
@@ -115,15 +103,9 @@ export function TerminalSidebar({
   onClose: () => void;
   onTakeControl: () => void;
   onHandBack: () => void;
-  onStop: () => void;
-  stopUnavailable: string;
   children: ReactNode;
 }) {
   const busyLease = terminal.leaseOperation !== "none";
-  const stopReady = snapshot.selectedHumanRequest !== undefined &&
-    snapshot.selectedHumanRequest.request.agent_id === terminal.agentId &&
-    snapshot.selectedHumanRequest.canCancel &&
-    snapshot.selectedHumanRequest.phase === "ready";
   return (
     <aside className={`dfConsoleSidebar${collapsed ? " dfConsoleSidebar--collapsed" : ""}`} aria-label={collapsed ? "Terminal (collapsed)" : "Terminal"}>
       {!collapsed ? null : (
@@ -152,14 +134,6 @@ export function TerminalSidebar({
             onClick={() => { if (!terminal.writable) onTakeControl(); }}
           >
             Steer
-          </button>
-          <button
-            type="button"
-            disabled={!stopReady}
-            title={stopReady ? "stop this run" : `needs: ${stopUnavailable}`}
-            onClick={() => { if (stopReady) onStop(); }}
-          >
-            Stop
           </button>
           <button type="button" onClick={onToggleCollapsed} title="collapse the terminal">»</button>
           <button type="button" onClick={onClose} title="close the terminal">×</button>

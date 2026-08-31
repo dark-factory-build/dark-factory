@@ -86,13 +86,12 @@ func TestSignalOwnedGroupForgivesEPERMOnlyWithConvergedCensus(t *testing.T) {
 		return censusOwnedGroup(identity)
 	}
 	testGroupSignalResult = func(error) error { return unix.EPERM }
-	started := time.Now()
 	err := signalOwnedGroup(live, unix.Signal(0))
 	if !errors.Is(err, ErrUnresolved) {
 		t.Fatalf("EPERM with live members = %v", err)
 	}
-	if censusCalls < 3 || time.Since(started) < 200*time.Millisecond {
-		t.Fatalf("live census did not retry EINTR through settle window: calls=%d elapsed=%s", censusCalls, time.Since(started))
+	if censusCalls != 2 {
+		t.Fatalf("live census did not fail closed on EINTR: calls=%d", censusCalls)
 	}
 	if census, censusErr := censusOwnedGroup(live); censusErr != nil || !census.hasLiveMember {
 		t.Fatalf("live fixture did not stay alive: census=%+v err=%v", census, censusErr)
@@ -118,5 +117,57 @@ func TestSignalOwnedGroupCensusFailureStaysFailClosed(t *testing.T) {
 	err := signalOwnedGroup(leader, unix.Signal(0))
 	if !errors.Is(err, ErrUnresolved) || !errors.Is(err, injected) {
 		t.Fatalf("non-EINTR census error was not preserved: %v", err)
+	}
+}
+
+func TestSignalOwnedGroupDoesNotForgiveTransientCensusAbsence(t *testing.T) {
+	leader := startGroupLeader(t)
+	t.Cleanup(func() {
+		testGroupSignalResult = nil
+		testGroupCensus = nil
+	})
+	censusCalls := 0
+	testGroupCensus = func(identity Identity) (ownedGroupCensus, error) {
+		censusCalls++
+		switch censusCalls {
+		case 1:
+			return censusOwnedGroup(identity)
+		case 2:
+			// A transient empty snapshot must not be treated as convergence.
+			return ownedGroupCensus{}, nil
+		default:
+			// The exact group is live again. Keep returning that fact until the
+			// bounded settle window expires.
+			return ownedGroupCensus{hasLiveMember: true}, nil
+		}
+	}
+	testGroupSignalResult = func(error) error { return unix.EPERM }
+
+	if err := signalOwnedGroup(leader, unix.Signal(0)); !errors.Is(err, ErrUnresolved) {
+		t.Fatalf("transient census absence was forgiven: %v", err)
+	}
+	if censusCalls < 3 {
+		t.Fatalf("census did not observe the live group reappearing: calls=%d", censusCalls)
+	}
+}
+
+func TestSignalOwnedGroupLiveGroupExhaustsFirstSettleWindow(t *testing.T) {
+	leader := startGroupLeader(t)
+	t.Cleanup(func() {
+		testGroupSignalResult = nil
+		testGroupCensus = nil
+	})
+	censusCalls := 0
+	testGroupCensus = func(Identity) (ownedGroupCensus, error) {
+		censusCalls++
+		return ownedGroupCensus{hasLiveMember: true}, nil
+	}
+	testGroupSignalResult = func(error) error { return unix.EPERM }
+	started := time.Now()
+	if err := signalOwnedGroup(leader, unix.Signal(0)); !errors.Is(err, ErrUnresolved) {
+		t.Fatalf("continuously live group was forgiven: %v", err)
+	}
+	if censusCalls < 2 || time.Since(started) < groupSignalSettle {
+		t.Fatalf("live group did not exhaust first settle window: calls=%d elapsed=%s", censusCalls, time.Since(started))
 	}
 }

@@ -3,7 +3,6 @@ import { createRoot } from "react-dom/client";
 import { FactoryApp, FactoryConsole, type FactoryConsoleProps } from "@dark-factory/ui";
 import "@dark-factory/ui/styles.css";
 import "./styles.css";
-import { fixtureConsoleExtras } from "../../../fixtures/console.mjs";
 import { fixtureState } from "../../../fixtures/state.mjs";
 
 // Fixture tour: sample data, no daemon, no authority. Reply/cancel handlers
@@ -20,7 +19,6 @@ function FixtureTour() {
       <FactoryConsole
         status="ready"
         state={fixtureState}
-        extras={fixtureConsoleExtras}
         screen={screen}
         selectedAgent={selectedAgent}
         selectedHumanRequest={selectedHumanRequest}
@@ -54,5 +52,5 @@ const root = createRoot(document.getElementById("root")!);
 if (new URLSearchParams(window.location.search).has("fixture")) {
   root.render(<FixtureTour />);
 } else {
-  root.render(<FactoryApp extras={fixtureConsoleExtras} />);
+  root.render(<FactoryApp />);
 }

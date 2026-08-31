@@ -7,7 +7,6 @@ import { ProtocolError, SessionError } from "@dark-factory/client";
 import { FactoryApp, FactoryConsole } from "../dist/src/index.js";
 import { TerminalSidebar } from "../dist/src/factory-app.js";
 import { fixtureState } from "../../../fixtures/state.mjs";
-import { fixtureConsoleExtras } from "../../../fixtures/console.mjs";
 
 const ids = {
   project: [...fixtureState.projects.keys()][0],
@@ -30,7 +29,6 @@ const SCREENS = [
   { kind: "home" },
   { kind: "queue" },
   { kind: "needs-you" },
-  { kind: "task", taskId: ids.task },
 ];
 
 test("error banner keeps its centered layout after the paragraph reset", () => {
@@ -55,9 +53,6 @@ test("projects, agents, tasks, and requests retain their canonical relationships
   const needsYou = render({ screen: { kind: "needs-you" } });
   assert.match(needsYou, /Builder One asks/);
   assert.match(needsYou, /North Workshop · TASK 31313131/);
-  const record = render({ screen: { kind: "task", taskId: ids.task } });
-  assert.match(record, /Review the state projection/);
-  assert.match(record, /Builder One · North Workshop/);
 });
 
 test("hostile names and titles are escaped as text and private detail is absent", () => {
@@ -74,21 +69,6 @@ test("hostile names and titles are escaped as text and private detail is absent"
   }
   const markup = render({ state: hostileState });
   assert.match(markup, /&lt;img src=x onerror=alert\(1\)&gt;/);
-});
-
-test("hostile extras render as text on every surface that shows them", () => {
-  const hostile = "<script>alert(1)</script>";
-  const extras = {
-    ticker: [{ at: "14:00", text: hostile }],
-    suggestions: [{ id: "51".repeat(16), title: hostile, origin: "github", detail: hostile }],
-    rowTicks: new Map([[ids.task, hostile]]),
-    records: new Map([[ids.task, { asked: hostile, happened: hostile, runNumber: 1, review: { outcome: "blocked", findings: [hostile] }, checks: [hostile], files: [{ path: hostile, additions: 1, deletions: 1, patch: hostile }], transcript: hostile }]]),
-  };
-  for (const screen of SCREENS) {
-    const markup = render({ extras, screen });
-    assert.equal(markup.includes("<script"), false, screen.kind);
-  }
-  assert.match(render({ extras }), /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
 });
 
 test("the console never shows a kernel-grammar or retired vocabulary word", () => {
@@ -117,11 +97,9 @@ test("the console never shows a kernel-grammar or retired vocabulary word", () =
     onClose: () => {},
     onTakeControl: () => {},
     onHandBack: () => {},
-    onStop: () => {},
-    stopUnavailable: "daemon per-run stop authority outside NEEDS YOU",
   }, createElement("div"));
   const surfaces = [
-    ...SCREENS.map((screen) => [screen.kind, render({ ...withDetail, extras: fixtureConsoleExtras, screen })]),
+    ...SCREENS.map((screen) => [screen.kind, render({ ...withDetail, screen })]),
     ["sidebar", renderToStaticMarkup(sidebarView())],
     ["sidebar-writable", renderToStaticMarkup(sidebarView({ terminal: { writable: true } }))],
     ["sidebar-collapsed", renderToStaticMarkup(sidebarView({ collapsed: true }))],
@@ -203,64 +181,99 @@ test("empty and maximum bounded collections have explicit, semantic output", () 
 test("semantic structure remains keyboard-safe and contains no unsupported action fields", () => {
   const markup = render();
   assert.match(markup, /<main class="dfFactoryConsole" aria-label="Factory operator console">/);
-  for (const label of ["Agents and factory counters", "BUILDING", "Tasks", "Latest factory event"]) {
+  for (const label of ["Agents and factory counters", "BUILDING", "Tasks"]) {
     assert.match(markup, new RegExp(`aria-label="${label}"`));
   }
   assert.match(render({ screen: { kind: "needs-you" } }), /aria-label="NEEDS YOU"/);
   assert.match(render({ screen: { kind: "queue" } }), /aria-label="Queue"/);
-  assert.match(render({ screen: { kind: "queue" } }), /aria-label="Suggestions"/);
-  assert.match(render({ screen: { kind: "task", taskId: ids.task } }), /aria-label="Task record"/);
   assert.match(markup, /role="status" aria-live="polite"/);
   assert.match(markup, /<ul class="dfConsoleRows">/);
   assert.equal(/<(input|textarea|select|form)\b/.test(markup), false);
 });
 
 test("stage meters fill only on store-backed stage and the strip counts honestly", () => {
-  const markup = render({ extras: fixtureConsoleExtras });
+  const markup = render();
   assert.match(markup, /aria-label="stage: building"/);
   assert.match(markup, /aria-label="stage: queued"/);
   assert.match(markup, /aria-label="stage: done"/);
   assert.match(markup, /aria-label="stage: failed"/);
   const doneMeter = markup.split('aria-label="stage: done"')[1].split("</span></span>")[0];
-  assert.equal((doneMeter.match(/dfStageMeter__segment--filled/g) ?? []).length, 4);
+  assert.equal((doneMeter.match(/dfStageMeter__segment--filled/g) ?? []).length, 2);
   const failedMeter = markup.split('aria-label="stage: failed"')[1].split("</span></span>")[0];
   assert.equal((failedMeter.match(/dfStageMeter__segment--filled/g) ?? []).length, 0);
   assert.match(markup, /1 queued</);
   assert.match(markup, /1 NEEDS YOU</);
-  assert.match(markup, /2 awaiting deploy</);
-  assert.match(markup, /review: approved/);
-  assert.match(markup, /\+42 −18/);
 });
 
-test("data the daemon does not serve renders as explicitly not served, never invented", () => {
+test("a terminal blocked task is neither building nor current agent work", () => {
+  const blockedTask = {
+    ...fixtureState.tasks.get(ids.task),
+    status: "blocked",
+  };
+  const state = baseState({
+    tasks: new Map([[ids.task, blockedTask]]),
+    humanRequests: new Map(),
+  });
+  const markup = render({ state });
+  assert.match(markup, /aria-label="stage: blocked"/);
+  assert.match(markup, /aria-label="Builder One: waiting"/);
+  assert.equal(markup.includes('aria-label="Builder One: building"'), false);
+  assert.equal(markup.includes('aria-label="Builder One: busy"'), false);
+});
+
+test("the production console exposes no speculative or unsupported surface", () => {
   const home = render();
-  assert.match(home, /event feed not yet served by the daemon/);
-  assert.match(home, /— awaiting deploy</);
   const queue = render({ screen: { kind: "queue" } });
-  assert.match(queue, /suggestions are not yet served by the daemon/);
-  const record = render({ screen: { kind: "task", taskId: ids.task } });
-  assert.equal((record.match(/<p class="dfFactoryConsole__empty">not yet served by the daemon<\/p>/g) ?? []).length, 5);
-  const gone = render({ screen: { kind: "task", taskId: "99".repeat(16) } });
-  assert.match(gone, /no longer in the factory state/);
-});
-
-test("queue mutations and suggestion admission are disabled with their daemon gap named", () => {
-  const queue = render({ screen: { kind: "queue" }, extras: fixtureConsoleExtras, onNavigate: () => {} });
-  for (const needs of ["task-creation", "task-edit", "task-comment", "task-delete", "suggestion-accept"]) {
-    assert.match(queue, new RegExp(`needs: daemon ${needs}`));
+  for (const text of [
+    "not yet served",
+    "awaiting deploy",
+    "suggestions",
+    "add work",
+    "accept",
+    "dismiss",
+    "task record",
+  ]) {
+    assert.equal(home.toLowerCase().includes(text), false, text);
+    assert.equal(queue.toLowerCase().includes(text), false, text);
   }
-  assert.equal((queue.match(/title="needs:/g) ?? []).length, (queue.match(/disabled="" title="needs:/g) ?? []).length);
-  assert.ok((queue.match(/title="needs:/g) ?? []).length >= 8);
-  assert.match(queue, /proposed work waits here until you accept it/);
-  assert.match(queue, /accept/);
-  assert.match(queue, /dismiss/);
 });
 
 test("an unavailable snapshot is explicit and does not invent runtime state", () => {
   const markup = render({ state: undefined, status: "syncing" });
   assert.match(markup, /NO SNAPSHOT/);
   assert.match(markup, /waiting for the factory/);
+  assert.match(markup, /waiting for snapshot/);
+  assert.match(markup, /— queued/);
+  assert.match(markup, /— NEEDS YOU/);
+  assert.equal(markup.includes("no agents"), false);
+  assert.equal(markup.includes("0 queued"), false);
   assert.equal(markup.includes("ACTIVE RUNS"), false);
+
+  const queue = render({ state: undefined, status: "syncing", screen: { kind: "queue" } });
+  assert.match(queue, /— queued/);
+  assert.match(queue, /waiting for snapshot/);
+  assert.equal(queue.includes("the queue is empty"), false);
+});
+
+test("HumanRequest delivery states remain visibly distinct", () => {
+  const request = fixtureState.humanRequests.get(ids.request);
+  const cases = [
+    ["open", "OPEN", "Awaiting your answer"],
+    ["delivering", "DELIVERING", "Answer delivery in progress"],
+    ["delivery_unknown", "DELIVERY UNKNOWN", "Answer delivery could not be confirmed"],
+  ];
+  for (const [status, label, description] of cases) {
+    const state = baseState({ humanRequests: new Map([[request.id, { ...request, status }]]) });
+    const markup = render({ state, screen: { kind: "needs-you" } });
+    assert.match(markup, new RegExp(`>${label}<`));
+    assert.match(markup, new RegExp(`>${description}<`));
+  }
+});
+
+test("mobile rows and the selected-agent sidebar have finite widths", () => {
+  const css = readFileSync(new URL("../src/factory-console.css", import.meta.url), "utf8");
+  assert.match(css, /\.dfConsoleRow__agent\s*\{[^}]*min-width: 0;[^}]*overflow-wrap: anywhere;/);
+  assert.match(css, /@media \(max-width: 960px\)[\s\S]*?\.dfConsoleSidebar__body\s*\{\s*width: 100%;\s*min-width: 0;\s*\}/);
 });
 
 test("FactoryApp server-renders without reading browser globals", () => {
@@ -268,8 +281,6 @@ test("FactoryApp server-renders without reading browser globals", () => {
   assert.match(markup, /Factory operator console/);
   assert.match(markup, />IDLE</);
   assert.match(markup, /NO SNAPSHOT/);
-  const withExtras = renderToStaticMarkup(createElement(FactoryApp, { extras: fixtureConsoleExtras }));
-  assert.match(withExtras, /Factory operator console/);
 });
 
 test("selected hostile private detail is escaped and actions remain semantic", () => {

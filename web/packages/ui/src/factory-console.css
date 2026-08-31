@@ -304,8 +304,7 @@
 /* Legibility (owner review round 1): prose at 14px full text color; the
    faintest grey marks decoration, never words. */
 .dfFactoryConsole__card p,
-.dfConsoleRow__title,
-.dfConsoleRecord__part p { font-size: 0.875rem; }
+.dfConsoleRow__title { font-size: 0.875rem; }
 .dfFactoryConsole__empty { font-size: 0.8rem; }
 
 .dfConsoleStrip {
@@ -380,6 +379,7 @@
 
 .dfStageMeter__segment--filled { background: var(--df-console-accent); border-color: var(--df-console-accent); }
 .dfStageMeter__terminal { min-width: 0.9rem; text-align: center; font-size: 0.8rem; }
+.dfStageMeter__terminal--blocked { color: var(--df-console-warning); }
 .dfStageMeter__terminal--done { color: var(--df-console-accent); }
 .dfStageMeter__terminal--failed { color: var(--df-console-alert); }
 
@@ -405,47 +405,7 @@
 
 .dfConsoleRow__glyph { flex: 0 0 auto; color: var(--df-console-accent); }
 .dfConsoleRow__title { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
-.dfConsoleRow__agent { flex: 0 1 auto; color: var(--df-console-muted); font-size: 0.8rem; }
-.dfConsoleRow__tick { flex: 0 1 12rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--df-console-muted); font-size: 0.75rem; }
-.dfConsoleRow__diff { flex: 0 0 auto; color: var(--df-console-accent); font-size: 0.8rem; }
-.dfConsoleRow__review { flex: 0 0 auto; font-size: 0.8rem; }
-.dfConsoleRow__review--approved { color: var(--df-console-accent); }
-.dfConsoleRow__review--blocked { color: var(--df-console-alert); }
-.dfConsoleRow__review--pending { color: var(--df-console-muted); }
-
-.dfConsoleQueue__addWork { margin-bottom: 1rem; }
-.dfConsoleQueue__row { display: flex; align-items: center; gap: 0.5rem; }
-.dfConsoleQueue__row .dfConsoleRow { flex: 1 1 auto; }
-.dfConsoleQueue__menu { position: relative; flex: 0 0 auto; }
-.dfConsoleQueue__menu summary { padding: 0.45rem 0.6rem; border: 1px solid var(--df-console-rule); cursor: pointer; list-style: none; }
-.dfConsoleQueue__menu div { display: grid; gap: 0.4rem; padding: 0.5rem 0 0; }
-
-.dfConsoleSuggestions__note { margin: 0 0 0.75rem; color: var(--df-console-muted); font-size: 0.8rem; }
-.dfConsoleSuggestions__row { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; padding: 0.7rem 0.85rem; border: 1px dashed var(--df-console-rule); }
-.dfConsoleSuggestions__body { display: grid; gap: 0.3rem; min-width: 0; font-size: 0.875rem; }
-.dfConsoleSuggestions__origin { color: var(--df-console-warning); font-size: 0.75rem; }
-.dfConsoleSuggestions__detail { color: var(--df-console-muted); font-size: 0.8rem; }
-.dfConsoleSuggestions__actions { display: flex; flex: 0 0 auto; gap: 0.5rem; }
-
-.dfConsoleRecord__stage { display: flex; align-items: center; gap: 0.75rem; margin: 0 0 1rem; font-size: 0.875rem; }
-.dfConsoleRecord__stage .dfStageMeter { margin-left: 0; }
-.dfConsoleRecord__part { margin-bottom: 1.25rem; }
-.dfConsoleRecord__part h3 { margin: 0 0 0.5rem; color: var(--df-console-muted); font-size: 0.8rem; letter-spacing: 0.06em; text-transform: uppercase; }
-.dfConsoleRecord__part p { margin: 0; line-height: 1.55; }
-.dfConsoleRecord__part ul { margin: 0; padding-left: 1.1rem; font-size: 0.875rem; line-height: 1.55; }
-.dfConsoleRecord__part pre { margin: 0; padding: 0.75rem; overflow-x: auto; background: var(--df-console-background); border: 1px solid var(--df-console-rule); font-size: 0.8rem; line-height: 1.5; }
-.dfConsoleRecord__reviewOutcome--approved { color: var(--df-console-accent); }
-.dfConsoleRecord__reviewOutcome--blocked { color: var(--df-console-alert); }
-.dfConsoleRecord__file summary { padding: 0.5rem 0; cursor: pointer; font-size: 0.875rem; }
-
-.dfConsoleTicker {
-  max-width: 90rem;
-  margin: 0 auto;
-  padding: 0.6rem 1rem;
-  border-top: 1px solid var(--df-console-rule);
-  color: var(--df-console-muted);
-  font-size: 0.8rem;
-}
+.dfConsoleRow__agent { flex: 0 1 auto; min-width: 0; overflow-wrap: anywhere; color: var(--df-console-muted); font-size: 0.8rem; }
 
 .dfConsoleSidebar {
   display: flex;
@@ -480,6 +440,7 @@
 @media (max-width: 960px) {
   .dfConsoleShell { flex-direction: column; }
   .dfConsoleSidebar { flex-basis: auto; border-left: 0; border-top: 1px solid var(--df-console-accent); }
+  .dfConsoleSidebar__body { width: 100%; min-width: 0; }
   .dfConsoleStrip { flex-direction: column; align-items: flex-start; }
 }
 

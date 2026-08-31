@@ -1109,26 +1109,53 @@ func signalOwnedGroup(leader Identity, signal unix.Signal) error {
 	// One sample is not proof. censusOwnedGroup reads a kern.proc.pgrp
 	// snapshot, which can still list a member the kernel's own killpg walk
 	// has already passed over — observed as EPERM answered by a census that
-	// still claims life. Re-sample within a bounded settle window; a group
-	// that is genuinely alive simply exhausts it and stays unresolved, and
-	// the caller re-signals.
-	deadline := time.Now().Add(groupSignalSettle)
+	// still claims life. Allow one bounded window for the exact census to first
+	// become no-live. Once it does, start a separate bounded window in which
+	// every sample must remain known no-live. A live or uncertain sample makes
+	// this attempt unresolved and the caller retries the signal.
+	phaseOneDeadline := time.Now().Add(groupSignalSettle)
 	for {
 		census, err = censusForGroupSignal(leader)
 		if err != nil {
 			if errors.Is(err, unix.EINTR) {
-				if !time.Now().Before(deadline) {
-					return classifyGroupSignal(signalErr, false)
-				}
-				time.Sleep(5 * time.Millisecond)
-				continue
+				// An interrupted census is an observation gap, not evidence of
+				// continuous absence. Do not restart or extend this attempt.
+				return classifyGroupSignal(signalErr, false)
 			}
 			return err
 		}
-		if !census.hasLiveMember || !time.Now().Before(deadline) {
-			return classifyGroupSignal(signalErr, !census.hasLiveMember)
+		now := time.Now()
+		if census.hasLiveMember {
+			if !now.Before(phaseOneDeadline) {
+				return classifyGroupSignal(signalErr, false)
+			}
+			time.Sleep(5 * time.Millisecond)
+			continue
 		}
-		time.Sleep(5 * time.Millisecond)
+		if !now.Before(phaseOneDeadline) {
+			return classifyGroupSignal(signalErr, false)
+		}
+
+		phaseTwoDeadline := now.Add(groupSignalSettle)
+		for {
+			census, err = censusForGroupSignal(leader)
+			if err != nil {
+				if errors.Is(err, unix.EINTR) {
+					// An interrupted census is an observation gap, not evidence
+					// of continuous absence. Do not restart or extend either
+					// proof window.
+					return classifyGroupSignal(signalErr, false)
+				}
+				return err
+			}
+			if census.hasLiveMember {
+				return classifyGroupSignal(signalErr, false)
+			}
+			if !time.Now().Before(phaseTwoDeadline) {
+				return classifyGroupSignal(signalErr, true)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
 	}
 }
 
