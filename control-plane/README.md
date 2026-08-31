@@ -45,8 +45,8 @@ Access policy, or App configuration is live.
   bound — one exact Access **service token**, which is how the surface is
   reached headlessly with no human present. Each principal's claim set rejects
   the other's shape, so neither can take the other's path. Its finite typed
-  tools observe the default head, any branch head, a file at an exact commit, the
-  paths and file modes differing between two commits, and durable operation state, manage a bounded
+  tools observe the default head, any branch head, a file at an exact commit, one
+  commit's whole tree, and durable operation state, manage a bounded
   issue lifecycle, publish an exact commit and pull request, submit an exact-head
   `ALLOW`, `COMMENT`, or `REQUEST_CHANGES` verdict, diagnose and rerun exact CI,
   observe eventual merge state, enqueue through the merge queue, publish and

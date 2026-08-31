@@ -23,10 +23,10 @@ const MAX_GITHUB_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 /// Publication bounds. A commit is a bounded, reviewable unit of work, not a
 /// bulk upload channel, and the Worker must hold every blob in memory.
 const MAX_COMMIT_FILES: usize = 50;
-/// Differing paths one `observe_changes` will answer with. Two unrelated
-/// commits differ in the whole repository, and a caller cannot integrate that
-/// as one operation anyway -- `publish_commit` writes 50 files at a time.
-const MAX_CHANGED_PATHS: usize = 2_000;
+/// Entries one `observe_tree` will answer with. GitHub truncates a tree well
+/// above this, and a listing larger than this is not something a caller can act
+/// on in one operation anyway -- `publish_commit` writes 50 files at a time.
+const MAX_TREE_ENTRIES: usize = 5_000;
 const MAX_COMMIT_FILE_BYTES: usize = 1_000_000;
 const MAX_ISSUE_COMMENT_PAGES: usize = 10;
 const MAX_ISSUE_COMMENTS_PER_PAGE: usize = 100;
@@ -362,39 +362,41 @@ pub(crate) struct FileObservationResult {
     pub(crate) content_base64: Option<String>,
 }
 
-/// Which paths differ between two exact commits.
+/// One commit's tree, exactly as git records it.
 ///
-/// Without this, reading another agent's branch means reading every file to
-/// find the few that moved. The patches are deliberately absent: this says
-/// where to look, and `observe_file` answers exactly what is there.
+/// This deliberately does not diff. An earlier version answered "which paths
+/// differ", which meant deciding what counts as added, modified, removed or
+/// renamed, whether a submodule change is a change, and which file modes are
+/// legal. Every one of those judgements was wrong at least once, and none of
+/// them is this service's to make: a caller comparing two trees knows what it
+/// wants a rename to mean. Reporting what git says, and nothing more, is both
+/// smaller and harder to be wrong about.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ObserveChanges {
+pub(crate) struct ObserveTree {
     pub(crate) repository: String,
-    pub(crate) base_sha: String,
-    pub(crate) head_sha: String,
+    pub(crate) commit_sha: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub(crate) struct ChangedPath {
+pub(crate) struct TreeEntryResult {
     pub(crate) path: String,
-    pub(crate) status: String,
-    /// `blob`, `tree` or `commit` as git names them. A submodule or a symlink
-    /// is a real difference; hiding it made "which paths differ" untrue, and
-    /// naming it is what tells a caller this one does not round-trip through
-    /// `observe_file` and `publish_commit`.
+    /// `blob`, `tree` or `commit`, as git names them. A caller needs this to
+    /// know that a submodule or a directory is not something `observe_file` and
+    /// `publish_commit` round-trip.
     pub(crate) kind: String,
-    /// The git file mode at the head commit, or at the base for a removal.
-    /// Without it an integrating caller republishes an executable file as
-    /// `100644` and the failure surfaces later as "permission denied".
+    /// Git's own mode string, not an enumeration this service invents. A
+    /// symlink is a blob with mode `120000`, so any narrower promise would be
+    /// one real data violates.
     pub(crate) mode: String,
+    pub(crate) sha: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub(crate) struct ChangesObservationResult {
-    pub(crate) base_sha: String,
-    pub(crate) head_sha: String,
-    pub(crate) paths: Vec<ChangedPath>,
+pub(crate) struct TreeObservationResult {
+    pub(crate) commit_sha: String,
+    pub(crate) tree_sha: String,
+    pub(crate) entries: Vec<TreeEntryResult>,
 }
 
 /// Which commit a branch points at right now.
@@ -971,10 +973,10 @@ impl AppAuthority {
     }
 
     #[cfg(target_arch = "wasm32")]
-    pub(crate) async fn observe_changes(
+    pub(crate) async fn observe_tree(
         &self,
-        mut request: ObserveChanges,
-    ) -> Result<ChangesObservationResult, OperationError> {
+        mut request: ObserveTree,
+    ) -> Result<TreeObservationResult, OperationError> {
         request.validate()?;
         let repository = RepositoryName::requested(&mut request.repository)?;
         let token = self
@@ -984,15 +986,7 @@ impl AppAuthority {
                 BTreeMap::from([("contents", "read"), ("metadata", "read")]),
             )
             .await?;
-        let paths = self
-            .0
-            .read_changed_paths(&token, &request.base_sha, &request.head_sha)
-            .await?;
-        Ok(ChangesObservationResult {
-            base_sha: request.base_sha,
-            head_sha: request.head_sha,
-            paths,
-        })
+        self.0.read_tree(&token, request.commit_sha).await
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -2842,10 +2836,9 @@ impl ObserveFile {
     }
 }
 
-impl ObserveChanges {
+impl ObserveTree {
     fn validate(&self) -> Result<(), OperationError> {
-        valid_sha(&self.base_sha)?;
-        valid_sha(&self.head_sha)
+        valid_sha(&self.commit_sha)
     }
 }
 
@@ -3022,31 +3015,6 @@ fn valid_repository_path(value: &str) -> Result<(), OperationError> {
     (!github_authority && !review_authority)
         .then_some(())
         .ok_or(OperationError::InvalidInput)
-}
-
-/// One differing path, with the git object kind it is.
-///
-/// Only the caller's own inputs are shape-checked; a path already in the
-/// repository is GitHub's, and refusing to *describe* it would make one
-/// unusual path anywhere in the tree break every read of every commit pair.
-/// It is still bounded, because it is about to be serialized.
-#[cfg(any(target_arch = "wasm32", test))]
-fn changed_path(
-    path: &str,
-    status: &str,
-    entry: &GitTreeEntry,
-) -> Result<ChangedPath, OperationError> {
-    valid_text(path, 1, 480, false)?;
-    Ok(ChangedPath {
-        path: path.to_owned(),
-        status: status.to_owned(),
-        // Reported, not filtered. A submodule pointer or a symlink that moved
-        // is a real difference, and omitting it made the answer to "which paths
-        // differ" quietly untrue for those. The kind is what tells a caller
-        // that `observe_file` and `publish_commit` cannot round-trip it.
-        kind: entry.kind.clone(),
-        mode: entry.mode.clone(),
-    })
 }
 
 /// A path's shape, with no authority policy attached.
@@ -3538,65 +3506,53 @@ impl Authority {
         Ok(Some(encoded))
     }
 
-    /// Which paths differ between two commits, from the two trees themselves.
-    ///
-    /// The obvious implementation is GitHub's compare endpoint. It was the
-    /// first one here, and it carries a patch per file, so answering "which
-    /// paths" dragged content through an 8 MiB ceiling. Diffing trees moves no
-    /// content, reports truncation as GitHub's own flag, and turns a rename
-    /// into a removal and an addition -- which is what a caller replaying it
-    /// into a delta tree must actually write.
-    async fn read_changed_paths(
+    async fn read_tree(
         &self,
         token: &RepositoryToken,
-        base_sha: &str,
-        head_sha: &str,
-    ) -> Result<Vec<ChangedPath>, OperationError> {
-        let base = self.read_commit_tree(token, base_sha).await?;
-        let head = self.read_commit_tree(token, head_sha).await?;
-        // Indexed once each. The nested scan this replaced was quadratic in
-        // tree size, which at GitHub's hundred-thousand-entry cap runs past the
-        // Worker's CPU budget -- for two trees that are usually near-identical.
-        let base_entries: BTreeMap<&str, &GitTreeEntry> = base
-            .tree
-            .iter()
-            .map(|entry| (entry.path.as_str(), entry))
-            .collect();
-        let head_entries: BTreeMap<&str, &GitTreeEntry> = head
-            .tree
-            .iter()
-            .map(|entry| (entry.path.as_str(), entry))
-            .collect();
-        let mut paths = Vec::new();
-        for (path, entry) in &head_entries {
-            let status = match base_entries.get(path) {
-                None => "added",
-                Some(previous) if previous.sha != entry.sha || previous.mode != entry.mode => {
-                    "modified"
-                }
-                Some(_) => continue,
-            };
-            paths.push(changed_path(path, status, entry)?);
-        }
-        for (path, entry) in &base_entries {
-            if head_entries.contains_key(path) {
-                continue;
-            }
-            paths.push(changed_path(path, "removed", entry)?);
-        }
-        // Two unrelated commits differ in the whole repository, and every path
-        // would then be serialized into one response. Refuse rather than answer
-        // with something no caller can act on as one integration.
-        if paths.len() > MAX_CHANGED_PATHS {
+        commit_sha: String,
+    ) -> Result<TreeObservationResult, OperationError> {
+        let commit = self.read_commit(token, &commit_sha).await?;
+        let tree: GitTree = github_json(
+            &format!(
+                "https://api.github.com/repos/{}/{}/git/trees/{}?recursive=1",
+                token.repository.owner, token.repository.name, commit.tree.sha
+            ),
+            token.as_str(),
+        )
+        .await?;
+        // A truncated tree is refused rather than returned: a partial answer to
+        // "what is in this commit" is one a caller reads as complete.
+        if tree.truncated || tree.tree.len() > MAX_TREE_ENTRIES {
             return Err(OperationError::Indeterminate);
         }
-        paths.sort_by(|left, right| left.path.cmp(&right.path));
-        Ok(paths)
+        let entries = tree
+            .tree
+            .into_iter()
+            .map(|entry| {
+                // These are the repository's own paths, not the caller's, so
+                // they are bounded for serialization rather than held to the
+                // shape rule governing what may be *written*. Refusing to
+                // describe an unusual path would make one file anywhere in a
+                // repository break every read of it.
+                valid_text(&entry.path, 1, 480, false)?;
+                valid_text(&entry.mode, 1, 16, false)?;
+                valid_text(&entry.kind, 1, 16, false)?;
+                valid_sha(&entry.sha)?;
+                Ok(TreeEntryResult {
+                    path: entry.path,
+                    kind: entry.kind,
+                    mode: entry.mode,
+                    sha: entry.sha,
+                })
+            })
+            .collect::<Result<Vec<_>, OperationError>>()?;
+        Ok(TreeObservationResult {
+            commit_sha,
+            tree_sha: commit.tree.sha,
+            entries,
+        })
     }
 
-    /// One commit's complete recursive tree. A truncated tree is refused rather
-    /// than returned: a partial answer to "what is in this commit" is one a
-    /// caller would read as complete.
     /// The commit itself, which is also the cheapest proof that it exists.
     async fn read_commit(
         &self,
@@ -3621,26 +3577,6 @@ impl Authority {
         };
         valid_sha(&commit.tree.sha)?;
         Ok(commit)
-    }
-
-    async fn read_commit_tree(
-        &self,
-        token: &RepositoryToken,
-        commit_sha: &str,
-    ) -> Result<GitTree, OperationError> {
-        let commit = self.read_commit(token, commit_sha).await?;
-        let tree: GitTree = github_json(
-            &format!(
-                "https://api.github.com/repos/{}/{}/git/trees/{}?recursive=1",
-                token.repository.owner, token.repository.name, commit.tree.sha
-            ),
-            token.as_str(),
-        )
-        .await?;
-        if tree.truncated {
-            return Err(OperationError::Indeterminate);
-        }
-        Ok(tree)
     }
 
     async fn read_ref(

@@ -11,11 +11,11 @@ use crate::{
     access::AccessAuthority,
     github_app::{
         AppAuthority, CreateIssue, CreatePullRequest, DispatchControlPlaneDeploy,
-        EnqueuePullRequest, ObserveChanges, ObserveControlPlaneDeploy, ObserveFile, ObserveIssue,
+        EnqueuePullRequest, ObserveControlPlaneDeploy, ObserveFile, ObserveIssue,
         ObservePullRequestChecks, ObservePullRequestMerge, ObservePullRequestWorkflows, ObserveRef,
-        ObserveRelease, ObserveReleaseWorkflow, ObserveRepository, OperationError, PublishCommit,
-        PublishReleaseTag, ReadPullRequestJobLog, RecoverRelease, RerunFailedPullRequestJobs,
-        ResolveIssue, SubmitPullRequestReview, canonical_operation_id,
+        ObserveRelease, ObserveReleaseWorkflow, ObserveRepository, ObserveTree, OperationError,
+        PublishCommit, PublishReleaseTag, ReadPullRequestJobLog, RecoverRelease,
+        RerunFailedPullRequestJobs, ResolveIssue, SubmitPullRequestReview, canonical_operation_id,
     },
     journal::DeliveryJournal,
 };
@@ -289,40 +289,39 @@ fn tools() -> Value {
         },
         "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
     }, {
-        "name": "observe_changes",
-        "title": "Observe which paths differ between two commits",
-        "description": "Return the paths that differ between two exact commits, each with its status, git object kind and file mode. Patches are not returned; read the paths that matter with observe_file. Only a blob round-trips through observe_file and publish_commit.",
+        "name": "observe_tree",
+        "title": "List one commit's tree",
+        "description": "Return every entry in one exact commit's recursive tree: path, git object kind, file mode and object id. Compare two of these to learn what changed; only a blob round-trips through observe_file and publish_commit.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
-                "base_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-                "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+                "commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
             },
-            "required": ["repository", "base_sha", "head_sha"],
+            "required": ["repository", "commit_sha"],
             "additionalProperties": false
         },
         "outputSchema": {
             "type": "object",
             "properties": {
-                "base_sha": {"type": "string"},
-                "head_sha": {"type": "string"},
-                "paths": {
+                "commit_sha": {"type": "string"},
+                "tree_sha": {"type": "string"},
+                "entries": {
                     "type": "array",
                     "items": {
                         "type": "object",
                         "properties": {
                             "path": {"type": "string"},
-                            "status": {"type": "string", "enum": ["added", "modified", "removed"]},
                             "kind": {"type": "string"},
-                            "mode": {"type": "string"}
+                            "mode": {"type": "string"},
+                            "sha": {"type": "string"}
                         },
-                        "required": ["path", "status", "kind", "mode"],
+                        "required": ["path", "kind", "mode", "sha"],
                         "additionalProperties": false
                     }
                 }
             },
-            "required": ["base_sha", "head_sha", "paths"],
+            "required": ["commit_sha", "tree_sha", "entries"],
             "additionalProperties": false
         },
         "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
@@ -865,12 +864,12 @@ async fn call_tool(id: Value, request: &Map<String, Value>, mcp: &McpState) -> R
                 Err(error) => operation_error(id, error),
             }
         }
-        Some("observe_changes") => {
-            let Ok(arguments) = serde_json::from_value::<ObserveChanges>(arguments) else {
+        Some("observe_tree") => {
+            let Ok(arguments) = serde_json::from_value::<ObserveTree>(arguments) else {
                 return json_rpc_error(id, -32602, "Invalid params");
             };
-            match mcp.app.observe_changes(arguments).await {
-                Ok(result) => serialized_tool_result(id, &result, "Changed paths are observed."),
+            match mcp.app.observe_tree(arguments).await {
+                Ok(result) => serialized_tool_result(id, &result, "Tree is observed."),
                 Err(error) => operation_error(id, error),
             }
         }

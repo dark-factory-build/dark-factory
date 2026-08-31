@@ -198,17 +198,16 @@ fn declared_output_schemas_name_the_fields_the_results_carry() {
             &["path", "commit_sha", "content_base64"][..],
         ),
         (
-            "observe_changes",
-            "ChangesObservationResult",
-            &["base_sha", "head_sha", "paths"][..],
+            "observe_tree",
+            "TreeObservationResult",
+            &["commit_sha", "tree_sha", "entries"][..],
         ),
         (
             // The nested entry is checked against its own struct: a rename
-            // inside `paths.items` is invisible to a top-level field list, and
-            // this is the only result type here with a nested object.
-            "observe_changes",
-            "ChangedPath",
-            &["path", "status", "kind", "mode"][..],
+            // inside `entries.items` is invisible to a top-level field list.
+            "observe_tree",
+            "TreeEntryResult",
+            &["path", "kind", "mode", "sha"][..],
         ),
         (
             "maintainer_status",
@@ -352,7 +351,7 @@ fn every_repository_tool_requires_the_repository_it_acts_on() {
         "maintainer_status",
         "observe_ref",
         "observe_file",
-        "observe_changes",
+        "observe_tree",
         "create_issue",
         "observe_issue",
         "resolve_issue",
@@ -432,7 +431,7 @@ fn mcp_surface_is_installation_bound_and_typed() {
         "maintainer_status",
         "observe_ref",
         "observe_file",
-        "observe_changes",
+        "observe_tree",
         "observe_operation",
         "create_issue",
         "observe_issue",

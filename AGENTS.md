@@ -46,10 +46,12 @@ framework. The shell-provider loop is proven; real Claude/Codex work is not.
    The App is expected to be sufficient, and that expectation is the point: an
    agent that reaches around it stops dogfooding the thing being built. Reading
    another agent's work needs no `git fetch` — `observe_ref` names a branch's
-   head, `observe_changes` says which paths differ, `observe_file` returns each
-   one's exact bytes at that commit, and `publish_commit` writes the result
-   back. If a task seems to need git, the missing thing is usually a typed
-   operation; add it rather than route around the surface.
+   head, `observe_tree` lists what is in a commit, `observe_file` returns one
+   file's exact bytes at that commit, and `publish_commit` writes the result
+   back. Compare two trees to see what moved; what a difference *means* is the
+   caller's to decide, not this service's. If a task seems to need git, the
+   missing thing is usually a typed operation; add it rather than route around
+   the surface.
 
    The one carve-out is explicit owner authorization, per task, and it must name
    the exact repository and a finite command and target set — refs, PR

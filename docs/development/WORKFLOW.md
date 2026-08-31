@@ -131,8 +131,9 @@ installation tokens, personal tokens, credential-helper output, or keychain
 contents to an agent or worktree.
 
 Reading another agent's branch needs no `git fetch`: `observe_ref` names its
-head, `observe_changes` says which paths differ, `observe_file` returns each
-one's bytes, and `publish_commit` writes the result back. If a task seems to
+head, `observe_tree` lists what is in a commit, `observe_file` returns one
+file's bytes, and `publish_commit` writes the result back. Compare two trees to
+see what moved. If a task seems to
 need git, the missing thing is usually a typed operation.
 
 Two things still need the owner: a broker that is unavailable, and the paths
