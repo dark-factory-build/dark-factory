@@ -35,7 +35,7 @@ const (
 	controllerPopulationReported
 	controllerProviderReleased
 	controllerResult
-	controllerPoisoned
+	controllerSpent
 )
 
 // AttemptController is the daemon side of one fixed attempt-runner protocol.
@@ -50,7 +50,7 @@ type AttemptController struct {
 
 // writeFrame is the controller's only authoritative write path. A failed
 // framed write may have left a peer with an indistinguishable prefix, so the
-// capability is poisoned immediately and can never append a retry to it.
+// capability is spent immediately and can never append a retry to it.
 func (c *AttemptController) writeFrame(value any, limit int) error {
 	if c == nil || c.file == nil {
 		return ErrState
@@ -59,10 +59,16 @@ func (c *AttemptController) writeFrame(value any, limit int) error {
 	if err == nil {
 		return nil
 	}
+	return errors.Join(err, c.spend())
+}
+
+// spend closes the sole control capability and puts the controller in its
+// terminal state, so every later call answers ErrState.
+func (c *AttemptController) spend() error {
 	closeErr := c.file.Close()
 	c.file = nil
-	c.state = controllerPoisoned
-	return errors.Join(err, closeErr)
+	c.state = controllerSpent
+	return closeErr
 }
 
 func NewAttemptController() (*AttemptController, *os.File, error) {
@@ -136,6 +142,15 @@ func (c *AttemptController) Next(timeout time.Duration) (AttemptEvent, error) {
 	defer c.file.SetReadDeadline(time.Time{})
 	var frame attemptFrame
 	if err := readFrame(c.file, &frame, maxConfigBytes); err != nil {
+		// A read that ends exactly on a frame boundary is conclusive, not a
+		// transient condition: this controller holds the only other end of the
+		// socketpair, so no further frame can arrive and no later write can be
+		// delivered. Spending the capability here is what makes ErrState — not
+		// a manufactured broken pipe from a write nobody could have received —
+		// the answer to every call that follows.
+		if errors.Is(err, io.EOF) {
+			return AttemptEvent{}, errors.Join(err, c.spend())
+		}
 		return AttemptEvent{}, err
 	}
 	if frame.Version != 1 {

@@ -31,7 +31,7 @@ func saturateControllerSendBuffer(t *testing.T, controller *AttemptController) {
 	}
 }
 
-func TestAttemptControllerWriteFailurePoisonsCapability(t *testing.T) {
+func TestAttemptControllerWriteFailureSpendsCapability(t *testing.T) {
 	controller, peer, err := NewAttemptController()
 	if err != nil {
 		t.Fatal(err)
@@ -48,7 +48,7 @@ func TestAttemptControllerWriteFailurePoisonsCapability(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > attemptControlTimeout+time.Second {
 		t.Fatalf("EAGAIN write took %s; nonblocking failure must be bounded", elapsed)
 	}
-	if controller.file != nil || controller.state != controllerPoisoned {
+	if controller.file != nil || controller.state != controllerSpent {
 		t.Fatalf("failed writer remained usable: file=%v state=%d", controller.file, controller.state)
 	}
 	if err := controller.SendTerminalCommand(TerminalCommand{Kind: TerminalCredit, Credit: 1}); !errors.Is(err, ErrState) {
