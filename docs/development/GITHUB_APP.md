@@ -142,7 +142,8 @@ The live maintainer broker exposes only these repository-scoped operations:
   revision, and live default branch head;
 - observe the exact commit any branch points at, or its absence;
 - observe one file's exact bytes at one exact commit, or its absence;
-- observe which paths differ between two exact commits;
+- observe which paths differ between two exact commits, with each path's git
+  file mode, taken from the two trees rather than from a patch listing;
 - observe one durable operation UUID without mutating it;
 - create, observe, and resolve one bounded issue with an evidence comment;
 - publish one exact independently reviewed tree as an App-authored commit to a

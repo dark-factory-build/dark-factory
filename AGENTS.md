@@ -51,20 +51,26 @@ framework. The shell-provider loop is proven; real Claude/Codex work is not.
    back. If a task seems to need git, the missing thing is usually a typed
    operation; add it rather than route around the surface.
 
-   The one carve-out is explicit owner authorization, per task. It enables any
-   git or `gh` action the owner names, and it exists because one boundary is
-   deliberately unreachable: `publish_commit` refuses `.github/**`, CODEOWNERS
-   and `dependabot.yml`, since an agent that could rewrite the CI gating its own
-   work would be escalating its authority. Changes to those paths therefore
+   The one carve-out is explicit owner authorization, per task, and it must name
+   the exact repository and a finite command and target set — refs, PR
+   head/base, tags, or fixed workflows. It is not a general grant. It exists
+   because one boundary is deliberately unreachable: `publish_commit` refuses
+   `.github` itself, `.github/workflows/**`, the three CODEOWNERS locations and
+   `.github/dependabot.{yml,yaml}`, since an agent that could rewrite the CI
+   gating its own work would be escalating its authority. The rest of `.github`
+   — issue and PR templates — stays publishable. Changes to the refused paths
    require the owner, by design.
 
    Absent that authorization everything else is closed, **reads included**: no
    `git fetch`, `pull`, `push`, `clone`, no `gh`, no direct GitHub REST or
-   GraphQL call. Never push to any branch, never force-push, never delete a ref.
-   Never open, review, or merge a pull request, and never mutate issues,
-   releases, Actions, repository settings, or repository/organization access
-   outside the App; PR authorship stays App-only so review is a distinct
-   principal. Never inspect, export, request, or print a credential.
+   GraphQL call. Never open, review, or merge a pull request, and never mutate
+   issues, releases, or Actions outside the App; PR authorship stays App-only so
+   review is a distinct principal.
+
+   These hold **regardless of any authorization**, because an owner approving a
+   task is not an owner approving these: never force-push, never delete a ref,
+   never change repository or organization access, and never inspect, export,
+   request, or print a credential.
 10. Never read/source `.env.txt` directly. Its only agent use is an explicitly
     authorized, independently reviewed fixed command:
     `./scripts/with-cloudflare-env.sh dns status`, `dns publish-app`, or

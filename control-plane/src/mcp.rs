@@ -313,9 +313,10 @@ fn tools() -> Value {
                         "type": "object",
                         "properties": {
                             "path": {"type": "string"},
-                            "status": {"type": "string"}
+                            "status": {"type": "string", "enum": ["added", "modified", "removed"]},
+                            "mode": {"type": "string", "enum": ["100644", "100755"]}
                         },
-                        "required": ["path", "status"],
+                        "required": ["path", "status", "mode"],
                         "additionalProperties": false
                     }
                 }
@@ -711,7 +712,8 @@ fn tools() -> Value {
                         "type": "object",
                         "properties": {
                             "path": {"type": "string", "minLength": 1, "maxLength": 240},
-                            "content_base64": {"type": "string", "maxLength": 1000000}
+                            "content_base64": {"type": "string", "maxLength": 1000000},
+                            "mode": {"type": "string", "enum": ["100644", "100755"]}
                         },
                         "required": ["path"],
                         "additionalProperties": false
@@ -1117,10 +1119,14 @@ fn operation_error(id: Value, error: OperationError) -> Response {
         OperationError::InvalidInput => {
             tool_error(id, "invalid_input", "Operation input is invalid.")
         }
+        // Not only heads: a read whose answer does not match what was asked
+        // for -- a path that is a directory, a symlink, or a submodule -- is
+        // the same class of "you did not get what you named", and an
+        // observation has no head binding to have changed.
         OperationError::Conflict => tool_error(
             id,
             "conflict",
-            "The exact-head or operation binding changed.",
+            "The exact-head, operation, or observed-object binding did not match.",
         ),
         OperationError::Refused(reason) => tool_error(
             id,

@@ -30,13 +30,6 @@ const MAX_WORKFLOW_RUNS: usize = 20;
 const MAX_WORKFLOW_JOBS: usize = 100;
 const MAX_WORKFLOW_STEPS: usize = 100;
 const MAX_JOB_LOG_BYTES: usize = 64 * 1024;
-/// One file, base64 as GitHub returns it. Matches `publish_commit`'s per-file
-/// ceiling: what can be written back has to be readable.
-const MAX_FILE_BYTES: usize = 1_000_000;
-/// Changed paths between two commits. GitHub's compare answers at most 300
-/// files, so a larger delta is refused rather than silently truncated into a
-/// list the caller would treat as complete.
-const MAX_CHANGED_FILES: usize = 300;
 const MAX_LOG_REDIRECT_BYTES: usize = 4_096;
 #[derive(Clone, Copy)]
 struct WorkflowRef<'a> {
@@ -382,6 +375,10 @@ pub(crate) struct ObserveChanges {
 pub(crate) struct ChangedPath {
     pub(crate) path: String,
     pub(crate) status: String,
+    /// The git file mode at the head commit, or at the base for a removal.
+    /// Without it an integrating caller republishes an executable file as
+    /// `100644` and the failure surfaces later as "permission denied".
+    pub(crate) mode: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -500,6 +497,11 @@ pub(crate) struct FileChange {
     pub(crate) path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) content_base64: Option<String>,
+    /// `100644` or `100755`. Absent keeps an existing path's mode and creates a
+    /// new one non-executable, which is the old behaviour. Stating it is what
+    /// lets an integrating caller reproduce an executable file it observed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) mode: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -3449,70 +3451,135 @@ impl Authority {
         );
         let content: Content = match github_json(&url, token.as_str()).await {
             Ok(content) => content,
-            // Absent at that commit is an answer, not a failure: a caller
-            // integrating a deletion has to tell the two apart.
-            Err(Error::Rejected(404)) => return Ok(None),
+            // The contents endpoint answers 404 for two different facts: the
+            // path is absent at that commit, and the commit does not exist.
+            // Reporting the second as the first tells a caller a file was
+            // deleted when it named a commit that was never there, and it would
+            // integrate that deletion. Only this branch pays for the
+            // disambiguation.
+            Err(Error::Rejected(404)) => {
+                self.read_commit_tree(token, commit_sha).await?;
+                return Ok(None);
+            }
             Err(error) => return Err(error.into()),
         };
         if content.kind != "file"
             || content.path != path
             || content.encoding != "base64"
-            || !(0..=MAX_FILE_BYTES as i64).contains(&content.size)
+            // Decoded size, so it is the weaker of the two bounds; the
+            // encoded-length check below is what actually caps the transfer.
+            // This one refuses a negative or absurd self-report before any of
+            // it is trusted.
+            || !(0..=MAX_COMMIT_FILE_BYTES as i64).contains(&content.size)
         {
             return Err(OperationError::Conflict);
         }
         // GitHub wraps base64 at 60 columns; the newlines are not content.
         let encoded: String = content.content.split_ascii_whitespace().collect();
-        if encoded.len() > MAX_FILE_BYTES {
+        if encoded.len() > MAX_COMMIT_FILE_BYTES {
             return Err(OperationError::Conflict);
         }
         Ok(Some(encoded))
     }
 
-    /// Which paths differ between two commits, and nothing else. Patches are
-    /// deliberately not returned: this answers where to look, and `read_file`
-    /// answers exactly what is there, at a size this surface already bounds.
+    /// Which paths differ between two commits, from the two trees themselves.
+    ///
+    /// The obvious implementation is GitHub's compare endpoint, and it was the
+    /// first one here. It was wrong three ways: `per_page` is capped at 100 so
+    /// the 300-file truncation guard could never fire on the case it existed
+    /// for; the response carries a patch per file, so answering "which paths"
+    /// dragged megabytes through an 8 MiB ceiling; and a rename arrives as one
+    /// entry naming only the new path, which an integrating caller replays as
+    /// an add — leaving the old file behind, because `publish_commit` writes a
+    /// delta tree. Diffing the trees has none of those: truncation is reported
+    /// by GitHub as a flag rather than inferred from a page length, no content
+    /// is transferred, and a rename is simply a removal and an addition, which
+    /// is exactly what a caller must replay.
     async fn read_changed_paths(
         &self,
         token: &RepositoryToken,
         base_sha: &str,
         head_sha: &str,
     ) -> Result<Vec<ChangedPath>, OperationError> {
-        #[derive(Deserialize)]
-        struct Comparison {
-            files: Option<Vec<ComparedFile>>,
+        let base = self.read_commit_tree(token, base_sha).await?;
+        let head = self.read_commit_tree(token, head_sha).await?;
+        let mut paths: BTreeMap<String, ChangedPath> = BTreeMap::new();
+        for entry in &head.tree {
+            if entry.kind != "blob" {
+                continue;
+            }
+            valid_path(&entry.path)?;
+            let previous = base
+                .tree
+                .iter()
+                .find(|candidate| candidate.kind == "blob" && candidate.path == entry.path);
+            let status = match previous {
+                None => "added",
+                Some(previous) if previous.sha != entry.sha || previous.mode != entry.mode => {
+                    "modified"
+                }
+                Some(_) => continue,
+            };
+            paths.insert(
+                entry.path.clone(),
+                ChangedPath {
+                    path: entry.path.clone(),
+                    status: status.to_owned(),
+                    mode: entry.mode.clone(),
+                },
+            );
         }
-        #[derive(Deserialize)]
-        struct ComparedFile {
-            filename: String,
-            status: String,
+        for entry in &base.tree {
+            if entry.kind != "blob"
+                || head
+                    .tree
+                    .iter()
+                    .any(|candidate| candidate.kind == "blob" && candidate.path == entry.path)
+            {
+                continue;
+            }
+            valid_path(&entry.path)?;
+            paths.insert(
+                entry.path.clone(),
+                ChangedPath {
+                    path: entry.path.clone(),
+                    status: "removed".to_owned(),
+                    mode: entry.mode.clone(),
+                },
+            );
         }
-        let comparison: Comparison = github_json(
+        Ok(paths.into_values().collect())
+    }
+
+    /// One commit's complete recursive tree. A truncated tree is refused rather
+    /// than returned: a partial answer to "what is in this commit" is one a
+    /// caller would read as complete.
+    async fn read_commit_tree(
+        &self,
+        token: &RepositoryToken,
+        commit_sha: &str,
+    ) -> Result<GitTree, OperationError> {
+        let commit: GitCommit = github_json(
             &format!(
-                "https://api.github.com/repos/{}/{}/compare/{base_sha}...{head_sha}?per_page={MAX_CHANGED_FILES}",
+                "https://api.github.com/repos/{}/{}/git/commits/{commit_sha}",
                 token.repository.owner, token.repository.name
             ),
             token.as_str(),
         )
         .await?;
-        let files = comparison.files.unwrap_or_default();
-        // GitHub caps the file list at 300 and says nothing about the cut, so a
-        // full page is indistinguishable from a truncated one. Refuse it rather
-        // than hand back a list the caller would read as complete.
-        if files.len() >= MAX_CHANGED_FILES {
+        valid_sha(&commit.tree.sha)?;
+        let tree: GitTree = github_json(
+            &format!(
+                "https://api.github.com/repos/{}/{}/git/trees/{}?recursive=1",
+                token.repository.owner, token.repository.name, commit.tree.sha
+            ),
+            token.as_str(),
+        )
+        .await?;
+        if tree.truncated {
             return Err(OperationError::Indeterminate);
         }
-        files
-            .into_iter()
-            .map(|file| {
-                valid_path(&file.filename)?;
-                valid_text(&file.status, 1, 32, false)?;
-                Ok(ChangedPath {
-                    path: file.filename,
-                    status: file.status,
-                })
-            })
-            .collect()
+        Ok(tree)
     }
 
     async fn read_ref(
@@ -4941,21 +5008,25 @@ mod publish_tree {
                         return Err(OperationError::InvalidInput);
                     }
                 }
-                let mode = match base_tree.iter().find(|entry| entry.path == change.path) {
-                    None => "100644",
+                let existing = match base_tree.iter().find(|entry| entry.path == change.path) {
+                    None => None,
                     Some(entry) if entry.kind == "blob" => match entry.mode.as_str() {
-                        "100644" | "100755" => entry.mode.as_str(),
+                        "100644" => Some("100644"),
+                        "100755" => Some("100755"),
                         _ => return Err(OperationError::InvalidInput),
                     },
+                    // A symlink or submodule is not a file this surface writes.
                     Some(_) => return Err(OperationError::InvalidInput),
+                };
+                let mode = match change.mode.as_deref() {
+                    Some("100644") => "100644",
+                    Some("100755") => "100755",
+                    Some(_) => return Err(OperationError::InvalidInput),
+                    None => existing.unwrap_or("100644"),
                 };
                 Ok(Entry {
                     path: change.path.clone(),
-                    mode: match mode {
-                        "100644" => "100644",
-                        "100755" => "100755",
-                        _ => unreachable!("build_request only returns supported modes"),
-                    },
+                    mode,
                     kind: "blob",
                     sha: sha.clone(),
                 })
@@ -4982,6 +5053,10 @@ struct GitTreeEntry {
     mode: String,
     #[serde(rename = "type")]
     kind: String,
+    /// Every entry carries one. It is what makes "the same path, different
+    /// content" distinguishable from "the same path, unchanged" without
+    /// reading either blob.
+    sha: String,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -7042,8 +7117,38 @@ mod tests {
         let file = |path: &str| FileChange {
             path: path.into(),
             content_base64: Some(general_purpose::STANDARD.encode(b"hello")),
+            mode: None,
         };
         assert!(base(vec![file("README.md")]).validate().is_ok());
+        // The authority refusal has to be reached THROUGH `validate`, not only
+        // tested as a function. `valid_path` is now an identical-signature,
+        // authority-free twin, so swapping the call at the one write site is a
+        // single-identifier slip that the rest of the suite cannot see -- and
+        // CODEOWNERS and `dependabot.yml` have no GitHub permission backstopping
+        // them, so that slip is the escalation this whole boundary exists to
+        // stop.
+        for protected in [
+            ".github/workflows/ci.yml",
+            ".github",
+            "CODEOWNERS",
+            ".github/CODEOWNERS",
+            "docs/CODEOWNERS",
+            ".github/dependabot.yml",
+            ".github/dependabot.yaml",
+        ] {
+            assert_eq!(
+                base(vec![file(protected)]).validate().err(),
+                Some(OperationError::InvalidInput),
+                "{protected} is publishable"
+            );
+        }
+        // The rest of the `.github` tree stays publishable, so the refusal is
+        // proven to be the authority set and not a blanket prefix.
+        assert!(
+            base(vec![file(".github/ISSUE_TEMPLATE/bug.md")])
+                .validate()
+                .is_ok()
+        );
         // A caller must not be able to write the reconciler's own vocabulary.
         // A caller cannot smuggle any operation marker into the headline.
         let forged = |message: &str| PublishCommit {
@@ -7071,7 +7176,8 @@ mod tests {
         assert!(
             base(vec![FileChange {
                 path: "gone.txt".into(),
-                content_base64: None
+                content_base64: None,
+                mode: None,
             }])
             .validate()
             .is_ok()
@@ -7098,7 +7204,8 @@ mod tests {
         assert!(
             base(vec![FileChange {
                 path: "bad.txt".into(),
-                content_base64: Some("not base64!!".into())
+                content_base64: Some("not base64!!".into()),
+                mode: None,
             }])
             .validate()
             .is_err()
@@ -7119,47 +7226,56 @@ mod tests {
         let change = |path: &str| FileChange {
             path: path.into(),
             content_base64: Some("aGVsbG8=".into()),
+            mode: None,
         };
         let base_tree = vec![
             GitTreeEntry {
                 path: "bin/tool".into(),
                 mode: "100755".into(),
                 kind: "blob".into(),
+                sha: "b".repeat(40),
             },
             GitTreeEntry {
                 path: "notes.txt".into(),
                 mode: "100644".into(),
                 kind: "blob".into(),
+                sha: "b".repeat(40),
             },
             GitTreeEntry {
                 path: "directory".into(),
                 mode: "040000".into(),
                 kind: "tree".into(),
+                sha: "b".repeat(40),
             },
             GitTreeEntry {
                 path: "nested/tool".into(),
                 mode: "100755".into(),
                 kind: "blob".into(),
+                sha: "b".repeat(40),
             },
             GitTreeEntry {
                 path: "file-parent".into(),
                 mode: "100644".into(),
                 kind: "blob".into(),
+                sha: "b".repeat(40),
             },
             GitTreeEntry {
                 path: "symlink-parent".into(),
                 mode: "120000".into(),
                 kind: "blob".into(),
+                sha: "b".repeat(40),
             },
             GitTreeEntry {
                 path: "submodule-parent".into(),
                 mode: "160000".into(),
                 kind: "commit".into(),
+                sha: "b".repeat(40),
             },
             GitTreeEntry {
                 path: "link".into(),
                 mode: "120000".into(),
                 kind: "blob".into(),
+                sha: "b".repeat(40),
             },
         ];
 
@@ -7190,6 +7306,51 @@ mod tests {
                 ]
             })
         );
+        // A stated mode is what lets an integrating caller reproduce an
+        // executable file it saw through `observe_changes`. Without it a new
+        // script lands at 100644 and fails much later as "permission denied".
+        let executable = |path: &str| FileChange {
+            path: path.into(),
+            content_base64: Some("aGVsbG8=".into()),
+            mode: Some("100755".into()),
+        };
+        let stated = publish_tree::build_request(
+            "base-tree",
+            &[executable("new/gate.sh"), change("bin/tool")],
+            &base_tree,
+            &[None, None],
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(stated).unwrap(),
+            serde_json::json!({
+                "base_tree": "base-tree",
+                "tree": [
+                    {"path": "new/gate.sh", "mode": "100755", "type": "blob", "sha": null},
+                    // Unstated still inherits, so the old behaviour is intact.
+                    {"path": "bin/tool", "mode": "100755", "type": "blob", "sha": null}
+                ]
+            })
+        );
+        // A mode outside the two regular-file modes is refused rather than
+        // passed through: a symlink or gitlink is not a file this surface
+        // writes, and accepting the string would let a caller create one.
+        for refused in ["120000", "160000", "040000", "100600", "", "0100755"] {
+            assert!(
+                publish_tree::build_request(
+                    "base-tree",
+                    &[FileChange {
+                        path: "new/thing".into(),
+                        content_base64: Some("aGVsbG8=".into()),
+                        mode: Some(refused.into()),
+                    }],
+                    &base_tree,
+                    &[None],
+                )
+                .is_err(),
+                "{refused} was accepted as a mode"
+            );
+        }
         // Replacing a tree or a symlink with a blob would silently destroy
         // repository structure, so publication fails closed.
         assert!(

@@ -203,6 +203,14 @@ fn declared_output_schemas_name_the_fields_the_results_carry() {
             &["base_sha", "head_sha", "paths"][..],
         ),
         (
+            // The nested entry is checked against its own struct: a rename
+            // inside `paths.items` is invisible to a top-level field list, and
+            // this is the only result type here with a nested object.
+            "observe_changes",
+            "ChangedPath",
+            &["path", "status", "mode"][..],
+        ),
+        (
             "maintainer_status",
             "RepositoryResult",
             &[
@@ -446,6 +454,13 @@ fn mcp_surface_is_installation_bound_and_typed() {
         "enqueue_pull_request",
     ] {
         assert!(mcp.contains(tool), "missing typed MCP tool: {tool}");
+        // Advertised is not dispatched. A renamed match arm leaves the tool in
+        // `tools()` and every call to it falling through to unknown-tool, which
+        // a whole-file search for the name cannot see.
+        assert!(
+            mcp.contains(&format!(r#"Some("{tool}")"#)),
+            "advertised but never dispatched: {tool}"
+        );
     }
     for forbidden in ["generic_request", "graphql", "shell", "access_token"] {
         assert!(

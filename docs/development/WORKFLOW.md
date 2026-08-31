@@ -135,13 +135,16 @@ head, `observe_changes` says which paths differ, `observe_file` returns each
 one's bytes, and `publish_commit` writes the result back. If a task seems to
 need git, the missing thing is usually a typed operation.
 
-If that broker is unavailable, automation stops unless the owner separately
-authorizes a finite host-credential fallback naming the exact repository and
-operations. The same authorization is what `.github/**`, CODEOWNERS and
-`dependabot.yml` need, because `publish_commit` refuses them by design. Under such an authorization, run only those named `git`/`gh`
-commands outside the sandbox and re-read the exact remote ref, PR, check,
-release, or workflow state after each effect. No force push, ref deletion,
-access change, credential inspection, or implicit expansion is allowed.
+Two things still need the owner: a broker that is unavailable, and the paths
+`publish_commit` refuses by design — `.github` itself, `.github/workflows/**`,
+the three CODEOWNERS locations, and `.github/dependabot.{yml,yaml}`. The rest of
+`.github`, such as issue and PR templates, is publishable and needs no
+authorization. In either case the owner authorizes a finite host-credential
+fallback naming the exact repository and operations; run only those named
+`git`/`gh` commands outside the sandbox and re-read the exact remote ref, PR,
+check, release, or workflow state after each effect. No force push, ref
+deletion, access change, credential inspection, or implicit expansion is
+allowed — those hold whatever the owner authorizes for the task.
 
 Pull-request and merge-queue runs use fresh hosted workers. A manual workflow
 dispatch is the explicit path for a platform investigation on the persistent
