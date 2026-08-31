@@ -198,7 +198,12 @@ fn own_key_in(schema: &str, key: &str) -> String {
                     let value = schema[from..].trim_start();
                     let end = match value.as_bytes().first() {
                         Some(b'[') => value.find(']').expect("unterminated array") + 1,
-                        _ => value.find([',', '\n']).unwrap_or(value.len()),
+                        // `}` closes the object, so it terminates the last
+                        // value in one. Without it `"additionalProperties":
+                        // false}` reads back as `false}` -- and six schemas in
+                        // `mcp.rs` are written that way today, passing only
+                        // because they are not yet in this table.
+                        _ => value.find([',', '\n', '}']).unwrap_or(value.len()),
                     };
                     return value[..end].trim().trim_end_matches(',').to_string();
                 }
@@ -275,6 +280,14 @@ fn declared_output_schemas_name_the_fields_the_results_carry() {
             "observe_ref",
             "RefObservationResult",
             &["branch", "head_sha"][..],
+        ),
+        (
+            // Written with its closing brace on the value's own line, which is
+            // how six other tools in `mcp.rs` are written. Including one here
+            // keeps the key reader honest about where a value ends.
+            "publish_release_tag",
+            "ReleaseTagResult",
+            &["tag", "commit_sha"][..],
         ),
         (
             "observe_file",
@@ -629,22 +642,6 @@ fn github_refusals_stay_determinate() {
     let github_app = project_file("src/github_app.rs");
     let mcp = project_file("src/mcp.rs");
     let journal = project_file("src/journal.rs");
-
-    // `read_tree` is wasm-only, so no host test can drive it. These pin the two
-    // decisions it makes that a caller cannot recover from if they silently
-    // revert: a truncated listing must never be returned as if complete, and
-    // the commit's parents must actually be populated. Both survived every
-    // gate before this, including the drift table -- which proves the `parents`
-    // field exists, never that anything fills it.
-    assert!(
-        github_app.contains("if tree.truncated {")
-            && github_app.contains("RefusalReason::TreeTruncated"),
-        "a truncated tree is no longer refused as a determinate refusal"
-    );
-    assert!(
-        github_app.contains("parents: commit") && github_app.contains(".map(|parent| parent.sha)"),
-        "observe_tree no longer reports the commit's parents"
-    );
 
     // The transport reports the status; it is the only place that sees one.
     assert!(github_app.contains("Err(Error::Rejected(response.status_code()))"));

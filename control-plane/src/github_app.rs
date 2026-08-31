@@ -98,15 +98,18 @@ pub(crate) enum OperationError {
     InvalidInput,
     #[error("operation ID is already bound to a different request")]
     Conflict,
-    /// GitHub refused the requested mutation determinately. Distinct from
-    /// `Indeterminate`, which means the outcome is genuinely unknown: a
-    /// refusal leaves the operation ID retryable once the precondition the
-    /// refusal names actually holds. The reason rides along because an
+    /// The request was refused determinately. Distinct from `Indeterminate`,
+    /// which means the outcome is genuinely unknown. Most refusals leave the
+    /// operation ID retryable once the precondition the reason names actually
+    /// holds — but not all: `TreeTruncated` names a fact about the commit that
+    /// will be just as true next time, and reads reach this variant too, so it
+    /// is not only about mutations. The reason carries which of those it is,
+    /// which is why the wrapper text states the refusal and promises nothing. The reason rides along because an
     /// untyped outcome has now cost two diagnosis cycles (#371): "the token
     /// lacks a permission", "the queue rejected the entry", and "there is
     /// no queue" are three different retries, and without the reason the
     /// only way to tell them apart is reading this crate's source.
-    #[error("github refused the requested mutation: {0}")]
+    #[error("the request was refused: {0}")]
     Refused(RefusalReason),
     #[error("operation outcome requires reconciliation")]
     Indeterminate,
@@ -3027,6 +3030,52 @@ fn valid_repository_path(value: &str) -> Result<(), OperationError> {
         .ok_or(OperationError::InvalidInput)
 }
 
+/// The two decisions `observe_tree` makes about a commit and its tree, split
+/// out so both are host-testable. The transport around it is `wasm32`-only, and
+/// a grep-style assertion on the source could neither catch `.take(1)` dropping
+/// a merge commit's second parent nor survive a behaviour-identical refactor.
+#[cfg(any(target_arch = "wasm32", test))]
+fn tree_observation(
+    commit_sha: String,
+    commit: GitCommit,
+    tree: GitTree,
+) -> Result<TreeObservationResult, OperationError> {
+    // Truncation is GitHub's own fact about its own answer, and a partial
+    // listing read as complete is the one outcome a caller cannot recover from.
+    // It is a determinate refusal that names itself, not an indeterminate
+    // outcome: this operation claims no id and writes no journal record, so
+    // there is nothing to reconcile, and the same commit truncates every time.
+    if tree.truncated {
+        return Err(OperationError::Refused(RefusalReason::TreeTruncated));
+    }
+    Ok(TreeObservationResult {
+        commit_sha,
+        tree_sha: commit.tree.sha,
+        // Every parent. A merge commit has two, and dropping the second makes
+        // ancestry unwalkable exactly where branches actually meet.
+        parents: commit
+            .parents
+            .into_iter()
+            .map(|parent| parent.sha)
+            .collect(),
+        // Reported as GitHub returned them. Shape-checking each entry made one
+        // unusual path -- long, or carrying a byte git permits -- break every
+        // read of that repository at every commit, for data the caller does not
+        // control and cannot fix. The response is already bounded by
+        // `MAX_GITHUB_RESPONSE_BYTES`, above GitHub's own tree ceiling.
+        entries: tree
+            .tree
+            .into_iter()
+            .map(|entry| TreeEntryResult {
+                path: entry.path,
+                kind: entry.kind,
+                mode: entry.mode,
+                sha: entry.sha,
+            })
+            .collect(),
+    })
+}
+
 /// A path's shape, with no authority policy attached.
 ///
 /// Reading is not writing. The `.github` and CODEOWNERS refusals exist because
@@ -3542,40 +3591,7 @@ impl Authority {
             token.as_str(),
         )
         .await?;
-        // Truncation is GitHub's own fact about its own answer, and a partial
-        // listing read as complete is the one outcome a caller cannot recover
-        // from. It is a determinate refusal that names itself, not an
-        // indeterminate outcome: this operation claims no id and writes no
-        // journal record, so there is nothing to reconcile and retrying the
-        // same commit will always truncate again.
-        if tree.truncated {
-            return Err(OperationError::Refused(RefusalReason::TreeTruncated));
-        }
-        // Reported as GitHub returned them. Shape-checking each entry made one
-        // unusual path -- long, or carrying a byte git permits -- break every
-        // read of that repository at every commit, for data the caller does not
-        // control and cannot fix. The response is already bounded by
-        // `MAX_GITHUB_RESPONSE_BYTES`, above GitHub's own tree ceiling.
-        let entries = tree
-            .tree
-            .into_iter()
-            .map(|entry| TreeEntryResult {
-                path: entry.path,
-                kind: entry.kind,
-                mode: entry.mode,
-                sha: entry.sha,
-            })
-            .collect();
-        Ok(TreeObservationResult {
-            commit_sha,
-            tree_sha: commit.tree.sha,
-            parents: commit
-                .parents
-                .into_iter()
-                .map(|parent| parent.sha)
-                .collect(),
-            entries,
-        })
+        tree_observation(commit_sha, commit, tree)
     }
 
     /// The commit itself, which is also the cheapest proof that it exists.
@@ -5104,13 +5120,13 @@ struct RefCreate<'a> {
     sha: &'a str,
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 #[derive(Deserialize)]
 struct GitObjectId {
     sha: String,
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 #[derive(Deserialize)]
 struct GitCommit {
     message: String,
@@ -5125,7 +5141,7 @@ struct TagObject {
 }
 
 /// A parent entry carries no `type`, so it cannot reuse `GitObject`.
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 #[derive(Deserialize)]
 struct GitParent {
     sha: String,
@@ -6649,6 +6665,71 @@ mod tests {
         }
     }
 
+    /// The two decisions `observe_tree` makes, tested for real rather than
+    /// pinned by a grep on the source. A source pin could not see `.take(1)`
+    /// dropping a merge commit's second parent, and broke on refactors that
+    /// changed nothing.
+    #[test]
+    fn a_tree_observation_reports_every_parent_and_refuses_a_partial_listing() {
+        let commit = |parents: &[&str]| -> GitCommit {
+            serde_json::from_str(&format!(
+                r#"{{"message":"m","tree":{{"sha":"{}"}},"parents":[{}]}}"#,
+                "c".repeat(40),
+                parents
+                    .iter()
+                    .map(|sha| format!(r#"{{"sha":"{sha}"}}"#))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ))
+            .unwrap()
+        };
+        let tree = |truncated: bool| -> GitTree {
+            serde_json::from_str(&format!(
+                r#"{{"truncated":{truncated},"tree":[{{"path":"a.txt","mode":"100644","type":"blob","sha":"{}"}},{{"path":"bin/x","mode":"100755","type":"blob","sha":"{}"}}]}}"#,
+                "d".repeat(40),
+                "e".repeat(40)
+            ))
+            .unwrap()
+        };
+
+        // A merge commit has two parents, and dropping the second makes
+        // ancestry unwalkable exactly where branches meet.
+        let merge = tree_observation(
+            "a".repeat(40),
+            commit(&["b".repeat(40).as_str(), &"f".repeat(40)]),
+            tree(false),
+        )
+        .unwrap();
+        assert_eq!(merge.parents, vec!["b".repeat(40), "f".repeat(40)]);
+        assert_eq!(merge.commit_sha, "a".repeat(40));
+        assert_eq!(merge.tree_sha, "c".repeat(40));
+        // Entries are reported as git records them, modes included.
+        assert_eq!(
+            merge
+                .entries
+                .iter()
+                .map(|entry| (
+                    entry.path.as_str(),
+                    entry.kind.as_str(),
+                    entry.mode.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            vec![("a.txt", "blob", "100644"), ("bin/x", "blob", "100755")]
+        );
+        // A root commit has none, which is an answer rather than a failure.
+        assert!(
+            tree_observation("a".repeat(40), commit(&[]), tree(false))
+                .unwrap()
+                .parents
+                .is_empty()
+        );
+        // A partial listing must never be returned as if it were complete.
+        assert_eq!(
+            tree_observation("a".repeat(40), commit(&[]), tree(true)).err(),
+            Some(OperationError::Refused(RefusalReason::TreeTruncated))
+        );
+    }
+
     #[test]
     fn a_workflow_path_names_a_workflow_file() {
         for accepted in [
@@ -7026,17 +7107,17 @@ mod tests {
             .unwrap();
         assert_eq!(
             rejected.to_string(),
-            "github refused the requested mutation: \
+            "the request was refused: \
              rejected before execution as NOT_FOUND+RATE_LIMITED"
         );
         assert_eq!(
             enqueue_outcome(None, None).err().unwrap().to_string(),
-            "github refused the requested mutation: \
+            "the request was refused: \
              answered with neither an effect nor an error"
         );
         assert_eq!(
             OperationError::Refused(RefusalReason::NoMergeQueue).to_string(),
-            "github refused the requested mutation: \
+            "the request was refused: \
              the queue read found no merge queue on the base branch"
         );
         // The empty set is unreachable from classification but constructible
