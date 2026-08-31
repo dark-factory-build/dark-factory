@@ -280,9 +280,9 @@ async fn ready(State(state): State<BrokerState>) -> Response {
                 json_response(
                     StatusCode::OK,
                     if mcp.headless() {
-                        r#"{"status":"ready","maintainer_webhook":"signed_ping_with_app_verification","maintainer_operations":"mcp_repository_bound_operator_and_headless","product_webhook":"inactive","operator_api":"inactive"}"#
+                        r#"{"status":"ready","maintainer_webhook":"signed_ping_with_app_verification","maintainer_operations":"mcp_installation_bound_operator_and_headless","product_webhook":"inactive","operator_api":"inactive"}"#
                     } else {
-                        r#"{"status":"ready","maintainer_webhook":"signed_ping_with_app_verification","maintainer_operations":"mcp_repository_bound_operator_only","product_webhook":"inactive","operator_api":"inactive"}"#
+                        r#"{"status":"ready","maintainer_webhook":"signed_ping_with_app_verification","maintainer_operations":"mcp_installation_bound_operator_only","product_webhook":"inactive","operator_api":"inactive"}"#
                     },
                 )
             } else {
@@ -401,7 +401,7 @@ mod tests {
                 4_673_420,
                 [
                     Some(private_key),
-                    Some("maintainer-operations-v2".into()),
+                    Some("maintainer-operations-v3".into()),
                     Some(hex::encode(sha2::Sha256::digest(b"operator@example.com"))),
                     Some("https://dark-factory.cloudflareaccess.com".into()),
                     Some("a".repeat(64)),

@@ -270,6 +270,57 @@ fn every_repository_tool_requires_the_repository_it_acts_on() {
         block[input..output].to_string()
     };
 
+    // The schema's OWN `required`, not the first one that appears in it.
+    // `publish_commit` nests an object inside `changes`, and a substring search
+    // matched that nested array instead -- so this assertion passed while the
+    // tool's own `required` omitted the repository and every call to it failed
+    // as invalid params. The guard has to know which object it is reading.
+    let own_required = |name: &str| -> String {
+        let schema = tool_input(name);
+        let bytes = schema.as_bytes();
+        let body = schema
+            .find('{')
+            .unwrap_or_else(|| panic!("{name} inputSchema is not an object"));
+        let mut depth = 0_i32;
+        let mut in_string = false;
+        let mut index = body;
+        while index < bytes.len() {
+            let byte = bytes[index];
+            if in_string {
+                // Skip quoted spans wholesale. The property patterns contain
+                // `{1,39}` and `\\.`, so counting braces blind to strings
+                // reads a depth the schema does not have.
+                match byte {
+                    b'\\' => index += 1,
+                    b'"' => in_string = false,
+                    _ => {}
+                }
+                index += 1;
+                continue;
+            }
+            match byte {
+                b'"' => {
+                    if depth == 1 && schema[index..].starts_with(r#""required""#) {
+                        let from = index
+                            + schema[index..]
+                                .find('[')
+                                .unwrap_or_else(|| panic!("{name} required is not an array"));
+                        let close = schema[from..]
+                            .find(']')
+                            .unwrap_or_else(|| panic!("{name} required is unterminated"));
+                        return schema[from..=from + close].to_string();
+                    }
+                    in_string = true;
+                }
+                b'{' | b'[' => depth += 1,
+                b'}' | b']' => depth -= 1,
+                _ => {}
+            }
+            index += 1;
+        }
+        panic!("{name} declares no required array of its own")
+    };
+
     // Every tool that reaches GitHub. `observe_operation` is deliberately
     // absent: it reads the durable journal by operation UUID, which is
     // repository-independent, and requiring a repository there would be a
@@ -301,8 +352,16 @@ fn every_repository_tool_requires_the_repository_it_acts_on() {
             "{tool} declares no repository property"
         );
         assert!(
-            input.contains(r#""required": ["repository""#),
-            "{tool} does not require a repository"
+            own_required(tool).contains(r#""repository""#),
+            "{tool} does not require a repository at its own top level"
+        );
+        // A repository named inside a nested object is not the operation's
+        // repository, and would make that object's schema unsatisfiable
+        // wherever it also forbids unknown properties.
+        let nested = input.replacen(&own_required(tool), "", 1);
+        assert!(
+            !nested.contains(r#""required": ["repository""#),
+            "{tool} requires a repository inside a nested object"
         );
     }
 
@@ -333,7 +392,7 @@ fn every_repository_tool_requires_the_repository_it_acts_on() {
 }
 
 #[test]
-fn mcp_surface_is_repository_bound_and_typed() {
+fn mcp_surface_is_installation_bound_and_typed() {
     let mcp = project_file("src/mcp.rs");
     let access = project_file("src/access.rs");
 
@@ -383,20 +442,26 @@ fn mcp_surface_is_repository_bound_and_typed() {
 #[test]
 fn the_deployment_gate_asserts_the_readiness_label_the_worker_emits() {
     let lib = project_file("src/lib.rs");
+    let bootstrap = project_file("../scripts/bootstrap-maintainer-v2.sh");
     let workflow = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../.github/workflows/deploy-control-plane.yml"),
     )
     .unwrap();
 
-    let headless = r#""maintainer_operations":"mcp_repository_bound_operator_and_headless""#;
+    let headless = r#""maintainer_operations":"mcp_installation_bound_operator_and_headless""#;
     assert!(lib.contains(headless));
-    assert!(lib.contains(r#""maintainer_operations":"mcp_repository_bound_operator_only""#));
+    assert!(lib.contains(r#""maintainer_operations":"mcp_installation_bound_operator_only""#));
     // The gate must require the headless variant specifically: the binding
     // behind it is optional and inherited across versions, so this is the only
     // check that catches a deployment which silently lost it.
     assert!(workflow.contains(headless));
-    assert!(!workflow.contains("mcp_repository_bound_operator_only"));
+    // The break-glass activation path performs the same live check. Keep it
+    // bound to the emitted label too, or a failed activation can roll back
+    // forever even while the regular deployment workflow is correct.
+    assert!(bootstrap.contains(headless));
+    assert!(!bootstrap.contains("mcp_repository_bound_operator_and_headless"));
+    assert!(!workflow.contains("mcp_installation_bound_operator_only"));
     assert!(!lib.contains("mcp_six_tools"));
     assert!(!workflow.contains("mcp_six_tools"));
 }

@@ -187,7 +187,7 @@ cleanup() {
         if test "$current_version" = "$version"; then
             echo "bootstrap: restoring $previous" >&2
             if ! run_wrangler rollback "$previous" --name "$worker" --yes \
-                --message 'rollback failed Maintainer v2 activation'; then
+                --message 'rollback failed Maintainer v3 activation'; then
                 echo "bootstrap: rollback failed" >&2
                 rollback_failed=1
             elif test "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 "https://$hostname/healthz" || true)" != 200; then
@@ -241,7 +241,7 @@ before_version=$(printf '%s' "$before_promotion" | "$node" -e '
       process.stdout.write(d[0].version_id);
     });')
 test "$before_version" = "$previous" || {
-    echo "bootstrap: live version changed while v2 was staged; refusing promotion" >&2
+    echo "bootstrap: live version changed while v3 was staged; refusing promotion" >&2
     exit 1
 }
 
@@ -278,13 +278,13 @@ for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
     body=$(curl -sS --max-time 30 "https://$hostname/readyz" || true)
     if test "$health" = 200 \
         && printf '%s' "$body" | grep -Fq '"status":"ready"' \
-        && printf '%s' "$body" | grep -Fq '"maintainer_operations":"mcp_repository_bound_operator_and_headless"'; then
+        && printf '%s' "$body" | grep -Fq '"maintainer_operations":"mcp_installation_bound_operator_and_headless"'; then
         ready=1
         break
     fi
     test "$attempt" = 12 || sleep 5
 done
-test "$ready" = 1 || { echo "bootstrap: live v2 readiness failed" >&2; exit 1; }
+test "$ready" = 1 || { echo "bootstrap: live v3 readiness failed" >&2; exit 1; }
 
 stop_tail
 verified=1

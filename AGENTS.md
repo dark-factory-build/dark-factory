@@ -38,9 +38,9 @@ framework. The shell-provider loop is proven; real Claude/Codex work is not.
 9. Contributor agents use only the Maintainer App for GitHub. Every tool names
    its `owner/name` repository. First require `maintainer_status` for the exact
    repository you intend to act on to return that same repository, a positive
-   numeric ID, and revision `maintainer-operations-v2`. Fail closed if the
-   required typed operation is
-   unavailable. An owner-authorized fallback must name the exact repository and
+   numeric ID, and revision `maintainer-operations-v3`. Fail closed if the
+   required typed operation is unavailable. An owner-authorized fallback must
+   name the exact repository and
    finite command/target set (refs, PR head/base, tags, or fixed workflows).
    Run only those `git`/`gh` operations outside the sandbox through existing
    host credentials, and re-read the exact remote state after each effect. No

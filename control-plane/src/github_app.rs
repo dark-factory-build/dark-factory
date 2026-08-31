@@ -14,7 +14,7 @@ use crate::maintainer::MAX_EXACT_INTEGER;
 
 pub(crate) const PRIVATE_KEY_BINDING: &str = "DARK_FACTORY_MAINTAINER_PRIVATE_KEY_PKCS8";
 pub(crate) const PERMISSION_REVISION_BINDING: &str = "DARK_FACTORY_MAINTAINER_PERMISSION_REVISION";
-pub(crate) const PERMISSION_REVISION: &str = "maintainer-operations-v2";
+pub(crate) const PERMISSION_REVISION: &str = "maintainer-operations-v3";
 const GITHUB_API_VERSION: &str = "2026-03-10";
 // GitHub list endpoints below request at most 100 records. Issue comments and
 // review bodies can each be 65,536 characters, so a webhook-sized 64 KiB cap
@@ -139,6 +139,19 @@ pub(crate) enum RefusalReason {
     JobNotFailed,
     #[error("the pull request was already queued before this operation claimed it")]
     AlreadyQueued,
+    /// The App is not installed on the named repository, or the installation
+    /// cannot see it. Distinguished from a mutation's own `NOT_FOUND` because
+    /// on a surface where the caller names the repository this is the likeliest
+    /// mistake, and reporting it as a mutation refusal sends the caller looking
+    /// at the issue or pull request instead of at the installation.
+    #[error("the App is not installed on the named repository")]
+    RepositoryNotInstalled,
+    /// The installation exists but does not carry the authority this revision
+    /// mints, and the value names the first field that failed. Readiness cannot
+    /// report this: it names no repository, so no installation is audited until
+    /// one is used, which makes the using caller the only one who can be told.
+    #[error("the installation is not usable: {0}")]
+    InstallationRejected(&'static str),
 }
 
 /// Which pre-execution rejection classes appeared. More than one can:
@@ -2971,18 +2984,18 @@ impl RepositoryName {
     /// returns is therefore case-insensitive.
     fn requested(value: &mut str) -> Result<Self, OperationError> {
         value.make_ascii_lowercase();
-        Self::new(value.to_owned()).map_err(|_| OperationError::InvalidInput)
+        Self::new(value.to_owned())
     }
 
-    fn new(value: String) -> Result<Self, Error> {
+    fn new(value: String) -> Result<Self, OperationError> {
         let Some((owner, name)) = value.split_once('/') else {
-            return Err(Error::Configuration);
+            return Err(OperationError::InvalidInput);
         };
         if value.matches('/').count() != 1
             || !valid_path_segment(owner, 39, false)
             || !valid_path_segment(name, 100, true)
         {
-            return Err(Error::Configuration);
+            return Err(OperationError::InvalidInput);
         }
         let owner = owner.to_owned();
         let name = name.to_owned();
@@ -3093,8 +3106,20 @@ impl Authority {
     ) -> Result<RepositoryToken, OperationError> {
         let jwt = self.jwt().await?;
         let installation: Installation =
-            github_json_as_app(&repository.installation_url(), jwt.as_str()).await?;
-        validate_installation(&installation, self.app_id)?;
+            match github_json_as_app(&repository.installation_url(), jwt.as_str()).await {
+                Ok(installation) => installation,
+                // "Not installed here" is the likeliest caller mistake on this
+                // surface, and it is not a refusal of the operation's target.
+                Err(Error::Rejected(404)) => {
+                    return Err(OperationError::Refused(
+                        RefusalReason::RepositoryNotInstalled,
+                    ));
+                }
+                Err(error) => return Err(error.into()),
+            };
+        validate_installation(&installation, self.app_id).map_err(|defect| {
+            OperationError::Refused(RefusalReason::InstallationRejected(defect))
+        })?;
         // Named, not numbered: the caller supplies `owner/name`, and the numeric
         // id is what GitHub hands back for it. Requesting by id would need an id
         // the caller cannot be trusted to supply and this service no longer
@@ -3137,22 +3162,35 @@ impl Authority {
             );
             return Err(OperationError::Unavailable);
         };
-        if response.permissions != expected_permissions
-            || !granted
-                .full_name
-                .eq_ignore_ascii_case(&repository.full_name)
-            || granted.owner.id != installation.account.id
+        // Three independent conditions. Two of them became caller-reachable
+        // when the repository stopped being configuration, so a single line
+        // reporting a permission count would send the reader to the wrong one.
+        let mismatch = if response.permissions != expected_permissions {
+            Some("permissions")
+        } else if !granted
+            .full_name
+            .eq_ignore_ascii_case(&repository.full_name)
         {
-            worker::console_error!(
-                "installation token contract mismatch: {} permission(s)",
-                response.permissions.len()
-            );
+            Some("repository")
+        } else if granted.owner.id != installation.account.id {
+            Some("owner")
+        } else {
+            None
+        };
+        if let Some(mismatch) = mismatch {
+            worker::console_error!("installation token contract mismatch on {mismatch}");
             return Err(OperationError::Unavailable);
         }
         valid_exact_integer(granted.id)?;
         Ok(RepositoryToken {
             repository_id: granted.id,
-            repository,
+            // GitHub's own spelling, not the caller's. Path segments resolve
+            // case-insensitively, but query filters are not documented to --
+            // `head={owner}:{ref}` on the pull request list in particular, where
+            // a missed match reads as "no such pull request" and lets a
+            // reconciliation publish a duplicate. Taking the name from the grant
+            // costs nothing and removes the question.
+            repository: RepositoryName::new(granted.full_name.clone())?,
             token: Credential::new(response.token)?,
         })
     }
@@ -3183,7 +3221,10 @@ impl Authority {
         }
         valid_sha(&reference.object.sha)?;
         Ok(RepositoryResult {
-            repository: token.repository.full_name.clone(),
+            // GitHub's canonical spelling, not the caller's. Both AGENTS files
+            // require an agent to fail closed unless status returns the
+            // repository it asked for, and the id already comes from the grant.
+            repository: metadata.full_name,
             repository_id: token.repository_id,
             default_branch: metadata.default_branch,
             default_sha: reference.object.sha,
@@ -3550,7 +3591,18 @@ impl Authority {
         )
         .await?;
         valid_sha(&base.tree.sha)?;
-        let mut entries = Vec::with_capacity(request.changes.len());
+        let base_tree: GitTree = github_json(
+            &format!(
+                "https://api.github.com/repos/{}/{}/git/trees/{}?recursive=1",
+                token.repository.owner, token.repository.name, base.tree.sha
+            ),
+            token.as_str(),
+        )
+        .await?;
+        if base_tree.truncated {
+            return Err(OperationError::Unavailable);
+        }
+        let mut blob_shas = Vec::with_capacity(request.changes.len());
         for change in &request.changes {
             let sha = match change.content_base64.as_deref() {
                 Some(content) => {
@@ -3572,13 +3624,14 @@ impl Authority {
                 }
                 None => None,
             };
-            entries.push(TreeEntry {
-                path: change.path.clone(),
-                mode: "100644",
-                kind: "blob",
-                sha,
-            });
+            blob_shas.push(sha);
         }
+        let tree_request = publish_tree::build_request(
+            &base.tree.sha,
+            &request.changes,
+            &base_tree.tree,
+            &blob_shas,
+        )?;
         let tree: GitObjectId = github_json_request(
             worker::Method::Post,
             &format!(
@@ -3586,10 +3639,7 @@ impl Authority {
                 token.repository.owner, token.repository.name
             ),
             token.as_str(),
-            Some(&TreeRequest {
-                base_tree: &base.tree.sha,
-                tree: &entries,
-            }),
+            Some(&tree_request),
         )
         .await?;
         valid_sha(&tree.sha)?;
@@ -4011,10 +4061,17 @@ impl Authority {
         token: &RepositoryToken,
         request: &ObservePullRequestWorkflows,
     ) -> Result<PullRequestWorkflowsResult, OperationError> {
+        let workflow = WorkflowRef::requested(&request.workflow_path)?;
         let response: WorkflowRuns = github_json(
             &format!(
-                "https://api.github.com/repos/{}/{}/actions/runs?event=pull_request&head_sha={}&per_page={MAX_WORKFLOW_RUNS}",
-                token.repository.owner, token.repository.name, request.head_sha
+                "{}?event=pull_request&head_sha={}&per_page={MAX_WORKFLOW_RUNS}",
+                workflow_api_url(
+                    &token.repository.owner,
+                    &token.repository.name,
+                    workflow,
+                    "runs",
+                ),
+                request.head_sha
             ),
             token.as_str(),
         )
@@ -4026,11 +4083,7 @@ impl Authority {
         }
         let mut runs = Vec::with_capacity(response.workflow_runs.len());
         for run in response.workflow_runs {
-            run.verify(
-                WorkflowRef::requested(&request.workflow_path)?,
-                request.pull_number,
-                &request.head_sha,
-            )?;
+            run.verify(workflow, request.pull_number, &request.head_sha)?;
             let jobs = self.workflow_jobs(token, run.id).await?;
             runs.push(run.into_result(jobs)?);
         }
@@ -4434,11 +4487,7 @@ struct RepositoryMetadata {
 impl RepositoryMetadata {
     fn validate(self, token: &RepositoryToken) -> Result<Self, OperationError> {
         valid_exact_integer(self.id)?;
-        if self.id != token.repository_id
-            || !self
-                .full_name
-                .eq_ignore_ascii_case(&token.repository.full_name)
-        {
+        if self.id != token.repository_id || self.full_name != token.repository.full_name {
             return Err(OperationError::Conflict);
         }
         valid_ref(&self.default_branch)?;
@@ -4557,21 +4606,98 @@ struct BlobRequest<'a> {
     encoding: &'static str,
 }
 
-#[cfg(target_arch = "wasm32")]
-#[derive(Serialize)]
-struct TreeEntry {
-    path: String,
-    mode: &'static str,
-    #[serde(rename = "type")]
-    kind: &'static str,
-    sha: Option<String>,
+#[cfg(any(target_arch = "wasm32", test))]
+mod publish_tree {
+    use super::{FileChange, GitTreeEntry, OperationError};
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    struct Entry {
+        path: String,
+        mode: &'static str,
+        #[serde(rename = "type")]
+        kind: &'static str,
+        sha: Option<String>,
+    }
+
+    #[derive(Serialize)]
+    pub(super) struct Request<'a> {
+        base_tree: &'a str,
+        tree: Vec<Entry>,
+    }
+
+    pub(super) fn build_request<'a>(
+        base_tree_sha: &'a str,
+        changes: &[FileChange],
+        base_tree: &[GitTreeEntry],
+        blob_shas: &[Option<String>],
+    ) -> Result<Request<'a>, OperationError> {
+        if changes.len() != blob_shas.len() {
+            return Err(OperationError::InvalidInput);
+        }
+        let tree = changes
+            .iter()
+            .zip(blob_shas)
+            .map(|(change, sha)| {
+                let mut ancestor = String::new();
+                let mut components = change.path.split('/').peekable();
+                while let Some(component) = components.next() {
+                    if components.peek().is_none() {
+                        break;
+                    }
+                    if !ancestor.is_empty() {
+                        ancestor.push('/');
+                    }
+                    ancestor.push_str(component);
+                    if base_tree
+                        .iter()
+                        .find(|entry| entry.path == ancestor)
+                        .is_some_and(|entry| entry.kind != "tree")
+                    {
+                        return Err(OperationError::InvalidInput);
+                    }
+                }
+                let mode = match base_tree.iter().find(|entry| entry.path == change.path) {
+                    None => "100644",
+                    Some(entry) if entry.kind == "blob" => match entry.mode.as_str() {
+                        "100644" | "100755" => entry.mode.as_str(),
+                        _ => return Err(OperationError::InvalidInput),
+                    },
+                    Some(_) => return Err(OperationError::InvalidInput),
+                };
+                Ok(Entry {
+                    path: change.path.clone(),
+                    mode: match mode {
+                        "100644" => "100644",
+                        "100755" => "100755",
+                        _ => unreachable!("build_request only returns supported modes"),
+                    },
+                    kind: "blob",
+                    sha: sha.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, OperationError>>()?;
+        Ok(Request {
+            base_tree: base_tree_sha,
+            tree,
+        })
+    }
 }
 
-#[cfg(target_arch = "wasm32")]
-#[derive(Serialize)]
-struct TreeRequest<'a> {
-    base_tree: &'a str,
-    tree: &'a [TreeEntry],
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Deserialize)]
+struct GitTree {
+    tree: Vec<GitTreeEntry>,
+    truncated: bool,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Deserialize)]
+struct GitTreeEntry {
+    path: String,
+    mode: String,
+    #[serde(rename = "type")]
+    kind: String,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -5279,7 +5405,7 @@ fn percent_encode(value: &str) -> String {
     encoded
 }
 
-fn validate_installation(installation: &Installation, app_id: i64) -> Result<(), Error> {
+fn validate_installation(installation: &Installation, app_id: i64) -> Result<(), &'static str> {
     let rejected: Vec<&str> = [
         (installation.id <= 0).then_some("id"),
         (installation.app_id != app_id).then_some("app_id"),
@@ -5287,9 +5413,10 @@ fn validate_installation(installation: &Installation, app_id: i64) -> Result<(),
         (!permission_at_least(&installation.permissions, "actions", "write")).then_some("actions"),
         (!permission_at_least(&installation.permissions, "checks", "read")).then_some("checks"),
         // `publish_commit` mints `contents: write`. Accepting a read-only
-        // installation let readiness pass and then failed at token mint, where
-        // GitHub's 422 reaches the caller as an opaque "authority is
-        // unavailable".
+        // installation would fail at token mint instead, where GitHub's 422
+        // reaches the caller as an opaque "authority is unavailable". This is
+        // the only place an installation is audited -- readiness names no
+        // repository, so it has none to look up.
         (!permission_at_least(&installation.permissions, "contents", "write"))
             .then_some("contents"),
         (!permission_at_least(&installation.permissions, "issues", "write")).then_some("issues"),
@@ -5299,10 +5426,10 @@ fn validate_installation(installation: &Installation, app_id: i64) -> Result<(),
         // `enqueue_pull_request` mints `merge_queues: write`, and it is the
         // only automated path to the default branch. Omitting it here is the
         // same fail-open the `contents` line above exists to prevent: an
-        // installation without Merge queues would pass `/readyz`, report
-        // authority ready, and then fail every enqueue at token mint. This
-        // check is also what makes readiness the answer to "was the permission
-        // actually granted?" rather than something nothing records.
+        // installation without Merge queues would fail every enqueue at token
+        // mint. Since this refusal names the field that failed, it is also the
+        // answer to "was the permission actually granted?" -- asked of the
+        // installation that is actually being used.
         (!permission_at_least(&installation.permissions, "merge_queues", "write"))
             .then_some("merge_queues"),
         (!installation.events.is_empty()).then_some("events"),
@@ -5311,10 +5438,10 @@ fn validate_installation(installation: &Installation, app_id: i64) -> Result<(),
     .into_iter()
     .flatten()
     .collect();
-    if !rejected.is_empty() {
+    if let Some(first) = rejected.first() {
         #[cfg(target_arch = "wasm32")]
         worker::console_error!("installation rejected on: {}", rejected.join(","));
-        return Err(Error::Unavailable);
+        return Err(first);
     }
     Ok(())
 }
@@ -5934,29 +6061,35 @@ mod tests {
     }
 
     #[test]
-    fn repository_metadata_is_bound_to_the_grant_not_to_its_spelling() {
-        let body = |full_name: &str| {
-            format!(r#"{{"id":1335380107,"full_name":"{full_name}","default_branch":"main"}}"#)
+    fn repository_metadata_is_bound_to_the_grant() {
+        let body = |id: i64, full_name: &str| {
+            format!(r#"{{"id":{id},"full_name":"{full_name}","default_branch":"main"}}"#)
         };
-        // GitHub answers with the repository's canonical case. The grant holds
-        // the lower-cased request, and the two name the same repository.
-        let canonical: RepositoryMetadata =
-            serde_json::from_str(&body("Dark-Factory-Build/Dark-Factory")).unwrap();
+        // The grant and the metadata are both GitHub's own answers, so they
+        // agree exactly or the repository is not the one the token covers.
+        let matching: RepositoryMetadata =
+            serde_json::from_str(&body(1_335_380_107, "dark-factory-build/dark-factory")).unwrap();
         assert!(
-            canonical
+            matching
                 .validate(&granted("dark-factory-build/dark-factory"))
                 .is_ok()
         );
-        // A different repository is a conflict however it is spelled, and the
-        // numeric id alone is not enough to accept it.
-        let other: RepositoryMetadata =
-            serde_json::from_str(&body("dark-factory-build/dark-factory-site")).unwrap();
-        assert_eq!(
-            other
-                .validate(&granted("dark-factory-build/dark-factory"))
-                .err(),
-            Some(OperationError::Conflict)
-        );
+        // A different repository is a conflict even when the id matches, and a
+        // different id is a conflict even when the name matches. Neither half
+        // is load-bearing alone.
+        for (id, full_name) in [
+            (1_335_380_107, "dark-factory-build/dark-factory-site"),
+            (1_335_380_108, "dark-factory-build/dark-factory"),
+        ] {
+            let other: RepositoryMetadata = serde_json::from_str(&body(id, full_name)).unwrap();
+            assert_eq!(
+                other
+                    .validate(&granted("dark-factory-build/dark-factory"))
+                    .err(),
+                Some(OperationError::Conflict),
+                "{full_name} at {id} was accepted"
+            );
+        }
     }
 
     #[test]
@@ -6068,41 +6201,62 @@ mod tests {
         .unwrap();
         assert!(validate_installation(&broader, 4_673_420).is_ok());
 
-        let insufficient: Installation = serde_json::from_str(
-            r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"checks":"read","contents":"write","metadata":"read","pull_requests":"read"},"events":[],"suspended_at":null}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            validate_installation(&insufficient, 4_673_420).err(),
-            Some(Error::Unavailable)
-        );
+        let with_permissions = |permissions: &str| -> Installation {
+            serde_json::from_str(&format!(
+                r#"{{"id":17,"app_id":4673420,"account":{{"id":109233175}},"repository_selection":"selected","permissions":{{{permissions}}},"events":[],"suspended_at":null}}"#
+            ))
+            .unwrap()
+        };
+        // Withhold exactly one grant per case. The guards are checked in order,
+        // so a fixture missing several only ever proves the first -- which is
+        // how the previous case here proved `actions` while reading as a
+        // `pull_requests` test.
+        for (permissions, expected) in [
+            (
+                r#""actions":"write","checks":"read","contents":"write","issues":"write","merge_queues":"write","metadata":"read","pull_requests":"read""#,
+                "pull_requests",
+            ),
+            (
+                r#""actions":"write","contents":"write","issues":"write","merge_queues":"write","metadata":"read","pull_requests":"write""#,
+                "checks",
+            ),
+            (
+                r#""actions":"write","checks":"read","contents":"write","issues":"write","merge_queues":"write","pull_requests":"write""#,
+                "metadata",
+            ),
+        ] {
+            assert_eq!(
+                validate_installation(&with_permissions(permissions), 4_673_420).err(),
+                Some(expected)
+            );
+        }
 
-        // `publish_commit` mints `contents:
-        // write`. A read-only installation used to pass here and pass
-        // readiness, then fail at token mint where GitHub's refusal reaches
-        // the caller as an opaque "authority is unavailable".
+        // `publish_commit` mints `contents: write`. Readiness no longer sees
+        // any installation, so this boundary is the only thing between a
+        // read-only installation and an opaque failure at token mint -- which
+        // is why the refusal now names the field rather than collapsing.
         let read_only: Installation = serde_json::from_str(
             r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"actions":"write","checks":"read","contents":"read","issues":"write","merge_queues":"write","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
         )
         .unwrap();
         assert_eq!(
             validate_installation(&read_only, 4_673_420).err(),
-            Some(Error::Unavailable)
+            Some("contents")
         );
 
         // The "ok" fixtures above already listed `merge_queues`, so they would
         // pass whether or not the boundary required it -- they read as
         // coverage while asserting nothing. This is the case that proves it:
         // everything else granted, Merge queues absent. Without it an
-        // installation that cannot enqueue passes `/readyz`, reports authority
-        // ready, and fails every `enqueue_pull_request` at token mint.
+        // installation that cannot enqueue fails every `enqueue_pull_request`
+        // at token mint with nothing naming the reason.
         let no_queue: Installation = serde_json::from_str(
             r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"actions":"write","checks":"read","contents":"write","issues":"write","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
         )
         .unwrap();
         assert_eq!(
             validate_installation(&no_queue, 4_673_420).err(),
-            Some(Error::Unavailable)
+            Some("merge_queues")
         );
 
         // Read is not enough: enqueueing writes to the queue.
@@ -6112,7 +6266,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             validate_installation(&queue_read_only, 4_673_420).err(),
-            Some(Error::Unavailable)
+            Some("merge_queues")
         );
 
         let no_issues: Installation = serde_json::from_str(
@@ -6121,7 +6275,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             validate_installation(&no_issues, 4_673_420).err(),
-            Some(Error::Unavailable)
+            Some("issues")
         );
 
         let no_actions: Installation = serde_json::from_str(
@@ -6130,7 +6284,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             validate_installation(&no_actions, 4_673_420).err(),
-            Some(Error::Unavailable)
+            Some("actions")
         );
     }
 
@@ -6591,6 +6745,107 @@ mod tests {
         different_tree.changes[0].content_base64 = Some("ZGlmZmVyZW50".into());
         assert_ne!(trailer, different_tree.trailer().unwrap());
         assert!(forged("Two\nlines").validate().is_err());
+    }
+
+    #[test]
+    fn published_tree_entries_preserve_executable_files_and_reject_other_objects() {
+        let change = |path: &str| FileChange {
+            path: path.into(),
+            content_base64: Some("aGVsbG8=".into()),
+        };
+        let base_tree = vec![
+            GitTreeEntry {
+                path: "bin/tool".into(),
+                mode: "100755".into(),
+                kind: "blob".into(),
+            },
+            GitTreeEntry {
+                path: "notes.txt".into(),
+                mode: "100644".into(),
+                kind: "blob".into(),
+            },
+            GitTreeEntry {
+                path: "directory".into(),
+                mode: "040000".into(),
+                kind: "tree".into(),
+            },
+            GitTreeEntry {
+                path: "nested/tool".into(),
+                mode: "100755".into(),
+                kind: "blob".into(),
+            },
+            GitTreeEntry {
+                path: "file-parent".into(),
+                mode: "100644".into(),
+                kind: "blob".into(),
+            },
+            GitTreeEntry {
+                path: "symlink-parent".into(),
+                mode: "120000".into(),
+                kind: "blob".into(),
+            },
+            GitTreeEntry {
+                path: "submodule-parent".into(),
+                mode: "160000".into(),
+                kind: "commit".into(),
+            },
+            GitTreeEntry {
+                path: "link".into(),
+                mode: "120000".into(),
+                kind: "blob".into(),
+            },
+        ];
+
+        let changes = vec![
+            change("bin/tool"),
+            change("notes.txt"),
+            change("nested/tool"),
+            change("new.txt"),
+            change("new/directory/file.txt"),
+        ];
+        let tree_request = publish_tree::build_request(
+            "base-tree",
+            &changes,
+            &base_tree,
+            &[Some("a".repeat(40)), None, Some("b".repeat(40)), None, None],
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(tree_request).unwrap(),
+            serde_json::json!({
+                "base_tree": "base-tree",
+                "tree": [
+                    {"path": "bin/tool", "mode": "100755", "type": "blob", "sha": "a".repeat(40)},
+                    {"path": "notes.txt", "mode": "100644", "type": "blob", "sha": null},
+                    {"path": "nested/tool", "mode": "100755", "type": "blob", "sha": "b".repeat(40)},
+                    {"path": "new.txt", "mode": "100644", "type": "blob", "sha": null},
+                    {"path": "new/directory/file.txt", "mode": "100644", "type": "blob", "sha": null}
+                ]
+            })
+        );
+        // Replacing a tree or a symlink with a blob would silently destroy
+        // repository structure, so publication fails closed.
+        assert!(
+            publish_tree::build_request("base-tree", &[change("directory")], &base_tree, &[None])
+                .is_err()
+        );
+        assert!(
+            publish_tree::build_request("base-tree", &[change("link")], &base_tree, &[None])
+                .is_err()
+        );
+        // A non-tree ancestor would otherwise let GitHub replace that object
+        // with a directory and silently destroy its contents.
+        for path in [
+            "file-parent/child.txt",
+            "symlink-parent/child.txt",
+            "submodule-parent/child.txt",
+        ] {
+            assert!(
+                publish_tree::build_request("base-tree", &[change(path)], &base_tree, &[None])
+                    .is_err()
+            );
+        }
+        assert!(publish_tree::build_request("base-tree", &changes, &base_tree, &[None]).is_err());
     }
 
     #[test]

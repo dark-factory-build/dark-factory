@@ -122,7 +122,7 @@ repository to report:
 
 - the same `owner/name` you asked for;
 - a positive numeric repository ID; and
-- permission revision `maintainer-operations-v2`.
+- permission revision `maintainer-operations-v3`.
 
 Use only its typed, exact-head operations. Retain a write's operation UUID and
 canonical request until the result is reconciled. Never expose App keys,

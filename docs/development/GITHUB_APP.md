@@ -1,8 +1,8 @@
 # GitHub App authority decision
 
 Status: the maintainer broker has one finite typed MCP surface whose every
-operation names the repository it acts on, bounded by the App's installation. Its
-only merge mutation is merge-queue enqueue; the direct-merge operation that
+operation names the repository it acts on, bounded by the App's installation.
+Its only merge mutation is merge-queue enqueue; the direct-merge operation that
 briefly stood in for it has been removed. This document does not itself
 authorize App registration, installation, repository publication, merge,
 release, or live-factory changes.
@@ -62,7 +62,8 @@ an App JWT and that the key belongs to the configured App. It names no
 repository: the installation, its bounded permissions, and the repository
 identity are established per operation, when a token is minted for the
 repository the caller named. This proof creates no installation token and
-exposes no repository operation through webhook intake. Every non-ping event is policy-rejected.
+exposes no repository operation through webhook intake. Every non-ping event
+is policy-rejected.
 The hosted adapter is a Rust Cloudflare Worker; repository operations are
 available only through the separately authenticated finite MCP surface.
 Its production journal uses strongly consistent SQLite Durable Objects;
@@ -73,15 +74,12 @@ and can never satisfy readiness. The production adapter accepts exactly
 `DARK_FACTORY_MAINTAINER_APP_ID`, plus the all-or-nothing App-authority group
 `DARK_FACTORY_MAINTAINER_PRIVATE_KEY_PKCS8`,
 `DARK_FACTORY_MAINTAINER_PERMISSION_REVISION`,
-`DARK_FACTORY_MAINTAINER_REPOSITORY`, and
-`DARK_FACTORY_MAINTAINER_REPOSITORY_OWNER_ID`,
-`DARK_FACTORY_MAINTAINER_REPOSITORY_ID`,
 `DARK_FACTORY_MAINTAINER_OPERATOR_EMAIL_SHA256`,
 `DARK_FACTORY_CLOUDFLARE_ACCESS_TEAM_DOMAIN`, and
 `DARK_FACTORY_CLOUDFLARE_ACCESS_AUD`. The private key is standard
-base64 of unencrypted PKCS#8 DER, the repository is an exact safe
-`owner/repository` name, and the implemented permission revision is exactly
-`maintainer-operations-v2`. Missing webhook authority or a partial or
+base64 of unencrypted PKCS#8 DER, no repository is configured, and the
+implemented permission revision is exactly
+`maintainer-operations-v3`. Missing webhook authority or a partial or
 syntactically invalid App-authority group leaves the fixed inactive router with
 no webhook route. An unusable key or configured but unavailable or drifted
 Durable Object journal or GitHub authority makes readiness and ping
@@ -369,6 +367,16 @@ transfer or deletion revokes the mapping pending fresh approval. Every other
 lifecycle action fails closed. The revision requests no Contents, Pull
 requests, Checks, Actions, Workflows, Releases, Administration, or Secrets
 authority.
+
+`maintainer-operations-v3` grants exactly what `maintainer-operations-v2`
+granted; no GitHub permission changed. It is a new revision because the
+revision is the surface's fail-closed handshake and the operation contract did
+change: every tool gained a required `repository`, three gained a
+`workflow_path`, and the replay digest now covers the repository, so an
+operation UUID journalled under v2 cannot be replayed under v3. Rotate the
+`DARK_FACTORY_MAINTAINER_PERMISSION_REVISION` secret before promoting a v3
+build; a build promoted against the old value fails its own authority check,
+readiness reports not-ready, and the deploy gate rolls it back.
 
 The separately approved `maintainer-operations-v2` revision adds only Actions
 read/write, Contents read/write, Issues read/write, Pull requests read/write,

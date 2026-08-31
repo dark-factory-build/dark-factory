@@ -7,9 +7,9 @@ member and never links to or runs inside `factoryd`.
 The service is a Rust Cloudflare Worker backed by SQLite Durable Objects. It
 keeps GitHub App credentials outside agent processes and exposes only reviewed,
 typed operations over MCP. Every operation names the `owner/name` repository it
-acts on, and can reach only repositories this App is installed on. Deployment state is verified separately;
-source control is not evidence that a route, Access policy, or App
-configuration is live.
+acts on, and can reach only repositories this App is installed on. Deployment
+state is verified separately; source control is not evidence that a route,
+Access policy, or App configuration is live.
 
 ## Current surface
 
@@ -66,8 +66,10 @@ configuration is live.
   not ... expose direct merge as a fallback"). Enqueue is the only automated
   path to `main`. Publication refuses the `.github` authority tree, and every
   write is bound to a stated head commit and to a durable operation ID.
-  There is no generic GitHub proxy, arbitrary URL, repository selector, shell,
-  direct merge, arbitrary ref/workflow mutation, or credential-returning tool.
+  There is no generic GitHub proxy, arbitrary URL, shell, direct merge,
+  arbitrary ref/workflow mutation, or credential-returning tool. Operations name
+  the repository they act on, and reach only repositories this App is installed
+  on: the installation is the boundary, not a configured name.
   A publication cannot target the
   live default branch: generated refs move only forward from a stated head or
   disappear after their exact pull request is proven merged.
@@ -117,12 +119,17 @@ executing or indeterminate operation cannot be reconciled, it is never blindly
 submitted again.
 
 GitHub App installation tokens are minted only inside the Worker, scoped to the
-configured numeric repository, and downscoped per operation. They are held in
-zeroizing memory and are never returned or journalled. The permanent App may
-have additional installed capabilities, but readiness requires the minimum
-  Actions-write, checks-read, contents-write, issues-write, merge-queues-write,
-  metadata-read, and pull-requests-write set; unused App-level authority is
-  never copied into an operation token.
+one repository the operation names, and downscoped per operation. They are held
+in zeroizing memory and are never returned or journalled. The permanent App may
+have additional installed capabilities; unused App-level authority is never
+copied into an operation token.
+
+The Actions-write, checks-read, contents-write, issues-write,
+merge-queues-write, metadata-read, and pull-requests-write minimum is enforced
+when a token is minted, not at readiness. Readiness names no repository, so it
+has no installation to audit; an installation that is suspended, is not
+selected-repository, or lacks one of those grants is refused at the operation
+that needs it, and the refusal names the field that failed.
 
 [SQLite storage API]: https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/
 [Durable Object rules]: https://developers.cloudflare.com/durable-objects/best-practices/rules-of-durable-objects/
@@ -141,7 +148,7 @@ runtime database role, Vercel adapter, or provider management API.
 - `preview_urls = false`;
 - no route or custom domain;
 - one capability-style Durable Object binding; and
-- eleven required production secret bindings.
+- eight required production secret bindings.
 
 The exact required bindings are:
 
@@ -154,7 +161,7 @@ The exact required bindings are:
 - `DARK_FACTORY_MAINTAINER_PRIVATE_KEY_PKCS8`: standard-base64 encoding of the
   App's unencrypted PKCS#8 DER private key;
 - `DARK_FACTORY_MAINTAINER_PERMISSION_REVISION`: exactly
-  `maintainer-operations-v2` for this authority revision;
+  `maintainer-operations-v3` for this authority revision;
 - `DARK_FACTORY_MAINTAINER_OPERATOR_EMAIL_SHA256`: lowercase SHA-256 of the one
   Cloudflare Access operator email after ASCII lowercasing;
 - `DARK_FACTORY_CLOUDFLARE_ACCESS_TEAM_DOMAIN`: the exact lowercase
@@ -169,8 +176,8 @@ One further binding is deliberately outside the all-or-nothing group:
   headlessly. Absent, every service-token assertion is rejected and only the
   operator identity can reach `/mcp`; it never means "any service token".
   Because it is optional and inherited across versions, `/readyz` names which
-  principals are live — `mcp_repository_bound_operator_and_headless` or
-  `mcp_repository_bound_operator_only` — and the deployment gate requires the
+  principals are live — `mcp_installation_bound_operator_and_headless` or
+  `mcp_installation_bound_operator_only` — and the deployment gate requires the
   former.
 
 The revisions and numeric IDs are stored as secrets too. They are not

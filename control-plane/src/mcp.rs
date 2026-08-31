@@ -629,12 +629,12 @@ fn tools() -> Value {
                             "path": {"type": "string", "minLength": 1, "maxLength": 240},
                             "content_base64": {"type": "string", "maxLength": 1000000}
                         },
-                        "required": ["repository", "path"],
+                        "required": ["path"],
                         "additionalProperties": false
                     }
                 }
             },
-            "required": ["operation_id", "branch", "expected_head_sha", "message", "changes"],
+            "required": ["repository", "operation_id", "branch", "expected_head_sha", "message", "changes"],
             "additionalProperties": false
         },
         "outputSchema": {

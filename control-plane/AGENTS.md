@@ -60,7 +60,7 @@ Codex nor Claude owns its credentials or its durable journal.
    first remote call must be `maintainer_status` for the exact repository they
    intend to act on, and they must fail closed unless it returns that same
    `owner/name`, a positive numeric repository ID, and permission revision
-   `maintainer-operations-v2`. Every tool names its repository; the App reaches
+   `maintainer-operations-v3`. Every tool names its repository; the App reaches
    only repositories it is installed on, and nothing selects one implicitly. A
    credential-isolating host transport authenticates the connection; provider,
    tool, and shell processes never inherit the Access pair. Agents never read
