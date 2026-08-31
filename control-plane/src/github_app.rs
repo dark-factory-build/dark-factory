@@ -2194,6 +2194,7 @@ impl AppAuthority {
                     // only operation that reads them, and it performs no admin
                     // mutation.
                     ("administration", "write"),
+                    ("merge_queues", "read"),
                     ("metadata", "read"),
                     ("pull_requests", "read"),
                 ]),
@@ -4325,20 +4326,34 @@ impl Authority {
             return Err(OperationError::Refused(RefusalReason::MergePreconditions));
         }
 
-        // The active-rules response names the rulesets that apply to this base.
-        // Prove each full ruleset does not grant this App a bypass before
-        // reading the rule grammar: only then does GitHub atomically enforce
-        // the current-base rules at the PUT.
-        let rules = self.branch_rules(token, &request.base).await?;
-        if rules.len() >= 100 {
-            return Err(OperationError::Refused(RefusalReason::MergePreconditions));
-        }
-        let ruleset_ids = active_ruleset_ids(&rules)
-            .ok_or(OperationError::Refused(RefusalReason::MergePreconditions))?;
-        self.verify_rulesets_without_app_bypass(token, &ruleset_ids)
-            .await?;
-        let required = branch_rules_allow_merge(&rules)
-            .ok_or(OperationError::Refused(RefusalReason::MergePreconditions))?;
+        // Keep the ruleset path unchanged. Exact 403 is the one alternate
+        // GitHub response accepted for a private plan that cannot expose
+        // rules: the App then proves the smaller policy itself.
+        let (required, private_base_sha) = match self.branch_rules(token, &request.base).await {
+            Ok(rules) => {
+                if rules.len() >= 100 {
+                    return Err(OperationError::Refused(RefusalReason::MergePreconditions));
+                }
+                let ruleset_ids = active_ruleset_ids(&rules)
+                    .ok_or(OperationError::Refused(RefusalReason::MergePreconditions))?;
+                self.verify_rulesets_without_app_bypass(token, &ruleset_ids)
+                    .await?;
+                let required = branch_rules_allow_merge(&rules)
+                    .ok_or(OperationError::Refused(RefusalReason::MergePreconditions))?;
+                (Some(required), None)
+            }
+            Err(error @ Error::Rejected(403)) => {
+                let branch = self.branch(token, &request.base).await?;
+                if !private_unprotected_merge_allowed(&metadata, &branch)
+                    || pull.base.sha != branch.commit.sha
+                {
+                    return Err(error.into());
+                }
+                self.verify_no_merge_queue(token, &request.base).await?;
+                (None, Some(branch.commit.sha))
+            }
+            Err(error) => return Err(error.into()),
+        };
         let checks = self
             .checks(
                 token,
@@ -4349,7 +4364,10 @@ impl Authority {
                 },
             )
             .await?;
-        if !checks_allow_merge(&checks.checks, &required) {
+        if !required.as_ref().map_or_else(
+            || checks_are_terminal_and_non_failing(&checks.checks),
+            |required| checks_allow_merge(&checks.checks, required),
+        ) {
             return Err(OperationError::Refused(RefusalReason::MergeChecks));
         }
         let allowed_review = self
@@ -4375,7 +4393,51 @@ impl Authority {
         {
             return Err(OperationError::Refused(RefusalReason::MergeReview));
         }
+
+        if let Some(private_base_sha) = private_base_sha {
+            self.verify_no_merge_queue(token, &request.base).await?;
+            let current_branch = self.branch(token, &request.base).await?;
+            if current_branch.protected || current_branch.commit.sha != private_base_sha {
+                return Err(OperationError::Refused(RefusalReason::MergePreconditions));
+            }
+            let current_pull = self
+                .verify_pull_request_head(token, request.pull_number, &request.head_sha)
+                .await?;
+            if current_pull.state != "open"
+                || current_pull.draft
+                || current_pull.base.name != request.base
+                || current_pull.base.sha != private_base_sha
+            {
+                return Err(OperationError::Refused(RefusalReason::MergePreconditions));
+            }
+        }
         Ok(())
+    }
+
+    async fn verify_no_merge_queue(
+        &self,
+        token: &RepositoryToken,
+        base: &str,
+    ) -> Result<(), OperationError> {
+        #[derive(Serialize)]
+        struct Variables<'a> {
+            owner: &'a str,
+            name: &'a str,
+            base: &'a str,
+        }
+        let (data, failure): (Option<serde_json::Value>, Option<GraphQlFailure>) = github_graphql(
+            &token.token,
+            "query($owner:String!,$name:String!,$base:String!){\
+             repository(owner:$owner,name:$name){\
+             mergeQueue(branch:$base){entries(first:1){totalCount}}}}",
+            &Variables {
+                owner: &token.repository.owner,
+                name: &token.repository.name,
+                base,
+            },
+        )
+        .await?;
+        no_merge_queue(data, failure)
     }
 
     async fn verify_review_operation(
@@ -4414,7 +4476,7 @@ impl Authority {
         &self,
         token: &RepositoryToken,
         base: &str,
-    ) -> Result<Vec<BranchRule>, OperationError> {
+    ) -> Result<Vec<BranchRule>, Error> {
         github_json(
             &format!(
                 "https://api.github.com/repos/{}/{}/rules/branches/{}?per_page=100",
@@ -4425,7 +4487,27 @@ impl Authority {
             token.as_str(),
         )
         .await
-        .map_err(OperationError::from)
+    }
+
+    async fn branch(
+        &self,
+        token: &RepositoryToken,
+        base: &str,
+    ) -> Result<BranchSnapshot, OperationError> {
+        let branch: BranchSnapshot = github_json(
+            &format!(
+                "https://api.github.com/repos/{}/{}/branches/{}",
+                token.repository.owner,
+                token.repository.name,
+                percent_encode(base)
+            ),
+            token.as_str(),
+        )
+        .await?;
+        if branch.name != base || valid_sha(&branch.commit.sha).is_err() {
+            return Err(OperationError::Refused(RefusalReason::MergePreconditions));
+        }
+        Ok(branch)
     }
 
     async fn verify_rulesets_without_app_bypass(
@@ -5282,6 +5364,10 @@ struct RepositoryMetadata {
     id: i64,
     full_name: String,
     default_branch: String,
+    #[serde(default)]
+    private: Option<bool>,
+    #[serde(default)]
+    allow_squash_merge: Option<bool>,
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -5664,6 +5750,20 @@ struct PullReference {
 
 #[cfg(any(target_arch = "wasm32", test))]
 #[derive(Clone, Debug, Deserialize)]
+struct BranchSnapshot {
+    name: String,
+    protected: bool,
+    commit: BranchCommit,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Clone, Debug, Deserialize)]
+struct BranchCommit {
+    sha: String,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Clone, Debug, Deserialize)]
 struct BranchRule {
     r#type: String,
     #[serde(default)]
@@ -5816,6 +5916,36 @@ fn branch_rules_allow_merge(rules: &[BranchRule]) -> Option<Vec<RequiredCheckIde
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
+fn private_unprotected_merge_allowed(
+    repository: &RepositoryMetadata,
+    branch: &BranchSnapshot,
+) -> bool {
+    repository.private == Some(true)
+        && repository.allow_squash_merge == Some(true)
+        && !branch.protected
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn no_merge_queue(
+    data: Option<serde_json::Value>,
+    failure: Option<GraphQlFailure>,
+) -> Result<(), OperationError> {
+    if failure.is_some() {
+        return Err(OperationError::Indeterminate);
+    }
+    match data
+        .as_ref()
+        .and_then(|data| data.get("repository"))
+        .filter(|repository| !repository.is_null())
+        .and_then(|repository| repository.get("mergeQueue"))
+    {
+        Some(serde_json::Value::Null) => Ok(()),
+        Some(_) => Err(OperationError::Refused(RefusalReason::MergePreconditions)),
+        None => Err(OperationError::Indeterminate),
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
 #[derive(Clone, Debug, Deserialize)]
 struct PullRequestMergeResponse {
     sha: Option<String>,
@@ -5942,6 +6072,18 @@ fn checks_allow_merge(checks: &[CheckResult], required: &[RequiredCheckIdentity]
         })
     });
     required_present
+        && checks.iter().all(|check| {
+            check.status == "completed"
+                && matches!(
+                    check.conclusion.as_deref(),
+                    Some("success" | "skipped" | "neutral")
+                )
+        })
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn checks_are_terminal_and_non_failing(checks: &[CheckResult]) -> bool {
+    !checks.is_empty()
         && checks.iter().all(|check| {
             check.status == "completed"
                 && matches!(
@@ -9000,6 +9142,69 @@ mod tests {
     }
 
     #[test]
+    fn direct_merge_private_unprotected_fallback_fails_closed() {
+        let repository = |private, squash| RepositoryMetadata {
+            id: 1_335_380_107,
+            full_name: "dark-factory-build/dark-factory-site".into(),
+            default_branch: "main".into(),
+            private,
+            allow_squash_merge: squash,
+        };
+        let branch = BranchSnapshot {
+            name: "main".into(),
+            protected: false,
+            commit: BranchCommit {
+                sha: "a".repeat(40),
+            },
+        };
+        assert!(private_unprotected_merge_allowed(
+            &repository(Some(true), Some(true)),
+            &branch
+        ));
+        for metadata in [
+            repository(None, Some(true)),
+            repository(Some(false), Some(true)),
+            repository(Some(true), None),
+            repository(Some(true), Some(false)),
+        ] {
+            assert!(!private_unprotected_merge_allowed(&metadata, &branch));
+        }
+        assert!(!private_unprotected_merge_allowed(
+            &repository(Some(true), Some(true)),
+            &BranchSnapshot {
+                protected: true,
+                ..branch
+            }
+        ));
+
+        let absent = serde_json::json!({"repository": {"mergeQueue": null}});
+        assert!(no_merge_queue(Some(absent.clone()), None).is_ok());
+        for unknown in [
+            None,
+            Some(serde_json::json!({})),
+            Some(serde_json::json!({"repository": null})),
+            Some(serde_json::json!({"repository": {}})),
+        ] {
+            assert_eq!(
+                no_merge_queue(unknown, None).err(),
+                Some(OperationError::Indeterminate)
+            );
+        }
+        assert_eq!(
+            no_merge_queue(
+                Some(serde_json::json!({"repository": {"mergeQueue": {}}})),
+                None
+            )
+            .err(),
+            Some(OperationError::Refused(RefusalReason::MergePreconditions))
+        );
+        assert_eq!(
+            no_merge_queue(Some(absent), Some(GraphQlFailure::Unknown)).err(),
+            Some(OperationError::Indeterminate)
+        );
+    }
+
+    #[test]
     fn direct_merge_rules_checks_reviews_and_statuses_fail_closed() {
         let required = |context: &str, integration_id| RequiredCheckIdentity {
             context: context.into(),
@@ -9098,6 +9303,8 @@ mod tests {
         incomplete[0].status = "in_progress".into();
         assert!(!checks_allow_merge(&incomplete, &any_checks));
         assert!(!checks_allow_merge(&passing, &[]));
+        assert!(checks_are_terminal_and_non_failing(&passing));
+        assert!(!checks_are_terminal_and_non_failing(&[]));
 
         let allow = ReviewResult {
             review_id: 1,

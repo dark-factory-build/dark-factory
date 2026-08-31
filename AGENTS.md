@@ -58,16 +58,17 @@ framework. The shell-provider loop is proven; real Claude/Codex work is not.
 
    Merges have two explicit paths, never an automatic fallback. Use
    `enqueue_pull_request` where the base branch has a merge queue. Use
-   `merge_pull_request_at_head` only where GitHub reports no queue and active
-   repository ruleset requires up-to-date status checks and permits squash
-   merge. Legacy classic branch protection alone is unsupported. The
-   direct operation binds the exact head and protected default-base branch, a
-   completed Maintainer `ALLOW`, and completed checks. It also proves the
+   `merge_pull_request_at_head` only where GitHub reports no queue. Its normal
+   path requires an active ruleset with up-to-date checks and squash; exact
+   rules-read 403 on a private repository instead requires `protected:false`,
+   squash enabled, nonempty all-green checks, explicit no-queue reads, and an
+   unchanged default base immediately before merge. The operation always binds
+   the exact head and a completed Maintainer `ALLOW`. It also proves the
    Maintainer App is absent from every active ruleset's disclosed bypass list;
    a missing or hidden list refuses the merge. GitHub exposes that list only to
    ruleset writers, so this operation alone mints Administration write for the
-   fixed ruleset reads; the broker exposes no administration mutation. It has
-   no caller-selected merge method.
+   fixed ruleset reads; the broker exposes no administration mutation or
+   caller-selected merge method. Classic branch protection alone is unsupported.
 
    The one carve-out is explicit owner authorization, per task, and it must name
    the exact repository and a finite command and target set — refs, PR

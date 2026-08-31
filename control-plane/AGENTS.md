@@ -77,8 +77,10 @@ Codex nor Claude owns its credentials or its durable journal.
    recovery, and one exact control-plane deployment dispatch. GitHub's
    delete-on-merge setting owns source-branch cleanup. Queue enqueue and direct
    merge are distinct tools, never fallbacks: the latter refuses a configured
-   queue and requires an active repository ruleset with strict status checks
-   plus a journal-bound Maintainer `ALLOW`. It proves the App is absent from
+   queue and requires a journal-bound Maintainer `ALLOW`. A protected base
+   requires an active strict ruleset; exact rules-read 403 on a private repo
+   instead requires `protected:false`, squash enabled, all-green checks,
+   explicit no-queue reads, and an unchanged default base. It proves the App is absent from
    every active ruleset's disclosed bypass list; a missing or hidden list
    refuses the merge. GitHub exposes that list only to ruleset writers, so this
    operation alone mints Administration write for fixed ruleset reads; no
