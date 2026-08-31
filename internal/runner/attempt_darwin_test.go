@@ -263,7 +263,7 @@ func runAttemptWorkerHelper(args []string) error {
 			script = fmt.Sprintf("trap '' TERM; sleep 30 & printf '%%s' $! > %q; printf '%%s' $$ > %q; while :; do sleep 1; done", filepath.Join(root, "descendant.pid"), filepath.Join(root, "provider.pid"))
 		}
 		if mode == "leader" {
-			script = fmt.Sprintf("sleep 30 & printf '%%s' $! > %q; printf '%%s' $$ > %q; exit 0", filepath.Join(root, "descendant.pid"), filepath.Join(root, "provider.pid"))
+			script = fmt.Sprintf("sleep 30 & printf '%%s' $! > %q; printf '%%s' $$ > %q; while test ! -f %q; do sleep 0.01; done; exit 0", filepath.Join(root, "descendant.pid"), filepath.Join(root, "provider.pid"), filepath.Join(root, "leader.release"))
 		}
 		if mode == "tail" {
 			script = "printf 'tail-output\\n'; exit 0"
@@ -601,9 +601,9 @@ func (f *attemptFixture) finishAndAck(expectOuterSuccess ...bool) *TerminalRecor
 	if record.Digest != event.Result.Digest || record.Identity != event.Result.Identity {
 		f.t.Fatalf("durable result=%+v event=%+v", record, event.Result)
 	}
-	if got := ObserveProcess(f.inner); got.Presence != Absent {
-		f.t.Fatalf("result published before sole Wait: %+v", got)
-	}
+	// The authenticated result is published only after group convergence and
+	// the sole Wait. Do not probe the numeric PGID after Wait, when it may
+	// already belong to an unrelated process group.
 	exit, err := f.outer.FinishAfterExit(6 * time.Second)
 	if err != nil || wantOuterSuccess && exit.Code != 0 {
 		f.t.Fatalf("outer exit=%+v err=%v output=%q", exit, err, f.output())
@@ -1170,9 +1170,6 @@ func TestAttemptRunnerReapsInertInnerExitBeforeSelection(t *testing.T) {
 		}
 	}
 	waitExactAbsence(t, inner)
-	if err := unix.Kill(-inner.PGID, 0); !errors.Is(err, unix.ESRCH) {
-		t.Fatalf("inert inner group remains: %v", err)
-	}
 }
 
 func TestAttemptCleanupReapsObservedInertExit(t *testing.T) {
@@ -1371,19 +1368,32 @@ func TestAttemptRunnerTerminatesOwnedProviderGroup(t *testing.T) {
 			if err := f.controller.Release(StageProvider); err != nil {
 				t.Fatal(err)
 			}
-			waitFile(t, filepath.Join(f.root, "descendant.pid"))
+			descendantPath := filepath.Join(f.root, "descendant.pid")
+			waitFile(t, descendantPath)
+			descendantBody, err := os.ReadFile(descendantPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			descendantPID, err := strconv.Atoi(strings.TrimSpace(string(descendantBody)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			descendant, err := readIdentity(descendantPID)
+			if err != nil || descendant.PGID != inner.PGID {
+				t.Fatalf("provider descendant=%+v err=%v inner=%+v", descendant, err, inner)
+			}
 			if mode == "term" {
 				if err := f.controller.Terminate(); err != nil {
 					t.Fatal(err)
 				}
+			} else if err := os.WriteFile(filepath.Join(f.root, "leader.release"), nil, 0o600); err != nil {
+				t.Fatal(err)
 			}
 			record := f.finishAndAck(false)
 			if record.Terminal.Process != inner {
 				t.Fatalf("terminal identity=%+v", record.Terminal.Process)
 			}
-			if err := unix.Kill(-inner.PGID, 0); !errors.Is(err, unix.ESRCH) {
-				t.Fatalf("provider group remains: %v", err)
-			}
+			waitExactAbsence(t, descendant)
 		})
 	}
 }
@@ -2213,9 +2223,6 @@ func TestAttemptCleanupUncertaintyRetainsOwnerBeforeTerminal(t *testing.T) {
 		t.Fatalf("uncertain cleanup published terminal: %v", err)
 	}
 	waitExactAbsence(t, identity)
-	if err := unix.Kill(-identity.PGID, 0); !errors.Is(err, unix.ESRCH) {
-		t.Fatalf("owned group remains after terminal: %v", err)
-	}
 }
 
 func TestAttemptPermanentCleanupUncertaintyPublishesNothing(t *testing.T) {
