@@ -14,7 +14,7 @@ use crate::maintainer::MAX_EXACT_INTEGER;
 
 pub(crate) const PRIVATE_KEY_BINDING: &str = "DARK_FACTORY_MAINTAINER_PRIVATE_KEY_PKCS8";
 pub(crate) const PERMISSION_REVISION_BINDING: &str = "DARK_FACTORY_MAINTAINER_PERMISSION_REVISION";
-pub(crate) const PERMISSION_REVISION: &str = "maintainer-operations-v3";
+pub(crate) const PERMISSION_REVISION: &str = "maintainer-operations-v4";
 const GITHUB_API_VERSION: &str = "2026-03-10";
 // GitHub list endpoints below request at most 100 records. Issue comments and
 // review bodies can each be 65,536 characters, so a webhook-sized 64 KiB cap
@@ -159,6 +159,16 @@ pub(crate) enum RefusalReason {
     /// Determinate: the same commit truncates every time.
     #[error("the commit's tree is too large for GitHub to return whole")]
     TreeTruncated,
+    #[error("the direct merge preconditions are not satisfied")]
+    MergePreconditions,
+    #[error("the pull request checks are not complete and successful")]
+    MergeChecks,
+    #[error("the required review did not allow this pull request head")]
+    MergeReview,
+    #[error("the pull request head conflicted with the merge request")]
+    MergeHeadConflict,
+    #[error("github refused the merge with status {0}")]
+    MergeRejected(u16),
 }
 
 /// Which pre-execution rejection classes appeared. More than one can:
@@ -542,12 +552,10 @@ pub(crate) struct PublishCommit {
 
 /// Add one pull request to the merge queue for its base branch.
 ///
-/// This replaced a direct `PUT /pulls/{n}/merge` operation, which
-/// `docs/development/GITHUB_APP.md` had already ruled out: "The typed merge
-/// operation uses a GitHub-enforced merge queue as its sole automated path
-/// ... The broker does not request Administration permission or expose direct
-/// merge as a fallback." A required queue also makes GitHub refuse that
-/// endpoint outright, so the operation was both non-compliant and dead.
+/// This is the queue path for repositories whose active repository ruleset
+/// requires a merge queue. Repositories with an active strict ruleset and no
+/// queue use the separate exact-head `merge_pull_request_at_head` operation
+/// instead.
 ///
 /// There is no merge method here. The queue's ruleset decides it, and a
 /// caller-supplied method would either be ignored or contradict the ruleset.
@@ -566,6 +574,29 @@ pub(crate) struct EnqueuePullRequest {
     /// different branch than the caller believes would be enqueued onto that
     /// branch's queue instead.
     pub(crate) base: String,
+}
+
+/// Merge one pull request directly, but only after proving every repository,
+/// branch-rule, check, and review condition at the exact head. The operation
+/// deliberately has no caller-selected URL, method, or merge mode: this is
+/// one fixed `PUT /pulls/{n}/merge` squash path.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MergePullRequestAtHead {
+    pub(crate) repository: String,
+    pub(crate) operation_id: String,
+    pub(crate) review_operation_id: String,
+    pub(crate) pull_number: i64,
+    pub(crate) head_sha: String,
+    pub(crate) base: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct MergePullRequestAtHeadResult {
+    pub(crate) pull_number: i64,
+    pub(crate) head_sha: String,
+    pub(crate) base: String,
+    pub(crate) merge_commit_sha: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -602,7 +633,7 @@ pub(crate) struct PullRequestResult {
     pub(crate) base_sha: String,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct ReviewResult {
     pub(crate) review_id: i64,
     pub(crate) url: String,
@@ -621,12 +652,14 @@ pub(crate) struct ChecksResult {
     pub(crate) checks: Vec<CheckResult>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct CheckResult {
     pub(crate) name: String,
     pub(crate) status: String,
     pub(crate) conclusion: Option<String>,
     pub(crate) url: String,
+    #[serde(skip)]
+    app_id: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -2133,6 +2166,107 @@ impl AppAuthority {
     }
 
     #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn merge_pull_request_at_head(
+        &self,
+        journal: &DeliveryJournal,
+        mut request: MergePullRequestAtHead,
+    ) -> Result<MergePullRequestAtHeadResult, OperationError> {
+        request.validate()?;
+        let repository = RepositoryName::requested(&mut request.repository)?;
+        let operation = request.operation("merge_pull_request_at_head")?;
+        let state = journal
+            .begin_operation(&operation)
+            .await
+            .map_err(|_| OperationError::Unavailable)?;
+        if let Some(result) = completed_or_conflict::<MergePullRequestAtHeadResult>(&state)? {
+            return Ok(result);
+        }
+        let token = self
+            .0
+            .installation_token(
+                repository,
+                BTreeMap::from([
+                    ("checks", "read"),
+                    // GitHub's Merge a pull request endpoint requires
+                    // Contents: write; pull-request reads only need read.
+                    ("contents", "write"),
+                    // Detailed rulesets are Administration-gated; this is the
+                    // only operation that reads them, and it performs no admin
+                    // mutation.
+                    ("administration", "write"),
+                    ("metadata", "read"),
+                    ("pull_requests", "read"),
+                ]),
+            )
+            .await?;
+
+        if matches!(
+            state,
+            OperationRecord::Executing | OperationRecord::Indeterminate
+        ) {
+            if let Ok(Some(result)) = self.0.reconcile_merge(&token, &request).await {
+                return complete(journal, &operation, result).await;
+            }
+            let _ = journal
+                .mark_operation(&operation, OperationTransition::Indeterminate)
+                .await;
+            return Err(OperationError::Indeterminate);
+        }
+        match journal
+            .mark_operation(&operation, OperationTransition::Executing)
+            .await
+            .map_err(|_| OperationError::Unavailable)?
+        {
+            OperationRecord::Claimed => {}
+            OperationRecord::Completed(result) => {
+                return serde_json::from_str(&result).map_err(|_| OperationError::Unavailable);
+            }
+            OperationRecord::Conflict => return Err(OperationError::Conflict),
+            OperationRecord::Executing | OperationRecord::Indeterminate => {
+                if let Ok(Some(result)) = self.0.reconcile_merge(&token, &request).await {
+                    return complete(journal, &operation, result).await;
+                }
+                let _ = journal
+                    .mark_operation(&operation, OperationTransition::Indeterminate)
+                    .await;
+                return Err(OperationError::Indeterminate);
+            }
+            OperationRecord::New | OperationRecord::Planned => {
+                return Err(OperationError::Unavailable);
+            }
+        }
+
+        // The unique durable claimant proves every mutable precondition once,
+        // immediately before the irreversible PUT. A determinate or read-only
+        // failure has made no GitHub mutation, so release the claim and keep
+        // this exact operation retryable.
+        if let Err(error) = self
+            .0
+            .verify_merge_preconditions(&token, journal, &request)
+            .await
+        {
+            journal
+                .mark_operation(&operation, OperationTransition::Refused)
+                .await
+                .map_err(|_| OperationError::Unavailable)?;
+            return Err(error);
+        }
+        match self.0.merge_pull_request(&token, &request).await {
+            Ok(result) => complete(journal, &operation, result).await,
+            Err(OperationError::Refused(reason)) => refuse(journal, &operation, reason).await,
+            Err(_) => {
+                if let Ok(Some(result)) = self.0.reconcile_merge(&token, &request).await {
+                    return complete(journal, &operation, result).await;
+                }
+                let _ = journal
+                    .mark_operation(&operation, OperationTransition::Indeterminate)
+                    .await;
+                Err(OperationError::Indeterminate)
+            }
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
     pub(crate) async fn observe_pull_request_checks(
         &self,
         mut request: ObservePullRequestChecks,
@@ -2670,6 +2804,32 @@ impl EnqueuePullRequest {
     #[cfg(target_arch = "wasm32")]
     fn operation(&self, kind: &str) -> Result<Operation, OperationError> {
         operation(kind, &self.operation_id, self)
+    }
+}
+
+impl MergePullRequestAtHead {
+    fn validate(&mut self) -> Result<(), OperationError> {
+        canonical_operation_id(&mut self.operation_id)?;
+        canonical_operation_id(&mut self.review_operation_id)?;
+        if self.operation_id == self.review_operation_id {
+            return Err(OperationError::InvalidInput);
+        }
+        valid_exact_integer(self.pull_number)?;
+        valid_sha(&self.head_sha)?;
+        valid_ref(&self.base)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn operation(&self, kind: &str) -> Result<Operation, OperationError> {
+        operation(kind, &self.operation_id, self)
+    }
+
+    fn trailer(&self) -> Result<String, OperationError> {
+        Ok(format!(
+            "{OPERATION_TRAILER_PREFIX} {} {}",
+            self.operation_id,
+            request_digest(self)?
+        ))
     }
 }
 
@@ -4148,6 +4308,258 @@ impl Authority {
             .transpose()
     }
 
+    async fn verify_merge_preconditions(
+        &self,
+        token: &RepositoryToken,
+        journal: &DeliveryJournal,
+        request: &MergePullRequestAtHead,
+    ) -> Result<(), OperationError> {
+        let metadata = self.repository_metadata(token).await?;
+        if request.base != metadata.default_branch {
+            return Err(OperationError::Refused(RefusalReason::MergePreconditions));
+        }
+        let pull = self
+            .verify_pull_request_head(token, request.pull_number, &request.head_sha)
+            .await?;
+        if pull.state != "open" || pull.draft || pull.base.name != request.base {
+            return Err(OperationError::Refused(RefusalReason::MergePreconditions));
+        }
+
+        // The active-rules response names the rulesets that apply to this base.
+        // Prove each full ruleset does not grant this App a bypass before
+        // reading the rule grammar: only then does GitHub atomically enforce
+        // the current-base rules at the PUT.
+        let rules = self.branch_rules(token, &request.base).await?;
+        if rules.len() >= 100 {
+            return Err(OperationError::Refused(RefusalReason::MergePreconditions));
+        }
+        let ruleset_ids = active_ruleset_ids(&rules)
+            .ok_or(OperationError::Refused(RefusalReason::MergePreconditions))?;
+        self.verify_rulesets_without_app_bypass(token, &ruleset_ids)
+            .await?;
+        let required = branch_rules_allow_merge(&rules)
+            .ok_or(OperationError::Refused(RefusalReason::MergePreconditions))?;
+        let checks = self
+            .checks(
+                token,
+                ObservePullRequestChecks {
+                    repository: token.repository.full_name.clone(),
+                    pull_number: request.pull_number,
+                    head_sha: request.head_sha.clone(),
+                },
+            )
+            .await?;
+        if !checks_allow_merge(&checks.checks, &required) {
+            return Err(OperationError::Refused(RefusalReason::MergeChecks));
+        }
+        let allowed_review = self
+            .verify_review_operation(journal, token, request)
+            .await?;
+        let reviews = self
+            .pull_request_reviews(token, request.pull_number)
+            .await?;
+        if reviews.len() >= 100 {
+            return Err(OperationError::Refused(RefusalReason::MergeReview));
+        }
+        if !reviews.iter().any(|review| {
+            review.matches_allow_result(
+                &allowed_review,
+                &token.repository.full_name,
+                request.pull_number,
+                &request.head_sha,
+                &request.review_operation_id,
+            )
+        }) || reviews
+            .iter()
+            .any(|review| review.blocks_head(&request.head_sha))
+        {
+            return Err(OperationError::Refused(RefusalReason::MergeReview));
+        }
+        Ok(())
+    }
+
+    async fn verify_review_operation(
+        &self,
+        journal: &DeliveryJournal,
+        token: &RepositoryToken,
+        request: &MergePullRequestAtHead,
+    ) -> Result<ReviewResult, OperationError> {
+        let observation = journal
+            .observe_operation(&request.review_operation_id)
+            .await
+            .map_err(|_| OperationError::Unavailable)?
+            .ok_or(OperationError::Refused(RefusalReason::MergeReview))?;
+        if observation.kind != "submit_pull_request_review" || observation.state != "completed" {
+            return Err(OperationError::Refused(RefusalReason::MergeReview));
+        }
+        let result: ReviewResult = serde_json::from_str(
+            observation
+                .result_json
+                .as_deref()
+                .ok_or(OperationError::Unavailable)?,
+        )
+        .map_err(|_| OperationError::Unavailable)?;
+        if !review_result_allows_merge(
+            &result,
+            &token.repository.full_name,
+            request.pull_number,
+            &request.head_sha,
+        ) {
+            return Err(OperationError::Refused(RefusalReason::MergeReview));
+        }
+        Ok(result)
+    }
+
+    async fn branch_rules(
+        &self,
+        token: &RepositoryToken,
+        base: &str,
+    ) -> Result<Vec<BranchRule>, OperationError> {
+        github_json(
+            &format!(
+                "https://api.github.com/repos/{}/{}/rules/branches/{}?per_page=100",
+                token.repository.owner,
+                token.repository.name,
+                percent_encode(base)
+            ),
+            token.as_str(),
+        )
+        .await
+        .map_err(OperationError::from)
+    }
+
+    async fn verify_rulesets_without_app_bypass(
+        &self,
+        token: &RepositoryToken,
+        ruleset_ids: &[i64],
+    ) -> Result<(), OperationError> {
+        for ruleset_id in ruleset_ids {
+            let body: serde_json::Value = github_json(
+                &format!(
+                    "https://api.github.com/repos/{}/{}/rulesets/{ruleset_id}?includes_parents=true",
+                    token.repository.owner, token.repository.name
+                ),
+                token.as_str(),
+            )
+            .await
+            .map_err(OperationError::from)?;
+            let ruleset: RepositoryRuleset = serde_json::from_value(body)
+                .map_err(|_| OperationError::Refused(RefusalReason::MergePreconditions))?;
+            if !ruleset_allows_merge(&ruleset, *ruleset_id, self.app_id) {
+                return Err(OperationError::Refused(RefusalReason::MergePreconditions));
+            }
+        }
+        Ok(())
+    }
+
+    async fn pull_request_reviews(
+        &self,
+        token: &RepositoryToken,
+        pull_number: i64,
+    ) -> Result<Vec<PullRequestReview>, OperationError> {
+        github_json(
+            &format!(
+                "https://api.github.com/repos/{}/{}/pulls/{pull_number}/reviews?per_page=100",
+                token.repository.owner, token.repository.name
+            ),
+            token.as_str(),
+        )
+        .await
+        .map_err(OperationError::from)
+    }
+
+    async fn merge_pull_request(
+        &self,
+        token: &RepositoryToken,
+        request: &MergePullRequestAtHead,
+    ) -> Result<MergePullRequestAtHeadResult, OperationError> {
+        #[derive(Serialize)]
+        struct Body<'a> {
+            sha: &'a str,
+            merge_method: &'static str,
+            commit_message: String,
+        }
+        let response: PullRequestMergeResponse = match github_json_request(
+            worker::Method::Put,
+            &format!(
+                "https://api.github.com/repos/{}/{}/pulls/{}/merge",
+                token.repository.owner, token.repository.name, request.pull_number
+            ),
+            token.as_str(),
+            Some(&Body {
+                sha: &request.head_sha,
+                merge_method: "squash",
+                commit_message: request.trailer()?,
+            }),
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(Error::Rejected(status)) => match classify_merge_status(status) {
+                MergeHttpStatus::HeadConflict => {
+                    return Err(OperationError::Refused(RefusalReason::MergeHeadConflict));
+                }
+                MergeHttpStatus::Refused => {
+                    return Err(OperationError::Refused(RefusalReason::MergeRejected(
+                        status,
+                    )));
+                }
+                MergeHttpStatus::Reconcile => return Err(OperationError::Unavailable),
+            },
+            Err(error) => return Err(error.into()),
+        };
+        let result = merge_response_result(response, request)?;
+        self.verify_merge_commit_trailer(token, request, &result.merge_commit_sha)
+            .await?;
+        Ok(result)
+    }
+
+    async fn verify_merge_commit_trailer(
+        &self,
+        token: &RepositoryToken,
+        request: &MergePullRequestAtHead,
+        merge_commit_sha: &str,
+    ) -> Result<(), OperationError> {
+        let merged = self.read_commit(token, merge_commit_sha).await?;
+        if merge_commit_has_trailer(request, &merged.message)? {
+            Ok(())
+        } else {
+            Err(OperationError::Indeterminate)
+        }
+    }
+
+    async fn reconcile_merge(
+        &self,
+        token: &RepositoryToken,
+        request: &MergePullRequestAtHead,
+    ) -> Result<Option<MergePullRequestAtHeadResult>, OperationError> {
+        let pull: PullRequest = github_json(
+            &format!(
+                "https://api.github.com/repos/{}/{}/pulls/{}",
+                token.repository.owner, token.repository.name, request.pull_number
+            ),
+            token.as_str(),
+        )
+        .await?;
+        if pull.number != request.pull_number
+            || pull.head.sha != request.head_sha
+            || pull.base.name != request.base
+            || !pull.merged
+        {
+            return Ok(None);
+        }
+        let merge_commit_sha = pull.merge_commit_sha.ok_or(OperationError::Indeterminate)?;
+        valid_sha(&merge_commit_sha)?;
+        self.verify_merge_commit_trailer(token, request, &merge_commit_sha)
+            .await?;
+        Ok(Some(MergePullRequestAtHeadResult {
+            pull_number: request.pull_number,
+            head_sha: request.head_sha.clone(),
+            base: request.base.clone(),
+            merge_commit_sha,
+        }))
+    }
+
     async fn read_queue_entry(
         &self,
         token: &RepositoryToken,
@@ -4852,15 +5264,15 @@ struct InstallationToken {
 /// The repository observation every operation binds itself to.
 ///
 /// Every field here must be one GitHub returns to *this* App's installation
-/// token. `delete_branch_on_merge` was not: GitHub returns it only to a caller
-/// with Administration access, which `docs/development/GITHUB_APP.md` says
-/// this broker deliberately never requests. A required field GitHub omits
-/// makes the whole 200 fail to deserialize, which reached the caller as an
-/// opaque "authority is unavailable" and disabled all eleven operations that
-/// observe the repository -- `maintainer_status` and the entire publication,
-/// merge, and CI-diagnosis path included. Three of the eleven reach this
-/// function indirectly through `verify_workflow_pr`, which is why the first
-/// count of the blast radius was too low.
+/// token. `delete_branch_on_merge` is intentionally not required: GitHub
+/// returns it only with Administration access, while repository metadata does
+/// not need that field. A required field GitHub omits makes the whole 200 fail
+/// to deserialize, which reached the caller as an opaque "authority is
+/// unavailable" and disabled all eleven operations that observe the
+/// repository -- `maintainer_status` and the entire publication, merge, and
+/// CI-diagnosis path included. Three of the eleven reach this function
+/// indirectly through `verify_workflow_pr`, which is why the first count of
+/// the blast radius was too low.
 ///
 /// Host-testable, unlike the `wasm32`-only transport around it, so the shape
 /// contract can be proven against a real GitHub body instead of asserted.
@@ -5250,6 +5662,166 @@ struct PullReference {
     sha: String,
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Clone, Debug, Deserialize)]
+struct BranchRule {
+    r#type: String,
+    #[serde(default)]
+    parameters: serde_json::Value,
+    #[serde(default)]
+    ruleset_id: Option<i64>,
+    #[serde(default)]
+    ruleset_source: Option<String>,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RulesetBypassActor {
+    actor_id: Option<i64>,
+    actor_type: String,
+    bypass_mode: String,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Clone, Debug, Deserialize)]
+struct RepositoryRuleset {
+    id: i64,
+    target: String,
+    enforcement: String,
+    #[serde(default)]
+    bypass_actors: Option<Vec<RulesetBypassActor>>,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RequiredCheckIdentity {
+    context: String,
+    integration_id: Option<i64>,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn active_ruleset_ids(rules: &[BranchRule]) -> Option<Vec<i64>> {
+    let mut ids = Vec::new();
+    for rule in rules {
+        let id = rule.ruleset_id?;
+        valid_exact_integer(id).ok()?;
+        if let Some(source) = rule.ruleset_source.as_deref() {
+            valid_text(source, 1, 256, false).ok()?;
+        }
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    Some(ids)
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn ruleset_allows_merge(ruleset: &RepositoryRuleset, expected_id: i64, app_id: i64) -> bool {
+    if ruleset.id != expected_id || ruleset.target != "branch" || ruleset.enforcement != "active" {
+        return false;
+    }
+    let Some(actors) = ruleset.bypass_actors.as_ref() else {
+        return false;
+    };
+    actors.iter().all(|actor| {
+        let known_type = matches!(
+            actor.actor_type.as_str(),
+            "Integration" | "OrganizationAdmin" | "RepositoryRole" | "Team" | "User" | "DeployKey"
+        );
+        let valid_id = match actor.actor_type.as_str() {
+            "Integration" | "RepositoryRole" | "Team" | "User" => actor
+                .actor_id
+                .is_some_and(|id| valid_exact_integer(id).is_ok()),
+            "OrganizationAdmin" => actor
+                .actor_id
+                .is_none_or(|id| valid_exact_integer(id).is_ok()),
+            "DeployKey" => actor.actor_id.is_none(),
+            _ => false,
+        };
+        known_type
+            && valid_id
+            && matches!(
+                actor.bypass_mode.as_str(),
+                "always" | "pull_request" | "exempt"
+            )
+            && !(actor.actor_type == "DeployKey" && actor.bypass_mode != "always")
+            && !(actor.actor_type == "Integration" && actor.actor_id == Some(app_id))
+    })
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn branch_rules_allow_merge(rules: &[BranchRule]) -> Option<Vec<RequiredCheckIdentity>> {
+    if rules.iter().any(|rule| rule.r#type == "merge_queue") {
+        return None;
+    }
+    let pull_requests = rules
+        .iter()
+        .filter(|rule| rule.r#type == "pull_request")
+        .collect::<Vec<_>>();
+    if pull_requests.is_empty()
+        || pull_requests.iter().any(|rule| {
+            rule.parameters
+                .get("allowed_merge_methods")
+                .and_then(serde_json::Value::as_array)
+                .is_none_or(|methods| !methods.iter().any(|method| method == "squash"))
+        })
+    {
+        return None;
+    }
+    let status_rules = rules
+        .iter()
+        .filter(|rule| rule.r#type == "required_status_checks")
+        .collect::<Vec<_>>();
+    if status_rules.is_empty() {
+        return None;
+    }
+    let mut names = Vec::new();
+    for rule in status_rules {
+        if rule
+            .parameters
+            .get("strict_required_status_checks_policy")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        {
+            return None;
+        }
+        let checks = rule
+            .parameters
+            .get("required_status_checks")
+            .and_then(serde_json::Value::as_array)?;
+        for check in checks {
+            let context = check.get("context").and_then(serde_json::Value::as_str)?;
+            if valid_text(context, 1, 256, false).is_err() {
+                return None;
+            }
+            let integration_id = match check.get("integration_id") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(value) => {
+                    let id = value.as_i64()?;
+                    valid_exact_integer(id).ok()?;
+                    Some(id)
+                }
+            };
+            let required = RequiredCheckIdentity {
+                context: context.to_owned(),
+                integration_id,
+            };
+            if !names.contains(&required) {
+                names.push(required);
+            }
+        }
+    }
+    (!names.is_empty()).then_some(names)
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Clone, Debug, Deserialize)]
+struct PullRequestMergeResponse {
+    sha: Option<String>,
+    merged: bool,
+}
+
 #[cfg(target_arch = "wasm32")]
 impl PullRequest {
     fn matches_create(&self, request: &CreatePullRequest) -> bool {
@@ -5305,6 +5877,141 @@ impl PullRequestReview {
             && self.commit_id == request.head_sha
             && self.state == REVIEW_STATE
     }
+
+    fn blocks_head(&self, head_sha: &str) -> bool {
+        if self.commit_id != head_sha {
+            return false;
+        }
+        // GitHub cannot delete a submitted review, and dismissal preserves its
+        // body. This App exposes no review-update operation, so its rendered
+        // BLOCK line remains the durable decision even if the review state is
+        // later changed to DISMISSED.
+        self.state == "CHANGES_REQUESTED"
+            || self.body.as_deref().is_some_and(|body| {
+                body.lines()
+                    .any(|line| line.trim() == format!("{REVIEW_VERDICT_PREFIX} block {head_sha}"))
+            })
+    }
+
+    fn matches_allow_result(
+        &self,
+        result: &ReviewResult,
+        repository: &str,
+        pull_number: i64,
+        head_sha: &str,
+        review_operation_id: &str,
+    ) -> bool {
+        let expected_url = format!("https://github.com/{repository}/pull/{pull_number}");
+        self.id == result.review_id
+            && self.commit_id == head_sha
+            && self.state == REVIEW_STATE
+            && self.html_url == result.url
+            && self.body.as_deref().is_some_and(|body| {
+                body.lines()
+                    .any(|line| line.trim() == format!("{REVIEW_VERDICT_PREFIX} allow {head_sha}"))
+                    && body.lines().any(|line| {
+                        line.trim().starts_with(&format!(
+                            "{OPERATION_MARKER_PREFIX}{review_operation_id}:"
+                        ))
+                    })
+            })
+            && (result.url == expected_url
+                || result
+                    .url
+                    .strip_prefix(&expected_url)
+                    .is_some_and(|suffix| suffix.starts_with('#')))
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn checks_allow_merge(checks: &[CheckResult], required: &[RequiredCheckIdentity]) -> bool {
+    if required.is_empty() {
+        return false;
+    }
+    let required_present = required.iter().all(|required| {
+        checks.iter().any(|check| {
+            check.name == required.context
+                && required
+                    .integration_id
+                    .is_none_or(|app_id| check.app_id == Some(app_id))
+                && check.status == "completed"
+                && matches!(
+                    check.conclusion.as_deref(),
+                    Some("success" | "skipped" | "neutral")
+                )
+        })
+    });
+    required_present
+        && checks.iter().all(|check| {
+            check.status == "completed"
+                && matches!(
+                    check.conclusion.as_deref(),
+                    Some("success" | "skipped" | "neutral")
+                )
+        })
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MergeHttpStatus {
+    HeadConflict,
+    Refused,
+    Reconcile,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn classify_merge_status(status: u16) -> MergeHttpStatus {
+    match status {
+        409 => MergeHttpStatus::HeadConflict,
+        403 | 404 | 405 | 422 => MergeHttpStatus::Refused,
+        _ => MergeHttpStatus::Reconcile,
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn review_result_allows_merge(
+    result: &ReviewResult,
+    repository: &str,
+    pull_number: i64,
+    head_sha: &str,
+) -> bool {
+    let expected = format!("https://github.com/{repository}/pull/{pull_number}");
+    valid_github_url(&result.url).is_ok()
+        && (result.url == expected
+            || result
+                .url
+                .strip_prefix(&expected)
+                .is_some_and(|suffix| suffix.starts_with('#')))
+        && result.head_sha == head_sha
+        && result.state == REVIEW_STATE
+        && result.verdict == "allow"
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn merge_commit_has_trailer(
+    request: &MergePullRequestAtHead,
+    message: &str,
+) -> Result<bool, OperationError> {
+    let trailer = request.trailer()?;
+    Ok(message.lines().any(|line| line.trim() == trailer))
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn merge_response_result(
+    response: PullRequestMergeResponse,
+    request: &MergePullRequestAtHead,
+) -> Result<MergePullRequestAtHeadResult, OperationError> {
+    if !response.merged {
+        return Err(OperationError::Refused(RefusalReason::MergePreconditions));
+    }
+    let merge_commit_sha = response.sha.ok_or(OperationError::Indeterminate)?;
+    valid_sha(&merge_commit_sha)?;
+    Ok(MergePullRequestAtHeadResult {
+        pull_number: request.pull_number,
+        head_sha: request.head_sha.clone(),
+        base: request.base.clone(),
+        merge_commit_sha,
+    })
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -5352,6 +6059,13 @@ struct CheckRun {
     status: String,
     conclusion: Option<String>,
     html_url: String,
+    app: Option<CheckRunApp>,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Deserialize)]
+struct CheckRunApp {
+    id: i64,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -5380,11 +6094,19 @@ impl TryFrom<CheckRun> for CheckResult {
             return Err(OperationError::Unavailable);
         }
         valid_github_url(&check.html_url)?;
+        let app_id = match check.app {
+            Some(app) => {
+                valid_exact_integer(app.id)?;
+                Some(app.id)
+            }
+            None => None,
+        };
         Ok(Self {
             name: check.name,
             status: check.status,
             conclusion: check.conclusion,
             url: check.html_url,
+            app_id,
         })
     }
 }
@@ -5809,6 +6531,12 @@ fn validate_installation(installation: &Installation, app_id: i64) -> Result<(),
         (installation.repository_selection != "selected").then_some("repository_selection"),
         (!permission_at_least(&installation.permissions, "actions", "write")).then_some("actions"),
         (!permission_at_least(&installation.permissions, "checks", "read")).then_some("checks"),
+        // Permission revisions are all-or-nothing at the installation boundary:
+        // status must not advertise v4 for a repository where direct merge is
+        // unusable. Only direct merge downscopes this grant into its operation
+        // token; every other token still omits it.
+        (!permission_at_least(&installation.permissions, "administration", "write"))
+            .then_some("administration"),
         // `publish_commit` mints `contents: write`. Accepting a read-only
         // installation would fail at token mint instead, where GitHub's 422
         // reaches the caller as an opaque "authority is unavailable". This is
@@ -5820,13 +6548,8 @@ fn validate_installation(installation: &Installation, app_id: i64) -> Result<(),
         (!permission_at_least(&installation.permissions, "metadata", "read")).then_some("metadata"),
         (!permission_at_least(&installation.permissions, "pull_requests", "write"))
             .then_some("pull_requests"),
-        // `enqueue_pull_request` mints `merge_queues: write`, and it is the
-        // only automated path to the default branch. Omitting it here is the
-        // same fail-open the `contents` line above exists to prevent: an
-        // installation without Merge queues would fail every enqueue at token
-        // mint. Since this refusal names the field that failed, it is also the
-        // answer to "was the permission actually granted?" -- asked of the
-        // installation that is actually being used.
+        // Queue enqueue still needs this authority; direct squash merge is
+        // separately gated by branch protection and exact-head checks.
         (!permission_at_least(&installation.permissions, "merge_queues", "write"))
             .then_some("merge_queues"),
         (!installation.events.is_empty()).then_some("events"),
@@ -6403,13 +7126,10 @@ mod tests {
     /// The exact defect this repair fixes, proven at the boundary it happened
     /// on rather than asserted about the source.
     ///
-    /// `GET /repos/{owner}/{repo}` answers **200** with the body below to a
-    /// caller without Administration access. The body was captured
-    /// unauthenticated, so it is evidence about the *field*, not about this
-    /// App's token: what ties it to the App is that no `installation_token`
-    /// call site in this file requests `administration`, so no token it mints
-    /// can receive the field either. Stating that as an inference rather than
-    /// as an observation is the same discipline this repair exists to enforce.
+    /// `GET /repos/{owner}/{repo}` answers **200** with the body below while
+    /// omitting Administration-gated fields. The body was captured
+    /// unauthenticated, so it is evidence about the response shape rather than
+    /// about this App's installation grant.
     /// While `RepositoryMetadata` required
     /// `delete_branch_on_merge`, this exact 200 failed to deserialize, and all
     /// eleven operations that observe the repository -- `maintainer_status`,
@@ -6418,7 +7138,7 @@ mod tests {
     /// control-plane deploy dispatch -- returned an opaque "authority is
     /// unavailable".
     #[test]
-    fn repository_metadata_parses_a_real_body_without_administration_access() {
+    fn repository_metadata_parses_a_real_body_without_optional_fields() {
         const BODY: &str = include_str!("../tests/fixtures/repository-without-administration.json");
 
         // The premise under test: GitHub really does omit the
@@ -6434,7 +7154,7 @@ mod tests {
         ] {
             assert!(
                 raw.get(gated).is_none(),
-                "fixture carries {gated}, so it is not a non-Administration body"
+                "fixture carries {gated}, so it is not an omitted-fields body"
             );
         }
 
@@ -6765,7 +7485,7 @@ mod tests {
         assert!(RepositoryName::new("baziyer/../dark-factory".into()).is_err());
         assert!(RepositoryName::new("baziyer/dark factory".into()).is_err());
         let installation: Installation = serde_json::from_str(
-            r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"actions":"write","checks":"read","contents":"write","issues":"write","merge_queues":"write","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
+            r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"actions":"write","administration":"write","checks":"read","contents":"write","issues":"write","merge_queues":"write","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
         )
         .unwrap();
         assert!(validate_installation(&installation, 4_673_420).is_ok());
@@ -6775,6 +7495,15 @@ mod tests {
         )
         .unwrap();
         assert!(validate_installation(&broader, 4_673_420).is_ok());
+
+        let no_administration: Installation = serde_json::from_str(
+            r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"actions":"write","checks":"read","contents":"write","issues":"write","merge_queues":"write","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            validate_installation(&no_administration, 4_673_420).err(),
+            Some("administration")
+        );
 
         let with_permissions = |permissions: &str| -> Installation {
             serde_json::from_str(&format!(
@@ -6788,15 +7517,15 @@ mod tests {
         // `pull_requests` test.
         for (permissions, expected) in [
             (
-                r#""actions":"write","checks":"read","contents":"write","issues":"write","merge_queues":"write","metadata":"read","pull_requests":"read""#,
+                r#""actions":"write","administration":"write","checks":"read","contents":"write","issues":"write","merge_queues":"write","metadata":"read","pull_requests":"read""#,
                 "pull_requests",
             ),
             (
-                r#""actions":"write","contents":"write","issues":"write","merge_queues":"write","metadata":"read","pull_requests":"write""#,
+                r#""actions":"write","administration":"write","contents":"write","issues":"write","merge_queues":"write","metadata":"read","pull_requests":"write""#,
                 "checks",
             ),
             (
-                r#""actions":"write","checks":"read","contents":"write","issues":"write","merge_queues":"write","pull_requests":"write""#,
+                r#""actions":"write","administration":"write","checks":"read","contents":"write","issues":"write","merge_queues":"write","pull_requests":"write""#,
                 "metadata",
             ),
         ] {
@@ -6811,7 +7540,7 @@ mod tests {
         // read-only installation and an opaque failure at token mint -- which
         // is why the refusal now names the field rather than collapsing.
         let read_only: Installation = serde_json::from_str(
-            r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"actions":"write","checks":"read","contents":"read","issues":"write","merge_queues":"write","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
+            r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"actions":"write","administration":"write","checks":"read","contents":"read","issues":"write","merge_queues":"write","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
         )
         .unwrap();
         assert_eq!(
@@ -6826,7 +7555,7 @@ mod tests {
         // installation that cannot enqueue fails every `enqueue_pull_request`
         // at token mint with nothing naming the reason.
         let no_queue: Installation = serde_json::from_str(
-            r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"actions":"write","checks":"read","contents":"write","issues":"write","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
+            r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"actions":"write","administration":"write","checks":"read","contents":"write","issues":"write","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
         )
         .unwrap();
         assert_eq!(
@@ -6836,7 +7565,7 @@ mod tests {
 
         // Read is not enough: enqueueing writes to the queue.
         let queue_read_only: Installation = serde_json::from_str(
-            r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"actions":"write","checks":"read","contents":"write","issues":"write","merge_queues":"read","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
+            r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"actions":"write","administration":"write","checks":"read","contents":"write","issues":"write","merge_queues":"read","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
         )
         .unwrap();
         assert_eq!(
@@ -6845,7 +7574,7 @@ mod tests {
         );
 
         let no_issues: Installation = serde_json::from_str(
-            r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"actions":"write","checks":"read","contents":"write","merge_queues":"write","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
+            r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"actions":"write","administration":"write","checks":"read","contents":"write","merge_queues":"write","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
         )
         .unwrap();
         assert_eq!(
@@ -6854,13 +7583,20 @@ mod tests {
         );
 
         let no_actions: Installation = serde_json::from_str(
-            r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"checks":"read","contents":"write","issues":"write","merge_queues":"write","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
+            r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"administration":"write","checks":"read","contents":"write","issues":"write","merge_queues":"write","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
         )
         .unwrap();
         assert_eq!(
             validate_installation(&no_actions, 4_673_420).err(),
             Some("actions")
         );
+    }
+
+    #[test]
+    fn operation_tokens_request_administration_only_for_direct_merge() {
+        let source = include_str!("github_app.rs");
+        let needle = ["(", "\"administration\"", ", ", "\"write\"", ")"].concat();
+        assert_eq!(source.matches(&needle).count(), 1);
     }
 
     #[test]
@@ -8226,5 +8962,316 @@ mod tests {
             }
             .matches(&allow)
         );
+    }
+
+    #[test]
+    fn direct_merge_input_is_exactly_bound_and_has_no_merge_controls() {
+        let mut request: MergePullRequestAtHead = serde_json::from_value(serde_json::json!({
+            "repository": "dark-factory-build/dark-factory",
+            "operation_id": "6c8a5c44-7f1f-11f0-952e-acde48001122",
+            "review_operation_id": "7c8a5c44-7f1f-11f0-952e-acde48001122",
+            "pull_number": 403,
+            "head_sha": "a".repeat(40),
+            "base": "main"
+        }))
+        .unwrap();
+        assert!(request.validate().is_ok());
+        for value in [
+            serde_json::json!({"method":"merge"}),
+            serde_json::json!({"merge_method":"merge"}),
+            serde_json::json!({"url":"https://api.github.com"}),
+            serde_json::json!({"base_sha":"b".repeat(40)}),
+        ] {
+            let mut extra = serde_json::to_value(&request).unwrap();
+            extra.as_object_mut().unwrap().extend(
+                value
+                    .as_object()
+                    .unwrap()
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone())),
+            );
+            assert!(serde_json::from_value::<MergePullRequestAtHead>(extra).is_err());
+        }
+        let mut same = request.clone();
+        same.operation_id = same.review_operation_id.clone();
+        assert_eq!(same.validate().err(), Some(OperationError::InvalidInput));
+        same.operation_id = "8c8a5c44-7f1f-11f0-952e-acde48001122".into();
+        assert_eq!(same.validate().err(), None);
+    }
+
+    #[test]
+    fn direct_merge_rules_checks_reviews_and_statuses_fail_closed() {
+        let required = |context: &str, integration_id| RequiredCheckIdentity {
+            context: context.into(),
+            integration_id,
+        };
+        let pull_parameters = || {
+            serde_json::json!({
+                "allowed_merge_methods": ["squash"],
+                "dismiss_stale_reviews_on_push": false,
+                "require_code_owner_review": false,
+                "require_last_push_approval": false,
+                "required_approving_review_count": 0,
+                "required_review_thread_resolution": false
+            })
+        };
+        let protected: Vec<BranchRule> = serde_json::from_value(serde_json::json!([
+            {"type": "pull_request", "parameters": pull_parameters()},
+            {"type": "required_status_checks", "parameters": {
+                "strict_required_status_checks_policy": true,
+                "required_status_checks": [{"context": "checks", "integration_id": 42}]
+            }}
+        ]))
+        .unwrap();
+        assert_eq!(
+            branch_rules_allow_merge(&protected).unwrap(),
+            [required("checks", Some(42))]
+        );
+        let multiple: Vec<BranchRule> = serde_json::from_value(serde_json::json!([
+            {"type": "pull_request", "parameters": pull_parameters()},
+            {"type": "pull_request", "parameters": pull_parameters()},
+            {"type": "required_status_checks", "parameters": {
+                "strict_required_status_checks_policy": true,
+                "required_status_checks": [{"context": "lint"}]
+            }},
+            {"type": "required_status_checks", "parameters": {
+                "strict_required_status_checks_policy": true,
+                "required_status_checks": [{"context": "tests"}]
+            }}
+        ]))
+        .unwrap();
+        assert_eq!(
+            branch_rules_allow_merge(&multiple).unwrap(),
+            [required("lint", None), required("tests", None)]
+        );
+        let mut queue = multiple.clone();
+        queue.push(BranchRule {
+            r#type: "merge_queue".into(),
+            parameters: serde_json::Value::Null,
+            ruleset_id: Some(1),
+            ruleset_source: Some("dark-factory-build/dark-factory".into()),
+        });
+        assert!(branch_rules_allow_merge(&queue).is_none());
+        let mut non_squash = multiple.clone();
+        non_squash[1].parameters = serde_json::json!({
+            "allowed_merge_methods": ["merge"],
+            "dismiss_stale_reviews_on_push": false,
+            "require_code_owner_review": false,
+            "require_last_push_approval": false,
+            "required_approving_review_count": 0,
+            "required_review_thread_resolution": false
+        });
+        assert!(branch_rules_allow_merge(&non_squash).is_none());
+        let mut loose = multiple.clone();
+        loose[3].parameters["strict_required_status_checks_policy"] =
+            serde_json::Value::Bool(false);
+        assert!(branch_rules_allow_merge(&loose).is_none());
+        let passing = vec![CheckResult {
+            name: "checks".into(),
+            status: "completed".into(),
+            conclusion: Some("success".into()),
+            url: "https://github.com/checks".into(),
+            app_id: Some(42),
+        }];
+        let any_checks = [required("checks", None)];
+        assert!(checks_allow_merge(&passing, &any_checks));
+        assert!(
+            serde_json::to_value(&passing[0])
+                .unwrap()
+                .get("app_id")
+                .is_none()
+        );
+        assert!(checks_allow_merge(
+            &passing,
+            &[required("checks", Some(42))]
+        ));
+        assert!(!checks_allow_merge(
+            &passing,
+            &[required("checks", Some(43))]
+        ));
+        for conclusion in ["failure", "cancelled", "timed_out", "action_required"] {
+            let mut blocked = passing.clone();
+            blocked[0].conclusion = Some(conclusion.into());
+            assert!(!checks_allow_merge(&blocked, &any_checks));
+        }
+        let mut incomplete = passing.clone();
+        incomplete[0].status = "in_progress".into();
+        assert!(!checks_allow_merge(&incomplete, &any_checks));
+        assert!(!checks_allow_merge(&passing, &[]));
+
+        let allow = ReviewResult {
+            review_id: 1,
+            url: "https://github.com/dark-factory-build/dark-factory/pull/403#pullrequestreview-1"
+                .into(),
+            head_sha: "a".repeat(40),
+            state: "COMMENTED".into(),
+            verdict: "allow".into(),
+        };
+        assert!(review_result_allows_merge(
+            &allow,
+            "dark-factory-build/dark-factory",
+            403,
+            &"a".repeat(40)
+        ));
+        for (state, verdict) in [("COMMENTED", "block"), ("CHANGES_REQUESTED", "allow")] {
+            let mut blocked = allow.clone();
+            blocked.state = state.into();
+            blocked.verdict = verdict.into();
+            assert!(!review_result_allows_merge(
+                &blocked,
+                "dark-factory-build/dark-factory",
+                403,
+                &"a".repeat(40)
+            ));
+        }
+
+        let head = "a".repeat(40);
+        let app_block = PullRequestReview {
+            id: 2,
+            html_url: "https://github.com/dark-factory-build/dark-factory/pull/403".into(),
+            body: Some(format!("{REVIEW_VERDICT_PREFIX} block {head}")),
+            commit_id: head.clone(),
+            state: "COMMENTED".into(),
+        };
+        assert!(app_block.blocks_head(&head));
+        assert!(!app_block.blocks_head(&"b".repeat(40)));
+        assert!(
+            PullRequestReview {
+                id: 3,
+                html_url: app_block.html_url.clone(),
+                body: app_block.body.clone(),
+                commit_id: head.clone(),
+                state: "DISMISSED".into(),
+            }
+            .blocks_head(&head)
+        );
+    }
+
+    #[test]
+    fn direct_merge_ruleset_ids_and_bypass_shape_fail_closed() {
+        let rules: Vec<BranchRule> = serde_json::from_value(serde_json::json!([
+            {"type": "pull_request", "parameters": {}, "ruleset_id": 7, "ruleset_source": "dark-factory-build/dark-factory"},
+            {"type": "required_status_checks", "parameters": {}, "ruleset_id": 7, "ruleset_source": "dark-factory-build/dark-factory"},
+            {"type": "creation", "parameters": null, "ruleset_id": 11, "ruleset_source": "dark-factory-build"}
+        ]))
+        .unwrap();
+        assert_eq!(active_ruleset_ids(&rules), Some(vec![7, 11]));
+
+        let mut missing = rules.clone();
+        missing[0].ruleset_id = None;
+        assert!(active_ruleset_ids(&missing).is_none());
+        for invalid in [0, -1] {
+            let mut invalid_id = rules.clone();
+            invalid_id[0].ruleset_id = Some(invalid);
+            assert!(active_ruleset_ids(&invalid_id).is_none());
+        }
+
+        let safe: RepositoryRuleset = serde_json::from_value(serde_json::json!({
+            "id": 7,
+            "target": "branch",
+            "enforcement": "active",
+            "bypass_actors": [
+                {"actor_id": 9, "actor_type": "User", "bypass_mode": "always"},
+                {"actor_id": 10, "actor_type": "Integration", "bypass_mode": "pull_request"},
+                {"actor_id": 11, "actor_type": "Team", "bypass_mode": "exempt"},
+                {"actor_id": null, "actor_type": "DeployKey", "bypass_mode": "always"},
+                {"actor_id": null, "actor_type": "OrganizationAdmin", "bypass_mode": "always"}
+            ]
+        }))
+        .unwrap();
+        assert!(ruleset_allows_merge(&safe, 7, 42));
+        for drifted in [
+            RepositoryRuleset {
+                id: 8,
+                ..safe.clone()
+            },
+            RepositoryRuleset {
+                target: "tag".into(),
+                ..safe.clone()
+            },
+            RepositoryRuleset {
+                enforcement: "disabled".into(),
+                ..safe.clone()
+            },
+        ] {
+            assert!(!ruleset_allows_merge(&drifted, 7, 42));
+        }
+
+        let matching_app: RepositoryRuleset = serde_json::from_value(serde_json::json!({
+            "id": 7,
+            "target": "branch",
+            "enforcement": "active",
+            "bypass_actors": [
+                {"actor_id": 42, "actor_type": "Integration", "bypass_mode": "always"}
+            ]
+        }))
+        .unwrap();
+        assert!(!ruleset_allows_merge(&matching_app, 7, 42));
+        let missing_bypass: RepositoryRuleset = serde_json::from_value(serde_json::json!({
+            "id": 7,
+            "target": "branch",
+            "enforcement": "active"
+        }))
+        .unwrap();
+        assert!(!ruleset_allows_merge(&missing_bypass, 7, 42));
+        for actor in [
+            serde_json::json!({"actor_id": 9, "actor_type": "FutureActor", "bypass_mode": "always"}),
+            serde_json::json!({"actor_id": 9, "actor_type": "User", "bypass_mode": "future"}),
+            serde_json::json!({"actor_id": 0, "actor_type": "User", "bypass_mode": "always"}),
+        ] {
+            let ruleset: RepositoryRuleset = serde_json::from_value(serde_json::json!({
+                "id": 7,
+                "target": "branch",
+                "enforcement": "active",
+                "bypass_actors": [actor]
+            }))
+            .unwrap();
+            assert!(!ruleset_allows_merge(&ruleset, 7, 42));
+        }
+        assert!(serde_json::from_value::<RepositoryRuleset>(serde_json::json!({
+            "id": 7,
+            "target": "branch",
+            "enforcement": "active",
+            "bypass_actors": [{"actor_id": 9, "actor_type": "User", "bypass_mode": "always", "new": true}]
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn direct_merge_statuses_and_response_reconciliation_are_typed() {
+        assert_eq!(classify_merge_status(409), MergeHttpStatus::HeadConflict);
+        assert_eq!(classify_merge_status(422), MergeHttpStatus::Refused);
+        assert_eq!(classify_merge_status(400), MergeHttpStatus::Reconcile);
+        assert_eq!(classify_merge_status(429), MergeHttpStatus::Reconcile);
+        assert_eq!(classify_merge_status(500), MergeHttpStatus::Reconcile);
+        assert_eq!(classify_merge_status(0), MergeHttpStatus::Reconcile);
+
+        let request = MergePullRequestAtHead {
+            repository: "dark-factory-build/dark-factory".into(),
+            operation_id: "6c8a5c44-7f1f-11f0-952e-acde48001122".into(),
+            review_operation_id: "7c8a5c44-7f1f-11f0-952e-acde48001122".into(),
+            pull_number: 403,
+            head_sha: "a".repeat(40),
+            base: "main".into(),
+        };
+        let response: PullRequestMergeResponse = serde_json::from_value(serde_json::json!({
+            "sha": "c".repeat(40), "merged": true
+        }))
+        .unwrap();
+        let result = merge_response_result(response, &request).unwrap();
+        assert_eq!(result.pull_number, 403);
+        assert_eq!(result.head_sha, request.head_sha);
+        assert_eq!(result.merge_commit_sha, "c".repeat(40));
+        let marked_message = format!("Squash change\n\n{}", request.trailer().unwrap());
+        assert!(merge_commit_has_trailer(&request, &marked_message).unwrap());
+        assert!(!merge_commit_has_trailer(&request, "Squash change").unwrap());
+        let no_effect: PullRequestMergeResponse = serde_json::from_value(serde_json::json!({
+            "sha": null, "merged": false
+        }))
+        .unwrap();
+        assert!(matches!(
+            merge_response_result(no_effect, &request),
+            Err(OperationError::Refused(RefusalReason::MergePreconditions))
+        ));
     }
 }

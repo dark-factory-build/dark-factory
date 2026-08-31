@@ -61,10 +61,20 @@ approval. Routine development uses the deterministic shell provider.
    correctness, security, and simplification, and returns `ALLOW <sha>` or
    `BLOCK <sha>`. Fix every finding and obtain a new verdict on the new head.
 
-7. Merge only the reviewed head after its required checks pass. The merge queue
-   tests the proposed composition before merge. A conflict-free merge whose
-   tree matches the reviewed, gated parent does not need another local or
-   post-merge gate.
+7. Merge only the reviewed head after its required checks pass. Use
+   `enqueue_pull_request` where the base has a merge queue. Where GitHub does
+   not offer a queue, use only `merge_pull_request_at_head`: it refuses a
+   queue-enabled base and requires the protected default-base branch and exact
+   head, a completed Maintainer `ALLOW`, completed non-failing checks, and an
+   active repository ruleset with strict status checks that permits squash. It
+   proves the Maintainer App is absent from every active ruleset's disclosed
+   bypass list; a missing or hidden list refuses the merge. Legacy classic
+   branch protection alone is unsupported. This operation alone mints
+   Administration write for fixed ruleset reads because GitHub otherwise hides
+   bypass actors; it exposes no administration mutation. It never falls back
+   between paths.
+   A conflict-free merge whose tree matches the reviewed, gated parent does
+   not need another local or post-merge gate.
 
 ## Shared local-CI lease
 
@@ -92,18 +102,13 @@ go build -o "$df_dev_root/factory-runner" ./cmd/factory-runner
 df_dev_home="$df_dev_root/factory"
 "$df_dev_root/factoryctl" init --home "$df_dev_home"
 "$df_dev_root/factoryctl" doctor --home "$df_dev_home"
-"$df_dev_root/factoryd" --home "$df_dev_home" \
-  --development-browser-address 127.0.0.1:0 &
+"$df_dev_root/factoryd" --home "$df_dev_home" &
 
 until [ -S "$df_dev_home/runtimes/factory.sock" ]; do sleep 0.2; done
 export DARK_FACTORY_SOCKET="$df_dev_home/runtimes/factory.sock"
 export DARK_FACTORY_OPERATOR_TOKEN_FILE="$df_dev_home/operator.token"
 "$df_dev_root/factoryctl" project create --name dev --root "$PWD"
 ```
-
-The development address option selects an available loopback port; `factoryctl
-web status` reports the bound address. Without it, `factoryd` keeps the stable
-`127.0.0.1:43123` address used by the installed service.
 
 The root is under `/private/tmp` because `/tmp` is a symlink on macOS and the
 home walk rejects symlinks. Run `doctor` while the home is stopped. Every
@@ -128,7 +133,7 @@ repository to report:
 - the `owner/name` you asked for, compared case-insensitively (it answers
   with GitHub's canonical spelling);
 - a positive numeric repository ID; and
-- permission revision `maintainer-operations-v3`.
+- permission revision `maintainer-operations-v4`.
 
 Use only its typed, exact-head operations. Retain a write's operation UUID and
 canonical request until the result is reconciled. Never expose App keys,

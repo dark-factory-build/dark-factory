@@ -2,10 +2,10 @@
 
 Status: the maintainer broker has one finite typed MCP surface whose every
 operation names the repository it acts on, bounded by the App's installation.
-Its only merge mutation is merge-queue enqueue; the direct-merge operation that
-briefly stood in for it has been removed. This document does not itself
-authorize App registration, installation, repository publication, merge,
-release, or live-factory changes.
+Its merge mutations are two explicit, mutually exclusive operations: queue
+enqueue where the base has a merge queue, and exact-head squash merge where it
+does not. This document does not itself authorize App registration,
+installation, repository publication, merge, release, or live-factory changes.
 
 ## Decision
 
@@ -79,7 +79,7 @@ and can never satisfy readiness. The production adapter accepts exactly
 `DARK_FACTORY_CLOUDFLARE_ACCESS_AUD`. The private key is standard
 base64 of unencrypted PKCS#8 DER, no repository is configured, and the
 implemented permission revision is exactly
-`maintainer-operations-v3`. Missing webhook authority or a partial or
+`maintainer-operations-v4`. Missing webhook authority or a partial or
 syntactically invalid App-authority group leaves the fixed inactive router with
 no webhook route. An unusable key or configured but unavailable or drifted
 Durable Object journal or GitHub authority makes readiness and ping
@@ -157,6 +157,8 @@ The live maintainer broker exposes only these repository-scoped operations:
 - rerun failed jobs from one exact completed failed workflow attempt;
 - enqueue one exact reviewed head for merge after its bound checks and
   approvals;
+- squash-merge one exact reviewed head only when its base has no merge queue
+  and an active repository ruleset requires up-to-date status checks;
 - publish and observe one immutable semver release tag, and recover only that
   exact tag through the fixed release workflow; and
 - dispatch and observe the fixed control-plane deployment workflow at one exact
@@ -171,8 +173,12 @@ state, or close authority. Until that bootstrap authority exists, the reviewed
 replacement bodies remain local and Phase 0 is incomplete.
 
 The live tools mint only their operation-specific subsets of Actions write,
-Metadata read, Contents write, Issues write, Pull requests write, Checks read,
-and Merge queues write. Issues write exists only for bounded issue creation and
+Administration write, Metadata read, Contents write, Issues write, Pull
+requests write, Checks read, and Merge queues write. Administration write is
+minted only by `merge_pull_request_at_head`, because GitHub omits ruleset bypass
+actors from callers without ruleset-write access; that operation uses it only
+for fixed `GET` requests for the active rulesets and exposes no administration
+mutation. Issues write exists only for bounded issue creation and
 evidence-backed terminal state. Pull requests
 write authorizes PR creation, formal review, and the exact-head enqueue, which
 mutates the pull request's queue state; a PR review is not an Issues API
@@ -180,11 +186,18 @@ comment. Merge queues write authorizes only the typed exact-head enqueue and
 reconciliation operation; the enqueue token also mints Contents write, because
 a queued entry ends with GitHub pushing the squash commit to the default branch
 (#371 tracks the live proof of the scope set). Actions write is narrowed by code
-to exact workflow/run identities; no generic workflow, Administration, Secrets,
-arbitrary status, direct-merge, dequeue, queue-jump, or generic API authority is
-exposed. Exact-tree publication still rejects any tree that changes
+to exact workflow/run identities; Contents write also authorizes only the
+strict exact-head squash operation described below. No generic workflow,
+administration mutation, Secrets, arbitrary status, caller-selected merge,
+dequeue, queue-jump, or generic API authority is exposed. Exact-tree publication still
+rejects any tree that changes
 `.github/workflows/**` rather than silently publishing an incomplete or
 unauthorized workflow update.
+
+The installation must carry the complete revision grant even though each
+operation token receives only its subset. That all-or-nothing check prevents
+`maintainer_status` from reporting v4 for a repository where direct merge is
+unusable; it does not copy Administration into any other operation token.
 
 A workflow change is therefore a separate human-authored and human-published
 pull request. It is never smuggled through the maintainer broker, and broker
@@ -203,26 +216,46 @@ distinct-reviewer requirement. The cold review must still be performed by a
 separate agent or person, and repository policy may require a separate GitHub
 actor to approve before the typed merge.
 
-The typed merge operation uses a GitHub-enforced merge queue as its sole
-automated path. Before enqueueing it re-reads the PR and requires the bound base
-and head; the GraphQL mutation supplies `expectedHeadOid`, never `jump`, and the
-broker reconciles the exact queue entry. The enqueue result reports the state
-the entry was created in, which is what makes an immediately `UNMERGEABLE`
-entry visible. An entry already present before the durable claim is refused as
-external; it is never adopted as an App enqueue. The read-only merge observer
-first binds to the completed
-durable App enqueue attempt, then distinguishes its active exact entry, a
-merged PR after that attempt with its merge commit, and an exact PR whose
-recorded entry is no longer in the queue. The last state deliberately does not
-guess whether the entry was ejected or manually removed. The durable entry ID
-is returned in every state; a generic `merged: true` response alone is not
-reported as queue lineage. GitHub tests the exact PR head
-against the queue's latest base before merging. A base or head mismatch
-observed before enqueue invalidates the operation; an ambiguous enqueue is
-reconciled and never blindly repeated. A repository with no merge queue, or
-only ruleset/classic branch protection the broker cannot prove applies without
-bypass, is unsupported and fails closed. The broker does not request
-Administration permission or expose direct merge as a fallback.
+The two typed merge operations are mutually exclusive; neither silently falls
+back to the other. Before queue enqueue, the broker re-reads the PR and requires
+the bound base and head. The GraphQL mutation supplies `expectedHeadOid`, never
+`jump`, and the broker reconciles the exact queue entry. The enqueue result
+reports the state the entry was created in, which makes an immediately
+`UNMERGEABLE` entry visible. An entry already present before the durable claim
+is refused as external; it is never adopted as an App enqueue. The read-only
+merge observer first binds to the completed durable App enqueue attempt, then
+distinguishes its active exact entry, a merged PR after that attempt with its
+merge commit, and an exact PR whose recorded entry is no longer in the queue.
+The last state deliberately does not guess whether the entry was ejected or
+manually removed. The durable entry ID is returned in every state; a generic
+`merged: true` response alone is not reported as queue lineage. GitHub tests
+the exact PR head against the queue's latest base before merging.
+
+`merge_pull_request_at_head` is the deliberately narrower path for a private
+repository whose plan does not offer merge queues. It first proves there is no
+queue for the base, the base is the repository's default branch, the exact PR
+head still matches the request, and the open PR is not a draft. It requires an
+active repository ruleset to permit squash, require at least one status check,
+and require the branch to be up to date. It reads the full definition of every
+active ruleset and proves the Maintainer App is absent from each disclosed
+bypass list; a missing or hidden list refuses the merge. GitHub discloses that
+field only with ruleset-write access, so the operation's repository token alone
+adds Administration write and uses it only for those fixed detailed-ruleset
+`GET` requests. GitHub's active-rules
+endpoint does not report legacy classic branch protection, so classic-only
+configuration is deliberately unsupported and fails closed. It then requires nonempty,
+completed, non-failing exact-head checks and binds to a completed durable
+`submit_pull_request_review` operation whose exact GitHub review carries the
+Maintainer-rendered `ALLOW` for that head. Any exact-head `BLOCK` refuses the
+merge. After its durable claim the broker re-reads those mutable preconditions,
+then calls GitHub's fixed squash endpoint with the expected head SHA. GitHub
+atomically binds that head, applies the ruleset to the then-current default
+base, and remains the final enforcer. A moved head,
+missing strict rule, queue appearing, failed or pending check, unbound review,
+or ambiguous authority fails closed. A network-ambiguous response is reconciled
+only when the merged PR names the exact head and base and its squash commit
+carries this operation's digest marker. It is never blindly repeated or adopted
+from an external merge.
 
 Every request binds the App installation, repository numeric ID, permission
 revision, operation kind, exact expected base and head where applicable,
@@ -237,10 +270,11 @@ the exact expected generated ref/commit and refuses the live default branch;
 any different target is a conflict.
 GitHub's `delete_branch_on_merge` setting removes the source ref as part of
 merge processing. The broker does not read that setting: GitHub returns it only
-to a caller holding Administration access, which this broker deliberately never
-requests, so every read of it was an assertion about a value the App cannot
-observe. Source-branch cleanup is the repository owner's setting, and the broker
-exposes no read-then-delete ref mutation either way.
+to a caller holding Administration access, and repository metadata operations
+deliberately do not mint that permission. The direct-merge operation's narrow
+ruleset-read token does not turn this unrelated setting into a precondition.
+Source-branch cleanup is the repository owner's setting, and the broker exposes
+no read-then-delete ref mutation either way.
 This maintainer surface is permanent official coordinator infrastructure, not
 executable intake and not the future runtime broker.
 
@@ -330,7 +364,7 @@ formal PR review, enqueue it, publish and observe one immutable release, and
 dispatch one fixed control-plane deployment. GitHub owns merged source-branch
 cleanup through delete-on-merge. There is no generic issue-comment or closure
 authority and no arbitrary REST, GraphQL, Git, shell, merge, ref update, or
-administration escape hatch.
+administration mutation escape hatch.
 
 ## Input quarantine
 
@@ -373,6 +407,21 @@ lifecycle action fails closed. The revision requests no Contents, Pull
 requests, Checks, Actions, Workflows, Releases, Administration, or Secrets
 authority.
 
+`maintainer-operations-v4` adds Administration write to
+`maintainer-operations-v3` solely because GitHub withholds ruleset bypass actors
+from a caller without ruleset-write access. Only the strict direct-merge
+operation mints it, and only for fixed detailed-ruleset reads; the broker has no
+administration mutation operation. The revision also adds that separate strict
+direct-merge operation.
+Before promotion, update the App registration and accept the new permission for
+every installation the broker must serve. `/readyz` names no repository and
+therefore cannot prove installation acceptance; after promotion,
+`maintainer_status` must report v4 for each named repository.
+Rotate the `DARK_FACTORY_MAINTAINER_PERMISSION_REVISION` secret before
+promoting a v4 build; a build promoted against the old value fails its own
+authority check, readiness reports not-ready, and the deploy gate rolls it
+back.
+
 `maintainer-operations-v3` grants exactly what `maintainer-operations-v2`
 granted; no GitHub permission changed. It is a new revision because the
 revision is the surface's fail-closed handshake and the operation contract did
@@ -383,16 +432,18 @@ operation UUID journalled under v2 cannot be replayed under v3. Rotate the
 build; a build promoted against the old value fails its own authority check,
 readiness reports not-ready, and the deploy gate rolls it back.
 
-The separately approved `maintainer-operations-v2` revision adds only Actions
+The separately approved `maintainer-operations-v2` revision added only Actions
 read/write, Contents read/write, Issues read/write, Pull requests read/write,
 Checks read, Merge queues read/write, and Metadata read. Each credential minted
 from it is downscoped again to one typed operation. Pull requests write covers
 PR creation and the formal review API; Contents write covers exact generated-ref
-and immutable tag creation; Actions write covers exact failed-run recovery and
+and immutable tag creation, queue completion, and the fixed exact-head squash
+mutation; Actions write covers exact failed-run recovery and
 the two fixed workflow dispatches. None creates a generic mutation surface.
-Runtime direct merge is absent. GitHub's required delete-on-merge repository
-setting performs source-branch cleanup atomically instead of a broker
-read-then-delete race.
+The direct mutation is not generic merge authority and cannot target a
+queue-enabled base. GitHub's required delete-on-merge repository setting
+performs source-branch cleanup atomically instead of a broker read-then-delete
+race.
 
 ## Bound App publication
 

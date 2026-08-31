@@ -336,6 +336,11 @@ fn declared_output_schemas_name_the_fields_the_results_carry() {
                 "merge_commit_sha",
             ][..],
         ),
+        (
+            "merge_pull_request_at_head",
+            "MergePullRequestAtHeadResult",
+            &["pull_number", "head_sha", "base", "merge_commit_sha"][..],
+        ),
     ] {
         let start = github_app
             .find(&format!("struct {struct_name} {{"))
@@ -455,6 +460,7 @@ fn every_repository_tool_requires_the_repository_it_acts_on() {
         "observe_pull_request_merge",
         "publish_commit",
         "enqueue_pull_request",
+        "merge_pull_request_at_head",
     ] {
         let input = tool_input(tool);
         assert!(
@@ -494,12 +500,27 @@ fn every_repository_tool_requires_the_repository_it_acts_on() {
         ("observe_ref", &["repository", "branch"][..]),
         ("observe_file", &["repository", "commit_sha", "path"][..]),
         ("observe_tree", &["repository", "commit_sha"][..]),
+        (
+            "merge_pull_request_at_head",
+            &[
+                "repository",
+                "operation_id",
+                "review_operation_id",
+                "pull_number",
+                "head_sha",
+                "base",
+            ][..],
+        ),
     ] {
         let declared = own_required(tool);
         for field in required {
             assert!(
                 declared.contains(&format!(r#""{field}""#)),
                 "{tool} does not require {field}"
+            );
+            assert!(
+                tool_input(tool).contains(&format!(r#""{field}": {{"#)),
+                "{tool} does not declare {field} in its input properties"
             );
         }
         assert!(
@@ -558,6 +579,7 @@ fn mcp_surface_is_installation_bound_and_typed() {
         "observe_pull_request_merge",
         "publish_commit",
         "enqueue_pull_request",
+        "merge_pull_request_at_head",
     ] {
         assert!(mcp.contains(tool), "missing typed MCP tool: {tool}");
         // Advertised is not dispatched. A renamed match arm leaves the tool in
@@ -676,8 +698,9 @@ fn github_refusals_stay_determinate() {
     // A failed read is never reported as a refusal of the operation it was
     // reconciling.
     assert!(github_app.contains("if failure.is_some() {"));
-    // The boundary requires every permission the operations mint, so a missing
-    // grant fails at `/readyz` rather than at token mint.
+    // The installation boundary requires every permission an operation may
+    // mint. Readiness names no repository; a missing grant is refused when a
+    // repository operation resolves its installation.
     assert!(
         github_app
             .contains(r#"permission_at_least(&installation.permissions, "merge_queues", "write")"#)
@@ -689,14 +712,20 @@ fn github_refusals_stay_determinate() {
         github_app
             .contains(r#"permission_at_least(&installation.permissions, "actions", "write")"#)
     );
-    // A branch with no queue fails closed instead of falling back to a merge.
-    assert!(!github_app.contains("/merge\""));
-    assert!(!mcp.contains("merge_pull_request_at_head"));
+    assert!(
+        github_app.contains(
+            r#"permission_at_least(&installation.permissions, "administration", "write")"#,
+        )
+    );
+    // Direct merge is now an exact-head, exact-review operation; the schema
+    // and dispatch checks above ensure it cannot become an untyped shortcut.
+    assert!(github_app.contains("MergePullRequestAtHead"));
+    assert!(mcp.contains("merge_pull_request_at_head"));
     // GitHub owns atomic post-merge cleanup, through a repository setting this
-    // App cannot read and never acts on. The absence of a ref mutation is a
-    // real property of this surface and is asserted here. That the App does not
+    // App never acts on. The absence of a ref mutation is a real property of
+    // this surface and is asserted here. That the metadata reader does not
     // *require* the setting is not: it is proven by
-    // `repository_metadata_parses_a_real_body_without_administration_access`,
+    // `repository_metadata_parses_a_real_body_without_optional_fields`,
     // which fails the moment the field is required again. The two greps that
     // used to stand here asserted the presence of that read for months while it
     // was disabling every repository observation -- a grep over the source
