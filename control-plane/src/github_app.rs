@@ -335,6 +335,28 @@ pub(crate) struct IssueResult {
     pub(crate) url: String,
 }
 
+/// Which commit a branch points at right now.
+///
+/// Every other observation takes a `head_sha` as input, and `maintainer_status`
+/// answers only for the default branch, so an agent working on a topic branch
+/// had no way to learn its head through this App at all -- it had to ask a
+/// human or reach for ambient git credentials, which is the one thing this
+/// surface exists to avoid.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ObserveRef {
+    pub(crate) repository: String,
+    pub(crate) branch: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct RefObservationResult {
+    pub(crate) branch: String,
+    /// Absent when the branch does not exist, which is an answer rather than a
+    /// failure: it is how a caller tells "not published yet" from "moved".
+    pub(crate) head_sha: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ObserveIssue {
@@ -854,6 +876,41 @@ impl AppAuthority {
                 Err(OperationError::Indeterminate)
             }
         }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn observe_ref(
+        &self,
+        mut request: ObserveRef,
+    ) -> Result<RefObservationResult, OperationError> {
+        request.validate()?;
+        let repository = RepositoryName::requested(&mut request.repository)?;
+        let token = self
+            .0
+            .installation_token(
+                repository,
+                BTreeMap::from([("contents", "read"), ("metadata", "read")]),
+            )
+            .await?;
+        let reference = self.0.read_ref_optional(&token, &request.branch).await?;
+        let head_sha = match reference {
+            Some(reference) => {
+                if reference.object.kind != "commit" {
+                    // A tag object or a symbolic ref is not a branch head, and
+                    // answering with its SHA would hand the caller something
+                    // that is not the commit it asked for.
+                    return Err(OperationError::Conflict);
+                }
+                valid_sha(&reference.object.sha)?;
+                Some(reference.object.sha)
+            }
+            None => None,
+        };
+        Ok(RefObservationResult {
+            branch: request.branch,
+            head_sha,
+        })
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -2643,6 +2700,12 @@ impl CreateIssue {
         } else {
             Ok(format!("{}\n\n{}", self.body, self.marker()?))
         }
+    }
+}
+
+impl ObserveRef {
+    fn validate(&self) -> Result<(), OperationError> {
+        valid_ref(&self.branch)
     }
 }
 

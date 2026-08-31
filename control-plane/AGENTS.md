@@ -68,7 +68,8 @@ Codex nor Claude owns its credentials or its durable journal.
    Cloudflare helper's two-variable CLI boundary is the only exception and
    never exposes the Access pair.
    The deployed surface is finite: authority and default-head observation,
-   durable operation observation, bounded issue lifecycle, exact commit and
+   branch-head observation, durable operation observation,
+   bounded issue lifecycle, exact commit and
    pull-request publication, exact-head review and CI diagnosis/recovery,
    merge-queue enqueue and eventual-result observation, immutable release
    publication/observation/recovery, and one exact control-plane deployment

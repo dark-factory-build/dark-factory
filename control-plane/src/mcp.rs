@@ -12,7 +12,7 @@ use crate::{
     github_app::{
         AppAuthority, CreateIssue, CreatePullRequest, DispatchControlPlaneDeploy,
         EnqueuePullRequest, ObserveControlPlaneDeploy, ObserveIssue, ObservePullRequestChecks,
-        ObservePullRequestMerge, ObservePullRequestWorkflows, ObserveRelease,
+        ObservePullRequestMerge, ObservePullRequestWorkflows, ObserveRef, ObserveRelease,
         ObserveReleaseWorkflow, ObserveRepository, OperationError, PublishCommit,
         PublishReleaseTag, ReadPullRequestJobLog, RecoverRelease, RerunFailedPullRequestJobs,
         ResolveIssue, SubmitPullRequestReview, canonical_operation_id,
@@ -263,6 +263,29 @@ fn tools() -> Value {
             "additionalProperties": false
         },
         "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true}
+    }, {
+        "name": "observe_ref",
+        "title": "Observe a branch head",
+        "description": "Return the exact commit a branch points at now, or null when the branch does not exist. Read this before binding a write to a head you did not just publish.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
+                "branch": {"type": "string", "minLength": 1, "maxLength": 240}
+            },
+            "required": ["repository", "branch"],
+            "additionalProperties": false
+        },
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "branch": {"type": "string"},
+                "head_sha": {"type": ["string", "null"]}
+            },
+            "required": ["branch", "head_sha"],
+            "additionalProperties": false
+        },
+        "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
     }, {
         "name": "observe_issue",
         "title": "Observe one issue",
@@ -766,6 +789,15 @@ async fn call_tool(id: Value, request: &Map<String, Value>, mcp: &McpState) -> R
             };
             match mcp.app.create_issue(&mcp.journal, arguments).await {
                 Ok(result) => serialized_tool_result(id, &result, "Issue is durably recorded."),
+                Err(error) => operation_error(id, error),
+            }
+        }
+        Some("observe_ref") => {
+            let Ok(arguments) = serde_json::from_value::<ObserveRef>(arguments) else {
+                return json_rpc_error(id, -32602, "Invalid params");
+            };
+            match mcp.app.observe_ref(arguments).await {
+                Ok(result) => serialized_tool_result(id, &result, "Branch head is observed."),
                 Err(error) => operation_error(id, error),
             }
         }

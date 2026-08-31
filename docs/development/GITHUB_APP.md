@@ -140,6 +140,7 @@ The live maintainer broker exposes only these repository-scoped operations:
 
 - verify one named repository's installation, numeric repository ID, permission
   revision, and live default branch head;
+- observe the exact commit any branch points at, or its absence;
 - observe one durable operation UUID without mutating it;
 - create, observe, and resolve one bounded issue with an evidence comment;
 - publish one exact independently reviewed tree as an App-authored commit to a

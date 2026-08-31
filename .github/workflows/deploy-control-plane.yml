@@ -194,10 +194,9 @@ jobs:
 
       # Secrets are inherited from the previous deployment rather than uploaded
       # here, so prove the inheritance happened before sending traffic. The
-      # match is anchored: three of these names are prefixes of others
-      # (..._WEBHOOK_SECRET of ..._WEBHOOK_SECRET_REVISION, ..._REPOSITORY of
-      # ..._REPOSITORY_ID and ..._REPOSITORY_OWNER_ID), so a substring test
-      # would report a missing secret as present.
+      # match is anchored: ..._WEBHOOK_SECRET is a prefix of
+      # ..._WEBHOOK_SECRET_REVISION, so a substring test would report a missing
+      # secret as present.
       - name: Prove the version carries every required secret
         working-directory: control-plane
         env:
@@ -268,7 +267,7 @@ jobs:
             echo "healthz=${health} readyz=${body}"
             if [ "${health}" = "200" ] \
               && printf '%s' "${body}" | grep -Fq '"status":"ready"' \
-              && printf '%s' "${body}" | grep -Fq '"maintainer_operations":"mcp_repository_bound_operator_and_headless"'; then
+              && printf '%s' "${body}" | grep -Fq '"maintainer_operations":"mcp_installation_bound_operator_and_headless"'; then
               ready=1
               break
             fi

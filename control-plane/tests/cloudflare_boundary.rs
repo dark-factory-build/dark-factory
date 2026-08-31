@@ -327,6 +327,7 @@ fn every_repository_tool_requires_the_repository_it_acts_on() {
     // field its request type does not accept.
     for tool in [
         "maintainer_status",
+        "observe_ref",
         "create_issue",
         "observe_issue",
         "resolve_issue",
