@@ -6,9 +6,10 @@ member and never links to or runs inside `factoryd`.
 
 The service is a Rust Cloudflare Worker backed by SQLite Durable Objects. It
 keeps GitHub App credentials outside agent processes and exposes only reviewed,
-repository-bound operations over MCP. Deployment state is verified separately;
-source control is not evidence that a route, Access policy, or App
-configuration is live.
+typed operations over MCP. Every operation names the `owner/name` repository it
+acts on, and can reach only repositories this App is installed on. Deployment
+state is verified separately; source control is not evidence that a route,
+Access policy, or App configuration is live.
 
 ## Current surface
 
@@ -16,17 +17,19 @@ configuration is live.
 - `GET /readyz` returns 200 only when the three webhook authority bindings are
   valid and the Durable Object binding, SQLite schema, and migration marker
   pass their audit. When App authority is configured, readiness also imports
-  the private key, signs an App JWT, and verifies the exact live installation.
-  A partial or syntactically invalid App-authority group makes the whole Worker
-  inactive.
+  the private key, signs an App JWT, and verifies that the key belongs to the
+  configured App. Readiness names no repository: which repositories the App may
+  act on is the installation's answer, established per operation when a token is
+  minted, not a deployment setting. A partial or syntactically invalid
+  App-authority group makes the whole Worker inactive.
 - `POST /v1/github/maintainer/webhook` accepts only a bounded GitHub webhook.
   It verifies `X-Hub-Signature-256` over the exact body with HMAC-SHA-256,
   limits the body to 64 KiB, requires one value for every security header,
   requires an `integration` target, and binds the configured App ID.
 - A valid `ping` is the only acknowledged event. When all operation-authority
   bindings are present, acknowledgement also requires an RS256 App JWT, one
-  exact selected-repository installation for the configured repository name,
-  numeric repository ID, and numeric owner. Every other authenticated event is
+  App identity proving the private key belongs to the configured App. Every
+  other authenticated event is
   journalled as `policy_rejected`
   and returns 422. No payload can create a task, message, prompt, provider run,
   or GitHub mutation.
@@ -42,7 +45,9 @@ configuration is live.
   bound — one exact Access **service token**, which is how the surface is
   reached headlessly with no human present. Each principal's claim set rejects
   the other's shape, so neither can take the other's path. Its finite typed
-  tools observe the default head and durable operation state, manage a bounded
+  tools observe the default head, any branch head, a file at an exact commit, one
+  commit's parents and complete tree, or a determinate refusal when GitHub
+  truncates it, and durable operation state, manage a bounded
   issue lifecycle, publish an exact commit and pull request, submit an exact-head
   `ALLOW`, `COMMENT`, or `REQUEST_CHANGES` verdict, diagnose and rerun exact CI,
   observe eventual merge state, enqueue through the merge queue, publish and
@@ -61,10 +66,13 @@ configuration is live.
   merge queue makes GitHub refuse `PUT /pulls/{n}/merge` outright, and
   `docs/development/GITHUB_APP.md` had already ruled it out ("the broker does
   not ... expose direct merge as a fallback"). Enqueue is the only automated
-  path to `main`. Publication refuses the `.github` authority tree, and every
+  path to `main`. Publication refuses `.github` itself, `.github/workflows/**`, the three
+  CODEOWNERS locations and the dependabot config, and every
   write is bound to a stated head commit and to a durable operation ID.
-  There is no generic GitHub proxy, arbitrary URL, repository selector, shell,
-  direct merge, arbitrary ref/workflow mutation, or credential-returning tool.
+  There is no generic GitHub proxy, arbitrary URL, shell, direct merge,
+  arbitrary ref/workflow mutation, or credential-returning tool. Operations name
+  the repository they act on, and reach only repositories this App is installed
+  on: the installation is the boundary, not a configured name.
   A publication cannot target the
   live default branch: generated refs move only forward from a stated head or
   disappear after their exact pull request is proven merged.
@@ -114,12 +122,17 @@ executing or indeterminate operation cannot be reconciled, it is never blindly
 submitted again.
 
 GitHub App installation tokens are minted only inside the Worker, scoped to the
-configured numeric repository, and downscoped per operation. They are held in
-zeroizing memory and are never returned or journalled. The permanent App may
-have additional installed capabilities, but readiness requires the minimum
-  Actions-write, checks-read, contents-write, issues-write, merge-queues-write,
-  metadata-read, and pull-requests-write set; unused App-level authority is
-  never copied into an operation token.
+one repository the operation names, and downscoped per operation. They are held
+in zeroizing memory and are never returned or journalled. The permanent App may
+have additional installed capabilities; unused App-level authority is never
+copied into an operation token.
+
+The Actions-write, checks-read, contents-write, issues-write,
+merge-queues-write, metadata-read, and pull-requests-write minimum is enforced
+when a token is minted, not at readiness. Readiness names no repository, so it
+has no installation to audit; an installation that is suspended, is not
+selected-repository, or lacks one of those grants is refused at the operation
+that needs it, and the refusal names the field that failed.
 
 [SQLite storage API]: https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/
 [Durable Object rules]: https://developers.cloudflare.com/durable-objects/best-practices/rules-of-durable-objects/
@@ -138,7 +151,7 @@ runtime database role, Vercel adapter, or provider management API.
 - `preview_urls = false`;
 - no route or custom domain;
 - one capability-style Durable Object binding; and
-- eleven required production secret bindings.
+- eight required production secret bindings.
 
 The exact required bindings are:
 
@@ -151,13 +164,7 @@ The exact required bindings are:
 - `DARK_FACTORY_MAINTAINER_PRIVATE_KEY_PKCS8`: standard-base64 encoding of the
   App's unencrypted PKCS#8 DER private key;
 - `DARK_FACTORY_MAINTAINER_PERMISSION_REVISION`: exactly
-  `maintainer-operations-v2` for this authority revision;
-- `DARK_FACTORY_MAINTAINER_REPOSITORY`: the exact safe `owner/repository`
-  name;
-- `DARK_FACTORY_MAINTAINER_REPOSITORY_OWNER_ID`: the exact positive numeric
-  owner ID;
-- `DARK_FACTORY_MAINTAINER_REPOSITORY_ID`: the exact positive numeric repository
-  ID; and
+  `maintainer-operations-v3` for this authority revision;
 - `DARK_FACTORY_MAINTAINER_OPERATOR_EMAIL_SHA256`: lowercase SHA-256 of the one
   Cloudflare Access operator email after ASCII lowercasing;
 - `DARK_FACTORY_CLOUDFLARE_ACCESS_TEAM_DOMAIN`: the exact lowercase
@@ -172,8 +179,8 @@ One further binding is deliberately outside the all-or-nothing group:
   headlessly. Absent, every service-token assertion is rejected and only the
   operator identity can reach `/mcp`; it never means "any service token".
   Because it is optional and inherited across versions, `/readyz` names which
-  principals are live — `mcp_repository_bound_operator_and_headless` or
-  `mcp_repository_bound_operator_only` — and the deployment gate requires the
+  principals are live — `mcp_installation_bound_operator_and_headless` or
+  `mcp_installation_bound_operator_only` — and the deployment gate requires the
   former.
 
 The revisions and numeric IDs are stored as secrets too. They are not

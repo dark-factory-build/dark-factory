@@ -1,7 +1,8 @@
 # GitHub App authority decision
 
-Status: the maintainer broker has one finite repository-bound MCP surface. Its
-only merge mutation is merge-queue enqueue; the direct-merge operation that
+Status: the maintainer broker has one finite typed MCP surface whose every
+operation names the repository it acts on, bounded by the App's installation.
+Its only merge mutation is merge-queue enqueue; the direct-merge operation that
 briefly stood in for it has been removed. This document does not itself
 authorize App registration, installation, repository publication, merge,
 release, or live-factory changes.
@@ -57,10 +58,12 @@ The broker implementation lives in the standalone `control-plane/` crate, not
 in the local-runtime workspace or `factoryd`. Its webhook remains a
 versioned, signed, inert maintainer `ping` boundary. With the App-authority
 group configured, readiness and every ping also prove that the broker can sign
-an App JWT and find the exact selected-repository installation with the
-revision's bounded permissions for the bound `owner/repository` and numeric
-owner. This proof creates no installation token and exposes no repository
-operation through webhook intake. Every non-ping event is policy-rejected.
+an App JWT and that the key belongs to the configured App. It names no
+repository: the installation, its bounded permissions, and the repository
+identity are established per operation, when a token is minted for the
+repository the caller named. This proof creates no installation token and
+exposes no repository operation through webhook intake. Every non-ping event
+is policy-rejected.
 The hosted adapter is a Rust Cloudflare Worker; repository operations are
 available only through the separately authenticated finite MCP surface.
 Its production journal uses strongly consistent SQLite Durable Objects;
@@ -71,15 +74,12 @@ and can never satisfy readiness. The production adapter accepts exactly
 `DARK_FACTORY_MAINTAINER_APP_ID`, plus the all-or-nothing App-authority group
 `DARK_FACTORY_MAINTAINER_PRIVATE_KEY_PKCS8`,
 `DARK_FACTORY_MAINTAINER_PERMISSION_REVISION`,
-`DARK_FACTORY_MAINTAINER_REPOSITORY`, and
-`DARK_FACTORY_MAINTAINER_REPOSITORY_OWNER_ID`,
-`DARK_FACTORY_MAINTAINER_REPOSITORY_ID`,
 `DARK_FACTORY_MAINTAINER_OPERATOR_EMAIL_SHA256`,
 `DARK_FACTORY_CLOUDFLARE_ACCESS_TEAM_DOMAIN`, and
 `DARK_FACTORY_CLOUDFLARE_ACCESS_AUD`. The private key is standard
-base64 of unencrypted PKCS#8 DER, the repository is an exact safe
-`owner/repository` name, and the implemented permission revision is exactly
-`maintainer-operations-v2`. Missing webhook authority or a partial or
+base64 of unencrypted PKCS#8 DER, no repository is configured, and the
+implemented permission revision is exactly
+`maintainer-operations-v3`. Missing webhook authority or a partial or
 syntactically invalid App-authority group leaves the fixed inactive router with
 no webhook route. An unusable key or configured but unavailable or drifted
 Durable Object journal or GitHub authority makes readiness and ping
@@ -101,7 +101,7 @@ App, or activate a webhook. Production credentials are never shared with
 preview or disposable deployments; those use a distinct App, secret, Durable
 Object namespace, and activation contract. `workers.dev` and preview URLs are
 disabled and the checked-in configuration has no route, so an upload cannot
-silently claim a public ingress. All eleven production authority settings are
+silently claim a public ingress. All eight production authority settings are
 required Cloudflare secrets. There is no database URL, owner integration,
 runtime role, provider API key, or ambient authentication fallback.
 
@@ -138,8 +138,13 @@ no such fixture, so treat them as unproven rather than as checked.
 
 The live maintainer broker exposes only these repository-scoped operations:
 
-- verify the exact repository, numeric repository ID, permission revision, and
-  live default branch head;
+- verify one named repository's installation, numeric repository ID, permission
+  revision, and live default branch head;
+- observe the exact commit any branch points at, or its absence;
+- observe one file's exact bytes at one exact commit, or its absence;
+- observe one exact commit's parents and recursive tree: every path with its
+  git object kind, file mode and object id, refused whole when GitHub truncates
+  it, and with no judgement about what a difference between two of them means;
 - observe one durable operation UUID without mutating it;
 - create, observe, and resolve one bounded issue with an evidence comment;
 - publish one exact independently reviewed tree as an App-authored commit to a
@@ -239,6 +244,43 @@ exposes no read-then-delete ref mutation either way.
 This maintainer surface is permanent official coordinator infrastructure, not
 executable intake and not the future runtime broker.
 
+## Repository selection
+
+Which repositories the Maintainer may act on is the App installation's answer,
+not this service's configuration. There is no configured repository: the caller
+names an `owner/name` on every operation, and the grant is what binds it.
+
+The mechanism is the installation token itself. The broker looks the
+installation up by the named repository, checks it is this App, still
+selected-repository, unsuspended, and carries the revision's permissions, then
+mints a token naming that repository. GitHub answers with the exact repository
+the token covers, and the broker accepts the token only if it covers exactly
+one repository, exactly the one named, owned by the installation's own account,
+with exactly the permissions requested. The numeric repository ID is read out
+of that answer rather than asserted from configuration, so identity comes from
+the grant that authorizes the access rather than from a value a caller or an
+operator could restate wrongly. Token and repository are then held together for
+the operation's lifetime, so no request can be spelled for a repository other
+than the one its credential was minted for.
+
+Three consequences are deliberate:
+
+- Adding a repository is an installation change, not a deployment. Removing one
+  likewise revokes reach the moment GitHub stops minting tokens for it.
+- The repository is part of every operation's replay identity, so one operation
+  UUID cannot address two repositories as though they were one request. Names
+  are lower-cased before the digest is taken, because GitHub resolves them
+  case-insensitively and two spellings of one repository must not become two
+  operations.
+- A single Access identity can act on every repository the App is installed on.
+  Narrowing that — mapping a caller identity to the installations it may use —
+  is the tenancy question, and it is a filter in front of repository
+  resolution, not a change to this mechanism.
+
+Operations that name a workflow take its path as an argument for the same
+reason. A hard-coded `.github/workflows/ci.yml` silently meant "this tool works
+on one repository".
+
 ## Authority boundary
 
 `factoryd` is the only local authority that can turn an exact attempt request
@@ -330,6 +372,16 @@ transfer or deletion revokes the mapping pending fresh approval. Every other
 lifecycle action fails closed. The revision requests no Contents, Pull
 requests, Checks, Actions, Workflows, Releases, Administration, or Secrets
 authority.
+
+`maintainer-operations-v3` grants exactly what `maintainer-operations-v2`
+granted; no GitHub permission changed. It is a new revision because the
+revision is the surface's fail-closed handshake and the operation contract did
+change: every tool gained a required `repository`, three gained a
+`workflow_path`, and the replay digest now covers the repository, so an
+operation UUID journalled under v2 cannot be replayed under v3. Rotate the
+`DARK_FACTORY_MAINTAINER_PERMISSION_REVISION` secret before promoting a v3
+build; a build promoted against the old value fails its own authority check,
+readiness reports not-ready, and the deploy gate rolls it back.
 
 The separately approved `maintainer-operations-v2` revision adds only Actions
 read/write, Contents read/write, Issues read/write, Pull requests read/write,

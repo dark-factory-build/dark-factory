@@ -120,24 +120,40 @@ when install or service ownership changes; it is not a routine extra gate.
 
 ## GitHub boundary
 
-The normal automation surface is the repository-bound Maintainer App. Before a
-write, require `maintainer_status` to report:
+The normal automation surface is the Maintainer App. Every tool names the
+`owner/name` repository it acts on, and the App reaches only repositories it is
+installed on. Before a write, require `maintainer_status` for that exact
+repository to report:
 
-- repository `dark-factory-build/dark-factory`;
-- repository ID `1335380107`; and
-- permission revision `maintainer-operations-v2`.
+- the `owner/name` you asked for, compared case-insensitively (it answers
+  with GitHub's canonical spelling);
+- a positive numeric repository ID; and
+- permission revision `maintainer-operations-v3`.
 
 Use only its typed, exact-head operations. Retain a write's operation UUID and
 canonical request until the result is reconciled. Never expose App keys,
 installation tokens, personal tokens, credential-helper output, or keychain
 contents to an agent or worktree.
 
-If that broker is unavailable, automation stops unless the owner separately
-authorizes a finite host-credential fallback naming the exact repository and
-operations. Under such an authorization, run only those named `git`/`gh`
-commands outside the sandbox and re-read the exact remote ref, PR, check,
-release, or workflow state after each effect. No force push, ref deletion,
-access change, credential inspection, or implicit expansion is allowed.
+Reading another agent's branch needs no `git fetch`: `observe_ref` names its
+head, `observe_tree` lists what is in a commit, `observe_file` returns one
+file's bytes, and `publish_commit` writes the result back. Compare a commit
+against an ancestor to see what a branch changed; `observe_tree` reports
+parents, and comparing two unrelated commits answers a different question. If a task seems to
+need git, the missing thing is usually a typed operation.
+
+Two things still need the owner: a broker that is unavailable, and the paths
+`publish_commit` refuses by design — `.github` itself, `.github/workflows/**`,
+the three CODEOWNERS locations, and `.github/dependabot.{yml,yaml}`. The rest of
+`.github`, such as issue and PR templates, is publishable without authorization,
+but CODEOWNERS owns that whole tree, so the pull request still needs the owner's
+review to merge. In either case the owner authorizes a finite host-credential
+fallback naming the exact repository and operations; run only those named
+`git`/`gh` commands outside the sandbox and re-read the exact remote ref, PR,
+check, release, or workflow state after each effect. No force push, ref
+deletion, repository-settings or access change, credential inspection, or
+implicit expansion is allowed — those hold whatever the owner authorizes for
+the task.
 
 Pull-request and merge-queue runs use fresh hosted workers. A manual workflow
 dispatch is the explicit path for a platform investigation on the persistent

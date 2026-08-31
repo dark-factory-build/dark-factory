@@ -99,9 +99,6 @@ fn wrangler_keeps_the_unconfigured_worker_private_and_inert() {
         "DARK_FACTORY_MAINTAINER_APP_ID",
         "DARK_FACTORY_MAINTAINER_PRIVATE_KEY_PKCS8",
         "DARK_FACTORY_MAINTAINER_PERMISSION_REVISION",
-        "DARK_FACTORY_MAINTAINER_REPOSITORY",
-        "DARK_FACTORY_MAINTAINER_REPOSITORY_OWNER_ID",
-        "DARK_FACTORY_MAINTAINER_REPOSITORY_ID",
         "DARK_FACTORY_MAINTAINER_OPERATOR_EMAIL_SHA256",
         "DARK_FACTORY_CLOUDFLARE_ACCESS_TEAM_DOMAIN",
         "DARK_FACTORY_CLOUDFLARE_ACCESS_AUD",
@@ -130,6 +127,95 @@ fn durable_object_is_sharded_by_app_and_exact_replay_identity() {
     assert!(journal.contains("sha256"));
     assert!(!journal.contains("DATABASE_URL"));
     assert!(!journal.contains("neon_superuser"));
+}
+
+/// The brace-delimited object beginning at or after `from`, skipping quoted
+/// spans. The schemas embed regex patterns containing `{1,39}` and `\\.`, so
+/// brace counting blind to strings reads a depth the schema does not have.
+fn object_at(text: &str, from: usize) -> String {
+    let bytes = text.as_bytes();
+    let open = from + text[from..].find('{').expect("no object here");
+    let mut depth = 0_i32;
+    let mut in_string = false;
+    let mut index = open;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            match byte {
+                b'\\' => index += 1,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return text[open..=index].to_string();
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    panic!("unterminated object")
+}
+
+/// The `required` array belonging to THIS object, not the first one nested
+/// anywhere inside it.
+fn own_required_in(schema: &str) -> String {
+    own_key_in(schema, "required")
+}
+
+/// The value of a key belonging to THIS object, not to one nested inside it.
+/// An unscoped `contains` is satisfied by a nested copy, which is how a
+/// top-level `additionalProperties` could be deleted with the gate green.
+fn own_key_in(schema: &str, key: &str) -> String {
+    let bytes = schema.as_bytes();
+    let body = schema.find('{').expect("not an object");
+    let mut depth = 0_i32;
+    let mut in_string = false;
+    let mut index = body;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            match byte {
+                b'\\' => index += 1,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'"' => {
+                if depth == 1 && schema[index..].starts_with(&format!(r#""{key}""#)) {
+                    let from = index + schema[index..].find(':').expect("key has no value") + 1;
+                    let value = schema[from..].trim_start();
+                    let end = match value.as_bytes().first() {
+                        Some(b'[') => value.find(']').expect("unterminated array") + 1,
+                        // `}` closes the object, so it terminates the last
+                        // value in one. Without it `"additionalProperties":
+                        // false}` reads back as `false}` -- and six schemas in
+                        // `mcp.rs` are written that way today, passing only
+                        // because they are not yet in this table.
+                        _ => value.find([',', '\n', '}']).unwrap_or(value.len()),
+                    };
+                    return value[..end].trim().trim_end_matches(',').to_string();
+                }
+                in_string = true;
+            }
+            b'{' | b'[' => depth += 1,
+            b'}' | b']' => depth -= 1,
+            _ => {}
+        }
+        index += 1;
+    }
+    panic!("no required array of its own")
 }
 
 /// A tool's declared `outputSchema` and the Rust struct it serializes live in
@@ -191,6 +277,41 @@ fn declared_output_schemas_name_the_fields_the_results_carry() {
             &["number", "url", "head_sha"][..],
         ),
         (
+            "observe_ref",
+            "RefObservationResult",
+            &["branch", "head_sha"][..],
+        ),
+        (
+            // Written with its closing brace on the value's own line, which is
+            // how six other tools in `mcp.rs` are written. Including one here
+            // keeps the key reader honest about where a value ends.
+            "publish_release_tag",
+            "ReleaseTagResult",
+            &["tag", "commit_sha"][..],
+        ),
+        (
+            "observe_file",
+            "FileObservationResult",
+            &["path", "commit_sha", "content_base64"][..],
+        ),
+        (
+            "observe_tree",
+            "TreeObservationResult",
+            &["commit_sha", "tree_sha", "parents", "entries"][..],
+        ),
+        (
+            // Scoped to `entries.items`, not to the whole output schema. A
+            // whole-block search is satisfied by the name appearing anywhere,
+            // so moving these four properties up to the top level -- leaving
+            // `items` an object with no properties that also forbids unknown
+            // ones, which every real response then violates -- read as
+            // correct. That is the "required named a field in the wrong
+            // object" defect, one level down.
+            "observe_tree.entries",
+            "TreeEntryResult",
+            &["path", "kind", "mode", "sha"][..],
+        ),
+        (
             "maintainer_status",
             "RepositoryResult",
             &[
@@ -220,7 +341,26 @@ fn declared_output_schemas_name_the_fields_the_results_carry() {
             .find(&format!("struct {struct_name} {{"))
             .unwrap_or_else(|| panic!("missing struct: {struct_name}"));
         let body = &github_app[start..start + github_app[start..].find('}').unwrap()];
-        let block = tool_block(tool);
+        // `tool.property` scopes the check to that property's `items` object
+        // rather than the whole schema.
+        let (tool, nested) = match tool.split_once('.') {
+            Some((tool, property)) => (tool, Some(property)),
+            None => (tool, None),
+        };
+        let schema = tool_block(tool);
+        let block = match nested {
+            None => schema.clone(),
+            Some(property) => {
+                let at = schema
+                    .find(&format!(r#""{property}": {{"#))
+                    .unwrap_or_else(|| panic!("{tool} declares no {property}"));
+                let items = at
+                    + schema[at..].find(r#""items": {"#).unwrap_or_else(|| {
+                        panic!("{tool}'s {property} is not an array of objects")
+                    });
+                object_at(&schema, items)
+            }
+        };
         for field in fields {
             assert!(
                 body.contains(&format!("{field}: ")),
@@ -230,7 +370,15 @@ fn declared_output_schemas_name_the_fields_the_results_carry() {
                 block.contains(&format!(r#""{field}": {{"#)),
                 "{tool}'s outputSchema does not declare {field}"
             );
+            assert!(
+                own_required_in(&block).contains(&format!(r#""{field}""#)),
+                "{tool}'s outputSchema does not require {field}"
+            );
         }
+        assert!(
+            own_key_in(&block, "additionalProperties") == "false",
+            "{tool}'s outputSchema accepts undeclared properties"
+        );
     }
 
     let operation = tool_block("observe_operation");
@@ -249,13 +397,148 @@ fn declared_output_schemas_name_the_fields_the_results_carry() {
     }
 }
 
+/// Which repository an operation acts on is now caller-supplied, so the tool
+/// schema is the only thing that makes a caller send it. A tool whose handler
+/// reads `request.repository` while its `inputSchema` does not require one
+/// fails at deserialization for every caller that trusts the schema -- the
+/// declaration would assert a contract it never observes.
 #[test]
-fn mcp_surface_is_repository_bound_and_typed() {
+fn every_repository_tool_requires_the_repository_it_acts_on() {
+    let mcp = project_file("src/mcp.rs");
+    let tool_input = |name: &str| -> String {
+        let start = mcp
+            .find(&format!(r#""name": "{name}""#))
+            .unwrap_or_else(|| panic!("missing tool: {name}"));
+        let rest = &mcp[start..];
+        let end = rest[1..]
+            .find(r#""name": ""#)
+            .map_or(rest.len(), |offset| offset + 1);
+        let block = &rest[..end];
+        let input = block
+            .find(r#""inputSchema""#)
+            .unwrap_or_else(|| panic!("{name} declares no inputSchema"));
+        let output = block.find(r#""outputSchema""#).unwrap_or(block.len());
+        block[input..output].to_string()
+    };
+
+    // The schema's OWN `required`, not the first one that appears in it.
+    // `publish_commit` nests an object inside `changes`, and a substring search
+    // matched that nested array instead -- so this assertion passed while the
+    // tool's own `required` omitted the repository and every call to it failed
+    // as invalid params. The guard has to know which object it is reading.
+    let own_required = |name: &str| own_required_in(&tool_input(name));
+
+    // Every tool that reaches GitHub. `observe_operation` is deliberately
+    // absent: it reads the durable journal by operation UUID, which is
+    // repository-independent, and requiring a repository there would be a
+    // field its request type does not accept.
+    for tool in [
+        "maintainer_status",
+        "observe_ref",
+        "observe_file",
+        "observe_tree",
+        "create_issue",
+        "observe_issue",
+        "resolve_issue",
+        "publish_release_tag",
+        "recover_release",
+        "observe_release",
+        "observe_release_workflow",
+        "dispatch_control_plane_deploy",
+        "observe_control_plane_deploy",
+        "create_pull_request",
+        "submit_pull_request_review",
+        "observe_pull_request_checks",
+        "observe_pull_request_workflows",
+        "read_pull_request_job_log",
+        "rerun_failed_pull_request_jobs",
+        "observe_pull_request_merge",
+        "publish_commit",
+        "enqueue_pull_request",
+    ] {
+        let input = tool_input(tool);
+        assert!(
+            input.contains(r#""repository": {"type": "string""#),
+            "{tool} declares no repository property"
+        );
+        assert!(
+            own_required(tool).contains(r#""repository""#),
+            "{tool} does not require a repository at its own top level"
+        );
+        // A repository named inside a nested object is not the operation's
+        // repository, and would make that object's schema unsatisfiable
+        // wherever it also forbids unknown properties.
+        let nested = input.replacen(&own_required(tool), "", 1);
+        for required in nested.match_indices(r#""required": ["#) {
+            let from = required.0;
+            let close = nested[from..]
+                .find(']')
+                .unwrap_or_else(|| panic!("{tool} has an unterminated nested required"));
+            assert!(
+                !nested[from..from + close].contains(r#""repository""#),
+                "{tool} requires a repository inside a nested object"
+            );
+        }
+    }
+
+    assert!(
+        !tool_input("observe_operation").contains(r#""repository""#),
+        "observe_operation is a journal lookup and takes no repository"
+    );
+
+    // `repository` is not the only field a handler reads. Every request type is
+    // `deny_unknown_fields`, so a declared schema that omits a required field,
+    // or that permits ones the struct refuses, fails at deserialization for
+    // exactly the callers who trusted it -- silently, and for every call.
+    for (tool, required) in [
+        ("observe_ref", &["repository", "branch"][..]),
+        ("observe_file", &["repository", "commit_sha", "path"][..]),
+        ("observe_tree", &["repository", "commit_sha"][..]),
+    ] {
+        let declared = own_required(tool);
+        for field in required {
+            assert!(
+                declared.contains(&format!(r#""{field}""#)),
+                "{tool} does not require {field}"
+            );
+        }
+        assert!(
+            tool_input(tool).contains(r#""additionalProperties": false"#),
+            "{tool} accepts fields its request type refuses"
+        );
+    }
+
+    // The workflow the run-observing tools watch is the caller's to name; a
+    // hard-coded path silently means "this tool works on one repository".
+    for tool in [
+        "observe_pull_request_workflows",
+        "read_pull_request_job_log",
+        "rerun_failed_pull_request_jobs",
+    ] {
+        assert!(
+            tool_input(tool).contains(r#""workflow_path""#),
+            "{tool} does not take a workflow path"
+        );
+    }
+    // The release and deploy workflows are this control plane's own and stay
+    // constants. A CI constant would be the hard-coding this removes: it is the
+    // one workflow whose name belongs to whichever repository is being watched.
+    assert!(
+        !project_file("src/github_app.rs").contains("CI_WORKFLOW"),
+        "the CI workflow is named by a constant again, so it works on one repository"
+    );
+}
+
+#[test]
+fn mcp_surface_is_installation_bound_and_typed() {
     let mcp = project_file("src/mcp.rs");
     let access = project_file("src/access.rs");
 
     for tool in [
         "maintainer_status",
+        "observe_ref",
+        "observe_file",
+        "observe_tree",
         "observe_operation",
         "create_issue",
         "observe_issue",
@@ -277,6 +560,13 @@ fn mcp_surface_is_repository_bound_and_typed() {
         "enqueue_pull_request",
     ] {
         assert!(mcp.contains(tool), "missing typed MCP tool: {tool}");
+        // Advertised is not dispatched. A renamed match arm leaves the tool in
+        // `tools()` and every call to it falling through to unknown-tool, which
+        // a whole-file search for the name cannot see.
+        assert!(
+            mcp.contains(&format!(r#"Some("{tool}")"#)),
+            "advertised but never dispatched: {tool}"
+        );
     }
     for forbidden in ["generic_request", "graphql", "shell", "access_token"] {
         assert!(
@@ -300,20 +590,26 @@ fn mcp_surface_is_repository_bound_and_typed() {
 #[test]
 fn the_deployment_gate_asserts_the_readiness_label_the_worker_emits() {
     let lib = project_file("src/lib.rs");
+    let bootstrap = project_file("../scripts/bootstrap-maintainer-v2.sh");
     let workflow = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../.github/workflows/deploy-control-plane.yml"),
     )
     .unwrap();
 
-    let headless = r#""maintainer_operations":"mcp_repository_bound_operator_and_headless""#;
+    let headless = r#""maintainer_operations":"mcp_installation_bound_operator_and_headless""#;
     assert!(lib.contains(headless));
-    assert!(lib.contains(r#""maintainer_operations":"mcp_repository_bound_operator_only""#));
+    assert!(lib.contains(r#""maintainer_operations":"mcp_installation_bound_operator_only""#));
     // The gate must require the headless variant specifically: the binding
     // behind it is optional and inherited across versions, so this is the only
     // check that catches a deployment which silently lost it.
     assert!(workflow.contains(headless));
-    assert!(!workflow.contains("mcp_repository_bound_operator_only"));
+    // The break-glass activation path performs the same live check. Keep it
+    // bound to the emitted label too, or a failed activation can roll back
+    // forever even while the regular deployment workflow is correct.
+    assert!(bootstrap.contains(headless));
+    assert!(!bootstrap.contains("mcp_repository_bound_operator_and_headless"));
+    assert!(!workflow.contains("mcp_installation_bound_operator_only"));
     assert!(!lib.contains("mcp_six_tools"));
     assert!(!workflow.contains("mcp_six_tools"));
 }

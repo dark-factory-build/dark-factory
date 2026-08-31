@@ -25,7 +25,7 @@ fixture="$temporary/repository"
 # The activation derives the permission revision from this constant, inside the
 # tree it just proved. The fixture carries it so the cases below exercise the
 # script's own parse rather than a copy of it restated in this test.
-revision_line='pub(crate) const PERMISSION_REVISION: &str = "maintainer-operations-v2";'
+revision_line='pub(crate) const PERMISSION_REVISION: &str = "maintainer-operations-v3";'
 # The neighbouring constant must not match. It shares the prefix and differs
 # only after it, which is the whole risk in the pattern.
 {
@@ -142,7 +142,7 @@ reject_revision() {
 
 reject_revision 'pub(crate) const PERMISSION_REVISION_BINDING: &str = "X";' absent
 reject_revision 'pub(crate) const PERMISSION_REVISION: &str =
-    "maintainer-operations-v2";' rustfmt-wrapped
+    "maintainer-operations-v3";' rustfmt-wrapped
 reject_revision 'pub(crate) const PERMISSION_REVISION: &str = "";' empty
 reject_revision 'pub(crate) const PERMISSION_REVISION: &str = "a";
 pub(crate) const PERMISSION_REVISION: &str = "b";' duplicated

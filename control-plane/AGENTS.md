@@ -57,16 +57,20 @@ Codex nor Claude owns its credentials or its durable journal.
    the provider-neutral streamable HTTP MCP at
    `https://maintainer.darkfactory.build/mcp`; no Codex-, Claude-, or other
    model-provider GitHub connector is an equivalent authority path. Their
-   first remote call must be `maintainer_status`, and they must fail closed
-   unless it binds `dark-factory-build/dark-factory` with numeric repository
-   ID `1335380107` and permission revision `maintainer-operations-v2`. A
+   first remote call must be `maintainer_status` for the exact repository they
+   intend to act on, and they must fail closed unless it returns that
+   `owner/name` -- compared case-insensitively, since it answers with GitHub's
+   canonical spelling -- a positive numeric repository ID, and permission
+   revision `maintainer-operations-v3`. Every tool names its repository; the App reaches
+   only repositories it is installed on, and nothing selects one implicitly. A
    credential-isolating host transport authenticates the connection; provider,
    tool, and shell processes never inherit the Access pair. Agents never read
    or source `.env.txt` directly or handle either Access value; the parent
    Cloudflare helper's two-variable CLI boundary is the only exception and
    never exposes the Access pair.
    The deployed surface is finite: authority and default-head observation,
-   durable operation observation, bounded issue lifecycle, exact commit and
+   branch-head, tree, and file-content observation, durable operation
+   observation, bounded issue lifecycle, exact commit and
    pull-request publication, exact-head review and CI diagnosis/recovery,
    merge-queue enqueue and eventual-result observation, immutable release
    publication/observation/recovery, and one exact control-plane deployment

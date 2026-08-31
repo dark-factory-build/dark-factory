@@ -35,16 +35,51 @@ framework. The shell-provider loop is proven; real Claude/Codex work is not.
    the shell provider.
 8. Use the shared model policy: Luna for routine workers/reviewers; Sol/xhigh
    only for an explicit high-risk escalation. Do not silently rewrite profiles.
-9. Contributor agents use only the repository-bound Maintainer App for GitHub.
-   First require `maintainer_status` = repository
-   `dark-factory-build/dark-factory`, ID `1335380107`, revision
-   `maintainer-operations-v2`. Fail closed if the required typed operation is
-   unavailable. An owner-authorized fallback must name the exact repository and
-   finite command/target set (refs, PR head/base, tags, or fixed workflows).
-   Run only those `git`/`gh` operations outside the sandbox through existing
-   host credentials, and re-read the exact remote state after each effect. No
-   other remote effect is permitted: never inspect/export credentials, request
-   a token, force-push, delete refs, or change repository/organization access.
+9. Contributor agents use **only** the Maintainer App for GitHub, with the one
+   carve-out named below. Every tool names its `owner/name` repository. First
+   require `maintainer_status` for the exact repository you intend to act on to
+   return that repository — compared case-insensitively, because it answers
+   with GitHub's canonical spelling and the caller's may differ — plus a
+   positive numeric ID and revision `maintainer-operations-v3`. Fail closed if
+   the required typed operation is unavailable.
+
+   The App is expected to be sufficient, and that expectation is the point: an
+   agent that reaches around it stops dogfooding the thing being built. Reading
+   another agent's work needs no `git fetch` — `observe_ref` names a branch's
+   head, `observe_tree` lists what is in a commit, `observe_file` returns one
+   file's exact bytes at that commit, and `publish_commit` writes the result
+   back. Compare a commit against an ancestor to see what a branch changed —
+   `observe_tree` reports a commit's parents so ancestry is walkable, and
+   comparing two unrelated commits answers a different question than the one
+   you meant. What a difference *means* is the caller's to decide, not this
+   service's. If a task seems to need git, the
+   missing thing is usually a typed operation; add it rather than route around
+   the surface.
+
+   The one carve-out is explicit owner authorization, per task, and it must name
+   the exact repository and a finite command and target set — refs, PR
+   head/base, tags, or fixed workflows. It is not a general grant. It exists
+   because one boundary is deliberately unreachable: `publish_commit` refuses
+   `.github` itself, `.github/workflows/**`, the three CODEOWNERS locations and
+   `.github/dependabot.{yml,yaml}`, since an agent that could rewrite the CI
+   gating its own work would be escalating its authority. The rest of `.github`
+   — issue and PR templates — is publishable, though CODEOWNERS owns the whole
+   tree, so such a change still needs the owner's review to merge; it needs no
+   authorization to *write*. Changes to the refused paths need the owner to make
+   them at all. Re-read the exact remote state after each authorized effect.
+
+   Absent that authorization everything else is closed, **reads included**: no
+   `git fetch`, `pull`, `push`, `clone`, no `gh`, no direct GitHub REST or
+   GraphQL call, and no mutation of issues, releases, or Actions outside the
+   App.
+
+   Regardless of any authorization — an owner approving a task is not an owner
+   approving these: never force-push, never delete a ref, never change
+   repository settings or repository/organization access, never inspect,
+   export, request, or print a credential, and never open, review, or merge a
+   pull request outside the App, so that review stays a distinct principal.
+   Branch protection and required checks are settings, so an authorization to
+   run a named `gh` command never reaches them.
 10. Never read/source `.env.txt` directly. Its only agent use is an explicitly
     authorized, independently reviewed fixed command:
     `./scripts/with-cloudflare-env.sh dns status`, `dns publish-app`, or

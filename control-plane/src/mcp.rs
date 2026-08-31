@@ -11,11 +11,11 @@ use crate::{
     access::AccessAuthority,
     github_app::{
         AppAuthority, CreateIssue, CreatePullRequest, DispatchControlPlaneDeploy,
-        EnqueuePullRequest, ObserveControlPlaneDeploy, ObserveIssue, ObservePullRequestChecks,
-        ObservePullRequestMerge, ObservePullRequestWorkflows, ObserveRelease,
-        ObserveReleaseWorkflow, OperationError, PublishCommit, PublishReleaseTag,
-        ReadPullRequestJobLog, RecoverRelease, RerunFailedPullRequestJobs, ResolveIssue,
-        SubmitPullRequestReview, canonical_operation_id,
+        EnqueuePullRequest, ObserveControlPlaneDeploy, ObserveFile, ObserveIssue,
+        ObservePullRequestChecks, ObservePullRequestMerge, ObservePullRequestWorkflows, ObserveRef,
+        ObserveRelease, ObserveReleaseWorkflow, ObserveRepository, ObserveTree, OperationError,
+        PublishCommit, PublishReleaseTag, ReadPullRequestJobLog, RecoverRelease,
+        RerunFailedPullRequestJobs, ResolveIssue, SubmitPullRequestReview, canonical_operation_id,
     },
     journal::DeliveryJournal,
 };
@@ -109,7 +109,7 @@ async fn dispatch(request: Value, mcp: &McpState) -> Response {
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {"tools": {"listChanged": false}},
                 "serverInfo": {"name": "dark-factory-maintainer", "version": "0.1.0"},
-                "instructions": "Use only the repository-bound tools. Read status before a write. Every write is exact-head bound and may fail closed."
+                "instructions": "Every tool names its `owner/name` repository, and acts only on repositories this App is installed on. Read status before a write. Every write is exact-head bound and may fail closed."
             }),
         ),
         "tools/list" => json_rpc_result(id, tools()),
@@ -199,7 +199,7 @@ fn tools() -> Value {
         "name": "maintainer_status",
         "title": "Verify authority and default head",
         "description": "Verify the exact Dark Factory Maintainer GitHub App installation and permission revision, and return the live default branch head before repository operations.",
-        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
+        "inputSchema": {"type": "object", "properties": {"repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"}}, "required": ["repository"], "additionalProperties": false},
         "outputSchema": {
             "type": "object",
             "properties": {
@@ -245,11 +245,12 @@ fn tools() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
+                "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
                 "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
                 "title": {"type": "string", "minLength": 1, "maxLength": 256},
                 "body": {"type": "string", "maxLength": 30000}
             },
-            "required": ["operation_id", "title", "body"],
+            "required": ["repository", "operation_id", "title", "body"],
             "additionalProperties": false
         },
         "outputSchema": {
@@ -263,13 +264,99 @@ fn tools() -> Value {
         },
         "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true}
     }, {
+        "name": "observe_file",
+        "title": "Read one file at one commit",
+        "description": "Return one file's exact bytes, base64 encoded, as of one exact commit, or null when the path does not exist there. Use this to read another agent's work instead of fetching git objects.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
+                "commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+                "path": {"type": "string", "minLength": 1, "maxLength": 4096}
+            },
+            "required": ["repository", "commit_sha", "path"],
+            "additionalProperties": false
+        },
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "commit_sha": {"type": "string"},
+                "content_base64": {"type": ["string", "null"]}
+            },
+            "required": ["path", "commit_sha", "content_base64"],
+            "additionalProperties": false
+        },
+        "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
+    }, {
+        "name": "observe_tree",
+        "title": "List one commit's tree",
+        "description": "Return one exact commit's parents and every entry in its recursive tree: path, git object kind, file mode and object id. Compare a commit against an ancestor to learn what that branch changed. Only mode 100644 and 100755 round-trip through observe_file and publish_commit; a symlink is a blob with mode 120000.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
+                "commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+            },
+            "required": ["repository", "commit_sha"],
+            "additionalProperties": false
+        },
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "commit_sha": {"type": "string"},
+                "tree_sha": {"type": "string"},
+                "parents": {"type": "array", "items": {"type": "string"}},
+                "entries": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "kind": {"type": "string"},
+                            "mode": {"type": "string"},
+                            "sha": {"type": "string"}
+                        },
+                        "required": ["path", "kind", "mode", "sha"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["commit_sha", "tree_sha", "parents", "entries"],
+            "additionalProperties": false
+        },
+        "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
+    }, {
+        "name": "observe_ref",
+        "title": "Observe a branch head",
+        "description": "Return the exact commit a branch points at now, or null when the branch does not exist. Read this before binding a write to a head you did not just publish.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
+                "branch": {"type": "string", "minLength": 1, "maxLength": 240}
+            },
+            "required": ["repository", "branch"],
+            "additionalProperties": false
+        },
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "branch": {"type": "string"},
+                "head_sha": {"type": ["string", "null"]}
+            },
+            "required": ["branch", "head_sha"],
+            "additionalProperties": false
+        },
+        "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
+    }, {
         "name": "observe_issue",
         "title": "Observe one issue",
         "description": "Return the live state of one repository issue. Pull requests are refused.",
         "inputSchema": {
             "type": "object",
-            "properties": {"issue_number": {"type": "integer", "minimum": 1}},
-            "required": ["issue_number"],
+            "properties": {"repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"}, "issue_number": {"type": "integer", "minimum": 1}},
+            "required": ["repository", "issue_number"],
             "additionalProperties": false
         },
         "outputSchema": {
@@ -291,12 +378,13 @@ fn tools() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
+                "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
                 "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
                 "issue_number": {"type": "integer", "minimum": 1},
                 "body": {"type": "string", "minLength": 1, "maxLength": 16000},
                 "state_reason": {"type": "string", "enum": ["completed", "not_planned"]}
             },
-            "required": ["operation_id", "issue_number", "body", "state_reason"],
+            "required": ["repository", "operation_id", "issue_number", "body", "state_reason"],
             "additionalProperties": false
         },
         "outputSchema": {
@@ -319,11 +407,12 @@ fn tools() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
+                "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
                 "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
                 "tag": {"type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+(?:-[A-Za-z0-9.-]+)?$"},
                 "commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
             },
-            "required": ["operation_id", "tag", "commit_sha"],
+            "required": ["repository", "operation_id", "tag", "commit_sha"],
             "additionalProperties": false
         },
         "outputSchema": {"type": "object", "properties": {"tag": {"type": "string"}, "commit_sha": {"type": "string"}}, "required": ["tag", "commit_sha"], "additionalProperties": false},
@@ -335,12 +424,13 @@ fn tools() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
+                "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
                 "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
                 "tag": {"type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+(?:-[A-Za-z0-9.-]+)?$"},
                 "commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
                 "workflow_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
             },
-            "required": ["operation_id", "tag", "commit_sha", "workflow_sha"],
+            "required": ["repository", "operation_id", "tag", "commit_sha", "workflow_sha"],
             "additionalProperties": false
         },
         "outputSchema": {"type": "object", "properties": {"operation_id": {"type": "string"}, "workflow": {"type": "string"}, "commit_sha": {"type": "string"}, "run_id": {"type": "integer"}, "run_attempt": {"type": "integer"}}, "required": ["operation_id", "workflow", "commit_sha", "run_id", "run_attempt"], "additionalProperties": false},
@@ -349,28 +439,28 @@ fn tools() -> Value {
         "name": "observe_release",
         "title": "Observe an exact release",
         "description": "Verify an immutable tag and return its release assets plus the one fixed tag-push release workflow run for that exact commit.",
-        "inputSchema": {"type": "object", "properties": {"tag": {"type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+(?:-[A-Za-z0-9.-]+)?$"}, "commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}}, "required": ["tag", "commit_sha"], "additionalProperties": false},
+        "inputSchema": {"type": "object", "properties": {"repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"}, "tag": {"type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+(?:-[A-Za-z0-9.-]+)?$"}, "commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}}, "required": ["repository", "tag", "commit_sha"], "additionalProperties": false},
         "outputSchema": {"type": "object", "properties": {"tag": {"type": "string"}, "commit_sha": {"type": "string"}, "release": release_schema(), "workflow_run": workflow_run_schema()}, "required": ["tag", "commit_sha", "release", "workflow_run"], "additionalProperties": false},
         "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
     }, {
         "name": "observe_release_workflow",
         "title": "Observe an exact release recovery workflow",
         "description": "Read the one workflow run returned by recover_release and re-prove its fixed workflow, complete request digest, immutable tag, and dispatch commit.",
-        "inputSchema": {"type": "object", "properties": {"operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"}, "tag": {"type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+(?:-[A-Za-z0-9.-]+)?$"}, "tag_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "workflow_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "run_id": {"type": "integer", "minimum": 1}}, "required": ["operation_id", "tag", "tag_sha", "workflow_sha", "run_id"], "additionalProperties": false},
+        "inputSchema": {"type": "object", "properties": {"repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"}, "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"}, "tag": {"type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+(?:-[A-Za-z0-9.-]+)?$"}, "tag_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "workflow_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "run_id": {"type": "integer", "minimum": 1}}, "required": ["repository", "operation_id", "tag", "tag_sha", "workflow_sha", "run_id"], "additionalProperties": false},
         "outputSchema": {"type": "object", "properties": {"operation_id": {"type": "string"}, "tag": {"type": "string"}, "tag_sha": {"type": "string"}, "workflow_sha": {"type": "string"}, "workflow_run": workflow_run_schema()}, "required": ["operation_id", "tag", "tag_sha", "workflow_sha", "workflow_run"], "additionalProperties": false},
         "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
     }, {
         "name": "dispatch_control_plane_deploy",
         "title": "Dispatch the fixed control-plane deployment",
         "description": "Dispatch only deploy-control-plane.yml from the live default branch, bound to the exact commit and reviewed source tree.",
-        "inputSchema": {"type": "object", "properties": {"operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"}, "commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "reviewed_tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "promote": {"type": "boolean"}}, "required": ["operation_id", "commit_sha", "reviewed_tree", "promote"], "additionalProperties": false},
+        "inputSchema": {"type": "object", "properties": {"repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"}, "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"}, "commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "reviewed_tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "promote": {"type": "boolean"}}, "required": ["repository", "operation_id", "commit_sha", "reviewed_tree", "promote"], "additionalProperties": false},
         "outputSchema": {"type": "object", "properties": {"operation_id": {"type": "string"}, "workflow": {"type": "string"}, "commit_sha": {"type": "string"}, "run_id": {"type": "integer"}, "run_attempt": {"type": "integer"}}, "required": ["operation_id", "workflow", "commit_sha", "run_id", "run_attempt"], "additionalProperties": false},
         "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true}
     }, {
         "name": "observe_control_plane_deploy",
         "title": "Observe an exact control-plane deployment",
         "description": "Read the one workflow run returned by dispatch_control_plane_deploy and re-prove its fixed workflow, complete request digest, exact commit, reviewed tree, and promotion mode.",
-        "inputSchema": {"type": "object", "properties": {"operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"}, "commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "reviewed_tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "promote": {"type": "boolean"}, "run_id": {"type": "integer", "minimum": 1}}, "required": ["operation_id", "commit_sha", "reviewed_tree", "promote", "run_id"], "additionalProperties": false},
+        "inputSchema": {"type": "object", "properties": {"repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"}, "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"}, "commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "reviewed_tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "promote": {"type": "boolean"}, "run_id": {"type": "integer", "minimum": 1}}, "required": ["repository", "operation_id", "commit_sha", "reviewed_tree", "promote", "run_id"], "additionalProperties": false},
         "outputSchema": {"type": "object", "properties": {"operation_id": {"type": "string"}, "commit_sha": {"type": "string"}, "reviewed_tree": {"type": "string"}, "promote": {"type": "boolean"}, "workflow_run": workflow_run_schema()}, "required": ["operation_id", "commit_sha", "reviewed_tree", "promote", "workflow_run"], "additionalProperties": false},
         "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
     }, {
@@ -380,6 +470,7 @@ fn tools() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
+                "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
                 "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
                 "issue_number": {"type": "integer", "minimum": 1},
                 "head": {"type": "string", "minLength": 1, "maxLength": 240},
@@ -390,7 +481,7 @@ fn tools() -> Value {
                 "body": {"type": "string", "maxLength": 30000},
                 "draft": {"type": "boolean"}
             },
-            "required": ["operation_id", "issue_number", "head", "head_sha", "base", "base_sha", "title", "body", "draft"],
+            "required": ["repository", "operation_id", "issue_number", "head", "head_sha", "base", "base_sha", "title", "body", "draft"],
             "additionalProperties": false
         },
         "outputSchema": {
@@ -412,13 +503,14 @@ fn tools() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
+                "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
                 "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
                 "pull_number": {"type": "integer", "minimum": 1},
                 "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
                 "event": {"type": "string", "enum": ["ALLOW", "COMMENT", "REQUEST_CHANGES"]},
                 "body": {"type": "string", "minLength": 1, "maxLength": 16000}
             },
-            "required": ["operation_id", "pull_number", "head_sha", "event", "body"],
+            "required": ["repository", "operation_id", "pull_number", "head_sha", "event", "body"],
             "additionalProperties": false
         },
         "outputSchema": {
@@ -441,10 +533,11 @@ fn tools() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
+                "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
                 "pull_number": {"type": "integer", "minimum": 1},
                 "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
             },
-            "required": ["pull_number", "head_sha"],
+            "required": ["repository", "pull_number", "head_sha"],
             "additionalProperties": false
         },
         "outputSchema": {
@@ -478,11 +571,13 @@ fn tools() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
+                "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
+                "workflow_path": {"type": "string", "pattern": "^\\.github/workflows/[A-Za-z0-9._-]{1,100}\\.ya?ml$"},
                 "pull_number": {"type": "integer", "minimum": 1},
                 "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
                 "base": {"type": "string", "minLength": 1, "maxLength": 240}
             },
-            "required": ["pull_number", "head_sha", "base"],
+            "required": ["repository", "workflow_path", "pull_number", "head_sha", "base"],
             "additionalProperties": false
         },
         "outputSchema": {
@@ -507,6 +602,8 @@ fn tools() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
+                "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
+                "workflow_path": {"type": "string", "pattern": "^\\.github/workflows/[A-Za-z0-9._-]{1,100}\\.ya?ml$"},
                 "pull_number": {"type": "integer", "minimum": 1},
                 "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
                 "base": {"type": "string", "minLength": 1, "maxLength": 240},
@@ -514,7 +611,7 @@ fn tools() -> Value {
                 "run_attempt": {"type": "integer", "minimum": 1},
                 "job_id": {"type": "integer", "minimum": 1}
             },
-            "required": ["pull_number", "head_sha", "base", "run_id", "run_attempt", "job_id"],
+            "required": ["repository", "workflow_path", "pull_number", "head_sha", "base", "run_id", "run_attempt", "job_id"],
             "additionalProperties": false
         },
         "outputSchema": {
@@ -539,6 +636,8 @@ fn tools() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
+                "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
+                "workflow_path": {"type": "string", "pattern": "^\\.github/workflows/[A-Za-z0-9._-]{1,100}\\.ya?ml$"},
                 "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
                 "pull_number": {"type": "integer", "minimum": 1},
                 "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
@@ -546,7 +645,7 @@ fn tools() -> Value {
                 "run_id": {"type": "integer", "minimum": 1},
                 "run_attempt": {"type": "integer", "minimum": 1}
             },
-            "required": ["operation_id", "pull_number", "head_sha", "base", "run_id", "run_attempt"],
+            "required": ["repository", "workflow_path", "operation_id", "pull_number", "head_sha", "base", "run_id", "run_attempt"],
             "additionalProperties": false
         },
         "outputSchema": {
@@ -569,12 +668,13 @@ fn tools() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
+                "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
                 "enqueue_operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
                 "pull_number": {"type": "integer", "minimum": 1},
                 "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
                 "base": {"type": "string", "minLength": 1, "maxLength": 240}
             },
-            "required": ["enqueue_operation_id", "pull_number", "head_sha", "base"],
+            "required": ["repository", "enqueue_operation_id", "pull_number", "head_sha", "base"],
             "additionalProperties": false
         },
         "outputSchema": {
@@ -596,10 +696,11 @@ fn tools() -> Value {
     }, {
         "name": "publish_commit",
         "title": "Publish an exact-head commit",
-        "description": "Publish one commit to a repository branch, but only while that branch still points at the stated commit. A file with no content is deleted. Workflow files cannot be written. Replays require the same operation UUID and request.",
+        "description": "Publish one commit to a repository branch, but only while that branch still points at the stated commit. A file with no content is deleted, so a mode may only be stated alongside content. The .github tree itself, .github/workflows, CODEOWNERS and dependabot config cannot be written. Replays require the same operation UUID and request.",
         "inputSchema": {
             "type": "object",
             "properties": {
+                "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
                 "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
                 "branch": {"type": "string", "minLength": 1, "maxLength": 240},
                 "expected_head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
@@ -612,14 +713,15 @@ fn tools() -> Value {
                         "type": "object",
                         "properties": {
                             "path": {"type": "string", "minLength": 1, "maxLength": 240},
-                            "content_base64": {"type": "string", "maxLength": 1000000}
+                            "content_base64": {"type": "string", "maxLength": 1000000},
+                            "mode": {"type": "string", "enum": ["100644", "100755"]}
                         },
                         "required": ["path"],
                         "additionalProperties": false
                     }
                 }
             },
-            "required": ["operation_id", "branch", "expected_head_sha", "message", "changes"],
+            "required": ["repository", "operation_id", "branch", "expected_head_sha", "message", "changes"],
             "additionalProperties": false
         },
         "outputSchema": {
@@ -640,12 +742,13 @@ fn tools() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
+                "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
                 "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
                 "pull_number": {"type": "integer", "minimum": 1},
                 "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
                 "base": {"type": "string", "minLength": 1, "maxLength": 255}
             },
-            "required": ["operation_id", "pull_number", "head_sha", "base"],
+            "required": ["repository", "operation_id", "pull_number", "head_sha", "base"],
             "additionalProperties": false
         },
         "outputSchema": {
@@ -673,10 +776,11 @@ async fn call_tool(id: Value, request: &Map<String, Value>, mcp: &McpState) -> R
         .cloned()
         .unwrap_or_else(|| json!({}));
     match name {
-        Some("maintainer_status")
-            if arguments.as_object().is_some_and(serde_json::Map::is_empty) =>
-        {
-            match mcp.app.observe_repository().await {
+        Some("maintainer_status") => {
+            let Ok(arguments) = serde_json::from_value::<ObserveRepository>(arguments) else {
+                return json_rpc_error(id, -32602, "Invalid params");
+            };
+            match mcp.app.observe_repository(arguments).await {
                 Ok(result) => tool_result(
                     id,
                     json!({
@@ -749,6 +853,33 @@ async fn call_tool(id: Value, request: &Map<String, Value>, mcp: &McpState) -> R
             };
             match mcp.app.create_issue(&mcp.journal, arguments).await {
                 Ok(result) => serialized_tool_result(id, &result, "Issue is durably recorded."),
+                Err(error) => operation_error(id, error),
+            }
+        }
+        Some("observe_file") => {
+            let Ok(arguments) = serde_json::from_value::<ObserveFile>(arguments) else {
+                return json_rpc_error(id, -32602, "Invalid params");
+            };
+            match mcp.app.observe_file(arguments).await {
+                Ok(result) => serialized_tool_result(id, &result, "File is observed."),
+                Err(error) => operation_error(id, error),
+            }
+        }
+        Some("observe_tree") => {
+            let Ok(arguments) = serde_json::from_value::<ObserveTree>(arguments) else {
+                return json_rpc_error(id, -32602, "Invalid params");
+            };
+            match mcp.app.observe_tree(arguments).await {
+                Ok(result) => serialized_tool_result(id, &result, "Tree is observed."),
+                Err(error) => operation_error(id, error),
+            }
+        }
+        Some("observe_ref") => {
+            let Ok(arguments) = serde_json::from_value::<ObserveRef>(arguments) else {
+                return json_rpc_error(id, -32602, "Invalid params");
+            };
+            match mcp.app.observe_ref(arguments).await {
+                Ok(result) => serialized_tool_result(id, &result, "Branch head is observed."),
                 Err(error) => operation_error(id, error),
             }
         }
@@ -989,18 +1120,25 @@ fn operation_error(id: Value, error: OperationError) -> Response {
         OperationError::InvalidInput => {
             tool_error(id, "invalid_input", "Operation input is invalid.")
         }
+        // Not only heads: a read whose answer does not match what was asked
+        // for -- a path that is a directory, a symlink, or a submodule -- is
+        // the same class of "you did not get what you named", and an
+        // observation has no head binding to have changed.
         OperationError::Conflict => tool_error(
             id,
             "conflict",
-            "The exact-head or operation binding changed.",
+            "The exact-head, operation, or observed-object binding did not match.",
         ),
+        // The reason names the fact; the wrapper must not promise more than the
+        // reason supports. Some refusals are preconditions that can come to
+        // hold, and some -- a tree GitHub cannot return whole -- are permanent
+        // for that input, so telling an autonomous caller to retry sends it to
+        // do the one thing guaranteed never to work. Reads reach this too, so
+        // it cannot say "mutation" either.
         OperationError::Refused(reason) => tool_error(
             id,
             "refused",
-            &format!(
-                "GitHub refused the requested mutation ({reason}); \
-                 retry when its precondition holds."
-            ),
+            &format!("The request was refused: {reason}."),
         ),
         OperationError::Indeterminate => tool_error(
             id,
