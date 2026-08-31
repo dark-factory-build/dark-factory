@@ -593,8 +593,24 @@ func TestServiceStatusCancellationAndRepeatedCallsLeakNothing(t *testing.T) {
 	if _, err := Init(context.Background(), home); err != nil {
 		t.Fatal(err)
 	}
+	// Settled, not sampled. A single sample is inflated whenever something
+	// started earlier is still winding down -- `Init` above leaves a
+	// `database/sql` connection opener running, which was measured live in one
+	// run in ten -- and an inflated baseline is exactly the condition under
+	// which `<=` passes a real leak. Taking the minimum over a short window
+	// removes that: an in-flight goroutine or descriptor cannot raise the
+	// floor, only fail to lower it.
 	baselineFD := serviceFDCount(t)
 	baselineGoroutines := runtime.NumGoroutine()
+	for settle := time.Now().Add(100 * time.Millisecond); time.Now().Before(settle); {
+		runtime.Gosched()
+		if count := runtime.NumGoroutine(); count < baselineGoroutines {
+			baselineGoroutines = count
+		}
+		if count := serviceFDCount(t); count < baselineFD {
+			baselineFD = count
+		}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	_, err := inspectService(ctx, home, userHome, func(ctx context.Context, _ ...string) launchctlResult {
 		cancel()
@@ -609,15 +625,16 @@ func TestServiceStatusCancellationAndRepeatedCallsLeakNothing(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// Both counts settle downward, so both compare with `<=`: an ambient
-	// goroutine or descriptor that merely *exits* during the run is not a leak,
-	// and demanding equality reported one. Because the baselines are taken
-	// before any work, nothing this test starts can inflate them, so `<=` still
-	// fails on anything genuinely retained -- including by the cancellation,
-	// which the old placement measured from after it had already happened.
+	// `<=`, not equality: a goroutine that merely *exits* during the run is not
+	// a leak, and demanding equality reported one -- observed on the base
+	// commit as "goroutines = 2, want 3", a count that had gone down. Against a
+	// settled floor, `<=` still fails on anything genuinely retained.
+	//
+	// Only the goroutine count is spun on. `serviceFDCount` reads `/dev/fd`,
+	// which opens a descriptor to count descriptors, so polling it in a
+	// `Gosched` loop perturbs the table it measures.
 	deadline := time.Now().Add(time.Second)
-	for (runtime.NumGoroutine() > baselineGoroutines || serviceFDCount(t) > baselineFD) &&
-		time.Now().Before(deadline) {
+	for runtime.NumGoroutine() > baselineGoroutines && time.Now().Before(deadline) {
 		runtime.Gosched()
 	}
 	if got := serviceFDCount(t); got > baselineFD {

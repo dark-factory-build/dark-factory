@@ -83,9 +83,9 @@ func closeAPITestListener(t testing.TB, listener *Listener) {
 }
 
 // The receive budget is the test's own lifetime rather than a fixed second.
-// This is not what any observed flake was about -- `Receive` is still bounded
-// below by `setDeadline`'s `requestTimeout` fallback, so the change buys
-// headroom, not the removal of a wall clock. It is here because a helper's
+// This is not what any observed flake was about -- `setDeadline` still caps the
+// wait at `requestTimeout` when the context carries no earlier deadline, so the
+// change buys headroom (one second to five), not the removal of a wall clock. It is here because a helper's
 // arbitrary timer racing the client script it serves is a hazard worth not
 // having, and `t.Context()` ends exactly when the test does.
 func startServerReceive(t testing.TB, listener *Listener, reply func(Call) Reply) <-chan serverReceiveResult {
@@ -438,7 +438,7 @@ func TestServerFramingDeadlinePeerAndResponseBounds(t *testing.T) {
 				if _, err := connection.Write(request); err != nil {
 					t.Fatal(err)
 				}
-				if err := connection.CloseWrite(); err != nil {
+				if err := connection.CloseWrite(); err != nil && !errors.Is(err, syscall.ENOTCONN) {
 					t.Fatal(err)
 				}
 				_ = connection.Close()
