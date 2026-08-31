@@ -28,7 +28,7 @@ function terminalView(overrides = {}) {
   };
 }
 
-function sidebarProps(overrides = {}, calls = { close: 0, take: 0, handBack: 0, stop: 0, toggle: 0 }) {
+function sidebarProps(overrides = {}, calls = { close: 0, take: 0, handBack: 0, toggle: 0 }) {
   return {
     calls,
     props: {
@@ -39,8 +39,6 @@ function sidebarProps(overrides = {}, calls = { close: 0, take: 0, handBack: 0, 
       onClose: () => { calls.close += 1; },
       onTakeControl: () => { calls.take += 1; },
       onHandBack: () => { calls.handBack += 1; },
-      onStop: () => { calls.stop += 1; },
-      stopUnavailable: "daemon per-run stop authority outside NEEDS YOU",
     },
   };
 }
@@ -95,7 +93,7 @@ test("the collapsed sidebar server-renders the tab and keeps the terminal body",
   assert.match(markup, /aria-hidden="true"/);
 });
 
-test("steer is never a dead-looking live control and stop routes only real authority", () => {
+test("steer is never a dead-looking live control", () => {
   const readOnly = sidebarProps();
   const readOnlyMarkup = renderToStaticMarkup(createElement(TerminalSidebar, readOnly.props, createElement("div")));
   assert.match(readOnlyMarkup, /<button type="button" title="takes control so you can type">Steer<\/button>/, "read-only ready steer is enabled");
@@ -104,18 +102,6 @@ test("steer is never a dead-looking live control and stop routes only real autho
   const writableMarkup = renderToStaticMarkup(createElement(TerminalSidebar, writable.props, createElement("div")));
   assert.match(writableMarkup, /<button[^>]*disabled=""[^>]*title="you have control — type in the terminal"[^>]*>Steer<\/button>/);
   assert.match(writableMarkup, /you have control/);
-
-  const request = { id: "41".repeat(16), agent_id: "21".repeat(16), revision: 13n };
-  const withStop = sidebarProps({
-    terminal: { writable: true },
-    snapshot: { selectedHumanRequest: { request, phase: "ready", canReply: true, canCancel: true, replyMaxBytes: 8192, reply: "" } },
-  });
-  const stopMarkup = renderToStaticMarkup(createElement(TerminalSidebar, withStop.props, createElement("div")));
-  assert.match(stopMarkup, /<button type="button" title="stop this run">Stop<\/button>/);
-
-  const withoutStop = sidebarProps();
-  const noStopMarkup = renderToStaticMarkup(createElement(TerminalSidebar, withoutStop.props, createElement("div")));
-  assert.match(noStopMarkup, /<button[^>]*disabled=""[^>]*title="needs: daemon per-run stop authority outside NEEDS YOU"[^>]*>Stop<\/button>/);
 });
 
 test("the replay-reset banner appears only after a server reset", async () => {
@@ -129,8 +115,6 @@ test("the replay-reset banner appears only after a server reset", async () => {
     onClose: () => {},
     onTakeControl: () => {},
     onHandBack: () => {},
-    onStop: () => {},
-    stopUnavailable: "daemon per-run stop authority outside NEEDS YOU",
   });
   const quiet = renderToStaticMarkup(createElement(TerminalSidebar, props(0), createElement("div")));
   assert.equal(/Replay reset/.test(quiet), false);

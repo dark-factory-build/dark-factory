@@ -9,10 +9,8 @@ import {
   orderTasksForHome,
   stageMeterFill,
   stageOfTask,
-  unavailableQueueActions,
 } from "../dist/src/console-view.js";
 import { fixtureState } from "../../../fixtures/state.mjs";
-import { fixtureConsoleExtras } from "../../../fixtures/console.mjs";
 
 const agentID = [...fixtureState.agents.keys()][0];
 const pausedAgentID = [...fixtureState.agents.keys()][1];
@@ -29,12 +27,6 @@ test("every durable task status maps to exactly one console stage", () => {
   assert.equal(stageOfTask(task("succeeded")), "done");
   assert.equal(stageOfTask(task("failed")), "failed");
   assert.equal(stageOfTask(task("cancelled")), "failed");
-});
-
-test("a served stage overrides only the exact task it names", () => {
-  const extras = { stages: new Map([[task("running").id, "reviewing"]]) };
-  assert.equal(stageOfTask(task("running"), extras), "reviewing");
-  assert.equal(stageOfTask(task("running", "88".repeat(16)), extras), "building");
 });
 
 test("meter fill is monotonic along the stage sequence, full for done, empty for failed", () => {
@@ -58,13 +50,11 @@ test("agent activity precedence: an open question outranks work, pause outranks 
   assert.equal(agentCurrentTask(state.agents.get(agentID), state)?.status, "running");
 });
 
-test("counters count only store-backed facts and never invent awaiting-deploy", () => {
+test("counters count only store-backed facts", () => {
   const counters = factoryCounters(fixtureState);
   assert.equal(counters.queued, 1);
   assert.equal(counters.needsYou, 1);
-  assert.equal(counters.awaitingDeploy, undefined);
-  assert.equal(factoryCounters(undefined).queued, 0);
-  assert.equal(factoryCounters(fixtureState, fixtureConsoleExtras).awaitingDeploy, 2);
+  assert.deepEqual(factoryCounters(undefined), { queued: undefined, needsYou: undefined });
 });
 
 test("home ordering puts active work first and finished work last", () => {
@@ -80,13 +70,4 @@ test("agent glyphs derive only from the served role and provider", () => {
   assert.equal(agentGlyph({ ...worker, provider: "codex" }), "X");
   assert.equal(agentGlyph({ ...worker, provider: "shell" }), "s");
   assert.equal(agentGlyph({ ...orchestrator, provider: "codex" }), "◆");
-});
-
-test("every unavailable queue action names its missing daemon surface", () => {
-  const actions = unavailableQueueActions();
-  for (const [name, invoke] of Object.entries(actions)) {
-    const result = invoke("00".repeat(16));
-    assert.equal(result.kind, "unavailable", name);
-    assert.match(result.needs, /daemon/, name);
-  }
 });

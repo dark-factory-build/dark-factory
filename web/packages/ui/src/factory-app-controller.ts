@@ -14,7 +14,6 @@ import {
   type StateView,
 } from "@dark-factory/client";
 import { TerminalController, type TerminalControllerSnapshot, type TerminalLeaseOperation, type TerminalSurface } from "./terminal-controller.js";
-import { unavailableQueueActions, type QueueActions } from "./console-view.js";
 
 const BROWSER_ENDPOINT = new URL("ws://127.0.0.1:43123/browser/v1");
 const BROWSER_URL = BROWSER_ENDPOINT.toString();
@@ -123,13 +122,6 @@ export class FactoryAppController {
   #generation = 0;
   #started = false;
   #closed = false;
-
-  /**
-   * Queue mutations the daemon has no API for yet. Every method returns a
-   * typed unavailable result and mutates nothing; the console renders the
-   * reason instead of pretending success.
-   */
-  readonly queueActions: QueueActions = unavailableQueueActions();
 
   constructor(options: FactoryAppControllerOptions) {
     this.#options = options;

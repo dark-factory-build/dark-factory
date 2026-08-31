@@ -387,32 +387,6 @@ test("deletion or revision change clears detail and fences a late private respon
   assert.equal(context.latest().selectedHumanRequest, undefined);
 });
 
-test("queue actions are typed unavailable, mutate nothing, and publish nothing", () => {
-  const context = harness();
-  context.controller.start();
-  context.emitStatus("ready");
-  context.emitState(fixtureState);
-  const before = context.snapshots.length;
-  const actions = context.controller.queueActions;
-  const results = [
-    actions.addWork(),
-    actions.editTask("31".repeat(16)),
-    actions.commentTask("31".repeat(16)),
-    actions.deleteTask("31".repeat(16)),
-    actions.acceptSuggestion("51".repeat(16)),
-    actions.dismissSuggestion("51".repeat(16)),
-    actions.stopRun("21".repeat(16)),
-  ];
-  for (const result of results) {
-    assert.equal(result.kind, "unavailable");
-    assert.match(result.needs, /daemon/);
-  }
-  assert.equal(context.snapshots.length, before, "an unavailable action publishes no snapshot");
-  assert.equal(context.latest().state, fixtureState, "an unavailable action mutates no state");
-  assert.equal(context.calls.close, 0);
-  context.controller.close();
-});
-
 test("terminal control requests without an open terminal are refused, and refused after close", () => {
   const context = harness();
   context.controller.start();

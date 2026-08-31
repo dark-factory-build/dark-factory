@@ -1,13 +1,11 @@
 import type { FormEvent, ReactNode } from "react";
 import type { AgentItem } from "@dark-factory/client";
 import type { FactoryAgentSelection, FactoryAppSnapshot, FactoryHumanRequestView } from "./factory-app-controller.js";
-import { AgentStrip, HomeScreen, QueueScreen, TaskScreen, Ticker } from "./console-screens.js";
-import { unavailableQueueActions, type ConsoleExtras, type ConsoleScreen, type QueueActions } from "./console-view.js";
+import { AgentStrip, HomeScreen, QueueScreen } from "./console-screens.js";
+import type { ConsoleScreen } from "./console-view.js";
 
 export type FactoryConsoleProps = FactoryAppSnapshot & {
   screen?: ConsoleScreen;
-  extras?: ConsoleExtras;
-  queueActions?: QueueActions;
   selectedAgent?: FactoryAgentSelection;
   onNavigate?: (screen: ConsoleScreen) => void;
   onSelectAgent?: (agent: AgentItem) => void;
@@ -56,8 +54,6 @@ export function FactoryConsole({
   state,
   error,
   screen = DEFAULT_SCREEN,
-  extras,
-  queueActions,
   selectedHumanRequest,
   selectedAgent,
   onNavigate,
@@ -71,8 +67,6 @@ export function FactoryConsole({
   terminalContent,
 }: FactoryConsoleProps) {
   const ready = status === "ready";
-  const actions = queueActions ?? unavailableQueueActions();
-  const openTask = onNavigate === undefined ? undefined : (taskId: string) => onNavigate({ kind: "task", taskId });
 
   return (
     <div className="dfConsoleShell">
@@ -97,7 +91,6 @@ export function FactoryConsole({
 
         <AgentStrip
           state={state}
-          extras={extras}
           selectedAgentId={selectedAgent?.id}
           ready={ready}
           onSelectAgent={onSelectAgent}
@@ -128,12 +121,10 @@ export function FactoryConsole({
                 </dl>
               )}
             </section>
-            <HomeScreen state={state} extras={extras} ready={ready} onOpenTask={openTask} />
+            <HomeScreen state={state} />
           </>
         ) : screen.kind === "queue" ? (
-          <QueueScreen state={state} extras={extras} actions={actions} ready={ready} onOpenTask={openTask} />
-        ) : screen.kind === "task" ? (
-          <TaskScreen state={state} extras={extras} taskId={screen.taskId} onBack={onNavigate === undefined ? undefined : () => onNavigate({ kind: "home" })} />
+          <QueueScreen state={state} />
         ) : (
           <NeedsYouScreen
             state={state}
@@ -148,7 +139,6 @@ export function FactoryConsole({
           />
         )}
 
-        <Ticker extras={extras} />
       </main>
       {terminalContent}
     </div>
@@ -171,19 +161,20 @@ function NeedsYouScreen({
 >) {
   const projects = state?.projects;
   return (
-    <CollectionSection title="NEEDS YOU" count={state?.humanRequests.size ?? 0}>
+    <CollectionSection title="NEEDS YOU" count={state?.humanRequests.size}>
       {state === undefined ? <EmptyItem label="WAITING FOR SNAPSHOT" /> : state.humanRequests.size === 0 ? <EmptyItem label="all quiet — nothing needs you" /> : (
         <ul className="dfFactoryConsole__list dfFactoryConsole__list--requests">
           {[...state.humanRequests.values()].map((request) => {
             const selected = selectedHumanRequest?.request.id === request.id;
+            const statusCopy = humanRequestStatusCopy(request.status);
             return (
               <li className="dfFactoryConsole__card" key={request.id}>
                 <div className="dfFactoryConsole__cardTitle">
                   <strong>{entityLabel(state.agents, request.agent_id, "AGENT")} asks</strong>
-                  <span>{request.status === "open" ? "OPEN" : "DELIVERING"}</span>
+                  <span>{statusCopy.label}</span>
                 </div>
                 <p>{projectLabel(projects, request.project_id)} · TASK {shortID(request.task_id)}</p>
-                <small>Awaiting your answer</small>
+                <small>{statusCopy.description}</small>
                 {onSelectHumanRequest === undefined ? null : (
                   <button type="button" aria-pressed={selected} disabled={selected || status !== "ready"} onClick={() => onSelectHumanRequest(request)}>
                     {selected ? "OPEN" : "VIEW"}
@@ -271,12 +262,12 @@ function HumanRequestPanel({
   );
 }
 
-function CollectionSection({ title, count, children }: { title: string; count: number; children: ReactNode }) {
+function CollectionSection({ title, count, children }: { title: string; count: number | undefined; children: ReactNode }) {
   return (
     <section className="dfFactoryConsole__section" aria-label={title}>
       <div className="dfFactoryConsole__sectionHeading">
         <h2>{title}</h2>
-        <span>{count} {count === 1 ? "ITEM" : "ITEMS"}</span>
+        <span>{count ?? "—"} {count === 1 ? "ITEM" : "ITEMS"}</span>
       </div>
       {children}
     </section>
@@ -302,4 +293,15 @@ function entityLabel(entities: ReadonlyMap<string, { name?: string; title?: stri
 
 function shortID(value: string): string {
   return value.slice(0, 8);
+}
+
+function humanRequestStatusCopy(status: FactoryHumanRequestView["request"]["status"]): Readonly<{ label: string; description: string }> {
+  switch (status) {
+    case "open":
+      return { label: "OPEN", description: "Awaiting your answer" };
+    case "delivering":
+      return { label: "DELIVERING", description: "Answer delivery in progress" };
+    case "delivery_unknown":
+      return { label: "DELIVERY UNKNOWN", description: "Answer delivery could not be confirmed" };
+  }
 }
