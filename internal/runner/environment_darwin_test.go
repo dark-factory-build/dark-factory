@@ -191,9 +191,7 @@ func TestPreparedEnvironmentOrderAndBytesReachRealChildExactly(t *testing.T) {
 	if !slices.Contains(want, "PATH=/usr/bin:/bin") {
 		t.Fatal("provider PATH changed")
 	}
-	if got := ObserveProcess(child.Identity()); got.Presence != Absent {
-		t.Fatalf("environment child remains after Wait: %+v", got)
-	}
+	assertWaitedAndAbsent(t, child)
 }
 
 func TestExecutableCommitmentRequiresExactDirectNativeTarget(t *testing.T) {

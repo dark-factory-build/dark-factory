@@ -2,8 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { dirname } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
@@ -11,7 +10,12 @@ test("packed client is importable by a clean consumer through package exports", 
   const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
   const consumer = mkdtempSync(join(tmpdir(), "dark-factory-client-consumer-"));
   try {
-    const env = { ...process.env, npm_config_cache: join(consumer, "npm-cache"), npm_config_update_notifier: "false" };
+    const env = {
+      ...process.env,
+      PATH: [dirname(process.execPath), "/usr/bin", "/bin"].join(delimiter),
+      npm_config_cache: join(consumer, "npm-cache"),
+      npm_config_update_notifier: "false",
+    };
     const tarball = execFileSync("npm", ["pack", "--ignore-scripts", "--pack-destination", consumer], { cwd: packageRoot, encoding: "utf8", env }).trim().split("\n").at(-1);
     assert.ok(tarball);
     writeFileSync(join(consumer, "package.json"), JSON.stringify({ name: "clean-consumer", private: true, type: "module" }));

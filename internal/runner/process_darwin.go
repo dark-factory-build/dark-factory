@@ -1393,11 +1393,14 @@ func RunExecGate() error {
 			return fmt.Errorf("runner: missing inherited capability")
 		}
 	}
+	// Keep FD 3 reserved until control is remapped onto it. Wrapping the
+	// nonblocking FD 11 may initialize Go's netpoll kqueue; a free FD 3 would
+	// let that runtime-owned descriptor be allocated where Dup2 later closes it.
+	defer config.Close()
 	var cfg gateConfig
 	if err := readFrame(io.LimitReader(config, maxConfigBytes+4), &cfg, maxConfigBytes); err != nil {
 		return err
 	}
-	_ = config.Close()
 	if cfg.Version != 1 || cfg.MarkerName == "" || filepath.Base(cfg.MarkerName) != cfg.MarkerName {
 		return fmt.Errorf("runner: invalid gate config")
 	}
@@ -1485,9 +1488,6 @@ func RunExecGate() error {
 		return err
 	}
 	_ = cwd.Close()
-	if !cfg.KeepDirectory {
-		_ = leaseDir.Close()
-	}
 	if !cfg.PTY {
 		if err := unix.Dup2(int(stdin.Fd()), 0); err != nil {
 			return err
@@ -1500,19 +1500,25 @@ func RunExecGate() error {
 		}
 	}
 	if control != nil {
-		if err := unix.Dup2(int(control.Fd()), 3); err != nil {
+		if err := unix.Dup2(int(control.Fd()), int(config.Fd())); err != nil {
 			return err
 		}
+		if err := control.Close(); err != nil {
+			return fmt.Errorf("runner: close staged control: %w", err)
+		}
+	} else if err := config.Close(); err != nil {
+		return fmt.Errorf("runner: close gate config: %w", err)
 	}
-	for _, fd := range []int{4, 6, 7, 8, 11, 12} {
-		_ = unix.Close(fd)
+	if err := errors.Join(stdin.Close(), stdout.Close(), stderr.Close()); err != nil {
+		return fmt.Errorf("runner: close staged standard streams: %w", err)
 	}
-	if control == nil {
-		_ = unix.Close(3)
+	if _, err := unix.FcntlInt(status.Fd(), unix.F_SETFD, unix.FD_CLOEXEC); err != nil {
+		return fmt.Errorf("runner: seal gate status: %w", err)
 	}
-	unix.CloseOnExec(5)
 	if !cfg.KeepDirectory {
-		_ = unix.Close(9)
+		if err := leaseDir.Close(); err != nil {
+			return fmt.Errorf("runner: close gate directory: %w", err)
+		}
 	}
 	if _, err := unix.FcntlInt(lifetime.Fd(), unix.F_SETFD, 0); err != nil {
 		return fmt.Errorf("runner: retain runtime lifetime: %w", err)

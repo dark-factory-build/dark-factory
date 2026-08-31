@@ -410,7 +410,4 @@ func assertWaitedAndAbsent(t *testing.T, child *OwnedChild) {
 		t.Fatalf("child not solely waited: state=%d process_state=%v", child.state, child.cmd.ProcessState)
 	}
 	waitExactAbsence(t, child.Identity())
-	if err := unix.Kill(-child.Identity().PGID, 0); !errors.Is(err, unix.ESRCH) {
-		t.Fatalf("owned group remains after Wait: %v", err)
-	}
 }

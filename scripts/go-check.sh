@@ -1,37 +1,57 @@
 #!/bin/sh
 set -eu
 
-[ "$#" -eq 0 ] || { echo "usage: go-check.sh" >&2; exit 64; }
+[ "$#" -eq 0 ] || { echo "usage: scripts/go-check.sh" >&2; exit 2; }
 script_dir=$(CDPATH= cd -- "$(/usr/bin/dirname "$0")" && pwd -P)
-repository_root=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
+repository_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 CDPATH= cd -- "$repository_root"
 . "$script_dir/local-ci-environment.sh"
-. "$script_dir/go-gate-environment.sh"
-. "$script_dir/go-fast-stage.sh"
-if ! go_gate_environment_setup; then go_gate_environment_cleanup || true; exit 1; fi
 
-go_gate_status=0
-go_gate_cleanup() {
-    go_gate_status=$?
-    trap - EXIT HUP INT TERM
-    go_gate_environment_cleanup || go_gate_status=1
-    exit "$go_gate_status"
+export GOTOOLCHAIN=local
+expected_go=$(awk '$1 == "go" { count++; version=$2 } END { if (count != 1) exit 1; print "go" version }' go.mod)
+actual_go=$(go env GOVERSION)
+[ "$actual_go" = "$expected_go" ] || {
+    echo "go-check: expected $expected_go, got $actual_go" >&2
+    exit 1
 }
-go_gate_signal() {
-    go_gate_signal_number=$1
-    trap - EXIT HUP INT TERM
-    if [ -n "${go_gate_supervisor_pid-}" ]; then
-        /bin/kill -TERM "$go_gate_supervisor_pid" 2>/dev/null || true
-        wait "$go_gate_supervisor_pid" 2>/dev/null || true
-        go_gate_supervisor_pid=
-    fi
-    go_gate_environment_cleanup || true
-    exit $((128 + go_gate_signal_number))
-}
-trap go_gate_cleanup EXIT
-trap 'go_gate_signal 1' HUP
-trap 'go_gate_signal 2' INT
-trap 'go_gate_signal 15' TERM
 
-go_gate_fast_stage || exit $?
+echo "go-check: download and verify Go modules"
+go mod download
+go mod verify
+
+echo "go-check: gofmt"
+if ! gofmt_output=$(git ls-files -z -- '*.go' | xargs -0 gofmt -l); then
+    echo "go-check: gofmt failed" >&2
+    exit 1
+fi
+[ -z "$gofmt_output" ] || {
+    printf '%s\n' "$gofmt_output" >&2
+    echo "go-check: gofmt required" >&2
+    exit 1
+}
+
+echo "go-check: go vet ./..."
+go vet ./...
+
+# These packages contain ordinary source and data-contract tests. Packages
+# that create sockets, PTYs, subprocesses, or services run in go-ci instead.
+echo "go-check: ordinary Go tests"
+go test -short -timeout=20m \
+    ./cmd/cloudflare-admin \
+    ./internal/browserprotocol \
+    ./internal/cloudflareadmin \
+    ./internal/provider
+
+echo "go-check: TypeScript install, build, typecheck, and tests"
+(
+    CDPATH= cd -- web
+    COREPACK_ENABLE_NETWORK=1 CI=true "$DF_CI_NODE" "$DF_CI_COREPACK" pnpm install --frozen-lockfile --ignore-scripts
+    COREPACK_ENABLE_NETWORK=0 CI=true "$DF_CI_NODE" "$DF_CI_COREPACK" pnpm --filter @dark-factory/client build
+    COREPACK_ENABLE_NETWORK=0 CI=true "$DF_CI_NODE" "$DF_CI_COREPACK" pnpm --filter @dark-factory/ui build
+    COREPACK_ENABLE_NETWORK=0 CI=true "$DF_CI_NODE" "$DF_CI_COREPACK" pnpm --filter dark-factory-dev typecheck
+    "$DF_CI_NODE" --test packages/client/test/*.test.mjs packages/ui/test/*.test.mjs
+)
+
+echo "go-check: git diff --check"
+git diff --check
 echo "go-check: PASS"

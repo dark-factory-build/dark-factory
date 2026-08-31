@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createElement, isValidElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -31,6 +32,12 @@ const SCREENS = [
   { kind: "needs-you" },
   { kind: "task", taskId: ids.task },
 ];
+
+test("error banner keeps its centered layout after the paragraph reset", () => {
+  const css = readFileSync(new URL("../src/factory-console.css", import.meta.url), "utf8");
+  assert.match(css, /\.dfFactoryConsole :where\(h1, h2, p, dl, ul\)\s*\{\s*margin: 0;\s*\}/);
+  assert.match(css, /\.dfFactoryConsole__error\s*\{[\s\S]*?margin: 0 auto 1\.25rem;/);
+});
 
 test("projects, agents, tasks, and requests retain their canonical relationships", () => {
   const request = [...fixtureState.humanRequests.values()][0];

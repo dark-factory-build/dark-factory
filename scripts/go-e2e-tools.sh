@@ -37,16 +37,3 @@ go_e2e_temporary_directory() {
     esac
     /usr/bin/mktemp -d "$go_e2e_temporary_template"
 }
-
-# The parent gate has already captured and identity-checked these paths. Pass
-# them as explicit command inputs so the bounded PATH remains intentionally
-# free of Homebrew or other mutable tool directories.
-go_gate_e2e_stage() {
-    go_gate_e2e_timeout=$1
-    shift
-    go_gate_stage "$go_gate_e2e_timeout" "$go_gate_env" \
-        "DARK_FACTORY_E2E_GO=$go_gate_go" \
-        "DARK_FACTORY_E2E_NODE=$go_gate_node" \
-        "DARK_FACTORY_E2E_COREPACK=$go_gate_corepack" \
-        "$@"
-}

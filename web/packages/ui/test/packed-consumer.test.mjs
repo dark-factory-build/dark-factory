@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { cpSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -12,7 +12,12 @@ test("packed UI is importable by a clean consumer with its stylesheet export", (
   const webRoot = join(packageRoot, "..", "..");
   const consumer = mkdtempSync(join(tmpdir(), "dark-factory-ui-consumer-"));
   try {
-    const env = { ...process.env, npm_config_cache: join(consumer, "npm-cache"), npm_config_update_notifier: "false" };
+    const env = {
+      ...process.env,
+      PATH: [dirname(process.execPath), "/usr/bin", "/bin"].join(delimiter),
+      npm_config_cache: join(consumer, "npm-cache"),
+      npm_config_update_notifier: "false",
+    };
     const packLocal = (cwd) => {
       execFileSync("corepack", ["pnpm", "pack", "--pack-destination", consumer], { cwd, stdio: "pipe", env });
     };

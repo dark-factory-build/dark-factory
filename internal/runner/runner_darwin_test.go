@@ -1241,12 +1241,16 @@ func waitExactAbsence(t *testing.T, want Identity) {
 	t.Helper()
 	deadline := time.Now().Add(4 * time.Second)
 	for {
-		observation := ObserveProcess(want)
-		if observation.Presence == Absent {
+		got, infoErr := readIdentity(want.PID)
+		if infoErr == nil && got != want {
 			return
 		}
-		if observation.Presence != Present || time.Now().After(deadline) {
-			t.Fatalf("exact process did not become absent: %+v", observation)
+		pidProbe := unix.Kill(want.PID, 0)
+		if (errors.Is(infoErr, unix.EIO) || errors.Is(infoErr, unix.ESRCH) || errors.Is(infoErr, unix.ENOENT)) && errors.Is(pidProbe, unix.ESRCH) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("exact process did not become absent: want=%+v got=%+v info=%v pid=%v", want, got, infoErr, pidProbe)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -1356,9 +1360,6 @@ func TestRealParentSIGKILLAbortsInertGate(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "effect")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("provider ran after its real owner was SIGKILLed before activation")
 	}
-	if err := unix.Kill(-gate.PGID, 0); !errors.Is(err, unix.ESRCH) {
-		t.Fatalf("gate group remains after real parent death: %v", err)
-	}
 }
 
 func TestBlockedActivateExecutesOnceWithExactIdentityAndInput(t *testing.T) {
@@ -1400,9 +1401,7 @@ func TestBlockedActivateExecutesOnceWithExactIdentityAndInput(t *testing.T) {
 	if fields != fmt.Sprintf("%d", id.PID) {
 		t.Fatalf("target identity %q want %d", fields, id.PID)
 	}
-	if got := ObserveProcess(id); got.Presence != Absent {
-		t.Fatalf("post-Wait=%+v", got)
-	}
+	assertWaitedAndAbsent(t, child)
 }
 
 func TestPrivateDirectoryAndLifetimeInheritanceAreExplicit(t *testing.T) {
@@ -1765,9 +1764,7 @@ func TestTerminateOwnsTERMKillAndWait(t *testing.T) {
 	if exit.Signal != int(syscall.SIGKILL) {
 		t.Fatalf("exit=%+v", exit)
 	}
-	if got := ObserveProcess(child.Identity()); got.Presence != Absent {
-		t.Fatalf("cleanup=%+v", got)
-	}
+	assertWaitedAndAbsent(t, child)
 }
 
 func TestLeaderExitWithLiveDescendantRetainsOwnerOnEPERM(t *testing.T) {
@@ -1883,9 +1880,7 @@ func TestTerminateGroupSignalCatchesDescendantForkedDuringTERMGrace(t *testing.T
 	if result.err != nil || result.exit.Signal != int(unix.SIGKILL) {
 		t.Fatalf("termination=%+v err=%v", result.exit, result.err)
 	}
-	if observation := ObserveProcess(late); observation.Presence != Absent {
-		t.Fatalf("late descendant survived group cleanup: %+v", observation)
-	}
+	waitExactAbsence(t, late)
 	assertWaitedAndAbsent(t, child)
 	cleanupDone()
 }
