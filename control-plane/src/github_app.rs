@@ -6581,12 +6581,26 @@ mod tests {
     /// to read them would leave an agent unable to see the gate it must pass.
     #[test]
     fn a_readable_path_is_shape_checked_but_not_authority_checked() {
+        // Driven through `ObserveFile::validate`, not through a validator by
+        // name. This test previously asserted on `valid_path`, which stopped
+        // being the read path when reads widened -- so swapping the call site
+        // back to the write rule, which is the regression this test is named
+        // after, passed the whole gate.
+        let observe = |path: &str| {
+            ObserveFile {
+                repository: "dark-factory-build/dark-factory".into(),
+                commit_sha: "a".repeat(40),
+                path: path.into(),
+            }
+            .validate()
+        };
         for readable in [
             ".github/workflows/ci.yml",
             ".github/CODEOWNERS",
             "CODEOWNERS",
             "control-plane/src/github_app.rs",
         ] {
+            assert!(observe(readable).is_ok(), "{readable} is unreadable");
             assert!(valid_path(readable).is_ok(), "{readable} was refused");
             // The same paths stay unwritable.
             if readable != "control-plane/src/github_app.rs" {
@@ -6617,6 +6631,22 @@ mod tests {
             valid_path("a\u{0}b").err(),
             Some(OperationError::InvalidInput)
         );
+        // Reads reach further than writes: `observe_tree` can name a path
+        // `publish_commit` will not accept, and refusing to read it would make
+        // the two operations disagree about which files exist.
+        let long = format!("vendor/{}/file.txt", "a".repeat(300));
+        assert!(observe(&long).is_ok());
+        assert_eq!(
+            valid_repository_path(&long).err(),
+            Some(OperationError::InvalidInput)
+        );
+        for rejected in ["", "/a", "a/../b", ".git/config"] {
+            assert_eq!(
+                observe(rejected).err(),
+                Some(OperationError::InvalidInput),
+                "{rejected:?} was readable"
+            );
+        }
     }
 
     #[test]

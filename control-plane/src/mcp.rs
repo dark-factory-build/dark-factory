@@ -1129,13 +1129,16 @@ fn operation_error(id: Value, error: OperationError) -> Response {
             "conflict",
             "The exact-head, operation, or observed-object binding did not match.",
         ),
+        // The reason names the fact; the wrapper must not promise more than the
+        // reason supports. Some refusals are preconditions that can come to
+        // hold, and some -- a tree GitHub cannot return whole -- are permanent
+        // for that input, so telling an autonomous caller to retry sends it to
+        // do the one thing guaranteed never to work. Reads reach this too, so
+        // it cannot say "mutation" either.
         OperationError::Refused(reason) => tool_error(
             id,
             "refused",
-            &format!(
-                "GitHub refused the requested mutation ({reason}); \
-                 retry when its precondition holds."
-            ),
+            &format!("The request was refused: {reason}."),
         ),
         OperationError::Indeterminate => tool_error(
             id,

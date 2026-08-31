@@ -168,6 +168,13 @@ fn object_at(text: &str, from: usize) -> String {
 /// The `required` array belonging to THIS object, not the first one nested
 /// anywhere inside it.
 fn own_required_in(schema: &str) -> String {
+    own_key_in(schema, "required")
+}
+
+/// The value of a key belonging to THIS object, not to one nested inside it.
+/// An unscoped `contains` is satisfied by a nested copy, which is how a
+/// top-level `additionalProperties` could be deleted with the gate green.
+fn own_key_in(schema: &str, key: &str) -> String {
     let bytes = schema.as_bytes();
     let body = schema.find('{').expect("not an object");
     let mut depth = 0_i32;
@@ -186,10 +193,14 @@ fn own_required_in(schema: &str) -> String {
         }
         match byte {
             b'"' => {
-                if depth == 1 && schema[index..].starts_with(r#""required""#) {
-                    let from = index + schema[index..].find('[').expect("required is not an array");
-                    let close = schema[from..].find(']').expect("required is unterminated");
-                    return schema[from..=from + close].to_string();
+                if depth == 1 && schema[index..].starts_with(&format!(r#""{key}""#)) {
+                    let from = index + schema[index..].find(':').expect("key has no value") + 1;
+                    let value = schema[from..].trim_start();
+                    let end = match value.as_bytes().first() {
+                        Some(b'[') => value.find(']').expect("unterminated array") + 1,
+                        _ => value.find([',', '\n']).unwrap_or(value.len()),
+                    };
+                    return value[..end].trim().trim_end_matches(',').to_string();
                 }
                 in_string = true;
             }
@@ -352,7 +363,7 @@ fn declared_output_schemas_name_the_fields_the_results_carry() {
             );
         }
         assert!(
-            block.contains(r#""additionalProperties": false"#),
+            own_key_in(&block, "additionalProperties") == "false",
             "{tool}'s outputSchema accepts undeclared properties"
         );
     }
@@ -618,6 +629,22 @@ fn github_refusals_stay_determinate() {
     let github_app = project_file("src/github_app.rs");
     let mcp = project_file("src/mcp.rs");
     let journal = project_file("src/journal.rs");
+
+    // `read_tree` is wasm-only, so no host test can drive it. These pin the two
+    // decisions it makes that a caller cannot recover from if they silently
+    // revert: a truncated listing must never be returned as if complete, and
+    // the commit's parents must actually be populated. Both survived every
+    // gate before this, including the drift table -- which proves the `parents`
+    // field exists, never that anything fills it.
+    assert!(
+        github_app.contains("if tree.truncated {")
+            && github_app.contains("RefusalReason::TreeTruncated"),
+        "a truncated tree is no longer refused as a determinate refusal"
+    );
+    assert!(
+        github_app.contains("parents: commit") && github_app.contains(".map(|parent| parent.sha)"),
+        "observe_tree no longer reports the commit's parents"
+    );
 
     // The transport reports the status; it is the only place that sees one.
     assert!(github_app.contains("Err(Error::Rejected(response.status_code()))"));
