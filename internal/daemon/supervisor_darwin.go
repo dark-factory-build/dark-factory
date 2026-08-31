@@ -42,6 +42,24 @@ type supervisorAttemptOwner struct {
 	child      *runner.OwnedChild
 	activated  bool
 	reaped     bool
+	outerExit  *runner.Exit
+}
+
+// outerRunnerEvidence names how the outer runner actually ended. A control read
+// that returns EOF says only that the socket closed, which is the same string
+// whether the runner exited cleanly, failed to exec, or was killed. This owner
+// already waits that exact child, so the distinguishing status is in hand at
+// the moment the run fails; reporting it is the difference between a failure
+// that can be diagnosed from one sighting and one that cannot.
+func (owner *supervisorAttemptOwner) outerRunnerEvidence() error {
+	if owner == nil || owner.outerExit == nil {
+		return nil
+	}
+	exit := *owner.outerExit
+	if exit.LaunchErr != "" {
+		return fmt.Errorf("daemon: outer runner exit code=%d signal=%d aborted=%v launch=%q", exit.Code, exit.Signal, exit.Aborted, exit.LaunchErr)
+	}
+	return fmt.Errorf("daemon: outer runner exit code=%d signal=%d aborted=%v", exit.Code, exit.Signal, exit.Aborted)
 }
 
 func (owner *supervisorAttemptOwner) close() error {
@@ -98,7 +116,9 @@ func (owner *supervisorAttemptOwner) close() error {
 			// provider group. Let it converge and exit; terminating the outer
 			// first could orphan that distinct group.
 			for {
-				if _, err := owner.child.FinishAfterExit(8 * time.Second); err == nil {
+				exit, err := owner.child.FinishAfterExit(8 * time.Second)
+				if err == nil {
+					owner.outerExit = &exit
 					break
 				}
 				time.Sleep(25 * time.Millisecond)
@@ -379,7 +399,13 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	}
 	owner := &supervisorAttemptOwner{controller: controller, child: child}
 	controllerOpen = false
-	defer func() { resultErr = errors.Join(resultErr, owner.close()) }()
+	defer func() {
+		closeErr := owner.close()
+		if resultErr == nil && closeErr == nil {
+			return
+		}
+		resultErr = errors.Join(resultErr, closeErr, owner.outerRunnerEvidence())
+	}()
 	runnerResourceIdentity, err := processResourceIdentity(child.Identity())
 	if err != nil {
 		return daemon.convergeUnstartedRunner(run, owner, keys.resources.RunnerProcess, err)
@@ -1052,6 +1078,7 @@ func (daemon *Daemon) convergeActivatedRunner(run kernel.Run, owner *supervisorA
 				if exitErr == nil {
 					outerExit, reaped = exit, true
 					owner.reaped = true
+					owner.outerExit = &outerExit
 					break
 				}
 			}
