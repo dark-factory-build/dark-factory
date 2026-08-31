@@ -11,9 +11,9 @@ use crate::{
     access::AccessAuthority,
     github_app::{
         AppAuthority, CreateIssue, CreatePullRequest, DispatchControlPlaneDeploy,
-        EnqueuePullRequest, ObserveControlPlaneDeploy, ObserveIssue, ObservePullRequestChecks,
-        ObservePullRequestMerge, ObservePullRequestWorkflows, ObserveRef, ObserveRelease,
-        ObserveReleaseWorkflow, ObserveRepository, OperationError, PublishCommit,
+        EnqueuePullRequest, ObserveChanges, ObserveControlPlaneDeploy, ObserveFile, ObserveIssue,
+        ObservePullRequestChecks, ObservePullRequestMerge, ObservePullRequestWorkflows, ObserveRef,
+        ObserveRelease, ObserveReleaseWorkflow, ObserveRepository, OperationError, PublishCommit,
         PublishReleaseTag, ReadPullRequestJobLog, RecoverRelease, RerunFailedPullRequestJobs,
         ResolveIssue, SubmitPullRequestReview, canonical_operation_id,
     },
@@ -263,6 +263,67 @@ fn tools() -> Value {
             "additionalProperties": false
         },
         "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true}
+    }, {
+        "name": "observe_file",
+        "title": "Read one file at one commit",
+        "description": "Return one file's exact bytes, base64 encoded, as of one exact commit, or null when the path does not exist there. Use this to read another agent's work instead of fetching git objects.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
+                "commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+                "path": {"type": "string", "minLength": 1, "maxLength": 240}
+            },
+            "required": ["repository", "commit_sha", "path"],
+            "additionalProperties": false
+        },
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "commit_sha": {"type": "string"},
+                "content_base64": {"type": ["string", "null"]}
+            },
+            "required": ["path", "commit_sha", "content_base64"],
+            "additionalProperties": false
+        },
+        "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
+    }, {
+        "name": "observe_changes",
+        "title": "Observe which paths differ between two commits",
+        "description": "Return the paths that differ between two exact commits, with each path's status. Patches are not returned; read the paths that matter with observe_file.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
+                "base_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+                "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+            },
+            "required": ["repository", "base_sha", "head_sha"],
+            "additionalProperties": false
+        },
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "base_sha": {"type": "string"},
+                "head_sha": {"type": "string"},
+                "paths": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "status": {"type": "string"}
+                        },
+                        "required": ["path", "status"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["base_sha", "head_sha", "paths"],
+            "additionalProperties": false
+        },
+        "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
     }, {
         "name": "observe_ref",
         "title": "Observe a branch head",
@@ -789,6 +850,24 @@ async fn call_tool(id: Value, request: &Map<String, Value>, mcp: &McpState) -> R
             };
             match mcp.app.create_issue(&mcp.journal, arguments).await {
                 Ok(result) => serialized_tool_result(id, &result, "Issue is durably recorded."),
+                Err(error) => operation_error(id, error),
+            }
+        }
+        Some("observe_file") => {
+            let Ok(arguments) = serde_json::from_value::<ObserveFile>(arguments) else {
+                return json_rpc_error(id, -32602, "Invalid params");
+            };
+            match mcp.app.observe_file(arguments).await {
+                Ok(result) => serialized_tool_result(id, &result, "File is observed."),
+                Err(error) => operation_error(id, error),
+            }
+        }
+        Some("observe_changes") => {
+            let Ok(arguments) = serde_json::from_value::<ObserveChanges>(arguments) else {
+                return json_rpc_error(id, -32602, "Invalid params");
+            };
+            match mcp.app.observe_changes(arguments).await {
+                Ok(result) => serialized_tool_result(id, &result, "Changed paths are observed."),
                 Err(error) => operation_error(id, error),
             }
         }

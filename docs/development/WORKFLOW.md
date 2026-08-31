@@ -120,7 +120,8 @@ The normal automation surface is the Maintainer App. Every tool names the
 installed on. Before a write, require `maintainer_status` for that exact
 repository to report:
 
-- the same `owner/name` you asked for;
+- the `owner/name` you asked for, compared case-insensitively (it answers
+  with GitHub's canonical spelling);
 - a positive numeric repository ID; and
 - permission revision `maintainer-operations-v3`.
 
@@ -129,9 +130,15 @@ canonical request until the result is reconciled. Never expose App keys,
 installation tokens, personal tokens, credential-helper output, or keychain
 contents to an agent or worktree.
 
+Reading another agent's branch needs no `git fetch`: `observe_ref` names its
+head, `observe_changes` says which paths differ, `observe_file` returns each
+one's bytes, and `publish_commit` writes the result back. If a task seems to
+need git, the missing thing is usually a typed operation.
+
 If that broker is unavailable, automation stops unless the owner separately
 authorizes a finite host-credential fallback naming the exact repository and
-operations. Under such an authorization, run only those named `git`/`gh`
+operations. The same authorization is what `.github/**`, CODEOWNERS and
+`dependabot.yml` need, because `publish_commit` refuses them by design. Under such an authorization, run only those named `git`/`gh`
 commands outside the sandbox and re-read the exact remote ref, PR, check,
 release, or workflow state after each effect. No force push, ref deletion,
 access change, credential inspection, or implicit expansion is allowed.

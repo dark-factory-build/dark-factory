@@ -101,7 +101,7 @@ App, or activate a webhook. Production credentials are never shared with
 preview or disposable deployments; those use a distinct App, secret, Durable
 Object namespace, and activation contract. `workers.dev` and preview URLs are
 disabled and the checked-in configuration has no route, so an upload cannot
-silently claim a public ingress. All eleven production authority settings are
+silently claim a public ingress. All eight production authority settings are
 required Cloudflare secrets. There is no database URL, owner integration,
 runtime role, provider API key, or ambient authentication fallback.
 
@@ -141,6 +141,8 @@ The live maintainer broker exposes only these repository-scoped operations:
 - verify one named repository's installation, numeric repository ID, permission
   revision, and live default branch head;
 - observe the exact commit any branch points at, or its absence;
+- observe one file's exact bytes at one exact commit, or its absence;
+- observe which paths differ between two exact commits;
 - observe one durable operation UUID without mutating it;
 - create, observe, and resolve one bounded issue with an evidence comment;
 - publish one exact independently reviewed tree as an App-authored commit to a

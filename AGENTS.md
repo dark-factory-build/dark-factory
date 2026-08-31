@@ -35,26 +35,36 @@ framework. The shell-provider loop is proven; real Claude/Codex work is not.
    the shell provider.
 8. Use the shared model policy: Luna for routine workers/reviewers; Sol/xhigh
    only for an explicit high-risk escalation. Do not silently rewrite profiles.
-9. Contributor agents use the Maintainer App for every GitHub *effect*. Every
-   tool names its `owner/name` repository. First require `maintainer_status`
-   for the exact repository you intend to act on to return that same
-   repository, a positive numeric ID, and revision `maintainer-operations-v3`.
-   Fail closed if the required typed operation is unavailable.
+9. Contributor agents use **only** the Maintainer App for GitHub, with the one
+   carve-out named below. Every tool names its `owner/name` repository. First
+   require `maintainer_status` for the exact repository you intend to act on to
+   return that repository — compared case-insensitively, because it answers
+   with GitHub's canonical spelling and the caller's may differ — plus a
+   positive numeric ID and revision `maintainer-operations-v3`. Fail closed if
+   the required typed operation is unavailable.
 
-   Standing authorization, `dark-factory-build/*` only: `git fetch`, and
-   `git push` to a non-default branch this agent created, through the existing
-   host credential helper. The App brokers effects, not git objects — it can
-   tell you a branch's head through `observe_ref` but cannot hand you the
-   commits behind it, so integrating another agent's work needs a real fetch.
-   Requiring a human for that made the App's own purpose unreachable. Re-read
-   the exact remote state after each effect.
+   The App is expected to be sufficient, and that expectation is the point: an
+   agent that reaches around it stops dogfooding the thing being built. Reading
+   another agent's work needs no `git fetch` — `observe_ref` names a branch's
+   head, `observe_changes` says which paths differ, `observe_file` returns each
+   one's exact bytes at that commit, and `publish_commit` writes the result
+   back. If a task seems to need git, the missing thing is usually a typed
+   operation; add it rather than route around the surface.
 
-   Everything else stays closed: never push to the default branch, never touch
-   a ref this agent did not create, never `--force` without
-   `--force-with-lease`, and never open, review, or merge a pull request or
-   mutate issues, releases, Actions, or repository settings outside the App —
-   PR authorship stays App-only so review is a distinct principal. Never
-   inspect, export, request, or print a credential.
+   The one carve-out is explicit owner authorization, per task. It enables any
+   git or `gh` action the owner names, and it exists because one boundary is
+   deliberately unreachable: `publish_commit` refuses `.github/**`, CODEOWNERS
+   and `dependabot.yml`, since an agent that could rewrite the CI gating its own
+   work would be escalating its authority. Changes to those paths therefore
+   require the owner, by design.
+
+   Absent that authorization everything else is closed, **reads included**: no
+   `git fetch`, `pull`, `push`, `clone`, no `gh`, no direct GitHub REST or
+   GraphQL call. Never push to any branch, never force-push, never delete a ref.
+   Never open, review, or merge a pull request, and never mutate issues,
+   releases, Actions, repository settings, or repository/organization access
+   outside the App; PR authorship stays App-only so review is a distinct
+   principal. Never inspect, export, request, or print a credential.
 10. Never read/source `.env.txt` directly. Its only agent use is an explicitly
     authorized, independently reviewed fixed command:
     `./scripts/with-cloudflare-env.sh dns status`, `dns publish-app`, or

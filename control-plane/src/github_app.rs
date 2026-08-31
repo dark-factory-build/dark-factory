@@ -30,6 +30,13 @@ const MAX_WORKFLOW_RUNS: usize = 20;
 const MAX_WORKFLOW_JOBS: usize = 100;
 const MAX_WORKFLOW_STEPS: usize = 100;
 const MAX_JOB_LOG_BYTES: usize = 64 * 1024;
+/// One file, base64 as GitHub returns it. Matches `publish_commit`'s per-file
+/// ceiling: what can be written back has to be readable.
+const MAX_FILE_BYTES: usize = 1_000_000;
+/// Changed paths between two commits. GitHub's compare answers at most 300
+/// files, so a larger delta is refused rather than silently truncated into a
+/// list the caller would treat as complete.
+const MAX_CHANGED_FILES: usize = 300;
 const MAX_LOG_REDIRECT_BYTES: usize = 4_096;
 #[derive(Clone, Copy)]
 struct WorkflowRef<'a> {
@@ -333,6 +340,55 @@ pub(crate) struct CreateIssue {
 pub(crate) struct IssueResult {
     pub(crate) number: i64,
     pub(crate) url: String,
+}
+
+/// One file's exact bytes at one exact commit.
+///
+/// Reading another agent's work needed a `git fetch`, which needed the
+/// operator's credential in an agent process. Content at a commit is what that
+/// fetch was actually for: with this and `publish_commit`, integrating someone
+/// else's branch never touches git history at all.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ObserveFile {
+    pub(crate) repository: String,
+    pub(crate) commit_sha: String,
+    pub(crate) path: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct FileObservationResult {
+    pub(crate) path: String,
+    pub(crate) commit_sha: String,
+    /// Absent when the path does not exist at that commit, which is an answer.
+    /// A caller integrating a deletion needs to tell that from a failure.
+    pub(crate) content_base64: Option<String>,
+}
+
+/// Which paths differ between two exact commits.
+///
+/// Without this, reading another agent's branch means reading every file to
+/// find the few that moved. The patches are deliberately absent: this says
+/// where to look, and `observe_file` answers exactly what is there.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ObserveChanges {
+    pub(crate) repository: String,
+    pub(crate) base_sha: String,
+    pub(crate) head_sha: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct ChangedPath {
+    pub(crate) path: String,
+    pub(crate) status: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct ChangesObservationResult {
+    pub(crate) base_sha: String,
+    pub(crate) head_sha: String,
+    pub(crate) paths: Vec<ChangedPath>,
 }
 
 /// Which commit a branch points at right now.
@@ -879,6 +935,55 @@ impl AppAuthority {
     }
 
     #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn observe_file(
+        &self,
+        mut request: ObserveFile,
+    ) -> Result<FileObservationResult, OperationError> {
+        request.validate()?;
+        let repository = RepositoryName::requested(&mut request.repository)?;
+        let token = self
+            .0
+            .installation_token(
+                repository,
+                BTreeMap::from([("contents", "read"), ("metadata", "read")]),
+            )
+            .await?;
+        let content = self
+            .0
+            .read_file(&token, &request.commit_sha, &request.path)
+            .await?;
+        Ok(FileObservationResult {
+            path: request.path,
+            commit_sha: request.commit_sha,
+            content_base64: content,
+        })
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn observe_changes(
+        &self,
+        mut request: ObserveChanges,
+    ) -> Result<ChangesObservationResult, OperationError> {
+        request.validate()?;
+        let repository = RepositoryName::requested(&mut request.repository)?;
+        let token = self
+            .0
+            .installation_token(
+                repository,
+                BTreeMap::from([("contents", "read"), ("metadata", "read")]),
+            )
+            .await?;
+        let paths = self
+            .0
+            .read_changed_paths(&token, &request.base_sha, &request.head_sha)
+            .await?;
+        Ok(ChangesObservationResult {
+            base_sha: request.base_sha,
+            head_sha: request.head_sha,
+            paths,
+        })
+    }
+
     #[cfg(target_arch = "wasm32")]
     pub(crate) async fn observe_ref(
         &self,
@@ -893,23 +998,14 @@ impl AppAuthority {
                 BTreeMap::from([("contents", "read"), ("metadata", "read")]),
             )
             .await?;
+        // `read_ref_optional` is the whole check: it proves the ref is exactly
+        // `refs/heads/{branch}`, that it points at a commit, and that the SHA
+        // is well formed, and refuses anything else. `None` is the one thing it
+        // reports as an answer rather than a failure -- the branch is absent.
         let reference = self.0.read_ref_optional(&token, &request.branch).await?;
-        let head_sha = match reference {
-            Some(reference) => {
-                if reference.object.kind != "commit" {
-                    // A tag object or a symbolic ref is not a branch head, and
-                    // answering with its SHA would hand the caller something
-                    // that is not the commit it asked for.
-                    return Err(OperationError::Conflict);
-                }
-                valid_sha(&reference.object.sha)?;
-                Some(reference.object.sha)
-            }
-            None => None,
-        };
         Ok(RefObservationResult {
             branch: request.branch,
-            head_sha,
+            head_sha: reference.map(|reference| reference.object.sha),
         })
     }
 
@@ -2709,6 +2805,22 @@ impl ObserveRef {
     }
 }
 
+impl ObserveFile {
+    fn validate(&self) -> Result<(), OperationError> {
+        valid_sha(&self.commit_sha)?;
+        // The same path rule publication uses, so what can be read back is
+        // exactly what could have been written.
+        valid_path(&self.path)
+    }
+}
+
+impl ObserveChanges {
+    fn validate(&self) -> Result<(), OperationError> {
+        valid_sha(&self.base_sha)?;
+        valid_sha(&self.head_sha)
+    }
+}
+
 impl ObserveIssue {
     fn validate(&self) -> Result<(), OperationError> {
         valid_exact_integer(self.issue_number)
@@ -2878,6 +2990,19 @@ fn valid_repository_path(value: &str) -> Result<(), OperationError> {
             .strip_prefix(protected)
             .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
     });
+    valid_path(value)?;
+    (!github_authority && !review_authority)
+        .then_some(())
+        .ok_or(OperationError::InvalidInput)
+}
+
+/// A path's shape, with no authority policy attached.
+///
+/// Reading is not writing. The `.github` and CODEOWNERS refusals exist because
+/// an agent that could *rewrite* the CI gating its own work would be escalating
+/// its authority; reading those files escalates nothing, and refusing to read
+/// them would leave an agent unable to see the gate it must satisfy.
+fn valid_path(value: &str) -> Result<(), OperationError> {
     let valid = !value.is_empty()
         && value.len() <= 240
         && !value.starts_with('/')
@@ -2888,9 +3013,7 @@ fn valid_repository_path(value: &str) -> Result<(), OperationError> {
         })
         && value
             .chars()
-            .all(|character| !character.is_control() && character != '\\')
-        && !github_authority
-        && !review_authority;
+            .all(|character| !character.is_control() && character != '\\');
     valid.then_some(()).ok_or(OperationError::InvalidInput)
 }
 
@@ -3043,8 +3166,10 @@ impl RepositoryName {
     /// request, so `Owner/Repo` and `owner/repo` would name one repository and
     /// two operations: a retry differing only in case would conflict with
     /// itself forever. This runs before the digest is taken, which makes the
-    /// two spellings one request. Every comparison against a name GitHub
-    /// returns is therefore case-insensitive.
+    /// two spellings one request. The one comparison against a name GitHub
+    /// returns while the caller's spelling is still in hand -- the token
+    /// grant's -- is therefore case-insensitive. Afterwards the token carries
+    /// GitHub's own spelling, so later comparisons are exact.
     fn requested(value: &mut str) -> Result<Self, OperationError> {
         value.make_ascii_lowercase();
         Self::new(value.to_owned())
@@ -3292,6 +3417,102 @@ impl Authority {
             default_branch: metadata.default_branch,
             default_sha: reference.object.sha,
         })
+    }
+
+    /// One blob at one commit. The `contents` media type returns base64 for a
+    /// file of any type, so a binary file reads back exactly as it would be
+    /// written. A directory answers as an array, which fails to deserialize
+    /// into a file and is refused rather than guessed at.
+    async fn read_file(
+        &self,
+        token: &RepositoryToken,
+        commit_sha: &str,
+        path: &str,
+    ) -> Result<Option<String>, OperationError> {
+        #[derive(Deserialize)]
+        struct Content {
+            #[serde(rename = "type")]
+            kind: String,
+            path: String,
+            content: String,
+            encoding: String,
+            size: i64,
+        }
+        let url = format!(
+            "https://api.github.com/repos/{}/{}/contents/{}?ref={commit_sha}",
+            token.repository.owner,
+            token.repository.name,
+            path.split('/')
+                .map(percent_encode)
+                .collect::<Vec<_>>()
+                .join("/")
+        );
+        let content: Content = match github_json(&url, token.as_str()).await {
+            Ok(content) => content,
+            // Absent at that commit is an answer, not a failure: a caller
+            // integrating a deletion has to tell the two apart.
+            Err(Error::Rejected(404)) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        if content.kind != "file"
+            || content.path != path
+            || content.encoding != "base64"
+            || !(0..=MAX_FILE_BYTES as i64).contains(&content.size)
+        {
+            return Err(OperationError::Conflict);
+        }
+        // GitHub wraps base64 at 60 columns; the newlines are not content.
+        let encoded: String = content.content.split_ascii_whitespace().collect();
+        if encoded.len() > MAX_FILE_BYTES {
+            return Err(OperationError::Conflict);
+        }
+        Ok(Some(encoded))
+    }
+
+    /// Which paths differ between two commits, and nothing else. Patches are
+    /// deliberately not returned: this answers where to look, and `read_file`
+    /// answers exactly what is there, at a size this surface already bounds.
+    async fn read_changed_paths(
+        &self,
+        token: &RepositoryToken,
+        base_sha: &str,
+        head_sha: &str,
+    ) -> Result<Vec<ChangedPath>, OperationError> {
+        #[derive(Deserialize)]
+        struct Comparison {
+            files: Option<Vec<ComparedFile>>,
+        }
+        #[derive(Deserialize)]
+        struct ComparedFile {
+            filename: String,
+            status: String,
+        }
+        let comparison: Comparison = github_json(
+            &format!(
+                "https://api.github.com/repos/{}/{}/compare/{base_sha}...{head_sha}?per_page={MAX_CHANGED_FILES}",
+                token.repository.owner, token.repository.name
+            ),
+            token.as_str(),
+        )
+        .await?;
+        let files = comparison.files.unwrap_or_default();
+        // GitHub caps the file list at 300 and says nothing about the cut, so a
+        // full page is indistinguishable from a truncated one. Refuse it rather
+        // than hand back a list the caller would read as complete.
+        if files.len() >= MAX_CHANGED_FILES {
+            return Err(OperationError::Indeterminate);
+        }
+        files
+            .into_iter()
+            .map(|file| {
+                valid_path(&file.filename)?;
+                valid_text(&file.status, 1, 32, false)?;
+                Ok(ChangedPath {
+                    path: file.filename,
+                    status: file.status,
+                })
+            })
+            .collect()
     }
 
     async fn read_ref(
@@ -6216,6 +6437,89 @@ mod tests {
         mixed.validate().unwrap();
         RepositoryName::requested(&mut mixed.repository).unwrap();
         assert_eq!(runtime, request_digest(&mixed).unwrap());
+    }
+
+    /// `valid_ref` is the only guard on the string that reaches
+    /// `.../git/ref/heads/{branch}`, and `observe_ref` made a ref name the
+    /// entire caller-controlled input for the first time. It had no negative
+    /// coverage anywhere in the crate.
+    #[test]
+    fn a_requested_ref_cannot_leave_the_branch_namespace() {
+        for accepted in ["main", "agent/work", "release/v0.3.1", "a.b-c_d", "x/y/z"] {
+            assert!(valid_ref(accepted).is_ok(), "{accepted} was refused");
+        }
+        for rejected in [
+            "",
+            "/main",
+            "main/",
+            "main.",
+            "../main",
+            "a..b",
+            "a//b",
+            "main@{1}",
+            "heads/main?x=1",
+            "main#frag",
+            "main%2f..%2ftags",
+            "main\\..\\tags",
+            "main branch",
+            "réf",
+            "main\u{7f}",
+        ] {
+            assert_eq!(
+                valid_ref(rejected).err(),
+                Some(OperationError::InvalidInput),
+                "{rejected:?} was accepted"
+            );
+        }
+        // 240 bytes is the boundary, not a suggestion.
+        assert!(valid_ref(&"a".repeat(240)).is_ok());
+        assert_eq!(
+            valid_ref(&"a".repeat(241)).err(),
+            Some(OperationError::InvalidInput)
+        );
+    }
+
+    /// Reading is not writing: the paths `publish_commit` refuses because an
+    /// agent must not rewrite the CI that judges it are readable, and refusing
+    /// to read them would leave an agent unable to see the gate it must pass.
+    #[test]
+    fn a_readable_path_is_shape_checked_but_not_authority_checked() {
+        for readable in [
+            ".github/workflows/ci.yml",
+            ".github/CODEOWNERS",
+            "CODEOWNERS",
+            "control-plane/src/github_app.rs",
+        ] {
+            assert!(valid_path(readable).is_ok(), "{readable} was refused");
+            // The same paths stay unwritable.
+            if readable != "control-plane/src/github_app.rs" {
+                assert_eq!(
+                    valid_repository_path(readable).err(),
+                    Some(OperationError::InvalidInput),
+                    "{readable} became writable"
+                );
+            }
+        }
+        for rejected in [
+            "",
+            "/a",
+            "a/",
+            "a//b",
+            "a/../b",
+            "a/./b",
+            ".git/config",
+            "a\\b",
+        ] {
+            assert_eq!(
+                valid_path(rejected).err(),
+                Some(OperationError::InvalidInput),
+                "{rejected:?} was accepted"
+            );
+        }
+        assert_eq!(
+            valid_path("a\u{0}b").err(),
+            Some(OperationError::InvalidInput)
+        );
     }
 
     #[test]

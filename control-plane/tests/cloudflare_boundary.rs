@@ -188,6 +188,21 @@ fn declared_output_schemas_name_the_fields_the_results_carry() {
             &["number", "url", "head_sha"][..],
         ),
         (
+            "observe_ref",
+            "RefObservationResult",
+            &["branch", "head_sha"][..],
+        ),
+        (
+            "observe_file",
+            "FileObservationResult",
+            &["path", "commit_sha", "content_base64"][..],
+        ),
+        (
+            "observe_changes",
+            "ChangesObservationResult",
+            &["base_sha", "head_sha", "paths"][..],
+        ),
+        (
             "maintainer_status",
             "RepositoryResult",
             &[
@@ -328,6 +343,8 @@ fn every_repository_tool_requires_the_repository_it_acts_on() {
     for tool in [
         "maintainer_status",
         "observe_ref",
+        "observe_file",
+        "observe_changes",
         "create_issue",
         "observe_issue",
         "resolve_issue",
@@ -360,10 +377,16 @@ fn every_repository_tool_requires_the_repository_it_acts_on() {
         // repository, and would make that object's schema unsatisfiable
         // wherever it also forbids unknown properties.
         let nested = input.replacen(&own_required(tool), "", 1);
-        assert!(
-            !nested.contains(r#""required": ["repository""#),
-            "{tool} requires a repository inside a nested object"
-        );
+        for required in nested.match_indices(r#""required": ["#) {
+            let from = required.0;
+            let close = nested[from..]
+                .find(']')
+                .unwrap_or_else(|| panic!("{tool} has an unterminated nested required"));
+            assert!(
+                !nested[from..from + close].contains(r#""repository""#),
+                "{tool} requires a repository inside a nested object"
+            );
+        }
     }
 
     assert!(
@@ -399,6 +422,9 @@ fn mcp_surface_is_installation_bound_and_typed() {
 
     for tool in [
         "maintainer_status",
+        "observe_ref",
+        "observe_file",
+        "observe_changes",
         "observe_operation",
         "create_issue",
         "observe_issue",
