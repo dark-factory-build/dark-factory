@@ -379,6 +379,7 @@
 
 .dfStageMeter__segment--filled { background: var(--df-console-accent); border-color: var(--df-console-accent); }
 .dfStageMeter__terminal { min-width: 0.9rem; text-align: center; font-size: 0.8rem; }
+.dfStageMeter__terminal--blocked { color: var(--df-console-warning); }
 .dfStageMeter__terminal--done { color: var(--df-console-accent); }
 .dfStageMeter__terminal--failed { color: var(--df-console-alert); }
 

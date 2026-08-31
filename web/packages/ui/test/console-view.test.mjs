@@ -23,7 +23,7 @@ function task(status, id = "77".repeat(16)) {
 test("every durable task status maps to exactly one console stage", () => {
   assert.equal(stageOfTask(task("queued")), "queued");
   assert.equal(stageOfTask(task("running")), "building");
-  assert.equal(stageOfTask(task("blocked")), "building");
+  assert.equal(stageOfTask(task("blocked")), "blocked");
   assert.equal(stageOfTask(task("succeeded")), "done");
   assert.equal(stageOfTask(task("failed")), "failed");
   assert.equal(stageOfTask(task("cancelled")), "failed");
@@ -48,6 +48,11 @@ test("agent activity precedence: an open question outranks work, pause outranks 
   const noRequests = { ...state, humanRequests: new Map() };
   assert.equal(agentActivity(state.agents.get(agentID), noRequests), "busy");
   assert.equal(agentCurrentTask(state.agents.get(agentID), state)?.status, "running");
+
+  const blockedTask = task("blocked");
+  const blocked = { ...noRequests, tasks: new Map([[blockedTask.id, blockedTask]]) };
+  assert.equal(agentCurrentTask(state.agents.get(agentID), blocked), undefined);
+  assert.equal(agentActivity(state.agents.get(agentID), blocked), "waiting");
 });
 
 test("counters count only store-backed facts", () => {

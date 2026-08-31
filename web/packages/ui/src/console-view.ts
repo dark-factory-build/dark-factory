@@ -1,7 +1,7 @@
 import type { AgentItem, StateView, TaskItem } from "@dark-factory/client";
 
 /** The task stages the daemon actually serves today. */
-export type TaskStage = "queued" | "building" | "done" | "failed";
+export type TaskStage = "queued" | "building" | "blocked" | "done" | "failed";
 
 export const STAGE_SEQUENCE: readonly TaskStage[] = ["queued", "building"];
 
@@ -13,8 +13,9 @@ export function stageOfTask(task: TaskItem): TaskStage {
     case "queued":
       return "queued";
     case "running":
-    case "blocked":
       return "building";
+    case "blocked":
+      return "blocked";
     case "succeeded":
       return "done";
     case "failed":
@@ -26,7 +27,7 @@ export function stageOfTask(task: TaskItem): TaskStage {
 /** Segments filled by the durable stage; done fills the complete meter. */
 export function stageMeterFill(stage: TaskStage): number {
   if (stage === "done") return STAGE_SEQUENCE.length;
-  if (stage === "failed") return 0;
+  if (stage === "blocked" || stage === "failed") return 0;
   return STAGE_SEQUENCE.indexOf(stage) + 1;
 }
 
@@ -35,7 +36,7 @@ export function agentCurrentTask(agent: AgentItem, state: StateView): TaskItem |
   for (const task of state.tasks.values()) {
     if (
       task.assigned_agent_id === agent.id &&
-      (task.status === "running" || task.status === "blocked")
+      task.status === "running"
     ) {
       return task;
     }
@@ -84,7 +85,13 @@ export function factoryCounters(state: StateView | undefined): FactoryCounters {
 
 /** Active work first, then queued, then finished; priority breaks ties. */
 export function orderTasksForHome(state: StateView): readonly TaskItem[] {
-  const rank: Record<TaskStage, number> = { building: 0, queued: 1, done: 2, failed: 3 };
+  const rank: Record<TaskStage, number> = {
+    building: 0,
+    queued: 1,
+    blocked: 2,
+    done: 3,
+    failed: 4,
+  };
   return [...state.tasks.values()].sort((left, right) => {
     const byStage = rank[stageOfTask(left)] - rank[stageOfTask(right)];
     return byStage !== 0 ? byStage : right.priority - left.priority;

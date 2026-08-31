@@ -15,6 +15,7 @@ import {
 const STAGE_GLYPHS: Record<TaskStage, string> = {
   queued: "▒",
   building: "░",
+  blocked: "!",
   done: "✓",
   failed: "×",
 };
@@ -152,10 +153,10 @@ export function StageMeter({ stage }: { stage: TaskStage }) {
         />
       ))}
       <span
-        className={`dfStageMeter__terminal${stage === "done" ? " dfStageMeter__terminal--done" : ""}${stage === "failed" ? " dfStageMeter__terminal--failed" : ""}`}
+        className={`dfStageMeter__terminal${stage === "blocked" ? " dfStageMeter__terminal--blocked" : ""}${stage === "done" ? " dfStageMeter__terminal--done" : ""}${stage === "failed" ? " dfStageMeter__terminal--failed" : ""}`}
         aria-hidden="true"
       >
-        {stage === "done" ? "✓" : stage === "failed" ? "×" : ""}
+        {stage === "blocked" ? "!" : stage === "done" ? "✓" : stage === "failed" ? "×" : ""}
       </span>
     </span>
   );

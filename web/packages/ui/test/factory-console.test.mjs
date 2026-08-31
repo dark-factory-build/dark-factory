@@ -205,6 +205,22 @@ test("stage meters fill only on store-backed stage and the strip counts honestly
   assert.match(markup, /1 NEEDS YOU</);
 });
 
+test("a terminal blocked task is neither building nor current agent work", () => {
+  const blockedTask = {
+    ...fixtureState.tasks.get(ids.task),
+    status: "blocked",
+  };
+  const state = baseState({
+    tasks: new Map([[ids.task, blockedTask]]),
+    humanRequests: new Map(),
+  });
+  const markup = render({ state });
+  assert.match(markup, /aria-label="stage: blocked"/);
+  assert.match(markup, /aria-label="Builder One: waiting"/);
+  assert.equal(markup.includes('aria-label="Builder One: building"'), false);
+  assert.equal(markup.includes('aria-label="Builder One: busy"'), false);
+});
+
 test("the production console exposes no speculative or unsupported surface", () => {
   const home = render();
   const queue = render({ screen: { kind: "queue" } });
