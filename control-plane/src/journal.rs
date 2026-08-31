@@ -1919,6 +1919,7 @@ mod migration_tests {
             "submit_pull_request_review",
             "publish_commit",
             "enqueue_pull_request",
+            "merge_pull_request_at_head",
         ]
         .into_iter()
         .enumerate()

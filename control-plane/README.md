@@ -50,9 +50,10 @@ Access policy, or App configuration is live.
   truncates it, and durable operation state, manage a bounded
   issue lifecycle, publish an exact commit and pull request, submit an exact-head
   `ALLOW`, `COMMENT`, or `REQUEST_CHANGES` verdict, diagnose and rerun exact CI,
-  observe eventual merge state, enqueue through the merge queue, publish and
-  observe immutable releases, and dispatch only the two fixed reviewed recovery
-  and deployment workflows. GitHub's `delete_branch_on_merge` repository setting
+  observe eventual merge state, enqueue through a merge queue, perform a
+  strict exact-head squash merge where a base has no queue, publish and observe
+  immutable releases, and dispatch only the two fixed reviewed recovery and
+  deployment workflows. GitHub's `delete_branch_on_merge` repository setting
   performs atomic source-branch cleanup; the broker never deletes a ref itself. All three verdicts are the repository's own words,
   not GitHub review states -- the App opens the pull requests it
   reviews, and GitHub refuses a self-review that takes a side, `APPROVE` and
@@ -61,15 +62,24 @@ Access policy, or App configuration is live.
   text. The `review` status check reads that line to enforce AGENTS.md rule 2;
   see `docs/development/WORKFLOW.md`. Each write's operation UUID is accepted
   in either case and canonicalized to lowercase, so one UUID is one replay
-  identity however the caller's `uuidgen` spelled it. There is no direct-merge
-  tool: a required
-  merge queue makes GitHub refuse `PUT /pulls/{n}/merge` outright, and
-  `docs/development/GITHUB_APP.md` had already ruled it out ("the broker does
-  not ... expose direct merge as a fallback"). Enqueue is the only automated
-  path to `main`. Publication refuses `.github` itself, `.github/workflows/**`, the three
+  identity however the caller's `uuidgen` spelled it. Merge queue enqueue and
+  direct merge are separate typed operations, never fallback attempts. Direct
+  merge refuses a configured queue and requires the protected default-base
+  branch and exact PR head, a journal-bound exact-head `ALLOW`, completed
+  non-failing checks, and an active repository ruleset that requires up-to-date
+  status checks and permits squash. The operation proves the Maintainer App is
+  absent from every active ruleset's disclosed bypass list; a missing or hidden
+  list refuses the merge. Legacy classic branch protection alone is
+  unsupported. GitHub exposes bypass actors only with ruleset-write access, so
+  direct merge alone mints Administration write for fixed detailed-ruleset
+  `GET` requests; the broker exposes no administration mutation. The
+  resulting squash commit carries the operation digest before success or
+  reconciliation. GitHub's merge request atomically binds the stated head and
+  applies the ruleset to the then-current default base.
+  Publication refuses `.github` itself, `.github/workflows/**`, the three
   CODEOWNERS locations and the dependabot config, and every
   write is bound to a stated head commit and to a durable operation ID.
-  There is no generic GitHub proxy, arbitrary URL, shell, direct merge,
+  There is no generic GitHub proxy, arbitrary URL, shell, caller-selected merge,
   arbitrary ref/workflow mutation, or credential-returning tool. Operations name
   the repository they act on, and reach only repositories this App is installed
   on: the installation is the boundary, not a configured name.
@@ -127,12 +137,15 @@ in zeroizing memory and are never returned or journalled. The permanent App may
 have additional installed capabilities; unused App-level authority is never
 copied into an operation token.
 
-The Actions-write, checks-read, contents-write, issues-write,
-merge-queues-write, metadata-read, and pull-requests-write minimum is enforced
-when a token is minted, not at readiness. Readiness names no repository, so it
-has no installation to audit; an installation that is suspended, is not
-selected-repository, or lacks one of those grants is refused at the operation
-that needs it, and the refusal names the field that failed.
+The Actions-write, Administration-write, checks-read, contents-write,
+issues-write, merge-queues-write, metadata-read, and pull-requests-write minimum
+is enforced when a token is minted, not at readiness. Administration write is
+downscoped only into direct merge's fixed ruleset reads. The installation check
+is deliberately all-or-nothing so status cannot advertise a partial v4
+surface. Readiness names no repository, so it has no installation to audit; an
+installation that is suspended, is not selected-repository, or lacks one of
+those grants is refused at the operation that needs it, and the refusal names
+the field that failed.
 
 [SQLite storage API]: https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/
 [Durable Object rules]: https://developers.cloudflare.com/durable-objects/best-practices/rules-of-durable-objects/
@@ -164,7 +177,7 @@ The exact required bindings are:
 - `DARK_FACTORY_MAINTAINER_PRIVATE_KEY_PKCS8`: standard-base64 encoding of the
   App's unencrypted PKCS#8 DER private key;
 - `DARK_FACTORY_MAINTAINER_PERMISSION_REVISION`: exactly
-  `maintainer-operations-v3` for this authority revision;
+  `maintainer-operations-v4` for this authority revision;
 - `DARK_FACTORY_MAINTAINER_OPERATOR_EMAIL_SHA256`: lowercase SHA-256 of the one
   Cloudflare Access operator email after ASCII lowercasing;
 - `DARK_FACTORY_CLOUDFLARE_ACCESS_TEAM_DOMAIN`: the exact lowercase

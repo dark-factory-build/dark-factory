@@ -61,9 +61,9 @@ Codex nor Claude owns its credentials or its durable journal.
    intend to act on, and they must fail closed unless it returns that
    `owner/name` -- compared case-insensitively, since it answers with GitHub's
    canonical spelling -- a positive numeric repository ID, and permission
-   revision `maintainer-operations-v3`. Every tool names its repository; the App reaches
-   only repositories it is installed on, and nothing selects one implicitly. A
-   credential-isolating host transport authenticates the connection; provider,
+   revision `maintainer-operations-v4`. Every tool names its repository; the
+   App reaches only repositories it is installed on, and nothing selects one
+   implicitly. A credential-isolating host transport authenticates the connection; provider,
    tool, and shell processes never inherit the Access pair. Agents never read
    or source `.env.txt` directly or handle either Access value; the parent
    Cloudflare helper's two-variable CLI boundary is the only exception and
@@ -72,11 +72,20 @@ Codex nor Claude owns its credentials or its durable journal.
    branch-head, tree, and file-content observation, durable operation
    observation, bounded issue lifecycle, exact commit and
    pull-request publication, exact-head review and CI diagnosis/recovery,
-   merge-queue enqueue and eventual-result observation, immutable release
-   publication/observation/recovery, and one exact control-plane deployment
-   dispatch. GitHub's delete-on-merge setting owns source-branch cleanup.
-   Direct merge and generic issue, ref, release, Actions, or API operations are
-   absent, never credential fallbacks.
+   merge-queue enqueue, strict exact-head squash merge for a queue-less base,
+   eventual-result observation, immutable release publication/observation/
+   recovery, and one exact control-plane deployment dispatch. GitHub's
+   delete-on-merge setting owns source-branch cleanup. Queue enqueue and direct
+   merge are distinct tools, never fallbacks: the latter refuses a configured
+   queue and requires an active repository ruleset with strict status checks
+   plus a journal-bound Maintainer `ALLOW`. It proves the App is absent from
+   every active ruleset's disclosed bypass list; a missing or hidden list
+   refuses the merge. GitHub exposes that list only to ruleset writers, so this
+   operation alone mints Administration write for fixed ruleset reads; no
+   administration mutation is exposed. Classic branch protection alone is
+   unsupported.
+   Generic issue, ref, release, Actions, or API operations
+   are absent, never credential fallbacks.
 4. Treat webhook authentication and replay handling as load-bearing. Verify
    the signature over the exact bounded request body, require exactly one of
    every security header, bind the configured App ID, and journal the full

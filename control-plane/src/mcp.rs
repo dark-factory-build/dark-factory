@@ -11,11 +11,12 @@ use crate::{
     access::AccessAuthority,
     github_app::{
         AppAuthority, CreateIssue, CreatePullRequest, DispatchControlPlaneDeploy,
-        EnqueuePullRequest, ObserveControlPlaneDeploy, ObserveFile, ObserveIssue,
-        ObservePullRequestChecks, ObservePullRequestMerge, ObservePullRequestWorkflows, ObserveRef,
-        ObserveRelease, ObserveReleaseWorkflow, ObserveRepository, ObserveTree, OperationError,
-        PublishCommit, PublishReleaseTag, ReadPullRequestJobLog, RecoverRelease,
-        RerunFailedPullRequestJobs, ResolveIssue, SubmitPullRequestReview, canonical_operation_id,
+        EnqueuePullRequest, MergePullRequestAtHead, ObserveControlPlaneDeploy, ObserveFile,
+        ObserveIssue, ObservePullRequestChecks, ObservePullRequestMerge,
+        ObservePullRequestWorkflows, ObserveRef, ObserveRelease, ObserveReleaseWorkflow,
+        ObserveRepository, ObserveTree, OperationError, PublishCommit, PublishReleaseTag,
+        ReadPullRequestJobLog, RecoverRelease, RerunFailedPullRequestJobs, ResolveIssue,
+        SubmitPullRequestReview, canonical_operation_id,
     },
     journal::DeliveryJournal,
 };
@@ -738,7 +739,7 @@ fn tools() -> Value {
     }, {
         "name": "enqueue_pull_request",
         "title": "Add a pull request to its base branch's merge queue at an exact head",
-        "description": "Enqueue one pull request only while its head is still the stated commit and its base is still the stated branch. GitHub tests the entry against the queue's latest base and merges it; there is no direct-merge path. A refusal names its typed reason -- the pre-execution rejection classes, a base branch with no merge queue, or an answer with no effect -- and the same operation UUID stays retryable. Replays require the same operation UUID and request.",
+        "description": "Enqueue one pull request only while its head is still the stated commit and its base is still the stated branch. This operation requires that base's merge queue; it never falls back to direct merge. GitHub tests the entry against the queue's latest base and merges it. A refusal names its typed reason, and the same operation UUID stays retryable. Replays require the same operation UUID and request.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -763,6 +764,35 @@ fn tools() -> Value {
             "additionalProperties": false
         },
         "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true}
+    }, {
+        "name": "merge_pull_request_at_head",
+        "title": "Merge an exact pull request head",
+        "description": "Squash-merge one pull request at its exact head into the current protected default base branch only when that branch has an active repository ruleset with no merge queue, permitted squash, and strict required checks; classic branch protection alone is unsupported. The Maintainer App must be absent from every active ruleset's disclosed bypass list, and a missing or hidden list refuses the merge. Every exact-head check must pass, a journal-bound exact-head ALLOW must still exist, and no exact-head BLOCK may exist. The squash commit carries the operation marker used for reconciliation. This operation never falls back to queue enqueue. Replays require the same operation UUID and request.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
+                "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
+                "review_operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
+                "pull_number": {"type": "integer", "minimum": 1},
+                "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+                "base": {"type": "string", "minLength": 1, "maxLength": 240}
+            },
+            "required": ["repository", "operation_id", "review_operation_id", "pull_number", "head_sha", "base"],
+            "additionalProperties": false
+        },
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "pull_number": {"type": "integer"},
+                "head_sha": {"type": "string"},
+                "base": {"type": "string"},
+                "merge_commit_sha": {"type": "string"}
+            },
+            "required": ["pull_number", "head_sha", "base", "merge_commit_sha"],
+            "additionalProperties": false
+        },
+        "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": true}
     }]})
 }
 
@@ -1021,6 +1051,21 @@ async fn call_tool(id: Value, request: &Map<String, Value>, mcp: &McpState) -> R
             match mcp.app.enqueue_pull_request(&mcp.journal, arguments).await {
                 Ok(result) => {
                     serialized_tool_result(id, &result, "Pull request is durably queued.")
+                }
+                Err(error) => operation_error(id, error),
+            }
+        }
+        Some("merge_pull_request_at_head") => {
+            let Ok(arguments) = serde_json::from_value::<MergePullRequestAtHead>(arguments) else {
+                return json_rpc_error(id, -32602, "Invalid params");
+            };
+            match mcp
+                .app
+                .merge_pull_request_at_head(&mcp.journal, arguments)
+                .await
+            {
+                Ok(result) => {
+                    serialized_tool_result(id, &result, "Pull request is durably merged.")
                 }
                 Err(error) => operation_error(id, error),
             }
