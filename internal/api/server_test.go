@@ -18,6 +18,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -81,15 +82,13 @@ func closeAPITestListener(t testing.TB, listener *Listener) {
 	}
 }
 
-// The receive budget is the test's own lifetime, not a fixed second. A wall
-// clock here races the client script it is serving: a test that writes, waits,
-// writes again and only then half-closes can exceed one second on a loaded
-// runner, at which point `Receive` gives up, the deferred `Close` fires, and
-// the client's next call fails with ENOTCONN -- a failure about this helper's
-// timeout, reported as though the server had refused the request. `t.Context()`
-// is cancelled when the test ends, which is the bound that was actually wanted.
-func startServerReceive(t *testing.T, listener *Listener, reply func(Call) Reply) <-chan serverReceiveResult {
-	t.Helper()
+// The receive budget is the test's own lifetime rather than a fixed second.
+// This is not what any observed flake was about -- `Receive` is still bounded
+// below by `setDeadline`'s `requestTimeout` fallback, so the change buys
+// headroom, not the removal of a wall clock. It is here because a helper's
+// arbitrary timer racing the client script it serves is a hazard worth not
+// having, and `t.Context()` ends exactly when the test does.
+func startServerReceive(t testing.TB, listener *Listener, reply func(Call) Reply) <-chan serverReceiveResult {
 	done := make(chan serverReceiveResult, 1)
 	ctx := t.Context()
 	go func() {
@@ -400,7 +399,15 @@ func TestServerRequiresRequestEOFBeforedispatch(t *testing.T) {
 	if _, err := connection.Write(request); err != nil {
 		t.Fatal(err)
 	}
-	if err := connection.CloseWrite(); err != nil {
+	// The second frame is what this test wants rejected, and the server rejects
+	// it the moment it arrives: `requireEOF` reads a byte, finds data, and the
+	// receive helper returns and closes its end. Whether that beats this
+	// half-close is a race with a microsecond window that no ordering here can
+	// remove -- and losing it is not a failure. On BSD, shutting down a socket
+	// whose peer has already closed is ENOTCONN. The rejection frame was
+	// written before that close, so it is still readable, and every assertion
+	// that matters is below.
+	if err := connection.CloseWrite(); err != nil && !errors.Is(err, syscall.ENOTCONN) {
 		t.Fatal(err)
 	}
 	if _, err := readTestFrame(connection); err != nil {

@@ -593,6 +593,8 @@ func TestServiceStatusCancellationAndRepeatedCallsLeakNothing(t *testing.T) {
 	if _, err := Init(context.Background(), home); err != nil {
 		t.Fatal(err)
 	}
+	baselineFD := serviceFDCount(t)
+	baselineGoroutines := runtime.NumGoroutine()
 	ctx, cancel := context.WithCancel(context.Background())
 	_, err := inspectService(ctx, home, userHome, func(ctx context.Context, _ ...string) launchctlResult {
 		cancel()
@@ -601,25 +603,25 @@ func TestServiceStatusCancellationAndRepeatedCallsLeakNothing(t *testing.T) {
 	if !errors.Is(err, context.Canceled) || !errors.Is(err, ErrServiceLaunchctl) {
 		t.Fatalf("cancel error = %v", err)
 	}
-	baselineFD := serviceFDCount(t)
-	baselineGoroutines := runtime.NumGoroutine()
 	for index := 0; index < 20; index++ {
 		fake := &recordedLaunchctl{results: []launchctlResult{{status: 113}, {status: 0, stdout: []byte(launchctlNotFoundText + "\n")}}}
 		if _, err := inspectService(context.Background(), home, userHome, fake.run); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if got := serviceFDCount(t); got != baselineFD {
-		t.Fatalf("FD count = %d, want %d", got, baselineFD)
-	}
-	// A leak is the count GROWING. Waiting for equality made the test fail
-	// when it shrank: the cancelled inspection above can still have a
-	// goroutine alive when the baseline is taken, and once that one exits the
-	// count never returns to the baseline, so the loop spun to its deadline
-	// and reported "goroutines = 2, want 3" for a run that leaked nothing.
+	// Both counts settle downward, so both compare with `<=`: an ambient
+	// goroutine or descriptor that merely *exits* during the run is not a leak,
+	// and demanding equality reported one. Because the baselines are taken
+	// before any work, nothing this test starts can inflate them, so `<=` still
+	// fails on anything genuinely retained -- including by the cancellation,
+	// which the old placement measured from after it had already happened.
 	deadline := time.Now().Add(time.Second)
-	for runtime.NumGoroutine() > baselineGoroutines && time.Now().Before(deadline) {
+	for (runtime.NumGoroutine() > baselineGoroutines || serviceFDCount(t) > baselineFD) &&
+		time.Now().Before(deadline) {
 		runtime.Gosched()
+	}
+	if got := serviceFDCount(t); got > baselineFD {
+		t.Fatalf("FD count = %d, want at most %d", got, baselineFD)
 	}
 	if got := runtime.NumGoroutine(); got > baselineGoroutines {
 		t.Fatalf("goroutines = %d, want at most %d", got, baselineGoroutines)
