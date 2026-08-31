@@ -16,8 +16,8 @@ anonymous download verified every published byte, archive, manifest, formula,
 and native arm64 build identity.
 
 The exact reviewed site head
-`6323046aad9c582e5dd7bbc1bdccb3a132922470` is deployed as Vercel production
-deployment `dpl_66rEm1EV4i3Y9MzS7e3XmcXEeYLN` and serves the console without a
+`0c7615d4400d88d00d5f51e102b2c75cc851532c` is deployed as Vercel production
+deployment `dpl_F6cfArfdJG4D3LZQqkvCJxYJn3y9` and serves the console without a
 login at `https://app.darkfactory.build`.
 
 The exact downloaded `v0.3.2` binaries were paired with that production site
