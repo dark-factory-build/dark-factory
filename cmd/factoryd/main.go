@@ -44,6 +44,7 @@ const (
 	usage = `usage:
   factoryd --home ABSOLUTE [--git PATH] [--tool-path PATH] [--base-revision REVISION]
            [--runner PATH] [--factoryctl PATH]
+           [--development-browser-address LOOPBACK]
            [--development-browser-origin EXACT_ORIGIN ...]
   factoryd --version
   factoryd --build-identity
@@ -144,6 +145,7 @@ func parse(args []string) (config, bool, bool) {
 		return config{}, true, true
 	}
 	result := config{browserAddress: defaultBrowserAddress, browserOrigins: []string{defaultBrowserOrigin}}
+	developmentBrowserAddress := false
 	for index := 0; index < len(args); {
 		if index+1 >= len(args) {
 			return config{}, false, false
@@ -180,6 +182,12 @@ func parse(args []string) (config, bool, bool) {
 				return config{}, false, false
 			}
 			result.factoryctlExecutable = value
+		case "--development-browser-address":
+			if developmentBrowserAddress || !validBrowserAddress(value, true) {
+				return config{}, false, false
+			}
+			result.browserAddress = value
+			developmentBrowserAddress = true
 		case "--development-browser-origin":
 			if !validBrowserOrigin(value) || len(result.browserOrigins) == 8 {
 				return config{}, false, false

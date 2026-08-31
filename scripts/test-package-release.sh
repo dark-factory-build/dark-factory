@@ -4,14 +4,105 @@ set -eu
 repository_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 packager="$repository_root/scripts/package-release.sh"
 renderer="$repository_root/scripts/render-homebrew-formula.sh"
-temporary=$(mktemp -d "${TMPDIR:-/tmp}/dark-factory-package-test.XXXXXX")
-trap 'rm -rf "$temporary"' EXIT HUP INT TERM
+. "$repository_root/scripts/go-gate-environment.sh"
+temporary=
+smoke_workspace=
+cleanup() {
+    [ -z "$temporary" ] || rm -rf "$temporary"
+    [ -z "$smoke_workspace" ] || rm -rf "$smoke_workspace"
+}
+trap cleanup EXIT
+
+interrupt() {
+    interrupt_signal=$1
+    trap - EXIT HUP INT TERM
+    go_gate_join_supervisor || true
+    cleanup
+    exit $((128 + interrupt_signal))
+}
+trap 'interrupt 1' HUP
+trap 'interrupt 2' INT
+trap 'interrupt 15' TERM
 source_sha=1234567890abcdef1234567890abcdef12345678
 
 fail() {
     echo "package-release test failed: $*" >&2
     exit 1
 }
+
+run_packaged_smoke() {
+    smoke_archive=$1
+    smoke_root=$2
+    smoke_pid=
+    smoke_stop() {
+        [ -n "$smoke_pid" ] || return 0
+        kill -TERM "$smoke_pid" 2>/dev/null || true
+        wait "$smoke_pid" 2>/dev/null || true
+        smoke_pid=
+    }
+    trap smoke_stop EXIT
+    trap 'exit 143' HUP INT TERM
+    smoke_bin="$smoke_root/bin"
+    smoke_parent="$smoke_root/home-parent"
+    smoke_home="$smoke_parent/factory"
+    mkdir -p "$smoke_bin" "$smoke_parent"
+    chmod 0700 "$smoke_root" "$smoke_parent"
+    tar -xzf "$smoke_archive" -C "$smoke_bin"
+    for binary in factoryd factory-runner factoryctl; do
+        [ -x "$smoke_bin/$binary" ] || fail "packaged smoke is missing $binary"
+    done
+
+    "$smoke_bin/factoryctl" init --home "$smoke_home" >/dev/null \
+        || fail "packaged factoryctl could not initialize a fresh home"
+    "$smoke_bin/factoryctl" doctor --home "$smoke_home" >/dev/null \
+        || fail "packaged factoryctl doctor rejected its fresh home"
+
+    smoke_socket="$smoke_home/runtimes/factory.sock"
+    "$smoke_bin/factoryd" --home "$smoke_home" \
+        --development-browser-address 127.0.0.1:0 \
+        >"$smoke_root/factoryd.out" 2>"$smoke_root/factoryd.err" &
+    smoke_pid=$!
+    smoke_socket_env="DARK_FACTORY_SOCKET=$smoke_socket"
+    smoke_token_env="DARK_FACTORY_OPERATOR_TOKEN_FILE=$smoke_home/operator.token"
+    smoke_deadline=$(( $(date +%s) + 10 ))
+    while :; do
+        if ! kill -0 "$smoke_pid" 2>/dev/null; then
+            fail "packaged factoryd exited before web readiness"
+        fi
+        if env "$smoke_socket_env" "$smoke_token_env" "$smoke_bin/factoryctl" web status \
+            >"$smoke_root/web-status.out" 2>"$smoke_root/web-status.err" &&
+            ruby -rjson -e '
+              status = JSON.parse(STDIN.read)
+              abort unless status["ready"] == true
+              address = status.fetch("address")
+              abort unless address.match?(/\A127\.0\.0\.1:[1-9][0-9]*\z/)
+            ' <"$smoke_root/web-status.out"; then
+            break
+        fi
+        [ "$(date +%s)" -lt "$smoke_deadline" ] \
+            || fail "packaged factoryd did not report a ready loopback browser before the deadline"
+        sleep 0.05
+    done
+    [ -e "$smoke_socket" ] || fail "packaged factoryd socket disappeared before shutdown"
+    kill -TERM "$smoke_pid" 2>/dev/null \
+        || fail "could not terminate packaged factoryd"
+    if wait "$smoke_pid"; then
+        :
+    else
+        smoke_exit=$?
+        fail "packaged factoryd did not terminate cleanly: exit $smoke_exit"
+    fi
+    smoke_pid=
+    [ ! -e "$smoke_socket" ] || fail "packaged factoryd left its API socket after termination"
+}
+
+if [ "${1-}" = --run-packaged-smoke ]; then
+    [ "$#" -eq 3 ] || fail "packaged smoke requires an archive and workspace"
+    run_packaged_smoke "$2" "$3"
+    exit 0
+fi
+
+temporary=$(mktemp -d "${TMPDIR:-/tmp}/dark-factory-package-test.XXXXXX")
 
 release_tool="$temporary/release-artifact"
 CGO_ENABLED=0 GOENV=off GOAUTH=off GOTOOLCHAIN=local \
@@ -58,8 +149,8 @@ intel_receipt=$("$release_tool" receipt 1.2.3 "$source_sha" darwin/amd64)
 arm_build_id=${arm_receipt##*|}
 intel_build_id=${intel_receipt##*|}
 case "$(uname -m)" in
-    arm64) native_dir=$arm_dir; native_target=darwin/arm64; native_build_id=$arm_build_id ;;
-    x86_64) native_dir=$intel_dir; native_target=darwin/amd64; native_build_id=$intel_build_id ;;
+    arm64) native_dir=$arm_dir; native_target=darwin/arm64; native_archive_target=aarch64-apple-darwin; native_build_id=$arm_build_id ;;
+    x86_64) native_dir=$intel_dir; native_target=darwin/amd64; native_archive_target=x86_64-apple-darwin; native_build_id=$intel_build_id ;;
     *) fail "unsupported native macOS architecture" ;;
 esac
 for binary in factoryd factory-runner factoryctl; do
@@ -177,6 +268,18 @@ factoryd" ] || fail "$target archive has unexpected contents: $listing"
     ' || fail "$target archive metadata is not normalized"
 done
 (cd "$output" && shasum -a 256 -c SHA256SUMS >/dev/null) || fail "release checksums failed"
+
+# Exercise the archive's daemon/API boundary under the process-group
+# supervisor, without starting a provider task.
+smoke_workspace=$(mktemp -d /private/tmp/dark-factory-package-smoke.XXXXXX)
+chmod 0700 "$smoke_workspace"
+smoke_status=0
+go_gate_run_bounded 45 "$0" --run-packaged-smoke \
+    "$output/dark-factory-v1.2.3-$native_archive_target.tar.gz" "$smoke_workspace" \
+    || smoke_status=$?
+rm -rf "$smoke_workspace"
+smoke_workspace=
+[ "$smoke_status" -eq 0 ] || fail "packaged archive operational smoke failed"
 
 ruby -rjson -e '
   manifest = JSON.parse(File.read(ARGV.fetch(0)))

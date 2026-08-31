@@ -39,19 +39,22 @@ func TestBuildIdentityDoesNotOpenRuntime(t *testing.T) {
 func TestParseOwnsOneFreshHomeAndExactLoopbackBrowserPolicy(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "factory")
 	tests := []struct {
-		name string
-		args []string
-		ok   bool
+		name    string
+		args    []string
+		ok      bool
+		address string
 	}{
-		{name: "default", args: []string{"--home", home}, ok: true},
+		{name: "default", args: []string{"--home", home}, ok: true, address: defaultBrowserAddress},
+		{name: "development address", args: []string{"--home", home, "--development-browser-address", "127.0.0.1:0"}, ok: true, address: "127.0.0.1:0"},
 		{name: "development origin", args: []string{"--home", home, "--development-browser-origin", testOrigin}, ok: true},
 		{name: "missing home", args: nil},
 		{name: "relative home", args: []string{"--home", "relative"}},
 		{name: "root home", args: []string{"--home", "/"}},
 		{name: "duplicate home", args: []string{"--home", home, "--home", home}},
-		{name: "nonloopback", args: []string{"--home", home, "--browser-address", "0.0.0.0:43123"}},
-		{name: "localhost", args: []string{"--home", home, "--browser-address", "localhost:43123"}},
-		{name: "browser address is fixed", args: []string{"--home", home, "--browser-address", "127.0.0.1:43124"}},
+		{name: "nonloopback", args: []string{"--home", home, "--development-browser-address", "0.0.0.0:43123"}},
+		{name: "localhost", args: []string{"--home", home, "--development-browser-address", "localhost:43123"}},
+		{name: "duplicate development address", args: []string{"--home", home, "--development-browser-address", "127.0.0.1:43124", "--development-browser-address", "127.0.0.1:43125"}},
+		{name: "unknown browser address", args: []string{"--home", home, "--browser-address", "127.0.0.1:43124"}},
 		{name: "wildcard origin", args: []string{"--home", home, "--development-browser-origin", "https://*.invalid"}},
 		{name: "origin path", args: []string{"--home", home, "--development-browser-origin", testOrigin + "/path"}},
 		{name: "duplicate origin", args: []string{"--home", home, "--development-browser-origin", testOrigin, "--development-browser-origin", testOrigin}},
@@ -64,7 +67,11 @@ func TestParseOwnsOneFreshHomeAndExactLoopbackBrowserPolicy(t *testing.T) {
 			if help || ok != test.ok {
 				t.Fatalf("parse = %+v, help=%v, ok=%v", configuration, help, ok)
 			}
-			if test.ok && (configuration.home != home || configuration.browserAddress != defaultBrowserAddress || len(configuration.browserOrigins) == 0) {
+			expectedAddress := test.address
+			if expectedAddress == "" {
+				expectedAddress = defaultBrowserAddress
+			}
+			if test.ok && (configuration.home != home || configuration.browserAddress != expectedAddress || len(configuration.browserOrigins) == 0) {
 				t.Fatalf("valid configuration = %+v", configuration)
 			}
 		})

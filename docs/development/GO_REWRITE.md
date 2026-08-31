@@ -6,21 +6,29 @@ authority and external effects, not around the existing Rust crates. Git
 history remains the archive; the Go runtime will not migrate a Rust home,
 schema, event log, protocol, or serialized state.
 
-## Current status (authoritative from 2026-08-30)
+## Current status (authoritative from 2026-08-31)
 
-The hard cutover is shipped. Repository main
-`552889365fe434b74ee619e51f298012c3aa127c` contains the Darwin-first Go
-runtime and no retired Rust local-runtime workspace. Stable `v0.3.1` was
-published from that exact source by release run `33334514022`. The exact
-reviewed site tree at `a6820192f93153b0ba919c83ee27c42fa45d51c8` was promoted
-after site PR #7 merged as `f8b7e869ec0eafa67a05bada423f101a3858be31` and is served
-anonymously at `https://app.darkfactory.build`.
+The hard cutover is shipped. The repository contains the Darwin-first Go
+runtime, its operational browser console, and no retired Rust local-runtime
+workspace. Stable `v0.3.2` was published from exact source
+`1db780803279dd1778e29676fb66d03d9bc40654` by release run `33369745738`; an
+anonymous download verified every published byte, archive, manifest, formula,
+and native arm64 build identity.
 
-A downloaded `v0.3.1` artifact was paired with that production site from a
-disposable home and completed one real shell-provider task through the daemon.
-The operator's live `~/.dark-factory` install was not touched, and real Claude
-and Codex attempts remain unproved. The rest of this document is chronological
-design and evidence; historical “not shipped” status is not current authority.
+The exact reviewed site head
+`6323046aad9c582e5dd7bbc1bdccb3a132922470` is deployed as Vercel production
+deployment `dpl_66rEm1EV4i3Y9MzS7e3XmcXEeYLN` and serves the console without a
+login at `https://app.darkfactory.build`.
+
+The exact downloaded `v0.3.2` binaries were paired with that production site
+from a disposable home and completed four real shell-provider tasks through
+the daemon. Desktop, mobile, refresh, live-terminal and final durable-state
+checks passed; absent, connecting and connected daemon states drive different
+guidance, and the pairing secret remains outside the final URL and browser
+storage. The operator's live `~/.dark-factory` install was not touched, and
+real Claude and Codex attempts remain unproved. The rest of this document is
+chronological design and evidence; historical “not shipped” status is not
+current authority.
 
 ## Web-first redirection (authoritative from 2026-08-26)
 
@@ -35,7 +43,7 @@ are green.
 
 The target product is a local Go daemon with durable authority and PTY-backed
 agents, controlled primarily by a hosted responsive web application. The
-production Go daemon shipped as stable `v0.3.1`; this document preserves the
+production Go daemon ships as stable `v0.3.2`; this document preserves the
 earlier distinction between package proof, in-process composition proof, and
 installed-runtime proof.
 There is no Go `factory-tui`. `factoryctl` remains the bootstrap, service,
@@ -6823,3 +6831,44 @@ changes.
   GitHub requires a filename. The adjacent source commit separates those API
   identifiers from the full returned-run paths and adds causal tests for both
   release and deployment workflows.
+
+### v0.3.2 operational-console completion (2026-08-31)
+
+- Runtime PR #416 merged its independently allowed exact head through the
+  protected queue as signed main commit
+  `1db780803279dd1778e29676fb66d03d9bc40654`. Its tree retains only the Go
+  local runtime; Rust remains solely in the intentionally separate Maintainer
+  control plane. Runtime issue #415 is closed as completed.
+- Maintainer release operation `78931cd0-529e-42e5-baf7-9d79324cde7d`
+  published `v0.3.2` from that exact main commit. Release run `33369745738`
+  succeeded with the two Darwin archives, `SHA256SUMS`, `latest.json`, and the
+  Homebrew formula. Anonymous downloads matched every reported size and SHA,
+  both archives had the normalized three-executable inventory, and the native
+  arm64 binaries reported version `0.3.2`, the exact source, and release build
+  identities.
+- Site PR #11 packages browser artifacts rebuilt from the final reviewed
+  runtime tree. Its exact head
+  `6323046aad9c582e5dd7bbc1bdccb3a132922470` received independent ALLOW and
+  passed all 99 site tests; deterministic source-to-tarball verification also
+  proved the corrected blocked-task terminal state is present. The PR remains
+  unmerged until the site's `main` branch has a merge queue for the Maintainer
+  App to use, so site issue #10 remains open.
+- Production deployment `dpl_66rEm1EV4i3Y9MzS7e3XmcXEeYLN` serves that exact
+  reviewed site tree anonymously at `https://app.darkfactory.build`. Fresh
+  desktop and mobile browsers verified the responsive layout and dynamic
+  install/start/pair guidance. A second outside-sandbox run paired the exact
+  downloaded v0.3.2 binaries without login, scrubbed the pair URL and storage,
+  displayed a live terminal, completed four deterministic shell-provider tasks
+  with daemon-owned Changes, retained their state across refresh, and shut down
+  with no listener, socket, provider child or runtime directory left behind.
+- The release audit exposed one narrow gate omission rather than a shipped
+  defect: packaging verified binary identities and archive bytes but never
+  booted the packaged sibling set. The adjacent change extracts the native
+  archive, initializes a disposable home, proves the packaged daemon/API ready
+  on an ephemeral loopback port, and requires bounded clean shutdown. Full
+  runner/provider behavior remains in the dedicated production E2E above.
+- No control-plane deployment was part of this cutover. At the time of this
+  proof, repository main still carried the single-repository v2 control-plane
+  source, so deploying it would have regressed the live repository-bound v3
+  worker; the separately owned multi-repository change remained the authority
+  for that deployment.
