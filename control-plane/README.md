@@ -69,12 +69,13 @@ Access policy, or App configuration is live.
   protected base requires an active strict squash ruleset. Exact rules-read 403
   on a private repo instead requires `protected:false`, squash enabled,
   nonempty all-green checks, explicit no-queue reads, and an unchanged base
-  re-read immediately before merge. The operation proves the Maintainer App is
-  absent from every active ruleset's disclosed bypass list; a missing or hidden
-  list refuses the merge. Legacy classic branch protection alone is
-  unsupported. GitHub exposes bypass actors only with ruleset-write access, so
-  direct merge alone mints Administration write for fixed detailed-ruleset
-  `GET` requests; the broker exposes no administration mutation. The
+  re-read immediately before merge. On the protected path the operation proves
+  the Maintainer App is absent from every active ruleset's disclosed bypass
+  list; a missing or hidden list refuses that path. Legacy classic branch
+  protection alone is unsupported. GitHub exposes bypass actors only with
+  ruleset-write access, so direct merge alone mints Administration write for
+  fixed detailed-ruleset `GET` requests; the broker exposes no administration
+  mutation. The
   resulting squash commit carries the operation digest before success or
   reconciliation. GitHub's merge request atomically binds the stated head and
   applies the ruleset to the then-current default base.

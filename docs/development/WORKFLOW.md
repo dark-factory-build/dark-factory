@@ -68,9 +68,9 @@ approval. Routine development uses the deterministic shell provider.
    Maintainer `ALLOW`, and completed non-failing checks. A protected base needs
    an active strict squash ruleset. Exact rules-read 403 on a private repo
    instead needs `protected:false`, squash enabled, explicit no-queue reads,
-   and an unchanged base immediately before merge. It
+   and an unchanged base immediately before merge. On the protected path it
    proves the Maintainer App is absent from every active ruleset's disclosed
-   bypass list; a missing or hidden list refuses the merge. Legacy classic
+   bypass list; a missing or hidden list refuses that path. Legacy classic
    branch protection alone is unsupported. This operation alone mints
    Administration write for fixed ruleset reads because GitHub otherwise hides
    bypass actors; it exposes no administration mutation. It never falls back

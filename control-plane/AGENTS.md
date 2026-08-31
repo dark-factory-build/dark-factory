@@ -80,12 +80,12 @@ Codex nor Claude owns its credentials or its durable journal.
    queue and requires a journal-bound Maintainer `ALLOW`. A protected base
    requires an active strict ruleset; exact rules-read 403 on a private repo
    instead requires `protected:false`, squash enabled, all-green checks,
-   explicit no-queue reads, and an unchanged default base. It proves the App is absent from
-   every active ruleset's disclosed bypass list; a missing or hidden list
-   refuses the merge. GitHub exposes that list only to ruleset writers, so this
-   operation alone mints Administration write for fixed ruleset reads; no
-   administration mutation is exposed. Classic branch protection alone is
-   unsupported.
+   explicit no-queue reads, and an unchanged default base. On the protected
+   path it proves the App is absent from every active ruleset's disclosed
+   bypass list; a missing or hidden list refuses that path. GitHub exposes that
+   list only to ruleset writers, so this operation alone mints Administration
+   write for fixed ruleset reads; no administration mutation is exposed.
+   Classic branch protection alone is unsupported.
    Generic issue, ref, release, Actions, or API operations
    are absent, never credential fallbacks.
 4. Treat webhook authentication and replay handling as load-bearing. Verify
