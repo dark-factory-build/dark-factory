@@ -612,12 +612,17 @@ func TestServiceStatusCancellationAndRepeatedCallsLeakNothing(t *testing.T) {
 	if got := serviceFDCount(t); got != baselineFD {
 		t.Fatalf("FD count = %d, want %d", got, baselineFD)
 	}
+	// A leak is the count GROWING. Waiting for equality made the test fail
+	// when it shrank: the cancelled inspection above can still have a
+	// goroutine alive when the baseline is taken, and once that one exits the
+	// count never returns to the baseline, so the loop spun to its deadline
+	// and reported "goroutines = 2, want 3" for a run that leaked nothing.
 	deadline := time.Now().Add(time.Second)
-	for runtime.NumGoroutine() != baselineGoroutines && time.Now().Before(deadline) {
+	for runtime.NumGoroutine() > baselineGoroutines && time.Now().Before(deadline) {
 		runtime.Gosched()
 	}
-	if got := runtime.NumGoroutine(); got != baselineGoroutines {
-		t.Fatalf("goroutines = %d, want %d", got, baselineGoroutines)
+	if got := runtime.NumGoroutine(); got > baselineGoroutines {
+		t.Fatalf("goroutines = %d, want at most %d", got, baselineGoroutines)
 	}
 }
 

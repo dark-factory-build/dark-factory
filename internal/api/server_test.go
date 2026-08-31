@@ -81,8 +81,17 @@ func closeAPITestListener(t testing.TB, listener *Listener) {
 	}
 }
 
-func startServerReceive(listener *Listener, reply func(Call) Reply) <-chan serverReceiveResult {
+// The receive budget is the test's own lifetime, not a fixed second. A wall
+// clock here races the client script it is serving: a test that writes, waits,
+// writes again and only then half-closes can exceed one second on a loaded
+// runner, at which point `Receive` gives up, the deferred `Close` fires, and
+// the client's next call fails with ENOTCONN -- a failure about this helper's
+// timeout, reported as though the server had refused the request. `t.Context()`
+// is cancelled when the test ends, which is the bound that was actually wanted.
+func startServerReceive(t *testing.T, listener *Listener, reply func(Call) Reply) <-chan serverReceiveResult {
+	t.Helper()
 	done := make(chan serverReceiveResult, 1)
+	ctx := t.Context()
 	go func() {
 		connection, err := listener.Accept()
 		if err != nil {
@@ -90,8 +99,6 @@ func startServerReceive(listener *Listener, reply func(Call) Reply) <-chan serve
 			return
 		}
 		defer connection.Close()
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
 		call, err := connection.Receive(ctx)
 		if err == nil && reply != nil {
 			var response Reply
@@ -256,7 +263,7 @@ func TestServerDecodesClosedMethodMatrix(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			listener, socketPath := newAPITestListener(t, operatorBearer)
-			done := startServerReceive(listener, replyForCall)
+			done := startServerReceive(t, listener, replyForCall)
 			response, err := exchangeRaw(socketPath, rawRequest(protocolGeneration, test.domain, test.bearer, []byte(test.body)), true)
 			if err != nil {
 				t.Fatal(err)
@@ -350,7 +357,7 @@ func TestServerRejectsDomainFallbackAndInvalidRequests(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			listener, socketPath := newAPITestListener(t, operatorBearer)
-			done := startServerReceive(listener, nil)
+			done := startServerReceive(t, listener, nil)
 			response, err := exchangeRaw(socketPath, rawRequest(test.generation, test.domain, test.bearer, test.body), true)
 			if err != nil {
 				t.Fatal(err)
@@ -375,7 +382,7 @@ func TestServerRejectsDomainFallbackAndInvalidRequests(t *testing.T) {
 func TestServerRequiresRequestEOFBeforedispatch(t *testing.T) {
 	bearer := testCredential('E')
 	listener, socketPath := newAPITestListener(t, bearer)
-	done := startServerReceive(listener, replyForCall)
+	done := startServerReceive(t, listener, replyForCall)
 	connection, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: socketPath, Net: "unix"})
 	if err != nil {
 		t.Fatal(err)
@@ -416,7 +423,7 @@ func TestServerFramingDeadlinePeerAndResponseBounds(t *testing.T) {
 		for index, request := range requests {
 			t.Run(fmt.Sprint(index), func(t *testing.T) {
 				listener, socketPath := newAPITestListener(t, bearer)
-				done := startServerReceive(listener, nil)
+				done := startServerReceive(t, listener, nil)
 				connection, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: socketPath, Net: "unix"})
 				if err != nil {
 					t.Fatal(err)
@@ -505,7 +512,7 @@ func TestServerFramingDeadlinePeerAndResponseBounds(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		done := startServerReceive(listener, func(Call) Reply { return reply })
+		done := startServerReceive(t, listener, func(Call) Reply { return reply })
 		response, err := exchangeRaw(socketPath, rawRequest(1, operatorDomain, bearer, []byte(`{"method":"snapshot","params":{}}`)), true)
 		if err != nil {
 			t.Fatal(err)
@@ -740,7 +747,7 @@ func TestServerConnectionsLeaveExactResourceCensus(t *testing.T) {
 	baselineFDs := countTestFDs(t)
 	for range 20 {
 		listener, socketPath := newAPITestListener(t, bearer)
-		done := startServerReceive(listener, replyForCall)
+		done := startServerReceive(t, listener, replyForCall)
 		response, err := exchangeRaw(socketPath, rawRequest(1, operatorDomain, bearer, []byte(`{"method":"health","params":{}}`)), true)
 		if err != nil {
 			t.Fatal(err)
