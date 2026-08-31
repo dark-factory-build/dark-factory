@@ -59,11 +59,7 @@
   color: var(--df-console-muted);
 }
 
-.dfFactoryConsole h1,
-.dfFactoryConsole h2,
-.dfFactoryConsole p,
-.dfFactoryConsole dl,
-.dfFactoryConsole ul {
+.dfFactoryConsole :where(h1, h2, p, dl, ul) {
   margin: 0;
 }
 
