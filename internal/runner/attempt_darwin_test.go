@@ -2113,6 +2113,32 @@ func TestAttemptProtocolSurfaceIsClosed(t *testing.T) {
 	if strings.Contains(string(source), ".Process.Signal(") {
 		t.Fatal("numeric per-process signal surface introduced")
 	}
+	gateStart := strings.Index(string(source), "func RunExecGate() error {")
+	if gateStart < 0 {
+		t.Fatal("exec gate is missing")
+	}
+	gateBody := string(source)[gateStart:]
+	if next := strings.Index(gateBody[len("func RunExecGate() error {"):], "\nfunc "); next >= 0 {
+		gateBody = gateBody[:len("func RunExecGate() error {")+next]
+	}
+	if strings.Contains(gateBody, "unix.Close(") {
+		t.Fatal("exec gate closes an unowned raw descriptor number")
+	}
+	for _, required := range []string{
+		"unix.Dup2(int(control.Fd()), int(config.Fd()))",
+		"control.Close()",
+		"stdin.Close()",
+		"stdout.Close()",
+		"stderr.Close()",
+	} {
+		if !strings.Contains(gateBody, required) {
+			t.Fatalf("exec gate does not preserve descriptor ownership through %q", required)
+		}
+	}
+	dup := strings.Index(gateBody, "unix.Dup2(int(control.Fd()), int(config.Fd()))")
+	if dup < 0 || !strings.Contains(gateBody[:dup], "defer config.Close()") || strings.Count(gateBody[:dup], "config.Close()") != 1 {
+		t.Fatal("exec gate can release reserved config fd3 before the control remap")
+	}
 	attemptSource, err := os.ReadFile("attempt_darwin.go")
 	if err != nil {
 		t.Fatal(err)
