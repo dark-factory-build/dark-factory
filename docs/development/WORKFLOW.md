@@ -46,12 +46,12 @@ approval. Routine development uses the deterministic shell provider.
    ./scripts/local-ci.sh
    ```
 
-   It runs repository/release fixtures, Go formatting and vetting, the short
-   serial Go suite, the TypeScript client proof, normal browser/daemon/service
+   It runs repository/release fixtures, Go formatting and vetting, risk-scoped
+   short Go suites, the TypeScript client proof, normal browser/daemon/service
    end-to-end checks, and `git diff --check`. It is macOS-only while the daemon
-   is Darwin-only; there is no Linux runtime lane yet. The gate provisions
-   isolated Go caches and clears inherited live-factory identity variables. One
-   memory-heavy Go run may execute at a time.
+   is Darwin-only; there is no Linux runtime lane yet. The gate uses the
+   isolated Go build and module caches and clears inherited live-factory
+   identity variables. One memory-heavy Go run may execute at a time.
 
 5. Commit the exact reviewed tree, publish it, and open a pull request. Record
    what changed, what was deleted, the exact head, checks run, and unverified

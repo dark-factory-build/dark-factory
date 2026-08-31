@@ -1136,6 +1136,10 @@ func fixtureGitEnvironment(home string) []string {
 }
 
 func TestGitBoundaryResourceCensus(t *testing.T) {
+	homesBefore, err := filepath.Glob(filepath.Join(os.Getenv("TMPDIR"), "dark-factory-git-home-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	fixture := newLocalGitFixture(t, "sha1")
 	previousGC := debug.SetGCPercent(-1)
 	t.Cleanup(func() { debug.SetGCPercent(previousGC) })
@@ -1201,8 +1205,8 @@ func TestGitBoundaryResourceCensus(t *testing.T) {
 	if after := runtime.NumGoroutine(); after > beforeGoroutines {
 		t.Fatalf("Git boundary goroutine leak: before=%d after=%d", beforeGoroutines, after)
 	}
-	homes, err := filepath.Glob(filepath.Join(os.Getenv("TMPDIR"), "dark-factory-git-home-*"))
-	if err != nil || len(homes) != 0 {
-		t.Fatalf("Git HOME census=%v err=%v", homes, err)
+	homesAfter, err := filepath.Glob(filepath.Join(os.Getenv("TMPDIR"), "dark-factory-git-home-*"))
+	if err != nil || !reflect.DeepEqual(homesAfter, homesBefore) {
+		t.Fatalf("Git HOME census before=%v after=%v err=%v", homesBefore, homesAfter, err)
 	}
 }

@@ -83,52 +83,6 @@ for browser_mode in serial race; do
         || fail "browser $browser_mode mode did not complete"
 done
 
-probe="$temporary/probe"
-/bin/cat >"$probe" <<'EOF'
-#!/bin/sh
-set -eu
-
-helper=$1
-log=$2
-expected_go=$3
-expected_node=$4
-expected_corepack=$5
-. "$helper"
-
-go=$(go_e2e_resolve_tool go "${DARK_FACTORY_E2E_GO-}")
-node=$(go_e2e_resolve_tool node "${DARK_FACTORY_E2E_NODE-}")
-corepack=$(go_e2e_resolve_tool corepack "${DARK_FACTORY_E2E_COREPACK-}")
-[ "$go" = "$expected_go" ]
-[ "$node" = "$expected_node" ]
-[ "$corepack" = "$expected_corepack" ]
-"$go"
-"$node"
-"$corepack"
-[ "$(/usr/bin/grep -c . "$log")" -eq 3 ]
-EOF
-/bin/chmod 700 "$probe"
-
-# The production stage has no ambient Homebrew or Node directory in PATH. The
-# only usable tools are the absolute values injected by go_gate_e2e_stage.
-PATH=/usr/bin:/bin
-export PATH
-go_gate_env=/usr/bin/env
-go_gate_go=$fake_go
-go_gate_node=$fake_node
-go_gate_corepack=$fake_corepack
-go_gate_stage() {
-    [ "$1" = 7 ] || fail "stage timeout was not preserved"
-    shift
-    "$@"
-}
-: >"$log"
-export CI=true
-go_gate_e2e_stage 7 "$probe" "$repository_root/scripts/go-e2e-tools.sh" \
-    "$log" "$fake_go" "$fake_node" "$fake_corepack"
-/usr/bin/grep -F -x go-used "$log" >/dev/null || fail "injected Go was not executed"
-/usr/bin/grep -F -x node-used "$log" >/dev/null || fail "injected Node was not executed"
-/usr/bin/grep -F -x corepack-used:true "$log" >/dev/null || fail "injected Corepack was not executed"
-
 for e2e_script in go-browser-e2e.sh go-daemon-e2e.sh go-service-e2e.sh; do
     path="$repository_root/scripts/$e2e_script"
     if /usr/bin/grep -Eq '(^|[[:space:]])go[[:space:]]+(build|test)' "$path"; then

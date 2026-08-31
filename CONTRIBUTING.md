@@ -21,8 +21,8 @@ Run the complete gate:
 ./scripts/local-ci.sh
 ```
 
-The routine source gate is the Go gate: `gofmt`, `go vet`, the short serial Go
-test suite, one TypeScript client proof, and the real browser, daemon and
+The routine source gate is the Go gate: `gofmt`, `go vet`, risk-scoped short Go
+suites, one TypeScript client proof, and the real browser, daemon and
 service end-to-end lifecycles, followed by
 `git diff --check`. It additionally checks release-source, publisher, and
 package fixtures. The daemon is Darwin-only today, so the gate is macOS-only;
