@@ -58,19 +58,23 @@ framework. The shell-provider loop is proven; real Claude/Codex work is not.
    `.github` itself, `.github/workflows/**`, the three CODEOWNERS locations and
    `.github/dependabot.{yml,yaml}`, since an agent that could rewrite the CI
    gating its own work would be escalating its authority. The rest of `.github`
-   — issue and PR templates — stays publishable. Changes to the refused paths
-   require the owner, by design.
+   — issue and PR templates — is publishable, though CODEOWNERS owns the whole
+   tree, so such a change still needs the owner's review to merge; it needs no
+   authorization to *write*. Changes to the refused paths need the owner to make
+   them at all. Re-read the exact remote state after each authorized effect.
 
    Absent that authorization everything else is closed, **reads included**: no
    `git fetch`, `pull`, `push`, `clone`, no `gh`, no direct GitHub REST or
-   GraphQL call. Never open, review, or merge a pull request, and never mutate
-   issues, releases, or Actions outside the App; PR authorship stays App-only so
-   review is a distinct principal.
+   GraphQL call, and no mutation of issues, releases, or Actions outside the
+   App.
 
-   These hold **regardless of any authorization**, because an owner approving a
-   task is not an owner approving these: never force-push, never delete a ref,
-   never change repository or organization access, and never inspect, export,
-   request, or print a credential.
+   Regardless of any authorization — an owner approving a task is not an owner
+   approving these: never force-push, never delete a ref, never change
+   repository settings or repository/organization access, never inspect,
+   export, request, or print a credential, and never open, review, or merge a
+   pull request outside the App, so that review stays a distinct principal.
+   Branch protection and required checks are settings, so an authorization to
+   run a named `gh` command never reaches them.
 10. Never read/source `.env.txt` directly. Its only agent use is an explicitly
     authorized, independently reviewed fixed command:
     `./scripts/with-cloudflare-env.sh dns status`, `dns publish-app`, or

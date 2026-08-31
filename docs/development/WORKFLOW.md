@@ -138,13 +138,15 @@ need git, the missing thing is usually a typed operation.
 Two things still need the owner: a broker that is unavailable, and the paths
 `publish_commit` refuses by design — `.github` itself, `.github/workflows/**`,
 the three CODEOWNERS locations, and `.github/dependabot.{yml,yaml}`. The rest of
-`.github`, such as issue and PR templates, is publishable and needs no
-authorization. In either case the owner authorizes a finite host-credential
+`.github`, such as issue and PR templates, is publishable without authorization,
+but CODEOWNERS owns that whole tree, so the pull request still needs the owner's
+review to merge. In either case the owner authorizes a finite host-credential
 fallback naming the exact repository and operations; run only those named
 `git`/`gh` commands outside the sandbox and re-read the exact remote ref, PR,
 check, release, or workflow state after each effect. No force push, ref
-deletion, access change, credential inspection, or implicit expansion is
-allowed — those hold whatever the owner authorizes for the task.
+deletion, repository-settings or access change, credential inspection, or
+implicit expansion is allowed — those hold whatever the owner authorizes for
+the task.
 
 Pull-request and merge-queue runs use fresh hosted workers. A manual workflow
 dispatch is the explicit path for a platform investigation on the persistent

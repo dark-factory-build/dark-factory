@@ -291,7 +291,7 @@ fn tools() -> Value {
     }, {
         "name": "observe_changes",
         "title": "Observe which paths differ between two commits",
-        "description": "Return the paths that differ between two exact commits, with each path's status. Patches are not returned; read the paths that matter with observe_file.",
+        "description": "Return the paths that differ between two exact commits, each with its status, git object kind and file mode. Patches are not returned; read the paths that matter with observe_file. Only a blob round-trips through observe_file and publish_commit.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -314,9 +314,10 @@ fn tools() -> Value {
                         "properties": {
                             "path": {"type": "string"},
                             "status": {"type": "string", "enum": ["added", "modified", "removed"]},
-                            "mode": {"type": "string", "enum": ["100644", "100755"]}
+                            "kind": {"type": "string"},
+                            "mode": {"type": "string"}
                         },
-                        "required": ["path", "status", "mode"],
+                        "required": ["path", "status", "kind", "mode"],
                         "additionalProperties": false
                     }
                 }
@@ -695,7 +696,7 @@ fn tools() -> Value {
     }, {
         "name": "publish_commit",
         "title": "Publish an exact-head commit",
-        "description": "Publish one commit to a repository branch, but only while that branch still points at the stated commit. A file with no content is deleted. Workflow files cannot be written. Replays require the same operation UUID and request.",
+        "description": "Publish one commit to a repository branch, but only while that branch still points at the stated commit. A file with no content is deleted, so a mode may only be stated alongside content. The .github tree itself, .github/workflows, CODEOWNERS and dependabot config cannot be written. Replays require the same operation UUID and request.",
         "inputSchema": {
             "type": "object",
             "properties": {

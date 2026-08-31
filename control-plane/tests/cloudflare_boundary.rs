@@ -208,7 +208,7 @@ fn declared_output_schemas_name_the_fields_the_results_carry() {
             // this is the only result type here with a nested object.
             "observe_changes",
             "ChangedPath",
-            &["path", "status", "mode"][..],
+            &["path", "status", "kind", "mode"][..],
         ),
         (
             "maintainer_status",

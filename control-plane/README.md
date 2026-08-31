@@ -65,7 +65,8 @@ Access policy, or App configuration is live.
   merge queue makes GitHub refuse `PUT /pulls/{n}/merge` outright, and
   `docs/development/GITHUB_APP.md` had already ruled it out ("the broker does
   not ... expose direct merge as a fallback"). Enqueue is the only automated
-  path to `main`. Publication refuses the `.github` authority tree, and every
+  path to `main`. Publication refuses `.github` itself, `.github/workflows/**`, the three
+  CODEOWNERS locations and the dependabot config, and every
   write is bound to a stated head commit and to a durable operation ID.
   There is no generic GitHub proxy, arbitrary URL, shell, direct merge,
   arbitrary ref/workflow mutation, or credential-returning tool. Operations name
