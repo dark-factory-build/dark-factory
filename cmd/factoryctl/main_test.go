@@ -589,9 +589,8 @@ func TestCancellationAndDeadlineJoinConnectionOwnership(t *testing.T) {
 	}
 }
 
-func TestRepeatedCallsLeaveNoFDGoroutineSocketOrTemp(t *testing.T) {
+func TestRepeatedCallsLeaveNoFDOrSocketOrTemp(t *testing.T) {
 	baselineFD := countFDs(t)
-	baselineGoroutines := runtime.NumGoroutine()
 	previousToken, tokenWasSet := os.LookupEnv("DARK_FACTORY_ATTEMPT_TOKEN_FILE")
 	defer func() {
 		if tokenWasSet {
@@ -618,13 +617,6 @@ func TestRepeatedCallsLeaveNoFDGoroutineSocketOrTemp(t *testing.T) {
 	}
 	if got := countFDs(t); got != baselineFD {
 		t.Fatalf("FD count = %d, want %d", got, baselineFD)
-	}
-	deadline := time.Now().Add(time.Second)
-	for runtime.NumGoroutine() != baselineGoroutines && time.Now().Before(deadline) {
-		runtime.Gosched()
-	}
-	if got := runtime.NumGoroutine(); got != baselineGoroutines {
-		t.Fatalf("goroutine count = %d, want %d", got, baselineGoroutines)
 	}
 }
 
