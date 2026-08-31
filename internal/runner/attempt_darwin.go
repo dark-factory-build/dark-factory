@@ -142,12 +142,14 @@ func (c *AttemptController) Next(timeout time.Duration) (AttemptEvent, error) {
 	defer c.file.SetReadDeadline(time.Time{})
 	var frame attemptFrame
 	if err := readFrame(c.file, &frame, maxConfigBytes); err != nil {
-		// A read that ends exactly on a frame boundary is conclusive, not a
-		// transient condition: this controller holds the only other end of the
-		// socketpair, so no further frame can arrive and no later write can be
-		// delivered. Spending the capability here is what makes ErrState — not
-		// a manufactured broken pipe from a write nobody could have received —
-		// the answer to every call that follows.
+		// io.EOF here means a read returned zero bytes, either at a frame
+		// boundary or at the very start of a body. On this AF_UNIX stream that
+		// requires every descriptor for the peer socket to be closed, so
+		// nothing can arrive later and no write can be delivered. It is not a
+		// claim that the last frame was whole — a peer that died between
+		// header and body reaches here too, and is just as gone. Spending the
+		// capability makes ErrState, rather than a broken pipe from a write
+		// nobody could have received, the answer to every call that follows.
 		if errors.Is(err, io.EOF) {
 			return AttemptEvent{}, errors.Join(err, c.spend())
 		}

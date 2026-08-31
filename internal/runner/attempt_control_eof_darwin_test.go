@@ -3,17 +3,18 @@
 package runner
 
 import (
+	"encoding/binary"
 	"errors"
 	"io"
 	"testing"
 	"time"
 )
 
-// A framed read that ends exactly on a frame boundary proves the sole peer is
-// gone: nothing further can arrive and no later write can be delivered. The
-// controller must therefore spend itself on that read, so a caller that writes
-// afterwards is told its capability is finished rather than being handed an
-// EPIPE that describes a message no peer could ever have received.
+// A read that returns zero bytes proves the sole peer is gone: nothing further
+// can arrive and no later write can be delivered. The controller must spend
+// itself on that read, so a caller that writes afterwards is told its
+// capability is finished rather than being handed an EPIPE describing a
+// message no peer could ever have received.
 func TestAttemptControllerCleanEOFSpendsCapability(t *testing.T) {
 	controller, peer, err := NewAttemptController()
 	if err != nil {
@@ -40,9 +41,11 @@ func TestAttemptControllerCleanEOFSpendsCapability(t *testing.T) {
 	}
 }
 
-// A partial frame is not a clean boundary: the peer may have died mid-write and
-// the caller must still see that distinct failure rather than a lifecycle state.
-func TestAttemptControllerPartialFrameIsNotACleanEOF(t *testing.T) {
+// A peer that died between header and body is just as gone, so spending is
+// still right there. What must not happen is spending on a *short* read that
+// left the stream intact. This passes on the parent commit too: it is a guard
+// against widening the predicate beyond zero-byte reads, not a regression test.
+func TestAttemptControllerShortHeaderDoesNotSpendCapability(t *testing.T) {
 	controller, peer, err := NewAttemptController()
 	if err != nil {
 		t.Fatal(err)
@@ -59,6 +62,33 @@ func TestAttemptControllerPartialFrameIsNotACleanEOF(t *testing.T) {
 	}
 	if controller.file == nil {
 		t.Fatal("truncated header spent the capability")
+	}
+	if err := controller.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A header with no body behind it is a zero-byte body read, so it is EOF and
+// does spend. Pinned so the boundary between the two cases above is explicit.
+func TestAttemptControllerHeaderWithoutBodyIsStreamEOF(t *testing.T) {
+	controller, peer, err := NewAttemptController()
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.state = controllerInnerReady
+	var header [4]byte
+	binary.BigEndian.PutUint32(header[:], 16)
+	if _, err := peer.Write(header[:]); err != nil {
+		t.Fatal(err)
+	}
+	if err := peer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Next(time.Second); !errors.Is(err, io.EOF) {
+		t.Fatalf("header without body = %v, want EOF", err)
+	}
+	if controller.state != controllerSpent {
+		t.Fatalf("header without body left state=%d", controller.state)
 	}
 	if err := controller.Close(); err != nil {
 		t.Fatal(err)

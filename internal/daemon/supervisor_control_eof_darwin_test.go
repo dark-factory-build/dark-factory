@@ -3,9 +3,10 @@
 package daemon
 
 import (
+	"encoding/binary"
 	"errors"
+	"io"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -14,12 +15,16 @@ import (
 
 // innerReadyControlPair drives a real controller to the inner-ready state over
 // the exact wire protocol and hands back the runner's still-open peer.
-func innerReadyControlPair(t *testing.T) (*runner.AttemptController, *os.File) {
+func innerReadyControlPair(t *testing.T, attemptID string) (*runner.AttemptController, *os.File) {
 	t.Helper()
 	controller, peer, err := runner.NewAttemptController()
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		_ = controller.Close()
+		_ = peer.Close()
+	})
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -29,7 +34,7 @@ func innerReadyControlPair(t *testing.T) (*runner.AttemptController, *os.File) {
 		t.Fatal(err)
 	}
 	if err := controller.Configure(runner.AttemptSpec{
-		AttemptID: "supervisor-control-eof", Wrapper: wrapper,
+		AttemptID: attemptID, Wrapper: wrapper,
 		MarkerName: runner.InnerActivationMarkerName, ResultName: runner.AttemptResultSpoolName, ResultProof: testResultProof(t),
 	}); err != nil {
 		t.Fatal(err)
@@ -50,20 +55,33 @@ func innerReadyControlPair(t *testing.T) (*runner.AttemptController, *os.File) {
 // that read with a terminate frame nothing can receive: a manufactured
 // "broken pipe" in the run's error describes no failure of its own and reads
 // as evidence that a racing daemon write ended the attempt, which is backwards.
-// The EOF is the whole failure and must be reported alone.
 func TestSupervisorCheckpointEOFReportsNoManufacturedBrokenPipe(t *testing.T) {
-	controller, peer := innerReadyControlPair(t)
-	closed := make(chan struct{})
+	controller, peer := innerReadyControlPair(t, "supervisor-control-eof")
+	// The peer runs off the test goroutine, so it reports through a channel
+	// rather than calling t.Fatal, which may only be called on the goroutine
+	// running the test.
+	drained := make(chan error, 1)
 	go func() {
-		defer close(closed)
-		// Reading the release frame proves the supervisor's write landed while
-		// the runner was still alive, so the exit that follows is orderly.
-		_ = readTerminalEffectWire(t, peer)
-		_ = peer.Close()
+		// Consuming the release frame proves the supervisor's write landed
+		// while the runner was still alive, so the exit that follows is
+		// orderly rather than a write into an already-dead peer.
+		var header [4]byte
+		if _, err := io.ReadFull(peer, header[:]); err != nil {
+			drained <- err
+			return
+		}
+		body := make([]byte, binary.BigEndian.Uint32(header[:]))
+		if _, err := io.ReadFull(peer, body); err != nil {
+			drained <- err
+			return
+		}
+		drained <- peer.Close()
 	}()
 	_, stageErr := releaseCheckpoint(controller, runner.StageSelection)
-	<-closed
-	if !errors.Is(stageErr, runner.ErrState) || !strings.Contains(stageErr.Error(), "EOF") {
+	if err := <-drained; err != nil {
+		t.Fatalf("runner peer: %v", err)
+	}
+	if !errors.Is(stageErr, io.EOF) || !errors.Is(stageErr, runner.ErrState) {
 		t.Fatalf("checkpoint after orderly runner exit = %v, want joined EOF and lifecycle state", stageErr)
 	}
 	owner := &supervisorAttemptOwner{controller: controller}
@@ -74,8 +92,7 @@ func TestSupervisorCheckpointEOFReportsNoManufacturedBrokenPipe(t *testing.T) {
 	if owner.controller != nil {
 		t.Fatal("owner retained a control capability whose peer is gone")
 	}
-	joined := errors.Join(stageErr, closeErr)
-	if strings.Contains(joined.Error(), "broken pipe") {
+	if joined := errors.Join(stageErr, closeErr); errors.Is(joined, io.ErrClosedPipe) {
 		t.Fatalf("run error manufactured a write failure after a conclusive read:\n%v", joined)
 	}
 }

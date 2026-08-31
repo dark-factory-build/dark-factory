@@ -90,27 +90,7 @@ func newTerminalEffectFixtureConfigured(t *testing.T, configure func(*liveAttemp
 
 func readyTerminalEffectController(t *testing.T) (*runner.AttemptController, *os.File) {
 	t.Helper()
-	controller, peer, err := runner.NewAttemptController()
-	if err != nil {
-		t.Fatal(err)
-	}
-	executable, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	wrapper, err := runner.PrepareExecSpec(runner.ExecSpec{Target: executable, Args: []string{"--unused"}, Env: []string{"PATH=/usr/bin:/bin"}, Cwd: t.TempDir()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := controller.Configure(runner.AttemptSpec{AttemptID: "daemon-terminal-effect", Wrapper: wrapper, MarkerName: runner.InnerActivationMarkerName, ResultName: runner.AttemptResultSpoolName, ResultProof: testResultProof(t)}); err != nil {
-		t.Fatal(err)
-	}
-	_ = readTerminalEffectWire(t, peer)
-	identity := runner.Identity{PID: 41001, PGID: 41001, Birth: runner.Birth{Seconds: 17, Microseconds: 9}}
-	writeTerminalEffectWire(t, peer, terminalEffectWireFrame{Version: 1, Kind: "inner-ready", Identity: identity})
-	if event, err := controller.Next(time.Second); err != nil || event.Kind != runner.AttemptInnerReady {
-		t.Fatalf("inner ready = %+v, %v", event, err)
-	}
+	controller, peer := innerReadyControlPair(t, "daemon-terminal-effect")
 	for _, stage := range []runner.AttemptStage{runner.StageSelection, runner.StagePreparation, runner.StagePopulation} {
 		if err := controller.Release(stage); err != nil {
 			t.Fatal(err)
