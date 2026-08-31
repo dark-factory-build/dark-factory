@@ -18,6 +18,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -81,8 +82,15 @@ func closeAPITestListener(t testing.TB, listener *Listener) {
 	}
 }
 
-func startServerReceive(listener *Listener, reply func(Call) Reply) <-chan serverReceiveResult {
+// The receive budget is the test's own lifetime rather than a fixed second.
+// This is not what any observed flake was about -- `setDeadline` still caps the
+// wait at `requestTimeout` when the context carries no earlier deadline, so the
+// change buys headroom (one second to five), not the removal of a wall clock. It is here because a helper's
+// arbitrary timer racing the client script it serves is a hazard worth not
+// having, and `t.Context()` ends exactly when the test does.
+func startServerReceive(t testing.TB, listener *Listener, reply func(Call) Reply) <-chan serverReceiveResult {
 	done := make(chan serverReceiveResult, 1)
+	ctx := t.Context()
 	go func() {
 		connection, err := listener.Accept()
 		if err != nil {
@@ -90,8 +98,6 @@ func startServerReceive(listener *Listener, reply func(Call) Reply) <-chan serve
 			return
 		}
 		defer connection.Close()
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
 		call, err := connection.Receive(ctx)
 		if err == nil && reply != nil {
 			var response Reply
@@ -256,7 +262,7 @@ func TestServerDecodesClosedMethodMatrix(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			listener, socketPath := newAPITestListener(t, operatorBearer)
-			done := startServerReceive(listener, replyForCall)
+			done := startServerReceive(t, listener, replyForCall)
 			response, err := exchangeRaw(socketPath, rawRequest(protocolGeneration, test.domain, test.bearer, []byte(test.body)), true)
 			if err != nil {
 				t.Fatal(err)
@@ -350,7 +356,7 @@ func TestServerRejectsDomainFallbackAndInvalidRequests(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			listener, socketPath := newAPITestListener(t, operatorBearer)
-			done := startServerReceive(listener, nil)
+			done := startServerReceive(t, listener, nil)
 			response, err := exchangeRaw(socketPath, rawRequest(test.generation, test.domain, test.bearer, test.body), true)
 			if err != nil {
 				t.Fatal(err)
@@ -375,7 +381,7 @@ func TestServerRejectsDomainFallbackAndInvalidRequests(t *testing.T) {
 func TestServerRequiresRequestEOFBeforedispatch(t *testing.T) {
 	bearer := testCredential('E')
 	listener, socketPath := newAPITestListener(t, bearer)
-	done := startServerReceive(listener, replyForCall)
+	done := startServerReceive(t, listener, replyForCall)
 	connection, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: socketPath, Net: "unix"})
 	if err != nil {
 		t.Fatal(err)
@@ -393,7 +399,15 @@ func TestServerRequiresRequestEOFBeforedispatch(t *testing.T) {
 	if _, err := connection.Write(request); err != nil {
 		t.Fatal(err)
 	}
-	if err := connection.CloseWrite(); err != nil {
+	// The second frame is what this test wants rejected, and the server rejects
+	// it the moment it arrives: `requireEOF` reads a byte, finds data, and the
+	// receive helper returns and closes its end. Whether that beats this
+	// half-close is a race with a microsecond window that no ordering here can
+	// remove -- and losing it is not a failure. On BSD, shutting down a socket
+	// whose peer has already closed is ENOTCONN. The rejection frame was
+	// written before that close, so it is still readable, and every assertion
+	// that matters is below.
+	if err := connection.CloseWrite(); err != nil && !errors.Is(err, syscall.ENOTCONN) {
 		t.Fatal(err)
 	}
 	if _, err := readTestFrame(connection); err != nil {
@@ -416,7 +430,7 @@ func TestServerFramingDeadlinePeerAndResponseBounds(t *testing.T) {
 		for index, request := range requests {
 			t.Run(fmt.Sprint(index), func(t *testing.T) {
 				listener, socketPath := newAPITestListener(t, bearer)
-				done := startServerReceive(listener, nil)
+				done := startServerReceive(t, listener, nil)
 				connection, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: socketPath, Net: "unix"})
 				if err != nil {
 					t.Fatal(err)
@@ -424,7 +438,7 @@ func TestServerFramingDeadlinePeerAndResponseBounds(t *testing.T) {
 				if _, err := connection.Write(request); err != nil {
 					t.Fatal(err)
 				}
-				if err := connection.CloseWrite(); err != nil {
+				if err := connection.CloseWrite(); err != nil && !errors.Is(err, syscall.ENOTCONN) {
 					t.Fatal(err)
 				}
 				_ = connection.Close()
@@ -505,7 +519,7 @@ func TestServerFramingDeadlinePeerAndResponseBounds(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		done := startServerReceive(listener, func(Call) Reply { return reply })
+		done := startServerReceive(t, listener, func(Call) Reply { return reply })
 		response, err := exchangeRaw(socketPath, rawRequest(1, operatorDomain, bearer, []byte(`{"method":"snapshot","params":{}}`)), true)
 		if err != nil {
 			t.Fatal(err)
@@ -740,7 +754,7 @@ func TestServerConnectionsLeaveExactResourceCensus(t *testing.T) {
 	baselineFDs := countTestFDs(t)
 	for range 20 {
 		listener, socketPath := newAPITestListener(t, bearer)
-		done := startServerReceive(listener, replyForCall)
+		done := startServerReceive(t, listener, replyForCall)
 		response, err := exchangeRaw(socketPath, rawRequest(1, operatorDomain, bearer, []byte(`{"method":"health","params":{}}`)), true)
 		if err != nil {
 			t.Fatal(err)

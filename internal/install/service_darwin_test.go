@@ -593,6 +593,31 @@ func TestServiceStatusCancellationAndRepeatedCallsLeakNothing(t *testing.T) {
 	if _, err := Init(context.Background(), home); err != nil {
 		t.Fatal(err)
 	}
+	// Settled, not sampled. A single sample is inflated whenever something
+	// started earlier is still winding down -- `Init` above leaves a
+	// `database/sql` connection opener running -- and an inflated baseline is
+	// the condition under which `<=` passes a real leak. How often that bites
+	// is a property of the scheduler, not of this code: never observed at the
+	// default GOMAXPROCS, every run at GOMAXPROCS=1.
+	//
+	// Taking the running minimum reduces it rather than removing it: a
+	// goroutine that has not exited inside the window still raises the floor.
+	// The window is generous against what it is budgeted for -- the winding-down
+	// goroutines are runnable, not blocked on I/O, so the floor was reached
+	// within 3us of entering the loop in every run measured, against 100ms
+	// allowed.
+	//
+	// Descriptors are not sampled here. Nothing in this process closes one
+	// asynchronously, so a minimum over time cannot differ from the first
+	// reading, and it never did across roughly 180,000 polls.
+	baselineFD := serviceFDCount(t)
+	baselineGoroutines := runtime.NumGoroutine()
+	for settle := time.Now().Add(100 * time.Millisecond); time.Now().Before(settle); {
+		runtime.Gosched()
+		if count := runtime.NumGoroutine(); count < baselineGoroutines {
+			baselineGoroutines = count
+		}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	_, err := inspectService(ctx, home, userHome, func(ctx context.Context, _ ...string) launchctlResult {
 		cancel()
@@ -601,23 +626,29 @@ func TestServiceStatusCancellationAndRepeatedCallsLeakNothing(t *testing.T) {
 	if !errors.Is(err, context.Canceled) || !errors.Is(err, ErrServiceLaunchctl) {
 		t.Fatalf("cancel error = %v", err)
 	}
-	baselineFD := serviceFDCount(t)
-	baselineGoroutines := runtime.NumGoroutine()
 	for index := 0; index < 20; index++ {
 		fake := &recordedLaunchctl{results: []launchctlResult{{status: 113}, {status: 0, stdout: []byte(launchctlNotFoundText + "\n")}}}
 		if _, err := inspectService(context.Background(), home, userHome, fake.run); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if got := serviceFDCount(t); got != baselineFD {
-		t.Fatalf("FD count = %d, want %d", got, baselineFD)
-	}
+	// `<=`, not equality: a goroutine that merely *exits* during the run is not
+	// a leak, and demanding equality reported one -- observed on the base
+	// commit as "goroutines = 2, want 3", a count that had gone down. Against a
+	// settled floor, `<=` still fails on anything genuinely retained.
+	//
+	// Only the goroutine count is waited on. Nothing here closes a descriptor
+	// asynchronously, so waiting for the FD count to fall could only ever burn
+	// the whole deadline before failing.
 	deadline := time.Now().Add(time.Second)
-	for runtime.NumGoroutine() != baselineGoroutines && time.Now().Before(deadline) {
+	for runtime.NumGoroutine() > baselineGoroutines && time.Now().Before(deadline) {
 		runtime.Gosched()
 	}
-	if got := runtime.NumGoroutine(); got != baselineGoroutines {
-		t.Fatalf("goroutines = %d, want %d", got, baselineGoroutines)
+	if got := serviceFDCount(t); got > baselineFD {
+		t.Fatalf("FD count = %d, want at most %d", got, baselineFD)
+	}
+	if got := runtime.NumGoroutine(); got > baselineGoroutines {
+		t.Fatalf("goroutines = %d, want at most %d", got, baselineGoroutines)
 	}
 }
 
