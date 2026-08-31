@@ -129,6 +129,79 @@ fn durable_object_is_sharded_by_app_and_exact_replay_identity() {
     assert!(!journal.contains("neon_superuser"));
 }
 
+/// The brace-delimited object beginning at or after `from`, skipping quoted
+/// spans. The schemas embed regex patterns containing `{1,39}` and `\\.`, so
+/// brace counting blind to strings reads a depth the schema does not have.
+fn object_at(text: &str, from: usize) -> String {
+    let bytes = text.as_bytes();
+    let open = from + text[from..].find('{').expect("no object here");
+    let mut depth = 0_i32;
+    let mut in_string = false;
+    let mut index = open;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            match byte {
+                b'\\' => index += 1,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return text[open..=index].to_string();
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    panic!("unterminated object")
+}
+
+/// The `required` array belonging to THIS object, not the first one nested
+/// anywhere inside it.
+fn own_required_in(schema: &str) -> String {
+    let bytes = schema.as_bytes();
+    let body = schema.find('{').expect("not an object");
+    let mut depth = 0_i32;
+    let mut in_string = false;
+    let mut index = body;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            match byte {
+                b'\\' => index += 1,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'"' => {
+                if depth == 1 && schema[index..].starts_with(r#""required""#) {
+                    let from = index + schema[index..].find('[').expect("required is not an array");
+                    let close = schema[from..].find(']').expect("required is unterminated");
+                    return schema[from..=from + close].to_string();
+                }
+                in_string = true;
+            }
+            b'{' | b'[' => depth += 1,
+            b'}' | b']' => depth -= 1,
+            _ => {}
+        }
+        index += 1;
+    }
+    panic!("no required array of its own")
+}
+
 /// A tool's declared `outputSchema` and the Rust struct it serializes live in
 /// two files with nothing tying them together. A rename in one alone produces
 /// a surface that advertises a field it never sends -- which compiles, passes
@@ -200,12 +273,17 @@ fn declared_output_schemas_name_the_fields_the_results_carry() {
         (
             "observe_tree",
             "TreeObservationResult",
-            &["commit_sha", "tree_sha", "entries"][..],
+            &["commit_sha", "tree_sha", "parents", "entries"][..],
         ),
         (
-            // The nested entry is checked against its own struct: a rename
-            // inside `entries.items` is invisible to a top-level field list.
-            "observe_tree",
+            // Scoped to `entries.items`, not to the whole output schema. A
+            // whole-block search is satisfied by the name appearing anywhere,
+            // so moving these four properties up to the top level -- leaving
+            // `items` an object with no properties that also forbids unknown
+            // ones, which every real response then violates -- read as
+            // correct. That is the "required named a field in the wrong
+            // object" defect, one level down.
+            "observe_tree.entries",
             "TreeEntryResult",
             &["path", "kind", "mode", "sha"][..],
         ),
@@ -239,7 +317,26 @@ fn declared_output_schemas_name_the_fields_the_results_carry() {
             .find(&format!("struct {struct_name} {{"))
             .unwrap_or_else(|| panic!("missing struct: {struct_name}"));
         let body = &github_app[start..start + github_app[start..].find('}').unwrap()];
-        let block = tool_block(tool);
+        // `tool.property` scopes the check to that property's `items` object
+        // rather than the whole schema.
+        let (tool, nested) = match tool.split_once('.') {
+            Some((tool, property)) => (tool, Some(property)),
+            None => (tool, None),
+        };
+        let schema = tool_block(tool);
+        let block = match nested {
+            None => schema.clone(),
+            Some(property) => {
+                let at = schema
+                    .find(&format!(r#""{property}": {{"#))
+                    .unwrap_or_else(|| panic!("{tool} declares no {property}"));
+                let items = at
+                    + schema[at..].find(r#""items": {"#).unwrap_or_else(|| {
+                        panic!("{tool}'s {property} is not an array of objects")
+                    });
+                object_at(&schema, items)
+            }
+        };
         for field in fields {
             assert!(
                 body.contains(&format!("{field}: ")),
@@ -249,7 +346,15 @@ fn declared_output_schemas_name_the_fields_the_results_carry() {
                 block.contains(&format!(r#""{field}": {{"#)),
                 "{tool}'s outputSchema does not declare {field}"
             );
+            assert!(
+                own_required_in(&block).contains(&format!(r#""{field}""#)),
+                "{tool}'s outputSchema does not require {field}"
+            );
         }
+        assert!(
+            block.contains(r#""additionalProperties": false"#),
+            "{tool}'s outputSchema accepts undeclared properties"
+        );
     }
 
     let operation = tool_block("observe_operation");
@@ -297,51 +402,7 @@ fn every_repository_tool_requires_the_repository_it_acts_on() {
     // matched that nested array instead -- so this assertion passed while the
     // tool's own `required` omitted the repository and every call to it failed
     // as invalid params. The guard has to know which object it is reading.
-    let own_required = |name: &str| -> String {
-        let schema = tool_input(name);
-        let bytes = schema.as_bytes();
-        let body = schema
-            .find('{')
-            .unwrap_or_else(|| panic!("{name} inputSchema is not an object"));
-        let mut depth = 0_i32;
-        let mut in_string = false;
-        let mut index = body;
-        while index < bytes.len() {
-            let byte = bytes[index];
-            if in_string {
-                // Skip quoted spans wholesale. The property patterns contain
-                // `{1,39}` and `\\.`, so counting braces blind to strings
-                // reads a depth the schema does not have.
-                match byte {
-                    b'\\' => index += 1,
-                    b'"' => in_string = false,
-                    _ => {}
-                }
-                index += 1;
-                continue;
-            }
-            match byte {
-                b'"' => {
-                    if depth == 1 && schema[index..].starts_with(r#""required""#) {
-                        let from = index
-                            + schema[index..]
-                                .find('[')
-                                .unwrap_or_else(|| panic!("{name} required is not an array"));
-                        let close = schema[from..]
-                            .find(']')
-                            .unwrap_or_else(|| panic!("{name} required is unterminated"));
-                        return schema[from..=from + close].to_string();
-                    }
-                    in_string = true;
-                }
-                b'{' | b'[' => depth += 1,
-                b'}' | b']' => depth -= 1,
-                _ => {}
-            }
-            index += 1;
-        }
-        panic!("{name} declares no required array of its own")
-    };
+    let own_required = |name: &str| own_required_in(&tool_input(name));
 
     // Every tool that reaches GitHub. `observe_operation` is deliberately
     // absent: it reads the durable journal by operation UUID, which is
@@ -400,6 +461,28 @@ fn every_repository_tool_requires_the_repository_it_acts_on() {
         !tool_input("observe_operation").contains(r#""repository""#),
         "observe_operation is a journal lookup and takes no repository"
     );
+
+    // `repository` is not the only field a handler reads. Every request type is
+    // `deny_unknown_fields`, so a declared schema that omits a required field,
+    // or that permits ones the struct refuses, fails at deserialization for
+    // exactly the callers who trusted it -- silently, and for every call.
+    for (tool, required) in [
+        ("observe_ref", &["repository", "branch"][..]),
+        ("observe_file", &["repository", "commit_sha", "path"][..]),
+        ("observe_tree", &["repository", "commit_sha"][..]),
+    ] {
+        let declared = own_required(tool);
+        for field in required {
+            assert!(
+                declared.contains(&format!(r#""{field}""#)),
+                "{tool} does not require {field}"
+            );
+        }
+        assert!(
+            tool_input(tool).contains(r#""additionalProperties": false"#),
+            "{tool} accepts fields its request type refuses"
+        );
+    }
 
     // The workflow the run-observing tools watch is the caller's to name; a
     // hard-coded path silently means "this tool works on one repository".

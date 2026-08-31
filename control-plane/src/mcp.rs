@@ -272,7 +272,7 @@ fn tools() -> Value {
             "properties": {
                 "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
                 "commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-                "path": {"type": "string", "minLength": 1, "maxLength": 240}
+                "path": {"type": "string", "minLength": 1, "maxLength": 4096}
             },
             "required": ["repository", "commit_sha", "path"],
             "additionalProperties": false
@@ -291,7 +291,7 @@ fn tools() -> Value {
     }, {
         "name": "observe_tree",
         "title": "List one commit's tree",
-        "description": "Return every entry in one exact commit's recursive tree: path, git object kind, file mode and object id. Compare two of these to learn what changed; only a blob round-trips through observe_file and publish_commit.",
+        "description": "Return one exact commit's parents and every entry in its recursive tree: path, git object kind, file mode and object id. Compare a commit against an ancestor to learn what that branch changed. Only mode 100644 and 100755 round-trip through observe_file and publish_commit; a symlink is a blob with mode 120000.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -306,6 +306,7 @@ fn tools() -> Value {
             "properties": {
                 "commit_sha": {"type": "string"},
                 "tree_sha": {"type": "string"},
+                "parents": {"type": "array", "items": {"type": "string"}},
                 "entries": {
                     "type": "array",
                     "items": {
@@ -321,7 +322,7 @@ fn tools() -> Value {
                     }
                 }
             },
-            "required": ["commit_sha", "tree_sha", "entries"],
+            "required": ["commit_sha", "tree_sha", "parents", "entries"],
             "additionalProperties": false
         },
         "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}

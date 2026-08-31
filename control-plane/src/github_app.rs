@@ -23,10 +23,6 @@ const MAX_GITHUB_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 /// Publication bounds. A commit is a bounded, reviewable unit of work, not a
 /// bulk upload channel, and the Worker must hold every blob in memory.
 const MAX_COMMIT_FILES: usize = 50;
-/// Entries one `observe_tree` will answer with. GitHub truncates a tree well
-/// above this, and a listing larger than this is not something a caller can act
-/// on in one operation anyway -- `publish_commit` writes 50 files at a time.
-const MAX_TREE_ENTRIES: usize = 5_000;
 const MAX_COMMIT_FILE_BYTES: usize = 1_000_000;
 const MAX_ISSUE_COMMENT_PAGES: usize = 10;
 const MAX_ISSUE_COMMENTS_PER_PAGE: usize = 100;
@@ -156,6 +152,10 @@ pub(crate) enum RefusalReason {
     /// one is used, which makes the using caller the only one who can be told.
     #[error("the installation is not usable: {0}")]
     InstallationRejected(&'static str),
+    /// GitHub truncated the tree it returned, so the listing is incomplete.
+    /// Determinate: the same commit truncates every time.
+    #[error("the commit's tree is too large for GitHub to return whole")]
+    TreeTruncated,
 }
 
 /// Which pre-execution rejection classes appeared. More than one can:
@@ -381,13 +381,13 @@ pub(crate) struct ObserveTree {
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct TreeEntryResult {
     pub(crate) path: String,
-    /// `blob`, `tree` or `commit`, as git names them. A caller needs this to
-    /// know that a submodule or a directory is not something `observe_file` and
-    /// `publish_commit` round-trip.
+    /// `blob`, `tree` or `commit`, as git names them.
     pub(crate) kind: String,
-    /// Git's own mode string, not an enumeration this service invents. A
-    /// symlink is a blob with mode `120000`, so any narrower promise would be
-    /// one real data violates.
+    /// Git's own mode string, not an enumeration this service invents. This,
+    /// not `kind`, is what decides whether an entry round-trips through
+    /// `observe_file` and `publish_commit`: only `100644` and `100755` do. A
+    /// symlink is a `blob` with mode `120000`, so a caller keying on `kind`
+    /// would try to read one and be refused.
     pub(crate) mode: String,
     pub(crate) sha: String,
 }
@@ -396,6 +396,14 @@ pub(crate) struct TreeEntryResult {
 pub(crate) struct TreeObservationResult {
     pub(crate) commit_sha: String,
     pub(crate) tree_sha: String,
+    /// This commit's parents. Comparing two trees answers "how do these two
+    /// snapshots differ", which is only the same question as "what did this
+    /// branch change" when one commit is an ancestor of the other. Without a
+    /// way to walk ancestry a caller cannot tell those apart, and replaying the
+    /// difference onto a moved default branch silently reverts everything
+    /// landed since the fork. The commit is already fetched to reach its tree,
+    /// so this costs nothing.
+    pub(crate) parents: Vec<String>,
     pub(crate) entries: Vec<TreeEntryResult>,
 }
 
@@ -2830,9 +2838,11 @@ impl ObserveRef {
 impl ObserveFile {
     fn validate(&self) -> Result<(), OperationError> {
         valid_sha(&self.commit_sha)?;
-        // The same path rule publication uses, so what can be read back is
-        // exactly what could have been written.
-        valid_path(&self.path)
+        // Reading is bounded by what `observe_tree` can name, not by the
+        // narrower rule governing what may be written. Naming a file and then
+        // refusing to read it would make the two operations disagree about
+        // which files exist.
+        valid_read_path(&self.path)
     }
 }
 
@@ -3024,8 +3034,20 @@ fn valid_repository_path(value: &str) -> Result<(), OperationError> {
 /// its authority; reading those files escalates nothing, and refusing to read
 /// them would leave an agent unable to see the gate it must satisfy.
 fn valid_path(value: &str) -> Result<(), OperationError> {
+    valid_bounded_path(value, 240)
+}
+
+/// A path this surface may *name*, which is wider than one it may write. Git
+/// permits far longer paths than `publish_commit` accepts, and a repository
+/// containing one is still a repository an agent must be able to read.
+#[cfg(any(target_arch = "wasm32", test))]
+fn valid_read_path(value: &str) -> Result<(), OperationError> {
+    valid_bounded_path(value, 4_096)
+}
+
+fn valid_bounded_path(value: &str, max: usize) -> Result<(), OperationError> {
     let valid = !value.is_empty()
-        && value.len() <= 240
+        && value.len() <= max
         && !value.starts_with('/')
         && !value.ends_with('/')
         && !value.contains("//")
@@ -3520,35 +3542,38 @@ impl Authority {
             token.as_str(),
         )
         .await?;
-        // A truncated tree is refused rather than returned: a partial answer to
-        // "what is in this commit" is one a caller reads as complete.
-        if tree.truncated || tree.tree.len() > MAX_TREE_ENTRIES {
-            return Err(OperationError::Indeterminate);
+        // Truncation is GitHub's own fact about its own answer, and a partial
+        // listing read as complete is the one outcome a caller cannot recover
+        // from. It is a determinate refusal that names itself, not an
+        // indeterminate outcome: this operation claims no id and writes no
+        // journal record, so there is nothing to reconcile and retrying the
+        // same commit will always truncate again.
+        if tree.truncated {
+            return Err(OperationError::Refused(RefusalReason::TreeTruncated));
         }
+        // Reported as GitHub returned them. Shape-checking each entry made one
+        // unusual path -- long, or carrying a byte git permits -- break every
+        // read of that repository at every commit, for data the caller does not
+        // control and cannot fix. The response is already bounded by
+        // `MAX_GITHUB_RESPONSE_BYTES`, above GitHub's own tree ceiling.
         let entries = tree
             .tree
             .into_iter()
-            .map(|entry| {
-                // These are the repository's own paths, not the caller's, so
-                // they are bounded for serialization rather than held to the
-                // shape rule governing what may be *written*. Refusing to
-                // describe an unusual path would make one file anywhere in a
-                // repository break every read of it.
-                valid_text(&entry.path, 1, 480, false)?;
-                valid_text(&entry.mode, 1, 16, false)?;
-                valid_text(&entry.kind, 1, 16, false)?;
-                valid_sha(&entry.sha)?;
-                Ok(TreeEntryResult {
-                    path: entry.path,
-                    kind: entry.kind,
-                    mode: entry.mode,
-                    sha: entry.sha,
-                })
+            .map(|entry| TreeEntryResult {
+                path: entry.path,
+                kind: entry.kind,
+                mode: entry.mode,
+                sha: entry.sha,
             })
-            .collect::<Result<Vec<_>, OperationError>>()?;
+            .collect();
         Ok(TreeObservationResult {
             commit_sha,
             tree_sha: commit.tree.sha,
+            parents: commit
+                .parents
+                .into_iter()
+                .map(|parent| parent.sha)
+                .collect(),
             entries,
         })
     }
@@ -7346,7 +7371,7 @@ mod tests {
             })
         );
         // A stated mode is what lets an integrating caller reproduce an
-        // executable file it saw through `observe_changes`. Without it a new
+        // executable file it saw through `observe_tree`. Without it a new
         // script lands at 100644 and fails much later as "permission denied".
         let executable = |path: &str| FileChange {
             path: path.into(),

@@ -48,8 +48,11 @@ framework. The shell-provider loop is proven; real Claude/Codex work is not.
    another agent's work needs no `git fetch` — `observe_ref` names a branch's
    head, `observe_tree` lists what is in a commit, `observe_file` returns one
    file's exact bytes at that commit, and `publish_commit` writes the result
-   back. Compare two trees to see what moved; what a difference *means* is the
-   caller's to decide, not this service's. If a task seems to need git, the
+   back. Compare a commit against an ancestor to see what a branch changed —
+   `observe_tree` reports a commit's parents so ancestry is walkable, and
+   comparing two unrelated commits answers a different question than the one
+   you meant. What a difference *means* is the caller's to decide, not this
+   service's. If a task seems to need git, the
    missing thing is usually a typed operation; add it rather than route around
    the surface.
 

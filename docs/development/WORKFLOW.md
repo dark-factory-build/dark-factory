@@ -132,8 +132,9 @@ contents to an agent or worktree.
 
 Reading another agent's branch needs no `git fetch`: `observe_ref` names its
 head, `observe_tree` lists what is in a commit, `observe_file` returns one
-file's bytes, and `publish_commit` writes the result back. Compare two trees to
-see what moved. If a task seems to
+file's bytes, and `publish_commit` writes the result back. Compare a commit
+against an ancestor to see what a branch changed; `observe_tree` reports
+parents, and comparing two unrelated commits answers a different question. If a task seems to
 need git, the missing thing is usually a typed operation.
 
 Two things still need the owner: a broker that is unavailable, and the paths
