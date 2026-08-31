@@ -92,13 +92,18 @@ go build -o "$df_dev_root/factory-runner" ./cmd/factory-runner
 df_dev_home="$df_dev_root/factory"
 "$df_dev_root/factoryctl" init --home "$df_dev_home"
 "$df_dev_root/factoryctl" doctor --home "$df_dev_home"
-"$df_dev_root/factoryd" --home "$df_dev_home" &
+"$df_dev_root/factoryd" --home "$df_dev_home" \
+  --development-browser-address 127.0.0.1:0 &
 
 until [ -S "$df_dev_home/runtimes/factory.sock" ]; do sleep 0.2; done
 export DARK_FACTORY_SOCKET="$df_dev_home/runtimes/factory.sock"
 export DARK_FACTORY_OPERATOR_TOKEN_FILE="$df_dev_home/operator.token"
 "$df_dev_root/factoryctl" project create --name dev --root "$PWD"
 ```
+
+The development address option selects an available loopback port; `factoryctl
+web status` reports the bound address. Without it, `factoryd` keeps the stable
+`127.0.0.1:43123` address used by the installed service.
 
 The root is under `/private/tmp` because `/tmp` is a symlink on macOS and the
 home walk rejects symlinks. Run `doctor` while the home is stopped. Every
