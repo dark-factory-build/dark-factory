@@ -601,7 +601,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	if err != nil {
 		return run, err
 	}
-	if resultOutcome.err == nil {
+	if resultOutcome.observersRetained {
 		if err := live.finishExit(context.Background(), exitEvent); err != nil {
 			return run, fmt.Errorf("daemon: broadcast committed exit: %w", err)
 		}

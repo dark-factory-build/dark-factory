@@ -353,6 +353,10 @@ func (fixture *blackBoxFixture) awaitTaskStatus(t *testing.T, client *api.Operat
 		if status == want {
 			return
 		}
+		switch status {
+		case "blocked", "succeeded", "failed", "cancelled":
+			t.Fatalf("task %s status = %q, want %q", taskID, status, want)
+		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("task %s status = %q, want %q", taskID, status, want)

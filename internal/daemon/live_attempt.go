@@ -219,8 +219,9 @@ type liveAttemptCommand struct {
 }
 
 type liveAttemptResult struct {
-	notice *runner.AttemptResultNotice
-	err    error
+	notice            *runner.AttemptResultNotice
+	err               error
+	observersRetained bool
 }
 
 // liveAttempt is intentionally concrete. All mutable fields below belong to
@@ -245,7 +246,8 @@ type liveAttempt struct {
 	releaseSent          bool
 	terminationSent      bool
 	terminationDelivered bool
-	resultSeen           bool
+	resultReturned       bool
+	shutdownRequested    bool
 	resultNotice         *runner.AttemptResultNotice
 	creditOutstanding    uint64
 	finalErr             error

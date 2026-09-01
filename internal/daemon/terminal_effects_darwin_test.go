@@ -1360,14 +1360,28 @@ func TestProviderExitAndOwnerDeathFencePrivateBinding(t *testing.T) {
 			t.Fatal(err)
 		}
 		select {
-		case <-fixture.attempt.done:
+		case result := <-fixture.attempt.result:
+			if result.err == nil || result.notice != nil {
+				t.Fatalf("owner fallback = %+v", result)
+			}
 		case <-time.After(time.Second):
-			t.Fatal("dead owner did not join")
+			t.Fatal("dead owner did not report fallback")
 		}
 		if fixture.attempt.binding != (terminalBinding{}) {
 			t.Fatalf("owner death retained private binding = %+v", fixture.attempt.binding)
 		}
-		if _, err := fixture.adapter.daemon.terminalInput(context.Background(), fixture.principal, fixture.run.ID, fixture.session.ID, lease.Generation, 1, fixture.run.Revision, fixture.session.Revision, []byte("after death")); !errors.Is(err, kernel.ErrNotFound) {
+		select {
+		case <-fixture.attempt.done:
+			t.Fatal("dead owner abandoned the authenticated-result window")
+		default:
+		}
+		if _, err := fixture.adapter.daemon.terminalInput(context.Background(), fixture.principal, fixture.run.ID, fixture.session.ID, lease.Generation, 1, fixture.run.Revision, fixture.session.Revision, []byte("after death")); !errors.Is(err, ErrTerminalEffectRejected) {
+			t.Fatalf("input while fallback pending = %v", err)
+		}
+		if err := fixture.attempt.close(); err == nil {
+			t.Fatal("fallback cleanup discarded the controller error")
+		}
+		if _, err := fixture.adapter.daemon.terminalInput(context.Background(), fixture.principal, fixture.run.ID, fixture.session.ID, lease.Generation, 1, fixture.run.Revision, fixture.session.Revision, []byte("after cleanup")); !errors.Is(err, kernel.ErrNotFound) {
 			t.Fatalf("input after owner death = %v", err)
 		}
 	})
