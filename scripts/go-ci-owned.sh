@@ -20,11 +20,17 @@ trap 'go_gate_signal 2' INT
 trap 'go_gate_signal 15' TERM
 
 export GOTOOLCHAIN=local
-# The change package measures the exact private Git HOME namespace, while the
-# changeworker package legitimately exercises that same boundary. Give the
-# census its own causal stage; every other package remains parallel.
+# These three packages own process boundaries that have demonstrated cross-
+# package scheduling sensitivity. Keep each causal stage uncached and isolated;
+# every other process package remains parallel.
 echo "go-ci: Git boundary resource census"
 go_gate_stage 1200 go test -short -timeout=20m -count=1 ./internal/change
+
+echo "go-ci: Change worker process tests"
+go_gate_stage 1200 go test -short -timeout=20m -count=1 ./internal/changeworker
+
+echo "go-ci: daemon process tests"
+go_gate_stage 1200 go test -short -timeout=20m -count=1 ./internal/daemon
 
 echo "go-ci: process-sensitive Go tests"
 go_gate_stage 1200 go test -short -timeout=20m -count=1 \
@@ -34,8 +40,6 @@ go_gate_stage 1200 go test -short -timeout=20m -count=1 \
     ./internal/api \
     ./internal/browser \
     ./internal/buildinfo/... \
-    ./internal/changeworker \
-    ./internal/daemon \
     ./internal/install \
     ./internal/kernel \
     ./internal/runner \

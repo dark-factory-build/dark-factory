@@ -17,15 +17,19 @@ set -e
 
 ordinary_line=$(grep -n -F 'echo "local-ci: ordinary source gate"' "$local_gate" | cut -d: -f1)
 process_line=$(grep -n -F 'echo "local-ci: process-sensitive gate"' "$local_gate" | cut -d: -f1)
+service_line=$(grep -n -F 'echo "local-ci: service gate"' "$local_gate" | cut -d: -f1)
 release_line=$(grep -n -F 'echo "local-ci: release gate"' "$local_gate" | cut -d: -f1)
-[ -n "$ordinary_line" ] && [ "$ordinary_line" -lt "$process_line" ] && [ "$process_line" -lt "$release_line" ] \
-    || fail "ordinary, process, and release gates are not ordered"
+[ -n "$ordinary_line" ] && [ "$ordinary_line" -lt "$process_line" ] \
+    && [ "$process_line" -lt "$service_line" ] && [ "$service_line" -lt "$release_line" ] \
+    || fail "ordinary, process, service, and release gates are not ordered"
 
 for invocation in './scripts/go-check.sh' '/bin/sh "$script_dir/go-ci-owned.sh"'; do
     [ "$(grep -Fc "$invocation" "$local_gate")" -eq 1 ] || fail "gate invocation is not unique: $invocation"
 done
-[ "$(grep -Fc './scripts/go-service-e2e.sh' "$local_gate")" -eq 0 ] \
-    || fail "service E2E unexpectedly remains in the routine gate"
+[ "$(grep -Fc './scripts/go-service-e2e.sh' "$local_gate")" -eq 1 ] \
+    || fail "service lifecycle proof is not unique"
+grep -Fq '/bin/launchctl print "gui/$(/usr/bin/id -u)/com.dark-factory.factoryd"' "$local_gate" \
+    || fail "service lifecycle proof lost its live-install boundary"
 [ "$(grep -Fc './scripts/test-local-ci-lease.sh' "$local_gate")" -eq 1 ] \
     || fail "local-CI lease proof is not unique"
 [ "$(grep -Fc '/bin/sh ./scripts/test-go-gates.sh' "$local_gate")" -eq 1 ] \
@@ -54,10 +58,12 @@ fi
 
 grep -Fq 'go test -short -timeout=20m -count=1' "$process_gate" \
     || fail "process tests are not uncached"
-grep -Fq 'go_gate_stage 1200 go test -short -timeout=20m -count=1 ./internal/change' \
-    "$process_gate" || fail "Git boundary census does not own an isolated causal stage"
-[ "$(grep -Ec '\./internal/change$' "$process_gate")" -eq 1 ] \
-    || fail "Git boundary census package is not unique"
+for isolated_package in ./internal/change ./internal/changeworker ./internal/daemon; do
+    grep -Fq "go_gate_stage 1200 go test -short -timeout=20m -count=1 $isolated_package" \
+        "$process_gate" || fail "process package lacks an isolated causal stage: $isolated_package"
+    [ "$(grep -Ec "\\$isolated_package$" "$process_gate")" -eq 1 ] \
+        || fail "isolated process package is not unique: $isolated_package"
+done
 for process_package in \
     './internal/buildinfo/...' \
     './internal/kernel' \

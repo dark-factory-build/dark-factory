@@ -30,6 +30,13 @@ echo "local-ci: process-sensitive gate"
 ./scripts/test-go-e2e-tools.sh
 /bin/sh "$script_dir/go-ci-owned.sh"
 
+echo "local-ci: service gate"
+if /bin/launchctl print "gui/$(/usr/bin/id -u)/com.dark-factory.factoryd" >/dev/null 2>&1; then
+    echo "local-ci: service gate skipped while the live operator service is loaded"
+else
+    ./scripts/go-service-e2e.sh
+fi
+
 echo "local-ci: release gate"
 ./scripts/test-prepare-release-source.sh
 ./scripts/test-publish-release.sh
