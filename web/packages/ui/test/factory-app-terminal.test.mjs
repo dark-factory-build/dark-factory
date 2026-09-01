@@ -545,6 +545,21 @@ test("output failure during replacement closes the session and never installs th
   assert.equal(context.targetGates.length, 1, "late detach completion stays fenced");
 });
 
+test("a prior lease refusal does not turn a clean terminal switch into session failure", async () => {
+  const context = terminalHarness({ fail: "acquire" });
+  context.controller.start();
+  context.ready();
+  await openTerminal(context, agent);
+  assert.equal(context.latest().terminal.writable, false);
+  assert.equal(context.latest().terminal.error.code, "connection");
+
+  context.controller.selectAgent(secondAgent);
+  await flush();
+  assert.equal(context.sessionCloses(), 0);
+  assert.equal(context.latest().selectedAgent.id, secondAgent.id);
+  assert.equal(context.latest().terminal.error, undefined);
+});
+
 test("normal terminal exit drops only UI ownership and does not become a connection error", async () => {
   const context = terminalHarness();
   context.controller.start();

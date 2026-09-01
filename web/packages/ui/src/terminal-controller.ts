@@ -255,6 +255,7 @@ class TerminalController {
       return Promise.resolve();
     }
     this.#writable = false;
+    this.#error = undefined;
     this.#detachRequested = true;
     this.#leaseOperation = "none";
     this.#inputBuffer = new Uint8Array(0);
