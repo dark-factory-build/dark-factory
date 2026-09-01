@@ -525,6 +525,26 @@ test("selected-agent revision drift cannot escalate an explicit detach to sessio
   assert.equal(context.latest().error, undefined, "the explicit close intent wins over concurrent revision drift");
 });
 
+test("output failure during replacement closes the session and never installs the queued agent", async () => {
+  const detachGate = deferred();
+  const context = terminalHarness({ detachImpl: () => detachGate.promise, fail: "surface" });
+  context.controller.start();
+  context.ready();
+  const first = await openTerminal(context, agent);
+
+  context.controller.selectAgent(secondAgent);
+  await assert.rejects(first.options.onOutput({ sequence: 0n, payload: new Uint8Array([1]) }), (error) => error.code === "closed");
+  first.options.onClose(new SessionError("connection"));
+  await flush();
+  assert.equal(context.sessionCloses(), 1);
+  assert.equal(context.latest().selectedAgent, undefined);
+  assert.equal(context.targetGates.length, 1, "replacement discovery never started");
+
+  detachGate.resolve();
+  await flush();
+  assert.equal(context.targetGates.length, 1, "late detach completion stays fenced");
+});
+
 test("normal terminal exit drops only UI ownership and does not become a connection error", async () => {
   const context = terminalHarness();
   context.controller.start();

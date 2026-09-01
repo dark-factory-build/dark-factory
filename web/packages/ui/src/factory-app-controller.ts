@@ -496,6 +496,10 @@ export class FactoryAppController {
   #receiveTerminalSnapshot(generation: number, controller: TerminalController, snapshot: TerminalControllerSnapshot): void {
     if (this.#closed || generation !== this.#terminalGeneration || controller !== this.#terminal) return;
     if (snapshot.phase === "closed") {
+      if (this.#terminalReplacement !== undefined && snapshot.error !== undefined && snapshot.error.code !== "closed") {
+        this.#disarmTerminal(snapshot.error);
+        return;
+      }
       if (this.#finishTerminalReplacement()) return;
       if (snapshot.reset && this.#recoverFromTerminalReset()) return;
       const selected = this.#selectedAgent;
