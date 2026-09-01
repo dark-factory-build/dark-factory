@@ -1222,18 +1222,29 @@ func runParentDeathOwner() error {
 
 func waitKqueueExit(t *testing.T, kq int, want Identity) {
 	t.Helper()
-	ts := unix.NsecToTimespec((4 * time.Second).Nanoseconds())
-	events := make([]unix.Kevent_t, 1)
-	n, err := unix.Kevent(kq, nil, events, &ts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n != 1 {
-		t.Fatal("timeout waiting for exact gate NOTE_EXIT")
-	}
-	event := events[0]
-	if int(event.Ident) != want.PID || event.Filter != unix.EVFILT_PROC || event.Fflags&unix.NOTE_EXIT == 0 || event.Flags&unix.EV_ERROR != 0 {
-		t.Fatalf("unexpected gate exit event %+v", event)
+	deadline := time.Now().Add(4 * time.Second)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			t.Fatal("timeout waiting for exact gate NOTE_EXIT")
+		}
+		ts := unix.NsecToTimespec(remaining.Nanoseconds())
+		events := make([]unix.Kevent_t, 1)
+		n, err := unix.Kevent(kq, nil, events, &ts)
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n != 1 {
+			t.Fatal("timeout waiting for exact gate NOTE_EXIT")
+		}
+		event := events[0]
+		if int(event.Ident) != want.PID || event.Filter != unix.EVFILT_PROC || event.Fflags&unix.NOTE_EXIT == 0 || event.Flags&unix.EV_ERROR != 0 {
+			t.Fatalf("unexpected gate exit event %+v", event)
+		}
+		return
 	}
 }
 

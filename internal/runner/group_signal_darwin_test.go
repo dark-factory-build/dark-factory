@@ -171,3 +171,30 @@ func TestSignalOwnedGroupLiveGroupExhaustsFirstSettleWindow(t *testing.T) {
 		t.Fatalf("live group did not exhaust first settle window: calls=%d elapsed=%s", censusCalls, time.Since(started))
 	}
 }
+
+func TestSignalOwnedGroupCallerDeadlineCutsSettle(t *testing.T) {
+	leader := startGroupLeader(t)
+	t.Cleanup(func() {
+		testGroupSignalResult = nil
+		testGroupCensus = nil
+	})
+	censusCalls := 0
+	testGroupCensus = func(Identity) (ownedGroupCensus, error) {
+		censusCalls++
+		if censusCalls == 1 {
+			return ownedGroupCensus{hasLiveMember: true}, nil
+		}
+		if censusCalls == 2 {
+			time.Sleep(75 * time.Millisecond)
+		}
+		return ownedGroupCensus{}, nil
+	}
+	testGroupSignalResult = func(error) error { return unix.EPERM }
+	deadline := time.Now().Add(50 * time.Millisecond)
+	if err := signalOwnedGroupBefore(leader, unix.Signal(0), deadline); !errors.Is(err, ErrUnresolved) {
+		t.Fatalf("caller deadline result = %v", err)
+	}
+	if censusCalls != 2 {
+		t.Fatalf("caller deadline allowed another settle census: calls=%d", censusCalls)
+	}
+}

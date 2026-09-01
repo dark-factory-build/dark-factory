@@ -3,8 +3,6 @@
 package e2e_test
 
 import (
-	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,13 +10,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/install"
-	_ "github.com/ncruces/go-sqlite3/driver"
 )
 
 // TestBlackBoxServiceLifecycle proves the managed launchd installation with
@@ -42,17 +38,11 @@ func TestBlackBoxServiceLifecycle(t *testing.T) {
 	serviceArgs := func(verb string) []string {
 		return []string{"service", verb, "--home", fixture.home, "--label", label, "--plist-dir", plistDir}
 	}
-	diagnosticTasks := make([]string, 0, 2)
 	t.Cleanup(func() {
 		// Guaranteed teardown: the disposable label must not survive the test
 		// process regardless of which assertion failed.
 		_ = exec.Command("/bin/launchctl", "bootout", fmt.Sprintf("gui/%d/%s", os.Geteuid(), label)).Run()
 		awaitNoHomeProcesses(t, fixture.home, 20*time.Second)
-	})
-	t.Cleanup(func() {
-		if t.Failed() {
-			logServiceDurableState(t, filepath.Join(fixture.home, "factory.sqlite3"), diagnosticTasks)
-		}
 	})
 
 	// Install: launchd starts factoryd from the sibling service directory.
@@ -67,7 +57,6 @@ func TestBlackBoxServiceLifecycle(t *testing.T) {
 	project := fixture.operatorID(t, fixture.runFactoryctl(t, 0, "project", "create", "--name", "Managed", "--root", fixture.repo))
 	agent := fixture.operatorID(t, fixture.runFactoryctl(t, 0, "agent", "create", "--project", project, "--name", "Service Smith", "--tool-budget", "4"))
 	task := fixture.operatorID(t, fixture.runFactoryctl(t, 0, "task", "add", "--project", project, "--agent", agent, "--title", "Managed service run", "--body", happyPathBody))
-	diagnosticTasks = append(diagnosticTasks, task)
 	fixture.runFactoryctl(t, 0, "dispatch", "on")
 	fixture.awaitTaskStatus(t, client, task, "succeeded", 60*time.Second)
 
@@ -99,7 +88,6 @@ func TestBlackBoxServiceLifecycle(t *testing.T) {
 	}
 	client = fixture.waitClient(t)
 	second := fixture.operatorID(t, fixture.runFactoryctl(t, 0, "task", "add", "--project", project, "--agent", agent, "--title", "Managed restart run", "--body", happyPathBody))
-	diagnosticTasks = append(diagnosticTasks, second)
 	fixture.awaitTaskStatus(t, client, second, "succeeded", 60*time.Second)
 
 	// Uninstall removes the job and every artifact; absence is provable.
@@ -175,86 +163,8 @@ func awaitNoHomeProcesses(t *testing.T, home string, patience time.Duration) {
 		}
 		if time.Now().After(deadline) {
 			survivors := strings.ReplaceAll(strings.TrimSpace(string(output)), "\n", ",")
-			t.Fatalf("processes referencing the home survived: pids %s\n%s", survivors, processIdentities(output))
+			t.Fatalf("processes referencing the home survived: pids %s", survivors)
 		}
 		time.Sleep(200 * time.Millisecond)
-	}
-}
-
-func processIdentities(pgrepOutput []byte) string {
-	pids := make([]string, 0, 16)
-	for _, field := range strings.Fields(string(pgrepOutput)) {
-		pid, err := strconv.Atoi(field)
-		if err == nil && pid > 1 {
-			pids = append(pids, strconv.Itoa(pid))
-		}
-		if len(pids) == cap(pids) {
-			break
-		}
-	}
-	if len(pids) == 0 {
-		return "process identities unavailable: no valid pids"
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	output, err := exec.CommandContext(ctx, "/bin/ps", "-ww", "-o", "pid=,ppid=,pgid=,state=,lstart=,comm=", "-p", strings.Join(pids, ",")).Output()
-	if err != nil {
-		return fmt.Sprintf("process identities unavailable: %v", err)
-	}
-	return "process identities:\n" + strings.TrimSpace(string(output))
-}
-
-func logServiceDurableState(t *testing.T, databasePath string, taskIDs []string) {
-	t.Helper()
-	database, err := sql.Open("sqlite3", "file:"+databasePath+"?mode=ro")
-	if err != nil {
-		t.Logf("service durable state unavailable: %v", err)
-		return
-	}
-	defer database.Close()
-	database.SetMaxOpenConns(1)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	const query = `WITH owned AS (
-	SELECT run_id, kind, state, pid, pgid FROM resources
-	UNION ALL
-	SELECT run_id, 'terminal_session', state, NULL, NULL FROM terminal_sessions
-)
-SELECT lower(hex(r.id)), r.phase,
-	ifnull(r.proposal_kind, '-'), ifnull(r.proposal_code, '-'),
-	ifnull(r.terminal_kind, '-'), ifnull(r.terminal_code, '-'),
-	ifnull(r.provider_exit_kind, '-'), ifnull(r.provider_exit_code, -1), ifnull(r.provider_exit_signal, -1),
-	ifnull(r.runner_exit_kind, '-'), ifnull(r.runner_exit_code, -1), ifnull(r.runner_exit_signal, -1),
-	ifnull(o.kind, '-'), ifnull(o.state, '-'), ifnull(o.pid, 0), ifnull(o.pgid, 0)
-FROM runs r LEFT JOIN owned o ON o.run_id = r.id
-WHERE lower(hex(r.task_id)) = ?
-ORDER BY r.admitted_at_ms, o.kind LIMIT 20`
-	for _, taskID := range taskIDs {
-		rows, queryErr := database.QueryContext(ctx, query, strings.ToLower(taskID))
-		if queryErr != nil {
-			t.Logf("service durable state task %s unavailable: %v", taskID, queryErr)
-			continue
-		}
-		found := false
-		for rows.Next() {
-			found = true
-			var runID, phase, proposalKind, proposalCode, terminalKind, terminalCode string
-			var providerExitKind, runnerExitKind, resourceKind, resourceState string
-			var providerExitCode, providerExitSignal, runnerExitCode, runnerExitSignal, pid, pgid int
-			if scanErr := rows.Scan(&runID, &phase, &proposalKind, &proposalCode, &terminalKind, &terminalCode, &providerExitKind, &providerExitCode, &providerExitSignal, &runnerExitKind, &runnerExitCode, &runnerExitSignal, &resourceKind, &resourceState, &pid, &pgid); scanErr != nil {
-				t.Logf("service durable state task %s scan failed: %v", taskID, scanErr)
-				break
-			}
-			t.Logf("service durable state task=%s run=%s phase=%s proposal=%s/%s terminal=%s/%s provider_exit=%s/%d/%d runner_exit=%s/%d/%d resource=%s/%s pid=%d pgid=%d", taskID, runID, phase, proposalKind, proposalCode, terminalKind, terminalCode, providerExitKind, providerExitCode, providerExitSignal, runnerExitKind, runnerExitCode, runnerExitSignal, resourceKind, resourceState, pid, pgid)
-		}
-		if closeErr := rows.Close(); closeErr != nil {
-			t.Logf("service durable state task %s close failed: %v", taskID, closeErr)
-		}
-		if rowsErr := rows.Err(); rowsErr != nil {
-			t.Logf("service durable state task %s rows failed: %v", taskID, rowsErr)
-		}
-		if !found {
-			t.Logf("service durable state task=%s has no run", taskID)
-		}
 	}
 }

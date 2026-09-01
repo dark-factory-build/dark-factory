@@ -1049,6 +1049,7 @@ func waitForOwnedGroupQuiescence(leader Identity, timeout time.Duration) error {
 
 func killRemainingGroup(leader Identity) error {
 	deadline := time.Now().Add(4 * time.Second)
+	var noLiveSince time.Time
 	for {
 		census, err := censusOwnedGroup(leader)
 		if errors.Is(err, unix.EINTR) {
@@ -1057,16 +1058,22 @@ func killRemainingGroup(leader Identity) error {
 		if err != nil {
 			return err
 		}
+		now := time.Now()
+		if !now.Before(deadline) {
+			return ErrUnresolved
+		}
 		if census.onlyLeader {
 			return nil
 		}
 		if census.hasLiveMember {
-			if err := signalOwnedGroup(leader, unix.SIGKILL); err != nil {
+			noLiveSince = time.Time{}
+			if err := signalOwnedGroupBefore(leader, unix.SIGKILL, deadline); err != nil {
 				return err
 			}
-		}
-		if time.Now().After(deadline) {
-			return ErrUnresolved
+		} else if noLiveSince.IsZero() {
+			noLiveSince = now
+		} else if !now.Before(noLiveSince.Add(groupSignalSettle)) {
+			return nil
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -1088,9 +1095,22 @@ var testGroupCensus func(Identity) (ownedGroupCensus, error)
 const groupSignalSettle = 250 * time.Millisecond
 
 func signalOwnedGroup(leader Identity, signal unix.Signal) error {
+	return signalOwnedGroupBefore(leader, signal, time.Time{})
+}
+
+func signalOwnedGroupBefore(leader Identity, signal unix.Signal, hardDeadline time.Time) error {
+	deadlineReached := func(now time.Time) bool {
+		return !hardDeadline.IsZero() && !now.Before(hardDeadline)
+	}
+	if deadlineReached(time.Now()) {
+		return ErrUnresolved
+	}
 	census, err := censusForGroupSignal(leader)
 	if err != nil {
 		return err
+	}
+	if deadlineReached(time.Now()) {
+		return ErrUnresolved
 	}
 	if !census.hasLiveMember {
 		return nil
@@ -1125,6 +1145,9 @@ func signalOwnedGroup(leader Identity, signal unix.Signal) error {
 			return err
 		}
 		now := time.Now()
+		if deadlineReached(now) {
+			return classifyGroupSignal(signalErr, false)
+		}
 		if census.hasLiveMember {
 			if !now.Before(phaseOneDeadline) {
 				return classifyGroupSignal(signalErr, false)
@@ -1148,10 +1171,14 @@ func signalOwnedGroup(leader Identity, signal unix.Signal) error {
 				}
 				return err
 			}
+			now = time.Now()
+			if deadlineReached(now) {
+				return classifyGroupSignal(signalErr, false)
+			}
 			if census.hasLiveMember {
 				return classifyGroupSignal(signalErr, false)
 			}
-			if !time.Now().Before(phaseTwoDeadline) {
+			if !now.Before(phaseTwoDeadline) {
 				return classifyGroupSignal(signalErr, true)
 			}
 			time.Sleep(5 * time.Millisecond)

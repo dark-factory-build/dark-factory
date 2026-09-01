@@ -6,15 +6,64 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	"golang.org/x/sys/unix"
 )
+
+func TestFinishAfterExitAcceptsDeadGroupPeer(t *testing.T) {
+	f := newFixture(t)
+	child, release := startControlledNaturalExit(t, f, 23)
+	installOwnedChildSafetyCleanup(t, child)
+
+	peer := exec.Command("/usr/bin/true")
+	peer.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: child.Identity().PGID}
+	if err := peer.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = peer.Process.Wait() })
+	waitForZombieProcess(t, peer.Process.Pid, child.Identity().PGID)
+	if _, err := release.Write([]byte("exit\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitOwnedGroupWithoutLiveMembersBounded(child.Identity(), time.Second); err != nil {
+		t.Fatal(err)
+	}
+	census, err := censusOwnedGroup(child.Identity())
+	if err != nil || census.hasLiveMember || census.onlyLeader {
+		t.Fatalf("dead-peer census=%+v err=%v", census, err)
+	}
+
+	started := time.Now()
+	exit, err := child.FinishAfterExit(time.Second)
+	if err != nil || exit.Code != 23 || exit.Signal != 0 {
+		t.Fatalf("dead peer blocked exact wait: exit=%+v err=%v", exit, err)
+	}
+	if elapsed := time.Since(started); elapsed < groupSignalSettle {
+		t.Fatalf("dead peer converged without a stable census: %s", elapsed)
+	}
+	assertWaitedAndAbsent(t, child)
+}
+
+func waitForZombieProcess(t *testing.T, pid, pgid int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		process, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
+		if err == nil && int(process.Eproc.Pgid) == pgid && process.Proc.P_stat == darwinZombieState {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("process %d did not become a zombie in group %d", pid, pgid)
+}
 
 func TestTerminateConvergesQueuedNaturalExit(t *testing.T) {
 	f := newFixture(t)
