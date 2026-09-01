@@ -116,6 +116,9 @@ class TerminalHandleImpl implements InternalTerminalHandle {
   #timerToken = 0;
   #outputInFlight = false;
   #outputCloseResolve: (() => void) | undefined;
+  #detachPromise: Promise<void> | undefined;
+  #detachResolve: (() => void) | undefined;
+  #detachReject: ((error: unknown) => void) | undefined;
 
   constructor(target: InternalTarget, options: TerminalOptions, send: Send, nextID: NextID, fatal: Fatal, timer: BrowserTimer, inputAllowed: boolean) {
     this.#target = { ...target };
@@ -196,15 +199,20 @@ class TerminalHandleImpl implements InternalTerminalHandle {
   }
 
   detach(): Promise<void> {
+    if (this.#detachPromise !== undefined) return this.#detachPromise;
     this.#ensureOpen();
     if (this.#outputInFlight) return Promise.reject(new SessionErrorLikeError("terminal output callback pending"));
-    if (this.#operation !== undefined) return Promise.reject(new SessionErrorLikeError("terminal operation pending"));
-    if (!this.#attached) { this.#closeLocal(); return Promise.resolve(); }
     this.#detaching = true;
     this.#cancelTimer();
     this.#renewDue = false;
-    if (this.#lease !== undefined) return this.#beginRelease(true) as Promise<void>;
-    return this.#beginDetach();
+    let resolveDetach!: () => void;
+    let rejectDetach!: (error: unknown) => void;
+    const pending = new Promise<void>((resolve, reject) => { resolveDetach = resolve; rejectDetach = reject; });
+    this.#detachPromise = pending;
+    this.#detachResolve = resolveDetach;
+    this.#detachReject = rejectDetach;
+    this.#advanceDetach();
+    return pending;
   }
 
   /** Called by BrowserSession when this socket generation is closing. */
@@ -265,6 +273,7 @@ class TerminalHandleImpl implements InternalTerminalHandle {
     if (operation.kind === "acquire") { this.#cancelTimer(); this.#renewDue = false; this.#lease = undefined; }
     if (operation.kind === "resize") this.#serviceRenewal();
     operation.reject(error);
+    this.#advanceDetach();
     return true;
   }
 
@@ -295,6 +304,7 @@ class TerminalHandleImpl implements InternalTerminalHandle {
     } finally {
       if (this.#outputCloseResolve === closeResolve) this.#outputCloseResolve = undefined;
       this.#outputInFlight = false;
+      this.#advanceDetach();
     }
   }
 
@@ -427,7 +437,8 @@ class TerminalHandleImpl implements InternalTerminalHandle {
 
   #install<T>(operation: Operation): Promise<T> {
     const result = new Promise<T>((resolve, reject) => { operation.resolve = resolve as (value: unknown) => void; operation.reject = reject; });
-    this.#operation = operation; return result;
+    this.#operation = operation;
+    return result;
   }
 
   #complete<T>(operation: Operation, value: T, apply?: () => void, closeAfter = false): void {
@@ -461,6 +472,18 @@ class TerminalHandleImpl implements InternalTerminalHandle {
     // operation whose response was already received.
     operation.resolve(value);
     if (!this.#closed) this.#serviceRenewal();
+    this.#advanceDetach();
+  }
+
+  #advanceDetach(): void {
+    if (!this.#detaching || this.#closed || this.#operation !== undefined || this.#outputInFlight) return;
+    if (!this.#attached) { this.#closeLocal(); return; }
+    try {
+      if (this.#lease !== undefined) void this.#beginRelease(true).catch((error: unknown) => this.#fatal(error as SessionErrorLike));
+      else void this.#beginDetach().catch((error: unknown) => this.#fatal(error as SessionErrorLike));
+    } catch (error) {
+      this.#fatal(error as SessionErrorLike);
+    }
   }
 
   #serviceRenewal(): void { if (!this.#renewDue || this.#lease === undefined || this.#closed || this.#detaching) return; this.#renewDue = false; this.#beginRenew(); }
@@ -518,6 +541,12 @@ class TerminalHandleImpl implements InternalTerminalHandle {
     const wakeOutput = this.#outputCloseResolve; this.#outputCloseResolve = undefined; wakeOutput?.();
     const operation = this.#operation; this.#operation = undefined; this.#lease = undefined; this.#attached = false;
     operation?.reject(error ?? new SessionErrorLikeError("closed"));
+    const resolveDetach = this.#detachResolve;
+    const rejectDetach = this.#detachReject;
+    this.#detachResolve = undefined;
+    this.#detachReject = undefined;
+    if (error === undefined) resolveDetach?.();
+    else rejectDetach?.(error);
     try { this.#options.onClose?.(error); } catch { /* callbacks never own transport */ }
   }
 

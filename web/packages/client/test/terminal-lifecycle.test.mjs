@@ -273,7 +273,8 @@ test("exit rejects every pending control operation without sending another effec
     const pending = kind === "acquire" ? context.handle.acquireInput() : kind === "resize" ? context.handle.resize(24, 80) : kind === "release" ? context.handle.releaseInput() : context.handle.detach();
     const before = context.sent.length;
     assert.equal(context.handle.receiveExit(attachFrame.id, { session_id: sessionId, exit_code: 1, exit_signal: 0, aborted: false }), true, kind);
-    await assert.rejects(pending, /terminal exited/, kind);
+    if (kind === "detach") await pending;
+    else await assert.rejects(pending, /terminal exited/, kind);
     assert.equal(context.sent.length, before, `${kind} must not continue after exit`);
     assert.equal(context.handle.writable, false, kind);
   }
@@ -714,12 +715,68 @@ test("release precedes detach and exact release ambiguity never sends detach", a
   assert.equal(failed.sent.some(({ payload }) => typeof payload === "string" && decodeClientControl(payload).type === "TERMINAL_DETACH"), false);
 });
 
+test("detach waits for a pending attach before sending detach", async () => {
+  const context = makeHandle();
+  const attach = context.handle.attach();
+  const attachFrame = lastControl(context.sent);
+  const detached = context.handle.detach();
+  assert.equal(context.sent.length, 1);
+  context.handle.receive(serverFrame(replyAttached({}, attachFrame)));
+  await attach;
+  assert.equal(lastControl(context.sent).type, "TERMINAL_DETACH");
+  const detachFrame = lastControl(context.sent);
+  context.handle.receive(serverFrame(encodeTerminalDetached(detachFrame.id, { session_id: sessionId })));
+  await detached;
+  assert.equal(context.handle.closed, true);
+});
+
+test("detach queues behind acquire and manual release transitions", async (t) => {
+  await t.test("acquire", async () => {
+    const context = makeHandle();
+    await attachedOnly(context);
+    const acquire = context.handle.acquireInput();
+    const acquireFrame = lastControl(context.sent);
+    const detached = context.handle.detach();
+    context.handle.receive(serverFrame(encodeTerminalLeaseResult(acquireFrame.id, {
+      operation: "acquired", run_id: runId, session_id: sessionId, generation: 1n,
+      expires_at_ms: 200_000n, last_input_sequence: 0n, run_revision: 1n, session_revision: 1n,
+    })));
+    await acquire;
+    const releaseFrame = lastControl(context.sent);
+    assert.equal(releaseFrame.type, "TERMINAL_LEASE_RELEASE");
+    context.handle.receive(serverFrame(encodeTerminalLeaseResult(releaseFrame.id, {
+      operation: "released", run_id: runId, session_id: sessionId, generation: 2n,
+      last_input_sequence: 0n, run_revision: 1n, session_revision: 1n,
+    })));
+    const detachFrame = lastControl(context.sent);
+    context.handle.receive(serverFrame(encodeTerminalDetached(detachFrame.id, { session_id: sessionId })));
+    await detached;
+  });
+
+  await t.test("manual release", async () => {
+    const context = makeHandle();
+    await attachedWithLease(context);
+    const released = context.handle.releaseInput();
+    const releaseFrame = lastControl(context.sent);
+    const detached = context.handle.detach();
+    context.handle.receive(serverFrame(encodeTerminalLeaseResult(releaseFrame.id, {
+      operation: "released", run_id: runId, session_id: sessionId, generation: 2n,
+      last_input_sequence: 0n, run_revision: 1n, session_revision: 1n,
+    })));
+    await released;
+    const detachFrame = lastControl(context.sent);
+    assert.equal(detachFrame.type, "TERMINAL_DETACH");
+    context.handle.receive(serverFrame(encodeTerminalDetached(detachFrame.id, { session_id: sessionId })));
+    await detached;
+  });
+});
+
 test("detach is single-flight, waits for release, and fences late duplicate results", async () => {
   const context = makeHandle();
   await attachedWithLease(context);
   const detached = context.handle.detach();
   const releaseFrame = lastControl(context.sent);
-  await assert.rejects(context.handle.detach(), /terminal operation pending/);
+  assert.equal(context.handle.detach(), detached);
   context.handle.receive(serverFrame(encodeTerminalLeaseResult(releaseFrame.id, {
     operation: "released", run_id: runId, session_id: sessionId, generation: 2n,
     last_input_sequence: 0n, run_revision: 1n, session_revision: 1n,
@@ -735,13 +792,12 @@ test("detach cannot overtake a pending input effect", async () => {
   const context = makeHandle();
   const { attachFrame } = await attachedWithLease(context);
   const input = context.handle.sendInput(new Uint8Array([1]));
-  await assert.rejects(context.handle.detach(), /terminal operation pending/);
+  const detached = context.handle.detach();
   assert.equal(context.sent.filter(({ payload }) => typeof payload === "string" && decodeClientControl(payload).type === "TERMINAL_DETACH").length, 0);
   context.handle.receive(inputResult(attachFrame.id, {
     session_id: sessionId, generation: 1n, sequence: 1n, status: "accepted", accepted_bytes: 1n,
   }));
   await input;
-  const detached = context.handle.detach();
   const releaseFrame = lastControl(context.sent);
   context.handle.receive(serverFrame(encodeTerminalLeaseResult(releaseFrame.id, {
     operation: "released", run_id: runId, session_id: sessionId, generation: 2n,
@@ -756,12 +812,11 @@ test("detach cannot overtake a pending resize effect", async () => {
   const context = makeHandle();
   await attachedWithLease(context);
   const resize = context.handle.resize(24, 80);
-  await assert.rejects(context.handle.detach(), /terminal operation pending/);
+  const detached = context.handle.detach();
   assert.equal(context.sent.filter(({ payload }) => typeof payload === "string" && decodeClientControl(payload).type === "TERMINAL_DETACH").length, 0);
   const resizeFrame = lastControl(context.sent);
   context.handle.receive(serverFrame(encodeTerminalResized(resizeFrame.id, { session_id: sessionId, generation: 1n, rows: 24, cols: 80 })));
   await resize;
-  const detached = context.handle.detach();
   const releaseFrame = lastControl(context.sent);
   context.handle.receive(serverFrame(encodeTerminalLeaseResult(releaseFrame.id, {
     operation: "released", run_id: runId, session_id: sessionId, generation: 2n,
@@ -769,6 +824,29 @@ test("detach cannot overtake a pending resize effect", async () => {
   })));
   const detachFrame = lastControl(context.sent);
   context.handle.receive(serverFrame(encodeTerminalDetached(detachFrame.id, { session_id: sessionId })));
+  await detached;
+});
+
+test("detach queues behind an autonomous lease renewal", async () => {
+  const context = makeHandle();
+  await attachedWithLease(context);
+  context.timer.advance(10_000);
+  const renewal = lastControl(context.sent);
+  assert.equal(renewal.type, "TERMINAL_LEASE_RENEW");
+  const detached = context.handle.detach();
+  assert.equal(context.sent.filter(({ payload }) => typeof payload === "string" && decodeClientControl(payload).type === "TERMINAL_LEASE_RELEASE").length, 0);
+  context.handle.receive(serverFrame(encodeTerminalLeaseResult(renewal.id, {
+    operation: "renewed", run_id: runId, session_id: sessionId, generation: 1n,
+    expires_at_ms: 200_000n, last_input_sequence: 0n, run_revision: 1n, session_revision: 1n,
+  })));
+  const release = lastControl(context.sent);
+  assert.equal(release.type, "TERMINAL_LEASE_RELEASE");
+  context.handle.receive(serverFrame(encodeTerminalLeaseResult(release.id, {
+    operation: "released", run_id: runId, session_id: sessionId, generation: 2n,
+    last_input_sequence: 0n, run_revision: 1n, session_revision: 1n,
+  })));
+  const detach = lastControl(context.sent);
+  context.handle.receive(serverFrame(encodeTerminalDetached(detach.id, { session_id: sessionId })));
   await detached;
 });
 

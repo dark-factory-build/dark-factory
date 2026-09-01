@@ -116,6 +116,7 @@ export function TerminalSidebar({
       <div className="dfConsoleSidebar__body" aria-hidden={collapsed ? "true" : undefined}>
         <div className="dfConsoleSidebar__header">
           <strong>{terminal.agentName}</strong>
+          <span className="dfConsoleSidebar__identity">CURRENT RUN TERMINAL{terminal.taskTitle === undefined ? "" : ` · ${terminal.taskTitle}`}</span>
           <span className="dfConsoleSidebar__phase">{TERMINAL_PHASE_LABELS[terminal.phase]}</span>
           <span className={`dfConsoleSidebar__control${terminal.writable ? " dfConsoleSidebar__control--held" : ""}`}>
             {terminal.writable ? "you have control" : "watching"}
@@ -136,7 +137,14 @@ export function TerminalSidebar({
             Steer
           </button>
           <button type="button" onClick={onToggleCollapsed} title="collapse the terminal">»</button>
-          <button type="button" onClick={onClose} title="close the terminal">×</button>
+          <button
+            type="button"
+            disabled={terminal.phase === "closing" || terminal.phase === "closed"}
+            onClick={onClose}
+            title="close this terminal view; the worker keeps running"
+          >
+            CLOSE TERMINAL
+          </button>
         </div>
         {terminal.error === undefined ? null : <p className="dfFactoryConsole__terminalError" role="alert">TERMINAL UNAVAILABLE</p>}
         {!terminal.resets ? null : (

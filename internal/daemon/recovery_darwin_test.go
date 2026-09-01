@@ -282,6 +282,98 @@ func TestRecoverySweepFailsRunWhoseRuntimeIsPositivelyAbsent(t *testing.T) {
 	}
 }
 
+func TestReturnedRunRecoveryIgnoresStaleLiveAttemptRegistry(t *testing.T) {
+	fixture := newRecoveryFixture(t, 0x1a)
+	stale := newLiveAttempt(fixture.daemon, fixture.run.ID, fixture.keys.TerminalSessionID, nil)
+	fixture.daemon.attemptMu.Lock()
+	fixture.daemon.attempts[fixture.run.ID] = stale
+	fixture.daemon.attemptMu.Unlock()
+	defer func() {
+		fixture.daemon.attemptMu.Lock()
+		delete(fixture.daemon.attempts, fixture.run.ID)
+		fixture.daemon.attemptMu.Unlock()
+	}()
+
+	run, err := fixture.daemon.recoverReturnedRun(fixture.parent, fixture.changeParent, fixture.run.ID)
+	if err != nil {
+		t.Fatalf("returned-run recovery = %+v, %v", run, err)
+	}
+	if run.Phase != kernel.RunTerminal || run.Terminal == nil || run.Terminal.Code() != kernel.FailureSpawn {
+		t.Fatalf("stale-registry recovery = %+v", run)
+	}
+}
+
+func TestRecoverySweepSettlesFinalizingReleasedRuntimeAfterResultCleanup(t *testing.T) {
+	fixture := newRecoveryFixture(t, 0x18)
+	fixture.stageRuntime(t)
+	failure, err := kernel.NewFailureProposal(kernel.FailureSource, "source failed after runtime cleanup")
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err := fixture.store.FailRun(context.Background(), fixture.run.ID, fixture.run.Revision, failure, mustKernelTime(t, 240))
+	if err != nil || failed.Phase != kernel.RunFinalizing {
+		t.Fatalf("finalizing source failure = %+v, %v", failed, err)
+	}
+	fixture.run = failed
+	disposition := fixture.sweep(t)
+	if disposition.Action != RecoveredConverged || disposition.Err != nil {
+		t.Fatalf("disposition = %+v", disposition)
+	}
+	run := fixture.currentRun(t)
+	if run.Phase != kernel.RunTerminal || run.Terminal == nil || run.Terminal.Code() != kernel.FailureSource {
+		t.Fatalf("recovered source failure = %+v", run)
+	}
+	for kind, resource := range fixture.resourceStates(t) {
+		if resource.State != kernel.ResourceReleased {
+			t.Fatalf("recovered %s = %+v", kind, resource)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(fixture.parentPath, run.ID.String())); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("recovered runtime directory persists: %v", err)
+	}
+	session, found, err := fixture.store.TerminalSessionForRun(context.Background(), run.ID)
+	if err != nil || !found || session.State != kernel.TerminalSessionClosed {
+		t.Fatalf("recovered session = %+v found=%v err=%v", session, found, err)
+	}
+}
+
+func TestRecoverySweepSettlesAfterRuntimeReleaseBeforeFinalization(t *testing.T) {
+	fixture := newRecoveryFixture(t, 0x19)
+	runtimeIdentity := fixture.stageRuntime(t)
+	failure, err := kernel.NewFailureProposal(kernel.FailureSource, "crash after runtime release")
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err := fixture.store.FailRun(context.Background(), fixture.run.ID, fixture.run.Revision, failure, mustKernelTime(t, 240))
+	if err != nil || failed.Phase != kernel.RunFinalizing {
+		t.Fatalf("finalizing source failure = %+v, %v", failed, err)
+	}
+	fixture.run = failed
+	fileIdentity, err := runtimeFileIdentity(runtimeIdentity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done, err := RemoveRecordedRuntime(context.Background(), fixture.parent, fixture.run.ID.String(), fileIdentity)
+	if err != nil || !done {
+		t.Fatalf("runtime removal = done=%v err=%v", done, err)
+	}
+	runtimeResource, found, err := fixture.store.Resource(context.Background(), fixture.keys.Resources.RuntimeRoot)
+	if err != nil || !found {
+		t.Fatalf("runtime resource = %+v found=%v err=%v", runtimeResource, found, err)
+	}
+	if _, err := fixture.store.ReleaseResource(context.Background(), fixture.run.ID, runtimeResource.ID, runtimeResource.Revision, runtimeResource.Identity, mustKernelTime(t, 250)); err != nil {
+		t.Fatal(err)
+	}
+	disposition := fixture.sweep(t)
+	if disposition.Action != RecoveredConverged || disposition.Err != nil {
+		t.Fatalf("disposition = %+v", disposition)
+	}
+	run := fixture.currentRun(t)
+	if run.Phase != kernel.RunTerminal || run.Terminal == nil || run.Terminal.Code() != kernel.FailureSource {
+		t.Fatalf("recovered source failure = %+v", run)
+	}
+}
+
 func TestRecoverySweepConvergesStartingRunnerWithoutResidue(t *testing.T) {
 	fixture := newRecoveryFixture(t, 0x20)
 	fixture.stageRuntime(t)

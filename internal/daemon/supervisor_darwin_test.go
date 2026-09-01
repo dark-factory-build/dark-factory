@@ -448,14 +448,18 @@ func TestSupervisorRecordsInvalidFactoryctlAfterAdmissionWithoutProviderEffect(t
 				t.Fatalf("invalid factoryctl result=%v", err)
 			}
 			fixture.trackRun(run.ID)
-			if run.Phase != kernel.RunFinalizing || run.CredentialRevokedAt == nil || run.Proposal == nil || run.Proposal.Kind() != kernel.OutcomeFailed || run.Proposal.Code() != kernel.FailureSpawn || run.Terminal != nil {
+			if run.Phase != kernel.RunTerminal || run.CredentialRevokedAt == nil || run.Proposal == nil || run.Proposal.Kind() != kernel.OutcomeFailed || run.Proposal.Code() != kernel.FailureSpawn || run.Terminal == nil {
 				t.Fatalf("invalid factoryctl durable run = %+v", run)
+			}
+			fixture.assertReleased(t, run)
+			if _, statErr := os.Stat(filepath.Join(fixture.runtimeParentPath, run.ID.String())); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("invalid factoryctl runtime remains: %v", statErr)
 			}
 			if _, err := os.Stat(fixture.witness); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("provider witness exists: %v", err)
 			}
 			snapshot, err := fixture.store.Snapshot(context.Background())
-			if err != nil || snapshot.Factory.ActiveRuns != 1 || len(snapshot.HumanRequests) != 0 {
+			if err != nil || snapshot.Factory.ActiveRuns != 0 || len(snapshot.HumanRequests) != 0 {
 				t.Fatalf("invalid factoryctl admitted state: active=%d requests=%+v err=%v", snapshot.Factory.ActiveRuns, snapshot.HumanRequests, err)
 			}
 		})
@@ -488,8 +492,12 @@ func TestSupervisorRecordsUnavailableProviderAfterAdmission(t *testing.T) {
 		t.Fatalf("RunNext error = %v, want provider unavailable", err)
 	}
 	fixture.trackRun(run.ID)
-	if run.Provider != kernel.ProviderCodex || run.Phase != kernel.RunFinalizing || run.CredentialRevokedAt == nil || run.Proposal == nil || run.Proposal.Code() != kernel.FailureSpawn || run.Terminal != nil {
+	if run.Provider != kernel.ProviderCodex || run.Phase != kernel.RunTerminal || run.CredentialRevokedAt == nil || run.Proposal == nil || run.Proposal.Code() != kernel.FailureSpawn || run.Terminal == nil {
 		t.Fatalf("unavailable provider durable run = %+v", run)
+	}
+	fixture.assertReleased(t, run)
+	if _, statErr := os.Stat(filepath.Join(fixture.runtimeParentPath, run.ID.String())); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("unavailable provider runtime remains: %v", statErr)
 	}
 	if _, err := os.Stat(fixture.witness); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("unavailable provider reached execution: %v", err)
@@ -671,7 +679,7 @@ func TestDaemonCloseActivelyCancelsPreReleaseSupervisor(t *testing.T) {
 	case <-time.After(12 * time.Second):
 		t.Fatal("Close did not join canceled supervisor")
 	}
-	fixture.assertInterruptedFinalizing(t, result.run, kernel.TerminalSessionReleasing)
+	fixture.assertInterruptedTerminal(t, result.run)
 	if _, err := os.Stat(fixture.witness); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("provider executed before release: stat err=%v", err)
 	}
@@ -730,7 +738,7 @@ func TestDaemonCloseActivelyCancelsBeforeLiveRegistration(t *testing.T) {
 	case <-time.After(8 * time.Second):
 		t.Fatal("Close did not join canceled pre-live supervisor")
 	}
-	fixture.assertInterruptedFinalizing(t, result.run, kernel.TerminalSessionClosed)
+	fixture.assertInterruptedTerminal(t, result.run)
 	if _, err := os.Stat(fixture.witness); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("provider executed after pre-live cancellation: stat err=%v", err)
 	}
@@ -770,9 +778,11 @@ func TestSupervisorDoesNotReleaseAfterFinalizationWinsBeforeProviderRelease(t *t
 	if err == nil || !errors.Is(err, kernel.ErrConflict) {
 		t.Fatalf("release after finalization error = %v, want conflict", err)
 	}
-	if run.Phase != kernel.RunFinalizing || run.Proposal == nil || run.Proposal.Result() != "outcome-before-release" {
+	fixture.assertTerminal(t, run, kernel.OutcomeSucceeded)
+	if run.Proposal == nil || run.Proposal.Result() != "outcome-before-release" {
 		t.Fatalf("run after finalization-before-release = %+v", run)
 	}
+	fixture.assertReleased(t, run)
 	if _, statErr := os.Stat(fixture.witness); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("provider crossed finalization-before-release boundary: %v", statErr)
 	}
@@ -923,8 +933,16 @@ func TestSupervisorSourceFailureCannotReleaseProvider(t *testing.T) {
 	if err == nil {
 		t.Fatal("invalid source revision unexpectedly ran")
 	}
-	if run.Phase != kernel.RunFinalizing || run.Terminal != nil {
+	if run.Phase != kernel.RunTerminal || run.Terminal == nil {
 		t.Fatalf("source failure run = %+v", run)
+	}
+	fixture.assertReleased(t, run)
+	if _, statErr := os.Stat(filepath.Join(fixture.runtimeParentPath, run.ID.String())); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("source failure runtime remains: %v", statErr)
+	}
+	session, found, sessionErr := fixture.store.TerminalSessionForRun(context.Background(), run.ID)
+	if sessionErr != nil || !found || session.State != kernel.TerminalSessionClosed {
+		t.Fatalf("source failure session = %+v found=%v err=%v", session, found, sessionErr)
 	}
 	if _, statErr := os.Stat(fixture.witness); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("provider executed before source registration: %v", statErr)
@@ -962,28 +980,15 @@ func TestSupervisorPartialProviderReleaseRevokesAuthority(t *testing.T) {
 	if !errors.Is(err, releaseErr) {
 		t.Fatalf("RunNext partial release = %v", err)
 	}
-	if run.Phase != kernel.RunFinalizing || run.Proposal == nil || run.Proposal.Code() != kernel.FailureProtocol || run.CredentialRevokedAt == nil || run.Terminal != nil {
+	fixture.assertTerminal(t, run, kernel.OutcomeFailed)
+	if run.Proposal == nil || run.Proposal.Code() != kernel.FailureProtocol || run.CredentialRevokedAt == nil {
 		t.Fatalf("partial release run = %+v", run)
 	}
 	if _, err := fixture.store.AuthenticateAttempt(context.Background(), run.CredentialDigest); !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Fatalf("partial release credential = %v", err)
 	}
 	fixture.assertOneWitness(t)
-	for _, resource := range fixture.resources(t, run.ID) {
-		if resource.State != kernel.ResourceReleasing {
-			t.Fatalf("partial release %s state = %s", resource.Kind.String(), resource.State.String())
-		}
-		if resource.Kind == kernel.ResourceRuntimeRoot || resource.Identity.Empty() {
-			continue
-		}
-		identity, identityErr := runnerIdentity(resource.Identity)
-		if identityErr != nil {
-			t.Fatal(identityErr)
-		}
-		if observation := runner.ObserveProcess(identity); observation.Presence != runner.Absent {
-			t.Fatalf("partial release left %s alive: %+v", resource.Kind.String(), observation)
-		}
-	}
+	fixture.assertReleased(t, run)
 }
 
 func TestSupervisorCancellationAfterProviderReleaseStillJoins(t *testing.T) {
@@ -1092,7 +1097,8 @@ func TestSupervisorCancellationBeforeProviderReleaseKeepsProviderInert(t *testin
 	if !errors.Is(got.err, context.Canceled) {
 		t.Fatalf("pre-release cancellation = %v", got.err)
 	}
-	if got.run.Phase != kernel.RunFinalizing || got.run.CredentialRevokedAt == nil || got.run.Terminal != nil {
+	fixture.assertTerminal(t, got.run, kernel.OutcomeFailed)
+	if got.run.CredentialRevokedAt == nil {
 		t.Fatalf("pre-release cancellation run = %+v", got.run)
 	}
 	if _, err := fixture.store.AuthenticateAttempt(context.Background(), got.run.CredentialDigest); !errors.Is(err, kernel.ErrUnauthorized) {
@@ -1101,6 +1107,7 @@ func TestSupervisorCancellationBeforeProviderReleaseKeepsProviderInert(t *testin
 	if _, err := os.Stat(fixture.witness); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("provider crossed cancellation/release boundary: %v", err)
 	}
+	fixture.assertReleased(t, got.run)
 }
 
 func TestSupervisorActivationErrorAfterDurableMarkerJoinsInnerOwner(t *testing.T) {
@@ -1122,7 +1129,8 @@ func TestSupervisorActivationErrorAfterDurableMarkerJoinsInnerOwner(t *testing.T
 	if !errors.Is(err, activationErr) {
 		t.Fatalf("RunNext activation ambiguity = %v", err)
 	}
-	if run.Phase != kernel.RunFinalizing || run.CredentialRevokedAt == nil || run.Terminal != nil {
+	fixture.assertTerminal(t, run, kernel.OutcomeFailed)
+	if run.CredentialRevokedAt == nil {
 		t.Fatalf("activation ambiguity run = %+v", run)
 	}
 	if _, err := fixture.store.AuthenticateAttempt(context.Background(), run.CredentialDigest); !errors.Is(err, kernel.ErrUnauthorized) {
@@ -1179,7 +1187,8 @@ func TestSupervisorReconcilesAmbiguousAdmissionAndRevokesBearer(t *testing.T) {
 	if len(admissions) != 1 || !admissions[0] {
 		t.Fatalf("durable admission observations = %v", admissions)
 	}
-	if run.Phase != kernel.RunFinalizing || run.Proposal == nil || run.Proposal.Code() != kernel.FailureInternal || run.CredentialRevokedAt == nil || run.Terminal != nil {
+	fixture.assertTerminal(t, run, kernel.OutcomeFailed)
+	if run.Proposal == nil || run.Proposal.Code() != kernel.FailureInternal || run.CredentialRevokedAt == nil {
 		t.Fatalf("admission ambiguity run = %+v", run)
 	}
 	if _, err := fixture.store.AuthenticateAttempt(context.Background(), run.CredentialDigest); !errors.Is(err, kernel.ErrUnauthorized) {
@@ -1217,7 +1226,8 @@ func TestSupervisorRetriesTransientAdmissionReconciliation(t *testing.T) {
 	if !errors.Is(err, commitErr) || attempts != 3 {
 		t.Fatalf("RunNext reconciliation = attempts %d, err %v", attempts, err)
 	}
-	if run.Phase != kernel.RunFinalizing || run.CredentialRevokedAt == nil {
+	fixture.assertTerminal(t, run, kernel.OutcomeFailed)
+	if run.CredentialRevokedAt == nil {
 		t.Fatalf("transient reconciliation run = %+v", run)
 	}
 	if _, err := fixture.store.AuthenticateAttempt(context.Background(), run.CredentialDigest); !errors.Is(err, kernel.ErrUnauthorized) {
@@ -1693,51 +1703,27 @@ func (fixture *supervisorFixture) assertTerminal(t *testing.T, run kernel.Run, k
 	}
 }
 
-func (fixture *supervisorFixture) assertInterruptedFinalizing(t *testing.T, run kernel.Run, sessionState kernel.TerminalSessionState) {
+func (fixture *supervisorFixture) assertInterruptedTerminal(t *testing.T, run kernel.Run) {
 	t.Helper()
-	if run.ID == (kernel.RunID{}) || run.Phase != kernel.RunFinalizing || run.Terminal != nil || run.CredentialRevokedAt == nil || run.Proposal == nil {
-		t.Fatalf("interrupted run = %+v, want revoked finalizing state", run)
+	if run.ID == (kernel.RunID{}) || run.Phase != kernel.RunTerminal || run.Terminal == nil || run.CredentialRevokedAt == nil || run.Proposal == nil {
+		t.Fatalf("interrupted run = %+v, want revoked terminal state", run)
 	}
-	fixture.trackRun(run.ID)
+	fixture.assertTerminal(t, run, run.Proposal.Kind())
 	durable, found, err := fixture.store.Run(context.Background(), run.ID)
 	if err != nil || !found {
 		t.Fatalf("durable interrupted run: found=%v err=%v", found, err)
 	}
-	if durable.Phase != kernel.RunFinalizing || durable.Terminal != nil || durable.CredentialRevokedAt == nil || durable.Revision != run.Revision {
+	if durable.Phase != kernel.RunTerminal || durable.Terminal == nil || durable.CredentialRevokedAt == nil || durable.Revision != run.Revision {
 		t.Fatalf("durable interrupted run = %+v", durable)
 	}
 	session, found, err := fixture.store.TerminalSessionForRun(context.Background(), run.ID)
 	if err != nil || !found {
 		t.Fatalf("durable interrupted session: found=%v err=%v", found, err)
 	}
-	// A pre-start interruption converges atomically: the never-activated
-	// session is closed and every declared resource is released empty. An
-	// interrupted active attempt instead leaves releasing residue for
-	// recovery to prove absent.
-	wantResource := kernel.ResourceReleasing
-	if sessionState == kernel.TerminalSessionClosed {
-		wantResource = kernel.ResourceReleased
-		if session.ClosedAt == nil || session.ActivatedAt != nil {
-			t.Fatalf("interrupted session = %+v, want atomically closed pre-activation session", session)
-		}
-	} else if session.ClosedAt != nil {
-		t.Fatalf("interrupted session = %+v, want state %s and not closed", session, sessionState)
+	if session.State != kernel.TerminalSessionClosed || session.ClosedAt == nil {
+		t.Fatalf("interrupted session = %+v, want closed", session)
 	}
-	if session.State != sessionState {
-		t.Fatalf("interrupted session = %+v, want state %s", session, sessionState)
-	}
-	resources := fixture.resources(t, run.ID)
-	if len(resources) != 4 {
-		t.Fatalf("interrupted resource count = %d, want 4", len(resources))
-	}
-	for _, resource := range resources {
-		if resource.State != wantResource {
-			t.Fatalf("interrupted resource %s = %s, want %s", resource.Kind, resource.State, wantResource)
-		}
-		if wantResource == kernel.ResourceReleased && !resource.Identity.Empty() {
-			t.Fatalf("interrupted resource %s retained identity", resource.Kind)
-		}
-	}
+	fixture.assertReleased(t, run)
 }
 
 func (fixture *supervisorFixture) assertOneWitness(t *testing.T) {
@@ -1757,7 +1743,7 @@ func (fixture *supervisorFixture) assertReleased(t *testing.T, run kernel.Run) {
 		if resource.State != kernel.ResourceReleased {
 			t.Fatalf("resource %s state = %s", resource.Kind.String(), resource.State.String())
 		}
-		if resource.Kind != kernel.ResourceRuntimeRoot {
+		if resource.Kind != kernel.ResourceRuntimeRoot && !resource.Identity.Empty() {
 			identity, err := runnerIdentity(resource.Identity)
 			if err != nil {
 				t.Fatal(err)

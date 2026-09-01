@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
@@ -28,10 +29,8 @@ type SupervisorSpec struct {
 	ToolPath             string
 
 	// UnsettledCompletion reports a scheduled attempt whose durable
-	// convergence could not be settled to a terminal record: the run stays
-	// finalizing and discoverable while the scheduler keeps serving every
-	// other attempt. A nil reporter drops nothing durable — the run and its
-	// task remain visibly nonterminal in the public state.
+	// convergence remains finalizing after RunNext. The run stays discoverable
+	// while the scheduler continues serving every other attempt.
 	UnsettledCompletion func(kernel.RunID, error)
 
 	// These unexported hooks are package-test-only ambiguity seams. Production
@@ -71,5 +70,11 @@ func (daemon *Daemon) RunNext(ctx context.Context, spec SupervisorSpec) (run ker
 		return kernel.Run{}, err
 	}
 	defer func() { daemon.endSupervisor(registration, resultErr) }()
-	return daemon.runNext(registration.ctx, spec)
+	run, resultErr = daemon.runNext(registration.ctx, spec)
+	if run.Phase == kernel.RunFinalizing && run.ID != (kernel.RunID{}) {
+		recovered, recoverErr := daemon.recoverReturnedRun(spec.RuntimeParent, spec.ChangeParent, run.ID)
+		run = recovered
+		resultErr = errors.Join(resultErr, recoverErr)
+	}
+	return run, resultErr
 }
