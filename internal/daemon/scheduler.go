@@ -53,7 +53,7 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 	validateCompletion := spec.scheduledCompletion
 	if validateCompletion == nil {
 		validateCompletion = func(observed kernel.Run) error {
-			return daemon.validateScheduledCompletion(spec.UnsettledCompletion, observed)
+			return daemon.validateScheduledCompletion(spec.ChangeParent, spec.UnsettledCompletion, observed)
 		}
 	}
 	events := make(chan schedulerEvent, (kernel.MaxFactoryCapacity+1)*2)
@@ -180,7 +180,7 @@ func duplicateAdmissionObservation(count int) error {
 	return fmt.Errorf("%w: repeated scheduler observation", kernel.ErrCorruptState)
 }
 
-func (daemon *Daemon) validateScheduledCompletion(unsettled func(kernel.RunID, error), observed kernel.Run) error {
+func (daemon *Daemon) validateScheduledCompletion(changeParent string, unsettled func(kernel.RunID, error), observed kernel.Run) error {
 	if observed.ID == (kernel.RunID{}) {
 		return kernel.NewOutcomeUnknownError(fmt.Errorf("%w: admitted attempt returned no run", kernel.ErrCorruptState))
 	}
@@ -194,10 +194,17 @@ func (daemon *Daemon) validateScheduledCompletion(unsettled func(kernel.RunID, e
 		return kernel.NewOutcomeUnknownError(err)
 	}
 	if current.Phase == kernel.RunFinalizing && current.Proposal != nil {
-		if unsettled != nil {
-			unsettled(current.ID, fmt.Errorf("%w: scheduled run remains finalizing", kernel.ErrConflict))
+		settled, settleErr := daemon.settleRun(changeParent, current.ID)
+		if settleErr != nil {
+			if errors.Is(settleErr, kernel.ErrConflict) {
+				if unsettled != nil {
+					unsettled(current.ID, settleErr)
+				}
+				return nil
+			}
+			return kernel.NewOutcomeUnknownError(fmt.Errorf("daemon: scheduled completion was not settled: %w", settleErr))
 		}
-		return nil
+		current = settled
 	}
 	if current.Phase != kernel.RunTerminal {
 		return kernel.NewOutcomeUnknownError(fmt.Errorf("%w: scheduled run remained %s", kernel.ErrConflict, current.Phase.String()))

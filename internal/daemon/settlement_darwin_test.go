@@ -126,9 +126,21 @@ func TestSettleRunRefusesUnverifiablePublishedChange(t *testing.T) {
 	}
 }
 
-// TestScheduledCompletionRequiresRunNextSettlement pins the scheduler's
-// narrow responsibility: a finalizing completion is not accepted as done.
-func TestScheduledCompletionRequiresRunNextSettlement(t *testing.T) {
+func TestScheduledCompletionSettlesReturnedReleasedRun(t *testing.T) {
+	fixture := newRecoveryFixtureWithRole(t, 0x88, kernel.RoleWorker)
+	failed := fixture.failBeforeRuntime(t)
+	if err := fixture.daemon.validateScheduledCompletion(fixture.changeParent, nil, failed); err != nil {
+		t.Fatalf("released completion = %v", err)
+	}
+	settled := fixture.currentRun(t)
+	if settled.Phase != kernel.RunTerminal || settled.Terminal == nil || settled.Terminal.Code() != kernel.FailureSpawn {
+		t.Fatalf("released completion stayed nonterminal: %+v", settled)
+	}
+}
+
+// TestScheduledCompletionSurfacesUnsettledRun pins the non-fatal refusal:
+// residue that still cannot settle remains visible while scheduling continues.
+func TestScheduledCompletionSurfacesUnsettledRun(t *testing.T) {
 	fixture := newRecoveryFixtureWithRole(t, 0x90, kernel.RoleWorker)
 	fixture.stageRuntime(t)
 	fixture.beginRunnerStart(t)
@@ -158,7 +170,7 @@ func TestScheduledCompletionRequiresRunNextSettlement(t *testing.T) {
 	fixture.run = failed
 	reported := kernel.RunID{}
 	var reportedErr error
-	err = fixture.daemon.validateScheduledCompletion(func(id kernel.RunID, cause error) {
+	err = fixture.daemon.validateScheduledCompletion(fixture.changeParent, func(id kernel.RunID, cause error) {
 		reported, reportedErr = id, cause
 	}, failed)
 	if err != nil {

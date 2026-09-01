@@ -42,6 +42,7 @@ func TestBlackBoxServiceLifecycle(t *testing.T) {
 		// Guaranteed teardown: the disposable label must not survive the test
 		// process regardless of which assertion failed.
 		_ = exec.Command("/bin/launchctl", "bootout", fmt.Sprintf("gui/%d/%s", os.Geteuid(), label)).Run()
+		awaitNoHomeProcesses(t, fixture.home, 20*time.Second)
 	})
 
 	// Install: launchd starts factoryd from the sibling service directory.
@@ -71,6 +72,10 @@ func TestBlackBoxServiceLifecycle(t *testing.T) {
 		t.Fatalf("stop state = %+v", state)
 	}
 	awaitSocketGone(t, install.LocalAPISocketPath(fixture.home), 20*time.Second)
+	// launchd absence and a closed listener do not prove that factoryd has
+	// joined its scheduler and released the home. Do not bootstrap a second
+	// owner until the first process has actually left.
+	awaitNoHomeProcesses(t, fixture.home, 20*time.Second)
 	state = serviceState(t, fixture.runFactoryctl(t, 0, serviceArgs("status")...))
 	if state.State != "installed" {
 		t.Fatalf("stopped status = %+v", state)
