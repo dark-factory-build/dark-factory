@@ -269,8 +269,8 @@ func acknowledgeTerminalEffectExit(t *testing.T, fixture *terminalEffectFixture,
 	case <-time.After(time.Second):
 		t.Fatal("terminal owner did not join after the exit broadcast")
 	}
-	if !fixture.attempt.controllerClosed || fixture.attempt.binding != (terminalBinding{}) {
-		t.Fatalf("converged owner census: closed=%v binding=%+v", fixture.attempt.controllerClosed, fixture.attempt.binding)
+	if !fixture.attempt.controller.Closed() || fixture.attempt.binding != (terminalBinding{}) {
+		t.Fatalf("converged owner census: closed=%v binding=%+v", fixture.attempt.controller.Closed(), fixture.attempt.binding)
 	}
 }
 
@@ -999,7 +999,7 @@ func TestCancelHumanRequestSurfacesOwnerFenceFailureAfterCommit(t *testing.T) {
 			if _, _, duplicateErr := fixture.adapter.daemon.cancelHumanRequestRun(context.Background(), cancellingClient.ID, request.ID, request.Revision, currentRun.Revision, adapterTime(t, 2_002)); !errors.Is(duplicateErr, kernel.ErrRevisionConflict) {
 				t.Fatalf("duplicate cancel = %v", duplicateErr)
 			}
-			if !fixture.attempt.controllerClosed {
+			if !fixture.attempt.controller.Closed() {
 				t.Fatal("owner was not closed after an unacknowledged fence")
 			}
 		})

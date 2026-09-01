@@ -880,16 +880,21 @@ func kernelProcessExit(exit runner.Exit, at kernel.UnixMillis) (kernel.ProcessEx
 
 // failureDetail records why the daemon failed a run. The proposal detail is the
 // one durable free-form field a failed run carries, it survives to terminal,
-// and it was storing a constant while the cause was discarded. Truncation keeps
-// whole runes so the stored text stays valid UTF-8.
+// and it was storing a constant while the cause was discarded.
 func failureDetail(cause error) string {
 	if cause == nil {
 		return "daemon attempt failure"
 	}
 	detail := cause.Error()
-	for len(detail) > maxFailureDetailBytes {
-		_, size := utf8.DecodeLastRuneInString(detail[:maxFailureDetailBytes+1])
-		detail = detail[:maxFailureDetailBytes+1-size]
+	if len(detail) <= maxFailureDetailBytes {
+		return detail
+	}
+	// The bound is on bytes, so the cut can land inside a rune. Drop bytes off
+	// the end until what remains decodes, rather than storing a truncated
+	// encoding in a column that is meant to be readable.
+	detail = detail[:maxFailureDetailBytes]
+	for len(detail) > 0 && !utf8.ValidString(detail) {
+		detail = detail[:len(detail)-1]
 	}
 	return detail
 }

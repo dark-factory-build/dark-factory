@@ -158,21 +158,36 @@ func TestSupervisorFailedRunPersistsItsCause(t *testing.T) {
 	}
 }
 
-// A cause longer than the field must be truncated on a rune boundary so the
-// stored text stays valid UTF-8.
+// A cause longer than the field must be truncated without splitting a rune.
+// The bound is 4096 bytes, so whether a naive cut lands mid-rune depends on the
+// rune width and on how much precedes it: two-byte runes at even alignment are
+// the one case that survives a broken implementation, so every width and offset
+// is exercised here rather than the convenient one.
 func TestFailureDetailTruncatesWholeRunes(t *testing.T) {
-	long := errors.New(strings.Repeat("é", maxFailureDetailBytes))
-	detail := failureDetail(long)
-	if len(detail) > maxFailureDetailBytes {
-		t.Fatalf("detail is %d bytes, over the %d-byte field", len(detail), maxFailureDetailBytes)
-	}
-	if !utf8.ValidString(detail) {
-		t.Fatal("truncation split a rune")
-	}
-	if _, err := kernel.NewFailureProposal(kernel.FailureInternal, detail); err != nil {
-		t.Fatalf("kernel rejected the truncated detail: %v", err)
+	for _, glyph := range []string{"e", "é", "€", "😀"} {
+		for pad := 0; pad < 4; pad++ {
+			cause := errors.New(strings.Repeat("a", pad) + strings.Repeat(glyph, maxFailureDetailBytes))
+			detail := failureDetail(cause)
+			if len(detail) > maxFailureDetailBytes {
+				t.Fatalf("width %d pad %d: detail is %d bytes, over the %d-byte field", len(glyph), pad, len(detail), maxFailureDetailBytes)
+			}
+			if !utf8.ValidString(detail) {
+				t.Fatalf("width %d pad %d: truncation split a rune", len(glyph), pad)
+			}
+			if _, err := kernel.NewFailureProposal(kernel.FailureInternal, detail); err != nil {
+				t.Fatalf("width %d pad %d: kernel rejected the detail: %v", len(glyph), pad, err)
+			}
+			// Truncation must lose the tail, not the message.
+			if want := maxFailureDetailBytes - len(glyph) + 1; len(detail) < want {
+				t.Fatalf("width %d pad %d: truncation dropped %d bytes, want at most one rune", len(glyph), pad, maxFailureDetailBytes-len(detail))
+			}
+		}
 	}
 	if failureDetail(nil) == "" {
 		t.Fatal("a nil cause produced an empty detail")
+	}
+	short := errors.New("kept whole")
+	if failureDetail(short) != "kept whole" {
+		t.Fatalf("a short cause was altered: %q", failureDetail(short))
 	}
 }

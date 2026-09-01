@@ -530,10 +530,7 @@ func (attempt *liveAttempt) shutdownController() error {
 	if !attempt.resultSeen {
 		result = attempt.terminateController()
 	}
-	closeErr := attempt.controller.Close()
-	if closeErr == nil || errors.Is(closeErr, runner.ErrState) {
-		attempt.controllerClosed = true
-	} else {
+	if closeErr := attempt.controller.Close(); closeErr != nil && !errors.Is(closeErr, runner.ErrState) {
 		result = errors.Join(result, closeErr)
 	}
 	return result

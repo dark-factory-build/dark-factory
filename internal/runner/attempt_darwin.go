@@ -329,13 +329,22 @@ func (c *AttemptController) acknowledgeCurrentExecCheck() error {
 	return c.writeFrame(attemptFrame{Version: 1, Kind: "current-exec-check-ack"}, maxFrameBytes)
 }
 
-// Spent reports that the capability ended because the transport ended, rather
-// than because a caller closed it. Only writeFrame and Next set that state, and
-// only when the socket itself is finished, so this is a fact the transport
-// recorded — not one reconstructed by matching sentinels in an error tree that
-// any decoder or subprocess could have contributed to.
+// Spent reports that the capability ended by failing, rather than because a
+// caller closed it. Only writeFrame and Next set that state: a read that ended
+// the stream, or a write that could not be completed. The second is broader
+// than a dead peer — a write that exhausts its deadline against a live but
+// unresponsive peer also spends the capability, because a partial frame is
+// unrecoverable either way. What this is not is a fact reconstructed by
+// matching sentinels in an error tree any decoder or subprocess could have
+// contributed to.
 func (c *AttemptController) Spent() bool {
 	return c != nil && c.state == controllerSpent
+}
+
+// Closed reports that the capability is gone, however it ended. Spent says
+// which of the two ways.
+func (c *AttemptController) Closed() bool {
+	return c == nil || c.file == nil
 }
 
 // Close drops the capability deliberately. It leaves the state alone, so Spent

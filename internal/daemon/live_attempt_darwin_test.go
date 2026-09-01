@@ -205,7 +205,7 @@ func TestLiveAttemptOwnerClosesControllerBeforeDoneOnReadError(t *testing.T) {
 	if err := attempt.join(); err == nil {
 		t.Fatal("owner read error was hidden")
 	}
-	if !attempt.controllerClosed {
+	if !attempt.controller.Closed() {
 		t.Fatal("owner published done before controller closure")
 	}
 }
