@@ -215,6 +215,10 @@ func readFrame(r io.Reader, dst any, limit int) error {
 	if _, err := io.ReadFull(r, body); err != nil {
 		return err
 	}
+	// io.EOF and io.ErrUnexpectedEOF out of this function mean the stream
+	// ended, and only that: decodeFrameBody renames the decoder's own two
+	// EOF answers so a malformed body from a live peer cannot impersonate a
+	// closed one.
 	return decodeFrameBody(body, dst)
 }
 

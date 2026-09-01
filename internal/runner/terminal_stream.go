@@ -182,6 +182,14 @@ func decodeFrameBody(body []byte, dst any) error {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
+		// The decoder reports a body holding no value at all as io.EOF, and one
+		// that stops mid-value as io.ErrUnexpectedEOF. Both describe this
+		// buffer, never the stream it arrived on, yet callers read exactly
+		// those two errors from a frame read as proof the peer is gone. Neither
+		// may escape wearing a transport error's name.
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return fmt.Errorf("runner: malformed frame body: %v", err)
+		}
 		return err
 	}
 	var trailing json.RawMessage

@@ -248,8 +248,6 @@ type liveAttempt struct {
 	resultSeen           bool
 	resultNotice         *runner.AttemptResultNotice
 	creditOutstanding    uint64
-	creditDead           bool
-	controllerClosed     bool
 	finalErr             error
 	binding              terminalBinding
 	effectLimit          time.Duration

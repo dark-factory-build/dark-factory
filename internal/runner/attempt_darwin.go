@@ -35,7 +35,7 @@ const (
 	controllerPopulationReported
 	controllerProviderReleased
 	controllerResult
-	controllerPoisoned
+	controllerSpent
 )
 
 // AttemptController is the daemon side of one fixed attempt-runner protocol.
@@ -50,7 +50,7 @@ type AttemptController struct {
 
 // writeFrame is the controller's only authoritative write path. A failed
 // framed write may have left a peer with an indistinguishable prefix, so the
-// capability is poisoned immediately and can never append a retry to it.
+// capability is spent immediately and can never append a retry to it.
 func (c *AttemptController) writeFrame(value any, limit int) error {
 	if c == nil || c.file == nil {
 		return ErrState
@@ -59,10 +59,16 @@ func (c *AttemptController) writeFrame(value any, limit int) error {
 	if err == nil {
 		return nil
 	}
+	return errors.Join(err, c.spend())
+}
+
+// spend closes the sole control capability and puts the controller in its
+// terminal state, so every later call answers ErrState.
+func (c *AttemptController) spend() error {
 	closeErr := c.file.Close()
 	c.file = nil
-	c.state = controllerPoisoned
-	return errors.Join(err, closeErr)
+	c.state = controllerSpent
+	return closeErr
 }
 
 func NewAttemptController() (*AttemptController, *os.File, error) {
@@ -136,6 +142,23 @@ func (c *AttemptController) Next(timeout time.Duration) (AttemptEvent, error) {
 	defer c.file.SetReadDeadline(time.Time{})
 	var frame attemptFrame
 	if err := readFrame(c.file, &frame, maxConfigBytes); err != nil {
+		// These two errors, and only these two, mean the read stopped because
+		// the stream ended: readFrame gets them from io.ReadFull, and
+		// decodeFrameBody renames the decoder's identically-named answers so a
+		// malformed body cannot reach here. A deadline reports itself
+		// separately and never lands here.
+		//
+		// The stream ending is conclusive rather than transient, because this
+		// control socket is only ever closed outright. Nothing in the tree
+		// half-closes it with shutdown(2), which is the one way a live peer
+		// could show a reader EOF while still accepting writes. Given that,
+		// no further frame can arrive and no later write can be delivered, so
+		// spending the capability makes ErrState — rather than a broken pipe
+		// from a write nobody could have received — the answer to every call
+		// that follows.
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return AttemptEvent{}, errors.Join(err, c.spend())
+		}
 		return AttemptEvent{}, err
 	}
 	if frame.Version != 1 {
@@ -306,6 +329,28 @@ func (c *AttemptController) acknowledgeCurrentExecCheck() error {
 	return c.writeFrame(attemptFrame{Version: 1, Kind: "current-exec-check-ack"}, maxFrameBytes)
 }
 
+// Spent reports that the capability ended by failing, rather than because a
+// caller closed it. Only writeFrame and Next set that state: a read that ended
+// the stream, or a write that could not be completed. The second is broader
+// than a dead peer — a write that exhausts its deadline against a live but
+// unresponsive peer also spends the capability, because a partial frame is
+// unrecoverable either way. What this is not is a fact reconstructed by
+// matching sentinels in an error tree any decoder or subprocess could have
+// contributed to.
+func (c *AttemptController) Spent() bool {
+	return c != nil && c.state == controllerSpent
+}
+
+// Closed reports that the capability is gone, however it ended. Spent says
+// which of the two ways.
+func (c *AttemptController) Closed() bool {
+	return c == nil || c.file == nil
+}
+
+// Close drops the capability deliberately. It leaves the state alone, so Spent
+// keeps telling a caller which of the two ended it; and it clears the file even
+// when the close itself fails, so no caller can be handed a descriptor it
+// might use again.
 func (c *AttemptController) Close() error {
 	if c == nil || c.file == nil {
 		return nil

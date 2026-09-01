@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/changeworker"
@@ -42,6 +43,40 @@ type supervisorAttemptOwner struct {
 	child      *runner.OwnedChild
 	activated  bool
 	reaped     bool
+	outerExit  *runner.Exit
+}
+
+// reap waits the exact outer child and keeps what it learned. The status is the
+// only thing that distinguishes a runner that exited cleanly from one that
+// failed to exec or was killed, and four call sites waiting the child directly
+// is how it came to be discarded on the most common path. Every wait that can
+// still observe a status goes through here; OwnedChild.Close waits too, but
+// only ever after this has already reached stateWaited, so it has none left to
+// discard.
+func (owner *supervisorAttemptOwner) reap(timeout time.Duration) (runner.Exit, error) {
+	exit, err := owner.child.FinishAfterExit(timeout)
+	if err != nil {
+		return runner.Exit{}, err
+	}
+	owner.reaped = true
+	owner.outerExit = &exit
+	return exit, nil
+}
+
+// outerRunnerEvidence names how the outer runner ended. A control read that
+// ends the stream, or a write that finds the peer gone, says only that the
+// socket is finished — the same thing however the runner died. The owner has
+// waited that exact child, so the status that tells those apart is in hand.
+func (owner *supervisorAttemptOwner) outerRunnerEvidence() error {
+	if owner.outerExit == nil {
+		return nil
+	}
+	exit := *owner.outerExit
+	launch := ""
+	if exit.LaunchErr != "" {
+		launch = fmt.Sprintf(" launch=%q", exit.LaunchErr)
+	}
+	return fmt.Errorf("daemon: outer runner exit code=%d signal=%d%s", exit.Code, exit.Signal, launch)
 }
 
 func (owner *supervisorAttemptOwner) close() error {
@@ -49,48 +84,25 @@ func (owner *supervisorAttemptOwner) close() error {
 		return nil
 	}
 	var terminationErr, controllerErr error
-	if owner.live != nil {
-		live := owner.live
+	if live := owner.live; live != nil {
+		// live.close joins the owner goroutine, and that owner always closes
+		// the controller before it returns. AttemptController.Close clears the
+		// capability even when the close itself fails, so there is no state in
+		// which this outer owner could usefully terminate or close it again.
+		// The controller is kept, not nilled: its Spent bit is how the caller
+		// learns whether the transport ended or a caller closed it.
 		controllerErr = live.close()
-		// live.close joins the owner before returning. If its close attempt was
-		// uncertain, this outer owner still retains the original controller and
-		// can make the final synchronous convergence attempt without a second
-		// concurrent reader/writer.
-		if !live.controllerClosed && owner.controller != nil {
-			terminationErr = owner.controller.Terminate()
-			if errors.Is(terminationErr, runner.ErrState) {
-				terminationErr = nil
-			}
-			fallbackCloseErr := owner.controller.Close()
-			controllerErr = errors.Join(controllerErr, fallbackCloseErr)
-			if fallbackCloseErr == nil || errors.Is(fallbackCloseErr, runner.ErrState) {
-				live.controllerClosed = true
-			}
-		}
-		if live.controllerClosed {
-			owner.live = nil
-			owner.controller = nil
-		}
-		if !live.controllerClosed {
-			// The outer child is not safe to reap while the released provider
-			// capability remains open: its process group is distinct and could
-			// outlive this owner. Leave the exact references intact so a caller
-			// can retry cleanup and surface the unresolved condition.
-			return errors.Join(terminationErr, controllerErr, fmt.Errorf("daemon: live attempt controller remains open"))
-		}
+		owner.live = nil
 	} else if owner.controller != nil {
-		// A released provider belongs to the inner attempt runner's distinct
-		// process group. Ask that live owner to converge it before dropping the
-		// control capability; killing only the outer group cannot prove absence.
+		// No live owner ever took over, so this owner still holds the only
+		// control capability. A released provider belongs to the inner runner's
+		// distinct process group; ask it to converge before dropping the
+		// capability, because killing only the outer group cannot prove absence.
 		terminationErr = owner.controller.Terminate()
 		if errors.Is(terminationErr, runner.ErrState) {
 			terminationErr = nil
 		}
-		closeErr := owner.controller.Close()
-		controllerErr = closeErr
-		if closeErr == nil || errors.Is(closeErr, runner.ErrState) {
-			owner.controller = nil
-		}
+		controllerErr = owner.controller.Close()
 	}
 	if owner.child != nil {
 		if owner.activated && !owner.reaped {
@@ -98,7 +110,7 @@ func (owner *supervisorAttemptOwner) close() error {
 			// provider group. Let it converge and exit; terminating the outer
 			// first could orphan that distinct group.
 			for {
-				if _, err := owner.child.FinishAfterExit(8 * time.Second); err == nil {
+				if _, err := owner.reap(8 * time.Second); err == nil {
 					break
 				}
 				time.Sleep(25 * time.Millisecond)
@@ -379,7 +391,17 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	}
 	owner := &supervisorAttemptOwner{controller: controller, child: child}
 	controllerOpen = false
-	defer func() { resultErr = errors.Join(resultErr, owner.close()) }()
+	defer func() {
+		closeErr := owner.close()
+		resultErr = errors.Join(resultErr, closeErr)
+		// Ask the controller how it ended rather than searching the failure for
+		// sentinels. Only the transport sets that bit, and only when the socket
+		// itself is finished, so a decoder, a directory read or a git child
+		// cannot contribute one by accident.
+		if owner.controller.Spent() {
+			resultErr = errors.Join(resultErr, owner.outerRunnerEvidence())
+		}
+	}()
 	runnerResourceIdentity, err := processResourceIdentity(child.Identity())
 	if err != nil {
 		return daemon.convergeUnstartedRunner(run, owner, keys.resources.RunnerProcess, err)
@@ -556,12 +578,11 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		}
 		record = authenticated
 	} else {
-		fallbackExit, waitErr := child.FinishAfterExit(8 * time.Second)
+		fallbackExit, waitErr := owner.reap(8 * time.Second)
 		if waitErr != nil {
 			return daemon.failRun(run, kernel.FailureProtocol, errors.Join(resultOutcome.err, waitErr))
 		}
 		outerExit = fallbackExit
-		owner.reaped = true
 		authenticated, authErr := runner.AuthenticateAttemptResult(runtimeDirectory, run.ID.String(), nil)
 		if authErr != nil {
 			return daemon.failRun(run, kernel.FailureProtocol, errors.Join(resultOutcome.err, authErr))
@@ -586,12 +607,11 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		}
 	}
 	if !owner.reaped {
-		waitedExit, waitErr := child.FinishAfterExit(8 * time.Second)
+		waitedExit, waitErr := owner.reap(8 * time.Second)
 		if waitErr != nil {
 			return run, fmt.Errorf("daemon: wait outer runner: %w", waitErr)
 		}
 		outerExit = waitedExit
-		owner.reaped = true
 	}
 	exitAt, err := daemon.timestamp()
 	if err != nil {
@@ -858,6 +878,29 @@ func kernelProcessExit(exit runner.Exit, at kernel.UnixMillis) (kernel.ProcessEx
 	return kernel.NewProcessExitCode(1, int64(exit.Code), at)
 }
 
+// failureDetail records why the daemon failed a run. The proposal detail is the
+// one durable free-form field a failed run carries, it survives to terminal,
+// and it was storing a constant while the cause was discarded.
+func failureDetail(cause error) string {
+	if cause == nil {
+		return "daemon attempt failure"
+	}
+	detail := cause.Error()
+	if len(detail) <= maxFailureDetailBytes {
+		return detail
+	}
+	// The bound is on bytes, so the cut can land inside a rune. Drop bytes off
+	// the end until what remains decodes, rather than storing a truncated
+	// encoding in a column that is meant to be readable.
+	detail = detail[:maxFailureDetailBytes]
+	for len(detail) > 0 && !utf8.ValidString(detail) {
+		detail = detail[:len(detail)-1]
+	}
+	return detail
+}
+
+const maxFailureDetailBytes = 4096
+
 func (daemon *Daemon) failRun(run kernel.Run, code kernel.FailureCode, cause error) (kernel.Run, error) {
 	// Infrastructure failure is another path into finalizing. It must share
 	// the same linearization gate as attach and later terminal effects: an
@@ -865,7 +908,7 @@ func (daemon *Daemon) failRun(run kernel.Run, code kernel.FailureCode, cause err
 	// this transition has revoked durable authority.
 	daemon.operationMu.Lock()
 	defer daemon.operationMu.Unlock()
-	failure, err := kernel.NewFailureProposal(code, "daemon attempt failure")
+	failure, err := kernel.NewFailureProposal(code, failureDetail(cause))
 	if err != nil {
 		return run, errors.Join(cause, err)
 	}
@@ -910,7 +953,7 @@ func (daemon *Daemon) failRun(run kernel.Run, code kernel.FailureCode, cause err
 func (daemon *Daemon) failRunBeforeRuntime(run kernel.Run, runtimeID kernel.ResourceID, code kernel.FailureCode, cause error) (kernel.Run, error) {
 	daemon.operationMu.Lock()
 	defer daemon.operationMu.Unlock()
-	failure, err := kernel.NewFailureProposal(code, "daemon attempt failure")
+	failure, err := kernel.NewFailureProposal(code, failureDetail(cause))
 	if err != nil {
 		return run, errors.Join(cause, err)
 	}
@@ -1048,10 +1091,9 @@ func (daemon *Daemon) convergeActivatedRunner(run kernel.Run, owner *supervisorA
 		}
 		if owner.child != nil {
 			for attempt := 0; attempt < supervisorReconcileAttempts; attempt++ {
-				exit, exitErr := owner.child.FinishAfterExit(8 * time.Second)
+				exit, exitErr := owner.reap(8 * time.Second)
 				if exitErr == nil {
 					outerExit, reaped = exit, true
-					owner.reaped = true
 					break
 				}
 			}

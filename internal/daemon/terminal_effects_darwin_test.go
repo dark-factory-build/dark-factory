@@ -90,27 +90,7 @@ func newTerminalEffectFixtureConfigured(t *testing.T, configure func(*liveAttemp
 
 func readyTerminalEffectController(t *testing.T) (*runner.AttemptController, *os.File) {
 	t.Helper()
-	controller, peer, err := runner.NewAttemptController()
-	if err != nil {
-		t.Fatal(err)
-	}
-	executable, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	wrapper, err := runner.PrepareExecSpec(runner.ExecSpec{Target: executable, Args: []string{"--unused"}, Env: []string{"PATH=/usr/bin:/bin"}, Cwd: t.TempDir()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := controller.Configure(runner.AttemptSpec{AttemptID: "daemon-terminal-effect", Wrapper: wrapper, MarkerName: runner.InnerActivationMarkerName, ResultName: runner.AttemptResultSpoolName, ResultProof: testResultProof(t)}); err != nil {
-		t.Fatal(err)
-	}
-	_ = readTerminalEffectWire(t, peer)
-	identity := runner.Identity{PID: 41001, PGID: 41001, Birth: runner.Birth{Seconds: 17, Microseconds: 9}}
-	writeTerminalEffectWire(t, peer, terminalEffectWireFrame{Version: 1, Kind: "inner-ready", Identity: identity})
-	if event, err := controller.Next(time.Second); err != nil || event.Kind != runner.AttemptInnerReady {
-		t.Fatalf("inner ready = %+v, %v", event, err)
-	}
+	controller, peer := innerReadyControlPair(t, "daemon-terminal-effect")
 	for _, stage := range []runner.AttemptStage{runner.StageSelection, runner.StagePreparation, runner.StagePopulation} {
 		if err := controller.Release(stage); err != nil {
 			t.Fatal(err)
@@ -289,8 +269,8 @@ func acknowledgeTerminalEffectExit(t *testing.T, fixture *terminalEffectFixture,
 	case <-time.After(time.Second):
 		t.Fatal("terminal owner did not join after the exit broadcast")
 	}
-	if !fixture.attempt.controllerClosed || fixture.attempt.binding != (terminalBinding{}) {
-		t.Fatalf("converged owner census: closed=%v binding=%+v", fixture.attempt.controllerClosed, fixture.attempt.binding)
+	if !fixture.attempt.controller.Closed() || fixture.attempt.binding != (terminalBinding{}) {
+		t.Fatalf("converged owner census: closed=%v binding=%+v", fixture.attempt.controller.Closed(), fixture.attempt.binding)
 	}
 }
 
@@ -1019,7 +999,7 @@ func TestCancelHumanRequestSurfacesOwnerFenceFailureAfterCommit(t *testing.T) {
 			if _, _, duplicateErr := fixture.adapter.daemon.cancelHumanRequestRun(context.Background(), cancellingClient.ID, request.ID, request.Revision, currentRun.Revision, adapterTime(t, 2_002)); !errors.Is(duplicateErr, kernel.ErrRevisionConflict) {
 				t.Fatalf("duplicate cancel = %v", duplicateErr)
 			}
-			if !fixture.attempt.controllerClosed {
+			if !fixture.attempt.controller.Closed() {
 				t.Fatal("owner was not closed after an unacknowledged fence")
 			}
 		})
@@ -1391,4 +1371,44 @@ func TestProviderExitAndOwnerDeathFencePrivateBinding(t *testing.T) {
 			t.Fatalf("input after owner death = %v", err)
 		}
 	})
+}
+
+// A terminal effect in flight when the runner exits is the other place the
+// daemon learns the control end is gone by reading it. That error carries the
+// transport sentinel the supervisor uses to decide whether the runner's exit
+// status is the missing part of the diagnosis, so this path must wrap it rather
+// than replace it with prose, exactly as the owner loop does.
+func TestTerminalEffectKeepsControlEndedSentinel(t *testing.T) {
+	controller, peer := readyTerminalEffectController(t)
+	runID, sessionID := liveTestIDs(t, 10021)
+	attempt := newLiveAttempt(nil, runID, sessionID, controller)
+	attempt.releaseSent = true
+	attempt.readySeen = true
+	attempt.effectLimit = 4 * time.Second
+	drained := make(chan error, 1)
+	go func() {
+		// Consuming the command proves the write landed while the runner was
+		// alive, so the exit that follows is the runner's own.
+		var header [4]byte
+		if _, err := io.ReadFull(peer, header[:]); err != nil {
+			drained <- err
+			return
+		}
+		body := make([]byte, binary.BigEndian.Uint32(header[:]))
+		if _, err := io.ReadFull(peer, body); err != nil {
+			drained <- err
+			return
+		}
+		drained <- peer.Close()
+	}()
+	_, err := attempt.runTerminalEffect(runner.TerminalCommand{Kind: runner.TerminalGenerationInstall, Generation: 1})
+	if peerErr := <-drained; peerErr != nil {
+		t.Fatalf("runner peer: %v", peerErr)
+	}
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("effect after runner exit lost the stream sentinel: %v", err)
+	}
+	if !strings.Contains(err.Error(), "attempt controller closed") {
+		t.Fatalf("effect error does not name the closed controller: %v", err)
+	}
 }

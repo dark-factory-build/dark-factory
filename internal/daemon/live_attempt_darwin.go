@@ -5,6 +5,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"syscall"
@@ -125,10 +126,7 @@ func (attempt *liveAttempt) loop(ctx context.Context) error {
 		}
 		event, err := attempt.controller.Next(8 * time.Second)
 		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return errors.New("daemon: attempt controller closed")
-			}
-			return err
+			return controllerClosedError(err)
 		}
 		if stop, err := attempt.handleRunnerEvent(event); err != nil {
 			return err
@@ -476,9 +474,7 @@ func (attempt *liveAttempt) runTerminalEffect(command runner.TerminalCommand) (t
 		}
 		event, err := attempt.controller.Next(remaining)
 		if err != nil {
-			if errors.Is(err, io.EOF) {
-				err = errors.New("daemon: attempt controller closed")
-			}
+			err = controllerClosedError(err)
 			return uncertainTerminalEffect(err), err
 		}
 		if event.Kind == runner.AttemptTerminalFrame && event.Frame != nil && terminalOperationResult(event.Frame.Kind) {
@@ -534,10 +530,7 @@ func (attempt *liveAttempt) shutdownController() error {
 	if !attempt.resultSeen {
 		result = attempt.terminateController()
 	}
-	closeErr := attempt.controller.Close()
-	if closeErr == nil || errors.Is(closeErr, runner.ErrState) {
-		attempt.controllerClosed = true
-	} else {
+	if closeErr := attempt.controller.Close(); closeErr != nil && !errors.Is(closeErr, runner.ErrState) {
 		result = errors.Join(result, closeErr)
 	}
 	return result
@@ -826,25 +819,30 @@ func (attempt *liveAttempt) nextCorrelation() (uint64, error) {
 }
 
 func (attempt *liveAttempt) addCredit(credit uint64) error {
-	if attempt.creditDead {
-		return nil
-	}
 	if credit == 0 || credit > liveAttemptCredit || attempt.creditOutstanding+credit > liveAttemptCredit {
 		return runner.ErrState
 	}
 	if err := attempt.controller.SendTerminalCommand(runner.TerminalCommand{Kind: runner.TerminalCredit, Credit: uint32(credit)}); err != nil {
-		// The ACK-free outer runner exits as soon as its result is published,
-		// so a credit write can race already-queued output frames against the
-		// closed peer. The credit protocol is over, but the socket must keep
-		// draining: the result frame is still pending behind this output.
-		if peerClosedWrite(err) {
-			attempt.creditDead = true
-			return nil
-		}
+		// This used to swallow a dead-peer write so the socket could keep
+		// draining a result frame queued behind the output. It cannot: the
+		// failed write has already spent the capability, so the next read
+		// answers ErrState and the owner loop ends either way. Report the write
+		// that actually failed rather than the lifecycle error that follows it.
 		return err
 	}
 	attempt.creditOutstanding += credit
 	return nil
+}
+
+// controllerClosedError names the runner's control end going away while
+// keeping the transport sentinel intact. Replacing it with prose, which is what
+// this used to do, hides the one fact the supervisor needs to decide whether
+// the runner's exit status is the missing part of the diagnosis.
+func controllerClosedError(err error) error {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return fmt.Errorf("daemon: attempt controller closed: %w", err)
+	}
+	return err
 }
 
 func peerClosedWrite(err error) bool {
