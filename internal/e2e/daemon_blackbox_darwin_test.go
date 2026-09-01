@@ -49,8 +49,8 @@ func (buffer *syncBuffer) String() string {
 	return buffer.value.String()
 }
 
-// ephemeralBrowserAddress keeps every daemon this fixture starts off the fixed
-// console port. The daemon defaults to one, so this gate could not run beside a
+// ephemeralBrowserAddress keeps the daemons this fixture expects to serve off
+// the fixed console port. The daemon defaults to one, so this gate could not run beside a
 // live install at all: the first factoryd failed to bind and the fixture only
 // ever reported that the API never became ready. The port is the one temporary
 // resource this fixture was not allocating.
@@ -153,7 +153,7 @@ func TestBlackBoxDaemonLifecycle(t *testing.T) {
 
 	// A second factoryd against the live home refuses without disturbing it.
 	refusedOutput := &strings.Builder{}
-	refused := exec.Command(fixture.factoryd, "--home", fixture.home, "--development-browser-address", ephemeralBrowserAddress)
+	refused := exec.Command(fixture.factoryd, "--home", fixture.home)
 	refused.Stdout, refused.Stderr = refusedOutput, refusedOutput
 	if err := refused.Start(); err != nil {
 		t.Fatal(err)
@@ -166,9 +166,9 @@ func TestBlackBoxDaemonLifecycle(t *testing.T) {
 	}
 	// This can only check that the second daemon exited non-zero. Which reason
 	// refused it is unknowable here, because factoryd redacts its startup
-	// failure to a fixed string; that is why the ephemeral port above matters,
-	// since a shared one would let a port collision pass for the home lock. See
-	// #435 and #438.
+	// failure to a fixed string. See #435. It needs no console port of its own:
+	// the home lease is taken before the console is bound, so this daemon is
+	// refused before it ever reaches one.
 	if status := fixture.taskStatus(t, client, firstTask); status != "succeeded" {
 		t.Fatalf("first task after refused double boot = %q", status)
 	}
