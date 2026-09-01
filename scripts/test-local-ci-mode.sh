@@ -58,8 +58,6 @@ fi
 
 grep -Fq 'go test -short -timeout=20m -count=1' "$process_gate" \
     || fail "process tests are not uncached"
-grep -Fq 'go_gate_stage 1200 go test -short -timeout=20m -count=1 ./internal/change' \
-    "$process_gate" || fail "Git boundary census does not own an isolated causal stage"
 for isolated_package in ./internal/change ./internal/changeworker ./internal/daemon; do
     grep -Fq "go_gate_stage 1200 go test -short -timeout=20m -count=1 $isolated_package" \
         "$process_gate" || fail "process package lacks an isolated causal stage: $isolated_package"
