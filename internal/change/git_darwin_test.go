@@ -1136,6 +1136,7 @@ func fixtureGitEnvironment(home string) []string {
 }
 
 func TestGitBoundaryResourceCensus(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
 	homesBefore, err := filepath.Glob(filepath.Join(os.Getenv("TMPDIR"), "dark-factory-git-home-*"))
 	if err != nil {
 		t.Fatal(err)

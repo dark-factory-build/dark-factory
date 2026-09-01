@@ -430,9 +430,9 @@ func openParent(path string) (*homeParent, error) {
 		p.parts = append(p.parts, retainedDir{name: name, file: file, stat: stat})
 		p.file = file
 	}
-	if err := exactDirectory(p.file, true); err != nil {
+	if err := homeParentDirectory(p.file); err != nil {
 		_ = p.close()
-		return nil, fmt.Errorf("home parent is not private: %w", err)
+		return nil, fmt.Errorf("home parent is not safe: %w", err)
 	}
 	return p, nil
 }
@@ -456,7 +456,7 @@ func (p *homeParent) recheck() error {
 			}
 		}
 	}
-	return exactDirectory(p.file, true)
+	return homeParentDirectory(p.file)
 }
 
 func (p *homeParent) commitments() ([]ancestryCommitment, error) {
@@ -537,20 +537,34 @@ func openDirectoryAt(parent *os.File, name string) (*os.File, error) {
 		_ = unix.Close(fd)
 		return nil, errors.New("invalid directory descriptor")
 	}
-	if err := exactDirectory(file, false); err != nil {
+	if err := exactDirectory(file); err != nil {
 		_ = file.Close()
 		return nil, err
 	}
 	return file, nil
 }
 
-func exactDirectory(file *os.File, parent bool) error {
+func exactDirectory(file *os.File) error {
 	var stat unix.Stat_t
 	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
 		return err
 	}
 	if stat.Mode&unix.S_IFMT != unix.S_IFDIR || !exactMode(uint32(stat.Mode), 0o700) || !exactOwner(uint32(stat.Uid)) {
 		return fmt.Errorf("%w: directory must be owner-only 0700", ErrInvalidHome)
+	}
+	if !exactDirectoryLinkCount(uint64(stat.Nlink)) {
+		return fmt.Errorf("%w: directory link count is invalid", ErrInvalidHome)
+	}
+	return nil
+}
+
+func homeParentDirectory(file *os.File) error {
+	var stat unix.Stat_t
+	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
+		return err
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFDIR || !exactOwner(uint32(stat.Uid)) || stat.Mode&0o7022 != 0 {
+		return fmt.Errorf("%w: home parent must be a current-user directory without group/world write access or special mode bits", ErrInvalidHome)
 	}
 	if !exactDirectoryLinkCount(uint64(stat.Nlink)) {
 		return fmt.Errorf("%w: directory link count is invalid", ErrInvalidHome)
@@ -714,7 +728,7 @@ func inspectBinding(ctx context.Context, parent *os.File, name string) (treeSnap
 }
 
 func inspectFD(ctx context.Context, home *os.File) (treeSnapshot, error) {
-	if err := exactDirectory(home, false); err != nil {
+	if err := exactDirectory(home); err != nil {
 		return treeSnapshot{}, err
 	}
 	names, err := home.Readdirnames(memberCount + 1)

@@ -96,6 +96,49 @@ func TestInitPublishesExactHomeAndReplaysReadOnly(t *testing.T) {
 	}
 }
 
+func TestInitAcceptsOwned0755HomeParent(t *testing.T) {
+	parent := installTempDir(t)
+	if err := os.Chmod(parent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(parent, "home")
+	if result, err := Init(context.Background(), home); err != nil || result.State != Published {
+		t.Fatalf("init = %+v, err=%v", result, err)
+	}
+	if result, err := Doctor(context.Background(), home); err != nil || result.State != Ready {
+		t.Fatalf("doctor = %+v, err=%v", result, err)
+	}
+}
+
+func TestInitAndDoctorRejectWritableHomeParents(t *testing.T) {
+	for _, mode := range []os.FileMode{0o775, 0o757} {
+		t.Run(fmt.Sprintf("%04o", mode), func(t *testing.T) {
+			parent := installTempDir(t)
+			if err := os.Chmod(parent, mode); err != nil {
+				t.Fatal(err)
+			}
+			home := filepath.Join(parent, "home")
+			before := installDigest(t, parent)
+			for _, operation := range []struct {
+				name string
+				call func() error
+			}{
+				{name: "init", call: func() error { _, err := Init(context.Background(), home); return err }},
+				{name: "doctor", call: func() error { _, err := Doctor(context.Background(), home); return err }},
+			} {
+				t.Run(operation.name, func(t *testing.T) {
+					if err := operation.call(); !errors.Is(err, ErrInvalidHome) {
+						t.Fatalf("operation error = %v, want invalid home", err)
+					}
+					if after := installDigest(t, parent); after != before {
+						t.Fatal("writable parent changed after refusal")
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestInitRefusesStageAlongsideReadyHome(t *testing.T) {
 	parent := installTempDir(t)
 	home := filepath.Join(parent, "home")

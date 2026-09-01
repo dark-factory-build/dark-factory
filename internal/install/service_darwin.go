@@ -410,7 +410,7 @@ func snapshotServiceHome(ctx context.Context, home *os.File) (serviceHomeImage, 
 	if err := unix.Fstat(int(home.Fd()), &rootBefore); err != nil {
 		return serviceHomeImage{}, err
 	}
-	if err := exactDirectory(home, false); err != nil {
+	if err := exactDirectory(home); err != nil {
 		return serviceHomeImage{}, err
 	}
 	if _, err := home.Seek(0, io.SeekStart); err != nil {

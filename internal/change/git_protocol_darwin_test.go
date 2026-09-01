@@ -574,6 +574,7 @@ func TestSelectedLooseObjectRemovalFailsWithoutFallback(t *testing.T) {
 }
 
 func TestGitStartFailureLeavesNoOwnedProcessDescriptorOrHome(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
 	repository := fakeRepository(t)
 	git := filepath.Join(secureTempDir(t), "git")
 	if err := os.WriteFile(git, []byte("not an executable image"), 0o700); err != nil {

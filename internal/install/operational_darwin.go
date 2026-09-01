@@ -404,7 +404,7 @@ func recheckOperationalCoreIdentityByState(state *operationalHomeState) error {
 	if err := state.parent.recheck(); err != nil {
 		return err
 	}
-	if err := exactDirectory(state.home, false); err != nil {
+	if err := exactDirectory(state.home); err != nil {
 		return err
 	}
 	if err := sameMemberFileIdentity(state.root, state.home, true); err != nil {
@@ -435,7 +435,7 @@ func recheckOperationalIdentity(parent *homeParent, name string, home *os.File, 
 	if err := parent.recheck(); err != nil {
 		return err
 	}
-	if err := exactDirectory(home, false); err != nil {
+	if err := exactDirectory(home); err != nil {
 		return err
 	}
 	if err := sameFileObjectIdentity(toIdentity(homeStat), home); err != nil {
@@ -740,7 +740,7 @@ func (state *operationalHomeState) recheckMembers() error {
 			return fmt.Errorf("%w: retained operational member %s is closed", ErrUncertain, name)
 		}
 		if member.directory {
-			if err := exactDirectory(member.file, false); err != nil {
+			if err := exactDirectory(member.file); err != nil {
 				return fmt.Errorf("recheck retained operational directory %s: %w", name, err)
 			}
 		}

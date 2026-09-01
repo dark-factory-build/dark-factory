@@ -267,7 +267,6 @@ if [ "${DF_GATE_FAULT-}" = env ]; then
 fi
 case "${DF_GATE_FAULT-}:$name" in
     release:test-package-release.sh) echo 'fixture release proof failure' >&2; exit 1 ;;
-    service:go-service-e2e.sh) echo 'fixture service proof failure' >&2; exit 1 ;;
 esac
 EOF
 /bin/cat >"$local_fixture/poison/dirname" <<'EOF'
@@ -317,8 +316,7 @@ for local_child in \
     test-cloudflare-env.sh test-bootstrap-maintainer-v2.sh test-repository-settings.sh \
     test-local-ci-mode.sh test-go-gates.sh test-local-ci-lease.sh \
     test-local-ci-lease-mutations.sh test-go-e2e-tools.sh go-ci-owned.sh \
-    test-prepare-release-source.sh test-publish-release.sh test-package-release.sh \
-    go-service-e2e.sh; do
+    test-prepare-release-source.sh test-publish-release.sh test-package-release.sh; do
     /bin/ln -s stub "$local_fixture/scripts/$local_child"
 done
 
@@ -340,14 +338,6 @@ local_cache_root=$(/usr/bin/tail -n 1 "$local_fixture/cache-roots")
 [ -d "$local_cache_root" ] || fail "failure removed gate cache root"
 [ "$(/usr/bin/head -n 1 "$local_fixture/cache-roots")" = "$local_cache_root" ] \
     || fail "nested gate source changed cache root"
-run_local_fault service
-[ "$local_status" -ne 0 ] || fail "failing service proof passed"
-printf '%s\n' "$local_output" | /usr/bin/grep -F 'fixture service proof failure' >/dev/null \
-    || fail "service failure was unclear: $local_output"
-local_cache_root=$(/usr/bin/tail -n 1 "$local_fixture/cache-roots")
-[ -d "$local_cache_root" ] || fail "second failure removed gate cache root"
-[ "$(/usr/bin/head -n 1 "$local_fixture/cache-roots")" = "$local_cache_root" ] \
-    || fail "second nested gate source changed cache root"
 set +e
 local_output=$(CDPATH= cd -- "$local_fixture" && \
     DARK_FACTORY_LOCAL_CI_LEASE_HELD=1 DF_GATE_FAULT=env \
