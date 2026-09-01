@@ -182,6 +182,11 @@ func writeRawWorkerConfigFrame(t *testing.T, peer *os.File, body []byte) {
 	}
 }
 
+func shellPIDWitness(pid, path string) string {
+	pending := path + ".pending"
+	return fmt.Sprintf("printf '%%s' %s > %q && mv %q %q", pid, pending, pending, path)
+}
+
 func runAttemptWorkerHelper(args []string) error {
 	if len(args) < 2 {
 		return errors.New("attempt worker: missing mode/root")
@@ -255,21 +260,22 @@ func runAttemptWorkerHelper(args []string) error {
 	var providerTask []byte
 	switch mode {
 	case "shell", "shell-input", "term", "leader", "tail", "reply", "loud-adoption":
-		script := fmt.Sprintf("test -z \"${HOME+x}\" || exit 90; test -z \"${DARK_FACTORY_ATTEMPT_TOKEN+x}\" || exit 91; for n in 3 4 5 6 7 8 9; do test ! -e /dev/fd/$n || exit 92; done; test -f /dev/fd/10 || exit 93; test ! -s /dev/fd/10 || exit 94; test -f /dev/fd/11 || exit 97; IFS= read -r task < /dev/fd/11; test \"$task\" = one-startup || exit 98; cat /dev/fd/10/change-worker.config >/dev/null 2>&1 && exit 95; cd /dev/fd/10 >/dev/null 2>&1 && exit 96; printf '%%s' $$ > %q; printf 'pre-output\\n'; while test ! -f %q; do sleep 0.01; done; printf 'post-output\\n'; printf x >> %q; while test ! -f %q; do sleep 0.01; done", filepath.Join(root, "provider.pid"), filepath.Join(root, "continue"), filepath.Join(root, "provider.effect"), filepath.Join(root, "finish"))
+		providerWitness := shellPIDWitness("$$", filepath.Join(root, "provider.pid"))
+		script := fmt.Sprintf("test -z \"${HOME+x}\" || exit 90; test -z \"${DARK_FACTORY_ATTEMPT_TOKEN+x}\" || exit 91; for n in 3 4 5 6 7 8 9; do test ! -e /dev/fd/$n || exit 92; done; test -f /dev/fd/10 || exit 93; test ! -s /dev/fd/10 || exit 94; test -f /dev/fd/11 || exit 97; IFS= read -r task < /dev/fd/11; test \"$task\" = one-startup || exit 98; cat /dev/fd/10/change-worker.config >/dev/null 2>&1 && exit 95; cd /dev/fd/10 >/dev/null 2>&1 && exit 96; %s; printf 'pre-output\\n'; while test ! -f %q; do sleep 0.01; done; printf 'post-output\\n'; printf x >> %q; while test ! -f %q; do sleep 0.01; done", providerWitness, filepath.Join(root, "continue"), filepath.Join(root, "provider.effect"), filepath.Join(root, "finish"))
 		if mode == "shell-input" {
 			script += fmt.Sprintf("; IFS= read -r line; printf '%%s' \"$line\" > %q", filepath.Join(root, "provider.stdin"))
 		}
 		if mode == "term" {
-			script = fmt.Sprintf("trap '' TERM; sleep 30 & printf '%%s' $! > %q; printf '%%s' $$ > %q; while :; do sleep 1; done", filepath.Join(root, "descendant.pid"), filepath.Join(root, "provider.pid"))
+			script = fmt.Sprintf("trap '' TERM; sleep 30 & %s; %s; while :; do sleep 1; done", shellPIDWitness("$!", filepath.Join(root, "descendant.pid")), providerWitness)
 		}
 		if mode == "leader" {
-			script = fmt.Sprintf("sleep 30 & printf '%%s' $! > %q; printf '%%s' $$ > %q; while test ! -f %q; do sleep 0.01; done; exit 0", filepath.Join(root, "descendant.pid"), filepath.Join(root, "provider.pid"), filepath.Join(root, "leader.release"))
+			script = fmt.Sprintf("sleep 30 & %s; %s; while test ! -f %q; do sleep 0.01; done; exit 0", shellPIDWitness("$!", filepath.Join(root, "descendant.pid")), providerWitness, filepath.Join(root, "leader.release"))
 		}
 		if mode == "tail" {
 			script = "printf 'tail-output\\n'; exit 0"
 		}
 		if mode == "reply" {
-			script = fmt.Sprintf("printf '%%s' $$ > %q; printf 'pre-output\\n'; while test ! -f %q; do sleep 0.01; done; printf 'post-output\\n'; stty -icanon -echo min 1 time 0; dd if=/dev/stdin bs=12 count=1 2>/dev/null > %q; while test ! -f %q; do sleep 0.01; done", filepath.Join(root, "provider.pid"), filepath.Join(root, "continue"), filepath.Join(root, "provider.reply"), filepath.Join(root, "finish"))
+			script = fmt.Sprintf("%s; printf 'pre-output\\n'; while test ! -f %q; do sleep 0.01; done; printf 'post-output\\n'; stty -icanon -echo min 1 time 0; dd if=/dev/stdin bs=12 count=1 2>/dev/null > %q; while test ! -f %q; do sleep 0.01; done", providerWitness, filepath.Join(root, "continue"), filepath.Join(root, "provider.reply"), filepath.Join(root, "finish"))
 			providerTask = nil
 		} else {
 			providerTask = []byte("one-startup\n")
