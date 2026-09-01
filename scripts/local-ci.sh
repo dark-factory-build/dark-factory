@@ -30,9 +30,8 @@ echo "local-ci: process-sensitive gate"
 ./scripts/test-go-e2e-tools.sh
 /bin/sh "$script_dir/go-ci-owned.sh"
 
-echo "local-ci: service and release gate"
+echo "local-ci: release gate"
 ./scripts/test-prepare-release-source.sh
 ./scripts/test-publish-release.sh
 ./scripts/test-package-release.sh
-./scripts/go-service-e2e.sh
 echo "local-ci: PASS"

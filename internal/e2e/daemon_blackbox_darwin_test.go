@@ -145,7 +145,7 @@ func TestBlackBoxDaemonLifecycle(t *testing.T) {
 
 	// A second factoryd against the live home refuses without disturbing it.
 	refusedOutput := &strings.Builder{}
-	refused := exec.Command(fixture.factoryd, "--home", fixture.home)
+	refused := exec.Command(fixture.factoryd, "--home", fixture.home, "--development-browser-address", "127.0.0.1:0")
 	refused.Stdout, refused.Stderr = refusedOutput, refusedOutput
 	if err := refused.Start(); err != nil {
 		t.Fatal(err)
@@ -259,7 +259,7 @@ func newBlackBoxFixture(t *testing.T) *blackBoxFixture {
 func (fixture *blackBoxFixture) startFactoryd(t *testing.T) (*exec.Cmd, *syncBuffer) {
 	t.Helper()
 	output := &syncBuffer{}
-	command := exec.Command(fixture.factoryd, "--home", fixture.home)
+	command := exec.Command(fixture.factoryd, "--home", fixture.home, "--development-browser-address", "127.0.0.1:0")
 	command.Stdout, command.Stderr = output, output
 	if err := command.Start(); err != nil {
 		t.Fatal(err)

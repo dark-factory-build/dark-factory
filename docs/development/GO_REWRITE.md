@@ -6,7 +6,7 @@ authority and external effects, not around the existing Rust crates. Git
 history remains the archive; the Go runtime will not migrate a Rust home,
 schema, event log, protocol, or serialized state.
 
-## Current status (authoritative from 2026-08-31)
+## Current status (authoritative from 2026-09-01)
 
 The hard cutover is shipped. The repository contains the Darwin-first Go
 runtime, its operational browser console, and no retired Rust local-runtime
@@ -15,20 +15,31 @@ workspace. Stable `v0.3.2` was published from exact source
 anonymous download verified every published byte, archive, manifest, formula,
 and native arm64 build identity.
 
-The exact reviewed site head
-`0c7615d4400d88d00d5f51e102b2c75cc851532c` is deployed as Vercel production
-deployment `dpl_F6cfArfdJG4D3LZQqkvCJxYJn3y9` and serves the console without a
-login at `https://app.darkfactory.build`.
+Site PR #11's final reviewed head
+`2827a9dc761886f19510824da05ae1bf80e1e90b` merged as site `main`
+`20b573b3a354061451525337e8e1b40af37c6f11`. Vercel production deployment
+`dpl_AKDVDUbDX8Q89TAAvx3hmX79WHuT` serves that console without a login at
+`https://app.darkfactory.build`.
 
 The exact downloaded `v0.3.2` binaries were paired with that production site
 from a disposable home and completed four real shell-provider tasks through
 the daemon. Desktop, mobile, refresh, live-terminal and final durable-state
 checks passed; absent, connecting and connected daemon states drive different
 guidance, and the pairing secret remains outside the final URL and browser
-storage. The operator's live `~/.dark-factory` install was not touched, and
-real Claude and Codex attempts remain unproved. The rest of this document is
-chronological design and evidence; historical “not shipped” status is not
-current authority.
+storage.
+
+The operator's retired `v0.2.5` service has now been replaced by those exact
+`v0.3.2` binaries. The managed launchd daemon is ready, the production site
+consumed a one-time challenge as one active browser client, and the ordinary
+`factoryctl` command reports the exact release identity and reaches the browser
+bridge. This live cutover exposed one installer defect: an owned normal macOS
+home at mode `0755` was rejected as a parent even though the installation guide
+uses `~/.dark-factory`. The adjacent causal fix accepts an owned parent with no
+group or world write authority while keeping the staged and published factory
+home exactly `0700`. Until that fix is released, the live `v0.3.2` home is
+nested under an owner-only `~/.dark-factory` wrapper. Real Claude and Codex
+attempts remain unproved. The rest of this document is chronological design and
+evidence; historical “not shipped” status is not current authority.
 
 ## Web-first redirection (authoritative from 2026-08-26)
 
@@ -6662,9 +6673,11 @@ Managed launchd service installation on 2026-08-29:
   status observation. Install bootstraps last (binaries, plist, receipt,
   then bootstrap), so a loaded job can never be receipt-less crash
   residue of this engine.
-- `scripts/go-service-e2e.sh` is in the authoritative gate: real binaries,
-  real launchd, one disposable unique label in the user gui domain, all
-  files under a temporary root, guaranteed bootout on exit. It proves
+- `scripts/go-service-e2e.sh` supplied the authoritative service proof for
+  this 2026-08-29 cutover; it now runs standalone when install/service
+  ownership changes. It uses real binaries, real launchd, one disposable
+  unique label in the user gui domain, all files under a temporary root, and
+  guaranteed bootout on exit. It proves
   install → running, a real task through the managed daemon, stop → the
   socket dies, start → a second task, uninstall → launchctl 113, no
   artifacts, and an empty process census for the home. The operator's
@@ -6794,8 +6807,9 @@ Claude/Codex provider proof.
 The duration audit is also closed for this cutover rather than left implicit.
 S6 removed the obsolete Rust and Linux-source lanes. The post-cutover #238
 policy keeps deterministic main/WAL/SHM validation and the short serial suite,
-one TypeScript proof, and normal browser/daemon/service E2Es in the routine
-baseline; the exhaustive workspace race and browser-PTY-race stages are
+one TypeScript proof, and normal browser/daemon E2Es in the routine baseline.
+The service E2E remains a standalone proof run when install/service ownership
+changes; the exhaustive workspace race and browser-PTY-race stages are
 reserved for affected-package or focused review work. The historical
 849.035-second kernel race package remains documented as intentional
 cryptographic snapshot and concurrency stress, not deletion evidence. Authors
@@ -6847,13 +6861,13 @@ changes.
   arm64 binaries reported version `0.3.2`, the exact source, and release build
   identities.
 - Site PR #11 packages browser artifacts rebuilt from the final reviewed
-  runtime tree. Its exact head
-  `6323046aad9c582e5dd7bbc1bdccb3a132922470` received independent ALLOW and
-  passed all 99 site tests; deterministic source-to-tarball verification also
-  proved the corrected blocked-task terminal state is present. The PR remains
-  unmerged until the site's `main` branch has a merge queue for the Maintainer
-  App to use, so site issue #10 remains open.
-- Production deployment `dpl_66rEm1EV4i3Y9MzS7e3XmcXEeYLN` serves that exact
+  runtime tree. Its final exact head
+  `2827a9dc761886f19510824da05ae1bf80e1e90b` received independent ALLOW,
+  passed all 99 site tests, and merged as site `main`
+  `20b573b3a354061451525337e8e1b40af37c6f11`; deterministic
+  source-to-tarball verification also proved the corrected blocked-task
+  terminal state is present.
+- Production deployment `dpl_AKDVDUbDX8Q89TAAvx3hmX79WHuT` serves that exact
   reviewed site tree anonymously at `https://app.darkfactory.build`. Fresh
   desktop and mobile browsers verified the responsive layout and dynamic
   install/start/pair guidance. A second outside-sandbox run paired the exact

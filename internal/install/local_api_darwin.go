@@ -172,7 +172,7 @@ func (state *operationalHomeState) rejectLocalAPIConstruction(authority *LocalAP
 
 func recheckLocalAPIMember(home *operationalHomeState, name string, member retainedMember) error {
 	if member.directory {
-		if err := exactDirectory(member.file, false); err != nil {
+		if err := exactDirectory(member.file); err != nil {
 			return fmt.Errorf("recheck local API member: %w", err)
 		}
 	}
@@ -425,7 +425,7 @@ func (state *localAPIState) verifyWithoutSocket() error {
 	if err := recheckOperationalCoreIdentityByState(state.home); err != nil {
 		return err
 	}
-	if err := exactDirectory(state.runtimes, false); err != nil {
+	if err := exactDirectory(state.runtimes); err != nil {
 		return err
 	}
 	if err := sameMemberFileIdentity(state.runtimesID, state.runtimes, true); err != nil {

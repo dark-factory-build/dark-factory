@@ -943,7 +943,7 @@ func TestOperationalHomeAllowsSharedAncestorLinkCountIncrease(t *testing.T) {
 	}
 }
 
-func TestOperationalHomeRejectsWrongFinalParentPolicy(t *testing.T) {
+func TestOperationalHomeAllowsOwned0755FinalParent(t *testing.T) {
 	root := installTempDir(t)
 	inner := filepath.Join(root, "inner")
 	homePath := filepath.Join(inner, "home")
@@ -957,11 +957,15 @@ func TestOperationalHomeRejectsWrongFinalParentPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := installDigest(t, root)
-	if _, err := OpenOperationalHome(context.Background(), homePath); err == nil {
-		t.Fatal("operational home accepted a non-private final parent")
+	home, err := OpenOperationalHome(context.Background(), homePath)
+	if err != nil {
+		t.Fatalf("operational home rejected an owned 0755 final parent: %v", err)
+	}
+	if err := home.Close(); err != nil {
+		t.Fatalf("close operational home: %v", err)
 	}
 	if after := installDigest(t, root); after != before {
-		t.Fatal("final-parent refusal changed filesystem evidence")
+		t.Fatal("operational home changed final-parent evidence")
 	}
 }
 
