@@ -337,6 +337,11 @@ fn declared_output_schemas_name_the_fields_the_results_carry() {
             ][..],
         ),
         (
+            "close_pull_request",
+            "ClosePullRequestResult",
+            &["pull_number", "head_sha", "url", "state"][..],
+        ),
+        (
             "merge_pull_request_at_head",
             "MergePullRequestAtHeadResult",
             &["pull_number", "head_sha", "base", "merge_commit_sha"][..],
@@ -452,6 +457,7 @@ fn every_repository_tool_requires_the_repository_it_acts_on() {
         "dispatch_control_plane_deploy",
         "observe_control_plane_deploy",
         "create_pull_request",
+        "close_pull_request",
         "submit_pull_request_review",
         "observe_pull_request_checks",
         "observe_pull_request_workflows",
@@ -500,6 +506,10 @@ fn every_repository_tool_requires_the_repository_it_acts_on() {
         ("observe_ref", &["repository", "branch"][..]),
         ("observe_file", &["repository", "commit_sha", "path"][..]),
         ("observe_tree", &["repository", "commit_sha"][..]),
+        (
+            "close_pull_request",
+            &["repository", "operation_id", "pull_number", "head_sha"][..],
+        ),
         (
             "merge_pull_request_at_head",
             &[
@@ -571,6 +581,7 @@ fn mcp_surface_is_installation_bound_and_typed() {
         "dispatch_control_plane_deploy",
         "observe_control_plane_deploy",
         "create_pull_request",
+        "close_pull_request",
         "submit_pull_request_review",
         "observe_pull_request_checks",
         "observe_pull_request_workflows",

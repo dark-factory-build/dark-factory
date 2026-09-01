@@ -40,7 +40,7 @@ framework. The shell-provider loop is proven; real Claude/Codex work is not.
    require `maintainer_status` for the exact repository you intend to act on to
    return that repository — compared case-insensitively, because it answers
    with GitHub's canonical spelling and the caller's may differ — plus a
-   positive numeric ID and revision `maintainer-operations-v4`. Fail closed if
+   positive numeric ID and revision `maintainer-operations-v5`. Fail closed if
    the required typed operation is unavailable.
 
    The App is expected to be sufficient, and that expectation is the point: an

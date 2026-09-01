@@ -47,8 +47,9 @@ Access policy, or App configuration is live.
   the other's shape, so neither can take the other's path. Its finite typed
   tools observe the default head, any branch head, a file at an exact commit, one
   commit's parents and complete tree, or a determinate refusal when GitHub
-  truncates it, and durable operation state, manage a bounded
-  issue lifecycle, publish an exact commit and pull request, submit an exact-head
+  truncates it, and durable operation state, manage a bounded issue lifecycle,
+  publish an exact commit and pull request, close a pull request at an exact
+  head, submit an exact-head
   `ALLOW`, `COMMENT`, or `REQUEST_CHANGES` verdict, diagnose and rerun exact CI,
   observe eventual merge state, enqueue through a merge queue, perform a
   strict exact-head squash merge where a base has no queue, publish and observe
@@ -180,7 +181,7 @@ The exact required bindings are:
 - `DARK_FACTORY_MAINTAINER_PRIVATE_KEY_PKCS8`: standard-base64 encoding of the
   App's unencrypted PKCS#8 DER private key;
 - `DARK_FACTORY_MAINTAINER_PERMISSION_REVISION`: exactly
-  `maintainer-operations-v4` for this authority revision;
+  `maintainer-operations-v5` for this authority revision;
 - `DARK_FACTORY_MAINTAINER_OPERATOR_EMAIL_SHA256`: lowercase SHA-256 of the one
   Cloudflare Access operator email after ASCII lowercasing;
 - `DARK_FACTORY_CLOUDFLARE_ACCESS_TEAM_DOMAIN`: the exact lowercase

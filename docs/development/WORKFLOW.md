@@ -135,12 +135,16 @@ repository to report:
 - the `owner/name` you asked for, compared case-insensitively (it answers
   with GitHub's canonical spelling);
 - a positive numeric repository ID; and
-- permission revision `maintainer-operations-v4`.
+- permission revision `maintainer-operations-v5`.
 
 Use only its typed, exact-head operations. Retain a write's operation UUID and
 canonical request until the result is reconciled. Never expose App keys,
 installation tokens, personal tokens, credential-helper output, or keychain
 contents to an agent or worktree.
+
+Close a superseded pull request with `close_pull_request`, naming its current
+head SHA. Record the reason first with the existing exact-head `COMMENT`
+review when the PR conversation does not already explain the closure.
 
 Reading another agent's branch needs no `git fetch`: `observe_ref` names its
 head, `observe_tree` lists what is in a commit, `observe_file` returns one
