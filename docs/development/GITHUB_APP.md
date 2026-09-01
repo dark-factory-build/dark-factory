@@ -157,8 +157,8 @@ The live maintainer broker exposes only these repository-scoped operations:
 - rerun failed jobs from one exact completed failed workflow attempt;
 - enqueue one exact reviewed head for merge after its bound checks and
   approvals;
-- squash-merge one exact reviewed head only when its base has no merge queue
-  and an active repository ruleset requires up-to-date status checks;
+- squash-merge one exact reviewed head when its queue-less base either has a
+  strict active ruleset or satisfies the private-unprotected 403 contract;
 - publish and observe one immutable semver release tag, and recover only that
   exact tag through the fixed release workflow; and
 - dispatch and observe the fixed control-plane deployment workflow at one exact
@@ -232,27 +232,18 @@ manually removed. The durable entry ID is returned in every state; a generic
 the exact PR head against the queue's latest base before merging.
 
 `merge_pull_request_at_head` is the deliberately narrower path for a private
-repository whose plan does not offer merge queues. It first proves there is no
-queue for the base, the base is the repository's default branch, the exact PR
-head still matches the request, and the open PR is not a draft. It requires an
-active repository ruleset to permit squash, require at least one status check,
-and require the branch to be up to date. It reads the full definition of every
-active ruleset and proves the Maintainer App is absent from each disclosed
-bypass list; a missing or hidden list refuses the merge. GitHub discloses that
-field only with ruleset-write access, so the operation's repository token alone
-adds Administration write and uses it only for those fixed detailed-ruleset
-`GET` requests. GitHub's active-rules
-endpoint does not report legacy classic branch protection, so classic-only
-configuration is deliberately unsupported and fails closed. It then requires nonempty,
-completed, non-failing exact-head checks and binds to a completed durable
-`submit_pull_request_review` operation whose exact GitHub review carries the
-Maintainer-rendered `ALLOW` for that head. Any exact-head `BLOCK` refuses the
-merge. After its durable claim the broker re-reads those mutable preconditions,
-then calls GitHub's fixed squash endpoint with the expected head SHA. GitHub
-atomically binds that head, applies the ruleset to the then-current default
-base, and remains the final enforcer. A moved head,
-missing strict rule, queue appearing, failed or pending check, unbound review,
-or ambiguous authority fails closed. A network-ambiguous response is reconciled
+repository whose plan does not offer merge queues. The normal protected path
+requires an active strict squash ruleset and proves the App is absent from each
+disclosed bypass list. When that rules read returns exactly 403 on a private
+repository, the alternate path instead requires GitHub to report
+`protected:false` and squash enabled, proves the queue field is explicitly
+null before and after checks, then re-reads the branch as still unprotected at
+the same SHA and the pull request against that unchanged base before merge.
+Both paths require nonempty completed non-failing exact-head checks, a
+durable Maintainer `ALLOW`, and no exact-head `BLOCK`; classic protection alone
+is unsupported. The fixed squash request atomically binds the head SHA, while
+the final base read narrows—but cannot eliminate—the remaining base race. A
+network-ambiguous response is reconciled
 only when the merged PR names the exact head and base and its squash commit
 carries this operation's digest marker. It is never blindly repeated or adopted
 from an external merge.

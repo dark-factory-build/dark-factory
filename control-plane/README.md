@@ -64,15 +64,18 @@ Access policy, or App configuration is live.
   in either case and canonicalized to lowercase, so one UUID is one replay
   identity however the caller's `uuidgen` spelled it. Merge queue enqueue and
   direct merge are separate typed operations, never fallback attempts. Direct
-  merge refuses a configured queue and requires the protected default-base
-  branch and exact PR head, a journal-bound exact-head `ALLOW`, completed
-  non-failing checks, and an active repository ruleset that requires up-to-date
-  status checks and permits squash. The operation proves the Maintainer App is
-  absent from every active ruleset's disclosed bypass list; a missing or hidden
-  list refuses the merge. Legacy classic branch protection alone is
-  unsupported. GitHub exposes bypass actors only with ruleset-write access, so
-  direct merge alone mints Administration write for fixed detailed-ruleset
-  `GET` requests; the broker exposes no administration mutation. The
+  merge refuses a configured queue and requires the default base, exact PR
+  head, journal-bound exact-head `ALLOW`, and completed non-failing checks. A
+  protected base requires an active strict squash ruleset. Exact rules-read 403
+  on a private repo instead requires `protected:false`, squash enabled,
+  nonempty all-green checks, explicit no-queue reads, and an unchanged base
+  re-read immediately before merge. On the protected path the operation proves
+  the Maintainer App is absent from every active ruleset's disclosed bypass
+  list; a missing or hidden list refuses that path. Legacy classic branch
+  protection alone is unsupported. GitHub exposes bypass actors only with
+  ruleset-write access, so direct merge alone mints Administration write for
+  fixed detailed-ruleset `GET` requests; the broker exposes no administration
+  mutation. The
   resulting squash commit carries the operation digest before success or
   reconciliation. GitHub's merge request atomically binds the stated head and
   applies the ruleset to the then-current default base.

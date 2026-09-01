@@ -64,11 +64,13 @@ approval. Routine development uses the deterministic shell provider.
 7. Merge only the reviewed head after its required checks pass. Use
    `enqueue_pull_request` where the base has a merge queue. Where GitHub does
    not offer a queue, use only `merge_pull_request_at_head`: it refuses a
-   queue-enabled base and requires the protected default-base branch and exact
-   head, a completed Maintainer `ALLOW`, completed non-failing checks, and an
-   active repository ruleset with strict status checks that permits squash. It
+   queue-enabled base and requires the default base and exact head, a completed
+   Maintainer `ALLOW`, and completed non-failing checks. A protected base needs
+   an active strict squash ruleset. Exact rules-read 403 on a private repo
+   instead needs `protected:false`, squash enabled, explicit no-queue reads,
+   and an unchanged base immediately before merge. On the protected path it
    proves the Maintainer App is absent from every active ruleset's disclosed
-   bypass list; a missing or hidden list refuses the merge. Legacy classic
+   bypass list; a missing or hidden list refuses that path. Legacy classic
    branch protection alone is unsupported. This operation alone mints
    Administration write for fixed ruleset reads because GitHub otherwise hides
    bypass actors; it exposes no administration mutation. It never falls back

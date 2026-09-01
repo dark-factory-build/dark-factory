@@ -767,7 +767,7 @@ fn tools() -> Value {
     }, {
         "name": "merge_pull_request_at_head",
         "title": "Merge an exact pull request head",
-        "description": "Squash-merge one pull request at its exact head into the current protected default base branch only when that branch has an active repository ruleset with no merge queue, permitted squash, and strict required checks; classic branch protection alone is unsupported. The Maintainer App must be absent from every active ruleset's disclosed bypass list, and a missing or hidden list refuses the merge. Every exact-head check must pass, a journal-bound exact-head ALLOW must still exist, and no exact-head BLOCK may exist. The squash commit carries the operation marker used for reconciliation. This operation never falls back to queue enqueue. Replays require the same operation UUID and request.",
+        "description": "Squash-merge one pull request at its exact head into the current default base only after exact-head ALLOW, no BLOCK, and all checks pass. A protected base requires a strict squash ruleset with no App bypass; exact rules-read 403 on a private repo instead requires protected:false, squash enabled, explicit no-queue reads, and an unchanged base re-read. Classic protection alone is unsupported. Replays require the same operation UUID and request.",
         "inputSchema": {
             "type": "object",
             "properties": {
