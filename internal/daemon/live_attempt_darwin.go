@@ -822,21 +822,15 @@ func (attempt *liveAttempt) nextCorrelation() (uint64, error) {
 }
 
 func (attempt *liveAttempt) addCredit(credit uint64) error {
-	if attempt.creditDead {
-		return nil
-	}
 	if credit == 0 || credit > liveAttemptCredit || attempt.creditOutstanding+credit > liveAttemptCredit {
 		return runner.ErrState
 	}
 	if err := attempt.controller.SendTerminalCommand(runner.TerminalCommand{Kind: runner.TerminalCredit, Credit: uint32(credit)}); err != nil {
-		// The ACK-free outer runner exits as soon as its result is published,
-		// so a credit write can race already-queued output frames against the
-		// closed peer. The credit protocol is over, but the socket must keep
-		// draining: the result frame is still pending behind this output.
-		if peerClosedWrite(err) {
-			attempt.creditDead = true
-			return nil
-		}
+		// This used to swallow a dead-peer write so the socket could keep
+		// draining a result frame queued behind the output. It cannot: the
+		// failed write has already spent the capability, so the next read
+		// answers ErrState and the owner loop ends either way. Report the write
+		// that actually failed rather than the lifecycle error that follows it.
 		return err
 	}
 	attempt.creditOutstanding += credit

@@ -9,6 +9,8 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func framedHeader(size uint32) []byte {
@@ -103,5 +105,51 @@ func closeAll(t *testing.T, controller *AttemptController, peer *os.File) {
 	}
 	if err := peer.Close(); err != nil {
 		t.Error(err)
+	}
+}
+
+// Close clears the capability even when the underlying close fails. Callers
+// treat a close error as "still open" only if the descriptor survives it, and
+// the supervisor's ownership handoff depends on a closed controller staying
+// closed however the close went.
+func TestAttemptControllerCloseClearsCapabilityOnError(t *testing.T) {
+	controller, peer, err := NewAttemptController()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peer.Close()
+	// Close the descriptor underneath the controller so its own Close fails.
+	if err := unix.Close(int(controller.file.Fd())); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.Close(); err == nil {
+		t.Fatal("close of an already-closed descriptor reported success")
+	}
+	if controller.file != nil {
+		t.Fatal("a failed close left the descriptor reachable")
+	}
+	if controller.Close() != nil {
+		t.Fatal("second close did not answer nil")
+	}
+}
+
+// Spent separates the two ways a capability ends. A deliberate Close must not
+// look like the transport going away, or every clean shutdown reads as a runner
+// death.
+func TestAttemptControllerCloseIsNotSpent(t *testing.T) {
+	controller, peer, err := NewAttemptController()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peer.Close()
+	controller.state = controllerInnerReady
+	if controller.Spent() {
+		t.Fatal("a live controller reported itself spent")
+	}
+	if err := controller.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if controller.Spent() {
+		t.Fatal("a deliberate close reported itself spent")
 	}
 }

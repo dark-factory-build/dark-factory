@@ -8,7 +8,9 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
+	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 	"golang.org/x/sys/unix"
 )
@@ -131,4 +133,46 @@ func TestSupervisorRunnerDeathAfterReleaseNamesExit(t *testing.T) {
 		t.Fatalf("run error does not name the killing signal:\n%v", err)
 	}
 	t.Logf("reported failure:\n%v", err)
+}
+
+// The proposal detail is the only durable free-form field a failed run carries.
+// It used to store a constant while the cause was discarded, which is why a
+// failed run in the database says nothing about why it failed.
+func TestSupervisorFailedRunPersistsItsCause(t *testing.T) {
+	fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
+	injected := errors.New("injected pre-release state failure")
+	fixture.spec.beforeProviderStateCheck = func() error { return injected }
+	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if !errors.Is(err, injected) {
+		t.Fatalf("RunNext = %v, want the injected failure", err)
+	}
+	stored, found, readErr := fixture.store.Run(context.Background(), run.ID)
+	if readErr != nil || !found {
+		t.Fatalf("read back run: found=%v err=%v", found, readErr)
+	}
+	if stored.Proposal == nil {
+		t.Fatal("a failed run carries no proposal")
+	}
+	if !strings.Contains(stored.Proposal.Detail(), injected.Error()) {
+		t.Fatalf("durable failure detail does not name the cause: %q", stored.Proposal.Detail())
+	}
+}
+
+// A cause longer than the field must be truncated on a rune boundary so the
+// stored text stays valid UTF-8.
+func TestFailureDetailTruncatesWholeRunes(t *testing.T) {
+	long := errors.New(strings.Repeat("é", maxFailureDetailBytes))
+	detail := failureDetail(long)
+	if len(detail) > maxFailureDetailBytes {
+		t.Fatalf("detail is %d bytes, over the %d-byte field", len(detail), maxFailureDetailBytes)
+	}
+	if !utf8.ValidString(detail) {
+		t.Fatal("truncation split a rune")
+	}
+	if _, err := kernel.NewFailureProposal(kernel.FailureInternal, detail); err != nil {
+		t.Fatalf("kernel rejected the truncated detail: %v", err)
+	}
+	if failureDetail(nil) == "" {
+		t.Fatal("a nil cause produced an empty detail")
+	}
 }

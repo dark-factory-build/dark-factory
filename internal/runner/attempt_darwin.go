@@ -329,6 +329,19 @@ func (c *AttemptController) acknowledgeCurrentExecCheck() error {
 	return c.writeFrame(attemptFrame{Version: 1, Kind: "current-exec-check-ack"}, maxFrameBytes)
 }
 
+// Spent reports that the capability ended because the transport ended, rather
+// than because a caller closed it. Only writeFrame and Next set that state, and
+// only when the socket itself is finished, so this is a fact the transport
+// recorded — not one reconstructed by matching sentinels in an error tree that
+// any decoder or subprocess could have contributed to.
+func (c *AttemptController) Spent() bool {
+	return c != nil && c.state == controllerSpent
+}
+
+// Close drops the capability deliberately. It leaves the state alone, so Spent
+// keeps telling a caller which of the two ended it; and it clears the file even
+// when the close itself fails, so no caller can be handed a descriptor it
+// might use again.
 func (c *AttemptController) Close() error {
 	if c == nil || c.file == nil {
 		return nil

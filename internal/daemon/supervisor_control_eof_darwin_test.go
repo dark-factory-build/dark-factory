@@ -89,7 +89,11 @@ func TestSupervisorCheckpointEOFReportsNoManufacturedBrokenPipe(t *testing.T) {
 	if closeErr != nil {
 		t.Fatalf("owner close after observed EOF = %v, want no further error", closeErr)
 	}
-	if owner.controller != nil {
-		t.Fatal("owner retained a control capability whose peer is gone")
+	// The capability is closed but deliberately still reachable: its Spent bit
+	// is how the supervisor learns the transport ended rather than a caller
+	// closing it, and that is what decides whether the run reports the runner's
+	// exit. A stream end must leave that bit set.
+	if !controller.Spent() {
+		t.Fatal("a stream end did not record itself on the capability")
 	}
 }
