@@ -35,19 +35,36 @@ func (attempt *liveAttempt) run(ctx context.Context) {
 	// error is not evidence that the child disappeared.
 	cleanupErr := attempt.shutdownController()
 	err = errors.Join(err, cleanupErr)
-	if !attempt.resultSeen {
+	if !attempt.resultReturned {
 		if err == nil {
 			err = ErrTerminalClosed
 		}
+		observersRetained := !attempt.shutdownRequested
+		attempt.resultReturned = true
+		attempt.result <- liveAttemptResult{err: err, observersRetained: observersRetained}
+		if observersRetained {
+			// The result notice is best-effort. Keep the existing observers owned
+			// while the supervisor reaps the runner and authenticates the exact
+			// result artifact; it will either submit the committed exit or close us
+			// while unwinding a rejected artifact.
+			err = errors.Join(err, attempt.awaitCommittedExit())
+		}
 	}
 	attempt.finalErr = err
-	if !attempt.resultSeen {
-		attempt.result <- liveAttemptResult{err: err}
-	}
 	attempt.finishSubscribers(err)
 	close(attempt.done)
 	if attempt.daemon != nil {
 		attempt.daemon.unregisterLiveAttempt(attempt.runID, attempt)
+	}
+}
+
+func (attempt *liveAttempt) awaitCommittedExit() error {
+	for {
+		command := <-attempt.commands
+		stop, err := attempt.handleRunningCommand(command)
+		if err != nil || stop {
+			return err
+		}
 	}
 }
 
@@ -86,7 +103,7 @@ func (attempt *liveAttempt) loop(ctx context.Context) error {
 		// controller remains owned exclusively for the supervisor's exact exit
 		// broadcast; do not consume late effect frames or close it on caller
 		// cancellation.
-		if attempt.resultSeen {
+		if attempt.resultReturned {
 			select {
 			case command := <-attempt.commands:
 				stop, err := attempt.handleRunningCommand(command)
@@ -191,6 +208,7 @@ func (attempt *liveAttempt) handleBeforeRelease(ctx context.Context, command liv
 		command.result <- nil
 		return false, nil
 	case liveCommandShutdown:
+		attempt.shutdownRequested = true
 		err := attempt.shutdownController()
 		command.result <- err
 		return true, err
@@ -210,7 +228,7 @@ func (attempt *liveAttempt) handleBeforeRelease(ctx context.Context, command liv
 }
 
 func (attempt *liveAttempt) processLifecycle(ctx context.Context) (bool, error) {
-	if attempt.terminationSent || attempt.resultSeen {
+	if attempt.terminationSent || attempt.resultReturned {
 		return false, nil
 	}
 	if ctx.Err() != nil {
@@ -292,7 +310,7 @@ func (attempt *liveAttempt) handleRunningCommand(command liveAttemptCommand) (bo
 		command.effectDone <- result
 		return false, fatal
 	case liveCommandFinishExit:
-		if !attempt.resultSeen || command.exit == nil || command.exit.Kind != TerminalEventExit {
+		if !attempt.resultReturned || command.exit == nil || command.exit.Kind != TerminalEventExit {
 			err := runner.ErrIdentity
 			command.result <- err
 			return false, nil
@@ -307,6 +325,7 @@ func (attempt *liveAttempt) handleRunningCommand(command liveAttemptCommand) (bo
 		command.result <- nil
 		return true, nil
 	case liveCommandShutdown:
+		attempt.shutdownRequested = true
 		err := attempt.shutdownController()
 		command.result <- err
 		return true, err
@@ -317,14 +336,14 @@ func (attempt *liveAttempt) handleRunningCommand(command liveAttemptCommand) (bo
 }
 
 func (attempt *liveAttempt) handleTerminalEffect(effect terminalEffect) (terminalEffectResult, error) {
-	if attempt.resultSeen {
-		// A published result is already a stronger runner-input fence than a
+	if attempt.resultReturned {
+		// A result already returned to the supervisor is a stronger runner-input fence than a
 		// generation revoke. Cleanup may therefore converge durable state without
 		// replacing the controller before the supervisor broadcasts the exit.
 		if effect.kind == terminalEffectRevoke || effect.kind == terminalEffectRevokeClient || effect.kind == terminalEffectRevokeCurrentBinding {
 			return terminalEffectResult{status: runner.TerminalResultOK, terminalFence: true}, nil
 		}
-		// The result is published: this effect can never succeed. Conflict, so
+		// The result path is terminal: this effect can never succeed. Conflict, so
 		// the wire types it stale — ErrTerminalNotReady means "not ready yet"
 		// everywhere, and only that condition is retryable.
 		return terminalEffectResult{status: runner.TerminalResultRejected, terminalFence: true, err: kernel.ErrConflict}, nil
@@ -491,8 +510,8 @@ func (attempt *liveAttempt) runTerminalEffect(command runner.TerminalCommand) (t
 		if err != nil {
 			return uncertainTerminalEffect(err), err
 		}
-		if stop || attempt.resultSeen {
-			return terminalEffectResult{status: runner.TerminalResultUncertain, terminalFence: attempt.resultSeen, err: ErrTerminalClosed}, nil
+		if stop || attempt.resultReturned {
+			return terminalEffectResult{status: runner.TerminalResultUncertain, terminalFence: attempt.resultReturned, err: ErrTerminalClosed}, nil
 		}
 	}
 }
@@ -527,7 +546,7 @@ func (attempt *liveAttempt) shutdownController() error {
 	}
 	var result error
 	attempt.binding = terminalBinding{}
-	if !attempt.resultSeen {
+	if !attempt.resultReturned {
 		result = attempt.terminateController()
 	}
 	if closeErr := attempt.controller.Close(); closeErr != nil && !errors.Is(closeErr, runner.ErrState) {
@@ -550,10 +569,10 @@ func (attempt *liveAttempt) handleRunnerEvent(event runner.AttemptEvent) (bool, 
 		// The notice is shape-only. Observers stay attached until the
 		// supervisor has authenticated the artifact and consumed it durably;
 		// only the finishExit command carries the committed exit to them.
-		attempt.resultSeen = true
+		attempt.resultReturned = true
 		attempt.binding = terminalBinding{}
 		attempt.resultNotice = event.Result
-		attempt.result <- liveAttemptResult{notice: event.Result}
+		attempt.result <- liveAttemptResult{notice: event.Result, observersRetained: true}
 		return false, nil
 	default:
 		return false, runner.ErrState
@@ -728,8 +747,8 @@ func (attempt *liveAttempt) handleAttach(attachment *TerminalAttachment, session
 	// AttachTerminal holds the operation gate before this command enters the
 	// owner mailbox. An attach accepted before finalizing wins; one queued after
 	// the durable boundary reloads that state and is refused.
-	if attempt.resultSeen {
-		// The result is already in flight to the Store: the attach window is
+	if attempt.resultReturned {
+		// The result is already being reconciled with the Store: the attach window is
 		// over and the durable world has moved past the client's pinned target.
 		// Conflict maps to the typed stale arm so the client re-resolves.
 		return kernel.ErrConflict

@@ -3,7 +3,6 @@
 package e2e_test
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,7 +15,6 @@ import (
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/install"
-	_ "github.com/ncruces/go-sqlite3/driver"
 )
 
 // TestBlackBoxServiceLifecycle proves the managed launchd installation with
@@ -40,15 +38,11 @@ func TestBlackBoxServiceLifecycle(t *testing.T) {
 	serviceArgs := func(verb string) []string {
 		return []string{"service", verb, "--home", fixture.home, "--label", label, "--plist-dir", plistDir}
 	}
-	diagnosticTasks := []string{}
 	t.Cleanup(func() {
 		// Guaranteed teardown: the disposable label must not survive the test
 		// process regardless of which assertion failed.
 		_ = exec.Command("/bin/launchctl", "bootout", fmt.Sprintf("gui/%d/%s", os.Geteuid(), label)).Run()
 		awaitNoHomeProcesses(t, fixture.home, 20*time.Second)
-		if t.Failed() {
-			logServiceFailureState(t, fixture, diagnosticTasks)
-		}
 	})
 
 	// Install: launchd starts factoryd from the sibling service directory.
@@ -63,7 +57,6 @@ func TestBlackBoxServiceLifecycle(t *testing.T) {
 	project := fixture.operatorID(t, fixture.runFactoryctl(t, 0, "project", "create", "--name", "Managed", "--root", fixture.repo))
 	agent := fixture.operatorID(t, fixture.runFactoryctl(t, 0, "agent", "create", "--project", project, "--name", "Service Smith", "--tool-budget", "4"))
 	task := fixture.operatorID(t, fixture.runFactoryctl(t, 0, "task", "add", "--project", project, "--agent", agent, "--title", "Managed service run", "--body", happyPathBody))
-	diagnosticTasks = append(diagnosticTasks, task)
 	fixture.runFactoryctl(t, 0, "dispatch", "on")
 	fixture.awaitTaskStatus(t, client, task, "succeeded", 60*time.Second)
 
@@ -95,7 +88,6 @@ func TestBlackBoxServiceLifecycle(t *testing.T) {
 	}
 	client = fixture.waitClient(t)
 	second := fixture.operatorID(t, fixture.runFactoryctl(t, 0, "task", "add", "--project", project, "--agent", agent, "--title", "Managed restart run", "--body", happyPathBody))
-	diagnosticTasks = append(diagnosticTasks, second)
 	fixture.awaitTaskStatus(t, client, second, "succeeded", 60*time.Second)
 
 	// Uninstall removes the job and every artifact; absence is provable.
@@ -124,115 +116,6 @@ func TestBlackBoxServiceLifecycle(t *testing.T) {
 		t.Fatalf("final status = %+v", state)
 	}
 	awaitNoHomeProcesses(t, fixture.home, 20*time.Second)
-}
-
-func logServiceFailureState(t *testing.T, fixture *blackBoxFixture, taskIDs []string) {
-	t.Helper()
-	database, err := sql.Open("sqlite3", "file:"+filepath.Join(fixture.home, "factory.sqlite3")+"?mode=ro")
-	if err != nil {
-		t.Logf("service diagnostic unavailable: %v", err)
-		return
-	}
-	defer database.Close()
-	for _, taskID := range taskIDs {
-		rows, err := database.Query(`
-			SELECT lower(hex(r.id)), r.phase,
-			       r.proposal_kind, r.proposal_code, r.proposal_detail,
-			       r.terminal_kind, r.terminal_code, r.terminal_detail,
-			       r.provider_exit_kind, r.provider_exit_code, r.provider_exit_signal,
-			       r.runner_exit_kind, r.runner_exit_code, r.runner_exit_signal,
-			       c.phase
-			FROM runs r
-			LEFT JOIN changes c ON c.id = r.change_id
-			WHERE lower(hex(r.task_id)) = ?
-			ORDER BY r.admitted_at_ms, r.id
-			LIMIT 4`, taskID)
-		if err != nil {
-			t.Logf("service diagnostic task %s unavailable: %v", taskID, err)
-			continue
-		}
-		for rows.Next() {
-			var runID, phase string
-			var proposalKind, proposalCode, proposalDetail sql.NullString
-			var terminalKind, terminalCode, terminalDetail sql.NullString
-			var providerExitKind, runnerExitKind, changePhase sql.NullString
-			var providerExitCode, providerExitSignal, runnerExitCode, runnerExitSignal sql.NullInt64
-			if err := rows.Scan(
-				&runID, &phase,
-				&proposalKind, &proposalCode, &proposalDetail,
-				&terminalKind, &terminalCode, &terminalDetail,
-				&providerExitKind, &providerExitCode, &providerExitSignal,
-				&runnerExitKind, &runnerExitCode, &runnerExitSignal,
-				&changePhase,
-			); err != nil {
-				t.Logf("service diagnostic task %s unreadable: %v", taskID, err)
-				continue
-			}
-			t.Logf(
-				"service diagnostic task=%s run=%s phase=%s proposal=%s/%s detail=%s terminal=%s/%s detail=%s provider_exit=%s/%s/%s runner_exit=%s/%s/%s change=%s",
-				taskID, runID, phase,
-				diagnosticString(proposalKind, fixture.root), diagnosticString(proposalCode, fixture.root), diagnosticString(proposalDetail, fixture.root),
-				diagnosticString(terminalKind, fixture.root), diagnosticString(terminalCode, fixture.root), diagnosticString(terminalDetail, fixture.root),
-				diagnosticString(providerExitKind, fixture.root), diagnosticInt(providerExitCode), diagnosticInt(providerExitSignal),
-				diagnosticString(runnerExitKind, fixture.root), diagnosticInt(runnerExitCode), diagnosticInt(runnerExitSignal),
-				diagnosticString(changePhase, fixture.root),
-			)
-			logServiceResources(t, database, runID, fixture.root)
-		}
-		if err := rows.Close(); err != nil {
-			t.Logf("service diagnostic task %s close: %v", taskID, err)
-		}
-		if err := rows.Err(); err != nil {
-			t.Logf("service diagnostic task %s incomplete: %v", taskID, err)
-		}
-	}
-}
-
-func logServiceResources(t *testing.T, database *sql.DB, runID, root string) {
-	t.Helper()
-	rows, err := database.Query(`
-		SELECT 'resource', kind, state, unresolved_reason
-		FROM resources WHERE lower(hex(run_id)) = ?
-		UNION ALL
-		SELECT 'terminal', 'session', state, unresolved_reason
-		FROM terminal_sessions WHERE lower(hex(run_id)) = ?
-		ORDER BY 1, 2`, runID, runID)
-	if err != nil {
-		t.Logf("service diagnostic run %s resources unavailable: %v", runID, err)
-		return
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var record, kind, state string
-		var reason sql.NullString
-		if err := rows.Scan(&record, &kind, &state, &reason); err != nil {
-			t.Logf("service diagnostic run %s resource unreadable: %v", runID, err)
-			continue
-		}
-		t.Logf("service diagnostic run=%s %s=%s state=%s reason=%s", runID, record, kind, state, diagnosticString(reason, root))
-	}
-	if err := rows.Err(); err != nil {
-		t.Logf("service diagnostic run %s resources incomplete: %v", runID, err)
-	}
-}
-
-func diagnosticString(value sql.NullString, root string) string {
-	if !value.Valid {
-		return "-"
-	}
-	text := strings.ReplaceAll(value.String, root, "<fixture>")
-	text = strings.ReplaceAll(text, "\n", `\n`)
-	if len(text) > 512 {
-		text = text[:512] + "..."
-	}
-	return text
-}
-
-func diagnosticInt(value sql.NullInt64) string {
-	if !value.Valid {
-		return "-"
-	}
-	return fmt.Sprint(value.Int64)
 }
 
 type serviceStateOutput struct {

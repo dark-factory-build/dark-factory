@@ -35,7 +35,7 @@ func TestLiveAttemptAttachBeforeReadyIsTypedRetryable(t *testing.T) {
 	// stale arm instead of retrying in place.
 	for _, readySeen := range []bool{false, true} {
 		attempt.readySeen = readySeen
-		attempt.resultSeen = true
+		attempt.resultReturned = true
 		if err := attempt.handleAttach(attachment, sessionID, revision, revision, 0); !errors.Is(err, kernel.ErrConflict) {
 			t.Fatalf("attach after result ready=%t = %v", readySeen, err)
 		}
@@ -98,7 +98,7 @@ func TestLiveAttemptDeliversResultNoticeAndBroadcastsCommittedExit(t *testing.T)
 			if err != nil || stop {
 				t.Fatalf("result event = stop %v err %v", stop, err)
 			}
-			if !attempt.resultSeen || attempt.resultNotice != notice {
+			if !attempt.resultReturned || attempt.resultNotice != notice {
 				t.Fatal("result notice was not retained")
 			}
 			// The shape-only notice must not reach observers as an exit; only the
@@ -106,7 +106,7 @@ func TestLiveAttemptDeliversResultNoticeAndBroadcastsCommittedExit(t *testing.T)
 			if len(attachment.queue) != 0 {
 				t.Fatalf("notice broadcast to observers: %d queued", len(attachment.queue))
 			}
-			if result := <-attempt.result; result.err != nil || result.notice != notice {
+			if result := <-attempt.result; result.err != nil || result.notice != notice || !result.observersRetained {
 				t.Fatalf("result delivery = %+v", result)
 			}
 			command := liveAttemptCommand{kind: liveCommandFinishExit, exit: &test.event, result: make(chan error, 1)}
@@ -128,6 +128,85 @@ func TestLiveAttemptDeliversResultNoticeAndBroadcastsCommittedExit(t *testing.T)
 	}
 }
 
+func TestLiveAttemptLostNoticeRetainsObserversForCommittedExit(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		finishExit bool
+	}{
+		{name: "authenticated artifact broadcasts exit", finishExit: true},
+		{name: "rejected artifact shuts owner down", finishExit: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			controller, peer := readyTerminalEffectController(t)
+			runID, sessionID := liveTestIDs(t, 11002)
+			attempt := newLiveAttempt(nil, runID, sessionID, controller)
+			attempt.releaseSent = true
+			attempt.readySeen = true
+			attachment := &TerminalAttachment{owner: attempt, queue: make(chan TerminalEvent, terminalSubscriberCap)}
+			attempt.subs[attachment] = struct{}{}
+			startLiveAttempt(attempt, context.Background())
+			if err := peer.Close(); err != nil {
+				t.Fatal(err)
+			}
+			result := attempt.waitResult()
+			if result.err == nil || result.notice != nil || !result.observersRetained || !attempt.resultReturned {
+				t.Fatalf("lost-notice result = %+v returned=%t", result, attempt.resultReturned)
+			}
+			select {
+			case <-attempt.done:
+				t.Fatal("lost notice abandoned terminal observers before artifact authentication")
+			default:
+			}
+			if !test.finishExit {
+				if err := attempt.close(); err == nil {
+					t.Fatal("lost-notice owner discarded its controller failure")
+				}
+				if _, err := attachment.Next(context.Background()); err == nil {
+					t.Fatalf("shutdown observer = %v", err)
+				}
+				return
+			}
+			exit := TerminalEvent{Kind: TerminalEventExit, ExitCode: 7}
+			if err := attempt.finishExit(context.Background(), exit); err != nil {
+				t.Fatal(err)
+			}
+			event, err := attachment.Next(context.Background())
+			if err != nil || event.Kind != TerminalEventExit || event.ExitCode != 7 {
+				t.Fatalf("committed exit = %+v, %v", event, err)
+			}
+			if err := attempt.join(); err == nil {
+				t.Fatal("committed fallback exit discarded its controller diagnosis")
+			}
+		})
+	}
+}
+
+func TestLiveAttemptShutdownReturnsFallbackToSupervisor(t *testing.T) {
+	runID, sessionID := liveTestIDs(t, 11003)
+	attempt := newLiveAttempt(nil, runID, sessionID, nil)
+	startLiveAttempt(attempt, context.Background())
+	resultDone := make(chan liveAttemptResult, 1)
+	closeDone := make(chan error, 1)
+	go func() { resultDone <- attempt.waitResult() }()
+	go func() { closeDone <- attempt.close() }()
+	select {
+	case result := <-resultDone:
+		if result.err == nil || result.notice != nil || result.observersRetained {
+			t.Fatalf("shutdown fallback = %+v", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("supervisor waiter remained blocked after owner shutdown")
+	}
+	select {
+	case err := <-closeDone:
+		if err == nil {
+			t.Fatal("shutdown discarded its terminal-closed result")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("owner shutdown did not join")
+	}
+}
+
 func TestLiveAttemptRejectsExitBroadcastWithoutCommittedResult(t *testing.T) {
 	runID, sessionID := liveTestIDs(t, 11001)
 	attempt := newLiveAttempt(nil, runID, sessionID, nil)
@@ -136,7 +215,7 @@ func TestLiveAttemptRejectsExitBroadcastWithoutCommittedResult(t *testing.T) {
 	if stop, err := attempt.handleRunnerEvent(runner.AttemptEvent{Kind: runner.AttemptResultReady}); stop || !errors.Is(err, runner.ErrState) {
 		t.Fatalf("nil notice = stop %v err %v", stop, err)
 	}
-	if attempt.resultSeen || attempt.resultNotice != nil || len(attempt.result) != 0 {
+	if attempt.resultReturned || attempt.resultNotice != nil || len(attempt.result) != 0 {
 		t.Fatal("nil notice changed state")
 	}
 	exit := TerminalEvent{Kind: TerminalEventExit}
@@ -147,7 +226,7 @@ func TestLiveAttemptRejectsExitBroadcastWithoutCommittedResult(t *testing.T) {
 	if commandErr := <-command.result; !errors.Is(commandErr, runner.ErrIdentity) {
 		t.Fatalf("finish exit before result = %v", commandErr)
 	}
-	attempt.resultSeen = true
+	attempt.resultReturned = true
 	wrongKind := TerminalEvent{Kind: TerminalEventOutput}
 	command = liveAttemptCommand{kind: liveCommandFinishExit, exit: &wrongKind, result: make(chan error, 1)}
 	if stop, err := attempt.handleRunningCommand(command); stop || err != nil {
@@ -186,7 +265,7 @@ func TestLiveAttemptRejectsWrongSessionBeforeRunnerAttach(t *testing.T) {
 	}
 }
 
-func TestLiveAttemptOwnerClosesControllerBeforeDoneOnReadError(t *testing.T) {
+func TestLiveAttemptOwnerClosesControllerBeforeFallbackResult(t *testing.T) {
 	daemon := &Daemon{attempts: make(map[kernel.RunID]*liveAttempt)}
 	runID, sessionID := liveTestIDs(t, 10007)
 	controller, peer, err := runner.NewAttemptController()
@@ -202,11 +281,19 @@ func TestLiveAttemptOwnerClosesControllerBeforeDoneOnReadError(t *testing.T) {
 		t.Fatal(err)
 	}
 	startLiveAttempt(attempt, context.Background())
-	if err := attempt.join(); err == nil {
+	if result := attempt.waitResult(); result.err == nil || result.notice != nil {
 		t.Fatal("owner read error was hidden")
 	}
 	if !attempt.controller.Closed() {
-		t.Fatal("owner published done before controller closure")
+		t.Fatal("owner published fallback before controller closure")
+	}
+	select {
+	case <-attempt.done:
+		t.Fatal("owner abandoned fallback before artifact authentication")
+	default:
+	}
+	if err := attempt.close(); err == nil {
+		t.Fatal("fallback cleanup discarded the controller error")
 	}
 }
 
@@ -289,13 +376,13 @@ func TestLiveAttemptEffectTypingSeparatesNotReadyFromPublishedResult(t *testing.
 		t.Fatalf("pre-ready wire mapping = %v", mapped)
 	}
 
-	// Once the result is published this effect can never succeed. Typing it
+	// Once the result is returned this effect can never succeed. Typing it
 	// retryable would invite a client to spin on a permanent condition, so it
 	// must reach the wire as stale and keep its terminal fence regardless of
 	// whether the runner's ready frame was consumed first.
 	for _, readySeen := range []bool{false, true} {
 		attempt.readySeen = readySeen
-		attempt.resultSeen = true
+		attempt.resultReturned = true
 		result, err = attempt.handleTerminalEffect(effect)
 		if err != nil || !errors.Is(result.err, kernel.ErrConflict) {
 			t.Fatalf("post-result ready=%t effect = %+v err=%v", readySeen, result, err)
