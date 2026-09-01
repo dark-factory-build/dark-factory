@@ -184,6 +184,11 @@ func TestSelectGitRejectsPartialCloneAlternatesAndNonCommitRevision(t *testing.T
 		t.Fatal("direct promisor remote accepted")
 	}
 	runFixtureGit(t, fixture.git, fixture.repository, "config", "--unset", "remote.origin.promisor")
+	runFixtureGit(t, fixture.git, fixture.repository, "config", "core.repositoryformatversion", "1")
+	runFixtureGit(t, fixture.git, fixture.repository, "config", "extensions.worktreeConfig", "true")
+	if _, err := SelectGit(context.Background(), fixture.git, fixture.repository, "HEAD", fixture.identity); err != nil {
+		t.Fatalf("worktreeConfig without config.worktree was rejected: %v", err)
+	}
 	alternates := filepath.Join(fixture.repository, ".git", "objects", "info", "alternates")
 	if err := os.WriteFile(alternates, []byte("/private/tmp/objects\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -214,7 +219,6 @@ func TestSelectGitRejectsLocalIncludesBeforeExecutingGit(t *testing.T) {
 		"conditional include": "[includeIf \"gitdir:**/repository/**\"]\n\tpath = ../outside-config\n",
 		"case folded include": "[InClUdEiF \"onbranch:main\"]\n\tpath = ../outside-config\n",
 		"include key":         "[core]\n\tinclude.path = ../outside-config\n",
-		"worktree config":     "[extensions]\n\tworktreeConfig = true\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			repository := fakeRepository(t)
@@ -253,7 +257,6 @@ func TestLocalGitConfigValidatorIsMinimalAndFailClosed(t *testing.T) {
 		"include section":      []byte("[include]\n\tpath = ../outside\n"),
 		"includeIf section":    []byte("[includeIf \"onbranch:main\"]\n\tpath = ../outside\n"),
 		"include key":          []byte("[core]\n\tinclude.path = ../outside\n"),
-		"worktree config":      []byte("[extensions]\n\tworktreeConfig = true\n"),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if validLocalGitConfig(config) {

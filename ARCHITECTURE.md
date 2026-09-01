@@ -77,6 +77,10 @@ fixed reply bound, and display-only `can_reply`. It contains no run locator,
 terminal locator, question, reply, cancel descriptor, process identity, or
 other private source data.
 
+Closing the selected agent's current-run terminal detaches that observer while
+leaving the authenticated BrowserSession connected; only an ambiguous detach
+fails closed by stopping the session.
+
 Private detail is one pinned SQLite read. A client with
 `private_human_request_detail` may receive the exact hostile question and, only
 for an open request whose originating run is running with its exact active
@@ -125,6 +129,10 @@ Launch is one nested register-before-exec handshake:
 If preparation or activation fails, the run enters `finalizing`; a provider
 must never execute first and become durable later. The runner is a
 provider-blind effect host, not a second lifecycle owner.
+
+Owned failed attempts apply exact recovery before `RunNext` returns. The
+scheduler reports any remaining `finalizing` residue as unsettled and leaves it
+for the startup recovery sweep.
 
 The resource ledger records process, process group, runner, runtime root, and
 other external effects before use. Stored numeric identities never grant

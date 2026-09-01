@@ -660,7 +660,7 @@ func validLocalGitConfig(config []byte) bool {
 		}
 		key, _, _ := strings.Cut(line, "=")
 		key = strings.ToLower(strings.TrimSpace(key))
-		if key == "" || key == "include" || strings.HasPrefix(key, "include.") || key == "includeif" || strings.HasPrefix(key, "includeif.") || section == "extensions" && key == "worktreeconfig" {
+		if key == "" || key == "include" || strings.HasPrefix(key, "include.") || key == "includeif" || strings.HasPrefix(key, "includeif.") {
 			return false
 		}
 		for _, character := range key {

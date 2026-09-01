@@ -95,7 +95,3 @@ func retainedSettlement(ctx context.Context, changeParent string, changeState ke
 	}
 	return kernel.NewRetainedChangeSettlement(changeState.Revision, availability)
 }
-
-// errUnsettledCompletion marks a scheduled attempt that converged durably but
-// could not be settled to a terminal record.
-var errUnsettledCompletion = errors.New("daemon: scheduled completion was not settled")

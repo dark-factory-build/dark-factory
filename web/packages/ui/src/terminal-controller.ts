@@ -73,6 +73,7 @@ class TerminalController {
   #error: SessionError | ProtocolError | undefined;
   #handle: TerminalHandle | undefined;
   #handleClosed = false;
+  #detachRequested = false;
   #started = false;
   #closing = false;
   #generation = 0;
@@ -84,7 +85,9 @@ class TerminalController {
   #leaseOperation: TerminalLeaseOperation = "none";
   #pendingResize: Resize | undefined;
   #effectTask: Promise<void> | undefined;
+  #outputTask: Promise<void> | undefined;
   #closePromise: Promise<void> | undefined;
+  #detachPromise: Promise<void> | undefined;
 
   constructor(options: TerminalControllerOptions) {
     this.#options = options;
@@ -242,6 +245,44 @@ class TerminalController {
     return true;
   }
 
+  /** Detach this terminal observer while leaving the authenticated session open. */
+  detach(): Promise<void> {
+    if (this.#closePromise !== undefined) return this.#closePromise;
+    if (this.#detachPromise !== undefined) return this.#detachPromise;
+    const handle = this.#handle;
+    if (handle === undefined || this.#handleClosed) {
+      this.#handleEnded(new SessionError("closed"));
+      return Promise.resolve();
+    }
+    this.#writable = false;
+    this.#detachRequested = true;
+    this.#leaseOperation = "none";
+    this.#inputBuffer = new Uint8Array(0);
+    this.#pendingResize = undefined;
+    this.#phase = "closing";
+    this.#publish();
+    const pending = (async () => {
+      const output = this.#outputTask;
+      if (output !== undefined) await output.catch(() => undefined);
+      if (this.#handle !== handle || this.#handleClosed) return;
+      await handle.detach();
+    })().then(() => {
+      if (this.#handle !== handle) return;
+      this.#handleClosed = true;
+      this.#abortSurface();
+      this.#phase = "closed";
+      this.#publish();
+    }, (error: unknown) => {
+      if (this.#handle !== handle) return;
+      this.#error = finiteError(error);
+      this.#publish();
+      void this.close();
+      throw error;
+    });
+    this.#detachPromise = pending;
+    return pending;
+  }
+
   close(): Promise<void> {
     if (this.#closePromise !== undefined) return this.#closePromise;
     // Install the latch before any callback can re-enter the owner.
@@ -292,10 +333,21 @@ class TerminalController {
         return;
       }
       const handle = this.#options.session.openTerminal(target as TerminalTarget, {
-        onOutput: (output) => this.#writeOutput(generation, output.payload),
+        onOutput: (output) => {
+          const task = this.#writeOutput(generation, output.payload);
+          this.#outputTask = task;
+          void task.then(() => this.#outputFinished(task), () => this.#outputFinished(task));
+          return task;
+        },
         onExit: () => this.#handleEnded(new SessionError("closed")),
-        onReset: () => { this.#reset = true; this.#handleEnded(new SessionError("stale")); },
-        onClose: (error) => this.#handleEnded(finiteError(error)),
+        onReset: () => {
+          if (!this.#detachRequested) this.#reset = true;
+          this.#handleEnded(new SessionError(this.#detachRequested ? "closed" : "stale"));
+        },
+        onClose: (error) => {
+          if (this.#detachRequested && error === undefined) return;
+          this.#handleEnded(finiteError(error));
+        },
       });
       this.#handle = handle;
       if (!this.#current(generation)) return;
@@ -353,7 +405,8 @@ class TerminalController {
   }
 
   async #writeOutput(generation: number, payload: Uint8Array): Promise<void> {
-    if (!this.#current(generation) || !this.#liveHandle()) return Promise.reject(new SessionError("closed"));
+    const live = this.#handle !== undefined && !this.#handleClosed && !this.#closing;
+    if ((!this.#current(generation) && !this.#detachRequested) || !live) return Promise.reject(new SessionError("closed"));
     try {
       await this.#options.surface.write(payload.slice());
     } catch {
@@ -361,7 +414,8 @@ class TerminalController {
       if (live) this.#fail(new SessionError("internal"));
       throw new SessionError(live ? "internal" : "closed");
     }
-    if (!this.#current(generation) || !this.#liveHandle()) throw new SessionError("closed");
+    const stillLive = this.#handle !== undefined && !this.#handleClosed && !this.#closing;
+    if ((!this.#current(generation) && !this.#detachRequested) || !stillLive) throw new SessionError("closed");
   }
 
   #pumpEffects(): void {
@@ -425,6 +479,9 @@ class TerminalController {
     if (this.#effectTask === task) this.#effectTask = undefined;
   }
 
+  #outputFinished(task: Promise<void>): void {
+    if (this.#outputTask === task) this.#outputTask = undefined;
+  }
   #handleEnded(error: SessionError | ProtocolError, retryDiscovery = false): void {
     if (this.#handleClosed) return;
     this.#handleClosed = true;
@@ -435,7 +492,7 @@ class TerminalController {
     this.#pendingResize = undefined;
     this.#retryDiscovery = retryDiscovery;
     ++this.#generation;
-    this.#abortSurface();
+    if (!this.#detachRequested) this.#abortSurface();
     if (!this.#closing && this.#phase !== "closed") {
       this.#error = error;
       this.#phase = "closed";

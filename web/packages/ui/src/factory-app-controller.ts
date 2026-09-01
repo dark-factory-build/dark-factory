@@ -39,6 +39,8 @@ export type FactoryTerminalView = Readonly<{
   agentId: string;
   agentName: string;
   agentRevision: bigint;
+  /** Current running task title, when this selected agent has one. */
+  taskTitle?: string;
   phase: "idle" | "resolving" | "attaching" | "acquiring" | "ready" | "closing" | "closed";
   writable: boolean;
   leaseOperation: TerminalLeaseOperation;
@@ -91,11 +93,17 @@ type AgentTerminalSelection = {
   resets: number;
 };
 
-function agentHasRunningTask(agent: AgentItem, state: StateView): boolean {
+type TerminalReplacement = {
+  agentId?: string;
+  agentRevision?: bigint;
+  error?: SessionError | ProtocolError;
+};
+
+function agentCurrentTask(agent: AgentItem, state: StateView) {
   for (const task of state.tasks.values()) {
-    if (task.assigned_agent_id === agent.id && task.status === "running") return true;
+    if (task.assigned_agent_id === agent.id && task.status === "running") return task;
   }
-  return false;
+  return undefined;
 }
 
 /** Owns one mounted FactoryApp lifecycle and its exact HumanRequest authority. */
@@ -118,6 +126,7 @@ export class FactoryAppController {
   #terminalGeneration = 0;
   #terminalResetBurst = 0;
   #terminalRetry: { head: bigint; stale: boolean } | undefined;
+  #terminalReplacement: TerminalReplacement | undefined;
   #pendingTerminalResize: { rows: number; cols: number } | undefined;
   #generation = 0;
   #started = false;
@@ -189,7 +198,8 @@ export class FactoryAppController {
     ++this.#generation;
     this.#clearSelection();
     this.#selectedAgent = undefined;
-    this.#dropTerminal(true);
+    this.#terminalReplacement = undefined;
+    this.#closeTerminal();
     this.#client?.close();
   }
 
@@ -203,10 +213,7 @@ export class FactoryAppController {
     }
     const selected = this.#selectedAgent;
     if (selected?.agent.id === current.id && selected.agent.revision === current.revision && (selected.head === this.#state?.head || this.#terminal !== undefined)) return;
-    this.#dropTerminal(true);
-    this.#selectedAgent = { agent: { ...current }, head: this.#state?.head ?? 0n, resets: 0 };
-    this.#error = undefined;
-    this.#publish();
+    this.#replaceTerminal({ agentId: current.id, agentRevision: current.revision });
   }
 
   openTerminalForHumanRequest(request: HumanRequestItem): void {
@@ -223,10 +230,7 @@ export class FactoryAppController {
 
   clearAgentTerminal(): void {
     if (this.#closed) return;
-    this.#selectedAgent = undefined;
-    this.#dropTerminal(true);
-    this.#error = undefined;
-    this.#publish();
+    this.#replaceTerminal({});
   }
 
   beginTerminalSurface(token: object, surfaceVersion = this.#terminalSurfaceVersion): void {
@@ -238,7 +242,8 @@ export class FactoryAppController {
   endTerminalSurface(token: object, surfaceVersion = this.#terminalSurfaceVersion): void {
     if (surfaceVersion !== this.#terminalSurfaceVersion || this.#terminalSurfaceToken !== token) return;
     this.#selectedAgent = undefined;
-    this.#dropTerminal(true);
+    this.#terminalReplacement = undefined;
+    this.#closeTerminal();
     this.#error = new SessionError("internal");
     this.#publish();
   }
@@ -259,7 +264,8 @@ export class FactoryAppController {
     if (this.#closed || this.#selectedAgent === undefined || surfaceVersion !== this.#terminalSurfaceVersion) return;
     if (this.#terminalSurfaceToken !== undefined && this.#terminalSurfaceToken !== token) return;
     this.#selectedAgent = undefined;
-    this.#dropTerminal(true);
+    this.#terminalReplacement = undefined;
+    this.#closeTerminal();
     this.#error = new SessionError("internal");
     this.#publish();
   }
@@ -395,7 +401,8 @@ export class FactoryAppController {
       this.#error = finiteError(error);
       this.#statusReason = this.#error.code;
       this.#clearSelection();
-      if (this.#terminal !== undefined) this.#dropTerminal(true);
+      this.#terminalReplacement = undefined;
+      if (this.#terminal !== undefined) this.#closeTerminal();
       this.#publish();
     });
   }
@@ -407,7 +414,10 @@ export class FactoryAppController {
     if (status !== "ready") this.#clearSelection();
     // A wire-level state restart resnapshots on the same authenticated socket;
     // exact terminal discovery and handles remain owned by that session.
-    if (status !== "ready" && status !== "syncing" && this.#terminal !== undefined) this.#dropTerminal(true);
+    if (status !== "ready" && status !== "syncing" && this.#terminal !== undefined) {
+      this.#terminalReplacement = undefined;
+      this.#closeTerminal();
+    }
     if (status !== "closed") this.#error = undefined;
     this.#publish();
     if (status === "ready") this.#reconcileTerminal();
@@ -417,21 +427,19 @@ export class FactoryAppController {
     if (!this.#current(generation)) return;
     this.#state = state;
     const selectedAgent = this.#selectedAgent;
-    if (selectedAgent !== undefined) {
+    if (selectedAgent !== undefined && this.#terminalReplacement === undefined) {
       const currentAgent = state.agents.get(selectedAgent.agent.id);
       if (currentAgent === undefined || currentAgent.revision !== selectedAgent.agent.revision) {
-        this.#selectedAgent = undefined;
-        this.#dropTerminal(true);
-        this.#error = new SessionError("stale");
+        this.#replaceTerminal({ error: new SessionError("stale") });
       } else {
         selectedAgent.agent = { ...currentAgent };
         if (this.#terminal === undefined) {
           if (selectedAgent.head !== state.head) {
             selectedAgent.head = state.head;
             this.#terminalRetry = undefined;
-          } else if (this.#terminalRetry !== undefined && !this.#terminalRetry.stale && !agentHasRunningTask(selectedAgent.agent, state)) {
+          } else if (this.#terminalRetry !== undefined && !this.#terminalRetry.stale && agentCurrentTask(selectedAgent.agent, state) === undefined) {
             this.#selectedAgent = undefined;
-            this.#dropTerminal(false);
+            this.#retireTerminal();
           }
         }
       }
@@ -488,6 +496,7 @@ export class FactoryAppController {
   #receiveTerminalSnapshot(generation: number, controller: TerminalController, snapshot: TerminalControllerSnapshot): void {
     if (this.#closed || generation !== this.#terminalGeneration || controller !== this.#terminal) return;
     if (snapshot.phase === "closed") {
+      if (this.#finishTerminalReplacement()) return;
       if (snapshot.reset && this.#recoverFromTerminalReset()) return;
       const selected = this.#selectedAgent;
       const state = this.#state;
@@ -496,8 +505,8 @@ export class FactoryAppController {
         snapshot.retryDiscovery &&
         selected !== undefined &&
         state !== undefined &&
-        (staleDiscovery || agentHasRunningTask(selected.agent, state));
-      this.#dropTerminal(false);
+        (staleDiscovery || agentCurrentTask(selected.agent, state) !== undefined);
+      this.#retireTerminal();
       if (retryDiscovery && selected !== undefined && state !== undefined) {
         if (selected.head === state.head) {
           this.#terminalRetry = { head: selected.head, stale: staleDiscovery };
@@ -557,7 +566,37 @@ export class FactoryAppController {
     terminal.resize(resize.rows, resize.cols);
   }
 
-  #dropTerminal(closeSession: boolean): void {
+  #replaceTerminal(replacement: TerminalReplacement): void {
+    const terminal = this.#terminal;
+    if (terminal === undefined) {
+      this.#terminalReplacement = replacement;
+      this.#finishTerminalReplacement();
+      return;
+    }
+    this.#terminalReplacement = replacement;
+    this.#error = undefined;
+    void terminal.detach().catch(() => undefined);
+    this.#publish();
+  }
+
+  #finishTerminalReplacement(): boolean {
+    const replacement = this.#terminalReplacement;
+    if (replacement === undefined) return false;
+    this.#terminalReplacement = undefined;
+    this.#retireTerminal();
+    const candidate = replacement.agentId === undefined ? undefined : this.#state?.agents.get(replacement.agentId);
+    const agent = candidate?.revision === replacement.agentRevision ? candidate : undefined;
+    this.#selectedAgent = agent === undefined ? undefined : {
+      agent: { ...agent },
+      head: this.#state?.head ?? 0n,
+      resets: 0,
+    };
+    this.#error = replacement.error ?? (replacement.agentId !== undefined && agent === undefined ? new SessionError("stale") : undefined);
+    this.#publish();
+    return true;
+  }
+
+  #retireTerminal(): TerminalController | undefined {
     const terminal = this.#terminal;
     this.#terminal = undefined;
     this.#terminalResetBurst = 0;
@@ -567,15 +606,19 @@ export class FactoryAppController {
     this.#terminalSurfaceToken = undefined;
     this.#pendingTerminalResize = undefined;
     ++this.#terminalSurfaceVersion;
-    if (closeSession && terminal !== undefined) void terminal.close();
+    return terminal;
+  }
+
+  #closeTerminal(): void {
+    const terminal = this.#retireTerminal();
+    if (terminal !== undefined) void terminal.close();
   }
 
   #disarmTerminal(error: SessionError | ProtocolError): void {
-    const terminal = this.#terminal;
     this.#selectedAgent = undefined;
-    this.#dropTerminal(false);
+    this.#terminalReplacement = undefined;
+    this.#closeTerminal();
     this.#error = error;
-    if (terminal !== undefined) void terminal.close();
     this.#publish();
   }
 
@@ -603,6 +646,7 @@ export class FactoryAppController {
         agentId: this.#selectedAgent.agent.id,
         agentName: this.#selectedAgent.agent.name,
         agentRevision: this.#selectedAgent.agent.revision,
+        taskTitle: this.#state === undefined ? undefined : agentCurrentTask(this.#selectedAgent.agent, this.#state)?.title,
         phase: this.#terminal?.snapshot.phase ?? "idle",
         writable: this.#terminal?.snapshot.writable ?? false,
         leaseOperation: this.#terminal?.snapshot.leaseOperation ?? "none",

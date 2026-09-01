@@ -1,5 +1,5 @@
 const clientModule = `
-const counters = globalThis.__darkFactoryStrictProbe ??= { clients: 0, sessionCloses: 0, resolves: 0, opens: 0, attaches: 0, acquires: 0, terminals: 0, disposes: 0 };
+const counters = globalThis.__darkFactoryStrictProbe ??= { clients: 0, states: 0, sessionCloses: 0, resolves: 0, opens: 0, attaches: 0, acquires: 0, detaches: 0, terminals: 0, disposes: 0 };
 export class SessionError extends Error { constructor(code) { super(code); this.name = "SessionError"; this.code = code; this.retryable = false; } }
 export class ProtocolError extends Error { constructor(code) { super(code); this.name = "ProtocolError"; this.code = code; } }
 export const MAX_TERMINAL_PAYLOAD = 4096;
@@ -15,7 +15,7 @@ export function createBrowserClient(options) {
     resolveAgentTerminal: async () => { counters.resolves += 1; return Object.freeze({}); },
     openTerminal: (_target, callbacks) => {
       counters.opens += 1;
-      const handle = { writable: true, attach: async () => { counters.attaches += 1; return {}; }, acquireInput: async () => { counters.acquires += 1; return {}; }, sendInput: async (bytes) => ({ status: "accepted", accepted_bytes: BigInt(bytes.length) }), resize: async (rows, cols) => ({ rows, cols }), close: () => callbacks.onClose?.(new SessionError("closed")) };
+      const handle = { writable: true, attach: async () => { counters.attaches += 1; return {}; }, acquireInput: async () => { counters.acquires += 1; return {}; }, detach: async () => { counters.detaches += 1; callbacks.onClose?.(); }, sendInput: async (bytes) => ({ status: "accepted", accepted_bytes: BigInt(bytes.length) }), resize: async (rows, cols) => ({ rows, cols }), close: () => callbacks.onClose?.(new SessionError("closed")) };
       return handle;
     },
     close: () => {
@@ -27,14 +27,14 @@ export function createBrowserClient(options) {
   };
   return {
     session,
-    connect: () => { options.onState?.(state); options.onStatus?.("ready"); return Promise.resolve(); },
+    connect: () => { counters.states += 1; options.onState?.(state); options.onStatus?.("ready"); return Promise.resolve(); },
     close: () => session.close(),
   };
 }
 `;
 
 const xtermModule = `
-const counters = globalThis.__darkFactoryStrictProbe ??= { clients: 0, sessionCloses: 0, resolves: 0, opens: 0, attaches: 0, acquires: 0, terminals: 0, disposes: 0 };
+const counters = globalThis.__darkFactoryStrictProbe ??= { clients: 0, states: 0, sessionCloses: 0, resolves: 0, opens: 0, attaches: 0, acquires: 0, detaches: 0, terminals: 0, disposes: 0 };
 export class Terminal {
   rows = 24;
   cols = 80;

@@ -104,6 +104,20 @@ test("steer is never a dead-looking live control", () => {
   assert.match(writableMarkup, /you have control/);
 });
 
+test("the current-run identity and close action stay truthful through setup", () => {
+  const identified = sidebarProps({ terminal: { taskTitle: "Repair finalization" } });
+  const identifiedMarkup = renderToStaticMarkup(createElement(TerminalSidebar, identified.props, createElement("div")));
+  assert.match(identifiedMarkup, /CURRENT RUN TERMINAL · Repair finalization/);
+
+  for (const phase of ["idle", "resolving", "attaching", "acquiring", "ready", "closing", "closed"]) {
+    const { props } = sidebarProps({ terminal: { phase } });
+    const markup = renderToStaticMarkup(createElement(TerminalSidebar, props, createElement("div")));
+    const button = markup.match(/<button[^>]*title="close this terminal view; the worker keeps running"[^>]*>/)?.[0];
+    assert.ok(button, phase);
+    assert.equal(button.includes("disabled"), phase === "closing" || phase === "closed", phase);
+  }
+});
+
 test("the replay-reset banner appears only after a server reset", async () => {
   const { renderToStaticMarkup } = await import("react-dom/server");
   const { createElement } = await import("react");

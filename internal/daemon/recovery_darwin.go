@@ -85,6 +85,42 @@ func (daemon *Daemon) RecoverAbandonedRuns(ctx context.Context, parent *RuntimeP
 	return dispositions, nil
 }
 
+// recoverReturnedRun applies the restart recovery grammar to one exact run
+// after RunNext has joined every owner and closed its runtime handles. It is
+// intentionally narrower than RecoverAbandonedRuns: a scheduler may have
+// other admitted attempts that are still between admission and registration,
+// and a global sweep here could misclassify those concurrent owners.
+func (daemon *Daemon) recoverReturnedRun(parent *RuntimeParent, changeParent string, runID kernel.RunID) (kernel.Run, error) {
+	if daemon == nil || daemon.store == nil || parent == nil || changeParent == "" || runID == (kernel.RunID{}) {
+		return kernel.Run{}, fmt.Errorf("%w: invalid returned-run recovery", kernel.ErrInvalidValue)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	recoverable, found, err := daemon.store.RecoverableRun(ctx, runID)
+	if err != nil {
+		return kernel.Run{}, err
+	}
+	if found {
+		_, recoverErr := daemon.recoverRun(ctx, parent, changeParent, recoverable)
+		current, currentFound, readErr := daemon.store.Run(ctx, runID)
+		if readErr != nil || !currentFound {
+			if readErr == nil {
+				readErr = kernel.ErrCorruptState
+			}
+			return kernel.Run{}, errors.Join(recoverErr, readErr)
+		}
+		return current, recoverErr
+	}
+	current, found, err := daemon.store.Run(ctx, runID)
+	if err != nil {
+		return kernel.Run{}, err
+	}
+	if !found {
+		return kernel.Run{}, kernel.ErrNotFound
+	}
+	return current, nil
+}
+
 func (daemon *Daemon) recoverRun(ctx context.Context, parent *RuntimeParent, changeParent string, recoverable kernel.RecoverableRun) (RecoveredRunAction, error) {
 	run := recoverable.Run
 	var runtimeRoot, runnerProcess, providerProcess, providerGroup kernel.Resource
@@ -104,6 +140,12 @@ func (daemon *Daemon) recoverRun(ctx context.Context, parent *RuntimeParent, cha
 		return RecoveredUncertain, errInvalidContract
 	}
 	if runtimeRoot.Identity.Empty() {
+		if run.Phase == kernel.RunFinalizing && runtimeRoot.State == kernel.ResourceReleased &&
+			runnerProcess.State == kernel.ResourceReleased && providerProcess.State == kernel.ResourceReleased && providerGroup.State == kernel.ResourceReleased &&
+			recoverable.TerminalSession.State == kernel.TerminalSessionClosed {
+			_, settleErr := daemon.settleRun(changeParent, run.ID)
+			return RecoveredConverged, settleErr
+		}
 		return daemon.recoverBeforeRuntime(ctx, parent, changeParent, run, runtimeRoot)
 	}
 	fileIdentity, err := runtimeFileIdentity(runtimeRoot.Identity)
@@ -112,6 +154,12 @@ func (daemon *Daemon) recoverRun(ctx context.Context, parent *RuntimeParent, cha
 	}
 	if runtimeRoot.State == kernel.ResourceReleased {
 		// The runtime is durably gone; only process/session residue can remain.
+		if run.Phase == kernel.RunFinalizing && runnerProcess.State == kernel.ResourceReleased &&
+			providerProcess.State == kernel.ResourceReleased && providerGroup.State == kernel.ResourceReleased &&
+			recoverable.TerminalSession.State == kernel.TerminalSessionClosed {
+			_, settleErr := daemon.settleRun(changeParent, run.ID)
+			return RecoveredConverged, settleErr
+		}
 		return daemon.recoverReleasedRuntimeResidue(ctx, run, runnerProcess, providerProcess, providerGroup)
 	}
 	recovered, err := OpenRecoveredRuntime(ctx, parent, run.ID.String(), fileIdentity)
@@ -122,7 +170,6 @@ func (daemon *Daemon) recoverRun(ctx context.Context, parent *RuntimeParent, cha
 		return RecoveredUncertain, err
 	}
 	defer func() { _ = recovered.Close() }()
-
 	// Ordering rule: the artifact always speaks before any absence edge.
 	if recovered.HasAttemptResult() {
 		record, authErr := recovered.AuthenticateResult(run.ID.String())
@@ -131,6 +178,15 @@ func (daemon *Daemon) recoverRun(ctx context.Context, parent *RuntimeParent, cha
 			return RecoveredUncertain, authErr
 		}
 		return daemon.recoverAuthenticatedResult(ctx, parent, changeParent, run, recovered, record, runtimeRoot, runnerProcess, fileIdentity)
+	}
+	if run.Phase == kernel.RunFinalizing && runtimeRoot.State == kernel.ResourceReleasing &&
+		runnerProcess.State == kernel.ResourceReleased && providerProcess.State == kernel.ResourceReleased && providerGroup.State == kernel.ResourceReleased &&
+		recoverable.TerminalSession.State == kernel.TerminalSessionClosed {
+		if removeErr := daemon.removeRecoveredRuntime(ctx, parent, run.ID, recovered, fileIdentity); removeErr != nil {
+			return RecoveredConverged, removeErr
+		}
+		_, settleErr := daemon.settleRun(changeParent, run.ID)
+		return RecoveredConverged, settleErr
 	}
 	switch {
 	case runnerProcess.State == kernel.ResourceStarting:

@@ -126,11 +126,9 @@ func TestSettleRunRefusesUnverifiablePublishedChange(t *testing.T) {
 	}
 }
 
-// TestScheduledCompletionSurfacesUnsettledRunAndContinues pins the non-fatal
-// arm: a completion whose settlement refuses with a conflict reports the run
-// and returns nil so the scheduler keeps serving; every other settlement
-// failure class stays fatal.
-func TestScheduledCompletionSurfacesUnsettledRunAndContinues(t *testing.T) {
+// TestScheduledCompletionRequiresRunNextSettlement pins the scheduler's
+// narrow responsibility: a finalizing completion is not accepted as done.
+func TestScheduledCompletionRequiresRunNextSettlement(t *testing.T) {
 	fixture := newRecoveryFixtureWithRole(t, 0x90, kernel.RoleWorker)
 	fixture.stageRuntime(t)
 	fixture.beginRunnerStart(t)
@@ -160,7 +158,7 @@ func TestScheduledCompletionSurfacesUnsettledRunAndContinues(t *testing.T) {
 	fixture.run = failed
 	reported := kernel.RunID{}
 	var reportedErr error
-	err = fixture.daemon.validateScheduledCompletion(fixture.changeParent, func(id kernel.RunID, cause error) {
+	err = fixture.daemon.validateScheduledCompletion(func(id kernel.RunID, cause error) {
 		reported, reportedErr = id, cause
 	}, failed)
 	if err != nil {

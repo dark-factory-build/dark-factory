@@ -429,6 +429,7 @@
 .dfConsoleSidebar__tab { border: 0; background: transparent; color: var(--df-console-muted); writing-mode: vertical-rl; font-size: 0.75rem; cursor: pointer; }
 .dfConsoleSidebar__header { display: flex; align-items: baseline; gap: 0.75rem; }
 .dfConsoleSidebar__header strong { font-size: 0.95rem; }
+.dfConsoleSidebar__identity { color: var(--df-console-muted); font-size: 0.7rem; overflow-wrap: anywhere; }
 .dfConsoleSidebar__phase { color: var(--df-console-muted); font-size: 0.75rem; }
 .dfConsoleSidebar__control { margin-left: auto; color: var(--df-console-muted); font-size: 0.8rem; }
 .dfConsoleSidebar__control--held { color: var(--df-console-accent); }

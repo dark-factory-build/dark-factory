@@ -24,7 +24,7 @@ function stateAt(head, overrides = {}) {
   return { ...fixtureState, head: BigInt(head), sequence: BigInt(head), ...overrides };
 }
 
-function terminalHarness({ closeStatus = false, fail, failError = new SessionError("connection") } = {}) {
+function terminalHarness({ closeStatus = false, fail, failError = new SessionError("connection"), detachImpl } = {}) {
   let attachReset = false;
   const snapshots = [];
   const calls = [];
@@ -60,6 +60,7 @@ function terminalHarness({ closeStatus = false, fail, failError = new SessionErr
         acquireInput: async () => { calls.push({ kind: "acquire" }); if (fail === "acquire") throw failError; return { generation: 1n }; },
         sendInput: async (bytes) => { calls.push({ kind: "input", bytes }); if (fail === "input") throw failError; return { status: "accepted", accepted_bytes: BigInt(bytes.length) }; },
         resize: async (rows, cols) => { calls.push({ kind: "resize", rows, cols }); if (fail === "resize") throw failError; return { rows, cols }; },
+        detach: async () => { calls.push({ kind: "detach" }); await detachImpl?.(); callbacks.onClose?.(); },
         get writable() { return true; },
       };
       handles.push(handle);
@@ -470,16 +471,22 @@ test("a fresh explicit selection can start one new terminal attempt after a fata
   assert.equal(context.targetGates.length, 2);
 });
 
-test("selection replaces the old controller before resolving the new public agent and fences stale callbacks", async () => {
-  const context = terminalHarness();
+test("selection detaches the old controller before resolving the new public agent and fences stale callbacks", async () => {
+  const detachGate = deferred();
+  const context = terminalHarness({ detachImpl: () => detachGate.promise });
   context.controller.start();
   context.ready();
   const first = await openTerminal(context, agent);
   const oldOptions = first.options;
   context.controller.selectAgent(secondAgent);
-  assert.equal(context.sessionCloses(), 1);
-  assert.equal(context.latest().selectedAgent.id, secondAgent.id);
+  assert.equal(context.sessionCloses(), 0);
+  assert.equal(context.latest().selectedAgent.id, agent.id, "old sidebar stays mounted while detach is pending");
+  assert.equal(context.latest().terminal.phase, "closing");
   assert.equal(context.targetGates.length, 1);
+  detachGate.resolve();
+  await flush();
+  assert.equal(context.latest().selectedAgent.id, secondAgent.id);
+  assert.equal(context.sessionCloses(), 0);
 
   const secondToken = {};
   context.controller.beginTerminalSurface(secondToken);
@@ -493,6 +500,29 @@ test("selection replaces the old controller before resolving the new public agen
   await flush();
   assert.deepEqual(context.calls.slice(-3).map((call) => call.kind), ["open", "attach", "acquire"]);
   assert.equal(context.latest().terminal.phase, "ready");
+});
+
+test("selected-agent revision drift cannot escalate an explicit detach to session close", async () => {
+  const detachGate = deferred();
+  const context = terminalHarness({ detachImpl: () => detachGate.promise });
+  context.controller.start();
+  context.ready();
+  await openTerminal(context, agent);
+
+  context.controller.clearAgentTerminal();
+  assert.equal(context.latest().terminal.phase, "closing");
+  const revisedAgent = { ...agent, revision: agent.revision + 1n };
+  const revisedAgents = new Map(fixtureState.agents);
+  revisedAgents.set(revisedAgent.id, revisedAgent);
+  context.clientOptions().onState(stateAt(43, { agents: revisedAgents }));
+  assert.equal(context.sessionCloses(), 0);
+  assert.equal(context.latest().selectedAgent.id, agent.id, "closing host remains mounted until detach resolves");
+
+  detachGate.resolve();
+  await flush();
+  assert.equal(context.sessionCloses(), 0);
+  assert.equal(context.latest().selectedAgent, undefined);
+  assert.equal(context.latest().error, undefined, "the explicit close intent wins over concurrent revision drift");
 });
 
 test("normal terminal exit drops only UI ownership and does not become a connection error", async () => {
@@ -528,16 +558,29 @@ test("HumanRequest terminal intent uses only its current public agent relationsh
   assert.equal(context.latest().error.code, "stale");
 });
 
-test("explicit terminal teardown closes the exact session once and rejects later surface intents", async () => {
+test("selected terminal close detaches once, keeps the session ready, and permits reopen", async () => {
   const context = terminalHarness();
   context.controller.start();
   context.ready();
-  const terminal = await openTerminal(context);
+  await openTerminal(context);
   context.controller.clearAgentTerminal();
   context.controller.clearAgentTerminal();
-  assert.equal(context.sessionCloses(), 1);
-  terminal.options.onExit();
+  await flush();
+  assert.deepEqual(context.calls.slice(-1).map((call) => call.kind), ["detach"]);
+  assert.equal(context.sessionCloses(), 0);
+  assert.equal(context.latest().error, undefined);
   assert.equal(context.latest().selectedAgent, undefined);
+
+  context.clientOptions().onState(fixtureState);
+  context.clientOptions().onStatus("ready");
+  context.controller.selectAgent(agent);
+  const token = {};
+  context.controller.beginTerminalSurface(token);
+  context.controller.setTerminalSurface(token, { write: async () => {}, abort: () => {} });
+  await flush();
+  context.targetGates.at(-1).resolve(target);
+  await flush();
+  assert.equal(context.latest().terminal.phase, "ready");
 });
 
 test("terminal failure is finite and never exposes protocol authority or output bytes in the public snapshot", async () => {
