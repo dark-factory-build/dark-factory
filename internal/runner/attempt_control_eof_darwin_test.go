@@ -72,34 +72,36 @@ func TestAttemptControllerStreamEndSpendsCapability(t *testing.T) {
 // live capability and report the peer as gone.
 func TestAttemptControllerMalformedBodyDoesNotSpendCapability(t *testing.T) {
 	for _, body := range []string{"   ", `{"version":`} {
-		controller, peer, err := NewAttemptController()
-		if err != nil {
-			t.Fatal(err)
-		}
-		controller.state = controllerInnerReady
-		if _, err := peer.Write(append(framedHeader(uint32(len(body))), body...)); err != nil {
-			t.Fatal(err)
-		}
-		_, readErr := controller.Next(time.Second)
-		if readErr == nil {
-			t.Fatalf("malformed body %q was accepted", body)
-		}
-		if errors.Is(readErr, io.EOF) || errors.Is(readErr, io.ErrUnexpectedEOF) {
-			t.Fatalf("malformed body %q impersonated a closed stream: %v", body, readErr)
-		}
-		if controller.file == nil || controller.state == controllerSpent {
-			t.Fatalf("malformed body %q spent a live capability", body)
-		}
-		closeAll(t, controller, peer)
+		t.Run(body, func(t *testing.T) {
+			controller, peer, err := NewAttemptController()
+			if err != nil {
+				t.Fatal(err)
+			}
+			controller.state = controllerInnerReady
+			t.Cleanup(func() { closeAll(t, controller, peer) })
+			if _, err := peer.Write(append(framedHeader(uint32(len(body))), body...)); err != nil {
+				t.Fatal(err)
+			}
+			_, readErr := controller.Next(time.Second)
+			if readErr == nil {
+				t.Fatalf("malformed body %q was accepted", body)
+			}
+			if errors.Is(readErr, io.EOF) || errors.Is(readErr, io.ErrUnexpectedEOF) {
+				t.Fatalf("malformed body %q impersonated a closed stream: %v", body, readErr)
+			}
+			if controller.file == nil || controller.state == controllerSpent {
+				t.Fatalf("malformed body %q spent a live capability", body)
+			}
+		})
 	}
 }
 
 func closeAll(t *testing.T, controller *AttemptController, peer *os.File) {
 	t.Helper()
 	if err := controller.Close(); err != nil {
-		t.Fatal(err)
+		t.Error(err)
 	}
 	if err := peer.Close(); err != nil {
-		t.Fatal(err)
+		t.Error(err)
 	}
 }

@@ -45,13 +45,28 @@ type supervisorAttemptOwner struct {
 	outerExit  *runner.Exit
 }
 
-// outerRunnerEvidence names how the outer runner actually ended. A control
-// read that returns EOF, or a write that returns EPIPE, says only that the
-// socket is finished — the same thing whether the runner exited cleanly,
-// failed to exec, or was killed. This owner already waits that exact child, so
-// the status that tells those apart is in hand at the moment the run fails.
+// reap waits the exact outer child and keeps what it learned. Every wait on
+// that child goes through here: the status is the only thing that distinguishes
+// a runner that exited cleanly from one that failed to exec or was killed, and
+// four separate call sites waiting it directly is how it came to be discarded
+// on the most common path.
+func (owner *supervisorAttemptOwner) reap(timeout time.Duration) (runner.Exit, error) {
+	exit, err := owner.child.FinishAfterExit(timeout)
+	if err != nil {
+		return runner.Exit{}, err
+	}
+	owner.reaped = true
+	recorded := exit
+	owner.outerExit = &recorded
+	return exit, nil
+}
+
+// outerRunnerEvidence names how the outer runner ended. A control read that
+// ends the stream, or a write that finds the peer gone, says only that the
+// socket is finished — the same thing however the runner died. The owner has
+// waited that exact child, so the status that tells those apart is in hand.
 func (owner *supervisorAttemptOwner) outerRunnerEvidence() error {
-	if owner == nil || owner.outerExit == nil {
+	if owner.outerExit == nil {
 		return nil
 	}
 	exit := *owner.outerExit
@@ -59,16 +74,17 @@ func (owner *supervisorAttemptOwner) outerRunnerEvidence() error {
 	if exit.LaunchErr != "" {
 		launch = fmt.Sprintf(" launch=%q", exit.LaunchErr)
 	}
-	return fmt.Errorf("daemon: outer runner exit code=%d signal=%d aborted=%v%s", exit.Code, exit.Signal, exit.Aborted, launch)
+	return fmt.Errorf("daemon: outer runner exit code=%d signal=%d%s", exit.Code, exit.Signal, launch)
 }
 
-// controlChannelEnded reports the failures whose whole content is "the control
-// socket is gone", which is the question the exit status answers. Every other
-// failure — a cancellation, a store conflict, an injected release error —
-// already carries its own reason, and the runner's exit there is a consequence
-// of the daemon's own action rather than evidence about it.
+// controlChannelEnded reports the two failures whose whole content is "the
+// control socket is finished": a read that ended the stream, and a write that
+// found the peer gone. Those are the questions the exit status answers. It is
+// deliberately narrower than peerClosedWrite, which also treats our own closed
+// descriptor as a dead peer — correct when classifying one controller write,
+// wrong as a verdict on a whole run.
 func controlChannelEnded(err error) bool {
-	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || peerClosedWrite(err)
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, syscall.EPIPE)
 }
 
 func (owner *supervisorAttemptOwner) close() error {
@@ -125,9 +141,7 @@ func (owner *supervisorAttemptOwner) close() error {
 			// provider group. Let it converge and exit; terminating the outer
 			// first could orphan that distinct group.
 			for {
-				exit, err := owner.child.FinishAfterExit(8 * time.Second)
-				if err == nil {
-					owner.outerExit = &exit
+				if _, err := owner.reap(8 * time.Second); err == nil {
 					break
 				}
 				time.Sleep(25 * time.Millisecond)
@@ -594,12 +608,11 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		}
 		record = authenticated
 	} else {
-		fallbackExit, waitErr := child.FinishAfterExit(8 * time.Second)
+		fallbackExit, waitErr := owner.reap(8 * time.Second)
 		if waitErr != nil {
 			return daemon.failRun(run, kernel.FailureProtocol, errors.Join(resultOutcome.err, waitErr))
 		}
 		outerExit = fallbackExit
-		owner.reaped = true
 		authenticated, authErr := runner.AuthenticateAttemptResult(runtimeDirectory, run.ID.String(), nil)
 		if authErr != nil {
 			return daemon.failRun(run, kernel.FailureProtocol, errors.Join(resultOutcome.err, authErr))
@@ -624,12 +637,11 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		}
 	}
 	if !owner.reaped {
-		waitedExit, waitErr := child.FinishAfterExit(8 * time.Second)
+		waitedExit, waitErr := owner.reap(8 * time.Second)
 		if waitErr != nil {
 			return run, fmt.Errorf("daemon: wait outer runner: %w", waitErr)
 		}
 		outerExit = waitedExit
-		owner.reaped = true
 	}
 	exitAt, err := daemon.timestamp()
 	if err != nil {
@@ -1086,12 +1098,9 @@ func (daemon *Daemon) convergeActivatedRunner(run kernel.Run, owner *supervisorA
 		}
 		if owner.child != nil {
 			for attempt := 0; attempt < supervisorReconcileAttempts; attempt++ {
-				exit, exitErr := owner.child.FinishAfterExit(8 * time.Second)
+				exit, exitErr := owner.reap(8 * time.Second)
 				if exitErr == nil {
 					outerExit, reaped = exit, true
-					owner.reaped = true
-					recorded := exit
-					owner.outerExit = &recorded
 					break
 				}
 			}

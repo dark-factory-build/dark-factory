@@ -5,6 +5,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"syscall"
@@ -126,7 +127,11 @@ func (attempt *liveAttempt) loop(ctx context.Context) error {
 		event, err := attempt.controller.Next(8 * time.Second)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				return errors.New("daemon: attempt controller closed")
+				// Wrap rather than replace. This is the daemon's primary
+				// observation that the runner's control end is gone, and the
+				// supervisor decides whether to report the runner's exit by
+				// looking for exactly this sentinel.
+				return fmt.Errorf("daemon: attempt controller closed: %w", err)
 			}
 			return err
 		}
@@ -477,7 +482,7 @@ func (attempt *liveAttempt) runTerminalEffect(command runner.TerminalCommand) (t
 		event, err := attempt.controller.Next(remaining)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				err = errors.New("daemon: attempt controller closed")
+				err = fmt.Errorf("daemon: attempt controller closed: %w", err)
 			}
 			return uncertainTerminalEffect(err), err
 		}

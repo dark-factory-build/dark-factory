@@ -21,16 +21,16 @@ import (
 // one indistinguishable line in a CI log and cannot be diagnosed from a single
 // sighting, which is exactly what happened in #425.
 func TestSupervisorFailedRunNamesOuterRunnerExit(t *testing.T) {
-	fixture := newSupervisorFixture(t, providerExitAfterSuccessProgram(t, 7))
+	fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
 	fixture.spec.activateOuter = func(child *runner.OwnedChild) (runner.FileIdentity, error) {
 		marker, err := child.Activate()
 		if err != nil {
 			return marker, err
 		}
-		// Kill the released outer runner. Whether it dies before or after it
-		// registers inner-ready decides which control operation notices first,
-		// and the run must name the exit either way. The daemon still owns the
-		// only wait, so the status stays its to observe.
+		// Kill the outer runner at activation, before it can register
+		// inner-ready, so the failure converges through convergeActivatedRunner.
+		// The daemon still owns the only wait, so the status stays its to
+		// observe. The two later tests cover the other two record sites.
 		if err := unix.Kill(child.Identity().PID, unix.SIGKILL); err != nil {
 			t.Fatalf("kill outer runner: %v", err)
 		}
@@ -100,4 +100,33 @@ func TestSupervisorSelfExplainingFailureCarriesNoExitEvidence(t *testing.T) {
 	if _, statErr := os.Stat(fixture.witness); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("provider ran despite the pre-release failure: %v", statErr)
 	}
+}
+
+// The runner dying after provider release is the shape #425 recorded, and the
+// daemon notices it by a read rather than a write: the live owner's control
+// read ends the stream. That path waits the child in the supervisor's own
+// result tail rather than in owner.close, and it is where the exit was being
+// waited and thrown away.
+func TestSupervisorRunnerDeathAfterReleaseNamesExit(t *testing.T) {
+	fixture := newSupervisorFixture(t, supervisorProgram(t, true, false))
+	var outer runner.Identity
+	fixture.spec.activateOuter = func(child *runner.OwnedChild) (runner.FileIdentity, error) {
+		marker, err := child.Activate()
+		outer = child.Identity()
+		return marker, err
+	}
+	fixture.spec.afterProviderRelease = func() error {
+		return unix.Kill(outer.PID, unix.SIGKILL)
+	}
+	_, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err == nil {
+		t.Fatal("a killed outer runner produced no error")
+	}
+	if !strings.Contains(err.Error(), "daemon: outer runner exit") {
+		t.Fatalf("run error does not name the outer runner exit:\n%v", err)
+	}
+	if !strings.Contains(err.Error(), "signal=9") {
+		t.Fatalf("run error does not name the killing signal:\n%v", err)
+	}
+	t.Logf("reported failure:\n%v", err)
 }
