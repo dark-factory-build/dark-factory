@@ -3,7 +3,6 @@ package runner
 import (
 	"encoding/binary"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 )
@@ -216,18 +215,11 @@ func readFrame(r io.Reader, dst any, limit int) error {
 	if _, err := io.ReadFull(r, body); err != nil {
 		return err
 	}
-	if err := decodeFrameBody(body, dst); err != nil {
-		// A complete frame whose body holds no JSON value at all makes the
-		// decoder answer io.EOF even though the stream is healthy. io.EOF out
-		// of readFrame means one thing only, that the peer closed the stream,
-		// because every caller reads it that way to conclude the peer is gone.
-		// A malformed frame from a live peer must not be able to say that.
-		if errors.Is(err, io.EOF) {
-			return fmt.Errorf("runner: empty frame body")
-		}
-		return err
-	}
-	return nil
+	// io.EOF and io.ErrUnexpectedEOF out of this function mean the stream
+	// ended, and only that: decodeFrameBody renames the decoder's own two
+	// EOF answers so a malformed body from a live peer cannot impersonate a
+	// closed one.
+	return decodeFrameBody(body, dst)
 }
 
 func errorsNewTrailing(err error) error { return fmt.Errorf("runner: trailing frame data: %v", err) }

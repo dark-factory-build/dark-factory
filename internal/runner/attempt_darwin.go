@@ -142,15 +142,21 @@ func (c *AttemptController) Next(timeout time.Duration) (AttemptEvent, error) {
 	defer c.file.SetReadDeadline(time.Time{})
 	var frame attemptFrame
 	if err := readFrame(c.file, &frame, maxConfigBytes); err != nil {
-		// io.EOF here means a read returned zero bytes, either at a frame
-		// boundary or at the very start of a body. On this AF_UNIX stream that
-		// requires every descriptor for the peer socket to be closed, so
-		// nothing can arrive later and no write can be delivered. It is not a
-		// claim that the last frame was whole — a peer that died between
-		// header and body reaches here too, and is just as gone. Spending the
-		// capability makes ErrState, rather than a broken pipe from a write
-		// nobody could have received, the answer to every call that follows.
-		if errors.Is(err, io.EOF) {
+		// These two errors, and only these two, mean the read stopped because
+		// the stream ended: readFrame gets them from io.ReadFull, and
+		// decodeFrameBody renames the decoder's identically-named answers so a
+		// malformed body cannot reach here. A deadline reports itself
+		// separately and never lands here.
+		//
+		// The stream ending is conclusive rather than transient, because this
+		// control socket is only ever closed outright. Nothing in the tree
+		// half-closes it with shutdown(2), which is the one way a live peer
+		// could show a reader EOF while still accepting writes. Given that,
+		// no further frame can arrive and no later write can be delivered, so
+		// spending the capability makes ErrState — rather than a broken pipe
+		// from a write nobody could have received — the answer to every call
+		// that follows.
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 			return AttemptEvent{}, errors.Join(err, c.spend())
 		}
 		return AttemptEvent{}, err

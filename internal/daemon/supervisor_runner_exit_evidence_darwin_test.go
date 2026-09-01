@@ -4,6 +4,8 @@ package daemon
 
 import (
 	"context"
+	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -46,4 +48,56 @@ func TestSupervisorFailedRunNamesOuterRunnerExit(t *testing.T) {
 		t.Fatalf("run error does not name the killing signal:\n%v", text)
 	}
 	t.Logf("reported failure:\n%v", text)
+}
+
+// The owner's own reap in close() is the path every post-activation failure
+// takes once the checkpoint stages have run, and it is where an intermittent
+// runner death during the protocol lands. Kill the outer runner after its
+// stages complete: the daemon's terminate can no longer be delivered, so the
+// exit is the runner's own and the run must name it.
+func TestSupervisorLateRunnerDeathNamesExitFromOwnerClose(t *testing.T) {
+	fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
+	var outer runner.Identity
+	fixture.spec.activateOuter = func(child *runner.OwnedChild) (runner.FileIdentity, error) {
+		marker, err := child.Activate()
+		outer = child.Identity()
+		return marker, err
+	}
+	fixture.spec.beforeProviderRelease = func() {
+		if err := unix.Kill(outer.PID, unix.SIGKILL); err != nil {
+			t.Errorf("kill outer runner: %v", err)
+		}
+	}
+	_, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err == nil {
+		t.Fatal("a dead outer runner produced no error")
+	}
+	if !strings.Contains(err.Error(), "daemon: outer runner exit") {
+		t.Fatalf("run error does not name the outer runner exit:\n%v", err)
+	}
+	if !strings.Contains(err.Error(), "signal=9") {
+		t.Fatalf("run error does not name the killing signal:\n%v", err)
+	}
+	t.Logf("reported failure:\n%v", err)
+}
+
+// A run that already carries its own reason must not gain an exit line. The
+// runner is alive and converged by the daemon here, so its exit is a
+// consequence of the daemon's own action rather than evidence about the
+// failure, and reporting it in the same voice would read as an independent
+// cause — the exact failure mode this evidence exists to remove.
+func TestSupervisorSelfExplainingFailureCarriesNoExitEvidence(t *testing.T) {
+	fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
+	injected := errors.New("injected pre-release state failure")
+	fixture.spec.beforeProviderStateCheck = func() error { return injected }
+	_, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if !errors.Is(err, injected) {
+		t.Fatalf("RunNext = %v, want the injected failure", err)
+	}
+	if strings.Contains(err.Error(), "daemon: outer runner exit") {
+		t.Fatalf("a self-explaining failure gained an exit line:\n%v", err)
+	}
+	if _, statErr := os.Stat(fixture.witness); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("provider ran despite the pre-release failure: %v", statErr)
+	}
 }

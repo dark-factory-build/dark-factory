@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"syscall"
 	"testing"
 	"time"
 
@@ -92,7 +93,7 @@ func TestSupervisorCheckpointEOFReportsNoManufacturedBrokenPipe(t *testing.T) {
 	if owner.controller != nil {
 		t.Fatal("owner retained a control capability whose peer is gone")
 	}
-	if joined := errors.Join(stageErr, closeErr); errors.Is(joined, io.ErrClosedPipe) {
+	if joined := errors.Join(stageErr, closeErr); errors.Is(joined, syscall.EPIPE) {
 		t.Fatalf("run error manufactured a write failure after a conclusive read:\n%v", joined)
 	}
 }

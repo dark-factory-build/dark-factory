@@ -6,91 +6,100 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"os"
 	"testing"
 	"time"
 )
 
-// A read that returns zero bytes proves the sole peer is gone: nothing further
-// can arrive and no later write can be delivered. The controller must spend
-// itself on that read, so a caller that writes afterwards is told its
-// capability is finished rather than being handed an EPIPE describing a
-// message no peer could ever have received.
-func TestAttemptControllerCleanEOFSpendsCapability(t *testing.T) {
-	controller, peer, err := NewAttemptController()
-	if err != nil {
-		t.Fatal(err)
-	}
-	controller.state = controllerInnerReady
-	if err := peer.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := controller.Next(time.Second); !errors.Is(err, io.EOF) {
-		t.Fatalf("read after peer exit = %v, want EOF", err)
-	}
-	if controller.file != nil || controller.state != controllerSpent {
-		t.Fatalf("controller survived a conclusive EOF: file=%v state=%d", controller.file, controller.state)
-	}
-	if err := controller.Terminate(); !errors.Is(err, ErrState) {
-		t.Fatalf("terminate after observed EOF = %v, want ErrState", err)
-	}
-	if err := controller.Release(StageSelection); !errors.Is(err, ErrState) {
-		t.Fatalf("release after observed EOF = %v, want ErrState", err)
-	}
-	if err := controller.Close(); err != nil {
-		t.Fatalf("close after observed EOF = %v", err)
-	}
-}
-
-// A peer that died between header and body is just as gone, so spending is
-// still right there. What must not happen is spending on a *short* read that
-// left the stream intact. This passes on the parent commit too: it is a guard
-// against widening the predicate beyond zero-byte reads, not a regression test.
-func TestAttemptControllerShortHeaderDoesNotSpendCapability(t *testing.T) {
-	controller, peer, err := NewAttemptController()
-	if err != nil {
-		t.Fatal(err)
-	}
-	controller.state = controllerInnerReady
-	if _, err := peer.Write([]byte{0, 0, 0}); err != nil {
-		t.Fatal(err)
-	}
-	if err := peer.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := controller.Next(time.Second); !errors.Is(err, io.ErrUnexpectedEOF) {
-		t.Fatalf("truncated header = %v, want unexpected EOF", err)
-	}
-	if controller.file == nil {
-		t.Fatal("truncated header spent the capability")
-	}
-	if err := controller.Close(); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// A header with no body behind it is a zero-byte body read, so it is EOF and
-// does spend. Pinned so the boundary between the two cases above is explicit.
-func TestAttemptControllerHeaderWithoutBodyIsStreamEOF(t *testing.T) {
-	controller, peer, err := NewAttemptController()
-	if err != nil {
-		t.Fatal(err)
-	}
-	controller.state = controllerInnerReady
+func framedHeader(size uint32) []byte {
 	var header [4]byte
-	binary.BigEndian.PutUint32(header[:], 16)
-	if _, err := peer.Write(header[:]); err != nil {
+	binary.BigEndian.PutUint32(header[:], size)
+	return header[:]
+}
+
+// A read that stops because the stream ended is conclusive: the peer is gone,
+// nothing more can arrive, and no later write can be delivered. The controller
+// must spend itself there, so a caller that writes afterwards is told its
+// capability is finished rather than being handed an EPIPE describing a message
+// no peer could ever have received.
+func TestAttemptControllerStreamEndSpendsCapability(t *testing.T) {
+	for _, streamEnd := range []struct {
+		name string
+		send []byte
+	}{
+		{"closed with nothing sent", nil},
+		{"torn header", []byte{0, 0, 0}},
+		{"header with no body", framedHeader(16)},
+		{"header with a torn body", append(framedHeader(16), 'a')},
+	} {
+		t.Run(streamEnd.name, func(t *testing.T) {
+			controller, peer, err := NewAttemptController()
+			if err != nil {
+				t.Fatal(err)
+			}
+			controller.state = controllerInnerReady
+			if len(streamEnd.send) != 0 {
+				if _, err := peer.Write(streamEnd.send); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := peer.Close(); err != nil {
+				t.Fatal(err)
+			}
+			_, readErr := controller.Next(time.Second)
+			if !errors.Is(readErr, io.EOF) && !errors.Is(readErr, io.ErrUnexpectedEOF) {
+				t.Fatalf("read after peer exit = %v, want a stream end", readErr)
+			}
+			if controller.file != nil || controller.state != controllerSpent {
+				t.Fatalf("controller survived a stream end: file=%v state=%d", controller.file, controller.state)
+			}
+			if err := controller.Terminate(); !errors.Is(err, ErrState) {
+				t.Fatalf("terminate after a stream end = %v, want ErrState", err)
+			}
+			if err := controller.Release(StageSelection); !errors.Is(err, ErrState) {
+				t.Fatalf("release after a stream end = %v, want ErrState", err)
+			}
+			if err := controller.Close(); err != nil {
+				t.Fatalf("close after a stream end = %v", err)
+			}
+		})
+	}
+}
+
+// A complete frame whose body is malformed came from a peer that is still
+// there. The JSON decoder answers such a body with io.EOF or io.ErrUnexpectedEOF
+// under its own name, so without renaming them one bad frame would destroy a
+// live capability and report the peer as gone.
+func TestAttemptControllerMalformedBodyDoesNotSpendCapability(t *testing.T) {
+	for _, body := range []string{"   ", `{"version":`} {
+		controller, peer, err := NewAttemptController()
+		if err != nil {
+			t.Fatal(err)
+		}
+		controller.state = controllerInnerReady
+		if _, err := peer.Write(append(framedHeader(uint32(len(body))), body...)); err != nil {
+			t.Fatal(err)
+		}
+		_, readErr := controller.Next(time.Second)
+		if readErr == nil {
+			t.Fatalf("malformed body %q was accepted", body)
+		}
+		if errors.Is(readErr, io.EOF) || errors.Is(readErr, io.ErrUnexpectedEOF) {
+			t.Fatalf("malformed body %q impersonated a closed stream: %v", body, readErr)
+		}
+		if controller.file == nil || controller.state == controllerSpent {
+			t.Fatalf("malformed body %q spent a live capability", body)
+		}
+		closeAll(t, controller, peer)
+	}
+}
+
+func closeAll(t *testing.T, controller *AttemptController, peer *os.File) {
+	t.Helper()
+	if err := controller.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if err := peer.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := controller.Next(time.Second); !errors.Is(err, io.EOF) {
-		t.Fatalf("header without body = %v, want EOF", err)
-	}
-	if controller.state != controllerSpent {
-		t.Fatalf("header without body left state=%d", controller.state)
-	}
-	if err := controller.Close(); err != nil {
 		t.Fatal(err)
 	}
 }

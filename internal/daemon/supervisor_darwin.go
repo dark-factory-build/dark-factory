@@ -45,21 +45,30 @@ type supervisorAttemptOwner struct {
 	outerExit  *runner.Exit
 }
 
-// outerRunnerEvidence names how the outer runner actually ended. A control read
-// that returns EOF says only that the socket closed, which is the same string
-// whether the runner exited cleanly, failed to exec, or was killed. This owner
-// already waits that exact child, so the distinguishing status is in hand at
-// the moment the run fails; reporting it is the difference between a failure
-// that can be diagnosed from one sighting and one that cannot.
+// outerRunnerEvidence names how the outer runner actually ended. A control
+// read that returns EOF, or a write that returns EPIPE, says only that the
+// socket is finished — the same thing whether the runner exited cleanly,
+// failed to exec, or was killed. This owner already waits that exact child, so
+// the status that tells those apart is in hand at the moment the run fails.
 func (owner *supervisorAttemptOwner) outerRunnerEvidence() error {
 	if owner == nil || owner.outerExit == nil {
 		return nil
 	}
 	exit := *owner.outerExit
+	launch := ""
 	if exit.LaunchErr != "" {
-		return fmt.Errorf("daemon: outer runner exit code=%d signal=%d aborted=%v launch=%q", exit.Code, exit.Signal, exit.Aborted, exit.LaunchErr)
+		launch = fmt.Sprintf(" launch=%q", exit.LaunchErr)
 	}
-	return fmt.Errorf("daemon: outer runner exit code=%d signal=%d aborted=%v", exit.Code, exit.Signal, exit.Aborted)
+	return fmt.Errorf("daemon: outer runner exit code=%d signal=%d aborted=%v%s", exit.Code, exit.Signal, exit.Aborted, launch)
+}
+
+// controlChannelEnded reports the failures whose whole content is "the control
+// socket is gone", which is the question the exit status answers. Every other
+// failure — a cancellation, a store conflict, an injected release error —
+// already carries its own reason, and the runner's exit there is a consequence
+// of the daemon's own action rather than evidence about it.
+func controlChannelEnded(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || peerClosedWrite(err)
 }
 
 func (owner *supervisorAttemptOwner) close() error {
@@ -404,7 +413,10 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		if resultErr == nil && closeErr == nil {
 			return
 		}
-		resultErr = errors.Join(resultErr, closeErr, owner.outerRunnerEvidence())
+		resultErr = errors.Join(resultErr, closeErr)
+		if controlChannelEnded(resultErr) {
+			resultErr = errors.Join(resultErr, owner.outerRunnerEvidence())
+		}
 	}()
 	runnerResourceIdentity, err := processResourceIdentity(child.Identity())
 	if err != nil {
@@ -1078,7 +1090,8 @@ func (daemon *Daemon) convergeActivatedRunner(run kernel.Run, owner *supervisorA
 				if exitErr == nil {
 					outerExit, reaped = exit, true
 					owner.reaped = true
-					owner.outerExit = &outerExit
+					recorded := exit
+					owner.outerExit = &recorded
 					break
 				}
 			}
