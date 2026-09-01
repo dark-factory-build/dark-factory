@@ -28,10 +28,8 @@ for invocation in './scripts/go-check.sh' '/bin/sh "$script_dir/go-ci-owned.sh"'
 done
 [ "$(grep -Fc './scripts/go-service-e2e.sh' "$local_gate")" -eq 1 ] \
     || fail "service lifecycle proof is not unique"
-grep -Fq 'local_ci_runner_environment=${RUNNER_ENVIRONMENT-}' "$local_gate" \
-    || fail "service lifecycle proof lost its hosted-runner boundary"
-grep -Fq '[ "$local_ci_runner_environment" = github-hosted ]' "$local_gate" \
-    || fail "service lifecycle proof is not restricted to ephemeral hosted runners"
+grep -Fq '/bin/launchctl print "gui/$(/usr/bin/id -u)/com.dark-factory.factoryd"' "$local_gate" \
+    || fail "service lifecycle proof lost its live-install boundary"
 [ "$(grep -Fc './scripts/test-local-ci-lease.sh' "$local_gate")" -eq 1 ] \
     || fail "local-CI lease proof is not unique"
 [ "$(grep -Fc '/bin/sh ./scripts/test-go-gates.sh' "$local_gate")" -eq 1 ] \

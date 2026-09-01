@@ -253,8 +253,13 @@ if grep -Eq 'rm -rf|cleanup_scratch|dark-factory-ci-home' \
 fi
 local_fixture="$temporary/local"
 /bin/mkdir -p "$local_fixture/scripts" "$local_fixture/poison"
-/bin/cp "$repository_root/scripts/local-ci.sh" "$local_fixture/scripts/local-ci.sh"
+/usr/bin/sed "s#/bin/launchctl#$local_fixture/scripts/launchctl#" \
+    "$repository_root/scripts/local-ci.sh" >"$local_fixture/scripts/local-ci.sh"
 /bin/cp "$repository_root/scripts/local-ci-environment.sh" "$local_fixture/scripts/local-ci-environment.sh"
+/bin/cat >"$local_fixture/scripts/launchctl" <<'EOF'
+#!/bin/sh
+exit 113
+EOF
 /bin/cat >"$local_fixture/scripts/stub" <<'EOF'
 #!/bin/sh
 name=$(/usr/bin/basename "$0")
@@ -307,7 +312,8 @@ printf '%s\n' "\$DF_CI_CACHE_ROOT" >"$local_fixture/cache-roots"
 . "$local_fixture/scripts/local-ci-environment.sh"
 printf '%s\n' "\$DF_CI_CACHE_ROOT" >>"$local_fixture/cache-roots"
 EOF
-/bin/chmod 755 "$local_fixture/scripts/local-ci.sh" "$local_fixture/scripts/stub"
+/bin/chmod 755 "$local_fixture/scripts/local-ci.sh" "$local_fixture/scripts/launchctl" \
+    "$local_fixture/scripts/stub"
 /bin/chmod 755 "$local_fixture/poison/dirname" "$local_fixture/poison/node" \
     "$local_fixture/poison/corepack" "$local_fixture/poison/go" \
     "$local_fixture/scripts/go-check.sh"
@@ -326,7 +332,7 @@ run_local_fault() {
     local_mode=$1
     set +e
     local_output=$(CDPATH= cd -- "$local_fixture" && DARK_FACTORY_LOCAL_CI_LEASE_HELD=1 \
-        DF_GATE_FAULT="$local_mode" RUNNER_ENVIRONMENT=github-hosted \
+        DF_GATE_FAULT="$local_mode" \
         PATH="$local_fixture/poison:/opt/homebrew/bin:/usr/bin:/bin" \
         /bin/sh ./scripts/local-ci.sh 2>&1)
     local_status=$?

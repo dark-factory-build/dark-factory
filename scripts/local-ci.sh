@@ -2,7 +2,6 @@
 set -eu
 
 script_dir=$(CDPATH= cd -- "$(/usr/bin/dirname "$0")" && pwd -P)
-local_ci_runner_environment=${RUNNER_ENVIRONMENT-}
 . "$script_dir/local-ci-environment.sh"
 [ "$#" -eq 0 ] || { echo "usage: scripts/local-ci.sh" >&2; exit 2; }
 if [ "${DARK_FACTORY_LOCAL_CI_LEASE_HELD-}" != 1 ]; then
@@ -32,10 +31,10 @@ echo "local-ci: process-sensitive gate"
 /bin/sh "$script_dir/go-ci-owned.sh"
 
 echo "local-ci: service gate"
-if [ "$local_ci_runner_environment" = github-hosted ]; then
-    ./scripts/go-service-e2e.sh
+if /bin/launchctl print "gui/$(/usr/bin/id -u)/com.dark-factory.factoryd" >/dev/null 2>&1; then
+    echo "local-ci: service gate skipped while the live operator service is loaded"
 else
-    echo "local-ci: service gate requires an ephemeral GitHub-hosted runner"
+    ./scripts/go-service-e2e.sh
 fi
 
 echo "local-ci: release gate"
