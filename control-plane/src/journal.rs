@@ -1916,6 +1916,7 @@ mod migration_tests {
         };
         for (index, kind) in [
             "create_pull_request",
+            "close_pull_request",
             "submit_pull_request_review",
             "publish_commit",
             "enqueue_pull_request",

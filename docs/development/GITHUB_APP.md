@@ -79,7 +79,7 @@ and can never satisfy readiness. The production adapter accepts exactly
 `DARK_FACTORY_CLOUDFLARE_ACCESS_AUD`. The private key is standard
 base64 of unencrypted PKCS#8 DER, no repository is configured, and the
 implemented permission revision is exactly
-`maintainer-operations-v4`. Missing webhook authority or a partial or
+`maintainer-operations-v5`. Missing webhook authority or a partial or
 syntactically invalid App-authority group leaves the fixed inactive router with
 no webhook route. An unusable key or configured but unavailable or drifted
 Durable Object journal or GitHub authority makes readiness and ping
@@ -150,6 +150,7 @@ The live maintainer broker exposes only these repository-scoped operations:
 - publish one exact independently reviewed tree as an App-authored commit to a
   generated branch;
 - create one PR for that exact branch and base;
+- close one PR only while it still names the caller's exact head;
 - submit one bounded exact-head review verdict through the Pull Request Review
   API;
 - observe Check Runs, bounded workflow/job/step state, a bounded failed-job log
@@ -180,9 +181,10 @@ actors from callers without ruleset-write access; that operation uses it only
 for fixed `GET` requests for the active rulesets and exposes no administration
 mutation. Issues write exists only for bounded issue creation and
 evidence-backed terminal state. Pull requests
-write authorizes PR creation, formal review, and the exact-head enqueue, which
-mutates the pull request's queue state; a PR review is not an Issues API
-comment. Merge queues write authorizes only the typed exact-head enqueue and
+write authorizes PR creation, formal review, the bounded close operation, and
+the exact-head enqueue, which mutates the pull request's queue state; a PR
+review is not an Issues API comment. Merge queues write authorizes only the
+typed exact-head enqueue and
 reconciliation operation; the enqueue token also mints Contents write, because
 a queued entry ends with GitHub pushing the squash commit to the default branch
 (#371 tracks the live proof of the scope set). Actions write is narrowed by code
@@ -196,7 +198,7 @@ unauthorized workflow update.
 
 The installation must carry the complete revision grant even though each
 operation token receives only its subset. That all-or-nothing check prevents
-`maintainer_status` from reporting v4 for a repository where direct merge is
+`maintainer_status` from reporting v5 for a repository where direct merge is
 unusable; it does not copy Administration into any other operation token.
 
 A workflow change is therefore a separate human-authored and human-published
@@ -397,6 +399,18 @@ transfer or deletion revokes the mapping pending fresh approval. Every other
 lifecycle action fails closed. The revision requests no Contents, Pull
 requests, Checks, Actions, Workflows, Releases, Administration, or Secrets
 authority.
+
+`maintainer-operations-v5` grants exactly what
+`maintainer-operations-v4` granted. It adds one bounded
+`close_pull_request` operation, so the revision changes as the surface's
+fail-closed handshake even though no GitHub permission expands. The request
+binds the pull-request number and exact head in the durable digest, re-reads
+that head immediately before the fixed close request, and accepts or
+reconciles only a closed, unmerged response at that head. GitHub's close API
+does not offer the merge API's atomic `expectedHeadOid`; a moved or uncertain
+response is therefore indeterminate rather than reported as success. Rotate
+the `DARK_FACTORY_MAINTAINER_PERMISSION_REVISION` secret before promoting a v5
+build.
 
 `maintainer-operations-v4` adds Administration write to
 `maintainer-operations-v3` solely because GitHub withholds ruleset bypass actors

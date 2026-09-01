@@ -10,7 +10,7 @@ use crate::{
     BrokerState,
     access::AccessAuthority,
     github_app::{
-        AppAuthority, CreateIssue, CreatePullRequest, DispatchControlPlaneDeploy,
+        AppAuthority, ClosePullRequest, CreateIssue, CreatePullRequest, DispatchControlPlaneDeploy,
         EnqueuePullRequest, MergePullRequestAtHead, ObserveControlPlaneDeploy, ObserveFile,
         ObserveIssue, ObservePullRequestChecks, ObservePullRequestMerge,
         ObservePullRequestWorkflows, ObserveRef, ObserveRelease, ObserveReleaseWorkflow,
@@ -497,6 +497,33 @@ fn tools() -> Value {
             "additionalProperties": false
         },
         "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true}
+    }, {
+        "name": "close_pull_request",
+        "title": "Close an exact-head pull request",
+        "description": "Close one pull request only while it still names the stated head commit. Replays require the same operation UUID and request.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
+                "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
+                "pull_number": {"type": "integer", "minimum": 1},
+                "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+            },
+            "required": ["repository", "operation_id", "pull_number", "head_sha"],
+            "additionalProperties": false
+        },
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "pull_number": {"type": "integer"},
+                "head_sha": {"type": "string"},
+                "url": {"type": "string"},
+                "state": {"type": "string", "const": "closed"}
+            },
+            "required": ["pull_number", "head_sha", "url", "state"],
+            "additionalProperties": false
+        },
+        "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": true}
     }, {
         "name": "submit_pull_request_review",
         "title": "Submit an exact-head pull request review",
@@ -1016,6 +1043,17 @@ async fn call_tool(id: Value, request: &Map<String, Value>, mcp: &McpState) -> R
             match mcp.app.create_pull_request(&mcp.journal, arguments).await {
                 Ok(result) => {
                     serialized_tool_result(id, &result, "Pull request is durably recorded.")
+                }
+                Err(error) => operation_error(id, error),
+            }
+        }
+        Some("close_pull_request") => {
+            let Ok(arguments) = serde_json::from_value::<ClosePullRequest>(arguments) else {
+                return json_rpc_error(id, -32602, "Invalid params");
+            };
+            match mcp.app.close_pull_request(&mcp.journal, arguments).await {
+                Ok(result) => {
+                    serialized_tool_result(id, &result, "Pull request is durably closed.")
                 }
                 Err(error) => operation_error(id, error),
             }
