@@ -266,6 +266,7 @@ if [ "${DF_GATE_FAULT-}" = env ]; then
         || { echo 'fixture Git environment was not scrubbed' >&2; exit 1; }
 fi
 case "${DF_GATE_FAULT-}:$name" in
+    service:go-service-e2e.sh) echo 'fixture service proof failure' >&2; exit 1 ;;
     release:test-package-release.sh) echo 'fixture release proof failure' >&2; exit 1 ;;
 esac
 EOF
@@ -316,6 +317,7 @@ for local_child in \
     test-cloudflare-env.sh test-bootstrap-maintainer-v2.sh test-repository-settings.sh \
     test-local-ci-mode.sh test-go-gates.sh test-local-ci-lease.sh \
     test-local-ci-lease-mutations.sh test-go-e2e-tools.sh go-ci-owned.sh \
+    go-service-e2e.sh \
     test-prepare-release-source.sh test-publish-release.sh test-package-release.sh; do
     /bin/ln -s stub "$local_fixture/scripts/$local_child"
 done
@@ -324,16 +326,22 @@ run_local_fault() {
     local_mode=$1
     set +e
     local_output=$(CDPATH= cd -- "$local_fixture" && DARK_FACTORY_LOCAL_CI_LEASE_HELD=1 \
-        DF_GATE_FAULT="$local_mode" \
+        DF_GATE_FAULT="$local_mode" RUNNER_ENVIRONMENT=github-hosted \
         PATH="$local_fixture/poison:/opt/homebrew/bin:/usr/bin:/bin" \
         /bin/sh ./scripts/local-ci.sh 2>&1)
     local_status=$?
     set -e
 }
-run_local_fault release
-[ "$local_status" -ne 0 ] || fail "failing release proof passed"
-printf '%s\n' "$local_output" | /usr/bin/grep -F 'fixture release proof failure' >/dev/null \
-    || fail "release failure was unclear: $local_output"
+for local_fault in \
+    'service:fixture service proof failure' \
+    'release:fixture release proof failure'; do
+    local_mode=${local_fault%%:*}
+    local_want=${local_fault#*:}
+    run_local_fault "$local_mode"
+    [ "$local_status" -ne 0 ] || fail "failing $local_mode proof passed"
+    printf '%s\n' "$local_output" | /usr/bin/grep -F "$local_want" >/dev/null \
+        || fail "$local_mode failure was unclear: $local_output"
+done
 local_cache_root=$(/usr/bin/tail -n 1 "$local_fixture/cache-roots")
 [ -d "$local_cache_root" ] || fail "failure removed gate cache root"
 [ "$(/usr/bin/head -n 1 "$local_fixture/cache-roots")" = "$local_cache_root" ] \

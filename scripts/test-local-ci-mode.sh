@@ -17,15 +17,21 @@ set -e
 
 ordinary_line=$(grep -n -F 'echo "local-ci: ordinary source gate"' "$local_gate" | cut -d: -f1)
 process_line=$(grep -n -F 'echo "local-ci: process-sensitive gate"' "$local_gate" | cut -d: -f1)
+service_line=$(grep -n -F 'echo "local-ci: service gate"' "$local_gate" | cut -d: -f1)
 release_line=$(grep -n -F 'echo "local-ci: release gate"' "$local_gate" | cut -d: -f1)
-[ -n "$ordinary_line" ] && [ "$ordinary_line" -lt "$process_line" ] && [ "$process_line" -lt "$release_line" ] \
-    || fail "ordinary, process, and release gates are not ordered"
+[ -n "$ordinary_line" ] && [ "$ordinary_line" -lt "$process_line" ] \
+    && [ "$process_line" -lt "$service_line" ] && [ "$service_line" -lt "$release_line" ] \
+    || fail "ordinary, process, service, and release gates are not ordered"
 
 for invocation in './scripts/go-check.sh' '/bin/sh "$script_dir/go-ci-owned.sh"'; do
     [ "$(grep -Fc "$invocation" "$local_gate")" -eq 1 ] || fail "gate invocation is not unique: $invocation"
 done
-[ "$(grep -Fc './scripts/go-service-e2e.sh' "$local_gate")" -eq 0 ] \
-    || fail "service E2E unexpectedly remains in the routine gate"
+[ "$(grep -Fc './scripts/go-service-e2e.sh' "$local_gate")" -eq 1 ] \
+    || fail "service lifecycle proof is not unique"
+grep -Fq 'local_ci_runner_environment=${RUNNER_ENVIRONMENT-}' "$local_gate" \
+    || fail "service lifecycle proof lost its hosted-runner boundary"
+grep -Fq '[ "$local_ci_runner_environment" = github-hosted ]' "$local_gate" \
+    || fail "service lifecycle proof is not restricted to ephemeral hosted runners"
 [ "$(grep -Fc './scripts/test-local-ci-lease.sh' "$local_gate")" -eq 1 ] \
     || fail "local-CI lease proof is not unique"
 [ "$(grep -Fc '/bin/sh ./scripts/test-go-gates.sh' "$local_gate")" -eq 1 ] \
