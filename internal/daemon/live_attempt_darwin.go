@@ -126,14 +126,7 @@ func (attempt *liveAttempt) loop(ctx context.Context) error {
 		}
 		event, err := attempt.controller.Next(8 * time.Second)
 		if err != nil {
-			if errors.Is(err, io.EOF) {
-				// Wrap rather than replace. This is the daemon's primary
-				// observation that the runner's control end is gone, and the
-				// supervisor decides whether to report the runner's exit by
-				// looking for exactly this sentinel.
-				return fmt.Errorf("daemon: attempt controller closed: %w", err)
-			}
-			return err
+			return controllerClosedError(err)
 		}
 		if stop, err := attempt.handleRunnerEvent(event); err != nil {
 			return err
@@ -481,9 +474,7 @@ func (attempt *liveAttempt) runTerminalEffect(command runner.TerminalCommand) (t
 		}
 		event, err := attempt.controller.Next(remaining)
 		if err != nil {
-			if errors.Is(err, io.EOF) {
-				err = fmt.Errorf("daemon: attempt controller closed: %w", err)
-			}
+			err = controllerClosedError(err)
 			return uncertainTerminalEffect(err), err
 		}
 		if event.Kind == runner.AttemptTerminalFrame && event.Frame != nil && terminalOperationResult(event.Frame.Kind) {
@@ -850,6 +841,17 @@ func (attempt *liveAttempt) addCredit(credit uint64) error {
 	}
 	attempt.creditOutstanding += credit
 	return nil
+}
+
+// controllerClosedError names the runner's control end going away while
+// keeping the transport sentinel intact. Replacing it with prose, which is what
+// this used to do, hides the one fact the supervisor needs to decide whether
+// the runner's exit status is the missing part of the diagnosis.
+func controllerClosedError(err error) error {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return fmt.Errorf("daemon: attempt controller closed: %w", err)
+	}
+	return err
 }
 
 func peerClosedWrite(err error) bool {

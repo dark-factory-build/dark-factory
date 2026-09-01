@@ -18,8 +18,10 @@ import (
 // cleanly, failed to exec, or was killed. The owner waits that exact child
 // during cleanup and therefore already holds the status that tells those apart,
 // so a failing run must carry it. Without this, an intermittent runner death is
-// one indistinguishable line in a CI log and cannot be diagnosed from a single
-// sighting, which is exactly what happened in #425.
+// one indistinguishable line and cannot be diagnosed from a single sighting,
+// which is what happened in #425 -- a package-test failure, where RunNext's
+// error is the report. Note the scheduler drops this error for an admitted
+// attempt, so under factoryd the cause still reaches no operator; see #435.
 func TestSupervisorFailedRunNamesOuterRunnerExit(t *testing.T) {
 	fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
 	fixture.spec.activateOuter = func(child *runner.OwnedChild) (runner.FileIdentity, error) {

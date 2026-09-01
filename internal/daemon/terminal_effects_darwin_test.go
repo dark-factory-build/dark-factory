@@ -1372,3 +1372,43 @@ func TestProviderExitAndOwnerDeathFencePrivateBinding(t *testing.T) {
 		}
 	})
 }
+
+// A terminal effect in flight when the runner exits is the other place the
+// daemon learns the control end is gone by reading it. That error carries the
+// transport sentinel the supervisor uses to decide whether the runner's exit
+// status is the missing part of the diagnosis, so this path must wrap it rather
+// than replace it with prose, exactly as the owner loop does.
+func TestTerminalEffectKeepsControlEndedSentinel(t *testing.T) {
+	controller, peer := readyTerminalEffectController(t)
+	runID, sessionID := liveTestIDs(t, 10021)
+	attempt := newLiveAttempt(nil, runID, sessionID, controller)
+	attempt.releaseSent = true
+	attempt.readySeen = true
+	attempt.effectLimit = 4 * time.Second
+	drained := make(chan error, 1)
+	go func() {
+		// Consuming the command proves the write landed while the runner was
+		// alive, so the exit that follows is the runner's own.
+		var header [4]byte
+		if _, err := io.ReadFull(peer, header[:]); err != nil {
+			drained <- err
+			return
+		}
+		body := make([]byte, binary.BigEndian.Uint32(header[:]))
+		if _, err := io.ReadFull(peer, body); err != nil {
+			drained <- err
+			return
+		}
+		drained <- peer.Close()
+	}()
+	_, err := attempt.runTerminalEffect(runner.TerminalCommand{Kind: runner.TerminalGenerationInstall, Generation: 1})
+	if peerErr := <-drained; peerErr != nil {
+		t.Fatalf("runner peer: %v", peerErr)
+	}
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("effect after runner exit lost the stream sentinel: %v", err)
+	}
+	if !strings.Contains(err.Error(), "attempt controller closed") {
+		t.Fatalf("effect error does not name the closed controller: %v", err)
+	}
+}

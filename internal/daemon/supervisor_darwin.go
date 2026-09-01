@@ -45,19 +45,20 @@ type supervisorAttemptOwner struct {
 	outerExit  *runner.Exit
 }
 
-// reap waits the exact outer child and keeps what it learned. Every wait on
-// that child goes through here: the status is the only thing that distinguishes
-// a runner that exited cleanly from one that failed to exec or was killed, and
-// four separate call sites waiting it directly is how it came to be discarded
-// on the most common path.
+// reap waits the exact outer child and keeps what it learned. The status is the
+// only thing that distinguishes a runner that exited cleanly from one that
+// failed to exec or was killed, and four call sites waiting the child directly
+// is how it came to be discarded on the most common path. Every wait that can
+// still observe a status goes through here; OwnedChild.Close waits too, but
+// only ever after this has already reached stateWaited, so it has none left to
+// discard.
 func (owner *supervisorAttemptOwner) reap(timeout time.Duration) (runner.Exit, error) {
 	exit, err := owner.child.FinishAfterExit(timeout)
 	if err != nil {
 		return runner.Exit{}, err
 	}
 	owner.reaped = true
-	recorded := exit
-	owner.outerExit = &recorded
+	owner.outerExit = &exit
 	return exit, nil
 }
 
@@ -77,9 +78,9 @@ func (owner *supervisorAttemptOwner) outerRunnerEvidence() error {
 	return fmt.Errorf("daemon: outer runner exit code=%d signal=%d%s", exit.Code, exit.Signal, launch)
 }
 
-// controlChannelEnded reports the two failures whose whole content is "the
-// control socket is finished": a read that ended the stream, and a write that
-// found the peer gone. Those are the questions the exit status answers. It is
+// controlChannelEnded reports the failures whose whole content is "the control
+// socket is finished": a read that ended the stream, either on a frame boundary
+// or mid-frame, and a write that found the peer gone. Those are the questions the exit status answers. It is
 // deliberately narrower than peerClosedWrite, which also treats our own closed
 // descriptor as a dead peer — correct when classifying one controller write,
 // wrong as a verdict on a whole run.
@@ -424,9 +425,6 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	controllerOpen = false
 	defer func() {
 		closeErr := owner.close()
-		if resultErr == nil && closeErr == nil {
-			return
-		}
 		resultErr = errors.Join(resultErr, closeErr)
 		if controlChannelEnded(resultErr) {
 			resultErr = errors.Join(resultErr, owner.outerRunnerEvidence())
