@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
@@ -262,6 +263,83 @@ func TestLiveAttemptRejectsWrongSessionBeforeRunnerAttach(t *testing.T) {
 	}
 	if len(attempt.subs) != 0 || len(attempt.correlations) != 0 {
 		t.Fatalf("wrong session changed subscribers: subs=%d correlations=%d", len(attempt.subs), len(attempt.correlations))
+	}
+}
+
+func TestLiveAttemptWaitsForOutcomeResponseBeforeTermination(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttempt(t, fixture, 112)
+	session, found, err := fixture.store.TerminalSessionForRun(context.Background(), active.run.ID)
+	if err != nil || !found {
+		t.Fatalf("terminal session = %+v, found=%v, err=%v", session, found, err)
+	}
+	controller, peer := readyTerminalEffectController(t)
+	attempt := newLiveAttempt(fixture.daemon, active.run.ID, session.ID, controller)
+	attempt.releaseSent = true
+	attempt.readySeen = true
+	if err := fixture.daemon.registerLiveAttempt(attempt); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		fixture.daemon.unregisterLiveAttempt(active.run.ID, attempt)
+		_ = controller.Close()
+		_ = peer.Close()
+	})
+
+	responsePending := make(chan struct{})
+	releaseResponse := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-releaseResponse:
+		default:
+			close(releaseResponse)
+		}
+	})
+	fixture.daemon.beforeConnectionResponse = func(call api.Call) {
+		if call.Kind() != api.CallSucceed {
+			return
+		}
+		close(responsePending)
+		<-releaseResponse
+	}
+	serverDone := fixture.serve(t)
+	type outcome struct {
+		result api.MutationResult
+		err    error
+	}
+	clientDone := make(chan outcome, 1)
+	go func() {
+		result, err := active.client.Succeed(context.Background(), "response-fenced")
+		clientDone <- outcome{result: result, err: err}
+	}()
+	select {
+	case <-responsePending:
+	case <-time.After(3 * time.Second):
+		t.Fatal("outcome did not reach the response fence")
+	}
+	run, found, err := fixture.store.Run(context.Background(), active.run.ID)
+	if err != nil || !found || run.Phase != kernel.RunFinalizing {
+		t.Fatalf("durable outcome at response fence = %+v, found=%v, err=%v", run, found, err)
+	}
+	if stop, err := attempt.processLifecycle(context.Background()); err != nil || stop || attempt.terminationSent {
+		t.Fatalf("lifecycle crossed pending response: stop=%v err=%v terminated=%v", stop, err, attempt.terminationSent)
+	}
+
+	close(releaseResponse)
+	select {
+	case got := <-clientDone:
+		if got.err != nil || got.result.Revision == 0 {
+			t.Fatalf("outcome response = %+v, %v", got.result, got.err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("outcome response did not complete")
+	}
+	waitDispatch(t, serverDone)
+	if stop, err := attempt.processLifecycle(context.Background()); err != nil || stop || !attempt.terminationSent || !attempt.terminationDelivered {
+		t.Fatalf("post-response lifecycle = stop=%v err=%v sent=%v delivered=%v", stop, err, attempt.terminationSent, attempt.terminationDelivered)
+	}
+	if frame := readTerminalEffectWire(t, peer); frame.Kind != "terminate" {
+		t.Fatalf("post-response controller frame = %+v", frame)
 	}
 }
 

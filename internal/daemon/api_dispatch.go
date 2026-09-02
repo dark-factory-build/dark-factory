@@ -36,6 +36,10 @@ type Daemon struct {
 	closeDone chan struct{}
 	closeErr  error
 
+	// beforeConnectionResponse is a fixed test seam for the exact interval
+	// between dispatch and response. Production leaves it nil.
+	beforeConnectionResponse func(api.Call)
+
 	// schedulerWake is a bounded hint channel. SQLite remains the only
 	// admission and capacity authority; losing or coalescing a hint is safe
 	// because the scheduler also polls. schedulerRunning prevents two process
@@ -83,16 +87,38 @@ func (daemon *Daemon) HandleConnection(ctx context.Context, connection *api.Conn
 	if daemon == nil || daemon.store == nil || connection == nil {
 		return fmt.Errorf("%w: invalid daemon connection", kernel.ErrInvalidValue)
 	}
-	defer connection.Close()
-	_, err := connection.Receive(ctx)
+	outcomeFenced := false
+	defer func() {
+		_ = connection.Close()
+		if outcomeFenced {
+			daemon.operationMu.Unlock()
+		}
+	}()
+	call, err := connection.Receive(ctx)
 	if err != nil {
 		return err
 	}
-	reply, err := connection.Dispatch(func(call api.Call) api.Reply { return daemon.dispatch(ctx, call) })
+	if attemptOutcomeCall(call.Kind()) {
+		daemon.operationMu.Lock()
+		outcomeFenced = true
+	}
+	reply, err := connection.Dispatch(func(call api.Call) api.Reply {
+		if attemptOutcomeCall(call.Kind()) {
+			return daemon.proposeOutcomeUnderGate(ctx, call)
+		}
+		return daemon.dispatch(ctx, call)
+	})
 	if err != nil {
 		return err
+	}
+	if daemon.beforeConnectionResponse != nil {
+		daemon.beforeConnectionResponse(call)
 	}
 	return connection.Respond(reply)
+}
+
+func attemptOutcomeCall(kind api.CallKind) bool {
+	return kind == api.CallSucceed || kind == api.CallBlock || kind == api.CallFail
 }
 
 // dispatch is intentionally one closed switch. API validation belongs to the
@@ -112,8 +138,6 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.enqueueTask(ctx, call)
 	case api.CallSetDispatch:
 		return daemon.setDispatch(ctx, call)
-	case api.CallSucceed, api.CallBlock, api.CallFail:
-		return daemon.proposeOutcome(ctx, call)
 	case api.CallRequestHuman:
 		return daemon.requestHuman(ctx, call)
 	case api.CallWebStatus:
@@ -315,7 +339,10 @@ func (daemon *Daemon) setDispatch(ctx context.Context, call api.Call) api.Reply 
 	return mutationReply(state.Head, state.Revision)
 }
 
-func (daemon *Daemon) proposeOutcome(ctx context.Context, call api.Call) api.Reply {
+// proposeOutcomeUnderGate is reached only from HandleConnection while its
+// outcome-response fence holds operationMu. The same gate linearizes terminal
+// attachment against the durable running-to-finalizing transition.
+func (daemon *Daemon) proposeOutcomeUnderGate(ctx context.Context, call api.Call) api.Reply {
 	digest, ok := call.AttemptDigest()
 	if !ok {
 		return newErrorReply(api.RemoteInvalidRequest)
@@ -332,7 +359,6 @@ func (daemon *Daemon) proposeOutcome(ctx context.Context, call api.Call) api.Rep
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
-	daemon.operationMu.Lock()
 	// This durable transition and the owner-side attach check share one
 	// linearization gate. Whichever operation acquires it first owns the
 	// running/finalizing boundary; notification carries no authority.
@@ -345,7 +371,6 @@ func (daemon *Daemon) proposeOutcome(ctx context.Context, call api.Call) api.Rep
 		// state payload; it only shortens the next durable Store poll.
 		daemon.notifyRun(run.ID)
 	}
-	daemon.operationMu.Unlock()
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
