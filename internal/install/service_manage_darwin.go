@@ -25,6 +25,38 @@ const (
 
 var serviceBinaryNames = [3]string{"factoryd", "factoryctl", "factory-runner"}
 
+// withServiceMutation serializes every lifecycle mutation on the exact home
+// directory. factoryd's lifetime flock is on the separate factory.lock inode,
+// so launchctl may start or stop the daemon while this lock remains held.
+func withServiceMutation(ctx context.Context, home string, operation func(*serviceHomeCapability) (ServiceStatus, error)) (status ServiceStatus, resultErr error) {
+	if ctx == nil || operation == nil {
+		return ServiceStatus{}, fmt.Errorf("%w: invalid service mutation", ErrServiceAmbiguous)
+	}
+	capability, err := openServiceHomeCapability(ctx, home)
+	if err != nil {
+		return ServiceStatus{}, err
+	}
+	if err := unix.Flock(int(capability.home.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		closeErr := capability.close()
+		if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
+			return ServiceStatus{}, errors.Join(ErrServiceAmbiguous, ErrBusy, err, closeErr)
+		}
+		return ServiceStatus{}, errors.Join(ErrServiceAmbiguous, err, closeErr)
+	}
+	defer func() {
+		verifyErr := errors.Join(capability.recheck(ctx), capability.stageAbsent())
+		unlockErr := unix.Flock(int(capability.home.Fd()), unix.LOCK_UN)
+		closeErr := capability.close()
+		if cleanupErr := errors.Join(verifyErr, unlockErr, closeErr); cleanupErr != nil {
+			resultErr = errors.Join(resultErr, ErrServiceAmbiguous, cleanupErr)
+		}
+	}()
+	if err := errors.Join(capability.recheck(ctx), capability.stageAbsent()); err != nil {
+		return ServiceStatus{}, errors.Join(ErrServiceAmbiguous, err)
+	}
+	return operation(capability)
+}
+
 // openServiceArtifacts opens <home>.service without following symlinks.
 // Absence is an ordinary result, never an error.
 func openServiceArtifacts(home string) (*os.File, bool, error) {
@@ -163,7 +195,14 @@ func serviceInstallAt(ctx context.Context, home, userHome string, config Service
 	if ctx == nil || launchctl == nil || !config.valid() || !validServicePath(sourceDir) {
 		return ServiceStatus{}, fmt.Errorf("%w: invalid install request", ErrServiceAmbiguous)
 	}
-	status, err := inspectServiceAtHome(ctx, home, userHome, config, launchctl)
+	return withServiceMutation(ctx, home, func(capability *serviceHomeCapability) (ServiceStatus, error) {
+		return serviceInstallLockedAt(ctx, home, userHome, config, sourceDir, launchctl, capability)
+	})
+}
+
+func serviceInstallLockedAt(ctx context.Context, home, userHome string, config ServiceConfig, sourceDir string, launchctl launchctlRun, capability *serviceHomeCapability) (ServiceStatus, error) {
+	inspection, err := inspectServiceWithCapabilityAt(ctx, home, userHome, config, launchctl, capability)
+	status := inspection.status
 	if err == nil && (status.State == ServiceInstalled || status.State == ServiceRunning) {
 		return status, nil
 	}
@@ -234,7 +273,14 @@ func serviceStartAt(ctx context.Context, home, userHome string, config ServiceCo
 	if ctx == nil || launchctl == nil || !config.valid() {
 		return ServiceStatus{}, fmt.Errorf("%w: invalid start request", ErrServiceAmbiguous)
 	}
-	status, err := inspectServiceAtHome(ctx, home, userHome, config, launchctl)
+	return withServiceMutation(ctx, home, func(capability *serviceHomeCapability) (ServiceStatus, error) {
+		return serviceStartLockedAt(ctx, home, userHome, config, launchctl, capability)
+	})
+}
+
+func serviceStartLockedAt(ctx context.Context, home, userHome string, config ServiceConfig, launchctl launchctlRun, capability *serviceHomeCapability) (ServiceStatus, error) {
+	inspection, err := inspectServiceWithCapabilityAt(ctx, home, userHome, config, launchctl, capability)
+	status := inspection.status
 	if err != nil {
 		return status, err
 	}
@@ -242,6 +288,13 @@ func serviceStartAt(ctx context.Context, home, userHome string, config ServiceCo
 	case ServiceRunning:
 		return status, nil
 	case ServiceInstalled:
+		if inspection.observation.present {
+			// RunAtLoad without KeepAlive can leave an exited job loaded. Remove
+			// that definition before reusing the one bootstrap path below.
+			if err := bootoutService(ctx, config, launchctl); err != nil {
+				return ServiceStatus{State: ServiceAmbiguous}, err
+			}
+		}
 	default:
 		return status, fmt.Errorf("%w: start requires an installed service", ErrServiceAmbiguous)
 	}
@@ -266,11 +319,21 @@ func serviceStopAt(ctx context.Context, home, userHome string, config ServiceCon
 	if ctx == nil || launchctl == nil || !config.valid() {
 		return ServiceStatus{}, fmt.Errorf("%w: invalid stop request", ErrServiceAmbiguous)
 	}
-	status, err := inspectServiceAtHome(ctx, home, userHome, config, launchctl)
+	return withServiceMutation(ctx, home, func(capability *serviceHomeCapability) (ServiceStatus, error) {
+		return serviceStopLockedAt(ctx, home, userHome, config, launchctl, capability)
+	})
+}
+
+func serviceStopLockedAt(ctx context.Context, home, userHome string, config ServiceConfig, launchctl launchctlRun, capability *serviceHomeCapability) (ServiceStatus, error) {
+	inspection, err := inspectServiceWithCapabilityAt(ctx, home, userHome, config, launchctl, capability)
+	status := inspection.status
 	if err != nil {
 		return status, err
 	}
-	if status.State != ServiceRunning && status.State != ServiceInstalled {
+	if status.State == ServiceInstalled && !inspection.observation.present {
+		return status, nil
+	}
+	if status.State != ServiceInstalled && status.State != ServiceRunning {
 		return status, fmt.Errorf("%w: stop requires an installed service", ErrServiceAmbiguous)
 	}
 	if err := bootoutService(ctx, config, launchctl); err != nil {
@@ -296,13 +359,24 @@ func serviceUninstallAt(ctx context.Context, home, userHome string, config Servi
 	if ctx == nil || launchctl == nil || !config.valid() || !validServicePath(home) {
 		return ServiceStatus{}, fmt.Errorf("%w: invalid uninstall request", ErrServiceAmbiguous)
 	}
-	plistDirectory, _ := servicePlistLocation(userHome, config)
+	return withServiceMutation(ctx, home, func(*serviceHomeCapability) (ServiceStatus, error) {
+		return serviceUninstallLockedAt(ctx, home, userHome, config, launchctl)
+	})
+}
+
+func serviceUninstallLockedAt(ctx context.Context, home, userHome string, config ServiceConfig, launchctl launchctlRun) (ServiceStatus, error) {
+	plistDirectory, plistPath := servicePlistLocation(userHome, config)
+	expectedPlist, expectedPlistDigest, err := ServicePlist(home, config.Label)
+	if err != nil {
+		return ServiceStatus{}, err
+	}
 	receipt, receiptPresent, receiptErr := readServiceReceipt(home)
-	if receiptErr == nil && receiptPresent && receipt.Label != config.Label {
-		// The service directory belongs to a different label's installation;
-		// removing it here would break that installation, and booting THIS
-		// label out has no evidence behind it.
-		return ServiceStatus{State: ServiceAmbiguous}, fmt.Errorf("%w: the receipt names label %q", ErrServiceForeign, receipt.Label)
+	if receiptErr == nil && receiptPresent {
+		if receipt.Label != config.Label || receipt.PlistPath != plistPath || receipt.PlistDigest != hex.EncodeToString(expectedPlistDigest[:]) {
+			// The service directory belongs to a different installation target;
+			// removing it here would orphan that installation.
+			return ServiceStatus{State: ServiceAmbiguous}, fmt.Errorf("%w: the receipt names a different installation target", ErrServiceForeign)
+		}
 	}
 	evidence := receiptErr == nil && receiptPresent
 	if !evidence {
@@ -314,15 +388,18 @@ func serviceUninstallAt(ctx context.Context, home, userHome string, config Servi
 		evidence = plistEvidence
 	}
 	if evidence {
-		if err := bootoutService(ctx, config, launchctl); err != nil {
+		service := "gui/" + strconv.Itoa(os.Geteuid()) + "/" + config.Label
+		observation, err := observeLaunchctl(ctx, launchctl, service, plistPath, serviceProgramPath(home))
+		if err != nil {
 			return ServiceStatus{State: ServiceAmbiguous}, err
 		}
+		if observation.present {
+			if err := bootoutService(ctx, config, launchctl); err != nil {
+				return ServiceStatus{State: ServiceAmbiguous}, err
+			}
+		}
 	}
-	expected, _, err := ServicePlist(home, config.Label)
-	if err != nil {
-		return ServiceStatus{}, err
-	}
-	if err := removeExactFile(plistDirectory, config.plistName(), expected); err != nil {
+	if err := removeExactFile(plistDirectory, config.plistName(), expectedPlist); err != nil {
 		return ServiceStatus{State: ServiceAmbiguous}, err
 	}
 	if err := removeOwnedFile(plistDirectory, "."+config.plistName()+".stage"); err != nil {

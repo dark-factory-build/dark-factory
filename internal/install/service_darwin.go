@@ -104,6 +104,11 @@ type launchctlObservation struct {
 	pid     int
 }
 
+type serviceInspection struct {
+	status      ServiceStatus
+	observation launchctlObservation
+}
+
 func inspectServiceForAccount(ctx context.Context, home string, config ServiceConfig, launchctl launchctlRun) (status ServiceStatus, resultErr error) {
 	if ctx == nil || launchctl == nil {
 		return ServiceStatus{}, fmt.Errorf("%w: invalid status request", ErrServiceAmbiguous)
@@ -134,6 +139,17 @@ func inspectServiceAtHome(ctx context.Context, home, userHome string, config Ser
 			resultErr = errors.Join(resultErr, ErrServiceAmbiguous, closeErr)
 		}
 	}()
+	inspection, err := inspectServiceWithCapabilityAt(ctx, home, userHome, config, launchctl, homeCapability)
+	return inspection.status, err
+}
+
+// inspectServiceWithCapabilityAt performs the external service observation
+// against one already-retained home. Mutation callers reuse the capability
+// that carries their directory lock instead of taking a second home snapshot.
+func inspectServiceWithCapabilityAt(ctx context.Context, home, userHome string, config ServiceConfig, launchctl launchctlRun, homeCapability *serviceHomeCapability) (inspection serviceInspection, resultErr error) {
+	if ctx == nil || launchctl == nil || !config.valid() || homeCapability == nil || homeCapability.home == nil {
+		return serviceInspection{}, fmt.Errorf("%w: invalid status request", ErrServiceAmbiguous)
+	}
 	plistDirectory := config.PlistDirectory
 	if plistDirectory == "" {
 		plistDirectory = filepath.Join(userHome, "Library", "LaunchAgents")
@@ -144,7 +160,7 @@ func inspectServiceAtHome(ctx context.Context, home, userHome string, config Ser
 	}
 	userDirectory, err := openServiceDirectory(walkRoot)
 	if err != nil {
-		return ServiceStatus{State: ServiceAmbiguous}, fmt.Errorf("%w: user home", ErrServiceAmbiguous)
+		return serviceInspection{status: ServiceStatus{State: ServiceAmbiguous}}, fmt.Errorf("%w: user home", ErrServiceAmbiguous)
 	}
 	defer func() {
 		if closeErr := userDirectory.close(); closeErr != nil {
@@ -153,10 +169,10 @@ func inspectServiceAtHome(ctx context.Context, home, userHome string, config Ser
 	}()
 	plist, err := inspectServicePlist(userDirectory, home, config)
 	if err != nil {
-		return ServiceStatus{State: ServiceAmbiguous}, errors.Join(ErrServiceAmbiguous, err)
+		return serviceInspection{status: ServiceStatus{State: ServiceAmbiguous}}, errors.Join(ErrServiceAmbiguous, err)
 	}
 	if err := userDirectory.recheck(); err != nil {
-		return ServiceStatus{State: ServiceAmbiguous}, errors.Join(ErrServiceAmbiguous, err)
+		return serviceInspection{status: ServiceStatus{State: ServiceAmbiguous}}, errors.Join(ErrServiceAmbiguous, err)
 	}
 
 	uid := os.Geteuid()
@@ -165,55 +181,55 @@ func inspectServiceAtHome(ctx context.Context, home, userHome string, config Ser
 	programPath := serviceProgramPath(home)
 	observation, err := observeLaunchctl(ctx, launchctl, service, plistPath, programPath)
 	if err != nil {
-		return ServiceStatus{State: ServiceAmbiguous}, err
+		return serviceInspection{status: ServiceStatus{State: ServiceAmbiguous}}, err
 	}
 	// launchctl is an external observation boundary: the exact staging name
 	// must be censused again before its result can influence status.
 	if err := homeCapability.recheck(ctx); err != nil {
-		return ServiceStatus{State: ServiceAmbiguous}, errors.Join(ErrServiceAmbiguous, err)
+		return serviceInspection{status: ServiceStatus{State: ServiceAmbiguous}}, errors.Join(ErrServiceAmbiguous, err)
 	}
 	if err := homeCapability.stageAbsent(); err != nil {
-		return ServiceStatus{State: ServiceAmbiguous}, errors.Join(ErrServiceAmbiguous, err)
+		return serviceInspection{status: ServiceStatus{State: ServiceAmbiguous}}, errors.Join(ErrServiceAmbiguous, err)
 	}
 	secondPlist, err := inspectServicePlist(userDirectory, home, config)
 	if err != nil || secondPlist != plist {
-		return ServiceStatus{State: ServiceAmbiguous}, errors.Join(ErrServiceAmbiguous, err)
+		return serviceInspection{status: ServiceStatus{State: ServiceAmbiguous}}, errors.Join(ErrServiceAmbiguous, err)
 	}
 	if err := userDirectory.recheck(); err != nil {
-		return ServiceStatus{State: ServiceAmbiguous}, errors.Join(ErrServiceAmbiguous, err)
+		return serviceInspection{status: ServiceStatus{State: ServiceAmbiguous}}, errors.Join(ErrServiceAmbiguous, err)
 	}
 	receipt, receiptPresent, err := readServiceReceipt(home)
 	if !plist.present && !observation.present {
 		if err != nil || receiptPresent {
 			// Install residue without a live job is not provable absence.
-			return ServiceStatus{State: ServiceAmbiguous}, errors.Join(ErrServiceAmbiguous, ErrServiceResidue, err)
+			return serviceInspection{status: ServiceStatus{State: ServiceAmbiguous}}, errors.Join(ErrServiceAmbiguous, ErrServiceResidue, err)
 		}
 		if residueErr := rejectServiceDirectoryResidue(home); residueErr != nil {
-			return ServiceStatus{State: ServiceAmbiguous}, errors.Join(ErrServiceAmbiguous, residueErr)
+			return serviceInspection{status: ServiceStatus{State: ServiceAmbiguous}}, errors.Join(ErrServiceAmbiguous, residueErr)
 		}
 		// Keep this check adjacent to the only absent projection. A stage that
 		// appears during the second plist census must not be reported as absent.
 		if err := homeCapability.recheck(ctx); err != nil {
-			return ServiceStatus{State: ServiceAmbiguous}, errors.Join(ErrServiceAmbiguous, err)
+			return serviceInspection{status: ServiceStatus{State: ServiceAmbiguous}}, errors.Join(ErrServiceAmbiguous, err)
 		}
 		if err := homeCapability.stageAbsent(); err != nil {
-			return ServiceStatus{State: ServiceAmbiguous}, errors.Join(ErrServiceAmbiguous, err)
+			return serviceInspection{status: ServiceStatus{State: ServiceAmbiguous}}, errors.Join(ErrServiceAmbiguous, err)
 		}
-		return ServiceStatus{State: ServiceAbsent}, nil
+		return serviceInspection{status: ServiceStatus{State: ServiceAbsent}}, nil
 	}
 	if err == nil && receiptPresent && plist.present {
 		if matchErr := receiptMatchesInstallation(receipt, home, config, plistPath); matchErr == nil {
 			if observation.present && observation.pid > 0 {
-				return ServiceStatus{State: ServiceRunning, PID: observation.pid}, nil
+				return serviceInspection{status: ServiceStatus{State: ServiceRunning, PID: observation.pid}, observation: observation}, nil
 			}
 			// A loaded-but-idle job and an unloaded plist are both restartable
 			// installations; neither grants process authority.
-			return ServiceStatus{State: ServiceInstalled}, nil
+			return serviceInspection{status: ServiceStatus{State: ServiceInstalled}, observation: observation}, nil
 		} else {
-			return ServiceStatus{State: ServiceAmbiguous}, errors.Join(ErrServiceAmbiguous, matchErr)
+			return serviceInspection{status: ServiceStatus{State: ServiceAmbiguous}}, errors.Join(ErrServiceAmbiguous, matchErr)
 		}
 	}
-	return ServiceStatus{State: ServiceAmbiguous, PID: observation.pid}, errors.Join(ErrServiceAmbiguous, err)
+	return serviceInspection{status: ServiceStatus{State: ServiceAmbiguous, PID: observation.pid}}, errors.Join(ErrServiceAmbiguous, err)
 }
 
 type serviceHomeCapability struct {
