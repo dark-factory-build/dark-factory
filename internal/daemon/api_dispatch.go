@@ -84,9 +84,27 @@ func (daemon *Daemon) HandleConnection(ctx context.Context, connection *api.Conn
 		return fmt.Errorf("%w: invalid daemon connection", kernel.ErrInvalidValue)
 	}
 	defer connection.Close()
-	_, err := connection.Receive(ctx)
+	call, err := connection.Receive(ctx)
 	if err != nil {
 		return err
+	}
+	if attemptOutcomeCall(call.Kind()) {
+		var attempt *liveAttempt
+		reply, dispatchErr := connection.Dispatch(func(call api.Call) api.Reply {
+			var outcome api.Reply
+			outcome, attempt = daemon.proposeOutcome(ctx, call)
+			return outcome
+		})
+		if dispatchErr != nil {
+			daemon.clearOutcomeReceipt(attempt)
+			return dispatchErr
+		}
+		responseErr := connection.Respond(reply)
+		if responseErr == nil {
+			responseErr = connection.AwaitOutcomeReceipt(ctx)
+		}
+		daemon.clearOutcomeReceipt(attempt)
+		return responseErr
 	}
 	reply, err := connection.Dispatch(func(call api.Call) api.Reply { return daemon.dispatch(ctx, call) })
 	if err != nil {
@@ -112,8 +130,6 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.enqueueTask(ctx, call)
 	case api.CallSetDispatch:
 		return daemon.setDispatch(ctx, call)
-	case api.CallSucceed, api.CallBlock, api.CallFail:
-		return daemon.proposeOutcome(ctx, call)
 	case api.CallRequestHuman:
 		return daemon.requestHuman(ctx, call)
 	case api.CallWebStatus:
@@ -315,22 +331,22 @@ func (daemon *Daemon) setDispatch(ctx context.Context, call api.Call) api.Reply 
 	return mutationReply(state.Head, state.Revision)
 }
 
-func (daemon *Daemon) proposeOutcome(ctx context.Context, call api.Call) api.Reply {
+func (daemon *Daemon) proposeOutcome(ctx context.Context, call api.Call) (api.Reply, *liveAttempt) {
 	digest, ok := call.AttemptDigest()
 	if !ok {
-		return newErrorReply(api.RemoteInvalidRequest)
+		return newErrorReply(api.RemoteInvalidRequest), nil
 	}
 	kDigest, err := attemptDigest(digest)
 	if err != nil {
-		return newErrorReply(api.RemoteInvalidRequest)
+		return newErrorReply(api.RemoteInvalidRequest), nil
 	}
 	proposal, err := proposalForCall(call)
 	if err != nil {
-		return newErrorReply(api.RemoteInvalidRequest)
+		return newErrorReply(api.RemoteInvalidRequest), nil
 	}
 	at, err := daemon.timestamp()
 	if err != nil {
-		return newErrorReply(api.RemoteInternal)
+		return newErrorReply(api.RemoteInternal), nil
 	}
 	daemon.operationMu.Lock()
 	// This durable transition and the owner-side attach check share one
@@ -339,7 +355,14 @@ func (daemon *Daemon) proposeOutcome(ctx context.Context, call api.Call) api.Rep
 	operationCtx, cancel := context.WithTimeout(ctx, liveAttemptStoreTimeout)
 	run, err := daemon.store.ProposeAttemptOutcome(operationCtx, kDigest, proposal, at)
 	cancel()
+	var attempt *liveAttempt
 	if err == nil {
+		daemon.attemptMu.Lock()
+		attempt = daemon.attempts[run.ID]
+		if attempt != nil {
+			attempt.outcomeReceiptPending = true
+		}
+		daemon.attemptMu.Unlock()
 		// The commit completed before ProposeAttemptOutcome returned. The owner
 		// notification is deliberately best-effort and carries no authority or
 		// state payload; it only shortens the next durable Store poll.
@@ -347,9 +370,23 @@ func (daemon *Daemon) proposeOutcome(ctx context.Context, call api.Call) api.Rep
 	}
 	daemon.operationMu.Unlock()
 	if err != nil {
-		return newErrorReply(remoteErrorCode(err))
+		return newErrorReply(remoteErrorCode(err)), nil
 	}
-	return daemon.mutation(ctx, run.Revision)
+	return daemon.mutation(ctx, run.Revision), attempt
+}
+
+func (daemon *Daemon) clearOutcomeReceipt(attempt *liveAttempt) {
+	if daemon == nil || attempt == nil {
+		return
+	}
+	daemon.operationMu.Lock()
+	attempt.outcomeReceiptPending = false
+	daemon.operationMu.Unlock()
+	attempt.notify()
+}
+
+func attemptOutcomeCall(kind api.CallKind) bool {
+	return kind == api.CallSucceed || kind == api.CallBlock || kind == api.CallFail
 }
 
 func (daemon *Daemon) requestHuman(ctx context.Context, call api.Call) api.Reply {

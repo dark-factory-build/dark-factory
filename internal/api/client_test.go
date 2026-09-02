@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	wireGeneration      byte = 1
+	wireGeneration      byte = 2
 	wireOperatorDomain  byte = 1
 	wireAttemptDomain   byte = 2
 	wireCredentialBytes      = 32
@@ -70,10 +70,12 @@ func newWireFixture(t testing.TB, bearer credential, response func(net.Conn, []b
 			fixture.done <- err
 			return
 		}
-		var extra [1]byte
-		if count, readErr := connection.Read(extra[:]); count != 0 || !errors.Is(readErr, io.EOF) {
-			fixture.done <- fmt.Errorf("request stream did not end after one frame: count=%d error=%v", count, readErr)
-			return
+		if !wireOutcomeRequest(request) {
+			var extra [1]byte
+			if count, readErr := connection.Read(extra[:]); count != 0 || !errors.Is(readErr, io.EOF) {
+				fixture.done <- fmt.Errorf("request stream did not end after one frame: count=%d error=%v", count, readErr)
+				return
+			}
 		}
 		fixture.request <- request
 		fixture.done <- response(connection, request)
@@ -168,6 +170,61 @@ func writeTestPayload(connection net.Conn, payload, trailing []byte) error {
 func successResponse(data string) string { return `{"ok":true,"data":` + data + `}` }
 
 func mutationResponse() string { return successResponse(`{"head":9,"revision":4}`) }
+
+func wireOutcomeRequest(request []byte) bool {
+	if len(request) < wireRequestPrelude {
+		return false
+	}
+	encoded := request[wireRequestPrelude:]
+	return bytes.Contains(encoded, []byte(`"method":"succeed"`)) ||
+		bytes.Contains(encoded, []byte(`"method":"block"`)) ||
+		bytes.Contains(encoded, []byte(`"method":"fail"`))
+}
+
+func writeTestOutcomeResponse(connection net.Conn, generation, domain byte, body string) error {
+	if err := writeTestResponse(connection, generation, domain, body); err != nil {
+		return err
+	}
+	receipt := bytes.Repeat([]byte{'R'}, outcomeReceiptBytes)
+	if err := writeTestPayload(connection, receipt, nil); err != nil {
+		return err
+	}
+	unix, ok := connection.(*net.UnixConn)
+	if !ok || unix.CloseWrite() != nil {
+		return ErrTransport
+	}
+	got, err := readTestFrame(connection)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(got, receipt) {
+		return fmt.Errorf("outcome receipt = %x, want %x", got, receipt)
+	}
+	var extra [1]byte
+	if count, readErr := connection.Read(extra[:]); count != 0 || !errors.Is(readErr, io.EOF) {
+		return fmt.Errorf("outcome receipt stream did not end: count=%d error=%v", count, readErr)
+	}
+	return nil
+}
+
+func writeTestUnacknowledgedOutcomeResponse(connection net.Conn, generation, domain byte, body string) error {
+	if err := writeTestResponse(connection, generation, domain, body); err != nil {
+		return err
+	}
+	receipt := bytes.Repeat([]byte{'R'}, outcomeReceiptBytes)
+	if err := writeTestPayload(connection, receipt, nil); err != nil {
+		return err
+	}
+	unix, ok := connection.(*net.UnixConn)
+	if !ok || unix.CloseWrite() != nil {
+		return ErrTransport
+	}
+	var extra [1]byte
+	if count, readErr := connection.Read(extra[:]); count != 0 || !errors.Is(readErr, io.EOF) {
+		return fmt.Errorf("invalid outcome response was acknowledged: count=%d error=%v", count, readErr)
+	}
+	return nil
+}
 
 func TestMutationResultUsesCanonicalHeadAndAllowsZero(t *testing.T) {
 	bearer := testCredential('H')
@@ -303,7 +360,10 @@ func TestAttemptClientHasExactScopedOutcomesAndNoOperatorFallback(t *testing.T) 
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			fixture := newWireFixture(t, attemptBearer, func(connection net.Conn, _ []byte) error {
+			fixture := newWireFixture(t, attemptBearer, func(connection net.Conn, request []byte) error {
+				if wireOutcomeRequest(request) {
+					return writeTestOutcomeResponse(connection, wireGeneration, wireAttemptDomain, mutationResponse())
+				}
 				return writeTestResponse(connection, wireGeneration, wireAttemptDomain, mutationResponse())
 			})
 			operatorPath := filepath.Join(fixture.directory, "operator.token")
@@ -341,6 +401,59 @@ func TestAttemptClientHasExactScopedOutcomesAndNoOperatorFallback(t *testing.T) 
 	})
 }
 
+func TestAttemptOutcomeAcknowledgesErrorResponse(t *testing.T) {
+	bearer := testCredential('E')
+	fixture := newWireFixture(t, bearer, func(connection net.Conn, request []byte) error {
+		if !wireOutcomeRequest(request) {
+			return fmt.Errorf("expected outcome request")
+		}
+		return writeTestOutcomeResponse(connection, wireGeneration, wireAttemptDomain, `{"ok":false,"error":"unavailable"}`)
+	})
+	t.Setenv(attemptTokenFileEnv, fixture.token)
+	client, err := NewAttemptClientFromEnvironment(fixture.socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Succeed(context.Background(), "committed"); err == nil {
+		t.Fatal("error response succeeded")
+	} else {
+		var remote *RemoteError
+		if !errors.As(err, &remote) || remote.Code() != RemoteUnavailable {
+			t.Fatalf("error response = %v", err)
+		}
+	}
+	fixture.wait(t)
+}
+
+func TestAttemptOutcomeDoesNotAcknowledgeInvalidResponse(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		body string
+	}{
+		{name: "malformed envelope", body: `{"ok":true,"data":{"head":9,"revision":4},"private":true}`},
+		{name: "zero revision", body: `{"ok":true,"data":{"head":9,"revision":0}}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			bearer := testCredential('I')
+			fixture := newWireFixture(t, bearer, func(connection net.Conn, request []byte) error {
+				if !wireOutcomeRequest(request) {
+					return fmt.Errorf("expected outcome request")
+				}
+				return writeTestUnacknowledgedOutcomeResponse(connection, wireGeneration, wireAttemptDomain, test.body)
+			})
+			t.Setenv(attemptTokenFileEnv, fixture.token)
+			client, err := NewAttemptClientFromEnvironment(fixture.socket)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := client.Succeed(context.Background(), "invalid-response"); !errors.Is(err, ErrProtocol) {
+				t.Fatalf("invalid outcome response = %v", err)
+			}
+			fixture.wait(t)
+		})
+	}
+}
+
 func TestResponseFramingIsExactBoundedAndStrict(t *testing.T) {
 	bearer := testCredential('R')
 	valid := successResponse(`{"ready":true}`)
@@ -350,7 +463,9 @@ func TestResponseFramingIsExactBoundedAndStrict(t *testing.T) {
 		want   error
 		remote RemoteErrorCode
 	}{
-		{name: "wrong generation", write: func(connection net.Conn) error { return writeTestResponse(connection, 2, wireOperatorDomain, valid) }, want: ErrProtocol},
+		{name: "wrong generation", write: func(connection net.Conn) error {
+			return writeTestResponse(connection, wireGeneration-1, wireOperatorDomain, valid)
+		}, want: ErrProtocol},
 		{name: "wrong domain", write: func(connection net.Conn) error {
 			return writeTestResponse(connection, wireGeneration, wireAttemptDomain, valid)
 		}, want: ErrProtocol},

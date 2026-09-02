@@ -237,9 +237,20 @@ func (attempt *liveAttempt) processLifecycle(ctx context.Context) (bool, error) 
 	if attempt.daemon == nil || attempt.daemon.store == nil {
 		return false, nil
 	}
+	// Terminal-effect callers retain operationMu while waiting for this owner
+	// to consume their mailbox command. Never join that wait here. The same gate
+	// atomically pairs durable finalization with its response receipt fence.
+	if !attempt.daemon.operationMu.TryLock() {
+		return false, nil
+	}
+	if attempt.outcomeReceiptPending {
+		attempt.daemon.operationMu.Unlock()
+		return false, nil
+	}
 	storeCtx, cancel := context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
 	run, found, err := attempt.daemon.store.Run(storeCtx, attempt.runID)
 	cancel()
+	attempt.daemon.operationMu.Unlock()
 	if err != nil {
 		return false, err
 	}

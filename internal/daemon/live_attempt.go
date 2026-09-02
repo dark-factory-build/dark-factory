@@ -224,9 +224,9 @@ type liveAttemptResult struct {
 	observersRetained bool
 }
 
-// liveAttempt is intentionally concrete. All mutable fields below belong to
-// its one owner goroutine after construction; the registry mutex protects
-// only the daemon's map membership.
+// liveAttempt is intentionally concrete. Except for the receipt fence named
+// below, mutable fields belong to its one owner goroutine after construction;
+// the registry mutex protects only the daemon's map membership.
 type liveAttempt struct {
 	daemon     *Daemon
 	runID      kernel.RunID
@@ -237,6 +237,11 @@ type liveAttempt struct {
 	wake     chan struct{}
 	done     chan struct{}
 	result   chan liveAttemptResult
+
+	// outcomeReceiptPending is set and cleared only under daemon.operationMu.
+	// It spans durable finalization through the reporting client's validated
+	// response acknowledgement, without holding that global gate during I/O.
+	outcomeReceiptPending bool
 
 	subs            map[*TerminalAttachment]struct{}
 	correlations    map[uint64]*TerminalAttachment

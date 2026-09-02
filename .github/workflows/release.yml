@@ -79,17 +79,10 @@ jobs:
       - name: Provide the Homebrew Go toolchain
         run: |
           set -euxo pipefail
-          required_go=$(awk '$1 == "go" { print "go" $2 }' go.mod)
-          installed_go=$(/opt/homebrew/bin/go env GOVERSION 2>/dev/null || true)
-          if [ "$installed_go" != "$required_go" ]; then
+          if [ ! -x /opt/homebrew/bin/go ]; then
             brew update
-            if [ -x /opt/homebrew/bin/go ]; then
-              brew upgrade go
-            else
-              brew install go
-            fi
+            brew install go
           fi
-          test "$(/opt/homebrew/bin/go env GOVERSION)" = "$required_go"
           echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
           /opt/homebrew/bin/go version
 

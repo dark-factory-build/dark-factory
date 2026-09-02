@@ -20,11 +20,12 @@ import (
 )
 
 const (
-	protocolGeneration  byte = 1
+	protocolGeneration  byte = 2
 	operatorDomain      byte = 1
 	attemptDomain       byte = 2
 	requestPrelude           = 2 + credentialBytes
 	responsePrelude          = 2
+	outcomeReceiptBytes      = 32
 	requestTimeout           = 5 * time.Second
 	attemptTokenFileEnv      = "DARK_FACTORY_ATTEMPT_TOKEN_FILE"
 )
@@ -304,7 +305,12 @@ func (client client) call(ctx context.Context, method string, params, output any
 	if err := writeFrame(connection, payload); err != nil {
 		return classifyTransport(ctx)
 	}
-	if unix, ok := connection.(*net.UnixConn); !ok || unix.CloseWrite() != nil {
+	outcomeReceipt := client.domain == attemptDomain && outcomeMethod(method)
+	unix, ok := connection.(*net.UnixConn)
+	if !ok {
+		return ErrTransport
+	}
+	if !outcomeReceipt && unix.CloseWrite() != nil {
 		return ErrTransport
 	}
 	response, err := readFrame(connection)
@@ -314,9 +320,60 @@ func (client client) call(ctx context.Context, method string, params, output any
 	if len(response) < responsePrelude || response[0] != protocolGeneration || response[1] != client.domain {
 		return ErrProtocol
 	}
+	responseErr := decodeResponse(response[responsePrelude:], output)
+	if outcomeReceipt && responseErr == nil {
+		result, ok := output.(*MutationResult)
+		if !ok || result.Revision == 0 {
+			responseErr = ErrProtocol
+		}
+	}
+	if outcomeReceipt && !acknowledgeableOutcomeResponse(responseErr) {
+		if err := client.revalidate(before); err != nil {
+			return err
+		}
+		return responseErr
+	}
+	if outcomeReceipt {
+		receipt, err := readFrame(connection)
+		if err != nil {
+			// Rejections before the server accepts an outcome call have no
+			// receipt. Once dispatch begins, every outcome response does.
+			if responseErr == nil && errors.Is(err, io.EOF) {
+				return ErrProtocol
+			}
+			if responseErr == nil || !errors.Is(err, io.EOF) {
+				return classifyFrameError(ctx, err)
+			}
+		} else {
+			if len(receipt) != outcomeReceiptBytes {
+				return ErrProtocol
+			}
+			if err := requireEOF(connection); err != nil {
+				return classifyFrameError(ctx, err)
+			}
+			if err := client.revalidate(before); err != nil {
+				return err
+			}
+			if err := writeFrame(connection, receipt); err != nil {
+				return classifyTransport(ctx)
+			}
+			clear(receipt)
+			if err := unix.CloseWrite(); err != nil {
+				return ErrTransport
+			}
+			return responseErr
+		}
+	}
 	if err := requireEOF(connection); err != nil {
 		return classifyFrameError(ctx, err)
 	}
+	if err := client.revalidate(before); err != nil {
+		return err
+	}
+	return responseErr
+}
+
+func (client client) revalidate(before socketRecord) error {
 	after, err := inspectSocket(client.socketPath)
 	if err != nil || !after.same(before) {
 		return ErrInvalidClient
@@ -325,7 +382,19 @@ func (client client) call(ctx context.Context, method string, params, output any
 	if err != nil || !latest.same(client.token) {
 		return ErrInvalidClient
 	}
-	return decodeResponse(response[responsePrelude:], output)
+	return nil
+}
+
+func outcomeMethod(method string) bool {
+	return method == "succeed" || method == "block" || method == "fail"
+}
+
+func acknowledgeableOutcomeResponse(err error) bool {
+	if err == nil {
+		return true
+	}
+	var remote *RemoteError
+	return errors.As(err, &remote)
 }
 
 func writeFrame(writer io.Writer, payload []byte) error {

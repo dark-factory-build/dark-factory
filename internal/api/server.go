@@ -5,6 +5,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -306,6 +307,8 @@ type Connection struct {
 	kind       CallKind
 	call       Call
 	state      connectionState
+	receipt    [outcomeReceiptBytes]byte
+	receiptDue bool
 	closeOnce  sync.Once
 	closeErr   error
 }
@@ -313,9 +316,10 @@ type Connection struct {
 func (*Connection) String() string   { return "Connection(<redacted>)" }
 func (*Connection) GoString() string { return "Connection(<redacted>)" }
 
-// Receive reads one complete request and requires client EOF before returning
-// a dispatchable Call. Invalid requests are answered, when a valid response
-// domain is available, with a fixed error code.
+// Receive reads one complete request. Ordinary calls require client EOF before
+// dispatch; attempt outcomes keep the write half open for their response
+// receipt. Invalid requests are answered, when a valid response domain is
+// available, with a fixed error code.
 func (connection *Connection) Receive(ctx context.Context) (Call, error) {
 	if connection == nil || connection.self != connection || connection.connection == nil || connection.protocol == nil || connection.state != connectionNew {
 		return Call{}, ErrProtocol
@@ -338,12 +342,6 @@ func (connection *Connection) Receive(ctx context.Context) (Call, error) {
 	if domain == operatorDomain || domain == attemptDomain {
 		connection.domain = domain
 	}
-	if err := requireEOF(connection.connection); err != nil {
-		if errors.Is(err, ErrProtocol) {
-			return Call{}, connection.reject(RemoteInvalidRequest)
-		}
-		return Call{}, classifyFrameError(ctx, err)
-	}
 	if err := ctx.Err(); err != nil {
 		return Call{}, err
 	}
@@ -362,6 +360,14 @@ func (connection *Connection) Receive(ctx context.Context) (Call, error) {
 	}
 	if code != "" {
 		return Call{}, connection.reject(code)
+	}
+	if !outcomeCall(call.kind) {
+		if err := requireEOF(connection.connection); err != nil {
+			if errors.Is(err, ErrProtocol) {
+				return Call{}, connection.reject(RemoteInvalidRequest)
+			}
+			return Call{}, classifyFrameError(ctx, err)
+		}
 	}
 	if domain == operatorDomain && !connection.protocol.CheckOperator(bearer[:]) || domain == attemptDomain && connection.protocol.Verify() != nil {
 		return Call{}, connection.reject(RemoteUnauthorized)
@@ -567,6 +573,43 @@ func (connection *Connection) Respond(reply Reply) error {
 	return nil
 }
 
+// AwaitOutcomeReceipt joins the response-consumption acknowledgement for a
+// successful attempt outcome. Other replies have no receipt and return
+// immediately. The random frame cannot be sent before the response is read.
+func (connection *Connection) AwaitOutcomeReceipt(ctx context.Context) error {
+	if connection == nil || connection.self != connection || connection.connection == nil || connection.state != connectionResponded {
+		return ErrProtocol
+	}
+	if !connection.receiptDue {
+		return nil
+	}
+	expected := connection.receipt
+	defer func() {
+		clear(connection.receipt[:])
+		connection.receiptDue = false
+	}()
+	if err := connection.setDeadline(ctx); err != nil {
+		return err
+	}
+	stopCancellation := watchCancellation(ctx, connection.connection)
+	defer stopCancellation()
+	receipt, err := readFrame(connection.connection)
+	if err != nil {
+		return classifyFrameError(ctx, err)
+	}
+	if len(receipt) != len(expected) || !bytes.Equal(receipt, expected[:]) {
+		return ErrProtocol
+	}
+	if err := requireEOF(connection.connection); err != nil {
+		return classifyFrameError(ctx, err)
+	}
+	return nil
+}
+
+func outcomeCall(kind CallKind) bool {
+	return kind == CallSucceed || kind == CallBlock || kind == CallFail
+}
+
 func replyMatches(kind CallKind, reply replyKind) bool {
 	if reply == replyError {
 		return true
@@ -654,10 +697,29 @@ func (connection *Connection) writeReply(reply Reply) error {
 	payload := make([]byte, responsePrelude+len(encoded))
 	payload[0], payload[1] = protocolGeneration, connection.domain
 	copy(payload[responsePrelude:], encoded)
+	// Every dispatched outcome response carries a receipt, including an error
+	// produced after the durable outcome committed. Receipt presence must not
+	// depend on a fallible post-commit response projection.
+	withReceipt := outcomeCall(connection.kind)
+	if withReceipt {
+		if _, err := rand.Read(connection.receipt[:]); err != nil {
+			return ErrTransport
+		}
+	}
 	if err := writeFrame(connection.connection, payload); err != nil {
+		clear(connection.receipt[:])
 		return ErrTransport
 	}
+	if withReceipt {
+		if err := writeFrame(connection.connection, connection.receipt[:]); err != nil {
+			clear(connection.receipt[:])
+			return ErrTransport
+		}
+		connection.receiptDue = true
+	}
 	if err := connection.connection.CloseWrite(); err != nil {
+		clear(connection.receipt[:])
+		connection.receiptDue = false
 		return ErrTransport
 	}
 	return nil
@@ -672,6 +734,8 @@ func (connection *Connection) Close() error {
 	}
 	connection.closeOnce.Do(func() {
 		connection.state = connectionClosed
+		clear(connection.receipt[:])
+		connection.receiptDue = false
 		if connection.connection != nil {
 			if err := connection.connection.Close(); err != nil {
 				connection.closeErr = ErrTransport

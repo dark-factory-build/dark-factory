@@ -130,6 +130,14 @@ If preparation or activation fails, the run enters `finalizing`; a provider
 must never execute first and become durable later. The runner is a
 provider-blind effect host, not a second lifecycle owner.
 
+A successful attempt outcome commits `finalizing` together with one in-memory
+response fence. The daemon sends a fresh random receipt after the outcome
+response; the attempt client validates the reply, echoes that receipt on the
+same connection, and then half-closes. Only that acknowledgement (or a visible
+transport failure) clears the fence and lets the live owner terminate the
+provider group. Socket I/O never holds the global operation gate, and explicit
+daemon cancellation preempts a missing receipt.
+
 Owned failed attempts apply exact recovery before `RunNext` returns. The
 scheduler reports any remaining `finalizing` residue as unsettled and leaves it
 for the startup recovery sweep.

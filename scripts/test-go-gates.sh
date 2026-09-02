@@ -42,7 +42,7 @@ printf '%s\n' 'package fixture' >"$ordinary/fixture.go"
 #!/bin/sh
 set -eu
 case "$1:${2-}" in
-    env:GOVERSION) printf '%s\n' go1.27.0 ;;
+    env:GOVERSION) /bin/cat "$(/usr/bin/dirname "$0")/../go-version" ;;
     mod:download|mod:verify) ;;
     vet:./...)
         [ "${DF_GATE_FAULT-}" != vet ] || { echo 'fixture vet failure' >&2; exit 1; }
@@ -98,6 +98,8 @@ EOF
 
 run_ordinary() {
     ordinary_mode=$1
+    ordinary_go_version=${2-go1.27.0}
+    printf '%s\n' "$ordinary_go_version" >"$ordinary/go-version"
     set +e
     ordinary_output=$(CDPATH= cd -- "$ordinary" && \
         DF_GATE_FAULT="$ordinary_mode" PATH="$ordinary/bin:/usr/bin:/bin" \
@@ -107,6 +109,14 @@ run_ordinary() {
 }
 run_ordinary ''
 [ "$ordinary_status" -eq 0 ] || fail "ordinary success fixture failed: $ordinary_output"
+run_ordinary '' go1.27.1
+[ "$ordinary_status" -eq 0 ] || fail "same-series Go patch failed: $ordinary_output"
+for wrong_go in go1.26.9 go1.28.0; do
+    run_ordinary '' "$wrong_go"
+    [ "$ordinary_status" -ne 0 ] || fail "wrong-series $wrong_go passed"
+    printf '%s\n' "$ordinary_output" | /usr/bin/grep -F 'expected go1.27.x' >/dev/null \
+        || fail "wrong-series $wrong_go failure was unclear: $ordinary_output"
+done
 for ordinary_case in \
     'malformed-go:malformed Go source' \
     'gofmt:gofmt required' \

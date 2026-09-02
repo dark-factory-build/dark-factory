@@ -105,6 +105,9 @@ func startServerReceive(t testing.TB, listener *Listener, reply func(Call) Reply
 			if err == nil {
 				err = connection.Respond(response)
 			}
+			if err == nil {
+				err = connection.AwaitOutcomeReceipt(ctx)
+			}
 		}
 		done <- serverReceiveResult{call: call, err: err}
 	}()
@@ -131,7 +134,8 @@ func exchangeRaw(socketPath string, request []byte, closeWrite bool) ([]byte, er
 	if _, err := connection.Write(request); err != nil {
 		return nil, err
 	}
-	if closeWrite {
+	outcome := rawOutcomeRequest(request)
+	if closeWrite && !outcome {
 		if err := connection.CloseWrite(); err != nil {
 			return nil, err
 		}
@@ -140,10 +144,39 @@ func exchangeRaw(socketPath string, request []byte, closeWrite bool) ([]byte, er
 	if err != nil {
 		return nil, err
 	}
+	if outcome && len(response) >= responsePrelude && bytes.Contains(response[responsePrelude:], []byte(`"ok":true`)) {
+		receipt, err := readTestFrame(connection)
+		if err != nil {
+			return nil, err
+		}
+		if len(receipt) != outcomeReceiptBytes {
+			return nil, ErrProtocol
+		}
+		if err := requireEOF(connection); err != nil {
+			return nil, err
+		}
+		if err := writeFrame(connection, receipt); err != nil {
+			return nil, err
+		}
+		if err := connection.CloseWrite(); err != nil {
+			return nil, err
+		}
+		return response, nil
+	}
 	if err := requireEOF(connection); err != nil {
 		return nil, err
 	}
 	return response, nil
+}
+
+func rawOutcomeRequest(request []byte) bool {
+	if len(request) < 4+requestPrelude {
+		return false
+	}
+	encoded := request[4+requestPrelude:]
+	return bytes.Contains(encoded, []byte(`"method":"succeed"`)) ||
+		bytes.Contains(encoded, []byte(`"method":"block"`)) ||
+		bytes.Contains(encoded, []byte(`"method":"fail"`))
 }
 
 func decodeTestResponse(t testing.TB, payload []byte, domain byte, output any) error {
@@ -309,6 +342,74 @@ func TestServerDecodesClosedMethodMatrix(t *testing.T) {
 	}
 }
 
+func TestOutcomeReceiptIsExactAndRequired(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		errorReply bool
+		wantError  bool
+		send       func(*net.UnixConn, []byte) error
+	}{
+		{name: "wrong receipt", wantError: true, send: func(connection *net.UnixConn, receipt []byte) error {
+			receipt[0] ^= 0xff
+			if err := writeFrame(connection, receipt); err != nil {
+				return err
+			}
+			return connection.CloseWrite()
+		}},
+		{name: "dropped receipt", wantError: true, send: func(connection *net.UnixConn, _ []byte) error {
+			return connection.CloseWrite()
+		}},
+		{name: "error response exact receipt", errorReply: true, send: func(connection *net.UnixConn, receipt []byte) error {
+			if err := writeFrame(connection, receipt); err != nil {
+				return err
+			}
+			return connection.CloseWrite()
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			bearer := testCredential('A')
+			listener, socketPath := newAPITestListener(t, testCredential('O'))
+			reply := replyForCall
+			if test.errorReply {
+				reply = func(Call) Reply {
+					result, _ := NewErrorReply(RemoteUnavailable)
+					return result
+				}
+			}
+			done := startServerReceive(t, listener, reply)
+			connection, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: socketPath, Net: "unix"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer connection.Close()
+			if err := connection.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			request := rawRequest(protocolGeneration, attemptDomain, bearer, []byte(`{"method":"succeed","params":{"result":"receipt-test"}}`))
+			if _, err := connection.Write(request); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := readTestFrame(connection); err != nil {
+				t.Fatal(err)
+			}
+			receipt, err := readTestFrame(connection)
+			if err != nil || len(receipt) != outcomeReceiptBytes {
+				t.Fatalf("receipt = %x, %v", receipt, err)
+			}
+			if err := requireEOF(connection); err != nil {
+				t.Fatal(err)
+			}
+			if err := test.send(connection, receipt); err != nil {
+				t.Fatal(err)
+			}
+			result := <-done
+			if result.call.Kind() != CallSucceed || (result.err != nil) != test.wantError {
+				t.Fatalf("outcome receipt = %v, %v", result.call.Kind(), result.err)
+			}
+		})
+	}
+}
+
 func TestServerRejectsDomainFallbackAndInvalidRequests(t *testing.T) {
 	operatorBearer := testCredential('O')
 	attemptBearer := testCredential('A')
@@ -320,38 +421,38 @@ func TestServerRejectsDomainFallbackAndInvalidRequests(t *testing.T) {
 		body       []byte
 		code       RemoteErrorCode
 	}{
-		{name: "wrong generation", generation: 2, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"health","params":{}}`), code: RemoteUnsupportedProtocol},
-		{name: "operator bearer does not authorize attempt domain", generation: 1, domain: attemptDomain, bearer: operatorBearer, body: []byte(`{"method":"health","params":{}}`), code: RemoteForbidden},
-		{name: "attempt bearer does not authorize operator", generation: 1, domain: operatorDomain, bearer: attemptBearer, body: []byte(`{"method":"health","params":{}}`), code: RemoteUnauthorized},
-		{name: "operator domain cannot invoke attempt", generation: 1, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"fail","params":{"detail":"x"}}`), code: RemoteForbidden},
-		{name: "unknown method", generation: 1, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"delete_all","params":{}}`), code: RemoteInvalidRequest},
-		{name: "null params", generation: 1, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"health","params":null}`), code: RemoteInvalidRequest},
-		{name: "array params", generation: 1, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"health","params":[]}`), code: RemoteInvalidRequest},
-		{name: "scalar params", generation: 1, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"health","params":1}`), code: RemoteInvalidRequest},
-		{name: "duplicate method", generation: 1, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"health","method":"snapshot","params":{}}`), code: RemoteInvalidRequest},
-		{name: "casefold method", generation: 1, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"health","Method":"snapshot","params":{}}`), code: RemoteInvalidRequest},
-		{name: "nested duplicate", generation: 1, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"set_dispatch","params":{"expected_revision":1,"expected_revision":2,"enabled":true}}`), code: RemoteInvalidRequest},
-		{name: "nested noncanonical", generation: 1, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"set_dispatch","params":{"Expected_revision":1,"enabled":true}}`), code: RemoteInvalidRequest},
-		{name: "unknown nested", generation: 1, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"set_dispatch","params":{"expected_revision":1,"enabled":true,"private":"sentinel"}}`), code: RemoteInvalidRequest},
-		{name: "removed selectable launch policy", generation: 1, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"create_shell_agent","params":{"id":"` + id('2') + `","project_id":"` + id('1') + `","name":"agent","role":"worker","tool_budget_limit":20,"` + "execution" + `_mode":"unrestricted"}}`), code: RemoteInvalidRequest},
-		{name: "attempt cannot supply id", generation: 1, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"fail","params":{"detail":"x","id":"` + id('1') + `"}}`), code: RemoteInvalidRequest},
-		{name: "attempt cannot supply failure code", generation: 1, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"fail","params":{"detail":"x","code":"internal"}}`), code: RemoteInvalidRequest},
-		{name: "empty block detail", generation: 1, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"block","params":{"detail":""}}`), code: RemoteInvalidRequest},
-		{name: "oversized failure detail", generation: 1, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"fail","params":{"detail":"` + strings.Repeat("x", 4097) + `"}}`), code: RemoteInvalidRequest},
-		{name: "request human operator domain", generation: 1, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"request_human","params":{"idempotency_key":"0123456789abcdef0123456789abcdef","question":"question"}}`), code: RemoteForbidden},
-		{name: "request human zero key", generation: 1, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"request_human","params":{"idempotency_key":"00000000000000000000000000000000","question":"question"}}`), code: RemoteInvalidRequest},
-		{name: "request human uppercase key", generation: 1, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"request_human","params":{"idempotency_key":"0123456789ABCDEF0123456789abcdef","question":"question"}}`), code: RemoteInvalidRequest},
-		{name: "request human nonhex key", generation: 1, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"request_human","params":{"idempotency_key":"0123456789abcdef0123456789abcdegf","question":"question"}}`), code: RemoteInvalidRequest},
-		{name: "request human empty question", generation: 1, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"request_human","params":{"idempotency_key":"0123456789abcdef0123456789abcdef","question":""}}`), code: RemoteInvalidRequest},
-		{name: "request human oversized question", generation: 1, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"request_human","params":{"idempotency_key":"0123456789abcdef0123456789abcdef","question":"` + strings.Repeat("x", 8193) + `"}}`), code: RemoteInvalidRequest},
-		{name: "request human duplicate question", generation: 1, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"request_human","params":{"idempotency_key":"0123456789abcdef0123456789abcdef","question":"one","question":"two"}}`), code: RemoteInvalidRequest},
-		{name: "request human unknown run", generation: 1, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"request_human","params":{"idempotency_key":"0123456789abcdef0123456789abcdef","question":"question","run_id":"` + id('1') + `"}}`), code: RemoteInvalidRequest},
-		{name: "request human unknown action", generation: 1, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"request_human","params":{"idempotency_key":"0123456789abcdef0123456789abcdef","question":"question","action":"publish"}}`), code: RemoteInvalidRequest},
-		{name: "invalid UTF-8", generation: 1, domain: operatorDomain, bearer: operatorBearer, body: []byte("{\"method\":\"health\",\"params\":{},\"x\":\"\xff\"}"), code: RemoteInvalidRequest},
-		{name: "lone high surrogate", generation: 1, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"create_project","params":{"id":"` + id('1') + `","name":"\ud800","root":"/private/project"}}`), code: RemoteInvalidRequest},
-		{name: "lone low surrogate", generation: 1, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"create_project","params":{"id":"` + id('1') + `","name":"\udc00","root":"/private/project"}}`), code: RemoteInvalidRequest},
-		{name: "reversed surrogate pair", generation: 1, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"create_project","params":{"id":"` + id('1') + `","name":"\udc00\ud800","root":"/private/project"}}`), code: RemoteInvalidRequest},
-		{name: "mismatched surrogate pair", generation: 1, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"create_project","params":{"id":"` + id('1') + `","name":"\ud800\u0041","root":"/private/project"}}`), code: RemoteInvalidRequest},
+		{name: "wrong generation", generation: protocolGeneration - 1, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"health","params":{}}`), code: RemoteUnsupportedProtocol},
+		{name: "operator bearer does not authorize attempt domain", generation: protocolGeneration, domain: attemptDomain, bearer: operatorBearer, body: []byte(`{"method":"health","params":{}}`), code: RemoteForbidden},
+		{name: "attempt bearer does not authorize operator", generation: protocolGeneration, domain: operatorDomain, bearer: attemptBearer, body: []byte(`{"method":"health","params":{}}`), code: RemoteUnauthorized},
+		{name: "operator domain cannot invoke attempt", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"fail","params":{"detail":"x"}}`), code: RemoteForbidden},
+		{name: "unknown method", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"delete_all","params":{}}`), code: RemoteInvalidRequest},
+		{name: "null params", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"health","params":null}`), code: RemoteInvalidRequest},
+		{name: "array params", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"health","params":[]}`), code: RemoteInvalidRequest},
+		{name: "scalar params", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"health","params":1}`), code: RemoteInvalidRequest},
+		{name: "duplicate method", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"health","method":"snapshot","params":{}}`), code: RemoteInvalidRequest},
+		{name: "casefold method", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"health","Method":"snapshot","params":{}}`), code: RemoteInvalidRequest},
+		{name: "nested duplicate", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"set_dispatch","params":{"expected_revision":1,"expected_revision":2,"enabled":true}}`), code: RemoteInvalidRequest},
+		{name: "nested noncanonical", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"set_dispatch","params":{"Expected_revision":1,"enabled":true}}`), code: RemoteInvalidRequest},
+		{name: "unknown nested", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"set_dispatch","params":{"expected_revision":1,"enabled":true,"private":"sentinel"}}`), code: RemoteInvalidRequest},
+		{name: "removed selectable launch policy", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"create_shell_agent","params":{"id":"` + id('2') + `","project_id":"` + id('1') + `","name":"agent","role":"worker","tool_budget_limit":20,"` + "execution" + `_mode":"unrestricted"}}`), code: RemoteInvalidRequest},
+		{name: "attempt cannot supply id", generation: protocolGeneration, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"fail","params":{"detail":"x","id":"` + id('1') + `"}}`), code: RemoteInvalidRequest},
+		{name: "attempt cannot supply failure code", generation: protocolGeneration, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"fail","params":{"detail":"x","code":"internal"}}`), code: RemoteInvalidRequest},
+		{name: "empty block detail", generation: protocolGeneration, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"block","params":{"detail":""}}`), code: RemoteInvalidRequest},
+		{name: "oversized failure detail", generation: protocolGeneration, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"fail","params":{"detail":"` + strings.Repeat("x", 4097) + `"}}`), code: RemoteInvalidRequest},
+		{name: "request human operator domain", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"request_human","params":{"idempotency_key":"0123456789abcdef0123456789abcdef","question":"question"}}`), code: RemoteForbidden},
+		{name: "request human zero key", generation: protocolGeneration, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"request_human","params":{"idempotency_key":"00000000000000000000000000000000","question":"question"}}`), code: RemoteInvalidRequest},
+		{name: "request human uppercase key", generation: protocolGeneration, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"request_human","params":{"idempotency_key":"0123456789ABCDEF0123456789abcdef","question":"question"}}`), code: RemoteInvalidRequest},
+		{name: "request human nonhex key", generation: protocolGeneration, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"request_human","params":{"idempotency_key":"0123456789abcdef0123456789abcdegf","question":"question"}}`), code: RemoteInvalidRequest},
+		{name: "request human empty question", generation: protocolGeneration, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"request_human","params":{"idempotency_key":"0123456789abcdef0123456789abcdef","question":""}}`), code: RemoteInvalidRequest},
+		{name: "request human oversized question", generation: protocolGeneration, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"request_human","params":{"idempotency_key":"0123456789abcdef0123456789abcdef","question":"` + strings.Repeat("x", 8193) + `"}}`), code: RemoteInvalidRequest},
+		{name: "request human duplicate question", generation: protocolGeneration, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"request_human","params":{"idempotency_key":"0123456789abcdef0123456789abcdef","question":"one","question":"two"}}`), code: RemoteInvalidRequest},
+		{name: "request human unknown run", generation: protocolGeneration, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"request_human","params":{"idempotency_key":"0123456789abcdef0123456789abcdef","question":"question","run_id":"` + id('1') + `"}}`), code: RemoteInvalidRequest},
+		{name: "request human unknown action", generation: protocolGeneration, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"request_human","params":{"idempotency_key":"0123456789abcdef0123456789abcdef","question":"question","action":"publish"}}`), code: RemoteInvalidRequest},
+		{name: "invalid UTF-8", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte("{\"method\":\"health\",\"params\":{},\"x\":\"\xff\"}"), code: RemoteInvalidRequest},
+		{name: "lone high surrogate", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"create_project","params":{"id":"` + id('1') + `","name":"\ud800","root":"/private/project"}}`), code: RemoteInvalidRequest},
+		{name: "lone low surrogate", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"create_project","params":{"id":"` + id('1') + `","name":"\udc00","root":"/private/project"}}`), code: RemoteInvalidRequest},
+		{name: "reversed surrogate pair", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"create_project","params":{"id":"` + id('1') + `","name":"\udc00\ud800","root":"/private/project"}}`), code: RemoteInvalidRequest},
+		{name: "mismatched surrogate pair", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"create_project","params":{"id":"` + id('1') + `","name":"\ud800\u0041","root":"/private/project"}}`), code: RemoteInvalidRequest},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -498,7 +599,7 @@ func TestServerFramingDeadlinePeerAndResponseBounds(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer connection.Close()
-		request := rawRequest(1, operatorDomain, bearer, []byte(`{"method":"health","params":{}}`))
+		request := rawRequest(protocolGeneration, operatorDomain, bearer, []byte(`{"method":"health","params":{}}`))
 		if _, err := connection.Write(request); err != nil {
 			t.Fatal(err)
 		}
@@ -520,7 +621,7 @@ func TestServerFramingDeadlinePeerAndResponseBounds(t *testing.T) {
 			t.Fatal(err)
 		}
 		done := startServerReceive(t, listener, func(Call) Reply { return reply })
-		response, err := exchangeRaw(socketPath, rawRequest(1, operatorDomain, bearer, []byte(`{"method":"snapshot","params":{}}`)), true)
+		response, err := exchangeRaw(socketPath, rawRequest(protocolGeneration, operatorDomain, bearer, []byte(`{"method":"snapshot","params":{}}`)), true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -546,7 +647,7 @@ func TestServerReceiveCancellationCutsJoinWatcher(t *testing.T) {
 	}{
 		{name: "partial header", write: []byte{0, 0}},
 		{name: "partial payload", write: append(partialPayloadHeader[:], 1, operatorDomain, 'x')},
-		{name: "missing request EOF", write: rawRequest(1, operatorDomain, bearer, []byte(`{"method":"health","params":{}}`))},
+		{name: "missing request EOF", write: rawRequest(protocolGeneration, operatorDomain, bearer, []byte(`{"method":"health","params":{}}`))},
 	}
 	for _, cut := range cuts {
 		t.Run(cut.name, func(t *testing.T) {
@@ -671,7 +772,7 @@ func TestServerRechecksOperatorTokenAndKeepsPublicValuesPrivate(t *testing.T) {
 	if err := os.Rename(replacement, tokenPath); err != nil {
 		t.Fatal(err)
 	}
-	request := rawRequest(1, operatorDomain, bearer, []byte(`{"method":"health","params":{}}`))
+	request := rawRequest(protocolGeneration, operatorDomain, bearer, []byte(`{"method":"health","params":{}}`))
 	if _, err := client.Write(request); err != nil {
 		t.Fatal(err)
 	}
@@ -697,7 +798,7 @@ func TestServerRechecksOperatorTokenAndKeepsPublicValuesPrivate(t *testing.T) {
 	if err := os.Rename(saved, tokenPath); err != nil {
 		t.Fatal(err)
 	}
-	attemptRequest := rawRequest(1, attemptDomain, testCredential('T'), []byte(`{"method":"succeed","params":{"result":"restored-must-not-dispatch"}}`))
+	attemptRequest := rawRequest(protocolGeneration, attemptDomain, testCredential('T'), []byte(`{"method":"succeed","params":{"result":"restored-must-not-dispatch"}}`))
 	if _, err := attemptClient.Write(attemptRequest); err != nil {
 		t.Fatal(err)
 	}
@@ -755,7 +856,7 @@ func TestServerConnectionsLeaveExactResourceCensus(t *testing.T) {
 	for range 20 {
 		listener, socketPath := newAPITestListener(t, bearer)
 		done := startServerReceive(t, listener, replyForCall)
-		response, err := exchangeRaw(socketPath, rawRequest(1, operatorDomain, bearer, []byte(`{"method":"health","params":{}}`)), true)
+		response, err := exchangeRaw(socketPath, rawRequest(protocolGeneration, operatorDomain, bearer, []byte(`{"method":"health","params":{}}`)), true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -811,7 +912,7 @@ func TestServerHomeCloseJoinsReceivedCallBeforeAuthorityRelease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := rawRequest(1, operatorDomain, bearer, []byte(`{"method":"health","params":{}}`))
+	request := rawRequest(protocolGeneration, operatorDomain, bearer, []byte(`{"method":"health","params":{}}`))
 	if _, err := client.Write(request); err != nil {
 		t.Fatal(err)
 	}
@@ -879,7 +980,7 @@ func TestConnectionDispatchLeaseLinearizesHomeClose(t *testing.T) {
 			t.Fatal("dispatch fixture was not accepted")
 		}
 		body := fmt.Sprintf(`{"method":"create_project","params":{"id":"%s","name":"dispatch-project","root":%q}}`, id('4'), root)
-		if _, err := client.Write(rawRequest(1, operatorDomain, bearer, []byte(body))); err != nil {
+		if _, err := client.Write(rawRequest(protocolGeneration, operatorDomain, bearer, []byte(body))); err != nil {
 			t.Fatal(err)
 		}
 		if err := client.CloseWrite(); err != nil {
@@ -1056,7 +1157,7 @@ func TestReplyConstructorsAndConnectionOrderAreClosed(t *testing.T) {
 
 func TestRawRequestHelperProducesOneExactFrame(t *testing.T) {
 	bearer := testCredential('H')
-	request := rawRequest(1, operatorDomain, bearer, []byte(`{"method":"health","params":{}}`))
+	request := rawRequest(protocolGeneration, operatorDomain, bearer, []byte(`{"method":"health","params":{}}`))
 	reader := bytes.NewReader(request)
 	payload, err := readTestFrame(reader)
 	if err != nil {

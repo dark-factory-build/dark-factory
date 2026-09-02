@@ -8,10 +8,19 @@ CDPATH= cd -- "$repository_root"
 . "$script_dir/local-ci-environment.sh"
 
 export GOTOOLCHAIN=local
-expected_go=$(awk '$1 == "go" { count++; version=$2 } END { if (count != 1) exit 1; print "go" version }' go.mod)
+required_go_series=$(awk '
+    $1 == "go" { count++; parts=split($2, version, "."); if (parts == 3) series="go" version[1] "." version[2] }
+    END { if (count != 1 || series == "") exit 1; print series }
+' go.mod)
 actual_go=$(go env GOVERSION)
-[ "$actual_go" = "$expected_go" ] || {
-    echo "go-check: expected $expected_go, got $actual_go" >&2
+case "$actual_go" in
+    "$required_go_series".[0-9]*)
+        actual_patch=${actual_go#"$required_go_series".}
+        case "$actual_patch" in *[!0-9]*|'') actual_patch= ;; esac
+        ;;
+esac
+[ -n "${actual_patch-}" ] || {
+    echo "go-check: expected $required_go_series.x, got $actual_go" >&2
     exit 1
 }
 
