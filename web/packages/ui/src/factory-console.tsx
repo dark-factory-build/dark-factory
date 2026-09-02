@@ -81,7 +81,11 @@ export function FactoryConsole({
               {screen.kind === "queue" ? " · QUEUE" : screen.kind === "needs-you" ? " · NEEDS YOU" : ""}
             </h1>
           </div>
-          {ready ? null : (
+          {ready ? (
+            <span className="dfFactoryConsole__visuallyHidden" role="status" aria-live="polite" aria-atomic="true">
+              {STATUS_LABELS[status]}
+            </span>
+          ) : (
             <div className="dfFactoryConsole__connection" aria-label={`Connection status: ${STATUS_LABELS[status]}`}>
               <p className="dfFactoryConsole__status" role="status" aria-live="polite" aria-atomic="true">
                 <span className={`dfFactoryConsole__statusDot dfFactoryConsole__statusDot--${status}`} aria-hidden="true" />
