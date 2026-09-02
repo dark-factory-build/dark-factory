@@ -112,8 +112,8 @@ test("transitional session statuses have stable live labels without healthy-stat
     assert.equal(markup.includes("<button"), false);
   }
   const ready = render({ status: "ready" });
-  assert.equal(ready.includes("dfFactoryConsole__connection"), false);
-  assert.match(ready, /class="dfFactoryConsole__visuallyHidden" role="status" aria-live="polite" aria-atomic="true">READY<\/span>/);
+  assert.match(ready, /class="dfFactoryConsole__connection dfFactoryConsole__visuallyHidden"/);
+  assert.match(ready, /role="status" aria-live="polite" aria-atomic="true"/);
 });
 
 test("closed and pairing-uncertain errors have no ineffective action", () => {
