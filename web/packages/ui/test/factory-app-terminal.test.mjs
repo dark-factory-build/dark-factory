@@ -316,7 +316,7 @@ test("same-socket state resync preserves one live writable terminal", async () =
   assert.equal(new TextDecoder().decode(context.calls.at(-1).bytes), "after resync");
 });
 
-test("target absence for an agent without active work closes only the sidebar", async () => {
+test("target absence for an agent without active work closes only the terminal panel", async () => {
   const context = terminalHarness();
   context.controller.start();
   context.ready();
@@ -480,7 +480,7 @@ test("selection detaches the old controller before resolving the new public agen
   const oldOptions = first.options;
   context.controller.selectAgent(secondAgent);
   assert.equal(context.sessionCloses(), 0);
-  assert.equal(context.latest().selectedAgent.id, agent.id, "old sidebar stays mounted while detach is pending");
+  assert.equal(context.latest().selectedAgent.id, agent.id, "old terminal stays mounted while detach is pending");
   assert.equal(context.latest().terminal.phase, "closing");
   assert.equal(context.targetGates.length, 1);
   detachGate.resolve();
@@ -667,7 +667,7 @@ test("a server replay reset recovers in place instead of surfacing an error", as
   context.handleOptions().onReset({ sessionId: "31".repeat(16), floor: 5n, head: 9n });
   await flush();
   let view = context.latest();
-  assert.notEqual(view.selectedAgent, undefined, "reset must keep the sidebar selection");
+  assert.notEqual(view.selectedAgent, undefined, "reset must keep the terminal selection");
   assert.equal(view.error, undefined, "reset is not an error");
   assert.equal(view.terminal.resets, 1);
   assert.equal(view.terminal.phase, "idle", "old controller gone, awaiting the remounted display");

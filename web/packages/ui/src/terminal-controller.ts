@@ -19,12 +19,9 @@ export type TerminalSurface = Readonly<{
 
 export type TerminalPhase = "idle" | "resolving" | "attaching" | "acquiring" | "ready" | "closing" | "closed";
 
-export type TerminalLeaseOperation = "none" | "taking" | "releasing";
-
 export type TerminalControllerSnapshot = Readonly<{
   phase: TerminalPhase;
   writable: boolean;
-  leaseOperation: TerminalLeaseOperation;
   error?: SessionError | ProtocolError;
   /**
    * True when this controller ended because the server reset the replay
@@ -82,7 +79,6 @@ class TerminalController {
   #surfaceAborted = false;
   #inputBuffer: Input = new Uint8Array(0);
   #inputInFlightBytes = 0;
-  #leaseOperation: TerminalLeaseOperation = "none";
   #pendingResize: Resize | undefined;
   #effectTask: Promise<void> | undefined;
   #outputTask: Promise<void> | undefined;
@@ -158,93 +154,6 @@ class TerminalController {
     return true;
   }
 
-  /**
-   * Take control: acquire the input lease for an attached read-only
-   * observer. Occupied or failed acquisition keeps the truthful read-only
-   * observer alive; it never closes the display.
-   */
-  takeControl(): boolean {
-    if (this.#phase !== "ready" || this.#writable || this.#leaseOperation !== "none" || !this.#liveHandle()) return false;
-    const handle = this.#handle;
-    if (handle === undefined) return false;
-    const generation = this.#generation;
-    this.#leaseOperation = "taking";
-    this.#publish();
-    void (async () => {
-      try {
-        await handle.acquireInput();
-        if (!this.#current(generation) || !this.#liveHandle(handle)) return;
-        if (handle.writable) {
-          this.#writable = true;
-          this.#error = undefined;
-        } else {
-          this.#error = new SessionError("closed");
-        }
-        this.#publish();
-      } catch (error) {
-        if (!this.#current(generation) || !this.#liveHandle(handle)) return;
-        this.#error = finiteError(error);
-        this.#publish();
-      } finally {
-        if (this.#current(generation)) {
-          this.#leaseOperation = "none";
-          this.#publish();
-        }
-      }
-    })();
-    return true;
-  }
-
-  /**
-   * Hand back: release the input lease and remain a read-only observer.
-   * Input stops being accepted before the release is attempted; a release
-   * failure is authority uncertainty and closes the controller.
-   */
-  handBack(): boolean {
-    if (this.#phase !== "ready" || !this.#writable || this.#leaseOperation !== "none" || !this.#liveHandle()) return false;
-    const handle = this.#handle;
-    if (handle === undefined) return false;
-    const generation = this.#generation;
-    this.#leaseOperation = "releasing";
-    this.#writable = false;
-    this.#inputBuffer = new Uint8Array(0);
-    this.#pendingResize = undefined;
-    this.#publish();
-    void (async () => {
-      try {
-        const drain = this.#effectTask;
-        if (drain !== undefined) await drain.catch(() => undefined);
-        if (!this.#current(generation) || !this.#liveHandle(handle)) return;
-        await handle.releaseInput();
-        if (!this.#current(generation)) return;
-        this.#leaseOperation = "none";
-        this.#publish();
-      } catch (error) {
-        if (!this.#current(generation)) return;
-        // A concurrent client operation (a lease renewal, a pending output
-        // callback) rejects the release before anything is sent, and the
-        // lease is still ours: that is retryable busyness, not authority
-        // uncertainty. Only a release that may have reached the daemon
-        // fails closed.
-        let leaseStillHeld = false;
-        try {
-          leaseStillHeld = this.#liveHandle(handle) && handle.writable;
-        } catch {
-          leaseStillHeld = false;
-        }
-        if (leaseStillHeld) {
-          this.#leaseOperation = "none";
-          this.#writable = true;
-          this.#publish();
-          return;
-        }
-        this.#leaseOperation = "none";
-        this.#fail(finiteError(error));
-      }
-    })();
-    return true;
-  }
-
   /** Detach this terminal observer while leaving the authenticated session open. */
   detach(): Promise<void> {
     if (this.#closePromise !== undefined) return this.#closePromise;
@@ -257,7 +166,6 @@ class TerminalController {
     this.#writable = false;
     this.#error = undefined;
     this.#detachRequested = true;
-    this.#leaseOperation = "none";
     this.#inputBuffer = new Uint8Array(0);
     this.#pendingResize = undefined;
     this.#phase = "closing";
@@ -291,7 +199,6 @@ class TerminalController {
     this.#closing = true;
     ++this.#generation;
     this.#writable = false;
-    this.#leaseOperation = "none";
     this.#inputBuffer = new Uint8Array(0);
     this.#pendingResize = undefined;
     this.#phase = "closing";
@@ -487,7 +394,6 @@ class TerminalController {
     if (this.#handleClosed) return;
     this.#handleClosed = true;
     this.#writable = false;
-    this.#leaseOperation = "none";
     this.#inputBuffer = new Uint8Array(0);
     this.#inputInFlightBytes = 0;
     this.#pendingResize = undefined;
@@ -505,7 +411,6 @@ class TerminalController {
     if (this.#closing || this.#phase === "closed") return;
     this.#error = error;
     this.#writable = false;
-    this.#leaseOperation = "none";
     this.#inputBuffer = new Uint8Array(0);
     this.#pendingResize = undefined;
     this.#phase = "closing";
@@ -539,7 +444,7 @@ class TerminalController {
   }
 
   #snapshot(): TerminalControllerSnapshot {
-    return { phase: this.#phase, writable: this.#writable, leaseOperation: this.#leaseOperation, error: this.#error, reset: this.#reset, retryDiscovery: this.#retryDiscovery };
+    return { phase: this.#phase, writable: this.#writable, error: this.#error, reset: this.#reset, retryDiscovery: this.#retryDiscovery };
   }
 
   #publish(): void {

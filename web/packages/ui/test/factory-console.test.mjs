@@ -5,7 +5,7 @@ import { createElement, isValidElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ProtocolError, SessionError } from "@dark-factory/client";
 import { FactoryApp, FactoryConsole } from "../dist/src/index.js";
-import { TerminalSidebar } from "../dist/src/factory-app.js";
+import { TerminalPanel } from "../dist/src/factory-app.js";
 import { fixtureState } from "../../../fixtures/state.mjs";
 
 const ids = {
@@ -89,21 +89,14 @@ test("the console never shows a kernel-grammar or retired vocabulary word", () =
     onNavigate: () => {},
     onSelectAgent: () => {},
   };
-  const sidebarView = (overrides = {}) => createElement(TerminalSidebar, {
-    terminal: { agentId: "21".repeat(16), agentName: "Builder One", agentRevision: 10n, phase: "ready", writable: false, leaseOperation: "none", surfaceVersion: 0, ...overrides.terminal },
-    snapshot: { status: "ready" },
-    collapsed: overrides.collapsed ?? false,
-    onToggleCollapsed: () => {},
+  const terminalView = (overrides = {}) => createElement(TerminalPanel, {
+    terminal: { agentId: "21".repeat(16), agentName: "Builder One", agentRevision: 10n, phase: "ready", writable: true, resets: 0, surfaceVersion: 0, ...overrides.terminal },
     onClose: () => {},
-    onTakeControl: () => {},
-    onHandBack: () => {},
   }, createElement("div"));
   const surfaces = [
     ...SCREENS.map((screen) => [screen.kind, render({ ...withDetail, screen })]),
-    ["sidebar", renderToStaticMarkup(sidebarView())],
-    ["sidebar-writable", renderToStaticMarkup(sidebarView({ terminal: { writable: true } }))],
-    ["sidebar-collapsed", renderToStaticMarkup(sidebarView({ collapsed: true }))],
-    ["sidebar-reset", renderToStaticMarkup(sidebarView({ terminal: { resets: 1 } }))],
+    ["terminal", renderToStaticMarkup(terminalView())],
+    ["terminal-reset", renderToStaticMarkup(terminalView({ terminal: { resets: 1 } }))],
   ];
   for (const [name, markup] of surfaces) {
     for (const forbidden of [/attempt/i, /converge/i, /admission/i, /finalize/i, /unresolved/i, /proposal/i, /verdict/i, /\bALLOW\b/, /\bBLOCK\b/, /lease/i, /intake/i, /quarantine/i, /overseer/i, /work item/i, /cancel run/i]) {
@@ -270,10 +263,11 @@ test("HumanRequest delivery states remain visibly distinct", () => {
   }
 });
 
-test("mobile rows and the selected-agent sidebar have finite widths", () => {
+test("mobile rows and the inline terminal remain page-bounded", () => {
   const css = readFileSync(new URL("../src/factory-console.css", import.meta.url), "utf8");
   assert.match(css, /\.dfConsoleRow__agent\s*\{[^}]*min-width: 0;[^}]*overflow-wrap: anywhere;/);
-  assert.match(css, /@media \(max-width: 960px\)[\s\S]*?\.dfConsoleSidebar__body\s*\{\s*width: 100%;\s*min-width: 0;\s*\}/);
+  assert.match(css, /\.dfFactoryConsole__terminalPanel\s*\{[^}]*max-width: 90rem;/);
+  assert.match(css, /@media \(max-width: 720px\)[\s\S]*?\.dfFactoryConsole__terminalHeading[^}]*flex-direction: column;/);
 });
 
 test("FactoryApp server-renders without reading browser globals", () => {

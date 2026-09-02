@@ -97,6 +97,8 @@ export function FactoryConsole({
           onNavigate={onNavigate}
         />
 
+        {terminalContent}
+
         {error === undefined ? null : (
           <p className="dfFactoryConsole__error" role="alert">
             {ERROR_LABELS.get(error.code) ?? "The connection could not continue."}
@@ -138,9 +140,7 @@ export function FactoryConsole({
             onOpenTerminalForHumanRequest={onOpenTerminalForHumanRequest}
           />
         )}
-
       </main>
-      {terminalContent}
     </div>
   );
 }

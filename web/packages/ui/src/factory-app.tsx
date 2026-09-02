@@ -17,7 +17,6 @@ export type FactoryAppProps = {
 export function FactoryApp({ onStatusChange }: FactoryAppProps = {}) {
   const [snapshot, setSnapshot] = useState<FactoryAppSnapshot>(INITIAL_SNAPSHOT);
   const [screen, setScreen] = useState<ConsoleScreen>({ kind: "home" });
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const owner = useRef<FactoryAppController | undefined>(undefined);
   const statusChange = useRef(onStatusChange);
   statusChange.current = onStatusChange;
@@ -39,18 +38,13 @@ export function FactoryApp({ onStatusChange }: FactoryAppProps = {}) {
   }, []);
 
   const controller = owner.current;
-  const sidebar = controller === undefined || snapshot.selectedAgent === undefined || snapshot.terminal === undefined ? undefined : (
-    <TerminalSidebar
+  const terminal = controller === undefined || snapshot.selectedAgent === undefined || snapshot.terminal === undefined ? undefined : (
+    <TerminalPanel
       terminal={snapshot.terminal}
-      snapshot={snapshot}
-      collapsed={sidebarCollapsed}
-      onToggleCollapsed={() => setSidebarCollapsed((value) => !value)}
       onClose={() => controller.clearAgentTerminal()}
-      onTakeControl={() => controller.takeTerminalControl()}
-      onHandBack={() => controller.handBackTerminalControl()}
     >
       <TerminalHost key={`${snapshot.selectedAgent.id}:${snapshot.terminal.surfaceVersion}`} controller={controller} surfaceVersion={snapshot.terminal.surfaceVersion} />
-    </TerminalSidebar>
+    </TerminalPanel>
   );
 
   return (
@@ -58,103 +52,55 @@ export function FactoryApp({ onStatusChange }: FactoryAppProps = {}) {
       {...snapshot}
       screen={screen}
       onNavigate={setScreen}
-      onSelectAgent={(agent) => { setSidebarCollapsed(false); void owner.current?.selectAgent(agent); }}
-      onOpenTerminalForHumanRequest={(request) => { setSidebarCollapsed(false); owner.current?.openTerminalForHumanRequest(request); }}
+      onSelectAgent={(agent) => { void owner.current?.selectAgent(agent); }}
+      onOpenTerminalForHumanRequest={(request) => { owner.current?.openTerminalForHumanRequest(request); }}
       onSelectHumanRequest={(request) => { void owner.current?.selectHumanRequest(request); }}
       onHumanReplyChange={(reply) => owner.current?.setHumanReply(reply)}
       onReplyHumanRequest={() => { void owner.current?.replyHumanRequest(); }}
       onCancelHumanRequest={() => { void owner.current?.cancelHumanRequest(); }}
       onCloseHumanRequest={() => owner.current?.clearHumanRequest()}
-      terminalContent={sidebar}
+      terminalContent={terminal}
     />
   );
 }
 
-const TERMINAL_PHASE_LABELS: Record<FactoryTerminalView["phase"], string> = {
-  idle: "WAITING FOR DISPLAY",
-  resolving: "RESOLVING TERMINAL",
-  attaching: "ATTACHING",
-  acquiring: "TAKING CONTROL",
-  ready: "READY",
-  closing: "CLOSING",
-  closed: "CLOSED",
-};
-
-/**
- * The persistent terminal sidebar. Collapse is purely visual: the body is
- * clipped by CSS while the terminal, its session, and any held control
- * survive — unmounting on collapse would tear the surface down and forfeit
- * the control lease for a presentation gesture.
- */
-export function TerminalSidebar({
+/** The selected agent's terminal is ordinary console content, not a mode. */
+export function TerminalPanel({
   terminal,
-  snapshot,
-  collapsed,
-  onToggleCollapsed,
   onClose,
-  onTakeControl,
-  onHandBack,
   children,
 }: {
   terminal: FactoryTerminalView;
-  snapshot: FactoryAppSnapshot;
-  collapsed: boolean;
-  onToggleCollapsed: () => void;
   onClose: () => void;
-  onTakeControl: () => void;
-  onHandBack: () => void;
   children: ReactNode;
 }) {
-  const busyLease = terminal.leaseOperation !== "none";
   return (
-    <aside className={`dfConsoleSidebar${collapsed ? " dfConsoleSidebar--collapsed" : ""}`} aria-label={collapsed ? "Terminal (collapsed)" : "Terminal"}>
-      {!collapsed ? null : (
-        <button type="button" className="dfConsoleSidebar__tab" onClick={onToggleCollapsed} title={`open the terminal for ${terminal.agentName}`}>
-          {terminal.agentName}
+    <section className="dfFactoryConsole__terminalPanel" aria-label={`Terminal for ${terminal.agentName}`}>
+      <div className="dfFactoryConsole__terminalHeading">
+        <p className="dfFactoryConsole__terminalAgent">
+          {terminal.agentName}{terminal.taskTitle === undefined ? "" : ` · ${terminal.taskTitle}`}
+        </p>
+        <button
+          type="button"
+          disabled={terminal.phase === "closing" || terminal.phase === "closed"}
+          onClick={onClose}
+          title="close this terminal view; the worker keeps running"
+        >
+          CLOSE TERMINAL
         </button>
-      )}
-      <div className="dfConsoleSidebar__body" aria-hidden={collapsed ? "true" : undefined}>
-        <div className="dfConsoleSidebar__header">
-          <strong>{terminal.agentName}</strong>
-          <span className="dfConsoleSidebar__identity">CURRENT RUN TERMINAL{terminal.taskTitle === undefined ? "" : ` · ${terminal.taskTitle}`}</span>
-          <span className="dfConsoleSidebar__phase">{TERMINAL_PHASE_LABELS[terminal.phase]}</span>
-          <span className={`dfConsoleSidebar__control${terminal.writable ? " dfConsoleSidebar__control--held" : ""}`}>
-            {terminal.writable ? "you have control" : "watching"}
-          </span>
-        </div>
-        <div className="dfConsoleSidebar__actions">
-          {terminal.writable ? (
-            <button type="button" disabled={busyLease} onClick={onHandBack}>hand back</button>
-          ) : (
-            <button type="button" disabled={busyLease || terminal.phase !== "ready"} onClick={onTakeControl}>take control</button>
-          )}
-          <button
-            type="button"
-            disabled={busyLease || terminal.writable || terminal.phase !== "ready"}
-            title={terminal.writable ? "you have control — type in the terminal" : "takes control so you can type"}
-            onClick={() => { if (!terminal.writable) onTakeControl(); }}
-          >
-            Steer
-          </button>
-          <button type="button" onClick={onToggleCollapsed} title="collapse the terminal">»</button>
-          <button
-            type="button"
-            disabled={terminal.phase === "closing" || terminal.phase === "closed"}
-            onClick={onClose}
-            title="close this terminal view; the worker keeps running"
-          >
-            CLOSE TERMINAL
-          </button>
-        </div>
-        {terminal.error === undefined ? null : <p className="dfFactoryConsole__terminalError" role="alert">TERMINAL UNAVAILABLE</p>}
-        {!terminal.resets ? null : (
-          <p className="dfConsoleSidebar__resetBanner" role="status">
-            Replay reset — earlier output is no longer retained; showing what the factory still holds.
-          </p>
-        )}
-        {children}
       </div>
-    </aside>
+      {terminal.error === undefined ? null : (
+        <p className="dfFactoryConsole__terminalError" role="alert">
+          {terminal.phase === "ready" && !terminal.writable ? "TERMINAL OPEN ELSEWHERE" : "TERMINAL UNAVAILABLE"}
+        </p>
+      )}
+      {!terminal.resets ? null : (
+        <p className="dfFactoryConsole__terminalReset" role="status">
+          Earlier output is no longer retained; showing what the factory still holds.
+        </p>
+      )}
+      {children}
+    </section>
   );
 }
 

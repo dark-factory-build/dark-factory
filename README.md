@@ -17,8 +17,9 @@ no commit, push, pull-request, or repository-publication operation.
 - Claude and Codex providers are unavailable until their integrations have
   been reviewed.
 - The browser console shows durable factory, agent, and task state and supports
-  terminal control plus HumanRequest reply and cancellation. Queue setup stays
-  in `factoryctl`; the console does not display controls the daemon cannot serve.
+  terminal observation and input, HumanRequest reply, and cancellation. Queue
+  setup stays in `factoryctl`; the console does not display controls the daemon
+  cannot serve.
 - There is no external HTTP/GitHub intake and no in-runtime updater.
 
 Each project has agents and durable tasks. An admitted attempt gets a fresh
