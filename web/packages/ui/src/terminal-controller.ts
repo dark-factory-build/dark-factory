@@ -102,9 +102,7 @@ class TerminalController {
   }
 
   sendInput(bytes: Uint8Array): boolean {
-    if (!(bytes instanceof Uint8Array) || bytes.length === 0) return false;
-    const awaitingLease = this.#phase === "resolving" || this.#phase === "attaching" || this.#phase === "acquiring";
-    if ((!this.#writable && !awaitingLease) || (this.#writable && !this.#canEffect())) return false;
+    if (!(bytes instanceof Uint8Array) || bytes.length === 0 || !this.#writable || !this.#canEffect()) return false;
     const total = this.#inputInFlightBytes + this.#inputBuffer.length;
     if (bytes.length > MAX_TERMINAL_PAYLOAD || bytes.length > MAX_PENDING_INPUT_BYTES || total + bytes.length > MAX_PENDING_INPUT_BYTES) {
       this.#fail(new SessionError("too_large"));
@@ -116,33 +114,6 @@ class TerminalController {
     this.#inputBuffer = next;
     this.#pumpEffects();
     return true;
-  }
-
-  sendText(value: string): boolean {
-    if (typeof value !== "string") return false;
-    if (value.length > MAX_PENDING_INPUT_BYTES) {
-      this.#fail(new SessionError("too_large"));
-      return false;
-    }
-    return this.sendInput(new TextEncoder().encode(value));
-  }
-
-  sendBinary(value: string): boolean {
-    if (typeof value !== "string") return false;
-    if (value.length > MAX_PENDING_INPUT_BYTES) {
-      this.#fail(new SessionError("too_large"));
-      return false;
-    }
-    const bytes = new Uint8Array(value.length);
-    for (let index = 0; index < value.length; index += 1) {
-      const code = value.charCodeAt(index);
-      if (code > 0xff) {
-        this.#fail(new ProtocolError("malformed"));
-        return false;
-      }
-      bytes[index] = code;
-    }
-    return this.sendInput(bytes);
   }
 
   resize(rows: number, cols: number): boolean {
@@ -300,7 +271,6 @@ class TerminalController {
         // display alive as a truthful read-only observer; the session/handle
         // still owns transport and terminal-end failures.
         if (this.#current(generation)) {
-          this.#inputBuffer = new Uint8Array(0);
           this.#error = finiteError(error);
           this.#phase = "ready";
           this.#publish();
@@ -310,7 +280,6 @@ class TerminalController {
       if (!this.#current(generation)) return;
       this.#phase = "ready";
       this.#publish();
-      this.#pumpEffects();
     } catch (error) {
       if (this.#current(generation)) this.#fail(finiteError(error));
     }
