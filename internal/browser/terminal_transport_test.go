@@ -34,6 +34,7 @@ type terminalTestBackend struct {
 
 type terminalTestAttachment struct {
 	events        chan TerminalEvent
+	closeDone     chan struct{}
 	closed        atomic.Int32
 	closeCalls    atomic.Int32
 	closeOnce     sync.Once
@@ -73,7 +74,10 @@ func (attachment *terminalTestAttachment) Close() error {
 	if attachment.closeErr != nil {
 		return attachment.closeErr
 	}
-	attachment.closeOnce.Do(func() { attachment.closed.Add(1) })
+	attachment.closeOnce.Do(func() {
+		attachment.closed.Add(1)
+		close(attachment.closeDone)
+	})
 	return nil
 }
 
@@ -82,7 +86,7 @@ func (backend *terminalTestBackend) AttachTerminal(context.Context, TerminalAtta
 	if !backend.invalidAttach {
 		events = make(chan TerminalEvent, 128)
 	}
-	attachment := &terminalTestAttachment{events: events, closeErr: backend.attachmentCloseErr, closeFirstErr: backend.attachmentCloseFirstErr}
+	attachment := &terminalTestAttachment{events: events, closeDone: make(chan struct{}), closeErr: backend.attachmentCloseErr, closeFirstErr: backend.attachmentCloseFirstErr}
 	backend.terminalMu.Lock()
 	backend.attachment = attachment
 	backend.terminalMu.Unlock()
@@ -273,6 +277,11 @@ func TestTerminalTransportDeliversCanonicalExitAndRetainsConnection(t *testing.T
 			exit, ok := frame.Body.(browserprotocol.TerminalExit)
 			if frame.Type != browserprotocol.TypeTerminalExit || !ok || exit.ExitCode != int64(test.code) || exit.ExitSignal != int64(test.signal) || exit.Aborted != test.aborted {
 				t.Fatalf("terminal exit = %+v", frame)
+			}
+			select {
+			case <-attachment.closeDone:
+			case <-time.After(time.Second):
+				t.Fatal("exit attachment did not close")
 			}
 			if attachment.closed.Load() != 1 || attachment.closeCalls.Load() != 1 {
 				t.Fatalf("exit attachment close = %d calls %d", attachment.closed.Load(), attachment.closeCalls.Load())
