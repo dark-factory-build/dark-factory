@@ -546,12 +546,12 @@ test("output failure during replacement closes the session and never installs th
 });
 
 test("a prior lease refusal does not turn a clean terminal switch into session failure", async () => {
-  const context = terminalHarness({ fail: "acquire" });
+  const context = terminalHarness({ fail: "acquire", failError: new SessionError("stale") });
   context.controller.start();
   context.ready();
   await openTerminal(context, agent);
   assert.equal(context.latest().terminal.writable, false);
-  assert.equal(context.latest().terminal.error.code, "connection");
+  assert.equal(context.latest().terminal.error.code, "stale");
 
   context.controller.selectAgent(secondAgent);
   await flush();

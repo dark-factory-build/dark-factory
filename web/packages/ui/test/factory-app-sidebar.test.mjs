@@ -62,7 +62,7 @@ test("close remains available through setup and invokes the owner once", async (
 });
 
 test("exceptional input ownership and replay loss are concise", () => {
-  const occupied = renderToStaticMarkup(panel(terminalView({ writable: false, error: { code: "invalid_request" } })));
+  const occupied = renderToStaticMarkup(panel(terminalView({ writable: false, error: { code: "stale" } })));
   assert.match(occupied, /TERMINAL OPEN ELSEWHERE/);
   const unavailable = renderToStaticMarkup(panel(terminalView({ writable: false, error: { code: "connection" } })));
   assert.match(unavailable, /TERMINAL UNAVAILABLE/);

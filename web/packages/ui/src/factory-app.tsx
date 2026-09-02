@@ -91,7 +91,7 @@ export function TerminalPanel({
       </div>
       {terminal.error === undefined ? null : (
         <p className="dfFactoryConsole__terminalError" role="alert">
-          {terminal.phase === "ready" && !terminal.writable && terminal.error.code === "invalid_request"
+          {terminal.phase === "ready" && !terminal.writable && terminal.error.code === "stale"
             ? "TERMINAL OPEN ELSEWHERE"
             : "TERMINAL UNAVAILABLE"}
         </p>

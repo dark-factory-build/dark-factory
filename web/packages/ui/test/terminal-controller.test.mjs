@@ -586,7 +586,7 @@ test("lease refusal keeps an attached observer ready and read-only", async () =>
   await tick();
   context.attachGate().resolve({ sessionId: "22".repeat(16), floor: 0n, head: 0n, acknowledgedSequence: 0n, maxUnackedBytes: 65536n });
   await tick();
-  context.acquireGate().reject(new SessionError("invalid_request"));
+  context.acquireGate().reject(new SessionError("stale"));
   await tick();
   assert.equal(context.controller.snapshot.phase, "ready");
   assert.equal(context.controller.snapshot.writable, false);
