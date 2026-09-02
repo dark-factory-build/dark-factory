@@ -34,6 +34,43 @@ func startGroupLeader(t *testing.T) Identity {
 	return leader
 }
 
+func TestObserveExactProcessIgnoresStillLiveGroup(t *testing.T) {
+	leader := startGroupLeader(t)
+	reporter := exec.Command("/bin/sleep", "30")
+	reporter.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: leader.PGID}
+	if err := reporter.Start(); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := IdentityForPID(reporter.Process.Pid)
+	if err != nil {
+		_ = reporter.Process.Kill()
+		_ = reporter.Wait()
+		t.Fatal(err)
+	}
+	if identity.PGID != leader.PGID {
+		_ = reporter.Process.Kill()
+		_ = reporter.Wait()
+		t.Fatalf("reporter group = %d, want %d", identity.PGID, leader.PGID)
+	}
+	if got := ObserveExactProcess(identity); got.Presence != Present {
+		_ = reporter.Process.Kill()
+		_ = reporter.Wait()
+		t.Fatalf("live reporter = %+v", got)
+	}
+	if err := reporter.Process.Signal(unix.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	if err := reporter.Wait(); err == nil {
+		t.Fatal("reporter exited successfully after SIGTERM")
+	}
+	if got := ObserveExactProcess(identity); got.Presence != Absent && got.Presence != Reused {
+		t.Fatalf("exited reporter = %+v", got)
+	}
+	if got := ObserveProcess(identity); got.Presence != Unknown {
+		t.Fatalf("group-aware observation = %+v, want unknown while leader lives", got)
+	}
+}
+
 func TestSignalOwnedGroupForgivesEPERMOnlyWithConvergedCensus(t *testing.T) {
 	// Darwin reports EPERM from the owned-group kill once our unreaped
 	// zombie leader is the only member left. The exact leader-anchored

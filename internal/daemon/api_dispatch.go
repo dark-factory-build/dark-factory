@@ -9,6 +9,7 @@ import (
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 // Daemon is the concrete composition root for the local API. It owns the
@@ -35,10 +36,6 @@ type Daemon struct {
 	closing   bool
 	closeDone chan struct{}
 	closeErr  error
-
-	// beforeConnectionResponse is a fixed test seam for the exact interval
-	// between dispatch and response. Production leaves it nil.
-	beforeConnectionResponse func(api.Call)
 
 	// schedulerWake is a bounded hint channel. SQLite remains the only
 	// admission and capacity authority; losing or coalescing a hint is safe
@@ -87,32 +84,39 @@ func (daemon *Daemon) HandleConnection(ctx context.Context, connection *api.Conn
 	if daemon == nil || daemon.store == nil || connection == nil {
 		return fmt.Errorf("%w: invalid daemon connection", kernel.ErrInvalidValue)
 	}
-	outcomeFenced := false
-	defer func() {
-		_ = connection.Close()
-		if outcomeFenced {
-			daemon.operationMu.Unlock()
-		}
-	}()
+	defer connection.Close()
 	call, err := connection.Receive(ctx)
 	if err != nil {
 		return err
 	}
+	var reporter runner.Identity
+	var reporterErr error
 	if attemptOutcomeCall(call.Kind()) {
-		daemon.operationMu.Lock()
-		outcomeFenced = true
-	}
-	reply, err := connection.Dispatch(func(call api.Call) api.Reply {
-		if attemptOutcomeCall(call.Kind()) {
-			return daemon.proposeOutcomeUnderGate(ctx, call)
+		var pid int
+		pid, reporterErr = connection.PeerPID()
+		if reporterErr == nil {
+			reporter, reporterErr = runner.IdentityForPID(pid)
 		}
-		return daemon.dispatch(ctx, call)
-	})
+	}
+	var reply api.Reply
+	if attemptOutcomeCall(call.Kind()) {
+		func() {
+			daemon.operationMu.Lock()
+			defer daemon.operationMu.Unlock()
+			reply, err = connection.Dispatch(func(call api.Call) api.Reply {
+				if reporterErr != nil {
+					return newErrorReply(api.RemoteInternal)
+				}
+				return daemon.proposeOutcomeUnderGate(ctx, call, reporter)
+			})
+		}()
+	} else {
+		reply, err = connection.Dispatch(func(call api.Call) api.Reply {
+			return daemon.dispatch(ctx, call)
+		})
+	}
 	if err != nil {
 		return err
-	}
-	if daemon.beforeConnectionResponse != nil {
-		daemon.beforeConnectionResponse(call)
 	}
 	return connection.Respond(reply)
 }
@@ -339,12 +343,12 @@ func (daemon *Daemon) setDispatch(ctx context.Context, call api.Call) api.Reply 
 	return mutationReply(state.Head, state.Revision)
 }
 
-// proposeOutcomeUnderGate is reached only from HandleConnection while its
-// outcome-response fence holds operationMu. The same gate linearizes terminal
-// attachment against the durable running-to-finalizing transition.
-func (daemon *Daemon) proposeOutcomeUnderGate(ctx context.Context, call api.Call) api.Reply {
+// proposeOutcomeUnderGate is reached only from HandleConnection while
+// operationMu linearizes the durable running-to-finalizing transition and the
+// exact reporting-process receipt installed on its live owner.
+func (daemon *Daemon) proposeOutcomeUnderGate(ctx context.Context, call api.Call, reporter runner.Identity) api.Reply {
 	digest, ok := call.AttemptDigest()
-	if !ok {
+	if !ok || !reporter.Valid() {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
 	kDigest, err := attemptDigest(digest)
@@ -354,6 +358,18 @@ func (daemon *Daemon) proposeOutcomeUnderGate(ctx context.Context, call api.Call
 	proposal, err := proposalForCall(call)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	authorityCtx, authorityCancel := context.WithTimeout(ctx, liveAttemptStoreTimeout)
+	authority, err := daemon.store.AuthenticateAttempt(authorityCtx, kDigest)
+	authorityCancel()
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	daemon.attemptMu.Lock()
+	attempt := daemon.attempts[authority.RunID]
+	daemon.attemptMu.Unlock()
+	if attempt != nil && (!attempt.providerIdentity.Valid() || reporter.PGID != attempt.providerIdentity.PGID) {
+		return newErrorReply(api.RemoteForbidden)
 	}
 	at, err := daemon.timestamp()
 	if err != nil {
@@ -366,6 +382,12 @@ func (daemon *Daemon) proposeOutcomeUnderGate(ctx context.Context, call api.Call
 	run, err := daemon.store.ProposeAttemptOutcome(operationCtx, kDigest, proposal, at)
 	cancel()
 	if err == nil {
+		if run.ID != authority.RunID {
+			return newErrorReply(api.RemoteInternal)
+		}
+		if attempt != nil {
+			attempt.outcomeReporter = reporter
+		}
 		// The commit completed before ProposeAttemptOutcome returned. The owner
 		// notification is deliberately best-effort and carries no authority or
 		// state payload; it only shortens the next durable Store poll.

@@ -313,6 +313,19 @@ type Connection struct {
 func (*Connection) String() string   { return "Connection(<redacted>)" }
 func (*Connection) GoString() string { return "Connection(<redacted>)" }
 
+// PeerPID returns the kernel-recorded PID for the exact accepted peer after
+// Receive has authenticated and fixed this connection's request domain.
+func (connection *Connection) PeerPID() (int, error) {
+	if connection == nil || connection.self != connection || connection.connection == nil || connection.state < connectionReceived || connection.state >= connectionClosed {
+		return 0, ErrProtocol
+	}
+	pid, err := connection.connection.PeerPID()
+	if err != nil {
+		return 0, ErrTransport
+	}
+	return pid, nil
+}
+
 // Receive reads one complete request and requires client EOF before returning
 // a dispatchable Call. Invalid requests are answered, when a valid response
 // domain is available, with a fixed error code.

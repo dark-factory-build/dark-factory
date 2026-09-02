@@ -54,6 +54,7 @@ func (*localAPIState) close() error                     { return nil }
 func (*LocalAPIConnection) Read([]byte) (int, error)    { return 0, ErrUnsupported }
 func (*LocalAPIConnection) Write([]byte) (int, error)   { return 0, ErrUnsupported }
 func (*LocalAPIConnection) SetDeadline(time.Time) error { return ErrUnsupported }
+func (*LocalAPIConnection) PeerPID() (int, error)       { return 0, ErrUnsupported }
 func (*LocalAPIConnection) CloseWrite() error           { return ErrUnsupported }
 func (*LocalAPIConnection) Close() error                { return nil }
 func (*LocalAPIDispatch) Close() error                  { return nil }

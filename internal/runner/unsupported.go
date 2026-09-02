@@ -31,7 +31,11 @@ func (c *OwnedChild) Abort() error                                { return ErrUn
 func (c *OwnedChild) Terminate(time.Duration) (Exit, error)       { return Exit{}, ErrUnsupported }
 func (c *OwnedChild) FinishAfterExit(time.Duration) (Exit, error) { return Exit{}, ErrUnsupported }
 func (c *OwnedChild) Close() error                                { return nil }
-func ObserveProcess(Identity) Observation                         { return Observation{Presence: Unknown, Err: ErrUnsupported} }
+func IdentityForPID(int) (Identity, error)                        { return Identity{}, ErrUnsupported }
+func ObserveExactProcess(Identity) Observation {
+	return Observation{Presence: Unknown, Err: ErrUnsupported}
+}
+func ObserveProcess(Identity) Observation { return Observation{Presence: Unknown, Err: ErrUnsupported} }
 func ObserveProcessGroup(Identity) Observation {
 	return Observation{Presence: Unknown, Err: ErrUnsupported}
 }

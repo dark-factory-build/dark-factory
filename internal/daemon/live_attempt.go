@@ -238,6 +238,14 @@ type liveAttempt struct {
 	done     chan struct{}
 	result   chan liveAttemptResult
 
+	// providerIdentity is fixed before the owner starts. outcomeReporter is
+	// installed by an authenticated outcome handler while operationMu excludes
+	// processLifecycle; the owner clears it under the same gate after exact
+	// reporter exit. Production observes it through ObserveExactProcess.
+	providerIdentity runner.Identity
+	outcomeReporter  runner.Identity
+	observeReporter  func(runner.Identity) runner.Observation
+
 	subs            map[*TerminalAttachment]struct{}
 	correlations    map[uint64]*TerminalAttachment
 	lastCorrelation uint64
@@ -268,7 +276,7 @@ func newLiveAttempt(daemon *Daemon, runID kernel.RunID, sessionID kernel.Termina
 		commands: make(chan liveAttemptCommand, liveAttemptMailboxCap),
 		wake:     make(chan struct{}, 1), done: make(chan struct{}), result: make(chan liveAttemptResult, 1),
 		subs: make(map[*TerminalAttachment]struct{}), correlations: make(map[uint64]*TerminalAttachment),
-		effectLimit: liveAttemptEffectLimit,
+		effectLimit: liveAttemptEffectLimit, observeReporter: runner.ObserveExactProcess,
 	}
 	if daemon != nil && daemon.store != nil {
 		attempt.renewLease = func(ctx context.Context, client kernel.BrowserClientID, generation uint64, expectedRun, expectedSession kernel.Revision, at kernel.UnixMillis) (kernel.TerminalLease, error) {

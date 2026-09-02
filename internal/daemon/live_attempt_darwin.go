@@ -237,13 +237,30 @@ func (attempt *liveAttempt) processLifecycle(ctx context.Context) (bool, error) 
 		}
 		return false, nil
 	}
-	// An outcome handler retains operationMu until its response connection has
-	// closed. Never wait for that gate here: terminal-effect callers retain the
-	// same gate while waiting for this owner to consume their mailbox command.
-	// A failed probe therefore skips lifecycle work for one iteration, allowing
-	// the mailbox to make progress without terminating the reporting client.
+	// An outcome handler uses operationMu to attach the exact reporting process
+	// to the durable finalization transition. Never wait for that gate here:
+	// terminal-effect callers retain the same gate while waiting for this owner
+	// to consume their mailbox command. A failed probe therefore skips lifecycle
+	// work for one iteration and lets the mailbox make progress.
 	if !attempt.daemon.operationMu.TryLock() {
 		return false, nil
+	}
+	if attempt.outcomeReporter.Valid() {
+		observe := attempt.observeReporter
+		if observe == nil {
+			observe = runner.ObserveExactProcess
+		}
+		reporter := observe(attempt.outcomeReporter)
+		switch reporter.Presence {
+		case runner.Present, runner.Unknown:
+			attempt.daemon.operationMu.Unlock()
+			return false, nil
+		case runner.Absent, runner.Reused:
+			attempt.outcomeReporter = runner.Identity{}
+		default:
+			attempt.daemon.operationMu.Unlock()
+			return false, nil
+		}
 	}
 	cancelled := ctx.Err()
 	if cancelled != nil {

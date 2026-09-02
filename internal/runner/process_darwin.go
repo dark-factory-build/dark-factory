@@ -1390,6 +1390,35 @@ func readIdentity(pid int) (Identity, error) {
 	return id, nil
 }
 
+// IdentityForPID binds a live PID to its exact process-group and birth
+// identity. Callers must retain a causal reason the process is still live
+// while this snapshot is taken.
+func IdentityForPID(pid int) (Identity, error) {
+	return readIdentity(pid)
+}
+
+// ObserveExactProcess reports only the exact process identity. Unlike
+// ObserveProcess, it deliberately ignores whether other members of the same
+// group remain live; this is used when one child must exit before its still-
+// live group can be terminated.
+func ObserveExactProcess(want Identity) Observation {
+	if !want.Valid() {
+		return Observation{Presence: Unknown, Err: ErrIdentity}
+	}
+	got, err := readIdentity(want.PID)
+	if err == nil {
+		if got == want {
+			return Observation{Presence: Present}
+		}
+		return Observation{Presence: Reused}
+	}
+	probe := unix.Kill(want.PID, 0)
+	if (errors.Is(err, unix.EIO) || errors.Is(err, unix.ESRCH) || errors.Is(err, unix.ENOENT)) && errors.Is(probe, unix.ESRCH) {
+		return Observation{Presence: Absent}
+	}
+	return Observation{Presence: Unknown, Err: fmt.Errorf("%w: info=%v pid=%v", ErrUnresolved, err, probe)}
+}
+
 func ObserveProcess(want Identity) Observation {
 	if !want.Valid() {
 		return Observation{Presence: Unknown, Err: ErrIdentity}
