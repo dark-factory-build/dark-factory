@@ -495,6 +495,60 @@ func TestGitChildInheritsCurrentRegisteredWrapperGroup(t *testing.T) {
 	}
 }
 
+func TestGitChildNaturalExitBeforeObserverSetupIsReaped(t *testing.T) {
+	repository := fakeRepository(t)
+	root := filepath.Dir(repository)
+	pidPath := filepath.Join(root, "pid")
+	releasePath := filepath.Join(root, "release")
+	git := writeFakeGit(t, fmt.Sprintf(
+		"#!/bin/sh\nprintf '%%s' \"$$\" > %q\nwhile [ ! -e %q ]; do :; done\nprintf done\n",
+		pidPath, releasePath,
+	))
+	recorder := &gitEventRecorder{}
+	hook := func(event gitProcessEvent) {
+		recorder.record(event)
+		if event != gitProcessStarted {
+			return
+		}
+		waitForFile(t, pidPath)
+		pid, err := strconv.Atoi(strings.TrimSpace(string(mustReadFile(t, pidPath))))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := mustProcessGroup(t, pid); got != unix.Getpgrp() {
+			t.Fatalf("Git child pgid=%d current registered wrapper pgid=%d", got, unix.Getpgrp())
+		}
+		if err := os.WriteFile(releasePath, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			proc, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
+			if err == nil && proc.Proc.P_stat == 5 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("Git child never became an unreaped zombie")
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	beforeFDs := descriptorCount(t)
+	result, err := runGitCapture(context.Background(), gitCommandSpec{
+		program: git, repository: repository, home: root, hook: hook,
+	}, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.exitCode != 0 || string(result.output) != "done" {
+		t.Fatalf("result=%+v", result)
+	}
+	recorder.require(t, 1, 0, 0, 1)
+	if afterFDs := descriptorCount(t); afterFDs != beforeFDs {
+		t.Fatalf("natural exit leaked descriptors: before=%d after=%d", beforeFDs, afterFDs)
+	}
+}
+
 func mustProcessGroup(t testing.TB, pid int) int {
 	t.Helper()
 	group, err := unix.Getpgid(pid)
