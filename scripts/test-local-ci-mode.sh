@@ -6,6 +6,7 @@ local_gate="$repository_root/scripts/local-ci.sh"
 ordinary_gate="$repository_root/scripts/go-check.sh"
 process_gate="$repository_root/scripts/go-ci-owned.sh"
 process_entry="$repository_root/scripts/go-ci.sh"
+service_gate="$repository_root/scripts/go-service-e2e.sh"
 fail() { echo "local-ci shape test failed: $*" >&2; exit 1; }
 
 set +e
@@ -79,6 +80,8 @@ if grep -Eq -- '-p[[:space:]]+1' "$process_gate"; then
     fail "process packages are globally serial"
 fi
 grep -Fq 'with-local-ci-lease.sh' "$process_entry" || fail "process entry lost the repository lease"
+grep -Fq 'exec "$script_dir/with-local-ci-lease.sh" "$script_dir/go-service-e2e.sh"' "$service_gate" \
+    || fail "focused service gate lost the repository lease"
 [ ! -e "$repository_root/scripts/go-fast-stage.sh" ] || fail "obsolete fast-stage helper survives"
 
 node -e '
@@ -87,7 +90,7 @@ if ((scripts.check.match(/packages:build/g) || []).length !== 1) process.exit(1)
 if (!scripts.check.includes("dark-factory-dev typecheck") || !scripts.check.includes("node --test")) process.exit(1);
 ' "$repository_root/web/package.json" || fail "TypeScript check does not build once before typecheck and tests"
 
-/bin/sh -n "$local_gate" "$ordinary_gate" "$process_gate" "$process_entry" \
+/bin/sh -n "$local_gate" "$ordinary_gate" "$process_gate" "$process_entry" "$service_gate" \
     "$repository_root/scripts/go-gate-environment.sh" \
     "$repository_root/scripts/local-ci-lease.sh" \
     "$repository_root/scripts/with-local-ci-lease.sh" \

@@ -8,6 +8,9 @@ case "$#" in
     0) ;;
     *) echo "usage: $0" >&2; exit 2 ;;
 esac
+if [ "${DARK_FACTORY_LOCAL_CI_LEASE_HELD-}" != 1 ]; then
+    exec "$script_dir/with-local-ci-lease.sh" "$script_dir/go-service-e2e.sh"
+fi
 
 trusted_git=/Library/Developer/CommandLineTools/usr/bin/git
 if [ ! -x "$trusted_git" ]; then
