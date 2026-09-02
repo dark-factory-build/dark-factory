@@ -386,17 +386,3 @@ test("deletion or revision change clears detail and fences a late private respon
   context.emitState(stateWithRequests([{ ...revised, revision: revised.revision + 1n }]));
   assert.equal(context.latest().selectedHumanRequest, undefined);
 });
-
-test("terminal control requests without an open terminal are refused, and refused after close", () => {
-  const context = harness();
-  context.controller.start();
-  context.emitStatus("ready");
-  context.emitState(fixtureState);
-  assert.equal(context.controller.takeTerminalControl(), false);
-  assert.equal(context.controller.handBackTerminalControl(), false);
-  const before = context.snapshots.length;
-  assert.equal(context.snapshots.length, before);
-  context.controller.close();
-  assert.equal(context.controller.takeTerminalControl(), false);
-  assert.equal(context.controller.handBackTerminalControl(), false);
-});

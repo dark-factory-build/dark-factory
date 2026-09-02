@@ -259,10 +259,18 @@
   border: 1px solid var(--df-console-accent);
 }
 
-.dfFactoryConsole__terminalAgent {
+.dfFactoryConsole__terminalHeading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
   margin-bottom: 0.75rem;
+}
+
+.dfFactoryConsole__terminalAgent {
   color: var(--df-console-muted);
   font-size: 0.75rem;
+  overflow-wrap: anywhere;
 }
 
 .dfFactoryConsole__terminalError {
@@ -271,26 +279,28 @@
   font-size: 0.75rem;
 }
 
-.dfFactoryConsole__terminalPanel > button { margin-top: 0.75rem; }
+.dfFactoryConsole__terminalReset {
+  margin: 0 0 0.75rem;
+  padding: 0.4rem 0.75rem;
+  color: var(--df-console-warning);
+  background: #1a1408;
+  border-block: 1px solid var(--df-console-rule);
+  font-size: 0.75rem;
+}
 
 @media (max-width: 720px) {
   .dfFactoryConsole__header,
-  .dfFactoryConsole__sectionHeading { align-items: flex-start; flex-direction: column; }
+  .dfFactoryConsole__sectionHeading,
+  .dfFactoryConsole__terminalHeading { align-items: flex-start; flex-direction: column; }
   .dfFactoryConsole__connection { justify-items: start; }
   .dfFactoryConsole__metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .dfFactoryConsole__columns { grid-template-columns: 1fr; gap: 0; }
 }
 
-/* Slice 1: shell with the persistent terminal sidebar. */
-
 .dfConsoleShell {
-  display: flex;
-  align-items: stretch;
   min-height: 100%;
   background: #070a09;
 }
-
-.dfConsoleShell .dfFactoryConsole { flex: 1 1 auto; min-width: 0; }
 
 .dfConsoleShell .dfFactoryConsole__homeLink {
   padding: 0;
@@ -407,50 +417,6 @@
 .dfConsoleRow__title { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
 .dfConsoleRow__agent { flex: 0 1 auto; min-width: 0; overflow-wrap: anywhere; color: var(--df-console-muted); font-size: 0.8rem; }
 
-.dfConsoleSidebar {
-  display: flex;
-  flex: 0 0 32.5rem;
-  flex-direction: column;
-  gap: 0.6rem;
-  padding: 1rem;
-  background: var(--df-console-surface);
-  border-left: 1px solid var(--df-console-accent);
-  color: var(--df-console-text);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-}
-
-/* Collapse clips; it never unmounts. The body keeps its laid-out width so
-   the live terminal (and any held control) survives with exact dimensions
-   and needs no refit on expand. */
-.dfConsoleSidebar { position: relative; overflow: hidden; }
-.dfConsoleSidebar--collapsed { flex: 0 0 2.2rem; padding: 0.5rem 0.2rem; border-left-color: var(--df-console-rule); }
-.dfConsoleSidebar__body { display: flex; flex: 1 1 auto; flex-direction: column; gap: 0.6rem; min-height: 0; width: 30.5rem; }
-.dfConsoleSidebar--collapsed .dfConsoleSidebar__body { position: absolute; visibility: hidden; pointer-events: none; }
-.dfConsoleSidebar__tab { border: 0; background: transparent; color: var(--df-console-muted); writing-mode: vertical-rl; font-size: 0.75rem; cursor: pointer; }
-.dfConsoleSidebar__header { display: flex; align-items: baseline; gap: 0.75rem; }
-.dfConsoleSidebar__header strong { font-size: 0.95rem; }
-.dfConsoleSidebar__identity { color: var(--df-console-muted); font-size: 0.7rem; overflow-wrap: anywhere; }
-.dfConsoleSidebar__phase { color: var(--df-console-muted); font-size: 0.75rem; }
-.dfConsoleSidebar__control { margin-left: auto; color: var(--df-console-muted); font-size: 0.8rem; }
-.dfConsoleSidebar__control--held { color: var(--df-console-accent); }
-.dfConsoleSidebar__actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
-.dfConsoleSidebar__actions button { padding: 0.45rem 0.6rem; border: 1px solid var(--df-console-rule); background: transparent; color: var(--df-console-text); font-size: 0.8rem; text-transform: none; cursor: pointer; }
-.dfConsoleSidebar__actions button:disabled { cursor: default; opacity: 0.5; }
-.dfConsoleSidebar .dfFactoryConsole__terminal { flex: 1 1 auto; }
-
 @media (max-width: 960px) {
-  .dfConsoleShell { flex-direction: column; }
-  .dfConsoleSidebar { flex-basis: auto; border-left: 0; border-top: 1px solid var(--df-console-accent); }
-  .dfConsoleSidebar__body { width: 100%; min-width: 0; }
   .dfConsoleStrip { flex-direction: column; align-items: flex-start; }
-}
-
-.dfConsoleSidebar__resetBanner {
-  margin: 0;
-  padding: 0.4rem 0.75rem;
-  background: #1a1408;
-  color: #b69a52;
-  border-top: 1px solid #26302c;
-  border-bottom: 1px solid #26302c;
-  font-size: 12.5px;
 }

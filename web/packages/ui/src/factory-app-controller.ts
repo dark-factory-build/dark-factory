@@ -13,7 +13,7 @@ import {
   type SessionStatus,
   type StateView,
 } from "@dark-factory/client";
-import { TerminalController, type TerminalControllerSnapshot, type TerminalLeaseOperation, type TerminalSurface } from "./terminal-controller.js";
+import { TerminalController, type TerminalControllerSnapshot, type TerminalSurface } from "./terminal-controller.js";
 
 const BROWSER_ENDPOINT = new URL("ws://127.0.0.1:43123/browser/v1");
 const BROWSER_URL = BROWSER_ENDPOINT.toString();
@@ -43,9 +43,8 @@ export type FactoryTerminalView = Readonly<{
   taskTitle?: string;
   phase: "idle" | "resolving" | "attaching" | "acquiring" | "ready" | "closing" | "closed";
   writable: boolean;
-  leaseOperation: TerminalLeaseOperation;
   error?: SessionError | ProtocolError;
-  /** Server replay resets survived by this sidebar view; > 0 shows the banner. */
+  /** Server replay resets survived by this terminal view; > 0 shows the banner. */
   resets: number;
   surfaceVersion: number;
 }>;
@@ -89,7 +88,7 @@ type Selection = {
 type AgentTerminalSelection = {
   agent: AgentItem;
   head: bigint;
-  /** Server replay resets survived by this sidebar view (banner state). */
+  /** Server replay resets survived by this terminal view (banner state). */
   resets: number;
 };
 
@@ -137,18 +136,6 @@ export class FactoryAppController {
   }
 
   get snapshot(): FactoryAppSnapshot { return this.#snapshot(); }
-
-  /** Take control of the open terminal's input. Read-only observer on failure. */
-  takeTerminalControl(): boolean {
-    if (this.#closed) return false;
-    return this.#terminal?.takeControl() ?? false;
-  }
-
-  /** Hand the open terminal's input back; the display stays attached. */
-  handBackTerminalControl(): boolean {
-    if (this.#closed) return false;
-    return this.#terminal?.handBack() ?? false;
-  }
 
   start(): void {
     if (this.#started || this.#closed) return;
@@ -536,7 +523,7 @@ export class FactoryAppController {
 
   /**
    * A server replay reset ends the protocol handle by design. Recover in
-   * place: keep the sidebar selection, remount the display (a fresh empty
+   * place: keep the terminal selection, remount the display (a fresh empty
    * surface — the retained output the old scrollback showed is gone), and
    * reconcile a new controller against current state. Bounded so a reset
    * storm cannot loop; past the bound the ordinary stale teardown stands.
@@ -653,7 +640,6 @@ export class FactoryAppController {
         taskTitle: this.#state === undefined ? undefined : agentCurrentTask(this.#selectedAgent.agent, this.#state)?.title,
         phase: this.#terminal?.snapshot.phase ?? "idle",
         writable: this.#terminal?.snapshot.writable ?? false,
-        leaseOperation: this.#terminal?.snapshot.leaseOperation ?? "none",
         error: this.#terminal?.snapshot.error,
         resets: this.#selectedAgent.resets,
         surfaceVersion: this.#terminalSurfaceVersion,

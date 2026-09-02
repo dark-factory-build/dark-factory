@@ -1,19 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createElement, useEffect } from "react";
+import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { act, create } from "react-test-renderer";
-import { TerminalSidebar } from "../dist/src/factory-app.js";
-
-const counters = { mounts: 0, unmounts: 0 };
-
-function Probe() {
-  useEffect(() => {
-    counters.mounts += 1;
-    return () => { counters.unmounts += 1; };
-  }, []);
-  return createElement("div", null, "live terminal surface");
-}
+import { TerminalPanel } from "../dist/src/factory-app.js";
 
 function terminalView(overrides = {}) {
   return {
@@ -21,118 +11,65 @@ function terminalView(overrides = {}) {
     agentName: "Builder One",
     agentRevision: 10n,
     phase: "ready",
-    writable: false,
-    leaseOperation: "none",
+    writable: true,
+    resets: 0,
     surfaceVersion: 0,
     ...overrides,
   };
 }
 
-function sidebarProps(overrides = {}, calls = { close: 0, take: 0, handBack: 0, toggle: 0 }) {
-  return {
-    calls,
-    props: {
-      terminal: terminalView(overrides.terminal),
-      snapshot: { status: "ready", ...overrides.snapshot },
-      collapsed: overrides.collapsed ?? false,
-      onToggleCollapsed: () => { calls.toggle += 1; },
-      onClose: () => { calls.close += 1; },
-      onTakeControl: () => { calls.take += 1; },
-      onHandBack: () => { calls.handBack += 1; },
-    },
-  };
+function panel(terminal = terminalView(), onClose = () => {}) {
+  return createElement(
+    TerminalPanel,
+    { terminal, onClose },
+    createElement("div", { className: "terminal-surface" }, "live terminal surface"),
+  );
 }
 
-test("collapse clips the sidebar without unmounting the terminal or touching the session", async () => {
+test("the terminal is quiet inline console content", () => {
+  const markup = renderToStaticMarkup(panel(terminalView({ taskTitle: "Repair finalization" })));
+  assert.match(markup, /dfFactoryConsole__terminalPanel/);
+  assert.match(markup, /Builder One · Repair finalization/);
+  assert.match(markup, /live terminal surface/);
+  assert.match(markup, />CLOSE TERMINAL<\/button>/);
+  for (const noise of ["CURRENT RUN TERMINAL", "READY", "you have control", "watching", "take control", "hand back", "Steer"]) {
+    assert.equal(markup.includes(noise), false, noise);
+  }
+  assert.equal((markup.match(/<button/g) ?? []).length, 1, "close is the only terminal control");
+});
+
+test("close remains available through setup and invokes the owner once", async () => {
   const previousAct = globalThis.IS_REACT_ACT_ENVIRONMENT;
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  counters.mounts = 0;
-  counters.unmounts = 0;
-  const { props, calls } = sidebarProps();
-  let renderer;
   try {
-    await act(async () => {
-      renderer = create(createElement(TerminalSidebar, props, createElement(Probe)));
-    });
-    assert.equal(counters.mounts, 1);
-    assert.equal(counters.unmounts, 0);
-
-    await act(async () => {
-      renderer.update(createElement(TerminalSidebar, { ...props, collapsed: true }, createElement(Probe)));
-    });
-    assert.equal(counters.unmounts, 0, "collapse must not unmount the terminal surface");
-    assert.equal(calls.close, 0, "collapse must not close the session");
-    const tab = renderer.root.findAllByType("button").find((button) => button.props.className === "dfConsoleSidebar__tab");
-    assert.ok(tab, "the collapsed edge tab renders");
-    assert.equal(tab.props.children, "Builder One");
-    const body = renderer.root.findAllByType("div").find((element) => element.props.className === "dfConsoleSidebar__body");
-    assert.equal(body.props["aria-hidden"], "true");
-
-    await act(async () => {
-      renderer.update(createElement(TerminalSidebar, { ...props, collapsed: false }, createElement(Probe)));
-    });
-    assert.equal(counters.mounts, 1, "expand reuses the same live surface, no re-open");
-    assert.equal(counters.unmounts, 0);
-    assert.equal(calls.close, 0);
-
-    await act(async () => { renderer.unmount(); });
-    assert.equal(counters.unmounts, 1, "only a real unmount tears the surface down");
+    for (const phase of ["idle", "resolving", "attaching", "acquiring", "ready", "closing", "closed"]) {
+      let closes = 0;
+      let renderer;
+      await act(async () => {
+        renderer = create(panel(terminalView({ phase }), () => { closes += 1; }));
+      });
+      const button = renderer.root.findByType("button");
+      assert.equal(button.props.disabled, phase === "closing" || phase === "closed", phase);
+      if (!button.props.disabled) {
+        await act(async () => { button.props.onClick(); });
+        assert.equal(closes, 1, phase);
+      }
+      await act(async () => { renderer.unmount(); });
+    }
   } finally {
-    if (renderer !== undefined) renderer.unmount();
     globalThis.IS_REACT_ACT_ENVIRONMENT = previousAct;
   }
 });
 
-test("the collapsed sidebar server-renders the tab and keeps the terminal body", () => {
-  const { props } = sidebarProps({ collapsed: true });
-  const markup = renderToStaticMarkup(createElement(TerminalSidebar, props, createElement("div", null, "live terminal surface")));
-  assert.match(markup, /Terminal \(collapsed\)/);
-  assert.match(markup, /dfConsoleSidebar__tab/);
-  assert.match(markup, /Builder One/);
-  assert.match(markup, /live terminal surface/, "the body stays rendered while clipped");
-  assert.match(markup, /aria-hidden="true"/);
-});
-
-test("steer is never a dead-looking live control", () => {
-  const readOnly = sidebarProps();
-  const readOnlyMarkup = renderToStaticMarkup(createElement(TerminalSidebar, readOnly.props, createElement("div")));
-  assert.match(readOnlyMarkup, /<button type="button" title="takes control so you can type">Steer<\/button>/, "read-only ready steer is enabled");
-
-  const writable = sidebarProps({ terminal: { writable: true } });
-  const writableMarkup = renderToStaticMarkup(createElement(TerminalSidebar, writable.props, createElement("div")));
-  assert.match(writableMarkup, /<button[^>]*disabled=""[^>]*title="you have control — type in the terminal"[^>]*>Steer<\/button>/);
-  assert.match(writableMarkup, /you have control/);
-});
-
-test("the current-run identity and close action stay truthful through setup", () => {
-  const identified = sidebarProps({ terminal: { taskTitle: "Repair finalization" } });
-  const identifiedMarkup = renderToStaticMarkup(createElement(TerminalSidebar, identified.props, createElement("div")));
-  assert.match(identifiedMarkup, /CURRENT RUN TERMINAL · Repair finalization/);
-
-  for (const phase of ["idle", "resolving", "attaching", "acquiring", "ready", "closing", "closed"]) {
-    const { props } = sidebarProps({ terminal: { phase } });
-    const markup = renderToStaticMarkup(createElement(TerminalSidebar, props, createElement("div")));
-    const button = markup.match(/<button[^>]*title="close this terminal view; the worker keeps running"[^>]*>/)?.[0];
-    assert.ok(button, phase);
-    assert.equal(button.includes("disabled"), phase === "closing" || phase === "closed", phase);
-  }
-});
-
-test("the replay-reset banner appears only after a server reset", async () => {
-  const { renderToStaticMarkup } = await import("react-dom/server");
-  const { createElement } = await import("react");
-  const props = (resets) => ({
-    terminal: { agentId: "21".repeat(16), agentName: "Builder One", agentRevision: 10n, phase: "ready", writable: false, leaseOperation: "none", resets, surfaceVersion: 0 },
-    snapshot: { status: "ready" },
-    collapsed: false,
-    onToggleCollapsed: () => {},
-    onClose: () => {},
-    onTakeControl: () => {},
-    onHandBack: () => {},
-  });
-  const quiet = renderToStaticMarkup(createElement(TerminalSidebar, props(0), createElement("div")));
-  assert.equal(/Replay reset/.test(quiet), false);
-  const reset = renderToStaticMarkup(createElement(TerminalSidebar, props(1), createElement("div")));
-  assert.match(reset, /role="status"/);
-  assert.match(reset, /Replay reset — earlier output is no longer retained/);
+test("exceptional input ownership and replay loss are concise", () => {
+  const occupied = renderToStaticMarkup(panel(terminalView({ writable: false, error: { code: "stale" } })));
+  assert.match(occupied, /TERMINAL OPEN ELSEWHERE/);
+  const unavailable = renderToStaticMarkup(panel(terminalView({ writable: false, error: { code: "connection" } })));
+  assert.match(unavailable, /TERMINAL UNAVAILABLE/);
+  assert.equal(unavailable.includes("TERMINAL OPEN ELSEWHERE"), false);
+  const reset = renderToStaticMarkup(panel(terminalView({ resets: 1 })));
+  assert.match(reset, /Earlier output is no longer retained/);
+  const quiet = renderToStaticMarkup(panel());
+  assert.equal(quiet.includes("TERMINAL OPEN ELSEWHERE"), false);
+  assert.equal(quiet.includes("Earlier output"), false);
 });
