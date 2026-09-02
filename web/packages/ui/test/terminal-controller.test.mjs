@@ -152,14 +152,16 @@ async function ready(context) {
   assert.equal(context.controller.snapshot.writable, true);
 }
 
-test("attach precedes lease and input is refused before writable", async () => {
+test("input is queued until the hidden terminal lease is acquired", async () => {
   const context = harness();
   context.controller.start();
   await tick();
+  assert.equal(context.snapshots.at(-1).phase, "resolving");
+  assert.equal(context.controller.sendText("before"), true);
+  assert.equal(context.inputCalls.length, 0);
   context.targetGate.resolve(target);
   await tick();
   assert.equal(context.snapshots.at(-1).phase, "attaching");
-  assert.equal(context.controller.sendText("before"), false);
   assert.equal(context.inputCalls.length, 0);
   context.attachGate().resolve({ sessionId: "22".repeat(16), floor: 0n, head: 0n, acknowledgedSequence: 0n, maxUnackedBytes: 65536n });
   await tick();
@@ -167,8 +169,10 @@ test("attach precedes lease and input is refused before writable", async () => {
   assert.equal(context.inputCalls.length, 0);
   context.acquireGate().resolve({ generation: 1n });
   await tick();
-  assert.equal(context.controller.sendText("after"), true);
   assert.equal(context.inputCalls.length, 1);
+  assert.equal(new TextDecoder().decode(context.inputCalls[0].bytes), "before");
+  context.inputCalls[0].result.resolve({ status: "accepted", accepted_bytes: 6n });
+  await context.controller.close();
 });
 
 test("output waits for the display write and copies payload bytes", async () => {
@@ -586,10 +590,14 @@ test("lease refusal keeps an attached observer ready and read-only", async () =>
   await tick();
   context.attachGate().resolve({ sessionId: "22".repeat(16), floor: 0n, head: 0n, acknowledgedSequence: 0n, maxUnackedBytes: 65536n });
   await tick();
+  assert.equal(context.controller.sendText("discard me"), true);
+  assert.equal(context.inputCalls.length, 0);
   context.acquireGate().reject(new SessionError("stale"));
   await tick();
   assert.equal(context.controller.snapshot.phase, "ready");
   assert.equal(context.controller.snapshot.writable, false);
+  assert.equal(context.controller.sendText("late"), false);
+  assert.equal(context.inputCalls.length, 0);
   assert.equal(context.sessionCloses(), 0);
   const output = context.callbacks().onOutput({ sequence: 0n, payload: new Uint8Array([7]) });
   await tick();
