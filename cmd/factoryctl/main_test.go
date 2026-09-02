@@ -147,6 +147,9 @@ func serveOne(listener *api.Listener, reply func(api.Call) api.Reply) <-chan ser
 			if err == nil {
 				err = connection.Respond(response)
 			}
+			if err == nil {
+				err = connection.AwaitOutcomeReceipt(ctx)
+			}
 		}
 		done <- serverResult{call: call, err: err}
 	}()
