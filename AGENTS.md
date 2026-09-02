@@ -102,6 +102,9 @@ framework. The shell-provider loop is proven; real Claude/Codex work is not.
     other Wrangler, Cloudflare-token, deployment, or credential use is implied.
 11. Preserve unrelated dirty work and report exactly what passed, failed, was
     skipped, or remains unverified.
+12. Do not bump `VERSION`, create a tag, publish, or promote a release without
+    the owner's explicit approval for that release. Merge and prove unreleased
+    work locally; a pull request does not create a release boundary.
 
 Related repositories are read-only unless the task explicitly includes them:
 `~/dark-factory-site` (Next.js/Vercel) and `~/rust-hem-runner` (style reference
