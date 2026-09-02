@@ -82,7 +82,8 @@ jobs:
       # its web stage needs Node 22+ with Corepack. The owned runner already
       # satisfies both, so this step is a no-op there; a fresh hosted image
       # receives the current Homebrew Go. GOTOOLCHAIN=local inside the gate
-      # makes go.mod the minimum version without downloading another toolchain.
+      # keeps the go.mod major/minor series and minimum patch without
+      # downloading another toolchain.
       - name: Provide the Homebrew Go and Node toolchains
         run: |
           set -euxo pipefail
