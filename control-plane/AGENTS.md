@@ -61,7 +61,7 @@ Codex nor Claude owns its credentials or its durable journal.
    intend to act on, and they must fail closed unless it returns that
    `owner/name` -- compared case-insensitively, since it answers with GitHub's
    canonical spelling -- a positive numeric repository ID, and permission
-   revision `maintainer-operations-v4`. Every tool names its repository; the
+   revision `maintainer-operations-v5`. Every tool names its repository; the
    App reaches only repositories it is installed on, and nothing selects one
    implicitly. A credential-isolating host transport authenticates the connection; provider,
    tool, and shell processes never inherit the Access pair. Agents never read
@@ -71,7 +71,7 @@ Codex nor Claude owns its credentials or its durable journal.
    The deployed surface is finite: authority and default-head observation,
    branch-head, tree, and file-content observation, durable operation
    observation, bounded issue lifecycle, exact commit and
-   pull-request publication, exact-head review and CI diagnosis/recovery,
+   pull-request publication and closure, exact-head review and CI diagnosis/recovery,
    merge-queue enqueue, strict exact-head squash merge for a queue-less base,
    eventual-result observation, immutable release publication/observation/
    recovery, and one exact control-plane deployment dispatch. GitHub's
