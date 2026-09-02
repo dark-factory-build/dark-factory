@@ -17,19 +17,17 @@ set -e
 
 ordinary_line=$(grep -n -F 'echo "local-ci: ordinary source gate"' "$local_gate" | cut -d: -f1)
 process_line=$(grep -n -F 'echo "local-ci: process-sensitive gate"' "$local_gate" | cut -d: -f1)
-service_line=$(grep -n -F 'echo "local-ci: service gate"' "$local_gate" | cut -d: -f1)
 release_line=$(grep -n -F 'echo "local-ci: release gate"' "$local_gate" | cut -d: -f1)
 [ -n "$ordinary_line" ] && [ "$ordinary_line" -lt "$process_line" ] \
-    && [ "$process_line" -lt "$service_line" ] && [ "$service_line" -lt "$release_line" ] \
-    || fail "ordinary, process, service, and release gates are not ordered"
+    && [ "$process_line" -lt "$release_line" ] \
+    || fail "ordinary, process, and release gates are not ordered"
 
 for invocation in './scripts/go-check.sh' '/bin/sh "$script_dir/go-ci-owned.sh"'; do
     [ "$(grep -Fc "$invocation" "$local_gate")" -eq 1 ] || fail "gate invocation is not unique: $invocation"
 done
-[ "$(grep -Fc './scripts/go-service-e2e.sh' "$local_gate")" -eq 1 ] \
-    || fail "service lifecycle proof is not unique"
-grep -Fq '/bin/launchctl print "gui/$(/usr/bin/id -u)/com.dark-factory.factoryd"' "$local_gate" \
-    || fail "service lifecycle proof lost its live-install boundary"
+if grep -Fq 'go-service-e2e.sh' "$local_gate"; then
+    fail "focused service lifecycle proof returned to the routine gate"
+fi
 grep -Fq 'exec "$script_dir/with-local-ci-lease.sh" "$script_dir/local-ci.sh"' "$local_gate" \
     || fail "local-CI entry lost the repository lease"
 if grep -Eq 'test-local-ci-lease(-mutations)?\.sh' "$local_gate"; then
