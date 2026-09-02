@@ -67,17 +67,11 @@ type gitAdminIdentity struct {
 	digest     [32]byte
 }
 
-type gitObjectStoreIdentity struct {
-	entryCount uint32
-	digest     [32]byte
-}
-
 type repositoryCheckpoint struct {
-	root        RepositoryIdentity
-	git         gitAdminIdentity
-	config      gitAdminIdentity
-	objects     gitAdminIdentity
-	objectStore gitObjectStoreIdentity
+	root    RepositoryIdentity
+	git     gitAdminIdentity
+	config  gitAdminIdentity
+	objects gitAdminIdentity
 }
 
 // Selection is one immutable exact commit and its complete regular-file tree.

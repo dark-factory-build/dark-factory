@@ -8,7 +8,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"debug/macho"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -16,7 +15,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,7 +32,6 @@ const (
 	maxGitStderrBytes     = 64 << 10
 	maxGitConfigBytes     = 1 << 20
 	maxGitExecutableBytes = 64 << 20
-	maxGitObjectEntries   = 65_536
 	gitTerminateGrace     = 250 * time.Millisecond
 	gitPipeDrainGrace     = time.Second
 )
@@ -278,12 +275,13 @@ func checkpointRepository(path string, expected RepositoryIdentity) (repositoryC
 	if err := rejectDirectGitAdminEntry(gitFD, "commondir"); err != nil {
 		return repositoryCheckpoint{}, err
 	}
-	objectStore, err := checkpointGitObjectStore(objectsFD, maxGitObjectEntries)
-	if err != nil {
-		return repositoryCheckpoint{}, err
+	for _, name := range []string{"alternates", "http-alternates"} {
+		if err := rejectGitAdminEntry(objectsFD, "info", name); err != nil {
+			return repositoryCheckpoint{}, err
+		}
 	}
 	return repositoryCheckpoint{
-		root: root, git: gitIdentity, config: configIdentity, objects: objectsIdentity, objectStore: objectStore,
+		root: root, git: gitIdentity, config: configIdentity, objects: objectsIdentity,
 	}, nil
 }
 
@@ -387,154 +385,6 @@ func rejectDirectGitAdminEntry(parentFD int, name string) error {
 	return &ValidationError{Reason: "Git external object or administration indirection is forbidden"}
 }
 
-type gitObjectRecord struct {
-	path string
-	stat unix.Stat_t
-}
-
-type gitObjectScan struct {
-	rootDevice uint64
-	rootUID    uint32
-	maximum    int
-	count      int
-	records    []gitObjectRecord
-}
-
-func checkpointGitObjectStore(objectsFD, maximum int) (gitObjectStoreIdentity, error) {
-	root, err := fstatGit(objectsFD)
-	if err != nil || !safeGitMode(root.Mode, gitModeDirectory) || root.Ino == 0 || maximum < 0 {
-		return gitObjectStoreIdentity{}, &ValidationError{Reason: "Git object store root is invalid"}
-	}
-	scan := gitObjectScan{
-		rootDevice: uint64(root.Dev), rootUID: root.Uid, maximum: maximum,
-		records: make([]gitObjectRecord, 0, min(maximum+1, 1024)),
-	}
-	if err := scan.walk(objectsFD, "", root); err != nil {
-		return gitObjectStoreIdentity{}, err
-	}
-	sort.Slice(scan.records, func(left, right int) bool { return scan.records[left].path < scan.records[right].path })
-	hasher := sha256.New()
-	var encoded [8]byte
-	for _, record := range scan.records {
-		binary.BigEndian.PutUint32(encoded[:4], uint32(len(record.path)))
-		_, _ = hasher.Write(encoded[:4])
-		_, _ = io.WriteString(hasher, record.path)
-		for _, value := range []uint64{
-			uint64(record.stat.Dev), record.stat.Ino, uint64(record.stat.Uid), uint64(record.stat.Mode),
-			uint64(record.stat.Nlink), uint64(record.stat.Size), uint64(record.stat.Mtim.Sec),
-			uint64(record.stat.Mtim.Nsec), uint64(record.stat.Ctim.Sec), uint64(record.stat.Ctim.Nsec),
-		} {
-			binary.BigEndian.PutUint64(encoded[:], value)
-			_, _ = hasher.Write(encoded[:])
-		}
-	}
-	var digest [32]byte
-	copy(digest[:], hasher.Sum(nil))
-	return gitObjectStoreIdentity{entryCount: uint32(scan.count), digest: digest}, nil
-}
-
-func (scan *gitObjectScan) walk(directoryFD int, relative string, expected unix.Stat_t) error {
-	before, err := fstatGit(directoryFD)
-	if err != nil || !sameGitStat(before, expected) || !scan.validDirectory(before) {
-		return &ValidationError{Reason: "Git object-store directory identity differs"}
-	}
-	scan.records = append(scan.records, gitObjectRecord{path: relative, stat: before})
-	names, err := scan.readNames(directoryFD)
-	if err != nil {
-		return err
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		isDirectory, allowed := validGitObjectPath(relative, name)
-		if !allowed {
-			return &ValidationError{Reason: "Git object store contains an unsupported path"}
-		}
-		var observed unix.Stat_t
-		if err := unix.Fstatat(directoryFD, name, &observed, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-			return newGitError(gitFailurePrivateIO)
-		}
-		path := name
-		if relative != "" {
-			path = relative + "/" + name
-		}
-		if isDirectory {
-			childFD, err := unix.Openat(directoryFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-			if err != nil {
-				return &ValidationError{Reason: "Git object-store directory indirection is forbidden"}
-			}
-			childStat, statErr := fstatGit(childFD)
-			if statErr != nil || !sameGitStat(observed, childStat) || !scan.validDirectory(childStat) {
-				unix.Close(childFD)
-				return &ValidationError{Reason: "Git object-store directory authority differs"}
-			}
-			err = scan.walk(childFD, path, childStat)
-			closeErr := unix.Close(childFD)
-			if err != nil {
-				return err
-			}
-			if closeErr != nil {
-				return newGitError(gitFailurePrivateIO)
-			}
-			continue
-		}
-		if !scan.validFile(observed) {
-			return &ValidationError{Reason: "Git object-store file authority differs"}
-		}
-		fileFD, err := unix.Openat(directoryFD, name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-		if err != nil {
-			return &ValidationError{Reason: "Git object-store file indirection is forbidden"}
-		}
-		actual, statErr := fstatGit(fileFD)
-		closeErr := unix.Close(fileFD)
-		if statErr != nil || closeErr != nil || !sameGitStat(observed, actual) || !scan.validFile(actual) {
-			return &ValidationError{Reason: "Git object-store file authority differs"}
-		}
-		scan.records = append(scan.records, gitObjectRecord{path: path, stat: actual})
-	}
-	after, err := fstatGit(directoryFD)
-	if err != nil || !sameGitStat(before, after) {
-		return &ValidationError{Reason: "Git object-store directory changed during inspection"}
-	}
-	return nil
-}
-
-func (scan *gitObjectScan) readNames(directoryFD int) ([]string, error) {
-	duplicate, err := unix.Dup(directoryFD)
-	if err != nil {
-		return nil, newGitError(gitFailurePrivateIO)
-	}
-	unix.CloseOnExec(duplicate)
-	directory := os.NewFile(uintptr(duplicate), "")
-	defer directory.Close()
-	names := make([]string, 0, 32)
-	for {
-		batch, err := directory.Readdirnames(128)
-		if err != nil && !errors.Is(err, io.EOF) {
-			return nil, newGitError(gitFailurePrivateIO)
-		}
-		for _, name := range batch {
-			scan.count++
-			if scan.count > scan.maximum {
-				return nil, &LimitError{Reason: "Git object-store entry limit exceeded"}
-			}
-			names = append(names, name)
-		}
-		if errors.Is(err, io.EOF) {
-			return names, nil
-		}
-	}
-}
-
-func (scan *gitObjectScan) validDirectory(stat unix.Stat_t) bool {
-	return safeGitMode(stat.Mode, gitModeDirectory) && uint64(stat.Dev) == scan.rootDevice && stat.Uid == scan.rootUID &&
-		stat.Ino != 0
-}
-
-func (scan *gitObjectScan) validFile(stat unix.Stat_t) bool {
-	return safeGitMode(stat.Mode, gitModeFile) && uint64(stat.Dev) == scan.rootDevice && stat.Uid == scan.rootUID &&
-		stat.Ino != 0 && stat.Size >= 0
-}
-
 type gitModeKind byte
 
 const (
@@ -556,70 +406,6 @@ func safeGitMode(mode uint16, kind gitModeKind) bool {
 		return mode&unix.S_IFMT == unix.S_IFREG
 	case gitModeExecutable:
 		return mode&unix.S_IFMT == unix.S_IFREG && mode&0o111 != 0
-	default:
-		return false
-	}
-}
-
-func validGitObjectPath(parent, name string) (bool, bool) {
-	if len(name) == 0 || len(name) > MaxComponentBytes || name == "." || name == ".." {
-		return false, false
-	}
-	switch parent {
-	case "":
-		return true, name == "info" || name == "pack" || (len(name) == 2 && isLowerHex(name))
-	case "info":
-		if name == "commit-graphs" {
-			return true, true
-		}
-		return false, name == "packs" || name == "commit-graph"
-	case "info/commit-graphs":
-		return false, name == "commit-graph-chain" || validGraphName(name)
-	case "pack":
-		return false, validPackName(name)
-	default:
-		if len(parent) == 2 && isLowerHex(parent) {
-			return false, (len(name) == 38 || len(name) == 62) && isLowerHex(name)
-		}
-		return false, false
-	}
-}
-
-func isLowerHex(value string) bool {
-	for _, character := range []byte(value) {
-		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')) {
-			return false
-		}
-	}
-	return len(value) > 0
-}
-
-func validGraphName(name string) bool {
-	if !strings.HasPrefix(name, "graph-") || !strings.HasSuffix(name, ".graph") {
-		return false
-	}
-	digest := strings.TrimSuffix(strings.TrimPrefix(name, "graph-"), ".graph")
-	return (len(digest) == 40 || len(digest) == 64) && isLowerHex(digest)
-}
-
-func validPackName(name string) bool {
-	if name == "multi-pack-index" {
-		return true
-	}
-	if strings.HasPrefix(name, "multi-pack-index-") && strings.HasSuffix(name, ".bitmap") {
-		digest := strings.TrimSuffix(strings.TrimPrefix(name, "multi-pack-index-"), ".bitmap")
-		return (len(digest) == 40 || len(digest) == 64) && isLowerHex(digest)
-	}
-	if !strings.HasPrefix(name, "pack-") {
-		return false
-	}
-	stem, extension, found := strings.Cut(strings.TrimPrefix(name, "pack-"), ".")
-	if !found || (len(stem) != 40 && len(stem) != 64) || !isLowerHex(stem) {
-		return false
-	}
-	switch extension {
-	case "pack", "idx", "rev", "bitmap", "mtimes", "keep":
-		return true
 	default:
 		return false
 	}
@@ -1272,10 +1058,6 @@ func (b *GitBlobs) Read(ctx context.Context, requested ObjectID) ([]byte, error)
 		_ = b.abortLocked()
 		return nil, newGitContextError(err, true)
 	}
-	if err := verifyGitAuthority(b.selection.repositoryRoot, b.selection.repository, b.selection.gitExecutable, b.selection.gitIdentity); err != nil {
-		_ = b.abortLocked()
-		return nil, newGitCleanupError(gitFailureProcess)
-	}
 	expected := b.selection.manifest.entries[b.next]
 	result := make(chan gitStreamResult, 1)
 	go func() { result <- b.readOne(ctx, expected) }()
@@ -1284,10 +1066,6 @@ func (b *GitBlobs) Read(ctx context.Context, requested ObjectID) ([]byte, error)
 		if response.err != nil || response.overflow {
 			_ = b.abortLocked()
 			return nil, newGitCleanupError(gitFailureProtocol)
-		}
-		if err := verifyGitAuthority(b.selection.repositoryRoot, b.selection.repository, b.selection.gitExecutable, b.selection.gitIdentity); err != nil {
-			_ = b.abortLocked()
-			return nil, newGitCleanupError(gitFailureProcess)
 		}
 		b.next++
 		return response.data, nil
