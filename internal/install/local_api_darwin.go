@@ -852,20 +852,6 @@ func (connection *LocalAPIConnection) SetDeadline(deadline time.Time) error {
 	return connection.state.raw.SetDeadline(deadline)
 }
 
-// PeerPID returns the kernel-recorded PID for this exact accepted local peer
-// while the connection is still owned and live.
-func (connection *LocalAPIConnection) PeerPID() (int, error) {
-	if connection == nil || connection.state == nil || connection.state.self != connection {
-		return 0, ErrClosed
-	}
-	connection.state.closeMu.Lock()
-	defer connection.state.closeMu.Unlock()
-	if connection.state.closed || connection.state.transportClosed || connection.state.raw == nil {
-		return 0, ErrClosed
-	}
-	return localAPIPeerPID(connection.state.raw)
-}
-
 func (connection *LocalAPIConnection) CloseWrite() error {
 	if connection == nil || connection.state == nil || connection.state.self != connection || connection.state.raw == nil {
 		return ErrClosed
@@ -918,24 +904,6 @@ func verifyLocalAPIPeer(connection *net.UnixConn) error {
 		return ErrInvalidHome
 	}
 	return nil
-}
-
-func localAPIPeerPID(connection *net.UnixConn) (int, error) {
-	if connection == nil {
-		return 0, ErrInvalidHome
-	}
-	raw, err := connection.SyscallConn()
-	if err != nil {
-		return 0, ErrInvalidHome
-	}
-	var peerPID int
-	var socketErr error
-	if err := raw.Control(func(fd uintptr) {
-		peerPID, socketErr = unix.GetsockoptInt(int(fd), unix.SOL_LOCAL, unix.LOCAL_PEERPID)
-	}); err != nil || socketErr != nil || peerPID <= 1 {
-		return 0, ErrInvalidHome
-	}
-	return peerPID, nil
 }
 
 const (

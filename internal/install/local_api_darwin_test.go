@@ -125,19 +125,6 @@ func acceptLocalAPIConnection(t *testing.T, fixture *localAPIFixture) (*LocalAPI
 	return nil, nil
 }
 
-func TestLocalAPIConnectionRecordsExactPeerPID(t *testing.T) {
-	fixture := newLocalAPIFixture(t, 'P')
-	server, client := acceptLocalAPIConnection(t, fixture)
-	t.Cleanup(func() {
-		_ = server.Close()
-		_ = client.Close()
-	})
-	pid, err := server.PeerPID()
-	if err != nil || pid != os.Getpid() {
-		t.Fatalf("peer PID = %d, %v; want %d", pid, err, os.Getpid())
-	}
-}
-
 func resetUncertainLocalAPIForCleanup(authority *LocalAPIAuthority, home *OperationalHome, listenerGone bool, socketGone bool) {
 	authority.state.mu.Lock()
 	authority.state.closed = false
