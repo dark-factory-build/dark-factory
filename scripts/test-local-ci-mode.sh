@@ -6,6 +6,7 @@ local_gate="$repository_root/scripts/local-ci.sh"
 ordinary_gate="$repository_root/scripts/go-check.sh"
 process_gate="$repository_root/scripts/go-ci-owned.sh"
 process_entry="$repository_root/scripts/go-ci.sh"
+service_gate="$repository_root/scripts/go-service-e2e.sh"
 fail() { echo "local-ci shape test failed: $*" >&2; exit 1; }
 
 set +e
@@ -17,21 +18,22 @@ set -e
 
 ordinary_line=$(grep -n -F 'echo "local-ci: ordinary source gate"' "$local_gate" | cut -d: -f1)
 process_line=$(grep -n -F 'echo "local-ci: process-sensitive gate"' "$local_gate" | cut -d: -f1)
-service_line=$(grep -n -F 'echo "local-ci: service gate"' "$local_gate" | cut -d: -f1)
 release_line=$(grep -n -F 'echo "local-ci: release gate"' "$local_gate" | cut -d: -f1)
 [ -n "$ordinary_line" ] && [ "$ordinary_line" -lt "$process_line" ] \
-    && [ "$process_line" -lt "$service_line" ] && [ "$service_line" -lt "$release_line" ] \
-    || fail "ordinary, process, service, and release gates are not ordered"
+    && [ "$process_line" -lt "$release_line" ] \
+    || fail "ordinary, process, and release gates are not ordered"
 
 for invocation in './scripts/go-check.sh' '/bin/sh "$script_dir/go-ci-owned.sh"'; do
     [ "$(grep -Fc "$invocation" "$local_gate")" -eq 1 ] || fail "gate invocation is not unique: $invocation"
 done
-[ "$(grep -Fc './scripts/go-service-e2e.sh' "$local_gate")" -eq 1 ] \
-    || fail "service lifecycle proof is not unique"
-grep -Fq '/bin/launchctl print "gui/$(/usr/bin/id -u)/com.dark-factory.factoryd"' "$local_gate" \
-    || fail "service lifecycle proof lost its live-install boundary"
-[ "$(grep -Fc './scripts/test-local-ci-lease.sh' "$local_gate")" -eq 1 ] \
-    || fail "local-CI lease proof is not unique"
+if grep -Fq 'go-service-e2e.sh' "$local_gate"; then
+    fail "focused service lifecycle proof returned to the routine gate"
+fi
+grep -Fq 'exec "$script_dir/with-local-ci-lease.sh" "$script_dir/local-ci.sh"' "$local_gate" \
+    || fail "local-CI entry lost the repository lease"
+if grep -Eq 'test-local-ci-lease(-mutations)?\.sh' "$local_gate"; then
+    fail "focused lease stress returned to the routine gate"
+fi
 [ "$(grep -Fc '/bin/sh ./scripts/test-go-gates.sh' "$local_gate")" -eq 1 ] \
     || fail "fault fixtures are not invoked through their non-executable shell boundary"
 [ ! -x "$repository_root/scripts/test-go-gates.sh" ] \
@@ -78,6 +80,8 @@ if grep -Eq -- '-p[[:space:]]+1' "$process_gate"; then
     fail "process packages are globally serial"
 fi
 grep -Fq 'with-local-ci-lease.sh' "$process_entry" || fail "process entry lost the repository lease"
+grep -Fq 'exec "$script_dir/with-local-ci-lease.sh" "$script_dir/go-service-e2e.sh"' "$service_gate" \
+    || fail "focused service gate lost the repository lease"
 [ ! -e "$repository_root/scripts/go-fast-stage.sh" ] || fail "obsolete fast-stage helper survives"
 
 node -e '
@@ -86,6 +90,9 @@ if ((scripts.check.match(/packages:build/g) || []).length !== 1) process.exit(1)
 if (!scripts.check.includes("dark-factory-dev typecheck") || !scripts.check.includes("node --test")) process.exit(1);
 ' "$repository_root/web/package.json" || fail "TypeScript check does not build once before typecheck and tests"
 
-/bin/sh -n "$local_gate" "$ordinary_gate" "$process_gate" "$process_entry" \
-    "$repository_root/scripts/go-gate-environment.sh" "$repository_root/scripts/test-go-gates.sh" "$0"
+/bin/sh -n "$local_gate" "$ordinary_gate" "$process_gate" "$process_entry" "$service_gate" \
+    "$repository_root/scripts/go-gate-environment.sh" \
+    "$repository_root/scripts/local-ci-lease.sh" \
+    "$repository_root/scripts/with-local-ci-lease.sh" \
+    "$repository_root/scripts/test-go-gates.sh" "$0"
 echo "local-ci shape tests passed"

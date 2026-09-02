@@ -110,21 +110,20 @@ wait_bounded() {
     wait_pid=$2
     wait_seconds=${3:-$wait_timeout_seconds}
     wait_timed_out=0
-    wait_timer_pid=
     wait_alarm() {
         wait_timed_out=1
     }
     trap wait_alarm 14
-    ( sleep "$wait_seconds"; kill -14 "$$" ) &
+    /usr/bin/perl -e 'sleep $ARGV[0]; kill "ALRM", $ARGV[1]' "$wait_seconds" "$$" &
     wait_timer_pid=$!
     if wait "$wait_pid"; then
         wait_status=0
     else
         wait_status=$?
     fi
-    trap - 14
-    kill "$wait_timer_pid" 2>/dev/null || true
+    kill -KILL "$wait_timer_pid" 2>/dev/null || true
     wait "$wait_timer_pid" 2>/dev/null || true
+    trap - 14
     if [ "$wait_timed_out" -ne 0 ]; then
         echo "local-ci lease test failed: $wait_phase: timed out after ${wait_seconds}s waiting for child pid=$wait_pid" >&2
         return 124

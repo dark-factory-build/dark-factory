@@ -85,6 +85,12 @@ directory, so linked worktrees cannot stack process-heavy Go runs. Set
 `DARK_FACTORY_LOCAL_CI_WAIT=0` to fail instead of waiting. Do not bypass the
 lease for process, daemon, browser, service, race, or stress fixtures.
 
+The full lease stress suites are focused checks, not routine gates. Run
+`scripts/test-local-ci-lease.sh` and `scripts/test-local-ci-lease-mutations.sh`
+when changing the lease helpers, their entry/owner semantics, or the macOS
+process primitives they depend on; unrelated source and documentation changes
+still exercise the real lease by entering `scripts/local-ci.sh` normally.
+
 The supervisor currently runs worker attempts with `VerificationNone`. The
 schema recognizes other roles and verification values, but unsupported
 combinations fail before provider execution and are not routine gate lanes.

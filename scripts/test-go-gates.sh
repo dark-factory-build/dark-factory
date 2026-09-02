@@ -263,13 +263,8 @@ if grep -Eq 'rm -rf|cleanup_scratch|dark-factory-ci-home' \
 fi
 local_fixture="$temporary/local"
 /bin/mkdir -p "$local_fixture/scripts" "$local_fixture/poison"
-/usr/bin/sed "s#/bin/launchctl#$local_fixture/scripts/launchctl#" \
-    "$repository_root/scripts/local-ci.sh" >"$local_fixture/scripts/local-ci.sh"
+/bin/cp "$repository_root/scripts/local-ci.sh" "$local_fixture/scripts/local-ci.sh"
 /bin/cp "$repository_root/scripts/local-ci-environment.sh" "$local_fixture/scripts/local-ci-environment.sh"
-/bin/cat >"$local_fixture/scripts/launchctl" <<'EOF'
-#!/bin/sh
-exit 113
-EOF
 /bin/cat >"$local_fixture/scripts/stub" <<'EOF'
 #!/bin/sh
 name=$(/usr/bin/basename "$0")
@@ -281,7 +276,6 @@ if [ "${DF_GATE_FAULT-}" = env ]; then
         || { echo 'fixture Git environment was not scrubbed' >&2; exit 1; }
 fi
 case "${DF_GATE_FAULT-}:$name" in
-    service:go-service-e2e.sh) echo 'fixture service proof failure' >&2; exit 1 ;;
     release:test-package-release.sh) echo 'fixture release proof failure' >&2; exit 1 ;;
 esac
 EOF
@@ -322,8 +316,7 @@ printf '%s\n' "\$DF_CI_CACHE_ROOT" >"$local_fixture/cache-roots"
 . "$local_fixture/scripts/local-ci-environment.sh"
 printf '%s\n' "\$DF_CI_CACHE_ROOT" >>"$local_fixture/cache-roots"
 EOF
-/bin/chmod 755 "$local_fixture/scripts/local-ci.sh" "$local_fixture/scripts/launchctl" \
-    "$local_fixture/scripts/stub"
+/bin/chmod 755 "$local_fixture/scripts/local-ci.sh" "$local_fixture/scripts/stub"
 /bin/chmod 755 "$local_fixture/poison/dirname" "$local_fixture/poison/node" \
     "$local_fixture/poison/corepack" "$local_fixture/poison/go" \
     "$local_fixture/scripts/go-check.sh"
@@ -331,9 +324,7 @@ for local_child in \
     check-toolchain-pins.sh test-local-ci-environment.sh test-new-worktree.sh \
     test-github-step-summary.sh test-verify-adversarial-review.sh test-inline-chokepoint.sh \
     test-cloudflare-env.sh test-bootstrap-maintainer-v2.sh test-repository-settings.sh \
-    test-local-ci-mode.sh test-go-gates.sh test-local-ci-lease.sh \
-    test-local-ci-lease-mutations.sh test-go-e2e-tools.sh go-ci-owned.sh \
-    go-service-e2e.sh \
+    test-local-ci-mode.sh test-go-gates.sh test-go-e2e-tools.sh go-ci-owned.sh \
     test-prepare-release-source.sh test-publish-release.sh test-package-release.sh; do
     /bin/ln -s stub "$local_fixture/scripts/$local_child"
 done
@@ -348,9 +339,7 @@ run_local_fault() {
     local_status=$?
     set -e
 }
-for local_fault in \
-    'service:fixture service proof failure' \
-    'release:fixture release proof failure'; do
+for local_fault in 'release:fixture release proof failure'; do
     local_mode=${local_fault%%:*}
     local_want=${local_fault#*:}
     run_local_fault "$local_mode"
