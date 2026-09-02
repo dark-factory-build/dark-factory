@@ -231,15 +231,29 @@ func (attempt *liveAttempt) processLifecycle(ctx context.Context) (bool, error) 
 	if attempt.terminationSent || attempt.resultReturned {
 		return false, nil
 	}
-	if ctx.Err() != nil {
-		return false, attempt.terminateController()
-	}
 	if attempt.daemon == nil || attempt.daemon.store == nil {
+		if ctx.Err() != nil {
+			return false, attempt.terminateController()
+		}
 		return false, nil
+	}
+	// An outcome handler retains operationMu until its response connection has
+	// closed. Never wait for that gate here: terminal-effect callers retain the
+	// same gate while waiting for this owner to consume their mailbox command.
+	// A failed probe therefore skips lifecycle work for one iteration, allowing
+	// the mailbox to make progress without terminating the reporting client.
+	if !attempt.daemon.operationMu.TryLock() {
+		return false, nil
+	}
+	cancelled := ctx.Err()
+	if cancelled != nil {
+		attempt.daemon.operationMu.Unlock()
+		return false, attempt.terminateController()
 	}
 	storeCtx, cancel := context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
 	run, found, err := attempt.daemon.store.Run(storeCtx, attempt.runID)
 	cancel()
+	attempt.daemon.operationMu.Unlock()
 	if err != nil {
 		return false, err
 	}
