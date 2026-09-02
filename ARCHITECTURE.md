@@ -180,6 +180,17 @@ inode identity, and no live lease; replacement or ambiguity remains visibly
 pending and is never touched. Retries reuse a retained Change only after the
 preceding run is terminal.
 
+Fresh selection pins the exact repository root, Git administration directory,
+bounded local config, object-directory root, and trusted Git executable around
+each metadata process. It does not enumerate unrelated historical objects.
+Trusted Git resolves the revision once, the tree query names that exact commit,
+and the manifest binds every path, mode, size, and blob object ID. Materializing
+each selected blob requires the expected object ID, type, and size and
+independently hashes its bytes before the `.git`-free tree is published.
+Concurrent garbage collection, repacking, or unrelated object creation may
+therefore preserve the exact selection or make its read fail; it cannot select
+a different moving revision.
+
 ## Verification and storage
 
 The current daemon has no generic build API or completion verifier. Project

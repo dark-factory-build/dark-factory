@@ -440,7 +440,6 @@ func TestGitRepositoryRejectsWritableAuthorityBeforeGit(t *testing.T) {
 		name     string
 		relative string
 		mode     os.FileMode
-		prepare  func(testing.TB, string)
 	}
 	attacks := []attack{
 		{name: "group-writable root", mode: 0o720},
@@ -451,36 +450,6 @@ func TestGitRepositoryRejectsWritableAuthorityBeforeGit(t *testing.T) {
 		{name: "world-writable config", relative: ".git/config", mode: 0o602},
 		{name: "group-writable objects", relative: ".git/objects", mode: 0o720},
 		{name: "world-writable objects", relative: ".git/objects", mode: 0o702},
-		{
-			name: "group-writable nested object directory", relative: ".git/objects/aa", mode: 0o720,
-			prepare: func(t testing.TB, path string) {
-				if err := os.Mkdir(path, 0o700); err != nil {
-					t.Fatal(err)
-				}
-			},
-		},
-		{
-			name: "world-writable nested object file", relative: ".git/objects/aa/" + strings.Repeat("0", 38), mode: 0o602,
-			prepare: func(t testing.TB, path string) {
-				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(path, []byte("object"), 0o600); err != nil {
-					t.Fatal(err)
-				}
-			},
-		},
-		{
-			name: "group-writable object admin file", relative: ".git/objects/info/packs", mode: 0o620,
-			prepare: func(t testing.TB, path string) {
-				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(path, nil, 0o600); err != nil {
-					t.Fatal(err)
-				}
-			},
-		},
 	}
 	for _, attack := range attacks {
 		t.Run(attack.name, func(t *testing.T) {
@@ -489,243 +458,68 @@ func TestGitRepositoryRejectsWritableAuthorityBeforeGit(t *testing.T) {
 			if attack.relative != "" {
 				path = filepath.Join(repository, attack.relative)
 			}
-			if attack.prepare != nil {
-				attack.prepare(t, path)
-			}
 			if err := os.Chmod(path, attack.mode); err != nil {
 				t.Fatal(err)
 			}
-			assertObjectStoreRejectedBeforeGit(t, repository, mustRepositoryIdentity(t, repository))
+			assertRepositoryRejectedBeforeGit(t, repository, mustRepositoryIdentity(t, repository))
 		})
 	}
 }
 
-func TestGitObjectStoreRejectsNestedIndirectionBeforeGit(t *testing.T) {
-	t.Run("all loose fanouts symlinked outside", func(t *testing.T) {
-		fixture := newLocalGitFixture(t, "sha1")
-		objects := filepath.Join(fixture.repository, ".git", "objects")
-		outside := filepath.Join(filepath.Dir(fixture.repository), "external-loose")
-		if err := os.Mkdir(outside, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		entries, err := os.ReadDir(objects)
-		if err != nil {
-			t.Fatal(err)
-		}
-		moved := 0
-		for _, entry := range entries {
-			if !entry.IsDir() || len(entry.Name()) != 2 || !isLowerHex(entry.Name()) {
-				continue
-			}
-			from := filepath.Join(objects, entry.Name())
-			to := filepath.Join(outside, entry.Name())
-			if err := os.Rename(from, to); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Symlink(to, from); err != nil {
-				t.Fatal(err)
-			}
-			moved++
-		}
-		if moved == 0 {
-			t.Fatal("fixture produced no loose fanouts")
-		}
-		assertObjectStoreRejectedBeforeGit(t, fixture.repository, fixture.identity)
-	})
-
-	t.Run("loose object symlink", func(t *testing.T) {
-		fixture := newLocalGitFixture(t, "sha1")
-		object := firstLooseObject(t, fixture.repository)
-		outside := filepath.Join(filepath.Dir(fixture.repository), "external-object")
-		if err := os.Rename(object, outside); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Symlink(outside, object); err != nil {
-			t.Fatal(err)
-		}
-		assertObjectStoreRejectedBeforeGit(t, fixture.repository, fixture.identity)
-	})
-
-	t.Run("pack directory symlink", func(t *testing.T) {
-		fixture := newLocalGitFixture(t, "sha1")
-		pack := filepath.Join(fixture.repository, ".git", "objects", "pack")
-		outside := filepath.Join(filepath.Dir(fixture.repository), "external-pack")
-		if err := os.Rename(pack, outside); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Symlink(outside, pack); err != nil {
-			t.Fatal(err)
-		}
-		assertObjectStoreRejectedBeforeGit(t, fixture.repository, fixture.identity)
-	})
-
-	for _, attack := range []struct {
-		name     string
-		relative string
-	}{
-		{"pack symlink", "pack/pack-" + strings.Repeat("1", 40) + ".pack"},
-		{"index symlink", "pack/pack-" + strings.Repeat("1", 40) + ".idx"},
-		{"multi-pack symlink", "pack/multi-pack-index"},
-		{"multi-pack bitmap symlink", "pack/multi-pack-index-" + strings.Repeat("2", 40) + ".bitmap"},
-		{"commit graph symlink", "info/commit-graph"},
-		{"split commit graph symlink", "info/commit-graphs/graph-" + strings.Repeat("3", 40) + ".graph"},
-	} {
-		t.Run(attack.name, func(t *testing.T) {
-			repository := fakeRepository(t)
-			target := filepath.Join(repository, ".git", "objects", attack.relative)
-			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			outside := filepath.Join(filepath.Dir(repository), strings.ReplaceAll(attack.name, " ", "-"))
-			if err := os.WriteFile(outside, []byte("object artifact"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Symlink(outside, target); err != nil {
-				t.Fatal(err)
-			}
-			assertObjectStoreRejectedBeforeGit(t, repository, mustRepositoryIdentity(t, repository))
-		})
-	}
-}
-
-func TestGitObjectStoreAllowsOwnedHardlinksAndDetectsAliasMutation(t *testing.T) {
+func TestGitSelectionToleratesUnrelatedObjectStoreChurn(t *testing.T) {
 	fixture := newLocalGitFixture(t, "sha1")
-	object := firstLooseObject(t, fixture.repository)
-	alias := filepath.Join(filepath.Dir(fixture.repository), "shared-object")
-	if err := os.Link(object, alias); err != nil {
+	unrelated := filepath.Join(fixture.repository, ".git", "objects", "aa", strings.Repeat("0", 38))
+	if err := os.MkdirAll(filepath.Dir(unrelated), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	mutated := false
+	selected, err := selectGit(context.Background(), fixture.git, fixture.repository, "HEAD", fixture.identity, func(event gitProcessEvent) {
+		if event != gitProcessWaited || mutated {
+			return
+		}
+		mutated = true
+		if writeErr := os.WriteFile(unrelated, []byte("unrelated object churn"), 0o600); writeErr != nil {
+			panic(writeErr)
+		}
+	})
+	if err != nil {
+		t.Fatalf("unrelated object-store churn rejected: %v", err)
+	}
+	if !mutated {
+		t.Fatal("fixture did not mutate the object store between Git phases")
+	}
+	if !selected.Commitment().Equal(fixture.manifest.Commitment()) {
+		t.Fatal("unrelated object-store churn changed the selected commitment")
+	}
+}
 
+func TestGitSelectionMaterializesAfterReachableRepack(t *testing.T) {
+	fixture := newLocalGitFixture(t, "sha1")
 	selected, err := SelectGit(context.Background(), fixture.git, fixture.repository, "HEAD", fixture.identity)
 	if err != nil {
-		t.Fatalf("owned hardlink rejected: %v", err)
-	}
-	body, err := os.ReadFile(alias)
-	if err != nil || len(body) == 0 {
-		t.Fatalf("read hardlink: bytes=%d err=%v", len(body), err)
-	}
-	if err := os.Chmod(alias, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	body[0] ^= 0xff
-	if err := os.WriteFile(alias, body, 0o600); err != nil {
+	runFixtureGit(t, fixture.git, fixture.repository, "gc", "--prune=now")
+	prepared := mustPrepare(t, secureTempDir(t), "published", "declared-stage")
+	blobs, err := OpenGitBlobs(context.Background(), fixture.git, fixture.repository, selected)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := OpenGitBlobs(context.Background(), fixture.git, fixture.repository, selected); err == nil {
-		t.Fatal("hardlink mutation crossed the object-store phase checkpoint")
+	published, err := prepared.PopulateAndPublish(context.Background(), selected.Manifest(), blobs.Read)
+	if err != nil {
+		_ = blobs.Abort()
+		t.Fatal(err)
 	}
+	if err := blobs.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepared.Close(); err != nil {
+		t.Fatal(err)
+	}
+	assertExactTree(t, published.Path(), changeFixture{manifest: fixture.manifest, blobs: fixture.blobs})
 }
 
-func TestGitObjectStoreSupportsLooseAndPackedRepositoriesAndRecordsCost(t *testing.T) {
-	for _, packed := range []bool{false, true} {
-		name := "loose"
-		if packed {
-			name = "packed"
-		}
-		t.Run(name, func(t *testing.T) {
-			fixture := newLocalGitFixture(t, "sha1")
-			if packed {
-				runFixtureGit(t, fixture.git, fixture.repository, "gc", "--prune=now")
-			}
-			started := time.Now()
-			selected, err := SelectGit(context.Background(), fixture.git, fixture.repository, "HEAD", fixture.identity)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !selected.Commitment().Equal(fixture.manifest.Commitment()) {
-				t.Fatal("object-store shape changed the selected commitment")
-			}
-			t.Logf("%s object-store checkpoint: entries=%d selection=%s", name, selected.repository.objectStore.entryCount, time.Since(started))
-		})
-	}
-}
-
-func TestGitObjectStoreBoundsGrammarAndPhaseIdentity(t *testing.T) {
-	t.Run("bounded enumeration", func(t *testing.T) {
-		repository := fakeRepository(t)
-		fanout := filepath.Join(repository, ".git", "objects", "aa")
-		if err := os.Mkdir(fanout, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		for index := range 4 {
-			name := fmt.Sprintf("%038x", index+1)
-			if err := os.WriteFile(filepath.Join(fanout, name), []byte("x"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-		}
-		fd, err := unix.Open(filepath.Join(repository, ".git", "objects"), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer unix.Close(fd)
-		if _, err := checkpointGitObjectStore(fd, 3); err == nil {
-			t.Fatal("bounded scanner accepted more than its exact entry budget")
-		}
-	})
-	for _, invalid := range []struct {
-		name string
-		make func(testing.TB, string)
-	}{
-		{"unknown", func(t testing.TB, objects string) { mustWriteTestFile(t, filepath.Join(objects, "mystery")) }},
-		{"depth", func(t testing.TB, objects string) {
-			if err := os.MkdirAll(filepath.Join(objects, "info", "commit-graphs", "nested"), 0o700); err != nil {
-				t.Fatal(err)
-			}
-		}},
-		{"fifo", func(t testing.TB, objects string) {
-			fanout := filepath.Join(objects, "aa")
-			if err := os.Mkdir(fanout, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if err := unix.Mkfifo(filepath.Join(fanout, strings.Repeat("0", 38)), 0o600); err != nil {
-				t.Fatal(err)
-			}
-		}},
-	} {
-		t.Run(invalid.name, func(t *testing.T) {
-			repository := fakeRepository(t)
-			invalid.make(t, filepath.Join(repository, ".git", "objects"))
-			assertObjectStoreRejectedBeforeGit(t, repository, mustRepositoryIdentity(t, repository))
-		})
-	}
-
-	for _, relative := range []string{"aa/" + strings.Repeat("0", 38), "pack/pack-" + strings.Repeat("1", 40) + ".pack"} {
-		t.Run("phase swap "+relative[:2], func(t *testing.T) {
-			repository := fakeRepository(t)
-			object := filepath.Join(repository, ".git", "objects", relative)
-			if err := os.MkdirAll(filepath.Dir(object), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(object, []byte("stable bytes"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			logPath := filepath.Join(filepath.Dir(repository), "commands")
-			git := writeFakeGit(t, fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %q\nexit 1\n", logPath))
-			mutated := false
-			_, err := selectGit(context.Background(), git, repository, "HEAD", mustRepositoryIdentity(t, repository), func(event gitProcessEvent) {
-				if event != gitProcessWaited || mutated {
-					return
-				}
-				mutated = true
-				old := object + ".old"
-				if renameErr := os.Rename(object, old); renameErr != nil {
-					panic(renameErr)
-				}
-				if writeErr := os.WriteFile(object, mustReadFile(t, old), 0o600); writeErr != nil {
-					panic(writeErr)
-				}
-			})
-			if err == nil {
-				t.Fatal("object-store identity swap crossed a Git phase")
-			}
-			if lines := bytes.Count(mustReadFile(t, logPath), []byte{'\n'}); lines != 1 {
-				t.Fatalf("Git continued after object-store swap: command lines=%d", lines)
-			}
-		})
-	}
-}
-
-func assertObjectStoreRejectedBeforeGit(t testing.TB, repository string, identity RepositoryIdentity) {
+func assertRepositoryRejectedBeforeGit(t testing.TB, repository string, identity RepositoryIdentity) {
 	t.Helper()
 	witness := filepath.Join(filepath.Dir(repository), "git-started")
 	git := writeFakeGit(t, fmt.Sprintf("#!/bin/sh\n: > %q\nexit 99\n", witness))
@@ -734,36 +528,6 @@ func assertObjectStoreRejectedBeforeGit(t testing.TB, repository string, identit
 	}
 	if _, err := os.Lstat(witness); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("Git ran before object-store refusal: %v", err)
-	}
-}
-
-func firstLooseObject(t testing.TB, repository string) string {
-	t.Helper()
-	objects := filepath.Join(repository, ".git", "objects")
-	entries, err := os.ReadDir(objects)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() || len(entry.Name()) != 2 || !isLowerHex(entry.Name()) {
-			continue
-		}
-		files, err := os.ReadDir(filepath.Join(objects, entry.Name()))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(files) > 0 {
-			return filepath.Join(objects, entry.Name(), files[0].Name())
-		}
-	}
-	t.Fatal("fixture produced no loose object")
-	return ""
-}
-
-func mustWriteTestFile(t testing.TB, path string) {
-	t.Helper()
-	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
 	}
 }
 

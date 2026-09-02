@@ -568,8 +568,12 @@ func TestSelectedLooseObjectRemovalFailsWithoutFallback(t *testing.T) {
 	if err := os.Rename(objectPath, quarantine); err != nil {
 		t.Fatalf("quarantine selected loose object: %v", err)
 	}
-	if _, err := OpenGitBlobs(context.Background(), fixture.git, fixture.repository, selected); err == nil {
-		t.Fatal("missing selected object crossed the exact object-store checkpoint")
+	blobs, err := OpenGitBlobs(context.Background(), fixture.git, fixture.repository, selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := blobs.Read(context.Background(), first.oid); err == nil {
+		t.Fatal("missing selected object was read after selection")
 	}
 }
 
