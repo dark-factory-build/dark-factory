@@ -238,6 +238,43 @@ test("active-task target absence waits for the next public head before retrying"
   assert.equal(new TextDecoder().decode(inputCalls[0].bytes), "typed immediately");
 });
 
+test("pending direct input never crosses tasks on the same agent", async () => {
+  const context = terminalHarness();
+  context.controller.start();
+  context.ready();
+  context.controller.selectAgent(agent);
+  const token = {};
+  context.controller.beginTerminalSurface(token);
+  context.controller.setTerminalSurface(token, { write: async () => {}, abort: () => {} });
+  context.controller.sendTerminalText(token, "for task A");
+  await flush();
+  context.targetGates[0].resolve(null);
+  await flush();
+
+  const tasks = new Map(fixtureState.tasks);
+  const taskA = [...tasks.values()].find(
+    (task) => task.assigned_agent_id === agent.id && task.status === "running",
+  );
+  assert.notEqual(taskA, undefined);
+  tasks.set(taskA.id, { ...taskA, status: "succeeded", revision: taskA.revision + 1n });
+  tasks.set("fe".repeat(16), {
+    ...taskA,
+    id: "fe".repeat(16),
+    title: "Task B",
+    status: "running",
+    revision: 1n,
+  });
+
+  await remountSurface(context);
+  context.clientOptions().onState(stateAt(43, { tasks }));
+  await flush();
+  assert.equal(context.targetGates.length, 2);
+  context.targetGates[1].resolve(target);
+  await flush();
+  assert.equal(context.latest().terminal.phase, "ready");
+  assert.equal(context.calls.some((call) => call.kind === "input"), false);
+});
+
 test("pending direct input never crosses a connection restart", async () => {
   const context = terminalHarness();
   context.controller.start();
