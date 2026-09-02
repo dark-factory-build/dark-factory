@@ -11,7 +11,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -64,6 +67,11 @@ func (fixture *manageFixture) service() string {
 
 func (fixture *manageFixture) printRunning(pid int) launchctlResult {
 	output := fixture.service() + " = {\n\tpath = " + fixture.plistPath() + "\n\tstate = running\n\tprogram = " + serviceProgramPath(fixture.home) + "\n\tpid = " + fmt.Sprint(pid) + "\n}\n"
+	return launchctlResult{status: 0, stdout: []byte(output)}
+}
+
+func (fixture *manageFixture) printIdle() launchctlResult {
+	output := fixture.service() + " = {\n\tpath = " + fixture.plistPath() + "\n\tstate = not running\n\tprogram = " + serviceProgramPath(fixture.home) + "\n}\n"
 	return launchctlResult{status: 0, stdout: []byte(output)}
 }
 
@@ -180,6 +188,16 @@ func TestServiceInstallLifecycleConvergesThroughEveryVerb(t *testing.T) {
 	if got := stop.calls[1]; len(got) != 2 || got[0] != "bootout" || got[1] != fixture.service() {
 		t.Fatalf("bootout call = %q", stop.calls[1])
 	}
+	alreadyStopped := &recordedLaunchctl{results: fixture.printAbsent()}
+	status, err = serviceStopAt(context.Background(), fixture.home, fixture.userHome, fixture.config, alreadyStopped.run)
+	if err != nil || status.State != ServiceInstalled || len(alreadyStopped.calls) != 2 {
+		t.Fatalf("repeat stop = %+v, %v, calls=%q", status, err, alreadyStopped.calls)
+	}
+	loadedIdleStop := &recordedLaunchctl{results: []launchctlResult{fixture.printIdle(), {status: 0}, {status: launchctlNotFound}}}
+	status, err = serviceStopAt(context.Background(), fixture.home, fixture.userHome, fixture.config, loadedIdleStop.run)
+	if err != nil || status.State != ServiceInstalled || len(loadedIdleStop.calls) != 3 || loadedIdleStop.calls[1][0] != "bootout" {
+		t.Fatalf("loaded-idle stop = %+v, %v, calls=%q", status, err, loadedIdleStop.calls)
+	}
 
 	// Stopped status is installed, not ambiguous.
 	stopped := &recordedLaunchctl{results: fixture.printAbsent()}
@@ -194,9 +212,14 @@ func TestServiceInstallLifecycleConvergesThroughEveryVerb(t *testing.T) {
 	if err != nil || status != (ServiceStatus{State: ServiceRunning, PID: 4400}) {
 		t.Fatalf("start = %+v, %v", status, err)
 	}
+	loadedIdleStart := &recordedLaunchctl{results: []launchctlResult{fixture.printIdle(), {status: 0}, {status: launchctlNotFound}, {status: 0}, fixture.printRunning(4500)}}
+	status, err = serviceStartAt(context.Background(), fixture.home, fixture.userHome, fixture.config, loadedIdleStart.run)
+	if err != nil || status != (ServiceStatus{State: ServiceRunning, PID: 4500}) || len(loadedIdleStart.calls) != 5 || loadedIdleStart.calls[1][0] != "bootout" || loadedIdleStart.calls[3][0] != "bootstrap" {
+		t.Fatalf("loaded-idle start = %+v, %v, calls=%q", status, err, loadedIdleStart.calls)
+	}
 
 	// Uninstall removes every artifact and proves absence.
-	uninstall := &recordedLaunchctl{results: []launchctlResult{{status: 0}, {status: launchctlNotFound}}}
+	uninstall := &recordedLaunchctl{results: []launchctlResult{fixture.printRunning(4400), {status: 0}, {status: launchctlNotFound}}}
 	status, err = serviceUninstallAt(context.Background(), fixture.home, fixture.userHome, fixture.config, uninstall.run)
 	if err != nil || status.State != ServiceAbsent {
 		t.Fatalf("uninstall = %+v, %v", status, err)
@@ -244,7 +267,7 @@ func TestServiceInstallRefusesForeignPlistAndResidue(t *testing.T) {
 	if _, err := serviceInstallAt(context.Background(), fixture.home, fixture.userHome, fixture.config, fixture.sourceDir, refuse.run); !errors.Is(err, ErrServiceResidue) {
 		t.Fatalf("install over residue = %v", err)
 	}
-	resolve := &recordedLaunchctl{results: []launchctlResult{{status: launchctlNotFound}, {status: launchctlNotFound}}}
+	resolve := &recordedLaunchctl{results: fixture.printAbsent()}
 	status, err = serviceUninstallAt(context.Background(), fixture.home, fixture.userHome, fixture.config, resolve.run)
 	if err != nil || status.State != ServiceAbsent {
 		t.Fatalf("uninstall residue = %+v, %v", status, err)
@@ -272,7 +295,7 @@ func TestServiceStatusRefusesTamperedProgramAndForeignUninstall(t *testing.T) {
 	if err := os.WriteFile(extra, []byte("not ours to delete"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	blocked := &recordedLaunchctl{results: []launchctlResult{{status: 0}, {status: launchctlNotFound}}}
+	blocked := &recordedLaunchctl{results: []launchctlResult{fixture.printRunning(88), {status: 0}, {status: launchctlNotFound}}}
 	if _, err := serviceUninstallAt(context.Background(), fixture.home, fixture.userHome, fixture.config, blocked.run); !errors.Is(err, ErrServiceForeign) {
 		t.Fatalf("uninstall with foreign file = %v", err)
 	}
@@ -313,6 +336,80 @@ func TestServiceMutationsValidateRequestsBeforeTouchingAnything(t *testing.T) {
 	if _, present, err := readServiceReceipt(fixture.home); err != nil || present {
 		t.Fatalf("receipt written despite refused source: present=%t err=%v", present, err)
 	}
+}
+
+func TestServiceMutationLockRejectsEveryConcurrentVerbBeforeLaunchctl(t *testing.T) {
+	fixture := newManageFixture(t)
+	var calls atomic.Int64
+	launchctl := func(context.Context, ...string) launchctlResult {
+		calls.Add(1)
+		return launchctlResult{status: -1, err: errors.New("launchctl must not run")}
+	}
+	_, err := withServiceMutation(context.Background(), fixture.home, func(*serviceHomeCapability) (ServiceStatus, error) {
+		tests := []struct {
+			name string
+			run  func() (ServiceStatus, error)
+		}{
+			{"install", func() (ServiceStatus, error) {
+				return serviceInstallAt(context.Background(), fixture.home, fixture.userHome, fixture.config, fixture.sourceDir, launchctl)
+			}},
+			{"start", func() (ServiceStatus, error) {
+				return serviceStartAt(context.Background(), fixture.home, fixture.userHome, fixture.config, launchctl)
+			}},
+			{"stop", func() (ServiceStatus, error) {
+				return serviceStopAt(context.Background(), fixture.home, fixture.userHome, fixture.config, launchctl)
+			}},
+			{"uninstall", func() (ServiceStatus, error) {
+				return serviceUninstallAt(context.Background(), fixture.home, fixture.userHome, fixture.config, launchctl)
+			}},
+		}
+		for _, test := range tests {
+			if _, err := test.run(); !errors.Is(err, ErrBusy) {
+				t.Fatalf("%s concurrent mutation = %v", test.name, err)
+			}
+		}
+		return ServiceStatus{State: ServiceAbsent}, nil
+	})
+	if err != nil {
+		t.Fatalf("hold mutation lock: %v", err)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("concurrent mutations made %d launchctl calls", calls.Load())
+	}
+}
+
+func TestServiceMutationLockIsIndependentFromOperationalHomeLock(t *testing.T) {
+	t.Run("service then operational", func(t *testing.T) {
+		fixture := newManageFixture(t)
+		_, err := withServiceMutation(context.Background(), fixture.home, func(*serviceHomeCapability) (ServiceStatus, error) {
+			home, err := OpenOperationalHome(context.Background(), fixture.home)
+			if err != nil {
+				return ServiceStatus{}, err
+			}
+			return ServiceStatus{State: ServiceAbsent}, home.Close()
+		})
+		if err != nil {
+			t.Fatalf("operational lock while service lock held: %v", err)
+		}
+	})
+
+	t.Run("operational then service", func(t *testing.T) {
+		fixture := newManageFixture(t)
+		home, err := OpenOperationalHome(context.Background(), fixture.home)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if err := home.Close(); err != nil {
+				t.Errorf("close operational home: %v", err)
+			}
+		}()
+		if _, err := withServiceMutation(context.Background(), fixture.home, func(*serviceHomeCapability) (ServiceStatus, error) {
+			return ServiceStatus{State: ServiceAbsent}, nil
+		}); err != nil {
+			t.Fatalf("service lock while operational lock held: %v", err)
+		}
+	})
 }
 
 func TestServiceUninstallIsEvidenceFirst(t *testing.T) {
@@ -356,16 +453,172 @@ func TestServiceUninstallIsEvidenceFirst(t *testing.T) {
 	if status.State != ServiceAmbiguous || !errors.Is(err, ErrServiceForeign) {
 		t.Fatalf("label-mismatch uninstall = %+v, %v", status, err)
 	}
+	otherDirectory := fixture.config
+	otherDirectory.PlistDirectory = filepath.Join(fixture.root, "other-plists")
+	status, err = serviceUninstallAt(context.Background(), fixture.home, fixture.userHome, otherDirectory, deny)
+	if status.State != ServiceAmbiguous || !errors.Is(err, ErrServiceForeign) {
+		t.Fatalf("plist-path-mismatch uninstall = %+v, %v", status, err)
+	}
 
-	// With the matching receipt the bootout is the FIRST verb, and removal
-	// completes as before.
-	proven := &recordedLaunchctl{results: []launchctlResult{{status: 0}, {status: launchctlNotFound}}}
+	// With the matching receipt an exact observation precedes the mutating
+	// bootout, and removal completes as before.
+	proven := &recordedLaunchctl{results: []launchctlResult{fixture.printRunning(91), {status: 0}, {status: launchctlNotFound}}}
 	status, err = serviceUninstallAt(context.Background(), fixture.home, fixture.userHome, fixture.config, proven.run)
 	if err != nil || status.State != ServiceAbsent {
 		t.Fatalf("proven uninstall = %+v, %v", status, err)
 	}
-	if len(proven.calls) == 0 || proven.calls[0][0] != "bootout" {
+	if len(proven.calls) < 2 || proven.calls[0][0] != "print" || proven.calls[1][0] != "bootout" {
 		t.Fatalf("proven uninstall verbs = %q", proven.calls)
+	}
+}
+
+func TestServiceUninstallSkipsBootoutWhenAlreadyUnloaded(t *testing.T) {
+	fixture := newManageFixture(t)
+	installed := &recordedLaunchctl{results: append(fixture.printAbsent(), launchctlResult{status: 0}, fixture.printRunning(92))}
+	fixture.install(t, installed.run)
+
+	unloaded := &recordedLaunchctl{results: fixture.printAbsent()}
+	status, err := serviceUninstallAt(context.Background(), fixture.home, fixture.userHome, fixture.config, unloaded.run)
+	if err != nil || status.State != ServiceAbsent {
+		t.Fatalf("unloaded uninstall = %+v, %v", status, err)
+	}
+	if len(unloaded.calls) != 2 || unloaded.calls[0][0] != "print" || unloaded.calls[1][0] != "error" {
+		t.Fatalf("unloaded uninstall verbs = %q", unloaded.calls)
+	}
+	if _, err := os.Lstat(ServiceDirectoryPath(fixture.home)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("service directory survived unloaded uninstall")
+	}
+	if _, err := os.Lstat(fixture.plistPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("plist survived unloaded uninstall")
+	}
+}
+
+func TestServiceUninstallSerializesAbsentObservationAgainstStart(t *testing.T) {
+	fixture := newManageFixture(t)
+	installed := &recordedLaunchctl{results: append(fixture.printAbsent(), launchctlResult{status: 0}, fixture.printRunning(94))}
+	fixture.install(t, installed.run)
+
+	var loaded atomic.Bool
+	var startCalls atomic.Int64
+	startLaunchctl := func(_ context.Context, arguments ...string) launchctlResult {
+		startCalls.Add(1)
+		switch arguments[0] {
+		case "print":
+			if loaded.Load() {
+				return fixture.printRunning(95)
+			}
+			return launchctlResult{status: launchctlNotFound}
+		case "error":
+			return launchctlResult{status: 0, stdout: []byte(launchctlNotFoundText + "\n")}
+		case "bootstrap":
+			loaded.Store(true)
+			return launchctlResult{status: 0}
+		default:
+			return launchctlResult{status: -1, err: fmt.Errorf("unexpected start verb %q", arguments[0])}
+		}
+	}
+
+	observedAbsent := make(chan struct{})
+	releaseObservation := make(chan struct{})
+	var observedOnce sync.Once
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(releaseObservation) })
+	uninstallLaunchctl := func(_ context.Context, arguments ...string) launchctlResult {
+		switch arguments[0] {
+		case "print":
+			// Capture absence before exposing the interleaving. Without the
+			// mutation lock, start can bootstrap while this stale observation
+			// is paused and uninstall will then delete its live artifacts.
+			wasLoaded := loaded.Load()
+			observedOnce.Do(func() { close(observedAbsent) })
+			<-releaseObservation
+			if wasLoaded {
+				return fixture.printRunning(95)
+			}
+			return launchctlResult{status: launchctlNotFound}
+		case "error":
+			return launchctlResult{status: 0, stdout: []byte(launchctlNotFoundText + "\n")}
+		case "bootout":
+			loaded.Store(false)
+			return launchctlResult{status: 0}
+		default:
+			return launchctlResult{status: -1, err: fmt.Errorf("unexpected uninstall verb %q", arguments[0])}
+		}
+	}
+
+	type result struct {
+		status ServiceStatus
+		err    error
+	}
+	uninstallDone := make(chan result, 1)
+	go func() {
+		status, err := serviceUninstallAt(context.Background(), fixture.home, fixture.userHome, fixture.config, uninstallLaunchctl)
+		uninstallDone <- result{status: status, err: err}
+	}()
+	select {
+	case <-observedAbsent:
+	case <-time.After(3 * time.Second):
+		t.Fatal("uninstall did not reach the absent observation")
+	}
+
+	startDone := make(chan result, 1)
+	go func() {
+		status, err := serviceStartAt(context.Background(), fixture.home, fixture.userHome, fixture.config, startLaunchctl)
+		startDone <- result{status: status, err: err}
+	}()
+	var start result
+	select {
+	case start = <-startDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("concurrent start did not refuse the held mutation lock")
+	}
+	releaseOnce.Do(func() { close(releaseObservation) })
+	var uninstall result
+	select {
+	case uninstall = <-uninstallDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("uninstall did not finish after observation release")
+	}
+	if !errors.Is(start.err, ErrBusy) {
+		t.Fatalf("concurrent start = %+v, %v", start.status, start.err)
+	}
+	if startCalls.Load() != 0 {
+		t.Fatalf("concurrent start made %d launchctl calls", startCalls.Load())
+	}
+	if uninstall.err != nil || uninstall.status.State != ServiceAbsent {
+		t.Fatalf("uninstall = %+v, %v", uninstall.status, uninstall.err)
+	}
+	if loaded.Load() {
+		t.Fatal("start installed a live job behind uninstall's absent observation")
+	}
+	if _, err := os.Lstat(ServiceDirectoryPath(fixture.home)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("service directory survived serialized uninstall")
+	}
+	if _, err := os.Lstat(fixture.plistPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("plist survived serialized uninstall")
+	}
+}
+
+func TestServiceUninstallRefusesForeignLoadedJobBeforeBootout(t *testing.T) {
+	fixture := newManageFixture(t)
+	installed := &recordedLaunchctl{results: append(fixture.printAbsent(), launchctlResult{status: 0}, fixture.printRunning(93))}
+	fixture.install(t, installed.run)
+
+	foreignResult := fixture.printRunning(93)
+	foreignResult.stdout = []byte(strings.Replace(string(foreignResult.stdout), fixture.plistPath(), fixture.plistPath()+".foreign", 1))
+	foreign := &recordedLaunchctl{results: []launchctlResult{foreignResult}}
+	status, err := serviceUninstallAt(context.Background(), fixture.home, fixture.userHome, fixture.config, foreign.run)
+	if status.State != ServiceAmbiguous || !errors.Is(err, ErrServiceLaunchctl) {
+		t.Fatalf("foreign loaded job uninstall = %+v, %v", status, err)
+	}
+	if len(foreign.calls) != 1 || foreign.calls[0][0] != "print" {
+		t.Fatalf("foreign loaded job verbs = %q", foreign.calls)
+	}
+	if _, err := os.Lstat(ServiceDirectoryPath(fixture.home)); err != nil {
+		t.Fatal("service directory was removed")
+	}
+	if _, err := os.Lstat(fixture.plistPath()); err != nil {
+		t.Fatal("plist was removed")
 	}
 }
 
