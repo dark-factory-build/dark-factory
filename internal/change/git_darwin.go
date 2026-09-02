@@ -532,7 +532,7 @@ func (scan *gitObjectScan) validDirectory(stat unix.Stat_t) bool {
 
 func (scan *gitObjectScan) validFile(stat unix.Stat_t) bool {
 	return safeGitMode(stat.Mode, gitModeFile) && uint64(stat.Dev) == scan.rootDevice && stat.Uid == scan.rootUID &&
-		stat.Ino != 0 && stat.Nlink == 1 && stat.Size >= 0
+		stat.Ino != 0 && stat.Size >= 0
 }
 
 type gitModeKind byte
