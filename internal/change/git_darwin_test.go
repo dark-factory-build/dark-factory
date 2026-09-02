@@ -533,24 +533,18 @@ func TestGitObjectStoreRejectsNestedIndirectionBeforeGit(t *testing.T) {
 		assertObjectStoreRejectedBeforeGit(t, fixture.repository, fixture.identity)
 	})
 
-	for _, linkKind := range []string{"symlink", "hardlink"} {
-		t.Run("loose object "+linkKind, func(t *testing.T) {
-			fixture := newLocalGitFixture(t, "sha1")
-			object := firstLooseObject(t, fixture.repository)
-			outside := filepath.Join(filepath.Dir(fixture.repository), "external-object")
-			if linkKind == "symlink" {
-				if err := os.Rename(object, outside); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Symlink(outside, object); err != nil {
-					t.Fatal(err)
-				}
-			} else if err := os.Link(object, outside); err != nil {
-				t.Fatal(err)
-			}
-			assertObjectStoreRejectedBeforeGit(t, fixture.repository, fixture.identity)
-		})
-	}
+	t.Run("loose object symlink", func(t *testing.T) {
+		fixture := newLocalGitFixture(t, "sha1")
+		object := firstLooseObject(t, fixture.repository)
+		outside := filepath.Join(filepath.Dir(fixture.repository), "external-object")
+		if err := os.Rename(object, outside); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, object); err != nil {
+			t.Fatal(err)
+		}
+		assertObjectStoreRejectedBeforeGit(t, fixture.repository, fixture.identity)
+	})
 
 	t.Run("pack directory symlink", func(t *testing.T) {
 		fixture := newLocalGitFixture(t, "sha1")
@@ -568,14 +562,13 @@ func TestGitObjectStoreRejectsNestedIndirectionBeforeGit(t *testing.T) {
 	for _, attack := range []struct {
 		name     string
 		relative string
-		hardlink bool
 	}{
-		{"pack symlink", "pack/pack-" + strings.Repeat("1", 40) + ".pack", false},
-		{"index hardlink", "pack/pack-" + strings.Repeat("1", 40) + ".idx", true},
-		{"multi-pack symlink", "pack/multi-pack-index", false},
-		{"multi-pack bitmap hardlink", "pack/multi-pack-index-" + strings.Repeat("2", 40) + ".bitmap", true},
-		{"commit graph symlink", "info/commit-graph", false},
-		{"split commit graph hardlink", "info/commit-graphs/graph-" + strings.Repeat("3", 40) + ".graph", true},
+		{"pack symlink", "pack/pack-" + strings.Repeat("1", 40) + ".pack"},
+		{"index symlink", "pack/pack-" + strings.Repeat("1", 40) + ".idx"},
+		{"multi-pack symlink", "pack/multi-pack-index"},
+		{"multi-pack bitmap symlink", "pack/multi-pack-index-" + strings.Repeat("2", 40) + ".bitmap"},
+		{"commit graph symlink", "info/commit-graph"},
+		{"split commit graph symlink", "info/commit-graphs/graph-" + strings.Repeat("3", 40) + ".graph"},
 	} {
 		t.Run(attack.name, func(t *testing.T) {
 			repository := fakeRepository(t)
@@ -587,17 +580,39 @@ func TestGitObjectStoreRejectsNestedIndirectionBeforeGit(t *testing.T) {
 			if err := os.WriteFile(outside, []byte("object artifact"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			var err error
-			if attack.hardlink {
-				err = os.Link(outside, target)
-			} else {
-				err = os.Symlink(outside, target)
-			}
-			if err != nil {
+			if err := os.Symlink(outside, target); err != nil {
 				t.Fatal(err)
 			}
 			assertObjectStoreRejectedBeforeGit(t, repository, mustRepositoryIdentity(t, repository))
 		})
+	}
+}
+
+func TestGitObjectStoreAllowsOwnedHardlinksAndDetectsAliasMutation(t *testing.T) {
+	fixture := newLocalGitFixture(t, "sha1")
+	object := firstLooseObject(t, fixture.repository)
+	alias := filepath.Join(filepath.Dir(fixture.repository), "shared-object")
+	if err := os.Link(object, alias); err != nil {
+		t.Fatal(err)
+	}
+
+	selected, err := SelectGit(context.Background(), fixture.git, fixture.repository, "HEAD", fixture.identity)
+	if err != nil {
+		t.Fatalf("owned hardlink rejected: %v", err)
+	}
+	body, err := os.ReadFile(alias)
+	if err != nil || len(body) == 0 {
+		t.Fatalf("read hardlink: bytes=%d err=%v", len(body), err)
+	}
+	if err := os.Chmod(alias, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body[0] ^= 0xff
+	if err := os.WriteFile(alias, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenGitBlobs(context.Background(), fixture.git, fixture.repository, selected); err == nil {
+		t.Fatal("hardlink mutation crossed the object-store phase checkpoint")
 	}
 }
 
