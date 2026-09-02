@@ -9,7 +9,6 @@ import (
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
-	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 // Daemon is the concrete composition root for the local API. It owns the
@@ -89,40 +88,29 @@ func (daemon *Daemon) HandleConnection(ctx context.Context, connection *api.Conn
 	if err != nil {
 		return err
 	}
-	var reporter runner.Identity
-	var reporterErr error
 	if attemptOutcomeCall(call.Kind()) {
-		var pid int
-		pid, reporterErr = connection.PeerPID()
-		if reporterErr == nil {
-			reporter, reporterErr = runner.IdentityForPID(pid)
-		}
-	}
-	var reply api.Reply
-	if attemptOutcomeCall(call.Kind()) {
-		func() {
-			daemon.operationMu.Lock()
-			defer daemon.operationMu.Unlock()
-			reply, err = connection.Dispatch(func(call api.Call) api.Reply {
-				if reporterErr != nil {
-					return newErrorReply(api.RemoteInternal)
-				}
-				return daemon.proposeOutcomeUnderGate(ctx, call, reporter)
-			})
-		}()
-	} else {
-		reply, err = connection.Dispatch(func(call api.Call) api.Reply {
-			return daemon.dispatch(ctx, call)
+		var attempt *liveAttempt
+		reply, dispatchErr := connection.Dispatch(func(call api.Call) api.Reply {
+			var outcome api.Reply
+			outcome, attempt = daemon.proposeOutcome(ctx, call)
+			return outcome
 		})
+		if dispatchErr != nil {
+			daemon.clearOutcomeReceipt(attempt)
+			return dispatchErr
+		}
+		responseErr := connection.Respond(reply)
+		if responseErr == nil {
+			responseErr = connection.AwaitOutcomeReceipt(ctx)
+		}
+		daemon.clearOutcomeReceipt(attempt)
+		return responseErr
 	}
+	reply, err := connection.Dispatch(func(call api.Call) api.Reply { return daemon.dispatch(ctx, call) })
 	if err != nil {
 		return err
 	}
 	return connection.Respond(reply)
-}
-
-func attemptOutcomeCall(kind api.CallKind) bool {
-	return kind == api.CallSucceed || kind == api.CallBlock || kind == api.CallFail
 }
 
 // dispatch is intentionally one closed switch. API validation belongs to the
@@ -343,60 +331,62 @@ func (daemon *Daemon) setDispatch(ctx context.Context, call api.Call) api.Reply 
 	return mutationReply(state.Head, state.Revision)
 }
 
-// proposeOutcomeUnderGate is reached only from HandleConnection while
-// operationMu linearizes the durable running-to-finalizing transition and the
-// exact reporting-process receipt installed on its live owner.
-func (daemon *Daemon) proposeOutcomeUnderGate(ctx context.Context, call api.Call, reporter runner.Identity) api.Reply {
+func (daemon *Daemon) proposeOutcome(ctx context.Context, call api.Call) (api.Reply, *liveAttempt) {
 	digest, ok := call.AttemptDigest()
-	if !ok || !reporter.Valid() {
-		return newErrorReply(api.RemoteInvalidRequest)
+	if !ok {
+		return newErrorReply(api.RemoteInvalidRequest), nil
 	}
 	kDigest, err := attemptDigest(digest)
 	if err != nil {
-		return newErrorReply(api.RemoteInvalidRequest)
+		return newErrorReply(api.RemoteInvalidRequest), nil
 	}
 	proposal, err := proposalForCall(call)
 	if err != nil {
-		return newErrorReply(api.RemoteInvalidRequest)
-	}
-	authorityCtx, authorityCancel := context.WithTimeout(ctx, liveAttemptStoreTimeout)
-	authority, err := daemon.store.AuthenticateAttempt(authorityCtx, kDigest)
-	authorityCancel()
-	if err != nil {
-		return newErrorReply(remoteErrorCode(err))
-	}
-	daemon.attemptMu.Lock()
-	attempt := daemon.attempts[authority.RunID]
-	daemon.attemptMu.Unlock()
-	if attempt != nil && (!attempt.providerIdentity.Valid() || reporter.PGID != attempt.providerIdentity.PGID) {
-		return newErrorReply(api.RemoteForbidden)
+		return newErrorReply(api.RemoteInvalidRequest), nil
 	}
 	at, err := daemon.timestamp()
 	if err != nil {
-		return newErrorReply(api.RemoteInternal)
+		return newErrorReply(api.RemoteInternal), nil
 	}
+	daemon.operationMu.Lock()
 	// This durable transition and the owner-side attach check share one
 	// linearization gate. Whichever operation acquires it first owns the
 	// running/finalizing boundary; notification carries no authority.
 	operationCtx, cancel := context.WithTimeout(ctx, liveAttemptStoreTimeout)
 	run, err := daemon.store.ProposeAttemptOutcome(operationCtx, kDigest, proposal, at)
 	cancel()
+	var attempt *liveAttempt
 	if err == nil {
-		if run.ID != authority.RunID {
-			return newErrorReply(api.RemoteInternal)
-		}
+		daemon.attemptMu.Lock()
+		attempt = daemon.attempts[run.ID]
 		if attempt != nil {
-			attempt.outcomeReporter = reporter
+			attempt.outcomeReceiptPending = true
 		}
+		daemon.attemptMu.Unlock()
 		// The commit completed before ProposeAttemptOutcome returned. The owner
 		// notification is deliberately best-effort and carries no authority or
 		// state payload; it only shortens the next durable Store poll.
 		daemon.notifyRun(run.ID)
 	}
+	daemon.operationMu.Unlock()
 	if err != nil {
-		return newErrorReply(remoteErrorCode(err))
+		return newErrorReply(remoteErrorCode(err)), nil
 	}
-	return daemon.mutation(ctx, run.Revision)
+	return daemon.mutation(ctx, run.Revision), attempt
+}
+
+func (daemon *Daemon) clearOutcomeReceipt(attempt *liveAttempt) {
+	if daemon == nil || attempt == nil {
+		return
+	}
+	daemon.operationMu.Lock()
+	attempt.outcomeReceiptPending = false
+	daemon.operationMu.Unlock()
+	attempt.notify()
+}
+
+func attemptOutcomeCall(kind api.CallKind) bool {
+	return kind == api.CallSucceed || kind == api.CallBlock || kind == api.CallFail
 }
 
 func (daemon *Daemon) requestHuman(ctx context.Context, call api.Call) api.Reply {

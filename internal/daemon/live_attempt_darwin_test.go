@@ -3,9 +3,12 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
-	"os"
+	"io"
+	"net"
 	"testing"
 	"time"
 
@@ -266,60 +269,137 @@ func TestLiveAttemptRejectsWrongSessionBeforeRunnerAttach(t *testing.T) {
 	}
 }
 
-func TestLiveAttemptWaitsForOutcomeReporterExitBeforeTermination(t *testing.T) {
+func TestLiveAttemptCancellationPreemptsOutcomeReceipt(t *testing.T) {
+	controller, peer := readyTerminalEffectController(t)
+	t.Cleanup(func() {
+		_ = controller.Close()
+		_ = peer.Close()
+	})
+	attempt := newLiveAttempt(&Daemon{}, kernel.RunID{}, kernel.TerminalSessionID{}, controller)
+	attempt.outcomeReceiptPending = true
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if stop, err := attempt.processLifecycle(ctx); err != nil || stop || !attempt.terminationSent || !attempt.terminationDelivered {
+		t.Fatalf("cancelled receipt = stop=%v err=%v sent=%v delivered=%v", stop, err, attempt.terminationSent, attempt.terminationDelivered)
+	}
+	if frame := readTerminalEffectWire(t, peer); frame.Kind != "terminate" {
+		t.Fatalf("cancelled receipt controller frame = %+v", frame)
+	}
+}
+
+func TestHandleConnectionClearsOnlyTheFailedOutcomeReceipt(t *testing.T) {
 	fixture := newDispatchFixture(t)
-	active := prepareActiveAttempt(t, fixture, 112)
+	active := prepareActiveAttempt(t, fixture, 114)
 	session, found, err := fixture.store.TerminalSessionForRun(context.Background(), active.run.ID)
 	if err != nil || !found {
 		t.Fatalf("terminal session = %+v, found=%v, err=%v", session, found, err)
 	}
 	controller, peer := readyTerminalEffectController(t)
-	attempt := newLiveAttempt(fixture.daemon, active.run.ID, session.ID, controller)
-	attempt.releaseSent = true
-	attempt.readySeen = true
-	reporter, err := runner.IdentityForPID(os.Getpid())
-	if err != nil {
-		t.Fatal(err)
-	}
-	attempt.providerIdentity = reporter
-	reporterPresent := true
-	attempt.observeReporter = func(got runner.Identity) runner.Observation {
-		if got != reporter {
-			return runner.Observation{Presence: runner.Unknown, Err: runner.ErrIdentity}
-		}
-		if reporterPresent {
-			return runner.Observation{Presence: runner.Present}
-		}
-		return runner.Observation{Presence: runner.Absent}
-	}
-	if err := fixture.daemon.registerLiveAttempt(attempt); err != nil {
-		t.Fatal(err)
-	}
 	t.Cleanup(func() {
-		fixture.daemon.unregisterLiveAttempt(active.run.ID, attempt)
 		_ = controller.Close()
 		_ = peer.Close()
 	})
-
-	serverDone := fixture.serve(t)
-	result, err := active.client.Succeed(context.Background(), "reporter-fenced")
-	if err != nil || result.Revision == 0 {
-		t.Fatalf("outcome response = %+v, %v", result, err)
+	attempt := newLiveAttempt(fixture.daemon, active.run.ID, session.ID, controller)
+	attempt.releaseSent = true
+	attempt.readySeen = true
+	if err := fixture.daemon.registerLiveAttempt(attempt); err != nil {
+		t.Fatal(err)
 	}
-	waitDispatch(t, serverDone)
-	run, found, err := fixture.store.Run(context.Background(), active.run.ID)
-	if err != nil || !found || run.Phase != kernel.RunFinalizing {
-		t.Fatalf("durable outcome after response = %+v, found=%v, err=%v", run, found, err)
+	t.Cleanup(func() { fixture.daemon.unregisterLiveAttempt(active.run.ID, attempt) })
+
+	otherRun, otherSession := liveTestIDs(t, 11400)
+	other := newLiveAttempt(fixture.daemon, otherRun, otherSession, nil)
+	if err := fixture.daemon.registerLiveAttempt(other); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { fixture.daemon.unregisterLiveAttempt(otherRun, other) })
+	fixture.daemon.operationMu.Lock()
+	other.outcomeReceiptPending = true
+	fixture.daemon.operationMu.Unlock()
+
+	done := fixture.serve(t)
+	connection, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: fixture.socket, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	if err := connection.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	writeFrame := func(payload []byte) {
+		t.Helper()
+		var header [4]byte
+		binary.BigEndian.PutUint32(header[:], uint32(len(payload)))
+		frame := append(header[:], payload...)
+		for len(frame) != 0 {
+			written, writeErr := connection.Write(frame)
+			if writeErr != nil || written < 1 || written > len(frame) {
+				t.Fatalf("write frame = %d, %v", written, writeErr)
+			}
+			frame = frame[written:]
+		}
+	}
+	readFrame := func() []byte {
+		t.Helper()
+		var header [4]byte
+		if _, err := io.ReadFull(connection, header[:]); err != nil {
+			t.Fatal(err)
+		}
+		payload := make([]byte, int(binary.BigEndian.Uint32(header[:])))
+		if _, err := io.ReadFull(connection, payload); err != nil {
+			t.Fatal(err)
+		}
+		return payload
+	}
+	body := []byte(`{"method":"succeed","params":{"result":"receipt-failure"}}`)
+	request := make([]byte, 2+len(active.bearer)+len(body))
+	request[0], request[1] = 2, 2
+	copy(request[2:], active.bearer)
+	copy(request[2+len(active.bearer):], body)
+	writeFrame(request)
+	response := readFrame()
+	receipt := readFrame()
+	if len(response) < 2 || !bytes.Contains(response[2:], []byte(`"ok":true`)) || len(receipt) != 32 {
+		t.Fatalf("outcome response = %q, receipt bytes = %d", response, len(receipt))
+	}
+	var extra [1]byte
+	if count, readErr := connection.Read(extra[:]); count != 0 || !errors.Is(readErr, io.EOF) {
+		t.Fatalf("outcome response did not end: count=%d error=%v", count, readErr)
+	}
+	fixture.daemon.operationMu.Lock()
+	pending, otherPending := attempt.outcomeReceiptPending, other.outcomeReceiptPending
+	fixture.daemon.operationMu.Unlock()
+	if !pending || !otherPending {
+		t.Fatalf("pending receipts before acknowledgement = attempt:%t other:%t", pending, otherPending)
 	}
 	if stop, err := attempt.processLifecycle(context.Background()); err != nil || stop || attempt.terminationSent {
-		t.Fatalf("lifecycle terminated the live reporter: stop=%v err=%v terminated=%v", stop, err, attempt.terminationSent)
+		t.Fatalf("lifecycle crossed handler receipt: stop=%v err=%v terminated=%v", stop, err, attempt.terminationSent)
 	}
-	reporterPresent = false
+
+	receipt[0] ^= 0xff
+	writeFrame(receipt)
+	if err := connection.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case handlerErr := <-done:
+		if handlerErr == nil {
+			t.Fatal("malformed receipt was accepted")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("daemon API handler did not reject malformed receipt")
+	}
+	fixture.daemon.operationMu.Lock()
+	pending, otherPending = attempt.outcomeReceiptPending, other.outcomeReceiptPending
+	fixture.daemon.operationMu.Unlock()
+	if pending || !otherPending {
+		t.Fatalf("pending receipts after failed acknowledgement = attempt:%t other:%t", pending, otherPending)
+	}
 	if stop, err := attempt.processLifecycle(context.Background()); err != nil || stop || !attempt.terminationSent || !attempt.terminationDelivered {
-		t.Fatalf("post-reporter lifecycle = stop=%v err=%v sent=%v delivered=%v", stop, err, attempt.terminationSent, attempt.terminationDelivered)
+		t.Fatalf("post-failure lifecycle = stop=%v err=%v sent=%v delivered=%v", stop, err, attempt.terminationSent, attempt.terminationDelivered)
 	}
 	if frame := readTerminalEffectWire(t, peer); frame.Kind != "terminate" {
-		t.Fatalf("post-response controller frame = %+v", frame)
+		t.Fatalf("post-failure controller frame = %+v", frame)
 	}
 }
 

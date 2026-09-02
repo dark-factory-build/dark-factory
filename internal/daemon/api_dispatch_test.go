@@ -385,6 +385,7 @@ func TestDaemonRejectsForgedAndFinalizingHumanQuestion(t *testing.T) {
 type activeAttempt struct {
 	client *api.AttemptClient
 	run    kernel.Run
+	bearer []byte
 }
 
 func prepareActiveAttempt(t *testing.T, fixture *dispatchFixture, seed byte) activeAttempt {
@@ -497,7 +498,7 @@ func prepareActiveAttempt(t *testing.T, fixture *dispatchFixture, seed byte) act
 	if err != nil {
 		t.Fatal(err)
 	}
-	return activeAttempt{client: client, run: active}
+	return activeAttempt{client: client, run: active, bearer: append([]byte(nil), bearer...)}
 }
 
 func TestDaemonDispatchesBlockAndFailCalls(t *testing.T) {

@@ -224,9 +224,9 @@ type liveAttemptResult struct {
 	observersRetained bool
 }
 
-// liveAttempt is intentionally concrete. All mutable fields below belong to
-// its one owner goroutine after construction; the registry mutex protects
-// only the daemon's map membership.
+// liveAttempt is intentionally concrete. Except for the receipt fence named
+// below, mutable fields belong to its one owner goroutine after construction;
+// the registry mutex protects only the daemon's map membership.
 type liveAttempt struct {
 	daemon     *Daemon
 	runID      kernel.RunID
@@ -238,13 +238,10 @@ type liveAttempt struct {
 	done     chan struct{}
 	result   chan liveAttemptResult
 
-	// providerIdentity is fixed before the owner starts. outcomeReporter is
-	// installed by an authenticated outcome handler while operationMu excludes
-	// processLifecycle; the owner clears it under the same gate after exact
-	// reporter exit. Production observes it through ObserveExactProcess.
-	providerIdentity runner.Identity
-	outcomeReporter  runner.Identity
-	observeReporter  func(runner.Identity) runner.Observation
+	// outcomeReceiptPending is set and cleared only under daemon.operationMu.
+	// It spans durable finalization through the reporting client's validated
+	// response acknowledgement, without holding that global gate during I/O.
+	outcomeReceiptPending bool
 
 	subs            map[*TerminalAttachment]struct{}
 	correlations    map[uint64]*TerminalAttachment
@@ -276,7 +273,7 @@ func newLiveAttempt(daemon *Daemon, runID kernel.RunID, sessionID kernel.Termina
 		commands: make(chan liveAttemptCommand, liveAttemptMailboxCap),
 		wake:     make(chan struct{}, 1), done: make(chan struct{}), result: make(chan liveAttemptResult, 1),
 		subs: make(map[*TerminalAttachment]struct{}), correlations: make(map[uint64]*TerminalAttachment),
-		effectLimit: liveAttemptEffectLimit, observeReporter: runner.ObserveExactProcess,
+		effectLimit: liveAttemptEffectLimit,
 	}
 	if daemon != nil && daemon.store != nil {
 		attempt.renewLease = func(ctx context.Context, client kernel.BrowserClientID, generation uint64, expectedRun, expectedSession kernel.Revision, at kernel.UnixMillis) (kernel.TerminalLease, error) {

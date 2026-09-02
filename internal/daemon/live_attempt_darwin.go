@@ -231,41 +231,21 @@ func (attempt *liveAttempt) processLifecycle(ctx context.Context) (bool, error) 
 	if attempt.terminationSent || attempt.resultReturned {
 		return false, nil
 	}
+	if ctx.Err() != nil {
+		return false, attempt.terminateController()
+	}
 	if attempt.daemon == nil || attempt.daemon.store == nil {
-		if ctx.Err() != nil {
-			return false, attempt.terminateController()
-		}
 		return false, nil
 	}
-	// An outcome handler uses operationMu to attach the exact reporting process
-	// to the durable finalization transition. Never wait for that gate here:
-	// terminal-effect callers retain the same gate while waiting for this owner
-	// to consume their mailbox command. A failed probe therefore skips lifecycle
-	// work for one iteration and lets the mailbox make progress.
+	// Terminal-effect callers retain operationMu while waiting for this owner
+	// to consume their mailbox command. Never join that wait here. The same gate
+	// atomically pairs durable finalization with its response receipt fence.
 	if !attempt.daemon.operationMu.TryLock() {
 		return false, nil
 	}
-	if attempt.outcomeReporter.Valid() {
-		observe := attempt.observeReporter
-		if observe == nil {
-			observe = runner.ObserveExactProcess
-		}
-		reporter := observe(attempt.outcomeReporter)
-		switch reporter.Presence {
-		case runner.Present, runner.Unknown:
-			attempt.daemon.operationMu.Unlock()
-			return false, nil
-		case runner.Absent, runner.Reused:
-			attempt.outcomeReporter = runner.Identity{}
-		default:
-			attempt.daemon.operationMu.Unlock()
-			return false, nil
-		}
-	}
-	cancelled := ctx.Err()
-	if cancelled != nil {
+	if attempt.outcomeReceiptPending {
 		attempt.daemon.operationMu.Unlock()
-		return false, attempt.terminateController()
+		return false, nil
 	}
 	storeCtx, cancel := context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
 	run, found, err := attempt.daemon.store.Run(storeCtx, attempt.runID)
