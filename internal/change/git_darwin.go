@@ -673,6 +673,8 @@ type gitReap struct {
 
 func startGitChild(spec gitCommandSpec, withInput bool) (*gitChild, error) {
 	command := spec.command()
+	pgid := unix.Getpgrp()
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: pgid}
 	kq, err := unix.Kqueue()
 	if err != nil {
 		return nil, newGitError(gitFailureProcess)
@@ -710,21 +712,22 @@ func startGitChild(spec gitCommandSpec, withInput bool) (*gitChild, error) {
 		spec.hook(gitProcessStarted)
 	}
 	child := &gitChild{
-		command: command, pid: command.Process.Pid, pgid: unix.Getpgrp(), kq: kq,
+		command: command, pid: command.Process.Pid, pgid: pgid, kq: kq,
 		stdin: stdin, stdout: stdout, stderr: stderr, hook: spec.hook, groupOK: true,
 	}
 	if closeGitFiles(childStdin, childStdout, childStderr) != nil {
 		return nil, child.failStart()
 	}
-	if !child.checkGroup(false) {
-		return nil, child.failStart()
-	}
-	if err := registerGitExit(kq, child.pid); err != nil {
-		return nil, child.failStart()
-	}
 	exit := make(chan error, 1)
 	child.exit = exit
-	go func() { exit <- waitGitExit(kq, child.pid) }()
+	switch err := registerGitExit(kq, child.pid); {
+	case err == nil:
+		go func() { exit <- waitGitExit(kq, child.pid) }()
+	case errors.Is(err, unix.ESRCH):
+		exit <- nil
+	default:
+		return nil, child.failStart()
+	}
 	return child, nil
 }
 
@@ -761,8 +764,14 @@ func registerGitExit(kq, pid int) error {
 	change := unix.Kevent_t{Ident: uint64(pid), Filter: unix.EVFILT_PROC, Flags: unix.EV_ADD | unix.EV_ENABLE | unix.EV_ONESHOT | unix.EV_RECEIPT, Fflags: unix.NOTE_EXIT}
 	receipts := make([]unix.Kevent_t, 1)
 	n, err := unix.Kevent(kq, []unix.Kevent_t{change}, receipts, nil)
-	if err != nil || n != 1 || receipts[0].Flags&unix.EV_ERROR == 0 || receipts[0].Data != 0 {
+	if err != nil {
+		return err
+	}
+	if n != 1 || receipts[0].Flags&unix.EV_ERROR == 0 {
 		return errors.New("Git NOTE_EXIT registration failed")
+	}
+	if receipts[0].Data != 0 {
+		return unix.Errno(receipts[0].Data)
 	}
 	return nil
 }
