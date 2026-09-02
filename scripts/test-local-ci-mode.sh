@@ -30,8 +30,11 @@ done
     || fail "service lifecycle proof is not unique"
 grep -Fq '/bin/launchctl print "gui/$(/usr/bin/id -u)/com.dark-factory.factoryd"' "$local_gate" \
     || fail "service lifecycle proof lost its live-install boundary"
-[ "$(grep -Fc './scripts/test-local-ci-lease.sh' "$local_gate")" -eq 1 ] \
-    || fail "local-CI lease proof is not unique"
+grep -Fq 'exec "$script_dir/with-local-ci-lease.sh" "$script_dir/local-ci.sh"' "$local_gate" \
+    || fail "local-CI entry lost the repository lease"
+if grep -Eq 'test-local-ci-lease(-mutations)?\.sh' "$local_gate"; then
+    fail "focused lease stress returned to the routine gate"
+fi
 [ "$(grep -Fc '/bin/sh ./scripts/test-go-gates.sh' "$local_gate")" -eq 1 ] \
     || fail "fault fixtures are not invoked through their non-executable shell boundary"
 [ ! -x "$repository_root/scripts/test-go-gates.sh" ] \
@@ -87,5 +90,8 @@ if (!scripts.check.includes("dark-factory-dev typecheck") || !scripts.check.incl
 ' "$repository_root/web/package.json" || fail "TypeScript check does not build once before typecheck and tests"
 
 /bin/sh -n "$local_gate" "$ordinary_gate" "$process_gate" "$process_entry" \
-    "$repository_root/scripts/go-gate-environment.sh" "$repository_root/scripts/test-go-gates.sh" "$0"
+    "$repository_root/scripts/go-gate-environment.sh" \
+    "$repository_root/scripts/local-ci-lease.sh" \
+    "$repository_root/scripts/with-local-ci-lease.sh" \
+    "$repository_root/scripts/test-go-gates.sh" "$0"
 echo "local-ci shape tests passed"

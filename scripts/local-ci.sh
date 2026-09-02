@@ -25,8 +25,6 @@ echo "local-ci: ordinary source gate"
 ./scripts/go-check.sh
 
 echo "local-ci: process-sensitive gate"
-./scripts/test-local-ci-lease.sh
-./scripts/test-local-ci-lease-mutations.sh
 ./scripts/test-go-e2e-tools.sh
 /bin/sh "$script_dir/go-ci-owned.sh"
 

@@ -331,8 +331,7 @@ for local_child in \
     check-toolchain-pins.sh test-local-ci-environment.sh test-new-worktree.sh \
     test-github-step-summary.sh test-verify-adversarial-review.sh test-inline-chokepoint.sh \
     test-cloudflare-env.sh test-bootstrap-maintainer-v2.sh test-repository-settings.sh \
-    test-local-ci-mode.sh test-go-gates.sh test-local-ci-lease.sh \
-    test-local-ci-lease-mutations.sh test-go-e2e-tools.sh go-ci-owned.sh \
+    test-local-ci-mode.sh test-go-gates.sh test-go-e2e-tools.sh go-ci-owned.sh \
     go-service-e2e.sh \
     test-prepare-release-source.sh test-publish-release.sh test-package-release.sh; do
     /bin/ln -s stub "$local_fixture/scripts/$local_child"
