@@ -13,46 +13,50 @@ import (
 )
 
 func TestPublicStateProjectPageBoundariesAndRawIDOrder(t *testing.T) {
-	for _, count := range []int{0, 1, 7, 8, 9} {
-		t.Run(fmt.Sprintf("rows_%d", count), func(t *testing.T) {
+	for _, test := range []struct {
+		count     int
+		pageSizes []int
+	}{
+		{count: 0, pageSizes: []int{0}},
+		{count: 1, pageSizes: []int{1}},
+		{count: 7, pageSizes: []int{7}},
+		{count: 8, pageSizes: []int{8, 0}},
+		{count: 9, pageSizes: []int{8, 1}},
+		{count: 16, pageSizes: []int{8, 8, 0}},
+	} {
+		t.Run(fmt.Sprintf("rows_%d", test.count), func(t *testing.T) {
 			store, _ := newTestStore(t)
 			defer store.Close()
-			insertPublicProjects(t, store, count)
+			insertPublicProjects(t, store, test.count)
 			state, err := store.Factory(context.Background())
 			if err != nil {
 				t.Fatal(err)
 			}
-			page, err := store.ReadPublicStatePage(context.Background(), &PublicStateCursor{Head: state.Head, Kind: PublicStateProject})
-			if err != nil {
-				t.Fatal(err)
-			}
-			wantFirst := count
-			if wantFirst > PublicStatePageSize {
-				wantFirst = PublicStatePageSize
-			}
-			if len(page.Items) != wantFirst || page.Kind != PublicStateProject || page.Head != state.Head {
-				t.Fatalf("page = %+v, items=%d", page, len(page.Items))
-			}
-			for index, item := range page.Items {
-				summary, ok := item.Project()
-				if !ok || summary.ID != publicProjectID(t, index+1) {
-					t.Fatalf("item %d = %+v, project=%+v", index, item, summary)
-				}
-			}
-			if count == 9 {
-				if page.NextCursor == nil || page.NextCursor.Kind != PublicStateProject || page.NextCursor.AfterID == nil || page.NextCursor.AfterID.String() != publicProjectID(t, 8).String() {
-					t.Fatalf("nine-row continuation = %+v", page.NextCursor)
-				}
-				last, err := store.ReadPublicStatePage(context.Background(), page.NextCursor)
+			cursor := &PublicStateCursor{Head: state.Head, Kind: PublicStateProject}
+			got := make([]string, 0, test.count)
+			for pageIndex, wantSize := range test.pageSizes {
+				page, err := store.ReadPublicStatePage(context.Background(), cursor)
 				if err != nil {
 					t.Fatal(err)
 				}
-				summary, ok := last.Items[0].Project()
-				if len(last.Items) != 1 || !ok || summary.ID != publicProjectID(t, 9) || last.NextCursor == nil || last.NextCursor.Kind != PublicStateAgent || last.NextCursor.AfterID != nil {
-					t.Fatalf("nine-row tail = %+v, project=%+v", last, summary)
+				if len(page.Items) != wantSize || page.Kind != PublicStateProject || page.Head != state.Head {
+					t.Fatalf("page %d = %+v, items=%d", pageIndex, page, len(page.Items))
 				}
-			} else if page.NextCursor == nil || page.NextCursor.Kind != PublicStateAgent || page.NextCursor.AfterID != nil {
-				t.Fatalf("short-page continuation = %+v", page.NextCursor)
+				for _, item := range page.Items {
+					summary, ok := item.Project()
+					if !ok {
+						t.Fatalf("page %d item = %+v", pageIndex, item)
+					}
+					got = append(got, summary.ID.String())
+				}
+				cursor = page.NextCursor
+			}
+			want := publicIDs(test.count, func(index int) string { return publicProjectID(t, index).String() })
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("traversal = %v, want %v", got, want)
+			}
+			if cursor == nil || cursor.Kind != PublicStateAgent || cursor.AfterID != nil {
+				t.Fatalf("next kind = %+v", cursor)
 			}
 		})
 	}

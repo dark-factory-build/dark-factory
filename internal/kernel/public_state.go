@@ -246,11 +246,16 @@ func (store *Store) ReadPublicStatePage(ctx context.Context, cursor *PublicState
 		return PublicStatePageResult{}, err
 	}
 	result := PublicStatePageResult{Head: state.Head, Kind: kind, Items: items}
-	if len(result.Items) > PublicStatePageSize {
-		result.Items = result.Items[:PublicStatePageSize]
+	next := kind.next()
+	hasMore := len(result.Items) > PublicStatePageSize
+	exactFullNonFinal := len(result.Items) == PublicStatePageSize && next != 0
+	if hasMore || exactFullNonFinal {
+		if hasMore {
+			result.Items = result.Items[:PublicStatePageSize]
+		}
 		last := result.Items[PublicStatePageSize-1].id()
 		result.NextCursor = &PublicStateCursor{Head: state.Head, Kind: kind, AfterID: &last}
-	} else if next := kind.next(); next != 0 {
+	} else if next != 0 {
 		result.NextCursor = &PublicStateCursor{Head: state.Head, Kind: next}
 	}
 	return result, nil
