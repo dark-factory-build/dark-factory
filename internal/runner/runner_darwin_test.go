@@ -91,6 +91,13 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
+	if len(os.Args) == 3 && os.Args[1] == "--pty-exit-pressure" {
+		if err := runPTYExitPressureHelper(os.Args[2]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(93)
+		}
+		os.Exit(0)
+	}
 	if len(os.Args) == 5 && os.Args[1] == "--attempt-retirement-provider" {
 		if err := runRetirementProviderHelper(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -321,6 +328,47 @@ func runPTYProviderHelper(root string) error {
 	}
 	_, err = fmt.Fprintf(os.Stdout, "RESPONSE:%s\n", strings.TrimSpace(string(line[:n])))
 	return err
+}
+
+const ptyExitPressureChunk = 8 << 10
+
+func runPTYExitPressureHelper(ready string) error {
+	term := make(chan os.Signal, 1)
+	signal.Notify(term, unix.SIGTERM)
+	defer signal.Stop(term)
+	if err := unix.SetNonblock(1, true); err != nil {
+		return err
+	}
+	payload := bytes.Repeat([]byte{'x'}, ptyExitPressureChunk)
+	written := 0
+	for {
+		n, err := unix.Write(1, payload)
+		if n > 0 {
+			written += n
+		}
+		if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrNoProgress
+		}
+	}
+	if written == 0 {
+		return errors.New("PTY accepted no output before reporting full")
+	}
+	pending := ready + ".pending"
+	if err := os.WriteFile(pending, []byte(strconv.Itoa(written)), 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(pending, ready); err != nil {
+		return err
+	}
+	<-term
+	syscall.Exit(0)
+	return errors.New("syscall.Exit returned")
 }
 
 func runCwdProviderHelper(root string) error {
