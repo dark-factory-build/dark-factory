@@ -1,7 +1,7 @@
 # Provider contract
 
-Dark Factory supports `shell`, `claude_code`, and `codex` through one closed Go
-boundary:
+Dark Factory implements `shell`, `claude_code`, and `codex` through one closed
+Go boundary:
 
 ```go
 func Build(Request) (Launch, error)
@@ -11,6 +11,10 @@ func Build(Request) (Launch, error)
 directory, task input, PTY, process group, output, wait, and cleanup. A provider
 cannot select a source path or lifecycle result, and there is no registry,
 plugin, fallback, or provider-owned supervision framework.
+
+Shell is proven end to end. The native launch paths are fixture-proven in the
+current source; a separately approved run against each signed-in CLI remains
+required before they are included in a release.
 
 ## Create an agent
 

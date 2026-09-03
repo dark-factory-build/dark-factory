@@ -1,11 +1,12 @@
 # Dark Factory roadmap
 
 Dark Factory is a macOS-local runtime with a hosted browser console, a
-durable daemon-owned work queue, and supervised shell, Claude Code, and Codex
-provider attempts.
+durable daemon-owned work queue, and supervised provider attempts.
 
 ## Next capabilities
 
+- Prove the implemented Claude Code and Codex launch paths with separately
+  approved real-provider attempts before including them in a release.
 - Add Linux runtime support while preserving the local-daemon and browser
   boundaries.
 - Complete release-grade install, service replacement, rollback, and recovery
