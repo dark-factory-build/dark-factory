@@ -8,7 +8,8 @@ workflow detail.
 Dark Factory is a Darwin-first Go runtime: `factoryd` owns durable work and
 provider processes, while `factoryctl` and the loopback web console use the
 same local API. It is not a hosted runtime, coding model, or general agent
-framework. The shell-provider loop is proven; real Claude/Codex work is not.
+framework. The shell-provider and real Codex loops are proven; real Claude work
+is not.
 
 ## Rules
 

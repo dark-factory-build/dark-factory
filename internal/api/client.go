@@ -219,6 +219,17 @@ func (client *AttemptClient) Succeed(ctx context.Context, result string) (Mutati
 	}{Result: result})
 }
 
+func (client *AttemptClient) Task(ctx context.Context) (AttemptTask, error) {
+	var result AttemptTask
+	if err := client.client.call(ctx, "task", struct{}{}, &result); err != nil {
+		return AttemptTask{}, err
+	}
+	if !validAttemptTask(result) {
+		return AttemptTask{}, ErrProtocol
+	}
+	return result, nil
+}
+
 func (client *AttemptClient) Block(ctx context.Context, detail string) (MutationResult, error) {
 	if !validText(detail, 1, 4096) {
 		return MutationResult{}, ErrInvalidInput

@@ -12,9 +12,9 @@ directory, task input, PTY, process group, output, wait, and cleanup. A provider
 cannot select a source path or lifecycle result, and there is no registry,
 plugin, fallback, or provider-owned supervision framework.
 
-Shell is proven end to end. The native launch paths are fixture-proven in the
-current source; a separately approved run against each signed-in CLI remains
-required before they are included in a release.
+Shell and Codex are proven end to end. The Claude Code launch path is
+fixture-proven in the current source; a separately approved run against its
+signed-in CLI remains required before it is included in a release.
 
 ## Create an agent
 
@@ -53,8 +53,14 @@ The native argv templates are:
 
 ```text
 claude --dangerously-skip-permissions [--model MODEL] [--effort EFFORT]
-codex --dangerously-bypass-approvals-and-sandbox --no-alt-screen [--model MODEL] [-c 'model_reasoning_effort="EFFORT"']
+codex --dangerously-bypass-approvals-and-sandbox --no-alt-screen -c check_for_update_on_startup=false -c tool_output_token_limit=32768 -c 'projects={"CHANGE-DIRECTORY"={trust_level="untrusted"}}' [--model MODEL] [-c 'model_reasoning_effort="EFFORT"'] 'FIXED BOOTSTRAP INSTRUCTION'
 ```
+
+Codex receives the daemon-authorized Change directory as an invocation-only
+project override with `trust_level="untrusted"`. This suppresses Codex's
+interactive directory-trust screen while explicitly refusing project-local
+configuration and hooks; the directory is never persisted in Codex config and
+the provider cannot choose a different working directory.
 
 Install and sign in to the chosen CLI through its normal local workflow before
 dispatching work. Both providers receive a private runtime `TMPDIR`. Claude
@@ -70,10 +76,21 @@ No provider API key is copied into the environment. The native process runs as
 the operator with unrestricted interactive authority and may use that account's
 normal configuration or Keychain access.
 
-Native providers do not inherit the shell task descriptor. The runner writes
-one fixed instruction plus the JSON-quoted task to the PTY after provider exec
-and before reporting the terminal ready. The complete prepared input must fit
-8 KiB; a partial or uncertain write fails the attempt and is never replayed.
+Native providers do not inherit the shell task descriptor. For Claude, the
+runner writes one fixed instruction plus the terminal-safe JSON-quoted task to
+the PTY after provider exec and before reporting the terminal ready. The
+complete prepared input must fit 8 KiB; a partial or uncertain write fails the
+attempt and is never replayed.
+
+Codex starts from a fixed, non-secret positional instruction to run
+`factoryctl attempt task` first. That command authenticates with the attempt's
+private credential and returns the exact effective task as terminal-safe JSON;
+body wins, with title used only when a native task has no body. Codex task text
+is absent from argv, environment, and Change-worker configuration, and is
+bounded to 8 KiB so the configured 32,768-token tool-result budget cannot
+truncate it even under worst-case control-character escaping. The attempt API
+serves it only while that exact run is `running`.
+
 Subsequent browser terminal input goes directly to the same PTY. The provider
 reports its durable outcome through the attempt-scoped `factoryctl` supplied by
 the daemon.
