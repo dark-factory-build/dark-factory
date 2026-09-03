@@ -13,8 +13,8 @@ import (
 )
 
 // runReleasedProvider is the single owner loop for a released PTY provider.
-// It deliberately has no goroutines: the outer attempt runner owns the PTY,
-// child group, two capability sockets and every terminal cursor.
+// It never returns with an unjoined goroutine: the outer attempt runner owns
+// the PTY, child group, two capability sockets and every terminal cursor.
 func runReleasedProvider(child *OwnedChild, daemon, worker *os.File, reads *attemptReadSet, stagePTY *ptyStageSink, retained *terminalByteRing, startup []byte) (bool, error) {
 	if child == nil || daemon == nil || worker == nil || reads == nil || child.ptyMaster == nil || retained == nil {
 		return false, ErrState
@@ -294,10 +294,24 @@ func (o *terminalOwner) stop() error {
 	if o.child == nil || o.child.state != stateActivated {
 		return errors.Join(cleanupErr, ErrState)
 	}
-	if _, err := o.child.Terminate(defaultStopTimeout); err != nil {
-		return errors.Join(cleanupErr, err)
+	return errors.Join(cleanupErr, o.terminateDrainingPTY())
+}
+
+// terminateDrainingPTY preserves the PTY tail while Darwin tears down the
+// provider's controlling terminal. Termination owns kqueue process events;
+// this owner concurrently drains only the PTY master, then joins termination
+// before either ownership domain can escape this call.
+func (o *terminalOwner) terminateDrainingPTY() error {
+	if o == nil || o.child == nil || o.child.state != stateActivated {
+		return ErrState
 	}
-	return errors.Join(cleanupErr, o.drainPTY())
+	terminated := make(chan error, 1)
+	go func() {
+		_, err := o.child.Terminate(defaultStopTimeout)
+		terminated <- err
+	}()
+	drainErr := o.drainPTY()
+	return errors.Join(<-terminated, drainErr)
 }
 
 func (o *terminalOwner) install(c TerminalCommand) error {
@@ -450,6 +464,7 @@ func (o *terminalOwner) consumePTY(data []byte, readErr error) error {
 
 func (o *terminalOwner) drainPTY() error {
 	deadline := time.Now().Add(2 * time.Second)
+	var streamErr error
 	for o.ptyOpen {
 		buf := make([]byte, terminalReplayChunk)
 		n, err := unix.Read(int(o.child.ptyMaster.Fd()), buf)
@@ -457,8 +472,8 @@ func (o *terminalOwner) drainPTY() error {
 			if err := o.ring.Append(buf[:n]); err != nil {
 				return err
 			}
-			if err := o.flush(); err != nil {
-				return err
+			if streamErr == nil {
+				streamErr = o.flush()
 			}
 			continue
 		}
@@ -471,21 +486,21 @@ func (o *terminalOwner) drainPTY() error {
 				}
 			}
 			if retireErr != nil {
-				return retireErr
+				return errors.Join(streamErr, retireErr)
 			}
 			o.ptyDrained = true
-			return o.emitPTYEOF()
+			return errors.Join(streamErr, o.emitPTYEOF())
 		}
 		if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
 			if time.Now().After(deadline) {
-				return ErrUnresolved
+				return errors.Join(streamErr, ErrUnresolved)
 			}
 			time.Sleep(time.Millisecond)
 			continue
 		}
-		return err
+		return errors.Join(streamErr, err)
 	}
-	return nil
+	return streamErr
 }
 
 func (o *terminalOwner) flush() error {
@@ -649,11 +664,7 @@ func (o *terminalOwner) daemonLost() error {
 	}
 	o.inputActive = false
 	if o.child != nil && o.child.state == stateActivated {
-		_, err := o.child.Terminate(defaultStopTimeout)
-		if err != nil {
-			return errors.Join(cleanupErr, err)
-		}
-		return errors.Join(cleanupErr, o.drainPTY())
+		return errors.Join(cleanupErr, o.terminateDrainingPTY())
 	}
 	return cleanupErr
 }

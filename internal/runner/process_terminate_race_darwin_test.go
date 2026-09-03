@@ -3,11 +3,13 @@
 package runner
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -219,6 +221,76 @@ func TestTypedTerminalTerminateIsNotStarvedByUnreadDaemonReadiness(t *testing.T)
 	assertWaitedAndAbsent(t, child)
 }
 
+func TestTypedTerminalTerminateDrainsPTYUntilExit(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		breakDaemon bool
+	}{{name: "connected-daemon"}, {name: "failed-daemon-send", breakDaemon: true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			ready := filepath.Join(f.root, "pty-exit-pressure-ready")
+			child, wantBytes := startPTYExitPressureChild(t, f, ready)
+			installOwnedChildSafetyCleanup(t, child)
+			// Closing the test-owned master first lets the ordinary exact-child
+			// safety cleanup reap even if the pre-fix path stalls in terminal exit.
+			t.Cleanup(func() {
+				if child.state != stateWaited {
+					_ = child.closePTY()
+				}
+			})
+			reads := &attemptReadSet{kq: child.kq, daemonFD: -1, workerFD: -1, ptyFD: int(child.ptyMaster.Fd())}
+			if err := reads.registerPTY(); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = reads.processOnly() })
+			owner := terminalOwner{child: child, reads: reads, ptyOpen: true, ring: &terminalByteRing{}}
+			if tc.breakDaemon {
+				daemon, peer, err := newControlPair("failed-daemon", "failed-daemon-peer")
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = daemon.Close() })
+				if err := peer.Close(); err != nil {
+					t.Fatal(err)
+				}
+				owner.daemon, owner.daemonOpen, owner.credit = daemon, true, 1
+			}
+			err := owner.command(attemptFrame{Version: 1, Kind: "terminate"})
+			if tc.breakDaemon {
+				if !errors.Is(err, unix.EPIPE) || owner.daemonOpen || owner.daemon != nil {
+					t.Fatalf("failed daemon send was not retained: err=%v open=%t daemon=%v", err, owner.daemonOpen, owner.daemon)
+				}
+			} else if err != nil {
+				t.Fatalf("typed terminal termination under PTY pressure: %v", err)
+			}
+			if !owner.stopRequested || !owner.ptyDrained || !owner.ptyEOF || !child.ptyDrained {
+				t.Fatalf("terminal drain evidence stop=%t owner_drained=%t eof=%t child_drained=%t", owner.stopRequested, owner.ptyDrained, owner.ptyEOF, child.ptyDrained)
+			}
+			exit, err := child.waitedExit()
+			if err != nil || exit.Code != 0 || exit.Signal != 0 {
+				t.Fatalf("terminal exit=%+v err=%v", exit, err)
+			}
+			if owner.ring.Head() != uint64(wantBytes) {
+				t.Fatalf("PTY output head=%d want=%d", owner.ring.Head(), wantBytes)
+			}
+			got := make([]byte, 0, min(wantBytes, terminalReplayCapacity))
+			for cursor := owner.ring.Floor(); cursor < owner.ring.Head(); {
+				chunk, next, err := owner.ring.Read(cursor)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got = append(got, chunk...)
+				cursor = next
+			}
+			want := bytes.Repeat([]byte{'x'}, len(got))
+			if !bytes.Equal(got, want) {
+				t.Fatalf("retained PTY tail bytes=%d want=%d", len(got), len(want))
+			}
+			assertWaitedAndAbsent(t, child)
+		})
+	}
+}
+
 func TestTypedTerminalResizeIsNotStarvedByUnreadDaemonReadiness(t *testing.T) {
 	f := newFixture(t)
 	ready := filepath.Join(f.root, "terminal-resize-ready")
@@ -329,6 +401,36 @@ func startLivePTYChild(t *testing.T, f *fixture, ready string) *OwnedChild {
 	}
 	waitFile(t, ready)
 	return child
+}
+
+func startPTYExitPressureChild(t *testing.T, f *fixture, ready string) (*OwnedChild, int) {
+	t.Helper()
+	gate, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := PrepareExecSpec(ExecSpec{Target: gate, Args: []string{"--pty-exit-pressure", ready}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C", "TERM=xterm"}, Cwd: f.cwd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := StartBlockedPTY(f.lease, gate, spec, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.child = child
+	if _, err := child.Activate(); err != nil {
+		t.Fatal(err)
+	}
+	waitFile(t, ready)
+	body, err := os.ReadFile(ready)
+	if err != nil {
+		t.Fatal(err)
+	}
+	written, err := strconv.Atoi(string(body))
+	if err != nil || written <= 0 {
+		t.Fatalf("PTY pressure witness=%q err=%v", body, err)
+	}
+	return child, written
 }
 
 func assertLevelTriggeredReadiness(t *testing.T, kq, fd int) {
