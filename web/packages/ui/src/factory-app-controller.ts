@@ -505,8 +505,9 @@ export class FactoryAppController {
     if (!this.#current(generation)) return;
     this.#state = state;
     const selectedAgent = this.#selectedAgent;
-    if (selectedAgent !== undefined && this.#terminalReplacement?.agentId === selectedAgent.agent.id) {
-      const currentAgent = state.agents.get(selectedAgent.agent.id);
+    const replacementAgentID = this.#terminalReplacement?.agentId;
+    if (replacementAgentID !== undefined) {
+      const currentAgent = state.agents.get(replacementAgentID);
       this.#terminalReplacement = currentAgent === undefined
         ? { error: new SessionError("stale") }
         : { agentId: currentAgent.id, agentRevision: currentAgent.revision };

@@ -784,9 +784,14 @@ test("selection detaches the old controller before presenting a paused idle agen
   assert.equal(context.latest().selectedAgent.id, agent.id, "old terminal stays mounted while detach is pending");
   assert.equal(context.latest().terminal.phase, "closing");
   assert.equal(context.targetGates.length, 1);
+  const latestSecondAgent = { ...secondAgent, revision: secondAgent.revision + 1n };
+  const agents = new Map(fixtureState.agents);
+  agents.set(secondAgent.id, latestSecondAgent);
+  context.clientOptions().onState(stateAt(43, { agents }));
   detachGate.resolve();
   await flush();
   assert.equal(context.latest().selectedAgent.id, secondAgent.id);
+  assert.equal(context.latest().selectedAgent.revision, latestSecondAgent.revision);
   assert.equal(context.latest().terminal.phase, "idle");
   assert.equal(context.latest().terminal.paused, true);
   assert.equal(context.sessionCloses(), 0);
