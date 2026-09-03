@@ -105,12 +105,15 @@ test("the console never shows a kernel-grammar or retired vocabulary word", () =
   }
 });
 
-test("all session statuses have stable live labels and no unsupported ready controls", () => {
-  for (const status of ["idle", "connecting", "authenticating", "syncing", "ready", "closed"]) {
+test("transitional session statuses have stable live labels without healthy-state noise", () => {
+  for (const status of ["idle", "connecting", "authenticating", "syncing", "closed"]) {
     const markup = render({ status });
     assert.match(markup, new RegExp(`>${status.toUpperCase()}<`));
     assert.equal(markup.includes("<button"), false);
   }
+  const ready = render({ status: "ready" });
+  assert.match(ready, /class="dfFactoryConsole__connection dfFactoryConsole__visuallyHidden"/);
+  assert.match(ready, /role="status" aria-live="polite" aria-atomic="true"/);
 });
 
 test("closed and pairing-uncertain errors have no ineffective action", () => {
@@ -179,7 +182,7 @@ test("semantic structure remains keyboard-safe and contains no unsupported actio
   }
   assert.match(render({ screen: { kind: "needs-you" } }), /aria-label="NEEDS YOU"/);
   assert.match(render({ screen: { kind: "queue" } }), /aria-label="Queue"/);
-  assert.match(markup, /role="status" aria-live="polite"/);
+  assert.match(render({ status: "connecting" }), /role="status" aria-live="polite"/);
   assert.match(markup, /<ul class="dfConsoleRows">/);
   assert.equal(/<(input|textarea|select|form)\b/.test(markup), false);
 });

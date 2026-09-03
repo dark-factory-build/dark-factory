@@ -24,7 +24,7 @@ function stateAt(head, overrides = {}) {
   return { ...fixtureState, head: BigInt(head), sequence: BigInt(head), ...overrides };
 }
 
-function terminalHarness({ closeStatus = false, fail, failError = new SessionError("connection"), detachImpl } = {}) {
+function terminalHarness({ closeStatus = false, fail, failError = new SessionError("connection"), detachImpl, acquireImpl } = {}) {
   let attachReset = false;
   const snapshots = [];
   const calls = [];
@@ -57,7 +57,7 @@ function terminalHarness({ closeStatus = false, fail, failError = new SessionErr
       handleOptions = callbacks;
       const handle = {
         attach: async () => { calls.push({ kind: "attach" }); if (fail === "attach") throw failError; if (attachReset) return { kind: "reset", freshAttachRequired: true, sessionId: "31".repeat(16), floor: 5n, head: 9n }; return { sessionId: "31".repeat(16), floor: 0n, head: 0n, acknowledgedSequence: 0n, maxUnackedBytes: 65536n }; },
-        acquireInput: async () => { calls.push({ kind: "acquire" }); if (fail === "acquire") throw failError; return { generation: 1n }; },
+        acquireInput: async () => { calls.push({ kind: "acquire" }); if (acquireImpl !== undefined) return acquireImpl(); if (fail === "acquire") throw failError; return { generation: 1n }; },
         sendInput: async (bytes) => { calls.push({ kind: "input", bytes }); if (fail === "input") throw failError; return { status: "accepted", accepted_bytes: BigInt(bytes.length) }; },
         resize: async (rows, cols) => { calls.push({ kind: "resize", rows, cols }); if (fail === "resize") throw failError; return { rows, cols }; },
         detach: async () => { calls.push({ kind: "detach" }); await detachImpl?.(); callbacks.onClose?.(); },
@@ -116,7 +116,7 @@ async function openTerminal(context, selectedAgent = agent) {
   return { token, writes, options: context.handleOptions() };
 }
 
-test("public terminal composition waits for surface and writable authority", async () => {
+test("public terminal composition buffers direct input until writable authority", async () => {
   const context = terminalHarness();
   context.controller.start();
   context.ready();
@@ -134,11 +134,40 @@ test("public terminal composition waits for surface and writable authority", asy
   assert.deepEqual(context.calls.at(-1).value, { agentId: agent.id, expectedAgentRevision: agent.revision, expectedHead: fixtureState.head });
   context.targetGates[0].resolve(target);
   await flush();
-  assert.deepEqual(context.calls.slice(-3).map((call) => call.kind), ["open", "attach", "acquire"]);
-  context.controller.sendTerminalText(token, "after");
+  assert.deepEqual(context.calls.slice(-4).map((call) => call.kind), ["open", "attach", "acquire", "input"]);
+  assert.deepEqual(context.calls.filter((call) => call.kind === "input").map((call) => [...call.bytes]), [[98, 101, 102, 111, 114, 101]]);
+  context.controller.sendTerminalText(token, "é");
   context.controller.sendTerminalBinary(token, String.fromCharCode(0, 255));
   await flush();
-  assert.deepEqual(context.calls.filter((call) => call.kind === "input").map((call) => [...call.bytes]), [[97, 102, 116, 101, 114], [0, 255]]);
+  assert.deepEqual(context.calls.filter((call) => call.kind === "input").map((call) => [...call.bytes]), [[98, 101, 102, 111, 114, 101], [0xc3, 0xa9], [0, 255]]);
+});
+
+test("oversized direct input is rejected before terminal discovery", () => {
+  for (const send of ["sendTerminalText", "sendTerminalBinary"]) {
+    const context = terminalHarness();
+    context.controller.start();
+    context.ready();
+    context.controller.selectAgent(agent);
+    const token = {};
+    context.controller.beginTerminalSurface(token);
+    context.controller[send](token, "x".repeat(64 * 1024 + 1));
+    assert.equal(context.latest().error.code, "too_large", send);
+    assert.equal(context.latest().selectedAgent, undefined, send);
+    assert.equal(context.calls.some((call) => call.kind === "resolve"), false, send);
+  }
+});
+
+test("malformed direct binary input is rejected before terminal discovery", () => {
+  const context = terminalHarness();
+  context.controller.start();
+  context.ready();
+  context.controller.selectAgent(agent);
+  const token = {};
+  context.controller.beginTerminalSurface(token);
+  context.controller.sendTerminalBinary(token, "\u0100");
+  assert.equal(context.latest().error.code, "malformed");
+  assert.equal(context.latest().selectedAgent, undefined);
+  assert.equal(context.calls.some((call) => call.kind === "resolve"), false);
 });
 
 test("a later state head does not restart a live terminal, while waiting discovery captures the latest head", async () => {
@@ -185,7 +214,9 @@ test("active-task target absence waits for the next public head before retrying"
   const token = {};
   context.controller.beginTerminalSurface(token);
   context.controller.setTerminalSurface(token, { write: async () => {}, abort: () => {} });
+  context.controller.sendTerminalText(token, "typed immediately");
   await flush();
+  assert.equal(context.calls.some((call) => call.kind === "input"), false);
   context.targetGates[0].resolve(null);
   await flush();
   assert.equal(context.latest().selectedAgent.id, agent.id);
@@ -202,6 +233,99 @@ test("active-task target absence waits for the next public head before retrying"
   context.targetGates[1].resolve(target);
   await flush();
   assert.equal(context.latest().terminal.phase, "ready");
+  const inputCalls = context.calls.filter((call) => call.kind === "input");
+  assert.equal(inputCalls.length, 1, "input survives discovery retry and is sent exactly once");
+  assert.equal(new TextDecoder().decode(inputCalls[0].bytes), "typed immediately");
+});
+
+test("pending direct input never crosses tasks on the same agent", async () => {
+  const context = terminalHarness();
+  context.controller.start();
+  context.ready();
+  context.controller.selectAgent(agent);
+  const token = {};
+  context.controller.beginTerminalSurface(token);
+  context.controller.setTerminalSurface(token, { write: async () => {}, abort: () => {} });
+  context.controller.sendTerminalText(token, "for task A");
+  await flush();
+  context.targetGates[0].resolve(null);
+  await flush();
+
+  const tasks = new Map(fixtureState.tasks);
+  const taskA = [...tasks.values()].find(
+    (task) => task.assigned_agent_id === agent.id && task.status === "running",
+  );
+  assert.notEqual(taskA, undefined);
+  tasks.set(taskA.id, { ...taskA, status: "succeeded", revision: taskA.revision + 1n });
+  tasks.set("fe".repeat(16), {
+    ...taskA,
+    id: "fe".repeat(16),
+    title: "Task B",
+    status: "running",
+    revision: 1n,
+  });
+
+  await remountSurface(context);
+  context.clientOptions().onState(stateAt(43, { tasks }));
+  await flush();
+  assert.equal(context.targetGates.length, 2);
+  context.targetGates[1].resolve(target);
+  await flush();
+  assert.equal(context.latest().terminal.phase, "ready");
+  assert.equal(context.calls.some((call) => call.kind === "input"), false);
+});
+
+test("pending direct input never crosses a connection restart", async () => {
+  const context = terminalHarness();
+  context.controller.start();
+  context.ready();
+  context.controller.selectAgent(agent);
+  const token = {};
+  context.controller.beginTerminalSurface(token);
+  context.controller.sendTerminalText(token, "old connection");
+  context.clientOptions().onStatus("connecting");
+  context.controller.sendTerminalText(token, "still disconnected");
+  context.clientOptions().onState(stateAt(43));
+  context.clientOptions().onStatus("ready");
+  context.controller.setTerminalSurface(token, { write: async () => {}, abort: () => {} });
+  await flush();
+  assert.equal(context.targetGates.length, 1);
+  context.targetGates[0].resolve(target);
+  await flush();
+  assert.equal(context.latest().terminal.phase, "ready");
+  assert.equal(context.calls.some((call) => call.kind === "input"), false);
+});
+
+test("lease refusal drops pending and later direct input", async () => {
+  let acquisitions = 0;
+  const context = terminalHarness({
+    acquireImpl: async () => {
+      acquisitions += 1;
+      if (acquisitions === 1) throw new SessionError("stale");
+      return { generation: BigInt(acquisitions) };
+    },
+  });
+  context.controller.start();
+  context.ready();
+  context.controller.selectAgent(agent);
+  const token = {};
+  context.controller.beginTerminalSurface(token);
+  context.controller.setTerminalSurface(token, { write: async () => {}, abort: () => {} });
+  context.controller.sendTerminalText(token, "before refusal");
+  await flush();
+  context.targetGates[0].resolve(target);
+  await flush();
+  assert.equal(context.latest().terminal.phase, "ready");
+  assert.equal(context.latest().terminal.writable, false);
+  context.controller.sendTerminalText(token, "after refusal");
+
+  context.handleOptions().onReset({ sessionId: "31".repeat(16), floor: 5n, head: 9n });
+  await flush();
+  await remountSurface(context);
+  context.targetGates[1].resolve(target);
+  await flush();
+  assert.equal(context.latest().terminal.writable, true);
+  assert.equal(context.calls.some((call) => call.kind === "input"), false);
 });
 
 test("stale active-task discovery retries the newer state already received", async () => {
@@ -479,6 +603,7 @@ test("selection detaches the old controller before resolving the new public agen
   const first = await openTerminal(context, agent);
   const oldOptions = first.options;
   context.controller.selectAgent(secondAgent);
+  context.controller.sendTerminalText(first.token, "do not cross agents");
   assert.equal(context.sessionCloses(), 0);
   assert.equal(context.latest().selectedAgent.id, agent.id, "old terminal stays mounted while detach is pending");
   assert.equal(context.latest().terminal.phase, "closing");
@@ -499,6 +624,7 @@ test("selection detaches the old controller before resolving the new public agen
   context.targetGates[1].resolve(target);
   await flush();
   assert.deepEqual(context.calls.slice(-3).map((call) => call.kind), ["open", "attach", "acquire"]);
+  assert.equal(context.calls.some((call) => call.kind === "input"), false);
   assert.equal(context.latest().terminal.phase, "ready");
 });
 

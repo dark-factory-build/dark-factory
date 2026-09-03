@@ -1,4 +1,5 @@
 import {
+  MAX_TERMINAL_PAYLOAD,
   ProtocolError,
   SessionError,
   consumePairingChallenge,
@@ -12,8 +13,9 @@ import {
   type SessionErrorCode,
   type SessionStatus,
   type StateView,
+  type TaskItem,
 } from "@dark-factory/client";
-import { TerminalController, type TerminalControllerSnapshot, type TerminalSurface } from "./terminal-controller.js";
+import { MAX_PENDING_INPUT_BYTES, TerminalController, type TerminalControllerSnapshot, type TerminalSurface } from "./terminal-controller.js";
 
 const BROWSER_ENDPOINT = new URL("ws://127.0.0.1:43123/browser/v1");
 const BROWSER_URL = BROWSER_ENDPOINT.toString();
@@ -88,6 +90,8 @@ type Selection = {
 type AgentTerminalSelection = {
   agent: AgentItem;
   head: bigint;
+  /** Public task identity that terminal discovery is allowed to resolve. */
+  task?: Pick<TaskItem, "id" | "revision">;
   /** Server replay resets survived by this terminal view (banner state). */
   resets: number;
 };
@@ -126,6 +130,7 @@ export class FactoryAppController {
   #terminalResetBurst = 0;
   #terminalRetry: { head: bigint; stale: boolean } | undefined;
   #terminalReplacement: TerminalReplacement | undefined;
+  #pendingTerminalInput = new Uint8Array(0);
   #pendingTerminalResize: { rows: number; cols: number } | undefined;
   #generation = 0;
   #started = false;
@@ -186,6 +191,7 @@ export class FactoryAppController {
     this.#clearSelection();
     this.#selectedAgent = undefined;
     this.#terminalReplacement = undefined;
+    this.#dropPendingTerminalInput();
     this.#closeTerminal();
     this.#client?.close();
   }
@@ -230,6 +236,7 @@ export class FactoryAppController {
     if (surfaceVersion !== this.#terminalSurfaceVersion || this.#terminalSurfaceToken !== token) return;
     this.#selectedAgent = undefined;
     this.#terminalReplacement = undefined;
+    this.#dropPendingTerminalInput();
     this.#closeTerminal();
     this.#error = new SessionError("internal");
     this.#publish();
@@ -252,17 +259,37 @@ export class FactoryAppController {
     if (this.#terminalSurfaceToken !== undefined && this.#terminalSurfaceToken !== token) return;
     this.#selectedAgent = undefined;
     this.#terminalReplacement = undefined;
+    this.#dropPendingTerminalInput();
     this.#closeTerminal();
     this.#error = new SessionError("internal");
     this.#publish();
   }
 
   sendTerminalText(token: object, value: string, surfaceVersion = this.#terminalSurfaceVersion): void {
-    if (surfaceVersion === this.#terminalSurfaceVersion && this.#terminalSurfaceToken === token) this.#terminal?.sendText(value);
+    if (this.#selectedAgent === undefined || this.#terminalSurfaceToken === undefined || surfaceVersion !== this.#terminalSurfaceVersion || this.#terminalSurfaceToken !== token || typeof value !== "string") return;
+    if (value.length > MAX_PENDING_INPUT_BYTES) {
+      this.#disarmTerminal(new SessionError("too_large"));
+      return;
+    }
+    this.#queueTerminalInput(new TextEncoder().encode(value));
   }
 
   sendTerminalBinary(token: object, value: string, surfaceVersion = this.#terminalSurfaceVersion): void {
-    if (surfaceVersion === this.#terminalSurfaceVersion && this.#terminalSurfaceToken === token) this.#terminal?.sendBinary(value);
+    if (this.#selectedAgent === undefined || this.#terminalSurfaceToken === undefined || surfaceVersion !== this.#terminalSurfaceVersion || this.#terminalSurfaceToken !== token || typeof value !== "string") return;
+    if (value.length > MAX_PENDING_INPUT_BYTES) {
+      this.#disarmTerminal(new SessionError("too_large"));
+      return;
+    }
+    const bytes = new Uint8Array(value.length);
+    for (let index = 0; index < value.length; index += 1) {
+      const code = value.charCodeAt(index);
+      if (code > 0xff) {
+        this.#disarmTerminal(new ProtocolError("malformed"));
+        return;
+      }
+      bytes[index] = code;
+    }
+    this.#queueTerminalInput(bytes);
   }
 
   resizeTerminal(token: object, rows: number, cols: number, surfaceVersion = this.#terminalSurfaceVersion): void {
@@ -389,6 +416,7 @@ export class FactoryAppController {
       this.#statusReason = this.#error.code;
       this.#clearSelection();
       this.#terminalReplacement = undefined;
+      this.#dropPendingTerminalInput();
       if (this.#terminal !== undefined) this.#closeTerminal();
       this.#publish();
     });
@@ -401,9 +429,10 @@ export class FactoryAppController {
     if (status !== "ready") this.#clearSelection();
     // A wire-level state restart resnapshots on the same authenticated socket;
     // exact terminal discovery and handles remain owned by that session.
-    if (status !== "ready" && status !== "syncing" && this.#terminal !== undefined) {
+    if (status !== "ready" && status !== "syncing") {
       this.#terminalReplacement = undefined;
-      this.#closeTerminal();
+      this.#dropPendingTerminalInput();
+      if (this.#terminal !== undefined) this.#closeTerminal();
     }
     if (status !== "closed") this.#error = undefined;
     this.#publish();
@@ -421,11 +450,13 @@ export class FactoryAppController {
       } else {
         selectedAgent.agent = { ...currentAgent };
         if (this.#terminal === undefined) {
+          this.#refreshTerminalTask(selectedAgent, state);
           if (selectedAgent.head !== state.head) {
             selectedAgent.head = state.head;
             this.#terminalRetry = undefined;
           } else if (this.#terminalRetry !== undefined && !this.#terminalRetry.stale && agentCurrentTask(selectedAgent.agent, state) === undefined) {
             this.#selectedAgent = undefined;
+            this.#dropPendingTerminalInput();
             this.#retireTerminal();
           }
         }
@@ -499,6 +530,7 @@ export class FactoryAppController {
         (staleDiscovery || agentCurrentTask(selected.agent, state) !== undefined);
       this.#retireTerminal();
       if (retryDiscovery && selected !== undefined && state !== undefined) {
+        this.#refreshTerminalTask(selected, state);
         if (selected.head === state.head) {
           this.#terminalRetry = { head: selected.head, stale: staleDiscovery };
         }
@@ -508,6 +540,7 @@ export class FactoryAppController {
         return;
       }
       this.#selectedAgent = undefined;
+      this.#dropPendingTerminalInput();
       this.#error = snapshot.error?.code === "stale" || snapshot.error?.code === "internal" ? snapshot.error : undefined;
       this.#publish();
       return;
@@ -516,9 +549,15 @@ export class FactoryAppController {
       if (snapshot.error !== undefined && !snapshot.reset) this.#disarmTerminal(snapshot.error);
       return;
     }
-    if (snapshot.phase === "ready") this.#terminalResetBurst = 0;
+    if (snapshot.phase === "ready") {
+      this.#terminalResetBurst = 0;
+      if (!snapshot.writable) this.#dropPendingTerminalInput();
+    }
     this.#publish();
-    if (snapshot.writable) this.#flushTerminalResize();
+    if (snapshot.writable) {
+      this.#flushTerminalInput();
+      this.#flushTerminalResize();
+    }
   }
 
   /**
@@ -536,6 +575,7 @@ export class FactoryAppController {
     this.#terminalResetBurst += 1;
     selected.resets += 1;
     selected.agent = { ...current };
+    if (this.#state !== undefined) this.#refreshTerminalTask(selected, this.#state);
     selected.head = this.#state?.head ?? selected.head;
     this.#terminal = undefined;
     ++this.#terminalGeneration;
@@ -557,6 +597,46 @@ export class FactoryAppController {
     terminal.resize(resize.rows, resize.cols);
   }
 
+  #queueTerminalInput(bytes: Uint8Array): void {
+    if (bytes.length === 0) return;
+    const terminal = this.#terminal;
+    const phase = terminal?.snapshot.phase;
+    if (this.#selectedAgent?.task === undefined || (this.#status !== "ready" && this.#status !== "syncing") || phase === "closing" || phase === "closed" || (phase === "ready" && !terminal?.snapshot.writable)) return;
+    if (bytes.length > MAX_TERMINAL_PAYLOAD || this.#pendingTerminalInput.length + bytes.length > MAX_PENDING_INPUT_BYTES) {
+      this.#disarmTerminal(new SessionError("too_large"));
+      return;
+    }
+    const next = new Uint8Array(this.#pendingTerminalInput.length + bytes.length);
+    next.set(this.#pendingTerminalInput);
+    next.set(bytes, this.#pendingTerminalInput.length);
+    this.#pendingTerminalInput = next;
+    this.#flushTerminalInput();
+  }
+
+  #flushTerminalInput(): void {
+    const terminal = this.#terminal;
+    if (terminal === undefined || !terminal.snapshot.writable) return;
+    while (this.#pendingTerminalInput.length > 0) {
+      const payload = this.#pendingTerminalInput.length <= MAX_TERMINAL_PAYLOAD
+        ? this.#pendingTerminalInput
+        : this.#pendingTerminalInput.slice(0, MAX_TERMINAL_PAYLOAD);
+      if (!terminal.sendInput(payload)) return;
+      this.#pendingTerminalInput = this.#pendingTerminalInput.slice(payload.length);
+    }
+  }
+
+  #dropPendingTerminalInput(): void {
+    this.#pendingTerminalInput = new Uint8Array(0);
+  }
+
+  #refreshTerminalTask(selected: AgentTerminalSelection, state: StateView): void {
+    const task = agentCurrentTask(selected.agent, state);
+    const current = task === undefined ? undefined : { id: task.id, revision: task.revision };
+    if (sameTaskIdentity(selected.task, current)) return;
+    selected.task = current;
+    this.#dropPendingTerminalInput();
+  }
+
   #replaceTerminal(replacement: TerminalReplacement): void {
     const terminal = this.#terminal;
     if (terminal === undefined) {
@@ -574,12 +654,15 @@ export class FactoryAppController {
     const replacement = this.#terminalReplacement;
     if (replacement === undefined) return false;
     this.#terminalReplacement = undefined;
+    this.#dropPendingTerminalInput();
     this.#retireTerminal();
     const candidate = replacement.agentId === undefined ? undefined : this.#state?.agents.get(replacement.agentId);
     const agent = candidate?.revision === replacement.agentRevision ? candidate : undefined;
+    const task = agent === undefined || this.#state === undefined ? undefined : agentCurrentTask(agent, this.#state);
     this.#selectedAgent = agent === undefined ? undefined : {
       agent: { ...agent },
       head: this.#state?.head ?? 0n,
+      task: task === undefined ? undefined : { id: task.id, revision: task.revision },
       resets: 0,
     };
     this.#error = replacement.error ?? (replacement.agentId !== undefined && agent === undefined ? new SessionError("stale") : undefined);
@@ -608,6 +691,7 @@ export class FactoryAppController {
   #disarmTerminal(error: SessionError | ProtocolError): void {
     this.#selectedAgent = undefined;
     this.#terminalReplacement = undefined;
+    this.#dropPendingTerminalInput();
     this.#closeTerminal();
     this.#error = error;
     this.#publish();
@@ -666,4 +750,11 @@ function finiteError(error: unknown): SessionError | ProtocolError {
 function sameStatus(left: FactoryAppStatus | undefined, right: FactoryAppStatus): boolean {
   if (left === undefined || left.status !== right.status) return false;
   return left.status !== "closed" || (right.status === "closed" && left.reason === right.reason);
+}
+
+function sameTaskIdentity(
+  left: Pick<TaskItem, "id" | "revision"> | undefined,
+  right: Pick<TaskItem, "id" | "revision"> | undefined,
+): boolean {
+  return left === undefined ? right === undefined : right !== undefined && left.id === right.id && left.revision === right.revision;
 }
