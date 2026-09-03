@@ -119,8 +119,9 @@ Provider choice is unrestricted interactive authority in V1. Shell receives
 its task through a sealed descriptor. Claude Code and Codex resolve one direct
 executable commitment from the daemon's fixed tool path and receive their
 initial prompt once before the terminal is exposed. They reuse the operator's
-explicit Claude or Codex configuration root while keeping a private runtime
-`HOME` and `TMPDIR`; no provider API key is copied into the environment. The
+existing account: Claude uses the account `HOME`, while Codex uses its explicit
+configuration root with a private runtime `HOME`. Both keep a private `TMPDIR`;
+no provider API key is copied into the environment. The
 [provider contract](docs/providers.md) owns the exact launch details. Non-None
 verification policies are unsupported by the current daemon and cannot be
 treated as completion proof.

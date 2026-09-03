@@ -187,22 +187,18 @@ func TestResolveInstallationFailsClosedAtInvalidExistingCandidate(t *testing.T) 
 
 func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) {
 	tests := []struct {
-		kind        kernel.Provider
-		model       string
-		effort      string
-		wantArgv    []string
-		configKey   string
-		configChild string
+		kind     kernel.Provider
+		model    string
+		effort   string
+		wantArgv []string
 	}{
 		{
 			kind: kernel.ProviderClaudeCode, model: "claude-model", effort: "max",
-			wantArgv:  []string{"/usr/bin/true", "--dangerously-skip-permissions", "--model", "claude-model", "--effort", "max"},
-			configKey: "CLAUDE_CONFIG_DIR=", configChild: claudeConfigDir,
+			wantArgv: []string{"/usr/bin/true", "--dangerously-skip-permissions", "--model", "claude-model", "--effort", "max"},
 		},
 		{
 			kind: kernel.ProviderCodex, model: "codex-model", effort: "xhigh",
-			wantArgv:  []string{"/usr/bin/true", "--dangerously-bypass-approvals-and-sandbox", "--no-alt-screen", "--model", "codex-model", "-c", `model_reasoning_effort="xhigh"`},
-			configKey: "CODEX_HOME=", configChild: codexConfigDir,
+			wantArgv: []string{"/usr/bin/true", "--dangerously-bypass-approvals-and-sandbox", "--no-alt-screen", "--model", "codex-model", "-c", `model_reasoning_effort="xhigh"`},
 		},
 	}
 	for _, test := range tests {
@@ -218,15 +214,23 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 			if got := launch.Argv(); !slices.Equal(got, test.wantArgv) {
 				t.Fatalf("argv=%q, want %q", got, test.wantArgv)
 			}
-			wantConfig := test.configKey + filepath.Join(runtime.accountHome, test.configChild)
-			if !slices.Contains(launch.Environment(), wantConfig) {
-				t.Fatalf("environment lacks exact config root %q: %q", wantConfig, launch.Environment())
+			wantHome := runtime.home
+			if test.kind == kernel.ProviderClaudeCode {
+				wantHome = runtime.accountHome
+			} else {
+				wantConfig := "CODEX_HOME=" + filepath.Join(runtime.accountHome, codexConfigDir)
+				if !slices.Contains(launch.Environment(), wantConfig) {
+					t.Fatalf("environment lacks exact config root %q: %q", wantConfig, launch.Environment())
+				}
+			}
+			if !slices.Contains(launch.Environment(), "HOME="+wantHome) {
+				t.Fatalf("environment lacks exact HOME %q: %q", wantHome, launch.Environment())
 			}
 			for _, entry := range launch.Environment() {
-				if strings.HasPrefix(entry, "HOME=") && entry != "HOME="+runtime.home {
-					t.Fatalf("native provider received non-private HOME: %q", entry)
+				if strings.HasPrefix(entry, "HOME=") && entry != "HOME="+wantHome {
+					t.Fatalf("native provider received wrong HOME: %q", entry)
 				}
-				if test.kind == kernel.ProviderClaudeCode && strings.HasPrefix(entry, "CODEX_HOME=") ||
+				if test.kind == kernel.ProviderClaudeCode && (strings.HasPrefix(entry, "CODEX_HOME=") || strings.HasPrefix(entry, "CLAUDE_CONFIG_DIR=")) ||
 					test.kind == kernel.ProviderCodex && strings.HasPrefix(entry, "CLAUDE_CONFIG_DIR=") {
 					t.Fatalf("provider received another provider's config root: %q", entry)
 				}

@@ -162,10 +162,11 @@ Shell receives bounded task bytes through a sealed descriptor. Claude Code and
 Codex resolve their named CLI through the daemon's fixed tool path to one exact
 direct executable commitment, then receive their initial prompt once through
 the PTY after provider exec and before the terminal is exposed. Native tools use
-their explicit account configuration root while runtime `HOME` and `TMPDIR`
-remain private. [The provider contract](docs/providers.md) owns the exact argv,
-environment, and task-delivery details. The schema and wire contract contain no
-permission-profile field.
+the operator's existing account: Claude uses the account `HOME`, while Codex
+uses its explicit configuration root with a private runtime `HOME`. Both keep a
+private `TMPDIR`. [The provider contract](docs/providers.md) owns the exact
+argv, environment, and task-delivery details. The schema and wire contract
+contain no permission-profile field.
 
 Provider output is opaque and never lifecycle authority.
 
