@@ -68,6 +68,15 @@ rejected as unsupported before a provider runs.
    writable source lease. A retry creates a new run and bearer; it never revives
    an old process or credential.
 
+## Browser authority
+
+The paired browser is a client of the local API, not a second scheduler. It
+may submit a bounded instruction to a configured idle agent. The daemon creates
+the same durable task used by `factoryctl`, and the browser renders its
+canonical queued, running, or terminal state. An idle configured agent remains
+selectable so the operator can add work; no provider process or terminal is
+created until admission starts a run.
+
 ## Browser HumanRequest authority
 
 The Go runtime keeps HumanRequest authority in SQLite and exposes only bounded,
@@ -213,8 +222,11 @@ targets, and the daemon does not claim an instantaneous filesystem byte ceiling.
 ## Clients and integrations
 
 `factoryctl` and the hosted browser are disposable clients of one local API;
-neither owns runtime state. Both use the operator credential for operator
-requests. Browser selection is pinned to canonical state heads and never polls
+neither owns runtime state. `factoryctl` uses the operator credential, while a
+paired browser uses its scoped durable browser authority. Browser task
+submission, like CLI task submission, is applied by the daemon's durable queue
+and does not bypass dispatch or provider admission.
+Browser selection is pinned to canonical state heads and never polls
 or sleeps across lifecycle boundaries. Stale discovery is treated as stale, not
 as authority for a retry or an old absence. Attempt commands read the private
 credential file for their exact run; an attempt cannot cross into operator

@@ -141,7 +141,8 @@
 .dfFactoryConsole__terminalPanel button:hover:not(:disabled) { border-color: var(--df-console-accent); }
 .dfFactoryConsole button:focus-visible,
 .dfFactoryConsole textarea:focus-visible,
-.dfFactoryConsole__terminalPanel button:focus-visible {
+.dfFactoryConsole__terminalPanel button:focus-visible,
+.dfFactoryConsole__terminalPanel textarea:focus-visible {
   outline: 2px solid var(--df-console-accent);
   outline-offset: 3px;
 }
@@ -333,6 +334,45 @@
   color: var(--df-console-warning);
   background: #1a1408;
   border-block: 1px solid var(--df-console-rule);
+  font-size: 0.75rem;
+}
+
+.dfFactoryConsole__instruction {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.dfFactoryConsole__instruction textarea {
+  flex: 1 1 auto;
+  min-height: 12rem;
+  width: 100%;
+  resize: none;
+  padding: 0.75rem;
+  color: var(--df-console-text);
+  background: #000;
+  border: 1px solid var(--df-console-rule);
+  font: inherit;
+  line-height: 1.5;
+}
+
+.dfFactoryConsole__instruction textarea::placeholder { color: var(--df-console-muted); }
+
+.dfFactoryConsole__instructionActions {
+  display: flex;
+  min-height: 2.1rem;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  color: var(--df-console-alert);
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+}
+
+.dfFactoryConsole__instructionState {
+  color: var(--df-console-muted);
   font-size: 0.75rem;
 }
 

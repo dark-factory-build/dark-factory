@@ -11,6 +11,7 @@ import {
   MAX_FACTORY_CAPACITY,
   MAX_HUMAN_QUESTION_BYTES,
   MAX_HUMAN_REPLY_BYTES,
+  MAX_TASK_INSTRUCTION_BYTES,
   MAX_JSON_DEPTH,
   MAX_OBJECT_MEMBERS,
   MAX_PROJECT_NAME_BYTES,
@@ -75,6 +76,8 @@ export type HumanRequestReplyBody = { request_id: string; expected_revision: big
 export type HumanRequestReplyResultBody = { request_id: string; revision: bigint; status: "resolved" | "delivery_unknown" };
 export type HumanRequestCancelRunBody = { request_id: string; expected_request_revision: bigint; expected_run_revision: bigint };
 export type HumanRequestCancelRunResultBody = { run_id: string; run_revision: bigint; request_id: string; request_revision: bigint };
+export type TaskEnqueueBody = { task_id: string; incarnation_id: string; agent_id: string; expected_agent_revision: bigint; instruction: string };
+export type TaskEnqueueResultBody = { task_id: string; revision: bigint; agent_revision: bigint };
 export type TerminalTargetGetBody = { agent_id: string; expected_agent_revision: bigint; expected_head: bigint };
 export type TerminalTargetDescriptor = { run_id: string; session_id: string; run_revision: bigint; session_revision: bigint };
 export type TerminalTargetBody = { agent_id: string; agent_revision: bigint; head: bigint; target: TerminalTargetDescriptor | null };
@@ -132,18 +135,20 @@ export type TerminalServerControlFrame =
 export type ServerControlFrame = HelloFrame | PairResultFrame | AuthResultFrame | StateSnapshotFrame | StateRestartFrame | StateEventFrame | StateEntityFrame | HumanRequestDetailFrame
   | { v: 1; type: "HUMAN_REQUEST_REPLY_RESULT"; id: string; body: HumanRequestReplyResultBody }
   | { v: 1; type: "HUMAN_REQUEST_CANCEL_RUN_RESULT"; id: string; body: HumanRequestCancelRunResultBody }
+  | { v: 1; type: "TASK_ENQUEUE_RESULT"; id: string; body: TaskEnqueueResultBody }
   | { v: 1; type: "TERMINAL_TARGET"; id: string; body: TerminalTargetBody }
   | TerminalServerControlFrame | ErrorFrame;
 export type ClientControlFrame = PairProveFrame | AuthProveFrame | StateGetFrame | StateSubscribeFrame | StateEntityGetFrame | HumanRequestDetailGetFrame
   | { v: 1; type: "HUMAN_REQUEST_REPLY"; id: string; body: HumanRequestReplyBody }
   | { v: 1; type: "HUMAN_REQUEST_CANCEL_RUN"; id: string; body: HumanRequestCancelRunBody }
+  | { v: 1; type: "TASK_ENQUEUE"; id: string; body: TaskEnqueueBody }
   | { v: 1; type: "TERMINAL_TARGET_GET"; id: string; body: TerminalTargetGetBody }
   | TerminalControlFrame | ErrorFrame;
 type ControlBody = ClientControlFrame["body"] | ServerControlFrame["body"];
 
 const HEX_BYTES = { daemon_id: 16, boot_id: 16, connection_nonce: 32, challenge: 32, client_id: 16, public_key_sec1: 65, signature: 64 } as const;
-const CLIENT_TYPES: readonly ControlType[] = ["PAIR_PROVE", "AUTH_PROVE", "STATE_GET", "STATE_SUBSCRIBE", "STATE_ENTITY_GET", "HUMAN_REQUEST_DETAIL_GET", "HUMAN_REQUEST_REPLY", "HUMAN_REQUEST_CANCEL_RUN", "TERMINAL_TARGET_GET", "TERMINAL_ATTACH", "TERMINAL_ACK", "TERMINAL_LEASE_ACQUIRE", "TERMINAL_LEASE_RENEW", "TERMINAL_LEASE_RELEASE", "TERMINAL_RESIZE", "TERMINAL_DETACH", "ERROR"];
-const SERVER_TYPES: readonly ControlType[] = ["HELLO", "PAIR_RESULT", "AUTH_RESULT", "STATE_SNAPSHOT", "STATE_RESTART", "STATE_EVENT", "STATE_ENTITY", "HUMAN_REQUEST_DETAIL", "HUMAN_REQUEST_REPLY_RESULT", "HUMAN_REQUEST_CANCEL_RUN_RESULT", "TERMINAL_TARGET", "TERMINAL_ATTACHED", "TERMINAL_LEASE_RESULT", "TERMINAL_RESIZED", "TERMINAL_DETACHED", "TERMINAL_INPUT_RESULT", "TERMINAL_EOF", "TERMINAL_EXIT", "TERMINAL_RESET", "ERROR"];
+const CLIENT_TYPES: readonly ControlType[] = ["PAIR_PROVE", "AUTH_PROVE", "STATE_GET", "STATE_SUBSCRIBE", "STATE_ENTITY_GET", "HUMAN_REQUEST_DETAIL_GET", "HUMAN_REQUEST_REPLY", "HUMAN_REQUEST_CANCEL_RUN", "TASK_ENQUEUE", "TERMINAL_TARGET_GET", "TERMINAL_ATTACH", "TERMINAL_ACK", "TERMINAL_LEASE_ACQUIRE", "TERMINAL_LEASE_RENEW", "TERMINAL_LEASE_RELEASE", "TERMINAL_RESIZE", "TERMINAL_DETACH", "ERROR"];
+const SERVER_TYPES: readonly ControlType[] = ["HELLO", "PAIR_RESULT", "AUTH_RESULT", "STATE_SNAPSHOT", "STATE_RESTART", "STATE_EVENT", "STATE_ENTITY", "HUMAN_REQUEST_DETAIL", "HUMAN_REQUEST_REPLY_RESULT", "HUMAN_REQUEST_CANCEL_RUN_RESULT", "TASK_ENQUEUE_RESULT", "TERMINAL_TARGET", "TERMINAL_ATTACHED", "TERMINAL_LEASE_RESULT", "TERMINAL_RESIZED", "TERMINAL_DETACHED", "TERMINAL_INPUT_RESULT", "TERMINAL_EOF", "TERMINAL_EXIT", "TERMINAL_RESET", "ERROR"];
 
 export function encodeClientControl(frame: ClientControlFrame): string { return normalizeBoundary(() => encode(frame, validateControl(frame, "client"))); }
 export function encodePairProve(id: string, body: PairProveBody): string { return encodeClientControl({ v: 1, type: "PAIR_PROVE", id, body }); }
@@ -154,6 +159,7 @@ export function encodeStateEntityGet(id: string, body: StateEntityGetBody): stri
 export function encodeHumanRequestDetailGet(id: string, body: HumanRequestDetailGetBody): string { return encodeClientControl({ v: 1, type: "HUMAN_REQUEST_DETAIL_GET", id, body }); }
 export function encodeHumanRequestReply(id: string, body: HumanRequestReplyBody): string { return encodeClientControl({ v: 1, type: "HUMAN_REQUEST_REPLY", id, body }); }
 export function encodeHumanRequestCancelRun(id: string, body: HumanRequestCancelRunBody): string { return encodeClientControl({ v: 1, type: "HUMAN_REQUEST_CANCEL_RUN", id, body }); }
+export function encodeTaskEnqueue(id: string, body: TaskEnqueueBody): string { return encodeClientControl({ v: 1, type: "TASK_ENQUEUE", id, body }); }
 export function encodeTerminalTargetGet(id: string, body: TerminalTargetGetBody): string { return encodeClientControl({ v: 1, type: "TERMINAL_TARGET_GET", id, body }); }
 export function encodeTerminalAttach(id: string, body: TerminalAttachBody): string { return encodeClientControl({ v: 1, type: "TERMINAL_ATTACH", id, body }); }
 export function encodeTerminalAck(body: TerminalAckBody): string { return encodeClientControl({ v: 1, type: "TERMINAL_ACK", body }); }
@@ -175,6 +181,7 @@ export function encodeStateEntity(id: string, body: StateEntityBody): string { r
 export function encodeHumanRequestDetail(id: string, body: HumanRequestDetailBody): string { return encodeServerControl({ v: 1, type: "HUMAN_REQUEST_DETAIL", id, body }); }
 export function encodeHumanRequestReplyResult(id: string, body: HumanRequestReplyResultBody): string { return encodeServerControl({ v: 1, type: "HUMAN_REQUEST_REPLY_RESULT", id, body }); }
 export function encodeHumanRequestCancelRunResult(id: string, body: HumanRequestCancelRunResultBody): string { return encodeServerControl({ v: 1, type: "HUMAN_REQUEST_CANCEL_RUN_RESULT", id, body }); }
+export function encodeTaskEnqueueResult(id: string, body: TaskEnqueueResultBody): string { return encodeServerControl({ v: 1, type: "TASK_ENQUEUE_RESULT", id, body }); }
 export function encodeTerminalTarget(id: string, body: TerminalTargetBody): string { return encodeServerControl({ v: 1, type: "TERMINAL_TARGET", id, body }); }
 export function encodeTerminalAttached(id: string, body: TerminalAttachedBody): string { return encodeServerControl({ v: 1, type: "TERMINAL_ATTACHED", id, body }); }
 export function encodeTerminalLeaseResult(id: string, body: TerminalLeaseResultBody): string { return encodeServerControl({ v: 1, type: "TERMINAL_LEASE_RESULT", id, body }); }
@@ -273,6 +280,8 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
     case "HUMAN_REQUEST_REPLY_RESULT": exactKeys(body, ["request_id", "revision", "status"]); if (body.status !== "resolved" && body.status !== "delivery_unknown") malformed(); return { request_id: dynamicID(body.request_id), revision: decimal(body.revision, wire, true), status: body.status };
     case "HUMAN_REQUEST_CANCEL_RUN": exactKeys(body, ["request_id", "expected_request_revision", "expected_run_revision"]); return { request_id: dynamicID(body.request_id), expected_request_revision: decimal(body.expected_request_revision, wire, true), expected_run_revision: decimal(body.expected_run_revision, wire, true) };
     case "HUMAN_REQUEST_CANCEL_RUN_RESULT": exactKeys(body, ["run_id", "run_revision", "request_id", "request_revision"]); return { run_id: dynamicID(body.run_id), run_revision: decimal(body.run_revision, wire, true), request_id: dynamicID(body.request_id), request_revision: decimal(body.request_revision, wire, true) };
+    case "TASK_ENQUEUE": exactKeys(body, ["task_id", "incarnation_id", "agent_id", "expected_agent_revision", "instruction"]); return { task_id: dynamicID(body.task_id), incarnation_id: dynamicID(body.incarnation_id), agent_id: dynamicID(body.agent_id), expected_agent_revision: decimal(body.expected_agent_revision, wire, true), instruction: boundedText(body.instruction, 1, MAX_TASK_INSTRUCTION_BYTES) };
+    case "TASK_ENQUEUE_RESULT": exactKeys(body, ["task_id", "revision", "agent_revision"]); return { task_id: dynamicID(body.task_id), revision: decimal(body.revision, wire, true), agent_revision: decimal(body.agent_revision, wire, true) };
     case "TERMINAL_TARGET_GET": exactKeys(body, ["agent_id", "expected_agent_revision", "expected_head"]); return { agent_id: dynamicID(body.agent_id), expected_agent_revision: decimal(body.expected_agent_revision, wire, true), expected_head: decimal(body.expected_head, wire) };
     case "TERMINAL_TARGET": exactKeys(body, ["agent_id", "agent_revision", "head", "target"]); { const target = body.target === null ? null : terminalTargetDescriptor(body.target, wire); return { agent_id: dynamicID(body.agent_id), agent_revision: decimal(body.agent_revision, wire, true), head: decimal(body.head, wire), target }; }
     case "TERMINAL_ATTACH": exactKeys(body, ["run_id", "session_id", "expected_run_revision", "expected_session_revision", "after_sequence"]); return { run_id: dynamicID(body.run_id), session_id: dynamicID(body.session_id), expected_run_revision: decimal(body.expected_run_revision, wire, true), expected_session_revision: decimal(body.expected_session_revision, wire, true), after_sequence: decimal(body.after_sequence, wire) };

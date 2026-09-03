@@ -467,6 +467,7 @@ test("manifest bounds and registry are an exact readable mirror", () => {
     maxTaskTitleBytes: manifest.bounds.max_task_title_bytes,
     maxHumanQuestionBytes: manifest.bounds.max_human_question_bytes,
     maxHumanReplyBytes: manifest.bounds.max_human_reply_bytes,
+    maxTaskInstructionBytes: manifest.bounds.max_task_instruction_bytes,
     maxFactoryCapacity: manifest.bounds.max_factory_capacity,
     maxTaskPriority: manifest.bounds.max_task_priority,
     maxSQLiteInteger: BigInt(manifest.bounds.max_sqlite_integer),

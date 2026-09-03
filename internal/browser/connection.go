@@ -423,6 +423,21 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 			current.sendError(frame.ID, browserprotocol.ErrorInternal, false)
 			return false
 		}
+	case browserprotocol.TaskEnqueue:
+		if current.server.taskBackend == nil {
+			err = ErrUnauthorized
+			break
+		}
+		result, backendErr := current.server.taskBackend.EnqueueTask(ctx, current.principal.ClientID, body)
+		if backendErr != nil {
+			err = backendErr
+			break
+		}
+		if result.TaskID != body.TaskID || result.AgentRevision != body.ExpectedAgentRevision || result.Revision == 0 {
+			current.sendError(frame.ID, browserprotocol.ErrorInternal, false)
+			return false
+		}
+		payload, err = browserprotocol.EncodeTaskEnqueueResult(frame.ID, result)
 	case browserprotocol.HumanRequestReply:
 		if current.server.terminalBackend == nil {
 			err = ErrUnauthorized

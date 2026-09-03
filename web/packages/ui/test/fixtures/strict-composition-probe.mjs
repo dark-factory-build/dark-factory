@@ -44,7 +44,7 @@ try {
   assert.ok(counters.terminals >= 1, "selected public terminal must construct xterm");
   assert.equal(counters.terminals - counters.disposes, 1, "one selected terminal must remain live before unmount");
 
-  const close = renderer.root.findAllByType("button").find((button) => button.props.children === "CLOSE TERMINAL");
+  const close = renderer.root.findAllByType("button").find((button) => button.props.children === "CLOSE");
   assert.ok(close, "selected terminal must expose an explicit close action");
   await act(async () => {
     close.props.onClick();

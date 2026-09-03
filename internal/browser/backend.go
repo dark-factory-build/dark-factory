@@ -202,6 +202,14 @@ type Backend interface {
 	SubscribeState(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.Decimal) (StateSubscription, error)
 }
 
+// TaskBackend is the optional bounded operator-mutation half of browser v1.
+// Keeping it separate preserves the state-only backend seam used by tests and
+// non-production adapters.
+type TaskBackend interface {
+	Backend
+	EnqueueTask(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.TaskEnqueue) (browserprotocol.TaskEnqueueResult, error)
+}
+
 // TerminalBackend is the optional effect half of browser v1. Keeping it
 // separate preserves the small state backend seam used by bootstrap/tests;
 // production daemon backends implement both interfaces.

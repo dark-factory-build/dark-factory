@@ -4,6 +4,7 @@ import {
   BrowserSession,
   BrowserClient,
   CAPABILITIES,
+  MAX_TASK_INSTRUCTION_BYTES,
   consumePairingChallenge,
   ProtocolError,
   SessionError,
@@ -15,6 +16,7 @@ import {
   encodeHumanRequestCancelRunResult,
   encodeHumanRequestDetail,
   encodeHumanRequestReplyResult,
+  encodeTaskEnqueueResult,
   encodeStateEntity,
   encodeStateEvent,
   encodeStateRestart,
@@ -259,6 +261,142 @@ test("authenticated HumanRequest methods emit exact frames and correlate results
   assert.equal((await cancel).run_id, runID);
   await assert.rejects(session.replyHumanRequest(cancelDetail, "too late"), (error) => error instanceof SessionError && error.code === "stale");
   session.close();
+});
+
+test("authenticated task enqueue mints exact IDs and correlates the durable result", async () => {
+  const { session, socket } = await openHumanSession();
+  const agentId = "77".repeat(16);
+  const pending = session.enqueueAgentTask({ agentId, expectedAgentRevision: 7n, instruction: "Repair the queue" });
+  const frame = decodeClientControl(socket.sent.at(-1));
+  assert.equal(frame.type, "TASK_ENQUEUE");
+  assert.deepEqual({
+    agent_id: frame.body.agent_id,
+    expected_agent_revision: frame.body.expected_agent_revision,
+    instruction: frame.body.instruction,
+  }, {
+    agent_id: agentId,
+    expected_agent_revision: 7n,
+    instruction: "Repair the queue",
+  });
+  assert.match(frame.body.task_id, /^[0-9a-f]{32}$/);
+  assert.match(frame.body.incarnation_id, /^[0-9a-f]{32}$/);
+  assert.notEqual(frame.body.task_id, "00".repeat(16));
+  assert.notEqual(frame.body.incarnation_id, "00".repeat(16));
+  assert.notEqual(frame.body.task_id, frame.body.incarnation_id);
+
+  socket.reply(encodeTaskEnqueueResult(frame.id, {
+    task_id: frame.body.task_id,
+    revision: 1n,
+    agent_revision: 7n,
+  }));
+  const result = await pending;
+  assert.deepEqual(result, { taskId: frame.body.task_id, revision: 1n });
+  assert.equal(Object.isFrozen(result), true);
+
+  const unicodeWhitespace = session.enqueueAgentTask({ agentId, expectedAgentRevision: 7n, instruction: "\u0085" });
+  const unicodeFrame = decodeClientControl(socket.sent.at(-1));
+  assert.equal(unicodeFrame.body.instruction, "\u0085", "wire validation uses the same explicit ASCII blank set as Go");
+  socket.reply(encodeTaskEnqueueResult(unicodeFrame.id, {
+    task_id: unicodeFrame.body.task_id,
+    revision: 1n,
+    agent_revision: 7n,
+  }));
+  await unicodeWhitespace;
+  session.close();
+});
+
+test("closing rejects an authenticated pending task enqueue and fences its late result", async () => {
+  const { session, socket } = await openHumanSession();
+  const pending = session.enqueueAgentTask({
+    agentId: "7c".repeat(16),
+    expectedAgentRevision: 12n,
+    instruction: "Wait for the durable result",
+  });
+  const frame = decodeClientControl(socket.sent.at(-1));
+  assert.equal(frame.type, "TASK_ENQUEUE");
+  const sent = socket.sent.length;
+
+  session.close();
+  await assert.rejects(pending, (error) => error instanceof SessionError && error.code === "closed");
+  assert.equal(session.status, "closed");
+  assert.equal(socket.sent.length, sent);
+
+  socket.reply(encodeTaskEnqueueResult(frame.id, {
+    task_id: frame.body.task_id,
+    revision: 1n,
+    agent_revision: 12n,
+  }));
+  await tick();
+  assert.equal(session.status, "closed");
+  assert.equal(socket.sent.length, sent, "a late result cannot restart or replay the operation");
+  await assert.rejects(
+    session.enqueueAgentTask({ agentId: "7c".repeat(16), expectedAgentRevision: 12n, instruction: "Do not revive" }),
+    (error) => error instanceof SessionError && error.code === "closed",
+  );
+});
+
+test("task enqueue result mismatches close the generation", async (t) => {
+  for (const mismatch of ["envelope", "task", "agent-revision"]) {
+    await t.test(mismatch, async () => {
+      const errors = [];
+      const { session, socket } = await openHumanSession((error) => errors.push(error));
+      const pending = session.enqueueAgentTask({
+        agentId: "78".repeat(16),
+        expectedAgentRevision: 8n,
+        instruction: "Inspect this",
+      });
+      const frame = decodeClientControl(socket.sent.at(-1));
+      socket.reply(encodeTaskEnqueueResult(
+        mismatch === "envelope" ? "forged-task" : frame.id,
+        {
+          task_id: mismatch === "task" ? "79".repeat(16) : frame.body.task_id,
+          revision: 1n,
+          agent_revision: mismatch === "agent-revision" ? 9n : 8n,
+        },
+      ));
+      await assert.rejects(pending, (error) => error instanceof ProtocolError && error.code === "malformed");
+      assert.equal(session.status, "closed");
+      assert.equal(errors.at(-1) instanceof ProtocolError, true);
+    });
+  }
+});
+
+test("task enqueue requires bounded human-actions authority before sending", async () => {
+  let socket;
+  const session = new BrowserSession({
+    url: "ws://127.0.0.1/browser/v1",
+    host: "127.0.0.1",
+    origin: "https://preview.example",
+    challenge,
+    keyStore: new MemoryKeys(),
+    socketFactory: () => {
+      socket = new Socket((current, frame) => {
+        if (frame.type === "PAIR_PROVE") current.reply(encodePairResult(frame.id, { client_id: clientID, capabilities: CAPABILITIES.observe }));
+        if (frame.type === "STATE_GET") replyStatePage(current, frame, 1n);
+      });
+      return socket;
+    },
+  });
+  await session.connect();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const sent = socket.sent.length;
+  await assert.rejects(
+    session.enqueueAgentTask({ agentId: "7a".repeat(16), expectedAgentRevision: 1n, instruction: "No authority" }),
+    (error) => error instanceof SessionError && error.code === "unauthorized",
+  );
+  assert.equal(socket.sent.length, sent);
+  session.close();
+
+  const authorized = await openHumanSession();
+  const beforeInvalid = authorized.socket.sent.length;
+  for (const instruction of ["   ", "x".repeat(MAX_TASK_INSTRUCTION_BYTES + 1)]) {
+    await assert.rejects(
+      authorized.session.enqueueAgentTask({ agentId: "7b".repeat(16), expectedAgentRevision: 1n, instruction }),
+      (error) => error instanceof SessionError && error.code === "invalid_request",
+    );
+  }
+  assert.equal(authorized.socket.sent.length, beforeInvalid);
+  authorized.session.close();
 });
 
 test("HumanRequest detail operations are bounded and exact-envelope correlated", async (t) => {

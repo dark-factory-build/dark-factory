@@ -292,6 +292,42 @@ func (backend *browserBackend) TerminalTarget(ctx context.Context, rawClient [br
 	return result, nil
 }
 
+func (backend *browserBackend) EnqueueTask(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, request browserprotocol.TaskEnqueue) (browserprotocol.TaskEnqueueResult, error) {
+	clientID, release, _, err := backend.authorize(ctx, rawClient, kernel.BrowserCapabilityHumanActions)
+	if err != nil {
+		return browserprotocol.TaskEnqueueResult{}, err
+	}
+	defer release()
+	taskID, err := browserID(request.TaskID, kernel.TaskIDFromBytes)
+	if err != nil {
+		return browserprotocol.TaskEnqueueResult{}, browser.ErrStale
+	}
+	incarnationID, err := browserID(request.IncarnationID, kernel.IncarnationIDFromBytes)
+	if err != nil {
+		return browserprotocol.TaskEnqueueResult{}, browser.ErrStale
+	}
+	agentID, err := browserID(request.AgentID, kernel.AgentIDFromBytes)
+	if err != nil {
+		return browserprotocol.TaskEnqueueResult{}, browser.ErrStale
+	}
+	expectedAgentRevision, err := browserDecimal(request.ExpectedAgentRevision)
+	if err != nil {
+		return browserprotocol.TaskEnqueueResult{}, browser.ErrStale
+	}
+	at, err := backend.timestamp()
+	if err != nil {
+		return browserprotocol.TaskEnqueueResult{}, mapBrowserError(err)
+	}
+	result, err := backend.store.EnqueueTaskForBrowserAgent(ctx, clientID, taskID, incarnationID, agentID, expectedAgentRevision, request.Instruction, at)
+	if err != nil {
+		return browserprotocol.TaskEnqueueResult{}, mapBrowserError(err)
+	}
+	if backend.owner != nil {
+		backend.owner.notifyScheduler()
+	}
+	return browserprotocol.TaskEnqueueResult{TaskID: result.Task.ID.String(), Revision: decimalRevision(result.Task.Revision), AgentRevision: decimalRevision(result.AgentRevision)}, nil
+}
+
 func (backend *browserBackend) authorize(ctx context.Context, rawID [browserprotocol.ClientIDSize]byte, capability kernel.BrowserCapabilityMask) (kernel.BrowserClientID, func(), kernel.BrowserClient, error) {
 	clientID, err := kernel.BrowserClientIDFromBytes(rawID[:])
 	if err != nil {

@@ -49,6 +49,7 @@ type clientLifecycle struct {
 type Server struct {
 	backend            Backend
 	terminalBackend    TerminalBackend
+	taskBackend        TaskBackend
 	host               string
 	origins            map[string]struct{}
 	terminalAckTimeout time.Duration
@@ -94,6 +95,7 @@ func start(backend Backend, origins map[string]struct{}, listener net.Listener) 
 	server := &Server{
 		backend:            backend,
 		terminalBackend:    func() TerminalBackend { value, _ := backend.(TerminalBackend); return value }(),
+		taskBackend:        func() TaskBackend { value, _ := backend.(TaskBackend); return value }(),
 		host:               listener.Addr().String(),
 		origins:            origins,
 		terminalAckTimeout: time.Duration(browserprotocol.TerminalAckTimeoutMS) * time.Millisecond,

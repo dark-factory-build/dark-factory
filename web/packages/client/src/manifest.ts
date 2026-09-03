@@ -13,6 +13,7 @@ export const MAX_AGENT_NAME_BYTES = 128;
 export const MAX_TASK_TITLE_BYTES = 1024;
 export const MAX_HUMAN_QUESTION_BYTES = 8192;
 export const MAX_HUMAN_REPLY_BYTES = 8192;
+export const MAX_TASK_INSTRUCTION_BYTES = 32768;
 export const MAX_FACTORY_CAPACITY = 1024;
 export const MAX_TASK_PRIORITY = 1_000_000;
 export const MAX_SQLITE_INTEGER = 9_223_372_036_854_775_807n;
@@ -51,6 +52,8 @@ export const CONTROL_MANIFEST = [
   { type: "HUMAN_REQUEST_REPLY_RESULT", direction: "server", id: "required", fixture: "human_request_reply_result.json" },
   { type: "HUMAN_REQUEST_CANCEL_RUN", direction: "client", id: "required", fixture: "human_request_cancel_run.json" },
   { type: "HUMAN_REQUEST_CANCEL_RUN_RESULT", direction: "server", id: "required", fixture: "human_request_cancel_run_result.json" },
+  { type: "TASK_ENQUEUE", direction: "client", id: "required", fixture: "task_enqueue.json" },
+  { type: "TASK_ENQUEUE_RESULT", direction: "server", id: "required", fixture: "task_enqueue_result.json" },
   { type: "TERMINAL_TARGET_GET", direction: "client", id: "required", fixture: "terminal_target_get.json" },
   { type: "TERMINAL_TARGET", direction: "server", id: "required", fixture: "terminal_target.json" },
   { type: "TERMINAL_ATTACH", direction: "client", id: "required", fixture: "terminal_attach.json" },
@@ -106,6 +109,7 @@ export const BROWSER_MANIFEST = {
     maxTaskTitleBytes: MAX_TASK_TITLE_BYTES,
     maxHumanQuestionBytes: MAX_HUMAN_QUESTION_BYTES,
     maxHumanReplyBytes: MAX_HUMAN_REPLY_BYTES,
+    maxTaskInstructionBytes: MAX_TASK_INSTRUCTION_BYTES,
     maxFactoryCapacity: MAX_FACTORY_CAPACITY,
     maxTaskPriority: MAX_TASK_PRIORITY,
     maxSQLiteInteger: MAX_SQLITE_INTEGER,

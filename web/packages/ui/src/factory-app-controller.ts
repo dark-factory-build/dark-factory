@@ -1,5 +1,6 @@
 import {
   MAX_TERMINAL_PAYLOAD,
+  MAX_TASK_INSTRUCTION_BYTES,
   ProtocolError,
   SessionError,
   consumePairingChallenge,
@@ -46,6 +47,10 @@ export type FactoryTerminalView = Readonly<{
   phase: "idle" | "resolving" | "attaching" | "acquiring" | "ready" | "closing" | "closed";
   writable: boolean;
   error?: SessionError | ProtocolError;
+  paused: boolean;
+  instructionPending: boolean;
+  instructionError?: SessionError | ProtocolError;
+  queued: boolean;
   /** Server replay resets survived by this terminal view; > 0 shows the banner. */
   resets: number;
   surfaceVersion: number;
@@ -66,7 +71,8 @@ export type FactoryAppStatus =
 
 type HumanSession = Pick<BrowserSession, "getHumanRequestDetail" | "replyHumanRequest" | "cancelHumanRequest">;
 type TerminalSession = Pick<BrowserSession, "resolveAgentTerminal" | "openTerminal" | "close">;
-type ControlledClient = Pick<BrowserClient, "connect" | "close"> & { readonly session?: HumanSession & TerminalSession };
+type AgentTaskSession = Pick<BrowserSession, "enqueueAgentTask">;
+type ControlledClient = Pick<BrowserClient, "connect" | "close"> & { readonly session?: HumanSession & TerminalSession & AgentTaskSession };
 type ClientFactory = (options: BrowserSessionOptions) => ControlledClient;
 
 export type FactoryAppControllerOptions = {
@@ -94,6 +100,9 @@ type AgentTerminalSelection = {
   task?: Pick<TaskItem, "id" | "revision">;
   /** Server replay resets survived by this terminal view (banner state). */
   resets: number;
+  instructionPending: boolean;
+  instructionError?: SessionError | ProtocolError;
+  queuedTaskID?: string;
 };
 
 type TerminalReplacement = {
@@ -105,6 +114,13 @@ type TerminalReplacement = {
 function agentCurrentTask(agent: AgentItem, state: StateView) {
   for (const task of state.tasks.values()) {
     if (task.assigned_agent_id === agent.id && task.status === "running") return task;
+  }
+  return undefined;
+}
+
+function agentQueuedTask(agent: AgentItem, state: StateView) {
+  for (const task of state.tasks.values()) {
+    if (task.assigned_agent_id === agent.id && task.status === "queued") return task;
   }
   return undefined;
 }
@@ -224,6 +240,52 @@ export class FactoryAppController {
   clearAgentTerminal(): void {
     if (this.#closed) return;
     this.#replaceTerminal({});
+  }
+
+  async enqueueAgentInstruction(instruction: string): Promise<boolean> {
+    const selected = this.#selectedAgent;
+    const session = this.#client?.session;
+    const body = instruction.trim();
+    if (
+      this.#closed ||
+      this.#status !== "ready" ||
+      selected === undefined ||
+      selected.task !== undefined ||
+      selected.queuedTaskID !== undefined ||
+      selected.agent.paused ||
+      selected.instructionPending ||
+      session === undefined
+    ) return false;
+    const byteLength = new TextEncoder().encode(body).length;
+    if (byteLength < 1 || byteLength > MAX_TASK_INSTRUCTION_BYTES) {
+      selected.instructionError = new SessionError(byteLength > MAX_TASK_INSTRUCTION_BYTES ? "too_large" : "invalid_request");
+      this.#publish();
+      return false;
+    }
+    const generation = this.#generation;
+    selected.instructionPending = true;
+    selected.instructionError = undefined;
+    this.#publish();
+    try {
+      const task = await session.enqueueAgentTask({
+        agentId: selected.agent.id,
+        expectedAgentRevision: selected.agent.revision,
+        instruction: body,
+      });
+      if (!this.#current(generation) || this.#selectedAgent !== selected) return false;
+      selected.instructionPending = false;
+      selected.queuedTaskID = task.taskId;
+      if (this.#state !== undefined) this.#refreshTerminalTask(selected, this.#state);
+      this.#publish();
+      this.#reconcileTerminal();
+      return true;
+    } catch (error) {
+      if (!this.#current(generation) || this.#selectedAgent !== selected) return false;
+      selected.instructionPending = false;
+      selected.instructionError = finiteError(error);
+      this.#publish();
+      return false;
+    }
   }
 
   beginTerminalSurface(token: object, surfaceVersion = this.#terminalSurfaceVersion): void {
@@ -454,10 +516,6 @@ export class FactoryAppController {
           if (selectedAgent.head !== state.head) {
             selectedAgent.head = state.head;
             this.#terminalRetry = undefined;
-          } else if (this.#terminalRetry !== undefined && !this.#terminalRetry.stale && agentCurrentTask(selectedAgent.agent, state) === undefined) {
-            this.#selectedAgent = undefined;
-            this.#dropPendingTerminalInput();
-            this.#retireTerminal();
           }
         }
       }
@@ -497,7 +555,7 @@ export class FactoryAppController {
     const surface = this.#terminalSurface;
     const session = this.#client?.session;
     const stateAgent = selected === undefined ? undefined : this.#state?.agents.get(selected.agent.id);
-    if (this.#closed || this.#status !== "ready" || selected === undefined || surface === undefined || session === undefined || stateAgent === undefined || stateAgent.revision !== selected.agent.revision || this.#state?.head !== selected.head || this.#terminalRetry?.head === selected.head || this.#terminal !== undefined) return;
+    if (this.#closed || this.#status !== "ready" || selected === undefined || selected.task === undefined || surface === undefined || session === undefined || stateAgent === undefined || stateAgent.revision !== selected.agent.revision || this.#state?.head !== selected.head || this.#terminalRetry?.head === selected.head || this.#terminal !== undefined) return;
     const generation = ++this.#terminalGeneration;
     const controller = new TerminalController({
       session,
@@ -522,6 +580,7 @@ export class FactoryAppController {
       if (snapshot.reset && this.#recoverFromTerminalReset()) return;
       const selected = this.#selectedAgent;
       const state = this.#state;
+      const endedTask = selected?.task;
       const staleDiscovery = snapshot.error?.code === "stale";
       const retryDiscovery =
         snapshot.retryDiscovery &&
@@ -539,8 +598,28 @@ export class FactoryAppController {
         this.#publish();
         return;
       }
-      this.#selectedAgent = undefined;
-      this.#dropPendingTerminalInput();
+      const current = selected === undefined ? undefined : state?.agents.get(selected.agent.id);
+      const cleanExit = snapshot.error === undefined || snapshot.error.code === "closed";
+      if (cleanExit && selected !== undefined && state !== undefined && current !== undefined) {
+        selected.agent = { ...current };
+        selected.head = state.head;
+        if (selected.queuedTaskID === endedTask?.id) selected.queuedTaskID = undefined;
+        this.#refreshQueuedTask(selected, state);
+        const runningTask = agentCurrentTask(current, state);
+        const running = runningTask === undefined ? undefined : { id: runningTask.id, revision: runningTask.revision };
+        if (running !== undefined && !sameTaskIdentity(endedTask, running)) {
+          selected.task = running;
+          selected.instructionError = undefined;
+          this.#terminalRetry = undefined;
+        } else {
+          selected.task = undefined;
+          this.#terminalRetry = running === undefined ? undefined : { head: state.head, stale: false };
+        }
+        this.#dropPendingTerminalInput();
+      } else {
+        this.#selectedAgent = undefined;
+        this.#dropPendingTerminalInput();
+      }
       this.#error = snapshot.error?.code === "stale" || snapshot.error?.code === "internal" ? snapshot.error : undefined;
       this.#publish();
       return;
@@ -631,10 +710,23 @@ export class FactoryAppController {
 
   #refreshTerminalTask(selected: AgentTerminalSelection, state: StateView): void {
     const task = agentCurrentTask(selected.agent, state);
+    this.#refreshQueuedTask(selected, state);
     const current = task === undefined ? undefined : { id: task.id, revision: task.revision };
     if (sameTaskIdentity(selected.task, current)) return;
     selected.task = current;
+    if (current !== undefined) selected.instructionError = undefined;
     this.#dropPendingTerminalInput();
+  }
+
+  #refreshQueuedTask(selected: AgentTerminalSelection, state: StateView): void {
+    if (selected.queuedTaskID !== undefined) {
+      const queued = state.tasks.get(selected.queuedTaskID);
+      if (
+        queued !== undefined &&
+        (queued.assigned_agent_id !== selected.agent.id || (queued.status !== "queued" && queued.status !== "running"))
+      ) selected.queuedTaskID = undefined;
+    }
+    if (selected.queuedTaskID === undefined) selected.queuedTaskID = agentQueuedTask(selected.agent, state)?.id;
   }
 
   #replaceTerminal(replacement: TerminalReplacement): void {
@@ -659,11 +751,14 @@ export class FactoryAppController {
     const candidate = replacement.agentId === undefined ? undefined : this.#state?.agents.get(replacement.agentId);
     const agent = candidate?.revision === replacement.agentRevision ? candidate : undefined;
     const task = agent === undefined || this.#state === undefined ? undefined : agentCurrentTask(agent, this.#state);
+    const queuedTask = agent === undefined || this.#state === undefined ? undefined : agentQueuedTask(agent, this.#state);
     this.#selectedAgent = agent === undefined ? undefined : {
       agent: { ...agent },
       head: this.#state?.head ?? 0n,
       task: task === undefined ? undefined : { id: task.id, revision: task.revision },
       resets: 0,
+      instructionPending: false,
+      queuedTaskID: queuedTask?.id,
     };
     this.#error = replacement.error ?? (replacement.agentId !== undefined && agent === undefined ? new SessionError("stale") : undefined);
     this.#publish();
@@ -721,10 +816,16 @@ export class FactoryAppController {
         agentId: this.#selectedAgent.agent.id,
         agentName: this.#selectedAgent.agent.name,
         agentRevision: this.#selectedAgent.agent.revision,
-        taskTitle: this.#state === undefined ? undefined : agentCurrentTask(this.#selectedAgent.agent, this.#state)?.title,
+        taskTitle: this.#selectedAgent.task === undefined || this.#state === undefined
+          ? undefined
+          : this.#state.tasks.get(this.#selectedAgent.task.id)?.title,
         phase: this.#terminal?.snapshot.phase ?? "idle",
         writable: this.#terminal?.snapshot.writable ?? false,
         error: this.#terminal?.snapshot.error,
+        paused: this.#selectedAgent.agent.paused,
+        instructionPending: this.#selectedAgent.instructionPending,
+        instructionError: this.#selectedAgent.instructionError,
+        queued: this.#selectedAgent.queuedTaskID !== undefined && this.#selectedAgent.task === undefined,
         resets: this.#selectedAgent.resets,
         surfaceVersion: this.#terminalSurfaceVersion,
       },
