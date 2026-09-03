@@ -132,7 +132,8 @@ func (owner *supervisorAttemptOwner) close() error {
 func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kernel.Run, resultErr error) {
 	if ctx == nil || daemon == nil || daemon.store == nil || spec.RuntimeParent == nil ||
 		spec.ChangeParent == "" || !filepath.IsAbs(spec.ChangeParent) || filepath.Clean(spec.ChangeParent) != spec.ChangeParent ||
-		spec.GitExecutable == "" || spec.BaseRevision == "" || spec.AttemptSocket == "" || spec.RunnerExecutable == "" || spec.FactoryctlExecutable == "" || provider.ValidateToolPath(spec.ToolPath) != nil {
+		spec.GitExecutable == "" || spec.BaseRevision == "" || spec.AttemptSocket == "" || spec.RunnerExecutable == "" || spec.FactoryctlExecutable == "" ||
+		spec.AccountHome == "" || !filepath.IsAbs(spec.AccountHome) || filepath.Clean(spec.AccountHome) != spec.AccountHome || provider.ValidateToolPath(spec.ToolPath) != nil {
 		return kernel.Run{}, fmt.Errorf("%w: invalid supervisor specification", kernel.ErrInvalidValue)
 	}
 	keys, err := newSupervisorKeys(rand.Reader)
@@ -237,9 +238,23 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		}
 		return daemon.failRunBeforeRuntime(run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
 	}
-	providerTask, err := provider.Task(run.Provider, []byte(task.Body))
+	rawProviderTask := []byte(task.Body)
+	if run.Provider != kernel.ProviderShell && len(rawProviderTask) == 0 {
+		rawProviderTask = []byte(task.Title)
+	}
+	delivery, preparedTask, err := provider.PrepareTask(run.Provider, rawProviderTask)
 	if err != nil {
 		return daemon.failRunBeforeRuntime(run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
+	}
+	var startupInput []byte
+	providerTask := rawProviderTask
+	switch delivery {
+	case provider.TaskDeliveryFD11:
+		providerTask = preparedTask
+	case provider.TaskDeliveryStartupTerminal:
+		startupInput = preparedTask
+	default:
+		return daemon.failRunBeforeRuntime(run, keys.resources.RuntimeRoot, kernel.FailureSpawn, provider.ErrInvalid)
 	}
 	changeState, found, err := daemon.store.Change(ctx, changeID)
 	if err != nil || !found {
@@ -294,7 +309,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	config := changeworker.Config{
 		Provider: run.Provider, Model: run.Model, ReasoningEffort: run.ReasoningEffort,
 		RuntimePath: gotRuntimePath, RuntimeIdentity: runtimeFileIdentity,
-		GitExecutable: spec.GitExecutable, FactoryctlExecutable: factoryctl.Path(), ToolPath: spec.ToolPath, RepositoryRoot: project.Root, RepositoryIdentity: repositoryIdentity,
+		GitExecutable: spec.GitExecutable, FactoryctlExecutable: factoryctl.Path(), ToolPath: spec.ToolPath, AccountHome: spec.AccountHome, RepositoryRoot: project.Root, RepositoryIdentity: repositoryIdentity,
 		Revision: spec.BaseRevision, ChangeParent: spec.ChangeParent, FinalName: finalName, StagingName: stagingName,
 		AttemptSocket: spec.AttemptSocket, Retained: retained, ProviderTask: providerTask,
 	}
@@ -349,6 +364,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	if err := controller.Configure(runner.AttemptSpec{
 		AttemptID: run.ID.String(), Wrapper: wrapper,
 		MarkerName: runner.InnerActivationMarkerName, ResultName: runner.AttemptResultSpoolName, ResultProof: resultProof,
+		StartupInput: startupInput,
 	}); err != nil {
 		_ = childControl.Close()
 		return daemon.failRun(run, kernel.FailureProtocol, err)

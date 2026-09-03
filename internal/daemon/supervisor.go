@@ -27,6 +27,7 @@ type SupervisorSpec struct {
 	RunnerExecutable     string
 	FactoryctlExecutable string
 	ToolPath             string
+	AccountHome          string
 
 	// UnsettledCompletion reports a scheduled attempt whose durable
 	// convergence remains finalizing after RunNext. The run stays discoverable
@@ -62,7 +63,7 @@ type SupervisorSpec struct {
 	schedulerPoll <-chan time.Time
 }
 
-// RunNext admits and synchronously owns one complete shell-worker attempt.
+// RunNext admits and synchronously owns one complete provider attempt.
 // The Darwin implementation does not return while it still owns a child.
 func (daemon *Daemon) RunNext(ctx context.Context, spec SupervisorSpec) (run kernel.Run, resultErr error) {
 	registration, err := daemon.registerSupervisor(ctx)

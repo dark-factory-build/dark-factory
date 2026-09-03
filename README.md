@@ -13,9 +13,9 @@ no commit, push, pull-request, or repository-publication operation.
 ## Current support
 
 - macOS only.
-- The deterministic `shell` provider is supported end to end.
-- Claude and Codex providers are unavailable until their integrations have
-  been reviewed.
+- The `shell`, `claude_code`, and `codex` providers are supported. Native
+  providers use an existing local CLI installation and signed-in account; see the
+  [provider contract](docs/providers.md).
 - The browser console shows durable factory, agent, and task state and supports
   terminal observation and input, HumanRequest reply, and cancellation. Queue
   setup stays in `factoryctl`; the console does not display controls the daemon

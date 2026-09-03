@@ -21,6 +21,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/buildinfo"
 	"github.com/dark-factory-build/dark-factory/internal/install"
+	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
 const (
@@ -36,7 +37,7 @@ const (
   factoryctl attempt fail [--detail TEXT]
   factoryctl attempt request-human --idempotency-key HEX32 --question TEXT
   factoryctl project create --name TEXT --root ABSOLUTE
-  factoryctl agent create --project ID --name TEXT --tool-budget N [--role worker|orchestrator]
+  factoryctl agent create --project ID --name TEXT --provider shell|claude_code|codex --tool-budget N [--role worker|orchestrator] [--model TEXT] [--reasoning-effort low|medium|high|xhigh|max|ultra]
   factoryctl task add --project ID --agent ID --title TEXT [--body TEXT] [--priority N]
   factoryctl dispatch on|off
   factoryctl web status
@@ -88,18 +89,21 @@ type attemptCommand struct {
 	after            string
 	expectedRevision uint64
 
-	label      string
-	plistDir   string
-	name       string
-	root       string
-	project    string
-	agent      string
-	role       string
-	title      string
-	body       string
-	toolBudget uint64
-	priority   int64
-	enabled    bool
+	label           string
+	plistDir        string
+	name            string
+	root            string
+	project         string
+	agent           string
+	role            string
+	provider        string
+	model           string
+	reasoningEffort string
+	title           string
+	body            string
+	toolBudget      uint64
+	priority        int64
+	enabled         bool
 }
 
 func main() {
@@ -533,6 +537,12 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			command.agent = value
 		case name == "--role" && command.kind == commandAgentCreate && (value == "worker" || value == "orchestrator"):
 			command.role = value
+		case name == "--provider" && command.kind == commandAgentCreate:
+			command.provider = value
+		case name == "--model" && command.kind == commandAgentCreate && validOperatorText(value, 0, 128):
+			command.model = value
+		case name == "--reasoning-effort" && command.kind == commandAgentCreate:
+			command.reasoningEffort = value
 		case name == "--tool-budget" && command.kind == commandAgentCreate:
 			budget, err := strconv.ParseUint(value, 10, 64)
 			if err != nil || value != strconv.FormatUint(budget, 10) || budget < 1 || budget > 1_000_000_000 {
@@ -559,7 +569,8 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			return attemptCommand{}, false, false
 		}
 	case commandAgentCreate:
-		if command.project == "" || command.name == "" || command.toolBudget == 0 {
+		provider, err := kernel.ParseProvider(command.provider)
+		if command.project == "" || command.name == "" || command.toolBudget == 0 || err != nil || kernel.ValidateProviderLaunchControls(provider, command.model, command.reasoningEffort) != nil {
 			return attemptCommand{}, false, false
 		}
 	case commandTaskAdd:
@@ -682,7 +693,11 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 		if err != nil {
 			return writeWebFailure(stderr, "agent create", err)
 		}
-		result, callErr := client.CreateShellAgent(callContext, api.CreateShellAgentInput{ID: id, ProjectID: command.project, Name: command.name, Role: command.role, ToolBudgetLimit: command.toolBudget})
+		result, callErr := client.CreateAgent(callContext, api.CreateAgentInput{
+			ID: id, ProjectID: command.project, Name: command.name, Role: command.role,
+			Provider: command.provider, Model: command.model, ReasoningEffort: command.reasoningEffort,
+			ToolBudgetLimit: command.toolBudget,
+		})
 		if callErr != nil {
 			return writeWebFailure(stderr, "agent create", callErr)
 		}

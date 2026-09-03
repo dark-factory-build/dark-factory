@@ -254,9 +254,9 @@ func TestServerDecodesClosedMethodMatrix(t *testing.T) {
 				t.Fatalf("literal replacement project input = %+v, %t", input, ok)
 			}
 		}},
-		{name: "create shell agent", domain: operatorDomain, bearer: operatorBearer, body: `{"method":"create_shell_agent","params":{"id":"` + id('2') + `","project_id":"` + id('1') + `","name":"agent","role":"worker","tool_budget_limit":20}}`, kind: CallCreateShellAgent, check: func(t *testing.T, call Call) {
-			input, ok := call.CreateShellAgentInput()
-			if !ok || input.ToolBudgetLimit != 20 {
+		{name: "create agent", domain: operatorDomain, bearer: operatorBearer, body: `{"method":"create_agent","params":{"id":"` + id('2') + `","project_id":"` + id('1') + `","name":"agent","role":"worker","provider":"codex","model":"gpt-5.6-luna","reasoning_effort":"medium","tool_budget_limit":20}}`, kind: CallCreateAgent, check: func(t *testing.T, call Call) {
+			input, ok := call.CreateAgentInput()
+			if !ok || input.Provider != "codex" || input.Model != "gpt-5.6-luna" || input.ReasoningEffort != "medium" || input.ToolBudgetLimit != 20 {
 				t.Fatalf("agent input = %+v, %t", input, ok)
 			}
 		}},
@@ -434,7 +434,11 @@ func TestServerRejectsDomainFallbackAndInvalidRequests(t *testing.T) {
 		{name: "nested duplicate", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"set_dispatch","params":{"expected_revision":1,"expected_revision":2,"enabled":true}}`), code: RemoteInvalidRequest},
 		{name: "nested noncanonical", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"set_dispatch","params":{"Expected_revision":1,"enabled":true}}`), code: RemoteInvalidRequest},
 		{name: "unknown nested", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"set_dispatch","params":{"expected_revision":1,"enabled":true,"private":"sentinel"}}`), code: RemoteInvalidRequest},
-		{name: "removed selectable launch policy", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"create_shell_agent","params":{"id":"` + id('2') + `","project_id":"` + id('1') + `","name":"agent","role":"worker","tool_budget_limit":20,"` + "execution" + `_mode":"unrestricted"}}`), code: RemoteInvalidRequest},
+		{name: "removed shell-only create alias", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"create_shell_agent","params":{"id":"` + id('2') + `","project_id":"` + id('1') + `","name":"agent","role":"worker","tool_budget_limit":20}}`), code: RemoteInvalidRequest},
+		{name: "removed selectable launch policy", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"create_agent","params":{"id":"` + id('2') + `","project_id":"` + id('1') + `","name":"agent","role":"worker","provider":"shell","tool_budget_limit":20,"` + "execution" + `_mode":"unrestricted"}}`), code: RemoteInvalidRequest},
+		{name: "create agent requires provider", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"create_agent","params":{"id":"` + id('2') + `","project_id":"` + id('1') + `","name":"agent","role":"worker","tool_budget_limit":20}}`), code: RemoteInvalidRequest},
+		{name: "shell agent rejects model", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"create_agent","params":{"id":"` + id('2') + `","project_id":"` + id('1') + `","name":"agent","role":"worker","provider":"shell","model":"private","tool_budget_limit":20}}`), code: RemoteInvalidRequest},
+		{name: "claude rejects ultra effort", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"create_agent","params":{"id":"` + id('2') + `","project_id":"` + id('1') + `","name":"agent","role":"worker","provider":"claude_code","reasoning_effort":"ultra","tool_budget_limit":20}}`), code: RemoteInvalidRequest},
 		{name: "attempt cannot supply id", generation: protocolGeneration, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"fail","params":{"detail":"x","id":"` + id('1') + `"}}`), code: RemoteInvalidRequest},
 		{name: "attempt cannot supply failure code", generation: protocolGeneration, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"fail","params":{"detail":"x","code":"internal"}}`), code: RemoteInvalidRequest},
 		{name: "empty block detail", generation: protocolGeneration, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"block","params":{"detail":""}}`), code: RemoteInvalidRequest},

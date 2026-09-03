@@ -1,6 +1,10 @@
 package api
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/dark-factory-build/dark-factory/internal/kernel"
+)
 
 const (
 	maxFrameBytes      = 1 << 20
@@ -147,6 +151,7 @@ type AgentSummary struct {
 	ProjectID string `json:"project_id"`
 	Name      string `json:"name"`
 	Role      string `json:"role"`
+	Provider  string `json:"provider"`
 	Paused    bool   `json:"paused"`
 	Revision  uint64 `json:"revision"`
 }
@@ -178,12 +183,26 @@ type CreateProjectInput struct {
 	Root string `json:"root"`
 }
 
-type CreateShellAgentInput struct {
+type CreateAgentInput struct {
 	ID              string `json:"id"`
 	ProjectID       string `json:"project_id"`
 	Name            string `json:"name"`
 	Role            string `json:"role"`
+	Provider        string `json:"provider"`
+	Model           string `json:"model,omitempty"`
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 	ToolBudgetLimit uint64 `json:"tool_budget_limit"`
+}
+
+func validCreateAgentInput(input CreateAgentInput) bool {
+	provider, err := kernel.ParseProvider(input.Provider)
+	if err != nil {
+		return false
+	}
+	return validID(input.ID) && validID(input.ProjectID) && validText(input.Name, 1, 128) &&
+		(input.Role == "worker" || input.Role == "orchestrator") &&
+		kernel.ValidateProviderLaunchControls(provider, input.Model, input.ReasoningEffort) == nil &&
+		input.ToolBudgetLimit >= 1 && input.ToolBudgetLimit <= 1_000_000_000
 }
 
 type EnqueueTaskInput struct {

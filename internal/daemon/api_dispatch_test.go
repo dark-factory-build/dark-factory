@@ -170,11 +170,12 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 	assertNoSchedulerWake(t, fixture.daemon)
 
 	done = fixture.serve(t)
-	agentResult, err := client.CreateShellAgent(ctx, api.CreateShellAgentInput{
-		ID: testID(2), ProjectID: projectInput.ID, Name: "agent", Role: "orchestrator", ToolBudgetLimit: 50,
+	agentResult, err := client.CreateAgent(ctx, api.CreateAgentInput{
+		ID: testID(2), ProjectID: projectInput.ID, Name: "agent", Role: "orchestrator",
+		Provider: "codex", Model: "gpt-5.6-luna", ReasoningEffort: "medium", ToolBudgetLimit: 50,
 	})
 	if err != nil || agentResult.Revision != 1 || agentResult.Head != 2 {
-		t.Fatalf("create shell agent = %+v, %v", agentResult, err)
+		t.Fatalf("create agent = %+v, %v", agentResult, err)
 	}
 	waitDispatch(t, done)
 	assertNoSchedulerWake(t, fixture.daemon)
@@ -219,8 +220,8 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 		t.Fatalf("durable project = %+v, found=%v, err=%v", project, found, err)
 	}
 	agent, found, err := fixture.store.Agent(ctx, mustAgentID(t, testID(2)))
-	if err != nil || !found || agent.Provider != kernel.ProviderShell || agent.Model != "" || agent.ReasoningEffort != "" {
-		t.Fatalf("durable shell agent = %+v, found=%v, err=%v", agent, found, err)
+	if err != nil || !found || agent.Provider != kernel.ProviderCodex || agent.Model != "gpt-5.6-luna" || agent.ReasoningEffort != "medium" {
+		t.Fatalf("durable agent = %+v, found=%v, err=%v", agent, found, err)
 	}
 	task, found, err := fixture.store.Task(ctx, mustTaskID(t, testID(3)))
 	if err != nil || !found || task.Body != "private task body sentinel" {
@@ -408,7 +409,7 @@ func prepareActiveAttempt(t *testing.T, fixture *dispatchFixture, seed byte) act
 		return err
 	})
 	call(func() error {
-		_, err := operator.CreateShellAgent(ctx, api.CreateShellAgentInput{ID: agentID, ProjectID: projectID, Name: "agent", Role: "orchestrator", ToolBudgetLimit: 10})
+		_, err := operator.CreateAgent(ctx, api.CreateAgentInput{ID: agentID, ProjectID: projectID, Name: "agent", Role: "orchestrator", Provider: "shell", ToolBudgetLimit: 10})
 		return err
 	})
 	call(func() error {
@@ -618,13 +619,13 @@ func TestProjectionHasNoPrivateFieldsAndKeepsEmptySlices(t *testing.T) {
 		Head:     head,
 		Factory:  kernel.FactorySummary{Capacity: 2, Revision: revision},
 		Projects: []kernel.ProjectSummary{{ID: projectID, Name: "project", Revision: revision}},
-		Agents:   []kernel.AgentSummary{{ID: agentID, ProjectID: projectID, Name: "agent", Role: "worker", Revision: revision}},
+		Agents:   []kernel.AgentSummary{{ID: agentID, ProjectID: projectID, Name: "agent", Role: "worker", Provider: "codex", Revision: revision}},
 		Tasks:    []kernel.TaskSummary{{ID: taskID, ProjectID: projectID, AssignedAgentID: agentID, Title: "title", Status: "queued", Priority: 3, Revision: revision}},
 	})
 	if projected.Head != 0 || projected.Projects == nil || projected.Agents == nil || projected.Tasks == nil {
 		t.Fatalf("projection emptiness/head = %+v", projected)
 	}
-	if projected.Projects[0].Name != "project" || projected.Tasks[0].Title != "title" {
+	if projected.Projects[0].Name != "project" || projected.Agents[0].Provider != "codex" || projected.Tasks[0].Title != "title" {
 		t.Fatalf("projection fields = %+v", projected)
 	}
 }

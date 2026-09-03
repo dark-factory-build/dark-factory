@@ -411,7 +411,7 @@ func TestParseSupervisorFlagsAndDefaults(t *testing.T) {
 		t.Fatalf("default supervisor configuration = %+v, help=%v, ok=%v", configuration, help, ok)
 	}
 	configuration, help, ok = parse([]string{"--home", home, "--git", "/opt/git/bin/git", "--tool-path", "/opt/tools:/usr/bin", "--base-revision", "refs/heads/main", "--runner", "/opt/df/factory-runner", "--factoryctl", "/opt/df/factoryctl"})
-	if help || !ok || configuration.gitExecutable != "/opt/git/bin/git" || configuration.toolPath != "/opt/tools:/usr/bin" || configuration.baseRevision != "refs/heads/main" || configuration.runnerExecutable != "/opt/df/factory-runner" || configuration.factoryctlExecutable != "/opt/df/factoryctl" {
+	if help || !ok || configuration.gitExecutable != "/opt/git/bin/git" || configuration.toolPath != "/opt/tools:/usr/bin" || !configuration.toolPathExplicit || configuration.baseRevision != "refs/heads/main" || configuration.runnerExecutable != "/opt/df/factory-runner" || configuration.factoryctlExecutable != "/opt/df/factoryctl" {
 		t.Fatalf("explicit supervisor configuration = %+v, help=%v, ok=%v", configuration, help, ok)
 	}
 	for _, test := range []struct {
@@ -473,7 +473,12 @@ func TestDeriveSupervisorSpecResolvesSymlinkedSelfToCommittedSiblings(t *testing
 	if spec.RunnerExecutable != filepath.Join(base, "factory-runner") || spec.FactoryctlExecutable != filepath.Join(base, "factoryctl") {
 		t.Fatalf("sibling derivation = %+v", spec)
 	}
-	if spec.GitExecutable != defaultGitExecutable || spec.BaseRevision != "refs/heads/main" || spec.ToolPath != defaultToolPath {
+	accountHome, err := install.AccountHome()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantToolPath := filepath.Join(accountHome, ".local", "bin") + string(filepath.ListSeparator) + defaultToolPath
+	if spec.GitExecutable != defaultGitExecutable || spec.BaseRevision != "refs/heads/main" || spec.ToolPath != wantToolPath || spec.AccountHome != accountHome {
 		t.Fatalf("boot inputs = %+v", spec)
 	}
 	if spec.ChangeParent != filepath.Join(home, "changes") || spec.AttemptSocket != install.LocalAPISocketPath(home) {

@@ -37,6 +37,20 @@ factoryctl web status
 factoryctl web open
 ```
 
+Create each agent with an explicit provider. `shell` needs no external tool;
+`claude_code` and `codex` require the corresponding `claude` or `codex` CLI to
+be installed and already signed in through its normal account workflow:
+
+```sh
+factoryctl agent create --project PROJECT_ID --name worker --provider shell --tool-budget 100
+factoryctl agent create --project PROJECT_ID --name worker --provider claude_code --reasoning-effort medium --tool-budget 100
+```
+
+The managed daemon finds native tools on its fixed path and points them at the
+operator's existing `~/.claude` or `~/.codex` configuration without copying a
+credential into the Dark Factory home. See the [provider
+contract](providers.md) for discovery, model, effort, and task-delivery details.
+
 `factoryctl service stop` stops the managed daemon without removing the
 installation; restart it with `factoryctl service start --home
 "$HOME/.dark-factory"`. `factoryctl service uninstall` is the evidence-first

@@ -104,24 +104,16 @@ func runProvider(ctx context.Context) (resultErr error) {
 	temp := filepath.Join(config.RuntimePath, TempName)
 	token := filepath.Join(config.RuntimePath, AttemptTokenName)
 	runtimePaths, err := provider.NewRuntimePaths(
-		home, temp, config.AttemptSocket, token, factoryctl.Path(), filepath.Dir(publishedPath), config.ToolPath,
+		home, temp, config.AttemptSocket, token, factoryctl.Path(), filepath.Dir(publishedPath), config.ToolPath, config.AccountHome,
 	)
 	if err != nil {
 		_ = cwd.Close()
 		return err
 	}
-	var installation provider.Installation
-	if config.Provider == kernel.ProviderShell {
-		executable, commitErr := runner.CommitExecutableLocator("/bin/sh")
-		if commitErr != nil {
-			_ = cwd.Close()
-			return commitErr
-		}
-		installation, err = provider.NewShellInstallation(executable)
-		if err != nil {
-			_ = cwd.Close()
-			return err
-		}
+	installation, err := provider.ResolveInstallation(config.Provider, config.ToolPath)
+	if err != nil {
+		_ = cwd.Close()
+		return err
 	}
 	request, err := provider.NewRequest(config.Provider, installation, config.Model, config.ReasoningEffort, runtimePaths)
 	if err != nil {
@@ -133,10 +125,14 @@ func runProvider(ctx context.Context) (resultErr error) {
 		_ = cwd.Close()
 		return err
 	}
-	program, err := provider.Task(config.Provider, config.ProviderTask)
+	delivery, program, err := provider.PrepareTask(config.Provider, config.ProviderTask)
 	if err != nil {
 		_ = cwd.Close()
 		return err
+	}
+	if delivery != launch.TaskDelivery() {
+		_ = cwd.Close()
+		return provider.ErrInvalid
 	}
 	spec, err := runner.PrepareCommittedExecSpec(launch.Executable(), launch.Argv(), launch.Environment(), publishedPath)
 	if err != nil {
@@ -155,21 +151,28 @@ func runProvider(ctx context.Context) (resultErr error) {
 		_ = cwd.Close()
 		return err
 	}
-	task, err := authority.sealProviderTask(config.Provider, program)
-	if err != nil {
+	var task *os.File
+	if delivery == provider.TaskDeliveryFD11 {
+		task, err = authority.sealProviderTask(config.Provider, program)
+		if err != nil {
+			_ = cwd.Close()
+			return err
+		}
+	} else if delivery != provider.TaskDeliveryStartupTerminal {
 		_ = cwd.Close()
-		return err
+		return provider.ErrInvalid
 	}
-	taskOpen := true
+	clear(program)
+	taskOpen := task != nil
 	defer func() {
-		if taskOpen {
+		if task != nil && taskOpen {
 			resultErr = errors.Join(resultErr, task.Close())
 		}
 	}()
 	// Retain the descriptor-bound runtime authority until exec. Its members are
 	// CLOEXEC, so a successful provider image receives none of them; a failed
-	// exec returns through the ordinary defer and closes them. The exact task is
-	// already unlinked and read-only, and the PTY has received no startup bytes.
+	// exec returns through the ordinary defer and closes them. Shell's task is
+	// unlinked and read-only; the attempt runner separately owns native startup.
 	if err := authority.verify(ctx); err != nil {
 		_ = cwd.Close()
 		return fmt.Errorf("runtime authority verification: %w", err)
@@ -183,7 +186,7 @@ func runProvider(ctx context.Context) (resultErr error) {
 // registered private runtime and is removed before the descriptor crosses the
 // runner boundary. No pathname is carried into provider exec.
 func (a *runtimeAuthority) sealProviderTask(kind kernel.Provider, task []byte) (_ *os.File, resultErr error) {
-	if a == nil || a.temp == nil || provider.ValidateTask(kind, task) != nil {
+	if _, _, err := provider.PrepareTask(kind, task); a == nil || a.temp == nil || err != nil {
 		return nil, ErrWorker
 	}
 	tempID, err := privateDirectory(a.temp)
