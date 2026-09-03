@@ -14,6 +14,22 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func TestOpenPTYHasUsableInitialSize(t *testing.T) {
+	master, slave, err := openPTY()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer master.Close()
+	defer slave.Close()
+	size, err := unix.IoctlGetWinsize(int(master.Fd()), unix.TIOCGWINSZ)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if size.Col != initialPTYColumns || size.Row != initialPTYRows {
+		t.Fatalf("initial PTY size=%dx%d, want %dx%d", size.Col, size.Row, initialPTYColumns, initialPTYRows)
+	}
+}
+
 func TestBlockedPTYIsInertUntilActivationAndProviderGetsExactTTY(t *testing.T) {
 	f := newFixture(t)
 	effect := filepath.Join(f.root, "provider.effect")
