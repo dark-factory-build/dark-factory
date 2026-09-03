@@ -271,7 +271,7 @@ test("the terminal is a bounded sidebar that stacks on narrow screens", () => {
   assert.match(css, /\.dfConsoleRow__agent\s*\{[^}]*min-width: 0;[^}]*overflow-wrap: anywhere;/);
   assert.match(css, /\.dfConsoleShell\s*\{[^}]*display: flex;[^}]*align-items: flex-start;/);
   assert.match(css, /\.dfFactoryConsole__terminalPanel :where\(p\)\s*\{\s*margin: 0;/);
-  assert.match(css, /\.dfFactoryConsole__terminalPanel\s*\{[^}]*position: sticky;[^}]*height: min\(46rem, calc\(100svh - 2rem\)\);/);
+  assert.match(css, /\.dfFactoryConsole__terminalPanel\s*\{[^}]*position: sticky;[^}]*flex: 0 0 clamp\(24rem, 32vw, 34rem\);[^}]*min-width: 0;[^}]*height: min\(46rem, calc\(100svh - 2rem\)\);/);
   assert.match(css, /@media \(max-width: 960px\)[\s\S]*?\.dfConsoleShell\s*\{\s*display: block;/);
   assert.match(css, /@media \(max-width: 720px\)[\s\S]*?\.dfFactoryConsole__terminalHeading[^}]*flex-direction: column;/);
 

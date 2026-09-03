@@ -291,6 +291,7 @@
   top: 1rem;
   display: flex;
   flex: 0 0 clamp(24rem, 32vw, 34rem);
+  min-width: 0;
   flex-direction: column;
   height: min(46rem, calc(100svh - 2rem));
   margin: 0;
