@@ -1,19 +1,9 @@
-# Authority-changing files require the repository owner's approval. Runtime
-# and ordinary documentation changes remain gated by hosted checks and the
-# independent exact-head adversarial-review verdict.
+# Only files that can rewrite the merge authority require the repository
+# owner's GitHub approval. Every change still needs an independent exact-head
+# Maintainer ALLOW and the merge queue's combined-tree gate.
 
-# CI, deployment, repository settings, and this ownership policy can change the
-# gate itself.
-/.github/               @baziyer
-
-# Agent and product authority boundaries.
-/AGENTS.md              @baziyer
-/CLAUDE.md              @baziyer
-/SECURITY.md            @baziyer
-/ARCHITECTURE.md        @baziyer
-
-# Executable repository-policy boundary.
-/scripts/github-repo-settings.sh           @baziyer
-/scripts/test-repository-settings.sh       @baziyer
-/scripts/verify-adversarial-review.sh      @baziyer
-/scripts/test-verify-adversarial-review.sh @baziyer
+/.github/workflows/                  @baziyer
+/.github/CODEOWNERS                  @baziyer
+/AGENTS.md                           @baziyer
+/scripts/github-repo-settings.sh     @baziyer
+/scripts/verify-adversarial-review.sh @baziyer

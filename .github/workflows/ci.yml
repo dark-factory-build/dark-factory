@@ -22,6 +22,24 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 
 jobs:
+  # Pull requests need one cheap green context so GitHub will admit them to
+  # the queue. The queue then tests the exact combined tree once; running the
+  # full macOS and control-plane gates here as well would duplicate that work.
+  eligibility:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check the pull request patch
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euxo pipefail
+          git init
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=1 origin "$BASE_SHA" "$GITHUB_SHA"
+          git diff --check "$BASE_SHA" "$GITHUB_SHA"
+
   # The macOS job is the runtime source gate. The Go daemon is Darwin-only
   # today, so there is no Linux runtime job to pair with it; Linux support is
   # #120/#141-144, and the release/publisher/package fixtures stay macOS-only
@@ -31,13 +49,13 @@ jobs:
   # workflow file it carries, so this expression only governs a PR that
   # leaves it unmodified — see docs/development/WORKFLOW.md, "GitHub
   # boundary". Manual runs use the persistent runner;
-  # gating PR and queue runs use fresh hosted workers.
+  # queue runs use fresh hosted workers. Pull requests run only `eligibility`.
   checks:
-    # `merge_group` is grouped with `pull_request`, not left to the fallback.
-    # A queue run gates a merge exactly as a pull request does, so it belongs
-    # on the ephemeral hosted runner; letting it fall through would quietly
-    # route every gating run onto the persistent shared runner (#54).
-    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'macos-latest' || 'dark-factory-mac' }}
+    if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
+    # A queue run gates a merge, so it belongs on the ephemeral hosted runner;
+    # letting it fall through would quietly route every gating run onto the
+    # persistent shared runner (#54).
+    runs-on: ${{ github.event_name == 'merge_group' && 'macos-latest' || 'dark-factory-mac' }}
     # The Go gate runs the routine short serial suite, one TypeScript client
     # proof, and the normal browser, daemon and service E2Es back to back.
     timeout-minutes: 30
@@ -62,11 +80,9 @@ jobs:
       # GOCACHE and GOMODCACHE under an isolated stage root (see
       # docs/development/WORKFLOW.md, "The self-hosted runner").
       #
-      # $GITHUB_SHA is the PR's merge commit for `pull_request` events and
-      # the selected commit for `merge_group`/`workflow_dispatch`; GitHub
-      # serves `git fetch` by arbitrary commit SHA either way, including a PR's
-      # hidden merge-commit ref (verified against this repository). The
-      # repo is public, so the fetch is unauthenticated and nothing is
+      # $GITHUB_SHA is the selected commit for `merge_group` and
+      # `workflow_dispatch`; GitHub serves `git fetch` by arbitrary commit SHA.
+      # The repo is public, so the fetch is unauthenticated and nothing is
       # written to .git/config that could leak a credential.
       - name: Check out $GITHUB_SHA
         run: |
@@ -130,16 +146,20 @@ jobs:
   # selected when the ruleset was first configured.
   required:
     if: always()
-    needs: [checks, control-plane, review]
+    needs: [eligibility, checks, control-plane, review]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require every hosted source gate
-        if: needs.checks.result != 'success' || needs.control-plane.result != 'success'
+        if: (github.event_name == 'pull_request' && needs.eligibility.result != 'success') || ((github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch') && (needs.checks.result != 'success' || needs.control-plane.result != 'success'))
         run: |
-          echo "required source gates failed: macOS=${{ needs.checks.result }}, control-plane=${{ needs.control-plane.result }}" >&2
+          echo "required source gates failed: eligibility=${{ needs.eligibility.result }}, macOS=${{ needs.checks.result }}, control-plane=${{ needs.control-plane.result }}" >&2
           exit 1
+      - name: Confirm the pull request is eligible for the queue
+        if: github.event_name == 'pull_request'
+        run: echo "pull request patch is eligible for combined-tree testing"
       - name: Confirm all hosted source gates passed
+        if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
         run: echo "macOS Go and control-plane source gates passed"
 
       # AGENTS.md rule 2, made a merge condition rather than a convention.
@@ -167,46 +187,15 @@ jobs:
           echo "  submit_pull_request_review, event: ALLOW, head_sha: <this exact head>" >&2
           exit 1
 
-      # The adversarial-review gate runs on `merge_group` and nowhere else, so
-      # the `merge_queue` rule is the single chokepoint keeping unreviewed work
-      # out of this branch. If it lapses, `merge_group` stops firing, the gate
-      # never runs on any event, and this aggregate stays green -- rule 2
-      # silently stops being enforced with no red check anywhere.
-      #
-      # Asserted INLINE, deliberately, and this is the one place in the repo
-      # where that is the safer arrangement. A pull request runs the workflow
-      # file it carries, but the maintainer App is refused
-      # `.github/workflows/` and `.github/` is owned in CODEOWNERS, so an
-      # agent-authored change cannot weaken this without a human push and an
-      # owner approval. A helper under `scripts/` would be App-publishable --
-      # the weaker-protected file guarding the stronger-protected one, which is
-      # exactly why `verify-adversarial-review.sh` is hoisted to the default
-      # branch. Hoisting is not available here: it cannot work until the code
-      # is already on the default branch, and this must hold from the first
-      # run. So the assertion is kept small enough to review by eye instead.
-      #
-      # Read from the LIVE rules, not from `scripts/github-repo-settings.sh`:
-      # that file records what an operator intended to apply, which is not
-      # evidence that it is applied, and the two have already drifted once.
-      # Rules in `evaluate` or `disabled` rulesets are not returned by this
-      # endpoint, so a ruleset downgraded out of enforcement reads as absent.
-      - name: Require the merge queue to still be the only path to this branch
+      # This is diagnostic defence against repository-setting drift. The
+      # Maintainer separately refuses enqueue when the base has no queue.
+      - name: Confirm the live merge rules
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         env:
           GH_TOKEN: ${{ github.token }}
-          BASE_BRANCH: ${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
-          # Written to a file, not piped. `grep -q` exits on its first match
-          # and closes the pipe; with `pipefail` a still-writing `printf` then
-          # makes the pipeline 141 (SIGPIPE), and a rule that IS active reads
-          # as absent. Latent here -- the projection is ~190 bytes against a
-          # 64KB pipe buffer -- but it grows with required contexts and the
-          # failure is silent and confusing when it arrives.
-          #
-          # Each required context yields two facts, and the second names the
-          # context it belongs to on purpose. A bare `integration:15368` would
-          # be satisfied by ANY bound entry, so a second required context
-          # carrying the binding would stand in for `required` losing it.
           gh api "repos/${GITHUB_REPOSITORY}/rules/branches/${BASE_BRANCH}" --jq '
             .[] | (("rule:" + .type),
                    (if .type=="merge_queue"
@@ -215,33 +204,14 @@ jobs:
                     then (.parameters.required_status_checks[]?
                           | ("context:" + .context),
                             ("integration:" + (.integration_id|tostring) + ":" + .context)) else empty end))' \
-            >"${RUNNER_TEMP}/ruleset-facts.txt"
-          require() {
-            grep -qx "$1" "${RUNNER_TEMP}/ruleset-facts.txt" || {
-              echo "chokepoint: '$1' is not active on ${BASE_BRANCH}" >&2
-              echo "  $2" >&2
-              echo "  Re-apply scripts/github-repo-settings.sh." >&2
+            >"${RUNNER_TEMP}/merge-rules"
+          for fact in rule:merge_queue grouping:ALLGREEN \
+            rule:required_status_checks context:required integration:15368:required; do
+            grep -qx "$fact" "${RUNNER_TEMP}/merge-rules" || {
+              echo "required live merge rule missing: $fact" >&2
               exit 1
             }
-          }
-          require rule:merge_queue \
-            'The review gate runs only on merge_group; without the queue it never runs.'
-          # ALLGREEN makes every entry's own group required. Under HEADGREEN the
-          # per-entry groups are still built but stop being required, so
-          # unreviewed entries ahead of the last would merge unchecked.
-          require grouping:ALLGREEN \
-            'Only the last entry of a group would be gated.'
-          require rule:required_status_checks \
-            'Nothing would require any check at all.'
-          require context:required \
-            'Nothing would require the aggregate the review gate reports through.'
-          # The context is required; this is who may report it green. Without
-          # the binding the ruleset accepts a `required` status from any
-          # integration installed on this repository, so the aggregate the
-          # review gate reports through could be satisfied by something that
-          # never ran it.
-          require integration:15368:required \
-            'Any installed integration could report it green, not only GitHub Actions.'
+          done
 
   review:
     # The merge queue, and nowhere else.
@@ -274,10 +244,10 @@ jobs:
       # This hoists the decision, not the plumbing. Everything else on this
       # path -- the projection below, the head lookup, this job's existence --
       # still comes from the pull request's own `ci.yml`, exactly as the
-      # comment on `checks` says. What bounds that is CODEOWNERS on `.github/`
-      # plus the App's refusal to publish under `.github/workflows/`; note the
-      # App's refusal is by named path, so `.github/actions/**` IS publishable
-      # and a composite action extracted from this job would not be covered.
+      # comment on `checks` says. What bounds that is the App's refusal to
+      # publish under `.github/workflows/`; note the refusal is by named path,
+      # so `.github/actions/**` IS publishable and a composite action extracted
+      # from this job would not be covered.
       - name: Check out the gate from the default branch
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
@@ -308,6 +278,7 @@ jobs:
             ./scripts/verify-adversarial-review.sh
 
   control-plane:
+    if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:

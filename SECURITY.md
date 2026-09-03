@@ -183,11 +183,12 @@ resource labels, and independent cleanup verification. They never inspect or
 mutate the installed job or operator home and never send paid provider prompts
 unless the task explicitly requires live validation.
 
-A pull request can modify its own workflow, including `runs-on`, and
-`.github/` is CODEOWNERS-owned, so that change stops for the owner, who must
-inspect it before approving. A green check alone never authorizes merge to
-protected `main`: every change needs the `required` aggregate in the merge
-queue, including an adversarial-review verdict at the exact head, plus resolved
-threads. Authority-surface changes additionally require the owner's approval,
-re-earned after every push because stale reviews are dismissed. Persistent CI
-runner isolation remains a separate hardening concern.
+A pull request can modify its own workflow, including `runs-on`, so the
+Maintainer App refuses workflow and CODEOWNERS publication; an owner must
+explicitly author those changes. Native CODEOWNER approval is limited to the
+few files that can rewrite merge authority, because the App cannot approve its
+own pull request. A green pull-request check alone never authorizes merge to protected
+`main`: every change needs the `required` aggregate on the queue's exact
+combined tree, including the Maintainer's adversarial-review verdict at the
+exact head, plus resolved threads. Persistent CI runner isolation remains a
+separate hardening concern.

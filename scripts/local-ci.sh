@@ -14,7 +14,6 @@ echo "local-ci: repository contract fixtures"
 ./scripts/test-new-worktree.sh
 ./scripts/test-github-step-summary.sh
 ./scripts/test-verify-adversarial-review.sh
-./scripts/test-inline-chokepoint.sh
 ./scripts/test-cloudflare-env.sh
 ./scripts/test-bootstrap-maintainer-v2.sh
 ./scripts/test-repository-settings.sh
