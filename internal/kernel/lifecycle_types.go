@@ -974,7 +974,12 @@ type AttemptAuthority struct {
 	Role            AgentRole
 	Provider        Provider
 	ChangeID        *ChangeID
+	task            string
 }
+
+func (authority AttemptAuthority) Task() string { return authority.task }
+func (AttemptAuthority) String() string         { return "AttemptAuthority(<redacted>)" }
+func (AttemptAuthority) GoString() string       { return "AttemptAuthority(<redacted>)" }
 
 type RecoverableRun struct {
 	Run             Run

@@ -24,7 +24,7 @@ func TestCredentialAuthorityExistsOnlyWhileExactRunIsRunning(t *testing.T) {
 		t.Fatal(err)
 	}
 	authority, err := store.AuthenticateAttempt(ctx, keys.AttemptDigest)
-	if err != nil || authority.RunID != run.ID || authority.TaskID != run.TaskID {
+	if err != nil || authority.RunID != run.ID || authority.TaskID != run.TaskID || authority.Task() != "run" {
 		t.Fatalf("authority = %+v, %v", authority, err)
 	}
 	forged, _ := AttemptDigestFromBytes(bytes.Repeat([]byte{0xfe}, DigestBytes))
@@ -51,6 +51,61 @@ func TestCredentialAuthorityExistsOnlyWhileExactRunIsRunning(t *testing.T) {
 		}
 	}
 	_ = running
+}
+
+func TestAttemptAuthorityUsesExactEffectiveTask(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		provider Provider
+		title    string
+		body     string
+		want     string
+	}{
+		{name: "native body", provider: ProviderCodex, title: "title sentinel", body: "body sentinel", want: "body sentinel"},
+		{name: "native title fallback", provider: ProviderCodex, title: "title sentinel", want: "title sentinel"},
+		{name: "empty shell program", provider: ProviderShell, title: "must not become shell input", want: ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, _ := newTestStore(t)
+			defer store.Close()
+			ctx := context.Background()
+			if _, err := store.SetDispatch(ctx, mustRevision(t, 1), true, mustTime(t, 2)); err != nil {
+				t.Fatal(err)
+			}
+			project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 210), Name: "task authority", Root: "/task-authority"}, mustTime(t, 3))
+			if err != nil {
+				t.Fatal(err)
+			}
+			agent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 211), ProjectID: project.ID, Name: "agent", Role: RoleOrchestrator, Provider: test.provider, ToolBudgetLimit: 1}, mustTime(t, 4))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 212), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 213), Title: test.title, Body: test.body}, mustTime(t, 5)); err != nil {
+				t.Fatal(err)
+			}
+			keys := admissionKeys(t, 214, nil)
+			admission, err := store.AdmitNext(ctx, keys, mustTime(t, 10))
+			if err != nil || !admission.Admitted() {
+				t.Fatalf("admission = %+v, %v", admission, err)
+			}
+			_, active := activateAllResources(t, store, *admission.Run, keys, 20)
+			session := terminalSessionForRunTest(t, store, active.ID)
+			if _, err := store.ActivateRun(ctx, active.ID, session.ID, active.Revision, session.Revision, mustTime(t, 30)); err != nil {
+				t.Fatal(err)
+			}
+			authority, err := store.AuthenticateAttempt(ctx, keys.AttemptDigest)
+			if err != nil || authority.Task() != test.want {
+				t.Fatalf("authority task = %q, want %q, err %v", authority.Task(), test.want, err)
+			}
+			if test.want != "" {
+				formatted := fmt.Sprintf("%v %+v %#v", authority, authority, authority)
+				encoded, marshalErr := json.Marshal(authority)
+				if marshalErr != nil || bytes.Contains([]byte(formatted), []byte(test.want)) || bytes.Contains(encoded, []byte(test.want)) {
+					t.Fatalf("attempt authority exposed private task: formatted=%s JSON=%s error=%v", formatted, encoded, marshalErr)
+				}
+			}
+		})
+	}
 }
 
 func TestCompletionExitOrderPreservesFirstOutcomeAndExactExit(t *testing.T) {
