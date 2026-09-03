@@ -130,6 +130,8 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.enqueueTask(ctx, call)
 	case api.CallSetDispatch:
 		return daemon.setDispatch(ctx, call)
+	case api.CallAttemptTask:
+		return daemon.attemptTask(ctx, call)
 	case api.CallRequestHuman:
 		return daemon.requestHuman(ctx, call)
 	case api.CallWebStatus:
@@ -196,6 +198,26 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 	default:
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
+}
+
+func (daemon *Daemon) attemptTask(ctx context.Context, call api.Call) api.Reply {
+	digest, ok := call.AttemptDigest()
+	if !ok {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	kDigest, err := attemptDigest(digest)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	authority, err := daemon.store.AuthenticateAttempt(ctx, kDigest)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	reply, err := api.NewAttemptTaskReply(api.AttemptTask{Task: authority.Task()})
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	return reply
 }
 
 func (daemon *Daemon) health(ctx context.Context) api.Reply {

@@ -115,7 +115,9 @@ func runProvider(ctx context.Context) (resultErr error) {
 		_ = cwd.Close()
 		return err
 	}
-	request, err := provider.NewRequest(config.Provider, installation, config.Model, config.ReasoningEffort, runtimePaths)
+	// Keep the one verified publication path as the authority for both Codex's
+	// project policy and the runner's process cwd below.
+	request, err := provider.NewRequest(config.Provider, installation, config.Model, config.ReasoningEffort, runtimePaths, publishedPath)
 	if err != nil {
 		_ = cwd.Close()
 		return err
@@ -125,7 +127,7 @@ func runProvider(ctx context.Context) (resultErr error) {
 		_ = cwd.Close()
 		return err
 	}
-	delivery, program, err := provider.PrepareTask(config.Provider, config.ProviderTask)
+	delivery, program, err := prepareProviderTask(config.Provider, config.ProviderTask)
 	if err != nil {
 		_ = cwd.Close()
 		return err
@@ -158,7 +160,7 @@ func runProvider(ctx context.Context) (resultErr error) {
 			_ = cwd.Close()
 			return err
 		}
-	} else if delivery != provider.TaskDeliveryStartupTerminal {
+	} else if delivery != provider.TaskDeliveryStartupTerminal && delivery != provider.TaskDeliveryAttemptAPI {
 		_ = cwd.Close()
 		return provider.ErrInvalid
 	}
@@ -172,7 +174,8 @@ func runProvider(ctx context.Context) (resultErr error) {
 	// Retain the descriptor-bound runtime authority until exec. Its members are
 	// CLOEXEC, so a successful provider image receives none of them; a failed
 	// exec returns through the ordinary defer and closes them. Shell's task is
-	// unlinked and read-only; the attempt runner separately owns native startup.
+	// unlinked and read-only; the attempt runner separately owns Claude startup,
+	// while Codex receives no task-bearing descriptor.
 	if err := authority.verify(ctx); err != nil {
 		_ = cwd.Close()
 		return fmt.Errorf("runtime authority verification: %w", err)
