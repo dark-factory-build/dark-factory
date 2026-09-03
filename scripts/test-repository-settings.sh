@@ -39,6 +39,19 @@ step_field() {
     '
 }
 
+step_keys() {
+    job_block "$1" | awk -v label="$2" '
+        $0 == "      - name: " label { step = 1; print "name"; next }
+        step && /^      - name: / { exit }
+        step && /^        [^ ]/ {
+            key = $0
+            sub(/^        /, "", key)
+            sub(/:.*/, "", key)
+            print key
+        }
+    '
+}
+
 assert_job_field() {
     actual=$(job_field "$1" "$2")
     [ "$actual" = "$3" ] || {
@@ -67,6 +80,11 @@ assert_job_field required needs "[eligibility, checks, control-plane, review]"
 diagnostic_events="github.event_name == 'pull_request' || github.event_name == 'merge_group'"
 [ "$(step_field required 'Confirm the live merge rules' if)" = "$diagnostic_events" ] || {
     echo "live merge-rule diagnostic is not bound to PR and queue events" >&2
+    exit 1
+}
+expected_diagnostic_keys=$(printf '%s\n' name if env run)
+[ "$(step_keys required 'Confirm the live merge rules')" = "$expected_diagnostic_keys" ] || {
+    echo "live merge-rule diagnostic has unexpected step controls" >&2
     exit 1
 }
 source_condition="if: (github.event_name == 'pull_request' && needs.eligibility.result != 'success') || ((github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch') && (needs.checks.result != 'success' || needs.control-plane.result != 'success'))"
