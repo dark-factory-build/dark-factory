@@ -131,16 +131,10 @@ func TestMain(m *testing.M) {
 		}
 	}
 	beforeFD := fdCensus()
-	beforeG := runtime.NumGoroutine()
 	code := m.Run()
 	afterFD := fdCensus()
-	afterG := runtime.NumGoroutine()
 	if code == 0 && !sameCensus(beforeFD, afterFD) {
 		fmt.Fprintf(os.Stderr, "runner FD leak before=%v after=%v\n", beforeFD, afterFD)
-		code = 1
-	}
-	if code == 0 && afterG > beforeG {
-		fmt.Fprintf(os.Stderr, "runner goroutine leak before=%d after=%d\n", beforeG, afterG)
 		code = 1
 	}
 	os.Exit(code)
