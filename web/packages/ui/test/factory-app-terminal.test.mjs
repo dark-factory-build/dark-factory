@@ -174,6 +174,29 @@ test("completed work leaves its configured agent idle and able to enqueue a dura
   assert.equal(context.latest().terminal.queued, true);
 });
 
+test("a selected idle agent follows its canonical pause revision without exposing input", async () => {
+  const context = terminalHarness();
+  context.controller.start();
+  const tasks = new Map(fixtureState.tasks);
+  for (const [id, task] of tasks) if (task.assigned_agent_id === thirdAgent.id && task.status === "queued") tasks.delete(id);
+  context.ready(stateAt(42, { tasks }));
+  context.controller.selectAgent(thirdAgent);
+
+  const paused = { ...thirdAgent, paused: true, revision: thirdAgent.revision + 1n };
+  const agents = new Map(fixtureState.agents);
+  agents.set(paused.id, paused);
+  context.clientOptions().onState(stateAt(43, { agents, tasks }));
+
+  assert.equal(context.latest().selectedAgent.id, paused.id);
+  assert.equal(context.latest().selectedAgent.revision, paused.revision);
+  assert.equal(context.latest().terminal.paused, true);
+  assert.equal(context.latest().terminal.phase, "idle");
+  assert.equal(context.latest().error, undefined);
+  assert.equal(context.targetGates.length, 0);
+  assert.equal(await context.controller.enqueueAgentInstruction("Must not enqueue while paused"), false);
+  assert.equal(context.calls.some((call) => call.kind === "enqueue"), false);
+});
+
 test("a newly running instruction turns the same idle sidebar into the real terminal", async () => {
   const context = terminalHarness();
   context.controller.start();
