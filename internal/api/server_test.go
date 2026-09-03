@@ -197,6 +197,9 @@ func replyForCall(call Call) Reply {
 			Projects: []ProjectSummary{}, Agents: []AgentSummary{}, Tasks: []TaskSummary{},
 		})
 		return reply
+	case CallAttemptTask:
+		reply, _ := NewAttemptTaskReply(AttemptTask{Task: "private-attempt-task"})
+		return reply
 	default:
 		reply, _ := NewMutationReply(MutationResult{Head: 0, Revision: 1})
 		return reply
@@ -272,6 +275,7 @@ func TestServerDecodesClosedMethodMatrix(t *testing.T) {
 				t.Fatalf("dispatch = %d, %t, %t", revision, enabled, ok)
 			}
 		}},
+		{name: "task", domain: attemptDomain, bearer: attemptBearer, body: `{"method":"task","params":{}}`, kind: CallAttemptTask},
 		{name: "succeed", domain: attemptDomain, bearer: attemptBearer, body: `{"method":"succeed","params":{"result":"private-result-sentinel"}}`, kind: CallSucceed, check: func(t *testing.T, call Call) {
 			result, ok := call.Result()
 			if !ok || result != "private-result-sentinel" {
@@ -306,6 +310,8 @@ func TestServerDecodesClosedMethodMatrix(t *testing.T) {
 				output = &HealthStatus{}
 			case CallSnapshot:
 				output = &DashboardSnapshot{}
+			case CallAttemptTask:
+				output = &AttemptTask{}
 			default:
 				output = &MutationResult{}
 			}
@@ -425,6 +431,7 @@ func TestServerRejectsDomainFallbackAndInvalidRequests(t *testing.T) {
 		{name: "operator bearer does not authorize attempt domain", generation: protocolGeneration, domain: attemptDomain, bearer: operatorBearer, body: []byte(`{"method":"health","params":{}}`), code: RemoteForbidden},
 		{name: "attempt bearer does not authorize operator", generation: protocolGeneration, domain: operatorDomain, bearer: attemptBearer, body: []byte(`{"method":"health","params":{}}`), code: RemoteUnauthorized},
 		{name: "operator domain cannot invoke attempt", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"fail","params":{"detail":"x"}}`), code: RemoteForbidden},
+		{name: "operator domain cannot read attempt task", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"task","params":{}}`), code: RemoteForbidden},
 		{name: "unknown method", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"delete_all","params":{}}`), code: RemoteInvalidRequest},
 		{name: "null params", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"health","params":null}`), code: RemoteInvalidRequest},
 		{name: "array params", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"health","params":[]}`), code: RemoteInvalidRequest},
@@ -440,6 +447,7 @@ func TestServerRejectsDomainFallbackAndInvalidRequests(t *testing.T) {
 		{name: "shell agent rejects model", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"create_agent","params":{"id":"` + id('2') + `","project_id":"` + id('1') + `","name":"agent","role":"worker","provider":"shell","model":"private","tool_budget_limit":20}}`), code: RemoteInvalidRequest},
 		{name: "claude rejects ultra effort", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"create_agent","params":{"id":"` + id('2') + `","project_id":"` + id('1') + `","name":"agent","role":"worker","provider":"claude_code","reasoning_effort":"ultra","tool_budget_limit":20}}`), code: RemoteInvalidRequest},
 		{name: "attempt cannot supply id", generation: protocolGeneration, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"fail","params":{"detail":"x","id":"` + id('1') + `"}}`), code: RemoteInvalidRequest},
+		{name: "attempt task requires empty params", generation: protocolGeneration, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"task","params":{"id":"` + id('1') + `"}}`), code: RemoteInvalidRequest},
 		{name: "attempt cannot supply failure code", generation: protocolGeneration, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"fail","params":{"detail":"x","code":"internal"}}`), code: RemoteInvalidRequest},
 		{name: "empty block detail", generation: protocolGeneration, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"block","params":{"detail":""}}`), code: RemoteInvalidRequest},
 		{name: "oversized failure detail", generation: protocolGeneration, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"fail","params":{"detail":"` + strings.Repeat("x", 4097) + `"}}`), code: RemoteInvalidRequest},
@@ -1146,6 +1154,9 @@ func TestReplyConstructorsAndConnectionOrderAreClosed(t *testing.T) {
 	}
 	if _, err := NewMutationReply(MutationResult{Head: 1}); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("zero revision = %v", err)
+	}
+	if _, err := NewAttemptTaskReply(AttemptTask{Task: strings.Repeat("x", 131073)}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("oversized attempt task = %v", err)
 	}
 	if _, err := NewErrorReply("private-sentinel"); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("arbitrary error = %v", err)

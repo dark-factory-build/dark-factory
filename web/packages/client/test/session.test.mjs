@@ -651,6 +651,211 @@ test("successful pairing consumes challenge state and reconnects through AUTH af
   client.close();
 });
 
+test("stale saved authorization repairs once through the still-held pairing challenge", async () => {
+  const store = new MemoryKeys();
+  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
+  await seed.connect();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  seed.close();
+  const sockets = [];
+  const client = new BrowserClient({
+    url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store,
+    socketFactory: () => { const socket = new Socket((current, frame) => {
+      if (frame.type === "AUTH_PROVE") current.reply(encodeServerError({ code: "unauthorized", retryable: false }));
+      if (frame.type === "PAIR_PROVE") current.reply(encodePairResult(frame.id, { client_id: "77".repeat(16), capabilities: CAPABILITIES.observe }));
+    }); sockets.push(socket); return socket; },
+  });
+  await client.connect();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(sockets.length, 2);
+  assert.equal(decodeClientControl(sockets[0].sent[0]).type, "AUTH_PROVE");
+  assert.equal(decodeClientControl(sockets[1].sent[0]).type, "PAIR_PROVE");
+  assert.equal(store.value.clientId, "77".repeat(16));
+  client.close();
+});
+
+test("a persisted repair that closes before ready reconnects through AUTH", async () => {
+  const store = new MemoryKeys();
+  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
+  await seed.connect();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  seed.close();
+  const timer = new VirtualTimer();
+  const sockets = [];
+  let client;
+  client = new BrowserClient({
+    url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, timer, reconnectInitialDelayMs: 10,
+    onStatus: (status) => { if (status === "syncing" && sockets.length === 2) client.session?.close(); },
+    socketFactory: () => { const server = sockets.length === 0 ? ((_current, frame) => { if (frame.type === "AUTH_PROVE") _current.reply(encodeServerError({ code: "unauthorized", retryable: false })); if (frame.type === "PAIR_PROVE") _current.reply(encodePairResult(frame.id, { client_id: "88".repeat(16), capabilities: CAPABILITIES.observe })); }) : serverFor; const socket = new Socket(server); sockets.push(socket); return socket; },
+  });
+  await assert.rejects(client.connect(), (error) => error instanceof SessionError && error.code === "closed");
+  assert.equal(sockets[1].sent.filter((wire) => decodeClientControl(wire).type === "PAIR_PROVE").length, 1);
+  assert.deepEqual(timer.delays, [10]);
+  timer.advance(10);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(sockets.length, 3);
+  assert.equal(decodeClientControl(sockets[2].sent[0]).type, "AUTH_PROVE");
+  assert.equal(sockets[2].sent.filter((wire) => decodeClientControl(wire).type === "PAIR_PROVE").length, 0);
+  client.close();
+});
+
+test("closing while repair persistence is pending does not replay pairing", async () => {
+  const seedStore = new MemoryKeys();
+  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: seedStore, socketFactory: () => new Socket(serverFor) });
+  await seed.connect();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  seed.close();
+  let releaseSave;
+  let saveStarted;
+  let persisted = seedStore.value;
+  const store = { async load() { return persisted; }, async save(value) { saveStarted?.(); await new Promise((resolve) => { releaseSave = resolve; }); persisted = value; } };
+  const sockets = [];
+  let client;
+  client = new BrowserClient({
+    url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store,
+    socketFactory: () => { const index = sockets.length; const server = index === 0 ? ((_current, frame) => { if (frame.type === "AUTH_PROVE") _current.reply(encodeServerError({ code: "unauthorized", retryable: false })); }) : index === 1 ? ((_current, frame) => { if (frame.type === "PAIR_PROVE") _current.reply(encodePairResult(frame.id, { client_id: "99".repeat(16), capabilities: CAPABILITIES.observe })); }) : ((_current, frame) => { if (frame.type === "AUTH_PROVE") _current.reply(encodeAuthResult(frame.id, { client_id: "99".repeat(16), capabilities: CAPABILITIES.observe })); if (frame.type === "STATE_GET") replyStatePage(_current, frame, 1n); }); const socket = new Socket(server); sockets.push(socket); return socket; },
+  });
+  saveStarted = () => client.close();
+  const connecting = client.connect();
+  await assert.rejects(connecting, (error) => error instanceof SessionError && error.code === "closed");
+  assert.equal(sockets.length, 2);
+  assert.equal(sockets[1].sent.filter((wire) => decodeClientControl(wire).type === "PAIR_PROVE").length, 1);
+  releaseSave();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  await client.connect();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(sockets.length, 3);
+  assert.equal(decodeClientControl(sockets[2].sent[0]).type, "AUTH_PROVE");
+  client.close();
+});
+
+test("a persisted repair clears the challenge before a rejected manual reconnect", async () => {
+  const seedStore = new MemoryKeys();
+  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: seedStore, socketFactory: () => new Socket(serverFor) });
+  await seed.connect();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  seed.close();
+  let client;
+  let persisted;
+  const store = {
+    async load() { return persisted ?? seedStore.value; },
+    async save(value) { persisted = value; client.close(); },
+  };
+  const sockets = [];
+  client = new BrowserClient({
+    url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store,
+    socketFactory: () => {
+      const index = sockets.length;
+      const server = index === 0
+        ? ((_current, frame) => { if (frame.type === "AUTH_PROVE") _current.reply(encodeServerError({ code: "unauthorized", retryable: false })); })
+        : index === 1
+          ? ((_current, frame) => { if (frame.type === "PAIR_PROVE") _current.reply(encodePairResult(frame.id, { client_id: "99".repeat(16), capabilities: CAPABILITIES.observe })); })
+          : ((_current, frame) => {
+            if (frame.type === "AUTH_PROVE") _current.reply(encodeServerError({ code: "unauthorized", retryable: false }));
+            if (frame.type === "PAIR_PROVE") _current.reply(encodeServerError({ code: "unauthorized", retryable: false }));
+          });
+      const socket = new Socket(server);
+      sockets.push(socket);
+      return socket;
+    },
+  });
+  await assert.rejects(client.connect(), (error) => error instanceof SessionError && error.code === "closed");
+  await assert.rejects(client.connect(), (error) => error instanceof SessionError && error.code === "unauthorized");
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(sockets.length, 3);
+  assert.equal(decodeClientControl(sockets[2].sent[0]).type, "AUTH_PROVE");
+  assert.equal(sockets[2].sent.filter((wire) => decodeClientControl(wire).type === "PAIR_PROVE").length, 0);
+  client.close();
+});
+
+test("a pairing authorization error never replays the one-shot challenge", async () => {
+  const sockets = [];
+  const client = new BrowserClient({
+    url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: new MemoryKeys(),
+    socketFactory: () => { const socket = new Socket((_current, frame) => { if (frame.type === "PAIR_PROVE") socket.reply(encodeServerError({ code: "unauthorized", retryable: false })); }); sockets.push(socket); return socket; },
+  });
+  await assert.rejects(client.connect(), (error) => error instanceof SessionError && error.code === "unauthorized");
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(sockets.length, 1);
+  assert.equal(decodeClientControl(sockets[0].sent[0]).type, "PAIR_PROVE");
+  client.close();
+});
+
+test("closing from stale authorization error fences the pending repair", async () => {
+  const store = new MemoryKeys();
+  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
+  await seed.connect();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  seed.close();
+  const sockets = [];
+  let client;
+  client = new BrowserClient({
+    url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store,
+    onError: () => client.close(),
+    socketFactory: () => { const server = sockets.length === 0 ? ((_current, frame) => { if (frame.type === "AUTH_PROVE") _current.reply(encodeServerError({ code: "unauthorized", retryable: false })); }) : serverFor; const socket = new Socket(server); sockets.push(socket); return socket; },
+  });
+  await assert.rejects(client.connect(), (error) => error instanceof SessionError && error.code === "unauthorized");
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(sockets.length, 1);
+  assert.equal(sockets[0].sent.filter((wire) => ["PAIR_PROVE", "STATE_GET"].includes(decodeClientControl(wire).type)).length, 0);
+});
+
+test("a newer generation started by the auth error fences the old repair", async () => {
+  const store = new MemoryKeys();
+  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
+  await seed.connect();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  seed.close();
+  const sockets = [];
+  let client;
+  let replaced = false;
+  client = new BrowserClient({
+    url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store,
+    onError: () => {
+      if (!replaced) { replaced = true; void client.connect().catch(() => {}); }
+    },
+    socketFactory: () => { const server = sockets.length === 0 ? ((_current, frame) => { if (frame.type === "AUTH_PROVE") _current.reply(encodeServerError({ code: "unauthorized", retryable: false })); }) : serverFor; const socket = new Socket(server); sockets.push(socket); return socket; },
+  });
+  await assert.rejects(client.connect(), (error) => error instanceof SessionError && error.code === "unauthorized");
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(sockets.length, 2);
+  assert.equal(sockets.flatMap((socket) => socket.sent).filter((wire) => decodeClientControl(wire).type === "PAIR_PROVE").length, 0);
+  client.close();
+});
+
+test("authorization repair requires a fresh challenge and only exact nonretryable unauthorized", async () => {
+  for (const error of [
+    { code: "unauthorized", retryable: true },
+    { code: "unauthorized", retryable: false },
+  ]) {
+    const store = new MemoryKeys();
+    const seed = new BrowserSession({ url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
+    await seed.connect();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    seed.close();
+    let sockets = 0;
+    const client = new BrowserClient({ url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", keyStore: store, challenge: error.retryable ? challenge : undefined, socketFactory: () => { sockets += 1; return new Socket((_current, frame) => { if (frame.type === "AUTH_PROVE") _current.reply(encodeServerError(error)); }); } });
+    await assert.rejects(client.connect(), (actual) => actual instanceof SessionError && actual.code === "unauthorized");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(sockets, 1);
+    client.close();
+  }
+});
+
+test("valid saved authorization with a fresh challenge does not duplicate the client", async () => {
+  const store = new MemoryKeys();
+  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
+  await seed.connect();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  seed.close();
+  let sockets = 0;
+  const client = new BrowserClient({ url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => { sockets += 1; return new Socket(serverFor); } });
+  await client.connect();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(sockets, 1);
+  client.close();
+});
+
 test("pairing challenge helper consumes the exact factoryctl fragment and clears it first", () => {
   const location = { hash: `#df_pair=${challenge}`, pathname: "/", search: "?preview=1" };
   const state = { route: "factory" };
@@ -909,6 +1114,10 @@ test("BrowserClient does not replay a one-shot proof while PairResult save is de
   const second = client.connect();
   assert.strictEqual(second, first);
   client.close();
+  const duringSave = client.connect();
+  assert.strictEqual(duringSave, first);
+  assert.equal(sockets.length, 1);
+  assert.equal(sockets[0].sent.filter((wire) => decodeClientControl(wire).type === "PAIR_PROVE").length, 1);
   releaseSave();
   await assert.rejects(first, (error) => error instanceof SessionError && error.code === "closed");
   await new Promise((resolve) => setTimeout(resolve, 0));

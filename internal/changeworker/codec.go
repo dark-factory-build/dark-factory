@@ -47,8 +47,9 @@ type Config struct {
 	StagingName          string
 	AttemptSocket        string
 	Retained             *Result
-	// ProviderTask is sealed on fd 11 for Shell or prepared for one native PTY
-	// write before that terminal becomes operator-visible.
+	// ProviderTask selects and verifies the provider's closed delivery path.
+	// Shell seals it on fd 11 and Claude receives a terminal-safe prompt. It is
+	// empty for Codex, whose task remains in the daemon behind the attempt API.
 	ProviderTask []byte
 }
 
@@ -171,7 +172,7 @@ func validateConfig(config Config) error {
 		config.FinalName == config.StagingName {
 		return invalidContract(nil)
 	}
-	if _, _, err := provider.PrepareTask(config.Provider, config.ProviderTask); err != nil {
+	if _, _, err := prepareProviderTask(config.Provider, config.ProviderTask); err != nil {
 		return invalidContract(err)
 	}
 	if _, err := change.NewRepositoryIdentity(config.RepositoryIdentity.Device(), config.RepositoryIdentity.Inode()); err != nil {
@@ -183,6 +184,16 @@ func validateConfig(config Config) error {
 		}
 	}
 	return nil
+}
+
+func prepareProviderTask(kind kernel.Provider, task []byte) (provider.TaskDelivery, []byte, error) {
+	if kind == kernel.ProviderCodex {
+		if len(task) != 0 {
+			return 0, nil, provider.ErrInvalid
+		}
+		return provider.TaskDeliveryAttemptAPI, nil, nil
+	}
+	return provider.PrepareTask(kind, task)
 }
 
 func providerFromString(value string) (kernel.Provider, error) {

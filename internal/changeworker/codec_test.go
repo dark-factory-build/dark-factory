@@ -60,6 +60,27 @@ func TestRetainedConfigRoundTripPreservesExactPublicationAuthority(t *testing.T)
 	}
 }
 
+func TestCodexConfigCarriesNoTaskBytes(t *testing.T) {
+	config := configFixture(t)
+	config.Provider = kernel.ProviderCodex
+	config.ProviderTask = nil
+	encoded, err := EncodeConfig(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte("printf exact")) {
+		t.Fatal("Codex worker config contains private task text")
+	}
+	got, err := DecodeConfig(encoded)
+	if err != nil || got.Provider != kernel.ProviderCodex || len(got.ProviderTask) != 0 {
+		t.Fatalf("Codex config round trip = provider %s task %d bytes, err %v", got.Provider, len(got.ProviderTask), err)
+	}
+	config.ProviderTask = []byte("private task")
+	if _, err := EncodeConfig(config); !errors.Is(err, ErrInvalidContract) {
+		t.Fatalf("Codex worker accepted task bytes: %v", err)
+	}
+}
+
 func TestConfigStrictJSONRejectsOversizeUnknownTrailingMissingAndInvalidProvider(t *testing.T) {
 	want := configFixture(t)
 	encoded, err := EncodeConfig(want)

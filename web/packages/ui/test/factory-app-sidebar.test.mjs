@@ -26,7 +26,7 @@ function panel(terminal = terminalView(), onClose = () => {}) {
   );
 }
 
-test("the terminal is quiet inline console content", () => {
+test("the terminal is a quiet sidebar", () => {
   const markup = renderToStaticMarkup(panel(terminalView({ taskTitle: "Repair finalization" })));
   assert.match(markup, /dfFactoryConsole__terminalPanel/);
   assert.match(markup, /Builder One · Repair finalization/);

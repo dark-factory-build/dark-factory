@@ -26,8 +26,9 @@ type AttemptSpec struct {
 	MarkerName  string
 	ResultName  string
 	ResultProof ResultProof
-	// StartupInput is the optional exact native-provider prompt. The attempt
-	// runner writes it once after provider exec and before TerminalReady.
+	// StartupInput is the optional exact terminal-delivered provider prompt.
+	// The attempt runner writes it once after provider exec and before
+	// TerminalReady. Codex instead reads its task through the attempt API.
 	StartupInput []byte
 }
 

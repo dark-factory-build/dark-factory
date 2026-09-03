@@ -266,11 +266,19 @@ test("HumanRequest delivery states remain visibly distinct", () => {
   }
 });
 
-test("mobile rows and the inline terminal remain page-bounded", () => {
+test("the terminal is a bounded sidebar that stacks on narrow screens", () => {
   const css = readFileSync(new URL("../src/factory-console.css", import.meta.url), "utf8");
   assert.match(css, /\.dfConsoleRow__agent\s*\{[^}]*min-width: 0;[^}]*overflow-wrap: anywhere;/);
-  assert.match(css, /\.dfFactoryConsole__terminalPanel\s*\{[^}]*max-width: 90rem;/);
+  assert.match(css, /\.dfConsoleShell\s*\{[^}]*display: flex;[^}]*align-items: flex-start;/);
+  assert.match(css, /\.dfFactoryConsole__terminalPanel :where\(p\)\s*\{\s*margin: 0;/);
+  assert.match(css, /\.dfFactoryConsole__terminalPanel\s*\{[^}]*position: sticky;[^}]*height: min\(46rem, calc\(100svh - 2rem\)\);/);
+  assert.match(css, /@media \(max-width: 960px\)[\s\S]*?\.dfConsoleShell\s*\{\s*display: block;/);
   assert.match(css, /@media \(max-width: 720px\)[\s\S]*?\.dfFactoryConsole__terminalHeading[^}]*flex-direction: column;/);
+
+  const markup = render({
+    terminalContent: createElement("section", { "aria-label": "Terminal sidebar" }),
+  });
+  assert.match(markup, /<\/main><section aria-label="Terminal sidebar"><\/section><\/div>$/);
 });
 
 test("FactoryApp server-renders without reading browser globals", () => {

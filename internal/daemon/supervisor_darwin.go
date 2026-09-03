@@ -253,6 +253,11 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		providerTask = preparedTask
 	case provider.TaskDeliveryStartupTerminal:
 		startupInput = preparedTask
+	case provider.TaskDeliveryAttemptAPI:
+		if len(preparedTask) != 0 {
+			return daemon.failRunBeforeRuntime(run, keys.resources.RuntimeRoot, kernel.FailureSpawn, provider.ErrInvalid)
+		}
+		providerTask = nil
 	default:
 		return daemon.failRunBeforeRuntime(run, keys.resources.RuntimeRoot, kernel.FailureSpawn, provider.ErrInvalid)
 	}

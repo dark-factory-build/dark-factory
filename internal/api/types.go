@@ -1,7 +1,9 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
+	"unicode/utf8"
 
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
@@ -131,6 +133,48 @@ type WebRevokeResult struct {
 type MutationResult struct {
 	Head     uint64 `json:"head"`
 	Revision uint64 `json:"revision"`
+}
+
+// AttemptTask is the exact private task text visible only to the authenticated
+// live attempt that owns it.
+type AttemptTask struct {
+	Task string `json:"task"`
+}
+
+func (AttemptTask) String() string   { return "AttemptTask(<redacted>)" }
+func (AttemptTask) GoString() string { return "AttemptTask(<redacted>)" }
+
+// MarshalJSON keeps private task text safe when factoryctl prints it inside a
+// provider terminal. encoding/json already escapes C0 controls; this also
+// escapes DEL and C1 controls, which terminal emulators may interpret.
+func (task AttemptTask) MarshalJSON() ([]byte, error) {
+	if !validAttemptTask(task) {
+		return nil, ErrInvalidInput
+	}
+	quoted, err := json.Marshal(task.Task)
+	if err != nil {
+		return nil, err
+	}
+	encoded := append([]byte(`{"task":`), terminalSafeJSON(nil, quoted)...)
+	return append(encoded, '}'), nil
+}
+
+func terminalSafeJSON(dst, encoded []byte) []byte {
+	const hex = "0123456789abcdef"
+	for len(encoded) > 0 {
+		value, width := utf8.DecodeRune(encoded)
+		if value >= 0x7f && value <= 0x9f {
+			dst = append(dst, '\\', 'u', '0', '0', hex[value>>4], hex[value&0xf])
+		} else {
+			dst = append(dst, encoded[:width]...)
+		}
+		encoded = encoded[width:]
+	}
+	return dst
+}
+
+func validAttemptTask(task AttemptTask) bool {
+	return validText(task.Task, 0, 131072)
 }
 
 type FactorySummary struct {

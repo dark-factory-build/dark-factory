@@ -90,7 +90,7 @@ func validateArgv(argv []string, executable string) error {
 		return fmt.Errorf("runner: argv does not name committed executable: %w", ErrIdentity)
 	}
 	for _, value := range argv {
-		if len(value) > 8192 || strings.IndexByte(value, 0) >= 0 || !utf8.ValidString(value) {
+		if len(value) > MaxArgumentBytes || strings.IndexByte(value, 0) >= 0 || !utf8.ValidString(value) {
 			return fmt.Errorf("runner: invalid argv")
 		}
 	}

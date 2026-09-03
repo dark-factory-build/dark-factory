@@ -401,6 +401,46 @@ func TestAttemptClientHasExactScopedOutcomesAndNoOperatorFallback(t *testing.T) 
 	})
 }
 
+func TestAttemptClientReadsExactTask(t *testing.T) {
+	bearer := testCredential('T')
+	fixture := newWireFixture(t, bearer, func(connection net.Conn, _ []byte) error {
+		return writeTestResponse(connection, wireGeneration, wireAttemptDomain, successResponse(`{"task":"private-task-sentinel"}`))
+	})
+	t.Setenv(attemptTokenFileEnv, fixture.token)
+	client, err := NewAttemptClientFromEnvironment(fixture.socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := client.Task(context.Background())
+	if err != nil || task.Task != "private-task-sentinel" {
+		t.Fatalf("task = %+v, %v", task, err)
+	}
+	if formatted := fmt.Sprintf("%v %+v %#v", task, task, task); strings.Contains(formatted, task.Task) {
+		t.Fatalf("attempt task formatting exposed private text: %s", formatted)
+	}
+	if encoded := requestJSON(t, <-fixture.request, wireAttemptDomain, bearer); encoded != `{"method":"task","params":{}}` {
+		t.Fatalf("attempt task request = %s", encoded)
+	}
+	fixture.wait(t)
+}
+
+func TestAttemptClientRejectsInvalidTaskResponse(t *testing.T) {
+	bearer := testCredential('V')
+	fixture := newWireFixture(t, bearer, func(connection net.Conn, _ []byte) error {
+		return writeTestResponse(connection, wireGeneration, wireAttemptDomain, successResponse(`{"task":"bad\u0000task"}`))
+	})
+	t.Setenv(attemptTokenFileEnv, fixture.token)
+	client, err := NewAttemptClientFromEnvironment(fixture.socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Task(context.Background()); !errors.Is(err, ErrProtocol) {
+		t.Fatalf("invalid task response = %v", err)
+	}
+	<-fixture.request
+	fixture.wait(t)
+}
+
 func TestAttemptOutcomeAcknowledgesErrorResponse(t *testing.T) {
 	bearer := testCredential('E')
 	fixture := newWireFixture(t, bearer, func(connection net.Conn, request []byte) error {

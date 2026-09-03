@@ -117,14 +117,17 @@ PTY, input, process group, wait/reap, output, and cleanup.
 
 Provider choice is unrestricted interactive authority in V1. Shell receives
 its task through a sealed descriptor. Claude Code and Codex resolve one direct
-executable commitment from the daemon's fixed tool path and receive their
-initial prompt once before the terminal is exposed. They reuse the operator's
-existing account: Claude uses the account `HOME`, while Codex uses its explicit
-configuration root with a private runtime `HOME`. Both keep a private `TMPDIR`;
-no provider API key is copied into the environment. The
-[provider contract](docs/providers.md) owns the exact launch details. Non-None
-verification policies are unsupported by the current daemon and cannot be
-treated as completion proof.
+executable commitment from the daemon's fixed tool path. Claude receives its
+task through the PTY before the terminal is exposed. Codex receives a fixed
+non-secret startup instruction in argv and reads the exact task only through
+its running attempt credential; the task is absent from argv, environment, and
+Change-worker configuration. They reuse the operator's existing account:
+Claude uses the account `HOME`, while Codex uses its explicit configuration
+root with a private runtime `HOME`. Both keep a private `TMPDIR`; no provider
+API key is copied into the environment. The [provider
+contract](docs/providers.md) owns the exact launch details. Non-None verification
+policies are unsupported by the current daemon and cannot be treated as
+completion proof.
 
 The runner's provider boundary does not grant source or lifecycle authority.
 

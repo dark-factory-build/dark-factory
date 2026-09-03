@@ -102,12 +102,16 @@ export type BrowserSessionOptions = {
   host: string;
   origin: string;
   challenge?: string;
+  /** Re-pair with the supplied one-shot challenge instead of using a saved key. */
+  forcePair?: boolean;
   keyStore?: BrowserKeyStore;
   socketFactory?: BrowserSocketFactory;
   crypto?: Crypto;
   timer?: BrowserTimer;
   reconnectInitialDelayMs?: number;
   reconnectMaxDelayMs?: number;
+  /** Called once a PAIR_RESULT has been durably saved, even if the session closed during the save. */
+  onPairingPersisted?: () => void;
   onStatus?: (status: SessionStatus) => void;
   onState?: (state: StateView) => void;
   onError?: (error: SessionError | ProtocolError) => void;
@@ -174,6 +178,7 @@ export class BrowserSession {
   #hello: HelloBody | undefined;
   #clientId: string | undefined;
   #authenticated = false;
+  #authAttempted = false;
   #capabilities = 0;
   #key: CryptoKey | undefined;
   #publicKey: Uint8Array | undefined;
@@ -208,6 +213,7 @@ export class BrowserSession {
   get clientId(): string | undefined { return this.#clientId; }
   get capabilities(): CapabilityMask { return this.#capabilities; }
   get pairingBlocked(): boolean { return this.#pairingBlocked; }
+  get authAttempted(): boolean { return this.#authAttempted; }
 
   resolveAgentTerminal(request: { agentId: string; expectedAgentRevision: bigint; expectedHead: bigint }): Promise<TerminalTarget | null> {
     try { this.#ensureLive(); } catch (error) { return Promise.reject(error); }
@@ -384,7 +390,7 @@ export class BrowserSession {
       let stored: StoredClientKey | null;
       try { stored = await this.#options.keyStore!.load(); } catch { throw new SessionError("storage_unavailable"); }
       this.#ensureLive();
-      if (stored === null) {
+      if (stored === null || this.#options.forcePair === true) {
         if (this.#options.challenge === undefined) throw new SessionError("pairing_required");
         await this.#pair();
       } else {
@@ -396,6 +402,7 @@ export class BrowserSession {
         const signature = await this.#sign(buildAuthTranscript({ ...this.#transcriptBase(), client_id: stored.clientId }));
         this.#ensureLive();
         const id = this.#nextID("auth");
+        this.#authAttempted = true;
         this.#sendAuth("auth", id, encodeAuthProve(id, { client_id: stored.clientId, signature }));
       }
     })();
@@ -449,6 +456,7 @@ export class BrowserSession {
     try {
       await this.#options.keyStore!.save({ clientId: frame.body.client_id, publicKeySEC1: publicKey.slice(), key, capabilities: frame.body.capabilities });
     } catch { throw new SessionError("storage_unavailable"); }
+    notify(this.#options.onPairingPersisted);
     // Persistence resolves the one-shot pairing outcome even if close raced
     // the await. The live-session fence below still prevents any old socket
     // or closed lifecycle from being revived.
@@ -830,6 +838,8 @@ export class BrowserClient {
   #reconnectAttempt = 0;
   #initialDelay: number;
   #maxDelay: number;
+  #pairRepairUsed = false;
+  #connectPromise: Promise<void> | undefined;
 
   constructor(options: BrowserSessionOptions) {
     this.#options = options;
@@ -845,12 +855,18 @@ export class BrowserClient {
     // A one-shot PAIR_PROVE may have an uncertain result while its durable
     // PairResult is being saved. Do not create another generation that would
     // replay that proof for the same challenge.
-    if (this.#session?.pairingBlocked) return this.#session.connect();
+    if (this.#session?.pairingBlocked) return this.#connectPromise ?? this.#session.connect();
     this.#cancelTimer();
     this.#reconnectAttempt = 0;
     this.#closed = false;
+    this.#pairRepairUsed = false;
     this.#reconnect = true;
-    return this.#newSession().connect();
+    const session = this.#newSession();
+    this.#connectPromise = session.connect().catch((error) => {
+      if (this.#canRepairPairing(error, session)) return this.#repairPairing();
+      throw error;
+    });
+    return this.#connectPromise;
   }
 
   close(): void {
@@ -860,15 +876,17 @@ export class BrowserClient {
     this.#session?.close();
   }
 
-  #newSession(): BrowserSession {
+  #newSession(forcePair = false): BrowserSession {
     const generation = ++this.#generation;
     this.#session?.close();
     let reconnectable = true;
     const session = new BrowserSession({
       ...this.#options,
+      forcePair,
+      onPairingPersisted: () => { this.#options = { ...this.#options, challenge: undefined }; },
       onStatus: (status) => {
         if (generation !== this.#generation) return;
-        if (session.clientId !== undefined && this.#options.challenge !== undefined) this.#options = { ...this.#options, challenge: undefined };
+        if ((status === "syncing" || status === "ready") && session.clientId !== undefined && this.#options.challenge !== undefined) this.#options = { ...this.#options, challenge: undefined };
         if (status === "ready") this.#reconnectAttempt = 0;
         if (status === "closed" && reconnectable && this.#reconnect && !this.#closed && (this.#options.challenge === undefined || session.clientId !== undefined)) this.#schedule(generation);
         notify(this.#options.onStatus, status);
@@ -920,6 +938,17 @@ export class BrowserClient {
     ++this.#timerToken;
     if (!scheduled) return;
     try { this.#timer.clearTimeout(handle); } catch { /* timer cleanup is best-effort */ }
+  }
+
+  #canRepairPairing(error: unknown, session: BrowserSession): error is SessionError {
+    return !this.#closed && this.#session === session && !this.#pairRepairUsed && error instanceof SessionError && error.code === "unauthorized" && !error.retryable && session.authAttempted && this.#options.challenge !== undefined;
+  }
+
+  #repairPairing(): Promise<void> {
+    if (this.#closed) return Promise.reject(new SessionError("closed"));
+    this.#pairRepairUsed = true;
+    this.#session?.close();
+    return this.#newSession(true).connect();
   }
 }
 

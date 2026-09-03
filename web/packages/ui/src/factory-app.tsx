@@ -64,7 +64,7 @@ export function FactoryApp({ onStatusChange }: FactoryAppProps = {}) {
   );
 }
 
-/** The selected agent's terminal is ordinary console content, not a mode. */
+/** The selected agent's terminal is a sidebar, not a replacement screen. */
 export function TerminalPanel({
   terminal,
   onClose,

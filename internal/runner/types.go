@@ -15,8 +15,8 @@ const (
 	// private diagnostic at 8 KiB leaves deterministic envelope headroom.
 	maxProviderErrorBytes = 8 << 10
 
-	// MaxProviderTaskBytes is the largest exact task sealed in the provider's
-	// unlinked, read-only-at-exec descriptor.
+	// MaxProviderTaskBytes is the outer bound on exact provider task material.
+	// Individual delivery paths may impose a smaller bound.
 	MaxProviderTaskBytes = 128 << 10
 	ProviderTaskPath     = "/dev/fd/11"
 	providerTaskFD       = 11
@@ -25,6 +25,9 @@ const (
 	// entries so a value accepted before admission cannot fail only after a
 	// provider launch is built.
 	MaxEnvironmentEntryBytes = 8192
+	// MaxArgumentBytes is shared with producers of exact argv entries so a
+	// value accepted before admission cannot fail only after a launch is built.
+	MaxArgumentBytes = 8192
 )
 
 // These are the complete fixed top-level runtime names emitted by the runner.

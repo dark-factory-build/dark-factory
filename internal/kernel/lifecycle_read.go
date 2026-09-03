@@ -569,8 +569,13 @@ func (store *Store) AuthenticateAttempt(ctx context.Context, digest AttemptDiges
 	if err := validateOwnershipLocators(ctx, tx.connection); err != nil {
 		return AttemptAuthority{}, err
 	}
-	if _, err := loadRunRelationships(ctx, tx.connection, run); err != nil {
+	relationships, err := loadRunRelationships(ctx, tx.connection, run)
+	if err != nil {
 		return AttemptAuthority{}, err
 	}
-	return AttemptAuthority{RunID: run.ID, ProjectID: run.ProjectID, AgentID: run.AgentID, TaskID: run.TaskID, TaskIncarnation: run.TaskIncarnationID, Role: run.Role, Provider: run.Provider, ChangeID: run.ChangeID}, nil
+	effectiveTask := relationships.task.Body
+	if run.Provider != ProviderShell && effectiveTask == "" {
+		effectiveTask = relationships.task.Title
+	}
+	return AttemptAuthority{RunID: run.ID, ProjectID: run.ProjectID, AgentID: run.AgentID, TaskID: run.TaskID, TaskIncarnation: run.TaskIncarnationID, Role: run.Role, Provider: run.Provider, ChangeID: run.ChangeID, task: effectiveTask}, nil
 }

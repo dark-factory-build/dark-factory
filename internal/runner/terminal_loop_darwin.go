@@ -38,8 +38,9 @@ func runReleasedProvider(child *OwnedChild, daemon, worker *os.File, reads *atte
 	}
 	loop.ptyOpen = true
 	// The worker's CLOEXEC capability has closed, proving provider exec, and the
-	// PTY is now registered. Native providers receive their frozen prompt once;
-	// Shell reads its program from fd 11 and has no startup PTY bytes.
+	// PTY is now registered. Claude receives its frozen prompt once. Shell reads
+	// its program from fd 11, and Codex reads its task through the attempt API;
+	// neither has startup PTY bytes.
 	if len(startup) > 0 {
 		n, err := loop.child.writePTYOwned(startup, attemptControlTimeout)
 		count, status := terminalPayloadResult(n, len(startup), err)

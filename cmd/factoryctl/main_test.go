@@ -177,6 +177,7 @@ func TestParseExactAttemptCommands(t *testing.T) {
 		{name: "root help", args: []string{"--help"}, help: true},
 		{name: "attempt help", args: []string{"attempt", "-h"}, help: true},
 		{name: "verb help", args: []string{"attempt", "block", "--help"}, help: true},
+		{name: "task", args: []string{"attempt", "task"}, command: attemptCommand{kind: commandAttemptTask}},
 		{name: "empty success", args: []string{"attempt", "succeed"}, command: attemptCommand{kind: commandSucceed}},
 		{name: "success", args: []string{"attempt", "succeed", "--result", "done"}, command: attemptCommand{kind: commandSucceed, text: "done"}},
 		{name: "block", args: []string{"attempt", "block", "--detail", "waiting"}, command: attemptCommand{kind: commandBlock, text: "waiting"}},
@@ -258,6 +259,8 @@ func TestInvalidSyntaxStopsBeforeEnvironmentOrConnection(t *testing.T) {
 		{"attempt"},
 		{"task", "done"},
 		{"attempt", "unknown"},
+		{"attempt", "task", "extra"},
+		{"attempt", "task", "--socket", "/private/socket"},
 		{"attempt", "block"},
 		{"attempt", "block", "--detail", ""},
 		{"attempt", "succeed", "positional"},
@@ -394,6 +397,74 @@ func TestAttemptCommandsUseExactTypedCalls(t *testing.T) {
 				if private != "" && strings.Contains(stdout.String()+stderr.String(), private) {
 					t.Fatalf("output leaked private sentinel")
 				}
+			}
+		})
+	}
+}
+
+func TestAttemptTaskUsesExactTypedCallAndWritesJSON(t *testing.T) {
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	t.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", fixture.attemptPath)
+	privateTask := "private\u007f\u009btask-sentinel"
+	done := serveOne(fixture.listener, func(api.Call) api.Reply {
+		reply, err := api.NewAttemptTaskReply(api.AttemptTask{Task: privateTask})
+		if err != nil {
+			t.Errorf("new attempt task reply: %v", err)
+		}
+		return reply
+	})
+	var stdout, stderr bytes.Buffer
+	exit := run(context.Background(), []string{"attempt", "task"}, func(name string) string {
+		if name == "DARK_FACTORY_SOCKET" {
+			return fixture.socket
+		}
+		return ""
+	}, &stdout, &stderr)
+	result := awaitServer(t, done)
+	if exit != 0 || result.err != nil || result.call.Kind() != api.CallAttemptTask {
+		t.Fatalf("run = exit %d, call %v, server %v", exit, result.call.Kind(), result.err)
+	}
+	digest, ok := result.call.AttemptDigest()
+	wantDigest := sha256.Sum256(fixture.bearer[:])
+	if !ok || digest.Bytes() != wantDigest {
+		t.Fatalf("attempt digest = %x, %t", digest.Bytes(), ok)
+	}
+	if stdout.String() != "{\"task\":\"private\\u007f\\u009btask-sentinel\"}\n" || stderr.Len() != 0 {
+		t.Fatalf("output = stdout %q, stderr %q", stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "\u007f") || strings.Contains(stdout.String(), "\u009b") {
+		t.Fatal("attempt task output contains terminal control characters")
+	}
+}
+
+func TestAttemptTaskInvalidEnvironmentFailsNormally(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		socket     string
+		attemptEnv string
+	}{
+		{name: "missing socket", attemptEnv: "/private/missing-attempt-token"},
+		{name: "missing attempt token", socket: "/private/missing-factory.sock"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			restoreEnvironment(t, "DARK_FACTORY_ATTEMPT_TOKEN_FILE")
+			if test.attemptEnv == "" {
+				if err := os.Unsetenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE"); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				t.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", test.attemptEnv)
+			}
+			var stdout, stderr bytes.Buffer
+			exit := run(context.Background(), []string{"attempt", "task"}, func(name string) string {
+				if name == "DARK_FACTORY_SOCKET" {
+					return test.socket
+				}
+				return ""
+			}, &stdout, &stderr)
+			if exit != exitFailure || stdout.Len() != 0 || stderr.String() != "factoryctl: attempt client configuration is invalid\n" {
+				t.Fatalf("invalid environment = exit %d, stdout %q, stderr %q", exit, stdout.String(), stderr.String())
 			}
 		})
 	}

@@ -532,6 +532,34 @@ func TestDaemonDispatchesBlockAndFailCalls(t *testing.T) {
 	}
 }
 
+func TestDaemonServesTaskOnlyToLiveAttempt(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttempt(t, fixture, 51)
+	done := fixture.serve(t)
+	task, err := active.client.Task(context.Background())
+	if err != nil || task.Task != "private" {
+		t.Fatalf("attempt task = %+v, %v", task, err)
+	}
+	waitDispatch(t, done)
+
+	done = fixture.serve(t)
+	if _, err := active.client.Succeed(context.Background(), "done"); err != nil {
+		t.Fatal(err)
+	}
+	waitDispatch(t, done)
+
+	done = fixture.serve(t)
+	if _, err := active.client.Task(context.Background()); err == nil {
+		t.Fatal("finalizing attempt read task")
+	} else {
+		var remote *api.RemoteError
+		if !errors.As(err, &remote) || remote.Code() != api.RemoteUnauthorized {
+			t.Fatalf("finalizing task error = %v", err)
+		}
+	}
+	waitDispatch(t, done)
+}
+
 func TestDaemonRejectsForgedAttemptOutcome(t *testing.T) {
 	fixture := newDispatchFixture(t)
 	_ = prepareActiveAttempt(t, fixture, 61)

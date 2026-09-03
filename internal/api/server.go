@@ -25,6 +25,7 @@ const (
 	CallCreateAgent
 	CallEnqueueTask
 	CallSetDispatch
+	CallAttemptTask
 	CallSucceed
 	CallBlock
 	CallFail
@@ -73,7 +74,7 @@ func (call Call) GoString() string {
 
 func (call Call) AttemptDigest() (AttemptDigest, bool) {
 	switch call.kind {
-	case CallSucceed, CallBlock, CallFail, CallRequestHuman:
+	case CallAttemptTask, CallSucceed, CallBlock, CallFail, CallRequestHuman:
 		return call.digest, true
 	default:
 		return AttemptDigest{}, false
@@ -126,6 +127,7 @@ const (
 	replyHealth replyKind = iota + 1
 	replySnapshot
 	replyMutation
+	replyAttemptTask
 	replyWebStatus
 	replyWebLaunch
 	replyWebAbandon
@@ -136,16 +138,17 @@ const (
 
 // Reply is constructed only through its fixed reply constructors.
 type Reply struct {
-	kind       replyKind
-	health     HealthStatus
-	snapshot   DashboardSnapshot
-	mutation   MutationResult
-	webStatus  WebStatus
-	webLaunch  WebLaunch
-	webAbandon WebAbandonOpenResult
-	webClients WebClientPage
-	webRevoke  WebRevokeResult
-	code       RemoteErrorCode
+	kind        replyKind
+	health      HealthStatus
+	snapshot    DashboardSnapshot
+	mutation    MutationResult
+	attemptTask AttemptTask
+	webStatus   WebStatus
+	webLaunch   WebLaunch
+	webAbandon  WebAbandonOpenResult
+	webClients  WebClientPage
+	webRevoke   WebRevokeResult
+	code        RemoteErrorCode
 }
 
 func (Reply) String() string   { return "Reply(<redacted>)" }
@@ -176,6 +179,13 @@ func NewMutationReply(result MutationResult) (Reply, error) {
 		return Reply{}, ErrInvalidInput
 	}
 	return Reply{kind: replyMutation, mutation: result}, nil
+}
+
+func NewAttemptTaskReply(task AttemptTask) (Reply, error) {
+	if !validAttemptTask(task) {
+		return Reply{}, ErrInvalidInput
+	}
+	return Reply{kind: replyAttemptTask, attemptTask: task}, nil
 }
 
 func NewWebStatusReply(status WebStatus) (Reply, error) {
@@ -439,7 +449,7 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		call.digest = digestAttemptCredential(bearer)
 	}
 	switch kind {
-	case CallHealth, CallSnapshot, CallWebStatus, CallWebOpen:
+	case CallHealth, CallSnapshot, CallAttemptTask, CallWebStatus, CallWebOpen:
 		if err := decodeExact(request.Params, &struct{}{}); err != nil {
 			return Call{}, RemoteInvalidRequest
 		}
@@ -537,6 +547,8 @@ func methodKind(method string) (CallKind, byte) {
 		return CallEnqueueTask, operatorDomain
 	case "set_dispatch":
 		return CallSetDispatch, operatorDomain
+	case "task":
+		return CallAttemptTask, attemptDomain
 	case "succeed":
 		return CallSucceed, attemptDomain
 	case "block":
@@ -619,6 +631,8 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyHealth
 	case CallSnapshot:
 		return reply == replySnapshot
+	case CallAttemptTask:
+		return reply == replyAttemptTask
 	case CallCreateProject, CallCreateAgent, CallEnqueueTask, CallSetDispatch, CallSucceed, CallBlock, CallFail, CallRequestHuman:
 		return reply == replyMutation
 	case CallWebStatus:
@@ -659,6 +673,8 @@ func (connection *Connection) writeReply(reply Reply) error {
 		data, err = json.Marshal(reply.snapshot)
 	case replyMutation:
 		data, err = json.Marshal(reply.mutation)
+	case replyAttemptTask:
+		data, err = json.Marshal(reply.attemptTask)
 	case replyWebStatus:
 		data, err = json.Marshal(reply.webStatus)
 	case replyWebLaunch:

@@ -593,8 +593,9 @@ func (w *WorkerControl) await(stage AttemptStage, before, after workerState) err
 }
 
 // ExecProvider takes ownership of cwd and an optional shell task on every call.
-// Shell supplies an exact unlinked descriptor inherited as fd 11. Native
-// providers supply nil because the attempt runner owns their startup PTY input.
+// Shell supplies an exact unlinked descriptor inherited as fd 11. Claude and
+// Codex supply nil: Claude receives startup PTY input, while Codex reads its
+// task through the attempt API.
 func (w *WorkerControl) ExecProvider(spec *LaunchSpec, cwd, task *os.File) error {
 	if w == nil || w.file == nil || w.dir == nil || w.lifetime == nil || w.state != workerProvider || spec == nil || cwd == nil || len(spec.stdin) != 0 || spec.control != nil || spec.controlID != nil || spec.stdout != nil || spec.stderr != nil {
 		if cwd != nil {

@@ -12,6 +12,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+const (
+	initialPTYColumns = 120
+	initialPTYRows    = 40
+)
+
 // openPTY deliberately uses the Darwin kernel's /dev/ptmx interface instead
 // of adding a PTY library. Both descriptors are CLOEXEC; os/exec makes the
 // slave its 0/1/2 descriptors for the blocked gate, while the parent retains
@@ -50,6 +55,14 @@ func openPTY() (master, slave *os.File, err error) {
 		return nil, nil, err
 	}
 	slave = os.NewFile(uintptr(slaveFD), "pty-slave")
+	// Providers start before any browser is attached to resize their terminal.
+	// Give unattended TUIs a usable geometry instead of Darwin's zero-sized
+	// default; an attached client can replace it through the normal owner path.
+	winsize := unix.Winsize{Col: initialPTYColumns, Row: initialPTYRows}
+	if err := unix.IoctlSetWinsize(masterFD, unix.TIOCSWINSZ, &winsize); err != nil {
+		_ = slave.Close()
+		return nil, nil, fmt.Errorf("runner: initial pty size: %w", err)
+	}
 	closeMaster = false
 	return master, slave, nil
 }
