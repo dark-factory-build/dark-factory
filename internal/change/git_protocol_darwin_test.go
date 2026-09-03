@@ -499,10 +499,11 @@ func TestGitChildNaturalExitBeforeObserverSetupIsReaped(t *testing.T) {
 	repository := fakeRepository(t)
 	root := filepath.Dir(repository)
 	pidPath := filepath.Join(root, "pid")
+	pidStagingPath := filepath.Join(root, "pid.staging")
 	releasePath := filepath.Join(root, "release")
 	git := writeFakeGit(t, fmt.Sprintf(
-		"#!/bin/sh\nprintf '%%s' \"$$\" > %q\nwhile [ ! -e %q ]; do :; done\nprintf done\n",
-		pidPath, releasePath,
+		"#!/bin/sh\nprintf '%%s' \"$$\" > %q\n/bin/mv %q %q\nwhile [ ! -e %q ]; do :; done\nprintf done\n",
+		pidStagingPath, pidStagingPath, pidPath, releasePath,
 	))
 	recorder := &gitEventRecorder{}
 	hook := func(event gitProcessEvent) {
