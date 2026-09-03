@@ -123,9 +123,9 @@ settings_log="$temporary/calls"
 cat >"$temporary/bin/gh" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$*" >>"$DF_SETTINGS_STUB_LOG"
-if [ -n "${DF_MERGE_RULE_FACTS-}" ]; then
+if [ -n "${DF_MERGE_RULE_JSON-}" ]; then
     [ "${DF_MERGE_RULE_API_FAIL-}" != 1 ] || exit 1
-    cat "$DF_MERGE_RULE_FACTS"
+    jq -r "$4" "$DF_MERGE_RULE_JSON"
 elif [ "$1" = repo ] && [ "$2" = view ]; then
     printf '%s\n' dark-factory-build/dark-factory
 elif [ "$1" = api ] && [ "$2" = repos/dark-factory-build/dark-factory/rulesets ] && [ "${3-}" = --jq ]; then
@@ -142,8 +142,8 @@ fi
 STUB
 chmod 755 "$temporary/bin/gh"
 
-# Execute the actual inline merge-rule step. The stub supplies GitHub's
-# projected facts; every missing fact and an API failure must stop the step.
+# Execute the actual inline merge-rule step, including its jq projection, from
+# raw ruleset JSON. Every missing or misbound fact and an API failure must stop.
 awk '
     /^      - name: Confirm the live merge rules$/ { step = 1; next }
     step && /^        run: \|$/ { body = 1; next }
@@ -151,14 +151,19 @@ awk '
     body && /^ *$/ { print ""; next }
     body { exit }
 ' "$workflow" >"$temporary/merge-rule-step.sh"
-grep -Fq '(.integration_id|tostring)' "$temporary/merge-rule-step.sh"
-merge_facts="$temporary/merge-facts"
-write_merge_facts() {
-    printf '%s\n' rule:merge_queue grouping:ALLGREEN rule:required_status_checks \
-        context:required integration:15368:required >"$merge_facts"
-}
+merge_rules_base="$temporary/merge-rules-base.json"
+merge_rules="$temporary/merge-rules.json"
+cat >"$merge_rules_base" <<'RULES'
+[
+  {"type":"merge_queue","parameters":{"grouping_strategy":"ALLGREEN"}},
+  {"type":"required_status_checks","parameters":{"required_status_checks":[
+    {"context":"required","integration_id":15368}
+  ]}},
+  {"type":"pull_request","parameters":{}}
+]
+RULES
 run_merge_rule_step() (
-    export DF_MERGE_RULE_FACTS="$merge_facts"
+    export DF_MERGE_RULE_JSON="$merge_rules"
     export DF_SETTINGS_STUB_LOG="$settings_log"
     export GITHUB_REPOSITORY=dark-factory-build/dark-factory
     export BASE_BRANCH=main
@@ -166,19 +171,24 @@ run_merge_rule_step() (
     PATH="$temporary/bin:$PATH" bash "$temporary/merge-rule-step.sh" \
         >"$temporary/merge.out" 2>"$temporary/merge.err"
 )
-write_merge_facts
+cp "$merge_rules_base" "$merge_rules"
 run_merge_rule_step
-for missing in rule:merge_queue grouping:ALLGREEN rule:required_status_checks \
-    context:required integration:15368:required; do
-    write_merge_facts
-    grep -vx "$missing" "$merge_facts" >"$temporary/remaining-facts"
-    mv "$temporary/remaining-facts" "$merge_facts"
+expect_rule_failure() {
+    label=$1
+    filter=$2
+    jq "$filter" "$merge_rules_base" >"$merge_rules"
     if run_merge_rule_step; then
-        echo "missing live merge fact passed: $missing" >&2
+        echo "invalid live merge rules passed: $label" >&2
         exit 1
     fi
-done
-write_merge_facts
+}
+expect_rule_failure no-queue 'map(select(.type != "merge_queue"))'
+expect_rule_failure wrong-grouping 'map(if .type == "merge_queue" then .parameters.grouping_strategy = "HEADGREEN" else . end)'
+expect_rule_failure no-required-rule 'map(select(.type != "required_status_checks"))'
+expect_rule_failure wrong-context 'map(if .type == "required_status_checks" then .parameters.required_status_checks[0].context = "other" else . end)'
+expect_rule_failure wrong-integration 'map(if .type == "required_status_checks" then .parameters.required_status_checks[0].integration_id = 42 else . end)'
+expect_rule_failure misbound-integration 'map(if .type == "required_status_checks" then .parameters.required_status_checks = [{"context":"required","integration_id":null},{"context":"other","integration_id":15368}] else . end)'
+cp "$merge_rules_base" "$merge_rules"
 if (DF_MERGE_RULE_API_FAIL=1; export DF_MERGE_RULE_API_FAIL; run_merge_rule_step); then
     echo "merge-rule API failure passed" >&2
     exit 1
