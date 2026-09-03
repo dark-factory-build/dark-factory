@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	protocolGeneration  byte = 2
+	protocolGeneration  byte = 3
 	operatorDomain      byte = 1
 	attemptDomain       byte = 2
 	requestPrelude           = 2 + credentialBytes
@@ -185,11 +185,11 @@ func (client *OperatorClient) CreateProject(ctx context.Context, input CreatePro
 	return client.client.mutate(ctx, "create_project", input)
 }
 
-func (client *OperatorClient) CreateShellAgent(ctx context.Context, input CreateShellAgentInput) (MutationResult, error) {
-	if !validID(input.ID) || !validID(input.ProjectID) || !validText(input.Name, 1, 128) || input.Role != "worker" && input.Role != "orchestrator" || input.ToolBudgetLimit < 1 || input.ToolBudgetLimit > 1_000_000_000 {
+func (client *OperatorClient) CreateAgent(ctx context.Context, input CreateAgentInput) (MutationResult, error) {
+	if !validCreateAgentInput(input) {
 		return MutationResult{}, ErrInvalidInput
 	}
-	return client.client.mutate(ctx, "create_shell_agent", input)
+	return client.client.mutate(ctx, "create_agent", input)
 }
 
 func (client *OperatorClient) EnqueueTask(ctx context.Context, input EnqueueTaskInput) (MutationResult, error) {
@@ -670,7 +670,7 @@ func validSnapshot(snapshot DashboardSnapshot) bool {
 		}
 	}
 	for _, agent := range snapshot.Agents {
-		if !validID(agent.ID) || !validID(agent.ProjectID) || !validText(agent.Name, 1, 128) || agent.Role != "worker" && agent.Role != "orchestrator" || agent.Revision == 0 {
+		if !validID(agent.ID) || !validID(agent.ProjectID) || !validText(agent.Name, 1, 128) || agent.Role != "worker" && agent.Role != "orchestrator" || !validProvider(agent.Provider) || agent.Revision == 0 {
 			return false
 		}
 	}
@@ -680,6 +680,10 @@ func validSnapshot(snapshot DashboardSnapshot) bool {
 		}
 	}
 	return true
+}
+
+func validProvider(value string) bool {
+	return value == "shell" || value == "claude_code" || value == "codex"
 }
 
 func validWebStatus(status WebStatus) bool {

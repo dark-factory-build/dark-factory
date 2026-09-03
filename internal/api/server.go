@@ -22,7 +22,7 @@ const (
 	CallHealth CallKind = iota + 1
 	CallSnapshot
 	CallCreateProject
-	CallCreateShellAgent
+	CallCreateAgent
 	CallEnqueueTask
 	CallSetDispatch
 	CallSucceed
@@ -54,7 +54,7 @@ type Call struct {
 	kind             CallKind
 	digest           AttemptDigest
 	project          CreateProjectInput
-	agent            CreateShellAgentInput
+	agent            CreateAgentInput
 	task             EnqueueTaskInput
 	humanQuestion    HumanQuestionInput
 	webClient        WebClientRevocationInput
@@ -84,8 +84,8 @@ func (call Call) CreateProjectInput() (CreateProjectInput, bool) {
 	return call.project, call.kind == CallCreateProject
 }
 
-func (call Call) CreateShellAgentInput() (CreateShellAgentInput, bool) {
-	return call.agent, call.kind == CallCreateShellAgent
+func (call Call) CreateAgentInput() (CreateAgentInput, bool) {
+	return call.agent, call.kind == CallCreateAgent
 }
 
 func (call Call) EnqueueTaskInput() (EnqueueTaskInput, bool) {
@@ -459,8 +459,8 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		if err := decodeExact(request.Params, &call.project); err != nil || !validID(call.project.ID) || !validText(call.project.Name, 1, 128) || !validText(call.project.Root, 1, 4096) {
 			return Call{}, RemoteInvalidRequest
 		}
-	case CallCreateShellAgent:
-		if err := decodeExact(request.Params, &call.agent); err != nil || !validID(call.agent.ID) || !validID(call.agent.ProjectID) || !validText(call.agent.Name, 1, 128) || call.agent.Role != "worker" && call.agent.Role != "orchestrator" || call.agent.ToolBudgetLimit < 1 || call.agent.ToolBudgetLimit > 1_000_000_000 {
+	case CallCreateAgent:
+		if err := decodeExact(request.Params, &call.agent); err != nil || !validCreateAgentInput(call.agent) {
 			return Call{}, RemoteInvalidRequest
 		}
 	case CallEnqueueTask:
@@ -531,8 +531,8 @@ func methodKind(method string) (CallKind, byte) {
 		return CallSnapshot, operatorDomain
 	case "create_project":
 		return CallCreateProject, operatorDomain
-	case "create_shell_agent":
-		return CallCreateShellAgent, operatorDomain
+	case "create_agent":
+		return CallCreateAgent, operatorDomain
 	case "enqueue_task":
 		return CallEnqueueTask, operatorDomain
 	case "set_dispatch":
@@ -619,7 +619,7 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyHealth
 	case CallSnapshot:
 		return reply == replySnapshot
-	case CallCreateProject, CallCreateShellAgent, CallEnqueueTask, CallSetDispatch, CallSucceed, CallBlock, CallFail, CallRequestHuman:
+	case CallCreateProject, CallCreateAgent, CallEnqueueTask, CallSetDispatch, CallSucceed, CallBlock, CallFail, CallRequestHuman:
 		return reply == replyMutation
 	case CallWebStatus:
 		return reply == replyWebStatus

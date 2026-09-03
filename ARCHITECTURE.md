@@ -158,11 +158,14 @@ and complete ordered environment. The runner owns the descriptor-bound Change
 cwd, task delivery, PTY, process group, wait/reap, output, and cleanup. A
 provider cannot select a source path or lifecycle result.
 
-Shell is the only implemented provider. Its executable is `/bin/sh` and its
-argv is `/bin/sh`, `/dev/fd/11`; bounded task bytes are written to that sealed
-descriptor after the launch gates pass. The PTY is reserved for later
-interactive terminal traffic. Claude Code and Codex are unsupported and fail
-closed. The schema and wire contract contain no permission-profile field.
+Shell receives bounded task bytes through a sealed descriptor. Claude Code and
+Codex resolve their named CLI through the daemon's fixed tool path to one exact
+direct executable commitment, then receive their initial prompt once through
+the PTY after provider exec and before the terminal is exposed. Native tools use
+their explicit account configuration root while runtime `HOME` and `TMPDIR`
+remain private. [The provider contract](docs/providers.md) owns the exact argv,
+environment, and task-delivery details. The schema and wire contract contain no
+permission-profile field.
 
 Provider output is opaque and never lifecycle authority.
 

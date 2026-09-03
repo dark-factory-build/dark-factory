@@ -31,7 +31,7 @@ const (
 	defaultBrowserAddress = "127.0.0.1:43123"
 	defaultBrowserOrigin  = "https://app.darkfactory.build"
 	defaultGitExecutable  = change.TrustedGitExecutable
-	defaultToolPath       = "/usr/bin:/bin"
+	defaultToolPath       = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 	defaultBaseRevision   = "HEAD"
 	runnerSiblingName     = "factory-runner"
 	factoryctlSiblingName = "factoryctl"
@@ -68,6 +68,7 @@ type config struct {
 	// at boot; every executable is committed before the process serves.
 	gitExecutable        string
 	toolPath             string
+	toolPathExplicit     bool
 	baseRevision         string
 	runnerExecutable     string
 	factoryctlExecutable string
@@ -167,6 +168,7 @@ func parse(args []string) (config, bool, bool) {
 				return config{}, false, false
 			}
 			result.toolPath = value
+			result.toolPathExplicit = true
 		case "--base-revision":
 			if result.baseRevision != "" || !validBaseRevision(value) {
 				return config{}, false, false
@@ -595,6 +597,17 @@ func deriveSupervisorSpec(configuration config, parent *daemon.RuntimeParent) (d
 	if err := provider.ValidateToolPath(configuration.toolPath); err != nil {
 		return daemon.SupervisorSpec{}, err
 	}
+	accountHome, err := install.AccountHome()
+	if err != nil {
+		return daemon.SupervisorSpec{}, err
+	}
+	toolPath := configuration.toolPath
+	if !configuration.toolPathExplicit {
+		toolPath = filepath.Join(accountHome, ".local", "bin") + string(filepath.ListSeparator) + toolPath
+	}
+	if err := provider.ValidateToolPath(toolPath); err != nil {
+		return daemon.SupervisorSpec{}, err
+	}
 	if !validBaseRevision(configuration.baseRevision) {
 		return daemon.SupervisorSpec{}, errors.New("factoryd: invalid base revision policy")
 	}
@@ -606,7 +619,8 @@ func deriveSupervisorSpec(configuration config, parent *daemon.RuntimeParent) (d
 		AttemptSocket:        install.LocalAPISocketPath(configuration.home),
 		RunnerExecutable:     runnerExecutable,
 		FactoryctlExecutable: factoryctlExecutable,
-		ToolPath:             configuration.toolPath,
+		ToolPath:             toolPath,
+		AccountHome:          accountHome,
 	}, nil
 }
 

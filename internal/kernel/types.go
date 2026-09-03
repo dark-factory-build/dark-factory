@@ -285,7 +285,8 @@ const (
 	ProviderShell
 )
 
-func parseProvider(value string) (Provider, error) {
+// ParseProvider accepts the complete public provider vocabulary.
+func ParseProvider(value string) (Provider, error) {
 	switch value {
 	case "claude_code":
 		return ProviderClaudeCode, nil

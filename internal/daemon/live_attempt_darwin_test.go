@@ -353,7 +353,7 @@ func TestHandleConnectionClearsOnlyTheFailedOutcomeReceipt(t *testing.T) {
 	}
 	body := []byte(`{"method":"succeed","params":{"result":"receipt-failure"}}`)
 	request := make([]byte, 2+len(active.bearer)+len(body))
-	request[0], request[1] = 2, 2
+	request[0], request[1] = 3, 2
 	copy(request[2:], active.bearer)
 	copy(request[2+len(active.bearer):], body)
 	writeFrame(request)

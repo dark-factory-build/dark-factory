@@ -124,8 +124,8 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.snapshot(ctx)
 	case api.CallCreateProject:
 		return daemon.createProject(ctx, call)
-	case api.CallCreateShellAgent:
-		return daemon.createShellAgent(ctx, call)
+	case api.CallCreateAgent:
+		return daemon.createAgent(ctx, call)
 	case api.CallEnqueueTask:
 		return daemon.enqueueTask(ctx, call)
 	case api.CallSetDispatch:
@@ -240,8 +240,8 @@ func (daemon *Daemon) createProject(ctx context.Context, call api.Call) api.Repl
 	return daemon.mutation(ctx, project.Revision)
 }
 
-func (daemon *Daemon) createShellAgent(ctx context.Context, call api.Call) api.Reply {
-	input, ok := call.CreateShellAgentInput()
+func (daemon *Daemon) createAgent(ctx context.Context, call api.Call) api.Reply {
+	input, ok := call.CreateAgentInput()
 	if !ok {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
@@ -257,13 +257,19 @@ func (daemon *Daemon) createShellAgent(ctx context.Context, call api.Call) api.R
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
+	provider, err := kernel.ParseProvider(input.Provider)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
 	at, err := daemon.timestamp()
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
 	agent, err := daemon.store.CreateAgent(ctx, kernel.NewAgent{
 		ID: id, ProjectID: projectID, Name: input.Name, Role: role,
-		Provider:        kernel.ProviderShell,
+		Provider:        provider,
+		Model:           input.Model,
+		ReasoningEffort: input.ReasoningEffort,
 		ToolBudgetLimit: input.ToolBudgetLimit,
 	}, at)
 	if err != nil {

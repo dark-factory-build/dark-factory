@@ -38,6 +38,7 @@ type Config struct {
 	GitExecutable        string
 	FactoryctlExecutable string
 	ToolPath             string
+	AccountHome          string
 	RepositoryRoot       string
 	RepositoryIdentity   change.RepositoryIdentity
 	Revision             string
@@ -46,8 +47,8 @@ type Config struct {
 	StagingName          string
 	AttemptSocket        string
 	Retained             *Result
-	// ProviderTask is sealed in one unlinked descriptor before provider exec.
-	// It never shares the interactive PTY input stream.
+	// ProviderTask is sealed on fd 11 for Shell or prepared for one native PTY
+	// write before that terminal becomes operator-visible.
 	ProviderTask []byte
 }
 
@@ -91,6 +92,7 @@ type configWire struct {
 	GitExecutable        string       `json:"git_executable"`
 	FactoryctlExecutable string       `json:"factoryctl_executable"`
 	ToolPath             string       `json:"tool_path"`
+	AccountHome          string       `json:"account_home"`
 	RepositoryRoot       string       `json:"repository_root"`
 	RepositoryIdentity   identityWire `json:"repository_identity"`
 	Revision             string       `json:"revision"`
@@ -109,7 +111,7 @@ func EncodeConfig(config Config) ([]byte, error) {
 	wire := configWire{
 		Provider: config.Provider.String(), Model: config.Model, ReasoningEffort: config.ReasoningEffort,
 		RuntimePath: config.RuntimePath, RuntimeIdentity: identityWire{Device: config.RuntimeIdentity.Device, Inode: config.RuntimeIdentity.Inode},
-		GitExecutable: config.GitExecutable, FactoryctlExecutable: config.FactoryctlExecutable, ToolPath: config.ToolPath,
+		GitExecutable: config.GitExecutable, FactoryctlExecutable: config.FactoryctlExecutable, ToolPath: config.ToolPath, AccountHome: config.AccountHome,
 		RepositoryRoot: config.RepositoryRoot, RepositoryIdentity: identityWire{Device: config.RepositoryIdentity.Device(), Inode: config.RepositoryIdentity.Inode()}, Revision: config.Revision,
 		ChangeParent: config.ChangeParent, FinalName: config.FinalName, StagingName: config.StagingName,
 		AttemptSocket: config.AttemptSocket, ProviderTask: bytes.Clone(config.ProviderTask),
@@ -145,7 +147,7 @@ func DecodeConfig(encoded []byte) (Config, error) {
 	config := Config{
 		Provider: providerKind, Model: wire.Model, ReasoningEffort: wire.ReasoningEffort,
 		RuntimePath: wire.RuntimePath, RuntimeIdentity: runner.FileIdentity{Device: wire.RuntimeIdentity.Device, Inode: wire.RuntimeIdentity.Inode},
-		GitExecutable: wire.GitExecutable, FactoryctlExecutable: wire.FactoryctlExecutable, ToolPath: wire.ToolPath,
+		GitExecutable: wire.GitExecutable, FactoryctlExecutable: wire.FactoryctlExecutable, ToolPath: wire.ToolPath, AccountHome: wire.AccountHome,
 		RepositoryRoot: wire.RepositoryRoot, RepositoryIdentity: repositoryIdentity, Revision: wire.Revision,
 		ChangeParent: wire.ChangeParent, FinalName: wire.FinalName, StagingName: wire.StagingName,
 		AttemptSocket: wire.AttemptSocket, Retained: retained, ProviderTask: bytes.Clone(wire.ProviderTask),
@@ -157,7 +159,7 @@ func DecodeConfig(encoded []byte) (Config, error) {
 }
 
 func validateConfig(config Config) error {
-	paths := []string{config.RuntimePath, config.GitExecutable, config.FactoryctlExecutable, config.RepositoryRoot, config.ChangeParent, config.AttemptSocket}
+	paths := []string{config.RuntimePath, config.GitExecutable, config.FactoryctlExecutable, config.AccountHome, config.RepositoryRoot, config.ChangeParent, config.AttemptSocket}
 	for _, path := range paths {
 		if !validAbsolute(path, maximumLocatorBytes) {
 			return invalidContract(nil)
@@ -166,8 +168,11 @@ func validateConfig(config Config) error {
 	if len(config.AttemptSocket) > install.MaxSocketPathBytes || config.RuntimeIdentity.Device == 0 || config.RuntimeIdentity.Inode == 0 ||
 		kernel.ValidateProviderLaunchControls(config.Provider, config.Model, config.ReasoningEffort) != nil || provider.ValidateToolPath(config.ToolPath) != nil ||
 		!validText(config.Revision, maximumRevisionBytes) || !validChangeName(config.FinalName) || !validChangeName(config.StagingName) ||
-		config.FinalName == config.StagingName || provider.ValidateTask(config.Provider, config.ProviderTask) != nil {
+		config.FinalName == config.StagingName {
 		return invalidContract(nil)
+	}
+	if _, _, err := provider.PrepareTask(config.Provider, config.ProviderTask); err != nil {
+		return invalidContract(err)
 	}
 	if _, err := change.NewRepositoryIdentity(config.RepositoryIdentity.Device(), config.RepositoryIdentity.Inode()); err != nil {
 		return invalidContract(err)

@@ -35,7 +35,7 @@ func TestSnapshotReplyKeepsEmptyCollectionsAndCopiesBacking(t *testing.T) {
 		Head:     0,
 		Factory:  FactorySummary{Capacity: 1, Revision: 1},
 		Projects: []ProjectSummary{{ID: strings.Repeat("1", 32), Name: "project", Revision: 1}},
-		Agents:   []AgentSummary{{ID: strings.Repeat("2", 32), ProjectID: strings.Repeat("1", 32), Name: "agent", Role: "worker", Revision: 1}},
+		Agents:   []AgentSummary{{ID: strings.Repeat("2", 32), ProjectID: strings.Repeat("1", 32), Name: "agent", Role: "worker", Provider: "codex", Revision: 1}},
 		Tasks:    []TaskSummary{{ID: strings.Repeat("3", 32), ProjectID: strings.Repeat("1", 32), AssignedAgentID: strings.Repeat("2", 32), Title: "task", Status: "queued", Revision: 1}},
 	}
 	reply, err := NewSnapshotReply(input)

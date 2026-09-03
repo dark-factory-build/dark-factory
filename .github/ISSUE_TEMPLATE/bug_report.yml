@@ -33,6 +33,6 @@ body:
     id: provider
     attributes:
       label: Provider involved
-      options: ["shell", "Claude Code (currently unavailable)", "Codex (currently unavailable)", "none / not provider-specific"]
+      options: ["shell", "Claude Code", "Codex", "none / not provider-specific"]
     validations:
       required: true

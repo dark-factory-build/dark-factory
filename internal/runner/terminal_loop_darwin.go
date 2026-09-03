@@ -15,7 +15,7 @@ import (
 // runReleasedProvider is the single owner loop for a released PTY provider.
 // It deliberately has no goroutines: the outer attempt runner owns the PTY,
 // child group, two capability sockets and every terminal cursor.
-func runReleasedProvider(child *OwnedChild, daemon, worker *os.File, reads *attemptReadSet, stagePTY *ptyStageSink, retained *terminalByteRing) (bool, error) {
+func runReleasedProvider(child *OwnedChild, daemon, worker *os.File, reads *attemptReadSet, stagePTY *ptyStageSink, retained *terminalByteRing, startup []byte) (bool, error) {
 	if child == nil || daemon == nil || worker == nil || reads == nil || child.ptyMaster == nil || retained == nil {
 		return false, ErrState
 	}
@@ -38,8 +38,17 @@ func runReleasedProvider(child *OwnedChild, daemon, worker *os.File, reads *atte
 	}
 	loop.ptyOpen = true
 	// The worker's CLOEXEC capability has closed, proving provider exec, and the
-	// PTY is now registered. Provider task bytes arrived on their own unlinked
-	// descriptor, so every subsequent PTY byte is interactive input.
+	// PTY is now registered. Native providers receive their frozen prompt once;
+	// Shell reads its program from fd 11 and has no startup PTY bytes.
+	if len(startup) > 0 {
+		n, err := loop.child.writePTYOwned(startup, attemptControlTimeout)
+		count, status := terminalPayloadResult(n, len(startup), err)
+		clear(startup)
+		if status != TerminalResultOK {
+			stopErr := loop.stop()
+			return loop.daemonOpen, errors.Join(fmt.Errorf("runner: provider startup input %s after %d bytes", status, count), stopErr)
+		}
+	}
 	if err := loop.send(TerminalFrame{Kind: TerminalReady}); err != nil {
 		return false, err
 	}
@@ -348,7 +357,7 @@ func (o *terminalOwner) writeTerminalPayload(payload []byte) (uint32, TerminalRe
 	if o == nil || o.stopRequested || o.ptyEOF || !o.ptyOpen || o.child == nil {
 		return 0, TerminalResultRejected
 	}
-	n, err := o.child.writePTYOwned(payload)
+	n, err := o.child.writePTYOwned(payload, 250*time.Millisecond)
 	count, status := terminalPayloadResult(n, len(payload), err)
 	if status == TerminalResultOK {
 		return count, status

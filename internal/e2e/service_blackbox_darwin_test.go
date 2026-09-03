@@ -55,7 +55,7 @@ func TestBlackBoxServiceLifecycle(t *testing.T) {
 
 	// The managed daemon serves a real task end to end.
 	project := fixture.operatorID(t, fixture.runFactoryctl(t, 0, "project", "create", "--name", "Managed", "--root", fixture.repo))
-	agent := fixture.operatorID(t, fixture.runFactoryctl(t, 0, "agent", "create", "--project", project, "--name", "Service Smith", "--tool-budget", "4"))
+	agent := fixture.operatorID(t, fixture.runFactoryctl(t, 0, "agent", "create", "--project", project, "--name", "Service Smith", "--provider", "shell", "--tool-budget", "4"))
 	task := fixture.operatorID(t, fixture.runFactoryctl(t, 0, "task", "add", "--project", project, "--agent", agent, "--title", "Managed service run", "--body", happyPathBody))
 	fixture.runFactoryctl(t, 0, "dispatch", "on")
 	fixture.awaitTaskStatus(t, client, task, "succeeded", 60*time.Second)

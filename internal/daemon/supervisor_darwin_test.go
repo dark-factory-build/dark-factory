@@ -26,7 +26,6 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/changeworker"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
-	"github.com/dark-factory-build/dark-factory/internal/provider"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 	"golang.org/x/sys/unix"
 )
@@ -482,18 +481,21 @@ func TestSupervisorUsesFrozenRunLaunchControlsAfterAdmission(t *testing.T) {
 	fixture.assertOneWitness(t)
 }
 
-func TestSupervisorRecordsUnavailableProviderAfterAdmission(t *testing.T) {
+func TestSupervisorRecordsMissingNativeToolAfterAdmission(t *testing.T) {
 	fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
 	if err := replaceSupervisorAgentLaunchControls(fixture.storePath, fixture.agentID, kernel.ProviderCodex, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
-	if !errors.Is(err, provider.ErrUnavailable) {
-		t.Fatalf("RunNext error = %v, want provider unavailable", err)
+	if err != nil {
+		t.Fatalf("RunNext: %v", err)
 	}
 	fixture.trackRun(run.ID)
-	if run.Provider != kernel.ProviderCodex || run.Phase != kernel.RunTerminal || run.CredentialRevokedAt == nil || run.Proposal == nil || run.Proposal.Code() != kernel.FailureSpawn || run.Terminal == nil {
-		t.Fatalf("unavailable provider durable run = %+v", run)
+	if run.Provider != kernel.ProviderCodex || run.Phase != kernel.RunTerminal || run.CredentialRevokedAt == nil || run.Proposal == nil || run.Proposal.Code() != kernel.FailureProviderExit || run.Terminal == nil {
+		if run.Proposal == nil {
+			t.Fatalf("missing native tool durable run = %+v", run)
+		}
+		t.Fatalf("missing native tool durable run provider=%s phase=%s code=%s detail=%q", run.Provider, run.Phase, run.Proposal.Code(), run.Proposal.Detail())
 	}
 	fixture.assertReleased(t, run)
 	if _, statErr := os.Stat(filepath.Join(fixture.runtimeParentPath, run.ID.String())); !errors.Is(statErr, os.ErrNotExist) {
@@ -1551,7 +1553,7 @@ func newSupervisorFixture(t *testing.T, program string) *supervisorFixture {
 	fixture.spec = SupervisorSpec{
 		RuntimeParent: runtimeParent, ChangeParent: changeParent,
 		GitExecutable: git, BaseRevision: base, AttemptSocket: socket, RunnerExecutable: executable, FactoryctlExecutable: factoryctl,
-		ToolPath: filepath.Join(runtime.GOROOT(), "bin") + ":/usr/bin:/bin",
+		ToolPath: filepath.Join(runtime.GOROOT(), "bin") + ":/usr/bin:/bin", AccountHome: root,
 	}
 	return fixture
 }

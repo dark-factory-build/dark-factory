@@ -182,6 +182,75 @@ func writeRawWorkerConfigFrame(t *testing.T, peer *os.File, body []byte) {
 	}
 }
 
+func TestAttemptConfigureFreezesAndRejectsStartupInput(t *testing.T) {
+	root := t.TempDir()
+	wrapper, err := PrepareExecSpec(ExecSpec{
+		Target: "/bin/sh", Args: []string{"-c", "exit 0"},
+		Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: root,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := AttemptSpec{
+		AttemptID: "startup-input", Wrapper: wrapper,
+		MarkerName: InnerActivationMarkerName, ResultName: AttemptResultSpoolName,
+		ResultProof: testResultProof(),
+	}
+
+	startup := []byte("exact startup\n")
+	controller, peer, err := NewAttemptController()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = controller.Close()
+		_ = peer.Close()
+	})
+	spec := base
+	spec.StartupInput = startup
+	if err := controller.Configure(spec); err != nil {
+		t.Fatal(err)
+	}
+	startup[0] = 'X'
+	var frozen attemptConfig
+	if err := readFrame(peer, &frozen, maxConfigBytes); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(frozen.StartupInput), "exact startup\n"; got != want {
+		t.Fatalf("frozen startup input=%q want=%q", got, want)
+	}
+	maximum := frozen
+	maximum.StartupInput = bytes.Repeat([]byte{'x'}, MaxProviderTaskBytes)
+	if err := validateAttemptConfig(maximum); err != nil {
+		t.Fatalf("maximum startup input rejected: %v", err)
+	}
+
+	for name, input := range map[string][]byte{
+		"oversized":     bytes.Repeat([]byte{'x'}, MaxProviderTaskBytes+1),
+		"invalid UTF-8": {0xff},
+		"NUL":           {'x', 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			controller, peer, err := NewAttemptController()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer controller.Close()
+			defer peer.Close()
+			spec := base
+			spec.StartupInput = input
+			if err := controller.Configure(spec); !errors.Is(err, ErrState) {
+				t.Fatalf("invalid startup input error=%v want ErrState", err)
+			}
+			recovered := frozen
+			recovered.StartupInput = input
+			if err := validateAttemptConfig(recovered); !errors.Is(err, ErrIdentity) {
+				t.Fatalf("invalid recovered startup input error=%v want ErrIdentity", err)
+			}
+		})
+	}
+}
+
 func shellPIDWitness(pid, path string) string {
 	pending := path + ".pending"
 	return fmt.Sprintf("printf '%%s' %s > %q && mv %q %q", pid, pending, pending, path)
@@ -259,6 +328,9 @@ func runAttemptWorkerHelper(args []string) error {
 	var provider ExecSpec
 	var providerTask []byte
 	switch mode {
+	case "native-input":
+		script := fmt.Sprintf("test ! -e /dev/fd/11 || exit 97; IFS= read -r startup || exit 98; printf '%%s' \"$startup\" > %q || exit 99; IFS= read -r interactive || exit 100; printf '%%s' \"$interactive\" > %q || exit 101; while test ! -f %q; do sleep 0.01; done", filepath.Join(root, "provider.startup"), filepath.Join(root, "provider.stdin"), filepath.Join(root, "finish"))
+		provider = ExecSpec{Target: "/bin/sh", Args: []string{"-c", script}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: providerCwd}
 	case "shell", "shell-input", "term", "leader", "tail", "reply", "loud-adoption":
 		providerWitness := shellPIDWitness("$$", filepath.Join(root, "provider.pid"))
 		script := fmt.Sprintf("test -z \"${HOME+x}\" || exit 90; test -z \"${DARK_FACTORY_ATTEMPT_TOKEN+x}\" || exit 91; for n in 3 4 5 6 7 8 9; do test ! -e /dev/fd/$n || exit 92; done; test -f /dev/fd/10 || exit 93; test ! -s /dev/fd/10 || exit 94; test -f /dev/fd/11 || exit 97; IFS= read -r task < /dev/fd/11; test \"$task\" = one-startup || exit 98; cat /dev/fd/10/change-worker.config >/dev/null 2>&1 && exit 95; cd /dev/fd/10 >/dev/null 2>&1 && exit 96; %s; printf 'pre-output\\n'; while test ! -f %q; do sleep 0.01; done; printf 'post-output\\n'; printf x >> %q; while test ! -f %q; do sleep 0.01; done", providerWitness, filepath.Join(root, "continue"), filepath.Join(root, "provider.effect"), filepath.Join(root, "finish"))
@@ -396,13 +468,16 @@ func runAttemptWorkerHelper(args []string) error {
 			return err
 		}
 	}
-	if len(providerTask) == 0 {
-		providerTask = []byte("test-provider-task\n")
-	}
-	task, err := createUnlinkedProviderTask(root, providerTask)
-	if err != nil {
-		cwd.Close()
-		return err
+	var task *os.File
+	if mode != "native-input" {
+		if len(providerTask) == 0 {
+			providerTask = []byte("test-provider-task\n")
+		}
+		task, err = createUnlinkedProviderTask(root, providerTask)
+		if err != nil {
+			cwd.Close()
+			return err
+		}
 	}
 	return control.ExecProvider(prepared, cwd, task)
 }
@@ -723,6 +798,49 @@ func TestAttemptRunnerOrdersOuterWrapperAndShellProvider(t *testing.T) {
 	}
 	if body, err := os.ReadFile(filepath.Join(f.root, "provider.stdin")); err != nil || string(body) != "interactive-after-ready" {
 		t.Fatalf("stdin=%q err=%v", body, err)
+	}
+}
+
+func TestAttemptRunnerInjectsNativeStartupOnceBeforeInteractiveInput(t *testing.T) {
+	f := newAttemptFixture(t, "native-input", "")
+	f.spec.StartupInput = []byte("native-startup\n")
+	inner := f.activateOuter()
+	f.advanceToProvider()
+	if err := f.controller.Release(StageProvider); err != nil {
+		t.Fatal(err)
+	}
+	if ready := f.nextTerminal(TerminalReady, 0); ready.Kind != TerminalReady {
+		t.Fatalf("terminal ready=%+v", ready)
+	}
+	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalGenerationInstall, Correlation: 1, Generation: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if result := f.nextTerminal(TerminalGenerationResult, 1); result.Status != TerminalResultOK {
+		t.Fatalf("generation install=%+v", result)
+	}
+	interactive := []byte("interactive-after-ready\n")
+	if err := f.controller.SendTerminalCommand(TerminalCommand{Kind: TerminalInput, Correlation: 2, Generation: 1, Sequence: 1, Payload: interactive}); err != nil {
+		t.Fatal(err)
+	}
+	if result := f.nextTerminal(TerminalInputResult, 2); result.Status != TerminalResultOK || result.Count != uint32(len(interactive)) {
+		t.Fatalf("terminal input=%+v", result)
+	}
+	for path, want := range map[string]string{
+		"provider.startup": "native-startup",
+		"provider.stdin":   "interactive-after-ready",
+	} {
+		path := filepath.Join(f.root, path)
+		waitFile(t, path)
+		if body, err := os.ReadFile(path); err != nil || string(body) != want {
+			t.Fatalf("%s=%q err=%v want=%q", filepath.Base(path), body, err, want)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(f.root, "finish"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record := f.finishAndAck()
+	if record.Terminal.Process != inner || record.Terminal.Exit.Code != 0 || record.Terminal.Exit.Signal != 0 {
+		t.Fatalf("terminal=%+v", record.Terminal)
 	}
 }
 

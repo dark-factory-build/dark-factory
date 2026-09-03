@@ -67,7 +67,7 @@ func scanRun(scanner rowScanner) (Run, bool, error) {
 	incarnationID, incarnationErr := IncarnationIDFromBytes(rawIncarnationID)
 	workRevision, workErr := NewRevision(admittedWorkRevision)
 	role, roleErr := parseAgentRole(roleValue)
-	provider, providerErr := parseProvider(providerValue)
+	provider, providerErr := ParseProvider(providerValue)
 	verification, verificationErr := parseVerificationPolicy(verificationValue)
 	phase, phaseErr := parseRunPhase(phaseValue)
 	digest, digestErr := AttemptDigestFromBytes(rawDigest)
@@ -75,7 +75,7 @@ func scanRun(scanner rowScanner) (Run, bool, error) {
 	rev, revisionErr := NewRevision(revision)
 	admittedTime, admittedErr := NewUnixMillis(admittedAt)
 	updatedTime, updatedErr := NewUnixMillis(updatedAt)
-	if idErr != nil || projectErr != nil || agentErr != nil || taskErr != nil || incarnationErr != nil || workErr != nil || roleErr != nil || providerErr != nil || verificationErr != nil || phaseErr != nil || digestErr != nil || resultProofDigestErr != nil || revisionErr != nil || admittedErr != nil || updatedErr != nil || updatedAt < admittedAt || model.Valid && model.String == "" || effort.Valid && effort.String == "" || ValidateProviderLaunchControls(provider, nullStringValue(model), nullStringValue(effort)) != nil {
+	if idErr != nil || projectErr != nil || agentErr != nil || taskErr != nil || incarnationErr != nil || workErr != nil || roleErr != nil || providerErr != nil || verificationErr != nil || phaseErr != nil || digestErr != nil || resultProofDigestErr != nil || revisionErr != nil || admittedErr != nil || updatedErr != nil || updatedAt < admittedAt || model.Valid && model.String == "" || effort.Valid && effort.String == "" || validateStoredProviderControls(provider, nullStringValue(model), nullStringValue(effort)) != nil {
 		return Run{}, false, fmt.Errorf("%w: invalid run controls", ErrCorruptState)
 	}
 	result := Run{

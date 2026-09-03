@@ -55,10 +55,10 @@ A few repository-wide rules the gate enforces, worth knowing up front:
   first change. Found a new one? Open an issue with the bug template and
   label it `known-issue`; a fix closes it in the same PR (`Closes #N`).
 - **A new provider**: see [docs/providers.md](docs/providers.md) — the whole
-  contract is `internal/provider/provider.go`, whose `NewShellInstallation`
-  is the minimal reference implementation to copy from. Only the shell
-  provider is proven end to end today; the Claude and Codex constructors are
-  deliberately fail-closed until a real attempt is reviewed.
+  closed contract is `internal/provider/provider.go`: executable resolution,
+  launch construction, and one selected task-delivery mode per launch. Extend
+  its deterministic fake-provider proofs before requesting a separately
+  approved real run.
 - **The web console**: `web/packages/ui/src` is the operator surface, built on
   the framework-neutral client in `web/packages/client`. It renders only
   bounded canonical state and finite errors, never constructs run or session

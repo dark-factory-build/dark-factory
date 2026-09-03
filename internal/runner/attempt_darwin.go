@@ -120,7 +120,14 @@ func (c *AttemptController) Configure(spec AttemptSpec) error {
 	if spec.Wrapper.control != nil || spec.Wrapper.controlID != nil || len(spec.Wrapper.stdin) != 0 || spec.Wrapper.stdout != nil || spec.Wrapper.stderr != nil || spec.Wrapper.testFinal != nil || spec.Wrapper.testCurrentFinal {
 		return fmt.Errorf("runner: wrapper launch contains unsupported capabilities")
 	}
-	cfg := attemptConfig{Version: 1, AttemptID: spec.AttemptID, Wrapper: spec.Wrapper.commit, MarkerName: spec.MarkerName, ResultName: spec.ResultName, ResultProof: proof}
+	if len(spec.StartupInput) > MaxProviderTaskBytes || len(spec.StartupInput) > 0 && (!utf8.Valid(spec.StartupInput) || bytes.IndexByte(spec.StartupInput, 0) >= 0) {
+		return ErrState
+	}
+	cfg := attemptConfig{
+		Version: 1, AttemptID: spec.AttemptID, Wrapper: spec.Wrapper.commit,
+		MarkerName: spec.MarkerName, ResultName: spec.ResultName, ResultProof: proof,
+		StartupInput: append([]byte(nil), spec.StartupInput...),
+	}
 	if err := c.writeFrame(cfg, maxConfigBytes); err != nil {
 		return err
 	}
@@ -585,13 +592,11 @@ func (w *WorkerControl) await(stage AttemptStage, before, after workerState) err
 	return nil
 }
 
-// ExecProvider takes ownership of cwd and task on every call. The registered
-// worker supplies both exact descriptors only after its final authority scan;
-// runner never reopens or interprets their pathnames. The task must already be
-// an unlinked, read-only, offset-zero regular file containing the exact bounded
-// provider program. A successful exec intentionally inherits it only as fd 11.
+// ExecProvider takes ownership of cwd and an optional shell task on every call.
+// Shell supplies an exact unlinked descriptor inherited as fd 11. Native
+// providers supply nil because the attempt runner owns their startup PTY input.
 func (w *WorkerControl) ExecProvider(spec *LaunchSpec, cwd, task *os.File) error {
-	if w == nil || w.file == nil || w.dir == nil || w.lifetime == nil || w.state != workerProvider || spec == nil || cwd == nil || task == nil || len(spec.stdin) != 0 || spec.control != nil || spec.controlID != nil || spec.stdout != nil || spec.stderr != nil {
+	if w == nil || w.file == nil || w.dir == nil || w.lifetime == nil || w.state != workerProvider || spec == nil || cwd == nil || len(spec.stdin) != 0 || spec.control != nil || spec.controlID != nil || spec.stdout != nil || spec.stderr != nil {
 		if cwd != nil {
 			_ = cwd.Close()
 		}
@@ -665,8 +670,10 @@ func execPreparedCurrent(spec *LaunchSpec, cwd, task *os.File, worker *WorkerCon
 			resultErr = errors.Join(resultErr, task.Close())
 		}
 	}()
-	if err := validateProviderTask(task); err != nil {
-		return fmt.Errorf("runner: provider task: %w", err)
+	if task != nil {
+		if err := validateProviderTask(task); err != nil {
+			return fmt.Errorf("runner: provider task: %w", err)
+		}
 	}
 	unix.CloseOnExec(int(cwd.Fd()))
 	if err := verifyCurrentDirectory(cwd, spec.commit.Cwd); err != nil {
@@ -712,12 +719,17 @@ func execPreparedCurrent(spec *LaunchSpec, cwd, task *os.File, worker *WorkerCon
 		return err
 	}
 	worker.dir = nil
-	installing := task
-	task = nil
-	if err := installProviderTask(installing); err != nil {
-		return fmt.Errorf("runner: install provider task: %w", err)
+	hasProviderTask := task != nil
+	if hasProviderTask {
+		installing := task
+		task = nil
+		if err := installProviderTask(installing); err != nil {
+			return fmt.Errorf("runner: install provider task: %w", err)
+		}
+		defer unix.Close(providerTaskFD)
+	} else {
+		_ = unix.Close(providerTaskFD)
 	}
-	defer unix.Close(providerTaskFD)
 	// The worker capability remains open only as a CLOEXEC diagnostic path for
 	// a failed final exec. A successful provider never inherits it.
 	unix.CloseOnExec(3)
@@ -729,7 +741,7 @@ func execPreparedCurrent(spec *LaunchSpec, cwd, task *os.File, worker *WorkerCon
 	// its PTY master, but must not let that hangup kill the still-live provider
 	// and make recovery mistake process death for clean convergence.
 	signal.Ignore(unix.SIGHUP)
-	if err := sealProviderDescriptors(); err != nil {
+	if err := sealProviderDescriptors(hasProviderTask); err != nil {
 		return fmt.Errorf("runner: seal provider descriptors: %w", err)
 	}
 	if err := unix.Exec(spec.commit.Executable.Path, spec.commit.Argv, spec.commit.Env); err != nil {
@@ -738,7 +750,7 @@ func execPreparedCurrent(spec *LaunchSpec, cwd, task *os.File, worker *WorkerCon
 	return nil
 }
 
-func sealProviderDescriptors() error {
+func sealProviderDescriptors(keepProviderTask bool) error {
 	directory, err := os.Open("/dev/fd")
 	if err != nil {
 		return err
@@ -750,7 +762,7 @@ func sealProviderDescriptors() error {
 	}
 	for _, entry := range entries {
 		fd, err := strconv.Atoi(entry)
-		if err != nil || fd <= 2 || fd == 10 || fd == providerTaskFD || fd == scanFD {
+		if err != nil || fd <= 2 || fd == 10 || keepProviderTask && fd == providerTaskFD || fd == scanFD {
 			continue
 		}
 		flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0)
@@ -936,6 +948,9 @@ func validateAttemptConfig(cfg attemptConfig) error {
 	if cfg.Version != 1 || validateAttemptName(cfg.AttemptID, 256) != nil || cfg.MarkerName != InnerActivationMarkerName || cfg.ResultName != AttemptResultSpoolName {
 		return ErrIdentity
 	}
+	if len(cfg.StartupInput) > MaxProviderTaskBytes || len(cfg.StartupInput) > 0 && (!utf8.Valid(cfg.StartupInput) || bytes.IndexByte(cfg.StartupInput, 0) >= 0) {
+		return ErrIdentity
+	}
 	if cfg.Wrapper.Executable.Path == "" || cfg.Wrapper.Cwd.Path == "" {
 		return ErrIdentity
 	}
@@ -1073,7 +1088,7 @@ func runAttempt(daemon, dir, lifetime *os.File, cfg attemptConfig, workerConfig 
 			return finishAttemptFailure(child, dir, cfg, &reads, err)
 		}
 	}
-	daemonOpen, err := runReleasedProvider(child, daemon, workerParent, &reads, stagePTY, retained)
+	daemonOpen, err := runReleasedProvider(child, daemon, workerParent, &reads, stagePTY, retained, cfg.StartupInput)
 	return finishAttemptWithExit(child, dir, cfg, &reads, daemon, daemonOpen, err)
 }
 

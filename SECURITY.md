@@ -11,8 +11,8 @@ security fixes.
 
 ## Threat model
 
-Dark Factory is a local, single-operator application. The shell provider runs
-as the operator. The kernel prevents confused or cooperative providers from
+Dark Factory is a local, single-operator application. Every provider runs as
+the operator. The kernel prevents confused or cooperative providers from
 acting outside an exact attempt; it does not isolate a hostile same-user process from readable files,
 credentials, other processes, or the local socket. That claim requires a
 separate OS user, container, or sandbox.
@@ -115,11 +115,13 @@ Admission freezes provider, optional model, and optional reasoning effort only.
 environment. The runner owns the descriptor-bound Change cwd, task delivery,
 PTY, input, process group, wait/reap, output, and cleanup.
 
-Provider choice is unrestricted interactive authority in V1. Shell is the only
-implemented provider. Its executable is `/bin/sh` and its argv is `/bin/sh`,
-`/dev/fd/11`; bounded task bytes are written to that sealed descriptor after
-the launch gates pass. The PTY is reserved for later interactive terminal
-traffic. Claude Code and Codex are unsupported and fail closed. Non-None
+Provider choice is unrestricted interactive authority in V1. Shell receives
+its task through a sealed descriptor. Claude Code and Codex resolve one direct
+executable commitment from the daemon's fixed tool path and receive their
+initial prompt once before the terminal is exposed. They reuse the operator's
+explicit Claude or Codex configuration root while keeping a private runtime
+`HOME` and `TMPDIR`; no provider API key is copied into the environment. The
+[provider contract](docs/providers.md) owns the exact launch details. Non-None
 verification policies are unsupported by the current daemon and cannot be
 treated as completion proof.
 
